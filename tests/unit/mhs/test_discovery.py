@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -17,7 +19,7 @@ DISCOVERY_END = pd.Timestamp("2022-12-31 23:59:59", tz="UTC")
 QUALIFICATION_END = pd.Timestamp("2023-12-31 23:59:59", tz="UTC")
 
 _SYMBOLS = ["S1", "S2", "S3", "S4"]
-_SIGN = -1
+_SIGN = 1
 _COST_BPS = 2.64
 _PPY = 365.0 * 24
 
@@ -41,7 +43,7 @@ def _build_panel(
 
     ``log_close`` and ``opens`` are decoupled: the rank-weight signal is driven
     by ``log_close`` while the ledger's open-to-open returns are set to
-    ``-k * signal_target.shift(2)``, so the sign=-1 reversal book profits from a
+    ``k * signal_target.shift(2)``, so the sign=+1 momentum book profits from a
     target signal with strength ``k``. ``phi`` negatively autocorrelates a
     segment's increments (mean reversion), which decorrelates the 24h and 48h
     signals inside that segment.
@@ -71,7 +73,7 @@ def _build_panel(
         target = sigs[24 if tg == "h24" else 48]
         for s in _SYMBOLS:
             tgt = target[s].shift(2).to_numpy()
-            o2o.loc[seg, s] = -k * tgt[np.where(idx.isin(seg))[0]]
+            o2o.loc[seg, s] = k * tgt[np.where(idx.isin(seg))[0]]
     o2o = o2o.fillna(0.0)
     opens = pd.DataFrame(
         100.0 * np.exp(np.cumsum(o2o.to_numpy(), axis=0)), index=idx, columns=_SYMBOLS,
@@ -81,16 +83,16 @@ def _build_panel(
     return log_close, opens, bar_funding, eligible, idx
 
 
-def _score(log_close, opens, bar_funding, eligible, horizon: int, mask: np.ndarray) -> float:
+def _score(log_close, opens, bar_funding, eligible, horizon: int, mask: np.ndarray, sign: int = _SIGN) -> float:
     return _candidate_net_t(
-        log_close, eligible, opens, bar_funding, _SIGN, horizon, mask,
+        log_close, eligible, opens, bar_funding, sign, horizon, mask,
         3, 1, _COST_BPS, _PPY,
     )
 
 
-def _run(log_close, opens, bar_funding, eligible, idx):
+def _run(log_close, opens, bar_funding, eligible, idx, sign: int = _SIGN):
     return select_horizon_by_discovery_qualification(
-        sign=_SIGN, horizon_candidates=(24, 48), log_close=log_close,
+        sign=sign, horizon_candidates=(24, 48), log_close=log_close,
         eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
         discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
         qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
@@ -99,7 +101,16 @@ def _run(log_close, opens, bar_funding, eligible, idx):
 
 class TestDiscoveryQualificationGate:
     """SCENARIO_MHS_DISCOVERY_*: worst-year-robust selection, qualification
-    single re-check, and fail-closed behavior."""
+    single re-check, fail-closed behavior, and sign-consistent oriented scoring.
+
+    SCENARIO_MHS_DISCOVERY_SIGN_REGRESSION_MOMENTUM_01: the three legacy
+    scenarios below run the sign=+1 (momentum) direction and are regression
+    anchors: sign=+1 must keep byte-identical behavior before/after the
+    oriented-score fix (``min(sign * t) == min(t)``). The reversal-family
+    scenarios (sign=-1) exercise the corrected worst-year semantics where
+    "weakest evidence" is the yearly net_t closest to zero, not the most
+    negative one.
+    """
 
     def test_worst_year_robust_selection_beats_aggregate(self) -> None:
         """SCENARIO_MHS_DISCOVERY_WORST_YEAR_ROBUST_05: candidate 24 has a higher
@@ -175,3 +186,92 @@ class TestDiscoveryQualificationGate:
         assert result.admitted is False
         assert result.qualification_net_t is None
         assert result.qualification_sign_consistent is None
+
+    def test_sign_minus_one_worst_year_is_closest_to_zero(self) -> None:
+        """SCENARIO_MHS_DISCOVERY_SIGN_REVERSAL_WORST_YEAR_02: on a synthetic
+        sign=-1 fixture whose discovery years are both negative for every
+        candidate, the gate's reported worst-year score must be the yearly
+        net_t CLOSEST TO ZERO (weakest evidence), not the most negative year.
+        Reversal evidence is strongest when net_t is most negative, so plain
+        min() picked the best year and ranked candidates backwards. Candidate
+        48 has two moderate years while candidate 24 has one weak and one very
+        strong year; the corrected oriented score ranks 48 (worst year about
+        -30.6) stronger than 24 (worst year about -23.5)."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            3, phi=0.85, align1="h48", align2="h24",
+        )
+        y1 = np.asarray(idx.year == 2021, dtype=bool)
+        y2 = np.asarray(idx.year == 2022, dtype=bool)
+        sign = -1
+        a1, a2 = (_score(log_close, opens, bar_funding, eligible, 24, m, sign) for m in (y1, y2))
+        b1, b2 = (_score(log_close, opens, bar_funding, eligible, 48, m, sign) for m in (y1, y2))
+        assert a1 < 0
+        assert a2 < 0
+        assert b1 < 0
+        assert b2 < 0
+        worst_a = max(a1, a2)
+        worst_b = max(b1, b2)
+        assert worst_a > min(a1, a2)
+        assert worst_b > min(b1, b2)
+        assert worst_b < worst_a
+
+        result = _run(log_close, opens, bar_funding, eligible, idx, sign=sign)
+        assert result.selected_horizon == 48
+        assert dict(result.discovery_scores)[24] == pytest.approx(worst_a)
+        assert dict(result.discovery_scores)[48] == pytest.approx(worst_b)
+
+    def test_sign_minus_one_reversal_can_be_admitted(self) -> None:
+        """SCENARIO_MHS_DISCOVERY_SIGN_REVERSAL_ADMITS_03: a synthetic sign=-1
+        fixture whose every discovery-year net_t is strongly negative (worst
+        year |t| >= 2.0) and whose qualification window is strongly negative
+        with the same sign is admitted by the corrected gate. Before the fix
+        the admission comparison ``best_score < 2.0`` was trivially true for
+        any negative best_score, so a reversal family could never be admitted
+        no matter how strong its (negative) evidence was."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, align1="h24", align2="h48",
+        )
+        result = _run(log_close, opens, bar_funding, eligible, idx, sign=-1)
+        assert result.selected_horizon is not None
+        assert result.admitted is True
+        assert result.qualification_sign_consistent is True
+
+    def test_sign_minus_one_all_nonfinite_years_never_selected(self) -> None:
+        """SCENARIO_MHS_DISCOVERY_SIGN_NO_FINITE_YEARS_04: on a sign=-1 fixture
+        where candidate 24's log-return signal is identically zero for the whole
+        discovery window (a period-24 ``log_close`` makes the 24h diff exactly
+        zero), every discovery-year net_t for that candidate is non-finite and
+        it is assigned the worst possible ORIENTED score (``float("-inf")``,
+        not ``sign * -inf`` which would flip to ``+inf`` under sign=-1). The
+        finite-data candidate 36 is selected instead."""
+        y1 = pd.date_range("2021-01-01", periods=400, freq="1h", tz="UTC")
+        y2 = pd.date_range("2022-01-01", periods=400, freq="1h", tz="UTC")
+        q = pd.date_range("2023-01-01", periods=400, freq="1h", tz="UTC")
+        idx = y1.append(y2).append(q)
+        n = len(idx)
+        base = np.tile(np.arange(24, dtype=float) * 1e-3, (n // 24) + 1)[:n]
+        phases = {"S1": 0, "S2": 6, "S3": 12, "S4": 18}
+        log_close = pd.DataFrame(
+            {s: np.roll(base, ph) for s, ph in phases.items()}, index=idx,
+        )
+        sig36 = horizon_log_return(log_close, 36)
+        o2o = pd.DataFrame(0.0, index=idx, columns=_SYMBOLS)
+        for seg in (y1, y2, q):
+            for s in _SYMBOLS:
+                tgt = sig36[s].shift(2).to_numpy()
+                o2o.loc[seg, s] = 0.5 * tgt[np.where(idx.isin(seg))[0]]
+        o2o = o2o.fillna(0.0)
+        opens = pd.DataFrame(
+            100.0 * np.exp(np.cumsum(o2o.to_numpy(), axis=0)), index=idx, columns=_SYMBOLS,
+        )
+        bar_funding = pd.DataFrame(0.0, index=idx, columns=_SYMBOLS)
+        eligible = pd.DataFrame(True, index=idx, columns=_SYMBOLS)
+        result = select_horizon_by_discovery_qualification(
+            sign=-1, horizon_candidates=(24, 36), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+        )
+        assert result.selected_horizon == 36
+        assert math.isnan(dict(result.discovery_scores)[24])
+        assert math.isfinite(dict(result.discovery_scores)[36])
