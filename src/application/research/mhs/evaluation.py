@@ -39,7 +39,7 @@ from src.research.evaluation.policy import resolve_evaluation_end
 
 from src.common.config import FUTURES_DATA_DIR, funding_path
 from src.common.errors import DataIntegrityError
-from src.mhs.books import phase_tranche_book, rank_weight_book
+from src.mhs.books import phase_tranche_book, rank_weight_book, renormalize_within_mask
 from src.mhs.contracts import (
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
@@ -1625,7 +1625,10 @@ def _run_books_concurrent(
     telemetry is merged into the parent recorder in declared book order.
     """
     blend_step = blend_1h.reindex(fast_grid)
-    blend_replay = blend_1h.where(execution_mask, other=0.0).reindex(fast_grid)
+    blend_replay = (
+        PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
+        + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+    ).reindex(fast_grid)
 
     with ProcessPoolExecutor(max_workers=3) as pool:
         f_fast = pool.submit(
@@ -1910,11 +1913,11 @@ def _build_fold_target_weights(
     w_slow = _book_weights(log_close, eligible, slow, slow_grid, ema_span=slow_ema)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
     del quote_vol, eligible
-    w_fast_execution = w_fast.where(
-        execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
+    w_fast_execution = renormalize_within_mask(
+        w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
-    w_slow_execution = w_slow.where(
-        execution_mask.reindex(w_slow.index).fillna(False), other=0.0,
+    w_slow_execution = renormalize_within_mask(
+        w_slow, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
     )
     del w_fast, w_slow, execution_mask
     blend_1h = (
@@ -2235,11 +2238,11 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-    w_fast_execution = w_fast.where(
-        execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
+    w_fast_execution = renormalize_within_mask(
+        w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
-    w_slow_execution = w_slow.where(
-        execution_mask.reindex(w_slow.index).fillna(False), other=0.0,
+    w_slow_execution = renormalize_within_mask(
+        w_slow, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
     )
     # Eligibility and the execution roster are now materialized.  The raw
     # volume matrix otherwise stays alive while phase diagnostics create their
