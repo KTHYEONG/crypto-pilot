@@ -149,6 +149,17 @@ def report(synthetic_market):
 
 
 @pytest.fixture(scope="module")
+def touch_report(synthetic_market):
+    root, end = synthetic_market
+    return run_mhs_horizon_diagnostic(
+        MhsDiagnosticRequest(
+            start=str(START), end=str(end), data_root=str(root),
+            execution_timeframe="1m", log_run=False, touch_diagnostic=True,
+        ),
+    )
+
+
+@pytest.fixture(scope="module")
 def calibrated_report(synthetic_market):
     """Full diagnostic run with spies on the R1/R3 wiring seams: records the
     ``ema_span`` passed to every ``_book_weights`` call and which callers invoke
@@ -436,6 +447,31 @@ class TestStrictSimulatedPrimary:
         fast = report.books["fast_reversal"]
         assert fast.tail.event_window_bars > 0
         assert set(fast.tail.winsor_curve) == {10, 20, 30, 50}
+
+
+class TestTouchDiagnostic:
+    """MHS execution fill-model realism Phase 1: ``touch_diagnostic=True``
+    adds an opt-in ``OHLCV_TOUCH_PROXY`` replay leg alongside the strict/stress
+    pair; the default path stays touch-free."""
+
+    def test_touch_default_off(self, report) -> None:
+        """SCENARIO_MHS_TOUCH_DEFAULT_OFF: every book report on the default
+        path carries ``touch=None``/``touch_naive_sharpe=None``."""
+        for book in (report.books["fast_reversal"], report.books["slow_momentum"], report.blend):
+            assert book.touch is None
+            assert book.touch_naive_sharpe is None
+
+    def test_touch_weak_dominance_over_strict(self, touch_report) -> None:
+        """SCENARIO_MHS_TOUCH_WEAK_DOMINANCE: the touch crossing condition
+        ``adverse <= decision_price`` is a superset of strict's
+        ``adverse < decision_price``, so on any input touch fill count weakly
+        dominates strict fill count."""
+        for book in (touch_report.books["slow_momentum"], touch_report.blend):
+            assert book.touch is not None
+            assert book.touch.fill_source == "OHLCV_TOUCH_PROXY"
+            assert book.touch_naive_sharpe is not None
+            assert book.touch.fill_count >= book.primary.fill_count
+            assert book.touch.unfilled_count <= book.primary.unfilled_count
 
 
 class TestFreezeBeforeFinalOos:
