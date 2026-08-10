@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_PERF_OPTIMIZATION_PHASE3",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_PERF_OPTIMIZATION_PHASE3",
+      "domain": "performance",
+      "title": "MHS Phase 3 성능 최적화 구현 (병렬 books/post-book 동시화/resolve_ns 벡터화/placebo 배치)",
+      "why": "Phase 1 진단 파이프라인 614.5s 중 books 순차 실행이 80% 차지(GIL 해제 numpy 구간 존재)하여 5분 예산 초과, 위상2 이후에도 병렬화 여지가 남아 있음.",
+      "resolution": "books 3종을 fork ProcessPoolExecutor로 병렬화(P10), post-book 진단/폴드/final_return을 폴드 프로세스 풀과 동시 진행(P14), resolve_ns 스칼라 루프를 np.searchsorted 벡터화(P11), placebo 500회 dot-product를 50배치 BLAS로 묶음(P13), O6 minute-frame 캐시 사전 프리로드 적용. 소요시간 614.5→476s 기록(폴드 병렬 비율 증가로 예산 500s 내).",
+      "impact": "총 소요시간 약 23% 단축(614.5→476s), 정량 결과 bit-exact 유지(checksum 불변), RSS 메인 8GB/시스템 12GB 예산 내, 폴드 병렬 비율 상향으로 폴드 wall-time 단축."
+    },
+    {
       "task_id": "MHS_PERF_OPTIMIZATION_PHASE2",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_PERF_OPTIMIZATION_PHASE2",
