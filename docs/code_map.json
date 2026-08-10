@@ -634,7 +634,7 @@
       "tests/unit/application/research/mhs/test_evaluation.py",
       "tests/integration/mhs/test_mhs_horizon_diagnostic.py"
     ],
-    "architecture": "docs/architecture/multi-horizon-market-state.md"
+    "architecture": "docs/specs/mhs_execution_fill_realism.md"
   },
   "src/mhs/panel.py": {
     "testing": "tests/unit/mhs/test_panel.py"
