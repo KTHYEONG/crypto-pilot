@@ -406,12 +406,15 @@ def _max_drawdown_from_equity(equity: pd.Series) -> float:
 def _time_under_water(equity: pd.Series) -> int:
     running_max = equity.cummax()
     underwater = (equity < running_max).to_numpy()
-    longest = 0
-    current = 0
-    for flag in underwater:
-        current = current + 1 if flag else 0
-        longest = max(longest, current)
-    return longest
+    if not underwater.any():
+        return 0
+    # Vectorized run-length encoding of contiguous True runs: diff over a
+    # zero-padded boolean array marks each run start (+1) and end (-1).
+    padded = np.concatenate(([0], underwater.astype(np.int8), [0]))
+    d = np.diff(padded)
+    starts = np.flatnonzero(d == 1)
+    ends = np.flatnonzero(d == -1)
+    return int((ends - starts).max())
 
 
 def _recovery_bars(equity: pd.Series) -> int | None:
@@ -428,51 +431,166 @@ def _recovery_bars(equity: pd.Series) -> int | None:
     return None
 
 
+def _bootstrap_chunk_size(n: int) -> int:
+    """Per-chunk replicate count keeping the (chunk, n) sample matrix bounded.
+
+    The vectorized bootstrap materialises one ``(chunk, n)`` float64 sample
+    matrix plus a few same-shaped temporaries per chunk.  At production scale
+    the equity is the 5-minute grid (~525,600 bars), so a fixed ``chunk=500``
+    would allocate ~2.1GB per array and spike RSS far above the 8GB soft
+    budget.  ``chunk`` is capped to keep a single sample matrix <= 128MB
+    (spec O10); the MDD path also allocates a same-sized running-max temporary,
+    so a 128MB sample keeps the combined transient ~1.1GB.
+    """
+    if n <= 0:
+        return 500
+    return max(1, min(500, int((128 * 2**20) // (n * 8))))
+
+
 def _stationary_block_bootstrap_paths(
     net_returns: np.ndarray, n_replicates: int, mean_block: int, seed: int,
 ) -> np.ndarray:
-    """Wealth multipliers (final wealth / initial) per replicate."""
+    """Wealth multipliers (final wealth / initial) per replicate, vectorized.
+
+    Statistically equivalent to the scalar while-loop block composition
+    (MHS_PERF_OPT_003 precedent): block lengths are ``geometric(p_block)`` and
+    block starts are uniform, matching the scalar length law.  A 6x block-count
+    safety margin makes running short effectively impossible; any shortfall
+    still falls back to the scalar replicate path.
+    """
+    if n_replicates <= 0:
+        raise ValueError(f"n_replicates must be > 0, got {n_replicates}")
+    if mean_block < 0:
+        raise ValueError(f"mean_block must be >= 0, got {mean_block}")
     rng = np.random.default_rng(seed)
     n = len(net_returns)
     if n == 0:
         return np.ones(n_replicates)
     p_block = 1.0 / mean_block if mean_block > 0 else 0.0
-    outcomes = np.empty(n_replicates)
-    for r in range(n_replicates):
-        blocks: list[float] = []
-        while len(blocks) < n:
-            start = int(rng.integers(0, n))
-            length = 1
-            while length < n and rng.random() > p_block:
-                length += 1
-            length = min(length, n - len(blocks))
-            blocks.extend(net_returns[start : start + length].tolist())
-        path = np.array(blocks[:n], dtype="float64")
-        outcomes[r] = float(np.prod(1.0 + path))
+    if p_block <= 0.0:
+        # Degenerate mean_block == 0: every block is a single element (the
+        # scalar ``while length < n and rng.random() > 0`` never advances).
+        starts = rng.integers(0, n, size=n_replicates)
+        return np.asarray(np.prod(1.0 + net_returns[starts], axis=0), dtype="float64")
+    outcomes = np.empty(n_replicates, dtype="float64")
+    chunk = _bootstrap_chunk_size(n)
+    for r0 in range(0, n_replicates, chunk):
+        r1 = min(r0 + chunk, n_replicates)
+        k = r1 - r0
+        max_blocks = min(n, int(np.ceil(n * 6.0 / mean_block)) + 16)
+        lengths = rng.geometric(p_block, size=(k, max_blocks))
+        starts = rng.integers(0, n, size=(k, max_blocks))
+        ends = np.cumsum(lengths, axis=1)
+        short = ends[:, -1] < n
+        for r in np.flatnonzero(short).tolist():
+            outcomes[r0 + r] = _block_bootstrap_replicate_wealth(
+                net_returns, n, p_block, rng,
+            )
+        valid = ~short
+        if valid.any():
+            ends_trunc = np.minimum(ends, n)
+            used = ends_trunc - np.concatenate(
+                [np.zeros((k, 1), dtype=np.int64), ends_trunc[:, :-1]], axis=1,
+            )
+            u = used[valid].ravel()
+            s = starts[valid].ravel()
+            keep = u > 0
+            u = u[keep]
+            s = s[keep]
+            block_start = np.cumsum(u) - u
+            offsets = np.arange(int(u.sum()), dtype=np.int64) - np.repeat(block_start, u)
+            arr_idx = (np.repeat(s, u) + offsets) % n
+            sample = net_returns[arr_idx].reshape(int(valid.sum()), n)
+            outcomes[r0 + np.flatnonzero(valid)] = np.prod(1.0 + sample, axis=1)
     return outcomes
+
+
+def _block_bootstrap_replicate_wealth(
+    arr: np.ndarray, n: int, p_block: float, rng: np.random.Generator,
+) -> float:
+    """Wealth multiplier of one scalar block-bootstrap replicate (fallback)."""
+    blocks: list[float] = []
+    while len(blocks) < n:
+        start = int(rng.integers(0, n))
+        length = 1
+        while length < n and rng.random() > p_block:
+            length += 1
+        length = min(length, n - len(blocks))
+        blocks.extend(arr[start : start + length].tolist())
+    path = np.array(blocks[:n], dtype="float64")
+    return float(np.prod(1.0 + path))
 
 
 def _bootstrap_mdd_paths(
     net_returns: np.ndarray, n_replicates: int, mean_block: int, seed: int,
 ) -> np.ndarray:
+    """Per-replicate max drawdown of the block-bootstrap equity path, vectorized."""
+    if n_replicates <= 0:
+        raise ValueError(f"n_replicates must be > 0, got {n_replicates}")
+    if mean_block < 0:
+        raise ValueError(f"mean_block must be >= 0, got {mean_block}")
     rng = np.random.default_rng(seed + 1)
     n = len(net_returns)
-    mdd = np.empty(n_replicates)
+    if n == 0:
+        return np.zeros(n_replicates)
     p_block = 1.0 / mean_block if mean_block > 0 else 0.0
-    for r in range(n_replicates):
-        blocks: list[float] = []
-        while len(blocks) < n:
-            start = int(rng.integers(0, n))
-            length = 1
-            while length < n and rng.random() > p_block:
-                length += 1
-            length = min(length, n - len(blocks))
-            blocks.extend(net_returns[start : start + length].tolist())
-        path = np.array(blocks[:n], dtype="float64")
-        equity = np.cumprod(1.0 + path)
-        running_max = np.maximum.accumulate(equity)
-        mdd[r] = float((equity / running_max - 1.0).min())
+    if p_block <= 0.0:
+        starts = rng.integers(0, n, size=n_replicates)
+        equity = np.cumprod(1.0 + net_returns[starts], axis=0)
+        running_max = np.maximum.accumulate(equity, axis=0)
+        return np.asarray((equity / running_max - 1.0).min(axis=0), dtype="float64")
+    mdd = np.empty(n_replicates, dtype="float64")
+    chunk = _bootstrap_chunk_size(n)
+    for r0 in range(0, n_replicates, chunk):
+        r1 = min(r0 + chunk, n_replicates)
+        k = r1 - r0
+        max_blocks = min(n, int(np.ceil(n * 6.0 / mean_block)) + 16)
+        lengths = rng.geometric(p_block, size=(k, max_blocks))
+        starts = rng.integers(0, n, size=(k, max_blocks))
+        ends = np.cumsum(lengths, axis=1)
+        short = ends[:, -1] < n
+        for r in np.flatnonzero(short).tolist():
+            mdd[r0 + r] = _block_bootstrap_replicate_mdd(
+                net_returns, n, p_block, rng,
+            )
+        valid = ~short
+        if valid.any():
+            ends_trunc = np.minimum(ends, n)
+            used = ends_trunc - np.concatenate(
+                [np.zeros((k, 1), dtype=np.int64), ends_trunc[:, :-1]], axis=1,
+            )
+            u = used[valid].ravel()
+            s = starts[valid].ravel()
+            keep = u > 0
+            u = u[keep]
+            s = s[keep]
+            block_start = np.cumsum(u) - u
+            offsets = np.arange(int(u.sum()), dtype=np.int64) - np.repeat(block_start, u)
+            arr_idx = (np.repeat(s, u) + offsets) % n
+            sample = net_returns[arr_idx].reshape(int(valid.sum()), n)
+            sample += 1.0
+            np.cumprod(sample, axis=1, out=sample)
+            running_max = np.maximum.accumulate(sample, axis=1)
+            mdd[r0 + np.flatnonzero(valid)] = (sample / running_max - 1.0).min(axis=1)
     return mdd
+
+
+def _block_bootstrap_replicate_mdd(
+    arr: np.ndarray, n: int, p_block: float, rng: np.random.Generator,
+) -> float:
+    """Max drawdown of one scalar block-bootstrap replicate (fallback)."""
+    blocks: list[float] = []
+    while len(blocks) < n:
+        start = int(rng.integers(0, n))
+        length = 1
+        while length < n and rng.random() > p_block:
+            length += 1
+        length = min(length, n - len(blocks))
+        blocks.extend(arr[start : start + length].tolist())
+    path = np.array(blocks[:n], dtype="float64")
+    equity = np.cumprod(1.0 + path)
+    running_max = np.maximum.accumulate(equity)
+    return float((equity / running_max - 1.0).min())
 
 
 def compute_deployment_readiness(
@@ -526,7 +644,16 @@ def compute_deployment_readiness(
     worst_1d = float(net.min())
 
     k7 = min(7, n)
-    worst_7d = float(min(net.iloc[i : i + k7].sum() for i in range(n - k7 + 1)))
+    # Vectorized sliding-window 7-bar sum: identical arithmetic to the scalar
+    # slice loop (each window is summed in the same element order).
+    if k7 > 1:
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        worst_7d = float(
+            sliding_window_view(net.to_numpy(dtype="float64"), k7).sum(axis=1).min()
+        )
+    else:
+        worst_7d = worst_1d
     worst_event = worst_7d if k7 > 1 else worst_1d
 
     net_arr = net.to_numpy(dtype="float64")
@@ -536,14 +663,14 @@ def compute_deployment_readiness(
     probability_mdd_over_20pct = float(np.mean(mdd_paths < -0.20))
     probability_mdd_over_30pct = float(np.mean(mdd_paths < -0.30))
 
+    # The scalar leverage-ruin loop recomputed the identical deterministic
+    # leveraged path ``n_bootstrap`` times; a single cumulative-product check
+    # per leverage is exactly equivalent (ruin_probs[lev] is 0.0 or 1.0).
     ruin_probs: dict[float, float] = {}
     for lev in leverage_grid:
-        ruin = 0
-        for _r in range(n_bootstrap):
-            path = np.cumprod(1.0 + lev * net_arr)
-            if (path <= 0).any():
-                ruin += 1
-        ruin_probs[lev] = ruin / n_bootstrap
+        ruin_probs[lev] = float(
+            bool((np.cumprod(1.0 + lev * net_arr) <= 0.0).any())
+        )
 
     return DeploymentReadinessResult(
         geometric_cagr=geometric_cagr,
