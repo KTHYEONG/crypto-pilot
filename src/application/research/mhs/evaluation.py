@@ -1954,7 +1954,7 @@ def _build_fold_target_weights(
     w_slow_execution = renormalize_within_mask(
         w_slow_tilted, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
     )
-    del w_fast, w_slow, w_fast_tilted, w_slow_tilted, execution_mask
+    del w_fast, w_slow, w_fast_tilted, w_slow_tilted
     blend_1h = (
         PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
         + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
@@ -1964,7 +1964,11 @@ def _build_fold_target_weights(
     target_weights = blend_1h.loc[decision_grid]
     del blend_1h
 
-    vol_mean = realized_vol(log_close, 48).reindex(decision_grid).mean(axis=1)
+    # The regime cash scale must read the traded execution roster, not the
+    # full eligible universe: only the execution_mask symbols carry capital, so
+    # their realized vol is the quantity that decides high-vol cash scaling.
+    vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(decision_grid).mean(axis=1)
+    del execution_mask
     del log_close
     regime_scale = _regime_cash_scale(vol_mean)
     target_weights = target_weights.mul(regime_scale, axis=0)
@@ -2300,7 +2304,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # its blended targets (_build_fold_target_weights) so top-level prescreen/
     # tail/execution diagnostics are comparable to fold primary evidence
     # (spec §3.2, ``regime_cash_scale``).
-    vol_mean = realized_vol(log_close, 48).reindex(grid_1h).mean(axis=1)
+    vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
     regime_scale = _regime_cash_scale(vol_mean)
     blend_1h = blend_1h.mul(regime_scale, axis=0)
     del vol_mean, regime_scale
