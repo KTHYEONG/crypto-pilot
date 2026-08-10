@@ -28,6 +28,8 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         max_rss_bytes=args.max_rss_bytes,
         log_run=not args.no_log_run,
         touch_diagnostic=args.touch_diagnostic,
+        ladder_diagnostic=args.ladder_diagnostic,
+        discovery_gate=args.discovery_gate,
     )
     report = run_mhs_horizon_diagnostic(request)
     path = persist_mhs_horizon_diagnostic_report(
@@ -82,6 +84,27 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Additionally replay slow_momentum/blend under OHLCV_TOUCH_PROXY "
             "alongside the strict/stress pair -- adds a second full window "
             "pass, opt-in only"
+        ),
+    )
+    mhs.add_argument(
+        "--ladder-diagnostic",
+        action="store_true",
+        default=False,
+        help=(
+            "Additionally replay slow_momentum/blend under OHLCV_LADDERED_PROXY "
+            "alongside the strict/stress pair -- adds a third full window pass "
+            "with the escalating limit ladder, opt-in only"
+        ),
+    )
+    mhs.add_argument(
+        "--discovery-gate",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the discovery/qualification horizon-selection gate on the "
+            "current panel for both sign families and record the outcome in "
+            "the diagnostic report (opt-in; the result never changes contracts "
+            "by itself)"
         ),
     )
     mhs.add_argument(
