@@ -13,6 +13,7 @@ from src.mhs.execution import (
     ExecutionSpec,
     _BoundExecutionReplayAccumulator,
     bar_funding_panel,
+    laddered_fill_schedule,
     mhs_ledger_pnl,
     passive_fill_shortfall_bps,
     replay_execution_window_pair,
@@ -26,8 +27,213 @@ from src.research.technical_experts.cross_sectional import XsCompositeSpec, run_
 SPEC = ExecutionSpec()
 
 
-class TestPassiveFillShortfall:
-    """MHS-07-PASSIVE-FILL-TRADE-THROUGH: touch fills only under the relaxed rule."""
+class TestLadderedFillSchedule:
+    """SCENARIO_MHS_LADDER_*: the escalating limit ladder pure function."""
+
+    SPEC = ExecutionSpec()
+
+    def test_contract_assertion_scenario(self) -> None:
+        """SCENARIO_MHS_LADDER_FINAL_TRANCHE_MARKET_FALLBACK_03 (python_assertion):
+        a never-trading-through window collapses the whole notional into a single
+        market fallback at the all-in taker cost."""
+        sched = laddered_fill_schedule(
+            100.0, 1,
+            np.array([101.0, 101.0, 101.0, 101.0]),
+            np.array([101.0, 101.0, 101.0, 101.0]),
+            4, ExecutionSpec(), True,
+        )
+        assert abs(sum(f[3] for f in sched) - 1.0) < 1e-12
+        assert sched[0][2] == pytest.approx(
+            ExecutionSpec().taker_fee_bps + ExecutionSpec().taker_slippage_bps
+        )
+
+    def test_tranche_one_matches_inline_strict_passive(self) -> None:
+        """SCENARIO_MHS_LADDER_TRANCHE_ONE_MATCHES_STRICT_01: a single tranche
+        reproduces the inline STRICT-proxy passive fill (hit at the first
+        trade-through, decision price, maker fee, full notional)."""
+        adverse = np.array([99.0, 100.5, 100.5])
+        closes = np.array([100.0, 101.0, 101.5])
+        sched = laddered_fill_schedule(100.0, 1, adverse, closes, 1, self.SPEC, True)
+        assert sched == [(0, 100.0, 2.0, 1.0)]
+
+    def test_tranche_one_matches_inline_strict_fallback(self) -> None:
+        """SCENARIO_MHS_LADDER_TRANCHE_ONE_MATCHES_STRICT_01: the single-tranche
+        timeout fallback fills at the window-boundary close with the all-in
+        taker cost, exactly like the inline STRICT-proxy branch."""
+        adverse = np.array([101.0, 101.0, 101.0])
+        closes = np.array([100.0, 101.0, 101.5, 102.0])
+        sched = laddered_fill_schedule(100.0, 1, adverse, closes, 1, self.SPEC, True)
+        assert sched == [(3, 102.0, 8.0, 1.0)]
+
+    def test_partial_escalation_carries_forward_without_market_fallback(self) -> None:
+        """SCENARIO_MHS_LADDER_PARTIAL_ESCALATION_02: tranche 1 never trades
+        through, tranche 2's repriced limit does -- the schedule returns exactly
+        two tuples, and tranche 1's share fills as part of tranche 2's 0.5
+        maker fill (no per-tranche market fallback)."""
+        adverse = np.array([100.5, 100.5, 99.0, 99.0, 100.5, 100.5, 100.5, 100.5])
+        closes = np.array([100.0, 100.0, 98.0, 98.0, 97.0, 97.0, 99.0, 99.0, 100.5])
+        sched = laddered_fill_schedule(100.0, 1, adverse, closes, 4, self.SPEC, True)
+        # tranche 2 limit: 100 + 1/4 * (closes[2] - 100) = 99.5
+        assert len(sched) == 2
+        assert sched[0] == (2, 99.5, 2.0, 0.5)
+        assert sched[1] == (8, 100.5, 8.0, 0.5)
+        assert abs(sum(f[3] for f in sched) - 1.0) < 1e-12
+
+    def test_final_tranche_market_fallback_accumulates_all_shares(self) -> None:
+        """SCENARIO_MHS_LADDER_FINAL_TRANCHE_MARKET_FALLBACK_03: no tranche ever
+        trades through, so the schedule's last tuple carries qty_fraction == 1.0,
+        the all-in taker cost, and the final sub-window's boundary close."""
+        adverse = np.array([101.0, 101.0, 101.0, 101.0])
+        closes = np.array([100.0, 100.0, 100.0, 100.0, 102.0])
+        sched = laddered_fill_schedule(100.0, 1, adverse, closes, 4, self.SPEC, True)
+        assert sched == [(4, 102.0, 8.0, 1.0)]
+
+    def test_sell_side_ladder_escalates_toward_higher_limits(self) -> None:
+        """The sell ladder reprices upward (side=-1) and uses the highs as the
+        adverse path; the accumulated share fills only on a trade-through."""
+        adverse = np.array([99.0, 99.0, 101.0, 101.0, 99.0, 99.0, 99.0, 99.0])
+        closes = np.array([100.0, 100.0, 102.0, 102.0, 103.0, 103.0, 100.0, 100.0, 99.0])
+        sched = laddered_fill_schedule(100.0, -1, adverse, closes, 4, self.SPEC, True)
+        # tranche 2 limit: 100 + (-1)/4 * (closes[2] - 100) = 100 - 0.5 = 99.5
+        assert sched[0][0] == 2
+        assert sched[0][2] == 2.0
+        assert sched[0][3] == pytest.approx(0.5)
+        assert abs(sum(f[3] for f in sched) - 1.0) < 1e-12
+
+    def test_touch_predicate_fills_on_exact_touch(self) -> None:
+        """require_strict=False reuses the TOUCH comparison operators: an exact
+        touch fills the first tranche passively."""
+        adverse = np.array([100.0, 101.0, 101.0, 101.0])
+        closes = np.array([100.0, 100.0, 100.0, 100.0, 101.0])
+        strict = laddered_fill_schedule(100.0, 1, adverse, closes, 4, self.SPEC, True)
+        touch = laddered_fill_schedule(100.0, 1, adverse, closes, 4, self.SPEC, False)
+        assert strict[0][2] == 8.0
+        assert touch[0] == (0, 100.0, 2.0, 0.25)
+
+    def test_fails_closed_on_invalid_input(self) -> None:
+        with pytest.raises(ValueError, match="tranche_count"):
+            laddered_fill_schedule(100.0, 1, np.array([1.0]), np.array([1.0]), 0, self.SPEC, True)
+        with pytest.raises(ValueError, match="side"):
+            laddered_fill_schedule(100.0, 0, np.array([1.0]), np.array([1.0]), 1, self.SPEC, True)
+        with pytest.raises(ValueError, match="adverse"):
+            laddered_fill_schedule(100.0, 1, np.array([]), np.array([]), 1, self.SPEC, True)
+        with pytest.raises(ValueError, match="finite"):
+            laddered_fill_schedule(100.0, 1, np.array([np.nan]), np.array([1.0]), 1, self.SPEC, True)
+
+
+class TestLadderedExecutionReplay:
+    """SCENARIO_MHS_LADDER_ORACLE_ACCUMULATOR_PARITY_04 + DoD regression: the
+    laddered bound is byte-identical to strict at ladder_tranches=1 and the
+    single-panel oracle matches the windowed accumulator under the same bound."""
+
+    def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        marks = closes.copy()
+        marks.iloc[100:105, 3] = np.nan
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=4, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.01, 0.06, 4)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": closes * 1.001,
+            "lows": closes * 0.999,
+            "closes": closes,
+            "marks": marks,
+            "funding": pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    def test_laddered_oracle_matches_accumulator(self) -> None:
+        """SCENARIO_MHS_LADDER_ORACLE_ACCUMULATOR_PARITY_04: LADDERED replay via
+        the single-panel oracle and the windowed accumulator produce identical
+        fills, ledger, termination, and counters at rtol=atol=1e-12."""
+        wl = self._workload()
+        oracle = strategy_aware_execution_replay(
+            wl["weights"], wl["signals"], wl["highs"], wl["lows"], wl["closes"],
+            wl["marks"], wl["funding"], 1.0, "OHLCV_LADDERED_PROXY", ExecutionSpec(),
+        )
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        windowed = replay_execution_windows(
+            windows, 1.0, "OHLCV_LADDERED_PROXY", ExecutionSpec(), retain_event_snapshots=True,
+        )
+        _assert_replay_equivalent(oracle, windowed)
+
+    def test_ladder_tranches_one_is_byte_identical_to_strict(self) -> None:
+        """DoD regression: OHLCV_LADDERED_PROXY with ladder_tranches=1 matches
+        OHLCV_STRICT_PROXY byte-for-byte in fills and all-intent shortfall on
+        both the single-panel oracle and the windowed path."""
+        wl = self._workload()
+        ladder_spec = ExecutionSpec(ladder_tranches=1)
+        for replay in (
+            lambda bound, spec: strategy_aware_execution_replay(
+                wl["weights"], wl["signals"], wl["highs"], wl["lows"], wl["closes"],
+                wl["marks"], wl["funding"], 1.0, bound, spec,
+            ),
+            lambda bound, spec: replay_execution_windows(
+                _partition_windows(
+                    wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                    wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+                ),
+                1.0, bound, spec,
+            ),
+        ):
+            strict = replay("OHLCV_STRICT_PROXY", ExecutionSpec())
+            ladder = replay("OHLCV_LADDERED_PROXY", ladder_spec)
+            assert len(strict.simulated_fills) == len(ladder.simulated_fills)
+            for col in ("timestamp", "symbol", "quantity_delta", "fill_price", "fee_bps", "reason"):
+                assert strict.simulated_fills[col].tolist() == ladder.simulated_fills[col].tolist(), col
+            assert strict.all_intent_shortfall_bps == ladder.all_intent_shortfall_bps
+            assert strict.fill_count == ladder.fill_count
+            assert strict.unfilled_count == ladder.unfilled_count
+            assert strict.fallback_count == ladder.fallback_count
+            assert dict(strict.termination_counts) == dict(ladder.termination_counts)
+            for field in ("equity", "net_returns", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+                np.testing.assert_allclose(
+                    getattr(strict.ledger, field).to_numpy(),
+                    getattr(ladder.ledger, field).to_numpy(),
+                    rtol=1e-12, atol=1e-12,
+                )
+
+    def test_ladder_splits_order_into_multiple_fill_records(self) -> None:
+        """A laddered order that partially escalates yields multiple fill
+        records on one intent, and the ladder fills a strict shortfall."""
+        idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+        lows = px.copy()
+        # Tranche 1 (bars 1-7) rests at 100: lows stay above.  Tranche 2's
+        # repriced limit (bar 8-15) is traded through: low drops to 99.0.
+        lows.loc["2021-01-01 12:09", "A"] = 99.0
+        target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        report = strategy_aware_execution_replay(
+            target, signal_at, px, lows, px, px,
+            pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+            "OHLCV_LADDERED_PROXY", ExecutionSpec(ladder_tranches=4),
+        )
+        fills = report.simulated_fills
+        assert len(fills) >= 2
+        assert (fills["fee_bps"] == 2.0).any()
+        assert (fills["reason"] == "passive_fill").any()
+        assert report.fill_count >= 1
+        assert report.fallback_count >= 1
+        assert abs(fills["quantity_delta"].sum() - 0.01) < 1e-9
+
+
+
 
     def test_buy_fills_when_low_trades_through(self) -> None:
         assert passive_fill_shortfall_bps(100.0, np.array([99.5, 100.2]), 101.0, 1, SPEC) == 2.0
