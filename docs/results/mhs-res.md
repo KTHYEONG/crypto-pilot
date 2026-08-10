@@ -41,25 +41,39 @@
 선택 → qualification 2024-2025 단일 재확인, 재탐색 없음)을 두 sign 계열에
 실제 데이터로 실행했다.
 
-| Family | Discovery 최고 점수 (worst-year net_t, 2.64bps) | 최고 후보 | Selected | Qualification | Admitted |
+**2026-08-10 수정 후 재실행**: 아래 수치는 discovery 게이트의 sign-unaware
+worst-year 버그를 수정한 뒤(`docs/specs/mhs_discovery_gate_sign_fix.md`) 이
+문서의 이전 수치를 폐기하고 재측정한 결과다. 이전 reversal 점수는 `min()`이
+"가장 강한(가장 음수인) 해"를 worst-year로 잘못 고른 값이라 전부 틀렸다.
+재실행은 production 관례에 맞춰 `tranche_count=8`, 2.64bps로 수행했다.
+
+| Family | Discovery 최고 점수 (worst-year net_t, 2.64bps, tranche_count=8) | 최고 후보 | Selected | Qualification | Admitted |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| reversal (sign=-1) | **-1.812** | 168h | `None` | 미평가 | `False` |
-| momentum (sign=+1) | **-0.736** | 336h | `None` | 미평가 | `False` |
+| reversal (sign=-1) | **-1.175** | 24h | `None` | 미평가 | `False` |
+| momentum (sign=+1) | **+0.220** | 336h | `None` | 미평가 | `False` |
 
-전체 discovery 점수(모든 후보, worst-year net_t @2.64bps):
+전체 discovery 점수(모든 후보, 올바른 worst-year net_t @2.64bps,
+tranche_count=8):
 
-- reversal: 24h=-3.932, 48h=-3.599, 72h=-3.441, 96h=-2.082, 120h=-2.024, **168h=-1.812**
-- momentum: 72h=-1.077, 120h=-1.693, 168h=-0.999, 240h=-1.399, **336h=-0.736**, 504h=-1.031
+- reversal: **24h=-1.175**, 48h=-1.107, 72h=-0.712, 96h=-0.752, 120h=-0.283, 168h=-1.057
+- momentum: 72h=-0.098, 120h=-0.357, 168h=+0.107, 240h=-0.168, **336h=+0.220**, 504h=-0.191
 
-**핵심 발견**: 이전(제거된) 단일구간 12점 스윕에서 유일하게 |t|>=2.0 문턱을
-넘었던 "168h reversal"(전체 5년 aggregate t=-2.16)이, **연도별 최소값
-기준으로는 -1.81로 문턱 미달**이다 — 특정 연도(단일 구간)에 성과가 몰려 있었을
-뿐 discovery 3개 연도 전체에서 강건하지 않았다는 뜻. §2.4에서 명시한 대로
-이 결과로 어떤 후보도 채택하지 않는다(fail-closed, qualification 자체가
-평가되지 않음). **현재 방법론(단순 rank-weight momentum/reversal,
-tranche_count=1)으로는 discovery 구간에서 강건한 edge가 어느 horizon에서도
-재현되지 않는다** — fast/slow 투 밴드 아키텍처의 파라미터 문제가 아니라
-접근 방식 자체를 재검토할 근거로 봐야 한다.
+**핵심 발견 (수정 후에도 결론 유지)**: 이전에 보고한 "reversal 최고 후보
+168h, worst-year=-1.812"는 sign-unaware `min()` 버그로 계산된 틀린 수치다.
+올바른 sign-aware worst-year 기준 reversal 최고 후보는 **24h(-1.175)** 이고,
+여전히 |t| < 2.0이라 어느 후보도 채택되지 않는다(fail-closed, qualification
+미평가). 즉 결론(admitted=False) 자체는 우연히 바뀌지 않았지만, 이전에는 그
+결론이 "알고리즘이 reversal을 원천적으로 통과 못 시키게 돼 있어서" 나온
+것이었고 이제는 "데이터가 실제로 약해서" 나온 것임이 확인됐다. **현재
+방법론(단순 rank-weight momentum/reversal, tranche_count=8)으로는 discovery
+구간에서 강건한 edge가 어느 horizon에서도 재현되지 않는다** — fast/slow 투
+밴드 아키텍처의 파라미터 문제가 아니라 접근 방식 자체를 재검토할 근거로 봐야
+한다.
+
+(참고) discovery 2021년은 모든 horizon에서 `net_t`가 non-finite(계산 불가)이라
+worst-year 샘플은 사실상 2022-2023 두 해뿐이다. 원인은 펀딩 정렬/eligibility
+워밍업/데이터 갭 중 무엇인지 아직 규명되지 않았으며 별도 데이터 무결성 조사가
+필요하다(`docs/specs/mhs_discovery_gate_sign_fix.md` §3).
 
 ---
 
