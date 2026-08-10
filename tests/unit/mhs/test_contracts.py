@@ -69,6 +69,12 @@ class TestExecutionSpec:
         with pytest.raises(ValueError, match="fees and slippage"):
             ExecutionSpec(maker_fee_bps=-1.0)
 
+    def test_ladder_tranches_default_and_validation(self) -> None:
+        assert ExecutionSpec().ladder_tranches == 4
+        assert ExecutionSpec(ladder_tranches=1).ladder_tranches == 1
+        with pytest.raises(ValueError, match="ladder_tranches"):
+            ExecutionSpec(ladder_tranches=0)
+
 
 class TestFrozenLiterals:
     """MHS-13-FIXED-BLEND-AND-COST-STRESS: the Phase 1 candidate set is frozen."""

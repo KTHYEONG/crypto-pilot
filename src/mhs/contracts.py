@@ -51,12 +51,15 @@ class ExecutionSpec:
     taker_slippage_bps: float = 3.0
     passive_timeout_minutes: int = 30
     require_trade_through: bool = True
+    ladder_tranches: int = 4
 
     def __post_init__(self) -> None:
         if min(self.maker_fee_bps, self.taker_fee_bps, self.taker_slippage_bps) < 0:
             raise ValueError("fees and slippage must be non-negative")
         if self.passive_timeout_minutes < 1:
             raise ValueError(f"passive_timeout_minutes must be >= 1, got {self.passive_timeout_minutes}")
+        if self.ladder_tranches < 1:
+            raise ValueError(f"ladder_tranches must be >= 1, got {self.ladder_tranches}")
 
     def one_way_taker_bps(self) -> float:
         """One-way all-in taker cost in bps (fee + slippage)."""
