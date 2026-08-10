@@ -1205,13 +1205,14 @@ def _sequential_book_reports(args: dict[str, object]) -> tuple[object, object, o
         args["request"], args["funding_by_symbol"], args["start"], args["end"],
         slow.horizon_hours, args["initial_equity"], args["w_slow_execution"],
     )
-    blend_step = args["blend_1h"].reindex(fast_grid)
+    active_spec, active_grid = ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+    blend_step = args["blend_1h"].reindex(active_grid)
     blend_replay = (
         ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
         + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
-    ).reindex(fast_grid)
+    ).reindex(active_grid)
     blend_rpt = ev._book_outcome(
-        "blend", fast, args["n_symbols"], fast_grid, blend_step, grid_1h,
+        "blend", active_spec, args["n_symbols"], active_grid, blend_step, grid_1h,
         args["opens"], args["bar_funding"], args["phase_blend"], args["root"],
         args["request"], args["funding_by_symbol"], args["start"], args["end"],
         168, args["initial_equity"], blend_replay,
@@ -1251,22 +1252,26 @@ def test_p10_concurrent_books_parity(mhs_market) -> None:
 
 def test_toplevel_blend_replay_matches_renormalized_components(mhs_market) -> None:
     # SCENARIO_MHS_TOPLEVEL_BLEND_REPLAY_MATCHES_RENORMALIZED_COMPONENTS: the
-    # blend replay target is the 50/50 sum of the renormalized execution books
-    # (each ffilled onto the 1h grid then reindexed onto the fast grid), no
-    # longer a collapse of the pre-mask theoretical blend.
+    # blend replay target is the weighted sum of the renormalized execution
+    # books (each ffilled onto the 1h grid then reindexed onto the blend's
+    # active execution grid), no longer a collapse of the pre-mask theoretical
+    # blend.
     args = _build_books_concurrent_args(mhs_market, universe_size=8)
-    grid_1h, fast_grid = args["grid_1h"], args["fast_grid"]
+    grid_1h = args["grid_1h"]
+    active_spec, active_grid = ev._active_blend_book_and_grid(
+        args["fast"], args["slow"], args["fast_grid"], args["slow_grid"],
+    )
     expected = (
         ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
         + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
-    ).reindex(fast_grid)
-    collapsed = args["blend_1h"].where(args["execution_mask"], other=0.0).reindex(fast_grid)
+    ).reindex(active_grid)
+    collapsed = args["blend_1h"].where(args["execution_mask"], other=0.0).reindex(active_grid)
     assert not expected.equals(collapsed), "renormalized blend must differ from the collapsed pre-mask blend"
     # the concurrent production path replays exactly the renormalized composition
     _, _, blend_report = ev._run_books_concurrent(**args)
     expected_report = ev._book_outcome(
-        "blend", args["fast"], args["n_symbols"], fast_grid,
-        args["blend_1h"].reindex(fast_grid), grid_1h,
+        "blend", active_spec, args["n_symbols"], active_grid,
+        args["blend_1h"].reindex(active_grid), grid_1h,
         args["opens"], args["bar_funding"], args["phase_blend"], args["root"],
         args["request"], args["funding_by_symbol"], args["start"], args["end"],
         168, args["initial_equity"], expected,
@@ -1325,6 +1330,93 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
     assert slow.failure.reason == ev.MHS_GO_REASON_EXECUTION_GAP
     assert blend.primary is not None
     assert blend.failure is None
+
+def test_active_blend_grid_slow_only() -> None:
+    # SCENARIO_MHS_ACTIVE_BLEND_GRID_SLOW_ONLY_01: with the frozen
+    # PHASE_1_BOOK_BLEND_WEIGHTS == {fast_reversal: 0.0, slow_momentum: 1.0},
+    # the blend adopts slow's own BookSpec and 24h-native grid by identity (not
+    # equality) -- never fast's 6h grid.
+    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
+    slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
+    spec, grid = ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+    assert spec is slow
+    assert grid is slow_grid
+
+
+def test_active_blend_grid_fast_weighted(monkeypatch) -> None:
+    # SCENARIO_MHS_ACTIVE_BLEND_GRID_FAST_WEIGHTED_02: with a nonzero fast
+    # weight (historical 50/50), the helper returns fast/fast_grid by identity,
+    # reproducing the pre-fix behavior byte-for-byte when fast is re-admitted.
+    monkeypatch.setattr(
+        ev, "PHASE_1_BOOK_BLEND_WEIGHTS",
+        {"fast_reversal": 0.5, "slow_momentum": 0.5},
+    )
+    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
+    slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
+    spec, grid = ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+    assert spec is fast
+    assert grid is fast_grid
+
+
+def test_active_blend_grid_no_weight_fails_closed(monkeypatch) -> None:
+    # SCENARIO_MHS_ACTIVE_BLEND_GRID_NO_WEIGHT_03: with zero weight on both
+    # books the allocation invariant is violated and the helper must fail
+    # closed (ValueError) rather than silently pick a default grid.
+    monkeypatch.setattr(
+        ev, "PHASE_1_BOOK_BLEND_WEIGHTS",
+        {"fast_reversal": 0.0, "slow_momentum": 0.0},
+    )
+    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
+    slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
+    with pytest.raises(ValueError, match="allocates no capital"):
+        ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+
+
+def test_blend_report_adopts_slow_cadence(mhs_market) -> None:
+    # SCENARIO_MHS_BLEND_REPORT_ADOPTS_SLOW_CADENCE_04: under the fixture with
+    # the current frozen weights, the blend MhsBookReport produced by
+    # _run_books_concurrent has step_hours==24 and horizon_hours==168
+    # (slow_momentum's values), not step_hours==6/horizon_hours==48
+    # (fast_reversal's) -- proving the _run_books_concurrent call site was
+    # rewired, not just the helper added in isolation.
+    args = _build_books_concurrent_args(mhs_market)
+    _, _, blend_report = ev._run_books_concurrent(**args)
+    assert blend_report.failure is None
+    assert blend_report.step_hours == 24
+    assert blend_report.horizon_hours == 168
+
+
+def test_fold_decision_grid_matches_slow_cadence(mhs_market) -> None:
+    # SCENARIO_MHS_FOLD_DECISION_GRID_MATCHES_SLOW_CADENCE_05: under the
+    # fixture with the current frozen weights, _build_fold_target_weights's
+    # target_weights index has a row spacing consistent with the 24h slow_grid
+    # (not the 1h native grid_1h) for the validation window -- the fold-level
+    # Research-GO gate no longer decides at native-hourly cadence when only
+    # slow_momentum is admitted.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+    )
+    target_weights, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+    )
+    assert not target_weights.empty
+    spacing = target_weights.index.to_series().diff().dropna()
+    assert not spacing.empty
+    assert (spacing == pd.Timedelta(hours=24)).all()
 
 
 def test_p14_postbook_concurrent_parity() -> None:
