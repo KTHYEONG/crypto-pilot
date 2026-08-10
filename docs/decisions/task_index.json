@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_BLEND_GRID_COUPLING_FIX",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_BLEND_GRID_COUPLING_FIX",
+      "domain": "research",
+      "title": "MHS blend 실행 격자/spec을 admission 가중치 기반으로 재결합",
+      "why": "3차 수정(fast_reversal admission 0.0)이 PHASE_1_BOOK_BLEND_WEIGHTS는 바꿨지만, blend의 실행 결정 격자·BookSpec은 _run_books_concurrent/_build_fold_target_weights/phase_blend 3곳에서 여전히 fast_reversal(6h/1h)에 하드코딩돼 있었음. blend가 slow_momentum과 가중치상 100% 동일한데도 fills가 4배(473,613 vs 118,557) 부풀려지고 autocorr Sharpe/MDD/turnover가 전부 열위였던 것이 그 증거(docs/specs/mhs_root_cause_reassessment.md §3.2).",
+      "resolution": "PHASE_1_BOOK_BLEND_WEIGHTS를 유일한 진실 소스로 (spec, grid)를 파생하는 순수 함수 _active_blend_book_and_grid를 evaluation.py에 신설하고 3개 호출부에 배선(fast 가중치 nonzero면 fast/fast_grid 반환해 과거 50/50 동작 바이트 동일 보존, 아니면 fail-closed).",
+      "impact": "blend이 slow_momentum과 step_hours/fills/autocorr Sharpe/MDD/turnover 전부 일치로 전환(격자 버그로 인한 4배 fills 팽창 해소). Research GO는 여전히 FALSE(folds_passed=0/3) — 남은 근본 원인은 strict proxy 30분 타임아웃발 428-563bps 비용 폭증(이미 별도 ADR로 측정됨, 후속 spec 필요)과 horizon 선택 근거 문서 부재(판단 보류)."
+    },
+    {
       "task_id": "TASK_MHS_BOOK_ADMISSION_VOL_MASK",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_BOOK_ADMISSION_VOL_MASK",
