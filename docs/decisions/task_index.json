@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_BOOK_ADMISSION_VOL_MASK",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_BOOK_ADMISSION_VOL_MASK",
+      "domain": "research",
+      "title": "MHS book admission 동결 + regime vol_mean roster 마스킹",
+      "why": "PHASE_1_BOOK_BLEND_WEIGHTS가 fast_reversal(prescreen t=-0.15, 미유의)에 자본 50%를 고정 배분해 살아있는 slow_momentum 신호를 구조적으로 희석시켰고, _regime_cash_scale의 vol_mean이 실행 roster(30종목)가 아닌 eligible 전체(446종목) 평균이라 실제 노출 리스크를 재지 못했다 (docs/specs/mhs_fundamental_redesign.md §2.A/§2.C)",
+      "resolution": "PHASE_1_BOOK_BLEND_WEIGHTS를 측정 근거 기반으로 {fast_reversal:0.0, slow_momentum:1.0}으로 동결(contracts.py), fold/top-level _regime_cash_scale의 vol_mean 계산을 execution_mask로 마스킹 후 산출하도록 변경(evaluation.py)",
+      "impact": "blend가 fast_reversal 자본잠식(CAPITAL_INVARIANT_BREACH) 없이 완주로 전환되고 slow_momentum과 동일 가중 기준이 됨. Research GO는 여전히 FALSE(folds_passed=0/3) — §2.B(roster N)·§2.D/E(cash floor 등) 미측정 상수가 후속 과제로 남음"
+    },
+    {
       "task_id": "MHS_ROSTER_HYSTERESIS_VOL_TILT",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_ROSTER_HYSTERESIS_VOL_TILT",
