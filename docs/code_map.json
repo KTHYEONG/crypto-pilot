@@ -641,5 +641,8 @@
   },
   "src/mhs/evaluation.py": {
     "testing": "tests/unit/mhs/test_evaluation.py"
+  },
+  "src/mhs/books.py": {
+    "testing": "tests/unit/mhs/test_books.py"
   }
 }

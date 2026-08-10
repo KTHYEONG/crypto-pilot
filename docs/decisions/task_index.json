@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_EXECUTION_ROSTER_RENORMALIZATION",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_EXECUTION_ROSTER_RENORMALIZATION",
+      "domain": "research",
+      "title": "MHS 실행 roster 재정규화로 dollar-neutral/unit-gross 불변식 복원",
+      "why": "MHS Research GO가 3개 anchored fold 전부 실패(Primary Autocorr Sharpe<<0.6). fast/slow 로직을 따라가 보니 rank_weight_book이 만든 dollar-neutral/unit-gross 북을 실행 roster(top-30 유동성)로 마스킹할 때 .where(mask, 0.0)만 적용하고 재정규화하지 않아, 실제 배포 gross가 5~10%로 붕괴하고 net 편향과 roster-churn turnover가 주입됨. slow_momentum은 prescreen(+0.73 Sharpe)에서 실재 edge가 있는데 primary 리플레이(-0.74)에서 파괴되는 것이 실행층 결함의 증거.",
+      "resolution": "src/mhs/books.py에 renormalize_within_mask() 신규 추가(center+gross 재정규화, min_symbols 미달 fail-closed). fold 빌더/top-level 진단의 4개 호출부(w_fast_execution/w_slow_execution 생성 2곳, blend_replay 조합 1곳)를 재정규화 함수로 교체. fast/slow 조합(50/50 blend) 단계는 아키텍처 §2 불변식대로 미재정규화 유지.",
+      "impact": "unit/application 테스트 신규 8개 시나리오 전부 PASS, lean_check --spec 계약 검증 PASS. fast_reversal은 prescreen부터 edge 없어 이번 수정으로 GO 통과 기대하지 않음(범위 밖 명시). MHS_REBALANCE_MIN_NOTIONAL_DELTA 재검토와 fast_reversal 알파 재설계는 후속 과제로 남김."
+    },
+    {
       "task_id": "TASK_MHS_OUTPUT_TIERING",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_OUTPUT_TIERING",
