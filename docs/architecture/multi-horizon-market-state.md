@@ -49,7 +49,7 @@ PYTHONPATH=. uv run python -m src.cli.main data collect mhs-execution \
   --timeframe 5m --start 2021-01-01 --end 2025-12-31 --execute
 ```
 
-수집 구현은 [mhs_execution_collection.py](/home/kth/my_coin_traider/src/application/data/mhs_execution_collection.py)에 있다.
+수집 구현은 [mhs_execution_collection.py](/home/kth/crypto-pilot/src/application/data/mhs_execution_collection.py)에 있다.
 
 ## 2. 신호와 portfolio construction
 
@@ -89,7 +89,7 @@ order-size impact를 복원할 수 없다. 따라서 이 리플레이는 실제 
 ## 4. Simulated inventory ledger
 
 모든 PnL과 risk metric의 단일 원천은
-[execution.py](/home/kth/my_coin_traider/src/mhs/execution.py)의
+[execution.py](/home/kth/crypto-pilot/src/mhs/execution.py)의
 `simulated_inventory_ledger`다.
 
 각 timestamp에서 다음 순서를 지킨다.
@@ -138,7 +138,7 @@ L1/L2/trade, own-order fill, size experiment가 필요하다. historical mark나
   개봉한다.
 
 주요 실행 결과는
-[mhs_horizon_diagnostic.json](/home/kth/my_coin_traider/docs/results/mhs_horizon_diagnostic.json)에 기록된다.
+[mhs_horizon_diagnostic.json](/home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic.json)에 기록된다.
 
 실행 결과 저장은 요약과 감사 원장을 분리한다. JSON에는 지표·판정·artifact 경로만 남기고,
 체결 이벤트와 equity/units/notional 시계열은
