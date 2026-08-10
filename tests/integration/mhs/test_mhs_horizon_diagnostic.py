@@ -152,17 +152,32 @@ def report(synthetic_market):
 def calibrated_report(synthetic_market):
     """Full diagnostic run with spies on the R1/R3 wiring seams: records the
     ``ema_span`` passed to every ``_book_weights`` call and which callers invoke
-    the regime cash scale and turnover deadband."""
+    the regime cash scale and turnover deadband.
+
+    The top-level book replays and anchored folds now run in forked workers
+    (Phase 3, P10/P14), so the capture stores use ``multiprocessing.Manager``
+    proxies: a fork child's writes are reflected in the parent's proxy instead
+    of mutating a copy-on-write shadow.
+    """
+    from multiprocessing import Manager
+
     root, end = synthetic_market
-    captured: dict[str, object] = {
-        "ema_spans": {}, "regime_callers": [], "deadband_callers": [],
-    }
+    mgr = Manager()
+    captured = mgr.dict({
+        "ema_spans": mgr.dict(),
+        "regime_callers": mgr.list(),
+        "deadband_callers": mgr.list(),
+    })
     real_book_weights = ev._book_weights
     real_regime = ev._regime_cash_scale
     real_deadband = ev._apply_rebalance_deadband
 
     def _book_weights(log_close, eligible, spec, step_grid, ema_span=None):
-        captured["ema_spans"].setdefault(spec.band.name, []).append(ema_span)
+        spans = captured["ema_spans"].get(spec.band.name)
+        if spans is None:
+            spans = mgr.list()
+            captured["ema_spans"][spec.band.name] = spans
+        spans.append(ema_span)
         return real_book_weights(log_close, eligible, spec, step_grid, ema_span=ema_span)
 
     def _regime(*args, **kwargs):
@@ -189,7 +204,8 @@ def calibrated_report(synthetic_market):
         ev._book_weights = real_book_weights
         ev._regime_cash_scale = real_regime
         ev._apply_rebalance_deadband = real_deadband
-    return report, captured
+    yield report, captured
+    mgr.shutdown()
 
 
 class TestQualityCalibrationWiring:
@@ -260,8 +276,9 @@ class TestQualityCalibrationWiring:
         src = inspect.getsource(ev.run_mhs_horizon_diagnostic)
         assert "del log_close" in src
         assert "signal_48h" in src
-        # log_close must be released before the first top-level book replay.
-        assert src.index("del log_close") < src.index("_book_outcome(")
+        # log_close must be released before the first top-level book replay
+        # (now launched concurrently in fork workers via ``_run_books_concurrent``).
+        assert src.index("del log_close") < src.index("_run_books_concurrent(")
 
 
 class TestMhsHorizonDiagnostic:
