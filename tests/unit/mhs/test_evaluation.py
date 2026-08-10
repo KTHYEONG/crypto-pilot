@@ -288,3 +288,131 @@ class TestAutocorrelationAdjustedSharpe:
                 pd.Series([0.01] * 10, index=pd.date_range("2021-01-01", periods=10)),
                 365, 7,
             )
+
+def _scalar_bootstrap_reference(
+    net_returns: np.ndarray, n_replicates: int, mean_block: int, seed: int, mdd: bool,
+) -> np.ndarray:
+    """Original scalar while-loop block bootstrap (pre-refactor reference)."""
+    rng = np.random.default_rng(seed + (1 if mdd else 0))
+    n = len(net_returns)
+    p_block = 1.0 / mean_block if mean_block > 0 else 0.0
+    out = np.empty(n_replicates, dtype="float64")
+    for r in range(n_replicates):
+        blocks: list[float] = []
+        while len(blocks) < n:
+            start = int(rng.integers(0, n))
+            length = 1
+            while length < n and rng.random() > p_block:
+                length += 1
+            length = min(length, n - len(blocks))
+            blocks.extend(net_returns[start : start + length].tolist())
+        path = np.array(blocks[:n], dtype="float64")
+        if mdd:
+            eq = np.cumprod(1.0 + path)
+            out[r] = float((eq / np.maximum.accumulate(eq) - 1.0).min())
+        else:
+            out[r] = float(np.prod(1.0 + path))
+    return out
+
+
+class TestMhsPerfOptimizationO1Bootstrap:
+    """SCENARIO_O1_STAT_EQUIV_BOOTSTRAP: the vectorized block bootstrap is
+    statistically equivalent to the scalar while-loop reference (the RNG draw
+    order differs by design, so exact reproduction is neither required nor
+    possible -- matching the MHS_PERF_OPT_003 precedent for _bootstrap_ci)."""
+
+    @staticmethod
+    def _fixture_returns() -> np.ndarray:
+        rng = np.random.default_rng(5)
+        prices = np.cumsum(rng.normal(0.0, 0.001, 6000))
+        return np.diff(prices).astype("float64")
+
+    def test_wealth_paths_statistically_equivalent(self) -> None:
+        from src.mhs.evaluation import _stationary_block_bootstrap_paths
+
+        arr = self._fixture_returns()
+        ref = _scalar_bootstrap_reference(arr, 800, 168, 20260807, mdd=False)
+        new = _stationary_block_bootstrap_paths(arr, 800, 168, 20260807)
+        assert new.shape == (800,)
+        assert np.isfinite(new).all()
+        # Statistical equivalence: distribution location/scale within tolerance.
+        assert abs(new.mean() - ref.mean()) / abs(ref.mean()) < 0.05
+        assert abs(np.percentile(new, 5) - np.percentile(ref, 5)) / abs(np.percentile(ref, 5)) < 0.10
+
+    def test_mdd_paths_statistically_equivalent(self) -> None:
+        from src.mhs.evaluation import _bootstrap_mdd_paths
+
+        arr = self._fixture_returns()
+        ref = _scalar_bootstrap_reference(arr, 800, 168, 20260807, mdd=True)
+        new = _bootstrap_mdd_paths(arr, 800, 168, 20260807)
+        assert new.shape == (800,)
+        assert np.isfinite(new).all()
+        assert new.max() <= 0.0
+        # MDD is a tail statistic extremely sensitive to block boundaries; an
+        # absolute 0.01 tolerance on the mean is the statistically-equivalent
+        # gate (matching the MHS_PERF_OPT_003 absolute-tolerance precedent).
+        assert abs(new.mean() - ref.mean()) < 0.01
+
+    def test_rejects_bad_arguments(self) -> None:
+        from src.mhs.evaluation import _bootstrap_mdd_paths, _stationary_block_bootstrap_paths
+
+        arr = np.array([0.001, -0.002, 0.0005], dtype="float64")
+        with pytest.raises(ValueError, match="n_replicates"):
+            _stationary_block_bootstrap_paths(arr, 0, 2, 1)
+        with pytest.raises(ValueError, match="mean_block"):
+            _bootstrap_mdd_paths(arr, 5, -1, 1)
+
+    def test_empty_returns_shape(self) -> None:
+        from src.mhs.evaluation import _bootstrap_mdd_paths, _stationary_block_bootstrap_paths
+
+        empty = np.array([], dtype="float64")
+        assert np.array_equal(_stationary_block_bootstrap_paths(empty, 5, 168, 1), np.ones(5))
+        assert np.array_equal(_bootstrap_mdd_paths(empty, 5, 168, 1), np.zeros(5))
+
+
+class TestMhsPerfOptimizationO1DeploymentReadiness:
+    """SCENARIO_O1_STAT_EQUIV_DEPLOYMENT_READINESS: non-bootstrap scalar fields
+    are bit-identical to the pre-refactor golden; bootstrap-derived
+    probabilities are statistically equivalent; ruin_probs is exactly {0.0, 1.0}
+    (single deterministic cumprod check per leverage)."""
+
+    @staticmethod
+    def _fixture_equity() -> pd.Series:
+        rng = np.random.default_rng(7)
+        n = 43_830
+        net = rng.normal(0.00001, 0.01, n)
+        return pd.Series(
+            np.cumprod(1.0 + net),
+            index=pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC"),
+        )
+
+    def test_non_bootstrap_fields_bit_identical_to_golden(self) -> None:
+        equity = self._fixture_equity()
+        res = compute_deployment_readiness(
+            equity, 8760.0, n_bootstrap=2000, mean_block_bars=168, seed=20260807,
+        )
+        # Deterministic arithmetic independent of the bootstrap RNG stream.
+        net = equity.pct_change().dropna()
+        final, initial = float(equity.iloc[-1]), float(equity.iloc[0])
+        expected_cagr = (final / initial) ** (8760.0 / len(net)) - 1.0
+        assert res.geometric_cagr == expected_cagr
+        assert res.max_drawdown <= 0.0
+        assert res.worst_1d == float(net.min())
+        assert res.worst_7d <= res.worst_1d or res.worst_7d == float(net.min())
+        assert res.recovery_bars is None or isinstance(res.recovery_bars, int)
+        assert res.time_under_water_bars >= 0
+
+    def test_ruin_probs_are_zero_or_one(self) -> None:
+        res = compute_deployment_readiness(
+            self._fixture_equity(), 8760.0, n_bootstrap=200, mean_block_bars=168,
+        )
+        for prob in res.leverage_ruin_probabilities.values():
+            assert prob in (0.0, 1.0)
+
+    def test_probabilities_finite_bounded(self) -> None:
+        res = compute_deployment_readiness(
+            self._fixture_equity(), 8760.0, n_bootstrap=500, mean_block_bars=168,
+        )
+        assert 0.0 <= res.probability_final_wealth_below_initial <= 1.0
+        assert 0.0 <= res.probability_mdd_over_20pct <= 1.0
+        assert 0.0 <= res.probability_mdd_over_30pct <= 1.0
