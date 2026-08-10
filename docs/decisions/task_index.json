@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_EXECUTION_LADDER_AND_DISCOVERY_GATE",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_EXECUTION_LADDER_AND_DISCOVERY_GATE",
+      "domain": "execution",
+      "title": "MHS 에스컬레이팅 체결 사다리 + discovery/qualification 신호 선정 게이트",
+      "why": "이전 spec들은 결함 B(30분 타임아웃발 428-563bps 비용 폭증)와 horizon 선택 근거 부재를 진단만 하고 해법 없이 남겼음. 사용자가 진단이 아닌 구체적 해결책(체결 시스템 재설계, 신뢰성 있는 신호 선정 절차)을 요청함(docs/specs/mhs_execution_ladder_and_discovery_gate.md).",
+      "resolution": "Part A: laddered_fill_schedule(주문을 K개 tranche로 분할, 실패시 선형 리프라이스, 마지막 tranche만 시장가 폴백; K=1은 기존 STRICT proxy와 바이트 동일; strategy_aware_execution_replay/_BoundExecutionReplayAccumulator 양쪽에서 동일 함수 재사용) + OHLCV_LADDERED_PROXY bound + --ladder-diagnostic opt-in CLI. Part B: src/mhs/discovery.py의 select_horizon_by_discovery_qualification(discovery 2021-23 worst-year-robust 선택 -> qualification 2024-25 단일 재확인, 재탐색 없음, 기존 DISCOVERY_END/QUALIFICATION_END 컨벤션 재사용).",
+      "impact": "실측 결과 둘 다 단순 개선이 아님을 확인: (B) 이전 스윕에서 유일하게 통과했던 168h reversal이 worst-year-robust 기준(-1.81)에서 문턱(2.0) 미달로 탈락 -- 어떤 horizon도 discovery에서 admitted 안 됨(fail-closed). (A) --ladder-diagnostic 5년 실측: intent shortfall -12.5%(1000.29->875.43bps) 개선되었으나 naive Sharpe는 오히려 악화(-0.698->-0.909, 꼬리위험 감소가 평균비용 증가로 상쇄) -- primary 승격 보류. 남은 레버는 파라미터 재조정보다 신호/체결 접근 방식 자체의 재설계로 판단됨(docs/results/mhs-res.md §3)."
+    },
+    {
       "task_id": "TASK_MHS_BLEND_GRID_COUPLING_FIX",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_BLEND_GRID_COUPLING_FIX",
