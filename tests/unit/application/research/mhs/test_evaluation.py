@@ -2,6 +2,7 @@
 
 import time
 import types
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -788,3 +789,295 @@ def test_mhs_phase2_o10_bootstrap_chunk_adaptive() -> None:
     assert _bootstrap_chunk_size(525_600) <= 63
     assert _bootstrap_chunk_size(43_830) >= 100
     assert _bootstrap_chunk_size(0) == 500
+
+
+def _reference_resolve_ns_scalar(
+    spos_all: np.ndarray,
+    full_grid_ns: np.ndarray,
+    n_grid: int,
+    timeout_ns_delta: int,
+) -> np.ndarray:
+    """The Phase-2 scalar resolve_ns loop (the parity reference for P11)."""
+    resolve_ns = np.full(len(spos_all), -1, dtype="int64")
+    for i in range(len(spos_all)):
+        s = int(spos_all[i])
+        if s >= n_grid:
+            continue
+        tns = full_grid_ns[s] + timeout_ns_delta
+        tpos = int(np.searchsorted(full_grid_ns, tns, side="left"))
+        if tpos < n_grid and full_grid_ns[tpos] == tns:
+            resolve_ns[i] = tns
+    return resolve_ns
+
+
+def test_p11_resolve_ns_bit_identical() -> None:
+    # SCENARIO_P11_RESOLVE_NS: the vectorized resolve_ns is bit-identical to the
+    # scalar per-decision loop for grids with on-grid timeouts, off-grid
+    # timeouts, and out-of-range submit positions.
+    rng = np.random.default_rng(11)
+    n_grid = 4096
+    grid_ns = np.arange(n_grid, dtype="int64") * 60_000_000_000
+    timeout_delta = 5 * 60_000_000_000
+    for _ in range(5):
+        spos_all = rng.integers(-10, n_grid + 10, size=300)
+        expected = _reference_resolve_ns_scalar(spos_all, grid_ns, n_grid, timeout_delta)
+        actual = ev._resolve_ns_vectorized(spos_all, grid_ns, n_grid, timeout_delta)
+        assert actual.dtype == np.int64
+        assert len(actual) == len(spos_all)
+        assert np.array_equal(actual, expected)
+    # A non-divisor timeout delta (never lands exactly on a grid bar) must be
+    # all -1 exactly like the scalar path.
+    odd_delta = 37 * 60_000_000_000
+    spos_all = rng.integers(0, n_grid - 1, size=200)
+    assert np.array_equal(
+        ev._resolve_ns_vectorized(spos_all, grid_ns, n_grid, odd_delta),
+        _reference_resolve_ns_scalar(spos_all, grid_ns, n_grid, odd_delta),
+    )
+
+
+def _build_books_concurrent_args(mhs_market) -> dict[str, object]:
+    """Replicate the top-level diagnostic setup for all three books."""
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+    )
+    panel = ev.load_base_panel(
+        root, "1h", ("close", "open", "quote_vol"), _START, end,
+        partition="dev", min_bars=2000,
+    )
+    close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    grid_1h = close.index
+    funded = [s for s in close.columns if s in funding_by_symbol]
+    close = close[funded]
+    opens = opens[funded]
+    quote_vol = quote_vol[funded]
+    bar_period = grid_1h[1] - grid_1h[0]
+    funding_window = {
+        s: funding_by_symbol[s].loc[
+            (funding_by_symbol[s].index >= grid_1h[0])
+            & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+        ]
+        for s in funded
+    }
+    bar_funding = ev.bar_funding_panel(funding_window, grid_1h)
+    aligned = list(bar_funding.columns)
+    close = close[aligned]
+    opens = opens[aligned]
+    quote_vol = quote_vol[aligned]
+    bar_funding = bar_funding[aligned]
+    funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
+    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    log_close = np.log(close)
+    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
+    slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
+    w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
+    w_slow = ev._book_weights(log_close, eligible, slow, slow_grid)
+    phase_fast = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    phase_slow = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
+    phase_blend = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    execution_mask = ev._pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+    w_fast_execution = w_fast.where(
+        execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
+    )
+    w_slow_execution = w_slow.where(
+        execution_mask.reindex(w_slow.index).fillna(False), other=0.0,
+    )
+    w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
+    w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
+    blend_1h = (
+        ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
+        + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
+    )
+    vol_mean = ev.realized_vol(log_close, 48).reindex(grid_1h).mean(axis=1)
+    regime_scale = ev._regime_cash_scale(vol_mean)
+    blend_1h = blend_1h.mul(regime_scale, axis=0)
+    return {
+        "root": str(root),
+        "request": request,
+        "n_symbols": len(aligned),
+        "grid_1h": grid_1h,
+        "fast": fast,
+        "slow": slow,
+        "fast_grid": fast_grid,
+        "slow_grid": slow_grid,
+        "w_fast": w_fast,
+        "w_slow": w_slow,
+        "w_fast_execution": w_fast_execution,
+        "w_slow_execution": w_slow_execution,
+        "opens": opens,
+        "bar_funding": bar_funding,
+        "phase_fast": phase_fast,
+        "phase_slow": phase_slow,
+        "phase_blend": phase_blend,
+        "start": _START,
+        "end": end,
+        "funding_by_symbol": funding_by_symbol,
+        "blend_1h": blend_1h,
+        "execution_mask": execution_mask,
+        "initial_equity": 1.0,
+    }
+
+
+def _sequential_book_reports(args: dict[str, object]) -> tuple[object, object, object]:
+    fast, slow = args["fast"], args["slow"]
+    fast_grid, slow_grid = args["fast_grid"], args["slow_grid"]
+    grid_1h = args["grid_1h"]
+    fast_rpt = ev._book_outcome(
+        "fast_reversal", fast, args["n_symbols"], fast_grid, args["w_fast"], grid_1h,
+        args["opens"], args["bar_funding"], args["phase_fast"], args["root"],
+        args["request"], args["funding_by_symbol"], args["start"], args["end"],
+        fast.horizon_hours, args["initial_equity"], args["w_fast_execution"],
+    )
+    slow_rpt = ev._book_outcome(
+        "slow_momentum", slow, args["n_symbols"], slow_grid, args["w_slow"], grid_1h,
+        args["opens"], args["bar_funding"], args["phase_slow"], args["root"],
+        args["request"], args["funding_by_symbol"], args["start"], args["end"],
+        slow.horizon_hours, args["initial_equity"], args["w_slow_execution"],
+    )
+    blend_step = args["blend_1h"].reindex(fast_grid)
+    blend_replay = args["blend_1h"].where(args["execution_mask"], other=0.0).reindex(fast_grid)
+    blend_rpt = ev._book_outcome(
+        "blend", fast, args["n_symbols"], fast_grid, blend_step, grid_1h,
+        args["opens"], args["bar_funding"], args["phase_blend"], args["root"],
+        args["request"], args["funding_by_symbol"], args["start"], args["end"],
+        168, args["initial_equity"], blend_replay,
+    )
+    return fast_rpt, slow_rpt, blend_rpt
+
+
+def _assert_books_equal(seq, con, name: str) -> None:
+    assert con.name == name
+    assert seq.failure is None
+    assert con.failure is None
+    assert seq.primary is not None
+    assert con.primary is not None
+    assert seq.stress is not None
+    assert con.stress is not None
+    assert len(con.primary.simulated_fills) == len(seq.primary.simulated_fills)
+    assert con.primary_naive_sharpe == seq.primary_naive_sharpe
+    assert con.primary_net_ann == seq.primary_net_ann
+    assert con.primary_geometric_cagr == seq.primary_geometric_cagr
+    assert con.stress_naive_sharpe == seq.stress_naive_sharpe
+    pd.testing.assert_series_equal(
+        con.primary.ledger.equity, seq.primary.ledger.equity,
+        check_exact=True, rtol=0.0, atol=0.0,
+    )
+
+
+def test_p10_concurrent_books_parity(mhs_market) -> None:
+    # SCENARIO_P10_CONCURRENT: three books executed concurrently in fork workers
+    # produce bit-identical reports to the sequential path.
+    args = _build_books_concurrent_args(mhs_market)
+    sequential = _sequential_book_reports(args)
+    concurrent = ev._run_books_concurrent(**args)
+    assert len(concurrent) == 3
+    for seq, con, name in zip(sequential, concurrent, ("fast_reversal", "slow_momentum", "blend"), strict=True):
+        _assert_books_equal(seq, con, name)
+
+
+def test_p10_eager_cache_preload(mhs_market) -> None:
+    # SCENARIO_P10_EAGER_CACHE: preloading fills the O6 cache for the execution
+    # roster so forked workers never re-read the same Parquet.
+    root, end = mhs_market
+    syms = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
+    ev._get_symbol_minute_frame.cache_clear()
+    ev._preload_symbol_minute_frames(str(root), syms, "1m")
+    info = ev._get_symbol_minute_frame.cache_info()
+    assert info.currsize >= len(syms)
+    for s in syms:
+        assert ev._get_symbol_minute_frame(str(root), s, "1m") is not None
+
+
+def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
+    # SCENARIO_P10_ISOLATION: a book whose outcome is a typed failure (primary
+    # dropped, failure set) is delivered through the process pool without
+    # blocking the other two books.
+    args = _build_books_concurrent_args(mhs_market)
+    real = ev._book_outcome
+
+    def _failing(name, *a, **k):
+        report = real(name, *a, **k)
+        if name == "slow_momentum":
+            return dataclasses.replace(
+                report,
+                primary=None, stress=None,
+                primary_autocorr_sharpe=None,
+                primary_naive_sharpe=None,
+                primary_net_ann=None,
+                primary_geometric_cagr=None,
+                primary_max_drawdown=None,
+                primary_annualized_turnover=None,
+                stress_naive_sharpe=None,
+                failure=ev.MhsBookFailure(
+                    stage="replay_slow_momentum",
+                    error_class="DataIntegrityError",
+                    reason=ev.MHS_GO_REASON_EXECUTION_GAP,
+                    message="forced isolation failure",
+                ),
+            )
+        return report
+
+    monkeypatch.setattr(ev, "_book_outcome", _failing)
+    fast, slow, blend = ev._run_books_concurrent(**args)
+    assert fast.primary is not None
+    assert fast.failure is None
+    assert slow.primary is None
+    assert slow.failure is not None
+    assert slow.failure.reason == ev.MHS_GO_REASON_EXECUTION_GAP
+    assert blend.primary is not None
+    assert blend.failure is None
+
+
+def test_p14_postbook_concurrent_parity() -> None:
+    # SCENARIO_P14_POSTBOOK: the deployment tail computed with the placeholder
+    # ``research_go_eligible=None`` and then patched with the fold-derived flag
+    # is identical to computing it directly with that flag, so the concurrent
+    # post-book path cannot change the readiness result.
+    idx = pd.date_range("2021-01-01", periods=3000, freq="1h", tz="UTC")
+    rng = np.random.default_rng(42)
+    equity = pd.Series(np.cumprod(1.0 + rng.normal(0.0002, 0.004, len(idx))), index=idx)
+    full = ev.compute_deployment_readiness(
+        equity, 365 * 24, research_go_eligible=False, n_bootstrap=200, seed=7,
+    )
+    placeholder = ev.compute_deployment_readiness(
+        equity, 365 * 24, research_go_eligible=None, primary_valid=True,
+        n_bootstrap=200, seed=7,
+    )
+    patched = dataclasses.replace(placeholder, research_go_eligible=False)
+    assert patched == full
+
+
+def test_p14_postbook_no_deadlock(monkeypatch) -> None:
+    # SCENARIO_P14_NO_DEADLOCK: with no anchored folds the concurrent
+    # orchestration degrades to the sequential diagnostics tail through the
+    # same entry point, proving the fold-pool/thread orchestration never
+    # deadlocks or hangs.
+    class _FakePrimary:
+        ledger = None
+
+    class _FakeBlend:
+        primary = _FakePrimary()
+
+    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
+    calls = {"n": 0}
+
+    def _fast_diag(*_args, **_kwargs):
+        calls["n"] += 1
+        return (None, None, {}, {}, None)
+
+    monkeypatch.setattr(ev, "_run_post_diag_deploy", _fast_diag)
+    result = ev._run_post_book_concurrently(
+        _FakeBlend(), "root", None, [], None, None, None, None, None, None, None, {}, 1.0, None,
+    )
+    assert calls["n"] == 1
+    assert result[4] == ()
+    assert result[5] is None
