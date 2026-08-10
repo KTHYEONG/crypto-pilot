@@ -24,7 +24,9 @@ from src.research.technical_experts.cross_sectional import XsCompositeSpec, run_
 # (OHLCV_IMMEDIATE_TAKER) UNKNOWN_TERMINATION forced exit (spec §2.17/§7.5).
 TERMINATION_STRESS_PENALTY_BPS = 50.0
 
-_ExecutionBound = Literal["OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER"]
+_ExecutionBound = Literal[
+    "OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"
+]
 _MarkSource = Literal["MARK_PRICE", "OHLCV_CLOSE_FALLBACK"]
 
 _ExecutionGapCode = Literal[
@@ -71,6 +73,86 @@ def passive_fill_shortfall_bps(
         return float(spec.maker_fee_bps)
     move_bps = side * (timeout_price / decision_price - 1.0) * 1e4
     return float(move_bps + spec.taker_fee_bps + spec.taker_slippage_bps)
+
+
+def laddered_fill_schedule(
+    decision_price: float,
+    side: int,
+    adverse: np.ndarray,
+    closes: np.ndarray,
+    tranche_count: int,
+    spec: ExecutionSpec,
+    require_strict: bool,
+) -> list[tuple[int, float, float, float]]:
+    """Split one order into an escalating ladder of ``tranche_count`` limit sub-windows.
+
+    The OHLCV execution window ``[0, len(adverse))`` is split into
+    ``tranche_count`` equal-width sub-windows (the last absorbs any remainder
+    bars); each sub-window reuses the existing binary trade-through predicate
+    (``require_strict`` selects the strict ``<``/``>`` vs the touch ``<=``/``>=``
+    comparison operators used at the inline STRICT/TOUCH branches) against its
+    own limit price. Tranche 1 rests at ``decision_price``; tranche ``k > 1``
+    reprices linearly toward the market by ``side * (k-1)/tranche_count`` of the
+    gap to the previous sub-window's closing anchor ``closes[sub_end_{k-1}]``
+    (the boundary bar's close, matching the codebase's timeout-close
+    convention). A tranche whose sub-window trades through fills its accumulated
+    carried share at its own limit price with the maker fee; only the final
+    tranche, if it never trades through, converts its remaining share to an
+    immediate market fill at the final sub-window's close with the all-in taker
+    cost. Non-final tranches that fail carry their share forward without a
+    market fallback.
+
+    ``closes`` must be at least as long as ``adverse`` (the production callers
+    pass one extra boundary close at index ``len(adverse)``); the market
+    fallback uses that boundary close when present so ``tranche_count == 1``
+    reproduces the pre-existing STRICT/TOUCH single-fill fallback exactly.
+    Returns ``(relative_fill_position, fill_price, fee_bps, qty_fraction)``
+    tuples in fill order with ``qty_fraction`` summing to 1.0.
+    """
+    if tranche_count < 1:
+        raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
+    if side not in (-1, 1):
+        raise ValueError(f"side must be -1 or +1, got {side}")
+    if decision_price <= 0:
+        raise ValueError("decision_price must be > 0")
+    n = len(adverse)
+    if n == 0:
+        raise ValueError("adverse must not be empty")
+    if not np.isfinite(adverse).all():
+        raise ValueError("adverse must be finite")
+    if len(closes) < n:
+        raise ValueError("closes must be at least as long as adverse")
+
+    schedule: list[tuple[int, float, float, float]] = []
+    carried = 0.0
+    own_share = 1.0 / tranche_count
+    for k in range(1, tranche_count + 1):
+        sub_start = (k - 1) * n // tranche_count
+        sub_end = k * n // tranche_count if k < tranche_count else n
+        if k == 1:
+            limit_price = decision_price
+        else:
+            anchor = float(closes[sub_start])
+            limit_price = decision_price + side * (k - 1) / tranche_count * (anchor - decision_price)
+        sub = adverse[sub_start:sub_end]
+        if side == 1:
+            crossed = (sub < limit_price) if require_strict else (sub <= limit_price)
+        else:
+            crossed = (sub > limit_price) if require_strict else (sub >= limit_price)
+        if crossed.any():
+            hit = int(np.argmax(crossed))
+            schedule.append(
+                (sub_start + hit, float(limit_price), float(spec.maker_fee_bps), carried + own_share)
+            )
+            carried = 0.0
+        else:
+            carried += own_share
+    if carried > 0.0:
+        fallback_close = float(closes[min(n, len(closes) - 1)])
+        schedule.append(
+            (n, fallback_close, float(spec.taker_fee_bps + spec.taker_slippage_bps), carried)
+        )
+    return schedule
 
 
 def bar_funding_panel(
@@ -457,7 +539,9 @@ def strategy_aware_execution_replay(
     """
     if initial_equity <= 0:
         raise DataIntegrityError("initial_equity must be > 0")
-    if execution_bound not in ("OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER"):
+    if execution_bound not in (
+        "OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"
+    ):
         raise ValueError(f"unknown execution_bound '{execution_bound}'")
     if len(target_weights) != len(signal_available_at):
         raise DataIntegrityError("signal_available_at must align with target_weights")
@@ -624,6 +708,110 @@ def strategy_aware_execution_replay(
                 fee_bps = spec.taker_fee_bps + spec.taker_slippage_bps
                 reason = "timeout_taker"
             else:
+                if execution_bound == "OHLCV_LADDERED_PROXY":
+                    if timeout_pos <= spos:
+                        termination_counts["MISSING_DATA"] += 1
+                        data_gaps.append(
+                            ExecutionDataGap(
+                                code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                timestamp=minute_grid[spos], decision_time=decision_time,
+                                signal_time=signal_time, execution_bound=execution_bound,
+                            )
+                        )
+                        continue
+                    adverse = (
+                        lows_values[spos:timeout_pos, col]
+                        if side == 1
+                        else highs_values[spos:timeout_pos, col]
+                    )
+                    if not np.isfinite(adverse).all():
+                        termination_counts["MISSING_DATA"] += 1
+                        first_bad = spos + int(np.argmax(~np.isfinite(adverse)))
+                        data_gaps.append(
+                            ExecutionDataGap(
+                                code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                timestamp=minute_grid[first_bad], decision_time=decision_time,
+                                signal_time=signal_time, execution_bound=execution_bound,
+                            )
+                        )
+                        continue
+                    for rel_pos, tranche_price, tranche_fee_bps, qty_fraction in laddered_fill_schedule(
+                        decision_price, side, adverse,
+                        closes_values[spos:timeout_pos + 1, col],
+                        spec.ladder_tranches, spec, True,
+                    ):
+                        fill_pos = spos + rel_pos
+                        if rel_pos == len(adverse):
+                            if timeout_pos >= n_grid or grid_ns[timeout_pos] != timeout_ns:
+                                termination_counts["MISSING_DATA"] += 1
+                                data_gaps.append(
+                                    ExecutionDataGap(
+                                        code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                        timestamp=minute_grid[spos], decision_time=decision_time,
+                                        signal_time=signal_time, execution_bound=execution_bound,
+                                    )
+                                )
+                                continue
+                            timeout_close = float(closes_values[timeout_pos, col])
+                            if not np.isfinite(timeout_close):
+                                termination_counts["MISSING_DATA"] += 1
+                                data_gaps.append(
+                                    ExecutionDataGap(
+                                        code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                        timestamp=minute_grid[timeout_pos], decision_time=decision_time,
+                                        signal_time=signal_time, execution_bound=execution_bound,
+                                    )
+                                )
+                                continue
+                            unfilled_count += 1
+                            fallback_count += 1
+                            reason = "timeout_taker"
+                        else:
+                            fill_count += 1
+                            reason = "passive_fill"
+                        fill_price = float(tranche_price)
+                        fee_bps = float(tranche_fee_bps)
+                        qty = net_units * float(qty_fraction)
+                        if reason == "passive_fill":
+                            shortfall = side * (fill_price / decision_price - 1.0) * 1e4 + spec.maker_fee_bps
+                        else:
+                            shortfall = (
+                                side * (fill_price / decision_price - 1.0) * 1e4
+                                + spec.taker_fee_bps + spec.taker_slippage_bps
+                            )
+                        shortfalls.append(shortfall)
+                        fill_time = minute_grid[fill_pos]
+                        submit_time = minute_grid[submit_pos]
+                        mark_price = float(marks_values[fill_pos, col])
+                        if np.isfinite(last_prices_arr[col]):
+                            if np.isfinite(mark_price):
+                                cash += units_arr[col] * (mark_price - last_prices_arr[col])
+                                last_prices_arr[col] = mark_price
+                        elif np.isfinite(mark_price):
+                            last_prices_arr[col] = mark_price
+                        cash -= qty * fill_price
+                        fee = fee_bps / 1e4 * abs(qty) * fill_price
+                        cash -= fee
+                        units_arr[col] += qty
+                        pre_trade_equity = _equity_at()
+                        fill_records.append(
+                            {
+                                "timestamp": fill_time,
+                                "symbol": sym,
+                                "quantity_delta": qty,
+                                "fill_price": fill_price,
+                                "fee_bps": fee_bps,
+                                "reason": reason,
+                                "pre_trade_equity": pre_trade_equity,
+                            }
+                        )
+                        fill_times.append(fill_time)
+                        submit_times.append(submit_time)
+                        units_after_events.append((fill_time, units_arr.copy()))
+                        notional_after_events.append(
+                            (fill_time, units_arr * marks_values[fill_pos, :])
+                        )
+                    continue
                 if timeout_pos <= spos:
                     termination_counts["MISSING_DATA"] += 1
                     data_gaps.append(
@@ -923,7 +1111,9 @@ class _BoundExecutionReplayAccumulator:
     ) -> None:
         if initial_equity <= 0:
             raise DataIntegrityError("initial_equity must be > 0")
-        if execution_bound not in ("OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER"):
+        if execution_bound not in (
+            "OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"
+        ):
             raise ValueError(f"unknown execution_bound '{execution_bound}'")
         self.execution_bound = execution_bound
         self.require_strict = execution_bound == "OHLCV_STRICT_PROXY"
@@ -1142,6 +1332,110 @@ class _BoundExecutionReplayAccumulator:
                     fee_bps = self.spec.taker_fee_bps + self.spec.taker_slippage_bps
                     reason = "timeout_taker"
                 else:
+                    if self.execution_bound == "OHLCV_LADDERED_PROXY":
+                        if timeout_pos <= spos:
+                            self.termination_counts["MISSING_DATA"] += 1
+                            self.data_gaps.append(
+                                ExecutionDataGap(
+                                    code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                    timestamp=grid[spos], decision_time=decision_time,
+                                    signal_time=signal_time, execution_bound=self.execution_bound,
+                                )
+                            )
+                            continue
+                        adverse = (
+                            lows_values[spos:timeout_pos, col]
+                            if side == 1
+                            else highs_values[spos:timeout_pos, col]
+                        )
+                        if not np.isfinite(adverse).all():
+                            self.termination_counts["MISSING_DATA"] += 1
+                            first_bad = spos + int(np.argmax(~np.isfinite(adverse)))
+                            self.data_gaps.append(
+                                ExecutionDataGap(
+                                    code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                    timestamp=grid[first_bad], decision_time=decision_time,
+                                    signal_time=signal_time, execution_bound=self.execution_bound,
+                                )
+                            )
+                            continue
+                        for rel_pos, tranche_price, tranche_fee_bps, qty_fraction in laddered_fill_schedule(
+                            decision_price, side, adverse,
+                            closes_values[spos:timeout_pos + 1, col],
+                            self.spec.ladder_tranches, self.spec, True,
+                        ):
+                            fill_pos = spos + rel_pos
+                            if rel_pos == len(adverse):
+                                if timeout_pos >= n_grid or grid_ns[timeout_pos] != timeout_ns:
+                                    self.termination_counts["MISSING_DATA"] += 1
+                                    self.data_gaps.append(
+                                        ExecutionDataGap(
+                                            code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                            timestamp=grid[spos], decision_time=decision_time,
+                                            signal_time=signal_time, execution_bound=self.execution_bound,
+                                        )
+                                    )
+                                    continue
+                                timeout_close = float(closes_values[timeout_pos, col])
+                                if not np.isfinite(timeout_close):
+                                    self.termination_counts["MISSING_DATA"] += 1
+                                    self.data_gaps.append(
+                                        ExecutionDataGap(
+                                            code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                            timestamp=grid[timeout_pos], decision_time=decision_time,
+                                            signal_time=signal_time, execution_bound=self.execution_bound,
+                                        )
+                                    )
+                                    continue
+                                self.unfilled_count += 1
+                                self.fallback_count += 1
+                                reason = "timeout_taker"
+                            else:
+                                self.fill_count += 1
+                                reason = "passive_fill"
+                            fill_price = float(tranche_price)
+                            fee_bps = float(tranche_fee_bps)
+                            qty = net_units * float(qty_fraction)
+                            if reason == "passive_fill":
+                                shortfall = (
+                                    side * (fill_price / decision_price - 1.0) * 1e4
+                                    + self.spec.maker_fee_bps
+                                )
+                            else:
+                                shortfall = (
+                                    side * (fill_price / decision_price - 1.0) * 1e4
+                                    + self.spec.taker_fee_bps + self.spec.taker_slippage_bps
+                                )
+                            self.shortfalls.append(shortfall)
+                            fill_time = grid[fill_pos]
+                            submit_time = grid[submit_pos]
+                            mark_price = float(marks_values[fill_pos, col])
+                            if np.isfinite(self.last_prices_arr[gcol]):
+                                if np.isfinite(mark_price):
+                                    self.cash += self.units_arr[gcol] * (mark_price - self.last_prices_arr[gcol])
+                                    self.last_prices_arr[gcol] = mark_price
+                            elif np.isfinite(mark_price):
+                                self.last_prices_arr[gcol] = mark_price
+                            self.cash -= qty * fill_price
+                            fee = fee_bps / 1e4 * abs(qty) * fill_price
+                            self.cash -= fee
+                            self.units_arr[gcol] += qty
+                            pre_trade_equity = self._equity_at(gpos)
+                            self.fill_ts.append(fill_time)
+                            self.fill_symbol.append(sym)
+                            self.fill_qty.append(qty)
+                            self.fill_price.append(fill_price)
+                            self.fill_fee_bps.append(fee_bps)
+                            self.fill_reason.append(reason)
+                            self.fill_pre_trade_equity.append(pre_trade_equity)
+                            self.fill_times.append(fill_time)
+                            self.submit_times.append(submit_time)
+                            if self.retain_event_snapshots:
+                                marks_row = np.full(n_cols, np.nan, dtype="float64")
+                                marks_row[gpos] = marks_values[fill_pos]
+                                self.units_after_events.append((fill_time, self.units_arr.copy()))
+                                self.notional_after_events.append((fill_time, self.units_arr * marks_row))
+                        continue
                     if timeout_pos <= spos:
                         self.termination_counts["MISSING_DATA"] += 1
                         self.data_gaps.append(
