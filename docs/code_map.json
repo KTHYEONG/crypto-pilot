@@ -638,5 +638,8 @@
   },
   "src/mhs/panel.py": {
     "testing": "tests/unit/mhs/test_panel.py"
+  },
+  "src/mhs/evaluation.py": {
+    "testing": "tests/unit/mhs/test_evaluation.py"
   }
 }
