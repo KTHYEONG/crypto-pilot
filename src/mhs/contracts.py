@@ -100,9 +100,21 @@ MEASURED_EXECUTION_COST_TIERS_BPS: dict[str, float] = {
     "stress": 6.07,
 }
 
+# Measured admission (docs/results/mhs_horizon_diagnostic.json
+# books.fast_reversal.prescreen): fast_reversal's 446-symbol prescreen net
+# t-stat stays below the |t| >= 2.0 admission floor across every cost tier,
+# from the 0.0bps pre-cost bound (net_t=+0.577) through the 2.64bps optimistic
+# tier (net_t=-0.150, sign already unstable) to the 6.07bps stress tier
+# (net_t=-1.094). slow_momentum clears |t| >= 2.0 pre-cost (net_t=+1.859) and
+# stays above the floor through the 2.64bps tier (net_t=+1.634), with the
+# pre-registered momentum sign throughout.
+# fast_reversal keeps its signal/prescreen/phase computation for re-measurement
+# but carries zero capital in the Research-GO blend. One-time evidence-based
+# revision (same governance pattern as MEASURED_EXECUTION_COST_TIERS_BPS), not
+# a performance-selected fit.
 PHASE_1_BOOK_BLEND_WEIGHTS: dict[str, float] = {
-    "fast_reversal": 0.5,
-    "slow_momentum": 0.5,
+    "fast_reversal": 0.0,
+    "slow_momentum": 1.0,
 }
 
 _FAST_BAND = HorizonBand(name="fast_reversal", horizons_hours=(48,), sign=-1)
