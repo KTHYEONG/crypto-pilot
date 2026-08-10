@@ -982,8 +982,14 @@ class _BoundExecutionReplayAccumulator:
         self.full_grid_end: pd.Timestamp = first.minute_grid[-1]
         self._t0 = time.perf_counter()
 
-    def _equity_at(self) -> float:
-        return self.cash + float(np.sum(self.units_arr * np.nan_to_num(self.last_prices_arr, nan=0.0)))
+    def _equity_at(self, gpos: np.ndarray | None = None) -> float:
+        if gpos is None:
+            return self.cash + float(
+                np.sum(self.units_arr * np.nan_to_num(self.last_prices_arr, nan=0.0))
+            )
+        return self.cash + float(
+            np.sum(self.units_arr[gpos] * np.nan_to_num(self.last_prices_arr[gpos], nan=0.0))
+        )
 
     def consume(self, w: ExecutionReplayWindow) -> None:
         columns = self.columns
@@ -1057,12 +1063,18 @@ class _BoundExecutionReplayAccumulator:
                 )
             self.last_time_ns = target_ns
 
+        # Per-window last-finite-close index table: ``last_close_idx[i, col]`` is
+        # the largest ``j <= i`` with ``close_finite[j, col]`` True, else -1.
+        # This makes the scalar ``_decision_price`` backward scan a single
+        # vectorised lookup (bit-identical: it returns the same last finite
+        # close position the while-loop would stop at).
+        close_row = np.where(close_finite, np.arange(n_grid)[:, None], -1)
+        last_close_idx = np.maximum.accumulate(close_row, axis=0)
+
         def _decision_price(col: int, on_grid: bool, dpos: int, spos: int) -> float | None:
             if on_grid and mark_valid[dpos, col]:
                 return float(marks_values[dpos, col])
-            j = spos - 1
-            while j >= 0 and not close_finite[j, col]:
-                j -= 1
+            j = int(last_close_idx[spos - 1, col]) if spos > 0 else -1
             if j >= 0 and mark_valid[j, col]:
                 return float(marks_values[j, col])
             sym = local_cols[col]
@@ -1089,7 +1101,7 @@ class _BoundExecutionReplayAccumulator:
             dpos = int(dpos_all[i])
             on_grid = bool(on_grid_all[i])
             _advance(dns, dpos, on_grid)
-            equity = self._equity_at()
+            equity = self._equity_at(gpos)
             row = target_values[i]
             spos = int(spos_all[i])
             signal_time = w.signal_available_at[i]
@@ -1215,7 +1227,7 @@ class _BoundExecutionReplayAccumulator:
                 self.cash -= fee
                 self.units_arr[gcol] += net_units
                 if reason in ("passive_fill", "timeout_taker"):
-                    pre_trade_equity = self._equity_at()
+                    pre_trade_equity = self._equity_at(gpos)
                     self.fill_ts.append(fill_time)
                     self.fill_symbol.append(sym)
                     self.fill_qty.append(net_units)
@@ -1237,97 +1249,141 @@ class _BoundExecutionReplayAccumulator:
             raise DataIntegrityError("execution windows must not leave an uncovered grid gap")
         chunk_len = n_grid - p0
         if chunk_len:
-            delta_pos: list[list[int]] = [[] for _ in range(n_local)]
-            delta_qty: list[list[float]] = [[] for _ in range(n_local)]
-            fill_flow = np.zeros(n_grid, dtype="float64")
-            fee_by_ts = np.zeros(n_grid, dtype="float64")
-            turnover_terms: list[tuple[int, float, float]] = []
-            for k in range(fill_start, len(self.fill_ts)):
-                ts = self.fill_ts[k]
-                ts_ns = int(ts.value)
-                pos = int(np.searchsorted(grid_ns, ts_ns, side="left"))
-                if pos >= n_grid or grid_ns[pos] != ts_ns:
+            # Vectorized fill scatter over the (grid, symbol) plane: the scalar
+            # per-fill ``local_cols.index`` / ``searchsorted`` / list append is
+            # replaced by one searchsorted + one add.at over the window's fills.
+            sym_to_local = {s: j for j, s in enumerate(local_cols)}
+            n_fill = len(self.fill_ts) - fill_start
+            turnover_pos_arr: np.ndarray
+            turnover_qty_arr: np.ndarray
+            turnover_price_arr: np.ndarray
+            if n_fill:
+                wf_ts = np.asarray(
+                    [int(ts.value) for ts in self.fill_ts[fill_start:]], dtype="int64",
+                )
+                wf_pos = np.searchsorted(grid_ns, wf_ts, side="left")
+                wf_exact = np.minimum(wf_pos, n_grid - 1)
+                if (
+                    np.any(wf_pos >= n_grid)
+                    or np.any(grid_ns[wf_exact] != wf_ts)
+                ):
                     raise DataIntegrityError("windowed fills must occur on the window minute grid")
-                j = local_cols.index(self.fill_symbol[k])
-                qty = self.fill_qty[k]
-                price = self.fill_price[k]
-                fee_bps = self.fill_fee_bps[k]
-                fee = fee_bps / 1e4 * abs(qty) * price
-                delta_pos[j].append(pos)
-                delta_qty[j].append(qty)
-                fill_flow[pos] += -(qty * price + fee)
-                fee_by_ts[pos] += fee
-                turnover_terms.append((pos, qty, price))
-
-            mtm_arr = np.zeros(n_grid, dtype="float64")
-            funding_arr = np.zeros(n_grid, dtype="float64")
-            notional_arr = np.zeros(n_grid, dtype="float64")
-            notional_before_arr = np.zeros(n_grid, dtype="float64")
-            grid_idx = np.arange(n_grid)
-            kept_region = grid_idx >= p0
-            for j in range(n_local):
-                m = marks_values[:, j]
-                f = funding_matrix[:, j]
-                sym_finite = np.isfinite(m)
-                d = np.zeros(n_grid, dtype="float64")
-                np.add.at(
-                    d,
-                    np.asarray(delta_pos[j], dtype=np.intp),
-                    np.asarray(delta_qty[j], dtype="float64"),
+                wf_j = np.asarray(
+                    [sym_to_local[s] for s in self.fill_symbol[fill_start:]],
+                    dtype=np.intp,
                 )
-                units_state = np.cumsum(d) + self.ledger_units[gpos[j]]
-                units_before = np.zeros(n_grid, dtype="float64")
-                units_before[0] = self.ledger_units[gpos[j]]
-                units_before[1:] = units_state[:-1]
-
-                m_ff = np.empty(n_grid, dtype="float64")
-                carry = float(self.last_valid_mark[gpos[j]])
-                for i in range(n_grid):
-                    if sym_finite[i]:
-                        m_ff[i] = m[i]
-                        carry = m[i]
-                    else:
-                        m_ff[i] = carry
-                self.last_valid_mark[gpos[j]] = carry
-                valuation = np.where(
-                    sym_finite | (units_state != 0.0),
-                    np.where(sym_finite, m, m_ff),
-                    0.0,
+                wf_qty = np.asarray(self.fill_qty[fill_start:], dtype="float64")
+                wf_price = np.asarray(self.fill_price[fill_start:], dtype="float64")
+                wf_fee = np.asarray(self.fill_fee_bps[fill_start:], dtype="float64")
+                wf_fee_amt = wf_fee / 1e4 * np.abs(wf_qty) * wf_price
+                d_flat = np.ravel_multi_index(
+                    (wf_pos, wf_j), (n_grid, n_local),
                 )
+                d_matrix = np.zeros(n_grid * n_local, dtype="float64")
+                np.add.at(d_matrix, d_flat, wf_qty)
+                d_matrix = d_matrix.reshape((n_grid, n_local))
+                fill_flow = np.zeros(n_grid, dtype="float64")
+                fee_by_ts = np.zeros(n_grid, dtype="float64")
+                np.add.at(fill_flow, wf_pos, -(wf_qty * wf_price + wf_fee_amt))
+                np.add.at(fee_by_ts, wf_pos, wf_fee_amt)
+                turnover_pos_arr = wf_pos
+                turnover_qty_arr = wf_qty
+                turnover_price_arr = wf_price
+            else:
+                d_matrix = np.zeros((n_grid, n_local), dtype="float64")
+                fill_flow = np.zeros(n_grid, dtype="float64")
+                fee_by_ts = np.zeros(n_grid, dtype="float64")
+                turnover_pos_arr = np.empty(0, dtype=np.intp)
+                turnover_qty_arr = np.empty(0, dtype="float64")
+                turnover_price_arr = np.empty(0, dtype="float64")
 
-                held = units_before != 0.0
-                joint = np.zeros(n_grid, dtype=bool)
-                joint[1:] = sym_finite[1:] & sym_finite[:-1]
-                # Held-gap provenance is judged only on this window's kept chunk
-                # region: bars before p0 belong to the previous chunk's ledger,
-                # where the carried state (not this window's frames) is correct.
-                held_mark_trigger = (held & ~joint) & kept_region
-                if np.any(held_mark_trigger):
-                    self.ledger_valid = False
-                    self.invalid_reasons.add("MISSING_DATA")
-                    if self.first_held_mark is None:
-                        trigger_pos = int(kept_region[held & ~joint].argmax())
-                        self.first_held_mark = (local_cols[j], grid[p0 + trigger_pos])
-                delta_price = np.zeros(n_grid, dtype="float64")
-                delta_price[1:] = m[1:] - m[:-1]
-                mtm_contrib = np.zeros(n_grid, dtype="float64")
-                mtm_contrib[1:] = np.where(joint[1:], units_before[1:] * delta_price[1:], 0.0)
-                mtm_arr += mtm_contrib
+            # Vectorized (grid, symbol) ledger pass.  Each column's arithmetic is
+            # bit-identical to the scalar per-symbol loop; only the iteration
+            # order changes (column-major collapse into one 2-D broadcast).
+            sym_finite = np.isfinite(marks_values)
+            units_state = np.cumsum(d_matrix, axis=0) + self.ledger_units[gpos][None, :]
+            units_before = np.zeros_like(units_state)
+            units_before[0] = self.ledger_units[gpos]
+            units_before[1:] = units_state[:-1]
 
-                charged = f * units_before * m
-                charged = np.where(sym_finite, charged, 0.0)
-                held_funding_trigger = (~sym_finite & held & (f != 0.0)) & kept_region
-                if np.any(held_funding_trigger):
-                    self.ledger_valid = False
-                    self.invalid_reasons.add("MISSING_DATA")
-                    if self.first_held_funding is None:
-                        trigger_pos = int(kept_region[~sym_finite & held & (f != 0.0)].argmax())
-                        self.first_held_funding = (local_cols[j], grid[p0 + trigger_pos])
-                funding_arr += charged
+            # Vectorized forward-fill of the last valid mark per symbol
+            # (replaces the ``for i in range(n_grid)`` carry loop).
+            last_finite_idx = np.maximum.accumulate(
+                np.where(sym_finite, np.arange(n_grid)[:, None], -1), axis=0,
+            )
+            m_ff = marks_values[last_finite_idx, np.arange(n_local)[None, :]]
+            carry_row = np.asarray(self.last_valid_mark[gpos], dtype="float64")[None, :]
+            m_ff = np.where(sym_finite, marks_values, np.where(last_finite_idx >= 0, m_ff, carry_row))
+            self.last_valid_mark[gpos] = m_ff[-1]
 
-                notional_arr += units_state * valuation
-                notional_before_arr += units_before * valuation
-                self.ledger_units[gpos[j]] = units_state[-1]
+            valuation = np.where(
+                sym_finite | (units_state != 0.0),
+                np.where(sym_finite, marks_values, m_ff),
+                0.0,
+            )
+
+            held = units_before != 0.0
+            joint = np.zeros_like(sym_finite, dtype=bool)
+            joint[1:] = sym_finite[1:] & sym_finite[:-1]
+            kept_region = np.arange(n_grid)[:, None] >= p0
+            # Held-gap provenance is judged only on this window's kept chunk
+            # region: bars before p0 belong to the previous chunk's ledger,
+            # where the carried state (not this window's frames) is correct.
+            held_mark_trigger = (held & ~joint) & kept_region
+            if held_mark_trigger.any():
+                self.ledger_valid = False
+                self.invalid_reasons.add("MISSING_DATA")
+                if self.first_held_mark is None:
+                    col_hit = held_mark_trigger.any(axis=0)
+                    j0 = int(np.argmax(col_hit))
+                    mask_col = (held & ~joint)[:, j0]
+                    trigger_pos = int(np.argmax(held_mark_trigger[:, j0][mask_col]))
+                    self.first_held_mark = (local_cols[j0], grid[p0 + trigger_pos])
+
+            delta_price = np.zeros_like(marks_values)
+            delta_price[1:] = marks_values[1:] - marks_values[:-1]
+            mtm_contrib = np.zeros_like(marks_values)
+            mtm_contrib[1:] = np.where(
+                joint[1:], units_before[1:] * delta_price[1:], 0.0,
+            )
+            # Sequential-order column sum (cumsum's last column), bit-identical
+            # to the scalar ``arr += col`` accumulation order.  An empty roster
+            # (n_local == 0) yields a zero contribution series.
+            mtm_arr = (
+                mtm_contrib.cumsum(axis=1)[:, -1]
+                if n_local
+                else np.zeros(n_grid, dtype="float64")
+            )
+
+            charged = funding_matrix * units_before * marks_values
+            charged = np.where(sym_finite, charged, 0.0)
+            held_funding_trigger = (~sym_finite & held & (funding_matrix != 0.0)) & kept_region
+            if held_funding_trigger.any():
+                self.ledger_valid = False
+                self.invalid_reasons.add("MISSING_DATA")
+                if self.first_held_funding is None:
+                    col_hit = held_funding_trigger.any(axis=0)
+                    j0 = int(np.argmax(col_hit))
+                    mask_col = (~sym_finite & held & (funding_matrix != 0.0))[:, j0]
+                    trigger_pos = int(np.argmax(held_funding_trigger[:, j0][mask_col]))
+                    self.first_held_funding = (local_cols[j0], grid[p0 + trigger_pos])
+            funding_arr = (
+                charged.cumsum(axis=1)[:, -1]
+                if n_local
+                else np.zeros(n_grid, dtype="float64")
+            )
+
+            notional_arr = (
+                (units_state * valuation).cumsum(axis=1)[:, -1]
+                if n_local
+                else np.zeros(n_grid, dtype="float64")
+            )
+            notional_before_arr = (
+                (units_before * valuation).cumsum(axis=1)[:, -1]
+                if n_local
+                else np.zeros(n_grid, dtype="float64")
+            )
+            self.ledger_units[gpos] = units_state[-1]
 
             # The cash cumsum starts at the chunk's first bar (p0): positions
             # [0, p0) belong to the previous chunk's ledger and must not be
@@ -1339,11 +1395,16 @@ class _BoundExecutionReplayAccumulator:
             cash_pre_fill[1:] = cash_after[:-1] - funding_arr[p0 + 1 :]
             equity_arr = cash_after + notional_arr[p0:]
             turnover_arr = np.zeros(chunk_len, dtype="float64")
-            for pos, qty, price in turnover_terms:
-                pre_trade_equity = cash_pre_fill[pos - p0] + notional_before_arr[pos]
-                if not np.isfinite(pre_trade_equity) or pre_trade_equity <= 0:
+            if len(turnover_pos_arr):
+                pre_trade_equity = (
+                    cash_pre_fill[turnover_pos_arr - p0] + notional_before_arr[turnover_pos_arr]
+                )
+                if not np.isfinite(pre_trade_equity).all() or (pre_trade_equity <= 0).any():
                     raise DataIntegrityError("pre-trade equity must be positive and finite")
-                turnover_arr[pos - p0] += abs(qty * price) / pre_trade_equity
+                np.add.at(
+                    turnover_arr, turnover_pos_arr - p0,
+                    np.abs(turnover_qty_arr * turnover_price_arr) / pre_trade_equity,
+                )
             if not np.isfinite(equity_arr).all() or (equity_arr <= 0).any():
                 raise DataIntegrityError("simulated inventory equity must be finite and strictly positive")
             self.equity_chunks.append(equity_arr)
