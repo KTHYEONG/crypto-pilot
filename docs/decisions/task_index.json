@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_OUTPUT_TIERING",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_OUTPUT_TIERING",
+      "domain": "quant",
+      "title": "MHS Horizon Diagnostic Output Tiering",
+      "why": "MHS persistence wrote 1 JSON + 5 lossless Parquet (~124MB) per run; all blanket-gitignored, blocking version-controlled research evidence",
+      "resolution": "persist_mhs_horizon_diagnostic_report gains MhsOutputTier (COMPACT/FULL). COMPACT default: git-tracked stripped summary JSON (~12KB) + daily-resampled float32 daily_ledger.parquet (~0.6-0.8MB). FULL opt-in: pre-tiering 5-category unified Parquet + checksummed JSON under _full/ (gitignored). CLI --output-tier flag added",
+      "impact": "COMPACT ~50x smaller than FULL ledger (42MB->0.8MB); research evidence (daily equity, fold PnL, GO gate) now diffable in git; FULL preserved for deep audit; existing FULL path tests updated to tier=FULL"
+    },
+    {
       "task_id": "TASK_MHS_TOUCH_PROXY_FILL_MEASUREMENT",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_TOUCH_PROXY_FILL_MEASUREMENT",

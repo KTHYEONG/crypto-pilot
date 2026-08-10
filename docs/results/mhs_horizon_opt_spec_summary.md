@@ -1,9 +1,9 @@
 # MHS Horizon Diagnostic Quantitative Performance & Resource Report
 
-- **Document Date**: 2026-08-09
+- **Document Date**: 2026-08-10 (2026-08-10 재실행 결과 기준 재검증·수정)
 - **Registered ADR**: `ADR_20260809_MHS_HORIZON_OPT_SPEC`
 - **Domain**: Research / MHS (Multi-Horizon Market State)
-- **Source Diagnostic File**: [`docs/results/mhs_horizon_diagnostic.json`](file:///home/kth/my_coin_traider/docs/results/mhs_horizon_diagnostic.json)
+- **Source Diagnostic File**: [`docs/results/mhs_horizon_diagnostic.json`](file:///home/kth/my_coin_traider/docs/results/mhs_horizon_diagnostic.json) (compact) · 상세 정량 수치(체결수/슬리피지)는 [`_full/report.json`](file:///home/kth/my_coin_traider/docs/results/mhs_horizon_diagnostic_artifacts/_full/report.json)
 - **Execution Status**: `COMPLETE` (전체 5개년 파이프라인 100% 정상 완주)
 
 ---
@@ -23,16 +23,18 @@
 
 ## 2. Resource & RSS Budget Metrics
 
-5개년(2021-2025) 정밀 백테스트 시 프로세스 최고 메모리(Peak RSS) 사용량 현황:
+5개년(2021-2025) 정밀 백테스트 시 프로세스 메모리(Observed RSS / Peak RSS) 사용량 현황 (2026-08-10 재실행 기준):
 
-| Stage / Replay Window | Peak RSS Observed | Budget Limit | Status |
-| :--- | :--- | :--- | :--- |
-| **`replay_fast_reversal`** | **2,575,036,416 bytes (2.575 GB)** | 4.000 GB | ✅ PASS |
-| **`replay_slow_momentum`** | **2,575,036,416 bytes (2.575 GB)** | 4.000 GB | ✅ PASS |
-| **`replay_blend`** | **2,575,036,416 bytes (2.575 GB)** | 4.000 GB | ✅ PASS |
-| **`anchored_fold_0` (2023)** | **2,575,036,416 bytes (2.575 GB)** | 4.000 GB | ✅ PASS |
-| **`anchored_fold_1` (2024)** | **2,575,036,416 bytes (2.575 GB)** | 4.000 GB | ✅ PASS |
-| **`anchored_fold_2` (2025)** | **2,575,036,416 bytes (2.575 GB)** | 4.000 GB | ✅ PASS |
+| Stage / Replay Window | Observed RSS | Peak RSS | Soft Budget | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **`replay_fast_reversal`** | **5.426 GB** | **6.020 GB** | 8.000 GB | ✅ PASS |
+| **`replay_slow_momentum`** | **4.823 GB** | **5.486 GB** | 8.000 GB | ✅ PASS |
+| **`replay_blend`** | **5.282 GB** | **5.740 GB** | 8.000 GB | ✅ PASS |
+| **`anchored_fold_0` (2023)** | **4.715 GB** | **6.020 GB** | 8.000 GB | ✅ PASS |
+| **`anchored_fold_1` (2024)** | **4.715 GB** | **6.020 GB** | 8.000 GB | ✅ PASS |
+| **`anchored_fold_2` (2025)** | **4.715 GB** | **6.020 GB** | 8.000 GB | ✅ PASS |
+
+> RSS는 실행 환경에 따라 변동됩니다. 2026-08-10 실행의 전 구간 최고 Peak RSS는 **6.020 GB**로, ADR에 반영된 소프트 예산(4→8 GB) 내에서 정상 완주했습니다.
 
 ---
 
@@ -48,8 +50,8 @@
 | **Geometric CAGR** | **-4.8079%** | **-0.8508%** | **-1.0229%** | Positive |
 | **Maximum Drawdown (MDD)** | **-94.8315%** | **-43.7777%** | **-46.0566%** | Low MDD |
 | **Annualized Turnover** | **4.3922** | **1.5240** | **1.6053** | Bounded |
-| **Intent Shortfall (Slippage)** | **428.75 bps** | **563.48 bps** | **-8.35 bps** | ≤ 15.0 bps |
-| **Fills / Unfilled Count** | 281,475 / 128,095 | 61,001 / 28,908 | N/A | Complete Fills |
+| **Intent Shortfall (Slippage)** | **428.75 bps** | **563.48 bps** | **530.40 bps** | ≤ 15.0 bps |
+| **Fills / Unfilled Count** | 281,475 / 128,095 | 61,001 / 28,908 | 238,735 / 107,593 | Complete Fills |
 
 ---
 
@@ -66,8 +68,8 @@
 | **Annualized Net Return** | **-0.5542%** | **-1.1743%** | **-0.9184%** | Positive |
 | **Geometric CAGR** | **-0.5694%** | **-1.1746%** | **-0.9262%** | Positive |
 | **Maximum Drawdown (MDD)** | **-13.3220%** | **-13.1434%** | **-10.4382%** | Low MDD |
-| **Intent Shortfall (Slippage)** | **36.23 bps** | **78.17 bps** | **78.17 bps** | ≤ 15.0 bps |
-| **Fills / Unfilled Count** | 317,200 / 136,598 | 195,243 / 78,932 | 177,302 / 79,670 | Complete Fills |
+| **Intent Shortfall (Slippage)** | **36.23 bps** | **45.03 bps** | **78.17 bps** | ≤ 15.0 bps |
+| **Fills / Unfilled Count** | 317,200 / 136,598 | 191,312 / 82,865 | 177,302 / 79,670 | Complete Fills |
 | **Decision Intents** | 668,226 | 274,912 | 257,010 | Complete |
 
 ---
@@ -78,14 +80,14 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **Fast Reversal** | -0.0671 | -2.3458 | -0.5113 | -0.5252 |
 | **Slow Momentum** | **+0.7303** | -0.0544 | +0.3086 | +0.2795 |
-| **Blend Ensemble** | **+0.5608** | -2.3458 | -0.1495 | -0.1000 |
+| **Blend Ensemble** | **+0.5951** | -2.3458 | **-0.1150** | -0.1000 |
 
 ---
 
 ## 6. Research GO Evaluation & Target Optimization Metrics
 
 - **Research GO Final Status**: **`eligible: false`**
-- **Reason Codes**: `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `STRESS_SHARPE_NOT_POSITIVE`
+- **Reason Codes**: `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `STRESS_SHARPE_NOT_POSITIVE`, `UNSPECIFIED_POLICY` (evaluated_folds=3, folds_passed=0)
 - **주요 성과 및 의의**:
   1. 백테스트 데이터 처리 엔진의 100% 정상 완주로 **Deterministic한 정밀 연구 시뮬레이션 환경 구축 완결**.
   2. `slow_momentum` 및 `blend` 전략의 스트레스 샤프 지수가 각각 **`+0.1694`**, **`+0.0618`**로 양수 유지.
