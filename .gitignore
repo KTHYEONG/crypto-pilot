@@ -240,9 +240,9 @@ __marimo__/
 # Ignore all json files everywhere in results/
 results/**/*.json
 
-# MHS horizon diagnostic artifacts (large; excluded from GitHub push)
-docs/results/mhs_horizon_diagnostic_artifacts/
-docs/results/mhs_horizon_diagnostic.json
+# MHS horizon diagnostic: only the lossless full-resolution audit tier is
+# excluded; the compact daily-resampled ledger and summary JSON are tracked.
+docs/results/mhs_horizon_diagnostic_artifacts/_full/
 
 # Ignore all enc files everywhere in results/ (default)
 results/**/*.enc
