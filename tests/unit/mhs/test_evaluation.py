@@ -34,6 +34,108 @@ def test_mhs_5m_02_pit_roster_uses_only_eligible_trailing_volume() -> None:
     assert not bool(mask.loc[idx[-1], "C"])
 
 
+def test_mhs_roster_hysteresis_enter_unchanged_from_baseline() -> None:
+    """SCENARIO_MHS_HYSTERESIS_01_ENTER_UNCHANGED_FROM_BASELINE: with a
+    720-row constant-volume fixture and ``universe_size=2``, the last row's
+    mask is exactly ``{A: True, B: True, C: False}`` as before hysteresis was
+    added -- entry via the top ``universe_size`` trailing-volume rank is
+    unchanged."""
+    from src.application.research.mhs.evaluation import _pit_execution_mask
+
+    idx = pd.date_range("2025-01-01", periods=720, freq="1h", tz="UTC")
+    volume = pd.DataFrame({"A": 10.0, "B": 20.0, "C": 30.0}, index=idx)
+    eligible = pd.DataFrame(True, index=idx, columns=volume.columns)
+    eligible.loc[idx[-1], "C"] = False
+    mask = _pit_execution_mask(volume, eligible, 2)
+    assert list(mask.loc[idx[-1], ["A", "B", "C"]]) == [True, True, False]
+
+
+def test_mhs_roster_hysteresis_member_survives_rank_dip_within_exit_band() -> None:
+    """SCENARIO_MHS_HYSTERESIS_02_MEMBER_SURVIVES_RANK_DIP_WITHIN_EXIT_BAND:
+    a member whose rank worsens past ``universe_size`` but stays within the
+    ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER`` band is retained,
+    unlike the pre-fix hard cutoff which dropped it."""
+    from src.application.research.mhs.evaluation import (
+        MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER,
+        _pit_execution_mask,
+    )
+
+    universe_size = 2
+    exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
+    idx = pd.date_range("2025-01-01", periods=721, freq="1h", tz="UTC")
+    volume = pd.DataFrame({"A": 100.0, "B": 200.0, "C": 300.0}, index=idx)
+    volume.loc[idx[720], "A"] = 200_000.0
+    volume.loc[idx[720], "B"] = 100_000.0
+    volume.loc[idx[720], "C"] = 100.0
+    eligible = pd.DataFrame(True, index=idx, columns=volume.columns)
+    # C is a member on bar 719 (rank 1); on bar 720 its trailing-volume rank
+    # dips to 3 -- past universe_size but still inside the exit band.
+    trailing = volume.rolling(720, min_periods=720).mean()
+    ranked = trailing.where(eligible).rank(axis=1, ascending=False, method="first")
+    assert ranked.loc[idx[719], "C"] == 1.0
+    assert ranked.loc[idx[720], "C"] == 3.0
+    assert exit_size >= 3.0
+
+    mask = _pit_execution_mask(volume, eligible, universe_size)
+    # Retained despite the rank dip (hysteresis); pre-fix rank<=2 would have dropped it.
+    assert bool(mask.loc[idx[720], "C"])
+    assert bool(mask.loc[idx[720], "A"])
+    assert bool(mask.loc[idx[720], "B"])
+
+
+def test_mhs_roster_hysteresis_member_exits_past_exit_band() -> None:
+    """SCENARIO_MHS_HYSTERESIS_03_MEMBER_EXITS_PAST_EXIT_BAND: a member whose
+    rank worsens past ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER``
+    is dropped on that bar."""
+    from src.application.research.mhs.evaluation import (
+        MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER,
+        _pit_execution_mask,
+    )
+
+    universe_size = 2
+    exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
+    idx = pd.date_range("2025-01-01", periods=721, freq="1h", tz="UTC")
+    volume = pd.DataFrame(
+        {"A": 100.0, "B": 200.0, "C": 300.0, "D": 400.0, "E": 500.0}, index=idx,
+    )
+    volume.loc[idx[720]] = [600_000.0, 500_000.0, 400_000.0, 100.0, 700_000.0]
+    eligible = pd.DataFrame(True, index=idx, columns=volume.columns)
+    trailing = volume.rolling(720, min_periods=720).mean()
+    ranked = trailing.where(eligible).rank(axis=1, ascending=False, method="first")
+    # D is a member on bar 719 (rank 2); on bar 720 its rank drops to 5, beyond exit_size=4.
+    assert ranked.loc[idx[719], "D"] == 2.0
+    assert ranked.loc[idx[720], "D"] == 5.0
+    assert exit_size < 5.0
+
+    mask = _pit_execution_mask(volume, eligible, universe_size)
+    assert not bool(mask.loc[idx[720], "D"])
+    assert bool(mask.loc[idx[720], "E"])
+
+
+def test_mhs_roster_hysteresis_ineligible_exits_immediately() -> None:
+    """SCENARIO_MHS_HYSTERESIS_04_INELIGIBLE_EXITS_IMMEDIATELY_REGARDLESS_OF_HYSTERESIS:
+    a held member whose eligible flag becomes False is excluded on that same bar
+    even though its raw trailing-volume rank is still inside the exit band."""
+    from src.application.research.mhs.evaluation import _pit_execution_mask
+
+    idx = pd.date_range("2025-01-01", periods=721, freq="1h", tz="UTC")
+    volume = pd.DataFrame(
+        {"A": 100.0, "B": 200.0, "C": 300.0, "D": 400.0, "E": 500.0}, index=idx,
+    )
+    eligible = pd.DataFrame(True, index=idx, columns=volume.columns)
+    eligible.loc[idx[720], "D"] = False
+    # D's raw trailing-volume rank is still 2 (well inside the exit band) -- only
+    # the eligibility flip changes membership.
+    raw_ranked = volume.rolling(720, min_periods=720).mean().rank(
+        axis=1, ascending=False, method="first",
+    )
+    assert raw_ranked.loc[idx[720], "D"] == 2.0
+
+    mask = _pit_execution_mask(volume, eligible, 2)
+    assert not bool(mask.loc[idx[720], "D"])
+    assert bool(mask.loc[idx[720], "E"])
+
+
 def _wsf() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     weights = pd.DataFrame({"A": [0.5, 0.5, -0.5], "B": [-0.5, -0.5, 0.5]})
     opens = pd.DataFrame({"A": [100.0, 101.0, 102.0], "B": [50.0, 49.0, 48.0]})
