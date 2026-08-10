@@ -85,8 +85,20 @@ class TestFrozenLiterals:
         )
         assert all(v > 0 for v in MEASURED_EXECUTION_COST_TIERS_BPS.values())
 
-    def test_blend_is_exactly_5050(self) -> None:
-        assert PHASE_1_BOOK_BLEND_WEIGHTS == {"fast_reversal": 0.5, "slow_momentum": 0.5}
+    def test_blend_weights_reflect_prescreen_admission(self) -> None:
+        # SCENARIO_MHS_BLEND_ADMISSION_01: fast_reversal's 446-symbol prescreen
+        # net t-stat stays below the |t| >= 2.0 admission floor at every cost
+        # tier (0.0bps pre-cost net_t=+0.577 .. 2.64bps net_t=-0.150, sign
+        # already unstable; docs/results/mhs_horizon_diagnostic.json), so its
+        # Research-GO blend weight is zero; slow_momentum clears |t| >= 2.0
+        # pre-cost (net_t=+1.859) and stays above it through 2.64bps
+        # (net_t=+1.634), with the pre-registered momentum sign throughout, so
+        # it takes the full allocation.
+        # fast_reversal stays a computed book (signal/prescreen kept for
+        # re-measurement), just zero-weighted.
+        assert PHASE_1_BOOK_BLEND_WEIGHTS == {"fast_reversal": 0.0, "slow_momentum": 1.0}
+        assert set(PHASE_1_BOOK_BLEND_WEIGHTS) == set(PHASE_1_BOOK_SPECS)
+        assert PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] == 0.0
         assert abs(sum(PHASE_1_BOOK_BLEND_WEIGHTS.values()) - 1.0) < 1e-12
 
     def test_book_specs_contain_only_frozen_books(self) -> None:

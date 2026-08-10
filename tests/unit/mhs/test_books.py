@@ -242,7 +242,7 @@ class TestIndependentBands:
         assert fast.abs().sum(axis=1).sub(1.0).abs().max() < 1e-9
         assert slow.abs().sum(axis=1).sub(1.0).abs().max() < 1e-9
 
-    def test_5050_blend_is_not_rescaled_to_gross_one(self) -> None:
+    def test_zero_weighted_fast_blend_is_pure_admitted_slow(self) -> None:
         from src.mhs.contracts import PHASE_1_BOOK_BLEND_WEIGHTS
 
         fast = pd.DataFrame({"A": [1.0, 1.0], "B": [-1.0, -1.0]})
@@ -251,8 +251,6 @@ class TestIndependentBands:
             PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * fast
             + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * slow
         )
-        gross = blend.abs().sum(axis=1)
-        # Opposing targets net to reduced gross: never rescaled back to 1.0.
-        assert gross.iloc[0] == pytest.approx(0.5)
-        assert (gross <= 1.0).all()
-        assert blend.abs().sum(axis=1).max() <= 1.0 + 1e-12
+        # fast_reversal is zero-weighted (admission-failed prescreen); the blend
+        # is exactly the admitted slow book, never renormalized to another gross.
+        pd.testing.assert_frame_equal(blend, slow)

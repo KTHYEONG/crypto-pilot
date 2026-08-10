@@ -36,7 +36,7 @@ def _write_mhs_market(root: Path, n_hours: int = 2700) -> pd.Timestamp:
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
-    ][:8]
+    ]
     hourly = pd.date_range(_START, periods=n_hours, freq="1h", tz="UTC")
     end = hourly[-1]
     rng = np.random.default_rng(20260807)
@@ -539,7 +539,7 @@ def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypa
     for row in range(len(fast_tilted)):
         mags = fast_raw.iloc[row].abs().to_numpy(dtype="float64")
         vols = fast_vol.iloc[row].to_numpy(dtype="float64")
-        valid = np.isfinite(vols) & (vols > 0.0) & (mags > 0.0)
+        valid = np.isfinite(vols) & (vols > 0.0) & (mags > 1e-6)
         pairs.extend(
             (row, i, j, float(vols[i]), float(vols[j]))
             for i in range(len(mags))
@@ -550,6 +550,136 @@ def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypa
     for row, i, j, vi, vj in pairs:
         hi, lo = (i, j) if vi > vj else (j, i)
         assert abs(fast_tilted.iloc[row, hi]) < abs(fast_tilted.iloc[row, lo])
+
+
+def _roster_mask_panel_inputs(
+    root: Path,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    funding_by_symbol: dict[str, pd.Series],
+    universe_size: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+    """Replicate the diagnostic panel prep to independently recompute the
+    execution_mask-filtered vol_mean that production must feed _regime_cash_scale."""
+    panel = ev.load_base_panel(
+        root, "1h", ("close", "open", "quote_vol"), start, end,
+        partition="dev", min_bars=2000,
+    )
+    close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    grid_1h = close.index
+    funded = [s for s in close.columns if s in funding_by_symbol]
+    close = close[funded]
+    opens = opens[funded]
+    quote_vol = quote_vol[funded]
+    bar_period = grid_1h[1] - grid_1h[0]
+    funding_window = {
+        s: funding_by_symbol[s].loc[
+            (funding_by_symbol[s].index >= grid_1h[0])
+            & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+        ]
+        for s in funded
+    }
+    bar_funding = ev.bar_funding_panel(funding_window, grid_1h)
+    aligned = list(bar_funding.columns)
+    close = close[aligned]
+    quote_vol = quote_vol[aligned]
+    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    log_close = np.log(close)
+    execution_mask = ev._pit_execution_mask(quote_vol, eligible, universe_size)
+    return log_close, execution_mask, grid_1h
+
+
+def _assert_regime_vol_mean_roster_masked(
+    captured: dict[str, pd.Series],
+    log_close: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    grid: pd.DatetimeIndex,
+) -> None:
+    """Assert the production vol_mean equals the execution_mask-filtered mean and
+    genuinely excludes non-roster symbols (masked mean != full-universe mean)."""
+    expected = ev.realized_vol(log_close, 48).where(execution_mask).reindex(grid).mean(axis=1)
+    all_universe = ev.realized_vol(log_close, 48).reindex(grid).mean(axis=1)
+    pd.testing.assert_series_equal(captured["vol_mean"], expected)
+    assert int(execution_mask.sum(axis=1).max()) < execution_mask.shape[1]
+    assert not expected.equals(all_universe)
+
+
+def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_VOL_MEAN_ROSTER_MASK_01: the fold builder's regime-cash-scale
+    # vol_mean is computed from execution_mask-filtered realized vol -- a
+    # high-vol symbol outside the traded roster must not pull the regime scale.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    captured: dict[str, pd.Series] = {}
+    real_scale = ev._regime_cash_scale
+
+    def spy(vol_mean, *args, **kwargs):
+        captured["vol_mean"] = vol_mean.copy()
+        return real_scale(vol_mean, *args, **kwargs)
+
+    monkeypatch.setattr(ev, "_regime_cash_scale", spy)
+    ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    assert "vol_mean" in captured, "fold builder must feed _regime_cash_scale its vol_mean"
+
+    panel_start = max(
+        _FOLD.train_start,
+        _FOLD.validation_start - pd.Timedelta(hours=ev.MHS_FOLD_PANEL_WARMUP_HOURS),
+    )
+    log_close, execution_mask, _grid = _roster_mask_panel_inputs(
+        root, panel_start, _FOLD.validation_end, funding_by_symbol,
+        request.execution_universe_size,
+    )
+    _assert_regime_vol_mean_roster_masked(
+        captured, log_close, execution_mask, captured["vol_mean"].index,
+    )
+
+
+def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_VOL_MEAN_ROSTER_MASK_TOPLEVEL_01: the top-level diagnostic
+    # path applies the same execution_mask-filtered vol_mean to its blend regime
+    # cash scale, matching the fold builder's fix.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    captured: dict[str, pd.Series] = {}
+    real_scale = ev._regime_cash_scale
+
+    def spy(vol_mean, *args, **kwargs):
+        captured["vol_mean"] = vol_mean.copy()
+        return real_scale(vol_mean, *args, **kwargs)
+
+    monkeypatch.setattr(ev, "_regime_cash_scale", spy)
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    assert "vol_mean" in captured, "top-level diagnostic must feed _regime_cash_scale its vol_mean"
+
+    log_close, execution_mask, _grid = _roster_mask_panel_inputs(
+        root, _START, end, funding_by_symbol, request.execution_universe_size,
+    )
+    _assert_regime_vol_mean_roster_masked(
+        captured, log_close, execution_mask, captured["vol_mean"].index,
+    )
 
 
 class TestBookOutcomePaired:
@@ -1029,7 +1159,7 @@ def _build_books_concurrent_args(
         ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
         + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
     )
-    vol_mean = ev.realized_vol(log_close, 48).reindex(grid_1h).mean(axis=1)
+    vol_mean = ev.realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
     regime_scale = ev._regime_cash_scale(vol_mean)
     blend_1h = blend_1h.mul(regime_scale, axis=0)
     return {
