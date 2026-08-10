@@ -762,6 +762,65 @@ class TestAnchoredFoldGoGate:
         assert MHS_GO_REASON_INCOMPLETE_FOLD in incomplete.reason_codes
         assert incomplete.eligible is False
 
+class TestMhsPerfOptimizationO3FoldParity:
+    """SCENARIO_O3_FOLD_PARITY: the three anchored folds run in parallel worker
+    processes produce bit-identical per-fold evidence to a sequential baseline
+    (same primary_autocorr_sharpe, stress_naive_sharpe, decision_intents,
+    termination_counts, primary_valid, and equity series)."""
+
+    @pytest.fixture(scope="module")
+    def fold_parity_request(self, tmp_path_factory) -> tuple[Path, pd.Timestamp]:
+        import src.market_data.services.futures_collection as fc
+
+        root = tmp_path_factory.mktemp("mhs_fold_parity")
+        end = _write_mhs_market(root, DEV_SYMBOLS)
+        originals = {"funding_path": ev.funding_path, "mark_price_path": fc._mark_price_path}
+        ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+        fc._mark_price_path = (
+            lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
+        )
+        yield root, end
+        ev.funding_path = originals["funding_path"]
+        fc._mark_price_path = originals["mark_price_path"]
+
+    def test_parallel_folds_match_sequential_folds(self, fold_parity_request) -> None:
+        from src.application.research.mhs.evaluation import (
+            _run_anchored_fold,
+            _run_folds_parallel,
+        )
+
+        root, end = fold_parity_request
+        funding = ev._load_funding_series(DEV_SYMBOLS)
+        request = MhsDiagnosticRequest(
+            start=str(START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        )
+        sequential = tuple(
+            _run_anchored_fold(str(root), fold, request, funding, 1.0, idx, None)
+            for idx, fold in enumerate(ev.phase_1_anchored_purged_folds())
+        )
+        parallel = _run_folds_parallel(str(root), request, funding, 1.0, None)
+        assert len(sequential) == len(parallel) == 3
+
+        def _same_float(a: float, b: float) -> bool:
+            return (a == b) or (np.isnan(a) and np.isnan(b))
+
+        for seq, par in zip(sequential, parallel, strict=True):
+            assert seq.fold_index == par.fold_index
+            assert _same_float(seq.primary_autocorr_sharpe, par.primary_autocorr_sharpe)
+            assert _same_float(seq.primary_naive_sharpe, par.primary_naive_sharpe)
+            assert _same_float(seq.stress_naive_sharpe, par.stress_naive_sharpe)
+            assert seq.decision_intents == par.decision_intents
+            assert seq.primary_valid == par.primary_valid
+            assert dict(seq.termination_counts) == dict(par.termination_counts)
+            assert seq.failures == par.failures
+            assert (seq.strict is None) == (par.strict is None)
+            assert (seq.stress is None) == (par.stress is None)
+            if seq.strict is not None and par.strict is not None:
+                assert seq.strict.ledger.equity.equals(par.strict.ledger.equity)
+                assert len(seq.strict.simulated_fills) == len(par.strict.simulated_fills)
+                assert len(seq.stress.simulated_fills) == len(par.stress.simulated_fills)
+
 
 class TestTypedArtifactRoundtrip:
     """MHS-29-TYPED-ARTIFACT-ROUNDTRIP: persisted ledger and times artifacts

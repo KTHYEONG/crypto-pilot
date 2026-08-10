@@ -744,3 +744,47 @@ def test_mhs_perf_opt_004_minute_frame_cache_reuses_reads(mhs_market, monkeypatc
     cached.clear()
     fresh = ev._load_minute_frames(str(root), syms, _START, end, "1m")
     assert set(fresh) == set(a)
+
+
+def test_mhs_phase2_o6_window_frames_parity(mhs_market) -> None:
+    # SCENARIO_O6_FRAME_PARITY: ``_get_symbol_minute_frame`` + ``_build_window_frames``
+    # (per-symbol full-period cache + slice) produce identical highs/lows/closes to
+    # the old ``_load_minute_frames`` + ``_align_minute_frames`` per-window read path.
+    root, end = mhs_market
+    syms = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
+    ws = pd.Timestamp("2021-01-01 06:00", tz="UTC")
+    we = pd.Timestamp("2021-01-02 06:00", tz="UTC")
+    grid = pd.date_range(ws, we, freq="1min", tz="UTC")
+
+    old_frames = ev._load_minute_frames(str(root), syms, ws, we, "1m")
+    old_aligned = ev._align_minute_frames(old_frames, "1m", ws, we)
+    assert old_aligned is not None
+
+    new_frames = {s: ev._get_symbol_minute_frame(str(root), s, "1m") for s in syms}
+    new_aligned = ev._build_window_frames(new_frames, syms, ws, we, grid, "1m")
+    assert new_aligned is not None
+
+    old_highs, old_lows, old_closes = old_aligned
+    new_highs, new_lows, new_closes = new_aligned
+    for old, new, name in ((old_highs, new_highs, "highs"), (old_lows, new_lows, "lows"), (old_closes, new_closes, "closes")):
+        assert list(new.columns) == list(old.columns), name
+        assert new.index.equals(old.index), name
+        assert np.isclose(new.to_numpy(), old.to_numpy(), rtol=0, atol=0, equal_nan=True).all(), name
+
+
+def test_mhs_phase2_o6_missing_symbol_raises(mhs_market) -> None:
+    # O6: full-period cache fails closed on a missing parquet (old per-window
+    # path silently skipped it).
+    root, _end = mhs_market
+    with pytest.raises(ev.DataIntegrityError):
+        ev._get_symbol_minute_frame(str(root), "NOSUCHUSDT", "1m")
+
+
+def test_mhs_phase2_o10_bootstrap_chunk_adaptive() -> None:
+    # SCENARIO_O10_RSS_GATE: chunk is capped so a (chunk, n) sample matrix stays
+    # <= 128MB; at production 5m scale (525,600 bars) that means a small chunk.
+    from src.mhs.evaluation import _bootstrap_chunk_size
+
+    assert _bootstrap_chunk_size(525_600) <= 63
+    assert _bootstrap_chunk_size(43_830) >= 100
+    assert _bootstrap_chunk_size(0) == 500
