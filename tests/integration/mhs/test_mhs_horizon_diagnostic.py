@@ -882,13 +882,14 @@ class TestTypedArtifactRoundtrip:
 
     def test_ledger_and_times_round_trip_as_utc(self, report, tmp_path) -> None:
         from src.application.research.mhs.evaluation import (
+            MhsOutputTier,
             load_mhs_replay_artifact,
             persist_mhs_horizon_diagnostic_report,
         )
 
         out = tmp_path / "mhs_report.json"
-        persist_mhs_horizon_diagnostic_report(report, out)
-        artifact_dir = out.parent / "mhs_report_artifacts"
+        persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.FULL)
+        artifact_dir = out.parent / "mhs_report_artifacts" / "_full"
 
         parquet_files = list(artifact_dir.glob("*.parquet"))
         assert len(parquet_files) == 5
@@ -917,13 +918,15 @@ class TestTypedArtifactRoundtrip:
         import json
 
         from src.application.research.mhs.evaluation import (
+            MhsOutputTier,
             load_mhs_replay_artifact,
             persist_mhs_horizon_diagnostic_report,
         )
 
         out = tmp_path / "mhs_report.json"
-        persist_mhs_horizon_diagnostic_report(report, out)
-        payload = json.loads(out.read_text())
+        persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.FULL)
+        report_json = out.parent / "mhs_report_artifacts" / "_full" / "report.json"
+        payload = json.loads(report_json.read_text())
         ledger_ref = payload["blend"]["primary"]["ledger"]
         assert ledger_ref["schema_version"] == 1
         assert ledger_ref["row_count"] > 0
@@ -936,7 +939,9 @@ class TestTypedArtifactRoundtrip:
             "fills", "units", "notional_weights", "ledger", "times",
         }
         assert "blend_primary" in payload["replay_ids"]
-        roundtrip = load_mhs_replay_artifact(out.parent / "mhs_report_artifacts", "blend_primary", "ledger")
+        roundtrip = load_mhs_replay_artifact(
+            out.parent / "mhs_report_artifacts" / "_full", "blend_primary", "ledger"
+        )
         assert len(roundtrip) == ledger_ref["row_count"]
 
     def test_empty_replay_artifacts_round_trip(self, tmp_path) -> None:
@@ -972,6 +977,7 @@ class TestTypedArtifactRoundtrip:
         from src.application.research.mhs.evaluation import (
             MHS_GO_REASON_UNSPECIFIED_POLICY,
             MhsFoldReport,
+            MhsOutputTier,
             load_mhs_replay_artifact,
             persist_mhs_horizon_diagnostic_report,
         )
@@ -1007,8 +1013,8 @@ class TestTypedArtifactRoundtrip:
         )
         patched = replace(report, folds=(fold_report,))
         out = tmp_path / "fold_report.json"
-        persist_mhs_horizon_diagnostic_report(patched, out)
-        artifact_dir = out.parent / "fold_report_artifacts"
+        persist_mhs_horizon_diagnostic_report(patched, out, tier=MhsOutputTier.FULL)
+        artifact_dir = out.parent / "fold_report_artifacts" / "_full"
         parquet_files = list(artifact_dir.glob("*.parquet"))
         assert len(parquet_files) == 5
         assert {p.name for p in parquet_files} == {
@@ -1017,6 +1023,56 @@ class TestTypedArtifactRoundtrip:
         }
         strict_ledger = load_mhs_replay_artifact(artifact_dir, "fold0_strict", "ledger")
         assert "timestamp" in strict_ledger.columns
+
+
+class TestFullModeBackwardCompat:
+    """MHS-OUTPUT-TIERING: FULL tier reproduces the pre-tiering 5-category
+    unified Parquet tables and row counts with no per-fill data loss."""
+
+    def test_full_mode_persists_unified_tables(self, report, tmp_path) -> None:
+        # FULL_MODE_BACKWARD_COMPAT
+        import pandas as pd
+
+        from src.application.research.mhs.evaluation import (
+            MhsOutputTier,
+            persist_mhs_horizon_diagnostic_report,
+        )
+
+        out = tmp_path / "mhs_report.json"
+        report_json = persist_mhs_horizon_diagnostic_report(
+            report, out, tier=MhsOutputTier.FULL,
+        )
+        assert report_json is not None
+        artifact_dir = out.parent / "mhs_report_artifacts" / "_full"
+        assert (artifact_dir / "report.json").exists()
+
+        for category in ("fills", "units", "notional_weights", "ledger", "times"):
+            table = pd.read_parquet(artifact_dir / f"{category}.parquet")
+            assert "replay_id" in table.columns
+            assert table["replay_id"].nunique() == len(pd.unique(table["replay_id"]))
+
+        fills = pd.read_parquet(artifact_dir / "fills.parquet")
+        expected_fills = sum(
+            len(replay.simulated_fills)
+            for book_report in report.books.values()
+            for replay in (book_report.primary, book_report.stress)
+            if replay is not None
+        )
+        if report.blend is not None:
+            for replay in (report.blend.primary, report.blend.stress):
+                if replay is not None:
+                    expected_fills += len(replay.simulated_fills)
+        for fold_report in report.folds:
+            for replay in (fold_report.strict, fold_report.stress):
+                if replay is not None:
+                    expected_fills += len(replay.simulated_fills)
+        assert len(fills) == expected_fills
+        assert fills["replay_id"].notna().all()
+
+        ledger = pd.read_parquet(artifact_dir / "ledger.parquet")
+        assert "timestamp" in ledger.columns
+        assert pd.api.types.is_datetime64_any_dtype(ledger["timestamp"])
+        assert np.isfinite(ledger["equity"].to_numpy()).all()
 
 
 FOLD_WINDOW_FOLD = ev.AnchoredPurgedFold(
