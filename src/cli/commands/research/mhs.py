@@ -17,7 +17,7 @@ _logger = logging.getLogger("MhsHorizonDiagnosticCli")
 
 
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
-    from src.application.research.mhs.evaluation import MhsDiagnosticRequest
+    from src.application.research.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
     from src.application.research.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report, run_mhs_horizon_diagnostic
 
     request = MhsDiagnosticRequest(
@@ -32,6 +32,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     report = run_mhs_horizon_diagnostic(request)
     path = persist_mhs_horizon_diagnostic_report(
         report, mhs_horizon_diagnostic_report_path(),
+        tier=MhsOutputTier(args.output_tier),
     )
     _logger.info(
         "[EVAL] mhs-horizon-diagnostic status=%s books=%s blend=%s path=%s",
@@ -81,6 +82,16 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Additionally replay slow_momentum/blend under OHLCV_TOUCH_PROXY "
             "alongside the strict/stress pair -- adds a second full window "
             "pass, opt-in only"
+        ),
+    )
+    mhs.add_argument(
+        "--output-tier",
+        choices=["compact", "full"],
+        default="compact",
+        help=(
+            "Persistence tier: compact (default) writes a git-committable "
+            "daily-resampled ledger + stripped summary JSON; full writes the "
+            "lossless per-fill audit Parquet tables under _full/ (gitignored)"
         ),
     )
     mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)

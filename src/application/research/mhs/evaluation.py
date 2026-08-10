@@ -19,6 +19,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -86,6 +87,18 @@ MHS_ARTIFACT_CATEGORIES: tuple[str, ...] = (
     "ledger",
     "times",
 )
+
+
+class MhsOutputTier(StrEnum):
+    """Persistence resolution for the MHS horizon diagnostic.
+
+    ``COMPACT`` is the default: a git-committable daily-resampled ledger plus a
+    stripped summary JSON. ``FULL`` persists the lossless per-fill audit tables
+    under ``_full/`` (gitignored) for deep execution auditing.
+    """
+
+    COMPACT = "compact"
+    FULL = "full"
 
 # Signal-quality calibration (spec §3.2, ``signal_quality``).
 # ``MHS_REBALANCE_MIN_NOTIONAL_DELTA`` is the turnover deadband cap: a per-symbol
@@ -2436,24 +2449,34 @@ def mhs_horizon_diagnostic_report_path() -> str:
     return str(Path("docs/results") / "mhs_horizon_diagnostic.json")
 
 
-def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, path: str | Path) -> Path:
-    """Persist a compact summary JSON and unified columnar replay audit artifacts.
+def persist_mhs_horizon_diagnostic_report(
+    report: MhsHorizonDiagnosticReport,
+    path: str | Path,
+    tier: MhsOutputTier = MhsOutputTier.COMPACT,
+) -> Path | None:
+    """Persist the MHS diagnostic in the requested output tier.
 
-    Fill events and ledger time series are intentionally kept out of the JSON
-    summary.  They are losslessly persisted as compressed Parquet tables and
-    referenced from the corresponding replay section.
+    COMPACT (default) writes a git-committable stripped summary JSON at ``path``
+    plus a daily-resampled ``daily_ledger.parquet`` under the sibling
+    ``*_artifacts`` directory; per-fill detail is intentionally dropped.
+    FULL writes the lossless 5-category unified Parquet audit tables and a
+    verbose checksummed JSON under ``*_artifacts/_full/`` (gitignored), keeping
+    the pre-tiering behaviour byte-for-byte otherwise.
 
-    All replay sessions (books, blend, folds) are consolidated into exactly 5
-    category-based unified tables (``fills.parquet``, ``units.parquet``,
-    ``notional_weights.parquet``, ``ledger.parquet``, ``times.parquet``) with an
-    explicit ``replay_id`` column, replacing the per-replay file proliferation.
+    Returns the persisted JSON path, or ``None`` when a COMPACT resample
+    failure is escalated past the compact artifacts (fail-closed policy).
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    artifact_root = target.parent / f"{target.stem}_artifacts"
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    payload = report.to_payload()
+    if tier == MhsOutputTier.FULL:
+        return _persist_mhs_report_full(report, target)
+    return _persist_mhs_report_compact(report, target)
 
+
+def _collect_replay_entries(
+    report: MhsHorizonDiagnosticReport,
+) -> list[tuple[str, StrategyExecutionReplayResult]]:
+    """Stable ordered replay sessions (books, blend, folds) for persistence."""
     replay_entries: list[tuple[str, StrategyExecutionReplayResult]] = []
     for book_name, book_report in report.books.items():
         if book_report.primary is not None:
@@ -2470,6 +2493,34 @@ def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, pa
             replay_entries.append((f"fold{fold_report.fold_index}_strict", fold_report.strict))
         if fold_report.stress is not None:
             replay_entries.append((f"fold{fold_report.fold_index}_stress", fold_report.stress))
+    return replay_entries
+
+
+def _write_json_report(path: Path, payload: Any) -> None:
+    """Serialize ``payload`` to ``path`` preferring orjson over stdlib json."""
+    with path.open("w", encoding="utf-8") as fh:
+        try:
+            import orjson
+
+            fh.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode("utf-8"))
+        except ImportError:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+
+
+def _persist_mhs_report_full(
+    report: MhsHorizonDiagnosticReport,
+    target: Path,
+) -> Path:
+    """Lossless tier: the pre-tiering 5-category unified audit tables + JSON.
+
+    Artifacts and the verbose report land under ``*_artifacts/_full/`` so the
+    compact daily ledger at the artifact root stays git-trackable. The JSON
+    carries the full per-replay SHA-256/checksum references exactly as before.
+    """
+    artifact_root = target.parent / f"{target.stem}_artifacts" / "_full"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    payload = report.to_payload()
+    replay_entries = _collect_replay_entries(report)
 
     tables_by_replay: dict[str, dict[str, pd.DataFrame]] = {}
     for replay_id, replay in replay_entries:
@@ -2477,7 +2528,7 @@ def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, pa
 
     unified_tables = _write_unified_artifact_tables(tables_by_replay, artifact_root)
 
-    # Keep the artifact directory at exactly the 5 canonical unified tables:
+    # Keep the FULL artifact directory at exactly the 5 canonical unified tables:
     # superseded per-replay Parquet files from earlier persistence formats are
     # removed so re-persisting to the same directory never leaves orphans.
     canonical_names = {f"{category}.parquet" for category in MHS_ARTIFACT_CATEGORIES}
@@ -2522,14 +2573,131 @@ def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, pa
     }
     payload["replay_ids"] = [replay_id for replay_id, _ in replay_entries]
 
-    with target.open("w", encoding="utf-8") as fh:
-        try:
-            import orjson
+    report_path = artifact_root / "report.json"
+    _write_json_report(report_path, payload)
+    _logger.info("[MHS] full report persisted path=%s", report_path)
+    return report_path
 
-            fh.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode("utf-8"))
-        except ImportError:
-            json.dump(payload, fh, indent=2, ensure_ascii=False)
-    _logger.info("[MHS] report persisted path=%s", target)
+
+def _replay_category_row_counts(replay: StrategyExecutionReplayResult) -> dict[str, int]:
+    """Cheap per-category row counts straight off the replay (no table build)."""
+    return {
+        "fills": len(replay.simulated_fills),
+        "units": len(replay.simulated_units),
+        "notional_weights": len(replay.simulated_notional_weights),
+        "ledger": len(replay.ledger.equity),
+        "times": len(replay.submit_times),
+    }
+
+
+def _ledger_table(replay: StrategyExecutionReplayResult) -> pd.DataFrame:
+    """Minimal timestamped ledger table (timestamp, equity, fill_turnover)."""
+    equity = replay.ledger.equity
+    idx = equity.index
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(idx, utc=True),
+            "equity": equity.to_numpy(dtype="float64"),
+            "fill_turnover": replay.ledger.fill_turnover.reindex(idx).to_numpy(dtype="float64"),
+        }
+    )
+
+
+def _compact_replay_ref(row_counts: dict[str, int]) -> dict[str, dict[str, int]]:
+    """Stripped per-replay reference: category -> row_count only."""
+    return {category: {"row_count": row_counts[category]} for category in MHS_ARTIFACT_CATEGORIES}
+
+
+def _wire_compact_refs(
+    payload: Any,
+    report: MhsHorizonDiagnosticReport,
+    replay_entries: list[tuple[str, StrategyExecutionReplayResult]],
+    row_counts: dict[str, dict[str, int]],
+) -> None:
+    """Replace verbose per-replay artifact references with row-count stubs."""
+    for book_name, book_report in report.books.items():
+        book_payload = payload["books"][book_name]
+        if book_report.primary is not None:
+            book_payload["primary"] = _compact_replay_ref(row_counts[f"{book_name}_primary"])
+        if book_report.stress is not None:
+            book_payload["stress"] = _compact_replay_ref(row_counts[f"{book_name}_stress"])
+    if report.blend is not None:
+        if report.blend.primary is not None:
+            payload["blend"]["primary"] = _compact_replay_ref(row_counts["blend_primary"])
+        if report.blend.stress is not None:
+            payload["blend"]["stress"] = _compact_replay_ref(row_counts["blend_stress"])
+    for fold_report in report.folds:
+        fold_payload = payload["folds"][fold_report.fold_index]
+        if fold_report.strict is not None:
+            fold_payload["strict"] = _compact_replay_ref(
+                row_counts[f"fold{fold_report.fold_index}_strict"]
+            )
+        if fold_report.stress is not None:
+            fold_payload["stress"] = _compact_replay_ref(
+                row_counts[f"fold{fold_report.fold_index}_stress"]
+            )
+
+
+def _persist_mhs_report_compact(
+    report: MhsHorizonDiagnosticReport,
+    target: Path,
+) -> Path | None:
+    """Compact tier: daily-resampled ledger Parquet + stripped summary JSON.
+
+    The daily rollup is written first; a fail-closed ``DataIntegrityError`` on
+    non-finite equity propagates, while any other resample failure logs and
+    escalates past compact persistence (returns ``None``).
+    """
+    artifact_root = target.parent / f"{target.stem}_artifacts"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    replay_entries = _collect_replay_entries(report)
+
+    row_counts: dict[str, dict[str, int]] = {}
+    daily_frames: list[pd.DataFrame] = []
+    for replay_id, replay in replay_entries:
+        row_counts[replay_id] = _replay_category_row_counts(replay)
+        try:
+            daily = _daily_resample_ledger(_ledger_table(replay))
+        except DataIntegrityError:
+            raise
+        except Exception:  # noqa: BLE001
+            _logger.error(
+                "[MHS] compact daily resample failed replay_id=%s", replay_id, exc_info=True
+            )
+            return None
+        tagged = daily.copy()
+        tagged.insert(0, "replay_id", replay_id)
+        daily_frames.append(tagged)
+
+    daily_table = pd.concat(daily_frames, ignore_index=True) if daily_frames else pd.DataFrame(
+        {"replay_id": pd.Series(dtype="string")}
+    )
+    daily_path = artifact_root / "daily_ledger.parquet"
+    daily_table.to_parquet(daily_path, index=False, compression="snappy")
+
+    payload = report.to_payload()
+    _wire_compact_refs(payload, report, replay_entries, row_counts)
+    unified_row_counts = {
+        category: sum(rc[category] for rc in row_counts.values())
+        for category in MHS_ARTIFACT_CATEGORIES
+    }
+    payload["artifacts"] = {
+        category: {"file": f"{category}.parquet", "row_count": unified_row_counts[category]}
+        for category in MHS_ARTIFACT_CATEGORIES
+    }
+    payload["artifacts"]["daily_ledger"] = {
+        "file": daily_path.name,
+        "row_count": len(daily_table),
+    }
+    payload["replay_ids"] = [replay_id for replay_id, _ in replay_entries]
+
+    _write_json_report(target, payload)
+    size = target.stat().st_size
+    if size > 50_000:
+        _logger.warning(
+            "[MHS] compact report exceeds 50KB size=%d path=%s", size, target
+        )
+    _logger.info("[MHS] compact report persisted path=%s", target)
     return target
 
 
@@ -2596,6 +2764,51 @@ def _verify_ledger_artifact(path: Path, replay_id: str, expected_rows: int) -> N
                 f"ledger artifact equity must be finite and strictly positive "
                 f"path={path} replay_id={replay_id}"
             )
+
+
+def _daily_resample_ledger(ledger_table: pd.DataFrame) -> pd.DataFrame:
+    """Resample one replay's minute ledger to a daily OHLCV rollup.
+
+    ``ledger_table`` must carry at least ``timestamp``, ``equity`` and
+    ``fill_turnover`` columns (the unified ledger schema). One row is emitted
+    per UTC day with ``equity_open/high/low/close``, ``daily_return``
+    (close/prev_close - 1), ``daily_turnover`` (sum of fill turnover) and
+    ``daily_fill_count`` (count of fill-bearing grid rows). Non-finite or
+    non-positive equity fails closed with ``DataIntegrityError``.
+    """
+    required = {"timestamp", "equity", "fill_turnover"}
+    missing = required - set(ledger_table.columns)
+    if missing:
+        raise DataIntegrityError(f"daily resample requires columns {sorted(missing)}")
+    frame = ledger_table.copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+    equity = frame["equity"].to_numpy(dtype="float64")
+    if not np.isfinite(equity).all() or (equity <= 0).any():
+        raise DataIntegrityError("ledger equity must be finite and strictly positive")
+    grouped = frame.groupby(pd.Grouper(key="timestamp", freq="1D"))
+    resampled = pd.DataFrame(
+        {
+            "equity_open": grouped["equity"].first(),
+            "equity_high": grouped["equity"].max(),
+            "equity_low": grouped["equity"].min(),
+            "equity_close": grouped["equity"].last(),
+            "daily_turnover": grouped["fill_turnover"].sum(),
+            "daily_fill_count": grouped["fill_turnover"].agg(lambda s: int((s > 0).sum())),
+        }
+    )
+    resampled = resampled.rename_axis("date").reset_index()
+    resampled["daily_return"] = (
+        resampled["equity_close"] / resampled["equity_close"].shift(1) - 1.0
+    ).replace([np.inf, -np.inf], np.nan)
+    # The daily rollup is a diagnostic aggregate, never a PnL source, so the
+    # numeric columns are safely downcast to float32 (validated finite/positive
+    # above) to keep the git-tracked compact artifact lean.
+    for col in (
+        "equity_open", "equity_high", "equity_low", "equity_close",
+        "daily_return", "daily_turnover",
+    ):
+        resampled[col] = resampled[col].astype("float32")
+    return resampled
 
 
 def _build_replay_category_tables(
