@@ -95,11 +95,13 @@ def select_horizon_by_discovery_qualification(
     """Run the worst-year-robust discovery/qualification gate for one sign family.
 
     For every candidate horizon the discovery window (calendar years within
-    ``[discovery_start, discovery_end]``) is scored by the MINIMUM of its
-    yearly prescreen net t-stats at ``cost_bps`` -- a single strong year can
-    never admit a candidate (spec §2.2). The highest-scoring candidate is
-    selected (ties break toward the smaller horizon, the project's existing
-    wide-candidate tie-break convention); if its worst-year score is below
+    ``[discovery_start, discovery_end]``) is scored in a sign-consistent
+    oriented space ``oriented = sign * net_t`` (larger means stronger evidence
+    in the preregistered direction) by the MINIMUM of its yearly oriented
+    prescreen scores at ``cost_bps`` -- a single strong year can never admit a
+    candidate (spec §2.2). The highest-scoring candidate is selected (ties
+    break toward the smaller horizon, the project's existing wide-candidate
+    tie-break convention); if its worst-year oriented score is below
     ``admission_t`` the gate fails closed with ``selected_horizon=None`` and
     qualification is never evaluated. Otherwise that one candidate is
     re-computed on the disjoint qualification window
@@ -131,7 +133,8 @@ def select_horizon_by_discovery_qualification(
     discovery_years = sorted({t.year for t in index[discovery_mask]})
     qualification_mask = (index > discovery_end) & (index <= qualification_end)
 
-    scores: dict[int, float] = {}
+    oriented_scores: dict[int, float] = {}
+    raw_worst_year: dict[int, float] = {}
     for horizon in horizon_candidates:
         yearly: list[float] = []
         for year in discovery_years:
@@ -142,16 +145,22 @@ def select_horizon_by_discovery_qualification(
             )
             if np.isfinite(net_t):
                 yearly.append(net_t)
-        scores[horizon] = min(yearly) if yearly else float("-inf")
+        if not yearly:
+            oriented_scores[horizon] = float("-inf")
+            raw_worst_year[horizon] = float("nan")
+            continue
+        worst_oriented = min(sign * t for t in yearly)
+        oriented_scores[horizon] = worst_oriented
+        raw_worst_year[horizon] = worst_oriented * sign
 
-    best_horizon = min(
+    best_horizon = max(
         horizon_candidates,
-        key=lambda h: (-scores[h], h),
+        key=lambda h: (oriented_scores[h], -h),
     )
-    best_score = scores[best_horizon]
+    best_oriented = oriented_scores[best_horizon]
 
-    discovery_scores = tuple(sorted(scores.items()))
-    if best_score < admission_t:
+    discovery_scores = tuple(sorted(raw_worst_year.items()))
+    if best_oriented < admission_t:
         return DiscoveryQualificationResult(
             selected_horizon=None,
             admitted=False,
