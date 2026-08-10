@@ -5,7 +5,7 @@
   - `ADR_20260810_MHS_EXECUTION_ROSTER_RENORMALIZATION` (1차: 실행 roster 마스킹 후 dollar-neutral/unit-gross 재정규화)
   - `ADR_20260810_MHS_ROSTER_HYSTERESIS_VOL_TILT` (2차: roster 진입/이탈 히스테리시스 + causal inverse-vol tilt)
 - **Domain**: Research / MHS (Multi-Horizon Market State)
-- **Source Diagnostic File**: [`docs/results/mhs_horizon_diagnostic.json`](file:///home/kth/my_coin_traider/docs/results/mhs_horizon_diagnostic.json) (compact tier)
+- **Source Diagnostic File**: [`docs/results/mhs_horizon_diagnostic.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic.json) (compact tier)
 - **Execution Status**: `COMPLETE`(파이프라인 자체는 완주) — 단, 3북 중 2북(`fast_reversal`, `blend`)과 anchored fold 2는 `CAPITAL_INVARIANT_BREACH`로 리플레이 중도 실패
 - **Run Metadata**: 2021-01-01~2025-12-31, `execution_universe_size=30`, `execution_timeframe=5m`, `eligible_symbols=445`, `run_elapsed_seconds≈261s`, peak RSS ≈ 6.45 GB
 
