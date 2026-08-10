@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from src.mhs.books import (
+    inverse_realized_vol_tilt,
     phase_tranche_book,
     rank_weight_book,
     renormalize_within_mask,
@@ -137,6 +138,54 @@ class TestRenormalizeWithinMask:
         out = renormalize_within_mask(weights, mask, 2)
         assert out.to_numpy().tolist() == [[0.0, 0.0, 0.0, 0.0]]
         assert bool(np.isfinite(out.to_numpy()).all())
+
+
+class TestInverseRealizedVolTilt:
+    """Inverse-realized-vol tilt: magnitudes scale by 1/vol with a never-NaN
+    neutral fallback, preserving sign and sparsity."""
+
+    def test_scales_by_inverse_vol(self) -> None:
+        # SCENARIO_MHS_TILT_01_SCALES_BY_INVERSE_VOL
+        weights = pd.DataFrame({"A": [0.6], "B": [-0.4], "C": [0.2]})
+        vol = pd.DataFrame({"A": [2.0], "B": [4.0], "C": [0.5]})
+        out = inverse_realized_vol_tilt(weights, vol)
+        assert out.iloc[0].tolist() == pytest.approx([0.3, -0.1, 0.4])
+
+    def test_zero_weight_stays_zero(self) -> None:
+        # SCENARIO_MHS_TILT_02_ZERO_WEIGHT_STAYS_ZERO
+        weights = pd.DataFrame({"A": [0.0], "B": [0.5], "C": [0.0]})
+        vol = pd.DataFrame({"A": [1e-9], "B": [2.0], "C": [1e9]})
+        out = inverse_realized_vol_tilt(weights, vol)
+        assert out.iloc[0]["A"] == 0.0
+        assert out.iloc[0]["C"] == 0.0
+        assert out.iloc[0]["B"] == pytest.approx(0.25)
+
+    def test_nonfinite_or_nonpositive_vol_falls_back_to_unscaled(self) -> None:
+        # SCENARIO_MHS_TILT_03_NONFINITE_OR_NONPOSITIVE_VOL_FALLS_BACK_TO_UNSCALED
+        weights = pd.DataFrame({"A": [0.4], "B": [0.4], "C": [0.4], "D": [0.4]})
+        vol = pd.DataFrame({"A": [np.nan], "B": [0.0], "C": [-1.0], "D": [2.0]})
+        out = inverse_realized_vol_tilt(weights, vol)
+        assert out.iloc[0]["A"] == pytest.approx(0.4)
+        assert out.iloc[0]["B"] == pytest.approx(0.4)
+        assert out.iloc[0]["C"] == pytest.approx(0.4)
+        assert out.iloc[0]["D"] == pytest.approx(0.2)
+        assert bool(np.isfinite(out.to_numpy()).all())
+
+    def test_fails_closed_on_misaligned_frames(self) -> None:
+        # SCENARIO_MHS_TILT_04_FAILS_CLOSED_ON_MISALIGNED_FRAMES
+        weights = pd.DataFrame({"A": [0.4], "B": [-0.4]})
+        vol = pd.DataFrame({"A": [2.0], "C": [1.0]})
+        with pytest.raises(ValueError, match="identically indexed"):
+            inverse_realized_vol_tilt(weights, vol)
+
+    def test_preserves_sign(self) -> None:
+        # SCENARIO_MHS_TILT_05_PRESERVES_SIGN
+        weights = pd.DataFrame({"A": [-0.6], "B": [0.3]})
+        vol = pd.DataFrame({"A": [3.0], "B": [0.5]})
+        out = inverse_realized_vol_tilt(weights, vol)
+        assert out.iloc[0]["A"] == pytest.approx(-0.2)
+        assert out.iloc[0]["B"] == pytest.approx(0.6)
+        assert bool((np.sign(out) == np.sign(weights)).to_numpy().all())
 
 
 class TestPhaseTrancheBook:

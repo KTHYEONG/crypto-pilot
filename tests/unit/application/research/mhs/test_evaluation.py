@@ -470,6 +470,88 @@ def test_fold_execution_weights_are_renormalized(mhs_market, monkeypatch) -> Non
         assert float(out[~mask].abs().max().max()) == 0.0
 
 
+def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_FOLD_WEIGHTS_ARE_VOL_TILTED_BEFORE_RENORMALIZATION: the fold
+    # builder tilts each book by its own-horizon inverse realized vol before the
+    # unchanged renormalize_within_mask, so a higher-vol roster symbol receives
+    # a smaller post-tilt, pre-renormalization magnitude than an equal-rank
+    # lower-vol symbol.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+
+    tilt_calls: list[tuple[pd.DataFrame, pd.DataFrame]] = []
+    renorm_inputs: list[pd.DataFrame] = []
+    real_tilt = ev.inverse_realized_vol_tilt
+    real_renorm = ev.renormalize_within_mask
+
+    def tilt_spy(weights, vol):
+        tilt_calls.append((weights, vol))
+        return real_tilt(weights, vol)
+
+    def renorm_spy(weights, mask, min_symbols):
+        renorm_inputs.append(weights)
+        return real_renorm(weights, mask, min_symbols)
+
+    monkeypatch.setattr(ev, "inverse_realized_vol_tilt", tilt_spy)
+    monkeypatch.setattr(ev, "renormalize_within_mask", renorm_spy)
+    ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+
+    assert len(tilt_calls) == 2, "fold builder must tilt both the fast and slow books"
+    assert len(renorm_inputs) == 2, "fold builder must renormalize both tilted books"
+    for (raw, vol), renorm_in in zip(tilt_calls, renorm_inputs, strict=True):
+        # renormalize receives the tilt output -- the raw rank book scaled by
+        # 1/vol -- never the untilted book.
+        assert renorm_in.equals(real_tilt(raw, vol))
+        valid = np.isfinite(vol.to_numpy(dtype="float64")) & (vol.to_numpy(dtype="float64") > 0.0)
+        assert valid.any(), "tilt must be a real scaling, not a no-op"
+
+    # The tilt is applied on each book's own horizon and reindexed onto its grid.
+    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    panel_start = max(
+        _FOLD.train_start,
+        _FOLD.validation_start - pd.Timedelta(hours=ev.MHS_FOLD_PANEL_WARMUP_HOURS),
+    )
+    fast_grid = pd.date_range(panel_start, _FOLD.validation_end, freq="6h", tz="UTC")
+    slow_grid = pd.date_range(panel_start, _FOLD.validation_end, freq="24h", tz="UTC")
+    fast_raw, fast_vol = tilt_calls[0]
+    slow_raw, slow_vol = tilt_calls[1]
+    assert fast_raw.index.equals(fast_grid)
+    assert fast_vol.index.equals(fast_grid)
+    assert slow_raw.index.equals(slow_grid)
+    assert slow_vol.index.equals(slow_grid)
+
+    # Semantic ordering: among roster symbols sharing an equal raw rank-slot
+    # magnitude (the book's symmetric extremes), the higher-realized-vol symbol
+    # has the strictly smaller pre-renormalization magnitude.
+    fast_tilted = real_tilt(fast_raw, fast_vol)
+    pairs: list[tuple[int, int, int, float, float]] = []
+    for row in range(len(fast_tilted)):
+        mags = fast_raw.iloc[row].abs().to_numpy(dtype="float64")
+        vols = fast_vol.iloc[row].to_numpy(dtype="float64")
+        valid = np.isfinite(vols) & (vols > 0.0) & (mags > 0.0)
+        pairs.extend(
+            (row, i, j, float(vols[i]), float(vols[j]))
+            for i in range(len(mags))
+            for j in range(i + 1, len(mags))
+            if valid[i] and valid[j] and np.isclose(mags[i], mags[j]) and vols[i] != vols[j]
+        )
+    assert pairs, "fixture must contain equal-|rank-weight| pairs with differing realized vol"
+    for row, i, j, vi, vj in pairs:
+        hi, lo = (i, j) if vi > vj else (j, i)
+        assert abs(fast_tilted.iloc[row, hi]) < abs(fast_tilted.iloc[row, lo])
+
+
 class TestBookOutcomePaired:
     """MHS-MEM-PAIR-02-BOOK: the top-level book orchestrator builds the
     execution-window iterator once per strict/stress pair and preserves the

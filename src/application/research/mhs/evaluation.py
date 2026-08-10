@@ -39,7 +39,12 @@ from src.research.evaluation.policy import resolve_evaluation_end
 
 from src.common.config import FUTURES_DATA_DIR, funding_path
 from src.common.errors import DataIntegrityError
-from src.mhs.books import phase_tranche_book, rank_weight_book, renormalize_within_mask
+from src.mhs.books import (
+    inverse_realized_vol_tilt,
+    phase_tranche_book,
+    rank_weight_book,
+    renormalize_within_mask,
+)
 from src.mhs.contracts import (
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
@@ -120,6 +125,13 @@ MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS = 720
 # liquidity-eligibility lookback plus the 168h slow horizon plus a one-day
 # boundary buffer; features only ever see history at or before each decision.
 MHS_FOLD_PANEL_WARMUP_HOURS = 720 + 168 + 24
+# Execution-roster Schmitt-trigger band: a member entered at the top
+# ``universe_size`` trailing-volume rank is kept until its rank exceeds
+# ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER``. The factor is an
+# engineering default (2x the entry threshold, the usual Schmitt-trigger
+# convention), not a measured constant; the fold/full-period replay is the
+# empirical check (docs/specs/mhs_roster_hysteresis_vol_tilt.md).
+MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER = 2.0
 
 MHS_GO_REASON_INCOMPLETE_FOLD = "INCOMPLETE_ANCHORED_FOLD"
 MHS_GO_REASON_INVALID_PRIMARY = "INVALID_PRIMARY_LEDGER"
@@ -502,10 +514,27 @@ def _pit_execution_mask(
     eligible: pd.DataFrame,
     universe_size: int,
 ) -> pd.DataFrame:
-    """Select the PIT top-volume execution roster without changing signals."""
+    """Select the PIT top-volume execution roster with entry/exit hysteresis.
+
+    A symbol enters only by reaching the top ``universe_size`` trailing-volume
+    rank; once a member, it is kept until its rank falls outside
+    ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER`` (a Schmitt-trigger
+    band). This prevents rank-boundary flicker from forcing a full entry/exit
+    trade on every decision when the signal itself has not changed. The exit
+    multiplier is an engineering default, not a measured constant; the fold/
+    full-period replay is the empirical check (docs/specs/mhs_roster_hysteresis_vol_tilt.md).
+    """
+    exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
     trailing = quote_volume.rolling(720, min_periods=720).mean()
     ranked = trailing.where(eligible).rank(axis=1, ascending=False, method="first")
-    return ranked.le(universe_size).fillna(False)
+    enter = ranked.le(universe_size).fillna(False).to_numpy()
+    keep = ranked.le(exit_size).fillna(False).to_numpy()
+    held = np.zeros(enter.shape[1], dtype=bool)
+    out = np.zeros_like(enter, dtype=bool)
+    for i in range(len(enter)):
+        held = enter[i] | (held & keep[i])
+        out[i] = held
+    return pd.DataFrame(out, index=quote_volume.index, columns=quote_volume.columns)
 
 
 def _load_minute_frames(
@@ -1911,15 +1940,21 @@ def _build_fold_target_weights(
     slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
     w_fast = _book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
     w_slow = _book_weights(log_close, eligible, slow, slow_grid, ema_span=slow_ema)
+    w_fast_tilted = inverse_realized_vol_tilt(
+        w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
+    )
+    w_slow_tilted = inverse_realized_vol_tilt(
+        w_slow, realized_vol(log_close, slow.horizon_hours).reindex(slow_grid),
+    )
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
     del quote_vol, eligible
     w_fast_execution = renormalize_within_mask(
-        w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
+        w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
     w_slow_execution = renormalize_within_mask(
-        w_slow, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
+        w_slow_tilted, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
     )
-    del w_fast, w_slow, execution_mask
+    del w_fast, w_slow, w_fast_tilted, w_slow_tilted, execution_mask
     blend_1h = (
         PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
         + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
@@ -2238,12 +2273,19 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+    w_fast_tilted = inverse_realized_vol_tilt(
+        w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
+    )
+    w_slow_tilted = inverse_realized_vol_tilt(
+        w_slow, realized_vol(log_close, slow.horizon_hours).reindex(slow_grid),
+    )
     w_fast_execution = renormalize_within_mask(
-        w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
+        w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
     w_slow_execution = renormalize_within_mask(
-        w_slow, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
+        w_slow_tilted, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
     )
+    del w_fast_tilted, w_slow_tilted
     # Eligibility and the execution roster are now materialized.  The raw
     # volume matrix otherwise stays alive while phase diagnostics create their
     # temporary target-weight matrices.

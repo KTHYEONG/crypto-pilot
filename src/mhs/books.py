@@ -8,7 +8,28 @@ blend is signal pooling and is prohibited.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+
+
+def inverse_realized_vol_tilt(
+    weights: pd.DataFrame, realized_vol: pd.DataFrame,
+) -> pd.DataFrame:
+    """Scale an existing weight book's magnitudes inversely to trailing realized vol.
+
+    Cells with a non-finite or non-positive ``realized_vol`` fall back to a
+    tilt of 1.0 (no scaling) rather than an undefined or infinite weight,
+    mirroring ``_causal_family_inverse_vol_weights``'s never-NaN fallback
+    (``src/research/technical_experts/cross_sectional.py``). This is an
+    unnormalized intermediate -- callers renormalize afterward (e.g. via
+    ``renormalize_within_mask``) to restore dollar-neutral/unit-gross.
+    """
+    if not weights.index.equals(realized_vol.index) or list(weights.columns) != list(realized_vol.columns):
+        raise ValueError("weights and realized_vol must be identically indexed and columned")
+    vol = realized_vol.to_numpy(dtype="float64")
+    valid = np.isfinite(vol) & (vol > 0.0)
+    tilt = np.where(valid, 1.0 / np.where(valid, vol, 1.0), 1.0)
+    return weights * tilt
 
 
 def rank_weight_book(
