@@ -17,6 +17,7 @@ import logging
 import os
 import time
 from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -484,16 +485,28 @@ def _load_minute_frames(
 ) -> dict[str, pd.DataFrame]:
     """Load minute OHLCV frames for ``symbols`` over ``[start, end]``.
 
-    The expensive Parquet reads are cached for the current process by
-    ``(root, symbols, start, end, timeframe)`` so a repeated identical replay
-    window (e.g. the blend book re-requesting the fast book's most recent
-    windows) is served from memory instead of re-reading Parquet (spec §4,
-    ``_load_minute_frames`` cache).  The cache is a small bounded LRU -- a
-    multi-year 5m roster frame is tens of megabytes, so an unbounded cache
-    would violate the RSS budget.  It is cleared at the start of every
-    diagnostic run so data re-writes between runs are never served stale.
+    Test-only convenience wrapper (MHS_PERF_OPT_004); the production replay
+    path uses the per-symbol full-period cache ``_get_symbol_minute_frame``.
     """
     return dict(_load_minute_frames_cached(root, tuple(sorted(symbols)), start, end, timeframe))
+
+
+_DATA_COLLECTOR: DataCollector | None = None
+
+
+def _data_collector() -> DataCollector:
+    """Lazily-instantiated shared mark-price collector.
+
+    ``_iter_mhs_execution_windows`` previously constructed one ``DataCollector``
+    per 31-day window; a module-level singleton pays the collector's
+    construction cost once per diagnostic run instead of once per window
+    (spec O5).  ``load_mark_price_panel`` resolves ``_mark_price_path``
+    dynamically at call time, so test monkeypatches keep working.
+    """
+    global _DATA_COLLECTOR
+    if _DATA_COLLECTOR is None:
+        _DATA_COLLECTOR = DataCollector()
+    return _DATA_COLLECTOR
 
 
 @lru_cache(maxsize=8)
@@ -526,6 +539,69 @@ def _load_minute_frames_cached(
         if not frame.empty:
             frames[sym] = frame
     return frames
+
+
+@lru_cache(maxsize=512)
+def _get_symbol_minute_frame(
+    root: str, symbol: str, timeframe: Literal["1m", "5m"],
+) -> pd.DataFrame:
+    """Full-period minute OHLCV frame for one symbol, cached for the process.
+
+    Replaces the window-keyed LRU cache (0% hit rate in production because every
+    31-day execution window has a distinct ``(start, end)`` key).  Reading each
+    symbol's full Parquet once and slicing per window turns ~5,300 window reads
+    into ~255 symbol reads.  The returned frame is immutable; callers must not
+    mutate it.
+    """
+    path = os.path.join(root, timeframe, f"{symbol}.parquet")
+    if not os.path.exists(path):
+        raise DataIntegrityError(f"minute OHLCV parquet missing: {path}")
+    table = pq.read_table(path, columns=["timestamp", "high", "low", "close"])
+    idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
+    frame = pd.DataFrame(
+        {
+            c: table.column(c).to_numpy().astype("float64")
+            for c in ("high", "low", "close")
+        },
+        index=idx,
+    )
+    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+    return frame
+
+
+def _build_window_frames(
+    symbol_frames: dict[str, pd.DataFrame],
+    roster: list[str],
+    grid_start: pd.Timestamp,
+    grid_end: pd.Timestamp,
+    minute_grid: pd.DatetimeIndex,
+    timeframe: Literal["1m", "5m"],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
+    """Slice per-symbol full-period frames onto a window minute grid.
+
+    Identical output to the old ``_load_minute_frames`` + ``_align_minute_frames``
+    path (same slicing, same reindex, same column order) but reads each symbol's
+    frame from the in-memory full-period cache instead of re-reading Parquet.
+    Returns ``None`` when no roster symbol has usable data.
+    """
+    if not symbol_frames:
+        return None
+    if grid_start >= grid_end:
+        return None
+    sliced: dict[str, pd.DataFrame] = {}
+    for s in sorted(roster):
+        full = symbol_frames.get(s)
+        if full is None or full.empty:
+            continue
+        frame = full.loc[(full.index >= grid_start) & (full.index <= grid_end)]
+        if not frame.empty:
+            sliced[s] = frame
+    if not sliced:
+        return None
+    highs = pd.DataFrame({s: f["high"] for s, f in sliced.items()}).reindex(minute_grid)
+    lows = pd.DataFrame({s: f["low"] for s, f in sliced.items()}).reindex(minute_grid)
+    closes = pd.DataFrame({s: f["close"] for s, f in sliced.items()}).reindex(minute_grid)
+    return highs, lows, closes
 
 
 def _align_minute_frames(
@@ -1182,8 +1258,14 @@ def _iter_mhs_execution_windows(
             if s in roster_set and os.path.exists(os.path.join(root, timeframe, f"{s}.parquet"))
         ]
 
-        frames = _load_minute_frames(root, roster, grid_start, grid_end, timeframe)
-        aligned = _align_minute_frames(frames, timeframe, grid_start, grid_end)
+        symbol_frames = {
+            s: _get_symbol_minute_frame(root, s, timeframe)
+            for s in roster
+            if os.path.exists(os.path.join(root, timeframe, f"{s}.parquet"))
+        }
+        aligned = _build_window_frames(
+            symbol_frames, roster, grid_start, grid_end, minute_grid, timeframe,
+        )
         if aligned is None:
             highs = pd.DataFrame(index=minute_grid)
             lows = pd.DataFrame(index=minute_grid)
@@ -1203,7 +1285,7 @@ def _iter_mhs_execution_windows(
         if mark_mode in ("cache_required", "cache_required_stale_carry"):
             if roster:
                 stale_hours = 24 if mark_mode == "cache_required_stale_carry" else 0
-                minute_marks = DataCollector().load_mark_price_panel(
+                minute_marks = _data_collector().load_mark_price_panel(
                     roster, "1h", minute_grid, max_stale_hours=stale_hours,
                 )
                 if mark_mode == "cache_required":
@@ -1633,6 +1715,59 @@ def _run_anchored_fold(
     except (RuntimeError, ValueError):
         return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
 
+def _run_folds_parallel(
+    root: str,
+    request: MhsDiagnosticRequest,
+    fold_funding: dict[str, pd.Series],
+    initial_equity: float,
+    telemetry: _StageRecorder | None = None,
+) -> tuple[MhsFoldReport, ...]:
+    """Run the three anchored folds concurrently, one process each.
+
+    Each fold builds its own 1h panel and executes an independent strict/stress
+    replay pair, so the folds are embarrassingly parallel.  ``ProcessPoolExecutor``
+    (fork) keeps each worker's RSS independent and bounded: three workers at a
+    measured peak of ~2.6GB each stay well inside the 8GB soft budget.  The
+    ``MhsFoldReport`` returned by every worker is picklable (frozen+slots,
+    holding only pd.Series/pd.DataFrame/numpy/native types), and per-worker
+    telemetry is recorded by the parent after each fold completes.  A fold that
+    cannot be replayed is reported (not raised) with machine-readable failure
+    codes, matching the sequential path.
+
+    ``fork`` (not ``spawn``) is required: spawn workers re-import the module and
+    lose the caller's monkeypatched ``funding_path``/``_mark_price_path`` (used
+    by the synthetic-market test suite and reproducible diagnostic fixtures),
+    and the Phase-1 11.4GiB RSS regression was traced to the main process's own
+    top-level matrices and minute-frame retention, not to fork-COW sharing, so
+    spawn would not reduce it.
+    """
+    folds = phase_1_anchored_purged_folds()
+    if not folds:
+        return ()
+    reports: dict[int, MhsFoldReport] = {}
+    max_workers = min(3, len(folds))
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(
+                _run_anchored_fold,
+                root, fold, request, fold_funding, initial_equity, idx, None,
+            ): idx
+            for idx, fold in enumerate(folds)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            reports[idx] = future.result()
+    ordered = tuple(reports[i] for i in range(len(folds)))
+    if telemetry is not None:
+        for fold_report in ordered:
+            fill_count = (
+                len(fold_report.strict.simulated_fills) + len(fold_report.stress.simulated_fills)
+                if fold_report.strict is not None and fold_report.stress is not None
+                else 0
+            )
+            telemetry.record(f"anchored_fold_{fold_report.fold_index}", fill_count=fill_count)
+    return ordered
+
 
 def _mhs_research_go(
     folds: tuple[MhsFoldReport, ...],
@@ -1677,8 +1812,9 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     fields; only strict simulated inventory is primary Research evidence.
     """
     # Each diagnostic run reads a static market snapshot; dropping the minute
-    # frame cache here keeps re-runs against re-written Parquet sources fresh.
+    # frame caches here keeps re-runs against re-written Parquet sources fresh.
     _load_minute_frames_cached.cache_clear()
+    _get_symbol_minute_frame.cache_clear()
     resolved_end = resolve_evaluation_end(request.end, unseal_holdout=False)
     _run_start = time.perf_counter()
     if request.partition != "dev":
@@ -1925,18 +2061,9 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     del funding_window, minute_grid
     gc.collect()
 
-    fold_reports: list[MhsFoldReport] = []
-    for idx, fold in enumerate(phase_1_anchored_purged_folds()):
-        fold_report = _run_anchored_fold(
-            root, fold, request, fold_funding, initial_equity, idx, telemetry,
-        )
-        fill_count = (
-            len(fold_report.strict.simulated_fills) + len(fold_report.stress.simulated_fills)
-            if fold_report.strict is not None and fold_report.stress is not None
-            else 0
-        )
-        telemetry.record(f"anchored_fold_{idx}", fill_count=fill_count)
-        fold_reports.append(fold_report)
+    fold_reports = _run_folds_parallel(
+        root, request, fold_funding, initial_equity, telemetry,
+    )
     folds = tuple(fold_reports)
     research_go = _mhs_research_go(folds, book_reasons)
 
@@ -2103,7 +2230,12 @@ def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, pa
     payload["replay_ids"] = [replay_id for replay_id, _ in replay_entries]
 
     with target.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, ensure_ascii=False)
+        try:
+            import orjson
+
+            fh.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode("utf-8"))
+        except ImportError:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
     _logger.info("[MHS] report persisted path=%s", target)
     return target
 
@@ -2219,7 +2351,11 @@ def _write_unified_artifact_tables(
     """Concatenate per-replay category tables into exactly 5 unified Parquet files.
 
     Every unified table carries a leading ``replay_id`` column; the 5 files are
-    written with zstd compression and returned as ``{category: (path, frame)}``.
+    written with snappy compression (much faster than zstd for these wide
+    numeric tables) and returned as ``{category: (path, frame)}``.  Cross-replay
+    schema promotion (timestamps at different precision, string vs large_string)
+    is handled by ``pd.concat`` which promotes dtypes losslessly before the
+    single snappy Parquet write (spec O8).
     """
     unified_frames: dict[str, list[pd.DataFrame]] = {
         category: [] for category in MHS_ARTIFACT_CATEGORIES
@@ -2238,7 +2374,7 @@ def _write_unified_artifact_tables(
         else:
             frame = pd.DataFrame({"replay_id": pd.Series(dtype="string")})
         path = artifact_root / f"{category}.parquet"
-        frame.to_parquet(path, index=False, compression="zstd")
+        frame.to_parquet(path, index=False, compression="snappy")
         unified_tables[category] = (path, frame)
     return unified_tables
 
