@@ -406,8 +406,8 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
     phase = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
     execution_mask = ev._pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-    w_fast_execution = w_fast.where(
-        execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
+    w_fast_execution = ev.renormalize_within_mask(
+        w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
     return {
         "name": "fast_reversal",
@@ -428,6 +428,46 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
         "initial_equity": 1.0,
         "replay_weights_step": w_fast_execution,
     }
+
+
+def test_fold_execution_weights_are_renormalized(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_FOLD_EXECUTION_WEIGHTS_ARE_RENORMALIZED: the fold builder
+    # re-normalizes its execution weights onto the roster instead of collapsing
+    # them to a partial-gross subset of the full-universe book.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    real = ev.renormalize_within_mask
+    captured: list[tuple[pd.DataFrame, pd.DataFrame, int]] = []
+
+    def spy(weights, mask, min_symbols):
+        out = real(weights, mask, min_symbols)
+        captured.append((out, mask, min_symbols))
+        return out
+
+    monkeypatch.setattr(ev, "renormalize_within_mask", spy)
+    target_weights, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+    )
+    assert captured, "fold builder must route execution weights through renormalize_within_mask"
+    assert not target_weights.empty
+    for out, mask, min_symbols in captured:
+        live = mask.sum(axis=1) >= min_symbols
+        assert live.any(), "fold decision rows must have a live roster"
+        # unit-gross and dollar-neutral within the surviving roster cells
+        assert out.abs().sum(axis=1).where(live).sub(1.0).abs().max() < 1e-9
+        assert out.sum(axis=1).where(live).abs().max() < 1e-9
+        # masked-out columns are exactly zero, never the unnormalized input
+        assert float(out[~mask].abs().max().max()) == 0.0
 
 
 class TestBookOutcomePaired:
@@ -837,18 +877,26 @@ def test_p11_resolve_ns_bit_identical() -> None:
     )
 
 
-def _build_books_concurrent_args(mhs_market) -> dict[str, object]:
-    """Replicate the top-level diagnostic setup for all three books."""
+def _build_books_concurrent_args(
+    mhs_market, universe_size: int | None = None,
+) -> dict[str, object]:
+    """Replicate the top-level diagnostic setup for all three books.
+
+    ``universe_size`` narrows the execution roster (default 30 keeps every
+    fixture symbol); a value between ``min_symbols`` and the eligible count
+    exercises the renormalization that rescales surviving roster cells.
+    """
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
-    ][:8]
+    ]
     funding_by_symbol = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        **({"execution_universe_size": universe_size} if universe_size is not None else {}),
     )
     panel = ev.load_base_panel(
         root, "1h", ("close", "open", "quote_vol"), _START, end,
@@ -887,11 +935,11 @@ def _build_books_concurrent_args(mhs_market) -> dict[str, object]:
     phase_slow = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
     phase_blend = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
     execution_mask = ev._pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-    w_fast_execution = w_fast.where(
-        execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
+    w_fast_execution = ev.renormalize_within_mask(
+        w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
-    w_slow_execution = w_slow.where(
-        execution_mask.reindex(w_slow.index).fillna(False), other=0.0,
+    w_slow_execution = ev.renormalize_within_mask(
+        w_slow, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
     )
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
@@ -946,7 +994,10 @@ def _sequential_book_reports(args: dict[str, object]) -> tuple[object, object, o
         slow.horizon_hours, args["initial_equity"], args["w_slow_execution"],
     )
     blend_step = args["blend_1h"].reindex(fast_grid)
-    blend_replay = args["blend_1h"].where(args["execution_mask"], other=0.0).reindex(fast_grid)
+    blend_replay = (
+        ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
+        + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
+    ).reindex(fast_grid)
     blend_rpt = ev._book_outcome(
         "blend", fast, args["n_symbols"], fast_grid, blend_step, grid_1h,
         args["opens"], args["bar_funding"], args["phase_blend"], args["root"],
@@ -984,6 +1035,31 @@ def test_p10_concurrent_books_parity(mhs_market) -> None:
     assert len(concurrent) == 3
     for seq, con, name in zip(sequential, concurrent, ("fast_reversal", "slow_momentum", "blend"), strict=True):
         _assert_books_equal(seq, con, name)
+
+
+def test_toplevel_blend_replay_matches_renormalized_components(mhs_market) -> None:
+    # SCENARIO_MHS_TOPLEVEL_BLEND_REPLAY_MATCHES_RENORMALIZED_COMPONENTS: the
+    # blend replay target is the 50/50 sum of the renormalized execution books
+    # (each ffilled onto the 1h grid then reindexed onto the fast grid), no
+    # longer a collapse of the pre-mask theoretical blend.
+    args = _build_books_concurrent_args(mhs_market, universe_size=8)
+    grid_1h, fast_grid = args["grid_1h"], args["fast_grid"]
+    expected = (
+        ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
+        + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
+    ).reindex(fast_grid)
+    collapsed = args["blend_1h"].where(args["execution_mask"], other=0.0).reindex(fast_grid)
+    assert not expected.equals(collapsed), "renormalized blend must differ from the collapsed pre-mask blend"
+    # the concurrent production path replays exactly the renormalized composition
+    _, _, blend_report = ev._run_books_concurrent(**args)
+    expected_report = ev._book_outcome(
+        "blend", args["fast"], args["n_symbols"], fast_grid,
+        args["blend_1h"].reindex(fast_grid), grid_1h,
+        args["opens"], args["bar_funding"], args["phase_blend"], args["root"],
+        args["request"], args["funding_by_symbol"], args["start"], args["end"],
+        168, args["initial_equity"], expected,
+    )
+    _assert_books_equal(expected_report, blend_report, "blend")
 
 
 def test_p10_eager_cache_preload(mhs_market) -> None:
