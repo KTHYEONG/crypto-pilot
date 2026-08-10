@@ -32,7 +32,7 @@ from src.market_data.services.futures_collection import DataCollector
 from src.mhs.evaluation import cost_response_curve, phase_diagnostic_metrics, tail_sensitivity_curve
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
-from src.mhs.execution import replay_execution_window_pair
+from src.mhs.execution import replay_execution_window_pair, replay_execution_windows
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.research.evaluation.policy import resolve_evaluation_end
 
@@ -148,6 +148,7 @@ class MhsDiagnosticRequest:
     execution_universe_size: int = 30
     max_rss_bytes: int | None = None
     log_run: bool = True
+    touch_diagnostic: bool = False
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -201,6 +202,8 @@ class MhsBookReport:
     stress_naive_sharpe: float | None
     terminal_censored_decisions: int = 0
     failure: MhsBookFailure | None = None
+    touch: StrategyExecutionReplayResult | None = None
+    touch_naive_sharpe: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1430,12 +1433,21 @@ def _book_outcome(
             yield w
             _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
 
+    touch = None
+    touch_naive_sharpe = None
     try:
         primary, stress = replay_execution_window_pair(
             _window_telemetry(_windows(), "execution_window"),
             initial_equity, ExecutionSpec(),
             retain_event_snapshots=False,
         )
+        if request.touch_diagnostic:
+            touch = replay_execution_windows(
+                _window_telemetry(_windows(), "execution_window_touch"),
+                initial_equity, "OHLCV_TOUCH_PROXY", ExecutionSpec(),
+                retain_event_snapshots=False,
+            )
+            touch_naive_sharpe = _naive_sharpe(touch.ledger)
         if telemetry is not None:
             telemetry.record(
                 f"replay_{name}_strict",
@@ -1483,6 +1495,8 @@ def _book_outcome(
             stress_naive_sharpe=None,
             terminal_censored_decisions=censored,
             failure=failure,
+            touch=touch,
+            touch_naive_sharpe=touch_naive_sharpe,
         )
     return MhsBookReport(
         name=name,
@@ -1504,6 +1518,8 @@ def _book_outcome(
         primary_annualized_turnover=_mean_ann(primary.ledger.fill_turnover, _PERIODS_PER_YEAR_1H),
         stress_naive_sharpe=_naive_sharpe(stress.ledger),
         terminal_censored_decisions=censored,
+        touch=touch,
+        touch_naive_sharpe=touch_naive_sharpe,
     )
 
 
