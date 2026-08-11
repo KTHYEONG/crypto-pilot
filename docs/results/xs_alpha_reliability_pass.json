@@ -1,0 +1,136 @@
+{
+  "xs_alpha_vol_weighted_v6_growth_sized": {
+    "discovery": {
+      "admitted": true,
+      "annual_sharpe": {
+        "2022": 1.65548616,
+        "2023": 1.93469685
+      },
+      "annualized_turnover": 49.98649204,
+      "beta": -0.00249679,
+      "binding_constraint": null,
+      "breakeven_cost": 0.00701215,
+      "cagr": 0.34399038,
+      "mdd": -0.10980378,
+      "sharpe": 1.78255293,
+      "t_stat": 2.35640322
+    },
+    "holdout": {
+      "admitted": true,
+      "annual_sharpe": {
+        "2026": 1.55345085
+      },
+      "annualized_turnover": 44.27526094,
+      "beta": -0.00692471,
+      "binding_constraint": null,
+      "breakeven_cost": 0.00533817,
+      "cagr": 0.21270035,
+      "mdd": -0.08411965,
+      "sharpe": 1.55345085,
+      "t_stat": 1.11488484
+    },
+    "pre_scaling_discovery": {
+      "admitted": true,
+      "annual_sharpe": {
+        "2022": 1.81150769,
+        "2023": 0.8336865
+      },
+      "annualized_turnover": 23.48806553,
+      "beta": 0.00303518,
+      "binding_constraint": null,
+      "breakeven_cost": 0.01029712,
+      "cagr": 0.23137625,
+      "mdd": -0.15293961,
+      "sharpe": 1.28301733,
+      "t_stat": 1.69605409
+    },
+    "pre_scaling_holdout": {
+      "admitted": true,
+      "annual_sharpe": {
+        "2026": 1.7307715
+      },
+      "annualized_turnover": 25.76978251,
+      "beta": 0.00273576,
+      "binding_constraint": null,
+      "breakeven_cost": 0.01089273,
+      "cagr": 0.28296654,
+      "mdd": -0.08209349,
+      "sharpe": 1.7307715,
+      "t_stat": 1.24214481
+    },
+    "pre_scaling_qualification": {
+      "admitted": true,
+      "annual_sharpe": {
+        "2024": 1.07466142,
+        "2025": 1.5885106
+      },
+      "annualized_turnover": 22.66347552,
+      "beta": -0.09106763,
+      "binding_constraint": null,
+      "breakeven_cost": 0.01179953,
+      "cagr": 0.26117317,
+      "mdd": -0.14344526,
+      "sharpe": 1.33304304,
+      "t_stat": 1.88649835
+    },
+    "profile": "xs_alpha_vol_weighted_v6",
+    "qualification": {
+      "admitted": true,
+      "annual_sharpe": {
+        "2024": 1.138281,
+        "2025": 1.81737071
+      },
+      "annualized_turnover": 34.85619233,
+      "beta": -0.0643074,
+      "binding_constraint": null,
+      "breakeven_cost": 0.00660165,
+      "cagr": 0.21314631,
+      "mdd": -0.10770727,
+      "sharpe": 1.49099445,
+      "t_stat": 2.11002831
+    },
+    "reliability": {
+      "fold": {
+        "fold_concentration": 0.32810197,
+        "fold_concentration_threshold": 0.40667695,
+        "fold_reference_sharpe": 1.26086141,
+        "gate_pass": true,
+        "max_period_contribution": 0.34265083,
+        "median_fold_cagr": 0.26758428,
+        "median_fold_calmar": 3.6773514,
+        "n_folds": 6,
+        "worst_fold_cagr": -0.02036551
+      },
+      "lcb": {
+        "block_size_used": 10,
+        "lcb90_cagr": 0.08597095,
+        "lcb95_cagr": 0.05705229,
+        "p_negative": 0.01133333,
+        "point_cagr": 0.21305507,
+        "t_stat": 2.38435485,
+        "trade_count": 82710,
+        "verdict": "PASS"
+      }
+    },
+    "report_fingerprint": "6c85c444cdb7358bf1d259972f39265f750f4370965f8c41bbe1308b9764bc54",
+    "sizing": {
+      "binding_constraint": "none",
+      "block_size_used": 17,
+      "feasible_risks": [
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0
+      ],
+      "mdd_breach_prob": 0.0,
+      "median_log_growth": 1.08119604,
+      "ruin_prob": 0.0,
+      "selected_risk": 1.5
+    },
+    "vol_target": 0.0031513952185643975,
+    "vol_target_window": 84
+  }
+}
