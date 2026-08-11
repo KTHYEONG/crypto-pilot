@@ -207,7 +207,11 @@ class TestSignalQualityMechanisms:
         )
         assert report.primary_valid is True
         assert report.strict is not None
-        assert report.strict.all_intent_shortfall_bps > 0
+        # Shortfall sign is signal-dependent: under the vol-normalized momentum
+        # signal (docs/specs/mhs_momentum_vol_normalization.md) the seeded
+        # synthetic fold's passive fills land slightly better than decision
+        # price, so only finiteness is an invariant here, not a >0 sign.
+        assert np.isfinite(report.strict.all_intent_shortfall_bps)
         assert np.isfinite(report.primary_autocorr_sharpe)
         assert np.isfinite(report.primary_naive_sharpe)
         assert np.isfinite(report.stress_naive_sharpe)

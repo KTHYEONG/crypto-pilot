@@ -788,6 +788,17 @@ def _book_weights(
     step_grid: pd.DatetimeIndex,
     ema_span: int | None = None,
 ) -> pd.DataFrame:
+    # NOTE: the live book intentionally stays on raw horizon_log_return for
+    # both bands. vol_normalized_horizon_signal (sign==1) was measured to
+    # improve the discovery-gate prescreen (+37% worst-year net_t) but broke
+    # CAPITAL_INVARIANT_BREACH on the full 2021-2025 realistic-execution
+    # replay (cumulative 2021-2024 drawdown deeper than raw momentum's,
+    # exhausting equity before 2025's gains could recover it -- confirmed via
+    # direct re-measurement, not merely the prescreen). It stays wired into
+    # discovery.py's diagnostic-only sign=1 candidate scoring, matching the
+    # existing OHLCV_STRICT_PROXY precedent (demoted to reference once the
+    # full replay disproved it as primary) -- see
+    # docs/specs/mhs_momentum_vol_normalization.md follow-up.
     sig = horizon_log_return(log_close, spec.horizon_hours)
     if ema_span is not None:
         sig = _smooth_signal_ema(sig, ema_span)

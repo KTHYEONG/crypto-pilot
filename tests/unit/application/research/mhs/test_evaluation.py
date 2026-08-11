@@ -22,7 +22,8 @@ from src.application.research.mhs.evaluation import (
     _truncate_replayable_decisions,
 )
 from src.common.errors import DataIntegrityError
-from src.mhs.contracts import BookSpec, ExecutionSpec
+from src.mhs.contracts import BookSpec, ExecutionSpec, HorizonBand
+from src.mhs.horizons import vol_normalized_horizon_signal
 from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
 from src.mhs.execution import strategy_aware_execution_replay
 from src.mhs.evaluation import AnchoredPurgedFold
@@ -78,6 +79,46 @@ def mhs_market(tmp_path, monkeypatch):
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     return root, end
+
+
+def _signal_disagreement_panel():
+    """Momentum signal disagreement fixture (horizon=2).
+
+    Cross-sectionally the raw ``horizon_log_return`` ranks NOISY above QUIET
+    while the vol-normalized signal ranks QUIET above NOISY, so ``_book_weights``
+    / ``_phase_diagnostics`` built from the two signals must differ -- the
+    fixture that proves a sign=+1 dispatch to ``vol_normalized_horizon_signal``
+    actually took effect.
+    """
+    idx = pd.date_range("2024-01-01", periods=8, freq="1h", tz="UTC")
+    log_close = pd.DataFrame(
+        {
+            "NOISY": [0.0, 0.5, -0.2, 0.4, 0.8, 0.7, 1.1, 0.9],
+            "QUIET": [0.0, 0.01, 0.04, 0.06, 0.07, 0.10, 0.11, 0.14],
+        },
+        index=idx,
+    )
+    eligible = pd.DataFrame(True, index=idx, columns=log_close.columns)
+    rng = np.random.default_rng(7)
+    o2o = pd.DataFrame(rng.normal(0.0, 1e-3, (len(idx), 2)), index=idx, columns=log_close.columns)
+    opens = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(o2o.to_numpy(), axis=0)), index=idx, columns=log_close.columns,
+    )
+    bar_funding = pd.DataFrame(0.0, index=idx, columns=log_close.columns)
+    return log_close, eligible, opens, bar_funding, idx
+
+
+def _dispatch_spec(sign: int) -> BookSpec:
+    band = HorizonBand(name="test_dispatch", horizons_hours=(2,), sign=sign)
+    return BookSpec(band=band, horizon_hours=2, step_hours=1, min_symbols=2)
+
+
+def _reference_weights(log_close, eligible, step_grid, spec) -> pd.DataFrame:
+    sig = ev.horizon_log_return(log_close, spec.horizon_hours).reindex(step_grid)
+    return ev.phase_tranche_book(
+        ev.rank_weight_book(sig, eligible.reindex(step_grid), spec.band.sign, spec.min_symbols),
+        spec.tranche_count(),
+    )
 
 
 def test_mhs_resource_measurement_records_ordered_stage_data() -> None:
@@ -1636,3 +1677,83 @@ def test_gitignore_full_subdir_only() -> None:
     assert "docs/results/mhs_horizon_diagnostic_artifacts/" not in gitignore
     assert "docs/results/mhs_horizon_diagnostic.json" not in gitignore
     assert "docs/results/mhs_horizon_diagnostic_artifacts/daily_ledger.parquet" not in gitignore
+
+
+def test_book_weights_momentum_keeps_raw_signal() -> None:
+    """SCENARIO_BOOK_WEIGHTS_MOMENTUM_STAYS_RAW: ``_book_weights`` for a
+    sign=+1 spec stays on raw ``horizon_log_return``. ``vol_normalized_
+    horizon_signal`` was tried in the live book and reverted -- it improved
+    the discovery-gate prescreen but broke ``CAPITAL_INVARIANT_BREACH`` on
+    the full 2021-2025 realistic-execution replay, so it stays wired into
+    discovery.py's diagnostic-only scoring only
+    (docs/specs/mhs_momentum_vol_normalization.md follow-up)."""
+    log_close, eligible, _, _, idx = _signal_disagreement_panel()
+    spec = _dispatch_spec(sign=1)
+    weights = ev._book_weights(log_close, eligible, spec, idx)
+    expected = _reference_weights(log_close, eligible, idx, spec)
+    pd.testing.assert_frame_equal(weights, expected)
+    vol_normalized = ev.phase_tranche_book(
+        ev.rank_weight_book(
+            vol_normalized_horizon_signal(log_close, spec.horizon_hours).reindex(idx),
+            eligible.reindex(idx),
+            spec.band.sign,
+            spec.min_symbols,
+        ),
+        spec.tranche_count(),
+    )
+    with pytest.raises(AssertionError):
+        pd.testing.assert_frame_equal(weights, vol_normalized)
+
+
+def test_book_weights_reversal_keeps_raw_signal() -> None:
+    """SCENARIO_BOOK_WEIGHTS_REVERSAL_UNCHANGED: ``_book_weights`` for a
+    sign=-1 spec stays on raw ``horizon_log_return``."""
+    log_close, eligible, _, _, idx = _signal_disagreement_panel()
+    spec = _dispatch_spec(sign=-1)
+    weights = ev._book_weights(log_close, eligible, spec, idx)
+    expected = _reference_weights(log_close, eligible, idx, spec)
+    pd.testing.assert_frame_equal(weights, expected)
+
+
+def test_phase_diagnostics_momentum_keeps_raw_signal(monkeypatch) -> None:
+    """SCENARIO_PHASE_DIAGNOSTICS_MOMENTUM_CONSISTENT_WITH_LIVE_SIGNAL:
+    ``_phase_diagnostics`` for a sign=+1 spec ranks raw ``horizon_log_return``,
+    consistent with ``_book_weights`` after the vol-normalized-signal revert."""
+    log_close, eligible, opens, bar_funding, idx = _signal_disagreement_panel()
+    spec = _dispatch_spec(sign=1)
+    captured: list[pd.DataFrame] = []
+    real_rank = ev.rank_weight_book
+
+    def recording(signal, elig, sign, min_symbols):
+        captured.append(signal)
+        return real_rank(signal, elig, sign, min_symbols)
+
+    monkeypatch.setattr(ev, "rank_weight_book", recording)
+    ev._phase_diagnostics(log_close, eligible, opens, bar_funding, idx, spec)
+    assert captured
+    phase_grid = idx[0 :: spec.step_hours]
+    expected = ev.horizon_log_return(log_close, spec.horizon_hours).reindex(phase_grid)
+    vol_normalized = vol_normalized_horizon_signal(log_close, spec.horizon_hours).reindex(phase_grid)
+    pd.testing.assert_frame_equal(captured[0], expected)
+    with pytest.raises(AssertionError):
+        pd.testing.assert_frame_equal(captured[0], vol_normalized)
+
+
+def test_phase_diagnostics_reversal_keeps_raw_signal(monkeypatch) -> None:
+    """SCENARIO_PHASE_DIAGNOSTICS_REVERSAL_UNCHANGED: ``_phase_diagnostics``
+    for a sign=-1 spec still ranks raw ``horizon_log_return``."""
+    log_close, eligible, opens, bar_funding, idx = _signal_disagreement_panel()
+    spec = _dispatch_spec(sign=-1)
+    captured: list[pd.DataFrame] = []
+    real_rank = ev.rank_weight_book
+
+    def recording(signal, elig, sign, min_symbols):
+        captured.append(signal)
+        return real_rank(signal, elig, sign, min_symbols)
+
+    monkeypatch.setattr(ev, "rank_weight_book", recording)
+    ev._phase_diagnostics(log_close, eligible, opens, bar_funding, idx, spec)
+    assert captured
+    phase_grid = idx[0 :: spec.step_hours]
+    expected = ev.horizon_log_return(log_close, spec.horizon_hours).reindex(phase_grid)
+    pd.testing.assert_frame_equal(captured[0], expected)
