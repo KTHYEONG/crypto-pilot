@@ -180,6 +180,70 @@ def test_truncate_replayable_decisions_requires_exact_timeout_bar() -> None:
     assert retained.empty
 
 
+def _pnl_vol_spike_returns() -> pd.Series:
+    """Calm-then-high-vol daily returns with non-zero vol in each regime."""
+    rng = np.random.default_rng(20260807)
+    idx = pd.date_range("2024-01-01", periods=200, freq="D", tz="UTC")
+    returns = np.concatenate([
+        rng.normal(0.001, 0.002, 100),
+        rng.normal(0.05, 0.05, 100),
+    ])
+    return pd.Series(returns, index=idx)
+
+
+def test_pnl_vol_target_scale_no_lookahead() -> None:
+    # SCENARIO_PNL_VOL_TARGET_SCALE_NO_LOOKAHEAD: scale_t must depend only on
+    # reference_daily_returns strictly before t -- truncating the input to end
+    # exactly at t leaves scale[:t+1] unchanged.
+    r = _pnl_vol_spike_returns()
+    full = ev._pnl_vol_target_scale(r)
+    for t in (40, 90, 110, 150, 198):
+        truncated = ev._pnl_vol_target_scale(r.iloc[: t + 1])
+        pd.testing.assert_series_equal(
+            full.iloc[: t + 1], truncated, check_names=False,
+        )
+
+
+def test_pnl_vol_target_scale_reduces_on_vol_spike() -> None:
+    # SCENARIO_PNL_VOL_TARGET_SCALE_REDUCES_ON_VOL_SPIKE: a calm regime keeps
+    # full exposure while a high-vol regime drives the scale toward the floor.
+    r = _pnl_vol_spike_returns()
+    out = ev._pnl_vol_target_scale(r)
+    assert out.iloc[50] == pytest.approx(1.0)
+    assert out.iloc[150] <= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR + 1e-9
+    assert out.iloc[150] < out.iloc[50]
+
+
+def test_pnl_vol_target_scale_never_exceeds_one() -> None:
+    # SCENARIO_PNL_VOL_TARGET_SCALE_NEVER_EXCEEDS_ONE: no leverage-up ever and
+    # the floor is respected across ultra-calm and ultra-volatile regimes; a
+    # zero-std constant-return input is safe-divided to 1.0 (no inf).
+    rng = np.random.default_rng(7)
+    calm = pd.Series(rng.normal(1e-4, 1e-5, 150), index=pd.date_range("2024-01-01", periods=150, freq="D", tz="UTC"))
+    wild = pd.Series(rng.normal(0.0, 0.5, 150), index=pd.date_range("2024-06-01", periods=150, freq="D", tz="UTC"))
+    combo = pd.concat([calm, wild])
+    out = ev._pnl_vol_target_scale(combo)
+    assert (out >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (out <= 1.0).all()
+    constant = pd.Series(
+        np.concatenate([np.full(100, 0.001), np.full(100, 0.05)]),
+        index=pd.date_range("2024-01-01", periods=200, freq="D", tz="UTC"),
+    )
+    zero_out = ev._pnl_vol_target_scale(constant)
+    assert np.isfinite(zero_out.to_numpy()).all()
+    assert (zero_out >= 0.2).all()
+    assert (zero_out <= 1.0).all()
+
+
+def test_pnl_vol_target_scale_burn_in_is_unscaled() -> None:
+    # SCENARIO_PNL_VOL_TARGET_SCALE_BURN_IN_IS_UNSCALED: before
+    # MHS_PNL_VOL_TARGET_BURN_IN_DAYS samples exist, scale is exactly 1.0 no
+    # matter how volatile the input is -- never an under-sampled estimate.
+    r = _pnl_vol_spike_returns()
+    out = ev._pnl_vol_target_scale(r)
+    assert (out.iloc[: ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
+
+
 def test_cache_required_marks_raise_structured_provenance() -> None:
     # MHS-STRICT-FAIL-CLOSED
     grid = pd.date_range("2021-01-01", periods=31, freq="1min", tz="UTC")
@@ -345,7 +409,22 @@ class TestAnchoredFoldBounded:
         ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, recorder)
         window_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
         assert window_stages, "fold paired window telemetry must be recorded"
-        assert window_stages == sorted(window_stages)
+        # The two-pass primary records each window bound twice (Pass 1
+        # reference, then the rescaled Pass 2), so the primary stages are two
+        # identical internally-ordered passes; the cost-stress bound follows.
+        primary_stages = [
+            s for s in window_stages
+            if not s.startswith("anchored_fold_0_window_cost_stress")
+        ]
+        assert len(primary_stages) % 2 == 0
+        half = len(primary_stages) // 2
+        assert primary_stages[:half] == primary_stages[half:]
+        assert primary_stages[:half] == sorted(primary_stages[:half])
+        stress_stages = [
+            s for s in window_stages
+            if s.startswith("anchored_fold_0_window_cost_stress")
+        ]
+        assert stress_stages == sorted(stress_stages)
         # The paired fan-out records one physical window per stage: the stress
         # bound consumes the same iterator, so no separate stress re-iteration
         # telemetry exists.
@@ -382,7 +461,8 @@ class TestAnchoredFoldBounded:
         )
         assert report.strict is not None
         assert report.stress is not None
-        assert calls["n"] == 2
+        # Two-pass primary (reference + rescaled) plus one stress bound.
+        assert calls["n"] == 3
 
     def test_rss_budget_enforced_inside_fold_fails_closed(self, mhs_market, monkeypatch) -> None:
         monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
@@ -401,6 +481,48 @@ class TestAnchoredFoldBounded:
             ev.MHS_GO_REASON_PRIMARY_SHARPE,
             ev.MHS_GO_REASON_STRESS_SHARPE,
         )
+
+
+def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
+    # SCENARIO_ANCHORED_FOLD_IS_TWO_PASS: the fold's reported primary
+    # (strict/autocorr-sharpe/max-drawdown) reflects the P&L-vol-target
+    # rescaled Pass-2 replay, not the unscaled reference. An engineered
+    # non-trivial scale must move the fold's reported metrics away from the
+    # all-ones (reference-equivalent) run.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+    )
+
+    def _all_ones_scale(reference_daily_returns: pd.Series) -> pd.Series:
+        return pd.Series(1.0, index=reference_daily_returns.index)
+
+    def _forced_step_scale(reference_daily_returns: pd.Series) -> pd.Series:
+        idx = reference_daily_returns.index
+        mid = idx[0] + (idx[-1] - idx[0]) / 2
+        return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
+
+    monkeypatch.setattr(ev, "_pnl_vol_target_scale", _all_ones_scale)
+    reference = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+    )
+    monkeypatch.setattr(ev, "_pnl_vol_target_scale", _forced_step_scale)
+    rescaled = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+    )
+    assert reference.strict is not None
+    assert reference.stress is not None
+    assert rescaled.strict is not None
+    assert rescaled.stress is not None
+    assert rescaled.primary_autocorr_sharpe != reference.primary_autocorr_sharpe
+    assert rescaled.primary_max_drawdown != reference.primary_max_drawdown
 
 
 def _build_book_outcome_args(mhs_market) -> dict[str, object]:
@@ -743,7 +865,9 @@ class TestBookOutcomePaired:
         assert report.primary is not None
         assert report.stress is not None
         assert report.failure is None
-        assert calls["n"] == 3
+        # Two-pass primary (reference + rescaled) plus stress and the
+        # informational patient-reference bound.
+        assert calls["n"] == 4
 
     def test_book_strict_resource_breach_is_typed_failure(self, mhs_market, monkeypatch) -> None:
         args = _build_book_outcome_args(mhs_market)
@@ -759,6 +883,31 @@ class TestBookOutcomePaired:
         assert report.failure is not None
         assert report.failure.stage == "replay_fast_reversal"
         assert report.failure.reason == ev.MHS_GO_REASON_RESOURCE_BREACH
+
+
+def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
+    # SCENARIO_BOOK_OUTCOME_IS_TWO_PASS: the reported primary is the
+    # P&L-vol-target-rescaled Pass-2 replay, with Pass 1 kept as the
+    # pre_vol_target_reference diagnostic. The fields are populated on the
+    # natural fixture, and an engineered non-trivial scale proves Pass 2
+    # genuinely re-ran with different weights (the 8th-iteration no-op class).
+    args = _build_book_outcome_args(mhs_market)
+    report = ev._book_outcome(**args)
+    assert report.pre_vol_target_reference is not None
+    assert report.pre_vol_target_reference_naive_sharpe is not None
+    assert report.primary is not None
+    assert report.pre_vol_target_reference.fill_source == report.primary.fill_source
+
+    def _forced_step_scale(reference_daily_returns: pd.Series) -> pd.Series:
+        idx = reference_daily_returns.index
+        mid = idx[0] + (idx[-1] - idx[0]) / 2
+        return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
+
+    monkeypatch.setattr(ev, "_pnl_vol_target_scale", _forced_step_scale)
+    forced = ev._book_outcome(**args)
+    assert forced.pre_vol_target_reference is not None
+    assert forced.pre_vol_target_reference_naive_sharpe is not None
+    assert forced.primary_naive_sharpe != forced.pre_vol_target_reference_naive_sharpe
 
 
 def test_xs_rank_ic_vectorized_contract_ignores_invalid_cross_section_cells() -> None:
@@ -1556,6 +1705,47 @@ def test_mhs_output_tier_enum_values() -> None:
     assert ev.MhsOutputTier.FULL.value == "full"
     assert ev.MhsOutputTier("compact") is ev.MhsOutputTier.COMPACT
     assert ev.MhsOutputTier("full") is ev.MhsOutputTier.FULL
+
+
+def test_regression_existing_report_fields_unchanged() -> None:
+    # SCENARIO_REGRESSION_EXISTING_REPORT_FIELDS_UNCHANGED: the two-pass
+    # change must not rename or drop any existing MhsBookReport/MhsFoldReport
+    # field (which doubles as the JSON key via to_payload()) -- only
+    # pre_vol_target_reference/pre_vol_target_reference_naive_sharpe are new,
+    # following the exact patient_reference field-addition precedent.
+    book_fields = {f.name for f in dataclasses.fields(ev.MhsBookReport)}
+    for field_name in (
+        "name", "band", "horizon_hours", "step_hours", "tranche_count",
+        "n_symbols", "phase", "prescreen", "tail", "primary", "stress",
+        "primary_autocorr_sharpe", "primary_naive_sharpe", "primary_net_ann",
+        "primary_geometric_cagr", "primary_max_drawdown",
+        "primary_annualized_turnover", "stress_naive_sharpe",
+        "terminal_censored_decisions", "failure", "touch", "touch_naive_sharpe",
+        "ladder", "ladder_naive_sharpe", "patient_reference",
+        "patient_reference_naive_sharpe",
+    ):
+        assert field_name in book_fields
+    assert "pre_vol_target_reference" in book_fields
+    assert "pre_vol_target_reference_naive_sharpe" in book_fields
+
+    fold_fields = {f.name for f in dataclasses.fields(ev.MhsFoldReport)}
+    for field_name in (
+        "fold_index", "validation_start", "validation_end", "strict", "stress",
+        "primary_valid", "primary_autocorr_sharpe", "primary_naive_sharpe",
+        "primary_net_ann", "primary_geometric_cagr", "primary_max_drawdown",
+        "stress_naive_sharpe", "decision_intents", "termination_counts",
+        "failures", "strict_elapsed_seconds", "stress_elapsed_seconds",
+        "terminal_censored_decisions",
+    ):
+        assert field_name in fold_fields
+
+    report = _build_compact_report()
+    book = report.books["fast_reversal"]
+    for key in ("primary", "patient_reference", "patient_reference_naive_sharpe"):
+        assert key in dataclasses.asdict(book)
+    assert "pre_vol_target_reference" in dataclasses.asdict(book)
+    payload = report.to_payload()
+    assert "pre_vol_target_reference" in payload["books"]["fast_reversal"]
 
 
 def test_daily_resample_ledger_fidelity() -> None:
