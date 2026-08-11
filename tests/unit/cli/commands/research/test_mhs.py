@@ -24,6 +24,7 @@ def test_mhs_diagnostic_defaults_and_mark_mode_choices() -> None:
     assert defaults["touch_diagnostic"] is False
     assert defaults["ladder_diagnostic"] is False
     assert defaults["discovery_gate"] is False
+    assert defaults["fold_safe_horizon"] is False
     args = parser.parse_args([])
     assert args.max_rss_bytes is None
 
@@ -105,6 +106,41 @@ def test_mhs_diagnostic_touch_flag_threaded_to_request(monkeypatch) -> None:
     assert args.touch_diagnostic is False
     _run_mhs_horizon_diagnostic(args)
     assert captured["touch_diagnostic"] is False
+
+
+def test_mhs_diagnostic_fold_safe_horizon_flag_threaded_to_request(monkeypatch) -> None:
+    """SCENARIO_MHS_FOLD_SAFE_HORIZON_08_CLI_FLAG_THREADS_THROUGH:
+    ``--fold-safe-horizon`` is parsed and threaded into the constructed
+    ``MhsDiagnosticRequest``; omitting it defaults to False."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        captured.update(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    args = parser.parse_args(["--fold-safe-horizon"])
+    assert args.fold_safe_horizon is True
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["fold_safe_horizon_selection"] is True
+
+    captured.clear()
+    args = parser.parse_args([])
+    assert args.fold_safe_horizon is False
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["fold_safe_horizon_selection"] is False
 
 
 def test_mhs_diagnostic_ladder_flag_threaded_to_request(monkeypatch) -> None:
