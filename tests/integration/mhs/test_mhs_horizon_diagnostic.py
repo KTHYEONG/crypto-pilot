@@ -1060,11 +1060,17 @@ class TestFullModeBackwardCompat:
         expected_fills = sum(
             len(replay.simulated_fills)
             for book_report in report.books.values()
-            for replay in (book_report.primary, book_report.stress, book_report.patient_reference)
+            for replay in (
+                book_report.primary, book_report.stress,
+                book_report.patient_reference, book_report.pre_vol_target_reference,
+            )
             if replay is not None
         )
         if report.blend is not None:
-            for replay in (report.blend.primary, report.blend.stress, report.blend.patient_reference):
+            for replay in (
+                report.blend.primary, report.blend.stress,
+                report.blend.patient_reference, report.blend.pre_vol_target_reference,
+            ):
                 if replay is not None:
                     expected_fills += len(replay.simulated_fills)
         for fold_report in report.folds:
@@ -1179,9 +1185,10 @@ class TestFoldWindowTelemetryOracle:
         assert fold_report.stress is not None
         assert fold_report.stress.event_snapshots_retained is False
 
-        # The fold runs two independent replays (immediate-taker primary and
-        # cost-stressed stress), each with its own window telemetry under a
-        # distinct stage prefix; both are recorded in chronological order.
+        # The fold runs three replay bounds (two-pass immediate-taker primary:
+        # Pass 1 reference + Pass 2 rescaled -- then the cost-stressed stress),
+        # each with its own window telemetry under a distinct stage prefix; all
+        # windows are recorded in chronological order.
         primary_windows = [
             (m.window_start, m.window_end)
             for m in recorder.records
@@ -1195,7 +1202,13 @@ class TestFoldWindowTelemetryOracle:
         ]
         assert primary_windows, "fold primary window telemetry must be recorded"
         assert stress_windows, "fold cost-stress window telemetry must be recorded"
-        for seen in (primary_windows, stress_windows):
+        # Pass 2 re-runs the identical window decomposition over the rescaled
+        # weights, so the two primary passes are ordered each on its own.
+        assert len(primary_windows) % 2 == 0
+        half = len(primary_windows) // 2
+        primary_passes = (primary_windows[:half], primary_windows[half:])
+        assert primary_passes[0] == primary_passes[1]
+        for seen in (*primary_passes, stress_windows):
             # Each bound's windows are chronologically ordered: starts and ends
             # are non-decreasing and span the validation window.
             starts = [pd.Timestamp(s) for s, _ in seen]
