@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260811_MHS_MOMENTUM_VOL_NORMALIZATION",
+      "date": "2026-08-11",
+      "adr_id": "ADR_20260811_MHS_MOMENTUM_VOL_NORMALIZATION",
+      "domain": "mhs",
+      "title": "MHS momentum 신호 vol-normalized 시도 및 원복",
+      "why": "raw momentum이 discovery worst-year admission floor(2.0)를 넘지 못해(최고 0.493) 신호 구성 자체를 재검토; 5개 대안 실측 중 vol-normalized momentum(horizon_log_return/realized_vol)만 부작용 없는 순수 개선(+37%, 0.673)으로 확인되어 실전 북에 배선",
+      "resolution": "discovery.py의 sign=1 진단 스코어링에는 vol-normalized 신호를 유지했으나, 실전 slow_momentum/blend 북(_book_weights/_phase_diagnostics)에 배선한 버전은 전체 2021-2025 리플레이에서 CAPITAL_INVARIANT_BREACH를 일으켜(이중 vol-scaling 제거로도 미해결, 2021-2024 누적손실이 raw보다 깊음을 확인) raw horizon_log_return으로 원복. 최종 상태는 7차 baseline과 수치까지 동일(+0.4317 Sharpe, blend.failure=None)함을 실측 재확인",
+      "impact": "Research GO는 여전히 FALSE(7차와 동일 판정). discovery-gate 진단은 momentum worst-year net_t +0.493→+0.673 개선 유지, 실전 자본에는 영향 없음. execution.py의 CAPITAL_INVARIANT_BREACH 에러 메시지에 timestamp/pre_trade_equity 진단 정보 추가(영구 개선)"
+    },
+    {
       "task_id": "ADR_20260811_MHS_REALISTIC_EXECUTION_PRIMARY_SWAP",
       "date": "2026-08-11",
       "adr_id": "ADR_20260811_MHS_REALISTIC_EXECUTION_PRIMARY_SWAP",
@@ -989,16 +999,6 @@
       "why": "Evaluates strategy robustness via block bootstrap LCB90 CAGR, fold distribution concentration, and cost/delay execution stress test.",
       "resolution": "Implemented compute_reliability_gate, split_holdout_segment, compute_fold_distribution, compute_stress_test_gate, and recorded metrics in runs.jsonl.",
       "impact": "Provides robust, data-driven gate criteria preventing overfitted or regime-dependent strategies from passing into production."
-    },
-    {
-      "task_id": "TASK_RESET_V1_DONCHIAN_BASELINE",
-      "date": "2026-07-31",
-      "adr_id": "ADR_20260731_RESET_V1_DONCHIAN_BASELINE",
-      "domain": "execution",
-      "title": "Full Reset — Donchian Breakout Baseline (v1)",
-      "why": "208k-LOC L1/L2 research stack (74.5k src + 140.5k tests) had no reproducible edge; every metric was untraceable across multi-symbol/multi-TF fitted layers",
-      "resolution": "Archived legacy/domain/application/tests to legacy/reset_20260731 (git tag pre-reset-20260731), kept only the data-collection carve-out (src/data/*), rebuilt a flat 0-fitted-parameter Donchian(20)/EMA(200)/ATR(14,2.0) engine with frozen StrategySpec+CostModel, and fixed a signal-bar-ATR causality bug (engine used atr[t] instead of atr[t-1] for stop sizing) caught by /check against the frozen SC-BASE-01 baseline",
-      "impact": "BTCUSDT 4h observation window 2022-04~2025-12: 91 trades, CAGR 9.63%, MDD -7.47%, Sharpe 1.40, PF 2.25 vs buy&hold CAGR 24.77%/MDD -60.58%/Sharpe 0.70 — risk-adjusted not absolute edge; 29/29 tests + mypy strict + ruff clean; 2026 H1 held out and sealed"
     }
   ]
 }
