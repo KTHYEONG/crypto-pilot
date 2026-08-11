@@ -20,9 +20,9 @@
 
 ## 4. Execution & Environment Rules
 - **Environment Tooling:** All execution, linting, typing, and tests MUST use `uv run` prefix (`uv run ruff check`, `uv run mypy`, `uv run pytest`).
+- **Project-Only Temp (No External /tmp):** All temporary artifacts MUST stay inside the repository. Scripts & command output logs go to `scratch/`; tool scratch roots go to `tmp/`. Never write to `/tmp`, `/tmp/opencode`, `%TEMP%`, or any external temp path. Tools that default to an external temp root (pytest `tmp_path`, `tempfile`, `TMPDIR`) are pinned to the project via `tests/conftest.py`. The sync skill purges `scratch/` and `tmp/`.
 - **File Modification Policy:** Use available patch/edit tools for existing files. Create a new file only when it does not exist.
 - **Context Control:** Omit unchanged lines with `# ... existing code ...`. Specify line ranges when viewing large files over 300 lines.
-- **Project-Only Temp (No External `/tmp`):** Every temporary artifact — scratch scripts, command output logs, pytest/Python temp roots, downloaded files — MUST stay inside the repo under `scratch/` (scripts/logs) or `tmp/` (machine/tool temp roots). NEVER write outside the repo: no `/tmp`, `/tmp/opencode`, `%TEMP%`, or any external temp default. When a tool defaults to an external temp root (pytest `tmp_path`, Python `tempfile`, etc.), pin it to the project (`tmp/`; pytest is already wired via `tests/conftest.py`). Verify all results inside the project. Sync skill purges `scratch/` and `tmp/`.
 
 ## 5. Domain & Skill Rule Routing
 - **Python Architecture & Standards:** [python.md](file:///.agents/rules/python.md)
@@ -30,4 +30,4 @@
 - **Testing & Coverage Directives:** [testing.md](file:///.agents/rules/testing.md)
 - **Logging & Traceability Standards:** [logging.md](file:///.agents/rules/logging.md)
 - **Performance & Optimization:** [performance.md](file:///.agents/rules/performance.md)
-- **Documentation & ADR Strategy:** [documentation.md](file:///.agents/rules/documentation.md)
+- **Documentation & Code Commenting:** [documentation.md](file:///.agents/rules/documentation.md)
