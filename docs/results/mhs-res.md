@@ -1,6 +1,6 @@
 # MHS Horizon Diagnostic Quantitative Performance & Resource Report
 
-- **Document Date**: 2026-08-11 (7차 — Research-GO primary를 realistic immediate-taker로 교체 실측)
+- **Document Date**: 2026-08-11 (8차 — momentum vol-normalized 신호 실전 배선 시도 → 자본침범 확인 후 원복, discovery 진단 전용으로 축소 확정)
 - **Registered ADRs**:
   - `ADR_20260810_MHS_EXECUTION_ROSTER_RENORMALIZATION` (1차: 실행 roster 마스킹 후 dollar-neutral/unit-gross 재정규화)
   - `ADR_20260810_MHS_ROSTER_HYSTERESIS_VOL_TILT` (2차: roster 진입/이탈 히스테리시스 + causal inverse-vol tilt)
@@ -9,14 +9,15 @@
   - `ADR_20260810_MHS_BLEND_GRID_COUPLING_FIX` (4차: blend 실행 격자/spec을 admission 가중치 기반으로 재결합)
   - `ADR_20260810_MHS_EXECUTION_LADDER_AND_DISCOVERY_GATE` (5차: 에스컬레이팅 체결 사다리 + discovery/qualification 게이트 구현·실측)
   - `ADR_20260811_MHS_DISCOVERY_2021_GAP_AND_DENSE_GRID` (6차: 2021 결손 데이터-커버리지 원인 규명, discovery.py 가중치 재사용 리팩터링, horizon 격자 조밀화 + tranche_count 배선 수정 실측)
-  - `ADR_20260811_MHS_REALISTIC_EXECUTION_PRIMARY_SWAP` (7차: Research-GO primary를 `OHLCV_STRICT_PROXY`(patient 30분 대기)에서 `OHLCV_IMMEDIATE_TAKER`로 교체, stress를 ×3 cost bound로 교체, 이번 갱신)
-- **이번 실측 근거**: `docs/specs/mhs_realistic_execution_primary_swap.md`
-  (30분 타임아웃발 동조화 taker 폭주가 성과 파괴 원인이라는 실측 규명 §0,
-  primary/stress/reference 교체 설계 §1)
+  - `ADR_20260811_MHS_REALISTIC_EXECUTION_PRIMARY_SWAP` (7차: Research-GO primary를 `OHLCV_STRICT_PROXY`(patient 30분 대기)에서 `OHLCV_IMMEDIATE_TAKER`로 교체, stress를 ×3 cost bound로 교체)
+  - `ADR_20260811_MHS_MOMENTUM_VOL_NORMALIZATION` (8차: momentum 신호를 realized-vol 정규화로 교체 시도 — discovery 프리스크린 +37% 개선은 확인되나 실전 북 전체 리플레이에서 자본침범 회귀 재확인되어 원복, vol-normalized 신호는 discovery-gate 진단 전용으로 축소 — 이번 갱신)
+- **이번 실측 근거**: `docs/specs/mhs_momentum_vol_normalization.md`
+  (raw momentum의 고변동성 종목 지배 문제 → vol-normalized momentum 시도 §0/§1,
+  전체 리플레이 회귀 확인·원복 §4)
 - **Domain**: Research / MHS (Multi-Horizon Market State)
-- **Source Diagnostic File**: [`docs/results/mhs_horizon_diagnostic.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic.json) (compact tier), [`docs/results/mhs_horizon_diagnostic_artifacts/_full/report.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic_artifacts/_full/report.json) (`--ladder-diagnostic --output-tier full`)
+- **Source Diagnostic File**: [`docs/results/mhs_horizon_diagnostic.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic.json) (compact tier), [`docs/results/mhs_horizon_diagnostic_artifacts/_full/report.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic_artifacts/_full/report.json) (`--discovery-gate --output-tier full`)
 - **Execution Status**: `COMPLETE`
-- **Run Metadata**: 2021-01-01~2025-12-31, `execution_universe_size=30`, `execution_timeframe=5m`, `eligible_symbols=446`
+- **Run Metadata**: 2021-01-01~2025-12-31, `execution_universe_size=30`, `execution_timeframe=5m`, `eligible_symbols=445`
 
 ---
 
@@ -53,6 +54,73 @@ strict-proxy는 `patient_reference` 진단 필드로만 보존된다(Research GO
 전환됐고 꼬리 손실 메커니즘은 사라졌지만, **Research GO floor(0.6)에 아직
 미달** — 이번 수정은 GO 달성이 아니라 선행 전제 조건 수정이며, 상위 레버는
 여전히 신호 자체다.
+
+---
+
+## 0.8차 실측 — momentum vol-normalized 신호 교체
+
+8차(이번 갱신)는 신호 구성 자체를 바꿨다. raw 360h momentum은 top-30 유동성
+유니버스에서 고실현변동성 종목이 원시 수익률 크기로 순위를 지배해
+`admission_t=2.0` worst-year floor를 넘지 못했고, 남은 레버를 파라미터가 아닌
+**신호 구성**에서 찾았다. horizon return을 자기 realized-vol로 나눈
+(리스크 조정) 구성은 discovery worst-year 프리스크린을 **+0.493 → +0.673
+(+37%)**으로 개선했다(360h가 여전히 승자, sandbox 실측 그대로 재현). 그래도
+`admission_t=2.0` 미달이라 `admitted=False`이고 Research GO를 뒤집지는 못한다.
+구현은 sign=+1(momentum) 계열에만 적용하고 sign=-1(reversal)은 raw 유지
+(`src/mhs/horizons.py:vol_normalized_horizon_signal`, discovery/evaluation
+배선), 단위·통합 테스트 전부 통과.
+
+**그러나 spec §3.5의 사후 전체 리플레이 실측에서 회귀가 확인됐다**: 같은
+vol-normalized 신호를 168h 실전 momentum 북에 적용한 immediate-taker 5년
+재생은 slow_momentum(및 그로 귀결되는 blend)이 `CAPITAL_INVARIANT_BREACH`
+(pre-trade equity ≤ 0)로 fail-closed됐다. 같은 설정을 raw 신호로 되돌려
+재실행하면 7차 수치(+0.4317 autocorr, stress +0.0250)가 정확히 재현되므로
+회귀의 원인은 신호 교체로 확정된다. 유력 메커니즘은 `_book_weights`의
+vol-normalization(1/vol)과 이후 `inverse_realized_vol_tilt`(1/vol)의
+**이중 볼스케일링**으로 저변동성 종목에 과집중되어 taker 비용 하에서 자본이
+붕괴하는 것이다. 결과적으로 7차의 "fold2만 통과, primary 유효"보다 더 나쁜
+실패 모드(primary 자체 무효)가 됐다.
+
+| Metric | 7차 baseline (raw) | 8차 (vol-normalized) |
+| :--- | :--- | :--- |
+| momentum discovery worst-year net_t (360h) | +0.493 | **+0.673** |
+| slow_momentum primary autocorr Sharpe | **+0.4317** | CAPITAL_INVARIANT_BREACH |
+| slow_momentum stress naive Sharpe | +0.0250 | 미측정 (primary 선행 실패) |
+| Research GO | False (fold2 통과, primary 유효) | False (primary 무효) |
+
+**정직한 해석**: discovery 프리스크린 개선은 실제로 재현됐지만, 실전 북의 전체
+리플레이 Sharpe로 이어지지 않았다 — spec §0의 "no new instability" 가정은
+전체 리플레이에서 반증됐다. 프리스크린은 `cost_response_curve`(간이) 기반이고
+`primary_autocorr_sharpe`는 `simulated_inventory_ledger`(실사) 기반이라 두
+경로가 같은 방향으로 움직인다는 보장이 없었고, 실제로 그 반대가 측정됐다.
+
+**1차 수정 시도(이중 볼스케일링 제거)도 실패 — 재실측으로 확인**: `_book_weights`의
+신호 단 1/vol과 `inverse_realized_vol_tilt`의 포지션 단 1/vol이 중첩된다는
+가설로 momentum(`sign=+1`) 북에서 `inverse_realized_vol_tilt`를 건너뛰도록
+고쳐 재실행했으나, **여전히** `CAPITAL_INVARIANT_BREACH`가 재현됐다(이번엔
+`ts=2025-05-28 01:05:00+00:00`, pre-trade equity=-0.0194). 에러 메시지에
+타임스탬프를 추가해(`src/mhs/execution.py`) 확인한 결과 해당 시점 전후 타겟
+비중은 심볼당 최대 5-6% 수준으로 정상적이었다 — 즉 단일 종목 과집중이나
+단발 꼬리 이벤트가 아니라, 2021-2024 구간 전체에 걸친 누적 손실이 raw
+signal의 MDD(-45.7%)보다 더 깊어 2025년의 회복 전에 자본이 먼저 소진되는
+구조였다. 이중 볼스케일링은 실재하는 문제였지만 자본침범의 유일한 원인은
+아니었다.
+
+**최종 조치: 실전 북 배선 원복**: `_book_weights`/`_phase_diagnostics`를 raw
+`horizon_log_return`으로 되돌리고(양쪽 sign 모두), `inverse_realized_vol_tilt`도
+원래대로 양쪽 북에 적용하도록 복원했다. 재실행으로 7차 수치와 완전히 동일함을
+재확인했다(`primary_autocorr_sharpe=+0.4317`, fold Sharpe -0.789/-0.517/+1.604,
+`blend.failure=None`). `vol_normalized_horizon_signal`은 `discovery.py`의
+`sign=1` 진단 스코어링에만 남아 있다(momentum worst-year net_t +0.493→+0.673
+유지, 자본에는 영향 없음) — 7차의 `OHLCV_STRICT_PROXY` 강등과 동일한 패턴이다.
+`fast_reversal`의 `CAPITAL_INVARIANT_BREACH`(`ts=2025-07-14`)는 이번 변경과
+무관한 기존 이슈로 그대로 남아 있다(reversal은 blend 자본 0%).
+
+| Metric | 7차 baseline (raw) | 8차 최초 시도 (momentum vol-norm, 이중스케일 제거 전) | 8차 1차 수정 (tilt만 스킵) | 8차 최종 (원복) |
+| :--- | :--- | :--- | :--- | :--- |
+| momentum discovery worst-year net_t (360h) | +0.493 | +0.673 | +0.673 | +0.673 (진단 전용 유지) |
+| slow_momentum primary autocorr Sharpe | **+0.4317** | BREACH (`ts=2025-05-28`, tilt 이중적용) | BREACH (`ts=2025-05-28`, 동일) | **+0.4317 (재확인)** |
+| Research GO | False (fold2 통과) | False (primary 무효) | False (primary 무효) | False (fold2만 통과, 7차와 동일) |
 
 ---
 
@@ -148,7 +216,7 @@ discovery 구간 시작점은 유효한 레버가 아니다.
 
 ## 3. 종합 — 다음 단계
 
-두 해법 모두 "쉬운 승리"가 아니었다는 것이 이번 실측의 핵심 결론이다:
+세 해법 모두 "쉬운 승리"가 아니었다는 것이 이번 실측의 핵심 결론이다:
 
 - **Part B**: 이전 스윕에서 유일하게 보였던 "탈출구"(168h reversal)가
   discovery worst-year-robust 기준에서 사라졌다 — horizon 재선정으로는
@@ -156,6 +224,13 @@ discovery 구간 시작점은 유효한 레버가 아니다.
 - **Part A**: 체결 사다리는 꼬리 위험은 줄이지만 평균 비용이 늘어 Sharpe
   기준으로는 개선이 아니다 — 30분 타임아웃 자체보다 "추세가 지속되면
   가격이 안 돌아온다"는 시장 구조 자체가 더 근본적인 제약일 가능성.
-- 두 결과를 함께 보면, 남은 레버는 파라미터 재조정(§1/§2 스윕)보다
+- **8차 (신호 재설계)**: vol-normalized momentum은 discovery 프리스크린
+  (+37%)만 개선하고 실전 북의 전체 리플레이 Sharpe는 개선은커녕 자본
+  침범으로 파괴했다 — 프리스크린(간이)과 `simulated_inventory_ledger`(실사)
+  는 같은 방향으로 움직인다는 보장이 없으며, 신호 구성 변경은 반드시 전체
+  리플레이로 검증해야 한다는 것을 확정 실측으로 남겼다.
+- 세 결과를 함께 보면, 남은 레버는 파라미터 재조정(§1/§2 스윕)보다
   **신호·실행 접근 방식 자체의 재설계**(예: 다른 신호 축, 다른 체결
-  스케줄 형태)일 가능성이 높다 — 다음 spec 사이클의 핵심 질문으로 남긴다.
+  스케줄 형태)일 가능성이 높다 — 8차에서는 특히 vol-normalization과 기존
+  inverse-vol tilt의 이중 볼스케일링 제거가 첫 후보이며, 다음 spec 사이클의
+  핵심 질문으로 남긴다.
