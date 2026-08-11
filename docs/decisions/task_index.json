@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FOLD_SAFE_HORIZON_SELECTION",
+      "date": "2026-08-11",
+      "adr_id": "ADR_20260811_MHS_FOLD_SAFE_HORIZON_SELECTION",
+      "domain": "mhs",
+      "title": "MHS fold-safe(leak-free) discovery/qualification horizon 재선정",
+      "why": "slow_momentum의 horizon_hours=168이 discovery.py 도입 이전 레거시 하드코딩으로, 전역 discovery 그리드 실측(mhs-res.md §2)에서 168h가 최약체(worst-year net_t=+0.107)이고 360h가 최강(+0.493)임에도 실전에 전혀 반영되지 않았음. 원인 규명: 전역 discovery/qualification 윈도우(2022-04~2025-12)가 3개 anchored fold의 validation 연도(2023/2024/2025) 전부와 겹쳐 그대로 쓰면 모든 fold에서 look-ahead leakage가 발생 -- 그래서 지금까지 discovery_gate는 진단 전용으로만 격리돼 있었음.",
+      "resolution": "src/mhs/discovery.py에 fold_train_only_discovery_qualification() 추가: 기존 select_horizon_by_discovery_qualification을 재사용하되, 각 anchored fold의 train_start~train_end(validation_start 이전)로만 discovery/qualification 윈도우를 파생(qualification=train_end가 속한 역년, discovery=그 이전 전체)해 leak-free 재선정. src/mhs/contracts.py의 _SLOW_BAND horizons_hours를 전체 momentum 후보 그리드(72~504h)로 확장해 동적 선택을 허용(기본 168h 유지). MhsDiagnosticRequest.fold_safe_horizon_selection(opt-in, 기본 False)로 게이팅, --fold-safe-horizon CLI 플래그 추가. 부모 프로세스에서 fold별 선택을 1회 계산해(이미 로드된 전체 패널 재사용) plain int만 fork된 fold worker에 전달(패널 재로드 없음). MhsFoldReport에 slow_horizon_hours/slow_horizon_source 필드 추가해 감사 가능하게 기록.",
+      "impact": "10차 전체 리플레이 실측(2021-2025, 446심볼, --fold-safe-horizon --discovery-gate): 3개 fold 전부 admitted=False로 168h 기본값에 폴백(fold1 최고후보조차 168h 자신, net_t=+1.382로 admission floor 2.0 미달; fold0은 2021 데이터커버리지 결손으로 전부 non-finite). Research GO 수치 불변(byte-identical, primary_autocorr_sharpe=+0.4464 vs 9차 +0.4661는 446 vs 445 심볼 유니버스 자연드리프트, fold별 수치는 소수점까지 일치). 안전한 no-op으로 확인됨과 동시에 실질 병목을 admission_t=2.0 임계값(전역 다년 윈도우 기준으로 캘리브레이션되어 fold-local 1~3년 표본에는 지나치게 엄격)으로 명확히 특정 -- 다음 스펙 후보로 문서화."
+    },
+    {
       "task_id": "ADR_20260811_MHS_PNL_VOL_TARGETING",
       "date": "2026-08-11",
       "adr_id": "ADR_20260811_MHS_PNL_VOL_TARGETING",
@@ -989,16 +999,6 @@
       "why": "Flat module structure in src root caused scattered config variables and circular import risks as features expanded.",
       "resolution": "Reorganized codebase into layered subpackages (core, data, strategy, engine, validation, cli) and synchronized unit and integration tests.",
       "impact": "Eliminated duplicate variable definitions, enforced unidirectional layer architecture, and established clean maintainability for scaling."
-    },
-    {
-      "task_id": "TASK_LEAN_CHECK_SCHEMA_ALIGNMENT",
-      "date": "2026-07-31",
-      "adr_id": "ADR_20260731_LEAN_CHECK_SCHEMA_ALIGNMENT",
-      "domain": "execution",
-      "title": "Align lean_check.py with Spec Contract Schema",
-      "why": "lean_check.py failed spec-compliance validation due to schema mismatch.",
-      "resolution": "Updated _check_spec_compliance in lean_check.py to support file/symbol keys, python_assertion exec evaluation, and flexible wiring matching.",
-      "impact": "Restores automated spec-compliance gate verification without breaking legacy contract formats."
     }
   ]
 }
