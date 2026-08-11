@@ -20,6 +20,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     from src.application.research.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
     from src.application.research.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report, run_mhs_horizon_diagnostic
 
+    fold_safe_horizon = args.fold_safe_horizon
     request = MhsDiagnosticRequest(
         start=args.start,
         end=args.end,
@@ -30,6 +31,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         touch_diagnostic=args.touch_diagnostic,
         ladder_diagnostic=args.ladder_diagnostic,
         discovery_gate=args.discovery_gate,
+        fold_safe_horizon_selection=fold_safe_horizon,
     )
     report = run_mhs_horizon_diagnostic(request)
     path = persist_mhs_horizon_diagnostic_report(
@@ -105,6 +107,17 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "current panel for both sign families and record the outcome in "
             "the diagnostic report (opt-in; the result never changes contracts "
             "by itself)"
+        ),
+    )
+    mhs.add_argument(
+        "--fold-safe-horizon",
+        action="store_true",
+        default=False,
+        help=(
+            "Reselect the slow_momentum horizon per anchored fold from a "
+            "leak-free discovery/qualification run confined to each fold's "
+            "train data (opt-in; measured to be a safe no-op against the "
+            "current admission floor)"
         ),
     )
     mhs.add_argument(

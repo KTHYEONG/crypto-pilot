@@ -20,7 +20,7 @@ import pandas as pd
 
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
-from src.mhs.evaluation import cost_response_curve
+from src.mhs.evaluation import AnchoredPurgedFold, cost_response_curve
 from src.mhs.horizons import horizon_log_return, vol_normalized_horizon_signal
 
 _PERIODS_PER_YEAR_1H = 365.0 * 24.0
@@ -232,7 +232,65 @@ def select_horizon_by_discovery_qualification(
     )
 
 
+def fold_train_only_discovery_qualification(
+    sign: int,
+    horizon_candidates: tuple[int, ...],
+    log_close: pd.DataFrame,
+    eligible: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    grid_1h: pd.DatetimeIndex,
+    fold: AnchoredPurgedFold,
+    min_symbols: int = 8,
+    tranche_count: int = 1,
+    cost_bps: float = MEASURED_EXECUTION_COST_TIERS_BPS["optimistic"],
+    periods_per_year: float = _PERIODS_PER_YEAR_1H,
+    admission_t: float = _ADMISSION_T,
+) -> DiscoveryQualificationResult:
+    """Run the discovery/qualification gate on one anchored fold's own train data.
+
+    A leak-free, fold-scoped wrapper around
+    ``select_horizon_by_discovery_qualification``: the qualification window is
+    the single calendar year containing ``fold.train_end``, discovery is
+    everything in ``[fold.train_start, discovery_end]``, and both bounds are
+    ``<= fold.train_end`` (which ``AnchoredPurgedFold.__post_init__`` already
+    guarantees is ``< fold.validation_start``), so the gate never reads a bar
+    the fold's validation replay could see. When the train window spans less
+    than one extra calendar year beyond its first (``qualification_start <=
+    fold.train_start``) there is no room for a disjoint split and the gate
+    fails closed without evaluating any candidate.
+    """
+    qualification_start = pd.Timestamp(year=fold.train_end.year, month=1, day=1, tz="UTC")
+    if qualification_start <= fold.train_start:
+        return DiscoveryQualificationResult(
+            selected_horizon=None,
+            admitted=False,
+            discovery_scores=(),
+            discovery_aggregate_net_t=None,
+            qualification_net_t=None,
+            qualification_sign_consistent=None,
+        )
+    return select_horizon_by_discovery_qualification(
+        sign=sign,
+        horizon_candidates=horizon_candidates,
+        log_close=log_close,
+        eligible=eligible,
+        opens=opens,
+        bar_funding=bar_funding,
+        grid_1h=grid_1h,
+        discovery_start=fold.train_start,
+        discovery_end=qualification_start - pd.Timedelta(microseconds=1),
+        qualification_end=fold.train_end,
+        min_symbols=min_symbols,
+        tranche_count=tranche_count,
+        cost_bps=cost_bps,
+        periods_per_year=periods_per_year,
+        admission_t=admission_t,
+    )
+
+
 __all__ = [
     "DiscoveryQualificationResult",
+    "fold_train_only_discovery_qualification",
     "select_horizon_by_discovery_qualification",
 ]
