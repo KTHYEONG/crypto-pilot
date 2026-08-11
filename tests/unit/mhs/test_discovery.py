@@ -327,6 +327,74 @@ class TestDiscoveryQualificationGate:
         assert result.admitted is True
         assert len(calls) == len((24, 48)) + 1
 
+    def test_build_candidate_weights_matches_direct_calls(self) -> None:
+        """SCENARIO_MHS_HORIZON_SEARCH_EFF_01_BUILD_CANDIDATE_WEIGHTS:
+        ``build_candidate_weights`` returns one weight book per candidate
+        horizon, each byte-identical to a direct ``_horizon_weights`` call."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(24)
+        cache = discovery.build_candidate_weights(log_close, eligible, 1, (24, 48), 3, 1)
+        assert set(cache) == {24, 48}
+        for h in (24, 48):
+            pd.testing.assert_frame_equal(
+                cache[h],
+                discovery._horizon_weights(log_close, eligible, 1, h, 3, 1),
+            )
+
+    def test_cache_omitted_is_byte_identical(self) -> None:
+        """SCENARIO_MHS_HORIZON_SEARCH_EFF_02_CACHE_OMITTED_IS_BYTE_IDENTICAL:
+        with ``precomputed_candidate_weights`` omitted (the default None), the
+        gate keeps producing the pre-change result on the worst-year-robust
+        fixture (the ``test_worst_year_robust_selection_beats_aggregate``
+        regression anchor): 48 selected, admitted, worst-year score reported."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        y1 = np.asarray(idx.year == 2021, dtype=bool)
+        y2 = np.asarray(idx.year == 2022, dtype=bool)
+        min48 = min(_score(log_close, opens, bar_funding, eligible, 48, y1),
+                    _score(log_close, opens, bar_funding, eligible, 48, y2))
+        result = _run(log_close, opens, bar_funding, eligible, idx)
+        assert result.selected_horizon == 48
+        assert result.admitted is True
+        assert dict(result.discovery_scores)[48] == pytest.approx(min48)
+
+    def test_cache_supplied_skips_horizon_weights_calls(self, monkeypatch) -> None:
+        """SCENARIO_MHS_HORIZON_SEARCH_EFF_03_CACHE_SUPPLIED_SKIPS_HORIZON_WEIGHTS_CALLS:
+        with a complete ``precomputed_candidate_weights`` mapping supplied, the
+        gate never calls ``_horizon_weights`` internally (call-count unchanged
+        after the cache build) and returns a result identical in every field to
+        the cache-free call on the admitted fixture."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        baseline = _run(log_close, opens, bar_funding, eligible, idx)
+        assert baseline.admitted is True
+        original = discovery._horizon_weights
+        calls: list[int] = []
+
+        def counting_wrapper(*args, **kwargs) -> pd.DataFrame:
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(discovery, "_horizon_weights", counting_wrapper)
+        cache = discovery.build_candidate_weights(log_close, eligible, 1, (24, 48), 3, 1)
+        n_build_calls = len(calls)
+        assert n_build_calls == len((24, 48))
+        result = select_horizon_by_discovery_qualification(
+            sign=1, horizon_candidates=(24, 48), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+            precomputed_candidate_weights=cache,
+        )
+        assert len(calls) == n_build_calls
+        assert result.selected_horizon == baseline.selected_horizon
+        assert result.admitted == baseline.admitted
+        assert result.discovery_scores == baseline.discovery_scores
+        assert result.discovery_aggregate_net_t == baseline.discovery_aggregate_net_t
+        assert result.qualification_net_t == baseline.qualification_net_t
+        assert result.qualification_sign_consistent == baseline.qualification_sign_consistent
+
     def test_sign_plus_one_uses_vol_normalized_signal(self) -> None:
         """SCENARIO_DISCOVERY_MOMENTUM_USES_VOL_NORMALIZED: the sign=+1
         momentum discovery weights are built from the vol-normalized signal,
@@ -444,6 +512,64 @@ class TestFoldTrainOnlyDiscoveryQualification:
             min_symbols=3, tranche_count=1,
         )
         assert result == expected
+
+    def test_fold_wrapper_forwards_cache_and_short_circuit_ignores_it(self, monkeypatch) -> None:
+        """SCENARIO_MHS_HORIZON_SEARCH_EFF_04_FOLD_WRAPPER_FORWARDS_CACHE: the
+        fold-scoped wrapper forwards the identical cache object into its
+        ``select_horizon_by_discovery_qualification`` delegation (captured via a
+        forwarding spy), the delegated result is byte-identical to the cache-free
+        call, and the insufficient-train-window short-circuit returns without
+        ever consulting the cache or calling into the selection."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(24)
+        cache = discovery.build_candidate_weights(log_close, eligible, 1, (24, 48), 3, 1)
+        fold = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            pd.Timestamp("2023-01-08", tz="UTC"),
+            pd.Timestamp("2023-12-31", tz="UTC"),
+            168, 168,
+        )
+        captured: dict = {}
+        real = discovery.select_horizon_by_discovery_qualification
+
+        def spy(*args, **kwargs):
+            captured["precomputed_candidate_weights"] = kwargs.get("precomputed_candidate_weights")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(discovery, "select_horizon_by_discovery_qualification", spy)
+        result = fold_train_only_discovery_qualification(
+            1, (24, 48), log_close, eligible, opens, bar_funding, idx, fold,
+            min_symbols=3, tranche_count=1, precomputed_candidate_weights=cache,
+        )
+        assert captured["precomputed_candidate_weights"] is cache
+        expected = fold_train_only_discovery_qualification(
+            1, (24, 48), log_close, eligible, opens, bar_funding, idx, fold,
+            min_symbols=3, tranche_count=1,
+        )
+        assert result == expected
+
+        short = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2021-12-31", tz="UTC"),
+            pd.Timestamp("2022-01-08", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            168, 168,
+        )
+        calls = {"n": 0}
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(discovery, "select_horizon_by_discovery_qualification", counting)
+        short_result = fold_train_only_discovery_qualification(
+            1, (72, 96), log_close, eligible, opens, bar_funding, idx, short,
+            precomputed_candidate_weights=cache,
+        )
+        assert calls["n"] == 0
+        assert short_result.admitted is False
+        assert short_result.selected_horizon is None
+        assert short_result.discovery_scores == ()
 
     def test_nonfinite_discovery_year_fails_closed(self) -> None:
         """SCENARIO_MHS_FOLD_SAFE_HORIZON_03_NONFINITE_DISCOVERY_YEAR_FAILS_CLOSED:
