@@ -52,6 +52,41 @@ def _year_mask(index: pd.DatetimeIndex, year: int) -> np.ndarray:
     return np.asarray(index.year == year, dtype=bool)
 
 
+def _horizon_weights(
+    log_close: pd.DataFrame,
+    eligible: pd.DataFrame,
+    sign: int,
+    horizon: int,
+    min_symbols: int,
+    tranche_count: int,
+) -> pd.DataFrame:
+    """Build the combined weight book for one horizon candidate.
+
+    The signal → rank-weight → phase-tranche chain depends only on
+    ``(sign, horizon, min_symbols, tranche_count)``, never on the year/qualification
+    mask, so it is computed once per candidate and shared across every mask the
+    gate evaluates.
+    """
+    signal = horizon_log_return(log_close, horizon)
+    weights = rank_weight_book(signal, eligible, sign, min_symbols)
+    return phase_tranche_book(weights, tranche_count)
+
+
+def _score_masked_net_t(
+    weights: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    mask: np.ndarray,
+    cost_bps: float,
+    periods_per_year: float,
+) -> float:
+    """Aggregate prescreen net t-stat of an already-built weight book over ``mask``."""
+    curve = cost_response_curve(
+        weights[mask], opens[mask], bar_funding[mask], (cost_bps,), periods_per_year,
+    )
+    return float(curve[cost_bps].net_t)
+
+
 def _candidate_net_t(
     log_close: pd.DataFrame,
     eligible: pd.DataFrame,
@@ -66,13 +101,8 @@ def _candidate_net_t(
     periods_per_year: float,
 ) -> float:
     """Aggregate prescreen net t-stat of one horizon candidate over ``mask``."""
-    signal = horizon_log_return(log_close, horizon)
-    weights = rank_weight_book(signal, eligible, sign, min_symbols)
-    weights = phase_tranche_book(weights, tranche_count)
-    curve = cost_response_curve(
-        weights[mask], opens[mask], bar_funding[mask], (cost_bps,), periods_per_year,
-    )
-    return float(curve[cost_bps].net_t)
+    weights = _horizon_weights(log_close, eligible, sign, horizon, min_symbols, tranche_count)
+    return _score_masked_net_t(weights, opens, bar_funding, mask, cost_bps, periods_per_year)
 
 
 def select_horizon_by_discovery_qualification(
@@ -136,12 +166,13 @@ def select_horizon_by_discovery_qualification(
     oriented_scores: dict[int, float] = {}
     raw_worst_year: dict[int, float] = {}
     for horizon in horizon_candidates:
+        weights = _horizon_weights(log_close, eligible, sign, horizon, min_symbols, tranche_count)
         yearly: list[float] = []
         for year in discovery_years:
-            net_t = _candidate_net_t(
-                log_close, eligible, opens, bar_funding, sign, horizon,
+            net_t = _score_masked_net_t(
+                weights, opens, bar_funding,
                 discovery_mask & _year_mask(index, year),
-                min_symbols, tranche_count, cost_bps, periods_per_year,
+                cost_bps, periods_per_year,
             )
             if np.isfinite(net_t):
                 yearly.append(net_t)
@@ -170,9 +201,9 @@ def select_horizon_by_discovery_qualification(
             qualification_sign_consistent=None,
         )
 
-    discovery_aggregate_net_t = _candidate_net_t(
-        log_close, eligible, opens, bar_funding, sign, best_horizon,
-        discovery_mask, min_symbols, tranche_count, cost_bps, periods_per_year,
+    best_weights = _horizon_weights(log_close, eligible, sign, best_horizon, min_symbols, tranche_count)
+    discovery_aggregate_net_t = _score_masked_net_t(
+        best_weights, opens, bar_funding, discovery_mask, cost_bps, periods_per_year,
     )
     if not np.isfinite(discovery_aggregate_net_t):
         return DiscoveryQualificationResult(
@@ -183,9 +214,8 @@ def select_horizon_by_discovery_qualification(
             qualification_net_t=None,
             qualification_sign_consistent=None,
         )
-    qualification_net_t = _candidate_net_t(
-        log_close, eligible, opens, bar_funding, sign, best_horizon,
-        qualification_mask, min_symbols, tranche_count, cost_bps, periods_per_year,
+    qualification_net_t = _score_masked_net_t(
+        best_weights, opens, bar_funding, qualification_mask, cost_bps, periods_per_year,
     )
     sign_consistent = bool(
         np.isfinite(qualification_net_t)
