@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260811_MHS_PNL_VOL_TARGETING",
+      "date": "2026-08-11",
+      "adr_id": "ADR_20260811_MHS_PNL_VOL_TARGETING",
+      "domain": "mhs",
+      "title": "MHS 전략 자체 P&L 변동성 타겟팅(2-pass 리플레이)",
+      "why": "실제 원장 분해로 2025-12-23(-40.4%)/2025-10-12(-31.6%) 단일일 손실이 daily_turnover≈2.0(전량 포지션 반전) 동반한 momentum crash(Daniel & Moskowitz 2016)임을 확인; 기존 _regime_cash_scale(자산단위 vol)은 두 날 모두 무력했음",
+      "resolution": "전략 자신의 실현 P&L 변동성 기반 2차 익스포저 스케일러(_pnl_vol_target_scale, Barroso & Santa-Clara 2015)를 Pass1(reference, 오늘의 리플레이 그대로)->Pass2(vol-target 축소 후 재실행) 구조로 top-level(_book_outcome)과 fold-level(_run_anchored_fold) 모두에 배선. 인과성(shift(1) 이중 적용, look-ahead 없음) 단위테스트로 증명, no-op 회귀 방지 테스트 포함",
+      "impact": "실측 재확인: primary_autocorr_sharpe +0.4317→+0.4661(+8%), MDD -45.74%→-21.64%(거의 절반), pre_vol_target_reference가 기존 baseline과 정확히 일치함을 확인(2-pass 정상 동작 증거). Research GO는 여전히 FALSE(0.466<0.6 floor, fold2만 통과) — 신호 방향성 문제(2023/2024)는 미해결"
+    },
+    {
       "task_id": "ADR_20260811_MHS_MOMENTUM_VOL_NORMALIZATION",
       "date": "2026-08-11",
       "adr_id": "ADR_20260811_MHS_MOMENTUM_VOL_NORMALIZATION",
@@ -989,16 +999,6 @@
       "why": "lean_check.py failed spec-compliance validation due to schema mismatch.",
       "resolution": "Updated _check_spec_compliance in lean_check.py to support file/symbol keys, python_assertion exec evaluation, and flexible wiring matching.",
       "impact": "Restores automated spec-compliance gate verification without breaking legacy contract formats."
-    },
-    {
-      "task_id": "TASK_RELIABILITY_GATE",
-      "date": "2026-07-31",
-      "adr_id": "ADR_20260731_RELIABILITY_GATE",
-      "domain": "risk",
-      "title": "Reliability Gate Protocol Implementation",
-      "why": "Evaluates strategy robustness via block bootstrap LCB90 CAGR, fold distribution concentration, and cost/delay execution stress test.",
-      "resolution": "Implemented compute_reliability_gate, split_holdout_segment, compute_fold_distribution, compute_stress_test_gate, and recorded metrics in runs.jsonl.",
-      "impact": "Provides robust, data-driven gate criteria preventing overfitted or regime-dependent strategies from passing into production."
     }
   ]
 }
