@@ -57,6 +57,11 @@ fast reversal과 slow momentum은 각각 독립적으로 생성한다. 두 신�
 TrendScore로 pooling하지 않는다. Phase 1의 결합은 사전등록된 portfolio-level
 allocation만 허용한다.
 
+fast reversal과 slow momentum 모두 raw horizon return을 신호로 쓴다.
+realized vol로 정규화한(vol-normalized) momentum 신호는 discovery-gate 진단
+전용으로만 배선되어 있다 — 실전 북 전체 리플레이에서 `CAPITAL_INVARIANT_BREACH`를
+일으켜 되돌렸다(`docs/specs/mhs_momentum_vol_normalization.md` §4).
+
 ```text
 w_blend = 0.5 * w_fast + 0.5 * w_slow
 ```
