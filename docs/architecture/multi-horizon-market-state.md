@@ -130,6 +130,11 @@ Research GO에는 다음이 모두 필요하다.
 
 1. 4.18bp/base와 6.07bp/stress pre-screen 결과 보고
 2. immediate-taker simulated-inventory aggregate의 daily autocorrelation-adjusted Sharpe ≥ 0.6
+   (primary replay는 two-pass로 구성된다: 1-pass는 오늘의 unscaled 가중치를 그대로 재현해
+   `pre_vol_target_reference` 진단으로 남기고, 2-pass는 전략 자체 일별 P&L 실현 변동성을 기반으로 한
+   인과적 volatility-targeting 스케일로 가중치를 축소한 뒤 보고용 primary/stress를 재실행한다 —
+   Barroso & Santa-Clara(2015)의 momentum-crash 완화 overlay이며 asset-level vol이 아닌
+   전략 고유 손익 변동성을 기준으로 하므로 `_regime_cash_scale`과는 별개의 리스크원을 방어한다)
 3. cost-stressed (SPREAD_AND_COST_X3) immediate-taker stress Sharpe > 0
 4. 양의 primary에 대해 cap30% Sharpe와 net annual return 조건 충족
 5. phase degeneracy, relevant missing data, termination, concentration, participation,
