@@ -121,7 +121,16 @@ PHASE_1_BOOK_BLEND_WEIGHTS: dict[str, float] = {
 }
 
 _FAST_BAND = HorizonBand(name="fast_reversal", horizons_hours=(48,), sign=-1)
-_SLOW_BAND = HorizonBand(name="slow_momentum", horizons_hours=(168,), sign=1)
+# The slow band's allowed set is the full measured momentum candidate grid
+# (docs/results/mhs-res.md §2, 19 horizons, 72h-504h step 24) so a
+# fold-scoped discovery/qualification selection may replace the frozen 168h
+# default. ``PHASE_1_BOOK_SPECS["slow_momentum"].horizon_hours`` stays 168
+# (the frozen fallback default).
+MOMENTUM_HORIZON_CANDIDATES_HOURS: tuple[int, ...] = (
+    72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336,
+    360, 384, 408, 432, 456, 480, 504,
+)
+_SLOW_BAND = HorizonBand(name="slow_momentum", horizons_hours=MOMENTUM_HORIZON_CANDIDATES_HOURS, sign=1)
 
 PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
     "fast_reversal": BookSpec(
