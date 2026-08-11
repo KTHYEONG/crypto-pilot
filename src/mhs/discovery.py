@@ -21,7 +21,7 @@ import pandas as pd
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
 from src.mhs.evaluation import cost_response_curve
-from src.mhs.horizons import horizon_log_return
+from src.mhs.horizons import horizon_log_return, vol_normalized_horizon_signal
 
 _PERIODS_PER_YEAR_1H = 365.0 * 24.0
 _ADMISSION_T = 2.0
@@ -67,7 +67,7 @@ def _horizon_weights(
     mask, so it is computed once per candidate and shared across every mask the
     gate evaluates.
     """
-    signal = horizon_log_return(log_close, horizon)
+    signal = vol_normalized_horizon_signal(log_close, horizon) if sign == 1 else horizon_log_return(log_close, horizon)
     weights = rank_weight_book(signal, eligible, sign, min_symbols)
     return phase_tranche_book(weights, tranche_count)
 
