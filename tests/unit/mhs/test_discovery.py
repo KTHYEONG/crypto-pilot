@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import src.mhs.discovery as discovery
 from src.mhs.discovery import (
     _candidate_net_t,
     select_horizon_by_discovery_qualification,
@@ -102,6 +103,11 @@ def _run(log_close, opens, bar_funding, eligible, idx, sign: int = _SIGN):
 class TestDiscoveryQualificationGate:
     """SCENARIO_MHS_DISCOVERY_*: worst-year-robust selection, qualification
     single re-check, fail-closed behavior, and sign-consistent oriented scoring.
+
+    SCENARIO_MHS_DISCOVERY_WEIGHT_REUSE_BYTE_IDENTICAL_08: the six pre-existing
+    scenarios below pass unchanged after the weight-hoisting refactor
+    (`docs/specs/mhs_discovery_2021_gap_and_dense_grid.md` §3) -- the
+    byte-identical proof that `_candidate_net_t` output is unchanged.
 
     SCENARIO_MHS_DISCOVERY_SIGN_REGRESSION_MOMENTUM_01: the three legacy
     scenarios below run the sign=+1 (momentum) direction and are regression
@@ -275,3 +281,25 @@ class TestDiscoveryQualificationGate:
         assert result.selected_horizon == 36
         assert math.isnan(dict(result.discovery_scores)[24])
         assert math.isfinite(dict(result.discovery_scores)[36])
+
+    def test_weight_reuse_builds_weights_once_per_candidate(self, monkeypatch) -> None:
+        """SCENARIO_MHS_DISCOVERY_WEIGHT_REUSE_CALL_COUNT_09: after the weight
+        hoisting refactor, ``_horizon_weights`` must be built once per candidate
+        horizon (shared across every discovery year) plus exactly one more for
+        the winning horizon's aggregate+qualification reuse -- never once per
+        (horizon, year) pair. The admitted panel exercises the full path so the
+        ``+1`` aggregate/qualification call is reachable."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        original = discovery._horizon_weights
+        calls: list[int] = []
+
+        def counting_wrapper(*args, **kwargs) -> pd.DataFrame:
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(discovery, "_horizon_weights", counting_wrapper)
+        result = _run(log_close, opens, bar_funding, eligible, idx)
+        assert result.admitted is True
+        assert len(calls) == len((24, 48)) + 1
