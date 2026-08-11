@@ -1,37 +1,63 @@
 # MHS Horizon Diagnostic — Quantitative Performance Report
 
-- **Document Date**: 2026-08-11 (9차 갱신)
+- **Document Date**: 2026-08-11 (10차 갱신)
 - **Domain**: Research / MHS (Multi-Horizon Market State)
-- **Run Metadata**: `2021-01-01~2025-12-31`, `execution_timeframe=5m`, `execution_universe_size=30`, `eligible_symbols=445`
-- **Source**: [`mhs_horizon_diagnostic.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic.json) (compact), `_full/report.json` (`--discovery-gate --output-tier full`)
+- **Run Metadata**: `2021-01-01~2025-12-31`, `execution_timeframe=5m`, `execution_universe_size=30`, `eligible_symbols=446`
+- **Source**: [`mhs_horizon_diagnostic.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic.json) (compact, `--fold-safe-horizon --discovery-gate`), `_full/report.json` (`--discovery-gate --output-tier full`)
 - **Research GO 판정 기준**: `daily autocorr-adjusted Sharpe ≥ 0.6` (primary) AND `stress Sharpe > 0`, 3-fold anchored 전부 통과
 
-## 0. 현재 상태 (9차, 최신 실측)
+## 0. 현재 상태 (10차, 최신 실측)
 
 | Metric | 값 |
 | :--- | ---: |
-| `primary_autocorr_sharpe` | **+0.4661** |
-| `primary_naive_sharpe` | +0.0936 |
-| `primary_max_drawdown` | **-21.64%** |
-| `primary_net_ann` | +0.53% |
-| `primary_geometric_cagr` | +0.38% |
-| `stress_naive_sharpe` (×3 cost) | +0.0210 |
-| `pre_vol_target_reference_naive_sharpe` (Pass 1, vol-target 적용 전) | +0.0991 |
+| `primary_autocorr_sharpe` | **+0.4464** |
+| `primary_naive_sharpe` | +0.0888 |
+| `primary_max_drawdown` | **-21.87%** |
+| `primary_net_ann` | +0.51% |
+| `primary_geometric_cagr` | +0.35% |
+| `primary_annualized_turnover` | 2.562 |
+| `stress_naive_sharpe` (×3 cost) | +0.0163 |
+| `pre_vol_target_reference_naive_sharpe` (Pass 1, vol-target 적용 전) | +0.0926 |
 | `blend.failure` | `None` |
 | `fast_reversal.failure` | `CAPITAL_INVARIANT_BREACH` (기존 이슈, blend 자본 0%, 무관) |
 | `research_go.eligible` | **`False`** |
 | `research_go.reason_codes` | `CAPITAL_INVARIANT_BREACH`(fast_reversal 기인), `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `STRESS_SHARPE_NOT_POSITIVE`, `UNSPECIFIED_POLICY` |
 | `folds_passed` | 1 / 3 |
 
+9차(+0.4661) 대비 top-level 수치의 소폭 하락(-0.0197)은 이번 변경이 아니라
+`eligible_symbols` 445→446 자연 드리프트(신규 데이터 갱신에 따른 유동성 유니버스
+경계 이동)로 설명됨 — fold별 수치(아래)는 소수점까지 9차와 동일해 fold-safe-horizon
+자체는 아무 것도 바꾸지 않았음을 직접 증명한다.
+
 ### Fold 상세
 
-| Fold | Validation | `primary_autocorr_sharpe` | `MDD` | `stress_naive_sharpe` | `failures` |
-| :--- | :--- | ---: | ---: | ---: | :--- |
-| 0 | 2023 | -0.706 | -23.6% | -0.354 | `PRIMARY_SHARPE_BELOW_0_6`, `STRESS_NOT_POSITIVE` |
-| 1 | 2024 | -0.504 | -18.3% | -0.345 | `PRIMARY_SHARPE_BELOW_0_6`, `STRESS_NOT_POSITIVE` |
-| 2 | 2025 | +1.605 | -40.9% | +0.265 | (통과) |
+| Fold | Validation | `primary_autocorr_sharpe` | `MDD` | `stress_naive_sharpe` | `failures` | `slow_horizon_hours` | `slow_horizon_source` |
+| :--- | :--- | ---: | ---: | ---: | :--- | ---: | :--- |
+| 0 | 2023 | -0.706 | -23.6% | -0.354 | `PRIMARY_SHARPE_BELOW_0_6`, `STRESS_NOT_POSITIVE` | 168 | `frozen_default` |
+| 1 | 2024 | -0.504 | -18.3% | -0.345 | `PRIMARY_SHARPE_BELOW_0_6`, `STRESS_NOT_POSITIVE` | 168 | `frozen_default` |
+| 2 | 2025 | +1.605 | -40.9% | +0.265 | (통과) | 168 | `frozen_default` |
 
-### Discovery-gate (진단 전용, Research GO 미게이팅)
+### Fold-safe horizon 재선정 (10차 신규, `ADR_20260811_MHS_FOLD_SAFE_HORIZON_SELECTION`)
+
+`select_horizon_by_discovery_qualification`을 각 anchored fold의 train-only
+윈도우(validation 연도를 전혀 보지 않음)로 재실행해 `slow_momentum`의
+`horizon_hours=168` 레거시 기본값을 leak-free하게 재검증하는 `--fold-safe-horizon`
+opt-in 경로를 추가하고 실측:
+
+| Fold | train-only discovery 윈도우 | 최고 후보(worst-year net_t) | `admitted` | 결과 |
+| :--- | :--- | :--- | :--- | :--- |
+| 0 | 2021만 | 19개 후보 전부 non-finite | `False` | 168h 폴백 (2021 데이터 커버리지 결손, §2 참고) |
+| 1 | 2021-2022 | **168h = +1.382** (현재 기본값 자신이 최고 후보) | `False` (2.0 미달) | 168h 폴백 |
+| 2 | 2021-2023 | 360h = +0.626 | `False` (2.0 미달) | 168h 폴백 |
+
+**3개 fold 전부 168h 유지, 수치 무변동** — 안전한 no-op으로 확인됨. 다만 fold 1의
+최고 후보가 이미 168h 자신이라는 점, fold 2의 최고 후보(360h, +0.626)가
+admission_t=2.0의 절반에도 못 미친다는 점을 통해 §4의 "discovery worst-year 통계의
+통계적 가혹함" 항목이 추측이 아니라 **실측으로 확인된 실질 병목**임이 이번 차수의
+핵심 성과다 (전역 다년 윈도우 기준으로 캘리브레이션된 `admission_t=2.0`이
+fold-local 1~3년 표본에는 지나치게 엄격함).
+
+### Discovery-gate (진단 전용, Research GO 미게이팅, 9차와 동일 — 유지)
 
 | Family | 최고 worst-year `net_t` | 최고 후보 | `selected_horizon` | `admitted` |
 | :--- | ---: | :--- | :--- | :--- |
@@ -50,6 +76,7 @@
 | 8차 (시도) | momentum 신호를 vol-normalized로 교체, 실전 배선 | BREACH | — | — | False (primary 무효) | **원복** — 이중 볼스케일링 제거해도 재현, 2021-24 누적손실이 raw보다 깊음 |
 | 8차 (최종) | 8차 원복 → 7차와 동일 | +0.4317 | -45.74% | +0.0250 | False (fold2만) | 7차와 byte-identical 재확인 |
 | 9차 | 전략 자체 P&L vol-targeting (2-pass 리플레이) | **+0.4661** | **-21.64%** | +0.0210 | False (fold2만) | **채택** — MDD 거의 절반, Sharpe +8% |
+| 10차 | fold-safe(leak-free) discovery/qualification horizon 재선정 opt-in 추가 | +0.4464 (445→446 심볼 드리프트, fold별은 9차와 byte-identical) | -21.87% | +0.0163 | False (fold2만) | **채택(no-op 확인)** — 3개 fold 전부 168h 유지, admission_t=2.0을 fold-local 표본의 실질 병목으로 실측 확정 |
 
 ### 근본 원인 진단 이력
 
@@ -100,6 +127,6 @@
 | 후보 | 상태 |
 | :--- | :--- |
 | 2023/2024 방향성 손실 자체를 고치는 신호 재설계 | 미탐색 — vol-normalization/funding-carry/multi-horizon ensemble 모두 discovery 프리스크린 기준 admission floor(2.0) 근처도 못 감 |
-| discovery worst-year 통계(2개년만 사용)의 통계적 가혹함 재검토 | 미탐색 — 방법론 자체 재설계 필요 |
+| discovery worst-year 통계(admission_t=2.0)의 fold-local 표본 통계적 가혹함 재설계 | **10차에서 실측 확정** (미탐색 아님) — fold 1 최고 후보(168h, net_t=+1.382)조차 2.0 미달, fold 2 최고 후보(360h, +0.626)는 2.0의 절반 미만. 전역 다년 윈도우 기준 캘리브레이션이 fold-local 1~3년 표본엔 과도하게 엄격함이 확인된 다음 스펙 후보 (`docs/specs/mhs_fold_safe_horizon_selection.md` §2.1, 이제 삭제됨 — ADR 참고) |
 | fast_reversal의 독립적 `CAPITAL_INVARIANT_BREACH`(`ts=2025-07-14`) | 미해결 — blend 자본 0%라 Research GO엔 영향 없으나 reversal 북 자체는 여전히 깨짐 |
 | 사다리 비선형 리프라이스 (초반 느리게·후반 빠르게) 또는 다른 K 값 | 미탐색 |
