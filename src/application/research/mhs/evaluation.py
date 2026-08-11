@@ -61,7 +61,11 @@ from src.mhs.evaluation import (
     required_cost_tiers,
 )
 from src.mhs.execution import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult, bar_funding_panel, laddered_fill_schedule, mhs_ledger_pnl
-from src.mhs.discovery import DiscoveryQualificationResult, select_horizon_by_discovery_qualification
+from src.mhs.discovery import (
+    DiscoveryQualificationResult,
+    fold_train_only_discovery_qualification,
+    select_horizon_by_discovery_qualification,
+)
 from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
@@ -91,10 +95,7 @@ def _stress_cost_execution_spec() -> ExecutionSpec:
 
 
 MHS_DISCOVERY_REVERSAL_CANDIDATES: tuple[int, ...] = (24, 48, 72, 96, 120, 144, 168)
-MHS_DISCOVERY_MOMENTUM_CANDIDATES: tuple[int, ...] = (
-    72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336,
-    360, 384, 408, 432, 456, 480, 504,
-)
+MHS_DISCOVERY_MOMENTUM_CANDIDATES: tuple[int, ...] = PHASE_1_BOOK_SPECS["slow_momentum"].band.horizons_hours
 _MHS_FEATURE = "multi_horizon_market_state"
 _PERIODS_PER_YEAR_1H = 365.0 * 24
 _BOOTSTRAP_SEED = 20260807
@@ -212,6 +213,7 @@ class MhsDiagnosticRequest:
     touch_diagnostic: bool = False
     ladder_diagnostic: bool = False
     discovery_gate: bool = False
+    fold_safe_horizon_selection: bool = False
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -315,6 +317,8 @@ class MhsFoldReport:
     strict_elapsed_seconds: float
     stress_elapsed_seconds: float
     terminal_censored_decisions: int = 0
+    slow_horizon_hours: int = 168
+    slow_horizon_source: str = "frozen_default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1951,6 +1955,7 @@ def _run_post_book_concurrently(
     fold_funding: dict[str, pd.Series],
     initial_equity: float,
     telemetry: _StageRecorder | None = None,
+    fold_slow_horizons: dict[int, int | None] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -1998,6 +2003,7 @@ def _run_post_book_concurrently(
             pool.submit(
                 _run_anchored_fold,
                 root, fold, request, fold_funding, initial_equity, idx, None,
+                (fold_slow_horizons or {}).get(idx),
             ): idx
             for idx, fold in enumerate(folds)
         }
@@ -2060,11 +2066,39 @@ def _incomplete_fold_report(
     )
 
 
+def _fold_safe_slow_book_spec(
+    selection: DiscoveryQualificationResult,
+    default: BookSpec,
+) -> tuple[BookSpec, int, str]:
+    """Resolve one fold's ``slow_momentum`` spec from its fold-scoped selection.
+
+    Returns ``(spec, horizon_hours, source)``. ``source`` is
+    ``"fold_train_only_discovery"`` only when the fold-scoped gate admitted a
+    candidate (spec is ``default`` with ``horizon_hours`` replaced by the
+    selected horizon, keeping band/step_hours/min_symbols identical to the
+    frozen default); otherwise ``"frozen_default"`` with ``spec is default``
+    unchanged.
+    """
+    if selection.admitted and selection.selected_horizon is not None:
+        return (
+            BookSpec(
+                band=default.band,
+                horizon_hours=selection.selected_horizon,
+                step_hours=default.step_hours,
+                min_symbols=default.min_symbols,
+            ),
+            selection.selected_horizon,
+            "fold_train_only_discovery",
+        )
+    return default, default.horizon_hours, "frozen_default"
+
+
 def _build_fold_target_weights(
     root: str,
     fold: AnchoredPurgedFold,
     request: MhsDiagnosticRequest,
     funding_by_symbol: dict[str, pd.Series],
+    slow_horizon_override: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Construct one fold's PIT decision targets with the quality calibration.
 
@@ -2122,7 +2156,11 @@ def _build_fold_target_weights(
     log_close = np.log(close)
     del close
     fast = PHASE_1_BOOK_SPECS["fast_reversal"]
-    slow = PHASE_1_BOOK_SPECS["slow_momentum"]
+    slow = (
+        dataclasses.replace(PHASE_1_BOOK_SPECS["slow_momentum"], horizon_hours=slow_horizon_override)
+        if slow_horizon_override is not None
+        else PHASE_1_BOOK_SPECS["slow_momentum"]
+    )
     fast_grid = pd.date_range(panel_start, ve, freq="6h", tz="UTC")
     slow_grid = pd.date_range(panel_start, ve, freq="24h", tz="UTC")
     fast_ema = max(1, round(fast.horizon_hours / fast.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
@@ -2186,6 +2224,7 @@ def _run_anchored_fold(
     initial_equity: float,
     fold_index: int,
     telemetry: _StageRecorder | None = None,
+    slow_horizon_override: int | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
@@ -2203,7 +2242,7 @@ def _run_anchored_fold(
         vs = fold.validation_start
         ve = fold.validation_end
         target_weights, signal_available_at, minute_roster, _grid_1h = _build_fold_target_weights(
-            root, fold, request, funding_by_symbol,
+            root, fold, request, funding_by_symbol, slow_horizon_override,
         )
         target_replay = target_weights[minute_roster]
         execution_grid = pd.date_range(
@@ -2301,6 +2340,14 @@ def _run_anchored_fold(
             strict_elapsed_seconds=primary.elapsed_seconds,
             stress_elapsed_seconds=stress.elapsed_seconds,
             terminal_censored_decisions=terminal_censored,
+            slow_horizon_hours=(
+                slow_horizon_override
+                if slow_horizon_override is not None
+                else PHASE_1_BOOK_SPECS["slow_momentum"].horizon_hours
+            ),
+            slow_horizon_source=(
+                "fold_train_only_discovery" if slow_horizon_override is not None else "frozen_default"
+            ),
         )
     except DataIntegrityError as exc:
         return _incomplete_fold_report(fold, fold_index, (_classify_execution_failure(exc),))
@@ -2313,6 +2360,7 @@ def _run_folds_parallel(
     fold_funding: dict[str, pd.Series],
     initial_equity: float,
     telemetry: _StageRecorder | None = None,
+    fold_slow_horizons: dict[int, int | None] | None = None,
 ) -> tuple[MhsFoldReport, ...]:
     """Run the three anchored folds concurrently, one process each.
 
@@ -2343,6 +2391,7 @@ def _run_folds_parallel(
             pool.submit(
                 _run_anchored_fold,
                 root, fold, request, fold_funding, initial_equity, idx, None,
+                (fold_slow_horizons or {}).get(idx),
             ): idx
             for idx, fold in enumerate(folds)
         }
@@ -2479,6 +2528,34 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     specs = PHASE_1_BOOK_SPECS
     fast = specs["fast_reversal"]
     slow = specs["slow_momentum"]
+    # Fold-safe horizon selection (spec §1.5, ``wiring``): computed once in the
+    # parent before either the top-level books or the fold pool are forked,
+    # reusing the already-loaded full-period panel. Only the resolved plain
+    # horizon ``int`` (or None) is passed down to fold workers, so no worker
+    # ever reloads a wide ``[train_start, train_end]`` panel.
+    fold_slow_horizons: dict[int, int | None] = {}
+    if request.fold_safe_horizon_selection:
+        for _fold_idx, _fold in enumerate(phase_1_anchored_purged_folds()):
+            _spec, _horizon, _source = _fold_safe_slow_book_spec(
+                fold_train_only_discovery_qualification(
+                    sign=1,
+                    horizon_candidates=specs["slow_momentum"].band.horizons_hours,
+                    log_close=log_close, eligible=eligible, opens=opens,
+                    bar_funding=bar_funding, grid_1h=grid_1h, fold=_fold,
+                    tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                ),
+                specs["slow_momentum"],
+            )
+            fold_slow_horizons[_fold_idx] = (
+                _horizon if _source == "fold_train_only_discovery" else None
+            )
+        # The top-level report uses fold index 2's selection (train=2021-2024,
+        # the widest leak-free window that still excludes 2025), making the
+        # full-period report's horizon choice walk-forward-safe relative to
+        # 2025 without a second, redundant discovery scan.
+        top_level_horizon = fold_slow_horizons.get(2)
+        if top_level_horizon is not None:
+            slow = dataclasses.replace(slow, horizon_hours=top_level_horizon)
     fast_grid = pd.date_range(start, end, freq="6h", tz="UTC")
     slow_grid = pd.date_range(start, end, freq="24h", tz="UTC")
 
@@ -2643,7 +2720,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     ) = _run_post_book_concurrently(
         blend_report, root, request, execution_symbols, minute_grid,
         signal_48h, eligible, opens, bar_funding, grid_1h, fast,
-        fold_funding, initial_equity, telemetry,
+        fold_funding, initial_equity, telemetry, fold_slow_horizons,
     )
     folds = tuple(fold_reports)
     research_go = _mhs_research_go(folds, book_reasons)
