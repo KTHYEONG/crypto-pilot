@@ -12,8 +12,10 @@ import src.mhs.discovery as discovery
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.discovery import (
     _candidate_net_t,
+    fold_train_only_discovery_qualification,
     select_horizon_by_discovery_qualification,
 )
+from src.mhs.evaluation import AnchoredPurgedFold
 from src.mhs.horizons import horizon_log_return, vol_normalized_horizon_signal
 
 DISCOVERY_START = pd.Timestamp("2021-01-01", tz="UTC")
@@ -355,3 +357,114 @@ class TestDiscoveryQualificationGate:
             1,
         )
         pd.testing.assert_frame_equal(weights, expected)
+
+class TestFoldTrainOnlyDiscoveryQualification:
+    """SCENARIO_MHS_FOLD_SAFE_HORIZON_01..03: the fold-scoped wrapper derives
+    leak-free discovery/qualification bounds from one ``AnchoredPurgedFold`` and
+    fails closed when the train window leaves no room for a disjoint split.
+    """
+
+    def test_insufficient_train_window_fails_closed_without_delegation(self, monkeypatch) -> None:
+        """SCENARIO_MHS_FOLD_SAFE_HORIZON_01_INSUFFICIENT_TRAIN_WINDOW: a fold
+        whose train window spans a single calendar year
+        (``fold.train_end.year == fold.train_start.year``) leaves no room for a
+        disjoint qualification split, so the wrapper returns the fail-closed
+        result without calling into ``select_horizon_by_discovery_qualification``
+        (verified by a call-count 0 monkeypatch)."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(24)
+        fold = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2021-12-31", tz="UTC"),
+            pd.Timestamp("2022-01-08", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            168, 168,
+        )
+        calls = {"n": 0}
+        real = discovery.select_horizon_by_discovery_qualification
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(discovery, "select_horizon_by_discovery_qualification", counting)
+        result = fold_train_only_discovery_qualification(
+            1, (72, 96), log_close, eligible, opens, bar_funding, idx, fold,
+        )
+        assert calls["n"] == 0
+        assert result.admitted is False
+        assert result.selected_horizon is None
+        assert result.discovery_scores == ()
+        assert result.discovery_aggregate_net_t is None
+        assert result.qualification_net_t is None
+        assert result.qualification_sign_consistent is None
+
+    def test_delegates_with_derived_bounds(self, monkeypatch) -> None:
+        """SCENARIO_MHS_FOLD_SAFE_HORIZON_02_DELEGATES_WITH_DERIVED_BOUNDS: for
+        a fold with train_start=2021-01-01 and train_end=2022-12-31 the wrapper
+        calls the underlying selection with discovery_start=2021-01-01,
+        discovery_end=2021-12-31 23:59:59.999999 and qualification_end=2022-12-31
+        (captured via a forwarding monkeypatch), and the returned result is
+        byte-identical to calling the selection directly with those bounds on
+        the same panel."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        fold = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            pd.Timestamp("2023-01-08", tz="UTC"),
+            pd.Timestamp("2023-12-31", tz="UTC"),
+            168, 168,
+        )
+        captured: dict = {}
+        real = discovery.select_horizon_by_discovery_qualification
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(discovery, "select_horizon_by_discovery_qualification", spy)
+        result = fold_train_only_discovery_qualification(
+            1, (24, 48), log_close, eligible, opens, bar_funding, idx, fold,
+            min_symbols=3, tranche_count=1,
+        )
+        assert captured["discovery_start"] == pd.Timestamp("2021-01-01", tz="UTC")
+        assert captured["discovery_end"] == pd.Timestamp("2021-12-31 23:59:59.999999", tz="UTC")
+        assert captured["qualification_end"] == pd.Timestamp("2022-12-31", tz="UTC")
+        assert captured["sign"] == 1
+        assert captured["horizon_candidates"] == (24, 48)
+        assert captured["min_symbols"] == 3
+        assert captured["tranche_count"] == 1
+        expected = select_horizon_by_discovery_qualification(
+            sign=1, horizon_candidates=(24, 48), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=pd.Timestamp("2021-01-01", tz="UTC"),
+            discovery_end=pd.Timestamp("2021-12-31 23:59:59.999999", tz="UTC"),
+            qualification_end=pd.Timestamp("2022-12-31", tz="UTC"),
+            min_symbols=3, tranche_count=1,
+        )
+        assert result == expected
+
+    def test_nonfinite_discovery_year_fails_closed(self) -> None:
+        """SCENARIO_MHS_FOLD_SAFE_HORIZON_03_NONFINITE_DISCOVERY_YEAR_FAILS_CLOSED:
+        when every discovery-window yearly score is non-finite (here the
+        discovery sub-window has < ``min_symbols`` eligible symbols, reproducing
+        the measured 2021-coverage-gap case), the fold-scoped wrapper returns
+        ``admitted=False``/``selected_horizon=None`` through the delegated
+        fail-closed path -- no candidate can clear the admission floor."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(24)
+        eligible = eligible.copy()
+        eligible.loc[idx.year == 2021, :] = False
+        fold = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            pd.Timestamp("2023-01-08", tz="UTC"),
+            pd.Timestamp("2023-12-31", tz="UTC"),
+            168, 168,
+        )
+        result = fold_train_only_discovery_qualification(
+            1, (24, 48), log_close, eligible, opens, bar_funding, idx, fold,
+            min_symbols=3, tranche_count=1,
+        )
+        assert result.admitted is False
+        assert result.selected_horizon is None

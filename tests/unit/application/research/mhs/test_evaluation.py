@@ -1947,3 +1947,169 @@ def test_phase_diagnostics_reversal_keeps_raw_signal(monkeypatch) -> None:
     phase_grid = idx[0 :: spec.step_hours]
     expected = ev.horizon_log_return(log_close, spec.horizon_hours).reindex(phase_grid)
     pd.testing.assert_frame_equal(captured[0], expected)
+
+def _admitted_selection(selected_horizon: int | None = 360) -> ev.DiscoveryQualificationResult:
+    return ev.DiscoveryQualificationResult(
+        selected_horizon=selected_horizon,
+        admitted=selected_horizon is not None,
+        discovery_scores=() if selected_horizon is None else ((selected_horizon, 2.5),),
+        discovery_aggregate_net_t=2.5 if selected_horizon is not None else None,
+        qualification_net_t=2.3 if selected_horizon is not None else None,
+        qualification_sign_consistent=True if selected_horizon is not None else None,
+    )
+
+
+def test_fold_safe_slow_book_spec_admitted_vs_fallback() -> None:
+    # SCENARIO_MHS_FOLD_SAFE_HORIZON_05_BOOK_SPEC_HELPER_ADMITTED_VS_FALLBACK:
+    # the fold-spec resolver returns the unchanged frozen default (168,
+    # "frozen_default") unless the fold-scoped gate both admitted AND selected
+    # a candidate; only then does it build a BookSpec whose horizon is the
+    # selected candidate with band/step_hours/min_symbols identical to the
+    # default.
+    default = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fallback = ev.DiscoveryQualificationResult(
+        selected_horizon=None, admitted=False, discovery_scores=(),
+        discovery_aggregate_net_t=None, qualification_net_t=None,
+        qualification_sign_consistent=None,
+    )
+    spec, horizon, source = ev._fold_safe_slow_book_spec(fallback, default)
+    assert spec is default
+    assert horizon == 168
+    assert source == "frozen_default"
+
+    admitted_none = _admitted_selection(selected_horizon=None)
+    spec, horizon, source = ev._fold_safe_slow_book_spec(admitted_none, default)
+    assert spec is default
+    assert source == "frozen_default"
+
+    admitted = _admitted_selection(360)
+    spec, horizon, source = ev._fold_safe_slow_book_spec(admitted, default)
+    assert source == "fold_train_only_discovery"
+    assert horizon == 360
+    assert spec is not default
+    assert spec.horizon_hours == 360
+    assert spec.band is default.band
+    assert spec.step_hours == default.step_hours
+    assert spec.min_symbols == default.min_symbols
+
+
+def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_FOLD_SAFE_HORIZON_06_FLAG_OFF_IS_BYTE_IDENTICAL: with
+    # fold_safe_horizon_selection=False (the default) neither the fold worker
+    # nor the parent diagnostic touches fold_train_only_discovery_qualification
+    # (call-count 0) and the fold report records the frozen 168h default -- a
+    # no-op regression guard matching the project's flag-gated ADR pattern.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    assert request.fold_safe_horizon_selection is False
+
+    calls = {"n": 0}
+    real_fn = ev.fold_train_only_discovery_qualification
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real_fn(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", counting)
+    report = ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
+    assert calls["n"] == 0
+    assert report.slow_horizon_hours == 168
+    assert report.slow_horizon_source == "frozen_default"
+
+    # Parent path: the default request passes an empty fold_slow_horizons dict
+    # into the fold pool and never runs the fold-scoped selection.
+    captured: dict = {}
+
+    def _spy_books(*args, **kwargs):
+        return (None, None, None)
+
+    def _spy_post(*args, **kwargs):
+        captured["fold_slow_horizons"] = args[14] if len(args) > 14 else None
+        return (None, None, {}, {}, (), None)
+
+    monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+    top_report = ev.run_mhs_horizon_diagnostic(request)
+    assert top_report.status == "COMPLETE"
+    assert calls["n"] == 0
+    assert captured["fold_slow_horizons"] == {}
+
+
+def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_FOLD_SAFE_HORIZON_07_FOLD_REPORT_RECORDS_SOURCE: MhsFoldReport
+    # constructed without the new fields defaults to (168, "frozen_default"),
+    # _incomplete_fold_report keeps that default, and a fold run resolved with a
+    # 360h fold-scoped override records slow_horizon_hours==360 with source
+    # "fold_train_only_discovery".
+    default_report = ev.MhsFoldReport(
+        fold_index=0, validation_start="2021-02-10", validation_end="2021-04-19",
+        strict=None, stress=None, primary_valid=False, primary_autocorr_sharpe=0.0,
+        primary_naive_sharpe=0.0, primary_net_ann=0.0, primary_geometric_cagr=0.0,
+        primary_max_drawdown=0.0, stress_naive_sharpe=0.0, decision_intents=0,
+        termination_counts={}, failures=(), strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+    )
+    assert default_report.slow_horizon_hours == 168
+    assert default_report.slow_horizon_source == "frozen_default"
+
+    incomplete = ev._incomplete_fold_report(_FOLD, 0, ())
+    assert incomplete.slow_horizon_source == "frozen_default"
+    assert incomplete.slow_horizon_hours == 168
+
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    report = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None, slow_horizon_override=360,
+    )
+    assert report.slow_horizon_hours == 360
+    assert report.slow_horizon_source == "fold_train_only_discovery"
+
+    # Parent wiring: with the flag on, the parent runs the fold-scoped selection
+    # once per fold and threads only the resolved plain int down to the fold
+    # pool; the top-level slow spec adopts fold 2's selection (360h here).
+    captured: dict = {}
+    monkeypatch.setattr(
+        ev, "fold_train_only_discovery_qualification",
+        lambda *args, **kwargs: _admitted_selection(360),
+    )
+
+    def _spy_books(*args, **kwargs):
+        captured["top_level_slow"] = args[5]
+        return (None, None, None)
+
+    def _spy_post(*args, **kwargs):
+        captured["fold_slow_horizons"] = args[14] if len(args) > 14 else None
+        return (None, None, {}, {}, (), None)
+
+    monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+    request_on = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, fold_safe_horizon_selection=True,
+    )
+    top_report = ev.run_mhs_horizon_diagnostic(request_on)
+    assert top_report.status == "COMPLETE"
+    assert captured["fold_slow_horizons"] == {0: 360, 1: 360, 2: 360}
+    assert captured["top_level_slow"].horizon_hours == 360
+    assert captured["top_level_slow"].band is ev.PHASE_1_BOOK_SPECS["slow_momentum"].band

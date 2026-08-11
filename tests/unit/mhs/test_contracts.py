@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pandas as pd
 import pytest
 
 from src.mhs.contracts import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
+    MOMENTUM_HORIZON_CANDIDATES_HOURS,
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
     BookSpec,
@@ -119,6 +122,27 @@ class TestFrozenLiterals:
         assert slow.step_hours == 24
         assert slow.tranche_count() == 7
         assert slow.band.sign == 1
+
+    def test_widened_band_accepts_fold_selected_candidates(self) -> None:
+        # SCENARIO_MHS_FOLD_SAFE_HORIZON_04_WIDENED_BAND_ACCEPTS_CANDIDATES:
+        # the slow band's allowed set is the full measured momentum candidate
+        # grid (all 19 horizons, 72..504 step 24) so a fold-selected horizon
+        # passes BookSpec.__post_init__'s band check, while the frozen 168h
+        # default is unchanged and out-of-band values still fail closed.
+        slow = PHASE_1_BOOK_SPECS["slow_momentum"]
+        assert slow.band.horizons_hours == MOMENTUM_HORIZON_CANDIDATES_HOURS
+        assert len(MOMENTUM_HORIZON_CANDIDATES_HOURS) == 19
+        assert MOMENTUM_HORIZON_CANDIDATES_HOURS[0] == 72
+        assert MOMENTUM_HORIZON_CANDIDATES_HOURS[-1] == 504
+        assert tuple(range(72, 504 + 1, 24)) == MOMENTUM_HORIZON_CANDIDATES_HOURS
+        assert slow.horizon_hours == 168
+        assert PHASE_1_BOOK_SPECS["fast_reversal"].band.horizons_hours == (48,)
+        widened = dataclasses.replace(slow, horizon_hours=360)
+        assert widened.horizon_hours == 360
+        assert widened.step_hours == slow.step_hours
+        assert widened.min_symbols == slow.min_symbols
+        with pytest.raises(ValueError, match="not in band"):
+            dataclasses.replace(slow, horizon_hours=100)
 
     def test_blend_preserves_reduced_gross(self) -> None:
         fast = pd.DataFrame({"A": [1.0], "B": [-1.0]})
