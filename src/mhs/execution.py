@@ -459,7 +459,10 @@ def simulated_inventory_ledger(
         pos = turnover_pos[ts]
         pre_trade_equity = cash_pre_fill[pos] + notional_before[pos]
         if not np.isfinite(pre_trade_equity) or pre_trade_equity <= 0:
-            raise DataIntegrityError("pre-trade equity must be positive and finite")
+            raise DataIntegrityError(
+                f"pre-trade equity must be positive and finite "
+                f"(ts={grid[pos]!r} pre_trade_equity={pre_trade_equity!r})"
+            )
         turnover_arr[pos] = sum(
             abs(qty * price) / pre_trade_equity for qty, price in terms
         )
@@ -1694,7 +1697,12 @@ class _BoundExecutionReplayAccumulator:
                     cash_pre_fill[turnover_pos_arr - p0] + notional_before_arr[turnover_pos_arr]
                 )
                 if not np.isfinite(pre_trade_equity).all() or (pre_trade_equity <= 0).any():
-                    raise DataIntegrityError("pre-trade equity must be positive and finite")
+                    bad = np.where(~np.isfinite(pre_trade_equity) | (pre_trade_equity <= 0))[0]
+                    bad_pos = turnover_pos_arr[bad[0]]
+                    raise DataIntegrityError(
+                        f"pre-trade equity must be positive and finite "
+                        f"(ts={grid[bad_pos]!r} pre_trade_equity={pre_trade_equity[bad[0]]!r})"
+                    )
                 np.add.at(
                     turnover_arr, turnover_pos_arr - p0,
                     np.abs(turnover_qty_arr * turnover_price_arr) / pre_trade_equity,
