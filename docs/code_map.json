@@ -647,7 +647,7 @@
     "testing": "tests/unit/mhs/test_books.py"
   },
   "src/mhs/discovery.py": {
-    "architecture": "docs/results/mhs-res.md",
+    "architecture": "docs/specs/mhs_fold_safe_horizon_selection.md",
     "testing": "tests/unit/mhs/test_discovery.py"
   }
 }
