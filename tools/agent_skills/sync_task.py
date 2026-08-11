@@ -157,37 +157,13 @@ def _clean_scratch_dir() -> int:
     return count
 
 
-def _clean_specs(
-    remove_specs: list[str] | None = None,
-    keep_specs: list[str] | None = None,
-    keep_all_specs: bool = False,
-) -> int:
-    if keep_all_specs:
-        return 0
+def _clean_specs() -> int:
     specs_dir = "docs/specs"
     if not _path_exists(specs_dir):
         return 0
-
-    keep_set = set(keep_specs) if keep_specs else set()
-
-    target_prefixes: set[str] = set()
-    if remove_specs:
-        for item in remove_specs:
-            base = item.replace(".md", "").replace("_contract.json", "").replace("docs/specs/", "").strip()
-            if base:
-                target_prefixes.add(base.lower())
-
     count = 0
     for fname in os.listdir(specs_dir):
         if fname.endswith((".md", "_contract.json")):
-            if fname in keep_set or fname.lower() in keep_set:
-                continue
-
-            if target_prefixes:
-                fname_base = fname.replace(".md", "").replace("_contract.json", "").lower()
-                if fname_base not in target_prefixes and fname.lower() not in target_prefixes:
-                    continue
-
             fpath = os.path.join(specs_dir, fname)
             try:
                 os.remove(fpath)
@@ -210,9 +186,6 @@ def main() -> None:
     parser.add_argument("--failure-reason", default=None, help="Reason why hypothesis failed")
     parser.add_argument("--test", default=None, help="Test file path")
     parser.add_argument("--doc", default=None, help="Architecture doc path")
-    parser.add_argument("--remove-specs", nargs="*", default=[], help="Spec files to remove")
-    parser.add_argument("--keep-specs", nargs="*", default=[], help="Spec files to preserve")
-    parser.add_argument("--keep-all-specs", action="store_true", help="Preserve all spec files")
     args = parser.parse_args()
 
     logs: list[str] = []
@@ -279,11 +252,7 @@ def main() -> None:
 
     # 4. Spec Cleanup
     try:
-        cleaned = _clean_specs(
-            remove_specs=args.remove_specs,
-            keep_specs=args.keep_specs,
-            keep_all_specs=args.keep_all_specs,
-        )
+        cleaned = _clean_specs()
         if cleaned > 0:
             logs.append(f"Cleaned {cleaned} spec files")
     except Exception as e:
