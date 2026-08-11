@@ -313,9 +313,10 @@ class TestAnchoredFoldBounded:
             if m.stage.startswith("anchored_fold_0_stress_window_")
         ]
 
-    def test_fold_builds_window_iterator_once_per_pair(self, mhs_market, monkeypatch) -> None:
-        """MHS-MEM-PAIR-02: the fold orchestrator constructs its execution-window
-        iterator exactly once and feeds it to the paired strict/stress replay."""
+    def test_fold_builds_window_iterator_once_per_bound(self, mhs_market, monkeypatch) -> None:
+        """MHS-MEM-PAIR-02: the fold orchestrator constructs one execution-window
+        iterator per replay bound (immediate-taker primary + cost-stressed
+        stress) and consumes each independently without re-materializing."""
         root, end = mhs_market
         symbols = [
             s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -340,7 +341,7 @@ class TestAnchoredFoldBounded:
         )
         assert report.strict is not None
         assert report.stress is not None
-        assert calls["n"] == 1
+        assert calls["n"] == 2
 
     def test_rss_budget_enforced_inside_fold_fails_closed(self, mhs_market, monkeypatch) -> None:
         monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
@@ -687,7 +688,7 @@ class TestBookOutcomePaired:
     execution-window iterator once per strict/stress pair and preserves the
     typed book failure conversion."""
 
-    def test_book_builds_window_iterator_once_per_pair(self, mhs_market, monkeypatch) -> None:
+    def test_book_builds_window_iterator_once_per_bound(self, mhs_market, monkeypatch) -> None:
         args = _build_book_outcome_args(mhs_market)
         calls = {"n": 0}
         original = ev._iter_mhs_execution_windows
@@ -701,7 +702,7 @@ class TestBookOutcomePaired:
         assert report.primary is not None
         assert report.stress is not None
         assert report.failure is None
-        assert calls["n"] == 1
+        assert calls["n"] == 3
 
     def test_book_strict_resource_breach_is_typed_failure(self, mhs_market, monkeypatch) -> None:
         args = _build_book_outcome_args(mhs_market)
