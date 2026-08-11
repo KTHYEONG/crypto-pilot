@@ -9,11 +9,12 @@ import pandas as pd
 import pytest
 
 import src.mhs.discovery as discovery
+from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.discovery import (
     _candidate_net_t,
     select_horizon_by_discovery_qualification,
 )
-from src.mhs.horizons import horizon_log_return
+from src.mhs.horizons import horizon_log_return, vol_normalized_horizon_signal
 
 DISCOVERY_START = pd.Timestamp("2021-01-01", tz="UTC")
 DISCOVERY_END = pd.Timestamp("2022-12-31 23:59:59", tz="UTC")
@@ -82,6 +83,26 @@ def _build_panel(
     bar_funding = pd.DataFrame(0.0, index=idx, columns=_SYMBOLS)
     eligible = pd.DataFrame(True, index=idx, columns=_SYMBOLS)
     return log_close, opens, bar_funding, eligible, idx
+
+
+def _disagreement_panel() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Momentum signal disagreement fixture (horizon=2).
+
+    Cross-sectionally the raw ``horizon_log_return`` ranks NOISY above QUIET
+    while the vol-normalized signal ranks QUIET above NOISY, so a sign=+1
+    ``_horizon_weights`` built from the two signals must produce different
+    weight books -- the fixture that proves the sign dispatch took effect.
+    """
+    idx = pd.date_range("2024-01-01", periods=8, freq="1h", tz="UTC")
+    log_close = pd.DataFrame(
+        {
+            "NOISY": [0.0, 0.5, -0.2, 0.4, 0.8, 0.7, 1.1, 0.9],
+            "QUIET": [0.0, 0.01, 0.04, 0.06, 0.07, 0.10, 0.11, 0.14],
+        },
+        index=idx,
+    )
+    eligible = pd.DataFrame(True, index=idx, columns=log_close.columns)
+    return log_close, eligible
 
 
 def _score(log_close, opens, bar_funding, eligible, horizon: int, mask: np.ndarray, sign: int = _SIGN) -> float:
@@ -303,3 +324,34 @@ class TestDiscoveryQualificationGate:
         result = _run(log_close, opens, bar_funding, eligible, idx)
         assert result.admitted is True
         assert len(calls) == len((24, 48)) + 1
+
+    def test_sign_plus_one_uses_vol_normalized_signal(self) -> None:
+        """SCENARIO_DISCOVERY_MOMENTUM_USES_VOL_NORMALIZED: the sign=+1
+        momentum discovery weights are built from the vol-normalized signal,
+        not raw ``horizon_log_return``. On the disagreement fixture the two
+        rank differently, so the assertion is a real (not accidental) check."""
+        log_close, eligible = _disagreement_panel()
+        weights = discovery._horizon_weights(log_close, eligible, 1, 2, 2, 1)
+        expected = phase_tranche_book(
+            rank_weight_book(vol_normalized_horizon_signal(log_close, 2), eligible, 1, 2),
+            1,
+        )
+        raw_expected = phase_tranche_book(
+            rank_weight_book(horizon_log_return(log_close, 2), eligible, 1, 2),
+            1,
+        )
+        pd.testing.assert_frame_equal(weights, expected)
+        with pytest.raises(AssertionError):
+            pd.testing.assert_frame_equal(weights, raw_expected)
+
+    def test_sign_minus_one_keeps_raw_signal(self) -> None:
+        """SCENARIO_DISCOVERY_REVERSAL_UNCHANGED: the sign=-1 reversal family
+        keeps raw ``horizon_log_return`` weights exactly as before, even on a
+        fixture where the vol-normalized variant would rank differently."""
+        log_close, eligible = _disagreement_panel()
+        weights = discovery._horizon_weights(log_close, eligible, -1, 2, 2, 1)
+        expected = phase_tranche_book(
+            rank_weight_book(horizon_log_return(log_close, 2), eligible, -1, 2),
+            1,
+        )
+        pd.testing.assert_frame_equal(weights, expected)
