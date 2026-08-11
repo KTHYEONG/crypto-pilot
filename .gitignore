@@ -1,6 +1,9 @@
 # scratch directory for AI experimentation
 scratch/
 
+# project-local machine/tool temp roots (pytest, tempfile, etc.)
+tmp/
+
 # data
 /data/
 
