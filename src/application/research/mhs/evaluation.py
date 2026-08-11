@@ -143,6 +143,18 @@ MHS_SIGNAL_EMA_HORIZON_SPAN = 1.0
 # ``MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS`` median, and never exceeds full exposure.
 MHS_REGIME_CASH_SCALE_FLOOR = 0.5
 MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS = 720
+# Strategy-level P&L volatility targeting (momentum-crash mitigation): exposure
+# is scaled by ``expanding_median(trailing_vol) / trailing_vol`` of the
+# strategy's own daily P&L, clipped to ``[MHS_PNL_VOL_TARGET_SCALE_FLOOR, 1.0]``
+# and never levered up. The 21-day window is deliberately shorter than the
+# 30-day asset-vol regime window (fast-moving strategy shocks, not broad market
+# regimes) and the 0.2 floor is deliberately lower than the 0.5 asset-vol floor
+# (strategy-level crash protection must de-risk far more aggressively). Burn-in
+# ``MHS_PNL_VOL_TARGET_BURN_IN_DAYS`` keeps the expanding-median target
+# under-sampled (hence unscaled at exactly 1.0) until enough realized history.
+MHS_PNL_VOL_TARGET_WINDOW_DAYS = 21
+MHS_PNL_VOL_TARGET_SCALE_FLOOR = 0.2
+MHS_PNL_VOL_TARGET_BURN_IN_DAYS = 90
 # Anchored-fold panel warm-up bound (spec §3.1, ``memory_opt``): the fold panel
 # is sliced to ``[validation_start - warmup, validation_end]`` instead of the
 # full ``[train_start, validation_end]``. The warm-up covers the 720-bar
@@ -259,6 +271,8 @@ class MhsBookReport:
     ladder_naive_sharpe: float | None = None
     patient_reference: StrategyExecutionReplayResult | None = None
     patient_reference_naive_sharpe: float | None = None
+    pre_vol_target_reference: StrategyExecutionReplayResult | None = None
+    pre_vol_target_reference_naive_sharpe: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -779,6 +793,37 @@ def _regime_cash_scale(
     scale = median.div(vol_mean.clip(lower=1e-12))
     scale = scale.clip(lower=floor, upper=1.0)
     return scale.fillna(1.0)
+
+
+def _pnl_vol_target_scale(
+    reference_daily_returns: pd.Series,
+    window_days: int = MHS_PNL_VOL_TARGET_WINDOW_DAYS,
+    floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR,
+) -> pd.Series:
+    """Strategy-own-P&L realized-vol targeting scale (Barroso & Santa-Clara).
+
+    ``scale_t = clip(expanding_median(trailing_vol)_{t-1} / trailing_vol_{t-1},
+    floor, 1.0)``: the strategy de-risks when its own daily P&L becomes more
+    volatile than its historical median (momentum-crash protection), never
+    levering up and never scaling on an under-sampled estimate. Causality is
+    strict: both the trailing-vol window AND the expanding-median target are
+    ``shift(1)`` before use (two independent shifts, not one combined), so
+    ``scale_t`` depends only on realized returns strictly before ``t``.
+    """
+    if not 0.0 < floor <= 1.0:
+        raise ValueError(f"floor must be in (0, 1], got {floor}")
+    if window_days < 1:
+        raise ValueError(f"window_days must be >= 1, got {window_days}")
+    if reference_daily_returns.empty:
+        return pd.Series(1.0, index=reference_daily_returns.index)
+    trailing_vol = reference_daily_returns.rolling(
+        window_days, min_periods=max(5, window_days // 2),
+    ).std().shift(1)
+    expanding_target = trailing_vol.expanding(
+        min_periods=MHS_PNL_VOL_TARGET_BURN_IN_DAYS,
+    ).median().shift(1)
+    scale = expanding_target.div(trailing_vol.where(trailing_vol > 0))
+    return scale.clip(lower=floor, upper=1.0).fillna(1.0)
 
 
 def _book_weights(
@@ -1542,7 +1587,28 @@ def _book_outcome(
     ladder_naive_sharpe = None
     patient_reference = None
     patient_reference_naive_sharpe = None
+    pre_vol_target_reference = None
+    pre_vol_target_reference_naive_sharpe = None
     try:
+        primary = replay_execution_windows(
+            _window_telemetry(_windows(), "execution_window"),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+            retain_event_snapshots=False,
+        )
+        # Pass 1 (reference) -> P&L-vol-target scale -> Pass 2 (reported):
+        # the strategy's own realized daily-return vol drives a causal
+        # multiplicative exposure scalar, so the reported primary/stress/etc.
+        # replay the rescaled weights while ``pre_vol_target_reference`` keeps
+        # the unscaled Pass-1 result as a diagnostic field.
+        pnl_vol_target_scale = _pnl_vol_target_scale(
+            primary.ledger.equity.resample("1D").last().pct_change()
+        )
+        target_replay = target_replay.mul(
+            pnl_vol_target_scale.reindex(target_replay.index, method="ffill").fillna(1.0),
+            axis=0,
+        )
+        pre_vol_target_reference = primary
+        pre_vol_target_reference_naive_sharpe = _naive_sharpe(primary.ledger)
         primary = replay_execution_windows(
             _window_telemetry(_windows(), "execution_window"),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
@@ -1627,6 +1693,8 @@ def _book_outcome(
             ladder_naive_sharpe=ladder_naive_sharpe,
             patient_reference=patient_reference,
             patient_reference_naive_sharpe=patient_reference_naive_sharpe,
+            pre_vol_target_reference=pre_vol_target_reference,
+            pre_vol_target_reference_naive_sharpe=pre_vol_target_reference_naive_sharpe,
         )
     return MhsBookReport(
         name=name,
@@ -1654,6 +1722,8 @@ def _book_outcome(
         ladder_naive_sharpe=ladder_naive_sharpe,
         patient_reference=patient_reference,
         patient_reference_naive_sharpe=patient_reference_naive_sharpe,
+        pre_vol_target_reference=pre_vol_target_reference,
+        pre_vol_target_reference_naive_sharpe=pre_vol_target_reference_naive_sharpe,
     )
 
 
@@ -2173,6 +2243,21 @@ def _run_anchored_fold(
             initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
             retain_event_snapshots=False,
         )
+        # Two-pass primary (reference -> P&L-vol-target rescale -> reported):
+        # same causal P&L-vol-target scale as the top-level books, computed from
+        # the fold's own validation-window reference ledger.
+        pnl_vol_target_scale = _pnl_vol_target_scale(
+            primary.ledger.equity.resample("1D").last().pct_change()
+        )
+        target_replay = target_replay.mul(
+            pnl_vol_target_scale.reindex(target_replay.index, method="ffill").fillna(1.0),
+            axis=0,
+        )
+        primary = replay_execution_windows(
+            _window_telemetry(_windows(), window_prefix),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+            retain_event_snapshots=False,
+        )
         stress = replay_execution_windows(
             _window_telemetry(_windows(), f"{window_prefix}_cost_stress"),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec(),
@@ -2684,6 +2769,10 @@ def _collect_replay_entries(
             replay_entries.append((f"{book_name}_stress", book_report.stress))
         if book_report.patient_reference is not None:
             replay_entries.append((f"{book_name}_patient_reference", book_report.patient_reference))
+        if book_report.pre_vol_target_reference is not None:
+            replay_entries.append(
+                (f"{book_name}_pre_vol_target_reference", book_report.pre_vol_target_reference)
+            )
     if report.blend is not None:
         if report.blend.primary is not None:
             replay_entries.append(("blend_primary", report.blend.primary))
@@ -2691,6 +2780,8 @@ def _collect_replay_entries(
             replay_entries.append(("blend_stress", report.blend.stress))
         if report.blend.patient_reference is not None:
             replay_entries.append(("blend_patient_reference", report.blend.patient_reference))
+        if report.blend.pre_vol_target_reference is not None:
+            replay_entries.append(("blend_pre_vol_target_reference", report.blend.pre_vol_target_reference))
     for fold_report in report.folds:
         if fold_report.strict is not None:
             replay_entries.append((f"fold{fold_report.fold_index}_strict", fold_report.strict))
@@ -2828,6 +2919,10 @@ def _wire_compact_refs(
             book_payload["patient_reference"] = _compact_replay_ref(
                 row_counts[f"{book_name}_patient_reference"]
             )
+        if book_report.pre_vol_target_reference is not None:
+            book_payload["pre_vol_target_reference"] = _compact_replay_ref(
+                row_counts[f"{book_name}_pre_vol_target_reference"]
+            )
     if report.blend is not None:
         if report.blend.primary is not None:
             payload["blend"]["primary"] = _compact_replay_ref(row_counts["blend_primary"])
@@ -2836,6 +2931,10 @@ def _wire_compact_refs(
         if report.blend.patient_reference is not None:
             payload["blend"]["patient_reference"] = _compact_replay_ref(
                 row_counts["blend_patient_reference"]
+            )
+        if report.blend.pre_vol_target_reference is not None:
+            payload["blend"]["pre_vol_target_reference"] = _compact_replay_ref(
+                row_counts["blend_pre_vol_target_reference"]
             )
     for fold_report in report.folds:
         fold_payload = payload["folds"][fold_report.fold_index]
