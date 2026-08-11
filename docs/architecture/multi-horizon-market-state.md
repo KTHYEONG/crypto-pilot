@@ -78,9 +78,16 @@ forward-fill한다. 5분 grid의 허용 보간 한도는 11개 bar이며, cache 
 
 실행 proxy는 다음 두 경계를 별도 계산한다.
 
+- `OHLCV_IMMEDIATE_TAKER`: 즉시 taker 체결을 적용한다. Research GO의 primary다 --
+  참여율(`participation_warnings`)이 분당 거래량의 1e-9 수준으로 무시 가능해
+  footprint 회피용 passive 주문 대기의 경제적 근거가 없다
+  (`docs/specs/mhs_realistic_execution_primary_swap.md` §0).
 - `OHLCV_STRICT_PROXY`: limit intent가 이후 high/low를 관통할 때만 passive fill로 인정하고,
-  timeout 시 taker fallback을 발생시킨다. Research GO의 primary다.
-- `OHLCV_IMMEDIATE_TAKER`: 즉시 taker 체결을 적용하는 stress bound다.
+  timeout 시 taker fallback을 발생시킨다. 참고용 patient-reference 지표로만 보고되며
+  Research GO를 더 이상 게이팅하지 않는다.
+
+스트레스 bound는 동일한 immediate-taker 체결에 비용을 3배(`SPREAD_AND_COST_X3`,
+`maker_fee_bps=6.0, taker_fee_bps=15.0, taker_slippage_bps=9.0`) 가정으로 적용한다.
 
 OHLCV만으로는 partial fill, queue position, post-only rejection, cancel/replace latency,
 order-size impact를 복원할 수 없다. 따라서 이 리플레이는 실제 체결 재현이 아니라
@@ -117,8 +124,8 @@ Target weight의 `abs(Δweight)`는 실제 turnover가 아니다. turnover는 �
 Research GO에는 다음이 모두 필요하다.
 
 1. 4.18bp/base와 6.07bp/stress pre-screen 결과 보고
-2. strict simulated-inventory aggregate의 daily autocorrelation-adjusted Sharpe ≥ 0.6
-3. immediate-taker stress Sharpe > 0
+2. immediate-taker simulated-inventory aggregate의 daily autocorrelation-adjusted Sharpe ≥ 0.6
+3. cost-stressed (SPREAD_AND_COST_X3) immediate-taker stress Sharpe > 0
 4. 양의 primary에 대해 cap30% Sharpe와 net annual return 조건 충족
 5. phase degeneracy, relevant missing data, termination, concentration, participation,
    synthetic stress 결과를 모두 보고하고 silent exclusion이 없어야 함

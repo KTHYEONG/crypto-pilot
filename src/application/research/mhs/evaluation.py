@@ -2,9 +2,10 @@
 
 This module composes the frozen ``src.mhs`` primitives; no alpha, cost,
 ranking, liquidity, funding, or inventory arithmetic is reimplemented here.
-The target-weight ``cost_response_curve`` is pre-screen only, the strict-proxy
-replay + simulated inventory ledger is the primary Research-GO evidence, and
-every report separates the two.
+The target-weight ``cost_response_curve`` is pre-screen only, the
+immediate-taker replay + simulated inventory ledger is the primary
+Research-GO evidence (with a cost-stressed x3 bound and an informational
+patient-passive reference), and every report separates the two.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from src.market_data.services.futures_collection import DataCollector
 from src.mhs.evaluation import cost_response_curve, phase_diagnostic_metrics, tail_sensitivity_curve
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
-from src.mhs.execution import replay_execution_window_pair, replay_execution_windows
+from src.mhs.execution import replay_execution_windows
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.research.evaluation.policy import resolve_evaluation_end
 
@@ -73,6 +74,27 @@ MhsExecutionWindow = ExecutionReplayWindow
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
 MHS_DISCOVERY_START = pd.Timestamp("2021-01-01", tz="UTC")
+MHS_DISCOVERY_GATE_TRANCHE_COUNT = 8
+# SPREAD_AND_COST_X3 stress assumption: the realistic primary fill mechanic at
+# 3x the default cost (same model, cost-shock robustness check).
+MHS_STRESS_COST_MULTIPLIER = 3.0
+
+
+def _stress_cost_execution_spec() -> ExecutionSpec:
+    """SPREAD_AND_COST_X3: the same realistic fill mechanic at 3x cost."""
+    base = ExecutionSpec()
+    return ExecutionSpec(
+        maker_fee_bps=base.maker_fee_bps * MHS_STRESS_COST_MULTIPLIER,
+        taker_fee_bps=base.taker_fee_bps * MHS_STRESS_COST_MULTIPLIER,
+        taker_slippage_bps=base.taker_slippage_bps * MHS_STRESS_COST_MULTIPLIER,
+    )
+
+
+MHS_DISCOVERY_REVERSAL_CANDIDATES: tuple[int, ...] = (24, 48, 72, 96, 120, 144, 168)
+MHS_DISCOVERY_MOMENTUM_CANDIDATES: tuple[int, ...] = (
+    72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336,
+    360, 384, 408, 432, 456, 480, 504,
+)
 _MHS_FEATURE = "multi_horizon_market_state"
 _PERIODS_PER_YEAR_1H = 365.0 * 24
 _BOOTSTRAP_SEED = 20260807
@@ -235,6 +257,8 @@ class MhsBookReport:
     touch_naive_sharpe: float | None = None
     ladder: StrategyExecutionReplayResult | None = None
     ladder_naive_sharpe: float | None = None
+    patient_reference: StrategyExecutionReplayResult | None = None
+    patient_reference_naive_sharpe: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1505,12 +1529,25 @@ def _book_outcome(
     touch_naive_sharpe = None
     ladder = None
     ladder_naive_sharpe = None
+    patient_reference = None
+    patient_reference_naive_sharpe = None
     try:
-        primary, stress = replay_execution_window_pair(
+        primary = replay_execution_windows(
             _window_telemetry(_windows(), "execution_window"),
-            initial_equity, ExecutionSpec(),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
             retain_event_snapshots=False,
         )
+        stress = replay_execution_windows(
+            _window_telemetry(_windows(), "execution_window_cost_stress"),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec(),
+            retain_event_snapshots=False,
+        )
+        patient_reference = replay_execution_windows(
+            _window_telemetry(_windows(), "execution_window_patient_reference"),
+            initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+            retain_event_snapshots=False,
+        )
+        patient_reference_naive_sharpe = _naive_sharpe(patient_reference.ledger)
         if request.touch_diagnostic:
             touch = replay_execution_windows(
                 _window_telemetry(_windows(), "execution_window_touch"),
@@ -1577,6 +1614,8 @@ def _book_outcome(
             touch_naive_sharpe=touch_naive_sharpe,
             ladder=ladder,
             ladder_naive_sharpe=ladder_naive_sharpe,
+            patient_reference=patient_reference,
+            patient_reference_naive_sharpe=patient_reference_naive_sharpe,
         )
     return MhsBookReport(
         name=name,
@@ -1602,6 +1641,8 @@ def _book_outcome(
         touch_naive_sharpe=touch_naive_sharpe,
         ladder=ladder,
         ladder_naive_sharpe=ladder_naive_sharpe,
+        patient_reference=patient_reference,
+        patient_reference_naive_sharpe=patient_reference_naive_sharpe,
     )
 
 
@@ -2071,7 +2112,8 @@ def _run_anchored_fold(
     feeds features only; the replay decisions and the fresh flat ledger cover
     only the validation window. The fold uses the same at-most-31-day windowed
     execution engine as the top-level books (``_iter_mhs_execution_windows`` +
-    ``replay_execution_window_pair``) so dense event snapshots stay disabled
+    ``replay_execution_windows``, immediate-taker primary and cost-stressed
+    stress) so dense event snapshots stay disabled
     and per-window resource telemetry/RSS budgets are applied inside the fold,
     not only at the top level. A fold that cannot be replayed is reported (not
     raised) with machine-readable failure codes.
@@ -2115,9 +2157,14 @@ def _run_anchored_fold(
                 _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
 
         window_prefix = f"anchored_fold_{fold_index}_window"
-        primary, stress = replay_execution_window_pair(
+        primary = replay_execution_windows(
             _window_telemetry(_windows(), window_prefix),
-            initial_equity, ExecutionSpec(),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+            retain_event_snapshots=False,
+        )
+        stress = replay_execution_windows(
+            _window_telemetry(_windows(), f"{window_prefix}_cost_stress"),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec(),
             retain_event_snapshots=False,
         )
 
@@ -2409,18 +2456,20 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     if request.discovery_gate:
         discovery_qualification = {
             "reversal": select_horizon_by_discovery_qualification(
-                sign=-1, horizon_candidates=(24, 48, 72, 96, 120, 168),
+                sign=-1, horizon_candidates=MHS_DISCOVERY_REVERSAL_CANDIDATES,
                 log_close=log_close, eligible=eligible, opens=opens,
                 bar_funding=bar_funding, grid_1h=grid_1h,
                 discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
                 qualification_end=QUALIFICATION_END,
+                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
             ),
             "momentum": select_horizon_by_discovery_qualification(
-                sign=1, horizon_candidates=(72, 120, 168, 240, 336, 504),
+                sign=1, horizon_candidates=MHS_DISCOVERY_MOMENTUM_CANDIDATES,
                 log_close=log_close, eligible=eligible, opens=opens,
                 bar_funding=bar_funding, grid_1h=grid_1h,
                 discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
                 qualification_end=QUALIFICATION_END,
+                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
             ),
         }
     del log_close
@@ -2539,7 +2588,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     fill_source = "NOT_RUN_NO_EXECUTION_DATA"
     if blend_report is not None and blend_report.primary is not None:
         mark_source = blend_report.primary.ledger.mark_source
-        fill_source = "OHLCV_STRICT_PROXY"
+        fill_source = "OHLCV_IMMEDIATE_TAKER"
 
     run_elapsed_seconds = time.perf_counter() - _run_start
     telemetry.record("final_return")
@@ -2622,11 +2671,15 @@ def _collect_replay_entries(
             replay_entries.append((f"{book_name}_primary", book_report.primary))
         if book_report.stress is not None:
             replay_entries.append((f"{book_name}_stress", book_report.stress))
+        if book_report.patient_reference is not None:
+            replay_entries.append((f"{book_name}_patient_reference", book_report.patient_reference))
     if report.blend is not None:
         if report.blend.primary is not None:
             replay_entries.append(("blend_primary", report.blend.primary))
         if report.blend.stress is not None:
             replay_entries.append(("blend_stress", report.blend.stress))
+        if report.blend.patient_reference is not None:
+            replay_entries.append(("blend_patient_reference", report.blend.patient_reference))
     for fold_report in report.folds:
         if fold_report.strict is not None:
             replay_entries.append((f"fold{fold_report.fold_index}_strict", fold_report.strict))
@@ -2760,11 +2813,19 @@ def _wire_compact_refs(
             book_payload["primary"] = _compact_replay_ref(row_counts[f"{book_name}_primary"])
         if book_report.stress is not None:
             book_payload["stress"] = _compact_replay_ref(row_counts[f"{book_name}_stress"])
+        if book_report.patient_reference is not None:
+            book_payload["patient_reference"] = _compact_replay_ref(
+                row_counts[f"{book_name}_patient_reference"]
+            )
     if report.blend is not None:
         if report.blend.primary is not None:
             payload["blend"]["primary"] = _compact_replay_ref(row_counts["blend_primary"])
         if report.blend.stress is not None:
             payload["blend"]["stress"] = _compact_replay_ref(row_counts["blend_stress"])
+        if report.blend.patient_reference is not None:
+            payload["blend"]["patient_reference"] = _compact_replay_ref(
+                row_counts["blend_patient_reference"]
+            )
     for fold_report in report.folds:
         fold_payload = payload["folds"][fold_report.fold_index]
         if fold_report.strict is not None:
