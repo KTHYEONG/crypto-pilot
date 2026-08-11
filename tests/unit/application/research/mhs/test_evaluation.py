@@ -2113,3 +2113,47 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     assert captured["fold_slow_horizons"] == {0: 360, 1: 360, 2: 360}
     assert captured["top_level_slow"].horizon_hours == 360
     assert captured["top_level_slow"].band is ev.PHASE_1_BOOK_SPECS["slow_momentum"].band
+
+
+def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_HORIZON_SEARCH_EFF_05_TOP_LEVEL_WIRING_SHARES_ONE_CACHE_ACROSS_FOLDS:
+    # with fold_safe_horizon_selection=True the parent builds the discovery
+    # weight book exactly once (call-count 1 wrapping the real implementation,
+    # regardless of the 3 anchored folds) and passes the SAME cache object into
+    # every fold_train_only_discovery_qualification(...) call -- the measured
+    # 3x-redundant weight construction is eliminated without changing any value.
+    root, end = mhs_market
+    calls = {"n": 0}
+    real_build = ev.build_candidate_weights
+
+    def counting_build(*args, **kwargs):
+        calls["n"] += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "build_candidate_weights", counting_build)
+    cache_objs: list = []
+
+    def _spy_fold(*args, **kwargs):
+        cache_objs.append(kwargs.get("precomputed_candidate_weights"))
+        return _admitted_selection(360)
+
+    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _spy_fold)
+
+    def _spy_books(*args, **kwargs):
+        return (None, None, None)
+
+    def _spy_post(*args, **kwargs):
+        return (None, None, {}, {}, (), None)
+
+    monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+    request_on = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, fold_safe_horizon_selection=True,
+    )
+    top_report = ev.run_mhs_horizon_diagnostic(request_on)
+    assert top_report.status == "COMPLETE"
+    assert calls["n"] == 1
+    assert len(cache_objs) == 3
+    assert all(c is cache_objs[0] for c in cache_objs)

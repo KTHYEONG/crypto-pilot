@@ -63,6 +63,7 @@ from src.mhs.evaluation import (
 from src.mhs.execution import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult, bar_funding_panel, laddered_fill_schedule, mhs_ledger_pnl
 from src.mhs.discovery import (
     DiscoveryQualificationResult,
+    build_candidate_weights,
     fold_train_only_discovery_qualification,
     select_horizon_by_discovery_qualification,
 )
@@ -2535,6 +2536,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # ever reloads a wide ``[train_start, train_end]`` panel.
     fold_slow_horizons: dict[int, int | None] = {}
     if request.fold_safe_horizon_selection:
+        _precomputed_weights = build_candidate_weights(
+            log_close, eligible, 1, specs["slow_momentum"].band.horizons_hours,
+            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+        )
         for _fold_idx, _fold in enumerate(phase_1_anchored_purged_folds()):
             _spec, _horizon, _source = _fold_safe_slow_book_spec(
                 fold_train_only_discovery_qualification(
@@ -2543,6 +2548,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                     log_close=log_close, eligible=eligible, opens=opens,
                     bar_funding=bar_funding, grid_1h=grid_1h, fold=_fold,
                     tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                    precomputed_candidate_weights=_precomputed_weights,
                 ),
                 specs["slow_momentum"],
             )

@@ -13,6 +13,7 @@ p-hack).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -105,6 +106,31 @@ def _candidate_net_t(
     return _score_masked_net_t(weights, opens, bar_funding, mask, cost_bps, periods_per_year)
 
 
+def build_candidate_weights(
+    log_close: pd.DataFrame,
+    eligible: pd.DataFrame,
+    sign: int,
+    horizon_candidates: tuple[int, ...],
+    min_symbols: int = 8,
+    tranche_count: int = 1,
+) -> dict[int, pd.DataFrame]:
+    """Precompute every horizon candidate's combined weight book once.
+
+    A thin dict-comprehension wrapper around the unchanged ``_horizon_weights``
+    building block: ``{h: _horizon_weights(log_close, eligible, sign, h,
+    min_symbols, tranche_count) for h in horizon_candidates}``.  ``_horizon_weights``
+    is a pure function of ``(log_close, eligible, sign, horizon, min_symbols,
+    tranche_count)`` -- it never depends on the discovery/qualification window
+    bounds -- so building the full candidate grid once and reusing it across
+    multiple window scans (e.g. one per anchored fold) yields values
+    mathematically identical to rebuilding per scan.
+    """
+    return {
+        h: _horizon_weights(log_close, eligible, sign, h, min_symbols, tranche_count)
+        for h in horizon_candidates
+    }
+
+
 def select_horizon_by_discovery_qualification(
     sign: int,
     horizon_candidates: tuple[int, ...],
@@ -121,6 +147,7 @@ def select_horizon_by_discovery_qualification(
     cost_bps: float = MEASURED_EXECUTION_COST_TIERS_BPS["optimistic"],
     periods_per_year: float = _PERIODS_PER_YEAR_1H,
     admission_t: float = _ADMISSION_T,
+    precomputed_candidate_weights: Mapping[int, pd.DataFrame] | None = None,
 ) -> DiscoveryQualificationResult:
     """Run the worst-year-robust discovery/qualification gate for one sign family.
 
@@ -166,7 +193,11 @@ def select_horizon_by_discovery_qualification(
     oriented_scores: dict[int, float] = {}
     raw_worst_year: dict[int, float] = {}
     for horizon in horizon_candidates:
-        weights = _horizon_weights(log_close, eligible, sign, horizon, min_symbols, tranche_count)
+        weights = (
+            precomputed_candidate_weights[horizon]
+            if precomputed_candidate_weights is not None
+            else _horizon_weights(log_close, eligible, sign, horizon, min_symbols, tranche_count)
+        )
         yearly: list[float] = []
         for year in discovery_years:
             net_t = _score_masked_net_t(
@@ -201,7 +232,11 @@ def select_horizon_by_discovery_qualification(
             qualification_sign_consistent=None,
         )
 
-    best_weights = _horizon_weights(log_close, eligible, sign, best_horizon, min_symbols, tranche_count)
+    best_weights = (
+        precomputed_candidate_weights[best_horizon]
+        if precomputed_candidate_weights is not None
+        else _horizon_weights(log_close, eligible, sign, best_horizon, min_symbols, tranche_count)
+    )
     discovery_aggregate_net_t = _score_masked_net_t(
         best_weights, opens, bar_funding, discovery_mask, cost_bps, periods_per_year,
     )
@@ -246,6 +281,7 @@ def fold_train_only_discovery_qualification(
     cost_bps: float = MEASURED_EXECUTION_COST_TIERS_BPS["optimistic"],
     periods_per_year: float = _PERIODS_PER_YEAR_1H,
     admission_t: float = _ADMISSION_T,
+    precomputed_candidate_weights: Mapping[int, pd.DataFrame] | None = None,
 ) -> DiscoveryQualificationResult:
     """Run the discovery/qualification gate on one anchored fold's own train data.
 
@@ -286,6 +322,7 @@ def fold_train_only_discovery_qualification(
         cost_bps=cost_bps,
         periods_per_year=periods_per_year,
         admission_t=admission_t,
+        precomputed_candidate_weights=precomputed_candidate_weights,
     )
 
 
