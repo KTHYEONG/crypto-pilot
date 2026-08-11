@@ -1,0 +1,5 @@
+creation_rules:
+  - path_regex: \.env(\.enc)?$
+    input_type: dotenv
+    output_type: dotenv
+    age: age1dacxehc33pffhu72njfm0acm5yavwv9v7evasyynuz6dqv2ee5zsa6waj9
