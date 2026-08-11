@@ -426,21 +426,22 @@ class TestWindowExecutionTelemetry:
 
 
 class TestStrictSimulatedPrimary:
-    """MHS-19-STRICT-SIMULATED-PRIMARY: strict proxy is the only primary evidence."""
+    """MHS-19-STRICT-SIMULATED-PRIMARY: the realistic immediate-taker bound is
+    the primary evidence, with a cost-stressed x3 stress bound."""
 
     def test_prescreen_and_primary_are_separate(self, report) -> None:
         blend = report.blend
         assert blend is not None
         assert 4.18 in blend.prescreen
         assert 6.07 in blend.prescreen
-        assert blend.primary.fill_source == "OHLCV_STRICT_PROXY"
+        assert blend.primary.fill_source == "OHLCV_IMMEDIATE_TAKER"
         assert blend.primary.ledger.mark_source == "MARK_PRICE"
         assert blend.primary_naive_sharpe is not None
         assert blend.primary_max_drawdown <= 0.0 or np.isnan(blend.primary_max_drawdown)
         assert blend.stress.fill_source == "OHLCV_IMMEDIATE_TAKER"
-        assert report.fill_source == "OHLCV_STRICT_PROXY"
+        assert report.fill_source == "OHLCV_IMMEDIATE_TAKER"
         assert blend.primary.simulated_fills is not None
-        # The executable tranche actually traded through the strict proxy.
+        # The executable tranche actually traded through the immediate taker.
         assert len(blend.primary.simulated_fills) > 0
 
     def test_phase_and_tail_diagnostics_reported(self, report) -> None:
@@ -465,13 +466,17 @@ class TestTouchDiagnostic:
         """SCENARIO_MHS_TOUCH_WEAK_DOMINANCE: the touch crossing condition
         ``adverse <= decision_price`` is a superset of strict's
         ``adverse < decision_price``, so on any input touch fill count weakly
-        dominates strict fill count."""
+        dominates the (demoted) strict patient-reference bound. The primary is
+        now the immediate-taker bound, so strict lives on as
+        ``patient_reference``."""
         for book in (touch_report.books["slow_momentum"], touch_report.blend):
             assert book.touch is not None
             assert book.touch.fill_source == "OHLCV_TOUCH_PROXY"
             assert book.touch_naive_sharpe is not None
-            assert book.touch.fill_count >= book.primary.fill_count
-            assert book.touch.unfilled_count <= book.primary.unfilled_count
+            assert book.patient_reference is not None
+            assert book.patient_reference.fill_source == "OHLCV_STRICT_PROXY"
+            assert book.touch.fill_count >= book.patient_reference.fill_count
+            assert book.touch.unfilled_count <= book.patient_reference.unfilled_count
 
 
 class TestFreezeBeforeFinalOos:
@@ -1055,11 +1060,11 @@ class TestFullModeBackwardCompat:
         expected_fills = sum(
             len(replay.simulated_fills)
             for book_report in report.books.values()
-            for replay in (book_report.primary, book_report.stress)
+            for replay in (book_report.primary, book_report.stress, book_report.patient_reference)
             if replay is not None
         )
         if report.blend is not None:
-            for replay in (report.blend.primary, report.blend.stress):
+            for replay in (report.blend.primary, report.blend.stress, report.blend.patient_reference):
                 if replay is not None:
                     expected_fills += len(replay.simulated_fills)
         for fold_report in report.folds:
@@ -1153,7 +1158,7 @@ class TestFoldWindowTelemetryOracle:
         minute_funding = ev.bar_funding_panel(mfwin, minute_grid).reindex(columns=list(closes.columns))
         oracle = strategy_aware_execution_replay(
             target_replay, signal_available_at, highs, lows, closes, marks,
-            minute_funding, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+            minute_funding, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
         )
         return oracle
 
@@ -1174,16 +1179,31 @@ class TestFoldWindowTelemetryOracle:
         assert fold_report.stress is not None
         assert fold_report.stress.event_snapshots_retained is False
 
-        window_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
-        assert window_stages, "fold paired window telemetry must be recorded"
-        assert window_stages == sorted(window_stages)
-        # The paired fan-out records one physical window per stage: the stress
-        # bound consumes the same iterator, so no stress re-iteration exists.
-        assert not [
-            m.stage for m in recorder.records
-            if m.stage.startswith("anchored_fold_0_stress_window_")
+        # The fold runs two independent replays (immediate-taker primary and
+        # cost-stressed stress), each with its own window telemetry under a
+        # distinct stage prefix; both are recorded in chronological order.
+        primary_windows = [
+            (m.window_start, m.window_end)
+            for m in recorder.records
+            if m.stage.startswith("anchored_fold_0_window_")
+            and not m.stage.startswith("anchored_fold_0_window_cost_stress_")
         ]
-        seen: list[tuple[str, str]] = []
+        stress_windows = [
+            (m.window_start, m.window_end)
+            for m in recorder.records
+            if m.stage.startswith("anchored_fold_0_window_cost_stress_")
+        ]
+        assert primary_windows, "fold primary window telemetry must be recorded"
+        assert stress_windows, "fold cost-stress window telemetry must be recorded"
+        for seen in (primary_windows, stress_windows):
+            # Each bound's windows are chronologically ordered: starts and ends
+            # are non-decreasing and span the validation window.
+            starts = [pd.Timestamp(s) for s, _ in seen]
+            ends = [pd.Timestamp(e) for _, e in seen]
+            assert starts == sorted(starts)
+            assert ends == sorted(ends)
+            assert starts[0] <= FOLD_WINDOW_FOLD.validation_start
+            assert ends[-1] >= FOLD_WINDOW_FOLD.validation_end
         for m in recorder.records:
             if not m.stage.startswith("anchored_fold_0_window_"):
                 continue
@@ -1195,15 +1215,6 @@ class TestFoldWindowTelemetryOracle:
             assert m.active_symbols >= 0
             assert m.peak_rss_bytes is not None
             assert m.peak_rss_bytes >= m.rss_bytes
-            seen.append((m.window_start, m.window_end))
-        assert seen
-        # Windows are chronologically ordered: starts and ends are non-decreasing.
-        starts = [pd.Timestamp(s) for s, _ in seen]
-        ends = [pd.Timestamp(e) for _, e in seen]
-        assert starts == sorted(starts)
-        assert ends == sorted(ends)
-        assert starts[0] <= FOLD_WINDOW_FOLD.validation_start
-        assert ends[-1] >= FOLD_WINDOW_FOLD.validation_end
 
         # Numerical equivalence to the single-panel oracle on the same inputs.
         oracle = self._single_panel_oracle(root, funding_by_symbol)
