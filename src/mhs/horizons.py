@@ -31,6 +31,22 @@ def realized_vol(log_price: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
         * np.sqrt(horizon_bars)
     )
 
+def vol_normalized_horizon_signal(log_price: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
+    """Horizon log-return scaled by its own realized vol (risk-adjusted momentum).
+
+    Avoids raw-return cross-sectional rank being dominated by a handful of
+    high-realized-vol symbols whose large moves carry no proportionally
+    larger persistence signal (docs/specs/mhs_momentum_vol_normalization.md §0).
+    """
+    raw = horizon_log_return(log_price, horizon_bars)
+    vol = realized_vol(log_price, horizon_bars)
+    r = raw.to_numpy(dtype="float64")
+    v = vol.to_numpy(dtype="float64")
+    out = np.full_like(r, np.nan)
+    valid = np.isfinite(v) & (v > 0)
+    np.divide(r, v, out=out, where=valid)
+    return pd.DataFrame(out, index=raw.index, columns=raw.columns)
+
 
 def efficiency_ratio(log_price: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     """Efficiency ratio: |net move| / sum(|one-bar moves|) over the window.
