@@ -9,7 +9,11 @@ import pandas as pd
 import pytest
 
 from src.application.research.mhs import evaluation as ev
-from src.application.research.mhs.evaluation import MhsDiagnosticRequest, run_mhs_horizon_diagnostic
+from src.application.research.mhs.evaluation import (
+    MhsDiagnosticRequest,
+    MhsHorizonDiagnosticReport,
+    run_mhs_horizon_diagnostic,
+)
 from src.cli.commands.research.mhs import add_mhs_commands
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.universe.pit_universe import symbol_partition
@@ -819,6 +823,61 @@ class TestAnchoredFoldGoGate:
         )
         assert MHS_GO_REASON_INCOMPLETE_FOLD in incomplete.reason_codes
         assert incomplete.eligible is False
+
+class TestFoldSafeHorizonEfficiency:
+    """SCENARIO_MHS_HORIZON_SEARCH_EFF_06_FULL_DIAGNOSTIC_REPORT_UNCHANGED: the
+    discovery weight cache (Q3) is a pure performance change -- running the
+    diagnostic with ``fold_safe_horizon_selection=True`` through the cached
+    path must produce a report byte-identical to the pre-caching-change
+    baseline (the same run with ``precomputed_candidate_weights`` stripped from
+    the fold-scoped qualification calls, which is exactly what the pre-change
+    code did)."""
+
+    @pytest.fixture(scope="module")
+    def fold_safe_report(self, synthetic_market) -> MhsHorizonDiagnosticReport:
+        root, end = synthetic_market
+        return run_mhs_horizon_diagnostic(
+            MhsDiagnosticRequest(
+                start=str(START), end=str(end), data_root=str(root),
+                execution_timeframe="1m", log_run=False,
+                fold_safe_horizon_selection=True,
+            ),
+        )
+
+    @pytest.fixture(scope="module")
+    def fold_safe_baseline_report(self, synthetic_market) -> MhsHorizonDiagnosticReport:
+        root, end = synthetic_market
+        real_fn = ev.fold_train_only_discovery_qualification
+
+        def _no_cache(*args, **kwargs):
+            kwargs.pop("precomputed_candidate_weights", None)
+            return real_fn(*args, **kwargs)
+
+        ev.fold_train_only_discovery_qualification = _no_cache
+        try:
+            return run_mhs_horizon_diagnostic(
+                MhsDiagnosticRequest(
+                    start=str(START), end=str(end), data_root=str(root),
+                    execution_timeframe="1m", log_run=False,
+                    fold_safe_horizon_selection=True,
+                ),
+            )
+        finally:
+            ev.fold_train_only_discovery_qualification = real_fn
+
+    def test_cached_path_report_byte_identical_to_baseline(
+        self, fold_safe_report, fold_safe_baseline_report,
+    ) -> None:
+        assert fold_safe_report.status == "COMPLETE"
+        assert fold_safe_baseline_report.status == "COMPLETE"
+        assert len(fold_safe_report.folds) == len(fold_safe_baseline_report.folds) == 3
+        for cached_fold, baseline_fold in zip(
+            fold_safe_report.folds, fold_safe_baseline_report.folds, strict=True,
+        ):
+            assert cached_fold.slow_horizon_hours == baseline_fold.slow_horizon_hours
+            assert cached_fold.slow_horizon_source == baseline_fold.slow_horizon_source
+        assert fold_safe_report.research_go == fold_safe_baseline_report.research_go
+        assert fold_safe_report.blend.primary_autocorr_sharpe == fold_safe_baseline_report.blend.primary_autocorr_sharpe
 
 class TestMhsPerfOptimizationO3FoldParity:
     """SCENARIO_O3_FOLD_PARITY: the three anchored folds run in parallel worker
