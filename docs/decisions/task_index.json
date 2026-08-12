@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_EXECUTION_ANNUALIZATION_FIX",
+      "date": "2026-08-12",
+      "adr_id": "ADR_20260812_MHS_EXECUTION_ANNUALIZATION_FIX",
+      "domain": "mhs",
+      "title": "MHS 실행 원장 연율화 버그 규명 및 수정",
+      "why": "16차(RC-1/RC-2 alpha-engine) 적용 후에도 primary_geometric_cagr가 0.00035→0.0063으로 사실상 0% 근처 정체 — 같은 원장의 primary_autocorr_sharpe는 0.18→0.53로 유의미하게 개선됐는데 왜 CAGR(자산증식 헤드라인)만 안 움직이는지 재조사 요청받음. _full/ledger.parquet 직접 검증으로 blend_primary 원장이 525,601행(5년×5분 격자)임을 확인했는데, _geometric_cagr/_naive_sharpe/_mean_ann/compute_deployment_readiness가 전부 하드코딩된 _PERIODS_PER_YEAR_1H(연 8,760, 1시간 격자 가정)를 그대로 적용해 연율화 지수가 정확히 12배(60분/5분) 축소되고 있었음을 규명. _daily_autocorr_sharpe/_mdd는 이미 일봉 리샘플·비율 기반이라 버그 없음 — Sharpe만 개선이 보이고 CAGR은 안 보였던 정확한 이유.",
+      "resolution": "신규 헬퍼 _hourly_ledger_series(equity, fill_turnover)가 (equity_1h, net_returns_1h, turnover_1h)를 반환하도록 추가(equity는 resample('1h').last(), turnover는 resample('1h').sum() — 회전율은 합산이 맞는 집계). _naive_sharpe는 시그니처 불변으로 내부에서 ledger.equity를 1시간 리샘플한 net_returns를 사용하도록 수정(8개 호출부 전부 무수정). _book_outcome/_run_anchored_fold의 primary_net_ann/primary_geometric_cagr/primary_annualized_turnover를 _hourly_ledger_series 결과로 교체, primary_max_drawdown/primary_autocorr_sharpe는 원본 원장 그대로 유지(빈도 무관이라 버그 없었음). _run_post_diag_deploy의 compute_deployment_readiness 호출도 이미 바로 위에서 계산되던 equity_1h를 재사용하도록 1줄 교체(부트스트랩 mean_block_bars=168의 '1주' 의미도 동시에 복원). 신호·비용·체결 로직은 전혀 무변경. 실전 재실행(17차, docs/results/mhs-res.md)으로 예측된 배율(CAGR 12.4x, naive Sharpe sqrt(12), MDD/autocorr Sharpe 무변화)이 정확히 실측 재현됨: CAGR 0.63%→7.84%, 30%+ 낙폭확률 62.65%→47.0%. Research GO 게이트(Sharpe 기반)는 버그 영향을 받지 않아 eligible=false 무변화.",
+      "impact": "research run portfolio mhs-horizon-diagnostic (모든 향후 실행의 CAGR/naive Sharpe/연율수익/연환산회전율/배포준비도 꼬리위험 수치가 이 수정의 영향을 받음); docs/results/mhs-res.md 17차 갱신"
+    },
+    {
       "task_id": "MHS_ALPHA_ENGINE_REBUILD",
       "date": "2026-08-12",
       "adr_id": "ADR_20260812_MHS_ALPHA_ENGINE_REBUILD",
@@ -989,16 +999,6 @@
       "why": "고정 5심볼 롱 전용 sleeve의 fold 집중을 완화할 인과적 방향·펀딩 레짐 후보를 검증하기 위해 구현했다.",
       "resolution": "funding_signed_directional_v1과 causal inverse-volatility sizing을 연결하고 351개 테스트·ruff·mypy·lean_check를 통과시켰으며 sealed CLI 실행 결과를 확인했다.",
       "impact": "CAGR 1.44%, observation LCB90 0.04%, fold 0.4056, stress FAIL로 promotion은 REJECTED이며 기존 fold threshold 완화 근거는 없다."
-    },
-    {
-      "task_id": "TASK_FIXED_SLEEVE_PORTFOLIO_BLEND",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_FIXED_SLEEVE_PORTFOLIO_BLEND",
-      "domain": "risk",
-      "title": "고정 슬리브 멀티심볼 Donchian 블렌드 + MDD-예산 레버리지 구현",
-      "why": "단일전략 의존과 보수적 사이징이 gate 실패의 원인이라는 사용자 지적에 따라, 분산투자+원칙적 레버리지가 observation gate를 통과시킬 수 있는지 검증 필요",
-      "resolution": "BTC+ETH+AVAX+BNB+DOGE 동일가중 블렌드(src/research/sleeve_blend/) 구현, MDD 예산(게이트 플로어의 85%) 기반 정적 레버리지 산출(Kelly 아님, v6 파산 사례 반영). 실행 결과 observation PASS(LCB90 15.12%), stress PASS, fold_gate만 FAIL(0.4899)",
-      "impact": "promotion은 여전히 REJECTED이나 병목이 observation hurdle에서 fold-concentration 단일 게이트로 좁혀짐; 5가지 독립 구성(단일심볼/알트/횡단면모멘텀/유동성포트폴리오/이번블렌드) 전부 fold<0.40 미달로 구조적 병목 확정, 기술적 레버 소진 - fold-gate 방법론 정책 결정이 다음 필수 단계"
     }
   ]
 }
