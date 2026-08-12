@@ -135,7 +135,14 @@ PHASE_1_BOOK_BLEND_WEIGHTS: dict[str, float] = {
 # §3.2), not for backtested performance.
 MHS_CRASH_REGIME_REFERENCE_SYMBOLS: tuple[str, ...] = ("BTCUSDT",)
 
-_FAST_BAND = HorizonBand(name="fast_reversal", horizons_hours=(48,), sign=-1)
+# The fast band's allowed set is the full measured reversal candidate grid
+# (docs/specs/mhs_universe_horizon_redesign.md §3.1, 7 horizons, 24h-168h step
+# 24) so a fold-scoped discovery/qualification selection may re-verify the
+# frozen 48h default. ``PHASE_1_BOOK_SPECS["fast_reversal"].horizon_hours``
+# stays 48 (the frozen fallback default); widening only the band is
+# diagnostic-only and never changes the 0.0 capital allocation.
+REVERSAL_HORIZON_CANDIDATES_HOURS: tuple[int, ...] = (24, 48, 72, 96, 120, 144, 168)
+_FAST_BAND = HorizonBand(name="fast_reversal", horizons_hours=REVERSAL_HORIZON_CANDIDATES_HOURS, sign=-1)
 # The slow band's allowed set is the full measured momentum candidate grid
 # (docs/results/mhs-res.md §2, 19 horizons, 72h-504h step 24) so a
 # fold-scoped discovery/qualification selection may replace the frozen 168h
