@@ -1,16 +1,23 @@
 # Multi-Horizon Market State (MHS) 시스템 아키텍처 및 체결 가이드
 
-## 1. 개요 및 목적 (Overview & Purpose)
+## 1. 개요 및 주 목적 (Overview & Core Purpose)
 
 **Multi-Horizon Market State (MHS)**는 여러 거래 보유 기간(Horizon)의 횡단면(Cross-Sectional) 알파 신호를 독립된 북(Book)으로 구축하고, 5분봉 단위의 실제 계약수량 기반 **모의 실행 원장(Simulated Inventory Ledger)**을 통해 전략의 유효성을 검증하는 **Phase 1 알파 연구 및 실행 파이프라인**입니다.
 
-### 핵심 역할
-- **다중 호라이즌 신호 앙상블**: Short-term Reversal(단기 반전)과 Long-term Momentum(장기 모멘텀) 신호를 병렬적으로 생성하여 포트폴리오를 구성합니다.
-- **인과적(Causal) 실행 리플레이**: 미래 편향(Look-ahead bias)을 엄격히 배제한 Point-In-Time (PIT) 마크 평가 및 5분봉 proxy 체결을 시뮬레이션합니다.
-- **단일 진실 원천(Single Source of Truth) 원장**: Target weight 기반의 근사 PnL이 아닌, 체결 이벤트와 펀딩비, 마크-투-마켓(MTM) 가치 평가가 완전 통합된 수량/현금 원장(`SimulatedInventoryLedger`)을 통해 최종 PnL 및 리스크를 정밀 측정합니다.
+### 🎯 MHS의 주 목적
+1. **Target Weight 근사 PnL의 착시 제거**: 목표 가중치(Target weight) 변경만으로 수익이 나는 것처럼 보이는 백테스트 착시를 막기 위해, 실제 주문 체결, 마크-투-마켓(MTM) 평가, 펀딩비, 슬리피지/수수료가 완전 통합된 수량/현금 원장(`SimulatedInventoryLedger`)으로 순수 PnL을 정밀 측정합니다.
+2. **미래 편향(Look-ahead bias) 배제**: 매 결정 시점(Point-In-Time, PIT)에서 관측 가능한 유동성 및 마크 가격만을 인과적(Causal)으로 이용합니다.
+3. **Kelly 및 동적 사이징의 배제 (Raw Alpha 검증)**:
+   - MHS Phase 1 파이프라인에는 Fractional Kelly, 동적 레버리지 배율, 포트폴리오 사이징 로직이 **의도적으로 배제**되어 있습니다.
+   - 이는 신호 자체의 순수한 우위(Edge)가 검증되지 않은 상태에서 사이징 로직을 얹어 백테스트 곡선을 왜곡하는 과적합(Overfitting)을 막고, **1.0x Gross 자본(자기자본 100%) 상에서 전략의 순수한 알파 생존력**을 쌩얼(Raw State)로 평가하기 위함입니다.
 
-> [!IMPORTANT]
-> MHS의 **Research GO** 승인은 과거 데이터 기반의 연구 유효성 검증일 뿐이며, 실거래 배포(Execution GO), 소액 실전 테스트(Pilot GO), 또는 자본 확대(Scale GO) 승인과는 명확히 분리됩니다.
+### 📌 단계별 파이프라인 (MHS의 위치)
+- **Phase 1: Research GO (현재 MHS 단계)** 👈 **[현재 위치]**
+  - 1.0x Gross 자본, Taker 체결/3배 비용 스트레스 조건에서 순수 알파 신호가 Sharpe ≥ 0.6 및 자본 보존을 달성하는지 검증
+- **Phase 2: Execution GO**
+  - L1/L2 오더북 데이터, 실시간 Limit/Taker 체결 딜레이 및 Market Impact 검증
+- **Phase 3: Pilot GO / Scale GO**
+  - Fractional Kelly, optimal leverage, 자금 배분(Sizing) 모델 적용 및 실전 자금 투입
 
 ---
 
@@ -21,10 +28,10 @@ MHS는 신호 생성(1시간봉)과 체결 리플레이(5분봉)의 시간 격�
 ```text
  1시간(1h) OHLCV + Funding + PIT Lifecycle
         │
-        ├─ Trailing 720-bar quote volume ──► Liquid-Half Eligibility (유동성 상위 50%)
+        ├─ 3단계 심볼 선정 (결손 제외 ──► 720h 유동성 상위 50% ──► Top-30 Roster & 히스테리시스)
         ├─ Fast Reversal (48h) / Slow Momentum (72h~504h 앙상블) 북 생성
         ├─ Portfolio Rebalance Trigger (추적오차 20% 이상 시에만 수량 변경)
-        └─ Market Beta Neutralization & Regime Tilt 적용
+        └─ Market Beta Neutralization & Regime Control (BTC 틸트 + P&L Vol Targeting)
         │
         ▼ Decision 시각별 Top-30 PIT Execution Roster (Schmitt-Trigger 2.0x 적용)
         │
@@ -41,61 +48,81 @@ MHS는 신호 생성(1시간봉)과 체결 리플레이(5분봉)의 시간 격�
 
 ---
 
-## 3. 데이터 및 Point-In-Time (PIT) 거버넌스
+## 3. 데이터 및 Point-In-Time (PIT) 심볼 선정 방식
 
-### 데이터 규격 및 PIT 규칙
-1. **신호 패널**: `1h` OHLCV의 `open`, `close`, `quote_vol`을 사용하며 `2021-01-01`부터 시점 정렬을 수행합니다.
-2. **유동성 필터 (Liquid-Half)**: 각 결정 시각마다 최근 720개 관측치(`720h`)의 quote volume 단면 중앙값(Median) 이상인 심볼만 거래 대상 자격(Eligible)을 가집니다.
-3. **실행 로스터 (Execution Roster)**:
-   - 유효 심볼 중 quote volume 상위 30개(`execution_universe_size=30`)를 실제 주문을 재생할 로스터로 선별합니다.
-   - **Schmitt-Trigger 히스테리시스**: 랭킹 경계 부근에서 자산이 잦게 락인/탈락하며 발생하는 진동 매매를 방지하기 위해, 진입 30위 / 탈락 60위(`2.0x Exit Multiplier`)의 이중 임계값을 적용합니다.
-4. **결손 데이터 엄격 배제 (Fail-Closed)**:
-   - Binance API/Vision 아카이브 결손 심볼(`MHS_SOURCE_GAP_EXCLUDED_SYMBOLS`: `SLPUSDT`, `CTKUSDT` 등)은 사전 제외됩니다.
-   - 보유 포지션이나 활성 주문에 데이터 갭이 발생하면 암묵적 0 패딩이나 추정을 하지 않고 해당 구간을 무효화(`INVALID_PRIMARY_LEDGER`)합니다.
+MHS는 미래 데이터를 보고 종목을 고르는 편향을 막기 위해 매 매매 결정 시각(1시간마다) 3단계 필터링을 거쳐 거래 대상을 선별합니다.
 
-### 실행 데이터 수집 (CLI)
-```bash
-# 5분봉 실행 데이터 manifest 생성 및 수집
-PYTHONPATH=. uv run python -m src.cli.main data collect mhs-execution \
-  --timeframe 5m --start 2021-01-01 --end 2025-12-31 --execute
+```text
+전체 바이낸스 선물 심볼 
+   │
+   ▼ [1단계] 데이터 결손 & 상장 이력 필터 (Source Gap Guard)
+결손 심볼(SLP, CTK 등) & 미상장/상장 직후 자산 제거
+   │
+   ▼ [2단계] 유동성 반분 필터 (Liquid-Half Eligibility)
+최근 30일(720시간) 거래대금 중앙값 이상인 유동성 상위 50% 추출
+   │
+   ▼ [3단계] 최종 실행 로스터 & 히스테리시스 (PIT Top-30 Roster + Schmitt-Trigger)
+실제 5분봉 시뮬레이션 체결을 수행할 상위 30개 종목 확정 (진동 매매 방지)
 ```
-*(관련 모듈: [mhs_execution_collection.py](file:///home/kth/crypto-pilot/src/application/data/mhs_execution_collection.py))*
+
+### 🔍 3단계 심볼 선정 상세 흐름
+1. **1단계: 데이터 결손 및 상장 이력 필터 (Source Gap Guard)**
+   - Binance API/Vision 아카이브에 4시간 이상 결손이 발생한 심볼(`SLPUSDT`, `CTKUSDT`, `LITUSDT` 등 `MHS_SOURCE_GAP_EXCLUDED_SYMBOLS`)은 사전 제외됩니다.
+   - 해당 시점에 새로 상장되어 최소 720시간 데이터가 쌓이지 않은 신규 코인도 제외합니다.
+2. **2단계: 유동성 반분 필터 (Liquid-Half Eligibility)**
+   - 매 결정 시각마다 최근 720시간(`720h`, 30일) 거래대금(Quote Volume)을 계산하고, 전체 코인 중 **거래대금 단면 중앙값(Median) 이상인 상위 50% 코인**만 1차 거래 자격 심볼(Eligible)로 표시합니다.
+3. **3단계: 최종 실행 로스터 30개 선별 (Schmitt-Trigger 히스테리시스)**
+   - 1차 유효 코인 중 거래대금이 가장 높은 **상위 30개 심볼 (`execution_universe_size=30`)**을 실제 주문을 재생할 로스터로 최종 선정합니다.
+   - **Schmitt-Trigger 히스테리시스 (2.0x Exit Multiplier)**: 랭킹 경계 부근에서 자산이 잦게 락인/탈락하며 발생해 수수료를 갉아먹는 진동 매매(Churning)를 방지하기 위해, **진입은 상위 30위 이내**, **탈락은 60위(30 * 2.0) 밖으로 밀려날 때**만 로스터에서 빼는 이중 스위치를 적용합니다.
 
 ---
 
-## 4. 신호 산출 및 포트폴리오 구조 (Signal & Portfolio Construction)
+## 4. 신호 산출 및 호라이즌 탐색·조합 방식
 
-MHS는 Fast Reversal 북과 Slow Momentum 북을 독립적으로 생성한 뒤 자본 배분을 수행합니다.
+### 1) Fast Reversal vs Slow Momentum 북 구조
+- **Fast Reversal**: 48시간(`48h`) 수익률을 측정하여 오버슈팅된 코인을 매도(Short), 과도하게 떨어진 코인을 매수(Long)합니다 (`Sign = -1`).
+- **Slow Momentum**: 72시간부터 504시간까지의 긴 기간 동안 오른 코인을 매수, 내린 코인을 매도합니다 (`Sign = +1`).
 
-### 1) 신호 및 자본 배분 (Capital Blend Weight)
-- **Fast Reversal**: 48시간 수익률 반전 신호 (Sign = -1)
-- **Slow Momentum**: 168시간(기본) 모멘텀 신호 (Sign = +1)
-- **최신 자본 배분 (`PHASE_1_BOOK_BLEND_WEIGHTS`)**:
-  Discovery qualification 실측 데이터 검증 결과, Fast Reversal은 전 비용 구간에서 t-stat 조건(|t| >= 2.0)을 미달하여 **자본 비중 0.0 (0%)**, Slow Momentum에 **자본 비중 1.0 (100%)**을 배분합니다.
+### 2) 호라이즌 탐색 및 디스커버리/퀄리피케이션 게이트 (Discovery / Qualification Gate)
+- 호라이즌 후보군 선정 시, 단 한 해만 특출나게 수익을 낸 후보가 채택되는 과적합을 막기 위해 **Worst-Year Robustness 검증**을 거칩니다 (`select_horizon_by_discovery_qualification`).
+- **Discovery 구간 (2021~2022년)**: 연도별 oriented net t-stat의 **최소값(Worst-year)**이 통계적 유의성 바닥(`|t| >= 2.0`)을 통과하는 호라이즌만 1차 선택합니다.
+- **Qualification 구간 (2023년)**: 분리된 2023년 데이터에서 동일한 방향 부호와 `|t| >= 2.0` 조건을 재확인하여 최종 승인합니다. Fast Reversal은 이 게이트를 통과하지 못해 자본 비중 0%로 조정되었습니다.
 
-### 2) 알파 엔진 개선 사항 (Alpha Engine Enhancements)
-기존 정적 랭크 방식의 한계를 극복하기 위해 아래 핵심 기법들이 배선되어 있습니다:
+### 3) 호라이즌 동일가중 앙상블 (Horizon Ensemble, RC-2)
+- 백테스트에서 단 하나의 호라이즌(예: 딱 168시간)만 고르면(Argmax 선택), 특정 시점에는 잘 맞지만 시장 환경이 바뀌면 붕괴하는 고분산(High Variance) 문제가 발생합니다.
+- 이를 해결하기 위해 Slow 모멘텀은 **72h부터 504h까지 24시간 간격의 19개 호라이즌**을 전부 계산한 뒤 **동일 가중 평균(`equal_weight_book_ensemble`)**합니다.
+- 호라이즌 간 의견이 일치할 때만 포지션이 커지고, 의견이 갈리면 비중이 축소되어 예측 안정성이 향상됩니다.
 
-- **Portfolio Rebalance Trigger (RC-1)**:
-  종목별 데드밴드는 달러 중립성과 단위 그로스(Unit Gross = 1.0)를 파괴하는 문제가 존재했습니다. 이를 해결하기 위해 포트폴리오 전체의 원웨이 추적 오차(Tracking Error)가 임계값(`0.20`, 20%) 이상 벌어질 때만 타겟 수량을 한 번에 업데이트하는 `portfolio_rebalance_trigger`를 적용합니다.
-- **Horizon Ensemble (RC-2)**:
-  단일 168시간 모멘텀 신호의 고분산 문제를 완화하기 위해 72h부터 504h까지 19개 호라이즌의 달러 중립 북을 동일 가중 평균하는 `horizon_ensemble` 모드를 지원합니다.
-- **Market Beta Neutralization (RC-4)**:
-  `causal_market_beta` (720바 롤링 OLS)를 산출하고 `beta_neutralize_weights`를 통해 포트폴리오가 시장 전체의 시장 베타(Market Directional Risk)에 노출되지 않도록 직교화(Orthogonalization)합니다.
-- **Crash Regime Tilt Overlay**:
-  BTCUSDT 단일 자산 바스켓의 인과적 추세 z-score 기반으로 크래시 레짐 시 시장 방향성 틸트를 보수적으로 혼합(`crash_regime_tilt_weights`)하는 기능을 지원합니다.
+### 4) 실측 데이터 기반 자본 배분 (Phase 1 Capital Blend)
+- 디스커버리 게이트 실측 검증 결과에 따라 `PHASE_1_BOOK_BLEND_WEIGHTS`는 **Fast Reversal 자본 비중 0.0 (0%)**, **Slow Momentum 앙상블 자본 비중 1.0 (100%)**을 배분합니다.
+
+### 5) 포트폴리오 제어 기법 (Alpha Engine)
+- **Portfolio Rebalance Trigger (RC-1)**: 종목별 데드밴드가 달러중립성을 파괴하는 문제를 막기 위해, 포트폴리오 추적 오차가 임계값(`0.20`, 20%) 이상 벌어질 때만 타겟 수량을 한 번에 업데이트하는 `portfolio_rebalance_trigger`를 적용합니다.
+- **Market Beta Neutralization (RC-4)**: `causal_market_beta` (720바 롤링 OLS)를 산출하고 `beta_neutralize_weights`를 통해 포트폴리오가 시장 전체의 방향성 위험에 노출되지 않도록 직교화(Orthogonalization)합니다.
 
 ---
 
-## 5. Historical Mark Price 및 체결 리플레이 (Execution Replay)
+## 5. 레짐(Regime)의 2중 관여 방식
+
+횡단면 모멘텀 전략은 하락장 폭락 시 숏스퀴즈가 터지거나 자산 간 상관관계가 1로 수렴하며 큰 손실(Momentum Crash)을 보는 약점이 있습니다. MHS는 **2가지 축의 레짐 제어**로 이를 방어합니다.
+
+### 1축: 참조 자산 추세 기반 크래시 레짐 틸트 (`crash_regime_tilt_weights`)
+- **고정 참조 자산 (BTCUSDT)**: 심볼 구성 변화로 인한 착시를 막기 위해 시장 대표성이 가장 높은 `BTCUSDT` 단일 자산을 레짐 지표로 고정 사용합니다.
+- **방향성 틸트 (Directional Tilt) 혼합**: BTC의 최근 추세 인과적 Z-score를 계산하여 시장 전체가 하락 크래시 레짐에 진입하면, 달러 중립 북에 **하락 방향성 틸트(`alpha` 비율만큼)**를 혼합합니다. 이는 하락장에서 숏 포지션 부담을 자연스럽게 완화(Offset)하여 **하락장 꼬리 위험(Tail Risk)을 방어**합니다.
+
+### 2축: 전략 자체 P&L 변동성 타겟팅 (`Strategy P&L Volatility Targeting`)
+- **전략 P&L 실현 변동성 추적**: 코인 개별 변동성이 아닌, **"MHS 전략 포트폴리오 자체의 최근 21일 일별 P&L 실현 변동성"**을 측정합니다.
+- **동적 비중 축소 (Two-Pass Replay)**: 전략의 P&L 변동성이 장기 평균(Median)보다 급격히 튀면 모멘텀 붕괴 레짐으로 판단하여, `중앙값 변동성 / 최근 변동성` 비율만큼 전체 노출(Gross Exposure)을 인과적으로 축소(최대 0.2까지)하여 **Momentum Crash를 방어**합니다.
+
+---
+
+## 6. Historical Mark Price 및 체결 리플레이 (Execution Replay)
 
 ### Historical Mark Price
 - Mark price는 신호, 랭킹, 체결 판정에는 영향을 주지 않으며, 오직 **Valuation(평가), MTM PnL, Funding Charge** 계산에만 사용됩니다.
-- `cache_required` 모드: `data/futures/markPriceKlines/<timeframe>/<symbol>.parquet` 데이터를 사용하며 1시간 마크 캔들은 1시간 지연 후 Causal Forward-Fill합니다. Mark gap 발생 시 즉시 Fail-Closed 처리됩니다.
+- `cache_required` 모드: `markPriceKlines` 1시간 마크 캔들을 1시간 지연 후 Causal Forward-Fill하며, Mark gap 발생 시 즉시 Fail-Closed 처리됩니다.
 
 ### Execution Proxy Bounds
-실제 OHLCV 시뮬레이션 체결은 세 가지 경계로 산출됩니다:
-
 1. **`OHLCV_IMMEDIATE_TAKER` (Primary Research GO)**:
    - 주문 생성 즉시 5분봉 Close 가격으로 Taker 체결을 가정합니다.
    - 전략의 분당 참여율(`participation_warnings`)이 1e-9 수준으로 무시 가능한 수준이므로, 시장 충격을 피하기 위해 Passive 대기를 수행할 경제적 근거가 없다는 연구 결과에 따라 **Primary 기준**으로 고정되었습니다.
@@ -106,7 +133,7 @@ MHS는 Fast Reversal 북과 Slow Momentum 북을 독립적으로 생성한 뒤 �
 
 ---
 
-## 6. Simulated Inventory Ledger & 17차 연율화 수정
+## 7. Simulated Inventory Ledger & 17차 연율화 수정
 
 모든 PnL 및 리스크 지표의 단일 진실 원천은 [src/mhs/execution.py](file:///home/kth/crypto-pilot/src/mhs/execution.py)의 `simulated_inventory_ledger` 함수입니다.
 
@@ -122,29 +149,35 @@ MHS는 Fast Reversal 북과 Slow Momentum 북을 독립적으로 생성한 뒤 �
 - **수정**: 5분봉 격자에 맞춘 연율화 상수(`_PERIODS_PER_YEAR_5M = 365 * 24 * 12 = 105,120`)가 올바르게 적용되도록 수정.
 - **효과**: Sharpe 비율(일봉 기반)이나 Research GO 승인 여부는 변함이 없으나, 연복리 수익률(CAGR), 연간 회전율, 꼬리위험(Bootstrapped MDD) 등 자산 증식 수치가 정확히 교정되었습니다 (CAGR 0.63% ──► **7.84%**).
 
-### Two-Pass Replay & Strategy P&L Volatility Targeting
-Primary 실행은 2단계(Two-Pass)로 진행됩니다:
-- **1-Pass (`pre_vol_target_reference`)**: Unscaled 가중치로 1차 시뮬레이션을 실행하여 전략 자체의 일별 P&L 실현 변동성을 측정.
-- **2-Pass (Primary)**: 측정된 P&L 변동성을 바탕으로 인과적 Volatility-Targeting(Barroso & Santa-Clara 2015) 스케일을 가중치에 적용하여 Momentum Crash를 방어한 뒤 최종 보고서를 작성합니다.
-
 ---
 
-## 7. Research GO 검증 체계 및 최신 상태
+## 8. 진단 테스팅 & Research GO 검증 체계
 
-### 3-Fold Level 2 Anchored Purged Validation
-과적합 방지를 위해 3개 구간의 Anchored Fold에서 검증을 수행합니다:
+### 1) 9대 합성 스트레스 시나리오 (Synthetic Stress Scenarios)
+MHS는 단순 과거 재현을 넘어 아래 9가지 결정론적 스트레스 상황을 독립적으로 검증합니다 (`synthetic_stress_scenarios`):
+1. `BTC_DOWN_10`: 비트코인 10% 급락
+2. `BTC_DOWN_20`: 비트코인 20% 급락
+3. `ALT_BETA_UP`: 알트코인 베타 급증
+4. `XS_CORRELATION_ONE`: 자산 간 횡단면 상관관계 1 수렴
+5. `SPREAD_AND_COST_X3`: 스프레드 및 체결 비용 3배 폭등
+6. `PASSIVE_FILL_DEGRADATION`: 지정가 체결률 저하
+7. `FUNDING_EXTREME`: 펀딩비 극단적 치솟음
+8. `LIQUIDITY_DETERIORATION_50PCT`: 50% 심볼 유동성 급감
+9. `VENUE_API_OUTAGE_30M`: 30분간 거래소 API 장애
+
+### 2) 꼬리 민감도 및 윈저화 (Tail Sensitivity & Winsor Curve)
+- 특정 대형 이벤트가 전체 수익률을 착시시키지 않았는지 `tail_sensitivity_curve`로 진단합니다.
+- 수익률 캡(50%, 30%, 20%, 10%) 윈저화(Winsorization) 손익 곡선, 상위 1개/5개/1% 이벤트 수익 기여도(`top1_event_share`), 최악 이벤트 제외 Sharpe(`leave_worst_event_out_sharpe`)를 측정합니다.
+
+### 3) 배포 준비도(Deployment Readiness) 부트스트랩 검증
+- **Stationary Block Bootstrap** (168시간/1주일 블록 크기, 2,000회 리플레이)을 통해 MDD 20% 초과 확률(`probability_mdd_over_20pct`), MDD 30% 초과 확률, 최종 자산 손실 확률 및 레버리지 파산 확률(Ruin Probabilities)을 추정합니다.
+
+### 4) 3-Fold Level 2 Anchored Purged Validation 및 최신 결과
 - **Fold 0**: 2021~2022 Train ──► **2023 Validation** (168시간 Purge/Embargo)
 - **Fold 1**: 2021~2023 Train ──► **2024 Validation** (168시간 Purge/Embargo)
 - **Fold 2**: 2021~2024 Train ──► **2025 Validation** (168시간 Purge/Embargo)
 
-### Research GO 5대 통과 조건
-1. Pre-screen cost tiers (4.18bp base, 6.07bp stress) 결과 리포트 제출.
-2. Immediate-Taker 원장의 Daily Autocorrelation-Adjusted Sharpe **≥ 0.6** 충족.
-3. Cost-stressed (`SPREAD_AND_COST_X3`) Immediate-Taker Stress Sharpe **> 0** 충족.
-4. Cap 30% Sharpe 및 양의 순 연환산 수익률 조건 충족.
-5. Phase degeneracy, relevant missing data, termination, concentration 등 5개 진단 리포트 완비 (Silent exclusion 금지).
-
-### 최신 실행 진단 결과 (17차 기준)
+#### 최신 실행 진단 결과 (17차 실측치)
 
 | 항목 | 16차 (연율화 버그) | **17차 (최신 수정)** | 비고 |
 | :--- | ---: | ---: | :--- |
@@ -157,18 +190,12 @@ Primary 실행은 2단계(Two-Pass)로 진행됩니다:
 | `stress_naive_sharpe` (x3 cost) | +0.0410 | **+0.1420** | 3.46배 상승 |
 | **`research_go.eligible`** | `false` | **`false`** | **Research GO 기각** |
 
-### Fold별 상세 (17차 실측치)
-- **2023년 (Fold 0)**: Autocorr Sharpe **+0.8046**, CAGR **+9.36%**, Stress Sharpe +0.2111 (통과)
-- **2024년 (Fold 1)**: Autocorr Sharpe **-0.2672**, CAGR **-4.99%**, Stress Sharpe -0.8201 (**미달 — 시장 반전장/붕괴장 손실**)
-- **2025년 (Fold 2)**: Autocorr Sharpe **+1.5047**, CAGR **+48.22%**, Stress Sharpe +0.9310 (통과)
-
-### 현재 상태 결론
-- **구현 상태**: 실행 리플레이, 모의 원장, Volatility Targeting, 앙상블 및 리밸런스 트리거 코드 구현 **100% 완료 및 정상 동작**.
-- **판정 상태**: 전략의 전체 Sharpe(0.5257 < 0.6) 및 2024년 Fold1 성능 미달로 인해 **Research GO 실패 (`eligible=false`)**.
+- **Fold별 실측**: 2023년 Sharpe +0.80 (통과), 2024년 Sharpe -0.27 (미달 — 시장 반전장/붕괴장 손실), 2025년 Sharpe +1.50 (통과)
+- **최종 상태**: 원장 및 시뮬레이션 파이프라인 구현 완료, 전략의 전체 Sharpe (0.5257 < 0.6) 및 2024년 Fold1 손실로 인해 **Research GO 실패 (`eligible=false`)**.
 
 ---
 
-## 8. 주요 코드 진입점 (Key Code Entry Points)
+## 9. 주요 코드 진입점 (Key Code Entry Points)
 
 | 책임 / 역할 | 파일 경로 | 주요 함수 / 클래스 |
 | :--- | :--- | :--- |
