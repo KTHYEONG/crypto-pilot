@@ -382,6 +382,14 @@ def test_xs_screen_cli_parses_and_dispatches(monkeypatch) -> None:
         "--end", "2025-12-31",
         "--unseal-holdout",
         "--no-log-run",
+        # This test only exercises xs-screen dispatch/persistence (asserted
+        # below); the default profile also triggers a real (unmocked) growth
+        # sizing pass against live OHLCV data, which is out of scope here and
+        # was incidentally coupling this test to the data lake's current
+        # per-symbol gap history. See
+        # test_xs_screen_cli_v6_default_also_runs_growth_sizing below for
+        # growth-sizing dispatch coverage (it mocks both calls).
+        "--no-growth-sizing",
     ])
     args.handler(args)
     assert calls == [("2022-04-01", "2025-12-31", True, XS_VOL_WEIGHTED_ALPHA_PROFILE_ID)]
