@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_LADDERED_FILL_CLOSES_GAP_FIX",
+      "date": "2026-08-12",
+      "adr_id": "ADR_20260812_MHS_LADDERED_FILL_CLOSES_GAP_FIX",
+      "domain": "research",
+      "title": "MHS 래더드 체결 스케줄의 미검증 종가 경계 근본 수정",
+      "why": "직전 fail-fast 계측 스펙을 실전 데이터로 실행해 CAPITAL_INVARIANT_BREACH의 진짜 원인을 확보해야 했음. 이전엔 5회 재실행에도 원인 미확정 상태였음.",
+      "resolution": "laddered_fill_schedule 호출부 2곳(strategy_aware_execution_replay, _BoundExecutionReplayAccumulator.consume)에서 adverse(low/high) 검증 범위 [spos,timeout_pos)가 실제 소비되는 closes 범위 [spos,timeout_pos](경계 포함)보다 1바 좁아 경계 종가의 NaN이 무검증 통과함을 실증(FILUSDT 2022-02-26, BNXUSDT 2023-02-01 두 독립 사례로 재현). 두 호출부에 기존 MISSING_ACTIVE_ORDER_OHLCV 스킵 패턴을 동일 범위로 확장하고, laddered_fill_schedule 함수 자체에도 백스톱 ValueError 검증을 추가. 4개 회귀 테스트(경계/내부 anchor NaN 거부, 정상 케이스 무변화, 엔진 레벨 오라클/윈도우 동치 유지)로 검증.",
+      "impact": "가격/사이징 공식은 무변경 확인 -- 순수 검증 범위 누락이었음. 다음 재실행에서 fold0/상위 books가 결손 구간을 스킵하고 완주할 것으로 예상됨."
+    },
+    {
       "task_id": "TASK_MHS_CAPITAL_INVARIANT_FOLD0_HARDENING",
       "date": "2026-08-12",
       "adr_id": "ADR_20260812_MHS_CAPITAL_INVARIANT_FOLD0_HARDENING",
@@ -989,16 +999,6 @@
       "why": "Phase B was blocked because the independent spot OHLCV and quote-borrow history inputs were absent, and the carry CLI mixed IO, hashing, and gate execution.",
       "resolution": "Implemented the canonical spot lake and ohlcv_store atomic write path, the Binance spot collector, canonical borrow import with explicit accrual cadence, explicit 1h-to-4h carry loading, funding/borrow interval-aligned target, append-only candidate pre-registration, idempotent anti-pattern evidence, and split the CLI into register/run commands.",
       "impact": "All 198 tests pass with strict mypy and ruff; the sealed run reports PENDING until a reproducible historical quote-borrow export covering the observation window is supplied, and the borrowed data pipeline now fail-closes on any unit ambiguity or coverage gap."
-    },
-    {
-      "task_id": "gate_pass_basis_carry_research",
-      "date": "2026-07-31",
-      "adr_id": "ADR_20260731_gate_pass_basis_carry_research",
-      "domain": "risk",
-      "title": "Basis carry Phase A and data storage synchronization",
-      "why": "Phase A carry ledger and futures storage consolidation are implemented, while Phase B remains blocked on independent spot and borrow data.",
-      "resolution": "Recorded the implemented carry contracts, canonical futures storage layout, normalized collection path, and the remaining Phase B gate prerequisites.",
-      "impact": "Future work must collect and validate spot OHLCV and borrow data before one sealed observation run plus stress evaluation."
     }
   ]
 }
