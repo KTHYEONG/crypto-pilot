@@ -8,8 +8,64 @@ blend is signal pooling and is prohibited.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import pandas as pd
+
+
+def portfolio_rebalance_trigger(
+    target: pd.DataFrame,
+    tracking_error_threshold: float,
+) -> pd.DataFrame:
+    """Hold the entire previously adopted target row until the one-way tracking
+    error reaches the threshold, then adopt the new row wholesale.
+
+    This is the portfolio-level replacement for the per-symbol rebalance
+    deadband (docs/specs/mhs_alpha_engine.md §1, RC-1). Because every emitted
+    row is an exact copy of some input row, the input book's dollar-neutrality
+    and unit-gross invariants are carried unchanged by construction. ``0.0`` is
+    the identity passthrough, the first row is always adopted, and non-finite
+    cells are treated as 0.0 before comparison so the output is always finite.
+    """
+    if tracking_error_threshold < 0:
+        raise ValueError(
+            f"tracking_error_threshold must be >= 0, got {tracking_error_threshold}"
+        )
+    if target.empty:
+        return target.copy()
+    raw = target.to_numpy(dtype="float64")
+    values = np.where(np.isfinite(raw), raw, 0.0)
+    out = np.empty_like(values)
+    held = values[0].copy()
+    out[0] = held
+    for i in range(1, len(values)):
+        if np.abs(values[i] - held).sum() >= tracking_error_threshold:
+            held = values[i]
+        out[i] = held
+    return pd.DataFrame(out, index=target.index, columns=target.columns)
+
+
+def equal_weight_book_ensemble(books: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
+    """Equal-weight arithmetic mean of candidate dollar-neutral books.
+
+    No weighting, no selection, no performance input: the mean of dollar-neutral
+    books is dollar-neutral, and by the triangle inequality its gross is
+    ``<= 1.0`` (strictly below when the horizons disagree -- the intended
+    consensus-scaled exposure). ``books`` may be keyed by horizon; only the
+    values are combined, in insertion order.
+    """
+    if not books:
+        raise ValueError("books must not be empty")
+    items = list(books.values())
+    first = items[0]
+    for other in items[1:]:
+        if not first.index.equals(other.index) or list(first.columns) != list(other.columns):
+            raise ValueError("all books must share an identical index and column order")
+    acc = first.copy()
+    for other in items[1:]:
+        acc = acc.add(other, fill_value=0.0)
+    return acc / len(items)
 
 
 def inverse_realized_vol_tilt(
