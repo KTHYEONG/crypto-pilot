@@ -10,6 +10,7 @@ from src.mhs.contracts import (
     MOMENTUM_HORIZON_CANDIDATES_HOURS,
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
+    REVERSAL_HORIZON_CANDIDATES_HOURS,
     BookSpec,
     ExecutionSpec,
     HorizonBand,
@@ -136,7 +137,20 @@ class TestFrozenLiterals:
         assert MOMENTUM_HORIZON_CANDIDATES_HOURS[-1] == 504
         assert tuple(range(72, 504 + 1, 24)) == MOMENTUM_HORIZON_CANDIDATES_HOURS
         assert slow.horizon_hours == 168
-        assert PHASE_1_BOOK_SPECS["fast_reversal"].band.horizons_hours == (48,)
+        fast = PHASE_1_BOOK_SPECS["fast_reversal"]
+        assert fast.band.horizons_hours == REVERSAL_HORIZON_CANDIDATES_HOURS
+        assert len(REVERSAL_HORIZON_CANDIDATES_HOURS) == 7
+        assert REVERSAL_HORIZON_CANDIDATES_HOURS == (24, 48, 72, 96, 120, 144, 168)
+        assert fast.horizon_hours == 48
+        assert fast.step_hours == 6
+        assert fast.tranche_count() == 8
+        # SCENARIO_FAST_BAND_GRID_WIDENED_DEFAULT_UNCHANGED: widening the fast
+        # band to the 7-candidate reversal grid leaves the frozen 48h default
+        # byte-identical (BookSpec.__post_init__ still accepts it), while an
+        # out-of-band horizon still fails closed.
+        assert dataclasses.replace(fast, horizon_hours=120).horizon_hours == 120
+        with pytest.raises(ValueError, match="not in band"):
+            dataclasses.replace(fast, horizon_hours=100)
         widened = dataclasses.replace(slow, horizon_hours=360)
         assert widened.horizon_hours == 360
         assert widened.step_hours == slow.step_hours
