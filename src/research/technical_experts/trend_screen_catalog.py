@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.technical_experts.contracts import TechnicalCandidate
 
 TREND_SCREEN_PROFILE_ID = "baseline_gate_performance_v1"
@@ -41,7 +42,7 @@ TREND_SCREEN_SYMBOLS: tuple[str, ...] = (
 DISCOVERY_START = pd.Timestamp("2022-04-01", tz="UTC")
 DISCOVERY_END = pd.Timestamp("2023-12-31 23:59:59", tz="UTC")
 QUALIFICATION_START = pd.Timestamp("2024-01-01", tz="UTC")
-QUALIFICATION_END = pd.Timestamp("2025-12-31 23:59:59", tz="UTC")
+QUALIFICATION_END = HOLDOUT_CUTOFF
 
 TREND_SCREEN_FAMILIES: tuple[str, ...] = (
     "ema_alignment",
