@@ -710,6 +710,16 @@ def strategy_aware_execution_replay(
             if execution_bound == "OHLCV_IMMEDIATE_TAKER":
                 fill_pos = submit_pos
                 fill_price = float(closes_values[fill_pos, col])
+                if not np.isfinite(fill_price):
+                    termination_counts["MISSING_DATA"] += 1
+                    data_gaps.append(
+                        ExecutionDataGap(
+                            code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                            timestamp=minute_grid[fill_pos], decision_time=decision_time,
+                            signal_time=signal_time, execution_bound=execution_bound,
+                        )
+                    )
+                    continue
                 fee_bps = spec.taker_fee_bps + spec.taker_slippage_bps
                 reason = "timeout_taker"
             else:
@@ -1348,6 +1358,16 @@ class _BoundExecutionReplayAccumulator:
                 if self.execution_bound == "OHLCV_IMMEDIATE_TAKER":
                     fill_pos = submit_pos
                     fill_price = float(closes_values[fill_pos, col])
+                    if not np.isfinite(fill_price):
+                        self.termination_counts["MISSING_DATA"] += 1
+                        self.data_gaps.append(
+                            ExecutionDataGap(
+                                code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                timestamp=grid[fill_pos], decision_time=decision_time,
+                                signal_time=signal_time, execution_bound=self.execution_bound,
+                            )
+                        )
+                        continue
                     fee_bps = self.spec.taker_fee_bps + self.spec.taker_slippage_bps
                     reason = "timeout_taker"
                 else:
