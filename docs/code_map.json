@@ -623,7 +623,7 @@
   },
   "src/validation/research_memory.py": {},
   "src/mhs/execution.py": {
-    "architecture": "docs/specs/mhs_capital_invariant_fold0_hardening.md",
+    "architecture": "docs/specs/mhs_laddered_fill_closes_gap_fix.md",
     "testing": [
       "tests/unit/mhs/test_collection.py",
       "tests/unit/mhs/test_execution.py"
