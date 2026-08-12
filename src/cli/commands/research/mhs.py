@@ -32,6 +32,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         ladder_diagnostic=args.ladder_diagnostic,
         discovery_gate=args.discovery_gate,
         fold_safe_horizon_selection=fold_safe_horizon,
+        crash_regime_tilt_alpha=args.crash_regime_tilt_alpha,
     )
     report = run_mhs_horizon_diagnostic(request)
     path = persist_mhs_horizon_diagnostic_report(
@@ -118,6 +119,18 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "leak-free discovery/qualification run confined to each fold's "
             "train data (opt-in; measured to be a safe no-op against the "
             "current admission floor)"
+        ),
+    )
+    mhs.add_argument(
+        "--crash-regime-tilt-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Opt-in crash-regime directional tilt on slow_momentum: fraction "
+            "(0.0, 1.0] of unit gross reallocated to a BTCUSDT-trend-scaled "
+            "directional overlay (default None = disabled, byte-identical to "
+            "the fully dollar-neutral book; no value is 'recommended' -- see "
+            "docs/specs/mhs_crash_regime_tilt_overlay.md)"
         ),
     )
     mhs.add_argument(

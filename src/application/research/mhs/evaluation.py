@@ -48,11 +48,13 @@ from src.mhs.books import (
 )
 from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import (
+    MHS_CRASH_REGIME_REFERENCE_SYMBOLS,
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
     BookSpec,
     ExecutionSpec,
 )
+from src.mhs.regime import crash_regime_tilt_weights
 from src.mhs.evaluation import (
     CostResponsePoint,
     PhaseDiagnosticResult,
@@ -215,6 +217,7 @@ class MhsDiagnosticRequest:
     ladder_diagnostic: bool = False
     discovery_gate: bool = False
     fold_safe_horizon_selection: bool = False
+    crash_regime_tilt_alpha: float | None = None
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -227,6 +230,10 @@ class MhsDiagnosticRequest:
             raise ValueError("execution_universe_size must be >= 8")
         if self.max_rss_bytes is not None and self.max_rss_bytes <= 0:
             raise ValueError("max_rss_bytes must be > 0")
+        if self.crash_regime_tilt_alpha is not None and not (0.0 < self.crash_regime_tilt_alpha <= 1.0):
+            raise ValueError(
+                f"crash_regime_tilt_alpha must be in (0.0, 1.0] when set, got {self.crash_regime_tilt_alpha}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2183,11 +2190,19 @@ def _build_fold_target_weights(
         w_slow_tilted, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
     )
     del w_fast, w_slow, w_fast_tilted, w_slow_tilted
+    w_slow_execution_1h = w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+    if request.crash_regime_tilt_alpha is not None:
+        w_slow_execution_1h = crash_regime_tilt_weights(
+            w_slow_execution_1h, log_close,
+            execution_mask.reindex(grid_1h).ffill().fillna(False),
+            MHS_CRASH_REGIME_REFERENCE_SYMBOLS, slow.horizon_hours,
+            request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
+        )
     blend_1h = (
         PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
-        + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+        + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution_1h
     )
-    del w_fast_execution, w_slow_execution
+    del w_fast_execution, w_slow_execution, w_slow_execution_1h
     _active_spec, active_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     del _active_spec
     decision_grid = active_grid[(active_grid >= vs) & (active_grid <= ve)]

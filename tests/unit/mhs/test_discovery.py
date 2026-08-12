@@ -426,6 +426,95 @@ class TestDiscoveryQualificationGate:
         )
         pd.testing.assert_frame_equal(weights, expected)
 
+    def test_yearly_net_t_matches_per_year_score(self) -> None:
+        """SCENARIO_MHS_DISCOVERY_YEARLY_NET_T_EXPOSED_09: ``yearly_net_t``
+        exposes the exact per-(horizon, year) net_t values the worst-year min
+        was computed from -- one (year, net_t) entry per discovery year for
+        every candidate, each matching an independent ``_score`` call, and the
+        worst-year min derived from those entries equals ``discovery_scores``."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        y1 = np.asarray(idx.year == 2021, dtype=bool)
+        y2 = np.asarray(idx.year == 2022, dtype=bool)
+        result = _run(log_close, opens, bar_funding, eligible, idx)
+        yearly = dict(result.yearly_net_t)
+        assert set(yearly) == {24, 48}
+        for h in (24, 48):
+            years = dict(yearly[h])
+            assert set(years) == {2021, 2022}
+            assert years[2021] == pytest.approx(
+                _score(log_close, opens, bar_funding, eligible, h, y1)
+            )
+            assert years[2022] == pytest.approx(
+                _score(log_close, opens, bar_funding, eligible, h, y2)
+            )
+            worst = min(1 * t for t in years.values() if math.isfinite(t))
+            assert dict(result.discovery_scores)[h] == pytest.approx(worst)
+
+    def test_yearly_net_t_records_nonfinite_year(self) -> None:
+        """SCENARIO_MHS_DISCOVERY_YEARLY_NET_T_NONFINITE_YEAR_10: on the
+        all-non-finite-years fixture (candidate 24's signal is identically
+        zero), ``yearly_net_t`` still carries one entry per discovery year for
+        candidate 24 with NaN values -- the non-finite years are recorded
+        transparently, not dropped, even though they never entered the
+        worst-year min computation."""
+        y1 = pd.date_range("2021-01-01", periods=400, freq="1h", tz="UTC")
+        y2 = pd.date_range("2022-01-01", periods=400, freq="1h", tz="UTC")
+        q = pd.date_range("2023-01-01", periods=400, freq="1h", tz="UTC")
+        idx = y1.append(y2).append(q)
+        n = len(idx)
+        base = np.tile(np.arange(24, dtype=float) * 1e-3, (n // 24) + 1)[:n]
+        phases = {"S1": 0, "S2": 6, "S3": 12, "S4": 18}
+        log_close = pd.DataFrame(
+            {s: np.roll(base, ph) for s, ph in phases.items()}, index=idx,
+        )
+        sig36 = horizon_log_return(log_close, 36)
+        o2o = pd.DataFrame(0.0, index=idx, columns=_SYMBOLS)
+        for seg in (y1, y2, q):
+            for s in _SYMBOLS:
+                tgt = sig36[s].shift(2).to_numpy()
+                o2o.loc[seg, s] = 0.5 * tgt[np.where(idx.isin(seg))[0]]
+        o2o = o2o.fillna(0.0)
+        opens = pd.DataFrame(
+            100.0 * np.exp(np.cumsum(o2o.to_numpy(), axis=0)), index=idx, columns=_SYMBOLS,
+        )
+        bar_funding = pd.DataFrame(0.0, index=idx, columns=_SYMBOLS)
+        eligible = pd.DataFrame(True, index=idx, columns=_SYMBOLS)
+        result = select_horizon_by_discovery_qualification(
+            sign=-1, horizon_candidates=(24, 36), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+        )
+        years_24 = dict(dict(result.yearly_net_t)[24])
+        assert set(years_24) == {2021, 2022}
+        assert all(math.isnan(v) for v in years_24.values())
+        years_36 = dict(dict(result.yearly_net_t)[36])
+        assert all(math.isfinite(v) for v in years_36.values())
+
+    def test_yearly_net_t_field_does_not_change_existing_fields(self) -> None:
+        """SCENARIO_MHS_DISCOVERY_YEARLY_NET_T_REGRESSION_11: adding
+        ``yearly_net_t`` leaves every pre-existing field byte-identical to the
+        cache-free baseline on the admitted worst-year-robust fixture."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        result = _run(log_close, opens, bar_funding, eligible, idx)
+        assert result.selected_horizon == 48
+        assert result.admitted is True
+        assert dict(result.discovery_scores)[48] == pytest.approx(
+            min(
+                _score(log_close, opens, bar_funding, eligible, 48,
+                       np.asarray(idx.year == 2021, dtype=bool)),
+                _score(log_close, opens, bar_funding, eligible, 48,
+                       np.asarray(idx.year == 2022, dtype=bool)),
+            )
+        )
+        assert result.discovery_aggregate_net_t is not None
+        assert result.qualification_net_t is not None
+        assert result.qualification_sign_consistent is True
+
 class TestFoldTrainOnlyDiscoveryQualification:
     """SCENARIO_MHS_FOLD_SAFE_HORIZON_01..03: the fold-scoped wrapper derives
     leak-free discovery/qualification bounds from one ``AnchoredPurgedFold`` and
