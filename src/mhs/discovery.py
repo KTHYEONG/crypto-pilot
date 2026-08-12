@@ -38,7 +38,10 @@ class DiscoveryQualificationResult:
     qualification re-check cleared |t| >= 2.0 with the same sign. Discovery
     scores are ``(horizon, worst-year net_t)`` pairs; the qualification
     aggregate ``net_t`` and sign-consistency flag are ``None`` when the gate
-    failed closed before any qualification evaluation.
+    failed closed before any qualification evaluation. ``yearly_net_t`` maps
+    each candidate horizon to its full per-calendar-year ``(year, net_t)``
+    series -- including non-finite years -- the raw values discovery_scores'
+    worst-year min was computed from.
     """
 
     selected_horizon: int | None
@@ -47,6 +50,7 @@ class DiscoveryQualificationResult:
     discovery_aggregate_net_t: float | None
     qualification_net_t: float | None
     qualification_sign_consistent: bool | None
+    yearly_net_t: tuple[tuple[int, tuple[tuple[int, float], ...]], ...] = ()
 
 
 def _year_mask(index: pd.DatetimeIndex, year: int) -> np.ndarray:
@@ -192,6 +196,7 @@ def select_horizon_by_discovery_qualification(
 
     oriented_scores: dict[int, float] = {}
     raw_worst_year: dict[int, float] = {}
+    yearly_net_t_by_horizon: dict[int, dict[int, float]] = {}
     for horizon in horizon_candidates:
         weights = (
             precomputed_candidate_weights[horizon]
@@ -199,14 +204,17 @@ def select_horizon_by_discovery_qualification(
             else _horizon_weights(log_close, eligible, sign, horizon, min_symbols, tranche_count)
         )
         yearly: list[float] = []
+        yearly_by_year: dict[int, float] = {}
         for year in discovery_years:
             net_t = _score_masked_net_t(
                 weights, opens, bar_funding,
                 discovery_mask & _year_mask(index, year),
                 cost_bps, periods_per_year,
             )
+            yearly_by_year[year] = net_t
             if np.isfinite(net_t):
                 yearly.append(net_t)
+        yearly_net_t_by_horizon[horizon] = yearly_by_year
         if not yearly:
             oriented_scores[horizon] = float("-inf")
             raw_worst_year[horizon] = float("nan")
@@ -214,6 +222,11 @@ def select_horizon_by_discovery_qualification(
         worst_oriented = min(sign * t for t in yearly)
         oriented_scores[horizon] = worst_oriented
         raw_worst_year[horizon] = worst_oriented * sign
+
+    yearly_net_t = tuple(
+        (h, tuple(sorted(yearly_net_t_by_horizon[h].items())))
+        for h in sorted(yearly_net_t_by_horizon)
+    )
 
     best_horizon = max(
         horizon_candidates,
@@ -230,6 +243,7 @@ def select_horizon_by_discovery_qualification(
             discovery_aggregate_net_t=None,
             qualification_net_t=None,
             qualification_sign_consistent=None,
+            yearly_net_t=yearly_net_t,
         )
 
     best_weights = (
@@ -248,6 +262,7 @@ def select_horizon_by_discovery_qualification(
             discovery_aggregate_net_t=None,
             qualification_net_t=None,
             qualification_sign_consistent=None,
+            yearly_net_t=yearly_net_t,
         )
     qualification_net_t = _score_masked_net_t(
         best_weights, opens, bar_funding, qualification_mask, cost_bps, periods_per_year,
@@ -264,6 +279,7 @@ def select_horizon_by_discovery_qualification(
         discovery_aggregate_net_t=discovery_aggregate_net_t,
         qualification_net_t=qualification_net_t,
         qualification_sign_consistent=sign_consistent,
+        yearly_net_t=yearly_net_t,
     )
 
 
@@ -305,6 +321,7 @@ def fold_train_only_discovery_qualification(
             discovery_aggregate_net_t=None,
             qualification_net_t=None,
             qualification_sign_consistent=None,
+            yearly_net_t=(),
         )
     return select_horizon_by_discovery_qualification(
         sign=sign,

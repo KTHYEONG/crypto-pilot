@@ -127,6 +127,14 @@ PHASE_1_BOOK_BLEND_WEIGHTS: dict[str, float] = {
     "slow_momentum": 1.0,
 }
 
+# Fixed reference basket for the opt-in crash-regime directional tilt
+# (src/mhs/regime.py crash_regime_tilt_weights, docs/specs/mhs_crash_regime_tilt_overlay.md
+# §6). BTCUSDT is listed continuously across the full 2021-2025 dev window --
+# chosen for listing-date stability (no universe-composition drift, unlike an
+# eligible-symbol basket, ADR_20260812_MHS_MOMENTUM_STRATEGY_REDESIGN_REVIEW
+# §3.2), not for backtested performance.
+MHS_CRASH_REGIME_REFERENCE_SYMBOLS: tuple[str, ...] = ("BTCUSDT",)
+
 _FAST_BAND = HorizonBand(name="fast_reversal", horizons_hours=(48,), sign=-1)
 # The slow band's allowed set is the full measured momentum candidate grid
 # (docs/results/mhs-res.md §2, 19 horizons, 72h-504h step 24) so a
