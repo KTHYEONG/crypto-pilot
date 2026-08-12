@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_CAPITAL_INVARIANT_FOLD0_HARDENING",
+      "date": "2026-08-12",
+      "adr_id": "ADR_20260812_MHS_CAPITAL_INVARIANT_FOLD0_HARDENING",
+      "domain": "research",
+      "title": "MHS 정밀 체결 리플레이 엔진 자본 불변식 fail-fast 계측",
+      "why": "데이터 기간/gap-carry 스펙 적용 후 13차 재실행에서 fold0이 CAPITAL_INVARIANT_BREACH로 무효화됨. 5회 실측 계측(임시 디버그, 실행 후 원복)으로 원인이 결손 데이터(funding/OHLCV/mark 전부 배제 확인)나 이미 알려진 held_mark_trigger 범주가 아니라, _BoundExecutionReplayAccumulator.consume()의 self.cash 스칼라 누적값이 fill 처리 중 비유한 값에 무방비 상태임을 확인. 진짜 최초 트리거는 맥락 없이 수 시간 뒤에야 벡터화 검증에서 드러나 진단 비용이 매우 컸음.",
+      "resolution": "같은 파일의 simulated_inventory_ledger가 이미 쓰는 fill 단위 유한성 가드 패턴을 스트리밍 accumulator의 두 fill-sizing 지점(래더드/멀티트랜치 분기, 단일 체결 분기)에 이식. 비유한 qty/fill_price 발생 시 심볼·결정시각·weight·equity·decision_price를 포함한 DataIntegrityError를 즉시 발생시키며, 메시지에 'capital accounting invariant' 키워드를 유지해 기존 _classify_execution_failure 분류(CAPITAL_INVARIANT_BREACH)와 호환. 강제청산 경로는 이미 자체 가드가 있어 무변경. 6개 회귀 테스트로 fail-fast 동작·분류 유지·정상 리플레이 무변화(오라클 동치)를 검증.",
+      "impact": "다음 발생 시 즉시 심볼/시각/원인값 확보 가능해져 향후 진단 비용 대폭 절감. 근본 산술 원인(왜 처음 비유한이 되는지)은 여전히 미확정 -- 이번 계약은 진단 전제 조건만 마련했고, 실제 근본 수정은 재발 시 확보되는 새 예외 메시지를 근거로 별도 /spec 필요."
+    },
+    {
       "task_id": "TASK_MHS_DATA_PERIOD_AND_GAP_HARDENING",
       "date": "2026-08-12",
       "adr_id": "ADR_20260812_MHS_DATA_PERIOD_AND_GAP_HARDENING",
@@ -989,16 +999,6 @@
       "why": "Phase A carry ledger and futures storage consolidation are implemented, while Phase B remains blocked on independent spot and borrow data.",
       "resolution": "Recorded the implemented carry contracts, canonical futures storage layout, normalized collection path, and the remaining Phase B gate prerequisites.",
       "impact": "Future work must collect and validate spot OHLCV and borrow data before one sealed observation run plus stress evaluation."
-    },
-    {
-      "task_id": "TASK_PORTFOLIO_INITIAL_UNIVERSE_DIAGNOSTIC",
-      "date": "2026-07-31",
-      "adr_id": "ADR_20260731_PORTFOLIO_INITIAL_UNIVERSE_DIAGNOSTIC",
-      "domain": "execution",
-      "title": "Fix portfolio initial liquidity diagnostic",
-      "why": "The CLI logged an empty initial universe because it queried the first bar before a complete trailing liquidity window existed.",
-      "resolution": "Moved the diagnostic as-of timestamp to the first common 30-day eligible window and added a regression assertion rejecting selected=[] logs.",
-      "impact": "Initial universe logs now show a causal non-empty selection while the engine's daily selection and promotion gates remain unchanged."
     }
   ]
 }
