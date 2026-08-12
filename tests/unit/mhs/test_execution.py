@@ -296,6 +296,39 @@ class TestLadderedExecutionReplay:
             assert report.simulated_fills.empty
         _assert_replay_equivalent(oracle, windowed)
 
+    def test_immediate_taker_close_gap_skips_order_on_both_paths(self) -> None:
+        """SCENARIO_MHS_IMMEDIATE_TAKER_CLOSE_GAP_01: a NaN in `closes` at the
+        immediate-taker fill position (submit_pos) makes both the single-panel
+        oracle and the windowed accumulator gracefully skip that one order --
+        MISSING_DATA == 1 with a MISSING_ACTIVE_ORDER_OHLCV gap -- rather than
+        raising DataIntegrityError, and the two paths stay equivalent."""
+        grid = pd.date_range("2021-01-01 12:00", periods=60, freq="5min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
+        highs = pd.DataFrame({"A": [101.0] * len(grid)}, index=grid)
+        lows = pd.DataFrame({"A": [99.0] * len(grid)}, index=grid)
+        marks = px.copy()
+        closes = px.copy()
+        closes.iloc[1, 0] = np.nan
+        funding = pd.DataFrame(0.0, index=grid, columns=["A"])
+        target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        spec = ExecutionSpec()
+        oracle = strategy_aware_execution_replay(
+            target, signal_at, highs, lows, closes, marks, funding, 1.0,
+            "OHLCV_IMMEDIATE_TAKER", spec,
+        )
+        windows = _partition_windows(
+            grid, target, signal_at, highs, lows, closes, marks, funding, spec, n_windows=1,
+        )
+        windowed = replay_execution_windows(
+            windows, 1.0, "OHLCV_IMMEDIATE_TAKER", spec, retain_event_snapshots=True,
+        )
+        for report in (oracle, windowed):
+            assert report.termination_counts["MISSING_DATA"] == 1
+            assert any(gap.code == "MISSING_ACTIVE_ORDER_OHLCV" for gap in report.data_gaps)
+            assert report.simulated_fills.empty
+        _assert_replay_equivalent(oracle, windowed)
+
     def test_buy_fills_when_low_trades_through(self) -> None:
         assert passive_fill_shortfall_bps(100.0, np.array([99.5, 100.2]), 101.0, 1, SPEC) == 2.0
 
@@ -451,6 +484,10 @@ class TestStrategyReplay:
         assert report.simulated_fills.iloc[0]["timestamp"] == report.fill_times.iloc[0]
 
     def test_no_order_at_or_before_signal_close(self) -> None:
+        """SCENARIO_MHS_IMMEDIATE_TAKER_CLOSE_GAP_02 (regression guard): on
+        fully-finite closes the OHLCV_IMMEDIATE_TAKER oracle fill timing is
+        unchanged by the fill-price finiteness guard added for the close-gap
+        skip -- submit/fill times still land strictly after the signal."""
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
         target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
         signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
@@ -1372,23 +1409,23 @@ class TestCapitalInvariantFailFast:
             ),
         )
 
-    def test_non_finite_fill_price_raises_with_symbol_and_decision_ts(self) -> None:
-        """SCENARIO_MHS_CAPITAL_HARDENING_01: a non-finite value injected at the
-        window boundary (NaN close at the immediate-taker submit bar) reaches the
-        single-fill sizing site and raises fail-fast, naming the symbol and the
-        decision timestamp, instead of silently corrupting ``self.cash`` and
-        crashing much later with the generic pre-trade-equity message."""
+    def test_non_finite_qty_raises_in_immediate_taker_branch(self) -> None:
+        """SCENARIO_MHS_CAPITAL_HARDENING_01 (immediate-taker site): a target
+        weight large enough to overflow ``desired_units`` (weight * equity /
+        mark) makes ``net_units`` non-finite in the OHLCV_IMMEDIATE_TAKER
+        single-fill branch -- the one path a NaN close no longer reaches, since
+        the new fill-price guard now skips that order upstream. The fail-fast
+        sizing guard still raises there with the full symbol/decision context,
+        never letting a non-finite qty corrupt ``self.cash``."""
         decision = pd.Timestamp("2021-01-01 00:10", tz="UTC")
-        window = self._single_decision_window(nan_close_at=decision)
+        window = self._single_decision_window(weight=1e308, mark=0.5)
         with pytest.raises(DataIntegrityError, match="capital accounting invariant") as exc_info:
             replay_execution_windows([window], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
         msg = str(exc_info.value)
         assert "AAAUSDT" in msg
         assert "00:10" in msg
-        assert "decision_price=100.0" in msg
-        assert "qty=np.float64(0.01)" in msg
-        assert "fill_price=nan" in msg
-        assert "pre-trade equity must be positive and finite" not in msg
+        assert "decision_price=0.5" in msg
+        assert "qty=np.float64(inf)" in msg
 
     def test_non_finite_qty_raises_in_laddered_branch(self) -> None:
         """SCENARIO_MHS_CAPITAL_HARDENING_01 (laddered site): a target weight
