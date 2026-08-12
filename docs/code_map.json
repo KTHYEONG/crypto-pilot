@@ -639,7 +639,7 @@
       "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
       "tests/unit/mhs/test_contracts.py"
     ],
-    "architecture": "docs/results/mhs-res.md"
+    "architecture": "docs/specs/mhs_execution_annualization_fix.md"
   },
   "src/mhs/panel.py": {
     "testing": "tests/unit/mhs/test_panel.py"
