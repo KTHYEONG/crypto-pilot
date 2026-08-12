@@ -41,8 +41,10 @@ from src.research.evaluation.policy import resolve_evaluation_end
 from src.common.config import FUTURES_DATA_DIR, funding_path
 from src.common.errors import DataIntegrityError
 from src.mhs.books import (
+    equal_weight_book_ensemble,
     inverse_realized_vol_tilt,
     phase_tranche_book,
+    portfolio_rebalance_trigger,
     rank_weight_book,
     renormalize_within_mask,
 )
@@ -54,7 +56,11 @@ from src.mhs.contracts import (
     BookSpec,
     ExecutionSpec,
 )
-from src.mhs.regime import crash_regime_tilt_weights
+from src.mhs.regime import (
+    beta_neutralize_weights,
+    causal_market_beta,
+    crash_regime_tilt_weights,
+)
 from src.mhs.evaluation import (
     CostResponsePoint,
     PhaseDiagnosticResult,
@@ -70,7 +76,7 @@ from src.mhs.discovery import (
     fold_train_only_discovery_qualification,
     select_horizon_by_discovery_qualification,
 )
-from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol
+from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol, vol_normalized_horizon_signal
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
 from src.market_data.storage.loaders import load_funding_rates
@@ -172,6 +178,19 @@ MHS_FOLD_PANEL_WARMUP_HOURS = 720 + 168 + 24
 # convention), not a measured constant; the fold/full-period replay is the
 # empirical check (docs/specs/mhs_roster_hysteresis_vol_tilt.md).
 MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER = 2.0
+# Portfolio-level rebalance trigger (docs/specs/mhs_alpha_engine.md §1): the
+# one-way tracking-error threshold, as a fraction of unit gross, at which the
+# entire previously adopted target row is replaced instead of the invariant-
+# breaking per-symbol deadband. Engineering default in the same class as
+# MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER -- NOT a measured constant and never
+# selected from the full-period table in the alpha-engine spec (§6.1 forbids
+# table-driven selection).
+MHS_REBALANCE_TRACKING_ERROR_THRESHOLD = 0.20
+# Causal market-beta window for beta neutralization (docs/specs/mhs_alpha_engine.md
+# §4): a 720-bar trailing window with a 360-bar minimum sample matches the
+# liquidity-eligibility lookback. Engineering defaults, not measured constants.
+MHS_CAUSAL_BETA_LOOKBACK_BARS = 720
+MHS_CAUSAL_BETA_MIN_PERIODS = 360
 
 MHS_GO_REASON_INCOMPLETE_FOLD = "INCOMPLETE_ANCHORED_FOLD"
 MHS_GO_REASON_INVALID_PRIMARY = "INVALID_PRIMARY_LEDGER"
@@ -218,6 +237,10 @@ class MhsDiagnosticRequest:
     discovery_gate: bool = False
     fold_safe_horizon_selection: bool = False
     crash_regime_tilt_alpha: float | None = None
+    slow_book_mode: Literal["single_horizon", "horizon_ensemble"] = "single_horizon"
+    rebalance_filter: Literal["per_symbol_deadband", "portfolio_trigger"] = "per_symbol_deadband"
+    beta_neutralize: bool = False
+    ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -234,6 +257,14 @@ class MhsDiagnosticRequest:
             raise ValueError(
                 f"crash_regime_tilt_alpha must be in (0.0, 1.0] when set, got {self.crash_regime_tilt_alpha}"
             )
+        if self.slow_book_mode not in ("single_horizon", "horizon_ensemble"):
+            raise ValueError(f"unknown slow_book_mode '{self.slow_book_mode}'")
+        if self.rebalance_filter not in ("per_symbol_deadband", "portfolio_trigger"):
+            raise ValueError(f"unknown rebalance_filter '{self.rebalance_filter}'")
+        if not isinstance(self.beta_neutralize, bool):
+            raise ValueError("beta_neutralize must be a bool")
+        if self.ensemble_signal not in ("raw", "vol_normalized"):
+            raise ValueError(f"unknown ensemble_signal '{self.ensemble_signal}'")
 
 
 @dataclass(frozen=True, slots=True)
@@ -865,6 +896,62 @@ def _book_weights(
     return phase_tranche_book(weights, spec.tranche_count())
 
 
+def _slow_book_execution_weights(
+    log_close: pd.DataFrame,
+    eligible: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    spec: BookSpec,
+    step_grid: pd.DatetimeIndex,
+    mode: Literal["single_horizon", "horizon_ensemble"],
+    signal_kind: Literal["raw", "vol_normalized"],
+    ema_span: int | None,
+) -> pd.DataFrame:
+    """Shared slow-book builder for the top-level diagnostic and fold replay.
+
+    ``mode='single_horizon'`` reproduces the frozen production chain
+    byte-identically (``horizon_log_return`` -> EMA -> ``rank_weight_book`` ->
+    ``phase_tranche_book`` -> ``inverse_realized_vol_tilt`` ->
+    ``renormalize_within_mask``). ``mode='horizon_ensemble'`` runs that same
+    chain once per candidate horizon in ``spec.band.horizons_hours`` and
+    combines the execution books with ``equal_weight_book_ensemble``, removing
+    the discovery argmax from the capital path (RC-2). Each horizon's book is
+    built on the same ``step_grid`` so the combination is a plain row-wise mean;
+    each horizon's intermediates are released before the next is built (bounded
+    RSS on the 43k-bar, 450-symbol panel).
+    """
+    if mode not in ("single_horizon", "horizon_ensemble"):
+        raise ValueError(f"unknown mode '{mode}'")
+    if signal_kind not in ("raw", "vol_normalized"):
+        raise ValueError(f"unknown signal_kind '{signal_kind}'")
+    mask = execution_mask.reindex(step_grid).fillna(False)
+    horizons = (
+        (spec.horizon_hours,) if mode == "single_horizon" else spec.band.horizons_hours
+    )
+    books: dict[int, pd.DataFrame] = {}
+    for h in horizons:
+        sig = (
+            vol_normalized_horizon_signal(log_close, h)
+            if signal_kind == "vol_normalized"
+            else horizon_log_return(log_close, h)
+        )
+        if ema_span is not None:
+            sig = _smooth_signal_ema(sig, ema_span)
+        sig_step = sig.reindex(step_grid)
+        weights = rank_weight_book(
+            sig_step, eligible.reindex(step_grid), spec.band.sign, spec.min_symbols,
+        )
+        book = phase_tranche_book(weights, h // spec.step_hours)
+        tilted = inverse_realized_vol_tilt(
+            book, realized_vol(log_close, h).reindex(step_grid),
+        )
+        books[h] = renormalize_within_mask(tilted, mask, spec.min_symbols)
+        del sig, sig_step, weights, book, tilted
+        gc.collect()
+    if mode == "single_horizon":
+        return books[spec.horizon_hours]
+    return equal_weight_book_ensemble(books)
+
+
 def _phase_diagnostics(
     log_close: pd.DataFrame,
     eligible: pd.DataFrame,
@@ -891,7 +978,23 @@ def _phase_diagnostics(
     return phase_diagnostic_metrics(phase_nets, _PERIODS_PER_YEAR_1H)
 
 
-def _xs_rank_ic(signal: pd.DataFrame, fwd: pd.DataFrame) -> dict[str, float]:
+def _xs_rank_ic(
+    signal: pd.DataFrame, opens: pd.DataFrame, forward_bars: int,
+) -> dict[str, float]:
+    """Cross-sectional rank IC of ``signal`` on a tradable forward window.
+
+    The forward return is built internally as
+    ``opens.pct_change(forward_bars).shift(-(forward_bars + 1))`` so the
+    measured window starts at ``open_{t+1}`` (the first bar a decision made on
+    close_t can enter) and never overlaps the signal's own lookback
+    (docs/specs/mhs_alpha_engine.md §3, RC-3). The trailing-return convention
+    that previously reported a contaminated +0.0957 (t=113) where the tradable
+    statistic is -0.0278 (t=-33) is removed: no caller may pass a pre-shifted
+    return panel, the shift is owned by this function.
+    """
+    if forward_bars < 1:
+        raise ValueError(f"forward_bars must be >= 1, got {forward_bars}")
+    fwd = opens.pct_change(forward_bars).shift(-(forward_bars + 1))
     common_index = signal.index.intersection(fwd.index)
     common_columns = signal.columns.intersection(fwd.columns)
     if common_index.empty or common_columns.empty:
@@ -916,21 +1019,41 @@ def _xs_rank_ic(signal: pd.DataFrame, fwd: pd.DataFrame) -> dict[str, float]:
     mean_ic = float(series.mean())
     sd = float(series.std(ddof=1)) if n_dates > 1 else 0.0
     t_stat = mean_ic / (sd / np.sqrt(n_dates)) if sd > 0 else float("nan")
-    return {"n_dates": n_dates, "mean_ic": mean_ic, "t_stat": t_stat}
+    return {
+        "n_dates": n_dates, "mean_ic": mean_ic, "t_stat": t_stat,
+        "forward_bars": forward_bars,
+    }
 
 
-def _date_clustered_ols(fwd: pd.DataFrame, past: pd.DataFrame) -> dict[str, float]:
-    """Pooled panel regression ``fwd ~ past`` with date-clustered standard errors."""
+def _date_clustered_ols(
+    opens: pd.DataFrame, past: pd.DataFrame, forward_bars: int,
+) -> dict[str, float]:
+    """Pooled panel regression of a tradable forward return on ``past``.
+
+    Same causality fix as ``_xs_rank_ic`` (RC-3): the dependent variable is
+    built internally from ``opens`` with the ``shift(-(forward_bars + 1))``
+    convention, so the regression never regresses a return window that lies
+    inside its own predictor's lookback. Standard errors are date-clustered.
+    """
+    if forward_bars < 1:
+        raise ValueError(f"forward_bars must be >= 1, got {forward_bars}")
+    fwd = opens.pct_change(forward_bars).shift(-(forward_bars + 1))
     common_index = past.index.intersection(fwd.index)
     common_columns = past.columns.intersection(fwd.columns)
     if common_index.empty or common_columns.empty:
-        return {"n": 0, "past_beta": float("nan"), "past_t": float("nan")}
+        return {
+            "n": 0, "n_dates": 0, "past_beta": float("nan"),
+            "past_t": float("nan"), "forward_bars": forward_bars,
+        }
     x = past.loc[common_index, common_columns].to_numpy(dtype="float64", copy=False)
     y = fwd.loc[common_index, common_columns].to_numpy(dtype="float64", copy=False)
     valid = np.isfinite(x) & np.isfinite(y)
     n = int(valid.sum())
     if n < 10:
-        return {"n": n, "past_beta": float("nan"), "past_t": float("nan")}
+        return {
+            "n": n, "n_dates": 0, "past_beta": float("nan"),
+            "past_t": float("nan"), "forward_bars": forward_bars,
+        }
     x_valid = np.where(valid, x, 0.0)
     y_valid = np.where(valid, y, 0.0)
     sum_x = float(x_valid.sum())
@@ -949,7 +1072,10 @@ def _date_clustered_ols(fwd: pd.DataFrame, past: pd.DataFrame) -> dict[str, floa
     cov = inv_xtx @ meat @ inv_xtx
     se = np.sqrt(np.diag(cov))
     t_beta = beta[1] / se[1] if se[1] > 0 else float("nan")
-    return {"n": n, "n_dates": len(daily_scores), "past_beta": float(beta[1]), "past_t": float(t_beta)}
+    return {
+        "n": n, "n_dates": len(daily_scores), "past_beta": float(beta[1]),
+        "past_t": float(t_beta), "forward_bars": forward_bars,
+    }
 
 
 def _block_bootstrap_replicate_mean(
@@ -1560,7 +1686,12 @@ def _book_outcome(
     gc.collect()
 
     target_weights = (replay_weights_step if replay_weights_step is not None else weights_step).reindex(step_grid)
-    target_weights = _apply_rebalance_deadband(target_weights, MHS_REBALANCE_MIN_NOTIONAL_DELTA)
+    if request.rebalance_filter == "portfolio_trigger":
+        target_weights = portfolio_rebalance_trigger(
+            target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
+        )
+    else:
+        target_weights = _apply_rebalance_deadband(target_weights, MHS_REBALANCE_MIN_NOTIONAL_DELTA)
     signal_available_at = step_grid + pd.Timedelta(hours=1)
     execution_grid = pd.date_range(
         start, end,
@@ -2174,22 +2305,29 @@ def _build_fold_target_weights(
     fast_ema = max(1, round(fast.horizon_hours / fast.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
     slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
     w_fast = _book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
-    w_slow = _book_weights(log_close, eligible, slow, slow_grid, ema_span=slow_ema)
     w_fast_tilted = inverse_realized_vol_tilt(
         w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
     )
-    w_slow_tilted = inverse_realized_vol_tilt(
-        w_slow, realized_vol(log_close, slow.horizon_hours).reindex(slow_grid),
-    )
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-    del quote_vol, eligible
     w_fast_execution = renormalize_within_mask(
         w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
-    w_slow_execution = renormalize_within_mask(
-        w_slow_tilted, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
+    w_slow_execution = _slow_book_execution_weights(
+        log_close, eligible, execution_mask, slow, slow_grid,
+        request.slow_book_mode, request.ensemble_signal, slow_ema,
     )
-    del w_fast, w_slow, w_fast_tilted, w_slow_tilted
+    if request.beta_neutralize:
+        w_slow_execution = beta_neutralize_weights(
+            w_slow_execution,
+            causal_market_beta(
+                log_close, eligible,
+                MHS_CAUSAL_BETA_LOOKBACK_BARS, MHS_CAUSAL_BETA_MIN_PERIODS,
+            ).reindex(w_slow_execution.index),
+            execution_mask.reindex(w_slow_execution.index).fillna(False),
+            slow.min_symbols,
+        )
+    del quote_vol, eligible
+    del w_fast, w_fast_tilted
     w_slow_execution_1h = w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
     if request.crash_regime_tilt_alpha is not None:
         w_slow_execution_1h = crash_regime_tilt_weights(
@@ -2216,8 +2354,17 @@ def _build_fold_target_weights(
     del execution_mask
     del log_close
     regime_scale = _regime_cash_scale(vol_mean)
-    target_weights = target_weights.mul(regime_scale, axis=0)
-    target_weights = _apply_rebalance_deadband(target_weights, MHS_REBALANCE_MIN_NOTIONAL_DELTA)
+    if request.rebalance_filter == "portfolio_trigger":
+        # Gate the UNSCALED book, then multiply the gross scale afterwards so
+        # the trigger's invariant-preserving row holds cannot filter out the
+        # regime de-risking (docs/specs/mhs_alpha_engine.md §1).
+        target_weights = portfolio_rebalance_trigger(
+            target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
+        ).mul(regime_scale, axis=0)
+    else:
+        target_weights = _apply_rebalance_deadband(
+            target_weights.mul(regime_scale, axis=0), MHS_REBALANCE_MIN_NOTIONAL_DELTA,
+        )
 
     if target_weights.empty:
         raise RuntimeError("fold decision grid is empty")
@@ -2590,16 +2737,24 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     w_fast_tilted = inverse_realized_vol_tilt(
         w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
     )
-    w_slow_tilted = inverse_realized_vol_tilt(
-        w_slow, realized_vol(log_close, slow.horizon_hours).reindex(slow_grid),
-    )
     w_fast_execution = renormalize_within_mask(
         w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
-    w_slow_execution = renormalize_within_mask(
-        w_slow_tilted, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
+    w_slow_execution = _slow_book_execution_weights(
+        log_close, eligible, execution_mask, slow, slow_grid,
+        request.slow_book_mode, request.ensemble_signal, slow_ema,
     )
-    del w_fast_tilted, w_slow_tilted
+    if request.beta_neutralize:
+        w_slow_execution = beta_neutralize_weights(
+            w_slow_execution,
+            causal_market_beta(
+                log_close, eligible,
+                MHS_CAUSAL_BETA_LOOKBACK_BARS, MHS_CAUSAL_BETA_MIN_PERIODS,
+            ).reindex(w_slow_execution.index),
+            execution_mask.reindex(w_slow_execution.index).fillna(False),
+            slow.min_symbols,
+        )
+    del w_fast_tilted
     # Eligibility and the execution roster are now materialized.  The raw
     # volume matrix otherwise stays alive while phase diagnostics create their
     # temporary target-weight matrices.
@@ -2636,8 +2791,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # three top-level replays instead of staying alive throughout them
     # (spec §3.1, ``memory_opt``).
     signal_48h = horizon_log_return(log_close, 48)
-    xs_ic = _xs_rank_ic(signal_48h, opens.pct_change())
-    regression = _date_clustered_ols(opens.pct_change(), signal_48h)
+    xs_ic = _xs_rank_ic(signal_48h, opens, forward_bars=48)
+    regression = _date_clustered_ols(opens, signal_48h, forward_bars=48)
     horizon_diagnostics = {
         "realized_vol_48h_mean": float(
             realized_vol(log_close, 48).mean().mean()

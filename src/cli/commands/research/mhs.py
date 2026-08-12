@@ -33,6 +33,10 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         discovery_gate=args.discovery_gate,
         fold_safe_horizon_selection=fold_safe_horizon,
         crash_regime_tilt_alpha=args.crash_regime_tilt_alpha,
+        slow_book_mode=args.slow_book_mode,
+        rebalance_filter=args.rebalance_filter,
+        beta_neutralize=args.beta_neutralize,
+        ensemble_signal=args.ensemble_signal,
     )
     report = run_mhs_horizon_diagnostic(request)
     path = persist_mhs_horizon_diagnostic_report(
@@ -131,6 +135,48 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "directional overlay (default None = disabled, byte-identical to "
             "the fully dollar-neutral book; no value is 'recommended' -- see "
             "docs/specs/mhs_crash_regime_tilt_overlay.md)"
+        ),
+    )
+    mhs.add_argument(
+        "--slow-book-mode",
+        choices=["single_horizon", "horizon_ensemble"],
+        default="single_horizon",
+        help=(
+            "Slow-book construction: single_horizon (frozen production chain) "
+            "or horizon_ensemble (equal-weight average of every candidate "
+            "horizon, no selection -- docs/specs/mhs_alpha_engine.md §2)"
+        ),
+    )
+    mhs.add_argument(
+        "--rebalance-filter",
+        choices=["per_symbol_deadband", "portfolio_trigger"],
+        default="per_symbol_deadband",
+        help=(
+            "Turnover gate on the decision targets: per_symbol_deadband "
+            "(published baseline) or portfolio_trigger (invariant-preserving "
+            "row hold gated before the gross scale -- "
+            "docs/specs/mhs_alpha_engine.md §1)"
+        ),
+    )
+    mhs.add_argument(
+        "--beta-neutralize",
+        action="store_true",
+        default=False,
+        help=(
+            "Orthogonally project the slow book onto the causal rolling market "
+            "beta (sum(w)==0 and sum(w*beta)==0 by construction; parameter-free "
+            "replacement for the crash-regime tilt -- "
+            "docs/specs/mhs_alpha_engine.md §4)"
+        ),
+    )
+    mhs.add_argument(
+        "--ensemble-signal",
+        choices=["raw", "vol_normalized"],
+        default="raw",
+        help=(
+            "Signal family for the slow book: raw horizon log return (frozen "
+            "production) or vol-normalized (re-open for measurement after the "
+            "RC-1 deadband fix -- docs/specs/mhs_alpha_engine.md §6.1)"
         ),
     )
     mhs.add_argument(
