@@ -120,6 +120,37 @@ class TestLadderedFillSchedule:
         with pytest.raises(ValueError, match="finite"):
             laddered_fill_schedule(100.0, 1, np.array([np.nan]), np.array([1.0]), 1, self.SPEC, True)
 
+    def test_fails_closed_on_boundary_close_nan(self) -> None:
+        """SCENARIO_MHS_LADDER_CLOSES_GAP_01: adverse is entirely finite but the
+        boundary close at index len(adverse) is NaN -- the exact defect the prior
+        check missed (adverse alone would have passed)."""
+        adverse = np.array([101.0, 101.0, 101.0, 101.0])
+        closes = np.array([100.0, 100.0, 100.0, 100.0, np.nan])
+        with pytest.raises(ValueError, match="closes must be finite"):
+            laddered_fill_schedule(100.0, 1, adverse, closes, 4, self.SPEC, True)
+
+    def test_fails_closed_on_interior_anchor_close_nan(self) -> None:
+        """SCENARIO_MHS_LADDER_CLOSES_GAP_02: a NaN at an interior anchor position
+        (index < len(adverse)) used by a k>1 tranche re-price is rejected too,
+        proving the fix covers the full consumed closes range, not only the
+        final boundary element."""
+        adverse = np.array([101.0, 101.0, 101.0, 101.0, 101.0, 101.0, 101.0, 101.0])
+        closes = np.array([100.0, 100.0, np.nan, 100.0, 100.0, 100.0, 100.0, 100.0, 101.0])
+        with pytest.raises(ValueError, match="closes must be finite"):
+            laddered_fill_schedule(100.0, 1, adverse, closes, 4, self.SPEC, True)
+
+    def test_finite_inputs_unchanged_by_closes_guard(self) -> None:
+        """SCENARIO_MHS_LADDER_CLOSES_GAP_04: on fully-finite input the new
+        closes finiteness check is a pure no-op -- the fully-finite market
+        fallback schedule is byte-identical to the pre-fix expectation (the
+        final-tranche market fallback at the boundary close with the all-in
+        taker cost), proving the guard does not narrow or alter ladder pricing."""
+        adverse = np.array([101.0, 101.0, 101.0, 101.0])
+        closes = np.array([100.0, 100.0, 100.0, 100.0, 102.0])
+        sched = laddered_fill_schedule(100.0, 1, adverse, closes, 4, self.SPEC, True)
+        assert sched == [(4, 102.0, 8.0, 1.0)]
+        assert abs(sum(f[3] for f in sched) - 1.0) < 1e-12
+
 
 class TestLadderedExecutionReplay:
     """SCENARIO_MHS_LADDER_ORACLE_ACCUMULATOR_PARITY_04 + DoD regression: the
@@ -232,8 +263,38 @@ class TestLadderedExecutionReplay:
         assert report.fallback_count >= 1
         assert abs(fills["quantity_delta"].sum() - 0.01) < 1e-9
 
-
-
+    def test_laddered_closes_gap_skips_order_on_both_paths(self) -> None:
+        """SCENARIO_MHS_LADDER_CLOSES_GAP_03: a NaN in `closes` (not marks/highs/
+        lows) at one bar inside an order's [spos, timeout_pos] window makes both
+        the single-panel oracle and the windowed accumulator gracefully skip that
+        one order -- MISSING_DATA > 0 with a MISSING_ACTIVE_ORDER_OHLCV gap --
+        rather than raising, and the two paths stay equivalent."""
+        grid = pd.date_range("2021-01-01 12:00", periods=60, freq="5min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
+        highs = pd.DataFrame({"A": [101.0] * len(grid)}, index=grid)
+        lows = pd.DataFrame({"A": [99.0] * len(grid)}, index=grid)
+        marks = px.copy()
+        closes = px.copy()
+        closes.iloc[3, 0] = np.nan
+        funding = pd.DataFrame(0.0, index=grid, columns=["A"])
+        target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        spec = ExecutionSpec()
+        oracle = strategy_aware_execution_replay(
+            target, signal_at, highs, lows, closes, marks, funding, 1.0,
+            "OHLCV_LADDERED_PROXY", spec,
+        )
+        windows = _partition_windows(
+            grid, target, signal_at, highs, lows, closes, marks, funding, spec, n_windows=1,
+        )
+        windowed = replay_execution_windows(
+            windows, 1.0, "OHLCV_LADDERED_PROXY", spec, retain_event_snapshots=True,
+        )
+        for report in (oracle, windowed):
+            assert report.termination_counts["MISSING_DATA"] == 1
+            assert any(gap.code == "MISSING_ACTIVE_ORDER_OHLCV" for gap in report.data_gaps)
+            assert report.simulated_fills.empty
+        _assert_replay_equivalent(oracle, windowed)
 
     def test_buy_fills_when_low_trades_through(self) -> None:
         assert passive_fill_shortfall_bps(100.0, np.array([99.5, 100.2]), 101.0, 1, SPEC) == 2.0
