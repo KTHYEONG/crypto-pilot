@@ -940,6 +940,8 @@ class TestFoldSafeHorizonEfficiency:
         ):
             assert cached_fold.slow_horizon_hours == baseline_fold.slow_horizon_hours
             assert cached_fold.slow_horizon_source == baseline_fold.slow_horizon_source
+            assert cached_fold.fast_horizon_hours == baseline_fold.fast_horizon_hours
+            assert cached_fold.fast_horizon_source == baseline_fold.fast_horizon_source
         assert fold_safe_report.research_go == fold_safe_baseline_report.research_go
         assert fold_safe_report.blend.primary_autocorr_sharpe == fold_safe_baseline_report.blend.primary_autocorr_sharpe
 
