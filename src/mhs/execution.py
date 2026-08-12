@@ -1421,6 +1421,12 @@ class _BoundExecutionReplayAccumulator:
                                     self.last_prices_arr[gcol] = mark_price
                             elif np.isfinite(mark_price):
                                 self.last_prices_arr[gcol] = mark_price
+                            if not (np.isfinite(qty) and np.isfinite(fill_price)):
+                                raise DataIntegrityError(
+                                    "non-finite fill sizing breaches the capital accounting invariant "
+                                    f"(symbol={sym!r} ts={fill_time!r} weight={weight!r} equity={equity!r} "
+                                    f"decision_price={decision_price!r} qty={qty!r} fill_price={fill_price!r})"
+                                )
                             self.cash -= qty * fill_price
                             fee = fee_bps / 1e4 * abs(qty) * fill_price
                             self.cash -= fee
@@ -1521,6 +1527,12 @@ class _BoundExecutionReplayAccumulator:
                         self.last_prices_arr[gcol] = mark_price
                 elif np.isfinite(mark_price):
                     self.last_prices_arr[gcol] = mark_price
+                if not (np.isfinite(net_units) and np.isfinite(fill_price)):
+                    raise DataIntegrityError(
+                        "non-finite fill sizing breaches the capital accounting invariant "
+                        f"(symbol={sym!r} ts={fill_time!r} weight={weight!r} equity={equity!r} "
+                        f"decision_price={decision_price!r} qty={net_units!r} fill_price={fill_price!r})"
+                    )
                 self.cash -= net_units * fill_price
                 fee = fee_bps / 1e4 * abs(net_units) * fill_price
                 self.cash -= fee
