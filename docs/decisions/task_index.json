@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_ALPHA_ENGINE_REBUILD",
+      "date": "2026-08-12",
+      "adr_id": "ADR_20260812_MHS_ALPHA_ENGINE_REBUILD",
+      "domain": "mhs",
+      "title": "MHS 알파 엔진 재구축 — 실행 스택 불변식 결함 제거",
+      "why": "docs/results/mhs-res.md 15차(crash_regime_tilt_alpha=0.2) 결과가 여전히 folds_passed=1/3, stress_naive_sharpe<0로 정체돼 근본 원인 재분석을 요청받음. 사전스크린 재측정으로 종목별 데드밴드(_apply_rebalance_deadband)가 달러중립성(|Σw| 0→0.10)과 레짐 디리스킹(corr(gross,scale) 0.72→-0.02)을 파괴하고, 19-호라이즌 discovery argmax가 고분산 선택편향을 발생시키며, 보고되는 xs_rank_ic가 신호 자신의 룩백과 겹치는 구간으로 계산돼(+0.096, t=113) 부호가 실제 거래가능 값(-0.028, t=-33)과 반대임을 확인.",
+      "resolution": "src/mhs/books.py에 portfolio_rebalance_trigger(행 단위 홀드로 불변식 보존)·equal_weight_book_ensemble(선택 없는 19-호라이즌 동일가중 평균) 신설. src/mhs/regime.py에 causal_market_beta·beta_neutralize_weights(파라미터 0개 베타중립 대안) 신설. evaluation.py의 _xs_rank_ic/_date_clustered_ols가 forward_bars를 필수화해 opens.pct_change(h).shift(-(h+1))로 인과적 선행수익률을 내부에서 구성하도록 수정. MhsDiagnosticRequest에 slow_book_mode/rebalance_filter/beta_neutralize/ensemble_signal opt-in 필드 추가, CLI 플래그 배선. 신규 파라미터(트리거 임계값 등)는 엔지니어링 기본값으로 등록하고 전 구간 표로 확정하지 않음(fold-train-only 선택 절차로 분리). --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger 실전 검증: primary_autocorr_sharpe 0.182→0.526, primary_max_drawdown -0.392→-0.227, stress_naive_sharpe -0.084→+0.041, folds_passed 1→2/3.",
+      "impact": "research run portfolio mhs-horizon-diagnostic --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger; docs/results/mhs-res.md 16차 갱신"
+    },
+    {
       "task_id": "MHS_CRASH_REGIME_TILT_OVERLAY",
       "date": "2026-08-12",
       "adr_id": "ADR_20260812_MHS_CRASH_REGIME_TILT_OVERLAY",
@@ -989,16 +999,6 @@
       "why": "단일전략 의존과 보수적 사이징이 gate 실패의 원인이라는 사용자 지적에 따라, 분산투자+원칙적 레버리지가 observation gate를 통과시킬 수 있는지 검증 필요",
       "resolution": "BTC+ETH+AVAX+BNB+DOGE 동일가중 블렌드(src/research/sleeve_blend/) 구현, MDD 예산(게이트 플로어의 85%) 기반 정적 레버리지 산출(Kelly 아님, v6 파산 사례 반영). 실행 결과 observation PASS(LCB90 15.12%), stress PASS, fold_gate만 FAIL(0.4899)",
       "impact": "promotion은 여전히 REJECTED이나 병목이 observation hurdle에서 fold-concentration 단일 게이트로 좁혀짐; 5가지 독립 구성(단일심볼/알트/횡단면모멘텀/유동성포트폴리오/이번블렌드) 전부 fold<0.40 미달로 구조적 병목 확정, 기술적 레버 소진 - fold-gate 방법론 정책 결정이 다음 필수 단계"
-    },
-    {
-      "task_id": "TASK_DONCHIAN_EXTENDED_HISTORY_BASELINE",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_DONCHIAN_EXTENDED_HISTORY_BASELINE",
-      "domain": "signal",
-      "title": "Donchian 과거 데이터 확장 및 신규 전략/다심볼 알파 탐색 마감",
-      "why": "BTCUSDT Donchian이 fold 집중도(2023년 76~82% 독점) 및 LCB90 hurdle 미달로 REJECTED; 다심볼/신규전략이 대안인지 실측 필요",
-      "resolution": "BTC+8알트 과거데이터 실백필(2019/2020~), 13심볼 재검증(BTC 최선 확인), mean-reversion/횡단면모멘텀 파일럿 반증, taker-flow 재검증(불충분), collect_funding CLI 서브커맨드 신설. fold_max 0.7585→0.4599, stress PASS 전환",
-      "impact": "BTCUSDT REJECTED 유지되나 gate 품질 대폭 개선(observation FAIL만 잔존, hurdle 정책은 사용자 결정으로 유지); 다심볼·평균회귀·횡단면모멘텀 경로는 반증되어 재탐색 불필요; 다음 가설=funding-rate 레짐 확인 필터"
     }
   ]
 }
