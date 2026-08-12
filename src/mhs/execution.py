@@ -122,6 +122,8 @@ def laddered_fill_schedule(
         raise ValueError("adverse must be finite")
     if len(closes) < n:
         raise ValueError("closes must be at least as long as adverse")
+    if not np.isfinite(closes[: n + 1]).all():
+        raise ValueError("closes must be finite")
 
     schedule: list[tuple[int, float, float, float]] = []
     carried = 0.0
@@ -738,9 +740,21 @@ def strategy_aware_execution_replay(
                             )
                         )
                         continue
+                    closes_window = closes_values[spos:timeout_pos + 1, col]
+                    if not np.isfinite(closes_window).all():
+                        termination_counts["MISSING_DATA"] += 1
+                        first_bad = spos + int(np.argmax(~np.isfinite(closes_window)))
+                        data_gaps.append(
+                            ExecutionDataGap(
+                                code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                timestamp=minute_grid[first_bad], decision_time=decision_time,
+                                signal_time=signal_time, execution_bound=execution_bound,
+                            )
+                        )
+                        continue
                     for rel_pos, tranche_price, tranche_fee_bps, qty_fraction in laddered_fill_schedule(
                         decision_price, side, adverse,
-                        closes_values[spos:timeout_pos + 1, col],
+                        closes_window,
                         spec.ladder_tranches, spec, True,
                     ):
                         fill_pos = spos + rel_pos
@@ -1364,9 +1378,21 @@ class _BoundExecutionReplayAccumulator:
                                 )
                             )
                             continue
+                        closes_window = closes_values[spos:timeout_pos + 1, col]
+                        if not np.isfinite(closes_window).all():
+                            self.termination_counts["MISSING_DATA"] += 1
+                            first_bad = spos + int(np.argmax(~np.isfinite(closes_window)))
+                            self.data_gaps.append(
+                                ExecutionDataGap(
+                                    code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                    timestamp=grid[first_bad], decision_time=decision_time,
+                                    signal_time=signal_time, execution_bound=self.execution_bound,
+                                )
+                            )
+                            continue
                         for rel_pos, tranche_price, tranche_fee_bps, qty_fraction in laddered_fill_schedule(
                             decision_price, side, adverse,
-                            closes_values[spos:timeout_pos + 1, col],
+                            closes_window,
                             self.spec.ladder_tranches, self.spec, True,
                         ):
                             fill_pos = spos + rel_pos
