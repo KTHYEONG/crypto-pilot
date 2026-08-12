@@ -6,8 +6,11 @@ import logging
 import pandas as pd
 
 from src.application.data import collection
+from src.market_data.storage.gap_report import detect_internal_gaps
 
 _logger = logging.getLogger(__name__)
+
+_DEFAULT_COLLECTION_START = "2022-04-01"
 
 
 def _ohlcv(args: argparse.Namespace) -> None:
@@ -76,6 +79,24 @@ def _collect_borrow(args: argparse.Namespace) -> None:
     )
 
 
+def _report_internal_gaps(args: argparse.Namespace) -> None:
+    from src.common.config import FUTURES_DATA_DIR
+    from src.mhs.panel import load_base_panel
+
+    panel = load_base_panel(
+        str(FUTURES_DATA_DIR / "ohlcv"), args.timeframe,
+        ("open", "high", "low", "close", "quote_vol"),
+        pd.Timestamp(args.start, tz="UTC"), pd.Timestamp(args.end, tz="UTC"), partition="all",
+    )
+    valid = panel["close"].notna()
+    for col in ("open", "high", "low", "quote_vol"):
+        valid &= panel[col].notna()
+    gaps = detect_internal_gaps(valid)
+    for sym, spans in sorted(gaps.items()):
+        for start, end, length in spans:
+            _logger.info("internal gap symbol=%s start=%s end=%s length_bars=%d", sym, start, end, length)
+
+
 def _repair_spot_gap(args: argparse.Namespace) -> None:
     collection.repair_spot_gap(args.symbol, args.timeframe, args.timestamp)
     _logger.info(
@@ -93,7 +114,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     futures = collect_sub.add_parser("futures-ohlcv", help="Collect futures OHLCV")
     futures.add_argument("symbol", type=str)
     futures.add_argument("timeframe", type=str)
-    futures.add_argument("--start", default="2022-04-01")
+    futures.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     futures.add_argument("--end", default=None)
     futures.set_defaults(handler=_ohlcv)
 
@@ -114,13 +135,13 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     spot = collect_sub.add_parser("spot-ohlcv", help="Collect independent spot OHLCV")
     spot.add_argument("symbol", type=str)
     spot.add_argument("timeframe", type=str)
-    spot.add_argument("--start", default="2022-04-01")
+    spot.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     spot.add_argument("--end", default=None)
     spot.set_defaults(handler=_spot_ohlcv)
 
     funding = collect_sub.add_parser("funding", help="Collect futures funding history")
     funding.add_argument("symbol", type=str)
-    funding.add_argument("--start", default="2022-04-01")
+    funding.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     funding.add_argument("--end", required=True)
     funding.set_defaults(handler=_funding)
 
@@ -128,7 +149,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
         "metrics", help="Collect daily futures metrics (open interest) for one symbol",
     )
     metrics.add_argument("symbol", type=str)
-    metrics.add_argument("--start", default="2022-04-01")
+    metrics.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     metrics.add_argument("--end", required=True)
     metrics.set_defaults(handler=_metrics)
 
@@ -138,7 +159,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     indicator_klines.add_argument("dataset", type=str)
     indicator_klines.add_argument("symbol", type=str)
     indicator_klines.add_argument("timeframe", type=str)
-    indicator_klines.add_argument("--start", default="2022-04-01")
+    indicator_klines.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     indicator_klines.add_argument("--end", default=None)
     indicator_klines.set_defaults(handler=_indicator_klines)
 
@@ -146,7 +167,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
         "bookdepth", help="Collect daily book depth from Vision archives",
     )
     bookdepth.add_argument("symbol", type=str)
-    bookdepth.add_argument("--start", default="2022-04-01")
+    bookdepth.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     bookdepth.add_argument("--end", default=None)
     bookdepth.set_defaults(handler=_bookdepth)
 
@@ -167,7 +188,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     )
     collect_borrow.add_argument("symbol", type=str)
     collect_borrow.add_argument("--asset", default="USDT")
-    collect_borrow.add_argument("--start", default="2022-04-01")
+    collect_borrow.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     collect_borrow.add_argument("--end", required=True)
     collect_borrow.set_defaults(handler=_collect_borrow)
 
@@ -178,3 +199,11 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     repair.add_argument("timeframe", type=str)
     repair.add_argument("timestamp", type=str)
     repair.set_defaults(handler=_repair_spot_gap)
+
+    report_gaps = collect_sub.add_parser(
+        "report-internal-gaps", help="Read-only report of per-symbol internal OHLCV gaps (never deletes data)",
+    )
+    report_gaps.add_argument("--timeframe", default="1h")
+    report_gaps.add_argument("--start", default="2019-01-01")
+    report_gaps.add_argument("--end", required=True)
+    report_gaps.set_defaults(handler=_report_internal_gaps)

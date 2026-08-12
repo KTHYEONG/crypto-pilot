@@ -46,6 +46,7 @@ from src.mhs.books import (
     rank_weight_book,
     renormalize_within_mask,
 )
+from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import (
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
@@ -78,7 +79,6 @@ MhsExecutionWindow = ExecutionReplayWindow
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
-MHS_DISCOVERY_START = pd.Timestamp("2021-01-01", tz="UTC")
 MHS_DISCOVERY_GATE_TRANCHE_COUNT = 8
 # SPREAD_AND_COST_X3 stress assumption: the realistic primary fill mechanic at
 # 3x the default cost (same model, cost-shock robustness check).

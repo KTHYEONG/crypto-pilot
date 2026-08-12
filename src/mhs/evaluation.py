@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
 from src.mhs.execution import mhs_ledger_pnl
 
@@ -321,7 +322,7 @@ def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, AnchoredPurgedF
     purge = 168
     return (
         AnchoredPurgedFold(
-            pd.Timestamp("2021-01-01", tz="UTC"),
+            MHS_DISCOVERY_START,
             pd.Timestamp("2022-12-31", tz="UTC"),
             pd.Timestamp("2023-01-08", tz="UTC"),
             pd.Timestamp("2023-12-31", tz="UTC"),
@@ -329,7 +330,7 @@ def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, AnchoredPurgedF
             purge,
         ),
         AnchoredPurgedFold(
-            pd.Timestamp("2021-01-01", tz="UTC"),
+            MHS_DISCOVERY_START,
             pd.Timestamp("2023-12-31", tz="UTC"),
             pd.Timestamp("2024-01-08", tz="UTC"),
             pd.Timestamp("2024-12-31", tz="UTC"),
@@ -337,7 +338,7 @@ def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, AnchoredPurgedF
             purge,
         ),
         AnchoredPurgedFold(
-            pd.Timestamp("2021-01-01", tz="UTC"),
+            MHS_DISCOVERY_START,
             pd.Timestamp("2024-12-31", tz="UTC"),
             pd.Timestamp("2025-01-08", tz="UTC"),
             pd.Timestamp("2025-12-31", tz="UTC"),

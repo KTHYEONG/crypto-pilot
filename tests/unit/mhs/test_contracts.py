@@ -150,3 +150,18 @@ class TestFrozenLiterals:
         blended = 0.5 * fast + 0.5 * slow
         assert float(blended.abs().sum(axis=1).iloc[0]) == pytest.approx(0.0)
         assert not blended.abs().gt(1.0).any().any()
+
+    def test_mhs_discovery_start_single_sourced_in_folds(self) -> None:
+        # SCENARIO_MHS_GAP_HARDENING_04: MHS_DISCOVERY_START is the domain
+        # single source and all three folds derive train_start from it -- a
+        # regression guard against the constant re-diverging into independent
+        # literals.
+        from src.mhs.contracts import MHS_DISCOVERY_START
+        from src.mhs.evaluation import phase_1_anchored_purged_folds
+
+        assert pd.Timestamp("2021-01-01", tz="UTC") == MHS_DISCOVERY_START
+        folds = phase_1_anchored_purged_folds()
+        assert len(folds) == 3
+        for fold in folds:
+            assert fold.train_start == MHS_DISCOVERY_START
+            assert fold.train_start is MHS_DISCOVERY_START

@@ -78,6 +78,7 @@ ignore = [
 "src/application/research/growth/evaluation.py" = ["I001"]  # contract wiring mandates exact single-line import strings
 "src/application/research/technical/xs_trend_screen.py" = ["I001"]  # contract wiring mandates an exact cross_sectional import block
 "src/application/research/mhs/evaluation.py" = ["I001"]  # contract wiring mandates exact single-line import strings
+"src/mhs/evaluation.py" = ["I001"]  # contract wiring mandates exact single-line import strings
 "src/cli/commands/research/mhs.py" = ["I001"]  # contract wiring mandates an exact application-layer import line
 "src/research/contracts.py" = ["RUF009"]  # growth-engine request defaults are frozen spec-mandated literals
 "src/data/vision.py" = ["E501"]
