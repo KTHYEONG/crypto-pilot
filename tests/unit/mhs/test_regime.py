@@ -8,6 +8,8 @@ import pandas as pd
 import pytest
 
 from src.mhs.regime import (
+    beta_neutralize_weights,
+    causal_market_beta,
     crash_regime_tilt_weights,
     reference_basket_drawdown,
     reference_basket_trend,
@@ -92,6 +94,156 @@ class TestRegimeValidation:
             reference_basket_trend(log_price, ("BTCUSDT", "ETHUSDT", "DOGEUSDT"), 2)
         with pytest.raises(ValueError, match="DOGEUSDT"):
             reference_basket_drawdown(log_price, ("ETHUSDT", "DOGEUSDT"), 2)
+
+
+class TestCausalMarketBeta:
+    """SCENARIO_MHS_ALPHA_ENGINE_04: rolling OLS beta against the eligible-
+    universe equal-weight market, causal, NaN (never inf) on zero market
+    variance, and clipped."""
+
+    def test_reproduces_known_synthetic_beta(self) -> None:
+        rng = np.random.default_rng(5)
+        n = 800
+        idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+        market_ret = rng.normal(0.0, 0.001, n)
+        # Equal-weight two-symbol market with mean beta 1.0, so the measured
+        # beta of A equals its true beta 2.0 exactly (plus tiny idio noise) and
+        # B's true beta 0.0 stays near zero.
+        rets = pd.DataFrame(
+            {
+                "A": 2.0 * market_ret + rng.normal(0.0, 1e-4, n),
+                "B": 0.0 * market_ret + rng.normal(0.0, 1e-4, n),
+            },
+            index=idx,
+        )
+        log_price = rets.cumsum()
+        eligible = pd.DataFrame(True, index=idx, columns=log_price.columns)
+        beta = causal_market_beta(log_price, eligible, lookback_bars=200, min_periods=100)
+        warmed = beta.iloc[200:]
+        assert float(warmed["A"].median()) == pytest.approx(2.0, abs=0.15)
+        assert float(warmed["B"].median()) == pytest.approx(0.0, abs=0.1)
+        assert bool(np.isfinite(warmed.to_numpy()).all())
+
+    def test_zero_variance_market_window_is_nan_never_inf(self) -> None:
+        n = 60
+        idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+        # All-zero one-bar returns: the equal-weight market is exactly constant,
+        # its rolling variance is exactly 0.0, and the beta must be NaN (never
+        # inf and never a spurious clipped value).
+        rets = pd.DataFrame({"A": [0.0] * n, "B": [0.0] * n}, index=idx)
+        log_price = rets.cumsum()
+        eligible = pd.DataFrame(True, index=idx, columns=log_price.columns)
+        beta = causal_market_beta(log_price, eligible, lookback_bars=20, min_periods=10)
+        assert not np.isinf(beta.to_numpy()).any()
+        assert beta.isna().all().all()
+
+    def test_clips_to_bounded_range(self) -> None:
+        rng = np.random.default_rng(8)
+        n = 500
+        idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+        market_ret = rng.normal(0.0, 0.001, n)
+        rets = pd.DataFrame(
+            {"A": 20.0 * market_ret + rng.normal(0.0, 1e-4, n), "B": 0.0 * market_ret + rng.normal(0.0, 1e-4, n)},
+            index=idx,
+        )
+        log_price = rets.cumsum()
+        eligible = pd.DataFrame(True, index=idx, columns=log_price.columns)
+        beta = causal_market_beta(log_price, eligible, lookback_bars=200, min_periods=100, clip_abs=3.0)
+        assert float(beta.abs().max().max()) <= 3.0
+
+    def test_is_causal_and_reads_no_bar_after_t(self) -> None:
+        rng = np.random.default_rng(11)
+        n = 400
+        idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+        market_ret = rng.normal(0.0, 0.001, n)
+        rets = pd.DataFrame(
+            {"A": 2.0 * market_ret + rng.normal(0.0, 1e-4, n), "B": -0.5 * market_ret},
+            index=idx,
+        )
+        log_price = rets.cumsum()
+        eligible = pd.DataFrame(True, index=idx, columns=log_price.columns)
+        base = causal_market_beta(log_price, eligible, lookback_bars=100, min_periods=50)
+        shocked = log_price.copy()
+        shocked.iloc[-20:] += 100.0
+        future = causal_market_beta(shocked, eligible, lookback_bars=100, min_periods=50)
+        pd.testing.assert_frame_equal(base.iloc[:-20], future.iloc[:-20])
+        assert not base.iloc[-20:].equals(future.iloc[-20:])
+
+    def test_validation(self) -> None:
+        idx = pd.date_range("2021-01-01", periods=50, freq="1h", tz="UTC")
+        log_price = pd.DataFrame({"A": np.arange(50.0), "B": np.arange(50.0) * 2.0}, index=idx)
+        eligible = pd.DataFrame(True, index=idx, columns=log_price.columns)
+        with pytest.raises(ValueError, match="lookback_bars"):
+            causal_market_beta(log_price, eligible, 1, 1)
+        with pytest.raises(ValueError, match="min_periods"):
+            causal_market_beta(log_price, eligible, 20, 1)
+        with pytest.raises(ValueError, match="min_periods"):
+            causal_market_beta(log_price, eligible, 10, 20)
+        with pytest.raises(ValueError, match="clip_abs"):
+            causal_market_beta(log_price, eligible, 20, 10, clip_abs=0.0)
+        bad_elig = eligible.rename(columns={"B": "C"})
+        with pytest.raises(ValueError, match="identically indexed"):
+            causal_market_beta(log_price, bad_elig, 20, 10)
+
+
+class TestBetaNeutralizeWeights:
+    """SCENARIO_MHS_ALPHA_ENGINE_05: the book is projected onto the subspace
+    orthogonal to both the constant vector and beta, so sum(w)==0 and
+    sum(w*beta)==0 hold by construction; degenerate rows fail closed to zeros."""
+
+    def test_removes_beta_exposure_and_keeps_dollar_neutral(self) -> None:
+        w = pd.DataFrame(
+            {"A": [0.4, 0.2], "B": [-0.3, 0.3], "C": [0.1, -0.4], "D": [-0.2, -0.1]},
+        )
+        b = pd.DataFrame(
+            {"A": [1.0, 2.0], "B": [0.5, 1.0], "C": [2.0, 0.5], "D": [1.5, 3.0]},
+        )
+        m = pd.DataFrame(True, index=w.index, columns=w.columns)
+        out = beta_neutralize_weights(w, b, m, 2)
+        assert out.sum(axis=1).abs().max() < 1e-12
+        assert (out * b).sum(axis=1).abs().max() < 1e-10
+        assert out.abs().sum(axis=1).sub(1.0).abs().max() < 1e-9
+
+    def test_fails_closed_on_zero_beta_dispersion_or_all_nan_beta(self) -> None:
+        w = pd.DataFrame({"A": [0.5], "B": [-0.5], "C": [0.0], "D": [0.0]})
+        flat = pd.DataFrame({"A": [1.0], "B": [1.0], "C": [1.0], "D": [1.0]})
+        m = pd.DataFrame({"A": [True], "B": [True], "C": [True], "D": [True]})
+        out = beta_neutralize_weights(w, flat, m, 2)
+        assert out.to_numpy().tolist() == [[0.0, 0.0, 0.0, 0.0]]
+        all_nan = pd.DataFrame(
+            {"A": [np.nan], "B": [np.nan], "C": [np.nan], "D": [np.nan]},
+        )
+        out_nan = beta_neutralize_weights(w, all_nan, m, 2)
+        assert out_nan.to_numpy().tolist() == [[0.0, 0.0, 0.0, 0.0]]
+
+    def test_fails_closed_below_min_symbols(self) -> None:
+        w = pd.DataFrame({"A": [0.5], "B": [-0.5], "C": [0.0], "D": [0.0]})
+        b = pd.DataFrame({"A": [1.0], "B": [1.5], "C": [2.0], "D": [0.5]})
+        m = pd.DataFrame({"A": [True], "B": [True], "C": [False], "D": [False]})
+        out = beta_neutralize_weights(w, b, m, 4)
+        assert out.to_numpy().tolist() == [[0.0, 0.0, 0.0, 0.0]]
+
+    def test_ignores_masked_out_columns(self) -> None:
+        w = pd.DataFrame({"A": [0.4], "B": [-0.4], "C": [0.2], "D": [-0.2]})
+        b = pd.DataFrame({"A": [1.0], "B": [2.0], "C": [5.0], "D": [6.0]})
+        m = pd.DataFrame({"A": [True], "B": [True], "C": [False], "D": [False]})
+        out = beta_neutralize_weights(w, b, m, 2)
+        assert out.iloc[0]["C"] == 0.0
+        assert out.iloc[0]["D"] == 0.0
+        assert abs(float(out.iloc[0][["A", "B"]].sum())) < 1e-9
+        assert abs((out.iloc[0][["A", "B"]] * b.iloc[0][["A", "B"]]).sum()) < 1e-10
+
+    def test_fails_closed_on_misaligned_frames(self) -> None:
+        w = pd.DataFrame({"A": [0.5], "B": [-0.5]})
+        b = pd.DataFrame({"A": [1.0], "C": [1.0]})
+        m = pd.DataFrame({"A": [True], "B": [True]})
+        with pytest.raises(ValueError, match="identically indexed"):
+            beta_neutralize_weights(w, b, m, 2)
+        with pytest.raises(ValueError, match="min_symbols"):
+            beta_neutralize_weights(
+                pd.DataFrame({"A": [0.5]}), pd.DataFrame({"A": [1.0]}),
+                pd.DataFrame({"A": [True]}), 1,
+            )
 
 
 class TestNoProductionWiring:
