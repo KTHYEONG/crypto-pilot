@@ -936,39 +936,87 @@ def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
     assert forced.primary_naive_sharpe != forced.pre_vol_target_reference_naive_sharpe
 
 
-def test_xs_rank_ic_vectorized_contract_ignores_invalid_cross_section_cells() -> None:
-    index = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+def test_xs_rank_ic_causal_forward_window_ignores_invalid_cells() -> None:
+    # SCENARIO_MHS_ALPHA_ENGINE_06: the forward return is built internally as
+    # opens.pct_change(forward_bars).shift(-(forward_bars + 1)); the measured
+    # window starts at open_{t+1} and never overlaps the signal's own lookback.
+    # With forward_bars=1, fwd[t] = (open[t+2] - open[t+1]) / open[t+1].
+    index = pd.date_range("2021-01-01", periods=4, freq="1h", tz="UTC")
+    opens = pd.DataFrame(
+        [[100.0, 100.0, 100.0, 100.0, 100.0],
+         [100.0, 100.0, 100.0, 100.0, 100.0],
+         [110.0, 105.0, 100.0, 95.0, 90.0],
+         [110.0, 105.0, np.nan, 95.0, 90.0]],
+        index=index,
+        columns=list("ABCDE"),
+    )
     signal = pd.DataFrame(
-        [[1.0, 2.0, 3.0, 4.0, 5.0], [1.0, 2.0, np.nan, 4.0, 5.0], [1.0] * 5],
+        [[1.0, 2.0, 3.0, 4.0, 5.0],
+         [1.0, 2.0, np.nan, 4.0, 5.0],
+         [1.0, 1.0, 1.0, 1.0, 1.0],
+         [5.0, 4.0, 3.0, 2.0, 1.0]],
         index=index,
         columns=list("ABCDE"),
     )
-    forward = pd.DataFrame(
-        [[5.0, 4.0, 3.0, 2.0, 1.0], [5.0, 4.0, 3.0, 2.0, 1.0], [1.0] * 5],
-        index=index,
-        columns=list("ABCDE"),
-    )
-
-    result = ev._xs_rank_ic(signal, forward)
-
+    result = ev._xs_rank_ic(signal, opens, forward_bars=1)
+    # Row 0 is the only valid cross section (>= 5 finite cells): ascending
+    # signal ranks against the descending forward returns score IC exactly -1.
+    # Row 1 has a NaN signal cell (< 5 valid cells, excluded), rows 2-3 have no
+    # forward window (NaN, excluded).
     assert result["n_dates"] == 1
     assert result["mean_ic"] == pytest.approx(-1.0)
+    assert result["forward_bars"] == 1
 
 
-def test_date_clustered_ols_vectorized_contract() -> None:
+def test_xs_rank_ic_causal_window_scores_near_zero_on_unpredictable_returns() -> None:
+    # SCENARIO_MHS_ALPHA_ENGINE_06: on IID returns, a signal equal to the
+    # TRAILING return scores ~0 under the tradable (non-overlapping) window,
+    # instead of the spuriously high overlap IC the old trailing convention
+    # reported (+0.0957 vs the tradable -0.0278 in the spec).
+    rng = np.random.default_rng(7)
+    n_hours, n_syms = 60, 10
+    index = pd.date_range("2021-01-01", periods=n_hours, freq="1h", tz="UTC")
+    cols = [f"S{i}" for i in range(n_syms)]
+    opens = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.001, (n_hours, n_syms)), axis=0)),
+        index=index,
+        columns=cols,
+    )
+    signal = opens.pct_change()
+    result = ev._xs_rank_ic(signal, opens, forward_bars=1)
+    assert result["n_dates"] > 20
+    assert abs(result["mean_ic"]) < 0.3
+    assert result["forward_bars"] == 1
+    with pytest.raises(ValueError, match="forward_bars"):
+        ev._xs_rank_ic(signal, opens, forward_bars=0)
+
+
+def test_date_clustered_ols_causal_forward_window() -> None:
+    # SCENARIO_MHS_ALPHA_ENGINE_06: the pooled panel regression builds its
+    # dependent variable internally with shift(-(forward_bars + 1)); with
+    # forward_bars=1 the forward window is fwd[t] = r[t + 2], and step returns
+    # r[t] = 1.5 * past[t - 2] + 0.25 recover the known 1.5 slope exactly.
     index = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
     past = pd.DataFrame(
         {"A": np.arange(48, dtype=float), "B": np.arange(48, dtype=float) + 2.0},
         index=index,
     )
-    forward = 0.25 + 1.5 * past
-    forward.loc[index[3], "A"] = np.nan
+    step_ret = np.vstack(
+        [np.zeros((2, past.shape[1])), (0.25 + 1.5 * past.iloc[:-2]).to_numpy()],
+    )
+    opens = pd.DataFrame(100.0 * np.cumprod(1.0 + step_ret, axis=0), index=index, columns=past.columns)
+    opens.iloc[3, 0] = np.nan
 
-    result = ev._date_clustered_ols(forward, past)
-
-    assert result["n"] == 95
+    result = ev._date_clustered_ols(opens, past, forward_bars=1)
+    # The NaN at opens[3, "A"] poisons the pct_change for two forward cells
+    # (fwd[1] reads r[3], fwd[2] divides by open[3]); the last two bars have no
+    # forward window, so 96 - 4 (terminal) - 2 (poisoned) = 90 finite pairs.
+    assert result["n"] == 90
     assert result["n_dates"] == 2
-    assert result["past_beta"] == pytest.approx(1.5)
+    assert result["past_beta"] == pytest.approx(1.5, rel=1e-3)
+    assert result["forward_bars"] == 1
+    with pytest.raises(ValueError, match="forward_bars"):
+        ev._date_clustered_ols(opens, past, forward_bars=0)
 
 
 def _perf_opt_placebo_inputs(seed: int) -> tuple[
@@ -2256,3 +2304,172 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     assert calls["n"] == 1
     assert len(cache_objs) == 3
     assert all(c is cache_objs[0] for c in cache_objs)
+
+
+def _slow_book_panel_inputs(mhs_market):
+    """Panel inputs for the ``_slow_book_execution_weights`` and fold tests."""
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    panel = ev.load_base_panel(
+        str(root), "1h", ("close", "open", "quote_vol"), _START, end,
+        partition="dev", min_bars=2000,
+    )
+    close, _opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    grid_1h = close.index
+    funded = [s for s in close.columns if s in funding_by_symbol]
+    close = close[funded]
+    quote_vol = quote_vol[funded]
+    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    log_close = np.log(close)
+    execution_mask = ev._pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+    return log_close, eligible, execution_mask, request, grid_1h, end
+
+
+def _pre_change_slow_book(
+    log_close, eligible, execution_mask, spec, step_grid, ema_span,
+):
+    """The frozen production slow-book chain ``_slow_book_execution_weights``
+    must reproduce byte-identically in single_horizon/raw mode."""
+    w = ev._book_weights(log_close, eligible, spec, step_grid, ema_span=ema_span)
+    w = ev.inverse_realized_vol_tilt(
+        w, ev.realized_vol(log_close, spec.horizon_hours).reindex(step_grid),
+    )
+    return ev.renormalize_within_mask(
+        w, execution_mask.reindex(step_grid).fillna(False), spec.min_symbols,
+    )
+
+
+def test_mhs_alpha_engine_slow_book_single_horizon_is_byte_identical(mhs_market) -> None:
+    # SCENARIO_MHS_ALPHA_ENGINE_07: in single_horizon/raw mode
+    # ``_slow_book_execution_weights`` reproduces the pre-change
+    # ``_book_weights`` + tilt + renormalize sequence exactly.
+    log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
+    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
+    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+    expected = _pre_change_slow_book(
+        log_close, eligible, execution_mask, slow, slow_grid, slow_ema,
+    )
+    actual = ev._slow_book_execution_weights(
+        log_close, eligible, execution_mask, slow, slow_grid,
+        "single_horizon", "raw", slow_ema,
+    )
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_mhs_alpha_engine_slow_book_ensemble_is_rowwise_mean_with_consensus_gross(mhs_market) -> None:
+    # SCENARIO_MHS_ALPHA_ENGINE_07: in horizon_ensemble mode the output is the
+    # row-wise mean of the per-horizon books on the same step grid, dollar-
+    # neutral, with strictly smaller mean gross than any single horizon on a
+    # panel where the horizons disagree (consensus-scaled exposure).
+    log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
+    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
+    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+    per_horizon: dict[int, pd.DataFrame] = {}
+    for h in slow.band.horizons_hours:
+        spec = dataclasses.replace(slow, horizon_hours=h)
+        per_horizon[h] = _pre_change_slow_book(
+            log_close, eligible, execution_mask, spec, slow_grid, slow_ema,
+        )
+    expected = sum(per_horizon.values()) / len(per_horizon)
+    actual = ev._slow_book_execution_weights(
+        log_close, eligible, execution_mask, slow, slow_grid,
+        "horizon_ensemble", "raw", slow_ema,
+    )
+    pd.testing.assert_frame_equal(actual, expected)
+    assert actual.sum(axis=1).abs().max() < 1e-9
+    per_horizon_gross = [float(w.abs().sum(axis=1).mean()) for w in per_horizon.values()]
+    ensemble_gross = float(actual.abs().sum(axis=1).mean())
+    assert ensemble_gross <= 1.0 + 1e-9
+    assert ensemble_gross < max(per_horizon_gross) - 1e-6
+
+
+def test_mhs_alpha_engine_slow_book_validates_mode_and_signal_kind(mhs_market) -> None:
+    log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
+    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
+    with pytest.raises(ValueError, match="mode"):
+        ev._slow_book_execution_weights(
+            log_close, eligible, execution_mask, slow, slow_grid,
+            "bogus", "raw", None,
+        )
+    with pytest.raises(ValueError, match="signal_kind"):
+        ev._slow_book_execution_weights(
+            log_close, eligible, execution_mask, slow, slow_grid,
+            "single_horizon", "bogus", None,
+        )
+
+
+def test_mhs_alpha_engine_fold_portfolio_trigger_preserves_invariants(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_ALPHA_ENGINE_08: with rebalance_filter='portfolio_trigger'
+    # the fold target weights keep exact dollar neutrality and the realized
+    # gross tracks regime_cash_scale (the trigger gates the UNSCALED book and
+    # the gross scale multiplies afterwards), whereas the per-symbol deadband
+    # branch leaks net exposure and decouples gross from the scale (RC-1).
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    forced_scale: dict[str, pd.Series] = {}
+
+    def _forced_step_scale(vol_mean: pd.Series) -> pd.Series:
+        out = pd.Series(
+            np.where(np.arange(len(vol_mean)) < len(vol_mean) // 2, 0.5, 1.0),
+            index=vol_mean.index,
+        )
+        forced_scale["series"] = out
+        return out
+
+    monkeypatch.setattr(ev, "_regime_cash_scale", _forced_step_scale)
+    request_trig = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        rebalance_filter="portfolio_trigger",
+    )
+    target_trig, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request_trig, funding_by_symbol,
+    )
+    scale = forced_scale["series"].reindex(target_trig.index)
+    assert target_trig.sum(axis=1).abs().max() < 1e-9
+    assert (target_trig.abs().sum(axis=1) - scale).abs().max() < 1e-9
+    assert target_trig.abs().sum(axis=1).max() <= 1.0 + 1e-9
+
+    request_dead = dataclasses.replace(request_trig, rebalance_filter="per_symbol_deadband")
+    target_dead, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request_dead, funding_by_symbol,
+    )
+    assert target_dead.sum(axis=1).abs().max() > 1e-3
+    assert (target_dead.abs().sum(axis=1) - scale).abs().max() > 1e-3
+
+
+def test_mhs_alpha_engine_request_field_validation() -> None:
+    # SCENARIO_MHS_ALPHA_ENGINE_08 (second half): MhsDiagnosticRequest raises
+    # ValueError on unknown slow_book_mode/rebalance_filter/ensemble_signal
+    # values and on a non-bool beta_neutralize; the defaults stay frozen.
+    req = MhsDiagnosticRequest()
+    assert req.slow_book_mode == "single_horizon"
+    assert req.rebalance_filter == "per_symbol_deadband"
+    assert req.beta_neutralize is False
+    assert req.ensemble_signal == "raw"
+    with pytest.raises(ValueError, match="slow_book_mode"):
+        MhsDiagnosticRequest(slow_book_mode="bogus")
+    with pytest.raises(ValueError, match="rebalance_filter"):
+        MhsDiagnosticRequest(rebalance_filter="bogus")
+    with pytest.raises(ValueError, match="beta_neutralize"):
+        MhsDiagnosticRequest(beta_neutralize=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="ensemble_signal"):
+        MhsDiagnosticRequest(ensemble_signal="bogus")

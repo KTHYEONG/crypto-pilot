@@ -5,11 +5,135 @@ import pandas as pd
 import pytest
 
 from src.mhs.books import (
+    equal_weight_book_ensemble,
     inverse_realized_vol_tilt,
     phase_tranche_book,
+    portfolio_rebalance_trigger,
     rank_weight_book,
     renormalize_within_mask,
 )
+
+
+class TestPortfolioRebalanceTrigger:
+    """SCENARIO_MHS_ALPHA_ENGINE_01 / SCENARIO_MHS_ALPHA_ENGINE_02: the
+    portfolio-level trigger holds the previously adopted row wholesale and every
+    emitted row is an exact copy of some input row, so dollar-neutrality and
+    unit-gross survive the turnover filter by construction."""
+
+    def test_holds_previous_row_below_threshold_and_adopts_wholesale(self) -> None:
+        target = pd.DataFrame(
+            [[0.5, -0.5], [0.45, -0.45], [0.3, -0.3], [0.35, -0.35]],
+            columns=["A", "B"],
+        )
+        # One-way tracking error from the first row:
+        #   row1: |0.45-0.5| + |(-0.45)-(-0.5)| = 0.10 (hold)
+        #   row2: |0.3-0.5| + |(-0.3)-(-0.5)|  = 0.40 >= 0.20 (adopt)
+        #   row3: |0.35-0.3| + |(-0.35)-(-0.3)| = 0.10 (hold)
+        out = portfolio_rebalance_trigger(target, 0.20)
+        assert out.iloc[0].tolist() == [0.5, -0.5]
+        assert out.iloc[1].tolist() == [0.5, -0.5]
+        assert out.iloc[2].tolist() == [0.3, -0.3]
+        assert out.iloc[3].tolist() == [0.3, -0.3]
+
+    def test_every_output_row_equals_some_input_row(self) -> None:
+        rng = np.random.default_rng(3)
+        target = pd.DataFrame(rng.normal(0.0, 0.3, (40, 6)), columns=list("ABCDEF"))
+        out = portfolio_rebalance_trigger(target, 0.25)
+        input_rows = target.to_numpy()
+        for i in range(len(out)):
+            row = out.iloc[i].to_numpy()
+            assert any(np.array_equal(row, input_rows[j]) for j in range(len(input_rows))), i
+
+    def test_dollar_neutral_unit_gross_input_preserves_invariants(self) -> None:
+        rng = np.random.default_rng(5)
+        raw = pd.DataFrame(rng.normal(0.0, 1.0, (60, 8)), columns=list("ABCDEFGH"))
+        raw = raw.sub(raw.mean(axis=1), axis=0)
+        book = raw.div(raw.abs().sum(axis=1), axis=0)
+        out = portfolio_rebalance_trigger(book, 0.15)
+        assert out.sum(axis=1).abs().max() < 1e-9
+        assert out.abs().sum(axis=1).sub(1.0).abs().max() < 1e-9
+
+    def test_nonfinite_cells_treated_as_zero_and_output_finite(self) -> None:
+        target = pd.DataFrame(
+            [[0.5, -0.5], [np.nan, -0.4], [0.3, np.inf]],
+            columns=["A", "B"],
+        )
+        out = portfolio_rebalance_trigger(target, 0.2)
+        assert bool(np.isfinite(out.to_numpy()).all())
+        # Row1: |0.0-0.5| + |-0.4-(-0.5)| = 0.6 >= 0.2 -> adopted (NaN -> 0).
+        assert out.iloc[1].tolist() == [0.0, -0.4]
+
+    def test_first_row_always_adopted(self) -> None:
+        target = pd.DataFrame([[0.4, -0.4], [0.4, -0.4], [0.4, -0.4]], columns=["A", "B"])
+        out = portfolio_rebalance_trigger(target, 0.1)
+        assert out.iloc[0].tolist() == [0.4, -0.4]
+
+    def test_zero_threshold_is_identity_passthrough(self) -> None:
+        target = pd.DataFrame(
+            [[0.5, -0.5], [0.2, -0.2], [0.1, -0.1]], columns=["A", "B"],
+        )
+        pd.testing.assert_frame_equal(portfolio_rebalance_trigger(target, 0.0), target)
+
+    def test_empty_input_is_unchanged_copy(self) -> None:
+        empty = pd.DataFrame(columns=["A", "B"])
+        out = portfolio_rebalance_trigger(empty, 0.2)
+        assert out.empty
+        assert list(out.columns) == ["A", "B"]
+
+    def test_fails_closed_on_negative_threshold(self) -> None:
+        with pytest.raises(ValueError, match="tracking_error_threshold"):
+            portfolio_rebalance_trigger(pd.DataFrame([[0.5, -0.5]]), -0.1)
+
+
+class TestEqualWeightBookEnsemble:
+    """SCENARIO_MHS_ALPHA_ENGINE_03: the ensemble is the plain row-wise mean of
+    every candidate book -- dollar-neutral, gross <= 1.0 with strict inequality
+    when horizons disagree -- and rejects empty/mismatched inputs."""
+
+    def test_averages_books_row_wise(self) -> None:
+        books = {
+            1: pd.DataFrame([[0.5, -0.5], [0.4, -0.4]], columns=["A", "B"]),
+            2: pd.DataFrame([[-0.5, 0.5], [0.6, -0.6]], columns=["A", "B"]),
+        }
+        out = equal_weight_book_ensemble(books)
+        assert out.iloc[0].tolist() == pytest.approx([0.0, 0.0])
+        assert out.iloc[1].tolist() == pytest.approx([0.5, -0.5])
+
+    def test_dollar_neutral_and_gross_bounded_by_unit(self) -> None:
+        rng = np.random.default_rng(11)
+        books = {}
+        for k in range(5):
+            raw = pd.DataFrame(rng.normal(0.0, 1.0, (30, 8)), columns=list("ABCDEFGH"))
+            raw = raw.sub(raw.mean(axis=1), axis=0)
+            books[k] = raw.div(raw.abs().sum(axis=1), axis=0)
+        out = equal_weight_book_ensemble(books)
+        assert out.sum(axis=1).abs().max() < 1e-9
+        assert out.abs().sum(axis=1).max() <= 1.0 + 1e-9
+        assert not np.isnan(out.to_numpy()).any()
+
+    def test_disagreeing_books_yield_strictly_smaller_gross(self) -> None:
+        books = {
+            1: pd.DataFrame([[0.5, -0.5], [0.5, -0.5]], columns=["A", "B"]),
+            2: pd.DataFrame([[-0.5, 0.5], [-0.5, 0.5]], columns=["A", "B"]),
+        }
+        out = equal_weight_book_ensemble(books)
+        assert out.abs().sum(axis=1).max() == pytest.approx(0.0)
+
+    def test_fails_closed_on_empty_mapping(self) -> None:
+        with pytest.raises(ValueError, match="books must not be empty"):
+            equal_weight_book_ensemble({})
+
+    def test_fails_closed_on_mismatched_index(self) -> None:
+        a = pd.DataFrame([[0.5, -0.5]], columns=["A", "B"])
+        b = pd.DataFrame([[0.5, -0.5]], columns=["A", "B"], index=[10])
+        with pytest.raises(ValueError, match="identical index"):
+            equal_weight_book_ensemble({1: a, 2: b})
+
+    def test_fails_closed_on_mismatched_columns(self) -> None:
+        a = pd.DataFrame([[0.5, -0.5]], columns=["A", "B"])
+        b = pd.DataFrame([[0.5, -0.5]], columns=["B", "A"])
+        with pytest.raises(ValueError, match="identical index"):
+            equal_weight_book_ensemble({1: a, 2: b})
 
 
 class TestRankWeightBook:

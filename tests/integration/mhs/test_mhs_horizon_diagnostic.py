@@ -284,8 +284,10 @@ class TestQualityCalibrationWiring:
         signal_48h = ev.horizon_log_return(log_close, 48)
         # R3 reorders these computations before the book replays; the reported
         # payload values must be identical to the same computation on the panel.
-        assert report.xs_rank_ic == ev._xs_rank_ic(signal_48h, opens.pct_change())
-        assert report.date_clustered_regression == ev._date_clustered_ols(opens.pct_change(), signal_48h)
+        # The IC/OLS now build their forward window internally with
+        # forward_bars=48 (docs/specs/mhs_alpha_engine.md §3, RC-3).
+        assert report.xs_rank_ic == ev._xs_rank_ic(signal_48h, opens, forward_bars=48)
+        assert report.date_clustered_regression == ev._date_clustered_ols(opens, signal_48h, forward_bars=48)
 
     def test_run_mhs_horizon_diagnostic_log_close_released_before_book_replay(self) -> None:
         src = inspect.getsource(ev.run_mhs_horizon_diagnostic)
