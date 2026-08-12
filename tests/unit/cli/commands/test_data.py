@@ -53,3 +53,23 @@ def test_bookdepth_handler_dispatches_requested_range(monkeypatch) -> None:
     )
 
     assert calls == [("BTCUSDT", "2022-04-01", "2025-01-01")]
+
+
+def test_all_collect_subcommands_resolve_single_start_default() -> None:
+    # SCENARIO_MHS_GAP_HARDENING_06: all 7 `data collect` subcommands resolve
+    # --start through the single _DEFAULT_COLLECTION_START constant.
+    parser = argparse.ArgumentParser()
+    data.add_data_commands(parser)
+    cases = {
+        "futures-ohlcv": ["futures-ohlcv", "BTCUSDT", "1h"],
+        "spot-ohlcv": ["spot-ohlcv", "BTCUSDT", "1h"],
+        "funding": ["funding", "BTCUSDT", "--end", "2025-01-01"],
+        "metrics": ["metrics", "BTCUSDT", "--end", "2025-01-01"],
+        "indicator-klines": ["indicator-klines", "premiumIndexKlines", "BTCUSDT", "1h"],
+        "bookdepth": ["bookdepth", "BTCUSDT"],
+        "collect-borrow": ["collect-borrow", "BTCUSDT", "--end", "2025-01-01"],
+    }
+    for subcommand, argv in cases.items():
+        args = parser.parse_args(["collect", *argv])
+        assert args.start == "2022-04-01", subcommand
+        assert args.start == data._DEFAULT_COLLECTION_START, subcommand

@@ -310,12 +310,30 @@ class TestMhsLedgerPnl:
             weights, opens, funding,
             XsCompositeSpec(
                 halflife_bars=0, no_trade_band=0.0, execution_delay_bars=1,
-                fee_rate=0.0004, slippage_rate=0.0004,
+                fee_rate=0.0004, slippage_rate=0.0004, gap_carry=True,
             ),
         )
         assert turnover.equals(turnover_ref)
         assert len(net) == len(equity_ref) - 1
         assert np.allclose(net.to_numpy(), equity_ref.pct_change().dropna().to_numpy())
+
+    def test_gap_carry_default_true_absorbs_internal_gap(self) -> None:
+        # SCENARIO_MHS_GAP_HARDENING_03: mhs_ledger_pnl carries a held weight
+        # across a 3-bar internal NaN open gap instead of failing closed --
+        # gap_carry defaults to True on this MHS-only pre-screen entrypoint.
+        index = pd.date_range("2024-01-01", periods=10, freq="4h", tz="UTC")
+        opens = pd.DataFrame(
+            {
+                "A": [100.0, 101.0, 102.0, np.nan, np.nan, np.nan,
+                      106.0, 107.0, 108.0, 109.0],
+            },
+            index=index,
+        )
+        weights = pd.DataFrame({"A": [0.5] * len(index)}, index=index)
+        funding = pd.DataFrame(0.0, index=index, columns=["A"])
+        net, turnover = mhs_ledger_pnl(weights, opens, funding, one_way_bps=8.0)
+        assert bool(np.isfinite(net.to_numpy()).all())
+        assert turnover.index.equals(index)
 
 
 class TestSimulatedInventoryLedger:

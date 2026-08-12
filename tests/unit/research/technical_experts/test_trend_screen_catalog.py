@@ -67,3 +67,12 @@ class TestTrendScreenCatalog:
         assert DISCOVERY_START < DISCOVERY_END < QUALIFICATION_START < QUALIFICATION_END
         assert QUALIFICATION_END.normalize() + pd.Timedelta(days=1) > QUALIFICATION_END
         assert QUALIFICATION_END.year == 2025
+
+    def test_qualification_end_is_shared_holdout_cutoff(self) -> None:
+        # SCENARIO_MHS_GAP_HARDENING_05: QUALIFICATION_END must be the very
+        # object as policy.HOLDOUT_CUTOFF -- a regression guard against the two
+        # independently-typed literals silently diverging again.
+        from src.research.evaluation.policy import HOLDOUT_CUTOFF
+
+        assert QUALIFICATION_END is HOLDOUT_CUTOFF
+        assert pd.Timestamp("2025-12-31 23:59:59", tz="UTC") == QUALIFICATION_END
