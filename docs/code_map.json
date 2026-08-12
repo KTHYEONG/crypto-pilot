@@ -663,5 +663,9 @@
   },
   "src/mhs/regime.py": {
     "testing": "tests/unit/mhs/test_regime.py"
+  },
+  "src/mhs/contracts.py": {
+    "architecture": "docs/results/mhs-res.md",
+    "testing": "tests/unit/mhs/test_evaluation_fold_safe_fast_horizon.py"
   }
 }

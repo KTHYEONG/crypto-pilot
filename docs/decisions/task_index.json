@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_UNIVERSE_HORIZON_REDESIGN",
+      "date": "2026-08-12",
+      "adr_id": "ADR_20260812_MHS_UNIVERSE_HORIZON_REDESIGN",
+      "domain": "mhs",
+      "title": "MHS 유니버스/호라이즌/자본배분 개선안 스펙 + fast_reversal fold-safe 재검증",
+      "why": "docs/results/mhs-res.md 17차 이후, 유동성 median-split(720h)/top-30 로스터/fast-slow horizon 탐색범위/앙상블 가중/fast 0% 배분의 근거를 코드분석으로 재검토 요청받음. fast_reversal의 0% 자본배분이 48h 단일밴드 prescreen에만 근거했고 slow에 이미 구축된 7-후보 fold-train-only leak-free 재검증 인프라가 fast엔 한번도 적용된 적 없음을 발견.",
+      "resolution": "_FAST_BAND.horizons_hours를 48h 단일값에서 REVERSAL_HORIZON_CANDIDATES_HOURS=(24,48,72,96,120,144,168) 7-후보 그리드로 확장(contracts.py). request.fold_safe_horizon_selection 블록에 fast용 fold_train_only_discovery_qualification(sign=-1)을 slow와 나란히 배선하고 MhsFoldReport에 fast_horizon_hours/fast_horizon_source 필드 추가(evaluation.py). PHASE_1_BOOK_BLEND_WEIGHTS/실제 fast 리플레이·원장은 전혀 변경하지 않는 진단 전용 계약. 18차 실전 실행(--fold-safe-horizon)으로 검증: 3개 fold 전부 fast_horizon_source=frozen_default로 폴백 -- 넓은 그리드에서도 admission floor(|t|>=2.0) 통과 후보 없음.",
+      "impact": "blend/primary 지표(primary_autocorr_sharpe=0.5257, CAGR 7.84%, stress_naive_sharpe=+0.1420) 17차와 소수점까지 바이트 동일 확인 -- 진단 전용 계약이 실측으로 증명됨. Q4('fast 탐색이 무의미한가')에 대해 '48h만 봐서 성급했다'는 가설을 leak-free 증거로 기각하고 edge 부재를 재확인. 다음 우선순위(CAPITAL_INVARIANT_BREACH 근본원인, fold1 원인조사, 로스터 N 재검증, 결합 파라미터 탐색)를 mhs-res.md §7에 정렬. /check PASS(lint/type/test, Impact Level 3)."
+    },
+    {
       "task_id": "MHS_EXECUTION_ANNUALIZATION_FIX",
       "date": "2026-08-12",
       "adr_id": "ADR_20260812_MHS_EXECUTION_ANNUALIZATION_FIX",
@@ -989,16 +999,6 @@
       "why": "실제 parquet 실행으로 전문가 포트폴리오의 등록·배분 경로와 게이트 결과를 검증해야 했다.",
       "resolution": "CLI는 미등록 library에서 중단되었고 등록을 우회한 BTC·ETH 코어 실행은 LCB 비양수로 전액 현금에 머문 결과를 ADR과 결정 인덱스에 기록했다.",
       "impact": "전문가 포트폴리오는 아직 promotion 불가이며 expert_library_registry 등록과 양의 LCB를 생성하는 독립 전략 증거가 다음 필수 작업으로 남았다."
-    },
-    {
-      "task_id": "TASK_SLEEVE_GATE_PASS_V2_DIRECTIONAL",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_SLEEVE_GATE_PASS_V2_DIRECTIONAL",
-      "domain": "signal",
-      "title": "Funding signed directional sleeve 구현 및 sealed gate 검증",
-      "why": "고정 5심볼 롱 전용 sleeve의 fold 집중을 완화할 인과적 방향·펀딩 레짐 후보를 검증하기 위해 구현했다.",
-      "resolution": "funding_signed_directional_v1과 causal inverse-volatility sizing을 연결하고 351개 테스트·ruff·mypy·lean_check를 통과시켰으며 sealed CLI 실행 결과를 확인했다.",
-      "impact": "CAGR 1.44%, observation LCB90 0.04%, fold 0.4056, stress FAIL로 promotion은 REJECTED이며 기존 fold threshold 완화 근거는 없다."
     }
   ]
 }
