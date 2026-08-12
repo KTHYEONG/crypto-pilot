@@ -125,6 +125,7 @@ class XsCompositeSpec:
     execution_delay_bars: int = 1
     fee_rate: float = 0.0005
     slippage_rate: float = 0.0003
+    gap_carry: bool = False
 
     def __post_init__(self) -> None:
         if self.halflife_bars < 0:
@@ -733,7 +734,7 @@ def run_xs_composite_ledger(
         )
 
     w = weights.to_numpy(dtype=np.float64)
-    o = opens.to_numpy(dtype=np.float64)
+    o = opens.ffill(axis=0).to_numpy(dtype=np.float64) if spec.gap_carry else opens.to_numpy(dtype=np.float64)
     f = bar_funding.to_numpy(dtype=np.float64)
 
     lag = 1 + spec.execution_delay_bars
