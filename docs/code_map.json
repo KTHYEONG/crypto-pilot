@@ -576,7 +576,8 @@
     "testing": "tests/unit/research/technical_experts/test_contracts.py"
   },
   "src/research/technical_experts/cross_sectional.py": {
-    "testing": "tests/unit/research/technical_experts/test_cross_sectional.py"
+    "testing": "tests/unit/research/technical_experts/test_cross_sectional.py",
+    "architecture": "docs/specs/mhs_data_period_and_gap_hardening.md"
   },
   "src/research/technical_experts/indicators.py": {
     "testing": "tests/unit/research/technical_experts/test_indicators.py"
@@ -652,5 +653,9 @@
   },
   "src/main.py": {
     "architecture": "docs/results/mhs-res.md"
+  },
+  "src/market_data/storage/gap_report.py": {
+    "architecture": "docs/results/mhs-res.md",
+    "testing": "tests/unit/market_data/storage/test_gap_report.py"
   }
 }

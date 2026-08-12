@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_DATA_PERIOD_AND_GAP_HARDENING",
+      "date": "2026-08-12",
+      "adr_id": "ADR_20260812_MHS_DATA_PERIOD_AND_GAP_HARDENING",
+      "domain": "data",
+      "title": "데이터 기간 파라미터 단일화 + 결손 데이터 gap_carry 견고화",
+      "why": "P0 gap-trim 데이터 손상 복구(ADR_20260812_MHS_GAP_TRIM_CORRUPTION_FIX) 이후 13차 재실행에서 결손 경계 DataIntegrityError로 조기 종료. 전수조사 결과 데이터 기간 파라미터(MHS_DISCOVERY_START 등)가 여러 파일에 산발적으로 재선언되어 있어 유지보수 혼란도 확인.",
+      "resolution": "src/mhs/contracts.py에 MHS_DISCOVERY_START 단일 소스 신설(src/mhs/evaluation.py 3개 fold + application/research/mhs/evaluation.py가 재사용), trend_screen_catalog.QUALIFICATION_END을 HOLDOUT_CUTOFF 참조로 교체, data.py 7개 CLI 서브커맨드의 --start 기본값을 _DEFAULT_COLLECTION_START 상수로 통합. XsCompositeSpec에 opt-in gap_carry 필드 추가(기본 False, 기존 15+ 호출부 무변화)로 run_xs_composite_ledger가 결손 진입 바에서 마지막 유효 open을 캐리(정밀 리플레이 엔진의 MISSING_HELD_MARK 패턴 재사용); mhs_ledger_pnl은 gap_carry=True 기본값으로 MHS 3개 호출부 자동 적용. /check 과정에서 무관한 XS growth-sizing 실데이터 의존 테스트 격리 버그(test_xs_screen_cli_parses_and_dispatches가 --no-growth-sizing 누락으로 실 프로덕션 parquet를 우회 로드)를 --no-growth-sizing 플래그 추가로 수정.",
+      "impact": "결손 경계 크래시 해소로 13차 MHS 재측정 가능. 기간 파라미터 단일화로 향후 유사 사고(값 불일치 은닉) 재발 위험 감소. 비MHS 15+ 호출부(XS trend-screen/alpha blend 등) byte-identical 보존 확인(lean_check PASS)."
+    },
+    {
+      "task_id": "TASK_MHS_GAP_TRIM_CORRUPTION_FIX",
+      "date": "2026-08-12",
+      "adr_id": "ADR_20260812_MHS_GAP_TRIM_CORRUPTION_FIX",
+      "domain": "data",
+      "title": "MHS gap-trim 데이터 손상 규명 및 복구 + 재발방지 진단 유틸 추가",
+      "why": "12차 결과(백필 후 재측정)가 이전보다 크게 악화(primary_autocorr_sharpe 0.0915, fold0/1 강한 음수). mhs-res.md §6이 유니버스 확장의 정직한 반영인지 gap-trim 부작용인지 미분리 상태로 남겨둠.",
+      "resolution": "scratch/trim_to_valid_segment_v2.py가 docstring(가장 이른 세그먼트 우선 보존)과 반대로 chosen=len(lengths)-1로 항상 최신 세그먼트만 남기도록 구현돼, 37개 주요 유동성 심볼(XRP/LTC/TRX/ETC/XLM 등)의 백필 이력 중앙값 806일을 프로덕션 parquet에서 삭제한 사실을 실측 확인. scratch/backfill_gap_backup_v3에서 75개 심볼 OHLCV+funding을 복원하고 손상 스크립트를 삭제. 기존 load_base_panel/liquid_half_eligibility/horizon_log_return이 이미 NaN 갭에 안전함을 확인해 대체 삭제 로직은 신설하지 않고, 대신 읽기 전용 detect_internal_gaps 진단 유틸(src/market_data/storage/gap_report.py)과 CLI report-internal-gaps 서브커맨드를 추가해 향후 동일한 물리적 삭제 재발을 방지.",
+      "impact": "P0 데이터 손상 원인을 (b) gap-trim 구현 버그로 확정, 12차 수치는 오염된 데이터 기준으로 무효 처리. 13차 재실행 시도에서 별도의 신규 이슈(체결 레이어가 갭 진입 경계에서 마지막 유효 바의 포지션을 다음 바 NaN open/수익률로 청산하려다 DataIntegrityError fail-closed, FILUSDT 2022-02-26 결손에서 재현)를 발견 -- P0 수정으로 은폐돼 있던 별개의 갭-경계 처리 미비가 드러난 것으로, 후속 /spec 대상으로 분리."
+    },
+    {
       "task_id": "TASK_MHS_2021_DATA_GAP_ROOT_CAUSE_CORRECTION",
       "date": "2026-08-11",
       "adr_id": "ADR_20260811_MHS_2021_DATA_GAP_ROOT_CAUSE_CORRECTION",
@@ -979,26 +999,6 @@
       "why": "The CLI logged an empty initial universe because it queried the first bar before a complete trailing liquidity window existed.",
       "resolution": "Moved the diagnostic as-of timestamp to the first common 30-day eligible window and added a regression assertion rejecting selected=[] logs.",
       "impact": "Initial universe logs now show a causal non-empty selection while the engine's daily selection and promotion gates remain unchanged."
-    },
-    {
-      "task_id": "TASK_PORTFOLIO_V2_EVALUATION",
-      "date": "2026-07-31",
-      "adr_id": "ADR_20260731_PORTFOLIO_V2_EVALUATION",
-      "domain": "risk",
-      "title": "Causal liquidity portfolio v2 evaluation",
-      "why": "Compare the implemented five-slot liquidity portfolio against the frozen BTC reliability gates.",
-      "resolution": "Recorded the latest portfolio run as rejected because observation LCB90, t-stat, fold concentration, and stress gates failed.",
-      "impact": "CAGR rose to 16.41% but LCB90 fell to 1.84%, MDD widened to -20.83%, and promotion remains fail-closed."
-    },
-    {
-      "task_id": "TASK_TAKER_FLOW_CONFIRMATION",
-      "date": "2026-07-31",
-      "adr_id": "ADR_20260731_TAKER_FLOW_CONFIRMATION",
-      "domain": "signal",
-      "title": "Taker-flow confirmation candidate evaluation",
-      "why": "Evaluate the opt-in quote-notional taker-flow filter with funding-net accounting against frozen reliability gates.",
-      "resolution": "Recorded the sealed BTCUSDT candidate CLI run and retained it as rejected because observation and fold gates still fail.",
-      "impact": "Candidate improved CAGR to 10.45% and Sharpe to 1.571 with MDD -7.00% while preserving the v1 default and promotion safeguards."
     }
   ]
 }
