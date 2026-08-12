@@ -1,25 +1,22 @@
 # MHS Horizon Diagnostic — Latest Result
 
-- **Document Date**: 2026-08-12 (13차, `OHLCV_IMMEDIATE_TAKER` 결손 가드 수정 후 재검증)
+- **Document Date**: 2026-08-12 (15차, `crash_regime_tilt_alpha=0.2` 실전 검증)
 - **Domain**: Research / MHS (Multi-Horizon Market State)
-- **Run Metadata**: `start=2021-01-01`, `end=2025-12-31`, `execution_timeframe=5m`, `execution_universe_size=30`, `eligible_symbols=446`, `run_elapsed_seconds=581.7`
-- **CLI**: `research run portfolio mhs-horizon-diagnostic` (기본 플래그, `--fold-safe-horizon`/`--discovery-gate` 미사용)
+- **Run Metadata**: `start=2021-01-01`, `end=2025-12-31`, `execution_timeframe=5m`, `execution_universe_size=30`, `eligible_symbols=446`
+- **CLI**: `research run portfolio mhs-horizon-diagnostic --crash-regime-tilt-alpha 0.2`
 - **Source**: [`mhs_horizon_diagnostic.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic.json)
 - **Research GO 판정 기준**: `daily autocorr-adjusted Sharpe >= 0.6` (primary) AND `stress Sharpe > 0`, 3-fold anchored 전부 통과
-- **직전 결과와 비교 목적 상이**: 12차는 `--fold-safe-horizon --discovery-gate` 부가 진단 플래그로 실행됐고, `slow_momentum`/`blend`의 `fold0(2023)/fold1(2024)` 전체가 `OHLCV_IMMEDIATE_TAKER` 체결가 미검증 결손(`docs/feedback.md` 2026-08-12 기록) 오진 때문에 `CAPITAL_INVARIANT_BREACH`로 조기 중단된 채 기록된 수치다. 이번 13차는 [`mhs_immediate_taker_fill_guard`](file:///home/kth/crypto-pilot/docs/specs/mhs_immediate_taker_fill_guard.md) 수정 이후 동일 커맨드를 완주 재실행한 결과이며, 두 실행의 primary 숫자를 직접 비교하지 말 것 — 12차는 애초에 오염된 조기 중단 수치였다.
+- **성격**: `ADR_20260812_MHS_CRASH_REGIME_TILT_OVERLAY`(`src/mhs/regime.py`의 `crash_regime_tilt_weights` — BTCUSDT 추세 기반 방향성 틸트를 `slow_momentum` fold 리플레이에만 opt-in 배선)의 실전 동작 검증 실행. **`alpha=0.2`는 메커니즘이 작동하는지 확인하기 위한 임의 시험값이며 검증된 프로덕션 권장값이 아니다** — alpha를 성과 보고 고르는 것 자체가 p-hack이므로(`docs/decisions/task_index.json` ADR 참고) 이 문서의 숫자를 "개선됐다"는 근거로 프로덕션 기본값 결정에 쓰지 말 것.
 
 ## 1. Primary metrics (`slow_momentum` == `blend`, `fast_reversal` blend 자본 0%)
+
+상위 books 경로는 이 오버레이가 의도적으로 미배선(fold 리플레이 경로만 배선) — `alpha` 값과 무관하게 항상 동일:
 
 | metric | value |
 | :--- | ---: |
 | `primary_autocorr_sharpe` | 0.1819 |
-| `primary_naive_sharpe` | 0.0399 |
 | `primary_max_drawdown` | -0.3922 |
-| `primary_net_ann` | 0.0029 |
-| `primary_geometric_cagr` | 0.0004 |
-| `primary_annualized_turnover` | 5.1248 |
 | `stress_naive_sharpe` (x3 cost) | -0.0844 |
-| `pre_vol_target_reference_naive_sharpe` | 0.0306 |
 | `blend.failure` | null |
 
 ## 2. Research GO gate
@@ -29,40 +26,29 @@
 | `eligible` | `false` |
 | `evaluated_folds` | 3 |
 | `folds_passed` | 1 |
-| `reason_codes` | `CAPITAL_INVARIANT_BREACH`, `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `RELEVANT_EXECUTION_DATA_GAP`, `STRESS_SHARPE_NOT_POSITIVE`, `UNSPECIFIED_POLICY` |
+| `reason_codes` | `CAPITAL_INVARIANT_BREACH`(`fast_reversal` 별개 이슈, 2025-07-14 음의 자기자본, blend 자본 0%라 무관), `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `RELEVANT_EXECUTION_DATA_GAP`(`MISSING_DATA=76`, 정상 스킵), `STRESS_SHARPE_NOT_POSITIVE`, `UNSPECIFIED_POLICY` |
 
-`CAPITAL_INVARIANT_BREACH`는 이번에도 `fast_reversal` 북 기인(blend 자본 0%, primary 판정과 무관)이지만 **원인이 12차와 다르다**: `pre-trade equity must be positive and finite (ts=2025-07-14 13:05 pre_trade_equity=-38.78)` — 음의 자기자본으로 인한 별개의 기존 이슈이며, `docs/feedback.md`가 다룬 `OHLCV_IMMEDIATE_TAKER` NaN 체결가 이슈와는 무관하다(미해결, 범위 밖).
+## 3. Fold detail — `alpha=0.2` 배선 대상 경로 (baseline 대비 변화 관찰)
 
-`RELEVANT_EXECUTION_DATA_GAP`은 fold0에서 신규 관측됨 — `termination_counts.MISSING_DATA=76`. 이는 이번 수정이 의도한 정확한 동작: 과거엔 결손 체결가가 크래시로 이어졌으나, 이제는 해당 주문만 스킵되고 `MISSING_ACTIVE_ORDER_OHLCV` 데이터 갭으로 기록되어 fold가 완주된다.
+| fold | validation | `primary_autocorr_sharpe` | `primary_max_drawdown` | `stress_naive_sharpe` | `failures` |
+| ---: | :--- | ---: | ---: | ---: | :--- |
+| 0 | 2023 | **+1.2092**(baseline -0.1461) | -0.1284(baseline -0.2009) | **+0.2367**(baseline -0.2093) | `RELEVANT_EXECUTION_DATA_GAP`만 (Sharpe/stress 게이트는 통과) |
+| 1 | 2024 | -0.3486(baseline -0.5044) | -0.1859(baseline -0.1825) | -0.2079(baseline -0.3448) | `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `STRESS_SHARPE_NOT_POSITIVE` |
+| 2 | 2025 | +1.4986(baseline +1.6054) | -0.2678(baseline -0.4093) | +0.2023(baseline +0.2646) | (none) |
 
-## 3. Fold detail
+**관찰**: 오버레이 설계 시 사전등록 실험(2021-2022만 사용, `docs/decisions/task_index.json` ADR_20260812_MHS_CRASH_REGIME_TILT_OVERLAY)에서 예측한 트레이드오프("alpha를 올릴수록 위기연도 개선·평시연도 소폭 악화")가 실제 fold 리플레이에서도 방향이 일치 — fold0(2023)이 손실→이익 전환(stress도 부호 전환), fold1(2024) 완화, fold2(2025)는 소폭 악화. `folds_passed`는 여전히 1/3(fold0가 Sharpe/stress는 통과했지만 무관한 `RELEVANT_EXECUTION_DATA_GAP`로 인해 "pass"로는 안 잡힘).
 
-| fold | validation_start | validation_end | `primary_autocorr_sharpe` | `primary_max_drawdown` | `stress_naive_sharpe` | `failures` | `slow_horizon_hours` | `slow_horizon_source` |
-| ---: | :--- | :--- | ---: | ---: | ---: | :--- | ---: | :--- |
-| 0 | 2023-01-08 | 2023-12-31 | -0.1461 | -0.2009 | -0.2093 | `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `RELEVANT_EXECUTION_DATA_GAP`, `STRESS_SHARPE_NOT_POSITIVE` | 168 | `frozen_default` |
-| 1 | 2024-01-08 | 2024-12-31 | -0.5044 | -0.1825 | -0.3448 | `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `STRESS_SHARPE_NOT_POSITIVE` | 168 | `frozen_default` |
-| 2 | 2025-01-08 | 2025-12-31 | 1.6054 | -0.4093 | 0.2646 | (none) | 168 | `frozen_default` |
+## 4. 최근 진단·조사 계보 (코드 변경 없이 원인 규명만 진행된 항목 포함)
 
-3개 fold 전부 완주(`OHLCV_IMMEDIATE_TAKER` 결손 가드 수정 전에는 fold0/fold1이 `CAPITAL_INVARIANT_BREACH`로 완주 자체가 불가능했다). `--fold-safe-horizon` 미사용 실행이라 전부 `frozen_default`.
+- **`OHLCV_IMMEDIATE_TAKER` 결손 가드**(`ADR_20260812_MHS_IMMEDIATE_TAKER_FILL_GUARD`): 예전엔 이 진단 자체가 `CAPITAL_INVARIANT_BREACH`로 미완주였음 — 수정 후 안정적으로 완주.
+- **fold Sharpe 편차 근본 원인**(`ADR_20260812_MHS_MOMENTUM_REGIME_DIAGNOSIS`): 2022(LUNA/FTX)가 horizon 무관 전원 음수 — horizon 선택 문제가 아니라 신호의 체계적 붕괴장 취약성. `DiscoveryQualificationResult.yearly_net_t` 진단 필드 신설.
+- **전략 유형 자체 재검토**(`ADR_20260812_MHS_MOMENTUM_STRATEGY_REDESIGN_REVIEW`): cross-sectional(완전 시장중립) vs time-series(방향성 허용) 비교 — 완전 시장중립 목표와 붕괴장 생존이 트레이드오프임을 확인. `src/mhs/regime.py` 레짐 프록시 신설.
+- **크래시 레짐 방향성 틸트 오버레이**(`ADR_20260812_MHS_CRASH_REGIME_TILT_OVERLAY`, 이번 15차): 위 프록시를 실제 fold 리플레이에 opt-in 연결, `alpha=0.2` 실전 검증 완료(§3).
 
-## 4. `mhs_immediate_taker_fill_guard` 수정 검증 (이번 차수의 핵심 목적)
-
-- **수정 전**: `research run portfolio mhs-horizon-diagnostic` 자체가 `CAPITAL_INVARIANT_BREACH`로 미완주 (`docs/feedback.md` 2026-08-12).
-- **수정**: `src/mhs/execution.py`의 `strategy_aware_execution_replay`/`_BoundExecutionReplayAccumulator.consume` 양쪽 `OHLCV_IMMEDIATE_TAKER` 분기에 STRICT/TOUCH/LADDERED와 동일한 `MISSING_ACTIVE_ORDER_OHLCV` 스킵 가드 이식(`docs/specs/mhs_immediate_taker_fill_guard.md`).
-- **수정 후**: 동일 커맨드 완주, `status=COMPLETE`, 로그 전체에서 `CAPITAL_INVARIANT_BREACH`/`DataIntegrityError`/`Traceback` 관련 미포착 예외 0건. `termination_counts.MISSING_DATA=76`으로 결손이 크래시 대신 진단 데이터로 정상 흡수됨.
-- **잔여 이슈**: `fast_reversal` 북의 별개 음의 자기자본 `CAPITAL_INVARIANT_BREACH`(§2)는 미해결 상태로 남음 — blend 자본 0%라 Research GO 판정에는 영향 없음.
-
-## 5. 관찰
-
-- Primary Sharpe(0.18)는 여전히 GO 임계값(0.6) 대비 크게 미달, MDD -0.39, stress Sharpe 음수 — 신호 자체의 근본적 개선 없이는 GO 불가능한 상태는 12차와 방향성이 동일.
-- fold0/fold1이 이번에 처음으로 실제 Sharpe 수치를 산출함(과거엔 크래시로 도달 불가) — fold0(-0.15)/fold1(-0.50) 모두 음수, fold2(1.61)만 양수로 fold 간 변동성이 매우 큼(`fold_concentration` 계열 실패 가능성, §2의 `UNSPECIFIED_POLICY`와 함께 확인 필요).
-- fold-safe-horizon/discovery-gate를 이번엔 켜지 않았으므로 12차 §4~§6의 discovery 미채택 결론은 이번 실행으로 재확인되지 않음 — 필요 시 별도 재실행 필요.
-
-## 6. 다음 스텝 후보
+## 5. 다음 스텝 후보
 
 | 후보 | 상태 |
 | :--- | :--- |
-| `fast_reversal`의 독립적 `CAPITAL_INVARIANT_BREACH`(음의 자기자본, 2025-07-14) 근본 원인 조사 | 미착수 (blend 자본 0%라 Research GO엔 무관하지만 북 자체는 여전히 미완주) |
-| fold0/fold1/fold2 간 Sharpe 부호 반전 원인(신호 vs 유니버스/기간별 레짐) 분리 검증 | 미착수 |
-| `--fold-safe-horizon --discovery-gate` 포함 재실행으로 12차 결론(§4~6, no-op 확인) 재검증 | 미착수 |
-| 2023/2024 방향성 손실을 고치는 신호 재설계 | 미탐색 |
+| `alpha` 프로덕션 값 결정 — fold train-only 데이터 기반 사전등록 절차로 별도 리서치 정책 결정 필요 | 미착수 (p-hack 방지를 위해 이번 문서 수치로 확정하지 말 것) |
+| `fast_reversal`의 독립적 `CAPITAL_INVARIANT_BREACH`(음의 자기자본, 2025-07-14) 근본 원인 조사 | 미착수 (Research GO엔 무관) |
+| 상위 books 진단 경로에도 오버레이 배선 여부 검토(현재 의도적으로 미배선) | 미착수 |
