@@ -1273,3 +1273,110 @@ class TestTerminalFailClosedRejection:
         encoded = json.dumps(payload)
         assert "NaN" not in encoded
         assert "Infinity" not in encoded
+
+
+class TestCapitalInvariantFailFast:
+    """SCENARIO_MHS_CAPITAL_HARDENING_01/02/03: non-finite fill sizing is
+    rejected fail-fast at the exact fill site (both the laddered and the
+    single-fill branches) with the full symbol/timestamp/weight/equity/
+    decision_price context, the new message still classifies as
+    CAPITAL_INVARIANT_BREACH, and the guards are pure no-ops on any
+    fully-finite replay."""
+
+    def _single_decision_window(
+        self, *, nan_close_at: pd.Timestamp | None = None,
+        weight: float = 1.0, mark: float = 100.0,
+    ) -> ExecutionReplayWindow:
+        grid = pd.date_range("2021-01-01 00:00", periods=13, freq="5min", tz="UTC")
+        symbols = ("AAAUSDT",)
+        closes = pd.DataFrame({"AAAUSDT": [100.0] * len(grid)}, index=grid)
+        if nan_close_at is not None:
+            closes.loc[nan_close_at, "AAAUSDT"] = np.nan
+        marks = pd.DataFrame({"AAAUSDT": [mark] * len(grid)}, index=grid)
+        decision = pd.Timestamp("2021-01-01 00:10", tz="UTC")
+        return ExecutionReplayWindow(
+            window_start=grid[0],
+            window_end=grid[-1],
+            columns=symbols,
+            symbols=symbols,
+            minute_grid=grid,
+            highs=closes * 1.01,
+            lows=closes * 0.99,
+            closes=closes,
+            marks=marks,
+            bar_funding=pd.DataFrame(0.0, index=grid, columns=symbols),
+            target_weights=pd.DataFrame({"AAAUSDT": [weight]}, index=[decision]),
+            signal_available_at=pd.DatetimeIndex(
+                [pd.Timestamp("2021-01-01 00:05", tz="UTC")],
+            ),
+        )
+
+    def test_non_finite_fill_price_raises_with_symbol_and_decision_ts(self) -> None:
+        """SCENARIO_MHS_CAPITAL_HARDENING_01: a non-finite value injected at the
+        window boundary (NaN close at the immediate-taker submit bar) reaches the
+        single-fill sizing site and raises fail-fast, naming the symbol and the
+        decision timestamp, instead of silently corrupting ``self.cash`` and
+        crashing much later with the generic pre-trade-equity message."""
+        decision = pd.Timestamp("2021-01-01 00:10", tz="UTC")
+        window = self._single_decision_window(nan_close_at=decision)
+        with pytest.raises(DataIntegrityError, match="capital accounting invariant") as exc_info:
+            replay_execution_windows([window], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+        msg = str(exc_info.value)
+        assert "AAAUSDT" in msg
+        assert "00:10" in msg
+        assert "decision_price=100.0" in msg
+        assert "qty=np.float64(0.01)" in msg
+        assert "fill_price=nan" in msg
+        assert "pre-trade equity must be positive and finite" not in msg
+
+    def test_non_finite_qty_raises_in_laddered_branch(self) -> None:
+        """SCENARIO_MHS_CAPITAL_HARDENING_01 (laddered site): a target weight
+        large enough to overflow ``desired_units`` (weight * equity / mark)
+        makes ``qty`` non-finite in the laddered/multi-tranche branch; the
+        guard raises there with the same full-context message."""
+        window = self._single_decision_window(weight=1e308, mark=0.5)
+        with pytest.raises(DataIntegrityError, match="capital accounting invariant") as exc_info:
+            replay_execution_windows([window], 1.0, "OHLCV_LADDERED_PROXY", ExecutionSpec())
+        msg = str(exc_info.value)
+        assert "AAAUSDT" in msg
+        assert "weight=1e+308" in msg
+        assert "decision_price=0.5" in msg
+        assert "qty=np.float64(inf)" in msg
+
+    def test_new_message_still_classifies_as_capital_breach(self) -> None:
+        """SCENARIO_MHS_CAPITAL_HARDENING_02: the more detailed message keeps
+        the 'capital' keyword so ``_classify_execution_failure`` still maps it
+        to the stable CAPITAL_INVARIANT_BREACH reason."""
+        from src.application.research.mhs.evaluation import _classify_execution_failure
+
+        sym = "AAAUSDT"
+        fill_time = pd.Timestamp("2021-01-01 00:10", tz="UTC")
+        weight, equity, decision_price, qty, fill_price = 1.0, 1.0, 100.0, 0.01, float("nan")
+        exc = DataIntegrityError(
+            "non-finite fill sizing breaches the capital accounting invariant "
+            f"(symbol={sym!r} ts={fill_time!r} weight={weight!r} equity={equity!r} "
+            f"decision_price={decision_price!r} qty={qty!r} fill_price={fill_price!r})"
+        )
+        assert _classify_execution_failure(exc) == "CAPITAL_INVARIANT_BREACH"
+
+    @pytest.mark.parametrize(
+        "bound", ["OHLCV_STRICT_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"],
+    )
+    def test_finite_replay_unchanged(self, bound: str) -> None:
+        """SCENARIO_MHS_CAPITAL_HARDENING_03: the new guards are pure no-ops on
+        a fully-finite window -- the windowed replay still matches the single-
+        panel oracle in fills and every ledger series, so no sizing arithmetic
+        was changed."""
+        wl = TestWindowedReplayEquivalence()._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        oracle = strategy_aware_execution_replay(
+            wl["weights"], wl["signals"], wl["highs"], wl["lows"], wl["closes"],
+            wl["marks"], wl["funding"], 1.0, bound, ExecutionSpec(),
+        )
+        windowed = replay_execution_windows(
+            windows, 1.0, bound, ExecutionSpec(), retain_event_snapshots=True,
+        )
+        _assert_replay_equivalent(oracle, windowed)
