@@ -358,6 +358,8 @@ class MhsFoldReport:
     terminal_censored_decisions: int = 0
     slow_horizon_hours: int = 168
     slow_horizon_source: str = "frozen_default"
+    fast_horizon_hours: int = 48
+    fast_horizon_source: str = "frozen_default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2121,6 +2123,7 @@ def _run_post_book_concurrently(
     initial_equity: float,
     telemetry: _StageRecorder | None = None,
     fold_slow_horizons: dict[int, int | None] | None = None,
+    fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -2169,6 +2172,7 @@ def _run_post_book_concurrently(
                 _run_anchored_fold,
                 root, fold, request, fold_funding, initial_equity, idx, None,
                 (fold_slow_horizons or {}).get(idx),
+                (fold_fast_horizons or {}).get(idx),
             ): idx
             for idx, fold in enumerate(folds)
         }
@@ -2256,6 +2260,25 @@ def _fold_safe_slow_book_spec(
             "fold_train_only_discovery",
         )
     return default, default.horizon_hours, "frozen_default"
+
+
+def _fold_safe_fast_horizon(
+    selection: DiscoveryQualificationResult,
+    default_horizon: int,
+) -> tuple[int, str]:
+    """Resolve one fold's ``fast_reversal`` horizon from its fold-scoped selection.
+
+    Diagnostic-only: returns ``(horizon_hours, source)`` instead of a
+    ``BookSpec`` because fast_reversal's book construction and
+    ``PHASE_1_BOOK_BLEND_WEIGHTS`` stay frozen at 0.0 capital (the result is
+    evidence for a separate governance decision, never a weight change).
+    ``source`` is ``"fold_train_only_discovery"`` only when the fold-scoped
+    gate admitted a candidate (``admitted`` and ``selected_horizon`` both
+    truthy); otherwise ``"frozen_default"`` with ``default_horizon`` unchanged.
+    """
+    if selection.admitted and selection.selected_horizon is not None:
+        return selection.selected_horizon, "fold_train_only_discovery"
+    return default_horizon, "frozen_default"
 
 
 def _build_fold_target_weights(
@@ -2414,6 +2437,7 @@ def _run_anchored_fold(
     fold_index: int,
     telemetry: _StageRecorder | None = None,
     slow_horizon_override: int | None = None,
+    fast_horizon_override: tuple[int, str] | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
@@ -2540,6 +2564,14 @@ def _run_anchored_fold(
             slow_horizon_source=(
                 "fold_train_only_discovery" if slow_horizon_override is not None else "frozen_default"
             ),
+            fast_horizon_hours=(
+                fast_horizon_override[0]
+                if fast_horizon_override is not None
+                else PHASE_1_BOOK_SPECS["fast_reversal"].horizon_hours
+            ),
+            fast_horizon_source=(
+                fast_horizon_override[1] if fast_horizon_override is not None else "frozen_default"
+            ),
         )
     except DataIntegrityError as exc:
         return _incomplete_fold_report(fold, fold_index, (_classify_execution_failure(exc),))
@@ -2553,6 +2585,7 @@ def _run_folds_parallel(
     initial_equity: float,
     telemetry: _StageRecorder | None = None,
     fold_slow_horizons: dict[int, int | None] | None = None,
+    fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
 ) -> tuple[MhsFoldReport, ...]:
     """Run the three anchored folds concurrently, one process each.
 
@@ -2584,6 +2617,7 @@ def _run_folds_parallel(
                 _run_anchored_fold,
                 root, fold, request, fold_funding, initial_equity, idx, None,
                 (fold_slow_horizons or {}).get(idx),
+                (fold_fast_horizons or {}).get(idx),
             ): idx
             for idx, fold in enumerate(folds)
         }
@@ -2726,6 +2760,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # horizon ``int`` (or None) is passed down to fold workers, so no worker
     # ever reloads a wide ``[train_start, train_end]`` panel.
     fold_slow_horizons: dict[int, int | None] = {}
+    fold_fast_horizons: dict[int, tuple[int, str]] = {}
     if request.fold_safe_horizon_selection:
         _precomputed_weights = build_candidate_weights(
             log_close, eligible, 1, specs["slow_momentum"].band.horizons_hours,
@@ -2745,6 +2780,22 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             )
             fold_slow_horizons[_fold_idx] = (
                 _horizon if _source == "fold_train_only_discovery" else None
+            )
+        _fast_precomputed_weights = build_candidate_weights(
+            log_close, eligible, -1, specs["fast_reversal"].band.horizons_hours,
+            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+        )
+        for _fold_idx, _fold in enumerate(phase_1_anchored_purged_folds()):
+            fold_fast_horizons[_fold_idx] = _fold_safe_fast_horizon(
+                fold_train_only_discovery_qualification(
+                    sign=-1,
+                    horizon_candidates=specs["fast_reversal"].band.horizons_hours,
+                    log_close=log_close, eligible=eligible, opens=opens,
+                    bar_funding=bar_funding, grid_1h=grid_1h, fold=_fold,
+                    tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                    precomputed_candidate_weights=_fast_precomputed_weights,
+                ),
+                fast.horizon_hours,
             )
         # The top-level report uses fold index 2's selection (train=2021-2024,
         # the widest leak-free window that still excludes 2025), making the
@@ -2925,7 +2976,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     ) = _run_post_book_concurrently(
         blend_report, root, request, execution_symbols, minute_grid,
         signal_48h, eligible, opens, bar_funding, grid_1h, fast,
-        fold_funding, initial_equity, telemetry, fold_slow_horizons,
+        fold_funding, initial_equity, telemetry, fold_slow_horizons, fold_fast_horizons,
     )
     folds = tuple(fold_reports)
     research_go = _mhs_research_go(folds, book_reasons)
