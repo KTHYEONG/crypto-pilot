@@ -41,10 +41,12 @@ def _write_mhs_market(
 
     hour_dir = root / "1h"
     minute_dir = root / "1m"
+    five_dir = root / "5m"
     funding_dir = root / "funding"
     mark_dir = root / "markPriceKlines" / "1h"
     hour_dir.mkdir(parents=True, exist_ok=True)
     minute_dir.mkdir(parents=True, exist_ok=True)
+    five_dir.mkdir(parents=True, exist_ok=True)
     funding_dir.mkdir(parents=True, exist_ok=True)
     mark_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,6 +89,31 @@ def _write_mhs_market(
                 "quote_vol": [1000.0] * sym_n_min,
             },
         ).to_parquet(minute_dir / f"{sym}.parquet")
+
+        # 5-minute execution grid for the default ``execution_timeframe="5m"``
+        # runs (SCENARIO_MHS_ANNUALIZATION_04), derived from the same minute
+        # path so the 1m/5m ledgers share one underlying price process.
+        five_frame = pd.DataFrame(
+            {
+                "open": minute_prices,
+                "high": minute_prices * 1.0005,
+                "low": minute_prices * 0.9995,
+                "close": minute_prices,
+            },
+            index=sym_minute,
+        ).resample("5min").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last"},
+        ).dropna()
+        pd.DataFrame(
+            {
+                "timestamp": (five_frame.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+                "open": five_frame["open"].to_numpy(),
+                "high": five_frame["high"].to_numpy(),
+                "low": five_frame["low"].to_numpy(),
+                "close": five_frame["close"].to_numpy(),
+                "quote_vol": np.full(len(five_frame), 5000.0),
+            },
+        ).to_parquet(five_dir / f"{sym}.parquet")
 
         pd.DataFrame(
             {
@@ -161,6 +188,41 @@ def touch_report(synthetic_market):
             execution_timeframe="1m", log_run=False, touch_diagnostic=True,
         ),
     )
+
+
+@pytest.fixture(scope="module")
+def annualization_report(synthetic_market):
+    """SCENARIO_MHS_ANNUALIZATION_04: a full diagnostic on the default 5m
+    execution grid, used to prove the corrected hourly-grid annualization of
+    every real-execution-ledger headline metric against the pre-fix formulas
+    applied to the same raw ledger.
+
+    Module-scoped sibling fixtures (``fold_market``/``late_market_report``)
+    re-point ``fc._mark_price_path``/``ev.funding_path`` at their own roots and
+    only restore them at module teardown, so this fixture re-asserts the
+    synthetic-market paths itself before running the diagnostic.
+    """
+    import src.market_data.services.futures_collection as fc
+
+    root, end = synthetic_market
+    originals = {
+        "funding_path": ev.funding_path,
+        "mark_price_path": fc._mark_price_path,
+    }
+    ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+    fc._mark_price_path = (
+        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
+    )
+    try:
+        return run_mhs_horizon_diagnostic(
+            MhsDiagnosticRequest(
+                start=str(START), end=str(end), data_root=str(root),
+                execution_timeframe="5m", log_run=False,
+            ),
+        )
+    finally:
+        ev.funding_path = originals["funding_path"]
+        fc._mark_price_path = originals["mark_price_path"]
 
 
 @pytest.fixture(scope="module")
@@ -1308,6 +1370,60 @@ class TestFoldWindowTelemetryOracle:
         assert oracle.ledger.invalid_reasons == windowed.ledger.invalid_reasons
         assert dict(oracle.termination_counts) == dict(windowed.termination_counts)
         assert oracle.fill_count == windowed.fill_count
+
+
+class TestMhsExecutionAnnualization:
+    """SCENARIO_MHS_ANNUALIZATION_04: the real-execution-ledger headline
+    metrics must be annualized on the native execution-timeframe grid via the
+    hourly resample (C1/C2), not with the hourly-grid constant applied to the
+    raw 5m ledger. The pre-fix formulas are kept here as an explicit oracle so
+    the regression guard survives independently of the fixed code."""
+
+    @staticmethod
+    def _pre_fix_metrics(ledger):
+        net = ledger.net_returns
+        equity = ledger.equity
+        pre_naive = float(net.mean() / net.std(ddof=1) * np.sqrt(ev._PERIODS_PER_YEAR_1H))
+        n = len(equity)
+        pre_cagr = float(
+            (equity.iloc[-1] / equity.iloc[0]) ** (ev._PERIODS_PER_YEAR_1H / n) - 1.0,
+        )
+        pre_net_ann = float(net.mean() * ev._PERIODS_PER_YEAR_1H)
+        pre_turnover = float(ledger.fill_turnover.mean() * ev._PERIODS_PER_YEAR_1H)
+        return pre_naive, pre_cagr, pre_net_ann, pre_turnover
+
+    def test_headline_metrics_larger_in_magnitude_holding_sign(self, annualization_report) -> None:
+        blend = annualization_report.blend
+        assert blend is not None
+        assert blend.primary is not None, f"blend primary missing: failure={blend.failure!r}"
+        ledger = blend.primary.ledger
+        pre_naive, pre_cagr, pre_net_ann, pre_turnover = self._pre_fix_metrics(ledger)
+        post = (
+            blend.primary_naive_sharpe,
+            blend.primary_geometric_cagr,
+            blend.primary_net_ann,
+            blend.primary_annualized_turnover,
+        )
+        for pre, value, label in zip(
+            (pre_naive, pre_cagr, pre_net_ann, pre_turnover),
+            post,
+            ("naive_sharpe", "geometric_cagr", "net_ann", "annualized_turnover"),
+            strict=False,
+        ):
+            assert value is not None, label
+            assert abs(value) > abs(pre), f"{label}: post={value} pre={pre}"
+            assert np.sign(value) == np.sign(pre), f"{label}: post={value} pre={pre}"
+
+    def test_autocorr_sharpe_and_mdd_still_read_raw_ledger(self, annualization_report) -> None:
+        # The frequency-independent metrics must stay wired to the raw ledger:
+        # any future resample there would shift MDD off the tick-level trough
+        # and silently change the daily autocorr Sharpe.
+        blend = annualization_report.blend
+        assert blend is not None
+        assert blend.primary is not None, f"blend primary missing: failure={blend.failure!r}"
+        ledger = blend.primary.ledger
+        assert blend.primary_autocorr_sharpe == ev._daily_autocorr_sharpe(ledger)
+        assert blend.primary_max_drawdown == ev._mdd(ledger.equity)
 
 
 _SUBPROCESS_SCRIPT = """
