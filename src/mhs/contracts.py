@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pandas as pd
+
 
 @dataclass(frozen=True, slots=True)
 class HorizonBand:
@@ -102,6 +104,11 @@ MEASURED_EXECUTION_COST_TIERS_BPS: dict[str, float] = {
     "base": 4.18,
     "stress": 6.07,
 }
+
+# Frozen MHS discovery window start (spec docs/specs/mhs_data_period_and_gap_hardening.md).
+# Domain-layer single source: src/mhs/evaluation.py folds and the application
+# orchestrator import it instead of re-typing the literal.
+MHS_DISCOVERY_START: pd.Timestamp = pd.Timestamp("2021-01-01", tz="UTC")
 
 # Measured admission (docs/results/mhs_horizon_diagnostic.json
 # books.fast_reversal.prescreen): fast_reversal's 446-symbol prescreen net

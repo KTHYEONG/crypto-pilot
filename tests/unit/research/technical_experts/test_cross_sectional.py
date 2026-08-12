@@ -259,6 +259,33 @@ class TestCompositeLedger:
         with pytest.raises(DataIntegrityError, match="active ledger cell"):
             run_xs_composite_ledger(weights, opens, funding, XsCompositeSpec())
 
+    def test_xsc_04_gap_carry_absorbs_internal_gap_carries_flat(self) -> None:
+        # SCENARIO_MHS_GAP_HARDENING_01: with gap_carry=True the same fixture
+        # that crashes the default fails-closed path is absorbed -- the held
+        # position carries flat at its last valid open across the gap bar.
+        weights, opens, funding = self._ledger_inputs(8)
+        weights["B"] = 0.0
+        opens.loc[opens.index[3], "A"] = np.nan
+        equity, _turnover = run_xs_composite_ledger(
+            weights, opens, funding, XsCompositeSpec(gap_carry=True),
+        )
+        assert bool(np.isfinite(equity.to_numpy()).all())
+        assert float(equity.iloc[-1]) > 0.0
+        net = equity.pct_change().fillna(0.0)
+        assert float(net.iloc[3]) == pytest.approx(0.0, abs=1e-12)
+        resumed = float(opens.iloc[4]["A"] / opens.iloc[2]["A"] - 1.0)
+        assert float(net.iloc[4]) == pytest.approx(0.5 * resumed, rel=1e-9)
+
+    def test_xsc_04_gap_carry_never_fills_pre_listing_leading_nan(self) -> None:
+        # SCENARIO_MHS_GAP_HARDENING_02: forward-fill never fills leading NaN,
+        # so a genuinely-invalid pre-listing position still fails closed even
+        # with gap_carry=True -- the safety net is unweakened.
+        weights, opens, funding = self._ledger_inputs(8)
+        weights["B"] = 0.0
+        opens.loc[opens.index[:3], "A"] = np.nan
+        with pytest.raises(DataIntegrityError, match="active ledger cell"):
+            run_xs_composite_ledger(weights, opens, funding, XsCompositeSpec(gap_carry=True))
+
 
 class TestAdmission:
     def _admission_inputs(self, n: int = 2200) -> tuple[pd.Series, pd.Series, pd.Series]:
