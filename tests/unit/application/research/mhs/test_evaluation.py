@@ -25,6 +25,7 @@ from src.common.errors import DataIntegrityError
 from src.mhs.contracts import BookSpec, ExecutionSpec, HorizonBand
 from src.mhs.horizons import vol_normalized_horizon_signal
 from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
+from src.mhs.execution import SimulatedInventoryLedgerResult
 from src.mhs.execution import strategy_aware_execution_replay
 from src.mhs.evaluation import AnchoredPurgedFold
 from src.research.universe.pit_universe import symbol_partition
@@ -2473,3 +2474,119 @@ def test_mhs_alpha_engine_request_field_validation() -> None:
         MhsDiagnosticRequest(beta_neutralize=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="ensemble_signal"):
         MhsDiagnosticRequest(ensemble_signal="bogus")
+
+
+def _synthetic_ledger(
+    freq: str,
+    n_bars: int,
+    mean_ret: float,
+    vol_ret: float,
+    seed: int,
+) -> SimulatedInventoryLedgerResult:
+    idx = pd.date_range("2021-01-01", periods=n_bars, freq=freq, tz="UTC")
+    rng = np.random.default_rng(seed)
+    rets = rng.normal(mean_ret, vol_ret, n_bars)
+    equity = pd.Series(np.cumprod(1.0 + rets), index=idx)
+    turnover = pd.Series(np.full(n_bars, 0.01), index=idx)
+    return SimulatedInventoryLedgerResult(
+        equity=equity,
+        net_returns=equity.pct_change().dropna(),
+        simulated_units=None,
+        mark_to_market_pnl=pd.Series(np.zeros(n_bars), index=idx),
+        funding_charge=pd.Series(np.zeros(n_bars), index=idx),
+        fee_charge=pd.Series(np.zeros(n_bars), index=idx),
+        fill_turnover=turnover,
+        fill_source="OHLCV_IMMEDIATE_TAKER",
+        mark_source="MARK_PRICE",
+        primary_valid=True,
+        invalid_reasons=(),
+    )
+
+
+def test_naive_sharpe_uses_hourly_annualization() -> None:
+    # SCENARIO_MHS_ANNUALIZATION_01: on a synthetic 5-minute ledger the
+    # hourly-resampled naive Sharpe agrees with a calendar-correct manual
+    # computation, while the pre-fix computation (sqrt(_PERIODS_PER_YEAR_1H)
+    # applied to the raw 5-minute returns) understates it by ~sqrt(12).
+    n_years = 3.0
+    n_bars = round(365.25 * 288 * n_years)
+    ledger = _synthetic_ledger("5min", n_bars, mean_ret=0.0004, vol_ret=0.001, seed=7)
+    net_1h = ledger.equity.resample("1h").last().dropna().pct_change().dropna()
+    ref = float(net_1h.mean() / net_1h.std(ddof=1) * np.sqrt(ev._PERIODS_PER_YEAR_1H))
+    assert ev._naive_sharpe(ledger) == pytest.approx(ref)
+    net_5m = ledger.net_returns
+    pre_fix = float(net_5m.mean() / net_5m.std(ddof=1) * np.sqrt(ev._PERIODS_PER_YEAR_1H))
+    assert ref / pre_fix == pytest.approx(np.sqrt(12.0), rel=0.05)
+
+
+def test_hourly_ledger_series_hourly_input_is_identity() -> None:
+    # SCENARIO_MHS_ANNUALIZATION_02: on an already-hourly ledger the helper is
+    # byte-identical up to the leading NaN drop on pct_change, so the existing
+    # hourly synthetic-fixture tests keep passing untouched.
+    idx = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
+    equity = pd.Series(np.linspace(100.0, 120.0, len(idx)), index=idx)
+    turnover = pd.Series(np.linspace(0.01, 0.02, len(idx)), index=idx)
+    eq_1h, net_1h, turn_1h = ev._hourly_ledger_series(equity, turnover)
+    pd.testing.assert_series_equal(eq_1h, equity)
+    pd.testing.assert_series_equal(net_1h, equity.pct_change().dropna())
+    pd.testing.assert_series_equal(turn_1h, turnover.iloc[1:].rename(None))
+
+
+def test_hourly_ledger_series_5m_returns_one_row_per_hour() -> None:
+    # SCENARIO_MHS_ANNUALIZATION_02 (5-minute leg): one row per calendar hour,
+    # turnover is summed (not last-sampled), and the return series drops the
+    # leading NaN of the equity pct_change.
+    idx = pd.date_range("2021-01-01", periods=72 * 12, freq="5min", tz="UTC")
+    equity = pd.Series(np.linspace(100.0, 130.0, len(idx)), index=idx)
+    turnover = pd.Series(np.full(len(idx), 0.01), index=idx)
+    eq_1h, net_1h, turn_1h = ev._hourly_ledger_series(equity, turnover)
+    assert len(eq_1h) == len(net_1h) + 1
+    assert len(eq_1h) == 72
+    assert (eq_1h.index.minute == 0).all()
+    assert (eq_1h.index.second == 0).all()
+    pd.testing.assert_series_equal(
+        eq_1h, equity.resample("1h").last().dropna(),
+    )
+    assert turn_1h.index.equals(net_1h.index)
+    np.testing.assert_allclose(turn_1h.to_numpy(), np.full(len(turn_1h), 12 * 0.01))
+
+
+def test_hourly_ledger_series_empty_input_is_empty() -> None:
+    # SCENARIO_MHS_ANNUALIZATION_02 (edge case): an empty equity series must
+    # raise no exception and return three empty Series, mirroring the caller's
+    # empty-input nan convention.
+    eq = pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
+    turn = pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
+    eq_1h, net_1h, turn_1h = ev._hourly_ledger_series(eq, turn)
+    assert eq_1h.empty
+    assert net_1h.empty
+    assert turn_1h.empty
+
+
+def test_geometric_cagr_uses_hourly_annualization() -> None:
+    # SCENARIO_MHS_ANNUALIZATION_03: on a synthetic 5-minute equity with known
+    # total-return ratio R over T years, _geometric_cagr on the C2 hourly series
+    # equals R**(1/T)-1, while the raw 5-minute call (the pre-fix path) is off by
+    # exactly the 12x (5m) bar-count multiple in the exponent.
+    n_years = 3.0
+    n_bars = round(365.25 * 288 * n_years)
+    idx = pd.date_range("2021-01-01", periods=n_bars, freq="5min", tz="UTC")
+    rng = np.random.default_rng(11)
+    rets = rng.normal(1.5e-6, 0.001, n_bars)
+    equity = pd.Series(np.cumprod(1.0 + rets), index=idx)
+    # Flatten the first hour so the hourly resample's opening close equals the
+    # raw series' opening close, making the pre/post exponent ratio exactly 12.
+    equity.iloc[1:12] = equity.iloc[0]
+    turnover = pd.Series(np.zeros(n_bars), index=idx)
+    eq_1h, _net_1h, _turn_1h = ev._hourly_ledger_series(equity, turnover)
+    # True CAGR over the hourly span: ratio from the first to the last hourly
+    # close, spanning (n_hours - 1) hourly intervals (the code annualizes with
+    # n_hours bars, an O(1/n) approximation).
+    ratio_h = float(eq_1h.iloc[-1] / eq_1h.iloc[0])
+    span_years = (len(eq_1h) - 1) / ev._PERIODS_PER_YEAR_1H
+    assert ev._geometric_cagr(eq_1h) == pytest.approx(
+        ratio_h ** (1.0 / span_years) - 1.0, rel=1e-3,
+    )
+    post = ev._geometric_cagr(eq_1h)
+    pre = ev._geometric_cagr(equity)
+    assert np.log1p(post) / np.log1p(pre) == pytest.approx(12.0)

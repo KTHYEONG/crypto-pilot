@@ -1332,8 +1332,31 @@ def _daily_autocorr_sharpe(ledger: SimulatedInventoryLedgerResult) -> float:
     return autocorrelation_adjusted_sharpe(daily.pct_change().dropna(), 365, 7)
 
 
+def _hourly_ledger_series(
+    equity: pd.Series, fill_turnover: pd.Series,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Resample a native execution-timeframe ledger to the annualization grid.
+
+    The ``_PERIODS_PER_YEAR_1H`` annualization constant describes hourly bars,
+    but the replay ledgers run on ``request.execution_timeframe`` (5m default),
+    so every headline metric derived from them must first be resampled to 1h
+    (the ``equity_1h`` pattern already present in ``_run_post_diag_deploy``).
+    Turnover is a per-bar traded-notional fraction, so hourly aggregation is a
+    sum (not a last-value sample, unlike equity). An already-hourly input passes
+    through unchanged.
+    """
+    equity_1h = equity.resample("1h").last().dropna()
+    net_returns_1h = equity_1h.pct_change().dropna()
+    turnover_1h = (
+        fill_turnover.resample("1h").sum()
+        .reindex(net_returns_1h.index)
+        .fillna(0.0)
+    )
+    return equity_1h, net_returns_1h, turnover_1h
+
+
 def _naive_sharpe(ledger: SimulatedInventoryLedgerResult) -> float:
-    net = ledger.net_returns
+    net = ledger.equity.resample("1h").last().dropna().pct_change().dropna()
     if len(net) < 2:
         return float("nan")
     sd = float(net.std(ddof=1))
@@ -1839,6 +1862,9 @@ def _book_outcome(
             pre_vol_target_reference=pre_vol_target_reference,
             pre_vol_target_reference_naive_sharpe=pre_vol_target_reference_naive_sharpe,
         )
+    equity_1h, net_returns_1h, turnover_1h = _hourly_ledger_series(
+        primary.ledger.equity, primary.ledger.fill_turnover,
+    )
     return MhsBookReport(
         name=name,
         band=spec.band.name,
@@ -1853,10 +1879,10 @@ def _book_outcome(
         stress=stress,
         primary_autocorr_sharpe=_daily_autocorr_sharpe(primary.ledger),
         primary_naive_sharpe=_naive_sharpe(primary.ledger),
-        primary_net_ann=_mean_ann(primary.ledger.net_returns, _PERIODS_PER_YEAR_1H),
-        primary_geometric_cagr=_geometric_cagr(primary.ledger.equity),
+        primary_net_ann=_mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H),
+        primary_geometric_cagr=_geometric_cagr(equity_1h),
         primary_max_drawdown=_mdd(primary.ledger.equity),
-        primary_annualized_turnover=_mean_ann(primary.ledger.fill_turnover, _PERIODS_PER_YEAR_1H),
+        primary_annualized_turnover=_mean_ann(turnover_1h, _PERIODS_PER_YEAR_1H),
         stress_naive_sharpe=_naive_sharpe(stress.ledger),
         terminal_censored_decisions=censored,
         touch=touch,
@@ -2067,7 +2093,7 @@ def _run_post_diag_deploy(
         fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
     )
     deployment = compute_deployment_readiness(
-        blend_report.primary.ledger.equity,
+        equity_1h,
         _PERIODS_PER_YEAR_1H,
         participation_warnings=participation,
         primary_valid=blend_report.primary.ledger.primary_valid,
@@ -2484,6 +2510,9 @@ def _run_anchored_fold(
         if not np.isfinite(stress_sharpe) or stress_sharpe <= 0.0:
             failures.append(MHS_GO_REASON_STRESS_SHARPE)
 
+        equity_1h, net_returns_1h, _turnover_1h = _hourly_ledger_series(
+            equity, primary.ledger.fill_turnover,
+        )
         return MhsFoldReport(
             fold_index=fold_index,
             validation_start=str(vs),
@@ -2493,8 +2522,8 @@ def _run_anchored_fold(
             primary_valid=primary.ledger.primary_valid,
             primary_autocorr_sharpe=primary_autocorr,
             primary_naive_sharpe=_naive_sharpe(primary.ledger),
-            primary_net_ann=_mean_ann(primary.ledger.net_returns, _PERIODS_PER_YEAR_1H),
-            primary_geometric_cagr=_geometric_cagr(equity),
+            primary_net_ann=_mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H),
+            primary_geometric_cagr=_geometric_cagr(equity_1h),
             primary_max_drawdown=_mdd(equity),
             stress_naive_sharpe=stress_sharpe,
             decision_intents=decision_intents,
