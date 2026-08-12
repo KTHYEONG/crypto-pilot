@@ -657,5 +657,8 @@
   "src/market_data/storage/gap_report.py": {
     "architecture": "docs/results/mhs-res.md",
     "testing": "tests/unit/market_data/storage/test_gap_report.py"
+  },
+  "src/mhs/regime.py": {
+    "testing": "tests/unit/mhs/test_regime.py"
   }
 }
