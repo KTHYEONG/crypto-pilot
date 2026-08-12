@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_IMMEDIATE_TAKER_FILL_GUARD",
+      "date": "2026-08-12",
+      "adr_id": "ADR_20260812_MHS_IMMEDIATE_TAKER_FILL_GUARD",
+      "domain": "mhs",
+      "title": "MHS OHLCV_IMMEDIATE_TAKER 체결가 미검증 결손 가드 추가",
+      "why": "research run portfolio mhs-horizon-diagnostic가 CAPITAL_INVARIANT_BREACH로 미완주. 실제 원인은 프로덕션 execution bound인 OHLCV_IMMEDIATE_TAKER 분기가 closes_values[fill_pos, col]를 유한성 검증 없이 체결가로 사용하는 것(docs/feedback.md 2026-08-12). 오라클 경로(strategy_aware_execution_replay)는 사후 가드조차 없어 cash가 침묵 NaN 오염되는 더 위험한 잠재 결함도 함께 발견.",
+      "resolution": "src/mhs/execution.py의 strategy_aware_execution_replay와 _BoundExecutionReplayAccumulator.consume 양쪽 OHLCV_IMMEDIATE_TAKER 분기에 STRICT/TOUCH/LADDERED가 이미 쓰는 MISSING_ACTIVE_ORDER_OHLCV 스킵 가드를 동일 이식. 472개 심볼 1m OHLCV 전수 스캔으로 21개 심볼(4.4%)이 자기 거래구간 내부에 평균 61일급 타임스탬프 홀을 보유함을 실측 확인해 이 결손이 구조적·반복 조건임을 정량화.",
+      "impact": "동일 커맨드(research run portfolio mhs-horizon-diagnostic) 재실행으로 검증: status=COMPLETE, CAPITAL_INVARIANT_BREACH/DataIntegrityError/Traceback 0건, termination_counts.MISSING_DATA=76으로 결손이 크래시 대신 진단 데이터로 흡수됨. 결과는 docs/results/mhs-res.md 13차에 기록."
+    },
+    {
       "task_id": "TASK_MHS_LADDERED_FILL_CLOSES_GAP_FIX",
       "date": "2026-08-12",
       "adr_id": "ADR_20260812_MHS_LADDERED_FILL_CLOSES_GAP_FIX",
@@ -989,16 +999,6 @@
       "why": "Cash-carry evaluation was blocked because Binance quote-borrow history was not persisted in the canonical spot lake.",
       "resolution": "Added signed Binance Margin interest-rate collection, interval-cost conversion, canonical borrow persistence, CLI wiring, tests, and synchronized all spec artifacts.",
       "impact": "Borrow collection now succeeds for the sealed window, while carry remains pending until existing funding timestamp jitter is normalized."
-    },
-    {
-      "task_id": "TASK_CARRY_PHASE_B_DATA_EVALUATION",
-      "date": "2026-07-31",
-      "adr_id": "ADR_20260731_CARRY_PHASE_B_DATA_EVALUATION",
-      "domain": "risk",
-      "title": "Cash-carry Phase B independent data and sealed evaluation",
-      "why": "Phase B was blocked because the independent spot OHLCV and quote-borrow history inputs were absent, and the carry CLI mixed IO, hashing, and gate execution.",
-      "resolution": "Implemented the canonical spot lake and ohlcv_store atomic write path, the Binance spot collector, canonical borrow import with explicit accrual cadence, explicit 1h-to-4h carry loading, funding/borrow interval-aligned target, append-only candidate pre-registration, idempotent anti-pattern evidence, and split the CLI into register/run commands.",
-      "impact": "All 198 tests pass with strict mypy and ruff; the sealed run reports PENDING until a reproducible historical quote-borrow export covering the observation window is supplied, and the borrowed data pipeline now fail-closes on any unit ambiguity or coverage gap."
     }
   ]
 }
