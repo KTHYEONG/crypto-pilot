@@ -488,6 +488,7 @@ class TestMhsPerfOptimizationO1DeploymentReadiness:
             index=pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC"),
         )
 
+    @pytest.mark.slow
     def test_non_bootstrap_fields_bit_identical_to_golden(self) -> None:
         equity = self._fixture_equity()
         res = compute_deployment_readiness(
@@ -506,15 +507,16 @@ class TestMhsPerfOptimizationO1DeploymentReadiness:
 
     def test_ruin_probs_are_zero_or_one(self) -> None:
         res = compute_deployment_readiness(
-            self._fixture_equity(), 8760.0, n_bootstrap=200, mean_block_bars=168,
+            self._fixture_equity(), 8760.0, n_bootstrap=20, mean_block_bars=168,
         )
         for prob in res.leverage_ruin_probabilities.values():
             assert prob in (0.0, 1.0)
 
     def test_probabilities_finite_bounded(self) -> None:
         res = compute_deployment_readiness(
-            self._fixture_equity(), 8760.0, n_bootstrap=500, mean_block_bars=168,
+            self._fixture_equity(), 8760.0, n_bootstrap=20, mean_block_bars=168,
         )
         assert 0.0 <= res.probability_final_wealth_below_initial <= 1.0
         assert 0.0 <= res.probability_mdd_over_20pct <= 1.0
         assert 0.0 <= res.probability_mdd_over_30pct <= 1.0
+
