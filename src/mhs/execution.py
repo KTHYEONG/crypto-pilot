@@ -1061,6 +1061,7 @@ def mhs_ledger_pnl(
     bar_funding: pd.DataFrame,
     one_way_bps: float,
     execution_delay_bars: int = 1,
+    gap_carry: bool = True,
 ) -> tuple[pd.Series, pd.Series]:
     """Pinned target-weight pre-screen proxy delegating to ``run_xs_composite_ledger``.
 
@@ -1076,6 +1077,7 @@ def mhs_ledger_pnl(
         execution_delay_bars=execution_delay_bars,
         fee_rate=half,
         slippage_rate=half,
+        gap_carry=gap_carry,
     )
     equity, turnover = run_xs_composite_ledger(weights, opens, bar_funding, spec)
     net = equity.pct_change().dropna()
