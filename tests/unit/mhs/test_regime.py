@@ -13,6 +13,7 @@ from src.mhs.regime import (
     crash_regime_tilt_weights,
     reference_basket_drawdown,
     reference_basket_trend,
+    trend_efficiency_scale,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -265,6 +266,61 @@ class TestNoProductionWiring:
             content = (_REPO_ROOT / rel).read_text()
             assert "src.mhs.regime" not in content, rel
             assert re.search(r"import\s+regime\b", content) is None, rel
+
+class TestTrendEfficiencyScale:
+    """SCENARIO_MHS_TREND_EFFICIENCY_SCALE_NEVER_LEVERS_UP_01
+    SCENARIO_MHS_TREND_EFFICIENCY_SCALE_DERISKS_ON_LOW_ER_02
+    SCENARIO_MHS_TREND_EFFICIENCY_SCALE_NEVER_ZERO_DIV_03"""
+
+    def _series(self, n: int = 800) -> pd.Series:
+        idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+        return pd.Series(0.4, index=idx)
+
+    def test_never_levers_above_one(self) -> None:
+        rng = np.random.default_rng(20260807)
+        mean_er = pd.Series(rng.uniform(0.1, 0.9, 800), index=self._series().index)
+        mean_er.iloc[700:] = 0.9
+        out = trend_efficiency_scale(mean_er, window_hours=720, floor=0.5)
+        assert (out <= 1.0 + 1e-12).all()
+        assert not out.isna().all()
+
+    def test_derisks_when_er_drops_below_own_median(self) -> None:
+        mean_er = self._series()
+        mean_er.iloc[750:] = 0.05
+        out = trend_efficiency_scale(mean_er, window_hours=720, floor=0.5)
+        assert float(out.iloc[799]) < 1.0
+        assert float(out.iloc[799]) >= 0.5
+        assert float(out.iloc[799]) == pytest.approx(0.5)
+
+    def test_flat_series_is_full_exposure(self) -> None:
+        out = trend_efficiency_scale(self._series(), window_hours=720, floor=0.5)
+        assert (out.dropna() == 1.0).all()
+
+    def test_insufficient_history_and_all_nan_are_full_exposure(self) -> None:
+        short = pd.Series(
+            0.3, index=pd.date_range("2021-01-01", periods=10, freq="1h", tz="UTC"),
+        )
+        out_short = trend_efficiency_scale(short, window_hours=720, floor=0.5)
+        assert (out_short == 1.0).all()
+
+        all_nan = pd.Series(
+            np.nan, index=pd.date_range("2021-01-01", periods=50, freq="1h", tz="UTC"),
+        )
+        out_nan = trend_efficiency_scale(all_nan, window_hours=720, floor=0.5)
+        assert (out_nan == 1.0).all()
+
+    def test_empty_input_returns_empty(self) -> None:
+        out = trend_efficiency_scale(pd.Series(dtype="float64"), floor=0.5)
+        assert out.empty
+
+    def test_validation(self) -> None:
+        mean_er = self._series()
+        with pytest.raises(ValueError, match="floor"):
+            trend_efficiency_scale(mean_er, floor=0.0)
+        with pytest.raises(ValueError, match="floor"):
+            trend_efficiency_scale(mean_er, floor=1.5)
+        with pytest.raises(ValueError, match="window_hours"):
+            trend_efficiency_scale(mean_er, window_hours=0)
 
 
 def _tilt_fixture(bars: int = 120, horizon: int = 24):
