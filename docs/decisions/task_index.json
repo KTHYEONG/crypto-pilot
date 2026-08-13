@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_DISCOVERY_ADMISSION_REGIME_SCALE_PARITY",
+      "date": "2026-08-13",
+      "adr_id": "ADR_20260813_MHS_DISCOVERY_ADMISSION_REGIME_SCALE_PARITY",
+      "domain": "mhs",
+      "title": "MHS Discovery Admission Regime-Scale Parity Diagnostic",
+      "why": "25차 실측(mhs-res.md §3.1)에서 자기상관 편향 가설은 기각됐으나, momentum 19개 호라이즌 전수 재확인 결과 2022(크립토 크래시 해) 한 해가 예외 없이 전 후보를 admission_t=2.0 미만으로 끌어내리는 구조적 패턴이 확인됨. discovery.py 후보 채점 경로는 regime 방어 레이어가 전혀 없는 원신호를 채점하는 반면, 24차 프로덕션 실행은 기본값으로 _regime_cash_scale(unconditional)과 pnl_vol_target_scale(기본 True)을 적용 -- gate가 실전 배포판보다 방어되지 않은 더 가혹한 버전을 심사하고 있어 admission 실패가 실제 edge 부재를 과대평가할 가능성 제기.",
+      "resolution": "discovery.py에 _discovery_regime_cash_scale/_discovery_market_vol_mean/_score_masked_regime_scaled_net_t 신규 opt-in 함수 추가(도메인 레이어 유지를 위해 application layer의 _regime_cash_scale 커널을 임포트 대신 로컬 복제). DiscoveryQualificationResult에 regime_scaled_* 필드 5종 병기(raw admitted/selected_horizon 등은 무변화, 기존 compute_adjusted_net_t와 독립적인 두 번째 opt-in). MhsDiagnosticRequest.discovery_gate_regime_scaled_net_t + CLI --discovery-gate-regime-scaled-net-t로 옵트인 배선. 26차 실측(2026-08-13)으로 검증: momentum 168h worst-year net_t가 -0.029->+0.180으로 부호 반전(가설 방향 확증)했으나 admission_t=2.0에는 크게 못 미침; reversal/funding_carry는 개선 없거나 악화.",
+      "impact": "가설 부분 확증(regime 방어 부재가 momentum을 실제보다 나쁘게 보이게 하는 효과는 존재)하되 크기가 부족해 admission 실패를 뒤집지 못함. 잔여 지배 요인은 discovery window worst-of-3(2021-2023, 2022 크래시 해 구조적 영향)으로 재확정 -- 다음 단계는 window 구조 자체를 다루는 더 큰 범위의 별도 스펙, 사용자 승인 필요. Research-GO/자본배분/PHASE_1_BOOK_BLEND_WEIGHTS 무변경."
+    },
+    {
       "task_id": "TASK_MHS_DISCOVERY_ADMISSION_AUTOCORR_ROBUSTNESS",
       "date": "2026-08-13",
       "adr_id": "ADR_20260813_MHS_DISCOVERY_ADMISSION_AUTOCORR_ROBUSTNESS",
@@ -989,16 +999,6 @@
       "why": "Flat application modules and one monolithic research CLI command module made feature ownership unclear and increased the cost and conflict risk of future additions.",
       "resolution": "Moved application implementations under data and research feature packages, split research CLI registration into feature-owned leaf modules, retained flat application and legacy CLI facades, and updated compatibility tests and code-map coverage.",
       "impact": "Existing typed application imports and documented CLI invocations remain compatible; future features can add one application package and one CLI leaf without editing an unrelated monolith."
-    },
-    {
-      "task_id": "TASK_RESEARCH_MODULE_DECOMPOSITION",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_RESEARCH_MODULE_DECOMPOSITION",
-      "domain": "execution",
-      "title": "Decompose research modules and simplify canonical filenames",
-      "why": "Expert-portfolio contracts and sleeve-blend backtest mixed multiple behavioral responsibilities across large files, while application filenames repeated technical qualifiers and obscured workflow ownership.",
-      "resolution": "Split expert-portfolio models, admission types, and reports; split sleeve-blend common, fixed, weights, and directional execution; retained old import paths as compatibility facades; promoted concise application module names; updated callers, tests, and code-map coverage.",
-      "impact": "Public imports, CLI commands, dataclass contracts, fingerprints, causal no-lookahead weights, leverage calibration, stress reuse, and full regression behavior remain unchanged. Canonical modules are easier to locate for maintainers and AI agents."
     }
   ]
 }
