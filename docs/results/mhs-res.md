@@ -5,6 +5,7 @@
 - **Run**: `start=2021-01-01 end=2025-12-31 execution_timeframe=5m execution_universe_size=30 eligible_symbols=445 realized_execution_roster_size=41.934179584940985 run_elapsed_seconds=765.0 peak_rss=16.8GB`
 - **CLI**: `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --discovery-gate --output-tier full`
 - **성능 최적화 적용**: C1 mark 프레임 캐시 / C2 window materialize+pass 재사용 / C3 window 단위 parquet 로드(preload 폐기) / C4 fold-safe discovery 병렬화
+- **25차 추가 실측 (discovery-gate 전용, 2026-08-13)**: `docs/specs/mhs_discovery_admission_autocorr_robustness.md` 계약 구현 후 `--discovery-gate --discovery-gate-adjusted-net-t`(기본 book mode, non-production) 재실행 — §3.1 참고. Top-level book/fold/research_go 수치는 이 실행 대상이 아님(기본 `single_horizon` book mode라 §1/§2 프로덕션 수치와 비교 불가, 무시할 것); discovery gate 자체는 book mode와 무관한 독립 계산이라 §3와 직접 비교 가능.
 
 > ⚠️ **데이터 drift 공지**: 본 실행의 `eligible_symbols=445`로 23차의 446과 다름(Parquet 소스 재수집). 동일 데이터 기준 원본 코드 대비 출력은 **bit-identical**(아래 §0 A/B). 수치 비교 시 23차 대비 차이는 코드 변경이 아닌 데이터 drift로 해석해야 함.
 
@@ -59,6 +60,20 @@
 
 - `effective_breadth`: slow_horizon **1.4120/19** (7.4 %), fast_horizon **1.5720/7** (22.5 %) — 호라이즌 축 포화 재확인.
 
+### 3.1 Bartlett/HAC 자기상관 보정 진단 (25차, 신규, opt-in `--discovery-gate-adjusted-net-t`)
+
+`docs/specs/mhs_discovery_admission_autocorr_robustness.md`(discovery.py `net_t`가 오버랩 윈도우 자기상관을 보정하지 않는 naive i.i.d. t-stat이라는 가설 검증) 계약을 구현·실행. **admitted/selected_horizon 등 raw 필드는 무변화(계약대로 bit-identical, 회귀 확인됨)**; 아래는 신규 진단 필드만.
+
+| 후보 | best raw worst-year net_t | best adjusted(HAC) worst-year net_t | admission_t |
+| :--- | ---: | ---: | ---: |
+| momentum (168h) | −0.0287 | **−0.0294** | 2.0 |
+| reversal (96h) | +0.252 | +0.270 | 2.0 |
+| funding_carry_long (504h) | −3.322 | −3.151 | 2.0 |
+| funding_carry_short (72h) | +4.213 | +4.099 | 2.0 |
+
+- **가설 기각**: raw와 adjusted 값의 차이는 ±5~10 % 수준이며, 어떤 후보도 부호나 admission_t=2.0 통과 방향으로 유의미하게 이동하지 않음(momentum 168h는 오히려 −0.0287→−0.0294로 더 악화). 즉 discovery admission 실패는 자기상관 편향이 아니라 **worst-year-of-2(2021·2022) 소표본 설계 자체**가 지배 원인 — 2021년 momentum net_t(§4, −0.145)라는 단일 나쁜 해가 구조적으로 전 후보를 탈락시킴.
+- 실행: `start=2021-01-01 end=2025-12-31`, 기본 book mode(non-production), `run_elapsed_seconds=490.8`, `status=COMPLETE`.
+
 ## 4. `yearly_net_t_diagnostic` — 5년 전체 (admission 미입력, 보고용)
 
 | 연도 | slow_momentum | fast_reversal | funding_carry |
@@ -100,7 +115,7 @@
 
 | 후보 | 상태 |
 | :--- | :--- |
-| momentum 3년 discovery window admission floor(|t|≥2.0) 검정력 재검토 (fold-local 표본 민감도) | 미착수, 사용자 판단 대기 |
+| momentum discovery window 2년(2021-2022) worst-year 소표본 설계 재검토 (§3.1: 자기상관 편향 가설은 25차 실측으로 기각, 표본 크기가 근본 원인으로 확정) | 원인 규명 완료, window 구조 변경안은 별도 스펙 필요·사용자 판단 대기 |
 | discovery 후보 웨이트 중복 빌드 dedupe (fold-safe ↔ top-level gate 공유, RAM/시간 추가 절감) | 신규, 미착수 |
 | `MHS_REGISTERED_POLICY_THRESHOLDS`(`cap_30_roster`, `primary_annual_return`) 등록 여부 | 미착수, 성과 무관 정책 결정 필요 |
 | `pnl_vol_target` 기본값 전환 여부 (`mhs_execution_friction_and_exposure_layers.md` §6.1) | 미착수 |
