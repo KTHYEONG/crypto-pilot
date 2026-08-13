@@ -515,6 +515,78 @@ class TestDiscoveryQualificationGate:
         assert result.qualification_net_t is not None
         assert result.qualification_sign_consistent is True
 
+class TestYearlyNetTDiagnostic:
+    """SCENARIO_MHS_YEARLY_DIAGNOSTIC_COVERS_FULL_HISTORY_01: the report-only
+    full-history diagnostic covers every requested calendar year -- including
+    2024/2025, which the discovery-window-confined ``yearly_net_t`` field can
+    never populate -- records zero-row/non-finite years as NaN rather than
+    dropping or zeroing them, and fails closed on empty years / negative cost.
+    """
+
+    @staticmethod
+    def _panel() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        idx = pd.date_range("2021-01-01", periods=5 * 8760, freq="1h", tz="UTC")
+        rng = np.random.default_rng(7)
+        base = np.tile(np.array([0.5, -0.5, 0.25, -0.25]), (len(idx), 1))
+        weights = pd.DataFrame(base, index=idx, columns=_SYMBOLS)
+        opens = pd.DataFrame(
+            100.0 * np.exp(np.cumsum(rng.standard_normal((len(idx), 4)) * 0.001, axis=0)),
+            index=idx, columns=_SYMBOLS,
+        )
+        bar_funding = pd.DataFrame(0.0, index=idx, columns=_SYMBOLS)
+        return weights, opens, bar_funding
+
+    def test_covers_full_history_with_finite_values(self) -> None:
+        """A 2021-2025 hourly panel yields a finite net_t for every requested
+        year (2024/2025 included), each matching an independent score call."""
+        weights, opens, bar_funding = self._panel()
+        out = discovery.yearly_net_t_diagnostic(
+            weights, opens, bar_funding, (2021, 2022, 2023, 2024, 2025), _COST_BPS, _PPY,
+        )
+        assert set(out) == {2021, 2022, 2023, 2024, 2025}
+        for year in (2021, 2022, 2023, 2024, 2025):
+            assert math.isfinite(out[year])
+        mask = discovery._year_mask(weights.index, 2021)
+        assert out[2021] == pytest.approx(
+            discovery._score_masked_net_t(
+                weights, opens, bar_funding, mask, _COST_BPS, _PPY,
+            )
+        )
+
+    def test_zero_row_year_returns_nan_not_dropped(self) -> None:
+        """A panel covering only 2021 returns NaN -- never a KeyError, never a
+        silently dropped key -- for the requested 2020/2022 years with no rows."""
+        idx = pd.date_range("2021-01-01", periods=8760, freq="1h", tz="UTC")
+        rng = np.random.default_rng(8)
+        weights = pd.DataFrame(
+            np.tile(np.array([0.5, -0.5, 0.25, -0.25]), (len(idx), 1)),
+            index=idx, columns=_SYMBOLS,
+        )
+        opens = pd.DataFrame(
+            100.0 * np.exp(np.cumsum(rng.standard_normal((len(idx), 4)) * 0.001, axis=0)),
+            index=idx, columns=_SYMBOLS,
+        )
+        bar_funding = pd.DataFrame(0.0, index=idx, columns=_SYMBOLS)
+        out = discovery.yearly_net_t_diagnostic(
+            weights, opens, bar_funding, (2020, 2021, 2022), _COST_BPS, _PPY,
+        )
+        assert set(out) == {2020, 2021, 2022}
+        assert math.isnan(out[2020])
+        assert math.isfinite(out[2021])
+        assert math.isnan(out[2022])
+
+    def test_fails_closed_on_bad_inputs(self) -> None:
+        """Empty years, negative cost, and non-positive periods per year all
+        raise ValueError (the cost_response_curve validation convention)."""
+        weights, opens, bar_funding = self._panel()
+        with pytest.raises(ValueError, match="years must not be empty"):
+            discovery.yearly_net_t_diagnostic(weights, opens, bar_funding, (), _COST_BPS, _PPY)
+        with pytest.raises(ValueError, match="cost_bps must be >= 0"):
+            discovery.yearly_net_t_diagnostic(weights, opens, bar_funding, (2021,), -1.0, _PPY)
+        with pytest.raises(ValueError, match="periods_per_year must be > 0"):
+            discovery.yearly_net_t_diagnostic(weights, opens, bar_funding, (2021,), _COST_BPS, 0.0)
+
+
 class TestFoldTrainOnlyDiscoveryQualification:
     """SCENARIO_MHS_FOLD_SAFE_HORIZON_01..03: the fold-scoped wrapper derives
     leak-free discovery/qualification bounds from one ``AnchoredPurgedFold`` and
