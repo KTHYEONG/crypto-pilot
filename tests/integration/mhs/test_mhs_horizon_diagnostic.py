@@ -303,13 +303,16 @@ class TestQualityCalibrationWiring:
         assert captured["ema_spans"]["fast_reversal"]
         assert captured["ema_spans"]["slow_momentum"]
         # Every _book_weights call -- the top-level books AND the three
-        # anchored folds -- passes the same EMA span the fold path computes, so
-        # the top-level books are calibrated exactly like fold targets.
+        # anchored folds -- passes the same sign-aware EMA span the fold path
+        # computes, so the top-level books are calibrated exactly like fold
+        # targets (docs/specs/mhs_fast_reversal_overlay_redesign.md §2.2): the
+        # momentum band keeps the whipsaw-suppressing EMA, while the reversal
+        # band is unsmoothed (its edge lives in the short-term noise the filter
+        # deletes).
         for span in captured["ema_spans"]["fast_reversal"]:
-            assert span == self._book_signal_ema_span(fast)
+            assert span is None
         for span in captured["ema_spans"]["slow_momentum"]:
             assert span == self._book_signal_ema_span(slow)
-        assert self._book_signal_ema_span(fast) >= 1
         assert self._book_signal_ema_span(slow) >= 1
 
     def test_top_level_blend_applies_regime_cash_scale_and_deadband(self, calibrated_report) -> None:
