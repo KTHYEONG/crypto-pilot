@@ -759,6 +759,176 @@ class TestDiscoveryAdjustedOptIn:
         assert on.adjusted_admitted is True
 
 
+class TestRegimeScaledNetTDiagnostic:
+    """SCENARIO_REGIME_SCALE_CONSTANT_VOL_IS_ONE /
+    SCENARIO_REGIME_SCALE_VOL_SPIKE_CLIPS_TO_FLOOR /
+    SCENARIO_REGIME_SCALED_NET_T_SCALE_ONE_MATCHES_RAW /
+    SCENARIO_DISCOVERY_DEFAULT_OFF_REGIME_FIELDS_EMPTY /
+    SCENARIO_DISCOVERY_OPT_IN_REGIME_PRESERVES_RAW_FIELDS /
+    SCENARIO_REGIME_SCALED_ADMITTED_SIGN_INVARIANT: the vol-regime
+    cash-scale-adjusted fields are an opt-in-only diagnostic -- the same
+    kernel as the application layer's ``_regime_cash_scale`` duplicated into
+    the domain layer, fed by an approximate market-vol proxy -- that never
+    perturbs the admission path and composes independently with the HAC
+    adjustment (``docs/specs/mhs_discovery_admission_regime_scale_parity.md``
+    §2/§3).
+    """
+
+    def test_regime_scale_constant_vol_is_one(self) -> None:
+        """SCENARIO_REGIME_SCALE_CONSTANT_VOL_IS_ONE: a constant (non-time-
+        varying) vol_mean series maps to a regime scale of exactly 1.0
+        everywhere -- median == instantaneous vol, ratio exactly 1.0, never
+        clipped, insufficient-history lead-in bars filled to 1.0."""
+        idx = pd.date_range("2021-01-01", periods=800, freq="1h", tz="UTC")
+        scale = discovery._discovery_regime_cash_scale(pd.Series(1.0, index=idx))
+        assert (scale == 1.0).all()
+
+    def test_regime_scale_vol_spike_clips_to_floor(self) -> None:
+        """SCENARIO_REGIME_SCALE_VOL_SPIKE_CLIPS_TO_FLOOR: a sustained multi-
+        week 10x vol spike drives the scale to the 0.5 floor inside the spike
+        (never below, never above 1.0) and is byte-identical to the application
+        layer's ``_regime_cash_scale`` on the same input -- the duplicated
+        kernel mirrors ``evaluation.py`` exactly."""
+        idx = pd.date_range("2021-01-01", periods=2000, freq="1h", tz="UTC")
+        vol = pd.Series(1.0, index=idx)
+        vol.iloc[800:1136] = 10.0
+        scale = discovery._discovery_regime_cash_scale(vol)
+        assert (scale >= 0.5).all()
+        assert (scale <= 1.0).all()
+        assert (scale.iloc[850:1100] == 0.5).all()
+
+        from src.application.research.mhs import evaluation as ev
+
+        pd.testing.assert_series_equal(
+            scale,
+            ev._regime_cash_scale(vol),
+            check_names=False,
+            check_freq=False,
+        )
+
+    def test_regime_scaled_net_t_scale_one_matches_raw(self) -> None:
+        """SCENARIO_REGIME_SCALED_NET_T_SCALE_ONE_MATCHES_RAW: with
+        ``regime_scale`` identically 1.0 the regime-scaled path degenerates
+        exactly (rtol=1e-12) to ``_score_masked_net_t`` on the same inputs."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        weights = discovery._horizon_weights(log_close, eligible, 1, 24, 3, 1)
+        mask = np.asarray(idx.year <= 2022, dtype=bool)
+        raw = discovery._score_masked_net_t(
+            weights, opens, bar_funding, mask, _COST_BPS, _PPY,
+        )
+        scale = pd.Series(1.0, index=idx)
+        scaled = discovery._score_masked_regime_scaled_net_t(
+            weights, scale, opens, bar_funding, mask, _COST_BPS, _PPY,
+        )
+        assert scaled == pytest.approx(raw, rel=1e-12)
+
+    def test_discovery_default_off_regime_fields_empty(self) -> None:
+        """SCENARIO_DISCOVERY_DEFAULT_OFF_REGIME_FIELDS_EMPTY: with the flag
+        omitted (default False) the gate returns the pre-change baseline on the
+        admitted worst-year-robust fixture -- every raw field bit-identical --
+        and all five new regime fields sit at their empty/None defaults."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        result = _run(log_close, opens, bar_funding, eligible, idx)
+        assert result.selected_horizon == 48
+        assert result.admitted is True
+        assert result.discovery_scores == (
+            (24, 16.43401479542989), (48, 25.517515748645305),
+        )
+        assert result.discovery_aggregate_net_t == 23.145363968299133
+        assert result.qualification_net_t == 66.88810950782543
+        assert result.qualification_sign_consistent is True
+        assert result.yearly_net_t == (
+            (24, ((2021, 39.39252393058957), (2022, 16.43401479542989))),
+            (48, ((2021, 25.517515748645305), (2022, 37.86453888754656))),
+        )
+        assert result.yearly_regime_scaled_net_t == ()
+        assert result.discovery_scores_regime_scaled == ()
+        assert result.discovery_aggregate_regime_scaled_net_t is None
+        assert result.qualification_regime_scaled_net_t is None
+        assert result.regime_scaled_admitted is None
+
+    def test_discovery_opt_in_regime_preserves_raw_fields(self) -> None:
+        """SCENARIO_DISCOVERY_OPT_IN_REGIME_PRESERVES_RAW_FIELDS: identical
+        inputs with the flag False vs True yield bit-identical raw admission-path
+        fields, while the True call additionally populates the regime-scaled
+        tables covering every candidate horizon; the two opt-in diagnostics
+        (HAC-adjusted and regime-scaled) are fully independent and composable."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        off = _run(log_close, opens, bar_funding, eligible, idx)
+        on = select_horizon_by_discovery_qualification(
+            sign=1, horizon_candidates=(24, 48), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+            compute_regime_scaled_net_t=True,
+        )
+        assert on.selected_horizon == off.selected_horizon
+        assert on.admitted == off.admitted
+        assert on.discovery_scores == off.discovery_scores
+        assert on.discovery_aggregate_net_t == off.discovery_aggregate_net_t
+        assert on.qualification_net_t == off.qualification_net_t
+        assert on.qualification_sign_consistent == off.qualification_sign_consistent
+        assert on.yearly_net_t == off.yearly_net_t
+        assert on.yearly_regime_scaled_net_t != ()
+        assert set(dict(on.yearly_regime_scaled_net_t)) == {24, 48}
+        assert set(dict(on.discovery_scores_regime_scaled)) == {24, 48}
+
+        adjusted_only = select_horizon_by_discovery_qualification(
+            sign=1, horizon_candidates=(24, 48), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+            compute_adjusted_net_t=True,
+        )
+        assert adjusted_only.yearly_regime_scaled_net_t == ()
+        assert adjusted_only.discovery_scores_regime_scaled == ()
+        assert adjusted_only.yearly_adjusted_net_t != ()
+        assert adjusted_only.adjusted_admitted is not None
+
+        combo = select_horizon_by_discovery_qualification(
+            sign=1, horizon_candidates=(24, 48), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+            compute_adjusted_net_t=True, compute_regime_scaled_net_t=True,
+        )
+        assert combo.yearly_regime_scaled_net_t != ()
+        assert combo.yearly_adjusted_net_t != ()
+        assert combo.adjusted_admitted == adjusted_only.adjusted_admitted
+        assert combo.regime_scaled_admitted == on.regime_scaled_admitted
+
+    def test_regime_scaled_admitted_sign_invariant(self) -> None:
+        """SCENARIO_REGIME_SCALED_ADMITTED_SIGN_INVARIANT: ``regime_scaled_admitted``
+        is True only when the RAW sign-consistency flag is True AND
+        ``abs(qualification_regime_scaled_net_t) >= admission_t``, and it never
+        influences ``admitted``/``selected_horizon``."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        on = select_horizon_by_discovery_qualification(
+            sign=1, horizon_candidates=(24, 48), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+            compute_regime_scaled_net_t=True,
+        )
+        assert on.selected_horizon is not None
+        assert on.qualification_regime_scaled_net_t is not None
+        assert math.isfinite(on.qualification_regime_scaled_net_t)
+        if on.regime_scaled_admitted:
+            assert on.qualification_sign_consistent is True
+            assert abs(on.qualification_regime_scaled_net_t) >= 2.0
+        off = _run(log_close, opens, bar_funding, eligible, idx)
+        assert on.selected_horizon == off.selected_horizon
+        assert on.admitted == off.admitted
+
+
 class TestFoldTrainOnlyDiscoveryQualification:
     """SCENARIO_MHS_FOLD_SAFE_HORIZON_01..03: the fold-scoped wrapper derives
     leak-free discovery/qualification bounds from one ``AnchoredPurgedFold`` and
@@ -976,3 +1146,52 @@ class TestFoldTrainOnlyDiscoveryQualification:
         assert short_result.discovery_aggregate_adjusted_net_t is None
         assert short_result.qualification_adjusted_net_t is None
         assert short_result.adjusted_admitted is None
+
+    def test_fold_train_only_regime_passthrough(self, monkeypatch) -> None:
+        """SCENARIO_FOLD_TRAIN_ONLY_REGIME_PASSTHROUGH: ``compute_regime_scaled_net_t=True``
+        is forwarded unchanged into the delegated selection (captured via a spy)
+        and the returned result carries populated ``yearly_regime_scaled_net_t``;
+        the early-return closed-gate branch (train window inside one calendar
+        year) leaves all five new regime fields at their empty/None defaults
+        regardless of the flag."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        fold = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            pd.Timestamp("2023-01-08", tz="UTC"),
+            pd.Timestamp("2023-12-31", tz="UTC"),
+            168, 168,
+        )
+        captured: dict = {}
+        real = discovery.select_horizon_by_discovery_qualification
+
+        def spy(*args, **kwargs):
+            captured["compute_regime_scaled_net_t"] = kwargs.get("compute_regime_scaled_net_t")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(discovery, "select_horizon_by_discovery_qualification", spy)
+        result = fold_train_only_discovery_qualification(
+            1, (24, 48), log_close, eligible, opens, bar_funding, idx, fold,
+            min_symbols=3, tranche_count=1, compute_regime_scaled_net_t=True,
+        )
+        assert captured["compute_regime_scaled_net_t"] is True
+        assert result.yearly_regime_scaled_net_t != ()
+
+        short = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2021-12-31", tz="UTC"),
+            pd.Timestamp("2022-01-08", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            168, 168,
+        )
+        short_result = fold_train_only_discovery_qualification(
+            1, (72, 96), log_close, eligible, opens, bar_funding, idx, short,
+            min_symbols=3, tranche_count=1, compute_regime_scaled_net_t=True,
+        )
+        assert short_result.yearly_regime_scaled_net_t == ()
+        assert short_result.discovery_scores_regime_scaled == ()
+        assert short_result.discovery_aggregate_regime_scaled_net_t is None
+        assert short_result.qualification_regime_scaled_net_t is None
+        assert short_result.regime_scaled_admitted is None
