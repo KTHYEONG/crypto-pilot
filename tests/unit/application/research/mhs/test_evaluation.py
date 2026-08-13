@@ -938,6 +938,135 @@ def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
     assert forced.primary_naive_sharpe != forced.pre_vol_target_reference_naive_sharpe
 
 
+def test_book_outcome_realized_cost_reaches_report(mhs_market) -> None:
+    # SCENARIO_MHS_REALIZED_EXECUTION_COST_REACHES_REPORT_04: _book_outcome
+    # projects the already-computed per-fill shortfall aggregates onto
+    # MhsBookReport (they were previously discarded); the stress spec triples
+    # fees, so the realized stress shortfall must be strictly higher than the
+    # primary's.
+    args = _build_book_outcome_args(mhs_market)
+    report = ev._book_outcome(**args)
+    assert report.failure is None
+    assert report.primary is not None
+    assert report.stress is not None
+    for field in (
+        "primary_realized_shortfall_bps",
+        "primary_notional_weighted_shortfall_bps",
+        "stress_realized_shortfall_bps",
+        "stress_notional_weighted_shortfall_bps",
+        "primary_forced_exit_notional",
+    ):
+        value = getattr(report, field)
+        assert value is not None
+        assert np.isfinite(value)
+    assert report.primary_fill_count is not None
+    assert report.primary_unfilled_count is not None
+    assert report.stress_realized_shortfall_bps > report.primary_realized_shortfall_bps
+    assert report.stress_notional_weighted_shortfall_bps > report.primary_notional_weighted_shortfall_bps
+
+
+def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_PNL_VOL_TARGET_FLAG_DEFAULTS_TRUE_AND_IS_IDENTITY_05: the
+    # flag defaults True (a run at the default is byte-identical to today), a
+    # non-bool value is rejected, and with pnl_vol_target=False ONLY the
+    # vol-target multiplication is skipped -- Pass 1/pre_vol_target_reference
+    # stay structurally unchanged.
+    assert MhsDiagnosticRequest().pnl_vol_target is True
+    with pytest.raises(ValueError, match="pnl_vol_target"):
+        MhsDiagnosticRequest(pnl_vol_target="yes")
+
+    args = _build_book_outcome_args(mhs_market)
+    default_report = ev._book_outcome(**args)
+    true_report = ev._book_outcome(
+        **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=True)}
+    )
+    # The default reproduces the pre-change primary/stress metrics exactly.
+    assert default_report.primary_naive_sharpe == pytest.approx(true_report.primary_naive_sharpe)
+    assert default_report.stress_naive_sharpe == pytest.approx(true_report.stress_naive_sharpe)
+
+    def _forced_step_scale(reference_daily_returns: pd.Series) -> pd.Series:
+        idx = reference_daily_returns.index
+        mid = idx[0] + (idx[-1] - idx[0]) / 2
+        return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
+
+    monkeypatch.setattr(ev, "_pnl_vol_target_scale", _forced_step_scale)
+    on = ev._book_outcome(**args)
+    off = ev._book_outcome(
+        **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=False)}
+    )
+    # Pass-1 reference is identical across the two branches.
+    assert on.pre_vol_target_reference_naive_sharpe == pytest.approx(
+        off.pre_vol_target_reference_naive_sharpe
+    )
+    # Off branch: Pass 2 replays the same unscaled weights as Pass 1.
+    assert off.primary_naive_sharpe == pytest.approx(off.pre_vol_target_reference_naive_sharpe)
+    # On branch: the two passes differ by exactly the one multiplicative factor.
+    assert on.primary_naive_sharpe != pytest.approx(on.pre_vol_target_reference_naive_sharpe)
+    assert on.primary_naive_sharpe != pytest.approx(off.primary_naive_sharpe)
+
+
+def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_REALIZED_ROSTER_SIZE_EXPOSED_06: the diagnostic report
+    # exposes the realized mean execution-roster size (mean per-row True count
+    # of the execution mask), and on a fixture where hysteresis retains members
+    # it is strictly greater than the requested execution_universe_size.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    universe_size = 8
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=universe_size,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    assert report.realized_execution_roster_size is not None
+    assert np.isfinite(report.realized_execution_roster_size)
+
+    _log_close, execution_mask, _grid = _roster_mask_panel_inputs(
+        root, _START, end, funding_by_symbol, universe_size,
+    )
+    assert report.realized_execution_roster_size == pytest.approx(
+        float(execution_mask.sum(axis=1).mean())
+    )
+
+    # Hysteresis retention: engineer a volume panel over the same market
+    # columns where the leading roster swaps early; the once-entered members
+    # are kept past the entry rank (Schmitt-trigger), so the realized mean
+    # roster strictly exceeds the requested universe size. The panel is longer
+    # than the 1h grid so the 720-bar trailing warm-up does not bury the
+    # retained members; downstream consumers realign by reindexing.
+    idx = execution_mask.index
+    cols = list(execution_mask.columns)
+    engine_idx = pd.date_range(idx[0], periods=6000, freq="1h", tz="UTC")
+    engineered_vol = pd.DataFrame(1.0, index=engine_idx, columns=cols)
+    engineered_vol.loc[engine_idx[:720], cols[:universe_size]] = [
+        100.0 - 10.0 * i for i in range(universe_size)
+    ]
+    engineered_vol.loc[engine_idx[720:], cols[universe_size:]] = [
+        1000.0 - 10.0 * i for i in range(len(cols) - universe_size)
+    ]
+    eligible_all = pd.DataFrame(True, index=engine_idx, columns=cols)
+    retention_mask = ev._pit_execution_mask(
+        engineered_vol, eligible_all, universe_size,
+    )
+    retention_mean = float(retention_mask.sum(axis=1).mean())
+    assert retention_mean > universe_size
+    monkeypatch.setattr(
+        ev, "_pit_execution_mask", lambda qv, el, usz: retention_mask,
+    )
+    retention_report = ev.run_mhs_horizon_diagnostic(request)
+    assert retention_report.realized_execution_roster_size == pytest.approx(retention_mean)
+    assert retention_report.realized_execution_roster_size > universe_size
+
+
 def test_xs_rank_ic_causal_forward_window_ignores_invalid_cells() -> None:
     # SCENARIO_MHS_ALPHA_ENGINE_06: the forward return is built internally as
     # opens.pct_change(forward_bars).shift(-(forward_bars + 1)); the measured
@@ -1629,8 +1758,10 @@ def test_regime_scale_reaches_blend_replay_not_only_prescreen(mhs_market) -> Non
     fast_base, slow_base, blend_base = ev._run_books_concurrent(**args)
     fast_scaled, slow_scaled, blend_scaled = ev._run_books_concurrent(**args, regime_scale=scale)
 
-    assert blend_base.failure is None and blend_scaled.failure is None
-    assert blend_base.primary is not None and blend_scaled.primary is not None
+    assert blend_base.failure is None
+    assert blend_scaled.failure is None
+    assert blend_base.primary is not None
+    assert blend_scaled.primary is not None
     # retain_event_snapshots=False throughout _book_outcome, so per-fill
     # notional weights are never materialized here -- the turnover/equity
     # series (always populated) are the observable proxy for "the replay
@@ -2687,3 +2818,133 @@ def test_geometric_cagr_uses_hourly_annualization() -> None:
     post = ev._geometric_cagr(eq_1h)
     pre = ev._geometric_cagr(equity)
     assert np.log1p(post) / np.log1p(pre) == pytest.approx(12.0)
+
+
+def test_book_outcome_executed_prescreen_reaches_report(mhs_market) -> None:
+    """SCENARIO_MHS_EXECUTED_PRESCREEN_REACHES_REPORT_04: when ``_book_outcome``
+    is handed an execution book (``replay_weights_step``) different from the
+    reference book (``weights_step``), the report carries BOTH the reference
+    prescreen and an executed_prescreen/executed_tail computed from the
+    capital-carrying book, and their net_t values differ. With no execution
+    book the executed fields mirror None. Fails against the pre-change code,
+    which could only ever report the reference book."""
+    args = _build_book_outcome_args(mhs_market)
+    report = ev._book_outcome(**args)
+    assert report.prescreen is not None
+    assert report.executed_prescreen is not None
+    assert report.executed_tail is not None
+    base_bps = ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"]
+    assert report.executed_prescreen_net_t == report.executed_prescreen[base_bps].net_t
+    assert report.prescreen[base_bps].net_t != report.executed_prescreen[base_bps].net_t
+
+    reference_only = ev._book_outcome(**{**args, "replay_weights_step": None})
+    assert reference_only.executed_prescreen is None
+    assert reference_only.executed_tail is None
+    assert reference_only.executed_prescreen_net_t is None
+
+
+def test_book_outcome_existing_primary_metrics_unchanged(mhs_market) -> None:
+    """SCENARIO_MHS_EXISTING_PRIMARY_METRICS_UNCHANGED_05: the executed-evidence
+    addition is additive-only -- the primary/stress replay metrics stay present
+    and finite, and the reference prescreen/tail remain bit-identical to the
+    pre-change inline construction (the regression invariant)."""
+    from src.mhs.evaluation import cost_response_curve, tail_sensitivity_curve
+
+    args = _build_book_outcome_args(mhs_market)
+    report = ev._book_outcome(**args)
+    assert report.primary is not None
+    assert report.stress is not None
+    assert report.failure is None
+    for field in (
+        "primary_autocorr_sharpe", "primary_naive_sharpe", "primary_net_ann",
+        "primary_geometric_cagr", "primary_max_drawdown",
+        "primary_annualized_turnover", "stress_naive_sharpe",
+    ):
+        value = getattr(report, field)
+        assert value is not None
+        assert np.isfinite(value)
+
+    weights_1h = args["weights_step"].reindex(args["grid_1h"]).ffill().fillna(0.0)
+    cost_grid = tuple(dict.fromkeys((0.0, 2.0, 4.0, 8.0, *ev.required_cost_tiers())))
+    expected_prescreen = cost_response_curve(
+        weights_1h, args["opens"], args["bar_funding"], cost_grid, ev._PERIODS_PER_YEAR_1H,
+    )
+    _net, expected_turnover = ev.mhs_ledger_pnl(
+        weights_1h, args["opens"], args["bar_funding"], 8.0,
+    )
+    expected_tail = tail_sensitivity_curve(
+        weights_1h.shift(2).fillna(0.0), args["opens"].pct_change(),
+        expected_turnover, 8.0, ev._PERIODS_PER_YEAR_1H, args["event_window_bars"],
+    )
+    assert report.prescreen == expected_prescreen
+    assert report.tail == expected_tail
+
+
+def _passing_fold_report(replay: object) -> ev.MhsFoldReport:
+    return ev.MhsFoldReport(
+        fold_index=0,
+        validation_start="2023-01-08 00:00:00+00:00",
+        validation_end="2023-12-31 00:00:00+00:00",
+        strict=replay,
+        stress=replay,
+        primary_valid=True,
+        primary_autocorr_sharpe=1.0,
+        primary_naive_sharpe=1.0,
+        primary_net_ann=0.1,
+        primary_geometric_cagr=0.1,
+        primary_max_drawdown=-0.02,
+        stress_naive_sharpe=0.1,
+        decision_intents=1,
+        termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+        failures=(),
+        strict_elapsed_seconds=0.01,
+        stress_elapsed_seconds=0.01,
+    )
+
+
+def test_research_go_eligible_is_reachable(mhs_market, monkeypatch) -> None:
+    """SCENARIO_MHS_RESEARCH_GO_ELIGIBLE_IS_REACHABLE_07: with every fold
+    passing and every policy threshold registered in
+    ``MHS_REGISTERED_POLICY_THRESHOLDS``, ``_mhs_research_go`` returns
+    eligible=True with no reason codes -- a result the pre-change code (which
+    unconditionally appended UNSPECIFIED_POLICY) could never produce. With a
+    threshold missing it still fails closed to UNSPECIFIED_POLICY."""
+    idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+    target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+    signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+    px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+    replay = strategy_aware_execution_replay(
+        target, signal_at, px, px, px, px,
+        pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+        "OHLCV_STRICT_PROXY", ExecutionSpec(),
+    )
+    passing = _passing_fold_report(replay)
+
+    monkeypatch.setattr(
+        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
+    )
+    registered = ev._mhs_research_go((passing,))
+    assert registered.eligible is True
+    assert registered.reason_codes == ()
+    assert registered.folds_passed == 1
+
+    monkeypatch.setattr(
+        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        {"cap_30_roster": None, "primary_annual_return": 0.05},
+    )
+    missing = ev._mhs_research_go((passing,))
+    assert missing.eligible is False
+    assert ev.MHS_GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
+
+
+def test_registered_policy_thresholds_contract() -> None:
+    """P0-D contract: the two named policy gates exist in source contracts and
+    default to the unregistered (conservative) state -- a deliberate policy act,
+    never a performance-flattering literal at the call site."""
+    from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS, MHS_SEARCH_TRIALS_ATTEMPTED
+
+    assert set(MHS_REGISTERED_POLICY_THRESHOLDS) == {"cap_30_roster", "primary_annual_return"}
+    assert all(v is None for v in MHS_REGISTERED_POLICY_THRESHOLDS.values())
+    assert isinstance(MHS_SEARCH_TRIALS_ATTEMPTED, int)
+    assert MHS_SEARCH_TRIALS_ATTEMPTED >= 1
