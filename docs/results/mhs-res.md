@@ -1,6 +1,7 @@
 # MHS Horizon Diagnostic — Latest Result
 
-- **Document Date**: 2026-08-13 (19차, `mhs_fast_reversal_overlay_redesign` 최초 실측 — §8 참고. 18차까지의 §1-§7은 아래 그대로 보존)
+- **Document Date**: 2026-08-13 (20차, `mhs_capital_floor_and_overlay_validation` 실측 완료 — §9 참고. 19차까지의 §1-§8은 아래 그대로 보존)
+- **Document Date (19차)**: 2026-08-13 (19차, `mhs_fast_reversal_overlay_redesign` 최초 실측 — §8 참고. 18차까지의 §1-§7은 아래 그대로 보존)
 - **Document Date (18차)**: 2026-08-12 (18차, `mhs_universe_horizon_redesign` 적용 재실행 — `--slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon`)
 - **Domain**: Research / MHS (Multi-Horizon Market State)
 - **Run Metadata**: `start=2021-01-01`, `end=2025-12-31`, `execution_timeframe=5m`, `execution_universe_size=30`, `eligible_symbols=446`, `run_elapsed_seconds=706.7`
@@ -103,12 +104,12 @@ fold별 CAGR이 처음으로 신뢰 가능한 수치로 노출됨 — fold1(2024
 | `beta_neutralize`, `ensemble_signal=vol_normalized`, 트리거 임계값(`crash_regime_tilt_alpha`, `rebalance_filter`) — **일괄** fold-train-only 결합 탐색 설계 필요(개별 임의값 시도는 p-hack 우려로 이미 기각, `ADR_20260812_MHS_CRASH_REGIME_TILT_OVERLAY`) | 미착수 (`mhs_universe_horizon_redesign.md` §5 순위 4) |
 | 시계열(방향성) 절대모멘텀 재검토 — 사전스크린 Sharpe 1.0~1.4로 횡단면 앙상블(0.72~0.86)보다 높게 관측됨 | 미착수, 연율화 버그 수정 후 fold-train-only로 재검증 필요(`docs/specs/mhs_execution_annualization_fix.md` §3) |
 | 펀딩비 캐리 신호 — 손익 분해 부호 모순 재검증 필요 | 미착수, 액면 그대로 신뢰 금지 |
-| fold1(2024) 잔여 미달 원인 조사 | 미착수 — `yearly_net_t` 필드가 이미 노출되어 있어 `--discovery-gate` 재실행 후 2024열만 조회하면 됨(신규 계산 불필요, `mhs_universe_horizon_redesign.md` §5 순위 2) |
-| `fast_reversal`의 독립적 `CAPITAL_INVARIANT_BREACH`(음의 자기자본) 근본 원인 조사 | **부분 해결 + 신규 결함 발견(19차, §8)**: root cause 규명(edge 없는 신호를 무방비 레버리지로 장기 리플레이한 결과, 데이터 버그 아님) + Pass-1 reference replay용 방어 플로어 구현 완료. 그러나 Pass-2(primary, 실제 보고값)는 미보호로 남아있어 여전히 크래시(더 악화: -144→**-66,427** 자기자본) — **Pass-2 플로어 확장이 신규 최우선 항목**(§8.3) |
+| fold1(2024) 잔여 미달 원인 조사 | **정정(20차, §9.3)**: 19차가 기록한 "yearly_net_t로 조회 가능"은 틀린 전제였음 — 그 필드의 discovery window는 `DISCOVERY_END=2023-12-31`로 고정돼 2024/2025 열이 구조적으로 항상 NaN(신규 계산 필요, 노출된 필드로 불가). 대신 `fold1_strict` 원장(ledger.parquet, `--output-tier full`)의 월별 손익을 직접 조회해 진단: 12개월 중 8개월이 음수, 단일 크래시 월 없는 만성적 부진 패턴(2022 LUNA/FTX류 단일 붕괴와 다름) — trend_efficiency_overlay로 해결 시도했으나 §9.2에서 오히려 악화됨이 실증돼 가설 기각, 근본 해결은 미해결 |
+| `fast_reversal`의 독립적 `CAPITAL_INVARIANT_BREACH`(음의 자기자본) 근본 원인 조사 | **완전 해결(20차, §9.1)**: Pass-2/stress/patient_reference/touch/ladder 전체에 동일 방어 플로어 확장 배선 완료. 실측 재실행으로 `books.fast_reversal.failure=None` 확인(크래시 완전 해소) |
 | top-30 로스터 크기(N) fold-train-only 재검증(Q2) | 미착수, `ADR_20260810_MHS_BOOK_ADMISSION_VOL_MASK`가 미측정 상수로 인정한 항목(`mhs_universe_horizon_redesign.md` §5 순위 3) |
-| fast 대안 방향 — ① 리스크/타이밍 오버레이 재배선, ② top-30 밖 중간유동성 구간 재스캔 | **① 착수(19차, §8)**: `trend_efficiency_scale` 오버레이 opt-in 구현·유닛테스트 완료(`docs/specs/mhs_fast_reversal_overlay_redesign.md`), fold-train-only 실측 비교는 미실행. ② 미착수. |
+| fast 대안 방향 — ① 리스크/타이밍 오버레이 재배선, ② top-30 밖 중간유동성 구간 재스캔 | **① 실측 완료, 부정적 결과(20차, §9.2)**: fold-train-only로 `regime_scale`-only vs `regime_scale*trend_efficiency_scale` 비교 — 3-fold 전부 `stress_naive_sharpe` 악화, fold1(2024, 가장 필요했던 fold)은 primary/stress 둘 다 악화. 기본값 `False` 유지 권고, 이 신호 형태로는 재시도하지 않음. ② 미착수. |
 | 유동성 lookback 720h 민감도(Q1) | 미착수, 낮은 우선순위(4개 모듈 공유, 문제 증거 없음) |
-| Pass-2(primary) 실행 replay에도 `min_equity_fraction` 플로어 확장 | **신규, 미착수 — 최우선(blocking)**: 19차 실측(§8.3)이 Pass-1만 보호하는 현재 구현이 Pass-2를 오히려 더 심하게 무방비로 노출시킴을 실증 — fast에 자본을 복원하는 어떤 경로든 이 확장이 선행되어야 함 |
+| top-level "blend" 북 실행 replay가 `regime_scale`을 반영하지 않던 결함 | **신규 발견 + 해결(20차, §9.4)**: `_run_books_concurrent`의 `blend_replay`가 `w_fast_execution`/`w_slow_execution`으로 독립 재구성되며 `regime_scale`(기존 `_regime_cash_scale` 포함, 신규 `trend_efficiency_overlay`도 마찬가지) 곱셈이 전혀 반영되지 않았음 — 17차 이래 보고된 `blend.primary_autocorr_sharpe=0.5257` 헤드라인이 실제로는 regime scale 없이 계산된 값이었음(코드 주석의 "prescreen/tail/execution diagnostics are comparable" 약속과 불일치). 수정 후 재실행 실측: `primary_autocorr_sharpe` 0.5257→**0.5196**, `primary_max_drawdown` -0.2269→**-0.2015**(개선), `stress_naive_sharpe` 0.1420→0.1295. Research-GO는 fold 경로(항상 정상 배선)로 판정되므로 게이트 결과 자체는 무변화(`folds_passed=2/3`) |
 
 ## 8. 19차 — `fast_reversal` 오버레이 재설계 최초 실측 (`docs/specs/mhs_fast_reversal_overlay_redesign.md`)
 
@@ -160,3 +161,81 @@ fold별 CAGR이 처음으로 신뢰 가능한 수치로 노출됨 — fold1(2024
 ### 8.4 C — 트렌드효율성 오버레이: 코드/유닛테스트만 존재, 실측 비교 미실행
 
 `trend_efficiency_scale`(`src/mhs/regime.py`) + `--trend-efficiency-overlay` opt-in 플래그 구현 및 10개 계약 시나리오 유닛테스트(104 passed) 완료. `regime_scale`-only vs `regime_scale * trend_efficiency_scale`의 fold-train-only Sharpe/MDD 비교(스펙 §4 3번 항목)는 이번 19차에 **실행하지 않았다** — 오버레이 기본값을 `True`로 승격하기 전 반드시 선행되어야 하는 실측이며, §7 백로그에 남아 있다.
+
+## 9. 20차 — 자본붕괴 완전방어·오버레이 실측·신규 결함 발견 (`docs/specs/mhs_capital_floor_and_overlay_validation.md`)
+
+19차가 남긴 세 항목(Pass-2 미보호, 오버레이 미검증, fold1 원인 미상)을 실제 데이터로 검증·수정했다. **이번 차수는 판단이 아니라 코드 수정 + 실측 확인까지 완료**했다.
+
+**CLI**: `research run portfolio mhs-horizon-diagnostic --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon [--discovery-gate] [--trend-efficiency-overlay] --output-tier full` (2021-2025 dev, 4회 실행 — 베이스라인, 오버레이 on, 수정검증용, 총 `status=COMPLETE`).
+
+### 9.1 A — 자본붕괴 방어: Pass-2/stress까지 확장, 완전 해결
+
+`SCENARIO_MHS_CAPITAL_FLOOR_PASS2_STRESS_PROTECTED_03` (`docs/specs/mhs_capital_floor_and_overlay_validation_contract.json`) — 실데이터 재실행으로 검증됨.
+
+19차는 `_book_outcome`의 Pass-1(reference)에만 `min_equity_fraction` 플로어를 배선해 Pass-2(실제 보고값)가 여전히 크래시했다(-144.52→-66,427.67로 악화). 이번 20차는 Pass-2/stress/patient_reference/touch/ladder 전체 replay 호출에 동일 플로어(`MHS_REFERENCE_PASS_EQUITY_FLOOR`)를 확장 배선했다.
+
+| field | 19차 | 20차 |
+| :--- | :--- | :--- |
+| `books.fast_reversal.failure` | `CAPITAL_INVARIANT_BREACH` (Pass-2 미해결) | **`None` (완전 해소)** |
+| `pre_vol_target_reference.equity_floor_breached_at` | (필드 자체는 19차부터 존재) | 6,086회 강제 플랫 처리 — 2021-09-14부터 시작 |
+| `primary.equity_floor_breached_at` | — | 0회 (Pass-1 보호 덕분에 Pass-2 자체는 플로어를 칠 필요조차 없었음) |
+| `fast_reversal.prescreen[0.0].net_t` | +0.067 | +0.067 (무변화 확인 — B의 결론 재확인) |
+
+**결론**: root cause(edge 없는 신호를 무방비 레버리지로 장기 리플레이한 결과)는 그대로이지만, 진단 파이프라인이 이제 크래시 없이 완주하며 결과를 정직하게(타입드 필드로) 보고한다. §7의 최우선 blocking 항목 해소.
+
+### 9.2 C — 트렌드효율성 오버레이 실측: 도움 안 됨, 기본값 유지
+
+`SCENARIO_MHS_TREND_EFFICIENCY_OVERLAY_FOLD_VALIDATION_NEGATIVE_04` (`docs/specs/mhs_capital_floor_and_overlay_validation_contract.json`) — 실데이터 재실행, 부정적 결과.
+
+`--slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon`(18차와 비교 가능한 정확한 플래그)로 오버레이 on/off 각각 재실행해 fold별 지표를 비교했다:
+
+| fold | validation | `primary_autocorr_sharpe` (off→on) | `stress_naive_sharpe` (off→on) | `primary_max_drawdown` (off→on) |
+| ---: | :--- | :--- | :--- | :--- |
+| 0 | 2023 | 0.8046 → 0.8213 (소폭 개선) | **0.2111 → 0.0301 (악화)** | -0.1089 → -0.1020 (개선) |
+| 1 | 2024 | **-0.2672 → -0.3395 (악화)** | **-0.8201 → -1.0475 (악화)** | -0.1743 → -0.1701 (소폭 개선) |
+| 2 | 2025 | 1.5047 → 1.5303 (소폭 개선) | **0.9310 → 0.7774 (악화)** | -0.2185 → -0.2215 (소폭 악화) |
+
+**stress_naive_sharpe가 3-fold 전부 악화**되고, **가장 도움이 필요했던 fold1(2024)이 primary/stress 둘 다 악화**됐다 — 애초에 "2024는 단일 크래시가 아니라 만성적 choppy 구간이니 trend_efficiency_overlay가 도움될 것"이라는 가설(§9.3)이 실측으로 기각됨. **`trend_efficiency_overlay` 기본값 `False` 유지 결정 — 이 신호 형태(efficiency_ratio 기반 gross 축소)로는 재시도하지 않는다.** 코드/opt-in 플래그/유닛테스트는 남겨두되(향후 다른 오버레이 신호의 배선 지점으로 재사용 가능), Research-GO 판정에 영향 없음(fold path는 항상 정상 배선이었으므로 이 실측 자체가 유효한 증거).
+
+### 9.3 fold1(2024) 원인 조사 — 이전 문서의 오류 정정
+
+19차/18차까지의 문서(§7)는 "yearly_net_t 필드가 이미 노출되어 있어 신규 계산 없이 조회만 하면 된다"고 기록했으나 **이는 틀린 전제였다** — `discovery_qualification.momentum.yearly_net_t`는 discovery window(`DISCOVERY_END=2023-12-31`)로 고정된 연도만 채워지며 2024/2025 열은 구조적으로 항상 `NaN`이다(신규 계산 없이는 확인 불가능).
+
+정확한 방법: `--output-tier full`로 실행하면 `ledger.parquet`에 `replay_id='fold1_strict'`로 fold1 전용 원장이 보존된다(다른 replay와 파일을 공유하지만 `replay_id` 컬럼으로 구분됨, 덮어쓰기 아님). 이 원장의 월별 손익을 직접 조회한 결과:
+
+| 월 | 손익 부호 | 비고 |
+| :--- | :--- | :--- |
+| 2024-02, 04, 06, 07, 08, 09, 11 | 음수 (7개월) | 단일 크래시 없이 산발적 손실 |
+| 2024-03, 05, 10, 12 | 양수 (4개월) | |
+| 최저 자기자본 | 2024-10-03, 초기자본의 -12.65% (0.8735) | 이후 12월까지 부분 회복 |
+
+**12개월 중 8개월이 순손실**(순수익 4개월) — 2022(LUNA/FTX, `ADR_20260812_MHS_MOMENTUM_REGIME_DIAGNOSIS`)처럼 특정 사건 하나가 아니라 연중 만성적 부진 패턴. 이 관찰이 §9.2의 trend_efficiency_overlay 가설을 낳았으나 실측으로 기각됐다 — **fold1(2024) 미달의 진짜 근본 원인은 여전히 미해결**로 남는다.
+
+### 9.4 신규 발견 + 해결 — top-level "blend" 실행 replay가 `regime_scale`을 전혀 반영하지 않던 결함
+
+§9.2 실측 과정에서 top-level `blend.primary_autocorr_sharpe`가 `trend_efficiency_overlay` on/off와 무관하게 소수점까지 완전 동일(`0.525673922813482`)하게 나오는 이상 현상을 발견, 추적 결과 **17차 이래 존재해온 별개의 사전 결함**을 확인했다: `_run_books_concurrent`의 `blend_replay`(실제 primary/stress replay에 쓰이는 가중치)가 `w_fast_execution`/`w_slow_execution`으로부터 독립적으로 재구성되며, `blend_1h`/`blend_step`(prescreen/tail 전용)에는 적용되는 `regime_scale`(기존 `_regime_cash_scale` + 신규 `trend_efficiency_overlay` 둘 다) 곱셈이 **한 번도 반영된 적이 없었다**. 코드 주석은 "top-level prescreen/tail/execution diagnostics are comparable to fold primary evidence"라고 명시했지만 execution(replay) 쪽은 실제로 지켜지지 않고 있었다.
+
+**수정**: `regime_scale`을 `_run_books_concurrent`에 새 옵셔널 파라미터로 전달해 `blend_replay`에도 동일하게 곱하도록 배선(`fast_reversal`/`slow_momentum` 개별 북은 영향 없음 — 포트폴리오 레벨 스케일이므로 blend에만 적용, fold 경로의 기존 설계와 정합). 회귀 테스트(`test_regime_scale_reaches_blend_replay_not_only_prescreen`, `tests/unit/application/research/mhs/test_evaluation.py`) 추가 — 수정 전 코드에서는 실패하고 수정 후 통과함을 확인.
+
+실측 재실행 결과:
+
+| field | 수정 전(버그, 18-19차 보고값과 동일) | 수정 후(20차) |
+| :--- | ---: | ---: |
+| `blend.primary_autocorr_sharpe` | 0.5257 | **0.5196** |
+| `blend.primary_geometric_cagr` | 7.84% | **7.56%** |
+| `blend.primary_max_drawdown` | -0.2269 | **-0.2015 (개선)** |
+| `blend.stress_naive_sharpe` | 0.1420 | 0.1295 |
+| `slow_momentum.primary_autocorr_sharpe`(개별 북, 영향 없어야 함) | 0.5257 | 0.5257 (무변화 확인) |
+| `research_go.folds_passed` | 2/3 | 2/3 (무변화 — fold 경로는 항상 정상 배선이었음) |
+
+효과 크기는 작다(Sharpe -1.2%, MDD 11% 개선) — `_regime_cash_scale`이 5년 전체에서 자주 발동하지 않기 때문으로 보인다. Research-GO 판정 자체(`eligible=False`)는 영향받지 않는다(게이트는 항상 정상 배선이던 fold 경로 기준). **이번 발견의 가치는 진단 리포트 헤드라인의 신뢰도 회복이며, Research-GO 판정 로직 자체의 변경은 아니다.**
+
+### 9.5 요약
+
+| 항목 | 상태 |
+| :--- | :--- |
+| A. 자본붕괴 방어 | ✅ 완전 해결 (Pass-1/2/stress/기타 전부 보호, 실측 확인) |
+| B. EMA 반전신호 스무딩 | ✅ 19차 확인 유지 (재확인됨, +0.067) |
+| C. 트렌드효율성 오버레이 | ✅ 실측 완료 — **부정적 결과**, 기본값 `False` 유지 |
+| D. fold1(2024) 근본원인 | 부분 진단(만성적 choppy 패턴 확인) — **근본 해결은 미해결로 이월** |
+| E. blend replay `regime_scale` 미반영 | ✅ 신규 발견 + 해결, 실측 확인 |
