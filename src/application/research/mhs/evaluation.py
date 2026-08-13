@@ -273,6 +273,7 @@ class MhsDiagnosticRequest:
     touch_diagnostic: bool = False
     ladder_diagnostic: bool = False
     discovery_gate: bool = False
+    discovery_gate_adjusted_net_t: bool = False
     fold_safe_horizon_selection: bool = False
     crash_regime_tilt_alpha: float | None = None
     slow_book_mode: Literal["single_horizon", "horizon_ensemble"] = "single_horizon"
@@ -304,6 +305,8 @@ class MhsDiagnosticRequest:
             raise ValueError(f"unknown fast_book_mode '{self.fast_book_mode}'")
         if self.rebalance_filter not in ("per_symbol_deadband", "portfolio_trigger"):
             raise ValueError(f"unknown rebalance_filter '{self.rebalance_filter}'")
+        if self.discovery_gate_adjusted_net_t and not self.discovery_gate:
+            raise ValueError("discovery_gate_adjusted_net_t requires discovery_gate=True")
         if not isinstance(self.beta_neutralize, bool):
             raise ValueError("beta_neutralize must be a bool")
         if self.ensemble_signal not in ("raw", "vol_normalized"):
@@ -3538,6 +3541,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 qualification_end=QUALIFICATION_END,
                 tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_fast_candidate_weights,
+                compute_adjusted_net_t=request.discovery_gate_adjusted_net_t,
             ),
             "momentum": select_horizon_by_discovery_qualification(
                 sign=1, horizon_candidates=MHS_DISCOVERY_MOMENTUM_CANDIDATES,
@@ -3547,6 +3551,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 qualification_end=QUALIFICATION_END,
                 tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_slow_candidate_weights,
+                compute_adjusted_net_t=request.discovery_gate_adjusted_net_t,
             ),
             "funding_carry_long": select_horizon_by_discovery_qualification(
                 sign=1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
@@ -3556,6 +3561,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 qualification_end=QUALIFICATION_END,
                 tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_funding_carry_candidate_weights[1],
+                compute_adjusted_net_t=request.discovery_gate_adjusted_net_t,
             ),
             "funding_carry_short": select_horizon_by_discovery_qualification(
                 sign=-1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
@@ -3565,6 +3571,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 qualification_end=QUALIFICATION_END,
                 tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_funding_carry_candidate_weights[-1],
+                compute_adjusted_net_t=request.discovery_gate_adjusted_net_t,
             ),
         }
         # Full-history (2021-2025) yearly net-t diagnostics -- REPORT-ONLY
