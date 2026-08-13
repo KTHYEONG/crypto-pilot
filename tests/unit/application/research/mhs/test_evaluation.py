@@ -2701,8 +2701,190 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
         assert corr is None
 
 
+def _deployment_readiness() -> ev.DeploymentReadinessResult:
+    """A placeholder deployment readiness result for monkeypatched
+    ``_run_post_book_concurrently`` returns (the real folds stream is skipped)."""
+    return ev.DeploymentReadinessResult(
+        geometric_cagr=0.0, max_drawdown=0.0, calmar=0.0, expected_shortfall=0.0,
+        worst_1d=0.0, worst_7d=0.0, worst_event=0.0, time_under_water_bars=0,
+        recovery_bars=None, probability_final_wealth_below_initial=0.0,
+        probability_mdd_over_20pct=0.0, probability_mdd_over_30pct=0.0,
+        leverage_ruin_probabilities={}, concentration={},
+        participation_warnings={}, research_go_eligible=False,
+        execution_go_eligible=False, pilot_go_eligible=False, scale_go_eligible=False,
+    )
+
+
+def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_FAST_BOOK_MODE_DEFAULT_IS_IDENTITY_03: the default
+    # fast_book_mode is single_horizon, an invalid value raises ValueError, and
+    # a full run at the default reproduces the pre-change single-horizon fast
+    # book byte-identically -- the regression-invariant proof. The default-path
+    # run keeps real books; the production w_fast_execution matrix is captured
+    # by a spy and must equal the verbatim pre-change chain (vol tilt +
+    # renormalize) built on the same panel.
+    assert MhsDiagnosticRequest().fast_book_mode == "single_horizon"
+    with pytest.raises(ValueError, match="unknown fast_book_mode"):
+        MhsDiagnosticRequest(fast_book_mode="bogus")
+
+    root, end = mhs_market
+    captured: dict = {}
+    real_books = ev._run_books_concurrent
+
+    def _spy_books(*args, **kwargs):
+        captured["w_fast_execution"] = args[10]
+        return real_books(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently",
+        lambda *a, **k: (None, None, {}, {}, (), _deployment_readiness()),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    book = report.books["fast_reversal"]
+    assert book.primary_autocorr_sharpe is not None
+    assert np.isfinite(book.primary_autocorr_sharpe)
+    assert book.executed_prescreen_net_t is not None
+    assert np.isfinite(book.executed_prescreen_net_t)
+
+    log_close, eligible, execution_mask, _req, _grid, _end = _slow_book_panel_inputs(mhs_market)
+    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
+    w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
+    ref_execution = ev.renormalize_within_mask(
+        ev.inverse_realized_vol_tilt(
+            w_fast, ev.realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
+        ),
+        execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
+    )
+    pd.testing.assert_frame_equal(captured["w_fast_execution"], ref_execution)
+
+
+def test_mhs_fast_book_mode_ensemble_produces_different_executed_book(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_FAST_BOOK_MODE_ENSEMBLE_PRODUCES_DIFFERENT_EXECUTED_BOOK_04:
+    # with fast_book_mode='horizon_ensemble' the resulting fast_reversal report
+    # carries a DIFFERENT primary_autocorr_sharpe (and different executed
+    # prescreen net_t) than the single_horizon default on the same fixture --
+    # proving the ensemble branch actually reaches the capital-book construction
+    # and RC-1's dual-instrument (executed_prescreen) reflects it automatically.
+    # The slow book is untouched by the fast flag. Fails against pre-change
+    # code, which has no fast_book_mode branch at all.
+    root, end = mhs_market
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently",
+        lambda *a, **k: (None, None, {}, {}, (), _deployment_readiness()),
+    )
+    base = {
+        "start": str(_START), "end": str(end), "data_root": str(root),
+        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_universe_size": 8,
+    }
+    report_default = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    report_ensemble = ev.run_mhs_horizon_diagnostic(
+        MhsDiagnosticRequest(**base, fast_book_mode="horizon_ensemble"),
+    )
+    fast_default = report_default.books["fast_reversal"]
+    fast_ensemble = report_ensemble.books["fast_reversal"]
+    assert fast_default.primary_autocorr_sharpe is not None
+    assert fast_ensemble.primary_autocorr_sharpe is not None
+    assert fast_default.primary_autocorr_sharpe != fast_ensemble.primary_autocorr_sharpe
+    assert fast_default.executed_prescreen_net_t != fast_ensemble.executed_prescreen_net_t
+    slow_default = report_default.books["slow_momentum"]
+    slow_ensemble = report_ensemble.books["slow_momentum"]
+    assert slow_default.primary_autocorr_sharpe == slow_ensemble.primary_autocorr_sharpe
+    assert slow_default.executed_prescreen_net_t == slow_ensemble.executed_prescreen_net_t
+
+
+def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypatch) -> None:
+    # SCENARIO_MHS_FUNDING_CARRY_TOP_LEVEL_DISCOVERY_05: with discovery_gate=True
+    # the top-level discovery_qualification carries funding_carry_long and
+    # funding_carry_short (each a populated DiscoveryQualificationResult) beside
+    # the existing reversal/momentum entries -- all three candidates measured on
+    # the same instrumented window. With discovery_gate=False the keys are
+    # absent (discovery_qualification stays None), matching the opt-in convention.
+    root, end = mhs_market_funding_vary
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request_on = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, discovery_gate=True,
+    )
+    report_on = ev.run_mhs_horizon_diagnostic(request_on)
+    assert report_on.status == "COMPLETE"
+    assert report_on.discovery_qualification is not None
+    assert set(report_on.discovery_qualification) == {
+        "reversal", "momentum", "funding_carry_long", "funding_carry_short",
+    }
+    for key in ("funding_carry_long", "funding_carry_short"):
+        result = report_on.discovery_qualification[key]
+        assert isinstance(result, ev.DiscoveryQualificationResult)
+        assert result.yearly_net_t
+
+    request_off = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    report_off = ev.run_mhs_horizon_diagnostic(request_off)
+    assert report_off.discovery_qualification is None
+
+
+def test_mhs_full_history_yearly_net_t_and_worst_year_corr_exposed(mhs_market_funding_vary, monkeypatch) -> None:
+    # SCENARIO_MHS_FULL_HISTORY_YEARLY_NET_T_AND_WORST_YEAR_CORR_EXPOSED_06:
+    # with discovery_gate=True the report exposes full_history_yearly_net_t for
+    # slow_momentum/fast_reversal/funding_carry covering all five years
+    # 2021-2025 (not just the 2021-2023 discovery window) and a finite
+    # funding_carry_worst_year_corr; both stay None when discovery_gate=False.
+    root, end = mhs_market_funding_vary
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request_on = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, discovery_gate=True,
+    )
+    report_on = ev.run_mhs_horizon_diagnostic(request_on)
+    assert report_on.status == "COMPLETE"
+    assert report_on.full_history_yearly_net_t is not None
+    assert set(report_on.full_history_yearly_net_t) == {
+        "slow_momentum", "fast_reversal", "funding_carry",
+    }
+    for key in report_on.full_history_yearly_net_t:
+        yearly = report_on.full_history_yearly_net_t[key]
+        assert set(yearly) == {2021, 2022, 2023, 2024, 2025}
+    assert report_on.funding_carry_worst_year_corr is not None
+    assert np.isfinite(report_on.funding_carry_worst_year_corr)
+    # The spec's headline claim -- momentum's own 168h book fails the same
+    # gate that rejected funding_carry -- is directly visible here: the
+    # momentum column's worst-year value (2021-2023) stays near/below the
+    # admission floor in this fixture, while the full history shows the whole
+    # five-year picture the 3-year window could not.
+    slow_2021 = report_on.full_history_yearly_net_t["slow_momentum"][2021]
+    assert np.isfinite(slow_2021)
+
+    request_off = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    report_off = ev.run_mhs_horizon_diagnostic(request_off)
+    assert report_off.full_history_yearly_net_t is None
+    assert report_off.funding_carry_worst_year_corr is None
+
+
 def _slow_book_panel_inputs(mhs_market):
-    """Panel inputs for the ``_slow_book_execution_weights`` and fold tests."""
+    """Panel inputs for the ``_horizon_ensemble_execution_weights`` and fold tests."""
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -2733,7 +2915,7 @@ def _slow_book_panel_inputs(mhs_market):
 def _pre_change_slow_book(
     log_close, eligible, execution_mask, spec, step_grid, ema_span,
 ):
-    """The frozen production slow-book chain ``_slow_book_execution_weights``
+    """The frozen production slow-book chain ``_horizon_ensemble_execution_weights``
     must reproduce byte-identically in single_horizon/raw mode."""
     w = ev._book_weights(log_close, eligible, spec, step_grid, ema_span=ema_span)
     w = ev.inverse_realized_vol_tilt(
@@ -2746,7 +2928,7 @@ def _pre_change_slow_book(
 
 def test_mhs_alpha_engine_slow_book_single_horizon_is_byte_identical(mhs_market) -> None:
     # SCENARIO_MHS_ALPHA_ENGINE_07: in single_horizon/raw mode
-    # ``_slow_book_execution_weights`` reproduces the pre-change
+    # ``_horizon_ensemble_execution_weights`` reproduces the pre-change
     # ``_book_weights`` + tilt + renormalize sequence exactly.
     log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
     slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
@@ -2755,7 +2937,7 @@ def test_mhs_alpha_engine_slow_book_single_horizon_is_byte_identical(mhs_market)
     expected = _pre_change_slow_book(
         log_close, eligible, execution_mask, slow, slow_grid, slow_ema,
     )
-    actual = ev._slow_book_execution_weights(
+    actual = ev._horizon_ensemble_execution_weights(
         log_close, eligible, execution_mask, slow, slow_grid,
         "single_horizon", "raw", slow_ema,
     )
@@ -2778,7 +2960,7 @@ def test_mhs_alpha_engine_slow_book_ensemble_is_rowwise_mean_with_consensus_gros
             log_close, eligible, execution_mask, spec, slow_grid, slow_ema,
         )
     expected = sum(per_horizon.values()) / len(per_horizon)
-    actual = ev._slow_book_execution_weights(
+    actual = ev._horizon_ensemble_execution_weights(
         log_close, eligible, execution_mask, slow, slow_grid,
         "horizon_ensemble", "raw", slow_ema,
     )
@@ -2795,12 +2977,12 @@ def test_mhs_alpha_engine_slow_book_validates_mode_and_signal_kind(mhs_market) -
     slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
     with pytest.raises(ValueError, match="mode"):
-        ev._slow_book_execution_weights(
+        ev._horizon_ensemble_execution_weights(
             log_close, eligible, execution_mask, slow, slow_grid,
             "bogus", "raw", None,
         )
     with pytest.raises(ValueError, match="signal_kind"):
-        ev._slow_book_execution_weights(
+        ev._horizon_ensemble_execution_weights(
             log_close, eligible, execution_mask, slow, slow_grid,
             "single_horizon", "bogus", None,
         )

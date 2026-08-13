@@ -13,7 +13,7 @@ p-hack).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -133,6 +133,48 @@ def build_candidate_weights(
         h: _horizon_weights(log_close, eligible, sign, h, min_symbols, tranche_count)
         for h in horizon_candidates
     }
+
+
+def yearly_net_t_diagnostic(
+    weights: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    years: Sequence[int],
+    cost_bps: float,
+    periods_per_year: float,
+) -> dict[int, float]:
+    """Retrospective full-history per-calendar-year net t-stat (REPORT-ONLY).
+
+    This function NEVER feeds ``admission_t``, ``DiscoveryQualificationResult``,
+    or any capital/gate decision -- unlike ``select_horizon_by_discovery_qualification``
+    it is not confined to a discovery window and is a purely reporting statistic,
+    so a future reader must not mistake it for an admission input. Each
+    requested calendar year is scored with the same ``_score_masked_net_t``
+    primitive the gate itself uses, over the full ``weights`` panel. A year
+    with zero rows in the panel, or a year whose score is non-finite, is
+    returned as ``float('nan')`` -- never silently dropped, never ``0.0``.
+    """
+    if not years:
+        raise ValueError("years must not be empty")
+    if cost_bps < 0:
+        raise ValueError(f"cost_bps must be >= 0, got {cost_bps}")
+    if periods_per_year <= 0:
+        raise ValueError(f"periods_per_year must be > 0, got {periods_per_year}")
+    if not weights.index.equals(opens.index) or list(weights.columns) != list(opens.columns):
+        raise ValueError("weights and opens must be identically indexed and columned")
+    if not weights.index.equals(bar_funding.index) or list(weights.columns) != list(bar_funding.columns):
+        raise ValueError("weights and bar_funding must be identically indexed and columned")
+    index = weights.index
+    out: dict[int, float] = {}
+    for year in years:
+        mask = _year_mask(index, year)
+        if not mask.any():
+            out[year] = float("nan")
+            continue
+        out[year] = _score_masked_net_t(
+            weights, opens, bar_funding, mask, cost_bps, periods_per_year,
+        )
+    return out
 
 
 def select_horizon_by_discovery_qualification(
@@ -347,4 +389,5 @@ __all__ = [
     "DiscoveryQualificationResult",
     "fold_train_only_discovery_qualification",
     "select_horizon_by_discovery_qualification",
+    "yearly_net_t_diagnostic",
 ]
