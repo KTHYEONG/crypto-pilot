@@ -38,6 +38,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         beta_neutralize=args.beta_neutralize,
         ensemble_signal=args.ensemble_signal,
         trend_efficiency_overlay=args.trend_efficiency_overlay,
+        pnl_vol_target=not args.no_pnl_vol_target,
     )
     report = run_mhs_horizon_diagnostic(request)
     path = persist_mhs_horizon_diagnostic_report(
@@ -190,6 +191,18 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "regimes using the fast band's own horizon, composed with the "
             "existing regime cash scale (default False = byte-identical -- "
             "docs/specs/mhs_fast_reversal_overlay_redesign.md §2.3)"
+        ),
+    )
+    mhs.add_argument(
+        "--no-pnl-vol-target",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-out of the P&L vol-target layer: skip the multiplicative "
+            "P&L-vol-target rescale between Pass 1 and Pass 2 (default keeps "
+            "the layer on -- default flip requires the preregistered "
+            "fold-train-only criterion in "
+            "docs/specs/mhs_execution_friction_and_exposure_layers.md §6.1)"
         ),
     )
     mhs.add_argument(
