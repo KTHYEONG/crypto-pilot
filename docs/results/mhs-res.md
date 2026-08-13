@@ -1,83 +1,107 @@
 # MHS Horizon Diagnostic — Latest Result
 
-- **Document Date**: 2026-08-13 (23차, `mhs_carry_and_fast_fair_evaluation` P0 실측 완료 — `ADR_20260813_MHS_CARRY_AND_FAST_FAIR_EVALUATION`. 22차 이전 이력은 git 이력으로 복구 가능)
+- **Document Date**: 2026-08-13 (24차, 실행 성능 최적화 적용 후 Full 5y 프로덕션 구성 재실측 — `ADR_20260813_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION`. 23차 이전 이력은 git 이력으로 복구 가능)
 - **Domain**: Research / MHS (Multi-Horizon Market State)
-
----
-
-## 22차 (직전 기록) — breadth 포화 확정 + 펀딩비 캐리 leak-free 탈락
-
-- **Run**: `start=2021-01-01 end=2025-12-31 execution_timeframe=1m execution_universe_size=30 eligible_symbols=446 run_elapsed_seconds=728.98`
-- **CLI**: `--slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --discovery-gate --output-tier full`
-- **`effective_breadth` 실측**(신규 계측): `slow_momentum` 19-호라이즌 → $n_{\text{eff}}$=**1.41**(7.4%), `fast_reversal` 7-호라이즌 → $n_{\text{eff}}$=**1.57**(22.4%) — 19개 호라이즌을 동시 운용해도 유효 독립 베팅은 1.4~1.6개뿐임을 확정.
-- **펀딩비 캐리 전 구간 예비측정**(fold 미분리): 168h lookback net_t=**+4.02**, net_ann=**+27.4%/년**, momentum과의 일간수익 상관 **+0.22**.
-- **펀딩비 캐리 fold-train-only 재검증(3-fold, sign=±1)**: 3개 fold 전부 `funding_carry_lookback_hours=null` → `frozen_default` 폴백, admission 실패. 자본 배분 근거 없음.
-- **회귀 불변식**: `slow_momentum.primary_autocorr_sharpe=0.525673922813482`, `blend.primary_autocorr_sharpe=0.5196163403815739`, `realized_execution_roster_size=41.93` — 21차와 바이트 동일.
-- **Research-GO**: `eligible=False`, `reason_codes=[PRIMARY_AUTOCORR_SHARPE_BELOW_0_6, STRESS_SHARPE_NOT_POSITIVE, UNSPECIFIED_POLICY]`, `folds_passed=2/3`, `deflated_sharpe_ratio=0.5321328197543407`(`trials_attempted=20`).
-- **미해결로 남긴 질문**: admission floor(|t|≥2.0)가 fold-local(1년 남짓) 표본엔 과엄격해 momentum(168h)조차 fold-train discovery에서 매번 `frozen_default`로 폴백 — "펀딩비 캐리에 edge가 없다"가 아니라 "이 게이트로는 아직 못 살렸다"가 정확한 결론.
-
----
-
-## 23차 (이번 기록) — 게이트 자체 재심사 + fast_reversal에 momentum의 구제책 적용
-
-- **Run**: `start=2021-01-01 end=2025-12-31 execution_timeframe=5m execution_universe_size=30 eligible_symbols=446 run_elapsed_seconds=871.12 realized_execution_roster_size=41.93`
+- **Run**: `start=2021-01-01 end=2025-12-31 execution_timeframe=5m execution_universe_size=30 eligible_symbols=445 realized_execution_roster_size=41.934179584940985 run_elapsed_seconds=765.0 peak_rss=16.8GB`
 - **CLI**: `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --discovery-gate --output-tier full`
-- **Source**: [`report.json`](file:///home/kth/crypto-pilot/docs/results/mhs_horizon_diagnostic_artifacts/_full/report.json)
-- **목적**: 22차가 momentum에게 준 유일한 구제책(단일 호라이즌 argmax → 호라이즌 앙상블)을 `fast_reversal`에도 처음 적용하고, `funding_carry`를 momentum/reversal과 동일한 top-level discovery 경로(2021-2023)에 배선해 3개 후보를 같은 계측기·같은 창에서 나란히 비교.
+- **성능 최적화 적용**: C1 mark 프레임 캐시 / C2 window materialize+pass 재사용 / C3 window 단위 parquet 로드(preload 폐기) / C4 fold-safe discovery 병렬화
 
-### 3.1 top-level discovery/qualification 게이트 (2021-2023, admission_t=2.0 불변)
+> ⚠️ **데이터 drift 공지**: 본 실행의 `eligible_symbols=445`로 23차의 446과 다름(Parquet 소스 재수집). 동일 데이터 기준 원본 코드 대비 출력은 **bit-identical**(아래 §0 A/B). 수치 비교 시 23차 대비 차이는 코드 변경이 아닌 데이터 drift로 해석해야 함.
+
+---
+
+## 0. 성능 최적화 A/B (동일 데이터, 2026-08-13)
+
+| 지표 | 원본 코드 | 최적화 코드 (C1-C4) | Δ |
+| :--- | ---: | ---: | ---: |
+| Full 5y wall (기본 5m, gate off) | 684.9 s | **309.1 s** | **−55 %** |
+| Full 5y peak RSS (기본 5m, gate off) | 5.40 GB | **3.15 GB** | **−42 %** |
+| `slow_momentum.primary_autocorr_sharpe` | −0.549471229370105 | −0.549471229370105 | **bit-identical** |
+| `blend.primary_autocorr_sharpe` | 0.452119924579761 | 0.452119924579761 | **bit-identical** |
+| `realized_execution_roster_size` | 41.934179584940985 | 41.934179584940985 | **bit-identical** |
+| `test_mhs_replay_resources` checksum | `b7a7ffba…` | `b7a7ffba…` | **bit-identical** |
+| 6mo book worker / fold worker | 31.7 s / 61.5 s | 7.1 s / 17.5 s | −78 % / −72 % |
+
+- gate 구성(위 Run)의 peak RSS 16.8GB는 discovery 후보 웨이트 행렬(~13GB, slow 19 + fast 7 + funding 2×8 호라이즌 full-panel)이 지배 — 기존 구조 고유 비용이며, fold-safe와 top-level gate가 동일 후보를 중복 빌드하므로 dedupe로 추가 절감 여지 있음(후속 후보).
+
+---
+
+## 1. Top-level book 성과 (2021-2025, 5m 집행, horizon_ensemble)
+
+| Book | Horizon | Autocorr Sharpe | Naive Sharpe | Net Ann | CAGR | MaxDD | Turnover(x/yr) | Stress Sharpe |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| slow_momentum | 168h | **+0.536** | +0.472 | **+9.95 %** | +8.08 % | −22.7 % | 42.8 | +0.152 |
+| blend | 168h | +0.536 | +0.484 | +9.50 % | +7.91 % | **−20.2 %** | 42.0 | +0.146 |
+| fast_reversal | 48h | −0.840 | −0.789 | −7.26 % | −7.40 % | −32.2 % | 38.6 | −1.137 |
+
+- blend `target_gross=0.7507`, `cash_fraction=0.2493`, `deflated_sharpe_ratio=0.5470`.
+- `termination_counts`: `MISSING_DATA=62`, `UNKNOWN_TERMINATION=0` (전 구간 데이터 gap 62건, leak 없음).
+- fast_reversal은 ensemble 구제책 적용 후에도 autocorr·naive·stress 전부 음수 — **자본 가치 없음** 재확인.
+
+## 2. Anchored folds (strict primary, horizon `frozen_default` 168h/48h)
+
+| Fold | Autocorr Sharpe | Naive Sharpe | Stress Sharpe | Net Ann | Failures |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| 0 | +0.805 | +0.812 | +0.211 | +9.66 % | — |
+| 1 | **−0.267** | −0.308 | **−0.820** | −4.19 % | `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `STRESS_SHARPE_NOT_POSITIVE` |
+| 2 | **+1.505** | +1.134 | +0.931 | **+48.2 %** | — |
+
+- **Research-GO**: ❌ `eligible=False`, `reason_codes=[PRIMARY_AUTOCORR_SHARPE_BELOW_0_6, STRESS_SHARPE_NOT_POSITIVE, UNSPECIFIED_POLICY]`, `folds_passed=2/3`.
+
+## 3. Discovery gate & breadth (2021-2023, admission_t=2.0)
 
 | 후보 | admitted | selected_horizon |
 | :--- | :--- | :--- |
-| `momentum` | **False** | null |
-| `reversal` | **False** | null |
-| `funding_carry_long` | **False** | null |
-| `funding_carry_short` | **False** | null |
+| momentum | **False** | null |
+| reversal | **False** | null |
+| funding_carry_long | **False** | null |
+| funding_carry_short | **False** | null |
 
-- momentum(168h) discovery-window 연도별 net_t: 2021 **+2.09**(admission floor 겨우 통과) / 2022 **-0.03** / 2023 **-0.11** — 22차 §1.1과 동일 패턴 재확인.
+- `effective_breadth`: slow_horizon **1.4120/19** (7.4 %), fast_horizon **1.5720/7** (22.5 %) — 호라이즌 축 포화 재확인.
 
-### 3.2 `yearly_net_t_diagnostic` — 5년 전체(2021-2025) 보고용 (admission 미입력)
+## 4. `yearly_net_t_diagnostic` — 5년 전체 (admission 미입력, 보고용)
 
-| 연도 | slow_momentum | fast_reversal(ensemble 적용) | funding_carry |
+| 연도 | slow_momentum | fast_reversal | funding_carry |
 | :--- | ---: | ---: | ---: |
-| 2021 | -0.145 | -1.329 | -4.249 |
-| 2022 | +0.169 | +0.171 | -1.813 |
-| 2023 | -0.568 | -0.797 | -2.176 |
-| 2024 | +0.249 | -0.649 | -2.163 |
-| 2025 | **+1.690** | +0.116 | -1.016 |
+| 2021 | −0.145 | −1.329 | −4.249 |
+| 2022 | +0.169 | +0.171 | −1.813 |
+| 2023 | −0.568 | −0.797 | −2.176 |
+| 2024 | +0.249 | −0.649 | −2.163 |
+| 2025 | **+1.775** | −0.012 | −1.142 |
 
-- `fast_reversal`은 momentum과 동일한 호라이즌 앙상블 구제책을 적용해도 5년 중 admission_t=2.0을 넘는 해가 **단 한 해도 없음** — 22차 §1.2/23차 스펙 §2.3의 "구제할 좋은 해가 애초에 없다"는 예측이 실측으로 확정됨.
-- `funding_carry`는 5년 전 구간 **모두 강한 음수**(-4.25~-1.02) — discovery window 3년만 봤던 22차보다 근거가 강해짐: fold-local 표본 부족(게이트 검정력 문제)이 아니라 **실제로 edge가 없음**이 5년 전체 관측으로 확인됨.
+- `funding_carry_worst_year_corr`(2023) = **−0.2657** — 최악의 해 분산효과 방향은 있으나 funding_carry 전 해 손실로 자본화 근거 없음.
+- fast_reversal은 5년 중 admission_t=2.0 상회 해 **없음**; funding_carry 전 해 음수 → edge 부재 결론 유지.
 
-### 3.3 `year_restricted_correlation` — momentum 최악의 해(2023)에서의 분산 효과
+## 5. 통계 진단 (전 구간)
 
-- `funding_carry_worst_year_corr` = **-0.2657396963823415** (momentum이 가장 약했던 2023년에 한정한 funding_carry-momentum 일간수익 상관).
-- 표준 상관(22차, +0.13~+0.23, 전 구간)보다 최악의 해 상관이 오히려 더 음수 — 분산 효과의 방향 자체는 있음. 다만 funding_carry가 매년 손실이므로 이 분산가치를 자본으로 실현할 근거는 없음(§3.2와 결합 판단).
-
-### 3.4 회귀 불변식 확인
-
-- `slow_momentum.primary_autocorr_sharpe=0.525673922813482`, `blend.primary_autocorr_sharpe=0.5196163403815739` — 22차와 바이트 동일.
-- `fast_reversal.primary_autocorr_sharpe=-0.8401773720292106` — `fast_book_mode=horizon_ensemble` opt-in 적용 시 값(22차의 `single_horizon` 집행책 -1.669와 다름, 예상된 변화; 기본값은 여전히 `single_horizon`이라 프로덕션 경로는 무변경).
-- `research_go.eligible=False`, `reason_codes=[PRIMARY_AUTOCORR_SHARPE_BELOW_0_6, STRESS_SHARPE_NOT_POSITIVE, UNSPECIFIED_POLICY]`, `folds_passed=2/3`, `deflated_sharpe_ratio=0.5321328197543407`(`trials_attempted=20`) — 무변화.
-
-### 3.5 23차 요약
-
-| 항목 | 상태 |
+| 계측 | 값 |
 | :--- | :--- |
-| `yearly_net_t_diagnostic`(5년 전체, 순수 보고용) | ✅ 완료, 3개 후보 전부 실측 |
-| `year_restricted_correlation`(최악의 해 상관) | ✅ 완료, -0.266 |
-| `fast_book_mode` 플래그 + `_horizon_ensemble_execution_weights` 개명·배선 | ✅ 완료, opt-in 기본값 `single_horizon` 무회귀 |
-| funding_carry top-level discovery 배선 | ✅ 완료, momentum/reversal과 동일 창에서 비교 가능 |
-| `fast_reversal` 구제 시도 | ❌ 5년 전체에서도 admission 가능한 해 없음 — "쓸모없음"이 공정하게 검증됨 |
-| `funding_carry` 최종 판정 | ❌ 5년 전체 일관된 손실 — 게이트 검정력 문제가 아니라 edge 부재로 결론 강화 |
-| `admission_t=2.0` 및 자본 배분(`PHASE_1_BOOK_SPECS`/`PHASE_1_BOOK_BLEND_WEIGHTS`) | 무변경 (스펙 §4 금지사항 준수) |
+| `xs_rank_ic` | n_dates=43,704, mean_ic=**−0.04086**, t=**−46.02** (fwd=48) |
+| `date_clustered_regression` | n=8,257,895, n_dates=1,826, beta=**−0.01779**, t=**−1.32** |
+| `horizon_diagnostics` | realized_vol_48h=0.09112, efficiency_ratio_48h=0.14636 |
+| `bootstrap_ci` (net_1h) | **[−6.02e-6, +2.80e-5]** (하한 음수) |
+| deployment | CAGR=+7.91 %, MaxDD=−20.15 %, Calmar=0.3926, P(최종재산<초기)=16.25 % |
 
-## 4. 다음 스텝 후보
+- xs rank IC는 유의한 **음수** 역행 효과, 클러스터 t=−1.32로 48h 전방가격 예측력 유의하지 않음.
+
+## 6. 회귀 불변식 & 요약
+
+| 항목 | 값 |
+| :--- | :--- |
+| slow_momentum autocorr (24차, drift 데이터) | 0.5360654316354135 |
+| blend autocorr (24차, drift 데이터) | 0.5359443875092911 |
+| fast_reversal autocorr (24차, drift 데이터) | −0.840177372029221 |
+| deflated_sharpe | 0.546963269158657 |
+
+- 23차 값(0.525673922813482 등)과의 차이는 `eligible_symbols 446→445` 데이터 drift이며, **동일 데이터 A/B로 코드 변경이 출력에 미치는 영향은 0**임을 §0이 증명.
+- **결론 유지**: momentum(168h ensemble)만 유일한 생존 후보(5년 CAGR +8 %, fold 2의 +48 % 포함), fast_reversal·funding_carry는 5년 전체에서도 자본 근거 없음, Research-GO 미달 → 자본 배분·`PHASE_1_BOOK_SPECS`/`PHASE_1_BOOK_BLEND_WEIGHTS` 무변경.
+
+## 7. 다음 스텝 후보
 
 | 후보 | 상태 |
 | :--- | :--- |
-| momentum 3년 discovery window의 admission floor 검정력 재검토 (fold-local 표본 민감도, 22차부터 이어지는 미해결 질문) | 미착수, 사용자 판단 대기 |
-| 신규 수익원 후보 탐색 — OI, 청산, 현물-선물 베이시스 | 미착수 |
+| momentum 3년 discovery window admission floor(|t|≥2.0) 검정력 재검토 (fold-local 표본 민감도) | 미착수, 사용자 판단 대기 |
+| discovery 후보 웨이트 중복 빌드 dedupe (fold-safe ↔ top-level gate 공유, RAM/시간 추가 절감) | 신규, 미착수 |
 | `MHS_REGISTERED_POLICY_THRESHOLDS`(`cap_30_roster`, `primary_annual_return`) 등록 여부 | 미착수, 성과 무관 정책 결정 필요 |
-| `pnl_vol_target` 기본값 전환 여부 (사전등록 fold-train-only 기준, `mhs_execution_friction_and_exposure_layers.md` §6.1) | 미착수 |
-| `fast_book_mode`/`funding_carry` 자본 배분 여부 최종 판정 (본 계약의 실측 결과가 선행조건) | 미착수, 사용자 승인 필요 |
+| `pnl_vol_target` 기본값 전환 여부 (`mhs_execution_friction_and_exposure_layers.md` §6.1) | 미착수 |
+| `fast_book_mode`/`funding_carry` 자본 배분 최종 판정 (본 계약 실측이 선행조건) | 미착수, 사용자 승인 필요 |
