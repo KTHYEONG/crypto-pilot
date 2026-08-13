@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_CARRY_AND_FAST_FAIR_EVALUATION",
+      "date": "2026-08-13",
+      "adr_id": "ADR_20260813_MHS_CARRY_AND_FAST_FAIR_EVALUATION",
+      "domain": "research",
+      "title": "MHS 캐리·fast_reversal 공정 재심사",
+      "why": "22차 discovery 게이트가 funding_carry뿐 아니라 momentum도 탈락시켜 게이트 검정력 자체가 의심됐고, fast_reversal은 momentum이 받은 호라이즌 앙상블 구제책을 한 번도 받아본 적이 없었다",
+      "resolution": "yearly_net_t_diagnostic(5년 전체 보고용)/year_restricted_correlation(최악의 해 상관)/fast_book_mode 플래그(horizon_ensemble opt-in)/funding_carry top-level discovery 배선을 추가해 3개 후보를 동일 계측기·동일 창에서 공정 비교",
+      "impact": "fast_reversal은 구제책 적용 후에도 5년 전체 admission 가능한 해 없음, funding_carry는 5년 전 구간 일관된 손실로 edge 부재 결론 강화, admission_t/자본배분 무변경"
+    },
+    {
       "task_id": "TASK_MHS_RETURN_SOURCE_BREADTH_EXPANSION",
       "date": "2026-08-13",
       "adr_id": "ADR_20260813_MHS_RETURN_SOURCE_BREADTH_EXPANSION",
@@ -989,16 +999,6 @@
       "why": "등록·catalog 변경 없이 선택한 proposal 또는 expert 조합의 contextual master-ledger와 stress 성과를 재현하고 provenance에 기록",
       "resolution": "proposal_id/expert 목록 기반 library-admission-backtest CLI를 실행하고 base/stress 결과를 append-only runs ledger에 저장",
       "impact": "선정 후보 조합의 실제 성과와 promotion 판정을 scratch 파일 없이 재현 가능"
-    },
-    {
-      "task_id": "TASK_EXPERT_LIBRARY_CONTEXTUAL_ROUTING",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_EXPERT_LIBRARY_CONTEXTUAL_ROUTING",
-      "domain": "futures",
-      "title": "Deterministic contextual expert-library routing",
-      "why": "Expert 후보별 gate만으로는 상황별 specialist 선택이라는 의도를 구현하지 못했고, library 승격 단위와 router provenance가 명확히 필요했다.",
-      "resolution": "Added a causal six-state contextual winner router with block-aware conditional LCB, CASH fallback, next-bar turnover accounting, router-preserving blueprint fingerprints, strict context alignment, and composite master-ledger promotion tests. Kept ML deferred until a deterministic routed library has sealed evidence.",
-      "impact": "The runtime can now evaluate a pre-registered contextual library as one master equity, while the default catalog remains empty and CLI fails closed until an approved expert combination and router configuration are source-controlled and registered."
     }
   ]
 }
