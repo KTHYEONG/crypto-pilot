@@ -31,7 +31,7 @@ import psutil
 import pyarrow.parquet as pq
 
 from src.market_data.services.futures_collection import DataCollector
-from src.mhs.evaluation import cost_response_curve, phase_diagnostic_metrics, tail_sensitivity_curve
+from src.mhs.evaluation import phase_diagnostic_metrics
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
 from src.mhs.execution import replay_execution_windows
@@ -49,7 +49,10 @@ from src.mhs.books import (
     renormalize_within_mask,
 )
 from src.mhs.contracts import MHS_DISCOVERY_START
+from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS
+from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
 from src.mhs.contracts import (
+    MEASURED_EXECUTION_COST_TIERS_BPS,
     MHS_CRASH_REGIME_REFERENCE_SYMBOLS,
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
@@ -61,6 +64,8 @@ from src.mhs.regime import (
     causal_market_beta,
     crash_regime_tilt_weights,
 )
+from src.mhs.evaluation import book_evidence
+from src.mhs.evaluation import deflated_sharpe_ratio
 from src.mhs.evaluation import (
     CostResponsePoint,
     PhaseDiagnosticResult,
@@ -240,6 +245,13 @@ class MhsDiagnosticRequest:
     bounded 24-hour causal carry for diagnostic-only continuity. The latter is
     never a strict Research-GO source. ``ohlcv_close_fallback`` deliberately
     passes ``None`` for fixtures and explicit comparison runs only.
+
+    ``execution_universe_size`` is the ENTRY rank threshold for the PIT
+    top-volume execution roster, not the realized holdings count: hysteresis
+    retains members past the entry rank, so realized holdings are approximately
+    ``execution_universe_size * (1 + hysteresis effect)``, NOT
+    ``execution_universe_size`` (see ``realized_execution_roster_size`` on
+    ``MhsHorizonDiagnosticReport``).
     """
 
     start: str | pd.Timestamp | None = None
@@ -261,6 +273,7 @@ class MhsDiagnosticRequest:
     beta_neutralize: bool = False
     ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
     trend_efficiency_overlay: bool = False
+    pnl_vol_target: bool = True
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -287,6 +300,8 @@ class MhsDiagnosticRequest:
             raise ValueError(f"unknown ensemble_signal '{self.ensemble_signal}'")
         if not isinstance(self.trend_efficiency_overlay, bool):
             raise ValueError("trend_efficiency_overlay must be a bool")
+        if not isinstance(self.pnl_vol_target, bool):
+            raise ValueError("pnl_vol_target must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +351,16 @@ class MhsBookReport:
     patient_reference_naive_sharpe: float | None = None
     pre_vol_target_reference: StrategyExecutionReplayResult | None = None
     pre_vol_target_reference_naive_sharpe: float | None = None
+    executed_prescreen: dict[float, CostResponsePoint] | None = None
+    executed_tail: TailSensitivityResult | None = None
+    executed_prescreen_net_t: float | None = None
+    primary_realized_shortfall_bps: float | None = None
+    primary_notional_weighted_shortfall_bps: float | None = None
+    stress_realized_shortfall_bps: float | None = None
+    stress_notional_weighted_shortfall_bps: float | None = None
+    primary_fill_count: int | None = None
+    primary_unfilled_count: int | None = None
+    primary_forced_exit_notional: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,6 +446,7 @@ class MhsHorizonDiagnosticReport:
     run_elapsed_seconds: float
     resource_measurements: tuple[MhsResourceMeasurement, ...] = ()
     discovery_qualification: dict[str, DiscoveryQualificationResult] | None = None
+    realized_execution_roster_size: float | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -628,13 +654,19 @@ def _pit_execution_mask(
 ) -> pd.DataFrame:
     """Select the PIT top-volume execution roster with entry/exit hysteresis.
 
-    A symbol enters only by reaching the top ``universe_size`` trailing-volume
-    rank; once a member, it is kept until its rank falls outside
+    ``universe_size`` is the ENTRY rank threshold only: a symbol enters by
+    reaching the top ``universe_size`` trailing-volume rank, and once a member
+    it is kept until its rank falls outside
     ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER`` (a Schmitt-trigger
-    band). This prevents rank-boundary flicker from forcing a full entry/exit
-    trade on every decision when the signal itself has not changed. The exit
-    multiplier is an engineering default, not a measured constant; the fold/
-    full-period replay is the empirical check (docs/specs/mhs_roster_hysteresis_vol_tilt.md).
+    band). Because hysteresis retains members that have slipped past the entry
+    threshold, the realized number of holdings is approximately
+    ``universe_size * (1 + hysteresis effect)``, NOT ``universe_size`` (measured
+    ~41.9 vs a declared 30) -- the true mean per-row True count is exposed as
+    ``MhsHorizonDiagnosticReport.realized_execution_roster_size``. This prevents
+    rank-boundary flicker from forcing a full entry/exit trade on every decision
+    when the signal itself has not changed. The exit multiplier is an
+    engineering default, not a measured constant; the fold/full-period replay is
+    the empirical check (docs/specs/mhs_roster_hysteresis_vol_tilt.md).
     """
     exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
     trailing = quote_volume.rolling(720, min_periods=720).mean()
@@ -1728,22 +1760,37 @@ def _book_outcome(
 ) -> MhsBookReport:
     weights_1h = weights_step.reindex(grid_1h).ffill().fillna(0.0)
     cost_grid = tuple(dict.fromkeys((0.0, 2.0, 4.0, 8.0, *required_cost_tiers())))
-    prescreen = cost_response_curve(
-        weights_1h, opens, bar_funding, cost_grid, _PERIODS_PER_YEAR_1H,
+    reference_evidence = book_evidence(
+        weights_1h, opens, bar_funding, cost_grid, _PERIODS_PER_YEAR_1H, event_window_bars,
     )
-
-    effective_weights = weights_1h.shift(2).fillna(0.0)
-    fwd = opens.pct_change()
-    _net, turnover = mhs_ledger_pnl(weights_1h, opens, bar_funding, 8.0)
-    tail = tail_sensitivity_curve(
-        effective_weights, fwd, turnover, 8.0, _PERIODS_PER_YEAR_1H, event_window_bars,
-    )
-    # The pre-screen matrices are consumed by ``prescreen``/``tail`` above and
-    # hold no references from those results.  Releasing them before the minute
+    prescreen = reference_evidence.prescreen
+    tail = reference_evidence.tail
+    # The pre-screen matrices are consumed by ``book_evidence`` above and hold
+    # no references from those results.  Releasing them before the minute
     # replay keeps three full multi-year price/weight matrices out of the replay
     # baseline (spec §3.1, ``memory_opt``).
-    del weights_1h, effective_weights, fwd, _net, turnover
+    del weights_1h, reference_evidence
     gc.collect()
+
+    # RC-1: the same significance instruments, pointed at the book that
+    # actually carries capital (roster + ensemble + tilt + regime scale). The
+    # reference (``weights_step``) and executed (``replay_weights_step``) books
+    # are now measured side by side under distinct labels.
+    executed_prescreen: dict[float, CostResponsePoint] | None = None
+    executed_tail: TailSensitivityResult | None = None
+    executed_prescreen_net_t: float | None = None
+    if replay_weights_step is not None:
+        replay_weights_1h = replay_weights_step.reindex(grid_1h).ffill().fillna(0.0)
+        executed_evidence = book_evidence(
+            replay_weights_1h, opens, bar_funding, cost_grid, _PERIODS_PER_YEAR_1H, event_window_bars,
+        )
+        executed_prescreen = executed_evidence.prescreen
+        executed_tail = executed_evidence.tail
+        executed_prescreen_net_t = executed_evidence.prescreen[
+            MEASURED_EXECUTION_COST_TIERS_BPS["base"]
+        ].net_t
+        del replay_weights_1h, executed_evidence
+        gc.collect()
 
     target_weights = (replay_weights_step if replay_weights_step is not None else weights_step).reindex(step_grid)
     if request.rebalance_filter == "portfolio_trigger":
@@ -1807,10 +1854,11 @@ def _book_outcome(
         pnl_vol_target_scale = _pnl_vol_target_scale(
             primary.ledger.equity.resample("1D").last().pct_change()
         )
-        target_replay = target_replay.mul(
-            pnl_vol_target_scale.reindex(target_replay.index, method="ffill").fillna(1.0),
-            axis=0,
-        )
+        if request.pnl_vol_target:
+            target_replay = target_replay.mul(
+                pnl_vol_target_scale.reindex(target_replay.index, method="ffill").fillna(1.0),
+                axis=0,
+            )
         pre_vol_target_reference = primary
         pre_vol_target_reference_naive_sharpe = _naive_sharpe(primary.ledger)
         # Pass 2 (reported) replays the SAME scaled target_replay Pass 1's own
@@ -1910,6 +1958,9 @@ def _book_outcome(
             patient_reference_naive_sharpe=patient_reference_naive_sharpe,
             pre_vol_target_reference=pre_vol_target_reference,
             pre_vol_target_reference_naive_sharpe=pre_vol_target_reference_naive_sharpe,
+            executed_prescreen=executed_prescreen,
+            executed_tail=executed_tail,
+            executed_prescreen_net_t=executed_prescreen_net_t,
         )
     equity_1h, net_returns_1h, turnover_1h = _hourly_ledger_series(
         primary.ledger.equity, primary.ledger.fill_turnover,
@@ -1942,6 +1993,16 @@ def _book_outcome(
         patient_reference_naive_sharpe=patient_reference_naive_sharpe,
         pre_vol_target_reference=pre_vol_target_reference,
         pre_vol_target_reference_naive_sharpe=pre_vol_target_reference_naive_sharpe,
+        executed_prescreen=executed_prescreen,
+        executed_tail=executed_tail,
+        executed_prescreen_net_t=executed_prescreen_net_t,
+        primary_realized_shortfall_bps=primary.all_intent_shortfall_bps,
+        primary_notional_weighted_shortfall_bps=primary.notional_weighted_shortfall_bps,
+        stress_realized_shortfall_bps=stress.all_intent_shortfall_bps,
+        stress_notional_weighted_shortfall_bps=stress.notional_weighted_shortfall_bps,
+        primary_fill_count=primary.fill_count,
+        primary_unfilled_count=primary.unfilled_count,
+        primary_forced_exit_notional=primary.forced_exit_notional,
     )
 
 
@@ -2703,6 +2764,77 @@ def _run_folds_parallel(
     return ordered
 
 
+def _per_observation_sharpe(returns: pd.Series) -> float:
+    """Per-observation (non-annualized) sample Sharpe of a return series.
+
+    ``mean / std`` with no ``sqrt(periods_per_year)`` scaling, matching the
+    per-observation input contract of ``probabilistic_sharpe_ratio``/
+    ``deflated_sharpe_ratio``. Degenerate zero-variance returns NaN so a
+    non-finite observed Sharpe never reaches the deflation statistic.
+    """
+    returns = returns.dropna()
+    if len(returns) < 2:
+        return float("nan")
+    sd = float(returns.std(ddof=1))
+    if sd <= 0.0:
+        return float("nan")
+    return float(returns.mean() / sd)
+
+
+def _deflated_sharpe_evidence(
+    blend_report: MhsBookReport | None,
+    folds: tuple[MhsFoldReport, ...],
+    n_trials: int,
+) -> float | None:
+    """Per-observation deflated Sharpe of the blend primary against the
+    anchored-fold trial dispersion (docs/specs/mhs_strategy_foundation_reset.md RC-6).
+
+    The observed trial is the blend primary ledger's per-observation Sharpe; the
+    trial dispersion is the sample variance of the per-observation Sharpe across
+    the anchored folds (each fold is one independent validation replay), and the
+    number of trials is the preregistered ``MHS_SEARCH_TRIALS_ATTEMPTED``
+    constant. Returns None when there is no replayable blend primary or no fold
+    trial; the pure ``deflated_sharpe_ratio`` statistic remains the single
+    source of the Bailey-LdP arithmetic.
+    """
+    if blend_report is None or blend_report.primary is None or not folds:
+        return None
+    _equity_1h, net_returns_1h, _turnover = _hourly_ledger_series(
+        blend_report.primary.ledger.equity,
+        blend_report.primary.ledger.fill_turnover,
+    )
+    observed_sr = _per_observation_sharpe(net_returns_1h)
+    if not np.isfinite(observed_sr):
+        return None
+    trial_sharpes: list[float] = []
+    for fold in folds:
+        if fold.strict is None or fold.failures:
+            continue
+        _fold_equity, fold_net, _fold_turnover = _hourly_ledger_series(
+            fold.strict.ledger.equity, fold.strict.ledger.fill_turnover,
+        )
+        trial_sharpes.append(_per_observation_sharpe(fold_net))
+    if not trial_sharpes:
+        return None
+    trial_variance = (
+        float(np.var(trial_sharpes, ddof=1)) if len(trial_sharpes) >= 2 else 0.0
+    )
+    returns = net_returns_1h.dropna()
+    if len(returns) < 2:
+        return None
+    result = deflated_sharpe_ratio(
+        observed_sr,
+        trial_variance,
+        n_trials,
+        len(returns),
+        float(returns.skew()),
+        float(returns.kurt()) + 3.0,
+    )
+    # Fail closed: a degenerate skew/kurtosis can push the statistic to NaN,
+    # which must never leak into the report payload as a real deflated value.
+    return result if np.isfinite(result) else None
+
+
 def _mhs_research_go(
     folds: tuple[MhsFoldReport, ...],
     book_reasons: tuple[str, ...] = (),
@@ -2714,9 +2846,11 @@ def _mhs_research_go(
     Sharpe each block the decision with a stable reason code. A book-level
     strict replay rejection (capital invariant breach, execution gap, invalid
     primary, or resource-budget breach) is aggregated with the fold reasons.
-    The cap-30 and primary annual-return gate thresholds are not preregistered
-    in source contracts, so those checks are reported as ``UNSPECIFIED_POLICY``
-    and keep Research GO conservative (false) until explicitly registered.
+    The cap-30 roster and primary annual-return gate thresholds live in
+    ``MHS_REGISTERED_POLICY_THRESHOLDS``; while any is unregistered (``None``)
+    the decision reports ``UNSPECIFIED_POLICY`` and stays conservative (false).
+    Once every threshold is deliberately registered, ``eligible`` responds to
+    the fold evidence alone (docs/specs/mhs_strategy_foundation_reset.md RC-5).
     """
     reasons: list[str] = list(book_reasons)
     passed = 0
@@ -2727,7 +2861,11 @@ def _mhs_research_go(
         if not fold_report.failures:
             passed += 1
         reasons.extend(fold_report.failures)
-    reasons.append(MHS_GO_REASON_UNSPECIFIED_POLICY)
+    # P0-D: UNSPECIFIED_POLICY only when a registered policy threshold is absent.
+    # Registering every threshold makes the gate reachable, so ``eligible`` can
+    # respond to actual evidence instead of being structurally always False.
+    if any(v is None for v in MHS_REGISTERED_POLICY_THRESHOLDS.values()):
+        reasons.append(MHS_GO_REASON_UNSPECIFIED_POLICY)
     reasons = sorted(set(reasons))
     return MhsResearchGoResult(
         eligible=not reasons,
@@ -2881,6 +3019,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+    realized_execution_roster_size = float(execution_mask.sum(axis=1).mean())
     w_fast_tilted = inverse_realized_vol_tilt(
         w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
     )
@@ -3026,7 +3165,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         )
     )
 
-    trials_attempted = 1
+    trials_attempted = MHS_SEARCH_TRIALS_ATTEMPTED
     deflated_sharpe_ratio = None
 
     bootstrap_ci: tuple[float, float] | None = None
@@ -3050,6 +3189,9 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         fold_funding, initial_equity, telemetry, fold_slow_horizons, fold_fast_horizons,
     )
     folds = tuple(fold_reports)
+    deflated_sharpe_ratio = _deflated_sharpe_evidence(
+        blend_report, folds, trials_attempted,
+    )
     research_go = _mhs_research_go(folds, book_reasons)
 
     if blend_report is not None and blend_report.primary is not None:
@@ -3129,6 +3271,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         run_elapsed_seconds=run_elapsed_seconds,
         resource_measurements=telemetry.records,
         discovery_qualification=discovery_qualification,
+        realized_execution_roster_size=realized_execution_roster_size,
     )
 
 
