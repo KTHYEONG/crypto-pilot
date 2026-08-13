@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_RETURN_SOURCE_BREADTH_EXPANSION",
+      "date": "2026-08-13",
+      "adr_id": "ADR_20260813_MHS_RETURN_SOURCE_BREADTH_EXPANSION",
+      "domain": "research",
+      "title": "MHS breadth 포화 실측 확정 + 펀딩비 캐리 leak-free 검증 기각",
+      "why": "21차까지 튜닝해온 호라이즌/종목 축이 실제로 breadth를 늘리는지 MHS 자체 데이터로 측정된 적이 없었다. 참조책/집행책 계측 정합화(21차) 이후에도 Sharpe가 0.5선에 갇힌 구조적 원인을 규명하기 위해 effective_breadth 계측을 신설하고, 파이프라인에 이미 로드되나 신호로 쓰인 적 없는 펀딩비율을 신규 수익원 후보로 검증했다.",
+      "resolution": "effective_breadth(참여비율 통계) 순수함수 신설 및 discovery_gate 경로에 배선(slow/fast 호라이즌 축 노출). funding_carry_signal + build_funding_carry_candidate_weights(src/mhs/funding.py 신규) 신설, 기존 discovery.py 게이트를 sign-agnostic 그대로 재사용해 fold-train-only 검증 배선. PHASE_1_BOOK_SPECS/BLEND_WEIGHTS는 무변경(진단 전용, 자본 배분 없음). 22차 실측(2021-2025 dev, --discovery-gate --fold-safe-horizon): slow_horizon_effective_breadth=1.41/19, fast_horizon_effective_breadth=1.57/7 확정 — 호라이즌 축 포화 재확인. funding_carry는 전 구간 예비측정(net_t=+4.15@4.18bps)에서는 강했으나 3개 fold 전부 leak-free discovery/qualification에서 admission 실패(frozen_default)로 자본 배분 근거 없음.",
+      "impact": "호라이즌 축 확장(16-18차)이 breadth를 사실상 늘리지 못했다는 것이 실측으로 확정됨 — 향후 호라이즌 그리드 재조정 시도는 근거 없이는 재개하지 않는다. 펀딩비 캐리는 유망해 보였으나 첫 leak-free 라운드에서 탈락 — 이 결과가 신호 자체의 부재인지 fold-local 표본에 과도히 엄격한 admission floor(ADR_20260811 기존 우려) 때문인지는 미해결로 남아 후속 판단 필요. 기존 primary/stress/folds/blend 수치는 바이트 동일(회귀 없음)."
+    },
+    {
       "task_id": "TASK_MHS_STRATEGY_FOUNDATION_RESET",
       "date": "2026-08-13",
       "adr_id": "ADR_20260813_MHS_STRATEGY_FOUNDATION_RESET",
@@ -989,16 +999,6 @@
       "why": "Expert 후보별 gate만으로는 상황별 specialist 선택이라는 의도를 구현하지 못했고, library 승격 단위와 router provenance가 명확히 필요했다.",
       "resolution": "Added a causal six-state contextual winner router with block-aware conditional LCB, CASH fallback, next-bar turnover accounting, router-preserving blueprint fingerprints, strict context alignment, and composite master-ledger promotion tests. Kept ML deferred until a deterministic routed library has sealed evidence.",
       "impact": "The runtime can now evaluate a pre-registered contextual library as one master equity, while the default catalog remains empty and CLI fails closed until an approved expert combination and router configuration are source-controlled and registered."
-    },
-    {
-      "task_id": "TASK_TECHNICAL_EXPERT_EQUITY_EXHAUSTION",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_TECHNICAL_EXPERT_EQUITY_EXHAUSTION",
-      "domain": "execution",
-      "title": "Technical expert short equity exhaustion fail-closed handling",
-      "why": "Short backtests could produce non-positive marked equity and crash the reliability gate.",
-      "resolution": "Raised DataIntegrityError at equity exhaustion and converted evaluation failures into pending reports.",
-      "impact": "Previously crashing short CLI runs now terminate safely as PENDING without invalid reliability metrics."
     }
   ]
 }
