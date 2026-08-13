@@ -154,6 +154,16 @@ MOMENTUM_HORIZON_CANDIDATES_HOURS: tuple[int, ...] = (
 )
 _SLOW_BAND = HorizonBand(name="slow_momentum", horizons_hours=MOMENTUM_HORIZON_CANDIDATES_HOURS, sign=1)
 
+# Measured candidate grid for the funding-rate carry return source
+# (docs/specs/mhs_return_source_breadth_expansion.md §2). A measured candidate
+# grid -- not a frozen BookSpec -- following the exact governance pattern of
+# REVERSAL_HORIZON_CANDIDATES_HOURS/MOMENTUM_HORIZON_CANDIDATES_HOURS: the
+# fold-scoped discovery/qualification gate selects from it on fold-train-only
+# evidence, and it is explicitly NOT wired into PHASE_1_BOOK_SPECS or
+# PHASE_1_BOOK_BLEND_WEIGHTS in this contract (P0 diagnostic only; capital
+# allocation is P1 gated on the fold-train results).
+MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS: tuple[int, ...] = (24, 72, 168, 336, 504)
+
 PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
     "fast_reversal": BookSpec(
         band=_FAST_BAND, horizon_hours=48, step_hours=6, min_symbols=8,

@@ -34,6 +34,30 @@ def _sharpe(series: pd.Series, periods_per_year: float) -> float:
         return float("inf") if mean > 0 else float("-inf")
     return float(mean / sd * math.sqrt(periods_per_year))
 
+def effective_breadth(returns: pd.DataFrame) -> tuple[float, float]:
+    """Participation-ratio effective breadth of a return panel.
+
+    ``n_eff = (sum(lambda))^2 / sum(lambda^2)`` over the eigenvalues of the
+    return correlation matrix, plus the mean pairwise correlation. Non-finite
+    correlation entries (zero-variance columns) become 0.0 before the
+    eigendecomposition and the diagonal is forced to 1.0, matching quant.md's
+    numerical-stability convention. Fails closed on fewer than 2 columns or 2
+    rows; the final ``n_eff`` is clipped to ``[1.0, n_columns]``.
+    """
+    n_columns, n_rows = returns.shape[1], returns.shape[0]
+    if n_columns < 2 or n_rows < 2:
+        raise ValueError(
+            f"effective_breadth requires >= 2 columns and >= 2 rows, got {returns.shape}"
+        )
+    corr = returns.corr().to_numpy()
+    corr = np.where(np.isfinite(corr), corr, 0.0)
+    np.fill_diagonal(corr, 1.0)
+    eigenvalues = np.clip(np.linalg.eigvalsh(corr), 0.0, None)
+    n_eff = float((eigenvalues.sum() ** 2) / (eigenvalues**2).sum())
+    n_eff = float(np.clip(n_eff, 1.0, n_columns))
+    mean_corr = float((corr.sum() - n_columns) / (n_columns * (n_columns - 1)))
+    return n_eff, mean_corr
+
 
 @dataclass(frozen=True, slots=True)
 class PhaseDiagnosticResult:
