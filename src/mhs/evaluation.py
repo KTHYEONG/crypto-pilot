@@ -12,10 +12,13 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
 from src.mhs.execution import mhs_ledger_pnl
+
+_EULER_GAMMA = 0.577215664901532860606512090082402431
 
 
 def _zero_variance(sd: float, mean: float) -> bool:
@@ -69,6 +72,20 @@ class TailSensitivityResult:
     top5_event_share: float
     top1pct_events_share: float
     leave_worst_event_out_sharpe: float
+
+
+@dataclass(frozen=True, slots=True)
+class BookEvidence:
+    """Pre-screen + tail evidence for exactly one capital book.
+
+    Carries both significance instruments (``prescreen`` and ``tail``) for a
+    single weight book so two distinct books -- the reference book and the
+    executed book -- can be measured side by side under distinct labels instead
+    of being conflated under one name (docs/specs/mhs_strategy_foundation_reset.md RC-1).
+    """
+
+    prescreen: dict[float, CostResponsePoint]
+    tail: TailSensitivityResult
 
 
 def phase_diagnostic_metrics(
@@ -242,6 +259,51 @@ def tail_sensitivity_curve(
     )
 
 
+def book_evidence(
+    weights_1h: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    cost_grid_bps: tuple[float, ...],
+    periods_per_year: float,
+    event_window_bars: int,
+    tail_one_way_bps: float = 8.0,
+) -> BookEvidence:
+    """Pre-screen + tail significance evidence for one weight book.
+
+    Pure extraction of the inline construction the MHS orchestrator previously
+    reserved for the reference (zero-capital) book, so the identical instruments
+    can also point at the executed book (roster + ensemble + tilt + regime
+    scale) that actually carries capital. ``cost_response_curve``,
+    ``tail_sensitivity_curve``, and ``mhs_ledger_pnl`` are reused unchanged; no
+    statistic is reimplemented. Intermediates are released before returning so
+    two books' evidence never leaves extra multi-year matrices resident
+    (docs/specs/mhs_strategy_foundation_reset.md RC-1, P0-A).
+    """
+    if not cost_grid_bps:
+        raise ValueError("cost_grid_bps must not be empty")
+    if any(c < 0 for c in cost_grid_bps):
+        raise ValueError("cost rates must be >= 0")
+    if periods_per_year <= 0:
+        raise ValueError(f"periods_per_year must be > 0, got {periods_per_year}")
+    if event_window_bars < 1:
+        raise ValueError(f"event_window_bars must be >= 1, got {event_window_bars}")
+    if tail_one_way_bps < 0:
+        raise ValueError(f"tail_one_way_bps must be >= 0, got {tail_one_way_bps}")
+
+    prescreen = cost_response_curve(
+        weights_1h, opens, bar_funding, cost_grid_bps, periods_per_year,
+    )
+
+    effective_weights = weights_1h.shift(2).fillna(0.0)
+    fwd = opens.pct_change()
+    _net, turnover = mhs_ledger_pnl(weights_1h, opens, bar_funding, tail_one_way_bps)
+    tail = tail_sensitivity_curve(
+        effective_weights, fwd, turnover, tail_one_way_bps, periods_per_year, event_window_bars,
+    )
+    del effective_weights, fwd, _net, turnover
+    return BookEvidence(prescreen=prescreen, tail=tail)
+
+
 def autocorrelation_adjusted_sharpe(
     daily_net_returns: pd.Series,
     annualization_days: int = 365,
@@ -285,6 +347,67 @@ def autocorrelation_adjusted_sharpe(
         acf_sum += (1.0 - k / (max_lag_days + 1)) * rho
     denom = max(1.0 + 2.0 * acf_sum, 1e-12)
     return sample_sharpe / math.sqrt(denom)
+
+
+def probabilistic_sharpe_ratio(
+    observed_sr: float,
+    benchmark_sr: float,
+    n_obs: int,
+    skew: float,
+    kurtosis: float,
+) -> float:
+    """Probabilistic Sharpe Ratio (Bailey & Lopez de Prado): normal CDF of the
+    probability that the true (non-annualized) Sharpe exceeds ``benchmark_sr``.
+
+    All Sharpe inputs are per-observation (non-annualized): the raw ``mean/std``
+    of the return series, never scaled by ``sqrt(periods_per_year)``.
+    ``kurtosis`` is the full (non-excess) fourth standardized moment, so pass
+    ``excess_kurtosis + 3.0``. Returns NaN (never ``inf`` or a complex value)
+    when the denominator radicand is not strictly positive.
+    """
+    if n_obs < 2:
+        raise ValueError(f"n_obs must be >= 2, got {n_obs}")
+    radicand = 1.0 - skew * observed_sr + ((kurtosis - 1.0) / 4.0) * observed_sr**2
+    if radicand <= 0.0:
+        return float("nan")
+    z = (observed_sr - benchmark_sr) * math.sqrt(n_obs - 1.0) / math.sqrt(radicand)
+    return float(norm.cdf(z))
+
+
+def deflated_sharpe_ratio(
+    observed_sr: float,
+    trial_sr_variance: float,
+    n_trials: int,
+    n_obs: int,
+    skew: float,
+    kurtosis: float,
+) -> float:
+    """Deflated Sharpe Ratio (Bailey & Lopez de Prado): PSR against the expected
+    maximum Sharpe over ``n_trials`` independent trials under the null.
+
+    The benchmark is ``sqrt(trial_sr_variance) * ((1 - gamma) * Phi_inv(1 - 1/N)
+    + gamma * Phi_inv(1 - 1/(N*e)))`` with ``gamma`` the Euler-Mascheroni
+    constant. All Sharpe inputs are per-observation (non-annualized);
+    ``trial_sr_variance`` is the variance of the per-observation Sharpe across
+    trials. With zero trial dispersion the benchmark collapses to zero and the
+    result equals the plain PSR against a zero benchmark.
+    """
+    if n_trials < 1:
+        raise ValueError(f"n_trials must be >= 1, got {n_trials}")
+    if n_obs < 2:
+        raise ValueError(f"n_obs must be >= 2, got {n_obs}")
+    if trial_sr_variance < 0.0:
+        raise ValueError(
+            f"trial_sr_variance must be >= 0, got {trial_sr_variance}"
+        )
+    if trial_sr_variance == 0.0:
+        return probabilistic_sharpe_ratio(observed_sr, 0.0, n_obs, skew, kurtosis)
+    sd = math.sqrt(trial_sr_variance)
+    max_benchmark = sd * (
+        (1.0 - _EULER_GAMMA) * norm.ppf(1.0 - 1.0 / n_trials)
+        + _EULER_GAMMA * norm.ppf(1.0 - 1.0 / (n_trials * math.e))
+    )
+    return probabilistic_sharpe_ratio(observed_sr, max_benchmark, n_obs, skew, kurtosis)
 
 
 @dataclass(frozen=True, slots=True)
