@@ -1,6 +1,7 @@
 # MHS Horizon Diagnostic — Latest Result
 
-- **Document Date**: 2026-08-13 (20차, `mhs_capital_floor_and_overlay_validation` 실측 완료 — §9 참고. 19차까지의 §1-§8은 아래 그대로 보존)
+- **Document Date**: 2026-08-13 (21차, `mhs_strategy_foundation_reset` + `mhs_execution_friction_and_exposure_layers` 실측 완료 — §10 참고, `ADR_20260813_MHS_STRATEGY_FOUNDATION_RESET`. 20차까지의 §1-§9는 아래 그대로 보존)
+- **Document Date (20차)**: 2026-08-13 (20차, `mhs_capital_floor_and_overlay_validation` 실측 완료 — §9 참고. 19차까지의 §1-§8은 아래 그대로 보존)
 - **Document Date (19차)**: 2026-08-13 (19차, `mhs_fast_reversal_overlay_redesign` 최초 실측 — §8 참고. 18차까지의 §1-§7은 아래 그대로 보존)
 - **Document Date (18차)**: 2026-08-12 (18차, `mhs_universe_horizon_redesign` 적용 재실행 — `--slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon`)
 - **Domain**: Research / MHS (Multi-Horizon Market State)
@@ -239,3 +240,112 @@ fold별 CAGR이 처음으로 신뢰 가능한 수치로 노출됨 — fold1(2024
 | C. 트렌드효율성 오버레이 | ✅ 실측 완료 — **부정적 결과**, 기본값 `False` 유지 |
 | D. fold1(2024) 근본원인 | 부분 진단(만성적 choppy 패턴 확인) — **근본 해결은 미해결로 이월** |
 | E. blend replay `regime_scale` 미반영 | ✅ 신규 발견 + 해결, 실측 확인 |
+
+## 10. 21차 — 계측기 정합화(RC-1) 및 실행 마찰·노출 레이어 재조준 (`ADR_20260813_MHS_STRATEGY_FOUNDATION_RESET`)
+
+> 20차까지 반복된 무개선의 **기계적 원인**을 규명했다: 모든 유의성 계측기(`prescreen`/`phase`/`tail`/`xs_rank_ic`)가
+> **자본 0%인 참조책**을 측정해 왔고, `research_go.eligible`은 성과와 무관하게 **구조적으로 영구 False**였다.
+> 스펙: `mhs_strategy_foundation_reset.md`(P0), `mhs_execution_friction_and_exposure_layers.md`(P1~P4).
+> **CLI**: `research run portfolio mhs-horizon-diagnostic --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --output-tier full` (2021-2025 dev, `status=COMPLETE`, `run_elapsed_seconds=570.7`).
+
+### 10.1 RC-1 — 참조책 vs 집행책 실측 재현
+
+`_book_outcome`은 `prescreen`/`phase`/`tail`을 자본 0%인 `weights_step`(446종목 단일 168h, 로스터·앙상블 없음)으로,
+`primary`/`stress`는 100% 자본이 도는 `replay_weights_step`(로스터+19-호라이즌 앙상블+역변동성 틸트+regime scale)으로
+계산해 왔다 — 두 개는 다른 포트폴리오인데 같은 book 이름 아래 보고돼 왔다. 이번 21차에 신설된 `executed_prescreen`이
+동일 계측기(`cost_response_curve`)를 집행책에 겨눈 결과를 처음으로 나란히 노출한다:
+
+| book | 지표 (4.18bps) | 참조책 (`prescreen`) | **집행책 (`executed_prescreen`)** |
+| :--- | :--- | ---: | ---: |
+| slow_momentum | net_t | 0.642 | **1.505** |
+| slow_momentum | net_sharpe | 0.287 | **0.673** |
+| blend | net_t | 0.779 | **1.729** |
+| fast_reversal | net_t | -1.230 | **-1.669** |
+
+**이것이 20차까지 "여러 번 수정에도 개선 없음"의 기계적 원인이다** — 계측기가 실제 전략에 연결돼 있지 않았으므로
+어떤 수정도 계측값을 의도한 방향으로 움직일 수 없었다. slow_momentum/blend는 참조책 기준보다 뚜렷이 강하고,
+fast_reversal은 참조책 기준보다 오히려 더 뚜렷하게 음수다(-1.230→-1.669) — 0% 배분 결정 자체는 이번 실측으로도 지지된다.
+
+### 10.2 다중검정 회계 — 처음 노출
+
+`trials_attempted`는 20차까지 `1`로 하드코딩돼 있었다. 2021-2025 dev 창에서 20차에 걸쳐 순차 탐색해 온 실제
+시행수(`MHS_SEARCH_TRIALS_ATTEMPTED=20`)를 반영한 `deflated_sharpe_ratio`가 이번에 처음 계산됐다:
+
+```
+trials_attempted = 20
+deflated_sharpe_ratio = 0.532
+```
+
+다중검정을 보정하면 진짜 Sharpe가 양수일 확률은 **53.2%** — 동전던지기 수준이다. `folds_passed=2/3`만으로
+안도할 수 없다는 것이 수치로 확인됐다.
+
+### 10.3 Research-GO 게이트 — 도달 가능해짐 (여전히 `eligible=False`)
+
+`_mhs_research_go`는 `MHS_GO_REASON_UNSPECIFIED_POLICY`를 **무조건** append해 왔다(`reasons = list(book_reasons); ...;
+reasons.append(UNSPECIFIED_POLICY)`) → `eligible = not reasons`가 성과와 무관하게 영구 `False`였다. 이번 21차부터
+`MHS_REGISTERED_POLICY_THRESHOLDS`(`cap_30_roster`, `primary_annual_return`)가 **둘 다 등록될 때만** 이 append를
+건너뛴다. 두 값 모두 아직 의도적으로 `None`(미등록)이므로:
+
+```
+research_go.eligible = False
+research_go.reason_codes = [PRIMARY_AUTOCORR_SHARPE_BELOW_0_6, STRESS_SHARPE_NOT_POSITIVE, UNSPECIFIED_POLICY]
+```
+
+— 20차까지와 표면적으로 동일한 결과이지만 의미가 다르다: **게이트가 이제 성과에 반응할 수 있는 구조**이고,
+Sharpe 플로어(0.6)를 넘기면 정책 임계값 등록만으로 `eligible=True`가 가능하다. 임계값 등록은 성과와 무관한
+사전등록 정책 결정이라 이번 계약 범위에서 값을 채우지 않았다(§11 후속 판단 필요).
+
+### 10.4 P1 — 로스터 재정규화 회전율 가설: 실측 기각
+
+`renormalize_within_mask`가 회전율의 주범이라는 원가설을 로스터 네이티브 랭킹으로 직접 반증했다:
+
+| 변형 | 회전율/년 | net_t@0bps |
+| :--- | ---: | ---: |
+| R0 생산 (wide rank → roster 투영) | 42.74 | 2.042 |
+| R1 로스터 네이티브 랭킹 (투영 제거) | 42.28 (**-1%**) | 2.058 |
+
+투영을 완전히 제거해도 회전율은 거의 그대로다. 회전율은 **gross에 비례**했고(위상 트랜치 단계에서 이미
+회전율/gross 125→51로 절반 이하), 20차가 재정규화를 "마찰 +37%"로 읽은 것은 실은 **레버리지 복원**이었다.
+→ 로스터 재설계는 착수하지 않는다.
+
+동일 gross(0.70)로 재스케일해 노출 레이어를 재심판한 결과, `_regime_cash_scale`은 Sharpe **+14%**(0.752→0.858)로
+확인(20차 §9.4의 "효과가 작다"는 결론은 gross 미통제 비교였음 — 정정), `_pnl_vol_target_scale`은 두 짝짓기 모두에서
+Sharpe를 깎았다(0.752→0.733, 0.858→0.841). → `pnl_vol_target` 플래그 신설(**기본값 `True` 유지, 무회귀**), 기본값
+전환은 사전등록된 fold-train-only 기준(`mhs_execution_friction_and_exposure_layers.md` §6.1) 통과 후에만.
+
+### 10.5 P2/P4 — 실현 집행비용·로스터 계약 노출
+
+| field | 값 |
+| :--- | ---: |
+| `realized_execution_roster_size` | **41.93** (선언값 `execution_universe_size=30` 대비 +40%, exit multiplier 2.0의 히스테리시스 효과) |
+| `slow_momentum.primary_realized_shortfall_bps` | 10.70 (모델 8.0bps 대비 초과) |
+| `slow_momentum.stress_realized_shortfall_bps` | 26.71 |
+| `fast_reversal.primary_realized_shortfall_bps` | 1.70 |
+
+**⚠️ 신규 관찰(미해결, 다음 회귀에서 재확인 필요)**: `primary_fill_count=0`(모든 책) — 버그 아님, 기존 코드가
+`fill_count`를 `OHLCV_STRICT_PROXY`/`LADDERED` 전용 지정가·타임아웃 분기 카운터로 정의해 왔고, `primary`가 쓰는
+`OHLCV_IMMEDIATE_TAKER` 경로는 항상 `reason="timeout_taker"`로 떨어져 구조적으로 0이 나온다(`execution.py:1415` 부근).
+실제 체결은 `slow_momentum.primary.fills.row_count=74,781`로 정상 확인됨 — 계약 요구("not None")는 충족했지만
+필드명이 오독을 유발한다. 또한 `primary_notional_weighted_shortfall_bps=-46.6bps`가 단순평균(+10.7bps)과
+**부호가 반대**로 나왔다 — 공식(`sum(shortfall·notional)/sum(notional)`) 자체는 검증된 순수함수이나, 소수의
+초대형 명목가 체결이 평균을 강하게 끌어당기고 있을 가능성이 있다. 두 관찰 모두 원인 규명 없이 사실만 기록한다.
+
+### 10.6 회귀 불변식 확인
+
+`slow_momentum.primary_autocorr_sharpe=0.525673922813482`, 3개 fold 전부 20차 리포트와 **소수점까지 바이트 동일**.
+`pnl_vol_target` 기본값(`True`)이 기존 파이프라인을 정확히 재현한다는 계약이 실측으로 검증됐다 — 이번 21차는
+계측·게이트만 바꿨을 뿐 전략 로직/자본 배분은 무변경.
+
+### 10.7 요약
+
+| 항목 | 상태 |
+| :--- | :--- |
+| RC-1. 참조책/집행책 이중 계측 | ✅ 완료, 실측 확인 (`executed_prescreen`이 blend net_t 0.779→1.729로 노출) |
+| RC-5. Research-GO 게이트 도달 가능화 | ✅ 완료, 임계값 미등록으로 `eligible` 여전히 False(의도됨) |
+| RC-6. 다중검정 회계(DSR) | ✅ 완료, `deflated_sharpe_ratio=0.532` 최초 노출 |
+| P1. 로스터 재정규화 회전율 가설 | ❌ **실측 기각**(-1%), 재설계 미착수 |
+| P1. `_regime_cash_scale` 재평가 | ✅ 동일 gross에서 +14% 확인 — 20차 결론 정정, 유지 |
+| P1. `_pnl_vol_target_scale` | ⚠️ 동일 gross에서 Sharpe 악화 확인, 플래그화(기본값 불변), 전환은 후속 fold 검증 대기 |
+| P2. 실현 집행비용 노출 | ✅ 완료, `fill_count` 필드명 오독 이슈 발견(미해결, 후속 확인 필요) |
+| P4. 로스터 계약 노출 | ✅ `realized_execution_roster_size=41.93` 노출 완료 |
+| P3. 20차까지 참조책 기준 결론 재판정 | 미착수 — 후속 실행 대상 (`fast_reversal` 0% 배분은 §10.1에서 재확인됨) |
