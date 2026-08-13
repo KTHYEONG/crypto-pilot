@@ -77,6 +77,7 @@ from src.mhs.discovery import (
     select_horizon_by_discovery_qualification,
 )
 from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol, vol_normalized_horizon_signal
+from src.mhs.regime import trend_efficiency_scale
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
 from src.market_data.storage.loaders import load_funding_rates
@@ -148,11 +149,29 @@ MHS_REBALANCE_MIN_NOTIONAL_DELTA = 0.02
 # (``horizon_hours // step_hours``), the structural invariant that the smoothed
 # signal cannot react faster than one horizon length.
 MHS_SIGNAL_EMA_HORIZON_SPAN = 1.0
+
+
+def _signal_ema_span(band_sign: int, horizon_hours: int, step_hours: int) -> int | None:
+    """Whipsaw-suppressing EMA span, or None for a reversal band (sign=-1).
+
+    ``_smooth_signal_ema`` exists to preserve trend polarity while removing the
+    noise that drives negative return autocorrelation -- structurally backwards
+    for a reversal signal, whose edge (if any) lives in that same short-term
+    noise (docs/specs/mhs_fast_reversal_overlay_redesign.md §1.2).
+    """
+    if band_sign != 1:
+        return None
+    return max(1, round(horizon_hours / step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
 # Regime cash scaling: gross exposure is linearly reduced toward
 # ``MHS_REGIME_CASH_SCALE_FLOOR`` when trailing realized vol exceeds its
 # ``MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS`` median, and never exceeds full exposure.
 MHS_REGIME_CASH_SCALE_FLOOR = 0.5
 MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS = 720
+# Reuses MHS_REGIME_CASH_SCALE_FLOOR's value: the standalone Pass-1 reference
+# replay (_book_outcome, docs/specs/mhs_fast_reversal_overlay_redesign.md §2.1)
+# forces flat once equity crosses this fraction of initial_equity, instead of
+# hard-raising CAPITAL_INVARIANT_BREACH on a known negative-edge book.
+MHS_REFERENCE_PASS_EQUITY_FLOOR = MHS_REGIME_CASH_SCALE_FLOOR
 # Strategy-level P&L volatility targeting (momentum-crash mitigation): exposure
 # is scaled by ``expanding_median(trailing_vol) / trailing_vol`` of the
 # strategy's own daily P&L, clipped to ``[MHS_PNL_VOL_TARGET_SCALE_FLOOR, 1.0]``
@@ -241,6 +260,7 @@ class MhsDiagnosticRequest:
     rebalance_filter: Literal["per_symbol_deadband", "portfolio_trigger"] = "per_symbol_deadband"
     beta_neutralize: bool = False
     ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
+    trend_efficiency_overlay: bool = False
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -265,6 +285,8 @@ class MhsDiagnosticRequest:
             raise ValueError("beta_neutralize must be a bool")
         if self.ensemble_signal not in ("raw", "vol_normalized"):
             raise ValueError(f"unknown ensemble_signal '{self.ensemble_signal}'")
+        if not isinstance(self.trend_efficiency_overlay, bool):
+            raise ValueError("trend_efficiency_overlay must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -812,6 +834,19 @@ def _apply_rebalance_deadband(target: pd.DataFrame, min_delta: float) -> pd.Data
         out[i] = np.where(carry, held, values[i])
         held = out[i]
     return pd.DataFrame(out, index=target.index, columns=target.columns).fillna(0.0)
+
+
+def _trend_efficiency_overlay_scale(
+    log_close: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    fast_horizon_hours: int,
+    target_index: pd.DatetimeIndex,
+) -> pd.Series:
+    """Execution-roster mean efficiency_ratio at the fast band's horizon, timed
+    into a slow_momentum exposure scale (docs/specs/mhs_fast_reversal_overlay_redesign.md §2.3).
+    """
+    mean_er = efficiency_ratio(log_close, fast_horizon_hours).where(execution_mask).reindex(target_index).mean(axis=1)
+    return trend_efficiency_scale(mean_er)
 
 
 def _regime_cash_scale(
@@ -1762,6 +1797,7 @@ def _book_outcome(
             _window_telemetry(_windows(), "execution_window"),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
             retain_event_snapshots=False,
+            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
         )
         # Pass 1 (reference) -> P&L-vol-target scale -> Pass 2 (reported):
         # the strategy's own realized daily-return vol drives a causal
@@ -2351,8 +2387,8 @@ def _build_fold_target_weights(
     )
     fast_grid = pd.date_range(panel_start, ve, freq="6h", tz="UTC")
     slow_grid = pd.date_range(panel_start, ve, freq="24h", tz="UTC")
-    fast_ema = max(1, round(fast.horizon_hours / fast.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
-    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
+    fast_ema = _signal_ema_span(fast.band.sign, fast.horizon_hours, fast.step_hours)
+    slow_ema = _signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours)
     w_fast = _book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
     w_fast_tilted = inverse_realized_vol_tilt(
         w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
@@ -2400,9 +2436,13 @@ def _build_fold_target_weights(
     # full eligible universe: only the execution_mask symbols carry capital, so
     # their realized vol is the quantity that decides high-vol cash scaling.
     vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(decision_grid).mean(axis=1)
+    regime_scale = _regime_cash_scale(vol_mean)
+    if request.trend_efficiency_overlay:
+        regime_scale = regime_scale.mul(
+            _trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, decision_grid),
+        )
     del execution_mask
     del log_close
-    regime_scale = _regime_cash_scale(vol_mean)
     if request.rebalance_filter == "portfolio_trigger":
         # Gate the UNSCALED book, then multiply the gross scale afterwards so
         # the trigger's invariant-preserving row holds cannot filter out the
@@ -2807,8 +2847,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     fast_grid = pd.date_range(start, end, freq="6h", tz="UTC")
     slow_grid = pd.date_range(start, end, freq="24h", tz="UTC")
 
-    fast_ema = max(1, round(fast.horizon_hours / fast.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
-    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
+    fast_ema = _signal_ema_span(fast.band.sign, fast.horizon_hours, fast.step_hours)
+    slow_ema = _signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours)
     w_fast = _book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
     w_slow = _book_weights(log_close, eligible, slow, slow_grid, ema_span=slow_ema)
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
@@ -2851,6 +2891,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # (spec §3.2, ``regime_cash_scale``).
     vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
     regime_scale = _regime_cash_scale(vol_mean)
+    if request.trend_efficiency_overlay:
+        regime_scale = regime_scale.mul(
+            _trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, grid_1h),
+        )
     blend_1h = blend_1h.mul(regime_scale, axis=0)
     del vol_mean, regime_scale
     # The 1h book views are only consumed by ``blend_1h`` above.  Releasing

@@ -264,6 +264,7 @@ class SimulatedInventoryLedgerResult:
     mark_source: _MarkSource
     primary_valid: bool
     invalid_reasons: tuple[str, ...]
+    equity_floor_breached_at: tuple[pd.Timestamp, ...] = ()
     data_gaps: tuple[ExecutionDataGap, ...] = ()
 
 
@@ -1137,9 +1138,15 @@ class _BoundExecutionReplayAccumulator:
         execution_bound: _ExecutionBound,
         spec: ExecutionSpec,
         retain_event_snapshots: bool,
+        min_equity_fraction: float | None = None,
     ) -> None:
         if initial_equity <= 0:
             raise DataIntegrityError("initial_equity must be > 0")
+        if min_equity_fraction is not None and not (0.0 < min_equity_fraction < 1.0):
+            raise ValueError(f"min_equity_fraction must be in (0.0, 1.0) when set, got {min_equity_fraction}")
+        self.min_equity_fraction = min_equity_fraction
+        self.initial_equity = float(initial_equity)
+        self.equity_floor_breaches: list[pd.Timestamp] = []
         if execution_bound not in (
             "OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"
         ):
@@ -1322,6 +1329,10 @@ class _BoundExecutionReplayAccumulator:
             _advance(dns, dpos, on_grid)
             equity = self._equity_at(gpos)
             row = target_values[i]
+            if self.min_equity_fraction is not None and equity <= self.min_equity_fraction * self.initial_equity:
+                if not self.equity_floor_breaches or self.equity_floor_breaches[-1] != decision_time:
+                    self.equity_floor_breaches.append(decision_time)
+                row = np.zeros_like(row)
             spos = int(spos_all[i])
             signal_time = w.signal_available_at[i]
             active = np.where(np.isfinite(row) & ((row != 0.0) | (self.units_arr[gpos] != 0.0)))[0]
@@ -1886,6 +1897,7 @@ class _BoundExecutionReplayAccumulator:
             mark_source=self.mark_source,
             primary_valid=self.ledger_valid,
             invalid_reasons=tuple(sorted(self.invalid_reasons)),
+            equity_floor_breached_at=tuple(self.equity_floor_breaches),
         )
         if self.first_held_mark is not None:
             self.data_gaps.append(
@@ -1956,6 +1968,7 @@ def replay_execution_windows(
     execution_bound: _ExecutionBound,
     spec: ExecutionSpec,
     retain_event_snapshots: bool = False,
+    min_equity_fraction: float | None = None,
 ) -> StrategyExecutionReplayResult:
     """Stateful windowed replay equivalent to ``strategy_aware_execution_replay``.
 
@@ -1982,7 +1995,7 @@ def replay_execution_windows(
     if first is None:
         raise DataIntegrityError("at least one execution window is required")
     accumulator = _BoundExecutionReplayAccumulator(
-        first, initial_equity, execution_bound, spec, retain_event_snapshots,
+        first, initial_equity, execution_bound, spec, retain_event_snapshots, min_equity_fraction,
     )
     accumulator.consume(first)
     del first
