@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import tracemalloc
 
 import numpy as np
@@ -15,6 +16,7 @@ from src.mhs.execution import (
     bar_funding_panel,
     laddered_fill_schedule,
     mhs_ledger_pnl,
+    notional_weighted_shortfall_bps,
     passive_fill_shortfall_bps,
     replay_execution_window_pair,
     replay_execution_windows,
@@ -558,6 +560,110 @@ class TestStrategyReplay:
             stress.simulated_fills["reason"] == "forced_exit"
         ]["fee_bps"].iloc[0]
         assert stress_exit_fee > strict_exit_fee
+
+
+class TestNotionalWeightedShortfall:
+    """P2-A: the notional-weighted mean of per-fill implementation shortfall.
+
+    The plain ``all_intent_shortfall_bps`` is ``np.mean`` of per-fill
+    shortfalls; the economically correct aggregate weights each fill by its
+    absolute fill notional. Both replay paths (single-panel and streamed)
+    accumulate the parallel notional series.
+    """
+
+    def test_weighted_differs_from_mean_and_matches_hand_computed(self) -> None:
+        """SCENARIO_MHS_NOTIONAL_WEIGHTED_SHORTFALL_DIFFERS_FROM_MEAN_01: on a
+        replay whose fills carry unequal notionals and unequal per-fill
+        shortfalls the weighted aggregate differs from the unweighted mean and
+        equals sum(shortfall*notional)/sum(notional)."""
+        idx = pd.date_range("2021-01-01 12:01", periods=121, freq="1min", tz="UTC")
+        marks = pd.DataFrame({"A": 100.0, "B": 200.0}, index=idx)
+        closes = marks.copy()
+        closes["B"] = 200.5
+        target = pd.DataFrame(
+            {"A": [0.5], "B": [0.5]},
+            index=pd.DatetimeIndex([pd.Timestamp("2021-01-01 11:00", tz="UTC")]),
+        )
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        report = strategy_aware_execution_replay(
+            target, signal_at, closes, closes, closes, marks,
+            pd.DataFrame(0.0, index=idx, columns=["A", "B"]), 1.0,
+            "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+        fills = report.simulated_fills
+        assert len(fills) == 2
+        decision_prices = {"A": 100.0, "B": 200.0}
+        shortfalls: list[float] = []
+        notionals: list[float] = []
+        for _, fill in fills.iterrows():
+            qty = float(fill["quantity_delta"])
+            price = float(fill["fill_price"])
+            side = 1.0 if qty > 0 else -1.0
+            shortfalls.append(
+                side * (price / decision_prices[fill["symbol"]] - 1.0) * 1e4
+                + float(fill["fee_bps"])
+            )
+            notionals.append(abs(qty) * price)
+        expected = sum(s * n for s, n in zip(shortfalls, notionals, strict=True)) / sum(notionals)
+        assert report.notional_weighted_shortfall_bps == pytest.approx(expected)
+        assert report.notional_weighted_shortfall_bps != pytest.approx(
+            report.all_intent_shortfall_bps
+        )
+
+    def test_identical_notionals_make_weighted_coincide_with_mean(self) -> None:
+        """When every fill carries an identical notional the two aggregates
+        coincide regardless of the per-fill shortfalls."""
+        assert notional_weighted_shortfall_bps([10.0, 20.0], [1.0, 1.0]) == pytest.approx(15.0)
+        assert notional_weighted_shortfall_bps([10.0, 20.0], [3.0, 1.0]) == pytest.approx(12.5)
+
+    def test_nan_when_no_fills_or_zero_notional(self) -> None:
+        """SCENARIO_MHS_SHORTFALL_NAN_WHEN_NO_FILLS_02: zero fills (or a zero
+        total notional) report NaN -- never 0.0 (which would read as free
+        execution) and never a ZeroDivisionError."""
+        idx = pd.date_range("2021-01-01 12:01", periods=61, freq="1min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * len(idx)}, index=idx)
+        target = pd.DataFrame(
+            {"A": [0.0]},
+            index=pd.DatetimeIndex([pd.Timestamp("2021-01-01 11:00", tz="UTC")]),
+        )
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        report = strategy_aware_execution_replay(
+            target, signal_at, px, px, px, px,
+            pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+            "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+        assert report.fill_count == 0
+        assert math.isnan(report.all_intent_shortfall_bps)
+        assert math.isnan(report.notional_weighted_shortfall_bps)
+        assert math.isnan(notional_weighted_shortfall_bps([], []))
+        assert math.isnan(notional_weighted_shortfall_bps([10.0, 20.0], [0.0, 0.0]))
+
+    def test_both_replay_paths_populate_weighted_shortfall(self) -> None:
+        """SCENARIO_MHS_BOTH_REPLAY_PATHS_POPULATE_SHORTFALL_03: both the
+        module-level replay and the windowed/streaming replay class produce a
+        finite notional-weighted shortfall on a fixture with fills."""
+        wl = TestWindowedReplayEquivalence()._workload(days=10, n_symbols=4)
+        grid = wl["grid"]
+        weights = wl["weights"]
+        signals = wl["signals"]
+        single = strategy_aware_execution_replay(
+            weights, signals, wl["highs"], wl["lows"], wl["closes"], wl["marks"],
+            wl["funding"], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+        windows = _partition_windows(
+            grid, weights, signals, wl["highs"], wl["lows"], wl["closes"],
+            wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        streamed = replay_execution_windows(
+            windows, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+        assert len(single.simulated_fills) > 0
+        assert np.isfinite(single.notional_weighted_shortfall_bps)
+        assert len(streamed.simulated_fills) > 0
+        assert np.isfinite(streamed.notional_weighted_shortfall_bps)
+        assert streamed.notional_weighted_shortfall_bps == pytest.approx(
+            single.notional_weighted_shortfall_bps, rel=1e-9,
+        )
 
 
 class TestMissingDataTermination:
