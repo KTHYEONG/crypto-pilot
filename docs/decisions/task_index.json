@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION",
+      "date": "2026-08-13",
+      "adr_id": "ADR_20260813_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION",
+      "domain": "research",
+      "title": "MHS 실행 성능 최적화 (C1-C4)",
+      "why": "cProfile 실측: worker CPU의 ~92%가 window 생성기(mark parquet 창×심볼 재읽기 + pass당 동일 window 재생성)이고 full-period minute preload(268심볼)가 4.5GB 상주, fold-safe discovery는 부모에서 순차 실행",
+      "resolution": "C1 mark 프레임 프로세스당 1회 캐시(_get_symbol_mark_frame/_cached_mark_panel), C2 window 1회 materialize 후 pass 간 _rescaled_windows 재사용, C3 window 단위 parquet 필터 로드(_load_window_minute_frames)로 preload 제거, C4 fold-safe discovery fork 병렬화",
+      "impact": "Full 5y 동일데이터 A/B: 684.9s→309.1s(−55%), peak RSS 5.40GB→3.15GB(−42%), 출력 bit-identical(primary_autocorr_sharpe·realized_execution_roster_size·benchmark checksum 불변); 6mo worker 31.7→7.1s, fold 61.5→17.5s"
+    },
+    {
       "task_id": "MHS_CARRY_AND_FAST_FAIR_EVALUATION",
       "date": "2026-08-13",
       "adr_id": "ADR_20260813_MHS_CARRY_AND_FAST_FAIR_EVALUATION",
@@ -989,16 +999,6 @@
       "why": "Cash-carry, open-interest, and technical-expert evaluators duplicated byte hashing and aggregate data fingerprint logic, while the canonical code map could omit production modules.",
       "resolution": "Added generic bounded-memory SHA-256 and canonical aggregate helpers, moved source mappings into domain provenance modules, rewired evaluators, added provenance regression coverage, and enforced complete canonical code-map coverage.",
       "impact": "Candidate data hashes and identifiers remain byte-for-byte compatible; missing inputs still fail closed and application workflows preserve PENDING behavior. Legacy import façades and CLI contracts remain intact."
-    },
-    {
-      "task_id": "TASK_LIBRARY_ADMISSION_BACKTEST",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_LIBRARY_ADMISSION_BACKTEST",
-      "domain": "research",
-      "title": "Contextual library admission backtest research run",
-      "why": "등록·catalog 변경 없이 선택한 proposal 또는 expert 조합의 contextual master-ledger와 stress 성과를 재현하고 provenance에 기록",
-      "resolution": "proposal_id/expert 목록 기반 library-admission-backtest CLI를 실행하고 base/stress 결과를 append-only runs ledger에 저장",
-      "impact": "선정 후보 조합의 실제 성과와 promotion 판정을 scratch 파일 없이 재현 가능"
     }
   ]
 }
