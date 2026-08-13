@@ -162,3 +162,23 @@ PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
         band=_SLOW_BAND, horizon_hours=168, step_hours=24, min_symbols=8,
     ),
 }
+
+# Preregistered count of sequential discovery trials the 2021-2025 dev search
+# has actually accumulated (docs/specs/mhs_strategy_foundation_reset.md RC-6).
+# The 20 iterations of horizon-grid/flag/overlay search all ran on the SAME dev
+# window, so they are one deliberate multi-trial search and the multiple-testing
+# deflation must account for them; ``trials_attempted = 1`` was the un-audited
+# placeholder. A revision of this constant is a contract revision, never an
+# inline edit at a call site.
+MHS_SEARCH_TRIALS_ATTEMPTED: int = 20
+
+# P0-D: the two Research-GO policy gates named in ``_mhs_research_go``'s
+# contract are not registered in source. A value of None means "unregistered"
+# and keeps Research GO conservative (the gate reports UNSPECIFIED_POLICY);
+# registering a value is a deliberate policy act following the
+# MEASURED_EXECUTION_COST_TIERS_BPS governance pattern, never an inline literal
+# at a call site and never a performance-flattering number.
+MHS_REGISTERED_POLICY_THRESHOLDS: dict[str, float | None] = {
+    "cap_30_roster": None,
+    "primary_annual_return": None,
+}

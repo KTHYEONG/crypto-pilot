@@ -10,13 +10,17 @@ from src.mhs.evaluation import (
     AnchoredPurgedFold,
     DeploymentReadinessResult,
     autocorrelation_adjusted_sharpe,
+    book_evidence,
     compute_deployment_readiness,
     cost_response_curve,
+    deflated_sharpe_ratio,
     phase_1_anchored_purged_folds,
     phase_diagnostic_metrics,
+    probabilistic_sharpe_ratio,
     synthetic_stress_scenarios,
     tail_sensitivity_curve,
 )
+from src.mhs.execution import mhs_ledger_pnl
 from src.mhs.execution import simulated_inventory_ledger
 
 
@@ -519,4 +523,135 @@ class TestMhsPerfOptimizationO1DeploymentReadiness:
         assert 0.0 <= res.probability_final_wealth_below_initial <= 1.0
         assert 0.0 <= res.probability_mdd_over_20pct <= 1.0
         assert 0.0 <= res.probability_mdd_over_30pct <= 1.0
+
+
+def _book_evidence_panel(
+    n: int = 400, cols: tuple[str, ...] = ("A", "B", "C", "D"), seed: int = 7,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Deterministic hourly open/funding panel plus an equal-weight book."""
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
+    rng = np.random.default_rng(seed)
+    opens = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rng.standard_normal((n, len(cols))) * 0.01, axis=0)),
+        index=idx, columns=cols,
+    )
+    funding = pd.DataFrame(0.0, index=idx, columns=cols)
+    weights = pd.DataFrame(np.full((n, len(cols)), 1.0 / len(cols)), index=idx, columns=cols)
+    return weights, opens, funding
+
+
+def _inline_book_evidence(
+    weights_1h: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    cost_grid: tuple[float, ...],
+    periods_per_year: float,
+    event_window_bars: int,
+) -> tuple[dict[float, object], object]:
+    """The pre-change inline construction from ``_book_outcome`` (the reference
+    book only): the exact block the ``book_evidence`` extraction replaced."""
+    prescreen = cost_response_curve(
+        weights_1h, opens, bar_funding, cost_grid, periods_per_year,
+    )
+    effective_weights = weights_1h.shift(2).fillna(0.0)
+    fwd = opens.pct_change()
+    _net, turnover = mhs_ledger_pnl(weights_1h, opens, bar_funding, 8.0)
+    tail = tail_sensitivity_curve(
+        effective_weights, fwd, turnover, 8.0, periods_per_year, event_window_bars,
+    )
+    return prescreen, tail
+
+
+class TestBookEvidence:
+    """SCENARIO_MHS_BOOK_EVIDENCE_MATCHES_INLINE_BLOCK_01: ``book_evidence`` is
+    a pure, behavior-preserving extraction of the reference-book significance
+    block -- both instruments must reproduce the inline construction exactly."""
+
+    def test_matches_inline_block(self) -> None:
+        weights, opens, funding = _book_evidence_panel()
+        cost_grid = (0.0, 2.64, 4.18, 8.0)
+        ev = book_evidence(weights, opens, funding, cost_grid, 8760.0, 168)
+        expected_prescreen, expected_tail = _inline_book_evidence(
+            weights, opens, funding, cost_grid, 8760.0, 168,
+        )
+        assert ev.prescreen == expected_prescreen
+        assert ev.tail == expected_tail
+        assert set(ev.prescreen) == set(cost_grid)
+
+    def test_net_t_monotone_in_cost(self) -> None:
+        weights, opens, funding = _book_evidence_panel()
+        ev = book_evidence(weights, opens, funding, (0.0, 2.64, 4.18, 8.0), 8760.0, 168)
+        for low, high in itertools.pairwise(sorted(ev.prescreen)):
+            assert ev.prescreen[high].net_ann <= ev.prescreen[low].net_ann + 1e-12
+
+    def test_distinguishes_reference_from_executed(self) -> None:
+        """SCENARIO_MHS_BOOK_EVIDENCE_DISTINGUISHES_REFERENCE_FROM_EXECUTED_02:
+        two different weight books over the same panel produce different
+        prescreen net_t values -- the helper measures the book it is handed,
+        not any ambient state (the unit-level RC-1 guard)."""
+        weights, opens, funding = _book_evidence_panel()
+        concentrated = weights.copy()
+        concentrated[["A", "B"]] = 0.0
+        concentrated[["C", "D"]] = 0.5
+        cost_grid = (0.0, 4.18)
+        wide = book_evidence(weights, opens, funding, cost_grid, 8760.0, 168)
+        narrow = book_evidence(concentrated, opens, funding, cost_grid, 8760.0, 168)
+        assert wide.prescreen[4.18].net_t != narrow.prescreen[4.18].net_t
+        assert wide.tail.base_net_ann != narrow.tail.base_net_ann
+
+    def test_fails_closed(self) -> None:
+        """SCENARIO_MHS_BOOK_EVIDENCE_FAILS_CLOSED_03: an empty cost grid, a
+        negative cost rate, periods_per_year <= 0, event_window_bars < 1, and a
+        negative tail one-way rate each raise ValueError -- never a degenerate
+        or NaN-filled result."""
+        weights, opens, funding = _book_evidence_panel()
+        with pytest.raises(ValueError, match="must not be empty"):
+            book_evidence(weights, opens, funding, (), 8760.0, 168)
+        with pytest.raises(ValueError, match=">= 0"):
+            book_evidence(weights, opens, funding, (-1.0,), 8760.0, 168)
+        with pytest.raises(ValueError, match="> 0"):
+            book_evidence(weights, opens, funding, (0.0,), 0.0, 168)
+        with pytest.raises(ValueError, match=">= 1"):
+            book_evidence(weights, opens, funding, (0.0,), 8760.0, 0)
+        with pytest.raises(ValueError, match=">= 0"):
+            book_evidence(weights, opens, funding, (0.0,), 8760.0, 168, -1.0)
+
+
+class TestDeflatedSharpeRatio:
+    """SCENARIO_MHS_DEFLATED_SHARPE_DEFLATES_WITH_TRIALS_06: the Bailey-LdP
+    multiple-testing adjustment deflates harder as the number of trials grows,
+    collapses to the plain PSR at zero trial dispersion, and stays in [0, 1]."""
+
+    def test_strictly_decreasing_in_trials(self) -> None:
+        few = deflated_sharpe_ratio(0.12, 0.0025, 5, 1200, 0.0, 3.0)
+        mid = deflated_sharpe_ratio(0.12, 0.0025, 100, 1200, 0.0, 3.0)
+        many = deflated_sharpe_ratio(0.12, 0.0025, 500, 1200, 0.0, 3.0)
+        assert few > mid > many
+        assert 0.0 <= many <= few <= 1.0
+
+    def test_zero_trial_variance_equals_psr_against_zero_benchmark(self) -> None:
+        d = deflated_sharpe_ratio(0.12, 0.0, 50, 1200, 0.0, 3.0)
+        p = probabilistic_sharpe_ratio(0.12, 0.0, 1200, 0.0, 3.0)
+        assert d == pytest.approx(p, rel=1e-12)
+        assert 0.0 <= d <= 1.0
+
+    def test_observed_sr_greater_than_benchmark_gives_high_psr(self) -> None:
+        v = probabilistic_sharpe_ratio(0.1, 0.0, 500, 0.0, 3.0)
+        assert 0.5 < v <= 1.0
+        assert probabilistic_sharpe_ratio(0.0, 0.0, 500, 0.0, 3.0) == 0.5
+
+    def test_fails_closed(self) -> None:
+        with pytest.raises(ValueError, match="n_trials"):
+            deflated_sharpe_ratio(0.1, 0.0, 0, 100, 0.0, 3.0)
+        with pytest.raises(ValueError, match="n_obs"):
+            deflated_sharpe_ratio(0.1, 0.0, 5, 1, 0.0, 3.0)
+        with pytest.raises(ValueError, match="trial_sr_variance"):
+            deflated_sharpe_ratio(0.1, -0.1, 5, 100, 0.0, 3.0)
+        with pytest.raises(ValueError, match="n_obs"):
+            probabilistic_sharpe_ratio(0.1, 0.0, 1, 0.0, 3.0)
+
+    def test_degenerate_radicand_returns_nan_not_inf(self) -> None:
+        # A radicand <= 0 (e.g. extreme skew/observed Sharpe) must yield NaN,
+        # never an inf or complex value.
+        assert np.isnan(probabilistic_sharpe_ratio(0.3, 0.0, 500, 10.0, 3.0))
 
