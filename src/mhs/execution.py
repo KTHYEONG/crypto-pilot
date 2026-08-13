@@ -75,6 +75,31 @@ def passive_fill_shortfall_bps(
     return float(move_bps + spec.taker_fee_bps + spec.taker_slippage_bps)
 
 
+def notional_weighted_shortfall_bps(
+    shortfalls: Iterable[float],
+    notionals: Iterable[float],
+) -> float:
+    """Notional-weighted mean of per-fill implementation shortfalls in bps.
+
+    The unweighted ``np.mean`` of per-fill shortfalls over-weights the many
+    small fills that dominate the count but carry little capital. The
+    economically correct aggregate weights each fill's shortfall by its
+    absolute notional ``abs(qty) * fill_price``:
+    ``sum(shortfall_i * notional_i) / sum(notional_i)``. Returns ``nan``
+    (never ``0.0``, which would read as free execution, and never a
+    ``ZeroDivisionError``) when no fills occurred or the total notional is
+    zero.
+    """
+    shortfall_arr = np.asarray(list(shortfalls), dtype="float64")
+    notional_arr = np.asarray(list(notionals), dtype="float64")
+    if shortfall_arr.size == 0 or notional_arr.size == 0:
+        return float("nan")
+    total_notional = float(notional_arr.sum())
+    if total_notional <= 0.0 or not np.isfinite(total_notional):
+        return float("nan")
+    return float(np.sum(shortfall_arr * notional_arr) / total_notional)
+
+
 def laddered_fill_schedule(
     decision_price: float,
     side: int,
@@ -291,6 +316,7 @@ class StrategyExecutionReplayResult:
     elapsed_seconds: float
     data_gaps: tuple[ExecutionDataGap, ...] = ()
     event_snapshots_retained: bool = True
+    notional_weighted_shortfall_bps: float = float("nan")
 
 
 def simulated_inventory_ledger(
@@ -644,6 +670,7 @@ def strategy_aware_execution_replay(
     submit_times: list[pd.Timestamp] = []
     fill_times: list[pd.Timestamp] = []
     shortfalls: list[float] = []
+    shortfall_notionals: list[float] = []
     fill_count = 0
     unfilled_count = 0
     fallback_count = 0
@@ -808,6 +835,7 @@ def strategy_aware_execution_replay(
                                 + spec.taker_fee_bps + spec.taker_slippage_bps
                             )
                         shortfalls.append(shortfall)
+                        shortfall_notionals.append(abs(qty) * fill_price)
                         fill_time = minute_grid[fill_pos]
                         submit_time = minute_grid[submit_pos]
                         mark_price = float(marks_values[fill_pos, col])
@@ -922,6 +950,7 @@ def strategy_aware_execution_replay(
                     decision_price, adverse, timeout_close, side, spec,
                 )
             shortfalls.append(shortfall)
+            shortfall_notionals.append(abs(net_units) * fill_price)
 
             fill_time = minute_grid[fill_pos]
             submit_time = minute_grid[submit_pos]
@@ -1050,6 +1079,9 @@ def strategy_aware_execution_replay(
     all_intent_shortfall_bps = (
         float(np.mean(shortfalls)) if shortfalls else float("nan")
     )
+    weighted_shortfall_bps = notional_weighted_shortfall_bps(
+        shortfalls, shortfall_notionals
+    )
     data_gaps.extend(ledger.data_gaps)
     data_gaps.sort(key=lambda g: (g.timestamp, g.code, g.symbol))
     return StrategyExecutionReplayResult(
@@ -1077,6 +1109,7 @@ def strategy_aware_execution_replay(
         ),
         elapsed_seconds=elapsed_seconds,
         data_gaps=tuple(data_gaps),
+        notional_weighted_shortfall_bps=weighted_shortfall_bps,
     )
 
 
@@ -1187,6 +1220,7 @@ class _BoundExecutionReplayAccumulator:
         self.submit_times: list[pd.Timestamp] = []
         self.fill_times: list[pd.Timestamp] = []
         self.shortfalls: list[float] = []
+        self.shortfall_notionals: list[float] = []
         self.fill_count = 0
         self.unfilled_count = 0
         self.fallback_count = 0
@@ -1469,6 +1503,7 @@ class _BoundExecutionReplayAccumulator:
                                     + self.spec.taker_fee_bps + self.spec.taker_slippage_bps
                                 )
                             self.shortfalls.append(shortfall)
+                            self.shortfall_notionals.append(abs(qty) * fill_price)
                             fill_time = grid[fill_pos]
                             submit_time = grid[submit_pos]
                             mark_price = float(marks_values[fill_pos, col])
@@ -1575,6 +1610,7 @@ class _BoundExecutionReplayAccumulator:
                 else:
                     shortfall = passive_fill_shortfall_bps(decision_price, adverse, timeout_close, side, self.spec)
                 self.shortfalls.append(shortfall)
+                self.shortfall_notionals.append(abs(net_units) * fill_price)
                 fill_time = grid[fill_pos]
                 submit_time = grid[submit_pos]
                 mark_price = float(marks_values[fill_pos, col])
@@ -1933,6 +1969,9 @@ class _BoundExecutionReplayAccumulator:
         all_intent_shortfall_bps = (
             float(np.mean(self.shortfalls)) if self.shortfalls else float("nan")
         )
+        weighted_shortfall_bps = notional_weighted_shortfall_bps(
+            self.shortfalls, self.shortfall_notionals
+        )
         return StrategyExecutionReplayResult(
             simulated_fills=simulated_fills,
             ledger=ledger,
@@ -1959,6 +1998,7 @@ class _BoundExecutionReplayAccumulator:
             elapsed_seconds=elapsed_seconds,
             data_gaps=tuple(self.data_gaps),
             event_snapshots_retained=self.retain_event_snapshots,
+            notional_weighted_shortfall_bps=weighted_shortfall_bps,
         )
 
 
