@@ -653,7 +653,7 @@
     "testing": "tests/unit/mhs/test_books.py"
   },
   "src/mhs/discovery.py": {
-    "architecture": "docs/specs/mhs_horizon_search_efficiency.md",
+    "architecture": "docs/results/mhs-res.md",
     "testing": "tests/unit/mhs/test_discovery.py"
   },
   "src/main.py": {
