@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_DISCOVERY_ADMISSION_AUTOCORR_ROBUSTNESS",
+      "date": "2026-08-13",
+      "adr_id": "ADR_20260813_MHS_DISCOVERY_ADMISSION_AUTOCORR_ROBUSTNESS",
+      "domain": "mhs",
+      "title": "MHS Discovery Admission Autocorrelation-Robustness Diagnostic",
+      "why": "24차 실측(mhs-res.md §3)에서 momentum(유일한 실질 생존 후보)조차 discovery/qualification admission(|t|>=2.0)을 통과하지 못함. discovery.py의 net_t가 자기상관 보정이 없는 naive i.i.d. t-stat인 반면 최종 Research-GO Sharpe는 Bartlett 보정을 적용해 방법론 불일치 존재 -- 72h~504h 오버랩 윈도우 특성상 편향 가능성 의심.",
+      "resolution": "discovery.py에 _bartlett_hac_denom/_score_masked_adjusted_net_t 신규 opt-in 진단 함수 추가, DiscoveryQualificationResult에 adjusted_* 필드 5종 병기(raw admitted/selected_horizon 등은 무변화, 기본값 False로 bit-identical 보장). MhsDiagnosticRequest.discovery_gate_adjusted_net_t + CLI --discovery-gate-adjusted-net-t로 옵트인 배선. 25차 실측(2026-08-13)으로 실행 검증: momentum 등 전 후보에서 raw vs adjusted 격차 5~10% 수준으로 admission_t=2.0 근접 이동 없음.",
+      "impact": "가설 기각(자기상관 편향은 admission 실패의 원인이 아님) -- 근본 원인은 discovery window 2년(2021-2022) worst-year 소표본 설계로 확정. 후속 조치(window 구조 변경)는 더 큰 범위의 별도 스펙 + 사용자 승인 필요로 이관. Research-GO/자본배분/PHASE_1_BOOK_BLEND_WEIGHTS는 무변경."
+    },
+    {
       "task_id": "TASK_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION",
       "date": "2026-08-13",
       "adr_id": "ADR_20260813_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION",
@@ -989,16 +999,6 @@
       "why": "Expert-portfolio contracts and sleeve-blend backtest mixed multiple behavioral responsibilities across large files, while application filenames repeated technical qualifiers and obscured workflow ownership.",
       "resolution": "Split expert-portfolio models, admission types, and reports; split sleeve-blend common, fixed, weights, and directional execution; retained old import paths as compatibility facades; promoted concise application module names; updated callers, tests, and code-map coverage.",
       "impact": "Public imports, CLI commands, dataclass contracts, fingerprints, causal no-lookahead weights, leverage calibration, stress reuse, and full regression behavior remain unchanged. Canonical modules are easier to locate for maintainers and AI agents."
-    },
-    {
-      "task_id": "TASK_PROVENANCE_FINGERPRINT_REFACTOR",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_PROVENANCE_FINGERPRINT_REFACTOR",
-      "domain": "execution",
-      "title": "Centralize research data provenance fingerprints",
-      "why": "Cash-carry, open-interest, and technical-expert evaluators duplicated byte hashing and aggregate data fingerprint logic, while the canonical code map could omit production modules.",
-      "resolution": "Added generic bounded-memory SHA-256 and canonical aggregate helpers, moved source mappings into domain provenance modules, rewired evaluators, added provenance regression coverage, and enforced complete canonical code-map coverage.",
-      "impact": "Candidate data hashes and identifiers remain byte-for-byte compatible; missing inputs still fail closed and application workflows preserve PENDING behavior. Legacy import façades and CLI contracts remain intact."
     }
   ]
 }
