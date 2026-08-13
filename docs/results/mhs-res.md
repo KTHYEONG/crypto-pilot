@@ -1,6 +1,7 @@
 # MHS Horizon Diagnostic — Latest Result
 
-- **Document Date**: 2026-08-12 (18차, `mhs_universe_horizon_redesign` 적용 재실행 — `--slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon`)
+- **Document Date**: 2026-08-13 (19차, `mhs_fast_reversal_overlay_redesign` 최초 실측 — §8 참고. 18차까지의 §1-§7은 아래 그대로 보존)
+- **Document Date (18차)**: 2026-08-12 (18차, `mhs_universe_horizon_redesign` 적용 재실행 — `--slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon`)
 - **Domain**: Research / MHS (Multi-Horizon Market State)
 - **Run Metadata**: `start=2021-01-01`, `end=2025-12-31`, `execution_timeframe=5m`, `execution_universe_size=30`, `eligible_symbols=446`, `run_elapsed_seconds=706.7`
 - **CLI**: `research run portfolio mhs-horizon-diagnostic --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon`
@@ -103,7 +104,59 @@ fold별 CAGR이 처음으로 신뢰 가능한 수치로 노출됨 — fold1(2024
 | 시계열(방향성) 절대모멘텀 재검토 — 사전스크린 Sharpe 1.0~1.4로 횡단면 앙상블(0.72~0.86)보다 높게 관측됨 | 미착수, 연율화 버그 수정 후 fold-train-only로 재검증 필요(`docs/specs/mhs_execution_annualization_fix.md` §3) |
 | 펀딩비 캐리 신호 — 손익 분해 부호 모순 재검증 필요 | 미착수, 액면 그대로 신뢰 금지 |
 | fold1(2024) 잔여 미달 원인 조사 | 미착수 — `yearly_net_t` 필드가 이미 노출되어 있어 `--discovery-gate` 재실행 후 2024열만 조회하면 됨(신규 계산 불필요, `mhs_universe_horizon_redesign.md` §5 순위 2) |
-| `fast_reversal`의 독립적 `CAPITAL_INVARIANT_BREACH`(음의 자기자본, 2025-07-14) 근본 원인 조사 | 미착수 — **최우선(blocking)**: 이번 18차가 fast의 horizon 재검증을 완료했으므로, 이후 fast에 어떤 형태로든 자본을 복원하려면 이 버그 해결이 반드시 선행되어야 함(`mhs_universe_horizon_redesign.md` §5 순위 1) |
+| `fast_reversal`의 독립적 `CAPITAL_INVARIANT_BREACH`(음의 자기자본) 근본 원인 조사 | **부분 해결 + 신규 결함 발견(19차, §8)**: root cause 규명(edge 없는 신호를 무방비 레버리지로 장기 리플레이한 결과, 데이터 버그 아님) + Pass-1 reference replay용 방어 플로어 구현 완료. 그러나 Pass-2(primary, 실제 보고값)는 미보호로 남아있어 여전히 크래시(더 악화: -144→**-66,427** 자기자본) — **Pass-2 플로어 확장이 신규 최우선 항목**(§8.3) |
 | top-30 로스터 크기(N) fold-train-only 재검증(Q2) | 미착수, `ADR_20260810_MHS_BOOK_ADMISSION_VOL_MASK`가 미측정 상수로 인정한 항목(`mhs_universe_horizon_redesign.md` §5 순위 3) |
-| fast 대안 방향 — ① 리스크/타이밍 오버레이 재배선, ② top-30 밖 중간유동성 구간 재스캔 | 미착수, 이번 18차로 horizon 탐색이 결론남에 따라 우선순위 상승(`mhs_universe_horizon_redesign.md` §4.2) |
+| fast 대안 방향 — ① 리스크/타이밍 오버레이 재배선, ② top-30 밖 중간유동성 구간 재스캔 | **① 착수(19차, §8)**: `trend_efficiency_scale` 오버레이 opt-in 구현·유닛테스트 완료(`docs/specs/mhs_fast_reversal_overlay_redesign.md`), fold-train-only 실측 비교는 미실행. ② 미착수. |
 | 유동성 lookback 720h 민감도(Q1) | 미착수, 낮은 우선순위(4개 모듈 공유, 문제 증거 없음) |
+| Pass-2(primary) 실행 replay에도 `min_equity_fraction` 플로어 확장 | **신규, 미착수 — 최우선(blocking)**: 19차 실측(§8.3)이 Pass-1만 보호하는 현재 구현이 Pass-2를 오히려 더 심하게 무방비로 노출시킴을 실증 — fast에 자본을 복원하는 어떤 경로든 이 확장이 선행되어야 함 |
+
+## 8. 19차 — `fast_reversal` 오버레이 재설계 최초 실측 (`docs/specs/mhs_fast_reversal_overlay_redesign.md`)
+
+**CLI**: `research run portfolio mhs-horizon-diagnostic --discovery-gate --fold-safe-horizon --output-tier full` (2021-2025 dev, `status=COMPLETE`).
+
+**⚠️ 실행 설정 주의**: 이번 실행은 `--slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger`(18차가 사용한 알파엔진 개선 플래그)를 포함하지 않았다 — 기본값(`single_horizon`/`per_symbol_deadband`)으로 실행됨. 따라서 §8.2의 `slow_momentum`/`blend` 수치는 §1의 17-18차 헤드라인(`primary_autocorr_sharpe=0.5257`)과 **직접 비교 불가**하다(실행 설정 차이이지 이번 스펙 변경에 의한 회귀가 아님). §8.1(B)과 §8.3(A)의 `fast_reversal` 자체 수치는 이 플래그와 무관해 유효하다.
+
+### 8.1 B — EMA 반전신호 스무딩 버그 수정: 확인됨
+
+`fast_reversal` 48h 전역 prescreen, 0bps 시작점:
+
+| cost tier | 18차(EMA 스무딩 버그 있음) | 19차(수정 후) |
+| :--- | ---: | ---: |
+| 0.0bps `net_t` | -0.06 (음수, 과거 문서화된 +0.577과도 불일치) | **+0.067 (양수로 복원)** |
+| 2.0bps `net_t` | (음수 심화) | -0.55 |
+| 8.0bps `net_t` | -2.39 | -2.41 (거의 동일) |
+
+예측대로 재현: 스무딩 제거로 0비용 부호가 양수로 복원되어 `discovery.py`의 leak-free 스캔(스무딩 미적용)과 내부 정합성을 회복했다. 그러나 2bps부터 음수로 꺾이는 건 동일 — **"신호 자체에 근본적으로 edge 없음" 결론(18차 §1-bis)은 그대로 유지**, 버그는 진단 헤드라인의 왜곡만 고친 것이지 edge를 만들어내지 않았다.
+
+### 8.2 슬로우/블렌드 (참고용, §1 헤드라인과 비교 불가 — 위 주의 참조)
+
+| field | 값 (single_horizon/per_symbol_deadband) |
+| :--- | ---: |
+| `slow_momentum.primary_autocorr_sharpe` | 0.1933 |
+| `slow_momentum.primary_geometric_cagr` | -0.28% |
+| `slow_momentum.stress_naive_sharpe` | -0.2362 |
+| `research_go.folds_passed` | 1/3 |
+| `research_go.reason_codes` | `CAPITAL_INVARIANT_BREACH`, `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `RELEVANT_EXECUTION_DATA_GAP`, `STRESS_SHARPE_NOT_POSITIVE`, `UNSPECIFIED_POLICY` |
+
+`fold_safe_horizon_selection`은 3개 fold 전부 fast/slow `frozen_default` 유지 — 18차와 무변화.
+
+### 8.3 A — 자본붕괴 방어: 부분 성공 + Pass-2 미보호 신규 발견
+
+`_book_outcome`의 Pass-1(reference) replay에만 `min_equity_fraction=0.5` 방어 플로어를 배선했다:
+
+- **Pass-1은 의도대로 크래시 없이 완주** — 단, `equity_floor_breached_at`가 **2021-09-14**부터 시작(2021-2025 전체 구간의 초반 8.5개월 만에 이미 초기자본 50%를 소진하고 있었다는 사실이 이번에 처음 노출됨).
+- **Pass-2(실제 `primary`로 보고되는 replay)는 미보호로 남아 여전히 크래시**, 오히려 악화됨:
+
+| field | 18차 | 19차 |
+| :--- | ---: | ---: |
+| `books.fast_reversal.failure.reason` | `CAPITAL_INVARIANT_BREACH` | `CAPITAL_INVARIANT_BREACH` (미해결) |
+| 붕괴 시각 | 2025-07-14 | 2025-07-16 |
+| `pre_trade_equity` | -144.52 | **-66,427.67** (약 460배 악화) |
+
+**원인**: Pass-1이 2021-09부터 계속 강제 플랫이라 실현 변동성이 인위적으로 거의 0으로 측정되고, 여기서 파생되는 `_pnl_vol_target_scale`이 Pass-2를 사실상 축소 없이(거의 풀 노출로) 통과시킨다. Pass-2 자체엔 플로어가 없어 무방비 상태로 재차 파산한다 — Pass-1만 보호하는 현재 구현은 "크래시를 없앤다"는 원래 목표를 달성하지 못했고, 오히려 Pass-2의 파산 규모를 키우는 부작용을 만들었다.
+
+**결론**: root cause 진단(edge 없는 신호를 무방비 레버리지로 장기 리플레이한 결과, 데이터 무결성 버그 아님)은 실측으로 확정됐으나, 구제 조치는 미완성이다. **Pass-2에도 동일 플로어를 확장하는 것이 fast_reversal 자본 복원 경로의 신규 최우선(blocking) 항목**이다(§7 갱신).
+
+### 8.4 C — 트렌드효율성 오버레이: 코드/유닛테스트만 존재, 실측 비교 미실행
+
+`trend_efficiency_scale`(`src/mhs/regime.py`) + `--trend-efficiency-overlay` opt-in 플래그 구현 및 10개 계약 시나리오 유닛테스트(104 passed) 완료. `regime_scale`-only vs `regime_scale * trend_efficiency_scale`의 fold-train-only Sharpe/MDD 비교(스펙 §4 3번 항목)는 이번 19차에 **실행하지 않았다** — 오버레이 기본값을 `True`로 승격하기 전 반드시 선행되어야 하는 실측이며, §7 백로그에 남아 있다.
