@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_CAPITAL_FLOOR_AND_OVERLAY_VALIDATION",
+      "date": "2026-08-13",
+      "adr_id": "ADR_20260813_MHS_CAPITAL_FLOOR_AND_OVERLAY_VALIDATION",
+      "domain": "mhs",
+      "title": "MHS 자본붕괴 완전방어·blend replay regime_scale 결함 수정·트렌드효율성 오버레이 실측(부정적 결과)",
+      "why": "19차가 code-only로 남긴 3개 gap을 실측 검증 요청받음: (1) fast_reversal Pass-2/stress가 여전히 무보호로 남아 CAPITAL_INVARIANT_BREACH가 오히려 악화(-144→-66,427), (2) trend_efficiency_overlay가 유닛테스트만 되고 fold-train-only 실측 비교 전무, (3) fold1(2024) 미달 원인 미상(이전 문서의 yearly_net_t 조회 가능 주장은 틀린 전제였음, DISCOVERY_END=2023-12-31로 2024열 구조적 NaN).",
+      "resolution": "(A) _book_outcome의 Pass-2/stress/patient_reference/touch/ladder 전체 replay_execution_windows 호출에 min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR 확장 배선 -- fast_reversal 표준 진단이 크래시 없이 완주(failure=None). (E, 신규 발견) C 실측 중 top-level blend.primary_autocorr_sharpe가 오버레이 on/off와 무관하게 불변임을 발견해 추적한 결과, _run_books_concurrent의 blend_replay가 w_fast_execution/w_slow_execution으로 독립 재구성되며 regime_scale(기존 _regime_cash_scale 포함) 곱셈이 17차 이래 한 번도 반영되지 않았던 결함을 확인·수정 -- regime_scale을 신규 옵셔널 파라미터로 스레딩해 blend_replay에만 적용(개별 북 무영향, fold 경로 무변경). 회귀 테스트 test_regime_scale_reaches_blend_replay_not_only_prescreen 추가(수정 전 실패, 수정 후 통과 확인). (C) --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon로 오버레이 on/off 각 전체 재실행 비교 -- 3-fold 전부 stress_naive_sharpe 악화, fold1(2024) primary/stress 둘 다 악화 확인, 기본값 False 유지 결정(코드 변경 없음, 실측 결과만 기록). (D) fold1 원인은 ledger.parquet의 replay_id='fold1_strict' 월별 손익 직접 조회로 재진단(12개월 중 8개월 손실, 단일크래시 없는 만성적 부진) -- 근본 해결은 미해결로 백로그 이월.",
+      "impact": "유닛/통합 테스트 전체 재통과(tests/unit/mhs, tests/unit/application/research/mhs, tests/integration/mhs), lean_check.py --spec-only PASS. 실데이터 재실행(4회, 2021-2025) 실측: fast_reversal.failure None 확인, blend.primary_autocorr_sharpe 0.5257->0.5196(MDD -0.2269->-0.2015 개선), slow_momentum 개별 북 0.5257 무변화(스케일이 blend 전용임을 실증), research_go.folds_passed 2/3 무변화(fold 경로는 원래 정상 배선이었으므로 게이트 판정 자체는 영향 없음 -- 이번 수정은 top-level 진단 리포트의 정확도 회복이 목적). trend_efficiency_overlay는 기본값 False 유지, 향후 이 신호 형태로는 재시도하지 않음."
+    },
+    {
       "task_id": "TASK_MHS_FAST_REVERSAL_OVERLAY_REDESIGN",
       "date": "2026-08-13",
       "adr_id": "ADR_20260813_MHS_FAST_REVERSAL_OVERLAY_REDESIGN",
@@ -989,16 +999,6 @@
       "why": "The fixed sleeve needed an independent return source to reduce fold concentration.",
       "resolution": "Collected causal daily metrics and evaluated open_interest_deleveraging_v1 across BTC, ETH, AVAX, BNB, and DOGE under unchanged gates.",
       "impact": "All five symbols were rejected and the candidate remains excluded from the expert catalog."
-    },
-    {
-      "task_id": "TASK_PROVENANCE_LEDGER_CLI_CONSOLIDATION",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_PROVENANCE_LEDGER_CLI_CONSOLIDATION",
-      "domain": "execution",
-      "title": "Provenance ledger and grouped CLI consolidation",
-      "why": "Expert registration and CLI entrypoints had divergent schemas and duplicated workflow files.",
-      "resolution": "Consolidated registration, evaluation, and retirement provenance into a typed runs ledger with grouped CLI adapters and fingerprint-verified expert catalogs.",
-      "impact": "Future strategies add catalog and command entries without new run scripts or registry files while legacy provenance remains queryable."
     }
   ]
 }
