@@ -37,6 +37,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         rebalance_filter=args.rebalance_filter,
         beta_neutralize=args.beta_neutralize,
         ensemble_signal=args.ensemble_signal,
+        trend_efficiency_overlay=args.trend_efficiency_overlay,
     )
     report = run_mhs_horizon_diagnostic(request)
     path = persist_mhs_horizon_diagnostic_report(
@@ -177,6 +178,18 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Signal family for the slow book: raw horizon log return (frozen "
             "production) or vol-normalized (re-open for measurement after the "
             "RC-1 deadband fix -- docs/specs/mhs_alpha_engine.md §6.1)"
+        ),
+    )
+    mhs.add_argument(
+        "--trend-efficiency-overlay",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in exposure timing overlay on slow_momentum: scales gross "
+            "exposure down in low-efficiency-ratio (choppy, momentum-hostile) "
+            "regimes using the fast band's own horizon, composed with the "
+            "existing regime cash scale (default False = byte-identical -- "
+            "docs/specs/mhs_fast_reversal_overlay_redesign.md §2.3)"
         ),
     )
     mhs.add_argument(

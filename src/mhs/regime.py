@@ -173,6 +173,35 @@ def crash_regime_tilt_weights(
     return (1.0 - alpha) * rank_neutral_weights + alpha * tilt
 
 
+def trend_efficiency_scale(
+    mean_efficiency_ratio: pd.Series,
+    window_hours: int = 720,
+    floor: float = 0.5,
+) -> pd.Series:
+    """De-risk slow_momentum's exposure in choppy (low efficiency-ratio) regimes.
+
+    ``scale = clip(current / rolling_median(current, window_hours), floor, 1.0)``:
+    mirrors ``_regime_cash_scale``'s ratio-to-own-trailing-history design (never
+    levers above 1.0), with the ratio inverted relative to that sibling because
+    ``efficiency_ratio``'s adverse direction is LOW (choppy/momentum-hostile),
+    not HIGH like realized vol. A flat/insufficient-history window carries full
+    exposure (never 0/0), matching ``_regime_cash_scale``'s same guarantee
+    (docs/specs/mhs_fast_reversal_overlay_redesign.md §2.3).
+    """
+    if not 0.0 < floor <= 1.0:
+        raise ValueError(f"floor must be in (0, 1], got {floor}")
+    if window_hours < 1:
+        raise ValueError(f"window_hours must be >= 1, got {window_hours}")
+    if mean_efficiency_ratio.empty:
+        return pd.Series(1.0, index=mean_efficiency_ratio.index)
+    median = mean_efficiency_ratio.rolling(
+        window_hours, min_periods=min(48, window_hours),
+    ).median()
+    scale = mean_efficiency_ratio.div(median.where(median > 0))
+    scale = scale.clip(lower=floor, upper=1.0)
+    return scale.fillna(1.0)
+
+
 def _validate_reference_symbols(
     log_price: pd.DataFrame, reference_symbols: Sequence[str]
 ) -> None:
