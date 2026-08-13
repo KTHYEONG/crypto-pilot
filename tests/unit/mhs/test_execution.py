@@ -1478,3 +1478,112 @@ class TestCapitalInvariantFailFast:
             windows, 1.0, bound, ExecutionSpec(), retain_event_snapshots=True,
         )
         _assert_replay_equivalent(oracle, windowed)
+
+class TestEquityFloorProtection:
+    """SCENARIO_MHS_EQUITY_FLOOR_DEFAULT_NONE_STRICT_08
+    SCENARIO_MHS_EQUITY_FLOOR_FORCES_FLAT_09
+    SCENARIO_MHS_EQUITY_FLOOR_NO_BREACH_EMPTY_TUPLE_10: the reference-pass
+    equity floor (min_equity_fraction) forces a decision row's sizing flat
+    once pre-trade equity crosses ``min_equity_fraction * initial_equity``
+    instead of levering a depleting base toward the hard turnover-equity
+    check. The default None keeps today's strict fail-closed behavior, and a
+    never-breached floor run is byte-identical to the None run."""
+
+    def _short_squeeze_window(self, *, price_levels: tuple[float, ...]) -> ExecutionReplayWindow:
+        """Short book squeezed by staged mark rises: each step's live equity
+        ``_equity_at`` erodes through the 0.5 floor while the ledger-level
+        pre-trade equity stays positive (so the floor's forced-flat unwind is
+        itself well-capitalized), and a step that more-than-doubles the entry
+        drives the ledger pre-trade equity <= 0 for the no-floor run."""
+        grid = pd.date_range("2021-01-01 00:00", periods=37, freq="5min", tz="UTC")
+        symbols = ("AAAUSDT",)
+        bounds = (pd.Timestamp("2021-01-01 01:00", tz="UTC"), pd.Timestamp("2021-01-01 01:50", tz="UTC"))
+        levels = np.where(
+            grid < bounds[0], price_levels[0],
+            np.where(grid < bounds[1], price_levels[1],
+            np.where(grid < pd.Timestamp("2021-01-01 02:40", tz="UTC"), price_levels[2], price_levels[3])),
+        )
+        closes = pd.DataFrame({"AAAUSDT": levels}, index=grid)
+        decisions = pd.DatetimeIndex(
+            [
+                pd.Timestamp("2021-01-01 00:10", tz="UTC"),
+                pd.Timestamp("2021-01-01 01:00", tz="UTC"),
+                pd.Timestamp("2021-01-01 01:50", tz="UTC"),
+                pd.Timestamp("2021-01-01 02:40", tz="UTC"),
+            ]
+        )
+        return ExecutionReplayWindow(
+            window_start=grid[0],
+            window_end=grid[-1],
+            columns=symbols,
+            symbols=symbols,
+            minute_grid=grid,
+            highs=closes * 1.01,
+            lows=closes * 0.99,
+            closes=closes,
+            marks=closes,
+            bar_funding=pd.DataFrame(0.0, index=grid, columns=symbols),
+            target_weights=pd.DataFrame({"AAAUSDT": [-1.0] * 4}, index=decisions),
+            signal_available_at=decisions,
+        )
+
+    def test_default_none_preserves_strict_fail_closed(self) -> None:
+        """SCENARIO_MHS_EQUITY_FLOOR_DEFAULT_NONE_STRICT_08: a short entered at
+        100 that more-than-doubles to 200 makes the ledger pre-trade equity at
+        the buy-back fill <= 0; with min_equity_fraction unset the replay still
+        raises the exact existing DataIntegrityError message."""
+        window = self._short_squeeze_window(price_levels=(100.0, 200.0, 200.0, 200.0))
+        with pytest.raises(DataIntegrityError, match="pre-trade equity must be positive and finite"):
+            replay_execution_windows([window], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+
+    def test_floor_forces_flat_and_records_breach_timestamps(self) -> None:
+        """SCENARIO_MHS_EQUITY_FLOOR_FORCES_FLAT_09: a gradual squeeze (100 ->
+        140 -> 180 -> 220) erodes live equity through the 0.5 floor at the
+        second and fourth decisions while the ledger-level pre-trade equity
+        stays positive, so the floor's forced-flat unwind completes the replay
+        and records the exact breach timestamps."""
+        window = self._short_squeeze_window(price_levels=(100.0, 140.0, 180.0, 220.0))
+        result = replay_execution_windows(
+            [window], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), min_equity_fraction=0.5,
+        )
+        breaches = result.ledger.equity_floor_breached_at
+        assert len(breaches) >= 2
+        assert breaches[0] == pd.Timestamp("2021-01-01 01:00", tz="UTC")
+        assert breaches[1] == pd.Timestamp("2021-01-01 01:50", tz="UTC")
+        assert breaches[-1] == pd.Timestamp("2021-01-01 02:40", tz="UTC")
+        assert result.ledger.equity.min() > 0.0
+
+    def test_no_breach_is_empty_tuple_and_byte_identical_to_none(self) -> None:
+        """SCENARIO_MHS_EQUITY_FLOOR_NO_BREACH_EMPTY_TUPLE_10: a falling-price
+        short (equity grows away from the floor) never trips it; the floor run
+        returns an empty equity_floor_breached_at tuple and every other ledger
+        field is byte-identical to the None run on the same fixture."""
+        window = self._short_squeeze_window(price_levels=(100.0, 60.0, 70.0, 80.0))
+        base = replay_execution_windows([window], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+        floored = replay_execution_windows(
+            [window], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), min_equity_fraction=0.5,
+        )
+        assert base.ledger.equity_floor_breached_at == ()
+        assert floored.ledger.equity_floor_breached_at == ()
+        self._assert_ledger_fields_equal(base, floored)
+
+    @staticmethod
+    def _ledger_without_floor(result) -> dict[str, object]:
+        out = {}
+        for f in dataclasses.fields(result.ledger):
+            if f.name == "equity_floor_breached_at":
+                continue
+            out[f.name] = getattr(result.ledger, f.name)
+        return out
+
+    def _assert_ledger_fields_equal(self, a, b) -> None:
+        fa, fb = self._ledger_without_floor(a), self._ledger_without_floor(b)
+        assert set(fa) == set(fb)
+        for key in fa:
+            va, vb = fa[key], fb[key]
+            if isinstance(va, pd.Series):
+                pd.testing.assert_series_equal(va, vb)
+            elif isinstance(va, pd.DataFrame):
+                pd.testing.assert_frame_equal(va, vb)
+            else:
+                assert va == vb
