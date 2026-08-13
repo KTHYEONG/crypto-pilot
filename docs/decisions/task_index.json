@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FAST_REVERSAL_OVERLAY_REDESIGN",
+      "date": "2026-08-13",
+      "adr_id": "ADR_20260813_MHS_FAST_REVERSAL_OVERLAY_REDESIGN",
+      "domain": "mhs",
+      "title": "MHS fast_reversal 오버레이 재설계: 자본붕괴 방어·EMA 반전신호 버그 수정·트렌드효율성 타이밍 오버레이",
+      "why": "fast_reversal이 24-168h 전체 후보 그리드에서 leak-free 재검증 후에도 admission 실패(mhs-res.md 18차 §1-bis)해 독자 알파북으로서 근거가 없음이 확정됨. 동시에 whipsaw 억제용 EMA가 reversal 신호에도 무조건 적용돼 진단 헤드라인을 왜곡하고 있었고, fast_reversal의 독립적 CAPITAL_INVARIANT_BREACH(2025-07-14 음의 자기자본)가 향후 어떤 형태로든 자본 복원을 막는 최우선 차단 항목으로 기록돼 있었음(mhs-res.md §7).",
+      "resolution": "(A) src/mhs/execution.py: _BoundExecutionReplayAccumulator/replay_execution_windows에 opt-in min_equity_fraction 방어 플로어 추가(기본 None=기존 동작 완전 동일), SimulatedInventoryLedgerResult.equity_floor_breached_at 타입드 필드 신설, _book_outcome의 Pass-1 reference replay에만 MHS_REFERENCE_PASS_EQUITY_FLOOR(=MHS_REGIME_CASH_SCALE_FLOOR 재사용)로 배선. (B) evaluation.py에 sign-aware _signal_ema_span 헬퍼 신설해 두 호출부(fold/top-level)의 fast_ema를 sign=-1일 때 None(무스무딩)으로 교체 -- slow_momentum 수치는 완전 불변. (C) src/mhs/regime.py에 trend_efficiency_scale 신설(efficiency_ratio 기반, _regime_cash_scale과 동일한 ratio-to-own-history 패턴, 방향만 반전), evaluation.py에 _trend_efficiency_overlay_scale 래퍼 + MhsDiagnosticRequest.trend_efficiency_overlay(opt-in bool, 기본 False) + CLI --trend-efficiency-overlay 플래그, 양쪽 호출부(_build_fold_target_weights/top-level run_mhs_horizon_diagnostic)에서 기존 regime_scale과 곱으로 합성. PHASE_1_BOOK_BLEND_WEIGHTS는 무변경(fast_reversal 여전히 0.0 자본).",
+      "impact": "lean_check.py --spec docs/specs/mhs_fast_reversal_overlay_redesign_contract.json PASS(lint/type/test 전체), contract의 10개 시나리오 전부 대응하는 테스트가 tests/unit/mhs/test_regime.py, tests/unit/mhs/test_execution.py, tests/unit/application/research/mhs/test_fast_reversal_overlay_redesign.py에 추가되어 104 passed. trend_efficiency_overlay 기본값 False이므로 기존 프로덕션 경로/mhs-res.md 기록 수치는 불변. 실전 데이터 재실행(fold-train-only 오버레이 비교, EMA 수정 후 프리스크린 재검증)은 미실행 -- §4 검증 계획은 후속 실측 과제로 남음."
+    },
+    {
       "task_id": "TASK_MHS_UNIVERSE_HORIZON_REDESIGN",
       "date": "2026-08-12",
       "adr_id": "ADR_20260812_MHS_UNIVERSE_HORIZON_REDESIGN",
@@ -989,16 +999,6 @@
       "why": "Expert registration and CLI entrypoints had divergent schemas and duplicated workflow files.",
       "resolution": "Consolidated registration, evaluation, and retirement provenance into a typed runs ledger with grouped CLI adapters and fingerprint-verified expert catalogs.",
       "impact": "Future strategies add catalog and command entries without new run scripts or registry files while legacy provenance remains queryable."
-    },
-    {
-      "task_id": "TASK_EXPERT_PORTFOLIO_RUNTIME_EXECUTION",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_EXPERT_PORTFOLIO_RUNTIME_EXECUTION",
-      "domain": "execution",
-      "title": "Expert portfolio runtime execution and fail-closed diagnosis",
-      "why": "실제 parquet 실행으로 전문가 포트폴리오의 등록·배분 경로와 게이트 결과를 검증해야 했다.",
-      "resolution": "CLI는 미등록 library에서 중단되었고 등록을 우회한 BTC·ETH 코어 실행은 LCB 비양수로 전액 현금에 머문 결과를 ADR과 결정 인덱스에 기록했다.",
-      "impact": "전문가 포트폴리오는 아직 promotion 불가이며 expert_library_registry 등록과 양의 LCB를 생성하는 독립 전략 증거가 다음 필수 작업으로 남았다."
     }
   ]
 }
