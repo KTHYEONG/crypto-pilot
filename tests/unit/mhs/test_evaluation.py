@@ -14,6 +14,7 @@ from src.mhs.evaluation import (
     compute_deployment_readiness,
     cost_response_curve,
     deflated_sharpe_ratio,
+    effective_breadth,
     phase_1_anchored_purged_folds,
     phase_diagnostic_metrics,
     probabilistic_sharpe_ratio,
@@ -654,4 +655,65 @@ class TestDeflatedSharpeRatio:
         # A radicand <= 0 (e.g. extreme skew/observed Sharpe) must yield NaN,
         # never an inf or complex value.
         assert np.isnan(probabilistic_sharpe_ratio(0.3, 0.0, 500, 10.0, 3.0))
+
+
+class TestEffectiveBreadth:
+    """SCENARIO_MHS_EFFECTIVE_BREADTH_MATCHES_KNOWN_CASES_03."""
+
+    def test_independent_columns_match_nominal(self) -> None:
+        # N independent random return columns yield n_eff within sampling error
+        # of N, with near-zero mean pairwise correlation.
+        rng = np.random.default_rng(0)
+        indep = pd.DataFrame(rng.standard_normal((300, 5)), columns=list("abcde"))
+        n_eff, mean_corr = effective_breadth(indep)
+        assert 3.5 <= n_eff <= 5.0
+        assert -0.2 <= mean_corr <= 0.2
+
+    def test_perfectly_correlated_columns_collapse_to_one(self) -> None:
+        # N perfectly correlated (identical) columns yield n_eff == 1.0.
+        rng = np.random.default_rng(0)
+        base = rng.standard_normal(300)
+        dup = pd.DataFrame(dict.fromkeys(list("abcd"), base))
+        n_eff, _ = effective_breadth(dup)
+        assert abs(n_eff - 1.0) < 0.05
+
+    def test_mixed_panel_strictly_between(self) -> None:
+        # A mixed panel (two correlated columns, two independent) yields n_eff
+        # strictly between 1.0 and N -- the direct correctness check behind the
+        # n_eff=1.76/19 and n_eff=3.05/28 saturation claims in the spec.
+        rng = np.random.default_rng(0)
+        base = rng.standard_normal(300)
+        frame = pd.DataFrame(
+            {
+                "a": base,
+                "b": base + 0.1 * rng.standard_normal(300),
+                "c": rng.standard_normal(300),
+                "d": rng.standard_normal(300),
+            }
+        )
+        n_eff, _ = effective_breadth(frame)
+        assert 1.0 < n_eff < 4.0
+
+    def test_zero_variance_column_is_absorbed_not_nan(self) -> None:
+        # A constant (zero-variance) column must not poison the correlation
+        # matrix with NaNs; the non-finite entries become 0.0 and the diagonal
+        # is forced to 1.0, so n_eff stays finite and within [1.0, N].
+        rng = np.random.default_rng(0)
+        frame = pd.DataFrame(
+            {
+                "a": rng.standard_normal(300),
+                "b": rng.standard_normal(300),
+                "c": 3.0,
+            }
+        )
+        n_eff, _ = effective_breadth(frame)
+        assert 1.0 <= n_eff <= 3.0
+        assert np.isfinite(n_eff)
+
+    def test_fails_closed_on_too_few_rows_or_columns(self) -> None:
+        with pytest.raises(ValueError, match="effective_breadth"):
+            effective_breadth(pd.DataFrame({"a": [1.0, 2.0]}))
+        with pytest.raises(ValueError, match="effective_breadth"):
+            effective_breadth(pd.DataFrame({"a": [1.0], "b": [2.0]}))
+
 
