@@ -24,7 +24,7 @@ from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
 from src.mhs.evaluation import AnchoredPurgedFold, cost_response_curve
 from src.mhs.execution import mhs_ledger_pnl
-from src.mhs.horizons import horizon_log_return, vol_normalized_horizon_signal
+from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
 
 _PERIODS_PER_YEAR_1H = 365.0 * 24.0
 _ADMISSION_T = 2.0
@@ -58,6 +58,11 @@ class DiscoveryQualificationResult:
     discovery_aggregate_adjusted_net_t: float | None = None
     qualification_adjusted_net_t: float | None = None
     adjusted_admitted: bool | None = None
+    yearly_regime_scaled_net_t: tuple[tuple[int, tuple[tuple[int, float], ...]], ...] = ()
+    discovery_scores_regime_scaled: tuple[tuple[int, float], ...] = ()
+    discovery_aggregate_regime_scaled_net_t: float | None = None
+    qualification_regime_scaled_net_t: float | None = None
+    regime_scaled_admitted: bool | None = None
 
 
 def _year_mask(index: pd.DatetimeIndex, year: int) -> np.ndarray:
@@ -156,6 +161,70 @@ def _score_masked_adjusted_net_t(
     demeaned = net.to_numpy(dtype="float64") - mean
     denom = _bartlett_hac_denom(demeaned, max_lag_periods)
     return raw_t / math.sqrt(denom)
+
+def _discovery_regime_cash_scale(vol_mean: pd.Series) -> pd.Series:
+    """Per-bar gross-exposure scale that raises cash in high-vol regimes.
+
+    Duplicates the exact kernel of the application layer's ``_regime_cash_scale``
+    (``src/application/research/mhs/evaluation.py``): ``median(vol) / vol``
+    clipped to ``[floor, 1.0]`` with a ``fillna(1.0)`` for
+    insufficient-history bars -- same local constants (floor ``0.5`` =
+    ``MHS_REGIME_CASH_SCALE_FLOOR``, median window ``720``h =
+    ``MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS``, ``min_periods`` 48), deliberately
+    NOT imported because ``src/mhs/discovery.py`` is domain layer and the
+    original lives in the application layer (importing it would invert the
+    dependency direction -- same pattern as ``_bartlett_hac_denom``). The
+    market-vol input it consumes is an approximation of production's
+    ``vol_mean``; see ``_discovery_market_vol_mean``.
+    """
+    if vol_mean.empty:
+        return pd.Series(1.0, index=vol_mean.index)
+    median = vol_mean.rolling(720, min_periods=min(48, 720)).median()
+    scale = median.div(vol_mean.clip(lower=1e-12))
+    scale = scale.clip(lower=0.5, upper=1.0)
+    return scale.fillna(1.0)
+
+
+def _discovery_market_vol_mean(
+    log_close: pd.DataFrame,
+    eligible: pd.DataFrame,
+    horizon_bars: int = 48,
+) -> pd.Series:
+    """Approximate market-wide realized-vol series used for regime de-risking.
+
+    ``realized_vol(log_close, horizon_bars).where(eligible).mean(axis=1)`` --
+    the cross-sectional mean of the liquid-half-eligible panel's realized vol.
+    This is an APPROXIMATION of the production regime signal
+    (``evaluation.py``'s ``vol_mean`` masks to the PIT ``execution_mask`` /
+    Top-30 roster, data ``discovery.py`` does not have and this spec does not
+    attempt to thread in) -- never a bit-identical replica of production's
+    ``_regime_cash_scale`` input.
+    """
+    return realized_vol(log_close, horizon_bars).where(eligible).mean(axis=1)
+
+
+def _score_masked_regime_scaled_net_t(
+    weights: pd.DataFrame,
+    regime_scale: pd.Series,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    mask: np.ndarray,
+    cost_bps: float,
+    periods_per_year: float,
+) -> float:
+    """Aggregate prescreen net t-stat of a regime-de-risked weight book over ``mask``.
+
+    Scales each bar's gross exposure by ``regime_scale`` (``weights.mul(
+    regime_scale, axis=0)``) then applies the identical raw t-stat formula as
+    ``_score_masked_net_t``. With ``regime_scale`` identically 1.0 this
+    degenerates exactly to ``_score_masked_net_t``'s value. Diagnostic-only --
+    never feeds ``admitted`` / ``selected_horizon``.
+    """
+    scaled = weights.mul(regime_scale, axis=0)
+    curve = cost_response_curve(
+        scaled[mask], opens[mask], bar_funding[mask], (cost_bps,), periods_per_year,
+    )
+    return float(curve[cost_bps].net_t)
 
 
 def _candidate_net_t(
@@ -261,6 +330,7 @@ def select_horizon_by_discovery_qualification(
     admission_t: float = _ADMISSION_T,
     precomputed_candidate_weights: Mapping[int, pd.DataFrame] | None = None,
     compute_adjusted_net_t: bool = False,
+    compute_regime_scaled_net_t: bool = False,
 ) -> DiscoveryQualificationResult:
     """Run the worst-year-robust discovery/qualification gate for one sign family.
 
@@ -283,9 +353,17 @@ def select_horizon_by_discovery_qualification(
     computes the Bartlett/HAC-adjusted net t-stat per (horizon, year), the
     adjusted worst-year ``discovery_scores_adjusted`` table, and -- for the
     selected candidate only -- the adjusted aggregate/qualification t-stats and
-    ``adjusted_admitted``. It never changes ``selected_horizon``/``admitted``/
-    the raw scores, which stay driven solely by the unadjusted path
-    (``docs/specs/mhs_discovery_admission_autocorr_robustness.md`` §2).
+    ``adjusted_admitted``. ``compute_regime_scaled_net_t`` is a second,
+    independent DIAGNOSTIC-ONLY opt-in: when True it also computes a vol-regime
+    cash-scale-adjusted net t-stat per (horizon, year) from ONE shared
+    ``regime_scale`` series built once per call, the regime-scaled worst-year
+    ``discovery_scores_regime_scaled`` table, and -- for the selected candidate
+    only -- the regime-scaled aggregate/qualification t-stats and
+    ``regime_scaled_admitted`` (reusing the raw sign-consistency flag). Neither
+    diagnostic ever changes ``selected_horizon``/``admitted``/the raw scores,
+    which stay driven solely by the unadjusted path
+    (``docs/specs/mhs_discovery_admission_autocorr_robustness.md`` §2,
+    ``docs/specs/mhs_discovery_admission_regime_scale_parity.md`` §2).
     """
     if sign not in (-1, 1):
         raise ValueError(f"sign must be -1 or +1, got {sign}")
@@ -314,8 +392,15 @@ def select_horizon_by_discovery_qualification(
     oriented_scores: dict[int, float] = {}
     raw_worst_year: dict[int, float] = {}
     raw_worst_year_adjusted: dict[int, float] = {}
+    raw_worst_year_regime_scaled: dict[int, float] = {}
     yearly_net_t_by_horizon: dict[int, dict[int, float]] = {}
     yearly_adjusted_net_t_by_horizon: dict[int, dict[int, float]] = {}
+    yearly_regime_scaled_net_t_by_horizon: dict[int, dict[int, float]] = {}
+    regime_scale: pd.Series | None = (
+        _discovery_regime_cash_scale(_discovery_market_vol_mean(log_close, eligible))
+        if compute_regime_scaled_net_t
+        else None
+    )
     for horizon in horizon_candidates:
         weights = (
             precomputed_candidate_weights[horizon]
@@ -325,6 +410,7 @@ def select_horizon_by_discovery_qualification(
         yearly: list[float] = []
         yearly_by_year: dict[int, float] = {}
         adjusted_by_year: dict[int, float] = {}
+        regime_scaled_by_year: dict[int, float] = {}
         for year in discovery_years:
             year_mask = discovery_mask & _year_mask(index, year)
             net_t = _score_masked_net_t(
@@ -333,23 +419,40 @@ def select_horizon_by_discovery_qualification(
             yearly_by_year[year] = net_t
             if np.isfinite(net_t):
                 yearly.append(net_t)
+            if compute_regime_scaled_net_t:
+                assert regime_scale is not None
+                regime_scaled_by_year[year] = _score_masked_regime_scaled_net_t(
+                    weights, regime_scale, opens, bar_funding, year_mask,
+                    cost_bps, periods_per_year,
+                )
             if compute_adjusted_net_t:
                 adjusted_by_year[year] = _score_masked_adjusted_net_t(
                     weights, opens, bar_funding, year_mask, cost_bps, periods_per_year,
                     max_lag_periods=horizon,
                 )
         yearly_net_t_by_horizon[horizon] = yearly_by_year
+        if compute_regime_scaled_net_t:
+            yearly_regime_scaled_net_t_by_horizon[horizon] = regime_scaled_by_year
         if compute_adjusted_net_t:
             yearly_adjusted_net_t_by_horizon[horizon] = adjusted_by_year
         if not yearly:
             oriented_scores[horizon] = float("-inf")
             raw_worst_year[horizon] = float("nan")
+            if compute_regime_scaled_net_t:
+                raw_worst_year_regime_scaled[horizon] = float("nan")
             if compute_adjusted_net_t:
                 raw_worst_year_adjusted[horizon] = float("nan")
             continue
         worst_oriented = min(sign * t for t in yearly)
         oriented_scores[horizon] = worst_oriented
         raw_worst_year[horizon] = worst_oriented * sign
+        if compute_regime_scaled_net_t:
+            regime_scaled_finite = [t for t in regime_scaled_by_year.values() if np.isfinite(t)]
+            if regime_scaled_finite:
+                worst_regime_scaled = min(sign * t for t in regime_scaled_finite)
+                raw_worst_year_regime_scaled[horizon] = worst_regime_scaled * sign
+            else:
+                raw_worst_year_regime_scaled[horizon] = float("nan")
         if compute_adjusted_net_t:
             adjusted_finite = [t for t in adjusted_by_year.values() if np.isfinite(t)]
             if adjusted_finite:
@@ -366,6 +469,10 @@ def select_horizon_by_discovery_qualification(
         (h, tuple(sorted(yearly_adjusted_net_t_by_horizon[h].items())))
         for h in sorted(yearly_adjusted_net_t_by_horizon)
     )
+    yearly_regime_scaled_net_t = tuple(
+        (h, tuple(sorted(yearly_regime_scaled_net_t_by_horizon[h].items())))
+        for h in sorted(yearly_regime_scaled_net_t_by_horizon)
+    )
 
     best_horizon = max(
         horizon_candidates,
@@ -375,6 +482,7 @@ def select_horizon_by_discovery_qualification(
 
     discovery_scores = tuple(sorted(raw_worst_year.items()))
     discovery_scores_adjusted = tuple(sorted(raw_worst_year_adjusted.items()))
+    discovery_scores_regime_scaled = tuple(sorted(raw_worst_year_regime_scaled.items()))
     if best_oriented < admission_t:
         return DiscoveryQualificationResult(
             selected_horizon=None,
@@ -386,6 +494,8 @@ def select_horizon_by_discovery_qualification(
             yearly_net_t=yearly_net_t,
             yearly_adjusted_net_t=yearly_adjusted_net_t,
             discovery_scores_adjusted=discovery_scores_adjusted,
+            yearly_regime_scaled_net_t=yearly_regime_scaled_net_t,
+            discovery_scores_regime_scaled=discovery_scores_regime_scaled,
         )
 
     best_weights = (
@@ -407,6 +517,8 @@ def select_horizon_by_discovery_qualification(
             yearly_net_t=yearly_net_t,
             yearly_adjusted_net_t=yearly_adjusted_net_t,
             discovery_scores_adjusted=discovery_scores_adjusted,
+            yearly_regime_scaled_net_t=yearly_regime_scaled_net_t,
+            discovery_scores_regime_scaled=discovery_scores_regime_scaled,
         )
     qualification_net_t = _score_masked_net_t(
         best_weights, opens, bar_funding, qualification_mask, cost_bps, periods_per_year,
@@ -435,6 +547,26 @@ def select_horizon_by_discovery_qualification(
         discovery_aggregate_adjusted_net_t = None
         qualification_adjusted_net_t = None
         adjusted_admitted = None
+    if compute_regime_scaled_net_t:
+        assert regime_scale is not None
+        discovery_aggregate_regime_scaled_net_t = _score_masked_regime_scaled_net_t(
+            best_weights, regime_scale, opens, bar_funding, discovery_mask,
+            cost_bps, periods_per_year,
+        )
+        qualification_regime_scaled_net_t = _score_masked_regime_scaled_net_t(
+            best_weights, regime_scale, opens, bar_funding, qualification_mask,
+            cost_bps, periods_per_year,
+        )
+        regime_scaled_admitted = bool(
+            sign_consistent
+            and qualification_regime_scaled_net_t is not None
+            and math.isfinite(qualification_regime_scaled_net_t)
+            and abs(qualification_regime_scaled_net_t) >= admission_t
+        )
+    else:
+        discovery_aggregate_regime_scaled_net_t = None
+        qualification_regime_scaled_net_t = None
+        regime_scaled_admitted = None
     return DiscoveryQualificationResult(
         selected_horizon=best_horizon,
         admitted=admitted,
@@ -448,6 +580,11 @@ def select_horizon_by_discovery_qualification(
         discovery_aggregate_adjusted_net_t=discovery_aggregate_adjusted_net_t,
         qualification_adjusted_net_t=qualification_adjusted_net_t,
         adjusted_admitted=adjusted_admitted,
+        yearly_regime_scaled_net_t=yearly_regime_scaled_net_t,
+        discovery_scores_regime_scaled=discovery_scores_regime_scaled,
+        discovery_aggregate_regime_scaled_net_t=discovery_aggregate_regime_scaled_net_t,
+        qualification_regime_scaled_net_t=qualification_regime_scaled_net_t,
+        regime_scaled_admitted=regime_scaled_admitted,
     )
 
 
@@ -467,6 +604,7 @@ def fold_train_only_discovery_qualification(
     admission_t: float = _ADMISSION_T,
     precomputed_candidate_weights: Mapping[int, pd.DataFrame] | None = None,
     compute_adjusted_net_t: bool = False,
+    compute_regime_scaled_net_t: bool = False,
 ) -> DiscoveryQualificationResult:
     """Run the discovery/qualification gate on one anchored fold's own train data.
 
@@ -480,8 +618,9 @@ def fold_train_only_discovery_qualification(
     than one extra calendar year beyond its first (``qualification_start <=
     fold.train_start``) there is no room for a disjoint split and the gate
     fails closed without evaluating any candidate. ``compute_adjusted_net_t``
-    is forwarded unchanged to the underlying selection; the closed-gate early
-    return leaves the diagnostic fields at their empty/None defaults.
+    and ``compute_regime_scaled_net_t`` are forwarded unchanged to the
+    underlying selection; the closed-gate early return leaves the diagnostic
+    fields at their empty/None defaults.
     """
     qualification_start = pd.Timestamp(year=fold.train_end.year, month=1, day=1, tz="UTC")
     if qualification_start <= fold.train_start:
@@ -512,6 +651,7 @@ def fold_train_only_discovery_qualification(
         admission_t=admission_t,
         precomputed_candidate_weights=precomputed_candidate_weights,
         compute_adjusted_net_t=compute_adjusted_net_t,
+        compute_regime_scaled_net_t=compute_regime_scaled_net_t,
     )
 
 
