@@ -7,6 +7,7 @@ import pytest
 
 from src.mhs.contracts import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
+    MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
     MOMENTUM_HORIZON_CANDIDATES_HOURS,
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
@@ -179,3 +180,21 @@ class TestFrozenLiterals:
         for fold in folds:
             assert fold.train_start == MHS_DISCOVERY_START
             assert fold.train_start is MHS_DISCOVERY_START
+
+    def test_funding_carry_grid_no_capital_allocated(self) -> None:
+        # SCENARIO_MHS_NO_CAPITAL_ALLOCATED_06: the funding-carry lookback grid
+        # is a measured candidate grid -- not a frozen BookSpec -- following the
+        # same governance pattern as the horizon grids, and 'funding_carry'
+        # appears in neither PHASE_1_BOOK_SPECS nor PHASE_1_BOOK_BLEND_WEIGHTS.
+        # This is the explicit guard against scope creep into P1's
+        # capital-allocation territory.
+        assert len(MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS) >= 3
+        assert all(h > 0 for h in MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS)
+        assert tuple(sorted(set(MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS))) == tuple(
+            MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+        )
+        assert set(PHASE_1_BOOK_SPECS) == {"fast_reversal", "slow_momentum"}
+        assert set(PHASE_1_BOOK_BLEND_WEIGHTS) == {"fast_reversal", "slow_momentum"}
+        assert "funding_carry" not in PHASE_1_BOOK_SPECS
+        assert "funding_carry" not in PHASE_1_BOOK_BLEND_WEIGHTS
+        assert abs(sum(PHASE_1_BOOK_BLEND_WEIGHTS.values()) - 1.0) < 1e-12
