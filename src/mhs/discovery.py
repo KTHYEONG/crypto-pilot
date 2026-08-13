@@ -13,6 +13,7 @@ p-hack).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -22,6 +23,7 @@ import pandas as pd
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
 from src.mhs.evaluation import AnchoredPurgedFold, cost_response_curve
+from src.mhs.execution import mhs_ledger_pnl
 from src.mhs.horizons import horizon_log_return, vol_normalized_horizon_signal
 
 _PERIODS_PER_YEAR_1H = 365.0 * 24.0
@@ -51,6 +53,11 @@ class DiscoveryQualificationResult:
     qualification_net_t: float | None
     qualification_sign_consistent: bool | None
     yearly_net_t: tuple[tuple[int, tuple[tuple[int, float], ...]], ...] = ()
+    yearly_adjusted_net_t: tuple[tuple[int, tuple[tuple[int, float], ...]], ...] = ()
+    discovery_scores_adjusted: tuple[tuple[int, float], ...] = ()
+    discovery_aggregate_adjusted_net_t: float | None = None
+    qualification_adjusted_net_t: float | None = None
+    adjusted_admitted: bool | None = None
 
 
 def _year_mask(index: pd.DatetimeIndex, year: int) -> np.ndarray:
@@ -90,6 +97,65 @@ def _score_masked_net_t(
         weights[mask], opens[mask], bar_funding[mask], (cost_bps,), periods_per_year,
     )
     return float(curve[cost_bps].net_t)
+
+
+def _bartlett_hac_denom(demeaned: np.ndarray, max_lag: int) -> float:
+    """Bartlett-kernel long-run-variance ratio denominator.
+
+    ``1 + 2 * sum_{k=1}^{max_lag}(1 - k/(max_lag + 1)) * rho_k`` over the
+    sample lag autocorrelations ``rho_k`` of the demeaned series -- the same
+    kernel form frozen in ``autocorrelation_adjusted_sharpe``
+    (``src/mhs/evaluation.py``), generalized to arbitrary bar frequency.
+    Autocovariances use ``np.dot`` on numpy slices, never a per-row Python
+    loop. ``max_lag < 1`` is treated as no adjustment (returns 1.0), and a
+    zero-variance series also returns 1.0 -- a defensive internal degenerate
+    case, never a raise.
+    """
+    if max_lag < 1:
+        return 1.0
+    n = len(demeaned)
+    var = float(np.dot(demeaned, demeaned))
+    if n < 2 or var <= 0.0:
+        return 1.0
+    acf_sum = 0.0
+    for k in range(1, max_lag + 1):
+        rho = float(np.dot(demeaned[k:], demeaned[: n - k])) / var
+        acf_sum += (1.0 - k / (max_lag + 1)) * rho
+    return float(max(1.0 + 2.0 * acf_sum, 1e-12))
+
+
+def _score_masked_adjusted_net_t(
+    weights: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    mask: np.ndarray,
+    cost_bps: float,
+    periods_per_year: float,
+    max_lag_periods: int,
+) -> float:
+    """Bartlett/HAC-adjusted prescreen net t-stat of a weight book over ``mask``.
+
+    Computes the identical raw t-stat as ``_score_masked_net_t`` (same
+    ``mhs_ledger_pnl`` primitive, same ``mean/std * sqrt(n)`` formula), then
+    divides by ``sqrt(_bartlett_hac_denom(...))`` with ``max_lag_periods`` set
+    to the candidate's own lookback horizon (the overlap length of its signal
+    window) -- correcting the naive i.i.d. t-stat for the serial correlation
+    overlapping windows structurally induce. Returns ``nan`` when the masked
+    window is too short (``len(net) < max(3, max_lag_periods + 2)``) or the net
+    series has zero variance. Diagnostic-only -- never feeds ``admitted`` /
+    ``selected_horizon``.
+    """
+    net, _turnover = mhs_ledger_pnl(weights[mask], opens[mask], bar_funding[mask], cost_bps)
+    if len(net) < max(3, max_lag_periods + 2):
+        return float("nan")
+    sd = float(net.std(ddof=1)) if len(net) > 1 else 0.0
+    if not (sd > 0.0):
+        return float("nan")
+    mean = float(net.mean())
+    raw_t = mean / sd * math.sqrt(len(net))
+    demeaned = net.to_numpy(dtype="float64") - mean
+    denom = _bartlett_hac_denom(demeaned, max_lag_periods)
+    return raw_t / math.sqrt(denom)
 
 
 def _candidate_net_t(
@@ -194,6 +260,7 @@ def select_horizon_by_discovery_qualification(
     periods_per_year: float = _PERIODS_PER_YEAR_1H,
     admission_t: float = _ADMISSION_T,
     precomputed_candidate_weights: Mapping[int, pd.DataFrame] | None = None,
+    compute_adjusted_net_t: bool = False,
 ) -> DiscoveryQualificationResult:
     """Run the worst-year-robust discovery/qualification gate for one sign family.
 
@@ -211,6 +278,14 @@ def select_horizon_by_discovery_qualification(
     ``(discovery_end, qualification_end]`` and admitted only when
     ``|net_t| >= admission_t`` AND the qualification net_t keeps the discovery
     aggregate's sign.
+
+    ``compute_adjusted_net_t`` is a DIAGNOSTIC-ONLY opt-in: when True it also
+    computes the Bartlett/HAC-adjusted net t-stat per (horizon, year), the
+    adjusted worst-year ``discovery_scores_adjusted`` table, and -- for the
+    selected candidate only -- the adjusted aggregate/qualification t-stats and
+    ``adjusted_admitted``. It never changes ``selected_horizon``/``admitted``/
+    the raw scores, which stay driven solely by the unadjusted path
+    (``docs/specs/mhs_discovery_admission_autocorr_robustness.md`` §2).
     """
     if sign not in (-1, 1):
         raise ValueError(f"sign must be -1 or +1, got {sign}")
@@ -238,7 +313,9 @@ def select_horizon_by_discovery_qualification(
 
     oriented_scores: dict[int, float] = {}
     raw_worst_year: dict[int, float] = {}
+    raw_worst_year_adjusted: dict[int, float] = {}
     yearly_net_t_by_horizon: dict[int, dict[int, float]] = {}
+    yearly_adjusted_net_t_by_horizon: dict[int, dict[int, float]] = {}
     for horizon in horizon_candidates:
         weights = (
             precomputed_candidate_weights[horizon]
@@ -247,27 +324,47 @@ def select_horizon_by_discovery_qualification(
         )
         yearly: list[float] = []
         yearly_by_year: dict[int, float] = {}
+        adjusted_by_year: dict[int, float] = {}
         for year in discovery_years:
+            year_mask = discovery_mask & _year_mask(index, year)
             net_t = _score_masked_net_t(
-                weights, opens, bar_funding,
-                discovery_mask & _year_mask(index, year),
-                cost_bps, periods_per_year,
+                weights, opens, bar_funding, year_mask, cost_bps, periods_per_year,
             )
             yearly_by_year[year] = net_t
             if np.isfinite(net_t):
                 yearly.append(net_t)
+            if compute_adjusted_net_t:
+                adjusted_by_year[year] = _score_masked_adjusted_net_t(
+                    weights, opens, bar_funding, year_mask, cost_bps, periods_per_year,
+                    max_lag_periods=horizon,
+                )
         yearly_net_t_by_horizon[horizon] = yearly_by_year
+        if compute_adjusted_net_t:
+            yearly_adjusted_net_t_by_horizon[horizon] = adjusted_by_year
         if not yearly:
             oriented_scores[horizon] = float("-inf")
             raw_worst_year[horizon] = float("nan")
+            if compute_adjusted_net_t:
+                raw_worst_year_adjusted[horizon] = float("nan")
             continue
         worst_oriented = min(sign * t for t in yearly)
         oriented_scores[horizon] = worst_oriented
         raw_worst_year[horizon] = worst_oriented * sign
+        if compute_adjusted_net_t:
+            adjusted_finite = [t for t in adjusted_by_year.values() if np.isfinite(t)]
+            if adjusted_finite:
+                worst_adjusted = min(sign * t for t in adjusted_finite)
+                raw_worst_year_adjusted[horizon] = worst_adjusted * sign
+            else:
+                raw_worst_year_adjusted[horizon] = float("nan")
 
     yearly_net_t = tuple(
         (h, tuple(sorted(yearly_net_t_by_horizon[h].items())))
         for h in sorted(yearly_net_t_by_horizon)
+    )
+    yearly_adjusted_net_t = tuple(
+        (h, tuple(sorted(yearly_adjusted_net_t_by_horizon[h].items())))
+        for h in sorted(yearly_adjusted_net_t_by_horizon)
     )
 
     best_horizon = max(
@@ -277,6 +374,7 @@ def select_horizon_by_discovery_qualification(
     best_oriented = oriented_scores[best_horizon]
 
     discovery_scores = tuple(sorted(raw_worst_year.items()))
+    discovery_scores_adjusted = tuple(sorted(raw_worst_year_adjusted.items()))
     if best_oriented < admission_t:
         return DiscoveryQualificationResult(
             selected_horizon=None,
@@ -286,6 +384,8 @@ def select_horizon_by_discovery_qualification(
             qualification_net_t=None,
             qualification_sign_consistent=None,
             yearly_net_t=yearly_net_t,
+            yearly_adjusted_net_t=yearly_adjusted_net_t,
+            discovery_scores_adjusted=discovery_scores_adjusted,
         )
 
     best_weights = (
@@ -305,6 +405,8 @@ def select_horizon_by_discovery_qualification(
             qualification_net_t=None,
             qualification_sign_consistent=None,
             yearly_net_t=yearly_net_t,
+            yearly_adjusted_net_t=yearly_adjusted_net_t,
+            discovery_scores_adjusted=discovery_scores_adjusted,
         )
     qualification_net_t = _score_masked_net_t(
         best_weights, opens, bar_funding, qualification_mask, cost_bps, periods_per_year,
@@ -314,6 +416,25 @@ def select_horizon_by_discovery_qualification(
         and (qualification_net_t >= 0.0) == (discovery_aggregate_net_t >= 0.0)
     )
     admitted = sign_consistent and abs(qualification_net_t) >= admission_t
+    if compute_adjusted_net_t:
+        discovery_aggregate_adjusted_net_t = _score_masked_adjusted_net_t(
+            best_weights, opens, bar_funding, discovery_mask, cost_bps, periods_per_year,
+            max_lag_periods=best_horizon,
+        )
+        qualification_adjusted_net_t = _score_masked_adjusted_net_t(
+            best_weights, opens, bar_funding, qualification_mask, cost_bps, periods_per_year,
+            max_lag_periods=best_horizon,
+        )
+        adjusted_admitted = bool(
+            sign_consistent
+            and qualification_adjusted_net_t is not None
+            and np.isfinite(qualification_adjusted_net_t)
+            and abs(qualification_adjusted_net_t) >= admission_t
+        )
+    else:
+        discovery_aggregate_adjusted_net_t = None
+        qualification_adjusted_net_t = None
+        adjusted_admitted = None
     return DiscoveryQualificationResult(
         selected_horizon=best_horizon,
         admitted=admitted,
@@ -322,6 +443,11 @@ def select_horizon_by_discovery_qualification(
         qualification_net_t=qualification_net_t,
         qualification_sign_consistent=sign_consistent,
         yearly_net_t=yearly_net_t,
+        yearly_adjusted_net_t=yearly_adjusted_net_t,
+        discovery_scores_adjusted=discovery_scores_adjusted,
+        discovery_aggregate_adjusted_net_t=discovery_aggregate_adjusted_net_t,
+        qualification_adjusted_net_t=qualification_adjusted_net_t,
+        adjusted_admitted=adjusted_admitted,
     )
 
 
@@ -340,6 +466,7 @@ def fold_train_only_discovery_qualification(
     periods_per_year: float = _PERIODS_PER_YEAR_1H,
     admission_t: float = _ADMISSION_T,
     precomputed_candidate_weights: Mapping[int, pd.DataFrame] | None = None,
+    compute_adjusted_net_t: bool = False,
 ) -> DiscoveryQualificationResult:
     """Run the discovery/qualification gate on one anchored fold's own train data.
 
@@ -352,7 +479,9 @@ def fold_train_only_discovery_qualification(
     the fold's validation replay could see. When the train window spans less
     than one extra calendar year beyond its first (``qualification_start <=
     fold.train_start``) there is no room for a disjoint split and the gate
-    fails closed without evaluating any candidate.
+    fails closed without evaluating any candidate. ``compute_adjusted_net_t``
+    is forwarded unchanged to the underlying selection; the closed-gate early
+    return leaves the diagnostic fields at their empty/None defaults.
     """
     qualification_start = pd.Timestamp(year=fold.train_end.year, month=1, day=1, tz="UTC")
     if qualification_start <= fold.train_start:
@@ -382,6 +511,7 @@ def fold_train_only_discovery_qualification(
         periods_per_year=periods_per_year,
         admission_t=admission_t,
         precomputed_candidate_weights=precomputed_candidate_weights,
+        compute_adjusted_net_t=compute_adjusted_net_t,
     )
 
 
