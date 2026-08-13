@@ -34,6 +34,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         fold_safe_horizon_selection=fold_safe_horizon,
         crash_regime_tilt_alpha=args.crash_regime_tilt_alpha,
         slow_book_mode=args.slow_book_mode,
+        fast_book_mode=args.fast_book_mode,
         rebalance_filter=args.rebalance_filter,
         beta_neutralize=args.beta_neutralize,
         ensemble_signal=args.ensemble_signal,
@@ -147,6 +148,17 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Slow-book construction: single_horizon (frozen production chain) "
             "or horizon_ensemble (equal-weight average of every candidate "
             "horizon, no selection -- docs/specs/mhs_alpha_engine.md §2)"
+        ),
+    )
+    mhs.add_argument(
+        "--fast-book-mode",
+        choices=["single_horizon", "horizon_ensemble"],
+        default="single_horizon",
+        help=(
+            "Fast-book construction: single_horizon (frozen production chain) "
+            "or horizon_ensemble (equal-weight average of every candidate "
+            "horizon, no selection -- the same rescue momentum already received, "
+            "docs/specs/mhs_carry_and_fast_fair_evaluation.md §2.3)"
         ),
     )
     mhs.add_argument(
