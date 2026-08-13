@@ -364,6 +364,19 @@ def test_crash_tilt_request_validation() -> None:
     assert MhsDiagnosticRequest(crash_regime_tilt_alpha=0.2).crash_regime_tilt_alpha == 0.2
 
 
+def test_request_validation_adjusted_without_gate() -> None:
+    """SCENARIO_REQUEST_VALIDATION_ADJUSTED_WITHOUT_GATE: requesting the
+    Bartlett/HAC-adjusted diagnostic while the discovery gate itself is off
+    raises ValueError from ``__post_init__`` (fail-closed -- no silent no-op),
+    and the flag defaults to False / composes with ``discovery_gate=True``."""
+    with pytest.raises(ValueError, match="discovery_gate_adjusted_net_t"):
+        MhsDiagnosticRequest(discovery_gate=False, discovery_gate_adjusted_net_t=True)
+    assert MhsDiagnosticRequest().discovery_gate_adjusted_net_t is False
+    assert MhsDiagnosticRequest(
+        discovery_gate=True, discovery_gate_adjusted_net_t=True,
+    ).discovery_gate_adjusted_net_t is True
+
+
 def test_mhs_mem_04_strict_gap_preserved() -> None:
     """MHS-MEM-04: cache_required continues to fail closed on MISSING_HELD_MARK
     for a held-mark fixture; stale carry remains explicit diagnostic mode."""

@@ -587,6 +587,178 @@ class TestYearlyNetTDiagnostic:
             discovery.yearly_net_t_diagnostic(weights, opens, bar_funding, (2021,), _COST_BPS, 0.0)
 
 
+class TestHacAdjustedNetTDiagnostic:
+    """SCENARIO_HAC_DENOM_IID_NEAR_ONE / SCENARIO_HAC_DENOM_POSITIVE_AUTOCORR_INFLATES /
+    SCENARIO_ADJUSTED_NET_T_IID_MATCHES_RAW: the Bartlett/HAC-adjusted prescreen
+    t-stat is a pure, deterministic correction of the naive i.i.d. t-stat
+    (``docs/specs/mhs_discovery_admission_autocorr_robustness.md`` §3.1).
+    """
+
+    @staticmethod
+    def _iid_series(seed: int = 3, n: int = 2000) -> np.ndarray:
+        series = np.random.default_rng(seed).normal(0.0, 1.0, n)
+        return series - series.mean()
+
+    @staticmethod
+    def _ar1_series(phi: float = 0.85, seed: int = 3, n: int = 2000) -> np.ndarray:
+        # drifting increments so the level has a nonzero mean and the naive
+        # t-stat is meaningful (a zero-mean AR(1) yields raw_t == 0 exactly,
+        # making the adjusted-vs-raw comparison degenerate)
+        u = np.random.default_rng(seed).normal(0.05, 1.0, n)
+        series = np.zeros(n)
+        for t in range(1, n):
+            series[t] = phi * series[t - 1] + u[t]
+        return series
+
+    def test_hac_denom_iid_near_one(self) -> None:
+        """SCENARIO_HAC_DENOM_IID_NEAR_ONE: a seeded i.i.d. zero-mean Gaussian
+        series (n>=2000, max_lag=168) has no serial correlation, so the
+        Bartlett long-run-variance ratio is close to 1.0 (within +-0.15) -- the
+        adjustment never invents inflation where the data has none."""
+        denom = discovery._bartlett_hac_denom(self._iid_series(), 168)
+        assert denom == pytest.approx(1.0, abs=0.15)
+
+    def test_hac_denom_zero_series_is_one(self) -> None:
+        """Contract regression anchor: a zero series (zero variance) yields the
+        no-adjustment denominator 1.0, never a division by zero."""
+        assert discovery._bartlett_hac_denom(np.zeros(500), 168) == pytest.approx(1.0)
+
+    def test_hac_denom_positive_autocorr_inflates(self) -> None:
+        """SCENARIO_HAC_DENOM_POSITIVE_AUTOCORR_INFLATES: an AR(1) series with
+        phi=0.85 (same seed/n as the i.i.d. case) has strong positive serial
+        correlation, inflating the denominator materially above 1.0 (>2.0), and
+        the adjusted |t| (raw_t / sqrt(denom)) is materially smaller in
+        magnitude than the naive raw_t on the same series."""
+        series = self._ar1_series()
+        mean = series.mean()
+        denom = discovery._bartlett_hac_denom(series - mean, 168)
+        assert denom > 2.0
+        raw_t = mean / series.std(ddof=1) * math.sqrt(len(series))
+        assert abs(raw_t / math.sqrt(denom)) < abs(raw_t)
+
+    def test_adjusted_net_t_iid_matches_raw(self) -> None:
+        """SCENARIO_ADJUSTED_NET_T_IID_MATCHES_RAW: on a genuinely serially
+        uncorrelated weights/opens panel (constant weights, i.i.d.-increment
+        random-walk opens -- the same pattern as ``TestYearlyNetTDiagnostic._panel``)
+        the adjusted net_t is within 10% relative tolerance of the raw net_t,
+        proving the HAC adjustment is a no-op (denom~=1) on uncorrelated returns
+        and introduces no mystery constant offset.
+
+        Note: ``_build_panel(phi=0.0)`` is NOT i.i.d. -- its net series is an
+        MA(23) rolling-signal process with Bartlett denom ~15.5 -- so this
+        scenario uses a genuinely uncorrelated panel to exercise the intended
+        no-op property."""
+        idx = pd.date_range("2021-01-01", periods=4000, freq="1h", tz="UTC")
+        rng = np.random.default_rng(7)
+        weights = pd.DataFrame(
+            np.tile(np.array([0.5, -0.5, 0.25, -0.25]), (len(idx), 1)),
+            index=idx, columns=_SYMBOLS,
+        )
+        opens = pd.DataFrame(
+            100.0 * np.exp(np.cumsum(rng.standard_normal((len(idx), 4)) * 0.001, axis=0)),
+            index=idx, columns=_SYMBOLS,
+        )
+        bar_funding = pd.DataFrame(0.0, index=idx, columns=_SYMBOLS)
+        mask = np.ones(len(idx), dtype=bool)
+        raw = discovery._score_masked_net_t(weights, opens, bar_funding, mask, _COST_BPS, _PPY)
+        adj = discovery._score_masked_adjusted_net_t(
+            weights, opens, bar_funding, mask, _COST_BPS, _PPY, max_lag_periods=24,
+        )
+        assert math.isfinite(raw)
+        assert math.isfinite(adj)
+        assert adj == pytest.approx(raw, rel=0.10)
+
+
+class TestDiscoveryAdjustedOptIn:
+    """SCENARIO_DISCOVERY_DEFAULT_OFF_BIT_IDENTICAL /
+    SCENARIO_DISCOVERY_OPT_IN_PRESERVES_RAW_FIELDS /
+    SCENARIO_ADJUSTED_ADMITTED_SIGN_INVARIANT: the new Bartlett/HAC-adjusted
+    fields are opt-in-only diagnostics that never perturb the existing
+    admission-path computation
+    (``docs/specs/mhs_discovery_admission_autocorr_robustness.md`` §2/§3.2).
+    """
+
+    def test_discovery_default_off_bit_identical(self) -> None:
+        """SCENARIO_DISCOVERY_DEFAULT_OFF_BIT_IDENTICAL: with the flag omitted
+        (default False) the gate returns the pre-change baseline on the admitted
+        worst-year-robust fixture -- every raw field bit-identical to the
+        captured 24차 baseline -- and every new field sits at its empty/None
+        default."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        result = _run(log_close, opens, bar_funding, eligible, idx)
+        assert result.selected_horizon == 48
+        assert result.admitted is True
+        assert result.discovery_scores == (
+            (24, 16.43401479542989), (48, 25.517515748645305),
+        )
+        assert result.discovery_aggregate_net_t == 23.145363968299133
+        assert result.qualification_net_t == 66.88810950782543
+        assert result.qualification_sign_consistent is True
+        assert result.yearly_net_t == (
+            (24, ((2021, 39.39252393058957), (2022, 16.43401479542989))),
+            (48, ((2021, 25.517515748645305), (2022, 37.86453888754656))),
+        )
+        assert result.yearly_adjusted_net_t == ()
+        assert result.discovery_scores_adjusted == ()
+        assert result.discovery_aggregate_adjusted_net_t is None
+        assert result.qualification_adjusted_net_t is None
+        assert result.adjusted_admitted is None
+
+    def test_discovery_opt_in_preserves_raw_fields(self) -> None:
+        """SCENARIO_DISCOVERY_OPT_IN_PRESERVES_RAW_FIELDS: identical inputs with
+        the flag False vs True yield bit-identical raw admission-path fields,
+        while the True call additionally populates the adjusted tables covering
+        every candidate horizon."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        off = _run(log_close, opens, bar_funding, eligible, idx)
+        on = select_horizon_by_discovery_qualification(
+            sign=1, horizon_candidates=(24, 48), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+            compute_adjusted_net_t=True,
+        )
+        assert on.selected_horizon == off.selected_horizon
+        assert on.admitted == off.admitted
+        assert on.discovery_scores == off.discovery_scores
+        assert on.discovery_aggregate_net_t == off.discovery_aggregate_net_t
+        assert on.qualification_net_t == off.qualification_net_t
+        assert on.qualification_sign_consistent == off.qualification_sign_consistent
+        assert on.yearly_net_t == off.yearly_net_t
+        assert set(dict(on.yearly_adjusted_net_t)) == {24, 48}
+        assert set(dict(on.discovery_scores_adjusted)) == {24, 48}
+
+    def test_adjusted_admitted_sign_invariant(self) -> None:
+        """SCENARIO_ADJUSTED_ADMITTED_SIGN_INVARIANT: dividing by sqrt(positive
+        denom) never flips the sign of the qualification t-stat, and
+        ``adjusted_admitted`` is True only when the raw sign is consistent AND
+        the adjusted magnitude clears the admission floor."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        on = select_horizon_by_discovery_qualification(
+            sign=1, horizon_candidates=(24, 48), log_close=log_close,
+            eligible=eligible, opens=opens, bar_funding=bar_funding, grid_1h=idx,
+            discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
+            qualification_end=QUALIFICATION_END, min_symbols=3, tranche_count=1,
+            compute_adjusted_net_t=True,
+        )
+        assert on.selected_horizon is not None
+        assert on.qualification_net_t is not None
+        assert on.qualification_adjusted_net_t is not None
+        assert math.isfinite(on.qualification_adjusted_net_t)
+        assert math.copysign(1.0, on.qualification_adjusted_net_t) == math.copysign(
+            1.0, on.qualification_net_t
+        )
+        assert on.qualification_sign_consistent is True
+        assert abs(on.qualification_adjusted_net_t) >= 2.0
+        assert on.adjusted_admitted is True
+
+
 class TestFoldTrainOnlyDiscoveryQualification:
     """SCENARIO_MHS_FOLD_SAFE_HORIZON_01..03: the fold-scoped wrapper derives
     leak-free discovery/qualification bounds from one ``AnchoredPurgedFold`` and
@@ -755,3 +927,52 @@ class TestFoldTrainOnlyDiscoveryQualification:
         )
         assert result.admitted is False
         assert result.selected_horizon is None
+
+    def test_fold_train_only_passthrough(self, monkeypatch) -> None:
+        """SCENARIO_FOLD_TRAIN_ONLY_PASSTHROUGH: ``compute_adjusted_net_t=True``
+        is forwarded unchanged into the delegated selection (captured via a spy)
+        and the returned result carries populated ``yearly_adjusted_net_t``; the
+        early-return closed-gate branch (train window inside one calendar year)
+        leaves all five new fields at their empty/None defaults regardless of
+        the flag."""
+        log_close, opens, bar_funding, eligible, idx = _build_panel(
+            24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
+        )
+        fold = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            pd.Timestamp("2023-01-08", tz="UTC"),
+            pd.Timestamp("2023-12-31", tz="UTC"),
+            168, 168,
+        )
+        captured: dict = {}
+        real = discovery.select_horizon_by_discovery_qualification
+
+        def spy(*args, **kwargs):
+            captured["compute_adjusted_net_t"] = kwargs.get("compute_adjusted_net_t")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(discovery, "select_horizon_by_discovery_qualification", spy)
+        result = fold_train_only_discovery_qualification(
+            1, (24, 48), log_close, eligible, opens, bar_funding, idx, fold,
+            min_symbols=3, tranche_count=1, compute_adjusted_net_t=True,
+        )
+        assert captured["compute_adjusted_net_t"] is True
+        assert result.yearly_adjusted_net_t != ()
+
+        short = AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2021-12-31", tz="UTC"),
+            pd.Timestamp("2022-01-08", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            168, 168,
+        )
+        short_result = fold_train_only_discovery_qualification(
+            1, (72, 96), log_close, eligible, opens, bar_funding, idx, short,
+            min_symbols=3, tranche_count=1, compute_adjusted_net_t=True,
+        )
+        assert short_result.yearly_adjusted_net_t == ()
+        assert short_result.discovery_scores_adjusted == ()
+        assert short_result.discovery_aggregate_adjusted_net_t is None
+        assert short_result.qualification_adjusted_net_t is None
+        assert short_result.adjusted_admitted is None
