@@ -480,9 +480,10 @@ class TestAnchoredFoldBounded:
         ]
 
     def test_fold_builds_window_iterator_once_per_bound(self, mhs_market, monkeypatch) -> None:
-        """MHS-MEM-PAIR-02: the fold orchestrator constructs one execution-window
-        iterator per replay bound (immediate-taker primary + cost-stressed
-        stress) and consumes each independently without re-materializing."""
+        """MHS-MEM-PAIR-02: the fold orchestrator materializes the execution
+        windows ONCE and reuses the same windows (with per-pass weight
+        substitution) across every replay bound -- the strongest form of the
+        no-re-materialization invariant."""
         root, end = mhs_market
         symbols = [
             s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -507,8 +508,8 @@ class TestAnchoredFoldBounded:
         )
         assert report.strict is not None
         assert report.stress is not None
-        # Two-pass primary (reference + rescaled) plus one stress bound.
-        assert calls["n"] == 3
+        # One materialization feeds the two-pass primary and the stress bound.
+        assert calls["n"] == 1
 
     def test_rss_budget_enforced_inside_fold_fails_closed(self, mhs_market, monkeypatch) -> None:
         monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
@@ -911,9 +912,9 @@ class TestBookOutcomePaired:
         assert report.primary is not None
         assert report.stress is not None
         assert report.failure is None
-        # Two-pass primary (reference + rescaled) plus stress and the
+        # One materialization feeds the two-pass primary, stress, and the
         # informational patient-reference bound.
-        assert calls["n"] == 4
+        assert calls["n"] == 1
 
     def test_book_strict_resource_breach_is_typed_failure(self, mhs_market, monkeypatch) -> None:
         args = _build_book_outcome_args(mhs_market)
@@ -2511,40 +2512,22 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
 
 def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_HORIZON_SEARCH_EFF_05_TOP_LEVEL_WIRING_SHARES_ONE_CACHE_ACROSS_FOLDS:
-    # with fold_safe_horizon_selection=True the parent builds each discovery
-    # weight book exactly once per sign family (call-count 2 wrapping the real
-    # implementation -- one slow_momentum, one fast_reversal -- regardless of
-    # the 3 anchored folds) and passes the SAME cache object into every
-    # fold_train_only_discovery_qualification(...) call of that family -- the
-    # measured 3x-redundant weight construction is eliminated without changing
-    # any value.
+    # with fold_safe_horizon_selection=True the parent precomputes every
+    # discovery weight book exactly once (``_precompute_fold_safe_candidate_weights``)
+    # and every fold's gate reuses that single precompute (fork-inherited
+    # copy-on-write in the parallel fold-safe path) -- the measured 3x-redundant
+    # weight construction is eliminated without changing any value. The
+    # parallel/sequential value-equivalence is pinned by
+    # ``test_mhs_perf_opt_fold_discovery_parallel_equivalence``.
     root, end = mhs_market
     calls = {"n": 0}
-    real_build = ev.build_candidate_weights
+    real_precompute = ev._precompute_fold_safe_candidate_weights
 
-    def counting_build(*args, **kwargs):
+    def counting_precompute(*args, **kwargs):
         calls["n"] += 1
-        return real_build(*args, **kwargs)
+        return real_precompute(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "build_candidate_weights", counting_build)
-    caches: dict[int, list] = {1: [], -1: []}
-
-    def _spy_fold(*args, **kwargs):
-        # Track only the momentum/reversal families (whose precomputed dict is
-        # shared across folds); the funding-carry family runs the same gate with
-        # its own measured grid and must select a lookback from that grid.
-        candidates = kwargs.get("horizon_candidates")
-        if candidates == ev.MHS_DISCOVERY_MOMENTUM_CANDIDATES:
-            caches[1].append(kwargs.get("precomputed_candidate_weights"))
-            return _admitted_selection(360)
-        if candidates == ev.MHS_DISCOVERY_REVERSAL_CANDIDATES:
-            caches[-1].append(kwargs.get("precomputed_candidate_weights"))
-            return _admitted_selection(360)
-        if candidates == ev.MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
-            return _admitted_selection(72)
-        return _admitted_selection(360)
-
-    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _spy_fold)
+    monkeypatch.setattr(ev, "_precompute_fold_safe_candidate_weights", counting_precompute)
 
     def _spy_books(*args, **kwargs):
         return (None, None, None)
@@ -2561,12 +2544,7 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     )
     top_report = ev.run_mhs_horizon_diagnostic(request_on)
     assert top_report.status == "COMPLETE"
-    assert calls["n"] == 2
-    assert len(caches[1]) == 3
-    assert len(caches[-1]) == 3
-    assert all(c is caches[1][0] for c in caches[1])
-    assert all(c is caches[-1][0] for c in caches[-1])
-    assert caches[1][0] is not caches[-1][0]
+    assert calls["n"] == 1
 
 
 def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) -> None:
