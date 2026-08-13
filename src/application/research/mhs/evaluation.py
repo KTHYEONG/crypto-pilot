@@ -1813,20 +1813,29 @@ def _book_outcome(
         )
         pre_vol_target_reference = primary
         pre_vol_target_reference_naive_sharpe = _naive_sharpe(primary.ledger)
+        # Pass 2 (reported) replays the SAME scaled target_replay Pass 1's own
+        # vol-target scale was derived from; a book whose Pass-1 reference is
+        # forced flat for most of the window (a known negative-edge book) still
+        # produces an artificially calm reference vol series, so Pass 2 must
+        # carry its own floor rather than relying on the derived scale alone
+        # (docs/specs/mhs_capital_floor_and_overlay_validation.md §1.1).
         primary = replay_execution_windows(
             _window_telemetry(_windows(), "execution_window"),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
             retain_event_snapshots=False,
+            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
         )
         stress = replay_execution_windows(
             _window_telemetry(_windows(), "execution_window_cost_stress"),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec(),
             retain_event_snapshots=False,
+            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
         )
         patient_reference = replay_execution_windows(
             _window_telemetry(_windows(), "execution_window_patient_reference"),
             initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
             retain_event_snapshots=False,
+            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
         )
         patient_reference_naive_sharpe = _naive_sharpe(patient_reference.ledger)
         if request.touch_diagnostic:
@@ -1834,6 +1843,7 @@ def _book_outcome(
                 _window_telemetry(_windows(), "execution_window_touch"),
                 initial_equity, "OHLCV_TOUCH_PROXY", ExecutionSpec(),
                 retain_event_snapshots=False,
+                min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
             )
             touch_naive_sharpe = _naive_sharpe(touch.ledger)
         if request.ladder_diagnostic:
@@ -1842,6 +1852,7 @@ def _book_outcome(
                 _window_telemetry(_windows(), "execution_window_ladder"),
                 initial_equity, "OHLCV_LADDERED_PROXY", ExecutionSpec(),
                 retain_event_snapshots=False,
+                min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
             )
             ladder_naive_sharpe = _naive_sharpe(ladder.ledger)
         if telemetry is not None:
@@ -2036,6 +2047,7 @@ def _run_books_concurrent(
     execution_mask: pd.DataFrame,
     initial_equity: float,
     telemetry: _StageRecorder | None = None,
+    regime_scale: pd.Series | None = None,
 ) -> tuple[MhsBookReport, MhsBookReport, MhsBookReport]:
     """Run the three top-level books concurrently in fork children.
 
@@ -2047,6 +2059,19 @@ def _run_books_concurrent(
     share the read-only panels and preloaded cache via copy-on-write (no 3x RSS
     blow-up), matching the existing ``_run_folds_parallel`` pattern.  Per-book
     telemetry is merged into the parent recorder in declared book order.
+
+    ``blend_replay`` (the blend book's actual execution-replay weights) is
+    built independently from ``blend_1h``/``blend_step`` because it must stay
+    restricted to the execution-roster (``w_*_execution``) symbols actually
+    tradable at minute granularity -- ``blend_1h`` covers the full eligible
+    universe and is prescreen/tail-diagnostic only (never itself replayed).
+    ``regime_scale`` (the R1 volatility-regime cash scale, optionally composed
+    with the opt-in trend-efficiency overlay) is applied to ``blend_1h`` by the
+    caller already; it must also be applied here so the blend book's actual
+    ``primary``/``stress`` replay reflects it, matching what the anchored-fold
+    path already does to its own target weights (docs/specs/
+    mhs_capital_floor_and_overlay_validation.md §2 -- previously this scale
+    only reached the top-level prescreen/tail fields, never the replay).
     """
     active_spec, active_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     blend_step = blend_1h.reindex(active_grid)
@@ -2054,6 +2079,8 @@ def _run_books_concurrent(
         PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
         + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
     ).reindex(active_grid)
+    if regime_scale is not None:
+        blend_replay = blend_replay.mul(regime_scale.reindex(active_grid).fillna(1.0), axis=0)
 
     with ProcessPoolExecutor(max_workers=3) as pool:
         f_fast = pool.submit(
@@ -2896,7 +2923,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             _trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, grid_1h),
         )
     blend_1h = blend_1h.mul(regime_scale, axis=0)
-    del vol_mean, regime_scale
+    del vol_mean
     # The 1h book views are only consumed by ``blend_1h`` above.  Releasing
     # them before phase diagnostics and the top-level replays keeps two full
     # multi-year weight matrices out of the replay baseline (spec §3.1).
@@ -2977,13 +3004,13 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             root, request, len(funded), grid_1h, fast, slow, fast_grid, slow_grid,
             w_fast, w_slow, w_fast_execution, w_slow_execution, opens, bar_funding,
             phase_fast, phase_slow, phase_blend, start, end, funding_by_symbol,
-            blend_1h, execution_mask, initial_equity, telemetry,
+            blend_1h, execution_mask, initial_equity, telemetry, regime_scale,
         )
         # All three books have completed; the single-use step-weight inputs are
         # released together (spec §3.1, ``memory_opt``).
         del w_fast, w_fast_execution, phase_fast
         del w_slow, w_slow_execution, phase_slow
-        del blend_1h, execution_mask, phase_blend
+        del blend_1h, execution_mask, phase_blend, regime_scale
         gc.collect()
         books = {"fast_reversal": book_report_fast, "slow_momentum": book_report_slow}
         blend_report = book_report_blend

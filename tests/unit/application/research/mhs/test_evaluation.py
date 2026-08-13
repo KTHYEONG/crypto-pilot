@@ -1507,8 +1507,11 @@ def _assert_books_equal(seq, con, name: str) -> None:
 
 
 def test_p10_concurrent_books_parity(mhs_market) -> None:
-    # SCENARIO_P10_CONCURRENT: three books executed concurrently in fork workers
-    # produce bit-identical reports to the sequential path.
+    # SCENARIO_P10_CONCURRENT / SCENARIO_MHS_REGIME_SCALE_OMITTED_BYTE_IDENTICAL_02:
+    # three books executed concurrently in fork workers produce bit-identical
+    # reports to the sequential path. This call omits regime_scale (defaults
+    # to None), so it also proves every existing _run_books_concurrent caller
+    # stays byte-identical after the regime_scale parameter was added.
     args = _build_books_concurrent_args(mhs_market)
     sequential = _sequential_book_reports(args)
     concurrent = ev._run_books_concurrent(**args)
@@ -1597,6 +1600,55 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
     assert slow.failure.reason == ev.MHS_GO_REASON_EXECUTION_GAP
     assert blend.primary is not None
     assert blend.failure is None
+
+
+def test_regime_scale_reaches_blend_replay_not_only_prescreen(mhs_market) -> None:
+    # SCENARIO_MHS_REGIME_SCALE_REACHES_BLEND_REPLAY_01: previously blend_replay
+    # (the blend book's actual execution-replay weights inside
+    # _run_books_concurrent) was reconstructed independently from
+    # w_fast_execution/w_slow_execution and never multiplied by regime_scale,
+    # so the top-level "blend" book's primary/stress replay never reflected the
+    # R1 volatility-regime cash scale (or, transitively, the opt-in
+    # trend_efficiency_overlay) even though blend_1h/blend_step (prescreen/tail
+    # diagnostics) did -- contradicting the R1 comment's own stated intent
+    # (docs/specs/mhs_capital_floor_and_overlay_validation.md §2). With a
+    # regime_scale that is < 1.0 on part of the grid, the blend book's replay
+    # must now show reduced gross exposure on those decisions relative to a
+    # None (no-scale) baseline, while fast_reversal/slow_momentum's own
+    # standalone books stay byte-identical (the scale is blend-only, matching
+    # the anchored-fold path's design where it applies to the portfolio target,
+    # not each book's own raw signal).
+    args = _build_books_concurrent_args(mhs_market)
+    active_grid = ev._active_blend_book_and_grid(
+        args["fast"], args["slow"], args["fast_grid"], args["slow_grid"],
+    )[1]
+    half = len(active_grid) // 2
+    scale = pd.Series(1.0, index=active_grid)
+    scale.iloc[:half] = 0.5
+
+    fast_base, slow_base, blend_base = ev._run_books_concurrent(**args)
+    fast_scaled, slow_scaled, blend_scaled = ev._run_books_concurrent(**args, regime_scale=scale)
+
+    assert blend_base.failure is None and blend_scaled.failure is None
+    assert blend_base.primary is not None and blend_scaled.primary is not None
+    # retain_event_snapshots=False throughout _book_outcome, so per-fill
+    # notional weights are never materialized here -- the turnover/equity
+    # series (always populated) are the observable proxy for "the replay
+    # actually traded a smaller book," not a coincidence of unrelated noise.
+    assert not blend_scaled.primary.ledger.equity.equals(blend_base.primary.ledger.equity)
+    assert blend_scaled.primary.ledger.fill_turnover.sum() < blend_base.primary.ledger.fill_turnover.sum()
+
+    # fast_reversal/slow_momentum's own standalone books are untouched by the
+    # blend-only scale.
+    pd.testing.assert_series_equal(
+        fast_scaled.primary.ledger.equity, fast_base.primary.ledger.equity,
+        check_exact=True, rtol=0.0, atol=0.0,
+    )
+    pd.testing.assert_series_equal(
+        slow_scaled.primary.ledger.equity, slow_base.primary.ledger.equity,
+        check_exact=True, rtol=0.0, atol=0.0,
+    )
+
 
 def test_active_blend_grid_slow_only() -> None:
     # SCENARIO_MHS_ACTIVE_BLEND_GRID_SLOW_ONLY_01: with the frozen
