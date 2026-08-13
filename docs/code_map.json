@@ -638,7 +638,8 @@
       "tests/benchmark/mhs/test_mhs_replay_resources.py",
       "tests/unit/application/research/mhs/test_evaluation.py",
       "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
-      "tests/unit/mhs/test_contracts.py"
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/application/research/mhs/test_mhs_perf_optimization.py"
     ],
     "architecture": "docs/results/mhs-res.md"
   },
