@@ -82,10 +82,12 @@ from src.mhs.discovery import (
     fold_train_only_discovery_qualification,
     select_horizon_by_discovery_qualification,
 )
+from src.mhs.discovery import yearly_net_t_diagnostic
 from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol, vol_normalized_horizon_signal
 from src.mhs.funding import build_funding_carry_candidate_weights
 from src.mhs.funding import funding_carry_signal  # noqa: F401 - contract wiring mandates the exact import line; the builder is invoked here
 from src.mhs.evaluation import effective_breadth
+from src.mhs.evaluation import year_restricted_correlation
 from src.mhs.regime import trend_efficiency_scale
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
@@ -273,6 +275,7 @@ class MhsDiagnosticRequest:
     fold_safe_horizon_selection: bool = False
     crash_regime_tilt_alpha: float | None = None
     slow_book_mode: Literal["single_horizon", "horizon_ensemble"] = "single_horizon"
+    fast_book_mode: Literal["single_horizon", "horizon_ensemble"] = "single_horizon"
     rebalance_filter: Literal["per_symbol_deadband", "portfolio_trigger"] = "per_symbol_deadband"
     beta_neutralize: bool = False
     ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
@@ -296,6 +299,8 @@ class MhsDiagnosticRequest:
             )
         if self.slow_book_mode not in ("single_horizon", "horizon_ensemble"):
             raise ValueError(f"unknown slow_book_mode '{self.slow_book_mode}'")
+        if self.fast_book_mode not in ("single_horizon", "horizon_ensemble"):
+            raise ValueError(f"unknown fast_book_mode '{self.fast_book_mode}'")
         if self.rebalance_filter not in ("per_symbol_deadband", "portfolio_trigger"):
             raise ValueError(f"unknown rebalance_filter '{self.rebalance_filter}'")
         if not isinstance(self.beta_neutralize, bool):
@@ -455,6 +460,8 @@ class MhsHorizonDiagnosticReport:
     resource_measurements: tuple[MhsResourceMeasurement, ...] = ()
     discovery_qualification: dict[str, DiscoveryQualificationResult] | None = None
     realized_execution_roster_size: float | None = None
+    full_history_yearly_net_t: dict[str, dict[int, float]] | None = None
+    funding_carry_worst_year_corr: float | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -973,7 +980,7 @@ def _book_weights(
     return phase_tranche_book(weights, spec.tranche_count())
 
 
-def _slow_book_execution_weights(
+def _horizon_ensemble_execution_weights(
     log_close: pd.DataFrame,
     eligible: pd.DataFrame,
     execution_mask: pd.DataFrame,
@@ -983,7 +990,11 @@ def _slow_book_execution_weights(
     signal_kind: Literal["raw", "vol_normalized"],
     ema_span: int | None,
 ) -> pd.DataFrame:
-    """Shared slow-book builder for the top-level diagnostic and fold replay.
+    """Shared execution-book builder for BOTH the slow and fast bands.
+
+    The same generic chain (``spec: BookSpec``, never momentum-specific)
+    constructs the top-level diagnostic and fold-replay execution books, so it
+    is wired to whichever band asks for it.
 
     ``mode='single_horizon'`` reproduces the frozen production chain
     byte-identically (``horizon_log_return`` -> EMA -> ``rank_weight_book`` ->
@@ -2515,14 +2526,20 @@ def _build_fold_target_weights(
     fast_ema = _signal_ema_span(fast.band.sign, fast.horizon_hours, fast.step_hours)
     slow_ema = _signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours)
     w_fast = _book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
-    w_fast_tilted = inverse_realized_vol_tilt(
-        w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
-    )
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-    w_fast_execution = renormalize_within_mask(
-        w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
-    )
-    w_slow_execution = _slow_book_execution_weights(
+    if request.fast_book_mode == "horizon_ensemble":
+        w_fast_execution = _horizon_ensemble_execution_weights(
+            log_close, eligible, execution_mask, fast, fast_grid,
+            "horizon_ensemble", "raw", fast_ema,
+        )
+    else:
+        w_fast_tilted = inverse_realized_vol_tilt(
+            w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
+        )
+        w_fast_execution = renormalize_within_mask(
+            w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
+        )
+    w_slow_execution = _horizon_ensemble_execution_weights(
         log_close, eligible, execution_mask, slow, slow_grid,
         request.slow_book_mode, request.ensemble_signal, slow_ema,
     )
@@ -2537,7 +2554,9 @@ def _build_fold_target_weights(
             slow.min_symbols,
         )
     del quote_vol, eligible
-    del w_fast, w_fast_tilted
+    del w_fast
+    if request.fast_book_mode == "single_horizon":
+        del w_fast_tilted
     w_slow_execution_1h = w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
     if request.crash_regime_tilt_alpha is not None:
         w_slow_execution_1h = crash_regime_tilt_weights(
@@ -3136,13 +3155,19 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
     realized_execution_roster_size = float(execution_mask.sum(axis=1).mean())
-    w_fast_tilted = inverse_realized_vol_tilt(
-        w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
-    )
-    w_fast_execution = renormalize_within_mask(
-        w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
-    )
-    w_slow_execution = _slow_book_execution_weights(
+    if request.fast_book_mode == "horizon_ensemble":
+        w_fast_execution = _horizon_ensemble_execution_weights(
+            log_close, eligible, execution_mask, fast, fast_grid,
+            "horizon_ensemble", "raw", fast_ema,
+        )
+    else:
+        w_fast_tilted = inverse_realized_vol_tilt(
+            w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
+        )
+        w_fast_execution = renormalize_within_mask(
+            w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
+        )
+    w_slow_execution = _horizon_ensemble_execution_weights(
         log_close, eligible, execution_mask, slow, slow_grid,
         request.slow_book_mode, request.ensemble_signal, slow_ema,
     )
@@ -3156,7 +3181,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             execution_mask.reindex(w_slow_execution.index).fillna(False),
             slow.min_symbols,
         )
-    del w_fast_tilted
+    if request.fast_book_mode == "single_horizon":
+        del w_fast_tilted
     # Eligibility and the execution roster are now materialized.  The raw
     # volume matrix otherwise stays alive while phase diagnostics create their
     # temporary target-weight matrices.
@@ -3208,6 +3234,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         ),
     }
     discovery_qualification = None
+    full_history_yearly_net_t = None
+    funding_carry_worst_year_corr = None
     if request.discovery_gate:
         _slow_candidate_weights = build_candidate_weights(
             log_close, eligible, 1, MHS_DISCOVERY_MOMENTUM_CANDIDATES,
@@ -3217,6 +3245,13 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             log_close, eligible, -1, MHS_DISCOVERY_REVERSAL_CANDIDATES,
             tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
         )
+        _funding_carry_candidate_weights = {
+            sign: build_funding_carry_candidate_weights(
+                bar_funding, eligible, sign, MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+            )
+            for sign in (1, -1)
+        }
         discovery_qualification = {
             "reversal": select_horizon_by_discovery_qualification(
                 sign=-1, horizon_candidates=MHS_DISCOVERY_REVERSAL_CANDIDATES,
@@ -3236,7 +3271,73 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_slow_candidate_weights,
             ),
+            "funding_carry_long": select_horizon_by_discovery_qualification(
+                sign=1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+                log_close=log_close, eligible=eligible, opens=opens,
+                bar_funding=bar_funding, grid_1h=grid_1h,
+                discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
+                qualification_end=QUALIFICATION_END,
+                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                precomputed_candidate_weights=_funding_carry_candidate_weights[1],
+            ),
+            "funding_carry_short": select_horizon_by_discovery_qualification(
+                sign=-1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+                log_close=log_close, eligible=eligible, opens=opens,
+                bar_funding=bar_funding, grid_1h=grid_1h,
+                discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
+                qualification_end=QUALIFICATION_END,
+                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                precomputed_candidate_weights=_funding_carry_candidate_weights[-1],
+            ),
         }
+        # Full-history (2021-2025) yearly net-t diagnostics -- REPORT-ONLY
+        # (docs/specs/mhs_carry_and_fast_fair_evaluation.md §2.1/§2.2). These
+        # values never feed admission_t or any gate/capital decision; they exist
+        # so a reader can tell "the gate lacked power" from "no edge exists".
+        # The momentum/fast books are the actual capital books (w_slow/w_fast,
+        # frozen 168h/48h at the default) and funding_carry uses whichever
+        # lookback the top-level long/short discovery picked (168h + sign as a
+        # representative fallback when neither family admits).
+        full_history_yearly_net_t = {
+            "slow_momentum": yearly_net_t_diagnostic(
+                w_slow.reindex(grid_1h).ffill().fillna(0.0), opens, bar_funding,
+                (2021, 2022, 2023, 2024, 2025),
+                MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
+            ),
+            "fast_reversal": yearly_net_t_diagnostic(
+                w_fast.reindex(grid_1h).ffill().fillna(0.0), opens, bar_funding,
+                (2021, 2022, 2023, 2024, 2025),
+                MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
+            ),
+        }
+        _fc_pick = _prefer_funding_carry_selection(
+            discovery_qualification["funding_carry_long"],
+            discovery_qualification["funding_carry_short"],
+        )
+        _fc_lookback, _fc_sign = _fc_pick if _fc_pick is not None else (168, 1)
+        _fc_book = _funding_carry_candidate_weights[_fc_sign][_fc_lookback]
+        full_history_yearly_net_t["funding_carry"] = yearly_net_t_diagnostic(
+            _fc_book, opens, bar_funding, (2021, 2022, 2023, 2024, 2025),
+            MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
+        )
+        # Worst-year-restricted correlation: does momentum's weakest calendar
+        # year still get funding-carry diversification (spec §2.2)?
+        _fc_net, _ = mhs_ledger_pnl(
+            _fc_book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+        )
+        _fc_daily = (1.0 + _fc_net).resample("1D").apply(lambda s: s.prod() - 1.0)
+        _slow_net, _ = mhs_ledger_pnl(
+            w_slow.reindex(grid_1h).ffill().fillna(0.0), opens, bar_funding,
+            MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+        )
+        _momentum_daily = (1.0 + _slow_net).resample("1D").apply(lambda s: s.prod() - 1.0)
+        _slow_yearly = full_history_yearly_net_t["slow_momentum"]
+        _finite_years = [y for y, t in _slow_yearly.items() if np.isfinite(t)]
+        if _finite_years:
+            _worst_year = min(_finite_years, key=lambda y: _slow_yearly[y])
+            funding_carry_worst_year_corr = year_restricted_correlation(
+                _fc_daily, _momentum_daily, (_worst_year,),
+            )
         # Breadth audit (docs/specs/mhs_return_source_breadth_expansion.md §3.1):
         # the same candidate weight books the gate scored are reused to expose
         # each axis's effective independent-bet count, making the
@@ -3425,6 +3526,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         resource_measurements=telemetry.records,
         discovery_qualification=discovery_qualification,
         realized_execution_roster_size=realized_execution_roster_size,
+        full_history_yearly_net_t=full_history_yearly_net_t,
+        funding_carry_worst_year_corr=funding_carry_worst_year_corr,
     )
 
 

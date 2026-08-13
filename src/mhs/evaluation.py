@@ -7,7 +7,7 @@ arbitrary decision-clock offset?" and nothing else.
 """
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -178,6 +178,27 @@ def cost_response_curve(
             net_t=t_stat,
         )
     return out
+
+
+def year_restricted_correlation(
+    series_a: pd.Series,
+    series_b: pd.Series,
+    years: Sequence[int],
+) -> float:
+    """Pearson correlation of two return series restricted to calendar years.
+
+    Filters both series to rows whose index year is in ``years``, aligns on the
+    intersection, and returns pandas ``.corr()``. An intersection with fewer
+    than 3 points returns ``float('nan')`` (a correlation on 1-2 points is not
+    meaningfully interpretable and would otherwise surface a spurious +/-1.0) --
+    never raises, never returns a made-up value.
+    """
+    a = series_a[series_a.index.year.isin(years)]
+    b = series_b[series_b.index.year.isin(years)]
+    joined = pd.concat([a, b], axis=1, join="inner")
+    if len(joined) < 3:
+        return float("nan")
+    return float(joined.corr().iloc[0, 1])
 
 
 def _event_clusters(

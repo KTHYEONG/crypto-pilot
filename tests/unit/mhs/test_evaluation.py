@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from src.mhs.evaluation import (
     probabilistic_sharpe_ratio,
     synthetic_stress_scenarios,
     tail_sensitivity_curve,
+    year_restricted_correlation,
 )
 from src.mhs.execution import mhs_ledger_pnl
 from src.mhs.execution import simulated_inventory_ledger
@@ -146,6 +148,28 @@ def _wsf() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     opens = pd.DataFrame({"A": [100.0, 101.0, 102.0], "B": [50.0, 49.0, 48.0]})
     funding = pd.DataFrame({"A": [0.0, 0.0, 0.0], "B": [0.0, 0.0, 0.0]})
     return weights, opens, funding
+
+
+def test_year_restricted_correlation_restricts_to_years() -> None:
+    """SCENARIO_MHS_YEAR_RESTRICTED_CORRELATION_02: ``year_restricted_correlation``
+    returns the correlation of the two series restricted to the requested
+    calendar years (hand-computable with pandas directly), not the full-series
+    correlation; an intersection with fewer than 3 points returns NaN rather
+    than a spurious +/-1.0 from a 2-point intersection."""
+    idx = pd.date_range("2021-01-01", periods=4 * 365, freq="1D", tz="UTC")
+    rng = np.random.default_rng(5)
+    a = pd.Series(rng.standard_normal(len(idx)), index=idx)
+    b = a + rng.standard_normal(len(idx)) * 0.01
+    expected = pd.concat(
+        [a[a.index.year == 2023], b[b.index.year == 2023]], axis=1, join="inner",
+    ).corr().iloc[0, 1]
+    assert year_restricted_correlation(a, b, (2023,)) == pytest.approx(expected)
+    assert year_restricted_correlation(a, b, (2021, 2022, 2023, 2024)) != pytest.approx(expected)
+
+    short = pd.date_range("2024-01-01", periods=2, freq="1D", tz="UTC")
+    c = pd.Series([1.0, 2.0], index=short)
+    d = pd.Series([2.0, 1.0], index=short)
+    assert math.isnan(year_restricted_correlation(c, d, (2024,)))
 
 
 class TestCostResponseCurve:
