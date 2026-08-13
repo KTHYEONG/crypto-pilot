@@ -33,7 +33,12 @@ from src.research.universe.pit_universe import symbol_partition
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 
 
-def _write_mhs_market(root: Path, n_hours: int = 2700, include_btc: bool = False) -> pd.Timestamp:
+def _write_mhs_market(
+    root: Path,
+    n_hours: int = 2700,
+    include_btc: bool = False,
+    funding_cross_sectional: bool = False,
+) -> pd.Timestamp:
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
@@ -65,8 +70,9 @@ def _write_mhs_market(root: Path, n_hours: int = 2700, include_btc: bool = False
             {"timestamp": minute_epoch, "open": mp, "high": mp * 1.0005,
              "low": mp * 0.9995, "close": mp, "quote_vol": [1000.0] * len(minute_idx)},
         ).to_parquet(mdir / f"{sym}.parquet")
+        funding_rate = 0.00005 * (1.0 + 0.2 * i) if funding_cross_sectional else 0.00005
         pd.DataFrame(
-            {"timestamp": epoch, "funding_rate": [0.00005] * n_hours, "datetime": hourly},
+            {"timestamp": epoch, "funding_rate": [funding_rate] * n_hours, "datetime": hourly},
         ).to_parquet(fdir / f"{sym}.parquet")
         mark = pd.Series(mp, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
         pd.DataFrame(
@@ -91,6 +97,18 @@ def mhs_market_with_btc(tmp_path, monkeypatch):
     has a real reference series to read."""
     root = tmp_path / "market"
     end = _write_mhs_market(root, include_btc=True)
+    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    return root, end
+
+
+@pytest.fixture
+def mhs_market_funding_vary(tmp_path, monkeypatch):
+    """Synthetic market whose funding rate differs per symbol, so a trailing
+    funding carry signal has genuine cross-sectional dispersion (the constant
+    ``mhs_market`` funding collapses a funding-carry book to zero weights)."""
+    root = tmp_path / "market_funding_vary"
+    end = _write_mhs_market(root, funding_cross_sectional=True)
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     return root, end
@@ -2421,10 +2439,15 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     # once per fold and threads only the resolved plain int down to the fold
     # pool; the top-level slow spec adopts fold 2's selection (360h here).
     captured: dict = {}
-    monkeypatch.setattr(
-        ev, "fold_train_only_discovery_qualification",
-        lambda *args, **kwargs: _admitted_selection(360),
-    )
+
+    def _admit_by_family(*args, **kwargs):
+        # The funding-carry family's selected lookback must come from its own
+        # measured grid; the slow/fast families keep the 360h selection.
+        if kwargs.get("horizon_candidates") == ev.MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
+            return _admitted_selection(72)
+        return _admitted_selection(360)
+
+    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _admit_by_family)
 
     def _spy_books(*args, **kwargs):
         captured["top_level_slow"] = args[5]
@@ -2507,7 +2530,18 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     caches: dict[int, list] = {1: [], -1: []}
 
     def _spy_fold(*args, **kwargs):
-        caches[kwargs["sign"]].append(kwargs.get("precomputed_candidate_weights"))
+        # Track only the momentum/reversal families (whose precomputed dict is
+        # shared across folds); the funding-carry family runs the same gate with
+        # its own measured grid and must select a lookback from that grid.
+        candidates = kwargs.get("horizon_candidates")
+        if candidates == ev.MHS_DISCOVERY_MOMENTUM_CANDIDATES:
+            caches[1].append(kwargs.get("precomputed_candidate_weights"))
+            return _admitted_selection(360)
+        if candidates == ev.MHS_DISCOVERY_REVERSAL_CANDIDATES:
+            caches[-1].append(kwargs.get("precomputed_candidate_weights"))
+            return _admitted_selection(360)
+        if candidates == ev.MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
+            return _admitted_selection(72)
         return _admitted_selection(360)
 
     monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _spy_fold)
@@ -2533,6 +2567,138 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     assert all(c is caches[1][0] for c in caches[1])
     assert all(c is caches[-1][0] for c in caches[-1])
     assert caches[1][0] is not caches[-1][0]
+
+
+def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_HORIZON_DIAGNOSTICS_EXPOSES_EFFECTIVE_BREADTH_04: with
+    # discovery_gate=True run_mhs_horizon_diagnostic reports finite
+    # slow_horizon_effective_breadth/fast_horizon_effective_breadth within
+    # [1.0, nominal_candidate_count]; with discovery_gate=False (the default)
+    # the two keys are absent -- opt-in, no default-path cost.
+    root, end = mhs_market
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request_on = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, discovery_gate=True,
+    )
+    report_on = ev.run_mhs_horizon_diagnostic(request_on)
+    assert report_on.status == "COMPLETE"
+    slow_n_eff = report_on.horizon_diagnostics.get("slow_horizon_effective_breadth")
+    fast_n_eff = report_on.horizon_diagnostics.get("fast_horizon_effective_breadth")
+    assert slow_n_eff is not None
+    assert np.isfinite(slow_n_eff)
+    assert fast_n_eff is not None
+    assert np.isfinite(fast_n_eff)
+    assert 1.0 <= slow_n_eff <= 19
+    assert 1.0 <= fast_n_eff <= 7
+
+    request_off = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    report_off = ev.run_mhs_horizon_diagnostic(request_off)
+    assert report_off.status == "COMPLETE"
+    assert "slow_horizon_effective_breadth" not in report_off.horizon_diagnostics
+    assert "fast_horizon_effective_breadth" not in report_off.horizon_diagnostics
+
+
+def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
+    # SCENARIO_MHS_FOLD_REPORT_CARRIES_FUNDING_CARRY_DISCOVERY_05 (fold worker
+    # path): a fold run resolved with a funding-carry override records all four
+    # fields on the report; without the override (flag off / no admission) they
+    # fail closed to their dataclass defaults -- existing construction sites
+    # are unaffected.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    report = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+        funding_carry_override=(72, 1, "fold_train_only_discovery", 0.15),
+    )
+    assert report.funding_carry_lookback_hours == 72
+    assert report.funding_carry_sign == 1
+    assert report.funding_carry_source == "fold_train_only_discovery"
+    assert report.funding_carry_vs_slow_momentum_daily_corr == 0.15
+
+    default_report = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+    )
+    assert default_report.funding_carry_lookback_hours is None
+    assert default_report.funding_carry_sign is None
+    assert default_report.funding_carry_source == "frozen_default"
+    assert default_report.funding_carry_vs_slow_momentum_daily_corr is None
+
+    incomplete = ev._incomplete_fold_report(_FOLD, 0, ())
+    assert incomplete.funding_carry_lookback_hours is None
+    assert incomplete.funding_carry_source == "frozen_default"
+
+
+def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypatch) -> None:
+    # SCENARIO_MHS_FOLD_REPORT_CARRIES_FUNDING_CARRY_DISCOVERY_05 (parent path):
+    # with fold_safe_horizon_selection=True and a funding-carry admission the
+    # parent threads (lookback, sign, source, corr) per fold with a finite
+    # train-window orthogonality correlation against slow_momentum; when no
+    # candidate admits, all four fields fail closed to frozen_default/None.
+    root, end = mhs_market_funding_vary
+    captured: dict = {}
+
+    def _run(captured):
+        monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+
+        def _spy_post(*args, **kwargs):
+            captured["fold_funding_carry"] = args[16] if len(args) > 16 else None
+            return (None, None, {}, {}, (), None)
+
+        monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+        request_on = MhsDiagnosticRequest(
+            start=str(_START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            execution_universe_size=8, fold_safe_horizon_selection=True,
+        )
+        top_report = ev.run_mhs_horizon_diagnostic(request_on)
+        assert top_report.status == "COMPLETE"
+        return captured["fold_funding_carry"]
+
+    def _admit_funding_only(*args, **kwargs):
+        if kwargs.get("horizon_candidates") == ev.MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
+            return _admitted_selection(72)
+        return _admitted_selection(None)
+
+    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _admit_funding_only)
+    admitted = _run(captured)
+    assert set(admitted) == {0, 1, 2}
+    for lookback, sign, source, corr in admitted.values():
+        assert lookback == 72
+        assert sign == 1
+        assert source == "fold_train_only_discovery"
+        assert np.isfinite(corr)
+
+    captured.clear()
+    monkeypatch.setattr(
+        ev, "fold_train_only_discovery_qualification",
+        lambda *a, **k: _admitted_selection(None),
+    )
+    fail_closed = _run(captured)
+    assert set(fail_closed) == {0, 1, 2}
+    for lookback, sign, source, corr in fail_closed.values():
+        assert lookback is None
+        assert sign is None
+        assert source == "frozen_default"
+        assert corr is None
 
 
 def _slow_book_panel_inputs(mhs_market):

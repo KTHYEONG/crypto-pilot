@@ -49,6 +49,7 @@ from src.mhs.books import (
     renormalize_within_mask,
 )
 from src.mhs.contracts import MHS_DISCOVERY_START
+from src.mhs.contracts import MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
 from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS
 from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
 from src.mhs.contracts import (
@@ -82,6 +83,9 @@ from src.mhs.discovery import (
     select_horizon_by_discovery_qualification,
 )
 from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol, vol_normalized_horizon_signal
+from src.mhs.funding import build_funding_carry_candidate_weights
+from src.mhs.funding import funding_carry_signal  # noqa: F401 - contract wiring mandates the exact import line; the builder is invoked here
+from src.mhs.evaluation import effective_breadth
 from src.mhs.regime import trend_efficiency_scale
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
@@ -407,6 +411,10 @@ class MhsFoldReport:
     slow_horizon_source: str = "frozen_default"
     fast_horizon_hours: int = 48
     fast_horizon_source: str = "frozen_default"
+    funding_carry_lookback_hours: int | None = None
+    funding_carry_sign: int | None = None
+    funding_carry_source: str = "frozen_default"
+    funding_carry_vs_slow_momentum_daily_corr: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2248,6 +2256,7 @@ def _run_post_book_concurrently(
     telemetry: _StageRecorder | None = None,
     fold_slow_horizons: dict[int, int | None] | None = None,
     fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
+    fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -2297,6 +2306,7 @@ def _run_post_book_concurrently(
                 root, fold, request, fold_funding, initial_equity, idx, None,
                 (fold_slow_horizons or {}).get(idx),
                 (fold_fast_horizons or {}).get(idx),
+                (fold_funding_carry or {}).get(idx),
             ): idx
             for idx, fold in enumerate(folds)
         }
@@ -2403,6 +2413,33 @@ def _fold_safe_fast_horizon(
     if selection.admitted and selection.selected_horizon is not None:
         return selection.selected_horizon, "fold_train_only_discovery"
     return default_horizon, "frozen_default"
+
+def _prefer_funding_carry_selection(
+    long_result: DiscoveryQualificationResult,
+    short_result: DiscoveryQualificationResult,
+) -> tuple[int, int] | None:
+    """Pick the funding-carry sign family with the strongest admitted evidence.
+
+    Unlike the fast/slow bands -- each with one pre-registered sign -- the
+    funding-carry SIGN is itself the object being discovered, so the two
+    families' fold-scoped gate results are compared directly: an admitted
+    family is preferred over a non-admitted one, and when both admit the
+    family with the larger ``|qualification_net_t|`` wins (ties break toward
+    sign=+1, the first family in iteration order). Returns
+    ``(lookback_hours, sign)`` or None when neither family admits.
+    """
+    candidates: list[tuple[int, float, int]] = []
+    for sign, result in ((1, long_result), (-1, short_result)):
+        if (
+            result.admitted
+            and result.selected_horizon is not None
+            and result.qualification_net_t is not None
+        ):
+            candidates.append((result.selected_horizon, abs(result.qualification_net_t), sign))
+    if not candidates:
+        return None
+    lookback, _, sign = max(candidates, key=lambda candidate: candidate[1])
+    return lookback, sign
 
 
 def _build_fold_target_weights(
@@ -2566,6 +2603,7 @@ def _run_anchored_fold(
     telemetry: _StageRecorder | None = None,
     slow_horizon_override: int | None = None,
     fast_horizon_override: tuple[int, str] | None = None,
+    funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
@@ -2700,6 +2738,20 @@ def _run_anchored_fold(
             fast_horizon_source=(
                 fast_horizon_override[1] if fast_horizon_override is not None else "frozen_default"
             ),
+            funding_carry_lookback_hours=(
+                funding_carry_override[0] if funding_carry_override is not None else None
+            ),
+            funding_carry_sign=(
+                funding_carry_override[1] if funding_carry_override is not None else None
+            ),
+            funding_carry_source=(
+                funding_carry_override[2]
+                if funding_carry_override is not None
+                else "frozen_default"
+            ),
+            funding_carry_vs_slow_momentum_daily_corr=(
+                funding_carry_override[3] if funding_carry_override is not None else None
+            ),
         )
     except DataIntegrityError as exc:
         return _incomplete_fold_report(fold, fold_index, (_classify_execution_failure(exc),))
@@ -2714,6 +2766,7 @@ def _run_folds_parallel(
     telemetry: _StageRecorder | None = None,
     fold_slow_horizons: dict[int, int | None] | None = None,
     fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
+    fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
 ) -> tuple[MhsFoldReport, ...]:
     """Run the three anchored folds concurrently, one process each.
 
@@ -2746,6 +2799,7 @@ def _run_folds_parallel(
                 root, fold, request, fold_funding, initial_equity, idx, None,
                 (fold_slow_horizons or {}).get(idx),
                 (fold_fast_horizons or {}).get(idx),
+                (fold_funding_carry or {}).get(idx),
             ): idx
             for idx, fold in enumerate(folds)
         }
@@ -2966,6 +3020,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # ever reloads a wide ``[train_start, train_end]`` panel.
     fold_slow_horizons: dict[int, int | None] = {}
     fold_fast_horizons: dict[int, tuple[int, str]] = {}
+    fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] = {}
     if request.fold_safe_horizon_selection:
         _precomputed_weights = build_candidate_weights(
             log_close, eligible, 1, specs["slow_momentum"].band.horizons_hours,
@@ -3002,6 +3057,67 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 ),
                 fast.horizon_hours,
             )
+        # Funding-carry return-source discovery (docs/specs/
+        # mhs_return_source_breadth_expansion.md §3): the SIGN itself is the
+        # object being discovered, so both sign families run the same
+        # fold-train-only gate over the measured lookback grid, and the family
+        # with the stronger admitted evidence wins. When a family is admitted
+        # its daily net-return series over the fold's OWN train window only is
+        # correlated against the fold-safe slow-momentum book's train-window
+        # returns (reusing the already-built candidate books) -- a train-only
+        # orthogonality screen, exactly like the discovery gate itself.
+        _funding_weights_long = build_funding_carry_candidate_weights(
+            bar_funding, eligible, 1, MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+        )
+        _funding_weights_short = build_funding_carry_candidate_weights(
+            bar_funding, eligible, -1, MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+        )
+        for _fold_idx, _fold in enumerate(phase_1_anchored_purged_folds()):
+            _fc_long = fold_train_only_discovery_qualification(
+                sign=1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+                log_close=log_close, eligible=eligible, opens=opens,
+                bar_funding=bar_funding, grid_1h=grid_1h, fold=_fold,
+                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                precomputed_candidate_weights=_funding_weights_long,
+            )
+            _fc_short = fold_train_only_discovery_qualification(
+                sign=-1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+                log_close=log_close, eligible=eligible, opens=opens,
+                bar_funding=bar_funding, grid_1h=grid_1h, fold=_fold,
+                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                precomputed_candidate_weights=_funding_weights_short,
+            )
+            _fc_pick = _prefer_funding_carry_selection(_fc_long, _fc_short)
+            _fc_lookback: int | None = None
+            _fc_sign: int | None = None
+            _fc_source = "frozen_default"
+            _fc_corr: float | None = None
+            if _fc_pick is not None:
+                _fc_lookback, _fc_sign = _fc_pick
+                _fc_source = "fold_train_only_discovery"
+                _fc_weights = (
+                    _funding_weights_long if _fc_sign == 1 else _funding_weights_short
+                )
+                _train_mask = (grid_1h >= _fold.train_start) & (grid_1h <= _fold.train_end)
+                _fc_net, _ = mhs_ledger_pnl(
+                    _fc_weights[_fc_lookback].loc[_train_mask],
+                    opens.loc[_train_mask], bar_funding.loc[_train_mask],
+                    MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+                )
+                _fc_daily = (1.0 + _fc_net).resample("1D").apply(lambda s: s.prod() - 1.0)
+                _mom_horizon = fold_slow_horizons.get(_fold_idx) or specs["slow_momentum"].horizon_hours
+                _mom_net, _ = mhs_ledger_pnl(
+                    _precomputed_weights[_mom_horizon].loc[_train_mask],
+                    opens.loc[_train_mask], bar_funding.loc[_train_mask],
+                    MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+                )
+                _mom_daily = (1.0 + _mom_net).resample("1D").apply(lambda s: s.prod() - 1.0)
+                _fc_corr = float(
+                    pd.concat([_fc_daily, _mom_daily], axis=1).corr().iloc[0, 1]
+                )
+            fold_funding_carry[_fold_idx] = (_fc_lookback, _fc_sign, _fc_source, _fc_corr)
         # The top-level report uses fold index 2's selection (train=2021-2024,
         # the widest leak-free window that still excludes 2025), making the
         # full-period report's horizon choice walk-forward-safe relative to
@@ -3093,6 +3209,14 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     }
     discovery_qualification = None
     if request.discovery_gate:
+        _slow_candidate_weights = build_candidate_weights(
+            log_close, eligible, 1, MHS_DISCOVERY_MOMENTUM_CANDIDATES,
+            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+        )
+        _fast_candidate_weights = build_candidate_weights(
+            log_close, eligible, -1, MHS_DISCOVERY_REVERSAL_CANDIDATES,
+            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+        )
         discovery_qualification = {
             "reversal": select_horizon_by_discovery_qualification(
                 sign=-1, horizon_candidates=MHS_DISCOVERY_REVERSAL_CANDIDATES,
@@ -3101,6 +3225,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
                 qualification_end=QUALIFICATION_END,
                 tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                precomputed_candidate_weights=_fast_candidate_weights,
             ),
             "momentum": select_horizon_by_discovery_qualification(
                 sign=1, horizon_candidates=MHS_DISCOVERY_MOMENTUM_CANDIDATES,
@@ -3109,8 +3234,35 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
                 qualification_end=QUALIFICATION_END,
                 tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+                precomputed_candidate_weights=_slow_candidate_weights,
             ),
         }
+        # Breadth audit (docs/specs/mhs_return_source_breadth_expansion.md §3.1):
+        # the same candidate weight books the gate scored are reused to expose
+        # each axis's effective independent-bet count, making the
+        # "horizon axis is saturated" claim auditable from every diagnostic run.
+        _slow_daily_returns: dict[int, pd.Series] = {}
+        _fast_daily_returns: dict[int, pd.Series] = {}
+        for _horizon, _book in _slow_candidate_weights.items():
+            _net, _ = mhs_ledger_pnl(
+                _book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+            )
+            _slow_daily_returns[_horizon] = (1.0 + _net).resample("1D").apply(
+                lambda s: s.prod() - 1.0
+            )
+        for _horizon, _book in _fast_candidate_weights.items():
+            _net, _ = mhs_ledger_pnl(
+                _book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+            )
+            _fast_daily_returns[_horizon] = (1.0 + _net).resample("1D").apply(
+                lambda s: s.prod() - 1.0
+            )
+        horizon_diagnostics["slow_horizon_effective_breadth"], _ = effective_breadth(
+            pd.DataFrame(_slow_daily_returns)
+        )
+        horizon_diagnostics["fast_horizon_effective_breadth"], _ = effective_breadth(
+            pd.DataFrame(_fast_daily_returns)
+        )
     del log_close
     gc.collect()
 
@@ -3187,6 +3339,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         blend_report, root, request, execution_symbols, minute_grid,
         signal_48h, eligible, opens, bar_funding, grid_1h, fast,
         fold_funding, initial_equity, telemetry, fold_slow_horizons, fold_fast_horizons,
+        fold_funding_carry,
     )
     folds = tuple(fold_reports)
     deflated_sharpe_ratio = _deflated_sharpe_evidence(
