@@ -6,6 +6,7 @@
 - **CLI**: `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --discovery-gate --output-tier full`
 - **성능 최적화 적용**: C1 mark 프레임 캐시 / C2 window materialize+pass 재사용 / C3 window 단위 parquet 로드(preload 폐기) / C4 fold-safe discovery 병렬화
 - **25차 추가 실측 (discovery-gate 전용, 2026-08-13)**: `docs/specs/mhs_discovery_admission_autocorr_robustness.md` 계약 구현 후 `--discovery-gate --discovery-gate-adjusted-net-t`(기본 book mode, non-production) 재실행 — §3.1 참고. Top-level book/fold/research_go 수치는 이 실행 대상이 아님(기본 `single_horizon` book mode라 §1/§2 프로덕션 수치와 비교 불가, 무시할 것); discovery gate 자체는 book mode와 무관한 독립 계산이라 §3와 직접 비교 가능.
+- **26차 추가 실측 (discovery-gate regime-scale 파리티 진단, 2026-08-13)**: `docs/specs/mhs_discovery_admission_regime_scale_parity.md` 계약 구현 후 `--discovery-gate --discovery-gate-regime-scaled-net-t`(기본 book mode, non-production) 재실행 — §3.2 참고. 25차와 동일하게 top-level book/fold/research_go 수치는 비교 대상 아님.
 
 > ⚠️ **데이터 drift 공지**: 본 실행의 `eligible_symbols=445`로 23차의 446과 다름(Parquet 소스 재수집). 동일 데이터 기준 원본 코드 대비 출력은 **bit-identical**(아래 §0 A/B). 수치 비교 시 23차 대비 차이는 코드 변경이 아닌 데이터 drift로 해석해야 함.
 
@@ -64,15 +65,34 @@
 
 `docs/specs/mhs_discovery_admission_autocorr_robustness.md`(discovery.py `net_t`가 오버랩 윈도우 자기상관을 보정하지 않는 naive i.i.d. t-stat이라는 가설 검증) 계약을 구현·실행. **admitted/selected_horizon 등 raw 필드는 무변화(계약대로 bit-identical, 회귀 확인됨)**; 아래는 신규 진단 필드만.
 
-| 후보 | best raw worst-year net_t | best adjusted(HAC) worst-year net_t | admission_t |
-| :--- | ---: | ---: | ---: |
-| momentum (168h) | −0.0287 | **−0.0294** | 2.0 |
-| reversal (96h) | +0.252 | +0.270 | 2.0 |
-| funding_carry_long (504h) | −3.322 | −3.151 | 2.0 |
-| funding_carry_short (72h) | +4.213 | +4.099 | 2.0 |
+> ⚠️ **정정**: discovery/qualification window는 `src/research/technical_experts/trend_screen_catalog.py`의 `DISCOVERY_END=2023-12-31`/`QUALIFICATION_END=HOLDOUT_CUTOFF(2025-12-31)`를 그대로 사용 — **discovery=2021-2023 (3년, worst-of-3)**, **qualification=2024-2025 (2년)**. `docs/architecture/mhs-explain.md` §4.2가 "discovery 2021-2022(2년)/qualification 2023(1년)"으로 서술한 것은 실제 코드와 불일치(outdated) — Contract Priority(in-code 정의가 우선) 원칙에 따라 아래는 25차 실측 원본 데이터(`yearly_net_t`)로 직접 재검증한 수치.
 
-- **가설 기각**: raw와 adjusted 값의 차이는 ±5~10 % 수준이며, 어떤 후보도 부호나 admission_t=2.0 통과 방향으로 유의미하게 이동하지 않음(momentum 168h는 오히려 −0.0287→−0.0294로 더 악화). 즉 discovery admission 실패는 자기상관 편향이 아니라 **worst-year-of-2(2021·2022) 소표본 설계 자체**가 지배 원인 — 2021년 momentum net_t(§4, −0.145)라는 단일 나쁜 해가 구조적으로 전 후보를 탈락시킴.
+| 후보 | best raw worst-year net_t (worst-of-3) | best adjusted(HAC) worst-year net_t | admission_t |
+| :--- | ---: | ---: | ---: |
+| momentum (168h) | −0.0287 (2022) | **−0.0294** (2022) | 2.0 |
+| reversal (96h) | +0.252 (2021) | +0.270 (2021) | 2.0 |
+| funding_carry_long (504h) | −3.322 (2021) | −3.151 (2021) | 2.0 |
+| funding_carry_short (72h) | +4.213 (2022) | +4.099 (2022) | 2.0 |
+
+- **가설 기각(자기상관)**: raw와 adjusted 값의 차이는 ±5~10 % 수준이며, 어떤 후보도 부호나 admission_t=2.0 통과 방향으로 유의미하게 이동하지 않음.
+- **momentum 연도별 재검증(19개 호라이즌 전수, raw)**: **2021은 전 호라이즌 강한 양(+1.1~+2.6)**, **2022는 전 호라이즌 예외 없이 음(−0.03~−2.0)**, 2023은 호라이즌별로 혼재(−0.46~+0.63). 즉 admission 실패는 "표본이 작아서 우연히 나쁜 해가 걸린" 문제가 아니라 **2022 한 해가 19개 후보 전원을 예외 없이 임계값 아래로 끌어내리는 구조적 패턴**(2022 크립토 크래시/모멘텀 크래시 레짐과 시기 일치).
+- **신규 발견(정밀 재확인)**: discovery gate가 채점하는 후보 웨이트(`discovery.py:_horizon_weights` → `rank_weight_book`/`phase_tranche_book`)는 regime 방어 레이어 없이 원신호(raw signal) 그대로 채점. 반면 24차 프로덕션 실행(§1, autocorr Sharpe +0.536)은 기본값 그대로 **`_regime_cash_scale`(R1, 시장 실현변동성 기반 unconditional 현금 스케일, `evaluation.py:3481`)**과 **`pnl_vol_target_scale`(전략 자체 실현 P&L 변동성 기반 Two-Pass 스케일, 기본 `pnl_vol_target=True`, `evaluation.py:2078`)**을 적용함 — 둘 다 2022류 고변동성/크래시 레짐에서 노출을 축소하도록 설계됨. (`crash_regime_tilt_weights`는 기본 `alpha=None`이라 24차 프로덕션에서 **미적용**이며 `ADR_20260813_MHS_CAPITAL_FLOOR_AND_OVERLAY_VALIDATION`에서 오히려 stress Sharpe 악화로 확인돼 파리티 진단 대상에서 제외.) 즉 게이트는 실전 배포판보다 **더 가혹한, 방어되지 않은 버전**을 심사하고 있어 admission 실패가 실제 전략 edge 부재를 과대평가할 가능성 있음.
 - 실행: `start=2021-01-01 end=2025-12-31`, 기본 book mode(non-production), `run_elapsed_seconds=490.8`, `status=COMPLETE`.
+
+### 3.2 Regime-scale 파리티 진단 (26차, 신규, opt-in `--discovery-gate-regime-scaled-net-t`)
+
+`docs/specs/mhs_discovery_admission_regime_scale_parity.md`(discovery gate가 `_regime_cash_scale` 없이 원신호를 채점한다는 §3.1 가설의 실측 검증) 계약을 구현·실행. **admitted/selected_horizon 등 raw 필드는 무변화(bit-identical, 회귀 확인됨)**; 시장 변동성 근사치(`realized_vol(log_close,48).where(eligible).mean(axis=1)`, PIT execution_mask 미사용 approximation)로 `_regime_cash_scale` 커널을 재적용한 후보 웨이트 재점수화 결과.
+
+| 후보 | best raw worst-year net_t | best regime-scaled worst-year net_t | admission_t | admitted |
+| :--- | ---: | ---: | ---: | :--- |
+| momentum (168h) | −0.0287 | **+0.1798** | 2.0 | False(그대로) |
+| reversal (96h) | +0.252 | −0.142 (악화) | 2.0 | False(그대로) |
+| funding_carry_long | −3.32~−4.67 | 소폭 악화 | 2.0 | False(그대로) |
+| funding_carry_short | +2.79~+4.21 | 소폭 개선 | 2.0 | False(그대로, 부호 규약상 오리엔티드 미달) |
+
+- **가설 부분 확증**: momentum 168h가 −0.029→**+0.180**로 부호 반전, 336h(−0.158→+0.162)·384h(−0.304→+0.027) 등 다수 호라이즌이 동반 개선 — "gate가 방어되지 않은 신호를 채점해 실제보다 나쁘게 나온다"는 방향은 실측으로 확인됨. 단 개선폭이 admission_t=2.0 대비 미미해 **여전히 미승인**. reversal/funding_carry는 regime-scale 적용해도 개선되지 않거나 악화 — §4-§5의 "edge 부재" 결론과 일관.
+- **결론**: regime 방어 파리티는 방향은 맞으나 admission 실패를 뒤집기엔 부족함. 잔여 지배 요인은 discovery window worst-of-3(2021-2023) 설계 자체, 특히 2022 크래시 해의 구조적 영향(§3.1)으로 재확정.
+- 실행: `start=2021-01-01 end=2025-12-31`, 기본 book mode(non-production), `run_elapsed_seconds=501.3`, `status=COMPLETE`.
 
 ## 4. `yearly_net_t_diagnostic` — 5년 전체 (admission 미입력, 보고용)
 
@@ -115,7 +135,8 @@
 
 | 후보 | 상태 |
 | :--- | :--- |
-| momentum discovery window 2년(2021-2022) worst-year 소표본 설계 재검토 (§3.1: 자기상관 편향 가설은 25차 실측으로 기각, 표본 크기가 근본 원인으로 확정) | 원인 규명 완료, window 구조 변경안은 별도 스펙 필요·사용자 판단 대기 |
+momentum discovery window worst-of-3(2021-2023) 설계 자체 재검토 (§3.1-§3.2: 자기상관 편향 기각 + regime-scale 파리티는 방향만 확증하고 크기 부족 확인 완료 -- 2022 크래시 해가 여전히 구조적 지배 요인) | 원인 규명 2건 소진, window 구조 변경안은 더 큰 범위·리스크의 별도 스펙 + 사용자 승인 필요 |
+| `_pnl_vol_target_scale`(Two-Pass, 전략 자체 PnL 기반) discovery gate 파리티 진단 추가 (§3.2에서 스코프 제외한 후속 후보) | 신규, 미착수 |
 | discovery 후보 웨이트 중복 빌드 dedupe (fold-safe ↔ top-level gate 공유, RAM/시간 추가 절감) | 신규, 미착수 |
 | `MHS_REGISTERED_POLICY_THRESHOLDS`(`cap_30_roster`, `primary_annual_return`) 등록 여부 | 미착수, 성과 무관 정책 결정 필요 |
 | `pnl_vol_target` 기본값 전환 여부 (`mhs_execution_friction_and_exposure_layers.md` §6.1) | 미착수 |
