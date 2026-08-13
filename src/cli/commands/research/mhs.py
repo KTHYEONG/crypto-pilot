@@ -32,6 +32,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         ladder_diagnostic=args.ladder_diagnostic,
         discovery_gate=args.discovery_gate,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
+        discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
         fold_safe_horizon_selection=fold_safe_horizon,
         crash_regime_tilt_alpha=args.crash_regime_tilt_alpha,
         slow_book_mode=args.slow_book_mode,
@@ -126,6 +127,16 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Opt-in: also compute a Bartlett/HAC-adjusted net_t diagnostic per "
             "discovery candidate (requires --discovery-gate; never changes "
             "admitted/selected_horizon)"
+        ),
+    )
+    mhs.add_argument(
+        "--discovery-gate-regime-scaled-net-t",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: also compute a vol-regime cash-scale-adjusted net_t "
+            "diagnostic per discovery candidate (approximate market-vol proxy, "
+            "requires --discovery-gate; never changes admitted/selected_horizon)"
         ),
     )
     mhs.add_argument(
