@@ -162,6 +162,37 @@ def volatility_target_scale(
     return float(target_vol / (sd * np.sqrt(periods_per_year)))
 
 
+def committee_block_edges_from(
+    start: pd.Timestamp,
+    oos_start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> list[pd.Timestamp]:
+    """6-month OOS block starts covering [max(start, oos_start), end).
+
+    Anchored at ``max(start, oos_start)`` instead of the raw diagnostic start so
+    a purged walk-forward can never book blocks before the declared OOS start as
+    pseudo-OOS via ``min_train_bars`` alone -- the B1 fix for
+    ``WALK_FORWARD_START_OPTIMISTIC``
+    (docs/specs/mhs_committee_evaluation_integrity_fixes.md §1). The blocks are
+    generated in 6-month ``DateOffset`` steps exactly as the committee
+    diagnostic always has; only the anchor is shifted. Raises ``ValueError``
+    when ``end <= max(start, oos_start)`` so a short diagnostic window that
+    cannot contain a test block fails closed instead of silently producing an
+    empty grid.
+    """
+    anchored = max(start, oos_start)
+    if end <= anchored:
+        raise ValueError(
+            f"end {end} must be after max(start, oos_start) = {anchored}"
+        )
+    edges: list[pd.Timestamp] = []
+    cursor = anchored
+    while cursor < end:
+        edges.append(cursor)
+        cursor = cursor + pd.DateOffset(months=6)
+    return edges
+
+
 def purged_walk_forward(
     gross: pd.DataFrame,
     turnover_cost: pd.DataFrame,
