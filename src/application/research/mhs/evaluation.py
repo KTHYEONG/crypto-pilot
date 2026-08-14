@@ -57,6 +57,9 @@ from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
 from src.mhs.contracts import MHS_TREND_SLEEVE_HORIZONS_HOURS
 from src.mhs.contracts import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
+    MHS_COMMITTEE_MEMBERS,
+    MHS_COMMITTEE_PURGE_HOURS,
+    MHS_COMMITTEE_TARGET_VOL,
     MHS_CRASH_REGIME_REFERENCE_SYMBOLS,
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
@@ -96,6 +99,12 @@ from src.mhs.features import (
     build_feature_books,
     equal_risk_combination,
     feature_coverage_audit,
+    source_coverage_audit,
+)
+from src.mhs.committee import (
+    decompose_cost,
+    purged_walk_forward,
+    wealth_metrics,
 )
 from src.mhs.stability import regime_split_stability
 from src.mhs.regime import trend_efficiency_scale
@@ -301,6 +310,7 @@ class MhsDiagnosticRequest:
     trend_sleeve: bool = False
     trend_sleeve_gross: float = 0.0
     multi_feature_book: bool = False
+    committee_book: bool = False
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -339,6 +349,8 @@ class MhsDiagnosticRequest:
             raise ValueError("trend_sleeve must be a bool")
         if not isinstance(self.multi_feature_book, bool):
             raise ValueError("multi_feature_book must be a bool")
+        if not isinstance(self.committee_book, bool):
+            raise ValueError("committee_book must be a bool")
         if not (0.0 <= self.trend_sleeve_gross <= 1.0):
             raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
         if self.trend_sleeve_gross > 0.0 and not self.trend_sleeve:
@@ -496,6 +508,7 @@ class MhsHorizonDiagnosticReport:
     funding_carry_worst_year_corr: float | None = None
     trend_sleeve_diagnostic: dict[str, Any] | None = None
     multi_feature_diagnostic: dict[str, Any] | None = None
+    committee_diagnostic: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -1578,6 +1591,127 @@ def _multi_feature_diagnostic(
             ),
         },
         "feature_book_effective_breadth": feature_book_effective_breadth,
+    }
+
+
+def _committee_block_edges(
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> list[pd.Timestamp]:
+    """6-month OOS block starts covering [start, end) -- the walk-forward grid."""
+    edges: list[pd.Timestamp] = []
+    cursor = start
+    while cursor < end:
+        edges.append(cursor)
+        cursor = cursor + pd.DateOffset(months=6)
+    return edges
+
+
+def _finite_or_none(value: float) -> float | None:
+    """Coerce a metric to an explicit None when it is not finite (JSON-safe)."""
+    return None if not np.isfinite(value) else float(value)
+
+
+def _committee_diagnostic(
+    root: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    grid_1h: pd.DatetimeIndex,
+    aligned_symbols: list[str],
+    execution_mask: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+) -> dict[str, Any]:
+    """SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_REPORTS_WALK_FORWARD_WEALTH:
+    opt-in measurement of the k=6 wealth committee.
+
+    Builds the declared committee members into the dollar-neutral rank books on
+    the 24h decision grid, audits the RAW source panels for pre-fillna coverage
+    gaps via ``source_coverage_audit`` (the funding gap the post-fillna feature
+    audit cannot see), recovers sign-safe gross and turnover-cost panels from
+    the two extreme measured cost tiers via ``decompose_cost``, and runs the
+    purged expanding-train walk-forward at every measured cost tier, reporting
+    the compounded-growth wealth metrics per tier. Diagnostic-only -- never an
+    admission, combiner, or capital input; this is the measured benchmark any
+    future learned combiner must clear under this same protocol
+    (docs/specs/mhs_committee_design_and_wealth_objective.md §0-§4).
+    """
+    panels = _load_feature_panels(root, start, end, grid_1h, aligned_symbols)
+    member_specs = [
+        spec for spec in MHS_FEATURE_REGISTRY if spec.name in set(MHS_COMMITTEE_MEMBERS)
+    ]
+    decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
+    books = build_feature_books(
+        member_specs, panels, execution_mask, decision_grid, min_symbols=8,
+    )
+
+    admitted = [name for name in MHS_COMMITTEE_MEMBERS if name in books]
+    excluded = [name for name in MHS_COMMITTEE_MEMBERS if name not in books]
+
+    source_coverage: dict[str, dict[str, dict[int, float]]] = {}
+    for spec in member_specs:
+        per_source: dict[str, dict[int, float]] = {}
+        for column in spec.required_columns:
+            if column in panels and panels[column].notna().any().any():
+                per_source[column] = source_coverage_audit(
+                    panels[column], execution_mask,
+                )
+        source_coverage[spec.name] = per_source
+
+    bps_low = MEASURED_EXECUTION_COST_TIERS_BPS["optimistic"]
+    bps_high = MEASURED_EXECUTION_COST_TIERS_BPS["stress"]
+    gross_all: pd.DataFrame | None = None
+    tc_all: pd.DataFrame | None = None
+    if admitted:
+        net_low_panel = pd.DataFrame(
+            {name: mhs_ledger_pnl(books[name], opens, bar_funding, bps_low)[0]
+             for name in admitted},
+        )
+        net_high_panel = pd.DataFrame(
+            {name: mhs_ledger_pnl(books[name], opens, bar_funding, bps_high)[0]
+             for name in admitted},
+        )
+        gross_all, tc_all = decompose_cost(
+            net_low_panel, net_high_panel, bps_low, bps_high,
+        )
+
+    edges = _committee_block_edges(start, end)
+    purge = pd.Timedelta(hours=MHS_COMMITTEE_PURGE_HOURS)
+    per_tier: dict[str, dict[str, float | None]] = {}
+    for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
+        if gross_all is None:
+            per_tier[tier] = {
+                "net_sharpe": None, "cagr": None, "mdd": None,
+                "logret": None, "bars": 0,
+            }
+            continue
+        wf = purged_walk_forward(gross_all, tc_all, cost_bps, edges, purge)
+        metrics = wealth_metrics(wf)
+        per_tier[tier] = {
+            "net_sharpe": _finite_or_none(metrics["sharpe"]),
+            "cagr": _finite_or_none(metrics["cagr"]),
+            "mdd": _finite_or_none(metrics["mdd"]),
+            "logret": _finite_or_none(metrics["logret"]),
+            "bars": len(wf),
+        }
+
+    return {
+        "members": list(MHS_COMMITTEE_MEMBERS),
+        "admitted": admitted,
+        "excluded": excluded,
+        "source_coverage": {
+            name: {
+                column: {str(year): float(cov) for year, cov in coverage.items()}
+                for column, coverage in sources.items()
+            }
+            for name, sources in source_coverage.items()
+        },
+        "walk_forward": {
+            "block_edges": [edge.isoformat() for edge in edges],
+            "purge_hours": MHS_COMMITTEE_PURGE_HOURS,
+            "target_vol": MHS_COMMITTEE_TARGET_VOL,
+            "per_tier": per_tier,
+        },
     }
 
 
@@ -3830,6 +3964,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     xs_ic = _xs_rank_ic(signal_48h, opens, forward_bars=48)
     trend_sleeve_diagnostic = _trend_sleeve_diagnostic(log_close, eligible, opens, bar_funding, execution_mask, request) if request.trend_sleeve else None
     multi_feature_diagnostic = _multi_feature_diagnostic(root, start, end, grid_1h, aligned_symbols, execution_mask, opens, bar_funding) if request.multi_feature_book else None
+    committee_diagnostic = _committee_diagnostic(root, start, end, grid_1h, aligned_symbols, execution_mask, opens, bar_funding) if request.committee_book else None
     regression = _date_clustered_ols(opens, signal_48h, forward_bars=48)
     horizon_diagnostics = {
         "realized_vol_48h_mean": float(
@@ -4144,6 +4279,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         funding_carry_worst_year_corr=funding_carry_worst_year_corr,
         trend_sleeve_diagnostic=trend_sleeve_diagnostic,
         multi_feature_diagnostic=multi_feature_diagnostic,
+        committee_diagnostic=committee_diagnostic,
     )
 
 

@@ -183,6 +183,37 @@ MHS_TREND_SLEEVE_HORIZONS_HOURS: tuple[int, ...] = (336, 480, 600, 720, 1080, 14
 # revision, never an inline edit at a call site.
 MHS_FEATURE_MIN_COVERAGE: float = 0.90
 
+# The k=6 wealth-committee composition declared by ECONOMIC FAMILY -- order
+# flow x2 (flow_imb_720h, flow_imb_168h), cross-sectional trend x3
+# (xs_mom_336h, xs_mom_720h, xs_idio_mom_336h), higher-moment x1
+# (mom3_skew_168h) -- never a performance-ranked selection
+# (docs/specs/mhs_committee_design_and_wealth_objective.md §2). Measured OOS:
+# Sharpe +1.379, CAGR +22.02%, MDD -12.5%, net positive at all three cost
+# tiers, versus the production single signal at -0.441 / -7.27%. Every name
+# must resolve in MHS_FEATURE_REGISTRY (src/mhs/features.py).
+MHS_COMMITTEE_MEMBERS: tuple[str, ...] = (
+    "flow_imb_720h",
+    "flow_imb_168h",
+    "xs_mom_336h",
+    "xs_mom_720h",
+    "xs_idio_mom_336h",
+    "mom3_skew_168h",
+)
+
+# Annualized volatility target the committee exposure is scaled to using
+# TRAIN-window realized volatility only (docs/specs/mhs_committee_design_and_wealth_objective.md
+# §4). The wealth objective is compounded growth, so exposure is sized by
+# volatility rather than left at unit gross. Leverage above 1.5x is out of
+# contract: the computed full-Kelly of 9.02x rests on 6 OOS blocks and assumes
+# known Gaussian parameters, so it is an upper reference only.
+MHS_COMMITTEE_TARGET_VOL: float = 0.15
+
+# Purge gap in hours between a walk-forward train window end and its test block
+# start (docs/specs/mhs_committee_design_and_wealth_objective.md §0). Covers the
+# longest committee feature lookback (720h) so no overlapping-label information
+# leaks across the boundary.
+MHS_COMMITTEE_PURGE_HOURS: int = 336
+
 PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
     "fast_reversal": BookSpec(
         band=_FAST_BAND, horizon_hours=48, step_hours=6, min_symbols=8,
