@@ -50,6 +50,27 @@ class FeatureSpec:
             )
 
 
+def _coverage_audit(frame: pd.DataFrame, mask: pd.DataFrame) -> dict[int, float]:
+    """Shared per-calendar-year non-null coverage of ``frame`` inside ``mask``.
+
+    For each calendar year in the frame index: the ratio of non-null frame
+    cells within the mask to the mask's true cell count. A year with zero mask
+    cells maps to ``0.0`` -- never NaN, never a silent drop.
+    """
+    masked = frame.where(mask)
+    years = sorted({ts.year for ts in frame.index})
+    out: dict[int, float] = {}
+    for year in years:
+        year_rows = frame.index.year == year
+        mask_cells = int(mask.loc[year_rows].sum().sum())
+        if mask_cells == 0:
+            out[year] = 0.0
+            continue
+        covered = int(masked.loc[year_rows].notna().sum().sum())
+        out[year] = float(covered / mask_cells)
+    return out
+
+
 def feature_coverage_audit(
     feature: pd.DataFrame, mask: pd.DataFrame,
 ) -> dict[int, float]:
@@ -63,18 +84,25 @@ def feature_coverage_audit(
     """
     if not feature.index.equals(mask.index) or list(feature.columns) != list(mask.columns):
         raise ValueError("feature and mask must be identically indexed and columned")
-    masked = feature.where(mask)
-    years = sorted({ts.year for ts in feature.index})
-    out: dict[int, float] = {}
-    for year in years:
-        year_rows = feature.index.year == year
-        mask_cells = int(mask.loc[year_rows].sum().sum())
-        if mask_cells == 0:
-            out[year] = 0.0
-            continue
-        covered = int(masked.loc[year_rows].notna().sum().sum())
-        out[year] = float(covered / mask_cells)
-    return out
+    return _coverage_audit(feature, mask)
+
+
+def source_coverage_audit(
+    source: pd.DataFrame, mask: pd.DataFrame,
+) -> dict[int, float]:
+    """Per-calendar-year non-null coverage of a RAW source panel before fillna.
+
+    Mirrors ``feature_coverage_audit`` but audits the panel AT THE SOURCE,
+    before any downstream ``fillna``: a column that was zero-filled after
+    loading appears fully covered to a post-fillna audit while its raw source is
+    mostly NaN. This is the gap the funding panel exposes (only 45 of 452
+    symbols carry real funding; the rest are 0-filled and quietly rank at the
+    center). Raises ``ValueError`` when ``source`` and ``mask`` are not
+    identically indexed and columned.
+    """
+    if not source.index.equals(mask.index) or list(source.columns) != list(mask.columns):
+        raise ValueError("source and mask must be identically indexed and columned")
+    return _coverage_audit(source, mask)
 
 
 def build_feature_books(
@@ -212,6 +240,64 @@ def _taker_imbalance_builder(horizon_bars: int) -> Callable[[Mapping[str, pd.Dat
     return _build
 
 
+def _xs_mom_builder(horizon_bars: int) -> Callable[[Mapping[str, pd.DataFrame]], pd.DataFrame]:
+    """Cross-sectional momentum: vol-normalized horizon return, row-demeaned.
+
+    Demeaning removes the common market component before the dollar-neutral rank
+    book so the signal is the relative move, not the absolute trend
+    (``flow_imb``/``xs_mom`` families are meant to be additive axes, not
+    duplicates of the raw ``mom_*`` momentum).
+    """
+    def _build(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+        signal = vol_normalized_horizon_signal(np.log(panels["close"]), horizon_bars)
+        return _finite(signal.sub(signal.mean(axis=1), axis=0))
+    return _build
+
+
+def _xs_idio_mom_builder(
+    horizon_bars: int, beta_bars: int = 336,
+) -> Callable[[Mapping[str, pd.DataFrame]], pd.DataFrame]:
+    """Idiosyncratic momentum: market-beta-removed, vol-normalized horizon return.
+
+    Each symbol's horizon return is regressed on the cross-sectional market
+    return via a causal rolling beta (rolling moments over ``beta_bars``, no
+    forward data), and the residual -- the move the market did not explain -- is
+    scaled by its own rolling volatility.
+    """
+    def _build(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+        log_close = np.log(panels["close"])
+        raw = horizon_log_return(log_close, horizon_bars)
+        market = raw.mean(axis=1)
+        mean_r = raw.rolling(beta_bars, min_periods=beta_bars).mean()
+        mean_m = market.rolling(beta_bars, min_periods=beta_bars).mean()
+        mean_rm = raw.mul(market, axis=0).rolling(beta_bars, min_periods=beta_bars).mean()
+        mean_m2 = market.pow(2).rolling(beta_bars, min_periods=beta_bars).mean()
+        var_m = mean_m2 - mean_m.pow(2)
+        cov_rm = mean_rm - mean_r.mul(mean_m, axis=0)
+        beta = cov_rm.div(var_m.replace(0, np.nan), axis=0)
+        residual = raw - beta.mul(market, axis=0)
+        residual_vol = (
+            residual.rolling(horizon_bars, min_periods=horizon_bars).std(ddof=1)
+            * np.sqrt(horizon_bars)
+        )
+        return _finite(residual.div(residual_vol.replace(0, np.nan)))
+    return _build
+
+
+def _mom3_skew_builder(horizon_bars: int) -> Callable[[Mapping[str, pd.DataFrame]], pd.DataFrame]:
+    """Negative-skewness premium: minus the rolling return skewness.
+
+    Investors pay for positive skew (lottery preference), so the measured
+    premium is on NEGATIVE skew -- the builder returns ``-skew`` and the rank
+    book goes long the most negatively skewed symbols.
+    """
+    def _build(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+        log_close = np.log(panels["close"])
+        ret1 = log_close.diff()
+        return _finite(-ret1.rolling(horizon_bars, min_periods=horizon_bars).skew())
+    return _build
+
+
 def _hl_range_168h_builder(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
     high = panels["high"]
     low = panels["low"]
@@ -286,5 +372,46 @@ MHS_FEATURE_REGISTRY: tuple[FeatureSpec, ...] = (
         required_columns=("quote_vol", "no_trades"),
         min_coverage=MHS_FEATURE_MIN_COVERAGE,
         builder=_avg_trade_size_builder,
+    ),
+    # Committee-family registry entries
+    # (docs/specs/mhs_committee_design_and_wealth_objective.md §2, §6.1). The
+    # k=6 committee (src/mhs/contracts.py MHS_COMMITTEE_MEMBERS) resolves every
+    # member name here; ``flow_imb_168h`` has the identical composition to the
+    # existing ``taker_imb_168h`` and is registered under the committee's name.
+    FeatureSpec(
+        name="flow_imb_168h",
+        required_columns=("taker_buy_quote", "quote_vol"),
+        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        builder=_taker_imbalance_builder(168),
+    ),
+    FeatureSpec(
+        name="flow_imb_720h",
+        required_columns=("taker_buy_quote", "quote_vol"),
+        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        builder=_taker_imbalance_builder(720),
+    ),
+    FeatureSpec(
+        name="xs_mom_336h",
+        required_columns=("close",),
+        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        builder=_xs_mom_builder(336),
+    ),
+    FeatureSpec(
+        name="xs_mom_720h",
+        required_columns=("close",),
+        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        builder=_xs_mom_builder(720),
+    ),
+    FeatureSpec(
+        name="xs_idio_mom_336h",
+        required_columns=("close",),
+        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        builder=_xs_idio_mom_builder(336),
+    ),
+    FeatureSpec(
+        name="mom3_skew_168h",
+        required_columns=("close",),
+        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        builder=_mom3_skew_builder(168),
     ),
 )
