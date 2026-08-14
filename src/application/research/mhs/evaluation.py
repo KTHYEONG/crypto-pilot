@@ -53,6 +53,7 @@ from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
 from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS
 from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
+from src.mhs.contracts import MHS_TREND_SLEEVE_HORIZONS_HOURS
 from src.mhs.contracts import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
     MHS_CRASH_REGIME_REFERENCE_SYMBOLS,
@@ -90,6 +91,11 @@ from src.mhs.funding import funding_carry_signal  # noqa: F401 - contract wiring
 from src.mhs.evaluation import effective_breadth
 from src.mhs.evaluation import year_restricted_correlation
 from src.mhs.regime import trend_efficiency_scale
+from src.mhs.trend_sleeve import (
+    market_basket_log_price,
+    time_series_trend_position,
+    trend_sleeve_weights,
+)
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
 from src.market_data.storage.loaders import load_funding_rates
@@ -284,6 +290,8 @@ class MhsDiagnosticRequest:
     ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
     trend_efficiency_overlay: bool = False
     pnl_vol_target: bool = True
+    trend_sleeve: bool = False
+    trend_sleeve_gross: float = 0.0
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -318,6 +326,12 @@ class MhsDiagnosticRequest:
             raise ValueError("trend_efficiency_overlay must be a bool")
         if not isinstance(self.pnl_vol_target, bool):
             raise ValueError("pnl_vol_target must be a bool")
+        if not isinstance(self.trend_sleeve, bool):
+            raise ValueError("trend_sleeve must be a bool")
+        if not (0.0 <= self.trend_sleeve_gross <= 1.0):
+            raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
+        if self.trend_sleeve_gross > 0.0 and not self.trend_sleeve:
+            raise ValueError("trend_sleeve_gross requires trend_sleeve=True")
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +483,7 @@ class MhsHorizonDiagnosticReport:
     realized_execution_roster_size: float | None = None
     full_history_yearly_net_t: dict[str, dict[int, float]] | None = None
     funding_carry_worst_year_corr: float | None = None
+    trend_sleeve_diagnostic: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -1257,6 +1272,108 @@ def _xs_rank_ic(
     return {
         "n_dates": n_dates, "mean_ic": mean_ic, "t_stat": t_stat,
         "forward_bars": forward_bars,
+    }
+
+
+def _annualized_1h_sharpe(net: pd.Series) -> float | None:
+    """Annualized Sharpe of an hourly net-return series, or None when undefinable.
+
+    A missing/empty series, a zero standard deviation, or a non-finite result
+    return ``None`` explicitly -- never NaN silently coerced to 0.0 (the
+    trend-sleeve diagnostic contract requires every reported value to be finite
+    or an explicit None).
+    """
+    net = net.dropna()
+    if len(net) < 2:
+        return None
+    sd = float(net.std(ddof=1))
+    if sd <= 0:
+        return None
+    value = float(net.mean() / sd * np.sqrt(_PERIODS_PER_YEAR_1H))
+    return value if np.isfinite(value) else None
+
+
+def _trend_sleeve_diagnostic(
+    log_close: pd.DataFrame,
+    eligible: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    request: MhsDiagnosticRequest,
+) -> dict[str, Any]:
+    """SCENARIO_MHS_TREND_SLEEVE_DIAGNOSTIC_POPULATED: report-only measurements
+    for the opt-in additive directional trend sleeve.
+
+    Builds the eligible-market basket, the ensemble time-series trend position
+    on a 24h decision grid, and the gross-budget-sized sleeve weights, then
+    reports the sleeve's standalone net Sharpe per measured cost tier, its
+    per-calendar-year net t-stat, its daily-return correlation to the frozen
+    slow_momentum book, and the combined (slow_momentum + sleeve) book metrics.
+    Every value is finite or an explicit ``None`` -- never NaN silently coerced
+    to 0.0. This NEVER feeds ``admission_t`` or any capital/gate decision: it is
+    a measurement the user consults before approving the (default 0.0) risk
+    budget (docs/specs/mhs_directional_trend_sleeve.md §2.2, §4).
+    """
+    grid_1h = log_close.index
+    decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
+    basket = market_basket_log_price(log_close, eligible)
+    position = time_series_trend_position(
+        basket, MHS_TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
+    )
+    sleeve = trend_sleeve_weights(position, execution_mask, request.trend_sleeve_gross)
+
+    slow_spec = PHASE_1_BOOK_SPECS["slow_momentum"]
+    slow_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
+    slow_ema = _signal_ema_span(slow_spec.band.sign, slow_spec.horizon_hours, slow_spec.step_hours)
+    w_slow = _book_weights(log_close, eligible, slow_spec, slow_grid, ema_span=slow_ema)
+    slow_book = w_slow.reindex(grid_1h).ffill().fillna(0.0)
+
+    per_tier: dict[str, float | None] = {}
+    combined_per_tier: dict[str, float | None] = {}
+    combined = slow_book.add(sleeve)
+    for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
+        net, _ = mhs_ledger_pnl(sleeve, opens, bar_funding, cost_bps)
+        per_tier[tier] = _annualized_1h_sharpe(net)
+        combined_net, _ = mhs_ledger_pnl(combined, opens, bar_funding, cost_bps)
+        combined_per_tier[tier] = _annualized_1h_sharpe(combined_net)
+
+    yearly = yearly_net_t_diagnostic(
+        sleeve, opens, bar_funding, (2021, 2022, 2023, 2024, 2025),
+        MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
+    )
+    yearly_net_t = {year: (None if not np.isfinite(v) else float(v)) for year, v in yearly.items()}
+    combined_yearly_raw = yearly_net_t_diagnostic(
+        combined, opens, bar_funding, (2021, 2022, 2023, 2024, 2025),
+        MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
+    )
+    combined_yearly = {
+        year: (None if not np.isfinite(v) else float(v))
+        for year, v in combined_yearly_raw.items()
+    }
+    finite_years = [v for v in combined_yearly.values() if v is not None]
+    worst_year_net_t = min(finite_years) if finite_years else None
+
+    slow_net, _ = mhs_ledger_pnl(
+        slow_book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+    )
+    sleeve_net, _ = mhs_ledger_pnl(
+        sleeve, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+    )
+    slow_daily = (1.0 + slow_net).resample("1D").apply(lambda s: s.prod() - 1.0)
+    sleeve_daily = (1.0 + sleeve_net).resample("1D").apply(lambda s: s.prod() - 1.0)
+    corr = year_restricted_correlation(
+        sleeve_daily, slow_daily, (2021, 2022, 2023, 2024, 2025),
+    )
+    slow_momentum_pnl_corr = float(corr) if np.isfinite(corr) else None
+
+    return {
+        "net_sharpe_per_tier": per_tier,
+        "yearly_net_t": yearly_net_t,
+        "slow_momentum_pnl_corr": slow_momentum_pnl_corr,
+        "combined": {
+            "net_sharpe_per_tier": combined_per_tier,
+            "worst_year_net_t": worst_year_net_t,
+        },
     }
 
 
@@ -3507,6 +3624,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # (spec §3.1, ``memory_opt``).
     signal_48h = horizon_log_return(log_close, 48)
     xs_ic = _xs_rank_ic(signal_48h, opens, forward_bars=48)
+    trend_sleeve_diagnostic = _trend_sleeve_diagnostic(log_close, eligible, opens, bar_funding, execution_mask, request) if request.trend_sleeve else None
     regression = _date_clustered_ols(opens, signal_48h, forward_bars=48)
     horizon_diagnostics = {
         "realized_vol_48h_mean": float(
@@ -3819,6 +3937,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         realized_execution_roster_size=realized_execution_roster_size,
         full_history_yearly_net_t=full_history_yearly_net_t,
         funding_carry_worst_year_corr=funding_carry_worst_year_corr,
+        trend_sleeve_diagnostic=trend_sleeve_diagnostic,
     )
 
 
