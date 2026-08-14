@@ -2795,6 +2795,96 @@ def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, mon
     assert np.isfinite(breadth["mean_corr"])
 
 
+def test_committee_request_validation() -> None:
+    # SCENARIO_MHS_REQUEST_COMMITTEE_VALIDATION: MhsDiagnosticRequest gains
+    # committee_book (bool, default False). A non-bool value raises ValueError
+    # (fail closed -- no silent no-op); the default construction leaves it False.
+    assert MhsDiagnosticRequest().committee_book is False
+    with pytest.raises(ValueError, match="committee_book"):
+        MhsDiagnosticRequest(committee_book="yes")
+    on = MhsDiagnosticRequest(committee_book=True)
+    assert on.committee_book is True
+
+
+def test_committee_default_off_bit_identical(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_DEFAULT_OFF_BIT_IDENTICAL: with the flag omitted
+    # (committee_book=False) the report's committee_diagnostic is None and every
+    # pre-existing field is bit-identical to the explicit-off baseline -- the
+    # committee axis is inert unless explicitly enabled.
+    root, end = mhs_market
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    base = {
+        "start": str(_START), "end": str(end), "data_root": str(root),
+        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_universe_size": 8,
+    }
+    default_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    explicit_off = ev.run_mhs_horizon_diagnostic(
+        MhsDiagnosticRequest(**base, committee_book=False),
+    )
+    assert default_report.status == "COMPLETE"
+    assert default_report.committee_diagnostic is None
+    assert explicit_off.committee_diagnostic is None
+    for field in ("books", "blend", "blend_target_gross", "research_go", "folds"):
+        assert getattr(default_report, field) == getattr(explicit_off, field)
+
+
+def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_REPORTS_WALK_FORWARD_WEALTH: with
+    # committee_book=True the report's committee_diagnostic dict carries the
+    # declared member names, the admitted/excluded split against the coverage
+    # gate, per-required-column source coverage audited before any fillna, and
+    # the purged walk-forward wealth metrics (net Sharpe, CAGR, MDD, logret) per
+    # measured cost tier -- every reported value finite or an explicit None.
+    root, end = mhs_market
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    diag = report.committee_diagnostic
+    assert isinstance(diag, dict)
+    members = diag["members"]
+    assert isinstance(members, list)
+    assert len(members) == 6
+    assert len(set(members)) == 6
+    admitted = diag["admitted"]
+    excluded = diag["excluded"]
+    assert isinstance(admitted, list)
+    assert isinstance(excluded, list)
+    assert set(admitted) <= set(members)
+    assert set(excluded) <= set(members)
+    source_coverage = diag["source_coverage"]
+    assert isinstance(source_coverage, dict)
+    for per_source in source_coverage.values():
+        assert isinstance(per_source, dict)
+        for coverage in per_source.values():
+            assert isinstance(coverage, dict)
+            for value in coverage.values():
+                assert 0.0 <= value <= 1.0
+    wf = diag["walk_forward"]
+    assert isinstance(wf["block_edges"], list)
+    assert wf["purge_hours"] == 336
+    assert wf["target_vol"] == pytest.approx(0.15)
+    per_tier = wf["per_tier"]
+    assert set(per_tier) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    for fields in per_tier.values():
+        assert isinstance(fields["bars"], int)
+        assert fields["bars"] >= 0
+        for key in ("net_sharpe", "cagr", "mdd", "logret"):
+            value = fields[key]
+            assert value is None or np.isfinite(value)
+
+
 def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
     # SCENARIO_MHS_FOLD_REPORT_CARRIES_FUNDING_CARRY_DISCOVERY_05 (fold worker
     # path): a fold run resolved with a funding-carry override records all four
