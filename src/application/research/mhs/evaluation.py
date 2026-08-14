@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import StrEnum
@@ -51,13 +51,18 @@ from src.mhs.books import (
     renormalize_within_mask,
 )
 from src.mhs.contracts import MHS_DISCOVERY_START
+from src.mhs.contracts import MHS_FEATURE_MIN_COVERAGE
 from src.mhs.contracts import MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+from src.mhs.contracts import MHS_RAM_BUDGET_FRACTION
+from src.mhs.contracts import MHS_RAM_RESERVE_FLOOR_BYTES
+from src.mhs.contracts import MHS_RAM_RESERVE_FRACTION
 from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS
 from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
 from src.mhs.contracts import MHS_TREND_SLEEVE_HORIZONS_HOURS
 from src.mhs.contracts import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
     MHS_COMMITTEE_MEMBERS,
+    MHS_COMMITTEE_OOS_START,
     MHS_COMMITTEE_PURGE_HOURS,
     MHS_COMMITTEE_TARGET_VOL,
     MHS_CRASH_REGIME_REFERENCE_SYMBOLS,
@@ -96,16 +101,19 @@ from src.mhs.evaluation import effective_breadth
 from src.mhs.evaluation import year_restricted_correlation
 from src.mhs.features import (
     MHS_FEATURE_REGISTRY,
+    FeatureSpec,
     build_feature_books,
-    equal_risk_combination,
     feature_coverage_audit,
+    feature_registry_panel_columns,
     source_coverage_audit,
 )
 from src.mhs.committee import (
+    committee_block_edges_from,
     decompose_cost,
     purged_walk_forward,
     wealth_metrics,
 )
+from src.mhs.execution import mhs_ledger_pnl_multi_tier
 from src.mhs.stability import regime_split_stability
 from src.mhs.regime import trend_efficiency_scale
 from src.mhs.trend_sleeve import (
@@ -144,6 +152,11 @@ MHS_DISCOVERY_MOMENTUM_CANDIDATES: tuple[int, ...] = PHASE_1_BOOK_SPECS["slow_mo
 _MHS_FEATURE = "multi_horizon_market_state"
 _PERIODS_PER_YEAR_1H = 365.0 * 24
 _BOOTSTRAP_SEED = 20260807
+# Must mirror ``purged_walk_forward``'s ``min_train_bars`` default; the
+# committee diagnostic passes it explicitly so the B6 ``skipped_blocks``
+# re-derivation and the walk-forward it describes can never disagree on the
+# train-floor (docs/specs/mhs_committee_evaluation_integrity_fixes.md §6).
+_MHS_WALK_FORWARD_MIN_TRAIN_BARS = 2000
 _BOOTSTRAP_REPLICATES = 2000
 _BOOTSTRAP_MEAN_BLOCK = 168
 
@@ -311,6 +324,7 @@ class MhsDiagnosticRequest:
     trend_sleeve_gross: float = 0.0
     multi_feature_book: bool = False
     committee_book: bool = False
+    ram_guard: bool = True
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -351,6 +365,8 @@ class MhsDiagnosticRequest:
             raise ValueError("multi_feature_book must be a bool")
         if not isinstance(self.committee_book, bool):
             raise ValueError("committee_book must be a bool")
+        if not isinstance(self.ram_guard, bool):
+            raise ValueError("ram_guard must be a bool")
         if not (0.0 <= self.trend_sleeve_gross <= 1.0):
             raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
         if self.trend_sleeve_gross > 0.0 and not self.trend_sleeve:
@@ -578,26 +594,125 @@ def _classify_execution_failure(exc: BaseException) -> str:
     return MHS_GO_REASON_INVALID_PRIMARY
 
 
+def _resolve_ram_budget(
+    max_rss_bytes: int | None,
+    ram_guard: bool,
+) -> tuple[int | None, int | None]:
+    """Resolve the automatic RAM-guard budget and reserve from the environment.
+
+    Returns ``(budget_bytes, reserve_bytes)``. With ``ram_guard=False`` both are
+    ``None`` (the legacy unlimited semantics). With the guard on, the budget is
+    ``max_rss_bytes`` when explicitly set, otherwise ``int(total *
+    MHS_RAM_BUDGET_FRACTION)``, and the reserve is
+    ``max(int(total * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)``.
+    A psutil failure or a non-positive total yields ``(None, None)`` -- an
+    observational failure disables the guard and never alters computed values.
+    """
+    if not ram_guard:
+        return (None, None)
+    try:
+        total = int(psutil.virtual_memory().total)
+    except Exception:  # noqa: BLE001
+        return (None, None)
+    if total <= 0:
+        return (None, None)
+    budget = (
+        max_rss_bytes
+        if max_rss_bytes is not None
+        else int(total * MHS_RAM_BUDGET_FRACTION)
+    )
+    reserve = max(int(total * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)
+    return (budget, reserve)
+
+
+def _assert_stage_rss_budget(
+    stage: str,
+    budget_bytes: int | None,
+    reserve_bytes: int | None,
+) -> None:
+    """Deterministic fail-closed RAM barrier at a named stage boundary.
+
+    (a) A positive ``budget_bytes`` exceeded by the current process RSS raises
+    ``DataIntegrityError`` naming the stage. (b) When ``reserve_bytes`` is set
+    and the system's available memory drops below it, ``DataIntegrityError`` is
+    raised BEFORE the OS OOM killer can fire (WSL kills the whole VM, so the
+    process must abort while headroom remains). psutil exceptions inside the
+    reserve probe are swallowed (observational). Both ``None`` makes it a no-op.
+    The guard never alters computed values.
+    """
+    if budget_bytes is not None:
+        observed = _current_rss_bytes()
+        if observed > budget_bytes:
+            raise DataIntegrityError(
+                f"RAM budget exceeded at stage '{stage}': "
+                f"rss={observed} > budget={budget_bytes}"
+            )
+    if reserve_bytes is not None:
+        try:
+            available = int(psutil.virtual_memory().available)
+        except Exception:  # noqa: BLE001
+            return
+        if available < reserve_bytes:
+            raise DataIntegrityError(
+                f"system RAM reserve breached at stage '{stage}': "
+                f"available={available} < reserve={reserve_bytes}"
+            )
+
+
+def _evict_minute_frame_caches() -> None:
+    """Free the full-period minute/mark frame caches after books and folds.
+
+    Books and folds are the only consumers of the full-period
+    ``_get_symbol_minute_frame``/``_get_symbol_mark_frame`` frames (and the
+    test-only ``_load_minute_frames_cached``); once the fold pool has joined,
+    the ~6 GB resident frames are released so the opt-in diagnostics and final
+    assembly run with a lean parent. Frames are re-read from Parquet on demand
+    (page-cache backed) if a later stage needs them.
+    """
+    _get_symbol_minute_frame.cache_clear()
+    _get_symbol_mark_frame.cache_clear()
+    _load_minute_frames_cached.cache_clear()
+    gc.collect()
+
+
 def _assert_execution_rss_budget(
     stage: str,
     budget: int | None,
     completed_windows: int,
+    reserve_bytes: int | None = None,
 ) -> None:
     """Deterministic fail-closed provenance for a configured RSS budget.
 
     A positive ``budget`` exceeded at a window boundary raises
     ``DataIntegrityError`` carrying the stage, observed RSS, configured budget,
     and completed window count; the default ``None`` applies no artificial cap.
+    When ``reserve_bytes`` is set and the system's available memory drops below
+    it, the same stable ``rss budget``-prefixed ``DataIntegrityError`` is raised
+    so ``_classify_execution_failure`` keeps mapping it to
+    ``MHS_GO_REASON_RESOURCE_BREACH`` -- the fork-worker OOM guard (only the
+    system reserve applies to workers; the auto 85% budget is parent-only
+    because fork-child RSS double-counts COW-shared pages).
     """
-    if budget is None:
+    if budget is None and reserve_bytes is None:
         return
     observed = _current_rss_bytes()
-    if observed > budget:
+    if budget is not None and observed > budget:
         raise DataIntegrityError(
             "execution RSS budget exceeded at window boundary: "
             f"stage={stage} observed_rss={observed} "
             f"budget={budget} completed_windows={completed_windows}"
         )
+    if reserve_bytes is not None:
+        try:
+            available = int(psutil.virtual_memory().available)
+        except Exception:  # noqa: BLE001
+            return
+        if available < reserve_bytes:
+            raise DataIntegrityError(
+                "execution RSS budget (system reserve) breached at window boundary: "
+                f"stage={stage} available={available} "
+                f"reserve={reserve_bytes} completed_windows={completed_windows}"
+            )
 
 
 class _StageRecorder:
@@ -1434,15 +1549,20 @@ def _load_feature_panels(
     end: pd.Timestamp,
     grid_1h: pd.DatetimeIndex,
     aligned_symbols: list[str],
+    columns: tuple[str, ...] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Load the registry's raw 1h panels, NaN-filling absent columns.
 
     Present columns come from ``load_base_panel`` (causal survivor discovery);
     a column missing from the store becomes an all-NaN panel aligned to
     ``grid_1h`` x ``aligned_symbols``, which then fails the coverage gate --
-    never a silent drop, never a crash.
+    never a silent drop, never a crash. ``columns`` prunes the load to exactly
+    the requested raw columns (e.g. ``feature_registry_panel_columns`` for the
+    opt-in diagnostics), halving-to-seventhing the resident panels and parquet
+    I/O; ``None`` keeps the legacy full ``_MULTI_FEATURE_PANEL_COLUMNS`` set.
     """
-    available = _available_panel_columns(root, _MULTI_FEATURE_PANEL_COLUMNS)
+    requested = _MULTI_FEATURE_PANEL_COLUMNS if columns is None else columns
+    available = _available_panel_columns(root, requested)
     panels: dict[str, pd.DataFrame] = {}
     if available:
         loaded = load_base_panel(
@@ -1450,7 +1570,7 @@ def _load_feature_panels(
         )
         for column in available:
             panels[column] = loaded[column].reindex(index=grid_1h, columns=aligned_symbols)
-    for column in _MULTI_FEATURE_PANEL_COLUMNS:
+    for column in requested:
         if column not in panels:
             panels[column] = pd.DataFrame(np.nan, index=grid_1h, columns=aligned_symbols)
     return panels
@@ -1465,6 +1585,9 @@ def _multi_feature_diagnostic(
     execution_mask: pd.DataFrame,
     opens: pd.DataFrame,
     bar_funding: pd.DataFrame,
+    panels: Mapping[str, pd.DataFrame] | None = None,
+    rss_budget_bytes: int | None = None,
+    rss_reserve_bytes: int | None = None,
 ) -> dict[str, Any]:
     """SCENARIO_MHS_MULTI_FEATURE_DIAGNOSTIC_REPORTS_COVERAGE_AND_STABILITY:
     report-only measurements for the opt-in multi-feature alpha axis.
@@ -1480,15 +1603,35 @@ def _multi_feature_diagnostic(
     ``admission_t`` or any capital/gate decision: it is a measurement the user
     consults before approving the architecture change
     (docs/specs/mhs_multi_feature_alpha_architecture.md §2 Stage 1).
+
+    Memory-optimized streaming: the panels are column-pruned to the registry's
+    required-column union and built one feature at a time, keeping only the
+    small per-feature net series and a single running combined-book accumulator
+    instead of every feature book simultaneously. The combined book is built by
+    sequential ``add`` in registry order -- the exact float order of
+    ``equal_risk_combination`` -- so every reported value stays bit-identical
+    (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md §5, §9).
     """
-    panels = _load_feature_panels(root, start, end, grid_1h, aligned_symbols)
+    if panels is None:
+        panels = _load_feature_panels(
+            root, start, end, grid_1h, aligned_symbols,
+            columns=feature_registry_panel_columns(MHS_FEATURE_REGISTRY),
+        )
+    _assert_stage_rss_budget("multi_feature_feature_panels", rss_budget_bytes, rss_reserve_bytes)
     decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
-    books = build_feature_books(
-        MHS_FEATURE_REGISTRY, panels, execution_mask, decision_grid, min_symbols=8,
-    )
 
     admitted: dict[str, dict[str, Any]] = {}
     excluded: dict[str, dict[str, Any]] = {}
+    # Per-feature streaming state: registry order throughout, matching the
+    # pre-streaming dict insertion orders so combined/combined_per_tier/breadth
+    # accumulation float order is preserved exactly.
+    base_net_by_name: dict[str, pd.Series] = {}
+    tier_nets_by_name: dict[str, tuple[pd.Series, pd.Series, pd.Series]] = {}
+    combinable_order: list[str] = []
+    sd_by_name: dict[str, np.float64] = {}
+    combined_acc: pd.DataFrame | None = None
+    combined_count = 0
+
     for spec in MHS_FEATURE_REGISTRY:
         feature = spec.builder(panels)
         coverage = feature_coverage_audit(feature, execution_mask)
@@ -1498,13 +1641,24 @@ def _multi_feature_diagnostic(
         if failing:
             excluded[spec.name] = {"failing_year": min(failing)}
             continue
-        if spec.name not in books:
-            continue
-        book = books[spec.name]
-        base_net, _ = mhs_ledger_pnl(
-            book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+        single = build_feature_books(
+            [spec], panels, execution_mask, decision_grid, min_symbols=8,
         )
-        stability = regime_split_stability(base_net, _MULTI_FEATURE_REGIME_SPLIT)
+        if spec.name not in single:
+            continue
+        book = single[spec.name]
+        _assert_stage_rss_budget(
+            f"multi_feature_member_{spec.name}", rss_budget_bytes, rss_reserve_bytes,
+        )
+        (net_opt, _), (net_base, _), (net_stress, _) = mhs_ledger_pnl_multi_tier(
+            book, opens, bar_funding,
+            [
+                MEASURED_EXECUTION_COST_TIERS_BPS["optimistic"],
+                MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+                MEASURED_EXECUTION_COST_TIERS_BPS["stress"],
+            ],
+        )
+        stability = regime_split_stability(net_base, _MULTI_FEATURE_REGIME_SPLIT)
         admitted[spec.name] = {
             "coverage": {str(year): float(cov) for year, cov in coverage.items()},
             "regime_split_stability": {
@@ -1522,52 +1676,54 @@ def _multi_feature_diagnostic(
                 ),
             },
         }
+        base_net_by_name[spec.name] = net_base
+        tier_nets_by_name[spec.name] = (net_opt, net_base, net_stress)
 
-    net_panel = {
-        name: mhs_ledger_pnl(
-            books[name], opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
-        )[0]
-        for name in admitted
-    }
-    # A feature whose realized net PnL has zero or non-finite variance cannot be
-    # risk-scaled (equal_risk_combination fails closed on it) -- drop it from
-    # the combination, never let one degenerate book crash the whole diagnostic.
-    combinable: dict[str, pd.Series] = {}
-    for name, net in net_panel.items():
-        cleaned = net.dropna()
-        sd = float(cleaned.std(ddof=1)) if len(cleaned) > 1 else 0.0
+        # A feature whose realized net PnL has zero or non-finite variance cannot
+        # be risk-scaled (equal_risk_combination fails closed on it) -- drop it
+        # from the combination, never let one degenerate book crash the whole
+        # diagnostic. Accumulate the combined book incrementally in registry
+        # order (the exact sequential-add float order of equal_risk_combination).
+        cleaned = net_base.dropna()
+        sd = cleaned.std(ddof=1) if len(cleaned) > 1 else np.float64(0.0)
         if np.isfinite(sd) and sd > 0:
-            combinable[name] = net
+            sd_by_name[spec.name] = sd
+            combinable_order.append(spec.name)
+            scaled_book = book / sd
+            combined_acc = (
+                scaled_book
+                if combined_acc is None
+                else combined_acc.add(scaled_book)
+            )
+            combined_count += 1
+        del single, book
+
     # Construct the combined weight book through the equal-risk primitive, but
     # report its net Sharpe per tier from the scaled net-PnL panel: net PnL is
     # linear in the weight book (each bar's return is a weighted sum plus a
     # turnover-proportional cost), so ``mean_i(net_i / sd_i)`` equals the ledger
     # of the combined book without the numerically explosive ~1/sd gross.
-    combined = None
+    combined = None if combined_acc is None else combined_acc / combined_count
     combined_per_tier: dict[str, float | None] = {}
-    if combinable:
-        combined = equal_risk_combination(
-            {name: books[name] for name in combinable}, combinable,
-        )
-        for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
-            per_feature = {
-                name: mhs_ledger_pnl(books[name], opens, bar_funding, cost_bps)[0]
-                for name in combinable
-            }
-            combined_net = (
-                sum(per_feature[name] / combinable[name].std(ddof=1) for name in combinable)
-                / len(combinable)
-            )
+    if combinable_order:
+        tier_index = {"optimistic": 0, "base": 1, "stress": 2}
+        for tier in MEASURED_EXECUTION_COST_TIERS_BPS:
+            acc: float | pd.Series = 0.0
+            for name in combinable_order:
+                acc = acc + tier_nets_by_name[name][tier_index[tier]] / sd_by_name[name]
+            combined_net = acc / len(combinable_order)
             combined_per_tier[tier] = _annualized_1h_sharpe(combined_net)
     else:
         combined_per_tier = dict.fromkeys(MEASURED_EXECUTION_COST_TIERS_BPS)
 
     feature_book_effective_breadth: dict[str, float] | None = None
-    if len(net_panel) >= 2:
-        n_eff, mean_corr = effective_breadth(pd.DataFrame(net_panel).fillna(0.0))
+    if len(base_net_by_name) >= 2:
+        n_eff, mean_corr = effective_breadth(pd.DataFrame(base_net_by_name).fillna(0.0))
         feature_book_effective_breadth = {"n_eff": n_eff, "mean_corr": mean_corr}
 
     return {
+        "evaluation_protocol": "in_sample_full_period",
+        "trials_explored": len(MHS_FEATURE_REGISTRY),
         "admitted": admitted,
         "excluded": excluded,
         "combined": {
@@ -1584,27 +1740,14 @@ def _multi_feature_diagnostic(
                 else float(
                     (
                         combined
-                        * len(combinable)
-                        / sum(1.0 / combinable[name].std(ddof=1) for name in combinable)
+                        * combined_count
+                        / sum(1.0 / sd_by_name[name] for name in combinable_order)
                     ).abs().sum(axis=1).mean()
                 )
             ),
         },
         "feature_book_effective_breadth": feature_book_effective_breadth,
     }
-
-
-def _committee_block_edges(
-    start: pd.Timestamp,
-    end: pd.Timestamp,
-) -> list[pd.Timestamp]:
-    """6-month OOS block starts covering [start, end) -- the walk-forward grid."""
-    edges: list[pd.Timestamp] = []
-    cursor = start
-    while cursor < end:
-        edges.append(cursor)
-        cursor = cursor + pd.DateOffset(months=6)
-    return edges
 
 
 def _finite_or_none(value: float) -> float | None:
@@ -1621,62 +1764,173 @@ def _committee_diagnostic(
     execution_mask: pd.DataFrame,
     opens: pd.DataFrame,
     bar_funding: pd.DataFrame,
+    panels: Mapping[str, pd.DataFrame] | None = None,
+    rss_budget_bytes: int | None = None,
+    rss_reserve_bytes: int | None = None,
 ) -> dict[str, Any]:
     """SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_REPORTS_WALK_FORWARD_WEALTH:
     opt-in measurement of the k=6 wealth committee.
 
     Builds the declared committee members into the dollar-neutral rank books on
     the 24h decision grid, audits the RAW source panels for pre-fillna coverage
-    gaps via ``source_coverage_audit`` (the funding gap the post-fillna feature
-    audit cannot see), recovers sign-safe gross and turnover-cost panels from
-    the two extreme measured cost tiers via ``decompose_cost``, and runs the
-    purged expanding-train walk-forward at every measured cost tier, reporting
-    the compounded-growth wealth metrics per tier. Diagnostic-only -- never an
-    admission, combiner, or capital input; this is the measured benchmark any
-    future learned combiner must clear under this same protocol
+    gaps via ``source_coverage_audit`` and fail-closes any member whose required
+    source drops below ``MHS_FEATURE_MIN_COVERAGE`` in ANY year BEFORE
+    ``build_feature_books`` (B3 -- the funding gap the post-fillna feature audit
+    cannot see), recovers sign-safe gross and turnover-cost panels from the two
+    extreme measured cost tiers via ``decompose_cost``, and runs the purged
+    expanding-train walk-forward at every measured cost tier, reporting the
+    compounded-growth wealth metrics per tier. The walk-forward block grid is
+    anchored at ``MHS_COMMITTEE_OOS_START``, never the diagnostic's own start
+    (B1), and any blocks the walk-forward skipped are reported alongside the
+    edges (B6). Diagnostic-only -- never an admission, combiner, or capital
+    input; this is the measured benchmark any future learned combiner must clear
+    under this same protocol
     (docs/specs/mhs_committee_design_and_wealth_objective.md §0-§4).
+
+    Memory-optimized streaming: the panels are column-pruned to the committee
+    members' required-column union and books are built one member at a time,
+    computing the two cost-tier net series via the single-pass multi-tier ledger
+    and dropping each book immediately, so at most one member book (instead of
+    all six) is resident (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md
+    §4, §9).
     """
-    panels = _load_feature_panels(root, start, end, grid_1h, aligned_symbols)
+    if panels is None:
+        panels = _load_feature_panels(
+            root, start, end, grid_1h, aligned_symbols,
+            columns=feature_registry_panel_columns(
+                [
+                    spec for spec in MHS_FEATURE_REGISTRY
+                    if spec.name in set(MHS_COMMITTEE_MEMBERS)
+                ],
+            ),
+        )
+    _assert_stage_rss_budget("committee_feature_panels", rss_budget_bytes, rss_reserve_bytes)
     member_specs = [
         spec for spec in MHS_FEATURE_REGISTRY if spec.name in set(MHS_COMMITTEE_MEMBERS)
     ]
-    decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
-    books = build_feature_books(
-        member_specs, panels, execution_mask, decision_grid, min_symbols=8,
-    )
 
-    admitted = [name for name in MHS_COMMITTEE_MEMBERS if name in books]
-    excluded = [name for name in MHS_COMMITTEE_MEMBERS if name not in books]
-
+    # B3: source-coverage pre-filter. Every required RAW source column present
+    # in the panels is audited against the execution mask -- including an
+    # all-NaN column, whose per-year coverage is 0.0 (the funding 45/452-symbol
+    # gap a post-fillna feature audit cannot see). A member with ANY year below
+    # MHS_FEATURE_MIN_COVERAGE is dropped from member_specs BEFORE
+    # build_feature_books so it never contributes a book, a PnL series, or a
+    # weight -- fail closed, mirroring feature_coverage_audit's
+    # exclude-not-nan-fill discipline at the source level.
     source_coverage: dict[str, dict[str, dict[int, float]]] = {}
+    source_excluded: dict[str, dict[str, Any]] = {}
+    source_admissible_specs: list[FeatureSpec] = []
     for spec in member_specs:
         per_source: dict[str, dict[int, float]] = {}
+        failing_sources: dict[str, int] = {}
         for column in spec.required_columns:
-            if column in panels and panels[column].notna().any().any():
-                per_source[column] = source_coverage_audit(
-                    panels[column], execution_mask,
-                )
+            if column not in panels:
+                continue
+            coverage = source_coverage_audit(panels[column], execution_mask)
+            per_source[column] = coverage
+            for year, cov in coverage.items():
+                if cov < MHS_FEATURE_MIN_COVERAGE:
+                    failing_sources[column] = min(
+                        failing_sources.get(column, year), year,
+                    )
         source_coverage[spec.name] = per_source
+        if failing_sources:
+            failing_source = min(failing_sources, key=lambda c: failing_sources[c])
+            source_excluded[spec.name] = {
+                "failing_source": failing_source,
+                "failing_year": failing_sources[failing_source],
+            }
+        else:
+            source_admissible_specs.append(spec)
+    member_specs = source_admissible_specs
+
+    decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
+    specs_by_name = {spec.name: spec for spec in member_specs}
 
     bps_low = MEASURED_EXECUTION_COST_TIERS_BPS["optimistic"]
     bps_high = MEASURED_EXECUTION_COST_TIERS_BPS["stress"]
+
+    # Stream one member at a time in MHS_COMMITTEE_MEMBERS order (preserving the
+    # pre-streaming admitted/net-panel column order), keep only the two cost-tier
+    # net series, and drop the book immediately.
+    admitted: list[str] = []
+    net_low_by_name: dict[str, pd.Series] = {}
+    net_high_by_name: dict[str, pd.Series] = {}
+    for name in MHS_COMMITTEE_MEMBERS:
+        member_spec = specs_by_name.get(name)
+        if member_spec is None:
+            continue
+        _assert_stage_rss_budget(
+            f"committee_member_{name}", rss_budget_bytes, rss_reserve_bytes,
+        )
+        single = build_feature_books(
+            [member_spec], panels, execution_mask, decision_grid, min_symbols=8,
+        )
+        if name not in single:
+            continue
+        book = single[name]
+        (net_low, _), (net_high, _) = mhs_ledger_pnl_multi_tier(
+            book, opens, bar_funding, [bps_low, bps_high],
+        )
+        net_low_by_name[name] = net_low
+        net_high_by_name[name] = net_high
+        admitted.append(name)
+        del single, book
+
+    excluded = [
+        {"name": name, "reason": "feature_coverage"}
+        for name in MHS_COMMITTEE_MEMBERS
+        if name not in admitted and name not in source_excluded
+    ]
+    excluded.extend(
+        {
+            "name": name,
+            "reason": "source_coverage",
+            "failing_source": details["failing_source"],
+            "failing_year": details["failing_year"],
+        }
+        for name, details in source_excluded.items()
+    )
+
     gross_all: pd.DataFrame | None = None
     tc_all: pd.DataFrame | None = None
     if admitted:
-        net_low_panel = pd.DataFrame(
-            {name: mhs_ledger_pnl(books[name], opens, bar_funding, bps_low)[0]
-             for name in admitted},
-        )
-        net_high_panel = pd.DataFrame(
-            {name: mhs_ledger_pnl(books[name], opens, bar_funding, bps_high)[0]
-             for name in admitted},
-        )
+        net_low_panel = pd.DataFrame(net_low_by_name)
+        net_high_panel = pd.DataFrame(net_high_by_name)
         gross_all, tc_all = decompose_cost(
             net_low_panel, net_high_panel, bps_low, bps_high,
         )
 
-    edges = _committee_block_edges(start, end)
+    # B1: anchor the OOS block grid at MHS_COMMITTEE_OOS_START, never the raw
+    # diagnostic start, so min_train_bars (~83 days) can no longer smuggle
+    # pre-OOS blocks in as pseudo-OOS.
+    edges = committee_block_edges_from(start, MHS_COMMITTEE_OOS_START, end)
     purge = pd.Timedelta(hours=MHS_COMMITTEE_PURGE_HOURS)
+
+    # B6: re-derive which candidate block edges purged_walk_forward skips
+    # (insufficient train rows or no test bars), independently of its internal
+    # loop, so a silently-ignored calendar gap in the concatenated wealth
+    # series is surfaced to the reader. Report-only, never raises.
+    skipped_blocks: list[dict[str, str]] = []
+    if gross_all is not None:
+        for i, t0 in enumerate(edges):
+            next_edge = (
+                edges[i + 1]
+                if i + 1 < len(edges)
+                else gross_all.index[-1] + pd.Timedelta(hours=1)
+            )
+            train_rows = gross_all.index < (t0 - purge)
+            if int(train_rows.sum()) < _MHS_WALK_FORWARD_MIN_TRAIN_BARS:
+                skipped_blocks.append(
+                    {"block_start": t0.isoformat(), "reason": "insufficient_train"}
+                )
+                continue
+            test_rows = (gross_all.index >= t0) & (gross_all.index < next_edge)
+            if not bool(test_rows.any()):
+                skipped_blocks.append(
+                    {"block_start": t0.isoformat(), "reason": "no_test_bars"}
+                )
+
     per_tier: dict[str, dict[str, float | None]] = {}
     for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
         if gross_all is None:
@@ -1685,7 +1939,10 @@ def _committee_diagnostic(
                 "logret": None, "bars": 0,
             }
             continue
-        wf = purged_walk_forward(gross_all, tc_all, cost_bps, edges, purge)
+        wf = purged_walk_forward(
+            gross_all, tc_all, cost_bps, edges, purge,
+            min_train_bars=_MHS_WALK_FORWARD_MIN_TRAIN_BARS,
+        )
         metrics = wealth_metrics(wf)
         per_tier[tier] = {
             "net_sharpe": _finite_or_none(metrics["sharpe"]),
@@ -1696,6 +1953,13 @@ def _committee_diagnostic(
         }
 
     return {
+        "evaluation_protocol": "purged_walk_forward_oos",
+        "trials_explored": 50,
+        "selection_bias_warning": (
+            "committee composition (k=6) was chosen after comparing ~50 "
+            "feature/combiner/size configurations on this same 2021-2025 panel; "
+            "treat OOS Sharpe as an upper bound, not a deflated estimate"
+        ),
         "members": list(MHS_COMMITTEE_MEMBERS),
         "admitted": admitted,
         "excluded": excluded,
@@ -1708,6 +1972,7 @@ def _committee_diagnostic(
         },
         "walk_forward": {
             "block_edges": [edge.isoformat() for edge in edges],
+            "skipped_blocks": skipped_blocks,
             "purge_hours": MHS_COMMITTEE_PURGE_HOURS,
             "target_vol": MHS_COMMITTEE_TARGET_VOL,
             "per_tier": per_tier,
@@ -2484,6 +2749,10 @@ def _book_outcome(
     )
     replay_symbols = list(target_replay.columns)
 
+    # Fork workers get the SYSTEM reserve check (not the auto 85% budget, whose
+    # fork-child RSS would double-count COW-shared parent pages).
+    _window_rss_reserve = _resolve_ram_budget(None, request.ram_guard)[1]
+
     def _windows() -> Iterator[MhsExecutionWindow]:
         return _iter_mhs_execution_windows(
             target_replay, signal_replay, root, request.execution_timeframe,
@@ -2503,7 +2772,10 @@ def _book_outcome(
                     window_end=str(w.window_end),
                 )
             yield w
-            _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
+            _assert_execution_rss_budget(
+                prefix, request.max_rss_bytes, idx + 1,
+                reserve_bytes=_window_rss_reserve,
+            )
 
     touch = None
     touch_naive_sharpe = None
@@ -3478,6 +3750,10 @@ def _run_anchored_fold(
         )
         decision_intents = int(np.isfinite(target_replay.to_numpy()).sum())
 
+        # Fork workers get the SYSTEM reserve check (not the auto 85% budget,
+        # whose fork-child RSS would double-count COW-shared parent pages).
+        _window_rss_reserve = _resolve_ram_budget(None, request.ram_guard)[1]
+
         def _windows() -> Iterator[MhsExecutionWindow]:
             return _iter_mhs_execution_windows(
                 target_replay, signal_available_at, root, request.execution_timeframe,
@@ -3497,7 +3773,10 @@ def _run_anchored_fold(
                         window_end=str(w.window_end),
                     )
                 yield w
-                _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
+                _assert_execution_rss_budget(
+                    prefix, request.max_rss_bytes, idx + 1,
+                    reserve_bytes=_window_rss_reserve,
+                )
 
         window_prefix = f"anchored_fold_{fold_index}_window"
         # Materialize the fold's windows once; both passes substitute the
@@ -3806,6 +4085,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     if end > HOLDOUT_CUTOFF:
         raise RuntimeError(f"Holdout sealed: requested end {end} past {HOLDOUT_CUTOFF}")
 
+    rss_budget_bytes, rss_reserve_bytes = _resolve_ram_budget(
+        request.max_rss_bytes, request.ram_guard,
+    )
+
     telemetry = _StageRecorder(log_run=request.log_run)
 
     root = request.data_root or str(FUTURES_DATA_DIR / "ohlcv")
@@ -3816,6 +4099,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     grid_1h = close.index
     symbols = list(close.columns)
     telemetry.record("base_1h_panel", grid_bars=len(grid_1h), n_symbols=len(symbols))
+    _assert_stage_rss_budget("base_1h_panel", rss_budget_bytes, rss_reserve_bytes)
 
     funding_by_symbol = _load_funding_series(symbols)
     fold_funding = dict(funding_by_symbol)
@@ -3846,6 +4130,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned_symbols}
     bar_funding = bar_funding[aligned_symbols]
     telemetry.record("funding_alignment", grid_bars=len(grid_1h), n_symbols=len(aligned_symbols))
+    _assert_stage_rss_budget("funding_alignment", rss_budget_bytes, rss_reserve_bytes)
 
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
@@ -3963,8 +4248,13 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     signal_48h = horizon_log_return(log_close, 48)
     xs_ic = _xs_rank_ic(signal_48h, opens, forward_bars=48)
     trend_sleeve_diagnostic = _trend_sleeve_diagnostic(log_close, eligible, opens, bar_funding, execution_mask, request) if request.trend_sleeve else None
-    multi_feature_diagnostic = _multi_feature_diagnostic(root, start, end, grid_1h, aligned_symbols, execution_mask, opens, bar_funding) if request.multi_feature_book else None
-    committee_diagnostic = _committee_diagnostic(root, start, end, grid_1h, aligned_symbols, execution_mask, opens, bar_funding) if request.committee_book else None
+    # The two feature-axis opt-in diagnostics run AFTER the fold pool so they
+    # execute with the minute/mark frame caches evicted and the parent RSS
+    # minimized (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md
+    # §6); they only consume the 1h panels, opens, bar_funding and
+    # execution_mask, all still alive here.
+    multi_feature_diagnostic = None
+    committee_diagnostic = None
     regression = _date_clustered_ols(opens, signal_48h, forward_bars=48)
     horizon_diagnostics = {
         "realized_vol_48h_mean": float(
@@ -4136,6 +4426,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             grid_bars=len(minute_grid),
             n_symbols=len(execution_symbols),
         )
+        _assert_stage_rss_budget("pre_books", rss_budget_bytes, rss_reserve_bytes)
         # Each book worker now loads only its own windows' roster slices from
         # Parquet (window-keyed reads, page-cache backed) and its own mark
         # frames per process, so no full-period minute-frame preload is needed
@@ -4151,8 +4442,11 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         # released together (spec §3.1, ``memory_opt``).
         del w_fast, w_fast_execution, phase_fast
         del w_slow, w_slow_execution, phase_slow
-        del blend_1h, execution_mask, phase_blend, regime_scale
+        del blend_1h, phase_blend, regime_scale
         gc.collect()
+        _assert_stage_rss_budget("post_books", rss_budget_bytes, rss_reserve_bytes)
+        # execution_mask stays alive: the post-fold opt-in diagnostics consume
+        # it (a bool panel, ~20 MB).
         books = {"fast_reversal": book_report_fast, "slow_momentum": book_report_slow}
         blend_report = book_report_blend
     else:
@@ -4192,6 +4486,41 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         fold_funding_carry,
     )
     folds = tuple(fold_reports)
+    # Books and folds are done: free the ~6 GB full-period minute/mark frame
+    # caches so the opt-in diagnostics and final assembly run with a lean
+    # parent (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md §6).
+    _evict_minute_frame_caches()
+    _assert_stage_rss_budget("post_folds", rss_budget_bytes, rss_reserve_bytes)
+    if request.multi_feature_book or request.committee_book:
+        if request.multi_feature_book:
+            _diag_panel_columns = feature_registry_panel_columns(MHS_FEATURE_REGISTRY)
+        else:
+            _diag_panel_columns = feature_registry_panel_columns(
+                [
+                    spec for spec in MHS_FEATURE_REGISTRY
+                    if spec.name in set(MHS_COMMITTEE_MEMBERS)
+                ],
+            )
+        _diag_panels = _load_feature_panels(
+            root, start, end, grid_1h, aligned_symbols, columns=_diag_panel_columns,
+        )
+        _assert_stage_rss_budget("diagnostic_feature_panels", rss_budget_bytes, rss_reserve_bytes)
+        if request.committee_book:
+            committee_diagnostic = _committee_diagnostic(
+                root, start, end, grid_1h, aligned_symbols, execution_mask, opens,
+                bar_funding, panels=_diag_panels,
+                rss_budget_bytes=rss_budget_bytes,
+                rss_reserve_bytes=rss_reserve_bytes,
+            )
+        if request.multi_feature_book:
+            multi_feature_diagnostic = _multi_feature_diagnostic(
+                root, start, end, grid_1h, aligned_symbols, execution_mask, opens,
+                bar_funding, panels=_diag_panels,
+                rss_budget_bytes=rss_budget_bytes,
+                rss_reserve_bytes=rss_reserve_bytes,
+            )
+        del _diag_panels
+        gc.collect()
     deflated_sharpe_ratio = _deflated_sharpe_evidence(
         blend_report, folds, trials_attempted,
     )

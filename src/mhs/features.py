@@ -105,6 +105,24 @@ def source_coverage_audit(
     return _coverage_audit(source, mask)
 
 
+def feature_registry_panel_columns(specs: Sequence[FeatureSpec]) -> tuple[str, ...]:
+    """Deterministic first-seen union of the specs' required RAW panel columns.
+
+    Prunes ``_load_feature_panels`` to only the columns the given specs'
+    builders consume, halving-to-seventhing the resident panel footprint and
+    parquet I/O of the opt-in feature diagnostics. For the full registry this is
+    ``('close', 'taker_buy_quote', 'quote_vol', 'high', 'low', 'no_trades')`` --
+    ``'open'`` is deliberately absent because no builder uses it; for the 6
+    committee members it is ``('taker_buy_quote', 'quote_vol', 'close')``.
+    """
+    columns: list[str] = []
+    for spec in specs:
+        for column in spec.required_columns:
+            if column not in columns:
+                columns.append(column)
+    return tuple(columns)
+
+
 def build_feature_books(
     specs: Sequence[FeatureSpec],
     panels: Mapping[str, pd.DataFrame],

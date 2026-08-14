@@ -35,6 +35,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         trend_sleeve_gross=args.trend_sleeve_gross,
         multi_feature_book=args.multi_feature_book,
         committee_book=args.committee_book,
+        ram_guard=not args.no_ram_guard,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
         discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
         fold_safe_horizon_selection=fold_safe_horizon,
@@ -81,8 +82,20 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         type=int,
         default=None,
         help=(
-            "Optional process RSS budget in bytes; exceeding it at an execution "
-            "window boundary fails closed with DataIntegrityError instead of OOM"
+            "Optional process RSS budget in bytes; when unset the RAM guard "
+            "auto-derives 85% of total RAM (docs/specs/"
+            "mhs_ram_guard_and_diagnostic_memory_optimization.md). Exceeding the "
+            "budget at a stage/window boundary fails closed with "
+            "DataIntegrityError instead of OOM"
+        ),
+    )
+    mhs.add_argument(
+        "--no-ram-guard",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the automatic RAM guard (85% budget + system reserve checks); "
+            "--max-rss-bytes still applies when set"
         ),
     )
     mhs.add_argument("--no-log-run", action="store_true", default=False)

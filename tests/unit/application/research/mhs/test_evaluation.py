@@ -38,6 +38,7 @@ def _write_mhs_market(
     n_hours: int = 2700,
     include_btc: bool = False,
     funding_cross_sectional: bool = False,
+    with_minute: bool = True,
 ) -> pd.Timestamp:
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -65,20 +66,35 @@ def _write_mhs_market(
             {"timestamp": epoch, "open": prices, "high": prices * 1.001,
              "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours},
         ).to_parquet(hdir / f"{sym}.parquet")
-        mp = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, len(minute_idx))))
-        pd.DataFrame(
-            {"timestamp": minute_epoch, "open": mp, "high": mp * 1.0005,
-             "low": mp * 0.9995, "close": mp, "quote_vol": [1000.0] * len(minute_idx)},
-        ).to_parquet(mdir / f"{sym}.parquet")
+        if with_minute:
+            mp = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, len(minute_idx))))
+            pd.DataFrame(
+                {"timestamp": minute_epoch, "open": mp, "high": mp * 1.0005,
+                 "low": mp * 0.9995, "close": mp, "quote_vol": [1000.0] * len(minute_idx)},
+            ).to_parquet(mdir / f"{sym}.parquet")
+            mark = pd.Series(mp, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
+            pd.DataFrame(
+                {"timestamp": epoch, "open": mark, "high": mark, "low": mark, "close": mark, "datetime": hourly},
+            ).to_parquet(mkdir / f"{sym}.parquet")
         funding_rate = 0.00005 * (1.0 + 0.2 * i) if funding_cross_sectional else 0.00005
         pd.DataFrame(
             {"timestamp": epoch, "funding_rate": [funding_rate] * n_hours, "datetime": hourly},
         ).to_parquet(fdir / f"{sym}.parquet")
-        mark = pd.Series(mp, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
-        pd.DataFrame(
-            {"timestamp": epoch, "open": mark, "high": mark, "low": mark, "close": mark, "datetime": hourly},
-        ).to_parquet(mkdir / f"{sym}.parquet")
     return end
+
+
+@pytest.fixture
+def mhs_market_long(tmp_path, monkeypatch):
+    # B1 fixture: spans 2021-01-01 .. 2024-01-01 so the committee diagnostic's
+    # OOS block grid anchored at MHS_COMMITTEE_OOS_START (2023-01-01) has real
+    # test bars (docs/specs/mhs_committee_evaluation_integrity_fixes.md §1).
+    # Minute frames are skipped: the committee diagnostic runs on 1h panels
+    # only, and the execution/fold paths are monkeypatched in these tests.
+    root = tmp_path / "market"
+    end = _write_mhs_market(root, n_hours=26304, with_minute=False)
+    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    return root, end
 
 
 @pytest.fixture
@@ -2832,14 +2848,16 @@ def test_committee_default_off_bit_identical(mhs_market, monkeypatch) -> None:
         assert getattr(default_report, field) == getattr(explicit_off, field)
 
 
-def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market, monkeypatch) -> None:
+def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_REPORTS_WALK_FORWARD_WEALTH: with
     # committee_book=True the report's committee_diagnostic dict carries the
     # declared member names, the admitted/excluded split against the coverage
-    # gate, per-required-column source coverage audited before any fillna, and
-    # the purged walk-forward wealth metrics (net Sharpe, CAGR, MDD, logret) per
-    # measured cost tier -- every reported value finite or an explicit None.
-    root, end = mhs_market
+    # gate (feature- and source-gated, each with a reason), per-required-column
+    # source coverage audited before any fillna, and the purged walk-forward
+    # wealth metrics (net Sharpe, CAGR, MDD, logret) per measured cost tier --
+    # every reported value finite or an explicit None. The fixture spans past
+    # MHS_COMMITTEE_OOS_START so the block grid has real test bars (B1).
+    root, end = mhs_market_long
     monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
@@ -2862,7 +2880,15 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market, monkeypatc
     assert isinstance(admitted, list)
     assert isinstance(excluded, list)
     assert set(admitted) <= set(members)
-    assert set(excluded) <= set(members)
+    assert all(isinstance(e, dict) and e["name"] in members for e in excluded)
+    for entry in excluded:
+        assert entry["reason"] in ("feature_coverage", "source_coverage")
+        if entry["reason"] == "source_coverage":
+            assert entry["failing_source"] in (
+                "close", "open", "high", "low", "quote_vol",
+                "taker_buy_quote", "no_trades",
+            )
+            assert isinstance(entry["failing_year"], int)
     source_coverage = diag["source_coverage"]
     assert isinstance(source_coverage, dict)
     for per_source in source_coverage.values():
@@ -2873,9 +2899,481 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market, monkeypatc
                 assert 0.0 <= value <= 1.0
     wf = diag["walk_forward"]
     assert isinstance(wf["block_edges"], list)
-    assert wf["purge_hours"] == 336
+    assert wf["block_edges"][0] == ev.MHS_COMMITTEE_OOS_START.isoformat()
+    assert wf["purge_hours"] == 720
     assert wf["target_vol"] == pytest.approx(0.15)
+    assert isinstance(wf["skipped_blocks"], list)
     per_tier = wf["per_tier"]
+    assert set(per_tier) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    for fields in per_tier.values():
+        assert isinstance(fields["bars"], int)
+        assert fields["bars"] >= 0
+        for key in ("net_sharpe", "cagr", "mdd", "logret"):
+            value = fields[key]
+            assert value is None or np.isfinite(value)
+
+def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_COMMITTEE_DIAGNOSTIC_USES_OOS_START_NOT_RAW_START (B1): on a
+    # panel spanning 2021-2025 the committee diagnostic's walk-forward block
+    # grid is anchored at MHS_COMMITTEE_OOS_START (2023-01-01), never the
+    # diagnostic's own 2021 start; monkeypatching the constant to a different
+    # date shifts the first edge, proving the constant is actually read.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    first_edge = report.committee_diagnostic["walk_forward"]["block_edges"][0]
+    assert first_edge == ev.MHS_COMMITTEE_OOS_START.isoformat()
+    assert first_edge == "2023-01-01T00:00:00+00:00"
+
+    shifted = pd.Timestamp("2023-07-01", tz="UTC")
+    monkeypatch.setattr(ev, "MHS_COMMITTEE_OOS_START", shifted)
+    report2 = ev.run_mhs_horizon_diagnostic(request)
+    assert report2.status == "COMPLETE"
+    first_edge2 = report2.committee_diagnostic["walk_forward"]["block_edges"][0]
+    assert first_edge2 == shifted.isoformat()
+    assert first_edge2 == "2023-07-01T00:00:00+00:00"
+
+
+def test_search_trials_attempted_raised_and_deflation_more_conservative() -> None:
+    # SCENARIO_SEARCH_TRIALS_ATTEMPTED_RAISED_AND_DEFLATED_SHARPE_MORE_CONSERVATIVE
+    # (B4): MHS_SEARCH_TRIALS_ATTEMPTED is raised to 70 (prior 20 + ~50 committee
+    # configurations), and deflated_sharpe_ratio is strictly non-increasing in
+    # the trial count, so the raised constant can only make the top-level
+    # statistic more conservative, never more optimistic.
+    from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
+    from src.mhs.evaluation import deflated_sharpe_ratio
+
+    assert MHS_SEARCH_TRIALS_ATTEMPTED == 70
+    kwargs = {"observed_sr": 0.12, "trial_sr_variance": 0.0025, "n_obs": 1200, "skew": 0.0, "kurtosis": 3.0}
+    d70 = deflated_sharpe_ratio(n_trials=70, **kwargs)
+    d20 = deflated_sharpe_ratio(n_trials=20, **kwargs)
+    assert np.isfinite(d70)
+    assert np.isfinite(d20)
+    assert d70 <= d20
+
+
+def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_COMMITTEE_SOURCE_COVERAGE_GATES_ADMISSION (B3): a member whose
+    # required RAW source column has coverage below MHS_FEATURE_MIN_COVERAGE in
+    # any year is fail-closed excluded from admission -- the fixture's missing
+    # taker_buy_quote column (mirroring the funding 45/452-symbol gap) gates
+    # both flow_imb members BEFORE build_feature_books, and the excluded list
+    # carries the failing source/year. With a full-coverage taker_buy_quote the
+    # gate is a no-op and all 6 members are admitted (regression).
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    diag = report.committee_diagnostic
+    assert "flow_imb_720h" not in diag["admitted"]
+    assert "flow_imb_168h" not in diag["admitted"]
+    flow_excluded = {e["name"]: e for e in diag["excluded"] if e["name"] in ("flow_imb_720h", "flow_imb_168h")}
+    assert set(flow_excluded) == {"flow_imb_720h", "flow_imb_168h"}
+    for entry in flow_excluded.values():
+        assert entry["reason"] == "source_coverage"
+        assert entry["failing_source"] == "taker_buy_quote"
+        assert isinstance(entry["failing_year"], int)
+
+    # Regression: with a full-coverage taker_buy_quote the source gate admits
+    # every member -- B3 is fail-closed-only and non-disruptive to the shipped
+    # committee.
+    real_load = ev._load_feature_panels
+    def _full_coverage_panels(root_arg, start_arg, end_arg, grid_1h, aligned_symbols, columns=None):
+        panels = real_load(root_arg, start_arg, end_arg, grid_1h, aligned_symbols, columns=columns)
+        quote_vol = panels["quote_vol"]
+        panels["taker_buy_quote"] = quote_vol * 0.5
+        return panels
+    monkeypatch.setattr(ev, "_load_feature_panels", _full_coverage_panels)
+    report_full = ev.run_mhs_horizon_diagnostic(request)
+    assert report_full.status == "COMPLETE"
+    assert set(report_full.committee_diagnostic["admitted"]) == set(
+        report_full.committee_diagnostic["members"]
+    )
+
+
+def test_committee_diagnostic_reports_trials_and_warning(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_COMMITTEE_DIAGNOSTIC_REPORTS_TRIALS_AND_WARNING (B4/B5): the
+    # committee diagnostic reports trials_explored == 50 and a non-empty
+    # selection_bias_warning naming the configuration count, and tags its
+    # evaluation protocol as purged walk-forward OOS (B5).
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    diag = report.committee_diagnostic
+    assert diag["trials_explored"] == 50
+    assert isinstance(diag["selection_bias_warning"], str)
+    assert diag["selection_bias_warning"]
+    assert "~50" in diag["selection_bias_warning"]
+    assert diag["evaluation_protocol"] == "purged_walk_forward_oos"
+
+
+def test_evaluation_protocol_field_distinguishes_in_sample_from_oos(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_EVALUATION_PROTOCOL_FIELD_DISTINGUISHES_IN_SAMPLE_FROM_OOS (B5):
+    # the two opt-in diagnostics carry distinct protocol tags on every call, so
+    # a reader can never mistake the in-sample full-period net Sharpe for the
+    # purged walk-forward OOS numbers.
+    from src.mhs.features import MHS_FEATURE_REGISTRY
+
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True, multi_feature_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    assert report.committee_diagnostic["evaluation_protocol"] == "purged_walk_forward_oos"
+    assert report.multi_feature_diagnostic["evaluation_protocol"] == "in_sample_full_period"
+    assert report.multi_feature_diagnostic["trials_explored"] == len(MHS_FEATURE_REGISTRY)
+    assert "selection_bias_warning" not in report.multi_feature_diagnostic
+
+
+def test_committee_diagnostic_reports_skipped_blocks(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_COMMITTEE_DIAGNOSTIC_REPORTS_SKIPPED_BLOCKS (B6): the committee
+    # diagnostic reports skipped_blocks as a list of {block_start, reason}
+    # entries computed independently of purged_walk_forward's internal skip
+    # loop. On a 2021-2025 panel anchored at OOS_START 2023-01-01 every 6-month
+    # block has both sufficient train and at least one test bar, so the list is
+    # empty (report-only, never raises).
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    skipped = report.committee_diagnostic["walk_forward"]["skipped_blocks"]
+    assert isinstance(skipped, list)
+    for entry in skipped:
+        assert set(entry) == {"block_start", "reason"}
+        assert entry["reason"] in ("insufficient_train", "no_test_bars")
+    assert skipped == []
+
+
+def test_committee_books_regression_unchanged_by_b1_b2(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_COMMITTEE_BOOKS_REGRESSION_UNCHANGED_BY_B1_B2: enabling
+    # committee_book must not perturb any pre-existing non-committee report
+    # field (books, blend, folds, research_go, trend_sleeve_diagnostic,
+    # multi_feature_diagnostic) -- only committee_diagnostic's own walk-forward
+    # numbers change by design (B1/B2).
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    base = {
+        "start": str(_START), "end": str(end), "data_root": str(root),
+        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_universe_size": 8,
+    }
+    off_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    on_report = ev.run_mhs_horizon_diagnostic(
+        MhsDiagnosticRequest(**base, committee_book=True),
+    )
+    assert off_report.status == "COMPLETE"
+    assert on_report.status == "COMPLETE"
+    for field in (
+        "books", "blend", "blend_target_gross", "research_go", "folds",
+        "trend_sleeve_diagnostic", "multi_feature_diagnostic",
+    ):
+        assert getattr(on_report, field) == getattr(off_report, field)
+
+def test_ram_guard_resolve_budget(monkeypatch) -> None:
+    # SCENARIO_MHS_RAM_GUARD_RESOLVE_BUDGET: _resolve_ram_budget maps the
+    # request into (budget_bytes, reserve_bytes). ram_guard=False disables the
+    # guard; ram_guard=True auto-derives 85% of total RAM and the reserve floor
+    # max(5% of total, 256 MiB); an explicit max_rss_bytes overrides the budget
+    # fraction; psutil failure / non-positive total yields (None, None).
+    from src.mhs.contracts import (
+        MHS_RAM_BUDGET_FRACTION,
+        MHS_RAM_RESERVE_FLOOR_BYTES,
+        MHS_RAM_RESERVE_FRACTION,
+    )
+
+    class _FakeMem:
+        total: int
+        available: int
+        def __init__(self, total: int, available: int) -> None:
+            self.total = total
+            self.available = available
+
+    assert ev._resolve_ram_budget(None, False) == (None, None)
+
+    monkeypatch.setattr(ev.psutil, "virtual_memory", lambda: _FakeMem(8 * 2**30, 4 * 2**30))
+    budget, reserve = ev._resolve_ram_budget(None, True)
+    assert budget == int(8 * 2**30 * MHS_RAM_BUDGET_FRACTION)
+    assert reserve == max(int(8 * 2**30 * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)
+
+    explicit, reserve2 = ev._resolve_ram_budget(123456789, True)
+    assert explicit == 123456789
+    assert reserve2 == reserve
+
+    monkeypatch.setattr(ev.psutil, "virtual_memory", lambda: _FakeMem(0, 0))
+    assert ev._resolve_ram_budget(None, True) == (None, None)
+
+    def _boom() -> _FakeMem:
+        raise RuntimeError("psutil unavailable")
+    monkeypatch.setattr(ev.psutil, "virtual_memory", _boom)
+    assert ev._resolve_ram_budget(None, True) == (None, None)
+
+
+def test_ram_guard_stage_barrier_fails_closed(monkeypatch) -> None:
+    # SCENARIO_MHS_RAM_GUARD_STAGE_BARRIER_FAIL_CLOSED: _assert_stage_rss_budget
+    # fails closed deterministically -- process RSS above the budget raises a
+    # DataIntegrityError naming the stage; system available memory below the
+    # reserve raises; (None, None) is a no-op.
+    with pytest.raises(ev.DataIntegrityError, match="RAM budget exceeded at stage 'test_stage'"):
+        ev._assert_stage_rss_budget("test_stage", 1, None)
+
+    class _FakeMem:
+        total: int
+        available: int
+        def __init__(self, total: int, available: int) -> None:
+            self.total = total
+            self.available = available
+
+    monkeypatch.setattr(ev.psutil, "virtual_memory", lambda: _FakeMem(8 * 2**30, 100))
+    with pytest.raises(ev.DataIntegrityError, match="reserve breached at stage 'test_reserve'"):
+        ev._assert_stage_rss_budget("test_reserve", None, 4096)
+
+    ev._assert_stage_rss_budget("noop", None, None)
+
+
+def test_ram_guard_request_field() -> None:
+    # SCENARIO_MHS_RAM_GUARD_REQUEST_FIELD: ram_guard defaults True on the
+    # request; a non-bool value fails closed; max_rss_bytes stays None (auto
+    # resolution happens at run time).
+    assert MhsDiagnosticRequest().ram_guard is True
+    assert MhsDiagnosticRequest().max_rss_bytes is None
+    with pytest.raises(ValueError, match="ram_guard"):
+        MhsDiagnosticRequest(ram_guard="yes")
+    assert MhsDiagnosticRequest(ram_guard=False).ram_guard is False
+
+
+def test_pipeline_ram_guard_fails_closed_before_oom(mhs_market_long) -> None:
+    # SCENARIO_MHS_PIPELINE_RAM_GUARD_FAILS_CLOSED_BEFORE_OOM: a tiny explicit
+    # budget makes run_mhs_horizon_diagnostic fail closed with DataIntegrityError
+    # at the base_1h_panel stage boundary instead of letting the OS OOM killer
+    # terminate the process.
+    root, end = mhs_market_long
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, max_rss_bytes=1,
+    )
+    with pytest.raises(ev.DataIntegrityError, match="RAM budget exceeded at stage 'base_1h_panel'"):
+        ev.run_mhs_horizon_diagnostic(request)
+
+
+def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTICS_RUN_AFTER_FOLDS_AND_EVICT_CACHES: the opt-in
+    # diagnostics run only after the fold pool returned, the minute/mark frame
+    # caches are evicted by the time the run completes, and the committee
+    # diagnostic is still populated (regression against the re-ordering).
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    order: list[str] = []
+    real_post = ev._run_post_book_concurrently
+    real_committee = ev._committee_diagnostic
+
+    def _spy_post(*args, **kwargs):
+        order.append("post_folds")
+        return real_post(*args, **kwargs)
+
+    def _spy_committee(*args, **kwargs):
+        order.append("committee")
+        return real_committee(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+    monkeypatch.setattr(ev, "_committee_diagnostic", _spy_committee)
+
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    assert order == ["post_folds", "committee"]
+    assert isinstance(report.committee_diagnostic, dict)
+    assert report.committee_diagnostic["evaluation_protocol"] == "purged_walk_forward_oos"
+
+    # The full-period minute/mark frame caches were evicted during the run.
+    assert ev._get_symbol_minute_frame.cache_info().currsize == 0
+    assert ev._get_symbol_mark_frame.cache_info().currsize == 0
+
+
+def test_multi_feature_streaming_combined_bit_identical() -> None:
+    # SCENARIO_MHS_MULTI_FEATURE_STREAMING_BIT_IDENTICAL: the streaming
+    # multi-feature diagnostic produces combined.book_mean_gross,
+    # combined.net_sharpe_per_tier and feature_book_effective_breadth EXACTLY
+    # equal to a batch reference built from the same panels with the existing
+    # primitives (build_feature_books + mhs_ledger_pnl + equal_risk_combination).
+    from src.mhs.execution import mhs_ledger_pnl
+    from src.mhs.features import (
+        MHS_FEATURE_REGISTRY,
+        build_feature_books,
+        equal_risk_combination,
+        feature_coverage_audit,
+    )
+
+    grid = pd.date_range("2021-01-01", periods=2400, freq="1h", tz="UTC")
+    symbols = [f"S{i:02d}" for i in range(10)]
+    rng = np.random.default_rng(9)
+    close = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rng.normal(0.0, 1e-4, (len(grid), len(symbols))), axis=0)),
+        index=grid, columns=symbols,
+    )
+    quote_vol = pd.DataFrame(rng.uniform(900.0, 1100.0, (len(grid), len(symbols))), index=grid, columns=symbols)
+    taker_buy_quote = quote_vol * rng.uniform(0.4, 0.6, (len(grid), len(symbols)))
+    panels = {
+        "close": close,
+        "high": close * 1.001,
+        "low": close * 0.999,
+        "quote_vol": quote_vol,
+        "taker_buy_quote": taker_buy_quote,
+        "no_trades": pd.DataFrame(1000, index=grid, columns=symbols),
+    }
+    mask = pd.DataFrame(True, index=grid, columns=symbols)
+    decision_grid = pd.date_range(grid[0], grid[-1], freq="24h", tz="UTC")
+
+    diag = ev._multi_feature_diagnostic(
+        "ignored", _START, grid[-1], grid, symbols, mask, close, quote_vol * 0.0,
+        panels=panels,
+    )
+
+    # Batch reference using the existing primitives.
+    books = build_feature_books(MHS_FEATURE_REGISTRY, panels, mask, decision_grid, min_symbols=8)
+    ref_admitted: dict[str, dict] = {}
+    ref_excluded: dict[str, dict] = {}
+    for spec in MHS_FEATURE_REGISTRY:
+        feature = spec.builder(panels)
+        coverage = feature_coverage_audit(feature, mask)
+        failing = [year for year, cov in coverage.items() if cov < spec.min_coverage]
+        if failing:
+            ref_excluded[spec.name] = {"failing_year": min(failing)}
+            continue
+        if spec.name not in books:
+            continue
+        base_net, _ = mhs_ledger_pnl(
+            books[spec.name], close, quote_vol * 0.0,
+            ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+        )
+        ref_admitted[spec.name] = {"_net": base_net}
+    net_panel = {name: fields["_net"] for name, fields in ref_admitted.items()}
+    combinable = {}
+    for name, net in net_panel.items():
+        cleaned = net.dropna()
+        sd = float(cleaned.std(ddof=1)) if len(cleaned) > 1 else 0.0
+        if np.isfinite(sd) and sd > 0:
+            combinable[name] = net
+    combined = None
+    ref_per_tier: dict[str, float | None] = {}
+    if combinable:
+        combined = equal_risk_combination(
+            {name: books[name] for name in combinable}, combinable,
+        )
+        for tier, cost_bps in ev.MEASURED_EXECUTION_COST_TIERS_BPS.items():
+            per_feature = {
+                name: mhs_ledger_pnl(books[name], close, quote_vol * 0.0, cost_bps)[0]
+                for name in combinable
+            }
+            combined_net = (
+                sum(per_feature[name] / combinable[name].std(ddof=1) for name in combinable)
+                / len(combinable)
+            )
+            ref_per_tier[tier] = ev._annualized_1h_sharpe(combined_net)
+    else:
+        ref_per_tier = dict.fromkeys(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+
+    ref_gross: float | None = None
+    if combined is not None:
+        ref_gross = float(
+            (
+                combined
+                * len(combinable)
+                / sum(1.0 / combinable[name].std(ddof=1) for name in combinable)
+            ).abs().sum(axis=1).mean()
+        )
+    ref_breadth: dict[str, float] | None = None
+    if len(net_panel) >= 2:
+        n_eff, mean_corr = ev.effective_breadth(pd.DataFrame(net_panel).fillna(0.0))
+        ref_breadth = {"n_eff": n_eff, "mean_corr": mean_corr}
+
+    assert set(diag["admitted"]) == set(ref_admitted)
+    assert set(diag["excluded"]) == set(ref_excluded)
+    assert diag["combined"]["book_mean_gross"] == ref_gross
+    for tier in ev.MEASURED_EXECUTION_COST_TIERS_BPS:
+        got = diag["combined"]["net_sharpe_per_tier"][tier]
+        want = ref_per_tier[tier]
+        assert (got is None and want is None) or got == want
+    if ref_breadth is not None:
+        assert diag["feature_book_effective_breadth"] == ref_breadth
+    else:
+        assert diag["feature_book_effective_breadth"] is None
+
+
+def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_STREAMING_REGRESSION: the streaming committee
+    # rewrite is behavior-transparent -- the pre-existing walk-forward wealth
+    # scenario (block edges anchored at OOS_START, purge 720, empty skipped
+    # blocks, finite per-tier fields) still holds after the per-member book
+    # streaming + multi-tier ledger.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    diag = report.committee_diagnostic
+    assert diag["walk_forward"]["block_edges"][0] == ev.MHS_COMMITTEE_OOS_START.isoformat()
+    assert diag["walk_forward"]["purge_hours"] == 720
+    assert diag["walk_forward"]["skipped_blocks"] == []
+    per_tier = diag["walk_forward"]["per_tier"]
     assert set(per_tier) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
     for fields in per_tier.values():
         assert isinstance(fields["bars"], int)
