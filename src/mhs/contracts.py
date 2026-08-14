@@ -210,9 +210,21 @@ MHS_COMMITTEE_TARGET_VOL: float = 0.15
 
 # Purge gap in hours between a walk-forward train window end and its test block
 # start (docs/specs/mhs_committee_design_and_wealth_objective.md §0). Covers the
-# longest committee feature lookback (720h) so no overlapping-label information
-# leaks across the boundary.
-MHS_COMMITTEE_PURGE_HOURS: int = 336
+# longest committee feature lookback (720h, matching xs_mom_720h/flow_imb_720h;
+# xs_idio_mom_336h reaches ~672h effective) so no overlapping-label information
+# leaks across the boundary. Raised from 336 to 720 to match the longest member
+# lookback (docs/specs/mhs_committee_evaluation_integrity_fixes.md §2).
+MHS_COMMITTEE_PURGE_HOURS: int = 720
+
+# First bar at which a committee walk-forward test block may be scored as OOS
+# (docs/specs/mhs_committee_design_and_wealth_objective.md, sandbox OOS_START
+# validated at 2023-01-01). The committee diagnostic anchors its 6-month block
+# grid at max(diagnostic_start, MHS_COMMITTEE_OOS_START) so a purged
+# walk-forward can never smuggle mid-2021 blocks in as pseudo-OOS via
+# min_train_bars (~83 days); a diagnostic run whose own start is already later
+# is unaffected (max() semantics, docs/specs/mhs_committee_evaluation_integrity_fixes.md
+# §1). A revision of this constant is a contract revision.
+MHS_COMMITTEE_OOS_START: pd.Timestamp = pd.Timestamp("2023-01-01", tz="UTC")
 
 PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
     "fast_reversal": BookSpec(
@@ -227,10 +239,26 @@ PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
 # has actually accumulated (docs/specs/mhs_strategy_foundation_reset.md RC-6).
 # The 20 iterations of horizon-grid/flag/overlay search all ran on the SAME dev
 # window, so they are one deliberate multi-trial search and the multiple-testing
-# deflation must account for them; ``trials_attempted = 1`` was the un-audited
-# placeholder. A revision of this constant is a contract revision, never an
-# inline edit at a call site.
-MHS_SEARCH_TRIALS_ATTEMPTED: int = 20
+# deflation must account for them. The committee design added ~50 more
+# configurations compared on the same panel (31 candidate features + 9 combiner
+# variants + 10 committee-size-ladder steps,
+# docs/specs/mhs_committee_design_and_wealth_objective.md §1-§3), so the total
+# is raised to 70 (docs/specs/mhs_committee_evaluation_integrity_fixes.md §4).
+# A revision of this constant is a contract revision, never an inline edit at a
+# call site.
+MHS_SEARCH_TRIALS_ATTEMPTED: int = 70
+
+# Automatic RAM-guard tuning (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md
+# §2). When ``MhsDiagnosticRequest.ram_guard`` is True (default) and
+# ``max_rss_bytes`` is unset, the parent-stage budget is 85% of
+# ``psutil.virtual_memory().total`` and the system available-memory reserve floor
+# is ``max(5% of total, MHS_RAM_RESERVE_FLOOR_BYTES)``. The guard is a pure
+# fail-closed safety net -- it is observational (exception path only) and never
+# alters any computed value. A revision of these constants is a contract
+# revision, never an inline edit at a call site.
+MHS_RAM_BUDGET_FRACTION: float = 0.85
+MHS_RAM_RESERVE_FRACTION: float = 0.05
+MHS_RAM_RESERVE_FLOOR_BYTES: int = 256 * 2**20
 
 # P0-D: the two Research-GO policy gates named in ``_mhs_research_go``'s
 # contract are not registered in source. A value of None means "unregistered"
