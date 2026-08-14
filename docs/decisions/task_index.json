@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_DIRECTIONAL_TREND_SLEEVE",
+      "date": "2026-08-14",
+      "adr_id": "ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE",
+      "domain": "mhs",
+      "title": "MHS 가산 시계열 추세 슬리브 추가",
+      "why": "dollar-neutral unit-gross 아키텍처가 순방향 노출을 구조적으로 보유할 수 없어 2022류 크래시 레짐에서 momentum 전 호라이즌이 동반 실패(discovery admission 실패의 근본 원인, docs/results/mhs-res.md §3.1-§3.2). crash_regime_tilt_weights는 unit-gross 내부 convex blend라 알파 북을 잠식해 이미 기각됨. 사용자가 futures 숏 활용도 재검토를 요청 -- 실측 결과 숏은 이미 100% 사용 중(rank_weight_book이 정확한 dollar-neutral 강제)이나, 방향성 시계열 추세 자체는 한 번도 가산 슬리브로 검증된 적 없었음.",
+      "resolution": "src/mhs/trend_sleeve.py 신규: market_basket_log_price(인과적 eligible 등가중 시장 지수)/time_series_trend_position(6-호라이즌 vol-정규화 앙상블, [-1,1] 클립)/trend_sleeve_weights(자체 gross 예산, 기존 북과 가산 결합, dollar-neutral 강제하지 않음). MhsDiagnosticRequest에 trend_sleeve/trend_sleeve_gross opt-in(기본 0.0, bit-identical) 배선, 리포트에 trend_sleeve_diagnostic 필드 추가. 실측(scratch 샌드박스, 인과성 교정 후): 슬리브 단독 net Sharpe 3개 비용 tier 전부 양(+0.091/+0.082/+0.070), 2022년 +0.22, XS 북과 상관 0.133, 턴오버 39x/yr(프로덕션 slow book 42x/yr 동급).",
+      "impact": "자본 배분 무변경(기본 gross_budget=0.0). 프로덕션 실측(--trend-sleeve --trend-sleeve-gross 검증) 및 사용자 승인 후 자본 배분 결정 별도 진행."
+    },
+    {
       "task_id": "TASK_MHS_DISCOVERY_ADMISSION_REGIME_SCALE_PARITY",
       "date": "2026-08-13",
       "adr_id": "ADR_20260813_MHS_DISCOVERY_ADMISSION_REGIME_SCALE_PARITY",
@@ -989,16 +999,6 @@
       "why": "후보 선정과 백테스트를 여러 명령으로 수행해야 하고 시간이 지나면 전략 효과가 변하므로 재현 가능한 자동 갱신 파이프라인이 필요함",
       "resolution": "후보군 도출·신뢰성/스트레스 백테스트·분기별 리밸런싱·append-only 원장·현재 프로필 포인터를 하나의 paper CLI 흐름으로 연결하고 공통 데이터 종료시각을 as_of로 제한함",
       "impact": "분기별 최신 전략 선택과 CASH 폴백을 자동화하고 과거 결정의 멱등성·인과성·추적성을 보장함"
-    },
-    {
-      "task_id": "TASK_APPLICATION_CLI_REORGANIZATION",
-      "date": "2026-08-01",
-      "adr_id": "ADR_20260801_APPLICATION_CLI_REORGANIZATION",
-      "domain": "architecture",
-      "title": "Feature-owned application and CLI package layout",
-      "why": "Flat application modules and one monolithic research CLI command module made feature ownership unclear and increased the cost and conflict risk of future additions.",
-      "resolution": "Moved application implementations under data and research feature packages, split research CLI registration into feature-owned leaf modules, retained flat application and legacy CLI facades, and updated compatibility tests and code-map coverage.",
-      "impact": "Existing typed application imports and documented CLI invocations remain compatible; future features can add one application package and one CLI leaf without editing an unrelated monolith."
     }
   ]
 }

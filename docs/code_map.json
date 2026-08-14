@@ -673,5 +673,9 @@
   "src/mhs/funding.py": {
     "architecture": "docs/results/mhs-res.md",
     "testing": "tests/unit/mhs/test_funding.py"
+  },
+  "src/mhs/trend_sleeve.py": {
+    "architecture": "docs/specs/mhs_directional_trend_sleeve.md",
+    "testing": "tests/unit/mhs/test_trend_sleeve.py"
   }
 }
