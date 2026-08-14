@@ -33,6 +33,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         discovery_gate=args.discovery_gate,
         trend_sleeve=args.trend_sleeve,
         trend_sleeve_gross=args.trend_sleeve_gross,
+        multi_feature_book=args.multi_feature_book,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
         discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
         fold_safe_horizon_selection=fold_safe_horizon,
@@ -138,6 +139,20 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Gross budget allocated to the directional trend sleeve, in "
             "[0.0, 1.0]; a risk-budget policy value, never a fitted parameter"
+        ),
+    )
+    mhs.add_argument(
+        "--multi-feature-book",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: build the feature-axis registry into dollar-neutral rank "
+            "books on the 24h decision grid with a per-year coverage gate "
+            "(fail-closed exclusion) and equal-risk combination; report each "
+            "admitted feature's coverage and regime-split stability plus the "
+            "combined net Sharpe per cost tier and feature-book breadth "
+            "(diagnostic-only, never an admission input -- "
+            "docs/specs/mhs_multi_feature_alpha_architecture.md §2 Stage 1)"
         ),
     )
     mhs.add_argument(
