@@ -8,7 +8,7 @@ GO, OOS, capital, or capacity claims.
 
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -18,7 +18,11 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import ExecutionSpec
 from src.research.baseline.backtest import _align_funding_rates
-from src.research.technical_experts.cross_sectional import XsCompositeSpec, run_xs_composite_ledger
+from src.research.technical_experts.cross_sectional import (
+    XsCompositeSpec,
+    run_xs_composite_ledger,
+    run_xs_composite_ledger_multi_tier,
+)
 
 # Conservative extra settlement/slippage penalty applied to a stress-ledger
 # (OHLCV_IMMEDIATE_TAKER) UNKNOWN_TERMINATION forced exit (spec §2.17/§7.5).
@@ -1140,6 +1144,47 @@ def mhs_ledger_pnl(
     equity, turnover = run_xs_composite_ledger(weights, opens, bar_funding, spec)
     net = equity.pct_change().dropna()
     return net, turnover
+
+
+def mhs_ledger_pnl_multi_tier(
+    weights: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    one_way_bps_list: Sequence[float],
+    execution_delay_bars: int = 1,
+    gap_carry: bool = True,
+) -> list[tuple[pd.Series, pd.Series]]:
+    """Single-pass multi-tier pre-screen proxy sharing the ledger arrays.
+
+    Mirrors ``mhs_ledger_pnl`` exactly for each entry in ``one_way_bps_list``:
+    the spec is built with ``fee_rate = slippage_rate = bps / 2.0 * 1e-4`` and
+    the frozen round-trip rate ``half + half`` (IEEE doubling is exact, so it
+    equals the single call's ``round_trip_cost_rate()`` bit-for-bit). The shared
+    array construction means element ``i``'s ``(net, turnover)`` is bit-identical
+    to ``mhs_ledger_pnl(weights, opens, bar_funding, bps_i)`` for the same
+    index. Like ``mhs_ledger_pnl`` this is a pinned pre-screen proxy -- never
+    Research GO, OOS, capital metrics, or capacity claims. Raises ``ValueError``
+    on an empty list or any negative bps.
+    """
+    if not one_way_bps_list:
+        raise ValueError("one_way_bps_list must not be empty")
+    for bps in one_way_bps_list:
+        if bps < 0.0:
+            raise ValueError(f"one_way_bps must be >= 0, got {bps}")
+
+    base_spec = XsCompositeSpec(
+        halflife_bars=0,
+        no_trade_band=0.0,
+        execution_delay_bars=execution_delay_bars,
+        fee_rate=0.0,
+        slippage_rate=0.0,
+        gap_carry=gap_carry,
+    )
+    cost_rates = [bps / 2.0 * 1e-4 + bps / 2.0 * 1e-4 for bps in one_way_bps_list]
+    results = run_xs_composite_ledger_multi_tier(
+        weights, opens, bar_funding, base_spec, cost_rates,
+    )
+    return [(equity.pct_change().dropna(), turnover) for equity, turnover in results]
 
 class _BoundExecutionReplayAccumulator:
     """Private streaming accumulator for one execution bound.

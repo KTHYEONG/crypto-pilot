@@ -21,7 +21,7 @@
 | 26 | 2026-08-13 | discovery-gate only | `--discovery-gate --discovery-gate-regime-scaled-net-t` | single_horizon (default, non-production) | §3.2 only | same caveat as 25; `run_elapsed_seconds=501.3 status=COMPLETE` |
 | 27 | 2026-08-14 | trend sleeve production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --trend-sleeve --trend-sleeve-gross 0.3 --output-tier full` | horizon_ensemble | §7 (books/folds/research_go bit-identical to 24) | ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE; `docs/specs/mhs_directional_trend_sleeve.md` |
 | 28 | 2026-08-14 | multi-feature diagnostic production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --multi-feature-book --output-tier full` | horizon_ensemble | §8 (books/folds/research_go bit-identical to 24) | ADR_20260814_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE; `docs/specs/mhs_multi_feature_alpha_architecture.md`; sandbox: `scratch/test_breadth_and_feature_axis.py`, `test_feature_books_net_of_cost.py`, `test_feature_oos_persistence.py` |
-| 29 | 2026-08-14 | committee (k=6) production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --committee-book --output-tier full` | horizon_ensemble | §9 (books/folds/research_go bit-identical to 24) | ADR_20260814_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE; `docs/specs/mhs_committee_design_and_wealth_objective.md`; sandbox: `scratch/build_committee_panel.py`, `analyze_committee_design_v2.py`, `analyze_committee_final.py` |
+| 29 | 2026-08-14 | committee (k=6) production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --committee-book --output-tier full` | horizon_ensemble | §9 (books/folds/research_go bit-identical to 24) | ADR_20260814_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE; `docs/specs/mhs_committee_design_and_wealth_objective.md`; sandbox: `scratch/build_committee_panel.py`, `analyze_committee_final.py` |
 
 > ⚠️ `eligible_symbols` drift: 24차 445 vs 23차 446(Parquet 재수집). 동일 데이터 A/B는 bit-identical(§0). 23차 대비 수치차는 코드 변경 아님, 데이터 drift.
 
@@ -189,8 +189,13 @@ verdict: xs_rank_ic 유의 음수(역행), date_clustered t=−1.32 유의하지
 | slow_momentum autocorr | 0.5360654316354135 |
 | blend autocorr | 0.5359443875092911 |
 | fast_reversal autocorr | −0.840177372029221 |
-| deflated_sharpe | 0.546963269158657 |
+| deflated_sharpe | 0.546963269158657 (24차, `MHS_SEARCH_TRIALS_ATTEMPTED=20`) |
 | 23차 대비 diff cause | `eligible_symbols 446→445` 데이터 drift, 코드 무관(§0 A/B로 증명) |
+
+> 30차 무결성 수정(B4, `docs/specs/mhs_committee_evaluation_integrity_fixes.md`):
+> `MHS_SEARCH_TRIALS_ATTEMPTED` 20→70으로 상향(위원회 설계 탐색 ~50 설정 반영). 이 상수는
+> top-level `deflated_sharpe_ratio` 계산에 직접 쓰이므로 24차 고정 회귀값은 변경 예정(더 보수적,
+> 단조 비증가) — `--multi-feature-book` 프로덕션 재실행으로 최종 확정 후 이 표 갱신 필요(스펙 §8.3).
 
 capital_conclusion: momentum(168h ensemble)만 유일 생존 후보(5yr CAGR +8%, fold2 +48%). fast_reversal/funding_carry 자본 근거 없음(5yr 전체). Research-GO 미달. `PHASE_1_BOOK_SPECS`/`PHASE_1_BOOK_BLEND_WEIGHTS` 무변경.
 
@@ -403,10 +408,24 @@ verdict = LEARNED_COMBINER_NOT_JUSTIFIED (모든 학습기반 조합기가 경�
 | :--- | :--- |
 | admitted | 6/6(전원), excluded=[] |
 | source_coverage(전원) | 5년 전 구간 1.0(funding 미사용 위원회라 §9.4 결함 비해당) |
-| walk_forward.block_edges 시작 | 2021-01-01 |
-| walk_forward.bars(OOS 집계) | 39,480 / 43,824(90%) |
-| issue_flag | WALK_FORWARD_START_OPTIMISTIC — 블록 생성이 `_committee_block_edges(start=2021-01-01, end)`을 사용해 sandbox 설계(OOS start=2023-01-01, min_train_bars=2000)보다 이른 시점부터 테스트에 포함됨. `purged_walk_forward` 자체(purge/train-only scaling)는 계약대로 정상 — 호출부의 블록 시작점 선택만 낙관적. 보수적 신뢰 상한은 §9.2의 sandbox base=+1.379(OOS start=2023) |
+| walk_forward.block_edges 시작 | 2023-01-01 (`MHS_COMMITTEE_OOS_START`, B1 수정 후 — 스펙 §1) |
+| walk_forward.bars(OOS 집계) | 26,304 (B1 수정 후 6개월 블록 기준, 재실측 필요) |
+| issue_flag | WALK_FORWARD_START_OPTIMISTIC — **30차 무결성 수정(B1)으로 해소**. `_committee_diagnostic`이 블록 그리드를 `committee_block_edges_from(start, MHS_COMMITTEE_OOS_START, end)`으로 앵커링(`MHS_COMMITTEE_OOS_START=2023-01-01`, `docs/specs/mhs_committee_evaluation_integrity_fixes.md` §1). 기존 §9.2 sandbox base=+1.379(OOS start=2023) 기준이 이제 코드 기본값. 최종 실측 수치는 `--committee-book` 프로덕션 재실행으로 확정(스펙 §8.2) |
 | books/folds/research_go(§1/§2) | bit-identical to 24차 |
+| B2 purge | `MHS_COMMITTEE_PURGE_HOURS` 336→720(위원회 최장 룩백 720h와 일치, 스펙 §2) |
+
+### 9.7 RAM 가드 + 진단 메모리 최적화 (구현 검증, 2026-08-14)
+
+| key | value |
+| :--- | :--- |
+| spec | `docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md` (구현 완료) |
+| auto RAM budget | `MHS_RAM_BUDGET_FRACTION=0.85` × `psutil.virtual_memory().total` (WSL 32 GB → ~27.2 GB), reserve = `max(5%, 256 MiB)` |
+| guard scope | `--committee-book`/`--multi-feature-book` 파이프라인 스테이지 배리어 fail-closed (exception, 계산 값 무변경) |
+| diagnostics 재배치 | 폴드 풀 join 후 + 미닛/마크 풀피리어드 LRU 캐시 퇴거 후 실행 (~6 GB 릴리스) |
+| 패널 컬럼 프루닝 | committee: `(taker_buy_quote, quote_vol, close)` 3컬럼, multi_feature: 6컬럼, `open` 미로드 |
+| bit-identity | 멀티티어 ledger per-tier bit-identical (`test_multi_tier_bit_identical_to_per_tier_calls`); streaming diagnostic 참조 비교 ULP 0 (`test_multi_feature_streaming_combined_bit_identical`) |
+| 검증 | `uv run pytest tests/unit/mhs tests/unit/application/research/mhs tests/integration/mhs` 전체 통과; `lean_check.py --spec ...` PASS (Lint/Type/Tests) |
+| production 재실측 | 미착수 — `--committee-book --multi-feature-book` 재실행으로 `peak_rss` 확정 예정 (스펙 §11-4) |
 
 ## 10. 전략 요약 (분류 데이터)
 
@@ -431,3 +450,4 @@ verdict = LEARNED_COMBINER_NOT_JUSTIFIED (모든 학습기반 조합기가 경�
 | `pnl_vol_target` 기본값 전환 여부 (`mhs_execution_friction_and_exposure_layers.md` §6.1) | 미착수 |
 | `fast_book_mode`/`funding_carry` 자본 배분 최종 판정 | 미착수, 사용자 승인 필요 |
 | trend sleeve 자본 배분(`gross_budget`) 확정 | 미착수, §7 실측 확장 후 사용자 승인 필요 |
+| RAM 가드 프로덕션 재실측 | `--committee-book --multi-feature-book` 재실행으로 `peak_rss` 확정 (스펙 §11-4, 구현 완료) |

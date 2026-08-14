@@ -16,6 +16,7 @@ from src.mhs.execution import (
     bar_funding_panel,
     laddered_fill_schedule,
     mhs_ledger_pnl,
+    mhs_ledger_pnl_multi_tier,
     notional_weighted_shortfall_bps,
     passive_fill_shortfall_bps,
     replay_execution_window_pair,
@@ -430,6 +431,58 @@ class TestMhsLedgerPnl:
         net, turnover = mhs_ledger_pnl(weights, opens, funding, one_way_bps=8.0)
         assert bool(np.isfinite(net.to_numpy()).all())
         assert turnover.index.equals(index)
+
+    def test_multi_tier_bit_identical_to_per_tier_calls(self) -> None:
+        # SCENARIO_MHS_LEDGER_MULTI_TIER_BIT_IDENTICAL: the single-pass shared-array
+        # multi-tier ledger must equal per-tier mhs_ledger_pnl calls exactly (net
+        # and turnover, check_exact=True) for the same one-way bps list -- the
+        # property that makes the committee/multi-feature streaming rewrites
+        # bit-identical.
+        rng = np.random.default_rng(42)
+        index = pd.date_range("2021-01-01", periods=2400, freq="1h", tz="UTC")
+        symbols = [f"S{i:03d}" for i in range(8)]
+        opens = pd.DataFrame(
+            100.0 * np.exp(np.cumsum(rng.normal(0.0, 1e-4, (len(index), len(symbols))), axis=0)),
+            index=index, columns=symbols,
+        )
+        funding = pd.DataFrame(
+            rng.normal(1e-5, 1e-6, (len(index), len(symbols))),
+            index=index, columns=symbols,
+        )
+        step_index = index[::24]
+        step = pd.DataFrame(
+            rng.normal(0.0, 0.05, (len(step_index), len(symbols))),
+            index=step_index, columns=symbols,
+        )
+        weights = step.reindex(index, method="ffill").fillna(0.0)
+
+        bps_list = [2.64, 4.18, 6.07]
+        singles = [
+            mhs_ledger_pnl(weights, opens, funding, bps) for bps in bps_list
+        ]
+        multi = mhs_ledger_pnl_multi_tier(weights, opens, funding, bps_list)
+        assert len(multi) == len(bps_list)
+        for (net_s, tc_s), (net_m, tc_m) in zip(singles, multi, strict=True):
+            pd.testing.assert_series_equal(net_s, net_m, check_exact=True)
+            pd.testing.assert_series_equal(tc_s, tc_m, check_exact=True)
+
+    def test_multi_tier_fails_closed(self) -> None:
+        # SCENARIO_MHS_LEDGER_MULTI_TIER_FAIL_CLOSED: empty bps list and negative
+        # bps raise ValueError; an index mismatch raises the same DataIntegrityError
+        # message as the single call.
+        weights = pd.DataFrame({"A": [0.5, 0.5, -0.5], "B": [-0.5, -0.5, 0.5]})
+        opens = pd.DataFrame({"A": [100.0, 101.0, 102.0], "B": [50.0, 49.0, 48.0]})
+        funding = pd.DataFrame({"A": [0.0, 0.0, 0.0], "B": [0.0, 0.0, 0.0]})
+        with pytest.raises(ValueError, match="must not be empty"):
+            mhs_ledger_pnl_multi_tier(weights, opens, funding, [])
+        with pytest.raises(ValueError, match=">= 0"):
+            mhs_ledger_pnl_multi_tier(weights, opens, funding, [2.64, -1.0])
+        mismatched = pd.DataFrame(
+            {"A": [100.0, 101.0, 102.0], "B": [50.0, 49.0, 48.0]},
+            index=pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"]),
+        )
+        with pytest.raises(DataIntegrityError, match="identical index"):
+            mhs_ledger_pnl_multi_tier(weights, opens, mismatched, [2.64])
 
 
 class TestSimulatedInventoryLedger:

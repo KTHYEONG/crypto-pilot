@@ -321,3 +321,25 @@ def test_source_coverage_audit_catches_pre_fillna_gaps() -> None:
 
     with pytest.raises(ValueError, match="identically indexed"):
         source_coverage_audit(source.iloc[1:], mask)
+
+def test_feature_registry_panel_columns_prunes_to_required_union() -> None:
+    # SCENARIO_MHS_FEATURE_PANEL_COLUMN_PRUNING: feature_registry_panel_columns
+    # returns the deterministic first-seen union of required_columns -- for the
+    # full registry 6 columns with NO 'open' (no builder uses it), and for the
+    # 6 committee members 3 columns -- so _load_feature_panels can prune its
+    # parquet reads and resident panels accordingly.
+    from src.mhs.contracts import MHS_COMMITTEE_MEMBERS
+    from src.mhs.features import feature_registry_panel_columns
+
+    registry_cols = feature_registry_panel_columns(MHS_FEATURE_REGISTRY)
+    assert registry_cols == (
+        "close", "taker_buy_quote", "quote_vol", "high", "low", "no_trades",
+    )
+    assert "open" not in registry_cols
+
+    member_specs = [
+        spec for spec in MHS_FEATURE_REGISTRY if spec.name in set(MHS_COMMITTEE_MEMBERS)
+    ]
+    committee_cols = feature_registry_panel_columns(member_specs)
+    assert committee_cols == ("taker_buy_quote", "quote_vol", "close")
+    assert all(c in registry_cols for c in committee_cols)
