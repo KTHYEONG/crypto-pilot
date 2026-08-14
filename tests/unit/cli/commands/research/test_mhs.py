@@ -216,6 +216,50 @@ def test_mhs_diagnostic_crash_tilt_alpha_flag_threaded_to_request(monkeypatch) -
     assert captured["crash_regime_tilt_alpha"] is None
 
 
+def test_mhs_diagnostic_trend_sleeve_flags_threaded_to_request(monkeypatch) -> None:
+    """SCENARIO_CLI_TREND_SLEEVE_FLAGS: ``--trend-sleeve`` (store_true, default
+    False) and ``--trend-sleeve-gross`` (type=float, default 0.0) are parsed and
+    threaded into the constructed ``MhsDiagnosticRequest``; omitting both yields
+    the off values."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        captured.update(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    defaults = {action.dest: action.default for action in parser._actions}
+    assert defaults["trend_sleeve"] is False
+    assert defaults["trend_sleeve_gross"] == 0.0
+
+    args = parser.parse_args(["--trend-sleeve", "--trend-sleeve-gross", "0.3"])
+    assert args.trend_sleeve is True
+    assert args.trend_sleeve_gross == 0.3
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["trend_sleeve"] is True
+    assert captured["trend_sleeve_gross"] == 0.3
+
+    captured.clear()
+    args = parser.parse_args([])
+    assert args.trend_sleeve is False
+    assert args.trend_sleeve_gross == 0.0
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["trend_sleeve"] is False
+    assert captured["trend_sleeve_gross"] == 0.0
+
+
 def test_mhs_diagnostic_alpha_engine_flags_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_ALPHA_ENGINE_09: ``--slow-book-mode``, ``--rebalance-filter``,
     ``--beta-neutralize`` and ``--ensemble-signal`` parse into the matching
