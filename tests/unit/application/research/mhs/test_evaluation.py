@@ -386,6 +386,18 @@ def test_trend_sleeve_request_validation() -> None:
     assert on.trend_sleeve_gross == 0.3
 
 
+def test_multi_feature_request_validation() -> None:
+    # SCENARIO_MHS_REQUEST_MULTI_FEATURE_VALIDATION: MhsDiagnosticRequest gains
+    # multi_feature_book (bool, default False). A non-bool value raises
+    # ValueError (fail closed -- no silent no-op); the default construction
+    # leaves it False and the report's multi_feature_diagnostic is None.
+    assert MhsDiagnosticRequest().multi_feature_book is False
+    with pytest.raises(ValueError, match="multi_feature_book"):
+        MhsDiagnosticRequest(multi_feature_book="yes")
+    on = MhsDiagnosticRequest(multi_feature_book=True)
+    assert on.multi_feature_book is True
+
+
 def test_request_validation_adjusted_without_gate() -> None:
     """SCENARIO_REQUEST_VALIDATION_ADJUSTED_WITHOUT_GATE: requesting the
     Bartlett/HAC-adjusted diagnostic while the discovery gate itself is off
@@ -2698,6 +2710,89 @@ def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
         assert value is None or np.isfinite(value)
     worst = combined["worst_year_net_t"]
     assert worst is None or np.isfinite(worst)
+
+
+def test_multi_feature_default_off_bit_identical(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_MULTI_FEATURE_DEFAULT_OFF_BIT_IDENTICAL: with the flag
+    # omitted (multi_feature_book=False) the report's multi_feature_diagnostic
+    # is None and every pre-existing field is bit-identical to the explicit-off
+    # baseline -- the multi-feature axis is inert unless explicitly enabled.
+    root, end = mhs_market
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    base = {
+        "start": str(_START), "end": str(end), "data_root": str(root),
+        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_universe_size": 8,
+    }
+    default_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    explicit_off = ev.run_mhs_horizon_diagnostic(
+        MhsDiagnosticRequest(**base, multi_feature_book=False),
+    )
+    assert default_report.status == "COMPLETE"
+    assert default_report.multi_feature_diagnostic is None
+    assert explicit_off.multi_feature_diagnostic is None
+    for field in ("books", "blend", "blend_target_gross", "research_go", "folds"):
+        assert getattr(default_report, field) == getattr(explicit_off, field)
+
+
+def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_MULTI_FEATURE_DIAGNOSTIC_REPORTS_COVERAGE_AND_STABILITY:
+    # with multi_feature_book=True the report's multi_feature_diagnostic dict
+    # carries, per admitted feature, its per-year coverage and its regime-split
+    # stability fields, plus the combined book's net Sharpe per measured cost
+    # tier and the effective breadth of the feature-book PnL panel; features
+    # excluded by the coverage gate are listed under an explicit excluded key
+    # with their failing year, never silently dropped.
+    root, end = mhs_market
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, multi_feature_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    diag = report.multi_feature_diagnostic
+    assert isinstance(diag, dict)
+    admitted = diag["admitted"]
+    assert isinstance(admitted, dict)
+    assert admitted, "the fixture's feature columns must admit at least one feature"
+    for feature_name, fields in admitted.items():
+        assert isinstance(feature_name, str)
+        coverage = fields["coverage"]
+        assert isinstance(coverage, dict)
+        for value in coverage.values():
+            assert 0.0 <= value <= 1.0
+        stability = fields["regime_split_stability"]
+        assert isinstance(stability, dict)
+        for label, sharpe in stability["window_sharpes"]:
+            assert isinstance(label, str)
+            assert sharpe is None or np.isfinite(sharpe)
+        assert stability["min_window_sharpe"] is None or np.isfinite(
+            stability["min_window_sharpe"]
+        )
+        assert isinstance(stability["sign_consistent"], bool)
+        assert stability["decay"] is None or np.isfinite(stability["decay"])
+    excluded = diag["excluded"]
+    assert isinstance(excluded, dict)
+    for fields in excluded.values():
+        assert "failing_year" in fields
+    combined = diag["combined"]
+    assert set(combined["net_sharpe_per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    for value in combined["net_sharpe_per_tier"].values():
+        assert value is None or np.isfinite(value)
+    breadth = diag["feature_book_effective_breadth"]
+    assert isinstance(breadth, dict)
+    assert "n_eff" in breadth
+    assert "mean_corr" in breadth
+    assert np.isfinite(breadth["n_eff"])
+    assert np.isfinite(breadth["mean_corr"])
 
 
 def test_fold_worker_records_funding_carry_override(mhs_market) -> None:

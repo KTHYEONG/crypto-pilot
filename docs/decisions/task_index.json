@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE",
+      "date": "2026-08-14",
+      "adr_id": "ADR_20260814_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE",
+      "domain": "mhs",
+      "title": "MHS 다중 피처 알파 아키텍처 도입 (Stage 1)",
+      "why": "호라이즌 그리드 탐색 기반 단일 알파(momentum 168h) 구조의 실효 breadth가 1.41/19(상관 0.824)에 불과함을 실측. 프로덕션이 고정한 mom_168h는 2024-2025 구간에서 -0.690으로 부호 반전(같은 패밀리 336h는 +0.742 유지)했으나 현 discovery gate는 2021-2023 창에서 +0.615로 보여 이 반전을 원리적으로 탐지 불가. IC(xs_rank_ic)가 알파의 대리지표가 아님도 실증(lowvol_168h IC +0.147/t=105이나 실북 -0.038; taker_imb_168h는 IC 작아도 북 +0.990).",
+      "resolution": "src/mhs/features.py 신규: FeatureSpec 레지스트리(커버리지 fail-closed)/feature_coverage_audit/build_feature_books/equal_risk_combination. src/mhs/stability.py 신규: StabilityResult/regime_split_stability(sign_consistent, min_window_sharpe, decay). MhsDiagnosticRequest.multi_feature_book opt-in(기본 False, bit-identical) 배선, 리포트에 multi_feature_diagnostic 필드 추가. no_trades 컬럼 커버리지 붕괴(2023년부터 0.00) 등 데이터 결함을 커버리지 게이트로 구조적 차단.",
+      "impact": "자본 배분 무변경(기본 multi_feature_book=False). Stage 1은 ML 미도입, 등리스크 결합만; Stage 2(레짐 안정성 게이트)/Stage 3(게이트된 ML)는 별도 스펙+실측 후 진행."
+    },
+    {
       "task_id": "TASK_MHS_DIRECTIONAL_TREND_SLEEVE",
       "date": "2026-08-14",
       "adr_id": "ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE",
@@ -989,16 +999,6 @@
       "why": "분기별 후보 필터링 결과를 사후 분석할 수 있어야 하고, 실제 CLI 실행에서 bounded 후보 조합 탐색이 기본 예산을 초과해 백테스트에 도달하지 못했음",
       "resolution": "분기별 candidate audit을 즉시 append하도록 보장하고 bounded 탐색 통계를 report/audit에 기록했으며, CLI 실측 결과 18개 전략 소스와 5개 심볼 조합이 1,000,000 graph-node 예산을 초과하는 fail-closed 동작을 확인함",
       "impact": "완료된 분기 감사 로그의 유실을 방지하고 탐색 폭발을 조용히 숨기지 않지만, 운영 가능한 후보 사전축소·심볼별 예산·CLI/profile 예산 조정이 다음 개선 과제로 명확해짐"
-    },
-    {
-      "task_id": "TASK_LIBRARY_ADMISSION_PIPELINE_ROLLING",
-      "date": "2026-08-02",
-      "adr_id": "ADR_20260802_LIBRARY_ADMISSION_PIPELINE_ROLLING",
-      "domain": "research",
-      "title": "자동 후보 도출 및 분기별 롤링 라이브러리 갱신",
-      "why": "후보 선정과 백테스트를 여러 명령으로 수행해야 하고 시간이 지나면 전략 효과가 변하므로 재현 가능한 자동 갱신 파이프라인이 필요함",
-      "resolution": "후보군 도출·신뢰성/스트레스 백테스트·분기별 리밸런싱·append-only 원장·현재 프로필 포인터를 하나의 paper CLI 흐름으로 연결하고 공통 데이터 종료시각을 as_of로 제한함",
-      "impact": "분기별 최신 전략 선택과 CASH 폴백을 자동화하고 과거 결정의 멱등성·인과성·추적성을 보장함"
     }
   ]
 }
