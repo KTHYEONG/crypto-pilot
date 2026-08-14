@@ -31,6 +31,8 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         touch_diagnostic=args.touch_diagnostic,
         ladder_diagnostic=args.ladder_diagnostic,
         discovery_gate=args.discovery_gate,
+        trend_sleeve=args.trend_sleeve,
+        trend_sleeve_gross=args.trend_sleeve_gross,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
         discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
         fold_safe_horizon_selection=fold_safe_horizon,
@@ -117,6 +119,25 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "current panel for both sign families and record the outcome in "
             "the diagnostic report (opt-in; the result never changes contracts "
             "by itself)"
+        ),
+    )
+    mhs.add_argument(
+        "--trend-sleeve",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: measure an additive time-series trend sleeve on the "
+            "eligible market basket (net directional exposure the dollar-neutral "
+            "books cannot hold); diagnostic-only unless --trend-sleeve-gross is set"
+        ),
+    )
+    mhs.add_argument(
+        "--trend-sleeve-gross",
+        type=float,
+        default=0.0,
+        help=(
+            "Gross budget allocated to the directional trend sleeve, in "
+            "[0.0, 1.0]; a risk-budget policy value, never a fitted parameter"
         ),
     )
     mhs.add_argument(

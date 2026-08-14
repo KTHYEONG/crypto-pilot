@@ -364,6 +364,28 @@ def test_crash_tilt_request_validation() -> None:
     assert MhsDiagnosticRequest(crash_regime_tilt_alpha=0.2).crash_regime_tilt_alpha == 0.2
 
 
+def test_trend_sleeve_request_validation() -> None:
+    # SCENARIO_MHS_REQUEST_TREND_SLEEVE_VALIDATION: MhsDiagnosticRequest gains
+    # trend_sleeve (bool, default False) and trend_sleeve_gross (float, default
+    # 0.0). A positive gross without the opt-in, or a gross outside [0.0, 1.0],
+    # raises ValueError (fail closed -- no silent no-op); the default
+    # construction leaves both at their off values.
+    default = MhsDiagnosticRequest()
+    assert default.trend_sleeve is False
+    assert default.trend_sleeve_gross == 0.0
+    with pytest.raises(ValueError, match="trend_sleeve_gross"):
+        MhsDiagnosticRequest(trend_sleeve_gross=0.3)
+    with pytest.raises(ValueError, match="trend_sleeve_gross"):
+        MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=-0.1)
+    with pytest.raises(ValueError, match="trend_sleeve_gross"):
+        MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=1.5)
+    with pytest.raises(ValueError, match="trend_sleeve"):
+        MhsDiagnosticRequest(trend_sleeve="yes")
+    on = MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=0.3)
+    assert on.trend_sleeve is True
+    assert on.trend_sleeve_gross == 0.3
+
+
 def test_request_validation_adjusted_without_gate() -> None:
     """SCENARIO_REQUEST_VALIDATION_ADJUSTED_WITHOUT_GATE: requesting the
     Bartlett/HAC-adjusted diagnostic while the discovery gate itself is off
@@ -2610,6 +2632,72 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
     assert report_off.status == "COMPLETE"
     assert "slow_horizon_effective_breadth" not in report_off.horizon_diagnostics
     assert "fast_horizon_effective_breadth" not in report_off.horizon_diagnostics
+
+
+def test_trend_sleeve_default_off_bit_identical(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_TREND_SLEEVE_DEFAULT_OFF_BIT_IDENTICAL: with the flags
+    # omitted (trend_sleeve=False, trend_sleeve_gross=0.0) the report's
+    # trend_sleeve_diagnostic is None and every pre-existing field is
+    # bit-identical to the explicit-off baseline -- the sleeve is inert unless
+    # explicitly enabled, so a default run cannot change any existing output.
+    root, end = mhs_market
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    base = {
+        "start": str(_START), "end": str(end), "data_root": str(root),
+        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_universe_size": 8,
+    }
+    default_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    explicit_off = ev.run_mhs_horizon_diagnostic(
+        MhsDiagnosticRequest(**base, trend_sleeve=False, trend_sleeve_gross=0.0),
+    )
+    assert default_report.status == "COMPLETE"
+    assert default_report.trend_sleeve_diagnostic is None
+    assert explicit_off.trend_sleeve_diagnostic is None
+    for field in ("books", "blend", "blend_target_gross", "research_go", "folds"):
+        assert getattr(default_report, field) == getattr(explicit_off, field)
+
+
+def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_TREND_SLEEVE_DIAGNOSTIC_POPULATED: with trend_sleeve=True
+    # and trend_sleeve_gross=0.3 the report's trend_sleeve_diagnostic is a dict
+    # carrying the sleeve's standalone net Sharpe per measured cost tier, its
+    # per-calendar-year net_t, its correlation to the slow_momentum book's pnl,
+    # and the combined metrics; every value is finite or an explicit None,
+    # never NaN silently coerced to 0.0.
+    root, end = mhs_market
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, trend_sleeve=True, trend_sleeve_gross=0.3,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    diag = report.trend_sleeve_diagnostic
+    assert isinstance(diag, dict)
+    assert set(diag["net_sharpe_per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    for value in diag["net_sharpe_per_tier"].values():
+        assert value is None or np.isfinite(value)
+    yearly = diag["yearly_net_t"]
+    assert isinstance(yearly, dict)
+    assert set(yearly) == {2021, 2022, 2023, 2024, 2025}
+    for value in yearly.values():
+        assert value is None or np.isfinite(value)
+    corr = diag["slow_momentum_pnl_corr"]
+    assert corr is None or np.isfinite(corr)
+    combined = diag["combined"]
+    assert set(combined["net_sharpe_per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    for value in combined["net_sharpe_per_tier"].values():
+        assert value is None or np.isfinite(value)
+    worst = combined["worst_year_net_t"]
+    assert worst is None or np.isfinite(worst)
 
 
 def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
