@@ -6,9 +6,9 @@
 
 | key | value |
 | :--- | :--- |
-| latest_run_seq | 27 |
+| latest_run_seq | 29 |
 | latest_run_date | 2026-08-14 |
-| latest_adr | ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE |
+| latest_adr | ADR_20260814_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE |
 | domain | Research / MHS (Multi-Horizon Market State) |
 | history | 23차 이전은 git 이력으로 복구 |
 
@@ -20,6 +20,8 @@
 | 25 | 2026-08-13 | discovery-gate only | `--discovery-gate --discovery-gate-adjusted-net-t` | single_horizon (default, non-production) | §3.1 only | top-level book/fold/research_go NOT comparable (book_mode mismatch); `run_elapsed_seconds=490.8 status=COMPLETE` |
 | 26 | 2026-08-13 | discovery-gate only | `--discovery-gate --discovery-gate-regime-scaled-net-t` | single_horizon (default, non-production) | §3.2 only | same caveat as 25; `run_elapsed_seconds=501.3 status=COMPLETE` |
 | 27 | 2026-08-14 | trend sleeve production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --trend-sleeve --trend-sleeve-gross 0.3 --output-tier full` | horizon_ensemble | §7 (books/folds/research_go bit-identical to 24) | ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE; `docs/specs/mhs_directional_trend_sleeve.md` |
+| 28 | 2026-08-14 | multi-feature diagnostic production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --multi-feature-book --output-tier full` | horizon_ensemble | §8 (books/folds/research_go bit-identical to 24) | ADR_20260814_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE; `docs/specs/mhs_multi_feature_alpha_architecture.md`; sandbox: `scratch/test_breadth_and_feature_axis.py`, `test_feature_books_net_of_cost.py`, `test_feature_oos_persistence.py` |
+| 29 | 2026-08-14 | committee (k=6) production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --committee-book --output-tier full` | horizon_ensemble | §9 (books/folds/research_go bit-identical to 24) | ADR_20260814_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE; `docs/specs/mhs_committee_design_and_wealth_objective.md`; sandbox: `scratch/build_committee_panel.py`, `analyze_committee_design_v2.py`, `analyze_committee_final.py` |
 
 > ⚠️ `eligible_symbols` drift: 24차 445 vs 23차 446(Parquet 재수집). 동일 데이터 A/B는 bit-identical(§0). 23차 대비 수치차는 코드 변경 아님, 데이터 drift.
 
@@ -40,7 +42,7 @@
 
 optimization_map: C1=mark 프레임 캐시, C2=window materialize+pass 재사용, C3=window 단위 parquet 로드(preload 폐기), C4=fold-safe discovery 병렬화.
 
-peak_rss_16.8GB_source: discovery 후보 웨이트 행렬(~13GB, slow 19 + fast 7 + funding 2×8 호라이즌 full-panel). fold-safe/top-level gate 중복 빌드 — dedupe 여지(§9).
+peak_rss_16.8GB_source: discovery 후보 웨이트 행렬(~13GB, slow 19 + fast 7 + funding 2×8 호라이즌 full-panel). fold-safe/top-level gate 중복 빌드 — dedupe 여지(§11).
 
 ---
 
@@ -250,7 +252,163 @@ CLI: `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --reba
 | folds (§2) | bit-identical |
 | research_go (§2) | bit-identical |
 
-## 8. 전략 요약 (분류 데이터)
+## 8. 다중 피처 알파 아키텍처 — 28차 실측 (2026-08-14)
+
+trigger: 사용자 요청 — 전략 구성/평가 로직 구조 재검토, ML 도입 고려.
+
+ADR: `ADR_20260814_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE`, module: `src/mhs/features.py`, `src/mhs/stability.py`.
+
+### 8.1 실효 breadth (participation ratio, `effective_breadth`)
+
+| 축 | 후보 수 | n_eff | mean_corr |
+| :--- | ---: | ---: | ---: |
+| 호라이즌(프로덕션 slow 그리드) | 19 | 1.413 | 0.824 |
+| 피처(IC 시계열) | 10 | 5.031 | 0.154 |
+| 피처(북 net PnL) | 10 | 4.015 | 0.115 |
+
+### 8.2 피처 vs IC 괴리 (net, 전 구간 2021-2025, top30 로스터, fwd=168h)
+
+| 피처 | base net Sharpe | IC (t) |
+| :--- | ---: | ---: |
+| mom_168h(프로덕션) | +0.020 | −0.0175 (−15.0) |
+| mom_336h | +0.688 | −0.0137 (−11.8) |
+| taker_imb_168h | +0.990 | +0.0189 (+18.1) |
+| lowvol_168h | −0.038 | +0.1475 (+104.8) |
+| hl_range_168h | −0.050 | +0.1530 (+105.9) |
+
+verdict = IC_NOT_ALPHA_PROXY (IC 최고 피처 2종이 실제 북은 음수; IC 작은 피처가 북 성과 최고). 168h 오버랩 독립표본 ~261개(43,824/168), t 과대 계수 ~√168≈13x.
+
+### 8.3 레짐 지속성 (net, base tier)
+
+| 피처 | 2021-2023 | 2024-2025 | sign_consistent |
+| :--- | ---: | ---: | :--- |
+| mom_168h(프로덕션) | +0.615 | **−0.690** | False |
+| mom_336h | +0.651 | +0.742 | True |
+
+### 8.4 데이터 결함
+
+| key | value |
+| :--- | :--- |
+| no_trades coverage(top30, 연도별) | 2021:0.84 → 2022:0.34 → 2023-2025:0.00 |
+| avg_trade_size(오염) full Sharpe | +0.311(사실상 2021-2022만) |
+| 프로덕션 반영 결과 | coverage gate가 avg_trade_size 자동 제외(§8.5 excluded) |
+
+### 8.5 프로덕션 실측 (`multi_feature_diagnostic`, 28차)
+
+| 피처 | window_0(2021-23) | window_1(2024-25) | sign_consistent | decay |
+| :--- | ---: | ---: | :--- | ---: |
+| mom_168h | +0.597 | −0.258 | False | −0.855 |
+| mom_336h | +0.582 | +1.461 | True | +0.879 |
+| taker_imb_168h | +2.001 | +1.105 | True | −0.896 |
+| rev_24h | +0.441 | +0.052 | True | −0.389 |
+| turnover_chg | +0.077 | +0.657 | True | +0.581 |
+| taker_imb_24h | +0.791 | −0.439 | False | −1.230 |
+| amihud | −0.269 | +0.891 | False | +1.160 |
+| lowvol_168h | −0.458 | −0.168 | True(둘다 음) | +0.291 |
+| hl_range_168h | −0.578 | +0.024 | False | +0.602 |
+
+excluded: `avg_trade_size`(failing_year=2021, coverage gate 자동 차단)
+
+| key | value |
+| :--- | :--- |
+| feature_book_effective_breadth.n_eff | 3.493/9 |
+| feature_book_effective_breadth.mean_corr | 0.139 |
+| combined.net_sharpe_per_tier(수정 전, 버그) | optimistic +1.016, base +0.754, stress +0.432 |
+| combined.book_mean_gross(수정 전) | 175.58(비정상, 리스크패리티 정규화 누락 버그) |
+| bugfix | `evaluation.py::_multi_feature_diagnostic`에 `n/Σ(1/sdᵢ)` 정규화 적용, lean_check PASS 확인 |
+| books/folds/research_go(§1/§2) | bit-identical to 24차 |
+
+## 9. 6인 위원회(committee) 및 자산증식 목적함수 — 29차 실측 (2026-08-14)
+
+trigger: 사용자 요청 — 위원회 규모/구성/ML 조율/자산증식 극대화 검토.
+
+ADR: `ADR_20260814_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE`, module: `src/mhs/committee.py`.
+
+protocol: purged walk-forward(train-only 336h purge, 6개월 블록), 비용 2-tier 대수분해(`decompose_cost`)로 net→gross/turnover_cost 복원, 롱온리 강제, train-window 15% 변동성 타게팅.
+
+### 9.1 후보 31종 → 경제 패밀리별 최고 (base tier full-period Sharpe)
+
+| family | best | sharpe |
+| :--- | :--- | ---: |
+| flow | flow_imb_168h | +1.251 |
+| trend | xs_mom_336h | +0.765 |
+| moments | mom3_skew_168h | +0.627 |
+| carry | carry_funding_chg | +0.506(데이터 결함, §9.4) |
+| reversal | xs_rev_6h | +0.280 |
+| volatility | vol_idio_168h | +0.104 |
+| liquidity | liq_turnover_surge | +0.084 |
+| beta | beta_low | +0.017 |
+| micro | micro_hl_range_168h | −0.076 |
+
+### 9.2 조합기 비교 (sandbox OOS walk-forward, 30종 전체, 비용부호보정 후)
+
+| 조합기 | Sharpe | opti/base/stress |
+| :--- | ---: | :--- |
+| equal_risk | +0.402 | +0.751/+0.402/−0.026 |
+| sharpe_weighted(long-short) | −0.209 | — |
+| shrunk_MV λ=0.8(long-only) | +0.650 | +0.872/+0.650/+0.544 |
+| shrunk_MV λ=0.8(**long-short**) | **−0.568** | +0.232/−0.568/**−1.813** |
+| top-12(train-Sharpe 선택) | +0.776 | +0.892/+0.776/+0.555 |
+| top-15 | +0.867 | — |
+| regime-conditional | +0.404 | — |
+| **큐레이션 k=6 + equal_risk** | **+1.379** | **+1.500/+1.379/+1.230** |
+
+verdict = LEARNED_COMBINER_NOT_JUSTIFIED (모든 학습기반 조합기가 경제적 큐레이션에 전패; 무제약 조합기는 전 tier 음수)
+
+### 9.3 위원회 규모/구성 sweep (sandbox, 경제 패밀리 순차 증설, OOS)
+
+| k | 구성 | Sharpe | CAGR | MDD |
+| ---: | :--- | ---: | ---: | ---: |
+| 1 | flow | +0.951 | +14.47% | −13.3% |
+| 2 | flow+trend | +1.141 | +17.24% | −11.7% |
+| 4 | flow×2+trend×2 | +1.029 | +15.20% | −11.4% |
+| **6** | **+idio_mom+skew** | **+1.379** | **+22.02%** | −12.5% |
+| 7 | +rev | +1.444 | +23.17% | −15.7% |
+| 8 | +carry | +1.273 | +21.78% | −20.1%(악화 시작) |
+
+`MHS_COMMITTEE_MEMBERS`(k=6): flow_imb_720h, flow_imb_168h, xs_mom_336h, xs_mom_720h, xs_idio_mom_336h, mom3_skew_168h. n_eff=2.168/6, mean_corr=0.290.
+
+### 9.4 데이터 결함 (신규)
+
+| key | value |
+| :--- | :--- |
+| `bar_funding_panel` 2021 그리드 정렬 성공 심볼 | 45/452 |
+| 나머지 처리 | `fillna(0.0)` — 랭크 중앙 배치, post-fillna coverage gate로 탐지 불가 |
+| 대응 | `source_coverage_audit`(fillna 이전 원천 감사) 계약 추가, carry 패밀리 위원회에서 제외 |
+
+### 9.5 자산증식 목적함수 (sandbox, k=6 큐레이션, 15% 변동성 타게팅)
+
+| leverage | vol | CAGR | MDD | logret |
+| ---: | ---: | ---: | ---: | ---: |
+| 1.0x | 15% | +22.02% | −12.5% | +0.598 |
+| 1.5x | 22% | +33.61% | −18.3% | +0.870 |
+| 2.0x | 30% | +45.46% | −23.9% | +1.125 |
+
+| key | value |
+| :--- | :--- |
+| full_kelly | 9.02x |
+| half_kelly | 4.51x |
+| kelly_verdict | 채택 불가(OOS 블록 6개 표본오차 + 두꺼운 꼬리, 상한 참고치일 뿐) |
+| 권고 leverage | 1.0x 시작, 1.5x 상한 |
+
+### 9.6 프로덕션 실측 (`committee_diagnostic`, 29차)
+
+| tier | net_sharpe | cagr | mdd | logret |
+| :--- | ---: | ---: | ---: | ---: |
+| optimistic | +1.798 | +26.91% | −11.27% | +1.074 |
+| base | +1.664 | +24.58% | −11.99% | +0.991 |
+| stress | +1.499 | +21.78% | −12.88% | +0.888 |
+
+| key | value |
+| :--- | :--- |
+| admitted | 6/6(전원), excluded=[] |
+| source_coverage(전원) | 5년 전 구간 1.0(funding 미사용 위원회라 §9.4 결함 비해당) |
+| walk_forward.block_edges 시작 | 2021-01-01 |
+| walk_forward.bars(OOS 집계) | 39,480 / 43,824(90%) |
+| issue_flag | WALK_FORWARD_START_OPTIMISTIC — 블록 생성이 `_committee_block_edges(start=2021-01-01, end)`을 사용해 sandbox 설계(OOS start=2023-01-01, min_train_bars=2000)보다 이른 시점부터 테스트에 포함됨. `purged_walk_forward` 자체(purge/train-only scaling)는 계약대로 정상 — 호출부의 블록 시작점 선택만 낙관적. 보수적 신뢰 상한은 §9.2의 sandbox base=+1.379(OOS start=2023) |
+| books/folds/research_go(§1/§2) | bit-identical to 24차 |
+
+## 10. 전략 요약 (분류 데이터)
 
 | 전략 | 방향성 | 자본 배분 | 5yr CAGR/Sharpe | 상태 |
 | :--- | :--- | ---: | :--- | :--- |
@@ -261,7 +419,7 @@ CLI: `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --reba
 | discovery_gate | N/A (검증 절차, 비거래) | N/A | momentum 3/3 candidates rejected 2021-2023 | root_cause=2022 crash dominance(§3.1-3.2) |
 | trend_sleeve | directional (시계열, non-dollar-neutral) | 0%(진단 단계, gross_budget default=0.0) | net Sharpe +0.07~+0.10, corr_to_momentum=0.275 | diagnostic_only, 자본 미승인 |
 
-## 9. 다음 스텝 후보
+## 11. 다음 스텝 후보
 
 | 후보 | 상태 |
 | :--- | :--- |

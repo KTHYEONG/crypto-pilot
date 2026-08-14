@@ -681,5 +681,9 @@
   "src/mhs/features.py": {
     "architecture": "docs/specs/mhs_multi_feature_alpha_architecture.md",
     "testing": "tests/unit/mhs/test_features.py"
+  },
+  "src/mhs/committee.py": {
+    "architecture": "docs/specs/mhs_committee_design_and_wealth_objective.md",
+    "testing": "tests/unit/mhs/test_committee.py"
   }
 }
