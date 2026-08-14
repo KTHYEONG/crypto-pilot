@@ -209,3 +209,28 @@ class TestFrozenLiterals:
         assert len(MHS_TREND_SLEEVE_HORIZONS_HOURS) == 6
         assert tuple(sorted(MHS_TREND_SLEEVE_HORIZONS_HOURS)) == MHS_TREND_SLEEVE_HORIZONS_HOURS
         assert all(h > 0 for h in MHS_TREND_SLEEVE_HORIZONS_HOURS)
+
+    def test_committee_literals_are_frozen_declared_composition(self) -> None:
+        # SCENARIO_MHS_COMMITTEE_LITERALS_FROZEN: the k=6 committee is declared
+        # by economic family (order flow x2, cross-sectional trend x3,
+        # higher-moment x1), its 15% target volatility and 336h purge are frozen
+        # contract values, and the longest purge covers the 720h lookbacks so
+        # no overlapping-label information leaks across a walk-forward boundary.
+        from src.mhs.contracts import (
+            MHS_COMMITTEE_MEMBERS,
+            MHS_COMMITTEE_PURGE_HOURS,
+            MHS_COMMITTEE_TARGET_VOL,
+        )
+
+        assert MHS_COMMITTEE_MEMBERS == (
+            "flow_imb_720h",
+            "flow_imb_168h",
+            "xs_mom_336h",
+            "xs_mom_720h",
+            "xs_idio_mom_336h",
+            "mom3_skew_168h",
+        )
+        assert len(MHS_COMMITTEE_MEMBERS) == 6
+        assert len(set(MHS_COMMITTEE_MEMBERS)) == 6
+        assert pytest.approx(0.15) == MHS_COMMITTEE_TARGET_VOL
+        assert MHS_COMMITTEE_PURGE_HOURS == 336

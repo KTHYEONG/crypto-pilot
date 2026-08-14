@@ -9,10 +9,12 @@ from dataclasses import FrozenInstanceError
 
 from src.mhs.books import rank_weight_book
 from src.mhs.features import (
+    MHS_FEATURE_REGISTRY,
     FeatureSpec,
     build_feature_books,
     equal_risk_combination,
     feature_coverage_audit,
+    source_coverage_audit,
 )
 from src.mhs.horizons import vol_normalized_horizon_signal
 
@@ -241,3 +243,81 @@ def test_equal_risk_scale_uses_only_supplied_returns() -> None:
         {"a": book_a, "b": book_b}, {"a": scale_a_train, "b": scale_b_train},
     )
     pd.testing.assert_frame_equal(truncated, from_full, check_dtype=False)
+
+
+def test_new_registry_builders_are_causal_and_finite() -> None:
+    # SCENARIO_NEW_REGISTRY_BUILDERS_ARE_CAUSAL_AND_FINITE: the four new
+    # builders (flow_imb_720h, xs_mom_720h, xs_idio_mom_336h, mom3_skew_168h)
+    # each produce a panel that is finite-or-NaN (never inf), whose leading
+    # lookback rows are NaN rather than fabricated, and whose values at bar t
+    # are unchanged when the panel is truncated after bar t (causality). Each
+    # declares required_columns that exist in the loaded panels.
+    new_names = ("flow_imb_720h", "xs_mom_720h", "xs_idio_mom_336h", "mom3_skew_168h")
+    leading_nan = {
+        "flow_imb_720h": 700,
+        "xs_mom_720h": 700,
+        "xs_idio_mom_336h": 660,
+        "mom3_skew_168h": 150,
+    }
+    n = 3000
+    idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+    rng = np.random.default_rng(7)
+    log_close = pd.DataFrame(
+        np.cumsum(rng.normal(0.0, 0.005, (n, len(_SYMBOLS))), axis=0),
+        index=idx, columns=_SYMBOLS,
+    )
+    panels = {
+        "close": np.exp(log_close),
+        "taker_buy_quote": pd.DataFrame(
+            rng.uniform(0.4, 0.6, (n, len(_SYMBOLS))), index=idx, columns=_SYMBOLS,
+        ),
+        "quote_vol": pd.DataFrame(
+            rng.uniform(100.0, 200.0, (n, len(_SYMBOLS))), index=idx, columns=_SYMBOLS,
+        ),
+    }
+    for spec in MHS_FEATURE_REGISTRY:
+        if spec.name not in new_names:
+            continue
+        assert all(column in panels for column in spec.required_columns)
+        feature = spec.builder(panels)
+        assert feature.index.equals(idx)
+        assert list(feature.columns) == list(_SYMBOLS)
+        assert not np.isinf(feature.to_numpy()).any()
+        assert feature.iloc[: leading_nan[spec.name]].notna().sum().sum() == 0
+        for t in (1000, 1500, 2000):
+            truncated = {col: frame.loc[frame.index <= idx[t]] for col, frame in panels.items()}
+            rebuilt = spec.builder(truncated)
+            pd.testing.assert_series_equal(
+                rebuilt.iloc[-1], feature.loc[idx[t]], check_dtype=False,
+            )
+
+
+def test_source_coverage_audit_catches_pre_fillna_gaps() -> None:
+    # SCENARIO_SOURCE_COVERAGE_AUDIT_CATCHES_PRE_FILLNA_GAPS: source_coverage_audit
+    # reports low coverage for a source panel whose values are missing BEFORE
+    # any fillna, on a fixture mirroring the funding case where only a minority
+    # of columns carry real data and the rest were zero-filled downstream -- the
+    # gap the existing post-fillna feature_coverage_audit cannot see. A fully
+    # populated source reports coverage 1.0 for every year.
+    idx = pd.date_range("2021-01-01", periods=2 * 24 * 365, freq="1h", tz="UTC")
+    cols = ["A", "B", "C"]
+    mask = pd.DataFrame(True, index=idx, columns=cols)
+    rng = np.random.default_rng(8)
+    source = pd.DataFrame(rng.normal(0.0, 1.0, (len(idx), len(cols))), index=idx, columns=cols)
+    # funding-style: in 2022 only column A carries real data; the rest were
+    # zero-filled downstream before any feature audit ran.
+    source.loc[idx[idx.year == 2022], ["B", "C"]] = np.nan
+    filled = source.fillna(0.0)
+
+    raw_audit = source_coverage_audit(source, mask)
+    filled_audit = feature_coverage_audit(filled, mask)
+    assert raw_audit[2021] == pytest.approx(1.0)
+    assert raw_audit[2022] == pytest.approx(1.0 / 3.0)
+    assert filled_audit[2022] == pytest.approx(1.0)
+
+    full = pd.DataFrame(rng.normal(0.0, 1.0, (len(idx), len(cols))), index=idx, columns=cols)
+    for cov in source_coverage_audit(full, mask).values():
+        assert cov == pytest.approx(1.0)
+
+    with pytest.raises(ValueError, match="identically indexed"):
+        source_coverage_audit(source.iloc[1:], mask)
