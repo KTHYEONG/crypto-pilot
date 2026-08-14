@@ -1,14 +1,27 @@
 # MHS Horizon Diagnostic — Latest Result
 
-- **Document Date**: 2026-08-13 (24차, 실행 성능 최적화 적용 후 Full 5y 프로덕션 구성 재실측 — `ADR_20260813_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION`. 23차 이전 이력은 git 이력으로 복구 가능)
-- **Domain**: Research / MHS (Multi-Horizon Market State)
-- **Run**: `start=2021-01-01 end=2025-12-31 execution_timeframe=5m execution_universe_size=30 eligible_symbols=445 realized_execution_roster_size=41.934179584940985 run_elapsed_seconds=765.0 peak_rss=16.8GB`
-- **CLI**: `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --discovery-gate --output-tier full`
-- **성능 최적화 적용**: C1 mark 프레임 캐시 / C2 window materialize+pass 재사용 / C3 window 단위 parquet 로드(preload 폐기) / C4 fold-safe discovery 병렬화
-- **25차 추가 실측 (discovery-gate 전용, 2026-08-13)**: `docs/specs/mhs_discovery_admission_autocorr_robustness.md` 계약 구현 후 `--discovery-gate --discovery-gate-adjusted-net-t`(기본 book mode, non-production) 재실행 — §3.1 참고. Top-level book/fold/research_go 수치는 이 실행 대상이 아님(기본 `single_horizon` book mode라 §1/§2 프로덕션 수치와 비교 불가, 무시할 것); discovery gate 자체는 book mode와 무관한 독립 계산이라 §3와 직접 비교 가능.
-- **26차 추가 실측 (discovery-gate regime-scale 파리티 진단, 2026-08-13)**: `docs/specs/mhs_discovery_admission_regime_scale_parity.md` 계약 구현 후 `--discovery-gate --discovery-gate-regime-scaled-net-t`(기본 book mode, non-production) 재실행 — §3.2 참고. 25차와 동일하게 top-level book/fold/research_go 수치는 비교 대상 아님.
+> **FORMAT POLICY**: 이 문서는 AI 분석용 데이터 로그다. 서술식 문장·설명·배경 스토리를 추가하지 말 것. 신규 실측은 표/키:값/코드 인용으로만 기록한다. 해석이 필요하면 `interpretation` 컬럼 또는 태그(`root_cause=`, `verdict=`)로 한 줄 이내로만 압축. 산문 문단(2문장 이상 서술)은 항상 리라이트 대상.
 
-> ⚠️ **데이터 drift 공지**: 본 실행의 `eligible_symbols=445`로 23차의 446과 다름(Parquet 소스 재수집). 동일 데이터 기준 원본 코드 대비 출력은 **bit-identical**(아래 §0 A/B). 수치 비교 시 23차 대비 차이는 코드 변경이 아닌 데이터 drift로 해석해야 함.
+## META
+
+| key | value |
+| :--- | :--- |
+| latest_run_seq | 27 |
+| latest_run_date | 2026-08-14 |
+| latest_adr | ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE |
+| domain | Research / MHS (Multi-Horizon Market State) |
+| history | 23차 이전은 git 이력으로 복구 |
+
+## RUN LOG
+
+| seq | date | scope | cli/flags | book_mode | comparable_to | notes |
+| ---: | :--- | :--- | :--- | :--- | :--- | :--- |
+| 24 | 2026-08-13 | Full 5y production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --discovery-gate --output-tier full` | horizon_ensemble | §1,§2,§3,§6 baseline | `eligible_symbols=445 realized_execution_roster_size=41.934179584940985 run_elapsed_seconds=765.0 peak_rss=16.8GB`; ADR_20260813_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION |
+| 25 | 2026-08-13 | discovery-gate only | `--discovery-gate --discovery-gate-adjusted-net-t` | single_horizon (default, non-production) | §3.1 only | top-level book/fold/research_go NOT comparable (book_mode mismatch); `run_elapsed_seconds=490.8 status=COMPLETE` |
+| 26 | 2026-08-13 | discovery-gate only | `--discovery-gate --discovery-gate-regime-scaled-net-t` | single_horizon (default, non-production) | §3.2 only | same caveat as 25; `run_elapsed_seconds=501.3 status=COMPLETE` |
+| 27 | 2026-08-14 | trend sleeve production | `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --trend-sleeve --trend-sleeve-gross 0.3 --output-tier full` | horizon_ensemble | §7 (books/folds/research_go bit-identical to 24) | ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE; `docs/specs/mhs_directional_trend_sleeve.md` |
+
+> ⚠️ `eligible_symbols` drift: 24차 445 vs 23차 446(Parquet 재수집). 동일 데이터 A/B는 bit-identical(§0). 23차 대비 수치차는 코드 변경 아님, 데이터 drift.
 
 ---
 
@@ -16,85 +29,121 @@
 
 | 지표 | 원본 코드 | 최적화 코드 (C1-C4) | Δ |
 | :--- | ---: | ---: | ---: |
-| Full 5y wall (기본 5m, gate off) | 684.9 s | **309.1 s** | **−55 %** |
-| Full 5y peak RSS (기본 5m, gate off) | 5.40 GB | **3.15 GB** | **−42 %** |
-| `slow_momentum.primary_autocorr_sharpe` | −0.549471229370105 | −0.549471229370105 | **bit-identical** |
-| `blend.primary_autocorr_sharpe` | 0.452119924579761 | 0.452119924579761 | **bit-identical** |
-| `realized_execution_roster_size` | 41.934179584940985 | 41.934179584940985 | **bit-identical** |
-| `test_mhs_replay_resources` checksum | `b7a7ffba…` | `b7a7ffba…` | **bit-identical** |
-| 6mo book worker / fold worker | 31.7 s / 61.5 s | 7.1 s / 17.5 s | −78 % / −72 % |
+| Full 5y wall (기본 5m, gate off) | 684.9 s | 309.1 s | −55 % |
+| Full 5y peak RSS (기본 5m, gate off) | 5.40 GB | 3.15 GB | −42 % |
+| `slow_momentum.primary_autocorr_sharpe` | −0.549471229370105 | −0.549471229370105 | bit-identical |
+| `blend.primary_autocorr_sharpe` | 0.452119924579761 | 0.452119924579761 | bit-identical |
+| `realized_execution_roster_size` | 41.934179584940985 | 41.934179584940985 | bit-identical |
+| `test_mhs_replay_resources` checksum | `b7a7ffba…` | `b7a7ffba…` | bit-identical |
+| 6mo book worker | 31.7 s | 7.1 s | −78 % |
+| 6mo fold worker | 61.5 s | 17.5 s | −72 % |
 
-- gate 구성(위 Run)의 peak RSS 16.8GB는 discovery 후보 웨이트 행렬(~13GB, slow 19 + fast 7 + funding 2×8 호라이즌 full-panel)이 지배 — 기존 구조 고유 비용이며, fold-safe와 top-level gate가 동일 후보를 중복 빌드하므로 dedupe로 추가 절감 여지 있음(후속 후보).
+optimization_map: C1=mark 프레임 캐시, C2=window materialize+pass 재사용, C3=window 단위 parquet 로드(preload 폐기), C4=fold-safe discovery 병렬화.
+
+peak_rss_16.8GB_source: discovery 후보 웨이트 행렬(~13GB, slow 19 + fast 7 + funding 2×8 호라이즌 full-panel). fold-safe/top-level gate 중복 빌드 — dedupe 여지(§9).
 
 ---
 
-## 1. Top-level book 성과 (2021-2025, 5m 집행, horizon_ensemble)
+## 1. Top-level book 성과 (2021-2025, 5m 집행, horizon_ensemble, 24차)
 
 | Book | Horizon | Autocorr Sharpe | Naive Sharpe | Net Ann | CAGR | MaxDD | Turnover(x/yr) | Stress Sharpe |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| slow_momentum | 168h | **+0.536** | +0.472 | **+9.95 %** | +8.08 % | −22.7 % | 42.8 | +0.152 |
-| blend | 168h | +0.536 | +0.484 | +9.50 % | +7.91 % | **−20.2 %** | 42.0 | +0.146 |
+| slow_momentum | 168h | +0.536 | +0.472 | +9.95 % | +8.08 % | −22.7 % | 42.8 | +0.152 |
+| blend | 168h | +0.536 | +0.484 | +9.50 % | +7.91 % | −20.2 % | 42.0 | +0.146 |
 | fast_reversal | 48h | −0.840 | −0.789 | −7.26 % | −7.40 % | −32.2 % | 38.6 | −1.137 |
 
-- blend `target_gross=0.7507`, `cash_fraction=0.2493`, `deflated_sharpe_ratio=0.5470`.
-- `termination_counts`: `MISSING_DATA=62`, `UNKNOWN_TERMINATION=0` (전 구간 데이터 gap 62건, leak 없음).
-- fast_reversal은 ensemble 구제책 적용 후에도 autocorr·naive·stress 전부 음수 — **자본 가치 없음** 재확인.
+| key | value |
+| :--- | :--- |
+| blend.target_gross | 0.7507 |
+| blend.cash_fraction | 0.2493 |
+| deflated_sharpe_ratio | 0.5470 |
+| termination_counts.MISSING_DATA | 62 |
+| termination_counts.UNKNOWN_TERMINATION | 0 |
+| fast_reversal.verdict | autocorr/naive/stress 전부 음수, capital_allocation=0 |
 
-## 2. Anchored folds (strict primary, horizon `frozen_default` 168h/48h)
+## 2. Anchored folds (strict primary, horizon `frozen_default` 168h/48h, 24차)
 
 | Fold | Autocorr Sharpe | Naive Sharpe | Stress Sharpe | Net Ann | Failures |
 | :--- | ---: | ---: | ---: | ---: | :--- |
 | 0 | +0.805 | +0.812 | +0.211 | +9.66 % | — |
-| 1 | **−0.267** | −0.308 | **−0.820** | −4.19 % | `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `STRESS_SHARPE_NOT_POSITIVE` |
-| 2 | **+1.505** | +1.134 | +0.931 | **+48.2 %** | — |
+| 1 | −0.267 | −0.308 | −0.820 | −4.19 % | `PRIMARY_AUTOCORR_SHARPE_BELOW_0_6`, `STRESS_SHARPE_NOT_POSITIVE` |
+| 2 | +1.505 | +1.134 | +0.931 | +48.2 % | — |
 
-- **Research-GO**: ❌ `eligible=False`, `reason_codes=[PRIMARY_AUTOCORR_SHARPE_BELOW_0_6, STRESS_SHARPE_NOT_POSITIVE, UNSPECIFIED_POLICY]`, `folds_passed=2/3`.
+| key | value |
+| :--- | :--- |
+| research_go.eligible | False |
+| research_go.reason_codes | PRIMARY_AUTOCORR_SHARPE_BELOW_0_6, STRESS_SHARPE_NOT_POSITIVE, UNSPECIFIED_POLICY |
+| research_go.folds_passed | 2/3 |
 
-## 3. Discovery gate & breadth (2021-2023, admission_t=2.0)
+## 3. Discovery gate & breadth (2021-2023, admission_t=2.0, 24차)
 
 | 후보 | admitted | selected_horizon |
 | :--- | :--- | :--- |
-| momentum | **False** | null |
-| reversal | **False** | null |
-| funding_carry_long | **False** | null |
-| funding_carry_short | **False** | null |
+| momentum | False | null |
+| reversal | False | null |
+| funding_carry_long | False | null |
+| funding_carry_short | False | null |
 
-- `effective_breadth`: slow_horizon **1.4120/19** (7.4 %), fast_horizon **1.5720/7** (22.5 %) — 호라이즌 축 포화 재확인.
+| key | value |
+| :--- | :--- |
+| effective_breadth.slow_horizon | 1.4120/19 (7.4%) |
+| effective_breadth.fast_horizon | 1.5720/7 (22.5%) |
 
-### 3.1 Bartlett/HAC 자기상관 보정 진단 (25차, 신규, opt-in `--discovery-gate-adjusted-net-t`)
+### 3.1 Bartlett/HAC 자기상관 보정 진단 (25차, opt-in `--discovery-gate-adjusted-net-t`)
 
-`docs/specs/mhs_discovery_admission_autocorr_robustness.md`(discovery.py `net_t`가 오버랩 윈도우 자기상관을 보정하지 않는 naive i.i.d. t-stat이라는 가설 검증) 계약을 구현·실행. **admitted/selected_horizon 등 raw 필드는 무변화(계약대로 bit-identical, 회귀 확인됨)**; 아래는 신규 진단 필드만.
+spec: `docs/specs/mhs_discovery_admission_autocorr_robustness.md` (raw admitted/selected_horizon 필드 bit-identical, 신규 진단 필드만 아래)
 
-> ⚠️ **정정**: discovery/qualification window는 `src/research/technical_experts/trend_screen_catalog.py`의 `DISCOVERY_END=2023-12-31`/`QUALIFICATION_END=HOLDOUT_CUTOFF(2025-12-31)`를 그대로 사용 — **discovery=2021-2023 (3년, worst-of-3)**, **qualification=2024-2025 (2년)**. `docs/architecture/mhs-explain.md` §4.2가 "discovery 2021-2022(2년)/qualification 2023(1년)"으로 서술한 것은 실제 코드와 불일치(outdated) — Contract Priority(in-code 정의가 우선) 원칙에 따라 아래는 25차 실측 원본 데이터(`yearly_net_t`)로 직접 재검증한 수치.
+window_correction: discovery=2021-2023(3yr, worst-of-3), qualification=2024-2025(2yr). source=`trend_screen_catalog.py:DISCOVERY_END/QUALIFICATION_END`. `docs/architecture/mhs-explain.md §4.2`(discovery 2021-2022/qualification 2023) is outdated — code is source of truth.
 
 | 후보 | best raw worst-year net_t (worst-of-3) | best adjusted(HAC) worst-year net_t | admission_t |
 | :--- | ---: | ---: | ---: |
-| momentum (168h) | −0.0287 (2022) | **−0.0294** (2022) | 2.0 |
+| momentum (168h) | −0.0287 (2022) | −0.0294 (2022) | 2.0 |
 | reversal (96h) | +0.252 (2021) | +0.270 (2021) | 2.0 |
 | funding_carry_long (504h) | −3.322 (2021) | −3.151 (2021) | 2.0 |
 | funding_carry_short (72h) | +4.213 (2022) | +4.099 (2022) | 2.0 |
 
-- **가설 기각(자기상관)**: raw와 adjusted 값의 차이는 ±5~10 % 수준이며, 어떤 후보도 부호나 admission_t=2.0 통과 방향으로 유의미하게 이동하지 않음.
-- **momentum 연도별 재검증(19개 호라이즌 전수, raw)**: **2021은 전 호라이즌 강한 양(+1.1~+2.6)**, **2022는 전 호라이즌 예외 없이 음(−0.03~−2.0)**, 2023은 호라이즌별로 혼재(−0.46~+0.63). 즉 admission 실패는 "표본이 작아서 우연히 나쁜 해가 걸린" 문제가 아니라 **2022 한 해가 19개 후보 전원을 예외 없이 임계값 아래로 끌어내리는 구조적 패턴**(2022 크립토 크래시/모멘텀 크래시 레짐과 시기 일치).
-- **신규 발견(정밀 재확인)**: discovery gate가 채점하는 후보 웨이트(`discovery.py:_horizon_weights` → `rank_weight_book`/`phase_tranche_book`)는 regime 방어 레이어 없이 원신호(raw signal) 그대로 채점. 반면 24차 프로덕션 실행(§1, autocorr Sharpe +0.536)은 기본값 그대로 **`_regime_cash_scale`(R1, 시장 실현변동성 기반 unconditional 현금 스케일, `evaluation.py:3481`)**과 **`pnl_vol_target_scale`(전략 자체 실현 P&L 변동성 기반 Two-Pass 스케일, 기본 `pnl_vol_target=True`, `evaluation.py:2078`)**을 적용함 — 둘 다 2022류 고변동성/크래시 레짐에서 노출을 축소하도록 설계됨. (`crash_regime_tilt_weights`는 기본 `alpha=None`이라 24차 프로덕션에서 **미적용**이며 `ADR_20260813_MHS_CAPITAL_FLOOR_AND_OVERLAY_VALIDATION`에서 오히려 stress Sharpe 악화로 확인돼 파리티 진단 대상에서 제외.) 즉 게이트는 실전 배포판보다 **더 가혹한, 방어되지 않은 버전**을 심사하고 있어 admission 실패가 실제 전략 edge 부재를 과대평가할 가능성 있음.
-- 실행: `start=2021-01-01 end=2025-12-31`, 기본 book mode(non-production), `run_elapsed_seconds=490.8`, `status=COMPLETE`.
+verdict=HAC_HYPOTHESIS_REJECTED (raw vs adjusted delta ±5-10%, no admission-direction shift)
 
-### 3.2 Regime-scale 파리티 진단 (26차, 신규, opt-in `--discovery-gate-regime-scaled-net-t`)
+| 연도 | momentum 19-horizon raw net_t range |
+| :--- | :--- |
+| 2021 | +1.1 ~ +2.6 (all positive) |
+| 2022 | −0.03 ~ −2.0 (all negative, no exception) |
+| 2023 | −0.46 ~ +0.63 (mixed) |
 
-`docs/specs/mhs_discovery_admission_regime_scale_parity.md`(discovery gate가 `_regime_cash_scale` 없이 원신호를 채점한다는 §3.1 가설의 실측 검증) 계약을 구현·실행. **admitted/selected_horizon 등 raw 필드는 무변화(bit-identical, 회귀 확인됨)**; 시장 변동성 근사치(`realized_vol(log_close,48).where(eligible).mean(axis=1)`, PIT execution_mask 미사용 approximation)로 `_regime_cash_scale` 커널을 재적용한 후보 웨이트 재점수화 결과.
+root_cause = 2022 단일 연도가 19개 후보 전원을 admission_t 미만으로 끌어내림(표본 부족 아님, 구조적 레짐 패턴, 2022 crypto crash와 시기 일치).
+
+| gate scoring vs production defense | value |
+| :--- | :--- |
+| discovery.py candidate weights | regime 방어 없음(raw signal) |
+| production defaults | `_regime_cash_scale`(`evaluation.py:3481`), `pnl_vol_target_scale`(`pnl_vol_target=True`, `evaluation.py:2078`) 적용 |
+| `crash_regime_tilt_weights` | default `alpha=None`, 24차 미적용; `ADR_20260813_MHS_CAPITAL_FLOOR_AND_OVERLAY_VALIDATION`에서 stress Sharpe 악화 확인되어 파리티 대상 제외 |
+
+`run_elapsed_seconds=490.8 status=COMPLETE`
+
+### 3.2 Regime-scale 파리티 진단 (26차, opt-in `--discovery-gate-regime-scaled-net-t`)
+
+spec: `docs/specs/mhs_discovery_admission_regime_scale_parity.md` (raw admitted/selected_horizon bit-identical). regime_scale approximation: `realized_vol(log_close,48).where(eligible).mean(axis=1)` (PIT execution_mask 미사용).
 
 | 후보 | best raw worst-year net_t | best regime-scaled worst-year net_t | admission_t | admitted |
 | :--- | ---: | ---: | ---: | :--- |
-| momentum (168h) | −0.0287 | **+0.1798** | 2.0 | False(그대로) |
-| reversal (96h) | +0.252 | −0.142 (악화) | 2.0 | False(그대로) |
-| funding_carry_long | −3.32~−4.67 | 소폭 악화 | 2.0 | False(그대로) |
-| funding_carry_short | +2.79~+4.21 | 소폭 개선 | 2.0 | False(그대로, 부호 규약상 오리엔티드 미달) |
+| momentum (168h) | −0.0287 | +0.1798 | 2.0 | False |
+| reversal (96h) | +0.252 | −0.142 | 2.0 | False |
+| funding_carry_long | −3.32~−4.67 | 소폭 악화 | 2.0 | False |
+| funding_carry_short | +2.79~+4.21 | 소폭 개선 | 2.0 | False (부호 규약상 미달) |
 
-- **가설 부분 확증**: momentum 168h가 −0.029→**+0.180**로 부호 반전, 336h(−0.158→+0.162)·384h(−0.304→+0.027) 등 다수 호라이즌이 동반 개선 — "gate가 방어되지 않은 신호를 채점해 실제보다 나쁘게 나온다"는 방향은 실측으로 확인됨. 단 개선폭이 admission_t=2.0 대비 미미해 **여전히 미승인**. reversal/funding_carry는 regime-scale 적용해도 개선되지 않거나 악화 — §4-§5의 "edge 부재" 결론과 일관.
-- **결론**: regime 방어 파리티는 방향은 맞으나 admission 실패를 뒤집기엔 부족함. 잔여 지배 요인은 discovery window worst-of-3(2021-2023) 설계 자체, 특히 2022 크래시 해의 구조적 영향(§3.1)으로 재확정.
-- 실행: `start=2021-01-01 end=2025-12-31`, 기본 book mode(non-production), `run_elapsed_seconds=501.3`, `status=COMPLETE`.
+| momentum horizon | raw | regime-scaled |
+| :--- | ---: | ---: |
+| 168h | −0.029 | +0.180 |
+| 336h | −0.158 | +0.162 |
+| 384h | −0.304 | +0.027 |
 
-## 4. `yearly_net_t_diagnostic` — 5년 전체 (admission 미입력, 보고용)
+verdict = REGIME_SCALE_HYPOTHESIS_PARTIALLY_CONFIRMED (direction correct, magnitude insufficient vs admission_t=2.0). reversal/funding_carry: no improvement or worse.
+
+root_cause_updated = regime 방어 파리티는 방향만 맞음, admission 반전엔 부족. 잔여 지배 요인 = discovery window worst-of-3(2021-2023) 설계, 특히 2022.
+
+`run_elapsed_seconds=501.3 status=COMPLETE`
+
+## 4. `yearly_net_t_diagnostic` — 5년 전체 (admission 미입력, report-only, 24차)
 
 | 연도 | slow_momentum | fast_reversal | funding_carry |
 | :--- | ---: | ---: | ---: |
@@ -102,42 +151,125 @@
 | 2022 | +0.169 | +0.171 | −1.813 |
 | 2023 | −0.568 | −0.797 | −2.176 |
 | 2024 | +0.249 | −0.649 | −2.163 |
-| 2025 | **+1.775** | −0.012 | −1.142 |
+| 2025 | +1.775 | −0.012 | −1.142 |
 
-- `funding_carry_worst_year_corr`(2023) = **−0.2657** — 최악의 해 분산효과 방향은 있으나 funding_carry 전 해 손실로 자본화 근거 없음.
-- fast_reversal은 5년 중 admission_t=2.0 상회 해 **없음**; funding_carry 전 해 음수 → edge 부재 결론 유지.
+| key | value |
+| :--- | :--- |
+| funding_carry_worst_year_corr (2023) | −0.2657 |
+| fast_reversal admission_t=2.0 상회 해 | 0/5 |
+| funding_carry 5년 net_t | 전 해 음수 |
 
-## 5. 통계 진단 (전 구간)
+## 5. 통계 진단 (전 구간, 24차)
 
 | 계측 | 값 |
 | :--- | :--- |
-| `xs_rank_ic` | n_dates=43,704, mean_ic=**−0.04086**, t=**−46.02** (fwd=48) |
-| `date_clustered_regression` | n=8,257,895, n_dates=1,826, beta=**−0.01779**, t=**−1.32** |
-| `horizon_diagnostics` | realized_vol_48h=0.09112, efficiency_ratio_48h=0.14636 |
-| `bootstrap_ci` (net_1h) | **[−6.02e-6, +2.80e-5]** (하한 음수) |
-| deployment | CAGR=+7.91 %, MaxDD=−20.15 %, Calmar=0.3926, P(최종재산<초기)=16.25 % |
+| `xs_rank_ic.n_dates` | 43,704 |
+| `xs_rank_ic.mean_ic` | −0.04086 |
+| `xs_rank_ic.t` | −46.02 (fwd=48) |
+| `date_clustered_regression.n` | 8,257,895 |
+| `date_clustered_regression.n_dates` | 1,826 |
+| `date_clustered_regression.beta` | −0.01779 |
+| `date_clustered_regression.t` | −1.32 |
+| `horizon_diagnostics.realized_vol_48h` | 0.09112 |
+| `horizon_diagnostics.efficiency_ratio_48h` | 0.14636 |
+| `bootstrap_ci` (net_1h) | [−6.02e-6, +2.80e-5] |
+| deployment.CAGR | +7.91 % |
+| deployment.MaxDD | −20.15 % |
+| deployment.Calmar | 0.3926 |
+| deployment.P(최종재산<초기) | 16.25 % |
 
-- xs rank IC는 유의한 **음수** 역행 효과, 클러스터 t=−1.32로 48h 전방가격 예측력 유의하지 않음.
+verdict: xs_rank_ic 유의 음수(역행), date_clustered t=−1.32 유의하지 않음(48h 전방가격 예측력 없음).
 
-## 6. 회귀 불변식 & 요약
+## 6. 회귀 불변식 & 요약 (24차, drift 데이터)
 
 | 항목 | 값 |
 | :--- | :--- |
-| slow_momentum autocorr (24차, drift 데이터) | 0.5360654316354135 |
-| blend autocorr (24차, drift 데이터) | 0.5359443875092911 |
-| fast_reversal autocorr (24차, drift 데이터) | −0.840177372029221 |
+| slow_momentum autocorr | 0.5360654316354135 |
+| blend autocorr | 0.5359443875092911 |
+| fast_reversal autocorr | −0.840177372029221 |
 | deflated_sharpe | 0.546963269158657 |
+| 23차 대비 diff cause | `eligible_symbols 446→445` 데이터 drift, 코드 무관(§0 A/B로 증명) |
 
-- 23차 값(0.525673922813482 등)과의 차이는 `eligible_symbols 446→445` 데이터 drift이며, **동일 데이터 A/B로 코드 변경이 출력에 미치는 영향은 0**임을 §0이 증명.
-- **결론 유지**: momentum(168h ensemble)만 유일한 생존 후보(5년 CAGR +8 %, fold 2의 +48 % 포함), fast_reversal·funding_carry는 5년 전체에서도 자본 근거 없음, Research-GO 미달 → 자본 배분·`PHASE_1_BOOK_SPECS`/`PHASE_1_BOOK_BLEND_WEIGHTS` 무변경.
+capital_conclusion: momentum(168h ensemble)만 유일 생존 후보(5yr CAGR +8%, fold2 +48%). fast_reversal/funding_carry 자본 근거 없음(5yr 전체). Research-GO 미달. `PHASE_1_BOOK_SPECS`/`PHASE_1_BOOK_BLEND_WEIGHTS` 무변경.
 
-## 7. 다음 스텝 후보
+## 7. 가산 시계열 추세 슬리브 — 27차 프로덕션 실측 (2026-08-14)
+
+trigger: 사용자 질의 — "1개의 해가 나빠도 futures 숏으로 커버 가능하지 않나, 전략이 coin/futures 환경을 제대로 활용하나".
+
+spec: `docs/specs/mhs_directional_trend_sleeve.md`, ADR: `ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE`, module: `src/mhs/trend_sleeve.py`.
+
+| 사전 검증 항목 | 값 |
+| :--- | :--- |
+| `rank_weight_book` dollar-neutral 강제 여부 | True (롱/숏 정확히 50:50, 코드 확인) |
+| momentum 구조적 방향성 노출 가능 여부 | False (unit-gross dollar-neutral, 시장 방향 베팅 불가) |
+| root_cause_2022 | 숏 부재 아님 — 전략 구조상 방향성 노출 자체가 불가능 |
+| sleeve_default(gross_budget=0.0) vs baseline | bit-identical |
+
+CLI: `--slow-book-mode horizon_ensemble --fast-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon --trend-sleeve --trend-sleeve-gross 0.3 --output-tier full`
+
+### 7.1 슬리브 단독 성과 (gross_budget=0.3)
+
+| 비용 tier | net Sharpe |
+| :--- | ---: |
+| optimistic | +0.096 |
+| base | +0.085 |
+| stress | +0.072 |
+
+| 연도 | net_t |
+| :--- | ---: |
+| 2021 | −0.132 |
+| 2022 | +0.193 |
+| 2023 | +0.239 |
+| 2024 | −0.125 |
+| 2025 | +0.309 |
+
+| key | value |
+| :--- | :--- |
+| slow_momentum_pnl_corr | 0.275 |
+| 2022 momentum net_t (§4) | +0.169 |
+| 2022 sleeve net_t | +0.193 |
+
+### 7.2 결합 성과 (momentum + 슬리브, risk-budget 방식)
+
+| 비용 tier | net Sharpe |
+| :--- | ---: |
+| optimistic | +0.274 |
+| base | +0.235 |
+| stress | +0.188 |
+
+| key | value |
+| :--- | :--- |
+| worst_year_net_t | −0.173 |
+| fold1 stress 실패(§2) 상쇄 여부 | 부분적(완전 반전 아님) |
+
+### 7.3 회귀 확인
+
+| 항목 | 24차 대비 |
+| :--- | :--- |
+| books (§1) | bit-identical |
+| folds (§2) | bit-identical |
+| research_go (§2) | bit-identical |
+
+## 8. 전략 요약 (분류 데이터)
+
+| 전략 | 방향성 | 자본 배분 | 5yr CAGR/Sharpe | 상태 |
+| :--- | :--- | ---: | :--- | :--- |
+| slow_momentum | market-neutral (횡단면 랭크, dollar-neutral) | 100% | CAGR +8.08%, autocorr +0.536 | capital_active |
+| blend | market-neutral (=momentum, cash_fraction 25%) | 100%(=momentum) | CAGR +7.91%, MaxDD −20.2%(momentum −22.7%) | capital_active |
+| fast_reversal | market-neutral | 0% | autocorr −0.840, 5yr 전 지표 음 | rejected (§1,§4) |
+| funding_carry | market-neutral(펀딩비 캐리) | 0% | 5yr 전 해 net_t 음 | rejected (§4) |
+| discovery_gate | N/A (검증 절차, 비거래) | N/A | momentum 3/3 candidates rejected 2021-2023 | root_cause=2022 crash dominance(§3.1-3.2) |
+| trend_sleeve | directional (시계열, non-dollar-neutral) | 0%(진단 단계, gross_budget default=0.0) | net Sharpe +0.07~+0.10, corr_to_momentum=0.275 | diagnostic_only, 자본 미승인 |
+
+## 9. 다음 스텝 후보
 
 | 후보 | 상태 |
 | :--- | :--- |
-momentum discovery window worst-of-3(2021-2023) 설계 자체 재검토 (§3.1-§3.2: 자기상관 편향 기각 + regime-scale 파리티는 방향만 확증하고 크기 부족 확인 완료 -- 2022 크래시 해가 여전히 구조적 지배 요인) | 원인 규명 2건 소진, window 구조 변경안은 더 큰 범위·리스크의 별도 스펙 + 사용자 승인 필요 |
-| `_pnl_vol_target_scale`(Two-Pass, 전략 자체 PnL 기반) discovery gate 파리티 진단 추가 (§3.2에서 스코프 제외한 후속 후보) | 신규, 미착수 |
-| discovery 후보 웨이트 중복 빌드 dedupe (fold-safe ↔ top-level gate 공유, RAM/시간 추가 절감) | 신규, 미착수 |
-| `MHS_REGISTERED_POLICY_THRESHOLDS`(`cap_30_roster`, `primary_annual_return`) 등록 여부 | 미착수, 성과 무관 정책 결정 필요 |
+| 시계열 추세 슬리브 `gross_budget` 스윕(0.3 초과) 및 discovery-gate 결합 실측 (§7) | 신규, 미착수 |
+| momentum discovery window worst-of-3(2021-2023) 설계 재검토 | 원인 규명 2건 소진(§3.1-§3.2); window 구조 변경안은 별도 스펙+사용자 승인 필요; §7 슬리브가 우선 경로 |
+| `_pnl_vol_target_scale`(Two-Pass) discovery gate 파리티 진단 추가 | 신규, 미착수 |
+| discovery 후보 웨이트 중복 빌드 dedupe (fold-safe ↔ top-level gate) | 신규, 미착수 |
+| `MHS_REGISTERED_POLICY_THRESHOLDS`(`cap_30_roster`, `primary_annual_return`) 등록 여부 | 미착수, 정책 결정 필요 |
 | `pnl_vol_target` 기본값 전환 여부 (`mhs_execution_friction_and_exposure_layers.md` §6.1) | 미착수 |
-| `fast_book_mode`/`funding_carry` 자본 배분 최종 판정 (본 계약 실측이 선행조건) | 미착수, 사용자 승인 필요 |
+| `fast_book_mode`/`funding_carry` 자본 배분 최종 판정 | 미착수, 사용자 승인 필요 |
+| trend sleeve 자본 배분(`gross_budget`) 확정 | 미착수, §7 실측 확장 후 사용자 승인 필요 |
