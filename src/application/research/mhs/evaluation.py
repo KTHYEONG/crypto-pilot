@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import glob
 import hashlib
 import json
 import logging
@@ -90,6 +91,13 @@ from src.mhs.funding import build_funding_carry_candidate_weights
 from src.mhs.funding import funding_carry_signal  # noqa: F401 - contract wiring mandates the exact import line; the builder is invoked here
 from src.mhs.evaluation import effective_breadth
 from src.mhs.evaluation import year_restricted_correlation
+from src.mhs.features import (
+    MHS_FEATURE_REGISTRY,
+    build_feature_books,
+    equal_risk_combination,
+    feature_coverage_audit,
+)
+from src.mhs.stability import regime_split_stability
 from src.mhs.regime import trend_efficiency_scale
 from src.mhs.trend_sleeve import (
     market_basket_log_price,
@@ -292,6 +300,7 @@ class MhsDiagnosticRequest:
     pnl_vol_target: bool = True
     trend_sleeve: bool = False
     trend_sleeve_gross: float = 0.0
+    multi_feature_book: bool = False
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -328,6 +337,8 @@ class MhsDiagnosticRequest:
             raise ValueError("pnl_vol_target must be a bool")
         if not isinstance(self.trend_sleeve, bool):
             raise ValueError("trend_sleeve must be a bool")
+        if not isinstance(self.multi_feature_book, bool):
+            raise ValueError("multi_feature_book must be a bool")
         if not (0.0 <= self.trend_sleeve_gross <= 1.0):
             raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
         if self.trend_sleeve_gross > 0.0 and not self.trend_sleeve:
@@ -484,6 +495,7 @@ class MhsHorizonDiagnosticReport:
     full_history_yearly_net_t: dict[str, dict[int, float]] | None = None
     funding_carry_worst_year_corr: float | None = None
     trend_sleeve_diagnostic: dict[str, Any] | None = None
+    multi_feature_diagnostic: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -1374,6 +1386,198 @@ def _trend_sleeve_diagnostic(
             "net_sharpe_per_tier": combined_per_tier,
             "worst_year_net_t": worst_year_net_t,
         },
+    }
+
+
+# Preregistered regime boundary for the multi-feature stability split: the
+# 2021-2023 vs 2024-2025 windows measured in
+# docs/specs/mhs_multi_feature_alpha_architecture.md §0.3.
+_MULTI_FEATURE_REGIME_SPLIT = (pd.Timestamp("2024-01-01", tz="UTC"),)
+
+_MULTI_FEATURE_PANEL_COLUMNS = (
+    "close", "open", "high", "low", "quote_vol", "taker_buy_quote", "no_trades",
+)
+
+
+def _available_panel_columns(root: str, columns: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the requested columns present in the symbol parquet schema.
+
+    A column absent from the store (e.g. ``no_trades`` on symbols that never
+    recorded it) is deliberately NOT loaded -- the caller NaN-fills it so the
+    coverage gate fails it closed, mirroring the real no_trades collapse
+    (docs/specs/mhs_multi_feature_alpha_architecture.md §0.4) instead of
+    crashing the whole diagnostic on a missing column.
+    """
+    paths = sorted(glob.glob(os.path.join(root, "1h", "*.parquet")))
+    if not paths:
+        return ()
+    schema = set(pq.ParquetFile(paths[0]).schema.names)
+    return tuple(c for c in columns if c in schema)
+
+
+def _load_feature_panels(
+    root: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    grid_1h: pd.DatetimeIndex,
+    aligned_symbols: list[str],
+) -> dict[str, pd.DataFrame]:
+    """Load the registry's raw 1h panels, NaN-filling absent columns.
+
+    Present columns come from ``load_base_panel`` (causal survivor discovery);
+    a column missing from the store becomes an all-NaN panel aligned to
+    ``grid_1h`` x ``aligned_symbols``, which then fails the coverage gate --
+    never a silent drop, never a crash.
+    """
+    available = _available_panel_columns(root, _MULTI_FEATURE_PANEL_COLUMNS)
+    panels: dict[str, pd.DataFrame] = {}
+    if available:
+        loaded = load_base_panel(
+            root, "1h", available, start, end, partition="dev", min_bars=2000,
+        )
+        for column in available:
+            panels[column] = loaded[column].reindex(index=grid_1h, columns=aligned_symbols)
+    for column in _MULTI_FEATURE_PANEL_COLUMNS:
+        if column not in panels:
+            panels[column] = pd.DataFrame(np.nan, index=grid_1h, columns=aligned_symbols)
+    return panels
+
+
+def _multi_feature_diagnostic(
+    root: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    grid_1h: pd.DatetimeIndex,
+    aligned_symbols: list[str],
+    execution_mask: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+) -> dict[str, Any]:
+    """SCENARIO_MHS_MULTI_FEATURE_DIAGNOSTIC_REPORTS_COVERAGE_AND_STABILITY:
+    report-only measurements for the opt-in multi-feature alpha axis.
+
+    Builds every registry feature from the raw 1h panels, audits per-year
+    coverage inside the execution mask (fail-closed exclusion with the failing
+    year reported, never a silent drop), converts the admitted features into the
+    same dollar-neutral rank books the production stack uses on the 24h decision
+    grid, and reports per-admitted-feature regime-split stability, the
+    equal-risk combined book's net Sharpe per measured cost tier, and the
+    effective breadth of the feature-book PnL panel. Every value is finite or an
+    explicit ``None`` -- never NaN silently coerced to 0.0. This NEVER feeds
+    ``admission_t`` or any capital/gate decision: it is a measurement the user
+    consults before approving the architecture change
+    (docs/specs/mhs_multi_feature_alpha_architecture.md §2 Stage 1).
+    """
+    panels = _load_feature_panels(root, start, end, grid_1h, aligned_symbols)
+    decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
+    books = build_feature_books(
+        MHS_FEATURE_REGISTRY, panels, execution_mask, decision_grid, min_symbols=8,
+    )
+
+    admitted: dict[str, dict[str, Any]] = {}
+    excluded: dict[str, dict[str, Any]] = {}
+    for spec in MHS_FEATURE_REGISTRY:
+        feature = spec.builder(panels)
+        coverage = feature_coverage_audit(feature, execution_mask)
+        failing = [
+            year for year, cov in coverage.items() if cov < spec.min_coverage
+        ]
+        if failing:
+            excluded[spec.name] = {"failing_year": min(failing)}
+            continue
+        if spec.name not in books:
+            continue
+        book = books[spec.name]
+        base_net, _ = mhs_ledger_pnl(
+            book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+        )
+        stability = regime_split_stability(base_net, _MULTI_FEATURE_REGIME_SPLIT)
+        admitted[spec.name] = {
+            "coverage": {str(year): float(cov) for year, cov in coverage.items()},
+            "regime_split_stability": {
+                "window_sharpes": [
+                    (label, None if not np.isfinite(value) else float(value))
+                    for label, value in stability.window_sharpes
+                ],
+                "min_window_sharpe": (
+                    None if not np.isfinite(stability.min_window_sharpe)
+                    else float(stability.min_window_sharpe)
+                ),
+                "sign_consistent": stability.sign_consistent,
+                "decay": (
+                    None if not np.isfinite(stability.decay) else float(stability.decay)
+                ),
+            },
+        }
+
+    net_panel = {
+        name: mhs_ledger_pnl(
+            books[name], opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+        )[0]
+        for name in admitted
+    }
+    # A feature whose realized net PnL has zero or non-finite variance cannot be
+    # risk-scaled (equal_risk_combination fails closed on it) -- drop it from
+    # the combination, never let one degenerate book crash the whole diagnostic.
+    combinable: dict[str, pd.Series] = {}
+    for name, net in net_panel.items():
+        cleaned = net.dropna()
+        sd = float(cleaned.std(ddof=1)) if len(cleaned) > 1 else 0.0
+        if np.isfinite(sd) and sd > 0:
+            combinable[name] = net
+    # Construct the combined weight book through the equal-risk primitive, but
+    # report its net Sharpe per tier from the scaled net-PnL panel: net PnL is
+    # linear in the weight book (each bar's return is a weighted sum plus a
+    # turnover-proportional cost), so ``mean_i(net_i / sd_i)`` equals the ledger
+    # of the combined book without the numerically explosive ~1/sd gross.
+    combined = None
+    combined_per_tier: dict[str, float | None] = {}
+    if combinable:
+        combined = equal_risk_combination(
+            {name: books[name] for name in combinable}, combinable,
+        )
+        for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
+            per_feature = {
+                name: mhs_ledger_pnl(books[name], opens, bar_funding, cost_bps)[0]
+                for name in combinable
+            }
+            combined_net = (
+                sum(per_feature[name] / combinable[name].std(ddof=1) for name in combinable)
+                / len(combinable)
+            )
+            combined_per_tier[tier] = _annualized_1h_sharpe(combined_net)
+    else:
+        combined_per_tier = dict.fromkeys(MEASURED_EXECUTION_COST_TIERS_BPS)
+
+    feature_book_effective_breadth: dict[str, float] | None = None
+    if len(net_panel) >= 2:
+        n_eff, mean_corr = effective_breadth(pd.DataFrame(net_panel).fillna(0.0))
+        feature_book_effective_breadth = {"n_eff": n_eff, "mean_corr": mean_corr}
+
+    return {
+        "admitted": admitted,
+        "excluded": excluded,
+        "combined": {
+            "net_sharpe_per_tier": combined_per_tier,
+            "book_mean_gross": (
+                None
+                if combined is None
+                # ``combined`` is a risk-parity blend in raw 1/sd units (sd is a
+                # tiny hourly-net-pnl std, so combined's own gross is a
+                # meaningless leverage figure, e.g. ~175x). Rescale by
+                # n / sum(1/sd_i) so the inverse-vol weights sum to 1 -- the
+                # standard risk-parity normalization -- before reporting gross,
+                # matching the interpretable ~<=1.0 scale a unit-gross book has.
+                else float(
+                    (
+                        combined
+                        * len(combinable)
+                        / sum(1.0 / combinable[name].std(ddof=1) for name in combinable)
+                    ).abs().sum(axis=1).mean()
+                )
+            ),
+        },
+        "feature_book_effective_breadth": feature_book_effective_breadth,
     }
 
 
@@ -3625,6 +3829,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     signal_48h = horizon_log_return(log_close, 48)
     xs_ic = _xs_rank_ic(signal_48h, opens, forward_bars=48)
     trend_sleeve_diagnostic = _trend_sleeve_diagnostic(log_close, eligible, opens, bar_funding, execution_mask, request) if request.trend_sleeve else None
+    multi_feature_diagnostic = _multi_feature_diagnostic(root, start, end, grid_1h, aligned_symbols, execution_mask, opens, bar_funding) if request.multi_feature_book else None
     regression = _date_clustered_ols(opens, signal_48h, forward_bars=48)
     horizon_diagnostics = {
         "realized_vol_48h_mean": float(
@@ -3938,6 +4143,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         full_history_yearly_net_t=full_history_yearly_net_t,
         funding_carry_worst_year_corr=funding_carry_worst_year_corr,
         trend_sleeve_diagnostic=trend_sleeve_diagnostic,
+        multi_feature_diagnostic=multi_feature_diagnostic,
     )
 
 
