@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_RAM_GUARD_DIAGNOSTIC_OPT",
+      "date": "2026-08-14",
+      "adr_id": "ADR_20260814_MHS_RAM_GUARD_DIAGNOSTIC_OPT",
+      "domain": "execution",
+      "title": "MHS RAM 가드 + 위원회/멀티피처 진단 메모리 최적화",
+      "why": "29차 committee 진단 프로덕션 실행에서 OOM 직전 피크 RSS(16.8 GB→~28 GB)로 프로세스가 사망. WSL 32 GB 환경에서 실패-마감(계산 값 비변경) RAM 가드와 병목 구간 메모리/시간 최적화 필요",
+      "resolution": "RAM 가드(MHS_RAM_BUDGET_FRACTION=0.85 자동 예산 + 리저브, 스테이지 배리어 fail-closed, 워커 리저브, --no-ram-guard)와 진단 최적화 구현: 진단을 폴드 풀 join+캐시 퇴거 후 재배치(~6GB 릴리스), 패널 컬럼 프루닝(committee 3/멀티피처 6컬럼, open 미로드), 멀티티어 ledger 및 스트리밍 accumul진단으로 O(개별) 단일패스(시간 2.9배 절감). 멀티티어 per-tier bit-identical 및 스트리밍 참조 비교 ULP 0으로 산출물 동결 유지",
+      "impact": "계산 값 bit-identical 동결 유지하되 위원회/멀티피처 진단 피크 RSS를 자동 예산(85%) 아래로 보호하고 실행 시간을 개선. 책/폴드 스트리밍(_materialize_replay_windows, 16.8GB 주범)은 리플레이 계약 회귀 위험으로 별도 스펙 후보로 기록"
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE",
       "date": "2026-08-14",
       "adr_id": "ADR_20260814_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE",
@@ -989,16 +999,6 @@
       "why": "실측 CLI 실행에서 216건 백테스트 중 0건이 observation/stress gate를 통과. 근본원인=ReliabilityGateConfig.hurdle_rate=0.15가 무근거 고정값이며, 이 프로젝트 유일의 검증된 edge(Donchian 베이스라인 점추정 CAGR 9.63%)조차 통과 못 했을 수준. shortlist_budget=24도 _SHORTLIST_PER_SIZE=6이라는 무근거 상수에서 유래. 사용자가 v1/v2 버전표기 코드 폐기와 JSONL 감사로그의 터미널 과다출력 제거도 함께 요청.",
       "resolution": "hurdle_rate를 실측 CostModel 비용배수(k=2.0 x 연환산 allocation_cost) 기반 동적값으로 대체(derive_cost_multiple_hurdle_rate, equity_span_years 신설). shortlist_budget을 probe-then-re-search 방식으로 실측 wall-time 기반 동적 도출(resolve_dynamic_shortlist_budget)로 전환. rolling 전용 v1/v2 프로필·알고리즘(_bounded_enumerate_proposals 등) 삭제, technical-5symbol-rolling 단일 프로필로 통합(정적 파이프라인의 exact_legacy_v1은 명시적으로 불변). rolling_candidate_audit.jsonl 파일 영속화를 제거하고 logging.md 스키마를 따르는 구조화 DEBUG 로그로 대체. /check 과정에서 2건의 실질 결함을 직접 재현·수정: (1) 동적 예산이 min_shortlist_budget에 의해 생성 단계에서부터 상한 걸려 실측과 무관하게 항상 8개로 고정되던 버그 - probe 이후 재탐색하도록 재구조화. (2) 수정 (1)이 노출시킨 _priority_top_n_for_size의 O(top_n) list.sort() 재정렬 latent 성능 결함(size=4/top_n=20000에서 17.4초, top_n=120000에서 행) - 고정크기 max-heap(_WorstKeptFirst, O(log top_n))으로 교체해 6.9초로 개선.",
       "impact": "전체 회귀 테스트·mypy·ruff·lean_check 게이트 전부 PASS. 다만 max_backtest_wall_seconds_per_window=120.0 기본값이 9개 분기 전체 실측 replay에는 다소 길어(이론상 최대 18분+오버헤드) 사용자가 40분 타임아웃 실행 도중 강제 종료함 - 기본값 하향 조정 또는 단일 분기 검증이 후속 과제로 남음. hurdle 재보정의 실제 통과율 효과는 전체 replay 미완주로 아직 실측 확정되지 않음."
-    },
-    {
-      "task_id": "TASK_ROLLING_ADMISSION_PRIORITY_SEARCH_V3",
-      "date": "2026-08-02",
-      "adr_id": "ADR_20260802_ROLLING_ADMISSION_PRIORITY_SEARCH_V3",
-      "domain": "research",
-      "title": "Rolling Admission v3: exact best-first 후보 탐색 재설계",
-      "why": "18-source x 5-symbol(90 expert) rolling-v2 bounded_family_unique DFS가 exhaustive 전수나열이라 첫 윈도우에서 1,000,001>1,000,000 graph-node 예산 초과로 fail-closed. 사용자가 향후 전략을 지속 추가할 계획이라, 후보를 줄이는 임시방편이 아니라 탐색 알고리즘 자체의 구조적 재검토를 요청함.",
-      "resolution": "family-unique pair-compatible lattice에서 rank_key의 max항이 집합 확장에 대해 단조증가함을 이용한 exact best-first branch-and-bound(_priority_top_n_for_size, priority_shortlist_family_unique_proposals)를 신설. v1/v2는 완전 동결, technical-5symbol-rolling-v3 프로필/priority_family_unique_v3 proposal_search로 추가. 분기 실패 시 이전 분기 ledger/pointer/audit이 유실되던 결함(run_rolling_library_admission)도 함께 수정. 실행 중 발견된 별도 결함(_validate_fixed_weights의 float64 엡실론 CASH 잔여가중치 오탐)도 수정.",
-      "impact": "실측: 90개 후보 전체(prefilter 비활성)로 9개 분기 전체 COMPLETE 완주, 분기당 generated_nodes 52,680~79,606(예산의 5~8%만 사용, 이전엔 즉시 fail-closed). 216건 실백테스트 전부 실행됐으나 전 분기 CASH(no_deployable_proposal) - 인프라 병목 해소 확인, 남은 병목은 기술적 신호 라이브러리의 예측력 부재로 재확인."
     }
   ]
 }

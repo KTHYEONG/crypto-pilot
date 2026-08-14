@@ -8,6 +8,7 @@ benchmarks any future learned combiner against the curated committee
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import numpy as np
@@ -16,6 +17,7 @@ import pytest
 
 import src.mhs.committee as committee
 from src.mhs.committee import (
+    committee_block_edges_from,
     decompose_cost,
     long_only_equal_risk_weights,
     purged_walk_forward,
@@ -23,7 +25,7 @@ from src.mhs.committee import (
     volatility_target_scale,
     wealth_metrics,
 )
-from src.mhs.contracts import MHS_COMMITTEE_MEMBERS
+from src.mhs.contracts import MHS_COMMITTEE_MEMBERS, MHS_COMMITTEE_OOS_START
 from src.mhs.features import MHS_FEATURE_REGISTRY
 
 _PPY = 365.0 * 24.0
@@ -330,3 +332,36 @@ def test_committee_members_resolve_in_feature_registry() -> None:
         else:
             families.add(member)
     assert len(families) >= 3
+
+def test_committee_block_edges_from_anchored_at_oos_start() -> None:
+    # SCENARIO_COMMITTEE_BLOCK_EDGES_ANCHORED_AT_OOS_START (B1): the walk-forward
+    # block grid must be anchored at max(start, oos_start), never the raw
+    # diagnostic start, so a purged walk-forward can no longer score pre-OOS
+    # blocks as pseudo-OOS. Edges start at MHS_COMMITTEE_OOS_START (2023-01-01)
+    # in 6-month steps and never earlier; a diagnostic whose own start is
+    # already after oos_start is unaffected (max() semantics); end <=
+    # max(start, oos_start) raises ValueError.
+    edges = committee_block_edges_from(
+        pd.Timestamp("2021-01-01", tz="UTC"),
+        MHS_COMMITTEE_OOS_START,
+        pd.Timestamp("2025-12-31", tz="UTC"),
+    )
+    assert edges[0] == MHS_COMMITTEE_OOS_START
+    assert edges[0] == pd.Timestamp("2023-01-01", tz="UTC")
+    for prev, nxt in itertools.pairwise(edges):
+        assert nxt == prev + pd.DateOffset(months=6)
+    assert all(e >= MHS_COMMITTEE_OOS_START for e in edges)
+
+    late = committee_block_edges_from(
+        pd.Timestamp("2024-06-01", tz="UTC"),
+        MHS_COMMITTEE_OOS_START,
+        pd.Timestamp("2025-12-31", tz="UTC"),
+    )
+    assert late[0] == pd.Timestamp("2024-06-01", tz="UTC")
+
+    with pytest.raises(ValueError, match="max\\(start, oos_start\\)"):
+        committee_block_edges_from(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            MHS_COMMITTEE_OOS_START,
+            pd.Timestamp("2022-01-01", tz="UTC"),
+        )
