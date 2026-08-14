@@ -164,6 +164,14 @@ _SLOW_BAND = HorizonBand(name="slow_momentum", horizons_hours=MOMENTUM_HORIZON_C
 # allocation is P1 gated on the fold-train results).
 MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS: tuple[int, ...] = (24, 72, 168, 336, 504)
 
+# Measured slow band of the additive directional trend sleeve
+# (docs/specs/mhs_directional_trend_sleeve.md §1.4). The ensemble is mandatory:
+# individual net Sharpe at the base tier ranges -0.058..+0.282, so any
+# single-horizon selection is overfitting. Used only by the opt-in diagnostic
+# (src/mhs/trend_sleeve.py, MhsDiagnosticRequest.trend_sleeve); the sleeve is
+# inert unless explicitly enabled.
+MHS_TREND_SLEEVE_HORIZONS_HOURS: tuple[int, ...] = (336, 480, 600, 720, 1080, 1440)
+
 PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
     "fast_reversal": BookSpec(
         band=_FAST_BAND, horizon_hours=48, step_hours=6, min_symbols=8,
