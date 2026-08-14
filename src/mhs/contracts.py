@@ -172,6 +172,17 @@ MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS: tuple[int, ...] = (24, 72, 168, 336
 # inert unless explicitly enabled.
 MHS_TREND_SLEEVE_HORIZONS_HOURS: tuple[int, ...] = (336, 480, 600, 720, 1080, 1440)
 
+# Per-year non-null coverage floor a feature must clear inside the execution
+# mask to be eligible for capital (docs/specs/mhs_multi_feature_alpha_architecture.md
+# §2 Stage 1, §0.4). Measured justification: the no_trades column coverage
+# collapses 2021:0.84 -> 2022:0.34 -> 2023-2025:0.00, which silently produced an
+# avg_trade_size book whose full-sample +0.311 Sharpe is sourced entirely from
+# 2021-2022. The registry (src/mhs/features.py MHS_FEATURE_REGISTRY) applies
+# this floor as its min_coverage; a feature failing it in ANY year is
+# fail-closed excluded from capital. A revision of this constant is a contract
+# revision, never an inline edit at a call site.
+MHS_FEATURE_MIN_COVERAGE: float = 0.90
+
 PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
     "fast_reversal": BookSpec(
         band=_FAST_BAND, horizon_hours=48, step_hours=6, min_symbols=8,

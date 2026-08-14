@@ -677,5 +677,9 @@
   "src/mhs/trend_sleeve.py": {
     "architecture": "docs/specs/mhs_directional_trend_sleeve.md",
     "testing": "tests/unit/mhs/test_trend_sleeve.py"
+  },
+  "src/mhs/features.py": {
+    "architecture": "docs/specs/mhs_multi_feature_alpha_architecture.md",
+    "testing": "tests/unit/mhs/test_features.py"
   }
 }
