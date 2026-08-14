@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE",
+      "date": "2026-08-14",
+      "adr_id": "ADR_20260814_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE",
+      "domain": "mhs",
+      "title": "MHS 6인 위원회(committee) 및 자산증식 목적함수 도입",
+      "why": "다중피처 아키텍처(ADR_20260814_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE) 이후 규모/구성/조율기/목적함수를 실증으로 확정할 필요. purged walk-forward(336h purge, 6개월 블록) 실측 결과 학습 기반 조합기(shrinkage MV, train-Sharpe top-k, 레짐조건부)가 경제적 큐레이션 equal-risk에 전부 패배(최대 +0.867 vs +1.379). 무제약(롱숏) 조합기는 비용 부호 보정 후 전 tier 음수(-0.568~-1.813)로 확인.",
+      "resolution": "src/mhs/committee.py 신규: decompose_cost(2-tier 비용 분해)/score_weighted_net(비용 양방향 drag)/long_only_equal_risk_weights/wealth_metrics(CAGR/MDD/logret)/volatility_target_scale/purged_walk_forward. MHS_COMMITTEE_MEMBERS(6인: flow_imb_720h/168h, xs_mom_336h/720h, xs_idio_mom_336h, mom3_skew_168h) 경제 패밀리 선언(성과 랭킹 아님). MhsDiagnosticRequest.committee_book opt-in(기본 False) 배선. source_coverage_audit로 fillna 이전 원천 커버리지 감사 추가(funding 45/452 심볼만 실제 보유 결함 탐지).",
+      "impact": "자본 배분 무변경(기본 committee_book=False). 프로덕션 실측: base tier Sharpe +1.664(walk-forward 블록 시작점이 2021-01이라 스펙 샌드박스 +1.379보다 낙관적 — 후속 보정 필요, §9). ML 도입은 이 벤치마크(equal_risk 큐레이션)를 이길 때까지 보류."
+    },
+    {
       "task_id": "TASK_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE",
       "date": "2026-08-14",
       "adr_id": "ADR_20260814_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE",
@@ -989,16 +999,6 @@
       "why": "18-source x 5-symbol(90 expert) rolling-v2 bounded_family_unique DFS가 exhaustive 전수나열이라 첫 윈도우에서 1,000,001>1,000,000 graph-node 예산 초과로 fail-closed. 사용자가 향후 전략을 지속 추가할 계획이라, 후보를 줄이는 임시방편이 아니라 탐색 알고리즘 자체의 구조적 재검토를 요청함.",
       "resolution": "family-unique pair-compatible lattice에서 rank_key의 max항이 집합 확장에 대해 단조증가함을 이용한 exact best-first branch-and-bound(_priority_top_n_for_size, priority_shortlist_family_unique_proposals)를 신설. v1/v2는 완전 동결, technical-5symbol-rolling-v3 프로필/priority_family_unique_v3 proposal_search로 추가. 분기 실패 시 이전 분기 ledger/pointer/audit이 유실되던 결함(run_rolling_library_admission)도 함께 수정. 실행 중 발견된 별도 결함(_validate_fixed_weights의 float64 엡실론 CASH 잔여가중치 오탐)도 수정.",
       "impact": "실측: 90개 후보 전체(prefilter 비활성)로 9개 분기 전체 COMPLETE 완주, 분기당 generated_nodes 52,680~79,606(예산의 5~8%만 사용, 이전엔 즉시 fail-closed). 216건 실백테스트 전부 실행됐으나 전 분기 CASH(no_deployable_proposal) - 인프라 병목 해소 확인, 남은 병목은 기술적 신호 라이브러리의 예측력 부재로 재확인."
-    },
-    {
-      "task_id": "TASK_ROLLING_ADMISSION_OBSERVABILITY_PERFORMANCE",
-      "date": "2026-08-02",
-      "adr_id": "ADR_20260802_ROLLING_ADMISSION_OBSERVABILITY_PERFORMANCE",
-      "domain": "research",
-      "title": "Rolling admission 관측성·성능 및 후보 탐색 예산",
-      "why": "분기별 후보 필터링 결과를 사후 분석할 수 있어야 하고, 실제 CLI 실행에서 bounded 후보 조합 탐색이 기본 예산을 초과해 백테스트에 도달하지 못했음",
-      "resolution": "분기별 candidate audit을 즉시 append하도록 보장하고 bounded 탐색 통계를 report/audit에 기록했으며, CLI 실측 결과 18개 전략 소스와 5개 심볼 조합이 1,000,000 graph-node 예산을 초과하는 fail-closed 동작을 확인함",
-      "impact": "완료된 분기 감사 로그의 유실을 방지하고 탐색 폭발을 조용히 숨기지 않지만, 운영 가능한 후보 사전축소·심볼별 예산·CLI/profile 예산 조정이 다음 개선 과제로 명확해짐"
     }
   ]
 }
