@@ -1,0 +1,139 @@
+{
+  "blend": {
+    "failure": null,
+    "horizon_hours": 168,
+    "primary_autocorr_sharpe": 2.3013534410125587,
+    "primary_geometric_cagr": 4.515921824631762,
+    "primary_max_drawdown": -0.24961408552155095,
+    "primary_naive_sharpe": 3.642123816665108,
+    "primary_net_ann": 1.8356040455841922,
+    "stress_naive_sharpe": 3.4563989184434263
+  },
+  "blend_cash_fraction": 0.5131428571428571,
+  "blend_target_gross": 0.4868571428571429,
+  "bootstrap_ci": [
+    -8.199795098619799e-05,
+    0.0004857228517806218
+  ],
+  "deflated_sharpe_ratio": null,
+  "discovery_qualification": {
+    "funding_carry_long": {
+      "admitted": false,
+      "qualification_adjusted_net_t": null,
+      "qualification_net_t": null,
+      "qualification_regime_scaled_net_t": null,
+      "selected_horizon": null
+    },
+    "funding_carry_short": {
+      "admitted": false,
+      "qualification_adjusted_net_t": null,
+      "qualification_net_t": null,
+      "qualification_regime_scaled_net_t": null,
+      "selected_horizon": null
+    },
+    "momentum": {
+      "admitted": false,
+      "qualification_adjusted_net_t": null,
+      "qualification_net_t": null,
+      "qualification_regime_scaled_net_t": null,
+      "selected_horizon": null
+    },
+    "reversal": {
+      "admitted": false,
+      "qualification_adjusted_net_t": null,
+      "qualification_net_t": null,
+      "qualification_regime_scaled_net_t": null,
+      "selected_horizon": null
+    }
+  },
+  "eligible_symbols": 8,
+  "fast_reversal": {
+    "failure": null,
+    "horizon_hours": 48,
+    "primary_autocorr_sharpe": -1.694944695642849,
+    "primary_geometric_cagr": -0.6558609107300557,
+    "primary_max_drawdown": -0.33702246935986624,
+    "primary_naive_sharpe": -1.9311283935332473,
+    "primary_net_ann": -0.9469762170660062,
+    "stress_naive_sharpe": -2.7020851397568553
+  },
+  "folds": [
+    {
+      "decision_intents": 0,
+      "failures": [
+        "INCOMPLETE_ANCHORED_FOLD"
+      ],
+      "fast_horizon_hours": 48,
+      "fold_index": 0,
+      "primary_autocorr_sharpe": NaN,
+      "primary_geometric_cagr": NaN,
+      "primary_max_drawdown": NaN,
+      "primary_naive_sharpe": NaN,
+      "primary_net_ann": NaN,
+      "slow_horizon_hours": 168,
+      "stress_naive_sharpe": NaN
+    },
+    {
+      "decision_intents": 0,
+      "failures": [
+        "INCOMPLETE_ANCHORED_FOLD"
+      ],
+      "fast_horizon_hours": 48,
+      "fold_index": 1,
+      "primary_autocorr_sharpe": NaN,
+      "primary_geometric_cagr": NaN,
+      "primary_max_drawdown": NaN,
+      "primary_naive_sharpe": NaN,
+      "primary_net_ann": NaN,
+      "slow_horizon_hours": 168,
+      "stress_naive_sharpe": NaN
+    },
+    {
+      "decision_intents": 0,
+      "failures": [
+        "INCOMPLETE_ANCHORED_FOLD"
+      ],
+      "fast_horizon_hours": 48,
+      "fold_index": 2,
+      "primary_autocorr_sharpe": NaN,
+      "primary_geometric_cagr": NaN,
+      "primary_max_drawdown": NaN,
+      "primary_naive_sharpe": NaN,
+      "primary_net_ann": NaN,
+      "slow_horizon_hours": 168,
+      "stress_naive_sharpe": NaN
+    }
+  ],
+  "horizon_diagnostics": {
+    "efficiency_ratio_48h_mean": 0.14304097444433383,
+    "fast_horizon_effective_breadth": 1.9461023584131822,
+    "realized_vol_48h_mean": 0.013690979316295912,
+    "slow_horizon_effective_breadth": 1.7521145122898814
+  },
+  "placebo_sharpe_percentile": 1.0,
+  "realized_execution_roster_size": 5.124,
+  "research_go": {
+    "eligible": false,
+    "reason_codes": [
+      "INCOMPLETE_ANCHORED_FOLD",
+      "UNSPECIFIED_POLICY"
+    ]
+  },
+  "slow_momentum": {
+    "failure": null,
+    "horizon_hours": 168,
+    "primary_autocorr_sharpe": 2.294422543334613,
+    "primary_geometric_cagr": 4.610123932490123,
+    "primary_max_drawdown": -0.2526807084449664,
+    "primary_naive_sharpe": 3.6378443089426087,
+    "primary_net_ann": 1.8556436531496068,
+    "stress_naive_sharpe": 3.450039946692842
+  },
+  "status": "COMPLETE",
+  "xs_rank_ic": {
+    "forward_bars": 48,
+    "mean_ic": 0.03921127042514325,
+    "n_dates": 1903,
+    "t_stat": 4.2807163514462445
+  }
+}

@@ -184,5 +184,9 @@
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
+  },
+  "src/mhs/result_log.py": {
+    "architecture": "docs/specs/mhs_result_logging.md",
+    "testing": "tests/unit/mhs/test_result_log.py"
   }
 }
