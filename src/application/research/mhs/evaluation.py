@@ -35,7 +35,8 @@ import pyarrow.parquet as pq
 
 import src.market_data.services.futures_collection as _futures_collection
 from src.market_data.services.futures_collection import DataCollector
-from src.application.data.mhs_execution_collection import assert_execution_data_coverage
+from src.application.data.mhs_execution_collection import assert_relevant_execution_data_coverage
+from src.application.data.mhs_execution_collection import assert_relevant_mark_price_coverage
 from src.mhs.evaluation import phase_diagnostic_metrics
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
@@ -561,6 +562,7 @@ class MhsHorizonDiagnosticReport:
     trend_sleeve_diagnostic: dict[str, Any] | None = None
     multi_feature_diagnostic: dict[str, Any] | None = None
     committee_diagnostic: dict[str, Any] | None = None
+    funding_dropped_symbols: dict[str, str] | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -828,20 +830,36 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def _load_funding_series(symbols: list[str]) -> dict[str, pd.Series]:
+def _load_funding_series(
+    symbols: list[str],
+) -> tuple[dict[str, pd.Series], dict[str, str]]:
+    """Load per-symbol funding series plus the symbols silently dropped on load.
+
+    Returns ``(series, dropped)``: ``series`` maps symbol -> funding rates as
+    before, and ``dropped`` maps each symbol whose parquet raised on load (or
+    produced no rates) to the failure reason -- the drop is no longer
+    observable only via a warning log line, so a corrupted funding file can
+    never change the universe composition invisibly. Exception swallowing
+    itself is kept: one corrupt file must not kill the whole diagnostic.
+    """
     series: dict[str, pd.Series] = {}
+    dropped: dict[str, str] = {}
     for sym in symbols:
         path = funding_path(sym)
         if not path.exists():
+            dropped[sym] = "missing"
             continue
         try:
             rates = load_funding_rates(str(path))
         except Exception as exc:  # noqa: BLE001
+            dropped[sym] = f"load_error: {exc}"
             _logger.warning("[MHS] funding load failed symbol=%s error=%s", sym, exc)
             continue
         if len(rates):
             series[sym] = rates
-    return series
+        else:
+            dropped[sym] = "empty"
+    return series, dropped
 
 
 def _pit_execution_mask(
@@ -4229,7 +4247,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     telemetry.record("base_1h_panel", grid_bars=len(grid_1h), n_symbols=len(symbols))
     _assert_stage_rss_budget("base_1h_panel", rss_budget_bytes, rss_reserve_bytes)
 
-    funding_by_symbol = _load_funding_series(symbols)
+    funding_by_symbol, funding_dropped = _load_funding_series(symbols)
     fold_funding = dict(funding_by_symbol)
     funded = [
         s for s in symbols
@@ -4237,10 +4255,6 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     ]
     if not funded:
         raise RuntimeError("no dev symbol has funding coverage; the MHS ledger requires funding")
-    if request.execution_coverage_gate:
-        assert_execution_data_coverage(
-            funded, request.execution_timeframe, str(start), str(end), root=request.data_root,
-        )
     close = close[funded]
     opens = opens[funded]
     quote_vol = quote_vol[funded]
@@ -4316,7 +4330,23 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+    if request.execution_coverage_gate:
+        # Relevance-scoped pre-flight gates (spec
+        # mhs_data_integrity_relevance_scoping.md §3): the full-universe
+        # Cartesian-product gate is replaced here by per-roster-membership
+        # scope -- gaps outside a symbol's membership interval are ignored, and
+        # mark-price coverage is validated with the exact causal availability
+        # semantics the replay applies, so a pass cannot die mid-replay.
+        assert_relevant_execution_data_coverage(
+            execution_mask, request.execution_timeframe, root=request.data_root,
+        )
     realized_execution_roster_size = float(execution_mask.sum(axis=1).mean())
+    if request.execution_coverage_gate:
+        assert_relevant_mark_price_coverage(
+            execution_mask,
+            "1h",
+            stale_hours=24 if request.mark_mode == "cache_required_stale_carry" else 0,
+        )
     if request.fast_book_mode == "horizon_ensemble":
         w_fast_execution = _horizon_ensemble_execution_weights(
             log_close, eligible, execution_mask, fast, fast_grid,
@@ -4749,6 +4779,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         trend_sleeve_diagnostic=trend_sleeve_diagnostic,
         multi_feature_diagnostic=multi_feature_diagnostic,
         committee_diagnostic=committee_diagnostic,
+        funding_dropped_symbols=funding_dropped or None,
     )
 
 
