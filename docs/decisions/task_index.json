@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_DATA_INTEGRITY_RELEVANCE_SCOPING",
+      "date": "2026-08-15",
+      "adr_id": "ADR_20260815_MHS_DATA_INTEGRITY_RELEVANCE_SCOPING",
+      "domain": "mhs",
+      "title": "MHS 데이터 무결성 관련성 스코핑 및 마크가격 사전 게이트",
+      "why": "3m 전환 후 실제 실행에서 --execution-coverage-gate가 로스터에 전혀 편입되지 않는 심볼의 무관한 결손 36/36(100% 오탐)으로 과차단되는 동시에, 게이트를 끄면 markPriceKlines 결손(VETUSDT 등 13개 심볼, 로스터 편입이 마크 데이터 시작보다 최대 9,410시간 앞섬)으로 91초 뒤 리플레이 도중 크래시함을 실측함. 두 문제 모두 커버리지 검사가 '실제 체결되는 (심볼×시각)'이 아니라 '전체 심볼×전체기간'으로 정의된 동일한 설계 결함에서 발생.",
+      "resolution": "mhs_execution_collection.py에 roster_membership_intervals()(execution_mask에서 심볼별 연속 편입구간 벡터화 추출) 신설. 이를 재사용해 assert_relevant_execution_data_coverage()(구간별 결손만 검사, 기존 전체스코프 assert_execution_data_coverage는 백필검증용으로 유지)와 assert_relevant_mark_price_coverage()(_cached_mark_panel과 동일한 +1h 인과 시프트·양수 필터·stale_hours 정책 재현)를 신규 구현. run_mhs_horizon_diagnostic의 execution_mask 산출 직후로 게이트 호출 위치 이동. _load_funding_series가 손상 파일을 무성으로 탈락시키던 부분을 dropped 매핑 반환으로 관측 가능하게 변경.",
+      "impact": "무관한 데이터 결손으로 인한 진단 실행 과차단이 제거되고, 이전에는 91초 리플레이 후에야 발견되던 마크가격 결손이 실행 시작 전 즉시 심볼 단위로 보고됨. markPriceKlines 백필(67개 심볼, 소스 존재 확인됨) 후 재실행하면 3m 전환의 순수 효과를 마크 결손 오염 없이 측정 가능."
+    },
+    {
       "task_id": "TASK_MHS_EXECUTION_TIMEFRAME_3M",
       "date": "2026-08-15",
       "adr_id": "ADR_20260815_MHS_EXECUTION_TIMEFRAME_3M",
@@ -989,16 +999,6 @@
       "why": "growth_engine_v2 첫 CLI 실행이 매 4h봉 무조건 재조정(rebalance_bars=1) 기본값을 썼고, xs_momentum 5개 룩백만 검정된 상태였다. 사용자가 재조정 주기 재검토, 20개 이상 전략 비교, universe_size/거래 심볼 수 등 구조 변수에 대한 Optuna류 탐색 적용 가능성을 요청했다.",
       "resolution": "(1) rebalance_bars/no_trade_band 단독 스윕(F4·E8-A)이 bar=1을 유일한 열등점으로 확인해 CLI 기본값을 1→3으로 변경. (2) PIT dev 74종에서 기존 소진 가설(xs_momentum/reversal/carry/low_vol)과 겹치지 않는 20개 신규 횡단면 가설을 Bonferroni(family=20, t floor=3.05) 기준으로 스크린 — 전부 미달, H17(유동성 팩터)만 평탄역·베타중립성 통과했으나 미채택(홀드아웃 의도적 미열람). (3) uv run --with optuna로 실행 가능성 확인 후 tools/research/structural_tuner.py(IS-only 목적함수, 시행 예산 4~50 상한, evaluate_parameter_plateau 재사용 평탄역 검사 강제) 구현, optuna는 pyproject.toml [project.optional-dependencies] tuning 그룹으로만 추가(런타임 의존성 아님). 축별 최선값 조합이 OOS에서 부호 반전(오버피팅)하는 반면 Optuna 결합탐색은 안정적임을 실측·테스트로 고정. CLI 재실행 결과 판정 불변(NO_ADMISSIBLE_ALPHA, plateau) — oos_t_stat 개선(−1.277→−0.510)은 비용 절감이 아니라 realized_weights 타이밍 개선임을 직접 비교로 확인, docs/results/growth_portfoilo.md §9에 기록.",
       "impact": "재조정 주기 기본값이 F4·E8-A 양쪽에서 독립 재현된 실측 근거로 교체됐고, 20개 가설 소진으로 다음 spec은 H17 단독 사전등록 재제출부터 시작해야 함이 명확해졌다. 구조 변수 탐색에 Optuna를 쓰되 축별 조합 관행의 위험성(OOS 부호반전)과 3대 안전장치(IS-only·예산상한·평탄역 검사)가 코드로 고정됐다."
-    },
-    {
-      "task_id": "TASK_GROWTH_ENGINE_V2_FIRST_RUN",
-      "date": "2026-08-03",
-      "adr_id": "ADR_20260803_GROWTH_ENGINE_V2_FIRST_RUN",
-      "domain": "risk",
-      "title": "Growth Engine v2 첫 CLI 실행 — 크래시/dev-holdout/backfill 범위 결함 3건 발견·수정",
-      "why": "spec growth_engine_v2(P1~P3)를 구현한 뒤 처음으로 research run portfolio growth CLI를 실행하자 shape mismatch로 즉시 크래시했다. 수정 후에도 symbol_scope=dev 기본값에서 holdout 파티션이 항상 공집합으로 계산되는 구조적 결함, derive_backfill_candidates가 봉인 이전 구간을 포함하는 범위 결함이 추가로 발견됐다.",
-      "resolution": "(1) _build_signal_weights의 weights.loc[bars] 대입에 컬럼 지정 누락 수정. (2) dev/holdout 분리를 symbol_scope 필터링 이전 full_schedule에서 계산하도록 순서 변경, symbol_scope는 매매 대상만 제한. (3) derive_backfill_candidates 호출을 start 이후 rebalance_dates로 제한. 세 수정 모두 lint/mypy/pytest 통과, 전체 회귀 없음. 최종 CLI 결과는 NO_ADMISSIBLE_ALPHA(binding_constraint=plateau, holdout_retention=0.117)로 CASH 유지. docs/specs/growth_engine_v2.md F1b의 backfill 후보 수치를 탐색 추정치 55에서 실측치 89로 갱신.",
-      "impact": "Growth Engine v2가 실데이터·실코드 경로로 처음 끝까지 실행되어 spec F3의 사전 반증(탐색 스크립트 기반)이 프로덕션 코드로도 재확인됐다. 향후 어떤 심볼 스코프로 실행해도 holdout 검정이 항상 정상 작동하고, backfill 우선순위 카운트가 봉인 경계를 정확히 지킨다."
     }
   ]
 }
