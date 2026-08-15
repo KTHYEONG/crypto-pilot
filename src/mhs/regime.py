@@ -1,11 +1,8 @@
 """Market-wide regime features: fixed-reference-basket trend and drawdown.
 
 Unlike ``horizons.py`` (per-symbol features), these aggregate a caller-supplied
-FIXED basket of symbols into market-level regime proxies. The basket is never
-derived from a time-varying eligibility panel -- composition drift would
-confound the measure (docs/specs/mhs_momentum_strategy_redesign_review.md
-§3.2). Both functions are causal (rolling/shift over past rows only) and pure:
-they depend solely on ``log_price`` rows at or before the current index.
+fixed basket of symbols into market-level regime proxies to avoid composition drift.
+Both functions are causal and depend solely on ``log_price`` rows at or before the current index.
 """
 
 from __future__ import annotations
@@ -32,8 +29,7 @@ def causal_market_beta(
     ``[-clip_abs, clip_abs]``. Causal: the rolling windows read only bars at or
     before ``t``. Cells with a zero or non-finite market variance are NaN, never
     inf (``var.where(var > 0)`` before division). Used by
-    ``beta_neutralize_weights`` to build the parameter-free market-neutral book
-    (docs/specs/mhs_alpha_engine.md §4, RC-4).
+    ``beta_neutralize_weights`` to build the market-neutral book.
     """
     if lookback_bars < 2:
         raise ValueError(f"lookback_bars must be >= 2, got {lookback_bars}")
@@ -68,7 +64,7 @@ def beta_neutralize_weights(
     removes the beta component ``sum(w * beta_c) / sum(beta_c ** 2)``, then
     restores dollar-neutral unit gross via ``renormalize_within_mask``. Both
     ``sum(w) == 0`` and ``sum(w * beta) == 0`` hold by construction on every
-    qualifying row (docs/specs/mhs_alpha_engine.md §4, RC-4). Rows with fewer
+    qualifying row. Rows with fewer
     than ``min_symbols`` mask cells, a zero beta dispersion, or all-NaN beta
     return all zeros (fail closed, never NaN).
     """
@@ -144,9 +140,7 @@ def crash_regime_tilt_weights(
     gross typically shrinks (the tilt offsets shorts rather than amplifying
     them, the conservative direction). ``alpha=0.0`` returns
     ``rank_neutral_weights`` unchanged (byte-identical passthrough); there is
-    no baked-in "recommended" alpha -- see
-    docs/specs/mhs_crash_regime_tilt_overlay.md §4-5 for why this is a
-    risk-budget policy parameter, not a fitted one.
+    no baked-in "recommended" alpha -- this is a risk-budget policy parameter, not a fitted one.
     """
     if not (0.0 <= alpha <= 1.0):
         raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha}")
@@ -185,8 +179,7 @@ def trend_efficiency_scale(
     levers above 1.0), with the ratio inverted relative to that sibling because
     ``efficiency_ratio``'s adverse direction is LOW (choppy/momentum-hostile),
     not HIGH like realized vol. A flat/insufficient-history window carries full
-    exposure (never 0/0), matching ``_regime_cash_scale``'s same guarantee
-    (docs/specs/mhs_fast_reversal_overlay_redesign.md §2.3).
+    exposure (never 0/0).
     """
     if not 0.0 < floor <= 1.0:
         raise ValueError(f"floor must be in (0, 1], got {floor}")
