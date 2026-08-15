@@ -4079,3 +4079,69 @@ def test_registered_policy_thresholds_contract() -> None:
     assert all(v is None for v in MHS_REGISTERED_POLICY_THRESHOLDS.values())
     assert isinstance(MHS_SEARCH_TRIALS_ATTEMPTED, int)
     assert MHS_SEARCH_TRIALS_ATTEMPTED >= 1
+
+def test_persist_wires_run_history_append_for_compact_and_full(tmp_path, monkeypatch) -> None:
+    """SCENARIO_MHS_RESULT_LOG_05: ``persist_mhs_horizon_diagnostic_report``
+    calls ``append_run_history_record`` exactly once per COMPACT/FULL tier."""
+    report = _build_compact_report()
+    calls: list[tuple[str, str]] = []
+
+    def _spy_append(record, history_dir):
+        calls.append((record["output_tier"], str(history_dir)))
+        return Path(history_dir) / "active.jsonl"
+
+    monkeypatch.setattr(ev, "append_run_history_record", _spy_append)
+    out = tmp_path / "mhs_report.json"
+    ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.COMPACT)
+    ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.FULL)
+
+    assert len(calls) == 2
+    assert [tier for tier, _ in calls] == ["compact", "full"]
+    assert all(history_dir.endswith("mhs_run_history") for _, history_dir in calls)
+
+
+def test_persist_still_appends_when_compact_resample_fails(tmp_path, monkeypatch) -> None:
+    """SCENARIO_MHS_RESULT_LOG_05 (COMPACT-None branch): the COMPACT path that
+    returns ``None`` (resample failure escalated past artifacts) still appends
+    a history record."""
+    report = _build_compact_report()
+    calls: list = []
+
+    def _boom(_table):
+        raise RuntimeError("boom")
+
+    def _spy_append(record, history_dir):
+        calls.append(record)
+        return Path(history_dir) / "active.jsonl"
+
+    monkeypatch.setattr(ev, "_daily_resample_ledger", _boom)
+    monkeypatch.setattr(ev, "append_run_history_record", _spy_append)
+    out = tmp_path / "mhs_report.json"
+    persisted = ev.persist_mhs_horizon_diagnostic_report(
+        report, out, tier=ev.MhsOutputTier.COMPACT,
+    )
+
+    assert persisted is None
+    assert len(calls) == 1
+    assert calls[0]["output_tier"] == "compact"
+
+
+def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
+    """SCENARIO_MHS_RESULT_LOG_06: an exception from ``append_run_history_record``
+    never propagates and never changes the persist return value."""
+    report = _build_compact_report()
+    out = tmp_path / "mhs_report.json"
+
+    baseline = ev.persist_mhs_horizon_diagnostic_report(
+        report, out, tier=ev.MhsOutputTier.COMPACT,
+    )
+
+    def _boom(record, history_dir):
+        raise RuntimeError("history boom")
+
+    monkeypatch.setattr(ev, "append_run_history_record", _boom)
+    isolated = ev.persist_mhs_horizon_diagnostic_report(
+        report, out, tier=ev.MhsOutputTier.COMPACT,
+    )
+
+    assert isolated == baseline
