@@ -1,6 +1,7 @@
 """Contract coverage for the MHS application evaluation resource telemetry."""
 
 import json
+import logging
 import time
 import types
 import dataclasses
@@ -2918,6 +2919,108 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
         for key in ("net_sharpe", "cagr", "mdd", "logret"):
             value = fields[key]
             assert value is None or np.isfinite(value)
+
+
+def test_committee_diagnostic_per_tier_blocks_present(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_PER_TIER_BLOCKS_PRESENT: every tier's walk-forward
+    # dict carries a per-block breakdown (same edges logic as skipped_blocks)
+    # that partitions the tier's aggregate bar count exactly -- no
+    # double-count or calendar gap against the total.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    per_tier = report.committee_diagnostic["walk_forward"]["per_tier"]
+    assert set(per_tier) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    for fields in per_tier.values():
+        assert isinstance(fields["blocks"], list)
+        for block in fields["blocks"]:
+            assert isinstance(block["bars"], int)
+            assert block["bars"] > 0
+            assert isinstance(block["block_start"], str)
+            for key in ("net_sharpe", "cagr", "mdd"):
+                assert block[key] is None or np.isfinite(block[key])
+        assert sum(b["bars"] for b in fields["blocks"]) == fields["bars"]
+
+
+def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, caplog) -> None:
+    # SCENARIO_MHS_COMMITTEE_DEBUG_LOGS_EMITTED: at DEBUG level the
+    # MhsHorizonDiagnostic logger emits all four committee checkpoints --
+    # source coverage, member PnL, per-block walk-forward, per-tier summary.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    with caplog.at_level(logging.DEBUG, logger="MhsHorizonDiagnostic"):
+        report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    messages = [r.message for r in caplog.records]
+    for tag in (
+        "stage=committee_source_coverage",
+        "stage=committee_member",
+        "stage=committee_block",
+        "stage=committee_tier_summary",
+    ):
+        assert any(tag in m for m in messages), tag
+
+
+def test_committee_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_TELEMETRY_STAGES_RECORDED: with committee_book=True
+    # the report's resource_measurements carry the diagnostic-feature panel
+    # load, the whole committee diagnostic, and one walk-forward checkpoint per
+    # measured cost tier -- so a production timeout can be attributed precisely.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    stages = {m.stage for m in report.resource_measurements}
+    assert "diagnostic_feature_panels" in stages
+    assert "committee_diagnostic" in stages
+    for tier in ev.MEASURED_EXECUTION_COST_TIERS_BPS:
+        assert f"committee_walk_forward_{tier}" in stages
+
+
+def test_multi_feature_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_MHS_MULTI_FEATURE_TELEMETRY_STAGE_RECORDED: with
+    # multi_feature_book=True the resource_measurements carry the diagnostic
+    # feature panel load and the multi-feature diagnostic stage.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, multi_feature_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    stages = {m.stage for m in report.resource_measurements}
+    assert "diagnostic_feature_panels" in stages
+    assert "multi_feature_diagnostic" in stages
 
 def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_COMMITTEE_DIAGNOSTIC_USES_OOS_START_NOT_RAW_START (B1): on a
