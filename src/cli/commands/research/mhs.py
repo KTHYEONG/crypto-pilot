@@ -37,6 +37,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         multi_feature_book=args.multi_feature_book,
         committee_book=args.committee_book,
         committee_capital=args.committee_capital,
+        execution_coverage_gate=args.execution_coverage_gate,
         ram_guard=not args.no_ram_guard,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
         discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
@@ -203,6 +204,17 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "production -- the comparability fix for the proxy-ledger defect "
             "in docs/specs/mhs_committee_capital_and_kelly_sizing.md §2.1. "
             "Changes no capital allocation by itself"
+        ),
+    )
+    mhs.add_argument(
+        "--execution-coverage-gate",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in pre-flight check: verify every funded symbol has "
+            "execution_timeframe OHLCV cache coverage for [start, end] before "
+            "the replay runs; fails closed with the missing/gapped symbol list "
+            "instead of a late opaque MISSING_DATA termination count"
         ),
     )
     mhs.add_argument(
