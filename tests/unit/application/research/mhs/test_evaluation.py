@@ -95,6 +95,36 @@ def _write_mhs_market(
     return end
 
 
+def _write_3m_cache(root: Path) -> None:
+    """Derive native 3m execution bars from the fixture's 1m data (identical
+    OHLC aggregation to Binance native 3m: open=first/high=max/low=min/close=last)."""
+    one_dir = root / "1m"
+    three_dir = root / "3m"
+    three_dir.mkdir(parents=True, exist_ok=True)
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    for path in sorted(one_dir.glob("*.parquet")):
+        df = pd.read_parquet(path)
+        idx = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        frame = pd.DataFrame(
+            {"open": df["open"].to_numpy(), "high": df["high"].to_numpy(),
+             "low": df["low"].to_numpy(), "close": df["close"].to_numpy()},
+            index=idx,
+        )
+        if "quote_vol" in df.columns:
+            frame["quote_vol"] = df["quote_vol"].to_numpy()
+        agg = frame.resample("3min").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last",
+             "quote_vol": "sum"},
+        ).dropna()
+        cols = {"timestamp", "open", "high", "low", "close"}
+        if "quote_vol" in agg.columns:
+            cols.add("quote_vol")
+        pd.DataFrame(
+            {"timestamp": (agg.index - epoch) // pd.Timedelta("1ms"),
+             **{c: agg[c].to_numpy() for c in sorted(cols - {"timestamp"})}},
+        ).to_parquet(three_dir / path.name)
+
+
 @pytest.fixture
 def mhs_market_long(tmp_path, monkeypatch):
     # B1 fixture: spans 2021-01-01 .. 2024-01-01 so the committee diagnostic's
@@ -4392,6 +4422,49 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
             dataclasses.replace(request, execution_coverage_gate=True),
         )
     assert books_called == []
+
+
+def test_mhs_diagnostic_execution_timeframe_3m_default() -> None:
+    # SCENARIO_MHS_EXECUTION_TIMEFRAME_3M_DEFAULT: the unqualified request (no
+    # execution_timeframe kwarg) defaults to '3m' -- the only interval
+    # physically present under data/futures/ohlcv/ since the 5m/1m caches were
+    # deleted (docs/specs/mhs_execution_timeframe_3m.md §1.4).
+    request = MhsDiagnosticRequest()
+    assert request.execution_timeframe == "3m"
+
+
+def test_mhs_diagnostic_execution_timeframe_3m_accepted() -> None:
+    # SCENARIO_MHS_EXECUTION_TIMEFRAME_3M_ACCEPTED: '3m' is a valid contract
+    # value; an out-of-contract '7m' still raises ValueError.
+    assert MhsDiagnosticRequest(execution_timeframe="3m").execution_timeframe == "3m"
+    with pytest.raises(ValueError, match="unknown execution_timeframe"):
+        MhsDiagnosticRequest(execution_timeframe="7m")
+
+
+def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_3M_REPLAY_END_TO_END: a synthetic 3m fixture
+    # (data_root/3m/{symbol}.parquet at 3-minute bars) replays through the real
+    # book path under the default execution_timeframe='3m' and completes --
+    # mirroring the existing 5m/1m fixture-based end-to-end test pattern.
+    root, end = mhs_market
+    _write_3m_cache(root)
+    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
+    monkeypatch.setattr(ev, "_BOOTSTRAP_REPLICATES", 20)
+    monkeypatch.setattr(ev, "_BOOTSTRAP_MEAN_BLOCK", 24)
+    monkeypatch.setattr(ev, "_bootstrap_ci", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "_placebo_sharpe_percentile", lambda *a, **k: None)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", log_run=False, execution_universe_size=8,
+    )
+    assert request.execution_timeframe == "3m"
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    assert report.execution_timeframe == "3m"
+    assert set(report.books) == {"fast_reversal", "slow_momentum"}
+    assert report.blend is not None
+    assert report.blend.primary is not None
+    assert report.fill_source == "OHLCV_IMMEDIATE_TAKER"
 
 
 def test_registered_policy_thresholds_contract() -> None:

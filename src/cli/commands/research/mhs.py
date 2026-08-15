@@ -110,9 +110,13 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument("--no-log-run", action="store_true", default=False)
     mhs.add_argument(
         "--execution-timeframe",
-        choices=["1m", "5m"],
-        default="5m",
-        help="OHLCV execution replay resolution; signal construction remains 1h",
+        choices=["1m", "3m", "5m"],
+        default="3m",
+        help=(
+            "OHLCV execution replay resolution; signal construction remains 1h. "
+            "3m (2026-08 default) gives ~+27% fill precision vs 5m and is "
+            "collected natively from Binance"
+        ),
     )
     mhs.add_argument(
         "--touch-diagnostic",
