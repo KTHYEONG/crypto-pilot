@@ -21,7 +21,7 @@
       "tests/unit/mhs/test_execution.py",
       "tests/unit/application/research/mhs/test_evaluation.py"
     ],
-    "architecture": "docs/specs/mhs_committee_capital_and_kelly_sizing.md"
+    "architecture": "docs/specs/mhs_execution_timeframe_3m.md"
   },
   "src/cli/commands/data.py": {},
   "src/cli/commands/research/mhs.py": {
