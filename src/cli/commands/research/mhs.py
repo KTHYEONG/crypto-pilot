@@ -36,6 +36,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         trend_sleeve_gross=args.trend_sleeve_gross,
         multi_feature_book=args.multi_feature_book,
         committee_book=args.committee_book,
+        committee_capital=args.committee_capital,
         ram_guard=not args.no_ram_guard,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
         discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
@@ -188,6 +189,20 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "wealth metrics per cost tier (diagnostic-only, never a combiner or "
             "capital input -- "
             "docs/specs/mhs_committee_design_and_wealth_objective.md §0-§4)"
+        ),
+    )
+    mhs.add_argument(
+        "--committee-capital",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: build the k=6 committee members into the FOLD decision "
+            "targets (equal-weight over admitted members) in place of the "
+            "momentum blend, so the committee is measured through the real 5m "
+            "simulated inventory ledger and the same Research-GO fold gate as "
+            "production -- the comparability fix for the proxy-ledger defect "
+            "in docs/specs/mhs_committee_capital_and_kelly_sizing.md §2.1. "
+            "Changes no capital allocation by itself"
         ),
     )
     mhs.add_argument(
