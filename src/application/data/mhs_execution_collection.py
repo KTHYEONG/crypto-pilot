@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -13,6 +14,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from src.common.config import FUTURES_DATA_DIR, funding_path
+from src.common.errors import DataIntegrityError
 from src.market_data.services.futures_collection import DataCollector
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.contracts import PHASE_1_BOOK_SPECS
@@ -103,8 +105,11 @@ def build_mhs_execution_plan(
     )
 
 
-def _coverage(symbol: str, timeframe: str, start: str, end: str) -> dict[str, object]:
-    path = FUTURES_DATA_DIR / "ohlcv" / timeframe / f"{symbol}.parquet"
+def _coverage(
+    symbol: str, timeframe: str, start: str, end: str, root: str | None = None,
+) -> dict[str, object]:
+    base = Path(root) if root else FUTURES_DATA_DIR / "ohlcv"
+    path = base / timeframe / f"{symbol}.parquet"
     if not path.exists():
         return {"status": "MISSING", "rows": 0}
     table = pq.read_table(path, columns=["timestamp"])
@@ -126,6 +131,32 @@ def _coverage(symbol: str, timeframe: str, start: str, end: str) -> dict[str, ob
         "last": observed[-1].isoformat() if len(observed) else None,
         "bytes": path.stat().st_size,
     }
+
+
+def assert_execution_data_coverage(
+    symbols: Sequence[str], timeframe: str, start: str, end: str, root: str | None = None,
+) -> None:
+    """Fail closed unless every symbol has full ``[start, end]`` execution cache coverage.
+
+    Reuses ``_coverage`` (local Parquet metadata reads only -- no network, no
+    ``DataCollector``) and raises ``DataIntegrityError`` naming every symbol
+    whose status is not ``PRESENT`` (``MISSING`` file or ``GAPPED`` internal
+    bars), so a pre-flight diagnostic gate fails with an actionable symbol list
+    instead of a late opaque ``MISSING_DATA`` termination count. ``root`` is the
+    synthetic-cache root for tests; when ``None`` the canonical
+    ``FUTURES_DATA_DIR / 'ohlcv'`` path is used (backward compatible with the
+    existing ``_coverage`` call sites).
+    """
+    deficient = {
+        symbol: status
+        for symbol in symbols
+        if (status := str(_coverage(symbol, timeframe, start, end, root)["status"])) != "PRESENT"
+    }
+    if deficient:
+        listed = ", ".join(f"{s} ({status})" for s, status in sorted(deficient.items()))
+        raise DataIntegrityError(
+            f"execution data coverage incomplete for {len(deficient)} symbols: {listed}"
+        )
 
 
 def collect_mhs_execution_data(
