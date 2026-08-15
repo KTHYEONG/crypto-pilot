@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_EXECUTION_TIMEFRAME_3M",
+      "date": "2026-08-15",
+      "adr_id": "ADR_20260815_MHS_EXECUTION_TIMEFRAME_3M",
+      "domain": "mhs",
+      "title": "MHS execution_timeframe 3m 도입 및 1m/5m 폐기",
+      "why": "5m 캐시 50%(225/446 심볼)가 미수집 상태로 리플레이 도중에야 사후 발견되던 문제(ADR_20260815_MHS_EXECUTION_DATA_COVERAGE_GATE)를 계기로, 1m/3m/5m 체결 정밀도를 실측 비교함. 3m은 5m 대비 체결가 오차 median -27%(15.7→11.4bps)이며, 1m에서 3m을 합성하는 방식은 네이티브 3m 직접 수집 대비 약 10배 느리고 약 57배 메모리를 더 써 비합리적임을 실측 확인. Binance가 3m을 1st-class interval로 이미 지원해 신규 수집 코드 없이 네이티브 수집이 가능함을 확인.",
+      "resolution": "사용자 지시로 data/futures/ohlcv/{1m,5m} 삭제(10.3GB 회수) 후 기존 collect_mhs_execution_data로 프로덕션 funded 유니버스 446개 심볼 전체를 네이티브 3m으로 재수집(446/446 PRESENT, 6.1GB, 1012.6초). 3m 전수 무결성검증 실행: 내부갭 36개 심볼 중 28개가 Binance Vision 소스 자체의 실제 결손(2022-02-25~03-01, 2022-03-31~04-03, 직접 아카이브 재조회로 확정, fold validation 윈도우 밖이라 Research-GO에 영향 없음)임을 검증. MhsDiagnosticRequest.execution_timeframe을 Literal['1m','3m','5m']로 확장하고 기본값을 '5m'->'3m'으로 변경(5m 캐시가 더 이상 없으므로 필수 변경), freq 매핑 5곳·_coverage() step 매핑·build_mhs_execution_plan 기본값·CLI choices/default를 동일하게 갱신. 커버리지 게이트(assert_execution_data_coverage 등)는 timeframe-agnostic이라 무변경 재사용.",
+      "impact": "MHS 실행 리플레이가 기본적으로 3m 그리드로 전환되어 5m 대비 체결정밀도가 개선되고, 1m 유지 대비 저장공간·리플레이 메모리 부담이 크게 낮아짐. 2022년 2~4월 소스 결손은 문서화된 기존 게이트로 커버되어 별도 예외 로직 없이 안전하게 처리됨."
+    },
+    {
       "task_id": "TASK_MHS_EXECUTION_DATA_COVERAGE_GATE",
       "date": "2026-08-15",
       "adr_id": "ADR_20260815_MHS_EXECUTION_DATA_COVERAGE_GATE",
@@ -989,16 +999,6 @@
       "why": "spec growth_engine_v2(P1~P3)를 구현한 뒤 처음으로 research run portfolio growth CLI를 실행하자 shape mismatch로 즉시 크래시했다. 수정 후에도 symbol_scope=dev 기본값에서 holdout 파티션이 항상 공집합으로 계산되는 구조적 결함, derive_backfill_candidates가 봉인 이전 구간을 포함하는 범위 결함이 추가로 발견됐다.",
       "resolution": "(1) _build_signal_weights의 weights.loc[bars] 대입에 컬럼 지정 누락 수정. (2) dev/holdout 분리를 symbol_scope 필터링 이전 full_schedule에서 계산하도록 순서 변경, symbol_scope는 매매 대상만 제한. (3) derive_backfill_candidates 호출을 start 이후 rebalance_dates로 제한. 세 수정 모두 lint/mypy/pytest 통과, 전체 회귀 없음. 최종 CLI 결과는 NO_ADMISSIBLE_ALPHA(binding_constraint=plateau, holdout_retention=0.117)로 CASH 유지. docs/specs/growth_engine_v2.md F1b의 backfill 후보 수치를 탐색 추정치 55에서 실측치 89로 갱신.",
       "impact": "Growth Engine v2가 실데이터·실코드 경로로 처음 끝까지 실행되어 spec F3의 사전 반증(탐색 스크립트 기반)이 프로덕션 코드로도 재확인됐다. 향후 어떤 심볼 스코프로 실행해도 holdout 검정이 항상 정상 작동하고, backfill 우선순위 카운트가 봉인 경계를 정확히 지킨다."
-    },
-    {
-      "task_id": "TASK_PORTFOLIO_BLEND_GROWTH_GATE",
-      "date": "2026-08-03",
-      "adr_id": "ADR_20260803_PORTFOLIO_BLEND_GROWTH_GATE",
-      "domain": "risk",
-      "title": "Portfolio Blend Growth Gate 실행 및 CASH fail-closed 검증",
-      "why": "고정 Donchian blend는 observation/stress는 통과했지만 fold concentration에서 거절되었고, 전체-window MDD fitting 및 자유 심볼 입력은 배포 가능한 계약이 아니었다. 제한된 사전등록 심볼, 인과 leverage schedule, 전략 tournament의 실제 sealed 실행 결과를 기록할 필요가 있었다.",
-      "resolution": "core5_v1 고정 universe와 causal tournament를 sealed discovery/qualification 프로파일로 실행했다. Donchian, funding directional, Supertrend, Parabolic SAR, Keltner 후보 모두 discovery feasibility 또는 reliability gate를 통과하지 못해 selected source를 비우고 base/stress 모두 CASH로 fail-closed 반환했다. 기존 fixed control은 CAGR 31.15%, MDD -20.24%, LCB90 15.12%, observation/stress PASS이나 fold 0.4899>0.4413로 REJECTED를 재현했다.",
-      "impact": "새 경로가 근거 없는 전략을 qualification에서 재선택하거나 gate를 완화하지 않고 안전하게 자산을 현금으로 유지함을 확인했다. 새 post-2025 데이터 또는 독립 return source 없이는 promotion/PASS를 주장하지 않는다. 상세 실행 결과를 docs/results에 보존하고 tournament source/test와 연결했다."
     }
   ]
 }
