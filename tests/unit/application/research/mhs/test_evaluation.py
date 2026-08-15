@@ -4287,6 +4287,113 @@ def test_research_go_eligible_is_reachable(mhs_market, monkeypatch) -> None:
     assert ev.MHS_GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
 
 
+def _gap_mixed_replay() -> object:
+    idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+    target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+    signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+    px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+    return strategy_aware_execution_replay(
+        target, signal_at, px, px, px, px,
+        pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+        "OHLCV_STRICT_PROXY", ExecutionSpec(),
+    )
+
+
+def test_research_go_data_integrity_reason_split(monkeypatch) -> None:
+    """SCENARIO_MHS_RESEARCH_GO_DATA_INTEGRITY_REASON_SPLIT: a fold failing on
+    both a relevant execution data gap and a pure alpha-quality Sharpe failure
+    carries only the data-integrity code in ``data_integrity_reason_codes``
+    while ``reason_codes`` keeps both axes separate."""
+    passing = _passing_fold_report(_gap_mixed_replay())
+    mixed = dataclasses.replace(
+        passing,
+        failures=(ev.MHS_GO_REASON_EXECUTION_GAP, ev.MHS_GO_REASON_PRIMARY_SHARPE),
+        termination_counts={"MISSING_DATA": 3, "UNKNOWN_TERMINATION": 0},
+        primary_autocorr_sharpe=0.3,
+    )
+    monkeypatch.setattr(
+        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
+    )
+    go = ev._mhs_research_go((mixed,))
+    assert go.data_integrity_reason_codes == (ev.MHS_GO_REASON_EXECUTION_GAP,)
+    assert ev.MHS_GO_REASON_PRIMARY_SHARPE not in go.data_integrity_reason_codes
+    assert set(go.reason_codes) == {
+        ev.MHS_GO_REASON_EXECUTION_GAP, ev.MHS_GO_REASON_PRIMARY_SHARPE,
+    }
+    assert go.eligible is False
+
+
+def test_research_go_data_integrity_reason_empty_when_clean(monkeypatch) -> None:
+    """SCENARIO_MHS_RESEARCH_GO_DATA_INTEGRITY_REASON_EMPTY_WHEN_CLEAN: a pure
+    alpha-quality failure (primary Sharpe below floor, no data gap) yields
+    ``data_integrity_reason_codes == ()`` even though eligible is False -- the
+    consumer distinguishes "data intact, alpha underperformed" from "data was
+    deficient" by that empty field."""
+    passing = _passing_fold_report(_gap_mixed_replay())
+    alpha_only = dataclasses.replace(
+        passing,
+        failures=(ev.MHS_GO_REASON_PRIMARY_SHARPE,),
+        primary_autocorr_sharpe=0.3,
+    )
+    monkeypatch.setattr(
+        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
+    )
+    go = ev._mhs_research_go((alpha_only,))
+    assert go.eligible is False
+    assert go.data_integrity_reason_codes == ()
+    assert go.reason_codes == (ev.MHS_GO_REASON_PRIMARY_SHARPE,)
+
+
+def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_DEFAULT_OFF_BYTE_IDENTICAL:
+    # with the opt-in flag omitted (default False) the pre-flight gate is inert:
+    # against a fixture with no 5m execution cache the run completes through the
+    # pre-existing MISSING_DATA termination path with no new DataIntegrityError,
+    # and the report is byte-identical to the explicit-off run.
+    root, end = mhs_market
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    base = {
+        "start": str(_START), "end": str(end), "data_root": str(root),
+        "mark_mode": "cache_required", "execution_timeframe": "5m", "log_run": False,
+        "execution_universe_size": 8,
+    }
+    default_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    explicit_off = ev.run_mhs_horizon_diagnostic(
+        MhsDiagnosticRequest(**base, execution_coverage_gate=False),
+    )
+    assert default_report.status == "COMPLETE"
+    for field in ("books", "blend", "blend_target_gross", "research_go", "folds"):
+        assert getattr(default_report, field) == getattr(explicit_off, field)
+
+
+def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_ON_FAILS_CLOSED_EARLY:
+    # with the opt-in flag on, a funded symbol with no 5m parquet file under
+    # data_root raises DataIntegrityError naming the missing symbol right after
+    # the funded universe resolves, before any replay window executes.
+    root, end = mhs_market
+    books_called: list[str] = []
+    monkeypatch.setattr(
+        ev, "_run_books_concurrent", lambda *a, **k: books_called.append("books"),
+    )
+    base = {
+        "start": str(_START), "end": str(end), "data_root": str(root),
+        "mark_mode": "cache_required", "execution_timeframe": "5m", "log_run": False,
+        "execution_universe_size": 8,
+    }
+    request = MhsDiagnosticRequest(**base)
+    with pytest.raises(DataIntegrityError, match="MISSING"):
+        ev.run_mhs_horizon_diagnostic(
+            dataclasses.replace(request, execution_coverage_gate=True),
+        )
+    assert books_called == []
+
+
 def test_registered_policy_thresholds_contract() -> None:
     """P0-D contract: the two named policy gates exist in source contracts and
     default to the unregistered (conservative) state -- a deliberate policy act,
