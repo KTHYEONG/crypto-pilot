@@ -54,11 +54,11 @@ def _manifest_path(timeframe: str, start: pd.Timestamp, end: pd.Timestamp) -> Pa
 
 
 def build_mhs_execution_plan(
-    start: str, end: str, timeframe: str = "5m", execution_universe_size: int = 30,
+    start: str, end: str, timeframe: str = "3m", execution_universe_size: int = 30,
 ) -> MhsExecutionCollectionPlan:
     """Derive the exact PIT replay symbol union without network access."""
-    if timeframe not in ("1m", "5m"):
-        raise ValueError("timeframe must be '1m' or '5m'")
+    if timeframe not in ("1m", "3m", "5m"):
+        raise ValueError("timeframe must be '1m', '3m' or '5m'")
     if execution_universe_size < 8:
         raise ValueError("execution_universe_size must be >= 8")
     start_ts = pd.Timestamp(start, tz="UTC")
@@ -120,7 +120,7 @@ def _coverage(
     observed = idx[(idx >= req_start) & (idx <= req_end)]
     missing_internal = 0
     if len(observed) > 1:
-        step = pd.Timedelta(minutes=1 if timeframe == "1m" else 5)
+        step = pd.Timedelta(minutes={"1m": 1, "3m": 3, "5m": 5}[timeframe])
         expected = int((observed[-1] - observed[0]) / step) + 1
         missing_internal = max(0, expected - len(observed))
     return {

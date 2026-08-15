@@ -121,7 +121,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     mhs_execution = collect_sub.add_parser(
         "mhs-execution", help="Plan or collect PIT MHS execution OHLCV (dry-run by default)",
     )
-    mhs_execution.add_argument("--timeframe", choices=["1m", "5m"], default="5m")
+    mhs_execution.add_argument("--timeframe", choices=["1m", "3m", "5m"], default="3m")
     mhs_execution.add_argument("--start", default="2021-01-01")
     mhs_execution.add_argument("--end", default=None)
     mhs_execution.add_argument("--execution-universe-size", type=int, default=30)
