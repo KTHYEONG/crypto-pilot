@@ -329,7 +329,7 @@ class MhsDiagnosticRequest:
     partition: Literal["dev", "holdout", "all"] = "dev"
     data_root: str | None = None
     mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"] = "cache_required"
-    execution_timeframe: Literal["1m", "5m"] = "5m"
+    execution_timeframe: Literal["1m", "3m", "5m"] = "3m"
     execution_universe_size: int = 30
     max_rss_bytes: int | None = None
     log_run: bool = True
@@ -360,7 +360,7 @@ class MhsDiagnosticRequest:
             raise ValueError(f"unknown partition '{self.partition}'")
         if self.mark_mode not in ("cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"):
             raise ValueError(f"unknown mark_mode '{self.mark_mode}'")
-        if self.execution_timeframe not in ("1m", "5m"):
+        if self.execution_timeframe not in ("1m", "3m", "5m"):
             raise ValueError(f"unknown execution_timeframe '{self.execution_timeframe}'")
         if self.execution_universe_size < 8:
             raise ValueError("execution_universe_size must be >= 8")
@@ -1008,7 +1008,7 @@ def _load_window_minute_frames(
     symbols: list[str],
     grid_start: pd.Timestamp,
     grid_end: pd.Timestamp,
-    timeframe: Literal["1m", "5m"],
+    timeframe: Literal["1m", "3m", "5m"],
 ) -> dict[str, pd.DataFrame]:
     """Load one execution window's minute OHLCV slices directly from Parquet.
 
@@ -1058,7 +1058,7 @@ def _build_window_frames(
     grid_start: pd.Timestamp,
     grid_end: pd.Timestamp,
     minute_grid: pd.DatetimeIndex,
-    timeframe: Literal["1m", "5m"],
+    timeframe: Literal["1m", "3m", "5m"],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     """Slice per-symbol full-period frames onto a window minute grid.
 
@@ -1088,7 +1088,7 @@ def _build_window_frames(
 
 
 def _align_minute_frames(
-    frames: dict[str, pd.DataFrame], timeframe: Literal["1m", "5m"],
+    frames: dict[str, pd.DataFrame], timeframe: Literal["1m", "3m", "5m"],
     start: pd.Timestamp, end: pd.Timestamp,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     if not frames:
@@ -1100,7 +1100,7 @@ def _align_minute_frames(
     # horizon is never shortened by the union of first-observed timestamps.
     grid = pd.date_range(
         start, end,
-        freq={"1m": "1min", "5m": "5min"}[timeframe],
+        freq={"1m": "1min", "3m": "3min", "5m": "5min"}[timeframe],
         tz="UTC",
     )
     highs = pd.DataFrame({s: f["high"] for s, f in frames.items()}).reindex(grid)
@@ -2193,7 +2193,7 @@ def _placebo_sharpe_percentile(
 def _load_symbol_quote_volume(
     root: str,
     symbol: str,
-    timeframe: Literal["1m", "5m"],
+    timeframe: Literal["1m", "3m", "5m"],
     start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> pd.Series | None:
@@ -2228,7 +2228,7 @@ def _load_symbol_quote_volume(
 def _participation_warnings(
     replay: StrategyExecutionReplayResult,
     root: str,
-    timeframe: Literal["1m", "5m"],
+    timeframe: Literal["1m", "3m", "5m"],
     symbols: list[str],
     minute_grid: pd.DatetimeIndex,
 ) -> dict[str, float]:
@@ -2297,7 +2297,7 @@ def _hourly_ledger_series(
     """Resample a native execution-timeframe ledger to the annualization grid.
 
     The ``_PERIODS_PER_YEAR_1H`` annualization constant describes hourly bars,
-    but the replay ledgers run on ``request.execution_timeframe`` (5m default),
+    but the replay ledgers run on ``request.execution_timeframe`` (3m default),
     so every headline metric derived from them must first be resampled to 1h
     (the ``equity_1h`` pattern already present in ``_run_post_diag_deploy``).
     Turnover is a per-bar traded-notional fraction, so hourly aggregation is a
@@ -2470,7 +2470,7 @@ def _iter_mhs_execution_windows(
     target_weights: pd.DataFrame,
     signal_available_at: pd.DatetimeIndex,
     root: str,
-    timeframe: Literal["1m", "5m"],
+    timeframe: Literal["1m", "3m", "5m"],
     start: pd.Timestamp,
     end: pd.Timestamp,
     funding_by_symbol: dict[str, pd.Series],
@@ -2493,7 +2493,7 @@ def _iter_mhs_execution_windows(
     if start >= end:
         raise DataIntegrityError("start must precede end")
     columns = tuple(target_weights.columns)
-    freq = {"1m": "1min", "5m": "5min"}[timeframe]
+    freq = {"1m": "1min", "3m": "3min", "5m": "5min"}[timeframe]
     full_grid = pd.date_range(start, end, freq=freq, tz="UTC")
     full_grid_ns = np.asarray(full_grid, dtype="datetime64[ns]").astype("int64")
     n_grid = len(full_grid_ns)
@@ -2780,7 +2780,7 @@ def _book_outcome(
     signal_available_at = step_grid + pd.Timedelta(hours=1)
     execution_grid = pd.date_range(
         start, end,
-        freq={"1m": "1min", "5m": "5min"}[request.execution_timeframe],
+        freq={"1m": "1min", "3m": "3min", "5m": "5min"}[request.execution_timeframe],
         tz="UTC",
     )
     target_replay, signal_replay, censored = _truncate_replayable_decisions(
@@ -3864,7 +3864,7 @@ def _run_anchored_fold(
         target_replay = target_weights[minute_roster]
         execution_grid = pd.date_range(
             vs, ve,
-            freq={"1m": "1min", "5m": "5min"}[request.execution_timeframe],
+            freq={"1m": "1min", "3m": "3min", "5m": "5min"}[request.execution_timeframe],
             tz="UTC",
         )
         target_replay, signal_available_at, terminal_censored = _truncate_replayable_decisions(
@@ -4544,7 +4544,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     initial_equity = 1.0
     minute_grid = pd.date_range(
         start, end,
-        freq={"1m": "1min", "5m": "5min"}[request.execution_timeframe],
+        freq={"1m": "1min", "3m": "3min", "5m": "5min"}[request.execution_timeframe],
         tz="UTC",
     )
     has_minute_data = any(
