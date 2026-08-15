@@ -154,7 +154,7 @@ def _request(root: Path, end: pd.Timestamp, **overrides) -> MhsDiagnosticRequest
 def _fold_targets(mhs_market, request: MhsDiagnosticRequest, fold: AnchoredPurgedFold):
     root, end = mhs_market
     symbols = [s for s in _DEV_SYMBOLS if symbol_partition(s) == "dev"]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     return ev._build_fold_target_weights(str(root), fold, request, funding_by_symbol)
 
 
