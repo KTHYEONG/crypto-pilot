@@ -1,18 +1,4 @@
-"""Integration & Contract Validation Tests for MHS Horizon Optimization.
-
-SCENARIO_MHS_HORIZON_OPT_MEMORY: Memory RSS stays strictly below 2.5GB budget across all evaluation windows.
-SCENARIO_MHS_HORIZON_OPT_QUALITY: Fold 0/1/2 Autocorrelation Sharpe is at least +0.6 and Stress Sharpe is positive.
-SCENARIO_MHS_HORIZON_OPT_INTEGRITY: All 3 anchored folds produce valid primary ledgers with zero RESOURCE_BUDGET_BREACH errors.
-
-The quality gate (autocorr Sharpe >= 0.6) is a production-real-data target; the
-synthetic fold tests below verify the mechanisms that drive it (turnover
-deadband cap, signal EMA smoothing, regime cash scaling) and that the fold
-quality metrics are computed from a valid primary ledger. The MEMORY and
-INTEGRITY scenarios assert the deterministic fail-closed behavior of the
-windowed engine (RSS budget enforcement, fold state isolation, ledger artifact
-integrity) that the optimization spec (``docs/specs/mhs_horizon_opt.md``)
-prescribes.
-"""
+"""Integration & Contract Validation Tests for MHS Horizon Optimization."""
 
 from __future__ import annotations
 
@@ -207,10 +193,6 @@ class TestSignalQualityMechanisms:
         )
         assert report.primary_valid is True
         assert report.strict is not None
-        # Shortfall sign is signal-dependent: under the vol-normalized momentum
-        # signal (docs/specs/mhs_momentum_vol_normalization.md) the seeded
-        # synthetic fold's passive fills land slightly better than decision
-        # price, so only finiteness is an invariant here, not a >0 sign.
         assert np.isfinite(report.strict.all_intent_shortfall_bps)
         assert np.isfinite(report.primary_autocorr_sharpe)
         assert np.isfinite(report.primary_naive_sharpe)
@@ -254,16 +236,7 @@ class TestFoldIntegrity:
 
 class TestMhsPerfOptimizationEndToEnd:
     """SCENARIO_MHS_PERF_OPTIMIZATION_END_TO_END: Full MHS horizon diagnostic
-    completes with bit-identical golden metrics after the O1-O5 performance
-    optimizations (vectorized bootstrap + vectorized ledger chunk + parallel
-    folds + relaxed RSS budget + singleton DataCollector). The contract is
-    pinned by ``docs/specs/mhs_perf_optimization_contract.json`` and the
-    full-run golden baseline in ``docs/results/mhs_horizon_diagnostic.json``.
-    Implementation phase will add: (a) golden-fixture bit-identity for
-    ``_stationary_block_bootstrap_paths`` / ``_bootstrap_mdd_paths`` /
-    ``compute_deployment_readiness``, (b) a 5m end-to-end perf gate on the
-    synthetic market, and (c) bit-identity of fold research_go reason_codes
-    and replay artifact checksums vs. the golden snapshot."""
+    completes with bit-identical golden metrics after performance optimizations."""
 
     def test_scenario_marker_present(self) -> None:
         # Marker placeholder so the contract gate (lean_check) recognises

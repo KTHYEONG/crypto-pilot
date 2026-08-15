@@ -1,8 +1,4 @@
-"""Run-history ledger contract: append / rotate / prune / latest snapshot.
-
-Covers SCENARIO_MHS_RESULT_LOG_01, SCENARIO_MHS_RESULT_LOG_02, and
-SCENARIO_MHS_RESULT_LOG_03 from docs/specs/mhs_result_logging_contract.json.
-"""
+"""Run-history ledger contract: append / rotate / prune / latest snapshot."""
 
 from __future__ import annotations
 

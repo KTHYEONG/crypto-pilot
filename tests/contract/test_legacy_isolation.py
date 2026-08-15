@@ -1,11 +1,7 @@
-"""SCENARIO_MHS_REFACTOR_08: legacy isolation contract.
+"""Legacy isolation contract.
 
-After the legacy migration (docs/specs/mhs_refactor.md §3):
-
-- No module under ``src/`` imports a ``legacy.*`` module, and
-- the AST import closure of the MHS + data-collection entry points contains no
-  module that was migrated to ``legacy/`` (the KEEP closure is closed under
-  ``src.`` imports).
+Verifies that no module under ``src/`` imports a ``legacy.*`` module, and
+the AST import closure of active entry points contains no legacy modules.
 """
 
 from __future__ import annotations

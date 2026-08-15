@@ -248,13 +248,7 @@ class TestBetaNeutralizeWeights:
 
 
 class TestNoProductionWiring:
-    """Wiring guard after mhs_crash_regime_tilt_overlay: the ONLY production
-    call site that may import src.mhs.regime is the fold-target-weights path in
-    src/application/research/mhs/evaluation.py (deliberately scoped to
-    ``_build_fold_target_weights``; the diagnostic-only ``blend_1h`` and the
-    books/discovery layers stay untouched per docs/specs/mhs_crash_regime_tilt_overlay.md
-    §5). The non-wired production layers below must never import it.
-    """
+    """Wiring guard: non-wired production layers must never import regime module."""
 
     _PRODUCTION_FILES = (
         "src/mhs/books.py",

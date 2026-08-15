@@ -103,9 +103,7 @@ class BookEvidence:
     """Pre-screen + tail evidence for exactly one capital book.
 
     Carries both significance instruments (``prescreen`` and ``tail``) for a
-    single weight book so two distinct books -- the reference book and the
-    executed book -- can be measured side by side under distinct labels instead
-    of being conflated under one name (docs/specs/mhs_strategy_foundation_reset.md RC-1).
+    single weight book so reference and executed books can be measured under distinct labels.
     """
 
     prescreen: dict[float, CostResponsePoint]
@@ -320,9 +318,7 @@ def book_evidence(
     can also point at the executed book (roster + ensemble + tilt + regime
     scale) that actually carries capital. ``cost_response_curve``,
     ``tail_sensitivity_curve``, and ``mhs_ledger_pnl`` are reused unchanged; no
-    statistic is reimplemented. Intermediates are released before returning so
-    two books' evidence never leaves extra multi-year matrices resident
-    (docs/specs/mhs_strategy_foundation_reset.md RC-1, P0-A).
+    statistic is reimplemented. Intermediates are released before returning to minimize resident memory.
     """
     if not cost_grid_bps:
         raise ValueError("cost_grid_bps must not be empty")

@@ -92,8 +92,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         default=None,
         help=(
             "Optional process RSS budget in bytes; when unset the RAM guard "
-            "auto-derives 85%% of total RAM (docs/specs/"
-            "mhs_ram_guard_and_diagnostic_memory_optimization.md). Exceeding the "
+            "auto-derives 85%% of total RAM. Exceeding the "
             "budget at a stage/window boundary fails closed with "
             "DataIntegrityError instead of OOM"
         ),
@@ -178,8 +177,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "(fail-closed exclusion) and equal-risk combination; report each "
             "admitted feature's coverage and regime-split stability plus the "
             "combined net Sharpe per cost tier and feature-book breadth "
-            "(diagnostic-only, never an admission input -- "
-            "docs/specs/mhs_multi_feature_alpha_architecture.md §2 Stage 1)"
+            "(diagnostic-only, never an admission input)"
         ),
     )
     mhs.add_argument(
@@ -192,8 +190,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "coverage before any fillna, recover sign-safe gross/turnover-cost "
             "panels, and run the purged expanding-train walk-forward reporting "
             "wealth metrics per cost tier (diagnostic-only, never a combiner or "
-            "capital input -- "
-            "docs/specs/mhs_committee_design_and_wealth_objective.md §0-§4)"
+            "capital input)"
         ),
     )
     mhs.add_argument(
@@ -205,9 +202,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "targets (equal-weight over admitted members) in place of the "
             "momentum blend, so the committee is measured through the real 5m "
             "simulated inventory ledger and the same Research-GO fold gate as "
-            "production -- the comparability fix for the proxy-ledger defect "
-            "in docs/specs/mhs_committee_capital_and_kelly_sizing.md §2.1. "
-            "Changes no capital allocation by itself"
+            "production. Changes no capital allocation by itself"
         ),
     )
     mhs.add_argument(
@@ -260,8 +255,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Opt-in crash-regime directional tilt on slow_momentum: fraction "
             "(0.0, 1.0] of unit gross reallocated to a BTCUSDT-trend-scaled "
             "directional overlay (default None = disabled, byte-identical to "
-            "the fully dollar-neutral book; no value is 'recommended' -- see "
-            "docs/specs/mhs_crash_regime_tilt_overlay.md)"
+            "the fully dollar-neutral book)"
         ),
     )
     mhs.add_argument(
@@ -271,7 +265,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Slow-book construction: single_horizon (frozen production chain) "
             "or horizon_ensemble (equal-weight average of every candidate "
-            "horizon, no selection -- docs/specs/mhs_alpha_engine.md §2)"
+            "horizon, no selection)"
         ),
     )
     mhs.add_argument(
@@ -281,8 +275,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Fast-book construction: single_horizon (frozen production chain) "
             "or horizon_ensemble (equal-weight average of every candidate "
-            "horizon, no selection -- the same rescue momentum already received, "
-            "docs/specs/mhs_carry_and_fast_fair_evaluation.md §2.3)"
+            "horizon, no selection)"
         ),
     )
     mhs.add_argument(
@@ -292,8 +285,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Turnover gate on the decision targets: per_symbol_deadband "
             "(published baseline) or portfolio_trigger (invariant-preserving "
-            "row hold gated before the gross scale -- "
-            "docs/specs/mhs_alpha_engine.md §1)"
+            "row hold gated before the gross scale)"
         ),
     )
     mhs.add_argument(
@@ -303,8 +295,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Orthogonally project the slow book onto the causal rolling market "
             "beta (sum(w)==0 and sum(w*beta)==0 by construction; parameter-free "
-            "replacement for the crash-regime tilt -- "
-            "docs/specs/mhs_alpha_engine.md §4)"
+            "replacement for the crash-regime tilt)"
         ),
     )
     mhs.add_argument(
@@ -313,8 +304,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         default="raw",
         help=(
             "Signal family for the slow book: raw horizon log return (frozen "
-            "production) or vol-normalized (re-open for measurement after the "
-            "RC-1 deadband fix -- docs/specs/mhs_alpha_engine.md §6.1)"
+            "production) or vol-normalized"
         ),
     )
     mhs.add_argument(
@@ -325,8 +315,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Opt-in exposure timing overlay on slow_momentum: scales gross "
             "exposure down in low-efficiency-ratio (choppy, momentum-hostile) "
             "regimes using the fast band's own horizon, composed with the "
-            "existing regime cash scale (default False = byte-identical -- "
-            "docs/specs/mhs_fast_reversal_overlay_redesign.md §2.3)"
+            "existing regime cash scale (default False = byte-identical)"
         ),
     )
     mhs.add_argument(
@@ -335,10 +324,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         default=False,
         help=(
             "Opt-out of the P&L vol-target layer: skip the multiplicative "
-            "P&L-vol-target rescale between Pass 1 and Pass 2 (default keeps "
-            "the layer on -- default flip requires the preregistered "
-            "fold-train-only criterion in "
-            "docs/specs/mhs_execution_friction_and_exposure_layers.md §6.1)"
+            "P&L-vol-target rescale between Pass 1 and Pass 2"
         ),
     )
     mhs.add_argument(

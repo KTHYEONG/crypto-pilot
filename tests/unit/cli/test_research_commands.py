@@ -1,10 +1,8 @@
 """CLI research command dispatch for the reduced CLI surface.
 
-SCENARIO_MHS_REFACTOR_09: after the legacy isolation refactor
-(docs/specs/mhs_refactor.md §3.2) ``build_root_parser`` exposes only the
+SCENARIO_MHS_REFACTOR_09: ``build_root_parser`` exposes only the
 ``data``/``research`` groups and ``research run portfolio`` carries only the
-MHS leaf. The removed ``single``/``expert``/``blend``/``growth`` subcommands and
-the ``provenance`` group must raise ``SystemExit`` at the parser boundary.
+MHS leaf.
 """
 
 from __future__ import annotations

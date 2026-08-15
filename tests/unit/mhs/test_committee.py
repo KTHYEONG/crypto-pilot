@@ -1,10 +1,4 @@
-"""Unit tests for the wealth-committee primitives.
-
-Covers the sign-safe cost accounting, long-only equal-risk weighting, wealth
-metrics, volatility-target scaling, and the purged walk-forward harness that
-benchmarks any future learned combiner against the curated committee
-(docs/specs/mhs_committee_design_and_wealth_objective.md §0-§4).
-"""
+"""Unit tests for the wealth-committee primitives."""
 
 from __future__ import annotations
 

@@ -1,13 +1,4 @@
-"""Contract coverage for the additive time-series trend sleeve.
-
-Scenario ids (docs/specs/mhs_directional_trend_sleeve_contract.json):
-SCENARIO_TREND_BASKET_IS_CAUSAL_AND_EQUAL_WEIGHT
-SCENARIO_TREND_POSITION_CLIPPED_AND_VOL_NORMALIZED
-SCENARIO_TREND_POSITION_HELD_ON_DECISION_GRID
-SCENARIO_TREND_SLEEVE_WEIGHTS_ARE_DIRECTIONAL_NOT_DOLLAR_NEUTRAL
-SCENARIO_TREND_SLEEVE_GROSS_BUDGET_IS_AN_UPPER_BOUND
-SCENARIO_TREND_SLEEVE_IS_ADDITIVE_NOT_CANNIBALIZING
-"""
+"""Contract coverage for the additive time-series trend sleeve."""
 
 from __future__ import annotations
 

@@ -105,92 +105,38 @@ MEASURED_EXECUTION_COST_TIERS_BPS: dict[str, float] = {
     "stress": 6.07,
 }
 
-# Frozen MHS discovery window start (spec docs/specs/mhs_data_period_and_gap_hardening.md).
-# Domain-layer single source: src/mhs/evaluation.py folds and the application
-# orchestrator import it instead of re-typing the literal.
+# MHS discovery window start for fold evaluation and application orchestration.
 MHS_DISCOVERY_START: pd.Timestamp = pd.Timestamp("2021-01-01", tz="UTC")
 
-# Measured admission (docs/results/mhs_horizon_diagnostic.json
-# books.fast_reversal.prescreen): fast_reversal's 446-symbol prescreen net
-# t-stat stays below the |t| >= 2.0 admission floor across every cost tier,
-# from the 0.0bps pre-cost bound (net_t=+0.577) through the 2.64bps optimistic
-# tier (net_t=-0.150, sign already unstable) to the 6.07bps stress tier
-# (net_t=-1.094). slow_momentum clears |t| >= 2.0 pre-cost (net_t=+1.859) and
-# stays above the floor through the 2.64bps tier (net_t=+1.634), with the
-# pre-registered momentum sign throughout.
-# fast_reversal keeps its signal/prescreen/phase computation for re-measurement
-# but carries zero capital in the Research-GO blend. One-time evidence-based
-# revision (same governance pattern as MEASURED_EXECUTION_COST_TIERS_BPS), not
-# a performance-selected fit.
+# Initial Research-GO blend weights: fast_reversal (0.0 weight) maintained for diagnostic evaluation.
 PHASE_1_BOOK_BLEND_WEIGHTS: dict[str, float] = {
     "fast_reversal": 0.0,
     "slow_momentum": 1.0,
 }
 
-# Fixed reference basket for the opt-in crash-regime directional tilt
-# (src/mhs/regime.py crash_regime_tilt_weights, docs/specs/mhs_crash_regime_tilt_overlay.md
-# §6). BTCUSDT is listed continuously across the full 2021-2025 dev window --
-# chosen for listing-date stability (no universe-composition drift, unlike an
-# eligible-symbol basket, ADR_20260812_MHS_MOMENTUM_STRATEGY_REDESIGN_REVIEW
-# §3.2), not for backtested performance.
+# Fixed reference basket for crash-regime directional tilt (BTCUSDT for continuous listing history).
 MHS_CRASH_REGIME_REFERENCE_SYMBOLS: tuple[str, ...] = ("BTCUSDT",)
 
-# The fast band's allowed set is the full measured reversal candidate grid
-# (docs/specs/mhs_universe_horizon_redesign.md §3.1, 7 horizons, 24h-168h step
-# 24) so a fold-scoped discovery/qualification selection may re-verify the
-# frozen 48h default. ``PHASE_1_BOOK_SPECS["fast_reversal"].horizon_hours``
-# stays 48 (the frozen fallback default); widening only the band is
-# diagnostic-only and never changes the 0.0 capital allocation.
+# Reversal and momentum candidate grids for fold-scoped discovery selection.
 REVERSAL_HORIZON_CANDIDATES_HOURS: tuple[int, ...] = (24, 48, 72, 96, 120, 144, 168)
 _FAST_BAND = HorizonBand(name="fast_reversal", horizons_hours=REVERSAL_HORIZON_CANDIDATES_HOURS, sign=-1)
-# The slow band's allowed set is the full measured momentum candidate grid
-# (docs/results/mhs-res.md §2, 19 horizons, 72h-504h step 24) so a
-# fold-scoped discovery/qualification selection may replace the frozen 168h
-# default. ``PHASE_1_BOOK_SPECS["slow_momentum"].horizon_hours`` stays 168
-# (the frozen fallback default).
+
 MOMENTUM_HORIZON_CANDIDATES_HOURS: tuple[int, ...] = (
     72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336,
     360, 384, 408, 432, 456, 480, 504,
 )
 _SLOW_BAND = HorizonBand(name="slow_momentum", horizons_hours=MOMENTUM_HORIZON_CANDIDATES_HOURS, sign=1)
 
-# Measured candidate grid for the funding-rate carry return source
-# (docs/specs/mhs_return_source_breadth_expansion.md §2). A measured candidate
-# grid -- not a frozen BookSpec -- following the exact governance pattern of
-# REVERSAL_HORIZON_CANDIDATES_HOURS/MOMENTUM_HORIZON_CANDIDATES_HOURS: the
-# fold-scoped discovery/qualification gate selects from it on fold-train-only
-# evidence, and it is explicitly NOT wired into PHASE_1_BOOK_SPECS or
-# PHASE_1_BOOK_BLEND_WEIGHTS in this contract (P0 diagnostic only; capital
-# allocation is P1 gated on the fold-train results).
+# Candidate grid for funding-rate carry return source discovery.
 MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS: tuple[int, ...] = (24, 72, 168, 336, 504)
 
-# Measured slow band of the additive directional trend sleeve
-# (docs/specs/mhs_directional_trend_sleeve.md §1.4). The ensemble is mandatory:
-# individual net Sharpe at the base tier ranges -0.058..+0.282, so any
-# single-horizon selection is overfitting. Used only by the opt-in diagnostic
-# (src/mhs/trend_sleeve.py, MhsDiagnosticRequest.trend_sleeve); the sleeve is
-# inert unless explicitly enabled.
+# Candidate slow band for additive directional trend sleeve.
 MHS_TREND_SLEEVE_HORIZONS_HOURS: tuple[int, ...] = (336, 480, 600, 720, 1080, 1440)
 
-# Per-year non-null coverage floor a feature must clear inside the execution
-# mask to be eligible for capital (docs/specs/mhs_multi_feature_alpha_architecture.md
-# §2 Stage 1, §0.4). Measured justification: the no_trades column coverage
-# collapses 2021:0.84 -> 2022:0.34 -> 2023-2025:0.00, which silently produced an
-# avg_trade_size book whose full-sample +0.311 Sharpe is sourced entirely from
-# 2021-2022. The registry (src/mhs/features.py MHS_FEATURE_REGISTRY) applies
-# this floor as its min_coverage; a feature failing it in ANY year is
-# fail-closed excluded from capital. A revision of this constant is a contract
-# revision, never an inline edit at a call site.
+# Annual non-null coverage floor (90%) required for capital eligibility.
 MHS_FEATURE_MIN_COVERAGE: float = 0.90
 
-# The k=6 wealth-committee composition declared by ECONOMIC FAMILY -- order
-# flow x2 (flow_imb_720h, flow_imb_168h), cross-sectional trend x3
-# (xs_mom_336h, xs_mom_720h, xs_idio_mom_336h), higher-moment x1
-# (mom3_skew_168h) -- never a performance-ranked selection
-# (docs/specs/mhs_committee_design_and_wealth_objective.md §2). Measured OOS:
-# Sharpe +1.379, CAGR +22.02%, MDD -12.5%, net positive at all three cost
-# tiers, versus the production single signal at -0.441 / -7.27%. Every name
-# must resolve in MHS_FEATURE_REGISTRY (src/mhs/features.py).
+# Predefined wealth committee composition across economic families (flow, momentum, skew).
 MHS_COMMITTEE_MEMBERS: tuple[str, ...] = (
     "flow_imb_720h",
     "flow_imb_168h",
@@ -200,30 +146,13 @@ MHS_COMMITTEE_MEMBERS: tuple[str, ...] = (
     "mom3_skew_168h",
 )
 
-# Annualized volatility target the committee exposure is scaled to using
-# TRAIN-window realized volatility only (docs/specs/mhs_committee_design_and_wealth_objective.md
-# §4). The wealth objective is compounded growth, so exposure is sized by
-# volatility rather than left at unit gross. Leverage above 1.5x is out of
-# contract: the computed full-Kelly of 9.02x rests on 6 OOS blocks and assumes
-# known Gaussian parameters, so it is an upper reference only.
+# Annualized volatility target for committee position sizing.
 MHS_COMMITTEE_TARGET_VOL: float = 0.15
 
-# Purge gap in hours between a walk-forward train window end and its test block
-# start (docs/specs/mhs_committee_design_and_wealth_objective.md §0). Covers the
-# longest committee feature lookback (720h, matching xs_mom_720h/flow_imb_720h;
-# xs_idio_mom_336h reaches ~672h effective) so no overlapping-label information
-# leaks across the boundary. Raised from 336 to 720 to match the longest member
-# lookback (docs/specs/mhs_committee_evaluation_integrity_fixes.md §2).
+# Purge gap (720h) between train and test windows to prevent label overlap leak.
 MHS_COMMITTEE_PURGE_HOURS: int = 720
 
-# First bar at which a committee walk-forward test block may be scored as OOS
-# (docs/specs/mhs_committee_design_and_wealth_objective.md, sandbox OOS_START
-# validated at 2023-01-01). The committee diagnostic anchors its 6-month block
-# grid at max(diagnostic_start, MHS_COMMITTEE_OOS_START) so a purged
-# walk-forward can never smuggle mid-2021 blocks in as pseudo-OOS via
-# min_train_bars (~83 days); a diagnostic run whose own start is already later
-# is unaffected (max() semantics, docs/specs/mhs_committee_evaluation_integrity_fixes.md
-# §1). A revision of this constant is a contract revision.
+# Earliest bar for committee walk-forward out-of-sample evaluation.
 MHS_COMMITTEE_OOS_START: pd.Timestamp = pd.Timestamp("2023-01-01", tz="UTC")
 
 PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
@@ -235,46 +164,18 @@ PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
     ),
 }
 
-# Preregistered count of sequential discovery trials the 2021-2025 dev search
-# has actually accumulated (docs/specs/mhs_strategy_foundation_reset.md RC-6).
-# The 20 iterations of horizon-grid/flag/overlay search all ran on the SAME dev
-# window, so they are one deliberate multi-trial search and the multiple-testing
-# deflation must account for them. The committee design added ~50 more
-# configurations compared on the same panel (31 candidate features + 9 combiner
-# variants + 10 committee-size-ladder steps,
-# docs/specs/mhs_committee_design_and_wealth_objective.md §1-§3), so the total
-# is raised to 70 (docs/specs/mhs_committee_evaluation_integrity_fixes.md §4).
-# A revision of this constant is a contract revision, never an inline edit at a
-# call site.
+# Cumulative sequential discovery trials count for multiple-testing deflation.
 MHS_SEARCH_TRIALS_ATTEMPTED: int = 70
 
-# Automatic RAM-guard tuning (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md
-# §2). When ``MhsDiagnosticRequest.ram_guard`` is True (default) and
-# ``max_rss_bytes`` is unset, the parent-stage budget is 85% of
-# ``psutil.virtual_memory().total`` and the system available-memory reserve floor
-# is ``max(5% of total, MHS_RAM_RESERVE_FLOOR_BYTES)``. The guard is a pure
-# fail-closed safety net -- it is observational (exception path only) and never
-# alters any computed value. A revision of these constants is a contract
-# revision, never an inline edit at a call site.
+# RAM-guard safety thresholds for parent stage execution.
 MHS_RAM_BUDGET_FRACTION: float = 0.85
 MHS_RAM_RESERVE_FRACTION: float = 0.05
 MHS_RAM_RESERVE_FLOOR_BYTES: int = 256 * 2**20
 
-# Estimated per-worker marginal RSS for the MHS fork pools after the
-# fork-COW refactor (docs/specs/mhs_refactor.md §1.3/§2.2). Measured
-# pre-refactor worker peak was 6.82 GB (``resource_measurements``
-# stage=``execution_window``) dominated by the pickled submit args and private
-# mark caches; those are eliminated, so ``plan_worker_count`` uses this
-# post-refactor figure (materialized windows ~1.4 GB at the realized roster
-# plus replay scratch). A revision is a contract revision, never an inline edit.
+# Estimated worker RSS budget for fork pools after COW memory optimization.
 MHS_WORKER_PEAK_RSS_BYTES: int = 3 * 2**30
 
-# P0-D: the two Research-GO policy gates named in ``_mhs_research_go``'s
-# contract are not registered in source. A value of None means "unregistered"
-# and keeps Research GO conservative (the gate reports UNSPECIFIED_POLICY);
-# registering a value is a deliberate policy act following the
-# MEASURED_EXECUTION_COST_TIERS_BPS governance pattern, never an inline literal
-# at a call site and never a performance-flattering number.
+# Research-GO policy thresholds (None indicates conservative unregistered state).
 MHS_REGISTERED_POLICY_THRESHOLDS: dict[str, float | None] = {
     "cap_30_roster": None,
     "primary_annual_return": None,
