@@ -34,9 +34,8 @@ def realized_vol(log_price: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
 def vol_normalized_horizon_signal(log_price: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     """Horizon log-return scaled by its own realized vol (risk-adjusted momentum).
 
-    Avoids raw-return cross-sectional rank being dominated by a handful of
-    high-realized-vol symbols whose large moves carry no proportionally
-    larger persistence signal (docs/specs/mhs_momentum_vol_normalization.md §0).
+    Avoids raw-return cross-sectional rank being dominated by high-realized-vol symbols
+    whose large moves carry no proportionally larger persistence signal.
     """
     raw = horizon_log_return(log_price, horizon_bars)
     vol = realized_vol(log_price, horizon_bars)

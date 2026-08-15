@@ -1,22 +1,8 @@
 """Additive time-series trend sleeve on an eligible-market basket.
 
-Every Phase 1 book (``books.rank_weight_book`` and friends) is by construction
-dollar-neutral unit-gross, so the system structurally cannot hold a net
-directional exposure no matter the parameterization. This module builds the one
-missing axis: a causal, self-vol-normalized time-series momentum position on an
-equal-weight market basket, sized by an explicit gross budget and combined
-ADDITIVELY with the dollar-neutral books (never as a convex blend that
-cannibalizes the alpha books' unit gross -- the specific design flaw of
-``regime.crash_regime_tilt_weights``; docs/specs/mhs_directional_trend_sleeve.md
-§2.1-§2.2).
-
-All statistics are causal: every rolling/shift window reads only bars at or
-before ``t``, positions are sampled onto the decision grid and forward-held
-(never recomputed intra-interval -- the turnover discipline the cost
-measurements assume), and there are no fitted constants: horizons come from the
-frozen ``MHS_TREND_SLEEVE_HORIZONS_HOURS`` contract and sizing is pure self-vol
-normalization with a ``[-1, 1]`` clip; ``gross_budget`` is a risk-budget policy
-input, never a fitted parameter.
+This module builds a causal, self-vol-normalized time-series momentum position on an
+equal-weight market basket, sized by an explicit gross budget and combined additively
+with dollar-neutral books.
 """
 
 from __future__ import annotations

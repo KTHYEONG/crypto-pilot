@@ -321,6 +321,155 @@ def assert_relevant_mark_price_coverage(
         )
 
 
+# Dynamic gap-exclusion threshold: reuses the SAME 720h invariant
+# ``liquid_half_eligibility(min_history_bars=720)`` already requires for a
+# symbol to become liquidity-eligible at all (src/mhs/panel.py). A contiguous
+# gap at or above this bound already structurally breaks that trailing-history
+# requirement through the gap, so exclusion at this threshold is not a policy
+# choice layered on top of a separate magic number -- it is the same bound the
+# eligibility computation already enforces. Not a hardcoded symbol list: this
+# is recomputed from the live cache and the live roster mask on every call, so
+# a symbol excluded today is automatically re-admitted once its gap is
+# backfilled, and a symbol excluded tomorrow if its cache degrades.
+MHS_DYNAMIC_GAP_EXCLUSION_HOURS = 720.0
+
+
+def _execution_gap_windows(
+    symbol: str,
+    timeframe: str,
+    iv_start: pd.Timestamp,
+    iv_end: pd.Timestamp,
+    root: str | None,
+    min_gap_hours: float,
+) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
+    """Contiguous OHLCV coverage gaps ``>= min_gap_hours`` inside ``[iv_start, iv_end]``.
+
+    A missing file or a window with zero observed bars is treated as one gap
+    spanning the entire requested interval. Leading/trailing gaps (before the
+    first or after the last observed bar within the interval) are included, not
+    just internal holes, since either leaves the symbol without a fill price
+    for part of its roster membership.
+    """
+    base = Path(root) if root else FUTURES_DATA_DIR / "ohlcv"
+    path = base / timeframe / f"{symbol}.parquet"
+    min_gap = pd.Timedelta(hours=min_gap_hours)
+    if not path.exists():
+        return ((iv_start, iv_end),)
+    table = pq.read_table(path, columns=["timestamp"])
+    idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
+    idx = pd.DatetimeIndex(idx).drop_duplicates().sort_values()
+    observed = idx[(idx >= iv_start) & (idx <= iv_end)]
+    if observed.empty:
+        return ((iv_start, iv_end),)
+    gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    if observed[0] - iv_start >= min_gap:
+        gaps.append((iv_start, observed[0]))
+    diffs = observed.to_series().diff()
+    big = diffs[diffs >= min_gap]
+    for ts, delta in big.items():
+        gaps.append((ts - delta, ts))
+    if iv_end - observed[-1] >= min_gap:
+        gaps.append((observed[-1], iv_end))
+    return tuple(gaps)
+
+
+def apply_dynamic_gap_exclusion(
+    execution_mask: pd.DataFrame,
+    timeframe: str,
+    root: str | None = None,
+    min_gap_hours: float = MHS_DYNAMIC_GAP_EXCLUSION_HOURS,
+) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
+    """Zero out roster membership wherever a large OHLCV gap overlaps it.
+
+    Replaces a static per-symbol exclusion list with a live computation: a gap
+    ``< min_gap_hours`` inside a membership interval is left untouched (the
+    existing per-event ``MISSING_DATA``/``RELEVANT_EXECUTION_DATA_GAP`` fold
+    reporting already handles it correctly without pre-flight over-blocking); a
+    gap ``>= min_gap_hours`` structurally cannot support the eligibility
+    computation's own trailing-history requirement, so that sub-window is
+    excluded from the returned mask. Returns the adjusted mask plus a mapping
+    of excluded ``(symbol -> gap windows)`` for observability.
+    """
+    intervals = roster_membership_intervals(execution_mask)
+    if not intervals:
+        return execution_mask, {}
+    adjusted = execution_mask.copy()
+    excluded: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]] = {}
+    for symbol, ivs in intervals.items():
+        symbol_gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        for iv_start, iv_end in ivs:
+            for g_start, g_end in _execution_gap_windows(
+                symbol, timeframe, iv_start, iv_end, root, min_gap_hours,
+            ):
+                adjusted.loc[(adjusted.index >= g_start) & (adjusted.index <= g_end), symbol] = False
+                symbol_gaps.append((g_start, g_end))
+        if symbol_gaps:
+            excluded[symbol] = tuple(symbol_gaps)
+    return adjusted, excluded
+
+
+def _mark_gap_windows(
+    avail: pd.DatetimeIndex,
+    iv_start: pd.Timestamp,
+    iv_end: pd.Timestamp,
+    min_gap_hours: float,
+) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
+    """Contiguous mark-availability gaps ``>= min_gap_hours`` inside ``[iv_start, iv_end]``.
+
+    ``avail`` must already carry ``_mark_availability_index``'s causal ``+1h``
+    shift and finite/strictly-positive ``close`` filter, so this sees exactly
+    the same availability points the replay does.
+    """
+    min_gap = pd.Timedelta(hours=min_gap_hours)
+    observed = avail[(avail >= iv_start) & (avail <= iv_end)]
+    if observed.empty:
+        return ((iv_start, iv_end),)
+    gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    if observed[0] - iv_start >= min_gap:
+        gaps.append((iv_start, observed[0]))
+    diffs = observed.to_series().diff()
+    big = diffs[diffs >= min_gap]
+    for ts, delta in big.items():
+        gaps.append((ts - delta, ts))
+    if iv_end - observed[-1] >= min_gap:
+        gaps.append((observed[-1], iv_end))
+    return tuple(gaps)
+
+
+def apply_dynamic_mark_gap_exclusion(
+    execution_mask: pd.DataFrame,
+    timeframe: str = "1h",
+    root: str | None = None,
+    min_gap_hours: float = MHS_DYNAMIC_GAP_EXCLUSION_HOURS,
+) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
+    """Zero out roster membership wherever a large mark-price gap overlaps it.
+
+    Same self-healing, threshold-based replacement for a static exclusion list
+    as ``apply_dynamic_gap_exclusion``, scoped to ``markPriceKlines`` via
+    ``_mark_availability_index`` instead of OHLCV. ``root`` is accepted for
+    signature symmetry but mark-price paths are always resolved through
+    ``futures_collection._mark_price_path`` (no synthetic-root override exists
+    for mark data).
+    """
+    if timeframe != "1h":
+        raise ValueError(f"unsupported timeframe '{timeframe}' (mark coverage is hourly)")
+    intervals = roster_membership_intervals(execution_mask)
+    if not intervals:
+        return execution_mask, {}
+    adjusted = execution_mask.copy()
+    excluded: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]] = {}
+    for symbol, ivs in intervals.items():
+        avail = _mark_availability_index(_futures_collection._mark_price_path(symbol, timeframe))
+        symbol_gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        for iv_start, iv_end in ivs:
+            for g_start, g_end in _mark_gap_windows(avail, iv_start, iv_end, min_gap_hours):
+                adjusted.loc[(adjusted.index >= g_start) & (adjusted.index <= g_end), symbol] = False
+                symbol_gaps.append((g_start, g_end))
+        if symbol_gaps:
+            excluded[symbol] = tuple(symbol_gaps)
+    return adjusted, excluded
+
+
 def collect_mhs_execution_data(
     plan: MhsExecutionCollectionPlan, *, execute: bool = False, workers: int = 4,
 ) -> dict[str, object]:

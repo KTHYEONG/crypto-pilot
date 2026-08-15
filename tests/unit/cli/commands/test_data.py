@@ -1,7 +1,4 @@
-"""Contract coverage for the ``data collect mhs-execution`` CLI defaults
-(docs/specs/mhs_execution_timeframe_3m.md §3.3/§3.5): the operator collection
-command must default to the native 3m interval and accept ``--timeframe 3m``.
-"""
+"""Contract coverage for the ``data collect mhs-execution`` CLI defaults."""
 
 from __future__ import annotations
 

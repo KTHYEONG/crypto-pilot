@@ -1,14 +1,8 @@
 """Committee combination and wealth-objective measurement primitives.
 
-The wealth committee (docs/specs/mhs_committee_design_and_wealth_objective.md)
-is the k=6 economic-family composition combined with long-only equal-risk
-weights and scaled to an annualized volatility target using TRAIN-window
-statistics only. This module holds the sign-safe cost accounting (§0), the
-wealth metrics (§4), the volatility-target scale (§4), and the purged
-walk-forward harness (§0) that benchmarks any future learned combiner against
-the curated equal-risk committee. No function here fits a model: equal-risk is
-the measured benchmark that shrinkage mean-variance (+0.698), top-k selection
-(+0.867), and regime-conditional weighting (+0.404) all failed to beat.
+The wealth committee combines selected economic-family signals with long-only equal-risk
+weights scaled to an annualized volatility target using train-window statistics only.
+This module provides cost decomposition, wealth metrics, volatility scaling, and walk-forward harnesses.
 """
 
 from __future__ import annotations
@@ -170,15 +164,8 @@ def committee_block_edges_from(
     """6-month OOS block starts covering [max(start, oos_start), end).
 
     Anchored at ``max(start, oos_start)`` instead of the raw diagnostic start so
-    a purged walk-forward can never book blocks before the declared OOS start as
-    pseudo-OOS via ``min_train_bars`` alone -- the B1 fix for
-    ``WALK_FORWARD_START_OPTIMISTIC``
-    (docs/specs/mhs_committee_evaluation_integrity_fixes.md §1). The blocks are
-    generated in 6-month ``DateOffset`` steps exactly as the committee
-    diagnostic always has; only the anchor is shifted. Raises ``ValueError``
-    when ``end <= max(start, oos_start)`` so a short diagnostic window that
-    cannot contain a test block fails closed instead of silently producing an
-    empty grid.
+    a purged walk-forward cannot evaluate pre-OOS blocks as pseudo-OOS via
+    ``min_train_bars`` alone. Raises ``ValueError`` when ``end <= max(start, oos_start)``.
     """
     anchored = max(start, oos_start)
     if end <= anchored:
