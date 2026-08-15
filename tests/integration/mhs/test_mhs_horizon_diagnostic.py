@@ -979,7 +979,7 @@ class TestMhsPerfOptimizationO3FoldParity:
         )
 
         root, end = fold_parity_request
-        funding = ev._load_funding_series(DEV_SYMBOLS)
+        funding, _ = ev._load_funding_series(DEV_SYMBOLS)
         request = MhsDiagnosticRequest(
             start=str(START), end=str(end), data_root=str(root),
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -1302,7 +1302,7 @@ class TestFoldWindowTelemetryOracle:
     def test_fold_window_telemetry_monotonic_and_oracle_equivalent(self, fold_market) -> None:
         root, end = fold_market
         symbols = list(DEV_SYMBOLS)
-        funding_by_symbol = ev._load_funding_series(symbols)
+        funding_by_symbol, _ = ev._load_funding_series(symbols)
         request = MhsDiagnosticRequest(
             start=str(START), end=str(end), data_root=str(root),
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,

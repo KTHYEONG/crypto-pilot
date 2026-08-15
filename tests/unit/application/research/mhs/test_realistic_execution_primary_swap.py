@@ -93,7 +93,7 @@ def mhs_market(tmp_path, monkeypatch):
 def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     root, end = mhs_market
     symbols = _DEV_SYMBOLS[:8]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = ev.MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -185,7 +185,7 @@ def test_fold_primary_is_immediate_taker(mhs_market) -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_FOLD_PRIMARY_IS_IMMEDIATE_TAKER_03."""
     root, end = mhs_market
     symbols = _DEV_SYMBOLS[:8]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = ev.MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
