@@ -20,7 +20,7 @@ def test_mhs_diagnostic_defaults_and_mark_mode_choices() -> None:
     parser = sub.choices["mhs-horizon-diagnostic"]
     defaults = {action.dest: action.default for action in parser._actions}
     assert defaults["mark_mode"] == "cache_required"
-    assert defaults["execution_timeframe"] == "5m"
+    assert defaults["execution_timeframe"] == "3m"
     assert defaults["max_rss_bytes"] is None
     assert defaults["no_log_run"] is False
     assert defaults["touch_diagnostic"] is False
@@ -524,3 +524,43 @@ def test_mhs_diagnostic_persist_receives_request_object(monkeypatch) -> None:
     assert len(requests) == 1
     assert "request" in captured
     assert captured["request"] is requests[0]
+
+
+def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
+    """SCENARIO_MHS_CLI_EXECUTION_TIMEFRAME_3M_DEFAULT: parsing
+    ``mhs-horizon-diagnostic`` args without ``--execution-timeframe`` yields
+    ``args.execution_timeframe == "3m"``; ``--execution-timeframe 3m`` is
+    accepted; and the constructed ``MhsDiagnosticRequest`` carries
+    ``execution_timeframe="3m"``."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        captured.update(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    defaults = {action.dest: action.default for action in parser._actions}
+    assert defaults["execution_timeframe"] == "3m"
+
+    args = parser.parse_args([])
+    assert args.execution_timeframe == "3m"
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["execution_timeframe"] == "3m"
+
+    captured.clear()
+    args = parser.parse_args(["--execution-timeframe", "3m"])
+    assert args.execution_timeframe == "3m"
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["execution_timeframe"] == "3m"
