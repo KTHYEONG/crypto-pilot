@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
+from src.application.data import mhs_execution_collection as mec
 from src.application.research.mhs import evaluation as ev
 from src.application.research.mhs.evaluation import (
     MhsDiagnosticRequest,
@@ -554,7 +555,7 @@ class TestAnchoredFoldBounded:
                         "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
             if symbol_partition(s) == "dev"
         ][:8]
-        funding_by_symbol = ev._load_funding_series(symbols)
+        funding_by_symbol, _ = ev._load_funding_series(symbols)
         request = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -578,7 +579,7 @@ class TestAnchoredFoldBounded:
                         "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
             if symbol_partition(s) == "dev"
         ][:8]
-        funding_by_symbol = ev._load_funding_series(symbols)
+        funding_by_symbol, _ = ev._load_funding_series(symbols)
         request = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -622,7 +623,7 @@ class TestAnchoredFoldBounded:
                         "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
             if symbol_partition(s) == "dev"
         ][:8]
-        funding_by_symbol = ev._load_funding_series(symbols)
+        funding_by_symbol, _ = ev._load_funding_series(symbols)
         request = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -674,7 +675,7 @@ def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -712,7 +713,7 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -783,7 +784,7 @@ def test_fold_execution_weights_are_renormalized(mhs_market, monkeypatch) -> Non
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -825,7 +826,7 @@ def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypa
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -957,7 +958,7 @@ def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> No
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -997,7 +998,7 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     captured: dict[str, pd.Series] = {}
     real_scale = ev._regime_cash_scale
 
@@ -1167,7 +1168,7 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     universe_size = 8
     monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
@@ -1658,7 +1659,7 @@ def _build_books_concurrent_args(
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -2013,7 +2014,7 @@ def test_fold_decision_grid_matches_slow_cadence(mhs_market) -> None:
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -2039,7 +2040,7 @@ def test_crash_tilt_disabled_fold_is_byte_identical(mhs_market, monkeypatch) -> 
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -2082,7 +2083,7 @@ def test_crash_tilt_active_fold_reaches_replay(mhs_market_with_btc) -> None:
                     "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     assert "BTCUSDT" in funding_by_symbol
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -2112,7 +2113,7 @@ def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_q
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -2151,7 +2152,7 @@ def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote)
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -2180,7 +2181,7 @@ def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quot
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -2587,7 +2588,7 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -2654,7 +2655,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -2724,7 +2725,7 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -3650,7 +3651,7 @@ def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -3922,7 +3923,7 @@ def _slow_book_panel_inputs(mhs_market):
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -4031,7 +4032,7 @@ def test_mhs_alpha_engine_fold_portfolio_trigger_preserves_invariants(mhs_market
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
     forced_scale: dict[str, pd.Series] = {}
 
     def _forced_step_scale(vol_mean: pd.Series) -> pd.Series:
@@ -4422,6 +4423,128 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
             dataclasses.replace(request, execution_coverage_gate=True),
         )
     assert books_called == []
+
+
+def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_RELEVANCE_GATE_PASSES_WHERE_FULL_SCOPE_BLOCKED:
+    # with execution_coverage_gate=True, a fixture whose NON-roster symbol has
+    # an internal 3m data gap completes normally (status COMPLETE), whereas the
+    # same fixture blocks under the old full-universe gate -- reproducing the
+    # measured 36/36 false-positive the relevance scope removes.
+    root, end = mhs_market
+    _write_3m_cache(root)
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    gap_symbol = symbols[0]
+    gap_path = root / "3m" / f"{gap_symbol}.parquet"
+    frame = pd.read_parquet(gap_path)
+    mid = len(frame) // 2
+    pd.concat([frame.iloc[:mid], frame.iloc[mid + 12:]]).to_parquet(gap_path)
+
+    # Pin the execution roster: every symbol in the roster from hour 1 EXCEPT
+    # gap_symbol, which is never a member. The first mask row stays False so the
+    # fixture's marks (available from start + 1h) cover every membership hour.
+    def _fixed_mask(quote_vol, eligible, universe_size):
+        mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
+        mask[gap_symbol] = False
+        mask.iloc[0] = False
+        return mask
+
+    monkeypatch.setattr(ev, "_pit_execution_mask", _fixed_mask)
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
+        execution_universe_size=8, execution_coverage_gate=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+
+    # The same fixture blocks under the old full-universe scope (the gapped
+    # symbol is funded, so it was part of the Cartesian product gate).
+    with pytest.raises(DataIntegrityError, match=gap_symbol):
+        mec.assert_execution_data_coverage(
+            symbols, "3m", str(_START), str(end), root=str(root),
+        )
+
+
+def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_MARK_GATE_FAILS_BEFORE_REPLAY: with
+    # execution_coverage_gate=True, a fixture where a roster symbol's mark data
+    # starts after its first roster hour raises DataIntegrityError naming that
+    # symbol, and raises before any execution replay window is materialized.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    late_symbol = symbols[0]
+    hourly = pd.date_range(_START, end, freq="1h", tz="UTC")
+    late_idx = pd.date_range(hourly[len(hourly) // 2], end, freq="1h", tz="UTC")
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    mdir = root / "markPriceKlines" / "1h"
+    mdir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "timestamp": (late_idx - epoch) // pd.Timedelta("1ms"),
+            "datetime": late_idx,
+            "close": 100.0,
+        }
+    ).to_parquet(mdir / f"{late_symbol}.parquet")
+
+    def _all_roster(quote_vol, eligible, universe_size):
+        mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
+        mask.iloc[0] = False
+        return mask
+
+    monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
+    materialized: list[object] = []
+    monkeypatch.setattr(
+        ev, "_materialize_replay_windows", lambda *a, **k: materialized.append(True),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, execution_coverage_gate=True,
+    )
+    with pytest.raises(DataIntegrityError) as exc_info:
+        ev.run_mhs_horizon_diagnostic(request)
+    assert late_symbol in str(exc_info.value)
+    assert materialized == []
+
+
+def test_mhs_funding_load_reports_dropped_symbols(tmp_path, monkeypatch) -> None:
+    # SCENARIO_MHS_FUNDING_LOAD_REPORTS_DROPPED_SYMBOLS: _load_funding_series
+    # returns (series, dropped) where a symbol whose funding parquet raises on
+    # load (or has no file / no rows) appears in `dropped` with its reason and
+    # is absent from `series` -- the drop is no longer observable only via a
+    # log line.
+    root = tmp_path / "market"
+    fdir = root / "funding"
+    fdir.mkdir(parents=True, exist_ok=True)
+    hourly = pd.date_range(_START, periods=24, freq="1h", tz="UTC")
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    pd.DataFrame(
+        {
+            "timestamp": (hourly - epoch) // pd.Timedelta("1ms"),
+            "datetime": hourly,
+            "funding_rate": 0.00005,
+        }
+    ).to_parquet(fdir / "GOODUSDT.parquet")
+    (fdir / "BROKENUSDT.parquet").write_bytes(b"not a parquet")
+    monkeypatch.setattr(ev, "funding_path", lambda sym: fdir / f"{sym}.parquet")
+    series, dropped = ev._load_funding_series(["GOODUSDT", "BROKENUSDT", "NOPATHUSDT"])
+    assert "GOODUSDT" in series
+    assert "BROKENUSDT" not in series
+    assert dropped["BROKENUSDT"].startswith("load_error")
+    assert dropped["NOPATHUSDT"] == "missing"
 
 
 def test_mhs_diagnostic_execution_timeframe_3m_default() -> None:
