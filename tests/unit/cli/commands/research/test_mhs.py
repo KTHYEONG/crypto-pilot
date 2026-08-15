@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import re
 import types
 
 from src.cli.commands.research.mhs import _run_mhs_horizon_diagnostic, add_mhs_commands
@@ -387,6 +389,29 @@ def test_mhs_diagnostic_committee_flag_threaded_to_request(monkeypatch) -> None:
     assert args.committee_book is False
     _run_mhs_horizon_diagnostic(args)
     assert captured["committee_book"] is False
+
+def test_mhs_diagnostic_persist_stage_logged(monkeypatch, caplog) -> None:
+    """SCENARIO_MHS_CLI_PERSIST_STAGE_LOGGED: the persist step emits a [SYS]
+    stage=persist_report elapsed_ms=<int> log line, so the post-run report
+    serialization span is visible to the same [SYS] telemetry."""
+    import src.application.research.mhs.evaluation as ev
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    args = parser.parse_args([])
+    with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"):
+        _run_mhs_horizon_diagnostic(args)
+    assert any(
+        re.match(r"^\[SYS\] stage=persist_report elapsed_ms=\d+$", record.message)
+        for record in caplog.records
+    )
+
 
 def test_mhs_diagnostic_persist_receives_request_object(monkeypatch) -> None:
     """SCENARIO_MHS_RESULT_LOG_07: ``_run_mhs_horizon_diagnostic`` threads the
