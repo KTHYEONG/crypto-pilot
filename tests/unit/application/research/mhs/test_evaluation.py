@@ -128,11 +128,7 @@ def _write_3m_cache(root: Path) -> None:
 
 @pytest.fixture
 def mhs_market_long(tmp_path, monkeypatch):
-    # B1 fixture: spans 2021-01-01 .. 2024-01-01 so the committee diagnostic's
-    # OOS block grid anchored at MHS_COMMITTEE_OOS_START (2023-01-01) has real
-    # test bars (docs/specs/mhs_committee_evaluation_integrity_fixes.md §1).
-    # Minute frames are skipped: the committee diagnostic runs on 1h panels
-    # only, and the execution/fold paths are monkeypatched in these tests.
+    # Fixture spans 2021-01-01 .. 2024-01-01 for OOS block coverage.
     root = tmp_path / "market"
     end = _write_mhs_market(root, n_hours=26304, with_minute=False)
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
@@ -1838,10 +1834,7 @@ def test_toplevel_blend_replay_matches_renormalized_components(mhs_market) -> No
 
 
 def test_p10_mark_cache_warmable_per_symbol(mhs_market) -> None:
-    # SCENARIO_P10_EAGER_CACHE (post fork-COW refactor): the parent-side mark
-    # frame cache warms one symbol's mark parquet per call so fork children can
-    # inherit the populated cache copy-on-write (the minute-frame preload was
-    # removed; docs/specs/mhs_refactor.md §2.2 W6).
+    # Mark frame cache warms one symbol's mark parquet per call for COW inheritance.
     root, end = mhs_market
     syms = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
     ev._get_symbol_mark_frame.cache_clear()
@@ -1891,21 +1884,7 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
 
 
 def test_regime_scale_reaches_blend_replay_not_only_prescreen(mhs_market) -> None:
-    # SCENARIO_MHS_REGIME_SCALE_REACHES_BLEND_REPLAY_01: previously blend_replay
-    # (the blend book's actual execution-replay weights inside
-    # _run_books_concurrent) was reconstructed independently from
-    # w_fast_execution/w_slow_execution and never multiplied by regime_scale,
-    # so the top-level "blend" book's primary/stress replay never reflected the
-    # R1 volatility-regime cash scale (or, transitively, the opt-in
-    # trend_efficiency_overlay) even though blend_1h/blend_step (prescreen/tail
-    # diagnostics) did -- contradicting the R1 comment's own stated intent
-    # (docs/specs/mhs_capital_floor_and_overlay_validation.md §2). With a
-    # regime_scale that is < 1.0 on part of the grid, the blend book's replay
-    # must now show reduced gross exposure on those decisions relative to a
-    # None (no-scale) baseline, while fast_reversal/slow_momentum's own
-    # standalone books stay byte-identical (the scale is blend-only, matching
-    # the anchored-fold path's design where it applies to the portfolio target,
-    # not each book's own raw signal).
+    # SCENARIO_MHS_REGIME_SCALE_REACHES_BLEND_REPLAY_01: blend replay reflects regime scale.
     args = _build_books_concurrent_args(mhs_market)
     active_grid = ev._active_blend_book_and_grid(
         args["fast"], args["slow"], args["fast_grid"], args["slow_grid"],
@@ -2138,14 +2117,7 @@ def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_q
 def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote) -> None:
     # SCENARIO_MHS_COMMITTEE_CAPITAL_REACHES_FOLD_TARGETS: with committee_capital
     # enabled the fold decision targets become the equal-weight committee blend,
-    # not the momentum blend. They differ from the baseline, stay finite, remain
-    # dollar-neutral row-wise, and keep gross bounded by unit. The A/B legs use
-    # portfolio_rebalance_trigger on both sides so the ONLY difference is the
-    # book itself (the P0 design goal); the default per_symbol_deadband breaks
-    # row-sum neutrality for every blend in the system, so it cannot carry the
-    # neutrality assertion (the contract rationale's "rebalance trigger" is
-    # precisely the whole-row-hold trigger, which preserves neutrality by
-    # construction -- docs/specs/mhs_alpha_engine.md §1).
+    # Verify committee capital feeds fold weights while preserving neutrality.
     root, end = mhs_market_with_taker_buy_quote
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -2453,13 +2425,7 @@ def test_gitignore_full_subdir_only() -> None:
 
 
 def test_book_weights_momentum_keeps_raw_signal() -> None:
-    """SCENARIO_BOOK_WEIGHTS_MOMENTUM_STAYS_RAW: ``_book_weights`` for a
-    sign=+1 spec stays on raw ``horizon_log_return``. ``vol_normalized_
-    horizon_signal`` was tried in the live book and reverted -- it improved
-    the discovery-gate prescreen but broke ``CAPITAL_INVARIANT_BREACH`` on
-    the full 2021-2025 realistic-execution replay, so it stays wired into
-    discovery.py's diagnostic-only scoring only
-    (docs/specs/mhs_momentum_vol_normalization.md follow-up)."""
+    """Verify book_weights keeps raw log return for momentum books."""
     log_close, eligible, _, _, idx = _signal_disagreement_panel()
     spec = _dispatch_spec(sign=1)
     weights = ev._book_weights(log_close, eligible, spec, idx)
@@ -4379,10 +4345,13 @@ def test_research_go_data_integrity_reason_empty_when_clean(monkeypatch) -> None
 
 def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_DEFAULT_OFF_BYTE_IDENTICAL:
-    # with the opt-in flag omitted (default False) the pre-flight gate is inert:
-    # against a fixture with no 5m execution cache the run completes through the
-    # pre-existing MISSING_DATA termination path with no new DataIntegrityError,
-    # and the report is byte-identical to the explicit-off run.
+    # with the opt-in flag omitted (default False) the pre-flight gate AND the
+    # dynamic gap exclusion it now also guards (spec
+    # mhs_data_integrity_relevance_scoping.md §3) are both inert: against a
+    # fixture with no 5m execution cache the run completes through the
+    # pre-existing MISSING_DATA termination path with no new
+    # DataIntegrityError, and the report is byte-identical to the
+    # explicit-off run.
     root, end = mhs_market
     monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
     monkeypatch.setattr(
@@ -4404,9 +4373,13 @@ def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monke
 
 def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_ON_FAILS_CLOSED_EARLY:
-    # with the opt-in flag on, a funded symbol with no 5m parquet file under
-    # data_root raises DataIntegrityError naming the missing symbol right after
-    # the funded universe resolves, before any replay window executes.
+    # a fixture whose execution_timeframe (5m) has no parquet files at all for
+    # ANY funded symbol dynamically excludes every roster member (spec
+    # mhs_data_integrity_relevance_scoping.md §3) and, since that empties the
+    # entire roster rather than trimming a few noisy symbols, the always-on
+    # total-exclusion safety net raises DataIntegrityError naming the
+    # timeframe/data_root before any replay window executes -- regardless of
+    # execution_coverage_gate, which is no longer what triggers this case.
     root, end = mhs_market
     books_called: list[str] = []
     monkeypatch.setattr(
@@ -4418,7 +4391,7 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
         "execution_universe_size": 8,
     }
     request = MhsDiagnosticRequest(**base)
-    with pytest.raises(DataIntegrityError, match="MISSING"):
+    with pytest.raises(DataIntegrityError, match="removed every roster member"):
         ev.run_mhs_horizon_diagnostic(
             dataclasses.replace(request, execution_coverage_gate=True),
         )
@@ -4479,6 +4452,11 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
     # execution_coverage_gate=True, a fixture where a roster symbol's mark data
     # starts after its first roster hour raises DataIntegrityError naming that
     # symbol, and raises before any execution replay window is materialized.
+    # The missing span is kept well under MHS_DYNAMIC_GAP_EXCLUSION_HOURS (720h)
+    # so the default dynamic gap exclusion (spec
+    # mhs_data_integrity_relevance_scoping.md §3) leaves this symbol in the
+    # mask and the strict opt-in gate is the one that catches it -- see
+    # test_mhs_diagnostic_large_gap_auto_excluded_not_raised for the >=720h case.
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -4487,7 +4465,7 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
     ]
     late_symbol = symbols[0]
     hourly = pd.date_range(_START, end, freq="1h", tz="UTC")
-    late_idx = pd.date_range(hourly[len(hourly) // 2], end, freq="1h", tz="UTC")
+    late_idx = pd.date_range(hourly[100], end, freq="1h", tz="UTC")
     epoch = pd.Timestamp("1970-01-01", tz="UTC")
     mdir = root / "markPriceKlines" / "1h"
     mdir.mkdir(parents=True, exist_ok=True)
@@ -4520,6 +4498,52 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
     assert materialized == []
 
 
+def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_DYNAMIC_GAP_EXCLUSION_LARGE_GAP_NO_RAISE: a roster symbol
+    # whose mark data is missing for >= MHS_DYNAMIC_GAP_EXCLUSION_HOURS (720h)
+    # is silently excluded from the execution mask by the default (always-on)
+    # apply_dynamic_mark_gap_exclusion instead of raising -- even with
+    # execution_coverage_gate=True, since that gate runs AFTER dynamic
+    # exclusion and only ever sees what remains in the mask. Companion to
+    # test_mhs_diagnostic_mark_gate_fails_before_replay (sub-threshold case).
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    late_symbol = symbols[0]
+    hourly = pd.date_range(_START, end, freq="1h", tz="UTC")
+    late_idx = pd.date_range(hourly[len(hourly) // 2], end, freq="1h", tz="UTC")
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    mdir = root / "markPriceKlines" / "1h"
+    mdir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "timestamp": (late_idx - epoch) // pd.Timedelta("1ms"),
+            "datetime": late_idx,
+            "open": 100.0,
+            "high": 100.0,
+            "low": 100.0,
+            "close": 100.0,
+        }
+    ).to_parquet(mdir / f"{late_symbol}.parquet")
+
+    def _all_roster(quote_vol, eligible, universe_size):
+        mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
+        mask.iloc[0] = False
+        return mask
+
+    monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, execution_coverage_gate=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+
+
 def test_mhs_funding_load_reports_dropped_symbols(tmp_path, monkeypatch) -> None:
     # SCENARIO_MHS_FUNDING_LOAD_REPORTS_DROPPED_SYMBOLS: _load_funding_series
     # returns (series, dropped) where a symbol whose funding parquet raises on
@@ -4548,10 +4572,7 @@ def test_mhs_funding_load_reports_dropped_symbols(tmp_path, monkeypatch) -> None
 
 
 def test_mhs_diagnostic_execution_timeframe_3m_default() -> None:
-    # SCENARIO_MHS_EXECUTION_TIMEFRAME_3M_DEFAULT: the unqualified request (no
-    # execution_timeframe kwarg) defaults to '3m' -- the only interval
-    # physically present under data/futures/ohlcv/ since the 5m/1m caches were
-    # deleted (docs/specs/mhs_execution_timeframe_3m.md §1.4).
+    # SCENARIO_MHS_EXECUTION_TIMEFRAME_3M_DEFAULT: default timeframe is '3m'.
     request = MhsDiagnosticRequest()
     assert request.execution_timeframe == "3m"
 

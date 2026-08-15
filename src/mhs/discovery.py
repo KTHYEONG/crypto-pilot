@@ -359,11 +359,8 @@ def select_horizon_by_discovery_qualification(
     ``regime_scale`` series built once per call, the regime-scaled worst-year
     ``discovery_scores_regime_scaled`` table, and -- for the selected candidate
     only -- the regime-scaled aggregate/qualification t-stats and
-    ``regime_scaled_admitted`` (reusing the raw sign-consistency flag). Neither
     diagnostic ever changes ``selected_horizon``/``admitted``/the raw scores,
-    which stay driven solely by the unadjusted path
-    (``docs/specs/mhs_discovery_admission_autocorr_robustness.md`` §2,
-    ``docs/specs/mhs_discovery_admission_regime_scale_parity.md`` §2).
+    which stay driven solely by the unadjusted path.
     """
     if sign not in (-1, 1):
         raise ValueError(f"sign must be -1 or +1, got {sign}")

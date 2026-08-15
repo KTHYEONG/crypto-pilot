@@ -1,12 +1,8 @@
-"""Regime-split stability: the admission gate that sees sign flips.
+"""Regime-split stability: the admission gate that evaluates sign consistency.
 
-The discovery gate scores a single window, so ``mom_168h`` (+0.615 in
-2021-2023, then -0.690) looks normal. ``regime_split_stability`` splits a PnL
-series at explicit regime boundaries and reports per-window Sharpe,
-``min_window_sharpe``, ``sign_consistent`` (all finite windows share one strict
-sign), and ``decay`` (last minus first window). The Stage 2 admission rule is
-``sign_consistent=True AND min_window_sharpe > 0``
-(docs/specs/mhs_multi_feature_alpha_architecture.md §2, Stage 2).
+``regime_split_stability`` splits a PnL series at explicit regime boundaries
+and reports per-window Sharpe, ``min_window_sharpe``, ``sign_consistent``,
+and ``decay`` (last minus first window).
 """
 
 from __future__ import annotations
