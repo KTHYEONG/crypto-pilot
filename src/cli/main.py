@@ -10,9 +10,7 @@ from src.cli.commands.research import add_research_commands
 def build_root_parser() -> argparse.ArgumentParser:
     """Compose the single documented CLI entry point with two command groups.
 
-    Top-level groups are ``data`` and ``research``; all run commands are
-    children of ``research run portfolio`` (MHS only after the legacy isolation
-    refactor -- docs/specs/mhs_refactor.md §3.2).
+    Top-level groups are ``data`` and ``research``.
     """
     parser = argparse.ArgumentParser(
         prog="python -m src.cli.main",

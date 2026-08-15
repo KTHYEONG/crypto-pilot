@@ -1,13 +1,4 @@
-"""SCENARIO_MHS_EXECUTION_DATA_COVERAGE_GATE_*: pre-flight execution cache
-coverage gate contract (docs/specs/mhs_execution_data_coverage_gate.md §3.1).
-
-``assert_execution_data_coverage`` must fail closed with the deficient symbol
-list and its status when any symbol is MISSING or GAPPED, stay a no-op when
-every symbol is PRESENT, and reuse the existing ``_coverage`` helper only
-(local Parquet metadata reads, never ``DataCollector``/network). The ``root``
-override must be backward compatible: calling ``_coverage`` without ``root``
-still resolves under ``FUTURES_DATA_DIR / 'ohlcv'``.
-"""
+"""SCENARIO_MHS_EXECUTION_DATA_COVERAGE_GATE_*: pre-flight execution cache coverage gate contract."""
 
 from __future__ import annotations
 

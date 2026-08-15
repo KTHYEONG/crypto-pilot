@@ -1,13 +1,4 @@
-"""Contract coverage for the MHS fast_reversal overlay redesign.
-
-Covers items B (sign-aware EMA smoothing) and C (trend-efficiency exposure
-overlay) from docs/specs/mhs_fast_reversal_overlay_redesign.md: the fast
-reversal band's signal stays unsmoothed (its edge lives in short-term noise),
-slow_momentum's numbers are byte-identical, the trend_efficiency_overlay flag
-defaults off with byte-identical output, and when enabled it de-risks slow
-exposure in low-efficiency-ratio (choppy) regimes while preserving
-dollar-neutrality and leaving fast_reversal's 0% capital allocation untouched.
-"""
+"""Contract coverage for the MHS fast_reversal overlay redesign."""
 
 from __future__ import annotations
 

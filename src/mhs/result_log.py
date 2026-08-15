@@ -2,18 +2,10 @@
 
 One JSON-Lines shard per active run set plus immutable timestamped archives,
 with ``latest.json`` holding the most recent run snapshot. No hardcoded
-absolute paths: callers derive the history directory from a target path via
-``mhs_run_history_dir`` so tests against ``tmp_path`` never touch the real
-``docs/results/`` tree.
+absolute paths: callers derive the history directory dynamically.
 
-Design (docs/specs/mhs_result_logging.md §3.1-§3.2): each record is one JSON
-line in ``active.jsonl``; when appending a line would push the active shard
-past ``MHS_RUN_HISTORY_SHARD_MAX_BYTES`` the existing shard is renamed to an
-immutable ``mhs_run_history_<utc_millis>.jsonl`` archive and a fresh active
-shard starts with the triggering record. Archived shards are pruned to at most
-``MHS_RUN_HISTORY_MAX_SHARDS`` at rotation time only (oldest first by
-filename order, which is chronological for the fixed-width millisecond
-prefix). ``latest.json`` is overwritten on every append.
+Each record is one JSON line in ``active.jsonl``; when appending exceeds
+``MHS_RUN_HISTORY_SHARD_MAX_BYTES``, the shard rotates to an immutable archive.
 """
 
 from __future__ import annotations

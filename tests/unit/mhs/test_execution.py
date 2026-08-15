@@ -1132,15 +1132,8 @@ class TestWindowedReplayEquivalence:
 
 
 class TestColumnarFillAccumulator:
-    """R2 columnar fill refactor (``docs/specs/mhs_horizon_opt.md``): the
-    ``_BoundExecutionReplayAccumulator`` stores fills field-wise (parallel
-    lists) instead of one 7-key dict per fill.  The ``simulated_fills`` output
-    must remain byte-for-byte identical to the legacy dict path with the same
-    column order and dtypes, while accumulation allocates measurably less.
-
-    The legacy dict path is the unchanged ``strategy_aware_execution_replay``
-    single-panel oracle, so comparing against it cross-validates the columnar
-    output semantics exactly.
+    """Columnar fill refactor: ``_BoundExecutionReplayAccumulator`` stores fills field-wise.
+    The ``simulated_fills`` output must remain byte-for-byte identical to the legacy dict path.
     """
 
     FILL_COLUMNS = (

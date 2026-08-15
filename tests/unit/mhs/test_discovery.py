@@ -124,22 +124,7 @@ def _run(log_close, opens, bar_funding, eligible, idx, sign: int = _SIGN):
 
 
 class TestDiscoveryQualificationGate:
-    """SCENARIO_MHS_DISCOVERY_*: worst-year-robust selection, qualification
-    single re-check, fail-closed behavior, and sign-consistent oriented scoring.
-
-    SCENARIO_MHS_DISCOVERY_WEIGHT_REUSE_BYTE_IDENTICAL_08: the six pre-existing
-    scenarios below pass unchanged after the weight-hoisting refactor
-    (`docs/specs/mhs_discovery_2021_gap_and_dense_grid.md` §3) -- the
-    byte-identical proof that `_candidate_net_t` output is unchanged.
-
-    SCENARIO_MHS_DISCOVERY_SIGN_REGRESSION_MOMENTUM_01: the three legacy
-    scenarios below run the sign=+1 (momentum) direction and are regression
-    anchors: sign=+1 must keep byte-identical behavior before/after the
-    oriented-score fix (``min(sign * t) == min(t)``). The reversal-family
-    scenarios (sign=-1) exercise the corrected worst-year semantics where
-    "weakest evidence" is the yearly net_t closest to zero, not the most
-    negative one.
-    """
+    """Worst-year-robust selection, qualification single re-check, and fail-closed behavior."""
 
     def test_worst_year_robust_selection_beats_aggregate(self) -> None:
         """SCENARIO_MHS_DISCOVERY_WORST_YEAR_ROBUST_05: candidate 24 has a higher
@@ -588,11 +573,7 @@ class TestYearlyNetTDiagnostic:
 
 
 class TestHacAdjustedNetTDiagnostic:
-    """SCENARIO_HAC_DENOM_IID_NEAR_ONE / SCENARIO_HAC_DENOM_POSITIVE_AUTOCORR_INFLATES /
-    SCENARIO_ADJUSTED_NET_T_IID_MATCHES_RAW: the Bartlett/HAC-adjusted prescreen
-    t-stat is a pure, deterministic correction of the naive i.i.d. t-stat
-    (``docs/specs/mhs_discovery_admission_autocorr_robustness.md`` §3.1).
-    """
+    """The Bartlett/HAC-adjusted prescreen t-stat is a pure, deterministic correction of the naive i.i.d. t-stat."""
 
     @staticmethod
     def _iid_series(seed: int = 3, n: int = 2000) -> np.ndarray:
@@ -670,19 +651,13 @@ class TestHacAdjustedNetTDiagnostic:
 
 
 class TestDiscoveryAdjustedOptIn:
-    """SCENARIO_DISCOVERY_DEFAULT_OFF_BIT_IDENTICAL /
-    SCENARIO_DISCOVERY_OPT_IN_PRESERVES_RAW_FIELDS /
-    SCENARIO_ADJUSTED_ADMITTED_SIGN_INVARIANT: the new Bartlett/HAC-adjusted
-    fields are opt-in-only diagnostics that never perturb the existing
-    admission-path computation
-    (``docs/specs/mhs_discovery_admission_autocorr_robustness.md`` §2/§3.2).
-    """
+    """The Bartlett/HAC-adjusted fields are opt-in-only diagnostics that never
+    perturb the admission path."""
 
     def test_discovery_default_off_bit_identical(self) -> None:
-        """SCENARIO_DISCOVERY_DEFAULT_OFF_BIT_IDENTICAL: with the flag omitted
-        (default False) the gate returns the pre-change baseline on the admitted
-        worst-year-robust fixture -- every raw field bit-identical to the
-        captured 24차 baseline -- and every new field sits at its empty/None
+        """With the flag omitted (default False) the gate returns the
+        pre-change baseline on the admitted worst-year-robust fixture -- every
+        raw field bit-identical -- and every new field sits at its empty/None
         default."""
         log_close, opens, bar_funding, eligible, idx = _build_panel(
             24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
@@ -707,10 +682,9 @@ class TestDiscoveryAdjustedOptIn:
         assert result.adjusted_admitted is None
 
     def test_discovery_opt_in_preserves_raw_fields(self) -> None:
-        """SCENARIO_DISCOVERY_OPT_IN_PRESERVES_RAW_FIELDS: identical inputs with
-        the flag False vs True yield bit-identical raw admission-path fields,
-        while the True call additionally populates the adjusted tables covering
-        every candidate horizon."""
+        """Identical inputs with the flag False vs True yield bit-identical raw
+        admission-path fields, while the True call additionally populates the
+        adjusted tables covering every candidate horizon."""
         log_close, opens, bar_funding, eligible, idx = _build_panel(
             24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
         )
@@ -733,10 +707,10 @@ class TestDiscoveryAdjustedOptIn:
         assert set(dict(on.discovery_scores_adjusted)) == {24, 48}
 
     def test_adjusted_admitted_sign_invariant(self) -> None:
-        """SCENARIO_ADJUSTED_ADMITTED_SIGN_INVARIANT: dividing by sqrt(positive
-        denom) never flips the sign of the qualification t-stat, and
-        ``adjusted_admitted`` is True only when the raw sign is consistent AND
-        the adjusted magnitude clears the admission floor."""
+        """Dividing by sqrt(positive denom) never flips the sign of the
+        qualification t-stat, and ``adjusted_admitted`` is True only when the
+        raw sign is consistent AND the adjusted magnitude clears the admission
+        floor."""
         log_close, opens, bar_funding, eligible, idx = _build_panel(
             24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
         )
@@ -760,25 +734,11 @@ class TestDiscoveryAdjustedOptIn:
 
 
 class TestRegimeScaledNetTDiagnostic:
-    """SCENARIO_REGIME_SCALE_CONSTANT_VOL_IS_ONE /
-    SCENARIO_REGIME_SCALE_VOL_SPIKE_CLIPS_TO_FLOOR /
-    SCENARIO_REGIME_SCALED_NET_T_SCALE_ONE_MATCHES_RAW /
-    SCENARIO_DISCOVERY_DEFAULT_OFF_REGIME_FIELDS_EMPTY /
-    SCENARIO_DISCOVERY_OPT_IN_REGIME_PRESERVES_RAW_FIELDS /
-    SCENARIO_REGIME_SCALED_ADMITTED_SIGN_INVARIANT: the vol-regime
-    cash-scale-adjusted fields are an opt-in-only diagnostic -- the same
-    kernel as the application layer's ``_regime_cash_scale`` duplicated into
-    the domain layer, fed by an approximate market-vol proxy -- that never
-    perturbs the admission path and composes independently with the HAC
-    adjustment (``docs/specs/mhs_discovery_admission_regime_scale_parity.md``
-    §2/§3).
-    """
+    """The vol-regime cash-scale-adjusted fields are an opt-in-only
+    diagnostic."""
 
     def test_regime_scale_constant_vol_is_one(self) -> None:
-        """SCENARIO_REGIME_SCALE_CONSTANT_VOL_IS_ONE: a constant (non-time-
-        varying) vol_mean series maps to a regime scale of exactly 1.0
-        everywhere -- median == instantaneous vol, ratio exactly 1.0, never
-        clipped, insufficient-history lead-in bars filled to 1.0."""
+        """Constant vol maps to regime scale of 1.0."""
         idx = pd.date_range("2021-01-01", periods=800, freq="1h", tz="UTC")
         scale = discovery._discovery_regime_cash_scale(pd.Series(1.0, index=idx))
         assert (scale == 1.0).all()
@@ -1099,12 +1059,7 @@ class TestFoldTrainOnlyDiscoveryQualification:
         assert result.selected_horizon is None
 
     def test_fold_train_only_passthrough(self, monkeypatch) -> None:
-        """SCENARIO_FOLD_TRAIN_ONLY_PASSTHROUGH: ``compute_adjusted_net_t=True``
-        is forwarded unchanged into the delegated selection (captured via a spy)
-        and the returned result carries populated ``yearly_adjusted_net_t``; the
-        early-return closed-gate branch (train window inside one calendar year)
-        leaves all five new fields at their empty/None defaults regardless of
-        the flag."""
+        # compute_adjusted_net_t=True is forwarded into delegated selection.
         log_close, opens, bar_funding, eligible, idx = _build_panel(
             24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
         )
@@ -1148,12 +1103,7 @@ class TestFoldTrainOnlyDiscoveryQualification:
         assert short_result.adjusted_admitted is None
 
     def test_fold_train_only_regime_passthrough(self, monkeypatch) -> None:
-        """SCENARIO_FOLD_TRAIN_ONLY_REGIME_PASSTHROUGH: ``compute_regime_scaled_net_t=True``
-        is forwarded unchanged into the delegated selection (captured via a spy)
-        and the returned result carries populated ``yearly_regime_scaled_net_t``;
-        the early-return closed-gate branch (train window inside one calendar
-        year) leaves all five new regime fields at their empty/None defaults
-        regardless of the flag."""
+        # compute_regime_scaled_net_t=True is forwarded into delegated selection.
         log_close, opens, bar_funding, eligible, idx = _build_panel(
             24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
         )
