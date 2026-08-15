@@ -377,11 +377,12 @@ class TestMhsHorizonDiagnostic:
         assert report.execution_tiers_bps == pytest.approx((2.64, 4.18, 6.07))
         assert report.blend_target_gross > 0.0
 
-    def test_mhs_5m_01_default_execution_timeframe(self) -> None:
-        """MHS-5M-01-DEFAULT: production requests default to 5m."""
+    def test_mhs_3m_01_default_execution_timeframe(self) -> None:
+        """MHS-3M-01-DEFAULT: production requests default to 3m
+        (docs/specs/mhs_execution_timeframe_3m.md)."""
         from src.application.research.mhs.evaluation import MhsDiagnosticRequest
 
-        assert MhsDiagnosticRequest().execution_timeframe == "5m"
+        assert MhsDiagnosticRequest().execution_timeframe == "3m"
 
     def test_diagnostic_ensemble_separate_from_executable_tranche(self, report) -> None:
         fast = report.books["fast_reversal"]
