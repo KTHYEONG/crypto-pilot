@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+import src.market_data.services.futures_collection as _futures_collection
 from src.common.config import FUTURES_DATA_DIR, funding_path
 from src.common.errors import DataIntegrityError
 from src.market_data.services.futures_collection import DataCollector
@@ -156,6 +157,167 @@ def assert_execution_data_coverage(
         listed = ", ".join(f"{s} ({status})" for s, status in sorted(deficient.items()))
         raise DataIntegrityError(
             f"execution data coverage incomplete for {len(deficient)} symbols: {listed}"
+        )
+
+
+def roster_membership_intervals(
+    execution_mask: pd.DataFrame,
+) -> dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]:
+    """Extract per-symbol contiguous roster-membership intervals from the PIT mask.
+
+    A symbol that leaves and re-enters the roster yields one ``(start, end)``
+    interval PER contiguous True-run -- never a single collapsed ``(first,
+    last)`` span, which would re-introduce the over-broad scope this design
+    removes. Symbols never in the roster (all-False column) are absent from the
+    returned mapping entirely (not mapped to an empty tuple).
+
+    Vectorized ``np.diff`` edge detection over the int8 view of the mask: no
+    ``pd.apply`` and no per-row Python loops over the wide (rows x symbols)
+    mask.
+    """
+    if execution_mask.shape[0] == 0 or execution_mask.shape[1] == 0:
+        return {}
+    arr = execution_mask.to_numpy(dtype=bool)
+    padded = np.zeros((arr.shape[0] + 2, arr.shape[1]), dtype=np.int8)
+    padded[1:-1] = arr
+    diff = np.diff(padded, axis=0)
+    enter_rows, enter_cols = np.nonzero(diff == 1)
+    exit_rows, exit_cols = np.nonzero(diff == -1)
+    intervals: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]] = {}
+    index = execution_mask.index
+    for j, col in enumerate(execution_mask.columns):
+        enters = enter_rows[enter_cols == j]
+        if enters.size == 0:
+            continue
+        exits = exit_rows[exit_cols == j]
+        ivs = tuple(
+            (index[int(enters[k])], index[int(exits[k]) - 1])
+            for k in range(enters.size)
+        )
+        intervals[col] = ivs
+    return intervals
+
+
+def assert_relevant_execution_data_coverage(
+    execution_mask: pd.DataFrame,
+    timeframe: str,
+    root: str | None = None,
+) -> None:
+    """Fail closed unless every roster-membership interval has full cache coverage.
+
+    Same local-Parquet-metadata semantics as ``assert_execution_data_coverage``
+    (``_coverage`` only -- no network, no ``DataCollector``) but scoped to the
+    roster's per-symbol contiguous membership intervals instead of the full
+    universe x full period Cartesian product. A gap that lies entirely OUTSIDE a
+    symbol's membership interval is correctly ignored; a gap INSIDE an interval
+    fails closed naming the offending ``(symbol, interval, status)``. An empty
+    mapping (no symbol ever in the roster) is a no-op.
+    """
+    intervals = roster_membership_intervals(execution_mask)
+    deficient: list[str] = []
+    for symbol, ivs in sorted(intervals.items()):
+        for iv_start, iv_end in ivs:
+            status = str(_coverage(symbol, timeframe, str(iv_start), str(iv_end), root)["status"])
+            if status != "PRESENT":
+                deficient.append(f"{symbol} ({iv_start}..{iv_end}) {status}")
+    if deficient:
+        listed = "; ".join(deficient)
+        raise DataIntegrityError(
+            f"relevant execution data coverage incomplete for {len(deficient)} "
+            f"interval(s): {listed}"
+        )
+
+
+def _mark_availability_index(path: Path) -> pd.DatetimeIndex:
+    """Sorted unique mark-availability times for one symbol's mark parquet.
+
+    Mirrors ``_cached_mark_panel``'s causal rules exactly: only rows whose
+    ``close`` is finite AND strictly positive count, and a row at time ``t``
+    becomes available only at ``t + 1h``.
+    """
+    if not path.exists():
+        return pd.DatetimeIndex([], tz="UTC")
+    try:
+        df = pd.read_parquet(path)
+    except Exception:  # noqa: BLE001
+        return pd.DatetimeIndex([], tz="UTC")
+    if df.empty or "close" not in df.columns:
+        return pd.DatetimeIndex([], tz="UTC")
+    if "datetime" in df.columns:
+        dt = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+    elif "timestamp" in df.columns:
+        dt = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+    else:
+        return pd.DatetimeIndex([], tz="UTC")
+    close = pd.to_numeric(df["close"], errors="coerce")
+    valid = dt.notna() & close.notna() & (close > 0)
+    if not bool(valid.any()):
+        return pd.DatetimeIndex([], tz="UTC")
+    avail = dt[valid] + pd.Timedelta(hours=1)
+    return pd.DatetimeIndex(avail.drop_duplicates()).sort_values()
+
+
+def _mark_covers_grid(
+    avail: pd.DatetimeIndex,
+    grid: pd.DatetimeIndex,
+    ffill_limit: int,
+) -> bool:
+    """Whether every hour of ``grid`` is causally covered by available marks.
+
+    Exact replica of ``_cached_mark_panel``'s reindex semantics: availability
+    points are reindexed onto the grid with ``method='ffill'`` and the same
+    ``limit`` the replay derives from ``stale_hours``, so a gate that passes
+    cannot die mid-replay from a missing mark.
+    """
+    if avail.empty or grid.empty:
+        return False
+    source = pd.Series(True, index=avail)
+    aligned = (
+        source.reindex(grid, method="ffill", limit=ffill_limit)
+        if ffill_limit > 0
+        else source.reindex(grid)
+    )
+    return bool(aligned.fillna(False).all())
+
+
+def assert_relevant_mark_price_coverage(
+    execution_mask: pd.DataFrame,
+    timeframe: str = "1h",
+    stale_hours: int = 0,
+) -> None:
+    """Fail closed unless every roster hour has a causally available mark.
+
+    Reuses ``roster_membership_intervals`` and checks each hour of each
+    membership interval against the symbol's ``markPriceKlines`` parquet
+    (resolved via ``futures_collection._mark_price_path``) using EXACTLY the
+    causal availability rules ``_cached_mark_panel`` applies during replay:
+    rows with finite, strictly-positive ``close`` become available at
+    ``datetime + 1h``, and a stale-carry allowance of ``stale_hours`` is
+    honored with the same ``ffill`` limit. A gate that is more permissive than
+    the replay would let a run pass and then die mid-replay -- this gate is
+    deliberately strict.
+    """
+    if timeframe != "1h":
+        raise ValueError(f"unsupported timeframe '{timeframe}' (mark coverage is hourly)")
+    if stale_hours < 0:
+        raise ValueError("stale_hours must be non-negative")
+    intervals = roster_membership_intervals(execution_mask)
+    if not intervals:
+        return
+    ffill_limit = max(0, stale_hours - 1) if stale_hours > 0 else 0
+    deficient: list[str] = []
+    for symbol, ivs in sorted(intervals.items()):
+        path = _futures_collection._mark_price_path(symbol, timeframe)
+        avail = _mark_availability_index(path)
+        for iv_start, iv_end in ivs:
+            grid = pd.date_range(iv_start, iv_end, freq="1h", tz="UTC")
+            if not _mark_covers_grid(avail, grid, ffill_limit):
+                deficient.append(f"{symbol} ({iv_start}..{iv_end}) mark coverage deficient")
+    if deficient:
+        listed = "; ".join(deficient)
+        raise DataIntegrityError(
+            f"relevant mark-price coverage incomplete for {len(deficient)} "
+            f"interval(s): {listed}"
         )
 
 

@@ -111,7 +111,7 @@ def fold_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
 @pytest.fixture(scope="module")
 def funding(fold_market) -> dict[str, pd.Series]:
     root, _end = fold_market
-    return ev._load_funding_series(DEV_SYMBOLS)
+    return ev._load_funding_series(DEV_SYMBOLS)[0]
 
 
 def _request(root: Path, end: pd.Timestamp, **overrides) -> MhsDiagnosticRequest:
