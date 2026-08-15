@@ -336,6 +336,7 @@ class MhsDiagnosticRequest:
     trend_sleeve_gross: float = 0.0
     multi_feature_book: bool = False
     committee_book: bool = False
+    committee_capital: bool = False
     ram_guard: bool = True
 
     def __post_init__(self) -> None:
@@ -377,6 +378,8 @@ class MhsDiagnosticRequest:
             raise ValueError("multi_feature_book must be a bool")
         if not isinstance(self.committee_book, bool):
             raise ValueError("committee_book must be a bool")
+        if not isinstance(self.committee_capital, bool):
+            raise ValueError("committee_capital must be a bool")
         if not isinstance(self.ram_guard, bool):
             raise ValueError("ram_guard must be a bool")
         if not (0.0 <= self.trend_sleeve_gross <= 1.0):
@@ -3423,11 +3426,17 @@ def _build_fold_target_weights(
     vs = fold.validation_start
     ve = fold.validation_end
     panel_start = max(ts, vs - pd.Timedelta(hours=MHS_FOLD_PANEL_WARMUP_HOURS))
+    _panel_columns = (
+        ("close", "open", "quote_vol", "taker_buy_quote")
+        if request.committee_capital
+        else ("close", "open", "quote_vol")
+    )
     panel = load_base_panel(
-        root, "1h", ("close", "open", "quote_vol"), panel_start, ve,
+        root, "1h", _panel_columns, panel_start, ve,
         partition="dev", min_bars=2000,
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    taker_buy_quote = panel["taker_buy_quote"] if request.committee_capital else None
     del panel
     grid_1h = close.index
     symbols = list(close.columns)
@@ -3440,6 +3449,8 @@ def _build_fold_target_weights(
     close = close[funded]
     opens = opens[funded]
     quote_vol = quote_vol[funded]
+    if taker_buy_quote is not None:
+        taker_buy_quote = taker_buy_quote[funded]
     bar_period = grid_1h[1] - grid_1h[0]
     funding_window = {
         s: funding_by_symbol[s].loc[
@@ -3457,10 +3468,13 @@ def _build_fold_target_weights(
     opens = opens[aligned_symbols]
     quote_vol = quote_vol[aligned_symbols]
     bar_funding = bar_funding[aligned_symbols]
+    if taker_buy_quote is not None:
+        taker_buy_quote = taker_buy_quote[aligned_symbols]
 
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
-    del close
+    if not request.committee_capital:
+        del close
     fast = PHASE_1_BOOK_SPECS["fast_reversal"]
     slow = (
         dataclasses.replace(PHASE_1_BOOK_SPECS["slow_momentum"], horizon_hours=slow_horizon_override)
@@ -3499,7 +3513,9 @@ def _build_fold_target_weights(
             execution_mask.reindex(w_slow_execution.index).fillna(False),
             slow.min_symbols,
         )
-    del quote_vol, eligible
+    del eligible
+    if not request.committee_capital:
+        del quote_vol
     del w_fast
     if request.fast_book_mode == "single_horizon":
         del w_fast_tilted
@@ -3511,10 +3527,29 @@ def _build_fold_target_weights(
             MHS_CRASH_REGIME_REFERENCE_SYMBOLS, slow.horizon_hours,
             request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
         )
-    blend_1h = (
-        PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
-        + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution_1h
-    )
+    if request.committee_capital:
+        _member_specs = [
+            spec for spec in MHS_FEATURE_REGISTRY
+            if spec.name in set(MHS_COMMITTEE_MEMBERS)
+        ]
+        _committee_books = build_feature_books(
+            _member_specs,
+            {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
+            execution_mask, slow_grid, min_symbols=slow.min_symbols,
+        )
+        if not _committee_books:
+            raise RuntimeError(
+                "committee_capital: no committee member admitted in this fold window"
+            )
+        blend_1h = (
+            sum(_committee_books.values()) / float(len(_committee_books))
+        ).reindex(grid_1h).fillna(0.0)
+        del _committee_books, close, taker_buy_quote
+    else:
+        blend_1h = (
+            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
+            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution_1h
+        )
     del w_fast_execution, w_slow_execution, w_slow_execution_1h
     _active_spec, active_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     del _active_spec
