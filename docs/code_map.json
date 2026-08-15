@@ -10,7 +10,7 @@
       "tests/unit/mhs/test_collection.py",
       "tests/unit/application/data/test_mhs_execution_collection.py"
     ],
-    "architecture": "docs/specs/mhs_execution_data_coverage_gate.md"
+    "architecture": "docs/specs/mhs_data_integrity_relevance_scoping.md"
   },
   "src/application/research/mhs/evaluation.py": {
     "testing": [
