@@ -187,3 +187,29 @@ def test_record_omits_optional_fields_without_raising() -> None:
     assert record["bootstrap_ci"] is None
     assert record["perf"]["peak_rss_bytes"] is None
     assert record["report_path"] is None
+
+
+def test_record_includes_committee_diagnostic_when_committee_book() -> None:
+    # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_IN_RUN_HISTORY: the durable run-history
+    # record carries the committee_diagnostic dict verbatim when present and
+    # null when absent -- additive, JSON-round-trippable, no key-set change.
+    with_committee = dataclasses.replace(
+        _representative_report(),
+        committee_diagnostic={
+            "admitted": ["x"], "excluded": [], "walk_forward": {"per_tier": {}},
+        },
+    )
+    without_committee = dataclasses.replace(
+        _representative_report(), committee_diagnostic=None,
+    )
+    request = ev.MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    record_with = ev.build_mhs_run_history_record(
+        with_committee, request, ev.MhsOutputTier.COMPACT, None,
+    )
+    record_without = ev.build_mhs_run_history_record(
+        without_committee, request, ev.MhsOutputTier.COMPACT, None,
+    )
+    assert json.loads(json.dumps(record_with)) == record_with
+    assert record_with["committee_diagnostic"] == with_committee.committee_diagnostic
+    assert json.loads(json.dumps(record_without)) == record_without
+    assert record_without["committee_diagnostic"] is None
