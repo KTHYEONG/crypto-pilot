@@ -881,23 +881,10 @@ class XsAdmissionConfig:
     """Scale-invariant, structure-only admission gates for the XS profile.
 
     ``sharpe_floor`` / ``beta_abs_max`` / ``turnover_max`` /
-    ``cost_breakeven_min`` are the spec section 3.1 gates. ``annual_bars_min``
+    ``cost_breakeven_min`` are the structural admission gates. ``annual_bars_min``
     is the minimum bars a calendar year needs to count toward the
     per-year-sub-sharpe gate, and ``round_trip_cost_rate`` is the per-unit-
-    turnover charge used to reconstruct the gross return in the breakeven-cost
-    computation. No absolute CAGR hurdle and no t-stat floor are applied.
-
-    ``turnover_max`` default was recalibrated 150.0 -> 200.0 by the
-    git-archaeology study documented in
-    ``docs/specs/xs_admission_turnover_max_recalibration.md`` (42 deduped
-    historical measurements; within-family Spearman(turnover, sharpe)
-    rho=+0.546, p=0.005 -- turnover predicts *better*, not worse,
-    risk-adjusted returns). 150.0 had no traceable derivation; the study's one
-    genuine disaster (``xs_alpha_contextual_v3``, 216.5-293.6x, Sharpe -1.8)
-    fails three other gates and is ADR-attributed to a routing bug. The 200.0
-    default admits ``xs_alpha_baseline_blend_v8_joint`` (best CAGR 41.1%,
-    qualification turnover 175.42x/yr, previously the sole binding
-    constraint) while staying well below the 216.5x+ disaster zone.
+    turnover charge used to reconstruct the gross return in the breakeven-cost computation.
     """
 
     sharpe_floor: float = 0.80

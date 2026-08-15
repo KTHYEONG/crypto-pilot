@@ -22,11 +22,10 @@ def portfolio_rebalance_trigger(
     error reaches the threshold, then adopt the new row wholesale.
 
     This is the portfolio-level replacement for the per-symbol rebalance
-    deadband (docs/specs/mhs_alpha_engine.md §1, RC-1). Because every emitted
-    row is an exact copy of some input row, the input book's dollar-neutrality
-    and unit-gross invariants are carried unchanged by construction. ``0.0`` is
-    the identity passthrough, the first row is always adopted, and non-finite
-    cells are treated as 0.0 before comparison so the output is always finite.
+    deadband. Because every emitted row is an exact copy of some input row, the
+    input book's dollar-neutrality and unit-gross invariants are preserved.
+    ``0.0`` is the identity passthrough, the first row is always adopted, and
+    non-finite cells are treated as 0.0 before comparison so the output is always finite.
     """
     if tracking_error_threshold < 0:
         raise ValueError(

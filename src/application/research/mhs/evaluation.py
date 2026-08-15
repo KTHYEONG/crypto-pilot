@@ -35,6 +35,8 @@ import pyarrow.parquet as pq
 
 import src.market_data.services.futures_collection as _futures_collection
 from src.market_data.services.futures_collection import DataCollector
+from src.application.data.mhs_execution_collection import apply_dynamic_gap_exclusion
+from src.application.data.mhs_execution_collection import apply_dynamic_mark_gap_exclusion
 from src.application.data.mhs_execution_collection import assert_relevant_execution_data_coverage
 from src.application.data.mhs_execution_collection import assert_relevant_mark_price_coverage
 from src.mhs.evaluation import phase_diagnostic_metrics
@@ -166,22 +168,17 @@ MHS_DISCOVERY_MOMENTUM_CANDIDATES: tuple[int, ...] = PHASE_1_BOOK_SPECS["slow_mo
 _MHS_FEATURE = "multi_horizon_market_state"
 _PERIODS_PER_YEAR_1H = 365.0 * 24
 _BOOTSTRAP_SEED = 20260807
-# Must mirror ``purged_walk_forward``'s ``min_train_bars`` default; the
-# committee diagnostic passes it explicitly so the B6 ``skipped_blocks``
-# re-derivation and the walk-forward it describes can never disagree on the
-# train-floor (docs/specs/mhs_committee_evaluation_integrity_fixes.md §6).
+# Walk-forward minimum training bars floor.
 _MHS_WALK_FORWARD_MIN_TRAIN_BARS = 2000
 _BOOTSTRAP_REPLICATES = 2000
 _BOOTSTRAP_MEAN_BLOCK = 168
 
-# Frozen strict-proxy Research-GO criterion (spec §3.3): the primary
-# autocorrelation-adjusted Sharpe must be >= 0.6 for a candidate to pass.
+# Strict-proxy Research-GO criterion: primary autocorrelation-adjusted Sharpe floor.
 MHS_GO_PRIMARY_SHARPE_FLOOR = 0.6
 
 MHS_ARTIFACT_SCHEMA_VERSION = 1
 
-# Unified artifact storage: every replay session is consolidated into exactly
-# these category tables, partitioned by an explicit ``replay_id`` column.
+# Unified artifact storage category tables.
 MHS_ARTIFACT_CATEGORIES: tuple[str, ...] = (
     "fills",
     "units",
@@ -192,84 +189,38 @@ MHS_ARTIFACT_CATEGORIES: tuple[str, ...] = (
 
 
 class MhsOutputTier(StrEnum):
-    """Persistence resolution for the MHS horizon diagnostic.
-
-    ``COMPACT`` is the default: a git-committable daily-resampled ledger plus a
-    stripped summary JSON. ``FULL`` persists the lossless per-fill audit tables
-    under ``_full/`` (gitignored) for deep execution auditing.
-    """
+    """Persistence resolution for the MHS horizon diagnostic."""
 
     COMPACT = "compact"
     FULL = "full"
 
-# Signal-quality calibration (spec §3.2, ``signal_quality``).
-# ``MHS_REBALANCE_MIN_NOTIONAL_DELTA`` is the turnover deadband cap: a per-symbol
-# target-weight change smaller than 0.02 (2% of equity notional) is suppressed so
-# the executor never churns the book on sub-threshold signal deltas.
+# Turnover deadband cap (2% notional).
 MHS_REBALANCE_MIN_NOTIONAL_DELTA = 0.02
-# The EMA smoothing span is one full horizon cycle in decision steps
-# (``horizon_hours // step_hours``), the structural invariant that the smoothed
-# signal cannot react faster than one horizon length.
+# EMA smoothing span in decision steps.
 MHS_SIGNAL_EMA_HORIZON_SPAN = 1.0
 
 
 def _signal_ema_span(band_sign: int, horizon_hours: int, step_hours: int) -> int | None:
-    """Whipsaw-suppressing EMA span, or None for a reversal band (sign=-1).
-
-    ``_smooth_signal_ema`` exists to preserve trend polarity while removing the
-    noise that drives negative return autocorrelation -- structurally backwards
-    for a reversal signal, whose edge (if any) lives in that same short-term
-    noise (docs/specs/mhs_fast_reversal_overlay_redesign.md §1.2).
-    """
+    """Whipsaw-suppressing EMA span, or None for a reversal band (sign=-1)."""
     if band_sign != 1:
         return None
     return max(1, round(horizon_hours / step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
-# Regime cash scaling: gross exposure is linearly reduced toward
-# ``MHS_REGIME_CASH_SCALE_FLOOR`` when trailing realized vol exceeds its
-# ``MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS`` median, and never exceeds full exposure.
+# Realized volatility regime cash scaling floor and median window.
 MHS_REGIME_CASH_SCALE_FLOOR = 0.5
 MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS = 720
-# Reuses MHS_REGIME_CASH_SCALE_FLOOR's value: the standalone Pass-1 reference
-# replay (_book_outcome, docs/specs/mhs_fast_reversal_overlay_redesign.md §2.1)
-# forces flat once equity crosses this fraction of initial_equity, instead of
-# hard-raising CAPITAL_INVARIANT_BREACH on a known negative-edge book.
+# Equity floor for reference pass replay.
 MHS_REFERENCE_PASS_EQUITY_FLOOR = MHS_REGIME_CASH_SCALE_FLOOR
-# Strategy-level P&L volatility targeting (momentum-crash mitigation): exposure
-# is scaled by ``expanding_median(trailing_vol) / trailing_vol`` of the
-# strategy's own daily P&L, clipped to ``[MHS_PNL_VOL_TARGET_SCALE_FLOOR, 1.0]``
-# and never levered up. The 21-day window is deliberately shorter than the
-# 30-day asset-vol regime window (fast-moving strategy shocks, not broad market
-# regimes) and the 0.2 floor is deliberately lower than the 0.5 asset-vol floor
-# (strategy-level crash protection must de-risk far more aggressively). Burn-in
-# ``MHS_PNL_VOL_TARGET_BURN_IN_DAYS`` keeps the expanding-median target
-# under-sampled (hence unscaled at exactly 1.0) until enough realized history.
+# Strategy-level P&L volatility targeting parameters.
 MHS_PNL_VOL_TARGET_WINDOW_DAYS = 21
 MHS_PNL_VOL_TARGET_SCALE_FLOOR = 0.2
 MHS_PNL_VOL_TARGET_BURN_IN_DAYS = 90
-# Anchored-fold panel warm-up bound (spec §3.1, ``memory_opt``): the fold panel
-# is sliced to ``[validation_start - warmup, validation_end]`` instead of the
-# full ``[train_start, validation_end]``. The warm-up covers the 720-bar
-# liquidity-eligibility lookback plus the 168h slow horizon plus a one-day
-# boundary buffer; features only ever see history at or before each decision.
+# Anchored-fold panel warm-up lookback bound.
 MHS_FOLD_PANEL_WARMUP_HOURS = 720 + 168 + 24
-# Execution-roster Schmitt-trigger band: a member entered at the top
-# ``universe_size`` trailing-volume rank is kept until its rank exceeds
-# ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER``. The factor is an
-# engineering default (2x the entry threshold, the usual Schmitt-trigger
-# convention), not a measured constant; the fold/full-period replay is the
-# empirical check (docs/specs/mhs_roster_hysteresis_vol_tilt.md).
+# Execution-roster Schmitt-trigger hysteresis exit factor.
 MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER = 2.0
-# Portfolio-level rebalance trigger (docs/specs/mhs_alpha_engine.md §1): the
-# one-way tracking-error threshold, as a fraction of unit gross, at which the
-# entire previously adopted target row is replaced instead of the invariant-
-# breaking per-symbol deadband. Engineering default in the same class as
-# MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER -- NOT a measured constant and never
-# selected from the full-period table in the alpha-engine spec (§6.1 forbids
-# table-driven selection).
+# Portfolio-level rebalance tracking error threshold.
 MHS_REBALANCE_TRACKING_ERROR_THRESHOLD = 0.20
-# Causal market-beta window for beta neutralization (docs/specs/mhs_alpha_engine.md
-# §4): a 720-bar trailing window with a 360-bar minimum sample matches the
-# liquidity-eligibility lookback. Engineering defaults, not measured constants.
+# Causal market-beta lookback and min-period bars for beta neutralization.
 MHS_CAUSAL_BETA_LOOKBACK_BARS = 720
 MHS_CAUSAL_BETA_MIN_PERIODS = 360
 
@@ -877,11 +828,7 @@ def _pit_execution_mask(
     threshold, the realized number of holdings is approximately
     ``universe_size * (1 + hysteresis effect)``, NOT ``universe_size`` (measured
     ~41.9 vs a declared 30) -- the true mean per-row True count is exposed as
-    ``MhsHorizonDiagnosticReport.realized_execution_roster_size``. This prevents
-    rank-boundary flicker from forcing a full entry/exit trade on every decision
-    when the signal itself has not changed. The exit multiplier is an
-    engineering default, not a measured constant; the fold/full-period replay is
-    the empirical check (docs/specs/mhs_roster_hysteresis_vol_tilt.md).
+    when the signal itself has not changed.
     """
     exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
     trailing = quote_volume.rolling(720, min_periods=720).mean()
@@ -1173,9 +1120,7 @@ def _trend_efficiency_overlay_scale(
     fast_horizon_hours: int,
     target_index: pd.DatetimeIndex,
 ) -> pd.Series:
-    """Execution-roster mean efficiency_ratio at the fast band's horizon, timed
-    into a slow_momentum exposure scale (docs/specs/mhs_fast_reversal_overlay_redesign.md §2.3).
-    """
+    """Execution-roster mean efficiency_ratio at the fast band's horizon."""
     mean_er = efficiency_ratio(log_close, fast_horizon_hours).where(execution_mask).reindex(target_index).mean(axis=1)
     return trend_efficiency_scale(mean_er)
 
@@ -1244,17 +1189,7 @@ def _book_weights(
     step_grid: pd.DatetimeIndex,
     ema_span: int | None = None,
 ) -> pd.DataFrame:
-    # NOTE: the live book intentionally stays on raw horizon_log_return for
-    # both bands. vol_normalized_horizon_signal (sign==1) was measured to
-    # improve the discovery-gate prescreen (+37% worst-year net_t) but broke
-    # CAPITAL_INVARIANT_BREACH on the full 2021-2025 realistic-execution
-    # replay (cumulative 2021-2024 drawdown deeper than raw momentum's,
-    # exhausting equity before 2025's gains could recover it -- confirmed via
-    # direct re-measurement, not merely the prescreen). It stays wired into
-    # discovery.py's diagnostic-only sign=1 candidate scoring, matching the
-    # existing OHLCV_STRICT_PROXY precedent (demoted to reference once the
-    # full replay disproved it as primary) -- see
-    # docs/specs/mhs_momentum_vol_normalization.md follow-up.
+    # Raw horizon_log_return is used for live book weights.
     sig = horizon_log_return(log_close, spec.horizon_hours)
     if ema_span is not None:
         sig = _smooth_signal_ema(sig, ema_span)
@@ -1357,12 +1292,7 @@ def _xs_rank_ic(
 
     The forward return is built internally as
     ``opens.pct_change(forward_bars).shift(-(forward_bars + 1))`` so the
-    measured window starts at ``open_{t+1}`` (the first bar a decision made on
-    close_t can enter) and never overlaps the signal's own lookback
-    (docs/specs/mhs_alpha_engine.md §3, RC-3). The trailing-return convention
-    that previously reported a contaminated +0.0957 (t=113) where the tradable
-    statistic is -0.0278 (t=-33) is removed: no caller may pass a pre-shifted
-    return panel, the shift is owned by this function.
+    measured window starts at ``open_{t+1}`` and avoids overlapping lookbacks.
     """
     if forward_bars < 1:
         raise ValueError(f"forward_bars must be >= 1, got {forward_bars}")
@@ -1432,9 +1362,7 @@ def _trend_sleeve_diagnostic(
     per-calendar-year net t-stat, its daily-return correlation to the frozen
     slow_momentum book, and the combined (slow_momentum + sleeve) book metrics.
     Every value is finite or an explicit ``None`` -- never NaN silently coerced
-    to 0.0. This NEVER feeds ``admission_t`` or any capital/gate decision: it is
-    a measurement the user consults before approving the (default 0.0) risk
-    budget (docs/specs/mhs_directional_trend_sleeve.md §2.2, §4).
+    to 0.0. This is a measurement report before configuring risk budgets.
     """
     grid_1h = log_close.index
     decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
@@ -1499,9 +1427,7 @@ def _trend_sleeve_diagnostic(
     }
 
 
-# Preregistered regime boundary for the multi-feature stability split: the
-# 2021-2023 vs 2024-2025 windows measured in
-# docs/specs/mhs_multi_feature_alpha_architecture.md §0.3.
+# Preregistered regime boundary for the multi-feature stability split.
 _MULTI_FEATURE_REGIME_SPLIT = (pd.Timestamp("2024-01-01", tz="UTC"),)
 
 _MULTI_FEATURE_PANEL_COLUMNS = (
@@ -1510,13 +1436,10 @@ _MULTI_FEATURE_PANEL_COLUMNS = (
 
 
 def _available_panel_columns(root: str, columns: tuple[str, ...]) -> tuple[str, ...]:
-    """Return the requested columns present in the symbol parquet schema.
+    """Inspect the first 1h parquet schema and return only the columns that exist.
 
-    A column absent from the store (e.g. ``no_trades`` on symbols that never
-    recorded it) is deliberately NOT loaded -- the caller NaN-fills it so the
-    coverage gate fails it closed, mirroring the real no_trades collapse
-    (docs/specs/mhs_multi_feature_alpha_architecture.md §0.4) instead of
-    crashing the whole diagnostic on a missing column.
+    Avoids ``load_base_panel`` crashing when a column is absent; the downstream
+    coverage gate fails it closed.
     """
     paths = sorted(glob.glob(os.path.join(root, "1h", "*.parquet")))
     if not paths:
@@ -1582,18 +1505,12 @@ def _multi_feature_diagnostic(
     grid, and reports per-admitted-feature regime-split stability, the
     equal-risk combined book's net Sharpe per measured cost tier, and the
     effective breadth of the feature-book PnL panel. Every value is finite or an
-    explicit ``None`` -- never NaN silently coerced to 0.0. This NEVER feeds
-    ``admission_t`` or any capital/gate decision: it is a measurement the user
-    consults before approving the architecture change
-    (docs/specs/mhs_multi_feature_alpha_architecture.md §2 Stage 1).
+    explicit ``None`` -- never NaN silently coerced to 0.0.
 
     Memory-optimized streaming: the panels are column-pruned to the registry's
     required-column union and built one feature at a time, keeping only the
     small per-feature net series and a single running combined-book accumulator
-    instead of every feature book simultaneously. The combined book is built by
-    sequential ``add`` in registry order -- the exact float order of
-    ``equal_risk_combination`` -- so every reported value stays bit-identical
-    (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md §5, §9).
+    instead of every feature book simultaneously.
     """
     if panels is None:
         panels = _load_feature_panels(
@@ -1764,19 +1681,11 @@ def _committee_diagnostic(
     extreme measured cost tiers via ``decompose_cost``, and runs the purged
     expanding-train walk-forward at every measured cost tier, reporting the
     compounded-growth wealth metrics per tier. The walk-forward block grid is
-    anchored at ``MHS_COMMITTEE_OOS_START``, never the diagnostic's own start
-    (B1), and any blocks the walk-forward skipped are reported alongside the
-    edges (B6). Diagnostic-only -- never an admission, combiner, or capital
-    input; this is the measured benchmark any future learned combiner must clear
-    under this same protocol
-    (docs/specs/mhs_committee_design_and_wealth_objective.md §0-§4).
+    anchored at ``MHS_COMMITTEE_OOS_START``, and any blocks skipped by the walk-forward
+    are reported alongside the edges.
 
-    Memory-optimized streaming: the panels are column-pruned to the committee
-    members' required-column union and books are built one member at a time,
-    computing the two cost-tier net series via the single-pass multi-tier ledger
-    and dropping each book immediately, so at most one member book (instead of
-    all six) is resident (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md
-    §4, §9).
+    Memory-optimized streaming: panels are column-pruned to committee requirements
+    and processed sequentially to minimize memory residency.
     """
     if panels is None:
         panels = _load_feature_panels(
@@ -2868,12 +2777,7 @@ def _book_outcome(
         replay_scale = pnl_vol_target_scale if request.pnl_vol_target else None
         pre_vol_target_reference = primary
         pre_vol_target_reference_naive_sharpe = _naive_sharpe(primary.ledger)
-        # Pass 2 (reported) replays the SAME scaled target_replay Pass 1's own
-        # vol-target scale was derived from; a book whose Pass-1 reference is
-        # forced flat for most of the window (a known negative-edge book) still
-        # produces an artificially calm reference vol series, so Pass 2 must
-        # carry its own floor rather than relying on the derived scale alone
-        # (docs/specs/mhs_capital_floor_and_overlay_validation.md §1.1).
+        # Pass 2 replays the scaled target_replay with min_equity_fraction floor.
         primary = replay_execution_windows(
             _window_telemetry(_rescaled_windows(replay_windows, replay_scale), "execution_window"),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
@@ -3119,10 +3023,7 @@ def _run_books_concurrent(
     ``regime_scale`` (the R1 volatility-regime cash scale, optionally composed
     with the opt-in trend-efficiency overlay) is applied to ``blend_1h`` by the
     caller already; it must also be applied here so the blend book's actual
-    ``primary``/``stress`` replay reflects it, matching what the anchored-fold
-    path already does to its own target weights (docs/specs/
-    mhs_capital_floor_and_overlay_validation.md §2 -- previously this scale
-    only reached the top-level prescreen/tail fields, never the replay).
+    ``primary``/``stress`` replay reflects it.
     """
     active_spec, active_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     blend_step = blend_1h.reindex(active_grid)
@@ -3608,9 +3509,7 @@ def _build_fold_target_weights(
     del execution_mask
     del log_close
     if request.rebalance_filter == "portfolio_trigger":
-        # Gate the UNSCALED book, then multiply the gross scale afterwards so
-        # the trigger's invariant-preserving row holds cannot filter out the
-        # regime de-risking (docs/specs/mhs_alpha_engine.md §1).
+        # Gate the unscaled book, then apply gross scale to preserve de-risking dynamics.
         target_weights = portfolio_rebalance_trigger(
             target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
         ).mul(regime_scale, axis=0)
@@ -4104,17 +4003,7 @@ def _deflated_sharpe_evidence(
     folds: tuple[MhsFoldReport, ...],
     n_trials: int,
 ) -> float | None:
-    """Per-observation deflated Sharpe of the blend primary against the
-    anchored-fold trial dispersion (docs/specs/mhs_strategy_foundation_reset.md RC-6).
-
-    The observed trial is the blend primary ledger's per-observation Sharpe; the
-    trial dispersion is the sample variance of the per-observation Sharpe across
-    the anchored folds (each fold is one independent validation replay), and the
-    number of trials is the preregistered ``MHS_SEARCH_TRIALS_ATTEMPTED``
-    constant. Returns None when there is no replayable blend primary or no fold
-    trial; the pure ``deflated_sharpe_ratio`` statistic remains the single
-    source of the Bailey-LdP arithmetic.
-    """
+    """Per-observation deflated Sharpe of the blend primary against anchored-fold trial dispersion."""
     if blend_report is None or blend_report.primary is None or not folds:
         return None
     _equity_1h, net_returns_1h, _turnover = _hourly_ledger_series(
@@ -4167,8 +4056,6 @@ def _mhs_research_go(
     The cap-30 roster and primary annual-return gate thresholds live in
     ``MHS_REGISTERED_POLICY_THRESHOLDS``; while any is unregistered (``None``)
     the decision reports ``UNSPECIFIED_POLICY`` and stays conservative (false).
-    Once every threshold is deliberately registered, ``eligible`` responds to
-    the fold evidence alone (docs/specs/mhs_strategy_foundation_reset.md RC-5).
     """
     reasons: list[str] = list(book_reasons)
     passed = 0
@@ -4180,8 +4067,6 @@ def _mhs_research_go(
             passed += 1
         reasons.extend(fold_report.failures)
     # P0-D: UNSPECIFIED_POLICY only when a registered policy threshold is absent.
-    # Registering every threshold makes the gate reachable, so ``eligible`` can
-    # respond to actual evidence instead of being structurally always False.
     if any(v is None for v in MHS_REGISTERED_POLICY_THRESHOLDS.values()):
         reasons.append(MHS_GO_REASON_UNSPECIFIED_POLICY)
     reasons = sorted(set(reasons))
@@ -4201,14 +4086,9 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     """Compose the dev-only Phase 1 diagnostic: pre-screen + strict-proxy evidence.
 
     Forces ``partition='dev'`` and resolves the sealed evaluation end; a holdout
-    partition or an end past ``HOLDOUT_CUTOFF`` raises ``RuntimeError``. The
-    diagnostic-ensemble and executable-tranche numbers are reported as separate
-    fields; only strict simulated inventory is primary Research evidence.
+    partition or an end past ``HOLDOUT_CUTOFF`` raises ``RuntimeError``.
     """
-    # Each diagnostic run reads a static market snapshot; dropping the mark
-    # frame cache here keeps re-runs against re-written Parquet sources fresh.
-    # (The minute-frame caches were removed in the fork-COW refactor:
-    # docs/specs/mhs_refactor.md §2.2 W6.)
+    # Dropping mark frame cache ensures clean state for re-runs against updated parquet files.
     _get_symbol_mark_frame.cache_clear()
     resolved_end = resolve_evaluation_end(request.end, unseal_holdout=False)
     _run_start = time.perf_counter()
@@ -4331,12 +4211,49 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
     if request.execution_coverage_gate:
-        # Relevance-scoped pre-flight gates (spec
-        # mhs_data_integrity_relevance_scoping.md §3): the full-universe
+        # Relevance-scoped data-integrity handling (spec
+        # mhs_data_integrity_relevance_scoping.md §3), opt-in via the same
+        # flag as the pre-existing strict gates below (default False keeps
+        # every other call byte-identical, matching this file's established
+        # opt-in-flag convention). Dynamic large-gap exclusion replaces a
+        # static per-symbol exclusion list with a live computation over the
+        # current cache and the current roster mask, so a symbol whose gap is
+        # later backfilled is automatically re-admitted and one whose cache
+        # degrades is automatically excluded. Gaps below the threshold are
+        # left untouched -- the per-event
+        # MISSING_DATA/RELEVANT_EXECUTION_DATA_GAP fold reporting already
+        # handles those correctly.
+        _had_any_roster_member = bool(execution_mask.to_numpy().any())
+        execution_mask, _execution_gap_excluded = apply_dynamic_gap_exclusion(
+            execution_mask, request.execution_timeframe, root=request.data_root,
+        )
+        execution_mask, _mark_gap_excluded = apply_dynamic_mark_gap_exclusion(execution_mask)
+        if _execution_gap_excluded or _mark_gap_excluded:
+            _logger.info(
+                "[DATA] stage=dynamic_gap_exclusion execution_symbols=%d mark_symbols=%d",
+                len(_execution_gap_excluded), len(_mark_gap_excluded),
+            )
+        if _had_any_roster_member and not bool(execution_mask.to_numpy().any()):
+            # Dynamic exclusion is meant to drop individual symbols/periods
+            # with a structurally unusable gap, never the entire roster.
+            # Every member being excluded is a systemic misconfiguration
+            # (wrong data_root, execution_timeframe never collected at all)
+            # rather than ordinary per-symbol data noise, and must fail
+            # closed loudly instead of silently producing a report over zero
+            # executed symbols.
+            raise DataIntegrityError(
+                "dynamic gap exclusion removed every roster member -- "
+                f"execution_timeframe={request.execution_timeframe!r} data_root="
+                f"{request.data_root!r} likely has no coverage at all for this window"
+            )
+        # Relevance-scoped pre-flight gates: the full-universe
         # Cartesian-product gate is replaced here by per-roster-membership
         # scope -- gaps outside a symbol's membership interval are ignored, and
         # mark-price coverage is validated with the exact causal availability
-        # semantics the replay applies, so a pass cannot die mid-replay.
+        # semantics the replay applies, so a pass cannot die mid-replay. Runs
+        # after dynamic exclusion, so this now only ever fires on sub-threshold
+        # gaps for users who want zero-tolerance instead of the default
+        # auto-exclusion.
         assert_relevant_execution_data_coverage(
             execution_mask, request.execution_timeframe, root=request.data_root,
         )
@@ -4417,11 +4334,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     signal_48h = horizon_log_return(log_close, 48)
     xs_ic = _xs_rank_ic(signal_48h, opens, forward_bars=48)
     trend_sleeve_diagnostic = _trend_sleeve_diagnostic(log_close, eligible, opens, bar_funding, execution_mask, request) if request.trend_sleeve else None
-    # The two feature-axis opt-in diagnostics run AFTER the fold pool so they
-    # execute with the minute/mark frame caches evicted and the parent RSS
-    # minimized (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md
-    # §6); they only consume the 1h panels, opens, bar_funding and
-    # execution_mask, all still alive here.
+    # Feature-axis opt-in diagnostics run after fold pool with evicted caches.
     multi_feature_diagnostic = None
     committee_diagnostic = None
     regression = _date_clustered_ols(opens, signal_48h, forward_bars=48)
@@ -4490,14 +4403,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 compute_regime_scaled_net_t=request.discovery_gate_regime_scaled_net_t,
             ),
         }
-        # Full-history (2021-2025) yearly net-t diagnostics -- REPORT-ONLY
-        # (docs/specs/mhs_carry_and_fast_fair_evaluation.md §2.1/§2.2). These
-        # values never feed admission_t or any gate/capital decision; they exist
-        # so a reader can tell "the gate lacked power" from "no edge exists".
-        # The momentum/fast books are the actual capital books (w_slow/w_fast,
-        # frozen 168h/48h at the default) and funding_carry uses whichever
-        # lookback the top-level long/short discovery picked (168h + sign as a
-        # representative fallback when neither family admits).
+        # Full-history (2021-2025) yearly net-t diagnostics (report-only).
         full_history_yearly_net_t = {
             "slow_momentum": yearly_net_t_diagnostic(
                 w_slow.reindex(grid_1h).ffill().fillna(0.0), opens, bar_funding,
@@ -4538,10 +4444,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             funding_carry_worst_year_corr = year_restricted_correlation(
                 _fc_daily, _momentum_daily, (_worst_year,),
             )
-        # Breadth audit (docs/specs/mhs_return_source_breadth_expansion.md §3.1):
-        # the same candidate weight books the gate scored are reused to expose
-        # each axis's effective independent-bet count, making the
-        # "horizon axis is saturated" claim auditable from every diagnostic run.
+        # Effective breadth audit across candidate weight books.
         _slow_daily_returns: dict[int, pd.Series] = {}
         _fast_daily_returns: dict[int, pd.Series] = {}
         for _horizon, _book in _slow_candidate_weights.items():
@@ -4649,10 +4552,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         fold_funding_carry,
     )
     folds = tuple(fold_reports)
-    # Books and folds are done: free the full-period mark frame cache so the
-    # opt-in diagnostics and final assembly run with a lean parent. The
-    # minute-frame caches were removed in the fork-COW refactor (only the mark
-    # cache survives; docs/specs/mhs_refactor.md §2.2 W6).
+    # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
     _get_symbol_mark_frame.cache_clear()
     gc.collect()
     _assert_stage_rss_budget("post_folds", rss_budget_bytes, rss_reserve_bytes)
@@ -4892,11 +4792,7 @@ def build_mhs_run_history_record(
     output_tier: MhsOutputTier,
     persisted_path: Path | None,
 ) -> dict[str, Any]:
-    """Curated, AI-parseable summary of one MHS run (docs/specs §3.3).
-
-    The record is fully JSON-round-trippable and rounded to 6 decimals; no git
-    SHA/ADR lookups (no subprocess calls) so recording stays deterministic.
-    """
+    """Curated, structured summary of one MHS run."""
     record: dict[str, Any] = {
         "run_at": datetime.now(UTC).isoformat(),
         "run_id": uuid4().hex,

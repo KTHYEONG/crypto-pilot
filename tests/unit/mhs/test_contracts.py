@@ -201,10 +201,7 @@ class TestFrozenLiterals:
         assert abs(sum(PHASE_1_BOOK_BLEND_WEIGHTS.values()) - 1.0) < 1e-12
 
     def test_trend_sleeve_horizons_are_frozen_measured_band(self) -> None:
-        # The trend sleeve's slow band is the frozen measured 6-horizon ensemble
-        # (docs/specs/mhs_directional_trend_sleeve.md §1.4); individual net
-        # Sharpe at the base tier ranges -0.058..+0.282, so any single-horizon
-        # selection is overfitting and the constant is never edited inline.
+        # The trend sleeve's slow band is the frozen measured 6-horizon ensemble.
         assert MHS_TREND_SLEEVE_HORIZONS_HOURS == (336, 480, 600, 720, 1080, 1440)
         assert len(MHS_TREND_SLEEVE_HORIZONS_HOURS) == 6
         assert tuple(sorted(MHS_TREND_SLEEVE_HORIZONS_HOURS)) == MHS_TREND_SLEEVE_HORIZONS_HOURS

@@ -288,11 +288,7 @@ def calibrated_report(synthetic_market):
 
 
 class TestQualityCalibrationWiring:
-    """R1/R3 wiring contract (``docs/specs/mhs_horizon_opt.md``): the top-level
-    books path applies the same signal-quality calibration as the fold path
-    (EMA span on each book; regime cash scale and turnover deadband on the
-    blend), and the panel statistics are computed before the book replays so
-    ``log_close`` is released before them."""
+    """Quality calibration wiring contract: top-level books apply matching signal calibration."""
 
     @staticmethod
     def _book_signal_ema_span(spec) -> int:
@@ -304,13 +300,7 @@ class TestQualityCalibrationWiring:
         slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
         assert captured["ema_spans"]["fast_reversal"]
         assert captured["ema_spans"]["slow_momentum"]
-        # Every _book_weights call -- the top-level books AND the three
-        # anchored folds -- passes the same sign-aware EMA span the fold path
-        # computes, so the top-level books are calibrated exactly like fold
-        # targets (docs/specs/mhs_fast_reversal_overlay_redesign.md §2.2): the
-        # momentum band keeps the whipsaw-suppressing EMA, while the reversal
-        # band is unsmoothed (its edge lives in the short-term noise the filter
-        # deletes).
+        # Every _book_weights call passes the same sign-aware EMA span.
         for span in captured["ema_spans"]["fast_reversal"]:
             assert span is None
         for span in captured["ema_spans"]["slow_momentum"]:
@@ -320,13 +310,7 @@ class TestQualityCalibrationWiring:
     def test_top_level_blend_applies_regime_cash_scale_and_deadband(self, calibrated_report) -> None:
         report, captured = calibrated_report
         assert report.books, "top-level books must run on the synthetic market"
-        # The volatility-regime cash scale is now applied to the top-level blend
-        # path (run_mhs_horizon_diagnostic) -- the R1 wiring seam.  (The
-        # anchored folds on this synthetic market are out-of-range, so the
-        # top-level call is the observable evidence.)
         assert captured["regime_callers"].count("run_mhs_horizon_diagnostic") == 1
-        # The turnover deadband is applied inside _book_outcome to every
-        # top-level book replay (fast, slow, blend).
         assert captured["deadband_callers"].count("_book_outcome") == 3
 
     def test_top_level_books_diagnostic_fields_populated_after_quality_calibration(self, report) -> None:
@@ -349,10 +333,6 @@ class TestQualityCalibrationWiring:
         log_close = np.log(panel["close"])
         opens = panel["open"]
         signal_48h = ev.horizon_log_return(log_close, 48)
-        # R3 reorders these computations before the book replays; the reported
-        # payload values must be identical to the same computation on the panel.
-        # The IC/OLS now build their forward window internally with
-        # forward_bars=48 (docs/specs/mhs_alpha_engine.md §3, RC-3).
         assert report.xs_rank_ic == ev._xs_rank_ic(signal_48h, opens, forward_bars=48)
         assert report.date_clustered_regression == ev._date_clustered_ols(opens, signal_48h, forward_bars=48)
 
@@ -360,8 +340,6 @@ class TestQualityCalibrationWiring:
         src = inspect.getsource(ev.run_mhs_horizon_diagnostic)
         assert "del log_close" in src
         assert "signal_48h" in src
-        # log_close must be released before the first top-level book replay
-        # (now launched concurrently in fork workers via ``_run_books_concurrent``).
         assert src.index("del log_close") < src.index("_run_books_concurrent(")
 
 
@@ -378,8 +356,7 @@ class TestMhsHorizonDiagnostic:
         assert report.blend_target_gross > 0.0
 
     def test_mhs_3m_01_default_execution_timeframe(self) -> None:
-        """MHS-3M-01-DEFAULT: production requests default to 3m
-        (docs/specs/mhs_execution_timeframe_3m.md)."""
+        """MHS-3M-01-DEFAULT: production requests default to 3m."""
         from src.application.research.mhs.evaluation import MhsDiagnosticRequest
 
         assert MhsDiagnosticRequest().execution_timeframe == "3m"
