@@ -35,6 +35,7 @@ import pyarrow.parquet as pq
 
 import src.market_data.services.futures_collection as _futures_collection
 from src.market_data.services.futures_collection import DataCollector
+from src.application.data.mhs_execution_collection import assert_execution_data_coverage
 from src.mhs.evaluation import phase_diagnostic_metrics
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
@@ -280,6 +281,20 @@ MHS_GO_REASON_STRESS_SHARPE = "STRESS_SHARPE_NOT_POSITIVE"
 MHS_GO_REASON_CAPITAL_BREACH = "CAPITAL_INVARIANT_BREACH"
 MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
 MHS_GO_REASON_RESOURCE_BREACH = "RESOURCE_BUDGET_BREACH"
+# Data-integrity reason codes: fail-closed evidence that the canonical input
+# data itself was missing or invalid, as opposed to pure alpha-quality failures
+# (MHS_GO_REASON_PRIMARY_SHARPE / MHS_GO_REASON_STRESS_SHARPE) or the policy
+# registration state (MHS_GO_REASON_UNSPECIFIED_POLICY). Consumers distinguish
+# "data was intact but alpha underperformed" from "data itself was deficient"
+# by whether MhsResearchGoResult.data_integrity_reason_codes is non-empty.
+MHS_GO_REASON_DATA_INTEGRITY_CODES = frozenset[str]({
+    MHS_GO_REASON_INCOMPLETE_FOLD,
+    MHS_GO_REASON_INVALID_PRIMARY,
+    MHS_GO_REASON_NONFINITE_EQUITY,
+    MHS_GO_REASON_EXECUTION_GAP,
+    MHS_GO_REASON_CAPITAL_BREACH,
+    MHS_GO_REASON_RESOURCE_BREACH,
+})
 
 
 # Unrecoverable source gap exclusions (Binance REST API & Vision archives have >4h gaps):
@@ -337,6 +352,7 @@ class MhsDiagnosticRequest:
     multi_feature_book: bool = False
     committee_book: bool = False
     committee_capital: bool = False
+    execution_coverage_gate: bool = False
     ram_guard: bool = True
 
     def __post_init__(self) -> None:
@@ -380,6 +396,8 @@ class MhsDiagnosticRequest:
             raise ValueError("committee_book must be a bool")
         if not isinstance(self.committee_capital, bool):
             raise ValueError("committee_capital must be a bool")
+        if not isinstance(self.execution_coverage_gate, bool):
+            raise ValueError("execution_coverage_gate must be a bool")
         if not isinstance(self.ram_guard, bool):
             raise ValueError("ram_guard must be a bool")
         if not (0.0 <= self.trend_sleeve_gross <= 1.0):
@@ -459,6 +477,9 @@ class MhsResearchGoResult:
     reason_codes: tuple[str, ...]
     evaluated_folds: int
     folds_passed: int
+    # Subset of ``reason_codes`` restricted to data-integrity failures; empty
+    # when the only blocking reasons are alpha-quality or policy-registration.
+    data_integrity_reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -4146,11 +4167,15 @@ def _mhs_research_go(
     if any(v is None for v in MHS_REGISTERED_POLICY_THRESHOLDS.values()):
         reasons.append(MHS_GO_REASON_UNSPECIFIED_POLICY)
     reasons = sorted(set(reasons))
+    data_integrity_reasons = tuple(
+        sorted(r for r in reasons if r in MHS_GO_REASON_DATA_INTEGRITY_CODES)
+    )
     return MhsResearchGoResult(
         eligible=not reasons,
         reason_codes=tuple(reasons),
         evaluated_folds=len(folds),
         folds_passed=passed,
+        data_integrity_reason_codes=data_integrity_reasons,
     )
 
 
@@ -4212,6 +4237,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     ]
     if not funded:
         raise RuntimeError("no dev symbol has funding coverage; the MHS ledger requires funding")
+    if request.execution_coverage_gate:
+        assert_execution_data_coverage(
+            funded, request.execution_timeframe, str(start), str(end), root=request.data_root,
+        )
     close = close[funded]
     opens = opens[funded]
     quote_vol = quote_vol[funded]
@@ -4864,6 +4893,7 @@ def build_mhs_run_history_record(
             "reason_codes": report.research_go.reason_codes,
             "evaluated_folds": report.research_go.evaluated_folds,
             "folds_passed": report.research_go.folds_passed,
+            "data_integrity_reason_codes": report.research_go.data_integrity_reason_codes,
         },
         "discovery_qualification": report.discovery_qualification,
         "committee_diagnostic": report.committee_diagnostic,

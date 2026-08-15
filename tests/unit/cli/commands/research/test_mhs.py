@@ -428,6 +428,46 @@ def test_mhs_diagnostic_committee_capital_flag_threaded_to_request(monkeypatch) 
     _run_mhs_horizon_diagnostic(args)
     assert captured["committee_capital"] is False
 
+
+def test_mhs_diagnostic_execution_coverage_gate_flag_threaded(monkeypatch) -> None:
+    """SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_CLI_FLAG_THREADED:
+    ``--execution-coverage-gate`` (store_true, default False) is parsed and
+    threaded into the constructed ``MhsDiagnosticRequest``; omitting it yields
+    execution_coverage_gate=False."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        captured.update(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    defaults = {action.dest: action.default for action in parser._actions}
+    assert defaults["execution_coverage_gate"] is False
+
+    args = parser.parse_args(["--execution-coverage-gate"])
+    assert args.execution_coverage_gate is True
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["execution_coverage_gate"] is True
+
+    captured.clear()
+    args = parser.parse_args([])
+    assert args.execution_coverage_gate is False
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["execution_coverage_gate"] is False
+
+
 def test_mhs_diagnostic_persist_stage_logged(monkeypatch, caplog) -> None:
     """SCENARIO_MHS_CLI_PERSIST_STAGE_LOGGED: the persist step emits a [SYS]
     stage=persist_report elapsed_ms=<int> log line, so the post-run report
