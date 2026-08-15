@@ -27,12 +27,11 @@ import src.market_data.services.futures_collection as fc
 from src.application.research.mhs import evaluation as ev
 from src.application.research.mhs.evaluation import (
     _cached_mark_panel,
+    _candidate_weight_books,
     _fold_safe_discovery_worker,
-    _get_symbol_minute_frame,
     _iter_mhs_execution_windows,
     _load_window_minute_frames,
     _materialize_replay_windows,
-    _precompute_fold_safe_candidate_weights,
     _rescaled_windows,
     _run_fold_safe_discovery_parallel,
 )
@@ -41,6 +40,7 @@ from src.market_data.services.futures_collection import DataCollector
 from src.mhs.contracts import PHASE_1_BOOK_SPECS, ExecutionSpec
 from src.mhs.evaluation import phase_1_anchored_purged_folds
 from src.mhs.execution import replay_execution_windows
+from src.mhs.parallel import fork_shared_payload
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 _SYMBOLS = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
@@ -49,8 +49,6 @@ _SYMBOLS = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
 @pytest.fixture(autouse=True)
 def _clear_perf_caches() -> None:
     ev._get_symbol_mark_frame.cache_clear()
-    ev._get_symbol_minute_frame.cache_clear()
-    ev._load_minute_frames_cached.cache_clear()
     yield
     ev._get_symbol_mark_frame.cache_clear()
 
@@ -146,14 +144,21 @@ def test_mhs_perf_opt_mark_cache_read_once(mark_market) -> None:
 def test_mhs_perf_opt_window_slice_equivalence(mark_market) -> None:
     """SCENARIO_MHS_PERF_OPT_WINDOW_SLICE_EQUIVALENCE: the window-filtered
     loader returns exactly the full-period-frame ``.loc`` slice."""
-    ev._get_symbol_minute_frame.cache_clear()
     root = str(mark_market)
     ws = _START + pd.Timedelta(hours=24)
     we = _START + pd.Timedelta(hours=72)
     windowed = _load_window_minute_frames(root, _SYMBOLS, ws, we, "5m")
     assert set(windowed) == set(_SYMBOLS)
     for sym in _SYMBOLS:
-        full = _get_symbol_minute_frame(root, sym, "5m")
+        table = ev.pq.read_table(
+            f"{root}/5m/{sym}.parquet", columns=["timestamp", "high", "low", "close"],
+        )
+        idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
+        full = pd.DataFrame(
+            {c: table.column(c).to_numpy().astype("float64") for c in ("high", "low", "close")},
+            index=idx,
+        )
+        full = full[~full.index.duplicated(keep="last")].sort_index()
         expected = full.loc[(full.index >= ws) & (full.index <= we)]
         pd.testing.assert_frame_equal(windowed[sym], expected)
 
@@ -221,7 +226,6 @@ def test_mhs_perf_opt_lazy_frame_scope(mark_market, monkeypatch) -> None:
     """SCENARIO_MHS_PERF_OPT_LAZY_FRAME_SCOPE: ``_load_window_minute_frames``
     reads only the requested roster's window rows via parquet filters and never
     triggers a full-period frame load."""
-    ev._get_symbol_minute_frame.cache_clear()
     root = str(mark_market)
     ws = _START + pd.Timedelta(hours=24)
     we = _START + pd.Timedelta(hours=48)
@@ -234,11 +238,6 @@ def test_mhs_perf_opt_lazy_frame_scope(mark_market, monkeypatch) -> None:
         return real_read_table(*args, **kwargs)
 
     monkeypatch.setattr(ev.pq, "read_table", counting_read_table)
-
-    def _forbidden(_root, _sym, _tf):
-        raise AssertionError("full-period minute frame must not be loaded in the window path")
-
-    monkeypatch.setattr(ev, "_get_symbol_minute_frame", _forbidden)
     frames = _load_window_minute_frames(root, _SYMBOLS, ws, we, "5m")
     assert set(frames) == set(_SYMBOLS)
     assert len(calls) == len(_SYMBOLS)
@@ -275,18 +274,21 @@ def test_mhs_perf_opt_fold_discovery_parallel_equivalence() -> None:
     fold-safe discovery returns exactly the sequential per-fold computation."""
     log_close, eligible, opens, bar_funding, grid = _build_fold_panel()
     specs = PHASE_1_BOOK_SPECS
-    precomputed = _precompute_fold_safe_candidate_weights(specs, log_close, eligible, bar_funding)
+    precomputed = _candidate_weight_books(log_close, eligible, bar_funding, specs)
 
     expected_slow: dict[int, int | None] = {}
     expected_fast: dict[int, tuple[int, str]] = {}
     expected_fc: dict[int, tuple[int | None, int | None, str, float | None]] = {}
-    for idx, fold in enumerate(phase_1_anchored_purged_folds()):
-        slow, fast, fc = _fold_safe_discovery_worker(
-            fold, idx, specs, log_close, eligible, opens, bar_funding, grid, precomputed,
-        )
-        expected_slow[idx] = slow
-        expected_fast[idx] = fast
-        expected_fc[idx] = fc
+    with fork_shared_payload({
+        "specs": specs, "log_close": log_close, "eligible": eligible,
+        "opens": opens, "bar_funding": bar_funding, "grid_1h": grid,
+        "precomputed": precomputed,
+    }) as token:
+        for idx, fold in enumerate(phase_1_anchored_purged_folds()):
+            slow, fast, fc = _fold_safe_discovery_worker(fold, idx, token)
+            expected_slow[idx] = slow
+            expected_fast[idx] = fast
+            expected_fc[idx] = fc
 
     slow, fast, fc = _run_fold_safe_discovery_parallel(
         specs, log_close, eligible, opens, bar_funding, grid,
@@ -329,3 +331,221 @@ def test_mhs_perf_opt_mark_panel_invalid_grid(mark_market) -> None:
         _cached_mark_panel(_SYMBOLS, "1h", grid.tz_localize(None), 0)
     with pytest.raises(DataIntegrityError):
         _cached_mark_panel(_SYMBOLS, "1h", grid[::-1], 0)
+
+
+def test_scenario_04_candidate_weight_books_covers_union() -> None:
+    """SCENARIO_MHS_REFACTOR_04: ``_candidate_weight_books`` returns horizon
+    keys covering both the fold-safe BookSpec band horizons and the top-level
+    MHS_DISCOVERY_* / funding-carry candidate sets, and every panel equals what
+    ``build_candidate_weights`` would have produced for that key."""
+    from src.application.research.mhs.evaluation import (
+        MHS_DISCOVERY_MOMENTUM_CANDIDATES,
+        MHS_DISCOVERY_REVERSAL_CANDIDATES,
+        MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+        build_funding_carry_candidate_weights,
+    )
+    from src.mhs.discovery import build_candidate_weights as _bcw
+
+    log_close, eligible, opens, bar_funding, grid = _build_fold_panel()
+    specs = PHASE_1_BOOK_SPECS
+    books = _candidate_weight_books(log_close, eligible, bar_funding, specs)
+    assert set(books) == {"slow", "fast", "funding_long", "funding_short"}
+
+    slow_keys = set(books["slow"])
+    assert set(specs["slow_momentum"].band.horizons_hours) <= slow_keys
+    assert set(MHS_DISCOVERY_MOMENTUM_CANDIDATES) <= slow_keys
+
+    fast_keys = set(books["fast"])
+    assert set(specs["fast_reversal"].band.horizons_hours) <= fast_keys
+    assert set(MHS_DISCOVERY_REVERSAL_CANDIDATES) <= fast_keys
+
+    funding_keys = set(books["funding_long"])
+    assert set(MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS) <= funding_keys
+
+    for h in slow_keys:
+        expected = _bcw(log_close, eligible, 1, (h,), tranche_count=8)[h]
+        pd.testing.assert_frame_equal(books["slow"][h], expected)
+    for h in fast_keys:
+        expected = _bcw(log_close, eligible, -1, (h,), tranche_count=8)[h]
+        pd.testing.assert_frame_equal(books["fast"][h], expected)
+    for h in funding_keys:
+        expected = build_funding_carry_candidate_weights(
+            bar_funding, eligible, 1, (h,), tranche_count=8,
+        )[h]
+        pd.testing.assert_frame_equal(books["funding_long"][h], expected)
+
+
+def test_scenario_05_materialize_replay_windows_budget(mark_market) -> None:
+    """SCENARIO_MHS_REFACTOR_05: unbounded materializes every window; a budget
+    smaller than one window still returns at least one window; and the
+    budgeted path replays to the same ledger as the unbounded path."""
+    root = str(mark_market)
+    end = _START + pd.Timedelta(hours=48)
+    decision_grid = pd.date_range(_START + pd.Timedelta(hours=1), end, freq="6h", tz="UTC")
+    target = pd.DataFrame(0.05, index=decision_grid, columns=_SYMBOLS)
+    signals = decision_grid + pd.Timedelta(hours=1)
+    funding = _build_small_funding(mark_market)
+    spec = ExecutionSpec()
+
+    def gen():
+        return _iter_mhs_execution_windows(
+            target, signals, root, "5m", _START, end, funding, "cache_required", spec,
+        )
+
+    all_windows = _materialize_replay_windows(gen)
+    assert len(all_windows) >= 1
+    bounded = _materialize_replay_windows(gen, budget_bytes=1)
+    assert len(bounded) >= 1
+
+    big_budget = sum(ev._window_footprint_bytes(w) for w in all_windows)
+    bounded_full = _materialize_replay_windows(gen, budget_bytes=big_budget)
+    assert len(bounded_full) == len(all_windows)
+
+    full_ledger = replay_execution_windows(iter(all_windows), 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    budget_ledger = replay_execution_windows(iter(bounded_full), 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    assert len(full_ledger.simulated_fills) == len(budget_ledger.simulated_fills)
+    assert np.allclose(
+        full_ledger.ledger.equity.to_numpy(), budget_ledger.ledger.equity.to_numpy(),
+        rtol=1e-12, atol=1e-12,
+    )
+
+
+def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
+    """SCENARIO_MHS_REFACTOR_06: no ProcessPoolExecutor.submit call in
+    evaluation.py passes a pd.DataFrame or pd.Series argument; large read-only
+    panels travel through fork_shared_payload tokens."""
+    import src.application.research.mhs.evaluation as ev_mod
+
+    root = tmp_path / "market"
+    _write_mark_market(root, _SYMBOLS, n_hours=2700)
+    monkeypatch.setattr(
+        fc, "_mark_price_path",
+        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet",
+    )
+    monkeypatch.setattr(
+        ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet",
+    )
+
+    recorded: list[list[object]] = []
+
+    class _SynchronousFuture:
+        def __init__(self, fn, args):
+            self._result = fn(*args)
+
+        def result(self, timeout=None):
+            return self._result
+
+    class _RecordingExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def submit(self, fn, *args, **kwargs):
+            recorded.append(list(args))
+            return _SynchronousFuture(fn, args)
+
+    monkeypatch.setattr(ev_mod, "ProcessPoolExecutor", _RecordingExecutor)
+
+    from src.application.research.mhs import evaluation as _ev
+    args = _build_books_args_from_market(root, 2700)
+    _ev._run_books_concurrent(**args)
+
+    assert recorded, "the book pool must submit at least once"
+    for submit_args in recorded:
+        for arg in submit_args:
+            assert not isinstance(arg, (pd.DataFrame, pd.Series))
+
+
+def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]:
+    """Minimal ``_run_books_concurrent`` arg set from a written market."""
+    import src.application.research.mhs.evaluation as ev_mod
+
+    end = _START + pd.Timedelta(hours=n_hours)
+    symbols = _SYMBOLS
+    funding_by_symbol = _build_small_funding(root)
+    request = ev_mod.MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="5m", log_run=False,
+        execution_universe_size=8,
+    )
+    panel = ev_mod.load_base_panel(
+        str(root), "1h", ("close", "open", "quote_vol"), _START, end,
+        partition="dev", min_bars=2000,
+    )
+    close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    grid_1h = close.index
+    bar_period = grid_1h[1] - grid_1h[0]
+    funding_window = {
+        s: funding_by_symbol[s].loc[
+            (funding_by_symbol[s].index >= grid_1h[0])
+            & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+        ]
+        for s in symbols
+        if s in funding_by_symbol
+    }
+    bar_funding = ev_mod.bar_funding_panel(funding_window, grid_1h)
+    aligned = list(bar_funding.columns)
+    close = close[aligned]
+    opens = opens[aligned]
+    bar_funding = bar_funding[aligned]
+    quote_vol = quote_vol[aligned]
+    funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
+    eligible = ev_mod.liquid_half_eligibility(
+        quote_vol, lookback_bars=720, min_history_bars=720,
+    )
+    log_close = np.log(close)
+    fast = ev_mod.PHASE_1_BOOK_SPECS["fast_reversal"]
+    slow = ev_mod.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
+    slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
+    w_fast = ev_mod._book_weights(log_close, eligible, fast, fast_grid)
+    w_slow = ev_mod._book_weights(log_close, eligible, slow, slow_grid)
+    phase_fast = ev_mod._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    phase_slow = ev_mod._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
+    phase_blend = ev_mod._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    execution_mask = ev_mod._pit_execution_mask(quote_vol, eligible, 8)
+    w_fast_execution = ev_mod.renormalize_within_mask(
+        w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
+    )
+    w_slow_execution = ev_mod.renormalize_within_mask(
+        w_slow, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
+    )
+    w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
+    w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
+    blend_1h = (
+        ev_mod.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
+        + ev_mod.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
+    )
+    vol_mean = ev_mod.realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
+    regime_scale = ev_mod._regime_cash_scale(vol_mean)
+    blend_1h = blend_1h.mul(regime_scale, axis=0)
+    return {
+        "root": str(root),
+        "request": request,
+        "n_symbols": len(aligned),
+        "grid_1h": grid_1h,
+        "fast": fast,
+        "slow": slow,
+        "fast_grid": fast_grid,
+        "slow_grid": slow_grid,
+        "w_fast": w_fast,
+        "w_slow": w_slow,
+        "w_fast_execution": w_fast_execution,
+        "w_slow_execution": w_slow_execution,
+        "opens": opens,
+        "bar_funding": bar_funding,
+        "phase_fast": phase_fast,
+        "phase_slow": phase_slow,
+        "phase_blend": phase_blend,
+        "start": _START,
+        "end": end,
+        "funding_by_symbol": funding_by_symbol,
+        "blend_1h": blend_1h,
+        "execution_mask": execution_mask,
+        "initial_equity": 1.0,
+    }

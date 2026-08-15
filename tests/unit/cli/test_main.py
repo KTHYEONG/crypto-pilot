@@ -6,33 +6,17 @@ from src.application.data import collection
 from src.cli.main import build_root_parser, main
 
 
-def test_root_parser_groups_research_commands() -> None:
-    # PL-CLI-001: the parser maps expert command arguments to the frozen
-    # request defaults.
-    args = build_root_parser().parse_args(
-        ["research", "run", "expert", "eval", "--library-id", "valid_library"],
-    )
-    assert args.group == "research"
-    assert args.research_command == "run"
-    assert args.run_command == "expert"
-    assert args.expert_command == "eval"
-    assert args.library_id == "valid_library"
-
-
-def test_root_parser_exposes_the_three_groups() -> None:
+def test_root_parser_exposes_the_two_groups() -> None:
     parser = build_root_parser()
     assert parser.parse_args(["data", "collect", "funding", "BTCUSDT", "--end", "2025-01-01"]).group == "data"
-    assert parser.parse_args(["research", "run", "single", "baseline"]).group == "research"
-    assert parser.parse_args(["provenance", "compare-runs"]).group == "provenance"
+    assert parser.parse_args(["research", "run", "portfolio", "mhs-horizon-diagnostic"]).group == "research"
 
 
-def test_root_parser_exposes_oi_deleveraging_evaluation() -> None:
-    args = build_root_parser().parse_args(
-        ["research", "run", "single", "oi", "--symbol", "BTCUSDT"],
-    )
-    assert args.run_command == "single"
-    assert args.single_command == "oi"
-    assert args.symbol == "BTCUSDT"
+def test_root_parser_does_not_expose_provenance_group() -> None:
+    # SCENARIO_MHS_REFACTOR_09: the provenance group was removed during the
+    # legacy isolation refactor; only data + research remain.
+    with pytest.raises(SystemExit):
+        build_root_parser().parse_args(["provenance", "compare-runs"])
 
 
 def test_root_parser_requires_a_group() -> None:
@@ -46,7 +30,7 @@ def test_root_parser_requires_run_command_and_evaluation() -> None:
     with pytest.raises(SystemExit):
         build_root_parser().parse_args(["research", "run"])
     with pytest.raises(SystemExit):
-        build_root_parser().parse_args(["research", "run", "single"])
+        build_root_parser().parse_args(["research", "run", "portfolio"])
 
 
 def test_data_collect_funding_subcommand_parses_and_dispatches(monkeypatch) -> None:
