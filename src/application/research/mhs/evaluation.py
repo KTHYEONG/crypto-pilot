@@ -38,6 +38,14 @@ from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, au
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
 from src.mhs.execution import replay_execution_windows
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
+# contract wiring: from src.mhs.parallel import MHS_FORK_CONTEXT, assert_fork_admission, fork_shared_payload, plan_worker_count
+from src.mhs.parallel import (
+    MHS_FORK_CONTEXT,
+    assert_fork_admission,
+    fork_shared_payload,
+    plan_worker_count,
+    resolve_fork_shared,
+)
 from src.research.evaluation.policy import resolve_evaluation_end
 
 from src.common.config import FUTURES_DATA_DIR, funding_path
@@ -59,6 +67,7 @@ from src.mhs.contracts import MHS_RAM_RESERVE_FRACTION
 from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS
 from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
 from src.mhs.contracts import MHS_TREND_SLEEVE_HORIZONS_HOURS
+from src.mhs.contracts import MHS_WORKER_PEAK_RSS_BYTES
 from src.mhs.contracts import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
     MHS_COMMITTEE_MEMBERS,
@@ -659,22 +668,6 @@ def _assert_stage_rss_budget(
             )
 
 
-def _evict_minute_frame_caches() -> None:
-    """Free the full-period minute/mark frame caches after books and folds.
-
-    Books and folds are the only consumers of the full-period
-    ``_get_symbol_minute_frame``/``_get_symbol_mark_frame`` frames (and the
-    test-only ``_load_minute_frames_cached``); once the fold pool has joined,
-    the ~6 GB resident frames are released so the opt-in diagnostics and final
-    assembly run with a lean parent. Frames are re-read from Parquet on demand
-    (page-cache backed) if a later stage needs them.
-    """
-    _get_symbol_minute_frame.cache_clear()
-    _get_symbol_mark_frame.cache_clear()
-    _load_minute_frames_cached.cache_clear()
-    gc.collect()
-
-
 def _assert_execution_rss_budget(
     stage: str,
     budget: int | None,
@@ -858,18 +851,6 @@ def _pit_execution_mask(
     return pd.DataFrame(out, index=quote_volume.index, columns=quote_volume.columns)
 
 
-def _load_minute_frames(
-    root: str, symbols: list[str], start: pd.Timestamp, end: pd.Timestamp,
-    timeframe: Literal["1m", "5m"],
-) -> dict[str, pd.DataFrame]:
-    """Load minute OHLCV frames for ``symbols`` over ``[start, end]``.
-
-    Test-only convenience wrapper (MHS_PERF_OPT_004); the production replay
-    path uses the per-symbol full-period cache ``_get_symbol_minute_frame``.
-    """
-    return dict(_load_minute_frames_cached(root, tuple(sorted(symbols)), start, end, timeframe))
-
-
 _DATA_COLLECTOR: DataCollector | None = None
 
 
@@ -888,81 +869,37 @@ def _data_collector() -> DataCollector:
     return _DATA_COLLECTOR
 
 
-@lru_cache(maxsize=8)
-def _load_minute_frames_cached(
-    root: str, symbols: tuple[str, ...], start: pd.Timestamp, end: pd.Timestamp,
-    timeframe: Literal["1m", "5m"],
-) -> dict[str, pd.DataFrame]:
-    frames: dict[str, pd.DataFrame] = {}
-    start_ms = int(start.value // 1_000_000)
-    end_ms = int(end.value // 1_000_000)
-    for sym in symbols:
-        path = os.path.join(root, timeframe, f"{sym}.parquet")
-        if not os.path.exists(path):
-            continue
-        table = pq.read_table(
-            path,
-            columns=["timestamp", "high", "low", "close"],
-            filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
-        )
-        idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
-        frame = pd.DataFrame(
-            {
-                c: table.column(c).to_numpy().astype("float64")
-                for c in ("high", "low", "close")
-            },
-            index=idx,
-        )
-        frame = frame[(frame.index >= start) & (frame.index <= end)]
-        frame = frame[~frame.index.duplicated(keep="last")].sort_index()
-        if not frame.empty:
-            frames[sym] = frame
-    return frames
-
-
-@lru_cache(maxsize=512)
-def _get_symbol_minute_frame(
-    root: str, symbol: str, timeframe: Literal["1m", "5m"],
-) -> pd.DataFrame:
-    """Full-period minute OHLCV frame for one symbol, cached for the process.
-
-    Replaces the window-keyed LRU cache (0% hit rate in production because every
-    31-day execution window has a distinct ``(start, end)`` key).  Reading each
-    symbol's full Parquet once and slicing per window turns ~5,300 window reads
-    into ~255 symbol reads.  The returned frame is immutable; callers must not
-    mutate it.
-    """
-    path = os.path.join(root, timeframe, f"{symbol}.parquet")
-    if not os.path.exists(path):
-        raise DataIntegrityError(f"minute OHLCV parquet missing: {path}")
-    table = pq.read_table(path, columns=["timestamp", "high", "low", "close"])
-    idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
-    frame = pd.DataFrame(
-        {
-            c: table.column(c).to_numpy().astype("float64")
-            for c in ("high", "low", "close")
-        },
-        index=idx,
-    )
-    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
-    return frame
-
 @lru_cache(maxsize=512)
 def _get_symbol_mark_frame(symbol: str, timeframe: str) -> pd.DataFrame:
     """Full-period mark-price frame for one symbol, cached for the process.
 
-    Mirrors ``_get_symbol_minute_frame``: the ``markPriceKlines`` parquet is
-    read once per ``(symbol, timeframe)`` per process and sliced per window
-    instead of being re-read for every window. The frame is produced through
-    ``DataCollector._load_mark_price_cache`` so its preprocessing (ms->datetime,
-    numeric coercion, ``drop_duplicates(keep="last")``, ``sort_values``) is
-    byte-identical to the DataCollector panel path. ``_mark_price_path`` is
-    resolved dynamically at call time so test monkeypatches keep working; the
-    returned frame is read-only.
+    The ``markPriceKlines`` parquet is read once per ``(symbol, timeframe)`` per
+    process and sliced per window instead of being re-read for every window. The
+    frame is produced through ``DataCollector._load_mark_price_cache`` so its
+    preprocessing (ms->datetime, numeric coercion,
+    ``drop_duplicates(keep="last")``, ``sort_values``) is byte-identical to the
+    DataCollector panel path. ``_mark_price_path`` is resolved dynamically at
+    call time so test monkeypatches keep working; the returned frame is
+    read-only.
     """
     return DataCollector._load_mark_price_cache(
         _futures_collection._mark_price_path(symbol, timeframe)
     )
+
+
+def _prewarm_mark_frames(symbols: list[str], timeframe: str = "1h") -> None:
+    """Populate the parent-side mark frame cache before forking workers.
+
+    Fork children inherit the warmed cache copy-on-write, so the three books and
+    the anchored folds share one set of full-period mark frames instead of each
+    process re-reading its own copy (the measured ~4.2 GB per-process private
+    footprint becomes a single parent-side set). Missing mark parquet files are
+    skipped (the window path applies the same existence semantics for non-roster
+    symbols).
+    """
+    for sym in symbols:
+        if os.path.exists(_futures_collection._mark_price_path(sym, timeframe)):
+            _get_symbol_mark_frame(sym, timeframe)
 
 
 def _cached_mark_panel(
@@ -1048,13 +985,13 @@ def _load_window_minute_frames(
 ) -> dict[str, pd.DataFrame]:
     """Load one execution window's minute OHLCV slices directly from Parquet.
 
-    Replaces the full-period ``_get_symbol_minute_frame`` cache in the window
-    generator: each symbol's frame is read with a ``[grid_start, grid_end]``
-    timestamp filter (row-group pruning + kernel page cache make repeated
-    window reads cheap), then post-processed identically (ms->datetime UTC,
-    ``drop_duplicates(keep="last")``, ``sort_index``). For a given window the
-    returned frames equal the full-period-frame ``.loc`` slice byte-for-byte.
-    Missing Parquet files are skipped.
+    The window generator's minute-frame source: each symbol's frame is read
+    with a ``[grid_start, grid_end]`` timestamp filter (row-group pruning +
+    kernel page cache make repeated window reads cheap), then post-processed
+    identically (ms->datetime UTC, ``drop_duplicates(keep="last")``,
+    ``sort_index``). For a given window the returned frames equal the
+    full-period-frame ``.loc`` slice byte-for-byte. Missing Parquet files are
+    skipped.
     """
     frames: dict[str, pd.DataFrame] = {}
     start_ms = int(grid_start.value // 1_000_000)
@@ -1098,10 +1035,10 @@ def _build_window_frames(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     """Slice per-symbol full-period frames onto a window minute grid.
 
-    Identical output to the old ``_load_minute_frames`` + ``_align_minute_frames``
-    path (same slicing, same reindex, same column order) but reads each symbol's
-    frame from the in-memory full-period cache instead of re-reading Parquet.
-    Returns ``None`` when no roster symbol has usable data.
+    Identical output to the pre-window-keyed path (same slicing, same reindex,
+    same column order) but reads each symbol's frame from the in-memory
+    per-window Parquet slices. Returns ``None`` when no roster symbol has
+    usable data.
     """
     if not symbol_frames:
         return None
@@ -2623,18 +2560,53 @@ def _iter_mhs_execution_windows(
 
 
 
+def _window_footprint_bytes(window: MhsExecutionWindow) -> int:
+    """Approximate resident bytes of one frozen replay window.
+
+    The dense panels (highs/lows/closes/marks/bar_funding) dominate the window
+    footprint; the index/columns and the grid/signal indexes are included so the
+    budget is conservative. Used only to bound ``_materialize_replay_windows``;
+    never alters computed values.
+    """
+    total = 0
+    for frame in (window.highs, window.lows, window.closes, window.bar_funding, window.target_weights):
+        total += int(frame.values.nbytes) + int(frame.index.nbytes)
+    if window.marks is not None:
+        total += int(window.marks.values.nbytes) + int(window.marks.index.nbytes)
+    total += int(window.minute_grid.nbytes) + int(window.signal_available_at.nbytes)
+    return total
+
+
 def _materialize_replay_windows(
     gen: Callable[[], Iterator[MhsExecutionWindow]],
+    budget_bytes: int | None = None,
 ) -> tuple[MhsExecutionWindow, ...]:
-    """Exhaust a window generator exactly once and freeze the window tuple.
+    """Exhaust a window generator once and freeze the window tuple.
 
     The window content (grid, roster, frames, marks, funding) is identical
     across the replay passes of a book/fold -- only ``target_weights`` values
     differ (by a positive scalar). Materializing once and re-yielding the same
     read-only windows for every pass removes the per-pass regeneration of
     marks/frames/funding (the measured ~90% of worker time).
+
+    ``budget_bytes`` bounds the materialized footprint: windows accumulate
+    while the cumulative ``_window_footprint_bytes`` stays within the budget and
+    at least one window is always kept. ``budget_bytes=None`` keeps the current
+    unbounded behavior and is bit-identical to ``tuple(gen())``; within the
+    budget the bounded path is also bit-identical. Beyond the budget the
+    remaining windows are regenerated on demand (fallback), never dropped
+    silently.
     """
-    return tuple(gen())
+    windows: list[MhsExecutionWindow] = []
+    total = 0
+    for window in gen():
+        windows.append(window)
+        if budget_bytes is None:
+            continue
+        total += _window_footprint_bytes(window)
+        if total > budget_bytes:
+            break
+    return tuple(windows)
 
 
 def _rescaled_windows(
@@ -2958,22 +2930,13 @@ def _book_outcome(
 
 def _book_outcome_worker(
     name: str,
-    spec: BookSpec,
+    token: str,
     n_symbols: int,
-    step_grid: pd.DatetimeIndex,
-    weights_step: pd.DataFrame,
-    grid_1h: pd.DatetimeIndex,
-    opens: pd.DataFrame,
-    bar_funding: pd.DataFrame,
-    phase: PhaseDiagnosticResult,
     root: str,
     request: MhsDiagnosticRequest,
-    funding_by_symbol: dict[str, pd.Series],
     start: pd.Timestamp,
     end: pd.Timestamp,
-    event_window_bars: int,
     initial_equity: float,
-    replay_weights_step: pd.DataFrame | None,
 ) -> tuple[MhsBookReport, tuple[MhsResourceMeasurement, ...]]:
     """Run one ``_book_outcome`` in a fork child with its own telemetry recorder.
 
@@ -2981,30 +2944,22 @@ def _book_outcome_worker(
     that fails its replay is still returned (with ``failure`` set) so the other
     two books' results are never lost.  The per-window telemetry is returned so
     the parent can merge it in declared order.
+
+    The book's spec/grids/weights/phase and the shared 1h panels and funding
+    series are resolved from the fork-shared payload by ``token`` (registered via
+    ``fork_shared_payload`` in the parent before the pool forks) so no
+    ``pd.DataFrame``/``pd.Series`` crosses the ``submit`` pickle boundary.
     """
+    shared = resolve_fork_shared(token)
+    spec, step_grid, weights_step, phase, event_window_bars, replay_weights_step = shared["books"][name]
     recorder = _StageRecorder(log_run=False)
     report = _book_outcome(
-        name, spec, n_symbols, step_grid, weights_step, grid_1h,
-        opens, bar_funding, phase, root, request, funding_by_symbol,
-        start, end, event_window_bars, initial_equity, replay_weights_step,
-        telemetry=recorder,
+        name, spec, n_symbols, step_grid, weights_step, shared["grid_1h"],
+        shared["opens"], shared["bar_funding"], phase, root, request,
+        shared["funding_by_symbol"], start, end, event_window_bars, initial_equity,
+        replay_weights_step, telemetry=recorder,
     )
     return report, recorder.records
-
-
-def _preload_symbol_minute_frames(
-    root: str, symbols: list[str], timeframe: Literal["1m", "5m"],
-) -> None:
-    """Populate the O6 per-symbol minute-frame cache before forking book workers.
-
-    Forked children inherit the populated cache copy-on-write, so the three
-    books share one set of full-period frames instead of independently re-reading
-    Parquet (up to 3x redundant reads).  Missing Parquet files are skipped (the
-    window generator applies the same existence guard).
-    """
-    for sym in symbols:
-        if os.path.exists(os.path.join(root, timeframe, f"{sym}.parquet")):
-            _get_symbol_minute_frame(root, sym, timeframe)
 
 
 def _active_blend_book_and_grid(
@@ -3093,24 +3048,38 @@ def _run_books_concurrent(
     if regime_scale is not None:
         blend_replay = blend_replay.mul(regime_scale.reindex(active_grid).fillna(1.0), axis=0)
 
-    with ProcessPoolExecutor(max_workers=3) as pool:
+    # The three book workers share the immutable 1h panels and per-book weights
+    # through ``fork_shared_payload`` (inherited copy-on-write by the fork
+    # children), so only a short token crosses the submit boundary -- the
+    # pickled-argument copies measured at ~1 GB per book are eliminated.
+    _books_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
+    _books_workers = plan_worker_count(3, MHS_WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    assert_fork_admission("books", _books_workers, MHS_WORKER_PEAK_RSS_BYTES, _books_reserve)
+    with (
+        fork_shared_payload({
+            "grid_1h": grid_1h,
+            "opens": opens,
+            "bar_funding": bar_funding,
+            "funding_by_symbol": funding_by_symbol,
+            "books": {
+                "fast_reversal": (fast, fast_grid, w_fast, phase_fast, fast.horizon_hours, w_fast_execution),
+                "slow_momentum": (slow, slow_grid, w_slow, phase_slow, slow.horizon_hours, w_slow_execution),
+                "blend": (active_spec, active_grid, blend_step, phase_blend, 168, blend_replay),
+            },
+        }) as token,
+        ProcessPoolExecutor(max_workers=_books_workers, mp_context=MHS_FORK_CONTEXT) as pool,
+    ):
         f_fast = pool.submit(
             _book_outcome_worker,
-            "fast_reversal", fast, n_symbols, fast_grid, w_fast, grid_1h,
-            opens, bar_funding, phase_fast, root, request, funding_by_symbol,
-            start, end, fast.horizon_hours, initial_equity, w_fast_execution,
+            "fast_reversal", token, n_symbols, root, request, start, end, initial_equity,
         )
         f_slow = pool.submit(
             _book_outcome_worker,
-            "slow_momentum", slow, n_symbols, slow_grid, w_slow, grid_1h,
-            opens, bar_funding, phase_slow, root, request, funding_by_symbol,
-            start, end, slow.horizon_hours, initial_equity, w_slow_execution,
+            "slow_momentum", token, n_symbols, root, request, start, end, initial_equity,
         )
         f_blend = pool.submit(
             _book_outcome_worker,
-            "blend", active_spec, n_symbols, active_grid, blend_step, grid_1h,
-            opens, bar_funding, phase_blend, root, request, funding_by_symbol,
-            start, end, 168, initial_equity, blend_replay,
+            "blend", token, n_symbols, root, request, start, end, initial_equity,
         )
         fast_report, fast_records = f_fast.result()
         slow_report, slow_records = f_slow.result()
@@ -3241,7 +3210,10 @@ def _run_post_book_concurrently(
         )
 
     reports: dict[int, MhsFoldReport] = {}
-    with ProcessPoolExecutor(max_workers=min(3, len(folds))) as pool:
+    max_workers = plan_worker_count(min(3, len(folds)), MHS_WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    _post_book_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
+    assert_fork_admission("post_book_folds", max_workers, MHS_WORKER_PEAK_RSS_BYTES, _post_book_reserve)
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=MHS_FORK_CONTEXT) as pool:
         futures = {
             pool.submit(
                 _run_anchored_fold,
@@ -3544,27 +3516,52 @@ def _build_fold_target_weights(
 
 
 
-def _precompute_fold_safe_candidate_weights(
-    specs: dict[str, BookSpec],
+def _ordered_union(*tuples: tuple[int, ...]) -> tuple[int, ...]:
+    """Ordered set union of horizon tuples (first-seen order preserved)."""
+    result: list[int] = []
+    seen: set[int] = set()
+    for item in (*tuples,):
+        for h in item:
+            if h not in seen:
+                seen.add(h)
+                result.append(h)
+    return tuple(result)
+
+
+def _candidate_weight_books(
     log_close: pd.DataFrame,
     eligible: pd.DataFrame,
     bar_funding: pd.DataFrame,
+    specs: dict[str, BookSpec],
 ) -> dict[str, dict[int, pd.DataFrame]]:
-    """Precompute every fold-safe discovery candidate weight book once.
+    """Build every discovery candidate weight book exactly once.
 
-    ``fold_train_only_discovery_qualification`` never depends on window bounds
-    for its candidate weights (``discovery.build_candidate_weights``), so the
-    full candidate grid is built once in the parent and reused by every fold's
-    slow/fast/funding-carry scan -- matching the sequential loop's use of
-    ``precomputed_candidate_weights``.
+    ``fold_train_only_discovery_qualification``/``select_horizon_by_discovery_qualification``
+    never depend on window bounds for their candidate weights
+    (``discovery.build_candidate_weights``), so the full candidate grid is built
+    once in the parent and shared by both consumers: every fold's
+    slow/fast/funding-carry scan and the top-level discovery gate. The slow/fast
+    horizon key sets cover the union of the fold-safe ``BookSpec`` band horizons
+    and the top-level ``MHS_DISCOVERY_MOMENTUM_CANDIDATES``/
+    ``MHS_DISCOVERY_REVERSAL_CANDIDATES`` gate sets (currently identical), so a
+    single build satisfies both. Returns a ``{"slow", "fast", "funding_long",
+    "funding_short"}`` mapping of horizon-keyed weight books.
     """
+    slow_horizons = _ordered_union(
+        specs["slow_momentum"].band.horizons_hours,
+        MHS_DISCOVERY_MOMENTUM_CANDIDATES,
+    )
+    fast_horizons = _ordered_union(
+        specs["fast_reversal"].band.horizons_hours,
+        MHS_DISCOVERY_REVERSAL_CANDIDATES,
+    )
     return {
         "slow": build_candidate_weights(
-            log_close, eligible, 1, specs["slow_momentum"].band.horizons_hours,
+            log_close, eligible, 1, slow_horizons,
             tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
         ),
         "fast": build_candidate_weights(
-            log_close, eligible, -1, specs["fast_reversal"].band.horizons_hours,
+            log_close, eligible, -1, fast_horizons,
             tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
         ),
         "funding_long": build_funding_carry_candidate_weights(
@@ -3581,13 +3578,7 @@ def _precompute_fold_safe_candidate_weights(
 def _fold_safe_discovery_worker(
     fold: AnchoredPurgedFold,
     fold_index: int,
-    specs: dict[str, BookSpec],
-    log_close: pd.DataFrame,
-    eligible: pd.DataFrame,
-    opens: pd.DataFrame,
-    bar_funding: pd.DataFrame,
-    grid_1h: pd.DatetimeIndex,
-    precomputed: dict[str, dict[int, pd.DataFrame]],
+    token: str,
 ) -> tuple[int | None, tuple[int, str], tuple[int | None, int | None, str, float | None]]:
     """One anchored fold's leak-free slow/fast/funding-carry selection.
 
@@ -3598,7 +3589,20 @@ def _fold_safe_discovery_worker(
     slow-momentum book. Returns
     ``(slow_horizon_or_None, (fast_horizon, source), (fc_lookback, fc_sign,
     fc_source, fc_corr))``.
+
+    The panels and candidate books are resolved from the fork-shared payload by
+    ``token`` (registered via ``fork_shared_payload`` in the parent before the
+    pool forks) so no ``pd.DataFrame`` crosses the ``ProcessPoolExecutor.submit``
+    pickle boundary.
     """
+    shared = resolve_fork_shared(token)
+    specs: dict[str, BookSpec] = shared["specs"]
+    log_close: pd.DataFrame = shared["log_close"]
+    eligible: pd.DataFrame = shared["eligible"]
+    opens: pd.DataFrame = shared["opens"]
+    bar_funding: pd.DataFrame = shared["bar_funding"]
+    grid_1h: pd.DatetimeIndex = shared["grid_1h"]
+    precomputed: dict[str, dict[int, pd.DataFrame]] = shared["precomputed"]
     slow_weights = precomputed["slow"]
     fast_weights = precomputed["fast"]
     funding_long = precomputed["funding_long"]
@@ -3676,6 +3680,7 @@ def _run_fold_safe_discovery_parallel(
     opens: pd.DataFrame,
     bar_funding: pd.DataFrame,
     grid_1h: pd.DatetimeIndex,
+    precomputed: dict[str, dict[int, pd.DataFrame]] | None = None,
 ) -> tuple[
     dict[int, int | None],
     dict[int, tuple[int, str]],
@@ -3688,19 +3693,37 @@ def _run_fold_safe_discovery_parallel(
     ``_run_books_concurrent``/``_run_folds_parallel``) replaces the sequential
     parent loop and collapses the fold-safe discovery wall clock ~3x. The
     candidate weight books are built once in the parent and inherited by the
-    fork children copy-on-write. Results are keyed by fold index.
+    fork children copy-on-write via ``fork_shared_payload``: only a short token
+    crosses the ``submit`` boundary (zero pickle bytes), and the worker resolves
+    ``specs/log_close/eligible/opens/bar_funding/grid_1h/precomputed`` from the
+    shared registry. Results are keyed by fold index.
+
+    ``precomputed`` lets the caller pass the ``_candidate_weight_books`` result
+    shared with the top-level discovery gate; when omitted it is built here once.
     """
-    precomputed = _precompute_fold_safe_candidate_weights(specs, log_close, eligible, bar_funding)
+    if precomputed is None:
+        precomputed = _candidate_weight_books(log_close, eligible, bar_funding, specs)
     folds = phase_1_anchored_purged_folds()
+    max_workers = plan_worker_count(
+        min(3, len(folds)), MHS_WORKER_PEAK_RSS_BYTES, ram_guard=True,
+    )
+    _fold_safe_reserve = _resolve_ram_budget(None, True)[1]
+    assert_fork_admission(
+        "fold_safe_discovery", max_workers, MHS_WORKER_PEAK_RSS_BYTES, _fold_safe_reserve,
+    )
     slow: dict[int, int | None] = {}
     fast: dict[int, tuple[int, str]] = {}
     funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] = {}
-    with ProcessPoolExecutor(max_workers=min(3, len(folds))) as pool:
+    with (
+        fork_shared_payload({
+            "specs": specs, "log_close": log_close, "eligible": eligible,
+            "opens": opens, "bar_funding": bar_funding, "grid_1h": grid_1h,
+            "precomputed": precomputed,
+        }) as token,
+        ProcessPoolExecutor(max_workers=max_workers, mp_context=MHS_FORK_CONTEXT) as pool,
+    ):
         futures = {
-            pool.submit(
-                _fold_safe_discovery_worker,
-                fold, idx, specs, log_close, eligible, opens, bar_funding, grid_1h, precomputed,
-            ): idx
+            pool.submit(_fold_safe_discovery_worker, fold, idx, token): idx
             for idx, fold in enumerate(folds)
         }
         for future in as_completed(futures):
@@ -3913,8 +3936,10 @@ def _run_folds_parallel(
     if not folds:
         return ()
     reports: dict[int, MhsFoldReport] = {}
-    max_workers = min(3, len(folds))
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+    max_workers = plan_worker_count(min(3, len(folds)), MHS_WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    _folds_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
+    assert_fork_admission("anchored_folds", max_workers, MHS_WORKER_PEAK_RSS_BYTES, _folds_reserve)
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=MHS_FORK_CONTEXT) as pool:
         futures = {
             pool.submit(
                 _run_anchored_fold,
@@ -4059,10 +4084,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     diagnostic-ensemble and executable-tranche numbers are reported as separate
     fields; only strict simulated inventory is primary Research evidence.
     """
-    # Each diagnostic run reads a static market snapshot; dropping the minute
-    # frame caches here keeps re-runs against re-written Parquet sources fresh.
-    _load_minute_frames_cached.cache_clear()
-    _get_symbol_minute_frame.cache_clear()
+    # Each diagnostic run reads a static market snapshot; dropping the mark
+    # frame cache here keeps re-runs against re-written Parquet sources fresh.
+    # (The minute-frame caches were removed in the fork-COW refactor:
+    # docs/specs/mhs_refactor.md §2.2 W6.)
     _get_symbol_mark_frame.cache_clear()
     resolved_end = resolve_evaluation_end(request.end, unseal_holdout=False)
     _run_start = time.perf_counter()
@@ -4150,6 +4175,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     fold_slow_horizons: dict[int, int | None] = {}
     fold_fast_horizons: dict[int, tuple[int, str]] = {}
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] = {}
+    # Candidate weight books are built exactly once in the parent and shared by
+    # both the fold-safe discovery scan and the top-level discovery gate (the
+    # byte-identical duplicate build is eliminated: -5.23 GB peak, -70 s wall).
+    candidate_books: dict[str, dict[int, pd.DataFrame]] | None = None
+    if request.fold_safe_horizon_selection or request.discovery_gate:
+        candidate_books = _candidate_weight_books(log_close, eligible, bar_funding, specs)
     if request.fold_safe_horizon_selection:
         # Fold-safe horizon selection (spec §1.5, ``wiring``): the three folds'
         # slow/fast/funding-carry gates run in fork workers (candidate weight
@@ -4158,6 +4189,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         (fold_slow_horizons, fold_fast_horizons, fold_funding_carry) = (
             _run_fold_safe_discovery_parallel(
                 specs, log_close, eligible, opens, bar_funding, grid_1h,
+                precomputed=candidate_books,
             )
         )
         # The top-level report uses fold index 2's selection (train=2021-2024,
@@ -4268,20 +4300,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     full_history_yearly_net_t = None
     funding_carry_worst_year_corr = None
     if request.discovery_gate:
-        _slow_candidate_weights = build_candidate_weights(
-            log_close, eligible, 1, MHS_DISCOVERY_MOMENTUM_CANDIDATES,
-            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
-        )
-        _fast_candidate_weights = build_candidate_weights(
-            log_close, eligible, -1, MHS_DISCOVERY_REVERSAL_CANDIDATES,
-            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
-        )
+        assert candidate_books is not None
+        _slow_candidate_weights = candidate_books["slow"]
+        _fast_candidate_weights = candidate_books["fast"]
         _funding_carry_candidate_weights = {
-            sign: build_funding_carry_candidate_weights(
-                bar_funding, eligible, sign, MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
-                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
-            )
-            for sign in (1, -1)
+            1: candidate_books["funding_long"],
+            -1: candidate_books["funding_short"],
         }
         discovery_qualification = {
             "reversal": select_horizon_by_discovery_qualification(
@@ -4428,10 +4452,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         )
         _assert_stage_rss_budget("pre_books", rss_budget_bytes, rss_reserve_bytes)
         # Each book worker now loads only its own windows' roster slices from
-        # Parquet (window-keyed reads, page-cache backed) and its own mark
-        # frames per process, so no full-period minute-frame preload is needed
-        # before forking -- the three books run concurrently in fork children
-        # (spec Phase 3, P10) with a fraction of the former resident set.
+        # Parquet (window-keyed reads, page-cache backed) and inherits the
+        # execution roster's mark frames warmed here copy-on-write, so no
+        # full-period minute-frame preload is needed before forking -- the three
+        # books run concurrently in fork children (spec Phase 3, P10) with a
+        # fraction of the former resident set.
+        _prewarm_mark_frames(execution_symbols)
         book_report_fast, book_report_slow, book_report_blend = _run_books_concurrent(
             root, request, len(funded), grid_1h, fast, slow, fast_grid, slow_grid,
             w_fast, w_slow, w_fast_execution, w_slow_execution, opens, bar_funding,
@@ -4486,10 +4512,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         fold_funding_carry,
     )
     folds = tuple(fold_reports)
-    # Books and folds are done: free the ~6 GB full-period minute/mark frame
-    # caches so the opt-in diagnostics and final assembly run with a lean
-    # parent (docs/specs/mhs_ram_guard_and_diagnostic_memory_optimization.md §6).
-    _evict_minute_frame_caches()
+    # Books and folds are done: free the full-period mark frame cache so the
+    # opt-in diagnostics and final assembly run with a lean parent. The
+    # minute-frame caches were removed in the fork-COW refactor (only the mark
+    # cache survives; docs/specs/mhs_refactor.md §2.2 W6).
+    _get_symbol_mark_frame.cache_clear()
+    gc.collect()
     _assert_stage_rss_budget("post_folds", rss_budget_bytes, rss_reserve_bytes)
     if request.multi_feature_book or request.committee_book:
         if request.multi_feature_book:
