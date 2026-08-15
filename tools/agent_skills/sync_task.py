@@ -135,14 +135,18 @@ def _wipe_temp_artifacts() -> int:
     return count
 
 
-def _clean_scratch_dir() -> int:
-    scratch_dir = "scratch"
-    if not os.path.exists(scratch_dir):
+def _clean_dir_contents(dir_path: str) -> int:
+    """Clean all contents inside a directory while preserving the directory and .gitignore.
+
+    Time Complexity: O(N) where N is number of entries in dir_path.
+    Space Complexity: O(D) where D is directory depth.
+    """
+    if not os.path.exists(dir_path):
         return 0
     count = 0
-    for root, dirs, files in os.walk(scratch_dir, topdown=False):
+    for root, dirs, files in os.walk(dir_path, topdown=False):
         for f in files:
-            if f == ".gitignore":
+            if f in {".gitignore", ".gitkeep"}:
                 continue
             fpath = os.path.join(root, f)
             try:
@@ -155,6 +159,18 @@ def _clean_scratch_dir() -> int:
             with contextlib.suppress(OSError):
                 os.rmdir(dpath)
     return count
+
+
+def _clean_scratch_dir() -> int:
+    return _clean_dir_contents("scratch")
+
+
+def _clean_tmp_dir() -> int:
+    return _clean_dir_contents("tmp")
+
+
+def _clean_logs_dir() -> int:
+    return _clean_dir_contents("logs")
 
 
 def _clean_specs() -> int:
@@ -194,10 +210,10 @@ def main() -> None:
     # Auto-detect source file if omitted
     source_file = args.source
     if not source_file:
-        try:
+        with contextlib.suppress(Exception):
             import subprocess
             diff_res = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain"],  # noqa: S607
                 capture_output=True, text=True, timeout=10, check=False
             )
             for line in diff_res.stdout.splitlines():
@@ -205,8 +221,6 @@ def main() -> None:
                 if fp.startswith("src/") and fp.endswith(".py"):
                     source_file = fp
                     break
-        except Exception:
-            pass
     if not source_file:
         source_file = "src/main.py"
 
@@ -241,14 +255,19 @@ def main() -> None:
         gen_code_map.main()
 
 
-    # 3. Temp & Scratch Wipe
+    # 3. Temp, Scratch, Logs Wipe
     try:
         wiped = _wipe_temp_artifacts()
         scratch_wiped = _clean_scratch_dir()
-        if wiped > 0 or scratch_wiped > 0:
-            logs.append(f"Wiped {wiped} temp, {scratch_wiped} scratch files")
+        tmp_wiped = _clean_tmp_dir()
+        logs_wiped = _clean_logs_dir()
+        total_wiped = wiped + scratch_wiped + tmp_wiped + logs_wiped
+        if total_wiped > 0:
+            logs.append(
+                f"Wiped {wiped} temp, {scratch_wiped} scratch, {tmp_wiped} tmp, {logs_wiped} logs files"
+            )
     except Exception as e:
-        errors.append(f"Temp wipe failed: {e}")
+        errors.append(f"Temp/logs wipe failed: {e}")
 
     # 4. Spec Cleanup
     try:
@@ -261,7 +280,7 @@ def main() -> None:
     # 5. Summary
     status = "OK" if not errors else "PARTIAL"
     summary = f"### 🏁 [SYNC:{status}] [{adr_id}] | {' | '.join(logs)}"
-    print(summary)
+    print(summary)  # noqa: T201
     if errors:
         sys.exit(1)
 
