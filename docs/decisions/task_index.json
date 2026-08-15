@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_EXECUTION_DATA_COVERAGE_GATE",
+      "date": "2026-08-15",
+      "adr_id": "ADR_20260815_MHS_EXECUTION_DATA_COVERAGE_GATE",
+      "domain": "mhs",
+      "title": "MHS 실행 데이터 커버리지 게이트 및 결손/알파 사유 분리",
+      "why": "committee_capital(35e85649)가 fold 자본을 실제 5m 원장으로 흘리며 RELEVANT_EXECUTION_DATA_GAP이 fold2(2025)에서 처음 노출됨. 로컬 캐시 대조 결과 246개 funded 심볼(1000SHIBUSDT, AEROUSDT 등)이 5m OHLCV 캐시 자체가 없어 리플레이 도중에야 MISSING_DATA로 사후 발견되고, 알파 성과 실패와 데이터 결손 실패가 reason_codes에 구분 없이 섞여 있었음.",
+      "resolution": "mhs_execution_collection.py에 assert_execution_data_coverage() 신설(기존 _coverage() 재사용, root 파라미터 하위호환 추가), MhsDiagnosticRequest.execution_coverage_gate 옵트인 플래그(기본 False)로 funded 유니버스 확정 직후 리플레이 전 fail-closed 사전 검증 연결. MhsResearchGoResult.data_integrity_reason_codes 파생 필드와 MHS_GO_REASON_DATA_INTEGRITY_CODES 상수로 결손성 사유(RELEVANT_EXECUTION_DATA_GAP 등)와 알파 품질 사유(Sharpe 미달 등)를 분리해 run_history/CLI(--execution-coverage-gate)에 노출. 3m 타임프레임 도입과 5m→1m 전면 전환은 근거 부족(participation_warnings~1e-9, RAM 비용 증가)으로 스코프아웃.",
+      "impact": "리플레이 수백 초 소요 후 사후 발견되던 데이터 결손을 사전 즉시 차단(--execution-coverage-gate opt-in, 기본 byte-identical)하고, active.jsonl/latest.json 소비자가 '측정 경로 변경으로 성과가 바뀐 것'과 '데이터가 결손인 것'을 즉시 구분 가능해짐."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_CAPITAL_ROUTING",
       "date": "2026-08-15",
       "adr_id": "ADR_20260815_MHS_COMMITTEE_CAPITAL_ROUTING",
@@ -989,16 +999,6 @@
       "why": "고정 Donchian blend는 observation/stress는 통과했지만 fold concentration에서 거절되었고, 전체-window MDD fitting 및 자유 심볼 입력은 배포 가능한 계약이 아니었다. 제한된 사전등록 심볼, 인과 leverage schedule, 전략 tournament의 실제 sealed 실행 결과를 기록할 필요가 있었다.",
       "resolution": "core5_v1 고정 universe와 causal tournament를 sealed discovery/qualification 프로파일로 실행했다. Donchian, funding directional, Supertrend, Parabolic SAR, Keltner 후보 모두 discovery feasibility 또는 reliability gate를 통과하지 못해 selected source를 비우고 base/stress 모두 CASH로 fail-closed 반환했다. 기존 fixed control은 CAGR 31.15%, MDD -20.24%, LCB90 15.12%, observation/stress PASS이나 fold 0.4899>0.4413로 REJECTED를 재현했다.",
       "impact": "새 경로가 근거 없는 전략을 qualification에서 재선택하거나 gate를 완화하지 않고 안전하게 자산을 현금으로 유지함을 확인했다. 새 post-2025 데이터 또는 독립 return source 없이는 promotion/PASS를 주장하지 않는다. 상세 실행 결과를 docs/results에 보존하고 tournament source/test와 연결했다."
-    },
-    {
-      "task_id": "TASK_RELIABILITY_GATE_REPAIR",
-      "date": "2026-08-03",
-      "adr_id": "ADR_20260803_RELIABILITY_GATE_REPAIR",
-      "domain": "risk",
-      "title": "Reliability Gate Repair — Fold-Concentration Re-specification + Pre-Backtest Feasibility",
-      "why": "6,550-cell stop-loss census and prior single-leg technical-expert research repeatedly hit an unpassable observation gate. Root-cause analysis (scratch/test_*.py, closed-form + Monte-Carlo validated) found the concept was not the primary defect: t_stat is sizing-invariant so no exit/sizing tuning of a Sharpe<1.06 leg can ever pass; the 18-candidate technical-expert population has negative beta-neutral alpha (-0.112) and is dominated by BTC buy-and-hold; and the fold-concentration statistic (max|v|/|sum v|) is unbounded (BTC buy-and-hold scores 0.914, ETH 1.501) and had a ~78% false-rejection rate against i.i.d. stationary Sharpe-1.3 processes with zero true concentration, matching ADR_20260801's finding that 5 independent portfolio constructions all passed observation+stress but failed only the fold gate at a flat 0.40 threshold.",
-      "resolution": "Replaced the fold statistic's denominator from net |sum(v)| to gross sum(|v|), bounding it in [1/n_folds, 1] while keeping the legacy value as a reported diagnostic. Replaced the flat 0.40 threshold with derive_fold_concentration_threshold(), which derives the threshold from the statistic's own null distribution (i.i.d. Normal(reference_sharpe, 1) folds, reference_sharpe = the gate's own t_stat_floor/sqrt(years)) at a stated false-rejection rate (default 10%) - Invariant Logic Over Magic Numbers, not a relaxation. Applied identically to compute_fold_distribution and compute_equal_duration_fold_distribution. Added src/research/evaluation/gate_feasibility.py (compute_gate_feasibility, compute_breadth_requirement) as a closed-form, +-3pp pre-backtest screen wired into run_technical_library_admission_backtest so every proposal report states which constraint binds (t_stat / mdd_floor / hurdle_rate / none) instead of only pass/fail.",
-      "impact": "9/9 scenario tests (RGR-01~09) pass, full pytest suite green (351+ tests), mypy/ruff clean. The corrected fold statistic scores the previously-blocked fixed-sleeve portfolio blend at 0.4160 against a derived threshold of 0.5347 (would now PASS the fold gate) versus the legacy 0.5380 vs flat 0.40 (FAIL) - but ADR_20260801's LCB90 15.12% observation-PASS configuration could not be reproduced this cycle (re-run scored LCB90 7.04%, observation FAIL, no matching runs.jsonl entry), so promotion readiness remains open pending re-derivation of that configuration, not resolved by this fix alone. Diagnosis also retires the 18-candidate technical-expert single-leg library from further entry/exit tuning (measured alpha Sharpe -0.112, dominated by buy-and-hold) and quantifies the breadth requirement for any future multi-leg construction (mean leg Sharpe 0.288 needed at measured rho=0.043, N=80)."
     }
   ]
 }
