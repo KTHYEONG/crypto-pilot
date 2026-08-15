@@ -18,13 +18,15 @@ import json
 import logging
 import os
 import time
+from datetime import UTC, datetime
+from uuid import uuid4
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -85,6 +87,7 @@ from src.mhs.regime import (
     causal_market_beta,
     crash_regime_tilt_weights,
 )
+from src.mhs.result_log import append_run_history_record, mhs_run_history_dir
 from src.mhs.evaluation import book_evidence
 from src.mhs.evaluation import deflated_sharpe_ratio
 from src.mhs.evaluation import (
@@ -4649,6 +4652,7 @@ def persist_mhs_horizon_diagnostic_report(
     report: MhsHorizonDiagnosticReport,
     path: str | Path,
     tier: MhsOutputTier = MhsOutputTier.COMPACT,
+    request: MhsDiagnosticRequest | None = None,
 ) -> Path | None:
     """Persist the MHS diagnostic in the requested output tier.
 
@@ -4659,14 +4663,152 @@ def persist_mhs_horizon_diagnostic_report(
     verbose checksummed JSON under ``*_artifacts/_full/`` (gitignored), keeping
     the pre-tiering behaviour byte-for-byte otherwise.
 
+    After either persistence path completes -- including a COMPACT resample
+    failure that returns ``None`` -- one lightweight run-history record is
+    appended to ``<target.parent>/mhs_run_history/``. History logging is
+    observational: a failure there is swallowed via ``_logger.warning`` and
+    never changes the returned persisted path.
+
     Returns the persisted JSON path, or ``None`` when a COMPACT resample
     failure is escalated past the compact artifacts (fail-closed policy).
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    persisted: Path | None
     if tier == MhsOutputTier.FULL:
-        return _persist_mhs_report_full(report, target)
-    return _persist_mhs_report_compact(report, target)
+        persisted = _persist_mhs_report_full(report, target)
+    else:
+        persisted = _persist_mhs_report_compact(report, target)
+    try:
+        append_run_history_record(
+            build_mhs_run_history_record(report, request, tier, persisted),
+            mhs_run_history_dir(target),
+        )
+    except Exception:  # noqa: BLE001 - observational; never break the research result
+        _logger.warning(
+            "[MHS] run-history record append failed path=%s",
+            mhs_run_history_dir(target),
+            exc_info=True,
+        )
+    return persisted
+
+def _round_6(value: Any) -> Any:
+    """Recursively round every float to 6 decimals (logging.md §4 precision)."""
+    if isinstance(value, dict):
+        return {k: _round_6(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_round_6(v) for v in value]
+    if isinstance(value, float):
+        return round(float(value), 6)
+    return value
+
+
+def _book_summary(book: MhsBookReport) -> dict[str, Any]:
+    """Curated scalar slice of one book report; heavy replay objects excluded."""
+    return {
+        "name": book.name,
+        "band": book.band,
+        "horizon_hours": book.horizon_hours,
+        "step_hours": book.step_hours,
+        "tranche_count": book.tranche_count,
+        "n_symbols": book.n_symbols,
+        "primary_autocorr_sharpe": book.primary_autocorr_sharpe,
+        "primary_naive_sharpe": book.primary_naive_sharpe,
+        "primary_net_ann": book.primary_net_ann,
+        "primary_geometric_cagr": book.primary_geometric_cagr,
+        "primary_max_drawdown": book.primary_max_drawdown,
+        "primary_annualized_turnover": book.primary_annualized_turnover,
+        "stress_naive_sharpe": book.stress_naive_sharpe,
+        "failure": book.failure,
+    }
+
+
+def _fold_summary(fold: MhsFoldReport) -> dict[str, Any]:
+    """Curated scalar slice of one anchored-fold report."""
+    return {
+        "fold_index": fold.fold_index,
+        "validation_start": fold.validation_start,
+        "validation_end": fold.validation_end,
+        "primary_valid": fold.primary_valid,
+        "primary_autocorr_sharpe": fold.primary_autocorr_sharpe,
+        "primary_naive_sharpe": fold.primary_naive_sharpe,
+        "primary_net_ann": fold.primary_net_ann,
+        "primary_geometric_cagr": fold.primary_geometric_cagr,
+        "primary_max_drawdown": fold.primary_max_drawdown,
+        "stress_naive_sharpe": fold.stress_naive_sharpe,
+        "failures": fold.failures,
+    }
+
+
+def _peak_rss_bytes(
+    resource_measurements: tuple[MhsResourceMeasurement, ...],
+) -> int | None:
+    return max((m.rss_bytes for m in resource_measurements), default=None)
+
+
+def build_mhs_run_history_record(
+    report: MhsHorizonDiagnosticReport,
+    request: MhsDiagnosticRequest | None,
+    output_tier: MhsOutputTier,
+    persisted_path: Path | None,
+) -> dict[str, Any]:
+    """Curated, AI-parseable summary of one MHS run (docs/specs §3.3).
+
+    The record is fully JSON-round-trippable and rounded to 6 decimals; no git
+    SHA/ADR lookups (no subprocess calls) so recording stays deterministic.
+    """
+    record: dict[str, Any] = {
+        "run_at": datetime.now(UTC).isoformat(),
+        "run_id": uuid4().hex,
+        "status": report.status,
+        "output_tier": output_tier.value,
+        "start": report.start,
+        "end": report.end,
+        "resolved_end": report.resolved_end,
+        "flags": dataclasses.asdict(request) if request is not None else None,
+        "perf": {
+            "run_elapsed_seconds": report.run_elapsed_seconds,
+            "peak_rss_bytes": _peak_rss_bytes(report.resource_measurements),
+            "eligible_symbols": report.eligible_symbols,
+            "realized_execution_roster_size": report.realized_execution_roster_size,
+        },
+        "books": {name: _book_summary(book) for name, book in report.books.items()},
+        "blend": _book_summary(report.blend) if report.blend is not None else None,
+        "blend_target_gross": report.blend_target_gross,
+        "blend_cash_fraction": report.blend_cash_fraction,
+        "deflated_sharpe_ratio": report.deflated_sharpe_ratio,
+        "trials_attempted": report.trials_attempted,
+        "folds": [_fold_summary(fold) for fold in report.folds],
+        "research_go": {
+            "eligible": report.research_go.eligible,
+            "reason_codes": report.research_go.reason_codes,
+            "evaluated_folds": report.research_go.evaluated_folds,
+            "folds_passed": report.research_go.folds_passed,
+        },
+        "discovery_qualification": report.discovery_qualification,
+        "full_history_yearly_net_t": report.full_history_yearly_net_t,
+        "funding_carry_worst_year_corr": report.funding_carry_worst_year_corr,
+        "xs_rank_ic": report.xs_rank_ic,
+        "date_clustered_regression": report.date_clustered_regression,
+        "horizon_diagnostics": report.horizon_diagnostics,
+        "bootstrap_ci": report.bootstrap_ci,
+        "placebo_sharpe_percentile": report.placebo_sharpe_percentile,
+        "deployment_readiness": {
+            "geometric_cagr": report.deployment_readiness.geometric_cagr,
+            "max_drawdown": report.deployment_readiness.max_drawdown,
+            "calmar": report.deployment_readiness.calmar,
+            "probability_final_wealth_below_initial": (
+                report.deployment_readiness.probability_final_wealth_below_initial
+            ),
+            "research_go_eligible": report.deployment_readiness.research_go_eligible,
+            "execution_go_eligible": report.deployment_readiness.execution_go_eligible,
+            "pilot_go_eligible": report.deployment_readiness.pilot_go_eligible,
+            "scale_go_eligible": report.deployment_readiness.scale_go_eligible,
+        },
+        "termination_counts": report.termination_counts,
+        "report_path": str(persisted_path) if persisted_path is not None else None,
+    }
+    return cast(dict[str, Any], _round_6(_jsonable(record)))
 
 
 def _collect_replay_entries(

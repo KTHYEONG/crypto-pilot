@@ -387,3 +387,37 @@ def test_mhs_diagnostic_committee_flag_threaded_to_request(monkeypatch) -> None:
     assert args.committee_book is False
     _run_mhs_horizon_diagnostic(args)
     assert captured["committee_book"] is False
+
+def test_mhs_diagnostic_persist_receives_request_object(monkeypatch) -> None:
+    """SCENARIO_MHS_RESULT_LOG_07: ``_run_mhs_horizon_diagnostic`` threads the
+    constructed ``MhsDiagnosticRequest`` into the persist call via ``request=``."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+    requests: list = []
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        req = real_request(*args, **kwargs)
+        requests.append(req)
+        return req
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+
+    def _spy_persist(*args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", _spy_persist)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    args = parser.parse_args(["--slow-book-mode", "horizon_ensemble"])
+    _run_mhs_horizon_diagnostic(args)
+
+    assert len(requests) == 1
+    assert "request" in captured
+    assert captured["request"] is requests[0]

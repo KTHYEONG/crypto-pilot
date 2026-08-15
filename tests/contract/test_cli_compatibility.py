@@ -68,7 +68,7 @@ def test_mhs_horizon_diagnostic_parses_into_mhs_handler(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "src.application.research.mhs.evaluation.persist_mhs_horizon_diagnostic_report",
-        lambda report, path, tier: path,
+        lambda report, path, tier, **kwargs: path,
     )
     _run_mhs_horizon_diagnostic(args)
     assert len(captured) == 1
