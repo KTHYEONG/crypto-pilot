@@ -52,6 +52,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     path = persist_mhs_horizon_diagnostic_report(
         report, mhs_horizon_diagnostic_report_path(),
         tier=MhsOutputTier(args.output_tier),
+        request=request,
     )
     _logger.info(
         "[EVAL] mhs-horizon-diagnostic status=%s books=%s blend=%s path=%s",
