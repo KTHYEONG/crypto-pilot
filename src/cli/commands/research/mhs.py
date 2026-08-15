@@ -83,7 +83,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         default=None,
         help=(
             "Optional process RSS budget in bytes; when unset the RAM guard "
-            "auto-derives 85% of total RAM (docs/specs/"
+            "auto-derives 85%% of total RAM (docs/specs/"
             "mhs_ram_guard_and_diagnostic_memory_optimization.md). Exceeding the "
             "budget at a stage/window boundary fails closed with "
             "DataIntegrityError instead of OOM"
@@ -94,7 +94,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         action="store_true",
         default=False,
         help=(
-            "Disable the automatic RAM guard (85% budget + system reserve checks); "
+            "Disable the automatic RAM guard (85%% budget + system reserve checks); "
             "--max-rss-bytes still applies when set"
         ),
     )

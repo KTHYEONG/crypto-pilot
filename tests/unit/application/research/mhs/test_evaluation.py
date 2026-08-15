@@ -1460,10 +1460,11 @@ def test_mhs_perf_opt_003_bootstrap_vectorized_equivalent() -> None:
         assert abs(hi_new - hi_ref) < 0.05
 
 
-def test_mhs_perf_opt_004_minute_frame_cache_reuses_reads(mhs_market, monkeypatch) -> None:
-    # MHS_PERF_OPT_004_MINUTE_FRAME_CACHE: repeated ``_load_minute_frames``
-    # calls with identical windows must not re-open the same Parquet files, and
-    # the returned dict must be a fresh copy so callers cannot poison the cache.
+def test_mhs_perf_opt_004_window_frames_read_window_only(mhs_market, monkeypatch) -> None:
+    # MHS_PERF_OPT_004_WINDOW_FRAMES: the production window loader
+    # ``_load_window_minute_frames`` opens each symbol's Parquet exactly once
+    # per window with a timestamp filter (never a full-period read), and a
+    # missing symbol is skipped rather than raising.
     root, end = mhs_market
     syms = ["MHSAUSDT", "MHSBUSDT"]
     calls = {"n": 0}
@@ -1475,56 +1476,62 @@ def test_mhs_perf_opt_004_minute_frame_cache_reuses_reads(mhs_market, monkeypatc
 
     monkeypatch.setattr(ev.pq, "read_table", counting)
 
-    a = ev._load_minute_frames(str(root), syms, _START, end, "1m")
+    ws = _START + pd.Timedelta(hours=6)
+    we = _START + pd.Timedelta(hours=30)
+    a = ev._load_window_minute_frames(str(root), syms, ws, we, "1m")
     assert a
-    first_calls = calls["n"]
-    b = ev._load_minute_frames(str(root), syms, _START, end, "1m")
-    assert calls["n"] == first_calls
-    assert set(a) == set(b)
+    assert calls["n"] == len(syms)
     for k in a:
-        assert a[k].equals(b[k])
-
-    ev._load_minute_frames(str(root), syms, _START, _START + pd.Timedelta(hours=1), "1m")
-    assert calls["n"] == first_calls + len(syms)
-
-    cached = ev._load_minute_frames(str(root), syms, _START, end, "1m")
-    cached.clear()
-    fresh = ev._load_minute_frames(str(root), syms, _START, end, "1m")
-    assert set(fresh) == set(a)
+        assert a[k].index.min() >= ws
+        assert a[k].index.max() <= we
+    b = ev._load_window_minute_frames(str(root), syms, ws, we, "1m")
+    assert set(b) == set(a)
 
 
 def test_mhs_phase2_o6_window_frames_parity(mhs_market) -> None:
-    # SCENARIO_O6_FRAME_PARITY: ``_get_symbol_minute_frame`` + ``_build_window_frames``
-    # (per-symbol full-period cache + slice) produce identical highs/lows/closes to
-    # the old ``_load_minute_frames`` + ``_align_minute_frames`` per-window read path.
+    # SCENARIO_O6_FRAME_PARITY: ``_load_window_minute_frames`` + ``_build_window_frames``
+    # (the production window path, post fork-COW refactor) produce highs/lows/closes
+    # on the window minute grid identical to the pre-refactor full-period slice path.
     root, end = mhs_market
     syms = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
     ws = pd.Timestamp("2021-01-01 06:00", tz="UTC")
     we = pd.Timestamp("2021-01-02 06:00", tz="UTC")
     grid = pd.date_range(ws, we, freq="1min", tz="UTC")
 
-    old_frames = ev._load_minute_frames(str(root), syms, ws, we, "1m")
-    old_aligned = ev._align_minute_frames(old_frames, "1m", ws, we)
-    assert old_aligned is not None
+    window_frames = ev._load_window_minute_frames(str(root), syms, ws, we, "1m")
+    window_aligned = ev._build_window_frames(window_frames, syms, ws, we, grid, "1m")
+    assert window_aligned is not None
 
-    new_frames = {s: ev._get_symbol_minute_frame(str(root), s, "1m") for s in syms}
-    new_aligned = ev._build_window_frames(new_frames, syms, ws, we, grid, "1m")
-    assert new_aligned is not None
+    full_frames = {
+        s: ev._load_window_minute_frames(str(root), [s], _START, end, "1m").get(s)
+        for s in syms
+    }
+    slice_aligned = ev._build_window_frames(full_frames, syms, ws, we, grid, "1m")
+    assert slice_aligned is not None
 
-    old_highs, old_lows, old_closes = old_aligned
-    new_highs, new_lows, new_closes = new_aligned
-    for old, new, name in ((old_highs, new_highs, "highs"), (old_lows, new_lows, "lows"), (old_closes, new_closes, "closes")):
-        assert list(new.columns) == list(old.columns), name
-        assert new.index.equals(old.index), name
-        assert np.isclose(new.to_numpy(), old.to_numpy(), rtol=0, atol=0, equal_nan=True).all(), name
+    window_highs, window_lows, window_closes = window_aligned
+    slice_highs, slice_lows, slice_closes = slice_aligned
+    for windowed, sliced, name in (
+        (window_highs, slice_highs, "highs"),
+        (window_lows, slice_lows, "lows"),
+        (window_closes, slice_closes, "closes"),
+    ):
+        assert list(windowed.columns) == list(sliced.columns), name
+        assert windowed.index.equals(sliced.index), name
+        assert np.isclose(
+            windowed.to_numpy(), sliced.to_numpy(), rtol=0, atol=0, equal_nan=True,
+        ).all(), name
 
 
-def test_mhs_phase2_o6_missing_symbol_raises(mhs_market) -> None:
-    # O6: full-period cache fails closed on a missing parquet (old per-window
-    # path silently skipped it).
+def test_mhs_phase2_o6_missing_symbol_skipped(mhs_market) -> None:
+    # O6: the window loader silently skips a missing parquet (no full-period
+    # cache exists to fail on after the fork-COW refactor).
     root, _end = mhs_market
-    with pytest.raises(ev.DataIntegrityError):
-        ev._get_symbol_minute_frame(str(root), "NOSUCHUSDT", "1m")
+    frames = ev._load_window_minute_frames(
+        str(root), ["MHSAUSDT", "NOSUCHUSDT"], _START, _START + pd.Timedelta(hours=24), "1m",
+    )
+    assert "MHSAUSDT" in frames
+    assert "NOSUCHUSDT" not in frames
 
 
 def test_mhs_phase2_o10_bootstrap_chunk_adaptive() -> None:
@@ -1774,17 +1781,17 @@ def test_toplevel_blend_replay_matches_renormalized_components(mhs_market) -> No
     _assert_books_equal(expected_report, blend_report, "blend")
 
 
-def test_p10_eager_cache_preload(mhs_market) -> None:
-    # SCENARIO_P10_EAGER_CACHE: preloading fills the O6 cache for the execution
-    # roster so forked workers never re-read the same Parquet.
+def test_p10_mark_cache_warmable_per_symbol(mhs_market) -> None:
+    # SCENARIO_P10_EAGER_CACHE (post fork-COW refactor): the parent-side mark
+    # frame cache warms one symbol's mark parquet per call so fork children can
+    # inherit the populated cache copy-on-write (the minute-frame preload was
+    # removed; docs/specs/mhs_refactor.md §2.2 W6).
     root, end = mhs_market
     syms = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
-    ev._get_symbol_minute_frame.cache_clear()
-    ev._preload_symbol_minute_frames(str(root), syms, "1m")
-    info = ev._get_symbol_minute_frame.cache_info()
-    assert info.currsize >= len(syms)
+    ev._get_symbol_mark_frame.cache_clear()
     for s in syms:
-        assert ev._get_symbol_minute_frame(str(root), s, "1m") is not None
+        assert ev._get_symbol_mark_frame(s, "1h") is not None
+    assert ev._get_symbol_mark_frame.cache_info().currsize >= len(syms)
 
 
 def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
@@ -2590,21 +2597,21 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
 def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_HORIZON_SEARCH_EFF_05_TOP_LEVEL_WIRING_SHARES_ONE_CACHE_ACROSS_FOLDS:
     # with fold_safe_horizon_selection=True the parent precomputes every
-    # discovery weight book exactly once (``_precompute_fold_safe_candidate_weights``)
-    # and every fold's gate reuses that single precompute (fork-inherited
-    # copy-on-write in the parallel fold-safe path) -- the measured 3x-redundant
-    # weight construction is eliminated without changing any value. The
+    # discovery weight book exactly once (``_candidate_weight_books``) and every
+    # fold's gate reuses that single precompute (fork-inherited copy-on-write in
+    # the parallel fold-safe path) -- the measured 3x-redundant weight
+    # construction is eliminated without changing any value. The
     # parallel/sequential value-equivalence is pinned by
     # ``test_mhs_perf_opt_fold_discovery_parallel_equivalence``.
     root, end = mhs_market
     calls = {"n": 0}
-    real_precompute = ev._precompute_fold_safe_candidate_weights
+    real_builder = ev._candidate_weight_books
 
-    def counting_precompute(*args, **kwargs):
+    def counting_builder(*args, **kwargs):
         calls["n"] += 1
-        return real_precompute(*args, **kwargs)
+        return real_builder(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_precompute_fold_safe_candidate_weights", counting_precompute)
+    monkeypatch.setattr(ev, "_candidate_weight_books", counting_builder)
 
     def _spy_books(*args, **kwargs):
         return (None, None, None)
@@ -3236,8 +3243,8 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
     assert isinstance(report.committee_diagnostic, dict)
     assert report.committee_diagnostic["evaluation_protocol"] == "purged_walk_forward_oos"
 
-    # The full-period minute/mark frame caches were evicted during the run.
-    assert ev._get_symbol_minute_frame.cache_info().currsize == 0
+    # The full-period mark frame cache was evicted during the run (the minute
+    # frame caches were removed in the fork-COW refactor).
     assert ev._get_symbol_mark_frame.cache_info().currsize == 0
 
 
