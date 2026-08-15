@@ -13,7 +13,7 @@ def test_research_command_registry_loads_mhs_leaf() -> None:
         "research", "run", "portfolio", "mhs-horizon-diagnostic", "--no-log-run",
     ])
     assert args.portfolio_command == "mhs-horizon-diagnostic"
-    assert args.execution_timeframe == "5m"
+    assert args.execution_timeframe == "3m"
 
 
 def test_research_command_registry_has_no_single_tier() -> None:
