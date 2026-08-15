@@ -1528,6 +1528,7 @@ def _multi_feature_diagnostic(
     panels: Mapping[str, pd.DataFrame] | None = None,
     rss_budget_bytes: int | None = None,
     rss_reserve_bytes: int | None = None,
+    telemetry: _StageRecorder | None = None,
 ) -> dict[str, Any]:
     """SCENARIO_MHS_MULTI_FEATURE_DIAGNOSTIC_REPORTS_COVERAGE_AND_STABILITY:
     report-only measurements for the opt-in multi-feature alpha axis.
@@ -1707,6 +1708,7 @@ def _committee_diagnostic(
     panels: Mapping[str, pd.DataFrame] | None = None,
     rss_budget_bytes: int | None = None,
     rss_reserve_bytes: int | None = None,
+    telemetry: _StageRecorder | None = None,
 ) -> dict[str, Any]:
     """SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_REPORTS_WALK_FORWARD_WEALTH:
     opt-in measurement of the k=6 wealth committee.
@@ -1774,6 +1776,11 @@ def _committee_diagnostic(
                         failing_sources.get(column, year), year,
                     )
         source_coverage[spec.name] = per_source
+        _logger.debug(
+            "[DATA] stage=committee_source_coverage member=%s excluded=%s min_coverage=%.3f",
+            spec.name, spec.name in source_excluded,
+            min((c for cov in per_source.values() for c in cov.values()), default=1.0),
+        )
         if failing_sources:
             failing_source = min(failing_sources, key=lambda c: failing_sources[c])
             source_excluded[spec.name] = {
@@ -1815,6 +1822,10 @@ def _committee_diagnostic(
         net_low_by_name[name] = net_low
         net_high_by_name[name] = net_high
         admitted.append(name)
+        _logger.debug(
+            "[ALGO] stage=committee_member member=%s net_low_mean=%.6f net_high_mean=%.6f",
+            name, float(net_low.mean()), float(net_high.mean()),
+        )
         del single, book
 
     excluded = [
@@ -1871,25 +1882,54 @@ def _committee_diagnostic(
                     {"block_start": t0.isoformat(), "reason": "no_test_bars"}
                 )
 
-    per_tier: dict[str, dict[str, float | None]] = {}
+    per_tier: dict[str, dict[str, Any]] = {}
     for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
         if gross_all is None:
             per_tier[tier] = {
                 "net_sharpe": None, "cagr": None, "mdd": None,
-                "logret": None, "bars": 0,
+                "logret": None, "bars": 0, "blocks": [],
             }
             continue
         wf = purged_walk_forward(
             gross_all, tc_all, cost_bps, edges, purge,
             min_train_bars=_MHS_WALK_FORWARD_MIN_TRAIN_BARS,
         )
+        if telemetry is not None:
+            telemetry.record(f"committee_walk_forward_{tier}")
         metrics = wealth_metrics(wf)
+        _logger.debug(
+            "[EVAL] stage=committee_tier_summary tier=%s bars=%d sharpe=%s cagr=%s mdd=%s",
+            tier, len(wf), metrics["sharpe"], metrics["cagr"], metrics["mdd"],
+        )
+        blocks: list[dict[str, Any]] = []
+        for i, t0 in enumerate(edges):
+            next_edge = (
+                edges[i + 1] if i + 1 < len(edges)
+                else gross_all.index[-1] + pd.Timedelta(hours=1)
+            )
+            block_wf = wf[(wf.index >= t0) & (wf.index < next_edge)]
+            if block_wf.empty:
+                continue
+            block_metrics = wealth_metrics(block_wf)
+            blocks.append({
+                "block_start": t0.isoformat(),
+                "bars": len(block_wf),
+                "net_sharpe": _finite_or_none(block_metrics["sharpe"]),
+                "cagr": _finite_or_none(block_metrics["cagr"]),
+                "mdd": _finite_or_none(block_metrics["mdd"]),
+            })
+            _logger.debug(
+                "[EVAL] stage=committee_block tier=%s block_start=%s bars=%d sharpe=%s cagr=%s mdd=%s",
+                tier, t0.isoformat(), len(block_wf),
+                block_metrics["sharpe"], block_metrics["cagr"], block_metrics["mdd"],
+            )
         per_tier[tier] = {
             "net_sharpe": _finite_or_none(metrics["sharpe"]),
             "cagr": _finite_or_none(metrics["cagr"]),
             "mdd": _finite_or_none(metrics["mdd"]),
             "logret": _finite_or_none(metrics["logret"]),
             "bars": len(wf),
+            "blocks": blocks,
         }
 
     return {
@@ -4535,6 +4575,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         _diag_panels = _load_feature_panels(
             root, start, end, grid_1h, aligned_symbols, columns=_diag_panel_columns,
         )
+        telemetry.record("diagnostic_feature_panels")
         _assert_stage_rss_budget("diagnostic_feature_panels", rss_budget_bytes, rss_reserve_bytes)
         if request.committee_book:
             committee_diagnostic = _committee_diagnostic(
@@ -4542,14 +4583,18 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 bar_funding, panels=_diag_panels,
                 rss_budget_bytes=rss_budget_bytes,
                 rss_reserve_bytes=rss_reserve_bytes,
+                telemetry=telemetry,
             )
+            telemetry.record("committee_diagnostic")
         if request.multi_feature_book:
             multi_feature_diagnostic = _multi_feature_diagnostic(
                 root, start, end, grid_1h, aligned_symbols, execution_mask, opens,
                 bar_funding, panels=_diag_panels,
                 rss_budget_bytes=rss_budget_bytes,
                 rss_reserve_bytes=rss_reserve_bytes,
+                telemetry=telemetry,
             )
+            telemetry.record("multi_feature_diagnostic")
         del _diag_panels
         gc.collect()
     deflated_sharpe_ratio = _deflated_sharpe_evidence(
@@ -4786,6 +4831,7 @@ def build_mhs_run_history_record(
             "folds_passed": report.research_go.folds_passed,
         },
         "discovery_qualification": report.discovery_qualification,
+        "committee_diagnostic": report.committee_diagnostic,
         "full_history_yearly_net_t": report.full_history_yearly_net_t,
         "funding_carry_worst_year_corr": report.funding_carry_worst_year_corr,
         "xs_rank_ic": report.xs_rank_ic,
