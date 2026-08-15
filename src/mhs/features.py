@@ -1,14 +1,8 @@
 """Feature-axis alpha: registry, coverage gate, and equal-risk combination.
 
-The architecture restructuring (docs/specs/mhs_multi_feature_alpha_architecture.md
-§2) replaces the saturated horizon-axis search with a declared feature registry.
-Each ``FeatureSpec`` names the raw panel columns it requires and a causal
-builder; ``build_feature_books`` converts the admitted features into the SAME
-dollar-neutral rank book the production stack uses, on the 24h decision grid,
-and fail-closes any feature whose per-year coverage drops below its floor
-inside the execution mask (the ``no_trades`` collapse, spec §0.4). This module
-introduces no new weighting scheme for individual books -- every book is the
-existing ``rank_weight_book`` primitive.
+This module provides a declared feature registry and builder functions.
+``build_feature_books`` converts admitted features into dollar-neutral rank books
+on a 24h decision grid, fail-closing any feature whose per-year coverage drops below threshold.
 """
 
 from __future__ import annotations
@@ -325,11 +319,8 @@ def _hl_range_168h_builder(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
     )
 
 
-# The declared feature registry (docs/specs/mhs_multi_feature_alpha_architecture.md
-# §2). Each entry's sign is baked into its builder; min_coverage is the frozen
-# MHS_FEATURE_MIN_COVERAGE floor. This is a declared registry -- not a
-# performance-selected subset -- so the default combination is the no-selection
-# full set.
+# The declared feature registry. Each entry's sign is baked into its builder;
+# min_coverage defaults to the frozen MHS_FEATURE_MIN_COVERAGE floor.
 MHS_FEATURE_REGISTRY: tuple[FeatureSpec, ...] = (
     FeatureSpec(
         name="mom_168h",
@@ -391,11 +382,7 @@ MHS_FEATURE_REGISTRY: tuple[FeatureSpec, ...] = (
         min_coverage=MHS_FEATURE_MIN_COVERAGE,
         builder=_avg_trade_size_builder,
     ),
-    # Committee-family registry entries
-    # (docs/specs/mhs_committee_design_and_wealth_objective.md §2, §6.1). The
-    # k=6 committee (src/mhs/contracts.py MHS_COMMITTEE_MEMBERS) resolves every
-    # member name here; ``flow_imb_168h`` has the identical composition to the
-    # existing ``taker_imb_168h`` and is registered under the committee's name.
+    # Committee-family registry entries (flow imbalance, cross-sectional momentum, skew)
     FeatureSpec(
         name="flow_imb_168h",
         required_columns=("taker_buy_quote", "quote_vol"),

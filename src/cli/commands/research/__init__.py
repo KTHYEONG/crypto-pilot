@@ -4,14 +4,7 @@ import argparse
 
 
 def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
-    """Attach the ``research run portfolio <evaluation>`` group to the root parser.
-
-    The MHS evaluation is the only research leaf retained after the legacy
-    isolation refactor (docs/specs/mhs_refactor.md §3.2): the ``single``/``expert``
-    tiers and the non-MHS ``portfolio`` leaves moved to ``legacy/``. This module
-    only composes the MHS leaf; the leaf module owns its ``argparse`` declaration
-    and conversion to its typed request.
-    """
+    """Attach the ``research run portfolio <evaluation>`` group to the root parser."""
     # Keep leaf-module imports lazy so coverage and command discovery can load
     # one command without initializing every research backend first.
     from src.cli.commands.research.mhs import add_mhs_commands
