@@ -260,6 +260,15 @@ MHS_RAM_BUDGET_FRACTION: float = 0.85
 MHS_RAM_RESERVE_FRACTION: float = 0.05
 MHS_RAM_RESERVE_FLOOR_BYTES: int = 256 * 2**20
 
+# Estimated per-worker marginal RSS for the MHS fork pools after the
+# fork-COW refactor (docs/specs/mhs_refactor.md §1.3/§2.2). Measured
+# pre-refactor worker peak was 6.82 GB (``resource_measurements``
+# stage=``execution_window``) dominated by the pickled submit args and private
+# mark caches; those are eliminated, so ``plan_worker_count`` uses this
+# post-refactor figure (materialized windows ~1.4 GB at the realized roster
+# plus replay scratch). A revision is a contract revision, never an inline edit.
+MHS_WORKER_PEAK_RSS_BYTES: int = 3 * 2**30
+
 # P0-D: the two Research-GO policy gates named in ``_mhs_research_go``'s
 # contract are not registered in source. A value of None means "unregistered"
 # and keeps Research GO conservative (the gate reports UNSPECIFIED_POLICY);

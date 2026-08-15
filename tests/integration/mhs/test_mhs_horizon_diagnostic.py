@@ -10,6 +10,8 @@ import pytest
 
 from src.application.research.mhs import evaluation as ev
 from src.application.research.mhs.evaluation import (
+    _bootstrap_ci as _real_bootstrap_ci,
+    _placebo_sharpe_percentile as _real_placebo_sharpe_percentile,
     MhsDiagnosticRequest,
     MhsHorizonDiagnosticReport,
     run_mhs_horizon_diagnostic,
@@ -1273,7 +1275,7 @@ class TestFoldWindowTelemetryOracle:
             target_replay, signal_available_at, minute_grid, ExecutionSpec(),
         )
         minute_frames = ev._align_minute_frames(
-            ev._load_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m"),
+            ev._load_window_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m"),
             "1m", vs, ve,
         )
         assert minute_frames is not None
@@ -1504,3 +1506,161 @@ class TestTerminalPersistenceSubprocess:
             b.get("failure", {}).get("reason") == "RESOURCE_BUDGET_BREACH"
             for b in payload["books"].values()
         )
+
+
+class TestMhsRefactorBitIdenticalReport:
+    """SCENARIO_MHS_REFACTOR_07: the memory/scheduling refactor
+    (fork-COW shared payloads, RAM-aware worker counts, candidate-weight
+    dedup, byte-budgeted window materialization, dead-cache removal) must
+    never alter a computed field of ``MhsHorizonDiagnosticReport``. The
+    synthetic-market full pipeline is compared bit-identically to the
+    pre-refactor golden payload (docs/results/mhs_refactor_baseline.json,
+    generated from the pre-refactor commit)."""
+
+    _GOLDEN = Path(__file__).resolve().parents[3] / "docs" / "results" / "mhs_refactor_baseline.json"
+
+    @pytest.fixture(scope="module")
+    def refactor_report(self, synthetic_market) -> MhsHorizonDiagnosticReport:
+        import src.market_data.services.futures_collection as fc
+
+        root, end = synthetic_market
+        originals = {
+            "funding_path": ev.funding_path,
+            "mark_price_path": fc._mark_price_path,
+            "_BOOTSTRAP_REPLICATES": ev._BOOTSTRAP_REPLICATES,
+            "_BOOTSTRAP_MEAN_BLOCK": ev._BOOTSTRAP_MEAN_BLOCK,
+            "_BOOTSTRAP_SEED": ev._BOOTSTRAP_SEED,
+            "_bootstrap_ci": ev._bootstrap_ci,
+            "_placebo_sharpe_percentile": ev._placebo_sharpe_percentile,
+        }
+
+        ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+        fc._mark_price_path = (
+            lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
+        )
+        ev._BOOTSTRAP_REPLICATES = 20
+        ev._BOOTSTRAP_MEAN_BLOCK = 24
+        ev._BOOTSTRAP_SEED = 20260807
+        # Sibling module-scoped fixtures stub these for their own speed; the
+        # golden bit-identity contract requires the real implementations.
+        ev._bootstrap_ci = _real_bootstrap_ci
+        ev._placebo_sharpe_percentile = _real_placebo_sharpe_percentile
+        try:
+            return run_mhs_horizon_diagnostic(
+                MhsDiagnosticRequest(
+                    start=str(START), end=str(end), data_root=str(root),
+                    execution_timeframe="1m", log_run=False, discovery_gate=True,
+                ),
+            )
+        finally:
+            for name, value in originals.items():
+                if name == "mark_price_path":
+                    fc._mark_price_path = value
+                else:
+                    setattr(ev, name, value)
+
+    def _scalar(self, x):
+        if isinstance(x, np.floating):
+            return float(x)
+        if isinstance(x, np.integer):
+            return int(x)
+        return x
+
+    def _project(self, report: MhsHorizonDiagnosticReport) -> dict:
+        out = {
+            "status": report.status,
+            "research_go": {
+                "eligible": bool(report.research_go.eligible),
+                "reason_codes": sorted(report.research_go.reason_codes),
+            },
+            "blend_target_gross": self._scalar(report.blend_target_gross),
+            "blend_cash_fraction": self._scalar(report.blend_cash_fraction),
+            "eligible_symbols": report.eligible_symbols,
+            "realized_execution_roster_size": self._scalar(report.realized_execution_roster_size),
+            "deflated_sharpe_ratio": self._scalar(report.deflated_sharpe_ratio),
+            "xs_rank_ic": self._scalar(report.xs_rank_ic),
+            "horizon_diagnostics": {
+                k: self._scalar(v) for k, v in report.horizon_diagnostics.items()
+            },
+            "bootstrap_ci": (
+                None
+                if report.bootstrap_ci is None
+                else [self._scalar(x) for x in report.bootstrap_ci]
+            ),
+            "placebo_sharpe_percentile": self._scalar(report.placebo_sharpe_percentile),
+        }
+        for bname in ("fast_reversal", "slow_momentum"):
+            book = report.books[bname]
+            out[bname] = {
+                "horizon_hours": book.horizon_hours,
+                "primary_naive_sharpe": self._scalar(book.primary_naive_sharpe),
+                "primary_net_ann": self._scalar(book.primary_net_ann),
+                "primary_geometric_cagr": self._scalar(book.primary_geometric_cagr),
+                "primary_max_drawdown": self._scalar(book.primary_max_drawdown),
+                "primary_autocorr_sharpe": self._scalar(book.primary_autocorr_sharpe),
+                "stress_naive_sharpe": self._scalar(book.stress_naive_sharpe),
+                "failure": None if book.failure is None else book.failure.reason,
+            }
+        blend = report.blend
+        out["blend"] = {
+            "horizon_hours": blend.horizon_hours,
+            "primary_naive_sharpe": self._scalar(blend.primary_naive_sharpe),
+            "primary_net_ann": self._scalar(blend.primary_net_ann),
+            "primary_geometric_cagr": self._scalar(blend.primary_geometric_cagr),
+            "primary_max_drawdown": self._scalar(blend.primary_max_drawdown),
+            "primary_autocorr_sharpe": self._scalar(blend.primary_autocorr_sharpe),
+            "stress_naive_sharpe": self._scalar(blend.stress_naive_sharpe),
+            "failure": None if blend.failure is None else blend.failure.reason,
+        }
+        out["folds"] = []
+        for fold in report.folds:
+            out["folds"].append({
+                "fold_index": fold.fold_index,
+                "primary_autocorr_sharpe": self._scalar(fold.primary_autocorr_sharpe),
+                "primary_naive_sharpe": self._scalar(fold.primary_naive_sharpe),
+                "primary_net_ann": self._scalar(fold.primary_net_ann),
+                "primary_geometric_cagr": self._scalar(fold.primary_geometric_cagr),
+                "primary_max_drawdown": self._scalar(fold.primary_max_drawdown),
+                "stress_naive_sharpe": self._scalar(fold.stress_naive_sharpe),
+                "decision_intents": fold.decision_intents,
+                "failures": sorted(fold.failures),
+                "slow_horizon_hours": fold.slow_horizon_hours,
+                "fast_horizon_hours": fold.fast_horizon_hours,
+            })
+        if report.discovery_qualification is not None:
+            out["discovery_qualification"] = {}
+            for k, v in report.discovery_qualification.items():
+                if v is None:
+                    out["discovery_qualification"][k] = None
+                else:
+                    out["discovery_qualification"][k] = {
+                        "selected_horizon": self._scalar(v.selected_horizon),
+                        "admitted": bool(v.admitted),
+                        "qualification_net_t": self._scalar(v.qualification_net_t),
+                        "qualification_adjusted_net_t": self._scalar(v.qualification_adjusted_net_t),
+                        "qualification_regime_scaled_net_t": self._scalar(
+                            v.qualification_regime_scaled_net_t,
+                        ),
+                    }
+        return out
+
+    def test_report_fields_bit_identical_to_pre_refactor_golden(
+        self, refactor_report,
+    ) -> None:
+        golden = json.loads(self._GOLDEN.read_text())
+        projected = self._project(refactor_report)
+
+        def _nan_equal(a, b) -> bool:
+            if isinstance(a, float) and isinstance(b, float):
+                return a == b or (np.isnan(a) and np.isnan(b))
+            return a == b
+
+        def _deep_equal(a, b) -> bool:
+            if isinstance(a, dict) and isinstance(b, dict):
+                return set(a) == set(b) and all(_deep_equal(a[k], b[k]) for k in a)
+            if isinstance(a, list) and isinstance(b, list):
+                return len(a) == len(b) and all(_deep_equal(x, y) for x, y in zip(a, b, strict=True))
+            return _nan_equal(a, b)
+
+        assert _deep_equal(projected, golden)
+

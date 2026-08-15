@@ -1,0 +1,901 @@
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+
+import numpy as np
+from numpy.typing import NDArray
+
+from src.domain.futures.compound.config import AllocatorConfig, DynamicCompoundingConfig
+from src.domain.futures.compound.contracts import (
+    ActiveForecastState,
+    AllocationConstraints,
+    AlphaForecastTape,
+    CalibratedForecastPanel,
+    CombinedForecast,
+    PortfolioDecision,
+)
+
+_logger = logging.getLogger(__name__)
+
+_VARIANCE_FLOOR: float = 1e-12
+
+_COST_EDGE_THETA: float = 0.0006
+
+
+def compute_funding_4h_2d(
+    funding_1h_2d: NDArray[np.float32], n_bars: int,
+) -> NDArray[np.float64]:
+    reshaped = funding_1h_2d[:n_bars * 4].reshape(n_bars, 4, funding_1h_2d.shape[1])
+    result: NDArray[np.float64] = np.where(np.isfinite(reshaped), reshaped.astype(np.float64), 0.0).sum(axis=1)
+    return result
+
+
+def apply_cost_aware_net_edge(
+    target_weights: NDArray[np.float64],
+    previous_weights: NDArray[np.float64],
+    mu: NDArray[np.float64],
+    theta_cost: float = _COST_EDGE_THETA,
+) -> NDArray[np.float64]:
+    delta_w = target_weights - previous_weights
+    edge = np.abs(delta_w * mu)
+    above_threshold = edge > theta_cost
+    return np.where(above_threshold, target_weights, previous_weights)
+
+
+def combine_alpha_forecasts(
+    tape: AlphaForecastTape,
+    time_idx: int,
+    *,
+    uncertainty_z: float,
+) -> CombinedForecast:
+    n_syms = len(tape.symbols)
+    n_recipes = len(tape.recipe_ids)
+
+    mu_robust = np.zeros(n_syms, dtype=np.float64)
+    variance = np.full(n_syms, 1e-4, dtype=np.float64)
+    support = np.zeros(n_syms, dtype=np.bool_)
+
+    for n in range(n_syms):
+        precisions: list[float] = []
+        mu_vals: list[float] = []
+        for k in range(n_recipes):
+            if not tape.valid_3d[time_idx, n, k] or not tape.estimated_3d[time_idx, n, k]:
+                continue
+            reliability_k = float(tape.reliability_3d[time_idx, n, k])
+            edge_var = float(tape.mean_edge_var_3d[time_idx, n, k])
+            mu_k = float(tape.gross_mu_3d[time_idx, n, k])
+            if not np.isfinite(mu_k) or not np.isfinite(edge_var):
+                continue
+            precision = reliability_k / max(edge_var, _VARIANCE_FLOOR)
+            precisions.append(precision)
+            mu_vals.append(mu_k)
+
+        if not precisions:
+            continue
+
+        total_precision = sum(precisions)
+        if total_precision <= 0:
+            continue
+        mu_symbol = sum(p * m for p, m in zip(precisions, mu_vals, strict=False)) / total_precision
+        var_symbol = 1.0 / total_precision
+
+        mu_robust_n = np.sign(mu_symbol) * max(abs(mu_symbol) - uncertainty_z * np.sqrt(var_symbol), 0.0)
+        mu_robust[n] = mu_robust_n
+        variance[n] = var_symbol
+        support[n] = abs(mu_robust_n) > 0
+
+    return CombinedForecast(mu_robust_1d=mu_robust, variance_1d=variance, support_1d=support)
+
+
+def _project_weights(
+    w: NDArray[np.float64],
+    gross_cap: float,
+    net_cap: float,
+    per_sym_cap: NDArray[np.float64],
+    beta_1d: NDArray[np.float64],
+    beta_cap: float,
+) -> tuple[NDArray[np.float64], list[str]]:
+    constraints: list[str] = []
+
+    abs_w = np.abs(w)
+    if np.sum(abs_w) > gross_cap:
+        scale = gross_cap / max(np.sum(abs_w), 1e-15)
+        w = w * scale
+        constraints.append("gross_cap")
+
+    for i in range(len(w)):
+        if abs_w[i] > per_sym_cap[i]:
+            w[i] = np.sign(w[i]) * per_sym_cap[i]
+            constraints.append(f"symbol_cap_{i}")
+
+    net = np.sum(w)
+    if abs(net) > net_cap:
+        if abs(net) > 1e-15:
+            w = w * (net_cap / abs(net))
+        constraints.append("net_cap")
+
+    beta = np.dot(beta_1d, w)
+    if abs(beta) > beta_cap and abs(beta) > 1e-15:
+        w = w * (beta_cap / abs(beta))
+        constraints.append("beta_cap")
+
+    return w, constraints
+
+
+def _full_objective(
+    w: NDArray[np.float64],
+    mu: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    prev_w: NDArray[np.float64],
+    cost_bps: NDArray[np.float64],
+    turnover_l2: float,
+    fractional_kelly: float,
+) -> float:
+    turnover = w - prev_w
+    cost_linear = float(np.sum(cost_bps * np.abs(turnover)) * 1e-4)
+    cost_l2 = turnover_l2 * float(np.dot(turnover, turnover))
+    risk = 0.5 / fractional_kelly * float(np.dot(w, sigma))
+    return float(np.dot(mu, w)) - risk - cost_linear - cost_l2
+
+
+def _solve_growth_weights_iterative(
+    mu: NDArray[np.float64],
+    covariance: NDArray[np.float64],
+    previous_weights: NDArray[np.float64],
+    constraints: AllocationConstraints,
+    config: AllocatorConfig,
+    support_mask: NDArray[np.bool_],
+    per_sym_cap: NDArray[np.float64],
+) -> PortfolioDecision:
+    n_syms = len(mu)
+    w = np.zeros(n_syms, dtype=np.float64)
+
+    for i in range(n_syms):
+        if support_mask[i] and per_sym_cap[i] > 0:
+            w[i] = np.sign(mu[i]) * min(config.gross_cap / max(n_syms, 1), per_sym_cap[i])
+
+    w, _ = _project_weights(
+        w, constraints.gross_cap, constraints.net_cap, per_sym_cap,
+        constraints.beta_1d, constraints.beta_cap,
+    )
+
+    prev_obj = -np.inf
+    for iteration in range(config.max_iterations):
+        sigma_vec = covariance @ w
+        obj = _full_objective(w, mu, sigma_vec, previous_weights,
+                              constraints.cost_bps_1d, config.turnover_l2, config.fractional_kelly)
+        grad = mu - (1.0 / config.fractional_kelly) * sigma_vec
+        grad -= constraints.cost_bps_1d * np.sign(w - previous_weights) * 1e-4
+        grad -= 2.0 * config.turnover_l2 * (w - previous_weights)
+        step = 1.0 / max(1.0 / config.fractional_kelly + 2.0 * config.turnover_l2, 1e-15)
+        w_new = w + step * grad
+        w_new *= support_mask.astype(np.float64)
+        w_new, _ = _project_weights(
+            w_new, constraints.gross_cap, constraints.net_cap, per_sym_cap,
+            constraints.beta_1d, constraints.beta_cap,
+        )
+        new_obj = _full_objective(w_new, mu, covariance @ w_new, previous_weights,
+                                  constraints.cost_bps_1d, config.turnover_l2, config.fractional_kelly)
+        if new_obj > obj:
+            w = w_new
+        if iteration > 0 and abs(obj - prev_obj) < config.objective_tolerance:
+            break
+        prev_obj = obj
+
+    gross_exp = float(np.sum(np.abs(w)))
+    net_exp = float(np.sum(w))
+    forecast_vol = float(np.sqrt(float(np.dot(w, covariance @ w))) * np.sqrt(8766.0))
+
+    binding: list[str] = []
+    if gross_exp >= constraints.gross_cap * 0.999:
+        binding.append("gross_cap")
+    if abs(net_exp) >= constraints.net_cap * 0.999:
+        binding.append("net_cap")
+    capped_syms = [f"symbol_cap_{i}" for i in range(n_syms) if abs(w[i]) >= per_sym_cap[i] * 0.999]
+    binding.extend(capped_syms)
+    beta_total = float(np.dot(constraints.beta_1d, w))
+    if abs(beta_total) >= constraints.beta_cap * 0.999:
+        binding.append("beta_cap")
+
+    return PortfolioDecision(
+        decision_idx=0,
+        decision_time_ns=0,
+        target_weights_1d=w,
+        gross_exposure=gross_exp,
+        net_exposure=net_exp,
+        forecast_ann_vol=forecast_vol,
+        risk_scale=1.0,
+        binding_constraints=tuple(binding),
+    )
+
+
+def solve_event_growth_weights(
+    *,
+    state: ActiveForecastState,
+    covariance_per_hour: NDArray[np.float64],
+    previous_weights: NDArray[np.float64],
+    constraints: AllocationConstraints,
+    config: AllocatorConfig,
+) -> PortfolioDecision:
+    n_syms = len(state.symbols)
+
+    if not np.all(np.isfinite(covariance_per_hour)):
+        msg = "non-finite covariance matrix"
+        raise ValueError(msg)
+
+    per_sym_cap = constraints.per_symbol_cap.copy()
+    for i in range(n_syms):
+        capacity_usdt = constraints.capacity_weight_1d[i]
+        nav_cap = capacity_usdt / max(config.portfolio_nav_usdt, 1.0) * config.risk_scale
+        per_sym_cap[i] = min(per_sym_cap[i], nav_cap)
+        if constraints.entry_block_1d[i]:
+            per_sym_cap[i] = min(per_sym_cap[i], abs(previous_weights[i]))
+
+    mu = state.alpha_rate_1d * 24.0
+
+    mu_robust = np.sign(mu) * np.maximum(np.abs(mu) - config.uncertainty_z * np.sqrt(state.epistemic_variance_1d), 0.0)
+    support = np.abs(mu_robust) > 0
+
+    return _solve_growth_weights_iterative(
+        mu=mu_robust,
+        covariance=covariance_per_hour * 24.0,
+        previous_weights=previous_weights,
+        constraints=constraints,
+        config=config,
+        support_mask=support,
+        per_sym_cap=per_sym_cap,
+    )
+
+
+def solve_growth_optimal_weights(
+    *,
+    combined: CombinedForecast,
+    covariance: NDArray[np.float64],
+    previous_weights: NDArray[np.float64],
+    constraints: AllocationConstraints,
+    decision_idx: int,
+    decision_time_ns: int,
+    config: AllocatorConfig,
+) -> PortfolioDecision:
+    n_syms = len(combined.mu_robust_1d)
+    w = np.zeros(n_syms, dtype=np.float64)
+
+    if not np.all(np.isfinite(covariance)):
+        raise ValueError("non-finite covariance matrix")
+    if config.portfolio_nav_usdt <= 0:
+        raise ValueError(f"NAV must be positive, got {config.portfolio_nav_usdt}")
+
+    per_sym_cap = constraints.per_symbol_cap.copy()
+    for i in range(n_syms):
+        capacity_usdt = constraints.capacity_weight_1d[i]
+        nav_cap = capacity_usdt / max(config.portfolio_nav_usdt, 1.0) * config.risk_scale
+        per_sym_cap[i] = min(per_sym_cap[i], nav_cap)
+        if constraints.entry_block_1d[i]:
+            per_sym_cap[i] = min(per_sym_cap[i], abs(previous_weights[i]))
+
+    mu = combined.mu_robust_1d
+    support_mask = combined.support_1d
+
+    has_negative = np.any(mu < 0)
+    if has_negative:
+        short_blocked = np.zeros(n_syms, dtype=np.bool_)
+        for i in range(n_syms):
+            if mu[i] < 0 and short_blocked[i]:
+                raise ValueError(
+                    f"negative robust forecast for symbol {i} but short is structurally blocked"
+                )
+
+    prev_obj = -np.inf
+    for i in range(n_syms):
+        if support_mask[i] and per_sym_cap[i] > 0:
+            w[i] = np.sign(mu[i]) * min(config.gross_cap / max(n_syms, 1), per_sym_cap[i])
+
+    w, _ = _project_weights(
+        w, constraints.gross_cap, constraints.net_cap, per_sym_cap,
+        constraints.beta_1d, constraints.beta_cap,
+    )
+
+    sigma_vec = covariance @ w
+
+    for iteration in range(config.max_iterations):
+        sigma_vec = covariance @ w
+        turnover = w - previous_weights
+
+        obj = _full_objective(w, mu, sigma_vec, previous_weights,
+                              constraints.cost_bps_1d, config.turnover_l2, config.fractional_kelly)
+
+        grad = mu - (1.0 / config.fractional_kelly) * sigma_vec
+        grad -= constraints.cost_bps_1d * np.sign(turnover) * 1e-4
+        grad -= 2.0 * config.turnover_l2 * turnover
+
+        step = 1.0 / max(1.0 / config.fractional_kelly + 2.0 * config.turnover_l2, 1e-15)
+        w_new = w + step * grad
+        w_new *= support_mask.astype(np.float64)
+        w_new, _ = _project_weights(
+            w_new, constraints.gross_cap, constraints.net_cap, per_sym_cap,
+            constraints.beta_1d, constraints.beta_cap,
+        )
+
+        new_obj = _full_objective(w_new, mu, covariance @ w_new, previous_weights,
+                                  constraints.cost_bps_1d, config.turnover_l2, config.fractional_kelly)
+        if new_obj > obj:
+            w = w_new
+
+        if iteration > 0 and abs(obj - prev_obj) < config.objective_tolerance:
+            break
+        prev_obj = obj
+
+    gross_exp = float(np.sum(np.abs(w)))
+    net_exp = float(np.sum(w))
+    forecast_vol = float(np.sqrt(float(np.dot(w, covariance @ w))) * np.sqrt(8766 / config.rebalance_bars))
+
+    binding = []
+    if gross_exp >= constraints.gross_cap * 0.999:
+        binding.append("gross_cap")
+    if abs(net_exp) >= constraints.net_cap * 0.999:
+        binding.append("net_cap")
+    capped_syms = [f"symbol_cap_{i}" for i in range(n_syms) if abs(w[i]) >= per_sym_cap[i] * 0.999]
+    binding.extend(capped_syms)
+    beta_total = float(np.dot(constraints.beta_1d, w))
+    if abs(beta_total) >= constraints.beta_cap * 0.999:
+        binding.append("beta_cap")
+
+    return PortfolioDecision(
+        decision_idx=decision_idx,
+        decision_time_ns=decision_time_ns,
+        target_weights_1d=w,
+        gross_exposure=gross_exp,
+        net_exposure=net_exp,
+        forecast_ann_vol=forecast_vol,
+        risk_scale=1.0,
+        binding_constraints=tuple(binding),
+    )
+
+
+def apply_beta_hedge_overlay(
+    weights_2d: NDArray[np.float64],
+    *, symbols: tuple[str, ...], beta_per_bar_1d: NDArray[np.float64],
+    benchmark_symbols: tuple[str, ...], benchmark_weights: tuple[float, ...],
+    benchmark_scale_1d: NDArray[np.float64], gross_cap: float,
+) -> NDArray[np.float64]:
+    if len(beta_per_bar_1d) != weights_2d.shape[0]:
+        raise ValueError(
+            f"beta_per_bar_1d length {len(beta_per_bar_1d)} != weights_2d rows {weights_2d.shape[0]}"
+        )
+    if len(benchmark_scale_1d) != weights_2d.shape[0]:
+        raise ValueError(
+            f"benchmark_scale_1d length {len(benchmark_scale_1d)} != weights_2d rows {weights_2d.shape[0]}"
+        )
+    if len(benchmark_symbols) != len(benchmark_weights):
+        raise ValueError("benchmark_symbols and benchmark_weights must have same length")
+    sym_indices: list[int] = []
+    for sym in benchmark_symbols:
+        try:
+            sym_indices.append(symbols.index(sym))
+        except ValueError as err:
+            raise ValueError(f"missing benchmark symbol in universe: {sym}") from err
+    result = weights_2d.copy().astype(np.float64)
+    n_bars = result.shape[0]
+    for i, sym_idx in enumerate(sym_indices):
+        w = benchmark_weights[i]
+        hedge_amount = -beta_per_bar_1d * benchmark_scale_1d * w
+        result[:, sym_idx] = result[:, sym_idx] + hedge_amount
+    gross = np.sum(np.abs(result), axis=1)
+    scale = np.ones(n_bars, dtype=np.float64)
+    mask = gross > gross_cap
+    if np.any(mask):
+        scale[mask] = gross_cap / gross[mask]
+    result = result * scale[:, np.newaxis]
+    return result
+
+
+def derive_mdd_parity_scale(
+    past_daily_returns_1d: NDArray[np.float64],
+    *, mdd_budget: float, max_scale: float,
+) -> float:
+    if mdd_budget <= 0:
+        raise ValueError(f"mdd_budget must be positive, got {mdd_budget}")
+    r = past_daily_returns_1d[np.isfinite(past_daily_returns_1d)]
+    if len(r) < 10:
+        return max_scale
+    equity = np.cumprod(1.0 + r)
+    peak = np.maximum.accumulate(equity)
+    dd = 1.0 - equity / np.maximum(peak, 1e-15)
+    realized_mdd = float(np.max(dd))
+    if realized_mdd < 1e-12:
+        return max_scale
+    scale = mdd_budget / realized_mdd
+    return float(np.clip(scale, 1.0, max_scale))
+
+
+def _apply_portfolio_level_caps(
+    w: NDArray[np.float64],
+    max_long: float,
+    max_short: float,
+    max_gross: float,
+) -> NDArray[np.float64]:
+    long_sum = np.sum(np.maximum(w, 0.0))
+    if long_sum > max_long:
+        w = np.where(w > 0, w * (max_long / max(long_sum, 1e-15)), w)
+
+    short_sum = np.sum(np.maximum(-w, 0.0))
+    if short_sum > max_short:
+        w = np.where(w < 0, w * (max_short / max(short_sum, 1e-15)), w)
+
+    gross = np.sum(np.abs(w))
+    if gross > max_gross:
+        w = w * (max_gross / max(gross, 1e-15))
+
+    return w
+
+
+def _rankdata_abs_avg(values: NDArray[np.float64]) -> NDArray[np.float64]:
+    n = values.shape[0]
+    sorter = np.argsort(values, kind="stable")
+    ranks = np.empty(n, dtype=np.float64)
+    i = 0
+    while i < n:
+        j = i
+        while j < n and values[sorter[j]] == values[sorter[i]]:
+            j += 1
+        avg = float(i + 1 + j) / 2.0
+        for k in range(i, j):
+            ranks[sorter[k]] = avg
+        i = j
+    return ranks
+
+
+def build_rank_conviction_targets(
+    mu_1d: NDArray[np.float64],
+    eligible_1d: NDArray[np.bool_],
+    *,
+    min_breadth: int = 10,
+) -> NDArray[np.float64]:
+    if mu_1d.shape != eligible_1d.shape:
+        raise ValueError(f"mu_1d shape {mu_1d.shape} != eligible_1d shape {eligible_1d.shape}")
+    n = mu_1d.shape[0]
+    eligible_count = int(np.sum(eligible_1d))
+    if eligible_count < min_breadth:
+        return np.zeros(n, dtype=np.float64)
+    eligible_mu = mu_1d[eligible_1d]
+    abs_ranks = _rankdata_abs_avg(np.abs(eligible_mu))
+    raw = np.sign(eligible_mu) * abs_ranks
+    raw = raw - np.mean(raw)
+    abs_sum = float(np.sum(np.abs(raw)))
+    if abs_sum > 0.0:
+        raw = raw / abs_sum
+    result = np.zeros(n, dtype=np.float64)
+    result[eligible_1d] = raw
+    return result
+
+
+def derive_causal_vol_target(
+    equity_history: Sequence[float], return_history: Sequence[float],
+    config: DynamicCompoundingConfig,
+) -> float:
+    if len(equity_history) < config.min_vol_samples:
+        return config.target_ann_vol
+    eq = np.array(equity_history, dtype=np.float64)
+    peak = np.maximum.accumulate(eq)
+    dd = 1.0 - eq / np.maximum(peak, 1e-15)
+    mdd = float(np.max(dd))
+    r = np.array(return_history[-config.vol_lookback_bars:], dtype=np.float64)
+    r = r[np.isfinite(r)]
+    if len(r) < 10:
+        return config.target_ann_vol
+    vol = float(np.std(r, ddof=1)) * np.sqrt(2190.0)
+    if vol < 1e-12:
+        return config.target_ann_vol
+    mdd_vol_ratio = mdd / vol
+    target = config.mdd_risk_budget * config.risk_safety_factor / max(mdd_vol_ratio, config.min_mdd_vol_ratio)
+    target = min(max(target, config.target_ann_vol), config.max_ann_vol_budget * config.risk_safety_factor)
+    _logger.debug("[ALGO] causal_vol_target=%.4f mdd=%.4f vol=%.4f ratio=%.4f", target, mdd, vol, mdd_vol_ratio)
+    return float(target)
+
+
+
+def apply_net_exposure_cap(
+    weights_1d: NDArray[np.float64], max_net_exposure: float,
+) -> NDArray[np.float64]:
+    if not 0.0 <= max_net_exposure <= 1.0:
+        raise ValueError(f"max_net_exposure must be in [0, 1], got {max_net_exposure}")
+    gross = float(np.sum(np.abs(weights_1d)))
+    if gross == 0.0:
+        return weights_1d
+    net = float(np.sum(weights_1d))
+    limit = max_net_exposure * gross
+    if abs(net) > limit:
+        active = weights_1d != 0.0
+        n_active = int(np.sum(active))
+        if n_active == 0:
+            return weights_1d
+        adjustment = (net - np.sign(net) * limit) / n_active
+        result = weights_1d.copy()
+        result[active] -= adjustment
+        return result
+    return weights_1d
+
+
+def compute_dynamic_compounding_path(
+    forecast: CalibratedForecastPanel,
+    sigma_2d: NDArray[np.float32],
+    funding_rates_1h_2d: NDArray[np.float32],
+    config: DynamicCompoundingConfig,
+    *,
+    close_2d: NDArray[np.float32],
+    cost_bps: float,
+) -> NDArray[np.float64]:
+    n_bars = forecast.decision_timestamps_ns.size
+    n_syms = len(forecast.symbols)
+    weights = np.zeros((n_bars, n_syms), dtype=np.float64)
+
+    equity = 1.0
+    peak_equity = 1.0
+    equity_history: list[float] = [1.0]
+    return_history: list[float] = []
+    state = np.zeros(n_syms, dtype=np.float64)
+    cooldown_counter = 0
+
+    for t in range(n_bars):
+        mu = np.nan_to_num(forecast.mu_2d[t], nan=0.0, posinf=0.0, neginf=0.0)
+        sigma_t = np.nan_to_num(sigma_2d[t], nan=1e-4, posinf=1e-4, neginf=1e-4)
+
+        eligible = np.abs(mu) > 0
+
+        if t == 0:
+            fr = np.zeros(n_syms, dtype=np.float64)
+        else:
+            idx = (t - 1) * 4
+            fr_raw = funding_rates_1h_2d[idx].astype(np.float64) if idx < funding_rates_1h_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
+            fr = np.nan_to_num(fr_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+        mu_f64 = mu.astype(np.float64)
+
+        if config.funding_carry_enabled:
+            carry = np.where(mu_f64 > 0, 1.0, np.where(mu_f64 < 0, -1.0, 0.0)) * fr
+            mu_f64 = mu_f64 + carry
+
+        if config.use_rank_conviction:
+            desired = build_rank_conviction_targets(mu_f64, eligible)
+            if float(np.sum(np.abs(desired))) == 0.0:
+                sigma_safe = np.maximum(sigma_t.astype(np.float64), config.sigma_floor)
+                desired = np.where(eligible, config.kelly_fraction * mu_f64 / sigma_safe, 0.0)
+        else:
+            sigma_safe = np.maximum(sigma_t.astype(np.float64), config.sigma_floor)
+            desired = np.where(eligible, config.kelly_fraction * mu_f64 / sigma_safe, 0.0)
+
+        smoothed = config.alpha_smooth * desired + (1.0 - config.alpha_smooth) * state
+
+        if config.band_frac > 0:
+            band_i = config.band_frac * np.abs(state)
+            delta = np.abs(smoothed - state)
+            state = np.where(delta > band_i, smoothed, state)
+        else:
+            state = smoothed
+
+        support_mask = eligible & (np.abs(mu_f64) > 0)
+        state = np.where(support_mask, state, 0.0)
+        state = apply_net_exposure_cap(state, config.max_net_exposure)
+
+        if cooldown_counter > 0:
+            cooldown_counter -= 1
+            dd_scale = config.dd_scale_floor
+        else:
+            dd = 1.0 - equity / max(peak_equity, 1e-15)
+            if dd >= config.hard_drawdown_limit:
+                cooldown_counter = config.dd_cooldown_bars
+                dd_scale = config.dd_scale_floor
+            elif dd >= config.soft_drawdown_limit:
+                frac = (dd - config.soft_drawdown_limit) / max(
+                    config.hard_drawdown_limit - config.soft_drawdown_limit, 1e-15
+                )
+                dd_scale = max(config.dd_scale_floor, 1.0 - frac)
+            else:
+                dd_scale = 1.0
+
+        w_exec = state * dd_scale
+
+        if len(return_history) >= config.min_vol_samples:
+            rv_ann = float(np.std(return_history[-config.vol_lookback_bars:], ddof=1)) * np.sqrt(2190.0)
+            vol_target = derive_causal_vol_target(equity_history, return_history, config)
+            vol_scale = min(vol_target / max(rv_ann, 1e-15), config.vol_scale_max)
+            if abs(vol_scale - 1.0) < 0.05:
+                vol_scale = 1.0
+        else:
+            vol_scale = min(0.5, config.vol_scale_max)
+
+        w_exec = w_exec * vol_scale
+        w_exec = _apply_portfolio_level_caps(w_exec, config.max_long_leverage, config.max_short_leverage, config.max_gross_leverage)
+        weights[t] = w_exec
+
+        if t < n_bars - 1:
+            prev_w = weights[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
+            close_t = close_2d[t].astype(np.float64)
+            close_next = close_2d[t + 1].astype(np.float64)
+            valid = (close_t > 0) & np.isfinite(close_t) & (close_next > 0) & np.isfinite(close_next)
+            ret = np.where(valid, close_next / close_t - 1.0, 0.0)
+            portfolio_ret = np.dot(w_exec, ret) - cost_bps * 1e-4 * np.sum(np.abs(w_exec - prev_w))
+            equity = equity * (1.0 + portfolio_ret)
+            peak_equity = max(peak_equity, equity)
+            return_history.append(portfolio_ret)
+            equity_history.append(equity)
+
+    return weights
+
+
+def compute_dynamic_compounding_weights(
+    forecast: CombinedForecast,
+    sigma_1d: NDArray[np.float64],
+    funding_rates_1d: NDArray[np.float64],
+    previous_weights_1d: NDArray[np.float64],
+    config: DynamicCompoundingConfig,
+    vol_scale: float = 1.0,
+) -> NDArray[np.float64]:
+    if not np.all(np.isfinite(forecast.mu_robust_1d)):
+        raise ValueError("non-finite mu_robust_1d in forecast")
+    if not np.all(np.isfinite(sigma_1d)):
+        raise ValueError("non-finite sigma_1d")
+    if not np.all(np.isfinite(funding_rates_1d)):
+        raise ValueError("non-finite funding_rates_1d")
+    if not np.all(np.isfinite(previous_weights_1d)):
+        raise ValueError("non-finite previous_weights_1d")
+
+    mu = forecast.mu_robust_1d.copy()
+    support = forecast.support_1d
+
+    sigma_safe = np.maximum(sigma_1d, config.sigma_floor)
+
+    if config.funding_carry_enabled:
+        carry = np.where(mu > 0, 1.0, np.where(mu < 0, -1.0, 0.0)) * funding_rates_1d
+        mu = mu + carry
+
+    mu_support = np.abs(mu) > 0
+    support = support & mu_support
+
+    raw_weights = np.where(support, config.kelly_fraction * mu / sigma_safe, 0.0)
+
+    raw_weights = raw_weights * vol_scale
+
+    smoothed = config.alpha_smooth * raw_weights + (1.0 - config.alpha_smooth) * previous_weights_1d
+
+    if config.band_frac > 0:
+        band = config.band_frac * float(np.mean(np.abs(smoothed)))
+        delta = np.abs(smoothed - previous_weights_1d)
+        hysteresis_mask = delta > band
+        w = np.where(hysteresis_mask, smoothed, previous_weights_1d)
+    else:
+        w = smoothed
+
+    w = np.where(support, w, 0.0)
+
+    w = _apply_portfolio_level_caps(w, config.max_long_leverage, config.max_short_leverage, config.max_gross_leverage)
+
+    return w
+
+
+def compute_top_n_compounding_weights(
+    forecast: CombinedForecast,
+    sigma_2d: NDArray[np.float32],
+    funding_rates_1h_2d: NDArray[np.float32],
+    config: DynamicCompoundingConfig,
+    top_n: int = 20,
+) -> NDArray[np.float64]:
+    if forecast.mu_robust_1d.ndim != 1:
+        raise ValueError("forecast.mu_robust_1d must be 1-D")
+    n_syms = forecast.mu_robust_1d.shape[0]
+    if sigma_2d.ndim != 2 or sigma_2d.shape[1] != n_syms:
+        raise ValueError("sigma_2d must be 2-D with n_syms columns")
+    t_total = sigma_2d.shape[0]
+
+    mu = forecast.mu_robust_1d
+    support = forecast.support_1d
+
+    ranked_idx = np.argsort(-np.abs(mu))
+    top_mask = np.zeros(n_syms, dtype=bool)
+    top_mask[ranked_idx[:top_n]] = True
+    active = support & top_mask & (mu > 0)
+
+    weights = np.zeros((t_total, n_syms), dtype=np.float64)
+    for t in range(t_total):
+        sigma_t = sigma_2d[t].astype(np.float64)
+
+        if t == 0:
+            fr = np.zeros(n_syms, dtype=np.float64)
+        else:
+            idx = (t - 1) * 4
+            fr_raw = funding_rates_1h_2d[idx].astype(np.float64) if idx < funding_rates_1h_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
+            fr = np.nan_to_num(fr_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+        prev_w = weights[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
+
+        per_bar_forecast = CombinedForecast(mu_robust_1d=mu, variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=active)
+        raw_w = compute_dynamic_compounding_weights(
+            forecast=per_bar_forecast,
+            sigma_1d=sigma_t,
+            funding_rates_1d=fr,
+            previous_weights_1d=prev_w,
+            config=config,
+            vol_scale=1.0,
+        )
+
+        weights[t] = raw_w
+
+    return weights
+
+
+def project_terminal_portfolio_caps(
+    weights_2d: NDArray[np.float64],
+    *,
+    per_symbol_cap: float,
+    net_cap: float,
+    max_long_leverage: float,
+    max_short_leverage: float,
+    gross_cap: float,
+    max_iterations: int = 256,
+    tolerance: float = 1e-12,
+) -> NDArray[np.float64]:
+    if not isinstance(weights_2d, np.ndarray) or weights_2d.ndim != 2:
+        raise ValueError(f"weights_2d must be a 2-D ndarray, got shape {getattr(weights_2d, 'shape', 'unknown')}")
+    if not np.all(np.isfinite(weights_2d)):
+        raise ValueError("weights_2d contains non-finite values")
+    if weights_2d.shape[0] == 0 or weights_2d.shape[1] == 0:
+        raise ValueError(f"weights_2d must be non-empty, got shape {weights_2d.shape}")
+    for name, val in [
+        ("per_symbol_cap", per_symbol_cap), ("net_cap", net_cap),
+        ("max_long_leverage", max_long_leverage), ("max_short_leverage", max_short_leverage),
+        ("gross_cap", gross_cap),
+    ]:
+        if not np.isfinite(val) or val <= 0:
+            raise ValueError(f"{name} must be finite positive, got {val}")
+    if not net_cap <= gross_cap:
+        raise ValueError(f"net_cap={net_cap} must be <= gross_cap={gross_cap}")
+    if not max_long_leverage + max_short_leverage <= gross_cap:
+        raise ValueError(f"max_long_leverage + max_short_leverage ({max_long_leverage + max_short_leverage}) must be <= gross_cap={gross_cap}")
+
+    result = weights_2d.copy()
+    n_rows = result.shape[0]
+
+    for i in range(n_rows):
+        w = result[i]
+        best_w = w.copy()
+        best_delta = float(np.inf)
+        for _ in range(max_iterations):
+            w_old = w.copy()
+
+            w = np.clip(w, -per_symbol_cap, per_symbol_cap)
+
+            gross = float(np.sum(np.abs(w)))
+            if gross > 0:
+                net = float(np.sum(w))
+                limit = net_cap * gross
+                if abs(net) > limit:
+                    active = w != 0.0
+                    n_active = int(np.sum(active))
+                    if n_active > 0:
+                        adjustment = (net - np.sign(net) * limit) / n_active
+                        w = w.copy()
+                        w[active] -= adjustment
+
+            long_sum = float(np.sum(np.maximum(w, 0.0)))
+            if long_sum > max_long_leverage:
+                w = np.where(w > 0, w * (max_long_leverage / max(long_sum, 1e-15)), w)
+
+            short_sum = float(np.sum(np.maximum(-w, 0.0)))
+            if short_sum > max_short_leverage:
+                w = np.where(w < 0, w * (max_short_leverage / max(short_sum, 1e-15)), w)
+
+            gross_sum = float(np.sum(np.abs(w)))
+            if gross_sum > gross_cap:
+                w = w * (gross_cap / max(gross_sum, 1e-15))
+
+            w = np.clip(w, -per_symbol_cap, per_symbol_cap)
+
+            delta = float(np.max(np.abs(w - w_old)))
+            if delta <= tolerance:
+                break
+            if delta < best_delta:
+                best_w = w.copy()
+                best_delta = delta
+        else:
+            if best_delta <= max(tolerance, 1e-6):
+                w = best_w
+            else:
+                raise RuntimeError(
+                    f"terminal projection did not converge in {max_iterations} iterations "
+                    f"at row {i}; max delta={best_delta:.6e}"
+                )
+
+        result[i] = w
+
+    _logger.debug(
+        "terminal projection: rows=%d, pre max|w|=%.6f, post max|w|=%.6f",
+        n_rows,
+        float(np.max(np.abs(weights_2d))),
+        float(np.max(np.abs(result))),
+    )
+    return result
+
+
+def compute_max_name_weight_p95(
+    weights_2d: NDArray[np.float64],
+) -> float:
+    if not isinstance(weights_2d, np.ndarray) or weights_2d.ndim != 2:
+        raise ValueError(f"weights_2d must be a 2-D ndarray, got shape {getattr(weights_2d, 'shape', 'unknown')}")
+    if not np.all(np.isfinite(weights_2d)):
+        raise ValueError("weights_2d contains non-finite values")
+    if weights_2d.shape[0] == 0:
+        raise ValueError("weights_2d must be non-empty")
+    max_abs_w = np.max(np.abs(weights_2d), axis=1)
+    return float(np.percentile(max_abs_w, 95))
+
+
+def apply_portfolio_risk_overlay(
+    weights_2d: NDArray[np.float64],
+    close_2d: NDArray[np.float32],
+    cost_bps: float,
+    config: DynamicCompoundingConfig,
+    *,
+    asset_return_2d: NDArray[np.float64] | None = None,
+) -> NDArray[np.float64]:
+    if not np.all(np.isfinite(weights_2d)):
+        raise ValueError("non-finite weights_2d")
+    if weights_2d.shape[0] != close_2d.shape[0]:
+        raise ValueError(f"weights_2d bars {weights_2d.shape[0]} != close_2d bars {close_2d.shape[0]}")
+    result = weights_2d.copy()
+    n_bars = result.shape[0]
+
+    # RULE-08 order, step 1: net-exposure cap first
+    for t in range(n_bars):
+        result[t] = apply_net_exposure_cap(result[t], config.max_net_exposure)
+
+    if asset_return_2d is not None:
+        book_ret_1d = np.zeros(n_bars, dtype=np.float64)
+        for t in range(1, n_bars):
+            book_ret_1d[t] = float(np.dot(result[t - 1], asset_return_2d[t]))
+        driver_ret = book_ret_1d
+    else:
+        driver_ret = np.zeros(n_bars, dtype=np.float64)
+        for t in range(1, n_bars):
+            prev = close_2d[t - 1].astype(np.float64)
+            curr = close_2d[t].astype(np.float64)
+            mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                driver_ret[t] = np.nanmean(np.where(mask, np.log(curr / prev), 0.0))
+
+    # step 2: realised-vol targeting on the driver series
+    trailing_vol = np.zeros(n_bars, dtype=np.float64)
+    vol_lb = config.vol_lookback_bars
+    for t in range(n_bars):
+        start = max(0, t - vol_lb + 1)
+        window = driver_ret[start:t + 1]
+        trailing_vol[t] = np.nanstd(window, ddof=1) if window.shape[0] > 1 else 0.0
+    trailing_vol = np.maximum(trailing_vol, 1e-6)
+    vol_target = config.target_ann_vol / np.sqrt(2190.0)
+    vol_scale = np.minimum(vol_target / trailing_vol, config.vol_scale_max)
+    vol_scale = np.minimum(vol_scale, 1.0)
+    for t in range(n_bars):
+        result[t] *= vol_scale[t]
+
+    # step 3: drawdown scaling on the book's own equity
+    cum_equity = np.cumprod(1.0 + driver_ret * vol_scale, axis=0)
+    running_max = np.maximum.accumulate(cum_equity)
+    drawdown = 1.0 - cum_equity / np.maximum(running_max, 1e-12)
+    dd_scale = np.ones(n_bars, dtype=np.float64)
+    soft_dd = config.soft_drawdown_limit
+    hard_dd = config.hard_drawdown_limit
+    for t in range(1, n_bars):
+        if drawdown[t] > hard_dd:
+            dd_scale[t] = 0.0
+        elif drawdown[t] > soft_dd:
+            dd_scale[t] = max(config.dd_scale_floor,
+                              1.0 - (drawdown[t] - soft_dd) / (hard_dd - soft_dd))
+    for t in range(n_bars):
+        result[t] *= dd_scale[t]
+
+    # step 4: portfolio leverage caps
+    for t in range(n_bars):
+        result[t] = _apply_portfolio_level_caps(
+            result[t], config.max_long_leverage, config.max_short_leverage, config.max_gross_leverage,
+        )
+    return result

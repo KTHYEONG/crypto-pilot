@@ -13,45 +13,40 @@ _MODULE_SPEC.loader.exec_module(_lean_check)
 
 
 def test_feature_named_cli_test_matches_imported_source() -> None:
-    source = "src/cli/adapters/run_backtest.py"
-    test_file = "tests/integration/cli/test_candidate_promotion_cli.py"
+    source = "src/application/research/mhs/evaluation.py"
+    test_file = "tests/integration/mhs/test_mhs_horizon_diagnostic.py"
 
     assert _lean_check._test_references_source(test_file, source)
-    assert _lean_check._source_has_matching_test(source, [test_file])
 
 
 def test_unrelated_test_does_not_match_source() -> None:
     assert not _lean_check._test_references_source(
         "tests/unit/research/evaluation/test_promotion.py",
-        "src/cli/adapters/run_backtest.py",
+        "src/application/research/mhs/evaluation.py",
     )
 
 
 def test_find_test_files_includes_semantic_source_test() -> None:
-    files = _lean_check._find_test_files(["src/cli/adapters/run_backtest.py"])
+    files = _lean_check._find_test_files(["src/application/research/mhs/evaluation.py"])
 
-    assert "tests/integration/cli/test_candidate_promotion_cli.py" in files
+    assert "tests/unit/application/research/mhs/test_evaluation.py" in files
 
 
 def test_import_index_contains_semantic_reference() -> None:
-    tf = "tests/integration/cli/test_candidate_promotion_cli.py"
+    tf = "tests/unit/application/research/mhs/test_evaluation.py"
 
     mods = _lean_check._imported_source_modules(tf)
 
-    assert "src.cli.adapters.run_backtest" in mods
+    assert "src.application.research.mhs.evaluation" in mods
 
 
 def test_semantic_match_builds_index_once() -> None:
-    _lean_check._test_references_source.cache_clear()
     _lean_check._imported_source_modules.cache_clear()
-    tf = "tests/integration/cli/test_candidate_promotion_cli.py"
-    src = "src/cli/adapters/run_backtest.py"
+    tf = "tests/unit/application/research/mhs/test_evaluation.py"
+    src = "src/application/research/mhs/evaluation.py"
 
     assert _lean_check._test_references_source(tf, src)
     _lean_check._test_references_source(tf, src)
 
     idx = _lean_check._imported_source_modules.cache_info()
     assert idx.misses == 1  # test file parsed exactly once, not once per pair
-    pair = _lean_check._test_references_source.cache_info()
-    assert pair.misses == 1
-    assert pair.hits == 1

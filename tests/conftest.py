@@ -26,10 +26,7 @@ def pytest_configure(config) -> None:
 
 pytest_plugins = [
     "tests.fixtures.bars",
-    "tests.fixtures.cash_carry",
-    "tests.fixtures.catalog",
     "tests.fixtures.market_data",
-    "tests.fixtures.oi_deleveraging",
 ]
 
 

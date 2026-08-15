@@ -4,15 +4,15 @@ import argparse
 import logging
 
 from src.cli.commands.data import add_data_commands
-from src.cli.commands.provenance import add_provenance_commands
 from src.cli.commands.research import add_research_commands
 
 
 def build_root_parser() -> argparse.ArgumentParser:
-    """Compose the single documented CLI entry point with three command groups.
+    """Compose the single documented CLI entry point with two command groups.
 
-    Top-level groups are ``data``, ``research``, and ``provenance``; all new run
-    commands are children of ``research run``.
+    Top-level groups are ``data`` and ``research``; all run commands are
+    children of ``research run portfolio`` (MHS only after the legacy isolation
+    refactor -- docs/specs/mhs_refactor.md §3.2).
     """
     parser = argparse.ArgumentParser(
         prog="python -m src.cli.main",
@@ -21,7 +21,6 @@ def build_root_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="group", required=True)
     add_data_commands(subparsers.add_parser("data", help="Collect and manage market data"))
     add_research_commands(subparsers.add_parser("research", help="Run sealed research evaluations"))
-    add_provenance_commands(subparsers.add_parser("provenance", help="Registration and run provenance"))
     return parser
 
 
