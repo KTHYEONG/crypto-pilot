@@ -1,21 +1,5 @@
-from src.core.config import (
-    BASE_DIR,
-    DATA_DIR,
-    FUTURES_DATA_DIR,
-    funding_path,
-    ohlcv_path,
-)
-from src.core.constants import SLIPPAGE_BPS, TAKER_FEE_BPS
-from src.core.types import CostModel, StrategySpec
+"""Hardware configuration package (settings only; legacy re-exports moved to legacy/)."""
 
-__all__ = [
-    "BASE_DIR",
-    "DATA_DIR",
-    "FUTURES_DATA_DIR",
-    "SLIPPAGE_BPS",
-    "TAKER_FEE_BPS",
-    "CostModel",
-    "StrategySpec",
-    "funding_path",
-    "ohlcv_path",
-]
+from src.core.settings import effective_worker_count
+
+__all__ = ["effective_worker_count"]

@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+import argparse
+
+import pytest
+
+from src.application.futures.runner.cli import build_arg_parser, check_removed_flags, run_from_cli
+from src.application.futures.runner.compound_config import (
+    build_compound_run_config,
+)
+from src.domain.futures.compound.validation import slice_execution_ledger
+from src.domain.futures.data_lake.contracts import SyncMode
+
+
+def _make_ledger() -> object:
+    import numpy as np
+    from src.domain.futures.compound.contracts import ExecutionLedger
+
+    n = 100
+    returns = np.zeros(n, dtype=np.float64)
+    returns[1:] = np.random.default_rng(42).normal(0.0005, 0.02, n - 1)
+    equity = np.ones(n, dtype=np.float64)
+    for i in range(1, n):
+        equity[i] = equity[i - 1] * (1.0 + returns[i])
+    ts = np.arange(n, dtype=np.int64) * 3_600_000_000_000
+    return ExecutionLedger(
+        timestamps_ns=ts,
+        net_returns_1d=returns,
+        equity_1d=equity,
+        target_weights_2d=np.zeros((n, 3), dtype=np.float32),
+        fee_returns_1d=np.zeros(n, dtype=np.float64),
+        slippage_returns_1d=np.zeros(n, dtype=np.float64),
+        impact_returns_1d=np.zeros(n, dtype=np.float64),
+        funding_returns_1d=np.zeros(n, dtype=np.float64),
+        integrity_ok=True,
+        integrity_reasons=(),
+    )
+
+
+# ── CompoundRunConfig ──────────────────────────────────────────────────────────
+
+
+class TestBuildCompoundRunConfig:
+    def test_defaults(self) -> None:
+        args = argparse.Namespace(date=None, sync="auto", refresh_universe=False, seed=42, max_rss_mb=12_000)
+        config = build_compound_run_config(args)
+        assert config.reference_date is None
+        assert config.sync == "auto"
+        assert config.refresh_universe is False
+        assert config.seed == 42
+        assert config.base_timeframe == "1h"
+        assert config.max_rss_mb == 12_000
+
+    def test_with_date_and_skip_sync(self) -> None:
+        args = argparse.Namespace(date="2026-07-08", sync=SyncMode.LOCAL, refresh_universe=True, seed=99, max_rss_mb=6000)
+        config = build_compound_run_config(args)
+        assert config.reference_date == "2026-07-08"
+        assert config.sync == SyncMode.LOCAL
+        assert config.refresh_universe is True
+        assert config.seed == 99
+        assert config.max_rss_mb == 6000
+
+    def test_invalid_sync_raises(self) -> None:
+        args = argparse.Namespace(sync="invalid")
+        with pytest.raises(ValueError, match="invalid sync mode"):
+            build_compound_run_config(args)
+
+    def test_negative_max_rss_raises(self) -> None:
+        args = argparse.Namespace(date=None, sync="auto", refresh_universe=False, seed=42, max_rss_mb=-1)
+        with pytest.raises(ValueError, match="max_rss_mb must be positive"):
+            build_compound_run_config(args)
+
+    def test_missing_date_is_optional(self) -> None:
+        args = argparse.Namespace(date=None, sync=SyncMode.LOCAL, refresh_universe=False, seed=42, max_rss_mb=12_000)
+        config = build_compound_run_config(args)
+        assert config.reference_date is None
+
+
+# ── CLI compound-only flags ───────────────────────────────────────────────────
+
+
+class TestCliCompoundOnly:
+    def test_build_arg_parser_accepts_only_allowed_flags(self) -> None:
+        parser = build_arg_parser()
+        args = parser.parse_args(["--date", "2026-07-08", "--sync", "local", "--seed", "42"])
+        assert args.date == "2026-07-08"
+        assert args.sync == "local"
+        assert args.seed == 42
+
+    def test_check_removed_flags_does_not_raise_for_allowed(self) -> None:
+        args = argparse.Namespace(date="2026-07-08", sync=SyncMode.LOCAL, phase=None, trials=None, timeframe=None)
+        check_removed_flags(args)
+
+    def test_check_removed_flags_raises_for_trials(self) -> None:
+        args = argparse.Namespace(trials=42)
+        with pytest.raises(SystemExit):
+            check_removed_flags(args)
+
+    def test_run_from_cli_returns_2_for_invalid_phase(self) -> None:
+        with pytest.raises(SystemExit):
+            run_from_cli(["--phase", "l3"])
+
+    def test_run_from_cli_returns_2_for_unknown_flag(self) -> None:
+        result = run_from_cli(["--unknown-flag"])
+        assert result == 2
+
+
+# ── slice_execution_ledger ─────────────────────────────────────────────────────
+
+
+class TestSliceExecutionLedger:
+    def test_slice_middle_returns_copied_ledger(self) -> None:
+
+        ledger = _make_ledger()
+        ts = ledger.timestamps_ns
+        mid_start = ts[20]
+        mid_end = ts[50]
+        sliced = slice_execution_ledger(ledger=ledger, start_time_ns=mid_start, end_time_ns=mid_end)
+        assert sliced.timestamps_ns.shape[0] == 31
+        assert sliced.equity_1d[0] == ledger.equity_1d[20]
+        assert sliced.equity_1d[-1] == ledger.equity_1d[50]
+        assert sliced.integrity_ok is True
+        assert len(sliced.net_returns_1d) == 31
+        assert len(sliced.target_weights_2d) == 31
+
+    def test_slice_raises_for_empty_range(self) -> None:
+
+        ledger = _make_ledger()
+        with pytest.raises(ValueError, match="empty slice"):
+            slice_execution_ledger(ledger=ledger, start_time_ns=ledger.timestamps_ns[-1] + 1, end_time_ns=ledger.timestamps_ns[-1] + 2)
+
+    def test_slice_raises_for_empty_ledger(self) -> None:
+        import numpy as np
+        from src.domain.futures.compound.contracts import ExecutionLedger
+
+        empty = ExecutionLedger(
+            timestamps_ns=np.array([], dtype=np.int64),
+            net_returns_1d=np.array([], dtype=np.float64),
+            equity_1d=np.array([], dtype=np.float64),
+            target_weights_2d=np.empty((0, 0), dtype=np.float32),
+            fee_returns_1d=np.array([], dtype=np.float64),
+            slippage_returns_1d=np.array([], dtype=np.float64),
+            impact_returns_1d=np.array([], dtype=np.float64),
+            funding_returns_1d=np.array([], dtype=np.float64),
+            integrity_ok=True,
+            integrity_reasons=(),
+        )
+        with pytest.raises(ValueError, match="cannot slice empty ledger"):
+            slice_execution_ledger(ledger=empty, start_time_ns=0, end_time_ns=1)
+
+    def test_memory_independence(self) -> None:
+
+        ledger = _make_ledger()
+        sliced = slice_execution_ledger(ledger=ledger, start_time_ns=ledger.timestamps_ns[10], end_time_ns=ledger.timestamps_ns[20])
+        original_val = float(sliced.equity_1d[0])
+        sliced.equity_1d[0] = 999.0
+        assert float(sliced.equity_1d[0]) != float(ledger.equity_1d[10])
+        assert float(ledger.equity_1d[10]) == pytest.approx(original_val, rel=1e-12)
+
+
+# ── legacy import census (PERF-07) ───────────────────────────────────────────
+
+
+def test_no_legacy_imports_in_retained_source() -> None:
+    retained = (
+        "src/execution/opt_main_futures.py",
+        "src/application/futures/runner/cli.py",
+        "src/application/futures/runner/compound_config.py",
+        "src/application/futures/runner/compound_main.py",
+        "src/application/futures/runner/compound_universe.py",
+        "src/application/futures/runner/compound_data.py",
+        "src/domain/futures/compound",
+    )
+    disallowed = (
+        "active_pipeline",
+        "alpha_foundry",
+        "tiered_workflow",
+        "strategy_runtime",
+        "online_growth_allocator",
+        "policy_shadow_book",
+    )
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", """
+import ast, sys
+for line in sys.stdin:
+    path = line.strip()
+    if not path:
+        continue
+    try:
+        with open(path) as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names if isinstance(node, ast.Import) else [node]:
+                    name = (alias.name if isinstance(node, ast.Import) else node.module) or ""
+                    print(f"{path}:::{name}")
+    except Exception:
+        pass
+"""],
+        input="\n".join(retained),
+        capture_output=True, text=True,
+    )
+    imports = result.stdout.strip().split("\n") if result.stdout.strip() else []
+    offending = [line for line in imports if any(d in line.split(":::")[1] for d in disallowed)]
+    assert not offending, f"legacy imports found in retained source: {offending}"
