@@ -14,8 +14,10 @@
       "tests/unit/mhs/test_evaluation.py",
       "tests/unit/mhs/test_evaluation_fold_report.py",
       "tests/unit/mhs/test_evaluation_fold_safe_fast_horizon.py",
-      "tests/unit/mhs/test_execution.py"
-    ]
+      "tests/unit/mhs/test_execution.py",
+      "tests/unit/application/research/mhs/test_evaluation.py"
+    ],
+    "architecture": "docs/specs/mhs_committee_diagnostic_detail_expansion.md"
   },
   "src/cli/commands/data.py": {},
   "src/cli/commands/research/mhs.py": {
