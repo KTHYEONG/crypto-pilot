@@ -157,6 +157,29 @@ def test_record_round_trips_and_curates_representative_report() -> None:
     assert record["blend_target_gross"] == pytest.approx(0.75)
     assert record["folds"][0]["primary_autocorr_sharpe"] == pytest.approx(0.804643)
     assert record["research_go"]["eligible"] is False
+    assert record["research_go"]["data_integrity_reason_codes"] == []
+
+
+def test_record_includes_data_integrity_reason_codes() -> None:
+    """SCENARIO_MHS_RUN_HISTORY_RECORD_INCLUDES_DATA_INTEGRITY_REASON_CODES:
+    the run-history record's research_go dict carries the derived
+    data-integrity/alpha-quality reason split so active.jsonl/latest.json expose
+    "data itself was deficient" separately from pure alpha underperformance."""
+    report = _representative_report()
+    go = dataclasses.replace(
+        report.research_go,
+        reason_codes=("RELEVANT_EXECUTION_DATA_GAP", "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"),
+        data_integrity_reason_codes=("RELEVANT_EXECUTION_DATA_GAP",),
+    )
+    report = dataclasses.replace(report, research_go=go)
+    request = ev.MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    record = ev.build_mhs_run_history_record(
+        report, request, ev.MhsOutputTier.FULL, Path("docs/results/x.json"),
+    )
+    assert record["research_go"]["data_integrity_reason_codes"] == [
+        "RELEVANT_EXECUTION_DATA_GAP",
+    ]
+    assert tuple(record["research_go"]["data_integrity_reason_codes"]) == report.research_go.data_integrity_reason_codes
     assert record["discovery_qualification"]["momentum"]["admitted"] is False
     assert record["full_history_yearly_net_t"]["slow_momentum"]["2021"] == pytest.approx(-0.144821)
     assert record["bootstrap_ci"] == pytest.approx([-0.0000067, 0.0000277], abs=1e-6)
