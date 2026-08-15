@@ -40,6 +40,7 @@ def _write_mhs_market(
     include_btc: bool = False,
     funding_cross_sectional: bool = False,
     with_minute: bool = True,
+    include_taker_buy_quote: bool = False,
 ) -> pd.Timestamp:
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -63,10 +64,20 @@ def _write_mhs_market(
     for i, sym in enumerate(symbols):
         drift = 1e-5 * (i - len(symbols) / 2.0)
         prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, n_hours)))
-        pd.DataFrame(
-            {"timestamp": epoch, "open": prices, "high": prices * 1.001,
-             "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours},
-        ).to_parquet(hdir / f"{sym}.parquet")
+        # taker_buy_quote (opt-in only) is derived without consuming rng so the
+        # existing fixture prices stay byte-identical; a per-symbol constant
+        # buy-ratio gives the flow_imb committee members a genuine
+        # cross-sectional signal while keeping every row finite (deterministic,
+        # no fillna needed). Default False keeps the shared fixture byte-identical
+        # so the committee source-coverage gate tests still see the column absent.
+        columns = {
+            "timestamp": epoch, "open": prices, "high": prices * 1.001,
+            "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours,
+        }
+        if include_taker_buy_quote:
+            buy_ratio = 0.5 + 0.05 * (i + 1) / len(symbols)
+            columns["taker_buy_quote"] = [1000.0 * buy_ratio] * n_hours
+        pd.DataFrame(columns).to_parquet(hdir / f"{sym}.parquet")
         if with_minute:
             mp = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, len(minute_idx))))
             pd.DataFrame(
@@ -126,6 +137,19 @@ def mhs_market_funding_vary(tmp_path, monkeypatch):
     ``mhs_market`` funding collapses a funding-carry book to zero weights)."""
     root = tmp_path / "market_funding_vary"
     end = _write_mhs_market(root, funding_cross_sectional=True)
+    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    return root, end
+
+
+@pytest.fixture
+def mhs_market_with_taker_buy_quote(tmp_path, monkeypatch):
+    """``mhs_market`` plus a deterministic ``taker_buy_quote`` column, so the
+    committee_capital fold path can load the flow_imb members' required source
+    panel. The shared ``mhs_market`` intentionally omits the column so the
+    committee source-coverage gate tests still see it absent."""
+    root = tmp_path / "market_tbq"
+    end = _write_mhs_market(root, include_taker_buy_quote=True)
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     return root, end
@@ -2044,6 +2068,97 @@ def test_crash_tilt_active_fold_reaches_replay(mhs_market_with_btc) -> None:
     assert not target_off.equals(target_on)
     assert np.isfinite(target_on.to_numpy(dtype="float64")).all()
     assert float(target_on.abs().max().max()) <= 1.0 + 1e-9
+
+
+def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_CAPITAL_DEFAULT_OFF_BIT_IDENTICAL: with the opt-in
+    # disabled (committee_capital defaults False) _build_fold_target_weights
+    # executes zero committee code -- proved by monkeypatching build_feature_books
+    # to raise if ever called -- and returns target weights byte-identical to an
+    # unpatched baseline run.
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+    )
+    assert request.committee_capital is False
+
+    def _must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(ev, "build_feature_books", _must_not_be_called)
+    target_patched, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+    )
+
+    monkeypatch.undo()
+    target_baseline, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+    )
+    pd.testing.assert_frame_equal(target_patched, target_baseline)
+
+
+def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote) -> None:
+    # SCENARIO_MHS_COMMITTEE_CAPITAL_REACHES_FOLD_TARGETS: with committee_capital
+    # enabled the fold decision targets become the equal-weight committee blend,
+    # not the momentum blend. They differ from the baseline, stay finite, remain
+    # dollar-neutral row-wise, and keep gross bounded by unit. The A/B legs use
+    # portfolio_rebalance_trigger on both sides so the ONLY difference is the
+    # book itself (the P0 design goal); the default per_symbol_deadband breaks
+    # row-sum neutrality for every blend in the system, so it cannot carry the
+    # neutrality assertion (the contract rationale's "rebalance trigger" is
+    # precisely the whole-row-hold trigger, which preserves neutrality by
+    # construction -- docs/specs/mhs_alpha_engine.md §1).
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        rebalance_filter="portfolio_trigger",
+    )
+    target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+    )
+    request_on = dataclasses.replace(request, committee_capital=True)
+    target_on, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request_on, funding_by_symbol,
+    )
+    assert not target_off.equals(target_on)
+    assert np.isfinite(target_on.to_numpy(dtype="float64")).all()
+    assert float(target_on.sum(axis=1).abs().max()) < 1e-6
+    assert float(target_on.abs().max().max()) <= 1.0 + 1e-9
+
+
+def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_CAPITAL_NO_MEMBER_FAILS_CLOSED: when no committee
+    # member is admitted, the fold target builder raises RuntimeError naming
+    # committee_capital instead of silently falling back to the momentum blend.
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        committee_capital=True,
+    )
+    monkeypatch.setattr(ev, "build_feature_books", lambda *a, **k: {})
+    with pytest.raises(RuntimeError, match="committee_capital"):
+        ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
 
 
 def test_p14_postbook_concurrent_parity() -> None:
