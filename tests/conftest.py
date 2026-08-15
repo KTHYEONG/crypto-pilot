@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -17,11 +18,35 @@ _PROJECT_TEMP_ROOT = Path(__file__).resolve().parents[1] / "tmp" / "pytest"
 
 
 @pytest.hookimpl(trylast=True)
-def pytest_configure(config) -> None:
+def pytest_configure(config: pytest.Config) -> None:
     _PROJECT_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
     os.environ["PYTEST_DEBUG_TEMPROOT"] = str(_PROJECT_TEMP_ROOT)
     os.environ["TMPDIR"] = str(_PROJECT_TEMP_ROOT)
     tempfile.tempdir = str(_PROJECT_TEMP_ROOT)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitCode) -> None:
+    """Clean up temporary test artifacts on session finish when all tests pass.
+
+    Time Complexity: O(N) where N is the number of temporary entries in the session temp root.
+    Space Complexity: O(1) auxiliary space.
+    """
+    if hasattr(session.config, "workerinput"):
+        # pytest-xdist worker process: sessionfinish fires independently per
+        # worker, so sweeping the shared temp root here would race sibling
+        # workers still creating their own tmp_path directories. Only the
+        # controller process (no ``workerinput``) may clean up.
+        return
+    if exitstatus == 0 and _PROJECT_TEMP_ROOT.exists():
+        for child in _PROJECT_TEMP_ROOT.iterdir():
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 pytest_plugins = [
