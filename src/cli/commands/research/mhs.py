@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -49,10 +50,15 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         pnl_vol_target=not args.no_pnl_vol_target,
     )
     report = run_mhs_horizon_diagnostic(request)
+    persist_start = time.perf_counter()
     path = persist_mhs_horizon_diagnostic_report(
         report, mhs_horizon_diagnostic_report_path(),
         tier=MhsOutputTier(args.output_tier),
         request=request,
+    )
+    _logger.info(
+        "[SYS] stage=persist_report elapsed_ms=%d",
+        int((time.perf_counter() - persist_start) * 1000),
     )
     _logger.info(
         "[EVAL] mhs-horizon-diagnostic status=%s books=%s blend=%s path=%s",
