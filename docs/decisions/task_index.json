@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_DIAGNOSTIC_DETAIL_EXPANSION",
+      "date": "2026-08-15",
+      "adr_id": "ADR_20260815_MHS_COMMITTEE_DIAGNOSTIC_DETAIL_EXPANSION",
+      "domain": "mhs",
+      "title": "MHS 위원회 진단 DEBUG 로깅 및 블록 단위 결과 상세화",
+      "why": "committee-book 프로덕션 시도가 timeout으로 실패한 이후, 재실행 시 AI가 결과를 상세 분석할 수 있도록 요청받음. _committee_diagnostic은 로그 라인이 전혀 없었고(module logger _logger 미사용), tier별 walk-forward는 전체 OOS 구간을 단일 Sharpe/CAGR/MDD 스칼라로만 집계해 블록별 시기(연도/구간)별 성과를 구분할 수 없었음. 더 심각하게는 build_mhs_run_history_record가 committee_diagnostic 키 자체를 아예 포함하지 않아, committee-book이 성공적으로 완료되더라도 영구 보관되는 docs/results/mhs_run_history/ 이력에는 위원회 결과가 전혀 남지 않는 구조였음.",
+      "resolution": "_committee_diagnostic에 4개 지점 DEBUG 로그 추가([DATA] committee_source_coverage, [ALGO] committee_member, [EVAL] committee_block, [EVAL] committee_tier_summary, logging.md 태그 스키마 준수). purged_walk_forward/committee.py는 변경하지 않고, 이미 계산된 wf 시리즈를 기존 edges/purge 경계로 caller에서 사후 슬라이싱해 tier별 blocks:[{block_start,bars,net_sharpe,cagr,mdd}] 배열을 per_tier에 추가. build_mhs_run_history_record에 committee_diagnostic: report.committee_diagnostic 키 1줄 추가(기본 None, 기존 patient_reference 필드 추가 선례와 동일 패턴). committee_book=False 시 완전 byte-identical.",
+      "impact": "lean_check 전체 PASS(lint/type/pytest) 재현 확인. 이제 --committee-book 재실행 시 DEBUG 로그와 docs/results/mhs_run_history/ 이력만으로 블록/연도별 성과와 멤버별 admission 근거를 AI가 라이브 로그 캡처 없이 분석 가능. 계산값/Research-GO 게이트/자본배분 무변경."
+    },
+    {
+      "task_id": "TASK_MHS_COMMITTEE_DIAGNOSTIC_STAGE_TELEMETRY",
+      "date": "2026-08-15",
+      "adr_id": "ADR_20260815_MHS_COMMITTEE_DIAGNOSTIC_STAGE_TELEMETRY",
+      "domain": "mhs",
+      "title": "MHS 위원회/멀티피처 진단 및 persist 단계 텔레메트리 계측",
+      "why": "--committee-book 프로덕션 시도가 10분 타임아웃(exit 124)으로 실패해 리포트가 저장되지 못함. peak RSS는 8.4GB로 안전(RAM guard 정상 동작, 과거 OOM 이슈 해소 확인)했으나, run_mhs_horizon_diagnostic 내부 [SYS] 텔레메트리는 final_return까지 약 310초만 기록해 나머지 최대 ~290초가 committee/multi_feature 진단 블록과 persist_mhs_horizon_diagnostic_report 호출 중 어디에서 소요됐는지 로그로 특정할 수 없었음(두 구간 모두 기존에 telemetry 계측 없음).",
+      "resolution": "evaluation.py의 run_mhs_horizon_diagnostic에 diagnostic_feature_panels/committee_diagnostic/multi_feature_diagnostic 3개 telemetry.record 스테이지 추가. _committee_diagnostic에 telemetry: _StageRecorder | None 파라미터 스레딩 후 3개 cost tier(optimistic/base/stress)별 committee_walk_forward_<tier> 스테이지 기록. CLI(mhs.py)에 persist_report 단계 elapsed_ms 로깅 추가(import time). 전부 순수 계측만 추가, 계산값/게이트/자본배분 무변경. /check 과정에서 추가로 발견: tests/conftest.py의 pytest_sessionfinish 훅이 pytest-xdist 하에서 워커 프로세스마다 독립 실행되어 공유 tmp root(tmp/pytest/)를 경합 삭제하며 매 실행마다 다른 테스트가 flaky하게 실패하던 버그를, session.config.workerinput 존재 시 즉시 return하는 컨트롤러 전용 가드로 수정.",
+      "impact": "lean_check.py 전체 PASS(lint/type/pytest, xdist 포함) 재현 확인. committee-book/multi-feature-book 재실행 시 [SYS] 로그만으로 병목 구간(feature panel load vs committee walk-forward vs report persist)을 정확히 특정 가능해짐 -- 다음 최적화 스펙의 전제 조건. 계산값/Research-GO 게이트/PHASE_1_BOOK_BLEND_WEIGHTS 무변경."
+    },
+    {
       "task_id": "TASK_MHS_RESULT_LOGGING_AUTOMATION",
       "date": "2026-08-15",
       "adr_id": "ADR_20260815_MHS_RESULT_LOGGING_AUTOMATION",
@@ -979,26 +999,6 @@
       "why": "The stop-loss edge-recovery verification sweep (spec technical_expert_edge_recovery.md §3) took ~34 minutes for 1,740 cells because each cell was a separate CLI subprocess re-running the full portfolio/router/stress/dual-bootstrap admission-backtest pipeline for a plain single-candidate exit-setting comparison, re-paying import and data-load costs 1,740 times over. Benchmarked root cause: ~1.9s of each 2.1s cell was orchestration overhead (stress duplicate + dual reliability-gate bootstrap + portfolio wrapping), not the ~227ms backtest loop itself.",
       "resolution": "Added research run expert exit-sweep (src/application/research/expert/exit_sweep.py) plus ExitSweepSetting/TechnicalExpertExitSweepRequest (admission_types.py) and ExitSweepCellResult/ExitSweepFamilySummary/TechnicalExpertExitSweepReport (admission_reports.py). Batches data loading once per (symbol, timeframe) pair, parallelizes across pairs via the existing effective_worker_count/ProcessPoolExecutor pattern, calls run_technical_expert_backtest/compute_metrics/compute_equity_reliability_gate directly with no portfolio/router/stress/promotion machinery, and includes the no-stop baseline by default with pre-aggregated family_summary output. JIT/vectorizing the per-bar loop and multithreading were explicitly evaluated and rejected (already settled by the prior hybrid-compilation Phase 0 ADR; the loop is GIL-bound so only process-level parallelism helps).",
       "impact": "Measured 12-15x wall-clock reduction (4h: 34min-equivalent scope down to 2m21s for 1,040 cells; 1d: 20s for 845 cells) while producing MORE data (baseline included) with numerically identical statistics. Used to complete the full 7-timeframframe stop-loss census (6,550 cells total, up from the original 1,740) in a single afternoon instead of an estimated 5+ hours: confirms 6,547/6,550 (99.95%) cells show no gate-PASS edge recovery at any timeframe, with the remaining 3 diagnosed as whipsaw noise from an overly tight stop, not real edge. Closes out the stop-loss exit-mechanism recovery avenue entirely - sizing/entry redesign is the only remaining lever per the original spec's §4."
-    },
-    {
-      "task_id": "TASK_STOP_LOSS_EDGE_RECOVERY",
-      "date": "2026-08-03",
-      "adr_id": "ADR_20260803_STOP_LOSS_EDGE_RECOVERY",
-      "domain": "risk",
-      "title": "Technical Expert Edge Recovery — Causal Stop-Loss Engine (v2)",
-      "why": "18-candidate technical expert library showed 0/499 backtests passing the observation gate across all timeframes; re-mining win_rate/payoff_ratio showed trend-confirmation families near-breakeven arithmetically (profit_factor>1) but negative geometrically (volatility drag from full-notional, unmanaged-risk sizing with no stop-loss), and pullback families with high win-rate/low payoff-ratio (no-stop-loss unbounded-loss signature).",
-      "resolution": "Added an opt-in causal stop-loss engine to _execute_target_schedule (fixed_pct/atr_multiple modes x static/trailing anchors, causally-shifted ATR, default stop_loss_mode=None byte-identical to prior behavior), threaded through run_technical_expert_backtest, TechnicalLibraryAdmissionBacktestRequest, and the CLI. Ran the spec's own verification sweep: 1,740 real CLI backtests across 12 stop settings x 16(4h)/13(1d) candidates x 5 symbols.",
-      "impact": "Stop-loss mechanism confirmed working and non-regressive, but did NOT recover edge: 0/960 cells passed the gate at 4h, 3/780 at 1d (isolated single-symbol whipsaw noise, not real edge; family-level PASS stayed 0/5 everywhere). Volatility-drag mitigation is real but insufficient to overcome the underlying lack of gross alpha already established by the 0/499 census — confirms the bottleneck is entry/sizing, not exit risk management."
-    },
-    {
-      "task_id": "TASK_TIMEFRAME_SCALING_ZERO_EDGE",
-      "date": "2026-08-02",
-      "adr_id": "ADR_20260802_TIMEFRAME_SCALING_ZERO_EDGE",
-      "domain": "signal",
-      "title": "타임프레임 불변 lookback 스케일링 구현 및 18종 후보 전수 edge 반증",
-      "why": "docs/results/rolling-res.md 기준 4h 외 타임프레임 성과·전략 정리·심볼선정 개선 요청에서 출발. 1차 census(활동성 게이트만 측정)에서 봉-개수 고정 파라미터(EMA/MACD/RSI 등 지표 기간, 라우터 lookback, activity floor)가 --timeframe과 무관하게 동일해 12h/1d 통과율이 봉-개수 왜곡으로 착시 붕괴함을 발견.",
-      "resolution": "timeframe_scale_factor 유틸(4h 기준 캘린더-시간 불변량)을 만들어 resolve_technical_candidate/scale_router_spec/scale_admission_config/RollingAdmissionConfig.warmup_bars에 배선(4h 무회귀 검증). 스케일링 적용 재census 후 18개 후보 x 7개 타임프레임 중 활동성 게이트를 통과한 전체 499개 조합을 research run expert backtest로 전수 실제 P&L 검증 -> 0/499 관측 게이트 통과, 전 후보 마이너스~보합 평균 CAGR 확인. 검증 도중 admission_backtest.py의 동일 스케일링 누락(별도 코드 경로)을 발견해 추가 수정(4h 무회귀 확인). rolling_admission.py의 동일 결함은 범위 밖(6곳 이상, 부분수정 리스크)으로 남김.",
-      "impact": "18개 기술적 전문가 후보 전부 단독 edge 부재 확정 -> rolling-res.md의 양의 블렌드 CAGR은 개별 레그가 아닌 다중 후보 분산·라우팅에서 기인함을 재확인. 카탈로그 삭제 대신 블렌드 구성요소로만 취급, 신규 신호계열(Supertrend 등) 또는 블렌드 자체 개선이 다음 경로. rolling_admission.py 라우터 스케일링 미비는 후속 과제로 명시."
     }
   ]
 }
