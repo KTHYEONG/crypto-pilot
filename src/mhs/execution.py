@@ -2090,6 +2090,48 @@ def replay_execution_windows(
     return accumulator.finalize()
 
 
+def replay_execution_window_batch(
+    windows: Iterable[ExecutionReplayWindow],
+    initial_equity: float,
+    bounds: Iterable[tuple[_ExecutionBound, ExecutionSpec]],
+    retain_event_snapshots: bool = False,
+    min_equity_fraction: float | None = None,
+) -> tuple[StrategyExecutionReplayResult, ...]:
+    """Replay one shared window stream into N independent bounds.
+
+    The N ``(execution_bound, spec)`` pairs consume identical immutable market
+    windows; only their state, fill rule, and cost spec differ. Each yielded
+    window is consumed by every bound's accumulator, then released before the
+    next is requested, so a single loaded ``ExecutionReplayWindow`` stays the
+    memory boundary and the window iterator is exhausted exactly once (never
+    materialized or recreated). Every bound's accumulator is byte-identical to
+    the single-bound ``replay_execution_windows`` path. A fatal
+    ``DataIntegrityError`` raised by an earlier bound propagates unchanged; no
+    later bound result is fabricated.
+    """
+    bound_list = list(bounds)
+    if not bound_list:
+        raise ValueError("bounds must be non-empty")
+    it = iter(windows)
+    first = next(it, None)
+    if first is None:
+        raise DataIntegrityError("at least one execution window is required")
+    accumulators = [
+        _BoundExecutionReplayAccumulator(
+            first, initial_equity, bound, spec, retain_event_snapshots, min_equity_fraction,
+        )
+        for (bound, spec) in bound_list
+    ]
+    for acc in accumulators:
+        acc.consume(first)
+    del first
+    for w in it:
+        for acc in accumulators:
+            acc.consume(w)
+        del w
+    return tuple(acc.finalize() for acc in accumulators)
+
+
 def replay_execution_window_pair(
     windows: Iterable[ExecutionReplayWindow],
     initial_equity: float,
@@ -2107,21 +2149,9 @@ def replay_execution_window_pair(
     raised by the strict bound propagates unchanged; no stress result is
     fabricated.
     """
-    it = iter(windows)
-    first = next(it, None)
-    if first is None:
-        raise DataIntegrityError("at least one execution window is required")
-    strict = _BoundExecutionReplayAccumulator(
-        first, initial_equity, "OHLCV_STRICT_PROXY", spec, retain_event_snapshots,
+    strict, stress = replay_execution_window_batch(
+        windows, initial_equity,
+        [("OHLCV_STRICT_PROXY", spec), ("OHLCV_IMMEDIATE_TAKER", spec)],
+        retain_event_snapshots=retain_event_snapshots,
     )
-    stress = _BoundExecutionReplayAccumulator(
-        first, initial_equity, "OHLCV_IMMEDIATE_TAKER", spec, retain_event_snapshots,
-    )
-    strict.consume(first)
-    stress.consume(first)
-    del first
-    for w in it:
-        strict.consume(w)
-        stress.consume(w)
-        del w
-    return strict.finalize(), stress.finalize()
+    return strict, stress

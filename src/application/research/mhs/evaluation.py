@@ -20,7 +20,7 @@ import os
 import time
 from datetime import UTC, datetime
 from uuid import uuid4
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import StrEnum
@@ -42,6 +42,7 @@ from src.application.data.mhs_execution_collection import assert_relevant_mark_p
 from src.mhs.evaluation import phase_diagnostic_metrics
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
+from src.mhs.execution import replay_execution_window_batch
 from src.mhs.execution import replay_execution_windows
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 # contract wiring: from src.mhs.parallel import MHS_FORK_CONTEXT, assert_fork_admission, fork_shared_payload, plan_worker_count
@@ -2554,57 +2555,8 @@ def _iter_mhs_execution_windows(
 
 
 
-def _window_footprint_bytes(window: MhsExecutionWindow) -> int:
-    """Approximate resident bytes of one frozen replay window.
-
-    The dense panels (highs/lows/closes/marks/bar_funding) dominate the window
-    footprint; the index/columns and the grid/signal indexes are included so the
-    budget is conservative. Used only to bound ``_materialize_replay_windows``;
-    never alters computed values.
-    """
-    total = 0
-    for frame in (window.highs, window.lows, window.closes, window.bar_funding, window.target_weights):
-        total += int(frame.values.nbytes) + int(frame.index.nbytes)
-    if window.marks is not None:
-        total += int(window.marks.values.nbytes) + int(window.marks.index.nbytes)
-    total += int(window.minute_grid.nbytes) + int(window.signal_available_at.nbytes)
-    return total
-
-
-def _materialize_replay_windows(
-    gen: Callable[[], Iterator[MhsExecutionWindow]],
-    budget_bytes: int | None = None,
-) -> tuple[MhsExecutionWindow, ...]:
-    """Exhaust a window generator once and freeze the window tuple.
-
-    The window content (grid, roster, frames, marks, funding) is identical
-    across the replay passes of a book/fold -- only ``target_weights`` values
-    differ (by a positive scalar). Materializing once and re-yielding the same
-    read-only windows for every pass removes the per-pass regeneration of
-    marks/frames/funding (the measured ~90% of worker time).
-
-    ``budget_bytes`` bounds the materialized footprint: windows accumulate
-    while the cumulative ``_window_footprint_bytes`` stays within the budget and
-    at least one window is always kept. ``budget_bytes=None`` keeps the current
-    unbounded behavior and is bit-identical to ``tuple(gen())``; within the
-    budget the bounded path is also bit-identical. Beyond the budget the
-    remaining windows are regenerated on demand (fallback), never dropped
-    silently.
-    """
-    windows: list[MhsExecutionWindow] = []
-    total = 0
-    for window in gen():
-        windows.append(window)
-        if budget_bytes is None:
-            continue
-        total += _window_footprint_bytes(window)
-        if total > budget_bytes:
-            break
-    return tuple(windows)
-
-
 def _rescaled_windows(
-    windows: tuple[MhsExecutionWindow, ...],
+    windows: Iterable[MhsExecutionWindow],
     scale: pd.Series | None,
 ) -> Iterator[MhsExecutionWindow]:
     """Yield the frozen windows with ``target_weights`` rescaled by ``scale``.
@@ -2752,16 +2704,13 @@ def _book_outcome(
     pre_vol_target_reference = None
     pre_vol_target_reference_naive_sharpe = None
     try:
-        # The window content (grid, roster, frames, marks, funding) is identical
-        # across all replay passes -- only ``target_weights`` differ by the
-        # P&L-vol-target scalar. Materializing once and substituting weights per
-        # pass removes the per-pass regeneration (marks/frames/funding), which
-        # measures as ~90% of worker time (spec ``mhs_perf_optimization.md``
-        # §1.2). Materialization lives inside the try so a mark-gap
-        # ``DataIntegrityError`` becomes a typed book failure, not an escape.
-        replay_windows = _materialize_replay_windows(_windows)
+        # Streaming replay: no bulk window materialization.  Phase A (reference,
+        # unscaled) streams the generator directly; Phase B (rescaled)
+        # regenerates once and fans every rescaled bound over that single
+        # stream, so one loaded window stays the memory boundary and the
+        # generator is exhausted exactly twice regardless of bound count.
         primary = replay_execution_windows(
-            _window_telemetry(iter(replay_windows), "execution_window"),
+            _window_telemetry(_windows(), "execution_window"),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
             retain_event_snapshots=False,
             min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
@@ -2778,41 +2727,37 @@ def _book_outcome(
         pre_vol_target_reference = primary
         pre_vol_target_reference_naive_sharpe = _naive_sharpe(primary.ledger)
         # Pass 2 replays the scaled target_replay with min_equity_fraction floor.
-        primary = replay_execution_windows(
-            _window_telemetry(_rescaled_windows(replay_windows, replay_scale), "execution_window"),
-            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
-            retain_event_snapshots=False,
-            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
-        )
-        stress = replay_execution_windows(
-            _window_telemetry(_rescaled_windows(replay_windows, replay_scale), "execution_window_cost_stress"),
-            initial_equity, "OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec(),
-            retain_event_snapshots=False,
-            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
-        )
-        patient_reference = replay_execution_windows(
-            _window_telemetry(_rescaled_windows(replay_windows, replay_scale), "execution_window_patient_reference"),
-            initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
-            retain_event_snapshots=False,
-            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
-        )
-        patient_reference_naive_sharpe = _naive_sharpe(patient_reference.ledger)
+        batch_bounds: list[tuple[
+            Literal["OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"],
+            ExecutionSpec,
+        ]] = [
+            ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
+            ("OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec()),
+            ("OHLCV_STRICT_PROXY", ExecutionSpec()),
+        ]
         if request.touch_diagnostic:
-            touch = replay_execution_windows(
-                _window_telemetry(_rescaled_windows(replay_windows, replay_scale), "execution_window_touch"),
-                initial_equity, "OHLCV_TOUCH_PROXY", ExecutionSpec(),
-                retain_event_snapshots=False,
-                min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
-            )
-            touch_naive_sharpe = _naive_sharpe(touch.ledger)
+            batch_bounds.append(("OHLCV_TOUCH_PROXY", ExecutionSpec()))
         if request.ladder_diagnostic:
             _validate_ladder_schedule_contract()
-            ladder = replay_execution_windows(
-                _window_telemetry(_rescaled_windows(replay_windows, replay_scale), "execution_window_ladder"),
-                initial_equity, "OHLCV_LADDERED_PROXY", ExecutionSpec(),
-                retain_event_snapshots=False,
-                min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
-            )
+            batch_bounds.append(("OHLCV_LADDERED_PROXY", ExecutionSpec()))
+        batch = replay_execution_window_batch(
+            _window_telemetry(
+                _rescaled_windows(_windows(), replay_scale),
+                "execution_window_rescaled",
+            ),
+            initial_equity, batch_bounds,
+            retain_event_snapshots=False,
+            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
+        )
+        primary = batch[0]
+        stress = batch[1]
+        patient_reference = batch[2]
+        patient_reference_naive_sharpe = _naive_sharpe(patient_reference.ledger)
+        if request.touch_diagnostic:
+            touch = batch[3]
+            touch_naive_sharpe = _naive_sharpe(touch.ledger)
+        if request.ladder_diagnostic:
+            ladder = batch[-1]
             ladder_naive_sharpe = _naive_sharpe(ladder.ledger)
         if telemetry is not None:
             telemetry.record(
@@ -3842,11 +3787,10 @@ def _run_anchored_fold(
                 )
 
         window_prefix = f"anchored_fold_{fold_index}_window"
-        # Materialize the fold's windows once; both passes substitute the
-        # causal P&L-vol-target scale per pass (identical frames/marks/funding).
-        fold_windows = _materialize_replay_windows(_windows)
+        # Streaming replay: reference pass streams directly; the rescaled
+        # primary/stress pair reuses one regenerated window stream.
         primary = replay_execution_windows(
-            _window_telemetry(iter(fold_windows), window_prefix),
+            _window_telemetry(_windows(), window_prefix),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
             retain_event_snapshots=False,
         )
@@ -3856,14 +3800,16 @@ def _run_anchored_fold(
         pnl_vol_target_scale = _pnl_vol_target_scale(
             primary.ledger.equity.resample("1D").last().pct_change()
         )
-        primary = replay_execution_windows(
-            _window_telemetry(_rescaled_windows(fold_windows, pnl_vol_target_scale), window_prefix),
-            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
-            retain_event_snapshots=False,
-        )
-        stress = replay_execution_windows(
-            _window_telemetry(_rescaled_windows(fold_windows, pnl_vol_target_scale), f"{window_prefix}_cost_stress"),
-            initial_equity, "OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec(),
+        primary, stress = replay_execution_window_batch(
+            _window_telemetry(
+                _rescaled_windows(_windows(), pnl_vol_target_scale),
+                f"{window_prefix}_rescaled",
+            ),
+            initial_equity,
+            [
+                ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
+                ("OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec()),
+            ],
             retain_event_snapshots=False,
         )
 

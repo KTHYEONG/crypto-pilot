@@ -19,6 +19,7 @@ from src.mhs.execution import (
     mhs_ledger_pnl_multi_tier,
     notional_weighted_shortfall_bps,
     passive_fill_shortfall_bps,
+    replay_execution_window_batch,
     replay_execution_window_pair,
     replay_execution_windows,
     simulated_inventory_ledger,
@@ -1117,6 +1118,51 @@ class TestWindowedReplayEquivalence:
         assert consumed["n"] == len(windows)
         _assert_pair_equivalent(strict_single, strict_pair, "strict")
         _assert_pair_equivalent(stress_single, stress_pair, "stress")
+
+    def test_batch_fanout_matches_independent_bounds(self) -> None:
+        """SCENARIO_MHS_STREAM_BATCH_EQUIVALENCE: an N-bound interleaved batch
+        over a single window iterator equals N independent single-bound calls
+        and consumes each window exactly once."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        spec = ExecutionSpec()
+        bounds = [
+            ("OHLCV_IMMEDIATE_TAKER", spec),
+            ("OHLCV_IMMEDIATE_TAKER", spec),
+            ("OHLCV_STRICT_PROXY", spec),
+        ]
+        independent = [
+            replay_execution_windows(windows, 1.0, b, s, retain_event_snapshots=True)
+            for (b, s) in bounds
+        ]
+        consumed = {"n": 0}
+
+        def _gen():
+            for w in windows:
+                consumed["n"] += 1
+                yield w
+
+        batch = replay_execution_window_batch(
+            _gen(), 1.0, bounds, retain_event_snapshots=True,
+        )
+        assert consumed["n"] == len(windows)
+        assert len(batch) == len(bounds)
+        for i, (indep, bres) in enumerate(zip(independent, batch, strict=True)):
+            _assert_pair_equivalent(indep, bres, f"batch[{i}]")
+
+    def test_batch_empty_bounds_fails_closed(self) -> None:
+        """SCENARIO_MHS_STREAM_BATCH_EMPTY_BOUNDS: an empty bounds iterable
+        raises ValueError before any window is consumed."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        with pytest.raises(ValueError, match="bounds"):
+            replay_execution_window_batch(windows, 1.0, [])
 
     def test_pair_strict_data_integrity_error_propagates(self) -> None:
         """MHS-MEM-PAIR-01: a fatal strict DataIntegrityError propagates
