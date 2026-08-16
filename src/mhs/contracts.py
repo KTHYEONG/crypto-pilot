@@ -141,7 +141,6 @@ MHS_COMMITTEE_MEMBERS: tuple[str, ...] = (
     "flow_imb_720h",
     "flow_imb_168h",
     "xs_mom_336h",
-    "xs_mom_720h",
     "xs_idio_mom_336h",
     "mom3_skew_168h",
 )
