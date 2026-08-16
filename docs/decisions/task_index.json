@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_CAPITAL_BLEND_WIRING",
+      "date": "2026-08-16",
+      "adr_id": "ADR_20260816_MHS_COMMITTEE_CAPITAL_BLEND_WIRING",
+      "domain": "mhs",
+      "title": "MHS committee_capital 배선을 top-level blend/deployment_readiness로 연결 (RC-4)",
+      "why": "committee_capital 플래그가 fold 경로(_build_fold_target_weights)에만 반영되고 top-level blend_replay는 여전히 PHASE_1_BOOK_BLEND_WEIGHTS(단일 모멘텀축)로 고정돼 deployment_readiness/report.blend가 실제 자본 배분을 반영하지 못함. 축 확장(9~10 feature axes)·레그 역변동성 틸트·사전 변동성 타깃 오버레이는 walk-forward-safe(fold train 구간에서만 axis admit) 재검증에서 전부 기각(committee6 단독보다 성과 악화)되어 제외.",
+      "resolution": "_committee_execution_book 헬퍼를 신설해 fold 경로 인라인 블록을 대체하고 top-level run_mhs_horizon_diagnostic/_run_books_concurrent의 blend_replay에도 동일 헬퍼를 배선. committee_capital=False 기본값은 byte-identical 유지. 실제 3분봉 리플레이(--committee-capital --no-ram-guard)로 검증: blend CAGR -0.0598->+0.1939, MDD -0.3438->-0.3090, Sharpe -0.670->0.718, Calmar -0.174->0.628, P(최종자산<초기자산) 0.915->0.068.",
+      "impact": "research run portfolio mhs-horizon-diagnostic --committee-capital 실행 시 deployment_readiness/report.blend가 위원회6 자본배분을 정확히 반영. 기본 실행(플래그 미지정)은 무변경. research_go.eligible은 여전히 false(PRIMARY_AUTOCORR_SHARPE_BELOW_0_6/RELEVANT_EXECUTION_DATA_GAP/UNSPECIFIED_POLICY, 기존 정책 게이트로 이번 변경과 무관). 이 dev 박스에서는 committee_capital 실행 시 기본 ram_guard로 top-level blend/slow_momentum 북이 RESOURCE_BUDGET_BREACH로 조기 종료될 수 있어 --no-ram-guard 필요."
+    },
+    {
       "task_id": "TASK_MHS_DYNAMIC_GAP_EXCLUSION",
       "date": "2026-08-15",
       "adr_id": "ADR_20260815_MHS_DYNAMIC_GAP_EXCLUSION",
@@ -989,16 +999,6 @@
       "why": "docs/results/growth_portfoilo.md의 NO_ADMISSIBLE_ALPHA(binding=multiplicity) 실행에서 funding_contrarian_v1 전략군(3/12 가설)이 discovery 단계에서 DATA_INVALID로 단 한 번도 실전 평가되지 않은 것을 발견함. 원인은 (1) _build_settled_funding이 심볼별 funding 이벤트를 pd.DataFrame(dict)로 합칠 때 서브밀리초 타임스탬프 불일치로 인덱스 유니온 NaN(컬럼당 최대 52.9%)이 발생해 align_funding_bars의 finite 체크를 오탐시키는 버그, (2) causal-alignability 체크가 전역 그리드 전체 커버리지를 요구해 discovery 로스터 49개 심볼 중 단 2개 때문에 가족 전체가 죽는 과잉 엄격함이었음.",
       "resolution": "align_funding_bars에 컬럼별 dropna(union NaN 제거, C1)와 symbol_spans 기반 심볼별 스케줄 구간 causal-alignability 재정의(전역 그리드 대신 PIT 로스터 편입 구간 기준, C2)를 적용. _oos_t_stat의 표본 구간을 test_fraction 명시 파라미터로 승격해 매직 넘버를 표면화(C3, 방향 전환 없음 — 실측상 전체 구간 사용이 오히려 게이트를 더 엄격하게 만듦을 확인). family_window_correlation을 추가해 family 내 윈도우 간 net-return 상관계수를 측정 전용으로 로깅(C4, falsification 미반영). 재실행 결과 funding_contrarian_v1이 SCREENED로 전환되었으나 discovery Sharpe(최고 0.609)가 taker_imbalance_v1(2.246)에 못 미쳐 family 선택에서 패배 — 최종 판정(NO_ADMISSIBLE_ALPHA, CASH)은 불변.",
       "impact": "미탐색 전략 가족을 실전 평가 가능하게 정정했으나 최종 자산배분 판정은 바뀌지 않음(정직한 재측정, gate 완화 아님). 4개 전략군 윈도우 간 상관계수(0.41~0.80) 실측치를 처음 확보해 family_size=12 Bonferroni 보정 타당성 재검토의 근거 자료로 남김."
-    },
-    {
-      "task_id": "TASK_GROWTH_STRATEGY_DISCOVERY_V1",
-      "date": "2026-08-03",
-      "adr_id": "ADR_20260803_GROWTH_STRATEGY_DISCOVERY_V1",
-      "domain": "portfolio",
-      "title": "Growth portfolio multi-strategy discovery",
-      "why": "The growth engine had no admissible strategy after xs_momentum plateau and holdout failures.",
-      "resolution": "Added a frozen four-family twelve-hypothesis strategy library, causal funding accounting, dev-only discovery with finalist holdout evaluation, and fail-closed CASH reporting.",
-      "impact": "Growth CLI now identifies a plateau-passing finalist while preserving multiplicity and holdout gates; the latest sealed run remains CASH."
     }
   ]
 }
