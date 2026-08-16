@@ -3003,6 +3003,7 @@ def _run_books_concurrent(
     initial_equity: float,
     telemetry: _StageRecorder | None = None,
     regime_scale: pd.Series | None = None,
+    committee_execution_book: pd.DataFrame | None = None,
 ) -> tuple[MhsBookReport, MhsBookReport, MhsBookReport]:
     """Run the three top-level books concurrently in fork children.
 
@@ -3028,8 +3029,12 @@ def _run_books_concurrent(
     active_spec, active_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     blend_step = blend_1h.reindex(active_grid)
     blend_replay = (
-        PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
-        + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+        committee_execution_book.reindex(grid_1h).ffill().fillna(0.0)
+        if committee_execution_book is not None
+        else (
+            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
+            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+        )
     ).reindex(active_grid)
     if regime_scale is not None:
         blend_replay = blend_replay.mul(regime_scale.reindex(active_grid).fillna(1.0), axis=0)
@@ -3342,6 +3347,38 @@ def _prefer_funding_carry_selection(
     return lookback, sign
 
 
+def _committee_execution_book(
+    close: pd.DataFrame,
+    quote_vol: pd.DataFrame,
+    taker_buy_quote: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    decision_grid: pd.DatetimeIndex,
+    min_symbols: int,
+) -> pd.DataFrame:
+    """Build the k=6 committee capital book on the decision grid.
+
+    Shared by the fold path and the top-level blend: filter the registry to
+    ``MHS_COMMITTEE_MEMBERS``, build equal-notional rank books, average them.
+    No leg-risk tilt -- tilting the curated committee set to equal risk removed
+    the concentration that carries its edge (walk-forward Sharpe 0.822 -> 0.503,
+    rejected in RC-4). Fails closed when no member is admitted.
+    """
+    _member_specs = [
+        spec for spec in MHS_FEATURE_REGISTRY
+        if spec.name in set(MHS_COMMITTEE_MEMBERS)
+    ]
+    _committee_books = build_feature_books(
+        _member_specs,
+        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
+        execution_mask, decision_grid, min_symbols=min_symbols,
+    )
+    if not _committee_books:
+        raise RuntimeError(
+            "committee_capital: no committee member admitted in this fold window"
+        )
+    return sum(_committee_books.values()) / float(len(_committee_books))
+
+
 def _build_fold_target_weights(
     root: str,
     fold: AnchoredPurgedFold,
@@ -3468,23 +3505,10 @@ def _build_fold_target_weights(
             request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
         )
     if request.committee_capital:
-        _member_specs = [
-            spec for spec in MHS_FEATURE_REGISTRY
-            if spec.name in set(MHS_COMMITTEE_MEMBERS)
-        ]
-        _committee_books = build_feature_books(
-            _member_specs,
-            {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
-            execution_mask, slow_grid, min_symbols=slow.min_symbols,
-        )
-        if not _committee_books:
-            raise RuntimeError(
-                "committee_capital: no committee member admitted in this fold window"
-            )
-        blend_1h = (
-            sum(_committee_books.values()) / float(len(_committee_books))
+        blend_1h = _committee_execution_book(
+            close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
         ).reindex(grid_1h).fillna(0.0)
-        del _committee_books, close, taker_buy_quote
+        del close, taker_buy_quote
     else:
         blend_1h = (
             PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
@@ -4119,9 +4143,16 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
 
     root = request.data_root or str(FUTURES_DATA_DIR / "ohlcv")
     panel = load_base_panel(
-        root, "1h", ("close", "open", "quote_vol"), start, end, partition="dev", min_bars=2000,
+        root, "1h",
+        (
+            ("close", "open", "quote_vol", "taker_buy_quote")
+            if request.committee_capital
+            else ("close", "open", "quote_vol")
+        ),
+        start, end, partition="dev", min_bars=2000,
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    taker_buy_quote = panel["taker_buy_quote"] if request.committee_capital else None
     grid_1h = close.index
     symbols = list(close.columns)
     telemetry.record("base_1h_panel", grid_bars=len(grid_1h), n_symbols=len(symbols))
@@ -4138,6 +4169,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     close = close[funded]
     opens = opens[funded]
     quote_vol = quote_vol[funded]
+    if taker_buy_quote is not None:
+        taker_buy_quote = taker_buy_quote[funded]
     bar_period = grid_1h[1] - grid_1h[0]
     funding_window = {
         s: funding_by_symbol[s].loc[
@@ -4153,6 +4186,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     close = close[aligned_symbols]
     opens = opens[aligned_symbols]
     quote_vol = quote_vol[aligned_symbols]
+    if taker_buy_quote is not None:
+        taker_buy_quote = taker_buy_quote[aligned_symbols]
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned_symbols}
     bar_funding = bar_funding[aligned_symbols]
     telemetry.record("funding_alignment", grid_bars=len(grid_1h), n_symbols=len(aligned_symbols))
@@ -4163,7 +4198,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # The raw close panel is not used after its log transform.  Releasing it
     # before phase/weight construction avoids retaining two full multi-year
     # price matrices at once.
-    del close
+    if not request.committee_capital:
+        del close
 
     specs = PHASE_1_BOOK_SPECS
     fast = specs["fast_reversal"]
@@ -4295,11 +4331,23 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # Eligibility and the execution roster are now materialized.  The raw
     # volume matrix otherwise stays alive while phase diagnostics create their
     # temporary target-weight matrices.
-    del quote_vol
-    blend_1h = (
-        PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
-        + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
-    )
+    if not request.committee_capital:
+        del quote_vol
+    if request.committee_capital:
+        # RC-4: the reported blend is the committee execution book, not the
+        # frozen momentum formula. Un-scaled copy feeds the concurrent replay
+        # base so regime_scale applies exactly once (matching the fold path).
+        blend_1h = _committee_execution_book(
+            close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
+        ).reindex(grid_1h).ffill().fillna(0.0)
+        committee_execution_book = blend_1h
+        del close, quote_vol, taker_buy_quote
+    else:
+        blend_1h = (
+            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
+            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
+        )
+        committee_execution_book = None
     blend_gross = float(blend_1h.abs().sum(axis=1).mean())
     blend_cash_fraction = float((1.0 - blend_1h.abs().sum(axis=1)).mean())
     # R1: apply the same volatility-regime cash scale the fold path applies to
@@ -4473,6 +4521,11 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     execution_symbols = sorted(
         set(w_fast_execution.columns[w_fast_execution.ne(0.0).any(axis=0)])
         | set(w_slow_execution.columns[w_slow_execution.ne(0.0).any(axis=0)])
+        | (
+            set(blend_1h.columns[blend_1h.ne(0.0).any(axis=0)])
+            if request.committee_capital
+            else set()
+        )
     )
     initial_equity = 1.0
     minute_grid = pd.date_range(
@@ -4503,12 +4556,13 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             w_fast, w_slow, w_fast_execution, w_slow_execution, opens, bar_funding,
             phase_fast, phase_slow, phase_blend, start, end, funding_by_symbol,
             blend_1h, execution_mask, initial_equity, telemetry, regime_scale,
+            committee_execution_book=committee_execution_book,
         )
         # All three books have completed; the single-use step-weight inputs are
         # released together (spec §3.1, ``memory_opt``).
         del w_fast, w_fast_execution, phase_fast
         del w_slow, w_slow_execution, phase_slow
-        del blend_1h, phase_blend, regime_scale
+        del blend_1h, phase_blend, regime_scale, committee_execution_book
         gc.collect()
         _assert_stage_rss_budget("post_books", rss_budget_bytes, rss_reserve_bytes)
         # execution_mask stays alive: the post-fold opt-in diagnostics consume

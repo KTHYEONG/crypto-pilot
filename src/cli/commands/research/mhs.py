@@ -199,10 +199,11 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         default=False,
         help=(
             "Opt-in: build the k=6 committee members into the FOLD decision "
-            "targets (equal-weight over admitted members) in place of the "
-            "momentum blend, so the committee is measured through the real 5m "
-            "simulated inventory ledger and the same Research-GO fold gate as "
-            "production. Changes no capital allocation by itself"
+            "targets and the TOP-LEVEL reported blend (equal-weight over "
+            "admitted members, no leg-risk tilt), replacing the frozen momentum "
+            "book in both places; measured to raise walk-forward blend Sharpe "
+            "and reduce blend MDD relative to the momentum default (see the run "
+            "history for magnitudes)."
         ),
     )
     mhs.add_argument(
