@@ -207,12 +207,14 @@ class TestFrozenLiterals:
         assert tuple(sorted(MHS_TREND_SLEEVE_HORIZONS_HOURS)) == MHS_TREND_SLEEVE_HORIZONS_HOURS
         assert all(h > 0 for h in MHS_TREND_SLEEVE_HORIZONS_HOURS)
 
-    def test_committee_literals_are_frozen_declared_composition(self) -> None:
-        # SCENARIO_MHS_COMMITTEE_LITERALS_FROZEN: the k=6 committee is declared
-        # by economic family (order flow x2, cross-sectional trend x3,
-        # higher-moment x1), its 15% target volatility and 720h purge are frozen
-        # contract values, and the purge matches the longest 720h lookbacks so
-        # no overlapping-label information leaks across a walk-forward boundary.
+    def test_committee_members_and_target_vol_are_frozen(self) -> None:
+        # SCENARIO_MHS_COMMITTEE_LITERALS_FROZEN and
+        # SCENARIO_MHS_COMMITTEE_MEMBERS_K5_FROZEN: the k=5 committee is declared
+        # by economic family (order flow x2, cross-sectional trend x2,
+        # higher-moment x1; xs_mom_720h removed as a rank-invariant no-op), its
+        # 15% target volatility and 720h purge are frozen contract values, and
+        # the purge matches the longest 720h lookbacks so no overlapping-label
+        # information leaks across a walk-forward boundary.
         from src.mhs.contracts import (
             MHS_COMMITTEE_MEMBERS,
             MHS_COMMITTEE_OOS_START,
@@ -224,12 +226,12 @@ class TestFrozenLiterals:
             "flow_imb_720h",
             "flow_imb_168h",
             "xs_mom_336h",
-            "xs_mom_720h",
             "xs_idio_mom_336h",
             "mom3_skew_168h",
         )
-        assert len(MHS_COMMITTEE_MEMBERS) == 6
-        assert len(set(MHS_COMMITTEE_MEMBERS)) == 6
+        assert len(MHS_COMMITTEE_MEMBERS) == 5
+        assert len(set(MHS_COMMITTEE_MEMBERS)) == 5
+        assert "xs_mom_720h" not in MHS_COMMITTEE_MEMBERS
         assert pytest.approx(0.15) == MHS_COMMITTEE_TARGET_VOL
         assert MHS_COMMITTEE_PURGE_HOURS == 720
         assert pd.Timestamp("2023-01-01", tz="UTC") == MHS_COMMITTEE_OOS_START
@@ -237,11 +239,12 @@ class TestFrozenLiterals:
 
     def test_committee_purge_hours_matches_longest_member_lookback(self) -> None:
         # SCENARIO_COMMITTEE_PURGE_HOURS_MATCHES_LONGEST_MEMBER_LOOKBACK (B2):
-        # the purge gap must always cover the longest committee feature
-        # lookback (720h, flow_imb_720h/xs_mom_720h) so no overlapping-label
-        # information leaks across a walk-forward boundary. A future member with
-        # a longer lookback than the purge fails this static test loudly instead
-        # of silently recurring the doc/value mismatch the B2 fix corrected.
+        # the purge gap must always cover the longest committee feature lookback
+        # (720h, still carried by flow_imb_720h after the k=5 change) so no
+        # overlapping-label information leaks across a walk-forward boundary. A
+        # future member with a longer lookback than the purge fails this static
+        # test loudly instead of silently recurring the doc/value mismatch the
+        # B2 fix corrected.
         from src.mhs.contracts import MHS_COMMITTEE_MEMBERS, MHS_COMMITTEE_PURGE_HOURS
         from src.mhs.features import MHS_FEATURE_REGISTRY
 
@@ -250,7 +253,6 @@ class TestFrozenLiterals:
         for name in MHS_COMMITTEE_MEMBERS:
             assert name in registry, f"committee member {name} not in registry"
         assert "flow_imb_720h" in MHS_COMMITTEE_MEMBERS
-        assert "xs_mom_720h" in MHS_COMMITTEE_MEMBERS
 
     def test_ram_guard_constants_are_frozen_with_sane_bounds(self) -> None:
         # SCENARIO_MHS_RAM_GUARD_CONSTANTS: the automatic RAM-guard tuning

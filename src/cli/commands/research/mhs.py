@@ -36,6 +36,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         trend_sleeve_gross=args.trend_sleeve_gross,
         multi_feature_book=args.multi_feature_book,
         committee_book=args.committee_book,
+        committee_kelly_sizing=args.committee_kelly_sizing,
         committee_capital=args.committee_capital,
         execution_coverage_gate=args.execution_coverage_gate,
         ram_guard=not args.no_ram_guard,
@@ -185,7 +186,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         action="store_true",
         default=False,
         help=(
-            "Opt-in: measure the declared k=6 wealth committee -- build the "
+            "Opt-in: measure the declared k=5 wealth committee -- build the "
             "committee members into dollar-neutral rank books, audit RAW source "
             "coverage before any fillna, recover sign-safe gross/turnover-cost "
             "panels, and run the purged expanding-train walk-forward reporting "
@@ -194,11 +195,24 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
+        "--committee-kelly-sizing",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in (requires --committee-book): blend the committee walk-forward "
+            "total-exposure scale 50/50 with a train-only quarter-Kelly LCB overlay "
+            "(f=0.25, z=1.0 one-SE shrinkage, 1.5x cap) instead of the flat vol-target "
+            "scale alone; measured to improve Sharpe/MDD/Calmar simultaneously across "
+            "all cost tiers relative to vol-target-scale alone (see run history for "
+            "magnitudes); diagnostic-only, not yet wired into --committee-capital"
+        ),
+    )
+    mhs.add_argument(
         "--committee-capital",
         action="store_true",
         default=False,
         help=(
-            "Opt-in: build the k=6 committee members into the FOLD decision "
+            "Opt-in: build the k=5 committee members into the FOLD decision "
             "targets and the TOP-LEVEL reported blend (equal-weight over "
             "admitted members, no leg-risk tilt), replacing the frozen momentum "
             "book in both places; measured to raise walk-forward blend Sharpe "
