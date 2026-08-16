@@ -350,8 +350,8 @@ class MhsDiagnosticRequest:
             raise ValueError("committee_book must be a bool")
         if not isinstance(self.committee_kelly_sizing, bool):
             raise ValueError("committee_kelly_sizing must be a bool")
-        if self.committee_kelly_sizing and not self.committee_book:
-            raise ValueError("committee_kelly_sizing requires committee_book=True")
+        if self.committee_kelly_sizing and not (self.committee_book or self.committee_capital):
+            raise ValueError("committee_kelly_sizing requires committee_book=True or committee_capital=True")
         if not isinstance(self.committee_capital, bool):
             raise ValueError("committee_capital must be a bool")
         if not isinstance(self.execution_coverage_gate, bool):
@@ -1186,6 +1186,66 @@ def _pnl_vol_target_scale(
     ).median().shift(1)
     scale = expanding_target.div(trailing_vol.where(trailing_vol > 0))
     return scale.clip(lower=floor, upper=1.0).fillna(1.0)
+
+
+def _committee_kelly_scale(
+    reference_daily_returns: pd.Series,
+    window_days: int = MHS_PNL_VOL_TARGET_WINDOW_DAYS,
+    fraction: float = 0.25,
+    z: float = 1.0,
+    floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR,
+) -> pd.Series:
+    """Strategy-own-P&L trailing quarter-Kelly LCB exposure scale, capped at 1.0.
+
+    ``scale_t = clip(fraction * lcb_mean_{t-1} / var_{t-1}, floor, 1.0)`` where
+    ``lcb_mean = trailing_mean - z * trailing_std / sqrt(n)`` (Wald-style
+    lower-confidence-bound mean), mirroring ``_pnl_vol_target_scale``'s
+    shift(1)-before-use causality and floor/1.0 clip exactly -- capped at 1.0
+    rather than the diagnostic-only 1.5x (``kelly_lcb_scale`` in
+    ``src.mhs.committee``) so this blend never levers the execution ledger
+    above the existing no-lever-up invariant the capital-breach gate assumes.
+    A weak or negative LCB edge shrinks the scale to ``floor``, same as the
+    P&L-vol-target scale's momentum-crash de-risking.
+    """
+    if not 0.0 < floor <= 1.0:
+        raise ValueError(f"floor must be in (0, 1], got {floor}")
+    if window_days < 1:
+        raise ValueError(f"window_days must be >= 1, got {window_days}")
+    if fraction <= 0:
+        raise ValueError(f"fraction must be > 0, got {fraction}")
+    if z < 0:
+        raise ValueError(f"z must be >= 0, got {z}")
+    if reference_daily_returns.empty:
+        return pd.Series(1.0, index=reference_daily_returns.index)
+    min_periods = max(5, window_days // 2)
+    trailing_mean = reference_daily_returns.rolling(window_days, min_periods=min_periods).mean().shift(1)
+    trailing_std = reference_daily_returns.rolling(window_days, min_periods=min_periods).std().shift(1)
+    trailing_n = reference_daily_returns.rolling(window_days, min_periods=min_periods).count().shift(1)
+    se = trailing_std.div(np.sqrt(trailing_n))
+    lcb_mean = trailing_mean - z * se
+    var = trailing_std.pow(2)
+    raw_scale = fraction * lcb_mean.div(var.where(var > 0))
+    return raw_scale.clip(lower=floor, upper=1.0).fillna(1.0)
+
+
+def _committee_capital_replay_scale(
+    pnl_vol_target_scale: pd.Series,
+    reference_daily_returns: pd.Series,
+    committee_capital: bool,
+    committee_kelly_sizing: bool,
+) -> pd.Series:
+    """50/50 blend of the P&L-vol-target scale with the committee Kelly-LCB scale.
+
+    Only active when both ``committee_capital`` and ``committee_kelly_sizing``
+    are set (opt-in on top of an opt-in); otherwise returns
+    ``pnl_vol_target_scale`` unchanged so every other run stays byte-identical.
+    """
+    if not (committee_capital and committee_kelly_sizing):
+        return pnl_vol_target_scale
+    kelly_scale = _committee_kelly_scale(reference_daily_returns).reindex(
+        pnl_vol_target_scale.index,
+    ).fillna(1.0)
+    return 0.5 * pnl_vol_target_scale + 0.5 * kelly_scale
 
 
 def _book_weights(
@@ -2737,8 +2797,11 @@ def _book_outcome(
         # multiplicative exposure scalar, so the reported primary/stress/etc.
         # replay the rescaled weights while ``pre_vol_target_reference`` keeps
         # the unscaled Pass-1 result as a diagnostic field.
-        pnl_vol_target_scale = _pnl_vol_target_scale(
-            primary.ledger.equity.resample("1D").last().pct_change()
+        reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
+        pnl_vol_target_scale = _pnl_vol_target_scale(reference_daily_returns)
+        pnl_vol_target_scale = _committee_capital_replay_scale(
+            pnl_vol_target_scale, reference_daily_returns,
+            request.committee_capital, request.committee_kelly_sizing,
         )
         replay_scale = pnl_vol_target_scale if request.pnl_vol_target else None
         pre_vol_target_reference = primary
@@ -3814,8 +3877,11 @@ def _run_anchored_fold(
         # Two-pass primary (reference -> P&L-vol-target rescale -> reported):
         # same causal P&L-vol-target scale as the top-level books, computed from
         # the fold's own validation-window reference ledger.
-        pnl_vol_target_scale = _pnl_vol_target_scale(
-            primary.ledger.equity.resample("1D").last().pct_change()
+        reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
+        pnl_vol_target_scale = _pnl_vol_target_scale(reference_daily_returns)
+        pnl_vol_target_scale = _committee_capital_replay_scale(
+            pnl_vol_target_scale, reference_daily_returns,
+            request.committee_capital, request.committee_kelly_sizing,
         )
         primary, stress = replay_execution_window_batch(
             _window_telemetry(
