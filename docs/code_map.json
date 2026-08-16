@@ -20,9 +20,10 @@
       "tests/unit/mhs/test_evaluation_fold_report.py",
       "tests/unit/mhs/test_evaluation_fold_safe_fast_horizon.py",
       "tests/unit/mhs/test_execution.py",
-      "tests/unit/application/research/mhs/test_evaluation.py"
+      "tests/unit/application/research/mhs/test_evaluation.py",
+      "tests/unit/application/research/test_mhs_capital_multi_axis.py"
     ],
-    "architecture": "docs/specs/mhs_execution_timeframe_3m.md"
+    "architecture": "docs/specs/mhs_capital_multi_axis.md"
   },
   "src/cli/commands/data.py": {},
   "src/cli/commands/research/mhs.py": {
