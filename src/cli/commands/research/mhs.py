@@ -37,6 +37,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         multi_feature_book=args.multi_feature_book,
         committee_book=args.committee_book,
         committee_kelly_sizing=args.committee_kelly_sizing,
+        committee_growth_diagnostic=args.committee_growth_diagnostic,
         committee_capital=args.committee_capital,
         execution_coverage_gate=args.execution_coverage_gate,
         ram_guard=not args.no_ram_guard,
@@ -199,12 +200,29 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         action="store_true",
         default=False,
         help=(
-            "Opt-in (requires --committee-book): blend the committee walk-forward "
-            "total-exposure scale 50/50 with a train-only quarter-Kelly LCB overlay "
-            "(f=0.25, z=1.0 one-SE shrinkage, 1.5x cap) instead of the flat vol-target "
-            "scale alone; measured to improve Sharpe/MDD/Calmar simultaneously across "
-            "all cost tiers relative to vol-target-scale alone (see run history for "
-            "magnitudes); diagnostic-only, not yet wired into --committee-capital"
+            "Opt-in (with --committee-book or --committee-capital): blend the "
+            "committee total-exposure scale 50/50 with a train-only quarter-Kelly "
+            "LCB overlay (f=0.25, z=1.0 one-SE shrinkage, capped at 1.0x when "
+            "applied to --committee-capital, at 1.5x when diagnostic-only via "
+            "--committee-book) instead of the flat vol-target scale alone. "
+            "Measured on the --committee-capital execution-replay path: reduces "
+            "MDD but also reduces CAGR and Calmar (net negative for compounded "
+            "growth) -- enable only if drawdown control is prioritized over "
+            "compounding, not as a default performance improvement; see run "
+            "history for magnitudes"
+        ),
+    )
+    mhs.add_argument(
+        "--committee-growth-diagnostic",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in (requires --committee-book): report whether the committee's "
+            "current exposure sits near its Monte-Carlo constrained growth-optimal "
+            "point (block-bootstrap search over a discovery-window-only risk grid, "
+            "reusing src.research.risk.growth_sizing -- the same framework already "
+            "used for xs_alpha); observational only, never feeds back into sizing "
+            "or capital allocation"
         ),
     )
     mhs.add_argument(

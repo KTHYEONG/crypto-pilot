@@ -154,6 +154,21 @@ MHS_COMMITTEE_PURGE_HOURS: int = 720
 # Earliest bar for committee walk-forward out-of-sample evaluation.
 MHS_COMMITTEE_OOS_START: pd.Timestamp = pd.Timestamp("2023-01-01", tz="UTC")
 
+# Discovery-window-only growth-optimal headroom diagnostic: risk-grid
+# multipliers of the realized reference_risk, plus the constraint anchors
+# (calibrated in the kelly_compounding_improve cycle: selected_risk=1.0x,
+# headroom_ratio=1.3%, 25% MDD between the 20% gate and the ~31% k=6 baseline).
+MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS: tuple[float, ...] = (
+    0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+)
+MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN: float = 0.25
+MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB: float = 0.10
+MHS_COMMITTEE_GROWTH_RUIN_FRACTION: float = 0.60
+MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB: float = 0.01
+MHS_COMMITTEE_GROWTH_HORIZON_YEARS: float = 3.0
+MHS_COMMITTEE_GROWTH_N_PATHS: int = 2000
+MHS_COMMITTEE_GROWTH_BARS_PER_YEAR: int = 365
+
 PHASE_1_BOOK_SPECS: dict[str, BookSpec] = {
     "fast_reversal": BookSpec(
         band=_FAST_BAND, horizon_hours=48, step_hours=6, min_symbols=8,

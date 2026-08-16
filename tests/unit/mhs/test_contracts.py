@@ -237,6 +237,34 @@ class TestFrozenLiterals:
         assert pd.Timestamp("2023-01-01", tz="UTC") == MHS_COMMITTEE_OOS_START
         assert MHS_COMMITTEE_OOS_START.tzinfo is not None
 
+    def test_committee_growth_diagnostic_constants_are_frozen(self) -> None:
+        # SCENARIO_COMMITTEE_GROWTH_CONTRACTS_FROZEN: the discovery-window
+        # growth-optimal risk-grid multipliers and constraint anchors are frozen
+        # contract values with a strictly ascending, 1.0-containing grid.
+        from src.mhs.contracts import (
+            MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
+            MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
+            MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
+            MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+            MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB,
+            MHS_COMMITTEE_GROWTH_N_PATHS,
+            MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
+            MHS_COMMITTEE_GROWTH_RUIN_FRACTION,
+        )
+
+        assert MHS_COMMITTEE_GROWTH_BARS_PER_YEAR == 365
+        assert MHS_COMMITTEE_GROWTH_HORIZON_YEARS == 3.0
+        assert MHS_COMMITTEE_GROWTH_N_PATHS == 2000
+        assert MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN == 0.25
+        assert MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB == 0.10
+        assert MHS_COMMITTEE_GROWTH_RUIN_FRACTION == 0.60
+        assert MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB == 0.01
+        grid = MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS
+        assert len(grid) >= 2
+        assert tuple(sorted(grid)) == grid
+        assert all(g > 0 for g in grid)
+        assert 1.0 in grid
+
     def test_committee_purge_hours_matches_longest_member_lookback(self) -> None:
         # SCENARIO_COMMITTEE_PURGE_HOURS_MATCHES_LONGEST_MEMBER_LOOKBACK (B2):
         # the purge gap must always cover the longest committee feature lookback
