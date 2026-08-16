@@ -27,7 +27,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitCode) -> None:
-    """Clean up temporary test artifacts on session finish when all tests pass.
+    """Clean up temporary test artifacts on session finish.
 
     Time Complexity: O(N) where N is the number of temporary entries in the session temp root.
     Space Complexity: O(1) auxiliary space.
@@ -38,7 +38,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
         # workers still creating their own tmp_path directories. Only the
         # controller process (no ``workerinput``) may clean up.
         return
-    if exitstatus == 0 and _PROJECT_TEMP_ROOT.exists():
+    if _PROJECT_TEMP_ROOT.exists():
         for child in _PROJECT_TEMP_ROOT.iterdir():
             try:
                 if child.is_dir():

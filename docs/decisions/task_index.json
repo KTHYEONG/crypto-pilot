@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_CAPITAL_IMPROVE",
+      "date": "2026-08-16",
+      "adr_id": "ADR_20260816_MHS_COMMITTEE_CAPITAL_IMPROVE",
+      "domain": "mhs",
+      "title": "MHS 위원회(k=6→k=5) 구성 재검토 + Kelly-LCB 총노출 사이징 오버레이",
+      "why": "committee_capital 배선(ADR_20260816) P0 실측 완료 후, ADR_20260815가 보류했던 Kelly 사이징(P2) 전제 조건이 해제됨. 실측 감사 결과 xs_mom_720h가 rank_weight_book의 퍼센타일 랭크 변환으로 xs_mom_336h와 구조적으로 중복(랭크는 행 상수이동 불변)됨을 확인, k=6 구성 자체가 ~50개 조합 비교로 선택된 selection-bias 경고 대상이었음.",
+      "resolution": "MHS_COMMITTEE_MEMBERS를 k=6->k=5로 축소(xs_mom_720h 제거, flow_imb_720h가 720h 최장 lookback 유지해 purge_hours=720 불변식 보존). src/mhs/committee.py에 kelly_lcb_scale(f=0.25 quarter-Kelly, z=1.0 LCB, cap=1.5x) 신규 원시함수 추가, purged_walk_forward에 opt-in sizing_mode(vol_target/kelly_blend) 파라미터로 배선(기본값 vol_target, byte-identical). MhsDiagnosticRequest.committee_kelly_sizing opt-in 플래그(committee_book 요구) + CLI --committee-kelly-sizing 배선. _committee_diagnostic 블록 리포트에 logret_share 추가(tail_sensitivity_curve의 top1_event_share 패턴 재사용, 게이트 아님 진단 전용).",
+      "impact": "실측(프록시 원장, 446심볼 2021-2025): k=5가 k=6 대비 전 지표 개선(Sharpe 1.930->2.092, CAGR 0.322->0.352, Calmar 2.685->2.866). vol-target/kelly 50/50 블렌드가 vol-target 단독 대비 Sharpe/MDD/Calmar 동시 개선(1.930->1.963, MDD -0.120->-0.109, Calmar 2.685->2.888) 전 비용 티어에서 일관. lean_check.py --spec 전체 PASS(Impact Level 3). committee_capital(자본 라우팅) 경로에는 아직 미배선 -- 3분봉 실행 리플레이 재검증 후 별도 승격 필요."
+    },
+    {
       "task_id": "TASK_MHS_REPLAY_STREAMING",
       "date": "2026-08-16",
       "adr_id": "ADR_20260816_MHS_REPLAY_STREAMING",
@@ -989,16 +999,6 @@
       "why": "실제 CLI 결과가 90일 fold 입력으로 fail-closed되어 원자료 부족과 rolling segment 탈락을 구분해야 했다.",
       "resolution": "652개 OHLCV parquet의 2020-01~2026-07 범위를 확인하고, sealed cutoff 2025-12-31 및 3개 segment 중 2개 causal-router reject를 수치로 기록했다.",
       "impact": "데이터 수집 부족이 아니라 evaluator segment 유효성 부족이 binding임을 확정하고, 결과 문서에 CLI gate 수치와 데이터 gap 12개 심볼을 기록했다."
-    },
-    {
-      "task_id": "TASK_GROWTH_REGIME_FOLD_CONCENTRATION_GATE",
-      "date": "2026-08-03",
-      "adr_id": "ADR_20260803_GROWTH_REGIME_FOLD_CONCENTRATION_GATE",
-      "domain": "research",
-      "title": "성장 엔진 신규 전략 3라운드 탐색 + 레짐-분할 구조 진단 + fold-concentration 게이트 구현",
-      "why": "funding 버그 수정 이후에도 NO_ADMISSIBLE_ALPHA가 지속되어, 사용자 요청으로 신규 데이터차원 3종·고전지표+조합 8종·자율 광범위 지표 81개조합(24 패밀리) 등 총 약 100개 파라미터 조합을 3라운드에 걸쳐 실측(discovery/qualification/holdout/plateau 파이프라인 재사용). plateau 통과 10개 후보 전량이 qualification/holdout에서 실패해, 개별 신호 결함이 아니라 평가 방법론 자체의 구조적 결함 여부를 진단 요청받음.",
-      "resolution": "레짐 진단: discovery(2023-04~2024-07) breadth 48.5% vs qualification(2024-08~2025-12) breadth 16.9%, 4-fold 세분 시 36.8%→48.8%→20.2%→12.4%로 지속 악화(추세적 붕괴, 데이터 아티팩트 아님을 메이저 알트 실측으로 확인) — plateau 통과 후보 대부분이 추세추종류였다는 사실과 정합. 가장 견고한 해결책으로 reliability.py의 기존 compute_equal_duration_fold_distribution(미사용 상태였음)을 재사용해 evaluate_falsification에 fold_concentration 게이트를 신설(순서: plateau→multiplicity→fold_concentration→symbol_holdout). _qualification_fold_gate_pass 신설, fail-closed. 실전 검증: taker_imbalance_v1/84가 fold_concentration=0.776(임계값 0.645 초과)로 qualification 성과의 77.6%가 3개 fold 중 1개에 집중되어 있음을 정량 확인 — 최종 판정(NO_ADMISSIBLE_ALPHA/CASH)은 불변.",
-      "impact": "3라운드 탐색으로 breadth/추세/오실레이터/거래량/느린타임프레임 가설 공간을 광범위하게 소진해 향후 탐색 우선순위를 재조정. fold-concentration 게이트는 어떤 후보도 새로 통과시키지 않지만, 기존 단일분할 oos_t_stat이 놓치던 시간적 집중 위험을 자동 검증하는 위험관리 계측을 프로덕션에 처음 배선함 — 향후 근접통과 후보의 오탐 배포 위험을 줄임."
     }
   ]
 }
