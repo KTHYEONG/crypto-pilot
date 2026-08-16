@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_REPLAY_STREAMING",
+      "date": "2026-08-16",
+      "adr_id": "ADR_20260816_MHS_REPLAY_STREAMING",
+      "domain": "mhs",
+      "title": "MHS 리플레이 스트리밍 — RAM 가드 + committee_capital 완주 최적화",
+      "why": "committee_capital/committee_book 실행 시 기본 ram_guard가 3개 book worker의 bulk window materialization(_materialize_replay_windows, 16.8GB 주범)으로 시스템 reserve를 위반해 RESOURCE_BUDGET_BREACH로 조기 종료됨. ADR_20260814_MHS_RAM_GUARD_DIAGNOSTIC_OPT가 '리플레이 계약 회귀 위험'으로 별도 스펙 후보로 기록했던 구간.",
+      "resolution": "bulk materialization 제거 후 2-단계 streaming으로 전환: _book_outcome/_run_anchored_fold의 참조 pass는 generator를 직접 stream, rescaled pass는 _windows()를 1회 재생성해 replay_execution_window_batch(N-bound interleave, _BoundExecutionReplayAccumulator 재사용)로 primary/stress/patient_reference/touch/ladder를 한 stream에 fan-out. _materialize_replay_windows/_window_footprint_bytes 제거, _rescaled_windows를 Iterable로 확장, replay_execution_window_pair를 batch wrapper로 재구현. worker당 메모리 경계가 전체 window 집합 → window 1개로 축소, generation은 bound 수와 무관하게 정확히 2회.",
+      "impact": "ram_guard=True + committee_capital 완주 가능(기존 RESOURCE_BUDGET_BREACH 해소). 계산 산출물 bit-identical 유지(golden baseline 대조 PASS, lean_check 전체 PASS). 텔레메트리 스테이지가 execution_window_rescaled/anchored_fold_*_window_rescaled로 재구성됨(의도된 계약 변경, 관련 테스트 갱신)."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_CAPITAL_BLEND_WIRING",
       "date": "2026-08-16",
       "adr_id": "ADR_20260816_MHS_COMMITTEE_CAPITAL_BLEND_WIRING",
@@ -989,16 +999,6 @@
       "why": "funding 버그 수정 이후에도 NO_ADMISSIBLE_ALPHA가 지속되어, 사용자 요청으로 신규 데이터차원 3종·고전지표+조합 8종·자율 광범위 지표 81개조합(24 패밀리) 등 총 약 100개 파라미터 조합을 3라운드에 걸쳐 실측(discovery/qualification/holdout/plateau 파이프라인 재사용). plateau 통과 10개 후보 전량이 qualification/holdout에서 실패해, 개별 신호 결함이 아니라 평가 방법론 자체의 구조적 결함 여부를 진단 요청받음.",
       "resolution": "레짐 진단: discovery(2023-04~2024-07) breadth 48.5% vs qualification(2024-08~2025-12) breadth 16.9%, 4-fold 세분 시 36.8%→48.8%→20.2%→12.4%로 지속 악화(추세적 붕괴, 데이터 아티팩트 아님을 메이저 알트 실측으로 확인) — plateau 통과 후보 대부분이 추세추종류였다는 사실과 정합. 가장 견고한 해결책으로 reliability.py의 기존 compute_equal_duration_fold_distribution(미사용 상태였음)을 재사용해 evaluate_falsification에 fold_concentration 게이트를 신설(순서: plateau→multiplicity→fold_concentration→symbol_holdout). _qualification_fold_gate_pass 신설, fail-closed. 실전 검증: taker_imbalance_v1/84가 fold_concentration=0.776(임계값 0.645 초과)로 qualification 성과의 77.6%가 3개 fold 중 1개에 집중되어 있음을 정량 확인 — 최종 판정(NO_ADMISSIBLE_ALPHA/CASH)은 불변.",
       "impact": "3라운드 탐색으로 breadth/추세/오실레이터/거래량/느린타임프레임 가설 공간을 광범위하게 소진해 향후 탐색 우선순위를 재조정. fold-concentration 게이트는 어떤 후보도 새로 통과시키지 않지만, 기존 단일분할 oos_t_stat이 놓치던 시간적 집중 위험을 자동 검증하는 위험관리 계측을 프로덕션에 처음 배선함 — 향후 근접통과 후보의 오탐 배포 위험을 줄임."
-    },
-    {
-      "task_id": "TASK_GROWTH_FUNDING_GATE_FIX",
-      "date": "2026-08-03",
-      "adr_id": "ADR_20260803_GROWTH_FUNDING_GATE_FIX",
-      "domain": "research",
-      "title": "성장 엔진 funding_contrarian_v1 게이트 결함 수정 및 다중검정 측정 계측",
-      "why": "docs/results/growth_portfoilo.md의 NO_ADMISSIBLE_ALPHA(binding=multiplicity) 실행에서 funding_contrarian_v1 전략군(3/12 가설)이 discovery 단계에서 DATA_INVALID로 단 한 번도 실전 평가되지 않은 것을 발견함. 원인은 (1) _build_settled_funding이 심볼별 funding 이벤트를 pd.DataFrame(dict)로 합칠 때 서브밀리초 타임스탬프 불일치로 인덱스 유니온 NaN(컬럼당 최대 52.9%)이 발생해 align_funding_bars의 finite 체크를 오탐시키는 버그, (2) causal-alignability 체크가 전역 그리드 전체 커버리지를 요구해 discovery 로스터 49개 심볼 중 단 2개 때문에 가족 전체가 죽는 과잉 엄격함이었음.",
-      "resolution": "align_funding_bars에 컬럼별 dropna(union NaN 제거, C1)와 symbol_spans 기반 심볼별 스케줄 구간 causal-alignability 재정의(전역 그리드 대신 PIT 로스터 편입 구간 기준, C2)를 적용. _oos_t_stat의 표본 구간을 test_fraction 명시 파라미터로 승격해 매직 넘버를 표면화(C3, 방향 전환 없음 — 실측상 전체 구간 사용이 오히려 게이트를 더 엄격하게 만듦을 확인). family_window_correlation을 추가해 family 내 윈도우 간 net-return 상관계수를 측정 전용으로 로깅(C4, falsification 미반영). 재실행 결과 funding_contrarian_v1이 SCREENED로 전환되었으나 discovery Sharpe(최고 0.609)가 taker_imbalance_v1(2.246)에 못 미쳐 family 선택에서 패배 — 최종 판정(NO_ADMISSIBLE_ALPHA, CASH)은 불변.",
-      "impact": "미탐색 전략 가족을 실전 평가 가능하게 정정했으나 최종 자산배분 판정은 바뀌지 않음(정직한 재측정, gate 완화 아님). 4개 전략군 윈도우 간 상관계수(0.41~0.80) 실측치를 처음 확보해 family_size=12 Bonferroni 보정 타당성 재검토의 근거 자료로 남김."
     }
   ]
 }
