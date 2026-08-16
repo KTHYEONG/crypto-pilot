@@ -13,6 +13,7 @@ import src.mhs.committee as committee
 from src.mhs.committee import (
     committee_block_edges_from,
     decompose_cost,
+    kelly_lcb_scale,
     long_only_equal_risk_weights,
     purged_walk_forward,
     score_weighted_net,
@@ -188,6 +189,59 @@ def test_volatility_target_scale_uses_train_only() -> None:
         volatility_target_scale(train, target, 0.0)
 
 
+def test_kelly_lcb_scale_fails_closed_on_zero_variance() -> None:
+    # SCENARIO_KELLY_LCB_SCALE_FAIL_CLOSED_ZERO_VARIANCE: a constant train series
+    # has zero variance, so the Kelly optimal leverage f*=mu/var is undefined --
+    # kelly_lcb_scale returns exactly 0.0 (fail closed to no exposure), matching
+    # volatility_target_scale's zero-variance discipline in the same module.
+    assert kelly_lcb_scale(pd.Series([0.001] * 10, index=_hourly_index(10))) == pytest.approx(0.0)
+    assert kelly_lcb_scale(pd.Series([np.nan] * 10, index=_hourly_index(10))) == pytest.approx(0.0)
+    assert kelly_lcb_scale(pd.Series([0.001], index=_hourly_index(1))) == pytest.approx(0.0)
+
+
+def test_kelly_lcb_scale_fails_closed_on_negative_lcb_mean() -> None:
+    # SCENARIO_KELLY_LCB_SCALE_FAIL_CLOSED_NEGATIVE_LCB_MEAN: when the one-SE
+    # lower confidence bound (sample mean - z*std/sqrt(n)) is <= 0 the estimate
+    # cannot justify any exposure -- exactly 0.0, never a negative or tiny
+    # positive bet on noise.
+    # Symmetric +/-0.05 pairs plus a small positive offset: mean == +0.001 but
+    # std/sqrt(n) ~ 0.0167, so the one-SE LCB is negative.
+    vals = np.concatenate([np.full(5, 0.05), np.full(5, -0.05)]) + 0.001
+    train = pd.Series(vals)
+    assert train.mean() > 0
+    assert train.mean() - train.std(ddof=1) / math.sqrt(len(train)) <= 0
+    assert kelly_lcb_scale(train) == pytest.approx(0.0)
+
+
+def test_kelly_lcb_scale_clips_at_cap() -> None:
+    # SCENARIO_KELLY_LCB_SCALE_CLIPS_AT_CAP: a strongly positive mean with a
+    # near-zero variance implies a huge Kelly leverage; the result is clipped at
+    # cap (default 1.5), never exceeding it.
+    base = np.full(200, 0.01)
+    noise = np.full(200, 1e-6)
+    noise[::2] = -1e-6
+    train = pd.Series(base + noise)
+    assert train.mean() > 0
+    assert kelly_lcb_scale(train) == pytest.approx(1.5)
+    assert kelly_lcb_scale(train, cap=2.0) == pytest.approx(2.0)
+
+
+def test_kelly_lcb_scale_invalid_params_raise() -> None:
+    # SCENARIO_KELLY_LCB_SCALE_INVALID_PARAMS_RAISE: fraction <= 0, cap <= 0,
+    # and z < 0 each raise ValueError (fail closed on a misconfigured overlay).
+    train = pd.Series(np.random.default_rng(0).normal(0.001, 0.01, 200))
+    with pytest.raises(ValueError, match="fraction"):
+        kelly_lcb_scale(train, fraction=0.0)
+    with pytest.raises(ValueError, match="fraction"):
+        kelly_lcb_scale(train, fraction=-0.25)
+    with pytest.raises(ValueError, match="cap"):
+        kelly_lcb_scale(train, cap=0.0)
+    with pytest.raises(ValueError, match="cap"):
+        kelly_lcb_scale(train, cap=-1.0)
+    with pytest.raises(ValueError, match="z"):
+        kelly_lcb_scale(train, z=-1.0)
+
+
 def _walk_forward_panels(seed: int = 1) -> tuple[pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
     idx = pd.date_range("2022-01-01", periods=4 * 24 * 90, freq="1h", tz="UTC")
     rng = np.random.default_rng(seed)
@@ -301,14 +355,59 @@ def test_purged_walk_forward_scales_by_train_vol_only() -> None:
     assert (res_zero == 0.0).all()
 
 
+def test_purged_walk_forward_default_sizing_mode_byte_identical() -> None:
+    # SCENARIO_PURGED_WALK_FORWARD_DEFAULT_SIZING_MODE_BYTE_IDENTICAL: omitting
+    # sizing_mode produces an identical Series (values and index) to the same
+    # call made explicitly with sizing_mode='vol_target' -- the default keeps
+    # every pre-existing call site byte-identical.
+    gross, tc, idx = _walk_forward_panels()
+    purge = pd.Timedelta(hours=336)
+    edges = [pd.Timestamp("2022-10-01", tz="UTC")]
+    default = purged_walk_forward(gross, tc, 4.18, edges, purge, min_train_bars=100)
+    explicit = purged_walk_forward(
+        gross, tc, 4.18, edges, purge, min_train_bars=100, sizing_mode="vol_target",
+    )
+    pd.testing.assert_series_equal(default, explicit)
+
+
+def test_purged_walk_forward_kelly_blend_changes_output() -> None:
+    # SCENARIO_PURGED_WALK_FORWARD_KELLY_BLEND_CHANGES_OUTPUT: on a fixture with
+    # nonzero train variance sizing_mode='kelly_blend' produces a Series with
+    # the same index as 'vol_target' but at least one differing value -- the
+    # 50/50 blend scalar differs from the pure vol-target scalar.
+    gross, tc, idx = _walk_forward_panels(seed=2)
+    purge = pd.Timedelta(hours=336)
+    edges = [pd.Timestamp("2022-10-01", tz="UTC")]
+    vol = purged_walk_forward(gross, tc, 4.18, edges, purge, min_train_bars=100)
+    kelly = purged_walk_forward(
+        gross, tc, 4.18, edges, purge, min_train_bars=100, sizing_mode="kelly_blend",
+    )
+    assert kelly.index.equals(vol.index)
+    assert not kelly.equals(vol)
+
+
+def test_purged_walk_forward_invalid_sizing_mode_raises() -> None:
+    # SCENARIO_PURGED_WALK_FORWARD_INVALID_SIZING_MODE_RAISES: an unknown
+    # sizing_mode fails closed with a ValueError naming the parameter.
+    gross, tc, idx = _walk_forward_panels()
+    purge = pd.Timedelta(hours=336)
+    edges = [pd.Timestamp("2022-10-01", tz="UTC")]
+    with pytest.raises(ValueError, match="sizing_mode"):
+        purged_walk_forward(
+            gross, tc, 4.18, edges, purge, min_train_bars=100, sizing_mode="bogus",
+        )
+
+
 def test_committee_members_resolve_in_feature_registry() -> None:
-    # SCENARIO_COMMITTEE_MEMBERS_RESOLVE_IN_FEATURE_REGISTRY: every name in
+    # SCENARIO_COMMITTEE_MEMBERS_RESOLVE_IN_FEATURE_REGISTRY and
+    # SCENARIO_MHS_COMMITTEE_MEMBERS_SPAN_THREE_FAMILIES_AFTER_K5: every name in
     # MHS_COMMITTEE_MEMBERS resolves to exactly one FeatureSpec in
-    # MHS_FEATURE_REGISTRY, the tuple has 6 unique entries, and it spans at
-    # least 3 distinct economic families -- the composition invariant that stops
-    # the committee from silently collapsing into one family.
-    assert len(MHS_COMMITTEE_MEMBERS) == 6
-    assert len(set(MHS_COMMITTEE_MEMBERS)) == 6
+    # MHS_FEATURE_REGISTRY, the k=5 tuple has 5 unique entries (xs_mom_720h
+    # removed as rank-invariant no-op), and it spans at least 3 distinct economic
+    # families -- the composition invariant that stops the committee from
+    # silently collapsing into one family.
+    assert len(MHS_COMMITTEE_MEMBERS) == 5
+    assert len(set(MHS_COMMITTEE_MEMBERS)) == 5
     registry_names = {spec.name for spec in MHS_FEATURE_REGISTRY}
     assert set(MHS_COMMITTEE_MEMBERS) <= registry_names
     for member in MHS_COMMITTEE_MEMBERS:
