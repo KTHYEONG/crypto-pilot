@@ -90,7 +90,8 @@
     "testing": "tests/unit/mhs/test_books.py"
   },
   "src/mhs/committee.py": {
-    "testing": "tests/unit/mhs/test_committee.py"
+    "testing": "tests/unit/mhs/test_committee.py",
+    "architecture": "docs/architecture/mhs-explain.md"
   },
   "src/mhs/contracts.py": {
     "testing": "tests/unit/mhs/test_contracts.py"
