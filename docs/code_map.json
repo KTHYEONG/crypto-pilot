@@ -23,7 +23,7 @@
       "tests/unit/application/research/mhs/test_evaluation.py",
       "tests/unit/application/research/test_mhs_capital_multi_axis.py"
     ],
-    "architecture": "docs/specs/mhs_capital_multi_axis.md"
+    "architecture": "docs/architecture/mhs-explain.md"
   },
   "src/cli/commands/data.py": {},
   "src/cli/commands/research/mhs.py": {
