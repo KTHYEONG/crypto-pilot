@@ -584,35 +584,33 @@ class TestAnchoredFoldBounded:
         ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, recorder)
         window_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
         assert window_stages, "fold paired window telemetry must be recorded"
-        # The two-pass primary records each window bound twice (Pass 1
-        # reference, then the rescaled Pass 2), so the primary stages are two
-        # identical internally-ordered passes; the cost-stress bound follows.
-        primary_stages = [
+        # The reference pass records each window under ``_window_``; the
+        # rescaled primary/stress pair share one interleaved stream under
+        # ``_window_rescaled_``, so no separate stress re-iteration exists.
+        reference_stages = [
             s for s in window_stages
-            if not s.startswith("anchored_fold_0_window_cost_stress")
+            if not s.startswith("anchored_fold_0_window_rescaled")
         ]
-        assert len(primary_stages) % 2 == 0
-        half = len(primary_stages) // 2
-        assert primary_stages[:half] == primary_stages[half:]
-        assert primary_stages[:half] == sorted(primary_stages[:half])
-        stress_stages = [
+        assert reference_stages == sorted(reference_stages)
+        rescaled_stages = [
             s for s in window_stages
-            if s.startswith("anchored_fold_0_window_cost_stress")
+            if s.startswith("anchored_fold_0_window_rescaled")
         ]
-        assert stress_stages == sorted(stress_stages)
-        # The paired fan-out records one physical window per stage: the stress
-        # bound consumes the same iterator, so no separate stress re-iteration
-        # telemetry exists.
+        assert rescaled_stages == sorted(rescaled_stages)
+        # The interleaved fan-out records one physical window per stage: the
+        # stress bound consumes the same iterator, so no separate stress
+        # re-iteration telemetry exists.
         assert not [
             m.stage for m in recorder.records
             if m.stage.startswith("anchored_fold_0_stress_window_")
         ]
 
-    def test_fold_builds_window_iterator_once_per_bound(self, mhs_market, monkeypatch) -> None:
-        """MHS-MEM-PAIR-02: the fold orchestrator materializes the execution
-        windows ONCE and reuses the same windows (with per-pass weight
-        substitution) across every replay bound -- the strongest form of the
-        no-re-materialization invariant."""
+    def test_fold_builds_window_iterator_twice_streaming(self, mhs_market, monkeypatch) -> None:
+        """SCENARIO_MHS_STREAM_FOLD_TWO_GENERATIONS: the streaming fold
+        regenerates the execution windows exactly twice -- once for the
+        reference pass and once for the interleaved rescaled primary/stress
+        batch -- never once per bound (the bounded-memory successor of the
+        materialize-once invariant)."""
         root, end = mhs_market
         symbols = [
             s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -637,8 +635,8 @@ class TestAnchoredFoldBounded:
         )
         assert report.strict is not None
         assert report.stress is not None
-        # One materialization feeds the two-pass primary and the stress bound.
-        assert calls["n"] == 1
+        # Reference pass + one interleaved rescaled batch (bounded memory).
+        assert calls["n"] == 2
 
     def test_rss_budget_enforced_inside_fold_fails_closed(self, mhs_market, monkeypatch) -> None:
         monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
@@ -1023,11 +1021,13 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
 
 
 class TestBookOutcomePaired:
-    """MHS-MEM-PAIR-02-BOOK: the top-level book orchestrator builds the
-    execution-window iterator once per strict/stress pair and preserves the
-    typed book failure conversion."""
+    """SCENARIO_MHS_STREAM_BOOK_NO_MATERIALIZATION: the top-level book
+    orchestrator streams the execution-window generator twice (reference pass +
+    interleaved rescaled batch) instead of bulk materializing, routes the
+    rescaled bounds through ``replay_execution_window_batch``, and preserves
+    the typed book failure conversion."""
 
-    def test_book_builds_window_iterator_once_per_bound(self, mhs_market, monkeypatch) -> None:
+    def test_book_builds_window_iterator_twice_streaming(self, mhs_market, monkeypatch) -> None:
         args = _build_book_outcome_args(mhs_market)
         calls = {"n": 0}
         original = ev._iter_mhs_execution_windows
@@ -1037,13 +1037,21 @@ class TestBookOutcomePaired:
             return original(*_args, **_kwargs)
 
         monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
+        batch_calls = {"n": 0}
+        original_batch = ev.replay_execution_window_batch
+
+        def counting_batch(*_args, **_kwargs):
+            batch_calls["n"] += 1
+            return original_batch(*_args, **_kwargs)
+
+        monkeypatch.setattr(ev, "replay_execution_window_batch", counting_batch)
         report = ev._book_outcome(**args)
         assert report.primary is not None
         assert report.stress is not None
         assert report.failure is None
-        # One materialization feeds the two-pass primary, stress, and the
-        # informational patient-reference bound.
-        assert calls["n"] == 1
+        # Reference pass + one interleaved rescaled batch (bounded memory).
+        assert calls["n"] == 2
+        assert batch_calls["n"] == 1
 
     def test_book_strict_resource_breach_is_typed_failure(self, mhs_market, monkeypatch) -> None:
         args = _build_book_outcome_args(mhs_market)
@@ -4483,10 +4491,14 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
         return mask
 
     monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
-    materialized: list[object] = []
-    monkeypatch.setattr(
-        ev, "_materialize_replay_windows", lambda *a, **k: materialized.append(True),
-    )
+    window_calls = {"n": 0}
+    original_windows = ev._iter_mhs_execution_windows
+
+    def counting(*args, **kwargs):
+        window_calls["n"] += 1
+        return original_windows(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -4495,7 +4507,7 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
     with pytest.raises(DataIntegrityError) as exc_info:
         ev.run_mhs_horizon_diagnostic(request)
     assert late_symbol in str(exc_info.value)
-    assert materialized == []
+    assert window_calls["n"] == 0
 
 
 def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypatch) -> None:

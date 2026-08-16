@@ -7,8 +7,8 @@ invariant of an optimization against the pre-optimization code path:
   ``DataCollector().load_mark_price_panel`` element-for-element.
 - ``WINDOW_SLICE_EQUIVALENCE``: ``_load_window_minute_frames`` reproduces the
   full-period-frame ``.loc`` slice byte-identically.
-- ``WINDOW_REUSE_EQUIVALENCE``: a materialized window tuple + per-pass weight
-  substitution reproduces per-pass generator regeneration.
+- ``WINDOW_REUSE_EQUIVALENCE``: per-pass generator regeneration reproduces the
+  streaming rescaled pass byte-identically.
 - ``LAZY_FRAME_SCOPE``: the window generator reads only its roster symbols'
   window slices, never a full-period preload.
 - ``FOLD_DISCOVERY_PARALLEL_EQUIVALENCE``: forked fold-safe discovery equals
@@ -31,7 +31,6 @@ from src.application.research.mhs.evaluation import (
     _fold_safe_discovery_worker,
     _iter_mhs_execution_windows,
     _load_window_minute_frames,
-    _materialize_replay_windows,
     _rescaled_windows,
     _run_fold_safe_discovery_parallel,
 )
@@ -176,8 +175,10 @@ def _build_small_funding(root: Path) -> dict[str, pd.Series]:
 
 
 def test_mhs_perf_opt_window_reuse_equivalence(mark_market) -> None:
-    """SCENARIO_MHS_PERF_OPT_WINDOW_REUSE_EQUIVALENCE: materialized windows fed
-    through ``_rescaled_windows`` reproduce per-pass generator regeneration."""
+    """SCENARIO_MHS_PERF_OPT_WINDOW_REUSE_EQUIVALENCE: a regenerated stream fed
+    through ``_rescaled_windows`` reproduces the direct rescaled-target
+    generator pass byte-identically (the streaming successor of the
+    materialize-once invariant)."""
     root = str(mark_market)
     end = _START + pd.Timedelta(hours=48)
     decision_grid = pd.date_range(_START + pd.Timedelta(hours=1), end, freq="6h", tz="UTC")
@@ -195,31 +196,23 @@ def test_mhs_perf_opt_window_reuse_equivalence(mark_market) -> None:
         )
 
     spec = ExecutionSpec()
-
-    def replay_pass(windows, scale):
-        stream = _rescaled_windows(windows, scale)
-        return replay_execution_windows(stream, 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
-
-    # Legacy: fresh generator per pass; pass B rescales the target DataFrame.
-    legacy_a = replay_execution_windows(gen(target), 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
     scale = pd.Series(
         0.5 + 0.5 * np.linspace(0.0, 1.0, len(target)), index=target.index,
     )
+    # Rescaled pass: fresh generator with the rescaled target DataFrame.
     scaled = target.mul(scale, axis=0)
     legacy_b = replay_execution_windows(gen(scaled), 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    # Streaming pass: regenerated windows rescaled on the fly.
+    new_b = replay_execution_windows(
+        _rescaled_windows(gen(target), scale), 1.0, "OHLCV_IMMEDIATE_TAKER", spec,
+    )
 
-    # New: materialize once from the unscaled target; substitute per pass.
-    windows = _materialize_replay_windows(lambda: gen(target))
-    new_a = replay_execution_windows(iter(windows), 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
-    new_b = replay_pass(windows, scale)
-
-    for legacy, new in ((legacy_a, new_a), (legacy_b, new_b)):
-        assert len(legacy.simulated_fills) == len(new.simulated_fills)
-        assert dict(legacy.termination_counts) == dict(new.termination_counts)
-        assert np.allclose(
-            legacy.ledger.equity.to_numpy(), new.ledger.equity.to_numpy(),
-            rtol=1e-12, atol=1e-12,
-        )
+    assert len(legacy_b.simulated_fills) == len(new_b.simulated_fills)
+    assert dict(legacy_b.termination_counts) == dict(new_b.termination_counts)
+    assert np.allclose(
+        legacy_b.ledger.equity.to_numpy(), new_b.ledger.equity.to_numpy(),
+        rtol=1e-12, atol=1e-12,
+    )
 
 
 def test_mhs_perf_opt_lazy_frame_scope(mark_market, monkeypatch) -> None:
@@ -307,11 +300,9 @@ def test_mhs_perf_opt_rescaled_windows_guards_zero_pattern(mark_market) -> None:
     target.loc[decision_grid[0], "MHSAUSDT"] = 0.05
     signals = decision_grid + pd.Timedelta(hours=1)
     funding = _build_small_funding(mark_market)
-    windows = _materialize_replay_windows(
-        lambda: _iter_mhs_execution_windows(
-            target, signals, str(mark_market), "5m", _START, end,
-            funding, "cache_required", ExecutionSpec(),
-        ),
+    windows = _iter_mhs_execution_windows(
+        target, signals, str(mark_market), "5m", _START, end,
+        funding, "cache_required", ExecutionSpec(),
     )
     zero_scale = pd.Series(0.0, index=target.index)
     with pytest.raises(DataIntegrityError):
@@ -373,41 +364,6 @@ def test_scenario_04_candidate_weight_books_covers_union() -> None:
             bar_funding, eligible, 1, (h,), tranche_count=8,
         )[h]
         pd.testing.assert_frame_equal(books["funding_long"][h], expected)
-
-
-def test_scenario_05_materialize_replay_windows_budget(mark_market) -> None:
-    """SCENARIO_MHS_REFACTOR_05: unbounded materializes every window; a budget
-    smaller than one window still returns at least one window; and the
-    budgeted path replays to the same ledger as the unbounded path."""
-    root = str(mark_market)
-    end = _START + pd.Timedelta(hours=48)
-    decision_grid = pd.date_range(_START + pd.Timedelta(hours=1), end, freq="6h", tz="UTC")
-    target = pd.DataFrame(0.05, index=decision_grid, columns=_SYMBOLS)
-    signals = decision_grid + pd.Timedelta(hours=1)
-    funding = _build_small_funding(mark_market)
-    spec = ExecutionSpec()
-
-    def gen():
-        return _iter_mhs_execution_windows(
-            target, signals, root, "5m", _START, end, funding, "cache_required", spec,
-        )
-
-    all_windows = _materialize_replay_windows(gen)
-    assert len(all_windows) >= 1
-    bounded = _materialize_replay_windows(gen, budget_bytes=1)
-    assert len(bounded) >= 1
-
-    big_budget = sum(ev._window_footprint_bytes(w) for w in all_windows)
-    bounded_full = _materialize_replay_windows(gen, budget_bytes=big_budget)
-    assert len(bounded_full) == len(all_windows)
-
-    full_ledger = replay_execution_windows(iter(all_windows), 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
-    budget_ledger = replay_execution_windows(iter(bounded_full), 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
-    assert len(full_ledger.simulated_fills) == len(budget_ledger.simulated_fills)
-    assert np.allclose(
-        full_ledger.ledger.equity.to_numpy(), budget_ledger.ledger.equity.to_numpy(),
-        rtol=1e-12, atol=1e-12,
-    )
 
 
 def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
