@@ -77,6 +77,14 @@ from src.mhs.contracts import MHS_TREND_SLEEVE_HORIZONS_HOURS
 from src.mhs.contracts import MHS_WORKER_PEAK_RSS_BYTES
 from src.mhs.contracts import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
+    MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
+    MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
+    MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
+    MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+    MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB,
+    MHS_COMMITTEE_GROWTH_N_PATHS,
+    MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
+    MHS_COMMITTEE_GROWTH_RUIN_FRACTION,
     MHS_COMMITTEE_MEMBERS,
     MHS_COMMITTEE_OOS_START,
     MHS_COMMITTEE_PURGE_HOURS,
@@ -127,9 +135,12 @@ from src.mhs.features import (
 from src.mhs.committee import (
     committee_block_edges_from,
     decompose_cost,
+    long_only_equal_risk_weights,
     purged_walk_forward,
+    score_weighted_net,
     wealth_metrics,
 )
+from src.research.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
 from src.mhs.execution import mhs_ledger_pnl_multi_tier
 from src.mhs.stability import regime_split_stability
 from src.mhs.regime import trend_efficiency_scale
@@ -305,6 +316,7 @@ class MhsDiagnosticRequest:
     multi_feature_book: bool = False
     committee_book: bool = False
     committee_kelly_sizing: bool = False
+    committee_growth_diagnostic: bool = False
     committee_capital: bool = False
     execution_coverage_gate: bool = False
     ram_guard: bool = True
@@ -352,6 +364,10 @@ class MhsDiagnosticRequest:
             raise ValueError("committee_kelly_sizing must be a bool")
         if self.committee_kelly_sizing and not (self.committee_book or self.committee_capital):
             raise ValueError("committee_kelly_sizing requires committee_book=True or committee_capital=True")
+        if not isinstance(self.committee_growth_diagnostic, bool):
+            raise ValueError("committee_growth_diagnostic must be a bool")
+        if self.committee_growth_diagnostic and not self.committee_book:
+            raise ValueError("committee_growth_diagnostic requires committee_book=True")
         if not isinstance(self.committee_capital, bool):
             raise ValueError("committee_capital must be a bool")
         if not isinstance(self.execution_coverage_gate, bool):
@@ -1721,6 +1737,61 @@ def _finite_or_none(value: float) -> float | None:
     return None if not np.isfinite(value) else float(value)
 
 
+def _committee_growth_headroom(
+    gross_all: pd.DataFrame,
+    tc_all: pd.DataFrame,
+    cost_bps: float,
+    oos_start: pd.Timestamp = MHS_COMMITTEE_OOS_START,
+) -> dict[str, Any] | None:
+    """Discovery-window-only headroom report via the reused growth_sizing solver.
+
+    Observational only: never feeds back into weights, scales, or replay
+    decisions. Fits strictly on bars before ``oos_start``; a degenerate or
+    short discovery window returns None instead of raising.
+    """
+    discovery_mask = gross_all.index < oos_start
+    if discovery_mask.sum() < 30:
+        return None
+    net = gross_all - tc_all * cost_bps
+    weights = long_only_equal_risk_weights(net.loc[discovery_mask])
+    discovery_net = score_weighted_net(
+        weights, gross_all.loc[discovery_mask], tc_all.loc[discovery_mask], cost_bps,
+    )
+    reference_risk = float(discovery_net.std(ddof=1))
+    if not np.isfinite(reference_risk) or reference_risk <= 0:
+        return None
+    risk_grid = tuple(
+        sorted(reference_risk * m for m in MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS)
+    )
+    config = GrowthSizingConfig(
+        risk_grid=risk_grid,
+        reference_risk=reference_risk,
+        max_drawdown=MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
+        max_drawdown_prob=MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+        ruin_fraction=MHS_COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
+        n_paths=MHS_COMMITTEE_GROWTH_N_PATHS,
+        bars_per_year=MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
+    )
+    selected = solve_growth_optimal_risk(discovery_net.to_numpy(), config)
+    headroom = diagnose_growth_headroom(discovery_net.to_numpy(), config, selected)
+    return {
+        "reference_risk": reference_risk,
+        "selected_risk": (
+            _finite_or_none(selected.selected_risk)
+            if selected.selected_risk is not None else None
+        ),
+        "median_log_growth": _finite_or_none(selected.median_log_growth),
+        "mdd_breach_prob": _finite_or_none(selected.mdd_breach_prob),
+        "ruin_prob": _finite_or_none(selected.ruin_prob),
+        "binding_constraint": selected.binding_constraint,
+        "headroom_ratio": _finite_or_none(headroom.headroom_ratio),
+        "risk_constrained": headroom.risk_constrained,
+        "discovery_bars": int(discovery_mask.sum()),
+    }
+
+
 def _committee_diagnostic(
     root: str,
     start: pd.Timestamp,
@@ -1735,6 +1806,7 @@ def _committee_diagnostic(
     rss_reserve_bytes: int | None = None,
     telemetry: _StageRecorder | None = None,
     sizing_mode: Literal["vol_target", "kelly_blend"] = "vol_target",
+    growth_diagnostic: bool = False,
 ) -> dict[str, Any]:
     """SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_REPORTS_WALK_FORWARD_WEALTH:
     opt-in measurement of the k=5 wealth committee.
@@ -1960,6 +2032,14 @@ def _committee_diagnostic(
             "blocks": blocks,
         }
 
+    growth_headroom = (
+        _committee_growth_headroom(
+            gross_all, tc_all, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+        )
+        if (growth_diagnostic and gross_all is not None)
+        else None
+    )
+
     return {
         "evaluation_protocol": "purged_walk_forward_oos",
         "trials_explored": 50,
@@ -1986,6 +2066,7 @@ def _committee_diagnostic(
             "sizing_mode": sizing_mode,
             "per_tier": per_tier,
         },
+        "growth_headroom": growth_headroom,
     }
 
 
@@ -4662,6 +4743,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 rss_reserve_bytes=rss_reserve_bytes,
                 telemetry=telemetry,
                 sizing_mode="kelly_blend" if request.committee_kelly_sizing else "vol_target",
+                growth_diagnostic=request.committee_growth_diagnostic,
             )
             telemetry.record("committee_diagnostic")
         if request.multi_feature_book:
