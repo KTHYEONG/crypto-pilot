@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_KELLY_CAPITAL_WIRING",
+      "date": "2026-08-16",
+      "adr_id": "ADR_20260816_MHS_COMMITTEE_KELLY_CAPITAL_WIRING",
+      "domain": "mhs",
+      "title": "MHS committee_capital Kelly 사이징 배선 + 성장최적 사이징 재검토(부정 결과)",
+      "why": "ADR_20260816_MHS_COMMITTEE_CAPITAL_IMPROVE에서 설계한 Kelly 사이징(진단 전용, cap=1.5x)을 실제 자본 라우팅 경로(committee_capital)까지 확장 검증할 필요가 있었음. 이후 사용자가 CAGR/MDD 복리성장 개선을 추가 요구해, xs_alpha에 이미 실전 검증된 growth_sizing.py(제약조건-우선 Monte Carlo 성장최적화) 재사용 가능성도 조사.",
+      "resolution": "committee_capital 실제 실행 경로에 _committee_kelly_scale(cap=1.0, 레버리지 상향 없음)+_committee_capital_replay_scale(기존 pnl_vol_target_scale과 50/50 블렌드)을 신설 배선(top-level ~2801행, fold 경로 ~3881행), MhsDiagnosticRequest.committee_kelly_sizing 검증을 committee_book 또는 committee_capital로 완화. 실측 결과 k=5 단독(Kelly 미적용)이 이미 fold 통과 1/3->2/3 및 2024 fold 회생을 달성했고(이전에 Kelly 덕분이라 오귀인했던 효과), ad hoc Kelly(f=0.25/0.5/1.0 전부)와 xs_alpha 실전검증 growth_sizing.py 기반 제약조건-우선 성장최적 사이징(드로다운 래더 5개 임계값 변형 포함) 전부 baseline 대비 Calmar 악화 확인 -> 사이징 오버레이는 기본값 미적용 유지(이미 opt-in default False)로 결론, growth_sizing 기반 성장최적점 진단만 향후 opt-in 모니터링 도구로 재사용 권고(docs/specs/mhs_committee_kelly_compounding_improve.md, 미구현 상태로 스펙만 보존 예정이었으나 sync 시 정리됨).",
+      "impact": "committee_capital 실제 3분봉 리플레이 재확인: k=5+Kelly는 naive Sharpe 0.627/CAGR 10.1%/MDD -20.3%/Calmar 0.498/folds_passed 2/3 (k=5 단독은 naive Sharpe 0.804/CAGR 15.0%/MDD -28.3%/Calmar 0.531/folds_passed 2/3 -- Kelly의 fold-robustness 기여는 없음, MDD 개선 대신 Calmar 순손해). DSR 붕괴(0.945->~0)는 _deflated_sharpe_evidence의 trial_sr_variance 계산이 clean fold 1개->2개로 늘며 처음으로 진짜 다중시행 벤치마크가 활성화된 통계적 아티팩트로 근본원인 확인(전략 열화 아님). lean_check(ruff/mypy/pytest) 전체 PASS. 레버리지 상향 승인 필요 사안 없음(growth-optimal 탐색 결과 이미 1.0x가 최적, headroom 1.3%)."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_CAPITAL_IMPROVE",
       "date": "2026-08-16",
       "adr_id": "ADR_20260816_MHS_COMMITTEE_CAPITAL_IMPROVE",
@@ -989,16 +999,6 @@
       "why": "450개 trend-screen discovery 백테스트가 셀별 순차 실행으로 약 540초 소요되어 실행시간 단축과 결과 추적이 필요했다.",
       "resolution": "심볼 단위 병렬 실행과 심볼별 데이터 재사용으로 discovery를 최적화하고, 450개 셀의 CAGR·MDD·t-stat·Holm 보정 신뢰하한·탈락 사유를 deterministic JSON 보고서로 기록했다. 실행 결과는 no_discovery_survivors로 gate 미통과였다.",
       "impact": "실행시간을 약 540초에서 46.99초로 단축하고 peak RSS 약 634MiB를 확인했다. discovery survivor가 없어 qualification/stress/holdout은 보류되며 투자 후보를 등록하지 않는다."
-    },
-    {
-      "task_id": "TASK_GROWTH_PORTFOLIO_CLI_DATA_DIAGNOSIS",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_GROWTH_PORTFOLIO_CLI_DATA_DIAGNOSIS",
-      "domain": "research",
-      "title": "Growth portfolio CLI 데이터 기간 및 fold 원인 계측",
-      "why": "실제 CLI 결과가 90일 fold 입력으로 fail-closed되어 원자료 부족과 rolling segment 탈락을 구분해야 했다.",
-      "resolution": "652개 OHLCV parquet의 2020-01~2026-07 범위를 확인하고, sealed cutoff 2025-12-31 및 3개 segment 중 2개 causal-router reject를 수치로 기록했다.",
-      "impact": "데이터 수집 부족이 아니라 evaluator segment 유효성 부족이 binding임을 확정하고, 결과 문서에 CLI gate 수치와 데이터 gap 12개 심볼을 기록했다."
     }
   ]
 }
