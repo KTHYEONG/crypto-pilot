@@ -1293,32 +1293,26 @@ class TestFoldWindowTelemetryOracle:
         assert fold_report.stress is not None
         assert fold_report.stress.event_snapshots_retained is False
 
-        # The fold runs three replay bounds (two-pass immediate-taker primary:
-        # Pass 1 reference + Pass 2 rescaled -- then the cost-stressed stress),
-        # each with its own window telemetry under a distinct stage prefix; all
-        # windows are recorded in chronological order.
-        primary_windows = [
+        # The fold runs two replay generations: the reference pass under
+        # ``_window_`` and the rescaled primary/stress pair sharing one
+        # interleaved stream under ``_window_rescaled_``; all windows are
+        # recorded in chronological order.
+        reference_windows = [
             (m.window_start, m.window_end)
             for m in recorder.records
             if m.stage.startswith("anchored_fold_0_window_")
-            and not m.stage.startswith("anchored_fold_0_window_cost_stress_")
+            and not m.stage.startswith("anchored_fold_0_window_rescaled_")
         ]
-        stress_windows = [
+        rescaled_windows = [
             (m.window_start, m.window_end)
             for m in recorder.records
-            if m.stage.startswith("anchored_fold_0_window_cost_stress_")
+            if m.stage.startswith("anchored_fold_0_window_rescaled_")
         ]
-        assert primary_windows, "fold primary window telemetry must be recorded"
-        assert stress_windows, "fold cost-stress window telemetry must be recorded"
-        # Pass 2 re-runs the identical window decomposition over the rescaled
-        # weights, so the two primary passes are ordered each on its own.
-        assert len(primary_windows) % 2 == 0
-        half = len(primary_windows) // 2
-        primary_passes = (primary_windows[:half], primary_windows[half:])
-        assert primary_passes[0] == primary_passes[1]
-        for seen in (*primary_passes, stress_windows):
-            # Each bound's windows are chronologically ordered: starts and ends
-            # are non-decreasing and span the validation window.
+        assert reference_windows, "fold reference window telemetry must be recorded"
+        assert rescaled_windows, "fold rescaled window telemetry must be recorded"
+        for seen in (reference_windows, rescaled_windows):
+            # Each generation's windows are chronologically ordered: starts and
+            # ends are non-decreasing and span the validation window.
             starts = [pd.Timestamp(s) for s, _ in seen]
             ends = [pd.Timestamp(e) for _, e in seen]
             assert starts == sorted(starts)
