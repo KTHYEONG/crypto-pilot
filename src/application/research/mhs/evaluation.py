@@ -304,6 +304,7 @@ class MhsDiagnosticRequest:
     trend_sleeve_gross: float = 0.0
     multi_feature_book: bool = False
     committee_book: bool = False
+    committee_kelly_sizing: bool = False
     committee_capital: bool = False
     execution_coverage_gate: bool = False
     ram_guard: bool = True
@@ -347,6 +348,10 @@ class MhsDiagnosticRequest:
             raise ValueError("multi_feature_book must be a bool")
         if not isinstance(self.committee_book, bool):
             raise ValueError("committee_book must be a bool")
+        if not isinstance(self.committee_kelly_sizing, bool):
+            raise ValueError("committee_kelly_sizing must be a bool")
+        if self.committee_kelly_sizing and not self.committee_book:
+            raise ValueError("committee_kelly_sizing requires committee_book=True")
         if not isinstance(self.committee_capital, bool):
             raise ValueError("committee_capital must be a bool")
         if not isinstance(self.execution_coverage_gate, bool):
@@ -1669,9 +1674,10 @@ def _committee_diagnostic(
     rss_budget_bytes: int | None = None,
     rss_reserve_bytes: int | None = None,
     telemetry: _StageRecorder | None = None,
+    sizing_mode: Literal["vol_target", "kelly_blend"] = "vol_target",
 ) -> dict[str, Any]:
     """SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_REPORTS_WALK_FORWARD_WEALTH:
-    opt-in measurement of the k=6 wealth committee.
+    opt-in measurement of the k=5 wealth committee.
 
     Builds the declared committee members into the dollar-neutral rank books on
     the 24h decision grid, audits the RAW source panels for pre-fillna coverage
@@ -1845,10 +1851,12 @@ def _committee_diagnostic(
         wf = purged_walk_forward(
             gross_all, tc_all, cost_bps, edges, purge,
             min_train_bars=_MHS_WALK_FORWARD_MIN_TRAIN_BARS,
+            sizing_mode=sizing_mode,
         )
         if telemetry is not None:
             telemetry.record(f"committee_walk_forward_{tier}")
         metrics = wealth_metrics(wf)
+        total_logret = metrics["logret"]
         _logger.debug(
             "[EVAL] stage=committee_tier_summary tier=%s bars=%d sharpe=%s cagr=%s mdd=%s",
             tier, len(wf), metrics["sharpe"], metrics["cagr"], metrics["mdd"],
@@ -1869,6 +1877,14 @@ def _committee_diagnostic(
                 "net_sharpe": _finite_or_none(block_metrics["sharpe"]),
                 "cagr": _finite_or_none(block_metrics["cagr"]),
                 "mdd": _finite_or_none(block_metrics["mdd"]),
+                "logret": _finite_or_none(block_metrics["logret"]),
+                "logret_share": (
+                    float(block_metrics["logret"] / total_logret)
+                    if np.isfinite(total_logret)
+                    and total_logret != 0
+                    and np.isfinite(block_metrics["logret"])
+                    else None
+                ),
             })
             _logger.debug(
                 "[EVAL] stage=committee_block tier=%s block_start=%s bars=%d sharpe=%s cagr=%s mdd=%s",
@@ -1888,7 +1904,7 @@ def _committee_diagnostic(
         "evaluation_protocol": "purged_walk_forward_oos",
         "trials_explored": 50,
         "selection_bias_warning": (
-            "committee composition (k=6) was chosen after comparing ~50 "
+            "committee composition (k=5) was chosen after comparing ~50 "
             "feature/combiner/size configurations on this same 2021-2025 panel; "
             "treat OOS Sharpe as an upper bound, not a deflated estimate"
         ),
@@ -1907,6 +1923,7 @@ def _committee_diagnostic(
             "skipped_blocks": skipped_blocks,
             "purge_hours": MHS_COMMITTEE_PURGE_HOURS,
             "target_vol": MHS_COMMITTEE_TARGET_VOL,
+            "sizing_mode": sizing_mode,
             "per_tier": per_tier,
         },
     }
@@ -3300,7 +3317,7 @@ def _committee_execution_book(
     decision_grid: pd.DatetimeIndex,
     min_symbols: int,
 ) -> pd.DataFrame:
-    """Build the k=6 committee capital book on the decision grid.
+    """Build the k=5 committee capital book on the decision grid.
 
     Shared by the fold path and the top-level blend: filter the registry to
     ``MHS_COMMITTEE_MEMBERS``, build equal-notional rank books, average them.
@@ -4578,6 +4595,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 rss_budget_bytes=rss_budget_bytes,
                 rss_reserve_bytes=rss_reserve_bytes,
                 telemetry=telemetry,
+                sizing_mode="kelly_blend" if request.committee_kelly_sizing else "vol_target",
             )
             telemetry.record("committee_diagnostic")
         if request.multi_feature_book:

@@ -8,6 +8,7 @@ This module provides cost decomposition, wealth metrics, volatility scaling, and
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -156,6 +157,49 @@ def volatility_target_scale(
     return float(target_vol / (sd * np.sqrt(periods_per_year)))
 
 
+def kelly_lcb_scale(
+    train_returns: pd.Series,
+    fraction: float = 0.25,
+    z: float = 1.0,
+    cap: float = 1.5,
+) -> float:
+    """Fractional-Kelly total-exposure scale with a one-SE lower-confidence-bound shrinkage.
+
+    The train-window optimal Kelly leverage is ``mean / variance`` (per-period
+    native units, never annualized). To shrink the estimate, ``fraction`` (a
+    quarter-Kelly default) is applied to the LCB of the mean --
+    ``mean - z * std / sqrt(n)`` -- rather than to the raw mean; when that LCB
+    is <= 0 the estimate cannot justify exposure and the result is ``0.0``,
+    the same fail-closed discipline ``volatility_target_scale`` uses. The
+    final value is clipped to ``[0.0, cap]``. Returns exactly ``0.0`` when the
+    train series has fewer than 2 observations or a zero/non-finite std. Raises
+    ``ValueError`` on ``fraction <= 0``, ``cap <= 0``, or ``z < 0``.
+    """
+    if fraction <= 0:
+        raise ValueError(f"fraction must be > 0, got {fraction}")
+    if cap <= 0:
+        raise ValueError(f"cap must be > 0, got {cap}")
+    if z < 0:
+        raise ValueError(f"z must be >= 0, got {z}")
+    r = train_returns.dropna()
+    if len(r) < 2:
+        return 0.0
+    mean = float(r.mean())
+    sd = float(r.std(ddof=1))
+    if not np.isfinite(mean) or not np.isfinite(sd) or sd <= 0:
+        return 0.0
+    variance = sd * sd
+    # A constant series leaves only float round-off in the std (e.g. repeated
+    # 0.001 yields sd ~ 2e-19); such a variance cannot justify any leverage.
+    # Fail closed when it is indistinguishable from the mean's float noise.
+    if variance <= np.finfo(np.float64).eps * float(mean * mean):
+        return 0.0
+    lcb_mean = mean - z * sd / np.sqrt(float(len(r)))
+    if lcb_mean <= 0:
+        return 0.0
+    return float(np.clip(fraction * lcb_mean / variance, 0.0, cap))
+
+
 def committee_block_edges_from(
     start: pd.Timestamp,
     oos_start: pd.Timestamp,
@@ -189,6 +233,10 @@ def purged_walk_forward(
     target_vol: float = MHS_COMMITTEE_TARGET_VOL,
     min_train_bars: int = 2000,
     periods_per_year: float = _PERIODS_PER_YEAR_1H,
+    sizing_mode: Literal["vol_target", "kelly_blend"] = "vol_target",
+    kelly_fraction: float = 0.25,
+    kelly_z: float = 1.0,
+    kelly_cap: float = 1.5,
 ) -> pd.Series:
     """Expanding-train purged walk-forward net PnL of the committee.
 
@@ -196,18 +244,24 @@ def purged_walk_forward(
     ``long_only_equal_risk_weights`` fitted on the net panel restricted to bars
     strictly before ``t0 - purge``, and the volatility scale comes from
     ``volatility_target_scale`` on the train-window weighted combination -- so
-    no test-window statistic ever feeds a weight or a scale. Blocks whose train
-    window has fewer than ``min_train_bars`` bars, and blocks with no test
-    bars, are skipped rather than raising. The returned series covers only
-    test-block timestamps, is sorted, and has no duplicate index entries.
-    Raises ``ValueError`` on empty or non-monotonic ``block_edges``, a
-    non-positive ``purge``, ``cost_bps < 0``, or a ``gross``/``turnover_cost``
-    shape mismatch.
+    no test-window statistic ever feeds a weight or a scale. With
+    ``sizing_mode='kelly_blend'`` the block scale is instead the 50/50 average
+    of the vol-target scale and ``kelly_lcb_scale`` on the same train
+    combination (an opt-in quarter-Kelly LCB overlay; the default
+    ``sizing_mode='vol_target'`` keeps every pre-existing call byte-identical).
+    Blocks whose train window has fewer than ``min_train_bars`` bars, and
+    blocks with no test bars, are skipped rather than raising. The returned
+    series covers only test-block timestamps, is sorted, and has no duplicate
+    index entries. Raises ``ValueError`` on empty or non-monotonic
+    ``block_edges``, a non-positive ``purge``, ``cost_bps < 0``, a
+    ``gross``/``turnover_cost`` shape mismatch, or an unknown ``sizing_mode``.
     """
     if cost_bps < 0:
         raise ValueError(f"cost_bps must be >= 0, got {cost_bps}")
     if purge <= pd.Timedelta(0):
         raise ValueError(f"purge must be positive, got {purge}")
+    if sizing_mode not in ("vol_target", "kelly_blend"):
+        raise ValueError(f"unknown sizing_mode {sizing_mode!r}")
     if not block_edges:
         raise ValueError("block_edges must not be empty")
     if not gross.index.equals(turnover_cost.index) or list(gross.columns) != list(
@@ -233,7 +287,14 @@ def purged_walk_forward(
         combined_train = score_weighted_net(
             weights, gross.loc[train_rows], turnover_cost.loc[train_rows], cost_bps,
         )
-        scale = volatility_target_scale(combined_train, target_vol, periods_per_year)
+        scale_vol = volatility_target_scale(combined_train, target_vol, periods_per_year)
+        scale = (
+            scale_vol
+            if sizing_mode == "vol_target"
+            else 0.5 * scale_vol + 0.5 * kelly_lcb_scale(
+                combined_train, kelly_fraction, kelly_z, kelly_cap,
+            )
+        )
         combined_test = score_weighted_net(
             weights, gross.loc[test_rows], turnover_cost.loc[test_rows], cost_bps,
         )
