@@ -126,57 +126,73 @@ def _write_3m_cache(root: Path) -> None:
         ).to_parquet(three_dir / path.name)
 
 
+@pytest.fixture(scope="module")
+def _mhs_shared_roots(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[Path, pd.Timestamp]]:
+    base = tmp_path_factory.mktemp("mhs_shared_base")
+    roots: dict[str, tuple[Path, pd.Timestamp]] = {}
+
+    root_long = base / "market_long"
+    end_long = _write_mhs_market(root_long, n_hours=26304, with_minute=False)
+    roots["long"] = (root_long, end_long)
+
+    root_default = base / "market"
+    end_default = _write_mhs_market(root_default)
+    _write_3m_cache(root_default)
+    roots["default"] = (root_default, end_default)
+
+    root_btc = base / "market_btc"
+    end_btc = _write_mhs_market(root_btc, include_btc=True)
+    _write_3m_cache(root_btc)
+    roots["btc"] = (root_btc, end_btc)
+
+    root_fund = base / "market_funding_vary"
+    end_fund = _write_mhs_market(root_fund, funding_cross_sectional=True)
+    _write_3m_cache(root_fund)
+    roots["fund"] = (root_fund, end_fund)
+
+    root_tbq = base / "market_tbq"
+    end_tbq = _write_mhs_market(root_tbq, include_taker_buy_quote=True)
+    _write_3m_cache(root_tbq)
+    roots["tbq"] = (root_tbq, end_tbq)
+
+    return roots
+
+
 @pytest.fixture
-def mhs_market_long(tmp_path, monkeypatch):
-    # Fixture spans 2021-01-01 .. 2024-01-01 for OOS block coverage.
-    root = tmp_path / "market"
-    end = _write_mhs_market(root, n_hours=26304, with_minute=False)
+def mhs_market_long(_mhs_shared_roots, monkeypatch):
+    root, end = _mhs_shared_roots["long"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     return root, end
 
 
 @pytest.fixture
-def mhs_market(tmp_path, monkeypatch):
-    root = tmp_path / "market"
-    end = _write_mhs_market(root)
+def mhs_market(_mhs_shared_roots, monkeypatch):
+    root, end = _mhs_shared_roots["default"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     return root, end
 
 
 @pytest.fixture
-def mhs_market_with_btc(tmp_path, monkeypatch):
-    """Same synthetic market plus a continuous BTCUSDT column, so the opt-in
-    crash-regime tilt (reference basket = MHS_CRASH_REGIME_REFERENCE_SYMBOLS)
-    has a real reference series to read."""
-    root = tmp_path / "market"
-    end = _write_mhs_market(root, include_btc=True)
+def mhs_market_with_btc(_mhs_shared_roots, monkeypatch):
+    root, end = _mhs_shared_roots["btc"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     return root, end
 
 
 @pytest.fixture
-def mhs_market_funding_vary(tmp_path, monkeypatch):
-    """Synthetic market whose funding rate differs per symbol, so a trailing
-    funding carry signal has genuine cross-sectional dispersion (the constant
-    ``mhs_market`` funding collapses a funding-carry book to zero weights)."""
-    root = tmp_path / "market_funding_vary"
-    end = _write_mhs_market(root, funding_cross_sectional=True)
+def mhs_market_funding_vary(_mhs_shared_roots, monkeypatch):
+    root, end = _mhs_shared_roots["fund"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     return root, end
 
 
 @pytest.fixture
-def mhs_market_with_taker_buy_quote(tmp_path, monkeypatch):
-    """``mhs_market`` plus a deterministic ``taker_buy_quote`` column, so the
-    committee_capital fold path can load the flow_imb members' required source
-    panel. The shared ``mhs_market`` intentionally omits the column so the
-    committee source-coverage gate tests still see it absent."""
-    root = tmp_path / "market_tbq"
-    end = _write_mhs_market(root, include_taker_buy_quote=True)
+def mhs_market_with_taker_buy_quote(_mhs_shared_roots, monkeypatch):
+    root, end = _mhs_shared_roots["tbq"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     return root, end
@@ -539,6 +555,7 @@ _FOLD = AnchoredPurgedFold(
 )
 
 
+@pytest.mark.slow
 class TestAnchoredFoldBounded:
     """MHS-MEM-03-ANCHORED-FOLD-BOUNDED: each anchored fold uses bounded
     windowed replay (no dense fold-wide minute panel) and enforces the
@@ -657,6 +674,7 @@ class TestAnchoredFoldBounded:
         )
 
 
+@pytest.mark.slow
 def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
     # SCENARIO_ANCHORED_FOLD_IS_TWO_PASS: the fold's reported primary
     # (strict/autocorr-sharpe/max-drawdown) reflects the P&L-vol-target
@@ -3001,8 +3019,8 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
     assert isinstance(diag, dict)
     members = diag["members"]
     assert isinstance(members, list)
-    assert len(members) == 6
-    assert len(set(members)) == 6
+    assert len(members) == 5
+    assert len(set(members)) == 5
     admitted = diag["admitted"]
     excluded = diag["excluded"]
     assert isinstance(admitted, list)
@@ -3069,6 +3087,93 @@ def test_committee_diagnostic_per_tier_blocks_present(mhs_market_long, monkeypat
             for key in ("net_sharpe", "cagr", "mdd"):
                 assert block[key] is None or np.isfinite(block[key])
         assert sum(b["bars"] for b in fields["blocks"]) == fields["bars"]
+
+
+def test_committee_kelly_sizing_requires_committee_book() -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_KELLY_SIZING_REQUIRES_COMMITTEE_BOOK:
+    # committee_kelly_sizing=True without committee_book=True fails closed in
+    # __post_init__ (mirrors discovery_gate_adjusted_net_t-requires-discovery_gate).
+    assert MhsDiagnosticRequest().committee_kelly_sizing is False
+    with pytest.raises(ValueError, match="committee_kelly_sizing requires committee_book"):
+        MhsDiagnosticRequest(committee_kelly_sizing=True, committee_book=False)
+    with pytest.raises(ValueError, match="committee_kelly_sizing must be a bool"):
+        MhsDiagnosticRequest(committee_kelly_sizing="yes")
+    assert MhsDiagnosticRequest(committee_book=True, committee_kelly_sizing=True).committee_kelly_sizing is True
+
+
+def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_KELLY_SIZING_DEFAULT_OFF_BYTE_IDENTICAL:
+    # with committee_book=True and committee_kelly_sizing omitted (default False)
+    # the committee walk-forward reports sizing_mode='vol_target' -- the pure
+    # pre-change vol-target path.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    wf = report.committee_diagnostic["walk_forward"]
+    assert wf["sizing_mode"] == "vol_target"
+    assert set(wf["per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+
+
+def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_KELLY_SIZING_ON_CHANGES_REPORT: with
+    # committee_kelly_sizing=True the committee walk-forward reports
+    # sizing_mode='kelly_blend' -- the opt-in 50/50 quarter-Kelly LCB overlay.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    base = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(
+        dataclasses.replace(base, committee_kelly_sizing=True),
+    )
+    assert report.status == "COMPLETE"
+    assert report.committee_diagnostic["walk_forward"]["sizing_mode"] == "kelly_blend"
+
+
+def test_committee_diagnostic_block_logret_share_reported(mhs_market_long, monkeypatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_BLOCK_LOGRET_SHARE_REPORTED: every block
+    # carries 'logret' and 'logret_share' keys, and the non-None shares across a
+    # tier sum to ~1.0 -- a structural ratio (report-only, never a gate) that
+    # surfaces single-block dominance, mirroring top1_event_share.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    per_tier = report.committee_diagnostic["walk_forward"]["per_tier"]
+    for tier, fields in per_tier.items():
+        if fields["bars"] == 0:
+            continue
+        shares = []
+        for block in fields["blocks"]:
+            assert "logret" in block
+            assert "logret_share" in block
+            if block["logret_share"] is not None:
+                assert np.isfinite(block["logret_share"])
+                shares.append(block["logret_share"])
+        if shares:
+            assert sum(shares) == pytest.approx(1.0, abs=1e-9), tier
 
 
 def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, caplog) -> None:
@@ -4413,7 +4518,6 @@ def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_marke
     # same fixture blocks under the old full-universe gate -- reproducing the
     # measured 36/36 false-positive the relevance scope removes.
     root, end = mhs_market
-    _write_3m_cache(root)
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
@@ -4421,38 +4525,42 @@ def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_marke
     ]
     gap_symbol = symbols[0]
     gap_path = root / "3m" / f"{gap_symbol}.parquet"
-    frame = pd.read_parquet(gap_path)
-    mid = len(frame) // 2
-    pd.concat([frame.iloc[:mid], frame.iloc[mid + 12:]]).to_parquet(gap_path)
+    original_bytes = gap_path.read_bytes()
+    try:
+        frame = pd.read_parquet(gap_path)
+        mid = len(frame) // 2
+        pd.concat([frame.iloc[:mid], frame.iloc[mid + 12:]]).to_parquet(gap_path)
 
-    # Pin the execution roster: every symbol in the roster from hour 1 EXCEPT
-    # gap_symbol, which is never a member. The first mask row stays False so the
-    # fixture's marks (available from start + 1h) cover every membership hour.
-    def _fixed_mask(quote_vol, eligible, universe_size):
-        mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
-        mask[gap_symbol] = False
-        mask.iloc[0] = False
-        return mask
+        # Pin the execution roster: every symbol in the roster from hour 1 EXCEPT
+        # gap_symbol, which is never a member. The first mask row stays False so the
+        # fixture's marks (available from start + 1h) cover every membership hour.
+        def _fixed_mask(quote_vol, eligible, universe_size):
+            mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
+            mask[gap_symbol] = False
+            mask.iloc[0] = False
+            return mask
 
-    monkeypatch.setattr(ev, "_pit_execution_mask", _fixed_mask)
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
-    )
-    request = MhsDiagnosticRequest(
-        start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
-        execution_universe_size=8, execution_coverage_gate=True,
-    )
-    report = ev.run_mhs_horizon_diagnostic(request)
-    assert report.status == "COMPLETE"
-
-    # The same fixture blocks under the old full-universe scope (the gapped
-    # symbol is funded, so it was part of the Cartesian product gate).
-    with pytest.raises(DataIntegrityError, match=gap_symbol):
-        mec.assert_execution_data_coverage(
-            symbols, "3m", str(_START), str(end), root=str(root),
+        monkeypatch.setattr(ev, "_pit_execution_mask", _fixed_mask)
+        monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+        monkeypatch.setattr(
+            ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
         )
+        request = MhsDiagnosticRequest(
+            start=str(_START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="3m", log_run=False,
+            execution_universe_size=8, execution_coverage_gate=True,
+        )
+        report = ev.run_mhs_horizon_diagnostic(request)
+        assert report.status == "COMPLETE"
+
+        # The same fixture blocks under the old full-universe scope (the gapped
+        # symbol is funded, so it was part of the Cartesian product gate).
+        with pytest.raises(DataIntegrityError, match=gap_symbol):
+            mec.assert_execution_data_coverage(
+                symbols, "3m", str(_START), str(end), root=str(root),
+            )
+    finally:
+        gap_path.write_bytes(original_bytes)
 
 
 def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -> None:
