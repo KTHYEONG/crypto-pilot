@@ -171,7 +171,14 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Opt-in: measure an additive time-series trend sleeve on the "
             "eligible market basket (net directional exposure the dollar-neutral "
-            "books cannot hold); diagnostic-only unless --trend-sleeve-gross is set"
+            "books cannot hold); diagnostic-only unless --trend-sleeve-gross is set. "
+            "WARNING (see ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT): wiring the "
+            "sleeve into the committee_capital execution replay at gross=0.15 raised "
+            "CAGR/Calmar/stress-Sharpe on the anchored folds but triggered "
+            "CAPITAL_INVARIANT_BREACH (negative equity, 2025-10-03) in the continuous "
+            "full-history replay -- fold-level pass/fail does not certify compounding "
+            "safety for this overlay. Do not set --trend-sleeve-gross > 0.0 for capital "
+            "decisions without re-deriving a fix, not just re-testing the same gross grid"
         ),
     )
     mhs.add_argument(
@@ -180,7 +187,9 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         default=0.0,
         help=(
             "Gross budget allocated to the directional trend sleeve, in "
-            "[0.0, 1.0]; a risk-budget policy value, never a fitted parameter"
+            "[0.0, 1.0]; a risk-budget policy value, never a fitted parameter. "
+            "Measured negative at 0.15/0.30 (CAPITAL_INVARIANT_BREACH) -- see "
+            "--trend-sleeve's warning"
         ),
     )
     mhs.add_argument(
