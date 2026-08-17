@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_DECISION_CADENCE",
+      "date": "2026-08-17",
+      "adr_id": "ADR_20260817_MHS_COMMITTEE_DECISION_CADENCE",
+      "domain": "mhs",
+      "title": "MHS 위원회 결정 주기 정합화 — 트랜치 평활(opt-in)",
+      "why": "위원회 자본 북이 24h 결정 격자에서 매번 완전 재포지셔닝하지만 최단 멤버 lookback은 168h로, 신호 갱신 속도보다 7배 빠른 구조적 오버샘플링이 회전율(연 32.9배)과 비용 드래그를 유발. discovery-only 스윕에서 24h/tranche=1은 14개 조합 중 하위권으로, 인과적 선택이었다면 고르지 않았을 지점임을 확인.",
+      "resolution": "MHS_COMMITTEE_TRANCHE_COUNT=3 상수 신설 후 _committee_execution_book에 tranche_count 파라미터 추가(기본 1은 항등 조기반환으로 byte-identical). decision_grid 리샘플 -> phase_tranche_book -> 원 인덱스 ffill 복원 구성. MhsDiagnosticRequest.committee_tranche_smoothing(committee_capital 요구) + CLI --committee-tranche-smoothing 배선, fold 경로와 top-level blend 양쪽 동일 스레딩.",
+      "impact": "실제 3분봉 리플레이(446심볼, 2021-2025): CAGR 15.00%->16.13%, MDD -28.28%->-26.52%, Calmar +14.7%, 연 회전율 -18.0%, 비용 3배 stress Sharpe +11.2%, gross는 오히려 감소(레버리지 무관). 반대급부로 anchored fold 통과 2/3->1/3(2023 0.151->1.537 회복, 2024 0.968->0.481 악화)이라 opt-in 기본 False 유지. 프록시 원장 최상위였던 grid_48h는 실제 리플레이에서 CAPITAL_INVARIANT_BREACH 실패 — 채택 근거는 실측 리플레이만 인정."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_KELLY_CAPITAL_WIRING",
       "date": "2026-08-16",
       "adr_id": "ADR_20260816_MHS_COMMITTEE_KELLY_CAPITAL_WIRING",
@@ -989,16 +999,6 @@
       "why": "최신 trend-screen 실행 결과를 기준으로 discovery 및 qualification gate를 동기화",
       "resolution": "최신 단일 실행 결과 JSON을 유지하고 fractional-Kelly 정책 및 qualification 결과를 코드맵과 작업 인덱스에 반영",
       "impact": "Discovery 후보 23개와 5개 포트폴리오 선택 결과를 추적하며 observation/stress gate 실패를 기록"
-    },
-    {
-      "task_id": "TASK_TREND_SCREEN_PERFORMANCE_OPTIMIZATION",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_TREND_SCREEN_PERFORMANCE_OPTIMIZATION",
-      "domain": "research",
-      "title": "Trend screen 백테스트 성능 최적화 및 게이트 결과 기록",
-      "why": "450개 trend-screen discovery 백테스트가 셀별 순차 실행으로 약 540초 소요되어 실행시간 단축과 결과 추적이 필요했다.",
-      "resolution": "심볼 단위 병렬 실행과 심볼별 데이터 재사용으로 discovery를 최적화하고, 450개 셀의 CAGR·MDD·t-stat·Holm 보정 신뢰하한·탈락 사유를 deterministic JSON 보고서로 기록했다. 실행 결과는 no_discovery_survivors로 gate 미통과였다.",
-      "impact": "실행시간을 약 540초에서 46.99초로 단축하고 peak RSS 약 634MiB를 확인했다. discovery survivor가 없어 qualification/stress/holdout은 보류되며 투자 후보를 등록하지 않는다."
     }
   ]
 }
