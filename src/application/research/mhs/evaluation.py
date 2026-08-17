@@ -244,6 +244,7 @@ MHS_GO_REASON_NONFINITE_EQUITY = "NONFINITE_EQUITY"
 MHS_GO_REASON_EXECUTION_GAP = "RELEVANT_EXECUTION_DATA_GAP"
 MHS_GO_REASON_PRIMARY_SHARPE = "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"
 MHS_GO_REASON_STRESS_SHARPE = "STRESS_SHARPE_NOT_POSITIVE"
+MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR = "PRIMARY_ANNUAL_RETURN_BELOW_FLOOR"
 MHS_GO_REASON_CAPITAL_BREACH = "CAPITAL_INVARIANT_BREACH"
 MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
 MHS_GO_REASON_RESOURCE_BREACH = "RESOURCE_BUDGET_BREACH"
@@ -4114,6 +4115,12 @@ def _run_anchored_fold(
         equity_1h, net_returns_1h, _turnover_1h = _hourly_ledger_series(
             equity, primary.ledger.fill_turnover,
         )
+        primary_net_ann = _mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H)
+        _return_floor = MHS_REGISTERED_POLICY_THRESHOLDS["primary_annual_return"]
+        if _return_floor is not None and (
+            not np.isfinite(primary_net_ann) or primary_net_ann < _return_floor
+        ):
+            failures.append(MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR)
         if _fold_debug_tag is not None and _logger.isEnabledFor(logging.DEBUG):
             _logger.debug(
                 "[EVAL] tag=%s ann_turnover=%.3f ann_net_ret=%.4f mdd=%.4f",
@@ -4131,7 +4138,7 @@ def _run_anchored_fold(
             primary_valid=primary.ledger.primary_valid,
             primary_autocorr_sharpe=primary_autocorr,
             primary_naive_sharpe=_naive_sharpe(primary.ledger),
-            primary_net_ann=_mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H),
+            primary_net_ann=primary_net_ann,
             primary_geometric_cagr=_geometric_cagr(equity_1h),
             primary_max_drawdown=_mdd(equity),
             stress_naive_sharpe=stress_sharpe,
