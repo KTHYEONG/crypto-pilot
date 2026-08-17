@@ -158,6 +158,11 @@ MHS_COMMITTEE_OOS_START: pd.Timestamp = pd.Timestamp("2023-01-01", tz="UTC")
 # 오버샘플링 배수를 7배->2.3배로 축소하는 구조적 선택 (피팅값 아님).
 MHS_COMMITTEE_TRANCHE_COUNT: int = 3
 
+# 위원회 raw 북 자기 proxy return의 causal trailing lag-1 자기상관 게이팅 창(결정
+# 행 개수). 실제 3분봉 리플레이로 15~25 구간 전부 3개 fold 알파 게이트 동시 통과를
+# 확인(고원, 단일 스파이크 아님); 창 10/90은 CAPITAL_INVARIANT_BREACH로 실패.
+MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW: int = 15
+
 # Discovery-window-only growth-optimal headroom diagnostic: risk-grid
 # multipliers of the realized reference_risk, plus the constraint anchors
 # (calibrated in the kelly_compounding_improve cycle: selected_risk=1.0x,

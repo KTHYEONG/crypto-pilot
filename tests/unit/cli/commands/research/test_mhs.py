@@ -476,26 +476,28 @@ def test_mhs_diagnostic_committee_growth_diagnostic_flag_threaded_to_request(mon
 def test_mhs_committee_kelly_sizing_help_text_no_stale_claims() -> None:
     """SCENARIO_MHS_COMMITTEE_KELLY_SIZING_HELP_TEXT_NO_LONGER_CLAIMS_COMMITTEE_BOOK_REQUIRED:
     the registered ``--committee-kelly-sizing`` help no longer carries the stale
-    'requires --committee-book' / 'not yet wired into --committee-capital'
-    claims, and parsing ``--committee-capital --committee-kelly-sizing`` without
-    ``--committee-book`` still succeeds."""
+    'requires --committee-book' claim, and parsing ``--committee-kelly-sizing``
+    alone succeeds now that committee capital is the default (no
+    ``--committee-book`` needed)."""
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
     parser = sub.choices["mhs-horizon-diagnostic"]
 
     kelly = next(a for a in parser._actions if a.dest == "committee_kelly_sizing")
     assert "requires --committee-book" not in kelly.help
-    assert "not yet wired into --committee-capital" not in kelly.help
 
-    args = parser.parse_args(["--committee-capital", "--committee-kelly-sizing"])
-    assert args.committee_capital is True
+    args = parser.parse_args(["--committee-kelly-sizing"])
+    assert args.no_committee_capital is False
     assert args.committee_kelly_sizing is True
 
 
-def test_mhs_diagnostic_committee_capital_flag_threaded_to_request(monkeypatch) -> None:
-    """SCENARIO_MHS_COMMITTEE_CAPITAL_CLI_FLAG_THREADED: ``--committee-capital``
-    (store_true, default False) is parsed and threaded into the constructed
-    ``MhsDiagnosticRequest``; omitting it yields committee_capital=False."""
+def test_mhs_diagnostic_committee_capital_defaults_on_and_opt_out(monkeypatch) -> None:
+    """SCENARIO_MHS_COMMITTEE_CAPITAL_MAIN_LOGIC_DEFAULT: committee capital (the
+    best-measured configuration) is the main-logic default -- omitting any flag
+    threads committee_capital=True into MhsDiagnosticRequest, and
+    ``--no-committee-capital`` opts back out to committee_capital=False (which
+    also forces committee_regime_adaptive_tranche=False, since it requires
+    committee capital)."""
     import src.application.research.mhs.evaluation as ev
 
     captured: dict = {}
@@ -516,25 +518,28 @@ def test_mhs_diagnostic_committee_capital_flag_threaded_to_request(monkeypatch) 
     parser = sub.choices["mhs-horizon-diagnostic"]
 
     defaults = {action.dest: action.default for action in parser._actions}
-    assert defaults["committee_capital"] is False
+    assert defaults["no_committee_capital"] is False
 
-    args = parser.parse_args(["--committee-capital"])
-    assert args.committee_capital is True
+    args = parser.parse_args([])
+    assert args.no_committee_capital is False
     _run_mhs_horizon_diagnostic(args)
     assert captured["committee_capital"] is True
+    assert captured["committee_regime_adaptive_tranche"] is True
 
     captured.clear()
-    args = parser.parse_args([])
-    assert args.committee_capital is False
+    args = parser.parse_args(["--no-committee-capital"])
+    assert args.no_committee_capital is True
     _run_mhs_horizon_diagnostic(args)
     assert captured["committee_capital"] is False
+    assert captured["committee_regime_adaptive_tranche"] is False
 
 
 def test_mhs_diagnostic_committee_tranche_smoothing_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_COMMITTEE_TRANCHE_SMOOTHING_CLI_FLAG_THREADED:
     ``--committee-tranche-smoothing`` (store_true, default False) is parsed and
-    threaded into the constructed ``MhsDiagnosticRequest``; omitting it yields
-    committee_tranche_smoothing=False."""
+    threaded into the constructed ``MhsDiagnosticRequest``; passing it
+    overrides the regime-adaptive main-logic default (the two are mutually
+    exclusive) rather than raising."""
     import src.application.research.mhs.evaluation as ev
 
     captured: dict = {}
@@ -561,14 +566,58 @@ def test_mhs_diagnostic_committee_tranche_smoothing_flag_threaded_to_request(mon
     assert args.committee_tranche_smoothing is False
     _run_mhs_horizon_diagnostic(args)
     assert captured["committee_tranche_smoothing"] is False
+    assert captured["committee_regime_adaptive_tranche"] is True
 
     captured.clear()
-    args = parser.parse_args(["--committee-capital", "--committee-tranche-smoothing"])
-    assert args.committee_capital is True
+    args = parser.parse_args(["--committee-tranche-smoothing"])
     assert args.committee_tranche_smoothing is True
     _run_mhs_horizon_diagnostic(args)
     assert captured["committee_capital"] is True
     assert captured["committee_tranche_smoothing"] is True
+    assert captured["committee_regime_adaptive_tranche"] is False
+
+
+def test_mhs_diagnostic_committee_regime_adaptive_tranche_defaults_on_and_opt_out(
+    monkeypatch,
+) -> None:
+    """SCENARIO_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE_MAIN_LOGIC_DEFAULT: the
+    regime-adaptive tranche (the best-measured configuration) is on by default
+    whenever committee capital is active; ``--no-committee-regime-adaptive-tranche``
+    opts back out to the raw committee book while leaving committee capital on."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        captured.update(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    defaults = {action.dest: action.default for action in parser._actions}
+    assert defaults["no_committee_regime_adaptive_tranche"] is False
+
+    args = parser.parse_args([])
+    assert args.no_committee_regime_adaptive_tranche is False
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["committee_capital"] is True
+    assert captured["committee_regime_adaptive_tranche"] is True
+
+    captured.clear()
+    args = parser.parse_args(["--no-committee-regime-adaptive-tranche"])
+    assert args.no_committee_regime_adaptive_tranche is True
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["committee_capital"] is True
+    assert captured["committee_regime_adaptive_tranche"] is False
 
 
 def test_mhs_diagnostic_execution_coverage_gate_flag_threaded(monkeypatch) -> None:
