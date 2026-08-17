@@ -2390,6 +2390,182 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
     assert seen["tranche_count"] == ev.MHS_COMMITTEE_TRANCHE_COUNT
 
 
+def test_committee_execution_book_regime_adaptive_differs_from_fixed_variants() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_REGIME_ADAPTIVE_DIFFERS_FROM_FIXED:
+    # regime_adaptive_window selects per-row between the raw (tranche=1) book
+    # and its tranche_count-row smooth, so on a fixture spanning a real
+    # decision history it differs from both fixed variants at some rows.
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
+    }
+    fixed1 = ev._committee_execution_book(**kwargs, tranche_count=1)
+    fixed3 = ev._committee_execution_book(**kwargs, tranche_count=3)
+    adaptive = ev._committee_execution_book(
+        **kwargs, tranche_count=3, regime_adaptive_window=ev.MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+    )
+    assert not adaptive.equals(fixed1)
+    assert not adaptive.equals(fixed3)
+
+
+def test_committee_execution_book_regime_adaptive_preserves_dollar_neutrality() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_REGIME_ADAPTIVE_PRESERVES_DOLLAR_NEUTRALITY:
+    # every non-zero adaptive row stays dollar-neutral (it is always exactly
+    # one of the two dollar-neutral fixed variants), and aggregate gross never
+    # exceeds the larger of the two fixed variants' gross.
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
+    }
+    fixed1 = ev._committee_execution_book(**kwargs, tranche_count=1)
+    fixed3 = ev._committee_execution_book(**kwargs, tranche_count=3)
+    adaptive = ev._committee_execution_book(
+        **kwargs, tranche_count=3, regime_adaptive_window=ev.MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+    )
+    non_zero = adaptive.abs().sum(axis=1) > 1e-9
+    assert float(adaptive.loc[non_zero].sum(axis=1).abs().max()) < 1e-9
+    max_gross = max(float(fixed1.abs().sum(axis=1).max()), float(fixed3.abs().sum(axis=1).max()))
+    assert float(adaptive.abs().sum(axis=1).max()) <= max_gross + 1e-9
+
+
+def test_committee_execution_book_regime_adaptive_invalid_window_raises() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_REGIME_ADAPTIVE_INVALID_WINDOW_RAISES
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    with pytest.raises(ValueError, match="regime_adaptive_window"):
+        ev._committee_execution_book(
+            close, quote_vol, taker_buy_quote, mask, decision_grid,
+            min_symbols=8, tranche_count=3, regime_adaptive_window=2,
+        )
+
+
+def test_committee_execution_book_regime_adaptive_no_member_still_fails_closed(
+    monkeypatch,
+) -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_REGIME_ADAPTIVE_NO_MEMBER_STILL_FAILS_CLOSED:
+    # the fail-closed path fires before any regime-adaptive selection.
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    monkeypatch.setattr(ev, "build_feature_books", lambda *a, **k: {})
+    with pytest.raises(RuntimeError, match="no committee member admitted"):
+        ev._committee_execution_book(
+            close, quote_vol, taker_buy_quote, mask, decision_grid,
+            min_symbols=8, tranche_count=3, regime_adaptive_window=15,
+        )
+
+
+def test_committee_regime_adaptive_tranche_requires_committee_capital() -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_REGIME_ADAPTIVE_TRANCHE_REQUIRES_COMMITTEE_CAPITAL
+    assert MhsDiagnosticRequest().committee_regime_adaptive_tranche is False
+    with pytest.raises(
+        ValueError, match="committee_regime_adaptive_tranche requires committee_capital",
+    ):
+        MhsDiagnosticRequest(committee_regime_adaptive_tranche=True, committee_capital=False)
+    with pytest.raises(ValueError, match="committee_regime_adaptive_tranche must be a bool"):
+        MhsDiagnosticRequest(committee_regime_adaptive_tranche="yes")
+    assert (
+        MhsDiagnosticRequest(
+            committee_capital=True, committee_regime_adaptive_tranche=True,
+        ).committee_regime_adaptive_tranche
+    )
+
+
+def test_committee_regime_adaptive_tranche_mutually_exclusive_with_tranche_smoothing() -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_REGIME_ADAPTIVE_TRANCHE_MUTUALLY_EXCLUSIVE
+    with pytest.raises(
+        ValueError,
+        match="committee_regime_adaptive_tranche is mutually exclusive with "
+        "committee_tranche_smoothing",
+    ):
+        MhsDiagnosticRequest(
+            committee_capital=True,
+            committee_regime_adaptive_tranche=True,
+            committee_tranche_smoothing=True,
+        )
+
+
+def test_committee_regime_adaptive_tranche_default_off_byte_identical(
+    mhs_market_with_taker_buy_quote, monkeypatch,
+) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_REGIME_ADAPTIVE_TRANCHE_DEFAULT_OFF_BYTE_IDENTICAL:
+    # with committee_capital=True and committee_regime_adaptive_tranche omitted
+    # (default False) both the fold target path and the top-level report are
+    # byte-identical to an explicit committee_regime_adaptive_tranche=False run.
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True,
+    )
+    target_default, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+    )
+    target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, dataclasses.replace(request, committee_regime_adaptive_tranche=False),
+        funding_by_symbol,
+    )
+    pd.testing.assert_frame_equal(target_default, target_off)
+
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    default_report = ev.run_mhs_horizon_diagnostic(request)
+    explicit_off = ev.run_mhs_horizon_diagnostic(
+        dataclasses.replace(request, committee_regime_adaptive_tranche=False),
+    )
+    assert default_report.status == "COMPLETE"
+    for field in ("books", "blend", "blend_target_gross", "research_go", "folds"):
+        assert getattr(default_report, field) == getattr(explicit_off, field)
+
+
+def test_committee_regime_adaptive_tranche_threads_both_call_sites(
+    mhs_market_with_taker_buy_quote, monkeypatch,
+) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_REGIME_ADAPTIVE_TRANCHE_THREADS_BOTH_CALL_SITES:
+    # with committee_capital=True and committee_regime_adaptive_tranche=True
+    # the fold target builder AND the top-level blend both thread
+    # regime_adaptive_window == MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW (never
+    # None at one site and set at the other).
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True,
+        committee_regime_adaptive_tranche=True,
+    )
+    seen: dict[str, int | None] = {}
+    real = ev._committee_execution_book
+
+    def _spy(*args, **kwargs):
+        seen["regime_adaptive_window"] = kwargs.get("regime_adaptive_window")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "_committee_execution_book", _spy)
+    ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    assert seen["regime_adaptive_window"] == ev.MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+
+    seen.clear()
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    ev.run_mhs_horizon_diagnostic(request)
+    assert seen["regime_adaptive_window"] == ev.MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+
+
 def test_p14_postbook_concurrent_parity() -> None:
     # SCENARIO_P14_POSTBOOK: the deployment tail computed with the placeholder
     # ``research_go_eligible=None`` and then patched with the fold-derived flag
@@ -3496,6 +3672,138 @@ def test_committee_diagnostic_block_logret_share_reported(mhs_market_long, monke
                 shares.append(block["logret_share"])
         if shares:
             assert sum(shares) == pytest.approx(1.0, abs=1e-9), tier
+
+
+def test_committee_diagnostic_block_return_autocorr_lag1_present(
+    mhs_market_long, monkeypatch,
+) -> None:
+    # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_BLOCK_RETURN_AUTOCORR_LAG1_PRESENT:
+    # every walk-forward block carries 'return_autocorr_lag1', either None
+    # (non-finite, e.g. a <=2-bar or zero-variance block) or a finite float in
+    # [-1.0, 1.0] -- the block-scoped lag-1 autocorrelation of the raw
+    # tranche_count=1 committee net returns.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    per_tier = report.committee_diagnostic["walk_forward"]["per_tier"]
+    for fields in per_tier.values():
+        for block in fields["blocks"]:
+            assert "return_autocorr_lag1" in block
+            value = block["return_autocorr_lag1"]
+            assert value is None or (
+                isinstance(value, float)
+                and np.isfinite(value)
+                and -1.0 <= value <= 1.0
+            )
+
+
+def test_committee_diagnostic_block_return_autocorr_lag1_matches_manual_computation(
+    mhs_market_long, monkeypatch,
+) -> None:
+    # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_BLOCK_RETURN_AUTOCORR_LAG1_MATCHES_MANUAL_COMPUTATION:
+    # the reported value is the true block-scoped pandas .autocorr(1) on that
+    # block's own net-return slice at the 'base' cost tier -- recomputed
+    # independently by capturing the purged walk-forward series during the run
+    # and slicing it on the reported block edges.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    captured: dict[str, pd.Series] = {}
+    real_wf = ev.purged_walk_forward
+
+    def _recording_wf(*args, **kwargs):
+        result = real_wf(*args, **kwargs)
+        captured[args[2]] = result
+        return result
+
+    monkeypatch.setattr(ev, "purged_walk_forward", _recording_wf)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    base_wf = captured.get(ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"])
+    assert base_wf is not None
+    base_fields = report.committee_diagnostic["walk_forward"]["per_tier"]["base"]
+    for block in base_fields["blocks"]:
+        if block["bars"] <= 2:
+            continue
+        slice_start = pd.Timestamp(block["block_start"])
+        block_slice = base_wf[base_wf.index >= slice_start].iloc[: block["bars"]]
+        expected = block_slice.autocorr(1)
+        if not np.isfinite(expected):
+            assert block["return_autocorr_lag1"] is None
+        else:
+            assert block["return_autocorr_lag1"] == pytest.approx(
+                float(expected), abs=1e-9,
+            )
+
+
+def test_committee_diagnostic_block_existing_fields_unchanged(
+    mhs_market_long, monkeypatch,
+) -> None:
+    # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_EXISTING_BLOCK_FIELDS_UNCHANGED: adding
+    # the new key leaves the prior per-block fields ('bars', 'block_start',
+    # 'net_sharpe', 'cagr', 'mdd', 'logret', 'logret_share') intact -- same keys,
+    # same values, same types -- so pre-existing per-block consumers are
+    # unaffected.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_book=True,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    prior_keys = {
+        "block_start", "bars", "net_sharpe", "cagr", "mdd", "logret", "logret_share",
+    }
+    for fields in report.committee_diagnostic["walk_forward"]["per_tier"].values():
+        for block in fields["blocks"]:
+            assert prior_keys.issubset(set(block))
+            assert isinstance(block["block_start"], str)
+            assert isinstance(block["bars"], int)
+            for key in ("net_sharpe", "cagr", "mdd", "logret", "logret_share"):
+                assert block[key] is None or isinstance(block[key], float)
+
+
+def test_committee_diagnostic_off_by_default_unchanged(
+    mhs_market_long, monkeypatch,
+) -> None:
+    # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_OFF_BY_DEFAULT_UNCHANGED: with
+    # committee_book and committee_capital both False (defaults) the report's
+    # committee_diagnostic stays exactly None -- the new field only ever appears
+    # inside an already-opt-in diagnostic block.
+    root, end = mhs_market_long
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    assert report.committee_diagnostic is None
 
 
 def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, caplog) -> None:
