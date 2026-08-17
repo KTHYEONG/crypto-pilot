@@ -97,7 +97,11 @@
     "architecture": "docs/architecture/mhs-explain.md"
   },
   "src/mhs/contracts.py": {
-    "testing": "tests/unit/mhs/test_contracts.py"
+    "testing": [
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/application/research/mhs/test_evaluation.py"
+    ],
+    "architecture": "docs/architecture/mhs-explain.md"
   },
   "src/mhs/discovery.py": {
     "testing": "tests/unit/mhs/test_evaluation_fold_safe_fast_horizon.py"

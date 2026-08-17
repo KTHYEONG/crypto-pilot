@@ -177,21 +177,23 @@ MHS는 단순 과거 재현을 넘어 아래 9가지 결정론적 스트레스 �
 - **Fold 1**: 2021~2023 Train ──► **2024 Validation** (168시간 Purge/Embargo)
 - **Fold 2**: 2021~2024 Train ──► **2025 Validation** (168시간 Purge/Embargo)
 
-#### 최신 실행 진단 결과 (17차 실측치)
+#### 최신 실행 진단 결과 (위원회 레짐 적응형 트랜치 기본값, 2026-08-17 실측)
 
-| 항목 | 16차 (연율화 버그) | **17차 (최신 수정)** | 비고 |
+`committee_capital=True` + `committee_regime_adaptive_tranche=True`(둘 다 CLI 기본값, ADR_20260817_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE)가 k=5 위원회 북 자신의 causal trailing lag-1 자기상관이 음수(whipsaw)인 결정행만 3행 트랜치로 평활하고 양수(추세지속)인 행은 raw를 채택해, 고정 평활 하나로는 항상 한쪽 레짐을 희생시키던 트레이드오프를 제거했다.
+
+| 항목 | 17차 (레짐 적응형 이전) | **위원회 레짐 적응형 (최신)** | 비고 |
 | :--- | ---: | ---: | :--- |
-| `primary_autocorr_sharpe` | 0.5257 | **0.5257** | 0.6 미달 (GO 차단 원인) |
-| `primary_naive_sharpe` | 0.1333 | **0.4616** | √12배 상승 교정 |
-| `primary_net_ann` | 0.0081 | **0.0972** | 12배 상승 교정 |
-| `primary_geometric_cagr` | 0.0063 | **0.0784 (7.84%)**| 12.4배 상승 교정 |
-| `primary_max_drawdown` | -0.2269 | **-0.2269 (-22.69%)**| 무변화 |
-| `primary_annualized_turnover`| 3.56 | **42.68** | 12배 상승 교정 |
-| `stress_naive_sharpe` (x3 cost) | +0.0410 | **+0.1420** | 3.46배 상승 |
-| **`research_go.eligible`** | `false` | **`false`** | **Research GO 기각** |
+| `primary_autocorr_sharpe` | 0.5257 | **1.0792** | 0.6 플로어 여유 통과 |
+| `primary_geometric_cagr` | 0.0784 (7.84%) | **0.1923 (19.23%)** | |
+| `primary_max_drawdown` | -0.2269 (-22.69%) | **-0.1705 (-17.05%)** | |
+| `deployment_readiness.calmar` | 0.35 | **1.128** | |
+| `stress_naive_sharpe` (x3 cost) | +0.1420 | **+0.8334** | |
+| `research_go.folds_passed` | 2/3 | **3/3** | |
+| **`research_go.reason_codes`** | 알파 미달 + 데이터 결손 다수 | **`['UNSPECIFIED_POLICY']` 단일** | 정책 임계값 미등록만 남음 |
 
-- **Fold별 실측**: 2023년 Sharpe +0.80 (통과), 2024년 Sharpe -0.27 (미달 — 시장 반전장/붕괴장 손실), 2025년 Sharpe +1.50 (통과)
-- **최종 상태**: 원장 및 시뮬레이션 파이프라인 구현 완료, 전략의 전체 Sharpe (0.5257 < 0.6) 및 2024년 Fold1 손실로 인해 **Research GO 실패 (`eligible=false`)**.
+- **Fold별 실측**: 2023년 autocorr Sharpe 1.158(통과), 2024년 0.853(통과), 2025년 3.387(통과) — 세 폴드 모두 0.6 플로어를 여유 있게 상회.
+- **최종 상태**: 알파/사이징 레벨의 병목은 해소되었고, Research GO의 유일한 차단 사유는 `MHS_REGISTERED_POLICY_THRESHOLDS`(`cap_30_roster`, `primary_annual_return`) 미등록에 따른 `UNSPECIFIED_POLICY`뿐 — 통계 게이트가 아닌 정책 등록 절차 이슈.
+- P&L 변동성 타겟팅 비활성화(`--no-pnl-vol-target`) 실측 결과 2025-07-20 시점 `CAPITAL_INVARIANT_BREACH`(자본 완전 파괴)로 실패 — 현재 gross exposure 억제(평균 53%)는 인위적 제약이 아니라 실측 검증된 꼬리위험 방어선.
 
 ---
 
