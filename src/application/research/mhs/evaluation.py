@@ -88,6 +88,7 @@ from src.mhs.contracts import (
     MHS_COMMITTEE_MEMBERS,
     MHS_COMMITTEE_OOS_START,
     MHS_COMMITTEE_PURGE_HOURS,
+    MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     MHS_COMMITTEE_TARGET_VOL,
     MHS_COMMITTEE_TRANCHE_COUNT,
     MHS_CRASH_REGIME_REFERENCE_SYMBOLS,
@@ -320,6 +321,7 @@ class MhsDiagnosticRequest:
     committee_growth_diagnostic: bool = False
     committee_capital: bool = False
     committee_tranche_smoothing: bool = False
+    committee_regime_adaptive_tranche: bool = False
     execution_coverage_gate: bool = False
     ram_guard: bool = True
 
@@ -370,6 +372,16 @@ class MhsDiagnosticRequest:
             raise ValueError("committee_tranche_smoothing must be a bool")
         if self.committee_tranche_smoothing and not self.committee_capital:
             raise ValueError("committee_tranche_smoothing requires committee_capital=True")
+        if not isinstance(self.committee_regime_adaptive_tranche, bool):
+            raise ValueError("committee_regime_adaptive_tranche must be a bool")
+        if self.committee_regime_adaptive_tranche:
+            if not self.committee_capital:
+                raise ValueError("committee_regime_adaptive_tranche requires committee_capital=True")
+            if self.committee_tranche_smoothing:
+                raise ValueError(
+                    "committee_regime_adaptive_tranche is mutually exclusive with "
+                    "committee_tranche_smoothing"
+                )
         if not isinstance(self.committee_growth_diagnostic, bool):
             raise ValueError("committee_growth_diagnostic must be a bool")
         if self.committee_growth_diagnostic and not self.committee_book:
@@ -2009,6 +2021,9 @@ def _committee_diagnostic(
             if block_wf.empty:
                 continue
             block_metrics = wealth_metrics(block_wf)
+            _block_rho1 = (
+                block_wf.autocorr(1) if len(block_wf) > 2 else float("nan")
+            )
             blocks.append({
                 "block_start": t0.isoformat(),
                 "bars": len(block_wf),
@@ -2023,11 +2038,15 @@ def _committee_diagnostic(
                     and np.isfinite(block_metrics["logret"])
                     else None
                 ),
+                "return_autocorr_lag1": (
+                    float(_block_rho1) if np.isfinite(_block_rho1) else None
+                ),
             })
             _logger.debug(
-                "[EVAL] stage=committee_block tier=%s block_start=%s bars=%d sharpe=%s cagr=%s mdd=%s",
+                "[EVAL] stage=committee_block tier=%s block_start=%s bars=%d sharpe=%s cagr=%s mdd=%s rho1=%s",
                 tier, t0.isoformat(), len(block_wf),
                 block_metrics["sharpe"], block_metrics["cagr"], block_metrics["mdd"],
+                _block_rho1,
             )
         per_tier[tier] = {
             "net_sharpe": _finite_or_none(metrics["sharpe"]),
@@ -2374,13 +2393,42 @@ def _participation_warnings(
     return warnings
 
 
-def _daily_autocorr_sharpe(ledger: SimulatedInventoryLedgerResult) -> float:
+def _log_autocorr_diagnostic(tag: str, returns: pd.Series, adjusted_sharpe: float) -> None:
+    """Debug-only Lo(2002) decomposition: separates the denominator penalty
+    (serial-correlation artifact) from raw-return decay, per fold/regime tag.
+    """
+    mean = float(returns.mean())
+    std = float(returns.std(ddof=1))
+    sample_sharpe = mean / std * float(np.sqrt(365)) if std > 0 else float("nan")
+    denom = (
+        sample_sharpe / adjusted_sharpe
+        if np.isfinite(adjusted_sharpe) and adjusted_sharpe != 0.0
+        else float("nan")
+    )
+    n = len(returns)
+    rho1 = float(returns.autocorr(1)) if n > 2 else float("nan")
+    rho3 = float(returns.autocorr(3)) if n > 4 else float("nan")
+    rho7 = float(returns.autocorr(7)) if n > 8 else float("nan")
+    _logger.debug(
+        "[EVAL] tag=%s n=%d mean=%.5f std=%.5f sample_sharpe=%.3f adjusted_sharpe=%.3f "
+        "lo_denom=%.3f rho1=%.3f rho3=%.3f rho7=%.3f",
+        tag, n, mean, std, sample_sharpe, adjusted_sharpe, denom, rho1, rho3, rho7,
+    )
+
+
+def _daily_autocorr_sharpe(
+    ledger: SimulatedInventoryLedgerResult, *, debug_tag: str | None = None,
+) -> float:
     if ledger.equity.empty:
         return float("nan")
     daily = ledger.equity.resample("1D").last().dropna()
     if len(daily) < 9:
         return float("nan")
-    return autocorrelation_adjusted_sharpe(daily.pct_change().dropna(), 365, 7)
+    returns = daily.pct_change().dropna()
+    adjusted = autocorrelation_adjusted_sharpe(returns, 365, 7)
+    if debug_tag is not None and _logger.isEnabledFor(logging.DEBUG):
+        _log_autocorr_diagnostic(debug_tag, returns, adjusted)
+    return adjusted
 
 
 def _hourly_ledger_series(
@@ -3459,6 +3507,18 @@ def _prefer_funding_carry_selection(
     return lookback, sign
 
 
+def _causal_lag1_autocorr(x: np.ndarray) -> float:
+    """Lag-1 Pearson autocorrelation of a rolling window (raw ndarray, for use
+    inside ``Series.rolling(...).apply(..., raw=True)``).
+    """
+    if len(x) < 3:
+        return float("nan")
+    x0, x1 = x[:-1], x[1:]
+    if np.std(x0) == 0.0 or np.std(x1) == 0.0:
+        return float("nan")
+    return float(np.corrcoef(x0, x1)[0, 1])
+
+
 def _committee_execution_book(
     close: pd.DataFrame,
     quote_vol: pd.DataFrame,
@@ -3467,6 +3527,7 @@ def _committee_execution_book(
     decision_grid: pd.DatetimeIndex,
     min_symbols: int,
     tranche_count: int = 1,
+    regime_adaptive_window: int | None = None,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
@@ -3476,10 +3537,20 @@ def _committee_execution_book(
     the concentration that carries its edge (walk-forward Sharpe 0.822 -> 0.503,
     rejected in RC-4). Fails closed when no member is admitted. ``tranche_count``
     smooths the decision rows with a staggered tranche mean (opt-in, defaults to
-    the identity single-phase book).
+    the identity single-phase book). ``regime_adaptive_window`` (opt-in, mutually
+    exclusive with a fixed ``tranche_count``-only smooth) selects per-row between
+    the raw book and its ``tranche_count``-row smooth using a causal trailing
+    lag-1 autocorrelation of the raw book's own proxy return: negative (mean-
+    reverting/whipsaw) rows use the smooth, non-negative (trending/persistent)
+    rows use the raw book -- root cause and evidence in
+    ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE.
     """
     if tranche_count < 1:
         raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
+    if regime_adaptive_window is not None and regime_adaptive_window < 3:
+        raise ValueError(
+            f"regime_adaptive_window must be >= 3, got {regime_adaptive_window}"
+        )
     _member_specs = [
         spec for spec in MHS_FEATURE_REGISTRY
         if spec.name in set(MHS_COMMITTEE_MEMBERS)
@@ -3494,6 +3565,20 @@ def _committee_execution_book(
             "committee_capital: no committee member admitted in this fold window"
         )
     book = sum(_committee_books.values()) / float(len(_committee_books))
+    if regime_adaptive_window is not None:
+        book_grid = book.reindex(decision_grid).fillna(0.0)
+        smoothed_grid = phase_tranche_book(book_grid, tranche_count)
+        close_grid = close.reindex(decision_grid).ffill()
+        fwd_ret = np.log(close_grid).shift(-1) - np.log(close_grid)
+        proxy_return = (book_grid * fwd_ret.reindex(decision_grid)).sum(axis=1)
+        trailing_rho1 = (
+            proxy_return.rolling(regime_adaptive_window, min_periods=regime_adaptive_window)
+            .apply(_causal_lag1_autocorr, raw=True)
+            .shift(1)
+        )
+        use_smoothed = (trailing_rho1 < 0.0).reindex(decision_grid).fillna(False)
+        adaptive_grid = book_grid.mask(use_smoothed, smoothed_grid)
+        return adaptive_grid.reindex(book.index, method="ffill").fillna(0.0)
     if tranche_count == 1:
         return book
     smoothed = phase_tranche_book(book.reindex(decision_grid).fillna(0.0), tranche_count)
@@ -3628,7 +3713,13 @@ def _build_fold_target_weights(
     if request.committee_capital:
         blend_1h = _committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
-            MHS_COMMITTEE_TRANCHE_COUNT if request.committee_tranche_smoothing else 1,
+            MHS_COMMITTEE_TRANCHE_COUNT
+            if (request.committee_tranche_smoothing or request.committee_regime_adaptive_tranche)
+            else 1,
+            regime_adaptive_window=(
+                MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+                if request.committee_regime_adaptive_tranche else None
+            ),
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
@@ -4004,7 +4095,16 @@ def _run_anchored_fold(
             or primary.termination_counts.get("UNKNOWN_TERMINATION", 0) > 0
         ):
             failures.append(MHS_GO_REASON_EXECUTION_GAP)
-        primary_autocorr = _daily_autocorr_sharpe(primary.ledger)
+        _fold_debug_mode = (
+            "adaptive" if request.committee_regime_adaptive_tranche
+            else "3" if request.committee_tranche_smoothing
+            else "1"
+        )
+        _fold_debug_tag = (
+            f"fold{fold_index}_tranche{_fold_debug_mode}"
+            if request.committee_capital else None
+        )
+        primary_autocorr = _daily_autocorr_sharpe(primary.ledger, debug_tag=_fold_debug_tag)
         if not np.isfinite(primary_autocorr) or primary_autocorr < MHS_GO_PRIMARY_SHARPE_FLOOR:
             failures.append(MHS_GO_REASON_PRIMARY_SHARPE)
         stress_sharpe = _naive_sharpe(stress.ledger)
@@ -4014,6 +4114,14 @@ def _run_anchored_fold(
         equity_1h, net_returns_1h, _turnover_1h = _hourly_ledger_series(
             equity, primary.ledger.fill_turnover,
         )
+        if _fold_debug_tag is not None and _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "[EVAL] tag=%s ann_turnover=%.3f ann_net_ret=%.4f mdd=%.4f",
+                _fold_debug_tag,
+                _mean_ann(_turnover_1h, _PERIODS_PER_YEAR_1H),
+                _mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H),
+                _mdd(equity),
+            )
         return MhsFoldReport(
             fold_index=fold_index,
             validation_start=str(vs),
@@ -4465,7 +4573,13 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         # base so regime_scale applies exactly once (matching the fold path).
         blend_1h = _committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
-            MHS_COMMITTEE_TRANCHE_COUNT if request.committee_tranche_smoothing else 1,
+            MHS_COMMITTEE_TRANCHE_COUNT
+            if (request.committee_tranche_smoothing or request.committee_regime_adaptive_tranche)
+            else 1,
+            regime_adaptive_window=(
+                MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+                if request.committee_regime_adaptive_tranche else None
+            ),
         ).reindex(grid_1h).ffill().fillna(0.0)
         committee_execution_book = blend_1h
         del close, quote_vol, taker_buy_quote

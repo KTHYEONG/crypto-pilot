@@ -309,3 +309,15 @@ class TestFrozenLiterals:
         assert isinstance(MHS_COMMITTEE_TRANCHE_COUNT, int)
         assert MHS_COMMITTEE_TRANCHE_COUNT >= 1
         assert MHS_COMMITTEE_TRANCHE_COUNT == 3
+
+    def test_committee_regime_adaptive_window_frozen(self) -> None:
+        # SCENARIO_MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW_FROZEN: the regime-
+        # adaptive tranche gating window is a frozen constant confirmed via
+        # real 3m replay to sit inside a plateau (15-25 all pass every
+        # anchored fold), not a single fitted point -- windows 10 and 90 both
+        # trigger CAPITAL_INVARIANT_BREACH.
+        from src.mhs.contracts import MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+
+        assert isinstance(MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW, int)
+        assert MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW >= 3
+        assert MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW == 15
