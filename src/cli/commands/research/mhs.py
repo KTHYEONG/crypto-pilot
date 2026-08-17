@@ -39,6 +39,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         committee_kelly_sizing=args.committee_kelly_sizing,
         committee_growth_diagnostic=args.committee_growth_diagnostic,
         committee_capital=args.committee_capital,
+        committee_tranche_smoothing=args.committee_tranche_smoothing,
         execution_coverage_gate=args.execution_coverage_gate,
         ram_guard=not args.no_ram_guard,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
@@ -115,7 +116,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         default="3m",
         help=(
             "OHLCV execution replay resolution; signal construction remains 1h. "
-            "3m (2026-08 default) gives ~+27% fill precision vs 5m and is "
+            "3m (2026-08 default) gives ~+27%% fill precision vs 5m and is "
             "collected natively from Binance"
         ),
     )
@@ -236,6 +237,22 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "book in both places; measured to raise walk-forward blend Sharpe "
             "and reduce blend MDD relative to the momentum default (see the run "
             "history for magnitudes)."
+        ),
+    )
+    mhs.add_argument(
+        "--committee-tranche-smoothing",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in (requires --committee-capital): smooth the committee capital "
+            "book with a 3-decision staggered tranche mean (effective 72h signal "
+            "life) instead of fully repositioning every 24h -- the committee's "
+            "shortest member lookback is 168h, so the 24h cadence oversamples its "
+            "own signals. Measured on the execution replay: CAGR 15.0%%->16.1%%, "
+            "MDD -28.3%%->-26.5%%, Calmar +14.7%%, annualized turnover -18%%, "
+            "cost-stress Sharpe +11%%; BUT anchored-fold pass count drops 2->1 "
+            "(2023 recovers 0.151->1.537 while 2024 degrades 0.968->0.481), so "
+            "top-level compounding improves while the Research GO fold gate worsens."
         ),
     )
     mhs.add_argument(

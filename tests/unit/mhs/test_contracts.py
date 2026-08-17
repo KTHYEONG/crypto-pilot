@@ -299,3 +299,13 @@ class TestFrozenLiterals:
         assert MHS_RAM_RESERVE_FLOOR_BYTES == 268435456
         assert MHS_RAM_RESERVE_FLOOR_BYTES > 0
         assert MHS_RAM_RESERVE_FLOOR_BYTES % (2**20) == 0
+
+    def test_committee_tranche_count_frozen(self) -> None:
+        # SCENARIO_MHS_COMMITTEE_TRANCHE_COUNT_FROZEN: the committee decision
+        # cadence smoothing is a frozen structural constant (24h grid x 3 =
+        # effective 72h signal life) with a valid tranche count.
+        from src.mhs.contracts import MHS_COMMITTEE_TRANCHE_COUNT
+
+        assert isinstance(MHS_COMMITTEE_TRANCHE_COUNT, int)
+        assert MHS_COMMITTEE_TRANCHE_COUNT >= 1
+        assert MHS_COMMITTEE_TRANCHE_COUNT == 3
