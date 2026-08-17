@@ -266,6 +266,13 @@ MHS_GO_REASON_DATA_INTEGRITY_CODES = frozenset[str]({
 
 # Unrecoverable source gap exclusions (Binance REST API & Vision archives have >4h gaps):
 # SLPUSDT, CTKUSDT, LITUSDT, AERGOUSDT, PUMPUSDT, CVXUSDT, CVCUSDT
+# BNXUSDT is NOT excluded despite a confirmed source-side gap (2023-01-31 23:57 to
+# 2023-02-22 14:45 UTC, no candles at fapi.binance.com either -- see
+# ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT): excluding it costs the
+# committee_capital baseline ~30% relative Calmar (1.128 -> 0.786, measured), so
+# it is only a real problem for a strategy that trades the gap window, which no
+# shipped configuration does today. Re-evaluate if a future feature needs to
+# trade a symbol uniformly across the eligible universe during that window.
 MHS_SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
     "SLPUSDT", "CTKUSDT", "LITUSDT", "AERGOUSDT", "PUMPUSDT", "CVXUSDT", "CVCUSDT",
 })
@@ -1452,6 +1459,7 @@ def _trend_sleeve_diagnostic(
     opens: pd.DataFrame,
     bar_funding: pd.DataFrame,
     execution_mask: pd.DataFrame,
+    current_book: pd.DataFrame,
     request: MhsDiagnosticRequest,
 ) -> dict[str, Any]:
     """SCENARIO_MHS_TREND_SLEEVE_DIAGNOSTIC_POPULATED: report-only measurements
@@ -1460,10 +1468,11 @@ def _trend_sleeve_diagnostic(
     Builds the eligible-market basket, the ensemble time-series trend position
     on a 24h decision grid, and the gross-budget-sized sleeve weights, then
     reports the sleeve's standalone net Sharpe per measured cost tier, its
-    per-calendar-year net t-stat, its daily-return correlation to the frozen
-    slow_momentum book, and the combined (slow_momentum + sleeve) book metrics.
-    Every value is finite or an explicit ``None`` -- never NaN silently coerced
-    to 0.0. This is a measurement report before configuring risk budgets.
+    per-calendar-year net t-stat, its daily-return correlation to the deployed
+    book passed in as ``current_book``, and the combined (current book + sleeve)
+    book metrics. Every value is finite or an explicit ``None`` -- never NaN
+    silently coerced to 0.0. This is a measurement report before configuring
+    risk budgets.
     """
     grid_1h = log_close.index
     decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
@@ -1473,15 +1482,9 @@ def _trend_sleeve_diagnostic(
     )
     sleeve = trend_sleeve_weights(position, execution_mask, request.trend_sleeve_gross)
 
-    slow_spec = PHASE_1_BOOK_SPECS["slow_momentum"]
-    slow_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
-    slow_ema = _signal_ema_span(slow_spec.band.sign, slow_spec.horizon_hours, slow_spec.step_hours)
-    w_slow = _book_weights(log_close, eligible, slow_spec, slow_grid, ema_span=slow_ema)
-    slow_book = w_slow.reindex(grid_1h).ffill().fillna(0.0)
-
     per_tier: dict[str, float | None] = {}
     combined_per_tier: dict[str, float | None] = {}
-    combined = slow_book.add(sleeve)
+    combined = current_book.add(sleeve)
     for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
         net, _ = mhs_ledger_pnl(sleeve, opens, bar_funding, cost_bps)
         per_tier[tier] = _annualized_1h_sharpe(net)
@@ -1504,16 +1507,16 @@ def _trend_sleeve_diagnostic(
     finite_years = [v for v in combined_yearly.values() if v is not None]
     worst_year_net_t = min(finite_years) if finite_years else None
 
-    slow_net, _ = mhs_ledger_pnl(
-        slow_book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+    current_net, _ = mhs_ledger_pnl(
+        current_book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
     )
     sleeve_net, _ = mhs_ledger_pnl(
         sleeve, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
     )
-    slow_daily = (1.0 + slow_net).resample("1D").apply(lambda s: s.prod() - 1.0)
+    current_daily = (1.0 + current_net).resample("1D").apply(lambda s: s.prod() - 1.0)
     sleeve_daily = (1.0 + sleeve_net).resample("1D").apply(lambda s: s.prod() - 1.0)
     corr = year_restricted_correlation(
-        sleeve_daily, slow_daily, (2021, 2022, 2023, 2024, 2025),
+        sleeve_daily, current_daily, (2021, 2022, 2023, 2024, 2025),
     )
     slow_momentum_pnl_corr = float(corr) if np.isfinite(corr) else None
 
@@ -3520,6 +3523,35 @@ def _causal_lag1_autocorr(x: np.ndarray) -> float:
     return float(np.corrcoef(x0, x1)[0, 1])
 
 
+def _trend_sleeve_position(
+    log_close: pd.DataFrame,
+    eligible: pd.DataFrame,
+    decision_grid: pd.DatetimeIndex,
+) -> pd.Series:
+    """Ensemble trend position on the eligible market basket, held to 1h bars.
+
+    Thin wrapper reusing the frozen ``market_basket_log_price`` and
+    ``time_series_trend_position`` primitives verbatim -- no new math.
+    """
+    basket = market_basket_log_price(log_close, eligible)
+    return time_series_trend_position(basket, MHS_TREND_SLEEVE_HORIZONS_HOURS, decision_grid)
+
+
+def _apply_trend_sleeve(
+    blend_1h: pd.DataFrame,
+    position: pd.Series,
+    execution_mask: pd.DataFrame,
+    gross_budget: float,
+) -> pd.DataFrame:
+    """Add the gross-budget sleeve weights to the book blend, purely.
+
+    Returns a new frame (``blend_1h`` is never mutated in place). The sleeve is
+    deliberately not dollar-neutral, so row sums of the result may be nonzero.
+    """
+    sleeve = trend_sleeve_weights(position, execution_mask, gross_budget)
+    return blend_1h.add(sleeve.reindex(blend_1h.index).fillna(0.0), fill_value=0.0)
+
+
 def _committee_execution_book(
     close: pd.DataFrame,
     quote_vol: pd.DataFrame,
@@ -3697,6 +3729,14 @@ def _build_fold_target_weights(
             execution_mask.reindex(w_slow_execution.index).fillna(False),
             slow.min_symbols,
         )
+    # The trend sleeve position rides the same 24h slow grid and must be
+    # computed while `eligible` is still alive; it is released right after, so
+    # only the tiny position Series survives (memory-order contract).
+    trend_position = (
+        _trend_sleeve_position(log_close, eligible, slow_grid)
+        if (request.trend_sleeve and request.trend_sleeve_gross > 0.0)
+        else None
+    )
     del eligible
     if not request.committee_capital:
         del quote_vol
@@ -3729,6 +3769,13 @@ def _build_fold_target_weights(
             + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution_1h
         )
     del w_fast_execution, w_slow_execution, w_slow_execution_1h
+    # Apply the additive sleeve before the regime cash-scale multiply and the
+    # rebalance_filter branch so it inherits the same de-risking and turnover
+    # gating the committee book already uses.
+    if trend_position is not None:
+        blend_1h = _apply_trend_sleeve(
+            blend_1h, trend_position, execution_mask, request.trend_sleeve_gross,
+        )
     _active_spec, active_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     del _active_spec
     decision_grid = active_grid[(active_grid >= vs) & (active_grid <= ve)]
@@ -4596,6 +4643,22 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
         )
         committee_execution_book = None
+    # Capture the pre-sleeve deployed book for the diagnostic, then add the
+    # gross-budget sleeve to the executed blend -- including the committee book
+    # passed to the replay -- before the regime cash-scale multiply, so the
+    # overlay rides the same de-risking machinery as the deployed book.
+    current_book_for_diagnostic = blend_1h
+    trend_position = (
+        _trend_sleeve_position(log_close, eligible, slow_grid)
+        if (request.trend_sleeve and request.trend_sleeve_gross > 0.0)
+        else None
+    )
+    if trend_position is not None:
+        blend_1h = _apply_trend_sleeve(
+            blend_1h, trend_position, execution_mask, request.trend_sleeve_gross,
+        )
+        if committee_execution_book is not None:
+            committee_execution_book = blend_1h
     blend_gross = float(blend_1h.abs().sum(axis=1).mean())
     blend_cash_fraction = float((1.0 - blend_1h.abs().sum(axis=1)).mean())
     # R1: apply the same volatility-regime cash scale the fold path applies to
@@ -4629,7 +4692,13 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # (spec §3.1, ``memory_opt``).
     signal_48h = horizon_log_return(log_close, 48)
     xs_ic = _xs_rank_ic(signal_48h, opens, forward_bars=48)
-    trend_sleeve_diagnostic = _trend_sleeve_diagnostic(log_close, eligible, opens, bar_funding, execution_mask, request) if request.trend_sleeve else None
+    trend_sleeve_diagnostic = _trend_sleeve_diagnostic(
+        log_close, eligible, opens, bar_funding, execution_mask,
+        current_book_for_diagnostic, request,
+    ) if request.trend_sleeve else None
+    # The pre-sleeve book is consumed by the diagnostic; the post-sleeve
+    # `blend_1h` alone must survive into the replay.
+    del current_book_for_diagnostic
     # Feature-axis opt-in diagnostics run after fold pool with evicted caches.
     multi_feature_diagnostic = None
     committee_diagnostic = None
