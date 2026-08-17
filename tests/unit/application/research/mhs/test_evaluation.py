@@ -4388,6 +4388,45 @@ def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
     assert incomplete.funding_carry_source == "frozen_default"
 
 
+def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -> None:
+    """SCENARIO_MHS_RESEARCH_GO_ELIGIBLE_WITH_REGISTERED_POLICY: a fold whose
+    realized primary_net_ann falls below the registered
+    MHS_REGISTERED_POLICY_THRESHOLDS['primary_annual_return'] floor carries
+    MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR in its failures; an unregistered
+    (None) threshold never adds the code, matching the pre-registration
+    conservative fail-closed default."""
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+
+    monkeypatch.setattr(
+        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        {"cap_30_roster": 30.0, "primary_annual_return": 10.0},
+    )
+    unreachable_floor = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+    )
+    assert ev.MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR in unreachable_floor.failures
+
+    monkeypatch.setattr(
+        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        {"cap_30_roster": 30.0, "primary_annual_return": None},
+    )
+    unregistered = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+    )
+    assert ev.MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR not in unregistered.failures
+
+
 def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_REPORT_CARRIES_FUNDING_CARRY_DISCOVERY_05 (parent path):
     # with fold_safe_horizon_selection=True and a funding-carry admission the
@@ -5362,13 +5401,16 @@ def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
 
 
 def test_registered_policy_thresholds_contract() -> None:
-    """P0-D contract: the two named policy gates exist in source contracts and
-    default to the unregistered (conservative) state -- a deliberate policy act,
-    never a performance-flattering literal at the call site."""
+    """SCENARIO_MHS_POLICY_THRESHOLDS_REGISTERED_VALUES: the two named policy
+    gates exist in source contracts and are registered at their reviewed
+    2026-08-17 values (docs/specs/mhs_research_go_policy_registration.md) --
+    cap_30_roster mirrors the frozen execution_universe_size design cap
+    (attestation only), primary_annual_return is enforced per anchored fold."""
     from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS, MHS_SEARCH_TRIALS_ATTEMPTED
 
-    assert set(MHS_REGISTERED_POLICY_THRESHOLDS) == {"cap_30_roster", "primary_annual_return"}
-    assert all(v is None for v in MHS_REGISTERED_POLICY_THRESHOLDS.values())
+    assert MHS_REGISTERED_POLICY_THRESHOLDS == {
+        "cap_30_roster": 30.0, "primary_annual_return": 0.05,
+    }
     assert isinstance(MHS_SEARCH_TRIALS_ATTEMPTED, int)
     assert MHS_SEARCH_TRIALS_ATTEMPTED >= 1
 

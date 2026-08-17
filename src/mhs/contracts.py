@@ -199,7 +199,12 @@ MHS_RAM_RESERVE_FLOOR_BYTES: int = 256 * 2**20
 MHS_WORKER_PEAK_RSS_BYTES: int = 3 * 2**30
 
 # Research-GO policy thresholds (None indicates conservative unregistered state).
+# cap_30_roster mirrors the frozen execution_universe_size design cap (attestation
+# only, not independently enforced against realized_execution_roster_size).
+# primary_annual_return is enforced per anchored fold (see MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR):
+# below the worst measured passing fold's net_ann (2024, 0.103) for headroom against
+# future fold variance while still requiring a real economic hurdle over funding/costs.
 MHS_REGISTERED_POLICY_THRESHOLDS: dict[str, float | None] = {
-    "cap_30_roster": None,
-    "primary_annual_return": None,
+    "cap_30_roster": 30.0,
+    "primary_annual_return": 0.05,
 }
