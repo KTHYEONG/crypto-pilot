@@ -89,6 +89,7 @@ from src.mhs.contracts import (
     MHS_COMMITTEE_OOS_START,
     MHS_COMMITTEE_PURGE_HOURS,
     MHS_COMMITTEE_TARGET_VOL,
+    MHS_COMMITTEE_TRANCHE_COUNT,
     MHS_CRASH_REGIME_REFERENCE_SYMBOLS,
     PHASE_1_BOOK_BLEND_WEIGHTS,
     PHASE_1_BOOK_SPECS,
@@ -318,6 +319,7 @@ class MhsDiagnosticRequest:
     committee_kelly_sizing: bool = False
     committee_growth_diagnostic: bool = False
     committee_capital: bool = False
+    committee_tranche_smoothing: bool = False
     execution_coverage_gate: bool = False
     ram_guard: bool = True
 
@@ -364,6 +366,10 @@ class MhsDiagnosticRequest:
             raise ValueError("committee_kelly_sizing must be a bool")
         if self.committee_kelly_sizing and not (self.committee_book or self.committee_capital):
             raise ValueError("committee_kelly_sizing requires committee_book=True or committee_capital=True")
+        if not isinstance(self.committee_tranche_smoothing, bool):
+            raise ValueError("committee_tranche_smoothing must be a bool")
+        if self.committee_tranche_smoothing and not self.committee_capital:
+            raise ValueError("committee_tranche_smoothing requires committee_capital=True")
         if not isinstance(self.committee_growth_diagnostic, bool):
             raise ValueError("committee_growth_diagnostic must be a bool")
         if self.committee_growth_diagnostic and not self.committee_book:
@@ -3460,6 +3466,7 @@ def _committee_execution_book(
     execution_mask: pd.DataFrame,
     decision_grid: pd.DatetimeIndex,
     min_symbols: int,
+    tranche_count: int = 1,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
@@ -3467,8 +3474,12 @@ def _committee_execution_book(
     ``MHS_COMMITTEE_MEMBERS``, build equal-notional rank books, average them.
     No leg-risk tilt -- tilting the curated committee set to equal risk removed
     the concentration that carries its edge (walk-forward Sharpe 0.822 -> 0.503,
-    rejected in RC-4). Fails closed when no member is admitted.
+    rejected in RC-4). Fails closed when no member is admitted. ``tranche_count``
+    smooths the decision rows with a staggered tranche mean (opt-in, defaults to
+    the identity single-phase book).
     """
+    if tranche_count < 1:
+        raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
     _member_specs = [
         spec for spec in MHS_FEATURE_REGISTRY
         if spec.name in set(MHS_COMMITTEE_MEMBERS)
@@ -3482,7 +3493,11 @@ def _committee_execution_book(
         raise RuntimeError(
             "committee_capital: no committee member admitted in this fold window"
         )
-    return sum(_committee_books.values()) / float(len(_committee_books))
+    book = sum(_committee_books.values()) / float(len(_committee_books))
+    if tranche_count == 1:
+        return book
+    smoothed = phase_tranche_book(book.reindex(decision_grid).fillna(0.0), tranche_count)
+    return smoothed.reindex(book.index, method="ffill").fillna(0.0)
 
 
 def _build_fold_target_weights(
@@ -3613,6 +3628,7 @@ def _build_fold_target_weights(
     if request.committee_capital:
         blend_1h = _committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
+            MHS_COMMITTEE_TRANCHE_COUNT if request.committee_tranche_smoothing else 1,
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
@@ -4449,6 +4465,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         # base so regime_scale applies exactly once (matching the fold path).
         blend_1h = _committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
+            MHS_COMMITTEE_TRANCHE_COUNT if request.committee_tranche_smoothing else 1,
         ).reindex(grid_1h).ffill().fillna(0.0)
         committee_execution_book = blend_1h
         del close, quote_vol, taker_buy_quote
