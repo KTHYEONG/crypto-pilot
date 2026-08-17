@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260817_MHS_RESEARCH_GO_POLICY_REGISTRATION",
+      "date": "2026-08-17",
+      "adr_id": "ADR_20260817_MHS_RESEARCH_GO_POLICY_REGISTRATION",
+      "domain": "quant",
+      "title": "MHS Research-GO 정책 임계값 등록 및 최초 GO 통과",
+      "why": "regime-adaptive tranche 기본값 도입 이후 알파/데이터 게이트는 모두 해소됐으나 MHS_REGISTERED_POLICY_THRESHOLDS(cap_30_roster, primary_annual_return)가 미등록 상태라 research_go.eligible이 항상 UNSPECIFIED_POLICY로 차단됨. run history 12건 + ADR 30여건 교차검증으로 Kelly/레버리지/리스크패리티/크래시틸트/볼타겟 완화 등 표준 레버가 모두 이미 실측 기각·채택 완료임을 확인, 남은 유일한 차단 지점이 정책 등록임을 판별.",
+      "resolution": "src/mhs/contracts.py에 cap_30_roster=30.0(기존 동결 execution_universe_size 재참조, attestation-only), primary_annual_return=0.05(최저 통과 폴드 net_ann 0.103 대비 여유) 등록. primary_annual_return은 단순 등록에 그치지 않고 _run_anchored_fold에 실제 집행 로직 추가(신규 사유 코드 MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR, 폴드별 primary_net_ann이 등록값 미만이면 게이트 실패). cap_30_roster는 실현 로스터(41.9)가 이미 30을 넘어 강제 집행 시 즉시 위반되므로 attestation-only로 유지, 강제 비교 로직 미추가. 관련 테스트(test_registered_policy_thresholds_contract 갱신, test_fold_primary_annual_return_floor_enforcement 신규) 및 docs/architecture/mhs-explain.md 최신 실측치 갱신 완료.",
+      "impact": "실측 확인: research_go.eligible False->True(최초), reason_codes=[] (folds_passed=3/3), CAGR 19.2%/MDD -17.1%/Calmar 1.13. --no-pnl-vol-target(자본파괴 CAPITAL_INVARIANT_BREACH) 및 --beta-neutralize(committee_capital 경로 미배선 확인)는 실측 후 기각/무효 확인, 신규 알파 기회 아님으로 결론."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE",
       "date": "2026-08-17",
       "adr_id": "ADR_20260817_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE",
@@ -989,16 +999,6 @@
       "why": "baseline_gate_performance_v1 qualification이 admitted=False로 반복 실패. Kelly 재튜닝 대신 실측 진단한 결과 15개 패밀리 중 3개(donchian_breakout exit 항등False, regression_slope 절편 차원오류, supertrend 상태미지속)가 신호 생성 자체가 결함이었고, _equal_risk_weights가 Kelly 적용 원장으로 가중치를 만들어 unit blend에 적용하는 차원 불일치로 사이징 신호가 반전되고 있었음(격리실측 QUAL t 0.41->1.10).",
       "resolution": "donchian exit 채널 .shift() 적용, regression_slope_tstat 절편식(n*xbar) 수정, supertrend를 상태기계(직전 상태 승계)로 수정, _equal_risk_weights를 disc_equity(unit 원장) 기준으로 재정합, 사이징 토너먼트에 양의 검증엣지 하한 추가(no_policy_with_positive_validation_edge로 fail-closed), SizingPolicyScore에 dead_parameter 진단 플래그 추가, assert_family_signal_liveness 감사 헬퍼 신설.",
       "impact": "450셀 재실행: cell_failed 0건(이전 6건, donchian short 파산 은폐 해소), 8/8 sizing fold VALID(이전 zero-active-leverage로 일부 INFEASIBLE). 그러나 discovery 두 폴드 전부 검증 LCB90 음수로 판명되어 토너먼트가 정직하게 INFEASIBLE(binding_constraint=sizing_tournament_infeasible)을 반환, CASH 유지. 이전 코드는 음엣지 상태에서도 kelly_mdd_q10을 강제 선출했었음 -- 결함 수정으로 허위 admission 경로가 제거됨."
-    },
-    {
-      "task_id": "TREND_SCREEN_BACKTEST_INTEGRITY_DIAGNOSIS",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_TREND_SCREEN_BACKTEST_INTEGRITY_DIAGNOSIS",
-      "domain": "research",
-      "title": "Trend-screen 백테스트 무결성 및 qualification 진단",
-      "why": "최신 실행에서 discovery fold와 qualification 결과의 신뢰성을 점검한 결과, warmup/자본 시작 혼재·경계 수익 누락·지원되지 않는 sizing fold 처리·동일 심볼 집중 문제가 확인됨.",
-      "resolution": "execution_start 분리, 평가 구간 anchor 적용, sizing fold VALID/INFEASIBLE 명시, 심볼당 단일 sleeve 선택, block-cap 진단을 반영하고 최신 백테스트 결과를 동기화함.",
-      "impact": "유효 셀 436→444, 실패 셀 14→6으로 개선. fold gate는 통과했으나 observation/stress gate는 여전히 실패하며, 현재 병목은 Kelly가 아니라 qualification 구간의 통계적 재현성임."
     }
   ]
 }
