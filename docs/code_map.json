@@ -27,7 +27,10 @@
   },
   "src/cli/commands/data.py": {},
   "src/cli/commands/research/mhs.py": {
-    "testing": "tests/unit/cli/commands/research/test_mhs.py"
+    "testing": [
+      "tests/unit/cli/commands/research/test_mhs.py",
+      "tests/unit/application/research/mhs/test_evaluation.py"
+    ]
   },
   "src/cli/main.py": {
     "testing": "tests/unit/cli/test_main.py"
