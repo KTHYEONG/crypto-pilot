@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE",
+      "date": "2026-08-17",
+      "adr_id": "ADR_20260817_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE",
+      "domain": "mhs",
+      "title": "MHS 위원회 레짐 적응형 트랜치 — fold 게이트 후퇴 없는 복리성장 개선",
+      "why": "ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE에서 tranche=3 고정 평활이 2023을 살리고 2024를 죽이는 트레이드오프임을 위원회 raw 북 자체 return의 자기상관 부호(음=whipsaw/양=지속)로 설명. 고정 선택 대신 causal하게 레짐을 감지해 매 결정 행마다 raw/평활을 고르면 트레이드오프를 없앨 수 있는지 실제 3분봉 리플레이로 검증.",
+      "resolution": "_committee_execution_book에 regime_adaptive_window 파라미터 추가: causal trailing lag-1 자기상관(위원회 raw 북 자신의 proxy return, .shift(1)로 lookahead 차단)이 음수면 그 결정행은 3행 평활을, 0 이상이면 raw를 채택(book.mask 행단위 전량 교체). MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW=15 상수 신설(15~25 고원 확인, 10/90은 CAPITAL_INVARIANT_BREACH로 기각 — CLI에 노출하지 않고 상수 동결). MhsDiagnosticRequest.committee_regime_adaptive_tranche(committee_capital 요구, committee_tranche_smoothing과 상호배타) + CLI --committee-regime-adaptive-tranche 배선, fold 경로·top-level 블렌드 양쪽 동일 스레딩. 실제 3분봉 리플레이 6회로 검증 완료(production 플래그가 raw window=15 실험과 완전 동일함도 재확인).",
+      "impact": "이전 사이클과 달리 트레이드오프가 아니라 지배(dominance): 실제 리플레이에서 3개 fold 전부 baseline과 fixed tranche=3 양쪽을 동시에 능가(2023 0.151/1.537->1.158, 2024 0.968/0.481->0.853, 2025 3.076/2.918->3.387, 전부 0.6 게이트 통과 failures=[]). top-level CAGR 15.00%->20.70%, MDD -28.28%->-16.61%, Calmar 0.530->1.246, 연 회전율 32.94->26.12(레버리지 아님). research_go.eligible은 여전히 False이나 원인이 MHS_REGISTERED_POLICY_THRESHOLDS(cap_30_roster/primary_annual_return)가 코드베이스 전체에서 항상 미등록(None)인 별개의 정책 게이트임을 확인 — 전략 설계와 무관, folds_passed가 실질 지표."
+    },
+    {
+      "task_id": "TASK_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE",
+      "date": "2026-08-17",
+      "adr_id": "ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE",
+      "domain": "mhs",
+      "title": "MHS 위원회 트랜치 평활 fold 게이트 후퇴 원인 규명 + 진단 필드 추가",
+      "why": "이전 사이클(ADR_20260817_MHS_COMMITTEE_DECISION_CADENCE)에서 tranche=3 평활 적용 시 top-level 복리성장은 개선되지만 anchored fold 게이트 통과가 2/3->1/3으로 후퇴(2023 0.151->1.537 회복, 2024 0.968->0.481 악화)한 원인이 미규명 상태로 남아 있었음. debug 계측 후 실제 3분봉 리플레이(committee_capital, 2021-2025) 재실행으로 근거 데이터 확보.",
+      "resolution": "_daily_autocorr_sharpe에 debug_tag 배선 + _log_autocorr_diagnostic 헬퍼로 Lo(2002) 조정 분해(sample_sharpe/lo_denom/rho1/rho3/rho7)를 fold 경로에 DEBUG 로그로 노출(비용 없음, isEnabledFor 가드). 실측 결과 fold 게이트 등락은 자기상관 조정(2차 효과, 5~10%)이 아니라 raw sample_sharpe 자체의 레짐 반전이 지배: 2023은 baseline rho1=-0.119(whipsaw)라 평활이 잡음을 걸러 sample_sharpe 11배 개선, 2024는 baseline rho1=+0.069(지속성)라 평활이 최신 신호를 희석해 거의 반토막. _committee_diagnostic 블록 리포트에 return_autocorr_lag1 진단 필드(관측 전용, 자본 미배선) 추가 완료.",
+      "impact": "이번 사이클 구현 범위(진단 필드)는 자본 배분에 영향 없음(committee_growth_diagnostic과 동일하게 관측 전용). 후속 발견: causal trailing rho1 게이팅 적응형 tranche 스위치의 방향성 스크린(실제 리플레이 데이터 재조합)에서 20일/90일 window가 2023·2024 fold 동시 통과를 보였으나 30일/60일은 실패해 window 선택에 민감 -> 다음 spec 사이클 후속 과제로 명시적 유보(단일 통합 리플레이로 전환 비용 반영 필요)."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_DECISION_CADENCE",
       "date": "2026-08-17",
       "adr_id": "ADR_20260817_MHS_COMMITTEE_DECISION_CADENCE",
@@ -979,26 +999,6 @@
       "why": "최신 실행에서 discovery fold와 qualification 결과의 신뢰성을 점검한 결과, warmup/자본 시작 혼재·경계 수익 누락·지원되지 않는 sizing fold 처리·동일 심볼 집중 문제가 확인됨.",
       "resolution": "execution_start 분리, 평가 구간 anchor 적용, sizing fold VALID/INFEASIBLE 명시, 심볼당 단일 sleeve 선택, block-cap 진단을 반영하고 최신 백테스트 결과를 동기화함.",
       "impact": "유효 셀 436→444, 실패 셀 14→6으로 개선. fold gate는 통과했으나 observation/stress gate는 여전히 실패하며, 현재 병목은 Kelly가 아니라 qualification 구간의 통계적 재현성임."
-    },
-    {
-      "task_id": "trend_screen_kelly_sizing_refinement",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_trend_screen_kelly_sizing_refinement",
-      "domain": "research",
-      "title": "Trend screen Kelly sizing refinement",
-      "why": "최신 450-cell 실행에서 sizing policy 선택과 qualification 결과를 동기화",
-      "resolution": "kelly_mdd_q25가 선택되었고 observation/stress gate는 FAIL; 첫 validation fold는 모든 정책이 유효 노출 부족으로 0점이어서 후속 보완 대상으로 기록",
-      "impact": "최신 sizing policy·fold score·gate 결과를 ADR 및 코드맵에 등록하고 임시 spec/scratch 산출물을 정리"
-    },
-    {
-      "task_id": "trend_screen_fractional_kelly_gate",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_trend_screen_fractional_kelly_gate",
-      "domain": "research",
-      "title": "Trend screen fractional Kelly gate",
-      "why": "최신 trend-screen 실행 결과를 기준으로 discovery 및 qualification gate를 동기화",
-      "resolution": "최신 단일 실행 결과 JSON을 유지하고 fractional-Kelly 정책 및 qualification 결과를 코드맵과 작업 인덱스에 반영",
-      "impact": "Discovery 후보 23개와 5개 포트폴리오 선택 결과를 추적하며 observation/stress gate 실패를 기록"
     }
   ]
 }
