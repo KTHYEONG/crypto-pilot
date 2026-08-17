@@ -2190,6 +2190,206 @@ def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quot
         ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
 
 
+def _committee_synthetic_panels(
+    n_hours: int = 12000, n_symbols: int = 12, seed: int = 7,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+    """Synthetic 1h panels that admit all five committee members (per-year raw
+    coverage >= 0.90) plus their 24h decision grid for the direct execution-book
+    tests. 12000h keeps the 720h rolling builders above the coverage floor."""
+    grid = pd.date_range("2021-01-01", periods=n_hours, freq="1h", tz="UTC")
+    symbols = [f"S{i:02d}" for i in range(n_symbols)]
+    rng = np.random.default_rng(seed)
+    close = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rng.normal(0.0, 1e-4, (len(grid), len(symbols))), axis=0)),
+        index=grid, columns=symbols,
+    )
+    quote_vol = pd.DataFrame(
+        rng.uniform(900.0, 1100.0, (len(grid), len(symbols))), index=grid, columns=symbols,
+    )
+    taker_buy_quote = quote_vol * rng.uniform(0.4, 0.6, (len(grid), len(symbols)))
+    mask = pd.DataFrame(True, index=grid, columns=symbols)
+    decision_grid = pd.date_range(grid[0], grid[-1], freq="24h", tz="UTC")
+    return close, quote_vol, taker_buy_quote, mask, decision_grid
+
+
+def test_committee_execution_book_tranche_1_is_identity() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_TRANCHE_1_IS_IDENTITY: the default
+    # tranche_count (1) returns exactly the plain mean of the committee member
+    # books -- byte-identical to the pre-change implementation and to an
+    # explicit tranche_count=1 call.
+    from src.mhs.features import MHS_FEATURE_REGISTRY, build_feature_books
+
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    panels = {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote}
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
+    }
+    default = ev._committee_execution_book(**kwargs)
+    explicit = ev._committee_execution_book(**kwargs, tranche_count=1)
+    member_specs = [s for s in MHS_FEATURE_REGISTRY if s.name in set(ev.MHS_COMMITTEE_MEMBERS)]
+    books = build_feature_books(member_specs, panels, mask, decision_grid, min_symbols=8)
+    assert len(books) >= 1
+    reference = sum(books.values()) / float(len(books))
+    pd.testing.assert_frame_equal(default, explicit)
+    pd.testing.assert_frame_equal(default, reference)
+
+
+def test_committee_execution_book_tranche_smooths_and_cuts_turnover() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_TRANCHE_SMOOTHS_AND_CUTS_TURNOVER: the
+    # trailing decision-row mean removes repositioning -- the summed absolute
+    # row-to-row change over the decision grid is strictly smaller than the
+    # tranche=1 book's.
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
+    }
+    base = ev._committee_execution_book(**kwargs)
+    smoothed = ev._committee_execution_book(**kwargs, tranche_count=3)
+    raw_change = float(base.loc[decision_grid].diff().abs().sum().sum())
+    smooth_change = float(smoothed.loc[decision_grid].diff().abs().sum().sum())
+    assert smooth_change < raw_change
+
+
+def test_committee_execution_book_tranche_preserves_dollar_neutrality() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_TRANCHE_PRESERVES_DOLLAR_NEUTRALITY:
+    # every non-zero row stays dollar-neutral and the smoothing never levers up
+    # -- max and mean gross of the smoothed book stay <= the raw book's. (The
+    # per-row gross claim is not implied by a trailing mean: a mean's gross can
+    # exceed one constituent row's gross, so the lever invariant is asserted in
+    # aggregate, which is the property the fold replay measures.)
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
+    }
+    base = ev._committee_execution_book(**kwargs)
+    smoothed = ev._committee_execution_book(**kwargs, tranche_count=3)
+    non_zero = smoothed.abs().sum(axis=1) > 1e-9
+    assert float(smoothed.loc[non_zero].sum(axis=1).abs().max()) < 1e-9
+    raw_gross = base.abs().sum(axis=1)
+    sm_gross = smoothed.abs().sum(axis=1)
+    assert float(sm_gross.max()) <= float(raw_gross.max()) + 1e-9
+    assert float(sm_gross.mean()) <= float(raw_gross.mean()) + 1e-9
+
+
+def test_committee_execution_book_invalid_tranche_raises() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_INVALID_TRANCHE_RAISES
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    with pytest.raises(ValueError, match="tranche_count"):
+        ev._committee_execution_book(
+            close, quote_vol, taker_buy_quote, mask, decision_grid,
+            min_symbols=8, tranche_count=0,
+        )
+
+
+def test_committee_execution_book_no_member_still_fails_closed(monkeypatch) -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_NO_MEMBER_STILL_FAILS_CLOSED: the
+    # fail-closed path fires before any smoothing is applied.
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    monkeypatch.setattr(ev, "build_feature_books", lambda *a, **k: {})
+    with pytest.raises(RuntimeError, match="no committee member admitted"):
+        ev._committee_execution_book(
+            close, quote_vol, taker_buy_quote, mask, decision_grid,
+            min_symbols=8, tranche_count=3,
+        )
+
+
+def test_committee_tranche_smoothing_requires_committee_capital() -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_TRANCHE_SMOOTHING_REQUIRES_COMMITTEE_CAPITAL: the
+    # opt-in flag fails closed unless committee_capital is enabled and is
+    # strictly bool.
+    assert MhsDiagnosticRequest().committee_tranche_smoothing is False
+    with pytest.raises(ValueError, match="committee_tranche_smoothing requires committee_capital"):
+        MhsDiagnosticRequest(committee_tranche_smoothing=True, committee_capital=False)
+    with pytest.raises(ValueError, match="committee_tranche_smoothing must be a bool"):
+        MhsDiagnosticRequest(committee_tranche_smoothing="yes")
+    assert (
+        MhsDiagnosticRequest(committee_capital=True, committee_tranche_smoothing=True).committee_tranche_smoothing
+        is True
+    )
+
+
+def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_TRANCHE_SMOOTHING_DEFAULT_OFF_BYTE_IDENTICAL:
+    # with committee_capital=True and committee_tranche_smoothing omitted
+    # (default False) both the fold target path and the top-level report are
+    # byte-identical to an explicit committee_tranche_smoothing=False run.
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True,
+    )
+    target_default, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+    )
+    target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
+        str(root), _FOLD, dataclasses.replace(request, committee_tranche_smoothing=False),
+        funding_by_symbol,
+    )
+    pd.testing.assert_frame_equal(target_default, target_off)
+
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    default_report = ev.run_mhs_horizon_diagnostic(request)
+    explicit_off = ev.run_mhs_horizon_diagnostic(
+        dataclasses.replace(request, committee_tranche_smoothing=False),
+    )
+    assert default_report.status == "COMPLETE"
+    for field in ("books", "blend", "blend_target_gross", "research_go", "folds"):
+        assert getattr(default_report, field) == getattr(explicit_off, field)
+
+
+def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
+    # SCENARIO_MHS_DIAGNOSTIC_TRANCHE_SMOOTHING_THREADS_BOTH_CALL_SITES: with
+    # committee_capital=True and committee_tranche_smoothing=True the fold
+    # target builder AND the top-level blend both thread tranche_count ==
+    # MHS_COMMITTEE_TRANCHE_COUNT (never 1 at one site and 3 at the other).
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True, committee_tranche_smoothing=True,
+    )
+    seen: dict[str, int] = {}
+    real = ev._committee_execution_book
+
+    def _spy(*args, **kwargs):
+        tranche_count = kwargs.get("tranche_count", 1)
+        if len(args) > 6:
+            tranche_count = args[6]
+        seen["tranche_count"] = tranche_count
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "_committee_execution_book", _spy)
+    ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    assert seen["tranche_count"] == ev.MHS_COMMITTEE_TRANCHE_COUNT
+
+    seen.clear()
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    ev.run_mhs_horizon_diagnostic(request)
+    assert seen["tranche_count"] == ev.MHS_COMMITTEE_TRANCHE_COUNT
+
+
 def test_p14_postbook_concurrent_parity() -> None:
     # SCENARIO_P14_POSTBOOK: the deployment tail computed with the placeholder
     # ``research_go_eligible=None`` and then patched with the fold-derived flag
