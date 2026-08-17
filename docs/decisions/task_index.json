@@ -1,6 +1,36 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260817_MHS_BNXUSDT_EXCLUSION_REVERTED",
+      "date": "2026-08-17",
+      "adr_id": "ADR_20260817_MHS_BNXUSDT_EXCLUSION_REVERTED",
+      "domain": "risk",
+      "title": "BNXUSDT 소스결손 영구제외 되돌림 -- 베이스라인 Calmar 보호",
+      "why": "ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT 조사 중 BNXUSDT를 MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에 추가했으나, committee_capital 베이스라인(트렌드 슬리브 미사용, 현재 배포 후보)을 재실측한 결과 Calmar 1.128->0.786(약 30% 상대하락), CAGR 19.23%->14.21%로 크게 악화됨을 확인.",
+      "resolution": "MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에서 BNXUSDT 제거, 원상 복구. 트렌드 슬리브 작업 자체를 중단하기로 한 이상 2023-01-31~02-22 결손 구간은 현재 어떤 배포 설정에도 영향을 주지 않으므로 데이터 위생보다 베이스라인 성과 보존을 우선함. evaluation.py 주석에 결손 사실과 되돌림 근거를 명시해 향후 재조사 시 반복 실측을 방지.",
+      "impact": "베이스라인 재검증 완료: CAGR 19.23%, Calmar 1.128, MDD -17.05%, 3/3 fold 통과로 원 수치 재확인(run_id 9b1f7361f4ec4bb98522bab49920809c). BNXUSDT 결손은 향후 execution_mask 전 종목 균등배분 방식의 다른 기능(예: 재시도되는 슬리브류)을 만들 때만 재검토 필요."
+    },
+    {
+      "task_id": "ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT",
+      "date": "2026-08-17",
+      "adr_id": "ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT",
+      "domain": "risk",
+      "title": "MHS 추세 슬리브 실측 결과: 자본붕괴로 기각, BNXUSDT 결손 발견·제외",
+      "why": "ADR_20260817_MHS_TREND_SLEEVE_COMMITTEE_OVERLAY로 배선 완료 후 committee_capital+regime_adaptive_tranche 베이스라인 대비 --trend-sleeve-gross 0.15/0.30 실측 백테스트를 수행해 실제 배포 안전성을 검증.",
+      "resolution": "gross=0.15: fold CAGR 19.23%->35.01%, Calmar 1.128->1.267, stress Sharpe 0.833->1.141 개선되었으나 fold 0(2023)에서 RELEVANT_EXECUTION_DATA_GAP 발생. --output-tier full로 원장 대조해 원인을 BNXUSDT 단일 종목으로 특정(위원회 북은 이 구간 비중 ~0이라 결손을 회피했으나 슬리브는 execution_mask 전 종목에 균등배분해 결손을 노출). fapi.binance.com REST 직접 조회로 2023-01-31 23:57~02-22 14:45 UTC 구간 원천 자체에 BNXUSDT 캔들이 없음(상장정지/재상장 추정)을 확인해 backfill 불가 판정, MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에 BNXUSDT 추가(evaluation.py). 제외 후 재실행 결과 3-fold는 전부 통과했으나 top-level 연속 전체기간(2021-2025) 리플레이가 2025-10-03 CAPITAL_INVARIANT_BREACH(pre_trade_equity=-0.0038, 자본 마이너스)로 실패 -- BNXUSDT 한 종목 제외만으로 발동 시점이 완전히 다른 자본붕괴가 노출될 만큼 슬리브 오버레이가 유니버스 구성 변화에 취약함을 확인. gross=0.30도 별도로 실측해 Calmar가 0.15(1.267)보다 낮은 1.157로 하락하고 fold 통과가 1/3까지 떨어짐을 확인(과다노출 시 악화 확인, 별개로 기각 사유 아님).",
+      "impact": "트렌드 슬리브 가산 결합(--trend-sleeve-gross > 0.0)은 fold 통계만으로는 배포 결정에 불충분함을 실증 -- 연속 전체기간 원장의 CAPITAL_INVARIANT_BREACH 점검이 fold pass/fail보다 우선하는 안전 게이트여야 함을 확인. 코드(evaluation.py의 _apply_trend_sleeve/_trend_sleeve_position 배선)는 opt-in(trend_sleeve_gross=0.0 기본값, byte-identical)이라 제거하지 않고 유지하되 CLI --help에 부정 결과 경고 추가(src/cli/commands/research/mhs.py). BNXUSDT 제외는 트렌드 슬리브와 무관하게 데이터 위생상 유지. [수정 2026-08-17] BNXUSDT 영구 제외는 committee_capital 베이스라인 Calmar를 1.128->0.786(~30% 상대하락)로 악화시킴이 재실측되어 되돌림(MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에 미포함 유지) -- 트렌드 슬리브를 중단하기로 한 이상 이 결손은 현재 어떤 배포 설정에도 영향 없음. 베이스라인은 원래 수치(CAGR 19.23%, Calmar 1.128, 3/3 fold)로 재확인 완료."
+    },
+    {
+      "task_id": "ADR_20260817_MHS_TREND_SLEEVE_COMMITTEE_OVERLAY",
+      "date": "2026-08-17",
+      "adr_id": "ADR_20260817_MHS_TREND_SLEEVE_COMMITTEE_OVERLAY",
+      "domain": "risk",
+      "title": "MHS 추세 슬리브 위원회 자본 가산 결합 배선",
+      "why": "committee_capital+committee_regime_adaptive_tranche 배포 이후 Research GO 통과(CAGR 19.23%, Calmar 1.128, MDD -17.05%)에도, ADR_20260814에서 낮은 상관(0.133)·양(+) 단독 Sharpe(0.070~0.091)로 측정된 가산형 추세 슬리브가 실제 배포 북에는 한 번도 결합되지 않았고, _trend_sleeve_diagnostic도 이미 대체된 frozen momentum 북과만 비교하도록 고정되어 있었음. 동적 레버리지/Kelly류 성장최적 사이징(ADR_20260816)은 이미 실측 후 전량 기각되어 재시도 대상에서 제외.",
+      "resolution": "src/application/research/mhs/evaluation.py에 _trend_sleeve_position/_apply_trend_sleeve 헬퍼 신설, 기존 --trend-sleeve/--trend-sleeve-gross 플래그로 fold 경로(_build_fold_target_weights)와 top-level 경로 양쪽에서 regime cash-scale/rebalance filter 이전 지점에 가산 결합 배선(trend_sleeve_gross=0.0이면 byte-identical). _trend_sleeve_diagnostic에 current_book 파라미터 추가해 비교 대상을 frozen momentum 북에서 실제 배포 북으로 교체.",
+      "impact": "170/171 테스트 통과(신규 6개 시나리오 포함), ruff/mypy clean. 유일 실패(test_mhs_diagnostic_3m_replay_end_to_end)는 git stash로 원본 코드 대비 재현해 사전 존재하던 순서-의존 flake임을 확인(회귀 아님). 실제 gross-budget 그리드(0.15/0.30) 백테스트를 통한 Calmar/CAGR/MDD 개선 검증은 아직 미실행 -- docs/specs 5절에 커맨드 명시, 다음 세션에서 실행 필요."
+    },
+    {
       "task_id": "ADR_20260817_MHS_RESEARCH_GO_POLICY_REGISTRATION",
       "date": "2026-08-17",
       "adr_id": "ADR_20260817_MHS_RESEARCH_GO_POLICY_REGISTRATION",
@@ -969,36 +999,6 @@
       "why": "The fixed equal-weight xs_alpha_multihorizon_v2 book lost 0.495 Sharpe from discovery to qualification and showed materially worse stress sensitivity, motivating causal family-specialist routing.",
       "resolution": "Implemented a research-only three-family contextual router using six-state causal labels, 90% block-aware LCB selection, CASH fallback, standalone diagnostics, final-ledger cost replay, and fail-closed validation; v2 remains unchanged.",
       "impact": "The frozen v3 execution failed discovery and qualification: Sharpe -1.828/-1.515, turnover 216.5/293.6x per year, and stress Sharpe -3.299/-3.014. The negative result exposes an execution-delay attribution defect or excessive sleeve-switch turnover; v3 is not promotable and requires timing-aligned router repair."
-    },
-    {
-      "task_id": "xs_neutral_alpha_v2",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_xs_neutral_alpha_v2",
-      "domain": "research",
-      "title": "Cross-sectional multihorizon alpha evaluation",
-      "why": "Repair the XS alpha research workflow after field-level taker ratio gaps were identified in the required futures universe.",
-      "resolution": "Added validated close/taker/funding alpha panel construction, reran the required 15-symbol data collection, and set XS evaluation start to 2022-04-03, the first complete common data boundary.",
-      "impact": "xs_alpha_multihorizon_v2 now evaluates deterministically with complete panels; discovery, qualification, stress, and holdout gates pass."
-    },
-    {
-      "task_id": "TASK_XS_NEUTRAL_COMPOSITE_SCREEN",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_XS_NEUTRAL_COMPOSITE_SCREEN",
-      "domain": "research",
-      "title": "XS-Neutral Composite Screen 추가 (선택형 TS 스크린 대안)",
-      "why": "신호 무결성 수정 후에도 baseline_gate_performance_v1 450셀 TS 스크린은 sizing_tournament_infeasible로 CASH 유지. 진단 결과 discovery t분포 꼬리(t>2: 관측 8 vs 귀무기대 10.2)가 노이즈보다 얇아 top-k 선택이 원리적으로 불가능하나, 평균 t(+0.222, 검정 +5.65)는 유의하게 양수로 넓고 얇은 알파가 존재. breadth/horizon 집계 가설은 반증됐고, 유일하게 지속되는 구조는 LONG/SHORT 방향성 베타(+0.187/-0.323)였음.",
-      "resolution": "동일 15개 패밀리 신호를 심볼별 합성 스코어로 평균, EWMA 평활(halflife=6bar), 교차섹션 디민(베타 구조적 제거), 무거래밴드(0.05)로 회전율 억제 후 단위gross 배분하는 xs_neutral_composite_v1 프로파일 신설(cross_sectional.py, xs_trend_screen.py). 스케일불변 admission 게이트(sharpe_floor/beta_abs_max/annual_sub_sharpe/turnover_max/cost_breakeven_min)로 절대CAGR허들·t_stat_floor 대체. /check에서 밴드 후 재정규화 버그(회전율 79->135x/yr, admission False로 반전) 발견 후 제거.",
-      "impact": "프로덕션 체결규약(t+2 시가)·8bp·펀딩 반영 전체 유니버스 재현: Discovery Sharpe=1.241, Qualification(OOS) Sharpe=1.177, beta=-0.019, 회전율=75.1x/yr, 2024/2025 각각 Sharpe 1.11/1.24 양년 모두 양수. 양쪽 admitted=True binding_constraint=None. 강건성 6축(비용손익분기~40bp, 패밀리LOO 15회 전부양수, 심볼LOO 15회 전부양수, 파라미터이웃 15조합 전부양수, 체결지연 무감쇠, XS가격모멘텀 벤치마크 대비 우위) 전부 통과. 기존 TS 스크린은 폐기하지 않고 병존. 2026-01-01+ 홀드아웃은 미개봉 유지 -- 최종 확인은 1회 봉인해제로만 수행 예정."
-    },
-    {
-      "task_id": "TASK_TREND_SCREEN_SIGNAL_INTEGRITY",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_TREND_SCREEN_SIGNAL_INTEGRITY",
-      "domain": "research",
-      "title": "Trend screen 신호 무결성 및 가중치 차원 정합 수리",
-      "why": "baseline_gate_performance_v1 qualification이 admitted=False로 반복 실패. Kelly 재튜닝 대신 실측 진단한 결과 15개 패밀리 중 3개(donchian_breakout exit 항등False, regression_slope 절편 차원오류, supertrend 상태미지속)가 신호 생성 자체가 결함이었고, _equal_risk_weights가 Kelly 적용 원장으로 가중치를 만들어 unit blend에 적용하는 차원 불일치로 사이징 신호가 반전되고 있었음(격리실측 QUAL t 0.41->1.10).",
-      "resolution": "donchian exit 채널 .shift() 적용, regression_slope_tstat 절편식(n*xbar) 수정, supertrend를 상태기계(직전 상태 승계)로 수정, _equal_risk_weights를 disc_equity(unit 원장) 기준으로 재정합, 사이징 토너먼트에 양의 검증엣지 하한 추가(no_policy_with_positive_validation_edge로 fail-closed), SizingPolicyScore에 dead_parameter 진단 플래그 추가, assert_family_signal_liveness 감사 헬퍼 신설.",
-      "impact": "450셀 재실행: cell_failed 0건(이전 6건, donchian short 파산 은폐 해소), 8/8 sizing fold VALID(이전 zero-active-leverage로 일부 INFEASIBLE). 그러나 discovery 두 폴드 전부 검증 LCB90 음수로 판명되어 토너먼트가 정직하게 INFEASIBLE(binding_constraint=sizing_tournament_infeasible)을 반환, CASH 유지. 이전 코드는 음엣지 상태에서도 kelly_mdd_q10을 강제 선출했었음 -- 결함 수정으로 허위 admission 경로가 제거됨."
     }
   ]
 }
