@@ -22,6 +22,18 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     from src.application.research.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report, run_mhs_horizon_diagnostic
 
     fold_safe_horizon = args.fold_safe_horizon
+    # Main-logic default: committee_capital + regime-adaptive tranche is the
+    # best-measured configuration (see ADR_20260817_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE),
+    # so both default on and are opt-out (--no-committee-capital /
+    # --no-committee-regime-adaptive-tranche) rather than opt-in. An explicit
+    # --committee-tranche-smoothing request always wins over the adaptive
+    # default so the two stay mutually exclusive without a hard CLI error.
+    committee_capital = not args.no_committee_capital
+    committee_regime_adaptive_tranche = (
+        committee_capital
+        and not args.no_committee_regime_adaptive_tranche
+        and not args.committee_tranche_smoothing
+    )
     request = MhsDiagnosticRequest(
         start=args.start,
         end=args.end,
@@ -38,8 +50,9 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         committee_book=args.committee_book,
         committee_kelly_sizing=args.committee_kelly_sizing,
         committee_growth_diagnostic=args.committee_growth_diagnostic,
-        committee_capital=args.committee_capital,
+        committee_capital=committee_capital,
         committee_tranche_smoothing=args.committee_tranche_smoothing,
+        committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
         execution_coverage_gate=args.execution_coverage_gate,
         ram_guard=not args.no_ram_guard,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
@@ -201,12 +214,13 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         action="store_true",
         default=False,
         help=(
-            "Opt-in (with --committee-book or --committee-capital): blend the "
-            "committee total-exposure scale 50/50 with a train-only quarter-Kelly "
-            "LCB overlay (f=0.25, z=1.0 one-SE shrinkage, capped at 1.0x when "
-            "applied to --committee-capital, at 1.5x when diagnostic-only via "
+            "Opt-in (with --committee-book, or committee capital which is on by "
+            "default -- see --no-committee-capital): blend the committee "
+            "total-exposure scale 50/50 with a train-only quarter-Kelly LCB "
+            "overlay (f=0.25, z=1.0 one-SE shrinkage, capped at 1.0x when "
+            "applied to committee capital, at 1.5x when diagnostic-only via "
             "--committee-book) instead of the flat vol-target scale alone. "
-            "Measured on the --committee-capital execution-replay path: reduces "
+            "Measured on the committee-capital execution-replay path: reduces "
             "MDD but also reduces CAGR and Calmar (net negative for compounded "
             "growth) -- enable only if drawdown control is prioritized over "
             "compounding, not as a default performance improvement; see run "
@@ -227,16 +241,19 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
-        "--committee-capital",
+        "--no-committee-capital",
         action="store_true",
         default=False,
         help=(
-            "Opt-in: build the k=5 committee members into the FOLD decision "
-            "targets and the TOP-LEVEL reported blend (equal-weight over "
-            "admitted members, no leg-risk tilt), replacing the frozen momentum "
-            "book in both places; measured to raise walk-forward blend Sharpe "
-            "and reduce blend MDD relative to the momentum default (see the run "
-            "history for magnitudes)."
+            "Main logic default is ON: the k=5 committee members build the FOLD "
+            "decision targets and the TOP-LEVEL reported blend (equal-weight "
+            "over admitted members, no leg-risk tilt), replacing the frozen "
+            "momentum book in both places; measured to raise walk-forward blend "
+            "Sharpe and reduce blend MDD relative to the momentum default (see "
+            "the run history for magnitudes). Pass this flag to opt back out to "
+            "the frozen momentum book (also disables "
+            "--committee-regime-adaptive-tranche, which requires committee "
+            "capital)."
         ),
     )
     mhs.add_argument(
@@ -244,7 +261,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         action="store_true",
         default=False,
         help=(
-            "Opt-in (requires --committee-capital): smooth the committee capital "
+            "Opt-in (requires committee capital, on by default): smooth the committee capital "
             "book with a 3-decision staggered tranche mean (effective 72h signal "
             "life) instead of fully repositioning every 24h -- the committee's "
             "shortest member lookback is 168h, so the 24h cadence oversamples its "
@@ -253,6 +270,35 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "cost-stress Sharpe +11%%; BUT anchored-fold pass count drops 2->1 "
             "(2023 recovers 0.151->1.537 while 2024 degrades 0.968->0.481), so "
             "top-level compounding improves while the Research GO fold gate worsens."
+        ),
+    )
+    mhs.add_argument(
+        "--no-committee-regime-adaptive-tranche",
+        action="store_true",
+        default=False,
+        help=(
+            "Main logic default is ON (requires committee capital, which is "
+            "also on by default; auto-disabled if --committee-tranche-smoothing "
+            "is explicitly passed instead, since the two are mutually "
+            "exclusive): per-decision-row choice between the raw committee book "
+            "and its 3-decision tranche smooth, gated by a "
+            "causal trailing lag-1 autocorrelation of the raw book's own proxy "
+            "return over the last 15 decision rows (negative/mean-reverting -> "
+            "smooth, non-negative/trending -> raw) -- root cause: "
+            "--committee-tranche-smoothing helps years where the raw book's own "
+            "returns whipsaw (negative autocorrelation) and hurts years where "
+            "they persist (positive autocorrelation), so a fixed choice always "
+            "sacrifices one regime. Measured on the execution replay: CAGR "
+            "15.0%%->20.7%%, MDD -28.3%%->-16.6%%, Calmar +135%%, annualized "
+            "turnover -21%%, cost-stress Sharpe +38%%, AND anchored-fold pass "
+            "count improves 2->3 (2023 0.151->1.16, 2024 0.968->0.85, 2025 "
+            "3.08->3.39, all comfortably above the 0.6 floor) -- dominates the "
+            "fixed-tranche choice on every fold simultaneously, not a tradeoff. "
+            "The 15-decision-row window is frozen (not CLI-tunable): windows "
+            "15-25 all pass every fold in real replay (plateau), but windows "
+            "10 and 90 both trigger CAPITAL_INVARIANT_BREACH -- this is not a "
+            "free parameter to fiddle with. Pass this flag to opt back out to "
+            "the raw (tranche_count=1) committee book."
         ),
     )
     mhs.add_argument(
