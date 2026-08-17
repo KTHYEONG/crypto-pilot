@@ -530,6 +530,47 @@ def test_mhs_diagnostic_committee_capital_flag_threaded_to_request(monkeypatch) 
     assert captured["committee_capital"] is False
 
 
+def test_mhs_diagnostic_committee_tranche_smoothing_flag_threaded_to_request(monkeypatch) -> None:
+    """SCENARIO_MHS_COMMITTEE_TRANCHE_SMOOTHING_CLI_FLAG_THREADED:
+    ``--committee-tranche-smoothing`` (store_true, default False) is parsed and
+    threaded into the constructed ``MhsDiagnosticRequest``; omitting it yields
+    committee_tranche_smoothing=False."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        captured.update(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    defaults = {action.dest: action.default for action in parser._actions}
+    assert defaults["committee_tranche_smoothing"] is False
+
+    args = parser.parse_args([])
+    assert args.committee_tranche_smoothing is False
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["committee_tranche_smoothing"] is False
+
+    captured.clear()
+    args = parser.parse_args(["--committee-capital", "--committee-tranche-smoothing"])
+    assert args.committee_capital is True
+    assert args.committee_tranche_smoothing is True
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["committee_capital"] is True
+    assert captured["committee_tranche_smoothing"] is True
+
+
 def test_mhs_diagnostic_execution_coverage_gate_flag_threaded(monkeypatch) -> None:
     """SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_CLI_FLAG_THREADED:
     ``--execution-coverage-gate`` (store_true, default False) is parsed and
