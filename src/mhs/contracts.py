@@ -154,6 +154,10 @@ MHS_COMMITTEE_PURGE_HOURS: int = 720
 # Earliest bar for committee walk-forward out-of-sample evaluation.
 MHS_COMMITTEE_OOS_START: pd.Timestamp = pd.Timestamp("2023-01-01", tz="UTC")
 
+# 24h 결정 격자 x 3 = 실효 72h 신호 수명으로, 최단 멤버 lookback(168h) 대비
+# 오버샘플링 배수를 7배->2.3배로 축소하는 구조적 선택 (피팅값 아님).
+MHS_COMMITTEE_TRANCHE_COUNT: int = 3
+
 # Discovery-window-only growth-optimal headroom diagnostic: risk-grid
 # multipliers of the realized reference_risk, plus the constraint anchors
 # (calibrated in the kelly_compounding_improve cycle: selected_risk=1.0x,
