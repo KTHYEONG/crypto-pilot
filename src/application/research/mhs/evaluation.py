@@ -234,6 +234,7 @@ MHS_REFERENCE_PASS_EQUITY_FLOOR = MHS_REGIME_CASH_SCALE_FLOOR
 MHS_PNL_VOL_TARGET_WINDOW_DAYS = 21
 MHS_PNL_VOL_TARGET_SCALE_FLOOR = 0.2
 MHS_PNL_VOL_TARGET_BURN_IN_DAYS = 90
+MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS = 365
 # Anchored-fold panel warm-up lookback bound.
 MHS_FOLD_PANEL_WARMUP_HOURS = 720 + 168 + 24
 # Execution-roster Schmitt-trigger hysteresis exit factor.
@@ -1336,31 +1337,38 @@ def _regime_cash_scale(
 def _pnl_vol_target_scale(
     reference_daily_returns: pd.Series,
     window_days: int = MHS_PNL_VOL_TARGET_WINDOW_DAYS,
+    median_window_days: int = MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS,
     floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR,
 ) -> pd.Series:
     """Strategy-own-P&L realized-vol targeting scale (Barroso & Santa-Clara).
 
-    ``scale_t = clip(expanding_median(trailing_vol)_{t-1} / trailing_vol_{t-1},
-    floor, 1.0)``: the strategy de-risks when its own daily P&L becomes more
-    volatile than its historical median (momentum-crash protection), never
-    levering up and never scaling on an under-sampled estimate. Causality is
-    strict: both the trailing-vol window AND the expanding-median target are
-    ``shift(1)`` before use (two independent shifts, not one combined), so
-    ``scale_t`` depends only on realized returns strictly before ``t``.
+    ``scale_t = clip(rolling_median(trailing_vol, window=365d)_{t-1} /
+    trailing_vol_{t-1}, floor, 1.0)``: the strategy de-risks when its own
+    daily P&L becomes more volatile than its recent historical median
+    (momentum-crash protection), never levering up and never scaling on an
+    under-sampled estimate. Causality is strict: both the trailing-vol window
+    AND the rolling-median target are ``shift(1)`` before use (two independent
+    shifts, not one combined), so ``scale_t`` depends only on realized returns
+    strictly before ``t``.
     """
     if not 0.0 < floor <= 1.0:
         raise ValueError(f"floor must be in (0, 1], got {floor}")
     if window_days < 1:
         raise ValueError(f"window_days must be >= 1, got {window_days}")
+    if median_window_days < MHS_PNL_VOL_TARGET_BURN_IN_DAYS:
+        raise ValueError(
+            f"median_window_days must be >= MHS_PNL_VOL_TARGET_BURN_IN_DAYS "
+            f"({MHS_PNL_VOL_TARGET_BURN_IN_DAYS}), got {median_window_days}"
+        )
     if reference_daily_returns.empty:
         return pd.Series(1.0, index=reference_daily_returns.index)
     trailing_vol = reference_daily_returns.rolling(
         window_days, min_periods=max(5, window_days // 2),
     ).std().shift(1)
-    expanding_target = trailing_vol.expanding(
-        min_periods=MHS_PNL_VOL_TARGET_BURN_IN_DAYS,
+    rolling_target = trailing_vol.rolling(
+        median_window_days, min_periods=MHS_PNL_VOL_TARGET_BURN_IN_DAYS,
     ).median().shift(1)
-    scale = expanding_target.div(trailing_vol.where(trailing_vol > 0))
+    scale = rolling_target.div(trailing_vol.where(trailing_vol > 0))
     return scale.clip(lower=floor, upper=1.0).fillna(1.0)
 
 
