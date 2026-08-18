@@ -235,3 +235,20 @@ def test_run_history_record_fold_blend_parity_default_none() -> None:
     assert "fold_blend_parity" in record
     assert record["fold_blend_parity"] is None
     json.dumps(record)
+
+
+def test_fold_report_regime_characterization_defaults_none() -> None:
+    # SCENARIO_MHS_FOLD_REPORT_REGIME_CHARACTERIZATION_DEFAULT: MhsFoldReport
+    # constructed without explicit regime_characterization kwarg has it as None;
+    # _incomplete_fold_report also yields None.
+    report = MhsFoldReport(
+        fold_index=0, validation_start="2021-02-10", validation_end="2021-04-19",
+        strict=None, stress=None, primary_valid=False, primary_autocorr_sharpe=0.0,
+        primary_naive_sharpe=0.0, primary_net_ann=0.0, primary_geometric_cagr=0.0,
+        primary_max_drawdown=0.0, stress_naive_sharpe=0.0, decision_intents=0,
+        termination_counts={}, failures=(), strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+    )
+    assert report.regime_characterization is None
+    incomplete = _incomplete_fold_report(_FOLD, 0, ())
+    assert incomplete.regime_characterization is None
