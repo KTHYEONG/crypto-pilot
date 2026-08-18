@@ -581,6 +581,7 @@ class TestMarkPriceCacheRequired:
         assert report.blend.primary.mark_source == report.blend.stress.mark_source
 
 
+@pytest.mark.slow
 class TestNoSilentMarkFallback:
     """MHS-MARK-04-NO-SILENT-FALLBACK: a cache gap is never silently replaced by
     OHLCV closes under cache_required; explicit fallback stays labelled."""

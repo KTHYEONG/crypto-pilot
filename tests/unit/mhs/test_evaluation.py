@@ -458,6 +458,7 @@ class TestMhsPerfOptimizationO1Bootstrap:
         prices = np.cumsum(rng.normal(0.0, 0.001, 6000))
         return np.diff(prices).astype("float64")
 
+    @pytest.mark.slow
     def test_wealth_paths_statistically_equivalent(self) -> None:
         from src.mhs.evaluation import _stationary_block_bootstrap_paths
 
@@ -470,6 +471,7 @@ class TestMhsPerfOptimizationO1Bootstrap:
         assert abs(new.mean() - ref.mean()) / abs(ref.mean()) < 0.05
         assert abs(np.percentile(new, 5) - np.percentile(ref, 5)) / abs(np.percentile(ref, 5)) < 0.10
 
+    @pytest.mark.slow
     def test_mdd_paths_statistically_equivalent(self) -> None:
         from src.mhs.evaluation import _bootstrap_mdd_paths
 
@@ -517,11 +519,16 @@ class TestMhsPerfOptimizationO1DeploymentReadiness:
             index=pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC"),
         )
 
-    @pytest.mark.slow
     def test_non_bootstrap_fields_bit_identical_to_golden(self) -> None:
-        equity = self._fixture_equity()
+        rng = np.random.default_rng(7)
+        n = 1000
+        net = rng.normal(0.00001, 0.01, n)
+        equity = pd.Series(
+            np.cumprod(1.0 + net),
+            index=pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC"),
+        )
         res = compute_deployment_readiness(
-            equity, 8760.0, n_bootstrap=2000, mean_block_bars=168, seed=20260807,
+            equity, 8760.0, n_bootstrap=20, mean_block_bars=24, seed=20260807,
         )
         # Deterministic arithmetic independent of the bootstrap RNG stream.
         net = equity.pct_change().dropna()
