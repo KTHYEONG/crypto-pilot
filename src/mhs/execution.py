@@ -1880,7 +1880,7 @@ class _BoundExecutionReplayAccumulator:
         grid_end = self.full_grid_end
         for col in range(n_cols):
             sym = columns[col]
-            if self.units_arr[col] == 0.0:
+            if abs(self.units_arr[col]) < 1e-12:
                 continue
             if sym not in self.last_close_ts or self.last_close_ts[sym] >= grid_end:
                 continue
