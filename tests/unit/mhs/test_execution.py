@@ -615,6 +615,64 @@ class TestStrategyReplay:
         ]["fee_bps"].iloc[0]
         assert stress_exit_fee > strict_exit_fee
 
+    def test_windowed_engine_real_stale_position_still_forced_exits(self) -> None:
+        """SCENARIO_MHS_FOLD0_REAL_STALE_POSITION_STILL_FORCE_EXITS.
+
+        Regression guard for the dust-tolerance fix below: a REAL
+        (above-tolerance) held position whose data permanently ends mid-grid
+        must keep forcing an exit through the windowed
+        ``_BoundExecutionReplayAccumulator`` path exactly as the oracle does
+        above -- the tolerance change must not weaken this fail-closed gate."""
+        grid = pd.date_range("2021-01-01 00:00", periods=180, freq="1min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
+        px.loc["2021-01-01 02:00":, "A"] = np.nan
+        weights = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 00:00", tz="UTC")])
+        signals = pd.DatetimeIndex([pd.Timestamp("2021-01-01 00:00", tz="UTC")])
+        windows = _partition_windows(
+            grid, weights, signals, px, px, px, px,
+            pd.DataFrame(0.0, index=grid, columns=["A"]), ExecutionSpec(), n_windows=1,
+        )
+        report = replay_execution_windows(
+            windows, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+        assert report.termination_counts["UNKNOWN_TERMINATION"] == 1
+        assert report.forced_exit_count == 1
+        assert report.forced_exit_notional > 0
+        assert "forced_exit" in report.simulated_fills["reason"].tolist()
+
+    def test_dust_residual_position_does_not_force_exit(self) -> None:
+        """SCENARIO_MHS_FOLD0_DUST_NO_FORCED_EXIT.
+
+        A held position of |units| < 1e-12 (floating-point accumulation
+        dust from a long chain of small rebalances, e.g. under the
+        scale-relative rebalance deadband) must NOT be treated as a real
+        stale position at fold/window end, even when its symbol's last
+        observed close trails the grid end. Reproducing the natural
+        multi-decision rounding chain that produces such a residual is
+        impractical in a unit fixture, so the residual is injected directly
+        via the accumulator's public attribute -- matching this file's
+        existing ``TestColumnarFillAccumulator`` convention of driving
+        ``_BoundExecutionReplayAccumulator`` internals directly."""
+        grid = pd.date_range("2021-01-01 00:00", periods=180, freq="1min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
+        px.loc["2021-01-01 02:00":, "A"] = np.nan
+        weights = pd.DataFrame({"A": [0.0]}, index=[pd.Timestamp("2021-01-01 00:00", tz="UTC")])
+        signals = pd.DatetimeIndex([pd.Timestamp("2021-01-01 00:00", tz="UTC")])
+        windows = _partition_windows(
+            grid, weights, signals, px, px, px, px,
+            pd.DataFrame(0.0, index=grid, columns=["A"]), ExecutionSpec(), n_windows=1,
+        )
+        acc = _BoundExecutionReplayAccumulator(
+            windows[0], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False,
+        )
+        acc.consume(windows[0])
+        assert acc.last_close_ts["A"] < windows[0].minute_grid[-1]
+        acc.units_arr[acc.columns.index("A")] = 1e-15
+        result = acc.finalize()
+        assert result.termination_counts == {"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0}
+        assert result.forced_exit_count == 0
+        assert "forced_exit" not in result.simulated_fills["reason"].tolist()
+
 
 class TestNotionalWeightedShortfall:
     """P2-A: the notional-weighted mean of per-fill implementation shortfall.
