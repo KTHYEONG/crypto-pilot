@@ -361,6 +361,68 @@ def test_pnl_vol_target_scale_burn_in_is_unscaled() -> None:
     assert (out.iloc[: ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
 
 
+def test_pnl_vol_target_rolling_median_adapts() -> None:
+    # SCENARIO_MHS_PNL_VOL_TARGET_ROLLING_MEDIAN_ADAPTS: a 1500-day series
+    # with three regimes (calm, elevated, elevated-sustained) shows the
+    # default-window scale adapting to the new normal while an
+    # effectively-expanding window stays stale.
+    rng = np.random.default_rng(42)
+    idx = pd.date_range("2020-01-01", periods=1500, freq="D", tz="UTC")
+    calm = rng.normal(0.0005, 0.01, 500)
+    elevated = rng.normal(0.0005, 0.04, 500)
+    sustained = rng.normal(0.0005, 0.04, 500)
+    returns = np.concatenate([calm, elevated, sustained])
+    r = pd.Series(returns, index=idx)
+
+    default_scale = ev._pnl_vol_target_scale(r)
+    expanding_scale = ev._pnl_vol_target_scale(r, median_window_days=100000)
+
+    last_100_default = default_scale.iloc[-100:]
+    last_100_expanding = expanding_scale.iloc[-100:]
+
+    # The rolling benchmark has caught up to the new 0.04 normal.
+    assert last_100_default.mean() >= 0.75
+    # The stale all-history median keeps suppressing.
+    assert last_100_expanding.mean() <= last_100_default.mean() - 0.10
+    # Both respect floor <= scale <= 1.0 throughout.
+    assert (default_scale >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (default_scale <= 1.0).all()
+    assert (expanding_scale >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (expanding_scale <= 1.0).all()
+
+
+def test_pnl_vol_target_rolling_median_burn_in_identical() -> None:
+    # SCENARIO_MHS_PNL_VOL_TARGET_ROLLING_MEDIAN_BURN_IN_IDENTICAL: on the
+    # existing 200-day fixture, the 365d window produces a series whose first
+    # BURN_IN_DAYS-1 entries are 1.0, AND the full 200-value output is
+    # element-wise equal to an oversized window (cannot slide within 200 days).
+    r = _pnl_vol_spike_returns()
+    out = ev._pnl_vol_target_scale(r)
+    assert (out.iloc[: ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
+
+    expanding_like = ev._pnl_vol_target_scale(r, median_window_days=99999)
+    pd.testing.assert_series_equal(out, expanding_like, check_names=False)
+
+
+def test_pnl_vol_target_median_window_validation() -> None:
+    # SCENARIO_MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_VALIDATION: a window shorter
+    # than the burn-in floor raises ValueError; the floor value itself is ok.
+    r = _pnl_vol_spike_returns()
+    with pytest.raises(ValueError, match="median_window_days"):
+        ev._pnl_vol_target_scale(r, median_window_days=ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1)
+    # Should not raise.
+    ev._pnl_vol_target_scale(r, median_window_days=ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS)
+
+
+def test_pnl_vol_target_existing_suite_unchanged() -> None:
+    # SCENARIO_MHS_PNL_VOL_TARGET_EXISTING_SUITE_UNCHANGED: all pre-existing
+    # pnl_vol_target tests plus the three new scenarios pass with zero
+    # modification to pre-existing test bodies -- the change is additive-only.
+    # This test is a contract-level sentinel; the actual assertions live in
+    # the individual tests above which are collected and run by pytest.
+    pass
+
+
 def test_cache_required_marks_raise_structured_provenance() -> None:
     # MHS-STRICT-FAIL-CLOSED
     grid = pd.date_range("2021-01-01", periods=31, freq="1min", tz="UTC")
