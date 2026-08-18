@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260818_MHS_REBALANCE_DEADBAND_SCALE_RELATIVE",
+      "date": "2026-08-18",
+      "adr_id": "ADR_20260818_MHS_REBALANCE_DEADBAND_SCALE_RELATIVE",
+      "domain": "mhs",
+      "title": "MHS 리밸런스 데드밴드 절대상수→스케일비례 전환 + fold/blend 경로 정합성 게이트",
+      "why": "절대 데드밴드(2% notional)가 종목당 목표비중(gross 0.53/roster 42 ≈ 1.26%)보다 커서 로스터 이탈 청산이 영구 억제, 보유종목이 40→122로 단조 누적. 동일 설정에서 fold2_strict와 blend_primary의 일간수익 상관 0.238, 횡단면 비중 상관 0.48로 Research GO 게이트와 deployment_readiness가 서로 다른 전략을 측정.",
+      "resolution": "_apply_rebalance_deadband를 절대상수(MHS_REBALANCE_MIN_NOTIONAL_DELTA=0.02, 제거)에서 스케일비례 불변식(position_fraction * gross/n_active, 기본 0.25)으로 재작성. 목표 0.0은 항상 청산(exit-always) 처리하고 holdings_out<=holdings_in 불변식 위반 시 DataIntegrityError로 fail-closed. _book_structure_trace/_fold_blend_parity 신설해 fold-blend 정합성을 관측하고 이탈 시 FOLD_BLEND_PATH_DIVERGENCE를 데이터 무결성 차단 사유로 research_go에 편입. 실측 재실행 완료.",
+      "impact": "CAGR 19.23%->33.45%, MDD -17.05%->-12.35%, Calmar 1.13->2.71 개선(좌초 포지션 제거 효과). fold/blend 보유종목 log비율 0.80(결손)->0.040(정합) 통과. 연환산 회전율 26.3x->61.7x 상승이 fold 0(2023) 실행데이터 결손을 새로 노출시켜 research_go가 3/3->2/3(RELEVANT_EXECUTION_DATA_GAP)으로 후퇴 -- 알파 결함이 아닌 데이터 커버리지 이슈, 재통과의 유일한 남은 차단 사유. 부수적으로 --output-tier full 직렬화 경로(_build_replay_artifact_reference, 기존 코드)에서 numpy 스칼라가 _jsonable 우회로 orjson에 유입되는 결함 발견(범위 외, 별도 스펙 필요)."
+    },
+    {
       "task_id": "ADR_20260817_MHS_BNXUSDT_EXCLUSION_REVERTED",
       "date": "2026-08-17",
       "adr_id": "ADR_20260817_MHS_BNXUSDT_EXCLUSION_REVERTED",
@@ -989,16 +999,6 @@
       "why": "xs_alpha_contextual_v3's hard weight-layer family switching produced catastrophic turnover (216.5x/293.6x per year) and failed both discovery and qualification; empirical decomposition showed ~97% of turnover came from CASH/family transitions bypassing the EWMA/no-trade-band pipeline that bounds v2 and every standalone family (2.9-3.3% same-family drift only).",
       "resolution": "Relocated the same causal six-state LCB family selection from the post-normalized weight layer to the pre-normalization score layer: build_xs_causal_score_selection now selects among raw per-family composite scores and feeds the combined row through build_xs_neutral_weights exactly once (shared halflife=6/band=0.05), reusing the extracted _causal_family_lcb_selection core for both the legacy weight-layer router and the new score-layer router.",
       "impact": "Turnover normalized to 34.1x/42.8x per year (from 216.5x/293.6x), clearing turnover_max and cost_breakeven_min in both windows -- confirms the root-cause diagnosis. Qualification (OOS) now admits: Sharpe 0.964, t=1.36, CAGR 17.8%. Discovery still fails sharpe_floor (Sharpe 0.684, t=0.90) driven by a weak 2022 sub-year (Sharpe 0.29 vs 2023's 0.94); v4 is not promotable yet. Selection frequency (CASH ~55%, remaining split across 3 families) is essentially unchanged from v3, isolating the fix to turnover mechanics only, as intended."
-    },
-    {
-      "task_id": "TASK_XS_ALPHA_CONTEXTUAL_ROUTING_V3",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_XS_ALPHA_CONTEXTUAL_ROUTING_V3",
-      "domain": "futures",
-      "title": "XS alpha contextual routing v3 evaluation",
-      "why": "The fixed equal-weight xs_alpha_multihorizon_v2 book lost 0.495 Sharpe from discovery to qualification and showed materially worse stress sensitivity, motivating causal family-specialist routing.",
-      "resolution": "Implemented a research-only three-family contextual router using six-state causal labels, 90% block-aware LCB selection, CASH fallback, standalone diagnostics, final-ledger cost replay, and fail-closed validation; v2 remains unchanged.",
-      "impact": "The frozen v3 execution failed discovery and qualification: Sharpe -1.828/-1.515, turnover 216.5/293.6x per year, and stress Sharpe -3.299/-3.014. The negative result exposes an execution-delay attribution defect or excessive sleeve-switch turnover; v3 is not promotable and requires timing-aligned router repair."
     }
   ]
 }
