@@ -167,7 +167,7 @@ def test_stress_cost_execution_spec_triples_cost_fields() -> None:
 
 def test_toplevel_book_primary_is_immediate_taker(mhs_market) -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_TOPLEVEL_PRIMARY_IS_IMMEDIATE_TAKER_02."""
-    report = ev._book_outcome(**_build_book_outcome_args(mhs_market))
+    report, _ = ev._book_outcome(**_build_book_outcome_args(mhs_market))
     assert report.primary is not None
     assert report.stress is not None
     assert report.primary.fill_source == "OHLCV_IMMEDIATE_TAKER"
@@ -208,7 +208,7 @@ def test_fold_primary_is_immediate_taker(mhs_market) -> None:
 def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_FILL_SOURCE_METADATA_04."""
     root, end = mhs_market
-    blend_report = ev._book_outcome(**_build_book_outcome_args(mhs_market))
+    blend_report, _ = ev._book_outcome(**_build_book_outcome_args(mhs_market))
     assert blend_report.primary is not None
     deployment = DeploymentReadinessResult(
         geometric_cagr=0.0, max_drawdown=0.0, calmar=0.0, expected_shortfall=0.0,
@@ -221,7 +221,7 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
     )
     monkeypatch.setattr(
         ev, "_run_books_concurrent",
-        lambda *a, **k: (blend_report, blend_report, blend_report),
+        lambda *a, **k: (blend_report, blend_report, blend_report, {}),
     )
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently",

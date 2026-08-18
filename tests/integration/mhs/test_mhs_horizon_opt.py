@@ -14,6 +14,7 @@ from src.application.research.mhs.evaluation import (
     MHS_GO_REASON_RESOURCE_BREACH,
     MhsDiagnosticRequest,
     _apply_rebalance_deadband,
+    _book_structure_trace,
     _regime_cash_scale,
     _run_anchored_fold,
     _smooth_signal_ema,
@@ -109,6 +110,23 @@ def _request(root: Path, end: pd.Timestamp, **overrides) -> MhsDiagnosticRequest
     return MhsDiagnosticRequest(**params)
 
 
+def _synthetic_roster_targets(
+    n_rows: int = 400, n_sym: int = 200, roster: int = 42, seed: int = 7,
+):
+    """Dollar-neutral unit-gross book on a churning top-`roster` mask (spec §4)."""
+    rng = np.random.default_rng(seed)
+    cols = [f"S{i:03d}" for i in range(n_sym)]
+    idx = pd.date_range("2021-01-01", periods=n_rows, freq="24h", tz="UTC")
+    vol = pd.DataFrame(rng.lognormal(0, 1.0, (n_rows, n_sym)), index=idx, columns=cols)
+    vol = vol.rolling(20, min_periods=1).mean()
+    rank = vol.rank(axis=1, ascending=False, method="first")
+    mask = rank.le(roster)
+    raw = pd.DataFrame(rng.normal(0, 1, (n_rows, n_sym)), index=idx, columns=cols).where(mask)
+    dn = raw.sub(raw.mean(axis=1), axis=0)
+    w = dn.div(dn.abs().sum(axis=1), axis=0).fillna(0.0) * 0.53
+    return w
+
+
 class TestMemoryBudget:
     """SCENARIO_MHS_HORIZON_OPT_MEMORY: RSS stays below the configured budget
     across all evaluation windows and the fold completes without a resource
@@ -153,7 +171,7 @@ class TestSignalQualityMechanisms:
             {"A": [0.0, 0.05, 0.06, 0.10], "B": [0.1, 0.2, 0.21, 0.21]},
             index=idx,
         )
-        out = _apply_rebalance_deadband(target, min_delta=0.02)
+        out = _apply_rebalance_deadband(target)
         # A: 0.0 -> 0.05 (large, trades), 0.05 -> 0.06 (sub-threshold, carried),
         # 0.06 -> 0.10 (large, trades).
         assert out.loc[idx[1], "A"] == pytest.approx(0.05)
@@ -198,6 +216,124 @@ class TestSignalQualityMechanisms:
         assert np.isfinite(report.primary_naive_sharpe)
         assert np.isfinite(report.stress_naive_sharpe)
         assert report.decision_intents > 0
+
+
+class TestMhsEvalIntegrity:
+    """SCENARIO_MHS_EVAL_INTEGRITY_*: exit-always liquidation, scale-relative
+    deadband, holdings boundedness, fail-closed assertion, and structure trace."""
+
+    def test_exit_always_zero_target_liquidates(self) -> None:
+        # SCENARIO_MHS_EVAL_INTEGRITY_EXIT_ALWAYS: a zero target is a
+        # liquidation instruction, never a carried resize.
+        idx = pd.DatetimeIndex(
+            ["2021-01-01 00:00", "2021-01-01 06:00", "2021-01-01 12:00", "2021-01-01 18:00"],
+            tz="UTC",
+        )
+        cols = ["A", *[f"S{i}" for i in range(1, 10)]]
+        # Row gross 0.100 over 10 active symbols -> min_delta = 0.25 * 0.100 / 10.
+        target = pd.DataFrame(
+            [
+                [0.010, *[0.010] * 9],
+                [0.011, *[0.010] * 9],
+                [0.000, *[0.010] * 9],
+                [0.000, *[0.010] * 9],
+            ],
+            index=idx,
+            columns=cols,
+        )
+        out = _apply_rebalance_deadband(target)
+        assert out.loc[idx[1], "A"] == pytest.approx(0.010)  # delta 0.001 < 0.0025, carried
+        assert out.loc[idx[2], "A"] == 0.0  # zero target liquidates exactly
+        assert out.loc[idx[3], "A"] == 0.0
+        # Under the legacy absolute 0.02 threshold out[2,'A'] would equal 0.010.
+        assert out.loc[idx[2], "A"] != pytest.approx(0.010)
+
+    def test_scale_relative_threshold(self) -> None:
+        # SCENARIO_MHS_EVAL_INTEGRITY_SCALE_RELATIVE: the threshold is a
+        # fraction of the per-symbol position scale, not an absolute constant.
+        idx = pd.DatetimeIndex(["2021-01-01 00:00", "2021-01-01 06:00"], tz="UTC")
+        cols = ["A", "B", "C", "D"]
+        # Frame L: gross 0.40 -> min_delta = 0.25 * 0.40 / 4 = 0.025; delta 0.020 carried.
+        frame_l = pd.DataFrame(
+            [[0.10, 0.10, 0.10, 0.10], [0.12, 0.10, 0.10, 0.10]],
+            index=idx,
+            columns=cols,
+        )
+        out_l = _apply_rebalance_deadband(frame_l)
+        assert out_l.loc[idx[1], "A"] == pytest.approx(0.10)  # carried == prior held
+        # Frame S: gross 0.04 -> min_delta = 0.0025; the same delta 0.020 now trades.
+        frame_s = pd.DataFrame(
+            [[0.01, 0.01, 0.01, 0.01], [0.03, 0.01, 0.01, 0.01]],
+            index=idx,
+            columns=cols,
+        )
+        out_s = _apply_rebalance_deadband(frame_s)
+        assert out_s.loc[idx[1], "A"] == pytest.approx(0.03)  # traded == new target
+        with pytest.raises(ValueError, match="position_fraction"):
+            _apply_rebalance_deadband(frame_l, position_fraction=-0.1)
+
+    def test_holdings_bounded_stationary(self) -> None:
+        # SCENARIO_MHS_EVAL_INTEGRITY_HOLDINGS_BOUNDED: on the seeded synthetic
+        # churning top-42 roster, holdings stay bounded and stationary.
+        target = _synthetic_roster_targets()
+        out = _apply_rebalance_deadband(target)
+        target_hold = (target != 0.0).sum(axis=1)
+        out_hold = (out != 0.0).sum(axis=1)
+        assert (out_hold <= target_hold).all()
+        assert out_hold.max() <= 42
+        first50, last50 = out_hold.iloc[:50].mean(), out_hold.iloc[-50:].mean()
+        assert 0.80 <= last50 / first50 <= 1.25
+        tracking = (out - target).abs().sum(axis=1).mean()
+        gross = target.abs().sum(axis=1).mean()
+        assert tracking <= 0.05 * gross
+
+    def test_holdings_fail_closed_on_carry_regression(self, monkeypatch) -> None:
+        # SCENARIO_MHS_EVAL_INTEGRITY_HOLDINGS_FAIL_CLOSED: a regression that
+        # carries a zero target must raise DataIntegrityError, never silently
+        # degrade into an unbounded book.
+        idx = pd.DatetimeIndex(["2021-01-01 00:00", "2021-01-01 06:00"], tz="UTC")
+        target = pd.DataFrame(
+            {"A": [0.010, 0.000], "B": [0.010, 0.010]},
+            index=idx,
+        )
+        real_where = np.where
+
+        def _regressed_where(condition, x, y):
+            # Simulate a regression of Invariant E: always carry held, even
+            # across a zero target.
+            return x
+
+        monkeypatch.setattr(np, "where", _regressed_where)
+        try:
+            with pytest.raises(ev.DataIntegrityError, match="holdings"):
+                _apply_rebalance_deadband(target)
+        finally:
+            monkeypatch.setattr(np, "where", real_where)
+
+    def test_book_structure_trace(self) -> None:
+        # SCENARIO_MHS_EVAL_INTEGRITY_STRUCTURE_TRACE: the trace returns the
+        # exact key set and measures stationarity correctly.
+        keys = {"n_rows", "gross_mean", "holdings_mean", "holdings_max", "holdings_growth_slope"}
+        idx = pd.date_range("2021-01-01", periods=100, freq="1h", tz="UTC")
+        stationary = pd.DataFrame(
+            {f"S{i}": [0.01] * 100 for i in range(10)}, index=idx,
+        )
+        trace = _book_structure_trace(stationary)
+        assert set(trace.keys()) == keys
+        assert trace["holdings_mean"] == pytest.approx(10.0)
+        assert trace["holdings_max"] == pytest.approx(10.0)
+        assert abs(trace["holdings_growth_slope"]) <= 1e-9
+        # A book ramping 10 -> 110 over 100 rows grows ~100 names over a mean
+        # of ~60 -> slope > 1.0.
+        ramp = pd.DataFrame(
+            {f"S{i}": [0.01 if i < 10 + r else 0.0 for r in range(100)] for i in range(120)},
+            index=idx,
+        )
+        ramp_trace = _book_structure_trace(ramp)
+        assert ramp_trace["holdings_growth_slope"] > 1.0
+        empty = _book_structure_trace(pd.DataFrame())
+        assert empty["n_rows"] == 0.0
+        assert all(v == 0.0 for v in empty.values())
 
 
 class TestFoldIntegrity:
