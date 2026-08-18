@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FOLD0_FORCED_EXIT_DUST_TOLERANCE",
+      "date": "2026-08-18",
+      "adr_id": "ADR_20260818_MHS_FOLD0_FORCED_EXIT_DUST_TOLERANCE",
+      "domain": "mhs",
+      "title": "MHS fold 0(2023) RELEVANT_EXECUTION_DATA_GAP 재진단: 데이터 결손이 아닌 부동소수점 잔여포지션 오탐",
+      "why": "ADR_20260818_MHS_REBALANCE_DEADBAND_SCALE_RELATIVE는 회전율 26.3x->61.7x 상승이 fold 0(2023) 실행데이터 결손을 새로 노출시켰다고 가정(RELEVANT_EXECUTION_DATA_GAP, folds_passed 3/3->2/3, BNXUSDT 결손과 유사 사례로 추정)했으나 실측 미검증 상태였음. research_go 재통과의 유일한 차단 사유였던 이 가정을 backfill/동적제외 판단을 위해 직접 재현·검증.",
+      "resolution": "_run_anchored_fold(fold0)를 직접 호출해 재현한 결과 실패 원인은 BNXUSDT류 데이터 결손이 아니라 JOEUSDT: termination_counts={MISSING_DATA:0, UNKNOWN_TERMINATION:1}이며 해당 심볼의 1h/3m OHLCV 캐시는 2023-03-29~2026-08-11 구간에 4h 이상 결손이 전혀 없음(백필 대상 자체가 없음). 실제 트리거는 units_arr[col]==1.7e-17의 부동소수점 잔여(스케일비례 데드밴드 도입 후 반복 리밸런스의 += 누적 반올림 오차)를 finalize()의 정확동일비교(units_arr[col]==0.0)가 '보유 포지션'으로 오인해 stale-price 강제청산을 시도한 것. 이 파일이 이미 net_units 델타에 사용 중인 동일 불변식(abs(x)<1e-12, L729/L1437)을 finalize()의 포지션 판정(L1883)에도 동일 적용하는 1줄 수정으로 해결. 실제 결손(가중치 1.0)에 대한 강제청산 게이트는 회귀 없이 그대로 유지(신규 windowed-path 테스트로 확인), strategy_aware_execution_replay(L999, 테스트 전용 oracle, 프로덕션 미도달)의 동일 패턴은 의도적으로 범위 제외.",
+      "impact": "fold0 실측 재검증: failures=() (기존 ('RELEVANT_EXECUTION_DATA_GAP',)), termination_counts={MISSING_DATA:0, UNKNOWN_TERMINATION:0}. primary_autocorr_sharpe/geometric_cagr/max_drawdown/net_ann은 소수점 6자리까지 수정 전과 동일(1.222273/0.118316/-0.092934/0.114697) -- 순수 오탐 제거이며 전략/실현성 변경 아님. tests/unit/mhs 372건 전부 그린(신규 2건 포함), ruff/mypy clean. MHS_SOURCE_GAP_EXCLUDED_SYMBOLS, apply_dynamic_gap_exclusion, execution_coverage_gate 등 데이터 결손 대응 메커니즘은 미변경(애초에 해당 없는 문제였음)."
+    },
+    {
       "task_id": "ADR_20260818_MHS_PNL_VOL_TARGET_ROLLING_MEDIAN",
       "date": "2026-08-18",
       "adr_id": "ADR_20260818_MHS_PNL_VOL_TARGET_ROLLING_MEDIAN",
@@ -989,16 +999,6 @@
       "why": "Three consecutive attempts to beat xs_alpha_multihorizon_v2 (v3 hard-switch routing, v4 score-layer routing, v5 permanent funding_contrarian removal) all used a binary allocation mechanism and all failed. v2 itself sits at the opposite fixed-equal-weight extreme and was known to lose 0.495 Sharpe from discovery to qualification. The untried middle ground was a continuous, always-diversified tilt driven by each family's own trailing realized risk.",
       "resolution": "Added _causal_family_inverse_vol_weights (causal trailing 1/std weighting over alpha_spec.signal_windows[0]=42 bars, no new tunable, equal-weight 1/3 fallback never CASH) and build_xs_alpha_vol_weighted_weights (sources vol from standalone net realized returns via run_xs_composite_ledger, not raw score dispersion) in cross_sectional.py; wired XS_VOL_WEIGHTED_ALPHA_PROFILE_ID through xs_trend_screen.py and the CLI allowlist in single_technical.py, mirroring v2-v5's dispatch pattern.",
       "impact": "Discovery Sharpe 1.28 (t=1.70), qualification Sharpe 1.33 (t=1.89, both 2024/2025 sub-years strongly positive), stress-qualification 1.23 -- all admitted with turnover ~23x/yr (lower than v2's 24.6-27.2x). Single confirmatory holdout unseal: 2026 YTD Sharpe 1.73 (CAGR 28.3%, MDD -8.2%, shallower than v2's -12.9%), stress-holdout 1.86, both admitted. v6 is the first profile after v2 to clear every window (discovery+qualification+holdout+stress); v2's known qualification-vs-discovery Sharpe loss and stress sensitivity are resolved. v2 holdout Sharpe (1.95) remains nominally higher, but v6 wins decisively on qualification robustness and drawdown. Holdout is now spent for v6 -- no further re-tuning against this result."
-    },
-    {
-      "task_id": "TASK_XS_ALPHA_DUAL_FAMILY_V5",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_XS_ALPHA_DUAL_FAMILY_V5",
-      "domain": "futures",
-      "title": "XS alpha dual-family composite (v5) — funding_contrarian removal disproved",
-      "why": "v2's equal-weight 3-family blend carried funding_contrarian, which independently fails its own standalone admission gate (t=0.99, negative 2022 sub-year). v3/v4 tried fixing this via regime routing (v3 catastrophic turnover, v4 turnover-repaired but still discovery-sharpe_floor short). v5 tested the untried deterministic lever: drop the standalone-failing family entirely, equal-weight trend+taker_imbalance only, no routing.",
-      "resolution": "Added build_xs_alpha_dual_family_weights (cross_sectional.py), XS_DUAL_FAMILY_ALPHA_PROFILE_ID profile wiring (xs_trend_screen.py), and fixed a pre-existing CLI reachability gap where the xs-screen command allowlist never included v3/v4 (single_technical.py). Ran the sealed discovery+qualification screen on real data.",
-      "impact": "Discovery admitted (Sharpe 1.29, t=1.71) but qualification (OOS 2024-2025) FAILED: Sharpe fell to 0.53 with 2024 turning Sharpe-negative (-0.185), tripping annual_sub_sharpe;sharpe_floor. Hypothesis disproved -- funding_contrarian's pooled-diagnostic weakness masked a real 2024 OOS diversification contribution that trend+taker_imbalance alone did not replace. xs_alpha_multihorizon_v2 remains the only profile admitted end-to-end (incl. unsealed 2026 holdout, Sharpe 1.95); three consecutive next-step attempts (v3 routing, v4 routing, v5 composition) have all failed to beat it. Holdout correctly stayed sealed (qualification gate not cleared)."
     }
   ]
 }
