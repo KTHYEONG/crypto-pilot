@@ -110,7 +110,8 @@
     "testing": "tests/unit/mhs/test_evaluation.py"
   },
   "src/mhs/execution.py": {
-    "testing": "tests/unit/mhs/test_execution.py"
+    "testing": "tests/unit/mhs/test_execution.py",
+    "architecture": "docs/specs/mhs_fold_forced_exit_dust_tolerance.md"
   },
   "src/mhs/features.py": {
     "testing": "tests/unit/mhs/test_features.py"
