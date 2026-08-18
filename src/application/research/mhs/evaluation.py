@@ -208,8 +208,14 @@ class MhsOutputTier(StrEnum):
     COMPACT = "compact"
     FULL = "full"
 
-# Turnover deadband cap (2% notional).
-MHS_REBALANCE_MIN_NOTIONAL_DELTA = 0.02
+# Rebalance deadband as a fraction of the per-row per-symbol position scale
+# (structural churn statement, never an absolute notional constant).
+MHS_REBALANCE_DEADBAND_POSITION_FRACTION = 0.25
+# Max absolute dimensionless holdings growth slope for a structurally bounded book.
+MHS_BOOK_HOLDINGS_STATIONARITY_TOLERANCE = 0.25
+# Max |log(fold/blend)| ratio for holdings_mean and gross_mean before the fold
+# and blend paths are treated as diverged (log-ratio band).
+MHS_FOLD_BLEND_PARITY_TOLERANCE = 0.25
 # EMA smoothing span in decision steps.
 MHS_SIGNAL_EMA_HORIZON_SPAN = 1.0
 
@@ -248,6 +254,7 @@ MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR = "PRIMARY_ANNUAL_RETURN_BELOW_FLOOR"
 MHS_GO_REASON_CAPITAL_BREACH = "CAPITAL_INVARIANT_BREACH"
 MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
 MHS_GO_REASON_RESOURCE_BREACH = "RESOURCE_BUDGET_BREACH"
+MHS_GO_REASON_PATH_DIVERGENCE = "FOLD_BLEND_PATH_DIVERGENCE"
 # Data-integrity reason codes: fail-closed evidence that the canonical input
 # data itself was missing or invalid, as opposed to pure alpha-quality failures
 # (MHS_GO_REASON_PRIMARY_SHARPE / MHS_GO_REASON_STRESS_SHARPE) or the policy
@@ -261,6 +268,7 @@ MHS_GO_REASON_DATA_INTEGRITY_CODES = frozenset[str]({
     MHS_GO_REASON_EXECUTION_GAP,
     MHS_GO_REASON_CAPITAL_BREACH,
     MHS_GO_REASON_RESOURCE_BREACH,
+    MHS_GO_REASON_PATH_DIVERGENCE,
 })
 
 
@@ -516,6 +524,7 @@ class MhsFoldReport:
     funding_carry_sign: int | None = None
     funding_carry_source: str = "frozen_default"
     funding_carry_vs_slow_momentum_daily_corr: float | None = None
+    book_structure: dict[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,6 +571,7 @@ class MhsHorizonDiagnosticReport:
     multi_feature_diagnostic: dict[str, Any] | None = None
     committee_diagnostic: dict[str, Any] | None = None
     funding_dropped_symbols: dict[str, str] | None = None
+    fold_blend_parity: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -1136,30 +1146,154 @@ def _smooth_signal_ema(signal: pd.DataFrame, span_steps: int) -> pd.DataFrame:
     return signal.ewm(span=span_steps, adjust=False).mean()
 
 
-def _apply_rebalance_deadband(target: pd.DataFrame, min_delta: float) -> pd.DataFrame:
-    """Suppress per-symbol rebalances smaller than the turnover deadband cap.
+def _apply_rebalance_deadband(
+    target: pd.DataFrame,
+    position_fraction: float = MHS_REBALANCE_DEADBAND_POSITION_FRACTION,
+) -> pd.DataFrame:
+    """Suppress per-symbol rebalances smaller than a scale-relative deadband.
 
-    A target-weight change ``|w_t - w_held|`` below ``min_delta`` (2% notional)
-    carries the last decided (held) target forward instead of retrading, so the
-    executor never churns on sub-threshold signal deltas; the hold is stateful,
-    so a slow drift cannot creep through one small step at a time. The first
-    observation is always a decision, NaN targets remain NaN (a delisting is
-    never silently re-expressed), and a held NaN resets the deadband so a
-    re-listed symbol trades from its own first finite target.
+    A target-weight change below ``position_fraction * scale_t`` (where
+    ``scale_t`` is the per-decision per-symbol position scale) carries the last
+    decided (held) target forward instead of retrading, so the executor never
+    churns on sub-threshold signal deltas; the hold is stateful, so a slow
+    drift cannot creep through one small step at a time. A target of exactly
+    ``0.0`` is a liquidation instruction, never a resize to be carried (the
+    exit-always invariant). The first observation is always a decision, NaN
+    targets remain NaN (a delisting is never silently re-expressed), and a held
+    NaN resets the deadband so a re-listed symbol trades from its own first
+    finite target.
     """
-    if min_delta < 0:
-        raise ValueError(f"min_delta must be >= 0, got {min_delta}")
+    if position_fraction < 0:
+        raise ValueError(f"position_fraction must be >= 0, got {position_fraction}")
     if target.empty:
         return target.copy()
     values = target.to_numpy(dtype="float64")
     out = values.copy()
     held = out[0].copy()
-    finite_values = np.isfinite(values)
+    finite = np.isfinite(values)
     for i in range(1, len(values)):
-        carry = (np.abs(values[i] - held) < min_delta) & finite_values[i] & np.isfinite(held)
-        out[i] = np.where(carry, held, values[i])
+        row = values[i]
+        active = np.count_nonzero(np.abs(row) > 0.0)
+        min_delta = (
+            position_fraction * float(np.abs(row[np.isfinite(row)]).sum()) / active
+            if active
+            else 0.0
+        )
+        carry = (np.abs(row - held) < min_delta) & finite[i] & np.isfinite(held) & (row != 0.0)
+        out[i] = np.where(carry, held, row)
         held = out[i]
+    # Invariant H (fail-closed): holdings can never exceed the roster that
+    # produced them; a violation is a systemic misconfiguration.
+    holdings_in = np.count_nonzero(np.abs(values) > 0.0, axis=1)
+    holdings_out = np.count_nonzero(np.abs(out) > 0.0, axis=1)
+    for i in range(len(values)):
+        if holdings_out[i] > holdings_in[i]:
+            raise DataIntegrityError(
+                f"holdings boundedness violated at {target.index[i]}: "
+                f"holdings_out={int(holdings_out[i])} > holdings_in={int(holdings_in[i])}"
+            )
     return pd.DataFrame(out, index=target.index, columns=target.columns).fillna(0.0)
+
+
+def _book_structure_trace(target_weights: pd.DataFrame) -> dict[str, float]:
+    """Observational book-structure trace of a post-deadband decision book.
+
+    ``holdings_growth_slope`` is the OLS slope of per-row holdings against the
+    normalized row position ``[0, 1]``, divided by ``holdings_mean``: a
+    dimensionless growth rate over the window (0 = stationary, 1 = doubles).
+    """
+    if target_weights.empty:
+        return {
+            "n_rows": 0.0,
+            "gross_mean": 0.0,
+            "holdings_mean": 0.0,
+            "holdings_max": 0.0,
+            "holdings_growth_slope": 0.0,
+        }
+    n_rows = float(len(target_weights))
+    gross = target_weights.abs().sum(axis=1)
+    holdings = (target_weights != 0.0).sum(axis=1)
+    holdings_mean = float(holdings.mean())
+    if n_rows < 2 or holdings_mean <= 0.0:
+        growth_slope = 0.0
+    else:
+        x = np.linspace(0.0, 1.0, int(n_rows))
+        y = holdings.to_numpy(dtype="float64")
+        x_mean = float(x.mean())
+        slope = float(np.dot(x - x_mean, y - y.mean()) / np.dot(x - x_mean, x - x_mean))
+        growth_slope = slope / holdings_mean
+    return {
+        "n_rows": n_rows,
+        "gross_mean": float(gross.mean()),
+        "holdings_mean": holdings_mean,
+        "holdings_max": float(holdings.max()),
+        "holdings_growth_slope": growth_slope,
+    }
+
+
+def _fold_blend_parity(
+    blend_traces: dict[int, dict[str, float]],
+    folds: tuple[MhsFoldReport, ...],
+    tolerance: float = MHS_FOLD_BLEND_PARITY_TOLERANCE,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Compare each fold's book structure against the blend path's trace.
+
+    Returns ``(payload, reason_codes)``. A fold whose ``book_structure`` is
+    None, or whose fold/blend denominator is non-positive, is recorded under
+    ``payload['unmeasured']`` and never emits the divergence code itself.
+    """
+    payload: dict[str, Any] = {
+        "folds": {},
+        "unmeasured": [],
+        "max_abs_log_holdings_ratio": 0.0,
+        "max_abs_log_gross_ratio": 0.0,
+        "tolerance": tolerance,
+    }
+    max_abs_holdings = 0.0
+    max_abs_gross = 0.0
+    for fold in folds:
+        fold_trace = fold.book_structure
+        blend_trace = blend_traces.get(fold.fold_index)
+        if fold_trace is None or blend_trace is None:
+            payload["unmeasured"].append(fold.fold_index)
+            payload["folds"][fold.fold_index] = {
+                "holdings_log_ratio": None,
+                "gross_log_ratio": None,
+                "fold": fold_trace,
+                "blend": blend_trace,
+            }
+            continue
+        f_holdings = fold_trace.get("holdings_mean", 0.0)
+        b_holdings = blend_trace.get("holdings_mean", 0.0)
+        f_gross = fold_trace.get("gross_mean", 0.0)
+        b_gross = blend_trace.get("gross_mean", 0.0)
+        if f_holdings <= 0.0 or b_holdings <= 0.0 or f_gross <= 0.0 or b_gross <= 0.0:
+            payload["unmeasured"].append(fold.fold_index)
+            payload["folds"][fold.fold_index] = {
+                "holdings_log_ratio": None,
+                "gross_log_ratio": None,
+                "fold": fold_trace,
+                "blend": blend_trace,
+            }
+            continue
+        holdings_log_ratio = float(np.log(f_holdings / b_holdings))
+        gross_log_ratio = float(np.log(f_gross / b_gross))
+        payload["folds"][fold.fold_index] = {
+            "holdings_log_ratio": holdings_log_ratio,
+            "gross_log_ratio": gross_log_ratio,
+            "fold": fold_trace,
+            "blend": blend_trace,
+        }
+        max_abs_holdings = max(max_abs_holdings, abs(holdings_log_ratio))
+        max_abs_gross = max(max_abs_gross, abs(gross_log_ratio))
+    payload["max_abs_log_holdings_ratio"] = max_abs_holdings
+    payload["max_abs_log_gross_ratio"] = max_abs_gross
+    reason_codes = (
+        (MHS_GO_REASON_PATH_DIVERGENCE,)
+        if max_abs_holdings > tolerance or max_abs_gross > tolerance
+        else ()
+    )
+    return payload, reason_codes
 
 
 def _trend_efficiency_overlay_scale(
@@ -2830,7 +2964,7 @@ def _book_outcome(
     initial_equity: float,
     replay_weights_step: pd.DataFrame | None = None,
     telemetry: _StageRecorder | None = None,
-) -> MhsBookReport:
+) -> tuple[MhsBookReport, dict[int, dict[str, float]]]:
     weights_1h = weights_step.reindex(grid_1h).ffill().fillna(0.0)
     cost_grid = tuple(dict.fromkeys((0.0, 2.0, 4.0, 8.0, *required_cost_tiers())))
     reference_evidence = book_evidence(
@@ -2871,7 +3005,18 @@ def _book_outcome(
             target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
         )
     else:
-        target_weights = _apply_rebalance_deadband(target_weights, MHS_REBALANCE_MIN_NOTIONAL_DELTA)
+        target_weights = _apply_rebalance_deadband(target_weights)
+    blend_traces: dict[int, dict[str, float]] = {}
+    if name == "blend":
+        blend_traces = {
+            idx: _book_structure_trace(
+                target_weights.loc[
+                    (target_weights.index >= fold.validation_start)
+                    & (target_weights.index <= fold.validation_end)
+                ]
+            )
+            for idx, fold in enumerate(phase_1_anchored_purged_folds())
+        }
     signal_available_at = step_grid + pd.Timedelta(hours=1)
     execution_grid = pd.date_range(
         start, end,
@@ -3036,7 +3181,7 @@ def _book_outcome(
             executed_prescreen=executed_prescreen,
             executed_tail=executed_tail,
             executed_prescreen_net_t=executed_prescreen_net_t,
-        )
+        ), blend_traces
     equity_1h, net_returns_1h, turnover_1h = _hourly_ledger_series(
         primary.ledger.equity, primary.ledger.fill_turnover,
     )
@@ -3078,7 +3223,7 @@ def _book_outcome(
         primary_fill_count=primary.fill_count,
         primary_unfilled_count=primary.unfilled_count,
         primary_forced_exit_notional=primary.forced_exit_notional,
-    )
+    ), blend_traces
 
 
 def _book_outcome_worker(
@@ -3090,13 +3235,14 @@ def _book_outcome_worker(
     start: pd.Timestamp,
     end: pd.Timestamp,
     initial_equity: float,
-) -> tuple[MhsBookReport, tuple[MhsResourceMeasurement, ...]]:
+) -> tuple[MhsBookReport, tuple[MhsResourceMeasurement, ...], dict[int, dict[str, float]]]:
     """Run one ``_book_outcome`` in a fork child with its own telemetry recorder.
 
     The typed failure conversion inside ``_book_outcome`` is preserved; a book
     that fails its replay is still returned (with ``failure`` set) so the other
-    two books' results are never lost.  The per-window telemetry is returned so
-    the parent can merge it in declared order.
+    two books' results are never lost.  The per-window telemetry and the blend
+    book's post-deadband structure trace are returned so the parent can merge
+    them in declared order.
 
     The book's spec/grids/weights/phase and the shared 1h panels and funding
     series are resolved from the fork-shared payload by ``token`` (registered via
@@ -3106,13 +3252,13 @@ def _book_outcome_worker(
     shared = resolve_fork_shared(token)
     spec, step_grid, weights_step, phase, event_window_bars, replay_weights_step = shared["books"][name]
     recorder = _StageRecorder(log_run=False)
-    report = _book_outcome(
+    report, blend_traces = _book_outcome(
         name, spec, n_symbols, step_grid, weights_step, shared["grid_1h"],
         shared["opens"], shared["bar_funding"], phase, root, request,
         shared["funding_by_symbol"], start, end, event_window_bars, initial_equity,
         replay_weights_step, telemetry=recorder,
     )
-    return report, recorder.records
+    return report, recorder.records, blend_traces
 
 
 def _active_blend_book_and_grid(
@@ -3168,7 +3314,7 @@ def _run_books_concurrent(
     telemetry: _StageRecorder | None = None,
     regime_scale: pd.Series | None = None,
     committee_execution_book: pd.DataFrame | None = None,
-) -> tuple[MhsBookReport, MhsBookReport, MhsBookReport]:
+) -> tuple[MhsBookReport, MhsBookReport, MhsBookReport, dict[int, dict[str, float]]]:
     """Run the three top-level books concurrently in fork children.
 
     The books share zero mutable state and only read the immutable 1h panels and
@@ -3236,14 +3382,14 @@ def _run_books_concurrent(
             _book_outcome_worker,
             "blend", token, n_symbols, root, request, start, end, initial_equity,
         )
-        fast_report, fast_records = f_fast.result()
-        slow_report, slow_records = f_slow.result()
-        blend_report, blend_records = f_blend.result()
+        fast_report, fast_records, _fast_traces = f_fast.result()
+        slow_report, slow_records, _slow_traces = f_slow.result()
+        blend_report, blend_records, blend_traces = f_blend.result()
 
     if telemetry is not None:
         for records in (fast_records, slow_records, blend_records):
             telemetry.absorb(records)
-    return fast_report, slow_report, blend_report
+    return fast_report, slow_report, blend_report, blend_traces
 
 
 def _run_post_diag_deploy(
@@ -3799,9 +3945,7 @@ def _build_fold_target_weights(
             target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
         ).mul(regime_scale, axis=0)
     else:
-        target_weights = _apply_rebalance_deadband(
-            target_weights.mul(regime_scale, axis=0), MHS_REBALANCE_MIN_NOTIONAL_DELTA,
-        )
+        target_weights = _apply_rebalance_deadband(target_weights.mul(regime_scale, axis=0))
 
     if target_weights.empty:
         raise RuntimeError("fold decision grid is empty")
@@ -4225,6 +4369,7 @@ def _run_anchored_fold(
             funding_carry_vs_slow_momentum_daily_corr=(
                 funding_carry_override[3] if funding_carry_override is not None else None
             ),
+            book_structure=_book_structure_trace(target_weights),
         )
     except DataIntegrityError as exc:
         return _incomplete_fold_report(fold, fold_index, (_classify_execution_failure(exc),))
@@ -4357,6 +4502,7 @@ def _deflated_sharpe_evidence(
 def _mhs_research_go(
     folds: tuple[MhsFoldReport, ...],
     book_reasons: tuple[str, ...] = (),
+    extra_reasons: tuple[str, ...] = (),
 ) -> MhsResearchGoResult:
     """Fail-closed top-level Research-GO decision from fold and book evidence.
 
@@ -4365,11 +4511,13 @@ def _mhs_research_go(
     Sharpe each block the decision with a stable reason code. A book-level
     strict replay rejection (capital invariant breach, execution gap, invalid
     primary, or resource-budget breach) is aggregated with the fold reasons.
-    The cap-30 roster and primary annual-return gate thresholds live in
-    ``MHS_REGISTERED_POLICY_THRESHOLDS``; while any is unregistered (``None``)
-    the decision reports ``UNSPECIFIED_POLICY`` and stays conservative (false).
+    ``extra_reasons`` carries observational gate codes (e.g. fold/blend path
+    divergence) surfaced by report assembly. The cap-30 roster and primary
+    annual-return gate thresholds live in ``MHS_REGISTERED_POLICY_THRESHOLDS``;
+    while any is unregistered (``None``) the decision reports
+    ``UNSPECIFIED_POLICY`` and stays conservative (false).
     """
-    reasons: list[str] = list(book_reasons)
+    reasons: list[str] = [*book_reasons, *extra_reasons]
     passed = 0
     for fold_report in folds:
         if fold_report.strict is None:
@@ -4868,7 +5016,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         # books run concurrently in fork children (spec Phase 3, P10) with a
         # fraction of the former resident set.
         _prewarm_mark_frames(execution_symbols)
-        book_report_fast, book_report_slow, book_report_blend = _run_books_concurrent(
+        book_report_fast, book_report_slow, book_report_blend, blend_traces = _run_books_concurrent(
             root, request, len(funded), grid_1h, fast, slow, fast_grid, slow_grid,
             w_fast, w_slow, w_fast_execution, w_slow_execution, opens, bar_funding,
             phase_fast, phase_slow, phase_blend, start, end, funding_by_symbol,
@@ -4889,6 +5037,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     else:
         books = {}
         blend_report = None
+        blend_traces = {}
 
     book_reasons = tuple(
         sorted(
@@ -4967,7 +5116,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     deflated_sharpe_ratio = _deflated_sharpe_evidence(
         blend_report, folds, trials_attempted,
     )
-    research_go = _mhs_research_go(folds, book_reasons)
+    fold_blend_parity, parity_reasons = _fold_blend_parity(blend_traces, folds)
+    research_go = _mhs_research_go(folds, book_reasons, parity_reasons)
 
     if blend_report is not None and blend_report.primary is not None:
         if minute_grid is None:
@@ -5053,6 +5203,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         multi_feature_diagnostic=multi_feature_diagnostic,
         committee_diagnostic=committee_diagnostic,
         funding_dropped_symbols=funding_dropped or None,
+        fold_blend_parity=fold_blend_parity,
     )
 
 
@@ -5217,6 +5368,7 @@ def build_mhs_run_history_record(
             "scale_go_eligible": report.deployment_readiness.scale_go_eligible,
         },
         "termination_counts": report.termination_counts,
+        "fold_blend_parity": report.fold_blend_parity,
         "report_path": str(persisted_path) if persisted_path is not None else None,
     }
     return cast(dict[str, Any], _round_6(_jsonable(record)))
