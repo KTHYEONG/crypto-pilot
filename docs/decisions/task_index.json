@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FOLD_REGIME_CHARACTERIZATION",
+      "date": "2026-08-18",
+      "adr_id": "ADR_20260818_MHS_FOLD_REGIME_CHARACTERIZATION",
+      "domain": "quant",
+      "title": "MHS 폴드 레짐 특성화 진단 필드 추가",
+      "why": "committee_capital 블렌드 위 리스크/알파 레버 6건(방향성 크래시 틸트 2변형, 리밸런스 필터, 베타 직교화, 펀딩 극단치 축소, committee 6번째 멤버 rev_24h)과 이전 세션 trend_efficiency_overlay가 전부 fold 1(2024)을 동일한 방향(stress Sharpe 붕괴)으로 파괴 -- 실측으로 fold 1이 최고변동성·최저휩쏘율의 진짜 상승장임을 확인. 향후 탐색이 이미 낙제한 가설을 맹목적으로 재시도하지 않도록 fold별 레짐을 영구 기록할 필요.",
+      "resolution": "MhsFoldReport에 report-only regime_characterization 필드 추가(_regime_reference_characterization 순수함수 + _fold_regime_characterization I/O 래퍼, BTCUSDT 1h close를 fold 검증구간만 인과적으로 읽음). 트레이딩 로직/게이트에는 절대 관여하지 않음. dataclasses.asdict 자동 직렬화로 별도 payload 배선 불필요. negative-result 문서에 6번째(rev_24h) 부정 결과 추가.",
+      "impact": "ruff/mypy clean, 신규 시나리오 6건 전부 통과. 기존 실패(test_mhs_diagnostic_3m_replay_end_to_end)는 git stash로 원본 baseline에서도 동일 재현 확인 -- 본 변경과 무관."
+    },
+    {
       "task_id": "TASK_MHS_FOLD0_FORCED_EXIT_DUST_TOLERANCE",
       "date": "2026-08-18",
       "adr_id": "ADR_20260818_MHS_FOLD0_FORCED_EXIT_DUST_TOLERANCE",
@@ -989,16 +999,6 @@
       "why": "v6 is now the first profile besides v2 admitted end-to-end (discovery+qualification+holdout+stress) and resolves v2's known qualification/stress weaknesses. Researchers running xs-screen with no --profile flag should see the strongest current evidence by default, scoped strictly to the CLI layer per explicit user confirmation (not a production/live-capital promotion -- no such registration pipeline exists in this codebase).",
       "resolution": "Changed single_technical.py::_run_xs_trend_screen's fallback from 'profile = args.profile or XS_NEUTRAL_PROFILE_ID' to 'profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID'. Left run_xs_trend_screen's own library default and xs_screen_report_path's default untouched. Updated the one existing test whose no-flag assertions depended on the old default (test_xs_screen_cli_parses_and_dispatches).",
       "impact": "xs-screen with no --profile now dispatches xs_alpha_vol_weighted_v6 and persists to docs/results/xs_alpha_vol_weighted_v6.json; xs_neutral_composite_v1 remains fully reachable via explicit --profile. All 5 xs-screen CLI tests and all 30 xs_trend_screen orchestration tests pass; ruff/mypy clean. No change to any research profile's evidence, no production/capital-allocation impact (no such pipeline exists yet)."
-    },
-    {
-      "task_id": "TASK_XS_ALPHA_VOL_WEIGHTED_V6",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_XS_ALPHA_VOL_WEIGHTED_V6",
-      "domain": "futures",
-      "title": "XS alpha causal inverse-vol family tilt (v6) — first candidate to beat v2, holdout confirmed",
-      "why": "Three consecutive attempts to beat xs_alpha_multihorizon_v2 (v3 hard-switch routing, v4 score-layer routing, v5 permanent funding_contrarian removal) all used a binary allocation mechanism and all failed. v2 itself sits at the opposite fixed-equal-weight extreme and was known to lose 0.495 Sharpe from discovery to qualification. The untried middle ground was a continuous, always-diversified tilt driven by each family's own trailing realized risk.",
-      "resolution": "Added _causal_family_inverse_vol_weights (causal trailing 1/std weighting over alpha_spec.signal_windows[0]=42 bars, no new tunable, equal-weight 1/3 fallback never CASH) and build_xs_alpha_vol_weighted_weights (sources vol from standalone net realized returns via run_xs_composite_ledger, not raw score dispersion) in cross_sectional.py; wired XS_VOL_WEIGHTED_ALPHA_PROFILE_ID through xs_trend_screen.py and the CLI allowlist in single_technical.py, mirroring v2-v5's dispatch pattern.",
-      "impact": "Discovery Sharpe 1.28 (t=1.70), qualification Sharpe 1.33 (t=1.89, both 2024/2025 sub-years strongly positive), stress-qualification 1.23 -- all admitted with turnover ~23x/yr (lower than v2's 24.6-27.2x). Single confirmatory holdout unseal: 2026 YTD Sharpe 1.73 (CAGR 28.3%, MDD -8.2%, shallower than v2's -12.9%), stress-holdout 1.86, both admitted. v6 is the first profile after v2 to clear every window (discovery+qualification+holdout+stress); v2's known qualification-vs-discovery Sharpe loss and stress sensitivity are resolved. v2 holdout Sharpe (1.95) remains nominally higher, but v6 wins decisively on qualification robustness and drawdown. Holdout is now spent for v6 -- no further re-tuning against this result."
     }
   ]
 }
