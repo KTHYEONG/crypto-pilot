@@ -127,6 +127,7 @@ def _synthetic_roster_targets(
     return w
 
 
+@pytest.mark.slow
 class TestMemoryBudget:
     """SCENARIO_MHS_HORIZON_OPT_MEMORY: RSS stays below the configured budget
     across all evaluation windows and the fold completes without a resource
@@ -203,6 +204,7 @@ class TestSignalQualityMechanisms:
         assert float(scale.max()) <= 1.0
         assert float(scale.min()) >= ev.MHS_REGIME_CASH_SCALE_FLOOR
 
+    @pytest.mark.slow
     def test_fold_quality_metrics_finite_from_valid_primary(self, fold_market, funding) -> None:
         root, end = fold_market
         report = _run_anchored_fold(
@@ -336,6 +338,7 @@ class TestMhsEvalIntegrity:
         assert all(v == 0.0 for v in empty.values())
 
 
+@pytest.mark.slow
 class TestFoldIntegrity:
     """SCENARIO_MHS_HORIZON_OPT_INTEGRITY: folds run in isolation with valid
     primary ledgers and the persisted ledger artifact is verified fail-closed."""
@@ -395,3 +398,93 @@ class TestMhsPerfOptimizationPhase2EndToEnd:
         assert "SCENARIO_PHASE2_END_TO_END" in {
             "SCENARIO_PHASE2_END_TO_END"
         }
+
+
+class TestRegimeCharacterization:
+    """SCENARIO_MHS_REGIME_CHARACTERIZATION_*: pure-function and I/O wrapper tests."""
+
+    def test_regime_reference_characterization_trending_uptrend(self) -> None:
+        # SCENARIO_MHS_REGIME_CHARACTERIZATION_UPTREND: monotonic uptrend yields
+        # positive total_return, near-zero flip rate, finite positive vol.
+        idx = pd.date_range("2021-01-01", periods=200, freq="1h", tz="UTC")
+        prices = 100.0 * np.exp(np.linspace(0, 0.5, 200))
+        close = pd.Series(prices, index=idx)
+        result = ev._regime_reference_characterization(close)
+        assert result is not None
+        assert result["total_return"] > 0
+        assert result["direction_flip_rate_24h"] < 0.05
+        assert np.isfinite(result["annualized_realized_vol"])
+        assert result["annualized_realized_vol"] > 0
+
+    def test_regime_reference_characterization_choppy_alternating(self) -> None:
+        # SCENARIO_MHS_REGIME_CHARACTERIZATION_CHOPPY: construct price[t] via a
+        # 24-bar-lag recursion (price[t] = price[t-24] * (1 +/- 5%), sign
+        # alternating every t) so pct_change(24)'s sign flips EVERY bar by
+        # construction -- a period-24-in-the-trend sawtooth (the original
+        # construction) only flips the rolling-24h return's sign once per
+        # 24-bar half-cycle, not every bar.
+        idx = pd.date_range("2021-01-01", periods=200, freq="1h", tz="UTC")
+        prices = [100.0] * 24
+        for t in range(24, 200):
+            sign = 1.0 if t % 2 == 0 else -1.0
+            prices.append(prices[t - 24] * (1.0 + sign * 0.05))
+        close = pd.Series(prices, index=idx)
+        result = ev._regime_reference_characterization(close)
+        assert result is not None
+        assert result["direction_flip_rate_24h"] > 0.9
+
+    def test_regime_reference_characterization_too_short_returns_none(self) -> None:
+        # SCENARIO_MHS_REGIME_CHARACTERIZATION_TOO_SHORT: fewer than 49 bars
+        # returns None, not a dict with NaN values.
+        idx = pd.date_range("2021-01-01", periods=30, freq="1h", tz="UTC")
+        close = pd.Series(100.0 + np.arange(30), index=idx)
+        result = ev._regime_reference_characterization(close)
+        assert result is None
+
+    def test_fold_regime_characterization_missing_reference_returns_none(self, tmp_path) -> None:
+        # SCENARIO_MHS_FOLD_REGIME_CHARACTERIZATION_MISSING_REFERENCE: missing
+        # BTCUSDT.parquet yields None, not an exception.
+        root = tmp_path / "market"
+        (root / "1h").mkdir(parents=True)
+        fold = ev.AnchoredPurgedFold(
+            pd.Timestamp("2021-01-01", tz="UTC"),
+            pd.Timestamp("2021-01-31", tz="UTC"),
+            pd.Timestamp("2021-02-10", tz="UTC"),
+            pd.Timestamp("2021-04-19 08:00", tz="UTC"),
+            168,
+            168,
+        )
+        result = ev._fold_regime_characterization(str(root), fold)
+        assert result is None
+
+    def test_fold_regime_characterization_reads_only_validation_window(self, tmp_path) -> None:
+        # SCENARIO_MHS_FOLD_REGIME_CHARACTERIZATION_READS_ONLY_VALIDATION_WINDOW:
+        # synthetic parquet with flat train + trending validation; returned
+        # stats match validation-only slice, not full train+validation.
+        root = tmp_path / "market"
+        (root / "1h").mkdir(parents=True)
+        train_start = pd.Timestamp("2021-01-01", tz="UTC")
+        train_end = pd.Timestamp("2021-01-31", tz="UTC")
+        val_start = pd.Timestamp("2021-02-10", tz="UTC")
+        val_end = pd.Timestamp("2021-04-19 08:00", tz="UTC")
+        fold = ev.AnchoredPurgedFold(train_start, train_end, val_start, val_end, 168, 168)
+        # Build synthetic data: flat in train, sharply trending in validation
+        train_hours = pd.date_range(train_start, train_end, freq="1h", tz="UTC")
+        val_hours = pd.date_range(val_start, val_end, freq="1h", tz="UTC")
+        all_hours = train_hours.append(val_hours)
+        train_prices = [100.0] * len(train_hours)
+        val_prices = np.linspace(100, 200, len(val_hours)).tolist()
+        all_prices = train_prices + val_prices
+        epoch_ms = ((all_hours - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")).tolist()
+        df = pd.DataFrame({"timestamp": epoch_ms, "open": all_prices, "high": all_prices,
+                           "low": all_prices, "close": all_prices, "quote_vol": [1000.0] * len(all_hours)})
+        df.to_parquet(root / "1h" / "BTCUSDT.parquet", index=False)
+        result = ev._fold_regime_characterization(str(root), fold)
+        assert result is not None
+        # Compute expected values from validation-only slice
+        val_arr = np.array(val_prices, dtype="float64")
+        val_ret = np.log(val_arr)
+        ann_vol = float(np.std(np.diff(val_ret), ddof=1) * np.sqrt(24 * 365))
+        total_ret = float(val_arr[-1] / val_arr[0] - 1.0)
+        assert result["annualized_realized_vol"] == pytest.approx(ann_vol, rel=1e-6)
+        assert result["total_return"] == pytest.approx(total_ret, rel=1e-6)
