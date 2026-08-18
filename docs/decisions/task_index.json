@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260818_MHS_PNL_VOL_TARGET_ROLLING_MEDIAN",
+      "date": "2026-08-18",
+      "adr_id": "ADR_20260818_MHS_PNL_VOL_TARGET_ROLLING_MEDIAN",
+      "domain": "mhs",
+      "title": "MHS PnL-Vol-Target 벤치마크 비정상성 오류 수정 — expanding median → 365d rolling median",
+      "why": "_pnl_vol_target_scale가 expanding(min_periods=90).median()으로 2021년 이후 전체 이력을 영구 기억 — 형제 메커니즘 _regime_cash_scale은 이미 rolling(720h)를 쓰는데(파일 내 유일한 .expanding( 호출) 이 함수만 예외. 실측 결과 벤치마크가 2021~2023 평온기에 영구 고정되어 전략이 가장 잘 작동한 2025년(fold2 autocorr Sharpe 3.14)에 평균 scale이 0.899(2021)->0.623(2025)로 가장 세게 억제됨. --no-pnl-vol-target/regime_scale=1.0 고정 두 대안가설 모두 ablation 실측으로 기각(현재 Calmar 2.71이 최선)하여 releveraging이 아닌 순수 정합성 버그로 확정.",
+      "resolution": "MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS=365 신설, expanding_target을 rolling_target(median_window_days, min_periods=BURN_IN)으로 교체. window_days<BURN_IN_DAYS일 때 fail-closed ValueError 추가. 기존 2개 호출부(top-level blend, per-fold)는 신규 파라미터 기본값 덕에 무변경. 180d~1095d 스윕에서 in-sample argmax(180d)가 아닌 Barroso&Santa-Clara 표준 1년 창을 채택해 과적합 회피. 단위테스트 4건 신규(적응성/burn-in 항등성/검증/회귀없음) + 기존 9건 전부 그린.",
+      "impact": "실측 재검증(파일 최종 저장 이후 재실행): CAGR 33.45%->34.69%(+1.24%p), MDD -12.35%->-12.28%(사실상 불변), Calmar 2.71->2.83 — spec 예측치(+1.1%p CAGR, Calmar 2.88)와 근접 일치, MDD 불변이면서 CAGR·Calmar 동시개선(risk/return trade-off 아닌 순수 정합성 개선 신호). check 단계에서 파일 mtime보다 앞선 4회 검증 실행이 전부 픽스 이전 코드를 테스트한 허위경보였음을 확인 후 재실행으로 해소."
+    },
+    {
       "task_id": "ADR_20260818_MHS_REBALANCE_DEADBAND_SCALE_RELATIVE",
       "date": "2026-08-18",
       "adr_id": "ADR_20260818_MHS_REBALANCE_DEADBAND_SCALE_RELATIVE",
@@ -989,16 +999,6 @@
       "why": "v2's equal-weight 3-family blend carried funding_contrarian, which independently fails its own standalone admission gate (t=0.99, negative 2022 sub-year). v3/v4 tried fixing this via regime routing (v3 catastrophic turnover, v4 turnover-repaired but still discovery-sharpe_floor short). v5 tested the untried deterministic lever: drop the standalone-failing family entirely, equal-weight trend+taker_imbalance only, no routing.",
       "resolution": "Added build_xs_alpha_dual_family_weights (cross_sectional.py), XS_DUAL_FAMILY_ALPHA_PROFILE_ID profile wiring (xs_trend_screen.py), and fixed a pre-existing CLI reachability gap where the xs-screen command allowlist never included v3/v4 (single_technical.py). Ran the sealed discovery+qualification screen on real data.",
       "impact": "Discovery admitted (Sharpe 1.29, t=1.71) but qualification (OOS 2024-2025) FAILED: Sharpe fell to 0.53 with 2024 turning Sharpe-negative (-0.185), tripping annual_sub_sharpe;sharpe_floor. Hypothesis disproved -- funding_contrarian's pooled-diagnostic weakness masked a real 2024 OOS diversification contribution that trend+taker_imbalance alone did not replace. xs_alpha_multihorizon_v2 remains the only profile admitted end-to-end (incl. unsealed 2026 holdout, Sharpe 1.95); three consecutive next-step attempts (v3 routing, v4 routing, v5 composition) have all failed to beat it. Holdout correctly stayed sealed (qualification gate not cleared)."
-    },
-    {
-      "task_id": "TASK_XS_ALPHA_SCORE_ROUTED_V4",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_XS_ALPHA_SCORE_ROUTED_V4",
-      "domain": "futures",
-      "title": "XS alpha score-routed contextual router (v4) turnover repair",
-      "why": "xs_alpha_contextual_v3's hard weight-layer family switching produced catastrophic turnover (216.5x/293.6x per year) and failed both discovery and qualification; empirical decomposition showed ~97% of turnover came from CASH/family transitions bypassing the EWMA/no-trade-band pipeline that bounds v2 and every standalone family (2.9-3.3% same-family drift only).",
-      "resolution": "Relocated the same causal six-state LCB family selection from the post-normalized weight layer to the pre-normalization score layer: build_xs_causal_score_selection now selects among raw per-family composite scores and feeds the combined row through build_xs_neutral_weights exactly once (shared halflife=6/band=0.05), reusing the extracted _causal_family_lcb_selection core for both the legacy weight-layer router and the new score-layer router.",
-      "impact": "Turnover normalized to 34.1x/42.8x per year (from 216.5x/293.6x), clearing turnover_max and cost_breakeven_min in both windows -- confirms the root-cause diagnosis. Qualification (OOS) now admits: Sharpe 0.964, t=1.36, CAGR 17.8%. Discovery still fails sharpe_floor (Sharpe 0.684, t=0.90) driven by a weak 2022 sub-year (Sharpe 0.29 vs 2023's 0.94); v4 is not promotable yet. Selection frequency (CASH ~55%, remaining split across 3 families) is essentially unchanged from v3, isolating the fix to turnover mechanics only, as intended."
     }
   ]
 }
