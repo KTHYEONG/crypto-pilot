@@ -53,6 +53,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         committee_capital=committee_capital,
         committee_tranche_smoothing=args.committee_tranche_smoothing,
         committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
+        committee_target_gross=args.committee_target_gross,
         execution_coverage_gate=args.execution_coverage_gate,
         ram_guard=not args.no_ram_guard,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
@@ -247,6 +248,30 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "reusing src.research.risk.growth_sizing -- the same framework already "
             "used for xs_alpha); observational only, never feeds back into sizing "
             "or capital allocation"
+        ),
+    )
+    mhs.add_argument(
+        "--committee-target-gross",
+        type=float,
+        default=None,
+        help=(
+            "Opt-in, requires committee capital (on by default): rescales every "
+            "committee decision row to an explicit gross, restoring the unit-gross "
+            "invariant that the k=5 member average and the tranche mean otherwise "
+            "dilute to ~0.53 (47% idle cash); default None keeps the diluted book "
+            "byte-identical; a risk-budget policy value, never a fitted parameter. "
+            "RECOMMENDED: 0.795 -- full continuous 2021-2025 replay measured CAGR "
+            "34.7%->57.0% at MDD -19.5% (Calmar 2.83->2.93), inside the registered "
+            "MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget, no borrowing, "
+            "blend.failure=None. DO NOT approach 1.0: a binary search on the same "
+            "replay found a capital-invariant cliff at gross in [0.9039, 0.9071] "
+            "(CAPITAL_INVARIANT_BREACH, negative/non-finite equity) -- every "
+            "anchored FOLD still passes individually at the breach point (folds "
+            "replay independently, ~1yr each) while the unbroken multi-year replay "
+            "collapses, so per-fold GO evidence cannot certify this parameter; only "
+            "a full continuous replay can. 0.795 sits well clear of that cliff; "
+            "values above ~0.85 must be re-verified by rerunning this diagnostic "
+            "and checking blend.failure is None before use"
         ),
     )
     mhs.add_argument(
