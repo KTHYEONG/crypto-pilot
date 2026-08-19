@@ -17,6 +17,7 @@ from src.mhs.committee import (
     long_only_equal_risk_weights,
     purged_walk_forward,
     score_weighted_net,
+    train_evidence_weights,
     volatility_target_scale,
     wealth_metrics,
 )
@@ -458,3 +459,91 @@ def test_committee_block_edges_from_anchored_at_oos_start() -> None:
             MHS_COMMITTEE_OOS_START,
             pd.Timestamp("2022-01-01", tz="UTC"),
         )
+
+
+# ---------------------------------------------------------------------------
+# train_evidence_weights tests
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_weights_favor_stronger_member() -> None:
+    rng = np.random.default_rng(42)
+    n = 200
+    idx = pd.date_range("2022-01-01", periods=n, freq="1h", tz="UTC")
+    train_mask = pd.Series(True, index=idx)
+
+    strong = pd.Series(rng.normal(0.01, 0.01, n), index=idx)
+    weak = pd.Series(rng.normal(0.0005, 0.01, n), index=idx)
+    noise = pd.Series(rng.normal(0.0, 0.01, n), index=idx)
+
+    weights = train_evidence_weights(
+        {"strong": strong, "weak": weak, "noise": noise}, train_mask,
+    )
+    assert weights["strong"] > weights["weak"] > weights["noise"]
+    assert all(w >= 0.0 for w in weights.values())
+    assert sum(weights.values()) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_evidence_weights_fail_closed_to_equal() -> None:
+    rng = np.random.default_rng(7)
+    n = 200
+    idx = pd.date_range("2022-01-01", periods=n, freq="1h", tz="UTC")
+    train_mask = pd.Series(True, index=idx)
+
+    neg1 = pd.Series(rng.uniform(-0.01, -0.005, n), index=idx)
+    neg2 = pd.Series(rng.uniform(-0.02, -0.01, n), index=idx)
+    neg3 = pd.Series(rng.uniform(-0.03, -0.02, n), index=idx)
+    w = train_evidence_weights({"a": neg1, "b": neg2, "c": neg3}, train_mask)
+    assert w["a"] == pytest.approx(1 / 3, abs=1e-12)
+    assert w["b"] == pytest.approx(1 / 3, abs=1e-12)
+    assert w["c"] == pytest.approx(1 / 3, abs=1e-12)
+
+    short_mask = pd.Series([True] * 5 + [False] * (n - 5), index=idx)
+    w2 = train_evidence_weights(
+        {"a": pd.Series(0.001, index=idx), "b": pd.Series(0.002, index=idx)},
+        short_mask,
+        min_train_rows=30,
+    )
+    assert w2["a"] == pytest.approx(0.5, abs=1e-12)
+    assert w2["b"] == pytest.approx(0.5, abs=1e-12)
+
+
+def test_evidence_weights_are_causal() -> None:
+    rng = np.random.default_rng(99)
+    n = 200
+    idx = pd.date_range("2022-01-01", periods=n, freq="1h", tz="UTC")
+    train_end = idx[150]
+    train_mask = pd.Series(idx < train_end, index=idx)
+
+    a = pd.Series(rng.normal(0.01, 0.01, n), index=idx)
+    b = pd.Series(rng.normal(0.005, 0.01, n), index=idx)
+    original = train_evidence_weights({"a": a, "b": b}, train_mask)
+
+    a_polluted = a.copy()
+    a_polluted.iloc[150:] = 1e6
+    a_polluted.iloc[160] = float("nan")
+    b_polluted = b.copy()
+    b_polluted.iloc[150:] = -1e6
+    polluted = train_evidence_weights({"a": a_polluted, "b": b_polluted}, train_mask)
+    assert original == polluted
+
+
+def test_evidence_weights_reject_invalid_input() -> None:
+    idx = pd.date_range("2022-01-01", periods=100, freq="1h", tz="UTC")
+    mask = pd.Series(True, index=idx)
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        train_evidence_weights({}, mask)
+    with pytest.raises(ValueError, match="min_train_rows"):
+        train_evidence_weights({"a": pd.Series(1.0, index=idx)}, mask, min_train_rows=0)
+
+    nan_series = pd.Series(float("nan"), index=idx)
+    flat_series = pd.Series(1.0, index=idx)
+    neg_series = pd.Series(-0.01, index=idx)
+    w = train_evidence_weights(
+        {"nan_col": nan_series, "flat": flat_series, "neg": neg_series}, mask, min_train_rows=30,
+    )
+    assert w["nan_col"] == pytest.approx(1 / 3, abs=1e-12)
+    assert w["flat"] == pytest.approx(1 / 3, abs=1e-12)
+    assert w["neg"] == pytest.approx(1 / 3, abs=1e-12)
+    assert sum(w.values()) == pytest.approx(1.0, abs=1e-12)
