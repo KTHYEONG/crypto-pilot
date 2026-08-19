@@ -20,6 +20,7 @@ _logger = logging.getLogger("MhsHorizonDiagnosticCli")
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     from src.application.research.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
     from src.application.research.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report, run_mhs_horizon_diagnostic
+    from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS
 
     fold_safe_horizon = args.fold_safe_horizon
     # Main-logic default: committee_capital + regime-adaptive tranche is the
@@ -33,6 +34,17 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         committee_capital
         and not args.no_committee_regime_adaptive_tranche
         and not args.committee_tranche_smoothing
+    )
+    # The registered exposure constant is the default; --no-committee-target-gross
+    # restores the diluted book (None).
+    committee_target_gross = (
+        None
+        if args.no_committee_target_gross
+        else (
+            MHS_COMMITTEE_TARGET_GROSS
+            if args.committee_target_gross is None
+            else args.committee_target_gross
+        )
     )
     request = MhsDiagnosticRequest(
         start=args.start,
@@ -53,7 +65,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         committee_capital=committee_capital,
         committee_tranche_smoothing=args.committee_tranche_smoothing,
         committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
-        committee_target_gross=args.committee_target_gross,
+        committee_target_gross=committee_target_gross,
         committee_evidence_weighting=args.committee_evidence_weighting,
         execution_coverage_gate=args.execution_coverage_gate,
         ram_guard=not args.no_ram_guard,
@@ -256,23 +268,31 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         type=float,
         default=None,
         help=(
-            "Opt-in, requires committee capital (on by default): rescales every "
-            "committee decision row to an explicit gross, restoring the unit-gross "
-            "invariant that the k=5 member average and the tranche mean otherwise "
-            "dilute to ~0.53 (47% idle cash); default None keeps the diluted book "
-            "byte-identical; a risk-budget policy value, never a fitted parameter. "
-            "RECOMMENDED: 0.795 -- full continuous 2021-2025 replay measured CAGR "
-            "34.7%->57.0% at MDD -19.5% (Calmar 2.83->2.93), inside the registered "
-            "MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget, no borrowing, "
-            "blend.failure=None. DO NOT approach 1.0: a binary search on the same "
-            "replay found a capital-invariant cliff at gross in [0.9039, 0.9071] "
-            "(CAPITAL_INVARIANT_BREACH, negative/non-finite equity) -- every "
-            "anchored FOLD still passes individually at the breach point (folds "
-            "replay independently, ~1yr each) while the unbroken multi-year replay "
-            "collapses, so per-fold GO evidence cannot certify this parameter; only "
-            "a full continuous replay can. 0.795 sits well clear of that cliff; "
-            "values above ~0.85 must be re-verified by rerunning this diagnostic "
-            "and checking blend.failure is None before use"
+            "Requires committee capital (on by default): rescales every "
+            "committee decision row to an explicit gross, restoring the "
+            "unit-gross invariant that the k=5 member average and the tranche "
+            "mean otherwise dilute to ~0.53 (47% idle cash). DEFAULT (flag "
+            "omitted): the registered MHS_COMMITTEE_TARGET_GROSS=0.92, the "
+            "largest replay-certified exposure inside the registered "
+            "MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget (certified point "
+            "0.9231: CAGR 0.6996 / MDD -0.2311 / Calmar 3.03 / stress Sharpe "
+            "1.34, 3/3 anchored folds); the I4 drawdown-budget gate blocks "
+            "Research-GO if a replay breaches the budget. Pass "
+            "--no-committee-target-gross to restore the diluted book "
+            "(None). The old CLI 'capital-invariant cliff at gross ~0.9039-0.9071' "
+            "was the ruin of a diagnostic reference instrument (OHLCV_STRICT_PROXY), "
+            "not of the capital book, and is no longer a reason to avoid 0.92; "
+            "a risk-budget policy value, never a fitted parameter"
+        ),
+    )
+    mhs.add_argument(
+        "--no-committee-target-gross",
+        action="store_true",
+        default=False,
+        help=(
+            "Keep the diluted committee book (committee_target_gross=None): "
+            "the k=5 member average and tranche mean are left un-rescaled. "
+            "Overrides the registered default exposure"
         ),
     )
     mhs.add_argument(

@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_GROWTH_EXPOSURE_BUDGET",
+      "date": "2026-08-19",
+      "adr_id": "ADR_20260819_MHS_GROWTH_EXPOSURE_BUDGET",
+      "domain": "quant",
+      "title": "MHS 위원회 노출 예산 복원 및 참조전용 바운드 격리",
+      "why": "docs/results/mhs_run_history 34개 런 분석 결과 xs_rank_ic는 전 런 동일(-0.0409)한데 --committee-target-gross를 0.907 이상으로 올리면 매번 CAPITAL_INVARIANT_BREACH로 blend 전체가 폐기됨. scratch/diag_capital_cliff.py로 재현한 결과 파산 원인은 자본을 싣는 OHLCV_IMMEDIATE_TAKER 북이 아니라 참고용 지표인 OHLCV_STRICT_PROXY(patient reference, 현재 노출에서도 CAGR -8.7%/MDD -60%)였음. _book_outcome이 pass-2 배치의 모든 바운드를 단일 try/except로 묶어 참조 바운드의 파산이 건강한 자본 원장 전체를 폐기시키고 있었음.",
+      "resolution": "src/mhs/execution.py에 replay_execution_window_batch_isolated 신설(바운드별 격리 실패, BatchReplayOutcome/IsolatedBoundFailure로 typed 반환, 격리 안 된 인덱스는 기존과 동일하게 fail-closed 전파); replay_execution_window_batch는 이를 감싸는 byte-identical 래퍼로 유지. ruin_guard_equity 순수함수로 파산가드가 fill-track과 이미 확정된 ledger-chunk 트랙 중 더 보수적인 값을 인과적으로 사용하도록 수정(두 트랙이 사실상 170배 괴리되어 가드가 무력화되던 버그). src/mhs/contracts.py에 MHS_COMMITTEE_TARGET_GROSS=0.92 등록(리플레이로 인증된, 등록 드로다운예산 25% 이내 최대 노출; 0.9231->CAGR 0.6996/MDD -0.2311, 1.05/1.20은 예산초과로 기각). MhsDiagnosticRequest.committee_target_gross 기본값을 sentinel 패턴으로 등록상수 해석(단, dataclasses.replace() 호환을 위해 __post_init__에서 필드를 직접 mutate하지 않고 _resolved_committee_target_gross 헬퍼로 두 소비지점에서만 지연 해석). _mhs_research_go에 PRIMARY_MAX_DRAWDOWN_OVER_BUDGET 리스크게이트 추가(데이터무결성 코드 아님). CLI --committee-target-gross 기본값이 등록상수로 전환, --no-committee-target-gross로 희석북 복귀 가능. 실측: CLI 순정 실행(--output-tier compact)에서 CAGR 38.5%->69.6%, MDD -12.7%->-23.0%(예산내), Calmar 3.03(불변), 3/3 폴드 통과, blend.failure=None, data_integrity_reason_codes=[] 확인. 남은 유일한 Research-GO 차단사유 FOLD_GROWTH_CONCENTRATION은 노출과 무관(0.81, 전 노출구간에서 불변)하여 이번 작업 범위 밖으로 명시.",
+      "impact": "committee_capital=True(기본값) 사용 시 CAGR이 약 1.8배로 증가하고 실현 MDD가 등록 위험예산(25%) 이내로 게이트됨. 과거 문서화된 'gross 0.9039-0.9071 자본불변식 절벽'은 참조전용 계측기의 파산이었음이 확정되어 재발하지 않음. 부트스트랩 꼬리위험(P(MDD>30%) 0.3%->37%)은 성장 확대의 실제 대가로 스펙/CLI 도움말에 명시."
+    },
+    {
       "task_id": "MHS_COMMITTEE_EVIDENCE_WEIGHTING_FOLD_FIX",
       "date": "2026-08-19",
       "adr_id": "ADR_20260819_MHS_COMMITTEE_EVIDENCE_WEIGHTING_FOLD_FIX",
@@ -989,16 +999,6 @@
       "why": "vol_target_window defaulted to a fixed 42 (signal_windows[0]) chosen for convenience, never validated as growth-optimal; measured post-cost-repricing across the frozen signal_windows=(42,84,168) triple that window=84 gives median_log_growth=1.081 vs window=42's 0.809 (+34%), with better CAGR in all three of discovery/qualification/holdout",
       "resolution": "Added select_vol_target_window (argmax median_log_growth over a pre-registered grid, discovery-only, reusing size_xs_alpha_growth_optimal unchanged); made it run_xs_alpha_growth_sizing's new default (grid=XsAlphaCompositeSpec().signal_windows). Explicit int or None still reproduce the two prior ADRs' fixed-window/disabled behavior byte-for-byte. CLI --vol-target-window/--no-vol-target unchanged in name, default now omits the kwarg so the search applies",
       "impact": "v6 growth-sized deployment: vol_target_window auto-selected to 84 (was 42), selected_risk stays 1.5x. Discovery/qualification/holdout CAGR improved materially (23.1%->34.4%, 14.5%->21.3%, 14.6%->21.3%) vs the window=42 baseline, all three admission gates still pass; qualification/holdout MDD deepened somewhat but stays better than pre-scaling v6. No-trade-band on the multiplier was tested and rejected (turnover-neutral-to-negative on median_log_growth)"
-    },
-    {
-      "task_id": "xs_alpha_growth_sizing_cost_repricing",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_growth_sizing_cost_repricing",
-      "domain": "risk",
-      "title": "XS Alpha Growth Sizing: True Turnover-Cost Repricing",
-      "why": "apply_realised_risk_overlay/apply_vol_target_overlay scale an already-net-of-original-cost return series by a per-bar factor, implicitly assuming rebalancing to track that factor is free; measured on v6 this was negligible (~1bps/yr) for the constant-factor scalar-only path (ADR_20260805_xs_alpha_v6_growth_sizing) but material (~296bps/yr, ~3%/yr) once vol-targeting made the factor vary every bar (ADR_20260805_xs_alpha_growth_vol_targeting), overstating its reported gains",
-      "resolution": "Extracted _ledger_pnl (frozen cost formula, no reimplementation) and added _true_realized_net to reprice P&L directly from realized weights; wired into size_xs_alpha_growth_optimal both before the discovery-window scalar search and before the final return. apply_realised_risk_overlay/apply_vol_target_overlay/solve_growth_optimal_risk/run_xs_composite_ledger signatures untouched",
-      "impact": "v6 growth-sized numbers corrected: selected_risk stays 1.5x (median_log_growth 1.029->0.831, still beats no-vol-target 0.518), but Sharpe/CAGR/MDD across discovery/qualification/holdout are now honestly costed -- qualification/holdout CAGR now below pre-scaling v6 (were reported above it), discovery CAGR ~unchanged from pre-scaling. Overlay's real benefit reframed from CAGR uplift to risk-adjusted (Sharpe/MDD) improvement only. docs/results/xs_alpha_vol_weighted_v6_growth_sized.json and xs-screen v6 default adopted_sizing log corrected"
     }
   ]
 }
