@@ -142,6 +142,7 @@ from src.mhs.committee import (
     long_only_equal_risk_weights,
     purged_walk_forward,
     score_weighted_net,
+    train_evidence_weights,
     wealth_metrics,
 )
 from src.research.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
@@ -346,6 +347,7 @@ class MhsDiagnosticRequest:
     committee_tranche_smoothing: bool = False
     committee_regime_adaptive_tranche: bool = False
     committee_target_gross: float | None = None
+    committee_evidence_weighting: bool = False
     execution_coverage_gate: bool = False
     ram_guard: bool = True
 
@@ -412,6 +414,10 @@ class MhsDiagnosticRequest:
             raise ValueError("committee_growth_diagnostic requires committee_book=True")
         if not isinstance(self.committee_capital, bool):
             raise ValueError("committee_capital must be a bool")
+        if not isinstance(self.committee_evidence_weighting, bool):
+            raise ValueError("committee_evidence_weighting must be a bool")
+        if self.committee_evidence_weighting and not self.committee_capital:
+            raise ValueError("committee_evidence_weighting requires committee_capital=True")
         if self.committee_target_gross is not None:
             if not (0.0 < self.committee_target_gross <= 2.0):
                 raise ValueError(
@@ -3579,6 +3585,7 @@ def _run_post_book_concurrently(
     fold_slow_horizons: dict[int, int | None] | None = None,
     fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
+    fold_committee_weights: dict[int, dict[str, float]] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -3632,6 +3639,7 @@ def _run_post_book_concurrently(
                 (fold_slow_horizons or {}).get(idx),
                 (fold_fast_horizons or {}).get(idx),
                 (fold_funding_carry or {}).get(idx),
+                (fold_committee_weights or {}).get(idx),
             ): idx
             for idx, fold in enumerate(folds)
         }
@@ -3653,11 +3661,9 @@ def _run_post_book_concurrently(
                     bootstrap_ci, placebo_percentile, participation,
                     termination_counts, deployment,
                 ) = post_future.result()
-
-    ordered = tuple(reports[i] for i in range(len(folds)))
-    fold_reports = ordered
+    fold_reports = tuple(reports[idx] for idx in sorted(reports))
     if telemetry is not None:
-        for fold_report in ordered:
+        for fold_report in fold_reports:
             fill_count = (
                 len(fold_report.strict.simulated_fills) + len(fold_report.stress.simulated_fills)
                 if fold_report.strict is not None and fold_report.stress is not None
@@ -3668,6 +3674,7 @@ def _run_post_book_concurrently(
         bootstrap_ci, placebo_percentile, participation,
         termination_counts, fold_reports, deployment,
     )
+
 
 def _incomplete_fold_report(
     fold: AnchoredPurgedFold, fold_index: int, failures: tuple[str, ...],
@@ -3808,6 +3815,48 @@ def _apply_trend_sleeve(
     return blend_1h.add(sleeve.reindex(blend_1h.index).fillna(0.0), fill_value=0.0)
 
 
+def _committee_evidence_weights_by_boundary(
+    close: pd.DataFrame,
+    quote_vol: pd.DataFrame,
+    taker_buy_quote: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    decision_grid: pd.DatetimeIndex,
+    min_symbols: int,
+    train_ends: Mapping[str, pd.Timestamp],
+) -> dict[str, dict[str, float]]:
+    """Build per-boundary evidence weights for committee members.
+
+    Member books and proxy return series are constructed exactly once
+    regardless of ``len(train_ends)`` -- this is what makes fold-level
+    evidence weighting possible without loading a second wide panel per fold.
+    Each boundary (fold or top-level OOS) then fits its own evidence weights
+    from the shared proxy return series, so every fold sees only the training
+    data up to its own boundary.
+    """
+    _member_specs = [
+        spec for spec in MHS_FEATURE_REGISTRY
+        if spec.name in set(MHS_COMMITTEE_MEMBERS)
+    ]
+    _committee_books = build_feature_books(
+        _member_specs,
+        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
+        execution_mask, decision_grid, min_symbols=min_symbols,
+    )
+    if not _committee_books:
+        return {label: {} for label in train_ends}
+    close_grid = close.reindex(decision_grid).ffill()
+    fwd_ret = np.log(close_grid).shift(-1) - np.log(close_grid)
+    proxies: dict[str, pd.Series] = {}
+    for name, book in _committee_books.items():
+        book_grid = book.reindex(decision_grid).fillna(0.0)
+        proxies[name] = (book_grid * fwd_ret).sum(axis=1)
+    result: dict[str, dict[str, float]] = {}
+    for label, train_end in train_ends.items():
+        train_mask = pd.Series(decision_grid < train_end, index=decision_grid)
+        result[label] = train_evidence_weights(proxies, train_mask)
+    return result
+
+
 def _committee_execution_book(
     close: pd.DataFrame,
     quote_vol: pd.DataFrame,
@@ -3818,6 +3867,7 @@ def _committee_execution_book(
     tranche_count: int = 1,
     regime_adaptive_window: int | None = None,
     target_gross: float | None = None,
+    member_weights: Mapping[str, float] | None = None,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
@@ -3836,7 +3886,11 @@ def _committee_execution_book(
     ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE. ``target_gross``
     rescales each decision row to an explicit gross, restoring the unit-gross
     invariant that the member average and tranche mean otherwise dilute; None
-    preserves the diluted book unchanged.
+    preserves the diluted book unchanged. ``member_weights`` is an
+    externally-fitted, already-normalized-or-not mapping this function applies
+    and renormalizes over admitted members, falling back to equal weights among
+    admitted members when the supplied weights don't cover any admitted member
+    or sum to <= 0.
     """
     if tranche_count < 1:
         raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
@@ -3857,7 +3911,15 @@ def _committee_execution_book(
         raise RuntimeError(
             "committee_capital: no committee member admitted in this fold window"
         )
-    book = sum(_committee_books.values()) / float(len(_committee_books))
+    if member_weights is not None:
+        admitted = {n: max(0.0, member_weights.get(n, 0.0)) for n in _committee_books}
+        total = sum(admitted.values())
+        if total <= 0.0:
+            book = sum(_committee_books.values()) / float(len(_committee_books))
+        else:
+            book = sum(admitted[n] / total * _committee_books[n] for n in _committee_books)
+    else:
+        book = sum(_committee_books.values()) / float(len(_committee_books))
     if regime_adaptive_window is not None:
         book_grid = book.reindex(decision_grid).fillna(0.0)
         smoothed_grid = phase_tranche_book(book_grid, tranche_count)
@@ -3888,6 +3950,7 @@ def _build_fold_target_weights(
     request: MhsDiagnosticRequest,
     funding_by_symbol: dict[str, pd.Series],
     slow_horizon_override: int | None = None,
+    committee_member_weights: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Construct one fold's PIT decision targets with the quality calibration.
 
@@ -4026,6 +4089,7 @@ def _build_fold_target_weights(
                 if request.committee_regime_adaptive_tranche else None
             ),
             target_gross=request.committee_target_gross,
+            member_weights=committee_member_weights,
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
@@ -4307,6 +4371,7 @@ def _run_anchored_fold(
     slow_horizon_override: int | None = None,
     fast_horizon_override: tuple[int, str] | None = None,
     funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
+    committee_member_weights: dict[str, float] | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
@@ -4324,7 +4389,7 @@ def _run_anchored_fold(
         vs = fold.validation_start
         ve = fold.validation_end
         target_weights, signal_available_at, minute_roster, _grid_1h = _build_fold_target_weights(
-            root, fold, request, funding_by_symbol, slow_horizon_override,
+            root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
         )
         target_replay = target_weights[minute_roster]
         execution_grid = pd.date_range(
@@ -4889,6 +4954,21 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # temporary target-weight matrices.
     if not request.committee_capital:
         del quote_vol
+    _committee_weights_by_boundary: dict[str, dict[str, float]] = {}
+    _fold_committee_weights: dict[int, dict[str, float]] | None = None
+    if request.committee_capital and request.committee_evidence_weighting:
+        _train_ends = {"top_level": MHS_COMMITTEE_OOS_START}
+        _train_ends.update({
+            f"fold_{_i}": _f.train_end
+            for _i, _f in enumerate(phase_1_anchored_purged_folds())
+        })
+        _committee_weights_by_boundary = _committee_evidence_weights_by_boundary(
+            close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols, _train_ends,
+        )
+        _fold_committee_weights = {
+            _i: _committee_weights_by_boundary[f"fold_{_i}"]
+            for _i in range(len(phase_1_anchored_purged_folds()))
+        }
     if request.committee_capital:
         # RC-4: the reported blend is the committee execution book, not the
         # frozen momentum formula. Un-scaled copy feeds the concurrent replay
@@ -4903,6 +4983,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 if request.committee_regime_adaptive_tranche else None
             ),
             target_gross=request.committee_target_gross,
+            member_weights=(_committee_weights_by_boundary.get("top_level") if request.committee_evidence_weighting else None),
         ).reindex(grid_1h).ffill().fillna(0.0)
         committee_execution_book = blend_1h
         del close, quote_vol, taker_buy_quote
@@ -5190,7 +5271,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         blend_report, root, request, execution_symbols, minute_grid,
         signal_48h, eligible, opens, bar_funding, grid_1h, fast,
         fold_funding, initial_equity, telemetry, fold_slow_horizons, fold_fast_horizons,
-        fold_funding_carry,
+        fold_funding_carry, _fold_committee_weights,
     )
     folds = tuple(fold_reports)
     # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
