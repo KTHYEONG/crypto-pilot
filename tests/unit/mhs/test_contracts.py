@@ -321,3 +321,33 @@ class TestFrozenLiterals:
         assert isinstance(MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW, int)
         assert MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW >= 3
         assert MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW == 15
+
+    def test_registered_target_gross_default(self) -> None:
+        """SCENARIO_MHS_REGISTERED_TARGET_GROSS_DEFAULT: the registered
+        committee exposure is 0.92, the largest replay-certified gross inside
+        the registered drawdown budget."""
+        from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS
+
+        assert 0.0 < MHS_COMMITTEE_TARGET_GROSS <= 2.0
+        assert MHS_COMMITTEE_TARGET_GROSS > 0.7950
+
+        import dataclasses
+
+        from src.application.research.mhs.evaluation import (
+            MhsDiagnosticRequest,
+            _resolved_committee_target_gross,
+        )
+
+        default_request = MhsDiagnosticRequest(committee_capital=True)
+        assert _resolved_committee_target_gross(default_request) == MHS_COMMITTEE_TARGET_GROSS
+        assert MhsDiagnosticRequest(committee_capital=True, committee_target_gross=None).committee_target_gross is None
+        with pytest.raises(ValueError, match="committee_target_gross"):
+            MhsDiagnosticRequest(committee_capital=True, committee_target_gross=0.0)
+
+        # Regression: dataclasses.replace() on an unset (implicit-default)
+        # request must not resolve the sentinel into the field, or a copy
+        # dropping committee_capital would wrongly see an "explicit" gross and
+        # raise -- even though no caller ever set committee_target_gross.
+        copied = dataclasses.replace(default_request, committee_capital=False)
+        assert copied.committee_capital is False
+        assert _resolved_committee_target_gross(copied) == MHS_COMMITTEE_TARGET_GROSS

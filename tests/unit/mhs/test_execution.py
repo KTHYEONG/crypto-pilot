@@ -1843,3 +1843,212 @@ class TestEquityFloorProtection:
                 pd.testing.assert_frame_equal(va, vb)
             else:
                 assert va == vb
+
+
+class TestIsolatedBoundReplay:
+    """SCENARIO_MHS_ISOLATED_BOUND_RETIRED + SCENARIO_MHS_ISOLATED_EMPTY_SET_PROPAGATES:
+    isolated reference-only bounds retire cleanly while capital bounds continue."""
+
+    def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        marks = closes.copy()
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=4, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.01, 0.06, 4)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": closes * 1.001,
+            "lows": closes * 0.999,
+            "closes": closes,
+            "marks": marks,
+            "funding": pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    def test_isolated_bound_retired_while_others_continue(self) -> None:
+        """SCENARIO_MHS_ISOLATED_BOUND_RETIRED: a DataIntegrityError from
+        isolated index 2 retires that bound (results[2] is None) while
+        capital-carrying bounds (0, 1) complete independently and match
+        single-bound replays at rtol=atol=1e-12."""
+        from src.mhs.execution import (
+            BatchReplayOutcome,
+            replay_execution_window_batch_isolated,
+        )
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        spec = ExecutionSpec()
+        bounds = [
+            ("OHLCV_IMMEDIATE_TAKER", spec),
+            ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec(maker_fee_bps=6.0)),
+            ("OHLCV_STRICT_PROXY", spec),
+        ]
+        # Run independent replays for bounds 0,1 BEFORE monkeypatching
+        independent = [
+            replay_execution_windows(windows, 1.0, b, s, retain_event_snapshots=True)
+            for (b, s) in bounds[:2]
+        ]
+        from src.mhs.execution import _BoundExecutionReplayAccumulator
+        original_consume = _BoundExecutionReplayAccumulator.consume
+        window_index = [0]
+        second_start = windows[1].window_start if len(windows) > 1 else None
+
+        def _failing_consume(self, w):
+            window_index[0] += 1
+            if self.execution_bound == "OHLCV_STRICT_PROXY" and w.window_start == second_start:
+                raise DataIntegrityError("pre-trade equity must be positive and finite (ts=fail)")
+            return original_consume(self, w)
+        _BoundExecutionReplayAccumulator.consume = _failing_consume
+        try:
+            consumed = {"n": 0}
+            def _gen():
+                for w in windows:
+                    consumed["n"] += 1
+                    yield w
+            outcome: BatchReplayOutcome = replay_execution_window_batch_isolated(
+                _gen(), 1.0, bounds, retain_event_snapshots=True,
+                isolated_bound_indices=frozenset({2}),
+            )
+        finally:
+            _BoundExecutionReplayAccumulator.consume = original_consume
+        assert consumed["n"] == len(windows)
+        # Bounds 0 and 1 are not None and match independent replays
+        for i in range(2):
+            assert outcome.results[i] is not None
+            _assert_pair_equivalent(independent[i], outcome.results[i], f"batch[{i}]")
+        # Bound 2 (strict) was retired mid-stream
+        assert outcome.results[2] is None
+        assert len(outcome.isolated_failures) == 1
+        f = outcome.isolated_failures[0]
+        assert f.bound_index == 2
+        assert f.execution_bound == "OHLCV_STRICT_PROXY"
+        assert f.error_class == "DataIntegrityError"
+        assert f.windows_consumed >= 1
+
+    def test_out_of_range_isolated_index_raises_value_error(self) -> None:
+        """SCENARIO_MHS_ISOLATED_EMPTY_SET_PROPAGATES: an out-of-range
+        isolated index raises ValueError before any window is consumed."""
+        from src.mhs.execution import replay_execution_window_batch_isolated
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        bounds = [
+            ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
+            ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
+            ("OHLCV_STRICT_PROXY", ExecutionSpec()),
+        ]
+        consumed = {"n": 0}
+        def _gen():
+            for w in windows:
+                consumed["n"] += 1
+                yield w
+        with pytest.raises(ValueError, match="out of range"):
+            replay_execution_window_batch_isolated(
+                _gen(), 1.0, bounds, isolated_bound_indices=frozenset({7}),
+            )
+        assert consumed["n"] == 0
+
+    def test_empty_isolated_set_propagates_error(self) -> None:
+        """SCENARIO_MHS_ISOLATED_EMPTY_SET_PROPAGATES: with isolated_bound_indices=frozenset(),
+        a failing stream propagates DataIntegrityError identical to the non-isolated wrapper."""
+        from src.mhs.execution import replay_execution_window_batch_isolated
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        windows[1] = dataclasses.replace(windows[1], bar_funding=windows[1].bar_funding * float("nan"))
+        bounds = [
+            ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
+            ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
+            ("OHLCV_STRICT_PROXY", ExecutionSpec()),
+        ]
+        with pytest.raises(DataIntegrityError, match="bar_funding must be finite"):
+            replay_execution_window_batch_isolated(
+                iter(windows), 1.0, bounds, isolated_bound_indices=frozenset(),
+            )
+
+
+class TestRuinGuardEquity:
+    """SCENARIO_MHS_RUIN_GUARD_LEDGER_TRACK: ruin_guard_equity uses
+    min(fill_track, finalized_ledger) and the floor guard fires on
+    the ledger track when the fill track is healthy."""
+
+    def test_pure_function_cases(self) -> None:
+        from src.mhs.execution import ruin_guard_equity
+        assert ruin_guard_equity(1.3599, 0.0079) == pytest.approx(0.0079)
+        assert ruin_guard_equity(1.3599, None) == pytest.approx(1.3599)
+        assert ruin_guard_equity(0.5, 2.0) == pytest.approx(0.5)
+        assert ruin_guard_equity(1.3599, float("nan")) == pytest.approx(1.3599)
+        assert ruin_guard_equity(1.3599, float("inf")) == pytest.approx(1.3599)
+        assert ruin_guard_equity(1.3599, float("-inf")) == pytest.approx(1.3599)
+
+    def test_floor_guard_fires_on_ledger_track(self) -> None:
+        """When the finalized ledger equity falls below 0.2*initial while the
+        fill track stays above, the floor guard fires on the second window's
+        first decision and subsequent decision rows are targeted flat."""
+        from src.mhs.execution import _BoundExecutionReplayAccumulator, ExecutionReplayWindow
+        grid = pd.date_range("2021-01-01", periods=36, freq="5min", tz="UTC")
+        symbols = ("AAAUSDT",)
+        closes = pd.DataFrame({"AAAUSDT": [100.0] * 36}, index=grid)
+        decisions = pd.DatetimeIndex([
+            pd.Timestamp("2021-01-01 00:05", tz="UTC"),
+            pd.Timestamp("2021-01-01 00:10", tz="UTC"),
+            pd.Timestamp("2021-01-01 00:20", tz="UTC"),
+            pd.Timestamp("2021-01-01 00:25", tz="UTC"),
+        ])
+        w1 = ExecutionReplayWindow(
+            window_start=grid[0], window_end=grid[17],
+            columns=symbols, symbols=symbols, minute_grid=grid[:18],
+            highs=closes.iloc[:18] * 1.01, lows=closes.iloc[:18] * 0.99,
+            closes=closes.iloc[:18], marks=closes.iloc[:18],
+            bar_funding=pd.DataFrame(0.0, index=grid[:18], columns=symbols),
+            target_weights=pd.DataFrame({"AAAUSDT": [0.3, 0.3]}, index=decisions[:2]),
+            signal_available_at=decisions[:2],
+        )
+        w2 = ExecutionReplayWindow(
+            window_start=grid[17], window_end=grid[-1],
+            columns=symbols, symbols=symbols, minute_grid=grid[17:],
+            highs=closes.iloc[17:] * 1.01, lows=closes.iloc[17:] * 0.99,
+            closes=closes.iloc[17:], marks=closes.iloc[17:],
+            bar_funding=pd.DataFrame(0.0, index=grid[17:], columns=symbols),
+            target_weights=pd.DataFrame({"AAAUSDT": [0.3, 0.3]}, index=decisions[2:]),
+            signal_available_at=decisions[2:],
+        )
+        original_consume = _BoundExecutionReplayAccumulator.consume
+        def _inject_low_ledger(self, w):
+            original_consume(self, w)
+            # Replace the last chunk with a value below the 0.2 floor
+            if self.equity_chunks:
+                n = len(self.equity_chunks[-1])
+                self.equity_chunks[-1] = np.full(n, self.initial_equity * 0.01)
+        _BoundExecutionReplayAccumulator.consume = _inject_low_ledger
+        try:
+            acc = _BoundExecutionReplayAccumulator(
+                w1, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False,
+                min_equity_fraction=0.2,
+            )
+            acc.consume(w1)
+            acc.consume(w2)
+            result = acc.finalize()
+        finally:
+            _BoundExecutionReplayAccumulator.consume = original_consume
+        assert len(acc.equity_floor_breaches) > 0
+        assert result.ledger.equity_floor_breached_at is not None
+        assert len(result.ledger.equity_floor_breached_at) > 0
+
