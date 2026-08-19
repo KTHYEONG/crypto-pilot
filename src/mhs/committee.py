@@ -7,7 +7,7 @@ This module provides cost decomposition, wealth metrics, volatility scaling, and
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 import numpy as np
@@ -77,6 +77,47 @@ def score_weighted_net(
     gross_part = gross.multiply(w, axis=1).sum(axis=1)
     cost_part = turnover_cost.multiply(w.abs(), axis=1).sum(axis=1) * cost_bps
     return gross_part - cost_part
+
+
+def train_evidence_weights(
+    member_proxy_returns: Mapping[str, pd.Series],
+    train_mask: pd.Series,
+    min_train_rows: int = 30,
+) -> dict[str, float]:
+    """Train-only P&L-aligned evidence weights for committee members.
+
+    Skill-aware counterpart to ``long_only_equal_risk_weights`` (equal-RISK,
+    rejected in RC-4): weights each member by its realized proxy-return
+    t-statistic computed exclusively on train-window rows, never on rank IC
+    (rank ordering and dollar P&L disagree under fat-tailed cross-sectional
+    crypto returns).  Weights are non-negative and sum to 1 so a convex
+    combination of dollar-neutral member books stays dollar-neutral with
+    gross <= 1.0.  Fails closed to exact equal weights when no member has
+    positive train evidence, reproducing today's behaviour.
+    """
+    if not member_proxy_returns:
+        raise ValueError("member_proxy_returns must not be empty")
+    if min_train_rows < 1:
+        raise ValueError(f"min_train_rows must be >= 1, got {min_train_rows}")
+
+    raw: dict[str, float] = {}
+    for name, series in member_proxy_returns.items():
+        train_series = series[train_mask].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(train_series) < min_train_rows:
+            raw[name] = 0.0
+            continue
+        std = float(train_series.std(ddof=1))
+        if not np.isfinite(std) or std <= 0:
+            raw[name] = 0.0
+            continue
+        t = float(train_series.mean()) / (std / np.sqrt(float(len(train_series))))
+        raw[name] = max(0.0, t)
+
+    total = sum(raw.values())
+    if total <= 0.0 or len(member_proxy_returns) < 2:
+        n = len(member_proxy_returns)
+        return dict.fromkeys(member_proxy_returns, 1.0 / n)
+    return {name: raw[name] / total for name in member_proxy_returns}
 
 
 def long_only_equal_risk_weights(train_net: pd.DataFrame) -> pd.Series:
