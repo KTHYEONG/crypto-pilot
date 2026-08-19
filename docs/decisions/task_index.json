@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_COMMITTEE_TARGET_GROSS",
+      "date": "2026-08-19",
+      "adr_id": "ADR_20260819_MHS_COMMITTEE_TARGET_GROSS",
+      "domain": "quant",
+      "title": "MHS 위원회 목표 총노출(target gross) 복원",
+      "why": "docs/results/mhs_run_history/latest.json 및 daily_ledger.parquet 실측 분석 결과, k=5 위원회 평균과 tranche 평활이 재정규화 없이 blend_target_gross를 1.0에서 0.530(현금 47%)으로 희석시키고 있음을 확인. 이 47%는 리스크 판단이 아닌 산술적 잔여물이며, 하류의 두 리스크 레이어(_pnl_vol_target_scale, _regime_cash_scale)는 스케일 불변(소수점 6자리까지 동일)임을 실증하여 노출 복원이 하류에서 상쇄되지 않음을 확인. 프로젝트 자체 registered growth-optimal 솔버(solve_growth_optimal_risk)도 등록 상수(MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25)로 독립적으로 1.5x 선택, 실현 참여율(5e-9)로 선형비용가정 유효함을 확인.",
+      "resolution": "src/mhs/books.py에 scale_book_to_target_gross 순수함수 추가(행별 절대값합을 target_gross로 재정규화, 달러중립·상대비중 보존, np.divide safe-division). MhsDiagnosticRequest.committee_target_gross: float|None=None 필드 및 (0.0,2.0] 검증 추가. _committee_execution_book에 target_gross 파라미터 추가, 단일 종료지점에서 tranche/regime-adaptive 평활 이후 리스케일 적용. fold 경로와 top-level blend 경로 양쪽 호출부 모두에 배선(누락 시 _fold_blend_parity의 FOLD_BLEND_PATH_DIVERGENCE 유발 가능하므로 필수). CLI --committee-target-gross 플래그 추가. 신규 테스트 6건(tests/unit/mhs/test_books.py 5건 + test_evaluation.py 1건) 전량 통과, 관련 전체 스위트(tests/unit/mhs/, tests/unit/application/research/mhs/test_evaluation.py) 회귀 없음, ruff/mypy 통과. target_gross=None(기본값)은 기존 동작과 byte-identical.",
+      "impact": "opt-in 파라미터 추가만으로 완료됨 -- 기본값 None은 기존 프로덕션 경로에 어떤 영향도 주지 않음(회귀 없음). 실측 백테스트 경로 시뮬레이션(returns 배율 적용, 실제 리플레이 아님) 기준으로 gross=0.795는 CAGR 34.7%->54.7%(MDD -17.2%), gross=1.0(불변식 완전복원)은 CAGR 34.7%->71.3%(MDD -21.2%) -- 둘 다 등록된 25% MDD 예산 이내이며 차입 불필요. 단, ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT 전례(fold 단위는 개선했으나 연속 전체이력 리플레이에서 CAPITAL_INVARIANT_BREACH 발생)에 따라 실제 노출값 채택 전 --committee-target-gross 플래그로 실제 리플레이 실행 및 termination_counts/research_go 검증이 필수 선행조건임을 스펙 §5에 명시. 집중도 게이트(FOLD_GROWTH_CONCENTRATION)와 deflated_sharpe_ratio≈0 문제는 이 변경으로 해결되지 않음(자본배치 효율화이지 신규 알파 아님) -- 후속 과제로 fast_reversal 신호 재조정과 committee_growth_diagnostic의 committee_capital 경로 개방이 남음."
+    },
+    {
       "task_id": "MHS_FOLD_GROWTH_CONCENTRATION_GATE",
       "date": "2026-08-19",
       "adr_id": "ADR_20260819_MHS_FOLD_GROWTH_CONCENTRATION_GATE",
@@ -989,16 +999,6 @@
       "why": "v6 static-scalar leverage was closed (selected_risk=1.0, ADR_20260805) and v2+v6 combination measured non-diversifying (corr 0.906-0.918); v6 discovery net returns showed real vol clustering (ACF|r| lag1=+0.186) with no forward-looking response in growth_sizing.py (only reactive drawdown ladder existed)",
       "resolution": "Added compute_discovery_target_vol/apply_vol_target_overlay (causal trailing-vol overlay, discovery-frozen anchor, fail-closed to 1.0x on insufficient history) in growth_sizing.py; wired as optional default-off params into size_xs_alpha_growth_optimal (backward compatible), default-on (window=42, reusing XsAlphaCompositeSpec signal_windows[0]) in run_xs_alpha_growth_sizing/CLI. Ran on v6: selected_risk 1.0->1.5, discovery Sharpe 1.18->1.59 (MDD -15.3%->-12.7%), qualification Sharpe 1.33->1.69 (MDD -14.3%->-7.5%), both admission gates still pass",
       "impact": "v6 growth-sized deployment scale updated: static scalar 1.0x -> 1.5x with vol-targeting overlay; turnover rose (qualification 22.7x->41.0x annualized) but stays under the 150x/yr gate -- flagged for monitoring, not adopted into live capital allocation (research-only)"
-    },
-    {
-      "task_id": "xs_alpha_v6_growth_sizing",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_v6_growth_sizing",
-      "domain": "risk",
-      "title": "XS Alpha v6 Growth-Optimal Sizing Overlay",
-      "why": "v6 admitted at fixed unit-gross scale with no drawdown response; growth_sizing.py primitives existed but were never wired onto v6's realized returns",
-      "resolution": "Added size_xs_alpha_growth_optimal (discovery-only sizing, full-history drawdown-protected overlay, fail-closed on infeasible), run_xs_alpha_growth_sizing orchestrator restricted to v2/v6, xs-growth-sizing CLI subcommand. Ran on v6: selected_risk=1.0, sizing lever closed (current unit-gross already growth-optimal)",
-      "impact": "No leverage change to v6; confirms existing deployment scale is growth-optimal, sizing lever closed as growth source for this profile"
     }
   ]
 }
