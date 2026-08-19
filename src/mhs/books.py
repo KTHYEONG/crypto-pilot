@@ -8,6 +8,7 @@ blend is signal pooling and is prohibited.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 import numpy as np
@@ -153,3 +154,28 @@ def phase_tranche_book(weights: pd.DataFrame, tranche_count: int) -> pd.DataFram
     if tranche_count < 1:
         raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
     return weights.rolling(tranche_count, min_periods=tranche_count).mean().fillna(0.0)
+
+
+def scale_book_to_target_gross(
+    weights: pd.DataFrame, target_gross: float,
+) -> pd.DataFrame:
+    """Rescale each decision row so its absolute-weight sum equals ``target_gross``.
+
+    Row-wise scaling preserves dollar-neutrality exactly (``sum(w)=0 =>
+    sum(k*w)=0``) and preserves every relative weight ratio, so the caller's
+    combination stage keeps authority over *which* symbols are held while
+    exposure becomes an explicit decision. Non-finite cells are treated as 0.0
+    before arithmetic; rows whose gross is zero emit all zeros.
+    """
+    if not (target_gross > 0) or not math.isfinite(target_gross):
+        raise ValueError(f"target_gross must be > 0, got {target_gross}")
+    if weights.empty:
+        return weights.copy()
+    values = np.where(np.isfinite(weights.to_numpy(dtype="float64")), weights.to_numpy(dtype="float64"), 0.0)
+    gross = np.abs(values).sum(axis=1)
+    scale = np.divide(
+        target_gross, gross, out=np.zeros_like(gross), where=gross > 0.0,
+    )
+    return pd.DataFrame(
+        values * scale[:, None], index=weights.index, columns=weights.columns,
+    )
