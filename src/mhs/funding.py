@@ -67,3 +67,23 @@ def build_funding_carry_candidate_weights(
         )
         for lookback in lookback_candidates
     }
+
+
+def funding_carry_execution_book(bar_funding: pd.DataFrame, execution_mask: pd.DataFrame, lookback_hours: int, decision_grid: pd.DatetimeIndex, tranche_count: int, min_symbols: int = 8) -> pd.DataFrame:
+    """캐리 슬리브 execution book: 고펀딩 숏 / 저펀딩 롱 (sign=-1 측정값).
+
+    Chain: funding_carry_signal -> rank_weight_book(sign=-1) -> reindex(decision_grid)
+    -> phase_tranche_book -> reindex(bar_funding.index, method='ffill').
+    sign=-1은 측정된 밴드 속성(가장 높은 trailing funding 숏, 가장 낮은 롱)이며
+    호출부에서 추론하지 않는다. shift(1)을 의도적으로 추가하지 않음:
+    기존 build_funding_carry_candidate_weights와 동일하게 재사용.
+    """
+    if tranche_count < 1:
+        raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
+    if min_symbols < 2:
+        raise ValueError(f"min_symbols must be >= 2, got {min_symbols}")
+    signal = funding_carry_signal(bar_funding, lookback_hours)
+    book = rank_weight_book(signal, execution_mask, sign=-1, min_symbols=min_symbols)
+    book_grid = book.reindex(decision_grid).fillna(0.0)
+    stepped = phase_tranche_book(book_grid, tranche_count)
+    return stepped.reindex(bar_funding.index, method="ffill").fillna(0.0)

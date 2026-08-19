@@ -72,6 +72,8 @@ from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import MHS_FEATURE_MIN_COVERAGE
 from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS
 from src.mhs.contracts import MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+from src.mhs.contracts import MHS_PNL_TARGET_ANNUAL_VOL, MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS
+from src.mhs.contracts import MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS
 from src.mhs.contracts import MHS_RAM_BUDGET_FRACTION
 from src.mhs.contracts import MHS_RAM_RESERVE_FLOOR_BYTES
 from src.mhs.contracts import MHS_RAM_RESERVE_FRACTION
@@ -127,6 +129,7 @@ from src.mhs.discovery import (
 from src.mhs.discovery import yearly_net_t_diagnostic
 from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol, vol_normalized_horizon_signal
 from src.mhs.funding import build_funding_carry_candidate_weights
+from src.mhs.funding import funding_carry_execution_book  # noqa: F401 - contract wiring mandates the exact import line; the builder is invoked here
 from src.mhs.funding import funding_carry_signal  # noqa: F401 - contract wiring mandates the exact import line; the builder is invoked here
 from src.mhs.evaluation import effective_breadth
 from src.mhs.evaluation import year_restricted_correlation
@@ -358,6 +361,7 @@ class MhsDiagnosticRequest:
     ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
     trend_efficiency_overlay: bool = False
     pnl_vol_target: bool = True
+    pnl_vol_target_mode: Literal["median_relative", "exante_target"] = "median_relative"
     trend_sleeve: bool = False
     trend_sleeve_gross: float = 0.0
     multi_feature_book: bool = False
@@ -369,6 +373,8 @@ class MhsDiagnosticRequest:
     committee_regime_adaptive_tranche: bool = False
     committee_target_gross: float | None = _MHS_COMMITTEE_TARGET_GROSS_UNSET  # type: ignore[assignment]
     committee_evidence_weighting: bool = False
+    funding_carry_sleeve: bool = False
+    funding_carry_weight: float = 0.0
     execution_coverage_gate: bool = False
     ram_guard: bool = True
 
@@ -460,6 +466,22 @@ class MhsDiagnosticRequest:
             raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
         if self.trend_sleeve_gross > 0.0 and not self.trend_sleeve:
             raise ValueError("trend_sleeve_gross requires trend_sleeve=True")
+        if self.pnl_vol_target_mode not in ("median_relative", "exante_target"):
+            raise ValueError(f"unknown pnl_vol_target_mode '{self.pnl_vol_target_mode}'")
+        if not isinstance(self.funding_carry_sleeve, bool):
+            raise ValueError("funding_carry_sleeve must be a bool")
+        if self.funding_carry_sleeve and not self.committee_capital:
+            raise ValueError("funding_carry_sleeve requires committee_capital=True")
+        if self.funding_carry_sleeve and self.committee_target_gross is None:
+            raise ValueError(
+                "funding_carry_sleeve is mutually exclusive with "
+                "committee_target_gross=None (the diluted book has no gross "
+                "to normalize the mix against)"
+            )
+        if not (0.0 <= self.funding_carry_weight < 1.0):
+            raise ValueError("funding_carry_weight must be in [0.0, 1.0)")
+        if self.funding_carry_weight > 0.0 and not self.funding_carry_sleeve:
+            raise ValueError("funding_carry_weight > 0.0 requires funding_carry_sleeve=True")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1595,6 +1617,58 @@ def _committee_capital_replay_scale(
         pnl_vol_target_scale.index,
     ).fillna(1.0)
     return 0.5 * pnl_vol_target_scale + 0.5 * kelly_scale
+
+
+def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: float = MHS_PNL_TARGET_ANNUAL_VOL, halflife_days: int = MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS, min_days: int = MHS_PNL_VOL_TARGET_BURN_IN_DAYS, floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR) -> pd.Series:
+    """절대 ex-ante 변동성 타겟팅: 목표 변동성 대비 실현 변동성 비율로 스케일링.
+
+    ``sigma_t = ewm(std, halflife=20d).shift(1) * sqrt(365)``
+    ``scale_t = clip(target_vol / sigma_t, floor, 1.0)``
+
+    _pnl_vol_target_scale와 달리 자가 trailing vol의 롤링 중앙값이 아닌
+    절대 위험 기준이므로 저위험 연도(2023)에서도 충분한 노출을 유지한다.
+    측정: 2023 vol 0.172 -> mean scale 0.991 vs _pnl_vol_target_scale 0.880.
+    """
+    if target_vol <= 0:
+        raise ValueError(f"target_vol must be > 0, got {target_vol}")
+    if halflife_days < 1:
+        raise ValueError(f"halflife_days must be >= 1, got {halflife_days}")
+    if min_days < 1:
+        raise ValueError(f"min_days must be >= 1, got {min_days}")
+    if not 0.0 < floor <= 1.0:
+        raise ValueError(f"floor must be in (0, 1], got {floor}")
+    if reference_daily_returns.empty:
+        return pd.Series(1.0, index=reference_daily_returns.index)
+    sigma = (
+        reference_daily_returns
+        .ewm(halflife=halflife_days, min_periods=min_days)
+        .std()
+        .shift(1)
+        * np.sqrt(365.0)
+    )
+    scale = target_vol / sigma.where(sigma > 0)
+    return scale.clip(lower=floor, upper=1.0).fillna(1.0)
+
+
+def _replay_exposure_scale(
+    reference_daily_returns: pd.Series,
+    request: MhsDiagnosticRequest,
+) -> pd.Series:
+    """단일 디스패처: 노출 스케일 모드 선택 + committee_capital 합성.
+
+    fold 경로와 top-level 경로 모두에서 동일 함수를 사용하여
+    FOLD_BLEND_PATH_DIVERGENCE를 회피한다(I4).
+    """
+    if request.pnl_vol_target_mode == "median_relative":
+        scale = _pnl_vol_target_scale(reference_daily_returns)
+    elif request.pnl_vol_target_mode == "exante_target":
+        scale = _exante_vol_target_scale(reference_daily_returns)
+    else:
+        raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
+    return _committee_capital_replay_scale(
+        scale, reference_daily_returns,
+        request.committee_capital, request.committee_kelly_sizing,
+    )
 
 
 def _book_weights(
@@ -3255,11 +3329,7 @@ def _book_outcome(
         # replay the rescaled weights while ``pre_vol_target_reference`` keeps
         # the unscaled Pass-1 result as a diagnostic field.
         reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        pnl_vol_target_scale = _pnl_vol_target_scale(reference_daily_returns)
-        pnl_vol_target_scale = _committee_capital_replay_scale(
-            pnl_vol_target_scale, reference_daily_returns,
-            request.committee_capital, request.committee_kelly_sizing,
-        )
+        pnl_vol_target_scale = _replay_exposure_scale(reference_daily_returns, request)
         replay_scale = pnl_vol_target_scale if request.pnl_vol_target else None
         pre_vol_target_reference = primary
         pre_vol_target_reference_naive_sharpe = _naive_sharpe(primary.ledger)
@@ -3943,6 +4013,8 @@ def _committee_execution_book(
     regime_adaptive_window: int | None = None,
     target_gross: float | None = None,
     member_weights: Mapping[str, float] | None = None,
+    carry_book: pd.DataFrame | None = None,
+    carry_weight: float = 0.0,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
@@ -4014,6 +4086,19 @@ def _committee_execution_book(
     else:
         smoothed = phase_tranche_book(book.reindex(decision_grid).fillna(0.0), tranche_count)
         result = smoothed.reindex(book.index, method="ffill").fillna(0.0)
+    if carry_book is not None and carry_weight > 0.0:
+        if target_gross is None:
+            raise ValueError(
+                "carry_book with carry_weight > 0.0 requires target_gross "
+                "to be set (the diluted book has no gross to normalize against)"
+            )
+        if not (0.0 <= carry_weight < 1.0):
+            raise ValueError(f"carry_weight must be in [0.0, 1.0), got {carry_weight}")
+        unit_committee = scale_book_to_target_gross(result, 1.0)
+        unit_carry = scale_book_to_target_gross(
+            carry_book.reindex(result.index).fillna(0.0), 1.0,
+        )
+        result = (1.0 - carry_weight) * unit_committee + carry_weight * unit_carry
     if target_gross is None:
         return result
     return scale_book_to_target_gross(result, target_gross)
@@ -4165,6 +4250,7 @@ def _build_fold_target_weights(
             ),
             target_gross=_resolved_committee_target_gross(request),
             member_weights=committee_member_weights,
+            carry_book=funding_carry_execution_book(bar_funding, execution_mask, MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, MHS_COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
@@ -4517,11 +4603,7 @@ def _run_anchored_fold(
         # same causal P&L-vol-target scale as the top-level books, computed from
         # the fold's own validation-window reference ledger.
         reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        pnl_vol_target_scale = _pnl_vol_target_scale(reference_daily_returns)
-        pnl_vol_target_scale = _committee_capital_replay_scale(
-            pnl_vol_target_scale, reference_daily_returns,
-            request.committee_capital, request.committee_kelly_sizing,
-        )
+        pnl_vol_target_scale = _replay_exposure_scale(reference_daily_returns, request)
         primary, stress = replay_execution_window_batch(
             _window_telemetry(
                 _rescaled_windows(_windows(), pnl_vol_target_scale),
@@ -5068,6 +5150,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             ),
             target_gross=_resolved_committee_target_gross(request),
             member_weights=(_committee_weights_by_boundary.get("top_level") if request.committee_evidence_weighting else None),
+            carry_book=funding_carry_execution_book(bar_funding, execution_mask, MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, MHS_COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
         ).reindex(grid_1h).ffill().fillna(0.0)
         committee_execution_book = blend_1h
         del close, quote_vol, taker_buy_quote

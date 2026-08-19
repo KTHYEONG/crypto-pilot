@@ -10,6 +10,8 @@ import argparse
 import logging
 import time
 
+from src.mhs.contracts import MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
 # numpy into a coverage or import-graph that must stay light.
@@ -39,13 +41,14 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     # restores the diluted book (None).
     committee_target_gross = (
         None
-        if args.no_committee_target_gross
+        if args.no_committee_target_gross or not committee_capital
         else (
             MHS_COMMITTEE_TARGET_GROSS
             if args.committee_target_gross is None
             else args.committee_target_gross
         )
     )
+    funding_carry_sleeve = committee_capital and not args.no_funding_carry_sleeve
     request = MhsDiagnosticRequest(
         start=args.start,
         end=args.end,
@@ -80,6 +83,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         ensemble_signal=args.ensemble_signal,
         trend_efficiency_overlay=args.trend_efficiency_overlay,
         pnl_vol_target=not args.no_pnl_vol_target,
+        pnl_vol_target_mode=args.pnl_vol_target_mode, funding_carry_sleeve=funding_carry_sleeve, funding_carry_weight=(args.funding_carry_weight if funding_carry_sleeve else 0.0),
     )
     report = run_mhs_horizon_diagnostic(request)
     persist_start = time.perf_counter()
@@ -496,6 +500,29 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Opt-out of the P&L vol-target layer: skip the multiplicative "
             "P&L-vol-target rescale between Pass 1 and Pass 2"
+        ),
+    )
+    mhs.add_argument("--pnl-vol-target-mode", choices=["exante_target", "median_relative"], default="exante_target")
+    mhs.add_argument(
+        "--no-funding-carry-sleeve",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the funding-carry sleeve (requires committee capital, "
+            "on by default). The carry sleeve shorts the highest trailing "
+            "funding and longs the lowest, complementing the committee book "
+            "in low-dispersion years"
+        ),
+    )
+    mhs.add_argument(
+        "--funding-carry-weight",
+        type=float,
+        default=MHS_FUNDING_CARRY_SLEEVE_WEIGHT,
+        help=(
+            "Gross-budget share of the funding-carry sleeve in [0.0, 1.0); "
+            "a registered risk-budget policy value on a measured 0.25-0.35 "
+            "plateau, never a fitted parameter. Requires --committee-capital "
+            "(on by default)"
         ),
     )
     mhs.add_argument(
