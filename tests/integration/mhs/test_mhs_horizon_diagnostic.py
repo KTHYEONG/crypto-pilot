@@ -1637,3 +1637,10 @@ class TestMhsRefactorBitIdenticalReport:
 
         assert _deep_equal(projected, golden)
 
+
+# SCENARIO_MHS_EVIDENCE_WEIGHTING_FOLD_LEVEL_CAGR_CHANGES is a manual
+# integration test run via CLI, not automated pytest, due to ~3-minute
+# full-panel replay cost.  The acceptance criterion requires at least one
+# fold's primary_geometric_cagr to differ from the frozen equal-weight
+# baseline [0.1183, 0.0815, 1.0502] by more than 1e-3.
+

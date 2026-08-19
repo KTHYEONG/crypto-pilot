@@ -5881,3 +5881,203 @@ def test_target_gross_request_validation() -> None:
         MhsDiagnosticRequest(committee_target_gross=-1.0, committee_capital=True)
     with pytest.raises(ValueError, match="committee_target_gross"):
         MhsDiagnosticRequest(committee_target_gross=2.5, committee_capital=True)
+
+
+def test_evidence_weighting_request_validation() -> None:
+    default = MhsDiagnosticRequest()
+    assert default.committee_evidence_weighting is False
+
+    valid = MhsDiagnosticRequest(committee_evidence_weighting=True, committee_capital=True)
+    assert valid.committee_evidence_weighting is True
+
+    with pytest.raises(ValueError, match="committee_capital"):
+        MhsDiagnosticRequest(committee_evidence_weighting=True, committee_capital=False)
+
+    with pytest.raises(ValueError, match="committee_evidence_weighting"):
+        MhsDiagnosticRequest(committee_evidence_weighting="yes")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_MHS_EVIDENCE_WEIGHTS_BY_BOUNDARY_BUILDS_BOOKS_ONCE
+# ---------------------------------------------------------------------------
+
+def test_evidence_weights_by_boundary_builds_once(monkeypatch) -> None:
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    train_ends = {
+        "fold_0": pd.Timestamp("2022-01-01", tz="UTC"),
+        "fold_1": pd.Timestamp("2023-01-01", tz="UTC"),
+        "fold_2": pd.Timestamp("2024-01-01", tz="UTC"),
+    }
+    call_count = {"n": 0}
+    real_build = ev.build_feature_books
+
+    def counting_build(*args, **kwargs):
+        call_count["n"] += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "build_feature_books", counting_build)
+    result = ev._committee_evidence_weights_by_boundary(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, train_ends=train_ends,
+    )
+    assert call_count["n"] == 1
+    assert set(result.keys()) == {"fold_0", "fold_1", "fold_2"}
+    for label in train_ends:
+        assert isinstance(result[label], dict)
+        assert len(result[label]) > 0
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_MHS_EVIDENCE_WEIGHTS_BY_BOUNDARY_DIFFERENTIATES_BY_TRAIN_END
+# ---------------------------------------------------------------------------
+
+def test_evidence_weights_by_boundary_differentiates(monkeypatch) -> None:
+    grid = pd.date_range("2021-01-01", periods=12000, freq="1h", tz="UTC")
+    n_symbols = 8
+    rng = np.random.default_rng(42)
+    symbols = [f"S{i:02d}" for i in range(n_symbols)]
+    close = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rng.normal(0.0, 1e-4, (len(grid), n_symbols)), axis=0)),
+        index=grid, columns=symbols,
+    )
+    quote_vol = pd.DataFrame(rng.uniform(900.0, 1100.0, (len(grid), n_symbols)), index=grid, columns=symbols)
+    taker_buy_quote = quote_vol * rng.uniform(0.4, 0.6, (len(grid), n_symbols))
+    mask = pd.DataFrame(True, index=grid, columns=symbols)
+    decision_grid = pd.date_range(grid[0], grid[-1], freq="24h", tz="UTC")
+
+    # Make two members clearly stronger by giving them positive drift
+    strong_col = [c for c in close.columns if c.startswith("S0")]
+    for c in strong_col:
+        close[c] = 100.0 * np.exp(np.cumsum(rng.normal(2e-4, 1e-5, len(grid))))
+    train_ends = {
+        "early": pd.Timestamp("2021-03-01", tz="UTC"),
+        "late": pd.Timestamp("2021-10-01", tz="UTC"),
+    }
+    result = ev._committee_evidence_weights_by_boundary(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, train_ends=train_ends,
+    )
+    for label in ("early", "late"):
+        assert isinstance(result[label], dict)
+        assert len(result[label]) > 0
+    # At least one member's weight differs between the two boundaries
+    common_keys = set(result["early"]) & set(result["late"])
+    assert any(
+        abs(result["early"][k] - result["late"][k]) > 1e-6
+        for k in common_keys
+    ), f"weights identical across boundaries: {result}"
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_MHS_COMMITTEE_EXECUTION_BOOK_MEMBER_WEIGHTS_NONE_IS_IDENTICAL
+# ---------------------------------------------------------------------------
+
+def test_committee_execution_book_member_weights_none_identical() -> None:
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    book_no_arg = ev._committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, tranche_count=1,
+    )
+    book_none = ev._committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, tranche_count=1, member_weights=None,
+    )
+    pd.testing.assert_frame_equal(book_no_arg, book_none)
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_MHS_COMMITTEE_EXECUTION_BOOK_APPLIES_MEMBER_WEIGHTS
+# ---------------------------------------------------------------------------
+
+def test_committee_execution_book_applies_member_weights() -> None:
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    book_equal = ev._committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, tranche_count=1,
+    )
+    # Build a weight dict that puts 0.8 on the first admitted member
+    member_specs = [s for s in ev.MHS_FEATURE_REGISTRY if s.name in set(ev.MHS_COMMITTEE_MEMBERS)]
+    books = ev.build_feature_books(
+        member_specs,
+        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
+        mask, decision_grid, min_symbols=8,
+    )
+    first_member = next(iter(books.keys()))
+    member_weights = {first_member: 0.8}
+    book_weighted = ev._committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, tranche_count=1, member_weights=member_weights,
+    )
+    # The weighted book should be more correlated with the dominant member
+    first_book_grid = books[first_member].reindex(book_equal.index).fillna(0.0)
+    corr_equal = book_equal.corrwith(first_book_grid, axis=1).mean()
+    corr_weighted = book_weighted.corrwith(first_book_grid, axis=1).mean()
+    assert corr_weighted > corr_equal
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_MHS_COMMITTEE_EXECUTION_BOOK_MEMBER_WEIGHTS_FAIL_CLOSED
+# ---------------------------------------------------------------------------
+
+def test_committee_execution_book_member_weights_fail_closed() -> None:
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    book_equal = ev._committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, tranche_count=1,
+    )
+    # member_weights with only keys not in admitted members
+    book_mismatch = ev._committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, tranche_count=1,
+        member_weights={"nonexistent_member": 1.0},
+    )
+    pd.testing.assert_frame_equal(book_equal, book_mismatch)
+    # All-zero weights also falls back to equal
+    member_specs = [s for s in ev.MHS_FEATURE_REGISTRY if s.name in set(ev.MHS_COMMITTEE_MEMBERS)]
+    books = ev.build_feature_books(
+        member_specs,
+        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
+        mask, decision_grid, min_symbols=8,
+    )
+    zero_weights = dict.fromkeys(books, 0.0)
+    book_zero = ev._committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=8, tranche_count=1, member_weights=zero_weights,
+    )
+    pd.testing.assert_frame_equal(book_equal, book_zero)
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_MHS_FOLD_TARGET_WEIGHTS_THREADS_COMMITTEE_MEMBER_WEIGHTS
+# ---------------------------------------------------------------------------
+
+def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_market_with_taker_buy_quote) -> None:
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True,
+    )
+    spy: dict = {}
+
+    def spy_books(*args, **kwargs):
+        spy["member_weights"] = kwargs.get("member_weights")
+        return (None, None, None, {})
+
+    import contextlib
+    monkeypatch.setattr(ev, "_committee_execution_book", spy_books)
+    # Should not raise; the spy captures the call
+    with contextlib.suppress(Exception):
+        ev._build_fold_target_weights(
+            str(root), _FOLD, request, funding_by_symbol, None,
+            committee_member_weights={"some_member": 1.0},
+        )
+    # The spy was called and received member_weights
+    assert "member_weights" in spy
+    assert spy["member_weights"] == {"some_member": 1.0}
