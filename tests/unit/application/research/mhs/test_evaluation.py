@@ -1108,7 +1108,7 @@ class TestBookOutcomePaired:
     """SCENARIO_MHS_STREAM_BOOK_NO_MATERIALIZATION: the top-level book
     orchestrator streams the execution-window generator twice (reference pass +
     interleaved rescaled batch) instead of bulk materializing, routes the
-    rescaled bounds through ``replay_execution_window_batch``, and preserves
+    rescaled bounds through ``replay_execution_window_batch_isolated``, and preserves
     the typed book failure conversion."""
 
     def test_book_builds_window_iterator_twice_streaming(self, mhs_market, monkeypatch) -> None:
@@ -1122,13 +1122,13 @@ class TestBookOutcomePaired:
 
         monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
         batch_calls = {"n": 0}
-        original_batch = ev.replay_execution_window_batch
+        original_batch = ev.replay_execution_window_batch_isolated
 
         def counting_batch(*_args, **_kwargs):
             batch_calls["n"] += 1
             return original_batch(*_args, **_kwargs)
 
-        monkeypatch.setattr(ev, "replay_execution_window_batch", counting_batch)
+        monkeypatch.setattr(ev, "replay_execution_window_batch_isolated", counting_batch)
         report, _ = ev._book_outcome(**args)
         assert report.primary is not None
         assert report.stress is not None
@@ -1218,7 +1218,7 @@ def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, m
     args = _build_book_outcome_args(mhs_market)
     default_report, _ = ev._book_outcome(**args)
     true_report, _ = ev._book_outcome(
-        **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=True)}
+        **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=True, committee_target_gross=None)}
     )
     # The default reproduces the pre-change primary/stress metrics exactly.
     assert default_report.primary_naive_sharpe == pytest.approx(true_report.primary_naive_sharpe)
@@ -1232,7 +1232,7 @@ def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, m
     monkeypatch.setattr(ev, "_pnl_vol_target_scale", _forced_step_scale)
     on, _ = ev._book_outcome(**args)
     off, _ = ev._book_outcome(
-        **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=False)}
+        **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=False, committee_target_gross=None)}
     )
     # Pass-1 reference is identical across the two branches.
     assert on.pre_vol_target_reference_naive_sharpe == pytest.approx(
@@ -2164,7 +2164,7 @@ def test_crash_tilt_active_fold_reaches_replay(mhs_market_with_btc) -> None:
     target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
-    request_on = dataclasses.replace(request, crash_regime_tilt_alpha=0.3)
+    request_on = dataclasses.replace(request, crash_regime_tilt_alpha=0.3, committee_target_gross=None)
     target_on, _signal, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request_on, funding_by_symbol,
     )
@@ -5188,7 +5188,7 @@ def test_mhs_alpha_engine_fold_portfolio_trigger_preserves_invariants(mhs_market
     assert (target_trig.abs().sum(axis=1) - scale).abs().max() < 1e-9
     assert target_trig.abs().sum(axis=1).max() <= 1.0 + 1e-9
 
-    request_dead = dataclasses.replace(request_trig, rebalance_filter="per_symbol_deadband")
+    request_dead = dataclasses.replace(request_trig, rebalance_filter="per_symbol_deadband", committee_target_gross=None)
     target_dead, _signal, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request_dead, funding_by_symbol,
     )
@@ -5558,7 +5558,7 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
     request = MhsDiagnosticRequest(**base)
     with pytest.raises(DataIntegrityError, match="removed every roster member"):
         ev.run_mhs_horizon_diagnostic(
-            dataclasses.replace(request, execution_coverage_gate=True),
+            dataclasses.replace(request, execution_coverage_gate=True, committee_target_gross=None),
         )
     assert books_called == []
 
@@ -5637,37 +5637,48 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
     epoch = pd.Timestamp("1970-01-01", tz="UTC")
     mdir = root / "markPriceKlines" / "1h"
     mdir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "timestamp": (late_idx - epoch) // pd.Timedelta("1ms"),
-            "datetime": late_idx,
-            "close": 100.0,
-        }
-    ).to_parquet(mdir / f"{late_symbol}.parquet")
+    mark_path = mdir / f"{late_symbol}.parquet"
+    # ``mhs_market`` is a module-scoped shared root: overwriting the mark file
+    # in place would permanently truncate this symbol's schema for every later
+    # test in the module, so the original bytes (or absence) are restored.
+    original_mark_bytes = mark_path.read_bytes() if mark_path.exists() else None
+    try:
+        pd.DataFrame(
+            {
+                "timestamp": (late_idx - epoch) // pd.Timedelta("1ms"),
+                "datetime": late_idx,
+                "close": 100.0,
+            }
+        ).to_parquet(mark_path)
 
-    def _all_roster(quote_vol, eligible, universe_size):
-        mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
-        mask.iloc[0] = False
-        return mask
+        def _all_roster(quote_vol, eligible, universe_size):
+            mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
+            mask.iloc[0] = False
+            return mask
 
-    monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
-    window_calls = {"n": 0}
-    original_windows = ev._iter_mhs_execution_windows
+        monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
+        window_calls = {"n": 0}
+        original_windows = ev._iter_mhs_execution_windows
 
-    def counting(*args, **kwargs):
-        window_calls["n"] += 1
-        return original_windows(*args, **kwargs)
+        def counting(*args, **kwargs):
+            window_calls["n"] += 1
+            return original_windows(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
-    request = MhsDiagnosticRequest(
-        start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
-        execution_universe_size=8, execution_coverage_gate=True,
-    )
-    with pytest.raises(DataIntegrityError) as exc_info:
-        ev.run_mhs_horizon_diagnostic(request)
-    assert late_symbol in str(exc_info.value)
-    assert window_calls["n"] == 0
+        monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
+        request = MhsDiagnosticRequest(
+            start=str(_START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            execution_universe_size=8, execution_coverage_gate=True,
+        )
+        with pytest.raises(DataIntegrityError) as exc_info:
+            ev.run_mhs_horizon_diagnostic(request)
+        assert late_symbol in str(exc_info.value)
+        assert window_calls["n"] == 0
+    finally:
+        if original_mark_bytes is None:
+            mark_path.unlink(missing_ok=True)
+        else:
+            mark_path.write_bytes(original_mark_bytes)
 
 
 def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypatch) -> None:
@@ -5690,30 +5701,41 @@ def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypat
     epoch = pd.Timestamp("1970-01-01", tz="UTC")
     mdir = root / "markPriceKlines" / "1h"
     mdir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "timestamp": (late_idx - epoch) // pd.Timedelta("1ms"),
-            "datetime": late_idx,
-            "open": 100.0,
-            "high": 100.0,
-            "low": 100.0,
-            "close": 100.0,
-        }
-    ).to_parquet(mdir / f"{late_symbol}.parquet")
+    mark_path = mdir / f"{late_symbol}.parquet"
+    # ``mhs_market`` is a module-scoped shared root: overwriting the mark file
+    # in place would permanently truncate this symbol's data for every later
+    # test in the module, so the original bytes (or absence) are restored.
+    original_mark_bytes = mark_path.read_bytes() if mark_path.exists() else None
+    try:
+        pd.DataFrame(
+            {
+                "timestamp": (late_idx - epoch) // pd.Timedelta("1ms"),
+                "datetime": late_idx,
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0,
+            }
+        ).to_parquet(mark_path)
 
-    def _all_roster(quote_vol, eligible, universe_size):
-        mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
-        mask.iloc[0] = False
-        return mask
+        def _all_roster(quote_vol, eligible, universe_size):
+            mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
+            mask.iloc[0] = False
+            return mask
 
-    monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
-    request = MhsDiagnosticRequest(
-        start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
-        execution_universe_size=8, execution_coverage_gate=True,
-    )
-    report = ev.run_mhs_horizon_diagnostic(request)
-    assert report.status == "COMPLETE"
+        monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
+        request = MhsDiagnosticRequest(
+            start=str(_START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            execution_universe_size=8, execution_coverage_gate=True,
+        )
+        report = ev.run_mhs_horizon_diagnostic(request)
+        assert report.status == "COMPLETE"
+    finally:
+        if original_mark_bytes is None:
+            mark_path.unlink(missing_ok=True)
+        else:
+            mark_path.write_bytes(original_mark_bytes)
 
 
 def test_mhs_funding_load_reports_dropped_symbols(tmp_path, monkeypatch) -> None:
@@ -5867,7 +5889,11 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
 def test_target_gross_request_validation() -> None:
     # SCENARIO_MHS_TARGET_GROSS_REQUEST_VALIDATION
     default = MhsDiagnosticRequest()
-    assert default.committee_target_gross is None
+    # Registered default exposure applies to a bare request without forcing
+    # committee_capital=True. The unresolved sentinel is never mutated into
+    # the frozen field (that would break dataclasses.replace()); resolution
+    # happens lazily via _resolved_committee_target_gross.
+    assert ev._resolved_committee_target_gross(default) == ev.MHS_COMMITTEE_TARGET_GROSS
 
     valid = MhsDiagnosticRequest(committee_target_gross=0.795, committee_capital=True)
     assert valid.committee_target_gross == 0.795
@@ -6081,3 +6107,61 @@ def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_m
     # The spy was called and received member_weights
     assert "member_weights" in spy
     assert spy["member_weights"] == {"some_member": 1.0}
+
+
+def test_reference_bound_degraded_preserves_primary(mhs_market, monkeypatch) -> None:
+    """SCENARIO_MHS_REFERENCE_BOUND_DEGRADED: when the isolated batch returns
+    a None result for the strict-proxy slot plus an IsolatedBoundFailure,
+    _book_outcome returns failure=None, primary not None, primary_geometric_cagr
+    finite, patient_reference None, and reference_bound_failures has exactly
+    one entry."""
+    from src.mhs.execution import IsolatedBoundFailure, BatchReplayOutcome
+    args = _build_book_outcome_args(mhs_market)
+    baseline, _ = ev._book_outcome(**args)
+    # Build a mock result for the strict slot
+    strict_fallback = baseline.primary
+    assert strict_fallback is not None
+    mock_outcome = BatchReplayOutcome(
+        results=(baseline.primary, baseline.stress, None),
+        isolated_failures=(
+            IsolatedBoundFailure(
+                bound_index=2,
+                execution_bound="OHLCV_STRICT_PROXY",
+                error_class="DataIntegrityError",
+                message="pre-trade equity must be positive and finite (ts=fail test)",
+                windows_consumed=3,
+            ),
+        ),
+    )
+    real_isolated = ev.replay_execution_window_batch_isolated
+    monkeypatch.setattr(ev, "replay_execution_window_batch_isolated", lambda *a, **k: mock_outcome)
+    report, _ = ev._book_outcome(**args)
+    monkeypatch.setattr(ev, "replay_execution_window_batch_isolated", real_isolated)
+    assert report.failure is None
+    assert report.primary is not None
+    assert np.isfinite(report.primary_geometric_cagr)
+    assert report.patient_reference is None
+    assert report.patient_reference_naive_sharpe is None
+    assert len(report.reference_bound_failures) == 1
+    rbf = report.reference_bound_failures[0]
+    assert "OHLCV_STRICT_PROXY" in rbf.stage
+    assert rbf.reason == "CAPITAL_INVARIANT_BREACH"
+
+
+def test_drawdown_budget_gate_reasons() -> None:
+    """SCENARIO_MHS_DRAWDOWN_BUDGET_GATE: _drawdown_budget_reasons returns
+    PRIMARY_MAX_DRAWDOWN_OVER_BUDGET only when the drawdown strictly exceeds
+    the registered budget, and _mhs_research_go with that reason code yields
+    eligible=False absent from data_integrity_reason_codes."""
+    assert ev._drawdown_budget_reasons(-0.26) == ("PRIMARY_MAX_DRAWDOWN_OVER_BUDGET",)
+    assert ev._drawdown_budget_reasons(-0.25) == ()
+    assert ev._drawdown_budget_reasons(-0.1269) == ()
+    assert ev._drawdown_budget_reasons(None) == ()
+    assert ev._drawdown_budget_reasons(float("nan")) == ()
+    with pytest.raises(ValueError, match="max_drawdown"):
+        ev._drawdown_budget_reasons(-0.26, max_drawdown=0.0)
+    # _mhs_research_go: extra reason gates eligible to False
+    go = ev._mhs_research_go((), extra_reasons=("PRIMARY_MAX_DRAWDOWN_OVER_BUDGET",))
+    assert go.eligible is False
+    assert "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET" in go.reason_codes
+    assert "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET" not in go.data_integrity_reason_codes
