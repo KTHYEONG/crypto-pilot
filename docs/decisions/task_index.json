@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_COMMITTEE_EVIDENCE_WEIGHTING_FOLD_FIX",
+      "date": "2026-08-19",
+      "adr_id": "ADR_20260819_MHS_COMMITTEE_EVIDENCE_WEIGHTING_FOLD_FIX",
+      "domain": "quant",
+      "title": "MHS 위원회 증거가중 fold 경로 무효화 버그 수정",
+      "why": "직전 ADR_20260819_MHS_COMMITTEE_EVIDENCE_WEIGHTING이 --committee-evidence-weighting을 배선했으나, 실제 백테스트 실행 후 fold별 CAGR이 플래그 on/off와 무관하게 baseline과 소수점까지 완전히 동일함을 발견. 원인 추적 결과 _build_fold_target_weights가 메모리 절감을 위해 fold 패널을 validation_start-38일부터만 로드하는데(기존 설계), sign_train_end=fold.train_end로 가중치를 그 잘린 패널 안에서 피팅하려 하면 336h~720h 룩백이 필요한 멤버들이 전부 NaN이 되어 train_evidence_weights의 min_train_rows fail-closed 폴백이 매번 등가중으로 조용히 무효화시킴을 재현 스크립트로 확정(넓은 패널로 같은 train_end를 계산하면 44%/32%/24%/0%/0%처럼 명확히 차등화된 가중치가 나옴 -- 우연한 수렴이 아니라 데이터 부족).",
+      "resolution": "src/application/research/mhs/evaluation.py에 신규 함수 _committee_evidence_weights_by_boundary 추가: top-level의 이미 로드된 연속 2021-2025 패널에서 위원회 멤버 북/proxy를 단 한 번만 만들고, top-level(MHS_COMMITTEE_OOS_START)과 3개 fold의 train_end 총 4개 경계에 대해 가중치를 한 번에 계산. _committee_execution_book은 sign_train_end 파라미터와 내부 피팅 로직을 완전히 제거하고 member_weights(외부에서 미리 계산된 매핑)를 적용·admitted 멤버 기준 재정규화·fail-closed만 담당하도록 단순화(가중치 피팅과 북 구성의 책임 분리). 계산된 fold별 가중치(dict[int,dict[str,float]], 작은 데이터)를 _run_post_book_concurrently -> pool.submit(_run_anchored_fold) -> _build_fold_target_weights 체인에 신규 trailing 파라미터로 배선(패널 자체는 fork 워커로 전달하지 않아 기존 메모리 경계 유지). 모든 신규 파라미터는 None 기본값이라 committee_evidence_weighting=False 시 완전 byte-identical. 감사(/check) 중 구현물이 _run_post_book_concurrently의 fold별 telemetry.record 호출을 스코프 밖에서 삭제한 회귀를 발견해 별도로 복원 완료(tests/integration의 test_ordered_non_negative_stage_records 재통과 확인). 신규 시나리오 테스트 6건, 관련 전체 unit/integration 스위트 검증, ruff/mypy 통과.",
+      "impact": "fold 경로 배선이 실제로 작동함을 실측 리플레이로 확정 -- fold0 11.83%->12.89%, fold1 8.15%->4.81%, fold2 105.02%->67.33%로 3개 fold 전부 baseline과 명확히 달라짐(이전엔 소수점까지 동일해 버그가 조용히 숨어 있었음). top-level 연속 리플레이 성과(CAGR 38.53%, Calmar 3.037)는 이번 수정으로 영향받지 않음(원래도 정상 작동했음). 다만 정직한 신규 발견: fold별로는 순수 개선이 아니며, fold1(2024)이 등가중보다 나빠져 Sharpe가 0.535로 MHS_GO_PRIMARY_SHARPE_FLOOR(0.6) 미달 + STRESS_SHARPE_NOT_POSITIVE 신규 위반, research_go.folds_passed가 3->2로 하락. leak-free 학습 데이터가 fold마다 다른 길이라 가중치 추정 안정성이 fold별로 다르다는 뜻으로 해석 -- committee_evidence_weighting을 기본값으로 전환하기 전 fold1 불안정성의 근본 원인(학습 데이터 부족 또는 특정 멤버 과적합) 규명이 선행 과제로 남음."
+    },
+    {
       "task_id": "MHS_COMMITTEE_TARGET_GROSS",
       "date": "2026-08-19",
       "adr_id": "ADR_20260819_MHS_COMMITTEE_TARGET_GROSS",
@@ -989,16 +999,6 @@
       "why": "apply_realised_risk_overlay/apply_vol_target_overlay scale an already-net-of-original-cost return series by a per-bar factor, implicitly assuming rebalancing to track that factor is free; measured on v6 this was negligible (~1bps/yr) for the constant-factor scalar-only path (ADR_20260805_xs_alpha_v6_growth_sizing) but material (~296bps/yr, ~3%/yr) once vol-targeting made the factor vary every bar (ADR_20260805_xs_alpha_growth_vol_targeting), overstating its reported gains",
       "resolution": "Extracted _ledger_pnl (frozen cost formula, no reimplementation) and added _true_realized_net to reprice P&L directly from realized weights; wired into size_xs_alpha_growth_optimal both before the discovery-window scalar search and before the final return. apply_realised_risk_overlay/apply_vol_target_overlay/solve_growth_optimal_risk/run_xs_composite_ledger signatures untouched",
       "impact": "v6 growth-sized numbers corrected: selected_risk stays 1.5x (median_log_growth 1.029->0.831, still beats no-vol-target 0.518), but Sharpe/CAGR/MDD across discovery/qualification/holdout are now honestly costed -- qualification/holdout CAGR now below pre-scaling v6 (were reported above it), discovery CAGR ~unchanged from pre-scaling. Overlay's real benefit reframed from CAGR uplift to risk-adjusted (Sharpe/MDD) improvement only. docs/results/xs_alpha_vol_weighted_v6_growth_sized.json and xs-screen v6 default adopted_sizing log corrected"
-    },
-    {
-      "task_id": "xs_alpha_growth_vol_targeting",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_growth_vol_targeting",
-      "domain": "risk",
-      "title": "XS Alpha Growth Sizing: Proactive Vol-Targeting Overlay",
-      "why": "v6 static-scalar leverage was closed (selected_risk=1.0, ADR_20260805) and v2+v6 combination measured non-diversifying (corr 0.906-0.918); v6 discovery net returns showed real vol clustering (ACF|r| lag1=+0.186) with no forward-looking response in growth_sizing.py (only reactive drawdown ladder existed)",
-      "resolution": "Added compute_discovery_target_vol/apply_vol_target_overlay (causal trailing-vol overlay, discovery-frozen anchor, fail-closed to 1.0x on insufficient history) in growth_sizing.py; wired as optional default-off params into size_xs_alpha_growth_optimal (backward compatible), default-on (window=42, reusing XsAlphaCompositeSpec signal_windows[0]) in run_xs_alpha_growth_sizing/CLI. Ran on v6: selected_risk 1.0->1.5, discovery Sharpe 1.18->1.59 (MDD -15.3%->-12.7%), qualification Sharpe 1.33->1.69 (MDD -14.3%->-7.5%), both admission gates still pass",
-      "impact": "v6 growth-sized deployment scale updated: static scalar 1.0x -> 1.5x with vol-targeting overlay; turnover rose (qualification 22.7x->41.0x annualized) but stays under the 150x/yr gate -- flagged for monitoring, not adopted into live capital allocation (research-only)"
     }
   ]
 }
