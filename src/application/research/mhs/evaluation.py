@@ -65,6 +65,7 @@ from src.mhs.books import (
     portfolio_rebalance_trigger,
     rank_weight_book,
     renormalize_within_mask,
+    scale_book_to_target_gross,
 )
 from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import MHS_FEATURE_MIN_COVERAGE
@@ -344,6 +345,7 @@ class MhsDiagnosticRequest:
     committee_capital: bool = False
     committee_tranche_smoothing: bool = False
     committee_regime_adaptive_tranche: bool = False
+    committee_target_gross: float | None = None
     execution_coverage_gate: bool = False
     ram_guard: bool = True
 
@@ -410,6 +412,13 @@ class MhsDiagnosticRequest:
             raise ValueError("committee_growth_diagnostic requires committee_book=True")
         if not isinstance(self.committee_capital, bool):
             raise ValueError("committee_capital must be a bool")
+        if self.committee_target_gross is not None:
+            if not (0.0 < self.committee_target_gross <= 2.0):
+                raise ValueError(
+                    "committee_target_gross must be in (0.0, 2.0] when set"
+                )
+            if not self.committee_capital:
+                raise ValueError("committee_target_gross requires committee_capital=True")
         if not isinstance(self.execution_coverage_gate, bool):
             raise ValueError("execution_coverage_gate must be a bool")
         if not isinstance(self.ram_guard, bool):
@@ -3808,6 +3817,7 @@ def _committee_execution_book(
     min_symbols: int,
     tranche_count: int = 1,
     regime_adaptive_window: int | None = None,
+    target_gross: float | None = None,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
@@ -3823,7 +3833,10 @@ def _committee_execution_book(
     lag-1 autocorrelation of the raw book's own proxy return: negative (mean-
     reverting/whipsaw) rows use the smooth, non-negative (trending/persistent)
     rows use the raw book -- root cause and evidence in
-    ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE.
+    ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE. ``target_gross``
+    rescales each decision row to an explicit gross, restoring the unit-gross
+    invariant that the member average and tranche mean otherwise dilute; None
+    preserves the diluted book unchanged.
     """
     if tranche_count < 1:
         raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
@@ -3858,11 +3871,15 @@ def _committee_execution_book(
         )
         use_smoothed = (trailing_rho1 < 0.0).reindex(decision_grid).fillna(False)
         adaptive_grid = book_grid.mask(use_smoothed, smoothed_grid)
-        return adaptive_grid.reindex(book.index, method="ffill").fillna(0.0)
-    if tranche_count == 1:
-        return book
-    smoothed = phase_tranche_book(book.reindex(decision_grid).fillna(0.0), tranche_count)
-    return smoothed.reindex(book.index, method="ffill").fillna(0.0)
+        result = adaptive_grid.reindex(book.index, method="ffill").fillna(0.0)
+    elif tranche_count == 1:
+        result = book
+    else:
+        smoothed = phase_tranche_book(book.reindex(decision_grid).fillna(0.0), tranche_count)
+        result = smoothed.reindex(book.index, method="ffill").fillna(0.0)
+    if target_gross is None:
+        return result
+    return scale_book_to_target_gross(result, target_gross)
 
 
 def _build_fold_target_weights(
@@ -4008,6 +4025,7 @@ def _build_fold_target_weights(
                 MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
+            target_gross=request.committee_target_gross,
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
@@ -4884,6 +4902,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
+            target_gross=request.committee_target_gross,
         ).reindex(grid_1h).ffill().fillna(0.0)
         committee_execution_book = blend_1h
         del close, quote_vol, taker_buy_quote
