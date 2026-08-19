@@ -323,6 +323,29 @@ class StrategyExecutionReplayResult:
     notional_weighted_shortfall_bps: float = float("nan")
 
 
+@dataclass(frozen=True, slots=True)
+class IsolatedBoundFailure:
+    bound_index: int
+    execution_bound: str
+    error_class: str
+    message: str
+    windows_consumed: int
+
+
+@dataclass(frozen=True, slots=True)
+class BatchReplayOutcome:
+    results: tuple[StrategyExecutionReplayResult | None, ...]
+    isolated_failures: tuple[IsolatedBoundFailure, ...]
+
+
+def ruin_guard_equity(fill_track_equity: float, last_ledger_equity: float | None) -> float:
+    if last_ledger_equity is None:
+        return float(fill_track_equity)
+    if not np.isfinite(last_ledger_equity):
+        return float(fill_track_equity)
+    return float(min(fill_track_equity, last_ledger_equity))
+
+
 def simulated_inventory_ledger(
     simulated_fills: pd.DataFrame,
     marks: pd.DataFrame,
@@ -1407,8 +1430,12 @@ class _BoundExecutionReplayAccumulator:
             on_grid = bool(on_grid_all[i])
             _advance(dns, dpos, on_grid)
             equity = self._equity_at(gpos)
+            last_ledger_equity: float | None = None
+            if self.equity_chunks:
+                last_ledger_equity = float(self.equity_chunks[-1][-1])
+            guard_equity = ruin_guard_equity(equity, last_ledger_equity)
             row = target_values[i]
-            if self.min_equity_fraction is not None and equity <= self.min_equity_fraction * self.initial_equity:
+            if self.min_equity_fraction is not None and guard_equity <= self.min_equity_fraction * self.initial_equity:
                 if not self.equity_floor_breaches or self.equity_floor_breaches[-1] != decision_time:
                     self.equity_floor_breaches.append(decision_time)
                 row = np.zeros_like(row)
@@ -2090,6 +2117,91 @@ def replay_execution_windows(
     return accumulator.finalize()
 
 
+def replay_execution_window_batch_isolated(
+    windows: Iterable[ExecutionReplayWindow],
+    initial_equity: float,
+    bounds: Iterable[tuple[_ExecutionBound, ExecutionSpec]],
+    retain_event_snapshots: bool = False,
+    min_equity_fraction: float | None = None,
+    isolated_bound_indices: frozenset[int] = frozenset(),
+) -> BatchReplayOutcome:
+    bound_list = list(bounds)
+    if not bound_list:
+        raise ValueError("bounds must be non-empty")
+    for idx in isolated_bound_indices:
+        if idx < 0 or idx >= len(bound_list):
+            raise ValueError(f"isolated index {idx} out of range for {len(bound_list)} bounds")
+    it = iter(windows)
+    first = next(it, None)
+    if first is None:
+        raise DataIntegrityError("at least one execution window is required")
+    accumulators: list[_BoundExecutionReplayAccumulator | None] = [
+        _BoundExecutionReplayAccumulator(
+            first, initial_equity, bound, spec, retain_event_snapshots, min_equity_fraction,
+        )
+        for (bound, spec) in bound_list
+    ]
+    active: list[bool] = [True] * len(bound_list)
+    windows_consumed: list[int] = [0] * len(bound_list)
+    failures: list[IsolatedBoundFailure] = []
+
+    def _try_consume(idx: int, w: ExecutionReplayWindow) -> None:
+        if not active[idx]:
+            return
+        try:
+            assert accumulators[idx] is not None
+            accumulators[idx].consume(w)  # type: ignore[union-attr]
+            windows_consumed[idx] += 1
+        except DataIntegrityError as exc:
+            if idx in isolated_bound_indices:
+                failures.append(
+                    IsolatedBoundFailure(
+                        bound_index=idx,
+                        execution_bound=str(bound_list[idx][0]),
+                        error_class=type(exc).__name__,
+                        message=str(exc),
+                        windows_consumed=windows_consumed[idx],
+                    )
+                )
+                active[idx] = False
+                accumulators[idx] = None
+            else:
+                raise
+
+    for idx in range(len(bound_list)):
+        _try_consume(idx, first)
+    del first
+    for w in it:
+        for idx in range(len(bound_list)):
+            _try_consume(idx, w)
+        del w
+    results: list[StrategyExecutionReplayResult | None] = []
+    for idx in range(len(bound_list)):
+        if not active[idx]:
+            results.append(None)
+            continue
+        try:
+            assert accumulators[idx] is not None
+            results.append(accumulators[idx].finalize())  # type: ignore[union-attr]
+        except DataIntegrityError as exc:
+            if idx in isolated_bound_indices:
+                failures.append(
+                    IsolatedBoundFailure(
+                        bound_index=idx,
+                        execution_bound=str(bound_list[idx][0]),
+                        error_class=type(exc).__name__,
+                        message=str(exc),
+                        windows_consumed=windows_consumed[idx],
+                    )
+                )
+                results.append(None)
+                active[idx] = False
+                accumulators[idx] = None
+            else:
+                raise
+    return BatchReplayOutcome(results=tuple(results), isolated_failures=tuple(failures))
+
+
 def replay_execution_window_batch(
     windows: Iterable[ExecutionReplayWindow],
     initial_equity: float,
@@ -2109,27 +2221,11 @@ def replay_execution_window_batch(
     ``DataIntegrityError`` raised by an earlier bound propagates unchanged; no
     later bound result is fabricated.
     """
-    bound_list = list(bounds)
-    if not bound_list:
-        raise ValueError("bounds must be non-empty")
-    it = iter(windows)
-    first = next(it, None)
-    if first is None:
-        raise DataIntegrityError("at least one execution window is required")
-    accumulators = [
-        _BoundExecutionReplayAccumulator(
-            first, initial_equity, bound, spec, retain_event_snapshots, min_equity_fraction,
-        )
-        for (bound, spec) in bound_list
-    ]
-    for acc in accumulators:
-        acc.consume(first)
-    del first
-    for w in it:
-        for acc in accumulators:
-            acc.consume(w)
-        del w
-    return tuple(acc.finalize() for acc in accumulators)
+    outcome = replay_execution_window_batch_isolated(
+        windows, initial_equity, bounds, retain_event_snapshots, min_equity_fraction, isolated_bound_indices=frozenset(),
+    )
+    # isolated set empty guarantees no None results
+    return tuple(result for result in outcome.results if result is not None)
 
 
 def replay_execution_window_pair(
