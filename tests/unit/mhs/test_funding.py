@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs.funding import build_funding_carry_candidate_weights, funding_carry_signal
+from src.mhs.funding import (
+    build_funding_carry_candidate_weights,
+    funding_carry_execution_book,
+    funding_carry_signal,
+)
 
 
 class TestFundingCarrySignal:
@@ -82,3 +86,53 @@ class TestFundingCarryCandidateWeights:
             bf, eligible, -1, (72,), min_symbols=4, tranche_count=1,
         )[72]
         pd.testing.assert_frame_equal(long_book, -short_book)
+
+
+class TestFundingCarryExecutionBook:
+    """SCENARIO_CARRY_BOOK_SHORTS_HIGHEST_FUNDING."""
+
+    def test_shorts_highest_funding(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=400, freq="1h", tz="UTC")
+        cols = ["A", "B", "C", "D"]
+        rates = [0.003, 0.001, -0.001, -0.003]
+        bf = pd.DataFrame({c: [r] * 400 for c, r in zip(cols, rates, strict=True)}, index=idx)
+        mask = pd.DataFrame(True, index=idx, columns=cols)
+        decision_grid = idx[::24]
+        book = funding_carry_execution_book(
+            bf, mask, lookback_hours=168,
+            decision_grid=decision_grid, tranche_count=1, min_symbols=2,
+        )
+        post_warmup = book.iloc[168:]
+        # Row sum == 0 (dollar-neutral)
+        assert (post_warmup.sum(axis=1).abs() < 1e-12).all()
+        # Row abs-sum == 1 (unit-gross)
+        assert ((post_warmup.abs().sum(axis=1) - 1.0).abs() < 1e-12).all()
+        # Short the highest funding (A=0.003), long the lowest (D=-0.003)
+        assert (post_warmup["A"] <= 0.0).all()
+        assert (post_warmup["D"] >= 0.0).all()
+
+    def test_fails_closed_on_short_history(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=400, freq="1h", tz="UTC")
+        cols = ["A", "B", "C", "D"]
+        bf = pd.DataFrame({c: [0.001] * 400 for c in cols}, index=idx)
+        mask = pd.DataFrame(True, index=idx, columns=cols)
+        decision_grid = idx[::24]
+        book = funding_carry_execution_book(
+            bf, mask, lookback_hours=168,
+            decision_grid=decision_grid, tranche_count=1, min_symbols=2,
+        )
+        # Rows before lookback_hours are exactly 0.0
+        assert (book.iloc[:168] == 0.0).all().all()
+
+    def test_fails_closed_on_invalid_params(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=100, freq="1h", tz="UTC")
+        bf = pd.DataFrame({"A": [0.0] * 100, "B": [0.0] * 100}, index=idx)
+        mask = pd.DataFrame(True, index=idx, columns=["A", "B"])
+        decision_grid = idx[::24]
+        with pytest.raises(ValueError, match="tranche_count"):
+            funding_carry_execution_book(bf, mask, 168, decision_grid, tranche_count=0)
+        with pytest.raises(ValueError, match="min_symbols"):
+            funding_carry_execution_book(bf, mask, 168, decision_grid, tranche_count=1, min_symbols=1)
+
+
+# SCENARIO_CARRY_BOOK_FAILS_CLOSED_ON_SHORT_HISTORY: covered by test_fails_closed_on_short_history above
