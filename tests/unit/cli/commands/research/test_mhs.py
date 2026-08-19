@@ -755,3 +755,60 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
     assert args.execution_timeframe == "3m"
     _run_mhs_horizon_diagnostic(args)
     assert captured["execution_timeframe"] == "3m"
+
+
+def test_cli_flags_threaded(monkeypatch) -> None:
+    """SCENARIO_CLI_FLAGS_THREADED: new CLI args are threaded into MhsDiagnosticRequest."""
+    import src.application.research.mhs.evaluation as ev
+    from src.mhs.contracts import MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+
+    captured: dict = {}
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        captured.update(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    defaults = {action.dest: action.default for action in parser._actions}
+    assert defaults["pnl_vol_target_mode"] == "exante_target"
+    assert defaults["no_funding_carry_sleeve"] is False
+    assert defaults["funding_carry_weight"] == MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+
+    # Default: exante_target, carry sleeve ON (committee_capital default ON)
+    captured.clear()
+    args = parser.parse_args([])
+    assert args.pnl_vol_target_mode == "exante_target"
+    assert args.no_funding_carry_sleeve is False
+    assert args.funding_carry_weight == MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["pnl_vol_target_mode"] == "exante_target"
+    assert captured["funding_carry_sleeve"] is True
+    assert captured["funding_carry_weight"] == MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+
+    # --no-funding-carry-sleeve disables sleeve
+    captured.clear()
+    args = parser.parse_args(["--no-funding-carry-sleeve"])
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["funding_carry_sleeve"] is False
+    assert captured["funding_carry_weight"] == 0.0
+
+    # --no-committee-capital disables sleeve
+    captured.clear()
+    args = parser.parse_args(["--no-committee-capital"])
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["funding_carry_sleeve"] is False
+
+    # --pnl-vol-target-mode threads through
+    captured.clear()
+    args = parser.parse_args(["--pnl-vol-target-mode", "median_relative"])
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["pnl_vol_target_mode"] == "median_relative"
