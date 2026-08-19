@@ -24,7 +24,7 @@
       "tests/unit/application/research/test_mhs_capital_multi_axis.py",
       "tests/integration/mhs/test_mhs_horizon_opt.py"
     ],
-    "architecture": "docs/specs/mhs_growth_exposure_budget.md"
+    "architecture": "docs/architecture/mhs-explain.md"
   },
   "src/cli/commands/data.py": {},
   "src/cli/commands/research/mhs.py": {
