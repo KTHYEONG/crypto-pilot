@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_COMPOUNDING_GROWTH",
+      "date": "2026-08-19",
+      "adr_id": "ADR_20260819_MHS_COMPOUNDING_GROWTH",
+      "domain": "mhs",
+      "title": "MHS 절대 ex-ante 변동성 타겟팅 + 펀딩캐리 슬리브 도입",
+      "why": "FOLD_GROWTH_CONCENTRATION(2025 폴드 몰빵, max_share 0.808)이 유일한 Research-GO 차단 사유. 근본원인: _pnl_vol_target_scale이 자기 trailing vol의 롤링 중앙값 대비 상대평가라 저위험 연도(2023 vol 0.172)를 고위험 연도(2025 vol 0.286)보다 더 세게 de-risk하는 역스케일 구조였음.",
+      "resolution": "src/mhs/contracts.py에 MHS_PNL_TARGET_ANNUAL_VOL=0.20/MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS=20/MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS=168/MHS_FUNDING_CARRY_SLEEVE_WEIGHT=0.30 등록. evaluation.py에 절대기준 _exante_vol_target_scale과 디스패처 _replay_exposure_scale 추가(기존 _pnl_vol_target_scale은 median_relative 모드로 유지, 기본값 byte-identical). src/mhs/funding.py에 funding_carry_execution_book 추가(고펀딩 숏/저펀딩 롱 캐리 슬리브, fold/blend 양쪽 경로에 동일 함수로 배선). MhsDiagnosticRequest에 pnl_vol_target_mode/funding_carry_sleeve/funding_carry_weight 필드 및 fail-closed 검증 추가. CLI 신규 기본값: --pnl-vol-target-mode exante_target, funding-carry-sleeve on(committee_capital 필요, opt-out 패턴).",
+      "impact": "3m 원장 실측(신규 기본값): fold0(2023) CAGR 0.218->0.351(+61%), fold1(2024) CAGR 0.117->0.247(+111%), fold_growth_concentration.max_fold_share 0.808->0.614(개선했으나 0.50 게이트 미달), primary_max_drawdown -0.230->-0.176(개선). 단 primary_geometric_cagr 0.696->0.521, calmar 3.03->2.96로 총 성장은 오히려 감소(1h 프록시가 예측한 +16% CAGR과 반대 방향) -- 실행 마찰(3m 체결/로스터 히스테리시스)이 exante 타겟팅의 반응성과 상호작용해 2025 고분산 구간 실제 노출을 프록시보다 더 깎은 것으로 추정. research_go.reason_codes는 여전히 ['FOLD_GROWTH_CONCENTRATION'] 하나만 남음(정책 임계값 미달, 데이터무결성 이슈 아님). 추가 조사 필요: target_vol 완화 또는 캐리 비중 재조정으로 총 CAGR 회복 여부."
+    },
+    {
       "task_id": "MHS_GROWTH_EXPOSURE_BUDGET",
       "date": "2026-08-19",
       "adr_id": "ADR_20260819_MHS_GROWTH_EXPOSURE_BUDGET",
@@ -989,16 +999,6 @@
       "why": "v6가 discovery/qualification/holdout/stress 단일분할 admission 게이트는 전부 통과했으나, 2026-08-03 구축된 block-bootstrap LCB90+fold-concentration 신뢰도 게이트는 growth/evaluation.py·rolling_admission.py에만 배선되어 있고 xs-screen/cross_sectional 경로(v2~v6)에는 전혀 연결되지 않아 v6와 그로스사이징 오버레이 모두 이 강건성 검증을 거친 적이 없었음. 사용자 요청으로 실전 투입 준비도 평가 필요.",
       "resolution": "count_closed_trades를 growth/evaluation.py에서 research/evaluation/reliability.py로 이동(레이어링 준수)하고, cross_sectional.py에 XsReliabilityResult+evaluate_xs_reliability를 신설(기존 compute_equity_reliability_gate/compute_equal_duration_fold_distribution 재사용, 신규 통계 없음). xs_trend_screen.py·xs_alpha_growth_sizing.py에 qualification(+holdout) stitched 구간에 대해 진단 필드로 배선(evaluate_xs_admission의 scale-invariant 계약은 불변). 6개월 미만 구간은 fail-closed to None. CLI 실행으로 실측: v6 기본/그로스사이징 모두 fold-concentration은 PASS(0.30/0.33 < threshold 0.407)하지만 LCB90 CAGR(9.98%/8.60%)이 15% 허들 미달로 신뢰도 게이트 FAIL.",
       "impact": "v6는 실전 투입 불가로 확정(측정 기반, 추론 아님) — point-estimate 게이트는 통과하나 부트스트랩 하한이 허들 미달. 그로스사이징 오버레이(1.5x)는 실제 holdout에서 Sharpe 1.73->1.55·CAGR 28.3%->21.3%로 악화 확인, 채택 보류 권고. 실행/주문관리 파이프라인 부재는 별도 스펙 범위로 분리. lean_check --spec 전체 PASS(65% coverage), 기존 admission 판정 전부 불변."
-    },
-    {
-      "task_id": "xs_alpha_growth_sizing_window_selection",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_growth_sizing_window_selection",
-      "domain": "risk",
-      "title": "XS Alpha Growth Sizing: Vol-Target Window Selection",
-      "why": "vol_target_window defaulted to a fixed 42 (signal_windows[0]) chosen for convenience, never validated as growth-optimal; measured post-cost-repricing across the frozen signal_windows=(42,84,168) triple that window=84 gives median_log_growth=1.081 vs window=42's 0.809 (+34%), with better CAGR in all three of discovery/qualification/holdout",
-      "resolution": "Added select_vol_target_window (argmax median_log_growth over a pre-registered grid, discovery-only, reusing size_xs_alpha_growth_optimal unchanged); made it run_xs_alpha_growth_sizing's new default (grid=XsAlphaCompositeSpec().signal_windows). Explicit int or None still reproduce the two prior ADRs' fixed-window/disabled behavior byte-for-byte. CLI --vol-target-window/--no-vol-target unchanged in name, default now omits the kwarg so the search applies",
-      "impact": "v6 growth-sized deployment: vol_target_window auto-selected to 84 (was 42), selected_risk stays 1.5x. Discovery/qualification/holdout CAGR improved materially (23.1%->34.4%, 14.5%->21.3%, 14.6%->21.3%) vs the window=42 baseline, all three admission gates still pass; qualification/holdout MDD deepened somewhat but stays better than pre-scaling v6. No-trade-band on the multiplier was tested and rejected (turnover-neutral-to-negative on median_log_growth)"
     }
   ]
 }
