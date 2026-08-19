@@ -336,7 +336,16 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                 found_impl = False
                 try:
                     tree = ast.parse(sf_content, filename=fh)
-                    if owner:
+                    if kind == "parameter_add" and owner and "." in name:
+                        # parameter_add: verify the owner function exists and
+                        # the leaf parameter is present in its signature.
+                        for node in ast.walk(tree):
+                            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == owner:
+                                target_node = node
+                                arg_names = [a.arg for a in node.args.args]
+                                found_impl = leaf in arg_names
+                                break
+                    elif owner:
                         for node in ast.walk(tree):
                             if isinstance(node, ast.ClassDef) and node.name == owner:
                                 for member in node.body:
