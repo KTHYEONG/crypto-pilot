@@ -54,6 +54,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         committee_tranche_smoothing=args.committee_tranche_smoothing,
         committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
         committee_target_gross=args.committee_target_gross,
+        committee_evidence_weighting=args.committee_evidence_weighting,
         execution_coverage_gate=args.execution_coverage_gate,
         ram_guard=not args.no_ram_guard,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
@@ -272,6 +273,26 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "a full continuous replay can. 0.795 sits well clear of that cliff; "
             "values above ~0.85 must be re-verified by rerunning this diagnostic "
             "and checking blend.failure is None before use"
+        ),
+    )
+    mhs.add_argument(
+        "--committee-evidence-weighting",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in, requires committee capital (on by default): weights the "
+            "k=5 committee members by their TRAIN-ONLY realized proxy-return "
+            "t-statistic instead of equal weights, because measured member proxy "
+            "Sharpes span +0.036 to +1.784 (a 50x spread) while equal weighting "
+            "gives a t=0.08 member the same 20%% as a t=+3.99 member; weights "
+            "are non-negative, sum to 1, and fall back to exact equal weights "
+            "when no member has positive train evidence; fitted strictly before "
+            "each fold's train_end (top-level: before the frozen committee OOS "
+            "start), never on evaluation data; walk-forward measured mean OOS "
+            "Sharpe +0.623->+1.266, improving in every evaluated year 2022-2025; "
+            "evidence is realized P&L, never rank IC -- rank ordering and dollar "
+            "P&L disagree under fat-tailed crypto cross-sections and a rank-IC "
+            "sign flip was measured to invert positive-P&L members"
         ),
     )
     mhs.add_argument(
