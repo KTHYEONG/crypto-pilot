@@ -16,6 +16,7 @@ import glob
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 from datetime import UTC, datetime
@@ -216,6 +217,9 @@ MHS_BOOK_HOLDINGS_STATIONARITY_TOLERANCE = 0.25
 # Max |log(fold/blend)| ratio for holdings_mean and gross_mean before the fold
 # and blend paths are treated as diverged (log-ratio band).
 MHS_FOLD_BLEND_PARITY_TOLERANCE = 0.25
+# Max share of total realized log-growth that a single fold may supply before
+# the fold-growth-concentration gate fires (structural repeatability invariant).
+MHS_FOLD_GROWTH_CONCENTRATION_MAX_SHARE = 0.5
 # EMA smoothing span in decision steps.
 MHS_SIGNAL_EMA_HORIZON_SPAN = 1.0
 
@@ -256,6 +260,7 @@ MHS_GO_REASON_CAPITAL_BREACH = "CAPITAL_INVARIANT_BREACH"
 MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
 MHS_GO_REASON_RESOURCE_BREACH = "RESOURCE_BUDGET_BREACH"
 MHS_GO_REASON_PATH_DIVERGENCE = "FOLD_BLEND_PATH_DIVERGENCE"
+MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION = "FOLD_GROWTH_CONCENTRATION"
 # Data-integrity reason codes: fail-closed evidence that the canonical input
 # data itself was missing or invalid, as opposed to pure alpha-quality failures
 # (MHS_GO_REASON_PRIMARY_SHARPE / MHS_GO_REASON_STRESS_SHARPE) or the policy
@@ -574,6 +579,7 @@ class MhsHorizonDiagnosticReport:
     committee_diagnostic: dict[str, Any] | None = None
     funding_dropped_symbols: dict[str, str] | None = None
     fold_blend_parity: dict[str, Any] | None = None
+    fold_growth_concentration: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -1274,6 +1280,49 @@ def _fold_regime_characterization(
     df = table.to_pandas().sort_values("timestamp").reset_index(drop=True)
     close = pd.Series(df["close"].to_numpy(dtype="float64"), index=pd.to_datetime(df["timestamp"], unit="ms", utc=True))
     return _regime_reference_characterization(close)
+
+
+def _fold_growth_concentration(
+    folds: tuple[MhsFoldReport, ...],
+    max_share: float = MHS_FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Check that no single fold dominates total realized log-growth.
+
+    Returns ``(payload, reason_codes)``.  Folds whose ``primary_valid`` is
+    False, whose CAGR is non-finite, or whose CAGR is ``<= -1.0`` (total
+    wipeout) are recorded under ``payload['unmeasured']`` and excluded from the
+    denominator — mirroring ``_fold_blend_parity``'s degenerate-evidence
+    fail-open pattern.
+    """
+    payload: dict[str, Any] = {
+        "folds": {},
+        "unmeasured": [],
+        "max_fold_share": 0.0,
+        "max_share": max_share,
+    }
+    logrets: list[tuple[int, float]] = []
+    for fold in folds:
+        cagr = fold.primary_geometric_cagr
+        if not fold.primary_valid or not math.isfinite(cagr) or cagr <= -1.0:
+            payload["unmeasured"].append(fold.fold_index)
+            continue
+        logret = math.log1p(cagr)
+        logrets.append((fold.fold_index, logret))
+    if len(logrets) < 2 or sum(lr for _, lr in logrets) <= 0.0:
+        return payload, ()
+    total = sum(lr for _, lr in logrets)
+    max_share_val = 0.0
+    for fold_index, logret in logrets:
+        share = logret / total
+        payload["folds"][fold_index] = {"logret": logret, "share": share}
+        max_share_val = max(max_share_val, share)
+    payload["max_fold_share"] = max_share_val
+    reason_codes = (
+        (MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION,)
+        if max_share_val > max_share
+        else ()
+    )
+    return payload, reason_codes
 
 
 def _fold_blend_parity(
@@ -5170,7 +5219,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         blend_report, folds, trials_attempted,
     )
     fold_blend_parity, parity_reasons = _fold_blend_parity(blend_traces, folds)
-    research_go = _mhs_research_go(folds, book_reasons, parity_reasons)
+    fold_growth_concentration, concentration_reasons = _fold_growth_concentration(folds)
+    research_go = _mhs_research_go(folds, book_reasons, parity_reasons + concentration_reasons)
 
     if blend_report is not None and blend_report.primary is not None:
         if minute_grid is None:
@@ -5257,6 +5307,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         committee_diagnostic=committee_diagnostic,
         funding_dropped_symbols=funding_dropped or None,
         fold_blend_parity=fold_blend_parity,
+        fold_growth_concentration=fold_growth_concentration,
     )
 
 
@@ -5422,6 +5473,7 @@ def build_mhs_run_history_record(
         },
         "termination_counts": report.termination_counts,
         "fold_blend_parity": report.fold_blend_parity,
+        "fold_growth_concentration": report.fold_growth_concentration,
         "report_path": str(persisted_path) if persisted_path is not None else None,
     }
     return cast(dict[str, Any], _round_6(_jsonable(record)))

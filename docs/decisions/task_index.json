@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_FOLD_GROWTH_CONCENTRATION_GATE",
+      "date": "2026-08-19",
+      "adr_id": "ADR_20260819_MHS_FOLD_GROWTH_CONCENTRATION_GATE",
+      "domain": "quant",
+      "title": "MHS 폴드 성장 집중도 게이트 추가",
+      "why": "docs/results/mhs_run_history 31개 런 분석 결과, xs_rank_ic는 전 런에 걸쳐 동일(-0.0409, t=-46)한데 blend CAGR은 사이징 노브 튜닝만으로 -6%~+45% 요동; 최신 런은 3개 폴드 중 2025 폴드 1개가 전체 로그성장의 79%를 차지(fold0 11.8%, fold1 8.1%, fold2 105%)함에도 research_go.eligible=True로 통과됨. 단일 폴드 의존 결과가 복리 재현성 증거 없이 GO 판정을 받는 구조적 공백.",
+      "resolution": "src/application/research/mhs/evaluation.py에 _fold_growth_concentration 순수함수 추가(기존 _fold_blend_parity와 동일한 (payload, reason_codes) 계약). 단일 폴드의 log1p(cagr) 점유율이 전체 대비 50% 초과 시 신규 사유코드 MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION 발생, _mhs_research_go의 extra_reasons로 병합. MhsHorizonDiagnosticReport.fold_growth_concentration 필드 추가 및 build_mhs_run_history_record를 통해 docs/results/mhs_run_history/*.jsonl에 영속화. 재현/가중치/스케일 경로 변경 없음(byte-identical replay). 테스트 5건 신규(tests/unit/mhs/test_evaluation_fold_report.py), 전량 통과, ruff/mypy 통과.",
+      "impact": "research_go 판정이 이제 폴드 간 복리 일관성을 검증; 현재 latest.json 설정은 재적용 시 max_fold_share≈0.79로 게이트가 발동해 research_go.eligible이 False로 전환됨(회귀 아님, 의도된 정책 강화). 후속 과제 2건은 docs/specs/mhs_fold_growth_concentration_gate.md §6에 결정 대기 상태로 문서화: (1) fast_reversal 북의 강한 반전 신호(t=-46)와 순손실의 불일치 규명, (2) committee_growth_diagnostic을 committee_capital 경로에도 개방."
+    },
+    {
       "task_id": "TASK_MHS_FOLD_REGIME_CHARACTERIZATION",
       "date": "2026-08-18",
       "adr_id": "ADR_20260818_MHS_FOLD_REGIME_CHARACTERIZATION",
@@ -989,16 +999,6 @@
       "why": "v6 admitted at fixed unit-gross scale with no drawdown response; growth_sizing.py primitives existed but were never wired onto v6's realized returns",
       "resolution": "Added size_xs_alpha_growth_optimal (discovery-only sizing, full-history drawdown-protected overlay, fail-closed on infeasible), run_xs_alpha_growth_sizing orchestrator restricted to v2/v6, xs-growth-sizing CLI subcommand. Ran on v6: selected_risk=1.0, sizing lever closed (current unit-gross already growth-optimal)",
       "impact": "No leverage change to v6; confirms existing deployment scale is growth-optimal, sizing lever closed as growth source for this profile"
-    },
-    {
-      "task_id": "TASK_XS_ALPHA_V6_CLI_DEFAULT",
-      "date": "2026-08-04",
-      "adr_id": "ADR_20260804_XS_ALPHA_V6_CLI_DEFAULT",
-      "domain": "futures",
-      "title": "xs-screen CLI default profile switched to xs_alpha_vol_weighted_v6",
-      "why": "v6 is now the first profile besides v2 admitted end-to-end (discovery+qualification+holdout+stress) and resolves v2's known qualification/stress weaknesses. Researchers running xs-screen with no --profile flag should see the strongest current evidence by default, scoped strictly to the CLI layer per explicit user confirmation (not a production/live-capital promotion -- no such registration pipeline exists in this codebase).",
-      "resolution": "Changed single_technical.py::_run_xs_trend_screen's fallback from 'profile = args.profile or XS_NEUTRAL_PROFILE_ID' to 'profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID'. Left run_xs_trend_screen's own library default and xs_screen_report_path's default untouched. Updated the one existing test whose no-flag assertions depended on the old default (test_xs_screen_cli_parses_and_dispatches).",
-      "impact": "xs-screen with no --profile now dispatches xs_alpha_vol_weighted_v6 and persists to docs/results/xs_alpha_vol_weighted_v6.json; xs_neutral_composite_v1 remains fully reachable via explicit --profile. All 5 xs-screen CLI tests and all 30 xs_trend_screen orchestration tests pass; ruff/mypy clean. No change to any research profile's evidence, no production/capital-allocation impact (no such pipeline exists yet)."
     }
   ]
 }
