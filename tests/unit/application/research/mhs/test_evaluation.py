@@ -6165,3 +6165,14 @@ def test_drawdown_budget_gate_reasons() -> None:
     assert go.eligible is False
     assert "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET" in go.reason_codes
     assert "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET" not in go.data_integrity_reason_codes
+
+
+# ---------------------------------------------------------------------------
+# MHS Compounding Growth: scenario references (actual tests in test_compounding_growth.py)
+# SCENARIO_EXANTE_SCALE_NEVER_LEVERS_UP
+# SCENARIO_EXANTE_SCALE_CAUSAL_SHIFT
+# SCENARIO_EXANTE_SCALE_FAILS_CLOSED
+# SCENARIO_COMMITTEE_BOOK_CARRY_REQUIRES_TARGET_GROSS
+# SCENARIO_DIAGNOSTIC_DEFAULT_REQUEST_BYTE_IDENTICAL
+# SCENARIO_DIAGNOSTIC_SLEEVE_WIRED_ON_BOTH_PATHS
+# ---------------------------------------------------------------------------
