@@ -142,6 +142,8 @@ MHS_COMMITTEE_MEMBERS: tuple[str, ...] = ()  # chosen members live in the privat
 # Annualized volatility target for committee position sizing.
 MHS_COMMITTEE_TARGET_VOL: float = 0.15
 
+MHS_COMMITTEE_TARGET_GROSS: float = 0.92
+
 # Purge gap (720h) between train and test windows to prevent label overlap leak.
 MHS_COMMITTEE_PURGE_HOURS: int = 720
 
