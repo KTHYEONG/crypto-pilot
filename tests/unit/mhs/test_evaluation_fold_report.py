@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pandas as pd
 import pytest
 
 from src.application.research.mhs.evaluation import (
+    MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION,
     MHS_GO_REASON_PATH_DIVERGENCE,
     MhsFoldReport,
     MhsHorizonDiagnosticReport,
     MhsOutputTier,
     MhsResearchGoResult,
     _fold_blend_parity,
+    _fold_growth_concentration,
     _incomplete_fold_report,
     _mhs_research_go,
     build_mhs_run_history_record,
@@ -252,3 +255,102 @@ def test_fold_report_regime_characterization_defaults_none() -> None:
     assert report.regime_characterization is None
     incomplete = _incomplete_fold_report(_FOLD, 0, ())
     assert incomplete.regime_characterization is None
+
+
+# ---------------------------------------------------------------------------
+# _fold_growth_concentration tests
+# ---------------------------------------------------------------------------
+
+
+def _concentration_fold(
+    fold_index: int,
+    cagr: float,
+    primary_valid: bool = True,
+) -> MhsFoldReport:
+    return MhsFoldReport(
+        fold_index=fold_index,
+        validation_start="2021-02-10",
+        validation_end="2021-04-19",
+        strict=None,
+        stress=None,
+        primary_valid=primary_valid,
+        primary_autocorr_sharpe=0.0,
+        primary_naive_sharpe=0.0,
+        primary_net_ann=0.0,
+        primary_geometric_cagr=cagr,
+        primary_max_drawdown=0.0,
+        stress_naive_sharpe=0.0,
+        decision_intents=0,
+        termination_counts={},
+        failures=(),
+        strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+    )
+
+
+def test_fold_growth_concentration_balanced_no_code() -> None:
+    # SCENARIO_MHS_FOLD_GROWTH_CONCENTRATION_BALANCED_NO_CODE
+    folds = (
+        _concentration_fold(0, 0.10),
+        _concentration_fold(1, 0.12),
+        _concentration_fold(2, 0.11),
+    )
+    payload, reasons = _fold_growth_concentration(folds)
+    assert reasons == ()
+    assert payload["max_fold_share"] <= 0.5
+    assert len(payload["folds"]) == 3
+    assert payload["unmeasured"] == []
+
+
+def test_fold_growth_concentration_single_fold_dominance_blocks_go() -> None:
+    # SCENARIO_MHS_FOLD_GROWTH_CONCENTRATION_SINGLE_FOLD_DOMINANCE_BLOCKS_GO
+    folds = (
+        _concentration_fold(0, 0.118316),
+        _concentration_fold(1, 0.08147),
+        _concentration_fold(2, 1.050152),
+    )
+    payload, reasons = _fold_growth_concentration(folds)
+    assert reasons == (MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION,)
+    assert payload["max_fold_share"] == pytest.approx(0.790, abs=1e-2)
+
+    result = _mhs_research_go((), (), reasons)
+    assert result.eligible is False
+    assert MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION in result.reason_codes
+    assert MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION not in result.data_integrity_reason_codes
+
+
+def test_fold_growth_concentration_invalid_fold_unmeasured() -> None:
+    # SCENARIO_MHS_FOLD_GROWTH_CONCENTRATION_INVALID_FOLD_UNMEASURED
+    folds = (
+        _concentration_fold(0, 0.10, primary_valid=False),
+        _concentration_fold(1, 0.12),
+    )
+    payload, reasons = _fold_growth_concentration(folds)
+    assert reasons == ()
+    assert 0 in payload["unmeasured"]
+    assert 1 not in payload["unmeasured"]
+
+
+def test_run_history_record_includes_fold_growth_concentration() -> None:
+    # SCENARIO_MHS_RUN_HISTORY_INCLUDES_FOLD_GROWTH_CONCENTRATION
+    concentration = {
+        "max_fold_share": 0.790,
+        "max_share": 0.5,
+        "folds": {"2": {"logret": 0.718, "share": 0.790}},
+        "unmeasured": [],
+    }
+    report = _minimal_report(fold_blend_parity_value=None)
+    report = dataclasses.replace(report, fold_growth_concentration=concentration)
+    record = build_mhs_run_history_record(report, None, MhsOutputTier.COMPACT, None)
+    assert "fold_growth_concentration" in record
+    assert record["fold_growth_concentration"] == concentration
+    json.dumps(record)
+
+
+def test_run_history_record_fold_growth_concentration_default_none() -> None:
+    # SCENARIO_MHS_RUN_HISTORY_INCLUDES_FOLD_GROWTH_CONCENTRATION: default None
+    report = _minimal_report(None)
+    record = build_mhs_run_history_record(report, None, MhsOutputTier.COMPACT, None)
+    assert "fold_growth_concentration" in record
+    assert record["fold_growth_concentration"] is None
+    json.dumps(record)
