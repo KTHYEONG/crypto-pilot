@@ -5862,3 +5862,22 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
     )
 
     assert isolated == baseline
+
+
+def test_target_gross_request_validation() -> None:
+    # SCENARIO_MHS_TARGET_GROSS_REQUEST_VALIDATION
+    default = MhsDiagnosticRequest()
+    assert default.committee_target_gross is None
+
+    valid = MhsDiagnosticRequest(committee_target_gross=0.795, committee_capital=True)
+    assert valid.committee_target_gross == 0.795
+
+    with pytest.raises(ValueError, match="committee_capital"):
+        MhsDiagnosticRequest(committee_target_gross=0.795, committee_capital=False)
+
+    with pytest.raises(ValueError, match="committee_target_gross"):
+        MhsDiagnosticRequest(committee_target_gross=0.0, committee_capital=True)
+    with pytest.raises(ValueError, match="committee_target_gross"):
+        MhsDiagnosticRequest(committee_target_gross=-1.0, committee_capital=True)
+    with pytest.raises(ValueError, match="committee_target_gross"):
+        MhsDiagnosticRequest(committee_target_gross=2.5, committee_capital=True)
