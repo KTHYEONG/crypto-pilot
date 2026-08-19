@@ -44,6 +44,7 @@ from src.mhs.evaluation import phase_diagnostic_metrics
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
 from src.mhs.execution import replay_execution_window_batch
+from src.mhs.execution import replay_execution_window_batch_isolated
 from src.mhs.execution import replay_execution_windows
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 # contract wiring: from src.mhs.parallel import MHS_FORK_CONTEXT, assert_fork_admission, fork_shared_payload, plan_worker_count
@@ -69,6 +70,7 @@ from src.mhs.books import (
 )
 from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import MHS_FEATURE_MIN_COVERAGE
+from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS
 from src.mhs.contracts import MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
 from src.mhs.contracts import MHS_RAM_BUDGET_FRACTION
 from src.mhs.contracts import MHS_RAM_RESERVE_FLOOR_BYTES
@@ -263,6 +265,10 @@ MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
 MHS_GO_REASON_RESOURCE_BREACH = "RESOURCE_BUDGET_BREACH"
 MHS_GO_REASON_PATH_DIVERGENCE = "FOLD_BLEND_PATH_DIVERGENCE"
 MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION = "FOLD_GROWTH_CONCENTRATION"
+# Blocking alpha/risk code for a completed blend whose realized drawdown exceeds
+# the registered budget. NOT a data-integrity reason: the data was intact; the
+# risk contract was exceeded.
+MHS_GO_REASON_DRAWDOWN_OVER_BUDGET = "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET"
 # Data-integrity reason codes: fail-closed evidence that the canonical input
 # data itself was missing or invalid, as opposed to pure alpha-quality failures
 # (MHS_GO_REASON_PRIMARY_SHARPE / MHS_GO_REASON_STRESS_SHARPE) or the policy
@@ -278,6 +284,21 @@ MHS_GO_REASON_DATA_INTEGRITY_CODES = frozenset[str]({
     MHS_GO_REASON_RESOURCE_BREACH,
     MHS_GO_REASON_PATH_DIVERGENCE,
 })
+
+
+# Diagnostic reference-only execution bounds. OHLCV_IMMEDIATE_TAKER (primary and
+# cost-stress) is deliberately absent: it carries capital and keeps fail-closed
+# propagation.
+MHS_REFERENCE_ONLY_EXECUTION_BOUNDS: frozenset[str] = frozenset(
+    {"OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_LADDERED_PROXY"}
+)
+
+
+# Sentinel distinguishing the registered default exposure from an explicit
+# committee_target_gross value: a bare MhsDiagnosticRequest() resolves to the
+# registered constant without triggering the committee_capital requirement,
+# while an explicit non-None value keeps requiring committee_capital=True.
+_MHS_COMMITTEE_TARGET_GROSS_UNSET: object = object()
 
 
 # Unrecoverable source gap exclusions (Binance REST API & Vision archives have >4h gaps):
@@ -346,7 +367,7 @@ class MhsDiagnosticRequest:
     committee_capital: bool = False
     committee_tranche_smoothing: bool = False
     committee_regime_adaptive_tranche: bool = False
-    committee_target_gross: float | None = None
+    committee_target_gross: float | None = _MHS_COMMITTEE_TARGET_GROSS_UNSET  # type: ignore[assignment]
     committee_evidence_weighting: bool = False
     execution_coverage_gate: bool = False
     ram_guard: bool = True
@@ -418,11 +439,17 @@ class MhsDiagnosticRequest:
             raise ValueError("committee_evidence_weighting must be a bool")
         if self.committee_evidence_weighting and not self.committee_capital:
             raise ValueError("committee_evidence_weighting requires committee_capital=True")
-        if self.committee_target_gross is not None:
-            if not (0.0 < self.committee_target_gross <= 2.0):
-                raise ValueError(
-                    "committee_target_gross must be in (0.0, 2.0] when set"
-                )
+        # The sentinel is never resolved into the frozen field: `__post_init__`
+        # runs on every `dataclasses.replace()` copy too, and a copy's incoming
+        # value is whatever the source instance's field held -- resolving here
+        # would make a prior resolution look like an explicit request on the
+        # next replace(), permanently losing the "was this ever set by a
+        # caller" distinction. Resolution happens lazily at the two read sites
+        # instead (``_resolved_committee_target_gross``).
+        _raw_target_gross = self.committee_target_gross
+        if _raw_target_gross is not _MHS_COMMITTEE_TARGET_GROSS_UNSET and _raw_target_gross is not None:
+            if not (0.0 < _raw_target_gross <= 2.0):
+                raise ValueError("committee_target_gross must be in (0.0, 2.0] when set")
             if not self.committee_capital:
                 raise ValueError("committee_target_gross requires committee_capital=True")
         if not isinstance(self.execution_coverage_gate, bool):
@@ -474,6 +501,7 @@ class MhsBookReport:
     stress_naive_sharpe: float | None
     terminal_censored_decisions: int = 0
     failure: MhsBookFailure | None = None
+    reference_bound_failures: tuple[MhsBookFailure, ...] = ()
     touch: StrategyExecutionReplayResult | None = None
     touch_naive_sharpe: float | None = None
     ladder: StrategyExecutionReplayResult | None = None
@@ -662,6 +690,35 @@ def _classify_execution_failure(exc: BaseException) -> str:
     if "gap" in message or "mark" in message or "missing" in message:
         return MHS_GO_REASON_EXECUTION_GAP
     return MHS_GO_REASON_INVALID_PRIMARY
+
+
+def _resolved_committee_target_gross(request: MhsDiagnosticRequest) -> float | None:
+    """The effective committee target gross: the registered default when the
+    caller never set the field, else the caller's explicit value (including
+    an explicit ``None``, which keeps the diluted book)."""
+    if request.committee_target_gross is _MHS_COMMITTEE_TARGET_GROSS_UNSET:
+        return MHS_COMMITTEE_TARGET_GROSS
+    return request.committee_target_gross
+
+
+def _drawdown_budget_reasons(
+    primary_max_drawdown: float | None,
+    max_drawdown: float = MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
+) -> tuple[str, ...]:
+    """Pure risk-contract gate: a completed blend breaching the drawdown budget.
+
+    Returns ``(MHS_GO_REASON_DRAWDOWN_OVER_BUDGET,)`` iff ``primary_max_drawdown``
+    is a finite float strictly below ``-max_drawdown``; ``()`` for ``None`` or
+    non-finite (an absent replay is already blocked by its own code). Raises
+    ``ValueError`` when ``max_drawdown <= 0``.
+    """
+    if max_drawdown <= 0:
+        raise ValueError(f"max_drawdown must be > 0, got {max_drawdown}")
+    if primary_max_drawdown is None or not np.isfinite(primary_max_drawdown):
+        return ()
+    if primary_max_drawdown < -max_drawdown:
+        return (MHS_GO_REASON_DRAWDOWN_OVER_BUDGET,)
+    return ()
 
 
 def _resolve_ram_budget(
@@ -3220,7 +3277,7 @@ def _book_outcome(
         if request.ladder_diagnostic:
             _validate_ladder_schedule_contract()
             batch_bounds.append(("OHLCV_LADDERED_PROXY", ExecutionSpec()))
-        batch = replay_execution_window_batch(
+        batch = replay_execution_window_batch_isolated(
             _window_telemetry(
                 _rescaled_windows(_windows(), replay_scale),
                 "execution_window_rescaled",
@@ -3228,17 +3285,34 @@ def _book_outcome(
             initial_equity, batch_bounds,
             retain_event_snapshots=False,
             min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
+            isolated_bound_indices=frozenset(
+                i for i, (bound, _spec) in enumerate(batch_bounds)
+                if bound in MHS_REFERENCE_ONLY_EXECUTION_BOUNDS
+            ),
         )
-        primary = batch[0]
-        stress = batch[1]
-        patient_reference = batch[2]
-        patient_reference_naive_sharpe = _naive_sharpe(patient_reference.ledger)
+        primary = batch.results[0]  # type: ignore[assignment]  # non-isolated index cannot be None
+        stress = batch.results[1]
+        patient_reference = batch.results[2]
+        assert primary is not None
+        assert stress is not None
+        patient_reference_naive_sharpe = (
+            _naive_sharpe(patient_reference.ledger) if patient_reference is not None else None
+        )
         if request.touch_diagnostic:
-            touch = batch[3]
-            touch_naive_sharpe = _naive_sharpe(touch.ledger)
+            touch = batch.results[3]
+            touch_naive_sharpe = _naive_sharpe(touch.ledger) if touch is not None else None
         if request.ladder_diagnostic:
-            ladder = batch[-1]
-            ladder_naive_sharpe = _naive_sharpe(ladder.ledger)
+            ladder = batch.results[-1]
+            ladder_naive_sharpe = _naive_sharpe(ladder.ledger) if ladder is not None else None
+        reference_bound_failures = tuple(
+            MhsBookFailure(
+                stage=f"replay_{name}_{f.execution_bound}",
+                error_class=f.error_class,
+                reason=_classify_execution_failure(DataIntegrityError(f.message)),
+                message=f.message,
+            )
+            for f in batch.isolated_failures
+        )
         if telemetry is not None:
             telemetry.record(
                 f"replay_{name}_strict",
@@ -3332,6 +3406,7 @@ def _book_outcome(
         executed_prescreen=executed_prescreen,
         executed_tail=executed_tail,
         executed_prescreen_net_t=executed_prescreen_net_t,
+        reference_bound_failures=reference_bound_failures,
         primary_realized_shortfall_bps=primary.all_intent_shortfall_bps,
         primary_notional_weighted_shortfall_bps=primary.notional_weighted_shortfall_bps,
         stress_realized_shortfall_bps=stress.all_intent_shortfall_bps,
@@ -4088,7 +4163,7 @@ def _build_fold_target_weights(
                 MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
-            target_gross=request.committee_target_gross,
+            target_gross=_resolved_committee_target_gross(request),
             member_weights=committee_member_weights,
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
@@ -4688,6 +4763,7 @@ def _mhs_research_go(
     folds: tuple[MhsFoldReport, ...],
     book_reasons: tuple[str, ...] = (),
     extra_reasons: tuple[str, ...] = (),
+    blend_primary_max_drawdown: float | None = None,
 ) -> MhsResearchGoResult:
     """Fail-closed top-level Research-GO decision from fold and book evidence.
 
@@ -4697,12 +4773,20 @@ def _mhs_research_go(
     strict replay rejection (capital invariant breach, execution gap, invalid
     primary, or resource-budget breach) is aggregated with the fold reasons.
     ``extra_reasons`` carries observational gate codes (e.g. fold/blend path
-    divergence) surfaced by report assembly. The cap-30 roster and primary
-    annual-return gate thresholds live in ``MHS_REGISTERED_POLICY_THRESHOLDS``;
-    while any is unregistered (``None``) the decision reports
-    ``UNSPECIFIED_POLICY`` and stays conservative (false).
+    divergence) surfaced by report assembly. ``blend_primary_max_drawdown``
+    feeds the registered drawdown-budget gate: a completed blend whose realized
+    drawdown breaches ``MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN`` blocks the decision
+    with ``PRIMARY_MAX_DRAWDOWN_OVER_BUDGET`` (a risk-contract code, never a
+    data-integrity code). The cap-30 roster and primary annual-return gate
+    thresholds live in ``MHS_REGISTERED_POLICY_THRESHOLDS``; while any is
+    unregistered (``None``) the decision reports ``UNSPECIFIED_POLICY`` and
+    stays conservative (false).
     """
-    reasons: list[str] = [*book_reasons, *extra_reasons]
+    reasons: list[str] = [
+        *book_reasons,
+        *extra_reasons,
+        *_drawdown_budget_reasons(blend_primary_max_drawdown),
+    ]
     passed = 0
     for fold_report in folds:
         if fold_report.strict is None:
@@ -4982,7 +5066,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
-            target_gross=request.committee_target_gross,
+            target_gross=_resolved_committee_target_gross(request),
             member_weights=(_committee_weights_by_boundary.get("top_level") if request.committee_evidence_weighting else None),
         ).reindex(grid_1h).ffill().fillna(0.0)
         committee_execution_book = blend_1h
@@ -5320,7 +5404,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     )
     fold_blend_parity, parity_reasons = _fold_blend_parity(blend_traces, folds)
     fold_growth_concentration, concentration_reasons = _fold_growth_concentration(folds)
-    research_go = _mhs_research_go(folds, book_reasons, parity_reasons + concentration_reasons)
+    research_go = _mhs_research_go(
+        folds, book_reasons, parity_reasons + concentration_reasons,
+        blend_primary_max_drawdown=(
+            blend_report.primary_max_drawdown if blend_report is not None else None
+        ),
+    )
 
     if blend_report is not None and blend_report.primary is not None:
         if minute_grid is None:
@@ -5488,6 +5577,7 @@ def _book_summary(book: MhsBookReport) -> dict[str, Any]:
         "primary_annualized_turnover": book.primary_annualized_turnover,
         "stress_naive_sharpe": book.stress_naive_sharpe,
         "failure": book.failure,
+        "reference_bound_failures": book.reference_bound_failures,
     }
 
 
