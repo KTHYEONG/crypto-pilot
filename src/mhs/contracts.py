@@ -129,6 +129,10 @@ _SLOW_BAND = HorizonBand(name="slow_momentum", horizons_hours=MOMENTUM_HORIZON_C
 
 # Candidate grid for funding-rate carry return source discovery.
 MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS: tuple[int, ...] = (24, 72, 168, 336, 504)
+# 캐리 슬리브 기본 lookback: 21회 펀딩 정산(1주), 고원 하한 경계.
+MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS: int = 168
+# 캐리 슬리브 gross 비중: 0.25-0.35 고원 중앙값 (피팅값 아님).
+MHS_FUNDING_CARRY_SLEEVE_WEIGHT: float = 0.30
 
 # Candidate slow band for additive directional trend sleeve.
 MHS_TREND_SLEEVE_HORIZONS_HOURS: tuple[int, ...] = (336, 480, 600, 720, 1080, 1440)
@@ -149,6 +153,12 @@ MHS_COMMITTEE_MEMBERS: tuple[str, ...] = (
 MHS_COMMITTEE_TARGET_VOL: float = 0.15
 
 MHS_COMMITTEE_TARGET_GROSS: float = 0.92
+
+# 절대 ex-ante 변동성 타겟: 전략 자체 실현변동성 5년 중앙값(0.194)에 근접한 보수적 기준.
+# discovery-window(2021-2022) 중앙값 0.23보다 낮아 OOS 과적합 아님.
+MHS_PNL_TARGET_ANNUAL_VOL: float = 0.20
+# EWMA halflife: 기존 MHS_PNL_VOL_TARGET_WINDOW_DAYS=21과 동일 반응속도.
+MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS: int = 20
 
 # Purge gap (720h) between train and test windows to prevent label overlap leak.
 MHS_COMMITTEE_PURGE_HOURS: int = 720

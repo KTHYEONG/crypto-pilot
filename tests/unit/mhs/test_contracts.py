@@ -351,3 +351,27 @@ class TestFrozenLiterals:
         copied = dataclasses.replace(default_request, committee_capital=False)
         assert copied.committee_capital is False
         assert _resolved_committee_target_gross(copied) == MHS_COMMITTEE_TARGET_GROSS
+
+
+class TestCompoundingGrowthContractConstants:
+    """SCENARIO_CONTRACT_CONSTANTS_REGISTERED: new risk-budget constants are registered."""
+
+    def test_constants_registered(self) -> None:
+        from src.mhs.contracts import (
+            MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
+            MHS_FUNDING_CARRY_SLEEVE_WEIGHT,
+            MHS_PNL_TARGET_ANNUAL_VOL,
+            MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
+        )
+
+        assert MHS_PNL_TARGET_ANNUAL_VOL == 0.20
+        assert 0.0 < MHS_PNL_TARGET_ANNUAL_VOL <= 1.0
+
+        assert MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS == 20
+        assert MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS >= 1
+
+        assert MHS_FUNDING_CARRY_SLEEVE_WEIGHT == 0.30
+        assert 0.0 <= MHS_FUNDING_CARRY_SLEEVE_WEIGHT < 1.0
+
+        assert MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS == 168
+        assert MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS in MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
