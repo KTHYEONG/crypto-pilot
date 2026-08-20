@@ -14,7 +14,20 @@ import numpy as np
 import pandas as pd
 
 from src.mhs.contracts import MHS_COMMITTEE_TARGET_VOL
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs.params import (
+    MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
+    MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
+    MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
+    MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+    MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB,
+    MHS_COMMITTEE_GROWTH_N_PATHS,
+    MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
+    MHS_COMMITTEE_GROWTH_RUIN_FRACTION,
+    MHS_PNL_TARGET_ANNUAL_VOL,
+)
+from src.mhs.params import (
+    PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
+)
 
 
 def decompose_cost(
@@ -343,3 +356,49 @@ def purged_walk_forward(
         return pd.Series(dtype=float)
     result = pd.concat(blocks)
     return result.sort_index()
+
+
+def growth_budget_annual_vol(
+    train_returns: pd.Series,
+    *,
+    bars_per_year: float = 365.0,
+    floor: float = 0.05,
+    cap: float = 1.0,
+    fallback: float = MHS_PNL_TARGET_ANNUAL_VOL,
+) -> float:
+    """Annualized target volatility derived from the registered drawdown budget.
+
+    Builds the risk grid as ``reference_risk * MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS``
+    where ``reference_risk = train_returns.std(ddof=1)``; calls
+    ``solve_growth_optimal_risk`` with ``use_drawdown_overlay=False``; returns
+    ``clip(selected_risk * sqrt(bars_per_year), floor, cap)``. On infeasible or
+    degenerate input returns ``fallback`` (MHS_PNL_TARGET_ANNUAL_VOL). The
+    ``use_drawdown_overlay=False`` is mandatory: with the overlay on every grid
+    point reports ``mdd_breach_prob=0.000`` and the solver selects a risk the live
+    path cannot honour.
+    """
+    from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
+
+    r = train_returns.dropna().replace([np.inf, -np.inf], np.nan).dropna()
+    if len(r) < 2:
+        return fallback
+    reference_risk = float(r.std(ddof=1))
+    if not np.isfinite(reference_risk) or reference_risk <= 0:
+        return fallback
+    risk_grid = tuple(sorted(reference_risk * m for m in MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS))
+    config = GrowthSizingConfig(
+        risk_grid=risk_grid,
+        reference_risk=reference_risk,
+        max_drawdown=MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
+        max_drawdown_prob=MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+        ruin_fraction=MHS_COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
+        n_paths=MHS_COMMITTEE_GROWTH_N_PATHS,
+        bars_per_year=MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
+    )
+    result = solve_growth_optimal_risk(r.to_numpy(), config, use_drawdown_overlay=False)
+    if result.selected_risk is None:
+        return fallback
+    annual_vol = float(result.selected_risk * np.sqrt(bars_per_year))
+    return float(np.clip(annual_vol, floor, cap))

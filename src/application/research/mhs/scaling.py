@@ -9,6 +9,7 @@ from src.application.research.mhs.contracts import MhsDiagnosticRequest
 from src.common.errors import DataIntegrityError
 from src.mhs.horizons import efficiency_ratio
 from src.mhs.params import (
+    MHS_COMMITTEE_OOS_START,
     MHS_PNL_TARGET_ANNUAL_VOL,
     MHS_PNL_VOL_TARGET_BURN_IN_DAYS,
     MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
@@ -254,6 +255,24 @@ def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: flo
     return scale.clip(lower=floor, upper=cap).fillna(1.0)
 
 
+def _growth_budget_target_vol(
+    reference_daily_returns: pd.Series,
+    oos_start: pd.Timestamp = MHS_COMMITTEE_OOS_START,
+) -> float:
+    """Leak-free wrapper: slices to index < oos_start, delegates to growth_budget_annual_vol.
+
+    Returns MHS_PNL_TARGET_ANNUAL_VOL when fewer than
+    MHS_PNL_VOL_TARGET_BURN_IN_DAYS train rows exist.
+    """
+    from src.mhs.committee import growth_budget_annual_vol
+
+    train = reference_daily_returns.loc[reference_daily_returns.index < oos_start]
+    train = train.dropna()
+    if len(train) < MHS_PNL_VOL_TARGET_BURN_IN_DAYS:
+        return MHS_PNL_TARGET_ANNUAL_VOL
+    return growth_budget_annual_vol(train)
+
+
 def _replay_exposure_scale(
     reference_daily_returns: pd.Series,
     request: MhsDiagnosticRequest,
@@ -267,6 +286,9 @@ def _replay_exposure_scale(
         scale = _pnl_vol_target_scale(reference_daily_returns)
     elif request.pnl_vol_target_mode == "exante_target":
         scale = _exante_vol_target_scale(reference_daily_returns, cap=MHS_PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
+    elif request.pnl_vol_target_mode == "growth_budget":
+        target_vol = _growth_budget_target_vol(reference_daily_returns)
+        scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=MHS_PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
     else:
         raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
     return _committee_capital_replay_scale(
