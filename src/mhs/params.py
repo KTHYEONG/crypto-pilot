@@ -45,7 +45,13 @@ MHS_TREND_SLEEVE_HORIZONS_HOURS: tuple[int, ...] = (336, 480, 600, 720, 1080, 14
 
 MHS_FEATURE_MIN_COVERAGE: float = 0.90
 
-MHS_COMMITTEE_MEMBERS: tuple[str, ...] = ()  # chosen members live in the private strategy store
+MHS_COMMITTEE_MEMBER_SETS: dict[str, tuple[str, ...]] = {}  # chosen sets live in the private strategy store
+
+MHS_COMMITTEE_DEFAULT_MEMBER_SET: str = "flow_momentum_v1"
+
+MHS_COMMITTEE_MEMBERS: tuple[str, ...] = MHS_COMMITTEE_MEMBER_SETS[
+    MHS_COMMITTEE_DEFAULT_MEMBER_SET
+]
 
 MHS_COMMITTEE_TARGET_VOL: float = 0.15
 MHS_COMMITTEE_TARGET_GROSS: float = 0.92
