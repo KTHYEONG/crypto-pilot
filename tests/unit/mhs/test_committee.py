@@ -423,6 +423,10 @@ def test_committee_members_resolve_in_feature_registry() -> None:
             families.add("trend")
         elif member.startswith("mom3_"):
             families.add("higher_moment")
+        elif member.startswith("lowvol_"):
+            families.add("defensive")
+        elif member.startswith("rev_"):
+            families.add("reversal")
         else:
             families.add(member)
     assert len(families) >= 3
@@ -547,3 +551,74 @@ def test_evidence_weights_reject_invalid_input() -> None:
     assert w["flat"] == pytest.approx(1 / 3, abs=1e-12)
     assert w["neg"] == pytest.approx(1 / 3, abs=1e-12)
     assert sum(w.values()) == pytest.approx(1.0, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# growth_budget_annual_vol tests
+# ---------------------------------------------------------------------------
+
+
+def test_growth_budget_annual_vol_returns_float_in_range() -> None:
+    # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_03: growth_budget_annual_vol on a
+    # 500-bar positive-drift series with std 0.01 returns a float in [0.05, 1.0].
+    from src.mhs.committee import growth_budget_annual_vol
+
+    rng = np.random.default_rng(42)
+    idx = _hourly_index(500)
+    returns = pd.Series(rng.normal(0.0001, 0.01, 500), index=idx)
+    result = growth_budget_annual_vol(returns)
+    assert isinstance(result, float)
+    assert 0.05 <= result <= 1.0
+
+
+def test_growth_budget_annual_vol_fallback_on_empty() -> None:
+    # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_03: on an empty Series, returns
+    # MHS_PNL_TARGET_ANNUAL_VOL.
+    from src.mhs.committee import growth_budget_annual_vol
+    from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+
+    assert growth_budget_annual_vol(pd.Series(dtype=float)) == MHS_PNL_TARGET_ANNUAL_VOL
+
+
+def test_growth_budget_annual_vol_fallback_on_one_row() -> None:
+    from src.mhs.committee import growth_budget_annual_vol
+    from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+
+    idx = _hourly_index(1)
+    assert growth_budget_annual_vol(pd.Series([0.001], index=idx)) == MHS_PNL_TARGET_ANNUAL_VOL
+
+
+def test_growth_budget_annual_vol_fallback_on_zero_std() -> None:
+    # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_03: an all-zero (std==0) Series
+    # returns exactly MHS_PNL_TARGET_ANNUAL_VOL.
+    from src.mhs.committee import growth_budget_annual_vol
+    from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+
+    idx = _hourly_index(500)
+    assert growth_budget_annual_vol(pd.Series(0.0, index=idx)) == MHS_PNL_TARGET_ANNUAL_VOL
+
+
+def test_growth_budget_annual_vol_always_finite() -> None:
+    from src.mhs.committee import growth_budget_annual_vol
+
+    rng = np.random.default_rng(7)
+    idx = _hourly_index(500)
+    returns = pd.Series(rng.normal(0.0001, 0.01, 500), index=idx)
+    result = growth_budget_annual_vol(returns)
+    assert np.isfinite(result)
+
+
+def test_growth_budget_annual_vol_high_sharpe_returns_larger() -> None:
+    # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_03: A high-Sharpe series
+    # (mean/std = 0.15) returns a strictly larger value than the same series
+    # scaled to 4x its volatility, proving the budget binds on drawdown risk
+    # rather than on raw magnitude.
+    from src.mhs.committee import growth_budget_annual_vol
+
+    rng = np.random.default_rng(12)
+    idx = _hourly_index(500)
+    high_sharpe = pd.Series(rng.normal(0.0015, 0.01, 500), index=idx)
+    low_sharpe = pd.Series(rng.normal(0.0015, 0.04, 500), index=idx)
+    result_high = growth_budget_annual_vol(high_sharpe)
+    result_low = growth_budget_annual_vol(low_sharpe)
+    assert result_high > result_low
