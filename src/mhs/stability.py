@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-_PERIODS_PER_YEAR_1H = 365.0 * 24.0
+from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 
 
 @dataclass(frozen=True, slots=True)

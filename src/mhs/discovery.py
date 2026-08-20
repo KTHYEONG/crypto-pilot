@@ -25,8 +25,8 @@ from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
 from src.mhs.evaluation import AnchoredPurgedFold, cost_response_curve
 from src.mhs.execution import mhs_ledger_pnl
 from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
+from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 
-_PERIODS_PER_YEAR_1H = 365.0 * 24.0
 _ADMISSION_T = 2.0
 
 
