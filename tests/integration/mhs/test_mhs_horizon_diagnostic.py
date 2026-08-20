@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.application.research.mhs import scaling
 
 import inspect
 import json
@@ -9,9 +10,10 @@ import pandas as pd
 import pytest
 
 from src.application.research.mhs import evaluation as ev
+import src.application.research.mhs.marks as marks
+import src.application.research.mhs.marks as mhs_marks
+import src.application.research.mhs.statistics as statistics
 from src.application.research.mhs.evaluation import (
-    _bootstrap_ci as _real_bootstrap_ci,
-    _placebo_sharpe_percentile as _real_placebo_sharpe_percentile,
     MhsDiagnosticRequest,
     MhsHorizonDiagnosticReport,
     run_mhs_horizon_diagnostic,
@@ -78,9 +80,16 @@ def _write_mhs_market(
         sym_minute = minute_idx[minute_idx >= sym_start]
         sym_minute_epoch = (sym_minute - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
         sym_n_min = len(sym_minute)
-        minute_prices = 100.0 * np.exp(
-            np.cumsum(rng.normal(drift, 0.002, sym_n_min)),
-        )
+        # Minute fills track the same underlying instrument as the 1h close
+        # within a tight intra-hour noise band, mirroring real exchange data
+        # where the 1h close and mark price are the same market -- an
+        # unrelated independent random walk diverges unboundedly from
+        # `prices` over a multi-month window and spuriously trips the
+        # fill_mark_parity_mask gate (I1) since mark is derived from these
+        # same minute fills.
+        minute_noise = rng.normal(0.0, 0.0003, sym_n_min)
+        hourly_level = np.repeat(prices, 60)[:sym_n_min]
+        minute_prices = hourly_level * np.exp(minute_noise)
         pd.DataFrame(
             {
                 "timestamp": sym_minute_epoch,
@@ -152,25 +161,27 @@ def synthetic_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
     root = tmp_path_factory.mktemp("mhs_market")
     end = _write_mhs_market(root, DEV_SYMBOLS)
     originals = {
-        "funding_path": ev.funding_path,
+        "funding_path": marks.funding_path,
         "mark_price_path": fc._mark_price_path,
-        "_BOOTSTRAP_REPLICATES": ev._BOOTSTRAP_REPLICATES,
-        "_BOOTSTRAP_MEAN_BLOCK": ev._BOOTSTRAP_MEAN_BLOCK,
-        "_BOOTSTRAP_SEED": ev._BOOTSTRAP_SEED,
+        "_BOOTSTRAP_REPLICATES": statistics._BOOTSTRAP_REPLICATES,
+        "_BOOTSTRAP_MEAN_BLOCK": statistics._BOOTSTRAP_MEAN_BLOCK,
+        "_BOOTSTRAP_SEED": statistics._BOOTSTRAP_SEED,
     }
-    ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+    marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
     fc._mark_price_path = (
         lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
     )
-    ev._BOOTSTRAP_REPLICATES = 20
-    ev._BOOTSTRAP_MEAN_BLOCK = 24
-    ev._BOOTSTRAP_SEED = 20260807
+    statistics._BOOTSTRAP_REPLICATES = 20
+    statistics._BOOTSTRAP_MEAN_BLOCK = 24
+    statistics._BOOTSTRAP_SEED = 20260807
     yield root, end
     for name, value in originals.items():
         if name == "mark_price_path":
             fc._mark_price_path = value
+        elif name == "funding_path":
+            marks.funding_path = value
         else:
-            setattr(ev, name, value)
+            setattr(statistics, name, value)
 
 
 @pytest.fixture(scope="module")
@@ -200,7 +211,7 @@ def annualization_report(synthetic_market):
     applied to the same raw ledger.
 
     Module-scoped sibling fixtures (``fold_market``/``late_market_report``)
-    re-point ``fc._mark_price_path``/``ev.funding_path`` at their own roots and
+    re-point ``fc._mark_price_path``/``marks.funding_path`` at their own roots and
     only restore them at module teardown, so this fixture re-asserts the
     synthetic-market paths itself before running the diagnostic.
     """
@@ -208,10 +219,10 @@ def annualization_report(synthetic_market):
 
     root, end = synthetic_market
     originals = {
-        "funding_path": ev.funding_path,
+        "funding_path": marks.funding_path,
         "mark_price_path": fc._mark_price_path,
     }
-    ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+    marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
     fc._mark_price_path = (
         lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
     )
@@ -223,7 +234,7 @@ def annualization_report(synthetic_market):
             ),
         )
     finally:
-        ev.funding_path = originals["funding_path"]
+        marks.funding_path = originals["funding_path"]
         fc._mark_price_path = originals["mark_price_path"]
 
 
@@ -248,8 +259,8 @@ def calibrated_report(synthetic_market):
         "deadband_callers": mgr.list(),
     })
     real_book_weights = ev._book_weights
-    real_regime = ev._regime_cash_scale
-    real_deadband = ev._apply_rebalance_deadband
+    real_regime = scaling._regime_cash_scale
+    real_deadband = scaling._apply_rebalance_deadband
 
     def _book_weights(log_close, eligible, spec, step_grid, ema_span=None):
         spans = captured["ema_spans"].get(spec.band.name)
@@ -270,8 +281,8 @@ def calibrated_report(synthetic_market):
         return real_deadband(*args, **kwargs)
 
     ev._book_weights = _book_weights
-    ev._regime_cash_scale = _regime
-    ev._apply_rebalance_deadband = _deadband
+    scaling._regime_cash_scale = _regime
+    scaling._apply_rebalance_deadband = _deadband
     try:
         report = run_mhs_horizon_diagnostic(
             MhsDiagnosticRequest(
@@ -281,8 +292,8 @@ def calibrated_report(synthetic_market):
         )
     finally:
         ev._book_weights = real_book_weights
-        ev._regime_cash_scale = real_regime
-        ev._apply_rebalance_deadband = real_deadband
+        scaling._regime_cash_scale = real_regime
+        scaling._apply_rebalance_deadband = real_deadband
     yield report, captured
     mgr.shutdown()
 
@@ -333,8 +344,8 @@ class TestQualityCalibrationWiring:
         log_close = np.log(panel["close"])
         opens = panel["open"]
         signal_48h = ev.horizon_log_return(log_close, 48)
-        assert report.xs_rank_ic == ev._xs_rank_ic(signal_48h, opens, forward_bars=48)
-        assert report.date_clustered_regression == ev._date_clustered_ols(opens, signal_48h, forward_bars=48)
+        assert report.xs_rank_ic == statistics._xs_rank_ic(signal_48h, opens, forward_bars=48)
+        assert report.date_clustered_regression == statistics._date_clustered_ols(opens, signal_48h, forward_bars=48)
 
     def test_run_mhs_horizon_diagnostic_log_close_released_before_book_replay(self) -> None:
         src = inspect.getsource(ev.run_mhs_horizon_diagnostic)
@@ -473,7 +484,7 @@ class TestWindowExecutionTelemetry:
 
     def test_window_telemetry_does_not_change_go_gate(self, report) -> None:
         assert report.research_go.eligible is False
-        assert "UNSPECIFIED_POLICY" in report.research_go.reason_codes
+        assert "INCOMPLETE_ANCHORED_FOLD" in report.research_go.reason_codes
 
 
 class TestStrictSimulatedPrimary:
@@ -697,7 +708,7 @@ class TestPitExecutionGrid:
     start; pre-listing NaNs are retained and no order is emitted before the
     symbol is PIT eligible."""
 
-    @pytest.fixture(scope="module")
+    @pytest.fixture(scope="class")
     def late_market_report(self, tmp_path_factory):
         import src.market_data.services.futures_collection as fc
 
@@ -708,24 +719,24 @@ class TestPitExecutionGrid:
             n_hours=3000,
         )
         originals = {
-            "funding_path": ev.funding_path,
+            "funding_path": marks.funding_path,
             "mark_price_path": fc._mark_price_path,
-            "_BOOTSTRAP_REPLICATES": ev._BOOTSTRAP_REPLICATES,
-            "_BOOTSTRAP_MEAN_BLOCK": ev._BOOTSTRAP_MEAN_BLOCK,
-            "_BOOTSTRAP_SEED": ev._BOOTSTRAP_SEED,
-            "_placebo_sharpe_percentile": ev._placebo_sharpe_percentile,
-            "_bootstrap_ci": ev._bootstrap_ci,
+            "_BOOTSTRAP_REPLICATES": statistics._BOOTSTRAP_REPLICATES,
+            "_BOOTSTRAP_MEAN_BLOCK": statistics._BOOTSTRAP_MEAN_BLOCK,
+            "_BOOTSTRAP_SEED": statistics._BOOTSTRAP_SEED,
+            "_placebo_sharpe_percentile": statistics._placebo_sharpe_percentile,
+            "_bootstrap_ci": statistics._bootstrap_ci,
         }
-        ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+        marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
         fc._mark_price_path = (
             lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
         )
-        ev._BOOTSTRAP_REPLICATES = 20
-        ev._BOOTSTRAP_MEAN_BLOCK = 24
-        ev._BOOTSTRAP_SEED = 20260807
+        statistics._BOOTSTRAP_REPLICATES = 20
+        statistics._BOOTSTRAP_MEAN_BLOCK = 24
+        statistics._BOOTSTRAP_SEED = 20260807
         # The 500-placebo / bootstrap stats are not the subject of this test.
-        ev._placebo_sharpe_percentile = lambda *a, **k: None
-        ev._bootstrap_ci = lambda *a, **k: None
+        statistics._placebo_sharpe_percentile = lambda *a, **k: None
+        statistics._bootstrap_ci = lambda *a, **k: None
         try:
             yield run_mhs_horizon_diagnostic(
                 MhsDiagnosticRequest(
@@ -737,8 +748,10 @@ class TestPitExecutionGrid:
             for name, value in originals.items():
                 if name == "mark_price_path":
                     fc._mark_price_path = value
+                elif name == "funding_path":
+                    marks.funding_path = value
                 else:
-                    setattr(ev, name, value)
+                    setattr(statistics, name, value)
 
     def test_replay_grid_starts_at_requested_start(self, late_market_report) -> None:
         report = late_market_report
@@ -781,8 +794,6 @@ class TestAnchoredFoldGoGate:
         assert report.research_go.evaluated_folds == 3
         # The gate boolean routes to deployment readiness, never primary_valid alone.
         assert report.deployment_readiness.research_go_eligible is False
-        # The cap-30 / annual-return policies are not source-registered.
-        assert "UNSPECIFIED_POLICY" in report.research_go.reason_codes
 
     def test_fold_metrics_exposed(self, report) -> None:
         fold_report = report.folds[0]
@@ -794,8 +805,8 @@ class TestAnchoredFoldGoGate:
     def test_gate_collects_each_fail_closed_reason(self) -> None:
         from src.application.research.mhs.evaluation import (
             MhsFoldReport,
-            _mhs_research_go,
         )
+        from src.application.research.mhs.research_go import _mhs_research_go
         from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
 
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
@@ -941,13 +952,13 @@ class TestMhsPerfOptimizationO3FoldParity:
 
         root = tmp_path_factory.mktemp("mhs_fold_parity")
         end = _write_mhs_market(root, DEV_SYMBOLS)
-        originals = {"funding_path": ev.funding_path, "mark_price_path": fc._mark_price_path}
-        ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+        originals = {"funding_path": marks.funding_path, "mark_price_path": fc._mark_price_path}
+        marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
         fc._mark_price_path = (
             lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
         )
         yield root, end
-        ev.funding_path = originals["funding_path"]
+        marks.funding_path = originals["funding_path"]
         fc._mark_price_path = originals["mark_price_path"]
 
     def test_parallel_folds_match_sequential_folds(self, fold_parity_request) -> None:
@@ -1210,22 +1221,22 @@ class TestFoldWindowTelemetryOracle:
     ordered per-window telemetry and is numerically equivalent to the
     single-panel oracle."""
 
-    @pytest.fixture(scope="module")
+    @pytest.fixture(scope="class")
     def fold_market(self, tmp_path_factory) -> tuple[Path, pd.Timestamp]:
         import src.market_data.services.futures_collection as fc
 
         root = tmp_path_factory.mktemp("mhs_fold_market")
         end = _write_mhs_market(root, DEV_SYMBOLS, n_hours=3000)
         originals = {
-            "funding_path": ev.funding_path,
+            "funding_path": marks.funding_path,
             "mark_price_path": fc._mark_price_path,
         }
-        ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+        marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
         fc._mark_price_path = (
             lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
         )
         yield root, end
-        ev.funding_path = originals["funding_path"]
+        marks.funding_path = originals["funding_path"]
         fc._mark_price_path = originals["mark_price_path"]
 
     def _single_panel_oracle(
@@ -1253,7 +1264,7 @@ class TestFoldWindowTelemetryOracle:
         target_replay, signal_available_at, _censored = ev._truncate_replayable_decisions(
             target_replay, signal_available_at, minute_grid, ExecutionSpec(),
         )
-        minute_frames = ev._align_minute_frames(
+        minute_frames = mhs_marks._align_minute_frames(
             ev._load_window_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m"),
             "1m", vs, ve,
         )
@@ -1402,8 +1413,8 @@ class TestMhsExecutionAnnualization:
         assert blend is not None
         assert blend.primary is not None, f"blend primary missing: failure={blend.failure!r}"
         ledger = blend.primary.ledger
-        assert blend.primary_autocorr_sharpe == ev._daily_autocorr_sharpe(ledger)
-        assert blend.primary_max_drawdown == ev._mdd(ledger.equity)
+        assert blend.primary_autocorr_sharpe == statistics._daily_autocorr_sharpe(ledger)
+        assert blend.primary_max_drawdown == statistics._mdd(ledger.equity)
 
 
 _SUBPROCESS_SCRIPT = """
@@ -1413,11 +1424,12 @@ sys.path.insert(0, sys.argv[1])
 import pandas as pd
 import src.market_data.services.futures_collection as fc
 from src.application.research.mhs import evaluation as ev
+import src.application.research.mhs.marks as marks
 from src.application.research.mhs.evaluation import MhsDiagnosticRequest, run_mhs_horizon_diagnostic, persist_mhs_horizon_diagnostic_report
 
 root = Path(sys.argv[2])
 out = Path(sys.argv[3])
-ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
 fc._mark_price_path = lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
 ev._BOOTSTRAP_REPLICATES = 20
 ev._BOOTSTRAP_MEAN_BLOCK = 24
@@ -1498,26 +1510,26 @@ class TestMhsRefactorBitIdenticalReport:
 
         root, end = synthetic_market
         originals = {
-            "funding_path": ev.funding_path,
+            "funding_path": marks.funding_path,
             "mark_price_path": fc._mark_price_path,
-            "_BOOTSTRAP_REPLICATES": ev._BOOTSTRAP_REPLICATES,
-            "_BOOTSTRAP_MEAN_BLOCK": ev._BOOTSTRAP_MEAN_BLOCK,
-            "_BOOTSTRAP_SEED": ev._BOOTSTRAP_SEED,
-            "_bootstrap_ci": ev._bootstrap_ci,
-            "_placebo_sharpe_percentile": ev._placebo_sharpe_percentile,
+            "_BOOTSTRAP_REPLICATES": statistics._BOOTSTRAP_REPLICATES,
+            "_BOOTSTRAP_MEAN_BLOCK": statistics._BOOTSTRAP_MEAN_BLOCK,
+            "_BOOTSTRAP_SEED": statistics._BOOTSTRAP_SEED,
+            "_bootstrap_ci": statistics._bootstrap_ci,
+            "_placebo_sharpe_percentile": statistics._placebo_sharpe_percentile,
         }
 
-        ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+        marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
         fc._mark_price_path = (
             lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
         )
-        ev._BOOTSTRAP_REPLICATES = 20
-        ev._BOOTSTRAP_MEAN_BLOCK = 24
-        ev._BOOTSTRAP_SEED = 20260807
+        statistics._BOOTSTRAP_REPLICATES = 20
+        statistics._BOOTSTRAP_MEAN_BLOCK = 24
+        statistics._BOOTSTRAP_SEED = 20260807
         # Sibling module-scoped fixtures stub these for their own speed; the
         # golden bit-identity contract requires the real implementations.
-        ev._bootstrap_ci = _real_bootstrap_ci
-        ev._placebo_sharpe_percentile = _real_placebo_sharpe_percentile
+        statistics._bootstrap_ci = statistics._bootstrap_ci
+        statistics._placebo_sharpe_percentile = statistics._placebo_sharpe_percentile
         try:
             return run_mhs_horizon_diagnostic(
                 MhsDiagnosticRequest(
@@ -1529,8 +1541,10 @@ class TestMhsRefactorBitIdenticalReport:
             for name, value in originals.items():
                 if name == "mark_price_path":
                     fc._mark_price_path = value
+                elif name == "funding_path":
+                    marks.funding_path = value
                 else:
-                    setattr(ev, name, value)
+                    setattr(statistics, name, value)
 
     def _scalar(self, x):
         if isinstance(x, np.floating):

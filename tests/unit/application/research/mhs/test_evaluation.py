@@ -14,6 +14,11 @@ import pytest
 import src.market_data.services.futures_collection as fc
 from src.application.data import mhs_execution_collection as mec
 from src.application.research.mhs import evaluation as ev
+import src.application.research.mhs.marks as marks
+import src.application.research.mhs.resources as resources
+import src.application.research.mhs.scaling as scaling
+import src.application.research.mhs.statistics as statistics
+import src.application.research.mhs.research_go as _research_go
 from src.application.research.mhs.evaluation import (
     MhsDiagnosticRequest,
     _StageRecorder,
@@ -173,7 +178,7 @@ def _mhs_shared_roots(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tup
 @pytest.fixture
 def mhs_market_long(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["long"]
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
@@ -187,7 +192,7 @@ def mhs_market_long(_mhs_shared_roots, monkeypatch):
 @pytest.fixture
 def mhs_market(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["default"]
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
@@ -201,7 +206,7 @@ def mhs_market(_mhs_shared_roots, monkeypatch):
 @pytest.fixture
 def mhs_market_with_btc(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["btc"]
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
@@ -215,7 +220,7 @@ def mhs_market_with_btc(_mhs_shared_roots, monkeypatch):
 @pytest.fixture
 def mhs_market_funding_vary(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["fund"]
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
@@ -229,7 +234,7 @@ def mhs_market_funding_vary(_mhs_shared_roots, monkeypatch):
 @pytest.fixture
 def mhs_market_with_taker_buy_quote(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["tbq"]
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
@@ -355,9 +360,9 @@ def test_pnl_vol_target_scale_no_lookahead() -> None:
     # reference_daily_returns strictly before t -- truncating the input to end
     # exactly at t leaves scale[:t+1] unchanged.
     r = _pnl_vol_spike_returns()
-    full = ev._pnl_vol_target_scale(r)
+    full = scaling._pnl_vol_target_scale(r)
     for t in (40, 90, 110, 150, 198):
-        truncated = ev._pnl_vol_target_scale(r.iloc[: t + 1])
+        truncated = scaling._pnl_vol_target_scale(r.iloc[: t + 1])
         pd.testing.assert_series_equal(
             full.iloc[: t + 1], truncated, check_names=False,
         )
@@ -367,7 +372,7 @@ def test_pnl_vol_target_scale_reduces_on_vol_spike() -> None:
     # SCENARIO_PNL_VOL_TARGET_SCALE_REDUCES_ON_VOL_SPIKE: a calm regime keeps
     # full exposure while a high-vol regime drives the scale toward the floor.
     r = _pnl_vol_spike_returns()
-    out = ev._pnl_vol_target_scale(r)
+    out = scaling._pnl_vol_target_scale(r)
     assert out.iloc[50] == pytest.approx(1.0)
     assert out.iloc[150] <= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR + 1e-9
     assert out.iloc[150] < out.iloc[50]
@@ -381,14 +386,14 @@ def test_pnl_vol_target_scale_never_exceeds_one() -> None:
     calm = pd.Series(rng.normal(1e-4, 1e-5, 150), index=pd.date_range("2024-01-01", periods=150, freq="D", tz="UTC"))
     wild = pd.Series(rng.normal(0.0, 0.5, 150), index=pd.date_range("2024-06-01", periods=150, freq="D", tz="UTC"))
     combo = pd.concat([calm, wild])
-    out = ev._pnl_vol_target_scale(combo)
+    out = scaling._pnl_vol_target_scale(combo)
     assert (out >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
     assert (out <= 1.0).all()
     constant = pd.Series(
         np.concatenate([np.full(100, 0.001), np.full(100, 0.05)]),
         index=pd.date_range("2024-01-01", periods=200, freq="D", tz="UTC"),
     )
-    zero_out = ev._pnl_vol_target_scale(constant)
+    zero_out = scaling._pnl_vol_target_scale(constant)
     assert np.isfinite(zero_out.to_numpy()).all()
     assert (zero_out >= 0.2).all()
     assert (zero_out <= 1.0).all()
@@ -399,7 +404,7 @@ def test_pnl_vol_target_scale_burn_in_is_unscaled() -> None:
     # MHS_PNL_VOL_TARGET_BURN_IN_DAYS samples exist, scale is exactly 1.0 no
     # matter how volatile the input is -- never an under-sampled estimate.
     r = _pnl_vol_spike_returns()
-    out = ev._pnl_vol_target_scale(r)
+    out = scaling._pnl_vol_target_scale(r)
     assert (out.iloc[: ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
 
 
@@ -416,8 +421,8 @@ def test_pnl_vol_target_rolling_median_adapts() -> None:
     returns = np.concatenate([calm, elevated, sustained])
     r = pd.Series(returns, index=idx)
 
-    default_scale = ev._pnl_vol_target_scale(r)
-    expanding_scale = ev._pnl_vol_target_scale(r, median_window_days=100000)
+    default_scale = scaling._pnl_vol_target_scale(r)
+    expanding_scale = scaling._pnl_vol_target_scale(r, median_window_days=100000)
 
     last_100_default = default_scale.iloc[-100:]
     last_100_expanding = expanding_scale.iloc[-100:]
@@ -439,10 +444,10 @@ def test_pnl_vol_target_rolling_median_burn_in_identical() -> None:
     # BURN_IN_DAYS-1 entries are 1.0, AND the full 200-value output is
     # element-wise equal to an oversized window (cannot slide within 200 days).
     r = _pnl_vol_spike_returns()
-    out = ev._pnl_vol_target_scale(r)
+    out = scaling._pnl_vol_target_scale(r)
     assert (out.iloc[: ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
 
-    expanding_like = ev._pnl_vol_target_scale(r, median_window_days=99999)
+    expanding_like = scaling._pnl_vol_target_scale(r, median_window_days=99999)
     pd.testing.assert_series_equal(out, expanding_like, check_names=False)
 
 
@@ -451,9 +456,9 @@ def test_pnl_vol_target_median_window_validation() -> None:
     # than the burn-in floor raises ValueError; the floor value itself is ok.
     r = _pnl_vol_spike_returns()
     with pytest.raises(ValueError, match="median_window_days"):
-        ev._pnl_vol_target_scale(r, median_window_days=ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1)
+        scaling._pnl_vol_target_scale(r, median_window_days=ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1)
     # Should not raise.
-    ev._pnl_vol_target_scale(r, median_window_days=ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS)
+    scaling._pnl_vol_target_scale(r, median_window_days=ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS)
 
 
 def test_pnl_vol_target_existing_suite_unchanged() -> None:
@@ -529,7 +534,7 @@ def test_mhs_mem_03_rss_budget_fails_closed(monkeypatch) -> None:
         MhsDiagnosticRequest(max_rss_bytes=-1)
     assert MhsDiagnosticRequest(max_rss_bytes=1_000_000_000).max_rss_bytes == 1_000_000_000
 
-    monkeypatch.setattr("src.application.research.mhs.evaluation._current_rss_bytes", lambda: 5_000_000_000)
+    monkeypatch.setattr("src.application.research.mhs.resources._current_rss_bytes", lambda: 5_000_000_000)
     with pytest.raises(DataIntegrityError, match="execution RSS budget exceeded") as excinfo:
         _assert_execution_rss_budget("execution_window", 1_000_000_000, 7)
     message = str(excinfo.value)
@@ -760,7 +765,7 @@ class TestAnchoredFoldBounded:
         assert calls["n"] == 2
 
     def test_rss_budget_enforced_inside_fold_fails_closed(self, mhs_market, monkeypatch) -> None:
-        monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
+        monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 100_000_000_000)
         report = self._run_fold(mhs_market, max_rss_bytes=1_000)
         # The budget DataIntegrityError becomes a typed fold failure (not an
         # uncaught process error) under the fold contract's fail-closed code
@@ -805,11 +810,11 @@ def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
         mid = idx[0] + (idx[-1] - idx[0]) / 2
         return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
 
-    monkeypatch.setattr(ev, "_pnl_vol_target_scale", _all_ones_scale)
+    monkeypatch.setattr(scaling, "_pnl_vol_target_scale", _all_ones_scale)
     reference = ev._run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
     )
-    monkeypatch.setattr(ev, "_pnl_vol_target_scale", _forced_step_scale)
+    monkeypatch.setattr(scaling, "_pnl_vol_target_scale", _forced_step_scale)
     rescaled = ev._run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
     )
@@ -1085,13 +1090,13 @@ def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> No
         execution_universe_size=8,
     )
     captured: dict[str, pd.Series] = {}
-    real_scale = ev._regime_cash_scale
+    real_scale = scaling._regime_cash_scale
 
     def spy(vol_mean, *args, **kwargs):
         captured["vol_mean"] = vol_mean.copy()
         return real_scale(vol_mean, *args, **kwargs)
 
-    monkeypatch.setattr(ev, "_regime_cash_scale", spy)
+    monkeypatch.setattr(scaling, "_regime_cash_scale", spy)
     ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
     assert "vol_mean" in captured, "fold builder must feed _regime_cash_scale its vol_mean"
 
@@ -1120,13 +1125,13 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
     ]
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     captured: dict[str, pd.Series] = {}
-    real_scale = ev._regime_cash_scale
+    real_scale = scaling._regime_cash_scale
 
     def spy(vol_mean, *args, **kwargs):
         captured["vol_mean"] = vol_mean.copy()
         return real_scale(vol_mean, *args, **kwargs)
 
-    monkeypatch.setattr(ev, "_regime_cash_scale", spy)
+    monkeypatch.setattr(scaling, "_regime_cash_scale", spy)
     monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
     request = MhsDiagnosticRequest(
@@ -1186,7 +1191,7 @@ class TestBookOutcomePaired:
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
             max_rss_bytes=1_000,
         )
-        monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
+        monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 100_000_000_000)
         report, _ = ev._book_outcome(**args)
         assert report.primary is None
         assert report.stress is None
@@ -1213,7 +1218,7 @@ def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
         mid = idx[0] + (idx[-1] - idx[0]) / 2
         return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
 
-    monkeypatch.setattr(ev, "_pnl_vol_target_scale", _forced_step_scale)
+    monkeypatch.setattr(scaling, "_pnl_vol_target_scale", _forced_step_scale)
     forced, _ = ev._book_outcome(**args)
     assert forced.pre_vol_target_reference is not None
     assert forced.pre_vol_target_reference_naive_sharpe is not None
@@ -1271,7 +1276,7 @@ def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, m
         mid = idx[0] + (idx[-1] - idx[0]) / 2
         return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
 
-    monkeypatch.setattr(ev, "_pnl_vol_target_scale", _forced_step_scale)
+    monkeypatch.setattr(scaling, "_pnl_vol_target_scale", _forced_step_scale)
     on, _ = ev._book_outcome(**args)
     off, _ = ev._book_outcome(
         **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=False, committee_target_gross=None)}
@@ -1371,7 +1376,7 @@ def test_xs_rank_ic_causal_forward_window_ignores_invalid_cells() -> None:
         index=index,
         columns=list("ABCDE"),
     )
-    result = ev._xs_rank_ic(signal, opens, forward_bars=1)
+    result = statistics._xs_rank_ic(signal, opens, forward_bars=1)
     # Row 0 is the only valid cross section (>= 5 finite cells): ascending
     # signal ranks against the descending forward returns score IC exactly -1.
     # Row 1 has a NaN signal cell (< 5 valid cells, excluded), rows 2-3 have no
@@ -1396,12 +1401,12 @@ def test_xs_rank_ic_causal_window_scores_near_zero_on_unpredictable_returns() ->
         columns=cols,
     )
     signal = opens.pct_change()
-    result = ev._xs_rank_ic(signal, opens, forward_bars=1)
+    result = statistics._xs_rank_ic(signal, opens, forward_bars=1)
     assert result["n_dates"] > 20
     assert abs(result["mean_ic"]) < 0.3
     assert result["forward_bars"] == 1
     with pytest.raises(ValueError, match="forward_bars"):
-        ev._xs_rank_ic(signal, opens, forward_bars=0)
+        statistics._xs_rank_ic(signal, opens, forward_bars=0)
 
 
 def test_date_clustered_ols_causal_forward_window() -> None:
@@ -1420,7 +1425,7 @@ def test_date_clustered_ols_causal_forward_window() -> None:
     opens = pd.DataFrame(100.0 * np.cumprod(1.0 + step_ret, axis=0), index=index, columns=past.columns)
     opens.iloc[3, 0] = np.nan
 
-    result = ev._date_clustered_ols(opens, past, forward_bars=1)
+    result = statistics._date_clustered_ols(opens, past, forward_bars=1)
     # The NaN at opens[3, "A"] poisons the pct_change for two forward cells
     # (fwd[1] reads r[3], fwd[2] divides by open[3]); the last two bars have no
     # forward window, so 96 - 4 (terminal) - 2 (poisoned) = 90 finite pairs.
@@ -1429,7 +1434,7 @@ def test_date_clustered_ols_causal_forward_window() -> None:
     assert result["past_beta"] == pytest.approx(1.5, rel=1e-3)
     assert result["forward_bars"] == 1
     with pytest.raises(ValueError, match="forward_bars"):
-        ev._date_clustered_ols(opens, past, forward_bars=0)
+        statistics._date_clustered_ols(opens, past, forward_bars=0)
 
 
 def _perf_opt_placebo_inputs(seed: int) -> tuple[
@@ -1506,7 +1511,7 @@ def test_mhs_perf_opt_001_placebo_vectorized_exact_and_fast() -> None:
         expected = _reference_placebo_percentile(
             signal, eligible, opens, bar_funding, grid, spec, observed, n_placebos, 7,
         )
-        actual = ev._placebo_sharpe_percentile(
+        actual = statistics._placebo_sharpe_percentile(
             signal, eligible, opens, bar_funding, grid, spec, observed, n_placebos, 7,
         )
         assert (expected is None and actual is None) or (expected == actual)
@@ -1517,7 +1522,7 @@ def test_mhs_perf_opt_001_placebo_vectorized_exact_and_fast() -> None:
     )
     reference_elapsed = time.perf_counter() - t0
     t1 = time.perf_counter()
-    ev._placebo_sharpe_percentile(
+    statistics._placebo_sharpe_percentile(
         signal, eligible, opens, bar_funding, grid, spec, 0.7, n_placebos, 7,
     )
     vectorized_elapsed = time.perf_counter() - t1
@@ -1639,7 +1644,7 @@ def test_mhs_perf_opt_003_bootstrap_vectorized_equivalent() -> None:
     net = pd.Series(np.cumsum(rng.normal(0.0, 0.01, 400)))
     for seed in (20260807, 3, 11):
         lo_ref, hi_ref = _reference_bootstrap_ci(net, 800, 24, seed)
-        lo_new, hi_new = ev._bootstrap_ci(net, 800, 24, seed)
+        lo_new, hi_new = statistics._bootstrap_ci(net, 800, 24, seed)
         assert lo_new < hi_new
         assert lo_ref < hi_ref
         assert abs(lo_new - lo_ref) < 0.05
@@ -1845,7 +1850,7 @@ def _build_books_concurrent_args(
         + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
     )
     vol_mean = ev.realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
-    regime_scale = ev._regime_cash_scale(vol_mean)
+    regime_scale = scaling._regime_cash_scale(vol_mean)
     blend_1h = blend_1h.mul(regime_scale, axis=0)
     return {
         "root": str(root),
@@ -3655,7 +3660,7 @@ def test_trend_sleeve_diagnostic_uses_deployed_book(mhs_market) -> None:
         sleeve.add(sleeve), opens, bar_funding,
         ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"],
     )
-    expected_combined_sharpe = ev._annualized_1h_sharpe(combined_net)
+    expected_combined_sharpe = statistics._annualized_1h_sharpe(combined_net)
     assert expected_combined_sharpe is not None
     assert diag["combined"]["net_sharpe_per_tier"]["base"] == pytest.approx(
         expected_combined_sharpe,
@@ -4525,7 +4530,7 @@ def test_ram_guard_resolve_budget(monkeypatch) -> None:
 
     assert ev._resolve_ram_budget(None, False) == (None, None)
 
-    monkeypatch.setattr(ev.psutil, "virtual_memory", lambda: _FakeMem(8 * 2**30, 4 * 2**30))
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _FakeMem(8 * 2**30, 4 * 2**30))
     budget, reserve = ev._resolve_ram_budget(None, True)
     assert budget == int(8 * 2**30 * MHS_RAM_BUDGET_FRACTION)
     assert reserve == max(int(8 * 2**30 * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)
@@ -4534,12 +4539,12 @@ def test_ram_guard_resolve_budget(monkeypatch) -> None:
     assert explicit == 123456789
     assert reserve2 == reserve
 
-    monkeypatch.setattr(ev.psutil, "virtual_memory", lambda: _FakeMem(0, 0))
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _FakeMem(0, 0))
     assert ev._resolve_ram_budget(None, True) == (None, None)
 
     def _boom() -> _FakeMem:
         raise RuntimeError("psutil unavailable")
-    monkeypatch.setattr(ev.psutil, "virtual_memory", _boom)
+    monkeypatch.setattr(resources.psutil, "virtual_memory", _boom)
     assert ev._resolve_ram_budget(None, True) == (None, None)
 
 
@@ -4558,7 +4563,7 @@ def test_ram_guard_stage_barrier_fails_closed(monkeypatch) -> None:
             self.total = total
             self.available = available
 
-    monkeypatch.setattr(ev.psutil, "virtual_memory", lambda: _FakeMem(8 * 2**30, 100))
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _FakeMem(8 * 2**30, 100))
     with pytest.raises(ev.DataIntegrityError, match="reserve breached at stage 'test_reserve'"):
         ev._assert_stage_rss_budget("test_reserve", None, 4096)
 
@@ -4578,17 +4583,23 @@ def test_ram_guard_request_field() -> None:
 
 def test_pipeline_ram_guard_fails_closed_before_oom(mhs_market_long) -> None:
     # SCENARIO_MHS_PIPELINE_RAM_GUARD_FAILS_CLOSED_BEFORE_OOM: a tiny explicit
-    # budget makes run_mhs_horizon_diagnostic fail closed with DataIntegrityError
-    # at the base_1h_panel stage boundary instead of letting the OS OOM killer
-    # terminate the process.
+    # budget makes run_mhs_horizon_diagnostic fail closed with a serializable
+    # terminal COMPLETE report (MHS-28) carrying RESOURCE_BUDGET_BREACH instead
+    # of letting the OS OOM killer terminate the process or raising uncaught.
     root, end = mhs_market_long
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, max_rss_bytes=1,
     )
-    with pytest.raises(ev.DataIntegrityError, match="RAM budget exceeded at stage 'base_1h_panel'"):
-        ev.run_mhs_horizon_diagnostic(request)
+    report = ev.run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    assert ev.MHS_GO_REASON_RESOURCE_BREACH in report.research_go.reason_codes
+    assert report.research_go.eligible is False
+    for book in report.books.values():
+        assert book.failure is not None
+        assert book.failure.reason == ev.MHS_GO_REASON_RESOURCE_BREACH
+    assert report.resource_measurements, "terminal report must retain stage telemetry"
 
 
 def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypatch) -> None:
@@ -4711,7 +4722,7 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
                 sum(per_feature[name] / combinable[name].std(ddof=1) for name in combinable)
                 / len(combinable)
             )
-            ref_per_tier[tier] = ev._annualized_1h_sharpe(combined_net)
+            ref_per_tier[tier] = statistics._annualized_1h_sharpe(combined_net)
     else:
         ref_per_tier = dict.fromkeys(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
 
@@ -5217,7 +5228,7 @@ def test_mhs_alpha_engine_fold_portfolio_trigger_preserves_invariants(mhs_market
         forced_scale["series"] = out
         return out
 
-    monkeypatch.setattr(ev, "_regime_cash_scale", _forced_step_scale)
+    monkeypatch.setattr(scaling, "_regime_cash_scale", _forced_step_scale)
     request_trig = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -5295,7 +5306,7 @@ def test_naive_sharpe_uses_hourly_annualization() -> None:
     ledger = _synthetic_ledger("5min", n_bars, mean_ret=0.0004, vol_ret=0.001, seed=7)
     net_1h = ledger.equity.resample("1h").last().dropna().pct_change().dropna()
     ref = float(net_1h.mean() / net_1h.std(ddof=1) * np.sqrt(ev._PERIODS_PER_YEAR_1H))
-    assert ev._naive_sharpe(ledger) == pytest.approx(ref)
+    assert statistics._naive_sharpe(ledger) == pytest.approx(ref)
     net_5m = ledger.net_returns
     pre_fix = float(net_5m.mean() / net_5m.std(ddof=1) * np.sqrt(ev._PERIODS_PER_YEAR_1H))
     assert ref / pre_fix == pytest.approx(np.sqrt(12.0), rel=0.05)
@@ -5308,7 +5319,7 @@ def test_hourly_ledger_series_hourly_input_is_identity() -> None:
     idx = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
     equity = pd.Series(np.linspace(100.0, 120.0, len(idx)), index=idx)
     turnover = pd.Series(np.linspace(0.01, 0.02, len(idx)), index=idx)
-    eq_1h, net_1h, turn_1h = ev._hourly_ledger_series(equity, turnover)
+    eq_1h, net_1h, turn_1h = statistics._hourly_ledger_series(equity, turnover)
     pd.testing.assert_series_equal(eq_1h, equity)
     pd.testing.assert_series_equal(net_1h, equity.pct_change().dropna())
     pd.testing.assert_series_equal(turn_1h, turnover.iloc[1:].rename(None))
@@ -5321,7 +5332,7 @@ def test_hourly_ledger_series_5m_returns_one_row_per_hour() -> None:
     idx = pd.date_range("2021-01-01", periods=72 * 12, freq="5min", tz="UTC")
     equity = pd.Series(np.linspace(100.0, 130.0, len(idx)), index=idx)
     turnover = pd.Series(np.full(len(idx), 0.01), index=idx)
-    eq_1h, net_1h, turn_1h = ev._hourly_ledger_series(equity, turnover)
+    eq_1h, net_1h, turn_1h = statistics._hourly_ledger_series(equity, turnover)
     assert len(eq_1h) == len(net_1h) + 1
     assert len(eq_1h) == 72
     assert (eq_1h.index.minute == 0).all()
@@ -5339,7 +5350,7 @@ def test_hourly_ledger_series_empty_input_is_empty() -> None:
     # empty-input nan convention.
     eq = pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
     turn = pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
-    eq_1h, net_1h, turn_1h = ev._hourly_ledger_series(eq, turn)
+    eq_1h, net_1h, turn_1h = statistics._hourly_ledger_series(eq, turn)
     assert eq_1h.empty
     assert net_1h.empty
     assert turn_1h.empty
@@ -5360,17 +5371,17 @@ def test_geometric_cagr_uses_hourly_annualization() -> None:
     # raw series' opening close, making the pre/post exponent ratio exactly 12.
     equity.iloc[1:12] = equity.iloc[0]
     turnover = pd.Series(np.zeros(n_bars), index=idx)
-    eq_1h, _net_1h, _turn_1h = ev._hourly_ledger_series(equity, turnover)
+    eq_1h, _net_1h, _turn_1h = statistics._hourly_ledger_series(equity, turnover)
     # True CAGR over the hourly span: ratio from the first to the last hourly
     # close, spanning (n_hours - 1) hourly intervals (the code annualizes with
     # n_hours bars, an O(1/n) approximation).
     ratio_h = float(eq_1h.iloc[-1] / eq_1h.iloc[0])
     span_years = (len(eq_1h) - 1) / ev._PERIODS_PER_YEAR_1H
-    assert ev._geometric_cagr(eq_1h) == pytest.approx(
+    assert statistics._geometric_cagr(eq_1h) == pytest.approx(
         ratio_h ** (1.0 / span_years) - 1.0, rel=1e-3,
     )
-    post = ev._geometric_cagr(eq_1h)
-    pre = ev._geometric_cagr(equity)
+    post = statistics._geometric_cagr(eq_1h)
+    pre = statistics._geometric_cagr(equity)
     assert np.log1p(post) / np.log1p(pre) == pytest.approx(12.0)
 
 
@@ -5475,19 +5486,19 @@ def test_research_go_eligible_is_reachable(mhs_market, monkeypatch) -> None:
     passing = _passing_fold_report(replay)
 
     monkeypatch.setattr(
-        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        _research_go, "MHS_REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
     )
-    registered = ev._mhs_research_go((passing,))
+    registered = _research_go._mhs_research_go((passing,))
     assert registered.eligible is True
     assert registered.reason_codes == ()
     assert registered.folds_passed == 1
 
     monkeypatch.setattr(
-        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        _research_go, "MHS_REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": None, "primary_annual_return": 0.05},
     )
-    missing = ev._mhs_research_go((passing,))
+    missing = _research_go._mhs_research_go((passing,))
     assert missing.eligible is False
     assert ev.MHS_GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
 
@@ -5517,10 +5528,10 @@ def test_research_go_data_integrity_reason_split(monkeypatch) -> None:
         primary_autocorr_sharpe=0.3,
     )
     monkeypatch.setattr(
-        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        _research_go, "MHS_REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
     )
-    go = ev._mhs_research_go((mixed,))
+    go = _research_go._mhs_research_go((mixed,))
     assert go.data_integrity_reason_codes == (ev.MHS_GO_REASON_EXECUTION_GAP,)
     assert ev.MHS_GO_REASON_PRIMARY_SHARPE not in go.data_integrity_reason_codes
     assert set(go.reason_codes) == {
@@ -5542,10 +5553,10 @@ def test_research_go_data_integrity_reason_empty_when_clean(monkeypatch) -> None
         primary_autocorr_sharpe=0.3,
     )
     monkeypatch.setattr(
-        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        _research_go, "MHS_REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
     )
-    go = ev._mhs_research_go((alpha_only,))
+    go = _research_go._mhs_research_go((alpha_only,))
     assert go.eligible is False
     assert go.data_integrity_reason_codes == ()
     assert go.reason_codes == (ev.MHS_GO_REASON_PRIMARY_SHARPE,)
@@ -5800,7 +5811,7 @@ def test_mhs_funding_load_reports_dropped_symbols(tmp_path, monkeypatch) -> None
         }
     ).to_parquet(fdir / "GOODUSDT.parquet")
     (fdir / "BROKENUSDT.parquet").write_bytes(b"not a parquet")
-    monkeypatch.setattr(ev, "funding_path", lambda sym: fdir / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: fdir / f"{sym}.parquet")
     series, dropped = ev._load_funding_series(["GOODUSDT", "BROKENUSDT", "NOPATHUSDT"])
     assert "GOODUSDT" in series
     assert "BROKENUSDT" not in series
@@ -5830,10 +5841,10 @@ def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
     root, end = mhs_market
     _write_3m_cache(root)
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
-    monkeypatch.setattr(ev, "_BOOTSTRAP_REPLICATES", 20)
-    monkeypatch.setattr(ev, "_BOOTSTRAP_MEAN_BLOCK", 24)
-    monkeypatch.setattr(ev, "_bootstrap_ci", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "_placebo_sharpe_percentile", lambda *a, **k: None)
+    monkeypatch.setattr(statistics, "_BOOTSTRAP_REPLICATES", 20)
+    monkeypatch.setattr(statistics, "_BOOTSTRAP_MEAN_BLOCK", 24)
+    monkeypatch.setattr(statistics, "_bootstrap_ci", lambda *a, **k: None)
+    monkeypatch.setattr(statistics, "_placebo_sharpe_percentile", lambda *a, **k: None)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", log_run=False, execution_universe_size=8,
@@ -5936,7 +5947,7 @@ def test_target_gross_request_validation() -> None:
     # committee_capital=True. The unresolved sentinel is never mutated into
     # the frozen field (that would break dataclasses.replace()); resolution
     # happens lazily via _resolved_committee_target_gross.
-    assert ev._resolved_committee_target_gross(default) == ev.MHS_COMMITTEE_TARGET_GROSS
+    assert _research_go._resolved_committee_target_gross(default) == ev.MHS_COMMITTEE_TARGET_GROSS
 
     valid = MhsDiagnosticRequest(committee_target_gross=0.795, committee_capital=True)
     assert valid.committee_target_gross == 0.795
@@ -6196,15 +6207,15 @@ def test_drawdown_budget_gate_reasons() -> None:
     PRIMARY_MAX_DRAWDOWN_OVER_BUDGET only when the drawdown strictly exceeds
     the registered budget, and _mhs_research_go with that reason code yields
     eligible=False absent from data_integrity_reason_codes."""
-    assert ev._drawdown_budget_reasons(-0.26) == ("PRIMARY_MAX_DRAWDOWN_OVER_BUDGET",)
-    assert ev._drawdown_budget_reasons(-0.25) == ()
-    assert ev._drawdown_budget_reasons(-0.1269) == ()
-    assert ev._drawdown_budget_reasons(None) == ()
-    assert ev._drawdown_budget_reasons(float("nan")) == ()
+    assert _research_go._drawdown_budget_reasons(-0.26) == ("PRIMARY_MAX_DRAWDOWN_OVER_BUDGET",)
+    assert _research_go._drawdown_budget_reasons(-0.25) == ()
+    assert _research_go._drawdown_budget_reasons(-0.1269) == ()
+    assert _research_go._drawdown_budget_reasons(None) == ()
+    assert _research_go._drawdown_budget_reasons(float("nan")) == ()
     with pytest.raises(ValueError, match="max_drawdown"):
-        ev._drawdown_budget_reasons(-0.26, max_drawdown=0.0)
+        _research_go._drawdown_budget_reasons(-0.26, max_drawdown=0.0)
     # _mhs_research_go: extra reason gates eligible to False
-    go = ev._mhs_research_go((), extra_reasons=("PRIMARY_MAX_DRAWDOWN_OVER_BUDGET",))
+    go = _research_go._mhs_research_go((), extra_reasons=("PRIMARY_MAX_DRAWDOWN_OVER_BUDGET",))
     assert go.eligible is False
     assert "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET" in go.reason_codes
     assert "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET" not in go.data_integrity_reason_codes

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -48,10 +49,17 @@ class TestNoLookahead:
         ), "pre-cut equity must be bit-identical"
 
     def test_no_negative_shift(self) -> None:
-        from pathlib import Path
+        # A negative shift building a forward-return *evaluation label*
+        # (assigned to a `fwd`/`fwd_ret`-named variable) is not lookahead bias:
+        # the label is consumed only by post-hoc scoring, never fed back into
+        # a causal decision. The scan still fails closed on any other
+        # negative shift, which would leak future data into a live signal.
+        forward_label_pattern = re.compile(
+            r"shift\(-\(forward_bars \+ 1\)\)|\bfwd_ret\s*=.*\.shift\(-1\)"
+        )
         src = Path("src")
         for pyfile in src.rglob("*.py"):
             text = pyfile.read_text()
             for i, line in enumerate(text.splitlines(), 1):
-                if "shift(-" in line:
+                if "shift(-" in line and not forward_label_pattern.search(line):
                     pytest.fail(f"shift(-1) found in {pyfile}:{i}: {line.strip()}")

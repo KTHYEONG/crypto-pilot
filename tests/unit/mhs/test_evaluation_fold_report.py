@@ -16,9 +16,9 @@ from src.application.research.mhs.evaluation import (
     _fold_blend_parity,
     _fold_growth_concentration,
     _incomplete_fold_report,
-    _mhs_research_go,
     build_mhs_run_history_record,
 )
+from src.application.research.mhs.research_go import _mhs_research_go
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult
 
 _FOLD = AnchoredPurgedFold(

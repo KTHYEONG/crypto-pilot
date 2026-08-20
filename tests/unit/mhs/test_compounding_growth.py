@@ -10,8 +10,10 @@ import pytest
 
 from src.application.research.mhs.evaluation import (
     MhsDiagnosticRequest,
-    _committee_capital_replay_scale,
     _committee_execution_book,
+)
+from src.application.research.mhs.scaling import (
+    _committee_capital_replay_scale,
     _exante_vol_target_scale,
     _pnl_vol_target_scale,
     _replay_exposure_scale,
