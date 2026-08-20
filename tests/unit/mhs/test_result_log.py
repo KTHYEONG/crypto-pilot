@@ -96,3 +96,78 @@ def test_mhs_run_history_dir_derives_from_target_parent() -> None:
 def test_shard_constants_are_fixed_bounds() -> None:
     assert MHS_RUN_HISTORY_SHARD_MAX_BYTES == 262144
     assert MHS_RUN_HISTORY_MAX_SHARDS == 12
+
+
+class TestFillMarkParityRunHistoryRecord:
+    """SCENARIO_MHS_FILL_MARK_PARITY_06: fill_mark_parity in run history record."""
+
+    def test_census_persisted_in_record(self) -> None:
+        from src.mhs.evaluation import DeploymentReadinessResult
+
+        from src.application.research.mhs.evaluation import (
+            MhsDiagnosticRequest,
+            MhsHorizonDiagnosticReport,
+            MhsOutputTier,
+            MhsResearchGoResult,
+            build_mhs_run_history_record,
+        )
+
+        census = {
+            "band": 0.0488,
+            "cells_over_band": 7,
+            "eligible_cells_removed": 7,
+            "symbols": {"FROZEN": 7},
+        }
+        report = MhsHorizonDiagnosticReport(
+            feature="mhs",
+            status="COMPLETE",
+            start="2021-01-01",
+            end="2025-01-01",
+            resolved_end="2025-01-01",
+            partition="dev",
+            execution_tiers_bps=(2.64, 4.18, 6.07),
+            books={},
+            blend=None,
+            blend_target_gross=0.0,
+            blend_cash_fraction=1.0,
+            eligible_symbols=10,
+            trials_attempted=70,
+            deflated_sharpe_ratio=None,
+            xs_rank_ic={},
+            date_clustered_regression={},
+            horizon_diagnostics={},
+            bootstrap_ci=None,
+            placebo_sharpe_percentile=None,
+            deployment_readiness=DeploymentReadinessResult(
+                geometric_cagr=0.5, max_drawdown=-0.2, calmar=2.5,
+                expected_shortfall=0.0, worst_1d=0.0, worst_7d=0.0, worst_event=0.0,
+                time_under_water_bars=0, recovery_bars=None,
+                probability_final_wealth_below_initial=0.0,
+                probability_mdd_over_20pct=0.0, probability_mdd_over_30pct=0.0,
+                leverage_ruin_probabilities={}, concentration={}, participation_warnings={},
+                research_go_eligible=False, execution_go_eligible=False,
+                pilot_go_eligible=False, scale_go_eligible=False,
+            ),
+            synthetic_stress={},
+            participation_warnings={},
+            termination_counts={},
+            unsupported_assumptions=(),
+            anchored_folds=(),
+            folds=(),
+            research_go=MhsResearchGoResult(
+                eligible=False, reason_codes=(), evaluated_folds=0, folds_passed=0,
+            ),
+            fill_source="OHLCV",
+            mark_source="MARK",
+            execution_timeframe="3m",
+            execution_universe_size=30,
+            execution_symbols=(),
+            run_elapsed_seconds=1.0,
+            fill_mark_parity=census,
+        )
+        request = MhsDiagnosticRequest()
+        record = build_mhs_run_history_record(report, request, MhsOutputTier.COMPACT, None)
+        assert record["fill_mark_parity"]["cells_over_band"] == 7
+        assert record["fill_mark_parity"]["band"] == 0.0488
+        assert record["flags"]["fill_mark_parity_gate"] is True
+        assert record["flags"]["exposure_scale_two_sided"] is False

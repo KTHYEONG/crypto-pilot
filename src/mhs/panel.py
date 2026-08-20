@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from src.mhs.contracts import MHS_FILL_MARK_MAX_LOG_DIVERGENCE
 from src.research.universe.pit_universe import symbol_partition
 
 
@@ -156,3 +157,42 @@ def liquid_half_eligibility(
     median = trailing_mean.median(axis=1)
     eligible = trailing_mean.ge(median, axis=0)
     return eligible.fillna(False)
+
+
+def fill_mark_parity_mask(
+    fill_close: pd.DataFrame,
+    mark_close: pd.DataFrame,
+    max_log_divergence: float = MHS_FILL_MARK_MAX_LOG_DIVERGENCE,
+) -> pd.DataFrame:
+    """Boolean mask: True where the bar is tradeable at the modelled fill price.
+
+    False only where both prices are finite and strictly positive AND
+    ``abs(log(fill/mark)) > max_log_divergence``.  NaN, zero, or negative
+    prices on either axis yield True (fail-open per I2/I6).
+    """
+    if max_log_divergence <= 0:
+        raise ValueError(f"max_log_divergence must be > 0, got {max_log_divergence}")
+
+    if not fill_close.index.equals(mark_close.index):
+        raise ValueError("fill_close and mark_close must have identical index")
+    if not fill_close.columns.equals(mark_close.columns):
+        raise ValueError("fill_close and mark_close must have identical columns")
+
+    fill_vals = fill_close.to_numpy(dtype="float64", copy=False)
+    mark_vals = mark_close.to_numpy(dtype="float64", copy=False)
+
+    both_positive = (fill_vals > 0) & (mark_vals > 0)
+    both_finite = np.isfinite(fill_vals) & np.isfinite(mark_vals)
+    comparable = both_positive & both_finite
+
+    log_div = np.full_like(fill_vals, np.nan)
+    log_div[comparable] = np.abs(
+        np.log(fill_vals[comparable]) - np.log(mark_vals[comparable])
+    )
+
+    over_band = comparable & (log_div > max_log_divergence)
+
+    mask = np.ones(fill_vals.shape, dtype=bool)
+    mask[over_band] = False
+
+    return pd.DataFrame(mask, index=fill_close.index, columns=fill_close.columns)

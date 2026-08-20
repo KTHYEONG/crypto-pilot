@@ -80,7 +80,19 @@ def _write_mhs_market(
             columns["taker_buy_quote"] = [1000.0 * buy_ratio] * n_hours
         pd.DataFrame(columns).to_parquet(hdir / f"{sym}.parquet")
         if with_minute:
-            mp = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, len(minute_idx))))
+            # 1m fills track the same underlying instrument as the 1h close
+            # within a tight intra-hour noise band (mirrors real exchange
+            # data, where an instrument's 1h close and its own minute bars
+            # are the same market, not independent walks); an unrelated
+            # random walk would diverge unboundedly from `prices` over the
+            # fixture's multi-month window and spuriously trip
+            # fill_mark_parity_mask (I1). Draws the identical
+            # rng.normal(..., len(minute_idx)) shape as before so `prices`'s
+            # own draws (and every other symbol's downstream draws) stay at
+            # the same rng-stream position -- only this local formula changes.
+            minute_noise = rng.normal(0.0, 0.0003, len(minute_idx))
+            hourly_level = np.repeat(prices, 60)[: len(minute_idx)]
+            mp = hourly_level * np.exp(minute_noise)
             pd.DataFrame(
                 {"timestamp": minute_epoch, "open": mp, "high": mp * 1.0005,
                  "low": mp * 0.9995, "close": mp, "quote_vol": [1000.0] * len(minute_idx)},
@@ -163,6 +175,12 @@ def mhs_market_long(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["long"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    # _get_symbol_mark_frame is a process-global lru_cache keyed on
+    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
+    # reuses the same symbol names across five distinct roots, so a test that
+    # already populated the cache from a different root would otherwise leak
+    # stale mark data into this one.
+    ev._get_symbol_mark_frame.cache_clear()
     return root, end
 
 
@@ -171,6 +189,12 @@ def mhs_market(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["default"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    # _get_symbol_mark_frame is a process-global lru_cache keyed on
+    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
+    # reuses the same symbol names across five distinct roots, so a test that
+    # already populated the cache from a different root would otherwise leak
+    # stale mark data into this one.
+    ev._get_symbol_mark_frame.cache_clear()
     return root, end
 
 
@@ -179,6 +203,12 @@ def mhs_market_with_btc(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["btc"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    # _get_symbol_mark_frame is a process-global lru_cache keyed on
+    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
+    # reuses the same symbol names across five distinct roots, so a test that
+    # already populated the cache from a different root would otherwise leak
+    # stale mark data into this one.
+    ev._get_symbol_mark_frame.cache_clear()
     return root, end
 
 
@@ -187,6 +217,12 @@ def mhs_market_funding_vary(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["fund"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    # _get_symbol_mark_frame is a process-global lru_cache keyed on
+    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
+    # reuses the same symbol names across five distinct roots, so a test that
+    # already populated the cache from a different root would otherwise leak
+    # stale mark data into this one.
+    ev._get_symbol_mark_frame.cache_clear()
     return root, end
 
 
@@ -195,6 +231,12 @@ def mhs_market_with_taker_buy_quote(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["tbq"]
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    # _get_symbol_mark_frame is a process-global lru_cache keyed on
+    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
+    # reuses the same symbol names across five distinct roots, so a test that
+    # already populated the cache from a different root would otherwise leak
+    # stale mark data into this one.
+    ev._get_symbol_mark_frame.cache_clear()
     return root, end
 
 
@@ -2189,6 +2231,7 @@ def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_q
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        fill_mark_parity_gate=False,
     )
     assert request.committee_capital is False
 
@@ -2221,7 +2264,7 @@ def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
-        rebalance_filter="portfolio_trigger",
+        rebalance_filter="portfolio_trigger", fill_mark_parity_gate=False,
     )
     target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
@@ -6165,6 +6208,87 @@ def test_drawdown_budget_gate_reasons() -> None:
     assert go.eligible is False
     assert "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET" in go.reason_codes
     assert "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET" not in go.data_integrity_reason_codes
+
+
+class TestFillMarkParityEligibility:
+    """SCENARIO_MHS_FILL_MARK_PARITY_04: _fill_mark_parity_eligibility ALPACA regression."""
+
+    def test_alpaca_shape_divergence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src.application.research.mhs.evaluation import _fill_mark_parity_eligibility
+
+        idx = pd.date_range("2025-04-01", periods=10, freq="1h", tz="UTC")
+        symbols = ["GOOD", "FROZEN", "ALSO_GOOD"]
+        close = pd.DataFrame(
+            {
+                "GOOD": [100.0] * 10,
+                "FROZEN": [1.19] * 10,
+                "ALSO_GOOD": [50.0] * 10,
+            },
+            index=idx, columns=symbols,
+        )
+        # FROZEN's mark decays from 0.575 -> 0.059 over the last 6 bars
+        mark_values = [1.19, 1.19, 1.19, 0.575, 0.4, 0.3, 0.2, 0.1, 0.07, 0.059]
+        mark = pd.DataFrame(
+            {
+                "GOOD": [100.0] * 10,
+                "FROZEN": mark_values,
+                "ALSO_GOOD": [50.0] * 10,
+            },
+            index=idx, columns=symbols,
+        )
+        eligible = pd.DataFrame(True, index=idx, columns=symbols)
+        result, census = _fill_mark_parity_eligibility(close, eligible, True, mark_close=mark)
+        # FROZEN rows 3-9 have |log(1.19/mark)| > log1p(0.05)
+        for i in range(3, 10):
+            assert result.loc[idx[i], "FROZEN"] == False  # noqa: E712
+        # GOOD and ALSO_GOOD unaffected
+        assert result["GOOD"].all()
+        assert result["ALSO_GOOD"].all()
+        assert census is not None
+        assert census["cells_over_band"] == 7
+        assert census["eligible_cells_removed"] == 7
+        assert "FROZEN" in census["symbols"]
+
+    def test_enabled_false_returns_unchanged(self) -> None:
+        from src.application.research.mhs.evaluation import _fill_mark_parity_eligibility
+
+        idx = pd.date_range("2025-04-01", periods=5, freq="1h", tz="UTC")
+        close = pd.DataFrame({"A": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=idx)
+        eligible = pd.DataFrame({"A": [True, True, True, True, True]}, index=idx)
+        result, census = _fill_mark_parity_eligibility(close, eligible, False)
+        pd.testing.assert_frame_equal(result, eligible)
+        assert census is None
+
+
+class TestMhsDiagnosticRequestParityGate:
+    """SCENARIO_MHS_FILL_MARK_PARITY_05: request field validation."""
+
+    def test_defaults(self) -> None:
+        req = MhsDiagnosticRequest()
+        assert req.fill_mark_parity_gate is True
+        assert req.exposure_scale_two_sided is False
+
+    def test_two_sided_requires_exante(self) -> None:
+        with pytest.raises(ValueError, match=r"exposure_scale_two_sided.*exante_target"):
+            MhsDiagnosticRequest(
+                exposure_scale_two_sided=True,
+                pnl_vol_target_mode="median_relative",
+            )
+
+    def test_two_sided_exante_ok(self) -> None:
+        req = MhsDiagnosticRequest(
+            exposure_scale_two_sided=True,
+            pnl_vol_target_mode="exante_target",
+        )
+        assert req.exposure_scale_two_sided is True
+
+    def test_non_bool_fill_mark_parity_gate_raises(self) -> None:
+        with pytest.raises(ValueError, match="fill_mark_parity_gate"):
+            MhsDiagnosticRequest(fill_mark_parity_gate="yes")  # type: ignore[arg-type]
+
+    def test_non_bool_exposure_scale_two_sided_raises(self) -> None:
+        with pytest.raises(ValueError, match="exposure_scale_two_sided"):
+            MhsDiagnosticRequest(exposure_scale_two_sided=1)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
