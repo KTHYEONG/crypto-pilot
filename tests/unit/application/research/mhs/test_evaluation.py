@@ -606,7 +606,7 @@ def test_request_validation_adjusted_without_gate() -> None:
 def test_request_validation_regime_without_gate() -> None:
     """SCENARIO_REQUEST_VALIDATION_REGIME_WITHOUT_GATE: requesting the
     vol-regime cash-scale-adjusted diagnostic while the discovery gate itself is
-    off raises ValueError from ``__post_init__`` (fail-closed -- no silent
+    off raises ValueError from ``__post_init__`` (fail-closed, no silent
     no-op), independent of and in addition to the existing adjusted-net-t
     validation, and the flag defaults to False / composes with
     ``discovery_gate=True``."""
@@ -616,6 +616,70 @@ def test_request_validation_regime_without_gate() -> None:
     assert MhsDiagnosticRequest(
         discovery_gate=True, discovery_gate_regime_scaled_net_t=True,
     ).discovery_gate_regime_scaled_net_t is True
+
+
+class TestGrowthBudgetTargetVol:
+    """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_04: _growth_budget_target_vol leak-free."""
+
+    def test_never_reads_post_oos_rows(self) -> None:
+        # Given a daily series whose pre-2023 slice is calm (std 0.005) and
+        # whose post-2023 slice is violent (std 0.05), the returned target vol
+        # is identical to the value returned when the post-2023 rows are
+        # replaced by NaN.
+        rng = np.random.default_rng(42)
+        idx = pd.date_range("2021-01-01", periods=800, freq="D", tz="UTC")
+        calm = rng.normal(0.0001, 0.005, 730)
+        violent = rng.normal(0.0, 0.05, 70)
+        returns = np.concatenate([calm, violent])
+        r = pd.Series(returns, index=idx)
+        result = scaling._growth_budget_target_vol(r)
+        # NaN out post-2023 rows
+        r_nan = r.copy()
+        r_nan.loc[r_nan.index >= pd.Timestamp("2023-01-01", tz="UTC")] = np.nan
+        result_nan = scaling._growth_budget_target_vol(r_nan)
+        assert result == pytest.approx(result_nan)
+
+    def test_fallback_when_fewer_than_burn_in_rows(self) -> None:
+        # A series with fewer than MHS_PNL_VOL_TARGET_BURN_IN_DAYS pre-OOS
+        # rows returns MHS_PNL_TARGET_ANNUAL_VOL.
+        from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+        idx = pd.date_range("2022-06-01", periods=10, freq="D", tz="UTC")
+        r = pd.Series(0.001, index=idx)
+        assert scaling._growth_budget_target_vol(r) == MHS_PNL_TARGET_ANNUAL_VOL
+
+
+class TestReplayExposureScaleGrowthBudget:
+    """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_04: _replay_exposure_scale with growth_budget."""
+
+    def test_growth_budget_returns_finite_bounded(self) -> None:
+        rng = np.random.default_rng(42)
+        idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
+        r = pd.Series(rng.normal(0.0001, 0.01, 500), index=idx)
+        request = MhsDiagnosticRequest(
+            pnl_vol_target_mode="growth_budget",
+            committee_capital=True,
+        )
+        result = scaling._replay_exposure_scale(r, request)
+        assert result.index.equals(r.index)
+        assert np.isfinite(result.to_numpy()).all()
+        assert (result >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
+        assert (result <= 1.0).all()
+
+
+class TestCommitteeMemberSetValidation:
+    """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_06: committee_member_set validation."""
+
+    def test_valid_member_set_accepted(self) -> None:
+        req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia_v2")
+        assert req.committee_member_set == "risk_premia_v2"
+
+    def test_invalid_member_set_raises(self) -> None:
+        with pytest.raises(ValueError, match="committee_member_set"):
+            MhsDiagnosticRequest(committee_capital=True, committee_member_set="unregistered")
+
+    def test_growth_budget_mode_in_pnl_vol_target_mode(self) -> None:
+        req = MhsDiagnosticRequest(pnl_vol_target_mode="growth_budget")
+        assert req.pnl_vol_target_mode == "growth_budget"
 
 
 def test_mhs_mem_04_strict_gap_preserved() -> None:
@@ -3182,7 +3246,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     )
     top_report = ev.run_mhs_horizon_diagnostic(request_on)
     assert top_report.status == "COMPLETE"
-    assert captured["fold_slow_horizons"] == {0: 360, 1: 360, 2: 360}
+    assert captured["fold_slow_horizons"] == {0: 360, 1: 360, 2: 360, 3: 360}
     # The fast re-verification is diagnostic-only: the parent threads the
     # resolved (horizon, source) pairs to the fold pool but never alters the
     # top-level fast spec (still the frozen 48h default, and blend weights
@@ -3191,6 +3255,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
         0: (360, "fold_train_only_discovery"),
         1: (360, "fold_train_only_discovery"),
         2: (360, "fold_train_only_discovery"),
+        3: (360, "fold_train_only_discovery"),
     }
     assert captured["top_level_slow"].horizon_hours == 360
     assert captured["top_level_slow"].band is ev.PHASE_1_BOOK_SPECS["slow_momentum"].band
@@ -4897,7 +4962,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
 
     monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _admit_funding_only)
     admitted = _run(captured)
-    assert set(admitted) == {0, 1, 2}
+    assert set(admitted) == {0, 1, 2, 3}
     for lookback, sign, source, corr in admitted.values():
         assert lookback == 72
         assert sign == 1
@@ -4910,7 +4975,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
         lambda *a, **k: _admitted_selection(None),
     )
     fail_closed = _run(captured)
-    assert set(fail_closed) == {0, 1, 2}
+    assert set(fail_closed) == {0, 1, 2, 3}
     for lookback, sign, source, corr in fail_closed.values():
         assert lookback is None
         assert sign is None

@@ -427,9 +427,9 @@ class TestResourceTelemetry:
         assert "blend_participation" in stages
         assert "statistical_diagnostics" in stages
         fold_stages = [s for s in stages if s.startswith("anchored_fold_") and "_window_" not in s]
-        assert len(fold_stages) == 3
+        assert len(fold_stages) == 4
         # Anchored folds are recorded in their declared order.
-        assert fold_stages == [f"anchored_fold_{i}" for i in range(3)]
+        assert fold_stages == [f"anchored_fold_{i}" for i in range(4)]
         # Key stages follow the execution order.
         positions = {s: stages.index(s) for s in self.STAGE_ORDER if s in stages}
         assert list(positions.values()) == sorted(positions.values())
@@ -784,14 +784,14 @@ class TestAnchoredFoldGoGate:
     relevant termination produces Research GO false and reason codes."""
 
     def test_three_folds_reported_and_go_false(self, report) -> None:
-        assert len(report.folds) == 3
-        assert len(report.anchored_folds) == 3
+        assert len(report.folds) == 4
+        assert len(report.anchored_folds) == 4
         for fold_report in report.folds:
-            assert fold_report.validation_start.startswith("2023-01-08") or fold_report.validation_start.startswith("2024-01-08") or fold_report.validation_start.startswith("2025-01-08")
-            assert fold_report.validation_end.startswith("2023-12-31") or fold_report.validation_end.startswith("2024-12-31") or fold_report.validation_end.startswith("2025-12-31")
+            assert fold_report.validation_start.startswith("2022-01-08") or fold_report.validation_start.startswith("2023-01-08") or fold_report.validation_start.startswith("2024-01-08") or fold_report.validation_start.startswith("2025-01-08")
+            assert fold_report.validation_end.startswith("2022-12-31") or fold_report.validation_end.startswith("2023-12-31") or fold_report.validation_end.startswith("2024-12-31") or fold_report.validation_end.startswith("2025-12-31")
         assert report.research_go.eligible is False
         assert "INCOMPLETE_ANCHORED_FOLD" in report.research_go.reason_codes
-        assert report.research_go.evaluated_folds == 3
+        assert report.research_go.evaluated_folds == 4
         # The gate boolean routes to deployment readiness, never primary_valid alone.
         assert report.deployment_readiness.research_go_eligible is False
 
@@ -929,7 +929,7 @@ class TestFoldSafeHorizonEfficiency:
     ) -> None:
         assert fold_safe_report.status == "COMPLETE"
         assert fold_safe_baseline_report.status == "COMPLETE"
-        assert len(fold_safe_report.folds) == len(fold_safe_baseline_report.folds) == 3
+        assert len(fold_safe_report.folds) == len(fold_safe_baseline_report.folds) == 4
         for cached_fold, baseline_fold in zip(
             fold_safe_report.folds, fold_safe_baseline_report.folds, strict=True,
         ):
@@ -978,7 +978,7 @@ class TestMhsPerfOptimizationO3FoldParity:
             for idx, fold in enumerate(ev.phase_1_anchored_purged_folds())
         )
         parallel = _run_folds_parallel(str(root), request, funding, 1.0, None)
-        assert len(sequential) == len(parallel) == 3
+        assert len(sequential) == len(parallel) == 4
 
         def _same_float(a: float, b: float) -> bool:
             return (a == b) or (np.isnan(a) and np.isnan(b))
