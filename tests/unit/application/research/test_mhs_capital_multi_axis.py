@@ -8,6 +8,7 @@ import pytest
 
 import src.market_data.services.futures_collection as fc
 from src.application.research.mhs import evaluation as ev
+import src.application.research.mhs.marks as marks
 from src.application.research.mhs.evaluation import (
     MhsDiagnosticRequest,
     _committee_execution_book,
@@ -39,7 +40,7 @@ def mhs_market_with_taker_buy_quote(tmp_path, monkeypatch):
     """Synthetic market with ``taker_buy_quote`` so the committee fold path loads."""
     root = tmp_path / "market_tbq"
     end = _write_mhs_market(root, include_taker_buy_quote=True)
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; a prior test in the same process/worker using
@@ -122,11 +123,11 @@ def test_fold_path_wires_helper_byte_identical(mhs_market_with_taker_buy_quote, 
     captured: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex, int] | None = None
 
     def recording_helper(
-        close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols,
+        close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols, *args, **kwargs,
     ):
         nonlocal captured
         captured = (close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols)
-        return orig(close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols)
+        return orig(close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols, *args, **kwargs)
 
     monkeypatch.setattr(ev, "_committee_execution_book", recording_helper)
     target, _signal, _roster, _grid = ev._build_fold_target_weights(

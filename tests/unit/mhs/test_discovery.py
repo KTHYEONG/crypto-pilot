@@ -1,6 +1,7 @@
 """Discovery/qualification horizon-selection gate tests (spec §2, Part B)."""
 
 from __future__ import annotations
+from src.application.research.mhs import scaling
 
 import math
 
@@ -757,11 +758,9 @@ class TestRegimeScaledNetTDiagnostic:
         assert (scale <= 1.0).all()
         assert (scale.iloc[850:1100] == 0.5).all()
 
-        from src.application.research.mhs import evaluation as ev
-
         pd.testing.assert_series_equal(
             scale,
-            ev._regime_cash_scale(vol),
+            scaling._regime_cash_scale(vol),
             check_names=False,
             check_freq=False,
         )

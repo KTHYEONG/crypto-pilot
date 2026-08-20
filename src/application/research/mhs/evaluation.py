@@ -23,25 +23,20 @@ from datetime import UTC, datetime
 from uuid import uuid4
 from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from enum import StrEnum
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
-import psutil
 import pyarrow.parquet as pq
 
-import src.market_data.services.futures_collection as _futures_collection
-from src.market_data.services.futures_collection import DataCollector
+from src.market_data.services.futures_collection import DataCollector  # noqa: F401 - facade re-export
 from src.application.data.mhs_execution_collection import apply_dynamic_gap_exclusion
 from src.application.data.mhs_execution_collection import apply_dynamic_mark_gap_exclusion
 from src.application.data.mhs_execution_collection import assert_relevant_execution_data_coverage
 from src.application.data.mhs_execution_collection import assert_relevant_mark_price_coverage
 from src.mhs.evaluation import phase_diagnostic_metrics
-from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
+from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
 from src.mhs.execution import replay_execution_window_batch
 from src.mhs.execution import replay_execution_window_batch_isolated
@@ -70,20 +65,14 @@ from src.mhs.books import (
 )
 from src.mhs.contracts import MHS_DISCOVERY_START
 from src.mhs.contracts import MHS_FEATURE_MIN_COVERAGE
-from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS
+from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS  # noqa: F401  (facade re-export; public API)
 from src.mhs.contracts import MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
-from src.mhs.contracts import MHS_PNL_TARGET_ANNUAL_VOL, MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS
 from src.mhs.contracts import MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS
-from src.mhs.contracts import MHS_RAM_BUDGET_FRACTION
-from src.mhs.contracts import MHS_RAM_RESERVE_FLOOR_BYTES
-from src.mhs.contracts import MHS_RAM_RESERVE_FRACTION
 from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS
 from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
 from src.mhs.contracts import MHS_TREND_SLEEVE_HORIZONS_HOURS
 from src.mhs.contracts import MHS_WORKER_PEAK_RSS_BYTES
 from src.mhs.contracts import (
-    MHS_FILL_MARK_MAX_LOG_DIVERGENCE,
-    MHS_PNL_VOL_TARGET_MAX_SCALE,
     MEASURED_EXECUTION_COST_TIERS_BPS,
     MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
     MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
@@ -112,7 +101,6 @@ from src.mhs.regime import (
 )
 from src.mhs.result_log import append_run_history_record, mhs_run_history_dir
 from src.mhs.evaluation import book_evidence
-from src.mhs.evaluation import deflated_sharpe_ratio
 from src.mhs.evaluation import (
     CostResponsePoint,
     PhaseDiagnosticResult,
@@ -121,7 +109,7 @@ from src.mhs.evaluation import (
     phase_1_anchored_purged_folds,
     required_cost_tiers,
 )
-from src.mhs.execution import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult, bar_funding_panel, laddered_fill_schedule, mhs_ledger_pnl
+from src.mhs.execution import StrategyExecutionReplayResult, bar_funding_panel, laddered_fill_schedule, mhs_ledger_pnl
 from src.mhs.discovery import (
     DiscoveryQualificationResult,
     build_candidate_weights,
@@ -155,7 +143,6 @@ from src.mhs.committee import (
 from src.research.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
 from src.mhs.execution import mhs_ledger_pnl_multi_tier
 from src.mhs.stability import regime_split_stability
-from src.mhs.regime import trend_efficiency_scale
 from src.mhs.trend_sleeve import (
     market_basket_log_price,
     time_series_trend_position,
@@ -163,18 +150,85 @@ from src.mhs.trend_sleeve import (
 )
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
-from src.market_data.storage.loaders import load_funding_rates
+from src.mhs.params import (
+    MHS_ARTIFACT_CATEGORIES,
+    MHS_ARTIFACT_SCHEMA_VERSION,
+    MHS_CAUSAL_BETA_LOOKBACK_BARS,
+    MHS_CAUSAL_BETA_MIN_PERIODS,
+    MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+    MHS_DISCOVERY_MOMENTUM_CANDIDATES,
+    MHS_DISCOVERY_REVERSAL_CANDIDATES,
+    MHS_FOLD_BLEND_PARITY_TOLERANCE,
+    MHS_FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
+    MHS_FOLD_PANEL_WARMUP_HOURS,
+    MHS_GO_PRIMARY_SHARPE_FLOOR,
+    MHS_PNL_VOL_TARGET_BURN_IN_DAYS,  # noqa: F401  (facade re-export; public API)
+    MHS_PNL_VOL_TARGET_SCALE_FLOOR,  # noqa: F401  (facade re-export; public API)
+    MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
+    MHS_REFERENCE_PASS_EQUITY_FLOOR,
+    MHS_SIGNAL_EMA_HORIZON_SPAN,
+    MHS_STRESS_COST_MULTIPLIER,
+    PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
+    _MHS_FEATURE,
+    _MHS_WALK_FORWARD_MIN_TRAIN_BARS,
+)  # noqa: F401  (facade re-exports MHS_* tunables for public-API stability)
+from src.application.research.mhs.contracts import (  # noqa: F401  (facade re-export; public API)
+    MhsDiagnosticRequest as MhsDiagnosticRequest,
+    MhsOutputTier as MhsOutputTier,
+    MhsBookFailure as MhsBookFailure,
+    MhsBookReport as MhsBookReport,
+    MhsResearchGoResult as MhsResearchGoResult,
+    MhsFoldReport as MhsFoldReport,
+    MhsHorizonDiagnosticReport as MhsHorizonDiagnosticReport,
+    MhsResourceMeasurement as MhsResourceMeasurement,
+)
+from src.application.research.mhs.marks import (
+    _load_funding_series,
+    _pit_execution_mask,
+    _get_symbol_mark_frame,
+    _prewarm_mark_frames,
+    _fill_mark_parity_eligibility,
+    _cached_mark_panel,
+    _load_window_minute_frames,
+    _build_window_frames,
+)
+from src.application.research.mhs import scaling as _scaling
+from src.application.research.mhs import statistics as _statistics
+from src.application.research.mhs import research_go as _research_go
 
-__all__ = ["simulated_inventory_ledger"]
+from src.application.research.mhs.resources import (
+    _resolve_ram_budget,
+    _assert_stage_rss_budget,
+    _assert_execution_rss_budget,
+    _StageRecorder,
+    _peak_rss_bytes,
+)
+
+# Public GO reason-code constants are defined in research_go; re-exported here so
+# the established ``ev.MHS_GO_REASON_*`` external API surface stays importable.
+from src.application.research.mhs.research_go import (  # noqa: F401  (facade re-export of public GO reason-code constants)
+    MHS_GO_REASON_CAPITAL_BREACH,  # noqa: F401
+    MHS_GO_REASON_DATA_INTEGRITY_CODES,  # noqa: F401
+    MHS_GO_REASON_DRAWDOWN_OVER_BUDGET,  # noqa: F401
+    MHS_GO_REASON_EXECUTION_GAP,  # noqa: F401
+    MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION,  # noqa: F401
+    MHS_GO_REASON_INCOMPLETE_FOLD,  # noqa: F401
+    MHS_GO_REASON_INVALID_PRIMARY,  # noqa: F401
+    MHS_GO_REASON_NONFINITE_EQUITY,  # noqa: F401
+    MHS_GO_REASON_PATH_DIVERGENCE,  # noqa: F401
+    MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR,  # noqa: F401
+    MHS_GO_REASON_PRIMARY_SHARPE,  # noqa: F401
+    MHS_GO_REASON_RESOURCE_BREACH,  # noqa: F401
+    MHS_GO_REASON_STRESS_SHARPE,  # noqa: F401
+    MHS_GO_REASON_UNSPECIFIED_POLICY,  # noqa: F401
+)
+
+
+__all__ = ["funding_path", "simulated_inventory_ledger"]
 
 MhsExecutionWindow = ExecutionReplayWindow
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
-
-MHS_DISCOVERY_GATE_TRANCHE_COUNT = 8
-# SPREAD_AND_COST_X3 stress assumption: the realistic primary fill mechanic at
-# 3x the default cost (same model, cost-shock robustness check).
-MHS_STRESS_COST_MULTIPLIER = 3.0
 
 
 def _stress_cost_execution_spec() -> ExecutionSpec:
@@ -187,50 +241,6 @@ def _stress_cost_execution_spec() -> ExecutionSpec:
     )
 
 
-MHS_DISCOVERY_REVERSAL_CANDIDATES: tuple[int, ...] = (24, 48, 72, 96, 120, 144, 168)
-MHS_DISCOVERY_MOMENTUM_CANDIDATES: tuple[int, ...] = PHASE_1_BOOK_SPECS["slow_momentum"].band.horizons_hours
-_MHS_FEATURE = "multi_horizon_market_state"
-_PERIODS_PER_YEAR_1H = 365.0 * 24
-_BOOTSTRAP_SEED = 20260807
-# Walk-forward minimum training bars floor.
-_MHS_WALK_FORWARD_MIN_TRAIN_BARS = 2000
-_BOOTSTRAP_REPLICATES = 2000
-_BOOTSTRAP_MEAN_BLOCK = 168
-
-# Strict-proxy Research-GO criterion: primary autocorrelation-adjusted Sharpe floor.
-MHS_GO_PRIMARY_SHARPE_FLOOR = 0.6
-
-MHS_ARTIFACT_SCHEMA_VERSION = 1
-
-# Unified artifact storage category tables.
-MHS_ARTIFACT_CATEGORIES: tuple[str, ...] = (
-    "fills",
-    "units",
-    "notional_weights",
-    "ledger",
-    "times",
-)
-
-
-class MhsOutputTier(StrEnum):
-    """Persistence resolution for the MHS horizon diagnostic."""
-
-    COMPACT = "compact"
-    FULL = "full"
-
-# Rebalance deadband as a fraction of the per-row per-symbol position scale
-# (structural churn statement, never an absolute notional constant).
-MHS_REBALANCE_DEADBAND_POSITION_FRACTION = 0.25
-# Max absolute dimensionless holdings growth slope for a structurally bounded book.
-MHS_BOOK_HOLDINGS_STATIONARITY_TOLERANCE = 0.25
-# Max |log(fold/blend)| ratio for holdings_mean and gross_mean before the fold
-# and blend paths are treated as diverged (log-ratio band).
-MHS_FOLD_BLEND_PARITY_TOLERANCE = 0.25
-# Max share of total realized log-growth that a single fold may supply before
-# the fold-growth-concentration gate fires (structural repeatability invariant).
-MHS_FOLD_GROWTH_CONCENTRATION_MAX_SHARE = 0.5
-# EMA smoothing span in decision steps.
-MHS_SIGNAL_EMA_HORIZON_SPAN = 1.0
 
 
 def _signal_ema_span(band_sign: int, horizon_hours: int, step_hours: int) -> int | None:
@@ -238,57 +248,6 @@ def _signal_ema_span(band_sign: int, horizon_hours: int, step_hours: int) -> int
     if band_sign != 1:
         return None
     return max(1, round(horizon_hours / step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
-# Realized volatility regime cash scaling floor and median window.
-MHS_REGIME_CASH_SCALE_FLOOR = 0.5
-MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS = 720
-# Equity floor for reference pass replay.
-MHS_REFERENCE_PASS_EQUITY_FLOOR = MHS_REGIME_CASH_SCALE_FLOOR
-# Strategy-level P&L volatility targeting parameters.
-MHS_PNL_VOL_TARGET_WINDOW_DAYS = 21
-MHS_PNL_VOL_TARGET_SCALE_FLOOR = 0.2
-MHS_PNL_VOL_TARGET_BURN_IN_DAYS = 90
-MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS = 365
-# Anchored-fold panel warm-up lookback bound.
-MHS_FOLD_PANEL_WARMUP_HOURS = 720 + 168 + 24
-# Execution-roster Schmitt-trigger hysteresis exit factor.
-MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER = 2.0
-# Portfolio-level rebalance tracking error threshold.
-MHS_REBALANCE_TRACKING_ERROR_THRESHOLD = 0.20
-# Causal market-beta lookback and min-period bars for beta neutralization.
-MHS_CAUSAL_BETA_LOOKBACK_BARS = 720
-MHS_CAUSAL_BETA_MIN_PERIODS = 360
-
-MHS_GO_REASON_INCOMPLETE_FOLD = "INCOMPLETE_ANCHORED_FOLD"
-MHS_GO_REASON_INVALID_PRIMARY = "INVALID_PRIMARY_LEDGER"
-MHS_GO_REASON_NONFINITE_EQUITY = "NONFINITE_EQUITY"
-MHS_GO_REASON_EXECUTION_GAP = "RELEVANT_EXECUTION_DATA_GAP"
-MHS_GO_REASON_PRIMARY_SHARPE = "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"
-MHS_GO_REASON_STRESS_SHARPE = "STRESS_SHARPE_NOT_POSITIVE"
-MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR = "PRIMARY_ANNUAL_RETURN_BELOW_FLOOR"
-MHS_GO_REASON_CAPITAL_BREACH = "CAPITAL_INVARIANT_BREACH"
-MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
-MHS_GO_REASON_RESOURCE_BREACH = "RESOURCE_BUDGET_BREACH"
-MHS_GO_REASON_PATH_DIVERGENCE = "FOLD_BLEND_PATH_DIVERGENCE"
-MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION = "FOLD_GROWTH_CONCENTRATION"
-# Blocking alpha/risk code for a completed blend whose realized drawdown exceeds
-# the registered budget. NOT a data-integrity reason: the data was intact; the
-# risk contract was exceeded.
-MHS_GO_REASON_DRAWDOWN_OVER_BUDGET = "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET"
-# Data-integrity reason codes: fail-closed evidence that the canonical input
-# data itself was missing or invalid, as opposed to pure alpha-quality failures
-# (MHS_GO_REASON_PRIMARY_SHARPE / MHS_GO_REASON_STRESS_SHARPE) or the policy
-# registration state (MHS_GO_REASON_UNSPECIFIED_POLICY). Consumers distinguish
-# "data was intact but alpha underperformed" from "data itself was deficient"
-# by whether MhsResearchGoResult.data_integrity_reason_codes is non-empty.
-MHS_GO_REASON_DATA_INTEGRITY_CODES = frozenset[str]({
-    MHS_GO_REASON_INCOMPLETE_FOLD,
-    MHS_GO_REASON_INVALID_PRIMARY,
-    MHS_GO_REASON_NONFINITE_EQUITY,
-    MHS_GO_REASON_EXECUTION_GAP,
-    MHS_GO_REASON_CAPITAL_BREACH,
-    MHS_GO_REASON_RESOURCE_BREACH,
-    MHS_GO_REASON_PATH_DIVERGENCE,
-})
 
 
 # Diagnostic reference-only execution bounds. OHLCV_IMMEDIATE_TAKER (primary and
@@ -303,7 +262,6 @@ MHS_REFERENCE_ONLY_EXECUTION_BOUNDS: frozenset[str] = frozenset(
 # committee_target_gross value: a bare MhsDiagnosticRequest() resolves to the
 # registered constant without triggering the committee_capital requirement,
 # while an explicit non-None value keeps requiring committee_capital=True.
-_MHS_COMMITTEE_TARGET_GROSS_UNSET: object = object()
 
 
 # Unrecoverable source gap exclusions (Binance REST API & Vision archives have >4h gaps):
@@ -320,375 +278,6 @@ MHS_SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
 })
 
 
-@dataclass(frozen=True, slots=True)
-class MhsDiagnosticRequest:
-    """Immutable request; the CLI carries ``--start``/``--end``/``--mark-mode``/``--no-log-run``.
-
-    ``partition`` is forced to ``'dev'`` (a holdout request raises); ``data_root``
-    allows tests to run against a synthetic market. ``mark_mode`` is a
-    reproducibility parameter: ``cache_required`` builds the strict causal mark
-    panel and fails closed, while ``cache_required_stale_carry`` permits a
-    bounded 24-hour causal carry for diagnostic-only continuity. The latter is
-    never a strict Research-GO source. ``ohlcv_close_fallback`` deliberately
-    passes ``None`` for fixtures and explicit comparison runs only.
-
-    ``execution_universe_size`` is the ENTRY rank threshold for the PIT
-    top-volume execution roster, not the realized holdings count: hysteresis
-    retains members past the entry rank, so realized holdings are approximately
-    ``execution_universe_size * (1 + hysteresis effect)``, NOT
-    ``execution_universe_size`` (see ``realized_execution_roster_size`` on
-    ``MhsHorizonDiagnosticReport``).
-    """
-
-    start: str | pd.Timestamp | None = None
-    end: str | pd.Timestamp | None = None
-    partition: Literal["dev", "holdout", "all"] = "dev"
-    data_root: str | None = None
-    mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"] = "cache_required"
-    execution_timeframe: Literal["1m", "3m", "5m"] = "3m"
-    execution_universe_size: int = 30
-    max_rss_bytes: int | None = None
-    log_run: bool = True
-    touch_diagnostic: bool = False
-    ladder_diagnostic: bool = False
-    discovery_gate: bool = False
-    discovery_gate_adjusted_net_t: bool = False
-    discovery_gate_regime_scaled_net_t: bool = False
-    fold_safe_horizon_selection: bool = False
-    crash_regime_tilt_alpha: float | None = None
-    slow_book_mode: Literal["single_horizon", "horizon_ensemble"] = "single_horizon"
-    fast_book_mode: Literal["single_horizon", "horizon_ensemble"] = "single_horizon"
-    rebalance_filter: Literal["per_symbol_deadband", "portfolio_trigger"] = "per_symbol_deadband"
-    beta_neutralize: bool = False
-    ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
-    trend_efficiency_overlay: bool = False
-    pnl_vol_target: bool = True
-    pnl_vol_target_mode: Literal["median_relative", "exante_target"] = "median_relative"
-    trend_sleeve: bool = False
-    trend_sleeve_gross: float = 0.0
-    multi_feature_book: bool = False
-    committee_book: bool = False
-    committee_kelly_sizing: bool = False
-    committee_growth_diagnostic: bool = False
-    committee_capital: bool = False
-    committee_tranche_smoothing: bool = False
-    committee_regime_adaptive_tranche: bool = False
-    committee_target_gross: float | None = _MHS_COMMITTEE_TARGET_GROSS_UNSET  # type: ignore[assignment]
-    committee_evidence_weighting: bool = False
-    funding_carry_sleeve: bool = False
-    funding_carry_weight: float = 0.0
-    execution_coverage_gate: bool = False
-    fill_mark_parity_gate: bool = True
-    exposure_scale_two_sided: bool = False
-    ram_guard: bool = True
-
-    def __post_init__(self) -> None:
-        if self.partition not in ("dev", "holdout", "all"):
-            raise ValueError(f"unknown partition '{self.partition}'")
-        if self.mark_mode not in ("cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"):
-            raise ValueError(f"unknown mark_mode '{self.mark_mode}'")
-        if self.execution_timeframe not in ("1m", "3m", "5m"):
-            raise ValueError(f"unknown execution_timeframe '{self.execution_timeframe}'")
-        if self.execution_universe_size < 8:
-            raise ValueError("execution_universe_size must be >= 8")
-        if self.max_rss_bytes is not None and self.max_rss_bytes <= 0:
-            raise ValueError("max_rss_bytes must be > 0")
-        if self.crash_regime_tilt_alpha is not None and not (0.0 < self.crash_regime_tilt_alpha <= 1.0):
-            raise ValueError(
-                f"crash_regime_tilt_alpha must be in (0.0, 1.0] when set, got {self.crash_regime_tilt_alpha}"
-            )
-        if self.slow_book_mode not in ("single_horizon", "horizon_ensemble"):
-            raise ValueError(f"unknown slow_book_mode '{self.slow_book_mode}'")
-        if self.fast_book_mode not in ("single_horizon", "horizon_ensemble"):
-            raise ValueError(f"unknown fast_book_mode '{self.fast_book_mode}'")
-        if self.rebalance_filter not in ("per_symbol_deadband", "portfolio_trigger"):
-            raise ValueError(f"unknown rebalance_filter '{self.rebalance_filter}'")
-        if self.discovery_gate_adjusted_net_t and not self.discovery_gate:
-            raise ValueError("discovery_gate_adjusted_net_t requires discovery_gate=True")
-        if self.discovery_gate_regime_scaled_net_t and not self.discovery_gate:
-            raise ValueError("discovery_gate_regime_scaled_net_t requires discovery_gate=True")
-        if not isinstance(self.beta_neutralize, bool):
-            raise ValueError("beta_neutralize must be a bool")
-        if self.ensemble_signal not in ("raw", "vol_normalized"):
-            raise ValueError(f"unknown ensemble_signal '{self.ensemble_signal}'")
-        if not isinstance(self.trend_efficiency_overlay, bool):
-            raise ValueError("trend_efficiency_overlay must be a bool")
-        if not isinstance(self.pnl_vol_target, bool):
-            raise ValueError("pnl_vol_target must be a bool")
-        if not isinstance(self.trend_sleeve, bool):
-            raise ValueError("trend_sleeve must be a bool")
-        if not isinstance(self.multi_feature_book, bool):
-            raise ValueError("multi_feature_book must be a bool")
-        if not isinstance(self.committee_book, bool):
-            raise ValueError("committee_book must be a bool")
-        if not isinstance(self.committee_kelly_sizing, bool):
-            raise ValueError("committee_kelly_sizing must be a bool")
-        if self.committee_kelly_sizing and not (self.committee_book or self.committee_capital):
-            raise ValueError("committee_kelly_sizing requires committee_book=True or committee_capital=True")
-        if not isinstance(self.committee_tranche_smoothing, bool):
-            raise ValueError("committee_tranche_smoothing must be a bool")
-        if self.committee_tranche_smoothing and not self.committee_capital:
-            raise ValueError("committee_tranche_smoothing requires committee_capital=True")
-        if not isinstance(self.committee_regime_adaptive_tranche, bool):
-            raise ValueError("committee_regime_adaptive_tranche must be a bool")
-        if self.committee_regime_adaptive_tranche:
-            if not self.committee_capital:
-                raise ValueError("committee_regime_adaptive_tranche requires committee_capital=True")
-            if self.committee_tranche_smoothing:
-                raise ValueError(
-                    "committee_regime_adaptive_tranche is mutually exclusive with "
-                    "committee_tranche_smoothing"
-                )
-        if not isinstance(self.committee_growth_diagnostic, bool):
-            raise ValueError("committee_growth_diagnostic must be a bool")
-        if self.committee_growth_diagnostic and not self.committee_book:
-            raise ValueError("committee_growth_diagnostic requires committee_book=True")
-        if not isinstance(self.committee_capital, bool):
-            raise ValueError("committee_capital must be a bool")
-        if not isinstance(self.committee_evidence_weighting, bool):
-            raise ValueError("committee_evidence_weighting must be a bool")
-        if self.committee_evidence_weighting and not self.committee_capital:
-            raise ValueError("committee_evidence_weighting requires committee_capital=True")
-        # The sentinel is never resolved into the frozen field: `__post_init__`
-        # runs on every `dataclasses.replace()` copy too, and a copy's incoming
-        # value is whatever the source instance's field held -- resolving here
-        # would make a prior resolution look like an explicit request on the
-        # next replace(), permanently losing the "was this ever set by a
-        # caller" distinction. Resolution happens lazily at the two read sites
-        # instead (``_resolved_committee_target_gross``).
-        _raw_target_gross = self.committee_target_gross
-        if _raw_target_gross is not _MHS_COMMITTEE_TARGET_GROSS_UNSET and _raw_target_gross is not None:
-            if not (0.0 < _raw_target_gross <= 2.0):
-                raise ValueError("committee_target_gross must be in (0.0, 2.0] when set")
-            if not self.committee_capital:
-                raise ValueError("committee_target_gross requires committee_capital=True")
-        if not isinstance(self.execution_coverage_gate, bool):
-            raise ValueError("execution_coverage_gate must be a bool")
-        if not isinstance(self.fill_mark_parity_gate, bool):
-            raise ValueError("fill_mark_parity_gate must be a bool")
-        if not isinstance(self.exposure_scale_two_sided, bool):
-            raise ValueError("exposure_scale_two_sided must be a bool")
-        if self.exposure_scale_two_sided and self.pnl_vol_target_mode != "exante_target":
-            raise ValueError(
-                "exposure_scale_two_sided requires pnl_vol_target_mode='exante_target'"
-            )
-        if not isinstance(self.ram_guard, bool):
-            raise ValueError("ram_guard must be a bool")
-        if not (0.0 <= self.trend_sleeve_gross <= 1.0):
-            raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
-        if self.trend_sleeve_gross > 0.0 and not self.trend_sleeve:
-            raise ValueError("trend_sleeve_gross requires trend_sleeve=True")
-        if self.pnl_vol_target_mode not in ("median_relative", "exante_target"):
-            raise ValueError(f"unknown pnl_vol_target_mode '{self.pnl_vol_target_mode}'")
-        if not isinstance(self.funding_carry_sleeve, bool):
-            raise ValueError("funding_carry_sleeve must be a bool")
-        if self.funding_carry_sleeve and not self.committee_capital:
-            raise ValueError("funding_carry_sleeve requires committee_capital=True")
-        if self.funding_carry_sleeve and self.committee_target_gross is None:
-            raise ValueError(
-                "funding_carry_sleeve is mutually exclusive with "
-                "committee_target_gross=None (the diluted book has no gross "
-                "to normalize the mix against)"
-            )
-        if not (0.0 <= self.funding_carry_weight < 1.0):
-            raise ValueError("funding_carry_weight must be in [0.0, 1.0)")
-        if self.funding_carry_weight > 0.0 and not self.funding_carry_sleeve:
-            raise ValueError("funding_carry_weight > 0.0 requires funding_carry_sleeve=True")
-
-
-@dataclass(frozen=True, slots=True)
-class MhsBookFailure:
-    """Typed, serializable book-level rejection of a strict replay error.
-
-    ``stage`` names the failing replay stage, ``error_class`` is the exact
-    exception class name, ``reason`` is a stable fail-closed code (one of the
-    ``MHS_GO_REASON_*`` strings), and ``message`` carries the deterministic
-    provenance. A failed book has no ledger/artifact reference and never
-    fabricates metrics, deployment readiness, or Research-GO evidence.
-    """
-
-    stage: str
-    error_class: str
-    reason: str
-    message: str
-
-
-@dataclass(frozen=True, slots=True)
-class MhsBookReport:
-    name: str
-    band: str
-    horizon_hours: int
-    step_hours: int
-    tranche_count: int
-    n_symbols: int
-    phase: PhaseDiagnosticResult
-    prescreen: dict[float, CostResponsePoint]
-    tail: TailSensitivityResult
-    primary: StrategyExecutionReplayResult | None
-    stress: StrategyExecutionReplayResult | None
-    primary_autocorr_sharpe: float | None
-    primary_naive_sharpe: float | None
-    primary_net_ann: float | None
-    primary_geometric_cagr: float | None
-    primary_max_drawdown: float | None
-    primary_annualized_turnover: float | None
-    stress_naive_sharpe: float | None
-    terminal_censored_decisions: int = 0
-    failure: MhsBookFailure | None = None
-    reference_bound_failures: tuple[MhsBookFailure, ...] = ()
-    touch: StrategyExecutionReplayResult | None = None
-    touch_naive_sharpe: float | None = None
-    ladder: StrategyExecutionReplayResult | None = None
-    ladder_naive_sharpe: float | None = None
-    patient_reference: StrategyExecutionReplayResult | None = None
-    patient_reference_naive_sharpe: float | None = None
-    pre_vol_target_reference: StrategyExecutionReplayResult | None = None
-    pre_vol_target_reference_naive_sharpe: float | None = None
-    executed_prescreen: dict[float, CostResponsePoint] | None = None
-    executed_tail: TailSensitivityResult | None = None
-    executed_prescreen_net_t: float | None = None
-    primary_realized_shortfall_bps: float | None = None
-    primary_notional_weighted_shortfall_bps: float | None = None
-    stress_realized_shortfall_bps: float | None = None
-    stress_notional_weighted_shortfall_bps: float | None = None
-    primary_fill_count: int | None = None
-    primary_unfilled_count: int | None = None
-    primary_forced_exit_notional: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MhsResearchGoResult:
-    """Machine-readable Research-GO gate decision built from the fold evidence.
-
-    ``eligible`` is false unless every anchored fold passed and no policy gate
-    is left unspecified; the exact blocking reasons are carried as stable codes.
-    """
-
-    eligible: bool
-    reason_codes: tuple[str, ...]
-    evaluated_folds: int
-    folds_passed: int
-    # Subset of ``reason_codes`` restricted to data-integrity failures; empty
-    # when the only blocking reasons are alpha-quality or policy-registration.
-    data_integrity_reason_codes: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class MhsFoldReport:
-    """One independently flat anchored-fold replay over the blend book.
-
-    ``strict``/``stress`` are ``None`` for an incomplete fold; ``failures``
-    carries the stable reason codes that blocked this fold's evidence.
-    """
-
-    fold_index: int
-    validation_start: str
-    validation_end: str
-    strict: StrategyExecutionReplayResult | None
-    stress: StrategyExecutionReplayResult | None
-    primary_valid: bool
-    primary_autocorr_sharpe: float
-    primary_naive_sharpe: float
-    primary_net_ann: float
-    primary_geometric_cagr: float
-    primary_max_drawdown: float
-    stress_naive_sharpe: float
-    decision_intents: int
-    termination_counts: dict[str, int]
-    failures: tuple[str, ...]
-    strict_elapsed_seconds: float
-    stress_elapsed_seconds: float
-    terminal_censored_decisions: int = 0
-    slow_horizon_hours: int = 168
-    slow_horizon_source: str = "frozen_default"
-    fast_horizon_hours: int = 48
-    fast_horizon_source: str = "frozen_default"
-    funding_carry_lookback_hours: int | None = None
-    funding_carry_sign: int | None = None
-    funding_carry_source: str = "frozen_default"
-    funding_carry_vs_slow_momentum_daily_corr: float | None = None
-    book_structure: dict[str, float] | None = None
-    regime_characterization: dict[str, float] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MhsHorizonDiagnosticReport:
-    feature: str
-    status: str
-    start: str
-    end: str
-    resolved_end: str
-    partition: str
-    execution_tiers_bps: tuple[float, ...]
-    books: dict[str, MhsBookReport]
-    blend: MhsBookReport | None
-    blend_target_gross: float
-    blend_cash_fraction: float
-    eligible_symbols: int
-    trials_attempted: int
-    deflated_sharpe_ratio: float | None
-    xs_rank_ic: dict[str, float]
-    date_clustered_regression: dict[str, float]
-    horizon_diagnostics: dict[str, float]
-    bootstrap_ci: tuple[float, float] | None
-    placebo_sharpe_percentile: float | None
-    deployment_readiness: DeploymentReadinessResult
-    synthetic_stress: dict[str, dict[str, Any]]
-    participation_warnings: dict[str, float]
-    termination_counts: dict[str, int]
-    unsupported_assumptions: tuple[str, ...]
-    anchored_folds: tuple[AnchoredPurgedFold, ...]
-    folds: tuple[MhsFoldReport, ...]
-    research_go: MhsResearchGoResult
-    fill_source: str
-    mark_source: str
-    execution_timeframe: str
-    execution_universe_size: int
-    execution_symbols: tuple[str, ...]
-    run_elapsed_seconds: float
-    resource_measurements: tuple[MhsResourceMeasurement, ...] = ()
-    discovery_qualification: dict[str, DiscoveryQualificationResult] | None = None
-    realized_execution_roster_size: float | None = None
-    full_history_yearly_net_t: dict[str, dict[int, float]] | None = None
-    funding_carry_worst_year_corr: float | None = None
-    trend_sleeve_diagnostic: dict[str, Any] | None = None
-    multi_feature_diagnostic: dict[str, Any] | None = None
-    committee_diagnostic: dict[str, Any] | None = None
-    funding_dropped_symbols: dict[str, str] | None = None
-    fold_blend_parity: dict[str, Any] | None = None
-    fold_growth_concentration: dict[str, Any] | None = None
-    fill_mark_parity: dict[str, Any] | None = None
-
-    def to_payload(self) -> Any:
-        return _jsonable(dataclasses.asdict(self))
-
-
-@dataclass(frozen=True, slots=True)
-class MhsResourceMeasurement:
-    """One ordered resource sample for a material diagnostic stage.
-
-    ``elapsed_ms`` is the wall time since the previous recorded stage; ``rss_bytes``
-    is the current process resident set size. Measurements are observational only
-    and must never alter control flow, replay data, or the GO gate.
-    """
-
-    stage: str
-    elapsed_ms: int
-    rss_bytes: int
-    grid_bars: int | None = None
-    n_symbols: int | None = None
-    fill_count: int | None = None
-    window_start: str | None = None
-    window_end: str | None = None
-    active_symbols: int | None = None
-    peak_rss_bytes: int | None = None
-
-
-def _current_rss_bytes() -> int:
-    try:
-        return int(psutil.Process().memory_info().rss)
-    except Exception:  # noqa: BLE001
-        return -1
 
 
 def _assert_cache_required_ledger_valid(
@@ -727,202 +316,6 @@ def _classify_execution_failure(exc: BaseException) -> str:
     return MHS_GO_REASON_INVALID_PRIMARY
 
 
-def _resolved_committee_target_gross(request: MhsDiagnosticRequest) -> float | None:
-    """The effective committee target gross: the registered default when the
-    caller never set the field, else the caller's explicit value (including
-    an explicit ``None``, which keeps the diluted book)."""
-    if request.committee_target_gross is _MHS_COMMITTEE_TARGET_GROSS_UNSET:
-        return MHS_COMMITTEE_TARGET_GROSS
-    return request.committee_target_gross
-
-
-def _drawdown_budget_reasons(
-    primary_max_drawdown: float | None,
-    max_drawdown: float = MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
-) -> tuple[str, ...]:
-    """Pure risk-contract gate: a completed blend breaching the drawdown budget.
-
-    Returns ``(MHS_GO_REASON_DRAWDOWN_OVER_BUDGET,)`` iff ``primary_max_drawdown``
-    is a finite float strictly below ``-max_drawdown``; ``()`` for ``None`` or
-    non-finite (an absent replay is already blocked by its own code). Raises
-    ``ValueError`` when ``max_drawdown <= 0``.
-    """
-    if max_drawdown <= 0:
-        raise ValueError(f"max_drawdown must be > 0, got {max_drawdown}")
-    if primary_max_drawdown is None or not np.isfinite(primary_max_drawdown):
-        return ()
-    if primary_max_drawdown < -max_drawdown:
-        return (MHS_GO_REASON_DRAWDOWN_OVER_BUDGET,)
-    return ()
-
-
-def _resolve_ram_budget(
-    max_rss_bytes: int | None,
-    ram_guard: bool,
-) -> tuple[int | None, int | None]:
-    """Resolve the automatic RAM-guard budget and reserve from the environment.
-
-    Returns ``(budget_bytes, reserve_bytes)``. With ``ram_guard=False`` both are
-    ``None`` (the legacy unlimited semantics). With the guard on, the budget is
-    ``max_rss_bytes`` when explicitly set, otherwise ``int(total *
-    MHS_RAM_BUDGET_FRACTION)``, and the reserve is
-    ``max(int(total * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)``.
-    A psutil failure or a non-positive total yields ``(None, None)`` -- an
-    observational failure disables the guard and never alters computed values.
-    """
-    if not ram_guard:
-        return (None, None)
-    try:
-        total = int(psutil.virtual_memory().total)
-    except Exception:  # noqa: BLE001
-        return (None, None)
-    if total <= 0:
-        return (None, None)
-    budget = (
-        max_rss_bytes
-        if max_rss_bytes is not None
-        else int(total * MHS_RAM_BUDGET_FRACTION)
-    )
-    reserve = max(int(total * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)
-    return (budget, reserve)
-
-
-def _assert_stage_rss_budget(
-    stage: str,
-    budget_bytes: int | None,
-    reserve_bytes: int | None,
-) -> None:
-    """Deterministic fail-closed RAM barrier at a named stage boundary.
-
-    (a) A positive ``budget_bytes`` exceeded by the current process RSS raises
-    ``DataIntegrityError`` naming the stage. (b) When ``reserve_bytes`` is set
-    and the system's available memory drops below it, ``DataIntegrityError`` is
-    raised BEFORE the OS OOM killer can fire (WSL kills the whole VM, so the
-    process must abort while headroom remains). psutil exceptions inside the
-    reserve probe are swallowed (observational). Both ``None`` makes it a no-op.
-    The guard never alters computed values.
-    """
-    if budget_bytes is not None:
-        observed = _current_rss_bytes()
-        if observed > budget_bytes:
-            raise DataIntegrityError(
-                f"RAM budget exceeded at stage '{stage}': "
-                f"rss={observed} > budget={budget_bytes}"
-            )
-    if reserve_bytes is not None:
-        try:
-            available = int(psutil.virtual_memory().available)
-        except Exception:  # noqa: BLE001
-            return
-        if available < reserve_bytes:
-            raise DataIntegrityError(
-                f"system RAM reserve breached at stage '{stage}': "
-                f"available={available} < reserve={reserve_bytes}"
-            )
-
-
-def _assert_execution_rss_budget(
-    stage: str,
-    budget: int | None,
-    completed_windows: int,
-    reserve_bytes: int | None = None,
-) -> None:
-    """Deterministic fail-closed provenance for a configured RSS budget.
-
-    A positive ``budget`` exceeded at a window boundary raises
-    ``DataIntegrityError`` carrying the stage, observed RSS, configured budget,
-    and completed window count; the default ``None`` applies no artificial cap.
-    When ``reserve_bytes`` is set and the system's available memory drops below
-    it, the same stable ``rss budget``-prefixed ``DataIntegrityError`` is raised
-    so ``_classify_execution_failure`` keeps mapping it to
-    ``MHS_GO_REASON_RESOURCE_BREACH`` -- the fork-worker OOM guard (only the
-    system reserve applies to workers; the auto 85% budget is parent-only
-    because fork-child RSS double-counts COW-shared pages).
-    """
-    if budget is None and reserve_bytes is None:
-        return
-    observed = _current_rss_bytes()
-    if budget is not None and observed > budget:
-        raise DataIntegrityError(
-            "execution RSS budget exceeded at window boundary: "
-            f"stage={stage} observed_rss={observed} "
-            f"budget={budget} completed_windows={completed_windows}"
-        )
-    if reserve_bytes is not None:
-        try:
-            available = int(psutil.virtual_memory().available)
-        except Exception:  # noqa: BLE001
-            return
-        if available < reserve_bytes:
-            raise DataIntegrityError(
-                "execution RSS budget (system reserve) breached at window boundary: "
-                f"stage={stage} available={available} "
-                f"reserve={reserve_bytes} completed_windows={completed_windows}"
-            )
-
-
-class _StageRecorder:
-    """Collects ordered ``MhsResourceMeasurement`` records and emits ``[SYS]`` logs."""
-
-    def __init__(self, log_run: bool) -> None:
-        self._records: list[MhsResourceMeasurement] = []
-        self._log_run = log_run
-        self._last = time.perf_counter()
-        self._peak_rss = -1
-
-    @property
-    def records(self) -> tuple[MhsResourceMeasurement, ...]:
-        return tuple(self._records)
-
-    def record(
-        self,
-        stage: str,
-        grid_bars: int | None = None,
-        n_symbols: int | None = None,
-        fill_count: int | None = None,
-        window_start: str | None = None,
-        window_end: str | None = None,
-        active_symbols: int | None = None,
-    ) -> None:
-        now = time.perf_counter()
-        elapsed_ms = int((now - self._last) * 1000)
-        self._last = now
-        rss = _current_rss_bytes()
-        self._peak_rss = max(self._peak_rss, rss)
-        self._records.append(
-            MhsResourceMeasurement(
-                stage=stage,
-                elapsed_ms=elapsed_ms,
-                rss_bytes=rss,
-                grid_bars=grid_bars,
-                n_symbols=n_symbols,
-                fill_count=fill_count,
-                window_start=window_start,
-                window_end=window_end,
-                active_symbols=active_symbols,
-                peak_rss_bytes=self._peak_rss,
-            )
-        )
-        if self._log_run:
-            _logger.info(
-                "[SYS] stage=%s rss=%d elapsed_ms=%d",
-                stage, rss, elapsed_ms,
-            )
-
-    def absorb(self, records: tuple[MhsResourceMeasurement, ...]) -> None:
-        """Merge frozen records (e.g. from a book subprocess) into this recorder.
-
-        Appends in arrival order, folds the peak-RSS tracking, and resets the
-        elapsed baseline so the next ``record`` measures from the absorption
-        point rather than from the last absorbed stage.
-        """
-        if not records:
-            return
-        self._records.extend(records)
-        self._peak_rss = max(self._peak_rss, max(r.peak_rss_bytes or 0 for r in records))
-        self._last = time.perf_counter()
-
-
 def _jsonable(value: Any) -> Any:
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
@@ -954,447 +347,27 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def _load_funding_series(
-    symbols: list[str],
-) -> tuple[dict[str, pd.Series], dict[str, str]]:
-    """Load per-symbol funding series plus the symbols silently dropped on load.
-
-    Returns ``(series, dropped)``: ``series`` maps symbol -> funding rates as
-    before, and ``dropped`` maps each symbol whose parquet raised on load (or
-    produced no rates) to the failure reason -- the drop is no longer
-    observable only via a warning log line, so a corrupted funding file can
-    never change the universe composition invisibly. Exception swallowing
-    itself is kept: one corrupt file must not kill the whole diagnostic.
-    """
-    series: dict[str, pd.Series] = {}
-    dropped: dict[str, str] = {}
-    for sym in symbols:
-        path = funding_path(sym)
-        if not path.exists():
-            dropped[sym] = "missing"
-            continue
-        try:
-            rates = load_funding_rates(str(path))
-        except Exception as exc:  # noqa: BLE001
-            dropped[sym] = f"load_error: {exc}"
-            _logger.warning("[MHS] funding load failed symbol=%s error=%s", sym, exc)
-            continue
-        if len(rates):
-            series[sym] = rates
-        else:
-            dropped[sym] = "empty"
-    return series, dropped
 
 
-def _pit_execution_mask(
-    quote_volume: pd.DataFrame,
-    eligible: pd.DataFrame,
-    universe_size: int,
-) -> pd.DataFrame:
-    """Select the PIT top-volume execution roster with entry/exit hysteresis.
-
-    ``universe_size`` is the ENTRY rank threshold only: a symbol enters by
-    reaching the top ``universe_size`` trailing-volume rank, and once a member
-    it is kept until its rank falls outside
-    ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER`` (a Schmitt-trigger
-    band). Because hysteresis retains members that have slipped past the entry
-    threshold, the realized number of holdings is approximately
-    ``universe_size * (1 + hysteresis effect)``, NOT ``universe_size`` (measured
-    ~41.9 vs a declared 30) -- the true mean per-row True count is exposed as
-    when the signal itself has not changed.
-    """
-    exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
-    trailing = quote_volume.rolling(720, min_periods=720).mean()
-    ranked = trailing.where(eligible).rank(axis=1, ascending=False, method="first")
-    enter = ranked.le(universe_size).fillna(False).to_numpy()
-    keep = ranked.le(exit_size).fillna(False).to_numpy()
-    held = np.zeros(enter.shape[1], dtype=bool)
-    out = np.zeros_like(enter, dtype=bool)
-    for i in range(len(enter)):
-        held = enter[i] | (held & keep[i])
-        out[i] = held
-    return pd.DataFrame(out, index=quote_volume.index, columns=quote_volume.columns)
 
 
-_DATA_COLLECTOR: DataCollector | None = None
 
 
-def _data_collector() -> DataCollector:
-    """Lazily-instantiated shared mark-price collector.
-
-    ``_iter_mhs_execution_windows`` previously constructed one ``DataCollector``
-    per 31-day window; a module-level singleton pays the collector's
-    construction cost once per diagnostic run instead of once per window
-    (spec O5).  ``load_mark_price_panel`` resolves ``_mark_price_path``
-    dynamically at call time, so test monkeypatches keep working.
-    """
-    global _DATA_COLLECTOR
-    if _DATA_COLLECTOR is None:
-        _DATA_COLLECTOR = DataCollector()
-    return _DATA_COLLECTOR
 
 
-@lru_cache(maxsize=512)
-def _get_symbol_mark_frame(symbol: str, timeframe: str) -> pd.DataFrame:
-    """Full-period mark-price frame for one symbol, cached for the process.
-
-    The ``markPriceKlines`` parquet is read once per ``(symbol, timeframe)`` per
-    process and sliced per window instead of being re-read for every window. The
-    frame is produced through ``DataCollector._load_mark_price_cache`` so its
-    preprocessing (ms->datetime, numeric coercion,
-    ``drop_duplicates(keep="last")``, ``sort_values``) is byte-identical to the
-    DataCollector panel path. ``_mark_price_path`` is resolved dynamically at
-    call time so test monkeypatches keep working; the returned frame is
-    read-only.
-    """
-    return DataCollector._load_mark_price_cache(
-        _futures_collection._mark_price_path(symbol, timeframe)
-    )
 
 
-def _prewarm_mark_frames(symbols: list[str], timeframe: str = "1h") -> None:
-    """Populate the parent-side mark frame cache before forking workers.
-
-    Fork children inherit the warmed cache copy-on-write, so the three books and
-    the anchored folds share one set of full-period mark frames instead of each
-    process re-reading its own copy (the measured ~4.2 GB per-process private
-    footprint becomes a single parent-side set). Missing mark parquet files are
-    skipped (the window path applies the same existence semantics for non-roster
-    symbols).
-    """
-    for sym in symbols:
-        if os.path.exists(_futures_collection._mark_price_path(sym, timeframe)):
-            _get_symbol_mark_frame(sym, timeframe)
 
 
-def _contemporaneous_mark_close_panel(
-    symbols: list[str],
-    grid: pd.DatetimeIndex,
-) -> pd.DataFrame:
-    """Contemporaneous mark-price close panel (no +1h shift, no ffill).
-
-    An absent mark stays NaN so the parity mask fails open per I2.  Deliberately
-    does NOT apply ``_cached_mark_panel``'s ``+1h`` availability shift — the gate
-    detects a stalled price feed, not the replay's valuation lag.
-    """
-    panel = pd.DataFrame(index=grid, columns=list(symbols), dtype="float64")
-    for sym in symbols:
-        try:
-            cache = _get_symbol_mark_frame(sym, "1h")
-        except (KeyError, ValueError):
-            # A malformed/incomplete mark cache (e.g. missing the
-            # open/high/low columns DataCollector._load_mark_price_cache
-            # unconditionally coerces) is a data-integrity condition the
-            # existing mark gates (_assert_cache_required_marks,
-            # apply_dynamic_mark_gap_exclusion) already own; this parity
-            # gate stays fail-open per I2 rather than pre-empting them with
-            # an unrelated crash.
-            continue
-        if cache.empty or "close" not in cache.columns:
-            continue
-        valid = (
-            cache["datetime"].notna()
-            & cache["close"].notna()
-            & (cache["close"] > 0)
-        )
-        closes = (
-            cache.loc[valid, ["datetime", "close"]]
-            .drop_duplicates(subset=["datetime"], keep="last")
-            .sort_values("datetime")
-        )
-        if closes.empty:
-            continue
-        available = pd.Series(
-            closes["close"].to_numpy(dtype="float64"),
-            index=closes["datetime"],
-        )
-        aligned = available.reindex(grid)
-        panel[sym] = aligned.to_numpy(dtype="float64")
-    return panel
 
 
-def _fill_mark_parity_eligibility(
-    close: pd.DataFrame,
-    eligible: pd.DataFrame,
-    enabled: bool,
-    *,
-    mark_close: pd.DataFrame | None = None,
-) -> tuple[pd.DataFrame, dict[str, Any] | None]:
-    """Single shared entry point for BOTH the top-level and the fold path (I4).
-
-    Returns ``(eligible, None)`` unchanged when ``enabled`` is False.
-    Otherwise returns ``(eligible & fill_mark_parity_mask(...), census)``.
-    """
-    if not enabled:
-        return eligible, None
-    if mark_close is None:
-        mark_close = _contemporaneous_mark_close_panel(
-            list(close.columns), close.index,
-        )
-    from src.mhs.panel import fill_mark_parity_mask
-
-    parity = fill_mark_parity_mask(close, mark_close)
-    removed = eligible & ~parity
-    cells_over_band = int(removed.to_numpy().sum())
-    eligible_cells_removed = int((removed & eligible).to_numpy().sum())
-    per_symbol = removed.sum(axis=0)
-    top_symbols = per_symbol[per_symbol > 0].sort_values(ascending=False)
-    truncated = len(top_symbols) > 5
-    symbols_dict: dict[str, int] = {}
-    for sym in top_symbols.index[:5]:
-        symbols_dict[str(sym)] = int(top_symbols[sym])
-    if truncated:
-        symbols_dict["truncated"] = len(top_symbols) - 5
-    census: dict[str, Any] = {
-        "band": MHS_FILL_MARK_MAX_LOG_DIVERGENCE,
-        "cells_over_band": cells_over_band,
-        "eligible_cells_removed": eligible_cells_removed,
-        "symbols": symbols_dict,
-    }
-    return eligible & parity, census
 
 
-def _cached_mark_panel(
-    roster: list[str],
-    timeframe: str,
-    minute_grid: pd.DatetimeIndex,
-    max_stale_hours: int,
-) -> pd.DataFrame:
-    """Build the causal mark-price panel from per-symbol cached mark frames.
-
-    Element-for-element equivalent to
-    ``DataCollector.load_mark_price_panel`` (same validation, same ``+1h``
-    availability shift, same ``ffill`` limit, same NaN for absent/non-finite/
-    non-positive marks) but sources each symbol's frame from the process-level
-    ``_get_symbol_mark_frame`` cache instead of re-reading the parquet per
-    window. The returned frame has exactly ``minute_grid`` as its index and
-    exactly ``roster`` as its column order.
-    """
-    if timeframe != "1h":
-        raise ValueError(f"unsupported timeframe '{timeframe}'")
-    if max_stale_hours < 0:
-        raise ValueError("max_stale_hours must be non-negative")
-    if not isinstance(minute_grid, pd.DatetimeIndex) or minute_grid.empty:
-        raise DataIntegrityError("grid must be a non-empty DatetimeIndex")
-    if minute_grid.tz is None:
-        raise DataIntegrityError("grid must be tz-aware UTC")
-    if not minute_grid.is_monotonic_increasing or minute_grid.has_duplicates:
-        raise DataIntegrityError("grid must be monotonically increasing with no duplicates")
-    if not roster:
-        raise DataIntegrityError("roster must be non-empty")
-    if len(set(roster)) != len(roster):
-        raise DataIntegrityError("roster must be unique")
-
-    panel = pd.DataFrame(index=minute_grid, columns=list(roster), dtype="float64")
-    if len(minute_grid) > 1:
-        step = minute_grid[1] - minute_grid[0]
-        step_minutes = step / pd.Timedelta(minutes=1)
-        if step_minutes <= 0 or 60 % step_minutes != 0:
-            raise DataIntegrityError(
-                "grid frequency must be a positive divisor of one hour"
-            )
-        if max_stale_hours == 0:
-            ffill_limit = int(60 // step_minutes - 1)
-        else:
-            ffill_limit = int(max_stale_hours * 60 // step_minutes - 1)
-    else:
-        ffill_limit = 0
-    for sym in roster:
-        cache = _get_symbol_mark_frame(sym, timeframe)
-        if cache.empty or "close" not in cache.columns:
-            continue
-        valid = (
-            cache["datetime"].notna()
-            & cache["close"].notna()
-            & (cache["close"] > 0)
-        )
-        closes = (
-            cache.loc[valid, ["datetime", "close"]]
-            .drop_duplicates(subset=["datetime"], keep="last")
-            .sort_values("datetime")
-        )
-        if closes.empty:
-            continue
-        available = pd.Series(
-            closes["close"].to_numpy(dtype="float64"),
-            index=closes["datetime"] + pd.Timedelta(hours=1),
-        )
-        aligned = (
-            available.reindex(minute_grid)
-            if ffill_limit == 0
-            else available.reindex(minute_grid, method="ffill", limit=ffill_limit)
-        )
-        panel[sym] = aligned.to_numpy(dtype="float64")
-    return panel
 
 
-def _load_window_minute_frames(
-    root: str,
-    symbols: list[str],
-    grid_start: pd.Timestamp,
-    grid_end: pd.Timestamp,
-    timeframe: Literal["1m", "3m", "5m"],
-) -> dict[str, pd.DataFrame]:
-    """Load one execution window's minute OHLCV slices directly from Parquet.
-
-    The window generator's minute-frame source: each symbol's frame is read
-    with a ``[grid_start, grid_end]`` timestamp filter (row-group pruning +
-    kernel page cache make repeated window reads cheap), then post-processed
-    identically (ms->datetime UTC, ``drop_duplicates(keep="last")``,
-    ``sort_index``). For a given window the returned frames equal the
-    full-period-frame ``.loc`` slice byte-for-byte. Missing Parquet files are
-    skipped.
-    """
-    frames: dict[str, pd.DataFrame] = {}
-    start_ms = int(grid_start.value // 1_000_000)
-    end_ms = int(grid_end.value // 1_000_000)
-    for sym in symbols:
-        path = os.path.join(root, timeframe, f"{sym}.parquet")
-        if not os.path.exists(path):
-            continue
-        table = pq.read_table(
-            path,
-            columns=["timestamp", "high", "low", "close"],
-            filters=[
-                [
-                    ("timestamp", ">=", start_ms),
-                    ("timestamp", "<=", end_ms),
-                ]
-            ],
-        )
-        idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
-        frame = pd.DataFrame(
-            {
-                c: table.column(c).to_numpy().astype("float64")
-                for c in ("high", "low", "close")
-            },
-            index=idx,
-        )
-        frame = frame[(frame.index >= grid_start) & (frame.index <= grid_end)]
-        frame = frame[~frame.index.duplicated(keep="last")].sort_index()
-        if not frame.empty:
-            frames[sym] = frame
-    return frames
 
 
-def _build_window_frames(
-    symbol_frames: dict[str, pd.DataFrame],
-    roster: list[str],
-    grid_start: pd.Timestamp,
-    grid_end: pd.Timestamp,
-    minute_grid: pd.DatetimeIndex,
-    timeframe: Literal["1m", "3m", "5m"],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
-    """Slice per-symbol full-period frames onto a window minute grid.
 
-    Identical output to the pre-window-keyed path (same slicing, same reindex,
-    same column order) but reads each symbol's frame from the in-memory
-    per-window Parquet slices. Returns ``None`` when no roster symbol has
-    usable data.
-    """
-    if not symbol_frames:
-        return None
-    if grid_start >= grid_end:
-        return None
-    sliced: dict[str, pd.DataFrame] = {}
-    for s in sorted(roster):
-        full = symbol_frames.get(s)
-        if full is None or full.empty:
-            continue
-        frame = full.loc[(full.index >= grid_start) & (full.index <= grid_end)]
-        if not frame.empty:
-            sliced[s] = frame
-    if not sliced:
-        return None
-    highs = pd.DataFrame({s: f["high"] for s, f in sliced.items()}).reindex(minute_grid)
-    lows = pd.DataFrame({s: f["low"] for s, f in sliced.items()}).reindex(minute_grid)
-    closes = pd.DataFrame({s: f["close"] for s, f in sliced.items()}).reindex(minute_grid)
-    return highs, lows, closes
-
-
-def _align_minute_frames(
-    frames: dict[str, pd.DataFrame], timeframe: Literal["1m", "3m", "5m"],
-    start: pd.Timestamp, end: pd.Timestamp,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
-    if not frames:
-        return None
-    if start >= end:
-        return None
-    # The requested evaluation grid is the replay grid. A late listing is kept
-    # as NaN on that grid and never trims the global start, so the replay
-    # horizon is never shortened by the union of first-observed timestamps.
-    grid = pd.date_range(
-        start, end,
-        freq={"1m": "1min", "3m": "3min", "5m": "5min"}[timeframe],
-        tz="UTC",
-    )
-    highs = pd.DataFrame({s: f["high"] for s, f in frames.items()}).reindex(grid)
-    lows = pd.DataFrame({s: f["low"] for s, f in frames.items()}).reindex(grid)
-    closes = pd.DataFrame({s: f["close"] for s, f in frames.items()}).reindex(grid)
-    return highs, lows, closes
-
-
-def _smooth_signal_ema(signal: pd.DataFrame, span_steps: int) -> pd.DataFrame:
-    """Apply an exponential moving average to a step-grid signal.
-
-    The EMA is the spec's ``Autocorr Smoothing`` (§3.2): it removes the
-    high-frequency noise that drives negative return autocorrelation (whipsaw)
-    while preserving the trend polarity. ``span_steps`` is one full horizon
-    cycle in decision steps; ``adjust=False`` so the span is the constant
-    half-life ``span - 1`` and the filtered series is fully causal.
-    """
-    if span_steps < 1:
-        raise ValueError(f"span_steps must be >= 1, got {span_steps}")
-    return signal.ewm(span=span_steps, adjust=False).mean()
-
-
-def _apply_rebalance_deadband(
-    target: pd.DataFrame,
-    position_fraction: float = MHS_REBALANCE_DEADBAND_POSITION_FRACTION,
-) -> pd.DataFrame:
-    """Suppress per-symbol rebalances smaller than a scale-relative deadband.
-
-    A target-weight change below ``position_fraction * scale_t`` (where
-    ``scale_t`` is the per-decision per-symbol position scale) carries the last
-    decided (held) target forward instead of retrading, so the executor never
-    churns on sub-threshold signal deltas; the hold is stateful, so a slow
-    drift cannot creep through one small step at a time. A target of exactly
-    ``0.0`` is a liquidation instruction, never a resize to be carried (the
-    exit-always invariant). The first observation is always a decision, NaN
-    targets remain NaN (a delisting is never silently re-expressed), and a held
-    NaN resets the deadband so a re-listed symbol trades from its own first
-    finite target.
-    """
-    if position_fraction < 0:
-        raise ValueError(f"position_fraction must be >= 0, got {position_fraction}")
-    if target.empty:
-        return target.copy()
-    values = target.to_numpy(dtype="float64")
-    out = values.copy()
-    held = out[0].copy()
-    finite = np.isfinite(values)
-    for i in range(1, len(values)):
-        row = values[i]
-        active = np.count_nonzero(np.abs(row) > 0.0)
-        min_delta = (
-            position_fraction * float(np.abs(row[np.isfinite(row)]).sum()) / active
-            if active
-            else 0.0
-        )
-        carry = (np.abs(row - held) < min_delta) & finite[i] & np.isfinite(held) & (row != 0.0)
-        out[i] = np.where(carry, held, row)
-        held = out[i]
-    # Invariant H (fail-closed): holdings can never exceed the roster that
-    # produced them; a violation is a systemic misconfiguration.
-    holdings_in = np.count_nonzero(np.abs(values) > 0.0, axis=1)
-    holdings_out = np.count_nonzero(np.abs(out) > 0.0, axis=1)
-    for i in range(len(values)):
-        if holdings_out[i] > holdings_in[i]:
-            raise DataIntegrityError(
-                f"holdings boundedness violated at {target.index[i]}: "
-                f"holdings_out={int(holdings_out[i])} > holdings_in={int(holdings_in[i])}"
-            )
-    return pd.DataFrame(out, index=target.index, columns=target.columns).fillna(0.0)
 
 
 def _book_structure_trace(target_weights: pd.DataFrame) -> dict[str, float]:
@@ -1584,193 +557,18 @@ def _fold_blend_parity(
     return payload, reason_codes
 
 
-def _trend_efficiency_overlay_scale(
-    log_close: pd.DataFrame,
-    execution_mask: pd.DataFrame,
-    fast_horizon_hours: int,
-    target_index: pd.DatetimeIndex,
-) -> pd.Series:
-    """Execution-roster mean efficiency_ratio at the fast band's horizon."""
-    mean_er = efficiency_ratio(log_close, fast_horizon_hours).where(execution_mask).reindex(target_index).mean(axis=1)
-    return trend_efficiency_scale(mean_er)
 
 
-def _regime_cash_scale(
-    vol_mean: pd.Series,
-    median_window_hours: int = MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS,
-    floor: float = MHS_REGIME_CASH_SCALE_FLOOR,
-) -> pd.Series:
-    """Per-decision gross-exposure scale that raises cash in high-vol regimes.
-
-    Exposure is ``median(vol) / vol`` clipped to ``[floor, 1.0]``: a calm regime
-    keeps full gross, a high-vol regime scales toward the cash floor, and a
-    flat/insufficient-history window carries full exposure (never 0/0). This is
-    the spec's ``Dynamic Band Weighting`` (§3.2) expressed as cash weighting.
-    """
-    if not 0.0 < floor <= 1.0:
-        raise ValueError(f"floor must be in (0, 1], got {floor}")
-    if median_window_hours < 1:
-        raise ValueError(f"median_window_hours must be >= 1, got {median_window_hours}")
-    if vol_mean.empty:
-        return pd.Series(1.0, index=vol_mean.index)
-    median = vol_mean.rolling(
-        median_window_hours, min_periods=min(48, median_window_hours),
-    ).median()
-    scale = median.div(vol_mean.clip(lower=1e-12))
-    scale = scale.clip(lower=floor, upper=1.0)
-    return scale.fillna(1.0)
 
 
-def _pnl_vol_target_scale(
-    reference_daily_returns: pd.Series,
-    window_days: int = MHS_PNL_VOL_TARGET_WINDOW_DAYS,
-    median_window_days: int = MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS,
-    floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR,
-) -> pd.Series:
-    """Strategy-own-P&L realized-vol targeting scale (Barroso & Santa-Clara).
-
-    ``scale_t = clip(rolling_median(trailing_vol, window=365d)_{t-1} /
-    trailing_vol_{t-1}, floor, 1.0)``: the strategy de-risks when its own
-    daily P&L becomes more volatile than its recent historical median
-    (momentum-crash protection), never levering up and never scaling on an
-    under-sampled estimate. Causality is strict: both the trailing-vol window
-    AND the rolling-median target are ``shift(1)`` before use (two independent
-    shifts, not one combined), so ``scale_t`` depends only on realized returns
-    strictly before ``t``.
-    """
-    if not 0.0 < floor <= 1.0:
-        raise ValueError(f"floor must be in (0, 1], got {floor}")
-    if window_days < 1:
-        raise ValueError(f"window_days must be >= 1, got {window_days}")
-    if median_window_days < MHS_PNL_VOL_TARGET_BURN_IN_DAYS:
-        raise ValueError(
-            f"median_window_days must be >= MHS_PNL_VOL_TARGET_BURN_IN_DAYS "
-            f"({MHS_PNL_VOL_TARGET_BURN_IN_DAYS}), got {median_window_days}"
-        )
-    if reference_daily_returns.empty:
-        return pd.Series(1.0, index=reference_daily_returns.index)
-    trailing_vol = reference_daily_returns.rolling(
-        window_days, min_periods=max(5, window_days // 2),
-    ).std().shift(1)
-    rolling_target = trailing_vol.rolling(
-        median_window_days, min_periods=MHS_PNL_VOL_TARGET_BURN_IN_DAYS,
-    ).median().shift(1)
-    scale = rolling_target.div(trailing_vol.where(trailing_vol > 0))
-    return scale.clip(lower=floor, upper=1.0).fillna(1.0)
 
 
-def _committee_kelly_scale(
-    reference_daily_returns: pd.Series,
-    window_days: int = MHS_PNL_VOL_TARGET_WINDOW_DAYS,
-    fraction: float = 0.25,
-    z: float = 1.0,
-    floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR,
-) -> pd.Series:
-    """Strategy-own-P&L trailing quarter-Kelly LCB exposure scale, capped at 1.0.
-
-    ``scale_t = clip(fraction * lcb_mean_{t-1} / var_{t-1}, floor, 1.0)`` where
-    ``lcb_mean = trailing_mean - z * trailing_std / sqrt(n)`` (Wald-style
-    lower-confidence-bound mean), mirroring ``_pnl_vol_target_scale``'s
-    shift(1)-before-use causality and floor/1.0 clip exactly -- capped at 1.0
-    rather than the diagnostic-only 1.5x (``kelly_lcb_scale`` in
-    ``src.mhs.committee``) so this blend never levers the execution ledger
-    above the existing no-lever-up invariant the capital-breach gate assumes.
-    A weak or negative LCB edge shrinks the scale to ``floor``, same as the
-    P&L-vol-target scale's momentum-crash de-risking.
-    """
-    if not 0.0 < floor <= 1.0:
-        raise ValueError(f"floor must be in (0, 1], got {floor}")
-    if window_days < 1:
-        raise ValueError(f"window_days must be >= 1, got {window_days}")
-    if fraction <= 0:
-        raise ValueError(f"fraction must be > 0, got {fraction}")
-    if z < 0:
-        raise ValueError(f"z must be >= 0, got {z}")
-    if reference_daily_returns.empty:
-        return pd.Series(1.0, index=reference_daily_returns.index)
-    min_periods = max(5, window_days // 2)
-    trailing_mean = reference_daily_returns.rolling(window_days, min_periods=min_periods).mean().shift(1)
-    trailing_std = reference_daily_returns.rolling(window_days, min_periods=min_periods).std().shift(1)
-    trailing_n = reference_daily_returns.rolling(window_days, min_periods=min_periods).count().shift(1)
-    se = trailing_std.div(np.sqrt(trailing_n))
-    lcb_mean = trailing_mean - z * se
-    var = trailing_std.pow(2)
-    raw_scale = fraction * lcb_mean.div(var.where(var > 0))
-    return raw_scale.clip(lower=floor, upper=1.0).fillna(1.0)
 
 
-def _committee_capital_replay_scale(
-    pnl_vol_target_scale: pd.Series,
-    reference_daily_returns: pd.Series,
-    committee_capital: bool,
-    committee_kelly_sizing: bool,
-) -> pd.Series:
-    """50/50 blend of the P&L-vol-target scale with the committee Kelly-LCB scale.
-
-    Only active when both ``committee_capital`` and ``committee_kelly_sizing``
-    are set (opt-in on top of an opt-in); otherwise returns
-    ``pnl_vol_target_scale`` unchanged so every other run stays byte-identical.
-    """
-    if not (committee_capital and committee_kelly_sizing):
-        return pnl_vol_target_scale
-    kelly_scale = _committee_kelly_scale(reference_daily_returns).reindex(
-        pnl_vol_target_scale.index,
-    ).fillna(1.0)
-    return 0.5 * pnl_vol_target_scale + 0.5 * kelly_scale
 
 
-def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: float = MHS_PNL_TARGET_ANNUAL_VOL, halflife_days: int = MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS, min_days: int = MHS_PNL_VOL_TARGET_BURN_IN_DAYS, floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR, cap: float = 1.0) -> pd.Series:
-    """절대 ex-ante 변동성 타겟팅: 목표 변동성 대비 실현 변동성 비율로 스케일링.
-
-    ``sigma_t = ewm(std, halflife=20d).shift(1) * sqrt(365)``
-    ``scale_t = clip(target_vol / sigma_t, floor, cap)``
-
-    _pnl_vol_target_scale와 달리 자가 trailing vol의 롤링 중앙값이 아닌
-    절대 위험 기준이므로 저위험 연도(2023)에서도 충분한 노출을 유지한다.
-    측정: 2023 vol 0.172 -> mean scale 0.991 vs _pnl_vol_target_scale 0.880.
-    """
-    if target_vol <= 0:
-        raise ValueError(f"target_vol must be > 0, got {target_vol}")
-    if halflife_days < 1:
-        raise ValueError(f"halflife_days must be >= 1, got {halflife_days}")
-    if min_days < 1:
-        raise ValueError(f"min_days must be >= 1, got {min_days}")
-    if not 0.0 < floor <= 1.0:
-        raise ValueError(f"floor must be in (0, 1], got {floor}")
-    if cap < 1.0:
-        raise ValueError(f"cap must be >= 1.0, got {cap}")
-    if reference_daily_returns.empty:
-        return pd.Series(1.0, index=reference_daily_returns.index)
-    sigma = (
-        reference_daily_returns
-        .ewm(halflife=halflife_days, min_periods=min_days)
-        .std()
-        .shift(1)
-        * np.sqrt(365.0)
-    )
-    scale = target_vol / sigma.where(sigma > 0)
-    return scale.clip(lower=floor, upper=cap).fillna(1.0)
 
 
-def _replay_exposure_scale(
-    reference_daily_returns: pd.Series,
-    request: MhsDiagnosticRequest,
-) -> pd.Series:
-    """단일 디스패처: 노출 스케일 모드 선택 + committee_capital 합성.
-
-    fold 경로와 top-level 경로 모두에서 동일 함수를 사용하여
-    FOLD_BLEND_PATH_DIVERGENCE를 회피한다(I4).
-    """
-    if request.pnl_vol_target_mode == "median_relative":
-        scale = _pnl_vol_target_scale(reference_daily_returns)
-    elif request.pnl_vol_target_mode == "exante_target":
-        scale = _exante_vol_target_scale(reference_daily_returns, cap=MHS_PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
-    else:
-        raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
-    return _committee_capital_replay_scale(
-        scale, reference_daily_returns,
-        request.committee_capital, request.committee_kelly_sizing,
-    )
 
 
 def _book_weights(
@@ -1783,7 +581,7 @@ def _book_weights(
     # Raw horizon_log_return is used for live book weights.
     sig = horizon_log_return(log_close, spec.horizon_hours)
     if ema_span is not None:
-        sig = _smooth_signal_ema(sig, ema_span)
+        sig = _scaling._smooth_signal_ema(sig, ema_span)
     sig_step = sig.reindex(step_grid)
     el_step = eligible.reindex(step_grid)
     weights = rank_weight_book(sig_step, el_step, spec.band.sign, spec.min_symbols)
@@ -1833,7 +631,7 @@ def _horizon_ensemble_execution_weights(
             else horizon_log_return(log_close, h)
         )
         if ema_span is not None:
-            sig = _smooth_signal_ema(sig, ema_span)
+            sig = _scaling._smooth_signal_ema(sig, ema_span)
         sig_step = sig.reindex(step_grid)
         weights = rank_weight_book(
             sig_step, eligible.reindex(step_grid), spec.band.sign, spec.min_symbols,
@@ -1876,64 +674,8 @@ def _phase_diagnostics(
     return phase_diagnostic_metrics(phase_nets, _PERIODS_PER_YEAR_1H)
 
 
-def _xs_rank_ic(
-    signal: pd.DataFrame, opens: pd.DataFrame, forward_bars: int,
-) -> dict[str, float]:
-    """Cross-sectional rank IC of ``signal`` on a tradable forward window.
-
-    The forward return is built internally as
-    ``opens.pct_change(forward_bars).shift(-(forward_bars + 1))`` so the
-    measured window starts at ``open_{t+1}`` and avoids overlapping lookbacks.
-    """
-    if forward_bars < 1:
-        raise ValueError(f"forward_bars must be >= 1, got {forward_bars}")
-    fwd = opens.pct_change(forward_bars).shift(-(forward_bars + 1))
-    common_index = signal.index.intersection(fwd.index)
-    common_columns = signal.columns.intersection(fwd.columns)
-    if common_index.empty or common_columns.empty:
-        return {}
-    signal_common = signal.loc[common_index, common_columns]
-    fwd_common = fwd.loc[common_index, common_columns]
-    valid = signal_common.notna() & fwd_common.notna()
-    signal_rank = signal_common.where(valid).rank(axis=1)
-    fwd_rank = fwd_common.where(valid).rank(axis=1)
-    signal_centered = signal_rank.sub(signal_rank.mean(axis=1), axis=0)
-    fwd_centered = fwd_rank.sub(fwd_rank.mean(axis=1), axis=0)
-    denominator = np.sqrt(
-        signal_centered.pow(2).sum(axis=1) * fwd_centered.pow(2).sum(axis=1),
-    )
-    correlations = (
-        (signal_centered * fwd_centered).sum(axis=1) / denominator
-    ).where(valid.sum(axis=1).ge(5) & denominator.gt(0.0)).dropna()
-    if correlations.empty:
-        return {}
-    series = correlations.astype("float64")
-    n_dates = len(series)
-    mean_ic = float(series.mean())
-    sd = float(series.std(ddof=1)) if n_dates > 1 else 0.0
-    t_stat = mean_ic / (sd / np.sqrt(n_dates)) if sd > 0 else float("nan")
-    return {
-        "n_dates": n_dates, "mean_ic": mean_ic, "t_stat": t_stat,
-        "forward_bars": forward_bars,
-    }
 
 
-def _annualized_1h_sharpe(net: pd.Series) -> float | None:
-    """Annualized Sharpe of an hourly net-return series, or None when undefinable.
-
-    A missing/empty series, a zero standard deviation, or a non-finite result
-    return ``None`` explicitly -- never NaN silently coerced to 0.0 (the
-    trend-sleeve diagnostic contract requires every reported value to be finite
-    or an explicit None).
-    """
-    net = net.dropna()
-    if len(net) < 2:
-        return None
-    sd = float(net.std(ddof=1))
-    if sd <= 0:
-        return None
-    value = float(net.mean() / sd * np.sqrt(_PERIODS_PER_YEAR_1H))
-    return value if np.isfinite(value) else None
 
 
 def _trend_sleeve_diagnostic(
@@ -1970,9 +712,9 @@ def _trend_sleeve_diagnostic(
     combined = current_book.add(sleeve)
     for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
         net, _ = mhs_ledger_pnl(sleeve, opens, bar_funding, cost_bps)
-        per_tier[tier] = _annualized_1h_sharpe(net)
+        per_tier[tier] = _statistics._annualized_1h_sharpe(net)
         combined_net, _ = mhs_ledger_pnl(combined, opens, bar_funding, cost_bps)
-        combined_per_tier[tier] = _annualized_1h_sharpe(combined_net)
+        combined_per_tier[tier] = _statistics._annualized_1h_sharpe(combined_net)
 
     yearly = yearly_net_t_diagnostic(
         sleeve, opens, bar_funding, (2021, 2022, 2023, 2024, 2025),
@@ -2199,7 +941,7 @@ def _multi_feature_diagnostic(
             for name in combinable_order:
                 acc = acc + tier_nets_by_name[name][tier_index[tier]] / sd_by_name[name]
             combined_net = acc / len(combinable_order)
-            combined_per_tier[tier] = _annualized_1h_sharpe(combined_net)
+            combined_per_tier[tier] = _statistics._annualized_1h_sharpe(combined_net)
     else:
         combined_per_tier = dict.fromkeys(MEASURED_EXECUTION_COST_TIERS_BPS)
 
@@ -2237,9 +979,6 @@ def _multi_feature_diagnostic(
     }
 
 
-def _finite_or_none(value: float) -> float | None:
-    """Coerce a metric to an explicit None when it is not finite (JSON-safe)."""
-    return None if not np.isfinite(value) else float(value)
 
 
 def _committee_growth_headroom(
@@ -2284,14 +1023,14 @@ def _committee_growth_headroom(
     return {
         "reference_risk": reference_risk,
         "selected_risk": (
-            _finite_or_none(selected.selected_risk)
+            _statistics._finite_or_none(selected.selected_risk)
             if selected.selected_risk is not None else None
         ),
-        "median_log_growth": _finite_or_none(selected.median_log_growth),
-        "mdd_breach_prob": _finite_or_none(selected.mdd_breach_prob),
-        "ruin_prob": _finite_or_none(selected.ruin_prob),
+        "median_log_growth": _statistics._finite_or_none(selected.median_log_growth),
+        "mdd_breach_prob": _statistics._finite_or_none(selected.mdd_breach_prob),
+        "ruin_prob": _statistics._finite_or_none(selected.ruin_prob),
         "binding_constraint": selected.binding_constraint,
-        "headroom_ratio": _finite_or_none(headroom.headroom_ratio),
+        "headroom_ratio": _statistics._finite_or_none(headroom.headroom_ratio),
         "risk_constrained": headroom.risk_constrained,
         "discovery_bars": int(discovery_mask.sum()),
     }
@@ -2514,10 +1253,10 @@ def _committee_diagnostic(
             blocks.append({
                 "block_start": t0.isoformat(),
                 "bars": len(block_wf),
-                "net_sharpe": _finite_or_none(block_metrics["sharpe"]),
-                "cagr": _finite_or_none(block_metrics["cagr"]),
-                "mdd": _finite_or_none(block_metrics["mdd"]),
-                "logret": _finite_or_none(block_metrics["logret"]),
+                "net_sharpe": _statistics._finite_or_none(block_metrics["sharpe"]),
+                "cagr": _statistics._finite_or_none(block_metrics["cagr"]),
+                "mdd": _statistics._finite_or_none(block_metrics["mdd"]),
+                "logret": _statistics._finite_or_none(block_metrics["logret"]),
                 "logret_share": (
                     float(block_metrics["logret"] / total_logret)
                     if np.isfinite(total_logret)
@@ -2536,10 +1275,10 @@ def _committee_diagnostic(
                 _block_rho1,
             )
         per_tier[tier] = {
-            "net_sharpe": _finite_or_none(metrics["sharpe"]),
-            "cagr": _finite_or_none(metrics["cagr"]),
-            "mdd": _finite_or_none(metrics["mdd"]),
-            "logret": _finite_or_none(metrics["logret"]),
+            "net_sharpe": _statistics._finite_or_none(metrics["sharpe"]),
+            "cagr": _statistics._finite_or_none(metrics["cagr"]),
+            "mdd": _statistics._finite_or_none(metrics["mdd"]),
+            "logret": _statistics._finite_or_none(metrics["logret"]),
             "bars": len(wf),
             "blocks": blocks,
         }
@@ -2582,210 +1321,10 @@ def _committee_diagnostic(
     }
 
 
-def _date_clustered_ols(
-    opens: pd.DataFrame, past: pd.DataFrame, forward_bars: int,
-) -> dict[str, float]:
-    """Pooled panel regression of a tradable forward return on ``past``.
-
-    Same causality fix as ``_xs_rank_ic`` (RC-3): the dependent variable is
-    built internally from ``opens`` with the ``shift(-(forward_bars + 1))``
-    convention, so the regression never regresses a return window that lies
-    inside its own predictor's lookback. Standard errors are date-clustered.
-    """
-    if forward_bars < 1:
-        raise ValueError(f"forward_bars must be >= 1, got {forward_bars}")
-    fwd = opens.pct_change(forward_bars).shift(-(forward_bars + 1))
-    common_index = past.index.intersection(fwd.index)
-    common_columns = past.columns.intersection(fwd.columns)
-    if common_index.empty or common_columns.empty:
-        return {
-            "n": 0, "n_dates": 0, "past_beta": float("nan"),
-            "past_t": float("nan"), "forward_bars": forward_bars,
-        }
-    x = past.loc[common_index, common_columns].to_numpy(dtype="float64", copy=False)
-    y = fwd.loc[common_index, common_columns].to_numpy(dtype="float64", copy=False)
-    valid = np.isfinite(x) & np.isfinite(y)
-    n = int(valid.sum())
-    if n < 10:
-        return {
-            "n": n, "n_dates": 0, "past_beta": float("nan"),
-            "past_t": float("nan"), "forward_bars": forward_bars,
-        }
-    x_valid = np.where(valid, x, 0.0)
-    y_valid = np.where(valid, y, 0.0)
-    sum_x = float(x_valid.sum())
-    sum_y = float(y_valid.sum())
-    xtx = np.array([[n, sum_x], [sum_x, float(np.square(x_valid).sum())]])
-    xty = np.array([sum_y, float((x_valid * y_valid).sum())])
-    inv_xtx = np.linalg.inv(xtx)
-    beta = inv_xtx @ xty
-    residual = np.where(valid, y - beta[0] - beta[1] * x, 0.0)
-    daily_scores = pd.DataFrame(
-        {"intercept": residual.sum(axis=1), "slope": (x_valid * residual).sum(axis=1)},
-        index=common_index,
-    ).resample("1D").sum()
-    scores = daily_scores.to_numpy(dtype="float64", copy=False)
-    meat = scores.T @ scores
-    cov = inv_xtx @ meat @ inv_xtx
-    se = np.sqrt(np.diag(cov))
-    t_beta = beta[1] / se[1] if se[1] > 0 else float("nan")
-    return {
-        "n": n, "n_dates": len(daily_scores), "past_beta": float(beta[1]),
-        "past_t": float(t_beta), "forward_bars": forward_bars,
-    }
 
 
-def _block_bootstrap_replicate_mean(
-    arr: np.ndarray, n: int, p_block: float, rng: np.random.Generator,
-) -> float:
-    """Mean of one block-bootstrap replicate (scalar fallback path).
-
-    Mirrors the original geometric block composition: block starts are uniform,
-    block lengths grow while ``rng.random() > p_block``, blocks are truncated at
-    the array end and again to the remaining sample length.  Only used for the
-    degenerate ``mean_block <= 0`` configuration and for the astronomically
-    rare vectorized shortfall, where a replicate's drawn blocks did not reach
-    length ``n``.
-    """
-    blocks: list[float] = []
-    while len(blocks) < n:
-        start = int(rng.integers(0, n))
-        length = 1
-        while length < n and rng.random() > p_block:
-            length += 1
-        length = min(length, n - len(blocks))
-        blocks.extend(arr[start : start + length].tolist())
-    return float(np.mean(blocks[:n]))
-
-def _bootstrap_ci(net: pd.Series, n_replicates: int, mean_block: int, seed: int) -> tuple[float, float]:
-    rng = np.random.default_rng(seed)
-    arr = net.to_numpy(dtype="float64")
-    n = len(arr)
-    if n == 0:
-        return float("nan"), float("nan")
-    if n == 1:
-        m = float(arr[0])
-        return m, m
-    p_block = 1.0 / mean_block if mean_block > 0 else 0.0
-    if p_block <= 0.0:
-        means = np.empty(n_replicates, dtype=np.float64)
-        for r in range(n_replicates):
-            means[r] = _block_bootstrap_replicate_mean(arr, n, p_block, rng)
-        return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
-
-    # Vectorized block bootstrap: block lengths are ``geometric(p_block)`` --
-    # the same length law as the scalar ``while`` loop -- and block starts are
-    # uniform.  A 6x block-count safety margin makes running short effectively
-    # impossible; any shortfall still falls back to the scalar replicate path.
-    max_blocks = min(n, int(np.ceil(n * 6.0 / mean_block)) + 16)
-    means = np.empty(n_replicates, dtype=np.float64)
-    chunk = 128
-    for r0 in range(0, n_replicates, chunk):
-        r1 = min(r0 + chunk, n_replicates)
-        k = r1 - r0
-        lengths = rng.geometric(p_block, size=(k, max_blocks))
-        starts = rng.integers(0, n, size=(k, max_blocks))
-        ends = np.cumsum(lengths, axis=1)
-        short = ends[:, -1] < n
-        for r in np.flatnonzero(short).tolist():
-            means[r0 + r] = _block_bootstrap_replicate_mean(arr, n, p_block, rng)
-        valid = ~short
-        if valid.any():
-            ends_trunc = np.minimum(ends, n)
-            used = ends_trunc - np.concatenate(
-                [np.zeros((k, 1), dtype=np.int64), ends_trunc[:, :-1]], axis=1,
-            )
-            u = used[valid].ravel()
-            s = starts[valid].ravel()
-            keep = u > 0
-            u = u[keep]
-            s = s[keep]
-            block_start = np.cumsum(u) - u
-            offsets = np.arange(int(u.sum()), dtype=np.int64) - np.repeat(block_start, u)
-            arr_idx = (np.repeat(s, u) + offsets) % n
-            sample = arr[arr_idx].reshape(int(valid.sum()), n)
-            means[r0 + np.flatnonzero(valid)] = sample.mean(axis=1)
-
-    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
 
-def _placebo_sharpe_percentile(
-    signal: pd.DataFrame,
-    eligible: pd.DataFrame,
-    opens: pd.DataFrame,
-    bar_funding: pd.DataFrame,
-    grid_1h: pd.DatetimeIndex,
-    spec: BookSpec,
-    observed_sharpe: float,
-    n_placebos: int,
-    seed: int,
-) -> float | None:
-    rng = np.random.default_rng(seed)
-    ranks: list[float] = []
-    cols = list(signal.columns)
-    n_cols = len(cols)
-    sig_step = signal.reindex(grid_1h)
-    el_step = eligible.reindex(grid_1h)
-    # The frozen ledger raises ``DataIntegrityError`` unless weights, opens, and
-    # funding share an identical index and column set; preserve that contract
-    # instead of silently aligning via ``reindex``.
-    if not opens.index.equals(grid_1h) or not bar_funding.index.equals(grid_1h):
-        raise DataIntegrityError("opens and bar_funding must share the placebo grid index")
-    opens_arr = opens[cols].to_numpy(dtype="float64")
-    funding_arr = bar_funding[cols].to_numpy(dtype="float64")
-
-    # The placebo shuffle relabels the signal/eligible columns without moving
-    # their values, so ``rank_weight_book`` on any shuffled copy returns the
-    # identical weight matrix; only the price/funding columns are genuinely
-    # permuted relative to those weights.  The whole weight pipeline is
-    # therefore computed once as a 2D float64 matrix instead of re-materializing
-    # pandas DataFrames inside the 500-step loop (spec §3, Optimization 1).
-    weights = rank_weight_book(sig_step, el_step, spec.band.sign, spec.min_symbols)
-    weights = phase_tranche_book(weights, spec.tranche_count())
-    w_arr = weights.reindex(grid_1h).ffill().fillna(0.0).to_numpy(dtype="float64")
-
-    n_rows = opens_arr.shape[0]
-    lag = 1 + 1  # ``mhs_ledger_pnl`` uses ``execution_delay_bars=1``.
-    lagged = np.zeros_like(w_arr)
-    if lag < n_rows:
-        lagged[lag:] = w_arr[: n_rows - lag]
-
-    o2o = np.zeros_like(opens_arr)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
-
-    prev_lagged = np.zeros_like(lagged)
-    prev_lagged[1:] = lagged[:-1]
-    turnover = np.abs(lagged - prev_lagged).sum(axis=1)
-    half = 8.0 / 2.0 * 1e-4
-    cost_rate = half + half
-    nonfinite = ~np.isfinite(o2o) | ~np.isfinite(funding_arr)
-    safe_o2o = np.where(np.isfinite(o2o), o2o, 0.0)
-    safe_funding = np.where(np.isfinite(funding_arr), funding_arr, 0.0)
-    active = lagged != 0.0
-
-    for _p in range(n_placebos):
-        perm = rng.permutation(n_cols)
-        # A shuffled placebo can pair a non-zero weight with a symbol outside
-        # its lifecycle; such a placebo is invalid, not evidence that the
-        # production ledger should relax its active-cell guard.
-        if (active & nonfinite[:, perm]).any():
-            continue
-        book_return = (lagged * safe_o2o[:, perm]).sum(axis=1)
-        funding_charge = (lagged * safe_funding[:, perm]).sum(axis=1)
-        net_returns = book_return - turnover * cost_rate - funding_charge
-        if np.any(net_returns <= -1.0):
-            continue
-        equity = 10000.0 * np.cumprod(1.0 + net_returns)
-        net = equity[1:] / equity[:-1] - 1.0
-        if len(net) <= 1:
-            continue
-        sd = float(np.std(net, ddof=1))
-        if sd > 0:
-            ranks.append(float(np.mean(net) / sd * np.sqrt(_PERIODS_PER_YEAR_1H)))
-    if not ranks:
-        return None
-    return float(np.mean([1.0 if observed_sharpe >= r else 0.0 for r in ranks]))
 
 
 def _load_symbol_quote_volume(
@@ -2880,75 +1419,12 @@ def _participation_warnings(
     return warnings
 
 
-def _log_autocorr_diagnostic(tag: str, returns: pd.Series, adjusted_sharpe: float) -> None:
-    """Debug-only Lo(2002) decomposition: separates the denominator penalty
-    (serial-correlation artifact) from raw-return decay, per fold/regime tag.
-    """
-    mean = float(returns.mean())
-    std = float(returns.std(ddof=1))
-    sample_sharpe = mean / std * float(np.sqrt(365)) if std > 0 else float("nan")
-    denom = (
-        sample_sharpe / adjusted_sharpe
-        if np.isfinite(adjusted_sharpe) and adjusted_sharpe != 0.0
-        else float("nan")
-    )
-    n = len(returns)
-    rho1 = float(returns.autocorr(1)) if n > 2 else float("nan")
-    rho3 = float(returns.autocorr(3)) if n > 4 else float("nan")
-    rho7 = float(returns.autocorr(7)) if n > 8 else float("nan")
-    _logger.debug(
-        "[EVAL] tag=%s n=%d mean=%.5f std=%.5f sample_sharpe=%.3f adjusted_sharpe=%.3f "
-        "lo_denom=%.3f rho1=%.3f rho3=%.3f rho7=%.3f",
-        tag, n, mean, std, sample_sharpe, adjusted_sharpe, denom, rho1, rho3, rho7,
-    )
 
 
-def _daily_autocorr_sharpe(
-    ledger: SimulatedInventoryLedgerResult, *, debug_tag: str | None = None,
-) -> float:
-    if ledger.equity.empty:
-        return float("nan")
-    daily = ledger.equity.resample("1D").last().dropna()
-    if len(daily) < 9:
-        return float("nan")
-    returns = daily.pct_change().dropna()
-    adjusted = autocorrelation_adjusted_sharpe(returns, 365, 7)
-    if debug_tag is not None and _logger.isEnabledFor(logging.DEBUG):
-        _log_autocorr_diagnostic(debug_tag, returns, adjusted)
-    return adjusted
 
 
-def _hourly_ledger_series(
-    equity: pd.Series, fill_turnover: pd.Series,
-) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """Resample a native execution-timeframe ledger to the annualization grid.
-
-    The ``_PERIODS_PER_YEAR_1H`` annualization constant describes hourly bars,
-    but the replay ledgers run on ``request.execution_timeframe`` (3m default),
-    so every headline metric derived from them must first be resampled to 1h
-    (the ``equity_1h`` pattern already present in ``_run_post_diag_deploy``).
-    Turnover is a per-bar traded-notional fraction, so hourly aggregation is a
-    sum (not a last-value sample, unlike equity). An already-hourly input passes
-    through unchanged.
-    """
-    equity_1h = equity.resample("1h").last().dropna()
-    net_returns_1h = equity_1h.pct_change().dropna()
-    turnover_1h = (
-        fill_turnover.resample("1h").sum()
-        .reindex(net_returns_1h.index)
-        .fillna(0.0)
-    )
-    return equity_1h, net_returns_1h, turnover_1h
 
 
-def _naive_sharpe(ledger: SimulatedInventoryLedgerResult) -> float:
-    net = ledger.equity.resample("1h").last().dropna().pct_change().dropna()
-    if len(net) < 2:
-        return float("nan")
-    sd = float(net.std(ddof=1))
-    if sd <= 0:
-        return float("inf") if float(net.mean()) > 0 else float("-inf")
-    return float(net.mean() / sd * np.sqrt(_PERIODS_PER_YEAR_1H))
 
 
 def _validate_ladder_schedule_contract() -> None:
@@ -2970,22 +1446,9 @@ def _validate_ladder_schedule_contract() -> None:
     assert abs(sum(f[3] for f in ladder) - 1.0) < 1e-12
 
 
-def _mean_ann(series: pd.Series, periods_per_year: float) -> float:
-    return float(series.mean()) * periods_per_year if len(series) else float("nan")
 
 
-def _geometric_cagr(equity: pd.Series) -> float:
-    if equity.empty or float(equity.iloc[0]) <= 0 or float(equity.iloc[-1]) <= 0:
-        return float("nan")
-    n = len(equity)
-    return float((equity.iloc[-1] / equity.iloc[0]) ** (_PERIODS_PER_YEAR_1H / n) - 1.0)
 
-
-def _mdd(equity: pd.Series) -> float:
-    if equity.empty:
-        return float("nan")
-    running_max = equity.cummax()
-    return float((equity / running_max - 1.0).min())
 
 
 def _truncate_replayable_decisions(
@@ -3354,7 +1817,7 @@ def _book_outcome(
             target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
         )
     else:
-        target_weights = _apply_rebalance_deadband(target_weights)
+        target_weights = _scaling._apply_rebalance_deadband(target_weights)
     blend_traces: dict[int, dict[str, float]] = {}
     if name == "blend":
         blend_traces = {
@@ -3431,10 +1894,10 @@ def _book_outcome(
         # replay the rescaled weights while ``pre_vol_target_reference`` keeps
         # the unscaled Pass-1 result as a diagnostic field.
         reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        pnl_vol_target_scale = _replay_exposure_scale(reference_daily_returns, request)
+        pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request)
         replay_scale = pnl_vol_target_scale if request.pnl_vol_target else None
         pre_vol_target_reference = primary
-        pre_vol_target_reference_naive_sharpe = _naive_sharpe(primary.ledger)
+        pre_vol_target_reference_naive_sharpe = _statistics._naive_sharpe(primary.ledger)
         # Pass 2 replays the scaled target_replay with min_equity_fraction floor.
         batch_bounds: list[tuple[
             Literal["OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"],
@@ -3468,14 +1931,14 @@ def _book_outcome(
         assert primary is not None
         assert stress is not None
         patient_reference_naive_sharpe = (
-            _naive_sharpe(patient_reference.ledger) if patient_reference is not None else None
+            _statistics._naive_sharpe(patient_reference.ledger) if patient_reference is not None else None
         )
         if request.touch_diagnostic:
             touch = batch.results[3]
-            touch_naive_sharpe = _naive_sharpe(touch.ledger) if touch is not None else None
+            touch_naive_sharpe = _statistics._naive_sharpe(touch.ledger) if touch is not None else None
         if request.ladder_diagnostic:
             ladder = batch.results[-1]
-            ladder_naive_sharpe = _naive_sharpe(ladder.ledger) if ladder is not None else None
+            ladder_naive_sharpe = _statistics._naive_sharpe(ladder.ledger) if ladder is not None else None
         reference_bound_failures = tuple(
             MhsBookFailure(
                 stage=f"replay_{name}_{f.execution_bound}",
@@ -3544,7 +2007,7 @@ def _book_outcome(
             executed_tail=executed_tail,
             executed_prescreen_net_t=executed_prescreen_net_t,
         ), blend_traces
-    equity_1h, net_returns_1h, turnover_1h = _hourly_ledger_series(
+    equity_1h, net_returns_1h, turnover_1h = _statistics._hourly_ledger_series(
         primary.ledger.equity, primary.ledger.fill_turnover,
     )
     return MhsBookReport(
@@ -3559,13 +2022,13 @@ def _book_outcome(
         tail=tail,
         primary=primary,
         stress=stress,
-        primary_autocorr_sharpe=_daily_autocorr_sharpe(primary.ledger),
-        primary_naive_sharpe=_naive_sharpe(primary.ledger),
-        primary_net_ann=_mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H),
-        primary_geometric_cagr=_geometric_cagr(equity_1h),
-        primary_max_drawdown=_mdd(primary.ledger.equity),
-        primary_annualized_turnover=_mean_ann(turnover_1h, _PERIODS_PER_YEAR_1H),
-        stress_naive_sharpe=_naive_sharpe(stress.ledger),
+        primary_autocorr_sharpe=_statistics._daily_autocorr_sharpe(primary.ledger),
+        primary_naive_sharpe=_statistics._naive_sharpe(primary.ledger),
+        primary_net_ann=_statistics._mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H),
+        primary_geometric_cagr=_statistics._geometric_cagr(equity_1h),
+        primary_max_drawdown=_statistics._mdd(primary.ledger.equity),
+        primary_annualized_turnover=_statistics._mean_ann(turnover_1h, _PERIODS_PER_YEAR_1H),
+        stress_naive_sharpe=_statistics._naive_sharpe(stress.ledger),
         terminal_censored_decisions=censored,
         touch=touch,
         touch_naive_sharpe=touch_naive_sharpe,
@@ -3787,8 +2250,8 @@ def _run_post_diag_deploy(
     equity_1h = blend_report.primary.ledger.equity.resample("1h").last().dropna()
     net_1h = equity_1h.pct_change().dropna()
     if len(net_1h) >= 2:
-        bootstrap_ci = _bootstrap_ci(
-            net_1h, _BOOTSTRAP_REPLICATES, _BOOTSTRAP_MEAN_BLOCK, _BOOTSTRAP_SEED,
+        bootstrap_ci = _statistics._bootstrap_ci(
+            net_1h, _statistics._BOOTSTRAP_REPLICATES, _statistics._BOOTSTRAP_MEAN_BLOCK, _statistics._BOOTSTRAP_SEED,
         )
     participation = _participation_warnings(
         blend_report.primary, root, request.execution_timeframe,
@@ -3797,9 +2260,9 @@ def _run_post_diag_deploy(
     termination_counts = dict(blend_report.primary.termination_counts)
     if blend_report.primary_naive_sharpe is None:
         raise DataIntegrityError("blend report requires a naive Sharpe for the placebo")
-    placebo_percentile = _placebo_sharpe_percentile(
+    placebo_percentile = _statistics._placebo_sharpe_percentile(
         signal_48h, eligible, opens, bar_funding, grid_1h,
-        fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
+        fast, blend_report.primary_naive_sharpe, 500, _statistics._BOOTSTRAP_SEED,
     )
     deployment = compute_deployment_readiness(
         equity_1h,
@@ -3807,9 +2270,9 @@ def _run_post_diag_deploy(
         participation_warnings=participation,
         primary_valid=blend_report.primary.ledger.primary_valid,
         research_go_eligible=None,
-        n_bootstrap=_BOOTSTRAP_REPLICATES,
-        mean_block_bars=_BOOTSTRAP_MEAN_BLOCK,
-        seed=_BOOTSTRAP_SEED,
+        n_bootstrap=_statistics._BOOTSTRAP_REPLICATES,
+        mean_block_bars=_statistics._BOOTSTRAP_MEAN_BLOCK,
+        seed=_statistics._BOOTSTRAP_SEED,
     )
     return bootstrap_ci, placebo_percentile, participation, termination_counts, deployment
 
@@ -4021,17 +2484,6 @@ def _prefer_funding_carry_selection(
     return lookback, sign
 
 
-def _causal_lag1_autocorr(x: np.ndarray) -> float:
-    """Lag-1 Pearson autocorrelation of a rolling window (raw ndarray, for use
-    inside ``Series.rolling(...).apply(..., raw=True)``).
-    """
-    if len(x) < 3:
-        return float("nan")
-    x0, x1 = x[:-1], x[1:]
-    if np.std(x0) == 0.0 or np.std(x1) == 0.0:
-        return float("nan")
-    return float(np.corrcoef(x0, x1)[0, 1])
-
 
 def _trend_sleeve_position(
     log_close: pd.DataFrame,
@@ -4177,7 +2629,7 @@ def _committee_execution_book(
         proxy_return = (book_grid * fwd_ret.reindex(decision_grid)).sum(axis=1)
         trailing_rho1 = (
             proxy_return.rolling(regime_adaptive_window, min_periods=regime_adaptive_window)
-            .apply(_causal_lag1_autocorr, raw=True)
+            .apply(_statistics._causal_lag1_autocorr, raw=True)
             .shift(1)
         )
         use_smoothed = (trailing_rho1 < 0.0).reindex(decision_grid).fillna(False)
@@ -4359,7 +2811,7 @@ def _build_fold_target_weights(
                 MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
-            target_gross=_resolved_committee_target_gross(request),
+            target_gross=_research_go._resolved_committee_target_gross(request),
             member_weights=committee_member_weights,
             carry_book=funding_carry_execution_book(bar_funding, execution_mask, MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, MHS_COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
         ).reindex(grid_1h).fillna(0.0)
@@ -4387,10 +2839,10 @@ def _build_fold_target_weights(
     # full eligible universe: only the execution_mask symbols carry capital, so
     # their realized vol is the quantity that decides high-vol cash scaling.
     vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(decision_grid).mean(axis=1)
-    regime_scale = _regime_cash_scale(vol_mean)
+    regime_scale = _scaling._regime_cash_scale(vol_mean)
     if request.trend_efficiency_overlay:
         regime_scale = regime_scale.mul(
-            _trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, decision_grid),
+            _scaling._trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, decision_grid),
         )
     del execution_mask
     del log_close
@@ -4400,7 +2852,7 @@ def _build_fold_target_weights(
             target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
         ).mul(regime_scale, axis=0)
     else:
-        target_weights = _apply_rebalance_deadband(target_weights.mul(regime_scale, axis=0))
+        target_weights = _scaling._apply_rebalance_deadband(target_weights.mul(regime_scale, axis=0))
 
     if target_weights.empty:
         raise RuntimeError("fold decision grid is empty")
@@ -4714,7 +3166,7 @@ def _run_anchored_fold(
         # same causal P&L-vol-target scale as the top-level books, computed from
         # the fold's own validation-window reference ledger.
         reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        pnl_vol_target_scale = _replay_exposure_scale(reference_daily_returns, request)
+        pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request)
         primary, stress = replay_execution_window_batch(
             _window_telemetry(
                 _rescaled_windows(_windows(), pnl_vol_target_scale),
@@ -4748,17 +3200,17 @@ def _run_anchored_fold(
             f"fold{fold_index}_tranche{_fold_debug_mode}"
             if request.committee_capital else None
         )
-        primary_autocorr = _daily_autocorr_sharpe(primary.ledger, debug_tag=_fold_debug_tag)
+        primary_autocorr = _statistics._daily_autocorr_sharpe(primary.ledger, debug_tag=_fold_debug_tag)
         if not np.isfinite(primary_autocorr) or primary_autocorr < MHS_GO_PRIMARY_SHARPE_FLOOR:
             failures.append(MHS_GO_REASON_PRIMARY_SHARPE)
-        stress_sharpe = _naive_sharpe(stress.ledger)
+        stress_sharpe = _statistics._naive_sharpe(stress.ledger)
         if not np.isfinite(stress_sharpe) or stress_sharpe <= 0.0:
             failures.append(MHS_GO_REASON_STRESS_SHARPE)
 
-        equity_1h, net_returns_1h, _turnover_1h = _hourly_ledger_series(
+        equity_1h, net_returns_1h, _turnover_1h = _statistics._hourly_ledger_series(
             equity, primary.ledger.fill_turnover,
         )
-        primary_net_ann = _mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H)
+        primary_net_ann = _statistics._mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H)
         _return_floor = MHS_REGISTERED_POLICY_THRESHOLDS["primary_annual_return"]
         if _return_floor is not None and (
             not np.isfinite(primary_net_ann) or primary_net_ann < _return_floor
@@ -4768,9 +3220,9 @@ def _run_anchored_fold(
             _logger.debug(
                 "[EVAL] tag=%s ann_turnover=%.3f ann_net_ret=%.4f mdd=%.4f",
                 _fold_debug_tag,
-                _mean_ann(_turnover_1h, _PERIODS_PER_YEAR_1H),
-                _mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H),
-                _mdd(equity),
+                _statistics._mean_ann(_turnover_1h, _PERIODS_PER_YEAR_1H),
+                _statistics._mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H),
+                _statistics._mdd(equity),
             )
         return MhsFoldReport(
             fold_index=fold_index,
@@ -4780,10 +3232,10 @@ def _run_anchored_fold(
             stress=stress,
             primary_valid=primary.ledger.primary_valid,
             primary_autocorr_sharpe=primary_autocorr,
-            primary_naive_sharpe=_naive_sharpe(primary.ledger),
+            primary_naive_sharpe=_statistics._naive_sharpe(primary.ledger),
             primary_net_ann=primary_net_ann,
-            primary_geometric_cagr=_geometric_cagr(equity_1h),
-            primary_max_drawdown=_mdd(equity),
+            primary_geometric_cagr=_statistics._geometric_cagr(equity_1h),
+            primary_max_drawdown=_statistics._mdd(equity),
             stress_naive_sharpe=stress_sharpe,
             decision_intents=decision_intents,
             termination_counts=dict(primary.termination_counts),
@@ -4891,117 +3343,161 @@ def _run_folds_parallel(
     return ordered
 
 
-def _per_observation_sharpe(returns: pd.Series) -> float:
-    """Per-observation (non-annualized) sample Sharpe of a return series.
 
-    ``mean / std`` with no ``sqrt(periods_per_year)`` scaling, matching the
-    per-observation input contract of ``probabilistic_sharpe_ratio``/
-    ``deflated_sharpe_ratio``. Degenerate zero-variance returns NaN so a
-    non-finite observed Sharpe never reaches the deflation statistic.
+
+
+
+def _terminal_resource_breach_report(
+    request: MhsDiagnosticRequest,
+    exc: DataIntegrityError,
+    telemetry: _StageRecorder,
+    resolved_end: str,
+    start: str,
+    end: str,
+) -> MhsHorizonDiagnosticReport:
+    """A serializable terminal rejection for a top-level RSS/RAM-budget breach.
+
+    The MHS-28 terminal-report contract (a resource breach yields a persisted
+    terminal ``COMPLETE`` report rather than an uncaught process error) applies
+    to the top-level stage barriers too, not just the book replays. When a
+    stage-guard ``DataIntegrityError`` carrying an RSS/RAM message escapes the
+    body, both top-level books are reported failed with
+    ``RESOURCE_BUDGET_BREACH`` and the Research-GO gate carries the same stable
+    code. Every heavy replay object is absent (``primary=None``), so persistence
+    stays lossless and never fabricates evidence.
     """
-    returns = returns.dropna()
-    if len(returns) < 2:
-        return float("nan")
-    sd = float(returns.std(ddof=1))
-    if sd <= 0.0:
-        return float("nan")
-    return float(returns.mean() / sd)
-
-
-def _deflated_sharpe_evidence(
-    blend_report: MhsBookReport | None,
-    folds: tuple[MhsFoldReport, ...],
-    n_trials: int,
-) -> float | None:
-    """Per-observation deflated Sharpe of the blend primary against anchored-fold trial dispersion."""
-    if blend_report is None or blend_report.primary is None or not folds:
-        return None
-    _equity_1h, net_returns_1h, _turnover = _hourly_ledger_series(
-        blend_report.primary.ledger.equity,
-        blend_report.primary.ledger.fill_turnover,
+    failure = MhsBookFailure(
+        stage="resource_budget_guard",
+        error_class=type(exc).__name__,
+        reason=MHS_GO_REASON_RESOURCE_BREACH,
+        message=str(exc),
     )
-    observed_sr = _per_observation_sharpe(net_returns_1h)
-    if not np.isfinite(observed_sr):
-        return None
-    trial_sharpes: list[float] = []
-    for fold in folds:
-        if fold.strict is None or fold.failures:
-            continue
-        _fold_equity, fold_net, _fold_turnover = _hourly_ledger_series(
-            fold.strict.ledger.equity, fold.strict.ledger.fill_turnover,
-        )
-        trial_sharpes.append(_per_observation_sharpe(fold_net))
-    if not trial_sharpes:
-        return None
-    trial_variance = (
-        float(np.var(trial_sharpes, ddof=1)) if len(trial_sharpes) >= 2 else 0.0
+    phase = PhaseDiagnosticResult(
+        n_phases=0,
+        ensemble_ann=float("nan"),
+        ensemble_sharpe=float("nan"),
+        mean_phase_ann=float("nan"),
+        min_phase_ann=float("nan"),
+        max_phase_ann=float("nan"),
+        phase_spread_ann=float("nan"),
+        degenerate=False,
     )
-    returns = net_returns_1h.dropna()
-    if len(returns) < 2:
-        return None
-    result = deflated_sharpe_ratio(
-        observed_sr,
-        trial_variance,
-        n_trials,
-        len(returns),
-        float(returns.skew()),
-        float(returns.kurt()) + 3.0,
+    tail = TailSensitivityResult(
+        base_net_ann=float("nan"),
+        base_sharpe=float("nan"),
+        winsor_curve={},
+        event_window_bars=0,
+        event_count=0,
+        top1_event_share=0.0,
+        top5_event_share=0.0,
+        top1pct_events_share=0.0,
+        leave_worst_event_out_sharpe=float("nan"),
     )
-    # Fail closed: a degenerate skew/kurtosis can push the statistic to NaN,
-    # which must never leak into the report payload as a real deflated value.
-    return result if np.isfinite(result) else None
+    base_book = MhsBookReport(
+        name="",
+        band="",
+        horizon_hours=0,
+        step_hours=0,
+        tranche_count=0,
+        n_symbols=0,
+        phase=phase,
+        prescreen={},
+        tail=tail,
+        primary=None,
+        stress=None,
+        primary_autocorr_sharpe=None,
+        primary_naive_sharpe=None,
+        primary_net_ann=None,
+        primary_geometric_cagr=None,
+        primary_max_drawdown=None,
+        primary_annualized_turnover=None,
+        stress_naive_sharpe=None,
+        failure=failure,
+    )
+    books: dict[str, MhsBookReport] = {}
+    for bname in ("fast_reversal", "slow_momentum"):
+        books[bname] = dataclasses.replace(base_book, name=bname)
+    deployment = compute_deployment_readiness(
+        pd.Series(
+            [1.0, 1.0],
+            index=pd.DatetimeIndex([pd.Timestamp(start), pd.Timestamp(start) + pd.Timedelta(hours=1)]),
+        ),
+        _PERIODS_PER_YEAR_1H,
+        research_go_eligible=False,
+        n_bootstrap=_statistics._BOOTSTRAP_REPLICATES,
+    )
+    research_go = MhsResearchGoResult(
+        eligible=False,
+        reason_codes=(MHS_GO_REASON_RESOURCE_BREACH,),
+        evaluated_folds=0,
+        folds_passed=0,
+        data_integrity_reason_codes=(MHS_GO_REASON_RESOURCE_BREACH,),
+    )
+    return MhsHorizonDiagnosticReport(
+        feature=_MHS_FEATURE,
+        status="COMPLETE",
+        start=start,
+        end=end,
+        resolved_end=resolved_end,
+        partition="dev",
+        execution_tiers_bps=required_cost_tiers(),
+        books=books,
+        blend=None,
+        blend_target_gross=0.0,
+        blend_cash_fraction=1.0,
+        eligible_symbols=0,
+        trials_attempted=0,
+        deflated_sharpe_ratio=None,
+        xs_rank_ic={},
+        date_clustered_regression={},
+        horizon_diagnostics={},
+        bootstrap_ci=None,
+        placebo_sharpe_percentile=None,
+        deployment_readiness=deployment,
+        synthetic_stress={},
+        participation_warnings={},
+        termination_counts={},
+        unsupported_assumptions=(),
+        anchored_folds=(),
+        folds=(),
+        research_go=research_go,
+        fill_source="NOT_RUN_NO_EXECUTION_DATA",
+        mark_source="NOT_RUN_NO_EXECUTION_DATA",
+        execution_timeframe=request.execution_timeframe,
+        execution_universe_size=request.execution_universe_size,
+        execution_symbols=(),
+        run_elapsed_seconds=0.0,
+        resource_measurements=telemetry.records,
+        realized_execution_roster_size=None,
+    )
 
 
-def _mhs_research_go(
-    folds: tuple[MhsFoldReport, ...],
-    book_reasons: tuple[str, ...] = (),
-    extra_reasons: tuple[str, ...] = (),
-    blend_primary_max_drawdown: float | None = None,
-) -> MhsResearchGoResult:
-    """Fail-closed top-level Research-GO decision from fold and book evidence.
+def _guard_stage_or_breach(
+    stage: str,
+    budget_bytes: int | None,
+    reserve_bytes: int | None,
+    request: MhsDiagnosticRequest,
+    telemetry: _StageRecorder,
+    resolved_end: str,
+    start: str,
+    end: str,
+) -> MhsHorizonDiagnosticReport | None:
+    """Run a top-level stage RSS barrier, converting a resource breach to a terminal report.
 
-    A fold that was not replayed, an invalid primary, non-finite equity, a
-    relevant execution gap, a strict-Sharpe failure, or a non-positive stress
-    Sharpe each block the decision with a stable reason code. A book-level
-    strict replay rejection (capital invariant breach, execution gap, invalid
-    primary, or resource-budget breach) is aggregated with the fold reasons.
-    ``extra_reasons`` carries observational gate codes (e.g. fold/blend path
-    divergence) surfaced by report assembly. ``blend_primary_max_drawdown``
-    feeds the registered drawdown-budget gate: a completed blend whose realized
-    drawdown breaches ``MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN`` blocks the decision
-    with ``PRIMARY_MAX_DRAWDOWN_OVER_BUDGET`` (a risk-contract code, never a
-    data-integrity code). The cap-30 roster and primary annual-return gate
-    thresholds live in ``MHS_REGISTERED_POLICY_THRESHOLDS``; while any is
-    unregistered (``None``) the decision reports ``UNSPECIFIED_POLICY`` and
-    stays conservative (false).
+    Returns the terminal rejection report when the barrier detects an
+    RSS/RAM-budget breach (MHS-28 fail-closed contract); ``None`` when the
+    barrier passes. Any other ``DataIntegrityError`` is re-raised unchanged.
     """
-    reasons: list[str] = [
-        *book_reasons,
-        *extra_reasons,
-        *_drawdown_budget_reasons(blend_primary_max_drawdown),
-    ]
-    passed = 0
-    for fold_report in folds:
-        if fold_report.strict is None:
-            reasons.append(MHS_GO_REASON_INCOMPLETE_FOLD)
-            continue
-        if not fold_report.failures:
-            passed += 1
-        reasons.extend(fold_report.failures)
-    # P0-D: UNSPECIFIED_POLICY only when a registered policy threshold is absent.
-    if any(v is None for v in MHS_REGISTERED_POLICY_THRESHOLDS.values()):
-        reasons.append(MHS_GO_REASON_UNSPECIFIED_POLICY)
-    reasons = sorted(set(reasons))
-    data_integrity_reasons = tuple(
-        sorted(r for r in reasons if r in MHS_GO_REASON_DATA_INTEGRITY_CODES)
-    )
-    return MhsResearchGoResult(
-        eligible=not reasons,
-        reason_codes=tuple(reasons),
-        evaluated_folds=len(folds),
-        folds_passed=passed,
-        data_integrity_reason_codes=data_integrity_reasons,
-    )
+    try:
+        _assert_stage_rss_budget(stage, budget_bytes, reserve_bytes)
+    except DataIntegrityError as exc:
+        message = str(exc).lower()
+        if "rss budget" in message or "ram budget" in message or "reserve" in message:
+            return _terminal_resource_breach_report(
+                request, exc, telemetry, resolved_end, start, end,
+            )
+        raise
+    return None
 
 
 def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagnosticReport:
@@ -5054,7 +3550,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     grid_1h = close.index
     symbols = list(close.columns)
     telemetry.record("base_1h_panel", grid_bars=len(grid_1h), n_symbols=len(symbols))
-    _assert_stage_rss_budget("base_1h_panel", rss_budget_bytes, rss_reserve_bytes)
+    _terminal = _guard_stage_or_breach(
+        "base_1h_panel", rss_budget_bytes, rss_reserve_bytes,
+        request, telemetry, str(resolved_end), str(start), str(end),
+    )
+    if _terminal is not None:
+        return _terminal
 
     funding_by_symbol, funding_dropped = _load_funding_series(symbols)
     fold_funding = dict(funding_by_symbol)
@@ -5089,7 +3590,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned_symbols}
     bar_funding = bar_funding[aligned_symbols]
     telemetry.record("funding_alignment", grid_bars=len(grid_1h), n_symbols=len(aligned_symbols))
-    _assert_stage_rss_budget("funding_alignment", rss_budget_bytes, rss_reserve_bytes)
+    _terminal = _guard_stage_or_breach(
+        "funding_alignment", rss_budget_bytes, rss_reserve_bytes,
+        request, telemetry, str(resolved_end), str(start), str(end),
+    )
+    if _terminal is not None:
+        return _terminal
 
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     eligible, _fill_mark_parity_census = _fill_mark_parity_eligibility(close, eligible, request.fill_mark_parity_gate)
@@ -5260,7 +3766,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
-            target_gross=_resolved_committee_target_gross(request),
+            target_gross=_research_go._resolved_committee_target_gross(request),
             member_weights=(_committee_weights_by_boundary.get("top_level") if request.committee_evidence_weighting else None),
             carry_book=funding_carry_execution_book(bar_funding, execution_mask, MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, MHS_COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
         ).reindex(grid_1h).ffill().fillna(0.0)
@@ -5295,10 +3801,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # tail/execution diagnostics are comparable to fold primary evidence
     # (spec §3.2, ``regime_cash_scale``).
     vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
-    regime_scale = _regime_cash_scale(vol_mean)
+    regime_scale = _scaling._regime_cash_scale(vol_mean)
     if request.trend_efficiency_overlay:
         regime_scale = regime_scale.mul(
-            _trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, grid_1h),
+            _scaling._trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, grid_1h),
         )
     blend_1h = blend_1h.mul(regime_scale, axis=0)
     del vol_mean
@@ -5320,7 +3826,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # three top-level replays instead of staying alive throughout them
     # (spec §3.1, ``memory_opt``).
     signal_48h = horizon_log_return(log_close, 48)
-    xs_ic = _xs_rank_ic(signal_48h, opens, forward_bars=48)
+    xs_ic = _statistics._xs_rank_ic(signal_48h, opens, forward_bars=48)
     trend_sleeve_diagnostic = _trend_sleeve_diagnostic(
         log_close, eligible, opens, bar_funding, execution_mask,
         current_book_for_diagnostic, request,
@@ -5331,7 +3837,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # Feature-axis opt-in diagnostics run after fold pool with evicted caches.
     multi_feature_diagnostic = None
     committee_diagnostic = None
-    regression = _date_clustered_ols(opens, signal_48h, forward_bars=48)
+    regression = _statistics._date_clustered_ols(opens, signal_48h, forward_bars=48)
     horizon_diagnostics = {
         "realized_vol_48h_mean": float(
             realized_vol(log_close, 48).mean().mean()
@@ -5489,7 +3995,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             grid_bars=len(minute_grid),
             n_symbols=len(execution_symbols),
         )
-        _assert_stage_rss_budget("pre_books", rss_budget_bytes, rss_reserve_bytes)
+        _terminal = _guard_stage_or_breach(
+            "pre_books", rss_budget_bytes, rss_reserve_bytes,
+            request, telemetry, str(resolved_end), str(start), str(end),
+        )
+        if _terminal is not None:
+            return _terminal
         # Each book worker now loads only its own windows' roster slices from
         # Parquet (window-keyed reads, page-cache backed) and inherits the
         # execution roster's mark frames warmed here copy-on-write, so no
@@ -5510,7 +4021,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         del w_slow, w_slow_execution, phase_slow
         del blend_1h, phase_blend, regime_scale, committee_execution_book
         gc.collect()
-        _assert_stage_rss_budget("post_books", rss_budget_bytes, rss_reserve_bytes)
+        _terminal = _guard_stage_or_breach(
+            "post_books", rss_budget_bytes, rss_reserve_bytes,
+            request, telemetry, str(resolved_end), str(start), str(end),
+        )
+        if _terminal is not None:
+            return _terminal
         # execution_mask stays alive: the post-fold opt-in diagnostics consume
         # it (a bool panel, ~20 MB).
         books = {"fast_reversal": book_report_fast, "slow_momentum": book_report_slow}
@@ -5556,7 +4072,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
     _get_symbol_mark_frame.cache_clear()
     gc.collect()
-    _assert_stage_rss_budget("post_folds", rss_budget_bytes, rss_reserve_bytes)
+    _terminal = _guard_stage_or_breach(
+        "post_folds", rss_budget_bytes, rss_reserve_bytes,
+        request, telemetry, str(resolved_end), str(start), str(end),
+    )
+    if _terminal is not None:
+        return _terminal
     if request.multi_feature_book or request.committee_book:
         if request.multi_feature_book:
             _diag_panel_columns = feature_registry_panel_columns(MHS_FEATURE_REGISTRY)
@@ -5594,12 +4115,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             telemetry.record("multi_feature_diagnostic")
         del _diag_panels
         gc.collect()
-    deflated_sharpe_ratio = _deflated_sharpe_evidence(
+    deflated_sharpe_ratio = _statistics._deflated_sharpe_evidence(
         blend_report, folds, trials_attempted,
     )
     fold_blend_parity, parity_reasons = _fold_blend_parity(blend_traces, folds)
     fold_growth_concentration, concentration_reasons = _fold_growth_concentration(folds)
-    research_go = _mhs_research_go(
+    research_go = _research_go._mhs_research_go(
         folds, book_reasons, parity_reasons + concentration_reasons,
         blend_primary_max_drawdown=(
             blend_report.primary_max_drawdown if blend_report is not None else None
@@ -5628,7 +4149,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             ),
             _PERIODS_PER_YEAR_1H,
             research_go_eligible=research_go.eligible,
-            n_bootstrap=_BOOTSTRAP_REPLICATES,
+            n_bootstrap=_statistics._BOOTSTRAP_REPLICATES,
         )
 
     del eligible
@@ -5794,10 +4315,6 @@ def _fold_summary(fold: MhsFoldReport) -> dict[str, Any]:
     }
 
 
-def _peak_rss_bytes(
-    resource_measurements: tuple[MhsResourceMeasurement, ...],
-) -> int | None:
-    return max((m.rss_bytes for m in resource_measurements), default=None)
 
 
 def build_mhs_run_history_record(

@@ -19,6 +19,7 @@ from src.common.errors import DataIntegrityError
 from src.market_data.binance.futures import BinanceClient, BinanceKlinePermanentError
 from src.market_data.binance.vision import BinanceVisionDownloader, fetch_metrics_bulk
 from src.market_data.storage.ohlcv import write_ohlcv
+from src.market_data.storage.schemas import METRICS_CANONICAL_COLUMNS as _METRICS_CANONICAL_COLUMNS
 
 _logger = logging.getLogger("DataCollector")
 
@@ -31,13 +32,6 @@ def _mark_price_path(symbol: str, timeframe: str) -> Path:
 def _mark_price_manifest_path(symbol: str, timeframe: str) -> Path:
     safe = symbol.replace("/", "").replace("_", "")
     return FUTURES_DATA_DIR / "markPriceKlines" / timeframe / f"{safe}.coverage.json"
-
-_METRICS_CANONICAL_COLUMNS: tuple[str, ...] = (
-    "timestamp", "datetime", "available_at", "symbol",
-    "sum_open_interest", "sum_open_interest_value",
-    "long_short_ratio", "top_trader_long_short_ratio",
-    "sum_taker_long_short_vol_ratio",
-)
 
 _METRICS_NUMERIC_COLUMNS: tuple[str, ...] = (
     "sum_open_interest", "sum_open_interest_value",
