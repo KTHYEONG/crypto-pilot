@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_structural_refactor_phase1_4",
+      "date": "2026-08-20",
+      "adr_id": "ADR_20260820_mhs_structural_refactor_phase1_4",
+      "domain": "architecture",
+      "title": "MHS 오케스트레이터 구조 리팩토링 (Phase 1-4) 및 회귀 수정",
+      "why": "src/application/research/mhs/evaluation.py 6364줄 단일 모듈과 MHS_* 상수 73개가 2개 모듈에 분산되어 AI 작업 토큰 효율과 유지보수성 저하; 옵션 1개 추가 시 상수/필드/검증/CLI 플래그/매핑 5곳 동시 수정 필요. 착수 전 베이스라인이 RED(29건 실패)여서 fill_mark_parity_gate 회귀와 무관한 잔여 결함 4건을 먼저 진단·수정함.",
+      "resolution": "죽은 코드(src/research/sleeve_blend/ 등 564줄) 제거, MHS_* 상수를 src/mhs/params.py로 단일화, MhsDiagnosticRequest를 cli_param 메타데이터 기반 선언적 검증/CLI 생성(src/cli/dataclass_args.py, validation.py)으로 전환, evaluation.py를 13개 모듈(contracts/marks/scaling/statistics/diagnostics/windows/books/folds/research_go/resources/validation 등)로 순수 이동 분해하고 공개 API만 재수출하는 파사드로 축소. 병행하여 테스트 fixture의 비결합 가격 생성, fill_mark_parity 정책 문구 노후화, 모듈 스코프 fixture 누수(TestPitExecutionGrid), mypy strict 위반(marks.py 미정의 전역, validation.py object 타입), 테스트 import 경로 노후화 5건을 수정. 652종목 실데이터 재실행으로 리팩토링 전후 계산 필드 완전 동일(log_run 제외) 확인.",
+      "impact": "src 76→87 파일, 최대 파일 6364→약 700줄 이하로 분해. MHS_* 상수 중복 선언 6종 및 파라미터 3중 선언 문제 해소. ruff/mypy strict/pytest 전량 GREEN. TestMhsRefactorBitIdenticalReport 골든 테스트 및 실데이터 검증 모두 비트 동일 확인."
+    },
+    {
       "task_id": "MHS_FILL_MARK_PARITY_GATE",
       "date": "2026-08-20",
       "adr_id": "ADR_20260820_MHS_FILL_MARK_PARITY_GATE",
@@ -989,16 +999,6 @@
       "why": "50개+ 가격/거래량 파생지표 소진 후 신규 데이터축(long_short_ratio, 15종목 PIT-safe)에서 유일하게 discovery+qualification 동시 단독admission 통과 신호 발견. Bollinger 트랩 방지 위해 상관관계·윈도우선택·top_trader 결합 등 강건성 검증 후 계약화.",
       "resolution": "cross_sectional.py에 build_xs_alpha_positioning_weights(기존 v6 패턴 재사용, 4번째 sleeve로 causal inverse-vol tilt 확장) 신설. xs_trend_screen.py에 _long_short_ratio_panel(load_metrics_asof 재사용, PIT-safe)과 XS_POSITIONING_ALPHA_PROFILE_ID='xs_alpha_positioning_v7' 배선, reliability 게이트 재사용(profile-agnostic). CLI 실행(holdout unseal)으로 실측: discovery/qualification/holdout/stress 전 구간 admitted(v6 이어 두번째).",
       "impact": "discovery는 개선(Sharpe 1.28->1.57, t 1.70->2.07)했으나 qualification+holdout 통합 LCB90은 v6보다 악화(9.98%->8.50%, 여전히 15% 허들 미달)하고 worst-fold CAGR이 -2.7%->-20.0%로 크게 거칠어짐. 스펙 작성 전 scratch 검증은 qualification 단독 슬라이스만 봐서 이 저하를 놓쳤음(holdout 포함 최종 비교에서 드러남). v6가 여전히 더 나은 배포 후보 -- v7은 연구자산으로 보존, 채택 보류."
-    },
-    {
-      "task_id": "xs_alpha_data_axis_expansion",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_data_axis_expansion",
-      "domain": "data",
-      "title": "XS Alpha 데이터 축 확장: Premium/Index Klines + bookDepth + OI 15종목 백필",
-      "why": "50개+ 가격/거래량 파생지표 실측이 전부 기존 trend 패밀리와 상관되거나 노이즈로 소진되어(scratch/test_xs_v6_indicator_screen_50.py 등), v6 성과 개선을 위해 가격/거래량이 아닌 새 데이터 축(포지셔닝, 베이시스, 마이크로구조)이 필요했음. Binance Vision 실제 접근성 검증 결과 liquidationSnapshot은 아예 존재하지 않고 bookTicker/aggTrades는 종목당 일 188MB로 비현실적임을 확인, premiumIndexKlines/indexPriceKlines/markPriceKlines/bookDepth/metrics(OI)만 실제 수집 가능으로 확정.",
-      "resolution": "config.py에 indicator_kline_path/bookdepth_path 추가, DataCollector.ensure_indicator_kline_data(마크/인덱스/프리미엄 월별 아카이브)·ensure_bookdepth_data(일별 아카이브) 신설, collection.py/CLI 배선. 구현 후 BTCUSDT 실측 검증 중 버그 3건 발견·수정: (1) 월별 아카이브 헤더 유무가 월마다 달라 close_time이 문자열/정수 혼재되어 parquet 저장 실패 → 명시적 숫자변환 추가, (2) vision.py의 기존(세션 이전부터 있던 미사용) fetch_bookdepth_daily가 실제 존재하지 않는 '-{level}-' 파일명 세그먼트를 붙여 항상 404 → 제거, (3) bookDepth raw fetch가 순번 컬럼을 반환하는데 정규화 함수가 named 컬럼을 기대해 매번 조용히 빈 프레임 반환 + timestamp가 epoch ms 아닌 문자열 포맷이라 이중 버그 → 컬럼 리네임 추가 및 metrics와 동일한 dtype-branch 정규화 적용. 이후 15종목 전체 수집 실행 완료.",
-      "impact": "OI/positioning 15/15종목(기존5+신규10, 2022-04~2026-08), premiumIndexKlines/indexPriceKlines 15/15종목(2022-04~2026-06, 월간아카이브 특성상 최근 5주 공백), bookDepth 15/15종목(5.7억행/7.1GB, 2023-01~2026-08, Vision 자체 결측 2023-02-08/09 등 소수일 확인·검증됨). 후속 discovery-only 실측(scratch/test_xs_v6_new_axes.py)에서 long_short_ratio(리테일 포지셔닝) 역발상 방향이 discovery+qualification 양쪽 단독 admission 통과 및 4-family 블렌딩 시 전 지표 개선(discovery Sharpe 1.28->1.58, qualification 1.33->1.41, LCB90 7.74%->8.33%, 여전히 15% 허들 미달) 확인 — 이번 세션 60개+ 후보 중 유일한 순개선 신호, 다음 스펙 사이클 후보로 확정."
     }
   ]
 }

@@ -366,6 +366,8 @@ class TestFrozenLiteralsCommitteeTiming:
 
         from src.application.research.mhs.evaluation import (
             MhsDiagnosticRequest,
+        )
+        from src.application.research.mhs.research_go import (
             _resolved_committee_target_gross,
         )
 

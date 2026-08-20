@@ -25,22 +25,6 @@ from src.market_data.storage.ohlcv import merge_ohlcv_frames, normalize_frame, w
 
 _logger = logging.getLogger("SpotDataCollector")
 
-_RATE_PERIOD_SECONDS: dict[str, int] = {
-    "annual": 365 * 86400,
-    "1y": 365 * 86400,
-    "365d": 365 * 86400,
-    "daily": 86400,
-    "1d": 86400,
-    "hourly": 3600,
-    "1h": 3600,
-    "3600s": 3600,
-}
-
-_SECONDS_PER_DAY = 86400.0
-_INTEREST_HISTORY_BOUNDARY = pd.Timedelta(days=31)
-
-_BORROW_CANONICAL_COLUMNS: tuple[str, ...] = ("timestamp", "borrow_rate", "accrual_seconds")
-
 
 def _read_spot_cache(path: Path) -> pd.DataFrame:
     if not path.exists():

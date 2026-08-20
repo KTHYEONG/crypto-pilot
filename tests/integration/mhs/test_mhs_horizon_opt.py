@@ -9,16 +9,20 @@ import pandas as pd
 import pytest
 
 from src.application.research.mhs import evaluation as ev
+from src.application.research.mhs import marks
+from src.mhs import params
 from src.application.research.mhs.evaluation import (
     MHS_GO_REASON_INVALID_PRIMARY,
     MHS_GO_REASON_RESOURCE_BREACH,
     MhsDiagnosticRequest,
-    _apply_rebalance_deadband,
     _book_structure_trace,
-    _regime_cash_scale,
     _run_anchored_fold,
-    _smooth_signal_ema,
     _verify_ledger_artifact,
+)
+from src.application.research.mhs.scaling import (
+    _apply_rebalance_deadband,
+    _regime_cash_scale,
+    _smooth_signal_ema,
 )
 from src.research.universe.pit_universe import symbol_partition
 
@@ -85,13 +89,13 @@ def fold_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
 
     root = tmp_path_factory.mktemp("mhs_opt_market")
     end = _write_mhs_market(root, DEV_SYMBOLS)
-    originals = {"funding_path": ev.funding_path, "mark_price_path": fc._mark_price_path}
-    ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+    originals = {"funding_path": marks.funding_path, "mark_price_path": fc._mark_price_path}
+    marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
     fc._mark_price_path = (
         lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
     )
     yield root, end
-    ev.funding_path = originals["funding_path"]
+    marks.funding_path = originals["funding_path"]
     fc._mark_price_path = originals["mark_price_path"]
 
 
@@ -202,7 +206,7 @@ class TestSignalQualityMechanisms:
         assert float(scale.iloc[1000]) == pytest.approx(1.0)
         assert float(scale.iloc[2090]) < 1.0
         assert float(scale.max()) <= 1.0
-        assert float(scale.min()) >= ev.MHS_REGIME_CASH_SCALE_FLOOR
+        assert float(scale.min()) >= params.MHS_REGIME_CASH_SCALE_FLOOR
 
     @pytest.mark.slow
     def test_fold_quality_metrics_finite_from_valid_primary(self, fold_market, funding) -> None:

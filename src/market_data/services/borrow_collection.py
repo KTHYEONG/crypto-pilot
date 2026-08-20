@@ -9,6 +9,18 @@ import pandas as pd
 from src.common.config import borrow_path
 from src.common.errors import DataIntegrityError
 from src.market_data.binance.margin import BinanceMarginClient
+from src.market_data.services.rate_common import (
+    BORROW_CANONICAL_COLUMNS as _BORROW_CANONICAL_COLUMNS,
+)
+from src.market_data.services.rate_common import (
+    INTEREST_HISTORY_BOUNDARY as _INTEREST_HISTORY_BOUNDARY,
+)
+from src.market_data.services.rate_common import (
+    RATE_PERIOD_SECONDS as _RATE_PERIOD_SECONDS,
+)
+from src.market_data.services.rate_common import (
+    SECONDS_PER_DAY as _SECONDS_PER_DAY,
+)
 from src.market_data.storage.manifest import (
     _file_sha256,
     _manifest_record,
@@ -16,22 +28,6 @@ from src.market_data.storage.manifest import (
 )
 
 _logger = logging.getLogger("SpotDataCollector")
-
-_BORROW_CANONICAL_COLUMNS: tuple[str, ...] = ("timestamp", "borrow_rate", "accrual_seconds")
-
-_RATE_PERIOD_SECONDS: dict[str, int] = {
-    "annual": 365 * 86400,
-    "1y": 365 * 86400,
-    "365d": 365 * 86400,
-    "daily": 86400,
-    "1d": 86400,
-    "hourly": 3600,
-    "1h": 3600,
-    "3600s": 3600,
-}
-
-_SECONDS_PER_DAY = 86400.0
-_INTEREST_HISTORY_BOUNDARY = pd.Timedelta(days=31)
 
 
 def _parse_rate_period(rate_period: str) -> int:

@@ -132,6 +132,18 @@ class TestEnsureMarkPriceData:
             lambda symbol, timeframe: tmp_path / timeframe / f"{symbol}.coverage.json",
         )
         collector.client.fetch_mark_price_klines = lambda symbol, timeframe, start, end: pd.DataFrame()
+
+        class _EmptyVision:
+            def fetch_indicator_klines_monthly(self, *args):
+                return pd.DataFrame()
+
+            def fetch_indicator_klines_daily(self, *args):
+                return pd.DataFrame()
+
+        monkeypatch.setattr(
+            "src.market_data.services.futures_collection.BinanceVisionDownloader",
+            _EmptyVision,
+        )
         coverage = collector.ensure_mark_price_data(
             "BTCUSDT", "1h", "2021-01-01", "2021-01-03",
         )

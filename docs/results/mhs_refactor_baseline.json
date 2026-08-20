@@ -2,18 +2,18 @@
   "blend": {
     "failure": null,
     "horizon_hours": 168,
-    "primary_autocorr_sharpe": 2.3013534410125587,
-    "primary_geometric_cagr": 4.515921824631762,
-    "primary_max_drawdown": -0.24961408552155095,
-    "primary_naive_sharpe": 3.642123816665108,
-    "primary_net_ann": 1.8356040455841922,
-    "stress_naive_sharpe": 3.4563989184434263
+    "primary_autocorr_sharpe": 3.0615092413874105,
+    "primary_geometric_cagr": 0.14331340231987633,
+    "primary_max_drawdown": -0.01324776217219159,
+    "primary_naive_sharpe": 2.2021611774521825,
+    "primary_net_ann": 0.13590184049271684,
+    "stress_naive_sharpe": 0.9703761913510507
   },
   "blend_cash_fraction": 0.5131428571428571,
   "blend_target_gross": 0.4868571428571429,
   "bootstrap_ci": [
-    -8.199795098619799e-05,
-    0.0004857228517806218
+    -5.679960331706966e-06,
+    3.921697354804808e-05
   ],
   "deflated_sharpe_ratio": null,
   "discovery_qualification": {
@@ -50,12 +50,12 @@
   "fast_reversal": {
     "failure": null,
     "horizon_hours": 48,
-    "primary_autocorr_sharpe": -1.694944695642849,
-    "primary_geometric_cagr": -0.6558609107300557,
-    "primary_max_drawdown": -0.33702246935986624,
-    "primary_naive_sharpe": -1.9311283935332473,
-    "primary_net_ann": -0.9469762170660062,
-    "stress_naive_sharpe": -2.7020851397568553
+    "primary_autocorr_sharpe": -2.7344532623388083,
+    "primary_geometric_cagr": -0.13295805289218077,
+    "primary_max_drawdown": -0.05085359335755568,
+    "primary_naive_sharpe": -2.074415989136989,
+    "primary_net_ann": -0.14044724354246882,
+    "stress_naive_sharpe": -6.803911857225043
   },
   "folds": [
     {
@@ -115,19 +115,18 @@
   "research_go": {
     "eligible": false,
     "reason_codes": [
-      "INCOMPLETE_ANCHORED_FOLD",
-      "UNSPECIFIED_POLICY"
+      "INCOMPLETE_ANCHORED_FOLD"
     ]
   },
   "slow_momentum": {
     "failure": null,
     "horizon_hours": 168,
-    "primary_autocorr_sharpe": 2.294422543334613,
-    "primary_geometric_cagr": 4.610123932490123,
-    "primary_max_drawdown": -0.2526807084449664,
-    "primary_naive_sharpe": 3.6378443089426087,
-    "primary_net_ann": 1.8556436531496068,
-    "stress_naive_sharpe": 3.450039946692842
+    "primary_autocorr_sharpe": 3.026349694372347,
+    "primary_geometric_cagr": 0.1408466707830376,
+    "primary_max_drawdown": -0.013904677016489453,
+    "primary_naive_sharpe": 2.1513109297785493,
+    "primary_net_ann": 0.13376982351749916,
+    "stress_naive_sharpe": 0.9201827334468511
   },
   "status": "COMPLETE",
   "xs_rank_ic": {
