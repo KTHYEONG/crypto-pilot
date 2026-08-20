@@ -19,6 +19,7 @@ import pytest
 
 import src.market_data.services.futures_collection as fc
 from src.application.research.mhs import evaluation as ev
+import src.application.research.mhs.marks as marks
 from src.mhs.contracts import ExecutionSpec
 from src.mhs.evaluation import DeploymentReadinessResult
 from src.mhs.execution import strategy_aware_execution_replay
@@ -94,7 +95,7 @@ def _write_mhs_market(root: Path) -> pd.Timestamp:
 def mhs_market(tmp_path, monkeypatch):
     root = tmp_path / "market"
     end = _write_mhs_market(root)
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; a prior test in the same process/worker using

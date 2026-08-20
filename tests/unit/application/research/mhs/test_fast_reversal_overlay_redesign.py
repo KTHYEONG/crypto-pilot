@@ -10,6 +10,7 @@ import pytest
 
 import src.market_data.services.futures_collection as fc
 from src.application.research.mhs import evaluation as ev
+import src.application.research.mhs.marks as marks
 from src.application.research.mhs.evaluation import MhsDiagnosticRequest
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.contracts import PHASE_1_BOOK_BLEND_WEIGHTS
@@ -117,7 +118,7 @@ def mhs_market(tmp_path, monkeypatch):
     root = tmp_path / "market"
     n_hours = 2700
     end = _write_market(root, n_hours, _random_walk_log_px(n_hours))
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; a prior test in the same process/worker using
@@ -132,7 +133,7 @@ def choppy_market(tmp_path, monkeypatch):
     root = tmp_path / "choppy_market"
     n_hours = 3200
     end = _write_market(root, n_hours, _trend_choppy_log_px(n_hours), include_minute=True)
-    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # _get_symbol_mark_frame is a process-global lru_cache keyed on
     # (symbol, timeframe) only; a prior test in the same process/worker using

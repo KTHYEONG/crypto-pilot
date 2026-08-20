@@ -420,6 +420,7 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
 def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]:
     """Minimal ``_run_books_concurrent`` arg set from a written market."""
     import src.application.research.mhs.evaluation as ev_mod
+    from src.application.research.mhs import scaling as scaling_mod
 
     end = _START + pd.Timedelta(hours=n_hours)
     symbols = _SYMBOLS
@@ -478,7 +479,7 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
         + ev_mod.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
     )
     vol_mean = ev_mod.realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
-    regime_scale = ev_mod._regime_cash_scale(vol_mean)
+    regime_scale = scaling_mod._regime_cash_scale(vol_mean)
     blend_1h = blend_1h.mul(regime_scale, axis=0)
     return {
         "root": str(root),
