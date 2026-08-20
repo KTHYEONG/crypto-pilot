@@ -41,6 +41,11 @@ def mhs_market_with_taker_buy_quote(tmp_path, monkeypatch):
     end = _write_mhs_market(root, include_taker_buy_quote=True)
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    # _get_symbol_mark_frame is a process-global lru_cache keyed on
+    # (symbol, timeframe) only; a prior test in the same process/worker using
+    # a different root with an overlapping symbol name would otherwise leak
+    # stale mark data into this fixture's replay.
+    ev._get_symbol_mark_frame.cache_clear()
     return root, end
 
 
