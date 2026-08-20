@@ -158,7 +158,10 @@
   "src/mhs/parallel.py": {
     "testing": "tests/unit/mhs/test_parallel.py"
   },
-  "src/mhs/params.py": {},
+  "src/mhs/params.py": {
+    "architecture": "docs/architecture/mhs-explain.md",
+    "testing": "tests/unit/mhs/test_params.py"
+  },
   "src/mhs/regime.py": {
     "testing": "tests/unit/mhs/test_regime.py"
   },

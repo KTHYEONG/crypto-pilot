@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES",
+      "date": "2026-08-20",
+      "adr_id": "ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES",
+      "domain": "mhs",
+      "title": "MHS 위원회 축 재구성(risk_premia_v2) 실측 및 fold 커버리지 확장",
+      "why": "committee growth solver(등록 리스크예산: MDD<=25%, ruin<=1%, 3y horizon)가 이미 노출 1.00x를 선택(1.25x는 전 학습구간 infeasible) -- 노출 레버가 소진되어 남은 유일한 성장 지렛대는 Sharpe. 1h 프록시 실측 결과 위원회 5명 중 3명(flow_imb_720h, xs_mom_336h, xs_idio_mom_336h)이 5년 Sharpe<=0.1인 반면, xs_mom_336h는 rank_weight_book이 mom_336h와 rank 완전 동일(행평균 차감이 rank 불변)해 사실상 중복. 위원회 밖의 lowvol_168h(Sharpe 1.68)/rev_24h(Sharpe 0.67)는 5년 전부 양수. 2022(베어장) fold가 3-fold 세트에 부재해 leak-free 증거가 편중.",
+      "resolution": "src/mhs/params.py에 MHS_COMMITTEE_MEMBER_SETS(flow_momentum_v1/risk_premia_v2) 및 _resolved_committee_members 단일 해석 seam(research_go.py) 도입, MhsDiagnosticRequest.committee_member_set 필드 + CLI --committee-member-set 배선(fold/top-level 양쪽 경로 공유, I4). src/mhs/committee.py에 growth_budget_annual_vol(등록 성장 솔버를 use_drawdown_overlay=False로 소비 -- overlay 활성 시 모든 grid point가 허위로 feasible 판정되는 결함 회피) 및 scaling.py에 _growth_budget_target_vol/pnl_vol_target_mode='growth_budget' 추가(leak-free, OOS 이전 학습구간만 사용). src/mhs/evaluation.py의 phase_1_anchored_purged_folds()에 2022 fold를 선두 추가(3->4개, 반환타입을 가변 tuple로 확장). 실제 3m 전체기간(2021-2025) 리플레이로 M1(flow_momentum_v1+4fold)과 M2(risk_premia_v2+4fold) 두 가설을 검증: M1은 blend 지표가 원 3-fold 베이스라인과 바이트 동일(CAGR 0.560/Sharpe 2.232/MDD -17.6%, I5 확인)이나 신규 2022 fold에서 RELEVANT_EXECUTION_DATA_GAP 발생(3m 데이터가 94/446 심볼만 2022-01-08 이전 커버 -- 축 변경과 무관한 별도 결함). M2는 사전 등록한 채택임계값(CAGR>=0.560, Sharpe>=2.232, MDD>-25%, data_integrity_reason_codes=[])을 전부 미달: CAGR 0.441, Sharpe 1.846, MDD -31.4%(등록 25% 예산 초과로 PRIMARY_MAX_DRAWDOWN_OVER_BUDGET 신규 발동), 2개 fold가 STRESS_SHARPE_NOT_POSITIVE로 전환 -- 1h 프록시가 예측한 방향과 정반대의 실측 결과. 스펙의 명시적 롤백 규칙에 따라 MHS_COMMITTEE_DEFAULT_MEMBER_SET을 flow_momentum_v1으로 유지(risk_premia_v2는 opt-in 비-기본값으로만 존재), 관련 프로덕션 기본값 테스트 3건 및 CLI help 텍스트 갱신, docs/results/mhs_refactor_baseline.json 골든 픽스처를 4-fold 반영으로 재생성(committee_capital=False 경로라 축 선택과 무관, blend/books 수치 전부 바이트 동일 확인 후 fold 배열만 갱신).",
+      "impact": "기본 프로덕션 경로는 CAGR/Sharpe/MDD 불변(committee_member_set 기본값 회귀 없음); risk_premia_v2는 opt-in으로 남아 향후 실행 마찰 완화(비용/스무딩/포지션 히스테리시스 재조정) 연구에 재사용 가능. fold 커버리지 확장(3->4)은 채택되어 2022 베어장의 leak-free 증거를 프로덕션에 추가했으나, 부수효과로 RELEVANT_EXECUTION_DATA_GAP이 research_go.reason_codes에 신규 등재(기존엔 FOLD_GROWTH_CONCENTRATION 단독)되어 research_go.eligible은 여전히 False. fold_growth_concentration.max_fold_share는 4-fold 분모 확장으로 0.649->0.571로 기계적 개선(스펙에 집중도 해결책이 아님을 명시). 후속 과제: (1) 2022 3m 실행 데이터 갭 근본원인 규명(데이터 백필 또는 fold0 실행타임프레임 완화), (2) risk_premia_v2가 왜 1h 프록시와 반대로 실측 악화됐는지(체결마찰/스무딩 상호작용 추정) 조사 -- ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT와 동일 패턴(fold 단위 프록시 개선이 연속 리플레이 악화로 반전)."
+    },
+    {
       "task_id": "mhs_structural_refactor_phase1_4",
       "date": "2026-08-20",
       "adr_id": "ADR_20260820_mhs_structural_refactor_phase1_4",
@@ -989,16 +999,6 @@
       "why": "v6 및 v2~v7 전 프로파일이 point-estimate admission은 통과하나 신뢰도 게이트(LCB90>=15%, t_stat>2.0, MDD>-25%)는 전부 FAIL. 실측 결과 t_stat이 leverage-invariant(순수 레버리지로는 2.0 플로어를 절대 못 넘음)임을 확인, family 재조합도 3사이클째 동일 Sharpe 대역(1.2~1.6)에 정체. 유일한 미검증 축으로 v6(시장중립 XS)와 frozen Donchian 베이스라인(방향성 단일자산)의 상관관계를 측정한 결과 사실상 0(qual창 rho=-0.0002)임을 발견, 진단용 tangency 블렌드가 t_stat 1.886->2.114로 플로어를 넘는 것을 확인해 실전 스펙 사이클 진행.",
       "resolution": "cross_sectional.py 패턴을 재사용해 src/research/technical_experts/xs_alpha_baseline_blend.py(select_baseline_blend_weight: discovery-only 그리드 서치, build_blended_ledger)와 application 레이어 오케스트레이터, xs-baseline-blend CLI 서브커맨드(single_technical.py, xs-growth-sizing과 동일 패턴)를 신설. CLI 실행(홀드아웃 봉인) 결과: discovery 그리드에서 선택된 가중치는 v6=0.2/baseline=0.8(진단용 tangency 0.37과 다름). qualification 블렌드 t_stat 1.886->1.945로 소폭 개선했으나 여전히 2.0 미달, LCB90은 7.74%->2.84%로 오히려 악화(worst_fold/fold_concentration은 개선). 원인: baseline이 discovery(2022-23, Sharpe 1.85)와 qualification(2024-25, Sharpe 0.67, 자체 admission 실패) 간 비정상적이라 discovery-only로 뽑힌 80% baseline 가중치가 qualification CAGR을 26.1%->8.1%로 크게 희석.",
       "impact": "v6 단독 대비 개선 없음(reliability 여전히 FAIL, LCB90 더 악화) -- 채택 보류, v6가 계속 최선 후보. 코드/CLI/결과 파일(docs/results/xs_alpha_baseline_blend_v8.json)은 연구자산으로 보존. 레버리지 단독 개선 불가(t_stat 불변)와 2-sleeve 블렌드가 baseline의 OOS 비정상성 탓에 미해결이라는 두 부정적 결과가 함께 확정되어 다음 사이클은 OOS-안정적인 2번째 슬리브(예: carry) 탐색 또는 baseline 자체의 qualification 붕괴 원인 규명으로 방향 전환 필요."
-    },
-    {
-      "task_id": "xs_alpha_positioning_v7",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_positioning_v7",
-      "domain": "signal",
-      "title": "XS Alpha v7 포지셔닝(long/short ratio) 4번째 패밀리 — admitted되나 신뢰도 게이트는 v6보다 악화",
-      "why": "50개+ 가격/거래량 파생지표 소진 후 신규 데이터축(long_short_ratio, 15종목 PIT-safe)에서 유일하게 discovery+qualification 동시 단독admission 통과 신호 발견. Bollinger 트랩 방지 위해 상관관계·윈도우선택·top_trader 결합 등 강건성 검증 후 계약화.",
-      "resolution": "cross_sectional.py에 build_xs_alpha_positioning_weights(기존 v6 패턴 재사용, 4번째 sleeve로 causal inverse-vol tilt 확장) 신설. xs_trend_screen.py에 _long_short_ratio_panel(load_metrics_asof 재사용, PIT-safe)과 XS_POSITIONING_ALPHA_PROFILE_ID='xs_alpha_positioning_v7' 배선, reliability 게이트 재사용(profile-agnostic). CLI 실행(holdout unseal)으로 실측: discovery/qualification/holdout/stress 전 구간 admitted(v6 이어 두번째).",
-      "impact": "discovery는 개선(Sharpe 1.28->1.57, t 1.70->2.07)했으나 qualification+holdout 통합 LCB90은 v6보다 악화(9.98%->8.50%, 여전히 15% 허들 미달)하고 worst-fold CAGR이 -2.7%->-20.0%로 크게 거칠어짐. 스펙 작성 전 scratch 검증은 qualification 단독 슬라이스만 봐서 이 저하를 놓쳤음(holdout 포함 최종 비교에서 드러남). v6가 여전히 더 나은 배포 후보 -- v7은 연구자산으로 보존, 채택 보류."
     }
   ]
 }
