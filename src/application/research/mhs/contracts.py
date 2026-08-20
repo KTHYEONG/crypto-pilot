@@ -193,12 +193,12 @@ class MhsDiagnosticRequest:
             flag="--pnl-vol-target", help="Apply the P&L vol-target layer.", negate_flag="--no-pnl-vol-target",
         ),
     )
-    pnl_vol_target_mode: Literal["median_relative", "exante_target"] = field(
+    pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget"] = field(
         default="median_relative",
         metadata=cli_param(
             flag="--pnl-vol-target-mode",
             help="P&L vol-target mode.",
-            choices=("median_relative", "exante_target"),
+            choices=("median_relative", "exante_target", "growth_budget"),
         ),
     )
     trend_sleeve: bool = field(
@@ -229,6 +229,15 @@ class MhsDiagnosticRequest:
         default=False,
         metadata=cli_param(
             flag="--committee-capital", help="Build the committee capital book.", negate_flag="--no-committee-capital",
+        ),
+    )
+    committee_member_set: Literal["risk_premia_v2", "flow_momentum_v1"] = field(
+        default="risk_premia_v2",
+        metadata=cli_param(
+            flag="--committee-member-set",
+            help="Registered committee axis set.",
+            choices=("risk_premia_v2", "flow_momentum_v1"),
+            requires=("committee_capital",),
         ),
     )
     committee_tranche_smoothing: bool = field(

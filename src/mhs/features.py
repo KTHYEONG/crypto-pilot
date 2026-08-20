@@ -255,10 +255,11 @@ def _taker_imbalance_builder(horizon_bars: int) -> Callable[[Mapping[str, pd.Dat
 def _xs_mom_builder(horizon_bars: int) -> Callable[[Mapping[str, pd.DataFrame]], pd.DataFrame]:
     """Cross-sectional momentum: vol-normalized horizon return, row-demeaned.
 
-    Demeaning removes the common market component before the dollar-neutral rank
-    book so the signal is the relative move, not the absolute trend
-    (``flow_imb``/``xs_mom`` families are meant to be additive axes, not
-    duplicates of the raw ``mom_*`` momentum).
+    Row-demeaning subtracts the cross-sectional mean from each row.  Because
+    ``rank_weight_book`` is rank-invariant to constant row shifts, the resulting
+    rank book is identical to the raw vol-normalized momentum book (``mom_*``
+    family).  ``_xs_idio_mom_builder`` is the builder that actually removes the
+    market component via a causal rolling beta residual.
     """
     def _build(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
         signal = vol_normalized_horizon_signal(np.log(panels["close"]), horizon_bars)
