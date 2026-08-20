@@ -82,6 +82,8 @@ from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
 from src.mhs.contracts import MHS_TREND_SLEEVE_HORIZONS_HOURS
 from src.mhs.contracts import MHS_WORKER_PEAK_RSS_BYTES
 from src.mhs.contracts import (
+    MHS_FILL_MARK_MAX_LOG_DIVERGENCE,
+    MHS_PNL_VOL_TARGET_MAX_SCALE,
     MEASURED_EXECUTION_COST_TIERS_BPS,
     MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
     MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
@@ -376,6 +378,8 @@ class MhsDiagnosticRequest:
     funding_carry_sleeve: bool = False
     funding_carry_weight: float = 0.0
     execution_coverage_gate: bool = False
+    fill_mark_parity_gate: bool = True
+    exposure_scale_two_sided: bool = False
     ram_guard: bool = True
 
     def __post_init__(self) -> None:
@@ -460,6 +464,14 @@ class MhsDiagnosticRequest:
                 raise ValueError("committee_target_gross requires committee_capital=True")
         if not isinstance(self.execution_coverage_gate, bool):
             raise ValueError("execution_coverage_gate must be a bool")
+        if not isinstance(self.fill_mark_parity_gate, bool):
+            raise ValueError("fill_mark_parity_gate must be a bool")
+        if not isinstance(self.exposure_scale_two_sided, bool):
+            raise ValueError("exposure_scale_two_sided must be a bool")
+        if self.exposure_scale_two_sided and self.pnl_vol_target_mode != "exante_target":
+            raise ValueError(
+                "exposure_scale_two_sided requires pnl_vol_target_mode='exante_target'"
+            )
         if not isinstance(self.ram_guard, bool):
             raise ValueError("ram_guard must be a bool")
         if not (0.0 <= self.trend_sleeve_gross <= 1.0):
@@ -645,6 +657,7 @@ class MhsHorizonDiagnosticReport:
     funding_dropped_symbols: dict[str, str] | None = None
     fold_blend_parity: dict[str, Any] | None = None
     fold_growth_concentration: dict[str, Any] | None = None
+    fill_mark_parity: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -1052,6 +1065,93 @@ def _prewarm_mark_frames(symbols: list[str], timeframe: str = "1h") -> None:
     for sym in symbols:
         if os.path.exists(_futures_collection._mark_price_path(sym, timeframe)):
             _get_symbol_mark_frame(sym, timeframe)
+
+
+def _contemporaneous_mark_close_panel(
+    symbols: list[str],
+    grid: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Contemporaneous mark-price close panel (no +1h shift, no ffill).
+
+    An absent mark stays NaN so the parity mask fails open per I2.  Deliberately
+    does NOT apply ``_cached_mark_panel``'s ``+1h`` availability shift — the gate
+    detects a stalled price feed, not the replay's valuation lag.
+    """
+    panel = pd.DataFrame(index=grid, columns=list(symbols), dtype="float64")
+    for sym in symbols:
+        try:
+            cache = _get_symbol_mark_frame(sym, "1h")
+        except (KeyError, ValueError):
+            # A malformed/incomplete mark cache (e.g. missing the
+            # open/high/low columns DataCollector._load_mark_price_cache
+            # unconditionally coerces) is a data-integrity condition the
+            # existing mark gates (_assert_cache_required_marks,
+            # apply_dynamic_mark_gap_exclusion) already own; this parity
+            # gate stays fail-open per I2 rather than pre-empting them with
+            # an unrelated crash.
+            continue
+        if cache.empty or "close" not in cache.columns:
+            continue
+        valid = (
+            cache["datetime"].notna()
+            & cache["close"].notna()
+            & (cache["close"] > 0)
+        )
+        closes = (
+            cache.loc[valid, ["datetime", "close"]]
+            .drop_duplicates(subset=["datetime"], keep="last")
+            .sort_values("datetime")
+        )
+        if closes.empty:
+            continue
+        available = pd.Series(
+            closes["close"].to_numpy(dtype="float64"),
+            index=closes["datetime"],
+        )
+        aligned = available.reindex(grid)
+        panel[sym] = aligned.to_numpy(dtype="float64")
+    return panel
+
+
+def _fill_mark_parity_eligibility(
+    close: pd.DataFrame,
+    eligible: pd.DataFrame,
+    enabled: bool,
+    *,
+    mark_close: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any] | None]:
+    """Single shared entry point for BOTH the top-level and the fold path (I4).
+
+    Returns ``(eligible, None)`` unchanged when ``enabled`` is False.
+    Otherwise returns ``(eligible & fill_mark_parity_mask(...), census)``.
+    """
+    if not enabled:
+        return eligible, None
+    if mark_close is None:
+        mark_close = _contemporaneous_mark_close_panel(
+            list(close.columns), close.index,
+        )
+    from src.mhs.panel import fill_mark_parity_mask
+
+    parity = fill_mark_parity_mask(close, mark_close)
+    removed = eligible & ~parity
+    cells_over_band = int(removed.to_numpy().sum())
+    eligible_cells_removed = int((removed & eligible).to_numpy().sum())
+    per_symbol = removed.sum(axis=0)
+    top_symbols = per_symbol[per_symbol > 0].sort_values(ascending=False)
+    truncated = len(top_symbols) > 5
+    symbols_dict: dict[str, int] = {}
+    for sym in top_symbols.index[:5]:
+        symbols_dict[str(sym)] = int(top_symbols[sym])
+    if truncated:
+        symbols_dict["truncated"] = len(top_symbols) - 5
+    census: dict[str, Any] = {
+        "band": MHS_FILL_MARK_MAX_LOG_DIVERGENCE,
+        "cells_over_band": cells_over_band,
+        "eligible_cells_removed": eligible_cells_removed,
+        "symbols": symbols_dict,
+    }
+    return eligible & parity, census
 
 
 def _cached_mark_panel(
@@ -1619,11 +1719,11 @@ def _committee_capital_replay_scale(
     return 0.5 * pnl_vol_target_scale + 0.5 * kelly_scale
 
 
-def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: float = MHS_PNL_TARGET_ANNUAL_VOL, halflife_days: int = MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS, min_days: int = MHS_PNL_VOL_TARGET_BURN_IN_DAYS, floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR) -> pd.Series:
+def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: float = MHS_PNL_TARGET_ANNUAL_VOL, halflife_days: int = MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS, min_days: int = MHS_PNL_VOL_TARGET_BURN_IN_DAYS, floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR, cap: float = 1.0) -> pd.Series:
     """절대 ex-ante 변동성 타겟팅: 목표 변동성 대비 실현 변동성 비율로 스케일링.
 
     ``sigma_t = ewm(std, halflife=20d).shift(1) * sqrt(365)``
-    ``scale_t = clip(target_vol / sigma_t, floor, 1.0)``
+    ``scale_t = clip(target_vol / sigma_t, floor, cap)``
 
     _pnl_vol_target_scale와 달리 자가 trailing vol의 롤링 중앙값이 아닌
     절대 위험 기준이므로 저위험 연도(2023)에서도 충분한 노출을 유지한다.
@@ -1637,6 +1737,8 @@ def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: flo
         raise ValueError(f"min_days must be >= 1, got {min_days}")
     if not 0.0 < floor <= 1.0:
         raise ValueError(f"floor must be in (0, 1], got {floor}")
+    if cap < 1.0:
+        raise ValueError(f"cap must be >= 1.0, got {cap}")
     if reference_daily_returns.empty:
         return pd.Series(1.0, index=reference_daily_returns.index)
     sigma = (
@@ -1647,7 +1749,7 @@ def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: flo
         * np.sqrt(365.0)
     )
     scale = target_vol / sigma.where(sigma > 0)
-    return scale.clip(lower=floor, upper=1.0).fillna(1.0)
+    return scale.clip(lower=floor, upper=cap).fillna(1.0)
 
 
 def _replay_exposure_scale(
@@ -1662,7 +1764,7 @@ def _replay_exposure_scale(
     if request.pnl_vol_target_mode == "median_relative":
         scale = _pnl_vol_target_scale(reference_daily_returns)
     elif request.pnl_vol_target_mode == "exante_target":
-        scale = _exante_vol_target_scale(reference_daily_returns)
+        scale = _exante_vol_target_scale(reference_daily_returns, cap=MHS_PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
     else:
         raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
     return _committee_capital_replay_scale(
@@ -4175,6 +4277,15 @@ def _build_fold_target_weights(
         taker_buy_quote = taker_buy_quote[aligned_symbols]
 
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    # Unlike run_mhs_horizon_diagnostic (which clears at entry), this function
+    # is also called directly outside a diagnostic run (fork worker per fold,
+    # or a unit test calling it standalone), so the process-level
+    # _get_symbol_mark_frame cache is never guaranteed fresh for this root
+    # otherwise -- a stale frame from a prior call against a different
+    # data_root/mark fixture would silently leak in (lru_cache keys on
+    # (symbol, timeframe) only, never on data_root).
+    _get_symbol_mark_frame.cache_clear()
+    eligible, _ = _fill_mark_parity_eligibility(close, eligible, request.fill_mark_parity_gate)
     log_close = np.log(close)
     if not request.committee_capital:
         del close
@@ -4981,6 +5092,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     _assert_stage_rss_budget("funding_alignment", rss_budget_bytes, rss_reserve_bytes)
 
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    eligible, _fill_mark_parity_census = _fill_mark_parity_eligibility(close, eligible, request.fill_mark_parity_gate)
     log_close = np.log(close)
     # The raw close panel is not used after its log transform.  Releasing it
     # before phase/weight construction avoids retaining two full multi-year
@@ -5580,6 +5692,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         funding_dropped_symbols=funding_dropped or None,
         fold_blend_parity=fold_blend_parity,
         fold_growth_concentration=fold_growth_concentration,
+        fill_mark_parity=_fill_mark_parity_census,
     )
 
 
@@ -5747,6 +5860,7 @@ def build_mhs_run_history_record(
         "termination_counts": report.termination_counts,
         "fold_blend_parity": report.fold_blend_parity,
         "fold_growth_concentration": report.fold_growth_concentration,
+        "fill_mark_parity": report.fill_mark_parity,
         "report_path": str(persisted_path) if persisted_path is not None else None,
     }
     return cast(dict[str, Any], _round_6(_jsonable(record)))
