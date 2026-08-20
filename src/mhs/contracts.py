@@ -7,6 +7,7 @@ them is a new contract revision, never an inline edit at a call site.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pandas as pd
@@ -220,3 +221,10 @@ MHS_REGISTERED_POLICY_THRESHOLDS: dict[str, float | None] = {
     "cap_30_roster": 30.0,
     "primary_annual_return": 0.05,
 }
+
+# Fill/Mark parity gate: Binance USDⓈ-M last-vs-mark price protection band.
+MHS_FILL_MARK_PRICE_PROTECTION_BAND: float = 0.05
+# Derived log-divergence threshold; never a literal.
+MHS_FILL_MARK_MAX_LOG_DIVERGENCE: float = math.log1p(MHS_FILL_MARK_PRICE_PROTECTION_BAND)
+# Two-sided exposure scale upper bound: target_gross * max_scale == 1.0 (I5).
+MHS_PNL_VOL_TARGET_MAX_SCALE: float = 1.0 / MHS_COMMITTEE_TARGET_GROSS

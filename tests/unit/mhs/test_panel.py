@@ -290,3 +290,101 @@ def test_synthetic_panel_writes_epoch_via_timedelta(tmp_path: Path) -> None:
         start=ts[0], end=ts[-1], partition="all", min_bars=1,
     )
     assert os.path.exists(directory / "AAAUSDT.parquet")
+
+
+class TestFillMarkParityMask:
+    """SCENARIO_MHS_FILL_MARK_PARITY_01: fill_mark_parity_mask correctness."""
+
+    def test_divergent_cells_false(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx = pd.date_range("2021-01-01", periods=4, freq="1h", tz="UTC")
+        cols = ["A", "B", "C"]
+        fill = pd.DataFrame(
+            {"A": [1.0, 1.0, 1.0, 1.0], "B": [1.0, 1.0, 1.19, 1.19], "C": [1.0, 1.0, 1.0, 1.0]},
+            index=idx, columns=cols,
+        )
+        mark = pd.DataFrame(
+            {"A": [1.0, 1.0, 1.0, 1.0], "B": [1.0, 1.0, 0.0835, 0.0835], "C": [1.0, 1.0, 1.0, 1.0]},
+            index=idx, columns=cols,
+        )
+        mask = fill_mark_parity_mask(fill, mark)
+        assert mask.dtypes.eq(bool).all()
+        # B rows 2-3 are divergent: |log(1.19/0.0835)| = |log(14.25)| ~ 2.657 >> 0.0488
+        assert mask.loc[idx[2], "B"] == False  # noqa: E712
+        assert mask.loc[idx[3], "B"] == False  # noqa: E712
+        # All other cells are True
+        assert mask.loc[idx[0], "B"] == True  # noqa: E712
+        assert mask.loc[idx[1], "B"] == True  # noqa: E712
+        assert mask["A"].all()
+        assert mask["C"].all()
+
+    def test_identical_panels_all_true(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+        data = pd.DataFrame({"X": [1.0, 2.0, 3.0], "Y": [4.0, 5.0, 6.0]}, index=idx)
+        mask = fill_mark_parity_mask(data, data.copy())
+        assert mask.all().all()
+
+    def test_nan_mark_true_fail_open(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx = pd.date_range("2021-01-01", periods=2, freq="1h", tz="UTC")
+        fill = pd.DataFrame({"A": [1.0, 1.0]}, index=idx)
+        mark = pd.DataFrame({"A": [float("nan"), 1.0]}, index=idx)
+        mask = fill_mark_parity_mask(fill, mark)
+        assert mask["A"].all()
+
+    def test_zero_mark_true_fail_open(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx = pd.date_range("2021-01-01", periods=2, freq="1h", tz="UTC")
+        fill = pd.DataFrame({"A": [1.0, 1.0]}, index=idx)
+        mark = pd.DataFrame({"A": [0.0, 1.0]}, index=idx)
+        mask = fill_mark_parity_mask(fill, mark)
+        assert mask["A"].all()
+
+    def test_negative_mark_true_fail_open(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx = pd.date_range("2021-01-01", periods=2, freq="1h", tz="UTC")
+        fill = pd.DataFrame({"A": [1.0, 1.0]}, index=idx)
+        mark = pd.DataFrame({"A": [-1.0, 1.0]}, index=idx)
+        mask = fill_mark_parity_mask(fill, mark)
+        assert mask["A"].all()
+
+    def test_max_log_divergence_zero_raises(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx = pd.date_range("2021-01-01", periods=2, freq="1h", tz="UTC")
+        data = pd.DataFrame({"A": [1.0, 2.0]}, index=idx)
+        with pytest.raises(ValueError, match="max_log_divergence"):
+            fill_mark_parity_mask(data, data.copy(), max_log_divergence=0.0)
+
+    def test_max_log_divergence_negative_raises(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx = pd.date_range("2021-01-01", periods=2, freq="1h", tz="UTC")
+        data = pd.DataFrame({"A": [1.0, 2.0]}, index=idx)
+        with pytest.raises(ValueError, match="max_log_divergence"):
+            fill_mark_parity_mask(data, data.copy(), max_log_divergence=-0.1)
+
+    def test_index_mismatch_raises(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx_a = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+        idx_b = pd.date_range("2021-01-02", periods=3, freq="1h", tz="UTC")
+        fill = pd.DataFrame({"A": [1.0, 2.0, 3.0]}, index=idx_a)
+        mark = pd.DataFrame({"A": [1.0, 2.0, 3.0]}, index=idx_b)
+        with pytest.raises(ValueError, match="index"):
+            fill_mark_parity_mask(fill, mark)
+
+    def test_column_mismatch_raises(self) -> None:
+        from src.mhs.panel import fill_mark_parity_mask
+
+        idx = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+        fill = pd.DataFrame({"A": [1.0, 2.0, 3.0]}, index=idx)
+        mark = pd.DataFrame({"B": [1.0, 2.0, 3.0]}, index=idx)
+        with pytest.raises(ValueError, match="column"):
+            fill_mark_parity_mask(fill, mark)
