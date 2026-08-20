@@ -2324,7 +2324,7 @@ def _run_post_book_concurrently(
     deployment: DeploymentReadinessResult | None = None
 
     if not folds:
-        if has_primary:
+        if blend_report is not None and blend_report.primary is not None:
             (
                 bootstrap_ci, placebo_percentile, participation,
                 termination_counts, deployment,
@@ -2522,6 +2522,7 @@ def _committee_evidence_weights_by_boundary(
     decision_grid: pd.DatetimeIndex,
     min_symbols: int,
     train_ends: Mapping[str, pd.Timestamp],
+    members: tuple[str, ...] | None = None,
 ) -> dict[str, dict[str, float]]:
     """Build per-boundary evidence weights for committee members.
 
@@ -2532,9 +2533,10 @@ def _committee_evidence_weights_by_boundary(
     from the shared proxy return series, so every fold sees only the training
     data up to its own boundary.
     """
+    _resolved = members or MHS_COMMITTEE_MEMBERS
     _member_specs = [
         spec for spec in MHS_FEATURE_REGISTRY
-        if spec.name in set(MHS_COMMITTEE_MEMBERS)
+        if spec.name in set(_resolved)
     ]
     _committee_books = build_feature_books(
         _member_specs,
@@ -2569,29 +2571,24 @@ def _committee_execution_book(
     member_weights: Mapping[str, float] | None = None,
     carry_book: pd.DataFrame | None = None,
     carry_weight: float = 0.0,
+    members: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
     Shared by the fold path and the top-level blend: filter the registry to
-    ``MHS_COMMITTEE_MEMBERS``, build equal-notional rank books, average them.
-    No leg-risk tilt -- tilting the curated committee set to equal risk removed
-    the concentration that carries its edge (walk-forward Sharpe 0.822 -> 0.503,
-    rejected in RC-4). Fails closed when no member is admitted. ``tranche_count``
-    smooths the decision rows with a staggered tranche mean (opt-in, defaults to
-    the identity single-phase book). ``regime_adaptive_window`` (opt-in, mutually
-    exclusive with a fixed ``tranche_count``-only smooth) selects per-row between
-    the raw book and its ``tranche_count``-row smooth using a causal trailing
-    lag-1 autocorrelation of the raw book's own proxy return: negative (mean-
-    reverting/whipsaw) rows use the smooth, non-negative (trending/persistent)
-    rows use the raw book -- root cause and evidence in
-    ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE. ``target_gross``
-    rescales each decision row to an explicit gross, restoring the unit-gross
-    invariant that the member average and tranche mean otherwise dilute; None
-    preserves the diluted book unchanged. ``member_weights`` is an
-    externally-fitted, already-normalized-or-not mapping this function applies
-    and renormalizes over admitted members, falling back to equal weights among
-    admitted members when the supplied weights don't cover any admitted member
-    or sum to <= 0.
+    ``members`` (or ``MHS_COMMITTEE_MEMBERS`` when None), build equal-notional
+    rank books, average them.  No leg-risk tilt -- tilting the curated committee
+    set to equal risk removed the concentration that carries its edge (walk-forward
+    Sharpe 0.822 -> 0.503, rejected in RC-4). Fails closed when no member is
+    admitted. ``tranche_count`` smooths the decision rows with a staggered tranche
+    mean (opt-in, defaults to the identity single-phase book).
+    ``regime_adaptive_window`` (opt-in, mutually exclusive with a fixed
+    ``tranche_count``-only smooth) selects per-row between the raw book and its
+    ``tranche_count``-row smooth using a causal trailing lag-1 autocorrelation of
+    the raw book's own proxy return. ``target_gross`` rescales each decision row
+    to an explicit gross. ``member_weights`` is an externally-fitted,
+    already-normalized-or-not mapping this function applies and renormalizes over
+    admitted members.
     """
     if tranche_count < 1:
         raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
@@ -2599,9 +2596,10 @@ def _committee_execution_book(
         raise ValueError(
             f"regime_adaptive_window must be >= 3, got {regime_adaptive_window}"
         )
+    _resolved = members or MHS_COMMITTEE_MEMBERS
     _member_specs = [
         spec for spec in MHS_FEATURE_REGISTRY
-        if spec.name in set(MHS_COMMITTEE_MEMBERS)
+        if spec.name in set(_resolved)
     ]
     _committee_books = build_feature_books(
         _member_specs,
@@ -2814,6 +2812,7 @@ def _build_fold_target_weights(
             target_gross=_research_go._resolved_committee_target_gross(request),
             member_weights=committee_member_weights,
             carry_book=funding_carry_execution_book(bar_funding, execution_mask, MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, MHS_COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
+            members=_research_go._resolved_committee_members(request),
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
@@ -3748,6 +3747,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         })
         _committee_weights_by_boundary = _committee_evidence_weights_by_boundary(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols, _train_ends,
+            members=_research_go._resolved_committee_members(request),
         )
         _fold_committee_weights = {
             _i: _committee_weights_by_boundary[f"fold_{_i}"]
@@ -3769,6 +3769,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             target_gross=_research_go._resolved_committee_target_gross(request),
             member_weights=(_committee_weights_by_boundary.get("top_level") if request.committee_evidence_weighting else None),
             carry_book=funding_carry_execution_book(bar_funding, execution_mask, MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, MHS_COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
+            members=_research_go._resolved_committee_members(request),
         ).reindex(grid_1h).ffill().fillna(0.0)
         committee_execution_book = blend_1h
         del close, quote_vol, taker_buy_quote

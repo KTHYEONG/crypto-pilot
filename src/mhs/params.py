@@ -45,13 +45,28 @@ MHS_TREND_SLEEVE_HORIZONS_HOURS: tuple[int, ...] = (336, 480, 600, 720, 1080, 14
 
 MHS_FEATURE_MIN_COVERAGE: float = 0.90
 
-MHS_COMMITTEE_MEMBERS: tuple[str, ...] = (
-    "flow_imb_720h",
-    "flow_imb_168h",
-    "xs_mom_336h",
-    "xs_idio_mom_336h",
-    "mom3_skew_168h",
-)
+MHS_COMMITTEE_MEMBER_SETS: dict[str, tuple[str, ...]] = {
+    "flow_momentum_v1": (
+        "flow_imb_720h",
+        "flow_imb_168h",
+        "xs_mom_336h",
+        "xs_idio_mom_336h",
+        "mom3_skew_168h",
+    ),
+    "risk_premia_v2": (
+        "flow_imb_720h",
+        "flow_imb_168h",
+        "mom3_skew_168h",
+        "lowvol_168h",
+        "rev_24h",
+    ),
+}
+
+MHS_COMMITTEE_DEFAULT_MEMBER_SET: str = "flow_momentum_v1"
+
+MHS_COMMITTEE_MEMBERS: tuple[str, ...] = MHS_COMMITTEE_MEMBER_SETS[
+    MHS_COMMITTEE_DEFAULT_MEMBER_SET
+]
 
 MHS_COMMITTEE_TARGET_VOL: float = 0.15
 MHS_COMMITTEE_TARGET_GROSS: float = 0.92

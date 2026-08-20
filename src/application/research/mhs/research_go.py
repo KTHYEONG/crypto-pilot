@@ -64,6 +64,25 @@ def _resolved_committee_target_gross(request: MhsDiagnosticRequest) -> float | N
     return request.committee_target_gross
 
 
+def _resolved_committee_members(request: MhsDiagnosticRequest) -> tuple[str, ...]:
+    """Single resolution seam for committee member set (invariant I4).
+
+    Returns the member tuple from MHS_COMMITTEE_MEMBER_SETS keyed by
+    request.committee_member_set. An unregistered key raises ValueError
+    naming the registered keys.
+    """
+    from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
+
+    key = request.committee_member_set
+    if key not in MHS_COMMITTEE_MEMBER_SETS:
+        registered = sorted(MHS_COMMITTEE_MEMBER_SETS)
+        raise ValueError(
+            f"unknown committee_member_set '{key}'; "
+            f"registered keys: {registered}"
+        )
+    return MHS_COMMITTEE_MEMBER_SETS[key]
+
+
 def _drawdown_budget_reasons(
     primary_max_drawdown: float | None,
     max_drawdown: float = MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,

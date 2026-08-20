@@ -11,6 +11,7 @@ import logging
 import time
 
 from src.mhs.contracts import MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+from src.mhs.params import MHS_COMMITTEE_DEFAULT_MEMBER_SET
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -66,6 +67,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         committee_kelly_sizing=args.committee_kelly_sizing,
         committee_growth_diagnostic=args.committee_growth_diagnostic,
         committee_capital=committee_capital,
+        committee_member_set=args.committee_member_set,
         committee_tranche_smoothing=args.committee_tranche_smoothing,
         committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
         committee_target_gross=committee_target_gross,
@@ -277,7 +279,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Requires committee capital (on by default): rescales every "
             "committee decision row to an explicit gross, restoring the "
             "unit-gross invariant that the k=5 member average and the tranche "
-            "mean otherwise dilute to ~0.53 (47% idle cash). DEFAULT (flag "
+            "mean otherwise dilute to ~0.53 (47%% idle cash). DEFAULT (flag "
             "omitted): the registered MHS_COMMITTEE_TARGET_GROSS=0.92, the "
             "largest replay-certified exposure inside the registered "
             "MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget (certified point "
@@ -516,7 +518,21 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "P&L-vol-target rescale between Pass 1 and Pass 2"
         ),
     )
-    mhs.add_argument("--pnl-vol-target-mode", choices=["exante_target", "median_relative"], default="exante_target")
+    mhs.add_argument(
+        "--pnl-vol-target-mode", choices=["exante_target", "median_relative", "growth_budget"], default="exante_target"
+    )
+    mhs.add_argument(
+        "--committee-member-set",
+        choices=["risk_premia_v2", "flow_momentum_v1"],
+        default=MHS_COMMITTEE_DEFAULT_MEMBER_SET,
+        help=(
+            "Registered committee axis set: flow_momentum_v1 (default, "
+            "the certified k=5 book) or risk_premia_v2 (measured non-default -- "
+            "full 3m replay breached the registered drawdown budget and added "
+            "STRESS_SHARPE_NOT_POSITIVE folds, see ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES). "
+            "Requires --committee-capital (on by default)"
+        ),
+    )
     mhs.add_argument(
         "--no-funding-carry-sleeve",
         action="store_true",
