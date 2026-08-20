@@ -6,33 +6,58 @@
     ]
   },
   "src/application/data/mhs_execution_collection.py": {
-    "testing": [
-      "tests/unit/mhs/test_collection.py",
-      "tests/unit/application/data/test_mhs_execution_collection.py",
-      "tests/unit/application/research/mhs/test_evaluation.py"
-    ],
-    "architecture": "docs/specs/mhs_data_integrity_relevance_scoping.md"
+    "testing": "tests/unit/application/data/test_mhs_execution_collection.py"
   },
+  "src/application/research/mhs/contracts.py": {},
   "src/application/research/mhs/evaluation.py": {
     "testing": [
-      "tests/unit/cli/commands/research/test_mhs.py",
-      "tests/unit/mhs/test_evaluation.py",
-      "tests/unit/mhs/test_evaluation_fold_report.py",
-      "tests/unit/mhs/test_evaluation_fold_safe_fast_horizon.py",
-      "tests/unit/mhs/test_execution.py",
       "tests/unit/application/research/mhs/test_evaluation.py",
-      "tests/unit/application/research/test_mhs_capital_multi_axis.py",
-      "tests/integration/mhs/test_mhs_horizon_opt.py",
-      "tests/unit/mhs/test_panel.py"
-    ],
-    "architecture": "docs/architecture/mhs-explain.md"
-  },
-  "src/cli/commands/data.py": {},
-  "src/cli/commands/research/mhs.py": {
-    "testing": [
-      "tests/unit/cli/commands/research/test_mhs.py",
-      "tests/unit/application/research/mhs/test_evaluation.py"
+      "tests/integration/mhs/test_mhs_horizon_diagnostic.py"
     ]
+  },
+  "src/application/research/mhs/marks.py": {
+    "testing": [
+      "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
+      "tests/integration/mhs/test_mhs_horizon_opt.py",
+      "tests/unit/application/research/mhs/test_evaluation.py",
+      "tests/unit/application/research/mhs/test_fast_reversal_overlay_redesign.py",
+      "tests/unit/application/research/mhs/test_realistic_execution_primary_swap.py",
+      "tests/unit/application/research/test_mhs_capital_multi_axis.py"
+    ]
+  },
+  "src/application/research/mhs/research_go.py": {
+    "testing": [
+      "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
+      "tests/unit/application/research/mhs/test_evaluation.py",
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/mhs/test_evaluation_fold_report.py"
+    ]
+  },
+  "src/application/research/mhs/resources.py": {
+    "testing": "tests/unit/application/research/mhs/test_evaluation.py"
+  },
+  "src/application/research/mhs/scaling.py": {
+    "testing": [
+      "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
+      "tests/integration/mhs/test_mhs_horizon_opt.py",
+      "tests/unit/application/research/mhs/test_evaluation.py",
+      "tests/unit/application/research/mhs/test_mhs_perf_optimization.py",
+      "tests/unit/mhs/test_compounding_growth.py",
+      "tests/unit/mhs/test_discovery.py"
+    ]
+  },
+  "src/application/research/mhs/statistics.py": {
+    "testing": "tests/unit/application/research/mhs/test_evaluation.py"
+  },
+  "src/application/research/mhs/validation.py": {},
+  "src/cli/commands/data.py": {
+    "testing": "tests/unit/cli/commands/test_data.py"
+  },
+  "src/cli/commands/research/mhs.py": {
+    "testing": "tests/unit/cli/commands/research/test_mhs.py"
+  },
+  "src/cli/dataclass_args.py": {
+    "testing": "tests/contract/test_request_cli_parity.py"
   },
   "src/cli/main.py": {
     "testing": "tests/unit/cli/test_main.py"
@@ -43,9 +68,13 @@
   "src/common/errors.py": {
     "testing": [
       "tests/integration/workflows/test_taker_flow_candidate.py",
+      "tests/unit/application/data/test_mhs_execution_collection.py",
+      "tests/unit/application/research/mhs/test_evaluation.py",
+      "tests/unit/application/research/mhs/test_mhs_perf_optimization.py",
       "tests/unit/market_data/services/test_futures_collection.py",
       "tests/unit/market_data/services/test_spot_collection.py",
       "tests/unit/market_data/storage/test_loaders.py",
+      "tests/unit/market_data/test_futures_mark_price.py",
       "tests/unit/mhs/test_execution.py",
       "tests/unit/mhs/test_parallel.py",
       "tests/unit/research/baseline/test_backtest.py",
@@ -59,7 +88,10 @@
     "testing": "tests/unit/core/test_settings.py"
   },
   "src/market_data/binance/futures.py": {
-    "testing": "tests/unit/market_data/binance/test_binance.py"
+    "testing": [
+      "tests/unit/market_data/binance/test_binance.py",
+      "tests/unit/market_data/test_futures_mark_price.py"
+    ]
   },
   "src/market_data/binance/margin.py": {
     "testing": "tests/unit/market_data/binance/test_binance.py"
@@ -76,6 +108,7 @@
   "src/market_data/services/futures_collection.py": {
     "testing": "tests/unit/market_data/services/test_futures_collection.py"
   },
+  "src/market_data/services/rate_common.py": {},
   "src/market_data/services/spot_collection.py": {
     "testing": "tests/unit/market_data/services/test_spot_collection.py"
   },
@@ -91,29 +124,24 @@
   "src/market_data/storage/ohlcv.py": {
     "testing": "tests/unit/market_data/storage/test_ohlcv.py"
   },
+  "src/market_data/storage/schemas.py": {},
   "src/mhs/books.py": {
     "testing": "tests/unit/mhs/test_books.py"
   },
   "src/mhs/committee.py": {
-    "testing": "tests/unit/mhs/test_committee.py",
-    "architecture": "docs/architecture/mhs-explain.md"
+    "testing": "tests/unit/mhs/test_committee.py"
   },
   "src/mhs/contracts.py": {
-    "testing": [
-      "tests/unit/mhs/test_contracts.py",
-      "tests/unit/application/research/mhs/test_evaluation.py"
-    ],
-    "architecture": "docs/architecture/mhs-explain.md"
+    "testing": "tests/unit/mhs/test_contracts.py"
   },
   "src/mhs/discovery.py": {
-    "testing": "tests/unit/mhs/test_evaluation_fold_safe_fast_horizon.py"
+    "testing": "tests/unit/mhs/test_discovery.py"
   },
   "src/mhs/evaluation.py": {
     "testing": "tests/unit/mhs/test_evaluation.py"
   },
   "src/mhs/execution.py": {
-    "testing": "tests/unit/mhs/test_execution.py",
-    "architecture": "docs/specs/mhs_fold_forced_exit_dust_tolerance.md"
+    "testing": "tests/unit/mhs/test_execution.py"
   },
   "src/mhs/features.py": {
     "testing": "tests/unit/mhs/test_features.py"
@@ -128,11 +156,14 @@
     "testing": "tests/unit/mhs/test_panel.py"
   },
   "src/mhs/parallel.py": {
-    "testing": "tests/unit/mhs/test_parallel.py",
-    "architecture": "docs/specs/mhs_refactor.md"
+    "testing": "tests/unit/mhs/test_parallel.py"
   },
+  "src/mhs/params.py": {},
   "src/mhs/regime.py": {
     "testing": "tests/unit/mhs/test_regime.py"
+  },
+  "src/mhs/result_log.py": {
+    "testing": "tests/unit/mhs/test_result_log.py"
   },
   "src/mhs/stability.py": {
     "testing": "tests/unit/mhs/test_stability.py"
@@ -164,7 +195,10 @@
     "testing": "tests/unit/research/evaluation/test_metrics.py"
   },
   "src/research/evaluation/policy.py": {
-    "testing": "tests/unit/research/technical_experts/test_trend_screen_catalog.py"
+    "testing": [
+      "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
+      "tests/unit/research/technical_experts/test_trend_screen_catalog.py"
+    ]
   },
   "src/research/evaluation/promotion.py": {
     "testing": "tests/unit/research/evaluation/test_promotion.py"
@@ -188,7 +222,6 @@
   "src/research/risk/growth_sizing.py": {
     "testing": "tests/unit/research/risk/test_growth_sizing.py"
   },
-  "src/research/sleeve_blend/contracts.py": {},
   "src/research/technical_experts/catalog.py": {
     "testing": "tests/unit/research/technical_experts/test_catalog.py"
   },
@@ -203,9 +236,5 @@
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
-  },
-  "src/mhs/result_log.py": {
-    "architecture": "docs/specs/mhs_result_logging.md",
-    "testing": "tests/unit/mhs/test_result_log.py"
   }
 }

@@ -62,10 +62,8 @@ def test_mhs_roster_hysteresis_member_survives_rank_dip_within_exit_band() -> No
     a member whose rank worsens past ``universe_size`` but stays within the
     ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER`` band is retained,
     unlike the pre-fix hard cutoff which dropped it."""
-    from src.application.research.mhs.evaluation import (
-        MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER,
-        _pit_execution_mask,
-    )
+    from src.application.research.mhs.evaluation import _pit_execution_mask
+    from src.mhs.params import MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
     exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
@@ -94,10 +92,8 @@ def test_mhs_roster_hysteresis_member_exits_past_exit_band() -> None:
     """SCENARIO_MHS_HYSTERESIS_03_MEMBER_EXITS_PAST_EXIT_BAND: a member whose
     rank worsens past ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER``
     is dropped on that bar."""
-    from src.application.research.mhs.evaluation import (
-        MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER,
-        _pit_execution_mask,
-    )
+    from src.application.research.mhs.evaluation import _pit_execution_mask
+    from src.mhs.params import MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
     exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
