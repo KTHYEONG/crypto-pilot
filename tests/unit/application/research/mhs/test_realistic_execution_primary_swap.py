@@ -66,7 +66,16 @@ def _write_mhs_market(root: Path) -> pd.Timestamp:
             {"timestamp": epoch, "open": prices, "high": prices * 1.001,
              "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours},
         ).to_parquet(hdir / f"{sym}.parquet")
-        mp = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, len(minute_idx))))
+        # 1m fills track the same underlying instrument as the 1h close within
+        # a tight intra-hour noise band (mirrors real exchange data); an
+        # unrelated random walk would diverge unboundedly from `prices` over
+        # the fixture's window and spuriously trip fill_mark_parity_mask
+        # (I1). Draws the identical rng.normal(..., len(minute_idx)) shape as
+        # before so `prices`'s own draws stay at the same rng-stream
+        # position -- only this local formula changes.
+        minute_noise = rng.normal(0.0, 0.0003, len(minute_idx))
+        hourly_level = np.repeat(prices, 60)[: len(minute_idx)]
+        mp = hourly_level * np.exp(minute_noise)
         pd.DataFrame(
             {"timestamp": minute_epoch, "open": mp, "high": mp * 1.0005,
              "low": mp * 0.9995, "close": mp, "quote_vol": [1000.0] * len(minute_idx)},
@@ -87,6 +96,11 @@ def mhs_market(tmp_path, monkeypatch):
     end = _write_mhs_market(root)
     monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    # _get_symbol_mark_frame is a process-global lru_cache keyed on
+    # (symbol, timeframe) only; a prior test in the same process/worker using
+    # a different root with an overlapping symbol name would otherwise leak
+    # stale mark data into this fixture's replay.
+    ev._get_symbol_mark_frame.cache_clear()
     return root, end
 
 
