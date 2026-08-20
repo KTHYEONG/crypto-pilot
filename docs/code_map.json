@@ -22,7 +22,8 @@
       "tests/unit/mhs/test_execution.py",
       "tests/unit/application/research/mhs/test_evaluation.py",
       "tests/unit/application/research/test_mhs_capital_multi_axis.py",
-      "tests/integration/mhs/test_mhs_horizon_opt.py"
+      "tests/integration/mhs/test_mhs_horizon_opt.py",
+      "tests/unit/mhs/test_panel.py"
     ],
     "architecture": "docs/architecture/mhs-explain.md"
   },
