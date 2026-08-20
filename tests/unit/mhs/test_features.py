@@ -341,5 +341,38 @@ def test_feature_registry_panel_columns_prunes_to_required_union() -> None:
         spec for spec in MHS_FEATURE_REGISTRY if spec.name in set(MHS_COMMITTEE_MEMBERS)
     ]
     committee_cols = feature_registry_panel_columns(member_specs)
+    # Default flow_momentum_v1: registry order puts flow_imb_168h/flow_imb_720h
+    # (taker_buy_quote, quote_vol) before xs_mom_336h/xs_idio_mom_336h/
+    # mom3_skew_168h (close,) -> first-seen union is (taker_buy_quote,
+    # quote_vol, close).
     assert committee_cols == ("taker_buy_quote", "quote_vol", "close")
     assert all(c in registry_cols for c in committee_cols)
+
+
+def test_xs_mom_builder_rank_invariance() -> None:
+    # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_02: rank_weight_book of
+    # _xs_mom_builder equals rank_weight_book of _momentum_builder cell-for-cell,
+    # while the raw signal frames are NOT equal -- locking the measured
+    # rank-invariance of the row-demeaning.
+    from src.mhs.features import _xs_mom_builder, _momentum_builder
+
+    n, ncols = 400, 12
+    idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+    rng = np.random.default_rng(99)
+    log_close = pd.DataFrame(
+        np.cumsum(rng.normal(0.0, 0.005, (n, ncols)), axis=0),
+        index=idx, columns=list("ABCDEFGHIJKL"),
+    )
+    panels = {"close": np.exp(log_close)}
+    mask = pd.DataFrame(True, index=idx, columns=list("ABCDEFGHIJKL"))
+
+    xs_signal = _xs_mom_builder(168)(panels)
+    mom_signal = _momentum_builder(168)(panels)
+
+    # Raw signals are NOT equal (row-demeaning changes values)
+    assert not xs_signal.equals(mom_signal)
+
+    # But rank books are identical (rank-invariance to row-constant shift)
+    xs_book = rank_weight_book(xs_signal, mask, 1, 2)
+    mom_book = rank_weight_book(mom_signal, mask, 1, 2)
+    assert xs_book.equals(mom_book)

@@ -169,7 +169,7 @@ class TestFrozenLiterals:
 
     def test_mhs_discovery_start_single_sourced_in_folds(self) -> None:
         # SCENARIO_MHS_GAP_HARDENING_04: MHS_DISCOVERY_START is the domain
-        # single source and all three folds derive train_start from it -- a
+        # single source and all four folds derive train_start from it -- a
         # regression guard against the constant re-diverging into independent
         # literals.
         from src.mhs.contracts import MHS_DISCOVERY_START
@@ -177,7 +177,7 @@ class TestFrozenLiterals:
 
         assert pd.Timestamp("2021-01-01", tz="UTC") == MHS_DISCOVERY_START
         folds = phase_1_anchored_purged_folds()
-        assert len(folds) == 3
+        assert len(folds) == 4
         for fold in folds:
             assert fold.train_start == MHS_DISCOVERY_START
             assert fold.train_start is MHS_DISCOVERY_START
@@ -408,3 +408,61 @@ class TestCompoundingGrowthContractConstants:
 
         assert MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS == 168
         assert MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS in MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+
+
+class TestCompoundingAlphaAxesContract:
+    """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_01: committee member set contracts."""
+
+    def test_member_sets_have_exactly_two_keys(self) -> None:
+        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
+        assert set(MHS_COMMITTEE_MEMBER_SETS.keys()) == {"flow_momentum_v1", "risk_premia_v2"}
+
+    def test_default_member_set_is_flow_momentum_v1(self) -> None:
+        # risk_premia_v2 was measured non-adopted: a full 3m replay (2021-2025)
+        # breached the registered drawdown budget (MDD -31.4% vs -25% budget)
+        # and turned two folds STRESS_SHARPE_NOT_POSITIVE. See
+        # ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES.
+        from src.mhs.params import MHS_COMMITTEE_DEFAULT_MEMBER_SET, MHS_COMMITTEE_MEMBERS, MHS_COMMITTEE_MEMBER_SETS
+        assert MHS_COMMITTEE_DEFAULT_MEMBER_SET == "flow_momentum_v1"
+        assert MHS_COMMITTEE_MEMBER_SETS["flow_momentum_v1"] == MHS_COMMITTEE_MEMBERS
+
+    def test_risk_premia_v2_members(self) -> None:
+        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
+        assert MHS_COMMITTEE_MEMBER_SETS["risk_premia_v2"] == (
+            "flow_imb_720h", "flow_imb_168h", "mom3_skew_168h", "lowvol_168h", "rev_24h",
+        )
+
+    def test_flow_momentum_v1_members(self) -> None:
+        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
+        assert MHS_COMMITTEE_MEMBER_SETS["flow_momentum_v1"] == (
+            "flow_imb_720h", "flow_imb_168h", "xs_mom_336h", "xs_idio_mom_336h", "mom3_skew_168h",
+        )
+
+    def test_all_member_names_in_registry(self) -> None:
+        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
+        from src.mhs.features import MHS_FEATURE_REGISTRY
+        registry_names = {s.name for s in MHS_FEATURE_REGISTRY}
+        for members in MHS_COMMITTEE_MEMBER_SETS.values():
+            for name in members:
+                assert name in registry_names, f"{name} not in MHS_FEATURE_REGISTRY"
+
+    def test_growth_budget_annual_vol_exists(self) -> None:
+        from src.mhs.committee import growth_budget_annual_vol
+        assert callable(growth_budget_annual_vol)
+
+    def test_resolved_committee_members(self) -> None:
+        from src.application.research.mhs.research_go import _resolved_committee_members
+        from src.application.research.mhs.contracts import MhsDiagnosticRequest
+        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
+
+        req_v2 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia_v2")
+        assert _resolved_committee_members(req_v2) == MHS_COMMITTEE_MEMBER_SETS["risk_premia_v2"]
+
+        req_v1 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="flow_momentum_v1")
+        assert _resolved_committee_members(req_v1) == MHS_COMMITTEE_MEMBER_SETS["flow_momentum_v1"]
+
+        req_bad = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia_v2")
+        # Simulate an unregistered key by replacing the field (bypassing validation)
+        object.__setattr__(req_bad, "committee_member_set", "unregistered")
+        with pytest.raises(ValueError, match="unknown committee_member_set"):
+            _resolved_committee_members(req_bad)
