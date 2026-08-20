@@ -476,15 +476,25 @@ class AnchoredPurgedFold:
             raise ValueError("the purge embargo must be positive")
 
 
-def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, AnchoredPurgedFold, AnchoredPurgedFold]:
-    """The three preregistered Level 2 anchored purged folds.
+def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
+    """The four preregistered Level 2 anchored purged folds.
 
     ``purge_hours`` derives from the maximum forward dependency (frozen at
     168h for Phase 1); these folds are internal historical robustness, never
-    labelled OOS.
+    labelled OOS.  The 2022 fold is the only bear-regime fold available and
+    adds leak-free evidence; the concentration gate denominator widens from 3
+    to 4.
     """
     purge = 168
     return (
+        AnchoredPurgedFold(
+            MHS_DISCOVERY_START,
+            pd.Timestamp("2021-12-31", tz="UTC"),
+            pd.Timestamp("2022-01-08", tz="UTC"),
+            pd.Timestamp("2022-12-31", tz="UTC"),
+            168,
+            purge,
+        ),
         AnchoredPurgedFold(
             MHS_DISCOVERY_START,
             pd.Timestamp("2022-12-31", tz="UTC"),
