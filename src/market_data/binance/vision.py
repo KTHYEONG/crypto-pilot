@@ -17,17 +17,7 @@ from xml.etree import ElementTree
 import numpy as np
 import pandas as pd
 
-_METRICS_CANONICAL_COLUMNS: tuple[str, ...] = (
-    "timestamp",
-    "datetime",
-    "available_at",
-    "symbol",
-    "sum_open_interest",
-    "sum_open_interest_value",
-    "long_short_ratio",
-    "top_trader_long_short_ratio",
-    "sum_taker_long_short_vol_ratio",
-)
+from src.market_data.storage.schemas import METRICS_CANONICAL_COLUMNS as _METRICS_CANONICAL_COLUMNS
 
 
 class BinanceVisionDownloader:
