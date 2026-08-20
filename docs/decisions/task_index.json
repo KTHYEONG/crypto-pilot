@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_FILL_MARK_PARITY_GATE",
+      "date": "2026-08-20",
+      "adr_id": "ADR_20260820_MHS_FILL_MARK_PARITY_GATE",
+      "domain": "mhs",
+      "title": "MHS 체결/평가 정합성 게이트 도입 + 양측 노출 스케일",
+      "why": "상장폐지 후 합성 zero-volume 고정가 바(52개 심볼, 2025 패널 8%)를 기존 gap 탐지기가 통과시켜, 로스터 보유 바에서 체결가(OHLCV close)와 평가가(markPriceKlines)가 최대 14.25배 괴리(ALPACAUSDT 실측). 매도 체결마다 무위험 가공손익을 계상해 fold2(2025) 로그성장의 50.3%를 5일에 집중시키고 FOLD_GROWTH_CONCENTRATION(0.614>0.50) 유일 차단사유를 만듦. 동시에 ex-ante vol target scale이 upper=1.0 단측이라 저변동성 구간에서 리스크예산 미달.",
+      "resolution": "src/mhs/panel.py에 fill_mark_parity_mask 순수함수 추가(|log(fill/mark)|<=log1p(0.05), Binance price-protection band, 결측/비정합 시 fail-open). src/mhs/contracts.py에 MHS_FILL_MARK_PRICE_PROTECTION_BAND/MHS_FILL_MARK_MAX_LOG_DIVERGENCE/MHS_PNL_VOL_TARGET_MAX_SCALE(=1/target_gross, unit-gross 불변식 유지) 등록. evaluation.py에 _contemporaneous_mark_close_panel(+1h shift 미적용, 동시점 비교)과 _fill_mark_parity_eligibility(fold/top-level 양쪽 동일 함수 배선)를 추가하고 fill_mark_parity_gate=True를 의도적 non-byte-identical 기본값으로 설정(--no-fill-mark-parity-gate로 opt-out). _exante_vol_target_scale에 cap 파라미터 추가, exposure_scale_two_sided=False(opt-in, exante_target 모드 필수)로 양측 스케일 배선. 구현 중 프로세스 전역 lru_cache(_get_symbol_mark_frame)가 module-scoped 공유 테스트 fixture의 서로 다른 root 간 mark 데이터를 오염시키는 결함을 발견해 _build_fold_target_weights와 5개 fixture에 cache_clear() 추가, 합성 테스트 fixture의 독립 랜덤워크 fill/mark 가격을 상관되도록 수정, 손상된 mark 캐시에 대한 fail-open try/except 추가.",
+      "impact": "3m 원장 실측(2021-2025 전체): primary_geometric_cagr 0.521->0.560(+3.9%p), primary_naive_sharpe 2.088->2.232, primary_max_drawdown -0.176(불변), deflated_sharpe_ratio 0.364, data_integrity_reason_codes=[](클린). 게이트가 로스터 보유 9837셀(ALPACAUSDT 719/BNXUSDT 702/MEMEFIUSDT 634/PORT3USDT 712/UXLINKUSDT 637 등)을 정확히 배제. 단, 원 가설(가격아티팩트 제거->FOLD_GROWTH_CONCENTRATION 개선)은 반증됨: max_fold_share 0.614->0.649(악화), fold2(2025) CAGR 129.4%->161.7%로 오히려 증가 -- 오염 심볼 제외 후 자본이 재배분되며 2025 모멘텀 신호가 더 강하게 집중, 즉 fold2 쏠림은 가격 아티팩트가 아니라 진짜 경제적 신호(단일 연도 의존)였음이 실측 확인됨. research_go.eligible은 여전히 False, reason_codes=['FOLD_GROWTH_CONCENTRATION']로 불변. run_elapsed_seconds 278s->541.5s로 약 2배 증가 -- fold-path가 fork 이전 mark 캐시를 prewarm하지 않아 3개 fold worker가 각각 최대 446개 mark parquet를 캐시 없이 재읽음(스펙에 명시한 기지 성능 갭, 실측으로 확인). 후속 과제: (1) fold-path mark prewarm 배선, (2) 2025 쏠림의 진짜 원인(과최적화 vs 진짜 알파) 규명."
+    },
+    {
       "task_id": "MHS_COMPOUNDING_GROWTH",
       "date": "2026-08-19",
       "adr_id": "ADR_20260819_MHS_COMPOUNDING_GROWTH",
@@ -989,16 +999,6 @@
       "why": "50개+ 가격/거래량 파생지표 실측이 전부 기존 trend 패밀리와 상관되거나 노이즈로 소진되어(scratch/test_xs_v6_indicator_screen_50.py 등), v6 성과 개선을 위해 가격/거래량이 아닌 새 데이터 축(포지셔닝, 베이시스, 마이크로구조)이 필요했음. Binance Vision 실제 접근성 검증 결과 liquidationSnapshot은 아예 존재하지 않고 bookTicker/aggTrades는 종목당 일 188MB로 비현실적임을 확인, premiumIndexKlines/indexPriceKlines/markPriceKlines/bookDepth/metrics(OI)만 실제 수집 가능으로 확정.",
       "resolution": "config.py에 indicator_kline_path/bookdepth_path 추가, DataCollector.ensure_indicator_kline_data(마크/인덱스/프리미엄 월별 아카이브)·ensure_bookdepth_data(일별 아카이브) 신설, collection.py/CLI 배선. 구현 후 BTCUSDT 실측 검증 중 버그 3건 발견·수정: (1) 월별 아카이브 헤더 유무가 월마다 달라 close_time이 문자열/정수 혼재되어 parquet 저장 실패 → 명시적 숫자변환 추가, (2) vision.py의 기존(세션 이전부터 있던 미사용) fetch_bookdepth_daily가 실제 존재하지 않는 '-{level}-' 파일명 세그먼트를 붙여 항상 404 → 제거, (3) bookDepth raw fetch가 순번 컬럼을 반환하는데 정규화 함수가 named 컬럼을 기대해 매번 조용히 빈 프레임 반환 + timestamp가 epoch ms 아닌 문자열 포맷이라 이중 버그 → 컬럼 리네임 추가 및 metrics와 동일한 dtype-branch 정규화 적용. 이후 15종목 전체 수집 실행 완료.",
       "impact": "OI/positioning 15/15종목(기존5+신규10, 2022-04~2026-08), premiumIndexKlines/indexPriceKlines 15/15종목(2022-04~2026-06, 월간아카이브 특성상 최근 5주 공백), bookDepth 15/15종목(5.7억행/7.1GB, 2023-01~2026-08, Vision 자체 결측 2023-02-08/09 등 소수일 확인·검증됨). 후속 discovery-only 실측(scratch/test_xs_v6_new_axes.py)에서 long_short_ratio(리테일 포지셔닝) 역발상 방향이 discovery+qualification 양쪽 단독 admission 통과 및 4-family 블렌딩 시 전 지표 개선(discovery Sharpe 1.28->1.58, qualification 1.33->1.41, LCB90 7.74%->8.33%, 여전히 15% 허들 미달) 확인 — 이번 세션 60개+ 후보 중 유일한 순개선 신호, 다음 스펙 사이클 후보로 확정."
-    },
-    {
-      "task_id": "xs_alpha_v6_reliability_gate_wiring",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_v6_reliability_gate_wiring",
-      "domain": "risk",
-      "title": "XS Alpha v6 신뢰도 게이트(LCB90+fold-concentration) 배선 및 실전 투입 준비도 실측",
-      "why": "v6가 discovery/qualification/holdout/stress 단일분할 admission 게이트는 전부 통과했으나, 2026-08-03 구축된 block-bootstrap LCB90+fold-concentration 신뢰도 게이트는 growth/evaluation.py·rolling_admission.py에만 배선되어 있고 xs-screen/cross_sectional 경로(v2~v6)에는 전혀 연결되지 않아 v6와 그로스사이징 오버레이 모두 이 강건성 검증을 거친 적이 없었음. 사용자 요청으로 실전 투입 준비도 평가 필요.",
-      "resolution": "count_closed_trades를 growth/evaluation.py에서 research/evaluation/reliability.py로 이동(레이어링 준수)하고, cross_sectional.py에 XsReliabilityResult+evaluate_xs_reliability를 신설(기존 compute_equity_reliability_gate/compute_equal_duration_fold_distribution 재사용, 신규 통계 없음). xs_trend_screen.py·xs_alpha_growth_sizing.py에 qualification(+holdout) stitched 구간에 대해 진단 필드로 배선(evaluate_xs_admission의 scale-invariant 계약은 불변). 6개월 미만 구간은 fail-closed to None. CLI 실행으로 실측: v6 기본/그로스사이징 모두 fold-concentration은 PASS(0.30/0.33 < threshold 0.407)하지만 LCB90 CAGR(9.98%/8.60%)이 15% 허들 미달로 신뢰도 게이트 FAIL.",
-      "impact": "v6는 실전 투입 불가로 확정(측정 기반, 추론 아님) — point-estimate 게이트는 통과하나 부트스트랩 하한이 허들 미달. 그로스사이징 오버레이(1.5x)는 실제 holdout에서 Sharpe 1.73->1.55·CAGR 28.3%->21.3%로 악화 확인, 채택 보류 권고. 실행/주문관리 파이프라인 부재는 별도 스펙 범위로 분리. lean_check --spec 전체 PASS(65% coverage), 기존 admission 판정 전부 불변."
     }
   ]
 }
