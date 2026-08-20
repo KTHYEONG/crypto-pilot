@@ -102,6 +102,21 @@
       "primary_net_ann": NaN,
       "slow_horizon_hours": 168,
       "stress_naive_sharpe": NaN
+    },
+    {
+      "decision_intents": 0,
+      "failures": [
+        "INCOMPLETE_ANCHORED_FOLD"
+      ],
+      "fast_horizon_hours": 48,
+      "fold_index": 3,
+      "primary_autocorr_sharpe": NaN,
+      "primary_geometric_cagr": NaN,
+      "primary_max_drawdown": NaN,
+      "primary_naive_sharpe": NaN,
+      "primary_net_ann": NaN,
+      "slow_horizon_hours": 168,
+      "stress_naive_sharpe": NaN
     }
   ],
   "horizon_diagnostics": {
