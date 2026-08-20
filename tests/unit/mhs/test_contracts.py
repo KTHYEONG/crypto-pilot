@@ -282,6 +282,37 @@ class TestFrozenLiterals:
             assert name in registry, f"committee member {name} not in registry"
         assert "flow_imb_720h" in MHS_COMMITTEE_MEMBERS
 
+
+class TestFillMarkParityGateConstants:
+    """SCENARIO_MHS_FILL_MARK_PARITY_02: contract constants for parity gate."""
+
+    def test_price_protection_band(self) -> None:
+        from src.mhs.contracts import MHS_FILL_MARK_PRICE_PROTECTION_BAND
+
+        assert MHS_FILL_MARK_PRICE_PROTECTION_BAND == 0.05
+
+    def test_max_log_divergence(self) -> None:
+        import math
+
+        from src.mhs.contracts import MHS_FILL_MARK_MAX_LOG_DIVERGENCE, MHS_FILL_MARK_PRICE_PROTECTION_BAND
+
+        assert pytest.approx(math.log1p(MHS_FILL_MARK_PRICE_PROTECTION_BAND)) == MHS_FILL_MARK_MAX_LOG_DIVERGENCE
+        assert 0.048 < MHS_FILL_MARK_MAX_LOG_DIVERGENCE < 0.049
+
+    def test_vol_target_max_scale(self) -> None:
+        from src.mhs.contracts import (
+            MHS_COMMITTEE_TARGET_GROSS,
+            MHS_PNL_VOL_TARGET_MAX_SCALE,
+        )
+
+        assert pytest.approx(1.0, abs=1e-12) == MHS_PNL_VOL_TARGET_MAX_SCALE * MHS_COMMITTEE_TARGET_GROSS
+        assert MHS_PNL_VOL_TARGET_MAX_SCALE > 1.0
+
+
+class TestFrozenLiteralsCommitteeTiming:
+    """Split out of TestFrozenLiterals so TestFillMarkParityGateConstants stays
+    scoped to the parity-gate scenario only (SCENARIO_MHS_FILL_MARK_PARITY_02)."""
+
     def test_ram_guard_constants_are_frozen_with_sane_bounds(self) -> None:
         # SCENARIO_MHS_RAM_GUARD_CONSTANTS: the automatic RAM-guard tuning
         # constants are frozen contract values with sane bounds (budget/reserve

@@ -71,6 +71,8 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         committee_target_gross=committee_target_gross,
         committee_evidence_weighting=args.committee_evidence_weighting,
         execution_coverage_gate=args.execution_coverage_gate,
+        fill_mark_parity_gate=not args.no_fill_mark_parity_gate,
+        exposure_scale_two_sided=args.exposure_scale_two_sided,
         ram_guard=not args.no_ram_guard,
         discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
         discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
@@ -378,6 +380,18 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "10 and 90 both trigger CAPITAL_INVARIANT_BREACH -- this is not a "
             "free parameter to fiddle with. Pass this flag to opt back out to "
             "the raw (tranche_count=1) committee book."
+        ),
+    )
+    mhs.add_argument("--no-fill-mark-parity-gate", action="store_true")
+    mhs.add_argument(
+        "--exposure-scale-two-sided",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: allow the ex-ante vol target scale to lever UP above "
+            "1.0x when realized vol is below the target (two-sided scaling). "
+            "Requires --pnl-vol-target-mode=exante_target; the upper bound is "
+            "MHS_PNL_VOL_TARGET_MAX_SCALE = 1.0/MHS_COMMITTEE_TARGET_GROSS"
         ),
     )
     mhs.add_argument(
