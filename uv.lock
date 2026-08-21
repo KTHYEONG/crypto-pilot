@@ -608,6 +608,66 @@ toml = [
 ]
 
 [[package]]
+name = "crypto-pilot"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "ccxt" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pandas" },
+    { name = "psutil" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "tenacity" },
+    { name = "tqdm" },
+]
+
+[package.optional-dependencies]
+tuning = [
+    { name = "optuna" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest-cov" },
+    { name = "pytest-timeout" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ccxt", specifier = ">=4.5.0" },
+    { name = "numpy", specifier = ">=2.0.0" },
+    { name = "optuna", marker = "extra == 'tuning'", specifier = ">=4.0.0" },
+    { name = "pandas", specifier = ">=2.2.0" },
+    { name = "psutil", specifier = ">=6.0.0" },
+    { name = "pyarrow", specifier = ">=15.0.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.0.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "scipy", specifier = ">=1.13.0" },
+    { name = "tenacity", specifier = ">=8.5.0" },
+    { name = "tqdm", specifier = ">=4.67.0" },
+]
+provides-extras = ["tuning"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=2.0.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-timeout", specifier = ">=2.4.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = ">=0.15.12" },
+]
+
+[[package]]
 name = "cryptography"
 version = "49.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1132,64 +1192,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/f7/addf1087b860ac60e6f382240f64fb99f8bfb532bb06f7c542b83c29ca61/multidict-6.7.1-cp314-cp314t-win_amd64.whl", hash = "sha256:497bde6223c212ba11d462853cfa4f0ae6ef97465033e7dc9940cdb3ab5b48e5", size = 53542, upload-time = "2026-01-26T02:46:08.809Z" },
     { url = "https://files.pythonhosted.org/packages/4c/81/4629d0aa32302ef7b2ec65c75a728cc5ff4fa410c50096174c1632e70b3e/multidict-6.7.1-cp314-cp314t-win_arm64.whl", hash = "sha256:2bbd113e0d4af5db41d5ebfe9ccaff89de2120578164f86a5d17d5a576d1e5b2", size = 44719, upload-time = "2026-01-26T02:46:11.146Z" },
     { url = "https://files.pythonhosted.org/packages/81/08/7036c080d7117f28a4af526d794aab6a84463126db031b007717c1a6676e/multidict-6.7.1-py3-none-any.whl", hash = "sha256:55d97cc6dae627efa6a6e548885712d4864b81110ac76fa4e534c03819fa4a56", size = 12319, upload-time = "2026-01-26T02:46:44.004Z" },
-]
-
-[[package]]
-name = "crypto-pilot"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "ccxt" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "pandas" },
-    { name = "psutil" },
-    { name = "pyarrow" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "python-dotenv" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "tenacity" },
-    { name = "tqdm" },
-]
-
-[package.optional-dependencies]
-tuning = [
-    { name = "optuna" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest-cov" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "ccxt", specifier = ">=4.5.0" },
-    { name = "numpy", specifier = ">=2.0.0" },
-    { name = "optuna", marker = "extra == 'tuning'", specifier = ">=4.0.0" },
-    { name = "pandas", specifier = ">=2.2.0" },
-    { name = "psutil", specifier = ">=6.0.0" },
-    { name = "pyarrow", specifier = ">=15.0.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pydantic-settings", specifier = ">=2.0.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "scipy", specifier = ">=1.13.0" },
-    { name = "tenacity", specifier = ">=8.5.0" },
-    { name = "tqdm", specifier = ">=4.67.0" },
-]
-provides-extras = ["tuning"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=2.0.0" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.15.12" },
 ]
 
 [[package]]
@@ -1929,6 +1931,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/51/a849f96e117386044471c8ec2bd6cfebacda285da9525c9106aeb28da671/pytest_cov-7.1.0.tar.gz", hash = "sha256:30674f2b5f6351aa09702a9c8c364f6a01c27aae0c1366ae8016160d1efc56b2", size = 55592, upload-time = "2026-03-21T20:11:16.284Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9d/7a/d968e294073affff457b041c2be9868a40c1c71f4a35fcc1e45e5493067b/pytest_cov-7.1.0-py3-none-any.whl", hash = "sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678", size = 22876, upload-time = "2026-03-21T20:11:14.438Z" },
+]
+
+[[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33.502Z" },
 ]
 
 [[package]]
