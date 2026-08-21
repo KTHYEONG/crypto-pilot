@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260821_MHS_STAGE_DECOMPOSITION_GOLDEN_VERIFICATION",
+      "date": "2026-08-21",
+      "adr_id": "ADR_20260821_MHS_STAGE_DECOMPOSITION_GOLDEN_VERIFICATION",
+      "domain": "mhs",
+      "title": "MHS 파이프라인 분해 골든 검증 및 check 도구 xdist 안정화",
+      "why": "이전 세션이 MHS 오케스트레이터를 717줄 단일 함수에서 6-스테이지(panel/selection/book/committee/replay/fold)로 분해했으나, golden identity 테스트가 여전히 구 monolith 경로만 검증하고 committee_capital=True 등 프로덕션 기본 경로는 골든 매트릭스가 아예 캡처되지 않아 회귀를 탐지 못하는 맹점이 있었음. 별도로 lean_check.py의 전체 스코프 pytest 실행이 pytest-xdist 워커 안에서 fork 기반 ProcessPoolExecutor 테스트가 중첩 fork되며 BrokenPipeError로 무한정 멈추는 문제, test_evaluation.py의 50개 테스트가 @pytest.mark.slow 없이 매번 전체 파이프라인을 돌려 testing.md Fast Feedback Default를 위반하는 문제 발견.",
+      "resolution": "capture_matrix.py에 funding_path/mark_price_path 몽키패치 누락 버그 수정 후 committee/discovery/trend_sleeve/fold_safe 4개 골든 캡처 완료. test_golden_identity_matrix의 request.param indirect 파라미터화 누락 버그 및 baseline 마켓 라이터 불일치 수정, 5개 골든 전부 bit-exact 통과 확인. Step 6(persist/artifacts 이동)이 남긴 monkeypatch-through-facade 데드패치 4건(append_run_history_record/_daily_resample_ledger)을 실제 호출 지점인 src.mhs.report.persist로 재타겟팅, 소스텍스트 단언 2건을 분해된 구조(committee.py의 del ctx.log_close + runner.py 스테이지 순서)로 재작성. tools/agent_skills/lean_check.py에 pytest-timeout 플러그인 도입(--test-timeout)과 xdist 타임아웃 시 -n0 자동 직렬 재시도 폴백을 추가해 프로젝트 범용으로 재사용 가능하게 함. test_evaluation.py 50개 + test_mhs_horizon_diagnostic.py 3개 테스트에 @pytest.mark.slow 추가. 최종적으로 프로덕션 CLI(committee_capital=True 기본)를 실데이터(446 심볼, 2021-2025)로 실행해 status=COMPLETE, CAGR 56.0%/MDD -17.6%/Calmar 3.18, 4/4 fold valid 확인.",
+      "impact": "golden identity 테스트 6/7 -> 7/7 bit-exact 통과, test_evaluation.py 기본(not slow) 실행 수십분/다수실패 -> 82초/0실패로 단축, lean_check.py xdist 안정화 기능은 다른 프로젝트에도 재사용 가능. RELEVANT_EXECUTION_DATA_GAP이 신규 Research-GO 차단 사유로 관측되어 별도 조사 필요 항목으로 남음."
+    },
+    {
       "task_id": "ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES",
       "date": "2026-08-20",
       "adr_id": "ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES",
@@ -989,16 +999,6 @@
       "why": "v8 블렌드(ADR_20260805_xs_alpha_baseline_blend_v8)가 aggregate discovery Sharpe로 뽑은 baseline 80% 가중치는 baseline 자체의 연도별 붕괴(2022 Sharpe -1.0, 2023 +2.77)에 낚여 qualification LCB90을 오히려 악화(7.74%->2.84%)시켰음. discovery 구간 연도별 최소 Sharpe(worst-year-robust) 기준으로 재선택하면 다른 가중치가 나오고, t_stat이 leverage-invariant이므로 이 블렌드를 재레버리지하면 t_stat 하락 없이 LCB90만 올릴 수 있는지 확인 필요. 진단(질적 구간 직접 스윕)에서 3.0x 지점이 신뢰도 게이트 3조건(LCB90/t_stat/MDD)을 전부 통과하는 것을 발견, 이 세션 최초 기록.",
       "resolution": "xs_alpha_baseline_blend.py에 select_robust_baseline_blend_weight(연도별 최소 Sharpe argmax, discovery-only)와 apply_fixed_gross_leverage(순수 선형 스케일, 드로다운 사다리 미적용 -- v8에서 사다리가 LCB90을 악화시킴을 이미 확인) 신설. application 레이어에 run_xs_alpha_baseline_blend_sized 오케스트레이터 추가: robust 가중치 선택 -> build_blended_ledger 전체 이력 적용 -> growth_sizing.solve_growth_optimal_risk(use_drawdown_overlay=False, discovery 수익률만, max_drawdown=0.20 기존 기본값)로 레버리지 선택 -> apply_fixed_gross_leverage 적용 -> evaluate_xs_admission/evaluate_xs_reliability 재검증. xs-baseline-blend-sized CLI 서브커맨드 배선(xs-baseline-blend와 동일 패턴). CLI 실행(홀드아웃 봉인) 결과: blend_weight=0.6(구 0.2에서 변경), qualification t_stat 1.886->2.036(2.0 플로어 최초 통과), MDD -14.3%->-7.95%. 그러나 solve_growth_optimal_risk의 5년 시뮬레이션 기준 selected_risk=1.0(레버리지 없음) -- feasible_risks=[1.0]뿐, 1.5x부터는 5년 지평 MDD 초과확률(4.85%가 이미 5% 한계 근접)로 전부 기각되어 진단에서 봤던 3.0x는 채택되지 않음. 최종 LCB90=6.40%(<15% 여전히 미달), fold_concentration/worst_fold는 개선(0.17%).",
       "impact": "3개 신뢰도 게이트 조건 중 t_stat과 MDD는 최초로 동시 통과, LCB90만 미달(6.40%<15%) -- 이번 프로젝트 전체 사이클 중 게이트에 가장 근접한 결과. 진단(질적 구간 스윕)과 실제 discovery-only 프로덕션 규칙(5년 장기 성장 리스크 기준)의 괴리가 확정됨: qualification 2년 정적 MDD 기준으로는 3.0x가 안전해 보이지만 5년 시뮬레이션 하에서는 1.5x부터 이미 위험. v6/v8 대비 개선(LCB90 6.40% vs v6 7.74%로는 여전히 낮지만 t_stat/MDD 마진 확보)이나 채택 보류. 다음 사이클 후보: solve_growth_optimal_risk의 5년/2년 지평 불일치를 좁히는 레버리지 선택 규칙 또는 LCB90 자체를 겨냥한 대안 셀렉터 설계."
-    },
-    {
-      "task_id": "xs_alpha_baseline_blend_v8",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_baseline_blend_v8",
-      "domain": "risk",
-      "title": "XS Alpha × Donchian Baseline Sleeve Blend — t_stat 소폭개선하나 LCB90 악화로 기각",
-      "why": "v6 및 v2~v7 전 프로파일이 point-estimate admission은 통과하나 신뢰도 게이트(LCB90>=15%, t_stat>2.0, MDD>-25%)는 전부 FAIL. 실측 결과 t_stat이 leverage-invariant(순수 레버리지로는 2.0 플로어를 절대 못 넘음)임을 확인, family 재조합도 3사이클째 동일 Sharpe 대역(1.2~1.6)에 정체. 유일한 미검증 축으로 v6(시장중립 XS)와 frozen Donchian 베이스라인(방향성 단일자산)의 상관관계를 측정한 결과 사실상 0(qual창 rho=-0.0002)임을 발견, 진단용 tangency 블렌드가 t_stat 1.886->2.114로 플로어를 넘는 것을 확인해 실전 스펙 사이클 진행.",
-      "resolution": "cross_sectional.py 패턴을 재사용해 src/research/technical_experts/xs_alpha_baseline_blend.py(select_baseline_blend_weight: discovery-only 그리드 서치, build_blended_ledger)와 application 레이어 오케스트레이터, xs-baseline-blend CLI 서브커맨드(single_technical.py, xs-growth-sizing과 동일 패턴)를 신설. CLI 실행(홀드아웃 봉인) 결과: discovery 그리드에서 선택된 가중치는 v6=0.2/baseline=0.8(진단용 tangency 0.37과 다름). qualification 블렌드 t_stat 1.886->1.945로 소폭 개선했으나 여전히 2.0 미달, LCB90은 7.74%->2.84%로 오히려 악화(worst_fold/fold_concentration은 개선). 원인: baseline이 discovery(2022-23, Sharpe 1.85)와 qualification(2024-25, Sharpe 0.67, 자체 admission 실패) 간 비정상적이라 discovery-only로 뽑힌 80% baseline 가중치가 qualification CAGR을 26.1%->8.1%로 크게 희석.",
-      "impact": "v6 단독 대비 개선 없음(reliability 여전히 FAIL, LCB90 더 악화) -- 채택 보류, v6가 계속 최선 후보. 코드/CLI/결과 파일(docs/results/xs_alpha_baseline_blend_v8.json)은 연구자산으로 보존. 레버리지 단독 개선 불가(t_stat 불변)와 2-sleeve 블렌드가 baseline의 OOS 비정상성 탓에 미해결이라는 두 부정적 결과가 함께 확정되어 다음 사이클은 OOS-안정적인 2번째 슬리브(예: carry) 탐색 또는 baseline 자체의 qualification 붕괴 원인 규명으로 방향 전환 필요."
     }
   ]
 }
