@@ -36,7 +36,7 @@ def _validate_field_bounds(request: MhsDiagnosticRequest, field: str, bounds: tu
 def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset: object) -> None:
     """Run every declared validation rule over the request, fail closed.
 
-    ``committee_target_gross_unset`` is the caller's ``_MHS_COMMITTEE_TARGET_GROSS_UNSET``
+    ``committee_target_gross_unset`` is the caller's ``COMMITTEE_TARGET_GROSS_UNSET``
     sentinel; its object identity distinguishes the registered default exposure
     from an explicit value (the sentinel is never resolved into the frozen
     field, so identity is preserved across ``dataclasses.replace``).
@@ -141,7 +141,7 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
         request, "pnl_vol_target_mode", ("median_relative", "exante_target", "growth_budget"),
     )
     _validate_field_choices(
-        request, "committee_member_set", ("risk_premia_v2", "flow_momentum_v1"),
+        request, "committee_member_set", ("risk_premia", "flow_momentum"),
     )
     if not isinstance(request.funding_carry_sleeve, bool):
         raise ValueError("funding_carry_sleeve must be a bool")

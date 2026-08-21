@@ -109,7 +109,7 @@ def _build_trend_screen_candidates() -> tuple[TechnicalCandidate, ...]:
     candidates: list[TechnicalCandidate] = []
     for family in TREND_SCREEN_FAMILIES:
         for side in ("LONG", "SHORT"):
-            return_source = f"technical_{family}_{side.lower()}_v1"
+            return_source = f"technical_{family}_{side.lower()}"
             candidates.append(TechnicalCandidate(
                 return_source,
                 return_source,

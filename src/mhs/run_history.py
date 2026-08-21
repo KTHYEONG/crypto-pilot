@@ -5,7 +5,7 @@ with ``latest.json`` holding the most recent run snapshot. No hardcoded
 absolute paths: callers derive the history directory dynamically.
 
 Each record is one JSON line in ``active.jsonl``; when appending exceeds
-``MHS_RUN_HISTORY_SHARD_MAX_BYTES``, the shard rotates to an immutable archive.
+``RUN_HISTORY_SHARD_MAX_BYTES``, the shard rotates to an immutable archive.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-MHS_RUN_HISTORY_SHARD_MAX_BYTES: int = 262144
-MHS_RUN_HISTORY_MAX_SHARDS: int = 12
+RUN_HISTORY_SHARD_MAX_BYTES: int = 262144
+RUN_HISTORY_MAX_SHARDS: int = 12
 
 _ACTIVE_FILE_NAME = "active.jsonl"
 _LATEST_FILE_NAME = "latest.json"
@@ -54,7 +54,7 @@ def _serialize_record(record: Mapping[str, Any]) -> str:
 
 def _prune_archives(history_dir: Path) -> None:
     archives = sorted(history_dir.glob(f"{_ARCHIVE_PREFIX}*{_ARCHIVE_SUFFIX}"))
-    excess = len(archives) - MHS_RUN_HISTORY_MAX_SHARDS
+    excess = len(archives) - RUN_HISTORY_MAX_SHARDS
     for stale in archives[:excess]:
         stale.unlink()
 
@@ -70,7 +70,7 @@ def append_run_history_record(record: Mapping[str, Any], history_dir: Path) -> P
     active = history_dir / _ACTIVE_FILE_NAME
     line = _serialize_record(record) + "\n"
 
-    if active.exists() and active.stat().st_size + len(line.encode("utf-8")) > MHS_RUN_HISTORY_SHARD_MAX_BYTES:
+    if active.exists() and active.stat().st_size + len(line.encode("utf-8")) > RUN_HISTORY_SHARD_MAX_BYTES:
         active.rename(_unique_archive_path(history_dir))
         _prune_archives(history_dir)
 

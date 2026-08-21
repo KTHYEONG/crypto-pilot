@@ -21,11 +21,11 @@ import numpy as np
 import pandas as pd
 
 from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
-from src.mhs.evaluation import AnchoredPurgedFold, cost_response_curve
+from src.mhs.evidence import AnchoredPurgedFold, cost_response_curve
 from src.mhs.execution import mhs_ledger_pnl
 from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs.types import MEASURED_EXECUTION_COST_TIERS_BPS
 
 _ADMISSION_T = 2.0
 
@@ -169,8 +169,8 @@ def _discovery_regime_cash_scale(vol_mean: pd.Series) -> pd.Series:
     (``src/application/research/mhs/evaluation.py``): ``median(vol) / vol``
     clipped to ``[floor, 1.0]`` with a ``fillna(1.0)`` for
     insufficient-history bars -- same local constants (floor ``0.5`` =
-    ``MHS_REGIME_CASH_SCALE_FLOOR``, median window ``720``h =
-    ``MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS``, ``min_periods`` 48), deliberately
+    ``REGIME_CASH_SCALE_FLOOR``, median window ``720``h =
+    ``REGIME_CASH_MEDIAN_WINDOW_HOURS``, ``min_periods`` 48), deliberately
     NOT imported because ``src/mhs/discovery.py`` is domain layer and the
     original lives in the application layer (importing it would invert the
     dependency direction -- same pattern as ``_bartlett_hac_denom``). The
