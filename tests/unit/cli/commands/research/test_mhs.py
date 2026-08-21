@@ -760,7 +760,7 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
 def test_cli_flags_threaded(monkeypatch) -> None:
     """SCENARIO_CLI_FLAGS_THREADED: new CLI args are threaded into MhsDiagnosticRequest."""
     import src.application.research.mhs.evaluation as ev
-    from src.mhs.contracts import MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+    from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 
     captured: dict = {}
     real_request = ev.MhsDiagnosticRequest
@@ -781,18 +781,18 @@ def test_cli_flags_threaded(monkeypatch) -> None:
     defaults = {action.dest: action.default for action in parser._actions}
     assert defaults["pnl_vol_target_mode"] == "exante_target"
     assert defaults["no_funding_carry_sleeve"] is False
-    assert defaults["funding_carry_weight"] == MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+    assert defaults["funding_carry_weight"] == FUNDING_CARRY_SLEEVE_WEIGHT
 
     # Default: exante_target, carry sleeve ON (committee_capital default ON)
     captured.clear()
     args = parser.parse_args([])
     assert args.pnl_vol_target_mode == "exante_target"
     assert args.no_funding_carry_sleeve is False
-    assert args.funding_carry_weight == MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+    assert args.funding_carry_weight == FUNDING_CARRY_SLEEVE_WEIGHT
     _run_mhs_horizon_diagnostic(args)
     assert captured["pnl_vol_target_mode"] == "exante_target"
     assert captured["funding_carry_sleeve"] is True
-    assert captured["funding_carry_weight"] == MHS_FUNDING_CARRY_SLEEVE_WEIGHT
+    assert captured["funding_carry_weight"] == FUNDING_CARRY_SLEEVE_WEIGHT
 
     # --no-funding-carry-sleeve disables sleeve
     captured.clear()
