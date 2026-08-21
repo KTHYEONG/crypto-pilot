@@ -14,8 +14,8 @@ import numpy as np
 import pandas as pd
 
 from src.mhs.books import rank_weight_book
-from src.mhs.contracts import MHS_FEATURE_MIN_COVERAGE
 from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
+from src.mhs.types import FEATURE_MIN_COVERAGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,103 +321,103 @@ def _hl_range_168h_builder(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 # The declared feature registry. Each entry's sign is baked into its builder;
-# min_coverage defaults to the frozen MHS_FEATURE_MIN_COVERAGE floor.
-MHS_FEATURE_REGISTRY: tuple[FeatureSpec, ...] = (
+# min_coverage defaults to the frozen FEATURE_MIN_COVERAGE floor.
+FEATURE_REGISTRY: tuple[FeatureSpec, ...] = (
     FeatureSpec(
         name="mom_168h",
         required_columns=("close",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_momentum_builder(168),
     ),
     FeatureSpec(
         name="mom_336h",
         required_columns=("close",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_momentum_builder(336),
     ),
     FeatureSpec(
         name="rev_24h",
         required_columns=("close",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_reversal_24h_builder,
     ),
     FeatureSpec(
         name="taker_imb_168h",
         required_columns=("taker_buy_quote", "quote_vol"),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_taker_imbalance_builder(168),
     ),
     FeatureSpec(
         name="taker_imb_24h",
         required_columns=("taker_buy_quote", "quote_vol"),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_taker_imbalance_builder(24),
     ),
     FeatureSpec(
         name="amihud",
         required_columns=("close", "quote_vol"),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_amihud_builder,
     ),
     FeatureSpec(
         name="lowvol_168h",
         required_columns=("close",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_lowvol_168h_builder,
     ),
     FeatureSpec(
         name="hl_range_168h",
         required_columns=("high", "low", "close"),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_hl_range_168h_builder,
     ),
     FeatureSpec(
         name="turnover_chg",
         required_columns=("quote_vol",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_turnover_chg_builder,
     ),
     FeatureSpec(
         name="avg_trade_size",
         required_columns=("quote_vol", "no_trades"),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_avg_trade_size_builder,
     ),
     # Committee-family registry entries (flow imbalance, cross-sectional momentum, skew)
     FeatureSpec(
         name="flow_imb_168h",
         required_columns=("taker_buy_quote", "quote_vol"),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_taker_imbalance_builder(168),
     ),
     FeatureSpec(
         name="flow_imb_720h",
         required_columns=("taker_buy_quote", "quote_vol"),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_taker_imbalance_builder(720),
     ),
     FeatureSpec(
         name="xs_mom_336h",
         required_columns=("close",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_xs_mom_builder(336),
     ),
     FeatureSpec(
         name="xs_mom_720h",
         required_columns=("close",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_xs_mom_builder(720),
     ),
     FeatureSpec(
         name="xs_idio_mom_336h",
         required_columns=("close",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_xs_idio_mom_builder(336),
     ),
     FeatureSpec(
         name="mom3_skew_168h",
         required_columns=("close",),
-        min_coverage=MHS_FEATURE_MIN_COVERAGE,
+        min_coverage=FEATURE_MIN_COVERAGE,
         builder=_mom3_skew_builder(168),
     ),
 )

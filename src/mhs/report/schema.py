@@ -1,0 +1,96 @@
+"""MHS report schema: dataclasses and key rename registry.
+
+``RENAME_REGISTRY`` maps old persisted JSON keys to their new names.
+The golden comparison applies it before diffing, so any unregistered
+key change fails the identity gate.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.application.research.mhs.contracts import (
+        MhsBookReport,
+        MhsFoldReport,
+        MhsResearchGoResult,
+        MhsResourceMeasurement,
+    )
+    from src.mhs.discovery import DiscoveryQualificationResult
+    from src.mhs.evidence import AnchoredPurgedFold, DeploymentReadinessResult
+
+
+@dataclass(frozen=True, slots=True)
+class MhsHorizonDiagnosticReport:
+    """Top-level MHS Phase 1 diagnostic report.
+
+    Canonical definition (P1): moved out of
+    ``src.application.research.mhs.contracts``, which now re-exports this
+    class so every existing ``from ... import MhsHorizonDiagnosticReport``
+    import path keeps working unchanged.
+    """
+
+    feature: str
+    status: str
+    start: str
+    end: str
+    resolved_end: str
+    partition: str
+    execution_tiers_bps: tuple[float, ...]
+    books: dict[str, MhsBookReport]
+    blend: MhsBookReport | None
+    blend_target_gross: float
+    blend_cash_fraction: float
+    eligible_symbols: int
+    trials_attempted: int
+    deflated_sharpe_ratio: float | None
+    xs_rank_ic: dict[str, float]
+    date_clustered_regression: dict[str, float]
+    horizon_diagnostics: dict[str, float]
+    bootstrap_ci: tuple[float, float] | None
+    placebo_sharpe_percentile: float | None
+    deployment_readiness: DeploymentReadinessResult
+    synthetic_stress: dict[str, dict[str, Any]]
+    participation_warnings: dict[str, float]
+    termination_counts: dict[str, int]
+    unsupported_assumptions: tuple[str, ...]
+    anchored_folds: tuple[AnchoredPurgedFold, ...]
+    folds: tuple[MhsFoldReport, ...]
+    research_go: MhsResearchGoResult
+    fill_source: str
+    mark_source: str
+    execution_timeframe: str
+    execution_universe_size: int
+    execution_symbols: tuple[str, ...]
+    run_elapsed_seconds: float
+    resource_measurements: tuple[MhsResourceMeasurement, ...] = ()
+    discovery_qualification: dict[str, DiscoveryQualificationResult] | None = None
+    realized_execution_roster_size: float | None = None
+    full_history_yearly_net_t: dict[str, dict[int, float]] | None = None
+    funding_carry_worst_year_corr: float | None = None
+    trend_sleeve_diagnostic: dict[str, Any] | None = None
+    multi_feature_diagnostic: dict[str, Any] | None = None
+    committee_diagnostic: dict[str, Any] | None = None
+    funding_dropped_symbols: dict[str, str] | None = None
+    fold_blend_parity: dict[str, Any] | None = None
+    fold_growth_concentration: dict[str, Any] | None = None
+    fill_mark_parity: dict[str, Any] | None = None
+
+    def to_payload(self) -> Any:
+        from src.application.research.mhs.evaluation import _jsonable
+        return _jsonable(dataclasses.asdict(self))
+
+
+# Frozen old-key → new-key map for persisted report JSON.
+# Only keys explicitly listed here may change name between versions.
+# The golden comparison applies renames to the golden before diffing.
+RENAME_REGISTRY: dict[str, str] = {
+    # P3: MHS_ prefix stripped from params constants
+    "MHS_COMMITTEE_TARGET_GROSS": "COMMITTEE_TARGET_GROSS",
+    "MHS_COMMITTEE_TARGET_VOL": "COMMITTEE_TARGET_VOL",
+    # P3: PHASE_1_ prefix stripped
+    "PHASE_1_BOOK_SPECS": "BOOK_SPECS",
+    "PHASE_1_BOOK_BLEND_WEIGHTS": "BOOK_BLEND_WEIGHTS",
+}

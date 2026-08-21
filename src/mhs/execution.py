@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.contracts import ExecutionSpec
+from src.mhs.types import ExecutionSpec
 from src.research.baseline.backtest import _align_funding_rates
 from src.research.technical_experts.cross_sectional import (
     XsCompositeSpec,
