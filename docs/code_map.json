@@ -17,6 +17,7 @@
   },
   "src/application/research/mhs/marks.py": {
     "testing": [
+      "tests/unit/application/research/mhs/test_marks.py",
       "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
       "tests/integration/mhs/test_mhs_horizon_opt.py",
       "tests/unit/application/research/mhs/test_evaluation.py",
@@ -34,7 +35,10 @@
     ]
   },
   "src/application/research/mhs/resources.py": {
-    "testing": "tests/unit/application/research/mhs/test_evaluation.py"
+    "testing": [
+      "tests/unit/application/research/mhs/test_resources.py",
+      "tests/unit/application/research/mhs/test_evaluation.py"
+    ]
   },
   "src/application/research/mhs/scaling.py": {
     "testing": [
@@ -47,7 +51,10 @@
     ]
   },
   "src/application/research/mhs/statistics.py": {
-    "testing": "tests/unit/application/research/mhs/test_evaluation.py"
+    "testing": [
+      "tests/unit/application/research/mhs/test_statistics.py",
+      "tests/unit/application/research/mhs/test_evaluation.py"
+    ]
   },
   "src/application/research/mhs/validation.py": {},
   "src/cli/commands/data.py": {
@@ -239,5 +246,6 @@
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
-  }
+  },
+  "src/mhs/pipeline/orchestrator.py": {}
 }
