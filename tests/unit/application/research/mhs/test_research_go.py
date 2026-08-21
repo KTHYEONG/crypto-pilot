@@ -6,25 +6,25 @@ import pytest
 
 from src.application.research.mhs.contracts import MhsDiagnosticRequest
 from src.application.research.mhs.research_go import _resolved_committee_members
-from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
+from src.mhs.params import COMMITTEE_MEMBER_SETS
 
 
-def test_resolved_committee_members_risk_premia_v2() -> None:
-    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia_v2")
+def test_resolved_committee_members_risk_premia() -> None:
+    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
     result = _resolved_committee_members(req)
-    assert result == MHS_COMMITTEE_MEMBER_SETS["risk_premia_v2"]
+    assert result == COMMITTEE_MEMBER_SETS["risk_premia"]
     assert len(result) == 5
 
 
-def test_resolved_committee_members_flow_momentum_v1() -> None:
-    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="flow_momentum_v1")
+def test_resolved_committee_members_flow_momentum() -> None:
+    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="flow_momentum")
     result = _resolved_committee_members(req)
-    assert result == MHS_COMMITTEE_MEMBER_SETS["flow_momentum_v1"]
+    assert result == COMMITTEE_MEMBER_SETS["flow_momentum"]
     assert len(result) == 5
 
 
 def test_resolved_committee_members_unregistered_raises() -> None:
-    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia_v2")
+    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
     # Simulate an unregistered key by replacing the field (bypassing validation)
     object.__setattr__(req, "committee_member_set", "unregistered")
     with pytest.raises(ValueError, match="unknown committee_member_set"):

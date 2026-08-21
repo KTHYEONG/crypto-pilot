@@ -104,24 +104,24 @@ class TestExanteVolTargetScaleCap:
         assert (post_burn == 1.0).all()
 
     def test_cap_two_sided(self) -> None:
-        from src.mhs.contracts import MHS_PNL_VOL_TARGET_MAX_SCALE
+        from src.mhs.types import PNL_VOL_TARGET_MAX_SCALE
 
         rng = np.random.default_rng(42)
         idx = pd.date_range("2021-01-01", periods=400, freq="1D", tz="UTC")
         low_vol = pd.Series(rng.normal(0, 0.005, 400), index=idx)
-        scale_capped = _exante_vol_target_scale(low_vol, target_vol=0.20, cap=MHS_PNL_VOL_TARGET_MAX_SCALE)
+        scale_capped = _exante_vol_target_scale(low_vol, target_vol=0.20, cap=PNL_VOL_TARGET_MAX_SCALE)
         post_burn = scale_capped.iloc[90:]
         assert (post_burn > 1.0).all()
-        assert scale_capped.max() <= MHS_PNL_VOL_TARGET_MAX_SCALE + 1e-12
+        assert scale_capped.max() <= PNL_VOL_TARGET_MAX_SCALE + 1e-12
 
     def test_high_vol_both_identical(self) -> None:
-        from src.mhs.contracts import MHS_PNL_VOL_TARGET_MAX_SCALE
+        from src.mhs.types import PNL_VOL_TARGET_MAX_SCALE
 
         rng = np.random.default_rng(99)
         idx = pd.date_range("2021-01-01", periods=400, freq="1D", tz="UTC")
         high_vol = pd.Series(rng.normal(0, 0.15, 400), index=idx)
         scale_default = _exante_vol_target_scale(high_vol, target_vol=0.20)
-        scale_capped = _exante_vol_target_scale(high_vol, target_vol=0.20, cap=MHS_PNL_VOL_TARGET_MAX_SCALE)
+        scale_capped = _exante_vol_target_scale(high_vol, target_vol=0.20, cap=PNL_VOL_TARGET_MAX_SCALE)
         pd.testing.assert_series_equal(scale_default, scale_capped)
 
     def test_cap_below_one_raises(self) -> None:

@@ -36,8 +36,8 @@ from src.application.research.mhs.evaluation import (
 )
 from src.common.errors import DataIntegrityError
 from src.market_data.services.futures_collection import DataCollector
-from src.mhs.contracts import PHASE_1_BOOK_SPECS, ExecutionSpec
-from src.mhs.evaluation import phase_1_anchored_purged_folds
+from src.mhs.types import BOOK_SPECS, ExecutionSpec
+from src.mhs.evidence import phase_1_anchored_purged_folds
 from src.mhs.execution import replay_execution_windows
 from src.mhs.parallel import fork_shared_payload
 
@@ -266,7 +266,7 @@ def test_mhs_perf_opt_fold_discovery_parallel_equivalence() -> None:
     """SCENARIO_MHS_PERF_OPT_FOLD_DISCOVERY_PARALLEL_EQUIVALENCE: the forked
     fold-safe discovery returns exactly the sequential per-fold computation."""
     log_close, eligible, opens, bar_funding, grid = _build_fold_panel()
-    specs = PHASE_1_BOOK_SPECS
+    specs = BOOK_SPECS
     precomputed = _candidate_weight_books(log_close, eligible, bar_funding, specs)
 
     expected_slow: dict[int, int | None] = {}
@@ -327,31 +327,31 @@ def test_mhs_perf_opt_mark_panel_invalid_grid(mark_market) -> None:
 def test_scenario_04_candidate_weight_books_covers_union() -> None:
     """SCENARIO_MHS_REFACTOR_04: ``_candidate_weight_books`` returns horizon
     keys covering both the fold-safe BookSpec band horizons and the top-level
-    MHS_DISCOVERY_* / funding-carry candidate sets, and every panel equals what
+    DISCOVERY_* / funding-carry candidate sets, and every panel equals what
     ``build_candidate_weights`` would have produced for that key."""
     from src.application.research.mhs.evaluation import (
-        MHS_DISCOVERY_MOMENTUM_CANDIDATES,
-        MHS_DISCOVERY_REVERSAL_CANDIDATES,
-        MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+        DISCOVERY_MOMENTUM_CANDIDATES,
+        DISCOVERY_REVERSAL_CANDIDATES,
+        FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
         build_funding_carry_candidate_weights,
     )
     from src.mhs.discovery import build_candidate_weights as _bcw
 
     log_close, eligible, opens, bar_funding, grid = _build_fold_panel()
-    specs = PHASE_1_BOOK_SPECS
+    specs = BOOK_SPECS
     books = _candidate_weight_books(log_close, eligible, bar_funding, specs)
     assert set(books) == {"slow", "fast", "funding_long", "funding_short"}
 
     slow_keys = set(books["slow"])
     assert set(specs["slow_momentum"].band.horizons_hours) <= slow_keys
-    assert set(MHS_DISCOVERY_MOMENTUM_CANDIDATES) <= slow_keys
+    assert set(DISCOVERY_MOMENTUM_CANDIDATES) <= slow_keys
 
     fast_keys = set(books["fast"])
     assert set(specs["fast_reversal"].band.horizons_hours) <= fast_keys
-    assert set(MHS_DISCOVERY_REVERSAL_CANDIDATES) <= fast_keys
+    assert set(DISCOVERY_REVERSAL_CANDIDATES) <= fast_keys
 
     funding_keys = set(books["funding_long"])
-    assert set(MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS) <= funding_keys
+    assert set(FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS) <= funding_keys
 
     for h in slow_keys:
         expected = _bcw(log_close, eligible, 1, (h,), tranche_count=8)[h]
@@ -456,8 +456,8 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
         quote_vol, lookback_bars=720, min_history_bars=720,
     )
     log_close = np.log(close)
-    fast = ev_mod.PHASE_1_BOOK_SPECS["fast_reversal"]
-    slow = ev_mod.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast = ev_mod.BOOK_SPECS["fast_reversal"]
+    slow = ev_mod.BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
     w_fast = ev_mod._book_weights(log_close, eligible, fast, fast_grid)
@@ -475,8 +475,8 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     blend_1h = (
-        ev_mod.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
-        + ev_mod.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
+        ev_mod.BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
+        + ev_mod.BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
     )
     vol_mean = ev_mod.realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
     regime_scale = scaling_mod._regime_cash_scale(vol_mean)

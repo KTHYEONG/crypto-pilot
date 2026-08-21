@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs.evaluation import (
+from src.mhs.evidence import (
     AnchoredPurgedFold,
     DeploymentReadinessResult,
     autocorrelation_adjusted_sharpe,
@@ -60,13 +60,13 @@ def test_mhs_roster_hysteresis_enter_unchanged_from_baseline() -> None:
 def test_mhs_roster_hysteresis_member_survives_rank_dip_within_exit_band() -> None:
     """SCENARIO_MHS_HYSTERESIS_02_MEMBER_SURVIVES_RANK_DIP_WITHIN_EXIT_BAND:
     a member whose rank worsens past ``universe_size`` but stays within the
-    ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER`` band is retained,
+    ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER`` band is retained,
     unlike the pre-fix hard cutoff which dropped it."""
     from src.application.research.mhs.evaluation import _pit_execution_mask
-    from src.mhs.params import MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
+    from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
-    exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
+    exit_size = universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER
     idx = pd.date_range("2025-01-01", periods=721, freq="1h", tz="UTC")
     volume = pd.DataFrame({"A": 100.0, "B": 200.0, "C": 300.0}, index=idx)
     volume.loc[idx[720], "A"] = 200_000.0
@@ -90,13 +90,13 @@ def test_mhs_roster_hysteresis_member_survives_rank_dip_within_exit_band() -> No
 
 def test_mhs_roster_hysteresis_member_exits_past_exit_band() -> None:
     """SCENARIO_MHS_HYSTERESIS_03_MEMBER_EXITS_PAST_EXIT_BAND: a member whose
-    rank worsens past ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER``
+    rank worsens past ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER``
     is dropped on that bar."""
     from src.application.research.mhs.evaluation import _pit_execution_mask
-    from src.mhs.params import MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
+    from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
-    exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
+    exit_size = universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER
     idx = pd.date_range("2025-01-01", periods=721, freq="1h", tz="UTC")
     volume = pd.DataFrame(
         {"A": 100.0, "B": 200.0, "C": 300.0, "D": 400.0, "E": 500.0}, index=idx,
@@ -180,7 +180,7 @@ class TestCostResponseCurve:
         assert set(rates) == {0.0, 2.0, 4.0, 8.0}
 
     def test_must_include_measured_tiers(self) -> None:
-        from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
+        from src.mhs.types import MEASURED_EXECUTION_COST_TIERS_BPS
 
         weights, opens, funding = _wsf()
         grid = tuple(MEASURED_EXECUTION_COST_TIERS_BPS.values())
@@ -334,10 +334,10 @@ class TestCompoundingAlphaAxesFolds:
             assert fold.forward_dependency_hours == 168
 
     def test_all_folds_share_train_start_identity(self) -> None:
-        from src.mhs.contracts import MHS_DISCOVERY_START
+        from src.mhs.types import DISCOVERY_START
         folds = phase_1_anchored_purged_folds()
         for fold in folds:
-            assert fold.train_start is MHS_DISCOVERY_START
+            assert fold.train_start is DISCOVERY_START
 
     def test_embargo_bounds(self) -> None:
         folds = phase_1_anchored_purged_folds()
@@ -481,7 +481,7 @@ class TestMhsPerfOptimizationO1Bootstrap:
     """SCENARIO_O1_STAT_EQUIV_BOOTSTRAP: the vectorized block bootstrap is
     statistically equivalent to the scalar while-loop reference (the RNG draw
     order differs by design, so exact reproduction is neither required nor
-    possible -- matching the MHS_PERF_OPT_003 precedent for _bootstrap_ci)."""
+    possible -- matching the PERF_OPT_003 precedent for _bootstrap_ci)."""
 
     @staticmethod
     def _fixture_returns() -> np.ndarray:
@@ -491,7 +491,7 @@ class TestMhsPerfOptimizationO1Bootstrap:
 
     @pytest.mark.slow
     def test_wealth_paths_statistically_equivalent(self) -> None:
-        from src.mhs.evaluation import _stationary_block_bootstrap_paths
+        from src.mhs.evidence import _stationary_block_bootstrap_paths
 
         arr = self._fixture_returns()
         ref = _scalar_bootstrap_reference(arr, 800, 168, 20260807, mdd=False)
@@ -504,7 +504,7 @@ class TestMhsPerfOptimizationO1Bootstrap:
 
     @pytest.mark.slow
     def test_mdd_paths_statistically_equivalent(self) -> None:
-        from src.mhs.evaluation import _bootstrap_mdd_paths
+        from src.mhs.evidence import _bootstrap_mdd_paths
 
         arr = self._fixture_returns()
         ref = _scalar_bootstrap_reference(arr, 800, 168, 20260807, mdd=True)
@@ -514,11 +514,11 @@ class TestMhsPerfOptimizationO1Bootstrap:
         assert new.max() <= 0.0
         # MDD is a tail statistic extremely sensitive to block boundaries; an
         # absolute 0.01 tolerance on the mean is the statistically-equivalent
-        # gate (matching the MHS_PERF_OPT_003 absolute-tolerance precedent).
+        # gate (matching the PERF_OPT_003 absolute-tolerance precedent).
         assert abs(new.mean() - ref.mean()) < 0.01
 
     def test_rejects_bad_arguments(self) -> None:
-        from src.mhs.evaluation import _bootstrap_mdd_paths, _stationary_block_bootstrap_paths
+        from src.mhs.evidence import _bootstrap_mdd_paths, _stationary_block_bootstrap_paths
 
         arr = np.array([0.001, -0.002, 0.0005], dtype="float64")
         with pytest.raises(ValueError, match="n_replicates"):
@@ -527,7 +527,7 @@ class TestMhsPerfOptimizationO1Bootstrap:
             _bootstrap_mdd_paths(arr, 5, -1, 1)
 
     def test_empty_returns_shape(self) -> None:
-        from src.mhs.evaluation import _bootstrap_mdd_paths, _stationary_block_bootstrap_paths
+        from src.mhs.evidence import _bootstrap_mdd_paths, _stationary_block_bootstrap_paths
 
         empty = np.array([], dtype="float64")
         assert np.array_equal(_stationary_block_bootstrap_paths(empty, 5, 168, 1), np.ones(5))

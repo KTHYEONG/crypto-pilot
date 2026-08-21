@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.mhs.result_log import (
-    MHS_RUN_HISTORY_MAX_SHARDS,
-    MHS_RUN_HISTORY_SHARD_MAX_BYTES,
+from src.mhs.run_history import (
+    RUN_HISTORY_MAX_SHARDS,
+    RUN_HISTORY_SHARD_MAX_BYTES,
     append_run_history_record,
     mhs_run_history_dir,
 )
@@ -30,7 +30,7 @@ def test_append_creates_history_dir_active_line_and_latest(tmp_path) -> None:
 
 
 def test_append_rotates_active_shard_when_over_budget(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("src.mhs.result_log.MHS_RUN_HISTORY_SHARD_MAX_BYTES", 1)
+    monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_SHARD_MAX_BYTES", 1)
     history_dir = tmp_path / "history"
 
     append_run_history_record({"run_id": "first"}, history_dir)
@@ -48,8 +48,8 @@ def test_append_rotates_active_shard_when_over_budget(tmp_path, monkeypatch) -> 
 
 
 def test_append_prunes_oldest_archive_at_retention_cap(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("src.mhs.result_log.MHS_RUN_HISTORY_SHARD_MAX_BYTES", 1)
-    monkeypatch.setattr("src.mhs.result_log.MHS_RUN_HISTORY_MAX_SHARDS", 3)
+    monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_SHARD_MAX_BYTES", 1)
+    monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_MAX_SHARDS", 3)
     history_dir = tmp_path / "history"
     history_dir.mkdir(parents=True)
     (history_dir / "mhs_run_history_100.jsonl").write_text('{"run_id": "oldest"}\n', encoding="utf-8")
@@ -94,15 +94,15 @@ def test_mhs_run_history_dir_derives_from_target_parent() -> None:
 
 
 def test_shard_constants_are_fixed_bounds() -> None:
-    assert MHS_RUN_HISTORY_SHARD_MAX_BYTES == 262144
-    assert MHS_RUN_HISTORY_MAX_SHARDS == 12
+    assert RUN_HISTORY_SHARD_MAX_BYTES == 262144
+    assert RUN_HISTORY_MAX_SHARDS == 12
 
 
 class TestFillMarkParityRunHistoryRecord:
     """SCENARIO_MHS_FILL_MARK_PARITY_06: fill_mark_parity in run history record."""
 
     def test_census_persisted_in_record(self) -> None:
-        from src.mhs.evaluation import DeploymentReadinessResult
+        from src.mhs.evidence import DeploymentReadinessResult
 
         from src.application.research.mhs.evaluation import (
             MhsDiagnosticRequest,

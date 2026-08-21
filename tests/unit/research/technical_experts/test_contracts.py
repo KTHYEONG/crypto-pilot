@@ -8,7 +8,7 @@ from src.research.technical_experts.contracts import TechnicalCandidate
 def _candidate(**overrides: object) -> TechnicalCandidate:
     base: dict[str, object] = {
         "candidate_id": "ema_alignment_long",
-        "return_source": "technical_ema_alignment_long_v1",
+        "return_source": "technical_ema_alignment_long",
         "family": "ema_alignment",
         "side": "LONG",
         "config": {"fast": 20, "mid": 50, "slow": 200},
@@ -49,15 +49,15 @@ class TestTechnicalCandidate:
     def test_candidate_rejects_mismatched_return_source(self) -> None:
         # A source that names a different family than the candidate is rejected.
         with pytest.raises(ValueError, match="return_source"):
-            _candidate(return_source="technical_macd_histogram_regime_long_v1")
+            _candidate(return_source="technical_macd_histogram_regime_long")
         # A source whose side disagrees with the candidate's side is rejected.
         with pytest.raises(ValueError, match="return_source"):
-            _candidate(return_source="technical_ema_alignment_short_v1")
+            _candidate(return_source="technical_ema_alignment_short")
 
     def test_valid_candidate_preserves_exact_identity(self) -> None:
         candidate = _candidate()
         assert candidate.side == "LONG"
-        assert candidate.return_source == "technical_ema_alignment_long_v1"
+        assert candidate.return_source == "technical_ema_alignment_long"
         assert candidate.config == {"fast": 20, "mid": 50, "slow": 200}
         assert candidate.min_history_bars == 201
 

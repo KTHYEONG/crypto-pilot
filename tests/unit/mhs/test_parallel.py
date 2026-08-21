@@ -21,7 +21,7 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.mhs.parallel import (
-    MHS_FORK_CONTEXT,
+    FORK_CONTEXT,
     assert_fork_admission,
     fork_shared_payload,
     plan_worker_count,
@@ -68,7 +68,7 @@ def test_scenario_01_token_removed_after_context_exit() -> None:
 
 def test_scenario_01_fork_context_pinned() -> None:
     """SCENARIO_MHS_REFACTOR_01: the pinned fork context is a fork context."""
-    assert MHS_FORK_CONTEXT.get_start_method() == "fork"
+    assert FORK_CONTEXT.get_start_method() == "fork"
 
 
 def test_scenario_02_clamps_to_one_when_ram_is_tight(monkeypatch) -> None:

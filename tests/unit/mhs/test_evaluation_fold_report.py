@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 
 from src.application.research.mhs.evaluation import (
-    MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION,
-    MHS_GO_REASON_PATH_DIVERGENCE,
+    GO_REASON_FOLD_GROWTH_CONCENTRATION,
+    GO_REASON_PATH_DIVERGENCE,
     MhsFoldReport,
     MhsHorizonDiagnosticReport,
     MhsOutputTier,
@@ -19,7 +19,7 @@ from src.application.research.mhs.evaluation import (
     build_mhs_run_history_record,
 )
 from src.application.research.mhs.research_go import _mhs_research_go
-from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult
+from src.mhs.evidence import AnchoredPurgedFold, DeploymentReadinessResult
 
 _FOLD = AnchoredPurgedFold(
     pd.Timestamp("2021-01-01", tz="UTC"),
@@ -128,7 +128,7 @@ def test_fold_blend_parity_production_divergence_blocks_go() -> None:
     # (fold 67.2 vs blend 149.9, log ratio -0.802) emits the path-divergence code.
     fold = _fold_report(0, _trace(67.2, 0.5))
     payload, reasons = _fold_blend_parity({0: _trace(149.9, 0.5)}, (fold,))
-    assert reasons == (MHS_GO_REASON_PATH_DIVERGENCE,)
+    assert reasons == (GO_REASON_PATH_DIVERGENCE,)
     assert payload["max_abs_log_holdings_ratio"] == pytest.approx(0.802, abs=1e-3)
     assert payload["folds"][0]["holdings_log_ratio"] == pytest.approx(-0.802, abs=1e-3)
 
@@ -145,10 +145,10 @@ def test_fold_blend_parity_unmeasured_fold_no_code() -> None:
 def test_research_go_path_divergence_is_data_integrity_blocker() -> None:
     # SCENARIO_MHS_EVAL_INTEGRITY_PARITY_GATE: the path-divergence code must
     # surface in BOTH reason_codes and data_integrity_reason_codes.
-    result = _mhs_research_go((), (), (MHS_GO_REASON_PATH_DIVERGENCE,))
+    result = _mhs_research_go((), (), (GO_REASON_PATH_DIVERGENCE,))
     assert result.eligible is False
-    assert MHS_GO_REASON_PATH_DIVERGENCE in result.reason_codes
-    assert MHS_GO_REASON_PATH_DIVERGENCE in result.data_integrity_reason_codes
+    assert GO_REASON_PATH_DIVERGENCE in result.reason_codes
+    assert GO_REASON_PATH_DIVERGENCE in result.data_integrity_reason_codes
 
 
 def _minimal_report(fold_blend_parity_value=None) -> MhsHorizonDiagnosticReport:
@@ -310,13 +310,13 @@ def test_fold_growth_concentration_single_fold_dominance_blocks_go() -> None:
         _concentration_fold(2, 1.050152),
     )
     payload, reasons = _fold_growth_concentration(folds)
-    assert reasons == (MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION,)
+    assert reasons == (GO_REASON_FOLD_GROWTH_CONCENTRATION,)
     assert payload["max_fold_share"] == pytest.approx(0.790, abs=1e-2)
 
     result = _mhs_research_go((), (), reasons)
     assert result.eligible is False
-    assert MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION in result.reason_codes
-    assert MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION not in result.data_integrity_reason_codes
+    assert GO_REASON_FOLD_GROWTH_CONCENTRATION in result.reason_codes
+    assert GO_REASON_FOLD_GROWTH_CONCENTRATION not in result.data_integrity_reason_codes
 
 
 def test_fold_growth_concentration_invalid_fold_unmeasured() -> None:

@@ -7,14 +7,14 @@ import pandas as pd
 
 from src.application.research.mhs.contracts import MhsDiagnosticRequest
 from src.application.research.mhs import scaling
-from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+from src.mhs.params import PNL_TARGET_ANNUAL_VOL
 
 
 def test_growth_budget_target_vol_fallback_on_short_series() -> None:
     """_growth_budget_target_vol returns fallback when train slice is too short."""
     idx = pd.date_range("2022-06-01", periods=10, freq="D", tz="UTC")
     r = pd.Series(0.001, index=idx)
-    assert scaling._growth_budget_target_vol(r) == MHS_PNL_TARGET_ANNUAL_VOL
+    assert scaling._growth_budget_target_vol(r) == PNL_TARGET_ANNUAL_VOL
 
 
 def test_replay_exposure_scale_growth_budget_mode() -> None:

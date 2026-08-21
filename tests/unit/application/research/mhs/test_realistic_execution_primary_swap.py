@@ -20,8 +20,8 @@ import pytest
 import src.market_data.services.futures_collection as fc
 from src.application.research.mhs import evaluation as ev
 import src.application.research.mhs.marks as marks
-from src.mhs.contracts import ExecutionSpec
-from src.mhs.evaluation import DeploymentReadinessResult
+from src.mhs.types import ExecutionSpec
+from src.mhs.evidence import DeploymentReadinessResult
 from src.mhs.execution import strategy_aware_execution_replay
 from src.research.universe.pit_universe import symbol_partition
 
@@ -140,7 +140,7 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
     eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
-    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    fast = ev.BOOK_SPECS["fast_reversal"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
     w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
     phase = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
@@ -173,9 +173,9 @@ def test_stress_cost_execution_spec_triples_cost_fields() -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_STRESS_SPEC_TRIPLED_01."""
     base = ExecutionSpec()
     spec = ev._stress_cost_execution_spec()
-    assert spec.maker_fee_bps == base.maker_fee_bps * ev.MHS_STRESS_COST_MULTIPLIER
-    assert spec.taker_fee_bps == base.taker_fee_bps * ev.MHS_STRESS_COST_MULTIPLIER
-    assert spec.taker_slippage_bps == base.taker_slippage_bps * ev.MHS_STRESS_COST_MULTIPLIER
+    assert spec.maker_fee_bps == base.maker_fee_bps * ev.STRESS_COST_MULTIPLIER
+    assert spec.taker_fee_bps == base.taker_fee_bps * ev.STRESS_COST_MULTIPLIER
+    assert spec.taker_slippage_bps == base.taker_slippage_bps * ev.STRESS_COST_MULTIPLIER
     assert spec.passive_timeout_minutes == base.passive_timeout_minutes
     assert spec == ExecutionSpec(maker_fee_bps=6.0, taker_fee_bps=15.0, taker_slippage_bps=9.0)
 
@@ -215,9 +215,9 @@ def test_fold_primary_is_immediate_taker(mhs_market) -> None:
     assert fold_report.strict.ledger.fill_source == "OHLCV_IMMEDIATE_TAKER"
     assert fold_report.stress.fill_source == "OHLCV_IMMEDIATE_TAKER"
     assert fold_report.stress.ledger.fill_source == "OHLCV_IMMEDIATE_TAKER"
-    assert ev.MHS_GO_PRIMARY_SHARPE_FLOOR == 0.6
-    assert ev.MHS_GO_REASON_PRIMARY_SHARPE == "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"
-    assert ev.MHS_GO_REASON_STRESS_SHARPE == "STRESS_SHARPE_NOT_POSITIVE"
+    assert ev.GO_PRIMARY_SHARPE_FLOOR == 0.6
+    assert ev.GO_REASON_PRIMARY_SHARPE == "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"
+    assert ev.GO_REASON_STRESS_SHARPE == "STRESS_SHARPE_NOT_POSITIVE"
 
 
 def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:

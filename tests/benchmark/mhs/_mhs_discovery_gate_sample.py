@@ -4,7 +4,7 @@ Every fresh benchmark process builds exactly the same fixed multi-year,
 64-symbol hourly panel so that wall time, the result checksum, and the
 selected/admitted outcome can be compared across processes and before/after
 refactor baselines.  The workload runs the densified 19-candidate momentum
-grid (``MHS_DISCOVERY_MOMENTUM_CANDIDATES``) with the production
+grid (``DISCOVERY_MOMENTUM_CANDIDATES``) with the production
 ``tranche_count=8`` convention.
 """
 
