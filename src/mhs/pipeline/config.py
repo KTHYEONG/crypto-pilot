@@ -1,0 +1,153 @@
+"""MHS run configuration: single source of truth for all defaults.
+
+``MhsRunConfig`` replaces ``MhsDiagnosticRequest`` (FIX D1). The CLI
+handler's 25 lines of derived-default logic are absorbed into the
+dataclass so that a no-argument CLI invocation and ``MhsRunConfig()``
+produce identical ``dataclasses.asdict()`` output.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Literal
+
+from src.mhs.params import COMMITTEE_TARGET_GROSS
+
+
+class MemberSet(StrEnum):
+    """Registered committee member sets (I_NOVERSION: no _v<N> suffix)."""
+
+    RISK_PREMIA = "risk_premia"
+    FLOW_MOMENTUM = "flow_momentum"
+
+
+@dataclass(frozen=True, slots=True)
+class MhsRunConfig:
+    """Immutable run config; sole owner of effective default values (I-CONFIG).
+
+    CLI is parsing + override only; it never redefines a default.
+    ``MhsRunConfig()`` and a no-arg CLI invocation yield the same dict.
+    """
+
+    # Time bounds
+    start: str | None = None
+    end: str | None = None
+    partition: Literal["dev", "holdout", "all"] = "dev"
+    data_root: str | None = None
+    mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"] = "cache_required"
+    execution_timeframe: Literal["1m", "3m", "5m"] = "3m"
+    execution_universe_size: int = 30
+    max_rss_bytes: int | None = None
+    log_run: bool = True
+
+    # Diagnostic opt-ins
+    touch_diagnostic: bool = False
+    ladder_diagnostic: bool = False
+    discovery_gate: bool = False
+    discovery_gate_adjusted_net_t: bool = False
+    discovery_gate_regime_scaled_net_t: bool = False
+    fold_safe_horizon_selection: bool = False
+    crash_regime_tilt_alpha: float | None = None
+    slow_book_mode: Literal["single_horizon", "horizon_ensemble"] = "single_horizon"
+    fast_book_mode: Literal["single_horizon", "horizon_ensemble"] = "single_horizon"
+    rebalance_filter: Literal["per_symbol_deadband", "portfolio_trigger"] = "per_symbol_deadband"
+    beta_neutralize: bool = False
+    ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
+    trend_efficiency_overlay: bool = False
+    pnl_vol_target: bool = True
+    pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget"] = "exante_target"  # was "median_relative" in MhsDiagnosticRequest -- CLI's real effective default (D1)
+    trend_sleeve: bool = False
+    trend_sleeve_gross: float = 0.0
+    multi_feature_book: bool = False
+
+    # Committee (FIX D1: defaults absorb CLI derived logic)
+    committee_book: bool = False
+    committee_kelly_sizing: bool = False
+    committee_growth_diagnostic: bool = False
+    committee_capital: bool = True  # was False + CLI override True
+    committee_member_set: MemberSet = MemberSet.FLOW_MOMENTUM  # was "risk_premia_v2" vs params "flow_momentum_v1"
+    committee_tranche_smoothing: bool = False
+    committee_regime_adaptive_tranche: bool = True  # was False + CLI override
+    committee_target_gross: float | None = COMMITTEE_TARGET_GROSS  # was _UNSET sentinel
+    committee_evidence_weighting: bool = False
+
+    # Funding
+    funding_carry_sleeve: bool = True  # was False + CLI override
+    funding_carry_weight: float = 0.3  # default when sleeve is on
+
+    # Gates
+    execution_coverage_gate: bool = False
+    fill_mark_parity_gate: bool = True
+    exposure_scale_two_sided: bool = False
+    ram_guard: bool = True
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> MhsRunConfig:
+        """Sole CLI-to-config adapter (FIX D1).
+
+        Mirrors the derivation previously duplicated in the CLI handler
+        (``src/cli/commands/research/mhs.py``) field-for-field, including the
+        ``--no-*`` negate-flag pattern and the ``fold_safe_horizon`` ->
+        ``fold_safe_horizon_selection`` rename. A no-argument CLI invocation
+        and ``MhsRunConfig()`` must produce an identical ``dataclasses.asdict``.
+        """
+        committee_capital = not args.no_committee_capital
+        committee_regime_adaptive_tranche = (
+            committee_capital
+            and not args.no_committee_regime_adaptive_tranche
+            and not args.committee_tranche_smoothing
+        )
+        committee_target_gross = (
+            None
+            if args.no_committee_target_gross or not committee_capital
+            else (
+                COMMITTEE_TARGET_GROSS
+                if args.committee_target_gross is None
+                else args.committee_target_gross
+            )
+        )
+        funding_carry_sleeve = committee_capital and not args.no_funding_carry_sleeve
+
+        return cls(
+            start=args.start,
+            end=args.end,
+            mark_mode=args.mark_mode,
+            execution_timeframe=args.execution_timeframe,
+            max_rss_bytes=args.max_rss_bytes,
+            log_run=not args.no_log_run,
+            touch_diagnostic=args.touch_diagnostic,
+            ladder_diagnostic=args.ladder_diagnostic,
+            discovery_gate=args.discovery_gate,
+            trend_sleeve=args.trend_sleeve,
+            trend_sleeve_gross=args.trend_sleeve_gross,
+            multi_feature_book=args.multi_feature_book,
+            committee_book=args.committee_book,
+            committee_kelly_sizing=args.committee_kelly_sizing,
+            committee_growth_diagnostic=args.committee_growth_diagnostic,
+            committee_capital=committee_capital,
+            committee_member_set=MemberSet(args.committee_member_set),
+            committee_tranche_smoothing=args.committee_tranche_smoothing,
+            committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
+            committee_target_gross=committee_target_gross,
+            committee_evidence_weighting=args.committee_evidence_weighting,
+            execution_coverage_gate=args.execution_coverage_gate,
+            fill_mark_parity_gate=not args.no_fill_mark_parity_gate,
+            exposure_scale_two_sided=args.exposure_scale_two_sided,
+            ram_guard=not args.no_ram_guard,
+            discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
+            discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
+            fold_safe_horizon_selection=args.fold_safe_horizon,
+            crash_regime_tilt_alpha=args.crash_regime_tilt_alpha,
+            slow_book_mode=args.slow_book_mode,
+            fast_book_mode=args.fast_book_mode,
+            rebalance_filter=args.rebalance_filter,
+            beta_neutralize=args.beta_neutralize,
+            ensemble_signal=args.ensemble_signal,
+            trend_efficiency_overlay=args.trend_efficiency_overlay,
+            pnl_vol_target=not args.no_pnl_vol_target,
+            pnl_vol_target_mode=args.pnl_vol_target_mode,
+            funding_carry_sleeve=funding_carry_sleeve,
+            funding_carry_weight=(args.funding_carry_weight if funding_carry_sleeve else 0.0),
+        )

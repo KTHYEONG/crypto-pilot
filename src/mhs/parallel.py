@@ -24,10 +24,10 @@ from typing import Any
 import psutil
 
 from src.common.errors import DataIntegrityError
-from src.mhs.contracts import MHS_RAM_RESERVE_FLOOR_BYTES, MHS_RAM_RESERVE_FRACTION
+from src.mhs.types import RAM_RESERVE_FLOOR_BYTES, RAM_RESERVE_FRACTION
 
 __all__ = [
-    "MHS_FORK_CONTEXT",
+    "FORK_CONTEXT",
     "assert_fork_admission",
     "fork_shared_payload",
     "plan_worker_count",
@@ -38,7 +38,7 @@ __all__ = [
 #: ``ProcessPoolExecutor``.  ``spawn`` is unusable here: it re-imports the
 #: module in each worker and drops the caller's monkeypatched
 #: ``funding_path``/``_mark_price_path``, and pickling still copies the panels.
-MHS_FORK_CONTEXT: BaseContext = multiprocessing.get_context("fork")
+FORK_CONTEXT: BaseContext = multiprocessing.get_context("fork")
 
 #: Module-global read-only payload registry inherited copy-on-write by fork
 #: children.  Keys are uuid4 hex tokens; values are arbitrary mappings.
@@ -48,7 +48,7 @@ _FORK_SHARED: dict[str, Mapping[str, Any]] = {}
 def _system_reserve_bytes() -> int:
     """The system RAM reserve floor: ``max(5% of total, 256 MiB)``."""
     total = int(psutil.virtual_memory().total)
-    return max(int(total * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)
+    return max(int(total * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES)
 
 
 @contextmanager

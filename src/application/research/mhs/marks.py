@@ -16,8 +16,8 @@ from src.common.config import funding_path
 from src.common.errors import DataIntegrityError
 from src.market_data.services.futures_collection import DataCollector
 from src.market_data.storage.loaders import load_funding_rates
-from src.mhs.contracts import MHS_FILL_MARK_MAX_LOG_DIVERGENCE
-from src.mhs.params import MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
+from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
+from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
@@ -66,14 +66,14 @@ def _pit_execution_mask(
     ``universe_size`` is the ENTRY rank threshold only: a symbol enters by
     reaching the top ``universe_size`` trailing-volume rank, and once a member
     it is kept until its rank falls outside
-    ``universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER`` (a Schmitt-trigger
+    ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER`` (a Schmitt-trigger
     band). Because hysteresis retains members that have slipped past the entry
     threshold, the realized number of holdings is approximately
     ``universe_size * (1 + hysteresis effect)``, NOT ``universe_size`` (measured
     ~41.9 vs a declared 30) -- the true mean per-row True count is exposed as
     when the signal itself has not changed.
     """
-    exit_size = universe_size * MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER
+    exit_size = universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER
     trailing = quote_volume.rolling(720, min_periods=720).mean()
     ranked = trailing.where(eligible).rank(axis=1, ascending=False, method="first")
     enter = ranked.le(universe_size).fillna(False).to_numpy()
@@ -213,7 +213,7 @@ def _fill_mark_parity_eligibility(
     if truncated:
         symbols_dict["truncated"] = len(top_symbols) - 5
     census: dict[str, Any] = {
-        "band": MHS_FILL_MARK_MAX_LOG_DIVERGENCE,
+        "band": FILL_MARK_MAX_LOG_DIVERGENCE,
         "cells_over_band": cells_over_band,
         "eligible_cells_removed": eligible_cells_removed,
         "symbols": symbols_dict,

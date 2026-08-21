@@ -17,7 +17,7 @@ import pandas as pd
 from src.mhs.books import phase_tranche_book, rank_weight_book
 
 # Matches src/application/research/mhs/evaluation.py
-# ``MHS_DISCOVERY_GATE_TRANCHE_COUNT`` (the application layer passes that
+# ``DISCOVERY_GATE_TRANCHE_COUNT`` (the application layer passes that
 # constant explicitly at the wiring site); the domain layer cannot import it
 # without inverting the src.mhs <- src.application layering.
 _DEFAULT_TRANCHE_COUNT = 8

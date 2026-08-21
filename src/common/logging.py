@@ -12,14 +12,27 @@ _FORMAT = "%(asctime)s [%(levelname)s] [%(tag)s] %(message)s"
 _DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 
+class _TagDefaultFormatter(logging.Formatter):
+    """Formatter that injects a default 'tag' value when extra={'tag':...} is absent."""
+
+    def __init__(self, fmt: str, datefmt: str | None = None) -> None:
+        super().__init__(fmt, datefmt=datefmt)
+
+    def format(self, record: logging.LogRecord) -> str:
+        if not hasattr(record, "tag"):
+            record.tag = "SYS"
+        return super().format(record)
+
+
 def setup_logger(name: str, *, level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.handlers.clear()
 
+    formatter = _TagDefaultFormatter(_FORMAT, datefmt=_DATE_FMT)
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)
-    formatter = logging.Formatter(_FORMAT, datefmt=_DATE_FMT)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 

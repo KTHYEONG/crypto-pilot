@@ -16,10 +16,10 @@ import pandas as pd
 from src.application.research.mhs.contracts import MhsBookReport, MhsFoldReport
 from src.common.errors import DataIntegrityError
 from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.contracts import BookSpec
-from src.mhs.evaluation import autocorrelation_adjusted_sharpe, deflated_sharpe_ratio
+from src.mhs.evidence import autocorrelation_adjusted_sharpe, deflated_sharpe_ratio
 from src.mhs.execution import SimulatedInventoryLedgerResult
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs.types import BookSpec
 
 _logger = logging.getLogger(__name__)
 
