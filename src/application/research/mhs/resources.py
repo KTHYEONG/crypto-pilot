@@ -9,10 +9,10 @@ import psutil
 
 from src.application.research.mhs.contracts import MhsResourceMeasurement
 from src.common.errors import DataIntegrityError
-from src.mhs.contracts import (
-    MHS_RAM_BUDGET_FRACTION,
-    MHS_RAM_RESERVE_FLOOR_BYTES,
-    MHS_RAM_RESERVE_FRACTION,
+from src.mhs.types import (
+    RAM_BUDGET_FRACTION,
+    RAM_RESERVE_FLOOR_BYTES,
+    RAM_RESERVE_FRACTION,
 )
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
@@ -33,8 +33,8 @@ def _resolve_ram_budget(
     Returns ``(budget_bytes, reserve_bytes)``. With ``ram_guard=False`` both are
     ``None`` (the legacy unlimited semantics). With the guard on, the budget is
     ``max_rss_bytes`` when explicitly set, otherwise ``int(total *
-    MHS_RAM_BUDGET_FRACTION)``, and the reserve is
-    ``max(int(total * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)``.
+    RAM_BUDGET_FRACTION)``, and the reserve is
+    ``max(int(total * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES)``.
     A psutil failure or a non-positive total yields ``(None, None)`` -- an
     observational failure disables the guard and never alters computed values.
     """
@@ -49,9 +49,9 @@ def _resolve_ram_budget(
     budget = (
         max_rss_bytes
         if max_rss_bytes is not None
-        else int(total * MHS_RAM_BUDGET_FRACTION)
+        else int(total * RAM_BUDGET_FRACTION)
     )
-    reserve = max(int(total * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)
+    reserve = max(int(total * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES)
     return (budget, reserve)
 
 
@@ -103,7 +103,7 @@ def _assert_execution_rss_budget(
     When ``reserve_bytes`` is set and the system's available memory drops below
     it, the same stable ``rss budget``-prefixed ``DataIntegrityError`` is raised
     so ``_classify_execution_failure`` keeps mapping it to
-    ``MHS_GO_REASON_RESOURCE_BREACH`` -- the fork-worker OOM guard (only the
+    ``GO_REASON_RESOURCE_BREACH`` -- the fork-worker OOM guard (only the
     system reserve applies to workers; the auto 85% budget is parent-only
     because fork-child RSS double-counts COW-shared pages).
     """

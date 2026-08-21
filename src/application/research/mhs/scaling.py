@@ -9,17 +9,17 @@ from src.application.research.mhs.contracts import MhsDiagnosticRequest
 from src.common.errors import DataIntegrityError
 from src.mhs.horizons import efficiency_ratio
 from src.mhs.params import (
-    MHS_COMMITTEE_OOS_START,
-    MHS_PNL_TARGET_ANNUAL_VOL,
-    MHS_PNL_VOL_TARGET_BURN_IN_DAYS,
-    MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
-    MHS_PNL_VOL_TARGET_MAX_SCALE,
-    MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS,
-    MHS_PNL_VOL_TARGET_SCALE_FLOOR,
-    MHS_PNL_VOL_TARGET_WINDOW_DAYS,
-    MHS_REBALANCE_DEADBAND_POSITION_FRACTION,
-    MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS,
-    MHS_REGIME_CASH_SCALE_FLOOR,
+    COMMITTEE_OOS_START,
+    PNL_TARGET_ANNUAL_VOL,
+    PNL_VOL_TARGET_BURN_IN_DAYS,
+    PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
+    PNL_VOL_TARGET_MAX_SCALE,
+    PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS,
+    PNL_VOL_TARGET_SCALE_FLOOR,
+    PNL_VOL_TARGET_WINDOW_DAYS,
+    REBALANCE_DEADBAND_POSITION_FRACTION,
+    REGIME_CASH_MEDIAN_WINDOW_HOURS,
+    REGIME_CASH_SCALE_FLOOR,
 )
 from src.mhs.regime import trend_efficiency_scale
 
@@ -40,7 +40,7 @@ def _smooth_signal_ema(signal: pd.DataFrame, span_steps: int) -> pd.DataFrame:
 
 def _apply_rebalance_deadband(
     target: pd.DataFrame,
-    position_fraction: float = MHS_REBALANCE_DEADBAND_POSITION_FRACTION,
+    position_fraction: float = REBALANCE_DEADBAND_POSITION_FRACTION,
 ) -> pd.DataFrame:
     """Suppress per-symbol rebalances smaller than a scale-relative deadband.
 
@@ -100,8 +100,8 @@ def _trend_efficiency_overlay_scale(
 
 def _regime_cash_scale(
     vol_mean: pd.Series,
-    median_window_hours: int = MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS,
-    floor: float = MHS_REGIME_CASH_SCALE_FLOOR,
+    median_window_hours: int = REGIME_CASH_MEDIAN_WINDOW_HOURS,
+    floor: float = REGIME_CASH_SCALE_FLOOR,
 ) -> pd.Series:
     """Per-decision gross-exposure scale that raises cash in high-vol regimes.
 
@@ -126,9 +126,9 @@ def _regime_cash_scale(
 
 def _pnl_vol_target_scale(
     reference_daily_returns: pd.Series,
-    window_days: int = MHS_PNL_VOL_TARGET_WINDOW_DAYS,
-    median_window_days: int = MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS,
-    floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR,
+    window_days: int = PNL_VOL_TARGET_WINDOW_DAYS,
+    median_window_days: int = PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS,
+    floor: float = PNL_VOL_TARGET_SCALE_FLOOR,
 ) -> pd.Series:
     """Strategy-own-P&L realized-vol targeting scale (Barroso & Santa-Clara).
 
@@ -145,10 +145,10 @@ def _pnl_vol_target_scale(
         raise ValueError(f"floor must be in (0, 1], got {floor}")
     if window_days < 1:
         raise ValueError(f"window_days must be >= 1, got {window_days}")
-    if median_window_days < MHS_PNL_VOL_TARGET_BURN_IN_DAYS:
+    if median_window_days < PNL_VOL_TARGET_BURN_IN_DAYS:
         raise ValueError(
-            f"median_window_days must be >= MHS_PNL_VOL_TARGET_BURN_IN_DAYS "
-            f"({MHS_PNL_VOL_TARGET_BURN_IN_DAYS}), got {median_window_days}"
+            f"median_window_days must be >= PNL_VOL_TARGET_BURN_IN_DAYS "
+            f"({PNL_VOL_TARGET_BURN_IN_DAYS}), got {median_window_days}"
         )
     if reference_daily_returns.empty:
         return pd.Series(1.0, index=reference_daily_returns.index)
@@ -156,7 +156,7 @@ def _pnl_vol_target_scale(
         window_days, min_periods=max(5, window_days // 2),
     ).std().shift(1)
     rolling_target = trailing_vol.rolling(
-        median_window_days, min_periods=MHS_PNL_VOL_TARGET_BURN_IN_DAYS,
+        median_window_days, min_periods=PNL_VOL_TARGET_BURN_IN_DAYS,
     ).median().shift(1)
     scale = rolling_target.div(trailing_vol.where(trailing_vol > 0))
     return scale.clip(lower=floor, upper=1.0).fillna(1.0)
@@ -164,10 +164,10 @@ def _pnl_vol_target_scale(
 
 def _committee_kelly_scale(
     reference_daily_returns: pd.Series,
-    window_days: int = MHS_PNL_VOL_TARGET_WINDOW_DAYS,
+    window_days: int = PNL_VOL_TARGET_WINDOW_DAYS,
     fraction: float = 0.25,
     z: float = 1.0,
-    floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR,
+    floor: float = PNL_VOL_TARGET_SCALE_FLOOR,
 ) -> pd.Series:
     """Strategy-own-P&L trailing quarter-Kelly LCB exposure scale, capped at 1.0.
 
@@ -222,7 +222,7 @@ def _committee_capital_replay_scale(
     return 0.5 * pnl_vol_target_scale + 0.5 * kelly_scale
 
 
-def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: float = MHS_PNL_TARGET_ANNUAL_VOL, halflife_days: int = MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS, min_days: int = MHS_PNL_VOL_TARGET_BURN_IN_DAYS, floor: float = MHS_PNL_VOL_TARGET_SCALE_FLOOR, cap: float = 1.0) -> pd.Series:
+def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: float = PNL_TARGET_ANNUAL_VOL, halflife_days: int = PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS, min_days: int = PNL_VOL_TARGET_BURN_IN_DAYS, floor: float = PNL_VOL_TARGET_SCALE_FLOOR, cap: float = 1.0) -> pd.Series:
     """절대 ex-ante 변동성 타겟팅: 목표 변동성 대비 실현 변동성 비율로 스케일링.
 
     ``sigma_t = ewm(std, halflife=20d).shift(1) * sqrt(365)``
@@ -257,19 +257,19 @@ def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: flo
 
 def _growth_budget_target_vol(
     reference_daily_returns: pd.Series,
-    oos_start: pd.Timestamp = MHS_COMMITTEE_OOS_START,
+    oos_start: pd.Timestamp = COMMITTEE_OOS_START,
 ) -> float:
     """Leak-free wrapper: slices to index < oos_start, delegates to growth_budget_annual_vol.
 
-    Returns MHS_PNL_TARGET_ANNUAL_VOL when fewer than
-    MHS_PNL_VOL_TARGET_BURN_IN_DAYS train rows exist.
+    Returns PNL_TARGET_ANNUAL_VOL when fewer than
+    PNL_VOL_TARGET_BURN_IN_DAYS train rows exist.
     """
     from src.mhs.committee import growth_budget_annual_vol
 
     train = reference_daily_returns.loc[reference_daily_returns.index < oos_start]
     train = train.dropna()
-    if len(train) < MHS_PNL_VOL_TARGET_BURN_IN_DAYS:
-        return MHS_PNL_TARGET_ANNUAL_VOL
+    if len(train) < PNL_VOL_TARGET_BURN_IN_DAYS:
+        return PNL_TARGET_ANNUAL_VOL
     return growth_budget_annual_vol(train)
 
 
@@ -285,10 +285,10 @@ def _replay_exposure_scale(
     if request.pnl_vol_target_mode == "median_relative":
         scale = _pnl_vol_target_scale(reference_daily_returns)
     elif request.pnl_vol_target_mode == "exante_target":
-        scale = _exante_vol_target_scale(reference_daily_returns, cap=MHS_PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
+        scale = _exante_vol_target_scale(reference_daily_returns, cap=PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
     elif request.pnl_vol_target_mode == "growth_budget":
         target_vol = _growth_budget_target_vol(reference_daily_returns)
-        scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=MHS_PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
+        scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
     else:
         raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
     return _committee_capital_replay_scale(
