@@ -13,38 +13,30 @@ from __future__ import annotations
 import dataclasses
 import gc
 import glob
-import hashlib
-import json
 import logging
 import math
 import os
 import time
-from datetime import UTC, datetime
-from uuid import uuid4
 from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
 from src.market_data.services.futures_collection import DataCollector  # noqa: F401 - facade re-export
-from src.application.data.mhs_execution_collection import apply_dynamic_gap_exclusion
-from src.application.data.mhs_execution_collection import apply_dynamic_mark_gap_exclusion
-from src.application.data.mhs_execution_collection import assert_relevant_execution_data_coverage
-from src.application.data.mhs_execution_collection import assert_relevant_mark_price_coverage
-from src.mhs.evaluation import phase_diagnostic_metrics
-from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, synthetic_stress_scenarios
+from src.mhs.evidence import phase_diagnostic_metrics
+from src.mhs.evidence import AnchoredPurgedFold, DeploymentReadinessResult
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
 from src.mhs.execution import replay_execution_window_batch
 from src.mhs.execution import replay_execution_window_batch_isolated
 from src.mhs.execution import replay_execution_windows
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
-# contract wiring: from src.mhs.parallel import MHS_FORK_CONTEXT, assert_fork_admission, fork_shared_payload, plan_worker_count
+# contract wiring: from src.mhs.parallel import FORK_CONTEXT, assert_fork_admission, fork_shared_payload, plan_worker_count
 from src.mhs.parallel import (
-    MHS_FORK_CONTEXT,
+    FORK_CONTEXT,
     assert_fork_admission,
     fork_shared_payload,
     plan_worker_count,
@@ -52,7 +44,7 @@ from src.mhs.parallel import (
 )
 from src.research.evaluation.policy import resolve_evaluation_end
 
-from src.common.config import FUTURES_DATA_DIR, funding_path
+from src.common.config import funding_path
 from src.common.errors import DataIntegrityError
 from src.mhs.books import (
     equal_weight_book_ensemble,
@@ -63,34 +55,33 @@ from src.mhs.books import (
     renormalize_within_mask,
     scale_book_to_target_gross,
 )
-from src.mhs.contracts import MHS_DISCOVERY_START
-from src.mhs.contracts import MHS_FEATURE_MIN_COVERAGE
-from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS  # noqa: F401  (facade re-export; public API)
-from src.mhs.contracts import MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
-from src.mhs.contracts import MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS
-from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS
-from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
-from src.mhs.contracts import MHS_TREND_SLEEVE_HORIZONS_HOURS
-from src.mhs.contracts import MHS_WORKER_PEAK_RSS_BYTES
-from src.mhs.contracts import (
+from src.mhs.types import DISCOVERY_START
+from src.mhs.types import FEATURE_MIN_COVERAGE
+from src.mhs.types import COMMITTEE_TARGET_GROSS  # noqa: F401  (facade re-export; public API)
+from src.mhs.types import FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+from src.mhs.types import FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS
+from src.mhs.types import REGISTERED_POLICY_THRESHOLDS
+from src.mhs.types import TREND_SLEEVE_HORIZONS_HOURS
+from src.mhs.types import WORKER_PEAK_RSS_BYTES
+from src.mhs.types import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
-    MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
-    MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
-    MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
-    MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
-    MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB,
-    MHS_COMMITTEE_GROWTH_N_PATHS,
-    MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
-    MHS_COMMITTEE_GROWTH_RUIN_FRACTION,
-    MHS_COMMITTEE_MEMBERS,
-    MHS_COMMITTEE_OOS_START,
-    MHS_COMMITTEE_PURGE_HOURS,
-    MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW,
-    MHS_COMMITTEE_TARGET_VOL,
-    MHS_COMMITTEE_TRANCHE_COUNT,
-    MHS_CRASH_REGIME_REFERENCE_SYMBOLS,
-    PHASE_1_BOOK_BLEND_WEIGHTS,
-    PHASE_1_BOOK_SPECS,
+    COMMITTEE_GROWTH_BARS_PER_YEAR,
+    COMMITTEE_GROWTH_HORIZON_YEARS,
+    COMMITTEE_GROWTH_MAX_DRAWDOWN,
+    COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+    COMMITTEE_GROWTH_MAX_RUIN_PROB,
+    COMMITTEE_GROWTH_N_PATHS,
+    COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
+    COMMITTEE_GROWTH_RUIN_FRACTION,
+    COMMITTEE_MEMBERS,
+    COMMITTEE_OOS_START,
+    COMMITTEE_PURGE_HOURS,
+    COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+    COMMITTEE_TARGET_VOL,
+    COMMITTEE_TRANCHE_COUNT,
+    CRASH_REGIME_REFERENCE_SYMBOLS,
+    BOOK_BLEND_WEIGHTS,
+    BOOK_SPECS,
     BookSpec,
     ExecutionSpec,
 )
@@ -99,9 +90,8 @@ from src.mhs.regime import (
     causal_market_beta,
     crash_regime_tilt_weights,
 )
-from src.mhs.result_log import append_run_history_record, mhs_run_history_dir
-from src.mhs.evaluation import book_evidence
-from src.mhs.evaluation import (
+from src.mhs.evidence import book_evidence
+from src.mhs.evidence import (
     CostResponsePoint,
     PhaseDiagnosticResult,
     TailSensitivityResult,
@@ -114,17 +104,16 @@ from src.mhs.discovery import (
     DiscoveryQualificationResult,
     build_candidate_weights,
     fold_train_only_discovery_qualification,
-    select_horizon_by_discovery_qualification,
 )
 from src.mhs.discovery import yearly_net_t_diagnostic
-from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol, vol_normalized_horizon_signal
+from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
 from src.mhs.funding import build_funding_carry_candidate_weights
 from src.mhs.funding import funding_carry_execution_book  # noqa: F401 - contract wiring mandates the exact import line; the builder is invoked here
 from src.mhs.funding import funding_carry_signal  # noqa: F401 - contract wiring mandates the exact import line; the builder is invoked here
-from src.mhs.evaluation import effective_breadth
-from src.mhs.evaluation import year_restricted_correlation
+from src.mhs.evidence import effective_breadth
+from src.mhs.evidence import year_restricted_correlation
 from src.mhs.features import (
-    MHS_FEATURE_REGISTRY,
+    FEATURE_REGISTRY,
     FeatureSpec,
     build_feature_books,
     feature_coverage_audit,
@@ -149,29 +138,26 @@ from src.mhs.trend_sleeve import (
     trend_sleeve_weights,
 )
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
-from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
 from src.mhs.params import (
-    MHS_ARTIFACT_CATEGORIES,
-    MHS_ARTIFACT_SCHEMA_VERSION,
-    MHS_CAUSAL_BETA_LOOKBACK_BARS,
-    MHS_CAUSAL_BETA_MIN_PERIODS,
-    MHS_DISCOVERY_GATE_TRANCHE_COUNT,
-    MHS_DISCOVERY_MOMENTUM_CANDIDATES,
-    MHS_DISCOVERY_REVERSAL_CANDIDATES,
-    MHS_FOLD_BLEND_PARITY_TOLERANCE,
-    MHS_FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
-    MHS_FOLD_PANEL_WARMUP_HOURS,
-    MHS_GO_PRIMARY_SHARPE_FLOOR,
-    MHS_PNL_VOL_TARGET_BURN_IN_DAYS,  # noqa: F401  (facade re-export; public API)
-    MHS_PNL_VOL_TARGET_SCALE_FLOOR,  # noqa: F401  (facade re-export; public API)
-    MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
-    MHS_REFERENCE_PASS_EQUITY_FLOOR,
-    MHS_SIGNAL_EMA_HORIZON_SPAN,
-    MHS_STRESS_COST_MULTIPLIER,
+    CAUSAL_BETA_LOOKBACK_BARS,
+    CAUSAL_BETA_MIN_PERIODS,
+    DISCOVERY_GATE_TRANCHE_COUNT,
+    DISCOVERY_MOMENTUM_CANDIDATES,
+    DISCOVERY_REVERSAL_CANDIDATES,
+    FOLD_BLEND_PARITY_TOLERANCE,
+    FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
+    FOLD_PANEL_WARMUP_HOURS,
+    GO_PRIMARY_SHARPE_FLOOR,
+    PNL_VOL_TARGET_BURN_IN_DAYS,  # noqa: F401  (facade re-export; public API)
+    PNL_VOL_TARGET_SCALE_FLOOR,  # noqa: F401  (facade re-export; public API)
+    REBALANCE_TRACKING_ERROR_THRESHOLD,
+    REFERENCE_PASS_EQUITY_FLOOR,
+    SIGNAL_EMA_HORIZON_SPAN,
+    STRESS_COST_MULTIPLIER,
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
-    _MHS_FEATURE,
-    _MHS_WALK_FORWARD_MIN_TRAIN_BARS,
-)  # noqa: F401  (facade re-exports MHS_* tunables for public-API stability)
+    FEATURE_NAME,
+    WALK_FORWARD_MIN_TRAIN_BARS,
+)  # noqa: F401  (facade re-exports * tunables for public-API stability)
 from src.application.research.mhs.contracts import (  # noqa: F401  (facade re-export; public API)
     MhsDiagnosticRequest as MhsDiagnosticRequest,
     MhsOutputTier as MhsOutputTier,
@@ -183,10 +169,8 @@ from src.application.research.mhs.contracts import (  # noqa: F401  (facade re-e
     MhsResourceMeasurement as MhsResourceMeasurement,
 )
 from src.application.research.mhs.marks import (
-    _load_funding_series,
     _pit_execution_mask,
     _get_symbol_mark_frame,
-    _prewarm_mark_frames,
     _fill_mark_parity_eligibility,
     _cached_mark_panel,
     _load_window_minute_frames,
@@ -201,28 +185,84 @@ from src.application.research.mhs.resources import (
     _assert_stage_rss_budget,
     _assert_execution_rss_budget,
     _StageRecorder,
-    _peak_rss_bytes,
 )
+from src.mhs.telemetry import StageTelemetry
 
 # Public GO reason-code constants are defined in research_go; re-exported here so
-# the established ``ev.MHS_GO_REASON_*`` external API surface stays importable.
+# the established ``ev.GO_REASON_*`` external API surface stays importable.
 from src.application.research.mhs.research_go import (  # noqa: F401  (facade re-export of public GO reason-code constants)
-    MHS_GO_REASON_CAPITAL_BREACH,  # noqa: F401
-    MHS_GO_REASON_DATA_INTEGRITY_CODES,  # noqa: F401
-    MHS_GO_REASON_DRAWDOWN_OVER_BUDGET,  # noqa: F401
-    MHS_GO_REASON_EXECUTION_GAP,  # noqa: F401
-    MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION,  # noqa: F401
-    MHS_GO_REASON_INCOMPLETE_FOLD,  # noqa: F401
-    MHS_GO_REASON_INVALID_PRIMARY,  # noqa: F401
-    MHS_GO_REASON_NONFINITE_EQUITY,  # noqa: F401
-    MHS_GO_REASON_PATH_DIVERGENCE,  # noqa: F401
-    MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR,  # noqa: F401
-    MHS_GO_REASON_PRIMARY_SHARPE,  # noqa: F401
-    MHS_GO_REASON_RESOURCE_BREACH,  # noqa: F401
-    MHS_GO_REASON_STRESS_SHARPE,  # noqa: F401
-    MHS_GO_REASON_UNSPECIFIED_POLICY,  # noqa: F401
+    GO_REASON_CAPITAL_BREACH,  # noqa: F401
+    GO_REASON_DATA_INTEGRITY_CODES,  # noqa: F401
+    GO_REASON_DRAWDOWN_OVER_BUDGET,  # noqa: F401
+    GO_REASON_EXECUTION_GAP,  # noqa: F401
+    GO_REASON_FOLD_GROWTH_CONCENTRATION,  # noqa: F401
+    GO_REASON_INCOMPLETE_FOLD,  # noqa: F401
+    GO_REASON_INVALID_PRIMARY,  # noqa: F401
+    GO_REASON_NONFINITE_EQUITY,  # noqa: F401
+    GO_REASON_PATH_DIVERGENCE,  # noqa: F401
+    GO_REASON_PRIMARY_RETURN_BELOW_FLOOR,  # noqa: F401
+    GO_REASON_PRIMARY_SHARPE,  # noqa: F401
+    GO_REASON_RESOURCE_BREACH,  # noqa: F401
+    GO_REASON_STRESS_SHARPE,  # noqa: F401
+    GO_REASON_UNSPECIFIED_POLICY,  # noqa: F401
 )
 
+
+# Re-exports of the report persistence/artifact layer (moved to src/mhs/report).
+# Kept importable from this module so legacy callers (CLI, tests, contracts) are
+# unaffected by the extraction.
+from src.mhs.report.artifacts import (  # noqa: F401
+    _artifact_checksum,
+    _artifact_reference,
+    _build_replay_artifact_reference,
+    _jsonable,
+    _to_timestamped_table,
+    _verify_ledger_artifact,
+    load_mhs_replay_artifact,
+)
+from src.mhs.report.persist import (  # noqa: F401
+    _book_summary,
+    _collect_replay_entries,
+    _compact_replay_ref,
+    _daily_resample_ledger,
+    _build_replay_category_tables,
+    _fold_summary,
+    _ledger_table,
+    _persist_mhs_report_compact,
+    _persist_mhs_report_full,
+    _replay_category_row_counts,
+    _round_6,
+    _wire_compact_refs,
+    _write_json_report,
+    _write_unified_artifact_tables,
+    build_mhs_run_history_record,
+    mhs_horizon_diagnostic_report_path,
+    persist_mhs_horizon_diagnostic_report,
+    persist_mhs_report,
+)
+
+# Facade re-exports consumed by the pipeline stage modules. evaluation used to
+# import these for its own monolith; the stages now import them from here, so
+# they are retained as a stable re-export surface (do not let ruff strip them).
+from src.application.data.mhs_execution_collection import (  # noqa: F401
+    apply_dynamic_gap_exclusion,
+    apply_dynamic_mark_gap_exclusion,
+    assert_relevant_execution_data_coverage,
+    assert_relevant_mark_price_coverage,
+)
+from src.mhs.evidence import synthetic_stress_scenarios  # noqa: F401
+from src.common.config import FUTURES_DATA_DIR  # noqa: F401
+from src.mhs.params import SEARCH_TRIALS_ATTEMPTED  # noqa: F401
+from src.mhs.discovery import select_horizon_by_discovery_qualification  # noqa: F401
+from src.mhs.horizons import efficiency_ratio  # noqa: F401
+from src.research.technical_experts.trend_screen_catalog import (  # noqa: F401
+    DISCOVERY_END,
+    QUALIFICATION_END,
+)
+from src.application.research.mhs.marks import (  # noqa: F401
+    _load_funding_series,
+    _prewarm_mark_frames,
+)
 
 __all__ = ["funding_path", "simulated_inventory_ledger"]
 
@@ -235,9 +275,9 @@ def _stress_cost_execution_spec() -> ExecutionSpec:
     """SPREAD_AND_COST_X3: the same realistic fill mechanic at 3x cost."""
     base = ExecutionSpec()
     return ExecutionSpec(
-        maker_fee_bps=base.maker_fee_bps * MHS_STRESS_COST_MULTIPLIER,
-        taker_fee_bps=base.taker_fee_bps * MHS_STRESS_COST_MULTIPLIER,
-        taker_slippage_bps=base.taker_slippage_bps * MHS_STRESS_COST_MULTIPLIER,
+        maker_fee_bps=base.maker_fee_bps * STRESS_COST_MULTIPLIER,
+        taker_fee_bps=base.taker_fee_bps * STRESS_COST_MULTIPLIER,
+        taker_slippage_bps=base.taker_slippage_bps * STRESS_COST_MULTIPLIER,
     )
 
 
@@ -247,13 +287,13 @@ def _signal_ema_span(band_sign: int, horizon_hours: int, step_hours: int) -> int
     """Whipsaw-suppressing EMA span, or None for a reversal band (sign=-1)."""
     if band_sign != 1:
         return None
-    return max(1, round(horizon_hours / step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
+    return max(1, round(horizon_hours / step_hours * SIGNAL_EMA_HORIZON_SPAN))
 
 
 # Diagnostic reference-only execution bounds. OHLCV_IMMEDIATE_TAKER (primary and
 # cost-stress) is deliberately absent: it carries capital and keeps fail-closed
 # propagation.
-MHS_REFERENCE_ONLY_EXECUTION_BOUNDS: frozenset[str] = frozenset(
+REFERENCE_ONLY_EXECUTION_BOUNDS: frozenset[str] = frozenset(
     {"OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_LADDERED_PROXY"}
 )
 
@@ -273,7 +313,7 @@ MHS_REFERENCE_ONLY_EXECUTION_BOUNDS: frozenset[str] = frozenset(
 # it is only a real problem for a strategy that trades the gap window, which no
 # shipped configuration does today. Re-evaluate if a future feature needs to
 # trade a symbol uniformly across the eligible universe during that window.
-MHS_SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
+SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
     "SLPUSDT", "CTKUSDT", "LITUSDT", "AERGOUSDT", "PUMPUSDT", "CVXUSDT", "CVCUSDT",
 })
 
@@ -306,45 +346,17 @@ def _classify_execution_failure(exc: BaseException) -> str:
     """
     message = str(exc).lower()
     if "pre-trade equity" in message or "capital" in message or "equity must be" in message:
-        return MHS_GO_REASON_CAPITAL_BREACH
+        return GO_REASON_CAPITAL_BREACH
     if "rss budget" in message:
-        return MHS_GO_REASON_RESOURCE_BREACH
+        return GO_REASON_RESOURCE_BREACH
     if "finite" in message:
-        return MHS_GO_REASON_NONFINITE_EQUITY
+        return GO_REASON_NONFINITE_EQUITY
     if "gap" in message or "mark" in message or "missing" in message:
-        return MHS_GO_REASON_EXECUTION_GAP
-    return MHS_GO_REASON_INVALID_PRIMARY
+        return GO_REASON_EXECUTION_GAP
+    return GO_REASON_INVALID_PRIMARY
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-    if isinstance(value, pd.Series):
-        return _jsonable(value.to_dict())
-    if isinstance(value, pd.DataFrame):
-        if not value.index.is_unique:
-            return _jsonable(value.to_dict(orient="records"))
-        return {
-            str(k): _jsonable(v)
-            for k, v in value.astype(object).to_dict(orient="index").items()
-        }
-    if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.floating):
-        return float(value)
-    if isinstance(value, np.ndarray):
-        return [_jsonable(v) for v in value.tolist()]
-    if isinstance(value, np.bool_):
-        return bool(value)
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _jsonable(dataclasses.asdict(value))
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    return str(value)
+
 
 
 
@@ -451,7 +463,7 @@ def _fold_regime_characterization(
 
 def _fold_growth_concentration(
     folds: tuple[MhsFoldReport, ...],
-    max_share: float = MHS_FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
+    max_share: float = FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     """Check that no single fold dominates total realized log-growth.
 
@@ -485,7 +497,7 @@ def _fold_growth_concentration(
         max_share_val = max(max_share_val, share)
     payload["max_fold_share"] = max_share_val
     reason_codes = (
-        (MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION,)
+        (GO_REASON_FOLD_GROWTH_CONCENTRATION,)
         if max_share_val > max_share
         else ()
     )
@@ -495,7 +507,7 @@ def _fold_growth_concentration(
 def _fold_blend_parity(
     blend_traces: dict[int, dict[str, float]],
     folds: tuple[MhsFoldReport, ...],
-    tolerance: float = MHS_FOLD_BLEND_PARITY_TOLERANCE,
+    tolerance: float = FOLD_BLEND_PARITY_TOLERANCE,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     """Compare each fold's book structure against the blend path's trace.
 
@@ -550,7 +562,7 @@ def _fold_blend_parity(
     payload["max_abs_log_holdings_ratio"] = max_abs_holdings
     payload["max_abs_log_gross_ratio"] = max_abs_gross
     reason_codes = (
-        (MHS_GO_REASON_PATH_DIVERGENCE,)
+        (GO_REASON_PATH_DIVERGENCE,)
         if max_abs_holdings > tolerance or max_abs_gross > tolerance
         else ()
     )
@@ -703,7 +715,7 @@ def _trend_sleeve_diagnostic(
     decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
     basket = market_basket_log_price(log_close, eligible)
     position = time_series_trend_position(
-        basket, MHS_TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
+        basket, TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
     )
     sleeve = trend_sleeve_weights(position, execution_mask, request.trend_sleeve_gross)
 
@@ -844,7 +856,7 @@ def _multi_feature_diagnostic(
     if panels is None:
         panels = _load_feature_panels(
             root, start, end, grid_1h, aligned_symbols,
-            columns=feature_registry_panel_columns(MHS_FEATURE_REGISTRY),
+            columns=feature_registry_panel_columns(FEATURE_REGISTRY),
         )
     _assert_stage_rss_budget("multi_feature_feature_panels", rss_budget_bytes, rss_reserve_bytes)
     decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
@@ -861,7 +873,7 @@ def _multi_feature_diagnostic(
     combined_acc: pd.DataFrame | None = None
     combined_count = 0
 
-    for spec in MHS_FEATURE_REGISTRY:
+    for spec in FEATURE_REGISTRY:
         feature = spec.builder(panels)
         coverage = feature_coverage_audit(feature, execution_mask)
         failing = [
@@ -952,7 +964,7 @@ def _multi_feature_diagnostic(
 
     return {
         "evaluation_protocol": "in_sample_full_period",
-        "trials_explored": len(MHS_FEATURE_REGISTRY),
+        "trials_explored": len(FEATURE_REGISTRY),
         "admitted": admitted,
         "excluded": excluded,
         "combined": {
@@ -985,7 +997,7 @@ def _committee_growth_headroom(
     gross_all: pd.DataFrame,
     tc_all: pd.DataFrame,
     cost_bps: float,
-    oos_start: pd.Timestamp = MHS_COMMITTEE_OOS_START,
+    oos_start: pd.Timestamp = COMMITTEE_OOS_START,
 ) -> dict[str, Any] | None:
     """Discovery-window-only headroom report via the reused growth_sizing solver.
 
@@ -1005,18 +1017,18 @@ def _committee_growth_headroom(
     if not np.isfinite(reference_risk) or reference_risk <= 0:
         return None
     risk_grid = tuple(
-        sorted(reference_risk * m for m in MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS)
+        sorted(reference_risk * m for m in COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS)
     )
     config = GrowthSizingConfig(
         risk_grid=risk_grid,
         reference_risk=reference_risk,
-        max_drawdown=MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
-        max_drawdown_prob=MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
-        ruin_fraction=MHS_COMMITTEE_GROWTH_RUIN_FRACTION,
-        max_ruin_prob=MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB,
-        horizon_years=MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
-        n_paths=MHS_COMMITTEE_GROWTH_N_PATHS,
-        bars_per_year=MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
+        max_drawdown=COMMITTEE_GROWTH_MAX_DRAWDOWN,
+        max_drawdown_prob=COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+        ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+        n_paths=COMMITTEE_GROWTH_N_PATHS,
+        bars_per_year=COMMITTEE_GROWTH_BARS_PER_YEAR,
     )
     selected = solve_growth_optimal_risk(discovery_net.to_numpy(), config)
     headroom = diagnose_growth_headroom(discovery_net.to_numpy(), config, selected)
@@ -1058,13 +1070,13 @@ def _committee_diagnostic(
     Builds the declared committee members into the dollar-neutral rank books on
     the 24h decision grid, audits the RAW source panels for pre-fillna coverage
     gaps via ``source_coverage_audit`` and fail-closes any member whose required
-    source drops below ``MHS_FEATURE_MIN_COVERAGE`` in ANY year BEFORE
+    source drops below ``FEATURE_MIN_COVERAGE`` in ANY year BEFORE
     ``build_feature_books`` (B3 -- the funding gap the post-fillna feature audit
     cannot see), recovers sign-safe gross and turnover-cost panels from the two
     extreme measured cost tiers via ``decompose_cost``, and runs the purged
     expanding-train walk-forward at every measured cost tier, reporting the
     compounded-growth wealth metrics per tier. The walk-forward block grid is
-    anchored at ``MHS_COMMITTEE_OOS_START``, and any blocks skipped by the walk-forward
+    anchored at ``COMMITTEE_OOS_START``, and any blocks skipped by the walk-forward
     are reported alongside the edges.
 
     Memory-optimized streaming: panels are column-pruned to committee requirements
@@ -1075,21 +1087,21 @@ def _committee_diagnostic(
             root, start, end, grid_1h, aligned_symbols,
             columns=feature_registry_panel_columns(
                 [
-                    spec for spec in MHS_FEATURE_REGISTRY
-                    if spec.name in set(MHS_COMMITTEE_MEMBERS)
+                    spec for spec in FEATURE_REGISTRY
+                    if spec.name in set(COMMITTEE_MEMBERS)
                 ],
             ),
         )
     _assert_stage_rss_budget("committee_feature_panels", rss_budget_bytes, rss_reserve_bytes)
     member_specs = [
-        spec for spec in MHS_FEATURE_REGISTRY if spec.name in set(MHS_COMMITTEE_MEMBERS)
+        spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)
     ]
 
     # B3: source-coverage pre-filter. Every required RAW source column present
     # in the panels is audited against the execution mask -- including an
     # all-NaN column, whose per-year coverage is 0.0 (the funding 45/452-symbol
     # gap a post-fillna feature audit cannot see). A member with ANY year below
-    # MHS_FEATURE_MIN_COVERAGE is dropped from member_specs BEFORE
+    # FEATURE_MIN_COVERAGE is dropped from member_specs BEFORE
     # build_feature_books so it never contributes a book, a PnL series, or a
     # weight -- fail closed, mirroring feature_coverage_audit's
     # exclude-not-nan-fill discipline at the source level.
@@ -1105,7 +1117,7 @@ def _committee_diagnostic(
             coverage = source_coverage_audit(panels[column], execution_mask)
             per_source[column] = coverage
             for year, cov in coverage.items():
-                if cov < MHS_FEATURE_MIN_COVERAGE:
+                if cov < FEATURE_MIN_COVERAGE:
                     failing_sources[column] = min(
                         failing_sources.get(column, year), year,
                     )
@@ -1131,13 +1143,13 @@ def _committee_diagnostic(
     bps_low = MEASURED_EXECUTION_COST_TIERS_BPS["optimistic"]
     bps_high = MEASURED_EXECUTION_COST_TIERS_BPS["stress"]
 
-    # Stream one member at a time in MHS_COMMITTEE_MEMBERS order (preserving the
+    # Stream one member at a time in COMMITTEE_MEMBERS order (preserving the
     # pre-streaming admitted/net-panel column order), keep only the two cost-tier
     # net series, and drop the book immediately.
     admitted: list[str] = []
     net_low_by_name: dict[str, pd.Series] = {}
     net_high_by_name: dict[str, pd.Series] = {}
-    for name in MHS_COMMITTEE_MEMBERS:
+    for name in COMMITTEE_MEMBERS:
         member_spec = specs_by_name.get(name)
         if member_spec is None:
             continue
@@ -1164,7 +1176,7 @@ def _committee_diagnostic(
 
     excluded = [
         {"name": name, "reason": "feature_coverage"}
-        for name in MHS_COMMITTEE_MEMBERS
+        for name in COMMITTEE_MEMBERS
         if name not in admitted and name not in source_excluded
     ]
     excluded.extend(
@@ -1186,11 +1198,11 @@ def _committee_diagnostic(
             net_low_panel, net_high_panel, bps_low, bps_high,
         )
 
-    # B1: anchor the OOS block grid at MHS_COMMITTEE_OOS_START, never the raw
+    # B1: anchor the OOS block grid at COMMITTEE_OOS_START, never the raw
     # diagnostic start, so min_train_bars (~83 days) can no longer smuggle
     # pre-OOS blocks in as pseudo-OOS.
-    edges = committee_block_edges_from(start, MHS_COMMITTEE_OOS_START, end)
-    purge = pd.Timedelta(hours=MHS_COMMITTEE_PURGE_HOURS)
+    edges = committee_block_edges_from(start, COMMITTEE_OOS_START, end)
+    purge = pd.Timedelta(hours=COMMITTEE_PURGE_HOURS)
 
     # B6: re-derive which candidate block edges purged_walk_forward skips
     # (insufficient train rows or no test bars), independently of its internal
@@ -1205,7 +1217,7 @@ def _committee_diagnostic(
                 else gross_all.index[-1] + pd.Timedelta(hours=1)
             )
             train_rows = gross_all.index < (t0 - purge)
-            if int(train_rows.sum()) < _MHS_WALK_FORWARD_MIN_TRAIN_BARS:
+            if int(train_rows.sum()) < WALK_FORWARD_MIN_TRAIN_BARS:
                 skipped_blocks.append(
                     {"block_start": t0.isoformat(), "reason": "insufficient_train"}
                 )
@@ -1226,7 +1238,7 @@ def _committee_diagnostic(
             continue
         wf = purged_walk_forward(
             gross_all, tc_all, cost_bps, edges, purge,
-            min_train_bars=_MHS_WALK_FORWARD_MIN_TRAIN_BARS,
+            min_train_bars=WALK_FORWARD_MIN_TRAIN_BARS,
             sizing_mode=sizing_mode,
         )
         if telemetry is not None:
@@ -1299,7 +1311,7 @@ def _committee_diagnostic(
             "feature/combiner/size configurations on this same 2021-2025 panel; "
             "treat OOS Sharpe as an upper bound, not a deflated estimate"
         ),
-        "members": list(MHS_COMMITTEE_MEMBERS),
+        "members": list(COMMITTEE_MEMBERS),
         "admitted": admitted,
         "excluded": excluded,
         "source_coverage": {
@@ -1312,8 +1324,8 @@ def _committee_diagnostic(
         "walk_forward": {
             "block_edges": [edge.isoformat() for edge in edges],
             "skipped_blocks": skipped_blocks,
-            "purge_hours": MHS_COMMITTEE_PURGE_HOURS,
-            "target_vol": MHS_COMMITTEE_TARGET_VOL,
+            "purge_hours": COMMITTEE_PURGE_HOURS,
+            "target_vol": COMMITTEE_TARGET_VOL,
             "sizing_mode": sizing_mode,
             "per_tier": per_tier,
         },
@@ -1814,7 +1826,7 @@ def _book_outcome(
     target_weights = (replay_weights_step if replay_weights_step is not None else weights_step).reindex(step_grid)
     if request.rebalance_filter == "portfolio_trigger":
         target_weights = portfolio_rebalance_trigger(
-            target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
+            target_weights, REBALANCE_TRACKING_ERROR_THRESHOLD,
         )
     else:
         target_weights = _scaling._apply_rebalance_deadband(target_weights)
@@ -1886,7 +1898,7 @@ def _book_outcome(
             _window_telemetry(_windows(), "execution_window"),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
             retain_event_snapshots=False,
-            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
+            min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
         )
         # Pass 1 (reference) -> P&L-vol-target scale -> Pass 2 (reported):
         # the strategy's own realized daily-return vol drives a causal
@@ -1919,10 +1931,10 @@ def _book_outcome(
             ),
             initial_equity, batch_bounds,
             retain_event_snapshots=False,
-            min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR,
+            min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
             isolated_bound_indices=frozenset(
                 i for i, (bound, _spec) in enumerate(batch_bounds)
-                if bound in MHS_REFERENCE_ONLY_EXECUTION_BOUNDS
+                if bound in REFERENCE_ONLY_EXECUTION_BOUNDS
             ),
         )
         primary = batch.results[0]  # type: ignore[assignment]  # non-isolated index cannot be None
@@ -2096,19 +2108,19 @@ def _active_blend_book_and_grid(
     """Select the blend's active book spec and execution grid from the capital contract.
 
     The blend's decision cadence must derive from the same contract that
-    allocates capital (``PHASE_1_BOOK_BLEND_WEIGHTS``), never from a hardcoded
+    allocates capital (``BOOK_BLEND_WEIGHTS``), never from a hardcoded
     book name: with only ``slow_momentum`` weighted the blend replays on slow's
     native 24h grid, while a nonzero ``fast_reversal`` weight (e.g. the
     historical 50/50) admits fast's 6h grid -- a superset of slow's from the
     same origin -- reproducing the pre-fix behavior byte-for-byte.  If no book
     carries capital the allocation invariant is violated and we fail closed.
     """
-    if PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] != 0.0:
+    if BOOK_BLEND_WEIGHTS["fast_reversal"] != 0.0:
         return fast, fast_grid
-    if PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] != 0.0:
+    if BOOK_BLEND_WEIGHTS["slow_momentum"] != 0.0:
         return slow, slow_grid
     raise ValueError(
-        "PHASE_1_BOOK_BLEND_WEIGHTS allocates no capital to either book; "
+        "BOOK_BLEND_WEIGHTS allocates no capital to either book; "
         "blend has no active execution grid"
     )
 
@@ -2168,8 +2180,8 @@ def _run_books_concurrent(
         committee_execution_book.reindex(grid_1h).ffill().fillna(0.0)
         if committee_execution_book is not None
         else (
-            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
-            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+            BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
+            + BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
         )
     ).reindex(active_grid)
     if regime_scale is not None:
@@ -2180,8 +2192,8 @@ def _run_books_concurrent(
     # children), so only a short token crosses the submit boundary -- the
     # pickled-argument copies measured at ~1 GB per book are eliminated.
     _books_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
-    _books_workers = plan_worker_count(3, MHS_WORKER_PEAK_RSS_BYTES, request.ram_guard)
-    assert_fork_admission("books", _books_workers, MHS_WORKER_PEAK_RSS_BYTES, _books_reserve)
+    _books_workers = plan_worker_count(3, WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    assert_fork_admission("books", _books_workers, WORKER_PEAK_RSS_BYTES, _books_reserve)
     with (
         fork_shared_payload({
             "grid_1h": grid_1h,
@@ -2194,7 +2206,7 @@ def _run_books_concurrent(
                 "blend": (active_spec, active_grid, blend_step, phase_blend, 168, blend_replay),
             },
         }) as token,
-        ProcessPoolExecutor(max_workers=_books_workers, mp_context=MHS_FORK_CONTEXT) as pool,
+        ProcessPoolExecutor(max_workers=_books_workers, mp_context=FORK_CONTEXT) as pool,
     ):
         f_fast = pool.submit(
             _book_outcome_worker,
@@ -2338,10 +2350,10 @@ def _run_post_book_concurrently(
         )
 
     reports: dict[int, MhsFoldReport] = {}
-    max_workers = plan_worker_count(min(3, len(folds)), MHS_WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    max_workers = plan_worker_count(min(3, len(folds)), WORKER_PEAK_RSS_BYTES, request.ram_guard)
     _post_book_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
-    assert_fork_admission("post_book_folds", max_workers, MHS_WORKER_PEAK_RSS_BYTES, _post_book_reserve)
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=MHS_FORK_CONTEXT) as pool:
+    assert_fork_admission("post_book_folds", max_workers, WORKER_PEAK_RSS_BYTES, _post_book_reserve)
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
         futures = {
             pool.submit(
                 _run_anchored_fold,
@@ -2446,7 +2458,7 @@ def _fold_safe_fast_horizon(
 
     Diagnostic-only: returns ``(horizon_hours, source)`` instead of a
     ``BookSpec`` because fast_reversal's book construction and
-    ``PHASE_1_BOOK_BLEND_WEIGHTS`` stay frozen at 0.0 capital (the result is
+    ``BOOK_BLEND_WEIGHTS`` stay frozen at 0.0 capital (the result is
     evidence for a separate governance decision, never a weight change).
     ``source`` is ``"fold_train_only_discovery"`` only when the fold-scoped
     gate admitted a candidate (``admitted`` and ``selected_horizon`` both
@@ -2496,7 +2508,7 @@ def _trend_sleeve_position(
     ``time_series_trend_position`` primitives verbatim -- no new math.
     """
     basket = market_basket_log_price(log_close, eligible)
-    return time_series_trend_position(basket, MHS_TREND_SLEEVE_HORIZONS_HOURS, decision_grid)
+    return time_series_trend_position(basket, TREND_SLEEVE_HORIZONS_HOURS, decision_grid)
 
 
 def _apply_trend_sleeve(
@@ -2533,9 +2545,9 @@ def _committee_evidence_weights_by_boundary(
     from the shared proxy return series, so every fold sees only the training
     data up to its own boundary.
     """
-    _resolved = members or MHS_COMMITTEE_MEMBERS
+    _resolved = members or COMMITTEE_MEMBERS
     _member_specs = [
-        spec for spec in MHS_FEATURE_REGISTRY
+        spec for spec in FEATURE_REGISTRY
         if spec.name in set(_resolved)
     ]
     _committee_books = build_feature_books(
@@ -2576,7 +2588,7 @@ def _committee_execution_book(
     """Build the k=5 committee capital book on the decision grid.
 
     Shared by the fold path and the top-level blend: filter the registry to
-    ``members`` (or ``MHS_COMMITTEE_MEMBERS`` when None), build equal-notional
+    ``members`` (or ``COMMITTEE_MEMBERS`` when None), build equal-notional
     rank books, average them.  No leg-risk tilt -- tilting the curated committee
     set to equal risk removed the concentration that carries its edge (walk-forward
     Sharpe 0.822 -> 0.503, rejected in RC-4). Fails closed when no member is
@@ -2596,9 +2608,9 @@ def _committee_execution_book(
         raise ValueError(
             f"regime_adaptive_window must be >= 3, got {regime_adaptive_window}"
         )
-    _resolved = members or MHS_COMMITTEE_MEMBERS
+    _resolved = members or COMMITTEE_MEMBERS
     _member_specs = [
-        spec for spec in MHS_FEATURE_REGISTRY
+        spec for spec in FEATURE_REGISTRY
         if spec.name in set(_resolved)
     ]
     _committee_books = build_feature_books(
@@ -2680,7 +2692,7 @@ def _build_fold_target_weights(
     ts = fold.train_start
     vs = fold.validation_start
     ve = fold.validation_end
-    panel_start = max(ts, vs - pd.Timedelta(hours=MHS_FOLD_PANEL_WARMUP_HOURS))
+    panel_start = max(ts, vs - pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS))
     _panel_columns = (
         ("close", "open", "quote_vol", "taker_buy_quote")
         if request.committee_capital
@@ -2697,7 +2709,7 @@ def _build_fold_target_weights(
     symbols = list(close.columns)
     funded = [
         s for s in symbols
-        if s in funding_by_symbol and s not in MHS_SOURCE_GAP_EXCLUDED_SYMBOLS
+        if s in funding_by_symbol and s not in SOURCE_GAP_EXCLUDED_SYMBOLS
     ]
     if not funded:
         raise RuntimeError("no fold symbol has funding coverage")
@@ -2739,11 +2751,11 @@ def _build_fold_target_weights(
     log_close = np.log(close)
     if not request.committee_capital:
         del close
-    fast = PHASE_1_BOOK_SPECS["fast_reversal"]
+    fast = BOOK_SPECS["fast_reversal"]
     slow = (
-        dataclasses.replace(PHASE_1_BOOK_SPECS["slow_momentum"], horizon_hours=slow_horizon_override)
+        dataclasses.replace(BOOK_SPECS["slow_momentum"], horizon_hours=slow_horizon_override)
         if slow_horizon_override is not None
-        else PHASE_1_BOOK_SPECS["slow_momentum"]
+        else BOOK_SPECS["slow_momentum"]
     )
     fast_grid = pd.date_range(panel_start, ve, freq="6h", tz="UTC")
     slow_grid = pd.date_range(panel_start, ve, freq="24h", tz="UTC")
@@ -2772,7 +2784,7 @@ def _build_fold_target_weights(
             w_slow_execution,
             causal_market_beta(
                 log_close, eligible,
-                MHS_CAUSAL_BETA_LOOKBACK_BARS, MHS_CAUSAL_BETA_MIN_PERIODS,
+                CAUSAL_BETA_LOOKBACK_BARS, CAUSAL_BETA_MIN_PERIODS,
             ).reindex(w_slow_execution.index),
             execution_mask.reindex(w_slow_execution.index).fillna(False),
             slow.min_symbols,
@@ -2796,29 +2808,29 @@ def _build_fold_target_weights(
         w_slow_execution_1h = crash_regime_tilt_weights(
             w_slow_execution_1h, log_close,
             execution_mask.reindex(grid_1h).ffill().fillna(False),
-            MHS_CRASH_REGIME_REFERENCE_SYMBOLS, slow.horizon_hours,
+            CRASH_REGIME_REFERENCE_SYMBOLS, slow.horizon_hours,
             request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
         )
     if request.committee_capital:
         blend_1h = _committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
-            MHS_COMMITTEE_TRANCHE_COUNT
+            COMMITTEE_TRANCHE_COUNT
             if (request.committee_tranche_smoothing or request.committee_regime_adaptive_tranche)
             else 1,
             regime_adaptive_window=(
-                MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+                COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
             target_gross=_research_go._resolved_committee_target_gross(request),
             member_weights=committee_member_weights,
-            carry_book=funding_carry_execution_book(bar_funding, execution_mask, MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, MHS_COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
+            carry_book=funding_carry_execution_book(bar_funding, execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(request),
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
         blend_1h = (
-            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
-            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution_1h
+            BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
+            + BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution_1h
         )
     del w_fast_execution, w_slow_execution, w_slow_execution_1h
     # Apply the additive sleeve before the regime cash-scale multiply and the
@@ -2848,7 +2860,7 @@ def _build_fold_target_weights(
     if request.rebalance_filter == "portfolio_trigger":
         # Gate the unscaled book, then apply gross scale to preserve de-risking dynamics.
         target_weights = portfolio_rebalance_trigger(
-            target_weights, MHS_REBALANCE_TRACKING_ERROR_THRESHOLD,
+            target_weights, REBALANCE_TRACKING_ERROR_THRESHOLD,
         ).mul(regime_scale, axis=0)
     else:
         target_weights = _scaling._apply_rebalance_deadband(target_weights.mul(regime_scale, axis=0))
@@ -2893,35 +2905,35 @@ def _candidate_weight_books(
     once in the parent and shared by both consumers: every fold's
     slow/fast/funding-carry scan and the top-level discovery gate. The slow/fast
     horizon key sets cover the union of the fold-safe ``BookSpec`` band horizons
-    and the top-level ``MHS_DISCOVERY_MOMENTUM_CANDIDATES``/
-    ``MHS_DISCOVERY_REVERSAL_CANDIDATES`` gate sets (currently identical), so a
+    and the top-level ``DISCOVERY_MOMENTUM_CANDIDATES``/
+    ``DISCOVERY_REVERSAL_CANDIDATES`` gate sets (currently identical), so a
     single build satisfies both. Returns a ``{"slow", "fast", "funding_long",
     "funding_short"}`` mapping of horizon-keyed weight books.
     """
     slow_horizons = _ordered_union(
         specs["slow_momentum"].band.horizons_hours,
-        MHS_DISCOVERY_MOMENTUM_CANDIDATES,
+        DISCOVERY_MOMENTUM_CANDIDATES,
     )
     fast_horizons = _ordered_union(
         specs["fast_reversal"].band.horizons_hours,
-        MHS_DISCOVERY_REVERSAL_CANDIDATES,
+        DISCOVERY_REVERSAL_CANDIDATES,
     )
     return {
         "slow": build_candidate_weights(
             log_close, eligible, 1, slow_horizons,
-            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+            tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
         ),
         "fast": build_candidate_weights(
             log_close, eligible, -1, fast_horizons,
-            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+            tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
         ),
         "funding_long": build_funding_carry_candidate_weights(
-            bar_funding, eligible, 1, MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
-            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+            bar_funding, eligible, 1, FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+            tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
         ),
         "funding_short": build_funding_carry_candidate_weights(
-            bar_funding, eligible, -1, MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
-            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+            bar_funding, eligible, -1, FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+            tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
         ),
     }
 
@@ -2964,7 +2976,7 @@ def _fold_safe_discovery_worker(
             horizon_candidates=specs["slow_momentum"].band.horizons_hours,
             log_close=log_close, eligible=eligible, opens=opens,
             bar_funding=bar_funding, grid_1h=grid_1h, fold=fold,
-            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+            tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
             precomputed_candidate_weights=slow_weights,
         ),
         specs["slow_momentum"],
@@ -2976,23 +2988,23 @@ def _fold_safe_discovery_worker(
             horizon_candidates=specs["fast_reversal"].band.horizons_hours,
             log_close=log_close, eligible=eligible, opens=opens,
             bar_funding=bar_funding, grid_1h=grid_1h, fold=fold,
-            tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+            tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
             precomputed_candidate_weights=fast_weights,
         ),
         specs["fast_reversal"].horizon_hours,
     )
     _fc_long = fold_train_only_discovery_qualification(
-        sign=1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+        sign=1, horizon_candidates=FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
         log_close=log_close, eligible=eligible, opens=opens,
         bar_funding=bar_funding, grid_1h=grid_1h, fold=fold,
-        tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+        tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
         precomputed_candidate_weights=funding_long,
     )
     _fc_short = fold_train_only_discovery_qualification(
-        sign=-1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+        sign=-1, horizon_candidates=FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
         log_close=log_close, eligible=eligible, opens=opens,
         bar_funding=bar_funding, grid_1h=grid_1h, fold=fold,
-        tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
+        tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
         precomputed_candidate_weights=funding_short,
     )
     _fc_pick = _prefer_funding_carry_selection(_fc_long, _fc_short)
@@ -3056,11 +3068,11 @@ def _run_fold_safe_discovery_parallel(
         precomputed = _candidate_weight_books(log_close, eligible, bar_funding, specs)
     folds = phase_1_anchored_purged_folds()
     max_workers = plan_worker_count(
-        min(3, len(folds)), MHS_WORKER_PEAK_RSS_BYTES, ram_guard=True,
+        min(3, len(folds)), WORKER_PEAK_RSS_BYTES, ram_guard=True,
     )
     _fold_safe_reserve = _resolve_ram_budget(None, True)[1]
     assert_fork_admission(
-        "fold_safe_discovery", max_workers, MHS_WORKER_PEAK_RSS_BYTES, _fold_safe_reserve,
+        "fold_safe_discovery", max_workers, WORKER_PEAK_RSS_BYTES, _fold_safe_reserve,
     )
     slow: dict[int, int | None] = {}
     fast: dict[int, tuple[int, str]] = {}
@@ -3071,7 +3083,7 @@ def _run_fold_safe_discovery_parallel(
             "opens": opens, "bar_funding": bar_funding, "grid_1h": grid_1h,
             "precomputed": precomputed,
         }) as token,
-        ProcessPoolExecutor(max_workers=max_workers, mp_context=MHS_FORK_CONTEXT) as pool,
+        ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool,
     ):
         futures = {
             pool.submit(_fold_safe_discovery_worker, fold, idx, token): idx
@@ -3182,14 +3194,14 @@ def _run_anchored_fold(
         failures: list[str] = []
         equity = primary.ledger.equity
         if not np.isfinite(equity.to_numpy()).all() or not (equity > 0).all():
-            failures.append(MHS_GO_REASON_NONFINITE_EQUITY)
+            failures.append(GO_REASON_NONFINITE_EQUITY)
         if not primary.ledger.primary_valid:
-            failures.append(MHS_GO_REASON_INVALID_PRIMARY)
+            failures.append(GO_REASON_INVALID_PRIMARY)
         if (
             primary.termination_counts.get("MISSING_DATA", 0) > 0
             or primary.termination_counts.get("UNKNOWN_TERMINATION", 0) > 0
         ):
-            failures.append(MHS_GO_REASON_EXECUTION_GAP)
+            failures.append(GO_REASON_EXECUTION_GAP)
         _fold_debug_mode = (
             "adaptive" if request.committee_regime_adaptive_tranche
             else "3" if request.committee_tranche_smoothing
@@ -3200,21 +3212,21 @@ def _run_anchored_fold(
             if request.committee_capital else None
         )
         primary_autocorr = _statistics._daily_autocorr_sharpe(primary.ledger, debug_tag=_fold_debug_tag)
-        if not np.isfinite(primary_autocorr) or primary_autocorr < MHS_GO_PRIMARY_SHARPE_FLOOR:
-            failures.append(MHS_GO_REASON_PRIMARY_SHARPE)
+        if not np.isfinite(primary_autocorr) or primary_autocorr < GO_PRIMARY_SHARPE_FLOOR:
+            failures.append(GO_REASON_PRIMARY_SHARPE)
         stress_sharpe = _statistics._naive_sharpe(stress.ledger)
         if not np.isfinite(stress_sharpe) or stress_sharpe <= 0.0:
-            failures.append(MHS_GO_REASON_STRESS_SHARPE)
+            failures.append(GO_REASON_STRESS_SHARPE)
 
         equity_1h, net_returns_1h, _turnover_1h = _statistics._hourly_ledger_series(
             equity, primary.ledger.fill_turnover,
         )
         primary_net_ann = _statistics._mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H)
-        _return_floor = MHS_REGISTERED_POLICY_THRESHOLDS["primary_annual_return"]
+        _return_floor = REGISTERED_POLICY_THRESHOLDS["primary_annual_return"]
         if _return_floor is not None and (
             not np.isfinite(primary_net_ann) or primary_net_ann < _return_floor
         ):
-            failures.append(MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR)
+            failures.append(GO_REASON_PRIMARY_RETURN_BELOW_FLOOR)
         if _fold_debug_tag is not None and _logger.isEnabledFor(logging.DEBUG):
             _logger.debug(
                 "[EVAL] tag=%s ann_turnover=%.3f ann_net_ret=%.4f mdd=%.4f",
@@ -3245,7 +3257,7 @@ def _run_anchored_fold(
             slow_horizon_hours=(
                 slow_horizon_override
                 if slow_horizon_override is not None
-                else PHASE_1_BOOK_SPECS["slow_momentum"].horizon_hours
+                else BOOK_SPECS["slow_momentum"].horizon_hours
             ),
             slow_horizon_source=(
                 "fold_train_only_discovery" if slow_horizon_override is not None else "frozen_default"
@@ -3253,7 +3265,7 @@ def _run_anchored_fold(
             fast_horizon_hours=(
                 fast_horizon_override[0]
                 if fast_horizon_override is not None
-                else PHASE_1_BOOK_SPECS["fast_reversal"].horizon_hours
+                else BOOK_SPECS["fast_reversal"].horizon_hours
             ),
             fast_horizon_source=(
                 fast_horizon_override[1] if fast_horizon_override is not None else "frozen_default"
@@ -3278,7 +3290,7 @@ def _run_anchored_fold(
     except DataIntegrityError as exc:
         return _incomplete_fold_report(fold, fold_index, (_classify_execution_failure(exc),))
     except (RuntimeError, ValueError):
-        return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
+        return _incomplete_fold_report(fold, fold_index, (GO_REASON_INCOMPLETE_FOLD,))
 
 def _run_folds_parallel(
     root: str,
@@ -3313,10 +3325,10 @@ def _run_folds_parallel(
     if not folds:
         return ()
     reports: dict[int, MhsFoldReport] = {}
-    max_workers = plan_worker_count(min(3, len(folds)), MHS_WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    max_workers = plan_worker_count(min(3, len(folds)), WORKER_PEAK_RSS_BYTES, request.ram_guard)
     _folds_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
-    assert_fork_admission("anchored_folds", max_workers, MHS_WORKER_PEAK_RSS_BYTES, _folds_reserve)
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=MHS_FORK_CONTEXT) as pool:
+    assert_fork_admission("anchored_folds", max_workers, WORKER_PEAK_RSS_BYTES, _folds_reserve)
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
         futures = {
             pool.submit(
                 _run_anchored_fold,
@@ -3368,7 +3380,7 @@ def _terminal_resource_breach_report(
     failure = MhsBookFailure(
         stage="resource_budget_guard",
         error_class=type(exc).__name__,
-        reason=MHS_GO_REASON_RESOURCE_BREACH,
+        reason=GO_REASON_RESOURCE_BREACH,
         message=str(exc),
     )
     phase = PhaseDiagnosticResult(
@@ -3427,13 +3439,13 @@ def _terminal_resource_breach_report(
     )
     research_go = MhsResearchGoResult(
         eligible=False,
-        reason_codes=(MHS_GO_REASON_RESOURCE_BREACH,),
+        reason_codes=(GO_REASON_RESOURCE_BREACH,),
         evaluated_folds=0,
         folds_passed=0,
-        data_integrity_reason_codes=(MHS_GO_REASON_RESOURCE_BREACH,),
+        data_integrity_reason_codes=(GO_REASON_RESOURCE_BREACH,),
     )
     return MhsHorizonDiagnosticReport(
-        feature=_MHS_FEATURE,
+        feature=FEATURE_NAME,
         status="COMPLETE",
         start=start,
         end=end,
@@ -3499,13 +3511,20 @@ def _guard_stage_or_breach(
     return None
 
 
+
 def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagnosticReport:
     """Compose the dev-only Phase 1 diagnostic: pre-screen + strict-proxy evidence.
 
     Forces ``partition='dev'`` and resolves the sealed evaluation end; a holdout
     partition or an end past ``HOLDOUT_CUTOFF`` raises ``RuntimeError``.
+
+    Decomposed into the six pipeline stages (``src/mhs/pipeline/stages``) driven
+    by ``run_stages``; this wrapper builds the shared ``PipelineContext`` from the
+    request and returns the assembled report (byte-identical to the monolith).
     """
-    # Dropping mark frame cache ensures clean state for re-runs against updated parquet files.
+    from src.mhs.pipeline.context import PipelineContext
+    from src.mhs.pipeline.runner import run_stages
+
     _get_symbol_mark_frame.cache_clear()
     resolved_end = resolve_evaluation_end(request.end, unseal_holdout=False)
     _run_start = time.perf_counter()
@@ -3518,7 +3537,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         start = pd.Timestamp(request.start)
         start = start.tz_localize("UTC") if start.tz is None else start.tz_convert("UTC")
     else:
-        start = MHS_DISCOVERY_START
+        start = DISCOVERY_START
 
     if resolved_end is not None:
         end = pd.Timestamp(resolved_end)
@@ -3528,1355 +3547,21 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     if end > HOLDOUT_CUTOFF:
         raise RuntimeError(f"Holdout sealed: requested end {end} past {HOLDOUT_CUTOFF}")
 
-    rss_budget_bytes, rss_reserve_bytes = _resolve_ram_budget(
-        request.max_rss_bytes, request.ram_guard,
+    ctx = PipelineContext(
+        config=request,
+        resolved_end=resolved_end,
+        start=start,
+        end=end,
+        rss_budget_bytes=None,
+        rss_reserve_bytes=None,
+        root="",
+        grid_1h=pd.DatetimeIndex([]),
+        close=pd.DataFrame(),
+        opens=pd.DataFrame(),
+        quote_vol=pd.DataFrame(),
+        taker_buy_quote=None,
+        symbols=[],
     )
-
-    telemetry = _StageRecorder(log_run=request.log_run)
-
-    root = request.data_root or str(FUTURES_DATA_DIR / "ohlcv")
-    panel = load_base_panel(
-        root, "1h",
-        (
-            ("close", "open", "quote_vol", "taker_buy_quote")
-            if request.committee_capital
-            else ("close", "open", "quote_vol")
-        ),
-        start, end, partition="dev", min_bars=2000,
-    )
-    close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
-    taker_buy_quote = panel["taker_buy_quote"] if request.committee_capital else None
-    grid_1h = close.index
-    symbols = list(close.columns)
-    telemetry.record("base_1h_panel", grid_bars=len(grid_1h), n_symbols=len(symbols))
-    _terminal = _guard_stage_or_breach(
-        "base_1h_panel", rss_budget_bytes, rss_reserve_bytes,
-        request, telemetry, str(resolved_end), str(start), str(end),
-    )
-    if _terminal is not None:
-        return _terminal
-
-    funding_by_symbol, funding_dropped = _load_funding_series(symbols)
-    fold_funding = dict(funding_by_symbol)
-    funded = [
-        s for s in symbols
-        if s in funding_by_symbol and s not in MHS_SOURCE_GAP_EXCLUDED_SYMBOLS
-    ]
-    if not funded:
-        raise RuntimeError("no dev symbol has funding coverage; the MHS ledger requires funding")
-    close = close[funded]
-    opens = opens[funded]
-    quote_vol = quote_vol[funded]
-    if taker_buy_quote is not None:
-        taker_buy_quote = taker_buy_quote[funded]
-    bar_period = grid_1h[1] - grid_1h[0]
-    funding_window = {
-        s: funding_by_symbol[s].loc[
-            (funding_by_symbol[s].index >= grid_1h[0])
-            & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
-        ]
-        for s in funded
-    }
-    bar_funding = bar_funding_panel(funding_window, grid_1h)
-    aligned_symbols = list(bar_funding.columns)
-    if not aligned_symbols:
-        raise RuntimeError("no dev symbol has causally aligned funding coverage")
-    close = close[aligned_symbols]
-    opens = opens[aligned_symbols]
-    quote_vol = quote_vol[aligned_symbols]
-    if taker_buy_quote is not None:
-        taker_buy_quote = taker_buy_quote[aligned_symbols]
-    funding_by_symbol = {s: funding_by_symbol[s] for s in aligned_symbols}
-    bar_funding = bar_funding[aligned_symbols]
-    telemetry.record("funding_alignment", grid_bars=len(grid_1h), n_symbols=len(aligned_symbols))
-    _terminal = _guard_stage_or_breach(
-        "funding_alignment", rss_budget_bytes, rss_reserve_bytes,
-        request, telemetry, str(resolved_end), str(start), str(end),
-    )
-    if _terminal is not None:
-        return _terminal
-
-    eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
-    eligible, _fill_mark_parity_census = _fill_mark_parity_eligibility(close, eligible, request.fill_mark_parity_gate)
-    log_close = np.log(close)
-    # The raw close panel is not used after its log transform.  Releasing it
-    # before phase/weight construction avoids retaining two full multi-year
-    # price matrices at once.
-    if not request.committee_capital:
-        del close
-
-    specs = PHASE_1_BOOK_SPECS
-    fast = specs["fast_reversal"]
-    slow = specs["slow_momentum"]
-    # Fold-safe horizon selection (spec §1.5, ``wiring``): computed once in the
-    # parent before either the top-level books or the fold pool are forked,
-    # reusing the already-loaded full-period panel. Only the resolved plain
-    # horizon ``int`` (or None) is passed down to fold workers, so no worker
-    # ever reloads a wide ``[train_start, train_end]`` panel.
-    fold_slow_horizons: dict[int, int | None] = {}
-    fold_fast_horizons: dict[int, tuple[int, str]] = {}
-    fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] = {}
-    # Candidate weight books are built exactly once in the parent and shared by
-    # both the fold-safe discovery scan and the top-level discovery gate (the
-    # byte-identical duplicate build is eliminated: -5.23 GB peak, -70 s wall).
-    candidate_books: dict[str, dict[int, pd.DataFrame]] | None = None
-    if request.fold_safe_horizon_selection or request.discovery_gate:
-        candidate_books = _candidate_weight_books(log_close, eligible, bar_funding, specs)
-    if request.fold_safe_horizon_selection:
-        # Fold-safe horizon selection (spec §1.5, ``wiring``): the three folds'
-        # slow/fast/funding-carry gates run in fork workers (candidate weight
-        # books built once in the parent and inherited COW), replacing the
-        # sequential per-fold loop.
-        (fold_slow_horizons, fold_fast_horizons, fold_funding_carry) = (
-            _run_fold_safe_discovery_parallel(
-                specs, log_close, eligible, opens, bar_funding, grid_1h,
-                precomputed=candidate_books,
-            )
-        )
-        # The top-level report uses fold index 2's selection (train=2021-2024,
-        # the widest leak-free window that still excludes 2025), making the
-        # full-period report's horizon choice walk-forward-safe relative to
-        # 2025 without a second, redundant discovery scan.
-        top_level_horizon = fold_slow_horizons.get(2)
-        if top_level_horizon is not None:
-            slow = dataclasses.replace(slow, horizon_hours=top_level_horizon)
-    fast_grid = pd.date_range(start, end, freq="6h", tz="UTC")
-    slow_grid = pd.date_range(start, end, freq="24h", tz="UTC")
-
-    fast_ema = _signal_ema_span(fast.band.sign, fast.horizon_hours, fast.step_hours)
-    slow_ema = _signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours)
-    w_fast = _book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
-    w_slow = _book_weights(log_close, eligible, slow, slow_grid, ema_span=slow_ema)
-    w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
-    w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
-    execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-    if request.execution_coverage_gate:
-        # Relevance-scoped data-integrity handling (spec
-        # mhs_data_integrity_relevance_scoping.md §3), opt-in via the same
-        # flag as the pre-existing strict gates below (default False keeps
-        # every other call byte-identical, matching this file's established
-        # opt-in-flag convention). Dynamic large-gap exclusion replaces a
-        # static per-symbol exclusion list with a live computation over the
-        # current cache and the current roster mask, so a symbol whose gap is
-        # later backfilled is automatically re-admitted and one whose cache
-        # degrades is automatically excluded. Gaps below the threshold are
-        # left untouched -- the per-event
-        # MISSING_DATA/RELEVANT_EXECUTION_DATA_GAP fold reporting already
-        # handles those correctly.
-        _had_any_roster_member = bool(execution_mask.to_numpy().any())
-        execution_mask, _execution_gap_excluded = apply_dynamic_gap_exclusion(
-            execution_mask, request.execution_timeframe, root=request.data_root,
-        )
-        execution_mask, _mark_gap_excluded = apply_dynamic_mark_gap_exclusion(execution_mask)
-        if _execution_gap_excluded or _mark_gap_excluded:
-            _logger.info(
-                "[DATA] stage=dynamic_gap_exclusion execution_symbols=%d mark_symbols=%d",
-                len(_execution_gap_excluded), len(_mark_gap_excluded),
-            )
-        if _had_any_roster_member and not bool(execution_mask.to_numpy().any()):
-            # Dynamic exclusion is meant to drop individual symbols/periods
-            # with a structurally unusable gap, never the entire roster.
-            # Every member being excluded is a systemic misconfiguration
-            # (wrong data_root, execution_timeframe never collected at all)
-            # rather than ordinary per-symbol data noise, and must fail
-            # closed loudly instead of silently producing a report over zero
-            # executed symbols.
-            raise DataIntegrityError(
-                "dynamic gap exclusion removed every roster member -- "
-                f"execution_timeframe={request.execution_timeframe!r} data_root="
-                f"{request.data_root!r} likely has no coverage at all for this window"
-            )
-        # Relevance-scoped pre-flight gates: the full-universe
-        # Cartesian-product gate is replaced here by per-roster-membership
-        # scope -- gaps outside a symbol's membership interval are ignored, and
-        # mark-price coverage is validated with the exact causal availability
-        # semantics the replay applies, so a pass cannot die mid-replay. Runs
-        # after dynamic exclusion, so this now only ever fires on sub-threshold
-        # gaps for users who want zero-tolerance instead of the default
-        # auto-exclusion.
-        assert_relevant_execution_data_coverage(
-            execution_mask, request.execution_timeframe, root=request.data_root,
-        )
-    realized_execution_roster_size = float(execution_mask.sum(axis=1).mean())
-    if request.execution_coverage_gate:
-        assert_relevant_mark_price_coverage(
-            execution_mask,
-            "1h",
-            stale_hours=24 if request.mark_mode == "cache_required_stale_carry" else 0,
-        )
-    if request.fast_book_mode == "horizon_ensemble":
-        w_fast_execution = _horizon_ensemble_execution_weights(
-            log_close, eligible, execution_mask, fast, fast_grid,
-            "horizon_ensemble", "raw", fast_ema,
-        )
-    else:
-        w_fast_tilted = inverse_realized_vol_tilt(
-            w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
-        )
-        w_fast_execution = renormalize_within_mask(
-            w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
-        )
-    w_slow_execution = _horizon_ensemble_execution_weights(
-        log_close, eligible, execution_mask, slow, slow_grid,
-        request.slow_book_mode, request.ensemble_signal, slow_ema,
-    )
-    if request.beta_neutralize:
-        w_slow_execution = beta_neutralize_weights(
-            w_slow_execution,
-            causal_market_beta(
-                log_close, eligible,
-                MHS_CAUSAL_BETA_LOOKBACK_BARS, MHS_CAUSAL_BETA_MIN_PERIODS,
-            ).reindex(w_slow_execution.index),
-            execution_mask.reindex(w_slow_execution.index).fillna(False),
-            slow.min_symbols,
-        )
-    if request.fast_book_mode == "single_horizon":
-        del w_fast_tilted
-    # Eligibility and the execution roster are now materialized.  The raw
-    # volume matrix otherwise stays alive while phase diagnostics create their
-    # temporary target-weight matrices.
-    if not request.committee_capital:
-        del quote_vol
-    _committee_weights_by_boundary: dict[str, dict[str, float]] = {}
-    _fold_committee_weights: dict[int, dict[str, float]] | None = None
-    if request.committee_capital and request.committee_evidence_weighting:
-        _train_ends = {"top_level": MHS_COMMITTEE_OOS_START}
-        _train_ends.update({
-            f"fold_{_i}": _f.train_end
-            for _i, _f in enumerate(phase_1_anchored_purged_folds())
-        })
-        _committee_weights_by_boundary = _committee_evidence_weights_by_boundary(
-            close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols, _train_ends,
-            members=_research_go._resolved_committee_members(request),
-        )
-        _fold_committee_weights = {
-            _i: _committee_weights_by_boundary[f"fold_{_i}"]
-            for _i in range(len(phase_1_anchored_purged_folds()))
-        }
-    if request.committee_capital:
-        # RC-4: the reported blend is the committee execution book, not the
-        # frozen momentum formula. Un-scaled copy feeds the concurrent replay
-        # base so regime_scale applies exactly once (matching the fold path).
-        blend_1h = _committee_execution_book(
-            close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
-            MHS_COMMITTEE_TRANCHE_COUNT
-            if (request.committee_tranche_smoothing or request.committee_regime_adaptive_tranche)
-            else 1,
-            regime_adaptive_window=(
-                MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
-                if request.committee_regime_adaptive_tranche else None
-            ),
-            target_gross=_research_go._resolved_committee_target_gross(request),
-            member_weights=(_committee_weights_by_boundary.get("top_level") if request.committee_evidence_weighting else None),
-            carry_book=funding_carry_execution_book(bar_funding, execution_mask, MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, MHS_COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
-            members=_research_go._resolved_committee_members(request),
-        ).reindex(grid_1h).ffill().fillna(0.0)
-        committee_execution_book = blend_1h
-        del close, quote_vol, taker_buy_quote
-    else:
-        blend_1h = (
-            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
-            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
-        )
-        committee_execution_book = None
-    # Capture the pre-sleeve deployed book for the diagnostic, then add the
-    # gross-budget sleeve to the executed blend -- including the committee book
-    # passed to the replay -- before the regime cash-scale multiply, so the
-    # overlay rides the same de-risking machinery as the deployed book.
-    current_book_for_diagnostic = blend_1h
-    trend_position = (
-        _trend_sleeve_position(log_close, eligible, slow_grid)
-        if (request.trend_sleeve and request.trend_sleeve_gross > 0.0)
-        else None
-    )
-    if trend_position is not None:
-        blend_1h = _apply_trend_sleeve(
-            blend_1h, trend_position, execution_mask, request.trend_sleeve_gross,
-        )
-        if committee_execution_book is not None:
-            committee_execution_book = blend_1h
-    blend_gross = float(blend_1h.abs().sum(axis=1).mean())
-    blend_cash_fraction = float((1.0 - blend_1h.abs().sum(axis=1)).mean())
-    # R1: apply the same volatility-regime cash scale the fold path applies to
-    # its blended targets (_build_fold_target_weights) so top-level prescreen/
-    # tail/execution diagnostics are comparable to fold primary evidence
-    # (spec §3.2, ``regime_cash_scale``).
-    vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
-    regime_scale = _scaling._regime_cash_scale(vol_mean)
-    if request.trend_efficiency_overlay:
-        regime_scale = regime_scale.mul(
-            _scaling._trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, grid_1h),
-        )
-    blend_1h = blend_1h.mul(regime_scale, axis=0)
-    del vol_mean
-    # The 1h book views are only consumed by ``blend_1h`` above.  Releasing
-    # them before phase diagnostics and the top-level replays keeps two full
-    # multi-year weight matrices out of the replay baseline (spec §3.1).
-    del w_fast_1h, w_slow_1h
-    gc.collect()
-
-    phase_fast = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
-    phase_slow = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
-    _blend_spec, _blend_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
-    del _blend_grid
-    phase_blend = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, _blend_spec)
-
-    # R3: the 48h cross-sectional statistics depend only on the 1h panel, not
-    # the book replays.  Computing them here -- and computing ``signal_48h``
-    # once so the placebo reuses it -- lets ``log_close`` be released before the
-    # three top-level replays instead of staying alive throughout them
-    # (spec §3.1, ``memory_opt``).
-    signal_48h = horizon_log_return(log_close, 48)
-    xs_ic = _statistics._xs_rank_ic(signal_48h, opens, forward_bars=48)
-    trend_sleeve_diagnostic = _trend_sleeve_diagnostic(
-        log_close, eligible, opens, bar_funding, execution_mask,
-        current_book_for_diagnostic, request,
-    ) if request.trend_sleeve else None
-    # The pre-sleeve book is consumed by the diagnostic; the post-sleeve
-    # `blend_1h` alone must survive into the replay.
-    del current_book_for_diagnostic
-    # Feature-axis opt-in diagnostics run after fold pool with evicted caches.
-    multi_feature_diagnostic = None
-    committee_diagnostic = None
-    regression = _statistics._date_clustered_ols(opens, signal_48h, forward_bars=48)
-    horizon_diagnostics = {
-        "realized_vol_48h_mean": float(
-            realized_vol(log_close, 48).mean().mean()
-        ),
-        "efficiency_ratio_48h_mean": float(
-            efficiency_ratio(log_close, 48).mean().mean()
-        ),
-    }
-    discovery_qualification = None
-    full_history_yearly_net_t = None
-    funding_carry_worst_year_corr = None
-    if request.discovery_gate:
-        assert candidate_books is not None
-        _slow_candidate_weights = candidate_books["slow"]
-        _fast_candidate_weights = candidate_books["fast"]
-        _funding_carry_candidate_weights = {
-            1: candidate_books["funding_long"],
-            -1: candidate_books["funding_short"],
-        }
-        discovery_qualification = {
-            "reversal": select_horizon_by_discovery_qualification(
-                sign=-1, horizon_candidates=MHS_DISCOVERY_REVERSAL_CANDIDATES,
-                log_close=log_close, eligible=eligible, opens=opens,
-                bar_funding=bar_funding, grid_1h=grid_1h,
-                discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
-                qualification_end=QUALIFICATION_END,
-                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
-                precomputed_candidate_weights=_fast_candidate_weights,
-                compute_adjusted_net_t=request.discovery_gate_adjusted_net_t,
-                compute_regime_scaled_net_t=request.discovery_gate_regime_scaled_net_t,
-            ),
-            "momentum": select_horizon_by_discovery_qualification(
-                sign=1, horizon_candidates=MHS_DISCOVERY_MOMENTUM_CANDIDATES,
-                log_close=log_close, eligible=eligible, opens=opens,
-                bar_funding=bar_funding, grid_1h=grid_1h,
-                discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
-                qualification_end=QUALIFICATION_END,
-                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
-                precomputed_candidate_weights=_slow_candidate_weights,
-                compute_adjusted_net_t=request.discovery_gate_adjusted_net_t,
-                compute_regime_scaled_net_t=request.discovery_gate_regime_scaled_net_t,
-            ),
-            "funding_carry_long": select_horizon_by_discovery_qualification(
-                sign=1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
-                log_close=log_close, eligible=eligible, opens=opens,
-                bar_funding=bar_funding, grid_1h=grid_1h,
-                discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
-                qualification_end=QUALIFICATION_END,
-                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
-                precomputed_candidate_weights=_funding_carry_candidate_weights[1],
-                compute_adjusted_net_t=request.discovery_gate_adjusted_net_t,
-                compute_regime_scaled_net_t=request.discovery_gate_regime_scaled_net_t,
-            ),
-            "funding_carry_short": select_horizon_by_discovery_qualification(
-                sign=-1, horizon_candidates=MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
-                log_close=log_close, eligible=eligible, opens=opens,
-                bar_funding=bar_funding, grid_1h=grid_1h,
-                discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
-                qualification_end=QUALIFICATION_END,
-                tranche_count=MHS_DISCOVERY_GATE_TRANCHE_COUNT,
-                precomputed_candidate_weights=_funding_carry_candidate_weights[-1],
-                compute_adjusted_net_t=request.discovery_gate_adjusted_net_t,
-                compute_regime_scaled_net_t=request.discovery_gate_regime_scaled_net_t,
-            ),
-        }
-        # Full-history (2021-2025) yearly net-t diagnostics (report-only).
-        full_history_yearly_net_t = {
-            "slow_momentum": yearly_net_t_diagnostic(
-                w_slow.reindex(grid_1h).ffill().fillna(0.0), opens, bar_funding,
-                (2021, 2022, 2023, 2024, 2025),
-                MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
-            ),
-            "fast_reversal": yearly_net_t_diagnostic(
-                w_fast.reindex(grid_1h).ffill().fillna(0.0), opens, bar_funding,
-                (2021, 2022, 2023, 2024, 2025),
-                MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
-            ),
-        }
-        _fc_pick = _prefer_funding_carry_selection(
-            discovery_qualification["funding_carry_long"],
-            discovery_qualification["funding_carry_short"],
-        )
-        _fc_lookback, _fc_sign = _fc_pick if _fc_pick is not None else (168, 1)
-        _fc_book = _funding_carry_candidate_weights[_fc_sign][_fc_lookback]
-        full_history_yearly_net_t["funding_carry"] = yearly_net_t_diagnostic(
-            _fc_book, opens, bar_funding, (2021, 2022, 2023, 2024, 2025),
-            MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
-        )
-        # Worst-year-restricted correlation: does momentum's weakest calendar
-        # year still get funding-carry diversification (spec §2.2)?
-        _fc_net, _ = mhs_ledger_pnl(
-            _fc_book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
-        )
-        _fc_daily = (1.0 + _fc_net).resample("1D").apply(lambda s: s.prod() - 1.0)
-        _slow_net, _ = mhs_ledger_pnl(
-            w_slow.reindex(grid_1h).ffill().fillna(0.0), opens, bar_funding,
-            MEASURED_EXECUTION_COST_TIERS_BPS["base"],
-        )
-        _momentum_daily = (1.0 + _slow_net).resample("1D").apply(lambda s: s.prod() - 1.0)
-        _slow_yearly = full_history_yearly_net_t["slow_momentum"]
-        _finite_years = [y for y, t in _slow_yearly.items() if np.isfinite(t)]
-        if _finite_years:
-            _worst_year = min(_finite_years, key=lambda y: _slow_yearly[y])
-            funding_carry_worst_year_corr = year_restricted_correlation(
-                _fc_daily, _momentum_daily, (_worst_year,),
-            )
-        # Effective breadth audit across candidate weight books.
-        _slow_daily_returns: dict[int, pd.Series] = {}
-        _fast_daily_returns: dict[int, pd.Series] = {}
-        for _horizon, _book in _slow_candidate_weights.items():
-            _net, _ = mhs_ledger_pnl(
-                _book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
-            )
-            _slow_daily_returns[_horizon] = (1.0 + _net).resample("1D").apply(
-                lambda s: s.prod() - 1.0
-            )
-        for _horizon, _book in _fast_candidate_weights.items():
-            _net, _ = mhs_ledger_pnl(
-                _book, opens, bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
-            )
-            _fast_daily_returns[_horizon] = (1.0 + _net).resample("1D").apply(
-                lambda s: s.prod() - 1.0
-            )
-        horizon_diagnostics["slow_horizon_effective_breadth"], _ = effective_breadth(
-            pd.DataFrame(_slow_daily_returns)
-        )
-        horizon_diagnostics["fast_horizon_effective_breadth"], _ = effective_breadth(
-            pd.DataFrame(_fast_daily_returns)
-        )
-    del log_close
-    gc.collect()
-
-    execution_symbols = sorted(
-        set(w_fast_execution.columns[w_fast_execution.ne(0.0).any(axis=0)])
-        | set(w_slow_execution.columns[w_slow_execution.ne(0.0).any(axis=0)])
-        | (
-            set(blend_1h.columns[blend_1h.ne(0.0).any(axis=0)])
-            if request.committee_capital
-            else set()
-        )
-    )
-    initial_equity = 1.0
-    minute_grid = pd.date_range(
-        start, end,
-        freq={"1m": "1min", "3m": "3min", "5m": "5min"}[request.execution_timeframe],
-        tz="UTC",
-    )
-    has_minute_data = any(
-        os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
-        for s in execution_symbols
-    )
-    if has_minute_data and execution_symbols:
-        telemetry.record(
-            "minute_market_mark_funding",
-            grid_bars=len(minute_grid),
-            n_symbols=len(execution_symbols),
-        )
-        _terminal = _guard_stage_or_breach(
-            "pre_books", rss_budget_bytes, rss_reserve_bytes,
-            request, telemetry, str(resolved_end), str(start), str(end),
-        )
-        if _terminal is not None:
-            return _terminal
-        # Each book worker now loads only its own windows' roster slices from
-        # Parquet (window-keyed reads, page-cache backed) and inherits the
-        # execution roster's mark frames warmed here copy-on-write, so no
-        # full-period minute-frame preload is needed before forking -- the three
-        # books run concurrently in fork children (spec Phase 3, P10) with a
-        # fraction of the former resident set.
-        _prewarm_mark_frames(execution_symbols)
-        book_report_fast, book_report_slow, book_report_blend, blend_traces = _run_books_concurrent(
-            root, request, len(funded), grid_1h, fast, slow, fast_grid, slow_grid,
-            w_fast, w_slow, w_fast_execution, w_slow_execution, opens, bar_funding,
-            phase_fast, phase_slow, phase_blend, start, end, funding_by_symbol,
-            blend_1h, execution_mask, initial_equity, telemetry, regime_scale,
-            committee_execution_book=committee_execution_book,
-        )
-        # All three books have completed; the single-use step-weight inputs are
-        # released together (spec §3.1, ``memory_opt``).
-        del w_fast, w_fast_execution, phase_fast
-        del w_slow, w_slow_execution, phase_slow
-        del blend_1h, phase_blend, regime_scale, committee_execution_book
-        gc.collect()
-        _terminal = _guard_stage_or_breach(
-            "post_books", rss_budget_bytes, rss_reserve_bytes,
-            request, telemetry, str(resolved_end), str(start), str(end),
-        )
-        if _terminal is not None:
-            return _terminal
-        # execution_mask stays alive: the post-fold opt-in diagnostics consume
-        # it (a bool panel, ~20 MB).
-        books = {"fast_reversal": book_report_fast, "slow_momentum": book_report_slow}
-        blend_report = book_report_blend
-    else:
-        books = {}
-        blend_report = None
-        blend_traces = {}
-
-    book_reasons = tuple(
-        sorted(
-            b.failure.reason
-            for b in [*books.values(), blend_report]
-            if b is not None and b.failure is not None
-        )
-    )
-
-    trials_attempted = MHS_SEARCH_TRIALS_ATTEMPTED
-    deflated_sharpe_ratio = None
-
-    bootstrap_ci: tuple[float, float] | None = None
-    placebo_percentile: float | None = None
-    participation: dict[str, float] = {}
-    termination_counts: dict[str, int] = {}
-    unsupported = ("partial_fill", "queue_position", "post_only_rejection", "cancel_replace_latency", "order_size_impact")
-
-    # Folds, statistical diagnostics, and deployment readiness are independent
-    # post-book streams: the fold pool runs in fork workers while a background
-    # thread computes the diagnostics + deployment tail (spec Phase 3, P14).
-    # The top-level feature matrices stay alive through that thread and are
-    # released after it joins so the wide multi-year panels never coexist with
-    # the final assembly.
-    (
-        bootstrap_ci, placebo_percentile, participation, termination_counts,
-        fold_reports, deployment,
-    ) = _run_post_book_concurrently(
-        blend_report, root, request, execution_symbols, minute_grid,
-        signal_48h, eligible, opens, bar_funding, grid_1h, fast,
-        fold_funding, initial_equity, telemetry, fold_slow_horizons, fold_fast_horizons,
-        fold_funding_carry, _fold_committee_weights,
-    )
-    folds = tuple(fold_reports)
-    # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
-    _get_symbol_mark_frame.cache_clear()
-    gc.collect()
-    _terminal = _guard_stage_or_breach(
-        "post_folds", rss_budget_bytes, rss_reserve_bytes,
-        request, telemetry, str(resolved_end), str(start), str(end),
-    )
-    if _terminal is not None:
-        return _terminal
-    if request.multi_feature_book or request.committee_book:
-        if request.multi_feature_book:
-            _diag_panel_columns = feature_registry_panel_columns(MHS_FEATURE_REGISTRY)
-        else:
-            _diag_panel_columns = feature_registry_panel_columns(
-                [
-                    spec for spec in MHS_FEATURE_REGISTRY
-                    if spec.name in set(MHS_COMMITTEE_MEMBERS)
-                ],
-            )
-        _diag_panels = _load_feature_panels(
-            root, start, end, grid_1h, aligned_symbols, columns=_diag_panel_columns,
-        )
-        telemetry.record("diagnostic_feature_panels")
-        _assert_stage_rss_budget("diagnostic_feature_panels", rss_budget_bytes, rss_reserve_bytes)
-        if request.committee_book:
-            committee_diagnostic = _committee_diagnostic(
-                root, start, end, grid_1h, aligned_symbols, execution_mask, opens,
-                bar_funding, panels=_diag_panels,
-                rss_budget_bytes=rss_budget_bytes,
-                rss_reserve_bytes=rss_reserve_bytes,
-                telemetry=telemetry,
-                sizing_mode="kelly_blend" if request.committee_kelly_sizing else "vol_target",
-                growth_diagnostic=request.committee_growth_diagnostic,
-            )
-            telemetry.record("committee_diagnostic")
-        if request.multi_feature_book:
-            multi_feature_diagnostic = _multi_feature_diagnostic(
-                root, start, end, grid_1h, aligned_symbols, execution_mask, opens,
-                bar_funding, panels=_diag_panels,
-                rss_budget_bytes=rss_budget_bytes,
-                rss_reserve_bytes=rss_reserve_bytes,
-                telemetry=telemetry,
-            )
-            telemetry.record("multi_feature_diagnostic")
-        del _diag_panels
-        gc.collect()
-    deflated_sharpe_ratio = _statistics._deflated_sharpe_evidence(
-        blend_report, folds, trials_attempted,
-    )
-    fold_blend_parity, parity_reasons = _fold_blend_parity(blend_traces, folds)
-    fold_growth_concentration, concentration_reasons = _fold_growth_concentration(folds)
-    research_go = _research_go._mhs_research_go(
-        folds, book_reasons, parity_reasons + concentration_reasons,
-        blend_primary_max_drawdown=(
-            blend_report.primary_max_drawdown if blend_report is not None else None
-        ),
-    )
-
-    if blend_report is not None and blend_report.primary is not None:
-        if minute_grid is None:
-            raise DataIntegrityError("blend report requires a minute replay grid")
-        # The deployment tail was computed with ``research_go_eligible=None``;
-        # patch in the fold-derived gate decision now that it is resolved.
-        assert deployment is not None
-        deployment = dataclasses.replace(
-            deployment, research_go_eligible=research_go.eligible,
-        )
-        telemetry.record(
-            "blend_participation",
-            fill_count=len(blend_report.primary.simulated_fills),
-        )
-        telemetry.record("statistical_diagnostics")
-    else:
-        deployment = compute_deployment_readiness(
-            pd.Series(
-                [1.0, 1.0],
-                index=pd.DatetimeIndex([start, start + pd.Timedelta(hours=1)]),
-            ),
-            _PERIODS_PER_YEAR_1H,
-            research_go_eligible=research_go.eligible,
-            n_bootstrap=_statistics._BOOTSTRAP_REPLICATES,
-        )
-
-    del eligible
-    del opens, bar_funding
-    del funding_window, minute_grid
-    gc.collect()
-
-    synthetic_stress = {s.name: {"description": s.description} for s in synthetic_stress_scenarios()}
-
-    mark_source = "NOT_RUN_NO_EXECUTION_DATA"
-    fill_source = "NOT_RUN_NO_EXECUTION_DATA"
-    if blend_report is not None and blend_report.primary is not None:
-        mark_source = blend_report.primary.ledger.mark_source
-        fill_source = "OHLCV_IMMEDIATE_TAKER"
-
-    run_elapsed_seconds = time.perf_counter() - _run_start
-    telemetry.record("final_return")
-
-    return MhsHorizonDiagnosticReport(
-        feature=_MHS_FEATURE,
-        status="COMPLETE",
-        start=str(start),
-        end=str(end),
-        resolved_end=str(resolved_end),
-        partition="dev",
-        execution_tiers_bps=required_cost_tiers(),
-        books=books,
-        blend=blend_report,
-        blend_target_gross=blend_gross,
-        blend_cash_fraction=blend_cash_fraction,
-        eligible_symbols=len(funded),
-        trials_attempted=trials_attempted,
-        deflated_sharpe_ratio=deflated_sharpe_ratio,
-        xs_rank_ic=xs_ic,
-        date_clustered_regression=regression,
-        horizon_diagnostics=horizon_diagnostics,
-        bootstrap_ci=bootstrap_ci,
-        placebo_sharpe_percentile=placebo_percentile,
-        deployment_readiness=deployment,
-        synthetic_stress=synthetic_stress,
-        participation_warnings=participation,
-        termination_counts=termination_counts,
-        unsupported_assumptions=unsupported,
-        anchored_folds=phase_1_anchored_purged_folds(),
-        folds=folds,
-        research_go=research_go,
-        fill_source=fill_source,
-        mark_source=mark_source,
-        execution_timeframe=request.execution_timeframe,
-        execution_universe_size=request.execution_universe_size,
-        execution_symbols=tuple(execution_symbols),
-        run_elapsed_seconds=run_elapsed_seconds,
-        resource_measurements=telemetry.records,
-        discovery_qualification=discovery_qualification,
-        realized_execution_roster_size=realized_execution_roster_size,
-        full_history_yearly_net_t=full_history_yearly_net_t,
-        funding_carry_worst_year_corr=funding_carry_worst_year_corr,
-        trend_sleeve_diagnostic=trend_sleeve_diagnostic,
-        multi_feature_diagnostic=multi_feature_diagnostic,
-        committee_diagnostic=committee_diagnostic,
-        funding_dropped_symbols=funding_dropped or None,
-        fold_blend_parity=fold_blend_parity,
-        fold_growth_concentration=fold_growth_concentration,
-        fill_mark_parity=_fill_mark_parity_census,
-    )
-
-
-def mhs_horizon_diagnostic_report_path() -> str:
-    """Single source-controlled report path, sibling to the other ``*_report_path`` helpers."""
-    return str(Path("docs/results") / "mhs_horizon_diagnostic.json")
-
-
-def persist_mhs_horizon_diagnostic_report(
-    report: MhsHorizonDiagnosticReport,
-    path: str | Path,
-    tier: MhsOutputTier = MhsOutputTier.COMPACT,
-    request: MhsDiagnosticRequest | None = None,
-) -> Path | None:
-    """Persist the MHS diagnostic in the requested output tier.
-
-    COMPACT (default) writes a git-committable stripped summary JSON at ``path``
-    plus a daily-resampled ``daily_ledger.parquet`` under the sibling
-    ``*_artifacts`` directory; per-fill detail is intentionally dropped.
-    FULL writes the lossless 5-category unified Parquet audit tables and a
-    verbose checksummed JSON under ``*_artifacts/_full/`` (gitignored), keeping
-    the pre-tiering behaviour byte-for-byte otherwise.
-
-    After either persistence path completes -- including a COMPACT resample
-    failure that returns ``None`` -- one lightweight run-history record is
-    appended to ``<target.parent>/mhs_run_history/``. History logging is
-    observational: a failure there is swallowed via ``_logger.warning`` and
-    never changes the returned persisted path.
-
-    Returns the persisted JSON path, or ``None`` when a COMPACT resample
-    failure is escalated past the compact artifacts (fail-closed policy).
-    """
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    persisted: Path | None
-    if tier == MhsOutputTier.FULL:
-        persisted = _persist_mhs_report_full(report, target)
-    else:
-        persisted = _persist_mhs_report_compact(report, target)
-    try:
-        append_run_history_record(
-            build_mhs_run_history_record(report, request, tier, persisted),
-            mhs_run_history_dir(target),
-        )
-    except Exception:  # noqa: BLE001 - observational; never break the research result
-        _logger.warning(
-            "[MHS] run-history record append failed path=%s",
-            mhs_run_history_dir(target),
-            exc_info=True,
-        )
-    return persisted
-
-def _round_6(value: Any) -> Any:
-    """Recursively round every float to 6 decimals (logging.md §4 precision)."""
-    if isinstance(value, dict):
-        return {k: _round_6(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_round_6(v) for v in value]
-    if isinstance(value, float):
-        return round(float(value), 6)
-    return value
-
-
-def _book_summary(book: MhsBookReport) -> dict[str, Any]:
-    """Curated scalar slice of one book report; heavy replay objects excluded."""
-    return {
-        "name": book.name,
-        "band": book.band,
-        "horizon_hours": book.horizon_hours,
-        "step_hours": book.step_hours,
-        "tranche_count": book.tranche_count,
-        "n_symbols": book.n_symbols,
-        "primary_autocorr_sharpe": book.primary_autocorr_sharpe,
-        "primary_naive_sharpe": book.primary_naive_sharpe,
-        "primary_net_ann": book.primary_net_ann,
-        "primary_geometric_cagr": book.primary_geometric_cagr,
-        "primary_max_drawdown": book.primary_max_drawdown,
-        "primary_annualized_turnover": book.primary_annualized_turnover,
-        "stress_naive_sharpe": book.stress_naive_sharpe,
-        "failure": book.failure,
-        "reference_bound_failures": book.reference_bound_failures,
-    }
-
-
-def _fold_summary(fold: MhsFoldReport) -> dict[str, Any]:
-    """Curated scalar slice of one anchored-fold report."""
-    return {
-        "fold_index": fold.fold_index,
-        "validation_start": fold.validation_start,
-        "validation_end": fold.validation_end,
-        "primary_valid": fold.primary_valid,
-        "primary_autocorr_sharpe": fold.primary_autocorr_sharpe,
-        "primary_naive_sharpe": fold.primary_naive_sharpe,
-        "primary_net_ann": fold.primary_net_ann,
-        "primary_geometric_cagr": fold.primary_geometric_cagr,
-        "primary_max_drawdown": fold.primary_max_drawdown,
-        "stress_naive_sharpe": fold.stress_naive_sharpe,
-        "failures": fold.failures,
-    }
-
-
-
-
-def build_mhs_run_history_record(
-    report: MhsHorizonDiagnosticReport,
-    request: MhsDiagnosticRequest | None,
-    output_tier: MhsOutputTier,
-    persisted_path: Path | None,
-) -> dict[str, Any]:
-    """Curated, structured summary of one MHS run."""
-    record: dict[str, Any] = {
-        "run_at": datetime.now(UTC).isoformat(),
-        "run_id": uuid4().hex,
-        "status": report.status,
-        "output_tier": output_tier.value,
-        "start": report.start,
-        "end": report.end,
-        "resolved_end": report.resolved_end,
-        "flags": dataclasses.asdict(request) if request is not None else None,
-        "perf": {
-            "run_elapsed_seconds": report.run_elapsed_seconds,
-            "peak_rss_bytes": _peak_rss_bytes(report.resource_measurements),
-            "eligible_symbols": report.eligible_symbols,
-            "realized_execution_roster_size": report.realized_execution_roster_size,
-        },
-        "books": {name: _book_summary(book) for name, book in report.books.items()},
-        "blend": _book_summary(report.blend) if report.blend is not None else None,
-        "blend_target_gross": report.blend_target_gross,
-        "blend_cash_fraction": report.blend_cash_fraction,
-        "deflated_sharpe_ratio": report.deflated_sharpe_ratio,
-        "trials_attempted": report.trials_attempted,
-        "folds": [_fold_summary(fold) for fold in report.folds],
-        "research_go": {
-            "eligible": report.research_go.eligible,
-            "reason_codes": report.research_go.reason_codes,
-            "evaluated_folds": report.research_go.evaluated_folds,
-            "folds_passed": report.research_go.folds_passed,
-            "data_integrity_reason_codes": report.research_go.data_integrity_reason_codes,
-        },
-        "discovery_qualification": report.discovery_qualification,
-        "committee_diagnostic": report.committee_diagnostic,
-        "full_history_yearly_net_t": report.full_history_yearly_net_t,
-        "funding_carry_worst_year_corr": report.funding_carry_worst_year_corr,
-        "xs_rank_ic": report.xs_rank_ic,
-        "date_clustered_regression": report.date_clustered_regression,
-        "horizon_diagnostics": report.horizon_diagnostics,
-        "bootstrap_ci": report.bootstrap_ci,
-        "placebo_sharpe_percentile": report.placebo_sharpe_percentile,
-        "deployment_readiness": {
-            "geometric_cagr": report.deployment_readiness.geometric_cagr,
-            "max_drawdown": report.deployment_readiness.max_drawdown,
-            "calmar": report.deployment_readiness.calmar,
-            "probability_final_wealth_below_initial": (
-                report.deployment_readiness.probability_final_wealth_below_initial
-            ),
-            "research_go_eligible": report.deployment_readiness.research_go_eligible,
-            "execution_go_eligible": report.deployment_readiness.execution_go_eligible,
-            "pilot_go_eligible": report.deployment_readiness.pilot_go_eligible,
-            "scale_go_eligible": report.deployment_readiness.scale_go_eligible,
-        },
-        "termination_counts": report.termination_counts,
-        "fold_blend_parity": report.fold_blend_parity,
-        "fold_growth_concentration": report.fold_growth_concentration,
-        "fill_mark_parity": report.fill_mark_parity,
-        "report_path": str(persisted_path) if persisted_path is not None else None,
-    }
-    return cast(dict[str, Any], _round_6(_jsonable(record)))
-
-
-def _collect_replay_entries(
-    report: MhsHorizonDiagnosticReport,
-) -> list[tuple[str, StrategyExecutionReplayResult]]:
-    """Stable ordered replay sessions (books, blend, folds) for persistence."""
-    replay_entries: list[tuple[str, StrategyExecutionReplayResult]] = []
-    for book_name, book_report in report.books.items():
-        if book_report.primary is not None:
-            replay_entries.append((f"{book_name}_primary", book_report.primary))
-        if book_report.stress is not None:
-            replay_entries.append((f"{book_name}_stress", book_report.stress))
-        if book_report.patient_reference is not None:
-            replay_entries.append((f"{book_name}_patient_reference", book_report.patient_reference))
-        if book_report.pre_vol_target_reference is not None:
-            replay_entries.append(
-                (f"{book_name}_pre_vol_target_reference", book_report.pre_vol_target_reference)
-            )
-    if report.blend is not None:
-        if report.blend.primary is not None:
-            replay_entries.append(("blend_primary", report.blend.primary))
-        if report.blend.stress is not None:
-            replay_entries.append(("blend_stress", report.blend.stress))
-        if report.blend.patient_reference is not None:
-            replay_entries.append(("blend_patient_reference", report.blend.patient_reference))
-        if report.blend.pre_vol_target_reference is not None:
-            replay_entries.append(("blend_pre_vol_target_reference", report.blend.pre_vol_target_reference))
-    for fold_report in report.folds:
-        if fold_report.strict is not None:
-            replay_entries.append((f"fold{fold_report.fold_index}_strict", fold_report.strict))
-        if fold_report.stress is not None:
-            replay_entries.append((f"fold{fold_report.fold_index}_stress", fold_report.stress))
-    return replay_entries
-
-
-def _write_json_report(path: Path, payload: Any) -> None:
-    """Serialize ``payload`` to ``path`` preferring orjson over stdlib json."""
-    with path.open("w", encoding="utf-8") as fh:
-        try:
-            import orjson
-
-            fh.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode("utf-8"))
-        except ImportError:
-            json.dump(payload, fh, indent=2, ensure_ascii=False)
-
-
-def _persist_mhs_report_full(
-    report: MhsHorizonDiagnosticReport,
-    target: Path,
-) -> Path:
-    """Lossless tier: the pre-tiering 5-category unified audit tables + JSON.
-
-    Artifacts and the verbose report land under ``*_artifacts/_full/`` so the
-    compact daily ledger at the artifact root stays git-trackable. The JSON
-    carries the full per-replay SHA-256/checksum references exactly as before.
-    """
-    artifact_root = target.parent / f"{target.stem}_artifacts" / "_full"
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    payload = report.to_payload()
-    replay_entries = _collect_replay_entries(report)
-
-    tables_by_replay: dict[str, dict[str, pd.DataFrame]] = {}
-    for replay_id, replay in replay_entries:
-        tables_by_replay[replay_id] = _build_replay_category_tables(replay)
-
-    unified_tables = _write_unified_artifact_tables(tables_by_replay, artifact_root)
-
-    # Keep the FULL artifact directory at exactly the 5 canonical unified tables:
-    # superseded per-replay Parquet files from earlier persistence formats are
-    # removed so re-persisting to the same directory never leaves orphans.
-    canonical_names = {f"{category}.parquet" for category in MHS_ARTIFACT_CATEGORIES}
-    for stale in artifact_root.glob("*.parquet"):
-        if stale.name not in canonical_names:
-            stale.unlink()
-
-    # Fail-closed ledger integrity verification per replay_id partition.
-    for replay_id, _replay in replay_entries:
-        _verify_ledger_artifact(
-            unified_tables["ledger"][0], replay_id, len(tables_by_replay[replay_id]["ledger"])
-        )
-
-    replay_references = {
-        replay_id: _build_replay_artifact_reference(
-            replay_id, replay, tables_by_replay[replay_id], artifact_root, unified_tables
-        )
-        for replay_id, replay in replay_entries
-    }
-
-    for book_name, book_report in report.books.items():
-        book_payload = payload["books"][book_name]
-        if book_report.primary is not None:
-            book_payload["primary"] = replay_references[f"{book_name}_primary"]
-        if book_report.stress is not None:
-            book_payload["stress"] = replay_references[f"{book_name}_stress"]
-    if report.blend is not None:
-        if report.blend.primary is not None:
-            payload["blend"]["primary"] = replay_references["blend_primary"]
-        if report.blend.stress is not None:
-            payload["blend"]["stress"] = replay_references["blend_stress"]
-    for fold_report in report.folds:
-        fold_payload = payload["folds"][fold_report.fold_index]
-        if fold_report.strict is not None:
-            fold_payload["strict"] = replay_references[f"fold{fold_report.fold_index}_strict"]
-        if fold_report.stress is not None:
-            fold_payload["stress"] = replay_references[f"fold{fold_report.fold_index}_stress"]
-
-    payload["artifacts"] = {
-        category: _artifact_reference(frame, path)
-        for category, (path, frame) in unified_tables.items()
-    }
-    payload["replay_ids"] = [replay_id for replay_id, _ in replay_entries]
-
-    report_path = artifact_root / "report.json"
-    _write_json_report(report_path, payload)
-    _logger.info("[MHS] full report persisted path=%s", report_path)
-    return report_path
-
-
-def _replay_category_row_counts(replay: StrategyExecutionReplayResult) -> dict[str, int]:
-    """Cheap per-category row counts straight off the replay (no table build)."""
-    return {
-        "fills": len(replay.simulated_fills),
-        "units": len(replay.simulated_units),
-        "notional_weights": len(replay.simulated_notional_weights),
-        "ledger": len(replay.ledger.equity),
-        "times": len(replay.submit_times),
-    }
-
-
-def _ledger_table(replay: StrategyExecutionReplayResult) -> pd.DataFrame:
-    """Minimal timestamped ledger table (timestamp, equity, fill_turnover)."""
-    equity = replay.ledger.equity
-    idx = equity.index
-    return pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(idx, utc=True),
-            "equity": equity.to_numpy(dtype="float64"),
-            "fill_turnover": replay.ledger.fill_turnover.reindex(idx).to_numpy(dtype="float64"),
-        }
-    )
-
-
-def _compact_replay_ref(row_counts: dict[str, int]) -> dict[str, dict[str, int]]:
-    """Stripped per-replay reference: category -> row_count only."""
-    return {category: {"row_count": row_counts[category]} for category in MHS_ARTIFACT_CATEGORIES}
-
-
-def _wire_compact_refs(
-    payload: Any,
-    report: MhsHorizonDiagnosticReport,
-    replay_entries: list[tuple[str, StrategyExecutionReplayResult]],
-    row_counts: dict[str, dict[str, int]],
-) -> None:
-    """Replace verbose per-replay artifact references with row-count stubs."""
-    for book_name, book_report in report.books.items():
-        book_payload = payload["books"][book_name]
-        if book_report.primary is not None:
-            book_payload["primary"] = _compact_replay_ref(row_counts[f"{book_name}_primary"])
-        if book_report.stress is not None:
-            book_payload["stress"] = _compact_replay_ref(row_counts[f"{book_name}_stress"])
-        if book_report.patient_reference is not None:
-            book_payload["patient_reference"] = _compact_replay_ref(
-                row_counts[f"{book_name}_patient_reference"]
-            )
-        if book_report.pre_vol_target_reference is not None:
-            book_payload["pre_vol_target_reference"] = _compact_replay_ref(
-                row_counts[f"{book_name}_pre_vol_target_reference"]
-            )
-    if report.blend is not None:
-        if report.blend.primary is not None:
-            payload["blend"]["primary"] = _compact_replay_ref(row_counts["blend_primary"])
-        if report.blend.stress is not None:
-            payload["blend"]["stress"] = _compact_replay_ref(row_counts["blend_stress"])
-        if report.blend.patient_reference is not None:
-            payload["blend"]["patient_reference"] = _compact_replay_ref(
-                row_counts["blend_patient_reference"]
-            )
-        if report.blend.pre_vol_target_reference is not None:
-            payload["blend"]["pre_vol_target_reference"] = _compact_replay_ref(
-                row_counts["blend_pre_vol_target_reference"]
-            )
-    for fold_report in report.folds:
-        fold_payload = payload["folds"][fold_report.fold_index]
-        if fold_report.strict is not None:
-            fold_payload["strict"] = _compact_replay_ref(
-                row_counts[f"fold{fold_report.fold_index}_strict"]
-            )
-        if fold_report.stress is not None:
-            fold_payload["stress"] = _compact_replay_ref(
-                row_counts[f"fold{fold_report.fold_index}_stress"]
-            )
-
-
-def _persist_mhs_report_compact(
-    report: MhsHorizonDiagnosticReport,
-    target: Path,
-) -> Path | None:
-    """Compact tier: daily-resampled ledger Parquet + stripped summary JSON.
-
-    The daily rollup is written first; a fail-closed ``DataIntegrityError`` on
-    non-finite equity propagates, while any other resample failure logs and
-    escalates past compact persistence (returns ``None``).
-    """
-    artifact_root = target.parent / f"{target.stem}_artifacts"
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    replay_entries = _collect_replay_entries(report)
-
-    row_counts: dict[str, dict[str, int]] = {}
-    daily_frames: list[pd.DataFrame] = []
-    for replay_id, replay in replay_entries:
-        row_counts[replay_id] = _replay_category_row_counts(replay)
-        try:
-            daily = _daily_resample_ledger(_ledger_table(replay))
-        except DataIntegrityError:
-            raise
-        except Exception:  # noqa: BLE001
-            _logger.error(
-                "[MHS] compact daily resample failed replay_id=%s", replay_id, exc_info=True
-            )
-            return None
-        tagged = daily.copy()
-        tagged.insert(0, "replay_id", replay_id)
-        daily_frames.append(tagged)
-
-    daily_table = pd.concat(daily_frames, ignore_index=True) if daily_frames else pd.DataFrame(
-        {"replay_id": pd.Series(dtype="string")}
-    )
-    daily_path = artifact_root / "daily_ledger.parquet"
-    daily_table.to_parquet(daily_path, index=False, compression="snappy")
-
-    payload = report.to_payload()
-    _wire_compact_refs(payload, report, replay_entries, row_counts)
-    unified_row_counts = {
-        category: sum(rc[category] for rc in row_counts.values())
-        for category in MHS_ARTIFACT_CATEGORIES
-    }
-    payload["artifacts"] = {
-        category: {"file": f"{category}.parquet", "row_count": unified_row_counts[category]}
-        for category in MHS_ARTIFACT_CATEGORIES
-    }
-    payload["artifacts"]["daily_ledger"] = {
-        "file": daily_path.name,
-        "row_count": len(daily_table),
-    }
-    payload["replay_ids"] = [replay_id for replay_id, _ in replay_entries]
-
-    _write_json_report(target, payload)
-    size = target.stat().st_size
-    if size > 50_000:
-        _logger.warning(
-            "[MHS] compact report exceeds 50KB size=%d path=%s", size, target
-        )
-    _logger.info("[MHS] compact report persisted path=%s", target)
-    return target
-
-
-def _to_timestamped_table(frame: pd.DataFrame) -> pd.DataFrame:
-    """Promote a DatetimeIndex into an explicit UTC timestamp column.
-
-    The returned table carries a physical ``datetime64[ns, UTC]`` column named
-    ``timestamp`` and a RangeIndex, so readers need no string-parsing guess.
-    """
-    out = frame.copy()
-    if len(out):
-        out.insert(0, "timestamp", out.index)
-        out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True)
-    else:
-        out["timestamp"] = pd.Series(dtype="datetime64[ns, UTC]")
-    return out.reset_index(drop=True)
-
-
-def _artifact_checksum(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(65536), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def _artifact_reference(table: pd.DataFrame, path: Path) -> dict[str, Any]:
-    """Row count, time bounds, schema version, and content checksum per table."""
-    ts = (
-        pd.to_datetime(table["timestamp"], utc=True)
-        if "timestamp" in table.columns
-        else pd.Series(dtype="datetime64[ns, UTC]")
-    )
-    return {
-        "file": path.name,
-        "schema_version": MHS_ARTIFACT_SCHEMA_VERSION,
-        "row_count": len(table),
-        "time_bounds": {
-            "start": None if len(ts) == 0 else str(ts.iloc[0]),
-            "end": None if len(ts) == 0 else str(ts.iloc[-1]),
-        },
-        "checksum_sha256": _artifact_checksum(path),
-    }
-
-
-def _verify_ledger_artifact(path: Path, replay_id: str, expected_rows: int) -> None:
-    """Re-read a written unified ledger parquet and verify one replay partition fail-closed.
-
-    Checksum-only provenance cannot detect a silently-written NULL or truncated
-    equity column, so this pass re-reads the ``replay_id`` partition via PyArrow
-    pushdown filtering and asserts the exact row count and a fully finite
-    positive equity column (spec §3.3, ``fold_integrity``).
-    """
-    roundtrip = pd.read_parquet(path, filters=[("replay_id", "==", replay_id)])
-    if len(roundtrip) != expected_rows:
-        raise DataIntegrityError(
-            f"ledger artifact row count mismatch path={path} replay_id={replay_id} "
-            f"expected={expected_rows} got={len(roundtrip)}"
-        )
-    if expected_rows and "equity" in roundtrip.columns:
-        equity = roundtrip["equity"].to_numpy(dtype="float64")
-        if not np.isfinite(equity).all() or (equity <= 0).any():
-            raise DataIntegrityError(
-                f"ledger artifact equity must be finite and strictly positive "
-                f"path={path} replay_id={replay_id}"
-            )
-
-
-def _daily_resample_ledger(ledger_table: pd.DataFrame) -> pd.DataFrame:
-    """Resample one replay's minute ledger to a daily OHLCV rollup.
-
-    ``ledger_table`` must carry at least ``timestamp``, ``equity`` and
-    ``fill_turnover`` columns (the unified ledger schema). One row is emitted
-    per UTC day with ``equity_open/high/low/close``, ``daily_return``
-    (close/prev_close - 1), ``daily_turnover`` (sum of fill turnover) and
-    ``daily_fill_count`` (count of fill-bearing grid rows). Non-finite or
-    non-positive equity fails closed with ``DataIntegrityError``.
-    """
-    required = {"timestamp", "equity", "fill_turnover"}
-    missing = required - set(ledger_table.columns)
-    if missing:
-        raise DataIntegrityError(f"daily resample requires columns {sorted(missing)}")
-    frame = ledger_table.copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
-    equity = frame["equity"].to_numpy(dtype="float64")
-    if not np.isfinite(equity).all() or (equity <= 0).any():
-        raise DataIntegrityError("ledger equity must be finite and strictly positive")
-    grouped = frame.groupby(pd.Grouper(key="timestamp", freq="1D"))
-    resampled = pd.DataFrame(
-        {
-            "equity_open": grouped["equity"].first(),
-            "equity_high": grouped["equity"].max(),
-            "equity_low": grouped["equity"].min(),
-            "equity_close": grouped["equity"].last(),
-            "daily_turnover": grouped["fill_turnover"].sum(),
-            "daily_fill_count": grouped["fill_turnover"].agg(lambda s: int((s > 0).sum())),
-        }
-    )
-    resampled = resampled.rename_axis("date").reset_index()
-    resampled["daily_return"] = (
-        resampled["equity_close"] / resampled["equity_close"].shift(1) - 1.0
-    ).replace([np.inf, -np.inf], np.nan)
-    # The daily rollup is a diagnostic aggregate, never a PnL source, so the
-    # numeric columns are safely downcast to float32 (validated finite/positive
-    # above) to keep the git-tracked compact artifact lean.
-    for col in (
-        "equity_open", "equity_high", "equity_low", "equity_close",
-        "daily_return", "daily_turnover",
-    ):
-        resampled[col] = resampled[col].astype("float32")
-    return resampled
-
-
-def _build_replay_category_tables(
-    replay: StrategyExecutionReplayResult,
-) -> dict[str, pd.DataFrame]:
-    """Build the five category tables for one replay, without the ``replay_id`` column."""
-    fills = replay.simulated_fills.copy()
-    if not fills.empty and "timestamp" in fills.columns:
-        fills["timestamp"] = pd.to_datetime(fills["timestamp"], utc=True)
-
-    units_table = _to_timestamped_table(replay.simulated_units)
-    notional_table = _to_timestamped_table(replay.simulated_notional_weights)
-
-    ledger = pd.concat(
-        {
-            "equity": replay.ledger.equity,
-            "net_returns": replay.ledger.net_returns,
-            "mark_to_market_pnl": replay.ledger.mark_to_market_pnl,
-            "funding_charge": replay.ledger.funding_charge,
-            "fee_charge": replay.ledger.fee_charge,
-            "fill_turnover": replay.ledger.fill_turnover,
-        },
-        axis=1,
-    )
-    ledger_table = _to_timestamped_table(ledger)
-
-    times = pd.DataFrame(
-        {"submit_time": replay.submit_times, "fill_time": replay.fill_times}
-    )
-    times["submit_time"] = pd.to_datetime(times["submit_time"], utc=True)
-    times["fill_time"] = pd.to_datetime(times["fill_time"], utc=True)
-
-    return {
-        "fills": fills,
-        "units": units_table,
-        "notional_weights": notional_table,
-        "ledger": ledger_table,
-        "times": times,
-    }
-
-
-def _write_unified_artifact_tables(
-    tables_by_replay: dict[str, dict[str, pd.DataFrame]],
-    artifact_root: Path,
-) -> dict[str, tuple[Path, pd.DataFrame]]:
-    """Concatenate per-replay category tables into exactly 5 unified Parquet files.
-
-    Every unified table carries a leading ``replay_id`` column; the 5 files are
-    written with snappy compression (much faster than zstd for these wide
-    numeric tables) and returned as ``{category: (path, frame)}``.  Cross-replay
-    schema promotion (timestamps at different precision, string vs large_string)
-    is handled by ``pd.concat`` which promotes dtypes losslessly before the
-    single snappy Parquet write (spec O8).
-    """
-    unified_frames: dict[str, list[pd.DataFrame]] = {
-        category: [] for category in MHS_ARTIFACT_CATEGORIES
-    }
-    for replay_id, tables in tables_by_replay.items():
-        for category in MHS_ARTIFACT_CATEGORIES:
-            tagged = tables[category].copy()
-            tagged.insert(0, "replay_id", replay_id)
-            unified_frames[category].append(tagged)
-
-    unified_tables: dict[str, tuple[Path, pd.DataFrame]] = {}
-    for category in MHS_ARTIFACT_CATEGORIES:
-        frames = unified_frames[category]
-        if frames:
-            frame = pd.concat(frames, ignore_index=True)
-        else:
-            frame = pd.DataFrame({"replay_id": pd.Series(dtype="string")})
-        path = artifact_root / f"{category}.parquet"
-        frame.to_parquet(path, index=False, compression="snappy")
-        unified_tables[category] = (path, frame)
-    return unified_tables
-
-
-def _build_replay_artifact_reference(
-    replay_id: str,
-    replay: StrategyExecutionReplayResult,
-    tables: dict[str, pd.DataFrame],
-    artifact_root: Path,
-    unified_tables: dict[str, tuple[Path, pd.DataFrame]],
-) -> dict[str, Any]:
-    """Unified-file reference for one replay: per-category row/time provenance and
-    the shared unified file checksum, so readers load via ``load_mhs_replay_artifact``."""
-    return {
-        "artifact_format": "parquet",
-        "artifact_dir": str(artifact_root),
-        "replay_id": replay_id,
-        "fills": _artifact_reference(tables["fills"], unified_tables["fills"][0]),
-        "units": _artifact_reference(tables["units"], unified_tables["units"][0]),
-        "notional_weights": _artifact_reference(
-            tables["notional_weights"], unified_tables["notional_weights"][0]
-        ),
-        "ledger": _artifact_reference(tables["ledger"], unified_tables["ledger"][0]),
-        "times": _artifact_reference(tables["times"], unified_tables["times"][0]),
-        "fill_source": replay.fill_source,
-        "mark_source": replay.mark_source,
-        "event_snapshots_retained": replay.event_snapshots_retained,
-        "fill_count": replay.fill_count,
-        "unfilled_count": replay.unfilled_count,
-        "fallback_count": replay.fallback_count,
-        "all_intent_shortfall_bps": replay.all_intent_shortfall_bps,
-        "forced_exit_count": replay.forced_exit_count,
-        "forced_exit_notional": replay.forced_exit_notional,
-        "termination_counts": dict(replay.termination_counts),
-        "unsupported_assumptions": list(replay.unsupported_assumptions),
-        "elapsed_seconds": replay.elapsed_seconds,
-        "data_gaps": [
-            {
-                "code": gap.code,
-                "symbol": gap.symbol,
-                "timestamp": _jsonable(gap.timestamp),
-                "decision_time": _jsonable(gap.decision_time),
-                "signal_time": _jsonable(gap.signal_time),
-                "execution_bound": gap.execution_bound,
-            }
-            for gap in replay.data_gaps
-        ],
-    }
-
-
-def load_mhs_replay_artifact(
-    artifact_root: str | Path,
-    replay_id: str,
-    category: Literal["fills", "units", "notional_weights", "ledger", "times"],
-) -> pd.DataFrame:
-    """Load a specific replay's artifact table using PyArrow pushdown filtering."""
-    path = Path(artifact_root) / f"{category}.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"Unified artifact table missing: {path}")
-    return pd.read_parquet(path, filters=[("replay_id", "==", replay_id)]).drop(
-        columns=["replay_id"]
-    )
+    ctx.run_start = _run_start
+    telemetry = StageTelemetry(log_run=request.log_run)
+    return run_stages(ctx, telemetry)

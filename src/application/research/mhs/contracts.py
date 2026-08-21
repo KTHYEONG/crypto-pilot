@@ -8,21 +8,17 @@ so adding one MHS execution option requires editing exactly one request field.
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
-from src.mhs.params import _MHS_COMMITTEE_TARGET_GROSS_UNSET
+from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET
 
 if TYPE_CHECKING:
     import pandas as pd
 
-    from src.mhs.discovery import DiscoveryQualificationResult
-    from src.mhs.evaluation import (
-        AnchoredPurgedFold,
+    from src.mhs.evidence import (
         CostResponsePoint,
-        DeploymentReadinessResult,
         PhaseDiagnosticResult,
         TailSensitivityResult,
     )
@@ -231,12 +227,12 @@ class MhsDiagnosticRequest:
             flag="--committee-capital", help="Build the committee capital book.", negate_flag="--no-committee-capital",
         ),
     )
-    committee_member_set: Literal["risk_premia_v2", "flow_momentum_v1"] = field(
-        default="risk_premia_v2",
+    committee_member_set: Literal["risk_premia", "flow_momentum"] = field(
+        default="risk_premia",
         metadata=cli_param(
             flag="--committee-member-set",
             help="Registered committee axis set.",
-            choices=("risk_premia_v2", "flow_momentum_v1"),
+            choices=("risk_premia", "flow_momentum"),
             requires=("committee_capital",),
         ),
     )
@@ -253,7 +249,7 @@ class MhsDiagnosticRequest:
         ),
     )
     committee_target_gross: float | None = field(
-        default=_MHS_COMMITTEE_TARGET_GROSS_UNSET,  # type: ignore[assignment]
+        default=COMMITTEE_TARGET_GROSS_UNSET,  # type: ignore[assignment]
         metadata=cli_param(
             flag="--committee-target-gross",
             help="Committee book target gross exposure.",
@@ -295,7 +291,7 @@ class MhsDiagnosticRequest:
 
     def __post_init__(self) -> None:
         from src.application.research.mhs.validation import validate_request
-        validate_request(self, _MHS_COMMITTEE_TARGET_GROSS_UNSET)
+        validate_request(self, COMMITTEE_TARGET_GROSS_UNSET)
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,7 +300,7 @@ class MhsBookFailure:
 
     ``stage`` names the failing replay stage, ``error_class`` is the exact
     exception class name, ``reason`` is a stable fail-closed code (one of the
-    ``MHS_GO_REASON_*`` strings), and ``message`` carries the deterministic
+    ``GO_REASON_*`` strings), and ``message`` carries the deterministic
     provenance. A failed book has no ledger/artifact reference and never
     fabricates metrics, deployment readiness, or Research-GO evidence.
     """
@@ -413,57 +409,11 @@ class MhsFoldReport:
     regime_characterization: dict[str, float] | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class MhsHorizonDiagnosticReport:
-    feature: str
-    status: str
-    start: str
-    end: str
-    resolved_end: str
-    partition: str
-    execution_tiers_bps: tuple[float, ...]
-    books: dict[str, MhsBookReport]
-    blend: MhsBookReport | None
-    blend_target_gross: float
-    blend_cash_fraction: float
-    eligible_symbols: int
-    trials_attempted: int
-    deflated_sharpe_ratio: float | None
-    xs_rank_ic: dict[str, float]
-    date_clustered_regression: dict[str, float]
-    horizon_diagnostics: dict[str, float]
-    bootstrap_ci: tuple[float, float] | None
-    placebo_sharpe_percentile: float | None
-    deployment_readiness: DeploymentReadinessResult
-    synthetic_stress: dict[str, dict[str, Any]]
-    participation_warnings: dict[str, float]
-    termination_counts: dict[str, int]
-    unsupported_assumptions: tuple[str, ...]
-    anchored_folds: tuple[AnchoredPurgedFold, ...]
-    folds: tuple[MhsFoldReport, ...]
-    research_go: MhsResearchGoResult
-    fill_source: str
-    mark_source: str
-    execution_timeframe: str
-    execution_universe_size: int
-    execution_symbols: tuple[str, ...]
-    run_elapsed_seconds: float
-    resource_measurements: tuple[MhsResourceMeasurement, ...] = ()
-    discovery_qualification: dict[str, DiscoveryQualificationResult] | None = None
-    realized_execution_roster_size: float | None = None
-    full_history_yearly_net_t: dict[str, dict[int, float]] | None = None
-    funding_carry_worst_year_corr: float | None = None
-    trend_sleeve_diagnostic: dict[str, Any] | None = None
-    multi_feature_diagnostic: dict[str, Any] | None = None
-    committee_diagnostic: dict[str, Any] | None = None
-    funding_dropped_symbols: dict[str, str] | None = None
-    fold_blend_parity: dict[str, Any] | None = None
-    fold_growth_concentration: dict[str, Any] | None = None
-    fill_mark_parity: dict[str, Any] | None = None
-
-    def to_payload(self) -> Any:
-        from src.application.research.mhs.evaluation import _jsonable
-        return _jsonable(dataclasses.asdict(self))
+# Canonical definition moved to src.mhs.report.schema (P1); re-exported here
+# so every existing `from ...contracts import MhsHorizonDiagnosticReport` keeps working.
+from src.mhs.report.schema import (  # noqa: E402
+    MhsHorizonDiagnosticReport as MhsHorizonDiagnosticReport,
+)
 
 
 @dataclass(frozen=True, slots=True)

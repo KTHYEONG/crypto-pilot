@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from src.mhs.contracts import MHS_FILL_MARK_MAX_LOG_DIVERGENCE
+from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
 from src.research.universe.pit_universe import symbol_partition
 
 
@@ -162,7 +162,7 @@ def liquid_half_eligibility(
 def fill_mark_parity_mask(
     fill_close: pd.DataFrame,
     mark_close: pd.DataFrame,
-    max_log_divergence: float = MHS_FILL_MARK_MAX_LOG_DIVERGENCE,
+    max_log_divergence: float = FILL_MARK_MAX_LOG_DIVERGENCE,
 ) -> pd.DataFrame:
     """Boolean mask: True where the bar is tradeable at the modelled fill price.
 
