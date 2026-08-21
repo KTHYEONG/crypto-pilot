@@ -21,8 +21,8 @@ from src.mhs.committee import (
     volatility_target_scale,
     wealth_metrics,
 )
-from src.mhs.contracts import MHS_COMMITTEE_MEMBERS, MHS_COMMITTEE_OOS_START
-from src.mhs.features import MHS_FEATURE_REGISTRY
+from src.mhs.types import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
+from src.mhs.features import FEATURE_REGISTRY
 
 _PPY = 365.0 * 24.0
 
@@ -402,21 +402,21 @@ def test_purged_walk_forward_invalid_sizing_mode_raises() -> None:
 def test_committee_members_resolve_in_feature_registry() -> None:
     # SCENARIO_COMMITTEE_MEMBERS_RESOLVE_IN_FEATURE_REGISTRY and
     # SCENARIO_MHS_COMMITTEE_MEMBERS_SPAN_THREE_FAMILIES_AFTER_K5: every name in
-    # MHS_COMMITTEE_MEMBERS resolves to exactly one FeatureSpec in
-    # MHS_FEATURE_REGISTRY, the k=5 tuple has 5 unique entries (xs_mom_720h
+    # COMMITTEE_MEMBERS resolves to exactly one FeatureSpec in
+    # FEATURE_REGISTRY, the k=5 tuple has 5 unique entries (xs_mom_720h
     # removed as rank-invariant no-op), and it spans at least 3 distinct economic
     # families -- the composition invariant that stops the committee from
     # silently collapsing into one family.
-    assert len(MHS_COMMITTEE_MEMBERS) == 5
-    assert len(set(MHS_COMMITTEE_MEMBERS)) == 5
-    registry_names = {spec.name for spec in MHS_FEATURE_REGISTRY}
-    assert set(MHS_COMMITTEE_MEMBERS) <= registry_names
-    for member in MHS_COMMITTEE_MEMBERS:
-        matches = [spec for spec in MHS_FEATURE_REGISTRY if spec.name == member]
+    assert len(COMMITTEE_MEMBERS) == 5
+    assert len(set(COMMITTEE_MEMBERS)) == 5
+    registry_names = {spec.name for spec in FEATURE_REGISTRY}
+    assert set(COMMITTEE_MEMBERS) <= registry_names
+    for member in COMMITTEE_MEMBERS:
+        matches = [spec for spec in FEATURE_REGISTRY if spec.name == member]
         assert len(matches) == 1
 
     families = set()
-    for member in MHS_COMMITTEE_MEMBERS:
+    for member in COMMITTEE_MEMBERS:
         if member.startswith("flow_"):
             families.add("order_flow")
         elif member.startswith(("xs_mom", "xs_idio_mom")):
@@ -435,24 +435,24 @@ def test_committee_block_edges_from_anchored_at_oos_start() -> None:
     # SCENARIO_COMMITTEE_BLOCK_EDGES_ANCHORED_AT_OOS_START (B1): the walk-forward
     # block grid must be anchored at max(start, oos_start), never the raw
     # diagnostic start, so a purged walk-forward can no longer score pre-OOS
-    # blocks as pseudo-OOS. Edges start at MHS_COMMITTEE_OOS_START (2023-01-01)
+    # blocks as pseudo-OOS. Edges start at COMMITTEE_OOS_START (2023-01-01)
     # in 6-month steps and never earlier; a diagnostic whose own start is
     # already after oos_start is unaffected (max() semantics); end <=
     # max(start, oos_start) raises ValueError.
     edges = committee_block_edges_from(
         pd.Timestamp("2021-01-01", tz="UTC"),
-        MHS_COMMITTEE_OOS_START,
+        COMMITTEE_OOS_START,
         pd.Timestamp("2025-12-31", tz="UTC"),
     )
-    assert edges[0] == MHS_COMMITTEE_OOS_START
+    assert edges[0] == COMMITTEE_OOS_START
     assert edges[0] == pd.Timestamp("2023-01-01", tz="UTC")
     for prev, nxt in itertools.pairwise(edges):
         assert nxt == prev + pd.DateOffset(months=6)
-    assert all(e >= MHS_COMMITTEE_OOS_START for e in edges)
+    assert all(e >= COMMITTEE_OOS_START for e in edges)
 
     late = committee_block_edges_from(
         pd.Timestamp("2024-06-01", tz="UTC"),
-        MHS_COMMITTEE_OOS_START,
+        COMMITTEE_OOS_START,
         pd.Timestamp("2025-12-31", tz="UTC"),
     )
     assert late[0] == pd.Timestamp("2024-06-01", tz="UTC")
@@ -460,7 +460,7 @@ def test_committee_block_edges_from_anchored_at_oos_start() -> None:
     with pytest.raises(ValueError, match="max\\(start, oos_start\\)"):
         committee_block_edges_from(
             pd.Timestamp("2021-01-01", tz="UTC"),
-            MHS_COMMITTEE_OOS_START,
+            COMMITTEE_OOS_START,
             pd.Timestamp("2022-01-01", tz="UTC"),
         )
 
@@ -573,29 +573,29 @@ def test_growth_budget_annual_vol_returns_float_in_range() -> None:
 
 def test_growth_budget_annual_vol_fallback_on_empty() -> None:
     # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_03: on an empty Series, returns
-    # MHS_PNL_TARGET_ANNUAL_VOL.
+    # PNL_TARGET_ANNUAL_VOL.
     from src.mhs.committee import growth_budget_annual_vol
-    from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+    from src.mhs.params import PNL_TARGET_ANNUAL_VOL
 
-    assert growth_budget_annual_vol(pd.Series(dtype=float)) == MHS_PNL_TARGET_ANNUAL_VOL
+    assert growth_budget_annual_vol(pd.Series(dtype=float)) == PNL_TARGET_ANNUAL_VOL
 
 
 def test_growth_budget_annual_vol_fallback_on_one_row() -> None:
     from src.mhs.committee import growth_budget_annual_vol
-    from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+    from src.mhs.params import PNL_TARGET_ANNUAL_VOL
 
     idx = _hourly_index(1)
-    assert growth_budget_annual_vol(pd.Series([0.001], index=idx)) == MHS_PNL_TARGET_ANNUAL_VOL
+    assert growth_budget_annual_vol(pd.Series([0.001], index=idx)) == PNL_TARGET_ANNUAL_VOL
 
 
 def test_growth_budget_annual_vol_fallback_on_zero_std() -> None:
     # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_03: an all-zero (std==0) Series
-    # returns exactly MHS_PNL_TARGET_ANNUAL_VOL.
+    # returns exactly PNL_TARGET_ANNUAL_VOL.
     from src.mhs.committee import growth_budget_annual_vol
-    from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+    from src.mhs.params import PNL_TARGET_ANNUAL_VOL
 
     idx = _hourly_index(500)
-    assert growth_budget_annual_vol(pd.Series(0.0, index=idx)) == MHS_PNL_TARGET_ANNUAL_VOL
+    assert growth_budget_annual_vol(pd.Series(0.0, index=idx)) == PNL_TARGET_ANNUAL_VOL
 
 
 def test_growth_budget_annual_vol_always_finite() -> None:

@@ -13,8 +13,8 @@ from src.application.research.mhs import evaluation as ev
 import src.application.research.mhs.marks as marks
 from src.application.research.mhs.evaluation import MhsDiagnosticRequest
 from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.contracts import PHASE_1_BOOK_BLEND_WEIGHTS
-from src.mhs.evaluation import AnchoredPurgedFold
+from src.mhs.types import BOOK_BLEND_WEIGHTS
+from src.mhs.evidence import AnchoredPurgedFold
 from src.mhs.horizons import horizon_log_return
 from src.research.universe.pit_universe import symbol_partition
 
@@ -167,7 +167,7 @@ class TestSignalEmaSpan:
     def test_signal_ema_span_is_sign_aware(self) -> None:
         assert ev._signal_ema_span(-1, 48, 6) is None
         assert ev._signal_ema_span(-1, 168, 24) is None
-        assert ev._signal_ema_span(1, 48, 6) == max(1, round(48 / 6 * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+        assert ev._signal_ema_span(1, 48, 6) == max(1, round(48 / 6 * ev.SIGNAL_EMA_HORIZON_SPAN))
         assert ev._signal_ema_span(1, 168, 24) == 7
 
     def test_fast_book_unsmoothed_matches_direct_construction(self) -> None:
@@ -181,7 +181,7 @@ class TestSignalEmaSpan:
             index=idx,
         )
         eligible = pd.DataFrame(True, index=idx, columns=log_close.columns)
-        fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+        fast = ev.BOOK_SPECS["fast_reversal"]
         fast_grid = pd.date_range(_START, idx[-1], freq="6h", tz="UTC")
 
         w_fast = ev._book_weights(log_close, eligible, fast, fast_grid, ema_span=None)
@@ -194,8 +194,8 @@ class TestSignalEmaSpan:
         pd.testing.assert_frame_equal(w_fast, expected)
 
     def test_slow_ema_span_equals_pre_refactor_inline_formula(self) -> None:
-        slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
-        inline = max(1, round(slow.horizon_hours / slow.step_hours * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+        slow = ev.BOOK_SPECS["slow_momentum"]
+        inline = max(1, round(slow.horizon_hours / slow.step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
         assert ev._signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours) == inline
 
     def test_fold_targets_byte_identical_when_ema_applied_to_both_bands(self, mhs_market) -> None:
@@ -207,7 +207,7 @@ class TestSignalEmaSpan:
         request = _request(root, end)
 
         def old_inline_span(band_sign: int, horizon_hours: int, step_hours: int) -> int | None:
-            return max(1, round(horizon_hours / step_hours * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+            return max(1, round(horizon_hours / step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
 
         targets_real, *_ = _fold_targets(mhs_market, request, _FOLD)
         monkeypatch = pytest.MonkeyPatch()
@@ -260,7 +260,7 @@ class TestTrendEfficiencyOverlayScalesSlowOnly:
 
     def test_overlay_derisks_choppy_stretch_and_preserves_invariants(self, choppy_market) -> None:
         root, end = choppy_market
-        assert PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] == 0.0
+        assert BOOK_BLEND_WEIGHTS["fast_reversal"] == 0.0
         # portfolio_trigger is the invariant-preserving fold rebalance mode
         # (same mode the existing fold-invariant test uses): the trigger holds
         # only whole neutral rows and the overlay scales every column by one
