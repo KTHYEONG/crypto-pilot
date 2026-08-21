@@ -109,6 +109,13 @@ exclude = [
 module = "tests.*"
 ignore_errors = true
 
+# evaluation.py intentionally re-exports many names imported from sibling mhs
+# modules; stage functions import them from evaluation's namespace for
+# byte-identical object references during the orchestrator decomposition.
+[[tool.mypy.overrides]]
+module = "src.application.research.mhs.evaluation"
+no_implicit_reexport = false
+
 
 
 
@@ -140,6 +147,7 @@ filterwarnings = [
 dev = [
     "mypy>=2.0.0",
     "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.12",
 ]
