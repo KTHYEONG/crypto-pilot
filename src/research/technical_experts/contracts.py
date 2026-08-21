@@ -15,7 +15,7 @@ from typing import Literal
 
 CandidateSide = Literal["LONG", "SHORT"]
 
-_RETURN_SOURCE_PATTERN = re.compile(r"^technical_[a-z0-9_]+_(long|short)_v1$")
+_RETURN_SOURCE_PATTERN = re.compile(r"^technical_[a-z0-9_]+_(long|short)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +58,10 @@ class TechnicalCandidate:
         match = _RETURN_SOURCE_PATTERN.match(self.return_source)
         if match is None or match.group(1).upper() != self.side:
             raise ValueError(
-                f"return_source must be 'technical_<family>_<side>_v1' matching side "
+                f"return_source must be 'technical_<family>_<side>' matching side "
                 f"{self.side}, got {self.return_source!r}"
             )
-        expected = f"technical_{self.family}_{self.side.lower()}_v1"
+        expected = f"technical_{self.family}_{self.side.lower()}"
         if self.return_source != expected:
             raise ValueError(
                 f"return_source {self.return_source!r} does not match family/side "
@@ -74,11 +74,11 @@ def _check_contract() -> None:
     from inspect import signature
 
     candidate = TechnicalCandidate(
-        "x", "technical_ema_alignment_long_v1", "ema_alignment", "LONG",
+        "x", "technical_ema_alignment_long", "ema_alignment", "LONG",
         {"fast": 20, "mid": 50, "slow": 200}, 201,
     )
     assert candidate.side == "LONG"
-    assert candidate.return_source == "technical_ema_alignment_long_v1"
+    assert candidate.return_source == "technical_ema_alignment_long"
     assert list(signature(TechnicalCandidate).parameters) == [
         "candidate_id", "return_source", "family", "side", "config", "min_history_bars",
     ]

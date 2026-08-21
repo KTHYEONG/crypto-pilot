@@ -18,9 +18,9 @@ from src.common.config import FUTURES_DATA_DIR, funding_path
 from src.common.errors import DataIntegrityError
 from src.market_data.services.futures_collection import DataCollector
 from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.contracts import PHASE_1_BOOK_SPECS
 from src.mhs.horizons import horizon_log_return
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
+from src.mhs.types import BOOK_SPECS
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +83,7 @@ def build_mhs_execution_plan(
     )
     selected: set[str] = set()
     for name in ("fast_reversal", "slow_momentum"):
-        spec = PHASE_1_BOOK_SPECS[name]
+        spec = BOOK_SPECS[name]
         grid = decision_grids[0 if name == "fast_reversal" else 1]
         signal = horizon_log_return(log_close, spec.horizon_hours).reindex(grid)
         eligibility = eligible.reindex(grid)
@@ -331,7 +331,7 @@ def assert_relevant_mark_price_coverage(
 # is recomputed from the live cache and the live roster mask on every call, so
 # a symbol excluded today is automatically re-admitted once its gap is
 # backfilled, and a symbol excluded tomorrow if its cache degrades.
-MHS_DYNAMIC_GAP_EXCLUSION_HOURS = 720.0
+DYNAMIC_GAP_EXCLUSION_HOURS = 720.0
 
 
 def _execution_gap_windows(
@@ -377,7 +377,7 @@ def apply_dynamic_gap_exclusion(
     execution_mask: pd.DataFrame,
     timeframe: str,
     root: str | None = None,
-    min_gap_hours: float = MHS_DYNAMIC_GAP_EXCLUSION_HOURS,
+    min_gap_hours: float = DYNAMIC_GAP_EXCLUSION_HOURS,
 ) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
     """Zero out roster membership wherever a large OHLCV gap overlaps it.
 
@@ -440,7 +440,7 @@ def apply_dynamic_mark_gap_exclusion(
     execution_mask: pd.DataFrame,
     timeframe: str = "1h",
     root: str | None = None,
-    min_gap_hours: float = MHS_DYNAMIC_GAP_EXCLUSION_HOURS,
+    min_gap_hours: float = DYNAMIC_GAP_EXCLUSION_HOURS,
 ) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
     """Zero out roster membership wherever a large mark-price gap overlaps it.
 

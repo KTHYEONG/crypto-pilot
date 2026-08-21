@@ -2,7 +2,7 @@
 
 Fast and slow ranks/signals are constructed independently; the only Phase 1
 combination is the preregistered 50/50 portfolio allocation (see
-``PHASE_1_BOOK_BLEND_WEIGHTS``). A shared TrendScore or performance-selected
+``BOOK_BLEND_WEIGHTS``). A shared TrendScore or performance-selected
 blend is signal pooling and is prohibited.
 """
 

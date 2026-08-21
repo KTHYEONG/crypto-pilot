@@ -10,8 +10,8 @@ import argparse
 import logging
 import time
 
-from src.mhs.contracts import MHS_FUNDING_CARRY_SLEEVE_WEIGHT
-from src.mhs.params import MHS_COMMITTEE_DEFAULT_MEMBER_SET
+from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
+from src.mhs.params import COMMITTEE_DEFAULT_MEMBER_SET
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -21,75 +21,19 @@ _logger = logging.getLogger("MhsHorizonDiagnosticCli")
 
 
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
-    from src.application.research.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
-    from src.application.research.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report, run_mhs_horizon_diagnostic
-    from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS
+    import dataclasses
 
-    fold_safe_horizon = args.fold_safe_horizon
-    # Main-logic default: committee_capital + regime-adaptive tranche is the
-    # best-measured configuration (see ADR_20260817_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE),
-    # so both default on and are opt-out (--no-committee-capital /
-    # --no-committee-regime-adaptive-tranche) rather than opt-in. An explicit
-    # --committee-tranche-smoothing request always wins over the adaptive
-    # default so the two stay mutually exclusive without a hard CLI error.
-    committee_capital = not args.no_committee_capital
-    committee_regime_adaptive_tranche = (
-        committee_capital
-        and not args.no_committee_regime_adaptive_tranche
-        and not args.committee_tranche_smoothing
-    )
-    # The registered exposure constant is the default; --no-committee-target-gross
-    # restores the diluted book (None).
-    committee_target_gross = (
-        None
-        if args.no_committee_target_gross or not committee_capital
-        else (
-            MHS_COMMITTEE_TARGET_GROSS
-            if args.committee_target_gross is None
-            else args.committee_target_gross
-        )
-    )
-    funding_carry_sleeve = committee_capital and not args.no_funding_carry_sleeve
-    request = MhsDiagnosticRequest(
-        start=args.start,
-        end=args.end,
-        mark_mode=args.mark_mode,
-        execution_timeframe=args.execution_timeframe,
-        max_rss_bytes=args.max_rss_bytes,
-        log_run=not args.no_log_run,
-        touch_diagnostic=args.touch_diagnostic,
-        ladder_diagnostic=args.ladder_diagnostic,
-        discovery_gate=args.discovery_gate,
-        trend_sleeve=args.trend_sleeve,
-        trend_sleeve_gross=args.trend_sleeve_gross,
-        multi_feature_book=args.multi_feature_book,
-        committee_book=args.committee_book,
-        committee_kelly_sizing=args.committee_kelly_sizing,
-        committee_growth_diagnostic=args.committee_growth_diagnostic,
-        committee_capital=committee_capital,
-        committee_member_set=args.committee_member_set,
-        committee_tranche_smoothing=args.committee_tranche_smoothing,
-        committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
-        committee_target_gross=committee_target_gross,
-        committee_evidence_weighting=args.committee_evidence_weighting,
-        execution_coverage_gate=args.execution_coverage_gate,
-        fill_mark_parity_gate=not args.no_fill_mark_parity_gate,
-        exposure_scale_two_sided=args.exposure_scale_two_sided,
-        ram_guard=not args.no_ram_guard,
-        discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
-        discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
-        fold_safe_horizon_selection=fold_safe_horizon,
-        crash_regime_tilt_alpha=args.crash_regime_tilt_alpha,
-        slow_book_mode=args.slow_book_mode,
-        fast_book_mode=args.fast_book_mode,
-        rebalance_filter=args.rebalance_filter,
-        beta_neutralize=args.beta_neutralize,
-        ensemble_signal=args.ensemble_signal,
-        trend_efficiency_overlay=args.trend_efficiency_overlay,
-        pnl_vol_target=not args.no_pnl_vol_target,
-        pnl_vol_target_mode=args.pnl_vol_target_mode, funding_carry_sleeve=funding_carry_sleeve, funding_carry_weight=(args.funding_carry_weight if funding_carry_sleeve else 0.0),
-    )
-    report = run_mhs_horizon_diagnostic(request)
+    from src.application.research.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
+    from src.application.research.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
+
+    # FIX D1: MhsRunConfig is the sole owner of the derived-default logic
+    # (committee_capital/regime-adaptive tranche/target-gross/funding-carry-sleeve
+    # opt-out semantics); the CLI only parses and adapts to MhsDiagnosticRequest.
+    config = MhsRunConfig.from_namespace(args)
+    request = MhsDiagnosticRequest(**dataclasses.asdict(config))
+    report = run_mhs_diagnostic(config)
     persist_start = time.perf_counter()
     path = persist_mhs_horizon_diagnostic_report(
         report, mhs_horizon_diagnostic_report_path(),
@@ -280,9 +224,9 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "committee decision row to an explicit gross, restoring the "
             "unit-gross invariant that the k=5 member average and the tranche "
             "mean otherwise dilute to ~0.53 (47%% idle cash). DEFAULT (flag "
-            "omitted): the registered MHS_COMMITTEE_TARGET_GROSS=0.92, the "
+            "omitted): the registered COMMITTEE_TARGET_GROSS=0.92, the "
             "largest replay-certified exposure inside the registered "
-            "MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget (certified point "
+            "COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget (certified point "
             "0.9231: CAGR 0.6996 / MDD -0.2311 / Calmar 3.03 / stress Sharpe "
             "1.34, 3/3 anchored folds); the I4 drawdown-budget gate blocks "
             "Research-GO if a replay breaches the budget. Pass "
@@ -393,7 +337,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Opt-in: allow the ex-ante vol target scale to lever UP above "
             "1.0x when realized vol is below the target (two-sided scaling). "
             "Requires --pnl-vol-target-mode=exante_target; the upper bound is "
-            "MHS_PNL_VOL_TARGET_MAX_SCALE = 1.0/MHS_COMMITTEE_TARGET_GROSS"
+            "PNL_VOL_TARGET_MAX_SCALE = 1.0/COMMITTEE_TARGET_GROSS"
         ),
     )
     mhs.add_argument(
@@ -523,11 +467,11 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     )
     mhs.add_argument(
         "--committee-member-set",
-        choices=["risk_premia_v2", "flow_momentum_v1"],
-        default=MHS_COMMITTEE_DEFAULT_MEMBER_SET,
+        choices=["risk_premia", "flow_momentum"],
+        default=COMMITTEE_DEFAULT_MEMBER_SET,
         help=(
-            "Registered committee axis set: flow_momentum_v1 (default, "
-            "the certified k=5 book) or risk_premia_v2 (measured non-default -- "
+            "Registered committee axis set: flow_momentum (default, "
+            "the certified k=5 book) or risk_premia (measured non-default -- "
             "full 3m replay breached the registered drawdown budget and added "
             "STRESS_SHARPE_NOT_POSITIVE folds, see ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES). "
             "Requires --committee-capital (on by default)"
@@ -547,7 +491,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument(
         "--funding-carry-weight",
         type=float,
-        default=MHS_FUNDING_CARRY_SLEEVE_WEIGHT,
+        default=FUNDING_CARRY_SLEEVE_WEIGHT,
         help=(
             "Gross-budget share of the funding-carry sleeve in [0.0, 1.0); "
             "a registered risk-budget policy value on a measured 0.25-0.35 "
