@@ -9,7 +9,7 @@ from dataclasses import FrozenInstanceError
 
 from src.mhs.books import rank_weight_book
 from src.mhs.features import (
-    MHS_FEATURE_REGISTRY,
+    FEATURE_REGISTRY,
     FeatureSpec,
     build_feature_books,
     equal_risk_combination,
@@ -275,7 +275,7 @@ def test_new_registry_builders_are_causal_and_finite() -> None:
             rng.uniform(100.0, 200.0, (n, len(_SYMBOLS))), index=idx, columns=_SYMBOLS,
         ),
     }
-    for spec in MHS_FEATURE_REGISTRY:
+    for spec in FEATURE_REGISTRY:
         if spec.name not in new_names:
             continue
         assert all(column in panels for column in spec.required_columns)
@@ -323,25 +323,25 @@ def test_source_coverage_audit_catches_pre_fillna_gaps() -> None:
         source_coverage_audit(source.iloc[1:], mask)
 
 def test_feature_registry_panel_columns_prunes_to_required_union() -> None:
-    # SCENARIO_MHS_FEATURE_PANEL_COLUMN_PRUNING: feature_registry_panel_columns
+    # SCENARIOFEATURE_NAME_PANEL_COLUMN_PRUNING: feature_registry_panel_columns
     # returns the deterministic first-seen union of required_columns -- for the
     # full registry 6 columns with NO 'open' (no builder uses it), and for the
     # 6 committee members 3 columns -- so _load_feature_panels can prune its
     # parquet reads and resident panels accordingly.
-    from src.mhs.contracts import MHS_COMMITTEE_MEMBERS
+    from src.mhs.types import COMMITTEE_MEMBERS
     from src.mhs.features import feature_registry_panel_columns
 
-    registry_cols = feature_registry_panel_columns(MHS_FEATURE_REGISTRY)
+    registry_cols = feature_registry_panel_columns(FEATURE_REGISTRY)
     assert registry_cols == (
         "close", "taker_buy_quote", "quote_vol", "high", "low", "no_trades",
     )
     assert "open" not in registry_cols
 
     member_specs = [
-        spec for spec in MHS_FEATURE_REGISTRY if spec.name in set(MHS_COMMITTEE_MEMBERS)
+        spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)
     ]
     committee_cols = feature_registry_panel_columns(member_specs)
-    # Default flow_momentum_v1: registry order puts flow_imb_168h/flow_imb_720h
+    # Default flow_momentum: registry order puts flow_imb_168h/flow_imb_720h
     # (taker_buy_quote, quote_vol) before xs_mom_336h/xs_idio_mom_336h/
     # mom3_skew_168h (close,) -> first-seen union is (taker_buy_quote,
     # quote_vol, close).

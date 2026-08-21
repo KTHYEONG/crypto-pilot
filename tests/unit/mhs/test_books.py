@@ -368,13 +368,13 @@ class TestIndependentBands:
         assert slow.abs().sum(axis=1).sub(1.0).abs().max() < 1e-9
 
     def test_zero_weighted_fast_blend_is_pure_admitted_slow(self) -> None:
-        from src.mhs.contracts import PHASE_1_BOOK_BLEND_WEIGHTS
+        from src.mhs.types import BOOK_BLEND_WEIGHTS
 
         fast = pd.DataFrame({"A": [1.0, 1.0], "B": [-1.0, -1.0]})
         slow = pd.DataFrame({"A": [-0.5, -0.5], "B": [0.5, 0.5]})
         blend = (
-            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * fast
-            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * slow
+            BOOK_BLEND_WEIGHTS["fast_reversal"] * fast
+            + BOOK_BLEND_WEIGHTS["slow_momentum"] * slow
         )
         # fast_reversal is zero-weighted (admission-failed prescreen); the blend
         # is exactly the admitted slow book, never renormalized to another gross.
