@@ -14,9 +14,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from src.mhs.contracts import MHS_DISCOVERY_START
-from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
 from src.mhs.execution import mhs_ledger_pnl
+from src.mhs.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
 
 _EULER_GAMMA = 0.577215664901532860606512090082402431
 
@@ -488,7 +487,7 @@ def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
     purge = 168
     return (
         AnchoredPurgedFold(
-            MHS_DISCOVERY_START,
+            DISCOVERY_START,
             pd.Timestamp("2021-12-31", tz="UTC"),
             pd.Timestamp("2022-01-08", tz="UTC"),
             pd.Timestamp("2022-12-31", tz="UTC"),
@@ -496,7 +495,7 @@ def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
             purge,
         ),
         AnchoredPurgedFold(
-            MHS_DISCOVERY_START,
+            DISCOVERY_START,
             pd.Timestamp("2022-12-31", tz="UTC"),
             pd.Timestamp("2023-01-08", tz="UTC"),
             pd.Timestamp("2023-12-31", tz="UTC"),
@@ -504,7 +503,7 @@ def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
             purge,
         ),
         AnchoredPurgedFold(
-            MHS_DISCOVERY_START,
+            DISCOVERY_START,
             pd.Timestamp("2023-12-31", tz="UTC"),
             pd.Timestamp("2024-01-08", tz="UTC"),
             pd.Timestamp("2024-12-31", tz="UTC"),
@@ -512,7 +511,7 @@ def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
             purge,
         ),
         AnchoredPurgedFold(
-            MHS_DISCOVERY_START,
+            DISCOVERY_START,
             pd.Timestamp("2024-12-31", tz="UTC"),
             pd.Timestamp("2025-01-08", tz="UTC"),
             pd.Timestamp("2025-12-31", tz="UTC"),
@@ -628,7 +627,7 @@ def _stationary_block_bootstrap_paths(
     """Wealth multipliers (final wealth / initial) per replicate, vectorized.
 
     Statistically equivalent to the scalar while-loop block composition
-    (MHS_PERF_OPT_003 precedent): block lengths are ``geometric(p_block)`` and
+    (PERF_OPT_003 precedent): block lengths are ``geometric(p_block)`` and
     block starts are uniform, matching the scalar length law.  A 6x block-count
     safety margin makes running short effectively impossible; any shortfall
     still falls back to the scalar replicate path.
