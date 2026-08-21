@@ -303,12 +303,12 @@ class TestQualityCalibrationWiring:
 
     @staticmethod
     def _book_signal_ema_span(spec) -> int:
-        return max(1, round(spec.horizon_hours / spec.step_hours * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+        return max(1, round(spec.horizon_hours / spec.step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
 
     def test_top_level_book_weights_use_ema_span_matching_fold_path(self, calibrated_report) -> None:
         _report, captured = calibrated_report
-        fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
-        slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+        fast = ev.BOOK_SPECS["fast_reversal"]
+        slow = ev.BOOK_SPECS["slow_momentum"]
         assert captured["ema_spans"]["fast_reversal"]
         assert captured["ema_spans"]["slow_momentum"]
         # Every _book_weights call passes the same sign-aware EMA span.
@@ -321,7 +321,7 @@ class TestQualityCalibrationWiring:
     def test_top_level_blend_applies_regime_cash_scale_and_deadband(self, calibrated_report) -> None:
         report, captured = calibrated_report
         assert report.books, "top-level books must run on the synthetic market"
-        assert captured["regime_callers"].count("run_mhs_horizon_diagnostic") == 1
+        assert captured["regime_callers"].count("build_committee") == 1
         assert captured["deadband_callers"].count("_book_outcome") == 3
 
     def test_top_level_books_diagnostic_fields_populated_after_quality_calibration(self, report) -> None:
@@ -348,10 +348,19 @@ class TestQualityCalibrationWiring:
         assert report.date_clustered_regression == statistics._date_clustered_ols(opens, signal_48h, forward_bars=48)
 
     def test_run_mhs_horizon_diagnostic_log_close_released_before_book_replay(self) -> None:
-        src = inspect.getsource(ev.run_mhs_horizon_diagnostic)
-        assert "del log_close" in src
-        assert "signal_48h" in src
-        assert src.index("del log_close") < src.index("_run_books_concurrent(")
+        """The log_close release (now in build_committee) still runs, and the
+        pipeline runner still sequences build_committee strictly before
+        run_replays -- the memory-release ordering this test protects survived
+        the stage decomposition, just moved to different source files."""
+        from src.mhs.pipeline import runner
+        from src.mhs.pipeline.stages import committee as committee_stage
+
+        committee_src = inspect.getsource(committee_stage.build_committee)
+        assert "del ctx.log_close" in committee_src
+        assert "signal_48h" in committee_src
+
+        runner_src = inspect.getsource(runner.run_stages)
+        assert runner_src.index("build_committee(") < runner_src.index("run_replays(")
 
 
 class TestMhsHorizonDiagnostic:
@@ -390,6 +399,7 @@ class TestMhsHorizonDiagnostic:
                 ),
             )
 
+    @pytest.mark.slow
     def test_end_past_cutoff_raises(self, synthetic_market) -> None:
         root, end = synthetic_market
         with pytest.raises(RuntimeError):
@@ -618,6 +628,7 @@ class TestNoSilentMarkFallback:
             lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
         )
 
+    @pytest.mark.slow
     def test_cache_required_fails_closed_with_typed_rejection(
         self, synthetic_market, tmp_path, monkeypatch,
     ) -> None:
@@ -641,6 +652,7 @@ class TestNoSilentMarkFallback:
             assert book.primary_autocorr_sharpe is None
         assert report.research_go.eligible is False
 
+    @pytest.mark.slow
     def test_explicit_ohlcv_fallback_completes_as_fallback(
         self, synthetic_market, tmp_path, monkeypatch,
     ) -> None:
@@ -661,7 +673,7 @@ class TestMarkPriceGoValidityIntegration:
     """MHS-MARK-05-GO-VALIDITY: an invalid primary never yields a Research GO."""
 
     def test_research_go_requires_valid_primary(self) -> None:
-        from src.mhs.evaluation import compute_deployment_readiness
+        from src.mhs.evidence import compute_deployment_readiness
 
         idx = pd.date_range("2025-01-01", periods=5, freq="1h", tz="UTC")
         equity = pd.Series(np.cumprod(1.0 + np.full(5, 0.001)), index=idx)
@@ -841,21 +853,21 @@ class TestAnchoredFoldGoGate:
             )
 
         from src.application.research.mhs.evaluation import (
-            MHS_GO_REASON_EXECUTION_GAP,
-            MHS_GO_REASON_INCOMPLETE_FOLD,
-            MHS_GO_REASON_PRIMARY_SHARPE,
-            MHS_GO_REASON_STRESS_SHARPE,
+            GO_REASON_EXECUTION_GAP,
+            GO_REASON_INCOMPLETE_FOLD,
+            GO_REASON_PRIMARY_SHARPE,
+            GO_REASON_STRESS_SHARPE,
         )
 
-        gap = _mhs_research_go((fold(0, (MHS_GO_REASON_EXECUTION_GAP,)),))
+        gap = _mhs_research_go((fold(0, (GO_REASON_EXECUTION_GAP,)),))
         assert gap.eligible is False
-        assert MHS_GO_REASON_EXECUTION_GAP in gap.reason_codes
+        assert GO_REASON_EXECUTION_GAP in gap.reason_codes
 
-        sharpe = _mhs_research_go((fold(0, (MHS_GO_REASON_PRIMARY_SHARPE,)),))
-        assert MHS_GO_REASON_PRIMARY_SHARPE in sharpe.reason_codes
+        sharpe = _mhs_research_go((fold(0, (GO_REASON_PRIMARY_SHARPE,)),))
+        assert GO_REASON_PRIMARY_SHARPE in sharpe.reason_codes
 
-        stress = _mhs_research_go((fold(0, (MHS_GO_REASON_STRESS_SHARPE,)),))
-        assert MHS_GO_REASON_STRESS_SHARPE in stress.reason_codes
+        stress = _mhs_research_go((fold(0, (GO_REASON_STRESS_SHARPE,)),))
+        assert GO_REASON_STRESS_SHARPE in stress.reason_codes
 
         incomplete = _mhs_research_go(
             (
@@ -874,13 +886,13 @@ class TestAnchoredFoldGoGate:
                     stress_naive_sharpe=float("nan"),
                     decision_intents=0,
                     termination_counts={},
-                    failures=(MHS_GO_REASON_INCOMPLETE_FOLD,),
+                    failures=(GO_REASON_INCOMPLETE_FOLD,),
                     strict_elapsed_seconds=0.0,
                     stress_elapsed_seconds=0.0,
                 ),
             ),
         )
-        assert MHS_GO_REASON_INCOMPLETE_FOLD in incomplete.reason_codes
+        assert GO_REASON_INCOMPLETE_FOLD in incomplete.reason_codes
         assert incomplete.eligible is False
 
 class TestFoldSafeHorizonEfficiency:
@@ -1100,7 +1112,7 @@ class TestTypedArtifactRoundtrip:
         from dataclasses import replace
 
         from src.application.research.mhs.evaluation import (
-            MHS_GO_REASON_UNSPECIFIED_POLICY,
+            GO_REASON_UNSPECIFIED_POLICY,
             MhsFoldReport,
             MhsOutputTier,
             load_mhs_replay_artifact,
@@ -1132,7 +1144,7 @@ class TestTypedArtifactRoundtrip:
             stress_naive_sharpe=0.1,
             decision_intents=1,
             termination_counts={},
-            failures=(MHS_GO_REASON_UNSPECIFIED_POLICY,),
+            failures=(GO_REASON_UNSPECIFIED_POLICY,),
             strict_elapsed_seconds=0.01,
             stress_elapsed_seconds=0.01,
         )
@@ -1246,7 +1258,7 @@ class TestFoldWindowTelemetryOracle:
         ``_build_fold_target_weights`` builder and run the dense single-panel
         oracle (``strategy_aware_execution_replay``) over the whole validation
         window."""
-        from src.mhs.contracts import ExecutionSpec
+        from src.mhs.types import ExecutionSpec
         from src.mhs.execution import strategy_aware_execution_replay
 
         fold = FOLD_WINDOW_FOLD

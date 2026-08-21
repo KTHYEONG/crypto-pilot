@@ -16,7 +16,7 @@ from src.mhs.discovery import (
     fold_train_only_discovery_qualification,
     select_horizon_by_discovery_qualification,
 )
-from src.mhs.evaluation import AnchoredPurgedFold
+from src.mhs.evidence import AnchoredPurgedFold
 from src.mhs.horizons import horizon_log_return, vol_normalized_horizon_signal
 
 DISCOVERY_START = pd.Timestamp("2021-01-01", tz="UTC")

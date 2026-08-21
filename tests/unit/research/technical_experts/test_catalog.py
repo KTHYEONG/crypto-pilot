@@ -27,7 +27,7 @@ class TestTechnicalCatalog:
         assert {c.family for c in TECHNICAL_CANDIDATES} == _FROZEN_FAMILIES
         assert {c.side for c in TECHNICAL_CANDIDATES} == {"LONG", "SHORT"}
         assert (
-            resolve_technical_candidate("technical_macd_histogram_regime_long_v1").family
+            resolve_technical_candidate("technical_macd_histogram_regime_long").family
             == "macd_histogram_regime"
         )
 
@@ -37,11 +37,11 @@ class TestTechnicalCatalog:
         assert len(set(ids)) == 18
         assert len(set(sources)) == 18
         for candidate in TECHNICAL_CANDIDATES:
-            assert candidate.return_source == f"technical_{candidate.family}_{candidate.side.lower()}_v1"
+            assert candidate.return_source == f"technical_{candidate.family}_{candidate.side.lower()}"
 
     def test_unknown_or_retired_source_fails_closed(self) -> None:
         with pytest.raises(ValueError, match="unknown or retired"):
-            resolve_technical_candidate("technical_open_interest_deleveraging_v1")
+            resolve_technical_candidate("technical_open_interest_deleveraging")
         with pytest.raises(ValueError, match="unknown or retired"):
             resolve_technical_candidate("technical_macd_histogram_regime_long_v2")
         with pytest.raises(ValueError, match="unknown or retired"):
@@ -75,7 +75,7 @@ class TestTechnicalCatalog:
         # TIS-02: at 1d the 4h/1d ratio (1/6) shrinks every int-valued config
         # entry and min_history_bars; float thresholds pass through untouched.
         scaled = resolve_technical_candidate(
-            "technical_ema_alignment_long_v1", timeframe="1d",
+            "technical_ema_alignment_long", timeframe="1d",
         )
         assert scaled.config == {
             "fast": round(20 / 6),
@@ -85,7 +85,7 @@ class TestTechnicalCatalog:
         assert scaled.min_history_bars == max(1, round(201 / 6))
 
         rsi = resolve_technical_candidate(
-            "technical_rsi_trend_pullback_long_v1", timeframe="1d",
+            "technical_rsi_trend_pullback_long", timeframe="1d",
         )
         assert rsi.config["period"] == max(1, round(14 / 6))
         assert rsi.config["regime"] == max(1, round(200 / 6))
@@ -93,7 +93,7 @@ class TestTechnicalCatalog:
         assert rsi.config["upper"] == 60.0
 
         bb = resolve_technical_candidate(
-            "technical_bb_squeeze_breakout_long_v1", timeframe="1d",
+            "technical_bb_squeeze_breakout_long", timeframe="1d",
         )
         assert bb.config["mult"] == 2.0
         assert bb.config["squeeze_percentile"] == 0.2
@@ -117,7 +117,7 @@ class TestTechnicalCatalog:
                     assert scaled.config[key] == value
             assert scaled.min_history_bars == max(1, round(default.min_history_bars * factor))
         stochastic = resolve_technical_candidate(
-            "technical_stochastic_trend_pullback_long_v1", timeframe="1d",
+            "technical_stochastic_trend_pullback_long", timeframe="1d",
         )
         assert stochastic.config["d_period"] == 1
         assert stochastic.config["smooth"] == 1
@@ -125,5 +125,5 @@ class TestTechnicalCatalog:
     def test_unknown_source_fails_closed_at_any_timeframe(self) -> None:
         with pytest.raises(ValueError, match="unknown or retired"):
             resolve_technical_candidate(
-                "technical_open_interest_deleveraging_v1", timeframe="1d",
+                "technical_open_interest_deleveraging", timeframe="1d",
             )

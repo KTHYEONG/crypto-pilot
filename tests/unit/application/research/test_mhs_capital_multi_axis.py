@@ -13,9 +13,9 @@ from src.application.research.mhs.evaluation import (
     MhsDiagnosticRequest,
     _committee_execution_book,
 )
-from src.mhs.contracts import MHS_COMMITTEE_MEMBERS
-from src.mhs.evaluation import AnchoredPurgedFold
-from src.mhs.features import MHS_FEATURE_REGISTRY, FeatureSpec, build_feature_books
+from src.mhs.types import COMMITTEE_MEMBERS
+from src.mhs.evidence import AnchoredPurgedFold
+from src.mhs.features import FEATURE_REGISTRY, FeatureSpec, build_feature_books
 from src.research.universe.pit_universe import symbol_partition
 from tests.unit.application.research.mhs.test_evaluation import _write_mhs_market
 
@@ -32,7 +32,7 @@ _FOLD = AnchoredPurgedFold(
 
 
 def _committee_member_specs() -> list[FeatureSpec]:
-    return [spec for spec in MHS_FEATURE_REGISTRY if spec.name in set(MHS_COMMITTEE_MEMBERS)]
+    return [spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)]
 
 
 @pytest.fixture
@@ -135,7 +135,7 @@ def test_fold_path_wires_helper_byte_identical(mhs_market_with_taker_buy_quote, 
     )
     assert captured is not None
     close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols = captured
-    assert min_symbols == ev.PHASE_1_BOOK_SPECS["slow_momentum"].min_symbols
+    assert min_symbols == ev.BOOK_SPECS["slow_momentum"].min_symbols
     books = build_feature_books(
         _committee_member_specs(),
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},

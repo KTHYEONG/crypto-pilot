@@ -12,8 +12,8 @@ from src.application.research.mhs import evaluation as ev
 from src.application.research.mhs import marks
 from src.mhs import params
 from src.application.research.mhs.evaluation import (
-    MHS_GO_REASON_INVALID_PRIMARY,
-    MHS_GO_REASON_RESOURCE_BREACH,
+    GO_REASON_INVALID_PRIMARY,
+    GO_REASON_RESOURCE_BREACH,
     MhsDiagnosticRequest,
     _book_structure_trace,
     _run_anchored_fold,
@@ -146,8 +146,8 @@ class TestMemoryBudget:
         )
         assert report.strict is not None
         assert report.primary_valid is True
-        assert MHS_GO_REASON_RESOURCE_BREACH not in report.failures
-        assert MHS_GO_REASON_INVALID_PRIMARY not in report.failures
+        assert GO_REASON_RESOURCE_BREACH not in report.failures
+        assert GO_REASON_INVALID_PRIMARY not in report.failures
         window_stages = [m for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
         assert window_stages
         budget = int(2.5 * 1024**3)
@@ -162,8 +162,8 @@ class TestMemoryBudget:
             str(root), OPT_FOLD, _request(root, end, max_rss_bytes=1),
             funding, 1.0, 0,
         )
-        assert MHS_GO_REASON_RESOURCE_BREACH in report.failures
-        assert MHS_GO_REASON_INVALID_PRIMARY not in report.failures
+        assert GO_REASON_RESOURCE_BREACH in report.failures
+        assert GO_REASON_INVALID_PRIMARY not in report.failures
 
 
 class TestSignalQualityMechanisms:
@@ -206,7 +206,7 @@ class TestSignalQualityMechanisms:
         assert float(scale.iloc[1000]) == pytest.approx(1.0)
         assert float(scale.iloc[2090]) < 1.0
         assert float(scale.max()) <= 1.0
-        assert float(scale.min()) >= params.MHS_REGIME_CASH_SCALE_FLOOR
+        assert float(scale.min()) >= params.REGIME_CASH_SCALE_FLOOR
 
     @pytest.mark.slow
     def test_fold_quality_metrics_finite_from_valid_primary(self, fold_market, funding) -> None:
@@ -354,8 +354,8 @@ class TestFoldIntegrity:
         for report in (first, second):
             assert report.strict is not None
             assert report.primary_valid is True
-            assert MHS_GO_REASON_RESOURCE_BREACH not in report.failures
-            assert MHS_GO_REASON_INVALID_PRIMARY not in report.failures
+            assert GO_REASON_RESOURCE_BREACH not in report.failures
+            assert GO_REASON_INVALID_PRIMARY not in report.failures
 
     def test_ledger_artifact_null_integrity_verification(self, fold_market, funding, tmp_path) -> None:
         root, end = fold_market

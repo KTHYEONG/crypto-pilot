@@ -5,13 +5,13 @@ import dataclasses
 import pandas as pd
 import pytest
 
-from src.mhs.contracts import (
+from src.mhs.types import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
-    MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
-    MHS_TREND_SLEEVE_HORIZONS_HOURS,
+    FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+    TREND_SLEEVE_HORIZONS_HOURS,
     MOMENTUM_HORIZON_CANDIDATES_HOURS,
-    PHASE_1_BOOK_BLEND_WEIGHTS,
-    PHASE_1_BOOK_SPECS,
+    BOOK_BLEND_WEIGHTS,
+    BOOK_SPECS,
     REVERSAL_HORIZON_CANDIDATES_HOURS,
     BookSpec,
     ExecutionSpec,
@@ -108,15 +108,15 @@ class TestFrozenLiterals:
         # it takes the full allocation.
         # fast_reversal stays a computed book (signal/prescreen kept for
         # re-measurement), just zero-weighted.
-        assert PHASE_1_BOOK_BLEND_WEIGHTS == {"fast_reversal": 0.0, "slow_momentum": 1.0}
-        assert set(PHASE_1_BOOK_BLEND_WEIGHTS) == set(PHASE_1_BOOK_SPECS)
-        assert PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] == 0.0
-        assert abs(sum(PHASE_1_BOOK_BLEND_WEIGHTS.values()) - 1.0) < 1e-12
+        assert BOOK_BLEND_WEIGHTS == {"fast_reversal": 0.0, "slow_momentum": 1.0}
+        assert set(BOOK_BLEND_WEIGHTS) == set(BOOK_SPECS)
+        assert BOOK_BLEND_WEIGHTS["fast_reversal"] == 0.0
+        assert abs(sum(BOOK_BLEND_WEIGHTS.values()) - 1.0) < 1e-12
 
     def test_book_specs_contain_only_frozen_books(self) -> None:
-        assert set(PHASE_1_BOOK_SPECS) == {"fast_reversal", "slow_momentum"}
-        fast = PHASE_1_BOOK_SPECS["fast_reversal"]
-        slow = PHASE_1_BOOK_SPECS["slow_momentum"]
+        assert set(BOOK_SPECS) == {"fast_reversal", "slow_momentum"}
+        fast = BOOK_SPECS["fast_reversal"]
+        slow = BOOK_SPECS["slow_momentum"]
         assert fast.horizon_hours == 48
         assert fast.step_hours == 6
         assert fast.tranche_count() == 8
@@ -132,14 +132,14 @@ class TestFrozenLiterals:
         # grid (all 19 horizons, 72..504 step 24) so a fold-selected horizon
         # passes BookSpec.__post_init__'s band check, while the frozen 168h
         # default is unchanged and out-of-band values still fail closed.
-        slow = PHASE_1_BOOK_SPECS["slow_momentum"]
+        slow = BOOK_SPECS["slow_momentum"]
         assert slow.band.horizons_hours == MOMENTUM_HORIZON_CANDIDATES_HOURS
         assert len(MOMENTUM_HORIZON_CANDIDATES_HOURS) == 19
         assert MOMENTUM_HORIZON_CANDIDATES_HOURS[0] == 72
         assert MOMENTUM_HORIZON_CANDIDATES_HOURS[-1] == 504
         assert tuple(range(72, 504 + 1, 24)) == MOMENTUM_HORIZON_CANDIDATES_HOURS
         assert slow.horizon_hours == 168
-        fast = PHASE_1_BOOK_SPECS["fast_reversal"]
+        fast = BOOK_SPECS["fast_reversal"]
         assert fast.band.horizons_hours == REVERSAL_HORIZON_CANDIDATES_HOURS
         assert len(REVERSAL_HORIZON_CANDIDATES_HOURS) == 7
         assert REVERSAL_HORIZON_CANDIDATES_HOURS == (24, 48, 72, 96, 120, 144, 168)
@@ -168,44 +168,44 @@ class TestFrozenLiterals:
         assert not blended.abs().gt(1.0).any().any()
 
     def test_mhs_discovery_start_single_sourced_in_folds(self) -> None:
-        # SCENARIO_MHS_GAP_HARDENING_04: MHS_DISCOVERY_START is the domain
+        # SCENARIO_MHS_GAP_HARDENING_04: DISCOVERY_START is the domain
         # single source and all four folds derive train_start from it -- a
         # regression guard against the constant re-diverging into independent
         # literals.
-        from src.mhs.contracts import MHS_DISCOVERY_START
-        from src.mhs.evaluation import phase_1_anchored_purged_folds
+        from src.mhs.types import DISCOVERY_START
+        from src.mhs.evidence import phase_1_anchored_purged_folds
 
-        assert pd.Timestamp("2021-01-01", tz="UTC") == MHS_DISCOVERY_START
+        assert pd.Timestamp("2021-01-01", tz="UTC") == DISCOVERY_START
         folds = phase_1_anchored_purged_folds()
         assert len(folds) == 4
         for fold in folds:
-            assert fold.train_start == MHS_DISCOVERY_START
-            assert fold.train_start is MHS_DISCOVERY_START
+            assert fold.train_start == DISCOVERY_START
+            assert fold.train_start is DISCOVERY_START
 
     def test_funding_carry_grid_no_capital_allocated(self) -> None:
         # SCENARIO_MHS_NO_CAPITAL_ALLOCATED_06: the funding-carry lookback grid
         # is a measured candidate grid -- not a frozen BookSpec -- following the
         # same governance pattern as the horizon grids, and 'funding_carry'
-        # appears in neither PHASE_1_BOOK_SPECS nor PHASE_1_BOOK_BLEND_WEIGHTS.
+        # appears in neither BOOK_SPECS nor BOOK_BLEND_WEIGHTS.
         # This is the explicit guard against scope creep into P1's
         # capital-allocation territory.
-        assert len(MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS) >= 3
-        assert all(h > 0 for h in MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS)
-        assert tuple(sorted(set(MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS))) == tuple(
-            MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+        assert len(FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS) >= 3
+        assert all(h > 0 for h in FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS)
+        assert tuple(sorted(set(FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS))) == tuple(
+            FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
         )
-        assert set(PHASE_1_BOOK_SPECS) == {"fast_reversal", "slow_momentum"}
-        assert set(PHASE_1_BOOK_BLEND_WEIGHTS) == {"fast_reversal", "slow_momentum"}
-        assert "funding_carry" not in PHASE_1_BOOK_SPECS
-        assert "funding_carry" not in PHASE_1_BOOK_BLEND_WEIGHTS
-        assert abs(sum(PHASE_1_BOOK_BLEND_WEIGHTS.values()) - 1.0) < 1e-12
+        assert set(BOOK_SPECS) == {"fast_reversal", "slow_momentum"}
+        assert set(BOOK_BLEND_WEIGHTS) == {"fast_reversal", "slow_momentum"}
+        assert "funding_carry" not in BOOK_SPECS
+        assert "funding_carry" not in BOOK_BLEND_WEIGHTS
+        assert abs(sum(BOOK_BLEND_WEIGHTS.values()) - 1.0) < 1e-12
 
     def test_trend_sleeve_horizons_are_frozen_measured_band(self) -> None:
         # The trend sleeve's slow band is the frozen measured 6-horizon ensemble.
-        assert MHS_TREND_SLEEVE_HORIZONS_HOURS == (336, 480, 600, 720, 1080, 1440)
-        assert len(MHS_TREND_SLEEVE_HORIZONS_HOURS) == 6
-        assert tuple(sorted(MHS_TREND_SLEEVE_HORIZONS_HOURS)) == MHS_TREND_SLEEVE_HORIZONS_HOURS
-        assert all(h > 0 for h in MHS_TREND_SLEEVE_HORIZONS_HOURS)
+        assert TREND_SLEEVE_HORIZONS_HOURS == (336, 480, 600, 720, 1080, 1440)
+        assert len(TREND_SLEEVE_HORIZONS_HOURS) == 6
+        assert tuple(sorted(TREND_SLEEVE_HORIZONS_HOURS)) == TREND_SLEEVE_HORIZONS_HOURS
+        assert all(h > 0 for h in TREND_SLEEVE_HORIZONS_HOURS)
 
     def test_committee_members_and_target_vol_are_frozen(self) -> None:
         # SCENARIO_MHS_COMMITTEE_LITERALS_FROZEN and
@@ -215,51 +215,51 @@ class TestFrozenLiterals:
         # 15% target volatility and 720h purge are frozen contract values, and
         # the purge matches the longest 720h lookbacks so no overlapping-label
         # information leaks across a walk-forward boundary.
-        from src.mhs.contracts import (
-            MHS_COMMITTEE_MEMBERS,
-            MHS_COMMITTEE_OOS_START,
-            MHS_COMMITTEE_PURGE_HOURS,
-            MHS_COMMITTEE_TARGET_VOL,
+        from src.mhs.types import (
+            COMMITTEE_MEMBERS,
+            COMMITTEE_OOS_START,
+            COMMITTEE_PURGE_HOURS,
+            COMMITTEE_TARGET_VOL,
         )
 
-        assert MHS_COMMITTEE_MEMBERS == (
+        assert COMMITTEE_MEMBERS == (
             "flow_imb_720h",
             "flow_imb_168h",
             "xs_mom_336h",
             "xs_idio_mom_336h",
             "mom3_skew_168h",
         )
-        assert len(MHS_COMMITTEE_MEMBERS) == 5
-        assert len(set(MHS_COMMITTEE_MEMBERS)) == 5
-        assert "xs_mom_720h" not in MHS_COMMITTEE_MEMBERS
-        assert pytest.approx(0.15) == MHS_COMMITTEE_TARGET_VOL
-        assert MHS_COMMITTEE_PURGE_HOURS == 720
-        assert pd.Timestamp("2023-01-01", tz="UTC") == MHS_COMMITTEE_OOS_START
-        assert MHS_COMMITTEE_OOS_START.tzinfo is not None
+        assert len(COMMITTEE_MEMBERS) == 5
+        assert len(set(COMMITTEE_MEMBERS)) == 5
+        assert "xs_mom_720h" not in COMMITTEE_MEMBERS
+        assert pytest.approx(0.15) == COMMITTEE_TARGET_VOL
+        assert COMMITTEE_PURGE_HOURS == 720
+        assert pd.Timestamp("2023-01-01", tz="UTC") == COMMITTEE_OOS_START
+        assert COMMITTEE_OOS_START.tzinfo is not None
 
     def test_committee_growth_diagnostic_constants_are_frozen(self) -> None:
         # SCENARIO_COMMITTEE_GROWTH_CONTRACTS_FROZEN: the discovery-window
         # growth-optimal risk-grid multipliers and constraint anchors are frozen
         # contract values with a strictly ascending, 1.0-containing grid.
-        from src.mhs.contracts import (
-            MHS_COMMITTEE_GROWTH_BARS_PER_YEAR,
-            MHS_COMMITTEE_GROWTH_HORIZON_YEARS,
-            MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN,
-            MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
-            MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB,
-            MHS_COMMITTEE_GROWTH_N_PATHS,
-            MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
-            MHS_COMMITTEE_GROWTH_RUIN_FRACTION,
+        from src.mhs.types import (
+            COMMITTEE_GROWTH_BARS_PER_YEAR,
+            COMMITTEE_GROWTH_HORIZON_YEARS,
+            COMMITTEE_GROWTH_MAX_DRAWDOWN,
+            COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+            COMMITTEE_GROWTH_MAX_RUIN_PROB,
+            COMMITTEE_GROWTH_N_PATHS,
+            COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
+            COMMITTEE_GROWTH_RUIN_FRACTION,
         )
 
-        assert MHS_COMMITTEE_GROWTH_BARS_PER_YEAR == 365
-        assert MHS_COMMITTEE_GROWTH_HORIZON_YEARS == 3.0
-        assert MHS_COMMITTEE_GROWTH_N_PATHS == 2000
-        assert MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN == 0.25
-        assert MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB == 0.10
-        assert MHS_COMMITTEE_GROWTH_RUIN_FRACTION == 0.60
-        assert MHS_COMMITTEE_GROWTH_MAX_RUIN_PROB == 0.01
-        grid = MHS_COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS
+        assert COMMITTEE_GROWTH_BARS_PER_YEAR == 365
+        assert COMMITTEE_GROWTH_HORIZON_YEARS == 3.0
+        assert COMMITTEE_GROWTH_N_PATHS == 2000
+        assert COMMITTEE_GROWTH_MAX_DRAWDOWN == 0.25
+        assert COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB == 0.10
+        assert COMMITTEE_GROWTH_RUIN_FRACTION == 0.60
+        assert COMMITTEE_GROWTH_MAX_RUIN_PROB == 0.01
+        grid = COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS
         assert len(grid) >= 2
         assert tuple(sorted(grid)) == grid
         assert all(g > 0 for g in grid)
@@ -273,40 +273,40 @@ class TestFrozenLiterals:
         # future member with a longer lookback than the purge fails this static
         # test loudly instead of silently recurring the doc/value mismatch the
         # B2 fix corrected.
-        from src.mhs.contracts import MHS_COMMITTEE_MEMBERS, MHS_COMMITTEE_PURGE_HOURS
-        from src.mhs.features import MHS_FEATURE_REGISTRY
+        from src.mhs.types import COMMITTEE_MEMBERS, COMMITTEE_PURGE_HOURS
+        from src.mhs.features import FEATURE_REGISTRY
 
-        registry = {spec.name: spec for spec in MHS_FEATURE_REGISTRY}
-        assert MHS_COMMITTEE_PURGE_HOURS >= 720
-        for name in MHS_COMMITTEE_MEMBERS:
+        registry = {spec.name: spec for spec in FEATURE_REGISTRY}
+        assert COMMITTEE_PURGE_HOURS >= 720
+        for name in COMMITTEE_MEMBERS:
             assert name in registry, f"committee member {name} not in registry"
-        assert "flow_imb_720h" in MHS_COMMITTEE_MEMBERS
+        assert "flow_imb_720h" in COMMITTEE_MEMBERS
 
 
 class TestFillMarkParityGateConstants:
     """SCENARIO_MHS_FILL_MARK_PARITY_02: contract constants for parity gate."""
 
     def test_price_protection_band(self) -> None:
-        from src.mhs.contracts import MHS_FILL_MARK_PRICE_PROTECTION_BAND
+        from src.mhs.types import FILL_MARK_PRICE_PROTECTION_BAND
 
-        assert MHS_FILL_MARK_PRICE_PROTECTION_BAND == 0.05
+        assert FILL_MARK_PRICE_PROTECTION_BAND == 0.05
 
     def test_max_log_divergence(self) -> None:
         import math
 
-        from src.mhs.contracts import MHS_FILL_MARK_MAX_LOG_DIVERGENCE, MHS_FILL_MARK_PRICE_PROTECTION_BAND
+        from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE, FILL_MARK_PRICE_PROTECTION_BAND
 
-        assert pytest.approx(math.log1p(MHS_FILL_MARK_PRICE_PROTECTION_BAND)) == MHS_FILL_MARK_MAX_LOG_DIVERGENCE
-        assert 0.048 < MHS_FILL_MARK_MAX_LOG_DIVERGENCE < 0.049
+        assert pytest.approx(math.log1p(FILL_MARK_PRICE_PROTECTION_BAND)) == FILL_MARK_MAX_LOG_DIVERGENCE
+        assert 0.048 < FILL_MARK_MAX_LOG_DIVERGENCE < 0.049
 
     def test_vol_target_max_scale(self) -> None:
-        from src.mhs.contracts import (
-            MHS_COMMITTEE_TARGET_GROSS,
-            MHS_PNL_VOL_TARGET_MAX_SCALE,
+        from src.mhs.types import (
+            COMMITTEE_TARGET_GROSS,
+            PNL_VOL_TARGET_MAX_SCALE,
         )
 
-        assert pytest.approx(1.0, abs=1e-12) == MHS_PNL_VOL_TARGET_MAX_SCALE * MHS_COMMITTEE_TARGET_GROSS
-        assert MHS_PNL_VOL_TARGET_MAX_SCALE > 1.0
+        assert pytest.approx(1.0, abs=1e-12) == PNL_VOL_TARGET_MAX_SCALE * COMMITTEE_TARGET_GROSS
+        assert PNL_VOL_TARGET_MAX_SCALE > 1.0
 
 
 class TestFrozenLiteralsCommitteeTiming:
@@ -317,29 +317,29 @@ class TestFrozenLiteralsCommitteeTiming:
         # SCENARIO_MHS_RAM_GUARD_CONSTANTS: the automatic RAM-guard tuning
         # constants are frozen contract values with sane bounds (budget/reserve
         # fractions in (0,1), floor a positive power-of-two MiB count).
-        from src.mhs.contracts import (
-            MHS_RAM_BUDGET_FRACTION,
-            MHS_RAM_RESERVE_FLOOR_BYTES,
-            MHS_RAM_RESERVE_FRACTION,
+        from src.mhs.types import (
+            RAM_BUDGET_FRACTION,
+            RAM_RESERVE_FLOOR_BYTES,
+            RAM_RESERVE_FRACTION,
         )
 
-        assert MHS_RAM_BUDGET_FRACTION == 0.85
-        assert 0.0 < MHS_RAM_BUDGET_FRACTION < 1.0
-        assert MHS_RAM_RESERVE_FRACTION == 0.05
-        assert 0.0 < MHS_RAM_RESERVE_FRACTION < 1.0
-        assert MHS_RAM_RESERVE_FLOOR_BYTES == 268435456
-        assert MHS_RAM_RESERVE_FLOOR_BYTES > 0
-        assert MHS_RAM_RESERVE_FLOOR_BYTES % (2**20) == 0
+        assert RAM_BUDGET_FRACTION == 0.85
+        assert 0.0 < RAM_BUDGET_FRACTION < 1.0
+        assert RAM_RESERVE_FRACTION == 0.05
+        assert 0.0 < RAM_RESERVE_FRACTION < 1.0
+        assert RAM_RESERVE_FLOOR_BYTES == 268435456
+        assert RAM_RESERVE_FLOOR_BYTES > 0
+        assert RAM_RESERVE_FLOOR_BYTES % (2**20) == 0
 
     def test_committee_tranche_count_frozen(self) -> None:
         # SCENARIO_MHS_COMMITTEE_TRANCHE_COUNT_FROZEN: the committee decision
         # cadence smoothing is a frozen structural constant (24h grid x 3 =
         # effective 72h signal life) with a valid tranche count.
-        from src.mhs.contracts import MHS_COMMITTEE_TRANCHE_COUNT
+        from src.mhs.types import COMMITTEE_TRANCHE_COUNT
 
-        assert isinstance(MHS_COMMITTEE_TRANCHE_COUNT, int)
-        assert MHS_COMMITTEE_TRANCHE_COUNT >= 1
-        assert MHS_COMMITTEE_TRANCHE_COUNT == 3
+        assert isinstance(COMMITTEE_TRANCHE_COUNT, int)
+        assert COMMITTEE_TRANCHE_COUNT >= 1
+        assert COMMITTEE_TRANCHE_COUNT == 3
 
     def test_committee_regime_adaptive_window_frozen(self) -> None:
         # SCENARIO_MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW_FROZEN: the regime-
@@ -347,20 +347,20 @@ class TestFrozenLiteralsCommitteeTiming:
         # real 3m replay to sit inside a plateau (15-25 all pass every
         # anchored fold), not a single fitted point -- windows 10 and 90 both
         # trigger CAPITAL_INVARIANT_BREACH.
-        from src.mhs.contracts import MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+        from src.mhs.types import COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
-        assert isinstance(MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW, int)
-        assert MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW >= 3
-        assert MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW == 15
+        assert isinstance(COMMITTEE_REGIME_ADAPTIVE_WINDOW, int)
+        assert COMMITTEE_REGIME_ADAPTIVE_WINDOW >= 3
+        assert COMMITTEE_REGIME_ADAPTIVE_WINDOW == 15
 
     def test_registered_target_gross_default(self) -> None:
         """SCENARIO_MHS_REGISTERED_TARGET_GROSS_DEFAULT: the registered
         committee exposure is 0.92, the largest replay-certified gross inside
         the registered drawdown budget."""
-        from src.mhs.contracts import MHS_COMMITTEE_TARGET_GROSS
+        from src.mhs.types import COMMITTEE_TARGET_GROSS
 
-        assert 0.0 < MHS_COMMITTEE_TARGET_GROSS <= 2.0
-        assert MHS_COMMITTEE_TARGET_GROSS > 0.7950
+        assert 0.0 < COMMITTEE_TARGET_GROSS <= 2.0
+        assert COMMITTEE_TARGET_GROSS > 0.7950
 
         import dataclasses
 
@@ -372,7 +372,7 @@ class TestFrozenLiteralsCommitteeTiming:
         )
 
         default_request = MhsDiagnosticRequest(committee_capital=True)
-        assert _resolved_committee_target_gross(default_request) == MHS_COMMITTEE_TARGET_GROSS
+        assert _resolved_committee_target_gross(default_request) == COMMITTEE_TARGET_GROSS
         assert MhsDiagnosticRequest(committee_capital=True, committee_target_gross=None).committee_target_gross is None
         with pytest.raises(ValueError, match="committee_target_gross"):
             MhsDiagnosticRequest(committee_capital=True, committee_target_gross=0.0)
@@ -383,68 +383,68 @@ class TestFrozenLiteralsCommitteeTiming:
         # raise -- even though no caller ever set committee_target_gross.
         copied = dataclasses.replace(default_request, committee_capital=False)
         assert copied.committee_capital is False
-        assert _resolved_committee_target_gross(copied) == MHS_COMMITTEE_TARGET_GROSS
+        assert _resolved_committee_target_gross(copied) == COMMITTEE_TARGET_GROSS
 
 
 class TestCompoundingGrowthContractConstants:
     """SCENARIO_CONTRACT_CONSTANTS_REGISTERED: new risk-budget constants are registered."""
 
     def test_constants_registered(self) -> None:
-        from src.mhs.contracts import (
-            MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
-            MHS_FUNDING_CARRY_SLEEVE_WEIGHT,
-            MHS_PNL_TARGET_ANNUAL_VOL,
-            MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
+        from src.mhs.types import (
+            FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
+            FUNDING_CARRY_SLEEVE_WEIGHT,
+            PNL_TARGET_ANNUAL_VOL,
+            PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
         )
 
-        assert MHS_PNL_TARGET_ANNUAL_VOL == 0.20
-        assert 0.0 < MHS_PNL_TARGET_ANNUAL_VOL <= 1.0
+        assert PNL_TARGET_ANNUAL_VOL == 0.20
+        assert 0.0 < PNL_TARGET_ANNUAL_VOL <= 1.0
 
-        assert MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS == 20
-        assert MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS >= 1
+        assert PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS == 20
+        assert PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS >= 1
 
-        assert MHS_FUNDING_CARRY_SLEEVE_WEIGHT == 0.30
-        assert 0.0 <= MHS_FUNDING_CARRY_SLEEVE_WEIGHT < 1.0
+        assert FUNDING_CARRY_SLEEVE_WEIGHT == 0.30
+        assert 0.0 <= FUNDING_CARRY_SLEEVE_WEIGHT < 1.0
 
-        assert MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS == 168
-        assert MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS in MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+        assert FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS == 168
+        assert FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS in FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
 
 
 class TestCompoundingAlphaAxesContract:
     """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_01: committee member set contracts."""
 
     def test_member_sets_have_exactly_two_keys(self) -> None:
-        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
-        assert set(MHS_COMMITTEE_MEMBER_SETS.keys()) == {"flow_momentum_v1", "risk_premia_v2"}
+        from src.mhs.params import COMMITTEE_MEMBER_SETS
+        assert set(COMMITTEE_MEMBER_SETS.keys()) == {"flow_momentum", "risk_premia"}
 
-    def test_default_member_set_is_flow_momentum_v1(self) -> None:
-        # risk_premia_v2 was measured non-adopted: a full 3m replay (2021-2025)
+    def test_default_member_set_is_flow_momentum(self) -> None:
+        # risk_premia was measured non-adopted: a full 3m replay (2021-2025)
         # breached the registered drawdown budget (MDD -31.4% vs -25% budget)
         # and turned two folds STRESS_SHARPE_NOT_POSITIVE. See
         # ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES.
-        from src.mhs.params import MHS_COMMITTEE_DEFAULT_MEMBER_SET, MHS_COMMITTEE_MEMBERS, MHS_COMMITTEE_MEMBER_SETS
-        assert MHS_COMMITTEE_DEFAULT_MEMBER_SET == "flow_momentum_v1"
-        assert MHS_COMMITTEE_MEMBER_SETS["flow_momentum_v1"] == MHS_COMMITTEE_MEMBERS
+        from src.mhs.params import COMMITTEE_DEFAULT_MEMBER_SET, COMMITTEE_MEMBERS, COMMITTEE_MEMBER_SETS
+        assert COMMITTEE_DEFAULT_MEMBER_SET == "flow_momentum"
+        assert COMMITTEE_MEMBER_SETS["flow_momentum"] == COMMITTEE_MEMBERS
 
-    def test_risk_premia_v2_members(self) -> None:
-        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
-        assert MHS_COMMITTEE_MEMBER_SETS["risk_premia_v2"] == (
+    def test_risk_premia_members(self) -> None:
+        from src.mhs.params import COMMITTEE_MEMBER_SETS
+        assert COMMITTEE_MEMBER_SETS["risk_premia"] == (
             "flow_imb_720h", "flow_imb_168h", "mom3_skew_168h", "lowvol_168h", "rev_24h",
         )
 
-    def test_flow_momentum_v1_members(self) -> None:
-        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
-        assert MHS_COMMITTEE_MEMBER_SETS["flow_momentum_v1"] == (
+    def test_flow_momentum_members(self) -> None:
+        from src.mhs.params import COMMITTEE_MEMBER_SETS
+        assert COMMITTEE_MEMBER_SETS["flow_momentum"] == (
             "flow_imb_720h", "flow_imb_168h", "xs_mom_336h", "xs_idio_mom_336h", "mom3_skew_168h",
         )
 
     def test_all_member_names_in_registry(self) -> None:
-        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
-        from src.mhs.features import MHS_FEATURE_REGISTRY
-        registry_names = {s.name for s in MHS_FEATURE_REGISTRY}
-        for members in MHS_COMMITTEE_MEMBER_SETS.values():
+        from src.mhs.params import COMMITTEE_MEMBER_SETS
+        from src.mhs.features import FEATURE_REGISTRY
+        registry_names = {s.name for s in FEATURE_REGISTRY}
+        for members in COMMITTEE_MEMBER_SETS.values():
             for name in members:
-                assert name in registry_names, f"{name} not in MHS_FEATURE_REGISTRY"
+                assert name in registry_names, f"{name} not in FEATURE_REGISTRY"
 
     def test_growth_budget_annual_vol_exists(self) -> None:
         from src.mhs.committee import growth_budget_annual_vol
@@ -453,15 +453,15 @@ class TestCompoundingAlphaAxesContract:
     def test_resolved_committee_members(self) -> None:
         from src.application.research.mhs.research_go import _resolved_committee_members
         from src.application.research.mhs.contracts import MhsDiagnosticRequest
-        from src.mhs.params import MHS_COMMITTEE_MEMBER_SETS
+        from src.mhs.params import COMMITTEE_MEMBER_SETS
 
-        req_v2 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia_v2")
-        assert _resolved_committee_members(req_v2) == MHS_COMMITTEE_MEMBER_SETS["risk_premia_v2"]
+        req_v2 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
+        assert _resolved_committee_members(req_v2) == COMMITTEE_MEMBER_SETS["risk_premia"]
 
-        req_v1 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="flow_momentum_v1")
-        assert _resolved_committee_members(req_v1) == MHS_COMMITTEE_MEMBER_SETS["flow_momentum_v1"]
+        req_v1 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="flow_momentum")
+        assert _resolved_committee_members(req_v1) == COMMITTEE_MEMBER_SETS["flow_momentum"]
 
-        req_bad = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia_v2")
+        req_bad = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
         # Simulate an unregistered key by replacing the field (bypassing validation)
         object.__setattr__(req_bad, "committee_member_set", "unregistered")
         with pytest.raises(ValueError, match="unknown committee_member_set"):

@@ -19,6 +19,7 @@ import src.application.research.mhs.resources as resources
 import src.application.research.mhs.scaling as scaling
 import src.application.research.mhs.statistics as statistics
 import src.application.research.mhs.research_go as _research_go
+import src.mhs.report.persist as persist_mod
 from src.application.research.mhs.evaluation import (
     MhsDiagnosticRequest,
     _StageRecorder,
@@ -29,12 +30,12 @@ from src.application.research.mhs.evaluation import (
     _truncate_replayable_decisions,
 )
 from src.common.errors import DataIntegrityError
-from src.mhs.contracts import BookSpec, ExecutionSpec, HorizonBand
+from src.mhs.types import BookSpec, ExecutionSpec, HorizonBand
 from src.mhs.horizons import vol_normalized_horizon_signal
 from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
 from src.mhs.execution import SimulatedInventoryLedgerResult
 from src.mhs.execution import strategy_aware_execution_replay
-from src.mhs.evaluation import AnchoredPurgedFold
+from src.mhs.evidence import AnchoredPurgedFold
 from src.research.universe.pit_universe import symbol_partition
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
@@ -374,7 +375,7 @@ def test_pnl_vol_target_scale_reduces_on_vol_spike() -> None:
     r = _pnl_vol_spike_returns()
     out = scaling._pnl_vol_target_scale(r)
     assert out.iloc[50] == pytest.approx(1.0)
-    assert out.iloc[150] <= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR + 1e-9
+    assert out.iloc[150] <= ev.PNL_VOL_TARGET_SCALE_FLOOR + 1e-9
     assert out.iloc[150] < out.iloc[50]
 
 
@@ -387,7 +388,7 @@ def test_pnl_vol_target_scale_never_exceeds_one() -> None:
     wild = pd.Series(rng.normal(0.0, 0.5, 150), index=pd.date_range("2024-06-01", periods=150, freq="D", tz="UTC"))
     combo = pd.concat([calm, wild])
     out = scaling._pnl_vol_target_scale(combo)
-    assert (out >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (out >= ev.PNL_VOL_TARGET_SCALE_FLOOR).all()
     assert (out <= 1.0).all()
     constant = pd.Series(
         np.concatenate([np.full(100, 0.001), np.full(100, 0.05)]),
@@ -401,11 +402,11 @@ def test_pnl_vol_target_scale_never_exceeds_one() -> None:
 
 def test_pnl_vol_target_scale_burn_in_is_unscaled() -> None:
     # SCENARIO_PNL_VOL_TARGET_SCALE_BURN_IN_IS_UNSCALED: before
-    # MHS_PNL_VOL_TARGET_BURN_IN_DAYS samples exist, scale is exactly 1.0 no
+    # PNL_VOL_TARGET_BURN_IN_DAYS samples exist, scale is exactly 1.0 no
     # matter how volatile the input is -- never an under-sampled estimate.
     r = _pnl_vol_spike_returns()
     out = scaling._pnl_vol_target_scale(r)
-    assert (out.iloc[: ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
+    assert (out.iloc[: ev.PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
 
 
 def test_pnl_vol_target_rolling_median_adapts() -> None:
@@ -432,9 +433,9 @@ def test_pnl_vol_target_rolling_median_adapts() -> None:
     # The stale all-history median keeps suppressing.
     assert last_100_expanding.mean() <= last_100_default.mean() - 0.10
     # Both respect floor <= scale <= 1.0 throughout.
-    assert (default_scale >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (default_scale >= ev.PNL_VOL_TARGET_SCALE_FLOOR).all()
     assert (default_scale <= 1.0).all()
-    assert (expanding_scale >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (expanding_scale >= ev.PNL_VOL_TARGET_SCALE_FLOOR).all()
     assert (expanding_scale <= 1.0).all()
 
 
@@ -445,7 +446,7 @@ def test_pnl_vol_target_rolling_median_burn_in_identical() -> None:
     # element-wise equal to an oversized window (cannot slide within 200 days).
     r = _pnl_vol_spike_returns()
     out = scaling._pnl_vol_target_scale(r)
-    assert (out.iloc[: ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
+    assert (out.iloc[: ev.PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
 
     expanding_like = scaling._pnl_vol_target_scale(r, median_window_days=99999)
     pd.testing.assert_series_equal(out, expanding_like, check_names=False)
@@ -456,9 +457,9 @@ def test_pnl_vol_target_median_window_validation() -> None:
     # than the burn-in floor raises ValueError; the floor value itself is ok.
     r = _pnl_vol_spike_returns()
     with pytest.raises(ValueError, match="median_window_days"):
-        scaling._pnl_vol_target_scale(r, median_window_days=ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS - 1)
+        scaling._pnl_vol_target_scale(r, median_window_days=ev.PNL_VOL_TARGET_BURN_IN_DAYS - 1)
     # Should not raise.
-    scaling._pnl_vol_target_scale(r, median_window_days=ev.MHS_PNL_VOL_TARGET_BURN_IN_DAYS)
+    scaling._pnl_vol_target_scale(r, median_window_days=ev.PNL_VOL_TARGET_BURN_IN_DAYS)
 
 
 def test_pnl_vol_target_existing_suite_unchanged() -> None:
@@ -640,12 +641,12 @@ class TestGrowthBudgetTargetVol:
         assert result == pytest.approx(result_nan)
 
     def test_fallback_when_fewer_than_burn_in_rows(self) -> None:
-        # A series with fewer than MHS_PNL_VOL_TARGET_BURN_IN_DAYS pre-OOS
-        # rows returns MHS_PNL_TARGET_ANNUAL_VOL.
-        from src.mhs.params import MHS_PNL_TARGET_ANNUAL_VOL
+        # A series with fewer than PNL_VOL_TARGET_BURN_IN_DAYS pre-OOS
+        # rows returns PNL_TARGET_ANNUAL_VOL.
+        from src.mhs.params import PNL_TARGET_ANNUAL_VOL
         idx = pd.date_range("2022-06-01", periods=10, freq="D", tz="UTC")
         r = pd.Series(0.001, index=idx)
-        assert scaling._growth_budget_target_vol(r) == MHS_PNL_TARGET_ANNUAL_VOL
+        assert scaling._growth_budget_target_vol(r) == PNL_TARGET_ANNUAL_VOL
 
 
 class TestReplayExposureScaleGrowthBudget:
@@ -662,7 +663,7 @@ class TestReplayExposureScaleGrowthBudget:
         result = scaling._replay_exposure_scale(r, request)
         assert result.index.equals(r.index)
         assert np.isfinite(result.to_numpy()).all()
-        assert (result >= ev.MHS_PNL_VOL_TARGET_SCALE_FLOOR).all()
+        assert (result >= ev.PNL_VOL_TARGET_SCALE_FLOOR).all()
         assert (result <= 1.0).all()
 
 
@@ -670,8 +671,8 @@ class TestCommitteeMemberSetValidation:
     """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_06: committee_member_set validation."""
 
     def test_valid_member_set_accepted(self) -> None:
-        req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia_v2")
-        assert req.committee_member_set == "risk_premia_v2"
+        req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
+        assert req.committee_member_set == "risk_premia"
 
     def test_invalid_member_set_raises(self) -> None:
         with pytest.raises(ValueError, match="committee_member_set"):
@@ -837,13 +838,13 @@ class TestAnchoredFoldBounded:
         # §3.3 ``fold_integrity``), never as an invalid primary ledger.
         assert report.strict is None
         assert report.stress is None
-        assert report.failures == (ev.MHS_GO_REASON_RESOURCE_BREACH,)
+        assert report.failures == (ev.GO_REASON_RESOURCE_BREACH,)
 
     def test_no_rss_budget_returns_complete_fold(self, mhs_market) -> None:
         report = self._run_fold(mhs_market, max_rss_bytes=None)
         assert report.strict is not None or report.failures == (
-            ev.MHS_GO_REASON_PRIMARY_SHARPE,
-            ev.MHS_GO_REASON_STRESS_SHARPE,
+            ev.GO_REASON_PRIMARY_SHARPE,
+            ev.GO_REASON_STRESS_SHARPE,
         )
 
 
@@ -934,7 +935,7 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
     eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
-    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    fast = ev.BOOK_SPECS["fast_reversal"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
     w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
     phase = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
@@ -1049,11 +1050,11 @@ def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypa
         assert valid.any(), "tilt must be a real scaling, not a no-op"
 
     # The tilt is applied on each book's own horizon and reindexed onto its grid.
-    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
-    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast = ev.BOOK_SPECS["fast_reversal"]
+    slow = ev.BOOK_SPECS["slow_momentum"]
     panel_start = max(
         _FOLD.train_start,
-        _FOLD.validation_start - pd.Timedelta(hours=ev.MHS_FOLD_PANEL_WARMUP_HOURS),
+        _FOLD.validation_start - pd.Timedelta(hours=ev.FOLD_PANEL_WARMUP_HOURS),
     )
     fast_grid = pd.date_range(panel_start, _FOLD.validation_end, freq="6h", tz="UTC")
     slow_grid = pd.date_range(panel_start, _FOLD.validation_end, freq="24h", tz="UTC")
@@ -1166,7 +1167,7 @@ def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> No
 
     panel_start = max(
         _FOLD.train_start,
-        _FOLD.validation_start - pd.Timedelta(hours=ev.MHS_FOLD_PANEL_WARMUP_HOURS),
+        _FOLD.validation_start - pd.Timedelta(hours=ev.FOLD_PANEL_WARMUP_HOURS),
     )
     log_close, execution_mask, _grid = _roster_mask_panel_inputs(
         root, panel_start, _FOLD.validation_end, funding_by_symbol,
@@ -1177,6 +1178,7 @@ def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> No
     )
 
 
+@pytest.mark.slow
 def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_VOL_MEAN_ROSTER_MASK_TOPLEVEL_01: the top-level diagnostic
     # path applies the same execution_mask-filtered vol_mean to its blend regime
@@ -1261,7 +1263,7 @@ class TestBookOutcomePaired:
         assert report.stress is None
         assert report.failure is not None
         assert report.failure.stage == "replay_fast_reversal"
-        assert report.failure.reason == ev.MHS_GO_REASON_RESOURCE_BREACH
+        assert report.failure.reason == ev.GO_REASON_RESOURCE_BREACH
 
 
 def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
@@ -1356,6 +1358,7 @@ def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, m
     assert on.primary_naive_sharpe != pytest.approx(off.primary_naive_sharpe)
 
 
+@pytest.mark.slow
 def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_REALIZED_ROSTER_SIZE_EXPOSED_06: the diagnostic report
     # exposes the realized mean execution-roster size (mean per-row True count
@@ -1527,7 +1530,7 @@ def _perf_opt_placebo_inputs(seed: int) -> tuple[
     bar_funding = pd.DataFrame(
         rng.normal(0.00005, 0.00001, (n_hours, n_syms)), index=grid, columns=cols,
     )
-    return signal, eligible, opens, bar_funding, grid, ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    return signal, eligible, opens, bar_funding, grid, ev.BOOK_SPECS["fast_reversal"]
 
 
 def _reference_placebo_percentile(
@@ -1567,7 +1570,7 @@ def _reference_placebo_percentile(
 
 
 def test_mhs_perf_opt_001_placebo_vectorized_exact_and_fast() -> None:
-    # MHS_PERF_OPT_001_PLACEBO_VECTORIZED: the vectorized NumPy placebo must
+    # PERF_OPT_001_PLACEBO_VECTORIZED: the vectorized NumPy placebo must
     # reproduce the baseline percentile exactly and run >= 5x faster.
     signal, eligible, opens, bar_funding, grid, spec = _perf_opt_placebo_inputs(20260807)
     n_placebos = 300
@@ -1650,7 +1653,7 @@ def _reference_participation_warnings(replay, root, timeframe, symbols, minute_g
 
 
 def test_mhs_perf_opt_002_participation_cumsum_exact(tmp_path) -> None:
-    # MHS_PERF_OPT_002_PARTICIPATION_CUMSUM: the cumsum/searchsorted rewrite
+    # PERF_OPT_002_PARTICIPATION_CUMSUM: the cumsum/searchsorted rewrite
     # must return the exact same warnings dict as the iterrows() baseline.
     symbols = ["SYMA", "SYMB", "SYMC"]
     grid, _ = _write_quote_volume_market(tmp_path, symbols)
@@ -1701,7 +1704,7 @@ def _reference_bootstrap_ci(net, n_replicates, mean_block, seed):
 
 
 def test_mhs_perf_opt_003_bootstrap_vectorized_equivalent() -> None:
-    # MHS_PERF_OPT_003_BOOTSTRAP_VECTORIZED: 2D block sampling must produce
+    # PERF_OPT_003_BOOTSTRAP_VECTORIZED: 2D block sampling must produce
     # statistically equivalent CI bounds (the RNG draw order differs by design,
     # so exact reproduction is neither required nor possible).
     rng = np.random.default_rng(5)
@@ -1716,7 +1719,7 @@ def test_mhs_perf_opt_003_bootstrap_vectorized_equivalent() -> None:
 
 
 def test_mhs_perf_opt_004_window_frames_read_window_only(mhs_market, monkeypatch) -> None:
-    # MHS_PERF_OPT_004_WINDOW_FRAMES: the production window loader
+    # PERF_OPT_004_WINDOW_FRAMES: the production window loader
     # ``_load_window_minute_frames`` opens each symbol's Parquet exactly once
     # per window with a timestamp filter (never a full-period read), and a
     # missing symbol is skipped rather than raising.
@@ -1792,7 +1795,7 @@ def test_mhs_phase2_o6_missing_symbol_skipped(mhs_market) -> None:
 def test_mhs_phase2_o10_bootstrap_chunk_adaptive() -> None:
     # SCENARIO_O10_RSS_GATE: chunk is capped so a (chunk, n) sample matrix stays
     # <= 128MB; at production 5m scale (525,600 bars) that means a small chunk.
-    from src.mhs.evaluation import _bootstrap_chunk_size
+    from src.mhs.evidence import _bootstrap_chunk_size
 
     assert _bootstrap_chunk_size(525_600) <= 63
     assert _bootstrap_chunk_size(43_830) >= 100
@@ -1891,8 +1894,8 @@ def _build_books_concurrent_args(
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
     eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
-    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
-    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast = ev.BOOK_SPECS["fast_reversal"]
+    slow = ev.BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
     w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
@@ -1910,8 +1913,8 @@ def _build_books_concurrent_args(
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     blend_1h = (
-        ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
-        + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
+        ev.BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
+        + ev.BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
     )
     vol_mean = ev.realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
     regime_scale = scaling._regime_cash_scale(vol_mean)
@@ -1962,8 +1965,8 @@ def _sequential_book_reports(args: dict[str, object]) -> tuple[object, object, o
     active_spec, active_grid = ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     blend_step = args["blend_1h"].reindex(active_grid)
     blend_replay = (
-        ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
-        + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
+        ev.BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
+        + ev.BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
     ).reindex(active_grid)
     blend_rpt, _ = ev._book_outcome(
         "blend", active_spec, args["n_symbols"], active_grid, blend_step, grid_1h,
@@ -2020,8 +2023,8 @@ def test_toplevel_blend_replay_matches_renormalized_components(mhs_market) -> No
         args["fast"], args["slow"], args["fast_grid"], args["slow_grid"],
     )
     expected = (
-        ev.PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
-        + ev.PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
+        ev.BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
+        + ev.BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
     ).reindex(active_grid)
     collapsed = args["blend_1h"].where(args["execution_mask"], other=0.0).reindex(active_grid)
     assert not expected.equals(collapsed), "renormalized blend must differ from the collapsed pre-mask blend"
@@ -2070,7 +2073,7 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
                 failure=ev.MhsBookFailure(
                     stage="replay_slow_momentum",
                     error_class="DataIntegrityError",
-                    reason=ev.MHS_GO_REASON_EXECUTION_GAP,
+                    reason=ev.GO_REASON_EXECUTION_GAP,
                     message="forced isolation failure",
                 ),
             ), traces
@@ -2082,7 +2085,7 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
     assert fast.failure is None
     assert slow.primary is None
     assert slow.failure is not None
-    assert slow.failure.reason == ev.MHS_GO_REASON_EXECUTION_GAP
+    assert slow.failure.reason == ev.GO_REASON_EXECUTION_GAP
     assert blend.primary is not None
     assert blend.failure is None
 
@@ -2125,11 +2128,11 @@ def test_regime_scale_reaches_blend_replay_not_only_prescreen(mhs_market) -> Non
 
 def test_active_blend_grid_slow_only() -> None:
     # SCENARIO_MHS_ACTIVE_BLEND_GRID_SLOW_ONLY_01: with the frozen
-    # PHASE_1_BOOK_BLEND_WEIGHTS == {fast_reversal: 0.0, slow_momentum: 1.0},
+    # BOOK_BLEND_WEIGHTS == {fast_reversal: 0.0, slow_momentum: 1.0},
     # the blend adopts slow's own BookSpec and 24h-native grid by identity (not
     # equality) -- never fast's 6h grid.
-    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
-    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast = ev.BOOK_SPECS["fast_reversal"]
+    slow = ev.BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
     spec, grid = ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
@@ -2142,11 +2145,11 @@ def test_active_blend_grid_fast_weighted(monkeypatch) -> None:
     # weight (historical 50/50), the helper returns fast/fast_grid by identity,
     # reproducing the pre-fix behavior byte-for-byte when fast is re-admitted.
     monkeypatch.setattr(
-        ev, "PHASE_1_BOOK_BLEND_WEIGHTS",
+        ev, "BOOK_BLEND_WEIGHTS",
         {"fast_reversal": 0.5, "slow_momentum": 0.5},
     )
-    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
-    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast = ev.BOOK_SPECS["fast_reversal"]
+    slow = ev.BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
     spec, grid = ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
@@ -2159,11 +2162,11 @@ def test_active_blend_grid_no_weight_fails_closed(monkeypatch) -> None:
     # books the allocation invariant is violated and the helper must fail
     # closed (ValueError) rather than silently pick a default grid.
     monkeypatch.setattr(
-        ev, "PHASE_1_BOOK_BLEND_WEIGHTS",
+        ev, "BOOK_BLEND_WEIGHTS",
         {"fast_reversal": 0.0, "slow_momentum": 0.0},
     )
-    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
-    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast = ev.BOOK_SPECS["fast_reversal"]
+    slow = ev.BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
     with pytest.raises(ValueError, match="allocates no capital"):
@@ -2396,7 +2399,7 @@ def test_committee_execution_book_tranche_1_is_identity() -> None:
     # tranche_count (1) returns exactly the plain mean of the committee member
     # books -- byte-identical to the pre-change implementation and to an
     # explicit tranche_count=1 call.
-    from src.mhs.features import MHS_FEATURE_REGISTRY, build_feature_books
+    from src.mhs.features import FEATURE_REGISTRY, build_feature_books
 
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
     panels = {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote}
@@ -2406,7 +2409,7 @@ def test_committee_execution_book_tranche_1_is_identity() -> None:
     }
     default = ev._committee_execution_book(**kwargs)
     explicit = ev._committee_execution_book(**kwargs, tranche_count=1)
-    member_specs = [s for s in MHS_FEATURE_REGISTRY if s.name in set(ev.MHS_COMMITTEE_MEMBERS)]
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(ev.COMMITTEE_MEMBERS)]
     books = build_feature_books(member_specs, panels, mask, decision_grid, min_symbols=8)
     assert len(books) >= 1
     reference = sum(books.values()) / float(len(books))
@@ -2490,6 +2493,7 @@ def test_committee_tranche_smoothing_requires_committee_capital() -> None:
     )
 
 
+@pytest.mark.slow
 def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_TRANCHE_SMOOTHING_DEFAULT_OFF_BYTE_IDENTICAL:
     # with committee_capital=True and committee_tranche_smoothing omitted
@@ -2529,11 +2533,12 @@ def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_
         assert getattr(default_report, field) == getattr(explicit_off, field)
 
 
+@pytest.mark.slow
 def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_TRANCHE_SMOOTHING_THREADS_BOTH_CALL_SITES: with
     # committee_capital=True and committee_tranche_smoothing=True the fold
     # target builder AND the top-level blend both thread tranche_count ==
-    # MHS_COMMITTEE_TRANCHE_COUNT (never 1 at one site and 3 at the other).
+    # COMMITTEE_TRANCHE_COUNT (never 1 at one site and 3 at the other).
     root, end = mhs_market_with_taker_buy_quote
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -2558,7 +2563,7 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
 
     monkeypatch.setattr(ev, "_committee_execution_book", _spy)
     ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
-    assert seen["tranche_count"] == ev.MHS_COMMITTEE_TRANCHE_COUNT
+    assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
 
     seen.clear()
     monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
@@ -2566,7 +2571,7 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     ev.run_mhs_horizon_diagnostic(request)
-    assert seen["tranche_count"] == ev.MHS_COMMITTEE_TRANCHE_COUNT
+    assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
 
 
 def test_committee_execution_book_regime_adaptive_differs_from_fixed_variants() -> None:
@@ -2582,7 +2587,7 @@ def test_committee_execution_book_regime_adaptive_differs_from_fixed_variants() 
     fixed1 = ev._committee_execution_book(**kwargs, tranche_count=1)
     fixed3 = ev._committee_execution_book(**kwargs, tranche_count=3)
     adaptive = ev._committee_execution_book(
-        **kwargs, tranche_count=3, regime_adaptive_window=ev.MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+        **kwargs, tranche_count=3, regime_adaptive_window=ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     )
     assert not adaptive.equals(fixed1)
     assert not adaptive.equals(fixed3)
@@ -2601,7 +2606,7 @@ def test_committee_execution_book_regime_adaptive_preserves_dollar_neutrality() 
     fixed1 = ev._committee_execution_book(**kwargs, tranche_count=1)
     fixed3 = ev._committee_execution_book(**kwargs, tranche_count=3)
     adaptive = ev._committee_execution_book(
-        **kwargs, tranche_count=3, regime_adaptive_window=ev.MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+        **kwargs, tranche_count=3, regime_adaptive_window=ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     )
     non_zero = adaptive.abs().sum(axis=1) > 1e-9
     assert float(adaptive.loc[non_zero].sum(axis=1).abs().max()) < 1e-9
@@ -2663,6 +2668,7 @@ def test_committee_regime_adaptive_tranche_mutually_exclusive_with_tranche_smoot
         )
 
 
+@pytest.mark.slow
 def test_committee_regime_adaptive_tranche_default_off_byte_identical(
     mhs_market_with_taker_buy_quote, monkeypatch,
 ) -> None:
@@ -2704,13 +2710,14 @@ def test_committee_regime_adaptive_tranche_default_off_byte_identical(
         assert getattr(default_report, field) == getattr(explicit_off, field)
 
 
+@pytest.mark.slow
 def test_committee_regime_adaptive_tranche_threads_both_call_sites(
     mhs_market_with_taker_buy_quote, monkeypatch,
 ) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_REGIME_ADAPTIVE_TRANCHE_THREADS_BOTH_CALL_SITES:
     # with committee_capital=True and committee_regime_adaptive_tranche=True
     # the fold target builder AND the top-level blend both thread
-    # regime_adaptive_window == MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW (never
+    # regime_adaptive_window == COMMITTEE_REGIME_ADAPTIVE_WINDOW (never
     # None at one site and set at the other).
     root, end = mhs_market_with_taker_buy_quote
     symbols = [
@@ -2734,7 +2741,7 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
 
     monkeypatch.setattr(ev, "_committee_execution_book", _spy)
     ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
-    assert seen["regime_adaptive_window"] == ev.MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+    assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
     seen.clear()
     monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
@@ -2742,7 +2749,7 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     ev.run_mhs_horizon_diagnostic(request)
-    assert seen["regime_adaptive_window"] == ev.MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW
+    assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
 
 def test_p14_postbook_concurrent_parity() -> None:
@@ -2986,7 +2993,7 @@ def test_compact_failure_escalates_past_artifacts(tmp_path, monkeypatch) -> None
     def _boom(_table):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(ev, "_daily_resample_ledger", _boom)
+    monkeypatch.setattr(persist_mod, "_daily_resample_ledger", _boom)
     out = tmp_path / "mhs_report.json"
     persisted = ev.persist_mhs_horizon_diagnostic_report(
         report, out, tier=ev.MhsOutputTier.COMPACT,
@@ -3096,7 +3103,7 @@ def test_fold_safe_slow_book_spec_admitted_vs_fallback() -> None:
     # a candidate; only then does it build a BookSpec whose horizon is the
     # selected candidate with band/step_hours/min_symbols identical to the
     # default.
-    default = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    default = ev.BOOK_SPECS["slow_momentum"]
     fallback = ev.DiscoveryQualificationResult(
         selected_horizon=None, admitted=False, discovery_scores=(),
         discovery_aggregate_net_t=None, qualification_net_t=None,
@@ -3123,6 +3130,7 @@ def test_fold_safe_slow_book_spec_admitted_vs_fallback() -> None:
     assert spec.min_symbols == default.min_symbols
 
 
+@pytest.mark.slow
 def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_SAFE_HORIZON_06_FLAG_OFF_IS_BYTE_IDENTICAL: with
     # fold_safe_horizon_selection=False (the default) neither the fold worker
@@ -3175,6 +3183,7 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
     assert captured["fold_slow_horizons"] == {}
 
 
+@pytest.mark.slow
 def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_SAFE_HORIZON_07_FOLD_REPORT_RECORDS_SOURCE: MhsFoldReport
     # constructed without the new fields defaults to (168, "frozen_default"),
@@ -3222,7 +3231,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     def _admit_by_family(*args, **kwargs):
         # The funding-carry family's selected lookback must come from its own
         # measured grid; the slow/fast families keep the 360h selection.
-        if kwargs.get("horizon_candidates") == ev.MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
+        if kwargs.get("horizon_candidates") == ev.FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
             return _admitted_selection(72)
         return _admitted_selection(360)
 
@@ -3258,7 +3267,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
         3: (360, "fold_train_only_discovery"),
     }
     assert captured["top_level_slow"].horizon_hours == 360
-    assert captured["top_level_slow"].band is ev.PHASE_1_BOOK_SPECS["slow_momentum"].band
+    assert captured["top_level_slow"].band is ev.BOOK_SPECS["slow_momentum"].band
 
 
 def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> None:
@@ -3289,6 +3298,7 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
     assert report.slow_horizon_source == "frozen_default"
 
 
+@pytest.mark.slow
 def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_HORIZON_SEARCH_EFF_05_TOP_LEVEL_WIRING_SHARES_ONE_CACHE_ACROSS_FOLDS:
     # with fold_safe_horizon_selection=True the parent precomputes every
@@ -3326,6 +3336,7 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     assert calls["n"] == 1
 
 
+@pytest.mark.slow
 def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_HORIZON_DIAGNOSTICS_EXPOSES_EFFECTIVE_BREADTH_04: with
     # discovery_gate=True run_mhs_horizon_diagnostic reports finite
@@ -3364,6 +3375,7 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
     assert "fast_horizon_effective_breadth" not in report_off.horizon_diagnostics
 
 
+@pytest.mark.slow
 def test_trend_sleeve_default_off_bit_identical(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_TREND_SLEEVE_DEFAULT_OFF_BIT_IDENTICAL: with the flags
     # omitted (trend_sleeve=False, trend_sleeve_gross=0.0) the report's
@@ -3391,6 +3403,7 @@ def test_trend_sleeve_default_off_bit_identical(mhs_market, monkeypatch) -> None
         assert getattr(default_report, field) == getattr(explicit_off, field)
 
 
+@pytest.mark.slow
 def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_TREND_SLEEVE_DIAGNOSTIC_POPULATED: with trend_sleeve=True
     # and trend_sleeve_gross=0.3 the report's trend_sleeve_diagnostic is a dict
@@ -3443,7 +3456,7 @@ def test_trend_sleeve_position_wraps_frozen_math() -> None:
     decision_grid = pd.date_range(grid[0], grid[-1], freq="24h", tz="UTC")
     expected = ev.time_series_trend_position(
         ev.market_basket_log_price(log_close, eligible),
-        ev.MHS_TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
+        ev.TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
     )
     got = ev._trend_sleeve_position(log_close, eligible, decision_grid)
     pd.testing.assert_series_equal(got, expected)
@@ -3553,6 +3566,7 @@ def test_trend_sleeve_overlay_additive_fold(mhs_market_with_taker_buy_quote, mon
     assert np.isfinite(target_on.to_numpy(dtype="float64")).all()
 
 
+@pytest.mark.slow
 def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
     # SCENARIO_MHS_TREND_SLEEVE_OVERLAY_ADDITIVE (top-level path): the sleeve is
     # applied exactly once, the top-level blend_1h is the pre-change blend plus
@@ -3688,7 +3702,7 @@ def test_trend_sleeve_diagnostic_uses_deployed_book(mhs_market) -> None:
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     funded = [
         s for s in symbols
-        if s in funding_by_symbol and s not in ev.MHS_SOURCE_GAP_EXCLUDED_SYMBOLS
+        if s in funding_by_symbol and s not in ev.SOURCE_GAP_EXCLUDED_SYMBOLS
     ]
     panel = ev.load_base_panel(
         str(root), "1h", ("close", "open", "quote_vol"), _START, end,
@@ -3713,7 +3727,7 @@ def test_trend_sleeve_diagnostic_uses_deployed_book(mhs_market) -> None:
     decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
     basket = ev.market_basket_log_price(log_close, eligible)
     position = ev.time_series_trend_position(
-        basket, ev.MHS_TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
+        basket, ev.TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
     )
     sleeve = ev.trend_sleeve_weights(position, execution_mask, request.trend_sleeve_gross)
 
@@ -3746,6 +3760,7 @@ def test_trend_sleeve_gross_budget_bounds() -> None:
         MhsDiagnosticRequest(trend_sleeve_gross=0.3)
 
 
+@pytest.mark.slow
 def test_multi_feature_default_off_bit_identical(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_MULTI_FEATURE_DEFAULT_OFF_BIT_IDENTICAL: with the flag
     # omitted (multi_feature_book=False) the report's multi_feature_diagnostic
@@ -3772,6 +3787,7 @@ def test_multi_feature_default_off_bit_identical(mhs_market, monkeypatch) -> Non
         assert getattr(default_report, field) == getattr(explicit_off, field)
 
 
+@pytest.mark.slow
 def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_MULTI_FEATURE_DIAGNOSTIC_REPORTS_COVERAGE_AND_STABILITY:
     # with multi_feature_book=True the report's multi_feature_diagnostic dict
@@ -3840,6 +3856,7 @@ def test_committee_request_validation() -> None:
     assert on.committee_book is True
 
 
+@pytest.mark.slow
 def test_committee_default_off_bit_identical(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_DEFAULT_OFF_BIT_IDENTICAL: with the flag omitted
     # (committee_book=False) the report's committee_diagnostic is None and every
@@ -3866,6 +3883,7 @@ def test_committee_default_off_bit_identical(mhs_market, monkeypatch) -> None:
         assert getattr(default_report, field) == getattr(explicit_off, field)
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_REPORTS_WALK_FORWARD_WEALTH: with
     # committee_book=True the report's committee_diagnostic dict carries the
@@ -3874,7 +3892,7 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
     # source coverage audited before any fillna, and the purged walk-forward
     # wealth metrics (net Sharpe, CAGR, MDD, logret) per measured cost tier --
     # every reported value finite or an explicit None. The fixture spans past
-    # MHS_COMMITTEE_OOS_START so the block grid has real test bars (B1).
+    # COMMITTEE_OOS_START so the block grid has real test bars (B1).
     root, end = mhs_market_long
     monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
     monkeypatch.setattr(
@@ -3917,7 +3935,7 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
                 assert 0.0 <= value <= 1.0
     wf = diag["walk_forward"]
     assert isinstance(wf["block_edges"], list)
-    assert wf["block_edges"][0] == ev.MHS_COMMITTEE_OOS_START.isoformat()
+    assert wf["block_edges"][0] == ev.COMMITTEE_OOS_START.isoformat()
     assert wf["purge_hours"] == 720
     assert wf["target_vol"] == pytest.approx(0.15)
     assert isinstance(wf["skipped_blocks"], list)
@@ -3931,6 +3949,7 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
             assert value is None or np.isfinite(value)
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_per_tier_blocks_present(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_PER_TIER_BLOCKS_PRESENT: every tier's walk-forward
     # dict carries a per-block breakdown (same edges logic as skipped_blocks)
@@ -3973,6 +3992,7 @@ def test_committee_kelly_sizing_requires_committee_book() -> None:
     assert MhsDiagnosticRequest(committee_book=True, committee_kelly_sizing=True).committee_kelly_sizing is True
 
 
+@pytest.mark.slow
 def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_KELLY_SIZING_DEFAULT_OFF_BYTE_IDENTICAL:
     # with committee_book=True and committee_kelly_sizing omitted (default False)
@@ -3995,6 +4015,7 @@ def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monk
     assert set(wf["per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
 
 
+@pytest.mark.slow
 def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_KELLY_SIZING_ON_CHANGES_REPORT: with
     # committee_kelly_sizing=True the committee walk-forward reports
@@ -4025,7 +4046,7 @@ def _committee_growth_panels(
     gross = pd.DataFrame(
         rng.normal(0.0, 0.002, size=(n_days, len(columns))), index=idx, columns=columns,
     )
-    discovery = gross.index < ev.MHS_COMMITTEE_OOS_START
+    discovery = gross.index < ev.COMMITTEE_OOS_START
     gross.loc[discovery] *= discovery_vol_scale
     tc = pd.DataFrame(
         rng.uniform(0.0, 0.005, size=(n_days, len(columns))), index=idx, columns=columns,
@@ -4035,13 +4056,13 @@ def _committee_growth_panels(
 
 def test_committee_growth_headroom_discovery_only_causality() -> None:
     # SCENARIO_COMMITTEE_GROWTH_HEADROOM_DISCOVERY_ONLY_CAUSALITY: OOS bars
-    # (>= MHS_COMMITTEE_OOS_START) never enter the discovery-only fit -- mutating
+    # (>= COMMITTEE_OOS_START) never enter the discovery-only fit -- mutating
     # them to extreme values leaves the diagnostic byte-identical.
     gross, tc = _committee_growth_panels()
     base = ev._committee_growth_headroom(gross, tc, cost_bps=4.18)
     gross_mut = gross.copy()
     tc_mut = tc.copy()
-    oos = gross.index >= ev.MHS_COMMITTEE_OOS_START
+    oos = gross.index >= ev.COMMITTEE_OOS_START
     gross_mut.loc[oos] *= 1e6
     tc_mut.loc[oos] *= 1e6
     assert ev._committee_growth_headroom(gross_mut, tc_mut, cost_bps=4.18) == base
@@ -4058,7 +4079,7 @@ def test_committee_growth_headroom_reference_risk_not_hardcoded() -> None:
     assert low["reference_risk"] != high["reference_risk"]
     for scale, result in ((1.0, low), (3.0, high)):
         gross, tc = _committee_growth_panels(discovery_vol_scale=scale)
-        discovery = gross.index < ev.MHS_COMMITTEE_OOS_START
+        discovery = gross.index < ev.COMMITTEE_OOS_START
         net = gross - tc * 4.18
         weights = ev.long_only_equal_risk_weights(net.loc[discovery])
         discovery_net = ev.score_weighted_net(
@@ -4091,6 +4112,7 @@ def test_committee_growth_diagnostic_requires_committee_book() -> None:
     )
 
 
+@pytest.mark.slow
 def test_committee_growth_diagnostic_default_off_byte_identical(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_GROWTH_DIAGNOSTIC_DEFAULT_OFF_BYTE_IDENTICAL:
     # with committee_growth_diagnostic omitted (default False) the report's
@@ -4111,6 +4133,7 @@ def test_committee_growth_diagnostic_default_off_byte_identical(mhs_market_long,
     assert report.committee_diagnostic["walk_forward"]["sizing_mode"] == "vol_target"
 
 
+@pytest.mark.slow
 def test_committee_growth_diagnostic_observational_only(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_COMMITTEE_GROWTH_HEADROOM_OBSERVATIONAL_ONLY: enabling the growth
     # headroom diagnostic must not perturb the reported per-tier walk-forward --
@@ -4138,6 +4161,7 @@ def test_committee_growth_diagnostic_observational_only(mhs_market_long, monkeyp
     )
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_block_logret_share_reported(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_DIAGNOSTIC_BLOCK_LOGRET_SHARE_REPORTED: every block
     # carries 'logret' and 'logret_share' keys, and the non-None shares across a
@@ -4170,6 +4194,7 @@ def test_committee_diagnostic_block_logret_share_reported(mhs_market_long, monke
             assert sum(shares) == pytest.approx(1.0, abs=1e-9), tier
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_block_return_autocorr_lag1_present(
     mhs_market_long, monkeypatch,
 ) -> None:
@@ -4202,6 +4227,7 @@ def test_committee_diagnostic_block_return_autocorr_lag1_present(
             )
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_block_return_autocorr_lag1_matches_manual_computation(
     mhs_market_long, monkeypatch,
 ) -> None:
@@ -4248,6 +4274,7 @@ def test_committee_diagnostic_block_return_autocorr_lag1_matches_manual_computat
             )
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_block_existing_fields_unchanged(
     mhs_market_long, monkeypatch,
 ) -> None:
@@ -4280,6 +4307,7 @@ def test_committee_diagnostic_block_existing_fields_unchanged(
                 assert block[key] is None or isinstance(block[key], float)
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_off_by_default_unchanged(
     mhs_market_long, monkeypatch,
 ) -> None:
@@ -4302,6 +4330,7 @@ def test_committee_diagnostic_off_by_default_unchanged(
     assert report.committee_diagnostic is None
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, caplog) -> None:
     # SCENARIO_MHS_COMMITTEE_DEBUG_LOGS_EMITTED: at DEBUG level the
     # MhsHorizonDiagnostic logger emits all four committee checkpoints --
@@ -4329,6 +4358,7 @@ def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, c
         assert any(tag in m for m in messages), tag
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_TELEMETRY_STAGES_RECORDED: with committee_book=True
     # the report's resource_measurements carry the diagnostic-feature panel
@@ -4353,6 +4383,7 @@ def test_committee_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeyp
         assert f"committee_walk_forward_{tier}" in stages
 
 
+@pytest.mark.slow
 def test_multi_feature_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_MULTI_FEATURE_TELEMETRY_STAGE_RECORDED: with
     # multi_feature_book=True the resource_measurements carry the diagnostic
@@ -4373,10 +4404,11 @@ def test_multi_feature_diagnostic_telemetry_stages_recorded(mhs_market_long, mon
     assert "diagnostic_feature_panels" in stages
     assert "multi_feature_diagnostic" in stages
 
+@pytest.mark.slow
 def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_COMMITTEE_DIAGNOSTIC_USES_OOS_START_NOT_RAW_START (B1): on a
     # panel spanning 2021-2025 the committee diagnostic's walk-forward block
-    # grid is anchored at MHS_COMMITTEE_OOS_START (2023-01-01), never the
+    # grid is anchored at COMMITTEE_OOS_START (2023-01-01), never the
     # diagnostic's own 2021 start; monkeypatching the constant to a different
     # date shifts the first edge, proving the constant is actually read.
     root, end = mhs_market_long
@@ -4392,11 +4424,11 @@ def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monk
     report = ev.run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     first_edge = report.committee_diagnostic["walk_forward"]["block_edges"][0]
-    assert first_edge == ev.MHS_COMMITTEE_OOS_START.isoformat()
+    assert first_edge == ev.COMMITTEE_OOS_START.isoformat()
     assert first_edge == "2023-01-01T00:00:00+00:00"
 
     shifted = pd.Timestamp("2023-07-01", tz="UTC")
-    monkeypatch.setattr(ev, "MHS_COMMITTEE_OOS_START", shifted)
+    monkeypatch.setattr(ev, "COMMITTEE_OOS_START", shifted)
     report2 = ev.run_mhs_horizon_diagnostic(request)
     assert report2.status == "COMPLETE"
     first_edge2 = report2.committee_diagnostic["walk_forward"]["block_edges"][0]
@@ -4406,14 +4438,14 @@ def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monk
 
 def test_search_trials_attempted_raised_and_deflation_more_conservative() -> None:
     # SCENARIO_SEARCH_TRIALS_ATTEMPTED_RAISED_AND_DEFLATED_SHARPE_MORE_CONSERVATIVE
-    # (B4): MHS_SEARCH_TRIALS_ATTEMPTED is raised to 70 (prior 20 + ~50 committee
+    # (B4): SEARCH_TRIALS_ATTEMPTED is raised to 70 (prior 20 + ~50 committee
     # configurations), and deflated_sharpe_ratio is strictly non-increasing in
     # the trial count, so the raised constant can only make the top-level
     # statistic more conservative, never more optimistic.
-    from src.mhs.contracts import MHS_SEARCH_TRIALS_ATTEMPTED
-    from src.mhs.evaluation import deflated_sharpe_ratio
+    from src.mhs.types import SEARCH_TRIALS_ATTEMPTED
+    from src.mhs.evidence import deflated_sharpe_ratio
 
-    assert MHS_SEARCH_TRIALS_ATTEMPTED == 70
+    assert SEARCH_TRIALS_ATTEMPTED == 70
     kwargs = {"observed_sr": 0.12, "trial_sr_variance": 0.0025, "n_obs": 1200, "skew": 0.0, "kurtosis": 3.0}
     d70 = deflated_sharpe_ratio(n_trials=70, **kwargs)
     d20 = deflated_sharpe_ratio(n_trials=20, **kwargs)
@@ -4422,9 +4454,10 @@ def test_search_trials_attempted_raised_and_deflation_more_conservative() -> Non
     assert d70 <= d20
 
 
+@pytest.mark.slow
 def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_COMMITTEE_SOURCE_COVERAGE_GATES_ADMISSION (B3): a member whose
-    # required RAW source column has coverage below MHS_FEATURE_MIN_COVERAGE in
+    # required RAW source column has coverage below FEATURE_MIN_COVERAGE in
     # any year is fail-closed excluded from admission -- the fixture's missing
     # taker_buy_quote column (mirroring the funding 45/452-symbol gap) gates
     # both flow_imb members BEFORE build_feature_books, and the excluded list
@@ -4469,6 +4502,7 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
     )
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_reports_trials_and_warning(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_COMMITTEE_DIAGNOSTIC_REPORTS_TRIALS_AND_WARNING (B4/B5): the
     # committee diagnostic reports trials_explored == 50 and a non-empty
@@ -4494,12 +4528,13 @@ def test_committee_diagnostic_reports_trials_and_warning(mhs_market_long, monkey
     assert diag["evaluation_protocol"] == "purged_walk_forward_oos"
 
 
+@pytest.mark.slow
 def test_evaluation_protocol_field_distinguishes_in_sample_from_oos(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_EVALUATION_PROTOCOL_FIELD_DISTINGUISHES_IN_SAMPLE_FROM_OOS (B5):
     # the two opt-in diagnostics carry distinct protocol tags on every call, so
     # a reader can never mistake the in-sample full-period net Sharpe for the
     # purged walk-forward OOS numbers.
-    from src.mhs.features import MHS_FEATURE_REGISTRY
+    from src.mhs.features import FEATURE_REGISTRY
 
     root, end = mhs_market_long
     monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
@@ -4515,10 +4550,11 @@ def test_evaluation_protocol_field_distinguishes_in_sample_from_oos(mhs_market_l
     assert report.status == "COMPLETE"
     assert report.committee_diagnostic["evaluation_protocol"] == "purged_walk_forward_oos"
     assert report.multi_feature_diagnostic["evaluation_protocol"] == "in_sample_full_period"
-    assert report.multi_feature_diagnostic["trials_explored"] == len(MHS_FEATURE_REGISTRY)
+    assert report.multi_feature_diagnostic["trials_explored"] == len(FEATURE_REGISTRY)
     assert "selection_bias_warning" not in report.multi_feature_diagnostic
 
 
+@pytest.mark.slow
 def test_committee_diagnostic_reports_skipped_blocks(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_COMMITTEE_DIAGNOSTIC_REPORTS_SKIPPED_BLOCKS (B6): the committee
     # diagnostic reports skipped_blocks as a list of {block_start, reason}
@@ -4546,6 +4582,7 @@ def test_committee_diagnostic_reports_skipped_blocks(mhs_market_long, monkeypatc
     assert skipped == []
 
 
+@pytest.mark.slow
 def test_committee_books_regression_unchanged_by_b1_b2(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_COMMITTEE_BOOKS_REGRESSION_UNCHANGED_BY_B1_B2: enabling
     # committee_book must not perturb any pre-existing non-committee report
@@ -4580,10 +4617,10 @@ def test_ram_guard_resolve_budget(monkeypatch) -> None:
     # guard; ram_guard=True auto-derives 85% of total RAM and the reserve floor
     # max(5% of total, 256 MiB); an explicit max_rss_bytes overrides the budget
     # fraction; psutil failure / non-positive total yields (None, None).
-    from src.mhs.contracts import (
-        MHS_RAM_BUDGET_FRACTION,
-        MHS_RAM_RESERVE_FLOOR_BYTES,
-        MHS_RAM_RESERVE_FRACTION,
+    from src.mhs.types import (
+        RAM_BUDGET_FRACTION,
+        RAM_RESERVE_FLOOR_BYTES,
+        RAM_RESERVE_FRACTION,
     )
 
     class _FakeMem:
@@ -4597,8 +4634,8 @@ def test_ram_guard_resolve_budget(monkeypatch) -> None:
 
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _FakeMem(8 * 2**30, 4 * 2**30))
     budget, reserve = ev._resolve_ram_budget(None, True)
-    assert budget == int(8 * 2**30 * MHS_RAM_BUDGET_FRACTION)
-    assert reserve == max(int(8 * 2**30 * MHS_RAM_RESERVE_FRACTION), MHS_RAM_RESERVE_FLOOR_BYTES)
+    assert budget == int(8 * 2**30 * RAM_BUDGET_FRACTION)
+    assert reserve == max(int(8 * 2**30 * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES)
 
     explicit, reserve2 = ev._resolve_ram_budget(123456789, True)
     assert explicit == 123456789
@@ -4646,6 +4683,7 @@ def test_ram_guard_request_field() -> None:
     assert MhsDiagnosticRequest(ram_guard=False).ram_guard is False
 
 
+@pytest.mark.slow
 def test_pipeline_ram_guard_fails_closed_before_oom(mhs_market_long) -> None:
     # SCENARIO_MHS_PIPELINE_RAM_GUARD_FAILS_CLOSED_BEFORE_OOM: a tiny explicit
     # budget makes run_mhs_horizon_diagnostic fail closed with a serializable
@@ -4659,14 +4697,15 @@ def test_pipeline_ram_guard_fails_closed_before_oom(mhs_market_long) -> None:
     )
     report = ev.run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
-    assert ev.MHS_GO_REASON_RESOURCE_BREACH in report.research_go.reason_codes
+    assert ev.GO_REASON_RESOURCE_BREACH in report.research_go.reason_codes
     assert report.research_go.eligible is False
     for book in report.books.values():
         assert book.failure is not None
-        assert book.failure.reason == ev.MHS_GO_REASON_RESOURCE_BREACH
+        assert book.failure.reason == ev.GO_REASON_RESOURCE_BREACH
     assert report.resource_measurements, "terminal report must retain stage telemetry"
 
 
+@pytest.mark.slow
 def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTICS_RUN_AFTER_FOLDS_AND_EVICT_CACHES: the opt-in
     # diagnostics run only after the fold pool returned, the minute/mark frame
@@ -4716,7 +4755,7 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
     # primitives (build_feature_books + mhs_ledger_pnl + equal_risk_combination).
     from src.mhs.execution import mhs_ledger_pnl
     from src.mhs.features import (
-        MHS_FEATURE_REGISTRY,
+        FEATURE_REGISTRY,
         build_feature_books,
         equal_risk_combination,
         feature_coverage_audit,
@@ -4748,10 +4787,10 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
     )
 
     # Batch reference using the existing primitives.
-    books = build_feature_books(MHS_FEATURE_REGISTRY, panels, mask, decision_grid, min_symbols=8)
+    books = build_feature_books(FEATURE_REGISTRY, panels, mask, decision_grid, min_symbols=8)
     ref_admitted: dict[str, dict] = {}
     ref_excluded: dict[str, dict] = {}
-    for spec in MHS_FEATURE_REGISTRY:
+    for spec in FEATURE_REGISTRY:
         feature = spec.builder(panels)
         coverage = feature_coverage_audit(feature, mask)
         failing = [year for year, cov in coverage.items() if cov < spec.min_coverage]
@@ -4818,6 +4857,7 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
         assert diag["feature_book_effective_breadth"] is None
 
 
+@pytest.mark.slow
 def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_STREAMING_REGRESSION: the streaming committee
     # rewrite is behavior-transparent -- the pre-existing walk-forward wealth
@@ -4837,7 +4877,7 @@ def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
     report = ev.run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.committee_diagnostic
-    assert diag["walk_forward"]["block_edges"][0] == ev.MHS_COMMITTEE_OOS_START.isoformat()
+    assert diag["walk_forward"]["block_edges"][0] == ev.COMMITTEE_OOS_START.isoformat()
     assert diag["walk_forward"]["purge_hours"] == 720
     assert diag["walk_forward"]["skipped_blocks"] == []
     per_tier = diag["walk_forward"]["per_tier"]
@@ -4893,8 +4933,8 @@ def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
 def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -> None:
     """SCENARIO_MHS_RESEARCH_GO_ELIGIBLE_WITH_REGISTERED_POLICY: a fold whose
     realized primary_net_ann falls below the registered
-    MHS_REGISTERED_POLICY_THRESHOLDS['primary_annual_return'] floor carries
-    MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR in its failures; an unregistered
+    REGISTERED_POLICY_THRESHOLDS['primary_annual_return'] floor carries
+    GO_REASON_PRIMARY_RETURN_BELOW_FLOOR in its failures; an unregistered
     (None) threshold never adds the code, matching the pre-registration
     conservative fail-closed default."""
     root, end = mhs_market
@@ -4911,24 +4951,25 @@ def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -
     )
 
     monkeypatch.setattr(
-        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        ev, "REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": 30.0, "primary_annual_return": 10.0},
     )
     unreachable_floor = ev._run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
     )
-    assert ev.MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR in unreachable_floor.failures
+    assert ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR in unreachable_floor.failures
 
     monkeypatch.setattr(
-        ev, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        ev, "REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": 30.0, "primary_annual_return": None},
     )
     unregistered = ev._run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
     )
-    assert ev.MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR not in unregistered.failures
+    assert ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR not in unregistered.failures
 
 
+@pytest.mark.slow
 def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_REPORT_CARRIES_FUNDING_CARRY_DISCOVERY_05 (parent path):
     # with fold_safe_horizon_selection=True and a funding-carry admission the
@@ -4956,7 +4997,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
         return captured["fold_funding_carry"]
 
     def _admit_funding_only(*args, **kwargs):
-        if kwargs.get("horizon_candidates") == ev.MHS_FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
+        if kwargs.get("horizon_candidates") == ev.FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
             return _admitted_selection(72)
         return _admitted_selection(None)
 
@@ -4997,6 +5038,7 @@ def _deployment_readiness() -> ev.DeploymentReadinessResult:
     )
 
 
+@pytest.mark.slow
 def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FAST_BOOK_MODE_DEFAULT_IS_IDENTITY_03: the default
     # fast_book_mode is single_horizon, an invalid value raises ValueError, and
@@ -5036,7 +5078,7 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
     assert np.isfinite(book.executed_prescreen_net_t)
 
     log_close, eligible, execution_mask, _req, _grid, _end = _slow_book_panel_inputs(mhs_market)
-    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    fast = ev.BOOK_SPECS["fast_reversal"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
     w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
     ref_execution = ev.renormalize_within_mask(
@@ -5048,6 +5090,7 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
     pd.testing.assert_frame_equal(captured["w_fast_execution"], ref_execution)
 
 
+@pytest.mark.slow
 def test_mhs_fast_book_mode_ensemble_produces_different_executed_book(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FAST_BOOK_MODE_ENSEMBLE_PRODUCES_DIFFERENT_EXECUTED_BOOK_04:
     # with fast_book_mode='horizon_ensemble' the resulting fast_reversal report
@@ -5083,6 +5126,7 @@ def test_mhs_fast_book_mode_ensemble_produces_different_executed_book(mhs_market
     assert slow_default.executed_prescreen_net_t == slow_ensemble.executed_prescreen_net_t
 
 
+@pytest.mark.slow
 def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypatch) -> None:
     # SCENARIO_MHS_FUNDING_CARRY_TOP_LEVEL_DISCOVERY_05: with discovery_gate=True
     # the top-level discovery_qualification carries funding_carry_long and
@@ -5120,6 +5164,7 @@ def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypa
     assert report_off.discovery_qualification is None
 
 
+@pytest.mark.slow
 def test_mhs_full_history_yearly_net_t_and_worst_year_corr_exposed(mhs_market_funding_vary, monkeypatch) -> None:
     # SCENARIO_MHS_FULL_HISTORY_YEARLY_NET_T_AND_WORST_YEAR_CORR_EXPOSED_06:
     # with discovery_gate=True the report exposes full_history_yearly_net_t for
@@ -5213,9 +5258,9 @@ def test_mhs_alpha_engine_slow_book_single_horizon_is_byte_identical(mhs_market)
     # ``_horizon_ensemble_execution_weights`` reproduces the pre-change
     # ``_book_weights`` + tilt + renormalize sequence exactly.
     log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
-    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    slow = ev.BOOK_SPECS["slow_momentum"]
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
-    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
     expected = _pre_change_slow_book(
         log_close, eligible, execution_mask, slow, slow_grid, slow_ema,
     )
@@ -5232,9 +5277,9 @@ def test_mhs_alpha_engine_slow_book_ensemble_is_rowwise_mean_with_consensus_gros
     # neutral, with strictly smaller mean gross than any single horizon on a
     # panel where the horizons disagree (consensus-scaled exposure).
     log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
-    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    slow = ev.BOOK_SPECS["slow_momentum"]
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
-    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
     per_horizon: dict[int, pd.DataFrame] = {}
     for h in slow.band.horizons_hours:
         spec = dataclasses.replace(slow, horizon_hours=h)
@@ -5256,7 +5301,7 @@ def test_mhs_alpha_engine_slow_book_ensemble_is_rowwise_mean_with_consensus_gros
 
 def test_mhs_alpha_engine_slow_book_validates_mode_and_signal_kind(mhs_market) -> None:
     log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
-    slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+    slow = ev.BOOK_SPECS["slow_momentum"]
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
     with pytest.raises(ValueError, match="mode"):
         ev._horizon_ensemble_execution_weights(
@@ -5478,7 +5523,7 @@ def test_book_outcome_existing_primary_metrics_unchanged(mhs_market) -> None:
     addition is additive-only -- the primary/stress replay metrics stay present
     and finite, and the reference prescreen/tail remain bit-identical to the
     pre-change inline construction (the regression invariant)."""
-    from src.mhs.evaluation import cost_response_curve, tail_sensitivity_curve
+    from src.mhs.evidence import cost_response_curve, tail_sensitivity_curve
 
     args = _build_book_outcome_args(mhs_market)
     report, _ = ev._book_outcome(**args)
@@ -5535,7 +5580,7 @@ def _passing_fold_report(replay: object) -> ev.MhsFoldReport:
 def test_research_go_eligible_is_reachable(mhs_market, monkeypatch) -> None:
     """SCENARIO_MHS_RESEARCH_GO_ELIGIBLE_IS_REACHABLE_07: with every fold
     passing and every policy threshold registered in
-    ``MHS_REGISTERED_POLICY_THRESHOLDS``, ``_mhs_research_go`` returns
+    ``REGISTERED_POLICY_THRESHOLDS``, ``_mhs_research_go`` returns
     eligible=True with no reason codes -- a result the pre-change code (which
     unconditionally appended UNSPECIFIED_POLICY) could never produce. With a
     threshold missing it still fails closed to UNSPECIFIED_POLICY."""
@@ -5551,7 +5596,7 @@ def test_research_go_eligible_is_reachable(mhs_market, monkeypatch) -> None:
     passing = _passing_fold_report(replay)
 
     monkeypatch.setattr(
-        _research_go, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        _research_go, "REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
     )
     registered = _research_go._mhs_research_go((passing,))
@@ -5560,12 +5605,12 @@ def test_research_go_eligible_is_reachable(mhs_market, monkeypatch) -> None:
     assert registered.folds_passed == 1
 
     monkeypatch.setattr(
-        _research_go, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        _research_go, "REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": None, "primary_annual_return": 0.05},
     )
     missing = _research_go._mhs_research_go((passing,))
     assert missing.eligible is False
-    assert ev.MHS_GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
+    assert ev.GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
 
 
 def _gap_mixed_replay() -> object:
@@ -5588,19 +5633,19 @@ def test_research_go_data_integrity_reason_split(monkeypatch) -> None:
     passing = _passing_fold_report(_gap_mixed_replay())
     mixed = dataclasses.replace(
         passing,
-        failures=(ev.MHS_GO_REASON_EXECUTION_GAP, ev.MHS_GO_REASON_PRIMARY_SHARPE),
+        failures=(ev.GO_REASON_EXECUTION_GAP, ev.GO_REASON_PRIMARY_SHARPE),
         termination_counts={"MISSING_DATA": 3, "UNKNOWN_TERMINATION": 0},
         primary_autocorr_sharpe=0.3,
     )
     monkeypatch.setattr(
-        _research_go, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        _research_go, "REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
     )
     go = _research_go._mhs_research_go((mixed,))
-    assert go.data_integrity_reason_codes == (ev.MHS_GO_REASON_EXECUTION_GAP,)
-    assert ev.MHS_GO_REASON_PRIMARY_SHARPE not in go.data_integrity_reason_codes
+    assert go.data_integrity_reason_codes == (ev.GO_REASON_EXECUTION_GAP,)
+    assert ev.GO_REASON_PRIMARY_SHARPE not in go.data_integrity_reason_codes
     assert set(go.reason_codes) == {
-        ev.MHS_GO_REASON_EXECUTION_GAP, ev.MHS_GO_REASON_PRIMARY_SHARPE,
+        ev.GO_REASON_EXECUTION_GAP, ev.GO_REASON_PRIMARY_SHARPE,
     }
     assert go.eligible is False
 
@@ -5614,19 +5659,20 @@ def test_research_go_data_integrity_reason_empty_when_clean(monkeypatch) -> None
     passing = _passing_fold_report(_gap_mixed_replay())
     alpha_only = dataclasses.replace(
         passing,
-        failures=(ev.MHS_GO_REASON_PRIMARY_SHARPE,),
+        failures=(ev.GO_REASON_PRIMARY_SHARPE,),
         primary_autocorr_sharpe=0.3,
     )
     monkeypatch.setattr(
-        _research_go, "MHS_REGISTERED_POLICY_THRESHOLDS",
+        _research_go, "REGISTERED_POLICY_THRESHOLDS",
         {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
     )
     go = _research_go._mhs_research_go((alpha_only,))
     assert go.eligible is False
     assert go.data_integrity_reason_codes == ()
-    assert go.reason_codes == (ev.MHS_GO_REASON_PRIMARY_SHARPE,)
+    assert go.reason_codes == (ev.GO_REASON_PRIMARY_SHARPE,)
 
 
+@pytest.mark.slow
 def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_DEFAULT_OFF_BYTE_IDENTICAL:
     # with the opt-in flag omitted (default False) the pre-flight gate AND the
@@ -5655,6 +5701,7 @@ def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monke
         assert getattr(default_report, field) == getattr(explicit_off, field)
 
 
+@pytest.mark.slow
 def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_ON_FAILS_CLOSED_EARLY:
     # a fixture whose execution_timeframe (5m) has no parquet files at all for
@@ -5682,6 +5729,7 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
     assert books_called == []
 
 
+@pytest.mark.slow
 def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_RELEVANCE_GATE_PASSES_WHERE_FULL_SCOPE_BLOCKED:
     # with execution_coverage_gate=True, a fixture whose NON-roster symbol has
@@ -5734,12 +5782,13 @@ def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_marke
         gap_path.write_bytes(original_bytes)
 
 
+@pytest.mark.slow
 def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_MARK_GATE_FAILS_BEFORE_REPLAY: with
     # execution_coverage_gate=True, a fixture where a roster symbol's mark data
     # starts after its first roster hour raises DataIntegrityError naming that
     # symbol, and raises before any execution replay window is materialized.
-    # The missing span is kept well under MHS_DYNAMIC_GAP_EXCLUSION_HOURS (720h)
+    # The missing span is kept well under DYNAMIC_GAP_EXCLUSION_HOURS (720h)
     # so the default dynamic gap exclusion (spec
     # mhs_data_integrity_relevance_scoping.md §3) leaves this symbol in the
     # mask and the strict opt-in gate is the one that catches it -- see
@@ -5800,9 +5849,10 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
             mark_path.write_bytes(original_mark_bytes)
 
 
+@pytest.mark.slow
 def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DYNAMIC_GAP_EXCLUSION_LARGE_GAP_NO_RAISE: a roster symbol
-    # whose mark data is missing for >= MHS_DYNAMIC_GAP_EXCLUSION_HOURS (720h)
+    # whose mark data is missing for >= DYNAMIC_GAP_EXCLUSION_HOURS (720h)
     # is silently excluded from the execution mask by the default (always-on)
     # apply_dynamic_mark_gap_exclusion instead of raising -- even with
     # execution_coverage_gate=True, since that gate runs AFTER dynamic
@@ -5898,6 +5948,7 @@ def test_mhs_diagnostic_execution_timeframe_3m_accepted() -> None:
         MhsDiagnosticRequest(execution_timeframe="7m")
 
 
+@pytest.mark.slow
 def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_3M_REPLAY_END_TO_END: a synthetic 3m fixture
     # (data_root/3m/{symbol}.parquet at 3-minute bars) replays through the real
@@ -5930,13 +5981,13 @@ def test_registered_policy_thresholds_contract() -> None:
     2026-08-17 values (docs/specs/mhs_research_go_policy_registration.md) --
     cap_30_roster mirrors the frozen execution_universe_size design cap
     (attestation only), primary_annual_return is enforced per anchored fold."""
-    from src.mhs.contracts import MHS_REGISTERED_POLICY_THRESHOLDS, MHS_SEARCH_TRIALS_ATTEMPTED
+    from src.mhs.types import REGISTERED_POLICY_THRESHOLDS, SEARCH_TRIALS_ATTEMPTED
 
-    assert MHS_REGISTERED_POLICY_THRESHOLDS == {
+    assert REGISTERED_POLICY_THRESHOLDS == {
         "cap_30_roster": 30.0, "primary_annual_return": 0.05,
     }
-    assert isinstance(MHS_SEARCH_TRIALS_ATTEMPTED, int)
-    assert MHS_SEARCH_TRIALS_ATTEMPTED >= 1
+    assert isinstance(SEARCH_TRIALS_ATTEMPTED, int)
+    assert SEARCH_TRIALS_ATTEMPTED >= 1
 
 def test_persist_wires_run_history_append_for_compact_and_full(tmp_path, monkeypatch) -> None:
     """SCENARIO_MHS_RESULT_LOG_05: ``persist_mhs_horizon_diagnostic_report``
@@ -5948,7 +5999,7 @@ def test_persist_wires_run_history_append_for_compact_and_full(tmp_path, monkeyp
         calls.append((record["output_tier"], str(history_dir)))
         return Path(history_dir) / "active.jsonl"
 
-    monkeypatch.setattr(ev, "append_run_history_record", _spy_append)
+    monkeypatch.setattr(persist_mod, "append_run_history_record", _spy_append)
     out = tmp_path / "mhs_report.json"
     ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.COMPACT)
     ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.FULL)
@@ -5972,8 +6023,8 @@ def test_persist_still_appends_when_compact_resample_fails(tmp_path, monkeypatch
         calls.append(record)
         return Path(history_dir) / "active.jsonl"
 
-    monkeypatch.setattr(ev, "_daily_resample_ledger", _boom)
-    monkeypatch.setattr(ev, "append_run_history_record", _spy_append)
+    monkeypatch.setattr(persist_mod, "_daily_resample_ledger", _boom)
+    monkeypatch.setattr(persist_mod, "append_run_history_record", _spy_append)
     out = tmp_path / "mhs_report.json"
     persisted = ev.persist_mhs_horizon_diagnostic_report(
         report, out, tier=ev.MhsOutputTier.COMPACT,
@@ -5997,7 +6048,7 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
     def _boom(record, history_dir):
         raise RuntimeError("history boom")
 
-    monkeypatch.setattr(ev, "append_run_history_record", _boom)
+    monkeypatch.setattr(persist_mod, "append_run_history_record", _boom)
     isolated = ev.persist_mhs_horizon_diagnostic_report(
         report, out, tier=ev.MhsOutputTier.COMPACT,
     )
@@ -6012,7 +6063,7 @@ def test_target_gross_request_validation() -> None:
     # committee_capital=True. The unresolved sentinel is never mutated into
     # the frozen field (that would break dataclasses.replace()); resolution
     # happens lazily via _resolved_committee_target_gross.
-    assert _research_go._resolved_committee_target_gross(default) == ev.MHS_COMMITTEE_TARGET_GROSS
+    assert _research_go._resolved_committee_target_gross(default) == ev.COMMITTEE_TARGET_GROSS
 
     valid = MhsDiagnosticRequest(committee_target_gross=0.795, committee_capital=True)
     assert valid.committee_target_gross == 0.795
@@ -6141,7 +6192,7 @@ def test_committee_execution_book_applies_member_weights() -> None:
         min_symbols=8, tranche_count=1,
     )
     # Build a weight dict that puts 0.8 on the first admitted member
-    member_specs = [s for s in ev.MHS_FEATURE_REGISTRY if s.name in set(ev.MHS_COMMITTEE_MEMBERS)]
+    member_specs = [s for s in ev.FEATURE_REGISTRY if s.name in set(ev.COMMITTEE_MEMBERS)]
     books = ev.build_feature_books(
         member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
@@ -6178,7 +6229,7 @@ def test_committee_execution_book_member_weights_fail_closed() -> None:
     )
     pd.testing.assert_frame_equal(book_equal, book_mismatch)
     # All-zero weights also falls back to equal
-    member_specs = [s for s in ev.MHS_FEATURE_REGISTRY if s.name in set(ev.MHS_COMMITTEE_MEMBERS)]
+    member_specs = [s for s in ev.FEATURE_REGISTRY if s.name in set(ev.COMMITTEE_MEMBERS)]
     books = ev.build_feature_books(
         member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
