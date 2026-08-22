@@ -50,6 +50,11 @@
       "tests/unit/mhs/test_discovery.py"
     ]
   },
+  "src/application/research/mhs/stage_services.py": {
+    "testing": [
+      "tests/unit/application/research/mhs/test_stage_services.py"
+    ]
+  },
   "src/application/research/mhs/statistics.py": {
     "testing": [
       "tests/unit/application/research/mhs/test_statistics.py",
@@ -169,6 +174,7 @@
     "architecture": "docs/architecture/mhs-explain.md",
     "testing": "tests/unit/mhs/test_params.py"
   },
+  "src/mhs/pipeline/orchestrator.py": {},
   "src/mhs/regime.py": {
     "testing": "tests/unit/mhs/test_regime.py"
   },
@@ -246,6 +252,5 @@
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
-  },
-  "src/mhs/pipeline/orchestrator.py": {}
+  }
 }
