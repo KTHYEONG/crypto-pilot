@@ -9,6 +9,7 @@ long-lived state. The orchestrator handles setup and wiring only (<=150 lines).
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
 import pandas as pd
@@ -19,6 +20,7 @@ from src.application.research.mhs.evaluation import (
     _get_symbol_mark_frame,
     resolve_evaluation_end,
 )
+from src.application.research.mhs.resources import _TreeMemorySampler
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.runner import run_stages
@@ -33,6 +35,10 @@ def run_mhs_diagnostic(config: MhsRunConfig) -> MhsHorizonDiagnosticReport:
     functions in the original computation order (I-IDENTITY). The previous
     delegation to the monolithic ``run_mhs_horizon_diagnostic`` has been
     removed -- this function is now the sole composition point.
+
+    A ``_TreeMemorySampler`` observes the whole process tree for the duration
+    of the run; its COW-correct PSS/USS/available-floor stats are attached to
+    the report as ``tree_memory`` (observational, never raises into the run).
     """
     _get_symbol_mark_frame.cache_clear()
     resolved_end = resolve_evaluation_end(config.end, unseal_holdout=False)
@@ -73,4 +79,10 @@ def run_mhs_diagnostic(config: MhsRunConfig) -> MhsHorizonDiagnosticReport:
     )
     ctx.run_start = _run_start
     telemetry = StageTelemetry(log_run=config.log_run)
-    return run_stages(ctx, telemetry)
+    tree_sampler = _TreeMemorySampler()
+    try:
+        tree_sampler.start()
+        report = run_stages(ctx, telemetry)
+    finally:
+        tree_stats = tree_sampler.stop()
+    return dataclasses.replace(report, tree_memory=tree_stats)
