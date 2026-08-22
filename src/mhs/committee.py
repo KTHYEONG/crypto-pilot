@@ -23,6 +23,7 @@ from src.mhs.params import (
     COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
     COMMITTEE_GROWTH_RUIN_FRACTION,
     PNL_TARGET_ANNUAL_VOL,
+    GrowthRiskEnvelope,
 )
 from src.mhs.params import (
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
@@ -361,6 +362,7 @@ def purged_walk_forward(
 def growth_budget_annual_vol(
     train_returns: pd.Series,
     *,
+    envelope: GrowthRiskEnvelope | None = None,
     bars_per_year: float = 365.0,
     floor: float = 0.05,
     cap: float = 1.0,
@@ -377,7 +379,19 @@ def growth_budget_annual_vol(
     point reports ``mdd_breach_prob=0.000`` and the solver selects a risk the live
     path cannot honour.
     """
+    from src.mhs.params import GrowthRiskEnvelope
     from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
+
+    if envelope is None:
+        envelope = GrowthRiskEnvelope(
+            name="conservative",
+            max_drawdown=COMMITTEE_GROWTH_MAX_DRAWDOWN,
+            max_drawdown_prob=COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+            ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
+            max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
+            horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+            leverage_ceiling=1.0,
+        )
 
     r = train_returns.dropna().replace([np.inf, -np.inf], np.nan).dropna()
     if len(r) < 2:
@@ -389,11 +403,11 @@ def growth_budget_annual_vol(
     config = GrowthSizingConfig(
         risk_grid=risk_grid,
         reference_risk=reference_risk,
-        max_drawdown=COMMITTEE_GROWTH_MAX_DRAWDOWN,
-        max_drawdown_prob=COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
-        ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
-        max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
-        horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+        max_drawdown=envelope.max_drawdown,
+        max_drawdown_prob=envelope.max_drawdown_prob,
+        ruin_fraction=envelope.ruin_fraction,
+        max_ruin_prob=envelope.max_ruin_prob,
+        horizon_years=envelope.horizon_years,
         n_paths=COMMITTEE_GROWTH_N_PATHS,
         bars_per_year=COMMITTEE_GROWTH_BARS_PER_YEAR,
     )

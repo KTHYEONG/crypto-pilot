@@ -20,6 +20,7 @@ from src.mhs.params import (
     REBALANCE_DEADBAND_POSITION_FRACTION,
     REGIME_CASH_MEDIAN_WINDOW_HOURS,
     REGIME_CASH_SCALE_FLOOR,
+    GrowthRiskEnvelope,
 )
 from src.mhs.regime import trend_efficiency_scale
 
@@ -257,6 +258,7 @@ def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: flo
 
 def _growth_budget_target_vol(
     reference_daily_returns: pd.Series,
+    envelope: GrowthRiskEnvelope | None = None,
     oos_start: pd.Timestamp = COMMITTEE_OOS_START,
 ) -> float:
     """Leak-free wrapper: slices to index < oos_start, delegates to growth_budget_annual_vol.
@@ -270,7 +272,63 @@ def _growth_budget_target_vol(
     train = train.dropna()
     if len(train) < PNL_VOL_TARGET_BURN_IN_DAYS:
         return PNL_TARGET_ANNUAL_VOL
-    return growth_budget_annual_vol(train)
+    return growth_budget_annual_vol(train, envelope=envelope)
+
+
+def _envelope_exposure_cap(
+    envelope: GrowthRiskEnvelope,
+    target_gross: float | None,
+    reference_daily_returns: pd.Series,
+) -> float:
+    """Exposure cap from the envelope, replacing PNL_VOL_TARGET_MAX_SCALE.
+
+    Returns ``envelope.leverage_ceiling / target_gross`` when ``target_gross``
+    is not None, else ``envelope.leverage_ceiling``. When
+    ``leverage_ceiling > 1.0`` the bootstrap ruin frontier is checked against
+    ``reference_daily_returns`` itself (the actual strategy P&L the cap will be
+    applied to, never a synthetic stand-in) using the same
+    ``reference_risk = std(ddof=1)`` convention as
+    ``growth_budget_annual_vol``; raises ``ValueError`` (fail-closed) when the
+    series has fewer than 2 finite observations, a zero/non-finite std, or the
+    envelope's solver result is infeasible at that reference risk -- a ceiling
+    beyond the bootstrap ruin frontier, or one that cannot be verified against
+    real data, must never be wired.
+    """
+    if envelope.leverage_ceiling > 1.0:
+        from src.mhs.params import COMMITTEE_GROWTH_BARS_PER_YEAR, COMMITTEE_GROWTH_N_PATHS, COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS  # noqa: I001
+        from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
+
+        r = reference_daily_returns.dropna().replace([np.inf, -np.inf], np.nan).dropna()
+        reference_risk = float(r.std(ddof=1)) if len(r) >= 2 else float("nan")
+        if not np.isfinite(reference_risk) or reference_risk <= 0:
+            raise ValueError(
+                f"envelope '{envelope.name}' has leverage_ceiling={envelope.leverage_ceiling} "
+                f"but reference_daily_returns has too little history/variance "
+                f"({len(r)} finite rows) to verify the bootstrap ruin frontier"
+            )
+        config = GrowthSizingConfig(
+            risk_grid=tuple(sorted(
+                reference_risk * m for m in COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS
+            )),
+            reference_risk=reference_risk,
+            max_drawdown=envelope.max_drawdown,
+            max_drawdown_prob=envelope.max_drawdown_prob,
+            ruin_fraction=envelope.ruin_fraction,
+            max_ruin_prob=envelope.max_ruin_prob,
+            horizon_years=envelope.horizon_years,
+            n_paths=COMMITTEE_GROWTH_N_PATHS,
+            bars_per_year=COMMITTEE_GROWTH_BARS_PER_YEAR,
+        )
+        result = solve_growth_optimal_risk(r.to_numpy(), config, use_drawdown_overlay=False)
+        if result.selected_risk is None:
+            raise ValueError(
+                f"envelope '{envelope.name}' has leverage_ceiling={envelope.leverage_ceiling} "
+                f"but the bootstrap ruin frontier is infeasible on reference_daily_returns; "
+                f"ceiling must not exceed the frontier"
+            )
+    if target_gross is not None:
+        return envelope.leverage_ceiling / target_gross
+    return envelope.leverage_ceiling
 
 
 def _replay_exposure_scale(
@@ -282,13 +340,33 @@ def _replay_exposure_scale(
     fold 경로와 top-level 경로 모두에서 동일 함수를 사용하여
     FOLD_BLEND_PATH_DIVERGENCE를 회피한다(I4).
     """
+    from src.application.research.mhs.research_go import _resolved_growth_envelope
+
     if request.pnl_vol_target_mode == "median_relative":
         scale = _pnl_vol_target_scale(reference_daily_returns)
     elif request.pnl_vol_target_mode == "exante_target":
-        scale = _exante_vol_target_scale(reference_daily_returns, cap=PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
+        envelope = _resolved_growth_envelope(request)
+        if envelope.name == "conservative":
+            # I4: the registered default envelope reproduces every
+            # pre-existing exante_target call byte-for-byte -- it must never
+            # route through the solver-fitted target_vol below, which would
+            # silently change the production default's exposure.
+            scale = _exante_vol_target_scale(reference_daily_returns, cap=PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
+        else:
+            target_vol = _growth_budget_target_vol(reference_daily_returns, envelope=envelope)
+            cap = (
+                _envelope_exposure_cap(envelope, request.committee_target_gross, reference_daily_returns)
+                if request.exposure_scale_two_sided else 1.0
+            )
+            scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=cap)
     elif request.pnl_vol_target_mode == "growth_budget":
-        target_vol = _growth_budget_target_vol(reference_daily_returns)
-        scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
+        envelope = _resolved_growth_envelope(request)
+        target_vol = _growth_budget_target_vol(reference_daily_returns, envelope=envelope)
+        cap = (
+            _envelope_exposure_cap(envelope, request.committee_target_gross, reference_daily_returns)
+            if request.exposure_scale_two_sided else 1.0
+        )
+        scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=cap)
     else:
         raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
     return _committee_capital_replay_scale(
