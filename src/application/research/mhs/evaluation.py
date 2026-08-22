@@ -522,10 +522,12 @@ def _fold_blend_parity(
         "unmeasured": [],
         "max_abs_log_holdings_ratio": 0.0,
         "max_abs_log_gross_ratio": 0.0,
+        "max_abs_log_deployed_gross_ratio": 0.0,
         "tolerance": tolerance,
     }
     max_abs_holdings = 0.0
     max_abs_gross = 0.0
+    max_abs_deployed = 0.0
     for fold in folds:
         fold_trace = fold.book_structure
         blend_trace = blend_traces.get(fold.fold_index)
@@ -534,6 +536,7 @@ def _fold_blend_parity(
             payload["folds"][fold.fold_index] = {
                 "holdings_log_ratio": None,
                 "gross_log_ratio": None,
+                "deployed_gross_log_ratio": None,
                 "fold": fold_trace,
                 "blend": blend_trace,
             }
@@ -547,15 +550,29 @@ def _fold_blend_parity(
             payload["folds"][fold.fold_index] = {
                 "holdings_log_ratio": None,
                 "gross_log_ratio": None,
+                "deployed_gross_log_ratio": None,
                 "fold": fold_trace,
                 "blend": blend_trace,
             }
             continue
         holdings_log_ratio = float(np.log(f_holdings / b_holdings))
         gross_log_ratio = float(np.log(f_gross / b_gross))
+        # Deployed (post-exposure-scale) gross is what actually ships; a trace
+        # without exposure_scale_mean stays unmeasured for this ratio -- never
+        # silently treated as scale 1.0.
+        f_scale = fold_trace.get("exposure_scale_mean")
+        b_scale = blend_trace.get("exposure_scale_mean")
+        deployed_gross_log_ratio: float | None
+        if not isinstance(f_scale, float) or f_scale <= 0.0 or not isinstance(b_scale, float) or b_scale <= 0.0:
+            deployed_gross_log_ratio = None
+            payload["unmeasured"].append(fold.fold_index)
+        else:
+            deployed_gross_log_ratio = float(np.log((f_gross * f_scale) / (b_gross * b_scale)))
+            max_abs_deployed = max(max_abs_deployed, abs(deployed_gross_log_ratio))
         payload["folds"][fold.fold_index] = {
             "holdings_log_ratio": holdings_log_ratio,
             "gross_log_ratio": gross_log_ratio,
+            "deployed_gross_log_ratio": deployed_gross_log_ratio,
             "fold": fold_trace,
             "blend": blend_trace,
         }
@@ -563,9 +580,13 @@ def _fold_blend_parity(
         max_abs_gross = max(max_abs_gross, abs(gross_log_ratio))
     payload["max_abs_log_holdings_ratio"] = max_abs_holdings
     payload["max_abs_log_gross_ratio"] = max_abs_gross
+    payload["max_abs_log_deployed_gross_ratio"] = max_abs_deployed
     reason_codes = (
         (GO_REASON_PATH_DIVERGENCE,)
-        if max_abs_holdings > tolerance or max_abs_gross > tolerance
+        if (
+            max_abs_holdings > tolerance or max_abs_gross > tolerance
+            or max_abs_deployed > tolerance
+        )
         else ()
     )
     return payload, reason_codes
@@ -2086,6 +2107,22 @@ def _book_outcome(
             reference_daily_returns = primary_two_pass.ledger.equity.resample("1D").last().pct_change()
             pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request)
             replay_scale = pnl_vol_target_scale if request.pnl_vol_target else None
+            if name == "blend":
+                # I5: the parity guard must see the SAME deployed-gross scale
+                # this replay actually applies -- an unscaled run (pnl_vol_target
+                # off) deploys at scale 1.0, never at the diagnostic-only
+                # pnl_vol_target_scale value that was computed but not applied.
+                _deployed_scale = (
+                    replay_scale if replay_scale is not None
+                    else pd.Series(1.0, index=pnl_vol_target_scale.index)
+                )
+                for _idx, _fold in enumerate(phase_1_anchored_purged_folds()):
+                    _fold_scale = _deployed_scale.loc[
+                        (_deployed_scale.index >= _fold.validation_start)
+                        & (_deployed_scale.index <= _fold.validation_end)
+                    ].dropna()
+                    if _idx in blend_traces and len(_fold_scale) > 0:
+                        blend_traces[_idx]["exposure_scale_mean"] = float(_fold_scale.mean())
             pre_vol_target_reference = primary_two_pass
             pre_vol_target_reference_naive_sharpe = _statistics._naive_sharpe(primary_two_pass.ledger)
             batch = replay_execution_window_batch_isolated(
@@ -2496,6 +2533,7 @@ def _run_post_book_concurrently(
     fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
     fold_committee_weights: dict[int, dict[str, float]] | None = None,
+    fold_growth_budget_target_vol: dict[int, float] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -2548,13 +2586,14 @@ def _run_post_book_concurrently(
         futures = {
             pool.submit(
                 _run_anchored_fold,
-                root, fold, request, fold_funding, initial_equity, idx, None,
-                (fold_slow_horizons or {}).get(idx),
-                (fold_fast_horizons or {}).get(idx),
-                (fold_funding_carry or {}).get(idx),
-                (fold_committee_weights or {}).get(idx),
-            ): idx
-            for idx, fold in enumerate(folds)
+                root, fold, request, fold_funding, initial_equity, fold_index, None,
+                (fold_slow_horizons or {}).get(fold_index),
+                (fold_fast_horizons or {}).get(fold_index),
+                (fold_funding_carry or {}).get(fold_index),
+                (fold_committee_weights or {}).get(fold_index),
+                growth_budget_target_vol=(fold_growth_budget_target_vol or {}).get(fold_index),
+            ): fold_index
+            for fold_index, fold in enumerate(folds)
         }
         # The fold pool is now forked; start the diagnostics/deployment thread.
         with ThreadPoolExecutor(max_workers=1) as tpool:
@@ -2567,8 +2606,8 @@ def _run_post_book_concurrently(
                     signal_48h, eligible, opens, bar_funding, grid_1h, fast,
                 )
             for future in as_completed(futures):
-                idx = futures[future]
-                reports[idx] = future.result()
+                fold_index = futures[future]
+                reports[fold_index] = future.result()
             if post_future is not None:
                 (
                     bootstrap_ci, placebo_percentile, participation,
@@ -3300,6 +3339,7 @@ def _run_anchored_fold(
     fast_horizon_override: tuple[int, str] | None = None,
     funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
     committee_member_weights: dict[str, float] | None = None,
+    growth_budget_target_vol: float | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
@@ -3370,7 +3410,7 @@ def _run_anchored_fold(
         # same causal P&L-vol-target scale as the top-level books, computed from
         # the fold's own validation-window reference ledger.
         reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request)
+        pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request, growth_budget_target_vol)
         primary, stress = replay_execution_window_batch(
             _window_telemetry(
                 _rescaled_windows(_windows(), pnl_vol_target_scale),
@@ -3477,7 +3517,13 @@ def _run_anchored_fold(
             funding_carry_vs_slow_momentum_daily_corr=(
                 funding_carry_override[3] if funding_carry_override is not None else None
             ),
-            book_structure=_book_structure_trace(target_weights),
+            book_structure={
+                **_book_structure_trace(target_weights),
+                # Deployed-gross observability: the parity guard must see the
+                # exposure scale actually applied to this fold, not just the
+                # pre-scale decision book.
+                "exposure_scale_mean": float(pnl_vol_target_scale.mean()),
+            },
             regime_characterization=_fold_regime_characterization(root, fold),
         )
     except DataIntegrityError as exc:
