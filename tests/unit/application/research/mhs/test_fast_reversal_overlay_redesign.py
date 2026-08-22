@@ -246,8 +246,16 @@ class TestTrendEfficiencyOverlayDefaultOff:
         def _spy_post(*args, **kwargs):
             return (None, None, {}, {}, (), None)
 
+        from src.application.research.mhs import stage_services
+        import src.mhs.pipeline.stages.fold as fold_stage
+        import src.mhs.pipeline.stages.replay as replay_stage
+
         monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
         monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+        monkeypatch.setattr(stage_services, "_run_books_concurrent", _spy_books)
+        monkeypatch.setattr(stage_services, "_run_post_book_concurrently", _spy_post)
+        monkeypatch.setattr(replay_stage, "_run_books_concurrent", _spy_books)
+        monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _spy_post)
         ev.run_mhs_horizon_diagnostic(_request(root, end))
         default_blend = captured["blend_1h"].copy()
         ev.run_mhs_horizon_diagnostic(_request(root, end, trend_efficiency_overlay=False))

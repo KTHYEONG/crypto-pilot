@@ -63,8 +63,8 @@ def test_mhs_horizon_diagnostic_parses_into_mhs_handler(monkeypatch) -> None:
             self.books: dict[str, object] = {}
 
     monkeypatch.setattr(
-        "src.application.research.mhs.evaluation.run_mhs_horizon_diagnostic",
-        lambda request: captured.append(request) or _Report(),
+        "src.mhs.pipeline.orchestrator.run_mhs_diagnostic",
+        lambda config: captured.append(config) or _Report(),
     )
     monkeypatch.setattr(
         "src.application.research.mhs.evaluation.persist_mhs_horizon_diagnostic_report",

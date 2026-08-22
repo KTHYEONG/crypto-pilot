@@ -448,7 +448,11 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
         quote_vol = panels["quote_vol"]
         panels["taker_buy_quote"] = quote_vol * 0.5
         return panels
+    from src.application.research.mhs import stage_services
+    import src.mhs.pipeline.stages.fold as fold_stage
     monkeypatch.setattr(ev, "_load_feature_panels", _full_coverage_panels)
+    monkeypatch.setattr(stage_services, "_load_feature_panels", _full_coverage_panels)
+    monkeypatch.setattr(fold_stage, "_load_feature_panels", _full_coverage_panels)
     report_full = ev.run_mhs_horizon_diagnostic(request)
     assert report_full.status == "COMPLETE"
     assert set(report_full.committee_diagnostic["admitted"]) == set(
