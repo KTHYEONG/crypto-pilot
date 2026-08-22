@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_PERF_STAGE_SERVICES_AND_COUPLED_REPLAY_HAZARD_FIX",
+      "date": "2026-08-22",
+      "adr_id": "ADR_20260822_MHS_PERF_STAGE_SERVICES_AND_COUPLED_REPLAY_HAZARD_FIX",
+      "domain": "mhs",
+      "title": "MHS 성능 리팩토링 stage_services 결합 수정 + P5 결합 replay fail-closed 가드 결함 수정",
+      "why": "code-review에서 stage_services.py가 evaluation.py 사설 심볼을 wrapper 함수로 감싸며 이름을 공개(무언더스코어)로 바꿔 기존 test_stage_services.py의 identity(is) 검증과 monkeypatch.setattr(evaluation, ...) 계약을 깨뜨렸음을 발견. 이를 고치는 과정에서 replay_execution_windows_coupled(P5, D1)의 fail-closed completeness gate가 자기 window 소비 이후 coverage와 비교하는 구조라 논리적으로 절대 발동하지 않는 dead guard였음을 실측 테스트로 확인.",
+      "resolution": "stage_services.py를 evaluation.py 사설 심볼의 identity re-export로 되돌리고 6개 pipeline stage 모듈의 _evaluation.<private>() attribute 접근을 전부 stage_services의 언더스코어 이름 import로 교체. test_module_boundaries.py에 attribute-access 우회 탐지 테스트를 추가. replay_execution_windows_coupled의 gap 체크를 window 소비 이전(prior_coverage_ns)의 window_start 비교로 재작성하고 tests/integration/mhs/test_coupled_replay_equivalence.py로 실측 등가성·gap fail-closed 검증.",
+      "impact": "P4 의존성 경계 게이트가 실질적 결합을 다시 탐지하도록 복구, monkeypatch 기반 기존 테스트 전부 회복. P5 고위험 기능의 fail-closed 안전장치가 실제로 작동하도록 수정되어 향후 window 생성 로직 변경 시 gap이 조용히 통과하는 회귀를 막음."
+    },
+    {
       "task_id": "MHS_GROWTH_ENVELOPE_AND_MEMBER_ATTRIBUTION",
       "date": "2026-08-22",
       "adr_id": "ADR_20260822_MHS_GROWTH_ENVELOPE_AND_MEMBER_ATTRIBUTION",
@@ -989,16 +999,6 @@
       "why": "v8_joint 결합탐색(discovery_reliability_score) 최적점이 admission turnover_max(150x/yr)에 막힘. rev1(고정비율 1.230x)은 과최적화된 매직넘버로 기각, rev2(block-bootstrap UCB)는 샌드박스 검증 결과 실제 격차(1.23x)를 과소추정(1.01~1.10x)해 기각, worst-6개월-fold 통계(1.62x)로 대체했으나 사용자가 turnover_max=150 자체의 근거를 질의. git log -S 추적 결과 도입 커밋의 'spec section 3.1' 인용 문서가 현재 저장소에 존재하지 않고, CostModel은 turnover에 대해 완전히 선형(시장충격/유동성 항 없음)이라 turnover_max가 비용현실성을 보정한다는 근거가 없으며, docs/results/*.json 10개 프로파일 실측 비교에서 turnover_max에 막힌 v8_joint(turnover=175.4)가 오히려 전체 중 최고 CAGR(41.1%)을 기록함 -- 게이트 자체가 검증되지 않은 임의 기준일 가능성이 높음을 확인.",
       "resolution": "discovery_reliability_score는 turnover 인지 거부 로직 없이 원래(순수 LCB90) 형태로 유지(rev1/2 되돌림, 순변경 0). reliability.py에 _equal_duration_fold_labels(기존 compute_equal_duration_fold_distribution의 fold 경계 로직 추출, 동작 불변 리팩터)와 compute_turnover_fold_upper_bound(동일 6개월 캘린더 fold 컨벤션 재사용, worst-fold 회전율 산출, 결정론적, 외부 캘리브레이션 상수 없음) 신설. tools/research/xs_alpha_blend_joint_search.py의 run()이 탐색 완료 후 최적점의 discovery 구간 worst-fold turnover를 계산해 turnover_max와 함께 진단 전용(비차단) 정보로 출력하도록 확장 -- 실제 채택 판정은 기존 evaluate_xs_admission(turnover_max=150, 무변경)에 전적으로 위임.",
       "impact": "재실행 결과 탐색은 동일 지점(xs_alpha_weight=0.2714, leverage_scale=3.9768, plateau_passed=True)을 재발견했고 새 진단선(discovery_worst_fold_turnover=296.53)만 추가 출력. 실제 CLI(xs-baseline-blend-joint) 결과는 이전과 완전 동일: qualification admitted=False binding=turnover_max(175.42x/yr), LCB90=13.21%(t_stat/fold_concentration PASS). 전략 판정 변경 없음(의도된 결과) -- turnover_max=150 자체의 재검증은 범위 밖 후속 과제로 명시(별도 스펙 필요), CostModel을 turnover에 볼록하게 만드는 구조적 대안도 플랫폼 공유 인프라라 별도 승인 필요로 기록."
-    },
-    {
-      "task_id": "xs_alpha_baseline_blend_joint_search",
-      "date": "2026-08-05",
-      "adr_id": "ADR_20260805_xs_alpha_baseline_blend_joint_search",
-      "domain": "risk",
-      "title": "XS Alpha × Baseline 블렌드 Optuna 결합 탐색 — LCB90 역대 최근접이나 turnover_max 신규 위반",
-      "why": "v8_sized의 순차적(가중치→레버리지 별도목적함수) 선택은 이 프로젝트가 이미 실측으로 'OOS 부호반전'을 확인·기각한 패턴(ADR_20260803_GROWTH_ENGINE_V3_STRUCTURAL_SEARCH)과 동일 구조. 그 ADR이 만든 결합 Optuna 탐색 도구(tools/research/structural_tuner.py::run_structural_search, IS-only+trial상한[4,50]+필수 plateau 게이트)가 미사용 상태로 존재했음. t_stat이 레버리지에 불변이므로 결합탐색이 의미있으려면 목적함수가 LCB90처럼 스케일에 반응해야 함을 확인, discovery 전용 LCB90 목적함수로 (xs_alpha_weight, leverage_scale)를 동시 탐색.",
-      "resolution": "xs_alpha_baseline_blend.py에 discovery_reliability_score(build_blended_ledger+apply_fixed_gross_leverage+evaluate_xs_reliability 순수 조합) 신설. tools/research/xs_alpha_blend_joint_search.py(dev tool, src 아님, optuna 비런타임의존)에서 run_structural_search(search_space={weight:[0,1], leverage:[1,4]}, max_trials=30)로 1회 탐색 실행 -- best_params=(weight=0.2714, leverage=3.977), plateau_passed=True(ratio=0.910)로 통과, 동결. application 레이어에 run_xs_alpha_baseline_blend_joint(필수 kwarg, 하드코딩 없음) 추가, xs-baseline-blend-joint CLI 배선(기존 서브커맨드와 동일 패턴). CLI 실행(홀드아웃 봉인) 결과: LCB90=13.21%(v6단독 7.74%/v8 2.84%/v8_sized 6.40% 대비 역대 최고, 15% 허들에 가장 근접), t_stat=2.069(PASS), fold_concentration PASS, worst_fold=+6.18%(역대 최고). 그러나 qualification 회전율이 175.4x/yr로 급증해 기존 admission 게이트의 turnover_max(150x/yr)를 위반, qualification admitted=False -- discovery_reliability_score가 turnover 제약을 전혀 반영하지 않은 채 레버리지 상한(4.0x) 근처까지 밀어붙인 결과.",
-      "impact": "신뢰도 게이트 3조건 중 LCB90(13.21%<15%, 갭 최소)만 남기고 t_stat/fold_concentration은 통과 -- 이번 프로젝트 전체 사이클 중 LCB90에 가장 근접. 다만 admission 자체가 별개 게이트(turnover_max)로 막혀 채택 보류. Optuna 결합탐색 인프라(discovery_reliability_score, tools/research/xs_alpha_blend_joint_search.py)는 검증되어 재사용 가능. 다음 사이클 후보: discovery_reliability_score에 turnover_max 페널티/제약을 추가해 재탐색, 또는 leverage_scale 탐색 상한을 turnover 여유가 있는 구간으로 좁혀 재실행."
     }
   ]
 }
