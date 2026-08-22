@@ -3,6 +3,9 @@
 """MHS evaluation core contract tests (everything not in a domain-specific split file)."""
 """Contract coverage for the MHS application evaluation resource telemetry."""
 import dataclasses
+import math
+from concurrent.futures import Future
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -472,6 +475,176 @@ def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quot
     monkeypatch.setattr(ev, "build_feature_books", lambda *a, **k: {})
     with pytest.raises(RuntimeError, match="committee_capital"):
         ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+
+def _parity_fold_report(
+    fold_index: int, book_structure: dict[str, float] | None,
+) -> ev.MhsFoldReport:
+    return ev.MhsFoldReport(
+        fold_index=fold_index,
+        validation_start="2022-01-08",
+        validation_end="2022-12-31",
+        strict=None,
+        stress=None,
+        primary_valid=False,
+        primary_autocorr_sharpe=0.0,
+        primary_naive_sharpe=0.0,
+        primary_net_ann=0.0,
+        primary_geometric_cagr=0.0,
+        primary_max_drawdown=0.0,
+        stress_naive_sharpe=0.0,
+        decision_intents=0,
+        termination_counts={},
+        failures=(),
+        strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+        book_structure=book_structure,
+    )
+
+
+def test_fold_blend_parity_measures_deployed_gross() -> None:
+    # SCENARIO_MHS_FOLD_BLEND_DEPLOYED_PARITY_05: the parity guard must measure
+    # the deployed (post-exposure-scale) gross. Identical pre-scale books
+    # (gross_mean 0.84 both sides) whose exposure scales diverge (0.63 vs 1.00)
+    # emit FOLD_BLEND_PATH_DIVERGENCE with max_abs_log_deployed_gross_ratio ==
+    # |log(0.63)| while the pre-scale ratio stays 0.0 -- proving the pre-scale
+    # measurement alone cannot detect the divergence (D2). A trace without
+    # exposure_scale_mean lands in unmeasured and emits no code by itself.
+    fold_trace = {"n_rows": 100.0, "gross_mean": 0.84, "holdings_mean": 42.0, "exposure_scale_mean": 0.63}
+    blend_trace = {"n_rows": 100.0, "gross_mean": 0.84, "holdings_mean": 42.0, "exposure_scale_mean": 1.00}
+    fold = _parity_fold_report(0, fold_trace)
+    payload, reasons = ev._fold_blend_parity({0: blend_trace}, (fold,))
+    assert reasons == (ev.GO_REASON_PATH_DIVERGENCE,)
+    assert payload["max_abs_log_deployed_gross_ratio"] == pytest.approx(abs(math.log(0.63)), rel=1e-9)
+    assert payload["max_abs_log_gross_ratio"] == pytest.approx(0.0)
+    assert payload["folds"][0]["deployed_gross_log_ratio"] == pytest.approx(math.log(0.63), rel=1e-9)
+
+    fold_no_scale = _parity_fold_report(1, {"n_rows": 100.0, "gross_mean": 0.84, "holdings_mean": 42.0})
+    payload_no_scale, reasons_no_scale = ev._fold_blend_parity({1: blend_trace}, (fold_no_scale,))
+    assert reasons_no_scale == ()
+    assert 1 in payload_no_scale["unmeasured"]
+    assert payload_no_scale["folds"][1]["deployed_gross_log_ratio"] is None
+    # The missing field is never silently treated as scale 1.0: no deployed
+    # ratio was folded into the maximum.
+    assert payload_no_scale["max_abs_log_deployed_gross_ratio"] == pytest.approx(0.0)
+
+
+def test_book_outcome_blend_traces_carry_deployed_exposure_scale(mhs_market, monkeypatch) -> None:
+    # Regression for the D2 wiring gap: _fold_blend_parity's deployed-gross
+    # check (SCENARIO_MHS_FOLD_BLEND_DEPLOYED_PARITY_05) is worthless in
+    # production unless the top-level blend_traces built by _book_outcome
+    # actually carry exposure_scale_mean -- previously blend_traces was built
+    # from _book_structure_trace(target_weights) alone, so the blend side of
+    # the ratio was always None and the divergence check could never fire.
+    # This drives the REAL two-pass replay (growth_budget mode, which never
+    # takes the coupled/streaming path per is_streaming_scale_mode) with a
+    # single synthetic fold inside the tiny fixture's own date range, and
+    # asserts blend_traces[0] carries a finite, strictly-positive
+    # exposure_scale_mean matching the deployed (post pnl_vol_target) scale.
+    from src.mhs.evidence import AnchoredPurgedFold
+
+    fold = AnchoredPurgedFold(
+        train_start=_START,
+        train_end=_START + pd.Timedelta(hours=200),
+        validation_start=_START + pd.Timedelta(hours=250),
+        validation_end=_START + pd.Timedelta(hours=2600),
+        forward_dependency_hours=1,
+        purge_hours=50,
+    )
+    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: (fold,))
+
+    args = _build_book_outcome_args(mhs_market)
+    args["name"] = "blend"
+    args["request"] = dataclasses.replace(
+        args["request"], pnl_vol_target_mode="growth_budget", log_run=False,
+    )
+    report, blend_traces = ev._book_outcome(**args)
+    assert report.failure is None
+    assert 0 in blend_traces
+    scale_mean = blend_traces[0]["exposure_scale_mean"]
+    assert isinstance(scale_mean, float)
+    assert np.isfinite(scale_mean)
+    assert scale_mean > 0.0
+
+    # End-to-end proof the wiring actually feeds the parity guard: a fold-side
+    # trace whose exposure differs materially from the real blend-side value
+    # now trips FOLD_BLEND_PATH_DIVERGENCE using the genuine blend trace, not
+    # a hand-fabricated one.
+    diverging_fold_trace = {**blend_traces[0], "exposure_scale_mean": scale_mean * 3.0}
+    fold_report = _parity_fold_report(0, diverging_fold_trace)
+    _, reasons = ev._fold_blend_parity(blend_traces, (fold_report,))
+    assert reasons == (ev.GO_REASON_PATH_DIVERGENCE,)
+
+
+class _InlineExecutor:
+    """Synchronous stand-in for the fork pool: runs submissions in-parent."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def __enter__(self) -> "_InlineExecutor":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def submit(self, fn, /, *args, **kwargs):
+        future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+
+_CAPTURED_FOLD_SUBMISSIONS: list[dict[str, object]] = []
+
+
+def _capturing_anchored_fold(
+    root, fold, request, funding_by_symbol, initial_equity, fold_index,
+    telemetry=None, slow_horizon_override=None, fast_horizon_override=None,
+    funding_carry_override=None, committee_member_weights=None,
+    growth_budget_target_vol=None,
+):
+    _CAPTURED_FOLD_SUBMISSIONS.append({
+        "fold_index": fold_index,
+        "growth_budget_target_vol": growth_budget_target_vol,
+    })
+    return ev._incomplete_fold_report(fold, fold_index, ())
+
+
+def test_post_book_concurrently_forwards_boundary_growth_budget_vols(monkeypatch) -> None:
+    # SCENARIO_MHS_FOLD_GROWTH_BUDGET_PROPAGATION_06: the boundary-resolved
+    # target-vol mapping reaches each fold submission as its trailing keyword;
+    # a None mapping forwards None everywhere so every other run stays
+    # byte-identical.
+    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
+    monkeypatch.setattr(ev, "_run_anchored_fold", _capturing_anchored_fold)
+    monkeypatch.setattr(ev, "ProcessPoolExecutor", _InlineExecutor)
+    monkeypatch.setattr(ev, "plan_worker_count", lambda *a, **k: 1)
+    monkeypatch.setattr(ev, "assert_fork_admission", lambda *a, **k: None)
+    request = MhsDiagnosticRequest(log_run=False)
+
+    _CAPTURED_FOLD_SUBMISSIONS.clear()
+    ev._run_post_book_concurrently(
+        None, "root", request, [], None, None, None, None, None, None, None, {}, 1.0, None,
+        fold_growth_budget_target_vol={0: 0.30, 1: 0.31, 2: 0.32, 3: 0.33},
+    )
+    forwarded = {
+        int(c["fold_index"]): c["growth_budget_target_vol"]
+        for c in _CAPTURED_FOLD_SUBMISSIONS
+    }
+    assert forwarded == {0: 0.30, 1: 0.31, 2: 0.32, 3: 0.33}
+
+    _CAPTURED_FOLD_SUBMISSIONS.clear()
+    ev._run_post_book_concurrently(
+        None, "root", request, [], None, None, None, None, None, None, None, {}, 1.0, None,
+    )
+    forwarded_none = {
+        int(c["fold_index"]): c["growth_budget_target_vol"]
+        for c in _CAPTURED_FOLD_SUBMISSIONS
+    }
+    assert forwarded_none == {0: None, 1: None, 2: None, 3: None}
+
 
 def test_p14_postbook_concurrent_parity() -> None:
     # SCENARIO_P14_POSTBOOK: the deployment tail computed with the placeholder
