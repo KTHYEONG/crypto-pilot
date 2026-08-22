@@ -258,7 +258,10 @@ class MhsDiagnosticRequest:
     )
     committee_evidence_weighting: bool = field(
         default=False,
-        metadata=cli_param(flag="--committee-evidence-weighting", help="Weight members by train evidence."),
+        metadata=cli_param(
+            flag="--committee-evidence-weighting", help="Weight members by train evidence.",
+            negate_flag="--no-committee-evidence-weighting",
+        ),
     )
     funding_carry_sleeve: bool = field(
         default=False,

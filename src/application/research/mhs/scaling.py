@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import pandas as pd
 
@@ -260,19 +262,60 @@ def _growth_budget_target_vol(
     reference_daily_returns: pd.Series,
     envelope: GrowthRiskEnvelope | None = None,
     oos_start: pd.Timestamp = COMMITTEE_OOS_START,
+    *,
+    fail_closed: bool = False,
 ) -> float:
     """Leak-free wrapper: slices to index < oos_start, delegates to growth_budget_annual_vol.
 
     Returns PNL_TARGET_ANNUAL_VOL when fewer than
-    PNL_VOL_TARGET_BURN_IN_DAYS train rows exist.
+    PNL_VOL_TARGET_BURN_IN_DAYS train rows exist. ``fail_closed=True``
+    promotes that unresolvable case to ``DataIntegrityError`` instead of
+    silently re-resolving the policy to a different target vol.
     """
     from src.mhs.committee import growth_budget_annual_vol
 
     train = reference_daily_returns.loc[reference_daily_returns.index < oos_start]
     train = train.dropna()
     if len(train) < PNL_VOL_TARGET_BURN_IN_DAYS:
+        if fail_closed:
+            raise DataIntegrityError(
+                f"growth_budget target vol unresolved: {len(train)} finite train "
+                f"rows before {oos_start}, require >= {PNL_VOL_TARGET_BURN_IN_DAYS}"
+            )
         return PNL_TARGET_ANNUAL_VOL
     return growth_budget_annual_vol(train, envelope=envelope)
+
+
+def _growth_budget_target_vol_by_boundary(
+    reference_daily_returns: pd.Series,
+    envelope: GrowthRiskEnvelope,
+    train_ends: Mapping[str, pd.Timestamp],
+) -> dict[str, float]:
+    """Boundary-resolved growth-budget target vol (I2/I3).
+
+    Each boundary is fit strictly on rows with index < its own ``train_end``,
+    so a fold never sees its own validation window inside its scale fit and
+    every path resolves the same exposure policy as the top-level blend.
+    Mirrors ``_committee_evidence_weights_by_boundary``. Fail-closed (I4): a
+    boundary with fewer than PNL_VOL_TARGET_BURN_IN_DAYS finite train rows
+    raises ``DataIntegrityError`` naming the boundary -- PNL_TARGET_ANNUAL_VOL
+    is never silently substituted.
+    """
+    from src.mhs.committee import growth_budget_annual_vol
+
+    resolved: dict[str, float] = {}
+    for label in sorted(train_ends):
+        boundary_train = reference_daily_returns.loc[
+            reference_daily_returns.index < train_ends[label]
+        ].dropna()
+        if len(boundary_train) < PNL_VOL_TARGET_BURN_IN_DAYS:
+            raise DataIntegrityError(
+                f"growth_budget target vol unresolved for boundary '{label}': "
+                f"{len(boundary_train)} finite train rows before {train_ends[label]}, "
+                f"require >= {PNL_VOL_TARGET_BURN_IN_DAYS}"
+            )
+        resolved[label] = growth_budget_annual_vol(boundary_train, envelope=envelope)
+    return resolved
 
 
 def _envelope_exposure_cap(
@@ -280,67 +323,82 @@ def _envelope_exposure_cap(
     target_gross: float | None,
     reference_daily_returns: pd.Series,
 ) -> float:
-    """Exposure cap from the envelope, replacing PNL_VOL_TARGET_MAX_SCALE.
+    """Exposure cap derived from the registered drawdown budget.
 
-    Returns ``envelope.leverage_ceiling / target_gross`` when ``target_gross``
-    is not None, else ``envelope.leverage_ceiling``. When
-    ``leverage_ceiling > 1.0`` the bootstrap ruin frontier is checked against
-    ``reference_daily_returns`` itself (the actual strategy P&L the cap will be
-    applied to, never a synthetic stand-in) using the same
-    ``reference_risk = std(ddof=1)`` convention as
-    ``growth_budget_annual_vol``; raises ``ValueError`` (fail-closed) when the
-    series has fewer than 2 finite observations, a zero/non-finite std, or the
-    envelope's solver result is infeasible at that reference risk -- a ceiling
-    beyond the bootstrap ruin frontier, or one that cannot be verified against
-    real data, must never be wired.
+    Runs the registered bootstrap frontier on ``reference_daily_returns``
+    itself (the actual strategy P&L the cap will be applied to, never a
+    synthetic stand-in) with ``reference_risk = std(ddof=1)`` and returns
+    ``max(1.0, selected_risk / reference_risk)`` -- the exposure multiple the
+    envelope's ``P(MDD > max_drawdown) <= max_drawdown_prob`` budget supports.
+    Raises ``ValueError`` (fail-closed) when the series has fewer than 2
+    finite observations, a zero/non-finite std, the solver is infeasible at
+    that reference risk, or ``leverage_ceiling`` exceeds the verified
+    frontier -- a ceiling beyond the bootstrap ruin frontier, or one that
+    cannot be verified against real data, must never be wired.
+    (``target_gross`` stays in the signature for call-site compatibility; the
+    cap is budget-derived and no longer scales with nominal gross.)
     """
-    if envelope.leverage_ceiling > 1.0:
-        from src.mhs.params import COMMITTEE_GROWTH_BARS_PER_YEAR, COMMITTEE_GROWTH_N_PATHS, COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS  # noqa: I001
-        from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
+    del target_gross
+    from src.mhs.params import COMMITTEE_GROWTH_BARS_PER_YEAR, COMMITTEE_GROWTH_N_PATHS, COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS  # noqa: I001
+    from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
 
-        r = reference_daily_returns.dropna().replace([np.inf, -np.inf], np.nan).dropna()
-        reference_risk = float(r.std(ddof=1)) if len(r) >= 2 else float("nan")
-        if not np.isfinite(reference_risk) or reference_risk <= 0:
-            raise ValueError(
-                f"envelope '{envelope.name}' has leverage_ceiling={envelope.leverage_ceiling} "
-                f"but reference_daily_returns has too little history/variance "
-                f"({len(r)} finite rows) to verify the bootstrap ruin frontier"
-            )
-        config = GrowthSizingConfig(
-            risk_grid=tuple(sorted(
-                reference_risk * m for m in COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS
-            )),
-            reference_risk=reference_risk,
-            max_drawdown=envelope.max_drawdown,
-            max_drawdown_prob=envelope.max_drawdown_prob,
-            ruin_fraction=envelope.ruin_fraction,
-            max_ruin_prob=envelope.max_ruin_prob,
-            horizon_years=envelope.horizon_years,
-            n_paths=COMMITTEE_GROWTH_N_PATHS,
-            bars_per_year=COMMITTEE_GROWTH_BARS_PER_YEAR,
+    r = reference_daily_returns.dropna().replace([np.inf, -np.inf], np.nan).dropna()
+    reference_risk = float(r.std(ddof=1)) if len(r) >= 2 else float("nan")
+    if not np.isfinite(reference_risk) or reference_risk <= 0:
+        raise ValueError(
+            f"envelope '{envelope.name}' has leverage_ceiling={envelope.leverage_ceiling} "
+            f"but reference_daily_returns has too little history/variance "
+            f"({len(r)} finite rows) to verify the bootstrap ruin frontier"
         )
-        result = solve_growth_optimal_risk(r.to_numpy(), config, use_drawdown_overlay=False)
-        if result.selected_risk is None:
-            raise ValueError(
-                f"envelope '{envelope.name}' has leverage_ceiling={envelope.leverage_ceiling} "
-                f"but the bootstrap ruin frontier is infeasible on reference_daily_returns; "
-                f"ceiling must not exceed the frontier"
-            )
-    if target_gross is not None:
-        return envelope.leverage_ceiling / target_gross
-    return envelope.leverage_ceiling
+    config = GrowthSizingConfig(
+        risk_grid=tuple(sorted(
+            reference_risk * m for m in COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS
+        )),
+        reference_risk=reference_risk,
+        max_drawdown=envelope.max_drawdown,
+        max_drawdown_prob=envelope.max_drawdown_prob,
+        ruin_fraction=envelope.ruin_fraction,
+        max_ruin_prob=envelope.max_ruin_prob,
+        horizon_years=envelope.horizon_years,
+        n_paths=COMMITTEE_GROWTH_N_PATHS,
+        bars_per_year=COMMITTEE_GROWTH_BARS_PER_YEAR,
+    )
+    result = solve_growth_optimal_risk(r.to_numpy(), config, use_drawdown_overlay=False)
+    if result.selected_risk is None:
+        raise ValueError(
+            f"envelope '{envelope.name}' has leverage_ceiling={envelope.leverage_ceiling} "
+            f"but the bootstrap ruin frontier is infeasible on reference_daily_returns; "
+            f"ceiling must not exceed the frontier"
+        )
+    frontier_multiple = result.selected_risk / reference_risk
+    if envelope.leverage_ceiling > frontier_multiple:
+        raise ValueError(
+            f"envelope '{envelope.name}' has leverage_ceiling={envelope.leverage_ceiling} "
+            f"but the bootstrap ruin frontier on reference_daily_returns allows only "
+            f"{frontier_multiple:.6f}x reference risk; ceiling must not exceed the frontier"
+        )
+    return max(1.0, float(frontier_multiple))
 
 
 def _replay_exposure_scale(
     reference_daily_returns: pd.Series,
     request: MhsDiagnosticRequest,
+    growth_budget_target_vol: float | None = None,
 ) -> pd.Series:
     """단일 디스패처: 노출 스케일 모드 선택 + committee_capital 합성.
 
     fold 경로와 top-level 경로 모두에서 동일 함수를 사용하여
-    FOLD_BLEND_PATH_DIVERGENCE를 회피한다(I4).
+    FOLD_BLEND_PATH_DIVERGENCE를 회피한다(I2). ``growth_budget_target_vol``이
+    None이 아니면 growth_budget 및 non-conservative exante_target 모드에서
+    fold-local 재적합 대신 그 경계별 사전 적합값을 쓴다 -- fold 참조 수익률은
+    validation 윈도우만 담으므로 자기 적합은 leak이거나 fallback이다(I3/I4).
     """
     from src.application.research.mhs.research_go import _resolved_growth_envelope
+
+    def _resolve_target_vol(envelope: GrowthRiskEnvelope) -> float:
+        if growth_budget_target_vol is not None:
+            return growth_budget_target_vol
+        return _growth_budget_target_vol(reference_daily_returns, envelope=envelope)
 
     if request.pnl_vol_target_mode == "median_relative":
         scale = _pnl_vol_target_scale(reference_daily_returns)
@@ -353,7 +411,7 @@ def _replay_exposure_scale(
             # silently change the production default's exposure.
             scale = _exante_vol_target_scale(reference_daily_returns, cap=PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
         else:
-            target_vol = _growth_budget_target_vol(reference_daily_returns, envelope=envelope)
+            target_vol = _resolve_target_vol(envelope)
             cap = (
                 _envelope_exposure_cap(envelope, request.committee_target_gross, reference_daily_returns)
                 if request.exposure_scale_two_sided else 1.0
@@ -361,7 +419,7 @@ def _replay_exposure_scale(
             scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=cap)
     elif request.pnl_vol_target_mode == "growth_budget":
         envelope = _resolved_growth_envelope(request)
-        target_vol = _growth_budget_target_vol(reference_daily_returns, envelope=envelope)
+        target_vol = _resolve_target_vol(envelope)
         cap = (
             _envelope_exposure_cap(envelope, request.committee_target_gross, reference_daily_returns)
             if request.exposure_scale_two_sided else 1.0
