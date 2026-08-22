@@ -252,5 +252,9 @@
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
+  },
+  "src/mhs/pipeline/config.py": {
+    "architecture": "docs/architecture/mhs-explain.md",
+    "testing": "tests/integration/mhs/test_mhs_growth_budget_acceptance.py"
   }
 }
