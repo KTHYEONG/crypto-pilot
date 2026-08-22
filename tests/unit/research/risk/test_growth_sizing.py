@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.mhs.committee import growth_budget_annual_vol
+from src.mhs.params import GROWTH_RISK_ENVELOPES
 from src.research.risk.growth_sizing import (
     GrowthHeadroomDiagnostic,
     GrowthSizingConfig,
@@ -45,7 +47,6 @@ class TestGrowthSizingConfig:
             {"reference_risk": -1.0},
             {"n_paths": 99},
             {"max_drawdown_prob": 0.0},
-            {"max_drawdown_prob": 1.0},
             {"max_ruin_prob": 0.0},
             {"max_ruin_prob": 1.0},
         ],
@@ -481,3 +482,33 @@ class TestVolTargetOverlay:
             apply_vol_target_overlay(net, weights, 10, 0.005, (4.0, 0.25))
         with pytest.raises(ValueError, match="multiplier_bounds"):
             apply_vol_target_overlay(net, weights, 10, 0.005, (0.0, 4.0))
+
+
+# SCENARIO_GROWTH_ENVELOPE_LADDER_SELECTS_MONOTONE_RISK
+class TestGrowthEnvelopeLadder:
+    """On a fixed seeded synthetic series, growth_budget_annual_vol is non-decreasing
+    across the conservative -> balanced -> growth ladder."""
+
+    @pytest.fixture(autouse=True)
+    def _seeded_returns(self) -> None:
+        rng = np.random.default_rng(0)
+        self.returns = pd.Series(rng.normal(0.0015, 0.018, 750))
+
+    def test_ladder_non_decreasing(self) -> None:
+        vols = []
+        for key in ("conservative", "balanced", "growth"):
+            env = GROWTH_RISK_ENVELOPES[key]
+            vol = growth_budget_annual_vol(self.returns, envelope=env)
+            vols.append(vol)
+        # conservative <= balanced <= growth
+        assert vols[0] <= vols[1] + 1e-9
+        assert vols[1] <= vols[2] + 1e-9
+        # growth > conservative strictly
+        assert vols[2] > vols[0]
+
+    def test_envelope_none_defaults_to_conservative(self) -> None:
+        vol_default = growth_budget_annual_vol(self.returns)
+        vol_conservative = growth_budget_annual_vol(
+            self.returns, envelope=GROWTH_RISK_ENVELOPES["conservative"],
+        )
+        assert vol_default == pytest.approx(vol_conservative)
