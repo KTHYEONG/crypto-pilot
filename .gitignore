@@ -68,8 +68,10 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+# Golden identity fixtures: the compact digest/summary pairs are tracked so
+# the bit-exactness gate can never silently go inert; only the synthetic
+# market scratch dir stays ignored.
 tests/fixtures/golden/_market/
-tests/fixtures/golden/*.json
 
 # Translations
 *.mo
