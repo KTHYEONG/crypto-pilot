@@ -236,7 +236,7 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
     )
     monkeypatch.setattr(
         ev, "_run_books_concurrent",
-        lambda *a, **k: (blend_report, blend_report, blend_report, {}),
+        lambda *a, **k: (blend_report, blend_report, blend_report, {}, None),
     )
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently",
