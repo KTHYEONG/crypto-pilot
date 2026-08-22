@@ -33,6 +33,7 @@ from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
 from src.mhs.execution import replay_execution_window_batch
 from src.mhs.execution import replay_execution_window_batch_isolated
 from src.mhs.execution import replay_execution_windows
+from src.mhs.execution import replay_execution_windows_coupled
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 # contract wiring: from src.mhs.parallel import FORK_CONTEXT, assert_fork_admission, fork_shared_payload, plan_worker_count
 from src.mhs.parallel import (
@@ -185,6 +186,7 @@ from src.application.research.mhs.resources import (
     _assert_stage_rss_budget,
     _assert_execution_rss_budget,
     _StageRecorder,
+    _worker_plan_observer,
 )
 from src.mhs.telemetry import StageTelemetry
 
@@ -2029,28 +2031,6 @@ def _book_outcome(
     pre_vol_target_reference = None
     pre_vol_target_reference_naive_sharpe = None
     try:
-        # Streaming replay: no bulk window materialization.  Phase A (reference,
-        # unscaled) streams the generator directly; Phase B (rescaled)
-        # regenerates once and fans every rescaled bound over that single
-        # stream, so one loaded window stays the memory boundary and the
-        # generator is exhausted exactly twice regardless of bound count.
-        primary = replay_execution_windows(
-            _window_telemetry(_windows(), "execution_window"),
-            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
-            retain_event_snapshots=False,
-            min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
-        )
-        # Pass 1 (reference) -> P&L-vol-target scale -> Pass 2 (reported):
-        # the strategy's own realized daily-return vol drives a causal
-        # multiplicative exposure scalar, so the reported primary/stress/etc.
-        # replay the rescaled weights while ``pre_vol_target_reference`` keeps
-        # the unscaled Pass-1 result as a diagnostic field.
-        reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request)
-        replay_scale = pnl_vol_target_scale if request.pnl_vol_target else None
-        pre_vol_target_reference = primary
-        pre_vol_target_reference_naive_sharpe = _statistics._naive_sharpe(primary.ledger)
-        # Pass 2 replays the scaled target_replay with min_equity_fraction floor.
         batch_bounds: list[tuple[
             Literal["OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"],
             ExecutionSpec,
@@ -2064,20 +2044,61 @@ def _book_outcome(
         if request.ladder_diagnostic:
             _validate_ladder_schedule_contract()
             batch_bounds.append(("OHLCV_LADDERED_PROXY", ExecutionSpec()))
-        batch = replay_execution_window_batch_isolated(
-            _window_telemetry(
-                _rescaled_windows(_windows(), replay_scale),
-                "execution_window_rescaled",
-            ),
-            initial_equity, batch_bounds,
-            retain_event_snapshots=False,
-            min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
-            isolated_bound_indices=frozenset(
-                i for i, (bound, _spec) in enumerate(batch_bounds)
-                if bound in REFERENCE_ONLY_EXECUTION_BOUNDS
-            ),
+        isolated_indices = frozenset(
+            i for i, (bound, _spec) in enumerate(batch_bounds)
+            if bound in REFERENCE_ONLY_EXECUTION_BOUNDS
         )
-        primary = batch.results[0]  # type: ignore[assignment]  # non-isolated index cannot be None
+        # D1 (gated): when the resolved exposure scale is strictly causal and
+        # prefix-deterministic, stream the windows ONCE -- the reference
+        # consumes each loaded window, the prefix scale is recomputed, and the
+        # scaled bounds consume the same already-loaded window. Any fail-closed
+        # condition (incomplete preceding day, roster drift) falls back to the
+        # exact two-pass path below.
+        coupled: tuple[StrategyExecutionReplayResult, Any] | None = None
+        if request.pnl_vol_target and _scaling.is_streaming_scale_mode(request):
+            try:
+                coupled = replay_execution_windows_coupled(
+                    _window_telemetry(_windows(), "execution_window"),
+                    initial_equity,
+                    ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
+                    batch_bounds,
+                    lambda daily_returns: _scaling._replay_exposure_scale(daily_returns, request),
+                    retain_event_snapshots=False,
+                    min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
+                    isolated_bound_indices=isolated_indices,
+                )
+            except DataIntegrityError:
+                coupled = None
+        if coupled is not None:
+            pre_vol_target_reference, batch = coupled
+            pre_vol_target_reference_naive_sharpe = _statistics._naive_sharpe(
+                pre_vol_target_reference.ledger
+            )
+        else:
+            # Exact two-pass path: Phase A (reference, unscaled), then the
+            # P&L-vol-target scale, then Phase B (rescaled batch).
+            primary_two_pass = replay_execution_windows(
+                _window_telemetry(_windows(), "execution_window"),
+                initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+                retain_event_snapshots=False,
+                min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
+            )
+            reference_daily_returns = primary_two_pass.ledger.equity.resample("1D").last().pct_change()
+            pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request)
+            replay_scale = pnl_vol_target_scale if request.pnl_vol_target else None
+            pre_vol_target_reference = primary_two_pass
+            pre_vol_target_reference_naive_sharpe = _statistics._naive_sharpe(primary_two_pass.ledger)
+            batch = replay_execution_window_batch_isolated(
+                _window_telemetry(
+                    _rescaled_windows(_windows(), replay_scale),
+                    "execution_window_rescaled",
+                ),
+                initial_equity, batch_bounds,
+                retain_event_snapshots=False,
+                min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
+                isolated_bound_indices=isolated_indices,
+            )
+        primary = batch.results[0]  # non-isolated index cannot be None
         stress = batch.results[1]
         patient_reference = batch.results[2]
         assert primary is not None
@@ -2347,7 +2368,10 @@ def _run_books_concurrent(
             )
     n_total_workers = 3 + len(member_names)
     _books_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
-    _books_workers = plan_worker_count(n_total_workers, WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    _books_workers = plan_worker_count(
+        n_total_workers, WORKER_PEAK_RSS_BYTES, request.ram_guard,
+        observer=_worker_plan_observer(telemetry, "books", WORKER_PEAK_RSS_BYTES),
+    )
     assert_fork_admission("books", _books_workers, WORKER_PEAK_RSS_BYTES, _books_reserve)
     with (
         fork_shared_payload({
@@ -2514,7 +2538,10 @@ def _run_post_book_concurrently(
         )
 
     reports: dict[int, MhsFoldReport] = {}
-    max_workers = plan_worker_count(min(3, len(folds)), WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    max_workers = plan_worker_count(
+        min(3, len(folds)), WORKER_PEAK_RSS_BYTES, request.ram_guard,
+        observer=_worker_plan_observer(telemetry, "post_book_folds", WORKER_PEAK_RSS_BYTES),
+    )
     _post_book_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     assert_fork_admission("post_book_folds", max_workers, WORKER_PEAK_RSS_BYTES, _post_book_reserve)
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
@@ -3208,6 +3235,7 @@ def _run_fold_safe_discovery_parallel(
     bar_funding: pd.DataFrame,
     grid_1h: pd.DatetimeIndex,
     precomputed: dict[str, dict[int, pd.DataFrame]] | None = None,
+    telemetry: _StageRecorder | None = None,
 ) -> tuple[
     dict[int, int | None],
     dict[int, tuple[int, str]],
@@ -3233,6 +3261,7 @@ def _run_fold_safe_discovery_parallel(
     folds = phase_1_anchored_purged_folds()
     max_workers = plan_worker_count(
         min(3, len(folds)), WORKER_PEAK_RSS_BYTES, ram_guard=True,
+        observer=_worker_plan_observer(telemetry, "fold_safe_discovery", WORKER_PEAK_RSS_BYTES),
     )
     _fold_safe_reserve = _resolve_ram_budget(None, True)[1]
     assert_fork_admission(
@@ -3489,7 +3518,10 @@ def _run_folds_parallel(
     if not folds:
         return ()
     reports: dict[int, MhsFoldReport] = {}
-    max_workers = plan_worker_count(min(3, len(folds)), WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    max_workers = plan_worker_count(
+        min(3, len(folds)), WORKER_PEAK_RSS_BYTES, request.ram_guard,
+        observer=_worker_plan_observer(telemetry, "anchored_folds", WORKER_PEAK_RSS_BYTES),
+    )
     _folds_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     assert_fork_admission("anchored_folds", max_workers, WORKER_PEAK_RSS_BYTES, _folds_reserve)
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:

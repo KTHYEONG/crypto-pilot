@@ -119,19 +119,71 @@ def _get_symbol_mark_frame(symbol: str, timeframe: str) -> pd.DataFrame:
     )
 
 
-def _prewarm_mark_frames(symbols: list[str], timeframe: str = "1h") -> None:
-    """Populate the parent-side mark frame cache before forking workers.
+def _compact_mark_series(symbol: str, timeframe: str) -> tuple[np.ndarray, np.ndarray]:
+    """Validated ``(availability_ns int64, close float64)`` arrays, built once.
 
-    Fork children inherit the warmed cache copy-on-write, so the three books and
-    the anchored folds share one set of full-period mark frames instead of each
-    process re-reading its own copy (the measured ~4.2 GB per-process private
-    footprint becomes a single parent-side set). Missing mark parquet files are
-    skipped (the window path applies the same existence semantics for non-roster
-    symbols).
+    Applies the per-symbol prologue (``datetime.notna() & close.notna() &
+    close > 0``, ``drop_duplicates(subset=['datetime'], keep='last')``,
+    ``sort_values('datetime')`` and the ``+1h`` availability shift) a single
+    time per symbol instead of once per window. A malformed or empty mark
+    cache yields empty arrays; the missing-mark fail-closed path downstream is
+    unchanged. Retention drops from six cached columns to the two ever read.
+    The resolved source path is part of the cache key so redirected data roots
+    (tests, synthetic markets) can never poison one another.
+    """
+    path = str(_futures_collection._mark_price_path(symbol, timeframe))
+    return _compact_mark_series_for_path(symbol, timeframe, path)
+
+
+@lru_cache(maxsize=512)
+def _compact_mark_series_for_path(
+    symbol: str,
+    timeframe: str,
+    path_key: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    del path_key  # identity-only: separates same-symbol data from different roots
+    cache = _get_symbol_mark_frame(symbol, timeframe)
+    if cache.empty or "close" not in cache.columns:
+        return (
+            np.empty(0, dtype="int64"),
+            np.empty(0, dtype="float64"),
+        )
+    valid = (
+        cache["datetime"].notna()
+        & cache["close"].notna()
+        & (cache["close"] > 0)
+    )
+    closes = (
+        cache.loc[valid, ["datetime", "close"]]
+        .drop_duplicates(subset=["datetime"], keep="last")
+        .sort_values("datetime")
+    )
+    if closes.empty:
+        return (
+            np.empty(0, dtype="int64"),
+            np.empty(0, dtype="float64"),
+        )
+    availability_ns = (closes["datetime"] + pd.Timedelta(hours=1)).to_numpy(
+        dtype="datetime64[ns]",
+    ).astype("int64")
+    return (
+        np.ascontiguousarray(availability_ns),
+        np.ascontiguousarray(closes["close"].to_numpy(dtype="float64")),
+    )
+
+
+def _prewarm_mark_frames(symbols: list[str], timeframe: str = "1h") -> None:
+    """Populate the parent-side compact mark cache before forking workers.
+
+    Fork children inherit the warmed compact arrays copy-on-write, so the three
+    books and the anchored folds share one set of validated
+    ``(availability_ns, close)`` arrays instead of each process re-reading its
+    own copy. Missing mark parquet files stay skipped (the window path applies
+    the same existence semantics for non-roster symbols).
     """
     for sym in symbols:
         if os.path.exists(_futures_collection._mark_price_path(sym, timeframe)):
-            _get_symbol_mark_frame(sym, timeframe)
+            _compact_mark_series(sym, timeframe)
 
 
 def _contemporaneous_mark_close_panel(
@@ -227,13 +279,13 @@ def _cached_mark_panel(
     minute_grid: pd.DatetimeIndex,
     max_stale_hours: int,
 ) -> pd.DataFrame:
-    """Build the causal mark-price panel from per-symbol cached mark frames.
+    """Build the causal mark-price panel from per-symbol cached mark series.
 
     Element-for-element equivalent to
     ``DataCollector.load_mark_price_panel`` (same validation, same ``+1h``
     availability shift, same ``ffill`` limit, same NaN for absent/non-finite/
-    non-positive marks) but sources each symbol's frame from the process-level
-    ``_get_symbol_mark_frame`` cache instead of re-reading the parquet per
+    non-positive marks) but sources each symbol from the process-level
+    ``_compact_mark_series`` cache instead of re-running the frame prologue per
     window. The returned frame has exactly ``minute_grid`` as its index and
     exactly ``roster`` as its column order.
     """
@@ -266,32 +318,30 @@ def _cached_mark_panel(
             ffill_limit = int(max_stale_hours * 60 // step_minutes - 1)
     else:
         ffill_limit = 0
+    grid_ns = np.asarray(minute_grid, dtype="datetime64[ns]").astype("int64")
+    n_grid = len(grid_ns)
+    grid_pos = np.arange(n_grid, dtype=np.intp)
     for sym in roster:
-        cache = _get_symbol_mark_frame(sym, timeframe)
-        if cache.empty or "close" not in cache.columns:
+        avail_ns, close_arr = _compact_mark_series(sym, timeframe)
+        if avail_ns.size == 0:
             continue
-        valid = (
-            cache["datetime"].notna()
-            & cache["close"].notna()
-            & (cache["close"] > 0)
-        )
-        closes = (
-            cache.loc[valid, ["datetime", "close"]]
-            .drop_duplicates(subset=["datetime"], keep="last")
-            .sort_values("datetime")
-        )
-        if closes.empty:
-            continue
-        available = pd.Series(
-            closes["close"].to_numpy(dtype="float64"),
-            index=closes["datetime"] + pd.Timedelta(hours=1),
-        )
-        aligned = (
-            available.reindex(minute_grid)
+        # reindex() places a source value only where its timestamp EXACTLY
+        # equals a grid stamp; method='ffill', limit=L then carries it into at
+        # most L consecutive missing grid rows. Reproduced exactly: fill
+        # origins are exact matches only, carried while i - last_match <= L.
+        hit = np.searchsorted(avail_ns, grid_ns, side="left")
+        hit_clipped = np.minimum(hit, len(avail_ns) - 1)
+        matched = (hit < len(avail_ns)) & (avail_ns[hit_clipped] == grid_ns)
+        last_match = np.maximum.accumulate(np.where(matched, grid_pos, -1))
+        carry_idx = np.maximum(last_match, 0)
+        values = np.where(matched, close_arr[hit_clipped], np.nan)
+        filled = values[carry_idx]
+        ok = (
+            matched
             if ffill_limit == 0
-            else available.reindex(minute_grid, method="ffill", limit=ffill_limit)
+            else (last_match >= 0) & ((grid_pos - last_match) <= ffill_limit)
         )
-        panel[sym] = aligned.to_numpy(dtype="float64")
+        panel[sym] = np.where(ok, filled, np.nan)
     return panel
 
 

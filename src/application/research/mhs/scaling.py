@@ -373,3 +373,33 @@ def _replay_exposure_scale(
         scale, reference_daily_returns,
         request.committee_capital, request.committee_kelly_sizing,
     )
+
+
+def is_streaming_scale_mode(request: MhsDiagnosticRequest) -> bool:
+    """True only when the resolved exposure scale is causal + prefix-deterministic.
+
+    A streaming (coupled one-pass) coordinator may recompute the scale from the
+    reference-return PREFIX alone iff every scale value at day ``d`` depends
+    only on realized returns strictly before ``d``. Verified for:
+
+    * ``median_relative`` -- rolling trailing vol and rolling median, both
+      ``shift(1)``-ed;
+    * ``exante_target`` under the registered conservative envelope --
+      ``clip(PNL_TARGET_ANNUAL_VOL / (ewm(std, halflife=20d,
+      min_periods=20).shift(1) * sqrt(365)), floor, cap)``: a constant target
+      with a one-day shift.
+
+    Returns False for ``growth_budget`` and non-conservative envelopes
+    (``_growth_budget_target_vol`` slices the whole pre-OOS train set -- not a
+    prefix computation), and for ``committee_kelly_sizing=True`` (the Kelly
+    blend changes the resolved formula).
+    """
+    if request.committee_kelly_sizing:
+        return False
+    if request.pnl_vol_target_mode == "median_relative":
+        return True
+    if request.pnl_vol_target_mode == "exante_target":
+        from src.application.research.mhs.research_go import _resolved_growth_envelope
+
+        return _resolved_growth_envelope(request).name == "conservative"
+    return False

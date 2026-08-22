@@ -215,37 +215,91 @@ def build_mhs_run_history_record(
     return cast(dict[str, Any], _round_6(_jsonable(record)))
 
 
+#: Legacy replay_id ordering is frozen by artifact partitioning and
+#: ``_verify_ledger_artifact``: each book/blend runs
+#: primary -> stress -> patient_reference -> pre_vol_target_reference, each
+#: fold runs strict -> stress. Any other replay field (touch, ladder, future
+#: additions) sorts after these, in declaration order.
+_REPLAY_FIELD_RANKS: dict[str, int] = {
+    "primary": 0,
+    "strict": 1,
+    "stress": 2,
+    "patient_reference": 3,
+    "pre_vol_target_reference": 4,
+}
+
+
+def _replay_field_names(container: Any) -> list[str]:
+    """Dataclass field names whose value is a StrategyExecutionReplayResult."""
+    return [
+        f.name
+        for f in dataclasses.fields(container)
+        if isinstance(getattr(container, f.name, None), StrategyExecutionReplayResult)
+    ]
+
+
 def _collect_replay_entries(
     report: MhsHorizonDiagnosticReport,
 ) -> list[tuple[str, StrategyExecutionReplayResult]]:
-    """Stable ordered replay sessions (books, blend, folds) for persistence."""
+    """Stable ordered replay sessions (books, blend, folds) for persistence.
+
+    Replay fields are enumerated generically (every dataclass field whose value
+    is a ``StrategyExecutionReplayResult``) so touch and ladder are included
+    and a future replay field cannot silently leak. The legacy ordering of the
+    core fields is preserved exactly; touch/ladder append after
+    pre_vol_target_reference.
+    """
     replay_entries: list[tuple[str, StrategyExecutionReplayResult]] = []
+
+    def _emit(prefix: str, container: Any) -> None:
+        names = enumerate(_replay_field_names(container))
+        ordered = sorted(
+            names,
+            key=lambda pair: (
+                _REPLAY_FIELD_RANKS.get(pair[1], len(_REPLAY_FIELD_RANKS)), pair[0],
+            ),
+        )
+        replay_entries.extend(
+            (f"{prefix}_{name}", getattr(container, name)) for _idx, name in ordered
+        )
+
     for book_name, book_report in report.books.items():
-        if book_report.primary is not None:
-            replay_entries.append((f"{book_name}_primary", book_report.primary))
-        if book_report.stress is not None:
-            replay_entries.append((f"{book_name}_stress", book_report.stress))
-        if book_report.patient_reference is not None:
-            replay_entries.append((f"{book_name}_patient_reference", book_report.patient_reference))
-        if book_report.pre_vol_target_reference is not None:
-            replay_entries.append(
-                (f"{book_name}_pre_vol_target_reference", book_report.pre_vol_target_reference)
-            )
+        _emit(book_name, book_report)
     if report.blend is not None:
-        if report.blend.primary is not None:
-            replay_entries.append(("blend_primary", report.blend.primary))
-        if report.blend.stress is not None:
-            replay_entries.append(("blend_stress", report.blend.stress))
-        if report.blend.patient_reference is not None:
-            replay_entries.append(("blend_patient_reference", report.blend.patient_reference))
-        if report.blend.pre_vol_target_reference is not None:
-            replay_entries.append(("blend_pre_vol_target_reference", report.blend.pre_vol_target_reference))
+        _emit("blend", report.blend)
     for fold_report in report.folds:
-        if fold_report.strict is not None:
-            replay_entries.append((f"fold{fold_report.fold_index}_strict", fold_report.strict))
-        if fold_report.stress is not None:
-            replay_entries.append((f"fold{fold_report.fold_index}_stress", fold_report.stress))
+        _emit(f"fold{fold_report.fold_index}", fold_report)
     return replay_entries
+
+
+def _stubbed_report_for_payload(
+    report: MhsHorizonDiagnosticReport,
+    row_counts: dict[str, dict[str, int]],
+) -> MhsHorizonDiagnosticReport:
+    """Replace every replay field with ``None`` BEFORE ``to_payload()`` runs.
+
+    ``_jsonable`` would otherwise expand every ledger Series (14.95 s / 0.87 GB
+    per 876480-bar replay, all discarded microseconds later by the row-count
+    stubs). Covers primary/stress/patient_reference/pre_vol_target_reference,
+    touch and ladder on each book and on blend, plus strict/stress on each
+    fold. ``row_counts`` must have been captured from the un-stubbed report.
+    """
+    del row_counts
+
+    def _stub(container: Any) -> Any:
+        stubs = {
+            f.name: None
+            for f in dataclasses.fields(container)
+            if isinstance(getattr(container, f.name, None), StrategyExecutionReplayResult)
+        }
+        return dataclasses.replace(container, **stubs)
+
+    return dataclasses.replace(
+        report,
+        books={name: _stub(book) for name, book in report.books.items()},
+        blend=_stub(report.blend) if report.blend is not None else None,
+        folds=tuple(_stub(fold) for fold in report.folds),
+    )
 
 
 def _write_json_report(path: Path, payload: Any) -> None:
@@ -367,43 +421,31 @@ def _wire_compact_refs(
     row_counts: dict[str, dict[str, int]],
 ) -> None:
     """Replace verbose per-replay artifact references with row-count stubs."""
-    for book_name, book_report in report.books.items():
-        book_payload = payload["books"][book_name]
-        if book_report.primary is not None:
-            book_payload["primary"] = _compact_replay_ref(row_counts[f"{book_name}_primary"])
-        if book_report.stress is not None:
-            book_payload["stress"] = _compact_replay_ref(row_counts[f"{book_name}_stress"])
-        if book_report.patient_reference is not None:
-            book_payload["patient_reference"] = _compact_replay_ref(
-                row_counts[f"{book_name}_patient_reference"]
-            )
-        if book_report.pre_vol_target_reference is not None:
-            book_payload["pre_vol_target_reference"] = _compact_replay_ref(
-                row_counts[f"{book_name}_pre_vol_target_reference"]
-            )
-    if report.blend is not None:
-        if report.blend.primary is not None:
-            payload["blend"]["primary"] = _compact_replay_ref(row_counts["blend_primary"])
-        if report.blend.stress is not None:
-            payload["blend"]["stress"] = _compact_replay_ref(row_counts["blend_stress"])
-        if report.blend.patient_reference is not None:
-            payload["blend"]["patient_reference"] = _compact_replay_ref(
-                row_counts["blend_patient_reference"]
-            )
-        if report.blend.pre_vol_target_reference is not None:
-            payload["blend"]["pre_vol_target_reference"] = _compact_replay_ref(
-                row_counts["blend_pre_vol_target_reference"]
-            )
-    for fold_report in report.folds:
-        fold_payload = payload["folds"][fold_report.fold_index]
-        if fold_report.strict is not None:
-            fold_payload["strict"] = _compact_replay_ref(
-                row_counts[f"fold{fold_report.fold_index}_strict"]
-            )
-        if fold_report.stress is not None:
-            fold_payload["stress"] = _compact_replay_ref(
-                row_counts[f"fold{fold_report.fold_index}_stress"]
-            )
+    # Longest-suffix match so underscore-bearing field names
+    # (patient_reference, pre_vol_target_reference) split correctly.
+    field_names = {
+        name
+        for container in (*report.books.values(), report.blend, *report.folds)
+        if container is not None
+        for name in _replay_field_names(container)
+    }
+    ordered_suffixes = sorted(field_names, key=len, reverse=True)
+    for replay_id, _replay in replay_entries:
+        ref = _compact_replay_ref(row_counts[replay_id])
+        for suffix in ordered_suffixes:
+            tag = f"_{suffix}"
+            if not replay_id.endswith(tag):
+                continue
+            container_name = replay_id[: -len(tag)]
+            break
+        else:  # pragma: no cover - ids are built from these very names
+            raise KeyError(f"unresolvable replay id {replay_id!r}")
+        if container_name == "blend":
+            payload["blend"][suffix] = ref
+        elif container_name.startswith("fold"):
+            payload["folds"][int(container_name[len("fold"):])][suffix] = ref
+        else:
+            payload["books"][container_name][suffix] = ref
 
 
 def _persist_mhs_report_compact(
@@ -443,7 +485,10 @@ def _persist_mhs_report_compact(
     daily_path = artifact_root / "daily_ledger.parquet"
     daily_table.to_parquet(daily_path, index=False, compression="snappy")
 
-    payload = report.to_payload()
+    # The stubbed copy never lets _jsonable expand a ledger Series: every
+    # replay field is None before to_payload() runs, then the row-count stubs
+    # are wired over the null keys (byte-identical output, ~0 s / ~0 GB).
+    payload = _stubbed_report_for_payload(report, row_counts).to_payload()
     _wire_compact_refs(payload, report, replay_entries, row_counts)
     unified_row_counts = {
         category: sum(rc[category] for rc in row_counts.values())
