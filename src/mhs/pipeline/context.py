@@ -69,6 +69,7 @@ class PipelineContext:
     fold_fast_horizons: dict[int, tuple[int, str]] = field(default_factory=dict)
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] = field(default_factory=dict)
     _fold_committee_weights: dict[int, Any] | None = None
+    _fold_growth_budget_target_vol: dict[int, float] | None = None
 
     # Book weights (S3)
     w_fast: pd.DataFrame = field(default_factory=lambda: pd.DataFrame())

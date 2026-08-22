@@ -17,14 +17,17 @@ import gc
 import pandas as pd
 
 from src.application.research.mhs import research_go as _research_go
+from src.application.research.mhs import scaling as _scaling
 from src.application.research.mhs import statistics as _statistics
 from src.application.research.mhs.evaluation import (
     COMMITTEE_MEMBERS,
+    COMMITTEE_OOS_START,
     FEATURE_REGISTRY,
     SEARCH_TRIALS_ATTEMPTED,
     DataIntegrityError,
     compute_deployment_readiness,
     feature_registry_panel_columns,
+    phase_1_anchored_purged_folds,
 )
 from src.application.research.mhs.marks import _get_symbol_mark_frame
 from src.application.research.mhs.resources import _assert_stage_rss_budget
@@ -62,6 +65,25 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # The top-level feature matrices stay alive through that thread and are
     # released after it joins so the wide multi-year panels never coexist with
     # the final assembly.
+    ctx._fold_growth_budget_target_vol = None
+    if (
+        ctx.config.pnl_vol_target_mode == "growth_budget"
+        and ctx.blend_report is not None
+        and ctx.blend_report.pre_vol_target_reference is not None
+    ):
+        _train_ends = {"top_level": COMMITTEE_OOS_START}
+        _train_ends.update({
+            f"fold_{_i}": _f.train_end
+            for _i, _f in enumerate(phase_1_anchored_purged_folds())
+        })
+        # I2/I3/I4: each boundary's growth-budget target vol is fit once here,
+        # on reference rows strictly before that boundary's train_end, and only
+        # the small float mapping crosses into the fork workers.
+        _boundary_target_vols = _scaling._growth_budget_target_vol_by_boundary(ctx.blend_report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change(), _research_go._resolved_growth_envelope(ctx.config), _train_ends)
+        ctx._fold_growth_budget_target_vol = {
+            _i: _boundary_target_vols[f"fold_{_i}"]
+            for _i in range(len(phase_1_anchored_purged_folds()))
+        }
     (
         ctx.bootstrap_ci, ctx.placebo_percentile, ctx.participation, ctx.termination_counts,
         fold_reports, ctx.deployment,
@@ -69,7 +91,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.blend_report, ctx.root, ctx.config, ctx.execution_symbols, ctx.minute_grid,
         ctx.signal_48h, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast,
         ctx.fold_funding, ctx.initial_equity, ctx.recorder, ctx.fold_slow_horizons, ctx.fold_fast_horizons,
-        ctx.fold_funding_carry, ctx._fold_committee_weights,
+        ctx.fold_funding_carry, ctx._fold_committee_weights, ctx._fold_growth_budget_target_vol,
     )
     ctx.folds = tuple(fold_reports)
     # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
