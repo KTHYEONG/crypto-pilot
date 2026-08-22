@@ -10,8 +10,52 @@ only; ``evaluation.py`` imports its tunables from here.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import pandas as pd
+
+
+@dataclass(frozen=True, slots=True)
+class GrowthRiskEnvelope:
+    """Immutable growth risk constraint envelope (I1: single risk definition).
+
+    ``max_drawdown`` is the single registered drawdown budget consumed by both
+    ``solve_growth_optimal_risk`` and ``_drawdown_budget_reasons``.
+    ``leverage_ceiling`` is the maximum allowed exposure scale (unit-gross
+    scaffolding, not a risk parameter).  ``ruin_fraction`` and ``max_ruin_prob``
+    are identical across all registered envelopes and are not swept (I2).
+    """
+
+    name: str
+    max_drawdown: float
+    max_drawdown_prob: float
+    ruin_fraction: float
+    max_ruin_prob: float
+    horizon_years: float
+    leverage_ceiling: float
+
+    def __post_init__(self) -> None:
+        if self.leverage_ceiling < 1.0:
+            raise ValueError(
+                f"leverage_ceiling must be >= 1.0, got {self.leverage_ceiling}"
+            )
+        if self.max_drawdown <= 0:
+            raise ValueError(f"max_drawdown must be > 0, got {self.max_drawdown}")
+        if not (0 < self.max_drawdown_prob <= 1.0):
+            raise ValueError(
+                f"max_drawdown_prob must be in (0, 1], got {self.max_drawdown_prob}"
+            )
+        if not (0 < self.max_ruin_prob <= 1.0):
+            raise ValueError(
+                f"max_ruin_prob must be in (0, 1], got {self.max_ruin_prob}"
+            )
+        if not (0 < self.ruin_fraction < 1.0):
+            raise ValueError(
+                f"ruin_fraction must be in (0, 1), got {self.ruin_fraction}"
+            )
+        if self.horizon_years <= 0:
+            raise ValueError(f"horizon_years must be > 0, got {self.horizon_years}")
+
 
 # --- cost / discovery / book construction ------------------------------------
 
@@ -92,6 +136,38 @@ COMMITTEE_GROWTH_MAX_RUIN_PROB: float = 0.01
 COMMITTEE_GROWTH_HORIZON_YEARS: float = 3.0
 COMMITTEE_GROWTH_N_PATHS: int = 2000
 COMMITTEE_GROWTH_BARS_PER_YEAR: int = 365
+
+GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
+    "conservative": GrowthRiskEnvelope(
+        name="conservative",
+        max_drawdown=COMMITTEE_GROWTH_MAX_DRAWDOWN,
+        max_drawdown_prob=COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+        ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+        leverage_ceiling=1.0,
+    ),
+    "balanced": GrowthRiskEnvelope(
+        name="balanced",
+        max_drawdown=0.35,
+        max_drawdown_prob=COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
+        ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+        leverage_ceiling=1.0,
+    ),
+    "growth": GrowthRiskEnvelope(
+        name="growth",
+        max_drawdown=1.0,
+        max_drawdown_prob=1.0,
+        ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+        leverage_ceiling=2.0,
+    ),
+}
+
+GROWTH_ENVELOPE_DEFAULT: str = "conservative"
 
 SEARCH_TRIALS_ATTEMPTED: int = 70
 

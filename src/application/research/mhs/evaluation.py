@@ -1048,6 +1048,146 @@ def _committee_growth_headroom(
     }
 
 
+def _committee_member_books(
+    close: pd.DataFrame,
+    quote_vol: pd.DataFrame,
+    taker_buy_quote: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    decision_grid: pd.DatetimeIndex,
+    min_symbols: int,
+    members: tuple[str, ...],
+    target_gross: float | None,
+) -> dict[str, pd.DataFrame]:
+    """Build individual execution books for each committee member (I5: observational only).
+
+    Returns ``{member_name: execution_book}`` where each book is a
+    single-member ``_committee_execution_book`` call. These books are used
+    ONLY for attribution reporting and never enter ``blend_1h``,
+    ``committee_execution_book``, ``regime_scale``, any exposure scale, any
+    fold report, or any Research-GO reason code.
+    """
+    from src.mhs.features import FEATURE_REGISTRY, build_feature_books
+    from src.mhs.books import scale_book_to_target_gross
+
+    member_specs = [
+        spec for spec in FEATURE_REGISTRY if spec.name in set(members)
+    ]
+    specs_by_name = {spec.name: spec for spec in member_specs}
+
+    member_books: dict[str, pd.DataFrame] = {}
+    for name in members:
+        member_spec = specs_by_name.get(name)
+        if member_spec is None:
+            continue
+        single = build_feature_books(
+            [member_spec],
+            {col: close if col == "close" else (quote_vol if col == "quote_vol" else taker_buy_quote)
+             for col in member_spec.required_columns if col in ("close", "quote_vol", "taker_buy_quote")},
+            execution_mask,
+            decision_grid,
+            min_symbols=min_symbols,
+        )
+        if name not in single:
+            continue
+        book = single[name]
+        if target_gross is not None:
+            book = scale_book_to_target_gross(book, target_gross)
+        member_books[name] = book
+    return member_books
+
+
+def _committee_member_attribution(
+    member_reports: dict[str, MhsBookReport],
+    member_proxy_sharpe: dict[str, float],
+) -> dict[str, Any]:
+    """Compute per-member attribution metrics from their individual replays.
+
+    Returns a dict with per-member metrics (cagr, naive_sharpe, max_drawdown,
+    annualized_turnover, net_ann) and the proxy_vs_ledger_rank_spearman
+    diagnostic. This is purely observational (I5).
+    """
+    from scipy.stats import spearmanr
+
+    members_data: dict[str, dict[str, Any]] = {}
+    ledger_sharpes: dict[str, float] = {}
+
+    for name, report in member_reports.items():
+        if report is None or report.primary is None:
+            members_data[name] = {
+                "cagr": None,
+                "naive_sharpe": None,
+                "max_drawdown": None,
+                "annualized_turnover": None,
+                "net_ann": None,
+            }
+            continue
+        equity = report.primary.ledger.equity
+        net_returns = report.primary.ledger.net_returns
+        turnover = report.primary.ledger.fill_turnover
+        periods_per_year = _PERIODS_PER_YEAR_1H
+
+        equity_1h = equity.resample("1h").last().dropna()
+        cagr = float(equity_1h.iloc[-1] ** (periods_per_year / len(equity_1h)) - 1.0) if len(equity_1h) > 0 else None
+
+        mdd = float((equity / equity.cummax() - 1.0).min()) if len(equity) > 0 else None
+        sd = float(net_returns.std(ddof=1)) if len(net_returns) > 1 else float("nan")
+        sharpe = (
+            float(net_returns.mean() / sd * np.sqrt(periods_per_year))
+            if np.isfinite(sd) and sd > 0
+            else None
+        )
+        annual_turnover = float(turnover.mean() * periods_per_year) if len(turnover) > 0 else None
+        net_ann = float(net_returns.mean() * periods_per_year) if len(net_returns) > 0 else None
+
+        members_data[name] = {
+            "cagr": cagr,
+            "naive_sharpe": sharpe,
+            "max_drawdown": mdd,
+            "annualized_turnover": annual_turnover,
+            "net_ann": net_ann,
+        }
+        if sharpe is not None and np.isfinite(sharpe):
+            ledger_sharpes[name] = sharpe
+
+    # Proxy vs ledger rank correlation
+    shared = sorted(set(ledger_sharpes.keys()) & set(member_proxy_sharpe.keys()))
+    proxy_vs_ledger_rank_spearman: float | None = None
+    if len(shared) >= 3:
+        ledger_vals = [ledger_sharpes[m] for m in shared]
+        proxy_vals = [member_proxy_sharpe[m] for m in shared]
+        rho, _ = spearmanr(ledger_vals, proxy_vals)
+        proxy_vs_ledger_rank_spearman = float(rho) if np.isfinite(rho) else None
+
+    # Daily return correlation matrix
+    daily_return_correlation: dict[str, dict[str, float]] = {}
+    member_nets: dict[str, pd.Series] = {}
+    for name, report in member_reports.items():
+        if report is not None and report.primary is not None:
+            daily = report.primary.ledger.net_returns.resample("1D").apply(lambda s: (1 + s).prod() - 1.0)
+            member_nets[name] = daily
+    net_names = sorted(member_nets.keys())
+    for i, n1 in enumerate(net_names):
+        daily_return_correlation[n1] = {}
+        for j, n2 in enumerate(net_names):
+            if i == j:
+                daily_return_correlation[n1][n2] = 1.0
+            elif n2 in daily_return_correlation and n1 in daily_return_correlation[n2]:
+                daily_return_correlation[n1][n2] = daily_return_correlation[n2][n1]
+            else:
+                aligned = pd.concat([member_nets[n1], member_nets[n2]], axis=1).dropna()
+                if len(aligned) > 1:
+                    rho = float(aligned.iloc[:, 0].corr(aligned.iloc[:, 1]))
+                    daily_return_correlation[n1][n2] = rho if np.isfinite(rho) else 0.0
+                else:
+                    daily_return_correlation[n1][n2] = 0.0
+
+    return {
+        "members": members_data,
+        "daily_return_correlation": daily_return_correlation,
+        "proxy_vs_ledger_rank_spearman": proxy_vs_ledger_rank_spearman,
+    }
+
+
 def _committee_diagnostic(
     root: str,
     start: pd.Timestamp,
@@ -2152,7 +2292,8 @@ def _run_books_concurrent(
     telemetry: _StageRecorder | None = None,
     regime_scale: pd.Series | None = None,
     committee_execution_book: pd.DataFrame | None = None,
-) -> tuple[MhsBookReport, MhsBookReport, MhsBookReport, dict[int, dict[str, float]]]:
+    committee_member_books: dict[str, pd.DataFrame] | None = None,
+) -> tuple[MhsBookReport, MhsBookReport, MhsBookReport, dict[int, dict[str, float]], dict[str, MhsBookReport] | None]:
     """Run the three top-level books concurrently in fork children.
 
     The books share zero mutable state and only read the immutable 1h panels and
@@ -2191,8 +2332,22 @@ def _run_books_concurrent(
     # through ``fork_shared_payload`` (inherited copy-on-write by the fork
     # children), so only a short token crosses the submit boundary -- the
     # pickled-argument copies measured at ~1 GB per book are eliminated.
+    books_dict: dict[str, tuple[Any, ...]] = {
+        "fast_reversal": (fast, fast_grid, w_fast, phase_fast, fast.horizon_hours, w_fast_execution),
+        "slow_momentum": (slow, slow_grid, w_slow, phase_slow, slow.horizon_hours, w_slow_execution),
+        "blend": (active_spec, active_grid, blend_step, phase_blend, 168, blend_replay),
+    }
+    member_names: list[str] = []
+    if committee_member_books:
+        for m_name, m_book in committee_member_books.items():
+            m_step = m_book.reindex(slow_grid).ffill().fillna(0.0)
+            member_names.append(m_name)
+            books_dict[f"member_{m_name}"] = (
+                slow, slow_grid, m_step, phase_slow, slow.horizon_hours, m_step,
+            )
+    n_total_workers = 3 + len(member_names)
     _books_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
-    _books_workers = plan_worker_count(3, WORKER_PEAK_RSS_BYTES, request.ram_guard)
+    _books_workers = plan_worker_count(n_total_workers, WORKER_PEAK_RSS_BYTES, request.ram_guard)
     assert_fork_admission("books", _books_workers, WORKER_PEAK_RSS_BYTES, _books_reserve)
     with (
         fork_shared_payload({
@@ -2200,11 +2355,7 @@ def _run_books_concurrent(
             "opens": opens,
             "bar_funding": bar_funding,
             "funding_by_symbol": funding_by_symbol,
-            "books": {
-                "fast_reversal": (fast, fast_grid, w_fast, phase_fast, fast.horizon_hours, w_fast_execution),
-                "slow_momentum": (slow, slow_grid, w_slow, phase_slow, slow.horizon_hours, w_slow_execution),
-                "blend": (active_spec, active_grid, blend_step, phase_blend, 168, blend_replay),
-            },
+            "books": books_dict,
         }) as token,
         ProcessPoolExecutor(max_workers=_books_workers, mp_context=FORK_CONTEXT) as pool,
     ):
@@ -2220,14 +2371,27 @@ def _run_books_concurrent(
             _book_outcome_worker,
             "blend", token, n_symbols, root, request, start, end, initial_equity,
         )
+        f_members = {
+            m_name: pool.submit(
+                _book_outcome_worker,
+                f"member_{m_name}", token, n_symbols, root, request, start, end, initial_equity,
+            )
+            for m_name in member_names
+        }
         fast_report, fast_records, _fast_traces = f_fast.result()
         slow_report, slow_records, _slow_traces = f_slow.result()
         blend_report, blend_records, blend_traces = f_blend.result()
+        member_reports: dict[str, MhsBookReport] = {}
+        for m_name, f_member in f_members.items():
+            m_report, m_records, _ = f_member.result()
+            member_reports[m_name] = m_report
+            if telemetry is not None:
+                telemetry.absorb(m_records)
 
     if telemetry is not None:
         for records in (fast_records, slow_records, blend_records):
             telemetry.absorb(records)
-    return fast_report, slow_report, blend_report, blend_traces
+    return fast_report, slow_report, blend_report, blend_traces, member_reports or None
 
 
 def _run_post_diag_deploy(

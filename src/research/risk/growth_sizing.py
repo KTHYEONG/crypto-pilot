@@ -39,12 +39,10 @@ class GrowthSizingConfig:
             raise ValueError(f"reference_risk must be > 0, got {self.reference_risk}")
         if self.n_paths < 100:
             raise ValueError(f"n_paths must be >= 100, got {self.n_paths}")
-        for name, value in (
-            ("max_drawdown_prob", self.max_drawdown_prob),
-            ("max_ruin_prob", self.max_ruin_prob),
-        ):
-            if not 0 < value < 1:
-                raise ValueError(f"{name} must be in (0, 1), got {value}")
+        if not 0 < self.max_drawdown_prob <= 1:
+            raise ValueError(f"max_drawdown_prob must be in (0, 1], got {self.max_drawdown_prob}")
+        if not 0 < self.max_ruin_prob < 1:
+            raise ValueError(f"max_ruin_prob must be in (0, 1), got {self.max_ruin_prob}")
 
 
 @dataclass(frozen=True, slots=True)

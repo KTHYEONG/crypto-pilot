@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
-from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET
+from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET, GROWTH_ENVELOPE_DEFAULT
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -287,6 +287,21 @@ class MhsDiagnosticRequest:
     ram_guard: bool = field(
         default=True,
         metadata=cli_param(flag="--ram-guard", help="Enable the RAM guard.", negate_flag="--no-ram-guard"),
+    )
+    growth_envelope: str = field(
+        default=GROWTH_ENVELOPE_DEFAULT,
+        metadata=cli_param(
+            flag="--growth-envelope",
+            help="Registered growth risk envelope.",
+            choices=("conservative", "balanced", "growth"),
+        ),
+    )
+    committee_member_attribution: bool = field(
+        default=False,
+        metadata=cli_param(
+            flag="--committee-member-attribution",
+            help="Replay committee members individually for attribution.",
+        ),
     )
 
     def __post_init__(self) -> None:
