@@ -133,3 +133,67 @@ def test_scenario_03_admission_noop_when_reserve_none(monkeypatch) -> None:
     )
     result = assert_fork_admission("books", 3, _GB, None)
     assert result is None
+
+
+class TestWorkerPlanObserver:
+    """SCENARIO_MHS_PERF_P0_04_WORKER_PLAN_RECORDED."""
+
+    def test_observer_invoked_once_with_granted_and_ram_state(self, monkeypatch) -> None:
+        """obs fires exactly once with the granted count and available/reserve."""
+        monkeypatch.setattr(
+            psutil, "virtual_memory", lambda: _fake_virtual_memory(19.53, 12.4),
+        )
+        monkeypatch.setattr(psutil, "cpu_count", lambda: 8)
+        calls: list[tuple] = []
+
+        granted = plan_worker_count(
+            3, int(3.0 * _GB), True,
+            observer=lambda *args: calls.append(args),
+        )
+        direct = plan_worker_count(3, int(3.0 * _GB), True)
+
+        assert granted == direct == 3
+        assert len(calls) == 1
+        stage, requested, obs_granted, available, reserve = calls[0]
+        assert requested == 3
+        assert obs_granted == granted
+        assert available == int(12.4 * _GB)
+        assert reserve == max(int(19.53 * _GB * 0.05), 256 * 2**20)
+
+    def test_observer_not_invoked_when_ram_guard_off(self, monkeypatch) -> None:
+        """ram_guard=False short-circuits before the observer would fire."""
+        monkeypatch.setattr(psutil, "cpu_count", lambda: 8)
+        calls: list[tuple] = []
+        assert plan_worker_count(
+            3, _GB, False, observer=lambda *a: calls.append(a),
+        ) == 3
+        assert calls == []
+
+    def test_observer_failure_is_observational(self, monkeypatch) -> None:
+        """A raising observer never changes the planner result."""
+        monkeypatch.setattr(
+            psutil, "virtual_memory", lambda: _fake_virtual_memory(19.53, 12.4),
+        )
+        monkeypatch.setattr(psutil, "cpu_count", lambda: 8)
+
+        def _boom(*_a):
+            raise RuntimeError("observer boom")
+
+        assert plan_worker_count(3, int(3.0 * _GB), True, observer=_boom) == 3
+
+    @pytest.mark.parametrize(
+        ("available_gb", "expected"),
+        [(6.0, 1), (12.4, 3)],
+        ids=["collapsed_to_one_worker", "full_three_workers"],
+    )
+    def test_planner_collapse_reproduces_baseline_divergence(
+        self, monkeypatch, available_gb: float, expected: int,
+    ) -> None:
+        """6.0 GiB available grants 1 worker (737 s outlier); 12.4 grants 3."""
+        monkeypatch.setattr(
+            psutil,
+            "virtual_memory",
+            lambda: _fake_virtual_memory(19.53, available_gb),
+        )
+        monkeypatch.setattr(psutil, "cpu_count", lambda: 8)
+        assert plan_worker_count(3, int(3.0 * _GB), True) == expected

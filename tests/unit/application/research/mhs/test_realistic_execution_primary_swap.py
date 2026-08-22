@@ -234,12 +234,24 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
         participation_warnings={}, research_go_eligible=False,
         execution_go_eligible=False, pilot_go_eligible=False, scale_go_eligible=False,
     )
+    from src.application.research.mhs import stage_services
+
     monkeypatch.setattr(
         ev, "_run_books_concurrent",
         lambda *a, **k: (blend_report, blend_report, blend_report, {}, None),
     )
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently",
+        lambda *a, **k: (None, None, {}, {}, (), deployment),
+    )
+    # The replay/fold stages consume these via the stage_services seam; patch
+    # there too so injection holds regardless of import order.
+    monkeypatch.setattr(
+        stage_services, "_run_books_concurrent",
+        lambda *a, **k: (blend_report, blend_report, blend_report, {}, None),
+    )
+    monkeypatch.setattr(
+        stage_services, "_run_post_book_concurrently",
         lambda *a, **k: (None, None, {}, {}, (), deployment),
     )
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
