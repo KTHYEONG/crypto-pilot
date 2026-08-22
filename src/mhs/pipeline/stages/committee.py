@@ -63,8 +63,22 @@ from src.mhs.telemetry import StageTelemetry
 
 def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     """Construct the committee execution book and all committee-tier diagnostics."""
+    from src.application.research.mhs.research_go import _resolved_growth_envelope
+
     ctx._committee_weights_by_boundary = {}
     ctx._fold_committee_weights = None
+
+    # Build growth envelope payload for the report
+    envelope = _resolved_growth_envelope(ctx.config)
+    ctx._growth_envelope_payload = {
+        "name": envelope.name,
+        "max_drawdown": envelope.max_drawdown,
+        "max_drawdown_prob": envelope.max_drawdown_prob,
+        "ruin_fraction": envelope.ruin_fraction,
+        "max_ruin_prob": envelope.max_ruin_prob,
+        "horizon_years": envelope.horizon_years,
+        "leverage_ceiling": envelope.leverage_ceiling,
+    }
     if ctx.config.committee_capital and ctx.config.committee_evidence_weighting:
         _train_ends = {"top_level": COMMITTEE_OOS_START}
         _train_ends.update({
@@ -98,6 +112,34 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             members=_research_go._resolved_committee_members(ctx.config),
         ).reindex(ctx.grid_1h).ffill().fillna(0.0)
         ctx.committee_execution_book = ctx.blend_1h
+        # Build per-member attribution books (I5: observational only)
+        if ctx.config.committee_member_attribution:
+            from src.application.research.mhs.evaluation import _committee_member_books
+            ctx.committee_member_books = _committee_member_books(
+                ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask,
+                ctx.slow_grid, ctx.slow.min_symbols,
+                _research_go._resolved_committee_members(ctx.config),
+                _research_go._resolved_committee_target_gross(ctx.config),
+            )
+            # D6: independent 1h prescreen-proxy Sharpe per member -- the
+            # historical selection signal (yearly_net_t_diagnostic /
+            # discovery gate all consume mhs_ledger_pnl on the 1h book, never
+            # the 3m minute replay). This must stay derived from a source
+            # distinct from the 3m ledger replay in replay.py, or
+            # proxy_vs_ledger_rank_spearman compares the ledger to itself and
+            # can never detect the proxy reversals ADR_20260819/20260817/
+            # 20260820 measured.
+            ctx.committee_member_proxy_sharpe = {}
+            for _member_name, _member_book in ctx.committee_member_books.items():
+                _member_net, _ = mhs_ledger_pnl(
+                    _member_book.reindex(ctx.grid_1h).ffill().fillna(0.0),
+                    ctx.opens, ctx.bar_funding, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+                )
+                _member_sd = float(_member_net.std(ddof=1)) if len(_member_net) > 1 else float("nan")
+                if np.isfinite(_member_sd) and _member_sd > 0:
+                    ctx.committee_member_proxy_sharpe[_member_name] = float(
+                        _member_net.mean() / _member_sd * np.sqrt(_PERIODS_PER_YEAR_1H)
+                    )
         del ctx.close, ctx.quote_vol, ctx.taker_buy_quote
     else:
         ctx.blend_1h = (
