@@ -123,10 +123,14 @@ class PipelineContext:
     trend_sleeve_diagnostic: Any = None
     multi_feature_diagnostic: Any = None
     committee_diagnostic: Any = None
+    committee_member_attribution: dict[str, Any] | None = None
+    committee_member_books: dict[str, pd.DataFrame] | None = None
+    committee_member_proxy_sharpe: dict[str, float] | None = None
     discovery_qualification: Any = None
     full_history_yearly_net_t: Any = None
     funding_carry_worst_year_corr: Any = None
     _fill_mark_parity_census: Any = None
+    _growth_envelope_payload: dict[str, Any] | None = None
     blend_gross: float = 0.0
     blend_cash_fraction: float = 0.0
     realized_execution_roster_size: float | None = None

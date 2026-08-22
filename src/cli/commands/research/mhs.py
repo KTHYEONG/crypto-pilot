@@ -11,7 +11,7 @@ import logging
 import time
 
 from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
-from src.mhs.params import COMMITTEE_DEFAULT_MEMBER_SET
+from src.mhs.params import COMMITTEE_DEFAULT_MEMBER_SET, GROWTH_ENVELOPE_DEFAULT, GROWTH_RISK_ENVELOPES
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -507,6 +507,30 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Persistence tier: compact (default) writes a git-committable "
             "daily-resampled ledger + stripped summary JSON; full writes the "
             "lossless per-fill audit Parquet tables under _full/ (gitignored)"
+        ),
+    )
+    mhs.add_argument(
+        "--growth-envelope",
+        choices=sorted(GROWTH_RISK_ENVELOPES),
+        default=GROWTH_ENVELOPE_DEFAULT,
+        help=(
+            "Registered growth risk envelope: conservative (default, "
+            "byte-identical to current production), balanced (MDD 0.35, "
+            "1x ceiling), or growth (MDD 1.0, 2x ceiling, opt-in). "
+            "Selects the drawdown budget for the growth-optimal risk solver "
+            "and the ex-ante vol-target cap"
+        ),
+    )
+    mhs.add_argument(
+        "--committee-member-attribution",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: replay committee members individually for attribution "
+            "reporting. Adds len(members) fork worker book replays; the "
+            "attribution reports proxy_vs_ledger_rank_spearman (1h proxy vs "
+            "3m ledger Sharpe rank correlation) but never feeds back into "
+            "blend, weights, scales, or Research-GO"
         ),
     )
     mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)
