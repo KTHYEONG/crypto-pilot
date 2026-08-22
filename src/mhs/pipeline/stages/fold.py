@@ -127,6 +127,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         blend_primary_max_drawdown=(
             ctx.blend_report.primary_max_drawdown if ctx.blend_report is not None else None
         ),
+        max_drawdown=_research_go._resolved_growth_envelope(ctx.config).max_drawdown,
     )
 
     if ctx.blend_report is not None and ctx.blend_report.primary is not None:

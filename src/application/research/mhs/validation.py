@@ -133,6 +133,13 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
         )
     if not isinstance(request.ram_guard, bool):
         raise ValueError("ram_guard must be a bool")
+    from src.mhs.params import GROWTH_RISK_ENVELOPES
+
+    _validate_field_choices(
+        request, "growth_envelope", tuple(sorted(GROWTH_RISK_ENVELOPES)),
+    )
+    if not isinstance(request.committee_member_attribution, bool):
+        raise ValueError("committee_member_attribution must be a bool")
     if not (0.0 <= request.trend_sleeve_gross <= 1.0):
         raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
     if request.trend_sleeve_gross > 0.0 and not request.trend_sleeve:

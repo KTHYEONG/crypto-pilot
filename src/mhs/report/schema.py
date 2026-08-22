@@ -77,6 +77,8 @@ class MhsHorizonDiagnosticReport:
     fold_blend_parity: dict[str, Any] | None = None
     fold_growth_concentration: dict[str, Any] | None = None
     fill_mark_parity: dict[str, Any] | None = None
+    growth_envelope: dict[str, Any] | None = None
+    committee_member_attribution: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         from src.application.research.mhs.evaluation import _jsonable
