@@ -208,6 +208,8 @@ def build_mhs_run_history_record(
         "fold_blend_parity": report.fold_blend_parity,
         "fold_growth_concentration": report.fold_growth_concentration,
         "fill_mark_parity": report.fill_mark_parity,
+        "growth_envelope": report.growth_envelope,
+        "committee_member_attribution": report.committee_member_attribution,
         "report_path": str(persisted_path) if persisted_path is not None else None,
     }
     return cast(dict[str, Any], _round_6(_jsonable(record)))

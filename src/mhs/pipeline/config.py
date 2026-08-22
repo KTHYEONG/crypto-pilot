@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
-from src.mhs.params import COMMITTEE_TARGET_GROSS
+from src.mhs.params import COMMITTEE_TARGET_GROSS, GROWTH_ENVELOPE_DEFAULT
 
 
 class MemberSet(StrEnum):
@@ -83,6 +83,10 @@ class MhsRunConfig:
     exposure_scale_two_sided: bool = False
     ram_guard: bool = True
 
+    # Growth envelope & member attribution
+    growth_envelope: str = GROWTH_ENVELOPE_DEFAULT
+    committee_member_attribution: bool = False
+
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> MhsRunConfig:
         """Sole CLI-to-config adapter (FIX D1).
@@ -150,4 +154,6 @@ class MhsRunConfig:
             pnl_vol_target_mode=args.pnl_vol_target_mode,
             funding_carry_sleeve=funding_carry_sleeve,
             funding_carry_weight=(args.funding_carry_weight if funding_carry_sleeve else 0.0),
+            growth_envelope=args.growth_envelope,
+            committee_member_attribution=args.committee_member_attribution,
         )

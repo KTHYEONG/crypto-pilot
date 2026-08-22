@@ -68,12 +68,13 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # books run concurrently in fork children (spec Phase 3, P10) with a
         # fraction of the former resident set.
         _prewarm_mark_frames(ctx.execution_symbols)
-        book_report_fast, book_report_slow, book_report_blend, ctx.blend_traces = _run_books_concurrent(
+        book_report_fast, book_report_slow, book_report_blend, ctx.blend_traces, member_reports = _run_books_concurrent(
             ctx.root, ctx.config, len(ctx.funded), ctx.grid_1h, ctx.fast, ctx.slow, ctx.fast_grid, ctx.slow_grid,
             ctx.w_fast, ctx.w_slow, ctx.w_fast_execution, ctx.w_slow_execution, ctx.opens, ctx.bar_funding,
             ctx.phase_fast, ctx.phase_slow, ctx.phase_blend, ctx.start, ctx.end, ctx.funding_by_symbol,
             ctx.blend_1h, ctx.execution_mask, ctx.initial_equity, ctx.recorder, ctx.regime_scale,
             committee_execution_book=ctx.committee_execution_book,
+            committee_member_books=ctx.committee_member_books,
         )
         # All three books have completed; the single-use step-weight inputs are
         # released together (spec §3.1, ``memory_opt``).
@@ -81,6 +82,19 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         del ctx.w_slow, ctx.w_slow_execution, ctx.phase_slow
         del ctx.blend_1h, ctx.phase_blend, ctx.regime_scale, ctx.committee_execution_book
         gc.collect()
+
+        # Compute member attribution from individual member book replays (I5:
+        # observational only). member_proxy_sharpe comes from the 1h
+        # prescreen ledger computed in the committee stage (D6), never from
+        # member_reports itself -- both sides must be independent sources or
+        # proxy_vs_ledger_rank_spearman compares the 3m ledger to itself.
+        if member_reports and ctx.config.committee_member_attribution:
+            from src.application.research.mhs.evaluation import _committee_member_attribution
+            ctx.committee_member_attribution = _committee_member_attribution(
+                member_reports, ctx.committee_member_proxy_sharpe or {},
+            )
+        else:
+            ctx.committee_member_attribution = None
         _terminal = _guard_stage_or_breach(
             "post_books", ctx.rss_budget_bytes, ctx.rss_reserve_bytes,
             ctx.config, ctx.recorder, str(ctx.resolved_end), str(ctx.start), str(ctx.end),

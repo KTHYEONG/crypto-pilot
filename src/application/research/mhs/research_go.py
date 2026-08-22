@@ -15,7 +15,11 @@ from src.application.research.mhs.contracts import (
     MhsFoldReport,
     MhsResearchGoResult,
 )
-from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET
+from src.mhs.params import (
+    COMMITTEE_TARGET_GROSS_UNSET,
+    GROWTH_RISK_ENVELOPES,
+    GrowthRiskEnvelope,
+)
 from src.mhs.types import (
     COMMITTEE_GROWTH_MAX_DRAWDOWN,
     COMMITTEE_TARGET_GROSS,
@@ -83,6 +87,23 @@ def _resolved_committee_members(request: MhsDiagnosticRequest) -> tuple[str, ...
     return COMMITTEE_MEMBER_SETS[key]
 
 
+def _resolved_growth_envelope(request: MhsDiagnosticRequest) -> GrowthRiskEnvelope:
+    """Single resolution seam for growth risk envelope (I3: single seam).
+
+    Returns the ``GrowthRiskEnvelope`` keyed by ``request.growth_envelope``.
+    An unregistered key raises ``ValueError`` naming the sorted registered
+    keys, mirroring ``_resolved_committee_members``.
+    """
+    key = request.growth_envelope
+    if key not in GROWTH_RISK_ENVELOPES:
+        registered = sorted(GROWTH_RISK_ENVELOPES)
+        raise ValueError(
+            f"unknown growth_envelope '{key}'; "
+            f"registered keys: {registered}"
+        )
+    return GROWTH_RISK_ENVELOPES[key]
+
+
 def _drawdown_budget_reasons(
     primary_max_drawdown: float | None,
     max_drawdown: float = COMMITTEE_GROWTH_MAX_DRAWDOWN,
@@ -108,6 +129,7 @@ def _mhs_research_go(
     book_reasons: tuple[str, ...] = (),
     extra_reasons: tuple[str, ...] = (),
     blend_primary_max_drawdown: float | None = None,
+    max_drawdown: float = COMMITTEE_GROWTH_MAX_DRAWDOWN,
 ) -> MhsResearchGoResult:
     """Fail-closed top-level Research-GO decision from fold and book evidence.
 
@@ -119,8 +141,10 @@ def _mhs_research_go(
     ``extra_reasons`` carries observational gate codes (e.g. fold/blend path
     divergence) surfaced by report assembly. ``blend_primary_max_drawdown``
     feeds the registered drawdown-budget gate: a completed blend whose realized
-    drawdown breaches ``COMMITTEE_GROWTH_MAX_DRAWDOWN`` blocks the decision
-    with ``PRIMARY_MAX_DRAWDOWN_OVER_BUDGET`` (a risk-contract code, never a
+    drawdown breaches ``max_drawdown`` (the caller's resolved
+    ``GrowthRiskEnvelope.max_drawdown`` -- ``COMMITTEE_GROWTH_MAX_DRAWDOWN`` by
+    default, i.e. the ``conservative`` envelope) blocks the decision with
+    ``PRIMARY_MAX_DRAWDOWN_OVER_BUDGET`` (a risk-contract code, never a
     data-integrity code). The cap-30 roster and primary annual-return gate
     thresholds live in ``REGISTERED_POLICY_THRESHOLDS``; while any is
     unregistered (``None``) the decision reports ``UNSPECIFIED_POLICY`` and
@@ -129,7 +153,7 @@ def _mhs_research_go(
     reasons: list[str] = [
         *book_reasons,
         *extra_reasons,
-        *_drawdown_budget_reasons(blend_primary_max_drawdown),
+        *_drawdown_budget_reasons(blend_primary_max_drawdown, max_drawdown),
     ]
     passed = 0
     for fold_report in folds:
