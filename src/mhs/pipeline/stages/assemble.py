@@ -74,6 +74,7 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         execution_symbols=tuple(ctx.execution_symbols),
         run_elapsed_seconds=run_elapsed_seconds,
         resource_measurements=ctx.recorder.records,
+        worker_plan=ctx.recorder.worker_plan if ctx.recorder is not None else {},
         discovery_qualification=ctx.discovery_qualification,
         realized_execution_roster_size=ctx.realized_execution_roster_size,
         full_history_yearly_net_t=ctx.full_history_yearly_net_t,

@@ -8,8 +8,9 @@ GO, OOS, capital, or capacity claims.
 
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from typing import Literal
 
 import numpy as np
@@ -1209,6 +1210,27 @@ def mhs_ledger_pnl_multi_tier(
     )
     return [(equity.pct_change().dropna(), turnover) for equity, turnover in results]
 
+
+def _column_order_row_sum(matrix: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+    """Left-to-right column accumulation == ``matrix.cumsum(axis=1)[:, -1]``.
+
+    Bit-identical to the cumsum last column by construction: cumsum along
+    axis=1 is exactly the same left-to-right per-row order (``np.add.reduce``
+    is FORBIDDEN here -- pairwise summation, verified NOT bit-identical).
+    Accumulates through a transposed (column-major) view so the running total
+    stays hot and the auxiliary allocation is O(n_grid), down from the
+    O(n_grid * n_local) cumsum temporary.
+    """
+    if out is None:
+        out = np.zeros(matrix.shape[0], dtype="float64")
+    else:
+        out[...] = 0.0
+    view = matrix.T
+    for col in range(view.shape[0]):
+        out += view[col]
+    return out
+
+
 class _BoundExecutionReplayAccumulator:
     """Private streaming accumulator for one execution bound.
 
@@ -1311,12 +1333,19 @@ class _BoundExecutionReplayAccumulator:
         self._t0 = time.perf_counter()
 
     def _equity_at(self, gpos: np.ndarray | None = None) -> float:
-        if gpos is None:
-            return self.cash + float(
-                np.sum(self.units_arr * np.nan_to_num(self.last_prices_arr, nan=0.0))
+        # NaN-only zeroing instead of nan_to_num: bit-identical on the
+        # reachable domain (prices are NaN or finite positives), ~2x faster,
+        # and a +/-inf -- which nan_to_num silently mapped to +-finfo.max --
+        # now fails closed instead of corrupting the equity ledger.
+        prices = self.last_prices_arr if gpos is None else self.last_prices_arr[gpos]
+        if np.isinf(prices).any():
+            raise DataIntegrityError(
+                "last prices must never be infinite; a non-finite mark slipped "
+                "past the strictly-positive finite-mark invariant"
             )
+        units = self.units_arr if gpos is None else self.units_arr[gpos]
         return self.cash + float(
-            np.sum(self.units_arr[gpos] * np.nan_to_num(self.last_prices_arr[gpos], nan=0.0))
+            np.sum(units * np.where(np.isnan(prices), 0.0, prices))
         )
 
     def consume(self, w: ExecutionReplayWindow) -> None:
@@ -1343,7 +1372,8 @@ class _BoundExecutionReplayAccumulator:
         lows_values = w.lows[local_cols].to_numpy(dtype="float64")
         closes_values = w.closes[local_cols].to_numpy(dtype="float64")
         close_finite = np.isfinite(closes_values)
-        mark_valid = np.isfinite(marks_values) & (marks_values > 0.0)
+        sym_finite = np.isfinite(marks_values)
+        mark_valid = sym_finite & (marks_values > 0.0)
         if n_local:
             funding_matrix = np.stack(
                 [w.bar_funding[s].to_numpy(dtype="float64") for s in local_cols], axis=1,
@@ -1352,7 +1382,7 @@ class _BoundExecutionReplayAccumulator:
             funding_matrix = np.zeros((n_grid, 0), dtype="float64")
         if not np.isfinite(funding_matrix).all():
             raise DataIntegrityError("bar_funding must be finite")
-        finite_marks = marks_values[np.isfinite(marks_values)]
+        finite_marks = marks_values[sym_finite]
         if (finite_marks <= 0).any():
             raise DataIntegrityError("finite marks must be strictly positive")
 
@@ -1424,7 +1454,28 @@ class _BoundExecutionReplayAccumulator:
         target_values = w.target_weights[local_cols].to_numpy(dtype="float64")
 
         fill_start = len(self.fill_ts)
-        for i, decision_time in enumerate(w.target_weights.index):
+        # Lazy pd.Timestamp boxing: the decision/fill hot path never touches
+        # the index; gaps, fills, and equity-floor breaches memoise on demand.
+        tw_index = w.target_weights.index
+        sig_index = w.signal_available_at
+        decision_time: pd.Timestamp | None = None
+        signal_time: pd.Timestamp | None = None
+
+        def _dt() -> pd.Timestamp:
+            nonlocal decision_time
+            if decision_time is None:
+                decision_time = tw_index[i]
+            return decision_time
+
+        def _st() -> pd.Timestamp:
+            nonlocal signal_time
+            if signal_time is None:
+                signal_time = sig_index[i]
+            return signal_time
+
+        for i in range(len(tw_index)):
+            decision_time = None
+            signal_time = None
             dns = int(decision_ns_all[i])
             dpos = int(dpos_all[i])
             on_grid = bool(on_grid_all[i])
@@ -1436,11 +1487,10 @@ class _BoundExecutionReplayAccumulator:
             guard_equity = ruin_guard_equity(equity, last_ledger_equity)
             row = target_values[i]
             if self.min_equity_fraction is not None and guard_equity <= self.min_equity_fraction * self.initial_equity:
-                if not self.equity_floor_breaches or self.equity_floor_breaches[-1] != decision_time:
-                    self.equity_floor_breaches.append(decision_time)
+                if not self.equity_floor_breaches or self.equity_floor_breaches[-1] != _dt():
+                    self.equity_floor_breaches.append(_dt())
                 row = np.zeros_like(row)
             spos = int(spos_all[i])
-            signal_time = w.signal_available_at[i]
             active = np.where(np.isfinite(row) & ((row != 0.0) | (self.units_arr[gpos] != 0.0)))[0]
             for col in active.tolist():
                 gcol = int(gpos[col])
@@ -1451,8 +1501,8 @@ class _BoundExecutionReplayAccumulator:
                     self.termination_counts["MISSING_DATA"] += 1
                     self.data_gaps.append(
                         ExecutionDataGap(
-                            code="MISSING_DECISION_MARK", symbol=sym, timestamp=decision_time,
-                            decision_time=decision_time, signal_time=signal_time,
+                            code="MISSING_DECISION_MARK", symbol=sym, timestamp=_dt(),
+                            decision_time=_dt(), signal_time=_st(),
                             execution_bound=self.execution_bound,
                         )
                     )
@@ -1480,8 +1530,8 @@ class _BoundExecutionReplayAccumulator:
                         self.data_gaps.append(
                             ExecutionDataGap(
                                 code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                timestamp=grid[fill_pos], decision_time=decision_time,
-                                signal_time=signal_time, execution_bound=self.execution_bound,
+                                timestamp=grid[fill_pos], decision_time=_dt(),
+                                signal_time=_st(), execution_bound=self.execution_bound,
                             )
                         )
                         continue
@@ -1494,8 +1544,8 @@ class _BoundExecutionReplayAccumulator:
                             self.data_gaps.append(
                                 ExecutionDataGap(
                                     code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                    timestamp=grid[spos], decision_time=decision_time,
-                                    signal_time=signal_time, execution_bound=self.execution_bound,
+                                    timestamp=grid[spos], decision_time=_dt(),
+                                    signal_time=_st(), execution_bound=self.execution_bound,
                                 )
                             )
                             continue
@@ -1510,8 +1560,8 @@ class _BoundExecutionReplayAccumulator:
                             self.data_gaps.append(
                                 ExecutionDataGap(
                                     code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                    timestamp=grid[first_bad], decision_time=decision_time,
-                                    signal_time=signal_time, execution_bound=self.execution_bound,
+                                    timestamp=grid[first_bad], decision_time=_dt(),
+                                    signal_time=_st(), execution_bound=self.execution_bound,
                                 )
                             )
                             continue
@@ -1522,8 +1572,8 @@ class _BoundExecutionReplayAccumulator:
                             self.data_gaps.append(
                                 ExecutionDataGap(
                                     code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                    timestamp=grid[first_bad], decision_time=decision_time,
-                                    signal_time=signal_time, execution_bound=self.execution_bound,
+                                    timestamp=grid[first_bad], decision_time=_dt(),
+                                    signal_time=_st(), execution_bound=self.execution_bound,
                                 )
                             )
                             continue
@@ -1539,8 +1589,8 @@ class _BoundExecutionReplayAccumulator:
                                     self.data_gaps.append(
                                         ExecutionDataGap(
                                             code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                            timestamp=grid[spos], decision_time=decision_time,
-                                            signal_time=signal_time, execution_bound=self.execution_bound,
+                                            timestamp=grid[spos], decision_time=_dt(),
+                                            signal_time=_st(), execution_bound=self.execution_bound,
                                         )
                                     )
                                     continue
@@ -1550,8 +1600,8 @@ class _BoundExecutionReplayAccumulator:
                                     self.data_gaps.append(
                                         ExecutionDataGap(
                                             code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                            timestamp=grid[timeout_pos], decision_time=decision_time,
-                                            signal_time=signal_time, execution_bound=self.execution_bound,
+                                            timestamp=grid[timeout_pos], decision_time=_dt(),
+                                            signal_time=_st(), execution_bound=self.execution_bound,
                                         )
                                     )
                                     continue
@@ -1616,8 +1666,8 @@ class _BoundExecutionReplayAccumulator:
                         self.data_gaps.append(
                             ExecutionDataGap(
                                 code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                timestamp=grid[spos], decision_time=decision_time,
-                                signal_time=signal_time, execution_bound=self.execution_bound,
+                                timestamp=grid[spos], decision_time=_dt(),
+                                signal_time=_st(), execution_bound=self.execution_bound,
                             )
                         )
                         continue
@@ -1632,8 +1682,8 @@ class _BoundExecutionReplayAccumulator:
                         self.data_gaps.append(
                             ExecutionDataGap(
                                 code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                timestamp=grid[first_bad], decision_time=decision_time,
-                                signal_time=signal_time, execution_bound=self.execution_bound,
+                                timestamp=grid[first_bad], decision_time=_dt(),
+                                signal_time=_st(), execution_bound=self.execution_bound,
                             )
                         )
                         continue
@@ -1653,8 +1703,8 @@ class _BoundExecutionReplayAccumulator:
                             self.data_gaps.append(
                                 ExecutionDataGap(
                                     code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                    timestamp=grid[spos], decision_time=decision_time,
-                                    signal_time=signal_time, execution_bound=self.execution_bound,
+                                    timestamp=grid[spos], decision_time=_dt(),
+                                    signal_time=_st(), execution_bound=self.execution_bound,
                                 )
                             )
                             continue
@@ -1664,8 +1714,8 @@ class _BoundExecutionReplayAccumulator:
                             self.data_gaps.append(
                                 ExecutionDataGap(
                                     code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
-                                    timestamp=grid[timeout_pos], decision_time=decision_time,
-                                    signal_time=signal_time, execution_bound=self.execution_bound,
+                                    timestamp=grid[timeout_pos], decision_time=_dt(),
+                                    signal_time=_st(), execution_bound=self.execution_bound,
                                 )
                             )
                             continue
@@ -1822,11 +1872,11 @@ class _BoundExecutionReplayAccumulator:
             mtm_contrib[1:] = np.where(
                 joint[1:], units_before[1:] * delta_price[1:], 0.0,
             )
-            # Sequential-order column sum (cumsum's last column), bit-identical
-            # to the scalar ``arr += col`` accumulation order.  An empty roster
+            # Sequential-order column sum (I-LEDGER): _column_order_row_sum is
+            # bit-identical to cumsum's last column; an empty roster
             # (n_local == 0) yields a zero contribution series.
             mtm_arr = (
-                mtm_contrib.cumsum(axis=1)[:, -1]
+                _column_order_row_sum(mtm_contrib)
                 if n_local
                 else np.zeros(n_grid, dtype="float64")
             )
@@ -1844,18 +1894,18 @@ class _BoundExecutionReplayAccumulator:
                     trigger_pos = int(np.argmax(held_funding_trigger[:, j0][mask_col]))
                     self.first_held_funding = (local_cols[j0], grid[p0 + trigger_pos])
             funding_arr = (
-                charged.cumsum(axis=1)[:, -1]
+                _column_order_row_sum(charged)
                 if n_local
                 else np.zeros(n_grid, dtype="float64")
             )
 
             notional_arr = (
-                (units_state * valuation).cumsum(axis=1)[:, -1]
+                _column_order_row_sum(units_state * valuation)
                 if n_local
                 else np.zeros(n_grid, dtype="float64")
             )
             notional_before_arr = (
-                (units_before * valuation).cumsum(axis=1)[:, -1]
+                _column_order_row_sum(units_before * valuation)
                 if n_local
                 else np.zeros(n_grid, dtype="float64")
             )
@@ -2200,6 +2250,198 @@ def replay_execution_window_batch_isolated(
             else:
                 raise
     return BatchReplayOutcome(results=tuple(results), isolated_failures=tuple(failures))
+
+
+def _rescale_window_weights(
+    w: ExecutionReplayWindow,
+    scale: pd.Series,
+) -> ExecutionReplayWindow:
+    """Apply the two-pass rescaling formula to one loaded window (verbatim)."""
+    scaled = w.target_weights.mul(
+        scale.reindex(w.target_weights.index, method="ffill").fillna(1.0),
+        axis=0,
+    )
+    original_active = (
+        w.target_weights.notna() & w.target_weights.ne(0.0)
+    ).any(axis=0)
+    scaled_active = (scaled.notna() & scaled.ne(0.0)).any(axis=0)
+    if (
+        list(scaled.columns) != list(w.target_weights.columns)
+        or not bool((original_active == scaled_active).all())
+    ):
+        raise DataIntegrityError(
+            "pnl-vol-target scaling changed a window's active roster; "
+            "the scale must preserve the zero pattern across replay passes"
+        )
+    return dataclass_replace(w, target_weights=scaled)
+
+
+def replay_execution_windows_coupled(
+    windows: Iterable[ExecutionReplayWindow],
+    initial_equity: float,
+    reference_bound: tuple[_ExecutionBound, ExecutionSpec],
+    scaled_bounds: Sequence[tuple[_ExecutionBound, ExecutionSpec]],
+    scale_fn: Callable[[pd.Series], pd.Series],
+    retain_event_snapshots: bool = False,
+    min_equity_fraction: float | None = None,
+    isolated_bound_indices: frozenset[int] = frozenset(),
+) -> tuple[StrategyExecutionReplayResult, BatchReplayOutcome]:
+    """One-pass coupled reference/rescaled replay (D1).
+
+    One market-data stream: the reference accumulator consumes window W, the
+    daily reference-return prefix is extended, ``scale_fn`` recomputes the
+    full-prefix scale, W's target weights are rescaled with the exact two-pass
+    formula, and every scaled bound consumes the SAME already-loaded W. This
+    eliminates the second generation pass (measured at 72.7% of the two-pass
+    cost) while peak residency stays one loaded window.
+
+    HAZARD handled explicitly (fail-closed): a non-final window's grid_end is
+    the last order's timeout bar, not a day boundary, so a decision day ``d``
+    may need the return of day ``d-1`` while ``d-1``'s last bars sit beyond
+    everything consumed so far. The gate checks whether W's own grid START is
+    already covered by everything consumed strictly BEFORE W: a window's own
+    span is internally contiguous, so only the boundary with the prior window
+    can hide a gap. Checking decision days against coverage already widened
+    by W's own consumption would make the guard vacuous (a window's own
+    decisions always lie inside its own span, and W's own span provably
+    completes any day it starts inside). If W starts strictly after the last
+    consumed bar, ``DataIntegrityError`` is raised before W is consumed and
+    the caller falls back to the exact two-pass path. The very first window
+    is exempt (no prior window can have left a gap, and the reference's own
+    first-day return is legitimately NaN). Only call this for
+    streaming-capable modes (``is_streaming_scale_mode``); other modes keep
+    the two-pass path.
+    """
+    bound_list = list(scaled_bounds)
+    if not bound_list:
+        raise ValueError("scaled_bounds must be non-empty")
+    for idx in isolated_bound_indices:
+        if idx < 0 or idx >= len(bound_list):
+            raise ValueError(f"isolated index {idx} out of range for {len(bound_list)} bounds")
+    it = iter(windows)
+    first = next(it, None)
+    if first is None:
+        raise DataIntegrityError("at least one execution window is required")
+
+    reference = _BoundExecutionReplayAccumulator(
+        first, initial_equity, reference_bound[0], reference_bound[1],
+        retain_event_snapshots, min_equity_fraction,
+    )
+    scaled_accumulators: list[_BoundExecutionReplayAccumulator | None] = [
+        _BoundExecutionReplayAccumulator(
+            first, initial_equity, bound, spec, retain_event_snapshots, min_equity_fraction,
+        )
+        for bound, spec in bound_list
+    ]
+    active: list[bool] = [True] * len(bound_list)
+    windows_consumed: list[int] = [0] * len(bound_list)
+
+    def _try_consume_scaled(idx: int, w: ExecutionReplayWindow) -> None:
+        if not active[idx]:
+            return
+        try:
+            assert scaled_accumulators[idx] is not None
+            scaled_accumulators[idx].consume(w)  # type: ignore[union-attr]
+            windows_consumed[idx] += 1
+        except DataIntegrityError as exc:
+            if idx in isolated_bound_indices:
+                active[idx] = False
+                scaled_accumulators[idx] = None
+                _isolated_failures.append(
+                    IsolatedBoundFailure(
+                        bound_index=idx,
+                        execution_bound=str(bound_list[idx][0]),
+                        error_class=type(exc).__name__,
+                        message=str(exc),
+                        windows_consumed=windows_consumed[idx],
+                    )
+                )
+            else:
+                raise
+
+    _isolated_failures: list[IsolatedBoundFailure] = []
+    coverage_ns = -1
+
+    def _couple_window(w: ExecutionReplayWindow) -> None:
+        nonlocal coverage_ns
+        # 1) Fail-closed completeness gate: a window is internally contiguous
+        #    (a single date_range), so its own span always finishes any day it
+        #    starts inside -- the only place a gap can hide is the BOUNDARY
+        #    with the prior window. If W starts strictly after everything
+        #    consumed so far, the reference prefix (and therefore any day's
+        #    resampled return spanning that boundary) has a hole; checking
+        #    decision days against coverage already widened by W's own
+        #    consumption would make the guard vacuous, since a window's own
+        #    decisions always lie inside its own span.
+        prior_coverage_ns = coverage_ns
+        window_start_ns = int(w.minute_grid[0].value)
+        if prior_coverage_ns >= 0 and window_start_ns > prior_coverage_ns:
+            raise DataIntegrityError(
+                "coupled replay: window starting "
+                f"{w.window_start.isoformat()} begins after the last consumed "
+                f"bar (coverage={prior_coverage_ns}); the reference prefix has "
+                "a gap -- fall back to the exact two-pass path"
+            )
+        # 2) The unscaled reference consumes W now that the gate has cleared.
+        reference.consume(w)
+        window_end_ns = int(w.minute_grid[-1].value)
+        coverage_ns = max(coverage_ns, window_end_ns)
+        # 3) Recompute the full-prefix scale from the reference equity chunks.
+        equity_prefix = (
+            pd.concat(
+                [
+                    pd.Series(chunk, index=times)
+                    for chunk, times in zip(
+                        reference.equity_chunks, reference.equity_times, strict=True,
+                    )
+                ],
+            )
+            if reference.equity_chunks
+            else pd.Series(dtype="float64")
+        )
+        daily_returns = equity_prefix.resample("1D").last().pct_change()
+        scale = scale_fn(daily_returns)
+        # 4) Rescale W in place (exact two-pass formula) and fan it to the
+        #    already-constructed scaled bounds.
+        rescaled = _rescale_window_weights(w, scale)
+        for idx in range(len(bound_list)):
+            _try_consume_scaled(idx, rescaled)
+
+    coverage_ns = -1
+    _couple_window(first)
+    del first
+    for w in it:
+        _couple_window(w)
+        del w
+
+    reference_result = reference.finalize()
+    results: list[StrategyExecutionReplayResult | None] = []
+    for idx in range(len(bound_list)):
+        if not active[idx]:
+            results.append(None)
+            continue
+        try:
+            assert scaled_accumulators[idx] is not None
+            results.append(scaled_accumulators[idx].finalize())  # type: ignore[union-attr]
+        except DataIntegrityError as exc:
+            if idx in isolated_bound_indices:
+                _isolated_failures.append(
+                    IsolatedBoundFailure(
+                        bound_index=idx,
+                        execution_bound=str(bound_list[idx][0]),
+                        error_class=type(exc).__name__,
+                        message=str(exc),
+                        windows_consumed=windows_consumed[idx],
+                    )
+                )
+                results.append(None)
+                active[idx] = False
+                scaled_accumulators[idx] = None
+            else:
+                raise
+    return reference_result, BatchReplayOutcome(
+        results=tuple(results), isolated_failures=tuple(_isolated_failures),
+    )
 
 
 def replay_execution_window_batch(

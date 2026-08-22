@@ -20,8 +20,10 @@ import gc
 import numpy as np
 import pandas as pd
 
+from src.application.research.mhs import research_go as _research_go
+from src.application.research.mhs import scaling as _scaling
+from src.application.research.mhs import statistics as _statistics
 from src.application.research.mhs.evaluation import (
-    _PERIODS_PER_YEAR_1H,
     BOOK_BLEND_WEIGHTS,
     COMMITTEE_OOS_START,
     COMMITTEE_REGIME_ADAPTIVE_WINDOW,
@@ -35,17 +37,6 @@ from src.application.research.mhs.evaluation import (
     FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
     QUALIFICATION_END,
-    _active_blend_book_and_grid,
-    _apply_trend_sleeve,
-    _committee_evidence_weights_by_boundary,
-    _committee_execution_book,
-    _phase_diagnostics,
-    _prefer_funding_carry_selection,
-    _research_go,
-    _scaling,
-    _statistics,
-    _trend_sleeve_diagnostic,
-    _trend_sleeve_position,
     effective_breadth,
     efficiency_ratio,
     funding_carry_execution_book,
@@ -57,6 +48,18 @@ from src.application.research.mhs.evaluation import (
     year_restricted_correlation,
     yearly_net_t_diagnostic,
 )
+from src.application.research.mhs.stage_services import (
+    _active_blend_book_and_grid,
+    _apply_trend_sleeve,
+    _committee_evidence_weights_by_boundary,
+    _committee_execution_book,
+    _committee_member_books,
+    _phase_diagnostics,
+    _prefer_funding_carry_selection,
+    _trend_sleeve_diagnostic,
+    _trend_sleeve_position,
+)
+from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -114,7 +117,6 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.committee_execution_book = ctx.blend_1h
         # Build per-member attribution books (I5: observational only)
         if ctx.config.committee_member_attribution:
-            from src.application.research.mhs.evaluation import _committee_member_books
             ctx.committee_member_books = _committee_member_books(
                 ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask,
                 ctx.slow_grid, ctx.slow.min_symbols,

@@ -13,17 +13,14 @@ The ``del quote_vol`` at 3751-3752 is preserved at the equivalent point.
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 from src.application.research.mhs.evaluation import (
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
     DataIntegrityError,
-    _book_weights,
-    _horizon_ensemble_execution_weights,
-    _logger,
-    _pit_execution_mask,
-    _signal_ema_span,
     apply_dynamic_gap_exclusion,
     apply_dynamic_mark_gap_exclusion,
     assert_relevant_execution_data_coverage,
@@ -34,8 +31,16 @@ from src.application.research.mhs.evaluation import (
     realized_vol,
     renormalize_within_mask,
 )
+from src.application.research.mhs.marks import _pit_execution_mask
+from src.application.research.mhs.stage_services import (
+    _book_weights,
+    _horizon_ensemble_execution_weights,
+    _signal_ema_span,
+)
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
+
+_logger = logging.getLogger("MhsHorizonDiagnostic")
 
 
 def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
