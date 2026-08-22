@@ -85,11 +85,39 @@ def test_from_namespace_fold_safe_horizon_flag_maps_to_selection_field():
 
 # SCENARIO_GROWTH_ENVELOPE_GOLDEN_IDENTITY_PRESERVED
 def test_config_defaults_growth_envelope_and_attribution():
-    """New fields default to conservative and False respectively."""
+    """growth_envelope defaults to growth (main logic, 2026-08-22); attribution stays False."""
     config = MhsRunConfig()
     d = dataclasses.asdict(config)
-    assert d["growth_envelope"] == "conservative"
+    assert d["growth_envelope"] == "growth"
     assert d["committee_member_attribution"] is False
+
+
+def test_config_defaults_growth_budget_main_logic():
+    """Main-logic default (2026-08-22): growth_budget mode + evidence weighting on."""
+    config = MhsRunConfig()
+    d = dataclasses.asdict(config)
+    assert d["pnl_vol_target_mode"] == "growth_budget"
+    assert d["committee_evidence_weighting"] is True
+
+
+def test_from_namespace_committee_evidence_weighting_cascades_with_capital():
+    """--no-committee-capital also disables evidence weighting (gated, like funding_carry_sleeve)."""
+    from src.cli.main import build_root_parser
+
+    args = build_root_parser().parse_args(
+        ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
+    )
+    assert MhsRunConfig.from_namespace(args).committee_evidence_weighting is True
+
+    args_off = build_root_parser().parse_args(
+        ["research", "run", "portfolio", "mhs-horizon-diagnostic", "--no-committee-evidence-weighting"],
+    )
+    assert MhsRunConfig.from_namespace(args_off).committee_evidence_weighting is False
+
+    args_no_capital = build_root_parser().parse_args(
+        ["research", "run", "portfolio", "mhs-horizon-diagnostic", "--no-committee-capital"],
+    )
+    assert MhsRunConfig.from_namespace(args_no_capital).committee_evidence_weighting is False
 
 
 def test_from_namespace_growth_envelope_flag():

@@ -126,6 +126,94 @@ def test_run_folds_reaches_seam_functions_default_flags(monkeypatch: pytest.Monk
     assert ctx.deployment is not None
 
 
+def test_run_folds_resolves_boundary_growth_budget_vols(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SCENARIO_MHS_FOLD_GROWTH_BUDGET_PROPAGATION_06 (stage wiring): under
+    # growth_budget mode with a pre-vol-target reference ledger, run_folds
+    # builds the boundary map from the top-level reference and forwards only
+    # the fold-indexed float mapping to the fold pool.
+    captured: dict[str, object] = {}
+
+    def _fake_by_boundary(_ref, _envelope, train_ends):
+        captured["train_ends"] = dict(train_ends)
+        return {f"fold_{i}": 0.30 + i / 100 for i in range(len(train_ends) - 1)} | {
+            "top_level": 0.29,
+        }
+
+    def _fake_run_post_book_concurrently(*args: object, **kwargs: object):
+        captured["forwarded"] = kwargs.get("fold_growth_budget_target_vol", args[-1])
+        return (None, None, {}, {}, [], None)
+
+    class _FoldStub:
+        train_end = pd.Timestamp("2022-01-01", tz="UTC")
+
+    monkeypatch.setattr(fold_stage._scaling, "_growth_budget_target_vol_by_boundary", _fake_by_boundary)
+    monkeypatch.setattr(fold_stage, "phase_1_anchored_purged_folds", lambda: (_FoldStub(),))
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently)
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        fold_stage._research_go, "_mhs_research_go",
+        lambda *_a, **_k: type("_RG", (), {"eligible": False})(),
+    )
+    monkeypatch.setattr(
+        fold_stage._research_go, "_resolved_growth_envelope",
+        lambda _config: type("_Env", (), {"max_drawdown": -0.5})(),
+    )
+
+    ctx = _bare_context(committee_book=False)
+    ctx.config = dataclasses.replace(ctx.config, pnl_vol_target_mode="growth_budget")
+    ctx.blend_report = type(
+        "_BlendStub", (),
+        {
+            "pre_vol_target_reference": type(
+                "_RefStub", (), {"ledger": type("_LedgerStub", (), {
+                    "equity": pd.Series([1.0, 1.1, 1.2], index=_GRID),
+                })()},
+            ),
+            "primary_max_drawdown": -0.1,
+            "primary": None,
+        },
+    )()
+    fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
+
+    assert set(captured["train_ends"]) == {"top_level", "fold_0"}
+    assert ctx._fold_growth_budget_target_vol is not None
+    assert captured["forwarded"] == {0: 0.30}
+    assert ctx._fold_growth_budget_target_vol == {0: 0.30}
+
+
+def test_run_folds_skips_boundary_vols_outside_growth_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The default (exante_target/conservative) run must never touch the
+    # boundary resolver -- byte-identical by construction.
+    def _must_not_be_called(*_args: object, **_kwargs: object):
+        raise AssertionError("boundary resolver must not run outside growth_budget mode")
+
+    monkeypatch.setattr(fold_stage._scaling, "_growth_budget_target_vol_by_boundary", _must_not_be_called)
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, [], None))
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        fold_stage._research_go, "_mhs_research_go",
+        lambda *_a, **_k: type("_RG", (), {"eligible": False})(),
+    )
+    monkeypatch.setattr(
+        fold_stage._research_go, "_resolved_growth_envelope",
+        lambda _config: type("_Env", (), {"max_drawdown": -0.5})(),
+    )
+
+    ctx = _bare_context(committee_book=False)
+    fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
+    assert ctx._fold_growth_budget_target_vol is None
+
+
 def test_run_folds_reaches_committee_diagnostic_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
