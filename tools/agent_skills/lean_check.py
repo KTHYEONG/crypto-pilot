@@ -261,7 +261,7 @@ def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
     default_target = contract.get("target_file", "")
     for change in contract.get("changes", []) + contract.get("symbols", []):
         symbol = change.get("symbol") or change.get("name", "")
-        target = change.get("target_file") or default_target
+        target = change.get("target_file") or change.get("file_hint") or default_target
         entries.append(
             {
                 "file_hint": _repo_relative(target),
