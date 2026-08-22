@@ -69,6 +69,7 @@ coverage.xml
 .pytest_cache/
 cover/
 tests/fixtures/golden/_market/
+tests/fixtures/golden/*.json
 
 # Translations
 *.mo
