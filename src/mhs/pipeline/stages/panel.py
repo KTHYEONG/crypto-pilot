@@ -16,13 +16,12 @@ from __future__ import annotations
 from src.application.research.mhs.evaluation import (
     FUTURES_DATA_DIR,
     SOURCE_GAP_EXCLUDED_SYMBOLS,
-    _guard_stage_or_breach,
-    _load_funding_series,
-    _resolve_ram_budget,
-    _StageRecorder,
     bar_funding_panel,
     load_base_panel,
 )
+from src.application.research.mhs.marks import _load_funding_series
+from src.application.research.mhs.resources import _resolve_ram_budget, _StageRecorder
+from src.application.research.mhs.stage_services import _guard_stage_or_breach
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry, Tag
 

@@ -16,26 +16,28 @@ import gc
 
 import pandas as pd
 
+from src.application.research.mhs import research_go as _research_go
+from src.application.research.mhs import statistics as _statistics
 from src.application.research.mhs.evaluation import (
-    _PERIODS_PER_YEAR_1H,
     COMMITTEE_MEMBERS,
     FEATURE_REGISTRY,
     SEARCH_TRIALS_ATTEMPTED,
     DataIntegrityError,
-    _assert_stage_rss_budget,
-    _committee_diagnostic,
-    _fold_blend_parity,
-    _fold_growth_concentration,
-    _get_symbol_mark_frame,
-    _guard_stage_or_breach,
-    _load_feature_panels,
-    _multi_feature_diagnostic,
-    _research_go,
-    _run_post_book_concurrently,
-    _statistics,
     compute_deployment_readiness,
     feature_registry_panel_columns,
 )
+from src.application.research.mhs.marks import _get_symbol_mark_frame
+from src.application.research.mhs.resources import _assert_stage_rss_budget
+from src.application.research.mhs.stage_services import (
+    _committee_diagnostic,
+    _fold_blend_parity,
+    _fold_growth_concentration,
+    _guard_stage_or_breach,
+    _load_feature_panels,
+    _multi_feature_diagnostic,
+    _run_post_book_concurrently,
+)
+from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
