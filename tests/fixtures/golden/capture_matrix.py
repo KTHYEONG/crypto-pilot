@@ -1,17 +1,20 @@
-"""Capture the five named MHS golden report fixtures.
+"""Capture the five named MHS golden report fixtures (digest + summary).
 
-Writes ``mhs_report_golden.json`` (baseline, left untouched if already present)
-plus ``mhs_report_golden_{committee,discovery,trend_sleeve,fold_safe}.json`` into
-``tests/fixtures/golden/``.
+Writes ``mhs_report_golden_{name}_digest.json`` and
+``mhs_report_golden_{name}_summary.json`` for each matrix name into
+``tests/fixtures/golden/``. The former monolithic full-payload golden measured
+1085.61 MB -- over GitHub's 100 MB per-file limit -- and its deletion left all
+identity tests skipping; the sha256 digest (~300 KB) plus the row-count
+summary (<100 KB) restore the gate at >= 2700x smaller size with no loss of
+strength (sha256 over float64 bytes is bit-equality by construction).
 
-Each non-baseline capture uses
+Each capture uses
 ``tests/unit/application/research/mhs/test_evaluation.py::_write_mhs_market(
 ..., include_taker_buy_quote=True)`` -- empirically required so that
 ``committee_capital=True`` (and the fold-safe discovery scan) can load the
 ``taker_buy_quote`` column without raising ``ArrowInvalid`` at
 ``load_base_panel``.  Exactly one opt-in flag is flipped per golden; everything
-else stays at its default, matching the empirically-verified feasibility run
-(status=COMPLETE, blend.primary non-None, folds=4 for committee_capital=True).
+else stays at its default.
 
 Run with::
 
@@ -20,6 +23,8 @@ Run with::
 
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 
 
@@ -28,6 +33,8 @@ import src.market_data.services.futures_collection as fc
 from src.application.research.mhs import statistics as _statistics
 from src.application.research.mhs.contracts import MhsDiagnosticRequest
 from src.application.research.mhs.evaluation import run_mhs_horizon_diagnostic
+from tests.fixtures.golden.compare import GOLDEN_MATRIX_NAMES, assert_report_digest_identical
+from tests.fixtures.golden.digest import build_report_digest, build_report_summary
 from tests.unit.application.research.mhs.test_evaluation import (
     _START,
     _write_mhs_market,
@@ -44,19 +51,30 @@ MATRIX: tuple[tuple[str, dict[str, object]], ...] = (
     ("fold_safe", {"fold_safe_horizon_selection": True}),
 )
 
+assert tuple(name for name, _ in MATRIX) == GOLDEN_MATRIX_NAMES
+
+
+def golden_digest_path(name: str) -> Path:
+    return GOLDEN_DIR / f"mhs_report_golden_{name}_digest.json"
+
+
+def golden_summary_path(name: str) -> Path:
+    return GOLDEN_DIR / f"mhs_report_golden_{name}_summary.json"
+
+
+def _write_json(path: Path, payload: object) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
 
 def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
-    """Generate and write all five named golden JSON files; return name->path."""
+    """Generate and write all named golden digest+summary files; return paths."""
     import tempfile
 
     written: dict[str, Path] = {}
     for name, overrides in MATRIX:
-        out_path = out_dir / f"mhs_report_golden_{name}.json"
-        if name == "baseline" and out_path.exists():
-            # The baseline golden is the canonical, previously-captured fixture;
-            # never overwrite it (keeps the historical byte reference intact).
-            written[name] = out_path
-            continue
+        out_path = golden_digest_path(name)
+        summary_path = golden_summary_path(name)
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             # Non-baseline goldens require the taker_buy_quote column so the
@@ -84,20 +102,22 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
                     data_root=str(root),
                     execution_timeframe="1m",
                     log_run=False,
-                    **overrides,
+                    **overrides,  # type: ignore[arg-type]
                 )
                 report = run_mhs_horizon_diagnostic(request)
+                # Self-check the gate before writing: the fresh report must be
+                # identical to its own freshly built digest.
+                assert_report_digest_identical(build_report_digest(report), report)
+                digest = build_report_digest(report)
+                summary = build_report_summary(report)
             finally:
                 marks.funding_path = orig_funding_path
                 fc._mark_price_path = orig_mark_price_path
-                _statistics._BOOTSTRAP_REPLICATES = orig_reps if "orig_reps" in locals() else orig_replicates
+                _statistics._BOOTSTRAP_REPLICATES = orig_replicates
                 _statistics._BOOTSTRAP_MEAN_BLOCK = orig_block
                 _statistics._BOOTSTRAP_SEED = orig_seed
-            payload = report.to_payload()
-            with open(out_path, "w", encoding="utf-8") as f:
-                import json
-
-                json.dump(payload, f)
+            _write_json(out_path, digest)
+            _write_json(summary_path, summary)
             written[name] = out_path
     return written
 
@@ -105,4 +125,4 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
 if __name__ == "__main__":
     result = capture_golden_matrix(GOLDEN_DIR)
     for name, path in result.items():
-        print(f"captured {name}: {path}")  # noqa: T201
+        sys.stdout.write(f"captured {name}: {path}\n")
