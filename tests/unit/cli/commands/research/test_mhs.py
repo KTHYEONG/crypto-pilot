@@ -760,6 +760,7 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
 def test_cli_flags_threaded(monkeypatch) -> None:
     """SCENARIO_CLI_FLAGS_THREADED: new CLI args are threaded into MhsDiagnosticRequest."""
     import src.application.research.mhs.evaluation as ev
+    import src.mhs.pipeline.orchestrator as orchestrator
     from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 
     captured: dict = {}
@@ -771,6 +772,13 @@ def test_cli_flags_threaded(monkeypatch) -> None:
 
     monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    # The CLI handler's real call path is run_mhs_diagnostic(config) from the
+    # pipeline orchestrator, not ev.run_mhs_horizon_diagnostic (which this
+    # test's request-capture spy above never routes through) -- patching only
+    # the latter leaves the former unmocked and the real multi-minute pipeline
+    # executes against production data on every _run_mhs_horizon_diagnostic
+    # call below.
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
     monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
 
@@ -779,18 +787,19 @@ def test_cli_flags_threaded(monkeypatch) -> None:
     parser = sub.choices["mhs-horizon-diagnostic"]
 
     defaults = {action.dest: action.default for action in parser._actions}
-    assert defaults["pnl_vol_target_mode"] == "exante_target"
+    assert defaults["pnl_vol_target_mode"] == "growth_budget"
     assert defaults["no_funding_carry_sleeve"] is False
     assert defaults["funding_carry_weight"] == FUNDING_CARRY_SLEEVE_WEIGHT
 
-    # Default: exante_target, carry sleeve ON (committee_capital default ON)
+    # Default (2026-08-22 main logic): growth_budget, carry sleeve ON
+    # (committee_capital default ON)
     captured.clear()
     args = parser.parse_args([])
-    assert args.pnl_vol_target_mode == "exante_target"
+    assert args.pnl_vol_target_mode == "growth_budget"
     assert args.no_funding_carry_sleeve is False
     assert args.funding_carry_weight == FUNDING_CARRY_SLEEVE_WEIGHT
     _run_mhs_horizon_diagnostic(args)
-    assert captured["pnl_vol_target_mode"] == "exante_target"
+    assert captured["pnl_vol_target_mode"] == "growth_budget"
     assert captured["funding_carry_sleeve"] is True
     assert captured["funding_carry_weight"] == FUNDING_CARRY_SLEEVE_WEIGHT
 
