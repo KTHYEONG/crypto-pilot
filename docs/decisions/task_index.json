@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_GROWTH_BUDGET_MAIN_LOGIC",
+      "date": "2026-08-22",
+      "adr_id": "ADR_20260822_MHS_GROWTH_BUDGET_MAIN_LOGIC",
+      "domain": "risk",
+      "title": "MHS 성장예산 경계전파 결함 수정 및 메인 로직 기본값 전환",
+      "why": "사용자가 docs/results/mhs_run_history의 실측 결과를 기반으로 복리 자산증식을 극대화할 근거있는 개선안을 요청. 분석 결과 노출 스케일 세 계층(target_gross/regime_cash/pnl_vol_target)이 전부 상한 1.0의 단방향 감쇠라 등록 드로다운 예산에 도달할 수 없었고, growth_budget 모드의 목표변동성이 fold 4개 중 3개에서 leak 또는 전역 fallback(0.20)으로 조용히 대체되어(D1) Research-GO가 배포되지 않을 노출 정책의 fold 증거로 판정하고 있었음. 이후 사용자가 드로다운 크기를 신경쓰지 않는다고 명시적으로 확인하고 growth envelope(파산확률 1% 한도만 남김) + evidence_weighting 조합을 메인 로직 기본값으로 설정해달라고 요청.",
+      "resolution": "src/application/research/mhs/scaling.py에 _growth_budget_target_vol_by_boundary 신설(각 fold의 train_end 이전 데이터로만 leak-free 적합, 실패시 DataIntegrityError). _envelope_exposure_cap을 부트스트랩 파산확률 프론티어에서 유도하도록 수정하고 leverage_ceiling이 프론티어를 넘으면 fail-closed(ValueError). src/mhs/pipeline/stages/fold.py에 경계별 target_vol을 fold pool에 배선. src/application/research/mhs/evaluation.py의 _fold_blend_parity에 배포된(post-scale) gross 비교를 추가하고 top-level blend_traces에도 실제 적용된 exposure_scale_mean을 기록(이전에는 fold쪽만 채워져 있어 발산 감지가 원리적으로 불가능했던 D2 결함 수정). 정책 결정: src/mhs/pipeline/config.py의 MhsRunConfig(CLI 실효 기본값의 단일 소유자) growth_envelope/pnl_vol_target_mode/committee_evidence_weighting 기본값을 conservative/exante_target/False에서 growth/growth_budget/True로 전환, --no-committee-evidence-weighting 네게이트 플래그 신설. MhsDiagnosticRequest(계약 객체) 자체 기본값과 GROWTH_ENVELOPE_DEFAULT 상수, golden fixture 매트릭스는 완전히 보존(committee_capital의 기존 패턴을 그대로 재사용)하여 40여개 기존 bit-exact 회귀 테스트에 영향 없음.",
+      "impact": "무인자 CLI 실행 기준 CAGR 56.0%->112.5%, MDD -17.6%->-26.5%, Sharpe 2.23->2.33, DSR 0.36->0.66, Calmar 3.30->4.25. 예전 기본값은 --growth-envelope conservative --pnl-vol-target-mode exante_target --no-committee-evidence-weighting로 계속 접근 가능하며 회귀 테스트로 정확한 수치(CAGR 56.0204%) 고정. leverage_ceiling=2.0 양방향 옵션(--exposure-scale-two-sided)은 실측 파산확률 프론티어를 넘어 fail-closed로 거부됨을 실행으로 확인, 메인 기본값에는 미포함. 잔여 차단사유는 FOLD_GROWTH_CONCENTRATION(2025년 한 해에 복리성장 59% 쏠림)과 RELEVANT_EXECUTION_DATA_GAP(fold 0 MISSING_DATA)이며 둘 다 이번 작업 범위 밖."
+    },
+    {
       "task_id": "MHS_PERF_STAGE_SERVICES_AND_COUPLED_REPLAY_HAZARD_FIX",
       "date": "2026-08-22",
       "adr_id": "ADR_20260822_MHS_PERF_STAGE_SERVICES_AND_COUPLED_REPLAY_HAZARD_FIX",
@@ -989,16 +999,6 @@
       "why": "사용자가 xs_alpha_vol_weighted_v6와 블렌드되는 frozen Donchian baseline이 검증된 선택인지, 상관계수가 비슷하면서 더 나은 대안이 있는지 질의. 조사 결과 Donchian은 단독 admission 실패(baseline_qualification.admitted=False)에도 xs_alpha_vol_weighted_v6와의 상관계수가 거의 0(rho≈-0.0002)이라는 이유만으로 고정 선택된 것으로 확인, 대안 후보와 비교된 적이 없었음. tournament.py에 이미 구현된 4개 동형 단일종목 후보(funding_signed_directional_v1/Supertrend/Parabolic SAR/Keltner)가 있었으나 xs_alpha_vol_weighted_v6과 짝지어 측정된 적이 없었음.",
       "resolution": "compute_discovery_correlation(진단용 상관계수, zero-variance-safe)과 select_best_baseline_leg(기존 select_baseline_blend_weight/_blended_sharpe 재사용, 후보별 블렌드 시너지 argmax, 동점시 candidate_order 최우선 후보 승리, fail-closed)를 xs_alpha_baseline_blend.py에 신설. run_xs_alpha_baseline_leg_selection 오케스트레이터(4번째 sibling, tournament._run_source 재사용)와 XsBaselineLegSelectionReport를 application 레이어에 추가, CLI에 xs-baseline-leg-selection 서브커맨드 배선. 홀드아웃 봉인 상태로 실행한 실측 결과 5개 후보 중 donchian_long_only_v1이 blended_sharpe=2.298로 압도적 1위(2위 funding_signed_directional_v1=1.970), 사용자의 '더 나은 대안이 있을 것' 가설은 반증됨 -- 상관계수 절댓값(Supertrend/PSAR가 -0.017/-0.012로 Donchian의 +0.011보다 큼)이 블렌드 시너지를 예측하지 못함을 확인.",
       "impact": "docs/results/xs_alpha_baseline_leg_selection.json 신규 생성(5개 후보 비교표+선택결과). run_xs_alpha_baseline_blend/_sized/_joint 및 기존 v8 계열 산출물은 무변경(Donchian 기본값 유지, 이번 실측이 그 선택을 정당화). LCB90 신뢰도 게이트는 여전히 FAIL(3.39%<15% 허들)로 별개 트랙 -- 이번 스펙의 목표가 아니었음. 후속 과제: 3-way+ 조합 최적화, xs_alpha_positioning_v7 편입, v6 내부 family간 교차상관 측정."
-    },
-    {
-      "task_id": "xs_alpha_blend_joint_turnover_diagnostic",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_xs_alpha_blend_joint_turnover_diagnostic",
-      "domain": "risk",
-      "title": "XS Alpha 블렌드 Optuna 결합탐색: turnover_max 게이트 대신 진단 리포팅으로 전환",
-      "why": "v8_joint 결합탐색(discovery_reliability_score) 최적점이 admission turnover_max(150x/yr)에 막힘. rev1(고정비율 1.230x)은 과최적화된 매직넘버로 기각, rev2(block-bootstrap UCB)는 샌드박스 검증 결과 실제 격차(1.23x)를 과소추정(1.01~1.10x)해 기각, worst-6개월-fold 통계(1.62x)로 대체했으나 사용자가 turnover_max=150 자체의 근거를 질의. git log -S 추적 결과 도입 커밋의 'spec section 3.1' 인용 문서가 현재 저장소에 존재하지 않고, CostModel은 turnover에 대해 완전히 선형(시장충격/유동성 항 없음)이라 turnover_max가 비용현실성을 보정한다는 근거가 없으며, docs/results/*.json 10개 프로파일 실측 비교에서 turnover_max에 막힌 v8_joint(turnover=175.4)가 오히려 전체 중 최고 CAGR(41.1%)을 기록함 -- 게이트 자체가 검증되지 않은 임의 기준일 가능성이 높음을 확인.",
-      "resolution": "discovery_reliability_score는 turnover 인지 거부 로직 없이 원래(순수 LCB90) 형태로 유지(rev1/2 되돌림, 순변경 0). reliability.py에 _equal_duration_fold_labels(기존 compute_equal_duration_fold_distribution의 fold 경계 로직 추출, 동작 불변 리팩터)와 compute_turnover_fold_upper_bound(동일 6개월 캘린더 fold 컨벤션 재사용, worst-fold 회전율 산출, 결정론적, 외부 캘리브레이션 상수 없음) 신설. tools/research/xs_alpha_blend_joint_search.py의 run()이 탐색 완료 후 최적점의 discovery 구간 worst-fold turnover를 계산해 turnover_max와 함께 진단 전용(비차단) 정보로 출력하도록 확장 -- 실제 채택 판정은 기존 evaluate_xs_admission(turnover_max=150, 무변경)에 전적으로 위임.",
-      "impact": "재실행 결과 탐색은 동일 지점(xs_alpha_weight=0.2714, leverage_scale=3.9768, plateau_passed=True)을 재발견했고 새 진단선(discovery_worst_fold_turnover=296.53)만 추가 출력. 실제 CLI(xs-baseline-blend-joint) 결과는 이전과 완전 동일: qualification admitted=False binding=turnover_max(175.42x/yr), LCB90=13.21%(t_stat/fold_concentration PASS). 전략 판정 변경 없음(의도된 결과) -- turnover_max=150 자체의 재검증은 범위 밖 후속 과제로 명시(별도 스펙 필요), CostModel을 turnover에 볼록하게 만드는 구조적 대안도 플랫폼 공유 인프라라 별도 승인 필요로 기록."
     }
   ]
 }
