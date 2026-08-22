@@ -1,0 +1,568 @@
+# MHS Performance Optimization + Architecture Refactoring Spec
+
+현재 작업 대상은 `KTHYEONG/crypto-pilot` 저장소의 `feat/improve-strategy` 브랜치다.
+
+이번 작업에서는 **구현하지 말고 반드시 `spec` skill을 사용하여 재검증·프로파일링·설계·계획 수립까지만 수행하라.**
+
+최종적으로 `docs/specs/` 아래 Blueprint와 precision contract를 생성하되, production code 구현은 시작하지 않는다. `/implement`를 실행하지 않는다.
+
+## 1. 최종 목적
+
+MHS diagnostic 실행의 다음 두 지표를 동시에 개선한다.
+
+* **1순위: wall-clock execution time을 최대한 크게 감소**
+* **2순위: peak memory를 감소**
+* 단, runtime 개선을 위해 RAM을 일부 더 사용하는 선택지가 존재한다면 OOM 가능성이 실질적으로 제거되고 명확한 memory headroom이 입증되는 범위에서만 허용한다.
+* 동일 머신·동일 데이터·동일 옵션에서 비교해야 한다.
+* 금융 로직, causality, fill semantics, execution semantics, report semantics를 성능 때문에 변경해서는 안 된다.
+
+현재 repository의 `docs/results/mhs_run_history/latest.json`을 초기 참고 baseline으로 사용하되, 이것을 절대적인 benchmark로 가정하지 말고 현재 HEAD에서 다시 측정 가능한 benchmark를 확립하라.
+
+참고 baseline:
+
+* eligible symbols: 446
+* trials: 70
+* execution timeframe: 3m
+* recorded wall time: 약 737.24 sec
+* recorded peak RSS: 약 5.666 GB
+* `ram_guard=true`
+* `pnl_vol_target=true`
+* `pnl_vol_target_mode=exante_target`
+
+단, 기존 `peak_rss_bytes`가 fork/COW를 포함한 시스템 전체의 진짜 physical-memory peak라고 가정하지 말라.
+
+## 2. 시작 전에 반드시 확인할 것
+
+먼저 다음을 읽고 repository 규칙을 따른다.
+
+* `AGENTS.md`
+* `.agents/rules/performance.md`
+* `.agents/rules/python.md`
+* `.agents/rules/quant.md`
+* `.agents/rules/testing.md`
+* `.agents/skills/spec/SKILL.md`
+* 관련 ADR / architecture docs
+* 기존 MHS specs 및 과거 성능 최적화 specs가 있다면 함께 확인
+
+`spec_init.py`를 사용하여 기존 결정/ADR/spec context를 수집한다.
+
+모든 Python/test/lint 명령은 repository 규칙에 따라 `uv run`으로 실행한다.
+
+production 파일은 수정하지 않는다.
+
+필요한 empirical experiment는 `scratch/`에 최소 script를 만들어 수행할 수 있다.
+
+## 3. 먼저 현재 MHS 실행 graph를 다시 작성하라
+
+CLI에서 시작하여 실제 현재 호출 경로를 추적한다.
+
+최소한 다음을 포함한다.
+
+`CLI`
+→ `MhsRunConfig`
+→ `pipeline orchestrator / runner`
+→ panel
+→ selection
+→ books
+→ committee
+→ replay
+→ folds
+→ report
+
+각 stage별로 다음을 기록한다.
+
+* 입력 객체
+* 출력 객체
+* 주요 DataFrame/NumPy shape
+* 객체 lifetime
+* process 경계
+* fork/COW 공유 객체
+* disk I/O
+* 반복 횟수
+* wall time
+* RSS/USS/PSS 변화
+* immediate caller / callee
+
+기존 stage telemetry만으로 부족하면 scratch instrumentation을 추가하되 production에는 아직 반영하지 않는다.
+
+## 4. 성능 분석은 반드시 측정 기반으로 수행하라
+
+기존 benchmark를 우선 재사용한다.
+
+특히 확인:
+
+* `tests/benchmark/mhs/test_mhs_execution_resource_benchmark.py`
+* `tests/benchmark/mhs/test_mhs_replay_resources.py`
+* `tests/unit/application/research/mhs/test_mhs_perf_optimization.py`
+
+가능하면 다음 계층으로 나눈다.
+
+### Micro benchmark
+
+90-day / 64-symbol deterministic workload 등 기존 benchmark를 활용한다.
+
+같은 process에서 단순 1회 측정하지 말고 변동성을 확인할 수 있는 반복 benchmark를 사용한다.
+
+### Component benchmark
+
+다음을 각각 가능한 수준까지 분해한다.
+
+* mark prewarm/cache
+* Parquet minute-window loading
+* window construction
+* Prepared/common preprocessing
+* execution decision/fill loop
+* ledger construction
+* rescaled replay
+* fold replay
+
+### Full-run acceptance benchmark
+
+최신 run의 flag를 CLI parser에서 직접 확인해 정확히 재현 가능한 command를 도출한다.
+
+명령을 추측하지 말라.
+
+cold filesystem cache와 warm filesystem cache가 결과에 영향을 준다면 구분해서 기록한다.
+
+## 5. Memory 측정 자체를 먼저 검증하라
+
+현재 `peak_rss_bytes` 하나만 믿지 않는다.
+
+Linux에서 가능한 범위 내에서 다음을 검토한다.
+
+* parent RSS
+* child RSS
+* USS
+* PSS
+* system available RAM minimum
+* cgroup/container memory limit이 있으면 해당 사용량
+* PyArrow memory pool allocated bytes
+* process별 retained memory
+* fork/COW shared-memory 특성
+
+parent + child RSS를 단순 합산하면 COW shared page를 중복 계산할 수 있으므로 해당 방식으로 OOM safety를 판단하지 않는다.
+
+반대로 parent RSS만으로 child private allocation을 놓쳐서도 안 된다.
+
+실제 OOM safety를 나타낼 수 있는 지표를 spec에 정의하라.
+
+## 6. 다음 최적화 가설들을 반드시 검증하되, 정답이라고 가정하지 말라
+
+### Hypothesis A — Common PreparedExecutionWindow
+
+현재 `replay_execution_window_batch[_isolated]`가 하나의 raw `ExecutionReplayWindow`를 여러 bound에 공유하더라도 각 `_BoundExecutionReplayAccumulator.consume()`가 다음을 반복 계산하는지 확인한다.
+
+* DataFrame → NumPy conversion
+* marks/highs/lows/closes extraction
+* funding matrix
+* finite masks
+* last-close lookup table
+* decision/signal ns arrays
+* searchsorted positions
+* target arrays
+* 기타 window-invariant preprocessing
+
+사실이라면 `PreparedExecutionWindow` 또는 동등한 immutable prepared representation을 window당 한 번만 구성하고 N개의 bound accumulator가 공유하는 설계를 분석한다.
+
+목표:
+
+`raw window -> common preprocessing once -> N bound states`
+
+다음도 확인한다.
+
+* prepared representation을 추가 객체로 얹어 memory를 늘리는 것이 아니라 기존 Pandas/wide-frame representation을 가능한 빨리 release할 수 있는가?
+* NumPy array를 contiguous/read-only하게 공유할 수 있는가?
+* current public contracts를 보존할 수 있는가?
+
+### Hypothesis B — Compact MHS mark cache
+
+`src/application/research/mhs/marks.py`의 `_get_symbol_mark_frame()`이 full `DataCollector` mark DataFrame을 512-entry LRU에 저장하는 구조를 분석한다.
+
+실제 MHS replay/parity가 필요한 mark field를 정확히 추적한다.
+
+만약 핵심적으로 `datetime/timestamp + close`만 필요하다면:
+
+* source validation semantics
+* duplicate handling
+* sorting
+* numeric coercion
+* malformed file behavior
+* missing mark fail-closed behavior
+
+를 그대로 보존하면서 compact NumPy/Arrow representation으로 교체 가능한지 검토한다.
+
+full Pandas frame cache와 compact cache의:
+
+* prewarm time
+* peak/private memory
+* per-window mark panel construction time
+
+을 prototype benchmark하라.
+
+### Hypothesis C — Ledger 2D temporary explosion
+
+`_BoundExecutionReplayAccumulator.consume()`에서 window마다 생성되는 모든 `(n_grid, n_local_symbols)` 배열을 목록화하라.
+
+예:
+
+* `d_matrix`
+* `units_state`
+* `units_before`
+* `last_finite_idx`
+* `m_ff`
+* `valuation`
+* `mtm_contrib`
+* `charged`
+* 기타 masks / matrices
+
+각 배열의 shape, dtype, bytes, lifetime을 계산한다.
+
+최종 ledger output이 대부분 1-D time series라는 점을 이용하여:
+
+* per-symbol vectorized reduction
+* small symbol-block reduction
+* reusable workspace
+* in-place reduction
+
+중 어떤 방식이 가장 빠르면서 memory를 줄이는지 scratch prototype으로 비교하라.
+
+block width 후보를 고정적으로 가정하지 말고 workload에 대해 비교한다.
+
+기존 column-order floating-point accumulation 및 `rtol=atol=1e-12` 계약을 보존해야 한다.
+
+### Hypothesis D — Reference/rescaled two-pass 제거
+
+현재 book/fold execution이:
+
+`unscaled reference replay`
+→ daily reference returns
+→ exposure scale
+→ `rescaled primary/stress/strict replay`
+
+형태로 market window generator를 두 번 소비하는지 확인한다.
+
+각 `pnl_vol_target_mode`별 causality를 분석한다.
+
+특히 현재 default run인:
+
+* `pnl_vol_target_mode=exante_target`
+* default conservative growth envelope
+* committee capital on
+* Kelly sizing off
+
+경로의 exposure scale이 strict causal / online-computable인지 수학적으로 확인한다.
+
+가능하다면 다음 구조의 feasibility를 검증한다.
+
+`one market-data stream`
+→ reference state progresses
+→ historical daily reference return finalized
+→ online scale state update
+→ scaled scenario states progress
+
+즉 raw OHLCV/mark/funding window를 다시 로드하지 않고 reference + reported replay를 chronological coordinator에서 함께 수행하는 구조다.
+
+중요:
+
+모든 scale mode를 억지로 one-pass로 바꾸지 않는다.
+
+`growth_budget`, non-conservative envelope 또는 full pre-OOS calibration이 필요한 mode가 streaming 불가능하다면 정확한 기존 two-pass fallback을 유지한다.
+
+다음 edge case를 반드시 검토한다.
+
+* midnight/day boundary
+* first scale/burn-in
+* EWMA shift semantics
+* rolling median double-shift semantics
+* folds
+* train/OOS boundary
+* forced exit
+* missing mark
+* missing funding
+* equity-floor breach
+* committee capital / Kelly
+* two-sided exposure scaling
+
+이 가설은 upside가 크지만 correctness 위험도 높으므로 empirical equivalence proof 없이는 선택하지 않는다.
+
+### Hypothesis E — Parquet/window layout
+
+현재 `_load_window_minute_frames()`의 I/O 비용을 계측한다.
+
+확인:
+
+* symbol당 `pq.read_table()` 횟수
+* row group 수
+* timestamp min/max statistics 존재 여부
+* filter predicate가 실제 row-group pruning을 수행하는지
+* footer/metadata parsing 비중
+* Arrow → NumPy/Pandas copy 횟수
+* `.astype("float64")` copy 비용
+* window마다 symbol DataFrame → wide DataFrame → NumPy 변환 비용
+
+가능한 개선안을 비교한다.
+
+예:
+
+* cached `ParquetFile` metadata
+* row-group direct selection
+* Arrow → prepared NumPy direct path
+* temporary intermediate DataFrame 제거
+
+새로운 storage format을 도입하는 것은 기존 Parquet path보다 명백히 우수하다는 증거가 있을 때만 고려한다.
+
+### Hypothesis F — Window size
+
+현재 최대 31-day window가 최적인지 검증한다.
+
+대표적으로 14 / 31 / 45 / 62 / 93 day 등의 window size를 동일 workload에서 측정하여:
+
+* elapsed time
+* peak private/aggregate memory
+* allocation churn
+
+을 비교한다.
+
+고정값보다 resource-aware dynamic window sizing이 의미가 있는지도 검토한다.
+
+financial/execution 결과는 동일해야 한다.
+
+### Hypothesis G — Parallelism / oversubscription
+
+engine 자체 최적화 전에 worker 수를 무작정 늘리지 않는다.
+
+현재:
+
+* fork shared payload
+* `WORKER_PEAK_RSS_BYTES`
+* `plan_worker_count`
+* max fold workers
+* system reserve gate
+
+를 분석한다.
+
+BLAS/OpenMP oversubscription 여부도 확인한다.
+
+필요하면 동일 benchmark에서:
+
+* default
+* one BLAS thread per process
+
+를 비교한다.
+
+worker 수를 늘리는 방안은 새로운 per-worker memory footprint가 측정된 후 후순위로 평가한다.
+
+## 7. 리팩토링 분석을 성능 분석과 같이 수행하라
+
+LOC만 세지 말고 다음 지표로 architecture heatmap을 만든다.
+
+* file bytes / LOC
+* number of functions/classes
+* largest function LOC
+* imports
+* fan-in / fan-out
+* number of responsibilities
+* number of private symbols imported by other modules
+* circular/lazy-import workarounds
+* test coupling
+* AI가 한 변경을 위해 읽어야 하는 최소 context 파일 수
+
+특히 반드시 분석:
+
+### Production
+
+* `src/application/research/mhs/evaluation.py`
+* `src/mhs/execution.py`
+* `src/research/technical_experts/cross_sectional.py`
+* `src/market_data/services/futures_collection.py`
+
+현재 `evaluation.py`가 이미 `src/mhs/pipeline/stages/`로 일부 분리되었음에도 여전히 compatibility facade 이상의 책임을 갖고 있는지 확인한다.
+
+stage가 `evaluation.py`의 private helper를 역으로 import하는 구조가 있다면 정확한 dependency graph를 작성한다.
+
+목표 dependency 방향 예시:
+
+`CLI/application`
+→ `pipeline`
+→ `application service / mhs domain`
+→ lower-level computation/data modules
+
+pipeline stage가 giant `evaluation.py`를 internal service locator처럼 사용하는 구조는 제거 후보로 평가한다.
+
+`evaluation.py`를 얇은 compatibility facade로 만드는 것이 적절한지 검증한다.
+
+### Execution
+
+`src/mhs/execution.py`를 단순 LOC 기준으로 자르지 말고 책임 단위로 분석한다.
+
+후보 seam:
+
+* contracts/types
+* prepared window
+* fill rules
+* inventory/ledger reducer
+* stateful window accumulator
+* batch/scenario replay
+* single-panel reference/oracle
+* compatibility facade
+
+public `from src.mhs.execution import ...` API를 불필요하게 깨지 않는 migration plan을 선호한다.
+
+필요하면 내부 package를 `src/mhs/replay/` 등으로 두고 `execution.py`를 facade로 유지하는 방식을 검토한다.
+
+### PipelineContext
+
+현재 `PipelineContext`의 broad mutable state가:
+
+* memory lifetime 제어에는 어떤 장점이 있고
+* type locality / stage ownership / AI context에는 어떤 단점이 있는지
+
+분석한다.
+
+무조건 immutable dataclass로 교체하지 말고 explicit release semantics를 유지할 수 있는 단계별 개선안을 제시한다.
+
+## 8. 테스트도 반드시 refactoring scope에 포함하라
+
+다음 거대 테스트 파일들을 직접 확인한다.
+
+* `tests/unit/application/research/mhs/test_evaluation.py`
+* `tests/unit/mhs/test_execution.py`
+* `tests/unit/research/technical_experts/test_cross_sectional.py`
+* `tests/unit/mhs/test_discovery.py`
+
+production module boundary와 동일한 behavioral domain으로 분해하는 방안을 설계한다.
+
+단순히 N줄 단위로 나누지 않는다.
+
+공통 synthetic market/builders/fixtures는 재사용하되, 하나의 거대한 magical fixture module이 새로 생기지 않게 한다.
+
+최종 목표는 AI가 특정 execution 또는 evaluation 기능을 수정할 때 수백 KB의 unrelated test context를 읽지 않아도 되는 구조다.
+
+## 9. 반드시 보존해야 하는 correctness invariant
+
+성능 향상은 다음 결과를 변경해서는 안 된다.
+
+* fill semantics
+* fill ordering
+* fill counts
+* termination counts
+* mark/funding causality
+* no-lookahead
+* window-boundary behavior
+* forced exits
+* capital/equity floor
+* strict/stress/reference bound semantics
+* report schema
+* deployment/research gate semantics
+* fold behavior
+
+기존 equality test가 exact equality를 요구하면 exact equality를 유지한다.
+
+기존 numerical contract가 `rtol=atol=1e-12`라면 최소한 그 계약을 만족한다.
+
+정밀도를 낮추는 `float32` 사용은 별도의 error analysis로 안전성이 증명된 대형 비민감 intermediate에 한해 후보로만 검토한다.
+
+financial compounding, matrix inversion, equity ledger 등에 임의 적용하지 않는다.
+
+## 10. 성능 목표는 Pareto 형태로 정의하라
+
+최신 저장 결과만 보고 threshold를 확정하지 말고 현재 HEAD의 재현 가능한 baseline 측정 후 수치를 확정한다.
+
+최소 목표의 방향:
+
+* 동일 조건 wall time: baseline 대비 **25% 이상 감소**를 우선 목표
+* stretch: **40% 이상 감소**
+* OOM: 절대 허용하지 않음
+* system/cgroup memory reserve invariant 충족
+* 가능한 경우 aggregate private/PSS peak 역시 baseline 이하
+* runtime을 크게 줄이기 위해 RAM이 일부 증가하는 후보가 있다면 실제 machine limit 대비 충분한 headroom이 수치로 입증되는 경우에만 Pareto candidate로 남긴다.
+
+다음과 같이 최종 비교표를 작성하라.
+
+`candidate | complexity | expected time impact | measured prototype impact | memory impact | correctness risk | maintenance impact | recommendation`
+
+추측값과 측정값을 명확히 구분한다.
+
+## 11. 구현 계획의 우선순위
+
+프로파일 결과가 반증하지 않는다는 전제에서 다음 순서를 우선 검토하되 스스로 재정렬할 수 있다.
+
+1. measurement/telemetry correctness
+2. common prepared-window preprocessing
+3. compact mark representation
+4. execution ledger workspace/block reduction
+5. causal coupled reference/rescaled replay feasibility
+6. Parquet/window-size optimization
+7. worker/concurrency retuning
+8. remaining secondary hotspots
+
+성능 개선과 구조 리팩토링이 같은 seam을 건드린다면 두 번 고치지 말고 최종 ownership boundary로 직접 이동하는 implementation plan을 설계한다.
+
+하지만 correctness 위험이 큰 optimization과 large-scale module move를 한 commit/phase에 섞는 계획은 피한다.
+
+## 12. 최종 Blueprint에 반드시 포함할 내용
+
+`docs/specs/<feature>.md`에 최소 다음을 포함한다.
+
+* verified current execution architecture
+* benchmark baseline
+* time breakdown
+* memory breakdown
+* measured bottlenecks
+* rejected hypotheses와 이유
+* selected optimizations
+* target module architecture
+* giant-file/test refactoring map
+* before/after dependency graph
+* object lifetime diagram
+* concurrency model
+* OOM safety model
+* numerical/financial invariants
+* implementation phases
+* rollback strategy
+* benchmark/test acceptance matrix
+
+`docs/specs/<feature>_contract.json`은 downstream `/implement`가 추가 code search 없이 실행할 수 있을 정도로 정확하게 작성한다.
+
+모든 target/context file, symbol, caller wiring, scenario, execution command를 명시한다.
+
+## 13. Spec 단계에서 허용/금지
+
+허용:
+
+* 코드 읽기
+* call-site 분석
+* profiler/benchmark
+* `scratch/` 실험
+* architecture comparison
+* `docs/specs/*` 생성
+* contract validation
+
+금지:
+
+* production implementation
+* production API 변경
+* 테스트 대규모 이동
+* 성능 최적화 코드 merge
+* `/implement` 실행
+
+마지막에 반드시:
+
+```bash
+uv run python tools/agent_skills/lean_check.py \
+  --spec docs/specs/<feature>_contract.json \
+  --pre-impl
+```
+
+을 실행하여 contract를 self-validate하라.
+
+최종 채팅 응답에서는 구현하지 않았음을 명확히 밝히고 다음만 간결하게 요약하라.
+
+* measured root bottleneck
+* 선택한 optimization architecture
+* 예상/측정 performance impact
+* refactoring target architecture
+* 생성한 Blueprint / contract 경로
+* 이후 실행할 `/implement ...` 명령
+
+중요: 위에 제시된 optimization hypothesis는 참고 가설이다. 코드와 benchmark가 반증하면 과감히 폐기하고 더 나은 구조를 선택하라. 추측을 사실처럼 사용하지 마라.
