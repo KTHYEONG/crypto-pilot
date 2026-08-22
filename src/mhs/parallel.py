@@ -16,8 +16,8 @@ from __future__ import annotations
 import gc
 import multiprocessing
 import uuid
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, suppress
 from multiprocessing.context import BaseContext
 from typing import Any
 
@@ -84,7 +84,13 @@ def resolve_fork_shared(token: str) -> Mapping[str, Any]:
         ) from None
 
 
-def plan_worker_count(requested: int, per_worker_bytes: int, ram_guard: bool) -> int:
+def plan_worker_count(
+    requested: int,
+    per_worker_bytes: int,
+    ram_guard: bool,
+    *,
+    observer: Callable[[str, int, int, int, int], None] | None = None,
+) -> int:
     """Clamp the requested worker count to what the available RAM supports.
 
     ``min(requested, cpu_count)`` is further clamped by
@@ -92,6 +98,12 @@ def plan_worker_count(requested: int, per_worker_bytes: int, ram_guard: bool) ->
     is True; with ``ram_guard=False`` the CPU bound is returned unchanged.
     ``per_worker_bytes <= 0`` raises ``ValueError``.  A psutil observational
     failure disables only the RAM clamp, never the CPU bound.
+
+    ``observer`` (default ``None`` keeps every existing call byte-identical)
+    is invoked once per RAM-clamped decision with
+    ``(stage, requested, granted, available_bytes, reserve_bytes)`` so the
+    decision is recorded in the report rather than silently swallowed; an
+    observer failure is itself observational and never changes the result.
     """
     if per_worker_bytes <= 0:
         raise ValueError("per_worker_bytes must be positive")
@@ -104,7 +116,11 @@ def plan_worker_count(requested: int, per_worker_bytes: int, ram_guard: bool) ->
         return capped
     reserve = _system_reserve_bytes()
     by_ram = (available - reserve) // per_worker_bytes
-    return max(1, min(capped, by_ram))
+    granted = max(1, min(capped, by_ram))
+    if observer is not None:
+        with suppress(Exception):
+            observer("ram_guard", requested, granted, available, reserve)
+    return granted
 
 
 def assert_fork_admission(

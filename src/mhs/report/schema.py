@@ -8,7 +8,7 @@ key change fails the identity gate.
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         MhsResearchGoResult,
         MhsResourceMeasurement,
     )
+    from src.application.research.mhs.resources import ProcessTreeMemoryStats
     from src.mhs.discovery import DiscoveryQualificationResult
     from src.mhs.evidence import AnchoredPurgedFold, DeploymentReadinessResult
 
@@ -79,9 +80,11 @@ class MhsHorizonDiagnosticReport:
     fill_mark_parity: dict[str, Any] | None = None
     growth_envelope: dict[str, Any] | None = None
     committee_member_attribution: dict[str, Any] | None = None
+    worker_plan: dict[str, int] = field(default_factory=dict)
+    tree_memory: ProcessTreeMemoryStats | None = None
 
     def to_payload(self) -> Any:
-        from src.application.research.mhs.evaluation import _jsonable
+        from src.mhs.report.artifacts import _jsonable
         return _jsonable(dataclasses.asdict(self))
 
 

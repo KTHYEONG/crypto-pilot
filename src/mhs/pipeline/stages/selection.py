@@ -19,10 +19,12 @@ import numpy as np
 
 from src.application.research.mhs.evaluation import (
     BOOK_SPECS,
-    _candidate_weight_books,
-    _fill_mark_parity_eligibility,
-    _run_fold_safe_discovery_parallel,
     liquid_half_eligibility,
+)
+from src.application.research.mhs.marks import _fill_mark_parity_eligibility
+from src.application.research.mhs.stage_services import (
+    _candidate_weight_books,
+    _run_fold_safe_discovery_parallel,
 )
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
@@ -70,6 +72,7 @@ def select_horizons(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ) = _run_fold_safe_discovery_parallel(
             ctx.specs, ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h,
             precomputed=ctx.candidate_books,
+            telemetry=ctx.recorder,
         )
         # The top-level report uses fold index 2's selection (train=2021-2024,
         # the widest leak-free window that still excludes 2025), making the
