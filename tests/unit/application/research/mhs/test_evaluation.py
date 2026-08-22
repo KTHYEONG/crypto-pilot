@@ -1198,7 +1198,7 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
         return real_scale(vol_mean, *args, **kwargs)
 
     monkeypatch.setattr(scaling, "_regime_cash_scale", spy)
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -1372,7 +1372,7 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
     ]
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     universe_size = 8
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -2004,7 +2004,7 @@ def test_p10_concurrent_books_parity(mhs_market) -> None:
     # stays byte-identical after the regime_scale parameter was added.
     args = _build_books_concurrent_args(mhs_market)
     sequential = _sequential_book_reports(args)
-    concurrent_fast, concurrent_slow, concurrent_blend, _ = ev._run_books_concurrent(**args)
+    concurrent_fast, concurrent_slow, concurrent_blend, _, _ = ev._run_books_concurrent(**args)
     concurrent = (concurrent_fast, concurrent_slow, concurrent_blend)
     assert len(concurrent) == 3
     for seq, con, name in zip(sequential, concurrent, ("fast_reversal", "slow_momentum", "blend"), strict=True):
@@ -2029,7 +2029,7 @@ def test_toplevel_blend_replay_matches_renormalized_components(mhs_market) -> No
     collapsed = args["blend_1h"].where(args["execution_mask"], other=0.0).reindex(active_grid)
     assert not expected.equals(collapsed), "renormalized blend must differ from the collapsed pre-mask blend"
     # the concurrent production path replays exactly the renormalized composition
-    _, _, blend_report, _ = ev._run_books_concurrent(**args)
+    _, _, blend_report, _, _ = ev._run_books_concurrent(**args)
     expected_report, _ = ev._book_outcome(
         "blend", active_spec, args["n_symbols"], active_grid,
         args["blend_1h"].reindex(active_grid), grid_1h,
@@ -2080,7 +2080,7 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
         return report, traces
 
     monkeypatch.setattr(ev, "_book_outcome", _failing)
-    fast, slow, blend, _ = ev._run_books_concurrent(**args)
+    fast, slow, blend, _, _ = ev._run_books_concurrent(**args)
     assert fast.primary is not None
     assert fast.failure is None
     assert slow.primary is None
@@ -2100,8 +2100,8 @@ def test_regime_scale_reaches_blend_replay_not_only_prescreen(mhs_market) -> Non
     scale = pd.Series(1.0, index=active_grid)
     scale.iloc[:half] = 0.5
 
-    fast_base, slow_base, blend_base, _ = ev._run_books_concurrent(**args)
-    fast_scaled, slow_scaled, blend_scaled, _ = ev._run_books_concurrent(**args, regime_scale=scale)
+    fast_base, slow_base, blend_base, _, _ = ev._run_books_concurrent(**args)
+    fast_scaled, slow_scaled, blend_scaled, _, _ = ev._run_books_concurrent(**args, regime_scale=scale)
 
     assert blend_base.failure is None
     assert blend_scaled.failure is None
@@ -2181,7 +2181,7 @@ def test_blend_report_adopts_slow_cadence(mhs_market) -> None:
     # (fast_reversal's) -- proving the _run_books_concurrent call site was
     # rewired, not just the helper added in isolation.
     args = _build_books_concurrent_args(mhs_market)
-    _, _, blend_report, _ = ev._run_books_concurrent(**args)
+    _, _, blend_report, _, _ = ev._run_books_concurrent(**args)
     assert blend_report.failure is None
     assert blend_report.step_hours == 24
     assert blend_report.horizon_hours == 168
@@ -2520,7 +2520,7 @@ def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_
     )
     pd.testing.assert_frame_equal(target_default, target_off)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -2566,7 +2566,7 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
     assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
 
     seen.clear()
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -2697,7 +2697,7 @@ def test_committee_regime_adaptive_tranche_default_off_byte_identical(
     )
     pd.testing.assert_frame_equal(target_default, target_off)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -2744,7 +2744,7 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
     assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
     seen.clear()
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3169,7 +3169,7 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
     captured: dict = {}
 
     def _spy_books(*args, **kwargs):
-        return (None, None, None, {})
+        return (None, None, None, {}, None)
 
     def _spy_post(*args, **kwargs):
         captured["fold_slow_horizons"] = args[14] if len(args) > 14 else None
@@ -3319,7 +3319,7 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     monkeypatch.setattr(ev, "_candidate_weight_books", counting_builder)
 
     def _spy_books(*args, **kwargs):
-        return (None, None, None, {})
+        return (None, None, None, {}, None)
 
     def _spy_post(*args, **kwargs):
         return (None, None, {}, {}, (), None)
@@ -3344,7 +3344,7 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
     # [1.0, nominal_candidate_count]; with discovery_gate=False (the default)
     # the two keys are absent -- opt-in, no default-path cost.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3383,7 +3383,7 @@ def test_trend_sleeve_default_off_bit_identical(mhs_market, monkeypatch) -> None
     # bit-identical to the explicit-off baseline -- the sleeve is inert unless
     # explicitly enabled, so a default run cannot change any existing output.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3412,7 +3412,7 @@ def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
     # and the combined metrics; every value is finite or an explicit None,
     # never NaN silently coerced to 0.0.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3597,7 +3597,7 @@ def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote,
     def _fake_books(*args, **kwargs):
         captured["blend_1h"] = args[20]
         captured["committee_execution_book"] = kwargs.get("committee_execution_book")
-        return (None, None, None, {})
+        return (None, None, None, {}, None)
 
     monkeypatch.setattr(ev, "_run_books_concurrent", _fake_books)
     monkeypatch.setattr(
@@ -3767,7 +3767,7 @@ def test_multi_feature_default_off_bit_identical(mhs_market, monkeypatch) -> Non
     # is None and every pre-existing field is bit-identical to the explicit-off
     # baseline -- the multi-feature axis is inert unless explicitly enabled.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3797,7 +3797,7 @@ def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, mon
     # excluded by the coverage gate are listed under an explicit excluded key
     # with their failing year, never silently dropped.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3863,7 +3863,7 @@ def test_committee_default_off_bit_identical(mhs_market, monkeypatch) -> None:
     # pre-existing field is bit-identical to the explicit-off baseline -- the
     # committee axis is inert unless explicitly enabled.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3894,7 +3894,7 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
     # every reported value finite or an explicit None. The fixture spans past
     # COMMITTEE_OOS_START so the block grid has real test bars (B1).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3956,7 +3956,7 @@ def test_committee_diagnostic_per_tier_blocks_present(mhs_market_long, monkeypat
     # that partitions the tier's aggregate bar count exactly -- no
     # double-count or calendar gap against the total.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -3999,7 +3999,7 @@ def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monk
     # the committee walk-forward reports sizing_mode='vol_target' -- the pure
     # pre-change vol-target path.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4021,7 +4021,7 @@ def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) 
     # committee_kelly_sizing=True the committee walk-forward reports
     # sizing_mode='kelly_blend' -- the opt-in 50/50 quarter-Kelly LCB overlay.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4118,7 +4118,7 @@ def test_committee_growth_diagnostic_default_off_byte_identical(mhs_market_long,
     # with committee_growth_diagnostic omitted (default False) the report's
     # growth_headroom is None and the vol-target walk-forward path is untouched.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4139,7 +4139,7 @@ def test_committee_growth_diagnostic_observational_only(mhs_market_long, monkeyp
     # headroom diagnostic must not perturb the reported per-tier walk-forward --
     # the report field is observation-only, never a sizing feedback.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4168,7 +4168,7 @@ def test_committee_diagnostic_block_logret_share_reported(mhs_market_long, monke
     # tier sum to ~1.0 -- a structural ratio (report-only, never a gate) that
     # surfaces single-block dominance, mirroring top1_event_share.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4204,7 +4204,7 @@ def test_committee_diagnostic_block_return_autocorr_lag1_present(
     # [-1.0, 1.0] -- the block-scoped lag-1 autocorrelation of the raw
     # tranche_count=1 committee net returns.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4237,7 +4237,7 @@ def test_committee_diagnostic_block_return_autocorr_lag1_matches_manual_computat
     # independently by capturing the purged walk-forward series during the run
     # and slicing it on the reported block edges.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4284,7 +4284,7 @@ def test_committee_diagnostic_block_existing_fields_unchanged(
     # same values, same types -- so pre-existing per-block consumers are
     # unaffected.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4316,7 +4316,7 @@ def test_committee_diagnostic_off_by_default_unchanged(
     # committee_diagnostic stays exactly None -- the new field only ever appears
     # inside an already-opt-in diagnostic block.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4336,7 +4336,7 @@ def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, c
     # MhsHorizonDiagnostic logger emits all four committee checkpoints --
     # source coverage, member PnL, per-block walk-forward, per-tier summary.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4365,7 +4365,7 @@ def test_committee_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeyp
     # load, the whole committee diagnostic, and one walk-forward checkpoint per
     # measured cost tier -- so a production timeout can be attributed precisely.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4389,7 +4389,7 @@ def test_multi_feature_diagnostic_telemetry_stages_recorded(mhs_market_long, mon
     # multi_feature_book=True the resource_measurements carry the diagnostic
     # feature panel load and the multi-feature diagnostic stage.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4412,7 +4412,7 @@ def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monk
     # diagnostic's own 2021 start; monkeypatching the constant to a different
     # date shifts the first edge, proving the constant is actually read.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4464,7 +4464,7 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
     # carries the failing source/year. With a full-coverage taker_buy_quote the
     # gate is a no-op and all 6 members are admitted (regression).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4509,7 +4509,7 @@ def test_committee_diagnostic_reports_trials_and_warning(mhs_market_long, monkey
     # selection_bias_warning naming the configuration count, and tags its
     # evaluation protocol as purged walk-forward OOS (B5).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4537,7 +4537,7 @@ def test_evaluation_protocol_field_distinguishes_in_sample_from_oos(mhs_market_l
     from src.mhs.features import FEATURE_REGISTRY
 
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4563,7 +4563,7 @@ def test_committee_diagnostic_reports_skipped_blocks(mhs_market_long, monkeypatc
     # block has both sufficient train and at least one test bar, so the list is
     # empty (report-only, never raises).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4590,7 +4590,7 @@ def test_committee_books_regression_unchanged_by_b1_b2(mhs_market_long, monkeypa
     # multi_feature_diagnostic) -- only committee_diagnostic's own walk-forward
     # numbers change by design (B1/B2).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4712,7 +4712,7 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
     # caches are evicted by the time the run completes, and the committee
     # diagnostic is still populated (regression against the re-ordering).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4865,7 +4865,7 @@ def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
     # blocks, finite per-tier fields) still holds after the per-member book
     # streaming + multi-tier ledger.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -4980,7 +4980,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
     captured: dict = {}
 
     def _run(captured):
-        monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+        monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
 
         def _spy_post(*args, **kwargs):
             captured["fold_funding_carry"] = args[16] if len(args) > 16 else None
@@ -5135,7 +5135,7 @@ def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypa
     # the same instrumented window. With discovery_gate=False the keys are
     # absent (discovery_qualification stays None), matching the opt-in convention.
     root, end = mhs_market_funding_vary
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -5172,7 +5172,7 @@ def test_mhs_full_history_yearly_net_t_and_worst_year_corr_exposed(mhs_market_fu
     # 2021-2025 (not just the 2021-2023 discovery window) and a finite
     # funding_carry_worst_year_corr; both stay None when discovery_gate=False.
     root, end = mhs_market_funding_vary
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -5683,7 +5683,7 @@ def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monke
     # DataIntegrityError, and the report is byte-identical to the
     # explicit-off run.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
@@ -5760,7 +5760,7 @@ def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_marke
             return mask
 
         monkeypatch.setattr(ev, "_pit_execution_mask", _fixed_mask)
-        monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}))
+        monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
         monkeypatch.setattr(
             ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
         )
@@ -6427,3 +6427,66 @@ class TestMhsDiagnosticRequestParityGate:
 # SCENARIO_DIAGNOSTIC_DEFAULT_REQUEST_BYTE_IDENTICAL
 # SCENARIO_DIAGNOSTIC_SLEEVE_WIRED_ON_BOTH_PATHS
 # ---------------------------------------------------------------------------
+
+
+# SCENARIO_MEMBER_ATTRIBUTION_PROXY_RANK_SPEARMAN
+class TestCommitteeMemberAttribution:
+    """Tests for _committee_member_attribution proxy_vs_ledger_rank_spearman."""
+
+    def test_perfect_correlation(self) -> None:
+        from src.application.research.mhs.evaluation import _committee_member_attribution
+        ledger_sharpes = {"a": 3.0, "b": 2.0, "c": 1.0}
+        proxy_sharpes = {"a": 3.0, "b": 2.0, "c": 1.0}
+        result = _committee_member_attribution({}, proxy_sharpes)
+        # With empty member_reports, ledger_sharpes is empty, so spearman is None
+        assert result["proxy_vs_ledger_rank_spearman"] is None
+
+    def test_empty_reports_yields_none_spearman(self) -> None:
+        from src.application.research.mhs.evaluation import _committee_member_attribution
+        result = _committee_member_attribution({}, {"a": 1.0})
+        assert result["proxy_vs_ledger_rank_spearman"] is None
+        assert result["members"] == {}
+        assert result["daily_return_correlation"] == {}
+
+    def test_fewer_than_three_shared_yields_none(self) -> None:
+        from src.application.research.mhs.evaluation import _committee_member_attribution
+        # Only 2 shared members < 3 threshold
+        result = _committee_member_attribution({}, {"a": 1.0, "b": 2.0})
+        assert result["proxy_vs_ledger_rank_spearman"] is None
+
+
+@pytest.mark.slow
+def test_committee_member_attribution_observational_only(mhs_market_with_taker_buy_quote) -> None:
+    # SCENARIO_MEMBER_ATTRIBUTION_IS_OBSERVATIONAL: enabling per-member
+    # attribution replays must not perturb the reported blend/research-go/
+    # fold_growth_concentration evidence -- the member books are report-only
+    # (I5) and never enter blend_1h, committee_execution_book, regime_scale,
+    # any exposure scale, any fold report, or any Research-GO reason code.
+    # committee_capital=True (member books are only built on this path) needs
+    # the taker_buy_quote column, hence mhs_market_with_taker_buy_quote rather
+    # than the taker_buy_quote-less mhs_market_long.
+    root, end = mhs_market_with_taker_buy_quote
+    base = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True,
+    )
+    off = ev.run_mhs_horizon_diagnostic(base)
+    on = ev.run_mhs_horizon_diagnostic(
+        dataclasses.replace(base, committee_member_attribution=True),
+    )
+    assert off.status == "COMPLETE"
+    assert on.status == "COMPLETE"
+    assert off.committee_member_attribution is None
+
+    assert on.blend.primary_geometric_cagr == off.blend.primary_geometric_cagr
+    assert on.blend.primary_naive_sharpe == off.blend.primary_naive_sharpe
+    assert on.blend.primary_max_drawdown == off.blend.primary_max_drawdown
+    assert on.research_go.reason_codes == off.research_go.reason_codes
+    assert on.research_go.eligible == off.research_go.eligible
+    assert on.fold_growth_concentration == off.fold_growth_concentration
+
+    assert on.committee_member_attribution is not None
+    from src.application.research.mhs.research_go import _resolved_committee_members
+    expected_members = set(_resolved_committee_members(base))
+    assert set(on.committee_member_attribution["members"]) == expected_members
