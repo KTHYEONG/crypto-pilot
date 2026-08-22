@@ -81,3 +81,54 @@ def test_from_namespace_fold_safe_horizon_flag_maps_to_selection_field():
     )
     config = MhsRunConfig.from_namespace(args)
     assert config.fold_safe_horizon_selection is True
+
+
+# SCENARIO_GROWTH_ENVELOPE_GOLDEN_IDENTITY_PRESERVED
+def test_config_defaults_growth_envelope_and_attribution():
+    """New fields default to conservative and False respectively."""
+    config = MhsRunConfig()
+    d = dataclasses.asdict(config)
+    assert d["growth_envelope"] == "conservative"
+    assert d["committee_member_attribution"] is False
+
+
+def test_from_namespace_growth_envelope_flag():
+    """--growth-envelope maps to growth_envelope field."""
+    from src.cli.main import build_root_parser
+
+    args = build_root_parser().parse_args(
+        [
+            "research", "run", "portfolio", "mhs-horizon-diagnostic",
+            "--growth-envelope", "balanced",
+        ],
+    )
+    config = MhsRunConfig.from_namespace(args)
+    assert config.growth_envelope == "balanced"
+
+
+def test_from_namespace_committee_member_attribution_flag():
+    """--committee-member-attribution maps to committee_member_attribution field."""
+    from src.cli.main import build_root_parser
+
+    args = build_root_parser().parse_args(
+        [
+            "research", "run", "portfolio", "mhs-horizon-diagnostic",
+            "--committee-member-attribution",
+        ],
+    )
+    config = MhsRunConfig.from_namespace(args)
+    assert config.committee_member_attribution is True
+
+
+def test_golden_identity_preserved():
+    """I-CONFIG: MhsRunConfig() and a no-arg CLI invocation produce identical dicts."""
+    from src.cli.main import build_root_parser
+
+    args = build_root_parser().parse_args(
+        ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
+    )
+    from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
+    bare = dataclasses.asdict(MhsRunConfig())
+    # New fields must be identical
+    assert from_cli["growth_envelope"] == bare["growth_envelope"]
+    assert from_cli["committee_member_attribution"] == bare["committee_member_attribution"]

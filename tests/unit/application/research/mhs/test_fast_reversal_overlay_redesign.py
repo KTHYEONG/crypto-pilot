@@ -241,7 +241,7 @@ class TestTrendEfficiencyOverlayDefaultOff:
 
         def _spy_books(*args, **kwargs):
             captured["blend_1h"] = args[20]
-            return (None, None, None, {})
+            return (None, None, None, {}, None)
 
         def _spy_post(*args, **kwargs):
             return (None, None, {}, {}, (), None)
