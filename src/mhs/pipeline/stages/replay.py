@@ -18,9 +18,10 @@ import os
 
 import pandas as pd
 
-from src.application.research.mhs.evaluation import (
+from src.application.research.mhs.marks import _prewarm_mark_frames
+from src.application.research.mhs.stage_services import (
+    _committee_member_attribution,
     _guard_stage_or_breach,
-    _prewarm_mark_frames,
     _run_books_concurrent,
 )
 from src.mhs.pipeline.context import PipelineContext
@@ -89,7 +90,6 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # member_reports itself -- both sides must be independent sources or
         # proxy_vs_ledger_rank_spearman compares the 3m ledger to itself.
         if member_reports and ctx.config.committee_member_attribution:
-            from src.application.research.mhs.evaluation import _committee_member_attribution
             ctx.committee_member_attribution = _committee_member_attribution(
                 member_reports, ctx.committee_member_proxy_sharpe or {},
             )
