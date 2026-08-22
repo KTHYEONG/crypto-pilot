@@ -11,7 +11,8 @@ import logging
 import time
 
 from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
-from src.mhs.params import COMMITTEE_DEFAULT_MEMBER_SET, GROWTH_ENVELOPE_DEFAULT, GROWTH_RISK_ENVELOPES
+from src.mhs.params import COMMITTEE_DEFAULT_MEMBER_SET, GROWTH_RISK_ENVELOPES
+from src.mhs.pipeline.config import CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -248,23 +249,23 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
-        "--committee-evidence-weighting",
+        "--no-committee-evidence-weighting",
         action="store_true",
         default=False,
         help=(
-            "Opt-in, requires committee capital (on by default): weights the "
-            "k=5 committee members by their TRAIN-ONLY realized proxy-return "
-            "t-statistic instead of equal weights, because measured member proxy "
-            "Sharpes span +0.036 to +1.784 (a 50x spread) while equal weighting "
-            "gives a t=0.08 member the same 20%% as a t=+3.99 member; weights "
-            "are non-negative, sum to 1, and fall back to exact equal weights "
-            "when no member has positive train evidence; fitted strictly before "
-            "each fold's train_end (top-level: before the frozen committee OOS "
-            "start), never on evaluation data; walk-forward measured mean OOS "
-            "Sharpe +0.623->+1.266, improving in every evaluated year 2022-2025; "
-            "evidence is realized P&L, never rank IC -- rank ordering and dollar "
-            "P&L disagree under fat-tailed crypto cross-sections and a rank-IC "
-            "sign flip was measured to invert positive-P&L members"
+            "Main logic default is ON (requires committee capital, which is "
+            "also on by default): weights the k=5 committee members by their "
+            "TRAIN-ONLY realized proxy-return t-statistic instead of equal "
+            "weights, because measured member proxy Sharpes span +0.036 to "
+            "+1.784 (a 50x spread) while equal weighting gives a t=0.08 "
+            "member the same 20%% as a t=+3.99 member; weights are "
+            "non-negative, sum to 1, and fall back to exact equal weights "
+            "when no member has positive train evidence; fitted strictly "
+            "before each fold's train_end (top-level: before the frozen "
+            "committee OOS start), never on evaluation data; walk-forward "
+            "measured mean OOS Sharpe +0.623->+1.266, improving in every "
+            "evaluated year 2022-2025; evidence is realized P&L, never rank "
+            "IC. Pass this flag to opt back out to equal-weighted members"
         ),
     )
     mhs.add_argument(
@@ -463,7 +464,14 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
-        "--pnl-vol-target-mode", choices=["exante_target", "median_relative", "growth_budget"], default="exante_target"
+        "--pnl-vol-target-mode", choices=["exante_target", "median_relative", "growth_budget"], default="growth_budget",
+        help=(
+            "P&L vol-target mode. Main logic default is growth_budget: the "
+            "target volatility is solved per-boundary (fold-leak-free) from "
+            "the resolved --growth-envelope's registered drawdown budget, "
+            "rather than the fixed PNL_TARGET_ANNUAL_VOL=0.20 constant "
+            "exante_target uses"
+        ),
     )
     mhs.add_argument(
         "--committee-member-set",
@@ -512,13 +520,15 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument(
         "--growth-envelope",
         choices=sorted(GROWTH_RISK_ENVELOPES),
-        default=GROWTH_ENVELOPE_DEFAULT,
+        default=_CLI_GROWTH_ENVELOPE_DEFAULT,
         help=(
-            "Registered growth risk envelope: conservative (default, "
-            "byte-identical to current production), balanced (MDD 0.35, "
-            "1x ceiling), or growth (MDD 1.0, 2x ceiling, opt-in). "
-            "Selects the drawdown budget for the growth-optimal risk solver "
-            "and the ex-ante vol-target cap"
+            "Registered growth risk envelope: growth (main logic default -- "
+            "no drawdown-magnitude cap, only the registered ruin-probability "
+            "frontier binds, measured CAGR ~112%% on the full 2021-2025 "
+            "replay), balanced (MDD 0.35, 1x ceiling), or conservative "
+            "(MDD 0.25, 1x ceiling, byte-identical to the original pre-2026-08-22 "
+            "production default). Selects the drawdown budget for the "
+            "growth-optimal risk solver and the ex-ante vol-target cap"
         ),
     )
     mhs.add_argument(

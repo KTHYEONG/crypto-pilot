@@ -13,7 +13,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
-from src.mhs.params import COMMITTEE_TARGET_GROSS, GROWTH_ENVELOPE_DEFAULT
+from src.mhs.params import COMMITTEE_TARGET_GROSS
+
+# Main-logic default as of 2026-08-22: measured full 2021-2025 replay gave
+# CAGR ~112.5%/MDD ~-26.5%/DSR 0.66 vs the original conservative/exante_target/
+# equal-weight baseline's CAGR 56.0%/MDD -17.6%/DSR 0.36, at the user's explicit
+# direction to optimize compounding growth without regard to drawdown
+# magnitude. Deliberately decoupled from ``src.mhs.params.GROWTH_ENVELOPE_DEFAULT``
+# ("conservative"), which stays the frozen default for ``MhsDiagnosticRequest``
+# and the golden fixture matrix -- neither is touched by this change.
+CLI_GROWTH_ENVELOPE_DEFAULT = "growth"
 
 
 class MemberSet(StrEnum):
@@ -57,7 +66,7 @@ class MhsRunConfig:
     ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
     trend_efficiency_overlay: bool = False
     pnl_vol_target: bool = True
-    pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget"] = "exante_target"  # was "median_relative" in MhsDiagnosticRequest -- CLI's real effective default (D1)
+    pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget"] = "growth_budget"  # was "median_relative" in MhsDiagnosticRequest -- CLI's real effective default (D1); growth_budget since 2026-08-22
     trend_sleeve: bool = False
     trend_sleeve_gross: float = 0.0
     multi_feature_book: bool = False
@@ -71,7 +80,7 @@ class MhsRunConfig:
     committee_tranche_smoothing: bool = False
     committee_regime_adaptive_tranche: bool = True  # was False + CLI override
     committee_target_gross: float | None = COMMITTEE_TARGET_GROSS  # was _UNSET sentinel
-    committee_evidence_weighting: bool = False
+    committee_evidence_weighting: bool = True  # was False + CLI override True (2026-08-22)
 
     # Funding
     funding_carry_sleeve: bool = True  # was False + CLI override
@@ -84,7 +93,7 @@ class MhsRunConfig:
     ram_guard: bool = True
 
     # Growth envelope & member attribution
-    growth_envelope: str = GROWTH_ENVELOPE_DEFAULT
+    growth_envelope: str = CLI_GROWTH_ENVELOPE_DEFAULT  # was "conservative" (2026-08-22)
     committee_member_attribution: bool = False
 
     @classmethod
@@ -113,6 +122,9 @@ class MhsRunConfig:
             )
         )
         funding_carry_sleeve = committee_capital and not args.no_funding_carry_sleeve
+        committee_evidence_weighting = (
+            committee_capital and not args.no_committee_evidence_weighting
+        )
 
         return cls(
             start=args.start,
@@ -135,7 +147,7 @@ class MhsRunConfig:
             committee_tranche_smoothing=args.committee_tranche_smoothing,
             committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
             committee_target_gross=committee_target_gross,
-            committee_evidence_weighting=args.committee_evidence_weighting,
+            committee_evidence_weighting=committee_evidence_weighting,
             execution_coverage_gate=args.execution_coverage_gate,
             fill_mark_parity_gate=not args.no_fill_mark_parity_gate,
             exposure_scale_two_sided=args.exposure_scale_two_sided,
