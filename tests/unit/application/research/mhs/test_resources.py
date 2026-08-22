@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
+import multiprocessing
+import time
+
+import psutil
 import pytest
 
 from src.application.research.mhs import resources
@@ -184,3 +189,106 @@ def test_peak_rss_bytes_returns_max_rss_across_measurements() -> None:
     peak = resources._peak_rss_bytes(recorder.records)
 
     assert peak == max(r.rss_bytes for r in recorder.records)
+
+
+def _child_hold_private_bytes(ready_queue, release_queue, nbytes: int) -> None:
+    """Fork child: allocate ``nbytes`` private pages and hold until released."""
+    buf = bytearray(nbytes)
+    for i in range(0, nbytes, 4096):
+        buf[i] = 1  # touch every page so the allocation becomes resident
+    ready_queue.put("held")
+    release_queue.get(timeout=60)
+
+
+class TestProcessTreeMemoryStats:
+    """SCENARIO_MHS_PERF_P0_03_TREE_MEMORY_METRIC."""
+
+    def test_has_no_sum_of_rss_field(self) -> None:
+        """Sum-of-RSS is deliberately absent: it double-counts COW-shared pages."""
+        names = {f.name for f in dataclasses.fields(resources.ProcessTreeMemoryStats)}
+        assert names == {
+            "tree_pss_peak_bytes",
+            "tree_uss_peak_bytes",
+            "min_system_available_bytes",
+            "max_concurrent_procs",
+            "samples_taken",
+        }
+        assert not any("rss" in name for name in names)
+
+    def test_fork_child_private_allocation_exceeds_parent_rss(self) -> None:
+        """A child's private 200 MB shows up in tree PSS but not parent RSS."""
+        ctx = multiprocessing.get_context("fork")
+        ready = ctx.Queue()
+        release = ctx.Queue()
+        # Pre-fork baselines. The >= 150 MB margin is asserted against the
+        # parent's own PSS: RSS double-counts COW-shared pages (the very
+        # defect this metric exists to fix), so PSS attribution is the stable
+        # reference -- the child contributes its ~200 MB private set on top.
+        parent_info_before = psutil.Process().memory_full_info()
+
+        sampler = resources._TreeMemorySampler(interval_seconds=0.05)
+        sampler.start()
+        try:
+            proc = ctx.Process(
+                target=_child_hold_private_bytes,
+                args=(ready, release, 200 * 2**20),
+            )
+            proc.start()
+            assert ready.get(timeout=60) == "held"
+            time.sleep(0.6)  # guarantee several samples catch the allocation
+        finally:
+            release.put("done")
+            proc.join(timeout=30)
+            if proc.is_alive():
+                proc.terminate()
+            stats = sampler.stop()
+
+        assert stats.samples_taken >= 1
+        assert (
+            stats.tree_pss_peak_bytes
+            - int(getattr(parent_info_before, "pss", parent_info_before.rss))
+            >= 150 * 2**20
+        )
+
+    def test_min_system_available_below_total(self) -> None:
+        """The available floor can never exceed total memory."""
+        ctx = multiprocessing.get_context("fork")
+        sampler = resources._TreeMemorySampler(interval_seconds=0.05)
+        sampler.start()
+        try:
+            time.sleep(0.2)
+        finally:
+            stats = sampler.stop()
+        assert stats.min_system_available_bytes < psutil.virtual_memory().total
+        assert stats.max_concurrent_procs >= 1
+
+    def test_psutil_failure_never_raises_into_the_run(self, monkeypatch) -> None:
+        """An injected psutil failure yields samples_taken >= 0 with no raise."""
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("injected psutil failure")
+
+        monkeypatch.setattr(resources.psutil, "virtual_memory", _boom)
+        monkeypatch.setattr(resources.psutil, "Process", _boom)
+
+        sampler = resources._TreeMemorySampler(interval_seconds=0.05)
+        sampler.start()
+        time.sleep(0.15)
+        stats = sampler.stop()
+        assert stats.samples_taken >= 0
+
+
+def test_worker_plan_observer_records_stage_and_budget() -> None:
+    """record_worker_plan stores granted workers plus the per-worker budget."""
+    recorder = resources._StageRecorder(log_run=False)
+    observer = resources._worker_plan_observer(recorder, "books", 3 * 2**30)
+    assert observer is not None
+    observer("ram_guard", 3, 2, (10 * 2**30), (1 * 2**30))
+
+    plan = recorder.worker_plan
+    assert plan["books"] == 2
+    assert plan["books_per_worker_bytes"] == 3 * 2**30
+
+
+def test_worker_plan_observer_none_recorder_is_none() -> None:
+    """No recorder means no observer: existing call sites stay untouched."""
+    assert resources._worker_plan_observer(None, "books") is None
