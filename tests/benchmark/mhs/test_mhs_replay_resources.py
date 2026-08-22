@@ -5,6 +5,13 @@ processes and publishes workload shape, the deterministic result checksum,
 median wall seconds, and peak RSS to ``logs/scratch/`` for before/after
 comparisons.  No absolute time/RSS gate is enforced: the same host and the same
 workload must show a strictly lower optimized median.
+
+SCENARIO_MHS_PERF_ACCEPT_01_FULL_RUN (docs/specs/mhs_perf_refactor_contract.json):
+this synthetic benchmark is the fast proxy this file automates; the full
+production-shaped acceptance gate (446 symbols, wall/memory thresholds against
+the HEAD baseline) is a manual reproduction run, not a pytest scenario --
+``uv run python tools/devops/mhs_baseline_run.py``, per
+docs/specs/mhs_perf_refactor.md §10-11.
 """
 
 from __future__ import annotations
