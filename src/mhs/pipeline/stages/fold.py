@@ -35,6 +35,7 @@ from src.application.research.mhs.stage_services import (
     _committee_diagnostic,
     _fold_blend_parity,
     _fold_growth_concentration,
+    _fold_realized_risk_parity,
     _guard_stage_or_breach,
     _load_feature_panels,
     _multi_feature_diagnostic,
@@ -66,8 +67,9 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # released after it joins so the wide multi-year panels never coexist with
     # the final assembly.
     ctx._fold_growth_budget_target_vol = None
+    ctx._fold_exposure_warmup_returns = None
     if (
-        ctx.config.pnl_vol_target_mode == "growth_budget"
+        ctx.config.pnl_vol_target_mode in ("growth_budget", "constant_risk")
         and ctx.blend_report is not None
         and ctx.blend_report.pre_vol_target_reference is not None
     ):
@@ -76,14 +78,21 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             f"fold_{_i}": _f.train_end
             for _i, _f in enumerate(phase_1_anchored_purged_folds())
         })
-        # I2/I3/I4: each boundary's growth-budget target vol is fit once here,
-        # on reference rows strictly before that boundary's train_end, and only
-        # the small float mapping crosses into the fork workers.
-        _boundary_target_vols = _scaling._growth_budget_target_vol_by_boundary(ctx.blend_report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change(), _research_go._resolved_growth_envelope(ctx.config), _train_ends)
+        # I2/I3/I4: each boundary's target vol is fit once here, on reference
+        # rows strictly before that boundary's train_end, and only the small
+        # float mapping crosses into the fork workers.
+        _reference_daily_returns = (
+            ctx.blend_report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change()
+        )
+        if ctx.config.pnl_vol_target_mode == "constant_risk":
+            _boundary_target_vols = _scaling._constant_risk_target_vol_by_boundary(_reference_daily_returns, _research_go._resolved_growth_envelope(ctx.config), _train_ends)
+        else:
+            _boundary_target_vols = _scaling._growth_budget_target_vol_by_boundary(_reference_daily_returns, _research_go._resolved_growth_envelope(ctx.config), _train_ends)
         ctx._fold_growth_budget_target_vol = {
             _i: _boundary_target_vols[f"fold_{_i}"]
             for _i in range(len(phase_1_anchored_purged_folds()))
         }
+        ctx._fold_exposure_warmup_returns = _reference_daily_returns
     (
         ctx.bootstrap_ci, ctx.placebo_percentile, ctx.participation, ctx.termination_counts,
         fold_reports, ctx.deployment,
@@ -92,6 +101,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.signal_48h, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast,
         ctx.fold_funding, ctx.initial_equity, ctx.recorder, ctx.fold_slow_horizons, ctx.fold_fast_horizons,
         ctx.fold_funding_carry, ctx._fold_committee_weights, ctx._fold_growth_budget_target_vol,
+        ctx._fold_exposure_warmup_returns,
     )
     ctx.folds = tuple(fold_reports)
     # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
@@ -146,6 +156,8 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     )
     ctx.fold_blend_parity, parity_reasons = _fold_blend_parity(ctx.blend_traces, ctx.folds)
     ctx.fold_growth_concentration, concentration_reasons = _fold_growth_concentration(ctx.folds)
+    # 관측 전용 진단: 항상 빈 튜플이며 Research-GO reason 합산에 더하지 않는다.
+    ctx.fold_realized_risk_parity, _risk_parity_reasons = _fold_realized_risk_parity(ctx.folds)
     ctx.research_go = _research_go._mhs_research_go(
         ctx.folds, ctx.book_reasons, parity_reasons + concentration_reasons,
         blend_primary_max_drawdown=(

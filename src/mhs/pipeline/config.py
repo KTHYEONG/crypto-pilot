@@ -15,14 +15,20 @@ from typing import Literal
 
 from src.mhs.params import COMMITTEE_TARGET_GROSS
 
-# Main-logic default as of 2026-08-22: measured full 2021-2025 replay gave
-# CAGR ~112.5%/MDD ~-26.5%/DSR 0.66 vs the original conservative/exante_target/
-# equal-weight baseline's CAGR 56.0%/MDD -17.6%/DSR 0.36, at the user's explicit
-# direction to optimize compounding growth without regard to drawdown
-# magnitude. Deliberately decoupled from ``src.mhs.params.GROWTH_ENVELOPE_DEFAULT``
-# ("conservative"), which stays the frozen default for ``MhsDiagnosticRequest``
-# and the golden fixture matrix -- neither is touched by this change.
-CLI_GROWTH_ENVELOPE_DEFAULT = "growth"
+# Main-logic default as of 2026-08-23: measured full 2021-2025 replay of
+# growth_extreme + committee_kelly_sizing=True (breadth 60) gave CAGR 341.6%/
+# MDD -38.4%/Calmar 8.89, dominating the growth(2.0x)+Kelly-off baseline
+# (CAGR 349.8%/MDD -45.6%/Calmar 7.68) on MDD and Calmar simultaneously for a
+# 2.3% CAGR cost (ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING pre-registered
+# acceptance, treatment B). Deliberately decoupled from
+# ``src.mhs.params.GROWTH_ENVELOPE_DEFAULT`` ("conservative"), which stays the
+# frozen default for ``MhsDiagnosticRequest`` and the golden fixture matrix --
+# neither is touched by this change.
+CLI_GROWTH_ENVELOPE_DEFAULT = "growth_extreme"
+
+# Single owner of the CLI effective breadth default; the contract object
+# (MhsDiagnosticRequest) keeps its frozen 30 for bit-exact fixtures.
+CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT = 60
 
 
 class MemberSet(StrEnum):
@@ -47,7 +53,7 @@ class MhsRunConfig:
     data_root: str | None = None
     mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"] = "cache_required"
     execution_timeframe: Literal["1m", "3m", "5m"] = "3m"
-    execution_universe_size: int = 30
+    execution_universe_size: int = CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT  # was 30 (2026-08-23): breadth 30->60 measured CAGR +17.4%, Sharpe +20.2%, stress-tier Sharpe +14.8%, MDD flat
     max_rss_bytes: int | None = None
     log_run: bool = True
 
@@ -66,14 +72,14 @@ class MhsRunConfig:
     ensemble_signal: Literal["raw", "vol_normalized"] = "raw"
     trend_efficiency_overlay: bool = False
     pnl_vol_target: bool = True
-    pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget"] = "growth_budget"  # was "median_relative" in MhsDiagnosticRequest -- CLI's real effective default (D1); growth_budget since 2026-08-22
+    pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget", "constant_risk"] = "growth_budget"  # was "median_relative" in MhsDiagnosticRequest -- CLI's real effective default (D1); growth_budget since 2026-08-22
     trend_sleeve: bool = False
     trend_sleeve_gross: float = 0.0
     multi_feature_book: bool = False
 
     # Committee (FIX D1: defaults absorb CLI derived logic)
     committee_book: bool = False
-    committee_kelly_sizing: bool = False
+    committee_kelly_sizing: bool = True  # was False + CLI override True (2026-08-23, ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING treatment B)
     committee_growth_diagnostic: bool = False
     committee_capital: bool = True  # was False + CLI override True
     committee_member_set: MemberSet = MemberSet.FLOW_MOMENTUM  # was "risk_premia_v2" vs params "flow_momentum_v1"
@@ -125,9 +131,10 @@ class MhsRunConfig:
         committee_evidence_weighting = (
             committee_capital and not args.no_committee_evidence_weighting
         )
+        committee_kelly_sizing = committee_capital and not args.no_committee_kelly_sizing
         # two-sided scaling is request-invalid outside exante_target/growth_budget;
         # an explicit median_relative override must opt the default back out.
-        if args.pnl_vol_target_mode not in ("exante_target", "growth_budget"):
+        if args.pnl_vol_target_mode not in ("exante_target", "growth_budget", "constant_risk"):
             args.no_exposure_scale_two_sided = True
 
         return cls(
@@ -145,7 +152,7 @@ class MhsRunConfig:
             trend_sleeve_gross=args.trend_sleeve_gross,
             multi_feature_book=args.multi_feature_book,
             committee_book=args.committee_book,
-            committee_kelly_sizing=args.committee_kelly_sizing,
+            committee_kelly_sizing=committee_kelly_sizing,
             committee_growth_diagnostic=args.committee_growth_diagnostic,
             committee_capital=committee_capital,
             committee_member_set=MemberSet(args.committee_member_set),

@@ -195,12 +195,12 @@ class MhsDiagnosticRequest:
             flag="--pnl-vol-target", help="Apply the P&L vol-target layer.", negate_flag="--no-pnl-vol-target",
         ),
     )
-    pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget"] = field(
+    pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget", "constant_risk"] = field(
         default="median_relative",
         metadata=cli_param(
             flag="--pnl-vol-target-mode",
             help="P&L vol-target mode.",
-            choices=("median_relative", "exante_target", "growth_budget"),
+            choices=("median_relative", "exante_target", "growth_budget", "constant_risk"),
         ),
     )
     trend_sleeve: bool = field(
@@ -221,7 +221,10 @@ class MhsDiagnosticRequest:
     )
     committee_kelly_sizing: bool = field(
         default=False,
-        metadata=cli_param(flag="--committee-kelly-sizing", help="Blend kelly sizing with vol target."),
+        metadata=cli_param(
+            flag="--committee-kelly-sizing", help="Blend kelly sizing with vol target.",
+            negate_flag="--no-committee-kelly-sizing",
+        ),
     )
     committee_growth_diagnostic: bool = field(
         default=False,
@@ -437,6 +440,8 @@ class MhsFoldReport:
     funding_carry_vs_slow_momentum_daily_corr: float | None = None
     book_structure: dict[str, float] | None = None
     regime_characterization: dict[str, float] | None = None
+    # strict 원장 일간 수익률 std(ddof=1)*sqrt(365); 2행 미만이면 None.
+    realized_annualized_vol: float | None = None
 
 
 # Canonical definition moved to src.mhs.report.schema (P1); re-exported here

@@ -12,6 +12,10 @@ from src.common.errors import DataIntegrityError
 from src.mhs.horizons import efficiency_ratio
 from src.mhs.params import (
     COMMITTEE_OOS_START,
+    CONSTANT_RISK_CAP_BINDING_QUANTILE,
+    CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
+    CONSTANT_RISK_MIN_PERIODS_DAYS,
+    CONSTANT_RISK_TARGET_ANNUAL_VOL,
     PNL_TARGET_ANNUAL_VOL,
     PNL_VOL_TARGET_BURN_IN_DAYS,
     PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
@@ -171,18 +175,20 @@ def _committee_kelly_scale(
     fraction: float = 0.25,
     z: float = 1.0,
     floor: float = PNL_VOL_TARGET_SCALE_FLOOR,
+    cap: float = 1.0,
 ) -> pd.Series:
-    """Strategy-own-P&L trailing quarter-Kelly LCB exposure scale, capped at 1.0.
+    """Strategy-own-P&L trailing quarter-Kelly LCB exposure scale.
 
-    ``scale_t = clip(fraction * lcb_mean_{t-1} / var_{t-1}, floor, 1.0)`` where
+    ``scale_t = clip(fraction * lcb_mean_{t-1} / var_{t-1}, floor, cap)`` where
     ``lcb_mean = trailing_mean - z * trailing_std / sqrt(n)`` (Wald-style
     lower-confidence-bound mean), mirroring ``_pnl_vol_target_scale``'s
-    shift(1)-before-use causality and floor/1.0 clip exactly -- capped at 1.0
-    rather than the diagnostic-only 1.5x (``kelly_lcb_scale`` in
-    ``src.mhs.committee``) so this blend never levers the execution ledger
-    above the existing no-lever-up invariant the capital-breach gate assumes.
-    A weak or negative LCB edge shrinks the scale to ``floor``, same as the
-    P&L-vol-target scale's momentum-crash de-risking.
+    shift(1)-before-use causality and floor clip exactly. The upper bound is
+    supplied by the caller from the resolved growth envelope's
+    ``leverage_ceiling`` (via ``resolved_exposure_cap``) and defaults to 1.0
+    for byte-identical legacy behaviour -- the former hardcoded 1.0 cap turned
+    the 50/50 blend into a pure de-leverager. A weak or negative LCB edge
+    shrinks the scale to ``floor``, same as the P&L-vol-target scale's
+    momentum-crash de-risking.
     """
     if not 0.0 < floor <= 1.0:
         raise ValueError(f"floor must be in (0, 1], got {floor}")
@@ -192,6 +198,8 @@ def _committee_kelly_scale(
         raise ValueError(f"fraction must be > 0, got {fraction}")
     if z < 0:
         raise ValueError(f"z must be >= 0, got {z}")
+    if cap < 1.0:
+        raise ValueError(f"cap must be >= 1.0, got {cap}")
     if reference_daily_returns.empty:
         return pd.Series(1.0, index=reference_daily_returns.index)
     min_periods = max(5, window_days // 2)
@@ -202,7 +210,7 @@ def _committee_kelly_scale(
     lcb_mean = trailing_mean - z * se
     var = trailing_std.pow(2)
     raw_scale = fraction * lcb_mean.div(var.where(var > 0))
-    return raw_scale.clip(lower=floor, upper=1.0).fillna(1.0)
+    return raw_scale.clip(lower=floor, upper=cap).fillna(1.0)
 
 
 def _committee_capital_replay_scale(
@@ -210,16 +218,19 @@ def _committee_capital_replay_scale(
     reference_daily_returns: pd.Series,
     committee_capital: bool,
     committee_kelly_sizing: bool,
+    cap: float = 1.0,
 ) -> pd.Series:
     """50/50 blend of the P&L-vol-target scale with the committee Kelly-LCB scale.
 
     Only active when both ``committee_capital`` and ``committee_kelly_sizing``
     are set (opt-in on top of an opt-in); otherwise returns
     ``pnl_vol_target_scale`` unchanged so every other run stays byte-identical.
+    Both blended terms must share the SAME ``cap`` (I2): differing caps make
+    the blend change the exposure LEVEL rather than its SHAPE.
     """
     if not (committee_capital and committee_kelly_sizing):
         return pnl_vol_target_scale
-    kelly_scale = _committee_kelly_scale(reference_daily_returns).reindex(
+    kelly_scale = _committee_kelly_scale(reference_daily_returns, cap=cap).reindex(
         pnl_vol_target_scale.index,
     ).fillna(1.0)
     return 0.5 * pnl_vol_target_scale + 0.5 * kelly_scale
@@ -318,6 +329,158 @@ def _growth_budget_target_vol_by_boundary(
     return resolved
 
 
+def _feasible_constant_risk_target(
+    reference_daily_returns: pd.Series,
+    envelope: GrowthRiskEnvelope,
+    budget_target_vol: float,
+    *,
+    halflife_days: int = CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
+    min_periods_days: int = CONSTANT_RISK_MIN_PERIODS_DAYS,
+    quantile: float = CONSTANT_RISK_CAP_BINDING_QUANTILE,
+) -> float:
+    """Clamp a budget-solved target vol to the leverage-feasible risk level.
+
+    Returns ``min(budget_target_vol, leverage_ceiling * q_p(sigma_book))``
+    where ``sigma_book`` is the reference book's own causal EWMA annualized
+    vol -- so cap saturation on the fit slice is structurally bounded by
+    probability ``p``. Fewer than ``min_periods_days`` finite sigma rows
+    raises ``DataIntegrityError``; PNL_TARGET_ANNUAL_VOL is never silently
+    substituted.
+    """
+    if not 0.0 < quantile < 1.0:
+        raise ValueError(f"quantile must be in (0, 1), got {quantile}")
+    if halflife_days < 1:
+        raise ValueError(f"halflife_days must be >= 1, got {halflife_days}")
+    if min_periods_days < 1:
+        raise ValueError(f"min_periods_days must be >= 1, got {min_periods_days}")
+    sigma_book = (
+        reference_daily_returns
+        .ewm(halflife=halflife_days, min_periods=min_periods_days)
+        .std()
+        .shift(1)
+        * np.sqrt(365.0)
+    )
+    finite_rows = int(np.isfinite(sigma_book.to_numpy(dtype="float64")).sum())
+    if finite_rows < min_periods_days:
+        raise DataIntegrityError(
+            f"constant_risk target vol unresolved: {finite_rows} finite sigma_book "
+            f"rows, require >= {min_periods_days}"
+        )
+    feasible_cap = float(envelope.leverage_ceiling) * float(sigma_book.quantile(quantile))
+    return min(float(budget_target_vol), feasible_cap)
+
+
+def _constant_risk_scale(
+    reference_daily_returns: pd.Series,
+    target_vol: float,
+    cap: float,
+    *,
+    halflife_days: int = CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
+    min_periods_days: int = CONSTANT_RISK_MIN_PERIODS_DAYS,
+    floor: float = PNL_VOL_TARGET_SCALE_FLOOR,
+    warmup_returns: pd.Series | None = None,
+) -> pd.Series:
+    """Realized-risk-constant exposure scale with optional warm-up support.
+
+    ``scale_t = clip(target_vol / sigma_hat_{t-1}, floor, cap)`` where
+    ``sigma_hat`` is the EWMA(halflife) daily std, ``shift(1)``-ed strictly
+    causal estimate annualized by sqrt(365). With ``warmup_returns``, the
+    EWMA warms up on ``concat(warmup, reference)`` and is reindexed back to
+    ``reference.index`` (removing the min-periods dead zone at a fold seam);
+    warmup rows at or after ``reference.index[0]`` raise ``ValueError``.
+    Only rows whose sigma stays un-interpreted fall back to 1.0.
+    """
+    if target_vol <= 0:
+        raise ValueError(f"target_vol must be > 0, got {target_vol}")
+    if halflife_days < 1:
+        raise ValueError(f"halflife_days must be >= 1, got {halflife_days}")
+    if min_periods_days < 1:
+        raise ValueError(f"min_periods_days must be >= 1, got {min_periods_days}")
+    if not 0.0 < floor <= 1.0:
+        raise ValueError(f"floor must be in (0, 1], got {floor}")
+    if cap < 1.0:
+        raise ValueError(f"cap must be >= 1.0, got {cap}")
+    if reference_daily_returns.empty:
+        return pd.Series(1.0, index=reference_daily_returns.index)
+    if warmup_returns is not None:
+        overlapping = warmup_returns.index[
+            warmup_returns.index >= reference_daily_returns.index[0]
+        ]
+        if len(overlapping) > 0:
+            # 엄격 인과(I-WARM): 워밍업은 참조 첫 행 이전만 허용한다.
+            raise ValueError(
+                f"warmup_returns must precede reference_daily_returns "
+                f"({len(overlapping)} rows at or after "
+                f"{reference_daily_returns.index[0]}, first offender {overlapping[0]})"
+            )
+        combined = pd.concat([warmup_returns, reference_daily_returns])
+    else:
+        combined = reference_daily_returns
+    sigma = (
+        combined
+        .ewm(halflife=halflife_days, min_periods=min_periods_days)
+        .std()
+        .shift(1)
+        * np.sqrt(365.0)
+    ).reindex(reference_daily_returns.index)
+    scale = target_vol / sigma.where(sigma > 0)
+    return scale.clip(lower=floor, upper=cap).fillna(1.0)
+
+
+def _constant_risk_target_vol_by_boundary(
+    reference_daily_returns: pd.Series,
+    envelope: GrowthRiskEnvelope,
+    train_ends: Mapping[str, pd.Timestamp],
+) -> dict[str, float]:
+    """Boundary-resolved constant-risk target vol (leak-free, fail-closed).
+
+    Mirrors ``_growth_budget_target_vol_by_boundary``'s slicing discipline:
+    each boundary fits strictly on rows with index < its own train_end. Unlike
+    ``growth_budget`` mode, the base target is the single registered
+    ``CONSTANT_RISK_TARGET_ANNUAL_VOL`` constant -- never a per-boundary
+    ``growth_budget_annual_vol`` re-solve, which is sample-specific and
+    diverges across boundaries (measured: fold0-2 realized vol 0.14-0.16 vs
+    fold3 0.29 when re-solved per boundary, reproducing
+    FOLD_GROWTH_CONCENTRATION). Only the feasibility clamp
+    (``_feasible_constant_risk_target``) stays boundary-local; insufficient
+    history raises ``DataIntegrityError`` naming the boundary label.
+    """
+    resolved: dict[str, float] = {}
+    for label in sorted(train_ends):
+        boundary_train = reference_daily_returns.loc[
+            reference_daily_returns.index < train_ends[label]
+        ].dropna()
+        if len(boundary_train) < PNL_VOL_TARGET_BURN_IN_DAYS:
+            raise DataIntegrityError(
+                f"constant_risk target vol unresolved for boundary '{label}': "
+                f"{len(boundary_train)} finite train rows before {train_ends[label]}, "
+                f"require >= {PNL_VOL_TARGET_BURN_IN_DAYS}"
+            )
+        resolved[label] = _feasible_constant_risk_target(
+            boundary_train, envelope, CONSTANT_RISK_TARGET_ANNUAL_VOL,
+        )
+    return resolved
+
+
+def _constant_risk_target_vol(
+    reference_daily_returns: pd.Series,
+    envelope: GrowthRiskEnvelope,
+    oos_start: pd.Timestamp = COMMITTEE_OOS_START,
+) -> float:
+    """Leak-free top-level wrapper: mirrors ``_constant_risk_target_vol_by_boundary``'s
+    ``"top_level"`` label exactly (same oos_start slice, same fixed base
+    constant, same feasibility clamp) so the two entry points can never
+    diverge (I2). Slicing to ``index < oos_start`` before the feasibility
+    clamp is required -- fitting ``sigma_book`` on the unsliced full-history
+    series would see post-OOS rows the fold paths never see, producing
+    FOLD_BLEND_PATH_DIVERGENCE (I3).
+    """
+    train = reference_daily_returns.loc[reference_daily_returns.index < oos_start].dropna()
+    if len(train) < PNL_VOL_TARGET_BURN_IN_DAYS:
+        return CONSTANT_RISK_TARGET_ANNUAL_VOL
+    return _feasible_constant_risk_target(train, envelope, CONSTANT_RISK_TARGET_ANNUAL_VOL)
+
+
 def _envelope_exposure_cap(
     envelope: GrowthRiskEnvelope,
     target_gross: float | None,
@@ -401,10 +564,33 @@ def _assert_envelope_leverage_ceiling_verified(
     _envelope_exposure_cap(envelope, None, train)
 
 
+def resolved_exposure_cap(request: MhsDiagnosticRequest) -> float:
+    """단일 소유 노출 상한(I2): 클립 상한을 결정하는 순수·데이터 비의존 함수.
+
+    Series를 읽지 않으므로 top-level과 fold 경로가 동일 값을 반환하고 캡 축의
+    FOLD_BLEND_PATH_DIVERGENCE는 구조적으로 불가능하다. 함수 내부에 리터럴
+    상한(1.0 등)을 박아둘 수 없다(I1).
+    """
+    if not request.exposure_scale_two_sided:
+        return 1.0
+    if request.pnl_vol_target_mode == "median_relative":
+        # median_relative는 자체 1.0 클립인 _pnl_vol_target_scale로 라우트된다.
+        return 1.0
+    from src.application.research.mhs.research_go import _resolved_growth_envelope
+
+    envelope = _resolved_growth_envelope(request)
+    if request.pnl_vol_target_mode == "exante_target" and envelope.name == "conservative":
+        # 등록 기본 엔벨로프의 byte-identical 특수 케이스를 보존한다.
+        return float(PNL_VOL_TARGET_MAX_SCALE)
+    return float(envelope.leverage_ceiling)
+
+
 def _replay_exposure_scale(
     reference_daily_returns: pd.Series,
     request: MhsDiagnosticRequest,
     growth_budget_target_vol: float | None = None,
+    *,
+    warmup_returns: pd.Series | None = None,
 ) -> pd.Series:
     """단일 디스패처: 노출 스케일 모드 선택 + committee_capital 합성.
 
@@ -413,6 +599,8 @@ def _replay_exposure_scale(
     None이 아니면 growth_budget 및 non-conservative exante_target 모드에서
     fold-local 재적합 대신 그 경계별 사전 적합값을 쓴다 -- fold 참조 수익률은
     validation 윈도우만 담으므로 자기 적합은 leak이거나 fallback이다(I3/I4).
+    constant_risk는 Kelly 블렌드를 경유하지 않고 즉시 반환하며
+    ``warmup_returns``로 fold 검증 시작 이전 EWMA 워밍업을 받는다(I-WARM).
     """
     from src.application.research.mhs.research_go import _resolved_growth_envelope
 
@@ -421,6 +609,21 @@ def _replay_exposure_scale(
             return growth_budget_target_vol
         return _growth_budget_target_vol(reference_daily_returns, envelope=envelope)
 
+    if request.pnl_vol_target_mode == "constant_risk":
+        envelope = _resolved_growth_envelope(request)
+        if growth_budget_target_vol is not None:
+            target_vol = growth_budget_target_vol
+        else:
+            # I2/I3: leak-free oos_start slice, mirroring the fold path's
+            # "top_level" boundary -- never fit sigma_book on the full
+            # unsliced series (FOLD_BLEND_PATH_DIVERGENCE root cause).
+            target_vol = _constant_risk_target_vol(reference_daily_returns, envelope)
+        # I-NO-PROCYCLIC: 경기순응 Kelly 항은 위험 상수성을 깨뜨린다.
+        return _constant_risk_scale(
+            reference_daily_returns, target_vol=target_vol,
+            cap=resolved_exposure_cap(request),
+            warmup_returns=warmup_returns,
+        )
     if request.pnl_vol_target_mode == "median_relative":
         scale = _pnl_vol_target_scale(reference_daily_returns)
     elif request.pnl_vol_target_mode == "exante_target":
@@ -430,27 +633,26 @@ def _replay_exposure_scale(
             # pre-existing exante_target call byte-for-byte -- it must never
             # route through the solver-fitted target_vol below, which would
             # silently change the production default's exposure.
-            scale = _exante_vol_target_scale(reference_daily_returns, cap=PNL_VOL_TARGET_MAX_SCALE if request.exposure_scale_two_sided else 1.0)
+            scale = _exante_vol_target_scale(reference_daily_returns, cap=resolved_exposure_cap(request))
         else:
             target_vol = _resolve_target_vol(envelope)
-            cap = (
-                float(envelope.leverage_ceiling)
-                if request.exposure_scale_two_sided else 1.0
+            scale = _exante_vol_target_scale(
+                reference_daily_returns, target_vol=target_vol,
+                cap=resolved_exposure_cap(request),
             )
-            scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=cap)
     elif request.pnl_vol_target_mode == "growth_budget":
         envelope = _resolved_growth_envelope(request)
         target_vol = _resolve_target_vol(envelope)
-        cap = (
-            float(envelope.leverage_ceiling)
-            if request.exposure_scale_two_sided else 1.0
+        scale = _exante_vol_target_scale(
+            reference_daily_returns, target_vol=target_vol,
+            cap=resolved_exposure_cap(request),
         )
-        scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=cap)
     else:
         raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
     return _committee_capital_replay_scale(
         scale, reference_daily_returns,
         request.committee_capital, request.committee_kelly_sizing,
+        cap=resolved_exposure_cap(request),
     )
 
 
@@ -470,10 +672,14 @@ def is_streaming_scale_mode(request: MhsDiagnosticRequest) -> bool:
 
     Returns False for ``growth_budget`` and non-conservative envelopes
     (``_growth_budget_target_vol`` slices the whole pre-OOS train set -- not a
-    prefix computation), and for ``committee_kelly_sizing=True`` (the Kelly
-    blend changes the resolved formula).
+    prefix computation), and when the Kelly blend is actually active (the
+    blend changes the resolved formula). ``constant_risk`` also returns False:
+    its feasible target needs the train-slice sigma_book quantile fit.
     """
-    if request.committee_kelly_sizing:
+    if request.committee_capital and request.committee_kelly_sizing:
+        # _committee_capital_replay_scale만이 실제 Kelly 블렌드를 발동하는
+        # 조건이다(둘 다 True). committee_kelly_sizing 단독으로는 무영향이므로
+        # committee_capital=False일 때 스트리밍 경로를 부당하게 차단해서는 안 된다.
         return False
     if request.pnl_vol_target_mode == "median_relative":
         return True
