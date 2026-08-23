@@ -8,6 +8,8 @@ funding, or inventory arithmetic is reimplemented here.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from src.application.research.mhs.contracts import (
@@ -17,6 +19,7 @@ from src.application.research.mhs.contracts import (
 )
 from src.mhs.params import (
     COMMITTEE_TARGET_GROSS_UNSET,
+    GO_PRIMARY_SHARPE_FLOOR,
     GROWTH_RISK_ENVELOPES,
     GrowthRiskEnvelope,
 )
@@ -122,6 +125,38 @@ def _drawdown_budget_reasons(
     if primary_max_drawdown < -max_drawdown:
         return (GO_REASON_DRAWDOWN_OVER_BUDGET,)
     return ()
+
+
+def _pooled_level_gate_reasons(
+    pooled_evidence: dict[str, Any],
+    sharpe_floor: float = GO_PRIMARY_SHARPE_FLOOR,
+    return_floor: float | None = None,
+) -> tuple[str, ...]:
+    """Level-family gate: pooled lower bounds vs registered absolute floors.
+
+    I-NO-CIRCULAR: the comparison is against absolute economic floors, never a
+    null bootstrapped from the strategy's own returns (a zero-edge strategy
+    would pass its own null). Fewer than two measurable folds defers entirely
+    to ``INCOMPLETE_ANCHORED_FOLD``, which already blocks upstream, so no level
+    codes are added here.
+    """
+    if int(pooled_evidence.get("n_measured_folds") or 0) < 2:
+        return ()
+    reasons: list[str] = []
+    if float(pooled_evidence["pooled_sharpe_lcb"]) <= sharpe_floor:
+        reasons.append(GO_REASON_PRIMARY_SHARPE)
+    if float(pooled_evidence["pooled_stress_sharpe_lcb"]) <= 0.0:
+        reasons.append(GO_REASON_STRESS_SHARPE)
+    effective_return_floor = (
+        REGISTERED_POLICY_THRESHOLDS["primary_annual_return"]
+        if return_floor is None
+        else return_floor
+    )
+    if effective_return_floor is not None and (
+        float(pooled_evidence["pooled_annual_log_return"]) < effective_return_floor
+    ):
+        reasons.append(GO_REASON_PRIMARY_RETURN_BELOW_FLOOR)
+    return tuple(reasons)
 
 
 def _mhs_research_go(

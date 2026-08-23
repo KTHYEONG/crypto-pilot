@@ -117,6 +117,8 @@ class PipelineContext:
     fold_blend_parity: Any = None
     fold_growth_concentration: Any = None
     fold_realized_risk_parity: Any = None
+    _pooled_fold_evidence: Any = None
+    evidence_calibration: Any = None
     research_go: Any = None
     deployment: Any = None
 

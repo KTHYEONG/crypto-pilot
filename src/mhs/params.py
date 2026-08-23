@@ -231,9 +231,21 @@ ARTIFACT_CATEGORIES: tuple[str, ...] = (
 REBALANCE_DEADBAND_POSITION_FRACTION: float = 0.25
 BOOK_HOLDINGS_STATIONARITY_TOLERANCE: float = 0.25
 FOLD_BLEND_PARITY_TOLERANCE: float = 0.25
-FOLD_GROWTH_CONCENTRATION_MAX_SHARE: float = 0.5
 # fold 실현변동성 log-ratio 관측 허용폭(≈1.42x): 관측 전용, reason code 없음.
 FOLD_REALIZED_RISK_PARITY_TOLERANCE: float = 0.35
+
+# --- 증거 게이트 보정(I-CALIB) ---------------------------------------------------
+# 등록 상수는 원시 지표 임계값이 아니라 선언된 오차율 alpha이며, 임계값은 각 런에서
+[redacted]
+[redacted]
+[redacted]
+EVIDENCE_GATE_ALPHA: float = 0.05
+NULL_BOOTSTRAP_MEAN_BLOCK_DAYS: int = 20
+NULL_BOOTSTRAP_TRIALS: int = 2000
+# I-DETERMINISTIC: 동일 원장 -> 비트 동일 임계값을 보장하는 등록 시드.
+NULL_BOOTSTRAP_SEED: int = 20260823
+# null 적합에 필요한 최소 유한 pooled 일간 행수(미만 시 fail-closed).
+NULL_BOOTSTRAP_MIN_ROWS: int = 250
 
 SIGNAL_EMA_HORIZON_SPAN: float = 1.0
 

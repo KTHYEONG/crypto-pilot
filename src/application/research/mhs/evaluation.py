@@ -56,12 +56,13 @@ from src.mhs.books import (
     renormalize_within_mask,
     scale_book_to_target_gross,
 )
+from src.mhs.calibration import sharpe_lower_confidence_bound
 from src.mhs.types import DISCOVERY_START
 from src.mhs.types import FEATURE_MIN_COVERAGE
 from src.mhs.types import COMMITTEE_TARGET_GROSS  # noqa: F401  (facade re-export; public API)
 from src.mhs.types import FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
 from src.mhs.types import FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS
-from src.mhs.types import REGISTERED_POLICY_THRESHOLDS
+from src.mhs.types import REGISTERED_POLICY_THRESHOLDS  # noqa: F401  (facade re-export; public API)
 from src.mhs.types import TREND_SLEEVE_HORIZONS_HOURS
 from src.mhs.types import WORKER_PEAK_RSS_BYTES
 from src.mhs.types import (
@@ -145,11 +146,11 @@ from src.mhs.params import (
     DISCOVERY_GATE_TRANCHE_COUNT,
     DISCOVERY_MOMENTUM_CANDIDATES,
     DISCOVERY_REVERSAL_CANDIDATES,
+    EVIDENCE_GATE_ALPHA,
     FOLD_BLEND_PARITY_TOLERANCE,
-    FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
     FOLD_PANEL_WARMUP_HOURS,
     FOLD_REALIZED_RISK_PARITY_TOLERANCE,
-    GO_PRIMARY_SHARPE_FLOOR,
+    GO_PRIMARY_SHARPE_FLOOR,  # noqa: F401  (facade re-export; public API)
     PNL_VOL_TARGET_BURN_IN_DAYS,  # noqa: F401  (facade re-export; public API)
     PNL_VOL_TARGET_SCALE_FLOOR,  # noqa: F401  (facade re-export; public API)
     REBALANCE_TRACKING_ERROR_THRESHOLD,
@@ -470,23 +471,86 @@ def _fold_regime_characterization(
     return _regime_reference_characterization(close)
 
 
+def _pooled_fold_evidence(
+    folds: tuple[MhsFoldReport, ...],
+    alpha: float = EVIDENCE_GATE_ALPHA,
+) -> dict[str, Any]:
+    """Pool measurable folds' strict/stress daily ledger returns into level evidence.
+
+    Level-family gates judge the pooled estimates' lower bounds against
+    registered absolute economic floors; ``min over folds`` is deliberately
+    absent (per-fold minima are noise-dominated). A fold that is invalid or
+    missing either replay is recorded under ``unmeasured`` and excluded from
+    pooling. Gate adjudication lives in research_go; this function only
+    measures. The raw ``pooled_strict_returns``/``pooled_stress_returns``
+    arrays are internal-only inputs for null calibration and never persisted.
+    """
+    strict_parts: list[np.ndarray] = []
+    stress_parts: list[np.ndarray] = []
+    unmeasured: list[int] = []
+    measured_count = 0
+    for fold in folds:
+        if not fold.primary_valid or fold.strict is None or fold.stress is None:
+            unmeasured.append(fold.fold_index)
+            continue
+        strict_daily = fold.strict.ledger.equity.resample("1D").last().pct_change().dropna()
+        stress_daily = fold.stress.ledger.equity.resample("1D").last().pct_change().dropna()
+        strict_parts.append(strict_daily.to_numpy(dtype="float64"))
+        stress_parts.append(stress_daily.to_numpy(dtype="float64"))
+        measured_count += 1
+    pooled_strict = (
+        np.concatenate(strict_parts) if strict_parts else np.empty(0, dtype="float64")
+    )
+    pooled_stress = (
+        np.concatenate(stress_parts) if stress_parts else np.empty(0, dtype="float64")
+    )
+    n_pooled_days = int(pooled_strict.size)
+    total_log = (
+        float(np.log1p(np.clip(pooled_strict, -0.999, None)).sum())
+        if n_pooled_days
+        else float("-inf")
+    )
+    if not math.isfinite(total_log):
+        total_log = float("-inf")
+    annual_log_return = (
+        total_log * 365.0 / n_pooled_days if n_pooled_days else float("-inf")
+    )
+    return {
+        "unmeasured": unmeasured,
+        "n_measured_folds": measured_count,
+        "n_pooled_days": n_pooled_days,
+        "pooled_sharpe_lcb": sharpe_lower_confidence_bound(pooled_strict, alpha),
+        "pooled_stress_sharpe_lcb": sharpe_lower_confidence_bound(pooled_stress, alpha),
+        "pooled_annual_log_return": annual_log_return,
+        "pooled_strict_returns": pooled_strict,
+        "pooled_stress_returns": pooled_stress,
+    }
+
+
+def _log_growth(daily_returns: np.ndarray) -> float:
+    # 일간 수익률의 누적 로그성장(총 로그성장). -1 이하 클립은 방어적 하한.
+    return float(np.log1p(np.clip(daily_returns, -0.999, None)).sum())
+
+
 def _fold_growth_concentration(
     folds: tuple[MhsFoldReport, ...],
-    max_share: float = FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
+    threshold: float,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     """Check that no single fold dominates total realized log-growth.
 
-    Returns ``(payload, reason_codes)``.  Folds whose ``primary_valid`` is
-    False, whose CAGR is non-finite, or whose CAGR is ``<= -1.0`` (total
-    wipeout) are recorded under ``payload['unmeasured']`` and excluded from the
-    denominator — mirroring ``_fold_blend_parity``'s degenerate-evidence
-    fail-open pattern.
+    Returns ``(payload, reason_codes)``.  ``threshold`` must be supplied by the
+    caller from the registered-alpha null calibration -- no literal default
+    lives here. Folds whose ``primary_valid`` is False, whose CAGR is
+    non-finite, or whose CAGR is ``<= -1.0`` (total wipeout) are recorded under
+    ``payload['unmeasured']`` and excluded from the denominator — mirroring
+    ``_fold_blend_parity``'s degenerate-evidence fail-open pattern.
     """
     payload: dict[str, Any] = {
         "folds": {},
         "unmeasured": [],
         "max_fold_share": 0.0,
-        "max_share": max_share,
+        "max_share": threshold,
+        "threshold": threshold,
     }
     logrets: list[tuple[int, float]] = []
     for fold in folds:
@@ -507,7 +571,7 @@ def _fold_growth_concentration(
     payload["max_fold_share"] = max_share_val
     reason_codes = (
         (GO_REASON_FOLD_GROWTH_CONCENTRATION,)
-        if max_share_val > max_share
+        if max_share_val > threshold
         else ()
     )
     return payload, reason_codes
@@ -3539,22 +3603,16 @@ def _run_anchored_fold(
             f"fold{fold_index}_tranche{_fold_debug_mode}"
             if request.committee_capital else None
         )
+        # (제거) fold별 level 코드 3개를 failures에 append하지 않는다 -- level은
+        # pooled 하한 게이트(research_go)의 단일 소유다. 아래 값들은 MhsFoldReport
+        # 관측 기록용으로 유지된다.
         primary_autocorr = _statistics._daily_autocorr_sharpe(primary.ledger, debug_tag=_fold_debug_tag)
-        if not np.isfinite(primary_autocorr) or primary_autocorr < GO_PRIMARY_SHARPE_FLOOR:
-            failures.append(GO_REASON_PRIMARY_SHARPE)
         stress_sharpe = _statistics._naive_sharpe(stress.ledger)
-        if not np.isfinite(stress_sharpe) or stress_sharpe <= 0.0:
-            failures.append(GO_REASON_STRESS_SHARPE)
 
         equity_1h, net_returns_1h, _turnover_1h = _statistics._hourly_ledger_series(
             equity, primary.ledger.fill_turnover,
         )
         primary_net_ann = _statistics._mean_ann(net_returns_1h, _PERIODS_PER_YEAR_1H)
-        _return_floor = REGISTERED_POLICY_THRESHOLDS["primary_annual_return"]
-        if _return_floor is not None and (
-            not np.isfinite(primary_net_ann) or primary_net_ann < _return_floor
-        ):
-            failures.append(GO_REASON_PRIMARY_RETURN_BELOW_FLOOR)
         if _fold_debug_tag is not None and _logger.isEnabledFor(logging.DEBUG):
             _logger.debug(
                 "[EVAL] tag=%s ann_turnover=%.3f ann_net_ret=%.4f mdd=%.4f",
