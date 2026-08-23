@@ -498,3 +498,14 @@ class TestMhsDiagnosticRequestParityGate:
     def test_non_bool_exposure_scale_two_sided_raises(self) -> None:
         with pytest.raises(ValueError, match="exposure_scale_two_sided"):
             MhsDiagnosticRequest(exposure_scale_two_sided=1)  # type: ignore[arg-type]
+
+    # SCENARIO_MHS_EXPOSURE_CEILING_08
+    def test_scenario_mhs_exposure_ceiling_08_request_default_stays_false(self) -> None:
+        assert MhsDiagnosticRequest().exposure_scale_two_sided is False
+        with pytest.raises(ValueError, match=r"exposure_scale_two_sided.*exante_target"):
+            MhsDiagnosticRequest(
+                exposure_scale_two_sided=True,
+                pnl_vol_target_mode="median_relative",
+            )
+        with pytest.raises(ValueError, match="exposure_scale_two_sided"):
+            MhsDiagnosticRequest(exposure_scale_two_sided=1)  # type: ignore[arg-type]
