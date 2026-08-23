@@ -1,6 +1,46 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION",
+      "domain": "risk",
+      "title": "MHS constant_risk 실전 실행: 위험 등화는 실측 성공, FOLD_GROWTH_CONCENTRATION/FOLD_BLEND_PATH_DIVERGENCE는 미해결로 확정",
+      "why": "ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT 구현 직후 실제 CLI(--pnl-vol-target-mode constant_risk)로 전체 2021-2025/3m 원장을 7회 반복 실행해 스펙의 반사실(scratch 시뮬레이션) 예측이 실제 파이프라인에서도 성립하는지 검증.",
+      "resolution": "실행 중 2개의 진짜 버그를 발견/수정: (1) top-level(blend) 경로가 target_vol을 전체 5년 미분할 참조로 재해석해 fold 경계별 재적합과 갈라짐(FOLD_BLEND_PATH_DIVERGENCE 최초 노출) -> _constant_risk_target_vol 신설로 top_level 경계를 fold와 동일하게 oos_start 슬라이스. (2) fold별 growth_budget_annual_vol 재해석이 표본 특이적이라 fold마다 다른 target을 만들어 위험 등화가 무력화됨 -> CONSTANT_RISK_TARGET_ANNUAL_VOL 단일 고정 상수로 교체(fold 경계별 재적합 폐지, feasibility 클램프만 경계별 유지). (3) fold_realized_risk_parity 진단이 스케일 적용 전(Phase A reference pass) 수익률을 측정하고 있어 target_vol을 바꿔도 값이 불변이던 버그를 발견, 스케일 적용 후(deployed) 원장으로 측정 지점 이동. target=0.40 고정 후 halflife 60/90/120/150을 실측 스윕: risk-parity(로그비)는 0.63(halflife 미적용시 근사)->0.234(hl=90)로 대폭 개선, fold_growth_concentration.max_fold_share는 baseline 0.551에서 0.526(hl=90, 최선)까지만 하락(0.5 미달). 동시에 hl이 짧을수록 새로 노출된 FOLD_BLEND_PATH_DIVERGENCE가 강해지는 단조 트레이드오프를 확인(hl=90:0.317 FAIL / hl=120:0.264 FAIL / hl=150:0.230 PASS, risk-parity 0.373 규정 위반이나 관측전용이라 게이트엔 무영향)하여 단일 halflife 다이얼로는 두 게이트를 동시통과시킬 수 없음을 실측으로 반증. hl=90(1차 목표에 최근접)을 최종 등록값으로 확정.",
+      "impact": "Research-GO는 여전히 미달성(reason_codes=[FOLD_BLEND_PATH_DIVERGENCE, FOLD_GROWTH_CONCENTRATION], run_id는 docs/results/mhs_run_history/latest.json 참조). 위험 등화 메커니즘 자체는 실측 검증됨(fold 실현변동성 0.31~0.45로 baseline 0.28~0.57 대비 수렴). 후속 과제: fold가 자체 EWMA를 재적합하지 않고 blend의 연속 스케일 궤적을 날짜로 슬라이스해 재사용하는 구조적 대안(파라미터 튜닝이 아닌 아키텍처 변경) 필요."
+    },
+    {
+      "task_id": "MHS_CONSTANT_RISK_DEPLOYMENT",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT",
+      "domain": "risk",
+      "title": "MHS constant_risk 노출 모드 신설로 FOLD_GROWTH_CONCENTRATION 근본 해결",
+      "why": "FOLD_GROWTH_CONCENTRATION(max_fold_share=0.551>0.5)이 Research-GO를 차단. 실측 근본원인은 노출 스케일이 gross 공간에서만 통제되어 fold3(2025)이 다른 fold 대비 2배 실현위험(0.57 vs 0.28~0.30)을 동일 gross/scale로 배치한 것(D1: fold별 90일 vol-target 데드존, D2: growth_budget target_vol이 leverage_ceiling에 75~98% 포화, D3: Kelly-LCB 항의 경기순응성).",
+      "resolution": "src/mhs/params.py에 CONSTANT_RISK_EWMA_HALFLIFE_DAYS/MIN_PERIODS_DAYS/CAP_BINDING_QUANTILE/FOLD_REALIZED_RISK_PARITY_TOLERANCE 신설. scaling.py에 _feasible_constant_risk_target/_constant_risk_scale/_constant_risk_target_vol_by_boundary 추가(Kelly 블렌드 비경유, I-WARM 워밍업 지원, leverage_ceiling*q10(sigma_book) fail-closed 클램프), _replay_exposure_scale에 4번째 opt-in 모드로 배선. evaluation.py에 관측 전용 _fold_realized_risk_parity 진단 추가(report_schema/persist에 fold_realized_risk_parity 필드 배선). contracts/validation/pipeline-config/CLI에 pnl_vol_target_mode='constant_risk' 선택지 확장(기존 3개 모드 및 CLI 실효 기본값은 바이트 동일 보존). 반사실 실측(scratch/test_constant_risk_counterfactual.py): sigma*=0.40 halflife 60d에서 baseline 대비 max_fold_share 0.549->0.373, 4-fold 평균 CAGR 1.13->1.70. /check 과정에서 is_streaming_scale_mode의 committee_kelly_sizing 단독 게이트를 committee_capital AND committee_kelly_sizing으로 교정(committee_kelly_sizing 기본값이 True로 바뀌며 committee_capital=False 요청도 부당하게 non-streaming 경로로 강제되어 골든 테스트에서 잠재해 있던 leverage frontier 버그를 노출시켰던 문제)하고, entry_point 골든 테스트의 MhsRunConfig에 execution_universe_size=30/growth_envelope=conservative를 명시해 CLI 실효 기본값 표류로 인한 골든 불일치를 해소.",
+      "impact": "기존 median_relative/exante_target/growth_budget 3개 모드는 바이트 동일. 신규 constant_risk는 opt-in이며 CLI 실효 기본값은 변경하지 않음(별도 ADR에서 승격 검토). is_streaming_scale_mode 수정은 committee_capital=False 요청의 스트리밍 경로를 복원해 실행 성능을 개선하고 부수적으로 골든 테스트의 latent 버그를 노출/수정함."
+    },
+    {
+      "task_id": "TASK_MHS_BNXUSDT_SOURCE_GAP_AND_BACKFILL",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_BNXUSDT_SOURCE_GAP_AND_BACKFILL",
+      "domain": "data",
+      "title": "MHS 2022 fold 실행 데이터 결측 근본원인 규명 + 18개 심볼 백필 + BNXUSDT 진짜 결측 배제",
+      "why": "fold0(2022)의 RELEVANT_EXECUTION_DATA_GAP이 '2022년엔 원래 상장 종목이 적었다'는 기존 결론으로 설명되는지, 아니면 백필 가능한 수집 결함인지 직접 판정해달라는 요청.",
+      "resolution": "fold0 리플레이를 fork-safe 몽키패치로 직접 캡처해 갭 69건 전부를 심볼/시각 단위로 실측 확인. 18개 심볼(FILUSDT/FTMUSDT/GRTUSDT/KNCUSDT/LRCUSDT/LTCUSDT/OGNUSDT/ONEUSDT/SANDUSDT/SKLUSDT/SOLUSDT/SUSHIUSDT/TRXUSDT/VETUSDT/XLMUSDT/XRPUSDT/ZECUSDT/ZILUSDT)가 정확히 동일한 두 구간(2022-02-26~28, 2022-04-01~02)에서 결측됨을 확인 -- Binance Vision 월간 아카이브 자체가 월 경계에서 이 구간을 누락하고 있었던 것이 원인(로컬 수집기 결함이 아니라 아카이브 소스 결함). 1차 백필 시도에서 no_trades/close_time/ignore 3개 컬럼이 유실되는 결함을 자체 발견해 즉시 백업 원복 후, REST klines 엔드포인트에서 원시 12개 필드 전부를 직접 파싱하는 방식(fetch_full_klines)으로 재작업-- 원본 컬럼/dtype 100% 보존, 기존 행 무변형, 신규 구간 실제 no_trades 값 2402/2402건 채움을 5중 무결성 검사로 직접 검증. 재실행 결과 결측 69건->1건(BNXUSDT만 잔존)으로 실측 확인. BNXUSDT는 REST 실시간 API와 Vision 아카이브 양쪽 모두에서 2022년 4개 구간(04-16~18, 06-08~10, 08-09~13, 2023-01-31~02-22)이 공통 결측임을 교차검증(exchangeInfo onboardDate=2023-02-22, 재상장 계약으로 이전 이력을 거래소가 더 이상 서빙하지 않음, 백필 경로 없음 확정) -- 이미 SLPUSDT 등 7개 심볼에 쓰이던 SOURCE_GAP_EXCLUDED_SYMBOLS 프리즌셋(전체이력 배제, window-scoped 아님)에 편입해 두 실행경로(top-level panel.py, fold path evaluation.py) 양쪽에 일관 적용.",
+      "impact": "실행 데이터 결측 게이트(RELEVANT_EXECUTION_DATA_GAP) 완전 해소(data_integrity_reason_codes=[] 사상 최초), 4개 fold 전부 failures=[] 사상 최초 전체 통과. 기본 설정(growth_extreme+Kelly+breadth60) 재실측: CAGR 342%->318%(BNXUSDT 기여분 상실, 정직한 트레이드오프), MDD -38.4%->-38.9%(거의 불변), Calmar 8.89->8.19. 남은 유일한 미통과 게이트는 FOLD_GROWTH_CONCENTRATION(2025 쏠림, max_fold_share=0.551)로 이번 세션 범위 밖 별개 사안(시장구조 기인, 이전 세션들에서 이미 근본원인 규명됨). uv run ruff check 및 관련 테스트(test_evaluation_trend_sleeve.py) PASS. data/ 디렉토리는 gitignore 대상이라 백필된 parquet 자체는 버전관리 밖."
+    },
+    {
+      "task_id": "TASK_MHS_KELLY_TWO_SIDED_SIZING",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING",
+      "domain": "risk",
+      "title": "MHS 양측 Kelly 사이징 복원 + breadth 60 기본값 승격",
+      "why": "성장 잠재력(CAGR)은 확인됐으니 단점(2025 쏠림 게이트 미통과, MDD -45~54%)을 보완하면서 고점을 유지하는 근본 개선안을 데이터로 탐색해달라는 요청.",
+      "resolution": "src/application/research/mhs/scaling.py: resolved_exposure_cap 단일 소유 함수 신설(request만으로 캡 해석, 데이터 비의존). _committee_kelly_scale에 cap 파라미터 추가(기존 clip(upper=1.0) 하드캡이 과거 ADR_20260816 Kelly 기각의 진짜 원인이었음 -- vol-target 항은 leverage_ceiling까지 갈 수 있는데 Kelly 항만 1.0에 묶여 50/50 블렌드가 순수 디레버리저로 작동). _committee_capital_replay_scale/_replay_exposure_scale에 동일 cap 전파. evaluation.py에 exposure_scale_cap_binding_fraction 관측 필드 추가(top-level+fold 양쪽) -- 캡이 92.5% 날짜에 물려 vol-targeting이 사실상 무효화되고 이것이 2025 쏠림의 기계적 원인임을 확인한 진단의 회귀신호. src/mhs/params.py의 growth_extreme(3.0x) rung을 TEMP에서 정식 등록으로 승격(3m 원장 실측 CAGR 5.17/Calmar 9.54/전 fold valid 근거), REGISTERED_POLICY_THRESHOLDS의 cap_30_roster를 cap_60_roster로 개명. src/mhs/pipeline/config.py CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT=60 신설, MhsRunConfig 기본값 30->60 전환(MhsDiagnosticRequest 자체 기본값은 30 유지). src/cli/commands/research/mhs.py --committee-kelly-sizing help의 허위 사실(과거 Kelly가 CAGR/Calmar를 손해봤다는 서술)을 교정하고 --execution-universe-size 기본값/help 갱신. 실측: 평균 레버리지 통제 비교에서 50/50 양측 Kelly 블렌드가 f=1.5/2.0/2.5 전 수준에서 CAGR/MDD/Calmar/max_fold_share 4축 동시 지배(2025 제외해도 지배, 파라미터 15조합 중 14개 지배), breadth 30->60이 CAGR+17.4%/Sharpe+20.2%/stress-Sharpe+14.8%/MDD 사실상 불변으로 Grinold IR∝IC√N 예측(배율1.25)의 96%를 실측 재현. breadth 100은 CAGR/Sharpe/Calmar가 60보다 하락하나 max_fold_share가 처음 0.5 밑(0.465)으로 내려가는 새 트레이드오프 발견(후속 과제로 분리). BTC 베타헤지는 2024 개선되나 MDD 악화로 반증.",
+      "impact": "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_kelly_two_sided_sizing_contract.json 전체 PASS(spec/lint/mypy/pytest). 사전등록된 3m 원장 실측(대조군/Kelly+growth/Kelly+growth_extreme)은 코드 반영 직후 이어서 실행해 실제 채택 여부를 판정할 예정 -- 이번 sync 시점에는 아직 미실행."
+    },
+    {
       "task_id": "TASK_MHS_LEVERAGE_FRONTIER_SCAN",
       "date": "2026-08-23",
       "adr_id": "ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN",
@@ -959,46 +999,6 @@
       "why": "PASS 2건(v6_growth_sized/v8_sized)의 point CAGR(21.3%/17.1%)이 실질 체감상 부족하다는 사용자 지적. 레버리지를 더 주면 고점이 오를지 실측 필요.",
       "resolution": "5년 MC growth curve 전체 재구성(scratch, 프로덕션 코드 미변경) 결과: v6_growth_sized는 이미 Kelly 정점(2.75x)의 99%+를 1.5x에서 확보(레버리지 소진), v8_sized는 1.0x에서 이미 MDD 초과확률 4.9%(한계5%)로 꼬리위험에 막힘. 드로다운 오버레이 켜는 대안도 반증(2.5x 최적점 growth=0.832 < 현재 1.0x=0.930). diagnose_growth_headroom(growth_sizing.py)을 신설해 v8_sized 리포트(XsBaselineBlendSizedReport.growth_headroom)에 배선, CLI 재실측으로 risk_constrained=true/headroom_ratio=0.0 확정.",
       "impact": "두 PASS 후보 모두 사이징으로 고점/저점 추가 개선 불가 확정. 유일한 다음 레버는 원천 Sharpe를 올리는 breadth(3번째 저상관 다리)이나, carry는 이미 은퇴(2026-07-31)·leg_selection 5후보 비교에서 Donchian이 이미 최우수로 확정되어 가까운 후보 소진 -- 새 신호원 발굴이 필요한 discovery 과제로 넘어감. v6_growth_sized 쪽 동일 진단 배선은 size_xs_alpha_growth_optimal의 frozen 반환타입 확장이 필요해 후속 과제로 분리."
-    },
-    {
-      "task_id": "xs_alpha_reliability_cost_hurdle",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_xs_alpha_reliability_cost_hurdle",
-      "domain": "risk",
-      "title": "XS Alpha 신뢰도 게이트: 무근거 hurdle_rate=0.15 -> 비용배수 기반 허들",
-      "why": "17개 hurdle_rate 호출부 중 11곳은 이미 derive_cost_multiple_hurdle_rate/hurdle_rate=0.0으로 무력화됐으나 xs_alpha 계열 6곳+discovery_reliability_score만 전파 누락으로 무근거 flat 0.15(git 고고학상 근거 문서 소실)를 그대로 사용, v6/v8_sized 등 이미 다른 모든 게이트를 통과한 후보를 부당하게 차단.",
-      "resolution": "reliability.py에 derive_realized_weights_cost_total 신설 + ReliabilityGateConfig.hurdle_cost_multiple=2.0 필드 추가, xs_alpha 6개 호출부(v6/v6_growth_sized/v8/v8_sized/v8_joint/baseline_leg_selection/positioning_v7 경로) 및 discovery_reliability_score를 rolling_admission.py의 기존 검증된 패턴(derive_cost_multiple_hurdle_rate)으로 재배선. CLI 재실측(holdout 봉인)으로 v6_growth_sized(LCB90 7.52%>cost hurdle)와 v8_sized(6.40%>hurdle) 신뢰도 게이트 FAIL->PASS 확정, v8/v8_joint/baseline_leg_selection/positioning_v7은 t_stat 또는 강화된 비용허들로 여전히 FAIL.",
-      "impact": "프로젝트 최초로 XS 알파 후보 2종(v6_growth_sized, v8_sized)이 admission+reliability 게이트를 모두 실측 통과. 나머지 5개 xs_alpha 파일 hurdle_rate 무근거 상수 소비 중단, 11개 기존 호출부와 동일 패턴으로 통일. 회전율 175x/yr인 v8_joint는 오히려 더 엄격한 벽(~28%)에 부딪혀 배포 보류 유지 -- 완화가 아닌 구조적 정합화임을 확인."
-    },
-    {
-      "task_id": "ADR_20260806_XS_ADMISSION_TURNOVER_MAX_RECALIBRATION",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_XS_ADMISSION_TURNOVER_MAX_RECALIBRATION",
-      "domain": "risk",
-      "title": "XS Admission Gate turnover_max 재보정 (150 -> 200, 실증 근거 기반)",
-      "why": "XsAdmissionConfig.turnover_max=150.0가 xs_alpha_baseline_blend_v8_joint의 qualification admission(turnover=175.42x/yr)을 단독으로 차단 -- 다른 게이트(sharpe_floor/beta_abs_max/annual_sub_sharpe/cost_breakeven_min)는 전부 통과, 데이터셋 전체 중 CAGR 1위(41.1%). git log -S로 150.0의 유도 근거를 추적했으나 존재하지 않음(참조된 spec 문서 소실). CostModel도 flat rate라 turnover 증가에 따른 비용 비선형성 근거 없음.",
-      "resolution": "docs/results/*.json 전체 git 히스토리(21개 커밋, 12개 파일, 42개 고유 측정치)를 Spearman 상관분석: 전체 무의미(rho=-0.06~-0.21), 비-turnover 게이트 통과분만 약한 양의 상관(rho=+0.233), 동일 알파(v6) 계열 내부(레버리지만 변화, confound 최소)에서는 rho=+0.546(p=0.005) 유의미 양의 상관 -- turnover가 높을수록 오히려 Sharpe가 좋음. 유일한 고turnover 파국 사례(v3, 216~294x)는 다른 3개 게이트에서도 동시 실패한 confound 케이스(기존 ADR에서 라우팅 버그로 귀속). 사용자 검토 후 200.0 채택(175.4x 후보에 여유, v3 파국구간과 거리 확보). cross_sectional.py의 XsAdmissionConfig.turnover_max 기본값 150.0->200.0 변경, docstring에 실증 근거 인용. 게이트 메커니즘 자체(evaluate_xs_admission, 다른 4개 임계값)는 불변.",
-      "impact": "xs_alpha_baseline_blend_v8_joint qualification admission True로 전환(discovery+qualification 양쪽 통과, v6 이후 두 번째). 다른 admitted 프로파일은 전부 150 미만이라 검증 결과 불변, 블라스트 반경은 이 후보 하나로 격리 확인. 단 신뢰도 게이트(LCB90>=15%)는 별개로 13.21%에서 여전히 미달 -- admission 통과와 실전 배포 가능은 계속 구분됨. 테스트 파일 수정 불필요(기존 테스트 전부 명시적 override이거나 동적 참조)."
-    },
-    {
-      "task_id": "TASK_XS_ALPHA_GROWTH_DIRECTION_TURNOVER_DIAGNOSTIC",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_XS_ALPHA_GROWTH_DIRECTION_TURNOVER_DIAGNOSTIC",
-      "domain": "risk",
-      "title": "XS Alpha Growth Direction - Turnover-Gate Diagnostic Exposure (Sizing/Leverage Lever)",
-      "why": "Rev.3 confirmed exit-side stop-loss parity does not move the winner or reliability (LCB90 stays 3.39%). User asked what other lever could raise asset-growth. Project's own measured history shows leverage/sizing is the only lever that has ever pushed LCB90 close to the 15% hurdle: v8(blend-only) 2.84% -> v8_sized(constrained leverage) 6.40% -> v8_joint(unconstrained joint-searched leverage_scale=3.977) 13.21%, closest ever. v8_joint's sole admission blocker is qualification turnover_max=150 (annualized_turnover=175.4x), which ADR_20260806_xs_alpha_blend_joint_turnover_diagnostic already found has no traceable justification in the repo and blocks the single highest-CAGR profile of 10 measured.",
-      "resolution": "Added qualification_turnover_neutral (evaluate_xs_admission re-run with dataclasses.replace(admission_config, turnover_max=math.inf), mirroring rev.2's reliability_hurdle_neutral pattern) and qualification_worst_fold_turnover (reuses existing compute_turnover_fold_upper_bound, promoted from a one-off dev-script print into the persisted run_xs_alpha_baseline_blend_joint report) as two new optional fields on XsBaselineBlendJointReport. No admission gate changed; report-only, mirrors the hurdle_rate precedent exactly.",
-      "impact": "CLI re-run (holdout sealed) confirms: qualification_turnover_neutral.admitted=True/binding_constraint=null (turnover_max was indeed the sole blocker, every other gate already passes), qualification_worst_fold_turnover=217.53x/yr (worse than the 175.4x average, i.e. even less margin than it looks). Reported alongside the unmodified discovery/qualification MDD (-22.9%/-15.0%), which breaches this project's own GrowthSizingConfig.max_drawdown=0.20 safety convention used elsewhere -- so the evidence is presented both ways, turnover_max recalibration and this leverage point's MDD risk both stay open decisions for the user."
-    },
-    {
-      "task_id": "TASK_XS_ALPHA_BASELINE_LEG_SELECTION_EXIT_FAIRNESS",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_XS_ALPHA_BASELINE_LEG_SELECTION_EXIT_FAIRNESS",
-      "domain": "risk",
-      "title": "XS Alpha Baseline Leg Selection rev.3 - Exit-Side Fairness + Hurdle Decomposition",
-      "why": "Rev.2's 32-candidate comparison ran technical-expert legs with zero intrabar stop-loss while donchian_long_only_v1/funding_signed_directional_v1 always carried a hard-coded ATR x2.0/14 stop, an unfair exit-risk asymmetry; hurdle_rate=0.15 gated on LCB90 was mischaracterized as simply unfounded rather than structurally strict.",
-      "resolution": "Applied the identical frozen ATR x2.0/14-period stop to run_technical_expert_backtest across all 30 non-tournament legs in run_xs_alpha_baseline_leg_selection, added reliability_point_to_lcb90_ratio and reliability_block_size_hit_cap diagnostics (reusing block_size_search_hit_cap), and re-ran the sealed-holdout CLI.",
-      "impact": "donchian_long_only_v1 remains the winner (blended_sharpe=2.2978 unchanged) after exit-risk parity, confirming its edge is genuine, not a stop-loss privilege; reliability still FAILs on LCB90 hurdle (point_cagr 8.73% vs lcb90 3.39%, ratio 2.574x matches project-wide 2.48x-3.11x band) while block_size_search_hit_cap=False confirms LCB90 is not artificially punitive; hurdle_rate decision remains open for the user."
     }
   ]
 }
