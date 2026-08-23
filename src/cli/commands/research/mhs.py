@@ -11,7 +11,11 @@ import logging
 import time
 
 from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
-from src.mhs.params import COMMITTEE_DEFAULT_MEMBER_SET, GROWTH_RISK_ENVELOPES
+from src.mhs.params import (
+    COMMITTEE_DEFAULT_MEMBER_SET,
+    GROWTH_RISK_ENVELOPES,
+    LEVERAGE_FRONTIER_SCAN_MULTIPLES,
+)
 from src.mhs.pipeline.config import CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT
 
 # The application module imports numpy/pandas transitively; it is imported
@@ -21,7 +25,27 @@ from src.mhs.pipeline.config import CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_E
 _logger = logging.getLogger("MhsHorizonDiagnosticCli")
 
 
+def _parse_float_csv(raw: str) -> tuple[float, ...]:
+    values: list[float] = []
+    for token in raw.split(","):
+        try:
+            values.append(float(token.strip()))
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"invalid float value in --leverage-frontier-multiples: {token!r}"
+            ) from None
+    return tuple(values)
+
+
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
+    if getattr(args, "leverage_frontier_scan", False):
+        # Diagnostic-only short-circuit: reads an already-persisted ledger and
+        # returns before any heavy pipeline import; never builds a request.
+        from src.application.research.mhs.leverage_scan import run_leverage_frontier_scan
+
+        run_leverage_frontier_scan(args.growth_envelope, tuple(args.leverage_frontier_multiples))
+        return
+
     import dataclasses
 
     from src.application.research.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
@@ -543,6 +567,30 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "(MDD 0.25, 1x ceiling, byte-identical to the original pre-2026-08-22 "
             "production default). Selects the drawdown budget for the "
             "growth-optimal risk solver and the ex-ante vol-target cap"
+        ),
+    )
+    mhs.add_argument(
+        "--leverage-frontier-scan",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: skip the full diagnostic pipeline and instead scan a wide "
+            "leverage-multiple grid against the registered growth envelope's "
+            "bootstrap ruin/mdd frontier, using the already-persisted "
+            "daily_ledger.parquet from a prior run. Diagnostic-only -- never "
+            "mutates GROWTH_RISK_ENVELOPES or production state; adopting a "
+            "candidate still requires registering a new envelope rung and "
+            "re-running a real 3m replay under the registered adoption protocol"
+        ),
+    )
+    mhs.add_argument(
+        "--leverage-frontier-multiples",
+        type=_parse_float_csv,
+        default=LEVERAGE_FRONTIER_SCAN_MULTIPLES,
+        help=(
+            "Comma-separated candidate leverage multiples for "
+            "--leverage-frontier-scan, e.g. 2.0,2.5,3.0. Defaults to "
+            "LEVERAGE_FRONTIER_SCAN_MULTIPLES (0.25 through 5.0 in 0.25 steps)"
         ),
     )
     mhs.add_argument(
