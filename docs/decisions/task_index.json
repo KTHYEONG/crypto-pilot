@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_LEVERAGE_FRONTIER_SCAN",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN",
+      "domain": "risk",
+      "title": "MHS 레버리지 상한 저비용 탐색 도구 신설 + MDD 오버레이 반증",
+      "why": "노출 상한(leverage_ceiling)이 수동 등록 하이퍼파라미터인데 후보마다 4~6분짜리 전체 3m 리플레이가 필요함. 또한 MDD를 낮추면서 CAGR을 유지/향상하는 레버리지 외 근본 대안이 있는지 데이터로 판정 요청.",
+      "resolution": "src/research/risk/growth_sizing.py에 FrontierScanPoint + scan_leverage_frontier 신설(diagnose_growth_headroom과 동일하게 solve_growth_optimal_risk를 호출하지 않고 부트스트랩 루프를 의도적으로 중복구현 -- plateau 규칙이 음의 성장률 후보의 mdd_breach_prob/ruin_prob를 0으로 가려버리는 것을 실측 확인했기 때문). src/application/research/mhs/leverage_scan.py 신규(_load_pre_oos_reference_returns/run_leverage_frontier_scan, 기존 daily_ledger.parquet 아티팩트만 읽고 전체 파이프라인 재실행 없음, fail-closed). src/cli/commands/research/mhs.py에 --leverage-frontier-scan/--leverage-frontier-multiples opt-in 플래그 추가(신규 서브커맨드 트리 아님, 기존 reduced-CLI-surface 불변식 보존; 플래그 True 시 무거운 파이프라인 임포트 전에 단락). tests/contract/test_request_cli_parity.py의 CLI/계약 1:1 대응 불변식에 신규 플래그 2개를 --output-tier와 동일하게 discard 처리. src/mhs/params.py에 LEVERAGE_FRONTIER_SCAN_MULTIPLES(0.25~5.0) 신설, 프로덕션 COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS(0.25~3.0)와 분리 유지. 실측 병행 진단: growth(2.0x) 원장의 실제 MDD(-41.8%, 2024-02-27)가 단일 급락이 아니라 2023-12~2024-04 4개월짜리 완만한 침식(BTC 2년차 강세장)임을 확인, 실현 드로다운 기반 디리스크 오버레이 10개 조합을 인과적으로 시뮬레이션했으나 단 하나도 baseline을 파레토 지배(CAGR유지/향상 AND MDD감소)하지 못함을 반증(전량 트레이드오프, ADR_20260812 crash_regime_tilt·ADR_20260823 mom3_skew 제거와 동일 패턴) -- 코드 미구현, 문서화만.",
+      "impact": "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_leverage_frontier_scan_contract.json --fast PASS(spec/lint/mypy). 타겟 테스트(test_growth_sizing.py/test_leverage_scan.py/test_mhs.py/test_request_cli_parity.py) 82건 전체 PASS. tests/integration/mhs/test_golden_identity.py 1건 FAIL은 이번 변경 스택 이전(prior ADR_20260822/23) golden fixture drift로 stash 비교를 통해 이번 세션 변경과 무관함을 확인, 별도 후속 수정 필요."
+    },
+    {
       "task_id": "TASK_MHS_GROWTH_EXPOSURE_CEILING",
       "date": "2026-08-23",
       "adr_id": "ADR_20260823_MHS_GROWTH_EXPOSURE_CEILING",
@@ -989,16 +999,6 @@
       "why": "Rev.2's 32-candidate comparison ran technical-expert legs with zero intrabar stop-loss while donchian_long_only_v1/funding_signed_directional_v1 always carried a hard-coded ATR x2.0/14 stop, an unfair exit-risk asymmetry; hurdle_rate=0.15 gated on LCB90 was mischaracterized as simply unfounded rather than structurally strict.",
       "resolution": "Applied the identical frozen ATR x2.0/14-period stop to run_technical_expert_backtest across all 30 non-tournament legs in run_xs_alpha_baseline_leg_selection, added reliability_point_to_lcb90_ratio and reliability_block_size_hit_cap diagnostics (reusing block_size_search_hit_cap), and re-ran the sealed-holdout CLI.",
       "impact": "donchian_long_only_v1 remains the winner (blended_sharpe=2.2978 unchanged) after exit-risk parity, confirming its edge is genuine, not a stop-loss privilege; reliability still FAILs on LCB90 hurdle (point_cagr 8.73% vs lcb90 3.39%, ratio 2.574x matches project-wide 2.48x-3.11x band) while block_size_search_hit_cap=False confirms LCB90 is not artificially punitive; hurdle_rate decision remains open for the user."
-    },
-    {
-      "task_id": "xs_alpha_baseline_leg_selection_rev2",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_xs_alpha_baseline_leg_selection_rev2",
-      "domain": "risk",
-      "title": "XS Alpha 베이스라인 레그 선택 rev.2: 32개 후보 확장 + hurdle_rate 무근거값 진단 노출",
-      "why": "rev.1(5개 후보) 실측 검토 중 사용자가 3가지 후속의문 제기: (1) baseline이 long-only인데 futures short 미활용 아닌지, (2) t-stat/hurdle 기준이 억지로 끼워맞춰진 것 아닌지(자산증식·신뢰성 목표와 상충 우려), (3) 5개는 비교 표본이 너무 적으니 30개 이상 필요. 조사 결과 (1)(3)은 trend_screen_catalog.py에 이미 구현된 30-identity(15전략x LONG/SHORT) 카탈로그로 해소 가능함을 확인(technical_donchian_breakout_short_v1 포함, 신규 시그널 불필요). (2)는 예상보다 구체적: 실측 FAIL의 binding factor는 t_stat(2.081, 통과)이 아니라 ReliabilityGateConfig.hurdle_rate=0.15였고, 이 값은 TASK_ROLLING_ADMISSION_GATE_RECALIBRATION(2026-08-02)이 이미 '무근거 고정값'으로 판정해 코드베이스 11개 호출부에서 dataclasses.replace(hurdle_rate=0.0) 또는 derive_cost_multiple_hurdle_rate로 무력화했으나 xs_alpha 계열 6곳(v6/v8/v8_sized/v8_joint/xs_alpha_growth_sizing/xs_trend_screen/discovery_reliability_score)만 그 수정이 누락된 상태였음(2026-08-05 배선이 2026-08-02 재보정보다 늦었음에도 반영 안 됨 -- 의도적 재검증 아닌 propagation 누락).",
-      "resolution": "_DEFAULT_CANDIDATE_ORDER를 TOURNAMENT_RETURN_SOURCES(5)와 TREND_SCREEN_CANDIDATES(30, 중복3 제외)의 합집합 32개로 확장(import-time 결정론적 구성, donchian_long_only_v1 최우선 유지). run_xs_alpha_baseline_leg_selection 디스패치 루프에 TOURNAMENT 미포함 후보는 run_technical_expert_backtest로 실행하는 분기 추가. XsBaselineLegSelectionReport에 reliability_hurdle_neutral(hurdle_rate=0.0 병기, 실제 admitted/verdict 판정에는 영향 없는 순수 진단 필드) 신설 -- turnover_max 진단 스펙과 동일 선례로 게이트 자체는 미변경. CLI 실측(홀드아웃 봉인): 32개 중에서도 donchian_long_only_v1이 blended_sharpe=2.298로 여전히 1위(2위 bb_squeeze_breakout=2.262, 순수 숏 donchian은 1.304로 하위권) -- '더 나은 대안' 가설 재반증, long-only 자체는 문제 아니었음. 반면 hurdle 진단은 결정적: lcb90=3.39%/t_stat=2.081 동일 수치에서 hurdle_rate=0.15→FAIL, hurdle_rate=0.0→PASS로 판정이 뒤집힘, 로그로 실증.",
-      "impact": "docs/results/xs_alpha_baseline_leg_selection.json 갱신(32개 후보 diagnostics + reliability_hurdle_neutral 병기). run_xs_alpha_baseline_blend/_sized/_joint 등 5개 다른 xs_alpha hurdle_rate 호출부와 XsAdmissionConfig/production 게이트는 전부 무변경 -- 이번 스펙은 진단만 노출, 게이트 완화는 안 함. 후속 결정 필요(사용자 몫): hurdle_rate=0.0을 나머지 5곳에 전파할지(그러면 xs_alpha 전체에 절대수익 하한이 sharpe_floor/t_stat_floor/mdd_floor만 남고 완전히 사라짐) 또는 derive_cost_multiple_hurdle_rate 같은 원칙적 값으로 대체할지."
     }
   ]
 }
