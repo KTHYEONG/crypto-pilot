@@ -156,6 +156,15 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
         horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
         leverage_ceiling=1.0,
     ),
+    "growth_moderate": GrowthRiskEnvelope(
+        name="growth_moderate",
+        max_drawdown=1.0,
+        max_drawdown_prob=1.0,
+        ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+        leverage_ceiling=1.5,
+    ),
     "growth": GrowthRiskEnvelope(
         name="growth",
         max_drawdown=1.0,

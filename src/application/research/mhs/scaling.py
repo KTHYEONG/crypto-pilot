@@ -323,18 +323,18 @@ def _envelope_exposure_cap(
     target_gross: float | None,
     reference_daily_returns: pd.Series,
 ) -> float:
-    """Exposure cap derived from the registered drawdown budget.
+    """Verification-first, policy-constant exposure cap.
 
-    Runs the registered bootstrap frontier on ``reference_daily_returns``
-    itself (the actual strategy P&L the cap will be applied to, never a
-    synthetic stand-in) with ``reference_risk = std(ddof=1)`` and returns
-    ``max(1.0, selected_risk / reference_risk)`` -- the exposure multiple the
-    envelope's ``P(MDD > max_drawdown) <= max_drawdown_prob`` budget supports.
-    Raises ``ValueError`` (fail-closed) when the series has fewer than 2
-    finite observations, a zero/non-finite std, the solver is infeasible at
-    that reference risk, or ``leverage_ceiling`` exceeds the verified
-    frontier -- a ceiling beyond the bootstrap ruin frontier, or one that
-    cannot be verified against real data, must never be wired.
+    Verifies the envelope's registered ``leverage_ceiling`` against the
+    bootstrap ruin frontier computed on ``reference_daily_returns`` itself
+    (the actual strategy P&L the cap will be applied to, never a synthetic
+    stand-in) with ``reference_risk = std(ddof=1)``, then returns THE
+    REGISTERED POLICY CONSTANT -- the cap is never refit from the returns it
+    is applied to (I1). Raises ``ValueError`` (fail-closed) when the series
+    has fewer than 2 finite observations, a zero/non-finite std, the solver
+    is infeasible at that reference risk, or ``leverage_ceiling`` exceeds
+    the verified frontier -- a ceiling beyond the bootstrap ruin frontier,
+    or one that cannot be verified against real data, must never be wired.
     (``target_gross`` stays in the signature for call-site compatibility; the
     cap is budget-derived and no longer scales with nominal gross.)
     """
@@ -377,7 +377,28 @@ def _envelope_exposure_cap(
             f"but the bootstrap ruin frontier on reference_daily_returns allows only "
             f"{frontier_multiple:.6f}x reference risk; ceiling must not exceed the frontier"
         )
-    return max(1.0, float(frontier_multiple))
+    return float(envelope.leverage_ceiling)
+
+
+def _assert_envelope_leverage_ceiling_verified(
+    envelope: GrowthRiskEnvelope,
+    reference_daily_returns: pd.Series,
+    oos_start: pd.Timestamp = COMMITTEE_OOS_START,
+) -> None:
+    """Leak-free once-per-run audit of the registered leverage ceiling (I3).
+
+    Mirrors ``_growth_budget_target_vol``'s slicing discipline: the bootstrap
+    verification runs strictly on rows with ``index < oos_start``, so it never
+    sees evaluation data. A fold-local reference window legitimately contains
+    no pre-OOS rows -- fewer than PNL_VOL_TARGET_BURN_IN_DAYS finite train
+    rows returns without invoking the solver (I6). Otherwise delegates to
+    ``_envelope_exposure_cap`` purely for verification and discards the
+    result; its fail-closed ``ValueError`` propagates unchanged (I4).
+    """
+    train = reference_daily_returns.loc[reference_daily_returns.index < oos_start].dropna()
+    if len(train) < PNL_VOL_TARGET_BURN_IN_DAYS:
+        return None
+    _envelope_exposure_cap(envelope, None, train)
 
 
 def _replay_exposure_scale(
@@ -413,7 +434,7 @@ def _replay_exposure_scale(
         else:
             target_vol = _resolve_target_vol(envelope)
             cap = (
-                _envelope_exposure_cap(envelope, request.committee_target_gross, reference_daily_returns)
+                float(envelope.leverage_ceiling)
                 if request.exposure_scale_two_sided else 1.0
             )
             scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=cap)
@@ -421,7 +442,7 @@ def _replay_exposure_scale(
         envelope = _resolved_growth_envelope(request)
         target_vol = _resolve_target_vol(envelope)
         cap = (
-            _envelope_exposure_cap(envelope, request.committee_target_gross, reference_daily_returns)
+            float(envelope.leverage_ceiling)
             if request.exposure_scale_two_sided else 1.0
         )
         scale = _exante_vol_target_scale(reference_daily_returns, target_vol=target_vol, cap=cap)

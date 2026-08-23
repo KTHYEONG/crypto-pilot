@@ -89,7 +89,7 @@ class MhsRunConfig:
     # Gates
     execution_coverage_gate: bool = False
     fill_mark_parity_gate: bool = True
-    exposure_scale_two_sided: bool = False
+    exposure_scale_two_sided: bool = True  # was False; CLI effective default flips like committee_capital/growth_envelope/pnl_vol_target_mode
     ram_guard: bool = True
 
     # Growth envelope & member attribution
@@ -125,12 +125,17 @@ class MhsRunConfig:
         committee_evidence_weighting = (
             committee_capital and not args.no_committee_evidence_weighting
         )
+        # two-sided scaling is request-invalid outside exante_target/growth_budget;
+        # an explicit median_relative override must opt the default back out.
+        if args.pnl_vol_target_mode not in ("exante_target", "growth_budget"):
+            args.no_exposure_scale_two_sided = True
 
         return cls(
             start=args.start,
             end=args.end,
             mark_mode=args.mark_mode,
             execution_timeframe=args.execution_timeframe,
+            execution_universe_size=args.execution_universe_size,
             max_rss_bytes=args.max_rss_bytes,
             log_run=not args.no_log_run,
             touch_diagnostic=args.touch_diagnostic,
@@ -150,7 +155,7 @@ class MhsRunConfig:
             committee_evidence_weighting=committee_evidence_weighting,
             execution_coverage_gate=args.execution_coverage_gate,
             fill_mark_parity_gate=not args.no_fill_mark_parity_gate,
-            exposure_scale_two_sided=args.exposure_scale_two_sided,
+            exposure_scale_two_sided=not args.no_exposure_scale_two_sided,
             ram_guard=not args.no_ram_guard,
             discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
             discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
