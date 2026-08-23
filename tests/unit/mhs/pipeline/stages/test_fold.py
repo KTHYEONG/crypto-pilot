@@ -140,7 +140,10 @@ def test_run_folds_resolves_boundary_growth_budget_vols(monkeypatch: pytest.Monk
         }
 
     def _fake_run_post_book_concurrently(*args: object, **kwargs: object):
-        captured["forwarded"] = kwargs.get("fold_growth_budget_target_vol", args[-1])
+        # 위치 인자 순서: ..., fold_committee_weights, fold_growth_budget_target_vol,
+        # exposure_warmup_returns (I-WARM 워밍업 Series가 마지막).
+        captured["forwarded"] = kwargs.get("fold_growth_budget_target_vol", args[-2])
+        captured["warmup"] = kwargs.get("exposure_warmup_returns", args[-1])
         return (None, None, {}, {}, [], None)
 
     class _FoldStub:
