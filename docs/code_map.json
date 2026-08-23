@@ -49,7 +49,8 @@
       "tests/unit/mhs/test_compounding_growth.py",
       "tests/unit/mhs/test_discovery.py",
       "tests/unit/application/research/mhs/test_scaling.py"
-    ]
+    ],
+    "architecture": "docs/specs/mhs_constant_risk_deployment.md"
   },
   "src/application/research/mhs/stage_services.py": {
     "testing": [
