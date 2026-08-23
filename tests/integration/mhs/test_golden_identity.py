@@ -219,6 +219,10 @@ def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matr
         committee_capital=False, committee_regime_adaptive_tranche=False,
         funding_carry_sleeve=False, committee_target_gross=None,
         pnl_vol_target_mode="median_relative",
+        # MhsRunConfig의 CLI 실효 기본값(60/growth_extreme)이 아니라 golden이 잡힌
+        # MhsDiagnosticRequest의 동결 기본값(30/conservative)과 맞춰야 bit-exact parity가 성립한다.
+        execution_universe_size=30,
+        growth_envelope="conservative",
     )
     report = run_mhs_diagnostic(config)
     golden_digest, golden_summary = matrix_golden

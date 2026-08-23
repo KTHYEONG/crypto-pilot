@@ -408,13 +408,54 @@ def test_research_go_data_integrity_reason_empty_when_clean(monkeypatch) -> None
 def test_registered_policy_thresholds_contract() -> None:
     """SCENARIO_MHS_POLICY_THRESHOLDS_REGISTERED_VALUES: the two named policy
     gates exist in source contracts and are registered at their reviewed
-    2026-08-17 values (docs/specs/mhs_research_go_policy_registration.md) --
-    cap_30_roster mirrors the frozen execution_universe_size design cap
-    (attestation only), primary_annual_return is enforced per anchored fold."""
+    values -- cap_60_roster mirrors the registered execution_universe_size
+    roster entry cap (attestation only), primary_annual_return is enforced per
+    anchored fold."""
     from src.mhs.types import REGISTERED_POLICY_THRESHOLDS, SEARCH_TRIALS_ATTEMPTED
 
     assert REGISTERED_POLICY_THRESHOLDS == {
-        "cap_30_roster": 30.0, "primary_annual_return": 0.05,
+        "cap_60_roster": 60.0, "primary_annual_return": 0.05,
     }
     assert isinstance(SEARCH_TRIALS_ATTEMPTED, int)
     assert SEARCH_TRIALS_ATTEMPTED >= 1
+
+
+# SCENARIO_MHS_KELLY_TWO_SIDED_08
+def test_scenario_mhs_kelly_two_sided_08_go_reason_iff_none_registration(
+    monkeypatch,
+) -> None:
+    """After the cap_60_roster rename the source contract still registers both
+    gates at non-None values, and ``_mhs_research_go`` emits
+    GO_REASON_UNSPECIFIED_POLICY iff some registered value is None."""
+    from src.mhs.types import REGISTERED_POLICY_THRESHOLDS as SOURCE_THRESHOLDS
+
+    assert SOURCE_THRESHOLDS == {
+        "cap_60_roster": 60.0, "primary_annual_return": 0.05,
+    }
+
+    idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+    target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+    signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+    px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+    replay = strategy_aware_execution_replay(
+        target, signal_at, px, px, px, px,
+        pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+        "OHLCV_STRICT_PROXY", ExecutionSpec(),
+    )
+    passing = _passing_fold_report(replay)
+
+    monkeypatch.setattr(
+        _research_go, "REGISTERED_POLICY_THRESHOLDS",
+        {"cap_60_roster": 60.0, "primary_annual_return": 0.05},
+    )
+    registered = _research_go._mhs_research_go((passing,))
+    assert registered.eligible is True
+    assert registered.reason_codes == ()
+
+    monkeypatch.setattr(
+        _research_go, "REGISTERED_POLICY_THRESHOLDS",
+        {"cap_60_roster": 60.0, "primary_annual_return": None},
+    )
+    missing = _research_go._mhs_research_go((passing,))
+    assert missing.eligible is False
+    assert ev.GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes

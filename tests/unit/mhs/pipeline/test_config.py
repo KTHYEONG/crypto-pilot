@@ -85,10 +85,11 @@ def test_from_namespace_fold_safe_horizon_flag_maps_to_selection_field():
 
 # SCENARIO_GROWTH_ENVELOPE_GOLDEN_IDENTITY_PRESERVED
 def test_config_defaults_growth_envelope_and_attribution():
-    """growth_envelope defaults to growth (main logic, 2026-08-22); attribution stays False."""
+    """growth_envelope defaults to growth_extreme (main logic, 2026-08-23,
+    ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING); attribution stays False."""
     config = MhsRunConfig()
     d = dataclasses.asdict(config)
-    assert d["growth_envelope"] == "growth"
+    assert d["growth_envelope"] == "growth_extreme"
     assert d["committee_member_attribution"] is False
 
 
@@ -177,4 +178,42 @@ def test_scenario_mhs_exposure_ceiling_06_two_sided_default_flipped_universe_wir
     assert MhsRunConfig.from_namespace(off).exposure_scale_two_sided is False
     wide = build_root_parser().parse_args([*argv, "--execution-universe-size", "60"])
     assert MhsRunConfig.from_namespace(wide).execution_universe_size == 60
-    assert MhsRunConfig.from_namespace(args).execution_universe_size == 30
+    assert MhsRunConfig.from_namespace(args).execution_universe_size == 60
+
+
+# SCENARIO_MHS_KELLY_TWO_SIDED_06
+def test_scenario_mhs_kelly_two_sided_06_universe_default_promotion() -> None:
+    """CLI effective breadth default moves to 60 at the MhsRunConfig single
+    owner only; the contract object MhsDiagnosticRequest keeps its frozen 30
+    default (bit-exact fixtures), and an explicit --execution-universe-size
+    still overrides."""
+    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.cli.main import build_root_parser
+    from src.mhs.pipeline.config import CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
+
+    assert MhsRunConfig().execution_universe_size == 60
+    assert MhsRunConfig().execution_universe_size == CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
+
+    argv = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    args = build_root_parser().parse_args(argv)
+    assert args.execution_universe_size == 60
+    narrow = build_root_parser().parse_args([*argv, "--execution-universe-size", "30"])
+    assert narrow.execution_universe_size == 30
+    assert MhsDiagnosticRequest().execution_universe_size == 30
+
+
+# SCENARIO_MHS_CONSTANT_RISK_CLI_AND_CONFIG_PARITY
+def test_constant_risk_cli_and_config_parity():
+    """--pnl-vol-target-mode constant_risk parses through and keeps the
+    two-sided scaling default ON; the no-arg effective default stays
+    growth_budget (A2: opt-in mode, defaults unchanged)."""
+    from src.cli.main import build_root_parser
+
+    argv = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    args = build_root_parser().parse_args(
+        [*argv, "--pnl-vol-target-mode", "constant_risk"],
+    )
+    config = MhsRunConfig.from_namespace(args)
+    assert config.pnl_vol_target_mode == "constant_risk"
+    assert config.exposure_scale_two_sided is True
+    assert MhsRunConfig().pnl_vol_target_mode == "growth_budget"
