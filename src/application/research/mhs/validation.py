@@ -127,9 +127,12 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
         raise ValueError("fill_mark_parity_gate must be a bool")
     if not isinstance(request.exposure_scale_two_sided, bool):
         raise ValueError("exposure_scale_two_sided must be a bool")
-    if request.exposure_scale_two_sided and request.pnl_vol_target_mode not in ("exante_target", "growth_budget"):
+    if request.exposure_scale_two_sided and request.pnl_vol_target_mode not in (
+        "exante_target", "growth_budget", "constant_risk",
+    ):
         raise ValueError(
-            "exposure_scale_two_sided requires pnl_vol_target_mode='exante_target' or 'growth_budget'"
+            "exposure_scale_two_sided requires pnl_vol_target_mode='exante_target', "
+            "'growth_budget', or 'constant_risk'"
         )
     if not isinstance(request.ram_guard, bool):
         raise ValueError("ram_guard must be a bool")
@@ -145,7 +148,8 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
     if request.trend_sleeve_gross > 0.0 and not request.trend_sleeve:
         raise ValueError("trend_sleeve_gross requires trend_sleeve=True")
     _validate_field_choices(
-        request, "pnl_vol_target_mode", ("median_relative", "exante_target", "growth_budget"),
+        request, "pnl_vol_target_mode",
+        ("median_relative", "exante_target", "growth_budget", "constant_risk"),
     )
     _validate_field_choices(
         request, "committee_member_set", ("risk_premia", "flow_momentum"),
