@@ -48,7 +48,9 @@ def test_growth_envelope_conservative_is_byte_identical() -> None:
     assert conservative.horizon_years == COMMITTEE_GROWTH_HORIZON_YEARS
     assert conservative.leverage_ceiling == 1.0
     assert GROWTH_ENVELOPE_DEFAULT == "conservative"
-    assert sorted(GROWTH_RISK_ENVELOPES) == ["balanced", "conservative", "growth"]
+    assert sorted(GROWTH_RISK_ENVELOPES) == [
+        "balanced", "conservative", "growth", "growth_moderate",
+    ]
     for env in GROWTH_RISK_ENVELOPES.values():
         assert env.ruin_fraction == COMMITTEE_GROWTH_RUIN_FRACTION
         assert env.max_ruin_prob == COMMITTEE_GROWTH_MAX_RUIN_PROB
@@ -78,3 +80,22 @@ def test_growth_envelope_fail_closed_bounds() -> None:
     assert env.leverage_ceiling == 2.0
     with pytest.raises(AttributeError):
         env.max_drawdown = 0.30  # type: ignore[misc]
+
+
+# SCENARIO_MHS_EXPOSURE_CEILING_05
+def test_scenario_mhs_exposure_ceiling_05_growth_moderate_rung_matches_growth() -> None:
+    moderate = GROWTH_RISK_ENVELOPES["growth_moderate"]
+    growth = GROWTH_RISK_ENVELOPES["growth"]
+    assert sorted(GROWTH_RISK_ENVELOPES) == [
+        "balanced", "conservative", "growth", "growth_moderate",
+    ]
+    assert moderate.leverage_ceiling == 1.5
+    assert moderate.max_drawdown == growth.max_drawdown
+    assert moderate.max_drawdown_prob == growth.max_drawdown_prob
+    assert moderate.ruin_fraction == growth.ruin_fraction
+    assert moderate.max_ruin_prob == growth.max_ruin_prob
+    assert moderate.horizon_years == growth.horizon_years
+    for envelope in GROWTH_RISK_ENVELOPES.values():
+        assert envelope.ruin_fraction == COMMITTEE_GROWTH_RUIN_FRACTION
+        assert envelope.max_ruin_prob == COMMITTEE_GROWTH_MAX_RUIN_PROB
+    assert GROWTH_ENVELOPE_DEFAULT == "conservative"

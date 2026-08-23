@@ -101,7 +101,11 @@ def test_shard_constants_are_fixed_bounds() -> None:
 class TestFillMarkParityRunHistoryRecord:
     """SCENARIO_MHS_FILL_MARK_PARITY_06: fill_mark_parity in run history record."""
 
-    def test_census_persisted_in_record(self) -> None:
+    def test_scenario_mhs_exposure_ceiling_07_census_persisted_in_record(self) -> None:
+        """SCENARIO_MHS_FILL_MARK_PARITY_06 / SCENARIO_MHS_EXPOSURE_CEILING_07:
+        the run-history flags payload carries exposure_scale_two_sided and its
+        value matches the fixture request (MhsDiagnosticRequest() default stays
+        False at the contract layer, I5)."""
         from src.mhs.evidence import DeploymentReadinessResult
 
         from src.application.research.mhs.evaluation import (
