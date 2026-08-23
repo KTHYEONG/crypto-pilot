@@ -265,5 +265,8 @@
   "src/mhs/calibration.py": {
     "architecture": "docs/specs/mhs_calibrated_evidence.md",
     "testing": "tests/unit/mhs/test_calibration.py"
+  },
+  "src/mhs/pipeline/stages/fold.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_fold.py"
   }
 }
