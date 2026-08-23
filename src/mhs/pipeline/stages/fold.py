@@ -76,11 +76,6 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         and ctx.blend_report is not None
         and ctx.blend_report.pre_vol_target_reference is not None
     ):
-        _train_ends = {"top_level": COMMITTEE_OOS_START}
-        _train_ends.update({
-            f"fold_{_i}": _f.train_end
-            for _i, _f in enumerate(phase_1_anchored_purged_folds())
-        })
         # I2/I3/I4: each boundary's target vol is fit once here, on reference
         # rows strictly before that boundary's train_end, and only the small
         # float mapping crosses into the fork workers.
@@ -88,13 +83,27 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             ctx.blend_report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change()
         )
         if ctx.config.pnl_vol_target_mode == "constant_risk":
-            _boundary_target_vols = _scaling._constant_risk_target_vol_by_boundary(_reference_daily_returns, _research_go._resolved_growth_envelope(ctx.config), _train_ends)
+            # I-SINGLE-TARGET-VOL: blend가 배치하는 것은 top-level 경계에서 한 번
+            # 해석된 단일 고정 target_vol이며, 모든 fold도 그 동일 값을 검증한다.
+            _top_level_target_vol = _scaling._constant_risk_target_vol(
+                _reference_daily_returns, _research_go._resolved_growth_envelope(ctx.config),
+            )
+            ctx._fold_growth_budget_target_vol = dict.fromkeys(
+                range(len(phase_1_anchored_purged_folds())), _top_level_target_vol,
+            )
         else:
-            _boundary_target_vols = _scaling._growth_budget_target_vol_by_boundary(_reference_daily_returns, _research_go._resolved_growth_envelope(ctx.config), _train_ends)
-        ctx._fold_growth_budget_target_vol = {
-            _i: _boundary_target_vols[f"fold_{_i}"]
-            for _i in range(len(phase_1_anchored_purged_folds()))
-        }
+            _train_ends = {"top_level": COMMITTEE_OOS_START}
+            _train_ends.update({
+                f"fold_{_i}": _f.train_end
+                for _i, _f in enumerate(phase_1_anchored_purged_folds())
+            })
+            _boundary_target_vols = _scaling._growth_budget_target_vol_by_boundary(
+                _reference_daily_returns, _research_go._resolved_growth_envelope(ctx.config), _train_ends,
+            )
+            ctx._fold_growth_budget_target_vol = {
+                _i: _boundary_target_vols[f"fold_{_i}"]
+                for _i in range(len(phase_1_anchored_purged_folds()))
+            }
         ctx._fold_exposure_warmup_returns = _reference_daily_returns
     (
         ctx.bootstrap_ci, ctx.placebo_percentile, ctx.participation, ctx.termination_counts,
