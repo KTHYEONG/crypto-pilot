@@ -10,6 +10,7 @@ from src.application.research.mhs.contracts import MhsDiagnosticRequest
 from src.application.research.mhs import scaling
 from src.common.errors import DataIntegrityError
 from src.mhs.params import (
+    COMMITTEE_OOS_START,
     COMMITTEE_TARGET_GROSS,
     GROWTH_RISK_ENVELOPES,
     PNL_TARGET_ANNUAL_VOL,
@@ -295,3 +296,422 @@ def test_scenario_mhs_exposure_ceiling_04_replay_two_sided_uses_policy_ceiling(
     assert 1.0 < scaled.max() <= 2.0 + 1e-12
     assert unscaled.max() <= 1.0 + 1e-12
     assert scaled.mean() > unscaled.mean()
+
+
+# SCENARIO_MHS_KELLY_TWO_SIDED_01
+def test_scenario_mhs_kelly_two_sided_01_resolved_cap_policy_matrix() -> None:
+    """resolved_exposure_cap is the single data-independent cap owner (I1/I2):
+    two_sided=False or median_relative -> 1.0, conservative exante ->
+    PNL_VOL_TARGET_MAX_SCALE, otherwise the envelope's leverage_ceiling."""
+    from src.mhs.params import PNL_VOL_TARGET_MAX_SCALE
+
+    cases: list[tuple[dict, float]] = [
+        (
+            {
+                "exposure_scale_two_sided": False,
+                "pnl_vol_target_mode": "growth_budget",
+                "growth_envelope": "growth",
+            },
+            1.0,
+        ),
+        (
+            {
+                "exposure_scale_two_sided": True,
+                "pnl_vol_target_mode": "exante_target",
+                "growth_envelope": "conservative",
+            },
+            float(PNL_VOL_TARGET_MAX_SCALE),
+        ),
+        (
+            {
+                "exposure_scale_two_sided": True,
+                "pnl_vol_target_mode": "growth_budget",
+                "growth_envelope": "growth",
+            },
+            2.0,
+        ),
+        (
+            {
+                "exposure_scale_two_sided": True,
+                "pnl_vol_target_mode": "growth_budget",
+                "growth_envelope": "growth_extreme",
+            },
+            3.0,
+        ),
+        (
+            {
+                "exposure_scale_two_sided": True,
+                "pnl_vol_target_mode": "growth_budget",
+                "growth_envelope": "growth_moderate",
+            },
+            1.5,
+        ),
+    ]
+    for kwargs, expected in cases:
+        assert scaling.resolved_exposure_cap(MhsDiagnosticRequest(**kwargs)) == expected
+    # The (two_sided=True, median_relative) combination is rejected by request
+    # validation; resolved_exposure_cap still resolves it to 1.0 defensively.
+    median_req = MhsDiagnosticRequest(pnl_vol_target_mode="median_relative")
+    object.__setattr__(median_req, "exposure_scale_two_sided", True)
+    assert scaling.resolved_exposure_cap(median_req) == 1.0
+
+
+_KELLY_DRIFT_RETURNS = pd.Series(
+    # Strong positive drift so the raw Kelly LCB ratio exceeds every tested cap.
+    np.random.default_rng(20260823).normal(0.02, 0.005, 400),
+    index=pd.date_range("2021-01-01", periods=400, freq="D", tz="UTC"),
+)
+
+
+def _raw_kelly_ratio(r: pd.Series) -> pd.Series:
+    from src.mhs.params import PNL_VOL_TARGET_WINDOW_DAYS
+
+    min_periods = max(5, PNL_VOL_TARGET_WINDOW_DAYS // 2)
+    trailing_mean = r.rolling(PNL_VOL_TARGET_WINDOW_DAYS, min_periods=min_periods).mean().shift(1)
+    trailing_std = r.rolling(PNL_VOL_TARGET_WINDOW_DAYS, min_periods=min_periods).std().shift(1)
+    trailing_n = r.rolling(PNL_VOL_TARGET_WINDOW_DAYS, min_periods=min_periods).count().shift(1)
+    se = trailing_std.div(np.sqrt(trailing_n))
+    var = trailing_std.pow(2)
+    return 0.25 * (trailing_mean - 1.0 * se).div(var.where(var > 0))
+
+
+# SCENARIO_MHS_KELLY_TWO_SIDED_02
+def test_scenario_mhs_kelly_two_sided_02_kelly_cap_param_and_guard() -> None:
+    from src.mhs.params import PNL_VOL_TARGET_SCALE_FLOOR
+
+    r = _KELLY_DRIFT_RETURNS
+    raw = _raw_kelly_ratio(r)
+    legacy = scaling._committee_kelly_scale(r)
+    assert legacy.max() <= 1.0 + 1e-12
+    pd.testing.assert_series_equal(
+        legacy, raw.clip(lower=PNL_VOL_TARGET_SCALE_FLOOR, upper=1.0).fillna(1.0),
+        check_exact=True,
+    )
+    widened = scaling._committee_kelly_scale(r, cap=3.0)
+    assert widened.max() > 1.0
+    assert widened.max() <= 3.0 + 1e-12
+    assert widened.mean() > legacy.mean()
+    with pytest.raises(ValueError, match=r"cap must be >= 1.0"):
+        scaling._committee_kelly_scale(r, cap=0.5)
+
+
+# SCENARIO_MHS_KELLY_TWO_SIDED_03
+def test_scenario_mhs_kelly_two_sided_03_replay_threads_cap_through_blend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(20260824)
+    idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.002, 0.01, len(idx)), index=idx)
+    req = MhsDiagnosticRequest(
+        pnl_vol_target_mode="growth_budget",
+        growth_envelope="growth_extreme",
+        exposure_scale_two_sided=True,
+        committee_capital=True,
+        committee_kelly_sizing=True,
+    )
+    threaded = scaling._replay_exposure_scale(ref, req)
+    assert threaded.max() <= 3.0 + 1e-12
+
+    real_kelly = scaling._committee_kelly_scale
+
+    def _legacy_capped(*args: object, **kwargs: object) -> pd.Series:
+        kwargs.pop("cap", None)
+        return real_kelly(*args, cap=1.0)
+
+    monkeypatch.setattr(scaling, "_committee_kelly_scale", _legacy_capped)
+    de_threaded = scaling._replay_exposure_scale(ref, req)
+    monkeypatch.undo()
+    assert threaded.mean() > de_threaded.mean()
+
+    no_kelly_req = MhsDiagnosticRequest(
+        pnl_vol_target_mode="growth_budget",
+        growth_envelope="growth_extreme",
+        exposure_scale_two_sided=True,
+        committee_capital=True,
+        committee_kelly_sizing=False,
+    )
+    expected_no_kelly = scaling._exante_vol_target_scale(
+        ref,
+        target_vol=scaling._growth_budget_target_vol(
+            ref, envelope=GROWTH_RISK_ENVELOPES["growth_extreme"],
+        ),
+        cap=3.0,
+    )
+    pd.testing.assert_series_equal(
+        scaling._replay_exposure_scale(ref, no_kelly_req), expected_no_kelly,
+        check_exact=True,
+    )
+
+
+# SCENARIO_MHS_KELLY_TWO_SIDED_04
+@pytest.mark.parametrize("mode", ["median_relative", "exante_target", "growth_budget"])
+@pytest.mark.parametrize("envelope", ["conservative", "growth"])
+def test_scenario_mhs_kelly_two_sided_04_legacy_paths_byte_identical(
+    mode: str, envelope: str,
+) -> None:
+    rng = np.random.default_rng(42)
+    idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0001, 0.01, len(idx)), index=idx)
+    request = MhsDiagnosticRequest(
+        pnl_vol_target_mode=mode,
+        growth_envelope=envelope,
+        exposure_scale_two_sided=False,
+        committee_capital=False,
+        committee_kelly_sizing=False,
+    )
+    result = scaling._replay_exposure_scale(ref, request)
+    assert result.max() <= 1.0 + 1e-12
+    if mode == "median_relative":
+        primitive = scaling._pnl_vol_target_scale(ref)
+    elif mode == "exante_target" and envelope == "conservative":
+        primitive = scaling._exante_vol_target_scale(ref, cap=1.0)
+    else:
+        primitive = scaling._exante_vol_target_scale(
+            ref,
+            target_vol=scaling._growth_budget_target_vol(
+                ref, envelope=GROWTH_RISK_ENVELOPES[envelope],
+            ),
+            cap=1.0,
+        )
+    expected = scaling._committee_capital_replay_scale(primitive, ref, False, False, cap=1.0)
+    pd.testing.assert_series_equal(result, expected, check_exact=True)
+
+
+# SCENARIO_MHS_CONSTANT_RISK_SCALE_EQUALIZES_REALIZED_VOL
+def test_constant_risk_scale_equalizes_realized_vol() -> None:
+    # halflife=150d(CONSTANT_RISK_EWMA_HALFLIFE_DAYS)이 완전히 수렴하려면
+    # 각 국면이 halflife의 수 배(>=600일)는 되어야 한다.
+    rng = np.random.default_rng(20260823)
+    idx = pd.date_range("2021-01-01", periods=1600, freq="D", tz="UTC")
+    rets = np.concatenate([rng.normal(0.0, 0.01, 800), rng.normal(0.0, 0.03, 800)])
+    r = pd.Series(rets, index=idx)
+    scale = scaling._constant_risk_scale(r, target_vol=0.20, cap=8.0)
+    assert scale.index.equals(r.index)
+    scaled = scale * r
+    v_low = float(scaled.iloc[200:800].std(ddof=1) * np.sqrt(365))
+    v_high = float(scaled.iloc[1200:].std(ddof=1) * np.sqrt(365))
+    ratio = v_high / v_low
+    assert 0.8 <= ratio <= 1.25
+    raw_low = float(r.iloc[:800].std(ddof=1) * np.sqrt(365))
+    raw_high = float(r.iloc[800:].std(ddof=1) * np.sqrt(365))
+    assert raw_high / raw_low >= 2.5
+
+
+# SCENARIO_MHS_CONSTANT_RISK_SCALE_IS_STRICTLY_CAUSAL
+def test_constant_risk_scale_causal() -> None:
+    rng = np.random.default_rng(11)
+    idx = pd.date_range("2022-01-01", periods=400, freq="D", tz="UTC")
+    r = pd.Series(rng.normal(0.0005, 0.02, 400), index=idx)
+    k = 217
+    perturbed = r.copy()
+    perturbed.iloc[k] *= 100.0
+    base = scaling._constant_risk_scale(r, target_vol=0.30, cap=5.0)
+    changed = scaling._constant_risk_scale(perturbed, target_vol=0.30, cap=5.0)
+    pd.testing.assert_series_equal(changed.iloc[: k + 1], base.iloc[: k + 1], check_exact=True)
+    assert not changed.iloc[k + 1 :].equals(base.iloc[k + 1 :])
+
+
+# SCENARIO_MHS_CONSTANT_RISK_WARMUP_REMOVES_DEAD_ZONE
+def test_constant_risk_warmup_removes_dead_zone() -> None:
+    from src.mhs.params import CONSTANT_RISK_MIN_PERIODS_DAYS
+
+    rng = np.random.default_rng(5)
+    idx = pd.date_range("2023-01-01", periods=200, freq="D", tz="UTC")
+    r = pd.Series(rng.normal(0.001, 0.02, 200), index=idx)
+    cold = scaling._constant_risk_scale(r, target_vol=0.25, cap=4.0)
+    assert cold.index.equals(r.index)
+    assert (cold.iloc[:CONSTANT_RISK_MIN_PERIODS_DAYS] == 1.0).all()
+    warm_idx = pd.date_range(
+        end=idx[0] - pd.Timedelta(days=1), periods=200, freq="D", tz="UTC",
+    )
+    warm = pd.Series(rng.normal(0.001, 0.02, 200), index=warm_idx)
+    warmed = scaling._constant_risk_scale(r, target_vol=0.25, cap=4.0, warmup_returns=warm)
+    assert warmed.index.equals(r.index)
+    assert warmed.iloc[0] != 1.0
+    assert float((warmed == 1.0).mean()) == 0.0
+
+
+# SCENARIO_MHS_CONSTANT_RISK_WARMUP_OVERLAP_FAILS_CLOSED
+def test_constant_risk_warmup_overlap_fails_closed() -> None:
+    idx = pd.date_range("2024-01-01", periods=120, freq="D", tz="UTC")
+    r = pd.Series(0.01, index=idx)
+    warm_idx = pd.date_range("2023-11-01", periods=70, freq="D", tz="UTC")
+    overlapping_warmup = pd.Series(0.01, index=warm_idx)
+    with pytest.raises(ValueError, match="warmup"):
+        scaling._constant_risk_scale(r, 0.25, 4.0, warmup_returns=overlapping_warmup)
+
+
+# SCENARIO_MHS_FEASIBLE_TARGET_CLAMPS_TO_LEVERAGE_CEILING
+def test_feasible_constant_risk_target_clamps_to_leverage_ceiling() -> None:
+    from src.mhs.params import (
+        CONSTANT_RISK_CAP_BINDING_QUANTILE,
+        CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
+        CONSTANT_RISK_MIN_PERIODS_DAYS,
+    )
+
+    envelope = GROWTH_RISK_ENVELOPES["growth_extreme"]
+    rng = np.random.default_rng(17)
+    idx = pd.date_range("2021-01-01", periods=1000, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0, 0.25 / np.sqrt(365), 1000), index=idx)
+    clamped = scaling._feasible_constant_risk_target(ref, envelope, 0.862)
+    sigma_book = ref.ewm(
+        halflife=CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
+        min_periods=CONSTANT_RISK_MIN_PERIODS_DAYS,
+    ).std().shift(1) * np.sqrt(365)
+    expected_clamp = envelope.leverage_ceiling * float(sigma_book.quantile(CONSTANT_RISK_CAP_BINDING_QUANTILE))
+    assert clamped < 0.862
+    assert clamped == pytest.approx(expected_clamp, abs=1e-9)
+    scale = scaling._constant_risk_scale(ref, target_vol=clamped, cap=envelope.leverage_ceiling)
+    saturation = float((scale >= envelope.leverage_ceiling - 1e-12).mean())
+    assert saturation <= CONSTANT_RISK_CAP_BINDING_QUANTILE + 0.05
+    assert scaling._feasible_constant_risk_target(ref, envelope, 0.10) == 0.10
+
+
+# SCENARIO_MHS_FEASIBLE_TARGET_INSUFFICIENT_HISTORY_FAILS_CLOSED
+def test_feasible_constant_risk_target_insufficient_history_fails_closed() -> None:
+    from src.mhs.params import CONSTANT_RISK_MIN_PERIODS_DAYS
+
+    envelope = GROWTH_RISK_ENVELOPES["growth_extreme"]
+    rng = np.random.default_rng(19)
+    n_rows = int(CONSTANT_RISK_MIN_PERIODS_DAYS * 1.5)
+    idx = pd.date_range("2024-01-01", periods=n_rows, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0, 0.02, n_rows), index=idx)
+    with pytest.raises(DataIntegrityError):
+        scaling._feasible_constant_risk_target(ref, envelope, PNL_TARGET_ANNUAL_VOL)
+
+
+# SCENARIO_MHS_CONSTANT_RISK_BOUNDARY_TARGETS_ARE_LEAK_FREE
+def test_constant_risk_target_vol_by_boundary_leak_free() -> None:
+    envelope = GROWTH_RISK_ENVELOPES["growth"]
+    rng = np.random.default_rng(23)
+    idx = pd.date_range("2021-01-01", periods=4 * 365, freq="D", tz="UTC")
+    r = pd.Series(rng.normal(0.0003, 0.015, len(idx)), index=idx)
+    train_ends = {
+        "top_level": pd.Timestamp("2023-01-01", tz="UTC"),
+        "fold_0": pd.Timestamp("2022-01-01", tz="UTC"),
+        "fold_1": pd.Timestamp("2023-01-01", tz="UTC"),
+    }
+    resolved = scaling._constant_risk_target_vol_by_boundary(r, envelope, train_ends)
+    assert set(resolved) == set(train_ends)
+    perturbed = r.copy()
+    # 모든 경계(최종 2023-01-01) 이후 구간만 100배로 변경한다.
+    perturbed.loc[perturbed.index >= pd.Timestamp("2024-06-01", tz="UTC")] *= 100.0
+    resolved_perturbed = scaling._constant_risk_target_vol_by_boundary(perturbed, envelope, train_ends)
+    for label, value in resolved.items():
+        assert resolved_perturbed[label] == pytest.approx(value, abs=1e-12)
+    with pytest.raises(DataIntegrityError, match="fold_9"):
+        scaling._constant_risk_target_vol_by_boundary(
+            r, envelope, {"fold_9": pd.Timestamp("2021-03-01", tz="UTC")},
+        )
+
+
+# SCENARIO_MHS_CONSTANT_RISK_TOP_LEVEL_MATCHES_BOUNDARY
+def test_constant_risk_top_level_target_vol_matches_boundary() -> None:
+    """FOLD_BLEND_PATH_DIVERGENCE 회귀 방지: top-level dispatcher가 전체
+    5년 참조로 sigma_book을 적합하면 fold의 oos_start 이전 전용 적합과
+    갈라진다(실측: exposure_scale_mean 2.36~2.96 vs 1.77~3.0, 실제 파이프라인
+    실행에서 FOLD_BLEND_PATH_DIVERGENCE 발화 확인). _replay_exposure_scale이
+    growth_budget_target_vol=None일 때 계산하는 target_vol은
+    _constant_risk_target_vol_by_boundary의 "top_level" 라벨 결과와
+    정확히 일치해야 한다.
+    """
+    envelope = GROWTH_RISK_ENVELOPES["growth_extreme"]
+    rng = np.random.default_rng(41)
+    idx = pd.date_range("2021-01-01", periods=5 * 365, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0003, 0.02, len(idx)), index=idx)
+    req = MhsDiagnosticRequest(
+        pnl_vol_target_mode="constant_risk", growth_envelope="growth_extreme",
+        exposure_scale_two_sided=True,
+    )
+    dispatched_scale = scaling._replay_exposure_scale(ref, req)
+    boundary_target = scaling._constant_risk_target_vol_by_boundary(
+        ref, envelope, {"top_level": COMMITTEE_OOS_START},
+    )["top_level"]
+    expected_scale = scaling._constant_risk_scale(
+        ref, target_vol=boundary_target, cap=scaling.resolved_exposure_cap(req),
+    )
+    pd.testing.assert_series_equal(dispatched_scale, expected_scale)
+
+
+# SCENARIO_MHS_CONSTANT_RISK_BYPASSES_KELLY_BLEND
+def test_constant_risk_bypasses_kelly_blend() -> None:
+    rng = np.random.default_rng(31)
+    idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0008, 0.02, 500), index=idx)
+    kelly_req = MhsDiagnosticRequest(
+        pnl_vol_target_mode="constant_risk",
+        exposure_scale_two_sided=True,
+        committee_capital=True,
+        committee_kelly_sizing=True,
+    )
+    plain_req = MhsDiagnosticRequest(
+        pnl_vol_target_mode="constant_risk",
+        exposure_scale_two_sided=True,
+        committee_capital=True,
+        committee_kelly_sizing=False,
+    )
+    pd.testing.assert_series_equal(
+        scaling._replay_exposure_scale(ref, kelly_req),
+        scaling._replay_exposure_scale(ref, plain_req),
+        check_exact=True,
+    )
+    gb_kelly = MhsDiagnosticRequest(
+        pnl_vol_target_mode="growth_budget",
+        exposure_scale_two_sided=True,
+        committee_capital=True,
+        committee_kelly_sizing=True,
+    )
+    gb_plain = MhsDiagnosticRequest(
+        pnl_vol_target_mode="growth_budget",
+        exposure_scale_two_sided=True,
+        committee_capital=True,
+        committee_kelly_sizing=False,
+    )
+    s_kelly = scaling._replay_exposure_scale(ref, gb_kelly)
+    s_plain = scaling._replay_exposure_scale(ref, gb_plain)
+    assert not s_kelly.equals(s_plain)
+
+
+# SCENARIO_MHS_LEGACY_EXPOSURE_MODES_BYTE_IDENTICAL
+def test_legacy_exposure_modes_byte_identical() -> None:
+    rng = np.random.default_rng(42)
+    idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0001, 0.01, 500), index=idx)
+
+    median_req = MhsDiagnosticRequest(pnl_vol_target_mode="median_relative")
+    pd.testing.assert_series_equal(
+        scaling._replay_exposure_scale(ref, median_req),
+        scaling._pnl_vol_target_scale(ref),
+        check_exact=False, rtol=0,
+    )
+    assert scaling.resolved_exposure_cap(median_req) == 1.0
+
+    exante_req = MhsDiagnosticRequest(pnl_vol_target_mode="exante_target")
+    pd.testing.assert_series_equal(
+        scaling._replay_exposure_scale(ref, exante_req),
+        scaling._exante_vol_target_scale(ref, cap=1.0),
+        check_exact=False, rtol=0,
+    )
+    assert scaling.resolved_exposure_cap(exante_req) == 1.0
+
+    gb_req = MhsDiagnosticRequest(
+        pnl_vol_target_mode="growth_budget",
+        growth_envelope="growth",
+        exposure_scale_two_sided=True,
+        committee_capital=False,
+    )
+    expected_gb = scaling._exante_vol_target_scale(
+        ref,
+        target_vol=scaling._growth_budget_target_vol(
+            ref, envelope=GROWTH_RISK_ENVELOPES["growth"],
+        ),
+        cap=2.0,
+    )
+    pd.testing.assert_series_equal(
+        scaling._replay_exposure_scale(ref, gb_req), expected_gb,
+        check_exact=False, rtol=0,
+    )
+    assert scaling.resolved_exposure_cap(gb_req) == 2.0
+
+    constant_req = MhsDiagnosticRequest(pnl_vol_target_mode="constant_risk")
+    assert scaling.is_streaming_scale_mode(constant_req) is False
