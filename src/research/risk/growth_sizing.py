@@ -76,6 +76,74 @@ class GrowthHeadroomDiagnostic:
     block_size_used: int
 
 
+@dataclass(frozen=True, slots=True)
+class FrontierScanPoint:
+    """Per-candidate leverage multiple frontier observation (diagnostic-only)."""
+
+    multiple: float
+    mdd_breach_prob: float
+    ruin_prob: float
+    feasible: bool
+
+
+def scan_leverage_frontier(
+    unit_returns: np.ndarray,
+    config: GrowthSizingConfig,
+    candidate_multiples: tuple[float, ...],
+) -> tuple[FrontierScanPoint, ...]:
+    """Report per-multiple mdd-breach/ruin feasibility over one bootstrap draw.
+
+    Diagnostic sibling of :func:`diagnose_growth_headroom`, following the same
+    deliberate-duplication philosophy: the frozen solver is never called here
+    because its plateau rule zeroes out any candidate whose median log growth
+    is negative, silently hiding the true constraint feasibility a wide
+    leverage scan exists to expose. The block-bootstrap draw happens exactly
+    once and every candidate multiple reuses those identical paths (same
+    comparability principle as the solver's own grid loop). Observability
+    only: nothing is selected, persisted, or fed back into sizing.
+    """
+    arr = np.asarray(unit_returns, dtype=np.float64)
+    if arr.size == 0:
+        raise ValueError("unit_returns must not be empty")
+    if not np.isfinite(arr).all():
+        raise ValueError("unit_returns must contain only finite values")
+    if len(candidate_multiples) == 0:
+        raise ValueError("candidate_multiples must not be empty")
+    offending = [m for m in candidate_multiples if not m > 0]
+    if offending:
+        raise ValueError(
+            f"candidate_multiples must contain only positive values, got {offending}"
+        )
+
+    path_len = round(config.horizon_years * config.bars_per_year)
+    if path_len < 1:
+        raise ValueError("horizon_years * bars_per_year must be >= 1")
+
+    block_size = derive_block_size(arr)
+    paths = _block_bootstrap_paths(
+        arr,
+        n_paths=config.n_paths,
+        path_len=path_len,
+        block_size=block_size,
+        seed=config.seed,
+    )
+
+    points: list[FrontierScanPoint] = []
+    for multiple in candidate_multiples:
+        scaled = paths * multiple
+        cum = np.cumprod(1.0 + scaled, axis=1)
+        finals = cum[:, -1]
+        mdd = (1.0 - cum / np.maximum.accumulate(cum, axis=1)).max(axis=1)
+        mdd_breach_prob = float(np.mean(mdd > config.max_drawdown))
+        ruin_prob = float(np.mean(finals < config.ruin_fraction))
+        feasible = (
+            mdd_breach_prob <= config.max_drawdown_prob
+            and ruin_prob <= config.max_ruin_prob
+        )
+        points.append(FrontierScanPoint(float(multiple), mdd_breach_prob, ruin_prob, feasible))
+    return tuple(points)
+
+
 def drawdown_risk_multiplier(drawdown: np.ndarray) -> np.ndarray:
     """Vectorized piecewise de-risk ladder on a positive drawdown fraction.
 
