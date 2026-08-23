@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -39,8 +40,10 @@ from src.application.research.mhs.stage_services import (
     _guard_stage_or_breach,
     _load_feature_panels,
     _multi_feature_diagnostic,
+    _pooled_fold_evidence,
     _run_post_book_concurrently,
 )
+from src.mhs.calibration import NullShareCalibration, calibrate_max_share_null
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
@@ -155,11 +158,50 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.blend_report, ctx.folds, ctx.trials_attempted,
     )
     ctx.fold_blend_parity, parity_reasons = _fold_blend_parity(ctx.blend_traces, ctx.folds)
-    ctx.fold_growth_concentration, concentration_reasons = _fold_growth_concentration(ctx.folds)
+    # I-FAMILY level 증거: fold별 min이 아니라 pooled 하한으로 판정한다.
+    ctx._pooled_fold_evidence = _pooled_fold_evidence(ctx.folds)
+    # 관측치 선계산(임계값 무관 경계): 보정 임계값 도출의 observed_share 입력.
+    _observed_concentration, _observed_reasons = _fold_growth_concentration(ctx.folds, 1.0)
+    _share_calibration: NullShareCalibration | SimpleNamespace
+    if ctx._pooled_fold_evidence["n_measured_folds"] >= 2:
+        _measured_reports = [
+            f for f in ctx.folds
+            if f.fold_index not in set(ctx._pooled_fold_evidence["unmeasured"])
+        ]
+        _measured_anchor = _measured_reports[0]
+        _fold_days = int(
+            (
+                pd.Timestamp(_measured_anchor.validation_end)
+                - pd.Timestamp(_measured_anchor.validation_start)
+            ).days
+        )
+        # I-CALIB/I-DETERMINISTIC: 임계값은 등록 alpha와 자기 null에서 파생된다.
+        _share_calibration = calibrate_max_share_null(
+            ctx._pooled_fold_evidence["pooled_strict_returns"],
+            len(ctx.folds),
+            _fold_days,
+            float(_observed_concentration["max_fold_share"]),
+        )
+        ctx.evidence_calibration = {
+            "null_alpha": _share_calibration.alpha,
+            "max_share_threshold": _share_calibration.threshold,
+            "max_share_null_percentile": _share_calibration.observed_percentile,
+            "pooled_sharpe_lcb": ctx._pooled_fold_evidence["pooled_sharpe_lcb"],
+            "pooled_stress_sharpe_lcb": ctx._pooled_fold_evidence["pooled_stress_sharpe_lcb"],
+            "n_pooled_days": ctx._pooled_fold_evidence["n_pooled_days"],
+        }
+        _share_threshold = _share_calibration.threshold
+    else:
+        # 측정 불가: dispersion 게이트를 구경계(threshold=1.0, share<=1 불가능
+        # 영역)로 비활성한다. 보정값을 어떤 기본 임계값으로도 대체하지 않는다.
+        ctx.evidence_calibration = None
+        _share_calibration = SimpleNamespace(threshold=1.0)
+    ctx.fold_growth_concentration, concentration_reasons = _fold_growth_concentration(ctx.folds, _share_calibration.threshold)
+    level_reasons = _research_go._pooled_level_gate_reasons(ctx._pooled_fold_evidence)
     # 관측 전용 진단: 항상 빈 튜플이며 Research-GO reason 합산에 더하지 않는다.
     ctx.fold_realized_risk_parity, _risk_parity_reasons = _fold_realized_risk_parity(ctx.folds)
     ctx.research_go = _research_go._mhs_research_go(
-        ctx.folds, ctx.book_reasons, parity_reasons + concentration_reasons,
+        ctx.folds, ctx.book_reasons, parity_reasons + concentration_reasons + level_reasons,
         blend_primary_max_drawdown=(
             ctx.blend_report.primary_max_drawdown if ctx.blend_report is not None else None
         ),

@@ -86,6 +86,7 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         fold_blend_parity=ctx.fold_blend_parity,
         fold_growth_concentration=ctx.fold_growth_concentration,
         fold_realized_risk_parity=ctx.fold_realized_risk_parity,
+        evidence_calibration=ctx.evidence_calibration,
         fill_mark_parity=ctx._fill_mark_parity_census,
         growth_envelope=ctx._growth_envelope_payload,
         committee_member_attribution=ctx.committee_member_attribution,

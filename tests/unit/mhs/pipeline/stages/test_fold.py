@@ -118,7 +118,9 @@ def test_run_folds_reaches_seam_functions_default_flags(monkeypatch: pytest.Monk
 
     assert calls == [
         "_run_post_book_concurrently", "_guard_stage_or_breach",
-        "_fold_blend_parity", "_fold_growth_concentration",
+        "_fold_blend_parity",
+        # 관측치 선계산(보정 전)과 보정 임계값 최종 판정으로 2회 호출된다.
+        "_fold_growth_concentration", "_fold_growth_concentration",
     ]
     assert ctx.folds == ()
     assert ctx.fold_blend_parity == "parity-stub"

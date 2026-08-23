@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
+from src.application.research.mhs.contracts import (
+    MhsDiagnosticRequest,
+    MhsFoldReport,
+)
 from src.application.research.mhs.research_go import (
     _drawdown_budget_reasons,
+    _mhs_research_go,
+    _pooled_level_gate_reasons,
     _resolved_committee_members,
     _resolved_growth_envelope,
 )
@@ -74,3 +81,106 @@ class TestResolvedGrowthEnvelope:
         object.__setattr__(req, "growth_envelope", "unregistered")
         with pytest.raises(ValueError, match="unknown growth_envelope"):
             _resolved_growth_envelope(req)
+
+
+# SCENARIO_MHS_POOLED_LEVEL_GATE_REPLACES_MIN_FOLD
+class TestPooledLevelGateReasons:
+    def test_strong_pooled_evidence_passes(self) -> None:
+        payload: dict[str, object] = {
+            "n_measured_folds": 4,
+            "pooled_sharpe_lcb": 1.28,
+            "pooled_stress_sharpe_lcb": 0.5,
+            "pooled_annual_log_return": 0.3,
+        }
+        assert _pooled_level_gate_reasons(payload) == ()
+
+    def test_low_primary_sharpe_lcb_flags_only_primary_sharpe(self) -> None:
+        payload: dict[str, object] = {
+            "n_measured_folds": 4,
+            "pooled_sharpe_lcb": 0.4,
+            "pooled_stress_sharpe_lcb": 0.5,
+            "pooled_annual_log_return": 0.3,
+        }
+        assert _pooled_level_gate_reasons(payload) == ("PRIMARY_AUTOCORR_SHARPE_BELOW_0_6",)
+
+    def test_negative_stress_sharpe_lcb_flags_only_stress(self) -> None:
+        payload: dict[str, object] = {
+            "n_measured_folds": 4,
+            "pooled_sharpe_lcb": 1.28,
+            "pooled_stress_sharpe_lcb": -0.1,
+            "pooled_annual_log_return": 0.3,
+        }
+        assert _pooled_level_gate_reasons(payload) == ("STRESS_SHARPE_NOT_POSITIVE",)
+
+    def test_below_return_floor_flags_return_code(self) -> None:
+        payload: dict[str, object] = {
+            "n_measured_folds": 4,
+            "pooled_sharpe_lcb": 1.28,
+            "pooled_stress_sharpe_lcb": 0.5,
+            "pooled_annual_log_return": 0.01,
+        }
+        codes = _pooled_level_gate_reasons(payload)
+        assert codes == ("PRIMARY_ANNUAL_RETURN_BELOW_FLOOR",)
+
+    def test_fewer_than_two_measured_folds_defers_to_incomplete_fold(self) -> None:
+        payload: dict[str, object] = {
+            "n_measured_folds": 1,
+            "pooled_sharpe_lcb": -1.0,
+            "pooled_stress_sharpe_lcb": -1.0,
+            "pooled_annual_log_return": -1.0,
+        }
+        assert _pooled_level_gate_reasons(payload) == ()
+
+    def test_explicit_return_floor_overrides_registered_policy(self) -> None:
+        payload: dict[str, object] = {
+            "n_measured_folds": 4,
+            "pooled_sharpe_lcb": 1.28,
+            "pooled_stress_sharpe_lcb": 0.5,
+            "pooled_annual_log_return": 0.3,
+        }
+        assert _pooled_level_gate_reasons(payload, return_floor=0.5) == (
+            "PRIMARY_ANNUAL_RETURN_BELOW_FLOOR",
+        )
+
+
+def _gate_fold(
+    failures: tuple[str, ...],
+    primary_valid: bool = True,
+) -> MhsFoldReport:
+    return MhsFoldReport(
+        fold_index=0,
+        validation_start="2021-02-10",
+        validation_end="2021-04-19",
+        strict=SimpleNamespace(),  # 완결 fold: INCOMPLETE 코드 유발하지 않는 최소 스텁
+        stress=None,
+        primary_valid=primary_valid,
+        primary_autocorr_sharpe=0.1,
+        primary_naive_sharpe=0.1,
+        primary_net_ann=0.01,
+        primary_geometric_cagr=0.01,
+        primary_max_drawdown=-0.1,
+        stress_naive_sharpe=0.0,
+        decision_intents=0,
+        termination_counts={},
+        failures=failures,
+        strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+    )
+
+
+# SCENARIO_MHS_FOLD_LEVEL_CODES_NO_LONGER_PER_FOLD
+def test_level_codes_no_longer_derived_per_fold() -> None:
+    # 경제하한 미달(autocorr 0.1 < 0.6) fold라도 무결성 문제가 없으면
+    # fold별 level 코드가 붙지 않는다(level은 pooled 게이트 소유).
+    result = _mhs_research_go((_gate_fold(()),))
+    assert result.reason_codes == ()
+    assert result.eligible is True
+
+
+# SCENARIO_MHS_FOLD_LEVEL_CODES_NO_LONGER_PER_FOLD
+def test_invalid_primary_integrity_code_still_blocks_fold() -> None:
+    result = _mhs_research_go(
+        (_gate_fold(("INVALID_PRIMARY_LEDGER",), primary_valid=False),),
+    )
+    assert "INVALID_PRIMARY_LEDGER" in result.reason_codes
+    assert "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6" not in result.reason_codes

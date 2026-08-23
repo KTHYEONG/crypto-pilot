@@ -137,3 +137,24 @@ def test_constant_risk_params_registered() -> None:
     assert FOLD_REALIZED_RISK_PARITY_TOLERANCE == 0.35
     # 기존 모드용 EWMA 반감기는 불변이다.
     assert PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS == 20
+
+
+# SCENARIO_MHS_EVIDENCE_GATE_ALPHA_REGISTERED
+def test_evidence_gate_alpha_registered() -> None:
+    import src.mhs.params as params_module
+    from src.mhs.params import (
+        EVIDENCE_GATE_ALPHA,
+        NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
+        NULL_BOOTSTRAP_MIN_ROWS,
+        NULL_BOOTSTRAP_TRIALS,
+        NULL_BOOTSTRAP_SEED,
+    )
+
+    assert EVIDENCE_GATE_ALPHA == 0.05
+    assert 0.0 < EVIDENCE_GATE_ALPHA < 0.5
+    assert NULL_BOOTSTRAP_MEAN_BLOCK_DAYS == 20
+    assert NULL_BOOTSTRAP_TRIALS >= 1000
+    assert NULL_BOOTSTRAP_MIN_ROWS >= 250
+    assert NULL_BOOTSTRAP_SEED > 0
+    # 유도 근거 없는 고정 임계값은 선언형 alpha로 교체되어 삭제되다.
+    assert not hasattr(params_module, "FOLD_GROWTH_CONCENTRATION_MAX_SHARE")
