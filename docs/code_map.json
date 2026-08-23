@@ -261,5 +261,9 @@
   },
   "src/application/research/mhs/leverage_scan.py": {
     "testing": "tests/unit/application/research/mhs/test_leverage_scan.py"
+  },
+  "src/mhs/calibration.py": {
+    "architecture": "docs/specs/mhs_calibrated_evidence.md",
+    "testing": "tests/unit/mhs/test_calibration.py"
   }
 }

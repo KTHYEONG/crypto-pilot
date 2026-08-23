@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_CALIBRATED_EVIDENCE_REAL_EXECUTION",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_CALIBRATED_EVIDENCE_REAL_EXECUTION",
+      "domain": "risk",
+      "title": "MHS calibrated evidence 실전 검증: FOLD_GROWTH_CONCENTRATION/레벨게이트 전부 해소, FOLD_BLEND_PATH_DIVERGENCE만 잔존",
+      "why": "ADR_20260823_MHS_CALIBRATED_EVIDENCE 구현 직후 실제 CLI로 2021-2025/3m 원장 전체 재생해 재보정 게이트가 실전에서 작동하는지, 그리고 I-DEPLOYMENT-INVARIANT(판정만 바뀌고 성과는 불변)가 지켜지는지 검증.",
+      "resolution": "실측: max_fold_share=0.526, null-보정 임계값=0.606(alpha=0.05, null 백분위 88.25) -> FOLD_GROWTH_CONCENTRATION 미발화. pooled_sharpe_lcb=1.337(>0.6), pooled_stress_sharpe_lcb=0.572(>0.0) -> PRIMARY_AUTOCORR_SHARPE_BELOW_0_6/STRESS_SHARPE_NOT_POSITIVE 미발화. 4개 fold 전부 failures=[] (데이터 무결성 코드 fold별 fail-closed는 그대로 유지되고 있음을 확인, 단순 무력화가 아님). blend.primary_geometric_cagr=1.777로 직전 constant_risk 런과 완전히 동일(비트동일) -- 배치 로직 미변경이 실측으로 확인됨.",
+      "impact": "research_go.reason_codes=['FOLD_BLEND_PATH_DIVERGENCE'] 단 하나만 남아 Research-GO 여전히 미달성. 이 코드는 ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION에서 이미 식별된 별도의 미해결 아키텍처 문제(fold가 자체 EWMA를 재적합하지 않고 blend의 연속 스케일 궤적을 슬라이스해 재사용해야 함)이며 이번 스펙의 범위가 아니다. 다음 단계는 그 구조적 대안의 구현."
+    },
+    {
+      "task_id": "MHS_CALIBRATED_EVIDENCE",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_CALIBRATED_EVIDENCE",
+      "domain": "risk",
+      "title": "MHS 증거 게이트를 고정 임계값에서 null-보정 alpha 가설검정으로 재설계",
+      "why": "직전 constant_risk 튜닝 사이클(7회 실전 실행)에서 FOLD_GROWTH_CONCENTRATION을 넘기지 못함. 게이트 자체를 통계적으로 검증한 결과, 안정적 전략(strict Sharpe 2.17 고정)의 오탈락률이 59.1%(STRESS_SHARPE_NOT_POSITIVE 38.0%/PRIMARY_AUTOCORR_SHARPE_BELOW_0_6 28.8%/PRIMARY_ANNUAL_RETURN_BELOW_FLOOR 19.1%/FOLD_GROWTH_CONCENTRATION 16.4%)임을 실측 확인. 1년 fold Sharpe 추정 SE가 ±1.08로 관측 fold Sharpe 1.21~3.67의 산포를 전부 설명(null 5~95% 구간 [0.32,3.88]이 관측치를 포함). FOLD_GROWTH_CONCENTRATION_MAX_SHARE=0.5는 동일분포 null의 83백분위(유도근거 없음, git 고고학상 문서 부재)로 관측 0.526은 p=0.12(비유의).",
+      "resolution": "src/mhs/calibration.py 신설: stationary_block_bootstrap(자기상관/팻테일 보존 블록 재표집), calibrate_max_share_null(전략 자신의 pooled 수익률로 max_fold_share의 null 분포를 만들어 (1-alpha) 분위수를 임계값으로 반환, fail-closed), sharpe_lower_confidence_bound(Lo(2002) 표준오차 기반 하한, 표본부족/분산0시 -inf로 fail-closed). src/mhs/params.py에 EVIDENCE_GATE_ALPHA=0.05 등록(FOLD_GROWTH_CONCENTRATION_MAX_SHARE 상수 삭제 -- 유도근거 없는 리터럴 제거). _fold_growth_concentration의 임계값을 필수 인자로 승격. research_go.py에 _pooled_level_gate_reasons 신설: level 게이트(Sharpe/stress/연수익)를 fold별 min() 대신 pooled 추정치 하한 vs 등록 절대 경제하한으로 재판정(I-NO-CIRCULAR: 자기 null 보정 금지, level은 절대기준·dispersion만 자기null). evaluation.py에서 fold별 level reason code 3개(min-over-folds 하향편향의 원인) 제거, 데이터 무결성 코드는 fold별 fail-closed 그대로 유지. schema/persist/context/assemble에 evidence_calibration 페이로드 배선.",
+      "impact": "판정 계층만 교체, 배치(노출스케일/북구성/replay) 로직 미변경 -- blend.primary_geometric_cagr 비트동일 확인 완료. 검정력 실측(edge가 1개 fold에만 100% 집중된 인공 취약전략): 탐지율 99.6% 유지. dispersion 게이트 오탈락 16.4%->5.7%. level 게이트: 진짜Sharpe 0.0에서 탈락률 99.2%->99.5%(쓰레기 판별 유지), 2.17에서 28.5%->9.7%(우수전략 오탈락 1/3로 감소). fold 해상도 4->8 확대는 이번 스펙 범위 밖(level min() 제거 후 안전, 후속 과제). fill_mark_parity 5% 밴드/fast_reversal-slow_momentum 유령북/regime_cash_scale 이중계상/SEARCH_TRIALS_ATTEMPTED=70 하드코딩은 별도 진단 필요 항목으로 식별만 하고 미착수."
+    },
+    {
       "task_id": "MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION",
       "date": "2026-08-23",
       "adr_id": "ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION",
@@ -979,26 +999,6 @@
       "why": "PASS 후보 존재에도 성장 상한이 낮다는 지적에 대해 직전 사이클(sizing/book-blend/capital-split) 전부 반증됨에 따라, 사용자가 남은 축인 '유니버스 breadth'를 근거없는 유명코인 선정 금지 조건으로 전면 재검토하고 가설을 실측 검증하라고 요청함. TREND_SCREEN_SYMBOLS(15종목)는 git 고고학상 도입 커밋에 선정 근거가 전혀 없었음(원칙적 방법론 부재 확정).",
       "resolution": "로컬 데이터 레이크(652종목, 신규 수집 없음)를 4중 객관적 기준(전체이력커버리지>=0.99, funding 존재, taker_buy_ratio 무결성, 현재 유동성>0)으로 스캔해 35종목의 원칙적 후보군을 도출(현재 15종목은 전원 부분집합). v6+Donchian growth_headroom 파이프라인을 15/25/35종목에서 동일 조건 실측: 25종목 Sharpe 0.80, 35종목 Sharpe 1.24 -- 둘 다 현재 15종목(1.76)보다 악화, selected_risk가 1.0에서 None(전 grid infeasible)으로 하락, 비단조. 유니버스 확장 가설 반증 확정, 프로덕션 TREND_SCREEN_SYMBOLS 무변경. 스캔 방법론은 src/research/universe/candidate_scan.py(순수 평가) + src/application/research/universe/candidate_scan.py(오케스트레이터+영속화) + xs-universe-candidate-scan CLI로 재현 가능한 진단 자산화(growth_headroom과 동일한 관측전용 철학).",
       "impact": "성장 상한 반증 사이클 완결: sizing/book-blend(coarse+fine)/capital-split/universe-breadth(2개 크기) 총 5개 가설 전부 반증. 남은 레버는 신호 재설계·실행비용 최적화·tail-risk 정책 재검토(사용자 리스크성향 결정 필요)뿐임을 확정. 부수 발견: 18종목에 2022-10-01부터 552봉 taker_buy_ratio 시스템 결손 존재(수집 아카이브 버그, 별도 백필 과제로 분리)."
-    },
-    {
-      "task_id": "xs_alpha_growth_ceiling_breadth",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_xs_alpha_growth_ceiling_breadth",
-      "domain": "risk",
-      "title": "XS Alpha 성장 상한: positioning-only 3번째 다리 nested blend 실측",
-      "why": "growth_ceiling_diagnostic(2026-08-06)이 두 PASS 후보(v6_growth_sized/v8_sized)의 사이징 레버 완전 소진을 확정하고, 유일한 다음 레버로 '3번째 저상관 다리(breadth)'를 지목함. 5회 이상의 원점 발굴 시도(carry/OI-deleveraging/funding-directional/5-way 블렌드)는 전부 반증됐고, xs_alpha_positioning_v7은 v6의 기존 3-family를 내부에 포함해 진짜 독립 다리가 아니었음. build_xs_alpha_positioning_weights 내부에서 계산 후 버려지던 positioning-only family 단독 스코어가 유일한 미시험 저상관 후보였음.",
-      "resolution": "select_baseline_blend_weight/build_blended_ledger/solve_growth_optimal_risk 등 기존 frozen 2-레그 순수 함수를 전혀 변경하지 않고, nested pairwise composition으로 2회 중첩 적용(v6⊕Donchian 다음 그 결과⊕positioning-only leg)하는 xs-triple-blend-sized를 구현. cross_sectional.py에 _positioning_score 헬퍼 추출 + build_xs_alpha_positioning_only_weights 신규 추가(v7 동작 무변경, 회귀 없음 확인). CLI 실행(holdout 봉인) 결과: positioning_weight=0.0000으로 discovery-window worst-year-robust 선택에서 그리드 최솟값(미채택)이 승리, xs_baseline_weight/selected_risk/qualification Sharpe/LCB90 전부 v8_sized와 완전 동일.",
-      "impact": "성장 상한이 사이징뿐 아니라 positioning 데이터축 레벨에서도 이미 소진됨을 실측 확정(스펙의 반증 가능 성공 기준 미충족, 정직한 negative result). positioning family 자체는 discovery에서 admitted=True/Sharpe 1.03이었으나 AB 블렌드보다 매 worst-year 구간에서 열위라 어떤 배합비에서도 개선 없음. 코드는 유효한 관측 인프라로 잔존(xs-triple-blend-sized CLI, 7개 테스트 시나리오 전부 PASS). 다음 레버는 이번 스펙 범위 밖의 Plan B: expert_portfolio/rolling_admission 인프라를 통한 자본 레벨 다중전략 분산."
-    },
-    {
-      "task_id": "xs_alpha_growth_ceiling_diagnostic",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_xs_alpha_growth_ceiling_diagnostic",
-      "domain": "risk",
-      "title": "XS Alpha 성장 상한(고점) 진단: 사이징은 소진된 레버, 3번째 다리(breadth)가 유일한 남은 지렛대",
-      "why": "PASS 2건(v6_growth_sized/v8_sized)의 point CAGR(21.3%/17.1%)이 실질 체감상 부족하다는 사용자 지적. 레버리지를 더 주면 고점이 오를지 실측 필요.",
-      "resolution": "5년 MC growth curve 전체 재구성(scratch, 프로덕션 코드 미변경) 결과: v6_growth_sized는 이미 Kelly 정점(2.75x)의 99%+를 1.5x에서 확보(레버리지 소진), v8_sized는 1.0x에서 이미 MDD 초과확률 4.9%(한계5%)로 꼬리위험에 막힘. 드로다운 오버레이 켜는 대안도 반증(2.5x 최적점 growth=0.832 < 현재 1.0x=0.930). diagnose_growth_headroom(growth_sizing.py)을 신설해 v8_sized 리포트(XsBaselineBlendSizedReport.growth_headroom)에 배선, CLI 재실측으로 risk_constrained=true/headroom_ratio=0.0 확정.",
-      "impact": "두 PASS 후보 모두 사이징으로 고점/저점 추가 개선 불가 확정. 유일한 다음 레버는 원천 Sharpe를 올리는 breadth(3번째 저상관 다리)이나, carry는 이미 은퇴(2026-07-31)·leg_selection 5후보 비교에서 Donchian이 이미 최우수로 확정되어 가까운 후보 소진 -- 새 신호원 발굴이 필요한 discovery 과제로 넘어감. v6_growth_sized 쪽 동일 진단 배선은 size_xs_alpha_growth_optimal의 frozen 반환타입 확장이 필요해 후속 과제로 분리."
     }
   ]
 }
