@@ -15,6 +15,7 @@ from src.application.research.mhs.evaluation import (
     MhsResearchGoResult,
     _fold_blend_parity,
     _fold_growth_concentration,
+    _fold_realized_risk_parity,
     _incomplete_fold_report,
     build_mhs_run_history_record,
 )
@@ -354,3 +355,117 @@ def test_run_history_record_fold_growth_concentration_default_none() -> None:
     assert "fold_growth_concentration" in record
     assert record["fold_growth_concentration"] is None
     json.dumps(record)
+
+
+# ---------------------------------------------------------------------------
+# _fold_realized_risk_parity tests (observation-only diagnostic)
+# ---------------------------------------------------------------------------
+
+
+def _parity_fold(
+    fold_index: int,
+    realized_annualized_vol: float | None,
+    primary_valid: bool = True,
+) -> MhsFoldReport:
+    return MhsFoldReport(
+        fold_index=fold_index,
+        validation_start="2021-02-10",
+        validation_end="2021-04-19",
+        strict=None,
+        stress=None,
+        primary_valid=primary_valid,
+        primary_autocorr_sharpe=0.0,
+        primary_naive_sharpe=0.0,
+        primary_net_ann=0.0,
+        primary_geometric_cagr=0.0,
+        primary_max_drawdown=0.0,
+        stress_naive_sharpe=0.0,
+        decision_intents=0,
+        termination_counts={},
+        failures=(),
+        strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+        realized_annualized_vol=realized_annualized_vol,
+    )
+
+
+def test_fold_realized_risk_parity_observes_divergence() -> None:
+    # SCENARIO_MHS_FOLD_REALIZED_RISK_PARITY_OBSERVES_DIVERGENCE: the measured
+    # baseline vols breach the tolerance but never emit a reason code.
+    folds = tuple(
+        _parity_fold(i, v) for i, v in enumerate([0.294, 0.304, 0.278, 0.570])
+    )
+    payload, reasons = _fold_realized_risk_parity(folds)
+    assert reasons == ()
+    max_ratio = payload["max_abs_log_risk_ratio"]
+    assert 0.60 <= max_ratio <= 0.70
+    assert max_ratio > payload["tolerance"]
+    assert payload["tolerance"] == pytest.approx(0.35)
+    assert payload["unmeasured"] == []
+    assert set(payload["folds"]) == {0, 1, 2, 3}
+
+    balanced = tuple(
+        _parity_fold(i, v) for i, v in enumerate([0.49, 0.47, 0.49, 0.50])
+    )
+    balanced_payload, balanced_reasons = _fold_realized_risk_parity(balanced)
+    assert balanced_reasons == ()
+    assert balanced_payload["max_abs_log_risk_ratio"] <= 0.10
+
+
+def test_fold_realized_risk_parity_unmeasured_folds_excluded() -> None:
+    # SCENARIO_MHS_FOLD_REALIZED_RISK_PARITY_OBSERVES_DIVERGENCE: None-vol and
+    # invalid-primary folds go to unmeasured and never into the denominator.
+    folds = (
+        _parity_fold(0, 0.294),
+        _parity_fold(1, None),
+        _parity_fold(2, 0.304, primary_valid=False),
+        _parity_fold(3, 0.570),
+    )
+    payload, reasons = _fold_realized_risk_parity(folds)
+    assert reasons == ()
+    assert sorted(payload["unmeasured"]) == [1, 2]
+    assert set(payload["folds"]) == {0, 3}
+
+
+def test_fold_realized_risk_parity_degenerate_fail_open() -> None:
+    # SCENARIO_MHS_FOLD_REALIZED_RISK_PARITY_DEGENERATE_FAIL_OPEN: fewer than
+    # two measurable folds yield zero divergence, no reasons, no exception.
+    single_payload, single_reasons = _fold_realized_risk_parity(
+        (_parity_fold(0, 0.294),),
+    )
+    assert single_reasons == ()
+    assert single_payload["max_abs_log_risk_ratio"] == 0.0
+    empty_payload, empty_reasons = _fold_realized_risk_parity(())
+    assert empty_reasons == ()
+    assert empty_payload["max_abs_log_risk_ratio"] == 0.0
+
+
+def test_run_history_record_includes_fold_realized_risk_parity() -> None:
+    # SCENARIO_MHS_FOLD_REALIZED_RISK_PARITY_OBSERVES_DIVERGENCE: the parity
+    # payload reaches the run-history record unchanged and round-trips JSON.
+    parity = {
+        "folds": {"3": {"realized_annualized_vol": 0.570, "log_ratio": 0.645}},
+        "unmeasured": [],
+        "max_abs_log_risk_ratio": 0.645,
+        "tolerance": 0.35,
+    }
+    report = dataclasses.replace(_minimal_report(None), fold_realized_risk_parity=parity)
+    record = build_mhs_run_history_record(report, None, MhsOutputTier.COMPACT, None)
+    assert "fold_realized_risk_parity" in record
+    assert record["fold_realized_risk_parity"] == parity
+    json.dumps(record)
+
+
+def test_fold_report_realized_vol_defaults_none() -> None:
+    # A fold constructed without realized_annualized_vol keeps None; an
+    # incomplete fold never fabricates evidence either.
+    report = MhsFoldReport(
+        fold_index=0, validation_start="2021-02-10", validation_end="2021-04-19",
+        strict=None, stress=None, primary_valid=False, primary_autocorr_sharpe=0.0,
+        primary_naive_sharpe=0.0, primary_net_ann=0.0, primary_geometric_cagr=0.0,
+        primary_max_drawdown=0.0, stress_naive_sharpe=0.0, decision_intents=0,
+        termination_counts={}, failures=(), strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+    )
+    assert report.realized_annualized_vol is None
+    assert _incomplete_fold_report(_FOLD, 0, ()).realized_annualized_vol is None
