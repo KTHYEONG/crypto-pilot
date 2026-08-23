@@ -129,6 +129,16 @@ _ENVELOPE_CAP_FRONTIER_RETURNS = pd.Series(
 )
 
 
+# SCENARIO_MHS_EXPOSURE_CEILING_03 fixture: same low-Sharpe generator as
+# _ENVELOPE_CAP_FRONTIER_RETURNS, sized so the AUDITED pre-OOS slice itself
+# carries a growth frontier (measured 1.5x) strictly below the registered
+# growth ceiling of 2.0 -- the audit verifies train rows only (I3).
+_ENVELOPE_CAP_AUDIT_RETURNS = pd.Series(
+    np.random.default_rng(11).normal(0.0009, 0.02, 600),
+    index=pd.date_range("2021-01-01", periods=600, freq="D", tz="UTC"),
+)
+
+
 def _frontier_multiple(r: pd.Series, envelope_name: str) -> float | None:
     """Direct conservative-style frontier readout used to pin fixture facts."""
     from src.mhs.params import (
@@ -197,3 +207,91 @@ class TestEnvelopeExposureCap:
             scaling._envelope_exposure_cap(
                 GROWTH_RISK_ENVELOPES["growth"], COMMITTEE_TARGET_GROSS, short,
             )
+
+
+# SCENARIO_MHS_EXPOSURE_CEILING_01
+def test_scenario_mhs_exposure_ceiling_01_cap_returns_registered_policy_constant() -> None:
+    cap_growth = scaling._envelope_exposure_cap(
+        GROWTH_RISK_ENVELOPES["growth"], COMMITTEE_TARGET_GROSS,
+        _ENVELOPE_CAP_TEST_RETURNS,
+    )
+    assert cap_growth == 2.0
+    assert cap_growth == GROWTH_RISK_ENVELOPES["growth"].leverage_ceiling
+    frontier_multiple = _frontier_multiple(_ENVELOPE_CAP_TEST_RETURNS, "growth")
+    assert frontier_multiple is not None
+    assert cap_growth != pytest.approx(frontier_multiple)
+    cap_moderate = scaling._envelope_exposure_cap(
+        GROWTH_RISK_ENVELOPES["growth_moderate"], COMMITTEE_TARGET_GROSS,
+        _ENVELOPE_CAP_TEST_RETURNS,
+    )
+    assert cap_moderate == 1.5
+
+
+# SCENARIO_MHS_EXPOSURE_CEILING_02
+def test_scenario_mhs_exposure_ceiling_02_fail_closed_branches_preserved() -> None:
+    with pytest.raises(ValueError, match="must not exceed"):
+        scaling._envelope_exposure_cap(
+            GROWTH_RISK_ENVELOPES["growth"], COMMITTEE_TARGET_GROSS,
+            _ENVELOPE_CAP_FRONTIER_RETURNS,
+        )
+    short = pd.Series(
+        [0.001], index=pd.date_range("2021-01-01", periods=1, freq="D", tz="UTC"),
+    )
+    with pytest.raises(ValueError, match="too little history"):
+        scaling._envelope_exposure_cap(
+            GROWTH_RISK_ENVELOPES["growth"], COMMITTEE_TARGET_GROSS, short,
+        )
+
+
+# SCENARIO_MHS_EXPOSURE_CEILING_03
+def test_scenario_mhs_exposure_ceiling_03_audit_noop_on_fold_local_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _sentinel(*args: object, **kwargs: object) -> float:
+        raise AssertionError("_envelope_exposure_cap must not be invoked")
+
+    monkeypatch.setattr(scaling, "_envelope_exposure_cap", _sentinel)
+    idx = pd.date_range("2023-06-01", periods=200, freq="D", tz="UTC")
+    r = pd.Series(0.001, index=idx)  # every row >= COMMITTEE_OOS_START
+    assert scaling._assert_envelope_leverage_ceiling_verified(
+        GROWTH_RISK_ENVELOPES["growth"], r,
+    ) is None
+
+
+# SCENARIO_MHS_EXPOSURE_CEILING_03
+def test_scenario_mhs_exposure_ceiling_03_audit_propagates_fail_closed_breach() -> None:
+    from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS
+
+    assert len(_ENVELOPE_CAP_AUDIT_RETURNS) >= 2 * PNL_VOL_TARGET_BURN_IN_DAYS
+    with pytest.raises(ValueError, match="must not exceed"):
+        scaling._assert_envelope_leverage_ceiling_verified(
+            GROWTH_RISK_ENVELOPES["growth"], _ENVELOPE_CAP_AUDIT_RETURNS,
+        )
+
+
+# SCENARIO_MHS_EXPOSURE_CEILING_04
+def test_scenario_mhs_exposure_ceiling_04_replay_two_sided_uses_policy_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _sentinel(*args: object, **kwargs: object) -> float:
+        raise AssertionError("_envelope_exposure_cap must not be invoked from replay")
+
+    monkeypatch.setattr(scaling, "_envelope_exposure_cap", _sentinel)
+    rng = np.random.default_rng(42)
+    idx = pd.date_range("2021-01-01", periods=4 * 365, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0002, 0.015, len(idx)), index=idx)
+    two_sided = MhsDiagnosticRequest(
+        pnl_vol_target_mode="growth_budget",
+        growth_envelope="growth",
+        exposure_scale_two_sided=True,
+    )
+    one_sided = MhsDiagnosticRequest(
+        pnl_vol_target_mode="growth_budget",
+        growth_envelope="growth",
+        exposure_scale_two_sided=False,
+    )
+    scaled = scaling._replay_exposure_scale(ref, two_sided)
+    unscaled = scaling._replay_exposure_scale(ref, one_sided)
+    assert 1.0 < scaled.max() <= 2.0 + 1e-12
+    assert unscaled.max() <= 1.0 + 1e-12
+    assert scaled.mean() > unscaled.mean()
