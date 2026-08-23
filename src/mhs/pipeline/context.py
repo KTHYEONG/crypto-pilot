@@ -70,6 +70,8 @@ class PipelineContext:
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] = field(default_factory=dict)
     _fold_committee_weights: dict[int, Any] | None = None
     _fold_growth_budget_target_vol: dict[int, float] | None = None
+    # run-level 일간 참조 수익률: fold worker의 EWMA 워밍업 원천(I-WARM).
+    _fold_exposure_warmup_returns: Any = None
 
     # Book weights (S3)
     w_fast: pd.DataFrame = field(default_factory=lambda: pd.DataFrame())
@@ -114,6 +116,7 @@ class PipelineContext:
     folds: Any = None  # tuple[MhsFoldReport, ...]
     fold_blend_parity: Any = None
     fold_growth_concentration: Any = None
+    fold_realized_risk_parity: Any = None
     research_go: Any = None
     deployment: Any = None
 

@@ -16,7 +16,10 @@ from src.mhs.params import (
     GROWTH_RISK_ENVELOPES,
     LEVERAGE_FRONTIER_SCAN_MULTIPLES,
 )
-from src.mhs.pipeline.config import CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT
+from src.mhs.pipeline.config import (
+    CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT as _CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
+    CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
+)
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -127,13 +130,16 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument(
         "--execution-universe-size",
         type=int,
-        default=30,
+        default=_CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
         help=(
             "Number of top-liquidity symbols in the execution replay roster "
-            "(breadth N); default 30 matches the registered cap_30_roster "
-            "attestation. Sweep with care: the flat-bps cost model has no "
-            "market-impact term, so breadth gains are optimistic by "
-            "construction -- require a stress-cost tier pass before adopting"
+            "(breadth N); default 60 matches the registered cap_60_roster "
+            "attestation and was adopted on a measured stress-cost tier pass "
+            "(vs breadth 30: CAGR +17.4%%, Sharpe +20.2%%, stress-tier Sharpe "
+            "+14.8%%, MDD flat). Sweep with care beyond 60: the flat-bps cost "
+            "model has no market-impact term, so breadth gains are optimistic "
+            "by construction -- require a stress-cost tier pass before "
+            "adopting a larger value"
         ),
     )
     mhs.add_argument(
@@ -222,21 +228,23 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
-        "--committee-kelly-sizing",
+        "--no-committee-kelly-sizing",
         action="store_true",
         default=False,
         help=(
-            "Opt-in (with --committee-book, or committee capital which is on by "
-            "default -- see --no-committee-capital): blend the committee "
-            "total-exposure scale 50/50 with a train-only quarter-Kelly LCB "
-            "overlay (f=0.25, z=1.0 one-SE shrinkage, capped at 1.0x when "
-            "applied to committee capital, at 1.5x when diagnostic-only via "
-            "--committee-book) instead of the flat vol-target scale alone. "
-            "Measured on the committee-capital execution-replay path: reduces "
-            "MDD but also reduces CAGR and Calmar (net negative for compounded "
-            "growth) -- enable only if drawdown control is prioritized over "
-            "compounding, not as a default performance improvement; see run "
-            "history for magnitudes"
+            "Opt-out: main-logic default is ON (with committee capital, which "
+            "is on by default -- see --no-committee-capital), blending the "
+            "committee total-exposure scale 50/50 with a train-only "
+            "quarter-Kelly LCB overlay (f=0.25, z=1.0 one-SE shrinkage) "
+            "instead of the flat vol-target scale alone. The Kelly term "
+            "shares the resolved growth envelope's leverage_ceiling as its "
+            "clip cap -- previously a stale hard 1.0x cap made the 50/50 "
+            "blend a pure de-leverager. Real 3m replay (growth_extreme, "
+            "breadth 60) measured CAGR 341.6%%/MDD -38.4%%/Calmar 8.89 vs the "
+            "Kelly-off baseline's CAGR 349.8%%/MDD -45.6%%/Calmar 7.68 -- MDD "
+            "and Calmar both improve for a 2.3%% CAGR cost "
+            "(ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING); pass this flag to "
+            "opt back out to the pure vol-target scale"
         ),
     )
     mhs.add_argument(
@@ -502,13 +510,16 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
-        "--pnl-vol-target-mode", choices=["exante_target", "median_relative", "growth_budget"], default="growth_budget",
+        "--pnl-vol-target-mode", choices=["exante_target", "median_relative", "growth_budget", "constant_risk"], default="growth_budget",
+        # choices mirror MhsDiagnosticRequest.pnl_vol_target_mode cli_param (declare-once).
         help=(
             "P&L vol-target mode. Main logic default is growth_budget: the "
             "target volatility is solved per-boundary (fold-leak-free) from "
             "the resolved --growth-envelope's registered drawdown budget, "
             "rather than the fixed PNL_TARGET_ANNUAL_VOL=0.20 constant "
-            "exante_target uses"
+            "exante_target uses. constant_risk deploys a constant realized "
+            "risk (EWMA halflife 90d) without the Kelly blend "
+            "(ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT)"
         ),
     )
     mhs.add_argument(

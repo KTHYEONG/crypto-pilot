@@ -148,6 +148,7 @@ from src.mhs.params import (
     FOLD_BLEND_PARITY_TOLERANCE,
     FOLD_GROWTH_CONCENTRATION_MAX_SHARE,
     FOLD_PANEL_WARMUP_HOURS,
+    FOLD_REALIZED_RISK_PARITY_TOLERANCE,
     GO_PRIMARY_SHARPE_FLOOR,
     PNL_VOL_TARGET_BURN_IN_DAYS,  # noqa: F401  (facade re-export; public API)
     PNL_VOL_TARGET_SCALE_FLOOR,  # noqa: F401  (facade re-export; public API)
@@ -308,15 +309,21 @@ REFERENCE_ONLY_EXECUTION_BOUNDS: frozenset[str] = frozenset(
 
 # Unrecoverable source gap exclusions (Binance REST API & Vision archives have >4h gaps):
 # SLPUSDT, CTKUSDT, LITUSDT, AERGOUSDT, PUMPUSDT, CVXUSDT, CVCUSDT
-# BNXUSDT is NOT excluded despite a confirmed source-side gap (2023-01-31 23:57 to
-# 2023-02-22 14:45 UTC, no candles at fapi.binance.com either -- see
-# ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT): excluding it costs the
-# committee_capital baseline ~30% relative Calmar (1.128 -> 0.786, measured), so
-# it is only a real problem for a strategy that trades the gap window, which no
-# shipped configuration does today. Re-evaluate if a future feature needs to
-# trade a symbol uniformly across the eligible universe during that window.
+# BNXUSDT re-evaluated 2026-08-23 (ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING
+# follow-up): confirmed via BOTH the live REST klines endpoint AND the Binance
+# Vision monthly archive that FOUR windows are absent from every current
+# Binance data source, not just the previously-documented 2023 one --
+# 2022-04-16 23:57..2022-04-18 00:00, 2022-06-08 23:57..2022-06-10 00:00,
+# 2022-08-09 23:57..2022-08-13 00:00, and 2023-01-31 23:57..2023-02-22 14:45
+# UTC. exchangeInfo reports this symbol's current contract onboardDate as
+# 2023-02-22 (a delist/relist), so the pre-relist history is not just
+# uncollected but no longer served by the exchange at all -- no backfill path
+# exists. The prior ~30% relative Calmar cost estimate was measured before
+# committee_kelly_sizing/growth_extreme/breadth-60 became the defaults; see
+# fold0's RELEVANT_EXECUTION_DATA_GAP measurement for the current cost.
 SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
     "SLPUSDT", "CTKUSDT", "LITUSDT", "AERGOUSDT", "PUMPUSDT", "CVXUSDT", "CVCUSDT",
+    "BNXUSDT",
 })
 
 
@@ -504,6 +511,49 @@ def _fold_growth_concentration(
         else ()
     )
     return payload, reason_codes
+
+
+def _fold_realized_risk_parity(
+    folds: tuple[MhsFoldReport, ...],
+    tolerance: float = FOLD_REALIZED_RISK_PARITY_TOLERANCE,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Observe realized-risk parity across folds (observation-only diagnostic).
+
+    Returns ``(payload, reason_codes)`` with reason_codes ALWAYS empty -- this
+    never alters the Research-GO decision. The reference is the median
+    ``realized_annualized_vol`` of measurable folds; each fold contributes its
+    ``log_ratio = ln(vol / median)`` and the payload reports
+    ``max_abs_log_risk_ratio`` against ``tolerance``. Folds whose vol is
+    None/non-finite/<=0 or whose ``primary_valid`` is False are recorded under
+    ``payload['unmeasured']`` and excluded from the denominator (the same
+    degenerate-evidence fail-open pattern as ``_fold_growth_concentration``).
+    """
+    payload: dict[str, Any] = {
+        "folds": {},
+        "unmeasured": [],
+        "max_abs_log_risk_ratio": 0.0,
+        "tolerance": tolerance,
+    }
+    measured: list[tuple[int, float]] = []
+    for fold in folds:
+        vol = fold.realized_annualized_vol
+        if not fold.primary_valid or vol is None or not math.isfinite(vol) or vol <= 0.0:
+            payload["unmeasured"].append(fold.fold_index)
+            continue
+        measured.append((fold.fold_index, vol))
+    if len(measured) < 2:
+        return payload, ()
+    median_vol = float(np.median([vol for _, vol in measured]))
+    max_abs_log_ratio = 0.0
+    for fold_index, vol in measured:
+        log_ratio = math.log(vol / median_vol)
+        payload["folds"][fold_index] = {
+            "realized_annualized_vol": vol,
+            "log_ratio": log_ratio,
+        }
+        max_abs_log_ratio = max(max_abs_log_ratio, abs(log_ratio))
+    payload["max_abs_log_risk_ratio"] = max_abs_log_ratio
+    return payload, ()
 
 
 def _fold_blend_parity(
@@ -2127,6 +2177,9 @@ def _book_outcome(
                     replay_scale if replay_scale is not None
                     else pd.Series(1.0, index=pnl_vol_target_scale.index)
                 )
+                # I4 observability: resolve the cap once per run -- it is a
+                # data-independent policy constant, never per-fold state.
+                _resolved_cap = _scaling.resolved_exposure_cap(request)
                 for _idx, _fold in enumerate(phase_1_anchored_purged_folds()):
                     _fold_scale = _deployed_scale.loc[
                         (_deployed_scale.index >= _fold.validation_start)
@@ -2134,6 +2187,9 @@ def _book_outcome(
                     ].dropna()
                     if _idx in blend_traces and len(_fold_scale) > 0:
                         blend_traces[_idx]["exposure_scale_mean"] = float(_fold_scale.mean())
+                        blend_traces[_idx]["exposure_scale_cap_binding_fraction"] = float(
+                            (_fold_scale >= _resolved_cap - 1e-12).mean(),
+                        )
             pre_vol_target_reference = primary_two_pass
             pre_vol_target_reference_naive_sharpe = _statistics._naive_sharpe(primary_two_pass.ledger)
             batch = replay_execution_window_batch_isolated(
@@ -2545,6 +2601,7 @@ def _run_post_book_concurrently(
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
     fold_committee_weights: dict[int, dict[str, float]] | None = None,
     fold_growth_budget_target_vol: dict[int, float] | None = None,
+    exposure_warmup_returns: pd.Series | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -2603,6 +2660,7 @@ def _run_post_book_concurrently(
                 (fold_funding_carry or {}).get(fold_index),
                 (fold_committee_weights or {}).get(fold_index),
                 growth_budget_target_vol=(fold_growth_budget_target_vol or {}).get(fold_index),
+                exposure_warmup_returns=exposure_warmup_returns,
             ): fold_index
             for fold_index, fold in enumerate(folds)
         }
@@ -3338,6 +3396,23 @@ def _run_fold_safe_discovery_parallel(
     return slow, fast, funding_carry
 
 
+def _fold_exposure_warmup(
+    exposure_warmup_returns: pd.Series | None,
+    validation_start: pd.Timestamp,
+) -> pd.Series | None:
+    """Pure slicer keeping only warmup rows strictly before a fold's start.
+
+    Defense in depth against leak (I-WARM): even though the fold worker's
+    scale primitive fail-closes on overlap, the run-level warmup reference is
+    sliced here so no row at/after ``validation_start`` ever reaches it.
+    """
+    if exposure_warmup_returns is None:
+        return None
+    return exposure_warmup_returns.loc[
+        exposure_warmup_returns.index < validation_start
+    ]
+
+
 def _run_anchored_fold(
     root: str,
     fold: AnchoredPurgedFold,
@@ -3351,6 +3426,7 @@ def _run_anchored_fold(
     funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
     committee_member_weights: dict[str, float] | None = None,
     growth_budget_target_vol: float | None = None,
+    exposure_warmup_returns: pd.Series | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
@@ -3421,7 +3497,7 @@ def _run_anchored_fold(
         # same causal P&L-vol-target scale as the top-level books, computed from
         # the fold's own validation-window reference ledger.
         reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request, growth_budget_target_vol)
+        pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request, growth_budget_target_vol, warmup_returns=_fold_exposure_warmup(exposure_warmup_returns, vs))
         primary, stress = replay_execution_window_batch(
             _window_telemetry(
                 _rescaled_windows(_windows(), pnl_vol_target_scale),
@@ -3437,6 +3513,14 @@ def _run_anchored_fold(
 
         failures: list[str] = []
         equity = primary.ledger.equity
+        # 관측 전용: 스케일이 실제 적용된 배치 원장의 실현 연변동성
+        # (fold_realized_risk_parity 입력) -- 스케일 이전 참조 패스가 아니다.
+        _deployed_daily = equity.resample("1D").last().pct_change().dropna()
+        realized_annualized_vol = (
+            float(_deployed_daily.std(ddof=1) * np.sqrt(365.0))
+            if len(_deployed_daily) >= 2
+            else None
+        )
         if not np.isfinite(equity.to_numpy()).all() or not (equity > 0).all():
             failures.append(GO_REASON_NONFINITE_EQUITY)
         if not primary.ledger.primary_valid:
@@ -3534,8 +3618,12 @@ def _run_anchored_fold(
                 # exposure scale actually applied to this fold, not just the
                 # pre-scale decision book.
                 "exposure_scale_mean": float(pnl_vol_target_scale.mean()),
+                "exposure_scale_cap_binding_fraction": float(
+                    (pnl_vol_target_scale >= _scaling.resolved_exposure_cap(request) - 1e-12).mean(),
+                ),
             },
             regime_characterization=_fold_regime_characterization(root, fold),
+            realized_annualized_vol=realized_annualized_vol,
         )
     except DataIntegrityError as exc:
         return _incomplete_fold_report(fold, fold_index, (_classify_execution_failure(exc),))
@@ -3551,6 +3639,7 @@ def _run_folds_parallel(
     fold_slow_horizons: dict[int, int | None] | None = None,
     fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
+    exposure_warmup_returns: pd.Series | None = None,
 ) -> tuple[MhsFoldReport, ...]:
     """Run the three anchored folds concurrently, one process each.
 
@@ -3589,6 +3678,7 @@ def _run_folds_parallel(
                 (fold_slow_horizons or {}).get(idx),
                 (fold_fast_horizons or {}).get(idx),
                 (fold_funding_carry or {}).get(idx),
+                exposure_warmup_returns=exposure_warmup_returns,
             ): idx
             for idx, fold in enumerate(folds)
         }
