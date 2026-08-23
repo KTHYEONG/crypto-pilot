@@ -32,6 +32,10 @@ def _mhs_cli_flags() -> set[str]:
     flags = _flag_set(parser)
     # The output tier is a persistence switch on the parser, not a request field.
     flags.discard("--output-tier")
+    # SCENARIO_MHS_LEVERAGE_SCAN_07: diagnostic-only short-circuit switches,
+    # never construct MhsDiagnosticRequest.
+    flags.discard("--leverage-frontier-scan")
+    flags.discard("--leverage-frontier-multiples")
     return flags
 
 
