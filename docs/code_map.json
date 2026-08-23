@@ -257,5 +257,8 @@
   "src/mhs/pipeline/config.py": {
     "architecture": "docs/architecture/mhs-explain.md",
     "testing": "tests/integration/mhs/test_mhs_growth_budget_acceptance.py"
+  },
+  "src/application/research/mhs/leverage_scan.py": {
+    "testing": "tests/unit/application/research/mhs/test_leverage_scan.py"
   }
 }
