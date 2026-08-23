@@ -104,7 +104,13 @@ class MhsDiagnosticRequest:
             choices=("1m", "3m", "5m"),
         ),
     )
-    execution_universe_size: int = 30
+    execution_universe_size: int = field(
+        default=30,
+        metadata=cli_param(
+            flag="--execution-universe-size",
+            help="Number of top-liquidity symbols in the execution replay roster.",
+        ),
+    )
     max_rss_bytes: int | None = field(
         default=None,
         metadata=cli_param(flag="--max-rss-bytes", help="Optional process RSS budget in bytes."),
@@ -285,7 +291,13 @@ class MhsDiagnosticRequest:
     )
     exposure_scale_two_sided: bool = field(
         default=False,
-        metadata=cli_param(flag="--exposure-scale-two-sided", help="Allow lever-up above 1.0x."),
+        metadata=cli_param(
+            flag="--exposure-scale-two-sided",
+            help="Allow lever-up above 1.0x.",
+            # Main logic default is ON at the MhsRunConfig effective-default
+            # owner layer; the CLI only exposes the negation.
+            negate_flag="--no-exposure-scale-two-sided",
+        ),
     )
     ram_guard: bool = field(
         default=True,
