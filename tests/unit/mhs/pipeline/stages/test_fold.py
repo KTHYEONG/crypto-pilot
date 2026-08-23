@@ -190,6 +190,75 @@ def test_run_folds_resolves_boundary_growth_budget_vols(monkeypatch: pytest.Monk
     assert captured["forwarded"] == {0: 0.30}
     assert ctx._fold_growth_budget_target_vol == {0: 0.30}
 
+def test_run_folds_broadcasts_top_level_constant_risk_vol(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SCENARIO_MHS_CONSTANT_RISK_FOLD_BROADCASTS_TOP_LEVEL_VOL (stage wiring): under
+    # constant_risk mode with >=2 fold stubs, run_folds resolves the target vol
+    # once at the top-level boundary and broadcasts that single float to every
+    # fold index -- the per-fold boundary resolver must never be invoked.
+    captured: dict[str, object] = {}
+
+    def _fake_top_level_vol(_ref: object, _envelope: object) -> float:
+        return 0.4123
+
+    def _must_not_resolve_by_boundary(*_a: object, **_k: object) -> float:
+        raise AssertionError("constant_risk folds must broadcast the top-level vol, not re-solve per boundary")
+
+    def _fake_run_post_book_concurrently(*args: object, **kwargs: object):
+        # 위치 인자 순서: ..., fold_committee_weights, fold_growth_budget_target_vol,
+        # exposure_warmup_returns (I-WARM 워밍업 Series가 마지막).
+        captured["forwarded"] = kwargs.get("fold_growth_budget_target_vol", args[-2])
+        return (None, None, {}, {}, [], None)
+
+    class _FoldStub:
+        def __init__(self, train_end: pd.Timestamp) -> None:
+            self.train_end = train_end
+
+    monkeypatch.setattr(fold_stage._scaling, "_constant_risk_target_vol", _fake_top_level_vol)
+    monkeypatch.setattr(
+        fold_stage._scaling, "_constant_risk_target_vol_by_boundary", _must_not_resolve_by_boundary,
+    )
+    monkeypatch.setattr(
+        fold_stage, "phase_1_anchored_purged_folds",
+        lambda: (
+            _FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),
+            _FoldStub(pd.Timestamp("2023-06-01", tz="UTC")),
+        ),
+    )
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently)
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        fold_stage._research_go, "_mhs_research_go",
+        lambda *_a, **_k: type("_RG", (), {"eligible": False})(),
+    )
+    monkeypatch.setattr(
+        fold_stage._research_go, "_resolved_growth_envelope",
+        lambda _config: type("_Env", (), {"max_drawdown": -0.5})(),
+    )
+
+    ctx = _bare_context(committee_book=False)
+    ctx.config = dataclasses.replace(ctx.config, pnl_vol_target_mode="constant_risk")
+    ctx.blend_report = type(
+        "_BlendStub", (),
+        {
+            "pre_vol_target_reference": type(
+                "_RefStub", (), {"ledger": type("_LedgerStub", (), {
+                    "equity": pd.Series([1.0, 1.1, 1.2], index=_GRID),
+                })()},
+            ),
+            "primary_max_drawdown": -0.1,
+            "primary": None,
+        },
+    )()
+    fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
+
+    assert ctx._fold_growth_budget_target_vol == {0: 0.4123, 1: 0.4123}
+    assert captured["forwarded"] == {0: 0.4123, 1: 0.4123}
+
 
 def test_run_folds_skips_boundary_vols_outside_growth_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     # The default (exante_target/conservative) run must never touch the
