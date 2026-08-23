@@ -129,6 +129,17 @@ COMMITTEE_REGIME_ADAPTIVE_WINDOW: int = 15
 COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS: tuple[float, ...] = (
     0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
 )
+
+# DIAGNOSTIC-ONLY constant for the leverage-frontier-scan CLI flag; must never
+# be merged with or substituted for COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS --
+# that production grid drives growth_budget_annual_vol's actual target_vol
+# solve (changing it changes deployed exposure), while this one drives nothing
+# but a read-only report.
+LEVERAGE_FRONTIER_SCAN_MULTIPLES: tuple[float, ...] = (
+    0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0,
+    2.25, 2.5, 2.75, 3.0, 3.25, 3.5, 3.75, 4.0,
+    4.25, 4.5, 4.75, 5.0,
+)
 COMMITTEE_GROWTH_MAX_DRAWDOWN: float = 0.25
 COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB: float = 0.10
 COMMITTEE_GROWTH_RUIN_FRACTION: float = 0.60
@@ -173,6 +184,20 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
         max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
         horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
         leverage_ceiling=2.0,
+    ),
+    # TEMP experimental rung (ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN follow-up
+    # measurement): leverage_frontier_scan reported feasible=True up to 8.0x on
+    # the pre-OOS slice; 3.0x is the next stepwise rung and matches the
+    # production COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS ceiling. Revert if not
+    # adopted per the pre-registered acceptance criteria.
+    "growth_extreme": GrowthRiskEnvelope(
+        name="growth_extreme",
+        max_drawdown=1.0,
+        max_drawdown_prob=1.0,
+        ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+        leverage_ceiling=3.0,
     ),
 }
 
