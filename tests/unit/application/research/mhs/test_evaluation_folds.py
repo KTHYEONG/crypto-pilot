@@ -158,10 +158,10 @@ class TestAnchoredFoldBounded:
 
     def test_no_rss_budget_returns_complete_fold(self, mhs_market) -> None:
         report = self._run_fold(mhs_market, max_rss_bytes=None)
-        assert report.strict is not None or report.failures == (
-            ev.GO_REASON_PRIMARY_SHARPE,
-            ev.GO_REASON_STRESS_SHARPE,
-        )
+        # I-FAMILY: 완결 fold의 failures는 데이터 무결성 코드만 담는다 --
+        # fold별 level 코드(Sharpe/stress/연수익)는 pooled 게이트로 이전했다.
+        assert report.strict is not None
+        assert report.failures == ()
 
 @pytest.mark.slow
 def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:

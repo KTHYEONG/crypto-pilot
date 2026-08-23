@@ -78,6 +78,8 @@ class MhsHorizonDiagnosticReport:
     fold_blend_parity: dict[str, Any] | None = None
     fold_growth_concentration: dict[str, Any] | None = None
     fold_realized_risk_parity: dict[str, Any] | None = None
+    # 선언형 alpha 증거 게이트의 런별 보정 결과(null_alpha/임계값/pooled LCB).
+    evidence_calibration: dict[str, Any] | None = None
     fill_mark_parity: dict[str, Any] | None = None
     growth_envelope: dict[str, Any] | None = None
     committee_member_attribution: dict[str, Any] | None = None

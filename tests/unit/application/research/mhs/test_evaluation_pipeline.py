@@ -602,12 +602,12 @@ def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
             assert value is None or np.isfinite(value)
 
 def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -> None:
-    """SCENARIO_MHS_RESEARCH_GO_ELIGIBLE_WITH_REGISTERED_POLICY: a fold whose
-    realized primary_net_ann falls below the registered
-    REGISTERED_POLICY_THRESHOLDS['primary_annual_return'] floor carries
-    GO_REASON_PRIMARY_RETURN_BELOW_FLOOR in its failures; an unregistered
-    (None) threshold never adds the code, matching the pre-registration
-    conservative fail-closed default."""
+    """SCENARIO_MHS_RESEARCH_GO_ELIGIBLE_WITH_REGISTERED_POLICY: the registered
+    REGISTERED_POLICY_THRESHOLDS['primary_annual_return'] floor is enforced on
+    the POOLED level evidence by research_go's pooled lower-bound gate, never
+    as a per-fold failure code (I-FAMILY); an unregistered (None) threshold
+    adds no code, matching the pre-registration conservative fail-closed
+    default."""
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -621,23 +621,33 @@ def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -
         execution_universe_size=8,
     )
 
-    monkeypatch.setattr(
-        ev, "REGISTERED_POLICY_THRESHOLDS",
-        {"cap_30_roster": 30.0, "primary_annual_return": 10.0},
-    )
-    unreachable_floor = ev._run_anchored_fold(
+    # I-FAMILY: fold replay는 level 코드를 만들지 않는다(무결성 코드만).
+    completed_fold = ev._run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
     )
-    assert ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR in unreachable_floor.failures
+    assert ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR not in completed_fold.failures
+
+    from src.application.research.mhs import research_go as _research_go_module
+
+    low_return_evidence = {
+        "n_measured_folds": 4,
+        "pooled_sharpe_lcb": 1.0,
+        "pooled_stress_sharpe_lcb": 0.5,
+        "pooled_annual_log_return": 0.01,
+    }
+    monkeypatch.setattr(
+        _research_go_module, "REGISTERED_POLICY_THRESHOLDS",
+        {"cap_60_roster": 60.0, "primary_annual_return": 10.0},
+    )
+    assert _research_go_module._pooled_level_gate_reasons(low_return_evidence) == (
+        ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR,
+    )
 
     monkeypatch.setattr(
-        ev, "REGISTERED_POLICY_THRESHOLDS",
-        {"cap_30_roster": 30.0, "primary_annual_return": None},
+        _research_go_module, "REGISTERED_POLICY_THRESHOLDS",
+        {"cap_60_roster": 60.0, "primary_annual_return": None},
     )
-    unregistered = ev._run_anchored_fold(
-        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
-    )
-    assert ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR not in unregistered.failures
+    assert _research_go_module._pooled_level_gate_reasons(low_return_evidence) == ()
 
 
 

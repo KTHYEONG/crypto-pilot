@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
+from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -17,6 +20,7 @@ from src.application.research.mhs.evaluation import (
     _fold_growth_concentration,
     _fold_realized_risk_parity,
     _incomplete_fold_report,
+    _pooled_fold_evidence,
     build_mhs_run_history_record,
 )
 from src.application.research.mhs.research_go import _mhs_research_go
@@ -296,7 +300,7 @@ def test_fold_growth_concentration_balanced_no_code() -> None:
         _concentration_fold(1, 0.12),
         _concentration_fold(2, 0.11),
     )
-    payload, reasons = _fold_growth_concentration(folds)
+    payload, reasons = _fold_growth_concentration(folds, 0.5)
     assert reasons == ()
     assert payload["max_fold_share"] <= 0.5
     assert len(payload["folds"]) == 3
@@ -310,7 +314,7 @@ def test_fold_growth_concentration_single_fold_dominance_blocks_go() -> None:
         _concentration_fold(1, 0.08147),
         _concentration_fold(2, 1.050152),
     )
-    payload, reasons = _fold_growth_concentration(folds)
+    payload, reasons = _fold_growth_concentration(folds, 0.5)
     assert reasons == (GO_REASON_FOLD_GROWTH_CONCENTRATION,)
     assert payload["max_fold_share"] == pytest.approx(0.790, abs=1e-2)
 
@@ -326,10 +330,106 @@ def test_fold_growth_concentration_invalid_fold_unmeasured() -> None:
         _concentration_fold(0, 0.10, primary_valid=False),
         _concentration_fold(1, 0.12),
     )
-    payload, reasons = _fold_growth_concentration(folds)
+    payload, reasons = _fold_growth_concentration(folds, 0.5)
     assert reasons == ()
     assert 0 in payload["unmeasured"]
     assert 1 not in payload["unmeasured"]
+
+
+# SCENARIO_MHS_FOLD_CONCENTRATION_TAKES_EXPLICIT_THRESHOLD
+def test_fold_growth_concentration_threshold_is_explicit_argument() -> None:
+    # 로그성장 share가 (0.526, 0.158, 0.158, 0.158)인 fold 집합: 실측 관측치 재현.
+    cagrs = tuple(math.expm1(logret) for logret in (0.526, 0.158, 0.158, 0.158))
+    folds = tuple(
+        _concentration_fold(index, cagr) for index, cagr in enumerate(cagrs)
+    )
+    passing_payload, passing_reasons = _fold_growth_concentration(folds, 0.602)
+    assert passing_reasons == ()
+    assert passing_payload["max_fold_share"] == pytest.approx(0.526, abs=1e-3)
+    assert passing_payload["threshold"] == 0.602
+    assert passing_payload["max_share"] == 0.602
+
+    failing_payload, failing_reasons = _fold_growth_concentration(folds, 0.50)
+    assert failing_reasons == (GO_REASON_FOLD_GROWTH_CONCENTRATION,)
+    assert failing_payload["threshold"] == 0.50
+    assert failing_payload["max_share"] == 0.50
+
+    with pytest.raises(TypeError):
+        _fold_growth_concentration(folds)  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# _pooled_fold_evidence tests (level-family evidence pooling)
+# ---------------------------------------------------------------------------
+
+
+def _daily_equity(days: int) -> pd.Series:
+    index = pd.date_range("2021-02-01", periods=days, freq="1D", tz="UTC")
+    return pd.Series(np.linspace(1.0, 1.05, days), index=index)
+
+
+def _replay_stub(equity: pd.Series | None) -> SimpleNamespace | None:
+    if equity is None:
+        return None
+    return SimpleNamespace(ledger=SimpleNamespace(equity=equity))
+
+
+def _evidence_fold(
+    fold_index: int,
+    strict: SimpleNamespace | None = None,
+    stress: SimpleNamespace | None = None,
+    primary_valid: bool = True,
+) -> MhsFoldReport:
+    return dataclasses.replace(
+        _concentration_fold(fold_index, 0.10, primary_valid=primary_valid),
+        strict=strict,
+        stress=stress,
+    )
+
+
+# SCENARIO_MHS_POOLED_FOLD_EVIDENCE_EXCLUDES_INVALID_FOLDS
+def test_pooled_fold_evidence_excludes_invalid_primary_folds() -> None:
+    folds = (
+        _evidence_fold(0, _replay_stub(_daily_equity(10)), _replay_stub(_daily_equity(10))),
+        _evidence_fold(1, _replay_stub(_daily_equity(12)), _replay_stub(_daily_equity(12))),
+        _evidence_fold(
+            2, _replay_stub(_daily_equity(16)), _replay_stub(_daily_equity(16)),
+            primary_valid=False,
+        ),
+        _evidence_fold(3, _replay_stub(_daily_equity(14)), _replay_stub(_daily_equity(14))),
+    )
+    payload = _pooled_fold_evidence(folds)
+    assert payload["unmeasured"] == [2]
+    assert payload["n_measured_folds"] == 3
+    assert payload["n_pooled_days"] == 9 + 11 + 13
+    assert np.isfinite(payload["pooled_sharpe_lcb"])
+    assert np.isfinite(payload["pooled_stress_sharpe_lcb"])
+
+
+# SCENARIO_MHS_POOLED_FOLD_EVIDENCE_EXCLUDES_INVALID_FOLDS
+def test_pooled_fold_evidence_excludes_missing_replay_folds() -> None:
+    folds = (
+        _evidence_fold(0, _replay_stub(_daily_equity(10)), _replay_stub(_daily_equity(10))),
+        _evidence_fold(1, None, _replay_stub(_daily_equity(12))),
+        _evidence_fold(2, _replay_stub(_daily_equity(14)), None),
+    )
+    payload = _pooled_fold_evidence(folds)
+    assert payload["unmeasured"] == [1, 2]
+    assert payload["n_measured_folds"] == 1
+    assert payload["n_pooled_days"] == 9
+
+
+# SCENARIO_MHS_POOLED_FOLD_EVIDENCE_EXCLUDES_INVALID_FOLDS
+def test_pooled_fold_evidence_zero_measured_folds_fails_closed() -> None:
+    folds = (
+        _evidence_fold(0, primary_valid=False),
+        _evidence_fold(1, primary_valid=False),
+    )
+    payload = _pooled_fold_evidence(folds)
+    assert payload["n_measured_folds"] == 0
+    assert payload["n_pooled_days"] == 0
+    assert payload["pooled_sharpe_lcb"] == float("-inf")
+    assert payload["pooled_stress_sharpe_lcb"] == float("-inf")
 
 
 def test_run_history_record_includes_fold_growth_concentration() -> None:
