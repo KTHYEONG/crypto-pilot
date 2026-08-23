@@ -58,3 +58,22 @@ def test_every_cli_exposed_field_carries_flag_metadata() -> None:
     for field in dataclasses.fields(MhsDiagnosticRequest):
         if "flag" in field.metadata:
             assert field.metadata["flag"], f"field {field.name} has empty flag metadata"
+
+
+def test_pnl_vol_target_mode_choices_match_cli_and_metadata() -> None:
+    """SCENARIO_MHS_CONSTANT_RISK_REQUEST_CLI_PARITY: the request contract's
+    cli_param choices and the hand-written CLI argparse choices for
+    --pnl-vol-target-mode stay exactly equal (4 registered values)."""
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    cli_action = next(a for a in parser._actions if a.dest == "pnl_vol_target_mode")
+    field = next(
+        f for f in dataclasses.fields(MhsDiagnosticRequest)
+        if f.name == "pnl_vol_target_mode"
+    )
+    meta_choices = field.metadata["choices"]
+    # 선언 순서는 계약/CLI 간 다를 수 있으므로 등록 값집합의 정확한 일치를 단언한다.
+    assert sorted(cli_action.choices) == sorted(meta_choices)
+    assert len(meta_choices) == 4
+    assert "constant_risk" in meta_choices
