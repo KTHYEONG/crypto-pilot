@@ -603,11 +603,12 @@ def _capturing_anchored_fold(
     root, fold, request, funding_by_symbol, initial_equity, fold_index,
     telemetry=None, slow_horizon_override=None, fast_horizon_override=None,
     funding_carry_override=None, committee_member_weights=None,
-    growth_budget_target_vol=None,
+    growth_budget_target_vol=None, exposure_warmup_returns=None,
 ):
     _CAPTURED_FOLD_SUBMISSIONS.append({
         "fold_index": fold_index,
         "growth_budget_target_vol": growth_budget_target_vol,
+        "exposure_warmup_returns": exposure_warmup_returns,
     })
     return ev._incomplete_fold_report(fold, fold_index, ())
 

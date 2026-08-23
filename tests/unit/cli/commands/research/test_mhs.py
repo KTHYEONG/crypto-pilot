@@ -394,11 +394,13 @@ def test_mhs_diagnostic_committee_flag_threaded_to_request(monkeypatch) -> None:
     assert captured["committee_book"] is False
 
 
-def test_mhs_diagnostic_committee_kelly_sizing_flag_threaded_to_request(monkeypatch) -> None:
-    """SCENARIO_MHS_COMMITTEE_KELLY_SIZING_CLI_FLAG_THREADED:
-    ``--committee-kelly-sizing`` (store_true, default False, requires
-    ``--committee-book``) is parsed and threaded into the constructed
-    ``MhsDiagnosticRequest``; omitting it yields committee_kelly_sizing=False."""
+def test_mhs_diagnostic_committee_kelly_sizing_defaults_on_and_opt_out(monkeypatch) -> None:
+    """SCENARIO_MHS_COMMITTEE_KELLY_SIZING_MAIN_LOGIC_DEFAULT: committee Kelly
+    sizing (real 3m replay measured CAGR 341.6%/MDD -38.4%/Calmar 8.89 vs the
+    Kelly-off baseline's CAGR 349.8%/MDD -45.6%/Calmar 7.68,
+    ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING) is on by default whenever
+    committee capital is active; ``--no-committee-kelly-sizing`` opts back out
+    to the pure vol-target scale while leaving committee capital on."""
     import src.application.research.mhs.evaluation as ev
 
     captured: dict = {}
@@ -419,19 +421,19 @@ def test_mhs_diagnostic_committee_kelly_sizing_flag_threaded_to_request(monkeypa
     parser = sub.choices["mhs-horizon-diagnostic"]
 
     defaults = {action.dest: action.default for action in parser._actions}
-    assert defaults["committee_kelly_sizing"] is False
+    assert defaults["no_committee_kelly_sizing"] is False
 
-    args = parser.parse_args(["--committee-book", "--committee-kelly-sizing"])
-    assert args.committee_book is True
-    assert args.committee_kelly_sizing is True
+    args = parser.parse_args([])
+    assert args.no_committee_kelly_sizing is False
     _run_mhs_horizon_diagnostic(args)
-    assert captured["committee_book"] is True
+    assert captured["committee_capital"] is True
     assert captured["committee_kelly_sizing"] is True
 
     captured.clear()
-    args = parser.parse_args(["--committee-book"])
-    assert args.committee_kelly_sizing is False
+    args = parser.parse_args(["--no-committee-kelly-sizing"])
+    assert args.no_committee_kelly_sizing is True
     _run_mhs_horizon_diagnostic(args)
+    assert captured["committee_capital"] is True
     assert captured["committee_kelly_sizing"] is False
 
 
@@ -478,20 +480,39 @@ def test_mhs_diagnostic_committee_growth_diagnostic_flag_threaded_to_request(mon
 
 def test_mhs_committee_kelly_sizing_help_text_no_stale_claims() -> None:
     """SCENARIO_MHS_COMMITTEE_KELLY_SIZING_HELP_TEXT_NO_LONGER_CLAIMS_COMMITTEE_BOOK_REQUIRED:
-    the registered ``--committee-kelly-sizing`` help no longer carries the stale
-    'requires --committee-book' claim, and parsing ``--committee-kelly-sizing``
-    alone succeeds now that committee capital is the default (no
-    ``--committee-book`` needed)."""
+    the registered ``--no-committee-kelly-sizing`` help no longer carries the
+    stale 'requires --committee-book' claim, and parsing it alone succeeds
+    now that committee capital is the default (no ``--committee-book``
+    needed)."""
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
     parser = sub.choices["mhs-horizon-diagnostic"]
 
-    kelly = next(a for a in parser._actions if a.dest == "committee_kelly_sizing")
+    kelly = next(a for a in parser._actions if a.dest == "no_committee_kelly_sizing")
     assert "requires --committee-book" not in kelly.help
 
-    args = parser.parse_args(["--committee-kelly-sizing"])
+    args = parser.parse_args(["--no-committee-kelly-sizing"])
     assert args.no_committee_capital is False
-    assert args.committee_kelly_sizing is True
+    assert args.no_committee_kelly_sizing is True
+
+
+# SCENARIO_MHS_KELLY_TWO_SIDED_07
+def test_scenario_mhs_kelly_two_sided_07_help_texts_reflect_two_sided_cap() -> None:
+    """The kelly-sizing help no longer carries the falsified de-leverager
+    claims, and the universe-size help documents the measured breadth-60
+    default matching the cap_60_roster attestation."""
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    kelly = next(a for a in parser._actions if a.dest == "no_committee_kelly_sizing")
+    assert "requires --committee-book" not in kelly.help
+    assert "capped at 1.0x" not in kelly.help
+    assert "net negative for compounded growth" not in kelly.help
+    assert "leverage_ceiling" in kelly.help
+
+    universe = next(a for a in parser._actions if a.dest == "execution_universe_size")
+    assert "60" in universe.help
 
 
 def test_mhs_diagnostic_committee_capital_defaults_on_and_opt_out(monkeypatch) -> None:
@@ -847,7 +868,7 @@ def test_mhs_diagnostic_leverage_frontier_scan_short_circuit_scenario_mhs_levera
     assert args.leverage_frontier_scan is True
     assert args.leverage_frontier_multiples == LEVERAGE_FRONTIER_SCAN_MULTIPLES
     _run_mhs_horizon_diagnostic(args)
-    assert captured["envelope_name"] == "growth"
+    assert captured["envelope_name"] == "growth_extreme"
     assert captured["candidate_multiples"] == LEVERAGE_FRONTIER_SCAN_MULTIPLES
 
     captured.clear()
