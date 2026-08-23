@@ -77,6 +77,7 @@ class MhsHorizonDiagnosticReport:
     funding_dropped_symbols: dict[str, str] | None = None
     fold_blend_parity: dict[str, Any] | None = None
     fold_growth_concentration: dict[str, Any] | None = None
+    fold_realized_risk_parity: dict[str, Any] | None = None
     fill_mark_parity: dict[str, Any] | None = None
     growth_envelope: dict[str, Any] | None = None
     committee_member_attribution: dict[str, Any] | None = None

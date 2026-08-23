@@ -207,6 +207,7 @@ def build_mhs_run_history_record(
         "termination_counts": report.termination_counts,
         "fold_blend_parity": report.fold_blend_parity,
         "fold_growth_concentration": report.fold_growth_concentration,
+        "fold_realized_risk_parity": report.fold_realized_risk_parity,
         "fill_mark_parity": report.fill_mark_parity,
         "growth_envelope": report.growth_envelope,
         "committee_member_attribution": report.committee_member_attribution,

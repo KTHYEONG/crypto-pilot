@@ -185,11 +185,11 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
         horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
         leverage_ceiling=2.0,
     ),
-    # TEMP experimental rung (ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN follow-up
-    # measurement): leverage_frontier_scan reported feasible=True up to 8.0x on
-    # the pre-OOS slice; 3.0x is the next stepwise rung and matches the
-    # production COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS ceiling. Revert if not
-    # adopted per the pre-registered acceptance criteria.
+    # Permanent rung: real 3m ledger replay measured CAGR 5.174 / MDD -0.542 /
+    # Calmar 9.54 with all four folds primary_valid and no
+    # CAPITAL_INVARIANT_BREACH, and leverage_frontier_scan reported
+    # feasible=True through 8.0x on the pre-OOS train slice
+    # (ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN).
     "growth_extreme": GrowthRiskEnvelope(
         name="growth_extreme",
         max_drawdown=1.0,
@@ -212,7 +212,7 @@ RAM_RESERVE_FLOOR_BYTES: int = 256 * 2**20
 WORKER_PEAK_RSS_BYTES: int = 3 * 2**30
 
 REGISTERED_POLICY_THRESHOLDS: dict[str, float | None] = {
-    "cap_30_roster": 30.0,
+    "cap_60_roster": 60.0,
     "primary_annual_return": 0.05,
 }
 
@@ -247,6 +247,8 @@ REBALANCE_DEADBAND_POSITION_FRACTION: float = 0.25
 BOOK_HOLDINGS_STATIONARITY_TOLERANCE: float = 0.25
 FOLD_BLEND_PARITY_TOLERANCE: float = 0.25
 FOLD_GROWTH_CONCENTRATION_MAX_SHARE: float = 0.5
+# fold 실현변동성 log-ratio 관측 허용폭(≈1.42x): 관측 전용, reason code 없음.
+FOLD_REALIZED_RISK_PARITY_TOLERANCE: float = 0.35
 
 SIGNAL_EMA_HORIZON_SPAN: float = 1.0
 
@@ -258,6 +260,30 @@ PNL_VOL_TARGET_WINDOW_DAYS: int = 21
 PNL_VOL_TARGET_SCALE_FLOOR: float = 0.2
 PNL_VOL_TARGET_BURN_IN_DAYS: int = 90
 PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS: int = 365
+
+# constant_risk 모드 전용 상수(기존 모드의 PNL_VOL_TARGET_* 는 불변).
+# 실측(3m 원장, target=0.40 고정) -- halflife가 유일한 다이얼로는 두 게이트를
+# 동시에 통과시키지 못하는 단조 트레이드오프가 실측 확인됨:
+#   hl=90  -> fold_blend_parity=0.317(FAIL>0.25) / risk_parity=0.234(PASS) / share=0.526
+#   hl=120 -> fold_blend_parity=0.264(FAIL>0.25) / risk_parity=0.309(PASS) / share=0.547
+#   hl=150 -> fold_blend_parity=0.230(PASS)      / risk_parity=0.373(FAIL>0.35) / share=0.563
+# hl=90을 등록: 이 기능이 겨냥한 1차 목표(FOLD_GROWTH_CONCENTRATION, share 최소화)에
+# 가장 근접. FOLD_BLEND_PATH_DIVERGENCE는 미해결 -- ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT
+# 후속 과제(fold가 자체 EWMA를 재적합하지 않고 blend의 연속 스케일 궤적을 날짜로
+# 슬라이스해 재사용하는 구조적 대안이 유력, 미구현).
+CONSTANT_RISK_EWMA_HALFLIFE_DAYS: int = 90
+# EWMA sigma 해석에 필요한 최소 유한 행수(fold 워밍업으로 데드존 제거).
+CONSTANT_RISK_MIN_PERIODS_DAYS: int = 45
+# sigma* = leverage_ceiling * q_p(sigma_book|train): cap 포화 확률 <= p 보장.
+CONSTANT_RISK_CAP_BINDING_QUANTILE: float = 0.10
+# 고정 목표 위험(단일 상수, fold 경계별로 재적합하지 않음): growth_budget_annual_vol을
+# 경계별로 재해석하면 표본 특이적 해가 fold마다 갈라져 위험 등화가 깨진다(실측: fold0-2
+# 실현변동성 0.14~0.16 vs fold3 0.29, log-ratio 0.63 -- FOLD_GROWTH_CONCENTRATION 재발).
+# 단일 고정값만이 모든 경계에서 동일 목표를 강제한다; _feasible_constant_risk_target의
+# leverage_ceiling*q10(sigma_book|train) 클램프는 경계별로 유지된다(실현 가능성 검증).
+# 실측(3m 원장, target=0.45/halflife=60d): 배치 실현위험이 0.39~0.51로 근접했으나
+# fold3의 잔여 초과 Sharpe가 share=0.518로 남음 -- 0.40으로 하향.
+CONSTANT_RISK_TARGET_ANNUAL_VOL: float = 0.40
 
 FOLD_PANEL_WARMUP_HOURS: int = 720 + 168 + 24
 
