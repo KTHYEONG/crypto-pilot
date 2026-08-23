@@ -2105,6 +2105,17 @@ def _book_outcome(
                 min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
             )
             reference_daily_returns = primary_two_pass.ledger.equity.resample("1D").last().pct_change()
+            if name == "blend" and request.exposure_scale_two_sided:
+                # The audit verifies the registered ceiling against the ONE
+                # book that actually deploys capital (I3: once per run). The
+                # fast/slow standalone reference books stay diagnostic-only
+                # under committee_capital=True and can be genuinely losing in
+                # a given train window -- their bootstrap frontier is
+                # legitimately infeasible and must never crash the run.
+                _scaling._assert_envelope_leverage_ceiling_verified(
+                    _research_go._resolved_growth_envelope(request),
+                    reference_daily_returns,
+                )
             pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request)
             replay_scale = pnl_vol_target_scale if request.pnl_vol_target else None
             if name == "blend":

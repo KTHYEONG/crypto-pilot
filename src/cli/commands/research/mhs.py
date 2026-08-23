@@ -101,6 +101,18 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
+        "--execution-universe-size",
+        type=int,
+        default=30,
+        help=(
+            "Number of top-liquidity symbols in the execution replay roster "
+            "(breadth N); default 30 matches the registered cap_30_roster "
+            "attestation. Sweep with care: the flat-bps cost model has no "
+            "market-impact term, so breadth gains are optimistic by "
+            "construction -- require a stress-cost tier pass before adopting"
+        ),
+    )
+    mhs.add_argument(
         "--touch-diagnostic",
         action="store_true",
         default=False,
@@ -331,14 +343,16 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     )
     mhs.add_argument("--no-fill-mark-parity-gate", action="store_true")
     mhs.add_argument(
-        "--exposure-scale-two-sided",
+        "--no-exposure-scale-two-sided",
         action="store_true",
         default=False,
         help=(
-            "Opt-in: allow the ex-ante vol target scale to lever UP above "
-            "1.0x when realized vol is below the target (two-sided scaling). "
-            "Requires --pnl-vol-target-mode=exante_target; the upper bound is "
-            "PNL_VOL_TARGET_MAX_SCALE = 1.0/COMMITTEE_TARGET_GROSS"
+            "Opt OUT of two-sided ex-ante vol targeting (main logic default is "
+            "ON): the scale may lever UP above 1.0x when realized vol runs "
+            "below target. Applies in pnl-vol-target-mode exante_target OR "
+            "growth_budget; the upper bound is the resolved "
+            "GrowthRiskEnvelope.leverage_ceiling (conservative/balanced 1.0, "
+            "growth_moderate 1.5, growth 2.0), NOT PNL_VOL_TARGET_MAX_SCALE"
         ),
     )
     mhs.add_argument(
