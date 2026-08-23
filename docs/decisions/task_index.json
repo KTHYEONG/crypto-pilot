@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL_REAL_EXECUTION",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL_REAL_EXECUTION",
+      "domain": "risk",
+      "title": "MHS target_vol 단일화 실전 검증: 가설 반증, FOLD_BLEND_PATH_DIVERGENCE 미해소",
+      "why": "ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL 구현 직후 실제 CLI(--pnl-vol-target-mode constant_risk --execution-timeframe 3m)로 2021-2025 원장 재실행해 target_vol 경계별 재해석이 근본원인이라는 가설을 실측 검증.",
+      "resolution": "재실행 결과 fold_blend_parity.max_abs_log_deployed_gross_ratio=0.316573로 수정 전과 소수점 6자리까지 완전히 동일(각 fold별 값도 0.241771/0.307097/0.316573/0.268464로 사실상 불변). 원인: CONSTANT_RISK_TARGET_ANNUAL_VOL=0.40 base가 _feasible_constant_risk_target의 leverage_ceiling(3.0)*q10(sigma_book|train) 클램프에 애초에 걸리지 않아(crypto 실현변동성이 0.40/3=0.133보다 항상 높음), 경계별 재해석을 하든 안 하든 모든 boundary가 이미 동일한 0.40으로 수렴하고 있었음 -- target_vol 통일 자체는 무효과. 실측(persisted book_structure)으로 fold_scale/blend_scale 비율을 직접 대조한 결과, 4개 fold 전부에서 fold_scale이 blend_scale보다 일관되게 1.25~1.38배 높음(target_vol가 동일하므로 scale=target/sigma_hat 관계상 fold의 causal EWMA sigma_hat이 blend의 연속 추정치보다 체계적으로 낮게 잡힘). warmup_returns(I-WARM)로 EWMA 상태를 pre-boundary 이력으로 워밍업해도 이 편향이 사라지지 않아, 진짜 근본원인은 target_vol이 아니라 EWMA sigma_hat 자체의 계산 경로(fold-local 2-pass replay로 재계산 vs blend의 단일 연속 replay)에 있음을 실측으로 확정.",
+      "impact": "가설 반증: target_vol 단일화 커밋은 되돌리지 않는다(growth_budget 모드 무변경 보존 및 fold_3의 lookahead성 재해석 제거라는 부수 이득은 유효하고 회귀 테스트로 잠겨 있음)이나 FOLD_BLEND_PATH_DIVERGENCE 해소에는 기여하지 않았다. Research-GO는 여전히 미달성(reason_codes=[FOLD_BLEND_PATH_DIVERGENCE], run_id는 docs/results/mhs_run_history/latest.json 참조, run_at=2026-08-23T12:56:18Z). 다음 단계: task_index.json이 원래 지목했던 두 번째 대안(fold가 자체 EWMA를 전혀 재적합하지 않고 blend가 이미 계산한 연속 scale 시계열 자체를 fold의 validation 날짜로 슬라이스해 그대로 재사용)의 구현이 필요 -- 이번 세션에서 배제했던 '파라미터 재해석 자체를 없애는' 방향이 유일하게 남은 구조적 경로."
+    },
+    {
+      "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL",
+      "domain": "risk",
+      "title": "MHS constant_risk fold/blend target_vol 단일화로 FOLD_BLEND_PATH_DIVERGENCE 구조적 해소",
+      "why": "Research-GO 최후 차단 사유가 FOLD_BLEND_PATH_DIVERGENCE 단 하나로 좁혀진 상태(docs/results/mhs_run_history/latest.json, ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION의 후속 과제). halflife 파라미터 스윕은 fold_blend_parity와 risk_parity의 단조 트레이드오프로 이미 막다른 길임이 실측 확인됨. 코드 추적 결과 근본원인은 blend가 top-level 경계(2021-2022)에서 단 1회 해석한 target_vol을 전체 배치 구간에 고정 적용하는데 반해, fold_1~3은 _constant_risk_target_vol_by_boundary로 자신의 train_end(최대 2년 더 긴 학습창)까지 데이터로 target_vol을 별도 재해석하고 있었기 때문(원시 북 gross_log_ratio는 ±0.04로 일치, deployed_gross_log_ratio만 0.24~0.32로 tolerance 0.25 초과).",
+      "resolution": "src/mhs/pipeline/stages/fold.py::run_folds의 constant_risk 분기를 _constant_risk_target_vol_by_boundary(경계별 재해석) 대신 _constant_risk_target_vol(top-level 경계 단일 해석) 호출로 교체하고 모든 fold index에 동일 값을 브로드캐스트(dict.fromkeys)하도록 수정. growth_budget 분기는 기존 경계별 재해석 로직 완전 보존(바이트 동일). tests/unit/mhs/pipeline/stages/test_fold.py에 SCENARIO_MHS_CONSTANT_RISK_FOLD_BROADCASTS_TOP_LEVEL_VOL 신규 회귀 테스트 추가(constant_risk 모드에서 _constant_risk_target_vol_by_boundary가 호출되면 AssertionError로 실패하도록 가드).",
+      "impact": "docs/specs/mhs_fold_blend_path_divergence.md/_contract.json 기준 spec->implement->check 완료: 유닛 테스트 52건 green, ruff/mypy clean. 실측 CLI 재실행(2021-2025/3m 원장)으로 FOLD_BLEND_PATH_DIVERGENCE 해소 여부 및 blend 성과 불변(primary_geometric_cagr=1.777395 등 비트동일 기대) 확인은 /sync 직후 진행."
+    },
+    {
       "task_id": "MHS_CALIBRATED_EVIDENCE_REAL_EXECUTION",
       "date": "2026-08-23",
       "adr_id": "ADR_20260823_MHS_CALIBRATED_EVIDENCE_REAL_EXECUTION",
@@ -979,26 +999,6 @@
       "why": "Run the frozen MHS Phase-1 Research GO protocol on the complete dev 2021-2025 period after 5m execution and historical mark-cache wiring.",
       "resolution": "Executed the 5m cache-required full-period replay. The strict simulated-inventory ledger failed closed when pre-trade equity became non-positive, so the preregistered two-band portfolio is rejected for Research GO; preserve the limited-window wiring validation as technical evidence.",
       "impact": "No Research GO, Execution GO, Pilot GO, or Scale GO promotion. The implementation and data path remain available for diagnosis, but the current strategy cannot proceed to sizing or deployment."
-    },
-    {
-      "task_id": "xs_alpha_basis_family_diagnostic",
-      "date": "2026-08-07",
-      "adr_id": "ADR_20260807_xs_alpha_basis_family_diagnostic",
-      "domain": "signal",
-      "title": "XS Alpha Basis 패밀리 진단 - funding_contrarian과 고상관 확인, 신규 독립 신호 아님으로 반증",
-      "why": "성장 상한 3개 레버(사이징/블렌드/유니버스) 전부 실측 소진(08-06) 후 남은 후보 중 신호 재설계가 유일한 근본 레버로 판단. premiumIndexKlines/indexPriceKlines/markPriceKlines가 xs_alpha_data_axis_expansion(08-05)에서 수집됐으나 실제 신호화된 적 없음을 rg 조사로 확인 -- 신규 수집 없이 즉시 진단 가능한 유일한 미탐색 데이터 축.",
-      "resolution": "_positioning_score와 구조 동일한 _basis_score(cross_sectional.py) 신설(신규 부호 파라미터 없음), _basis_panel 로더(xs_alpha_baseline_blend.py, indicator_kline_path 재사용), run_xs_alpha_basis_family_diagnostic 오케스트레이터(discovery/qualification admission + 기존 3패밀리 대비 discovery-window 상관계수 진단, 프로덕션 블렌드 미편입) + xs-basis-family-diagnostic CLI. 사전 등록 성공기준(admission 통과 AND 전 패밀리 |상관| <0.3)으로 실행.",
-      "impact": "CLI 실측: qualification admission=False(2025 Sharpe -1.56, MDD -38.9%), funding_contrarian과의 상관계수 rho=0.831(임계값 0.3 대폭 초과) -- 두 채택 조건 모두 실패, 사전 경고했던 collinearity 가설 확인. Basis는 새 독립 신호가 아니라 기존 funding_contrarian을 다른 집계창(4h 스냅샷 vs 정산 펀딩비 누적)으로 재관측한 것으로 정직하게 반증. 프로덕션 v6/v8_sized 무변경. 남은 미탐색 축은 bookdepth(주문호가 깊이, BTC만 3800만행/2초단위)뿐이며 별도 4h 집계설계 스펙 필요."
-    },
-    {
-      "task_id": "xs_alpha_universe_breadth_expansion",
-      "date": "2026-08-06",
-      "adr_id": "ADR_20260806_xs_alpha_universe_breadth_expansion",
-      "domain": "data",
-      "title": "XS Alpha 유니버스 확장 가설 실측 반증 + 원칙적 후보 스캔 진단 자산화",
-      "why": "PASS 후보 존재에도 성장 상한이 낮다는 지적에 대해 직전 사이클(sizing/book-blend/capital-split) 전부 반증됨에 따라, 사용자가 남은 축인 '유니버스 breadth'를 근거없는 유명코인 선정 금지 조건으로 전면 재검토하고 가설을 실측 검증하라고 요청함. TREND_SCREEN_SYMBOLS(15종목)는 git 고고학상 도입 커밋에 선정 근거가 전혀 없었음(원칙적 방법론 부재 확정).",
-      "resolution": "로컬 데이터 레이크(652종목, 신규 수집 없음)를 4중 객관적 기준(전체이력커버리지>=0.99, funding 존재, taker_buy_ratio 무결성, 현재 유동성>0)으로 스캔해 35종목의 원칙적 후보군을 도출(현재 15종목은 전원 부분집합). v6+Donchian growth_headroom 파이프라인을 15/25/35종목에서 동일 조건 실측: 25종목 Sharpe 0.80, 35종목 Sharpe 1.24 -- 둘 다 현재 15종목(1.76)보다 악화, selected_risk가 1.0에서 None(전 grid infeasible)으로 하락, 비단조. 유니버스 확장 가설 반증 확정, 프로덕션 TREND_SCREEN_SYMBOLS 무변경. 스캔 방법론은 src/research/universe/candidate_scan.py(순수 평가) + src/application/research/universe/candidate_scan.py(오케스트레이터+영속화) + xs-universe-candidate-scan CLI로 재현 가능한 진단 자산화(growth_headroom과 동일한 관측전용 철학).",
-      "impact": "성장 상한 반증 사이클 완결: sizing/book-blend(coarse+fine)/capital-split/universe-breadth(2개 크기) 총 5개 가설 전부 반증. 남은 레버는 신호 재설계·실행비용 최적화·tail-risk 정책 재검토(사용자 리스크성향 결정 필요)뿐임을 확정. 부수 발견: 18종목에 2022-10-01부터 552봉 taker_buy_ratio 시스템 결손 존재(수집 아카이브 버그, 별도 백필 과제로 분리)."
     }
   ]
 }
