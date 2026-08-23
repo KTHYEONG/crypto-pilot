@@ -160,3 +160,21 @@ def test_golden_identity_preserved():
     # New fields must be identical
     assert from_cli["growth_envelope"] == bare["growth_envelope"]
     assert from_cli["committee_member_attribution"] == bare["committee_member_attribution"]
+
+
+# SCENARIO_MHS_EXPOSURE_CEILING_06
+def test_scenario_mhs_exposure_ceiling_06_two_sided_default_flipped_universe_wired():
+    """exposure_scale_two_sided flips to True at the MhsRunConfig (CLI
+    effective-default owner) layer only; --no-exposure-scale-two-sided opts
+    back out; --execution-universe-size exposes the roster breadth field."""
+    from src.cli.main import build_root_parser
+
+    assert MhsRunConfig().exposure_scale_two_sided is True
+    argv = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    args = build_root_parser().parse_args(argv)
+    assert dataclasses.asdict(MhsRunConfig.from_namespace(args)) == dataclasses.asdict(MhsRunConfig())
+    off = build_root_parser().parse_args([*argv, "--no-exposure-scale-two-sided"])
+    assert MhsRunConfig.from_namespace(off).exposure_scale_two_sided is False
+    wide = build_root_parser().parse_args([*argv, "--execution-universe-size", "60"])
+    assert MhsRunConfig.from_namespace(wide).execution_universe_size == 60
+    assert MhsRunConfig.from_namespace(args).execution_universe_size == 30
