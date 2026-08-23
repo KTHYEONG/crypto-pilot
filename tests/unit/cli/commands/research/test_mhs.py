@@ -7,6 +7,8 @@ import logging
 import re
 import types
 
+import pytest
+
 from src.cli.commands.research.mhs import _run_mhs_horizon_diagnostic, add_mhs_commands
 import src.mhs.pipeline.orchestrator as orchestrator
 
@@ -815,3 +817,66 @@ def test_cli_flags_threaded(monkeypatch) -> None:
     args = parser.parse_args(["--pnl-vol-target-mode", "median_relative"])
     _run_mhs_horizon_diagnostic(args)
     assert captured["pnl_vol_target_mode"] == "median_relative"
+
+
+def test_mhs_diagnostic_leverage_frontier_scan_short_circuit_scenario_mhs_leverage_scan_06(monkeypatch) -> None:
+    """SCENARIO_MHS_LEVERAGE_SCAN_06: ``--leverage-frontier-scan`` short-circuits
+    the handler before any heavy import -- the full pipeline must never run on
+    the scan path, while the flag=False path still reaches the pipeline."""
+    from src.mhs.params import LEVERAGE_FRONTIER_SCAN_MULTIPLES
+    import src.application.research.mhs.leverage_scan as leverage_scan
+
+    def _boom(config):
+        raise AssertionError("full pipeline must not run")
+
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", _boom)
+    captured: dict = {}
+
+    def _stub_scan(envelope_name, candidate_multiples, artifact_path=None):
+        captured["envelope_name"] = envelope_name
+        captured["candidate_multiples"] = candidate_multiples
+        return ()
+
+    monkeypatch.setattr(leverage_scan, "run_leverage_frontier_scan", _stub_scan)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    args = parser.parse_args(["--leverage-frontier-scan"])
+    assert args.leverage_frontier_scan is True
+    assert args.leverage_frontier_multiples == LEVERAGE_FRONTIER_SCAN_MULTIPLES
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["envelope_name"] == "growth"
+    assert captured["candidate_multiples"] == LEVERAGE_FRONTIER_SCAN_MULTIPLES
+
+    captured.clear()
+    args = parser.parse_args(
+        ["--leverage-frontier-scan", "--growth-envelope", "balanced",
+         "--leverage-frontier-multiples", "2.0, 2.5, 3.0"],
+    )
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["envelope_name"] == "balanced"
+    assert captured["candidate_multiples"] == (2.0, 2.5, 3.0)
+
+    # The identical run_mhs_diagnostic-raises monkeypatch MUST trip when the
+    # flag is off: proves the flag gates the branch instead of the pipeline
+    # call having been removed outright.
+    args = parser.parse_args([])
+    assert args.leverage_frontier_scan is False
+    with pytest.raises(AssertionError, match="full pipeline must not run"):
+        _run_mhs_horizon_diagnostic(args)
+
+
+def test_mhs_leverage_frontier_multiples_rejects_non_float_token() -> None:
+    from src.cli.commands.research.mhs import _parse_float_csv
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    # argparse converts the type callback's ArgumentTypeError into its own
+    # usage error (SystemExit); the offending token is still surfaced.
+    with pytest.raises(SystemExit), pytest.raises(argparse.ArgumentTypeError):
+        parser.parse_args(["--leverage-frontier-multiples", "1.0,abc"])
+    with pytest.raises(argparse.ArgumentTypeError, match="not-a-float"):
+        _parse_float_csv("not-a-float")

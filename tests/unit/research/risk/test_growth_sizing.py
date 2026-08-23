@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from src.mhs.committee import growth_budget_annual_vol
 from src.mhs.params import GROWTH_RISK_ENVELOPES
 from src.research.risk.growth_sizing import (
+    FrontierScanPoint,
     GrowthHeadroomDiagnostic,
     GrowthSizingConfig,
     GrowthSizingResult,
@@ -15,6 +18,7 @@ from src.research.risk.growth_sizing import (
     compute_discovery_target_vol,
     diagnose_growth_headroom,
     drawdown_risk_multiplier,
+    scan_leverage_frontier,
     solve_growth_optimal_risk,
 )
 
@@ -512,3 +516,73 @@ class TestGrowthEnvelopeLadder:
             self.returns, envelope=GROWTH_RISK_ENVELOPES["conservative"],
         )
         assert vol_default == pytest.approx(vol_conservative)
+
+
+class TestScanLeverageFrontier:
+    """Diagnostic-only per-multiple frontier scan (no solver, no plateau rule)."""
+
+    # SCENARIO_MHS_LEVERAGE_SCAN_01
+    def test_matches_solver_inner_loop_positive_drift_scenario_mhs_leverage_scan_01(self) -> None:
+        # Positive median growth => the plateau rule cannot interfere, so the
+        # duplicated arithmetic must equal the frozen solver's inner loop to
+        # the bit (same seed, same single bootstrap draw).
+        rng = np.random.default_rng(11)
+        arr = rng.normal(0.002, 0.01, 3000)
+        config = GrowthSizingConfig(
+            risk_grid=(0.001, 0.002), reference_risk=0.002,
+            horizon_years=1.0, bars_per_year=365, n_paths=500, seed=7,
+        )
+        points = scan_leverage_frontier(arr, config, (1.0,))
+        solver = solve_growth_optimal_risk(
+            arr, dataclasses.replace(config, risk_grid=(config.reference_risk,)),
+            use_drawdown_overlay=False,
+        )
+        assert len(points) == 1
+        point = points[0]
+        assert isinstance(point, FrontierScanPoint)
+        assert point.multiple == 1.0
+        assert point.mdd_breach_prob == solver.mdd_breach_prob
+        assert point.ruin_prob == solver.ruin_prob
+        assert point.feasible == (solver.selected_risk is not None)
+
+    # SCENARIO_MHS_LEVERAGE_SCAN_02
+    def test_reports_real_feasibility_where_plateau_masks_scenario_mhs_leverage_scan_02(self) -> None:
+        # Losing stream: the frozen solver's plateau rule excludes every
+        # negative-median-growth candidate (even constraint-feasible ones) and
+        # returns selected_risk=None for ALL grid points; the scan must instead
+        # report each candidate's TRUE mdd_breach_prob/ruin_prob/feasible.
+        rng = np.random.default_rng(5)
+        arr = rng.normal(-0.0008, 0.005, 3000)
+        config = GrowthSizingConfig(
+            risk_grid=(0.5, 1.0, 2.0), reference_risk=1.0,
+            max_drawdown=0.5, max_drawdown_prob=1.0,
+            ruin_fraction=0.6, max_ruin_prob=0.01,
+            horizon_years=1.0, bars_per_year=365, n_paths=500, seed=3,
+        )
+        points = scan_leverage_frontier(arr, config, (0.5, 1.0, 2.0))
+        assert [p.multiple for p in points] == [0.5, 1.0, 2.0]
+        assert points[0].feasible is True
+        assert points[-1].feasible is False
+        assert any(p.feasible is False for p in points)
+        solver = solve_growth_optimal_risk(arr, config, use_drawdown_overlay=False)
+        assert solver.selected_risk is None
+
+    # SCENARIO_MHS_LEVERAGE_SCAN_03
+    def test_rejects_invalid_inputs_scenario_mhs_leverage_scan_03(self) -> None:
+        arr = np.random.default_rng(0).normal(0.001, 0.01, 500)
+        config = GrowthSizingConfig(
+            risk_grid=(0.001,), reference_risk=0.001,
+            horizon_years=1.0, bars_per_year=365, n_paths=200,
+        )
+        with pytest.raises(ValueError, match="empty"):
+            scan_leverage_frontier(np.array([]), config, (1.0,))
+        with pytest.raises(ValueError, match="finite"):
+            scan_leverage_frontier(np.array([0.001, np.nan]), config, (1.0,))
+        with pytest.raises(ValueError, match="finite"):
+            scan_leverage_frontier(np.array([0.001, np.inf]), config, (1.0,))
+        with pytest.raises(ValueError, match="empty"):
+            scan_leverage_frontier(arr, config, ())
+        with pytest.raises(ValueError, match=r"-0\.5"):
+            scan_leverage_frontier(arr, config, (1.0, -0.5))
+        with pytest.raises(ValueError, match="positive"):
+            scan_leverage_frontier(arr, config, (0.0,))
