@@ -8,64 +8,41 @@
   "src/application/data/mhs_execution_collection.py": {
     "testing": "tests/unit/application/data/test_mhs_execution_collection.py"
   },
-  "src/application/research/mhs/contracts.py": {},
+  "src/application/research/mhs/contracts.py": {
+    "testing": "tests/unit/application/research/mhs/test_contracts.py"
+  },
   "src/application/research/mhs/evaluation.py": {
-    "testing": [
-      "tests/unit/application/research/mhs/test_evaluation.py",
-      "tests/integration/mhs/test_mhs_horizon_diagnostic.py"
-    ]
+    "testing": "tests/unit/application/research/mhs/test_evaluation.py"
+  },
+  "src/application/research/mhs/leverage_scan.py": {
+    "testing": "tests/unit/application/research/mhs/test_leverage_scan.py"
   },
   "src/application/research/mhs/marks.py": {
-    "testing": [
-      "tests/unit/application/research/mhs/test_marks.py",
-      "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
-      "tests/integration/mhs/test_mhs_horizon_opt.py",
-      "tests/unit/application/research/mhs/test_evaluation.py",
-      "tests/unit/application/research/mhs/test_fast_reversal_overlay_redesign.py",
-      "tests/unit/application/research/mhs/test_realistic_execution_primary_swap.py",
-      "tests/unit/application/research/test_mhs_capital_multi_axis.py"
-    ]
+    "testing": "tests/unit/application/research/mhs/test_marks.py"
   },
   "src/application/research/mhs/research_go.py": {
-    "testing": [
-      "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
-      "tests/unit/application/research/mhs/test_evaluation.py",
-      "tests/unit/mhs/test_contracts.py",
-      "tests/unit/mhs/test_evaluation_fold_report.py"
-    ]
+    "testing": "tests/unit/application/research/mhs/test_research_go.py"
   },
   "src/application/research/mhs/resources.py": {
-    "testing": [
-      "tests/unit/application/research/mhs/test_resources.py",
-      "tests/unit/application/research/mhs/test_evaluation.py"
-    ]
+    "testing": "tests/unit/application/research/mhs/test_resources.py"
   },
   "src/application/research/mhs/scaling.py": {
-    "testing": [
-      "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
-      "tests/integration/mhs/test_mhs_horizon_opt.py",
-      "tests/unit/application/research/mhs/test_evaluation.py",
-      "tests/unit/application/research/mhs/test_mhs_perf_optimization.py",
-      "tests/unit/mhs/test_compounding_growth.py",
-      "tests/unit/mhs/test_discovery.py",
-      "tests/unit/application/research/mhs/test_scaling.py"
-    ],
-    "architecture": "docs/specs/mhs_constant_risk_deployment.md"
+    "testing": "tests/unit/application/research/mhs/test_scaling.py"
   },
   "src/application/research/mhs/stage_services.py": {
-    "testing": [
-      "tests/unit/application/research/mhs/test_stage_services.py"
-    ]
+    "testing": "tests/unit/application/research/mhs/test_stage_services.py"
   },
   "src/application/research/mhs/statistics.py": {
-    "testing": [
-      "tests/unit/application/research/mhs/test_statistics.py",
-      "tests/unit/application/research/mhs/test_evaluation.py"
-    ]
+    "testing": "tests/unit/application/research/mhs/test_statistics.py"
   },
-  "src/application/research/mhs/validation.py": {},
+  "src/application/research/mhs/validation.py": {
+    "testing": "tests/unit/application/research/mhs/test_validation.py"
+  },
   "src/cli/commands/data.py": {
     "testing": "tests/unit/cli/commands/test_data.py"
+  },
+  "src/cli/commands/live.py": {
+    "testing": "tests/unit/cli/commands/test_live.py"
   },
   "src/cli/commands/research/mhs.py": {
     "testing": "tests/unit/cli/commands/research/test_mhs.py"
@@ -84,22 +61,76 @@
       "tests/integration/workflows/test_taker_flow_candidate.py",
       "tests/unit/application/data/test_mhs_execution_collection.py",
       "tests/unit/application/research/mhs/test_evaluation.py",
+      "tests/unit/application/research/mhs/test_evaluation_diagnostic_gates.py",
+      "tests/unit/application/research/mhs/test_evaluation_pipeline.py",
+      "tests/unit/application/research/mhs/test_evaluation_ram_guard.py",
+      "tests/unit/application/research/mhs/test_evaluation_report_persist.py",
       "tests/unit/application/research/mhs/test_mhs_perf_optimization.py",
+      "tests/unit/application/research/mhs/test_resources.py",
+      "tests/unit/application/research/mhs/test_scaling.py",
+      "tests/unit/cli/commands/research/test_mhs.py",
+      "tests/unit/live/test_ledger.py",
+      "tests/unit/live/test_signal.py",
       "tests/unit/market_data/services/test_futures_collection.py",
       "tests/unit/market_data/services/test_spot_collection.py",
       "tests/unit/market_data/storage/test_loaders.py",
       "tests/unit/market_data/test_futures_mark_price.py",
+      "tests/unit/mhs/test_calibration.py",
       "tests/unit/mhs/test_execution.py",
       "tests/unit/mhs/test_parallel.py",
+      "tests/unit/mhs/test_replay_accumulator.py",
+      "tests/unit/mhs/test_replay_batch.py",
+      "tests/unit/mhs/test_replay_failclosed.py",
+      "tests/unit/mhs/test_replay_ledger.py",
       "tests/unit/research/baseline/test_backtest.py",
       "tests/unit/research/baseline/test_directional_funding_signal.py",
       "tests/unit/research/portfolio/test_net_construction.py",
-      "tests/unit/research/technical_experts/test_cross_sectional.py"
+      "tests/unit/research/technical_experts/test_xs_ledger.py",
+      "tests/unit/research/technical_experts/test_xs_weights.py",
+      "tests/unit/tools/test_repartition_ohlcv_parquet.py"
     ]
   },
-  "src/common/logging.py": {},
+  "src/common/logging.py": {
+    "testing": "tests/unit/common/test_logging.py"
+  },
   "src/core/settings.py": {
     "testing": "tests/unit/core/test_settings.py"
+  },
+  "src/live/account.py": {
+    "testing": "tests/unit/live/test_account.py"
+  },
+  "src/live/audit.py": {
+    "testing": "tests/unit/live/test_audit.py"
+  },
+  "src/live/errors.py": {
+    "testing": "tests/unit/live/test_errors.py"
+  },
+  "src/live/executor.py": {
+    "testing": "tests/unit/live/test_executor.py"
+  },
+  "src/live/filters.py": {
+    "testing": "tests/unit/live/test_filters.py"
+  },
+  "src/live/ledger.py": {
+    "testing": "tests/unit/live/test_ledger.py"
+  },
+  "src/live/planner.py": {
+    "testing": "tests/unit/live/test_planner.py"
+  },
+  "src/live/rest.py": {
+    "testing": "tests/unit/live/test_rest.py"
+  },
+  "src/live/runner.py": {
+    "testing": "tests/unit/live/test_runner.py"
+  },
+  "src/live/settings.py": {
+    "testing": "tests/unit/live/test_settings.py"
+  },
+  "src/live/signal.py": {
+    "testing": "tests/unit/live/test_signal.py"
+  },
+  "src/live/sizing.py": {
+    "testing": "tests/unit/live/test_sizing.py"
   },
   "src/market_data/binance/futures.py": {
     "testing": [
@@ -142,17 +173,35 @@
   "src/mhs/books.py": {
     "testing": "tests/unit/mhs/test_books.py"
   },
+  "src/mhs/calibration.py": {
+    "testing": "tests/unit/mhs/test_calibration.py"
+  },
   "src/mhs/committee.py": {
     "testing": "tests/unit/mhs/test_committee.py"
-  },
-  "src/mhs/contracts.py": {
-    "testing": "tests/unit/mhs/test_contracts.py"
   },
   "src/mhs/discovery.py": {
     "testing": "tests/unit/mhs/test_discovery.py"
   },
-  "src/mhs/evaluation.py": {
-    "testing": "tests/unit/mhs/test_evaluation.py"
+  "src/mhs/evidence.py": {
+    "testing": [
+      "tests/integration/mhs/test_mhs_horizon_pipeline_e2e.py",
+      "tests/unit/application/research/mhs/test_evaluation.py",
+      "tests/unit/application/research/mhs/test_evaluation_book_outcome.py",
+      "tests/unit/application/research/mhs/test_evaluation_committee_diagnostic.py",
+      "tests/unit/application/research/mhs/test_evaluation_folds.py",
+      "tests/unit/application/research/mhs/test_evaluation_statistics.py",
+      "tests/unit/application/research/mhs/test_fast_reversal_overlay_redesign.py",
+      "tests/unit/application/research/mhs/test_mhs_perf_optimization.py",
+      "tests/unit/application/research/mhs/test_realistic_execution_primary_swap.py",
+      "tests/unit/application/research/test_mhs_capital_multi_axis.py",
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/mhs/test_discovery.py",
+      "tests/unit/mhs/test_evaluation.py",
+      "tests/unit/mhs/test_evaluation_fold_report.py",
+      "tests/unit/mhs/test_golden_digest.py",
+      "tests/unit/mhs/test_report_persist_compact.py",
+      "tests/unit/mhs/test_result_log.py"
+    ]
   },
   "src/mhs/execution.py": {
     "testing": "tests/unit/mhs/test_execution.py"
@@ -173,21 +222,75 @@
     "testing": "tests/unit/mhs/test_parallel.py"
   },
   "src/mhs/params.py": {
-    "architecture": "docs/architecture/mhs-explain.md",
     "testing": "tests/unit/mhs/test_params.py"
   },
-  "src/mhs/pipeline/orchestrator.py": {},
+  "src/mhs/pipeline/config.py": {
+    "testing": "tests/unit/mhs/pipeline/test_config.py"
+  },
+  "src/mhs/pipeline/context.py": {
+    "testing": [
+      "tests/unit/mhs/pipeline/stages/test_book.py",
+      "tests/unit/mhs/pipeline/stages/test_committee.py",
+      "tests/unit/mhs/pipeline/stages/test_context.py",
+      "tests/unit/mhs/pipeline/stages/test_fold.py",
+      "tests/unit/mhs/pipeline/stages/test_panel.py",
+      "tests/unit/mhs/pipeline/stages/test_replay.py",
+      "tests/unit/mhs/pipeline/stages/test_selection.py",
+      "tests/unit/mhs/pipeline/test_assemble.py"
+    ]
+  },
+  "src/mhs/pipeline/orchestrator.py": {
+    "testing": "tests/unit/mhs/pipeline/test_orchestrator.py"
+  },
+  "src/mhs/pipeline/runner.py": {
+    "testing": "tests/integration/mhs/test_mhs_horizon_pipeline_e2e.py"
+  },
+  "src/mhs/pipeline/stages/assemble.py": {
+    "testing": "tests/unit/mhs/pipeline/test_assemble.py"
+  },
+  "src/mhs/pipeline/stages/book.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_book.py"
+  },
+  "src/mhs/pipeline/stages/committee.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_committee.py"
+  },
+  "src/mhs/pipeline/stages/diagnostic.py": {},
+  "src/mhs/pipeline/stages/fold.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_fold.py"
+  },
+  "src/mhs/pipeline/stages/panel.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_panel.py"
+  },
+  "src/mhs/pipeline/stages/replay.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_replay.py"
+  },
+  "src/mhs/pipeline/stages/selection.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_selection.py"
+  },
   "src/mhs/regime.py": {
     "testing": "tests/unit/mhs/test_regime.py"
   },
-  "src/mhs/result_log.py": {
+  "src/mhs/report/artifacts.py": {},
+  "src/mhs/report/persist.py": {
+    "testing": "tests/unit/mhs/report/test_persist.py"
+  },
+  "src/mhs/report/schema.py": {
+    "testing": "tests/unit/mhs/report/test_schema.py"
+  },
+  "src/mhs/run_history.py": {
     "testing": "tests/unit/mhs/test_result_log.py"
   },
   "src/mhs/stability.py": {
     "testing": "tests/unit/mhs/test_stability.py"
   },
+  "src/mhs/telemetry.py": {
+    "testing": "tests/unit/mhs/test_telemetry.py"
+  },
   "src/mhs/trend_sleeve.py": {
     "testing": "tests/unit/mhs/test_trend_sleeve.py"
+  },
+  "src/mhs/types.py": {
+    "testing": "tests/unit/mhs/test_types.py"
   },
   "src/research/baseline/backtest.py": {
     "testing": "tests/unit/research/baseline/test_backtest.py"
@@ -214,7 +317,8 @@
   },
   "src/research/evaluation/policy.py": {
     "testing": [
-      "tests/integration/mhs/test_mhs_horizon_diagnostic.py",
+      "tests/integration/mhs/test_mhs_horizon_pipeline_e2e.py",
+      "tests/unit/mhs/pipeline/test_orchestrator.py",
       "tests/unit/research/technical_experts/test_trend_screen_catalog.py"
     ]
   },
@@ -228,7 +332,7 @@
       "tests/unit/research/evaluation/test_fold_concentration.py",
       "tests/unit/research/evaluation/test_portfolio_reliability.py",
       "tests/unit/research/evaluation/test_promotion.py",
-      "tests/unit/research/technical_experts/test_cross_sectional.py"
+      "tests/unit/research/technical_experts/test_xs_admission.py"
     ]
   },
   "src/research/portfolio/defaults.py": {
@@ -254,22 +358,5 @@
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
-  },
-  "src/mhs/pipeline/config.py": {
-    "architecture": "docs/architecture/mhs-explain.md",
-    "testing": "tests/integration/mhs/test_mhs_growth_budget_acceptance.py"
-  },
-  "src/application/research/mhs/leverage_scan.py": {
-    "testing": "tests/unit/application/research/mhs/test_leverage_scan.py"
-  },
-  "src/mhs/calibration.py": {
-    "architecture": "docs/specs/mhs_calibrated_evidence.md",
-    "testing": "tests/unit/mhs/test_calibration.py"
-  },
-  "src/mhs/pipeline/stages/fold.py": {
-    "testing": "tests/unit/mhs/pipeline/stages/test_fold.py"
-  },
-  "src/mhs/pipeline/stages/committee.py": {
-    "testing": "tests/unit/mhs/pipeline/stages/test_committee.py"
   }
 }
