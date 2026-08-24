@@ -31,7 +31,7 @@ jobs:
       - name: Build and Push to ECR
         run: |
           ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY=my-coin-bot
+          ECR_REPOSITORY=crypto-pilot-live
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
@@ -72,6 +72,23 @@ jobs:
           source: "docker-compose.yml"
           target: "~/crypto-pilot/"
 
+      - name: Decrypt .env
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          curl -sL https://github.com/getsops/sops/releases/latest/download/sops-linux-amd64 -o /usr/local/bin/sops
+          chmod +x /usr/local/bin/sops
+          sops -d .env.enc > .env.decrypted
+
+      - name: Copy .env via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: ".env.decrypted"
+          target: "~/crypto-pilot/"
+
       - name: SSH Deploy
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -84,12 +101,17 @@ jobs:
             export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
             export AWS_DEFAULT_REGION=${{ secrets.AWS_REGION }}
 
-            # 2. ECR 로그인
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
-
             cd ~/crypto-pilot
 
-            # 3. Docker Compose V1/V2 양쪽 호환되게 처리
+            # 2. 복호화된 .env를 compose 실행 전에 배치(이미지 밖, env_file 주입 전용)
+            if [ -f .env.decrypted ]; then
+              mv .env.decrypted .env
+            fi
+
+            # 3. ECR 로그인
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+            # 4. Docker Compose V1/V2 양쪽 호환되게 처리
             if docker compose version > /dev/null 2>&1; then
               COMPOSE_CMD="docker compose"
             else
