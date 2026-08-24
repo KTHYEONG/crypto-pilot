@@ -12,8 +12,9 @@ from src.common.config import DATA_DIR
 
 logger = logging.getLogger("LiveCli")
 
+#: 프로덕션 기본값은 봉인된 아티팩트다(I-SEAL). 평문 .parquet 을 쓰려면 --artifact 로 명시한다.
 _DEFAULT_ARTIFACT = (
-    "docs/results/mhs_horizon_diagnostic_artifacts/deployed_target_weights.parquet"
+    "docs/results/mhs_horizon_diagnostic_artifacts/deployed_target_weights.parquet.enc"
 )
 _DEFAULT_DAEMON_STATE_PATH = str(DATA_DIR / "state" / "live_daemon_last_run.json")
 
@@ -69,7 +70,7 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         "--artifact",
         type=str,
         default=_DEFAULT_ARTIFACT,
-        help="Path to the deployed_target_weights.parquet artifact to consume",
+        help="Path to the deployed_target_weights.parquet(.enc) artifact to consume (.enc requires LIVE_ARTIFACT_KEY)",
     )
     shadow.add_argument(
         "--dry-run",
@@ -84,7 +85,7 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         "--artifact",
         type=str,
         default=_DEFAULT_ARTIFACT,
-        help="Path to the deployed_target_weights.parquet artifact to consume daily",
+        help="Path to the deployed_target_weights.parquet(.enc) artifact to consume daily (.enc requires LIVE_ARTIFACT_KEY)",
     )
     daemon.add_argument(
         "--state-path",

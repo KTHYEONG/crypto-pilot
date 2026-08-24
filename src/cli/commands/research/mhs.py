@@ -83,6 +83,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         from pathlib import Path
 
         from src.common.errors import DataIntegrityError
+        from src.live.settings import LiveSettings
         from src.mhs.report.persist import emit_deployed_target_weights
 
         if report.blend is None or report.blend.target_weights is None:
@@ -95,6 +96,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         emit_result = emit_deployed_target_weights(
             report.blend.target_weights, report.blend.exposure_scale, artifact_root,
             tail_rows=_EMIT_TARGET_WEIGHTS_TAIL_ROWS,
+            artifact_key=LiveSettings().artifact_key,
         )
         _logger.info(
             "[EVAL] mhs-horizon-diagnostic emit_target_weights path=%s rows=%d",

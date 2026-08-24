@@ -6,7 +6,7 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import pandas as pd
 
@@ -20,7 +20,9 @@ AUDIT_LOG_RETENTION_DAYS: int = 90
 
 _DATE_PARTITION_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
 
-_SECRET_KEYS = frozenset({"signature", "apiKey", "apiSecret", "secret", "api_key", "api_secret"})
+_SECRET_KEYS = frozenset(
+    {"signature", "apiKey", "apiSecret", "secret", "api_key", "api_secret", "artifact_key"}
+)
 
 
 def default_audit_log_path(name: str, for_date: pd.Timestamp | None = None) -> Path:
@@ -80,12 +82,26 @@ def _jsonable(value: Any) -> Any:
 
 
 class AuditLog:
-    """모든 레코드에 ts/run_id/mode/event를 강제하는 append-only JSONL 로그."""
+    """모든 레코드에 ts/run_id/mode/event를 강제하는 append-only JSONL 로그.
+
+    핫루프 syscall 폭증을 피하기 위해 파일 핸들을 열어두고 재사용한다(매 record
+    open/close 금지). 각 레코드는 flush 되므로 크래시 시에도 직전 레코드까지 가시적이다.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.context: dict[str, Any] = {}
+        self._handle: TextIO | None = None
+
+    def _ensure_handle(self) -> TextIO:
+        if self._handle is None or self._handle.closed:
+            self._handle = self.path.open("a", encoding="utf-8")
+        return self._handle
+
+    def close(self) -> None:
+        if self._handle is not None and not self._handle.closed:
+            self._handle.close()
 
     def record(self, event: str, **fields: Any) -> None:
         record: dict[str, Any] = {
@@ -96,8 +112,9 @@ class AuditLog:
         }
         clean = {k: _jsonable(v) for k, v in _sanitize(record).items()}
         line = json.dumps(clean, ensure_ascii=False, sort_keys=True, default=str)
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        handle = self._ensure_handle()
+        handle.write(line + "\n")
+        handle.flush()
 
     def record_suppressed(self, method: str, path: str, payload: dict[str, Any] | None = None) -> None:
         """SHADOW 모드에서 억제된 변이 요청을 기록한다. 원문 대신 다이제스트만 남긴다."""
