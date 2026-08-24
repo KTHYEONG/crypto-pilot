@@ -1,6 +1,8 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -206,3 +208,30 @@ def test_book_outcome_existing_primary_metrics_unchanged(mhs_market) -> None:
     )
     assert report.prescreen == expected_prescreen
     assert report.tail == expected_tail
+
+
+def test_book_outcome_blend_exposes_exposure_scale_series_constant_risk(mhs_market) -> None:
+    # SCENARIO_MHS_BLEND_REPORT_EXPOSES_EXPOSURE_SCALE_SERIES: under
+    # constant_risk the two-pass blend book carries the pnl_vol_target_scale it
+    # already computed and applied on MhsBookReport.exposure_scale (read-only
+    # reuse for folds, no new numeric logic), while a non-blend book leaves
+    # the field at its None default.
+    args = _build_book_outcome_args(mhs_market)
+    request = dataclasses.replace(
+        args["request"], pnl_vol_target_mode="constant_risk", committee_capital=True,
+    )
+    report, _ = ev._book_outcome(**{**args, "name": "blend", "request": request})
+    assert report.failure is None
+    assert report.pre_vol_target_reference is not None
+    assert isinstance(report.exposure_scale, pd.Series)
+    reference_daily_returns = (
+        report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change()
+    )
+    pd.testing.assert_index_equal(report.exposure_scale.index, reference_daily_returns.index)
+    expected = scaling._replay_exposure_scale(reference_daily_returns, request)
+    np.testing.assert_allclose(report.exposure_scale.to_numpy(), expected.to_numpy())
+
+    non_blend, _ = ev._book_outcome(**{**args, "request": request})
+    assert non_blend.failure is None
+    assert non_blend.name != "blend"
+    assert non_blend.exposure_scale is None

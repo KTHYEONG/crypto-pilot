@@ -120,3 +120,79 @@ def test_build_committee_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch)
     assert ctx.phase_slow == "phase-result"
     assert ctx.phase_blend == "phase-result"
     assert ctx.committee_execution_book is None
+
+
+def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SCENARIO_MHS_COMMITTEE_FOLD_BROADCASTS_TOP_LEVEL_WEIGHTS (I-SINGLE-CONFIGURATION,
+    # mirrors the constant_risk target_vol fix): under committee_capital=True with
+    # evidence weighting on, every fold index must receive the SAME top-level
+    # member-weight mix -- never a per-fold-boundary leak-free refit of it, which
+    # would drift the fold's signal blend away from what the blend actually deploys.
+    captured: dict[str, object] = {}
+
+    def _fake_by_boundary(*_a: object, **_k: object) -> dict[str, dict[str, float]]:
+        return {
+            "top_level": {"member_a": 0.7, "member_b": 0.3},
+            "fold_0": {"member_a": 0.9, "member_b": 0.1},
+            "fold_1": {"member_a": 0.5, "member_b": 0.5},
+        }
+
+    def _fake_committee_execution_book(*_a: object, **_k: object) -> pd.DataFrame:
+        captured["member_weights"] = _k.get("member_weights")
+        return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
+
+    monkeypatch.setattr(
+        committee_stage, "_committee_evidence_weights_by_boundary", _fake_by_boundary,
+    )
+    class _FoldStub:
+        def __init__(self, train_end: pd.Timestamp) -> None:
+            self.train_end = train_end
+
+    monkeypatch.setattr(
+        committee_stage, "phase_1_anchored_purged_folds",
+        lambda: (
+            _FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),
+            _FoldStub(pd.Timestamp("2023-01-01", tz="UTC")),
+        ),
+    )
+    monkeypatch.setattr(
+        committee_stage, "_committee_execution_book", _fake_committee_execution_book,
+    )
+    monkeypatch.setattr(committee_stage, "_phase_diagnostics", lambda *_a, **_k: "phase-result")
+    monkeypatch.setattr(
+        committee_stage, "_active_blend_book_and_grid",
+        lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid),
+    )
+    monkeypatch.setattr(
+        committee_stage, "realized_vol",
+        lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(
+        committee_stage, "horizon_log_return",
+        lambda log_close, horizon: pd.DataFrame(0.0, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(
+        committee_stage, "efficiency_ratio",
+        lambda log_close, horizon: pd.DataFrame(0.5, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(committee_stage._statistics, "_xs_rank_ic", lambda *_a, **_k: {"mean_ic": 0.0})
+    monkeypatch.setattr(committee_stage._statistics, "_date_clustered_ols", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        committee_stage._scaling, "_regime_cash_scale",
+        lambda vol_mean: pd.Series(1.0, index=vol_mean.index),
+    )
+    monkeypatch.setattr(
+        committee_stage, "funding_carry_execution_book", lambda *_a, **_k: None,
+    )
+
+    ctx = _bare_context()
+    ctx.config = dataclasses.replace(
+        ctx.config, committee_capital=True, committee_evidence_weighting=True,
+    )
+    committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
+
+    assert ctx._fold_committee_weights == {
+        0: {"member_a": 0.7, "member_b": 0.3},
+        1: {"member_a": 0.7, "member_b": 0.3},
+    }
+    assert captured["member_weights"] == {"member_a": 0.7, "member_b": 0.3}
