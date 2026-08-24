@@ -7,6 +7,8 @@ import math
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from src.live.audit import AuditLog
 from src.live.errors import VenueError
 from src.live.executor import (
@@ -158,8 +160,9 @@ def test_SCENARIO_LIVE_09_passive_chase_then_ioc_never_market(tmp_path) -> None:
     )
     assert len(rejecty_client.orders) >= 1
 
-    # (d) passive_deadline 경과 후 잔여는 IOC + 가격 상한(ask*(1+15bps))으로 게시된다.
-    deadline_client = StubClient()
+    # (d) passive_deadline 경과 후 잔여는 IOC 백스톱으로 전이하며, 게시 가격은
+    # ask*(1+15bps) 상한을 준수하고 재게시는 max_ioc_attempts 로 상한 종결된다.
+    deadline_client = StubClient(touches=[("100.00", "100.00")])
     execute_intent(
         deadline_client,
         _intent(),
@@ -170,7 +173,8 @@ def test_SCENARIO_LIVE_09_passive_chase_then_ioc_never_market(tmp_path) -> None:
     )
     ioc_orders = [o for o in deadline_client.orders if o["timeInForce"] == "IOC"]
     assert len(ioc_orders) >= 1
-    ask = Decimal("100.20")
+    assert len(ioc_orders) <= _policy().max_ioc_attempts
+    ask = Decimal("100.00")
     cap = ask * (Decimal(1) + Decimal("15") / Decimal(10_000))
     for order in ioc_orders:
         assert Decimal(order["price"]) <= cap
@@ -307,6 +311,171 @@ def test_SCENARIO_LIVE_23_shadow_shortcircuit_and_chase_band(tmp_path) -> None:
     assert moving_outcomes[0].unfilled_qty > 0
 
 
+def test_SCENARIO_LIVE_20_PASSIVE_DEADLINE_STRICTLY_BELOW_WINDOW(tmp_path) -> None:
+    """passive_deadline_s 기본값 1080.0 은 window_deadline_s 보다 엄격히 작고,
+    위반 구성은 fail-closed 한다. 정적 호가 런은 t>=1080s 첫 폴에서 IOC 로
+    전이한다(L1 사분기 죽은 분기 제거)."""
+    policy = PassiveExecutionPolicy()
+    assert policy.passive_deadline_s == 1080.0
+    assert policy.passive_deadline_s < policy.window_deadline_s == 1800.0
+    with pytest.raises(ValueError, match="passive_deadline_s"):
+        PassiveExecutionPolicy(passive_deadline_s=1800.0)
+    with pytest.raises(ValueError, match="poll_interval_s"):
+        PassiveExecutionPolicy(poll_interval_s=0.0)
+    with pytest.raises(ValueError, match="max_ioc_attempts"):
+        PassiveExecutionPolicy(max_ioc_attempts=0)
+
+    client = StubClient(touches=[("100.00", "100.05")])
+    rclock = SteppingClock(3.0)
+    now_value = 0.0
+    post_times: list[float] = []
+    orig_new_order = client.new_order
+
+    def _recording_new_order(params: dict[str, Any]) -> dict[str, Any]:
+        post_times.append(now_value)
+        return orig_new_order(params)
+
+    class _NowClock:
+        def __call__(self) -> float:
+            nonlocal now_value
+            now_value = rclock()
+            return now_value
+
+    client.new_order = _recording_new_order  # type: ignore[method-assign]
+    outcome = execute_intent(
+        client, _intent(), _filters(tick_size="0.01"), policy, AuditLog(tmp_path / "20.jsonl"), _NowClock()
+    )
+    assert len(post_times) >= 2
+    assert client.orders[0]["timeInForce"] == "GTX"
+    assert client.orders[1]["timeInForce"] == "IOC"
+    assert post_times[0] == 3.0  # 첫 폴에서 초기 GTX 게시
+    # timed_out 이 유일한 전이 트리거: 게시 나이가 정확히 passive_deadline 에
+    # 도달하는 첫 폴에서 즉시 전이한다.
+    assert post_times[1] == post_times[0] + policy.passive_deadline_s
+    assert post_times[1] >= 1080.0
+    ioc_price = Decimal(client.orders[1]["price"])
+    assert ioc_price <= Decimal("100") * (Decimal(1) + Decimal("10") / Decimal(10_000))
+    assert outcome.status == "RESIDUAL"
+
+
+def test_SCENARIO_LIVE_21_CHASE_EXHAUSTION_HOLDS_INSTEAD_OF_CROSSING(tmp_path) -> None:
+    """호가가 매 폴 움직여도 chases 소진은 재페그 중단일 뿐이다: GTX 게시는
+    정확히 max_chases+1 회, IOC 전이 없음(t=1080s 이전 무조건)."""
+    touches = [(f"{100 + 0.3 * i:.2f}", f"{100.20 + 0.3 * i:.2f}") for i in range(16)]
+    client = StubClient(touches=touches)
+    policy = _policy(max_chases=8, chase_band_bps=300.0)
+    assert policy.passive_deadline_s == 50.0
+    assert policy.window_deadline_s == 600.0
+    outcomes = execute_intents(
+        client,
+        [_intent()],
+        {"AAAUSDT": _filters()},
+        policy,
+        AuditLog(tmp_path / "21.jsonl"),
+        SteppingClock(3.0),
+        lambda _seconds: None,
+    )
+    gtx_posts = [o for o in client.orders if o["timeInForce"] == "GTX"]
+    ioc_posts = [o for o in client.orders if o["timeInForce"] == "IOC"]
+    assert all(o["type"] == "LIMIT" for o in client.orders)
+    assert len(gtx_posts) == policy.max_chases + 1 == 9
+    assert not ioc_posts
+    assert outcomes[0].chases == policy.max_chases
+    assert outcomes[0].status == "RESIDUAL"
+
+
+def test_SCENARIO_LIVE_22_FAVOURABLE_TOUCH_STILL_POSTS(tmp_path) -> None:
+    """유리 방향 밴드 이탈(매수 중 100bps 하락 bid=99.00)은 HOLD 가 아니라
+    게시다. 매도 거울(ask=101.00 상승)도 동일하다."""
+    buy_client = StubClient(touches=[("99.00", "99.20")])
+    buy_outcome = execute_intent(
+        buy_client, _intent(), _filters(), _policy(), AuditLog(tmp_path / "22b.jsonl"), SteppingClock(3.0)
+    )
+    buy_gtx = [o for o in buy_client.orders if o["timeInForce"] == "GTX"]
+    assert buy_gtx
+    assert Decimal(buy_gtx[0]["price"]) == Decimal("99.00")
+    assert buy_outcome.unfilled_qty > 0
+
+    sell_intent = OrderIntent(
+        symbol="AAAUSDT",
+        side="SELL",
+        quantity=Decimal("1.000"),
+        reduce_only=False,
+        target_qty=Decimal("0"),
+        current_qty=Decimal("1.000"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("100"),
+    )
+    sell_client = StubClient(touches=[("100.80", "101.00")])
+    sell_outcome = execute_intent(
+        sell_client, sell_intent, _filters(), _policy(), AuditLog(tmp_path / "22s.jsonl"), SteppingClock(3.0)
+    )
+    sell_gtx = [o for o in sell_client.orders if o["timeInForce"] == "GTX"]
+    assert sell_gtx
+    assert Decimal(sell_gtx[0]["price"]) == Decimal("101.00")
+    assert sell_outcome.unfilled_qty > 0
+
+
+def test_SCENARIO_LIVE_23_NON_MARKETABLE_IOC_IS_BOUNDED(tmp_path) -> None:
+    """클램프 후 비마케터블 IOC 는 None 이고, 시장가보다 낮은 가격 재게시는
+    max_ioc_attempts 회로 상한 종결된다(창 끝까지 ~600회 스팸 금지)."""
+    capped = _capped_ioc_price(
+        Decimal("100.50"), is_buy=True, taker_cap_bps=15.0,
+        tick_size=Decimal("0.10"), band_low=Decimal("99.90"), band_high=Decimal("100.10"),
+    )
+    assert capped is None  # 클램프 100.10 < ask 100.50
+    capped_sell = _capped_ioc_price(
+        Decimal("99.50"), is_buy=False, taker_cap_bps=15.0,
+        tick_size=Decimal("0.10"), band_low=Decimal("99.90"), band_high=Decimal("100.10"),
+    )
+    assert capped_sell is None  # 클램프 99.90 > bid 99.50
+    marketable_sell = _capped_ioc_price(
+        Decimal("100.00"), is_buy=False, taker_cap_bps=15.0,
+        tick_size=Decimal("0.10"), band_low=Decimal("99.90"), band_high=Decimal("100.10"),
+    )
+    assert marketable_sell is not None
+
+    client = StubClient(touches=[("100.00", "100.00")])
+    policy = _policy(passive_deadline_s=20.0, window_deadline_s=600.0)
+    outcome = execute_intent(
+        client, _intent(), _filters(), policy, AuditLog(tmp_path / "23.jsonl"), SteppingClock(3.0)
+    )
+    ioc_orders = [o for o in client.orders if o["timeInForce"] == "IOC"]
+    assert 1 <= len(ioc_orders) <= policy.max_ioc_attempts == 10
+    assert outcome.filled_qty == 0
+    assert outcome.status == "RESIDUAL"
+
+
+class CancelFillStubClient(StubClient):
+    """cancel 직후 같은 주문 id 의 executedQty 만 '0.5'를 반환하는 fake."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled_ids: set[str] = set()
+
+    def cancel_order(self, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
+        self.cancelled_ids.add(orig_client_order_id)
+        return {}
+
+    def query_order(self, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
+        self.queries += 1
+        executed = "0.5" if orig_client_order_id in self.cancelled_ids else "0"
+        return {"status": "NEW", "executedQty": executed}
+
+
+def test_SCENARIO_LIVE_24_CANCEL_SETTLES_PARTIAL_FILL(tmp_path) -> None:
+    """취소 시점 부분체결은 cancel 직후 재조회로 정산된다. 수정 전 경로
+    (취소 응답 폐기)라면 filled_qty 는 0 으로 수렴해 이 테스트는 실패한다."""
+    client = CancelFillStubClient()
+    policy = _policy(passive_deadline_s=20.0, window_deadline_s=600.0)
+    outcome = execute_intent(
+        client, _intent(), _filters(), policy, AuditLog(tmp_path / "24.jsonl"), SteppingClock(3.0)
+    )
+    assert outcome.filled_qty == Decimal("0.5")
+    assert outcome.unfilled_qty == Decimal("0.5")
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_09_PASSIVE_CHASE_THEN_IOC_NEVER_MARKET",
@@ -314,4 +483,9 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_16",  # IOC_PRICE_IS_TICK_MULTIPLE_AND_CAPPED
     "SCENARIO_LIVE_17",  # SLICE_QUANTITIES_CONSERVE_TOTAL
     "SCENARIO_LIVE_23",  # SHADOW_SHORTCIRCUIT_AND_CHASE_BAND
+    "SCENARIO_LIVE_20_PASSIVE_DEADLINE_STRICTLY_BELOW_WINDOW",
+    "SCENARIO_LIVE_21_CHASE_EXHAUSTION_HOLDS_INSTEAD_OF_CROSSING",
+    "SCENARIO_LIVE_22_FAVOURABLE_TOUCH_STILL_POSTS",
+    "SCENARIO_LIVE_23_NON_MARKETABLE_IOC_IS_BOUNDED",
+    "SCENARIO_LIVE_24_CANCEL_SETTLES_PARTIAL_FILL",
 )

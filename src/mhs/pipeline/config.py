@@ -60,6 +60,7 @@ class MhsRunConfig:
     # Diagnostic opt-ins
     touch_diagnostic: bool = False
     ladder_diagnostic: bool = False
+    peg_chase_diagnostic: bool = False
     discovery_gate: bool = False
     discovery_gate_adjusted_net_t: bool = False
     discovery_gate_regime_scaled_net_t: bool = False
@@ -148,6 +149,7 @@ class MhsRunConfig:
             log_run=not args.no_log_run,
             touch_diagnostic=args.touch_diagnostic,
             ladder_diagnostic=args.ladder_diagnostic,
+            peg_chase_diagnostic=args.peg_chase_diagnostic,
             discovery_gate=args.discovery_gate,
             trend_sleeve=args.trend_sleeve,
             trend_sleeve_gross=args.trend_sleeve_gross,
