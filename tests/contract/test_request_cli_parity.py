@@ -36,6 +36,8 @@ def _mhs_cli_flags() -> set[str]:
     # never construct MhsDiagnosticRequest.
     flags.discard("--leverage-frontier-scan")
     flags.discard("--leverage-frontier-multiples")
+    # 연구-라이브 seam 스위치: 완료된 리포트를 사후 소비할 뿐 요청 필드가 아니다.
+    flags.discard("--emit-target-weights")
     return flags
 
 
