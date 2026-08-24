@@ -466,3 +466,20 @@ class TestCompoundingAlphaAxesContract:
         object.__setattr__(req_bad, "committee_member_set", "unregistered")
         with pytest.raises(ValueError, match="unknown committee_member_set"):
             _resolved_committee_members(req_bad)
+
+
+def test_mhs_book_report_exposure_scale_defaults_to_none() -> None:
+    # SCENARIO_MHS_BOOK_REPORT_EXPOSURE_SCALE_FIELD: exposure_scale is a purely
+    # additive defaulted field -- every existing construction call site stays
+    # valid unmodified and reads None when never populated (blend-only fill).
+    from src.application.research.mhs.contracts import MhsBookReport
+
+    report = MhsBookReport(
+        name="fast_reversal", band="intraday", horizon_hours=48, step_hours=6,
+        tranche_count=8, n_symbols=8, phase=None, prescreen=None, tail=None,
+        primary=None, stress=None, primary_autocorr_sharpe=None,
+        primary_naive_sharpe=None, primary_net_ann=None,
+        primary_geometric_cagr=None, primary_max_drawdown=None,
+        primary_annualized_turnover=None, stress_naive_sharpe=None,
+    )
+    assert report.exposure_scale is None
