@@ -19,6 +19,7 @@ import os
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -298,8 +299,24 @@ def _signal_ema_span(band_sign: int, horizon_hours: int, step_hours: int) -> int
 # cost-stress) is deliberately absent: it carries capital and keeps fail-closed
 # propagation.
 REFERENCE_ONLY_EXECUTION_BOUNDS: frozenset[str] = frozenset(
-    {"OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_LADDERED_PROXY"}
+    {"OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_LADDERED_PROXY", "OHLCV_PEG_CHASE_PROXY"}
 )
+
+
+def _peg_chase_fill_rate(report: StrategyExecutionReplayResult) -> float | None:
+    """Share of peg-chase intents that terminated in a fill (maker or taker)."""
+    denom = report.fill_count + report.fallback_count + report.residual_count
+    if not denom:
+        return None
+    return (report.fill_count + report.fallback_count) / denom
+
+
+def _peg_chase_maker_share(report: StrategyExecutionReplayResult) -> float | None:
+    """Share of filled peg-chase notional intents that executed as maker."""
+    denom = report.fill_count + report.fallback_count
+    if not denom:
+        return None
+    return report.fill_count / denom
 
 
 # Sentinel distinguishing the registered default exposure from an explicit
@@ -2161,6 +2178,10 @@ def _book_outcome(
     touch_naive_sharpe = None
     ladder = None
     ladder_naive_sharpe = None
+    peg_chase = None
+    peg_chase_naive_sharpe = None
+    peg_chase_fill_rate = None
+    peg_chase_maker_share = None
     patient_reference = None
     patient_reference_naive_sharpe = None
     pre_vol_target_reference = None
@@ -2170,18 +2191,32 @@ def _book_outcome(
     pnl_vol_target_scale: pd.Series | None = None
     try:
         batch_bounds: list[tuple[
-            Literal["OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"],
+            Literal[
+                "OHLCV_STRICT_PROXY",
+                "OHLCV_TOUCH_PROXY",
+                "OHLCV_IMMEDIATE_TAKER",
+                "OHLCV_LADDERED_PROXY",
+                "OHLCV_PEG_CHASE_PROXY",
+            ],
             ExecutionSpec,
         ]] = [
             ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
             ("OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec()),
             ("OHLCV_STRICT_PROXY", ExecutionSpec()),
         ]
+        # Explicit result indices for the optional diagnostic bounds: a negative
+        # index silently misbinds once another bound is appended.
+        optional_bound_indices: dict[str, int] = {}
         if request.touch_diagnostic:
             batch_bounds.append(("OHLCV_TOUCH_PROXY", ExecutionSpec()))
+            optional_bound_indices["touch"] = len(batch_bounds) - 1
         if request.ladder_diagnostic:
             _validate_ladder_schedule_contract()
             batch_bounds.append(("OHLCV_LADDERED_PROXY", ExecutionSpec()))
+            optional_bound_indices["ladder"] = len(batch_bounds) - 1
+        if request.peg_chase_diagnostic:
+            batch_bounds.append(("OHLCV_PEG_CHASE_PROXY", dataclass_replace(ExecutionSpec(), decision_anchor="submit_bar")))
+            optional_bound_indices["peg_chase"] = len(batch_bounds) - 1
         isolated_indices = frozenset(
             i for i, (bound, _spec) in enumerate(batch_bounds)
             if bound in REFERENCE_ONLY_EXECUTION_BOUNDS
@@ -2277,12 +2312,18 @@ def _book_outcome(
         patient_reference_naive_sharpe = (
             _statistics._naive_sharpe(patient_reference.ledger) if patient_reference is not None else None
         )
-        if request.touch_diagnostic:
-            touch = batch.results[3]
+        if request.touch_diagnostic and "touch" in optional_bound_indices:
+            touch = batch.results[optional_bound_indices["touch"]]
             touch_naive_sharpe = _statistics._naive_sharpe(touch.ledger) if touch is not None else None
-        if request.ladder_diagnostic:
-            ladder = batch.results[-1]
+        if request.ladder_diagnostic and "ladder" in optional_bound_indices:
+            ladder = batch.results[optional_bound_indices["ladder"]]
             ladder_naive_sharpe = _statistics._naive_sharpe(ladder.ledger) if ladder is not None else None
+        if request.peg_chase_diagnostic and "peg_chase" in optional_bound_indices:
+            peg_chase = batch.results[optional_bound_indices["peg_chase"]]
+            if peg_chase is not None:
+                peg_chase_naive_sharpe = _statistics._naive_sharpe(peg_chase.ledger)
+                peg_chase_fill_rate = _peg_chase_fill_rate(peg_chase)
+                peg_chase_maker_share = _peg_chase_maker_share(peg_chase)
         reference_bound_failures = tuple(
             MhsBookFailure(
                 stage=f"replay_{name}_{f.execution_bound}",
@@ -2343,6 +2384,10 @@ def _book_outcome(
             touch_naive_sharpe=touch_naive_sharpe,
             ladder=ladder,
             ladder_naive_sharpe=ladder_naive_sharpe,
+            peg_chase=peg_chase,
+            peg_chase_naive_sharpe=peg_chase_naive_sharpe,
+            peg_chase_fill_rate=peg_chase_fill_rate,
+            peg_chase_maker_share=peg_chase_maker_share,
             patient_reference=patient_reference,
             patient_reference_naive_sharpe=patient_reference_naive_sharpe,
             pre_vol_target_reference=pre_vol_target_reference,
@@ -2379,6 +2424,10 @@ def _book_outcome(
         touch_naive_sharpe=touch_naive_sharpe,
         ladder=ladder,
         ladder_naive_sharpe=ladder_naive_sharpe,
+        peg_chase=peg_chase,
+        peg_chase_naive_sharpe=peg_chase_naive_sharpe,
+        peg_chase_fill_rate=peg_chase_fill_rate,
+        peg_chase_maker_share=peg_chase_maker_share,
         patient_reference=patient_reference,
         patient_reference_naive_sharpe=patient_reference_naive_sharpe,
         pre_vol_target_reference=pre_vol_target_reference,
