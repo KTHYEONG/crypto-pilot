@@ -575,6 +575,70 @@ def test_book_outcome_blend_traces_carry_deployed_exposure_scale(mhs_market, mon
     assert reasons == (ev.GO_REASON_PATH_DIVERGENCE,)
 
 
+def test_constant_risk_fold_reuses_blend_exposure_scale(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_RUN_ANCHORED_FOLD_USES_BLEND_SCALE_DIRECTLY: under
+    # constant_risk the fold consumes blend_exposure_scale verbatim
+    # (I-SCALE-IS-DEPLOYED-OVERLAY) -- book_structure's exposure_scale_mean
+    # equals the passed series mean over the validation dates, and the
+    # fold-local replay dispatcher is never invoked.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        pnl_vol_target_mode="constant_risk",
+    )
+    daily_idx = pd.date_range(
+        _FOLD.validation_start.normalize(), _FOLD.validation_end.normalize(),
+        freq="D", tz="UTC",
+    )
+    # 날짜별로 구분 가능하면서 배치 가능한(자본 불변 위반이 없는) 현실적 스케일.
+    blend_scale = pd.Series(
+        0.8 + 0.4 * (daily_idx.dayofyear.to_numpy(dtype="float64") / 366.0),
+        index=daily_idx,
+    )
+
+    def _must_not_replay(*_a: object, **_k: object) -> pd.Series:
+        raise AssertionError("constant_risk folds must consume the blend scale, never re-replay it")
+
+    monkeypatch.setattr(scaling, "_replay_exposure_scale", _must_not_replay)
+    report = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+        blend_exposure_scale=blend_scale,
+    )
+    assert report.strict is not None
+    assert report.failures == ()
+    assert report.book_structure["exposure_scale_mean"] == pytest.approx(float(blend_scale.mean()))
+
+
+def test_constant_risk_fold_missing_blend_scale_fails_closed(mhs_market) -> None:
+    # SCENARIO_MHS_RUN_ANCHORED_FOLD_USES_BLEND_SCALE_DIRECTLY (case 2): a
+    # missing blend_exposure_scale converts into a typed incomplete-fold
+    # failure through the existing try/except DataIntegrityError wrapper --
+    # never an uncaught error and never a silent unscaled fallback.
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        pnl_vol_target_mode="constant_risk",
+    )
+    report = ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
+    assert report.strict is None
+    assert report.stress is None
+    assert len(report.failures) == 1
+
+
 class _InlineExecutor:
     """Synchronous stand-in for the fork pool: runs submissions in-parent."""
 
@@ -604,11 +668,13 @@ def _capturing_anchored_fold(
     telemetry=None, slow_horizon_override=None, fast_horizon_override=None,
     funding_carry_override=None, committee_member_weights=None,
     growth_budget_target_vol=None, exposure_warmup_returns=None,
+    blend_exposure_scale=None,
 ):
     _CAPTURED_FOLD_SUBMISSIONS.append({
         "fold_index": fold_index,
         "growth_budget_target_vol": growth_budget_target_vol,
         "exposure_warmup_returns": exposure_warmup_returns,
+        "blend_exposure_scale": blend_exposure_scale,
     })
     return ev._incomplete_fold_report(fold, fold_index, ())
 
@@ -645,6 +711,24 @@ def test_post_book_concurrently_forwards_boundary_growth_budget_vols(monkeypatch
         for c in _CAPTURED_FOLD_SUBMISSIONS
     }
     assert forwarded_none == {0: None, 1: None, 2: None, 3: None}
+
+    _CAPTURED_FOLD_SUBMISSIONS.clear()
+    blend_slices = {
+        0: pd.Series([1.0], index=pd.DatetimeIndex([pd.Timestamp("2021-06-01", tz="UTC")])),
+        3: pd.Series([2.0], index=pd.DatetimeIndex([pd.Timestamp("2024-06-01", tz="UTC")])),
+    }
+    ev._run_post_book_concurrently(
+        None, "root", request, [], None, None, None, None, None, None, None, {}, 1.0, None,
+        fold_blend_exposure_scale=blend_slices,
+    )
+    forwarded_blend = {
+        int(c["fold_index"]): c["blend_exposure_scale"]
+        for c in _CAPTURED_FOLD_SUBMISSIONS
+    }
+    assert forwarded_blend[0] is blend_slices[0]
+    assert forwarded_blend[3] is blend_slices[3]
+    assert forwarded_blend[1] is None
+    assert forwarded_blend[2] is None
 
 
 def test_p14_postbook_concurrent_parity() -> None:
