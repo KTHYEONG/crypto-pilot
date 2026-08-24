@@ -197,6 +197,14 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "(submit-bar anchor) alongside the strict/stress pair -- opt-in only"
         ),
     )
+    _liquidity_cost_model_action = mhs.add_argument("--liquidity-cost-model", choices=["flat", "corwin_schultz"], default="flat")
+    _liquidity_cost_model_action.help = (
+        "Taker crossing cost model: flat (frozen default, fixed 3bps "
+        "slippage, bit-identical) or corwin_schultz (per-symbol half-spread "
+        "estimated from window high/lows with an EWMA smoothing; applied "
+        "identically to every bound in the batch). Default keeps every "
+        "existing replay byte-identical"
+    )
     mhs.add_argument(
         "--discovery-gate",
         action="store_true",
