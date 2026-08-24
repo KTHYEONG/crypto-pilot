@@ -24,6 +24,7 @@ class AccountSnapshot:
     wallet_balance: Decimal
     available_balance: Decimal
     total_maint_margin: Decimal
+    unrealized_pnl: Decimal
     positions: Mapping[str, Decimal]
     dual_side_position: bool
     multi_assets_margin: bool
@@ -65,10 +66,43 @@ def fetch_account_snapshot(client: Any, *, now: pd.Timestamp) -> AccountSnapshot
         wallet_balance=_required_number(account, "totalWalletBalance"),
         available_balance=_required_number(account, "availableBalance"),
         total_maint_margin=_required_number(account, "totalInitialMargin"),
+        unrealized_pnl=_required_number(account, "totalUnrealizedProfit"),
         positions=positions,
         dual_side_position=str(dual_side_raw).lower() == "true",
         multi_assets_margin=str(multi_assets_raw).lower() == "true",
     )
+
+
+def resolve_sizing_equity(snapshot: AccountSnapshot, cap_usdt: Decimal) -> Decimal:
+    """I-EQUITY-MTM: E = min(wallet_balance + unrealized_pnl, cap_usdt).
+
+    cap 은 '목표 노셔널'이 아니라 사이징 에쿼티의 절대 상한 캡이다.
+    결과가 0 이하면 RiskGateBreach 로 전체 HALT 한다.
+    """
+    equity = min(snapshot.wallet_balance + snapshot.unrealized_pnl, cap_usdt)
+    if equity <= Decimal(0):
+        raise RiskGateBreach(
+            f"sizing equity {equity} must be positive "
+            f"(wallet={snapshot.wallet_balance} uPnL={snapshot.unrealized_pnl} cap={cap_usdt})"
+        )
+    return equity
+
+
+def assert_drawdown_within_limit(
+    equity: Decimal, high_water_mark: Decimal, limit_fraction: float
+) -> None:
+    """I-DD-HALT: equity/hwm - 1 <= limit_fraction 이면 RiskGateBreach.
+
+    high_water_mark <= 0 은 초기 사이클로 간주해 게이트를 통과시킨다.
+    """
+    if high_water_mark <= Decimal(0):
+        return
+    drawdown = equity / high_water_mark - Decimal(1)
+    if drawdown <= Decimal(str(limit_fraction)):
+        raise RiskGateBreach(
+            f"equity drawdown {drawdown} breaches halt limit {limit_fraction} "
+            f"(equity={equity} hwm={high_water_mark})"
+        )
 
 
 def assert_venue_configuration(snapshot: AccountSnapshot) -> None:

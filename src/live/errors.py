@@ -9,7 +9,10 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.live.executor import ExecutionOutcome
 
 
 class ErrorAction(str, Enum):  # noqa: UP042 - contract pins the (str, Enum) base
@@ -21,6 +24,8 @@ class ErrorAction(str, Enum):  # noqa: UP042 - contract pins the (str, Enum) bas
     RESYNC_THEN_DECIDE = "resync_then_decide"
     BENIGN = "benign"
     BENIGN_REPRICE = "benign_reprice"
+    # '이 intent 는 무의미해졌다'(-2022 reduceOnly 거절). 사이클 전체가 아니라 해당 intent 만 종료한다.
+    BENIGN_ABORT = "benign_abort"
     FAIL_CLOSED = "fail_closed"
 
 
@@ -39,6 +44,10 @@ BINANCE_ERROR_POLICY: Mapping[int, ErrorAction] = {
     -2019: ErrorAction.FAIL_CLOSED,
     -4046: ErrorAction.BENIGN,
     -5022: ErrorAction.BENIGN_REPRICE,
+    # ReduceOnly Order is rejected: 포지션이 이미 청산됨 -> 해당 intent 만 무의미.
+    -2022: ErrorAction.BENIGN_ABORT,
+    # PERCENT_PRICE 한계 초과: 밴드 내 재호가 신호.
+    -4131: ErrorAction.BENIGN_REPRICE,
 }
 
 
@@ -56,7 +65,13 @@ def payload_digest(payload: Mapping[str, Any] | str | None) -> str:
 
 
 class LiveTradingError(RuntimeError):
-    """라이브 트레이딩 계층의 최상위 예외."""
+    """라이브 트레이딩 계층의 최상위 예외.
+
+    I-LEDGER-DURABLE 채널: 집행기가 중단 시까지 확인된 부분 결과를
+    partial_outcomes 에 붙여 재전파하면 원장이 이를 영속한다.
+    """
+
+    partial_outcomes: tuple[ExecutionOutcome, ...] | None = None
 
 
 class ShadowModeViolation(LiveTradingError):  # noqa: N818 - contract pins the name
@@ -73,6 +88,18 @@ class ReconciliationBreach(LiveTradingError):  # noqa: N818 - contract pins the 
 
 class RiskGateBreach(LiveTradingError):  # noqa: N818 - contract pins the name
     """사전 리스크 게이트 위반으로 사이클 전체가 HALT 되었다."""
+
+
+class StaleSignalError(LiveTradingError):
+    """신호가 max_staleness 보다 오래되어 주문 0건으로 스킵한다."""
+
+
+class OrderObsolete(LiveTradingError):  # noqa: N818 - contract pins the name
+    """거래소가 해당 intent 의 무의미함(-2022)을 통보했다. 사이클 전체가 아니다."""
+
+
+class ArtifactSealError(LiveTradingError):
+    """아티팩트 봉투(seal)의 키/포맷/무결성 실패. 평문 노출 없이 HALT 한다."""
 
 
 class VenueError(LiveTradingError):
