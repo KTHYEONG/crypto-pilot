@@ -387,6 +387,19 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "growth_moderate 1.5, growth 2.0), NOT PNL_VOL_TARGET_MAX_SCALE"
         ),
     )
+    mhs.add_argument("--exposure-drawdown-brake",
+        # argparse가 dest exposure_drawdown_brake를 플래그에서 유도한다.
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in causal equity-drawdown brake on the exposure scale: "
+            "scale_t = base_t * clip(1 + k * underwater_{t-1}, floor, 1.0), "
+            "where underwater_{t-1} is the replayed equity's drawdown vs its "
+            "running peak measured BEFORE day t's own return (strictly causal; "
+            "recovery restores full scale immediately). Requires --pnl-vol-target-mode "
+            "constant_risk. Default False (byte-identical)"
+        ),
+    )
     mhs.add_argument(
         "--execution-coverage-gate",
         action="store_true",

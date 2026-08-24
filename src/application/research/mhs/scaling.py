@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 import numpy as np
@@ -16,6 +17,8 @@ from src.mhs.params import (
     CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
     CONSTANT_RISK_MIN_PERIODS_DAYS,
     CONSTANT_RISK_TARGET_ANNUAL_VOL,
+    EXPOSURE_DRAWDOWN_BRAKE_FLOOR,
+    EXPOSURE_DRAWDOWN_BRAKE_K,
     PNL_TARGET_ANNUAL_VOL,
     PNL_VOL_TARGET_BURN_IN_DAYS,
     PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
@@ -427,6 +430,51 @@ def _constant_risk_scale(
     return scale.clip(lower=floor, upper=cap).fillna(1.0)
 
 
+def _equity_drawdown_brake_scale(
+    reference_daily_returns: pd.Series,
+    base_scale: pd.Series,
+    *,
+    cap: float,
+    k: float = EXPOSURE_DRAWDOWN_BRAKE_K,
+    floor: float = EXPOSURE_DRAWDOWN_BRAKE_FLOOR,
+) -> pd.Series:
+    """인과적 자기자본 드로다운 브레이크: base scale에 underwater 비례 감쇠를 합성.
+
+    ``u_{t-1} = E_{t-1}/P_{t-1} - 1`` 을 r_t 반영 이전 자본으로 계산하고
+    ``scale_t = clip(base_t * clip(1 + k*u, floor, 1), 0, cap)``. 현재
+    언더워터에 선형 비례하고 회복 시 즉시 복원되므로 회복 구간을 놓치지 않는다.
+    경로 의존 재귀이므로 단일 Python 루프가 유일한 허용 형태(O(n)).
+    """
+    if not reference_daily_returns.index.equals(base_scale.index):
+        raise ValueError("reference_daily_returns and base_scale indexes must be equal")
+    if cap < 0.0:
+        raise ValueError(f"cap must be >= 0.0, got {cap}")
+    if not 0.0 < floor <= 1.0:
+        raise ValueError(f"floor must be in (0, 1], got {floor}")
+    if k < 0.0:
+        raise ValueError(f"k must be >= 0.0, got {k}")
+    r_arr = reference_daily_returns.to_numpy(dtype="float64")
+    base_arr = base_scale.to_numpy(dtype="float64")
+    scales = np.empty(r_arr.shape[0], dtype="float64")
+    equity = 1.0
+    peak = 1.0
+    for t in range(r_arr.shape[0]):
+        u = equity / peak - 1.0
+        brake = min(max(1.0 + k * u, floor), 1.0)
+        scale_t = min(max(base_arr[t] * brake, 0.0), cap)
+        scales[t] = scale_t
+        r_t = r_arr[t]
+        # NaN 첫 행(pct_change 잔재) 등 비유한 수익은 무수익으로만 대체한다.
+        equity *= 1.0 + (r_t if np.isfinite(r_t) else 0.0) * scale_t
+        if not np.isfinite(equity) or equity <= 0.0:
+            raise DataIntegrityError(
+                f"equity drawdown brake requires positive finite equity; "
+                f"got {equity!r} at row {t}"
+            )
+        peak = max(peak, equity)
+    return pd.Series(scales, index=reference_daily_returns.index, dtype="float64")
+
+
 def _constant_risk_target_vol_by_boundary(
     reference_daily_returns: pd.Series,
     envelope: GrowthRiskEnvelope,
@@ -466,6 +514,8 @@ def _constant_risk_target_vol(
     reference_daily_returns: pd.Series,
     envelope: GrowthRiskEnvelope,
     oos_start: pd.Timestamp = COMMITTEE_OOS_START,
+    *,
+    drawdown_brake: bool = False,
 ) -> float:
     """Leak-free top-level wrapper: mirrors ``_constant_risk_target_vol_by_boundary``'s
     ``"top_level"`` label exactly (same oos_start slice, same fixed base
@@ -478,7 +528,11 @@ def _constant_risk_target_vol(
     train = reference_daily_returns.loc[reference_daily_returns.index < oos_start].dropna()
     if len(train) < PNL_VOL_TARGET_BURN_IN_DAYS:
         return CONSTANT_RISK_TARGET_ANNUAL_VOL
-    return _feasible_constant_risk_target(train, envelope, CONSTANT_RISK_TARGET_ANNUAL_VOL)
+    # 브레이크 ON은 실현 드로다운을 구조적으로 억제하므로 budget 상한이 아닌
+    # 레버리지 실현가능 상한(min(inf, feasible_cap))이 유일 구속조건이 된다 --
+    # 새 적합 파라미터 없이 기존 feasibility clamp만으로 타깃이 유도된다.
+    budget = math.inf if drawdown_brake else CONSTANT_RISK_TARGET_ANNUAL_VOL
+    return _feasible_constant_risk_target(train, envelope, budget)
 
 
 def _envelope_exposure_cap(
@@ -617,13 +671,21 @@ def _replay_exposure_scale(
             # I2/I3: leak-free oos_start slice, mirroring the fold path's
             # "top_level" boundary -- never fit sigma_book on the full
             # unsliced series (FOLD_BLEND_PATH_DIVERGENCE root cause).
-            target_vol = _constant_risk_target_vol(reference_daily_returns, envelope)
+            target_vol = _constant_risk_target_vol(
+                reference_daily_returns, envelope,
+                drawdown_brake=request.exposure_drawdown_brake,
+            )
         # I-NO-PROCYCLIC: 경기순응 Kelly 항은 위험 상수성을 깨뜨린다.
-        return _constant_risk_scale(
+        scale = _constant_risk_scale(
             reference_daily_returns, target_vol=target_vol,
             cap=resolved_exposure_cap(request),
             warmup_returns=warmup_returns,
         )
+        if not request.exposure_drawdown_brake:
+            return scale
+        # 브레이크는 base scale 산출 직후 단일 합성점에서만 적용되며,
+        # blend의 exposure_scale에 이미 반영되므로 fold로 자동 전파된다.
+        return _equity_drawdown_brake_scale(reference_daily_returns, scale, cap=resolved_exposure_cap(request))
     if request.pnl_vol_target_mode == "median_relative":
         scale = _pnl_vol_target_scale(reference_daily_returns)
     elif request.pnl_vol_target_mode == "exante_target":
@@ -676,6 +738,10 @@ def is_streaming_scale_mode(request: MhsDiagnosticRequest) -> bool:
     blend changes the resolved formula). ``constant_risk`` also returns False:
     its feasible target needs the train-slice sigma_book quantile fit.
     """
+    if request.exposure_drawdown_brake:
+        # 브레이크는 prefix-deterministic이지만 배포 자본 궤적에 자기참조하므로
+        # 스트리밍 코디네이터가 독립 재구성하면 경로가 갈라진다.
+        return False
     if request.committee_capital and request.committee_kelly_sizing:
         # _committee_capital_replay_scale만이 실제 Kelly 블렌드를 발동하는
         # 조건이다(둘 다 True). committee_kelly_sizing 단독으로는 무영향이므로
