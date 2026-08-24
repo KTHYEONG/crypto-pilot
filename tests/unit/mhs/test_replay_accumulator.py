@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import dataclasses
+import math
 import tracemalloc
 import numpy as np
 import pandas as pd
@@ -531,3 +532,127 @@ class TestPegChaseAnchorMode:
         assert qty_decision == pytest.approx(0.01 * 1.0 / 100.0, rel=1e-12)
         assert qty_submit == pytest.approx(0.01 * 1.0 / 101.0, rel=1e-12)
         assert submit_mode.residual_count == 0
+
+
+class TestFairnessInstrumentation:
+    """SCENARIO_MHS_FAIR_04..06: causal spread EWMA, cost decomposition
+    identity, and ledger-neutral min-notional probe."""
+
+    def _workload(self, days: int = 10, n_symbols: int = 4) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=2, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.02, 0.06, 2)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            # Wide high-low bands give the CS estimator a strongly non-flat input.
+            "highs": closes * 1.005,
+            "lows": closes * 0.995,
+            "closes": closes,
+            "marks": closes,
+            "funding": pd.DataFrame(0.0, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    def test_SCENARIO_MHS_FAIR_04_SPREAD_EWMA_IS_CAUSAL(self) -> None:
+        """SCENARIO_MHS_FAIR_04_SPREAD_EWMA_IS_CAUSAL: the first window prices
+        its taker fills at the frozen slippage (EWMA still nan), later windows
+        price at the EWMA built from strictly prior windows, and the ordering
+        is load-bearing -- window 1's own wide bars would have changed its own
+        fees had the update run ahead of the fills."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+        acc = _BoundExecutionReplayAccumulator(windows[0], 1.0, "OHLCV_IMMEDIATE_TAKER", spec, False)
+        assert np.isnan(acc.half_spread_bps).all()
+        acc.consume(windows[0])
+        first_fees = list(acc.fill_fee_bps)
+        assert first_fees
+        assert all(f == spec.taker_fee_bps + spec.taker_slippage_bps for f in first_fees)
+        est_after_first = acc.half_spread_bps.copy()
+        assert np.isfinite(est_after_first).all()
+        # Load-bearing ordering: window 1's own estimate differs from the flat
+        # slippage it was actually charged.
+        assert np.all(est_after_first != spec.taker_slippage_bps)
+        est_snapshot = est_after_first.copy()
+        acc.consume(windows[1])
+        gcol_of = {s: i for i, s in enumerate(acc.columns)}
+        later_fees = acc.fill_fee_bps[len(first_fees):]
+        later_syms = acc.fill_symbol[len(first_fees):]
+        assert later_fees
+        for fee, sym in zip(later_fees, later_syms, strict=True):
+            assert fee == pytest.approx(spec.taker_fee_bps + est_snapshot[gcol_of[sym]])
+
+    def test_SCENARIO_MHS_FAIR_05_COST_DECOMPOSITION_SUMS(self) -> None:
+        """SCENARIO_MHS_FAIR_05_COST_DECOMPOSITION_SUMS: fee+spread+delay
+        reconstructs the notional-weighted shortfall within 1e-9 under both
+        cost models; 'flat' books zero spread."""
+        wl = self._workload()
+        for spec in (
+            ExecutionSpec(),
+            dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz"),
+        ):
+            report = replay_execution_windows(
+                _partition_windows(
+                    wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                    wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+                ),
+                1.0, "OHLCV_IMMEDIATE_TAKER", spec,
+            )
+            assert len(report.simulated_fills) > 0
+            total = (
+                report.notional_weighted_fee_bps
+                + report.notional_weighted_spread_bps
+                + report.notional_weighted_delay_bps
+            )
+            assert abs(total - report.notional_weighted_shortfall_bps) < 1e-9
+
+        flat = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+            ),
+            1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+        assert flat.notional_weighted_spread_bps == 0.0
+
+    def test_SCENARIO_MHS_FAIR_06_MIN_NOTIONAL_PROBE_IS_LEDGER_NEUTRAL(self) -> None:
+        """SCENARIO_MHS_FAIR_06_MIN_NOTIONAL_PROBE_IS_LEDGER_NEUTRAL: enabling
+        the probe leaves equity, fills, and cash bit-identical and only
+        populates min_notional_dropped_fraction."""
+        wl = self._workload()
+
+        def _run(spec: ExecutionSpec) -> object:
+            return replay_execution_windows(
+                _partition_windows(
+                    wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                    wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+                ),
+                1.0, "OHLCV_IMMEDIATE_TAKER", spec,
+            )
+
+        disabled = _run(ExecutionSpec())
+        enabled = _run(dataclasses.replace(ExecutionSpec(), min_notional_probe_usdt=5.0))
+        np.testing.assert_array_equal(
+            enabled.ledger.equity.to_numpy(), disabled.ledger.equity.to_numpy(),
+        )
+        np.testing.assert_array_equal(
+            enabled.ledger.fee_charge.to_numpy(), disabled.ledger.fee_charge.to_numpy(),
+        )
+        pd.testing.assert_frame_equal(enabled.simulated_fills, disabled.simulated_fills)
+        assert math.isnan(disabled.min_notional_dropped_fraction)
+        assert 0.0 <= enabled.min_notional_dropped_fraction <= 1.0
