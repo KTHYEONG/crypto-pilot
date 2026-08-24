@@ -385,6 +385,9 @@ class MhsBookReport:
     primary_fill_count: int | None = None
     primary_unfilled_count: int | None = None
     primary_forced_exit_notional: float | None = None
+    # I-SCALE-IS-DEPLOYED-OVERLAY: blend가 배치 확정한 노출 스케일 시계열.
+    # constant_risk fold가 재적합하지 않고 이 값을 슬라이스해 재사용한다.
+    exposure_scale: pd.Series | None = None
 
 
 @dataclass(frozen=True, slots=True)

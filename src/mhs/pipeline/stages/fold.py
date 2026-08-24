@@ -71,6 +71,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # the final assembly.
     ctx._fold_growth_budget_target_vol = None
     ctx._fold_exposure_warmup_returns = None
+    ctx._fold_blend_exposure_scale = None
     if (
         ctx.config.pnl_vol_target_mode in ("growth_budget", "constant_risk")
         and ctx.blend_report is not None
@@ -83,14 +84,23 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             ctx.blend_report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change()
         )
         if ctx.config.pnl_vol_target_mode == "constant_risk":
-            # I-SINGLE-TARGET-VOL: blend가 배치하는 것은 top-level 경계에서 한 번
-            # 해석된 단일 고정 target_vol이며, 모든 fold도 그 동일 값을 검증한다.
-            _top_level_target_vol = _scaling._constant_risk_target_vol(
-                _reference_daily_returns, _research_go._resolved_growth_envelope(ctx.config),
-            )
-            ctx._fold_growth_budget_target_vol = dict.fromkeys(
-                range(len(phase_1_anchored_purged_folds())), _top_level_target_vol,
-            )
+            # I-SCALE-IS-DEPLOYED-OVERLAY: exposure_scale은 blend가 배치 확정한
+            # 리스크 오버레이로, fold는 자신의 검증 구간만큼 슬라이스해 읽기만
+            # 한다 -- fold-local EWMA 재적합은 FOLD_BLEND_PATH_DIVERGENCE의
+            # 실측 원인이므로 금지. 누락 시 침묵 폴백 없이 fail-closed.
+            _exposure_scale = ctx.blend_report.exposure_scale
+            if ctx.blend_report is None or _exposure_scale is None:
+                raise DataIntegrityError(
+                    "constant_risk folds require the blend book's deployed "
+                    f"exposure_scale (pnl_vol_target_mode={ctx.config.pnl_vol_target_mode})"
+                )
+            ctx._fold_blend_exposure_scale = {
+                _i: _exposure_scale.loc[
+                    (_exposure_scale.index >= _f.validation_start)
+                    & (_exposure_scale.index <= _f.validation_end)
+                ]
+                for _i, _f in enumerate(phase_1_anchored_purged_folds())
+            }
         else:
             _train_ends = {"top_level": COMMITTEE_OOS_START}
             _train_ends.update({
@@ -114,6 +124,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.fold_funding, ctx.initial_equity, ctx.recorder, ctx.fold_slow_horizons, ctx.fold_fast_horizons,
         ctx.fold_funding_carry, ctx._fold_committee_weights, ctx._fold_growth_budget_target_vol,
         ctx._fold_exposure_warmup_returns,
+        fold_blend_exposure_scale=ctx._fold_blend_exposure_scale,
     )
     ctx.folds = tuple(fold_reports)
     # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
