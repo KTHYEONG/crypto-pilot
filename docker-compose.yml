@@ -1,41 +1,18 @@
-version: '3.8'
-
 services:
-  # Upbit Spot Trading Bot
-  # spot-bot:
-  #   image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/my-coin-bot:latest
-  #   container_name: coin-trader-spot
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   volumes:
-  #     - ./data:/app/data
-  #     - ./logs:/app/logs
-  #     - ./results:/app/results
-  #   command: >
-  #     /bin/sh -c "cp /app/results_seed/* /app/results/ 2>/dev/null || true &&
-  #     python -u src/execution/trader_spot.py"
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "5"
-
-  # Binance Futures Trading Bot
-  # futures-bot:
-  #   image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/my-coin-bot:latest
-  #   container_name: coin-trader-futures
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   volumes:
-  #     - ./data:/app/data
-  #     - ./logs:/app/logs
-  #     - ./results:/app/results
-  #   command: >
-  #     /bin/sh -c "cp /app/results_seed/* /app/results/ 2>/dev/null || true &&
-  #     python -u src/execution/trader_futures.py"
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "5"
- 
+  mhs-live:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/crypto-pilot-live:latest
+    container_name: mhs-live-daemon
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - HARDWARE_MAX_WORKERS=1
+    volumes:
+      # 원장/데몬 상태와 감사로그는 호스트에 보존된다(재배포 생존).
+      - ./data/state:/app/data/state
+      - ./logs:/app/logs
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
