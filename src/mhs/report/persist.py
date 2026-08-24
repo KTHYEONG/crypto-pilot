@@ -10,6 +10,7 @@ record. Artifact-table checksum/reference helpers live in ``artifacts``.
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
 import logging
 from datetime import UTC, datetime
@@ -19,6 +20,7 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+from pydantic import SecretStr
 
 from src.application.research.mhs.contracts import (
     MhsBookReport,
@@ -28,6 +30,7 @@ from src.application.research.mhs.contracts import (
 )
 from src.application.research.mhs.resources import _peak_rss_bytes
 from src.common.errors import DataIntegrityError
+from src.live.crypto import derive_key
 from src.mhs.execution import StrategyExecutionReplayResult
 from src.mhs.params import ARTIFACT_CATEGORIES
 from src.mhs.report.artifacts import (
@@ -54,20 +57,14 @@ def emit_deployed_target_weights(
     artifact_root: Path,
     *,
     tail_rows: int,
+    artifact_key: SecretStr | None = None,
 ) -> dict[str, Any]:
-    """연구-라이브 seam: 라이브가 소비할 deployed 목표비중 tail을 Parquet으로 기록한다."""
-    return _emit_deployed_target_weights(target_weights, exposure_scale, artifact_root, tail_rows=tail_rows)
+    """연구-라이브 seam: 라이브가 소비할 deployed 목표비중 tail을 Parquet으로 기록한다.
 
-
-def _emit_deployed_target_weights(
-    target_weights: pd.DataFrame,
-    exposure_scale: pd.Series | None,
-    artifact_root: Path,
-    *,
-    tail_rows: int,
-) -> dict[str, Any]:
-    """deployed = target_weights x exposure_scale(ffill, 결측 1.0) -- 실행 리플레이의
-    two-pass rescale 공식과 동일하다. exposure_scale이 None이면 스케일 1.0."""
+    artifact_key 가 주어지면 parquet 바이트를 seal_bytes 로 봉인해
+    ``deployed_target_weights.parquet.enc`` 로 기록하고 sealed=True 를 반환한다.
+    키가 없으면 기존 평문 경로를 바이트 동일하게 유지한다(연구 워크플로 회귀 금지).
+    """
     if exposure_scale is None:
         scale = pd.Series(1.0, index=target_weights.index)
     else:
@@ -75,9 +72,19 @@ def _emit_deployed_target_weights(
     deployed = target_weights.mul(scale, axis=0)
     artifact_root = Path(artifact_root)
     artifact_root.mkdir(parents=True, exist_ok=True)
+    tail_frame = deployed.tail(tail_rows)
+    rows = int(min(tail_rows, len(deployed)))
+    if artifact_key is not None:
+        from src.live.crypto import seal_bytes
+
+        buffer = io.BytesIO()
+        tail_frame.to_parquet(buffer, index=True)
+        path = artifact_root / "deployed_target_weights.parquet.enc"
+        path.write_bytes(seal_bytes(buffer.getvalue(), derive_key(artifact_key)))
+        return {"path": str(path), "rows": rows, "sealed": True}
     path = artifact_root / "deployed_target_weights.parquet"
-    deployed.tail(tail_rows).to_parquet(path, index=True)
-    return {"path": str(path), "rows": int(min(tail_rows, len(deployed)))}
+    tail_frame.to_parquet(path, index=True)
+    return {"path": str(path), "rows": rows, "sealed": False}
 
 
 def persist_mhs_report(
@@ -317,14 +324,23 @@ def _stubbed_report_for_payload(
     stubs). Covers primary/stress/patient_reference/pre_vol_target_reference,
     touch and ladder on each book and on blend, plus strict/stress on each
     fold. ``row_counts`` must have been captured from the un-stubbed report.
+
+    Also stubs ``target_weights``/``exposure_scale`` on blend: these carry the
+    full decision-grid weight matrix (the research-live seam consumed by
+    ``--emit-target-weights`` via ``emit_deployed_target_weights`` on the
+    *unstubbed* report, called separately) and must never leak into the
+    git-committable COMPACT JSON at full resolution.
     """
     del row_counts
+
+    _heavy_scalar_fields = frozenset({"target_weights", "exposure_scale"})
 
     def _stub(container: Any) -> Any:
         stubs = {
             f.name: None
             for f in dataclasses.fields(container)
             if isinstance(getattr(container, f.name, None), StrategyExecutionReplayResult)
+            or (f.name in _heavy_scalar_fields and getattr(container, f.name, None) is not None)
         }
         return dataclasses.replace(container, **stubs)
 

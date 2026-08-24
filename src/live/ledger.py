@@ -3,12 +3,15 @@
 I-RECONCILE-FIRST가 대조하는 '내부 원장'의 유일한 소스. SHADOW에서는 실제 체결이
 전송되지 않으므로 이 원장은 항상 0으로 남아, 거래소 스냅샷(역시 0)과 자명하게
 일치한다. LIVE_TESTNET에서 실제 체결이 발생해야 원장이 갱신된다.
+I-DD-HALT: equity_high_water_mark 는 여기에 단조 증가로 영속된다.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
@@ -17,26 +20,62 @@ from src.common.errors import DataIntegrityError
 from src.live.executor import ExecutionOutcome
 from src.live.planner import OrderIntent
 
+_HWM_KEY = "equity_high_water_mark"
+_POSITIONS_KEY = "positions"
+
 
 def default_ledger_path() -> Path:
     return DATA_DIR / "state" / "live_position_ledger.json"
 
 
-def load_ledger(path: Path) -> dict[str, Decimal]:
-    """path가 없으면 빈 원장(전량 미보유)을 반환한다."""
+@dataclass(frozen=True, slots=True)
+class LedgerState:
+    """원장 상태: 포지션 맵 + 에쿼티 고수위선(단조 증가)."""
+
+    positions: dict[str, Decimal] = field(default_factory=dict)
+    equity_high_water_mark: Decimal = Decimal(0)
+
+
+def load_ledger(path: Path) -> LedgerState:
+    """path가 없으면 빈 원장을 반환한다. 레거시 평면 dict 는 hwm=0 으로 승격한다."""
     if not path.exists():
-        return {}
+        return LedgerState()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise DataIntegrityError(f"ledger file corrupt: {path}") from exc
-    return {str(symbol): Decimal(str(qty)) for symbol, qty in raw.items()}
+    if not isinstance(raw, dict):
+        raise DataIntegrityError(f"ledger file must be a JSON object: {path}")
+    if _POSITIONS_KEY not in raw:
+        # 레거시 평면 레이아웃({symbol: qty}) 하위 호환.
+        positions_raw = raw
+        hwm = Decimal(0)
+    else:
+        positions_raw = raw[_POSITIONS_KEY]
+        hwm_raw = raw.get(_HWM_KEY, "0")
+        try:
+            hwm = Decimal(str(hwm_raw))
+        except Exception as exc:  # noqa: BLE001
+            raise DataIntegrityError(f"ledger hwm is not numeric: {path}") from exc
+    if not isinstance(positions_raw, dict):
+        raise DataIntegrityError(f"ledger positions must be an object: {path}")
+    try:
+        positions = {str(symbol): Decimal(str(qty)) for symbol, qty in positions_raw.items()}
+    except Exception as exc:  # noqa: BLE001
+        raise DataIntegrityError(f"ledger position quantity is not numeric: {path}") from exc
+    return LedgerState(positions=positions, equity_high_water_mark=hwm)
 
 
-def save_ledger(path: Path, positions: Mapping[str, Decimal]) -> None:
+def save_ledger(path: Path, state: LedgerState) -> None:
+    """임시파일 + os.replace 로 원자적 기록한다(부분 기록 JSON 은 영구 HALT 로 이어진다)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {symbol: str(qty) for symbol, qty in positions.items() if qty != 0}
-    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    payload = {
+        _POSITIONS_KEY: {symbol: str(qty) for symbol, qty in state.positions.items() if qty != 0},
+        _HWM_KEY: str(state.equity_high_water_mark),
+    }
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def apply_outcomes(

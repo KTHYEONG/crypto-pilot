@@ -6,8 +6,10 @@ I-SHADOW-CHOKE: SHADOW 모드의 변이 요청은 전송 계층 최상단에서 
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
+import http.client
 import json
 import time
 import urllib.parse
@@ -18,10 +20,12 @@ from typing import Any, cast
 
 from pydantic import SecretStr
 
+from src.common.errors import DataIntegrityError
 from src.live.audit import AuditLog
 from src.live.errors import (
     ErrorAction,
     LiveTradingError,
+    OrderObsolete,
     ShadowModeViolation,
     VenueError,
     payload_digest,
@@ -70,6 +74,102 @@ class HttpResponse:
     status_code: int
     headers: Mapping[str, str]
     body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimits:
+    """exchangeInfo.rateLimits 에서 파싱한 거래소 공식 한도(추정 금지)."""
+
+    request_weight_1m: int
+    orders_1m: int
+    orders_10s: int
+
+
+def parse_rate_limits(exchange_info: Mapping[str, Any]) -> RateLimits:
+    """REQUEST_WEIGHT/ORDERS 한도를 읽는다. 누락 시 DataIntegrityError(추정 금지)."""
+    rate_limits = exchange_info.get("rateLimits")
+    if not isinstance(rate_limits, list):
+        raise DataIntegrityError("exchangeInfo missing rateLimits")
+    weight_1m: int | None = None
+    orders_1m: int | None = None
+    orders_10s: int | None = None
+    for entry in rate_limits:
+        if not isinstance(entry, dict):
+            continue
+        filter_type = entry.get("filterType")
+        interval = entry.get("interval")
+        limit = entry.get("limit")
+        if filter_type == "REQUEST_WEIGHT" and interval == "1m" and limit is not None:
+            weight_1m = int(limit)
+        elif filter_type == "ORDERS" and interval == "1m" and limit is not None:
+            orders_1m = int(limit)
+        elif filter_type == "ORDERS" and interval == "10s" and limit is not None:
+            orders_10s = int(limit)
+    if weight_1m is None or orders_1m is None or orders_10s is None:
+        raise DataIntegrityError(
+            "exchangeInfo rateLimits missing REQUEST_WEIGHT/ORDERS limits"
+        )
+    return RateLimits(
+        request_weight_1m=weight_1m, orders_1m=orders_1m, orders_10s=orders_10s
+    )
+
+
+class KeepAliveTransport:
+    """호스트당 1개의 HTTPSConnection 을 재사용해 TLS 핸드셰이크를 제거한다.
+
+    UrllibTransport 와 동일한 call 시그니처를 유지하므로 기존 스텁 테스트는 영향받지
+    않는다. 연결 사망 시 1회 재연결 후 재시도하고, 그래도 실패하면 예외를 전파한다.
+    """
+
+    def __init__(self, base_url: str) -> None:
+        parsed = urllib.parse.urlsplit(base_url if "://" in base_url else f"https://{base_url}")
+        self._host = parsed.hostname or parsed.path
+        self._port = parsed.port or (443 if parsed.scheme != "http" else 80)
+        self._scheme = parsed.scheme
+        self._connection: http.client.HTTPConnection | None = None
+
+    def _connect(self) -> http.client.HTTPConnection:
+        if self._scheme == "http":
+            connection: http.client.HTTPConnection = http.client.HTTPConnection(
+                self._host, self._port, timeout=_HTTP_TIMEOUT_SECONDS
+            )
+        else:
+            connection = http.client.HTTPSConnection(
+                self._host, self._port, timeout=_HTTP_TIMEOUT_SECONDS
+            )
+        self._connection = connection
+        return connection
+
+    def _drop(self) -> None:
+        if self._connection is not None:
+            with contextlib.suppress(OSError):
+                self._connection.close()
+            self._connection = None
+
+    def call(self, method: str, url: str, headers: Mapping[str, str]) -> HttpResponse:
+        parts = urllib.parse.urlsplit(url)
+        path = parts.path or "/"
+        if parts.query:
+            path = f"{path}?{parts.query}"
+        last_error: Exception | None = None
+        for attempt in range(2):
+            connection = self._connection if attempt == 0 and self._connection else self._connect()
+            try:
+                connection.request(method.upper(), path, body=None, headers=dict(headers))
+                response = connection.getresponse()
+                body = response.read()
+                return HttpResponse(
+                    status_code=response.status,
+                    headers=dict(response.getheaders()),
+                    body=body,
+                )
+            except (http.client.HTTPException, OSError, TimeoutError) as exc:
+                last_error = exc
+                self._drop()
+        raise last_error if last_error is not None else OSError("transport failed")
+
+    def close(self) -> None:
+        self._drop()
 
 
 class UrllibTransport:
@@ -125,7 +225,7 @@ class BinanceFuturesRestClient:
         self._mode = mode
         self._audit = audit
         self._recv_window_ms = recv_window_ms
-        self._transport = session if session is not None else UrllibTransport(base_url)
+        self._transport = session if session is not None else KeepAliveTransport(base_url)
         self.rate_state = RateLimitState()
         self._time_offset_ms = 0
 
@@ -239,6 +339,10 @@ class BinanceFuturesRestClient:
                 )
             if action is ErrorAction.BENIGN:
                 return body
+            if action is ErrorAction.BENIGN_ABORT:
+                raise OrderObsolete(
+                    f"venue reports intent is obsolete at {path} (code={error_code})"
+                )
             if action is ErrorAction.BENIGN_REPRICE:
                 raise VenueError(
                     "post-only rejection (reprice signal)",
@@ -278,6 +382,17 @@ class BinanceFuturesRestClient:
         payload = self.request("GET", "/fapi/v1/ticker/bookTicker", {"symbol": symbol})
         return cast(dict[str, Any], payload)
 
+    def book_tickers(self) -> dict[str, dict[str, Any]]:
+        """무심볼 GET /fapi/v1/ticker/bookTicker(weight 5)로 전 종목을 1회에 수집한다."""
+        payload = self.request("GET", "/fapi/v1/ticker/bookTicker")
+        if not isinstance(payload, list):
+            raise DataIntegrityError("book_tickers endpoint returned an unexpected schema")
+        indexed: dict[str, dict[str, Any]] = {}
+        for entry in payload:
+            if isinstance(entry, dict) and "symbol" in entry:
+                indexed[str(entry["symbol"])] = entry
+        return indexed
+
     def new_order(self, params: Mapping[str, Any]) -> Any:
         return self.request("POST", "/fapi/v1/order", params, signed=True)
 
@@ -292,6 +407,13 @@ class BinanceFuturesRestClient:
             "GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": orig_client_order_id},
             signed=True,
         )
+
+    def open_orders(self) -> list[dict[str, Any]]:
+        """무심볼 GET /fapi/v1/openOrders: 고아 주문 정리를 위한 전량 조회."""
+        payload = self.request("GET", "/fapi/v1/openOrders", signed=True)
+        if not isinstance(payload, list):
+            raise DataIntegrityError("openOrders endpoint returned an unexpected schema")
+        return cast(list[dict[str, Any]], payload)
 
     def account(self) -> Any:
         return self.request("GET", "/fapi/v2/account", signed=True)
