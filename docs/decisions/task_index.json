@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_EQUITY_DRAWDOWN_BRAKE",
+      "date": "2026-08-24",
+      "adr_id": "ADR_20260824_MHS_EQUITY_DRAWDOWN_BRAKE",
+      "domain": "quant",
+      "title": "MHS 자기자본 드로다운 브레이크(opt-in) 도입",
+      "why": "배포 오버레이 constant_risk가 이 북에서 실현변동성과 연간 Sharpe가 양의 상관이라 anti-Kelly로 작동, 최악 에지 해(2024)에 두번째로 높은 레버리지·최고 에지 해(2025)에 최저 레버리지를 배분함을 82개 run_history + daily_ledger.parquet 직접 분해로 실측. 오프라인 선형모델이 실제 3m 리플레이를 일별 corr 0.9994로 재현해 신뢰 검증.",
+      "resolution": "src/application/research/mhs/scaling.py에 _equity_drawdown_brake_scale 신설(인과적 자기참조 재귀, scale_t=clip(base_t*clip(1+k*underwater_{t-1},floor,1),0,cap), 단일 Python 루프 O(n)). _constant_risk_target_vol에 drawdown_brake 키워드 추가(True 시 budget=inf로 _feasible_constant_risk_target의 leverage_ceiling*q10(sigma_book) 클램프만으로 비적합 target_vol 유도, 신규 적합상수 없음). _replay_exposure_scale 단일 디스패처에서 constant_risk 분기에 합성. is_streaming_scale_mode는 브레이크 ON 시 무조건 False. MhsDiagnosticRequest.exposure_drawdown_brake 필드 + validate_request fail-closed(constant_risk 전용, pnl_vol_target=True 필수) + CLI --exposure-drawdown-brake 플래그(기본 False, 비트동일 보존). 상수 EXPOSURE_DRAWDOWN_BRAKE_K=2.0/FLOOR=0.2는 params.py 등록(k는 2.0~6.0 플래토 실측, floor는 실측상 비활성). fold 경로는 blend의 확정 exposure_scale을 슬라이스 재사용하는 기존 배선을 그대로 타므로 코드 변경 없이 브레이크가 자동 전파(I-SCALE-IS-DEPLOYED-OVERLAY 보존, FOLD_BLEND_PATH_DIVERGENCE 재발 없음). 실제 3m 리플레이(constant_risk+growth_extreme+brake) 검증: CAGR 1.761->3.322(+89%), MDD -0.402->-0.400(횡보), Calmar 4.38->8.31이나 fold3(2025) 성장 기여율이 55.4%->65.5%로 상승해 등록임계값(60.1%) 초과, Research-GO 사유가 []에서 FOLD_GROWTH_CONCENTRATION으로 전환(신규 부작용, 미해결). 기본(growth_budget, 브레이크 OFF) 프로덕션 실행은 CAGR 3.184/MDD -0.389/Calmar 8.19/DSR 0.794로 Research-GO 완전 통과 확인, 회귀 없음.",
+      "impact": "기본 실행 경로는 비트동일 보존(회귀 없음, 프로덕션 GO 상태 불변). exposure_drawdown_brake=True는 opt-in 실험 플래그로 남아 프로덕션에 영향 없음. 실측 결과 constant_risk+brake 조합은 fold_growth_concentration 부작용으로 이번 스펙 범위 내 채택 보류, 후속 과제로 k 하향 또는 fold별 상한 재검토 필요."
+    },
+    {
       "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE_REAL_EXECUTION",
       "date": "2026-08-24",
       "adr_id": "ADR_20260824_MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE_REAL_EXECUTION",
@@ -989,16 +999,6 @@
       "why": "Preserve strict fail-closed mark-price validation while supporting bounded diagnostic continuity for irrecoverable short source gaps.",
       "resolution": "Added cache_required_stale_carry with a bounded causal 24-hour mark carry, retained strict cache_required semantics, wired CLI mode, and added coverage tests.",
       "impact": "Strict Research-GO behavior is unchanged; stale-carry runs are diagnostic-only and never replace primary ledger evidence."
-    },
-    {
-      "task_id": "TASK_MHS_WINDOWED_REPLAY_FAIL_CLOSED",
-      "date": "2026-08-08",
-      "adr_id": "ADR_20260808_MHS_WINDOWED_REPLAY_FAIL_CLOSED",
-      "domain": "execution",
-      "title": "MHS windowed replay and fail-closed gap provenance",
-      "why": "The 2021-2025 cache-required 5-minute MHS run peaked at 13.10 GiB and reported ambiguous slow_momentum strict-primary MISSING_DATA; the replay also retained a five-year 252-symbol execution union despite a 30-symbol PIT roster.",
-      "resolution": "Added terminal execution-window censoring, structured symbol/time gap provenance, 31-day PIT-active window loading, stateful windowed replay and streamed ledger accumulation, RSS/window telemetry, and deterministic single-panel equivalence coverage. The full 2021-2025 run now executes the optimized path but still fails closed at slow_momentum strict-primary MISSING_DATA; no mark fallback or GO relaxation was introduced.",
-      "impact": "Benchmark equivalence passes with matching fills/ledger checksums and lower windowed fixture runtime. Full-period production execution remains Research-GO ineligible until the residual slow-band mark/source gap is identified and repaired; the failed run did not persist a new report or peak RSS measurement."
     }
   ]
 }
