@@ -901,3 +901,61 @@ def test_mhs_leverage_frontier_multiples_rejects_non_float_token() -> None:
         parser.parse_args(["--leverage-frontier-multiples", "1.0,abc"])
     with pytest.raises(argparse.ArgumentTypeError, match="not-a-float"):
         _parse_float_csv("not-a-float")
+
+
+def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
+    """--emit-target-weights invokes emit_deployed_target_weights with the
+    completed blend's target_weights/exposure_scale (fail-closed check bugfix)."""
+    import pandas as pd
+
+    import src.application.research.mhs.evaluation as ev
+    import src.mhs.report.persist as persist_mod
+
+    target_weights = pd.DataFrame({"BTCUSDT": [0.1, -0.1]})
+    exposure_scale = pd.Series([1.2, 1.3])
+    fake_blend = types.SimpleNamespace(target_weights=target_weights, exposure_scale=exposure_scale)
+    fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=fake_blend)
+
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: fake_report)
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+
+    captured: dict = {}
+
+    def _spy_emit(tw, scale, artifact_root, *, tail_rows):
+        captured["target_weights"] = tw
+        captured["exposure_scale"] = scale
+        captured["artifact_root"] = artifact_root
+        captured["tail_rows"] = tail_rows
+        return {"path": str(artifact_root / "deployed_target_weights.parquet"), "rows": tail_rows}
+
+    monkeypatch.setattr(persist_mod, "emit_deployed_target_weights", _spy_emit)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    args = parser.parse_args(["--emit-target-weights"])
+    _run_mhs_horizon_diagnostic(args)
+
+    assert captured["target_weights"] is target_weights
+    assert captured["exposure_scale"] is exposure_scale
+    assert str(captured["artifact_root"]).endswith("mhs_artifacts")
+    assert captured["tail_rows"] > 0
+
+
+def test_mhs_emit_target_weights_fails_closed_without_blend(monkeypatch) -> None:
+    """A blend-less/target_weights-less report must never be silently skipped."""
+    import src.application.research.mhs.evaluation as ev
+    from src.common.errors import DataIntegrityError
+
+    fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=None)
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: fake_report)
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    args = parser.parse_args(["--emit-target-weights"])
+    with pytest.raises(DataIntegrityError):
+        _run_mhs_horizon_diagnostic(args)
