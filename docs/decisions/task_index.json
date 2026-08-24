@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260824_LIVE_EXECUTION_HARDENING",
+      "date": "2026-08-24",
+      "adr_id": "ADR_20260824_ADR_20260824_LIVE_EXECUTION_HARDENING",
+      "domain": "live",
+      "title": "Live 매매봇 정확성/정합성/효율/기밀성 강화",
+      "why": "SHADOW 모드 구조적 HALT, 원장 유실 시 영구 HALT, 아티팩트 부재 시 조용한 소각, tick 양자화/슬라이스 손실, 백테스트-라이브 집행 파라미터 불일치, 폴링 busy-wait, 전략 레시피 평문 노출을 실증 후 해소",
+      "resolution": "executor 협조 루프 재구성(sleep 예산화), Decimal 배수 양자화 통일, 반전 2-leg client_order_id 충돌 해소, SHADOW ShadowResponse 단락, 원장 finally 영속화, I-EQUITY-MTM/I-DD-HALT 도입, AES-256-GCM 결정적 봉투(src/live/crypto.py)로 deployed_target_weights.parquet 봉인, LiveSettings 기본 아티팩트 경로를 .enc로 전환, LiveSettings의 공유 .env(BINANCE_API_KEY 등) 크래시 버그 수정(env_file 제거, OS 환경변수만 신뢰)",
+      "impact": "live 24/7 데몬이 SHADOW 검증 기간과 실제 운영 .env 구성 양쪽에서 정상 기동 가능. deployed_target_weights.parquet의 git 노출 경로 차단(암호문만 커밋)"
+    },
+    {
       "task_id": "TASK_LIVE_DAEMON_DOCKER_DEPLOY",
       "date": "2026-08-24",
       "adr_id": "ADR_20260824_LIVE_DAEMON_DOCKER_DEPLOY",
@@ -989,16 +999,6 @@
       "why": "The full 2021-2025 MHS run reached terminal persistence only with an RSS guard because each book and anchored fold rebuilt identical execution windows for strict and stress bounds.",
       "resolution": "Added streaming paired replay fan-out with independent strict/stress accumulators, wired book and fold orchestration to consume each execution window once, added equivalence/resource benchmark coverage, and vectorized the remaining top-level diagnostics.",
       "impact": "The full guarded CLI now completes in 167.34 seconds with paired replay equivalence PASS; Research-GO remains fail-closed because the measured run exceeds the selected RSS budget and fold Sharpe/stress gates fail."
-    },
-    {
-      "task_id": "TASK_MHS_PIPELINE_COMPLETION",
-      "date": "2026-08-08",
-      "adr_id": "ADR_20260808_MHS_PIPELINE_COMPLETION",
-      "domain": "execution",
-      "title": "MHS pipeline terminal completion and memory diagnosis",
-      "why": "The full 2021-2025 MHS run terminated before terminal report generation while anchored folds loaded multi-year dense panels; the user requested root-cause analysis and a fail-closed completion path.",
-      "resolution": "Added windowed replay telemetry, typed book/fold failures, Arrow range filtering, deterministic report persistence, collection-safe pytest configuration, and lean-check semantic source-test mapping. Execution confirms short-period terminal completion but exposes residual multi-year fold panel RSS growth.",
-      "impact": "MHS now emits machine-readable terminal failures instead of silently losing the run; Research-GO remains ineligible until fold panel loading is streamed or bounded."
     }
   ]
 }
