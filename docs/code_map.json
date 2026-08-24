@@ -358,5 +358,8 @@
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
+  },
+  "src/live/scheduler.py": {
+    "testing": "tests/unit/live/test_scheduler.py"
   }
 }
