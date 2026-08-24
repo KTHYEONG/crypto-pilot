@@ -40,6 +40,9 @@ def _parse_float_csv(raw: str) -> tuple[float, ...]:
     return tuple(values)
 
 
+_EMIT_TARGET_WEIGHTS_TAIL_ROWS = 30
+
+
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     if getattr(args, "leverage_frontier_scan", False):
         # Diagnostic-only short-circuit: reads an already-persisted ledger and
@@ -76,6 +79,27 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         "[EVAL] mhs-horizon-diagnostic status=%s books=%s blend=%s path=%s",
         report.status, sorted(report.books), report.blend is not None, path,
     )
+    if getattr(args, "emit_target_weights", False):
+        from pathlib import Path
+
+        from src.common.errors import DataIntegrityError
+        from src.mhs.report.persist import emit_deployed_target_weights
+
+        if report.blend is None or report.blend.target_weights is None:
+            raise DataIntegrityError(
+                "--emit-target-weights requires a completed blend replay with "
+                "recorded target weights"
+            )
+        report_target = Path(mhs_horizon_diagnostic_report_path())
+        artifact_root = report_target.parent / f"{report_target.stem}_artifacts"
+        emit_result = emit_deployed_target_weights(
+            report.blend.target_weights, report.blend.exposure_scale, artifact_root,
+            tail_rows=_EMIT_TARGET_WEIGHTS_TAIL_ROWS,
+        )
+        _logger.info(
+            "[EVAL] mhs-horizon-diagnostic emit_target_weights path=%s rows=%d",
+            emit_result["path"], emit_result["rows"],
+        )
 
 
 def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -591,6 +615,17 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "(MDD 0.25, 1x ceiling, byte-identical to the original pre-2026-08-22 "
             "production default). Selects the drawdown budget for the "
             "growth-optimal risk solver and the ex-ante vol-target cap"
+        ),
+    )
+    mhs.add_argument(
+        "--emit-target-weights",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: also persist the deployed target-weight tail as "
+            "deployed_target_weights.parquet under the run's artifacts directory "
+            "for live/shadow consumption. Default False keeps every existing "
+            "artifact byte-identical"
         ),
     )
     mhs.add_argument(
