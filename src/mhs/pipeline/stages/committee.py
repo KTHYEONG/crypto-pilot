@@ -92,10 +92,17 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols, _train_ends,
             members=_research_go._resolved_committee_members(ctx.config),
         )
-        ctx._fold_committee_weights = {
-            _i: ctx._committee_weights_by_boundary[f"fold_{_i}"]
-            for _i in range(len(phase_1_anchored_purged_folds()))
-        }
+        # I-SINGLE-CONFIGURATION (mirrors the constant_risk target_vol fix,
+        # ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL): the
+        # blend deploys ONE committee member-weight mix, resolved once at the
+        # top-level boundary, for the whole run. Anchored-purged folds must
+        # validate that SAME deployed mix -- not a per-fold-boundary leak-free
+        # refit of it, which drifts the fold's signal blend away from what the
+        # blend actually deploys (measured: dominant-member weight drift up to
+        # ~0.05, e.g. flow_imb_168h 0.389 top-level vs 0.442 for fold_0).
+        ctx._fold_committee_weights = dict.fromkeys(
+            range(len(phase_1_anchored_purged_folds())), ctx._committee_weights_by_boundary["top_level"],
+        )
     if ctx.config.committee_capital:
         # RC-4: the reported blend is the committee execution book, not the
         # frozen momentum formula. Un-scaled copy feeds the concurrent replay
