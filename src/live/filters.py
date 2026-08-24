@@ -91,7 +91,8 @@ def parse_exchange_filters(exchange_info: Mapping[str, Any]) -> dict[str, Symbol
     return parsed
 
 
-def _quantize(value: Decimal, multiple: Decimal, rounding: str) -> Decimal:
+def quantize_to_multiple(value: Decimal, multiple: Decimal, rounding: str) -> Decimal:
+    """거래소 필터 규약(배수 기반) 양자화. Decimal.quantize 의 지수 기반 반올림과 혼동 금지."""
     if multiple <= _ZERO:
         raise ValueError("quantization multiple must be positive")
     return (value / multiple).to_integral_value(rounding=rounding) * multiple
@@ -113,15 +114,15 @@ def quantize_order(
     qty = abs(target_qty)
 
     qty = min(qty, filters.max_qty)
-    qty = _quantize(qty, filters.step_size, ROUND_DOWN)
+    qty = quantize_to_multiple(qty, filters.step_size, ROUND_DOWN)
 
     if qty < filters.min_qty:
         return None
 
     if side_buy:
-        price = _quantize(reference_price, filters.tick_size, ROUND_DOWN)
+        price = quantize_to_multiple(reference_price, filters.tick_size, ROUND_DOWN)
     else:
-        price = _quantize(reference_price, filters.tick_size, ROUND_UP)
+        price = quantize_to_multiple(reference_price, filters.tick_size, ROUND_UP)
     if price <= _ZERO:
         price = filters.tick_size
 
