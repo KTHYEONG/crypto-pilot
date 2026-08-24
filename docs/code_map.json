@@ -208,7 +208,7 @@
       "tests/unit/mhs/test_execution.py",
       "tests/unit/mhs/test_replay_fills.py"
     ],
-    "architecture": "docs/specs/mhs_execution_fidelity.md"
+    "architecture": "docs/specs/mhs_execution_fairness.md"
   },
   "src/mhs/features.py": {
     "testing": "tests/unit/mhs/test_features.py"

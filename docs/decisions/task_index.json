@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_EXECUTION_FAIRNESS",
+      "date": "2026-08-24",
+      "adr_id": "ADR_20260824_MHS_EXECUTION_FAIRNESS",
+      "domain": "execution",
+      "title": "MHS 체결 공정성 재설계: 완결성 보장, 유동성 인지 비용, live 리스크레일 분리",
+      "why": "실측 결과 체결엔진이 유동성을 전혀 참조하지 않고 전 심볼에 taker_slippage_bps=3.0 고정을 부과했으며(Corwin-Schultz 추정 실측 BTC 1.4~2.3bps ~ PEPE 4.5~6.3bps로 심볼별 최대 4배 차이), 백테스트에 계좌 규모 개념이 없어(initial_equity=1.0 스케일프리) 라이브 실제 $2,000 설정에서 평균 주문금액($19.12)이 Binance minNotional 경계에 걸치는데도 손실이 0으로 가정됐다. 또한 '30분 대기가 지정가를 불리하게 만든다'는 가설을 449개 결정일로 반증(0~120분 드리프트가 0과 통계적으로 구분 불가, t<1.0)했고, 대신 peg_chase_fill_schedule의 backstop_eligible 밴드 게이트가 미체결(residual) 11%를 강제해 건당 알파가 19배 높은(+0.57bps vs -0.03bps) 미체결군을 구조적으로 버리고 있음을 확인했다. taker와 peg_chase 두 바운드가 서로 다른 완결성·비용 계약 위에서 경쟁해 비교 자체가 불공정했다.",
+      "resolution": "src/mhs/execution.py: peg_chase_fill_schedule의 backstop_eligible 밴드 거부 게이트를 제거해 완결성을 보장(밴드는 maker peg 클램프 전용, 유한 종가가 있는 창은 반드시 체결). corwin_schultz_half_spread_bps 순수함수를 신설해 창 high/low에서 심볼별 반스프레드를 벡터화 추정(음수 2-bar 추정치 0 플로어, [0, CEILING] 클립). _BoundExecutionReplayAccumulator에 half_spread_bps EWMA를 추가해 consume() 종료 시점(체결 확정 이후)에만 갱신하는 인과적 순서를 강제하고, IMMEDIATE_TAKER/PEG_CHASE_PROXY 양쪽에 동일 심볼별 비용을 대칭 부과. min_notional_probe_usdt로 계좌규모 손실을 원장 불변 진단 지표로 계측. ExecutionSpec에 liquidity_cost_model/spread_ewma_alpha/min_notional_probe_usdt/reference_equity_usdt 필드를 기본값과 함께 추가(flat 기본값은 기존 동작과 bit-identical). CLI --liquidity-cost-model 플래그와 MhsBookReport 비용분해 필드(fee/spread/delay)를 배선. src/live/executor.py는 chase_band_bps(알파 레일)와 max_cross_bps(리스크 레일, 신설, 50bps)를 분리해 _capped_ioc_price가 리스크 레일 안에서는 반드시 마케터블 가격을 반환하도록 수정.",
+      "impact": "peg_chase 바운드 실측(전체 2021-2025 재실행): fill_rate 87.7~89.0%에서 100%로 개선(잔여 미체결 완전 제거), maker_share는 100%에서 86.0~87.7%로 하락(밴드 밖 강제체결이 taker 비용을 물기 때문, 정상 트레이드오프), peg_chase naive Sharpe가 blend 기준 2.174→2.275로 개선(미체결이 버리던 고알파 종목을 이제 붙잡음). --liquidity-cost-model corwin_schultz 활성화 시 primary(즉시체결)도 실측 스프레드를 반영해 blend CAGR 318.4%→301.3%, MDD -38.90%→-40.23%, Sharpe 2.886→2.760로 악화(기존 3bps 고정이 소형 알트코인 비중이 큰 breadth-60 로스터의 실제 비용을 과소평가하고 있었다는 뜻이며, 성과 저하가 아니라 더 정직한 측정치). MhsRunConfig() 기본 실행(liquidity_cost_model='flat')은 bit-identical 유지(test_golden_digest.py 통과). 알려진 잔여 비일관성: OHLCV_STRICT_PROXY(patient_reference)의 타임아웃 강제체결 수수료(execution.py:2085)가 half_spread_bps를 참조하지 않는 레거시 경로로 남아있어, liquidity_cost_model을 바꿔도 patient_reference 값이 불변이다 — 완전한 바운드 간 공정 비교를 위해서는 후속 스펙에서 이 경로도 정리해야 한다."
+    },
+    {
       "task_id": "TASK_MHS_EXECUTION_FIDELITY",
       "date": "2026-08-24",
       "adr_id": "ADR_20260824_MHS_EXECUTION_FIDELITY",
@@ -989,16 +999,6 @@
       "why": "mhs_horizon_opt_spec_summary.md의 RSS 예산 초과(2.5~2.76GB)·Fold 0/1/2 Sharpe 미달 진단은 실제로는 248c9ee1(fold 경로만 수정) 이전 수치였고, 재실행 결과 fold 메모리는 이미 해결(3/3 완주)됐으나 top-level books는 fold와 동일한 신호-품질 배선(EMA/regime-scale)이 누락돼 있었고 fill_records가 fill당 Python dict를 누적해 메모리를 낭비했음. 1.80GB 목표 자체도 실측(free -h: 17GiB, cgroup 제한 없음) 없이 설정된 과보수적 값이었음.",
       "resolution": "top-level books의 w_fast/w_slow에 fold와 동일한 ema_span 적용, blend_1h에 regime_cash_scale 적용(R1). _BoundExecutionReplayAccumulator.fill_records를 dict-list에서 columnar 병렬 list로 전환해 출력 동치성 유지한 채 메모리 절감(R2). xs_ic/regression/horizon_diagnostics를 book replay 루프 이전으로 재배치하고 log_close/eligible을 조기 해제(R3). RSS 예산을 실측 시스템 용량(17GiB, 여유 7.9GiB) 근거로 1.80GB→4.00GiB 재산정.",
       "impact": "실측 재검증: overall peak RSS 2.264GB→2.124GB(4.00GiB 예산 대비 47% 여유). Fold 0/1/2는 R1/R2/R3와 무관하게 수치 불변(LIMIT-01 불변식 확인, 회귀 없음) — Autocorr Sharpe는 여전히 목표(0.60) 미달(fold0 -1.15/fold1 -3.27/fold2 -1.82), Stress Sharpe는 fold0만 양전환(+0.24). top-level books는 데이터 완결성 결함(funding NaN, LITUSDT mark 결측)으로 여전히 NONFINITE_EQUITY 실패 — R4로 별도 데이터 spec 필요, research_go.eligible은 계속 False."
-    },
-    {
-      "task_id": "MHS_HORIZON_OPT_SPEC",
-      "date": "2026-08-09",
-      "adr_id": "ADR_20260809_MHS_HORIZON_OPT_SPEC",
-      "domain": "research",
-      "title": "MHS Horizon Diagnostic Optimization Spec and Contract Setup",
-      "why": "MHS replay execution RSS budget breach (>2.5GB) and Fold 0 strategy quality failure",
-      "resolution": "Created mhs_horizon_opt specification blueprint, precision contract json, integration tests, and timestamp timezone fix",
-      "impact": "Restructured MHS evaluation memory management policy, signal deadband caps, and timezone conversion compatibility"
     }
   ]
 }
