@@ -497,3 +497,37 @@ class TestEventSnapshotOptIn:
         assert disabled.simulated_units.empty
         assert disabled.simulated_notional_weights.empty
         assert list(disabled.simulated_units.columns) == list(wl["symbols"])
+
+class TestPegChaseAnchorMode:
+    """SCENARIO_MHS_PEG_CHASE_05_ANCHOR_MODE_SWITCH_IS_CAUSAL: decision_anchor
+    switches the sizing/peg anchor from the decision-bar mark to the causally
+    observable submit-bar close (bar spos-1), leaving the default mode
+    byte-identical."""
+
+    def _replay(self, spec: ExecutionSpec):
+        grid = pd.date_range("2021-01-01 12:00", periods=40, freq="5min", tz="UTC")
+        closes = pd.DataFrame({"A": [101.0] * len(grid)}, index=grid)
+        closes.iloc[0, 0] = 100.0  # decision-bar mark at dpos=0 (12:00)
+        # bar spos-1 == grid[12] (13:00) carries the submit-bar anchor close 101.0
+        marks = closes.copy()
+        highs = closes + 0.05
+        lows = closes - 0.05
+        funding = pd.DataFrame(0.0, index=grid, columns=["A"])
+        target = pd.DataFrame(
+            {"A": [0.01]}, index=pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        )
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 13:00", tz="UTC")])
+        windows = _partition_windows(
+            grid, target, signal_at, highs, lows, closes, marks, funding, ExecutionSpec(), n_windows=1,
+        )
+        return replay_execution_windows(windows, 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+
+    def test_SCENARIO_MHS_PEG_CHASE_05_ANCHOR_MODE_SWITCH_IS_CAUSAL(self) -> None:
+        """SCENARIO_MHS_PEG_CHASE_05_ANCHOR_MODE_SWITCH_IS_CAUSAL."""
+        decision_mode = self._replay(ExecutionSpec())
+        submit_mode = self._replay(ExecutionSpec(decision_anchor="submit_bar"))
+        qty_decision = float(decision_mode.simulated_fills["quantity_delta"].iloc[0])
+        qty_submit = float(submit_mode.simulated_fills["quantity_delta"].iloc[0])
+        assert qty_decision == pytest.approx(0.01 * 1.0 / 100.0, rel=1e-12)
+        assert qty_submit == pytest.approx(0.01 * 1.0 / 101.0, rel=1e-12)
+        assert submit_mode.residual_count == 0

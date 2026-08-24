@@ -15,6 +15,7 @@ them is a new contract revision, never an inline edit at a call site.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from src.mhs.params import (
     BOOK_BLEND_WEIGHTS,
@@ -144,6 +145,14 @@ class ExecutionSpec:
 
     ``one_way_taker_bps`` reproduces ``CostModel()``'s 8.0 bp one-way assumption
     so the two cost models stay comparable.
+
+    ``decision_anchor`` selects the reference price of one intent: the
+    decision-bar mark (frozen default, bit-identical legacy behaviour) or the
+    submit-bar close (the last finite close before the order's submission bar,
+    observable at submit time). The peg-chase fields shape
+    ``peg_chase_fill_schedule``: ``peg_passive_fraction`` is the passive share
+    of the window and ``peg_chase_band_bps`` caps the adverse excursion of any
+    pegged limit price.
     """
 
     maker_fee_bps: float = 2.0
@@ -152,6 +161,9 @@ class ExecutionSpec:
     passive_timeout_minutes: int = 30
     require_trade_through: bool = True
     ladder_tranches: int = 4
+    decision_anchor: Literal["decision_bar", "submit_bar"] = "decision_bar"
+    peg_passive_fraction: float = 0.6
+    peg_chase_band_bps: float = 10.0
 
     def __post_init__(self) -> None:
         if min(self.maker_fee_bps, self.taker_fee_bps, self.taker_slippage_bps) < 0:
@@ -160,6 +172,12 @@ class ExecutionSpec:
             raise ValueError(f"passive_timeout_minutes must be >= 1, got {self.passive_timeout_minutes}")
         if self.ladder_tranches < 1:
             raise ValueError(f"ladder_tranches must be >= 1, got {self.ladder_tranches}")
+        if self.decision_anchor not in ("decision_bar", "submit_bar"):
+            raise ValueError(f"decision_anchor must be 'decision_bar' or 'submit_bar', got {self.decision_anchor!r}")
+        if not (0.0 < self.peg_passive_fraction <= 1.0):
+            raise ValueError(f"peg_passive_fraction must be in (0.0, 1.0], got {self.peg_passive_fraction}")
+        if self.peg_chase_band_bps <= 0:
+            raise ValueError(f"peg_chase_band_bps must be > 0, got {self.peg_chase_band_bps}")
 
     def one_way_taker_bps(self) -> float:
         """One-way all-in taker cost in bps (fee + slippage)."""

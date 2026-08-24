@@ -11,6 +11,7 @@ from src.mhs.execution import (
     laddered_fill_schedule,
     notional_weighted_shortfall_bps,
     passive_fill_shortfall_bps,
+    peg_chase_fill_schedule,
     replay_execution_windows,
     strategy_aware_execution_replay,
 )
@@ -147,6 +148,109 @@ class TestLadderedFillSchedule:
         sched = laddered_fill_schedule(100.0, 1, adverse, closes, 4, self.SPEC, True)
         assert sched == [(4, 102.0, 8.0, 1.0)]
         assert abs(sum(f[3] for f in sched) - 1.0) < 1e-12
+
+class TestPegChaseFillSchedule:
+    """SCENARIO_MHS_PEG_CHASE_*: the own-touch repricing peg-chase pure function."""
+
+    def test_SCENARIO_MHS_PEG_CHASE_01_MAKER_FILL_AT_FIRST_TRADE_THROUGH(self) -> None:
+        """SCENARIO_MHS_PEG_CHASE_01_MAKER_FILL_AT_FIRST_TRADE_THROUGH:
+        Bar 0 does not fill (100.5 < 100.0 is False under the strict
+        trade-through predicate); bar 1's re-pegged limit is traded through."""
+        adverse = np.array([100.5, 99.5] + [100.5] * 8)
+        closes = np.full(10, 100.0)
+        sched = peg_chase_fill_schedule(100.0, 1, adverse, closes, ExecutionSpec())
+        assert sched == (1, 100.0, ExecutionSpec().maker_fee_bps, "maker_fill")
+
+    def test_SCENARIO_MHS_PEG_CHASE_02_BACKSTOP_TAKER_AFTER_PASSIVE_PHASE(self) -> None:
+        """SCENARIO_MHS_PEG_CHASE_02_BACKSTOP_TAKER_AFTER_PASSIVE_PHASE:
+        P=ceil(0.6*10)=6; no crossing during bars 0..5, then closes[6]=100.05
+        stays within anchor*(1+10bps)=100.10 -> taker backstop with fee 8.0."""
+        adverse = np.full(10, 100.5)
+        closes = np.full(10, 100.0)
+        closes[6] = 100.05
+        sched = peg_chase_fill_schedule(100.0, 1, adverse, closes, ExecutionSpec())
+        assert sched is not None
+        assert sched == (6, 100.05, ExecutionSpec().taker_fee_bps + ExecutionSpec().taker_slippage_bps, "backstop_taker")
+        assert sched[2] == 8.0
+
+    def test_SCENARIO_MHS_PEG_CHASE_03_RESIDUAL_WHEN_PRICE_LEAVES_BAND(self) -> None:
+        """SCENARIO_MHS_PEG_CHASE_03_RESIDUAL_WHEN_PRICE_LEAVES_BAND:
+        Every adverse value and close beyond anchor*(1+10bps) -> None; the
+        full replay leaves units unchanged and books exactly one residual."""
+        adverse = np.full(10, 100.20)
+        closes = np.full(10, 100.20)
+        assert peg_chase_fill_schedule(100.0, 1, adverse, closes, ExecutionSpec()) is None
+
+        grid = pd.date_range("2021-01-01 12:00", periods=40, freq="5min", tz="UTC")
+        px = pd.DataFrame({"A": [100.20] * len(grid)}, index=grid)
+        highs = pd.DataFrame({"A": [100.25] * len(grid)}, index=grid)
+        lows = pd.DataFrame({"A": [100.15] * len(grid)}, index=grid)
+        marks = px.copy()
+        marks.iloc[0, 0] = 100.0
+        funding = pd.DataFrame(0.0, index=grid, columns=["A"])
+        target = pd.DataFrame(
+            {"A": [0.01]}, index=pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        )
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 13:00", tz="UTC")])
+        report = replay_execution_windows(
+            _partition_windows(grid, target, signal_at, highs, lows, px, marks, funding, ExecutionSpec(), n_windows=1),
+            1.0, "OHLCV_PEG_CHASE_PROXY", ExecutionSpec(), retain_event_snapshots=True,
+        )
+        assert report.simulated_fills.empty
+        assert report.simulated_units.empty
+        assert report.fill_count + report.fallback_count + report.residual_count == 1
+        assert report.residual_count == 1
+        assert report.residual_notional == pytest.approx(abs(0.01 * 1.0 / 100.0) * 100.0)
+
+    def test_SCENARIO_MHS_PEG_CHASE_04_FAVOURABLE_SIDE_IS_NEVER_CLAMPED(self) -> None:
+        """SCENARIO_MHS_PEG_CHASE_04_FAVOURABLE_SIDE_IS_NEVER_CLAMPED:
+        A 100bps favourable fall carries the peg below anchor*(1-10bps); a
+        symmetric band clamp would have blocked this maker_fill."""
+        closes = np.full(10, 99.85)
+        closes[0] = 100.0
+        adverse = np.full(10, 100.5)
+        adverse[2] = 99.70
+        sched = peg_chase_fill_schedule(100.0, 1, adverse, closes, ExecutionSpec())
+        assert sched is not None
+        assert sched[3] == "maker_fill"
+        assert sched[1] < 99.90
+        assert sched == (2, 99.85, ExecutionSpec().maker_fee_bps, "maker_fill")
+
+    def test_sell_side_mirrors_and_follows_favourable_rise(self) -> None:
+        """Sell side uses highs as the adverse path and its peg follows a
+        favourable rise above the cap without clamping."""
+        closes = np.full(10, 100.0)
+        closes[1:] = 100.15
+        adverse = np.full(10, 99.5)
+        adverse[2] = 100.25
+        sched = peg_chase_fill_schedule(100.0, -1, adverse, closes, ExecutionSpec())
+        assert sched is not None
+        assert sched[0] == 2
+        assert sched[2] == ExecutionSpec().maker_fee_bps
+        assert sched[3] == "maker_fill"
+        assert sched[1] > 100.0 * (1 - ExecutionSpec().peg_chase_band_bps / 1e4)
+
+    def test_fails_closed_on_invalid_input(self) -> None:
+        spec = ExecutionSpec()
+        with pytest.raises(ValueError, match="side"):
+            peg_chase_fill_schedule(100.0, 0, np.array([99.0]), np.array([100.0]), spec)
+        with pytest.raises(ValueError, match="anchor"):
+            peg_chase_fill_schedule(0.0, 1, np.array([99.0]), np.array([100.0]), spec)
+        with pytest.raises(ValueError, match="anchor"):
+            peg_chase_fill_schedule(-1.0, -1, np.array([101.0]), np.array([100.0]), spec)
+        with pytest.raises(ValueError, match="adverse"):
+            peg_chase_fill_schedule(100.0, 1, np.array([]), np.array([]), spec)
+        with pytest.raises(ValueError, match="finite"):
+            peg_chase_fill_schedule(100.0, 1, np.array([np.nan]), np.array([100.0]), spec)
+        with pytest.raises(ValueError, match="finite"):
+            peg_chase_fill_schedule(100.0, 1, np.array([np.inf]), np.array([100.0]), spec)
+        with pytest.raises(ValueError, match="finite"):
+            peg_chase_fill_schedule(100.0, 1, np.array([99.0]), np.array([np.nan]), spec)
+
+    def test_fails_closed_when_closes_shorter_than_adverse(self) -> None:
+        with pytest.raises(ValueError, match="closes must be at least as long as adverse"):
+            peg_chase_fill_schedule(100.0, 1, np.arange(4.0), np.arange(3.0), ExecutionSpec())
+
 
 class TestLadderedExecutionReplay:
     """SCENARIO_MHS_LADDER_ORACLE_ACCUMULATOR_PARITY_04 + DoD regression: the

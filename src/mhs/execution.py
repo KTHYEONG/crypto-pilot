@@ -6,6 +6,7 @@ the pinned target-weight *pre-screen* proxy only and must never back Research
 GO, OOS, capital, or capacity claims.
 """
 
+import math
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -30,7 +31,11 @@ from src.research.technical_experts.cross_sectional import (
 TERMINATION_STRESS_PENALTY_BPS = 50.0
 
 _ExecutionBound = Literal[
-    "OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"
+    "OHLCV_STRICT_PROXY",
+    "OHLCV_TOUCH_PROXY",
+    "OHLCV_IMMEDIATE_TAKER",
+    "OHLCV_LADDERED_PROXY",
+    "OHLCV_PEG_CHASE_PROXY",
 ]
 _MarkSource = Literal["MARK_PRICE", "OHLCV_CLOSE_FALLBACK"]
 
@@ -187,6 +192,77 @@ def laddered_fill_schedule(
     return schedule
 
 
+def peg_chase_fill_schedule(
+    anchor_price: float,
+    side: int,
+    adverse: np.ndarray,
+    closes: np.ndarray,
+    spec: ExecutionSpec,
+) -> tuple[int, float, float, str] | None:
+    """Repricing peg-chase schedule for one order over its execution window.
+
+    Window bar ``w = 0..N-1`` maps to grid position ``spos + w``. The limit
+    price re-pegs each bar to the previous bar's close (``peg[0] =
+    anchor_price``, ``peg[w] = closes[w-1]``), reproducing the live
+    own-touch re-peg at bar granularity. Only the adverse direction is
+    clamped: ``cap = anchor_price * (1 + side * peg_chase_band_bps / 1e4)``
+    bounds a buy's peg from above and a sell's from below, while a favourable
+    excursion carries the peg freely (a maker fill below the band is the
+    point of chasing).
+
+    During the passive phase ``w < P`` with
+    ``P = min(N, max(1, ceil(peg_passive_fraction * N)))`` a strict
+    trade-through fills as maker (buy: ``adverse[w] < peg[w]``). From bar
+    ``P`` on, the first bar whose close does not exceed the cap takes the
+    taker backstop. Neither fires -> ``None`` (residual): the intent stays
+    unfilled and the next decision recomputes it.
+
+    Returns ``(relative_fill_position, fill_price, fee_bps, reason)`` with
+    ``reason in {"maker_fill", "backstop_taker"}``, or ``None``.
+    """
+    if side not in (-1, 1):
+        raise ValueError(f"side must be -1 or +1, got {side}")
+    if anchor_price <= 0:
+        raise ValueError(f"anchor_price must be > 0, got {anchor_price}")
+    n = len(adverse)
+    if n == 0:
+        raise ValueError("adverse must not be empty")
+    if not np.isfinite(adverse).all():
+        raise ValueError("adverse must be finite")
+    if len(closes) < n:
+        raise ValueError("closes must be at least as long as adverse")
+    if not np.isfinite(closes[:n]).all():
+        raise ValueError("closes must be finite")
+
+    peg = np.empty(n, dtype="float64")
+    peg[0] = anchor_price
+    if n > 1:
+        peg[1:] = closes[: n - 1]
+    cap = anchor_price * (1.0 + side * spec.peg_chase_band_bps / 1e4)
+    if side == 1:
+        peg = np.minimum(peg, cap)
+        crossed = adverse < peg
+    else:
+        peg = np.maximum(peg, cap)
+        crossed = adverse > peg
+    passive_bars = np.arange(n) < min(n, max(1, math.ceil(spec.peg_passive_fraction * n)))
+    maker_hits = crossed & passive_bars
+    if maker_hits.any():
+        hit = int(np.argmax(maker_hits))
+        return (hit, float(peg[hit]), float(spec.maker_fee_bps), "maker_fill")
+    backstop_eligible = closes[:n] <= cap if side == 1 else closes[:n] >= cap
+    backstop_hits = backstop_eligible & ~passive_bars
+    if backstop_hits.any():
+        hit = int(np.argmax(backstop_hits))
+        return (
+            hit,
+            float(closes[hit]),
+            float(spec.taker_fee_bps + spec.taker_slippage_bps),
+            "backstop_taker",
+        )
+    return None
+
+
 def bar_funding_panel(
     funding_by_symbol: Mapping[str, pd.Series],
     grid: pd.DatetimeIndex,
@@ -322,6 +398,8 @@ class StrategyExecutionReplayResult:
     data_gaps: tuple[ExecutionDataGap, ...] = ()
     event_snapshots_retained: bool = True
     notional_weighted_shortfall_bps: float = float("nan")
+    residual_count: int = 0
+    residual_notional: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,7 +678,11 @@ def strategy_aware_execution_replay(
     if initial_equity <= 0:
         raise DataIntegrityError("initial_equity must be > 0")
     if execution_bound not in (
-        "OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"
+        "OHLCV_STRICT_PROXY",
+        "OHLCV_TOUCH_PROXY",
+        "OHLCV_IMMEDIATE_TAKER",
+        "OHLCV_LADDERED_PROXY",
+        "OHLCV_PEG_CHASE_PROXY",
     ):
         raise ValueError(f"unknown execution_bound '{execution_bound}'")
     if len(target_weights) != len(signal_available_at):
@@ -1271,7 +1353,11 @@ class _BoundExecutionReplayAccumulator:
         self.initial_equity = float(initial_equity)
         self.equity_floor_breaches: list[pd.Timestamp] = []
         if execution_bound not in (
-            "OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"
+            "OHLCV_STRICT_PROXY",
+            "OHLCV_TOUCH_PROXY",
+            "OHLCV_IMMEDIATE_TAKER",
+            "OHLCV_LADDERED_PROXY",
+            "OHLCV_PEG_CHASE_PROXY",
         ):
             raise ValueError(f"unknown execution_bound '{execution_bound}'")
         self.execution_bound = execution_bound
@@ -1314,6 +1400,8 @@ class _BoundExecutionReplayAccumulator:
         self.fill_count = 0
         self.unfilled_count = 0
         self.fallback_count = 0
+        self.residual_count = 0
+        self.residual_notional = 0.0
         self.termination_counts: dict[str, int] = {"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0}
         self.data_gaps: list[ExecutionDataGap] = []
         self.units_after_events: list[tuple[pd.Timestamp, np.ndarray]] = []
@@ -1452,6 +1540,10 @@ class _BoundExecutionReplayAccumulator:
         dpos_clipped = np.minimum(dpos_all, n_grid - 1)
         on_grid_all = np.where(dpos_all < n_grid, grid_ns[dpos_clipped] == decision_ns_all, False)
         target_values = w.target_weights[local_cols].to_numpy(dtype="float64")
+        # submit_bar anchor: the reference is the mark at bar spos-1 -- the bar
+        # that closes exactly at the submission bar's open, hence observable at
+        # submit time (no look-ahead). decision_bar keeps the frozen default.
+        submit_anchored = self.spec.decision_anchor == "submit_bar"
 
         fill_start = len(self.fill_ts)
         # Lazy pd.Timestamp boxing: the decision/fill hot path never touches
@@ -1496,7 +1588,7 @@ class _BoundExecutionReplayAccumulator:
                 gcol = int(gpos[col])
                 sym = local_cols[col]
                 weight = float(row[col])
-                decision_price = _decision_price(col, on_grid, dpos, spos)
+                decision_price = _decision_price(col, on_grid and not submit_anchored, dpos, spos)
                 if decision_price is None:
                     self.termination_counts["MISSING_DATA"] += 1
                     self.data_gaps.append(
@@ -1660,6 +1752,105 @@ class _BoundExecutionReplayAccumulator:
                                 marks_row[gpos] = marks_values[fill_pos]
                                 self.units_after_events.append((fill_time, self.units_arr.copy()))
                                 self.notional_after_events.append((fill_time, self.units_arr * marks_row))
+                        continue
+                    if self.execution_bound == "OHLCV_PEG_CHASE_PROXY":
+                        if timeout_pos <= spos:
+                            self.termination_counts["MISSING_DATA"] += 1
+                            self.data_gaps.append(
+                                ExecutionDataGap(
+                                    code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                    timestamp=grid[spos], decision_time=_dt(),
+                                    signal_time=_st(), execution_bound=self.execution_bound,
+                                )
+                            )
+                            continue
+                        adverse = (
+                            lows_values[spos:timeout_pos, col]
+                            if side == 1
+                            else highs_values[spos:timeout_pos, col]
+                        )
+                        if not np.isfinite(adverse).all():
+                            self.termination_counts["MISSING_DATA"] += 1
+                            first_bad = spos + int(np.argmax(~np.isfinite(adverse)))
+                            self.data_gaps.append(
+                                ExecutionDataGap(
+                                    code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                    timestamp=grid[first_bad], decision_time=_dt(),
+                                    signal_time=_st(), execution_bound=self.execution_bound,
+                                )
+                            )
+                            continue
+                        closes_window = closes_values[spos:timeout_pos, col]
+                        if not np.isfinite(closes_window).all():
+                            self.termination_counts["MISSING_DATA"] += 1
+                            first_bad = spos + int(np.argmax(~np.isfinite(closes_window)))
+                            self.data_gaps.append(
+                                ExecutionDataGap(
+                                    code="MISSING_ACTIVE_ORDER_OHLCV", symbol=sym,
+                                    timestamp=grid[first_bad], decision_time=_dt(),
+                                    signal_time=_st(), execution_bound=self.execution_bound,
+                                )
+                            )
+                            continue
+                        schedule = peg_chase_fill_schedule(
+                            decision_price, side, adverse, closes_window, self.spec
+                        )
+                        if schedule is None:
+                            # Residual: cash and units stay untouched (I3), so
+                            # the next decision recomputes net from the stale
+                            # position and carries the intent forward.
+                            self.residual_count += 1
+                            self.residual_notional += abs(net_units) * decision_price
+                            continue
+                        rel_pos, fill_price, fee_bps, sched_reason = schedule
+                        fill_pos = spos + rel_pos
+                        reason = "passive_fill" if sched_reason == "maker_fill" else "timeout_taker"
+                        if reason == "passive_fill":
+                            self.fill_count += 1
+                        shortfall = (
+                            side * (fill_price / decision_price - 1.0) * 1e4
+                            + (
+                                self.spec.maker_fee_bps
+                                if sched_reason == "maker_fill"
+                                else self.spec.taker_fee_bps + self.spec.taker_slippage_bps
+                            )
+                        )
+                        self.shortfalls.append(shortfall)
+                        self.shortfall_notionals.append(abs(net_units) * fill_price)
+                        fill_time = grid[fill_pos]
+                        submit_time = grid[submit_pos]
+                        mark_price = float(marks_values[fill_pos, col])
+                        if np.isfinite(self.last_prices_arr[gcol]):
+                            if np.isfinite(mark_price):
+                                self.cash += self.units_arr[gcol] * (mark_price - self.last_prices_arr[gcol])
+                                self.last_prices_arr[gcol] = mark_price
+                        elif np.isfinite(mark_price):
+                            self.last_prices_arr[gcol] = mark_price
+                        if not (np.isfinite(net_units) and np.isfinite(fill_price)):
+                            raise DataIntegrityError(
+                                "non-finite fill sizing breaches the capital accounting invariant "
+                                f"(symbol={sym!r} ts={fill_time!r} weight={weight!r} equity={equity!r} "
+                                f"decision_price={decision_price!r} qty={net_units!r} fill_price={fill_price!r})"
+                            )
+                        self.cash -= net_units * fill_price
+                        fee = fee_bps / 1e4 * abs(net_units) * fill_price
+                        self.cash -= fee
+                        self.units_arr[gcol] += net_units
+                        pre_trade_equity = self._equity_at(gpos)
+                        self.fill_ts.append(fill_time)
+                        self.fill_symbol.append(sym)
+                        self.fill_qty.append(net_units)
+                        self.fill_price.append(fill_price)
+                        self.fill_fee_bps.append(fee_bps)
+                        self.fill_reason.append(reason)
+                        self.fill_pre_trade_equity.append(pre_trade_equity)
+                        self.fill_times.append(fill_time)
+                        self.submit_times.append(submit_time)
+                        if self.retain_event_snapshots:
+                            marks_row = np.full(n_cols, np.nan, dtype="float64")
+                            marks_row[gpos] = marks_values[fill_pos]
+                            self.units_after_events.append((fill_time, self.units_arr.copy()))
+                            self.notional_after_events.append((fill_time, self.units_arr * marks_row))
                         continue
                     if timeout_pos <= spos:
                         self.termination_counts["MISSING_DATA"] += 1
@@ -2121,6 +2312,8 @@ class _BoundExecutionReplayAccumulator:
             data_gaps=tuple(self.data_gaps),
             event_snapshots_retained=self.retain_event_snapshots,
             notional_weighted_shortfall_bps=weighted_shortfall_bps,
+            residual_count=self.residual_count,
+            residual_notional=self.residual_notional,
         )
 
 
