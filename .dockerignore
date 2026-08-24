@@ -25,4 +25,10 @@ results/*.json
 
 # Documentation
 README.md
-docs/
+# 연구->라이브 유일 인계 산출물(parquet)만 이미지에 포함한다.
+docs/*
+!docs/results
+docs/results/*
+!docs/results/mhs_horizon_diagnostic_artifacts
+docs/results/mhs_horizon_diagnostic_artifacts/*
+!docs/results/mhs_horizon_diagnostic_artifacts/*.parquet
