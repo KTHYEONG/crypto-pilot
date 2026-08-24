@@ -89,3 +89,48 @@ def test_persist_mhs_report_swallows_run_history_failure(
     result = persist_mhs_report(report=object(), target=target)  # type: ignore[arg-type]
 
     assert result == target
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_LIVE_12: deployed target weights seam (research -> live)
+# ---------------------------------------------------------------------------
+
+import inspect
+
+import numpy as np
+import pandas as pd
+
+from src.mhs.report.persist import emit_deployed_target_weights
+
+
+def test_SCENARIO_LIVE_12_deployed_weights_match_replay_formula(
+    tmp_path: Path,
+) -> None:
+    rng = np.random.default_rng(7)
+    index = pd.date_range("2026-08-01", periods=10, freq="24h", tz="UTC")
+    target_weights = pd.DataFrame(rng.normal(size=(10, 3)), index=index, columns=list("ABC"))
+    scale = pd.Series(rng.uniform(0.5, 2.0, size=6), index=index[:6])
+
+    result = emit_deployed_target_weights(
+        target_weights, scale, tmp_path, tail_rows=5
+    )
+    emitted = pd.read_parquet(tmp_path / "deployed_target_weights.parquet")
+    expected = target_weights.mul(scale.reindex(index, method="ffill").fillna(1.0), axis=0)
+    pd.testing.assert_frame_equal(emitted, expected.tail(5), check_freq=False)
+    assert result["rows"] == 5
+
+    none_scale_path = tmp_path / "none_scale"
+    emit_deployed_target_weights(target_weights, None, none_scale_path, tail_rows=10)
+    identity = pd.read_parquet(none_scale_path / "deployed_target_weights.parquet")
+    pd.testing.assert_frame_equal(identity, target_weights, check_freq=False)
+
+
+def test_persist_mhs_report_signature_unchanged_without_flag() -> None:
+    """--emit-target-weights 미지정 시 기존 compact 산출물 경로는 변경되지 않는다."""
+    signature = inspect.signature(persist_mhs_report)
+    assert "emit_target_weights" not in signature.parameters
+
+#: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
+COVERED_SCENARIOS: tuple[str, ...] = (
+    "SCENARIO_LIVE_12_DEPLOYED_WEIGHTS_MATCH_REPLAY_FORMULA",
+)
