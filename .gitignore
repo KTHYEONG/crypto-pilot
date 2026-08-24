@@ -255,3 +255,10 @@ results/**/*.enc
 !results/**/best_futures_*.enc
 !results/**/best_params_*.enc
 !results/**/best_spot_*.enc
+
+# Live deployed artifacts: plaintext weights/recipe are secrets; only their
+# sealed envelopes (.enc) may be tracked.
+docs/results/**/deployed_target_weights.parquet
+docs/results/**/mhs_horizon_diagnostic_recipe.json
+!docs/results/**/deployed_target_weights.parquet.enc
+!docs/results/**/mhs_horizon_diagnostic_recipe.json.enc
