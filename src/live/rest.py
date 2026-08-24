@@ -1,0 +1,300 @@
+"""Binance USDⓈ-M REST client with the SHADOW mutation chokepoint.
+
+I-SHADOW-CHOKE: SHADOW 모드의 변이 요청은 전송 계층 최상단에서 억제되며 네트워크에
+절대 도달하지 않는다. 오류 처리 정책은 오직 레지스트리 결정만 따른다.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import time
+import urllib.parse
+import urllib.request
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, cast
+
+from pydantic import SecretStr
+
+from src.live.audit import AuditLog
+from src.live.errors import (
+    ErrorAction,
+    LiveTradingError,
+    ShadowModeViolation,
+    VenueError,
+    payload_digest,
+    resolve_error_action,
+)
+from src.live.settings import ExecutionMode
+
+#: SHADOW 모드에서 예외적으로 허용되는 변이 경로. 검증 기간 전체에 비워둔다.
+SHADOW_ALLOWED_MUTATIONS: frozenset[str] = frozenset()
+
+_RETRY_BACKOFF_SECONDS = 1.0
+_RETRY_BACKOFF_LONG_SECONDS = 10.0
+_MAX_ATTEMPTS = 3
+_HTTP_TIMEOUT_SECONDS = 30.0
+
+_USED_WEIGHT_1M_HEADER = "X-MBX-USED-WEIGHT-1M"
+_ORDER_COUNT_1M_HEADER = "X-MBX-ORDER-COUNT-1M"
+_ORDER_COUNT_10S_HEADER = "X-MBX-ORDER-COUNT-10S"
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowResponse:
+    """전송되지 않은 변이 요청의 자리표시자 응답."""
+
+    method: str
+    path: str
+    payload_digest: str
+    status: str = "suppressed"
+
+    @classmethod
+    def suppressed(cls, method: str, path: str, payload_digest_str: str) -> ShadowResponse:
+        return cls(method=method, path=path, payload_digest=payload_digest_str)
+
+
+@dataclass(slots=True)
+class RateLimitState:
+    """거래소 보고값 그대로 보관하는 레이트리밋 상태(자체 추정 금지)."""
+
+    used_weight_1m: int | None = None
+    order_count_1m: int | None = None
+    order_count_10s: int | None = None
+
+
+@dataclass(slots=True)
+class HttpResponse:
+    status_code: int
+    headers: Mapping[str, str]
+    body: bytes
+
+
+class UrllibTransport:
+    """기본 전송 계층. 단위 테스트에서는 항상 스텁으로 대체된다."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url.rstrip("/")
+
+    def call(self, method: str, url: str, headers: Mapping[str, str]) -> HttpResponse:
+        request = urllib.request.Request(  # noqa: S310
+            url, method=method.upper(), headers=dict(headers)
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:  # noqa: S310
+                return HttpResponse(
+                    status_code=response.status,
+                    headers=dict(response.headers.items()),
+                    body=response.read(),
+                )
+        except urllib.error.HTTPError as exc:
+            return HttpResponse(
+                status_code=exc.code,
+                headers=dict(exc.headers.items()) if exc.headers else {},
+                body=exc.read(),
+            )
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str | None:
+    lowered = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lowered:
+            return value
+    return None
+
+
+class BinanceFuturesRestClient:
+    """서명/레이트리밋/정책 재시도/SHADOW 초크포인트를 담당하는 REST 클라이언트."""
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: SecretStr | None,
+        api_secret: SecretStr | None,
+        mode: ExecutionMode,
+        audit: AuditLog,
+        *,
+        recv_window_ms: int = 5000,
+        session: Any | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._mode = mode
+        self._audit = audit
+        self._recv_window_ms = recv_window_ms
+        self._transport = session if session is not None else UrllibTransport(base_url)
+        self.rate_state = RateLimitState()
+        self._time_offset_ms = 0
+
+    # ------------------------------------------------------------------ helpers
+
+    def sync_server_time(self) -> None:
+        payload = self.request("GET", "/fapi/v1/time")
+        server_ms = int(payload["serverTime"])
+        self._time_offset_ms = server_ms - int(time.time() * 1000)
+
+    def _signed_query(self, params: Mapping[str, Any]) -> str:
+        if self._api_secret is None:
+            raise LiveTradingError("signed request requires API secret")
+        signed_params = dict(params)
+        signed_params["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
+        signed_params["recvWindow"] = self._recv_window_ms
+        query = urllib.parse.urlencode(signed_params)
+        signature = hmac.new(
+            self._api_secret.get_secret_value().encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        return f"{query}&signature={signature}"
+
+    def _update_rate_state(self, headers: Mapping[str, str]) -> None:
+        weight = _header_value(headers, _USED_WEIGHT_1M_HEADER)
+        count_1m = _header_value(headers, _ORDER_COUNT_1M_HEADER)
+        count_10s = _header_value(headers, _ORDER_COUNT_10S_HEADER)
+        if weight is not None:
+            self.rate_state.used_weight_1m = int(weight)
+        if count_1m is not None:
+            self.rate_state.order_count_1m = int(count_1m)
+        if count_10s is not None:
+            self.rate_state.order_count_10s = int(count_10s)
+
+    @staticmethod
+    def _error_code(body: Any) -> int | None:
+        if isinstance(body, dict) and "code" in body:
+            try:
+                return int(body["code"])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    # ------------------------------------------------------------------ request
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        signed: bool = False,
+    ) -> Any:
+        method = method.upper()
+        base_params = dict(params or {})
+
+        if self._mode is ExecutionMode.SHADOW and method != "GET":
+            if path not in SHADOW_ALLOWED_MUTATIONS:
+                digest = payload_digest(repr(base_params))
+                self._audit.record_suppressed(method, path, base_params)
+                return ShadowResponse.suppressed(method, path, digest)
+            raise ShadowModeViolation(
+                f"mutation to {path} is not allowed by the shadow whitelist"
+            )
+
+        resynced_clock = False
+        last_error: VenueError | None = None
+        for _attempt in range(1, _MAX_ATTEMPTS + 1):
+            query = self._signed_query(base_params) if signed else (
+                urllib.parse.urlencode(base_params) if base_params else ""
+            )
+            url = f"{self._base_url}{path}" + (f"?{query}" if query else "")
+            headers: dict[str, str] = {}
+            if self._api_key is not None:
+                headers["X-MBX-APIKEY"] = self._api_key.get_secret_value()
+
+            response = self._transport.call(method, url, headers)
+            self._update_rate_state(response.headers)
+
+            body: Any = None
+            if response.body:
+                try:
+                    body = json.loads(response.body.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    body = None
+
+            if response.status_code == 418:
+                raise LiveTradingError(f"IP ban received at {path}; halting")
+            if response.status_code == 429:
+                retry_after = _header_value(response.headers, "Retry-After")
+                time.sleep(float(retry_after) if retry_after else _RETRY_BACKOFF_SECONDS)
+                last_error = VenueError(
+                    "rate limited", code=None, http_status=429, path=path,
+                    payload_digest=payload_digest(response.body.decode("utf-8", errors="replace")),
+                )
+                continue
+
+            error_code = self._error_code(body)
+            if response.status_code < 400 and error_code is None:
+                return body
+
+            action = resolve_error_action(error_code)
+            if action is ErrorAction.FAIL_CLOSED or action is ErrorAction.RESYNC_THEN_DECIDE:
+                raise VenueError(
+                    f"venue rejected request at {path}",
+                    code=error_code,
+                    http_status=response.status_code,
+                    path=path,
+                    payload_digest=payload_digest(
+                        response.body.decode("utf-8", errors="replace") if response.body else ""
+                    ),
+                )
+            if action is ErrorAction.BENIGN:
+                return body
+            if action is ErrorAction.BENIGN_REPRICE:
+                raise VenueError(
+                    "post-only rejection (reprice signal)",
+                    code=error_code,
+                    http_status=response.status_code,
+                    path=path,
+                    payload_digest=payload_digest(
+                        response.body.decode("utf-8", errors="replace") if response.body else ""
+                    ),
+                )
+            if action is ErrorAction.RESYNC_CLOCK:
+                if resynced_clock:
+                    break
+                resynced_clock = True
+                self.sync_server_time()
+                continue
+            time.sleep(
+                _RETRY_BACKOFF_LONG_SECONDS
+                if action is ErrorAction.RETRY_BACKOFF_LONG
+                else _RETRY_BACKOFF_SECONDS
+            )
+
+        raise last_error or VenueError(
+            f"request to {path} exhausted retries",
+            code=None,
+            http_status=0,
+            path=path,
+            payload_digest=payload_digest(None),
+        )
+
+    # ------------------------------------------------------- endpoint shortcuts
+
+    def exchange_info(self) -> Any:
+        return self.request("GET", "/fapi/v1/exchangeInfo")
+
+    def book_ticker(self, symbol: str) -> dict[str, Any]:
+        payload = self.request("GET", "/fapi/v1/ticker/bookTicker", {"symbol": symbol})
+        return cast(dict[str, Any], payload)
+
+    def new_order(self, params: Mapping[str, Any]) -> Any:
+        return self.request("POST", "/fapi/v1/order", params, signed=True)
+
+    def cancel_order(self, symbol: str, orig_client_order_id: str) -> Any:
+        return self.request(
+            "DELETE", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": orig_client_order_id},
+            signed=True,
+        )
+
+    def query_order(self, symbol: str, orig_client_order_id: str) -> Any:
+        return self.request(
+            "GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": orig_client_order_id},
+            signed=True,
+        )
+
+    def account(self) -> Any:
+        return self.request("GET", "/fapi/v2/account", signed=True)
+
+    def position_risk(self) -> Any:
+        return self.request("GET", "/fapi/v2/positionRisk", signed=True)

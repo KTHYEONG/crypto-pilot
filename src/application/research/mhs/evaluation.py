@@ -2350,6 +2350,7 @@ def _book_outcome(
             executed_prescreen=executed_prescreen,
             executed_tail=executed_tail,
             executed_prescreen_net_t=executed_prescreen_net_t,
+            target_weights=target_weights if name == "blend" else None,
         ), blend_traces
     equity_1h, net_returns_1h, turnover_1h = _statistics._hourly_ledger_series(
         primary.ledger.equity, primary.ledger.fill_turnover,
@@ -2396,6 +2397,7 @@ def _book_outcome(
         # I-SCALE-IS-DEPLOYED-OVERLAY: fold가 재적합하지 않고 읽어가는
         # blend의 배치 확정 스케일. name=="blend"일 때만 노출한다.
         exposure_scale=pnl_vol_target_scale if name == "blend" else None,
+        target_weights=target_weights if name == "blend" else None,
     ), blend_traces
 
 
