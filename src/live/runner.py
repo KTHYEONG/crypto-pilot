@@ -93,13 +93,13 @@ def run_shadow_cycle(
         # 1) 인과성 게이트: 결정 시각 T의 주문은 T+1h 이전에 생성될 수 없다.
         assert_signal_available(decision_time, now_ts)
 
-        audit = AuditLog(default_audit_log_path("shadow_cycle"))
+        audit = AuditLog(default_audit_log_path("shadow_cycle", for_date=decision_time))
         audit.context.update(run_id=decision_time.strftime("%Y%m%dT%H%M%SZ"), mode=settings.mode.value)
 
-        market_client = _market_client(settings)
+        market_client = _market_client(settings, decision_time)
         filters = parse_exchange_filters(market_client.exchange_info())
 
-        order_client = _order_client(settings)
+        order_client = _order_client(settings, decision_time)
         snapshot = fetch_account_snapshot(order_client, now=now_ts)
         assert_venue_configuration(snapshot)
         ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
@@ -175,23 +175,23 @@ def _clock() -> float:
     return time.time()
 
 
-def _market_client(settings: LiveSettings) -> BinanceFuturesRestClient:
+def _market_client(settings: LiveSettings, decision_time: pd.Timestamp) -> BinanceFuturesRestClient:
     return BinanceFuturesRestClient(
         settings.market_data_base_url,
         settings.api_key,
         settings.api_secret,
         settings.mode,
-        AuditLog(default_audit_log_path("market_data")),
+        AuditLog(default_audit_log_path("market_data", for_date=decision_time)),
         recv_window_ms=settings.recv_window_ms,
     )
 
 
-def _order_client(settings: LiveSettings) -> BinanceFuturesRestClient:
+def _order_client(settings: LiveSettings, decision_time: pd.Timestamp) -> BinanceFuturesRestClient:
     return BinanceFuturesRestClient(
         settings.order_base_url,
         settings.order_api_key or settings.api_key,
         settings.order_api_secret or settings.api_secret,
         settings.mode,
-        AuditLog(default_audit_log_path("orders")),
+        AuditLog(default_audit_log_path("orders", for_date=decision_time)),
         recv_window_ms=settings.recv_window_ms,
     )
