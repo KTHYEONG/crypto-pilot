@@ -17,9 +17,10 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.live.audit import AUDIT_LOG_ROOT, prune_old_audit_logs
+from src.live.errors import StaleSignalError
 from src.live.runner import run_shadow_cycle
 from src.live.settings import LiveSettings
-from src.live.signal import _SIGNAL_LAG
+from src.live.signal import _SIGNAL_LAG, assert_signal_fresh
 
 logger = logging.getLogger("LiveScheduler")
 
@@ -90,10 +91,21 @@ def run_daemon(
     반복마다 누적 상태가 없어 O(1) 메모리로 무한 실행 가능하다.
     """
     iteration = 0
+    max_staleness = pd.Timedelta(hours=settings.max_signal_staleness_hours)
     while max_iterations is None or iteration < max_iterations:
         iteration += 1
         last = _load_last_processed(state_path)
         target = next_decision_time(last, now_fn())
+
+        # 스테일 가드: N일 정지 후 복귀 시 과거 신호로 실주문하지 않고 당일까지
+        # 빠르게 따라잡는다. 스테일한 날짜는 사이클 없이 상태만 전진한다.
+        try:
+            assert_signal_fresh(target, now_fn(), max_staleness)
+        except StaleSignalError:
+            logger.warning("[SYS] daemon skipped stale signal decision_time=%s", target)
+            _save_last_processed(state_path, target)
+            continue
+
         wait_until = target + _SIGNAL_LAG + DAEMON_CATCHUP_BUFFER
         remaining_seconds = (wait_until - now_fn()).total_seconds()
         while remaining_seconds > 0:
