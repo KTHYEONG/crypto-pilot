@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_EXECUTION_FIDELITY",
+      "date": "2026-08-24",
+      "adr_id": "ADR_20260824_MHS_EXECUTION_FIDELITY",
+      "domain": "execution",
+      "title": "MHS 지정가 체결 정확도 및 live executor 결함 수정",
+      "why": "지정가 레퍼런스(OHLCV_STRICT_PROXY)가 결정 시각(T) mark를 앵커로 써서 실제 제출 시점보다 63~66분 stale했고, 이로 인해 patient_reference naive Sharpe가 2.886→0.138로 붕괴해 '지정가 대기의 경제적 근거 없음'이라는 잘못된 결론을 뒷받침하고 있었다. blend 연회전율 271.18x에서 taker-maker 편도 6bps 차이는 연 16.27%p에 해당해 현재 비용구조상 최대 단일 레버였다. 또한 src/live/executor.py에서 passive_deadline_s==window_deadline_s로 타임아웃 분기가 도달 불가능했고, chase 8회 소진으로 패시브 대기가 실질 ~24초에 그쳤으며, 밴드 클램프가 유리 방향까지 차단하고, 비마케터블 IOC가 3초마다 무한 재게시되고, cancel 응답의 executedQty가 유실되는 5건의 체결 결함이 있었다.",
+      "resolution": "src/mhs/types.py ExecutionSpec에 decision_anchor/peg_passive_fraction/peg_chase_band_bps 필드 추가(기본값은 기존 동작과 bit-identical). src/mhs/execution.py에 peg_chase_fill_schedule 순수함수와 OHLCV_PEG_CHASE_PROXY 바운드를 신설해 live의 peg→chase→capped IOC 정책을 리플레이에서 재현하고 residual_count/residual_notional로 미체결을 계측한다. --peg-chase-diagnostic opt-in으로 배선하며 옵션 바운드 인덱스를 명시적으로 추적해 기존 'ladder = batch.results[-1]' 오배정 위험을 제거했다. src/live/executor.py는 passive_deadline_s를 window_deadline_s의 60%(1080s)로 분리해 fail-closed 검증을 추가하고, chase 소진 시 주문을 유지하도록 바꾸고, _gtx_candidate/_capped_ioc_price의 대칭 밴드 클램프를 불리 방향 전용으로 교정하고, max_ioc_attempts로 비마케터블 IOC 재게시를 상한하고, cancel 직후 재조회로 executedQty 유실을 막았다.",
+      "impact": "MhsRunConfig() 기본 실행(primary/stress)은 bit-identical 유지(test_golden_digest.py 통과 확인). --peg-chase-diagnostic 옵트인 시에만 새 바운드가 실행되어 지정가 활용의 실제 fill_rate/maker_share를 처음으로 계측 가능. live executor 5건 결함 수정으로 GTX 패시브 대기가 설계대로 1080초까지 유지되고, 유리 방향 체결 기회 손실과 비마케터블 IOC 스팸(최대 10회로 상한)과 cancel 시점 체결 유실에 의한 reconcile_or_halt 오탐 리스크가 해소됨. execution_timeframe 1m 채택 여부는 peg-chase 바운드로 A/B 실측 전까지 보류(사전등록 채택 기준 명시)."
+    },
+    {
       "task_id": "ADR_20260824_LIVE_EXECUTION_HARDENING",
       "date": "2026-08-24",
       "adr_id": "ADR_20260824_ADR_20260824_LIVE_EXECUTION_HARDENING",
@@ -989,16 +999,6 @@
       "why": "MHS replay execution RSS budget breach (>2.5GB) and Fold 0 strategy quality failure",
       "resolution": "Created mhs_horizon_opt specification blueprint, precision contract json, integration tests, and timestamp timezone fix",
       "impact": "Restructured MHS evaluation memory management policy, signal deadband caps, and timezone conversion compatibility"
-    },
-    {
-      "task_id": "TASK_MHS_PAIRED_REPLAY_COMPLETION",
-      "date": "2026-08-08",
-      "adr_id": "ADR_20260808_MHS_PAIRED_REPLAY_COMPLETION",
-      "domain": "execution",
-      "title": "MHS paired strict and stress replay completion",
-      "why": "The full 2021-2025 MHS run reached terminal persistence only with an RSS guard because each book and anchored fold rebuilt identical execution windows for strict and stress bounds.",
-      "resolution": "Added streaming paired replay fan-out with independent strict/stress accumulators, wired book and fold orchestration to consume each execution window once, added equivalence/resource benchmark coverage, and vectorized the remaining top-level diagnostics.",
-      "impact": "The full guarded CLI now completes in 167.34 seconds with paired replay equivalence PASS; Research-GO remains fail-closed because the measured run exceeds the selected RSS budget and fold Sharpe/stress gates fail."
     }
   ]
 }

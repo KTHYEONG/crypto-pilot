@@ -129,6 +129,7 @@ class MhsDiagnosticRequest:
         default=False,
         metadata=cli_param(flag="--ladder-diagnostic", help="Additionally replay under OHLCV_LADDERED_PROXY."),
     )
+    peg_chase_diagnostic: bool = field(default=False, metadata=cli_param(flag="--peg-chase-diagnostic", help="Additionally replay under OHLCV_PEG_CHASE_PROXY."))
     discovery_gate: bool = field(
         default=False,
         metadata=cli_param(flag="--discovery-gate", help="Run the discovery/qualification horizon gate."),
@@ -378,6 +379,10 @@ class MhsBookReport:
     touch_naive_sharpe: float | None = None
     ladder: StrategyExecutionReplayResult | None = None
     ladder_naive_sharpe: float | None = None
+    peg_chase: StrategyExecutionReplayResult | None = None
+    peg_chase_naive_sharpe: float | None = None
+    peg_chase_fill_rate: float | None = None
+    peg_chase_maker_share: float | None = None
     patient_reference: StrategyExecutionReplayResult | None = None
     patient_reference_naive_sharpe: float | None = None
     pre_vol_target_reference: StrategyExecutionReplayResult | None = None

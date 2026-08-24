@@ -32,20 +32,33 @@ MAX_SLICE_NOTIONAL = Decimal("500")
 class PassiveExecutionPolicy:
     """집행 파라미터. 시간/비용 기본값은 ExecutionSpec 계약에서 유도된다.
 
-    passive_deadline_s/window_deadline_s = passive_timeout_minutes(30)*60,
+    window_deadline_s = passive_timeout_minutes(30)*60,
+    passive_deadline_s 는 창의 60% 로 패시브 단계 상한을 나누며
+    window_deadline_s 보다 엄격히 작아야 한다(fail-closed 검증),
     taker_cap_bps = taker_fee_bps(5) + taker_slippage_bps(3).
     """
 
     poll_interval_s: float = 3.0
     chase_ticks: int = 2
     max_chases: int = 8
-    passive_deadline_s: float = 30 * 60.0
+    passive_deadline_s: float = 0.6 * 30 * 60.0
     window_deadline_s: float = 30 * 60.0
     taker_cap_bps: float = 5.0 + 3.0
     chase_band_bps: float = 10.0
-    participation_cap: float = 0.005
     max_slices: int = 4
     rate_weight_budget_fraction: float = 0.5
+    max_ioc_attempts: int = 10
+
+    def __post_init__(self) -> None:
+        if self.passive_deadline_s >= self.window_deadline_s:
+            raise ValueError(
+                f"passive_deadline_s ({self.passive_deadline_s}) must be strictly less than "
+                f"window_deadline_s ({self.window_deadline_s})"
+            )
+        if self.poll_interval_s <= 0:
+            raise ValueError(f"poll_interval_s must be > 0, got {self.poll_interval_s}")
+        if self.max_ioc_attempts < 1:
+            raise ValueError(f"max_ioc_attempts must be >= 1, got {self.max_ioc_attempts}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +157,11 @@ def _capped_ioc_price(
     band_low: Decimal | None = None,
     band_high: Decimal | None = None,
 ) -> Decimal | None:
-    """IOC 백스톱 가격: opposite*(1±taker_cap) 틱 양자화 후 I-CHASE-BAND 로 클램프한다."""
+    """IOC 백스톱 가격: opposite*(1±taker_cap) 틱 양자화 후 I-CHASE-BAND 로 클램프한다.
+
+    클램프 결과가 비마케터블(매수는 opposite 미만, 매도는 초과)이면 None 을
+    반환해 체결 불가능한 IOC 재게시 스팸을 원천 차단한다.
+    """
     factor = (
         Decimal(1) + Decimal(str(taker_cap_bps)) / _BPS_DENOMINATOR
         if is_buy
@@ -156,17 +173,15 @@ def _capped_ioc_price(
         if is_buy:
             high = quantize_to_multiple(band_high, tick_size, ROUND_DOWN)
             price = min(price, high)
-            floor = quantize_to_multiple(band_low, tick_size, ROUND_DOWN)
-            if price < floor:
-                return None
         else:
             low = quantize_to_multiple(band_low, tick_size, ROUND_UP)
             price = max(price, low)
-            ceiling = quantize_to_multiple(band_high, tick_size, ROUND_UP)
-            if price > ceiling:
-                return None
     if price <= _ZERO:
         return None
+    if band_low is not None and band_high is not None:
+        non_marketable = price < opposite_touch if is_buy else price > opposite_touch
+        if non_marketable:
+            return None
     return price
 
 
@@ -184,10 +199,20 @@ def _gtx_candidate(
     band_low: Decimal,
     band_high: Decimal,
 ) -> Decimal | None:
-    """GTX 게시 가격: 패시브측 틱 양자화 후 밴드 밖이면 None(HOLD)."""
+    """GTX 게시 가격: 패시브측 틱 양자화 후 불리 방향 밴드 이탈만 None(HOLD).
+
+    유리 방향 이탈(매수 중 하락, 매도 중 상승)은 그대로 게시해 체결 기회를
+    유지한다. 대칭 밴드 차단은 유리한 체결까지 폐기하는 결함이었다.
+    """
     price = quantize_to_multiple(raw, filters.tick_size, ROUND_DOWN if is_buy else ROUND_UP)
-    if price <= _ZERO or not (band_low <= price <= band_high):
+    if price <= _ZERO:
         return None
+    if is_buy:
+        if price > band_high:
+            return None
+    else:
+        if price < band_low:
+            return None
     return price
 
 
@@ -198,6 +223,21 @@ def _cancel_tolerating_benign(client: Any, symbol: str, client_order_id: str) ->
     except VenueError as exc:
         if exc.code != -2011:
             raise
+
+
+def _cancel_and_settle(client: Any, rt: _IntentRuntime) -> None:
+    """취소 직후 동일 주문을 재조회해 취소 시점 부분체결을 정산한다(-2011 benign).
+
+    cancel 응답의 체결량을 폐기하면 그 사이 체결이 filled_total 에 누락되고
+    다음 사이클 정합성 검증에서 HALT 로 이어진다.
+    """
+    assert rt.active_id is not None
+    _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
+    executed = Decimal(
+        str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
+    )
+    _record_fill(rt, executed)
+    rt.active_id = None
 
 
 def _record_fill(rt: _IntentRuntime, executed: Decimal) -> None:
@@ -222,6 +262,7 @@ class _IntentRuntime:
     fill_notional: Decimal = _ZERO
     chases: int = 0
     attempts: int = 0
+    ioc_attempts: int = 0
     posted_at: float = 0.0
     terminal_status: str | None = None
 
@@ -382,20 +423,21 @@ def _poll_or_post(
             timed_out = now - rt.posted_at >= policy.passive_deadline_s
             exhausted = rt.chases >= policy.max_chases
             moved = abs(own_touch - rt.active_price) >= rt.filters.tick_size * policy.chase_ticks
-            if timed_out or exhausted:
-                _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
-                rt.active_id = None
+            if timed_out:
+                # passive -> ioc 전이는 timed_out 뿐이다.
+                _cancel_and_settle(client, rt)
                 rt.phase = "ioc"
+            elif exhausted:
+                # chase 소진은 재펜그 중단: 현재 휴지 주문을 유지한다.
+                return
             elif moved:
-                _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
-                rt.active_id = None
+                _cancel_and_settle(client, rt)
                 rt.chases += 1
             else:
                 return
         else:
             # IOC 미체결분은 즉시 소멸하므로 잔량을 새 IOC 로 재게시한다.
-            _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
-            rt.active_id = None
+            _cancel_and_settle(client, rt)
 
     # 2) 게시: 패시브(GTX, 밴드 내) 또는 백스톱(IOC, 캡+밴드 클램프).
     remaining = rt.intent.quantity - rt.filled_total
@@ -408,6 +450,10 @@ def _poll_or_post(
         )
         time_in_force = "GTX"
     else:
+        if rt.ioc_attempts >= policy.max_ioc_attempts:
+            # 비마케터블/미체결 IOC 재게시 상한: 잔량을 RESIDUAL 로 확정한다.
+            rt.terminal_status = "RESIDUAL"
+            return
         price = _capped_ioc_price(
             opposite_touch,
             is_buy=is_buy,
@@ -458,6 +504,8 @@ def _poll_or_post(
     rt.active_price = price
     rt.reported_executed = _ZERO
     rt.posted_at = now
+    if time_in_force == "IOC":
+        rt.ioc_attempts += 1
     audit.record(
         "order_posted",
         symbol=rt.intent.symbol,
