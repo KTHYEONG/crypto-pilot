@@ -2165,6 +2165,9 @@ def _book_outcome(
     patient_reference_naive_sharpe = None
     pre_vol_target_reference = None
     pre_vol_target_reference_naive_sharpe = None
+    # Two-pass 경로에서만 채워진다(coupled 스트리밍은 per-prefix 재계산이라
+    # 단일 Series가 없다). constant_risk는 항상 two-pass다.
+    pnl_vol_target_scale: pd.Series | None = None
     try:
         batch_bounds: list[tuple[
             Literal["OHLCV_STRICT_PROXY", "OHLCV_TOUCH_PROXY", "OHLCV_IMMEDIATE_TAKER", "OHLCV_LADDERED_PROXY"],
@@ -2390,6 +2393,9 @@ def _book_outcome(
         primary_fill_count=primary.fill_count,
         primary_unfilled_count=primary.unfilled_count,
         primary_forced_exit_notional=primary.forced_exit_notional,
+        # I-SCALE-IS-DEPLOYED-OVERLAY: fold가 재적합하지 않고 읽어가는
+        # blend의 배치 확정 스케일. name=="blend"일 때만 노출한다.
+        exposure_scale=pnl_vol_target_scale if name == "blend" else None,
     ), blend_traces
 
 
@@ -2666,6 +2672,7 @@ def _run_post_book_concurrently(
     fold_committee_weights: dict[int, dict[str, float]] | None = None,
     fold_growth_budget_target_vol: dict[int, float] | None = None,
     exposure_warmup_returns: pd.Series | None = None,
+    fold_blend_exposure_scale: dict[int, pd.Series] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -2725,6 +2732,7 @@ def _run_post_book_concurrently(
                 (fold_committee_weights or {}).get(fold_index),
                 growth_budget_target_vol=(fold_growth_budget_target_vol or {}).get(fold_index),
                 exposure_warmup_returns=exposure_warmup_returns,
+                blend_exposure_scale=(fold_blend_exposure_scale or {}).get(fold_index),
             ): fold_index
             for fold_index, fold in enumerate(folds)
         }
@@ -3491,6 +3499,7 @@ def _run_anchored_fold(
     committee_member_weights: dict[str, float] | None = None,
     growth_budget_target_vol: float | None = None,
     exposure_warmup_returns: pd.Series | None = None,
+    blend_exposure_scale: pd.Series | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
@@ -3558,10 +3567,23 @@ def _run_anchored_fold(
             retain_event_snapshots=False,
         )
         # Two-pass primary (reference -> P&L-vol-target rescale -> reported):
-        # same causal P&L-vol-target scale as the top-level books, computed from
-        # the fold's own validation-window reference ledger.
+        # constant_risk는 blend가 배치 확정한 exposure_scale을 그대로 슬라이스
+        # 재사용한다(I-SCALE-IS-DEPLOYED-OVERLAY, fold-local EWMA 재적합 금지).
         reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        pnl_vol_target_scale = _scaling._replay_exposure_scale(reference_daily_returns, request, growth_budget_target_vol, warmup_returns=_fold_exposure_warmup(exposure_warmup_returns, vs))
+        if request.pnl_vol_target_mode == "constant_risk":
+            if blend_exposure_scale is None:
+                raise DataIntegrityError(f"fold {fold_index}: constant_risk requires blend_exposure_scale")
+            pnl_vol_target_scale = blend_exposure_scale.reindex(reference_daily_returns.index)
+            if pnl_vol_target_scale.isna().any():
+                raise DataIntegrityError(
+                    f"fold {fold_index}: blend exposure_scale missing for "
+                    f"{int(pnl_vol_target_scale.isna().sum())} validation dates"
+                )
+        else:
+            pnl_vol_target_scale = _scaling._replay_exposure_scale(
+                reference_daily_returns, request, growth_budget_target_vol,
+                warmup_returns=_fold_exposure_warmup(exposure_warmup_returns, vs),
+            )
         primary, stress = replay_execution_window_batch(
             _window_telemetry(
                 _rescaled_windows(_windows(), pnl_vol_target_scale),
