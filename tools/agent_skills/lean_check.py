@@ -170,7 +170,9 @@ def _test_references_source(test_file: str, source_file: str) -> bool:
 
 
 def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonDiag]:
-    if kind == "field" or not fh.startswith("src"):
+    if kind in ("field", "cli_argument") or not fh.startswith("src"):
+        # field는 정의 자체가 사용처가 아니고, cli_argument 플래그 리터럴은
+        # 선행 하이픈 때문에 \b 단어경계 참조 스캔과 구조적으로 불규합이다.
         return []
     leaf = name.rpartition(".")[2] if "." in name else name
     if not leaf:
@@ -322,7 +324,7 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
 
         with open(fh) as sf:
             sf_content = sf.read()
-            if kind == "field":
+            if kind in ("field", "dataclass_field"):
                 field_name = name.split(".")[-1] if "." in name else name
                 pat = rf"\b{re.escape(field_name)}[\"']?\s*(?::|=)"
                 if not re.search(pat, sf_content, re.MULTILINE):
@@ -340,7 +342,41 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                 found_impl = False
                 try:
                     tree = ast.parse(sf_content, filename=fh)
-                    if kind == "parameter_add" and owner and "." in name:
+                    if kind == "constant":
+                        # 모듈 수준 상수(AnnAssign/Assign 타깃)를 인식한다.
+                        for node in ast.walk(tree):
+                            if (
+                                isinstance(node, ast.AnnAssign)
+                                and isinstance(node.target, ast.Name)
+                                and node.target.id == name
+                            ):
+                                found_impl = True
+                                break
+                            if isinstance(node, ast.Assign) and any(
+                                isinstance(t, ast.Name) and t.id == name
+                                for t in node.targets
+                            ):
+                                found_impl = True
+                                break
+                    elif kind == "reexport":
+                        imported = any(
+                            isinstance(node, ast.ImportFrom)
+                            and any(
+                                alias.name == name or alias.asname == name
+                                for alias in node.names
+                            )
+                            for node in ast.walk(tree)
+                        )
+                        # 재수출 계약은 __all__ 등재까지 요구한다(인용 문자열 검색).
+                        found_impl = imported and f'"{name}"' in sf_content
+                    elif kind == "cli_argument":
+                        found_impl = bool(
+                            re.search(
+                                rf"add_argument\(\s*['\"]{re.escape(name)}['\"]",
+                                sf_content,
+                            )
+                        )
+                    elif kind == "parameter_add" and owner and "." in name:
                         # parameter_add: verify the owner function exists and
                         # the leaf parameter is present in its signature.
                         for node in ast.walk(tree):
