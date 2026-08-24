@@ -354,7 +354,11 @@ def test_SCENARIO_LIVE_20_PASSIVE_DEADLINE_STRICTLY_BELOW_WINDOW(tmp_path) -> No
     assert post_times[1] == post_times[0] + policy.passive_deadline_s
     assert post_times[1] >= 1080.0
     ioc_price = Decimal(client.orders[1]["price"])
-    assert ioc_price <= Decimal("100") * (Decimal(1) + Decimal("10") / Decimal(10_000))
+    # S7: IOC 캡은 리스크 레일(max_cross_bps)이다 -- chase_band_bps 가 아니다.
+    assert ioc_price <= Decimal("100") * (
+        Decimal(1) + Decimal(str(policy.max_cross_bps)) / Decimal(10_000)
+    )
+    assert ioc_price >= Decimal("100.05")  # ask 이상: 마케터블
     assert outcome.status == "RESIDUAL"
 
 
@@ -363,7 +367,9 @@ def test_SCENARIO_LIVE_21_CHASE_EXHAUSTION_HOLDS_INSTEAD_OF_CROSSING(tmp_path) -
     정확히 max_chases+1 회, IOC 전이 없음(t=1080s 이전 무조건)."""
     touches = [(f"{100 + 0.3 * i:.2f}", f"{100.20 + 0.3 * i:.2f}") for i in range(16)]
     client = StubClient(touches=touches)
-    policy = _policy(max_chases=8, chase_band_bps=300.0)
+    # 리스크 레일은 알파 레일(chase_band)을 초과해야 한다. 최종 호가
+    # (104.50/104.70)는 400bps 레일 상한 104.00 밖이라 IOC 거부가 유지된다.
+    policy = _policy(max_chases=8, chase_band_bps=300.0, max_cross_bps=400.0)
     assert policy.passive_deadline_s == 50.0
     assert policy.window_deadline_s == 600.0
     outcomes = execute_intents(
@@ -450,8 +456,8 @@ def test_SCENARIO_LIVE_23_NON_MARKETABLE_IOC_IS_BOUNDED(tmp_path) -> None:
 class CancelFillStubClient(StubClient):
     """cancel 직후 같은 주문 id 의 executedQty 만 '0.5'를 반환하는 fake."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, touches: list[tuple[str, str]] | None = None) -> None:
+        super().__init__(touches=touches)
         self.cancelled_ids: set[str] = set()
 
     def cancel_order(self, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
@@ -466,14 +472,67 @@ class CancelFillStubClient(StubClient):
 
 def test_SCENARIO_LIVE_24_CANCEL_SETTLES_PARTIAL_FILL(tmp_path) -> None:
     """취소 시점 부분체결은 cancel 직후 재조회로 정산된다. 수정 전 경로
-    (취소 응답 폐기)라면 filled_qty 는 0 으로 수렴해 이 테스트는 실패한다."""
-    client = CancelFillStubClient()
+    (취소 응답 폐기)라면 filled_qty 는 0 으로 수렴해 이 테스트는 실패한다.
+    ask(101.00)가 리스크 레일 밖이라 IOC 백스톱은 게시되지 않고, 잔량 0.5 는
+    순수하게 취소 정산만으로 확정된다."""
+    client = CancelFillStubClient(touches=[("100.00", "101.00")])
     policy = _policy(passive_deadline_s=20.0, window_deadline_s=600.0)
     outcome = execute_intent(
         client, _intent(), _filters(), policy, AuditLog(tmp_path / "24.jsonl"), SteppingClock(3.0)
     )
     assert outcome.filled_qty == Decimal("0.5")
     assert outcome.unfilled_qty == Decimal("0.5")
+
+
+def test_SCENARIO_LIVE_25_IOC_ALWAYS_MARKETABLE_INSIDE_RISK_RAIL(tmp_path) -> None:
+    """S7: chase_band(10bps)는 알파 레일, max_cross_bps(50bps)는 리스크 레일.
+    ask 가 chase 밴드 밖이지만 리스크 레일 안이면 IOC 는 반드시 마케터블
+    가격을 반환한다(수정 전에는 밴드 클램프 때문에 None)."""
+    assert PassiveExecutionPolicy().max_cross_bps == 50.0
+    with pytest.raises(ValueError, match="max_cross_bps"):
+        PassiveExecutionPolicy(max_cross_bps=10.0)
+
+    price = _capped_ioc_price(
+        Decimal("100.30"), is_buy=True, taker_cap_bps=8.0,
+        tick_size=Decimal("0.10"), band_low=Decimal("99.50"), band_high=Decimal("100.50"),
+    )
+    assert price is not None
+    assert price >= Decimal("100.30")
+    assert price % Decimal("0.10") == 0
+
+    # 엔드투엔드: passive 마감 후 IOC 가 실제로 게시된다(밴드 거부 없음).
+    client = StubClient(touches=[("100.00", "100.30")])
+    policy = _policy(passive_deadline_s=20.0, window_deadline_s=600.0)
+    outcome = execute_intent(
+        client, _intent(), _filters(tick_size="0.10"), policy,
+        AuditLog(tmp_path / "25.jsonl"), SteppingClock(3.0),
+    )
+    ioc_orders = [o for o in client.orders if o["timeInForce"] == "IOC"]
+    assert len(ioc_orders) >= 1
+    assert all(
+        Decimal(o["price"]) >= Decimal("100.30") and o["type"] == "LIMIT"
+        for o in ioc_orders
+    )
+
+
+def test_SCENARIO_LIVE_26_RISK_RAIL_STILL_REFUSES_ANOMALY(tmp_path) -> None:
+    """S7: ask 가 max_cross_bps 레일 밖(100bps)이면 None 이고, execute_intents
+    는 해당 intent 에 IOC 0건으로 RESIDUAL 로 종결한다."""
+    assert _capped_ioc_price(
+        Decimal("101.00"), is_buy=True, taker_cap_bps=8.0,
+        tick_size=Decimal("0.10"), band_low=Decimal("99.50"), band_high=Decimal("100.50"),
+    ) is None
+
+    client = StubClient(touches=[("100.00", "101.00")])
+    policy = _policy(passive_deadline_s=20.0, window_deadline_s=600.0)
+    outcome = execute_intent(
+        client, _intent(), _filters(tick_size="0.10"), policy,
+        AuditLog(tmp_path / "26.jsonl"), SteppingClock(3.0),
+    )
+    ioc_orders = [o for o in client.orders if o["timeInForce"] == "IOC"]
+    assert not ioc_orders
+    assert outcome.status == "RESIDUAL"
+    assert outcome.unfilled_qty > 0
 
 
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
@@ -488,4 +547,6 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_22_FAVOURABLE_TOUCH_STILL_POSTS",
     "SCENARIO_LIVE_23_NON_MARKETABLE_IOC_IS_BOUNDED",
     "SCENARIO_LIVE_24_CANCEL_SETTLES_PARTIAL_FILL",
+    "SCENARIO_LIVE_25_IOC_ALWAYS_MARKETABLE_INSIDE_RISK_RAIL",
+    "SCENARIO_LIVE_26_RISK_RAIL_STILL_REFUSES_ANOMALY",
 )
