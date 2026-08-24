@@ -30,6 +30,10 @@ from src.research.technical_experts.cross_sectional import (
 # (OHLCV_IMMEDIATE_TAKER) UNKNOWN_TERMINATION forced exit (spec §2.17/§7.5).
 TERMINATION_STRESS_PENALTY_BPS = 50.0
 
+# Hard ceiling for the Corwin-Schultz half-spread estimate: a degenerate
+# illiquid bar sequence can otherwise produce an unbounded cost.
+SPREAD_ESTIMATE_CEILING_BPS: float = 100.0
+
 _ExecutionBound = Literal[
     "OHLCV_STRICT_PROXY",
     "OHLCV_TOUCH_PROXY",
@@ -198,6 +202,7 @@ def peg_chase_fill_schedule(
     adverse: np.ndarray,
     closes: np.ndarray,
     spec: ExecutionSpec,
+    taker_cost_bps: float | None = None,
 ) -> tuple[int, float, float, str] | None:
     """Repricing peg-chase schedule for one order over its execution window.
 
@@ -212,10 +217,17 @@ def peg_chase_fill_schedule(
 
     During the passive phase ``w < P`` with
     ``P = min(N, max(1, ceil(peg_passive_fraction * N)))`` a strict
-    trade-through fills as maker (buy: ``adverse[w] < peg[w]``). From bar
-    ``P`` on, the first bar whose close does not exceed the cap takes the
-    taker backstop. Neither fires -> ``None`` (residual): the intent stays
-    unfilled and the next decision recomputes it.
+    trade-through fills as maker (buy: ``adverse[w] < peg[w]``). The taker
+    backstop crosses UNCONDITIONALLY at the first bar ``w >= min(P, N-1)``
+    with a finite close: the band caps the maker peg only and is never a
+    refusal to trade, and the final bar stays backstop-eligible so the
+    schedule completes even when the passive fraction consumes the whole
+    window. ``None`` is returned exactly when the window holds no finite
+    close (a data gap), never as a pricing decision.
+
+    ``taker_cost_bps`` overrides the all-in backstop fee term when the caller
+    supplies a liquidity-aware cost; otherwise it defaults to
+    ``taker_fee_bps + taker_slippage_bps``.
 
     Returns ``(relative_fill_position, fill_price, fee_bps, reason)`` with
     ``reason in {"maker_fill", "backstop_taker"}``, or ``None``.
@@ -231,8 +243,10 @@ def peg_chase_fill_schedule(
         raise ValueError("adverse must be finite")
     if len(closes) < n:
         raise ValueError("closes must be at least as long as adverse")
-    if not np.isfinite(closes[:n]).all():
-        raise ValueError("closes must be finite")
+
+    finite_close = np.isfinite(closes[:n])
+    if not finite_close.any():
+        return None
 
     peg = np.empty(n, dtype="float64")
     peg[0] = anchor_price
@@ -245,22 +259,94 @@ def peg_chase_fill_schedule(
     else:
         peg = np.maximum(peg, cap)
         crossed = adverse > peg
-    passive_bars = np.arange(n) < min(n, max(1, math.ceil(spec.peg_passive_fraction * n)))
+    passive_len = min(n, max(1, math.ceil(spec.peg_passive_fraction * n)))
+    passive_bars = np.arange(n) < passive_len
     maker_hits = crossed & passive_bars
     if maker_hits.any():
         hit = int(np.argmax(maker_hits))
         return (hit, float(peg[hit]), float(spec.maker_fee_bps), "maker_fill")
-    backstop_eligible = closes[:n] <= cap if side == 1 else closes[:n] >= cap
-    backstop_hits = backstop_eligible & ~passive_bars
+    backstop_from = min(passive_len, n - 1)
+    backstop_hits = (np.arange(n) >= backstop_from) & finite_close
     if backstop_hits.any():
         hit = int(np.argmax(backstop_hits))
+        fee_bps = (
+            float(taker_cost_bps)
+            if taker_cost_bps is not None
+            else float(spec.taker_fee_bps + spec.taker_slippage_bps)
+        )
         return (
             hit,
             float(closes[hit]),
-            float(spec.taker_fee_bps + spec.taker_slippage_bps),
+            fee_bps,
             "backstop_taker",
         )
     return None
+
+
+def corwin_schultz_half_spread_bps(
+    highs: np.ndarray,
+    lows: np.ndarray,
+) -> np.ndarray:
+    """Column-wise Corwin-Schultz (2012) effective-spread half-spread in bps.
+
+    Estimates one half-spread per column from consecutive 2-bar high/low
+    pairs: ``b`` sums the squared per-bar log ranges, ``g`` squares the
+    2-bar log range of the union, and the spread follows
+    ``S = 2*(e^a - 1)/(e^a + 1)`` with
+    ``a = (sqrt(2b) - sqrt(b))/k - sqrt(g/k)`` and ``k = 3 - 2*sqrt(2)``.
+    Negative 2-bar estimates -- the estimator's known degeneracy on quiet
+    pairs -- are floored at 0 before averaging; the column mean is halved to
+    a half-spread, converted to bps, and clipped to
+    ``[0, SPREAD_ESTIMATE_CEILING_BPS]`` so a degenerate sequence can never
+    price an unbounded crossing.
+
+    Bars whose high/low are non-finite, non-positive, or inverted
+    (``high < low``) are masked out, and non-adjacent valid bars are never
+    paired. A column with fewer than 3 valid bars yields ``nan`` and the
+    caller falls back to the flat slippage. Input shape ``(n_bars, n_cols)``
+    with matching highs/lows and at least 2 rows (both fail closed with
+    ``ValueError``); output shape ``(n_cols,)``. Fully vectorised over bars.
+    """
+    high_arr = np.asarray(highs, dtype="float64")
+    low_arr = np.asarray(lows, dtype="float64")
+    if high_arr.shape != low_arr.shape:
+        raise ValueError(
+            f"highs and lows must share one shape, got {high_arr.shape} vs {low_arr.shape}"
+        )
+    if high_arr.ndim != 2 or high_arr.shape[0] < 2:
+        raise ValueError(f"highs/lows must be 2-D with >= 2 rows, got shape {high_arr.shape}")
+
+    valid = (
+        np.isfinite(high_arr)
+        & np.isfinite(low_arr)
+        & (high_arr > 0.0)
+        & (low_arr > 0.0)
+        & (high_arr >= low_arr)
+    )
+    pair_ok = valid[:-1] & valid[1:]
+
+    h0 = np.where(pair_ok, high_arr[:-1], np.nan)
+    l0 = np.where(pair_ok, low_arr[:-1], np.nan)
+    h1 = np.where(pair_ok, high_arr[1:], np.nan)
+    l1 = np.where(pair_ok, low_arr[1:], np.nan)
+
+    b = np.log(h0 / l0) ** 2 + np.log(h1 / l1) ** 2
+    g = np.log(np.maximum(h0, h1) / np.minimum(l0, l1)) ** 2
+    k = 3.0 - 2.0 * np.sqrt(2.0)
+    a = (np.sqrt(2.0 * b) - np.sqrt(b)) / k - np.sqrt(g / k)
+    # tanh(a/2) == (e^a - 1)/(e^a + 1) without the overflow at large |a|.
+    spread = 2.0 * np.tanh(a / 2.0)
+    floored = np.maximum(spread, 0.0)
+
+    pair_counts = np.sum(np.isfinite(floored), axis=0)
+    pair_sums = np.nansum(floored, axis=0)
+    mean_spread = np.where(
+        pair_counts > 0, pair_sums / np.where(pair_counts > 0, pair_counts, 1), np.nan,
+    )
+    half_bps = mean_spread / 2.0 * 1e4
+    bar_counts = np.sum(valid, axis=0)
+    half_bps = np.where(bar_counts >= 3, half_bps, np.nan)
+    return np.clip(half_bps, 0.0, SPREAD_ESTIMATE_CEILING_BPS)
 
 
 def bar_funding_panel(
@@ -400,6 +486,10 @@ class StrategyExecutionReplayResult:
     notional_weighted_shortfall_bps: float = float("nan")
     residual_count: int = 0
     residual_notional: float = 0.0
+    notional_weighted_fee_bps: float = float("nan")
+    notional_weighted_spread_bps: float = float("nan")
+    notional_weighted_delay_bps: float = float("nan")
+    min_notional_dropped_fraction: float = float("nan")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1402,6 +1492,17 @@ class _BoundExecutionReplayAccumulator:
         self.fallback_count = 0
         self.residual_count = 0
         self.residual_notional = 0.0
+        # Liquidity-aware taker cost state: one half-spread estimate per
+        # canonical column, nan until a window's bars have been consumed.
+        self.half_spread_bps = np.full(self.n_cols, np.nan, dtype="float64")
+        # Cost decomposition terms paired 1:1 with ``self.shortfalls``.
+        self.fee_terms: list[float] = []
+        self.spread_terms: list[float] = []
+        self.delay_terms: list[float] = []
+        # Min-notional diagnostic accumulators (report-only; never the ledger).
+        self.min_notional_probe_usdt = float(spec.min_notional_probe_usdt)
+        self.min_notional_total_notional = 0.0
+        self.min_notional_dropped_notional = 0.0
         self.termination_counts: dict[str, int] = {"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0}
         self.data_gaps: list[ExecutionDataGap] = []
         self.units_after_events: list[tuple[pd.Timestamp, np.ndarray]] = []
@@ -1435,6 +1536,51 @@ class _BoundExecutionReplayAccumulator:
         return self.cash + float(
             np.sum(units * np.where(np.isnan(prices), 0.0, prices))
         )
+
+    def _taker_cost_bps(self, gcol: int) -> float:
+        """Liquidity-aware taker crossing cost for one column.
+
+        Under ``corwin_schultz`` the column's EWMA half-spread replaces the
+        flat slippage whenever it is finite; a degenerate estimate (nan)
+        falls back to ``taker_slippage_bps``. Under ``flat`` this is exactly
+        the frozen slippage, reproducing legacy behaviour bit-identically.
+        """
+        if self.spec.liquidity_cost_model == "corwin_schultz":
+            est = float(self.half_spread_bps[gcol])
+            if np.isfinite(est):
+                return est
+        return float(self.spec.taker_slippage_bps)
+
+    def _record_terms(
+        self,
+        decision_price: float,
+        fill_price: float,
+        side: int,
+        fee_component_bps: float,
+        spread_component_bps: float,
+    ) -> None:
+        """Append the fee/spread/delay decomposition terms for one shortfall.
+
+        ``delay`` is ``side * (fill_price / decision_price - 1) * 1e4`` -- the
+        pure timing cost of filling away from the anchor -- so that
+        ``fee + spread + delay`` reconstructs the recorded shortfall.
+        """
+        self.fee_terms.append(float(fee_component_bps))
+        self.spread_terms.append(float(spread_component_bps))
+        self.delay_terms.append(side * (fill_price / decision_price - 1.0) * 1e4)
+
+    def _probe_intent_notional(self, net_units: float, decision_price: float) -> None:
+        """Accumulate the min-notional diagnostic for one intent (ledger-neutral)."""
+        if self.min_notional_probe_usdt <= 0:
+            return
+        dollar = (
+            abs(net_units * decision_price)
+            * self.spec.reference_equity_usdt
+            / self.initial_equity
+        )
+        self.min_notional_total_notional += dollar
+        if dollar < self.min_notional_probe_usdt:
+            self.min_notional_dropped_notional += dollar
 
     def consume(self, w: ExecutionReplayWindow) -> None:
         columns = self.columns
@@ -1606,6 +1752,7 @@ class _BoundExecutionReplayAccumulator:
                 if abs(net_units) < 1e-12:
                     continue
                 side = 1 if net_units > 0 else -1
+                self._probe_intent_notional(net_units, decision_price)
                 if spos >= n_grid:
                     self.termination_counts["MISSING_DATA"] += 1
                     continue
@@ -1627,7 +1774,8 @@ class _BoundExecutionReplayAccumulator:
                             )
                         )
                         continue
-                    fee_bps = self.spec.taker_fee_bps + self.spec.taker_slippage_bps
+                    taker_cost_bps = self._taker_cost_bps(gcol)
+                    fee_bps = self.spec.taker_fee_bps + taker_cost_bps
                     reason = "timeout_taker"
                 else:
                     if self.execution_bound == "OHLCV_LADDERED_PROXY":
@@ -1707,15 +1855,17 @@ class _BoundExecutionReplayAccumulator:
                             fee_bps = float(tranche_fee_bps)
                             qty = net_units * float(qty_fraction)
                             if reason == "passive_fill":
-                                shortfall = (
-                                    side * (fill_price / decision_price - 1.0) * 1e4
-                                    + self.spec.maker_fee_bps
+                                self._record_terms(
+                                    decision_price, fill_price, side, self.spec.maker_fee_bps, 0.0,
                                 )
                             else:
-                                shortfall = (
-                                    side * (fill_price / decision_price - 1.0) * 1e4
-                                    + self.spec.taker_fee_bps + self.spec.taker_slippage_bps
+                                self._record_terms(
+                                    decision_price, fill_price, side,
+                                    self.spec.taker_fee_bps + self.spec.taker_slippage_bps, 0.0,
                                 )
+                            shortfall = (
+                                self.fee_terms[-1] + self.spread_terms[-1] + self.delay_terms[-1]
+                            )
                             self.shortfalls.append(shortfall)
                             self.shortfall_notionals.append(abs(qty) * fill_price)
                             fill_time = grid[fill_pos]
@@ -1792,8 +1942,10 @@ class _BoundExecutionReplayAccumulator:
                                 )
                             )
                             continue
+                        liquidity_cost_bps = self._taker_cost_bps(gcol)
                         schedule = peg_chase_fill_schedule(
-                            decision_price, side, adverse, closes_window, self.spec
+                            decision_price, side, adverse, closes_window, self.spec,
+                            taker_cost_bps=self.spec.taker_fee_bps + liquidity_cost_bps,
                         )
                         if schedule is None:
                             # Residual: cash and units stay untouched (I3), so
@@ -1807,12 +1959,30 @@ class _BoundExecutionReplayAccumulator:
                         reason = "passive_fill" if sched_reason == "maker_fill" else "timeout_taker"
                         if reason == "passive_fill":
                             self.fill_count += 1
+                        else:
+                            # Backstop conversion mirrors the strict/touch
+                            # timeout convention: one unfilled intent that
+                            # completed via the taker fallback.
+                            self.unfilled_count += 1
+                            self.fallback_count += 1
+                        if reason == "passive_fill":
+                            self._record_terms(decision_price, fill_price, side, self.spec.maker_fee_bps, 0.0)
+                        elif self.spec.liquidity_cost_model == "corwin_schultz":
+                            self._record_terms(
+                                decision_price, fill_price, side,
+                                self.spec.taker_fee_bps, liquidity_cost_bps,
+                            )
+                        else:
+                            self._record_terms(
+                                decision_price, fill_price, side,
+                                self.spec.taker_fee_bps + liquidity_cost_bps, 0.0,
+                            )
                         shortfall = (
                             side * (fill_price / decision_price - 1.0) * 1e4
                             + (
                                 self.spec.maker_fee_bps
                                 if sched_reason == "maker_fill"
-                                else self.spec.taker_fee_bps + self.spec.taker_slippage_bps
+                                else self.spec.taker_fee_bps + liquidity_cost_bps
                             )
                         )
                         self.shortfalls.append(shortfall)
@@ -1920,8 +2090,27 @@ class _BoundExecutionReplayAccumulator:
                     self.fill_count += 1
                 if self.execution_bound == "OHLCV_IMMEDIATE_TAKER":
                     shortfall = side * (fill_price / decision_price - 1.0) * 1e4 + fee_bps
+                    if self.spec.liquidity_cost_model == "corwin_schultz":
+                        self._record_terms(
+                            decision_price, fill_price, side,
+                            self.spec.taker_fee_bps,
+                            fee_bps - self.spec.taker_fee_bps,
+                        )
+                    else:
+                        # Flat model: the fixed slippage folds into the fee
+                        # term and the spread term stays exactly zero.
+                        self._record_terms(decision_price, fill_price, side, fee_bps, 0.0)
                 else:
                     shortfall = passive_fill_shortfall_bps(decision_price, adverse, timeout_close, side, self.spec)
+                    # The residual after timing is the all-in fee component;
+                    # deriving it keeps fee+spread+delay == shortfall exact
+                    # even on degenerate exact-touch fills.
+                    anchor = fill_price if reason == "passive_fill" else timeout_close
+                    self._record_terms(
+                        decision_price, anchor, side,
+                        shortfall - side * (anchor / decision_price - 1.0) * 1e4,
+                        0.0,
+                    )
                 self.shortfalls.append(shortfall)
                 self.shortfall_notionals.append(abs(net_units) * fill_price)
                 fill_time = grid[fill_pos]
@@ -2138,6 +2327,18 @@ class _BoundExecutionReplayAccumulator:
             self.ledger_cash = float(cash_after[-1])
         self.ledger_start_ns = int(grid_ns[-1]) + bar_ns
 
+        # Liquidity-aware spread EWMA update -- strictly AFTER this window's
+        # fills were priced, so a window's own bars can never price its own
+        # costs (causality). A degenerate (nan) estimate carries the prior
+        # value forward instead of poisoning it.
+        if self.spec.liquidity_cost_model == "corwin_schultz":
+            est = corwin_schultz_half_spread_bps(highs_values, lows_values)
+            old = self.half_spread_bps[gpos]
+            alpha = self.spec.spread_ewma_alpha
+            updated = alpha * est + (1.0 - alpha) * old
+            merged = np.where(np.isnan(est), old, updated)
+            self.half_spread_bps[gpos] = np.where(np.isnan(old), est, merged)
+
     def finalize(self) -> StrategyExecutionReplayResult:
         columns = self.columns
         n_cols = self.n_cols
@@ -2285,6 +2486,18 @@ class _BoundExecutionReplayAccumulator:
         weighted_shortfall_bps = notional_weighted_shortfall_bps(
             self.shortfalls, self.shortfall_notionals
         )
+        weighted_fee_bps = notional_weighted_shortfall_bps(self.fee_terms, self.shortfall_notionals)
+        weighted_spread_bps = notional_weighted_shortfall_bps(
+            self.spread_terms, self.shortfall_notionals
+        )
+        weighted_delay_bps = notional_weighted_shortfall_bps(
+            self.delay_terms, self.shortfall_notionals
+        )
+        probe_fraction = (
+            self.min_notional_dropped_notional / self.min_notional_total_notional
+            if self.min_notional_probe_usdt > 0 and self.min_notional_total_notional > 0
+            else float("nan")
+        )
         return StrategyExecutionReplayResult(
             simulated_fills=simulated_fills,
             ledger=ledger,
@@ -2314,6 +2527,10 @@ class _BoundExecutionReplayAccumulator:
             notional_weighted_shortfall_bps=weighted_shortfall_bps,
             residual_count=self.residual_count,
             residual_notional=self.residual_notional,
+            notional_weighted_fee_bps=weighted_fee_bps,
+            notional_weighted_spread_bps=weighted_spread_bps,
+            notional_weighted_delay_bps=weighted_delay_bps,
+            min_notional_dropped_fraction=probe_fraction,
         )
 
 

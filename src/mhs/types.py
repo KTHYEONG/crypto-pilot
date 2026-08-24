@@ -153,6 +153,14 @@ class ExecutionSpec:
     ``peg_chase_fill_schedule``: ``peg_passive_fraction`` is the passive share
     of the window and ``peg_chase_band_bps`` caps the adverse excursion of any
     pegged limit price.
+
+    The liquidity fields select the taker crossing-cost model: ``flat``
+    charges the fixed ``taker_slippage_bps`` (frozen default, bit-identical),
+    while ``corwin_schultz`` charges a per-symbol half-spread estimated from
+    window high/lows and smoothed by ``spread_ewma_alpha``. The min-notional
+    probe is a diagnostic-only overlay: when ``min_notional_probe_usdt > 0``
+    each intent's dollar size at ``reference_equity_usdt`` is accumulated into
+    a dropped-fraction report metric without touching the ledger.
     """
 
     maker_fee_bps: float = 2.0
@@ -164,6 +172,10 @@ class ExecutionSpec:
     decision_anchor: Literal["decision_bar", "submit_bar"] = "decision_bar"
     peg_passive_fraction: float = 0.6
     peg_chase_band_bps: float = 10.0
+    liquidity_cost_model: Literal["flat", "corwin_schultz"] = "flat"
+    spread_ewma_alpha: float = 0.25
+    min_notional_probe_usdt: float = 0.0
+    reference_equity_usdt: float = 2000.0
 
     def __post_init__(self) -> None:
         if min(self.maker_fee_bps, self.taker_fee_bps, self.taker_slippage_bps) < 0:
@@ -178,6 +190,16 @@ class ExecutionSpec:
             raise ValueError(f"peg_passive_fraction must be in (0.0, 1.0], got {self.peg_passive_fraction}")
         if self.peg_chase_band_bps <= 0:
             raise ValueError(f"peg_chase_band_bps must be > 0, got {self.peg_chase_band_bps}")
+        if self.liquidity_cost_model not in ("flat", "corwin_schultz"):
+            raise ValueError(
+                f"liquidity_cost_model must be 'flat' or 'corwin_schultz', got {self.liquidity_cost_model!r}"
+            )
+        if not (0.0 < self.spread_ewma_alpha <= 1.0):
+            raise ValueError(f"spread_ewma_alpha must be in (0.0, 1.0], got {self.spread_ewma_alpha}")
+        if self.min_notional_probe_usdt < 0:
+            raise ValueError(f"min_notional_probe_usdt must be >= 0, got {self.min_notional_probe_usdt}")
+        if self.reference_equity_usdt <= 0:
+            raise ValueError(f"reference_equity_usdt must be > 0, got {self.reference_equity_usdt}")
 
     def one_way_taker_bps(self) -> float:
         """One-way all-in taker cost in bps (fee + slippage)."""
