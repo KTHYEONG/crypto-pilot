@@ -29,6 +29,20 @@ def test_recv_window_and_equity_validators() -> None:
         LiveSettings(notional_equity_usdt=0)
 
 
+def test_shared_env_with_non_live_keys_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """docker-compose 의 env_file: .env 는 BINANCE_API_KEY 등 비-LIVE_ 키도 함께 주입한다.
+
+    LiveSettings 가 자체 env_file 을 지정해 dotenv 를 다시 파싱하면 pydantic-settings
+    가 prefix 필터 없이 전체 키를 extra=forbid 검증에 넣어 즉시 크래시한다. OS 환경변수
+    소스만 신뢰해야 이 시나리오에서 안전하다.
+    """
+    monkeypatch.setenv("BINANCE_API_KEY", "unrelated")
+    monkeypatch.setenv("LIVE_ARTIFACT_KEY", "a" * 44)
+    settings = LiveSettings()
+    assert settings.artifact_key is not None
+    assert settings.artifact_key.get_secret_value() == "a" * 44
+
+
 def test_mainnet_requires_exact_ack_string() -> None:
     with pytest.raises(ValueError, match="mainnet_trading_ack"):
         LiveSettings(mode=ExecutionMode.LIVE_MAINNET)
