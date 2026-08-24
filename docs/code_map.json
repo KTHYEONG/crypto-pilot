@@ -268,5 +268,8 @@
   },
   "src/mhs/pipeline/stages/fold.py": {
     "testing": "tests/unit/mhs/pipeline/stages/test_fold.py"
+  },
+  "src/mhs/pipeline/stages/committee.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_committee.py"
   }
 }
