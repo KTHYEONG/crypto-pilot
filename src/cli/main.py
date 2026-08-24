@@ -4,6 +4,7 @@ import argparse
 import logging
 
 from src.cli.commands.data import add_data_commands
+from src.cli.commands.live import add_live_commands
 from src.cli.commands.research import add_research_commands
 
 _LOG_LEVELS = {
@@ -20,9 +21,9 @@ def configure_logging(*, level: int = logging.INFO, debug_streams: bool = False)
 
 
 def build_root_parser() -> argparse.ArgumentParser:
-    """Compose the single documented CLI entry point with two command groups.
+    """Compose the single documented CLI entry point with three command groups.
 
-    Top-level groups are ``data`` and ``research``.
+    Top-level groups are ``data``, ``research`` and ``live``.
     """
     parser = argparse.ArgumentParser(
         prog="python -m src.cli.main",
@@ -43,6 +44,7 @@ def build_root_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="group", required=True)
     add_data_commands(subparsers.add_parser("data", help="Collect and manage market data"))
     add_research_commands(subparsers.add_parser("research", help="Run sealed research evaluations"))
+    add_live_commands(subparsers.add_parser("live", help="Live/shadow exchange execution"))
     return parser
 
 

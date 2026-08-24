@@ -48,6 +48,38 @@ def mhs_horizon_diagnostic_report_path() -> str:
     return str(Path("docs/results") / "mhs_horizon_diagnostic.json")
 
 
+def emit_deployed_target_weights(
+    target_weights: pd.DataFrame,
+    exposure_scale: pd.Series | None,
+    artifact_root: Path,
+    *,
+    tail_rows: int,
+) -> dict[str, Any]:
+    """연구-라이브 seam: 라이브가 소비할 deployed 목표비중 tail을 Parquet으로 기록한다."""
+    return _emit_deployed_target_weights(target_weights, exposure_scale, artifact_root, tail_rows=tail_rows)
+
+
+def _emit_deployed_target_weights(
+    target_weights: pd.DataFrame,
+    exposure_scale: pd.Series | None,
+    artifact_root: Path,
+    *,
+    tail_rows: int,
+) -> dict[str, Any]:
+    """deployed = target_weights x exposure_scale(ffill, 결측 1.0) -- 실행 리플레이의
+    two-pass rescale 공식과 동일하다. exposure_scale이 None이면 스케일 1.0."""
+    if exposure_scale is None:
+        scale = pd.Series(1.0, index=target_weights.index)
+    else:
+        scale = exposure_scale.reindex(target_weights.index, method="ffill").fillna(1.0)
+    deployed = target_weights.mul(scale, axis=0)
+    artifact_root = Path(artifact_root)
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    path = artifact_root / "deployed_target_weights.parquet"
+    deployed.tail(tail_rows).to_parquet(path, index=True)
+    return {"path": str(path), "rows": int(min(tail_rows, len(deployed)))}
+
+
 def persist_mhs_report(
     report: MhsHorizonDiagnosticReport,
     target: str | Path,
