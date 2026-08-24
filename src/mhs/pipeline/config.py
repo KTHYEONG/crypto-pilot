@@ -96,6 +96,7 @@ class MhsRunConfig:
     execution_coverage_gate: bool = False
     fill_mark_parity_gate: bool = True
     exposure_scale_two_sided: bool = True  # was False; CLI effective default flips like committee_capital/growth_envelope/pnl_vol_target_mode
+    exposure_drawdown_brake: bool = False
     ram_guard: bool = True
 
     # Growth envelope & member attribution
@@ -163,6 +164,7 @@ class MhsRunConfig:
             execution_coverage_gate=args.execution_coverage_gate,
             fill_mark_parity_gate=not args.no_fill_mark_parity_gate,
             exposure_scale_two_sided=not args.no_exposure_scale_two_sided,
+            exposure_drawdown_brake=args.exposure_drawdown_brake,
             ram_guard=not args.no_ram_guard,
             discovery_gate_adjusted_net_t=args.discovery_gate_adjusted_net_t,
             discovery_gate_regime_scaled_net_t=args.discovery_gate_regime_scaled_net_t,
