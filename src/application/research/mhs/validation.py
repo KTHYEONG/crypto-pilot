@@ -134,6 +134,15 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
             "exposure_scale_two_sided requires pnl_vol_target_mode='exante_target', "
             "'growth_budget', or 'constant_risk'"
         )
+    if not isinstance(request.exposure_drawdown_brake, bool):
+        raise ValueError("exposure_drawdown_brake must be a bool")
+    if request.exposure_drawdown_brake:
+        if request.pnl_vol_target_mode != "constant_risk":
+            raise ValueError(
+                "exposure_drawdown_brake requires pnl_vol_target_mode='constant_risk'"
+            )
+        if not request.pnl_vol_target:
+            raise ValueError("exposure_drawdown_brake requires pnl_vol_target=True")
     if not isinstance(request.ram_guard, bool):
         raise ValueError("ram_guard must be a bool")
     from src.mhs.params import GROWTH_RISK_ENVELOPES

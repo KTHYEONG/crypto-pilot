@@ -302,6 +302,13 @@ class MhsDiagnosticRequest:
             negate_flag="--no-exposure-scale-two-sided",
         ),
     )
+    exposure_drawdown_brake: bool = field(
+        default=False,
+        metadata=cli_param(
+            flag="--exposure-drawdown-brake",
+            help="Scale exposure down by the strategy's own trailing equity drawdown.",
+        ),
+    )
     ram_guard: bool = field(
         default=True,
         metadata=cli_param(flag="--ram-guard", help="Enable the RAM guard.", negate_flag="--no-ram-guard"),
