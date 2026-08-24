@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_LIVE_BINANCE_SHADOW_EXECUTION",
+      "date": "2026-08-24",
+      "adr_id": "ADR_20260824_LIVE_BINANCE_SHADOW_EXECUTION",
+      "domain": "execution",
+      "title": "Binance 실거래소 섬도우(기록전용) 집행 인프라 구축",
+      "why": "MHS Research-GO 통과(CAGR 318%/MDD -38.9%/DSR 0.79) 이후 실거래소/계좌 연동 요청. 실계좌가 걸린 만큼 3개월간 주문을 전송하지 않고 전 경로(신호->필터->계좌->집행)를 실검증하는 섬도우 우선 설계가 필요했다. 라이브 인프라는 이전까지 전무(주문/계좌/필터/인증 grep 0건, BinanceClient는 시세수집 전용).",
+      "resolution": "src/live/ 신설: settings(ExecutionMode SHADOW/LIVE_TESTNET/LIVE_MAINNET, pydantic-settings, LIVE_MAINNET은 승인문자열 없으면 생성불가), errors(BINANCE_ERROR_POLICY 레지스트리, 미등록코드 fail-closed), filters(Decimal 기반 stepSize/tickSize/minNotional 양자화), rest(BinanceFuturesRestClient, SHADOW 모드에서 GET 외 요청을 전송계층에서 원천 차단), account(거래소 설정 정합 + reconcile_or_halt, 불일치시 자동보정 없이 예외만), signal(latest_target_weights + T+1h 인과성 게이트), sizing/planner(포지션 반전을 reduce_only 2-intent로 분해, 결정론적 client_order_id), executor(GTX post-only 체이스 -> IOC 데드라인, MARKET 주문 전면 금지), audit(비밀정보 절대 미기록 append-only JSONL), runner(일일 사이클 오케스트레이션, 리스크게이트 위반시 부분집행 없이 전체 HALT), ledger(내부 포지션 원장 로드/저장/체결반영, reconcile_or_halt가 소비). CLI에 research/live 서브커맨드(live shadow-cycle) 및 --emit-target-weights 플래그 추가. 연구-라이브 seam: MhsBookReport.target_weights 필드 신설(name=='blend'일 때만 채움, _book_outcome 양쪽 반환경로에 배선), emit_deployed_target_weights가 deployed=target_weights*exposure_scale(ffill) 공식으로 deployed_target_weights.parquet 기록. /check에서 발견된 두 결함(--emit-target-weights가 항상 DataIntegrityError로 무조건 거부되던 스텁, reconcile_or_halt가 하드코딩된 빈 dict를 받아 재조정이 사실상 무력화되던 버그)을 수정: emit 경로를 실제로 배선하고 ledger.py를 신설해 runner가 실제 원장을 재조정하도록 교체. 부수 수정: CLI 파리티 계약에 --emit-target-weights 제외 등록(--output-tier와 동일 패턴), src/live/ 내 _ZERO 상수 3중 선언을 filters.py 단일 소스로 정리.",
+      "impact": "그린필드 신규 기능이라 기존 MHS 연구 파이프라인 회귀 없음(--emit-target-weights 기본 False로 기존 산출물 비트동일 유지 확인). tests/unit/mhs, tests/unit/application/research/mhs, tests/contract, tests/unit/live, tests/unit/cli 전체 통과(코드맵 미등록은 이번 sync로 해소, LOG_DIR/DISCOVERY_START 다중선언은 이 기능과 무관한 기존 이슈로 범위 밖). 실제 주문 전송은 SHADOW 모드 기본값과 LIVE_MAINNET 승인문자열 게이트로 구조적으로 차단된 상태이며, 3개월 섬도우 검증 후 별도 결정 없이는 실주문이 나갈 수 없다."
+    },
+    {
       "task_id": "TASK_MHS_EQUITY_DRAWDOWN_BRAKE",
       "date": "2026-08-24",
       "adr_id": "ADR_20260824_MHS_EQUITY_DRAWDOWN_BRAKE",
@@ -989,16 +999,6 @@
       "why": "Full 2021-2025 stale-carry execution terminated before report generation due retained dense per-fill universe snapshots and cumulative replay memory.",
       "resolution": "Made dense event snapshots opt-in, preserved numerical replay equivalence, added bounded RSS handling and regression coverage, and fixed mark backfill/type robustness.",
       "impact": "Reduces replay memory growth while retaining strict fail-closed semantics and enables full diagnostic execution under the available resource budget."
-    },
-    {
-      "task_id": "TASK_MHS_STALE_MARK_POLICY",
-      "date": "2026-08-08",
-      "adr_id": "ADR_20260808_MHS_STALE_MARK_POLICY",
-      "domain": "execution",
-      "title": "MHS listing-aware stale mark policy",
-      "why": "Preserve strict fail-closed mark-price validation while supporting bounded diagnostic continuity for irrecoverable short source gaps.",
-      "resolution": "Added cache_required_stale_carry with a bounded causal 24-hour mark carry, retained strict cache_required semantics, wired CLI mode, and added coverage tests.",
-      "impact": "Strict Research-GO behavior is unchanged; stale-carry runs are diagnostic-only and never replace primary ledger evidence."
     }
   ]
 }
