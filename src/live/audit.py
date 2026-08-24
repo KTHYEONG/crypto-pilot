@@ -3,21 +3,62 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from src.common.config import BASE_DIR
 
 #: 감사 로그가 허용되는 유일한 프로젝트 하위 루트(외부 /tmp 금지).
 AUDIT_LOG_ROOT = BASE_DIR / "logs"
 
+#: 3개월 섬도우 검증 기간을 커버하는 감사로그 보존 일수.
+AUDIT_LOG_RETENTION_DAYS: int = 90
+
+_DATE_PARTITION_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
+
 _SECRET_KEYS = frozenset({"signature", "apiKey", "apiSecret", "secret", "api_key", "api_secret"})
 
 
-def default_audit_log_path(name: str) -> Path:
-    """프로젝트 logs/ 하위의 감사 로그 경로를 반환한다."""
-    return AUDIT_LOG_ROOT / "live" / f"{name}.jsonl"
+def default_audit_log_path(name: str, for_date: pd.Timestamp | None = None) -> Path:
+    """decision_time 날짜로 파티셔닝된 감사 로그 경로를 반환한다(무한 증가 방지)."""
+    if for_date is None:
+        date_str = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+    else:
+        ts = pd.Timestamp(for_date)
+        if ts.tzinfo is None:
+            raise ValueError("for_date must be tz-aware UTC")
+        date_str = ts.strftime("%Y-%m-%d")
+    return AUDIT_LOG_ROOT / "live" / name / f"{date_str}.jsonl"
+
+
+def prune_old_audit_logs(
+    root: Path,
+    reference_date: pd.Timestamp,
+    *,
+    retain_days: int = AUDIT_LOG_RETENTION_DAYS,
+) -> int:
+    """retain_days보다 오래된 {YYYY-MM-DD}.jsonl 만 삭제하고 건수를 반환한다."""
+    if not root.exists():
+        return 0
+    cutoff = pd.Timestamp(reference_date).normalize() - pd.Timedelta(days=retain_days)
+    cutoff_str = cutoff.strftime("%Y-%m-%d")
+    removed = 0
+    for name_dir in sorted(root.iterdir()):
+        if not name_dir.is_dir():
+            continue
+        for candidate in name_dir.iterdir():
+            if _DATE_PARTITION_RE.match(candidate.name) is None:
+                continue
+            # ISO 날짜는 사전식 비교가 시간순과 동일하다.
+            if not candidate.is_file() or candidate.name[:10] >= cutoff_str:
+                continue
+            candidate.unlink()
+            removed += 1
+    return removed
 
 
 def _sanitize(value: Any) -> Any:
