@@ -715,3 +715,178 @@ def test_legacy_exposure_modes_byte_identical() -> None:
 
     constant_req = MhsDiagnosticRequest(pnl_vol_target_mode="constant_risk")
     assert scaling.is_streaming_scale_mode(constant_req) is False
+
+
+# SCENARIO_MHS_DD_BRAKE_11_NO_REGRESSION: 기본값(False)에서 4개 pnl_vol_target_mode
+# 전부 비트 동일 회귀는 아래 3파일 전체 스위트 실행으로 검증한다.
+#   uv run pytest tests/unit/application/research/mhs/test_scaling.py \
+#       tests/unit/mhs/test_compounding_growth.py tests/contract/test_request_cli_parity.py -q
+
+# SCENARIO_MHS_DD_BRAKE_01_INERT_ON_MONOTONE_EQUITY
+def test_scenario_mhs_dd_brake_01_drawdown_brake_inert_on_monotone_equity() -> None:
+    idx = pd.date_range("2021-01-01", periods=30, freq="D", tz="UTC")
+    r = pd.Series(0.01, index=idx)
+    base = pd.Series(1.3, index=idx)
+    result = scaling._equity_drawdown_brake_scale(r, base, cap=3.0)
+    pd.testing.assert_series_equal(result, base.astype("float64"), check_names=False)
+
+
+# SCENARIO_MHS_DD_BRAKE_02_ONLY_REDUCES
+def test_scenario_mhs_dd_brake_02_drawdown_brake_only_reduces() -> None:
+    rng = np.random.default_rng(20260824)
+    idx = pd.date_range("2021-01-01", periods=400, freq="D", tz="UTC")
+    r = pd.Series(rng.normal(0.0, 0.03, 400), index=idx)
+    base = pd.Series(1.5, index=idx)
+    result = scaling._equity_drawdown_brake_scale(r, base, cap=3.0)
+    assert (result <= base.clip(0.0, 3.0) + 1e-12).all()
+    assert (result >= 0.0).all()
+    assert result.notna().all()
+    assert result.lt(base - 1e-9).any()
+
+
+# SCENARIO_MHS_DD_BRAKE_03_PREFIX_DETERMINISTIC
+def test_scenario_mhs_dd_brake_03_drawdown_brake_prefix_deterministic() -> None:
+    rng = np.random.default_rng(20260824)
+    idx = pd.date_range("2021-01-01", periods=400, freq="D", tz="UTC")
+    r = pd.Series(rng.normal(0.0, 0.03, 400), index=idx)
+    base = pd.Series(1.5, index=r.index)
+    full = scaling._equity_drawdown_brake_scale(r, base, cap=3.0)
+    for m in (1, 7, 50, 199, 400):
+        prefix = scaling._equity_drawdown_brake_scale(
+            r.iloc[:m], base.iloc[:m], cap=3.0,
+        )
+        pd.testing.assert_series_equal(prefix, full.iloc[:m], check_exact=True)
+
+
+# SCENARIO_MHS_DD_BRAKE_04_FLOOR_AND_K_BOUNDS
+def test_scenario_mhs_dd_brake_04_drawdown_brake_floor_and_k_bounds() -> None:
+    idx = pd.date_range("2022-01-01", periods=60, freq="D", tz="UTC")
+    r = pd.Series(-0.05, index=idx)
+    base = pd.Series(1.0, index=idx)
+    floored = scaling._equity_drawdown_brake_scale(
+        r, base, cap=3.0, k=50.0, floor=0.2,
+    )
+    assert floored.min() == pytest.approx(0.2)
+    assert (floored >= 0.2 - 1e-12).all()
+    identity = scaling._equity_drawdown_brake_scale(
+        r, base, cap=3.0, k=0.0, floor=0.2,
+    )
+    pd.testing.assert_series_equal(
+        identity, base.clip(0.0, 3.0).astype("float64"), check_names=False,
+    )
+
+
+# SCENARIO_MHS_DD_BRAKE_05_FAIL_CLOSED
+def test_scenario_mhs_dd_brake_05_drawdown_brake_fail_closed() -> None:
+    idx = pd.date_range("2023-01-01", periods=40, freq="D", tz="UTC")
+    r = pd.Series(0.01, index=idx)
+    base = pd.Series(1.0, index=idx)
+    shifted_base = pd.Series(1.0, index=pd.date_range("2023-01-02", periods=40, freq="D", tz="UTC"))
+    with pytest.raises(ValueError, match="indexes must be equal"):
+        scaling._equity_drawdown_brake_scale(r, shifted_base, cap=3.0)
+    with pytest.raises(ValueError, match="floor"):
+        scaling._equity_drawdown_brake_scale(r, base, cap=3.0, floor=0.0)
+    with pytest.raises(ValueError, match="floor"):
+        scaling._equity_drawdown_brake_scale(r, base, cap=3.0, floor=1.5)
+    with pytest.raises(ValueError, match=r"\bk\b"):
+        scaling._equity_drawdown_brake_scale(r, base, cap=3.0, k=-1.0)
+    with pytest.raises(ValueError, match="cap"):
+        scaling._equity_drawdown_brake_scale(r, base, cap=-0.1)
+    ruin = pd.Series(-1.5, index=idx)
+    with pytest.raises(DataIntegrityError):
+        scaling._equity_drawdown_brake_scale(ruin, base, cap=3.0)
+    nan_lead_idx = pd.date_range("2024-01-01", periods=10, freq="D", tz="UTC")
+    nan_lead = pd.Series(np.nan, index=nan_lead_idx)
+    nan_lead.iloc[1:] = [0.02, -0.01, 0.03, 0.01, -0.02, 0.04, 0.01, -0.03, 0.02]
+    nan_result = scaling._equity_drawdown_brake_scale(
+        nan_lead, pd.Series(1.0, index=nan_lead_idx), cap=3.0,
+    )
+    assert np.isfinite(nan_result.iloc[0])
+
+
+# SCENARIO_MHS_DD_BRAKE_06_REPLAY_DEFAULT_BIT_IDENTICAL
+def test_scenario_mhs_dd_brake_06_drawdown_brake_replay_default_bit_identical() -> None:
+    from src.application.research.mhs.research_go import _resolved_growth_envelope
+
+    rng = np.random.default_rng(37)
+    idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0005, 0.015, 500), index=idx)
+    request = MhsDiagnosticRequest(pnl_vol_target_mode="constant_risk")
+    expected = scaling._constant_risk_scale(
+        ref,
+        target_vol=scaling._constant_risk_target_vol(ref, _resolved_growth_envelope(request)),
+        cap=scaling.resolved_exposure_cap(request),
+    )
+    pd.testing.assert_series_equal(
+        scaling._replay_exposure_scale(ref, request), expected, check_exact=True,
+    )
+    braked_request = MhsDiagnosticRequest(
+        pnl_vol_target_mode="constant_risk",
+        exposure_drawdown_brake=True,
+    )
+    plain = scaling._replay_exposure_scale(ref, request)
+    braked = scaling._replay_exposure_scale(ref, braked_request)
+    assert (braked <= plain + 1e-12).all()
+    assert braked.lt(plain - 1e-9).any()
+
+
+# SCENARIO_MHS_DD_BRAKE_07_NON_FITTED_TARGET_VOL
+def test_scenario_mhs_dd_brake_07_drawdown_brake_non_fitted_target_vol() -> None:
+    from src.mhs.params import (
+        CONSTANT_RISK_CAP_BINDING_QUANTILE,
+        CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
+        CONSTANT_RISK_MIN_PERIODS_DAYS,
+    )
+
+    envelope = GROWTH_RISK_ENVELOPES["growth_extreme"]
+    rng = np.random.default_rng(29)
+    idx = pd.date_range("2021-08-01", periods=500, freq="D", tz="UTC")
+    ref = pd.Series(rng.normal(0.0004, 0.018, 500), index=idx)
+    braked = scaling._constant_risk_target_vol(ref, envelope, drawdown_brake=True)
+    train = ref.loc[ref.index < COMMITTEE_OOS_START].dropna()
+    sigma_book = (
+        train.ewm(
+            halflife=CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
+            min_periods=CONSTANT_RISK_MIN_PERIODS_DAYS,
+        ).std().shift(1) * np.sqrt(365.0)
+    )
+    feasible = envelope.leverage_ceiling * float(sigma_book.quantile(CONSTANT_RISK_CAP_BINDING_QUANTILE))
+    assert braked == pytest.approx(feasible)
+    assert braked >= scaling._constant_risk_target_vol(ref, envelope, drawdown_brake=False)
+
+
+# SCENARIO_MHS_DD_BRAKE_08_NEVER_STREAMING
+@pytest.mark.parametrize("mode", ["median_relative", "exante_target"])
+def test_scenario_mhs_dd_brake_08_drawdown_brake_never_streaming(mode: str) -> None:
+    request = MhsDiagnosticRequest(
+        pnl_vol_target_mode=mode,
+        growth_envelope="conservative",
+        committee_capital=False,
+    )
+    assert scaling.is_streaming_scale_mode(request) is True
+    # 브레이크 ON + 비constant_risk는 validation이 거부하는 형태지만,
+    # 스트리밍 가드의 방어깊이(I-BRAKE-NO-STREAM)는 모드 무관하게 단독 검증한다.
+    braked = MhsDiagnosticRequest(pnl_vol_target_mode="constant_risk")
+    object.__setattr__(braked, "pnl_vol_target_mode", mode)
+    object.__setattr__(braked, "exposure_drawdown_brake", True)
+    assert scaling.is_streaming_scale_mode(braked) is False
+
+
+# SCENARIO_MHS_DD_BRAKE_09_REQUEST_VALIDATION
+def test_scenario_mhs_dd_brake_09_drawdown_brake_request_validation() -> None:
+    with pytest.raises(ValueError, match="constant_risk"):
+        MhsDiagnosticRequest(
+            pnl_vol_target_mode="growth_budget",
+            exposure_drawdown_brake=True,
+        )
+    with pytest.raises(ValueError, match="pnl_vol_target"):
+        MhsDiagnosticRequest(
+            pnl_vol_target=False,
+            pnl_vol_target_mode="constant_risk",
+            exposure_drawdown_brake=True,
+        )
+    MhsDiagnosticRequest(
+        pnl_vol_target=True,
+        pnl_vol_target_mode="constant_risk",
+        exposure_drawdown_brake=True,
+    )
