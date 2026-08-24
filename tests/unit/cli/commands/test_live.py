@@ -24,7 +24,7 @@ def test_shadow_cycle_parses_utc_decision_time() -> None:
         ["shadow-cycle", "--decision-time", "2026-08-24T00:00:00Z"]
     )
     assert args.decision_time == pd.Timestamp("2026-08-24 00:00Z")
-    assert args.artifact.endswith("deployed_target_weights.parquet")
+    assert args.artifact.endswith("deployed_target_weights.parquet.enc")
     assert args.dry_run is False
 
 
@@ -43,7 +43,7 @@ def test_SCENARIO_LIVE_DAEMON_09_cli_daemon_subcommand_registered(
     )
     assert shadow_args.decision_time == pd.Timestamp("2026-08-24 00:00Z")
     daemon_args = parser.parse_args(["daemon"])  # --decision-time 없이 파싱 성공
-    assert daemon_args.artifact.endswith("deployed_target_weights.parquet")
+    assert daemon_args.artifact.endswith("deployed_target_weights.parquet.enc")
     assert daemon_args.state_path.endswith("live_daemon_last_run.json")
 
     calls: list[tuple[Path, Path]] = []

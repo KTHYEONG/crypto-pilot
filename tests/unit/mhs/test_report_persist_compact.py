@@ -254,6 +254,43 @@ class TestTouchLadderNotLeaked:
         # The original report object is untouched (dataclasses.replace copy).
         assert report.books["fast_reversal"].primary is not None
 
+    def test_blend_target_weights_never_reach_compact_json(self, tmp_path) -> None:
+        """SCENARIO_MHS_PERF_P1_03: blend.target_weights/exposure_scale are the
+        research-live seam (I-SIGNAL-FIDELITY) consumed only by
+        emit_deployed_target_weights on the *unstubbed* report; the compact
+        JSON must never carry the raw decision-grid weight matrix.
+        """
+        report, ledger_index = _build_report(with_touch_ladder=False)
+        weights = pd.DataFrame(
+            {"AAAUSDT": [0.01, 0.02, 0.03]},
+            index=pd.date_range("2021-01-01", periods=3, freq="1D", tz="UTC"),
+        )
+        scale = pd.Series([1.0, 0.9, 0.8], index=weights.index)
+        report = dataclasses.replace(
+            report,
+            blend=dataclasses.replace(report.blend, target_weights=weights, exposure_scale=scale),
+        )
+
+        entries = _collect_replay_entries(report)
+        row_counts = {rid: _replay_category_row_counts(r) for rid, r in entries}
+        stubbed = _stubbed_report_for_payload(report, row_counts)
+        assert stubbed.blend.target_weights is None
+        assert stubbed.blend.exposure_scale is None
+        # The original report object is untouched (dataclasses.replace copy):
+        # emit_deployed_target_weights consumes report.blend.target_weights
+        # separately, after persistence, and must still see the real matrix.
+        assert report.blend.target_weights is weights
+
+        target = tmp_path / "report.json"
+        persisted = _persist_mhs_report_compact(report, target)
+        assert persisted is not None
+        raw = persisted.read_text(encoding="utf-8")
+        assert "AAAUSDT" not in raw
+        assert "0.03" not in raw
+        payload = json.loads(raw)
+        assert payload["blend"]["target_weights"] is None
+        assert payload["blend"]["exposure_scale"] is None
+
 
 @pytest.mark.parametrize("with_touch_ladder", [False, True])
 def test_collect_replay_entries_covers_every_replay_field(with_touch_ladder: bool) -> None:
