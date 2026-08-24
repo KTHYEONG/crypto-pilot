@@ -2190,32 +2190,50 @@ def _book_outcome(
     # 단일 Series가 없다). constant_risk는 항상 two-pass다.
     pnl_vol_target_scale: pd.Series | None = None
     try:
-        batch_bounds: list[tuple[
-            Literal[
-                "OHLCV_STRICT_PROXY",
-                "OHLCV_TOUCH_PROXY",
+        # One cost model for EVERY bound in the batch (primary, stress, strict,
+        # and each diagnostic): the bounds must compete on identical taker
+        # crossing costs, never a single bound overridden in isolation.
+        replay_base_spec = (
+            dataclass_replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+            if request.liquidity_cost_model == "corwin_schultz"
+            else ExecutionSpec()
+        )
+        batch_bounds: list[
+            tuple[
+                Literal[
+                    "OHLCV_STRICT_PROXY",
+                    "OHLCV_TOUCH_PROXY",
+                    "OHLCV_IMMEDIATE_TAKER",
+                    "OHLCV_LADDERED_PROXY",
+                    "OHLCV_PEG_CHASE_PROXY",
+                ],
+                ExecutionSpec,
+            ]
+        ] = [
+            ("OHLCV_IMMEDIATE_TAKER", replay_base_spec),
+            (
                 "OHLCV_IMMEDIATE_TAKER",
-                "OHLCV_LADDERED_PROXY",
-                "OHLCV_PEG_CHASE_PROXY",
-            ],
-            ExecutionSpec,
-        ]] = [
-            ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
-            ("OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec()),
-            ("OHLCV_STRICT_PROXY", ExecutionSpec()),
+                dataclass_replace(
+                    _stress_cost_execution_spec(),
+                    liquidity_cost_model=replay_base_spec.liquidity_cost_model,
+                ),
+            ),
+            ("OHLCV_STRICT_PROXY", replay_base_spec),
         ]
         # Explicit result indices for the optional diagnostic bounds: a negative
         # index silently misbinds once another bound is appended.
         optional_bound_indices: dict[str, int] = {}
         if request.touch_diagnostic:
-            batch_bounds.append(("OHLCV_TOUCH_PROXY", ExecutionSpec()))
+            batch_bounds.append(("OHLCV_TOUCH_PROXY", replay_base_spec))
             optional_bound_indices["touch"] = len(batch_bounds) - 1
         if request.ladder_diagnostic:
             _validate_ladder_schedule_contract()
-            batch_bounds.append(("OHLCV_LADDERED_PROXY", ExecutionSpec()))
+            batch_bounds.append(("OHLCV_LADDERED_PROXY", replay_base_spec))
             optional_bound_indices["ladder"] = len(batch_bounds) - 1
         if request.peg_chase_diagnostic:
-            batch_bounds.append(("OHLCV_PEG_CHASE_PROXY", dataclass_replace(ExecutionSpec(), decision_anchor="submit_bar")))
+            batch_bounds.append(
+                ("OHLCV_PEG_CHASE_PROXY", dataclass_replace(replay_base_spec, decision_anchor="submit_bar"))
+            )
             optional_bound_indices["peg_chase"] = len(batch_bounds) - 1
         isolated_indices = frozenset(
             i for i, (bound, _spec) in enumerate(batch_bounds)
