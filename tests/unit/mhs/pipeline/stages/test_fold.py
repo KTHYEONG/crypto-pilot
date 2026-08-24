@@ -15,12 +15,20 @@ import pandas as pd
 import pytest
 
 import src.mhs.pipeline.stages.fold as fold_stage
+from src.application.research.mhs.evaluation import DataIntegrityError
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
 _GRID = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
 _SYMS = ["AAAUSDT", "BBBUSDT"]
+
+
+class _ExposureFoldStub:
+    def __init__(self, vs: pd.Timestamp, ve: pd.Timestamp) -> None:
+        self.train_end = vs
+        self.validation_start = vs
+        self.validation_end = ve
 
 
 class _RecordingRecorder:
@@ -133,6 +141,9 @@ def test_run_folds_resolves_boundary_growth_budget_vols(monkeypatch: pytest.Monk
     # growth_budget mode with a pre-vol-target reference ledger, run_folds
     # builds the boundary map from the top-level reference and forwards only
     # the fold-indexed float mapping to the fold pool.
+    # SCENARIO_MHS_GROWTH_BUDGET_STILL_BYTE_IDENTICAL: this pre-existing test
+    # must keep passing unmodified after the constant_risk blend-slice change
+    # -- the new fold_blend_exposure_scale forwarding is keyword-only trailing.
     captured: dict[str, object] = {}
 
     def _fake_by_boundary(_ref, _envelope, train_ends):
@@ -190,40 +201,33 @@ def test_run_folds_resolves_boundary_growth_budget_vols(monkeypatch: pytest.Monk
     assert captured["forwarded"] == {0: 0.30}
     assert ctx._fold_growth_budget_target_vol == {0: 0.30}
 
-def test_run_folds_broadcasts_top_level_constant_risk_vol(monkeypatch: pytest.MonkeyPatch) -> None:
-    # SCENARIO_MHS_CONSTANT_RISK_FOLD_BROADCASTS_TOP_LEVEL_VOL (stage wiring): under
-    # constant_risk mode with >=2 fold stubs, run_folds resolves the target vol
-    # once at the top-level boundary and broadcasts that single float to every
-    # fold index -- the per-fold boundary resolver must never be invoked.
+def test_run_folds_slices_blend_exposure_scale_for_constant_risk(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SCENARIO_MHS_FOLD_SLICES_BLEND_EXPOSURE_SCALE: under constant_risk the
+    # stage no longer resolves or broadcasts any target vol -- it slices the
+    # blend book's already-deployed exposure_scale series onto each fold's
+    # [validation_start, validation_end] window and forwards that mapping
+    # verbatim to the fold pool (I-SCALE-IS-DEPLOYED-OVERLAY).
     captured: dict[str, object] = {}
 
-    def _fake_top_level_vol(_ref: object, _envelope: object) -> float:
-        return 0.4123
-
-    def _must_not_resolve_by_boundary(*_a: object, **_k: object) -> float:
-        raise AssertionError("constant_risk folds must broadcast the top-level vol, not re-solve per boundary")
+    def _must_not_resolve(*_a: object, **_k: object) -> float:
+        raise AssertionError("constant_risk folds must reuse the blend exposure scale, not re-solve any target vol")
 
     def _fake_run_post_book_concurrently(*args: object, **kwargs: object):
-        # 위치 인자 순서: ..., fold_committee_weights, fold_growth_budget_target_vol,
-        # exposure_warmup_returns (I-WARM 워밍업 Series가 마지막).
-        captured["forwarded"] = kwargs.get("fold_growth_budget_target_vol", args[-2])
+        captured["forwarded"] = kwargs.get("fold_blend_exposure_scale")
         return (None, None, {}, {}, [], None)
 
-    class _FoldStub:
-        def __init__(self, train_end: pd.Timestamp) -> None:
-            self.train_end = train_end
+    folds = (
+        _ExposureFoldStub(pd.Timestamp("2021-06-01", tz="UTC"), pd.Timestamp("2021-12-31", tz="UTC")),
+        _ExposureFoldStub(pd.Timestamp("2022-01-01", tz="UTC"), pd.Timestamp("2023-06-30", tz="UTC")),
+    )
+    idx = pd.date_range("2021-01-01", "2025-12-31", freq="D", tz="UTC")
+    exposure = pd.Series(idx.dayofyear.astype(float), index=idx)
 
-    monkeypatch.setattr(fold_stage._scaling, "_constant_risk_target_vol", _fake_top_level_vol)
+    monkeypatch.setattr(fold_stage._scaling, "_constant_risk_target_vol", _must_not_resolve)
     monkeypatch.setattr(
-        fold_stage._scaling, "_constant_risk_target_vol_by_boundary", _must_not_resolve_by_boundary,
+        fold_stage._scaling, "_constant_risk_target_vol_by_boundary", _must_not_resolve,
     )
-    monkeypatch.setattr(
-        fold_stage, "phase_1_anchored_purged_folds",
-        lambda: (
-            _FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),
-            _FoldStub(pd.Timestamp("2023-06-01", tz="UTC")),
-        ),
-    )
+    monkeypatch.setattr(fold_stage, "phase_1_anchored_purged_folds", lambda: folds)
     monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently)
     monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
     monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
@@ -250,14 +254,51 @@ def test_run_folds_broadcasts_top_level_constant_risk_vol(monkeypatch: pytest.Mo
                     "equity": pd.Series([1.0, 1.1, 1.2], index=_GRID),
                 })()},
             ),
+            "exposure_scale": exposure,
             "primary_max_drawdown": -0.1,
             "primary": None,
         },
     )()
     fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
 
-    assert ctx._fold_growth_budget_target_vol == {0: 0.4123, 1: 0.4123}
-    assert captured["forwarded"] == {0: 0.4123, 1: 0.4123}
+    assert ctx._fold_growth_budget_target_vol is None
+    assert set(ctx._fold_blend_exposure_scale) == {0, 1}
+    for i, fold in enumerate(folds):
+        mask = (exposure.index >= fold.validation_start) & (exposure.index <= fold.validation_end)
+        pd.testing.assert_series_equal(ctx._fold_blend_exposure_scale[i], exposure.loc[mask])
+    assert captured["forwarded"] is ctx._fold_blend_exposure_scale
+
+
+def test_run_folds_constant_risk_requires_blend_exposure_scale(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SCENARIO_MHS_FOLD_MISSING_BLEND_SCALE_FAILS_CLOSED: a missing blend
+    # exposure_scale under constant_risk raises DataIntegrityError -- never a
+    # silent empty-dict fallback that would let the run proceed unscaled.
+    def _must_not_run(*_a: object, **_k: object):
+        raise AssertionError("the fold pool must never start without the blend exposure scale")
+
+    monkeypatch.setattr(
+        fold_stage, "phase_1_anchored_purged_folds",
+        lambda: (_ExposureFoldStub(pd.Timestamp("2021-06-01", tz="UTC"), pd.Timestamp("2021-12-31", tz="UTC")),),
+    )
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _must_not_run)
+
+    ctx = _bare_context(committee_book=False)
+    ctx.config = dataclasses.replace(ctx.config, pnl_vol_target_mode="constant_risk")
+    ctx.blend_report = type(
+        "_BlendStub", (),
+        {
+            "pre_vol_target_reference": type(
+                "_RefStub", (), {"ledger": type("_LedgerStub", (), {
+                    "equity": pd.Series([1.0, 1.1, 1.2], index=_GRID),
+                })()},
+            ),
+            "exposure_scale": None,
+            "primary_max_drawdown": -0.1,
+            "primary": None,
+        },
+    )()
+    with pytest.raises(DataIntegrityError, match="exposure_scale"):
+        fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
 
 
 def test_run_folds_skips_boundary_vols_outside_growth_budget(monkeypatch: pytest.MonkeyPatch) -> None:
