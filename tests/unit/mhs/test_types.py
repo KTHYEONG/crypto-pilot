@@ -38,3 +38,23 @@ def test_SCENARIO_MHS_PEG_CHASE_06_SPEC_DEFAULTS_ARE_BIT_IDENTICAL() -> None:
         ExecutionSpec(peg_passive_fraction=1.5)
     with pytest.raises(ValueError, match="peg_chase_band_bps"):
         ExecutionSpec(peg_chase_band_bps=0.0)
+
+
+def test_SCENARIO_MHS_FAIR_07_SPEC_DEFAULTS_ARE_BIT_IDENTICAL() -> None:
+    """SCENARIO_MHS_FAIR_07_SPEC_DEFAULTS_ARE_BIT_IDENTICAL: the liquidity-aware
+    cost fields freeze the pre-change behaviour -- 'flat' reproduces the fixed
+    slippage path bit-identically, and invalid domains fail closed."""
+    assert ExecutionSpec() == ExecutionSpec(
+        liquidity_cost_model="flat",
+        spread_ewma_alpha=0.25,
+        min_notional_probe_usdt=0.0,
+        reference_equity_usdt=2000.0,
+    )
+    with pytest.raises(ValueError, match="spread_ewma_alpha"):
+        ExecutionSpec(spread_ewma_alpha=0.0)
+    with pytest.raises(ValueError, match="spread_ewma_alpha"):
+        ExecutionSpec(spread_ewma_alpha=1.5)
+    with pytest.raises(ValueError, match="min_notional_probe_usdt"):
+        ExecutionSpec(min_notional_probe_usdt=-1.0)
+    with pytest.raises(ValueError, match="reference_equity_usdt"):
+        ExecutionSpec(reference_equity_usdt=0.0)

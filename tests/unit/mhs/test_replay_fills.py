@@ -7,7 +7,9 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.mhs.execution import (
+    SPREAD_ESTIMATE_CEILING_BPS,
     ExecutionSpec,
+    corwin_schultz_half_spread_bps,
     laddered_fill_schedule,
     notional_weighted_shortfall_bps,
     passive_fill_shortfall_bps,
@@ -173,13 +175,67 @@ class TestPegChaseFillSchedule:
         assert sched == (6, 100.05, ExecutionSpec().taker_fee_bps + ExecutionSpec().taker_slippage_bps, "backstop_taker")
         assert sched[2] == 8.0
 
-    def test_SCENARIO_MHS_PEG_CHASE_03_RESIDUAL_WHEN_PRICE_LEAVES_BAND(self) -> None:
-        """SCENARIO_MHS_PEG_CHASE_03_RESIDUAL_WHEN_PRICE_LEAVES_BAND:
-        Every adverse value and close beyond anchor*(1+10bps) -> None; the
-        full replay leaves units unchanged and books exactly one residual."""
+    def test_SCENARIO_MHS_FAIR_01_BACKSTOP_ALWAYS_COMPLETES(self) -> None:
+        """SCENARIO_MHS_FAIR_01_BACKSTOP_ALWAYS_COMPLETES: the taker backstop
+        crosses unconditionally -- every adverse value and close sits far
+        outside the 10bps band that previously vetoed the backstop, yet the
+        schedule now fills at the first post-passive bar's close."""
         adverse = np.full(10, 100.20)
         closes = np.full(10, 100.20)
-        assert peg_chase_fill_schedule(100.0, 1, adverse, closes, ExecutionSpec()) is None
+        sched = peg_chase_fill_schedule(100.0, 1, adverse, closes, ExecutionSpec())
+        assert sched is not None
+        assert sched == (6, 100.20, ExecutionSpec().taker_fee_bps + ExecutionSpec().taker_slippage_bps, "backstop_taker")
+
+    def test_SCENARIO_MHS_FAIR_02_RESIDUAL_ONLY_ON_DATA_GAP(self) -> None:
+        """SCENARIO_MHS_FAIR_02_RESIDUAL_ONLY_ON_DATA_GAP: over 500 randomised
+        finite-close windows the schedule never returns None; an all-NaN close
+        window is the only residual (data gap)."""
+        rng = np.random.default_rng(20260824)
+        for _ in range(500):
+            n = int(rng.integers(1, 21))
+            drift = float(rng.uniform(-0.02, 0.02))
+            path = 100.0 * np.exp(np.cumsum(rng.normal(drift / n, 0.004, n)))
+            adverse = path * float(rng.uniform(1.0005, 1.005))
+            for side in (-1, 1):
+                assert peg_chase_fill_schedule(
+                    100.0, side, adverse, path, ExecutionSpec(),
+                ) is not None, (n, drift, side)
+        all_nan = np.full(6, np.nan)
+        assert peg_chase_fill_schedule(
+            100.0, 1, np.full(6, 100.2), all_nan, ExecutionSpec(),
+        ) is None
+
+    def test_SCENARIO_MHS_FAIR_03_CORWIN_SCHULTZ_BOUNDED_AND_ORDERED(self) -> None:
+        """SCENARIO_MHS_FAIR_03_CORWIN_SCHULTZ_BOUNDED_AND_ORDERED: zero-range
+        bars price 0.0, wider bands price strictly higher inside the hard
+        ceiling, a 2-valid-bar column is nan, and malformed inputs fail closed."""
+        n = 12
+        lows = np.full((n, 3), 100.0)
+        highs = np.full((n, 3), 100.0)
+        highs[:, 1] = 100.0 * (1.0 + 10.0 / 1e4)
+        highs[:, 2] = 100.0 * (1.0 + 100.0 / 1e4)
+        out = corwin_schultz_half_spread_bps(highs, lows)
+        assert out.shape == (3,)
+        assert out[0] == 0.0
+        assert np.isfinite(out).all()
+        assert 0.0 < out[1] < out[2] <= SPREAD_ESTIMATE_CEILING_BPS
+        two_bars = np.array([[100.0, 101.0], [100.0, 101.0]])
+        assert np.isnan(corwin_schultz_half_spread_bps(two_bars, two_bars * 0.999)[0])
+        with pytest.raises(ValueError, match="shape"):
+            corwin_schultz_half_spread_bps(highs, lows[:, :2])
+        with pytest.raises(ValueError, match="rows"):
+            corwin_schultz_half_spread_bps(np.array([[1.0]]), np.array([[1.0]]))
+
+    def test_SCENARIO_MHS_PEG_CHASE_03_PRICE_LEAVING_BAND_STILL_FILLS(self) -> None:
+        """SCENARIO_MHS_FAIR supersedes the pre-fix residual expectation: a
+        price leaving the band no longer strands the intent -- the backstop
+        completes it at the first post-passive finite close, so the full replay
+        books one fallback fill and zero residuals."""
+        adverse = np.full(10, 100.20)
+        closes = np.full(10, 100.20)
+        sched = peg_chase_fill_schedule(100.0, 1, adverse, closes, ExecutionSpec())
+        assert sched is not None
+        assert sched[3] == "backstop_taker"
 
         grid = pd.date_range("2021-01-01 12:00", periods=40, freq="5min", tz="UTC")
         px = pd.DataFrame({"A": [100.20] * len(grid)}, index=grid)
@@ -196,11 +252,14 @@ class TestPegChaseFillSchedule:
             _partition_windows(grid, target, signal_at, highs, lows, px, marks, funding, ExecutionSpec(), n_windows=1),
             1.0, "OHLCV_PEG_CHASE_PROXY", ExecutionSpec(), retain_event_snapshots=True,
         )
-        assert report.simulated_fills.empty
-        assert report.simulated_units.empty
+        assert not report.simulated_fills.empty
+        assert len(report.simulated_fills) == 1
+        assert report.simulated_fills["reason"].iloc[0] == "timeout_taker"
+        assert report.simulated_fills["fee_bps"].iloc[0] == (
+            ExecutionSpec().taker_fee_bps + ExecutionSpec().taker_slippage_bps
+        )
         assert report.fill_count + report.fallback_count + report.residual_count == 1
-        assert report.residual_count == 1
-        assert report.residual_notional == pytest.approx(abs(0.01 * 1.0 / 100.0) * 100.0)
+        assert report.residual_count == 0
 
     def test_SCENARIO_MHS_PEG_CHASE_04_FAVOURABLE_SIDE_IS_NEVER_CLAMPED(self) -> None:
         """SCENARIO_MHS_PEG_CHASE_04_FAVOURABLE_SIDE_IS_NEVER_CLAMPED:
@@ -244,8 +303,9 @@ class TestPegChaseFillSchedule:
             peg_chase_fill_schedule(100.0, 1, np.array([np.nan]), np.array([100.0]), spec)
         with pytest.raises(ValueError, match="finite"):
             peg_chase_fill_schedule(100.0, 1, np.array([np.inf]), np.array([100.0]), spec)
-        with pytest.raises(ValueError, match="finite"):
-            peg_chase_fill_schedule(100.0, 1, np.array([99.0]), np.array([np.nan]), spec)
+        # A window with no finite close is a data gap: None, never a raise.
+        assert peg_chase_fill_schedule(100.0, 1, np.array([99.0]), np.array([np.nan]), spec) is None
+        assert peg_chase_fill_schedule(100.0, -1, np.array([101.0]), np.array([np.inf]), spec) is None
 
     def test_fails_closed_when_closes_shorter_than_adverse(self) -> None:
         with pytest.raises(ValueError, match="closes must be at least as long as adverse"):
