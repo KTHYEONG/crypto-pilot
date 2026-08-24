@@ -1,6 +1,36 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE_REAL_EXECUTION",
+      "date": "2026-08-24",
+      "adr_id": "ADR_20260824_MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE_REAL_EXECUTION",
+      "domain": "risk",
+      "title": "MHS Research-GO 최종 달성: exposure_scale blend 슬라이스 재사용으로 FOLD_BLEND_PATH_DIVERGENCE 완전 해소",
+      "why": "ADR_20260824_MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE 구현 직후 실제 CLI(--pnl-vol-target-mode constant_risk --execution-timeframe 3m)로 2021-2025 전체 원장을 재실행해 fold-local EWMA 재적합 제거가 실제로 게이트를 통과시키는지, blend 자체 성과가 비트동일한지 검증.",
+      "resolution": "실측: research_go.eligible=True, reason_codes=[](완전 해소). fold_blend_parity.max_abs_log_deployed_gross_ratio가 0.306545(직전)에서 0.039233으로 붕괴 -- 정확히 max_abs_log_gross_ratio(원시 북 비중 괴리, 0.039233)와 동일값으로 수렴함. 이는 스케일 축 괴리가 완전히 0이 되어 fold/blend deployed_gross 차이가 순수 신호 구성 차이(±0.04, 애초에 tolerance 0.25에 여유있게 통과하던 수준)로만 남았다는 예측이 정확히 실측 확인된 것. blend.primary_geometric_cagr=1.761383, primary_max_drawdown=-0.402129로 직전 실행(committee 가중치 단일화 이후)과 완전 비트동일 -- blend/top-level 경로가 이번 변경으로 전혀 영향받지 않았음을 재확인. deployment_readiness.research_go_eligible=True, calmar=4.38.",
+      "impact": "MHS Phase 1 Research-GO 통과 -- Phase 2(Execution GO, L1/L2 오더북 실시간 체결 검증)로 진행 가능한 상태가 됨. 3차례 시도(target_vol 단일화 무효과 -> committee 가중치 단일화 부분개선 -> exposure_scale 자체를 fold-local 재계산에서 blend 슬라이스 재사용으로 전환해 완전해소)를 통해 얻은 아키텍처 교훈: MHS Phase 1 설계가 의도적으로 배제한 사이징/리스크 오버레이 계층(Kelly, 동적 레버리지 등)과 마찬가지로, constant_risk exposure_scale도 fold별 독립 재적합 대상이 아니라 blend가 배치 확정한 단일 값으로 취급해야 한다는 I-SCALE-IS-DEPLOYED-OVERLAY 원칙이 실측으로 검증됨. fold의 target_weights(raw alpha) 독립 재시뮬레이션은 그대로 유지되어 walk-forward 알파 강건성 검증력은 보존됨."
+    },
+    {
+      "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE",
+      "date": "2026-08-24",
+      "adr_id": "ADR_20260824_MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE",
+      "domain": "risk",
+      "title": "MHS constant_risk fold가 exposure_scale을 독립 재계산하지 않고 blend의 배치 확정 스케일을 날짜 슬라이스로 재사용",
+      "why": "target_vol 단일화(무효과 실측 확인)와 committee 증거가중치 단일화(0.3166->0.3065, 부분개선이나 tolerance 0.25 미달) 두 시도 모두 파라미터 값을 통일했으나, scratch 계측(blend/fold 일별 참조수익률·target_weights 직접 대조)으로 확인한 진짜 근본원인은 파라미터가 아니라 exposure_scale이라는 시계열 자체를 fold가 별도 프로세스에서 독립 재계산(fold-local EWMA)하는 구조 그 자체였음(target_weights는 98.8% 상관으로 신호는 동일한데 실행된 원장 수익률 표준편차 비율이 1.50배로 벌어짐, target_vol 통일해도 불변).",
+      "resolution": "MHS Phase 1 설계 철학(docs/architecture/mhs-explain.md: Kelly/동적 레버리지/사이징 로직 의도적 배제 -- 1.0x Gross 순수 알파 검증)에 근거해 exposure_scale을 '검증 대상 알파'가 아닌 'blend가 배치 확정한 리스크 오버레이'로 재정의(I-SCALE-IS-DEPLOYED-OVERLAY). MhsBookReport에 exposure_scale: pd.Series 필드 신설(blend 전용, 두-패스 경로에서만 채움). fold.py::run_folds의 constant_risk 분기를 target_vol 브로드캐스트(무효과 확인된 이전 fix) 대신 ctx.blend_report.exposure_scale을 fold별 [validation_start, validation_end]로 슬라이스하는 로직으로 교체(누락 시 DataIntegrityError fail-closed). _run_anchored_fold에 blend_exposure_scale 매개변수 추가, constant_risk일 때 _scaling._replay_exposure_scale 재계산을 완전히 건너뛰고 슬라이스된 값을 reindex+NaN 검증 후 그대로 사용. fold의 target_weights(신호/북 구성) 독립 재시뮬레이션은 그대로 유지 -- walk-forward 알파 강건성 검증은 보존됨. median_relative/exante_target/growth_budget 3개 모드 완전 무변경. 신규 회귀 테스트 3건(blend exposure_scale 노출, fold 슬라이스 정확성, 누락시 fail-closed) 추가, 기존 test_run_folds_broadcasts_top_level_constant_risk_vol은 무효화된 target_vol 브로드캐스트 테스트라 신규 테스트로 교체.",
+      "impact": "유닛테스트 전체(tests/unit/mhs/, tests/unit/application/research/mhs/) green, ruff/mypy clean. 실전 CLI 재실행(2021-2025/3m)으로 research_go.reason_codes에서 FOLD_BLEND_PATH_DIVERGENCE 해소 여부와 blend 성과 비트동일 여부 확인은 /sync 직후 진행 예정(결과는 후속 REAL_EXECUTION 항목에 기록)."
+    },
+    {
+      "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_COMMITTEE_WEIGHT_SINGLE_SOURCE",
+      "date": "2026-08-23",
+      "adr_id": "ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_COMMITTEE_WEIGHT_SINGLE_SOURCE",
+      "domain": "risk",
+      "title": "MHS committee 증거가중치 단일화로 FOLD_BLEND_PATH_DIVERGENCE 실측 부분 개선(0.3166->0.3065), 완전 해소는 미달성",
+      "why": "target_vol 단일화가 실측으로 무효과임이 확인된 후(ADR_..._REAL_EXECUTION), persisted book_structure 직접 대조(scratch 계측: blend/fold 일별 참조수익률·target_weights CSV 덤프)로 실제 발산 축을 추적. fold_scale이 4개 fold 전부에서 blend_scale보다 1.25~1.38배 높음(target_vol 동일한데도)을 확인 -> 분모(EWMA sigma_hat) 자체가 아니라 그 위 단의 신호 구성이 원인일 가능성을 조사.",
+      "resolution": "committee.py::build_committee가 _committee_evidence_weights_by_boundary로 committee 멤버 증거가중치를 fold marginal train_end 경계별로 재해석(target_vol과 동일한 패턴)하고 있음을 발견 -- 실측: top_level {flow_imb_168h:0.389, mom3_skew_168h:0.346} vs fold_0 {flow_imb_168h:0.442, mom3_skew_168h:0.290}로 지배적 멤버 비중이 최대 5.3%p 이동. blend는 top_level 경계 하나만 써서 전체 2021-2025에 고정 적용하는데 fold는 각자의 경계로 별도 재해석 -> 서로 다른 신호 블렌드를 검증하고 있었음. target_vol과 동일 원리(I-SINGLE-CONFIGURATION)로 committee.py의 ctx._fold_committee_weights를 fold별 경계값 대신 top_level 값 단일 broadcast로 교체(dict.fromkeys). tests/unit/mhs/pipeline/stages/test_committee.py에 SCENARIO_MHS_COMMITTEE_FOLD_BROADCASTS_TOP_LEVEL_WEIGHTS 회귀 테스트 추가.",
+      "impact": "실전 CLI 재실행(2021-2025/3m, committee_target_vol 고정 fix와 결합)으로 실측: max_abs_log_deployed_gross_ratio 0.316573->0.306545(fold별: fold1 0.307->0.307 거의 불변, fold2 0.317->0.306, fold3 0.269->0.265, fold0은 0.242->0.251로 근소 악화). 방향은 가설과 일치(committee 가중치 단일화가 발산을 줄임)하나 tolerance 0.25에는 여전히 미달 -- research_go.reason_codes=[FOLD_BLEND_PATH_DIVERGENCE] 그대로 잔존. blend 성과는 target_vol fix 이후와 완전히 동일(primary_geometric_cagr=1.761383, max_drawdown=-0.402129, 비트동일) -- 배치 경로 무변경 재확인. 잔여 원인: _apply_rebalance_deadband의 재귀적/경로의존적 상태(carry-forward held 값)가 fold의 독립 재시뮬레이션(별도 프로세스, 별도 패널 로드)에서 blend의 연속 경로와 미세하게 다른 트리거 타이밍으로 갈라지며 증폭되는 것으로 추정 -- 다음 단계는 fold가 신호/스케일을 독립 재계산하지 않고 blend의 이미 계산된 연속 경로(target_weights·exposure_scale)를 날짜로 슬라이스해 재사용하는 근본적 재설계(task_index.json이 원래 지목한 두 번째 대안)이며, 이는 fold의 통계적 검증 의미(독립 재시뮬레이션 vs 단일 경로의 날짜 분할)를 바꾸는 방법론적 결정이라 사용자 확인 필요."
+    },
+    {
       "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL_REAL_EXECUTION",
       "date": "2026-08-23",
       "adr_id": "ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL_REAL_EXECUTION",
@@ -969,36 +999,6 @@
       "why": "The 2021-2025 cache-required 5-minute MHS run peaked at 13.10 GiB and reported ambiguous slow_momentum strict-primary MISSING_DATA; the replay also retained a five-year 252-symbol execution union despite a 30-symbol PIT roster.",
       "resolution": "Added terminal execution-window censoring, structured symbol/time gap provenance, 31-day PIT-active window loading, stateful windowed replay and streamed ledger accumulation, RSS/window telemetry, and deterministic single-panel equivalence coverage. The full 2021-2025 run now executes the optimized path but still fails closed at slow_momentum strict-primary MISSING_DATA; no mark fallback or GO relaxation was introduced.",
       "impact": "Benchmark equivalence passes with matching fills/ledger checksums and lower windowed fixture runtime. Full-period production execution remains Research-GO ineligible until the residual slow-band mark/source gap is identified and repaired; the failed run did not persist a new report or peak RSS measurement."
-    },
-    {
-      "task_id": "TASK_MHS_RUNTIME_RESOURCE_OPTIMIZATION",
-      "date": "2026-08-08",
-      "adr_id": "ADR_20260808_MHS_RUNTIME_RESOURCE_OPTIMIZATION",
-      "domain": "execution",
-      "title": "MHS runtime and memory optimization",
-      "why": "The full 2021-2025 MHS cache-required diagnostic used excessive memory and required measured runtime optimization.",
-      "resolution": "Implemented streamed inventory-ledger arithmetic, NumPy active-column replay state, lazy quote-volume loading, stage RSS telemetry, and deterministic resource benchmark coverage. Full 2021-2025 execution measured 304.09 seconds and 13,737,124 KiB peak RSS, then failed closed on slow_momentum strict-primary MISSING_DATA.",
-      "impact": "Replay correctness and Research-GO fail-closed semantics remain covered by tests; benchmark infrastructure now reports resource usage. The full-period run still cannot produce a GO decision until the slow_momentum missing-data gate is resolved."
-    },
-    {
-      "task_id": "TASK_MHS_MARK_CACHE_BACKFILL",
-      "date": "2026-08-08",
-      "adr_id": "ADR_20260808_MHS_MARK_CACHE_BACKFILL",
-      "domain": "execution",
-      "title": "MHS mark-price gap backfill and full-period validation",
-      "why": "The cache-required 2021-2025 MHS replay was blocked by internal mark-price gaps in 102 of 255 execution symbols; the user requested root-cause analysis and feasible backfill.",
-      "resolution": "Historical REST and Binance Vision backfill repaired 99 symbols, reducing the execution universe to 252 internally continuous symbols. Three residual source gaps remain in AERGOUSDT, LITUSDT, and PUMPUSDT because neither source provides those intervals. The post-backfill full replay passed the initial mark-gap blocker but failed closed at the strict fast-reversal pre-trade-equity invariant; no OHLCV mark fallback was introduced.",
-      "impact": "No MHS Research GO or strategy promotion. Residual source gaps remain fail-closed; follow-up work must diagnose the strict inventory capital breach. Temporary spec and scratch artifacts are cleaned per sync policy."
-    },
-    {
-      "task_id": "TASK_MHS_RESEARCH_GO_EVALUATION",
-      "date": "2026-08-07",
-      "adr_id": "ADR_20260807_MHS_RESEARCH_GO_EVALUATION",
-      "domain": "risk",
-      "title": "MHS Research GO full-period evaluation",
-      "why": "Run the frozen MHS Phase-1 Research GO protocol on the complete dev 2021-2025 period after 5m execution and historical mark-cache wiring.",
-      "resolution": "Executed the 5m cache-required full-period replay. The strict simulated-inventory ledger failed closed when pre-trade equity became non-positive, so the preregistered two-band portfolio is rejected for Research GO; preserve the limited-window wiring validation as technical evidence.",
-      "impact": "No Research GO, Execution GO, Pilot GO, or Scale GO promotion. The implementation and data path remain available for diagnosis, but the current strategy cannot proceed to sizing or deployment."
     }
   ]
 }
