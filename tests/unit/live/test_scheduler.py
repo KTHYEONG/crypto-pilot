@@ -191,6 +191,49 @@ def test_SCENARIO_LIVE_DAEMON_07_catchup_no_extra_wait(
     assert cycle_calls == [DECISION_TIME]
 
 
+def test_SCENARIO_LIVE_21_stale_signals_are_skipped_not_executed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D8: N일 정지 후 복귀 시 과거 신호로 사이클을 돌지 않고 당일까지 따라잡는다."""
+    artifact_path = tmp_path / "deployed_target_weights.parquet"
+    state_path = tmp_path / "state" / "live_daemon_last_run.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_start = DECISION_TIME - pd.Timedelta(days=5)
+    state_path.write_text(
+        json.dumps({"last_processed_decision_time": stale_start.isoformat()}),
+        encoding="utf-8",
+    )
+
+    cycle_calls: list[pd.Timestamp] = []
+
+    def fake_cycle(
+        settings: LiveSettings,
+        decision_time: pd.Timestamp,
+        artifact: Path,
+        *,
+        now: pd.Timestamp,
+    ) -> CycleReport:
+        cycle_calls.append(decision_time)
+        return _report(decision_time)
+
+    monkeypatch.setattr(scheduler_mod, "run_shadow_cycle", fake_cycle)
+    monkeypatch.setattr(scheduler_mod, "prune_old_audit_logs", lambda *_a: 0)
+
+    # now 는 당일 decision_time+2h: D-4..D-1 은 스테일 스킵, D 만 실행 대상이다.
+    run_daemon(
+        LiveSettings(max_signal_staleness_hours=6.0),
+        artifact_path,
+        state_path,
+        sleep_fn=lambda seconds: pytest.fail("catch-up must not wait for stale days"),
+        now_fn=lambda: DECISION_TIME + pd.Timedelta(hours=2),
+        max_iterations=5,
+    )
+
+    assert cycle_calls == [DECISION_TIME]  # 정확히 1회, 과거 신호 실행 없음
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert pd.Timestamp(saved["last_processed_decision_time"]) == DECISION_TIME
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_01_NEXT_DECISION_TIME_SEQUENTIAL",
@@ -198,4 +241,5 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_05_IDEMPOTENT_SKIP_ON_RESTART",
     "SCENARIO_LIVE_DAEMON_06_CRASH_DOES_NOT_KILL_LOOP",
     "SCENARIO_LIVE_DAEMON_07_CATCHUP_NO_EXTRA_WAIT",
+    "SCENARIO_LIVE_21",  # STALE_SIGNALS_ARE_SKIPPED_NOT_EXECUTED
 )
