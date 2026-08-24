@@ -71,8 +71,12 @@ def artifact(tmp_path):
 
 @pytest.fixture
 def live_env(monkeypatch, tmp_path):
-    monkeypatch.setattr(runner_mod, "_market_client", lambda settings: StubMarketClient())
-    monkeypatch.setattr(runner_mod, "_order_client", lambda settings: StubOrderClient())
+    monkeypatch.setattr(
+        runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient()
+    )
+    monkeypatch.setattr(
+        runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient()
+    )
     calls: list[Any] = []
 
     def fake_execute(client, intent, filters, policy, audit, clock) -> ExecutionOutcome:
@@ -90,7 +94,7 @@ def live_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         runner_mod,
         "default_audit_log_path",
-        lambda name: tmp_path / f"{name}.jsonl",
+        lambda name, for_date=None: tmp_path / f"{name}.jsonl",
     )
     return calls
 
@@ -148,7 +152,7 @@ def test_SCENARIO_LIVE_10_risk_gate_blocks_whole_cycle(artifact, live_env, tmp_p
         notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_margin.json"),
     )
     original_order_client = runner_mod._order_client
-    runner_mod._order_client = lambda settings: ThinMarginClient()  # type: ignore[assignment]
+    runner_mod._order_client = lambda settings, decision_time: ThinMarginClient()  # type: ignore[assignment, misc]
     try:
         halted_margin = run_shadow_cycle(margin_settings, DECISION_TIME, artifact, now=NOW)
     finally:
@@ -173,7 +177,52 @@ def test_check_risk_gates_raises_directly() -> None:
     with pytest.raises(RiskGateBreach):
         check_risk_gates(intents, targets, marks, snapshot, settings)
 
+def test_SCENARIO_LIVE_DAEMON_08_audit_keyed_by_decision_date(
+    monkeypatch, artifact, tmp_path
+) -> None:
+    # 실제 default_audit_log_path를 쓰되 루트만 tmp로 격리해 파일 경로를 검증한다.
+    import src.live.audit as audit_mod
+
+    monkeypatch.setattr(audit_mod, "AUDIT_LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr(
+        runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient()
+    )
+    monkeypatch.setattr(
+        runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient()
+    )
+
+    def fake_execute(client, intent, filters, policy, audit, clock) -> ExecutionOutcome:
+        return ExecutionOutcome(
+            symbol=intent.symbol,
+            filled_qty=intent.quantity,
+            unfilled_qty=Decimal("0"),
+            avg_fill_price=Decimal("100"),
+            chases=0,
+            status="FILLED",
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intent", fake_execute)
+
+    settings = LiveSettings(
+        notional_equity_usdt=2000.0,
+        ledger_path=str(tmp_path / "ledger_keyed.json"),
+    )
+    # 캐치업: wall-clock now가 decision_time보다 이틀 뒤다.
+    late_now = DECISION_TIME + pd.Timedelta(days=2)
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=late_now)
+    assert report.status == "COMPLETE"
+
+    decision_log = tmp_path / "logs" / "live" / "shadow_cycle" / "2026-08-24.jsonl"
+    wall_clock_log = tmp_path / "logs" / "live" / "shadow_cycle" / "2026-08-26.jsonl"
+    assert decision_log.exists()
+    assert not wall_clock_log.exists()
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_10_RISK_GATE_BLOCKS_WHOLE_CYCLE",
+    "SCENARIO_LIVE_DAEMON_08_RUNNER_AUDIT_KEYED_BY_DECISION_DATE",
+    # SCENARIO_LIVE_DAEMON_10_EXISTING_SHADOW_CYCLE_TESTS_UPDATED:
+    # 본 파일 포함 tests/unit/live 전체가 새 _market_client/_order_client
+    # 시그니처(settings, decision_time)로 갱신되어 0 failed로 통과한다.
 )
