@@ -297,6 +297,12 @@ CONSTANT_RISK_CAP_BINDING_QUANTILE: float = 0.10
 # fold3의 잔여 초과 Sharpe가 share=0.518로 남음 -- 0.40으로 하향.
 CONSTANT_RISK_TARGET_ANNUAL_VOL: float = 0.40
 
+# 인과적 자기자본 드로다운 브레이크: brake = clip(1 + k * underwater, floor, 1).
+# k=2.0은 실측 플래토(k=2~6에서 CAGR 3.1~3.3, MDD 정규화)의 무릎이며 cap 비바인딩.
+EXPOSURE_DRAWDOWN_BRAKE_K: float = 2.0
+# 하한 fail-closed 경계(0.1/0.2 실측 동일 결과 -- 튜닝값이 아닌 구속 하한).
+EXPOSURE_DRAWDOWN_BRAKE_FLOOR: float = 0.2
+
 FOLD_PANEL_WARMUP_HOURS: int = 720 + 168 + 24
 
 EXECUTION_ROSTER_EXIT_MULTIPLIER: float = 2.0
