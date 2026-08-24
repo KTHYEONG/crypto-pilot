@@ -189,6 +189,15 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
+        "--peg-chase-diagnostic",
+        action="store_true",
+        default=False,
+        help=(
+            "Additionally replay slow_momentum/blend under OHLCV_PEG_CHASE_PROXY "
+            "(submit-bar anchor) alongside the strict/stress pair -- opt-in only"
+        ),
+    )
+    mhs.add_argument(
         "--discovery-gate",
         action="store_true",
         default=False,
