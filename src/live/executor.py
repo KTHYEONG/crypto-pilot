@@ -2,8 +2,10 @@
 
 I-NO-NAKED-MARKET: MARKET 주문은 절대 생성하지 않는다. 공격적 집행조차
 LIMIT + IOC + 가격 상한으로 표현하며 최악 슬리피지를 계약으로 묶는다.
-I-CHASE-BAND: 모든 가격은 decision_price 밴드 안에 있어야 하며, 밴드 이탈 시
-재호가하지 않고 대기한다(백테스트의 decision_price 고정 모델과 비용 구조 일치).
+I-CHASE-BAND: GTX 게시 가격은 decision_price chase 밴드 안에 있어야 하며,
+밴드 이탈 시 재호가하지 않고 대기한다. IOC 백스톱은 별도의 max_cross_bps
+리스크 레일을 따른다: 레일 안이면 반드시 마케터블 가격으로 크로싱하고,
+레일 밖 이상 징후일 때만 대기한다.
 I-POLL-BOUNDED: 매 tick 은 반드시 sleep 으로 끝나며 루프 상한은
 ceil(window_deadline_s / poll_interval_s) + 1 로 유도된다.
 """
@@ -36,6 +38,10 @@ class PassiveExecutionPolicy:
     passive_deadline_s 는 창의 60% 로 패시브 단계 상한을 나누며
     window_deadline_s 보다 엄격히 작아야 한다(fail-closed 검증),
     taker_cap_bps = taker_fee_bps(5) + taker_slippage_bps(3).
+
+    chase_band_bps(GTX 알파 레일)와 max_cross_bps(IOC 리스크 레일)는 분리된
+    한계다: 전자는 GTX peg 가 얼마나 쫓아가는가(수익 기회 한계), 후자는
+    백스톱 크로싱이 포기하는 이상 징후 경계(손실 한계)다.
     """
 
     poll_interval_s: float = 3.0
@@ -45,6 +51,7 @@ class PassiveExecutionPolicy:
     window_deadline_s: float = 30 * 60.0
     taker_cap_bps: float = 5.0 + 3.0
     chase_band_bps: float = 10.0
+    max_cross_bps: float = 50.0
     max_slices: int = 4
     rate_weight_budget_fraction: float = 0.5
     max_ioc_attempts: int = 10
@@ -59,6 +66,11 @@ class PassiveExecutionPolicy:
             raise ValueError(f"poll_interval_s must be > 0, got {self.poll_interval_s}")
         if self.max_ioc_attempts < 1:
             raise ValueError(f"max_ioc_attempts must be >= 1, got {self.max_ioc_attempts}")
+        if self.max_cross_bps <= self.chase_band_bps:
+            raise ValueError(
+                f"max_cross_bps ({self.max_cross_bps}) must strictly exceed "
+                f"chase_band_bps ({self.chase_band_bps})"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,10 +169,13 @@ def _capped_ioc_price(
     band_low: Decimal | None = None,
     band_high: Decimal | None = None,
 ) -> Decimal | None:
-    """IOC 백스톱 가격: opposite*(1±taker_cap) 틱 양자화 후 I-CHASE-BAND 로 클램프한다.
+    """IOC 백스톱 가격: opposite*(1±taker_cap) 틱 양자화 후 리스크 레일 클램프.
 
-    클램프 결과가 비마케터블(매수는 opposite 미만, 매도는 초과)이면 None 을
-    반환해 체결 불가능한 IOC 재게시 스팸을 원천 차단한다.
+    ``band_low``/``band_high`` 는 chase 밴드가 아니라 decision_price ±
+    max_cross_bps 리스크 레일이다. 레일 안에서는 결과가 반드시 마케터블이다:
+    클램프 후 비마케터블(매수는 opposite 미달, 매도는 초과)이면 opposite 터치
+    가격으로 올려(내려) 반환한다. opposite 자체가 레일 밖 이상 징후일 때만
+    None 을 반환해 체결 거부는 진짜 이상 징후 보호로 한정한다.
     """
     factor = (
         Decimal(1) + Decimal(str(taker_cap_bps)) / _BPS_DENOMINATOR
@@ -173,22 +188,32 @@ def _capped_ioc_price(
         if is_buy:
             high = quantize_to_multiple(band_high, tick_size, ROUND_DOWN)
             price = min(price, high)
+            if price < opposite_touch:
+                price = quantize_to_multiple(opposite_touch, tick_size, ROUND_UP)
         else:
             low = quantize_to_multiple(band_low, tick_size, ROUND_UP)
             price = max(price, low)
+            if price > opposite_touch:
+                price = quantize_to_multiple(opposite_touch, tick_size, ROUND_DOWN)
     if price <= _ZERO:
         return None
     if band_low is not None and band_high is not None:
-        non_marketable = price < opposite_touch if is_buy else price > opposite_touch
-        if non_marketable:
+        outside_rail = opposite_touch > band_high if is_buy else opposite_touch < band_low
+        if outside_rail:
             return None
     return price
 
 
 def _band(intent: OrderIntent, policy: PassiveExecutionPolicy) -> tuple[Decimal, Decimal]:
-    """I-CHASE-BAND 앵커: decision_price ± chase_band_bps."""
+    """I-CHASE-BAND 앵커: decision_price ± chase_band_bps (GTX 알파 레일)."""
     half_band = intent.decision_price * Decimal(str(policy.chase_band_bps)) / _BPS_DENOMINATOR
     return intent.decision_price - half_band, intent.decision_price + half_band
+
+
+def _risk_rail(intent: OrderIntent, policy: PassiveExecutionPolicy) -> tuple[Decimal, Decimal]:
+    """IOC 리스크 레일: decision_price ± max_cross_bps."""
+    half_rail = intent.decision_price * Decimal(str(policy.max_cross_bps)) / _BPS_DENOMINATOR
+    return intent.decision_price - half_rail, intent.decision_price + half_rail
 
 
 def _gtx_candidate(
@@ -409,6 +434,7 @@ def _poll_or_post(
     own_touch = bid if is_buy else ask
     opposite_touch = ask if is_buy else bid
     band_low, band_high = _band(rt.intent, policy)
+    rail_low, rail_high = _risk_rail(rt.intent, policy)
 
     # 1) 활성 주문 조회: 체결 누적 및 상태 전이(FILL/CHASE/HOLD/IOC).
     if rt.active_id is not None:
@@ -459,12 +485,12 @@ def _poll_or_post(
             is_buy=is_buy,
             taker_cap_bps=policy.taker_cap_bps,
             tick_size=rt.filters.tick_size,
-            band_low=band_low,
-            band_high=band_high,
+            band_low=rail_low,
+            band_high=rail_high,
         )
         time_in_force = "IOC"
     if price is None:
-        return  # I-CHASE-BAND: 밴드 이탈 시 재호가하지 않고 대기한다.
+        return  # 리스크 레일 밖 이상 징후: 재게시하지 않고 대기한다.
 
     post_qty = _post_quantity(
         remaining, price, filters=rt.filters, max_slices=policy.max_slices
