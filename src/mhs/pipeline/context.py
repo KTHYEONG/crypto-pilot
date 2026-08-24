@@ -72,6 +72,9 @@ class PipelineContext:
     _fold_growth_budget_target_vol: dict[int, float] | None = None
     # run-level 일간 참조 수익률: fold worker의 EWMA 워밍업 원천(I-WARM).
     _fold_exposure_warmup_returns: Any = None
+    # blend가 배치 확정한 노출 스케일의 fold별 검증 구간 슬라이스
+    # (I-SCALE-IS-DEPLOYED-OVERLAY, constant_risk 전용).
+    _fold_blend_exposure_scale: Any = None
 
     # Book weights (S3)
     w_fast: pd.DataFrame = field(default_factory=lambda: pd.DataFrame())
