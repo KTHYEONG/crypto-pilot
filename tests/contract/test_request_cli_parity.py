@@ -77,3 +77,26 @@ def test_pnl_vol_target_mode_choices_match_cli_and_metadata() -> None:
     assert sorted(cli_action.choices) == sorted(meta_choices)
     assert len(meta_choices) == 4
     assert "constant_risk" in meta_choices
+
+
+def test_scenario_mhs_dd_brake_10_cli_request_parity() -> None:
+    """SCENARIO_MHS_DD_BRAKE_10_CLI_REQUEST_PARITY: --exposure-drawdown-brake is declared exactly
+    once on the request (cli_param metadata) and mirrored by the hand-written
+    CLI; the MhsRunConfig no-arg parity stays intact with brake=False."""
+    cli_flags = _mhs_cli_flags()
+    meta_flags = _metadata_flags()
+    assert "--exposure-drawdown-brake" in cli_flags
+    assert "--exposure-drawdown-brake" in meta_flags
+
+    from src.cli.main import build_root_parser
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    args = build_root_parser().parse_args(
+        ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
+    )
+    assert args.exposure_drawdown_brake is False
+    assert (
+        dataclasses.asdict(MhsRunConfig.from_namespace(args))
+        == dataclasses.asdict(MhsRunConfig())
+    )
+    assert dataclasses.asdict(MhsRunConfig())["exposure_drawdown_brake"] is False
