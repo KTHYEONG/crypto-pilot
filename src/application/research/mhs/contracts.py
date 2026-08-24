@@ -130,6 +130,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(flag="--ladder-diagnostic", help="Additionally replay under OHLCV_LADDERED_PROXY."),
     )
     peg_chase_diagnostic: bool = field(default=False, metadata=cli_param(flag="--peg-chase-diagnostic", help="Additionally replay under OHLCV_PEG_CHASE_PROXY."))
+    liquidity_cost_model: str = field(default="flat", metadata=cli_param(flag="--liquidity-cost-model", help="Taker crossing cost model: flat or corwin_schultz."))
     discovery_gate: bool = field(
         default=False,
         metadata=cli_param(flag="--discovery-gate", help="Run the discovery/qualification horizon gate."),
@@ -383,6 +384,12 @@ class MhsBookReport:
     peg_chase_naive_sharpe: float | None = None
     peg_chase_fill_rate: float | None = None
     peg_chase_maker_share: float | None = None
+    # Cost decomposition + min-notional diagnostics of the capital-carrying
+    # primary replay (None when the book failed before a replay existed).
+    notional_weighted_fee_bps: float | None = None
+    notional_weighted_spread_bps: float | None = None
+    notional_weighted_delay_bps: float | None = None
+    min_notional_dropped_fraction: float | None = None
     patient_reference: StrategyExecutionReplayResult | None = None
     patient_reference_naive_sharpe: float | None = None
     pre_vol_target_reference: StrategyExecutionReplayResult | None = None

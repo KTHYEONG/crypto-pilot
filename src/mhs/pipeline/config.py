@@ -61,6 +61,7 @@ class MhsRunConfig:
     touch_diagnostic: bool = False
     ladder_diagnostic: bool = False
     peg_chase_diagnostic: bool = False
+    liquidity_cost_model: Literal["flat", "corwin_schultz"] = "flat"
     discovery_gate: bool = False
     discovery_gate_adjusted_net_t: bool = False
     discovery_gate_regime_scaled_net_t: bool = False
@@ -150,6 +151,7 @@ class MhsRunConfig:
             touch_diagnostic=args.touch_diagnostic,
             ladder_diagnostic=args.ladder_diagnostic,
             peg_chase_diagnostic=args.peg_chase_diagnostic,
+            liquidity_cost_model=args.liquidity_cost_model,
             discovery_gate=args.discovery_gate,
             trend_sleeve=args.trend_sleeve,
             trend_sleeve_gross=args.trend_sleeve_gross,
