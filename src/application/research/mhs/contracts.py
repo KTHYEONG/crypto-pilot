@@ -395,6 +395,9 @@ class MhsBookReport:
     # I-SCALE-IS-DEPLOYED-OVERLAY: blend가 배치 확정한 노출 스케일 시계열.
     # constant_risk fold가 재적합하지 않고 이 값을 슬라이스해 재사용한다.
     exposure_scale: pd.Series | None = None
+    # 연구-라이브 seam: 데드밴드 적용 후, exposure_scale 곱하기 전의 결정 격자
+    # 목표비중. name=="blend"일 때만 채워진다.
+    target_weights: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True, slots=True)
