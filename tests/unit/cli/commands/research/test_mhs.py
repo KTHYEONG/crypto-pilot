@@ -922,11 +922,12 @@ def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
 
     captured: dict = {}
 
-    def _spy_emit(tw, scale, artifact_root, *, tail_rows):
+    def _spy_emit(tw, scale, artifact_root, *, tail_rows, artifact_key=None):
         captured["target_weights"] = tw
         captured["exposure_scale"] = scale
         captured["artifact_root"] = artifact_root
         captured["tail_rows"] = tail_rows
+        captured["artifact_key"] = artifact_key
         return {"path": str(artifact_root / "deployed_target_weights.parquet"), "rows": tail_rows}
 
     monkeypatch.setattr(persist_mod, "emit_deployed_target_weights", _spy_emit)

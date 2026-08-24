@@ -21,6 +21,7 @@ def _snapshot(positions: dict[str, Decimal], **overrides) -> AccountSnapshot:
         "wallet_balance": Decimal("1000"),
         "available_balance": Decimal("900"),
         "total_maint_margin": Decimal("10"),
+        "unrealized_pnl": Decimal("0"),
         "positions": positions,
         "dual_side_position": False,
         "multi_assets_margin": False,
