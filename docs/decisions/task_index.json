@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_LIVE_DAEMON_DOCKER_DEPLOY",
+      "date": "2026-08-24",
+      "adr_id": "ADR_20260824_LIVE_DAEMON_DOCKER_DEPLOY",
+      "domain": "execution",
+      "title": "24/7 Docker 라이브 데몬 및 main 병합 자동배포",
+      "why": "저렴한 AWS 무료서버에서 섬도우 사이클이 사용자 개입 없이 매일 자동 실행되고, 기록이 무한정 커지지 않으며, main 병합 시 자동 재배포되길 요청. 레거시 Dockerfile/docker-compose.yml은 옛 trader_spot/futures 봇용(Python 3.10+TA-Lib, 이미 비가동 처리)이라 현재 src/live/와 무관했고, AuditLog는 고정 경로에 영구 append만 해 실제로 무한 증가하는 버그가 있었다. MHS 리서치(peak RSS 약 3.1GB, 15GB 데이터, 2021-2022 discovery 구간에 committee/target_vol을 고정 앵커해 피팅)는 무료서버에서 근본적으로 실행 불가능함을 실측 확인.",
+      "resolution": "무겁고 가벼운 두 축으로 분리: MHS 리서치는 계속 로컬 수동 실행 + git push, 서버는 git 커밋된 deployed_target_weights.parquet만 소비(data/ 15GB는 git 미추적이라 서버에 전혀 전달되지 않음, 확인됨). src/live/scheduler.py 신설(next_decision_time 순수함수 + run_daemon: 매일 00:00Z 결정, T+1h+5분 버퍼까지 대기, 실행, data/state/live_daemon_last_run.json에 last_processed_decision_time 덮어쓰기 기록, COMPLETE/HALT/예외 모두 처리완료로 취급해 무한 재시도 방지, 재배포로 컨테이너가 죽어도 상태파일로 캐치업). src/live/audit.py의 default_audit_log_path를 logs/live/{name}/{YYYY-MM-DD}.jsonl 날짜 파티션으로 변경(무한증가 버그 수정)하고 prune_old_audit_logs(90일 보존) 신설; runner.py의 3개 호출부(_market_client/_order_client/run_shadow_cycle)를 wall-clock now가 아닌 decision_time으로 파티션 키잉하도록 수정(자정 넘어 캐치업 실행돼도 원래 날짜 파일에 기록). CLI에 live daemon 서브커맨드 추가(--decision-time 불필요, 무한루프). Dockerfile을 uv 기반으로 전면 교체(Python 3.11, TA-Lib/requirements.txt 등 legacy 제거, exec-form CMD로 종료시그널 보장), docker-compose.yml을 mhs-live 단일 서비스로 교체(data/state와 logs만 호스트 바인드마운트로 재배포 생존 보장, mem_limit 512m, json-file 로깅 상한). .dockerignore의 docs/ 전체 제외 버그 수정(연구에서 라이브로 인계하는 아티팩트인 deployed_target_weights.parquet이 빌드 컨텍스트에서 빠지고 있었음) 단계적 negation으로 parquet만 재포함. 기존 GH Actions deploy.yml(ECR+SSH+compose, push:main 트리거)은 그대로 재사용하고 SOPS 복호화 스텝만 추가(.env.enc에서 .env로, 기존 .sops.yaml 재사용, 이미지에 시크릿 미포함 유지).",
+      "impact": "라이브 인프라 회귀 없음(tests/unit/live, tests/unit/cli, tests/contract 전체 통과 확인, 유일한 잔여 실패는 이 기능과 무관한 기존 LOG_DIR/DISCOVERY_START 다중선언). Docker 실제 빌드는 이 샌드박스에 docker 미설치라 미실행 -- 정적 계약 테스트(시크릿 미포함, env_file 주입, state/logs 마운트)로 대체 검증했고 실제 docker build는 CI/사용자 로컬에서 최초 검증 필요. 서버는 여전히 SHADOW 모드 기본값과 LIVE_MAINNET 승인문자열 게이트로 실주문 불가 상태 유지."
+    },
+    {
       "task_id": "TASK_LIVE_BINANCE_SHADOW_EXECUTION",
       "date": "2026-08-24",
       "adr_id": "ADR_20260824_LIVE_BINANCE_SHADOW_EXECUTION",
@@ -989,16 +999,6 @@
       "why": "The full 2021-2025 MHS run terminated before terminal report generation while anchored folds loaded multi-year dense panels; the user requested root-cause analysis and a fail-closed completion path.",
       "resolution": "Added windowed replay telemetry, typed book/fold failures, Arrow range filtering, deterministic report persistence, collection-safe pytest configuration, and lean-check semantic source-test mapping. Execution confirms short-period terminal completion but exposes residual multi-year fold panel RSS growth.",
       "impact": "MHS now emits machine-readable terminal failures instead of silently losing the run; Research-GO remains ineligible until fold panel loading is streamed or bounded."
-    },
-    {
-      "task_id": "TASK_MHS_STREAMED_EXECUTION_MEMORY",
-      "date": "2026-08-08",
-      "adr_id": "ADR_20260808_MHS_STREAMED_EXECUTION_MEMORY",
-      "domain": "execution",
-      "title": "MHS streamed execution memory completion",
-      "why": "Full 2021-2025 stale-carry execution terminated before report generation due retained dense per-fill universe snapshots and cumulative replay memory.",
-      "resolution": "Made dense event snapshots opt-in, preserved numerical replay equivalence, added bounded RSS handling and regression coverage, and fixed mark backfill/type robustness.",
-      "impact": "Reduces replay memory growth while retaining strict fail-closed semantics and enables full diagnostic execution under the available resource budget."
     }
   ]
 }
