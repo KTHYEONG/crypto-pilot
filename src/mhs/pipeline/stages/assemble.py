@@ -17,10 +17,12 @@ import time
 
 from src.application.research.mhs.evaluation import (
     FEATURE_NAME,
+    HOLDOUT_CUTOFF,
     phase_1_anchored_purged_folds,
     required_cost_tiers,
     synthetic_stress_scenarios,
 )
+from src.mhs.evidence import holdout_tail_evidence
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.telemetry import StageTelemetry
@@ -35,6 +37,13 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
     if ctx.blend_report is not None and ctx.blend_report.primary is not None:
         mark_source = ctx.blend_report.primary.ledger.mark_source
         fill_source = "OHLCV_IMMEDIATE_TAKER"
+
+    # 봉인 경계 넘은 실행만 hold-out 꼬리 성과를 채운다(미통과는 None = 정직한 신호).
+    holdout_tail = (
+        holdout_tail_evidence(ctx.blend_report.primary.ledger.equity, HOLDOUT_CUTOFF)
+        if ctx.blend_report is not None and ctx.blend_report.primary is not None
+        else None
+    )
 
     run_elapsed_seconds = time.perf_counter() - ctx.run_start
     ctx.recorder.record("final_return")
@@ -101,4 +110,5 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
             else None
         ),
         trials_attempted_source=ctx.trials_attempted_source,
+        holdout_tail=holdout_tail,
     )
