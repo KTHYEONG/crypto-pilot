@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_EVIDENCE_INTEGRITY",
+      "date": "2026-08-25",
+      "adr_id": "ADR_20260825_MHS_EVIDENCE_INTEGRITY",
+      "domain": "execution",
+      "title": "MHS 증거 정직성: DSR 게이트, 선택편향 공시, PAPER 체결검증, 부분체결 현실성",
+      "why": "보고 수치의 신뢰성을 3가지 축으로 검증한 결과: (1) CLI 기본값(growth_extreme, committee_kelly_sizing, breadth 60)이 코드 주석 자체에 명시된 대로 2021-2025 전체 구간 실측으로 선택됐는데 헤드라인 CAGR/MDD가 바로 그 동일 구간에서 산출됐고, 프로젝트 자신의 deflated_sharpe_ratio=0.7039(합격선 0.95)가 이미 불합격을 말하는데도 research_go 게이트가 DSR을 인자로조차 받지 않아 eligible=True가 나오고 있었다. phase_1_anchored_purged_folds 독스트링이 'never labelled OOS'라 명시하고, holdout 종목 파티션은 설계상 존재하나 모든 실행이 partition=dev로 미사용 상태였다. (2) SHADOW 모드는 사용자 우려(무한자본 전량체결)와 반대로 SHADOW_ALLOWED_MUTATIONS가 빈 집합이라 모든 비-GET이 전송계층에서 억제되어 filled_qty가 항상 0으로 고정되고, 그 결과 chase 재호가/IOC 백스톱/cancel-settle/잔량처리/reconcile_or_halt가 한 번도 실행되지 않아 라이브 체결 상태기계가 사실상 미검증 상태였다. (3) 449 결정일/23,665 intent 실측으로 체결창 6~480분×밴드 10/30/100bps 24개 조합을 스윕한 결과 전 조합이 4.49~4.92bps로 평평해 창 튜닝의 여지는 0.3~0.4bps에 불과했고, 대신 peg_chase가 intent당 전량단일체결만 지원해(partial_fill 미모델) 실제보다 maker 포착률을 구조적으로 과소평가하고 있었다. 부수 발견: OHLCV_STRICT_PROXY 타임아웃 수수료가 corwin_schultz 비용모델을 참조하지 않는 레거시 경로로 남아 바운드 간 공정비교가 불완전했다.",
+      "resolution": "src/application/research/mhs/research_go.py에 GO_REASON_DEFLATED_SHARPE_BELOW_THRESHOLD/UNAVAILABLE/SELECTION_WINDOW_OVERLAP 사유코드와 _deflated_sharpe_gate_reasons를 신설해 _mhs_research_go가 deflated_sharpe_ratio 인자를 받아 REGISTERED_POLICY_THRESHOLDS['deflated_sharpe_ratio']=0.95 미만이거나 결측이면 fail-closed로 차단하도록 배선(reasons 리스트에 append만 하는 구조라 True->False로만 이동 가능, 게이트 자체가 단조성을 보장). src/mhs/evidence.py에 selection_overlap_fraction 순수함수와 DEFAULT_SELECTION_WINDOW 상수를 신설해 src/mhs/pipeline/stages/fold.py가 매 실행마다 무조건(옵트인 없이) 겹침 비율을 계산하고 0 초과 시 SELECTION_WINDOW_OVERLAP을 reason에 강제 포함. src/mhs/run_history.py에 derive_trials_attempted를 신설해 이력에서 센 고유 설정 수와 SEARCH_TRIALS_ATTEMPTED 상수 중 큰 값만 채택(과소신고 방지). src/live/settings.py에 ExecutionMode.PAPER를 추가하고 src/live/rest.py의 SHADOW 초크포인트에 동일하게 편입시키되 PaperResponse로 구분해, src/live/executor.py가 PAPER 응답을 SHADOW처럼 즉시 종결하지 않고 관측된 그 tick의 touch만으로 로컬 체결을 시뮬레이션(GTX는 trade-through, IOC는 즉시체결)하도록 분기해 chase/백스톱/cancel-settle/잔량 경로 전체가 실제로 실행되게 함. src/mhs/execution.py에 peg_chase_partial_schedule을 신설해 ExecutionSpec.peg_chase_tranches(기본 1, 기존 동작과 bit-identical)로 창을 균등분할하고 각 트랜치가 독립적으로 trade-through 판정 후 실패분을 다음 트랜치로 이월, 마지막 잔량은 데드라인에 무조건 크로싱. _taker_cost_bps 헬퍼로 OHLCV_STRICT_PROXY 타임아웃 수수료를 IMMEDIATE_TAKER/PEG_CHASE_PROXY와 동일한 유동성 비용모델 경로로 통합.",
+      "impact": "기본 플래그 전체 재실행(2021-2025) 실측: research_go.eligible이 True에서 False로 실제 반전됨(reason_codes=['DEFLATED_SHARPE_BELOW_THRESHOLD','SELECTION_WINDOW_OVERLAP']), deflated_sharpe_ratio=0.7935(합격선 0.95 미달), selection_overlap_fraction=0.9995(보고구간과 선택창이 99.95% 중첩)이 신규 필드로 처음 공시됨. 이는 현재 전략 설정을 이 증거로 실전 투입해서는 안 된다는 것을 시스템이 최초로 자기신고하는 변화이며, 코드가 아니라 통계적 정직성의 개선이다. A1 계약 검증: blend primary_naive_sharpe=2.885640227863382/primary_geometric_cagr=3.184139338406977/primary_max_drawdown=-0.38902446238958843가 스펙 3라운드(execution_fidelity/execution_fairness/evidence_integrity) 전체를 거치고도 최초 베이스라인과 소수점 15자리까지 완전히 동일(test_golden_digest.py 통과) -- opt-in 플래그를 켜지 않는 한 기본 산출물은 불변임을 실측으로 재확인. PAPER 모드와 peg_chase_partial_schedule은 opt-in/라이브 전용 경로라 이번 백테스트 실행 자체에는 반영되지 않았으며 단위 테스트(SCENARIO_LIVE_27/28, SCENARIO_MHS_EVID_04)로 검증됨. 알려진 잔여 과제: 진짜 holdout 파티션 실행은 코드가 아니라 운영 결정으로 남겨둠(1회 소비 시 해당 종목군이 영구히 in-sample화되므로 배포 직전으로 유보)."
+    },
+    {
       "task_id": "TASK_MHS_EXECUTION_FAIRNESS",
       "date": "2026-08-24",
       "adr_id": "ADR_20260824_MHS_EXECUTION_FAIRNESS",
@@ -989,16 +999,6 @@
       "why": "MHS diagnostic evaluation generated over 60 discrete Parquet files per run causing IO overhead and repo clutter",
       "resolution": "Consolidated discrete replay artifact files into 5 category-based unified Parquet tables with replay_id column and pushdown loader helper",
       "impact": "Reduced artifact file count from 60+ to 5, improved AI maintainability and query efficiency"
-    },
-    {
-      "task_id": "MHS_HORIZON_OPT_R1R2R3_IMPL",
-      "date": "2026-08-09",
-      "adr_id": "ADR_20260809_MHS_HORIZON_OPT_R1R2R3_IMPL",
-      "domain": "research",
-      "title": "MHS top-level books 신호 품질 배선 완성 및 fill 메모리 columnar 최적화",
-      "why": "mhs_horizon_opt_spec_summary.md의 RSS 예산 초과(2.5~2.76GB)·Fold 0/1/2 Sharpe 미달 진단은 실제로는 248c9ee1(fold 경로만 수정) 이전 수치였고, 재실행 결과 fold 메모리는 이미 해결(3/3 완주)됐으나 top-level books는 fold와 동일한 신호-품질 배선(EMA/regime-scale)이 누락돼 있었고 fill_records가 fill당 Python dict를 누적해 메모리를 낭비했음. 1.80GB 목표 자체도 실측(free -h: 17GiB, cgroup 제한 없음) 없이 설정된 과보수적 값이었음.",
-      "resolution": "top-level books의 w_fast/w_slow에 fold와 동일한 ema_span 적용, blend_1h에 regime_cash_scale 적용(R1). _BoundExecutionReplayAccumulator.fill_records를 dict-list에서 columnar 병렬 list로 전환해 출력 동치성 유지한 채 메모리 절감(R2). xs_ic/regression/horizon_diagnostics를 book replay 루프 이전으로 재배치하고 log_close/eligible을 조기 해제(R3). RSS 예산을 실측 시스템 용량(17GiB, 여유 7.9GiB) 근거로 1.80GB→4.00GiB 재산정.",
-      "impact": "실측 재검증: overall peak RSS 2.264GB→2.124GB(4.00GiB 예산 대비 47% 여유). Fold 0/1/2는 R1/R2/R3와 무관하게 수치 불변(LIMIT-01 불변식 확인, 회귀 없음) — Autocorr Sharpe는 여전히 목표(0.60) 미달(fold0 -1.15/fold1 -3.27/fold2 -1.82), Stress Sharpe는 fold0만 양전환(+0.24). top-level books는 데이터 완결성 결함(funding NaN, LITUSDT mark 결측)으로 여전히 NONFINITE_EQUITY 실패 — R4로 별도 데이터 spec 필요, research_go.eligible은 계속 False."
     }
   ]
 }
