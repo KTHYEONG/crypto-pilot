@@ -25,6 +25,7 @@ from src.application.research.mhs.evaluation import (
     COMMITTEE_OOS_START,
     FEATURE_REGISTRY,
     DataIntegrityError,
+    _load_reference_close,
     compute_deployment_readiness,
     feature_registry_panel_columns,
     phase_1_anchored_purged_folds,
@@ -43,16 +44,36 @@ from src.application.research.mhs.stage_services import (
     _run_post_book_concurrently,
 )
 from src.mhs.calibration import NullShareCalibration, calibrate_max_share_null
-from src.mhs.evidence import selection_overlap_fraction
+from src.mhs.evidence import (
+    regime_conditional_sharpe_blocks,
+    selection_overlap_fraction,
+)
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
-from src.mhs.run_history import derive_trials_attempted
+from src.mhs.run_history import derive_trials_attempted, window_trial_sharpes
 from src.mhs.telemetry import StageTelemetry
+
+
+def _committee_weight_leak_fraction(validation_start: str, validation_end: str) -> float:
+    """Fraction of one fold's validation window inside the committee weight-fit
+    sample (rows before COMMITTEE_OOS_START). Observational disclosure only."""
+    window_start = pd.Timestamp(validation_start)
+    window_end = pd.Timestamp(validation_end)
+    span = window_end - window_start
+    if span <= pd.Timedelta(0):
+        return 0.0
+    fit_overlap = min(window_end, COMMITTEE_OOS_START) - window_start
+    if fit_overlap <= pd.Timedelta(0):
+        return 0.0
+    return float(fit_overlap / span)
 
 
 def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     """Run the fold pool and all post-book statistical diagnostics."""
+    # Distinct annualized trial outcomes recorded for exactly this window; the
+    # DSR pool divides them by sqrt(PERIODS_PER_YEAR_1H) downstream.
     ctx.trials_attempted, ctx.trials_attempted_source = derive_trials_attempted()
+    ctx.trial_sharpes = window_trial_sharpes((str(ctx.start), str(ctx.resolved_end)))
     ctx.deflated_sharpe_ratio = None
     # Observational disclosure of the defaults' selection window overlap.
     ctx.selection_overlap_fraction = selection_overlap_fraction(ctx.start, ctx.end)
@@ -177,12 +198,37 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             ctx.recorder.record("multi_feature_diagnostic")
         del _diag_panels
         gc.collect()
-    ctx.deflated_sharpe_ratio, ctx.dsr_decomposition = _statistics._deflated_sharpe_evidence(ctx.blend_report, ctx.folds, ctx.trials_attempted)  # noqa: E501
+    ctx.deflated_sharpe_ratio, ctx.dsr_decomposition, ctx.deflated_sharpe_ratio_fold_proxy = _statistics._deflated_sharpe_evidence(ctx.blend_report, ctx.folds, ctx.trials_attempted, ctx.trial_sharpes)  # noqa: E501
     ctx.fold_sharpe_dispersion = (
         float(ctx.dsr_decomposition.trial_sr_sqrt_variance)
         if ctx.dsr_decomposition is not None
         else None
     )
+    # Observational disclosures: per-fold weight-fit leak (D6) and strictly
+    # causal regime stratification of the blend hourly returns. Neither may
+    # append a Research-GO reason code or touch any ledger/weight/fill.
+    ctx.fold_committee_weight_leak = {
+        str(fold.fold_index): _committee_weight_leak_fraction(
+            fold.validation_start, fold.validation_end
+        )
+        for fold in ctx.folds
+    }
+    if ctx.blend_report is not None and ctx.blend_report.primary is not None:
+        _regime_equity_1h, _regime_returns_1h, _regime_turnover = (
+            _statistics._hourly_ledger_series(
+                ctx.blend_report.primary.ledger.equity,
+                ctx.blend_report.primary.ledger.fill_turnover,
+            )
+        )
+        _regime_btc_close = _load_reference_close(ctx.root, ctx.start, ctx.end)
+        ctx.regime_conditional_sharpe = (
+            regime_conditional_sharpe_blocks(_regime_returns_1h, _regime_btc_close)
+            if _regime_btc_close is not None
+            else None
+        )
+        del _regime_equity_1h, _regime_returns_1h, _regime_turnover, _regime_btc_close
+    else:
+        ctx.regime_conditional_sharpe = None
     ctx.fold_blend_parity, parity_reasons = _fold_blend_parity(ctx.blend_traces, ctx.folds)
     # I-FAMILY level 증거: fold별 min이 아니라 pooled 하한으로 판정한다.
     ctx._pooled_fold_evidence = _pooled_fold_evidence(ctx.folds)

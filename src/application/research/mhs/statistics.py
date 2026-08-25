@@ -9,6 +9,7 @@ autocorrelation_adjusted_sharpe, rank_weight_book, phase_tranche_book).
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
@@ -17,10 +18,12 @@ from src.application.research.mhs.contracts import MhsBookReport, MhsFoldReport
 from src.common.errors import DataIntegrityError
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.evidence import (
+    TRIAL_SHARPE_DEDUP_DECIMALS,
     DsrDecomposition,
     autocorrelation_adjusted_sharpe,
     deflated_sharpe_decomposition,
     deflated_sharpe_ratio,
+    distinct_trial_sr_variance,
     effective_observation_count,
 )
 from src.mhs.execution import SimulatedInventoryLedgerResult
@@ -32,6 +35,11 @@ _logger = logging.getLogger(__name__)
 _BOOTSTRAP_SEED = 20260807
 _BOOTSTRAP_REPLICATES = 2000
 _BOOTSTRAP_MEAN_BLOCK = 168
+
+# Lag-window sensitivity disclosure: one holding horizon = 168h. Report-only
+# alternative reading of the effective sample size (the registered max_lag
+# stays 24 and is unchanged).
+_HOLDING_HORIZON_MAX_LAG: int = 168
 
 def _xs_rank_ic(
     signal: pd.DataFrame, opens: pd.DataFrame, forward_bars: int,
@@ -398,61 +406,98 @@ def _deflated_sharpe_evidence(
     blend_report: MhsBookReport | None,
     folds: tuple[MhsFoldReport, ...],
     n_trials: int,
-) -> tuple[float | None, DsrDecomposition | None]:
-    """Per-observation deflated Sharpe of the blend primary against anchored-fold trial dispersion.
+    trial_sharpes: Sequence[float],
+) -> tuple[float | None, DsrDecomposition | None, float | None]:
+    """Per-observation deflated Sharpe of the blend primary against the
+    distinct per-observation trial outcomes recorded for this exact window.
 
-    The sample count is the autocorrelation-corrected
-    ``effective_observation_count`` of the hourly returns -- serially
-    dependent observations overstate ``sqrt(n)`` and would inflate the DSR.
-    Returns the scalar plus its descriptive decomposition; both elements are
-    ``None`` when the statistic is unresolvable.
+    ``trial_sharpes`` carries ANNUALIZED run-history Sharpes; each is divided
+    by ``sqrt(PERIODS_PER_YEAR_1H)`` so the pooled variance lives in
+    per-observation units like ``observed_sr``. The sample count is the
+    autocorrelation-corrected ``effective_observation_count`` of the hourly
+    returns -- serially dependent observations overstate ``sqrt(n)`` and would
+    inflate the DSR. Fewer than the registered minimum of distinct pooled
+    outcomes raises inside ``distinct_trial_sr_variance`` and fails closed:
+    the gated statistic is ``(None, None)``, while the fold-based DSR is still
+    returned as a purely observational proxy (it must never re-enter the gate
+    on any code path).
     """
     if blend_report is None or blend_report.primary is None or not folds:
-        return None, None
+        return None, None, None
     _equity_1h, net_returns_1h, _turnover = _hourly_ledger_series(
         blend_report.primary.ledger.equity,
         blend_report.primary.ledger.fill_turnover,
     )
     observed_sr = _per_observation_sharpe(net_returns_1h)
     if not np.isfinite(observed_sr):
-        return None, None
-    trial_sharpes: list[float] = []
+        return None, None, None
+    fold_trial_sharpes: list[float] = []
     for fold in folds:
         if fold.strict is None or fold.failures:
             continue
         _fold_equity, fold_net, _fold_turnover = _hourly_ledger_series(
             fold.strict.ledger.equity, fold.strict.ledger.fill_turnover,
         )
-        trial_sharpes.append(_per_observation_sharpe(fold_net))
-    if not trial_sharpes:
-        return None, None
-    trial_variance = (
-        float(np.var(trial_sharpes, ddof=1)) if len(trial_sharpes) >= 2 else 0.0
+        fold_trial_sharpes.append(_per_observation_sharpe(fold_net))
+    if not fold_trial_sharpes:
+        return None, None, None
+    fold_variance = (
+        float(np.var(fold_trial_sharpes, ddof=1))
+        if len(fold_trial_sharpes) >= 2
+        else 0.0
     )
     returns = net_returns_1h.dropna()
     if len(returns) < 2:
-        return None, None
+        return None, None, None
     try:
         n_obs_effective = effective_observation_count(returns)
     except ValueError:
         # Too few observations for the autocorrelation window: unresolvable.
-        return None, None
+        return None, None, None
     if n_obs_effective < 2:
-        return None, None
+        return None, None, None
     skew = float(returns.skew())
     kurtosis = float(returns.kurt()) + 3.0
+
+    # Observational fold proxy (report-only): today's fold-dispersion reading.
+    fold_proxy_value = deflated_sharpe_ratio(
+        observed_sr, fold_variance, n_trials, n_obs_effective, skew, kurtosis,
+    )
+    fold_proxy: float | None = (
+        fold_proxy_value if np.isfinite(fold_proxy_value) else None
+    )
+
+    # Gated statistic: distinct distinct-outcome trial pool only, fail-closed.
+    annualization_scale = float(np.sqrt(float(_PERIODS_PER_YEAR_1H)))
+    per_observation_trials = [
+        float(value) / annualization_scale
+        for value in trial_sharpes
+        if np.isfinite(float(value))
+    ]
+    try:
+        trial_variance = distinct_trial_sr_variance(
+            per_observation_trials, observed_sr
+        )
+    except ValueError:
+        return None, None, fold_proxy
+    distinct_outcomes = len({
+        round(float(value), TRIAL_SHARPE_DEDUP_DECIMALS)
+        for value in (observed_sr, *per_observation_trials)
+    })
     result = deflated_sharpe_ratio(
-        observed_sr,
-        trial_variance,
-        n_trials,
-        n_obs_effective,
-        skew,
-        kurtosis,
+        observed_sr, trial_variance, n_trials, n_obs_effective, skew, kurtosis,
     )
     # Fail closed: a degenerate skew/kurtosis can push the statistic to NaN,
     # which must never leak into the report payload as a real deflated value.
     if not np.isfinite(result):
-        return None, None
+        return None, None, fold_proxy
+    try:
+        n_obs_holding_horizon = effective_observation_count(
+            returns, _HOLDING_HORIZON_MAX_LAG
+        )
+    except ValueError:
+        # Series shorter than one holding horizon: sensitivity stays unset.
+        n_obs_holding_horizon = 0
     decomposition = deflated_sharpe_decomposition(
         observed_sr,
         trial_variance,
@@ -461,6 +506,9 @@ def _deflated_sharpe_evidence(
         n_obs_effective,
         skew,
         kurtosis,
-        tuple(trial_sharpes),
+        tuple(fold_trial_sharpes),
+        trial_sr_source="distinct_trial_outcomes",
+        distinct_trial_outcomes=distinct_outcomes,
+        n_obs_effective_holding_horizon=n_obs_holding_horizon,
     )
-    return result, decomposition
+    return result, decomposition, fold_proxy

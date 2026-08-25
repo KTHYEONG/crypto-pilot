@@ -11,6 +11,7 @@ Each record is one JSON line in ``active.jsonl``; when appending exceeds
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -121,3 +122,55 @@ def derive_trials_attempted(history_dir: Path | str | None = None) -> tuple[int,
         # No readable history at all: the denominator's provenance must say so.
         return SEARCH_TRIALS_ATTEMPTED, "constant_fallback"
     return SEARCH_TRIALS_ATTEMPTED + len(seen), "constant_plus_history"
+
+
+def window_trial_sharpes(
+    window: tuple[str, str], history_dir: Path | str | None = None
+) -> tuple[float, ...]:
+    """Annualized blend Sharpe outcomes recorded for exactly one report window.
+
+    Single pass over every JSONL shard, mirroring ``derive_trials_attempted``:
+    a record qualifies when its ``(start, resolved_end)`` equals ``window`` and
+    its ``blend.primary_naive_sharpe`` is finite. Records sharing an identical
+    canonical ``flags`` payload collapse to one entry (a re-run of the same
+    configuration is the same trial, and duplicate outcomes must not shrink
+    the DSR trial variance). Returns the outcomes ascending; an unreadable or
+    missing history yields ``()``.
+    """
+    directory = Path(history_dir) if history_dir is not None else _DEFAULT_HISTORY_DIR
+    wanted = (str(window[0]), str(window[1]))
+    try:
+        seen_flags: set[str] = set()
+        outcomes: list[float] = []
+        for shard in sorted(directory.glob("*.jsonl")):
+            with shard.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    record = json.loads(stripped)
+                    if not isinstance(record, dict):
+                        continue
+                    if (str(record.get("start")), str(record.get("resolved_end"))) != wanted:
+                        continue
+                    blend = record.get("blend")
+                    sharpe = (
+                        blend.get("primary_naive_sharpe")
+                        if isinstance(blend, dict)
+                        else None
+                    )
+                    if not isinstance(sharpe, (int, float)) or isinstance(sharpe, bool):
+                        continue
+                    sharpe = float(sharpe)
+                    if not math.isfinite(sharpe):
+                        continue
+                    flags_key = json.dumps(
+                        record.get("flags"), ensure_ascii=False, sort_keys=True
+                    )
+                    if flags_key in seen_flags:
+                        continue
+                    seen_flags.add(flags_key)
+                    outcomes.append(sharpe)
+        return tuple(sorted(outcomes))
+    except (OSError, json.JSONDecodeError):
+        return ()
