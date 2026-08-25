@@ -47,7 +47,17 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
         request, "mark_mode",
         ("cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"),
     )
+    # Terminal-decision censoring needs an exact grid hit, so the passive
+    # window must be a positive multiple of the execution timeframe's minutes;
+    # rejected at request validation, before any panel load or replay.
     _validate_field_choices(request, "execution_timeframe", ("1m", "3m", "5m"))
+    _timeframe_minutes = {"1m": 1, "3m": 3, "5m": 5}[request.execution_timeframe]
+    if request.passive_timeout_minutes < 1 or request.passive_timeout_minutes % _timeframe_minutes:
+        raise ValueError(
+            f"passive_timeout_minutes must be a positive multiple of "
+            f"{_timeframe_minutes} for execution_timeframe={request.execution_timeframe}, "
+            f"got {request.passive_timeout_minutes}"
+        )
     if request.execution_universe_size < 8:
         raise ValueError("execution_universe_size must be >= 8")
     if request.max_rss_bytes is not None and request.max_rss_bytes <= 0:
