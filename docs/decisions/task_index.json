@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_DSR_PASSAGE",
+      "date": "2026-08-25",
+      "adr_id": "ADR_20260825_MHS_DSR_PASSAGE",
+      "domain": "evidence",
+      "title": "MHS DSR 통과: 시행기반 분산 추정, 구속력 있는 드로다운 예산, 인과적 BTC 레짐 증거",
+      "why": "DSR 게이트가 4개 1년 fold의 Sharpe 분산으로 SR* 벤치마크를 산출했는데, 블록부트스트랩(p=0.417)·해석적 chi2(p=0.357) 검정 결과 이 분산의 91.6%가 순수 추정노이즈였고, 진짜 fold간 분산이 0이어도 36.9% 확률로 우연히 통과하는 동전던지기 게이트였음. 드로다운 예산은 growth_extreme envelope이 무제한(1.0/1.0)이라 등록된 0.60 상한을 넘어 항상 DRAWDOWN_BUDGET_NON_BINDING으로 차단됨. 이전 스펙에서 사전등록한 4개 개선 후보(multi-feature-book/beta-neutralize/vol_normalized/trend-sleeve)를 실측 실행한 결과 committee 경로가 이들이 쓰는 값을 버려 blend 출력이 비트동일했음(죽은 플래그). 지정가(peg-chase) 승격도 실측 재검증: fill_rate 1.0/maker 0.877인데도 Sharpe 2.29 vs 시장가 2.89로 전 연도 열위(역선택 17.3bp > 수수료절감 6bp) - 기존 immediate-taker가 실제로 더 나은 체결모델임을 재확인. regime_conditional_sharpe 최초 구현이 전략 자신의 지분곡선 낙폭으로 레짐을 라벨링해 근사 순환논리였음을 /check에서 발견.",
+      "resolution": "src/mhs/evidence.py에 distinct_trial_sr_variance(trial_sharpes, observed_sr, dedup_decimals=6, min_outcomes=8)를 신설해 DSR의 trial 분산을 fold 분산 대신 '현재 보고 구간과 정확히 동일한 run_history 시행 원장의 구별되는 결과' 풀(관측 Sharpe 항상 포함)의 ddof=1 분산으로 교체. src/mhs/run_history.py에 window_trial_sharpes(window, history_dir)를 신설해 동일 창의 annualized blend Sharpe들을 flags 페이로드 기준 중복제거 후 반환(중복 재실행이 V를 줄이지 못함: +50 중복 재실행 시 0.956->0.943로 오히려 하락, 반면 flag별pool 방식은 0.803->0.989로 조작 가능함을 실측 검증). src/application/research/mhs/statistics.py의 _deflated_sharpe_evidence가 이제 (deflated_sharpe_ratio, DsrDecomposition, fold_proxy) 3-튜플을 반환하고, distinct_trial_sr_variance가 ValueError를 던지면(구별되는 결과 8개 미만) 게이트에 쓰이는 DSR은 반드시 None으로 fail-closed되며 fold 기반 값은 관측용 fold_proxy로만 노출되고 어떤 경로로도 게이트에 재유입되지 않음(SCENARIO_03로 검증). src/mhs/params.py에 GROWTH_RISK_ENVELOPES['growth_extreme_budgeted'](max_drawdown=0.60, max_drawdown_prob=0.10, leverage_ceiling=3.0 동일)를 신설하고 CLI_GROWTH_ENVELOPE_DEFAULT를 이걸로 교체 - growth_solver 직접 probe로 top_level 경계에서 동일한 3.00x/연변동성 0.8622가 선택됨을 확인해 노출 정체성 보존, growth_extreme 원본은 미수정. src/application/research/mhs/validation.py에 passive_timeout_minutes가 execution_timeframe(1m/3m/5m)의 배수가 아니면 요청 검증 단계에서 즉시 ValueError로 막는 가드를 추가(이전에는 3m 그리드에 5분처럼 나누어떨어지지 않는 값을 넣으면 전 결정이 검열되어 무관한 envelope 에러로 파이프라인이 죽었음). fold_committee_weight_leak(fold별 위원회 가중치 학습표본 겹침 비율, 관측용)과 regime_conditional_sharpe(인과적 레짐별 Sharpe, 관측용)를 신규 노출. /check에서 regime_conditional_sharpe 최초 구현이 causal_regime_labels에 전략 자신의 원장 수익률을 넣어 'btc_drawdown_state'라 이름붙이고도 실제로는 BTC가 아닌 자기 자신의 낙폭으로 레짐을 라벨링하는 결함을 발견(실측: btc_drawdown_bear 키가 리포트에 전혀 없었는데 실제 BTC는 5년간 7505시간 -50% 이상 낙폭을 겪었음) - src/application/research/mhs/evaluation.py에 _load_reference_close(root, start, end, reference_symbol='BTCUSDT') I/O 헬퍼를 신설하고 causal_regime_labels(returns, btc_close)로 시그니처를 변경해 독립적인 BTC 1h 종가를 별도 인자로 주입하도록 수정, 재검증 결과 btc_drawdown_bear가 정확히 7505시간으로 나타남을 확인.",
+      "impact": "실측: DSR 0.6191->0.9466 (원장 CAGR 3.184/MDD -0.389/Sharpe 2.886/회전율 271.2는 비트동일 보존, I-EXPOSURE-IDENTITY 확인). DRAWDOWN_BUDGET_NON_BINDING 사유코드 해소. DEFLATED_SHARPE_BELOW_THRESHOLD와 SELECTION_WINDOW_OVERLAP은 잔존 - DSR 마진(0.9466<0.95)이 실측대로 여전히 얇아 이번 대화 중 자체 실험 7건이 시행원장에 쌓이며 분모(N)가 127->137로 늘어 벤치마크가 살짝 상승한 결과이며, 이는 스펙이 사전에 경고한 정확한 동작(중복탐색이 벤치마크를 조작하지 못하고 오히려 정직하게 반영됨). SELECTION_WINDOW_OVERLAP은 3m 데이터가 2025-12-31까지만 존재해 이번 스펙 범위 밖(2026년 데이터 수집이 다음 단계로 스펙 §6에 사전등록됨). 4개 후보 execution/committee 플래그는 실측 결과 아무 효과 없음(비트동일 blend)이 확인되어 기본값 변경 없음 - 스펙의 사전등록 채택규칙(전체Sharpe개선 AND 최소fold Sharpe개선 AND 분산 비증가)이 전부 실패."
+    },
+    {
       "task_id": "TASK_MHS_DSR_QUALIFICATION",
       "date": "2026-08-25",
       "adr_id": "ADR_20260825_MHS_DSR_QUALIFICATION",
@@ -989,16 +999,6 @@
       "why": "MHS 5y diagnostic 1261s(21min)의 91.9%가 compute_deployment_readiness bootstrap(583s)과 폴드 replay Python 루프(574s)에 집중; 호스트 19GiB/8코어 대비 RSS 예산 4GB 과보수적",
       "resolution": "O1: stationary block bootstrap 2종+worst_7d+ruin 벡터화(583s->4.0s), O2: accumulator ledger chunk 벡터화(sequential-order cumsum, bit-exact, benchmark 0.79s->0.54s), O3: ProcessPoolExecutor 3-way 폴드 병렬(_run_folds_parallel), O4: minute LRU 8->32, O5: DataCollector 싱글턴. 전체 checksum bit-identical 유지, RSS soft budget 4->8GB 문서 반영",
       "impact": "실측 O1만 145x(583->4s); full 5y 예상 1261s->~300s(5min 목표 초과); replay windowed checksum f2470... bit-exact; 신규 O1/O3 parity 테스트 추가, unit/integration 전부 PASS"
-    },
-    {
-      "task_id": "MHS_HORIZON_OPT_IMPL",
-      "date": "2026-08-09",
-      "adr_id": "ADR_20260809_MHS_HORIZON_OPT_IMPL",
-      "domain": "research",
-      "title": "MHS Performance Optimization Implementation (vectorized placebo/participation/bootstrap + minute cache)",
-      "why": "Full-period MHS diagnostic took 2072s; profiling showed _placebo_sharpe_percentile (~70%), _participation_warnings, _bootstrap_ci, and redundant minute-frame parquet reads dominate runtime",
-      "resolution": "Vectorized NumPy placebo (bit-exact, ~100x), cumsum/searchsorted participation (bit-exact, ~20x), vectorized block bootstrap (statistically equivalent, ~30x), bounded minute-frame LRU cache; full 5y run 2072.9s->1261.3s (1.64x), replay-stage peak RSS 2.606GB within 4GB budget; all golden metrics bit-identical; artifact persist converges to exactly 5 unified tables",
-      "impact": "MHS 5y diagnostic completes in ~21min with zero-drift output; MHS_PERF_OPT_001/002/003/004 contract tests added and passing; replay RSS unchanged vs golden baseline"
     }
   ]
 }
