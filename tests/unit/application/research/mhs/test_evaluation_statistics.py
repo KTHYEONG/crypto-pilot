@@ -415,7 +415,7 @@ def test_registered_policy_thresholds_contract() -> None:
 
     assert REGISTERED_POLICY_THRESHOLDS == {
         "cap_60_roster": 60.0, "primary_annual_return": 0.05,
-        "deflated_sharpe_ratio": 0.95,
+        "deflated_sharpe_ratio": 0.95, "max_drawdown_budget_ceiling": 0.60,
     }
     assert isinstance(SEARCH_TRIALS_ATTEMPTED, int)
     assert SEARCH_TRIALS_ATTEMPTED >= 1
@@ -432,7 +432,7 @@ def test_scenario_mhs_kelly_two_sided_08_go_reason_iff_none_registration(
 
     assert SOURCE_THRESHOLDS == {
         "cap_60_roster": 60.0, "primary_annual_return": 0.05,
-        "deflated_sharpe_ratio": 0.95,
+        "deflated_sharpe_ratio": 0.95, "max_drawdown_budget_ceiling": 0.60,
     }
 
     idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")

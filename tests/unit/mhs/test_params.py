@@ -107,7 +107,7 @@ def test_scenario_mhs_kelly_two_sided_05_registered_roster_cap_and_extreme_rung(
 
     assert REGISTERED_POLICY_THRESHOLDS == {
         "cap_60_roster": 60.0, "primary_annual_return": 0.05,
-        "deflated_sharpe_ratio": 0.95,
+        "deflated_sharpe_ratio": 0.95, "max_drawdown_budget_ceiling": 0.60,
     }
     assert "cap_30_roster" not in REGISTERED_POLICY_THRESHOLDS
     extreme = GROWTH_RISK_ENVELOPES["growth_extreme"]
@@ -159,6 +159,16 @@ def test_evidence_gate_alpha_registered() -> None:
     assert NULL_BOOTSTRAP_SEED > 0
     # 유도 근거 없는 고정 임계값은 선언형 alpha로 교체되어 삭제되다.
     assert not hasattr(params_module, "FOLD_GROWTH_CONCENTRATION_MAX_SHARE")
+
+
+# SCENARIO_MHS_DSR_06_REGISTERED_THRESHOLD_UNCHANGED
+def test_SCENARIO_MHS_DSR_06_REGISTERED_THRESHOLD_UNCHANGED() -> None:
+    """A4 guard: the registered DSR pass line and the drawdown-budget ceiling
+    stay at their preregistered values -- no future statistical loosening."""
+    from src.mhs.types import REGISTERED_POLICY_THRESHOLDS
+
+    assert REGISTERED_POLICY_THRESHOLDS["deflated_sharpe_ratio"] == 0.95
+    assert REGISTERED_POLICY_THRESHOLDS["max_drawdown_budget_ceiling"] == 0.60
 
 
 def test_SCENARIO_MHS_EVID_02_SELECTION_OVERLAP_IS_DISCLOSED() -> None:
