@@ -11,7 +11,9 @@ from src.application.research.mhs.contracts import (
     MhsFoldReport,
 )
 from src.application.research.mhs.research_go import (
+    GO_REASON_DEFLATED_SHARPE_UNAVAILABLE,
     GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+    GO_REASON_SELECTION_WINDOW_OVERLAP,
     _drawdown_budget_reasons,
     _mhs_research_go,
     _pooled_level_gate_reasons,
@@ -229,3 +231,37 @@ def test_invalid_primary_integrity_code_still_blocks_fold() -> None:
     )
     assert "INVALID_PRIMARY_LEDGER" in result.reason_codes
     assert "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6" not in result.reason_codes
+
+
+# SCENARIO_SELECTION_WINDOW_OVERLAP_NEVER_BLOCKS_ALONE
+def test_selection_window_overlap_disclosed_but_never_blocks_alone() -> None:
+    # 관측 전용 공시 코드(evidence.py selection_overlap_fraction 독스트링 및
+    # fold.py 호출부 주석의 문서화된 의도)는 eligible을 단독으로 차단하지 않고,
+    # reason_codes에는 그대로 공시된다.
+    result = _mhs_research_go(
+        folds=(),
+        book_reasons=(),
+        extra_reasons=(GO_REASON_SELECTION_WINDOW_OVERLAP,),
+        blend_primary_max_drawdown=-0.1,
+        max_drawdown=0.6,
+        deflated_sharpe_ratio=0.99,
+    )
+    assert result.eligible is True
+    assert result.reason_codes == ("SELECTION_WINDOW_OVERLAP",)
+
+
+# SCENARIO_SELECTION_WINDOW_OVERLAP_NEVER_BLOCKS_ALONE (disclosure preserved)
+def test_selection_window_overlap_preserved_alongside_real_blocker() -> None:
+    result = _mhs_research_go(
+        folds=(),
+        book_reasons=(),
+        extra_reasons=(GO_REASON_SELECTION_WINDOW_OVERLAP,),
+        blend_primary_max_drawdown=-0.1,
+        max_drawdown=0.6,
+        deflated_sharpe_ratio=None,
+    )
+    assert result.eligible is False
+    assert set(result.reason_codes) == {
+        GO_REASON_SELECTION_WINDOW_OVERLAP,
+        GO_REASON_DEFLATED_SHARPE_UNAVAILABLE,
+    }

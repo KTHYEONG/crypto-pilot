@@ -1,4 +1,8 @@
-"""Evidence-layer unit contract: selection-window overlap disclosure (I1)."""
+"""Evidence-layer unit contract: selection-window overlap disclosure (I1).
+
+SCENARIO_MHS_UNIT_REGRESSION_UNCHANGED: 아래 신설 케이스 포함, 이 디렉터리의
+기존 MHS 유닛 스위트 전체는 두 수정이 가법적임을 확인하는 회귀 게이트다.
+"""
 
 from __future__ import annotations
 
@@ -17,10 +21,16 @@ from src.mhs.evidence import (
     deflated_sharpe_ratio,
     distinct_trial_sr_variance,
     effective_observation_count,
+    holdout_tail_evidence,
     regime_conditional_sharpe_blocks,
     selection_overlap_fraction,
 )
-from src.mhs.params import DEFAULT_SELECTION_WINDOW, PERIODS_PER_YEAR_1H
+from src.mhs.params import (
+    DEFAULT_SELECTION_WINDOW,
+    PERIODS_PER_YEAR_1H,
+    PNL_VOL_TARGET_BURN_IN_DAYS,
+)
+from src.research.evaluation.policy import HOLDOUT_CUTOFF
 
 _UTC = "UTC"
 
@@ -314,3 +324,54 @@ def test_SCENARIO_MHS_SELECTION_EXEC_OVERLAP_REDUCED_03() -> None:
         pd.Timestamp("2021-01-01", tz=_UTC), pd.Timestamp("2025-12-31 23:59:59", tz=_UTC)
     )
     assert final_oos_fraction < default_fraction
+
+
+# SCENARIO_HOLDOUT_TAIL_EVIDENCE_ISOLATES_POST_CUTOFF_PERFORMANCE
+def test_holdout_tail_evidence_isolates_post_cutoff_performance() -> None:
+    """봉인 경계(HOLDOUT_CUTOFF) 이후 구간만의 성과를 분리 계산하고, 미달
+    표본/미통과 입력은 None으로 정직하게 신호하며 입력을 변이하지 않는다."""
+    rng = np.random.default_rng(20260825)
+    hours = pd.date_range("2021-01-01 00:00", "2026-06-30 23:00", freq="1h", tz="UTC")
+    post = hours > HOLDOUT_CUTOFF
+    hourly_pre = rng.normal(0.0, 0.003, int((~post).sum()))
+    # cutoff 이후: 알려진 양의 일간 드리프트 + 소량 노이즈(std>0 보장).
+    daily_drift = 0.002
+    hourly_post = (
+        (1.0 + daily_drift) ** (1.0 / 24.0) - 1.0
+        + rng.normal(0.0, 0.0005, int(post.sum()))
+    )
+    hourly = np.empty(len(hours))
+    hourly[~post] = hourly_pre
+    hourly[post] = hourly_post
+    equity = pd.Series(np.cumprod(1.0 + hourly), index=hours)
+    snapshot = equity.copy(deep=True)
+
+    tail = holdout_tail_evidence(equity, HOLDOUT_CUTOFF)
+
+    assert tail is not None
+    expected_days = len(pd.date_range("2026-01-01", "2026-06-30", freq="1D", tz="UTC"))
+    assert tail["n_days"] == expected_days == 181
+    assert set(tail) >= {
+        "start", "end", "n_days", "total_return",
+        "geometric_cagr", "max_drawdown", "naive_sharpe",
+    }
+    # 통계는 주입된 post-cutoff 드리프트만 반영(pre-cutoff 국면과 무관):
+    # 일간 (1+d) 복리의 기하 CAGR와 총수익은 해석해 닫힌형으로 검증.
+    exact_cagr = (1.0 + daily_drift) ** 365.25 - 1.0
+    assert tail["geometric_cagr"] == pytest.approx(exact_cagr, rel=0.3)
+    assert tail["total_return"] == pytest.approx((1.0 + daily_drift) ** 181 - 1.0, rel=0.3)
+    assert tail["naive_sharpe"] > 10.0
+    assert -0.05 <= tail["max_drawdown"] <= 0.0
+    assert str(pd.Timestamp("2026-01-01", tz="UTC")) in str(tail["start"])
+
+    # (b) 봉인을 아예 넘지 않는 시리즈: None.
+    equity_pre_only = equity.loc[hours <= HOLDOUT_CUTOFF]
+    assert holdout_tail_evidence(equity_pre_only, HOLDOUT_CUTOFF) is None
+
+    # (c) 꼬리 표본이 min_days 미만(종료 10일 전 컷): None.
+    short_cutoff = hours[-1] - pd.Timedelta(days=10)
+    assert holdout_tail_evidence(equity, short_cutoff) is None
+    assert PNL_VOL_TARGET_BURN_IN_DAYS == 90
+
+    # (d) 입력 Series 불변.
+    pd.testing.assert_series_equal(equity, snapshot)
