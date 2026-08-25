@@ -15,7 +15,7 @@ import pandas as pd
 from scipy.stats import norm
 
 from src.mhs.execution import mhs_ledger_pnl
-from src.mhs.params import DEFAULT_SELECTION_WINDOW
+from src.mhs.params import DEFAULT_SELECTION_WINDOW, PERIODS_PER_YEAR_1H
 from src.mhs.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
 
 _EULER_GAMMA = 0.577215664901532860606512090082402431
@@ -525,15 +525,51 @@ def deflated_sharpe_ratio(
     return probabilistic_sharpe_ratio(observed_sr, benchmark_sr, n_obs, skew, kurtosis)
 
 
+TRIAL_SHARPE_DEDUP_DECIMALS: int = 6
+MIN_TRIAL_SHARPE_OUTCOMES: int = 8
+
+
+def distinct_trial_sr_variance(
+    trial_sharpes: Sequence[float],
+    observed_sr: float,
+    *,
+    dedup_decimals: int = TRIAL_SHARPE_DEDUP_DECIMALS,
+    min_outcomes: int = MIN_TRIAL_SHARPE_OUTCOMES,
+) -> float:
+    """ddof=1 variance over the DISTINCT pooled per-observation trial Sharpes.
+
+    The pool is ``[observed_sr] + every finite element of trial_sharpes`` --
+    the current run's own Sharpe is always a member -- deduplicated by
+    ``round(x, dedup_decimals)`` so bit-identical re-runs of one configuration
+    can neither shrink V nor game the deflation benchmark. Raises ValueError
+    naming both counts when fewer than ``min_outcomes`` distinct outcomes
+    survive; callers must fail closed rather than substitute another variance.
+    """
+    pooled = [float(observed_sr)]
+    for sharpe in trial_sharpes:
+        value = float(sharpe)
+        if np.isfinite(value):
+            pooled.append(value)
+    distinct = sorted({round(value, dedup_decimals) for value in pooled})
+    if len(distinct) < min_outcomes:
+        raise ValueError(
+            f"only {len(distinct)} distinct trial Sharpe outcomes pooled "
+            f"(observed_sr included), need at least {min_outcomes}"
+        )
+    return float(np.var(np.asarray(distinct, dtype="float64"), ddof=1))
+
+
 @dataclass(frozen=True, slots=True)
 class DsrDecomposition:
     """Descriptive decomposition of one deflated Sharpe Ratio evaluation.
 
     Purely observational -- it never feeds back into the reported DSR value.
     ``margin = observed_sr - benchmark_sr``, ``radicand`` is the PSR variance
-    correction, and ``fold_sharpes`` holds the per-trial Sharpes whose
-    dispersion forms the benchmark, so candidate runs can be compared on
-    ``trial_sr_sqrt_variance`` rather than on Sharpe alone.
+    correction. ``fold_sharpes`` holds the per-fold Sharpes of the replayed
+    anchored folds (observational context only: the benchmark dispersion now
+    comes from the distinct trial outcomes recorded in the run history).
+    ``n_obs_effective_holding_horizon`` is the lag-168h sensitivity reading of
+    the effective sample size, published so no reader has to rediscover it.
     """
 
     observed_sr: float
@@ -545,6 +581,9 @@ class DsrDecomposition:
     radicand: float
     n_trials: int
     fold_sharpes: tuple[float, ...]
+    trial_sr_source: str = "distinct_trial_outcomes"
+    distinct_trial_outcomes: int = 0
+    n_obs_effective_holding_horizon: int = 0
 
 
 def deflated_sharpe_decomposition(
@@ -556,6 +595,10 @@ def deflated_sharpe_decomposition(
     skew: float,
     kurtosis: float,
     fold_sharpes: tuple[float, ...],
+    *,
+    trial_sr_source: str = "distinct_trial_outcomes",
+    distinct_trial_outcomes: int = 0,
+    n_obs_effective_holding_horizon: int = 0,
 ) -> DsrDecomposition:
     """Decompose one DSR evaluation into its registered-formula components.
 
@@ -591,7 +634,113 @@ def deflated_sharpe_decomposition(
         radicand=_psr_radicand(observed_sr, skew, kurtosis),
         n_trials=n_trials,
         fold_sharpes=tuple(fold_sharpes),
+        trial_sr_source=trial_sr_source,
+        distinct_trial_outcomes=distinct_trial_outcomes,
+        n_obs_effective_holding_horizon=n_obs_effective_holding_horizon,
     )
+
+
+# Causal regime stratification constants (report-only evidence, never gates):
+# one-year trailing high for the BTC drawdown state, 30-day window for the
+# book realized vol, both labelled strictly backward-looking.
+_REGIME_TRAILING_HIGH_HOURS: int = 8760
+_REGIME_TRAILING_HIGH_MIN_HOURS: int = 24
+_REGIME_VOL_LOOKBACK_HOURS: int = 720
+_REGIME_VOL_MIN_HOURS: int = 24
+_REGIME_TERCILE_MIN_HOURS: int = 48
+_BTC_DRAWDOWN_BULL_FLOOR: float = -0.20
+_BTC_DRAWDOWN_BEAR_FLOOR: float = -0.50
+
+
+def causal_regime_labels(returns: pd.Series, btc_close: pd.Series) -> pd.DataFrame:
+    """Strictly causal per-bar regime labels over an hourly return series.
+
+    The BTC drawdown state divides ``btc_close`` -- an independent, exogenous
+    price level reindexed to ``returns.index`` -- by its own trailing rolling
+    max **shifted by one bar**; the book trailing-vol terciles compare the
+    trailing realized vol of ``returns`` against expanding-window quantiles
+    **shifted by one bar**. Deriving the drawdown state from the book's own
+    equity would make "Sharpe conditional on our own drawdown" close to
+    tautological; ``btc_close`` keeps the two regime axes independent. No
+    full-sample statistic enters any label, so each label at index t is
+    bit-identical whether computed on the prefix ``[:t+1]`` of both series or
+    the full series. Warm-up rows carry an empty string (unlabelled); a
+    non-finite ``btc_close`` bar carries an unlabelled drawdown state only.
+    """
+    btc_level = btc_close.reindex(returns.index).astype("float64")
+    trailing_high = (
+        btc_level.rolling(
+            _REGIME_TRAILING_HIGH_HOURS, min_periods=_REGIME_TRAILING_HIGH_MIN_HOURS
+        ).max().shift(1)
+    )
+    drawdown = btc_level / trailing_high - 1.0
+    bull = (drawdown > _BTC_DRAWDOWN_BULL_FLOOR).fillna(False).to_numpy(dtype=bool)
+    bear = (drawdown < _BTC_DRAWDOWN_BEAR_FLOOR).fillna(False).to_numpy(dtype=bool)
+    states: np.ndarray = np.full(len(returns), "", dtype=object)
+    states[bull] = "bull"
+    states[~bull & ((drawdown >= _BTC_DRAWDOWN_BEAR_FLOOR).fillna(False).to_numpy(dtype=bool))] = "correction"
+    states[bear] = "bear"
+
+    realized_vol = (
+        returns.rolling(_REGIME_VOL_LOOKBACK_HOURS, min_periods=_REGIME_VOL_MIN_HOURS)
+        .std().shift(1)
+    )
+    quantile_low = (
+        realized_vol.expanding(min_periods=_REGIME_TERCILE_MIN_HOURS)
+        .quantile(1.0 / 3.0).shift(1)
+    )
+    quantile_high = (
+        realized_vol.expanding(min_periods=_REGIME_TERCILE_MIN_HOURS)
+        .quantile(2.0 / 3.0).shift(1)
+    )
+    is_low = (realized_vol <= quantile_low).fillna(False).to_numpy(dtype=bool)
+    is_mid = (
+        (realized_vol > quantile_low) & (realized_vol <= quantile_high)
+    ).fillna(False).to_numpy(dtype=bool)
+    is_high = (realized_vol > quantile_high).fillna(False).to_numpy(dtype=bool)
+    terciles: np.ndarray = np.full(len(returns), "", dtype=object)
+    terciles[is_low] = "low"
+    terciles[is_mid] = "mid"
+    terciles[is_high] = "high"
+
+    return pd.DataFrame(
+        {"btc_drawdown_state": states, "book_vol_tercile": terciles},
+        index=returns.index,
+    )
+
+
+def regime_conditional_sharpe_blocks(
+    returns: pd.Series, btc_close: pd.Series,
+) -> dict[str, dict[str, float]]:
+    """Causal regime stratification of hourly returns (observational only).
+
+    Consumes :func:`causal_regime_labels` and reports, per block, ``n_hours``,
+    naive annualized ``sharpe`` and ``ann_vol``. Warm-up hours remain
+    unlabelled, so the summed ``n_hours`` of one labelling never exceeds
+    ``len(returns)``.
+    """
+    if len(returns) == 0:
+        return {}
+    labels = causal_regime_labels(returns, btc_close)
+    values = returns.to_numpy(dtype="float64")
+    annualization = math.sqrt(PERIODS_PER_YEAR_1H)
+    blocks: dict[str, dict[str, float]] = {}
+    for column, prefix in (
+        ("btc_drawdown_state", "btc_drawdown_"),
+        ("book_vol_tercile", "book_vol_"),
+    ):
+        column_values = labels[column].to_numpy()
+        for label in sorted({value for value in column_values if value}):
+            sample = values[column_values == label]
+            count = int(sample.size)
+            mean = float(sample.mean()) if count else 0.0
+            sd = float(sample.std(ddof=1)) if count >= 2 else 0.0
+            blocks[f"{prefix}{label}"] = {
+                "n_hours": count,
+                "sharpe": float(mean / sd * annualization) if sd > 0.0 else 0.0,
+                "ann_vol": float(sd * annualization),
+            }
+    return blocks
 
 
 @dataclass(frozen=True, slots=True)
