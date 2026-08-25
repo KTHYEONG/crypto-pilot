@@ -92,12 +92,14 @@ def derive_trials_attempted(history_dir: Path | str | None = None) -> tuple[int,
     """Audit-trials denominator for the DSR from the run history itself.
 
     Counts the distinct flag configurations (each record's canonical ``flags``
-    payload) across every JSONL shard and returns ``(max(counted,
-    SEARCH_TRIALS_ATTEMPTED), source)`` so the registered constant is a floor,
-    never a substitute for observation. ``source`` is ``'history'`` when the
-    observed count exceeds the constant, ``'constant'`` when the constant
-    binds, or ``'constant_fallback'`` when the history is unreadable (missing
-    directory or malformed records). O(history_lines).
+    payload) across every JSONL shard and returns
+    ``(SEARCH_TRIALS_ATTEMPTED + counted, 'constant_plus_history')``: the
+    registered constant is the floor for the search performed before any
+    history existed, and every newly recorded distinct configuration adds on
+    top of it, so the denominator is monotone -- never capped -- in
+    exploration. ``source`` is ``'constant_plus_history'`` when at least one
+    readable record exists, or ``'constant_fallback'`` when the history is
+    unreadable (missing directory or malformed records). O(history_lines).
     """
     directory = Path(history_dir) if history_dir is not None else _DEFAULT_HISTORY_DIR
     try:
@@ -118,7 +120,4 @@ def derive_trials_attempted(history_dir: Path | str | None = None) -> tuple[int,
     if observed_records == 0:
         # No readable history at all: the denominator's provenance must say so.
         return SEARCH_TRIALS_ATTEMPTED, "constant_fallback"
-    counted = len(seen)
-    if counted > SEARCH_TRIALS_ATTEMPTED:
-        return counted, "history"
-    return SEARCH_TRIALS_ATTEMPTED, "constant"
+    return SEARCH_TRIALS_ATTEMPTED + len(seen), "constant_plus_history"

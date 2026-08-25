@@ -177,8 +177,11 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             ctx.recorder.record("multi_feature_diagnostic")
         del _diag_panels
         gc.collect()
-    ctx.deflated_sharpe_ratio = _statistics._deflated_sharpe_evidence(
-        ctx.blend_report, ctx.folds, ctx.trials_attempted,
+    ctx.deflated_sharpe_ratio, ctx.dsr_decomposition = _statistics._deflated_sharpe_evidence(ctx.blend_report, ctx.folds, ctx.trials_attempted)  # noqa: E501
+    ctx.fold_sharpe_dispersion = (
+        float(ctx.dsr_decomposition.trial_sr_sqrt_variance)
+        if ctx.dsr_decomposition is not None
+        else None
     )
     ctx.fold_blend_parity, parity_reasons = _fold_blend_parity(ctx.blend_traces, ctx.folds)
     # I-FAMILY level 증거: fold별 min이 아니라 pooled 하한으로 판정한다.

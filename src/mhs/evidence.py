@@ -370,6 +370,21 @@ def book_evidence(
     return BookEvidence(prescreen=prescreen, tail=tail)
 
 
+def _bartlett_weighted_acf_sum(demeaned: np.ndarray, var: float, max_lag: int) -> float:
+    """Bartlett-weighted lag autocorrelation sum over ``k = 1..max_lag``.
+
+    Shared by the autocorrelation-adjusted Sharpe denominator and the
+    effective-sample-size estimator so both statistics penalize exactly the
+    same serial-dependence estimate.
+    """
+    n = len(demeaned)
+    acf_sum = 0.0
+    for k in range(1, max_lag + 1):
+        rho = float(np.dot(demeaned[k:], demeaned[: n - k])) / var if var > 0 else 0.0
+        acf_sum += (1.0 - k / (max_lag + 1)) * rho
+    return acf_sum
+
+
 def autocorrelation_adjusted_sharpe(
     daily_net_returns: pd.Series,
     annualization_days: int = 365,
@@ -404,15 +419,41 @@ def autocorrelation_adjusted_sharpe(
             return float("-inf")
         return float("nan")
     sample_sharpe = mean / std * math.sqrt(annualization_days)
-    acf_sum = 0.0
-    n = len(daily_net_returns)
     demeaned = daily_net_returns.to_numpy(dtype="float64") - mean
     var = float(np.dot(demeaned, demeaned))
-    for k in range(1, max_lag_days + 1):
-        rho = float(np.dot(demeaned[k:], demeaned[: n - k])) / var if var > 0 else 0.0
-        acf_sum += (1.0 - k / (max_lag_days + 1)) * rho
+    acf_sum = _bartlett_weighted_acf_sum(demeaned, var, max_lag_days)
     denom = max(1.0 + 2.0 * acf_sum, 1e-12)
     return sample_sharpe / math.sqrt(denom)
+
+
+def effective_observation_count(returns: pd.Series, max_lag: int = 24) -> int:
+    """Effective sample size under the Bartlett-weighted autocorrelation sum.
+
+    ``n_eff = n / (1 + 2 * sum((1 - k/(max_lag+1)) * rho_k))`` over lags
+    ``k = 1..max_lag``, sharing the exact autocorrelation estimate of
+    ``autocorrelation_adjusted_sharpe`` so both statistics penalize the same
+    serial dependence. The result is clipped to ``[1, n]``: negative
+    autocorrelation can never inflate the sample above the raw count. Raises
+    ``ValueError`` when ``max_lag < 1`` or fewer than ``max_lag + 2``
+    observations are supplied.
+    """
+    if max_lag < 1:
+        raise ValueError(f"max_lag must be >= 1, got {max_lag}")
+    n = len(returns)
+    if n < max_lag + 2:
+        raise ValueError(f"need at least {max_lag + 2} observations, got {n}")
+    arr = returns.to_numpy(dtype="float64")
+    mean = float(arr.mean())
+    demeaned = arr - mean
+    var = float(np.dot(demeaned, demeaned))
+    denom = 1.0 + 2.0 * _bartlett_weighted_acf_sum(demeaned, var, max_lag)
+    n_eff = int(n / denom) if denom > 0.0 else 0
+    return int(min(max(n_eff, 1), n))
+
+
+def _psr_radicand(observed_sr: float, skew: float, kurtosis: float) -> float:
+    """PSR variance correction ``1 - skew*SR + ((kurt-1)/4)*SR^2`` (shared form)."""
+    return 1.0 - skew * observed_sr + ((kurtosis - 1.0) / 4.0) * observed_sr**2
 
 
 def probabilistic_sharpe_ratio(
@@ -433,11 +474,23 @@ def probabilistic_sharpe_ratio(
     """
     if n_obs < 2:
         raise ValueError(f"n_obs must be >= 2, got {n_obs}")
-    radicand = 1.0 - skew * observed_sr + ((kurtosis - 1.0) / 4.0) * observed_sr**2
+    radicand = _psr_radicand(observed_sr, skew, kurtosis)
     if radicand <= 0.0:
         return float("nan")
     z = (observed_sr - benchmark_sr) * math.sqrt(n_obs - 1.0) / math.sqrt(radicand)
     return float(norm.cdf(z))
+
+
+def _expected_max_trial_sr(trial_sr_variance: float, n_trials: int) -> float:
+    """Expected maximum Sharpe over ``n_trials`` independent zero-edge trials."""
+    sd = math.sqrt(trial_sr_variance)
+    return float(
+        sd
+        * (
+            (1.0 - _EULER_GAMMA) * norm.ppf(1.0 - 1.0 / n_trials)
+            + _EULER_GAMMA * norm.ppf(1.0 - 1.0 / (n_trials * math.e))
+        )
+    )
 
 
 def deflated_sharpe_ratio(
@@ -468,12 +521,77 @@ def deflated_sharpe_ratio(
         )
     if trial_sr_variance == 0.0:
         return probabilistic_sharpe_ratio(observed_sr, 0.0, n_obs, skew, kurtosis)
-    sd = math.sqrt(trial_sr_variance)
-    max_benchmark = sd * (
-        (1.0 - _EULER_GAMMA) * norm.ppf(1.0 - 1.0 / n_trials)
-        + _EULER_GAMMA * norm.ppf(1.0 - 1.0 / (n_trials * math.e))
+    benchmark_sr = _expected_max_trial_sr(trial_sr_variance, n_trials)
+    return probabilistic_sharpe_ratio(observed_sr, benchmark_sr, n_obs, skew, kurtosis)
+
+
+@dataclass(frozen=True, slots=True)
+class DsrDecomposition:
+    """Descriptive decomposition of one deflated Sharpe Ratio evaluation.
+
+    Purely observational -- it never feeds back into the reported DSR value.
+    ``margin = observed_sr - benchmark_sr``, ``radicand`` is the PSR variance
+    correction, and ``fold_sharpes`` holds the per-trial Sharpes whose
+    dispersion forms the benchmark, so candidate runs can be compared on
+    ``trial_sr_sqrt_variance`` rather than on Sharpe alone.
+    """
+
+    observed_sr: float
+    benchmark_sr: float
+    margin: float
+    trial_sr_sqrt_variance: float
+    n_obs_raw: int
+    n_obs_effective: int
+    radicand: float
+    n_trials: int
+    fold_sharpes: tuple[float, ...]
+
+
+def deflated_sharpe_decomposition(
+    observed_sr: float,
+    trial_sr_variance: float,
+    n_trials: int,
+    n_obs_raw: int,
+    n_obs_effective: int,
+    skew: float,
+    kurtosis: float,
+    fold_sharpes: tuple[float, ...],
+) -> DsrDecomposition:
+    """Decompose one DSR evaluation into its registered-formula components.
+
+    The benchmark and radicand are recomputed with exactly the expressions
+    ``deflated_sharpe_ratio`` uses, so
+    ``norm.cdf(margin * sqrt(n_obs_effective - 1) / sqrt(radicand))``
+    reproduces the reported statistic. Validation mirrors
+    ``deflated_sharpe_ratio`` for both sample counts.
+    """
+    if n_trials < 1:
+        raise ValueError(f"n_trials must be >= 1, got {n_trials}")
+    if n_obs_raw < 2:
+        raise ValueError(f"n_obs_raw must be >= 2, got {n_obs_raw}")
+    if n_obs_effective < 2:
+        raise ValueError(f"n_obs_effective must be >= 2, got {n_obs_effective}")
+    if trial_sr_variance < 0.0:
+        raise ValueError(
+            f"trial_sr_variance must be >= 0, got {trial_sr_variance}"
+        )
+    benchmark_sr = (
+        0.0
+        if trial_sr_variance == 0.0
+        else _expected_max_trial_sr(trial_sr_variance, n_trials)
     )
-    return probabilistic_sharpe_ratio(observed_sr, max_benchmark, n_obs, skew, kurtosis)
+    margin = observed_sr - benchmark_sr
+    return DsrDecomposition(
+        observed_sr=observed_sr,
+        benchmark_sr=benchmark_sr,
+        margin=margin,
+        trial_sr_sqrt_variance=math.sqrt(trial_sr_variance),
+        n_obs_raw=n_obs_raw,
+        n_obs_effective=n_obs_effective,
+        radicand=_psr_radicand(observed_sr, skew, kurtosis),
+        n_trials=n_trials,
+        fold_sharpes=tuple(fold_sharpes),
+    )
 
 
 @dataclass(frozen=True, slots=True)

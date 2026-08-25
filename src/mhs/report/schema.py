@@ -20,7 +20,11 @@ if TYPE_CHECKING:
     )
     from src.application.research.mhs.resources import ProcessTreeMemoryStats
     from src.mhs.discovery import DiscoveryQualificationResult
-    from src.mhs.evidence import AnchoredPurgedFold, DeploymentReadinessResult
+    from src.mhs.evidence import (
+        AnchoredPurgedFold,
+        DeploymentReadinessResult,
+        DsrDecomposition,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +94,10 @@ class MhsHorizonDiagnosticReport:
     selection_overlap_fraction: float | None = None
     # DSR 분모(trials_attempted)의 출처: 'history' | 'constant' | 'constant_fallback'.
     trials_attempted_source: str | None = None
+    # DSR 분해 계측: 어느 항(SR 마진/분산/n_eff/N)이 통계를 끌어내렸는지 노출.
+    dsr_decomposition: DsrDecomposition | None = None
+    # 폴드 Sharpe 분산 sqrt(V): 사전등록 후보 탐색의 1차 목적함수.
+    fold_sharpe_dispersion: float | None = None
 
     def to_payload(self) -> Any:
         from src.mhs.report.artifacts import _jsonable
