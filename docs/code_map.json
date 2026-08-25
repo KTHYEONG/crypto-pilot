@@ -200,8 +200,10 @@
       "tests/unit/mhs/test_evaluation_fold_report.py",
       "tests/unit/mhs/test_golden_digest.py",
       "tests/unit/mhs/test_report_persist_compact.py",
-      "tests/unit/mhs/test_result_log.py"
-    ]
+      "tests/unit/mhs/test_result_log.py",
+      "tests/unit/mhs/test_evidence.py"
+    ],
+    "architecture": "docs/specs/mhs_dsr_qualification.md"
   },
   "src/mhs/execution.py": {
     "testing": [
