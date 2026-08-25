@@ -276,13 +276,25 @@ MhsExecutionWindow = ExecutionReplayWindow
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
 
-def _stress_cost_execution_spec() -> ExecutionSpec:
+def _resolved_base_execution_spec(request: Any) -> ExecutionSpec:
+    """Single owner of the request-driven base execution spec (S6).
+
+    Threads the configured execution window (``passive_timeout_minutes``) into
+    every replay bound; the frozen default 30 reproduces legacy specs exactly.
+    """
+    return dataclass_replace(
+        ExecutionSpec(), passive_timeout_minutes=int(request.passive_timeout_minutes)
+    )
+
+
+def _stress_cost_execution_spec(base: ExecutionSpec | None = None) -> ExecutionSpec:
     """SPREAD_AND_COST_X3: the same realistic fill mechanic at 3x cost."""
-    base = ExecutionSpec()
+    resolved = ExecutionSpec() if base is None else base
     return ExecutionSpec(
-        maker_fee_bps=base.maker_fee_bps * STRESS_COST_MULTIPLIER,
-        taker_fee_bps=base.taker_fee_bps * STRESS_COST_MULTIPLIER,
-        taker_slippage_bps=base.taker_slippage_bps * STRESS_COST_MULTIPLIER,
+        maker_fee_bps=resolved.maker_fee_bps * STRESS_COST_MULTIPLIER,
+        taker_fee_bps=resolved.taker_fee_bps * STRESS_COST_MULTIPLIER,
+        taker_slippage_bps=resolved.taker_slippage_bps * STRESS_COST_MULTIPLIER,
+        passive_timeout_minutes=resolved.passive_timeout_minutes,
     )
 
 
@@ -2142,7 +2154,7 @@ def _book_outcome(
         tz="UTC",
     )
     target_replay, signal_replay, censored = _truncate_replayable_decisions(
-        target_weights, signal_available_at, execution_grid, ExecutionSpec(),
+        target_weights, signal_available_at, execution_grid, _resolved_base_execution_spec(request),
     )
     replay_symbols = list(target_replay.columns)
 
@@ -2153,7 +2165,7 @@ def _book_outcome(
     def _windows() -> Iterator[MhsExecutionWindow]:
         return _iter_mhs_execution_windows(
             target_replay, signal_replay, root, request.execution_timeframe,
-            start, end, funding_by_symbol, request.mark_mode, ExecutionSpec(),
+            start, end, funding_by_symbol, request.mark_mode, _resolved_base_execution_spec(request),
         )
 
     def _window_telemetry(
@@ -2194,9 +2206,9 @@ def _book_outcome(
         # and each diagnostic): the bounds must compete on identical taker
         # crossing costs, never a single bound overridden in isolation.
         replay_base_spec = (
-            dataclass_replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+            dataclass_replace(_resolved_base_execution_spec(request), liquidity_cost_model="corwin_schultz")
             if request.liquidity_cost_model == "corwin_schultz"
-            else ExecutionSpec()
+            else _resolved_base_execution_spec(request)
         )
         batch_bounds: list[
             tuple[
@@ -2214,7 +2226,7 @@ def _book_outcome(
             (
                 "OHLCV_IMMEDIATE_TAKER",
                 dataclass_replace(
-                    _stress_cost_execution_spec(),
+                    _stress_cost_execution_spec(replay_base_spec),
                     liquidity_cost_model=replay_base_spec.liquidity_cost_model,
                 ),
             ),
@@ -2251,7 +2263,7 @@ def _book_outcome(
                 coupled = replay_execution_windows_coupled(
                     _window_telemetry(_windows(), "execution_window"),
                     initial_equity,
-                    ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
+                    ("OHLCV_IMMEDIATE_TAKER", _resolved_base_execution_spec(request)),
                     batch_bounds,
                     lambda daily_returns: _scaling._replay_exposure_scale(daily_returns, request),
                     retain_event_snapshots=False,
@@ -2270,7 +2282,7 @@ def _book_outcome(
             # P&L-vol-target scale, then Phase B (rescaled batch).
             primary_two_pass = replay_execution_windows(
                 _window_telemetry(_windows(), "execution_window"),
-                initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+                initial_equity, "OHLCV_IMMEDIATE_TAKER", _resolved_base_execution_spec(request),
                 retain_event_snapshots=False,
                 min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
             )
@@ -3595,7 +3607,7 @@ def _run_anchored_fold(
             tz="UTC",
         )
         target_replay, signal_available_at, terminal_censored = _truncate_replayable_decisions(
-            target_replay, signal_available_at, execution_grid, ExecutionSpec(),
+            target_replay, signal_available_at, execution_grid, _resolved_base_execution_spec(request),
         )
         decision_intents = int(np.isfinite(target_replay.to_numpy()).sum())
 
@@ -3606,7 +3618,7 @@ def _run_anchored_fold(
         def _windows() -> Iterator[MhsExecutionWindow]:
             return _iter_mhs_execution_windows(
                 target_replay, signal_available_at, root, request.execution_timeframe,
-                vs, ve, funding_by_symbol, request.mark_mode, ExecutionSpec(),
+                vs, ve, funding_by_symbol, request.mark_mode, _resolved_base_execution_spec(request),
             )
 
         def _window_telemetry(
@@ -3632,7 +3644,7 @@ def _run_anchored_fold(
         # primary/stress pair reuses one regenerated window stream.
         primary = replay_execution_windows(
             _window_telemetry(_windows(), window_prefix),
-            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", _resolved_base_execution_spec(request),
             retain_event_snapshots=False,
         )
         # Two-pass primary (reference -> P&L-vol-target rescale -> reported):
@@ -3660,8 +3672,8 @@ def _run_anchored_fold(
             ),
             initial_equity,
             [
-                ("OHLCV_IMMEDIATE_TAKER", ExecutionSpec()),
-                ("OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec()),
+                ("OHLCV_IMMEDIATE_TAKER", _resolved_base_execution_spec(request)),
+                ("OHLCV_IMMEDIATE_TAKER", _stress_cost_execution_spec(_resolved_base_execution_spec(request))),
             ],
             retain_event_snapshots=False,
         )

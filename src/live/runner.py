@@ -55,6 +55,9 @@ class CycleReport:
     decision_time: pd.Timestamp
     intent_count: int
     outcomes: tuple[ExecutionOutcome, ...] = ()
+    # minNotional 등으로 드롭된 목표 노셔널 비중(S5): 자본 캡($2,000) 하에서의
+    # 페널티를 매 사이클 로그에서 보이게 한다.
+    dropped_notional_fraction: float = 0.0
 
 
 def check_risk_gates(
@@ -145,6 +148,23 @@ def run_shadow_cycle(
         targets, dropped = target_quantities(weights, marks, filters, equity)
         for item in dropped:
             audit.record("symbol_dropped", symbol=item.symbol, reason=item.reason)
+        # S5 공시: 드롭 목표 노셔널 / 전체 목표 노셔널. 드롭이 없으면 정확히 0.0.
+        dropped_notional = sum(
+            (abs(item.target_notional) for item in dropped), Decimal(0)
+        )
+        total_target_notional = dropped_notional + sum(
+            (
+                abs(equity * Decimal(str(float(weights[symbol]))))
+                for symbol in targets
+                if symbol in weights.index
+            ),
+            Decimal(0),
+        )
+        dropped_fraction = (
+            float(dropped_notional / total_target_notional)
+            if total_target_notional > 0
+            else 0.0
+        )
 
         intents = plan_orders(targets, snapshot.positions, filters, marks, run_id)
 
@@ -176,6 +196,7 @@ def run_shadow_cycle(
             decision_time=decision_time,
             intent_count=len(outcomes),
             outcomes=tuple(outcomes),
+            dropped_notional_fraction=dropped_fraction,
         )
         audit.record("cycle_complete", intents=len(outcomes))
         return report
