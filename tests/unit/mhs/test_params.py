@@ -107,6 +107,7 @@ def test_scenario_mhs_kelly_two_sided_05_registered_roster_cap_and_extreme_rung(
 
     assert REGISTERED_POLICY_THRESHOLDS == {
         "cap_60_roster": 60.0, "primary_annual_return": 0.05,
+        "deflated_sharpe_ratio": 0.95,
     }
     assert "cap_30_roster" not in REGISTERED_POLICY_THRESHOLDS
     extreme = GROWTH_RISK_ENVELOPES["growth_extreme"]
@@ -158,3 +159,45 @@ def test_evidence_gate_alpha_registered() -> None:
     assert NULL_BOOTSTRAP_SEED > 0
     # 유도 근거 없는 고정 임계값은 선언형 alpha로 교체되어 삭제되다.
     assert not hasattr(params_module, "FOLD_GROWTH_CONCENTRATION_MAX_SHARE")
+
+
+def test_SCENARIO_MHS_EVID_02_SELECTION_OVERLAP_IS_DISCLOSED() -> None:
+    """SCENARIO_MHS_EVID_02_SELECTION_OVERLAP_IS_DISCLOSED: the fraction of the
+    report window inside the defaults' selection window is 1.0 when identical,
+    0.0 when disjoint, fractional when partially overlapping, and fails closed
+    on an inverted window."""
+    import pandas as pd
+
+    from src.mhs.evidence import selection_overlap_fraction
+    from src.mhs.params import DEFAULT_SELECTION_WINDOW
+
+    registered_window = DEFAULT_SELECTION_WINDOW
+    assert registered_window == (
+        pd.Timestamp("2021-01-01", tz="UTC"),
+        pd.Timestamp("2025-12-31", tz="UTC"),
+    )
+
+    full = selection_overlap_fraction(
+        pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")
+    )
+    assert full == 1.0
+
+    disjoint = selection_overlap_fraction(
+        pd.Timestamp("2026-01-01", tz="UTC"), pd.Timestamp("2026-06-30", tz="UTC")
+    )
+    assert disjoint == 0.0
+
+    window_start, window_end = DEFAULT_SELECTION_WINDOW
+    partial = selection_overlap_fraction(window_start, window_end + (window_end - window_start))
+    assert 0.0 < partial < 1.0
+    assert partial == pytest.approx(0.5)
+
+    with pytest.raises(ValueError, match="report_end"):
+        selection_overlap_fraction(
+            pd.Timestamp("2026-01-01", tz="UTC"), pd.Timestamp("2025-01-01", tz="UTC")
+        )
+
+    zero_length = selection_overlap_fraction(
+        pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-01", tz="UTC")
+    )
+    assert zero_length == 0.0

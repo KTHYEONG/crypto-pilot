@@ -626,3 +626,83 @@ class TestNotionalWeightedShortfall:
         assert streamed.notional_weighted_shortfall_bps == pytest.approx(
             single.notional_weighted_shortfall_bps, rel=1e-9,
         )
+
+
+class TestPegChasePartialSchedule:
+    """S7: tranched peg-chase with exact quantity conservation and completion."""
+
+    def test_SCENARIO_MHS_EVID_04_PARTIAL_SCHEDULE_CONSERVES_AND_COMPLETES(self) -> None:
+        """SCENARIO_MHS_EVID_04_PARTIAL_SCHEDULE_CONSERVES_AND_COMPLETES: over
+        seeded random windows every tranched schedule is non-empty, conserves
+        quantity (qty_fraction sums to 1.0 within 1e-12), and the tranches==1
+        output is exactly the single-fill schedule's tuple."""
+        from src.mhs.execution import peg_chase_partial_schedule
+
+        rng = np.random.default_rng(20260824)
+        for _case in range(100):
+            n = int(rng.integers(2, 40))
+            anchor = float(rng.uniform(50.0, 150.0))
+            side = int(rng.choice([-1, 1]))
+            closes = anchor * np.exp(np.cumsum(rng.normal(0.0, 0.004, n)))
+            # adverse = lows(buy) / highs(sell): straddle around each bar close.
+            adverse = closes * (
+                1.0 - side * np.abs(rng.normal(0.0, 0.003, n))
+            )
+            for tranches in (1, 2, 4):
+                spec = ExecutionSpec(peg_chase_tranches=tranches)
+                schedule = peg_chase_partial_schedule(
+                    anchor, side, adverse, closes, spec
+                )
+                assert schedule, "a completable window must never yield an empty schedule"
+                assert abs(sum(entry[3] for entry in schedule) - 1.0) <= 1e-12
+                for rel_pos, price, _fee, _fraction, reason in schedule:
+                    assert 0 <= rel_pos < n
+                    assert np.isfinite(price)
+                    assert price > 0
+                    assert reason in ("maker_fill", "backstop_taker")
+                if tranches == 1:
+                    single = peg_chase_fill_schedule(anchor, side, adverse, closes, spec)
+                    assert single is not None
+                    assert len(schedule) == 1
+                    rel_pos, price, fee_bps, _fraction, reason = schedule[0]
+                    assert (rel_pos, price, fee_bps, reason) == single
+
+    def test_partial_schedule_splits_into_maker_tranches_with_carried_share(self) -> None:
+        """A mid-window trade-through fills only its tranche share as maker;
+        the remaining carried share crosses via the final backstop."""
+        from types import SimpleNamespace
+
+        from src.mhs.execution import peg_chase_partial_schedule
+
+        n = 12
+        anchor = 100.0
+        closes = np.full(n, 100.20)
+        adverse = np.full(n, 100.30)  # never trades through on its own
+        adverse[5] = 99.50  # one deep trade-through inside the middle third
+        spec = ExecutionSpec(peg_chase_tranches=3)
+        schedule = peg_chase_partial_schedule(anchor, 1, adverse, closes, spec)
+        assert [entry[4] for entry in schedule] == ["maker_fill", "backstop_taker"]
+        # Tranche 0 failed -> its 1/3 share is carried into tranche 1, whose
+        # own deep trade-through fills both shares as maker.
+        maker_fraction = schedule[0][3]
+        assert abs(maker_fraction - 2.0 / 3) <= 1e-12
+        assert schedule[0][0] == 5
+        backstop_fraction = schedule[1][3]
+        assert abs(maker_fraction + backstop_fraction - 1.0) <= 1e-12
+        assert schedule[1][0] == 11
+
+        # Fail-closed: a malformed tranches value raises even pre-validation.
+        bogus = SimpleNamespace(peg_chase_tranches=0)
+        with pytest.raises(ValueError, match="peg_chase_tranches"):
+            peg_chase_partial_schedule(100.0, 1, np.array([99.0]), np.array([100.0]), bogus)
+
+    def test_partial_schedule_returns_empty_on_total_data_gap(self) -> None:
+        from src.mhs.execution import peg_chase_partial_schedule
+
+        all_nan = np.full(6, np.nan)
+        assert (
+            peg_chase_partial_schedule(
+                100.0, 1, np.full(6, 100.2), all_nan, ExecutionSpec(peg_chase_tranches=2)
+            )
+            == []
+        )

@@ -345,16 +345,16 @@ def test_research_go_eligible_is_reachable(mhs_market, monkeypatch) -> None:
 
     monkeypatch.setattr(
         _research_go, "REGISTERED_POLICY_THRESHOLDS",
-        {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
+        {"cap_30_roster": 30.0, "primary_annual_return": 0.05, "deflated_sharpe_ratio": 0.95},
     )
-    registered = _research_go._mhs_research_go((passing,))
+    registered = _research_go._mhs_research_go((passing,), deflated_sharpe_ratio=0.96)
     assert registered.eligible is True
     assert registered.reason_codes == ()
     assert registered.folds_passed == 1
 
     monkeypatch.setattr(
         _research_go, "REGISTERED_POLICY_THRESHOLDS",
-        {"cap_30_roster": None, "primary_annual_return": 0.05},
+        {"cap_30_roster": None, "primary_annual_return": 0.05, "deflated_sharpe_ratio": 0.95},
     )
     missing = _research_go._mhs_research_go((passing,))
     assert missing.eligible is False
@@ -374,9 +374,9 @@ def test_research_go_data_integrity_reason_split(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         _research_go, "REGISTERED_POLICY_THRESHOLDS",
-        {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
+        {"cap_30_roster": 30.0, "primary_annual_return": 0.05, "deflated_sharpe_ratio": 0.95},
     )
-    go = _research_go._mhs_research_go((mixed,))
+    go = _research_go._mhs_research_go((mixed,), deflated_sharpe_ratio=0.96)
     assert go.data_integrity_reason_codes == (ev.GO_REASON_EXECUTION_GAP,)
     assert ev.GO_REASON_PRIMARY_SHARPE not in go.data_integrity_reason_codes
     assert set(go.reason_codes) == {
@@ -398,9 +398,9 @@ def test_research_go_data_integrity_reason_empty_when_clean(monkeypatch) -> None
     )
     monkeypatch.setattr(
         _research_go, "REGISTERED_POLICY_THRESHOLDS",
-        {"cap_30_roster": 30.0, "primary_annual_return": 0.05},
+        {"cap_30_roster": 30.0, "primary_annual_return": 0.05, "deflated_sharpe_ratio": 0.95},
     )
-    go = _research_go._mhs_research_go((alpha_only,))
+    go = _research_go._mhs_research_go((alpha_only,), deflated_sharpe_ratio=0.96)
     assert go.eligible is False
     assert go.data_integrity_reason_codes == ()
     assert go.reason_codes == (ev.GO_REASON_PRIMARY_SHARPE,)
@@ -415,6 +415,7 @@ def test_registered_policy_thresholds_contract() -> None:
 
     assert REGISTERED_POLICY_THRESHOLDS == {
         "cap_60_roster": 60.0, "primary_annual_return": 0.05,
+        "deflated_sharpe_ratio": 0.95,
     }
     assert isinstance(SEARCH_TRIALS_ATTEMPTED, int)
     assert SEARCH_TRIALS_ATTEMPTED >= 1
@@ -431,6 +432,7 @@ def test_scenario_mhs_kelly_two_sided_08_go_reason_iff_none_registration(
 
     assert SOURCE_THRESHOLDS == {
         "cap_60_roster": 60.0, "primary_annual_return": 0.05,
+        "deflated_sharpe_ratio": 0.95,
     }
 
     idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
@@ -446,15 +448,15 @@ def test_scenario_mhs_kelly_two_sided_08_go_reason_iff_none_registration(
 
     monkeypatch.setattr(
         _research_go, "REGISTERED_POLICY_THRESHOLDS",
-        {"cap_60_roster": 60.0, "primary_annual_return": 0.05},
+        {"cap_60_roster": 60.0, "primary_annual_return": 0.05, "deflated_sharpe_ratio": 0.95},
     )
-    registered = _research_go._mhs_research_go((passing,))
+    registered = _research_go._mhs_research_go((passing,), deflated_sharpe_ratio=0.96)
     assert registered.eligible is True
     assert registered.reason_codes == ()
 
     monkeypatch.setattr(
         _research_go, "REGISTERED_POLICY_THRESHOLDS",
-        {"cap_60_roster": 60.0, "primary_annual_return": None},
+        {"cap_60_roster": 60.0, "primary_annual_return": None, "deflated_sharpe_ratio": 0.95},
     )
     missing = _research_go._mhs_research_go((passing,))
     assert missing.eligible is False
