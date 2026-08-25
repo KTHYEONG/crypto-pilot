@@ -123,6 +123,7 @@ def build_feature_books(
     mask: pd.DataFrame,
     decision_grid: pd.DatetimeIndex,
     min_symbols: int = 8,
+    coverage_cutoff: pd.Timestamp | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Build dollar-neutral rank books for every coverage-admitted feature.
 
@@ -132,6 +133,10 @@ def build_feature_books(
     are absent from ``panels`` raises ``ValueError``; a feature failing its
     ``min_coverage`` in ANY year is excluded entirely from the returned dict
     (fail closed -- never NaN, never zero-filled, never silently dropped).
+    ``coverage_cutoff``, when given, restricts the admission audit to rows
+    before it -- a caller fitting or deploying a fixed PIT boundary's weight mix
+    must never have a member's availability decided by coverage in years that
+    boundary never sees (I-COVERAGE-PIT).
     """
     if min_symbols < 2:
         raise ValueError(f"min_symbols must be >= 2, got {min_symbols}")
@@ -147,7 +152,11 @@ def build_feature_books(
             raise ValueError(
                 f"feature '{spec.name}' and mask must be identically indexed and columned"
             )
-        coverage = feature_coverage_audit(feature, mask)
+        if coverage_cutoff is None:
+            coverage = feature_coverage_audit(feature, mask)
+        else:
+            in_cutoff = feature.index < coverage_cutoff
+            coverage = feature_coverage_audit(feature.loc[in_cutoff], mask.loc[in_cutoff])
         if any(cov < spec.min_coverage for cov in coverage.values()):
             continue
         step = rank_weight_book(feature, mask, 1, min_symbols)
