@@ -120,6 +120,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             member_weights=(ctx._committee_weights_by_boundary.get("top_level") if ctx.config.committee_evidence_weighting else None),
             carry_book=funding_carry_execution_book(ctx.bar_funding, ctx.execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, ctx.slow_grid, COMMITTEE_TRANCHE_COUNT, ctx.slow.min_symbols) if ctx.config.funding_carry_sleeve else None, carry_weight=ctx.config.funding_carry_weight if ctx.config.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(ctx.config),
+            coverage_cutoff=COMMITTEE_OOS_START,
         ).reindex(ctx.grid_1h).ffill().fillna(0.0)
         ctx.committee_execution_book = ctx.blend_1h
         # Build per-member attribution books (I5: observational only)
