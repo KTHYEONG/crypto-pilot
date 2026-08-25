@@ -203,7 +203,7 @@
       "tests/unit/mhs/test_result_log.py",
       "tests/unit/mhs/test_evidence.py"
     ],
-    "architecture": "docs/specs/mhs_dsr_qualification.md"
+    "architecture": "docs/specs/mhs_dsr_passage.md"
   },
   "src/mhs/execution.py": {
     "testing": [
