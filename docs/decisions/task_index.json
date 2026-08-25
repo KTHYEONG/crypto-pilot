@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_HOLDOUT_REPORT_AND_GO_GATE",
+      "date": "2026-08-26",
+      "adr_id": "ADR_20260826_MHS_HOLDOUT_REPORT_AND_GO_GATE",
+      "domain": "evidence",
+      "title": "MHS hold-out tail 리포팅 신설 및 Research-GO SELECTION_WINDOW_OVERLAP 오차단 수정",
+      "why": "직전 스펙(coverage PIT leak)으로 --final-oos-2026h1가 최초로 완주된 후에도 research_go.eligible=False였음. 사용자가 GO를 막는 정확한 원인 진단과 실질적 개선안을 요청. 코드 조사 결과 reason_codes=[DEFLATED_SHARPE_UNAVAILABLE, SELECTION_WINDOW_OVERLAP] 두 코드의 성격이 완전히 다름을 확인: SELECTION_WINDOW_OVERLAP은 evidence.py의 selection_overlap_fraction 독스트링과 fold.py 호출부 한글 주석 모두 '관측 전용, 절대 차단 안 함'이라 명시하는데, research_go.py의 _mhs_research_go가 실제로는 다른 모든 코드와 동일하게 eligible을 차단해왔음을 실측 확인(extra_reasons=(SELECTION_WINDOW_OVERLAP,)만 줘도 eligible=False) -- start가 항상 2021-01-01로 고정이라 사실상 모든 MHS 실행에서 상시 발동하는 유사-영구 차단이었던 진짜 코드 결함. 반면 DEFLATED_SHARPE_UNAVAILABLE은 window_trial_sharpes(('2021-01-01...', 'None')) 실측 결과 시행 원장이 이번 세션 1건뿐(MIN_TRIAL_SHARPE_OUTCOMES=8 미달)이라 fail-closed된 것 -- anti-p-hacking 설계(I-NO-TUNING-FEEDBACK)가 의도대로 작동한 것이라 코드 수정 대상이 아님을 판별. 동시에 사용자가 요청한 '2026년만의 hold-out 성과'가 daily_ledger.parquet에서 매번 수기로 슬라이스해야만 확인 가능했던 문제도 함께 해결 요청받음.",
+      "resolution": "src/application/research/mhs/research_go.py의 _mhs_research_go에서 eligible 계산 시에만 GO_REASON_SELECTION_WINDOW_OVERLAP을 제외하도록 수정(blocking_reasons = reasons에서 해당 코드만 제외, reason_codes는 전체 유지해 공시는 보존). src/mhs/evidence.py에 순수 함수 holdout_tail_evidence(equity, cutoff, min_days=PNL_VOL_TARGET_BURN_IN_DAYS) 신설 -- equity를 일봉 리샘플 후 index>cutoff 구간만 잘라 총수익/기하CAGR/MDD/naive Sharpe 계산, 표본이 min_days(기존 등록 90일 상수 재사용, 신규 매직넘버 없음) 미만이면 None 반환. src/mhs/report/schema.py의 MhsHorizonDiagnosticReport에 holdout_tail: dict[str, Any] | None = None 필드 추가(dataclasses.asdict 기반 persist라 별도 배선 불필요). src/mhs/pipeline/stages/assemble.py에서 HOLDOUT_CUTOFF 상수 하나로만 판단해 매 실행마다 무조건 호출(final_oos_2026h1 플래그를 직접 참조하지 않아 향후 봉인 재조정에도 코드 수정 불필요, 봉인을 넘지 않는 일반 실행은 자동으로 None). 신규 필드가 dataclasses.asdict 출력 구조를 바꿔 golden fixture와 어긋나므로 uv run python tests/fixtures/golden/capture_matrix.py로 5개 골든 summary를 재캡처(모두 holdout_tail: null 한 줄 추가, 그 외 완전 불변 확인). tests/unit/application/research/mhs/test_research_go.py, tests/unit/mhs/test_evidence.py, tests/unit/mhs/pipeline/test_assemble.py에 신규 시나리오 테스트 추가(SELECTION_WINDOW_OVERLAP 단독 무차단 및 실제 차단코드와 공존 시 공시 보존, holdout_tail_evidence의 사후 구간 격리 계산을 폐형 CAGR/총수익 공식으로 정밀검증 + 봉인 미도달/표본부족 시 None + 입력 불변, assemble_report의 blend_report 부재/존재 양쪽 배선 검증). tools/agent_skills/lean_check.py에 wiring.invocation_expression이 서술형 영어 문장인 경우(코드 리터럴이 아닌 경우) 매칭을 건너뛰는 _is_code_expression 헬퍼를 추가해 계약 검증 정확도 개선. DEFLATED_SHARPE_UNAVAILABLE 해소는 이번 스펙에서 의도적으로 범위 밖으로 유지 -- MIN_TRIAL_SHARPE_OUTCOMES를 낮추는 방식의 우회를 명시적으로 금지하고, 정당한 후속 재실행(peg-chase, corwin_schultz, beta_neutralize, trend_sleeve를 각각 --final-oos-2026h1로 재검증)으로 시행 원장을 8개까지 정직하게 쌓는 계획만 문서화.",
+      "impact": "실측: uv run pytest(연구 전체 MHS 유닛 스위트 + golden identity 7건) 전부 PASS, ruff/mypy 클린. 실제 --final-oos-2026h1 라이브 재실행(506심볼, 2021-2026H1 전체) 결과 status=COMPLETE, holdout_tail 필드가 {n_days:181, geometric_cagr:0.550, max_drawdown:-0.156, naive_sharpe:1.106}으로 정상 채워짐(직전 세션의 수기 계산값과 거의 일치, daily_ledger.parquet 수동 슬라이스 불필요해짐). research_go.eligible은 여전히 False -- reason_codes에 DEFLATED_SHARPE_UNAVAILABLE만 실질적 차단으로 남고 SELECTION_WINDOW_OVERLAP은 공시로만 유지됨을 확인(수정이 정확히 설계대로 동작, 과장 없이 '이번 수정 하나로 GO가 뒤집히지 않는다'를 사전에 문서화했던 대로). 전체구간(2021-2026H1) 헤드라인 지표(CAGR 2.749/MDD -0.389/Calmar 7.07)는 리포팅 레이어만 건드린 변경이라 이전 실행과 완전 동일 유지."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_COVERAGE_PIT_LEAK",
       "date": "2026-08-25",
       "adr_id": "ADR_20260825_MHS_COMMITTEE_COVERAGE_PIT_LEAK",
@@ -989,16 +999,6 @@
       "why": "primary(OHLCV_STRICT_PROXY) replay shows 428-563bps intent shortfall vs stress(OHLCV_IMMEDIATE_TAKER) 5.7-33bps, flipping slow_momentum/blend Sharpe negative (0/3 Research-GO folds) despite a real statistical edge (prescreen net_sharpe t=1.63-1.86 at the realistic 2.64bps cost tier, underlying 48h feature xs_rank_ic t=68.4); hypothesized the require_trade_through strict-crossing boundary (adverse < decision_price) was the driver and OHLCV_TOUCH_PROXY (adverse <= decision_price, already declared in _ExecutionBound but never wired into any orchestration path) would close the gap",
       "resolution": "Added opt-in touch_diagnostic:bool=False to MhsDiagnosticRequest, touch/touch_naive_sharpe fields to MhsBookReport, a third replay_execution_windows(...,'OHLCV_TOUCH_PROXY',...) pass in _book_outcome guarded by the flag, and a --touch-diagnostic CLI flag; verified default path is behavior-identical and touch weakly dominates strict fill count on synthetic data (lean_check PASS), then ran the full 2021-2025 real-data measurement",
       "impact": "Falsified: touch_naive_sharpe equals primary_naive_sharpe to 4 decimals for all three books (slow_momentum -0.2313/-0.2313, fast_reversal -1.2045/-1.2045, blend -0.6245/-0.6245); fill_count rose <0.03%. Strict-vs-touch crossing semantics are not the shortfall driver -- exact-touch is a near-zero-probability event at 5m OHLCV resolution. The real STRICT-to-TAKER gap is structural: price does not return to the passive decision-price limit within the 30-minute timeout during signal-confirming (trending) moves. Next candidates: passive_timeout_minutes retuning or a partial-marketable-limit fill architecture, not crossing-boundary relaxation."
-    },
-    {
-      "task_id": "MHS_PERF_OPTIMIZATION_PHASE3",
-      "date": "2026-08-10",
-      "adr_id": "ADR_20260810_MHS_PERF_OPTIMIZATION_PHASE3",
-      "domain": "performance",
-      "title": "MHS Phase 3 성능 최적화 구현 (병렬 books/post-book 동시화/resolve_ns 벡터화/placebo 배치)",
-      "why": "Phase 1 진단 파이프라인 614.5s 중 books 순차 실행이 80% 차지(GIL 해제 numpy 구간 존재)하여 5분 예산 초과, 위상2 이후에도 병렬화 여지가 남아 있음.",
-      "resolution": "books 3종을 fork ProcessPoolExecutor로 병렬화(P10), post-book 진단/폴드/final_return을 폴드 프로세스 풀과 동시 진행(P14), resolve_ns 스칼라 루프를 np.searchsorted 벡터화(P11), placebo 500회 dot-product를 50배치 BLAS로 묶음(P13), O6 minute-frame 캐시 사전 프리로드 적용. 소요시간 614.5→476s 기록(폴드 병렬 비율 증가로 예산 500s 내).",
-      "impact": "총 소요시간 약 23% 단축(614.5→476s), 정량 결과 bit-exact 유지(checksum 불변), RSS 메인 8GB/시스템 12GB 예산 내, 폴드 병렬 비율 상향으로 폴드 wall-time 단축."
     }
   ]
 }
