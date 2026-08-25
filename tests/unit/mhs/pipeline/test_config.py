@@ -219,3 +219,40 @@ def test_constant_risk_cli_and_config_parity():
     assert config.pnl_vol_target_mode == "constant_risk"
     assert config.exposure_scale_two_sided is True
     assert MhsRunConfig().pnl_vol_target_mode == "growth_budget"
+
+
+# SCENARIO_MHS_SELECTION_EXEC_DEFAULT_UNCHANGED_01
+def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
+    """MhsRunConfig() and a no-arg CLI parse stay identical, both resolving
+    final_oos_2026h1=False as the ONLY key added to the pre-spec field set."""
+    from src.cli.main import build_root_parser
+
+    pre_spec_fields = frozenset({
+        "start", "end", "partition", "data_root", "mark_mode",
+        "execution_timeframe", "execution_universe_size", "max_rss_bytes",
+        "log_run", "touch_diagnostic", "ladder_diagnostic",
+        "peg_chase_diagnostic", "liquidity_cost_model",
+        "passive_timeout_minutes", "discovery_gate",
+        "discovery_gate_adjusted_net_t", "discovery_gate_regime_scaled_net_t",
+        "fold_safe_horizon_selection", "crash_regime_tilt_alpha",
+        "slow_book_mode", "fast_book_mode", "rebalance_filter",
+        "beta_neutralize", "ensemble_signal", "trend_efficiency_overlay",
+        "pnl_vol_target", "pnl_vol_target_mode", "trend_sleeve",
+        "trend_sleeve_gross", "multi_feature_book", "committee_book",
+        "committee_kelly_sizing", "committee_growth_diagnostic",
+        "committee_capital", "committee_member_set",
+        "committee_tranche_smoothing", "committee_regime_adaptive_tranche",
+        "committee_target_gross", "committee_evidence_weighting",
+        "funding_carry_sleeve", "funding_carry_weight",
+        "execution_coverage_gate", "fill_mark_parity_gate",
+        "exposure_scale_two_sided", "exposure_drawdown_brake", "ram_guard",
+        "growth_envelope", "committee_member_attribution",
+    })
+    args = build_root_parser().parse_args(
+        ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
+    )
+    bare = dataclasses.asdict(MhsRunConfig())
+    from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
+    assert from_cli == bare
+    assert bare["final_oos_2026h1"] is False
+    assert set(bare) == pre_spec_fields | {"final_oos_2026h1"}
