@@ -868,7 +868,11 @@ def test_mhs_diagnostic_leverage_frontier_scan_short_circuit_scenario_mhs_levera
     assert args.leverage_frontier_scan is True
     assert args.leverage_frontier_multiples == LEVERAGE_FRONTIER_SCAN_MULTIPLES
     _run_mhs_horizon_diagnostic(args)
-    assert captured["envelope_name"] == "growth_extreme"
+    from src.mhs.pipeline.config import (
+        CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
+    )
+
+    assert captured["envelope_name"] == _CLI_GROWTH_ENVELOPE_DEFAULT
     assert captured["candidate_multiples"] == LEVERAGE_FRONTIER_SCAN_MULTIPLES
 
     captured.clear()
