@@ -175,3 +175,42 @@ class TestFillMarkParityRunHistoryRecord:
         assert record["fill_mark_parity"]["band"] == 0.0488
         assert record["flags"]["fill_mark_parity_gate"] is True
         assert record["flags"]["exposure_scale_two_sided"] is False
+
+
+def test_SCENARIO_MHS_EVID_03_TRIALS_NEVER_UNDERSTATED(tmp_path) -> None:
+    """SCENARIO_MHS_EVID_03_TRIALS_NEVER_UNDERSTATED: the DSR trials denominator
+    is derived from the history's distinct flag configurations but never drops
+    below the registered constant; an unreadable history falls back with an
+    explicit 'constant_fallback' provenance."""
+    from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
+    from src.mhs.run_history import derive_trials_attempted
+
+    # 6 distinct flag configurations (< 70): the registered constant binds.
+    small_dir = tmp_path / "history_small"
+    for index in range(6):
+        append_run_history_record(
+            {"run_id": f"r{index}", "flags": {"execution_universe_size": 30 + (index % 6)}},
+            small_dir,
+        )
+    assert derive_trials_attempted(small_dir) == (SEARCH_TRIALS_ATTEMPTED, "constant")
+
+    # 200 distinct configurations: the observed history wins.
+    big_dir = tmp_path / "history_big"
+    for index in range(200):
+        append_run_history_record(
+            {"run_id": f"r{index}", "flags": {"execution_universe_size": index}},
+            big_dir,
+        )
+    assert derive_trials_attempted(big_dir) == (200, "history")
+
+    # Missing directory: unreadable -> conservative fallback, never a guess.
+    missing = derive_trials_attempted(tmp_path / "does_not_exist")
+    assert missing == (SEARCH_TRIALS_ATTEMPTED, "constant_fallback")
+
+    # The floor holds regardless of source.
+    for count, _source in (
+        derive_trials_attempted(small_dir),
+        derive_trials_attempted(big_dir),
+        missing,
+    ):
+        assert count >= SEARCH_TRIALS_ATTEMPTED
