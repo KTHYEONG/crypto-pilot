@@ -85,11 +85,13 @@ def test_from_namespace_fold_safe_horizon_flag_maps_to_selection_field():
 
 # SCENARIO_GROWTH_ENVELOPE_GOLDEN_IDENTITY_PRESERVED
 def test_config_defaults_growth_envelope_and_attribution():
-    """growth_envelope defaults to growth_extreme (main logic, 2026-08-23,
-    ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING); attribution stays False."""
+    """growth_envelope defaults to growth_extreme_budgeted: the budgeted twin
+    of the 2026-08-23 main-logic rung (ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING)
+    with the identical leverage_ceiling, so the deployed exposure is unchanged;
+    attribution stays False."""
     config = MhsRunConfig()
     d = dataclasses.asdict(config)
-    assert d["growth_envelope"] == "growth_extreme"
+    assert d["growth_envelope"] == "growth_extreme_budgeted"
     assert d["committee_member_attribution"] is False
 
 
