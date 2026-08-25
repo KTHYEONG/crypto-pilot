@@ -487,6 +487,63 @@ def test_evidence_weights_by_boundary_differentiates(monkeypatch) -> None:
         for k in common_keys
     ), f"weights identical across boundaries: {result}"
 
+
+def _panels_through_2023_with_taker_tail_gap() -> tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
+]:
+    """Synthetic 2021-2023 panels plus the UNGAPPED taker source.
+
+    ``taker_gap`` carries the coverage degradation (NaN for all of 2023);
+    ``taker_no_gap`` shares identical values through 2022-12-31 and stays
+    valid everywhere, so callers can truncate it at the boundary without ever
+    importing the gap.
+    """
+    grid = pd.date_range("2021-01-01", periods=3 * 365 * 24, freq="1h", tz="UTC")
+    symbols = [f"S{i:02d}" for i in range(8)]
+    rng = np.random.default_rng(42)
+    close = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rng.normal(0.0, 1e-4, (len(grid), len(symbols))), axis=0)),
+        index=grid, columns=symbols,
+    )
+    quote_vol = pd.DataFrame(
+        rng.uniform(900.0, 1100.0, (len(grid), len(symbols))), index=grid, columns=symbols,
+    )
+    taker_no_gap = quote_vol * rng.uniform(0.4, 0.6, (len(grid), len(symbols)))
+    taker_gap = taker_no_gap.copy()
+    taker_gap[taker_gap.index.year == 2023] = np.nan
+    mask = pd.DataFrame(True, index=grid, columns=symbols)
+    return close, quote_vol, taker_gap, taker_no_gap, mask
+
+
+def test_evidence_weights_by_boundary_tail_beyond_every_boundary() -> None:
+    # SCENARIO_EVIDENCE_WEIGHTS_BY_BOUNDARY_ADMISSION_IGNORES_TAIL_BEYOND_EVERY_BOUNDARY:
+    # a coverage gap strictly after every train_ends boundary must not change
+    # any boundary's fit -- panels ending at the boundary and the same panels
+    # extended with a post-boundary gap tail admit the SAME member set with the
+    # SAME fitted weights (admission audited only up to max(train_ends)).
+    close, quote_vol, taker_gap, taker_no_gap, mask = _panels_through_2023_with_taker_tail_gap()
+    end_bound = pd.Timestamp("2023-01-01", tz="UTC")
+    in_cut = mask.index <= end_bound
+    cut_close, cut_quote_vol = close.loc[in_cut], quote_vol.loc[in_cut]
+    cut_taker, cut_mask = taker_no_gap.loc[in_cut], mask.loc[in_cut]
+    train_ends = {"top_level": end_bound}
+    result_tail_gap = ev._committee_evidence_weights_by_boundary(
+        close, quote_vol, taker_gap, mask,
+        pd.date_range(close.index[0], close.index[-1], freq="24h", tz="UTC"),
+        min_symbols=8, train_ends=train_ends,
+    )
+    result_no_tail = ev._committee_evidence_weights_by_boundary(
+        cut_close, cut_quote_vol, cut_taker, cut_mask,
+        pd.date_range(cut_close.index[0], cut_close.index[-1], freq="24h", tz="UTC"),
+        min_symbols=8, train_ends=train_ends,
+    )
+    w_tail_gap = result_tail_gap["top_level"]
+    w_no_tail = result_no_tail["top_level"]
+    assert set(w_tail_gap) == set(w_no_tail)
+    assert len(w_no_tail) > 0
+    for name, weight in w_no_tail.items():
+        assert abs(w_tail_gap[name] - weight) <= 1e-9
+
 def test_committee_execution_book_member_weights_none_identical() -> None:
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
     book_no_arg = ev._committee_execution_book(
@@ -498,6 +555,52 @@ def test_committee_execution_book_member_weights_none_identical() -> None:
         min_symbols=8, tranche_count=1, member_weights=None,
     )
     pd.testing.assert_frame_equal(book_no_arg, book_none)
+
+
+def test_committee_execution_book_coverage_cutoff_default_none_byte_identical() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_COVERAGE_CUTOFF_DEFAULT_NONE_BYTE_IDENTICAL:
+    # an explicit coverage_cutoff=None call is byte-identical to the no-argument
+    # call (default path untouched).
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
+    }
+    book_no_arg = ev._committee_execution_book(**kwargs)
+    book_none = ev._committee_execution_book(**kwargs, coverage_cutoff=None)
+    pd.testing.assert_frame_equal(book_no_arg, book_none)
+
+def test_committee_execution_book_coverage_cutoff_admits_pre_cutoff_member() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_COVERAGE_CUTOFF_ADMITS_PRE_CUTOFF_MEMBER:
+    # a flow member whose source has a coverage gap strictly after the chosen
+    # boundary is silently dropped from the deployed book without a cutoff; with
+    # coverage_cutoff set before the gap its book detectably contributes again.
+    close, quote_vol, taker_gap, _taker_no_gap, mask = _panels_through_2023_with_taker_tail_gap()
+    decision_grid = pd.date_range(close.index[0], close.index[-1], freq="24h", tz="UTC")
+    cutoff = pd.Timestamp("2023-01-01", tz="UTC")
+    book_without_cutoff = ev._committee_execution_book(
+        close, quote_vol, taker_gap, mask, decision_grid,
+        min_symbols=8, tranche_count=1,
+    )
+    book_with_cutoff = ev._committee_execution_book(
+        close, quote_vol, taker_gap, mask, decision_grid,
+        min_symbols=8, tranche_count=1, coverage_cutoff=cutoff,
+    )
+    member_specs = [s for s in ev.FEATURE_REGISTRY if s.name in set(ev.COMMITTEE_MEMBERS)]
+    flow_members = [
+        s.name for s in member_specs if "taker_buy_quote" in s.required_columns
+    ]
+    assert flow_members
+    books_with_cutoff = ev.build_feature_books(
+        member_specs,
+        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_gap},
+        mask, decision_grid, min_symbols=8, coverage_cutoff=cutoff,
+    )
+    gap_member = next(name for name in flow_members if name in books_with_cutoff)
+    gap_raw_grid = books_with_cutoff[gap_member].reindex(book_without_cutoff.index).fillna(0.0)
+    corr_without = float(book_without_cutoff.corrwith(gap_raw_grid, axis=1).mean())
+    corr_with = float(book_with_cutoff.corrwith(gap_raw_grid, axis=1).mean())
+    assert corr_with > corr_without
 
 def test_committee_execution_book_applies_member_weights() -> None:
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
