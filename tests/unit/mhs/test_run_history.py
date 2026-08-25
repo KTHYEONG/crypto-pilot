@@ -144,3 +144,32 @@ def test_SCENARIO_MHS_DSR_PASSAGE_HISTORY_WINDOW_FILTER_04(tmp_path) -> None:
     assert window_trial_sharpes(window, history_dir) == (2.0, 3.0)
 
     assert window_trial_sharpes(window, tmp_path / "does_not_exist") == ()
+
+
+# SCENARIO_MHS_SELECTION_EXEC_NO_TUNING_FEEDBACK_04
+def test_SCENARIO_MHS_SELECTION_EXEC_NO_TUNING_FEEDBACK_04(tmp_path) -> None:
+    """A final-OOS record's Sharpe never pools into the default window's
+    trial outcomes: window_trial_sharpes matches (start, resolved_end)
+    exactly, so the extended window is a distinct key."""
+    history_dir = tmp_path / "history"
+    default_window = ("2021-01-01T00:00:00+00:00", "2025-12-31T23:59:59+00:00")
+    final_window = ("2021-01-01T00:00:00+00:00", "2026-06-30T23:59:59+00:00")
+    append_run_history_record(
+        {
+            "start": default_window[0],
+            "resolved_end": default_window[1],
+            "flags": {"window": "default"},
+            "blend": {"primary_naive_sharpe": 2.0},
+        },
+        history_dir,
+    )
+    append_run_history_record(
+        {
+            "start": final_window[0],
+            "resolved_end": final_window[1],
+            "flags": {"window": "final_oos"},
+            "blend": {"primary_naive_sharpe": 9.9},
+        },
+        history_dir,
+    )
+    assert window_trial_sharpes(default_window, history_dir) == (2.0,)

@@ -300,3 +300,17 @@ def test_SCENARIO_MHS_DSR_PASSAGE_REGIME_LABELS_CAUSAL_08() -> None:
             if name.startswith(family)
         )
         assert total <= n_hours
+
+
+# SCENARIO_MHS_SELECTION_EXEC_OVERLAP_REDUCED_03
+def test_SCENARIO_MHS_SELECTION_EXEC_OVERLAP_REDUCED_03() -> None:
+    """The final-OOS window (through 2026-06-30) discloses strictly less
+    selection-window overlap than the default window (through 2025-12-31),
+    via the unmodified selection_overlap_fraction."""
+    final_oos_fraction = selection_overlap_fraction(
+        pd.Timestamp("2021-01-01", tz=_UTC), pd.Timestamp("2026-06-30 23:59:59", tz=_UTC)
+    )
+    default_fraction = selection_overlap_fraction(
+        pd.Timestamp("2021-01-01", tz=_UTC), pd.Timestamp("2025-12-31 23:59:59", tz=_UTC)
+    )
+    assert final_oos_fraction < default_fraction
