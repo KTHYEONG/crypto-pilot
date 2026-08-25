@@ -54,6 +54,8 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         eligible_symbols=len(ctx.funded),
         trials_attempted=ctx.trials_attempted,
         deflated_sharpe_ratio=ctx.deflated_sharpe_ratio,
+        dsr_decomposition=ctx.dsr_decomposition,
+        fold_sharpe_dispersion=ctx.fold_sharpe_dispersion,
         xs_rank_ic=ctx.xs_ic,
         date_clustered_regression=ctx.regression,
         horizon_diagnostics=ctx.horizon_diagnostics,
