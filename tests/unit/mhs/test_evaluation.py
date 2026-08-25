@@ -841,3 +841,34 @@ def test_SCENARIO_MHS_EVID_01_DSR_GATE_BLOCKS_WEAK_EVIDENCE() -> None:
     unavailable = _mhs_research_go(folds, deflated_sharpe_ratio=None)
     assert unavailable.eligible is False
     assert GO_REASON_DEFLATED_SHARPE_UNAVAILABLE in unavailable.reason_codes
+
+
+# SCENARIO_MHS_DSR_07_GATE_STILL_MONOTONE
+def test_SCENARIO_MHS_DSR_07_GATE_STILL_MONOTONE() -> None:
+    """SCENARIO_MHS_DSR_07_GATE_STILL_MONOTONE: the non-binding drawdown
+    budget code can only remove eligibility -- a binding envelope with clean
+    evidence still passes, the same evidence under a never-binding budget
+    blocks with DRAWDOWN_BUDGET_NON_BINDING."""
+    from src.application.research.mhs.research_go import (
+        GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+        _mhs_research_go,
+    )
+
+    folds = (_passing_fold(0), _passing_fold(1))
+    binding = _mhs_research_go(
+        folds,
+        deflated_sharpe_ratio=0.96,
+        blend_primary_max_drawdown=-0.10,
+        max_drawdown=0.25,
+    )
+    assert binding.eligible is True
+    assert binding.reason_codes == ()
+
+    non_binding = _mhs_research_go(
+        folds,
+        deflated_sharpe_ratio=0.96,
+        blend_primary_max_drawdown=-0.10,
+        max_drawdown=1.0,
+    )
+    assert non_binding.eligible is False
+    assert GO_REASON_DRAWDOWN_BUDGET_NON_BINDING in non_binding.reason_codes
