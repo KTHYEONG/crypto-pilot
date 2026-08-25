@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
-from src.mhs.run_history import append_run_history_record, derive_trials_attempted
+from src.mhs.run_history import (
+    append_run_history_record,
+    derive_trials_attempted,
+    window_trial_sharpes,
+)
 
 
 def _write_records(history_dir: Path, flags_list: list[dict[str, object]]) -> None:
@@ -100,3 +104,43 @@ def test_returned_count_is_monotone_in_distinct_configurations(tmp_path) -> None
         append_run_history_record({"flags": flags}, history_dir)
     counted, _source = derive_trials_attempted(history_dir)
     assert counted == before_counted + 2
+
+
+# SCENARIO_MHS_DSR_PASSAGE_HISTORY_WINDOW_FILTER_04
+def test_SCENARIO_MHS_DSR_PASSAGE_HISTORY_WINDOW_FILTER_04(tmp_path) -> None:
+    history_dir = tmp_path / "history"
+    window = ("2021-01-01 00:00:00+00:00", "2025-12-31 23:00:00+00:00")
+    start, resolved_end = window
+    in_window = {"start": start, "resolved_end": resolved_end}
+    # The later Sharpe is recorded first: the returned tuple is order-insensitive.
+    append_run_history_record(
+        {**in_window, "flags": {"a": 2}, "blend": {"primary_naive_sharpe": 3.0}},
+        history_dir,
+    )
+    append_run_history_record(
+        {**in_window, "flags": {"a": 1}, "blend": {"primary_naive_sharpe": 2.0}},
+        history_dir,
+    )
+    # Same window but an unmeasured outcome contributes nothing.
+    append_run_history_record(
+        {**in_window, "flags": {"a": 3}, "blend": {"primary_naive_sharpe": None}},
+        history_dir,
+    )
+    # A different window is excluded even with a finite Sharpe.
+    append_run_history_record(
+        {
+            "start": "2019-01-01 00:00:00+00:00", "resolved_end": resolved_end,
+            "flags": {"a": 4}, "blend": {"primary_naive_sharpe": 9.0},
+        },
+        history_dir,
+    )
+    assert window_trial_sharpes(window, history_dir) == (2.0, 3.0)
+
+    # Two records sharing an identical flags payload collapse to one entry.
+    append_run_history_record(
+        {**in_window, "flags": {"a": 1}, "blend": {"primary_naive_sharpe": 2.0}},
+        history_dir,
+    )
+    assert window_trial_sharpes(window, history_dir) == (2.0, 3.0)
+
+    assert window_trial_sharpes(window, tmp_path / "does_not_exist") == ()

@@ -49,7 +49,8 @@ def test_growth_envelope_conservative_is_byte_identical() -> None:
     assert conservative.leverage_ceiling == 1.0
     assert GROWTH_ENVELOPE_DEFAULT == "conservative"
     assert sorted(GROWTH_RISK_ENVELOPES) == [
-        "balanced", "conservative", "growth", "growth_extreme", "growth_moderate",
+        "balanced", "conservative", "growth", "growth_extreme",
+        "growth_extreme_budgeted", "growth_moderate",
     ]
     for env in GROWTH_RISK_ENVELOPES.values():
         assert env.ruin_fraction == COMMITTEE_GROWTH_RUIN_FRACTION
@@ -87,7 +88,8 @@ def test_scenario_mhs_exposure_ceiling_05_growth_moderate_rung_matches_growth() 
     moderate = GROWTH_RISK_ENVELOPES["growth_moderate"]
     growth = GROWTH_RISK_ENVELOPES["growth"]
     assert sorted(GROWTH_RISK_ENVELOPES) == [
-        "balanced", "conservative", "growth", "growth_extreme", "growth_moderate",
+        "balanced", "conservative", "growth", "growth_extreme",
+        "growth_extreme_budgeted", "growth_moderate",
     ]
     assert moderate.leverage_ceiling == 1.5
     assert moderate.max_drawdown == growth.max_drawdown
@@ -113,8 +115,11 @@ def test_scenario_mhs_kelly_two_sided_05_registered_roster_cap_and_extreme_rung(
     extreme = GROWTH_RISK_ENVELOPES["growth_extreme"]
     assert extreme.leverage_ceiling == 3.0
     assert sorted(GROWTH_RISK_ENVELOPES) == [
-        "balanced", "conservative", "growth", "growth_extreme", "growth_moderate",
+        "balanced", "conservative", "growth", "growth_extreme",
+        "growth_extreme_budgeted", "growth_moderate",
     ]
+    # The budgeted twin resolves the identical leverage cap as growth_extreme.
+    assert GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"].leverage_ceiling == 3.0
     for env in GROWTH_RISK_ENVELOPES.values():
         assert env.ruin_fraction == COMMITTEE_GROWTH_RUIN_FRACTION
         assert env.max_ruin_prob == COMMITTEE_GROWTH_MAX_RUIN_PROB

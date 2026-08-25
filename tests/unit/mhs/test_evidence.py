@@ -10,12 +10,17 @@ import pytest
 from scipy.stats import norm
 
 from src.mhs.evidence import (
+    MIN_TRIAL_SHARPE_OUTCOMES,
+    TRIAL_SHARPE_DEDUP_DECIMALS,
+    causal_regime_labels,
     deflated_sharpe_decomposition,
     deflated_sharpe_ratio,
+    distinct_trial_sr_variance,
     effective_observation_count,
+    regime_conditional_sharpe_blocks,
     selection_overlap_fraction,
 )
-from src.mhs.params import DEFAULT_SELECTION_WINDOW
+from src.mhs.params import DEFAULT_SELECTION_WINDOW, PERIODS_PER_YEAR_1H
 
 _UTC = "UTC"
 
@@ -167,3 +172,131 @@ def test_decomposition_propagates_dsr_validation() -> None:
         deflated_sharpe_decomposition(**{**base, "n_obs_effective": 1})
     with pytest.raises(ValueError, match="trial_sr_variance"):
         deflated_sharpe_decomposition(**{**base, "trial_sr_variance": -1.0})
+
+
+# SCENARIO_MHS_DSR_PASSAGE_DEDUP_VARIANCE_01
+def test_SCENARIO_MHS_DSR_PASSAGE_DEDUP_VARIANCE_01() -> None:
+    trials = [0.010, 0.010, 0.010, 0.020, 0.030, 0.040, 0.050, 0.060, 0.070]
+    expected = float(np.var([0.010, 0.020, 0.030, 0.040, 0.050, 0.060, 0.070], ddof=1))
+    # The fixture pool holds only 7 distinct outcomes, below the registered
+    # minimum, so the dedup arithmetic is exercised with min_outcomes=7.
+    variance = distinct_trial_sr_variance(
+        trials, observed_sr=0.010, min_outcomes=7
+    )
+    # The four duplicate 0.010 entries (three trials plus observed_sr) collapse
+    # to one pooled member.
+    assert variance == expected
+    # Duplicate re-runs cannot shrink V: appending 50 more copies of 0.010
+    # returns the identical float.
+    inflated = trials + [0.010] * 50
+    assert distinct_trial_sr_variance(
+        inflated, observed_sr=0.010, min_outcomes=7
+    ) == expected
+
+
+# SCENARIO_MHS_DSR_PASSAGE_OBSERVED_ALWAYS_POOLED_02
+def test_SCENARIO_MHS_DSR_PASSAGE_OBSERVED_ALWAYS_POOLED_02() -> None:
+    trials = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
+    # observed_sr=0.99 is an 8th distinct value: all 8 pool members survive and
+    # the ddof=1 variance over exactly those 8 values is returned.
+    variance = distinct_trial_sr_variance(trials, observed_sr=0.99)
+    assert variance == float(np.var(sorted([0.99, *trials]), ddof=1))
+    assert MIN_TRIAL_SHARPE_OUTCOMES == 8
+    # observed_sr=0.01 duplicates a trial outcome: only 7 distinct outcomes
+    # remain and the failure names both the count and the minimum.
+    with pytest.raises(ValueError, match="distinct trial Sharpe outcomes") as excinfo:
+        distinct_trial_sr_variance(trials, observed_sr=0.01)
+    message = str(excinfo.value)
+    assert "7" in message
+    assert "8" in message
+
+
+# SCENARIO_MHS_DSR_PASSAGE_DECOMPOSITION_REPRODUCES_05
+def test_SCENARIO_MHS_DSR_PASSAGE_DECOMPOSITION_REPRODUCES_05() -> None:
+    annualized_history = (-0.670, 0.412, 0.905, 1.204, 1.618, 1.877, 2.101, 2.456, 2.924)
+    scale = math.sqrt(PERIODS_PER_YEAR_1H)
+    fixture_pool = tuple(value / scale for value in annualized_history)
+    observed_sr = 0.03083117885474785
+    trial_sr_variance = distinct_trial_sr_variance(fixture_pool, observed_sr)
+    pooled_distinct = len(
+        {round(value, TRIAL_SHARPE_DEDUP_DECIMALS) for value in (observed_sr, *fixture_pool)}
+    )
+    decomposition = deflated_sharpe_decomposition(
+        observed_sr=observed_sr,
+        trial_sr_variance=trial_sr_variance,
+        n_trials=130,
+        n_obs_raw=43823,
+        n_obs_effective=39031,
+        skew=0.8579,
+        kurtosis=78.4613,
+        fold_sharpes=(0.019426, 0.024174, 0.014090, 0.040085),
+        distinct_trial_outcomes=pooled_distinct,
+    )
+    reproduced = norm.cdf(
+        decomposition.margin * math.sqrt(decomposition.n_obs_effective - 1)
+        / math.sqrt(decomposition.radicand)
+    )
+    expected = deflated_sharpe_ratio(
+        observed_sr, trial_sr_variance, 130, 39031, 0.8579, 78.4613
+    )
+    assert reproduced == pytest.approx(expected, abs=1e-12)
+    assert decomposition.trial_sr_source == "distinct_trial_outcomes"
+    assert decomposition.distinct_trial_outcomes == len(
+        {round(value, TRIAL_SHARPE_DEDUP_DECIMALS) for value in (observed_sr, *fixture_pool)}
+    )
+
+
+# SCENARIO_MHS_DSR_PASSAGE_REGIME_LABELS_CAUSAL_08
+def test_SCENARIO_MHS_DSR_PASSAGE_REGIME_LABELS_CAUSAL_08() -> None:
+    rng = np.random.default_rng(20260825)
+    # Deterministic cycle so all three BTC drawdown states occur: calm
+    # uptrend, noisy bull, a ~-62% crash (bear), a volatile base, then a sharp
+    # recovery. This is the INDEPENDENT reference price series, never the
+    # book's own equity (that would make "Sharpe conditional on our own
+    # drawdown" close to tautological).
+    btc_segments = (
+        np.full(800, 0.0005),
+        rng.normal(0.0008, 0.008, 600),
+        np.full(120, -0.008),
+        rng.normal(0.0, 0.02, 500),
+        np.full(80, 0.010),
+        rng.normal(0.001, 0.01, 900),
+    )
+    index = pd.date_range("2021-01-01", periods=3000, freq="1h", tz="UTC")
+    btc_returns = pd.Series(np.concatenate(btc_segments), index=index)
+    btc_close = (1.0 + btc_returns).cumprod()
+    # A DIFFERENT synthetic book return series (its own low/mid/high vol
+    # blocks) so the two regime axes are independent, as they are in
+    # production (book's own returns vs. an exogenous BTC price).
+    book_segments = (
+        rng.normal(0.0003, 0.003, 1000),
+        rng.normal(0.0002, 0.012, 1000),
+        rng.normal(0.0004, 0.006, 1000),
+    )
+    returns = pd.Series(np.concatenate(book_segments), index=index)
+    n_hours = len(returns)
+    labels_full = causal_regime_labels(returns, btc_close)
+    # No future bar enters any label: the label at index t is bit-identical
+    # whether computed on the prefix [:t+1] of both series or the full series.
+    for cut in (400, 1200, n_hours - 1):
+        labels_prefix = causal_regime_labels(
+            returns.iloc[: cut + 1], btc_close.iloc[: cut + 1]
+        )
+        for column in labels_full.columns:
+            assert (
+                labels_prefix[column].to_numpy() == labels_full[column].to_numpy()[: cut + 1]
+            ).all(), f"label {column} at cut={cut} is not causal"
+    blocks = regime_conditional_sharpe_blocks(returns, btc_close)
+    assert set(blocks) >= {
+        "btc_drawdown_bull", "btc_drawdown_correction", "btc_drawdown_bear",
+        "book_vol_low", "book_vol_mid", "book_vol_high",
+    }
+    for block in blocks.values():
+        assert {"n_hours", "sharpe", "ann_vol"} <= set(block)
+    for family in ("btc_drawdown_", "book_vol_"):
+        total = sum(
+            int(block["n_hours"])
+            for name, block in blocks.items()
+            if name.startswith(family)
+        )
+        assert total <= n_hours

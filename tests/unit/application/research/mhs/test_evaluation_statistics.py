@@ -461,3 +461,50 @@ def test_scenario_mhs_kelly_two_sided_08_go_reason_iff_none_registration(
     missing = _research_go._mhs_research_go((passing,))
     assert missing.eligible is False
     assert ev.GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
+
+
+def _varying_price_replay() -> object:
+    """A small strict replay whose hourly equity has non-degenerate returns."""
+    idx = pd.date_range("2021-01-01 12:01", periods=4000, freq="1min", tz="UTC")
+    prices = 100.0 * np.exp(np.cumsum(np.sin(np.arange(len(idx)) * 0.05) * 0.002))
+    px = pd.DataFrame({"A": prices}, index=idx)
+    target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+    signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+    return strategy_aware_execution_replay(
+        target, signal_at, px, px, px, px,
+        pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+        "OHLCV_STRICT_PROXY", ExecutionSpec(),
+    )
+
+
+def _blend_book_report(replay: object) -> ev.MhsBookReport:
+    return ev.MhsBookReport(
+        name="blend", band="FAST", horizon_hours=48, step_hours=6, tranche_count=8,
+        n_symbols=1, phase=None, prescreen=None, tail=None,
+        primary=replay, stress=None,
+        primary_autocorr_sharpe=0.5, primary_naive_sharpe=2.9,
+        primary_net_ann=0.55, primary_geometric_cagr=3.1,
+        primary_max_drawdown=-0.389, primary_annualized_turnover=271.0,
+        stress_naive_sharpe=0.4,
+    )
+
+
+# SCENARIO_MHS_DSR_PASSAGE_FAILCLOSED_NO_FOLD_FALLBACK_03
+def test_SCENARIO_MHS_DSR_PASSAGE_FAILCLOSED_NO_FOLD_FALLBACK_03() -> None:
+    replay = _varying_price_replay()
+    blend_report = _blend_book_report(replay)
+    folds = (_passing_fold_report(replay),)
+
+    result = statistics._deflated_sharpe_evidence(blend_report, folds, 127, ())
+    assert len(result) == 3
+    gated_dsr, decomposition, fold_proxy = result
+    # Fewer than the registered minimum of distinct trial outcomes fail closed...
+    assert gated_dsr is None
+    assert decomposition is None
+    # ...while the observational fold proxy stays a finite float.
+    assert fold_proxy is not None
+    assert np.isfinite(fold_proxy)
+
+    go = _research_go._mhs_research_go(folds, deflated_sharpe_ratio=gated_dsr)
+    assert _research_go.GO_REASON_DEFLATED_SHARPE_UNAVAILABLE in go.reason_codes
+    assert go.eligible is False
