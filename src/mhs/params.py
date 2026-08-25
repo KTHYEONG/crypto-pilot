@@ -227,6 +227,10 @@ DEFAULT_SELECTION_WINDOW: tuple[pd.Timestamp, pd.Timestamp] = (
     pd.Timestamp("2025-12-31", tz="UTC"),
 )
 
+# MHS-local one-time final-OOS ceiling (2026-08-25 user-authorized decision):
+# strictly narrower than any unseal of the shared HOLDOUT_CUTOFF gate.
+MHS_FINAL_OOS_CUTOFF_2026H1: pd.Timestamp = pd.Timestamp("2026-06-30 23:59:59", tz="UTC")
+
 RAM_BUDGET_FRACTION: float = 0.85
 RAM_RESERVE_FRACTION: float = 0.05
 RAM_RESERVE_FLOOR_BYTES: int = 256 * 2**20
