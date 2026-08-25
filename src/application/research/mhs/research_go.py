@@ -45,6 +45,11 @@ GO_REASON_FOLD_GROWTH_CONCENTRATION = "FOLD_GROWTH_CONCENTRATION"
 # the registered budget. NOT a data-integrity reason: the data was intact; the
 # risk contract was exceeded.
 GO_REASON_DRAWDOWN_OVER_BUDGET = "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET"
+# Risk-contract code for a drawdown budget that can never bind: an envelope
+# whose max_drawdown exceeds the registered ceiling cannot gate any realized
+# drawdown (-100% is capital extinction), so judging GO under it would
+# silently disable the risk gate instead of blocking.
+GO_REASON_DRAWDOWN_BUDGET_NON_BINDING = "DRAWDOWN_BUDGET_NON_BINDING"
 # Risk-contract codes for the Deflated Sharpe Ratio gate (never data-integrity
 # codes): a DSR under the registered threshold blocks the decision, and a
 # missing/non-finite DSR fails closed instead of passing silently.
@@ -122,13 +127,20 @@ def _drawdown_budget_reasons(
 ) -> tuple[str, ...]:
     """Pure risk-contract gate: a completed blend breaching the drawdown budget.
 
-    Returns ``(GO_REASON_DRAWDOWN_OVER_BUDGET,)`` iff ``primary_max_drawdown``
-    is a finite float strictly below ``-max_drawdown``; ``()`` for ``None`` or
+    A budget above the registered ``max_drawdown_budget_ceiling`` can never
+    bind, so it blocks with ``(GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,)``
+    regardless of the observed drawdown -- silence would let an unenforceable
+    risk contract pass. Otherwise returns
+    ``(GO_REASON_DRAWDOWN_OVER_BUDGET,)`` iff ``primary_max_drawdown`` is a
+    finite float strictly below ``-max_drawdown``; ``()`` for ``None`` or
     non-finite (an absent replay is already blocked by its own code). Raises
     ``ValueError`` when ``max_drawdown <= 0``.
     """
     if max_drawdown <= 0:
         raise ValueError(f"max_drawdown must be > 0, got {max_drawdown}")
+    ceiling = REGISTERED_POLICY_THRESHOLDS.get("max_drawdown_budget_ceiling")
+    if ceiling is not None and max_drawdown > float(ceiling):
+        return (GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,)
     if primary_max_drawdown is None or not np.isfinite(primary_max_drawdown):
         return ()
     if primary_max_drawdown < -max_drawdown:
@@ -211,7 +223,9 @@ def _mhs_research_go(
     ``GrowthRiskEnvelope.max_drawdown`` -- ``COMMITTEE_GROWTH_MAX_DRAWDOWN`` by
     default, i.e. the ``conservative`` envelope) blocks the decision with
     ``PRIMARY_MAX_DRAWDOWN_OVER_BUDGET`` (a risk-contract code, never a
-    data-integrity code). ``deflated_sharpe_ratio`` feeds the DSR gate against
+    data-integrity code). A budget above the registered drawdown-budget
+    ceiling blocks with ``DRAWDOWN_BUDGET_NON_BINDING`` regardless of the
+    observed drawdown. ``deflated_sharpe_ratio`` feeds the DSR gate against
     ``REGISTERED_POLICY_THRESHOLDS['deflated_sharpe_ratio']``: below-threshold
     evidence blocks with ``DEFLATED_SHARPE_BELOW_THRESHOLD`` and an absent DSR
     fails closed with ``DEFLATED_SHARPE_UNAVAILABLE``; the gate can only turn
