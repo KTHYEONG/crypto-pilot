@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_COVERAGE_PIT_LEAK",
+      "date": "2026-08-25",
+      "adr_id": "ADR_20260825_MHS_COMMITTEE_COVERAGE_PIT_LEAK",
+      "domain": "evidence",
+      "title": "MHS committee 멤버 admission coverage 게이트의 PIT leak 수정 (2026H1 final-OOS 리버리지 상한 검증 실패 해결)",
+      "why": "--final-oos-2026h1(end=2026-06-30) 실행이 growth_extreme/growth_extreme_budgeted 모두 동일하게 leverage_ceiling=3.0 vs bootstrap frontier 0.75x ValueError로 3회 재현성 있게 실패. 직전 세션의 가설(min_bars=2000 유니버스 확장이 2021-2022 신호 순위 계산에 소급 영향)은 이번 세션에서 실측으로 반증(패널 값/liquid_half_eligibility 마스크가 2023년 이전 구간에서 byte-identical, 신규 61종목 전부 첫 봉이 2023-01-01 이후). 4단계 파이프라인(load_panel->select_horizons->build_books->build_committee)만 실행해 committee_weights_by_boundary['top_level']을 직접 비교한 결과 flow_imb_168h/flow_imb_720h(둘 다 taker_buy_quote 필요)가 end=2026-06-30에서만 완전히 탈락함을 확인. src/mhs/features.py의 build_feature_books가 feature 채택 여부를 연도별 coverage로 감사하는데 그 감사 범위가 요청 구간 전체(end까지)라서, 2026년(taker_buy_quote coverage 0.8425 < FEATURE_MIN_COVERAGE 0.90)의 부분연도 결함이 2021-2025 구간(coverage 99.999-100%)까지 포함해 feature 전체를 탈락시켰음을 정밀 특정.",
+      "resolution": "src/mhs/features.py build_feature_books에 coverage_cutoff: pd.Timestamp | None = None 옵션 추가 -- coverage_cutoff가 주어지면 feature_coverage_audit을 feature.index < coverage_cutoff로 제한(admission 감사 범위만 축소, rank_weight_book이 소비하는 book의 값 계산 범위는 전체 decision_grid로 불변). _committee_evidence_weights_by_boundary(evaluation.py:3032)는 coverage_cutoff=max(train_ends.values())를 전달(신규 하드코딩 상수 없이 이미 받는 train_ends에서 파생). _committee_execution_book(evaluation.py:3056)에 coverage_cutoff 파라미터를 추가해 내부 build_feature_books 호출에 전달하고 top-level 배포 지점(committee.py:110, ctx.blend_1h)과 fold 경로(_build_fold_target_weights) 두 호출부 모두 coverage_cutoff=COMMITTEE_OOS_START를 전달(committee_member_weights를 적합한 것과 동일 경계, I-SINGLE-CONFIGURATION과 대칭 유지). 기본값 None은 기존 동작과 byte-identical 보존. tests/unit/mhs/test_features.py, tests/unit/application/research/mhs/test_evaluation_committee_execution.py, tests/unit/mhs/pipeline/stages/test_committee.py에 4개 시나리오 신규 테스트 추가(coverage_cutoff가 post-cutoff gap을 무시함, 경계 너머 tail이 어떤 boundary의 적합도 바꾸지 않음, 배포된 book이 cutoff 이전 멤버를 다시 채택함, committee stage가 COMMITTEE_OOS_START를 올바르게 배선함). _committee_diagnostic/multi_feature_book의 동일 패턴은 opt-in 진단 전용(기본 False)이라 이번 스펙 범위 밖으로 명시적으로 제외.",
+      "impact": "실측: uv run ruff check/mypy/pytest 전부 PASS(회귀 없음, coverage_cutoff=None 기본 경로 byte-identical 유지). 실제 --final-oos-2026h1 라이브 재실행(506심볼, 2021-01-01~2026-06-30 전체 분당 리플레이) 결과 ValueError 없이 status=COMPLETE로 최초 완주. growth_extreme_budgeted 기준 leverage_ruin_probabilities 3.0x=0.0(검증 통과), 전체구간 geometric_cagr=2.749/max_drawdown=-0.389/Calmar=7.07. daily_ledger.parquet에서 2026년만 분리한 진짜 hold-out 성과: 6개월 CAGR 0.559/MDD -0.156/naive_sharpe 1.106(2021-2025의 sharpe 2.66 대비 하락하나 표본 181일로 노이즈 큼). research_go_eligible=False로 남음 -- deflated_sharpe_ratio가 이번 실행에서 null로 계산 스킵됐고 probability_mdd_over_30pct=0.879로 드로다운 확률 게이트 미통과, 둘 다 이번 스펙 범위 밖의 별개 후속 과제로 식별."
+    },
+    {
       "task_id": "TASK_MHS_SELECTION_AND_EXECUTION_ALGORITHMS",
       "date": "2026-08-25",
       "adr_id": "ADR_20260825_MHS_SELECTION_AND_EXECUTION_ALGORITHMS",
@@ -989,16 +999,6 @@
       "why": "Phase 1 진단 파이프라인 614.5s 중 books 순차 실행이 80% 차지(GIL 해제 numpy 구간 존재)하여 5분 예산 초과, 위상2 이후에도 병렬화 여지가 남아 있음.",
       "resolution": "books 3종을 fork ProcessPoolExecutor로 병렬화(P10), post-book 진단/폴드/final_return을 폴드 프로세스 풀과 동시 진행(P14), resolve_ns 스칼라 루프를 np.searchsorted 벡터화(P11), placebo 500회 dot-product를 50배치 BLAS로 묶음(P13), O6 minute-frame 캐시 사전 프리로드 적용. 소요시간 614.5→476s 기록(폴드 병렬 비율 증가로 예산 500s 내).",
       "impact": "총 소요시간 약 23% 단축(614.5→476s), 정량 결과 bit-exact 유지(checksum 불변), RSS 메인 8GB/시스템 12GB 예산 내, 폴드 병렬 비율 상향으로 폴드 wall-time 단축."
-    },
-    {
-      "task_id": "MHS_PERF_OPTIMIZATION_PHASE2",
-      "date": "2026-08-10",
-      "adr_id": "ADR_20260810_MHS_PERF_OPTIMIZATION_PHASE2",
-      "domain": "quant",
-      "title": "MHS Phase 2 최적화 구현 (심볼별 캐시/결정가 벡터화/persist 경량화/bootstrap chunk)",
-      "why": "Phase 1 후 전체 실행 측정에서 main-process peak RSS가 11.4GiB로 회귀(최초 2.6GiB)했고, top_replays(398s)+persist(159s)가 잔여 병목으로 남음",
-      "resolution": "O6: 0% 히트 window-keyed LRU 제거 후 심볼별 full-period 캐시+슬라이스(Parquet 5310회->255회), O7: _decision_price 역방향 스캔->last-finite-close 테이블 벡터화+_equity_at gpos 축소(bit-exact), O8: persist zstd->snappy+orjson(12 replay 0.8s), O10: bootstrap chunk 256->128MB 적응형. O9는 spawn 불채택(fork 유지) — 실증상 spawn이 main RSS 미감소+테스트 monkeypatch 경로 파괴",
-      "impact": "run_elapsed 615s->476s(누적 1261s 대비 2.65x), peak RSS 11.4GiB->5.25GiB(회귀 54% 회수), benchmark checksum bit-exact 유지, O6 parity 0-diff/O7 stress parity 1e-12, unit+integration+benchmark 전부 PASS"
     }
   ]
 }
