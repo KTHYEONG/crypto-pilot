@@ -98,6 +98,12 @@ class MhsHorizonDiagnosticReport:
     dsr_decomposition: DsrDecomposition | None = None
     # 폴드 Sharpe 분산 sqrt(V): 사전등록 후보 탐색의 1차 목적함수.
     fold_sharpe_dispersion: float | None = None
+    # 폴드 분산 기반 DSR 프록시(관측 전용): 게이트에 절대 재진입하지 않는다.
+    deflated_sharpe_ratio_fold_proxy: float | None = None
+    # 폴드별 committee 가중치 적합 샘플(< COMMITTEE_OOS_START) 누출 비율(관측 전용).
+    fold_committee_weight_leak: dict[str, float] | None = None
+    # 인과 레짐(trailing high / trailing vol tercile, 1-bar shift) 조건부 Sharpe(관측 전용).
+    regime_conditional_sharpe: dict[str, dict[str, float]] | None = None
 
     def to_payload(self) -> Any:
         from src.mhs.report.artifacts import _jsonable
