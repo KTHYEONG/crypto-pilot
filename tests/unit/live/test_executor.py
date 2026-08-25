@@ -20,7 +20,7 @@ from src.live.executor import (
 )
 from src.live.filters import SymbolFilters
 from src.live.planner import OrderIntent
-from src.live.rest import ShadowResponse
+from src.live.rest import PaperResponse, ShadowResponse
 
 
 class StubClient:
@@ -549,4 +549,113 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_24_CANCEL_SETTLES_PARTIAL_FILL",
     "SCENARIO_LIVE_25_IOC_ALWAYS_MARKETABLE_INSIDE_RISK_RAIL",
     "SCENARIO_LIVE_26_RISK_RAIL_STILL_REFUSES_ANOMALY",
+    "SCENARIO_LIVE_27_PAPER_FILLS_WITHOUT_SENDING_ORDERS",
+    "SCENARIO_LIVE_28_PAPER_EXERCISES_IOC_BACKSTOP",
+)
+
+
+class PaperStubClient:
+    """PAPER 전송 초크포인트를 흉내내는 스텁.
+
+    변이 시도는 기록만 하고 실제 네트워크 전송은 절대 없다(sent_* 는 항상
+    비어 있다). 주문 조회는 PAPER 에서 발생하지 않는다는 불변을 단언한다.
+    """
+
+    def __init__(self, touches: list[tuple[str, str]]) -> None:
+        self.suppressed_attempts: list[dict[str, Any]] = []
+        self.sent_orders: list[dict[str, Any]] = []
+        self.sent_cancels: list[str] = []
+        self._touches = list(touches)
+        self._cursor = 0
+
+    def book_ticker(self, symbol: str) -> dict[str, str]:
+        idx = min(self._cursor, len(self._touches) - 1)
+        self._cursor += 1
+        bid, ask = self._touches[idx]
+        return {"bidPrice": bid, "askPrice": ask}
+
+    def new_order(self, params: dict[str, Any]) -> Any:
+        self.suppressed_attempts.append(dict(params))
+        return PaperResponse.suppressed("POST", "/fapi/v1/order", "0" * 12)
+
+    def cancel_order(self, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
+        return {}
+
+    def query_order(self, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
+        raise AssertionError("PAPER must never poll a venue order")
+
+
+def test_SCENARIO_LIVE_27_PAPER_FILLS_WITHOUT_SENDING_ORDERS(tmp_path) -> None:
+    """SCENARIO_LIVE_27_PAPER_FILLS_WITHOUT_SENDING_ORDERS: a PAPER run whose
+    observed touch trades through the posted GTX price fills locally (non-zero
+    filled_qty, status FILLED) while zero mutating requests reach the network;
+    the equivalent SHADOW run stays at filled_qty == 0 / status SHADOW."""
+    # ask(99.50) < 게시 GTX 가격(bid 100.00 양자화): 엄밀 trade-through.
+    paper_client = PaperStubClient(touches=[("100.00", "99.50")])
+    outcome = execute_intent(
+        paper_client,
+        _intent(),
+        _filters(tick_size="0.01"),
+        _policy(),
+        AuditLog(tmp_path / "paper27.jsonl"),
+        SteppingClock(3.0),
+    )
+    assert outcome.status == "FILLED"
+    assert outcome.filled_qty == Decimal("1.000")
+    assert outcome.avg_fill_price is not None
+    assert outcome.avg_fill_price > 0
+    assert paper_client.sent_orders == []
+    assert paper_client.sent_cancels == []
+    assert len(paper_client.suppressed_attempts) >= 1
+    assert all(o["type"] == "LIMIT" for o in paper_client.suppressed_attempts)
+    assert all(o["timeInForce"] in ("GTX", "IOC") for o in paper_client.suppressed_attempts)
+
+    shadow_client = ShadowStubClient()
+    shadow_outcomes = execute_intents(
+        shadow_client,
+        [_intent()],
+        {"AAAUSDT": _filters()},
+        _policy(),
+        AuditLog(tmp_path / "shadow27.jsonl"),
+        lambda: 0.0,
+        lambda _seconds: None,
+    )
+    assert shadow_outcomes[0].status == "SHADOW"
+    assert shadow_outcomes[0].filled_qty == 0
+
+
+def test_SCENARIO_LIVE_28_PAPER_EXERCISES_IOC_BACKSTOP(tmp_path) -> None:
+    """SCENARIO_LIVE_28_PAPER_EXERCISES_IOC_BACKSTOP: when the touch never
+    trades through the GTX price, the run still transitions to the IOC phase
+    after passive_deadline_s and terminates FILLED via the capped IOC -- chase
+    and backstop paths that SHADOW never reaches."""
+    # 정적 균형 호가: ask(100.00) < 게시가(100.00) 거짓 -> GTX 미체결 유지.
+    client = PaperStubClient(touches=[("100.00", "100.00")])
+    policy = _policy(passive_deadline_s=20.0)
+    outcome = execute_intent(
+        client,
+        _intent(),
+        _filters(tick_size="0.01"),
+        policy,
+        AuditLog(tmp_path / "paper28.jsonl"),
+        SteppingClock(15.0),
+    )
+    assert outcome.status == "FILLED"
+    assert outcome.filled_qty == Decimal("1.000")
+    ioc_posts = [
+        o for o in client.suppressed_attempts if o["timeInForce"] == "IOC"
+    ]
+    assert len(ioc_posts) >= 1  # 백스톱 경로가 실제로 실행됐다
+    ask = Decimal("100.00")
+    cap = ask * (Decimal(1) + Decimal(str(policy.taker_cap_bps)) / Decimal(10_000))
+    for order in ioc_posts:
+        assert Decimal(order["price"]) <= cap
+    assert client.sent_orders == []
+    assert client.sent_cancels == []
+
+
+COVERED_SCENARIOS = (
+    *COVERED_SCENARIOS,
+    "SCENARIO_LIVE_27_PAPER_FILLS_WITHOUT_SENDING_ORDERS",
+    "SCENARIO_LIVE_28_PAPER_EXERCISES_IOC_BACKSTOP",
 )
