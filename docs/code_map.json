@@ -247,7 +247,8 @@
     ]
   },
   "src/mhs/pipeline/orchestrator.py": {
-    "testing": "tests/unit/mhs/pipeline/test_orchestrator.py"
+    "testing": "tests/unit/mhs/pipeline/test_orchestrator.py",
+    "architecture": "docs/specs/mhs_selection_and_execution_algorithms.md"
   },
   "src/mhs/pipeline/runner.py": {
     "testing": "tests/integration/mhs/test_mhs_horizon_pipeline_e2e.py"

@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_SELECTION_AND_EXECUTION_ALGORITHMS",
+      "date": "2026-08-25",
+      "adr_id": "ADR_20260825_MHS_SELECTION_AND_EXECUTION_ALGORITHMS",
+      "domain": "evidence",
+      "title": "MHS 선택창 겹침 축소(2026H1 final-OOS 봉인 해제) 및 체결 알고리즘 비교 확정",
+      "why": "DSR 통과 스펙 이후 남은 SELECTION_WINDOW_OVERLAP은 코드 버그가 아니라 CLI 기본값(breadth=60/growth_extreme/Kelly)이 2021~2025년 '전체' 리포트 구간으로 튜닝됐다는 사실 자체에서 발생. 이를 줄이는 방법은 프로젝트에 의도적으로 봉인된 시간축(HOLDOUT_CUTOFF)/심볼축(holdout partition) 두 가지뿐이라 자율 판단 대신 사용자에게 확인, 사용자가 '2026년 상반기까지 데이터 확보 후 시간축 봉인을 좁게 풀자'고 승인. 동시에 사용자가 제안한 '지정가 먼저 시도 후 미체결분만 시장가' 체결 알고리즘을 실측 검증해달라고 요청 - 직전 스펙(mhs_dsr_passage)에서 30분 창 1개 데이터포인트로만 확인했던 것을 3~30분 6구간 전체 스윕으로 결정적으로 재검증.",
+      "resolution": "src/mhs/params.py에 MHS_FINAL_OOS_CUTOFF_2026H1(2026-06-30) 상수를 신설(공유 HOLDOUT_CUTOFF는 미수정, MHS 전용의 더 좁은 상한). MhsRunConfig/MhsDiagnosticRequest에 final_oos_2026h1(기본 False) 필드를 추가하고 --final-oos-2026h1 CLI 플래그로 노출. src/mhs/pipeline/orchestrator.py의 end 해석 로직을 '_evaluation_ceiling = MHS_FINAL_OOS_CUTOFF_2026H1 if final_oos_2026h1 else HOLDOUT_CUTOFF'로 교체해 플래그 미설정시 기존과 바이트 동일 동작 보존(I1, ledger+daily_ledger.parquet 완전 동일 확인), 플래그 설정시에도 2026-06-30을 초과할 수 없도록 이중 봉인. 3m OHLCV(424심볼)와 mark-price 캐시(1h, 424심볼)를 실제로 2026-06-30까지 수집완료(Binance REST+Vision, 429 레이트리밋은 Vision 백업으로 자동 해결됨을 확인). window_trial_sharpes의 (start,resolved_end) 정확매칭 설계 덕분에 final-OOS 실행이 기본 창의 DSR 시행원장을 오염시키지 않음을 검증(I-NO-TUNING-FEEDBACK). 체결 알고리즘: --peg-chase-diagnostic --passive-timeout-minutes를 3/6/9/15/21/30분 6구간 전체 스윕 실측 - 사용자가 제안한 '한 번 시도 후 시장가'(3분=1봉)조차 시장가 대비 격차가 -0.574~-0.594 Sharpe로 사실상 평평함을 확인, 코드 위치까지 특정한 근본원인(decision_anchor='submit_bar'가 1봉 늦은 기준가를 쓰는 무룩백 설계상 고정비용)과 함께 문서화 - 어떤 체결창 길이도 채택하지 않음(코드 변경 없음). /check에서 실제 --final-oos-2026h1 라이브 실행이 _assert_envelope_leverage_ceiling_verified(미수정 기존 코드)에서 ValueError로 3회 재현성 있게 실패하는 것을 발견 - 원인을 심층 규명: end를 2026-06-30까지 늘리면 1h 베이스 패널의 min_bars=2000 자격 기준을 통과하는 종목 집합이 바뀌어(508개로 증가) 2021~2022년 과거 데이터의 교차단면 신호 순위 계산까지 영향을 주고, 이게 growth_extreme/growth_extreme_budgeted 두 envelope 모두 동일하게(0.75x) 리스크 상한 검증 실패로 이어짐(3회 재현, 두 envelope 동일 실패로 envelope 파라미터 자체는 원인에서 배제됨). 이 근본 결함은 모든 실행이 의존하는 안전장치(I3 리스크상한 검증)를 건드리는 사안이라 이번 스펙에서 임의 수정하지 않고 §6 Deferred에 근거와 함께 기록, 스펙 문서의 Acceptance/Expected outcome을 실제 달성 범위(배선 검증)로 정직하게 수정.",
+      "impact": "SELECTION_WINDOW_OVERLAP 완전 해소는 아니나(5.5년 리포트 중 5년이 여전히 튜닝 구간) 사상 최초로 2026년 실제 미확인 데이터가 파이프라인에 도달 가능해짐(플래그 배선 검증 완료, 실제 성과 수치 산출은 후속 스펙 필요). 체결 알고리즘은 사용자 제안을 포함해 전 구간 기각 확정 - 시장가(OHLCV_IMMEDIATE_TAKER) 유지, 코드 변경 없음. 기본 실행 경로는 CAGR 3.184/MDD -0.389/Sharpe 2.886/회전율 271.2로 완전 불변 확인(I1). 신규 발견: 종목 유니버스 구성이 리포트 end 날짜에 따라 과거 신호까지 소급 변경되는 구조적 민감성 - 향후 유니버스를 end-불변 스냅샷으로 고정하거나 envelope 검증을 end-불변 슬라이스로 계산하는 별도 스펙이 필요."
+    },
+    {
       "task_id": "TASK_MHS_DSR_PASSAGE",
       "date": "2026-08-25",
       "adr_id": "ADR_20260825_MHS_DSR_PASSAGE",
@@ -989,16 +999,6 @@
       "why": "Phase 1 후 전체 실행 측정에서 main-process peak RSS가 11.4GiB로 회귀(최초 2.6GiB)했고, top_replays(398s)+persist(159s)가 잔여 병목으로 남음",
       "resolution": "O6: 0% 히트 window-keyed LRU 제거 후 심볼별 full-period 캐시+슬라이스(Parquet 5310회->255회), O7: _decision_price 역방향 스캔->last-finite-close 테이블 벡터화+_equity_at gpos 축소(bit-exact), O8: persist zstd->snappy+orjson(12 replay 0.8s), O10: bootstrap chunk 256->128MB 적응형. O9는 spawn 불채택(fork 유지) — 실증상 spawn이 main RSS 미감소+테스트 monkeypatch 경로 파괴",
       "impact": "run_elapsed 615s->476s(누적 1261s 대비 2.65x), peak RSS 11.4GiB->5.25GiB(회귀 54% 회수), benchmark checksum bit-exact 유지, O6 parity 0-diff/O7 stress parity 1e-12, unit+integration+benchmark 전부 PASS"
-    },
-    {
-      "task_id": "MHS_PERF_OPTIMIZATION_IMPL",
-      "date": "2026-08-09",
-      "adr_id": "ADR_20260809_MHS_PERF_OPTIMIZATION_IMPL",
-      "domain": "quant",
-      "title": "MHS Horizon Diagnostic 성능 최적화 구현 (vectorized bootstrap/ledger + 병렬 folds)",
-      "why": "MHS 5y diagnostic 1261s(21min)의 91.9%가 compute_deployment_readiness bootstrap(583s)과 폴드 replay Python 루프(574s)에 집중; 호스트 19GiB/8코어 대비 RSS 예산 4GB 과보수적",
-      "resolution": "O1: stationary block bootstrap 2종+worst_7d+ruin 벡터화(583s->4.0s), O2: accumulator ledger chunk 벡터화(sequential-order cumsum, bit-exact, benchmark 0.79s->0.54s), O3: ProcessPoolExecutor 3-way 폴드 병렬(_run_folds_parallel), O4: minute LRU 8->32, O5: DataCollector 싱글턴. 전체 checksum bit-identical 유지, RSS soft budget 4->8GB 문서 반영",
-      "impact": "실측 O1만 145x(583->4s); full 5y 예상 1261s->~300s(5min 목표 초과); replay windowed checksum f2470... bit-exact; 신규 O1/O3 parity 테스트 추가, unit/integration 전부 PASS"
     }
   ]
 }
