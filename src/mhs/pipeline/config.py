@@ -20,11 +20,15 @@ from src.mhs.params import COMMITTEE_TARGET_GROSS
 # MDD -38.4%/Calmar 8.89, dominating the growth(2.0x)+Kelly-off baseline
 # (CAGR 349.8%/MDD -45.6%/Calmar 7.68) on MDD and Calmar simultaneously for a
 # 2.3% CAGR cost (ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING pre-registered
-# acceptance, treatment B). Deliberately decoupled from
+# acceptance, treatment B). The budgeted twin rung keeps the identical
+# leverage_ceiling=3.0 -- hence the identical resolved exposure cap and
+# deployed exposure -- while its max_drawdown=0.60 sits at the registered
+# budget ceiling, making the drawdown risk contract binding instead of
+# permanently DRAWDOWN_BUDGET_NON_BINDING. Deliberately decoupled from
 # ``src.mhs.params.GROWTH_ENVELOPE_DEFAULT`` ("conservative"), which stays the
 # frozen default for ``MhsDiagnosticRequest`` and the golden fixture matrix --
 # neither is touched by this change.
-CLI_GROWTH_ENVELOPE_DEFAULT = "growth_extreme"
+CLI_GROWTH_ENVELOPE_DEFAULT = "growth_extreme_budgeted"
 
 # Single owner of the CLI effective breadth default; the contract object
 # (MhsDiagnosticRequest) keeps its frozen 30 for bit-exact fixtures.

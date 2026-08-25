@@ -110,9 +110,13 @@ class PipelineContext:
     # Folds / diagnostics (S7)
     trials_attempted: int = 0
     trials_attempted_source: str | None = None
+    trial_sharpes: Any = None
     deflated_sharpe_ratio: Any = None
     dsr_decomposition: Any = None
+    deflated_sharpe_ratio_fold_proxy: Any = None
     fold_sharpe_dispersion: Any = None
+    fold_committee_weight_leak: Any = None
+    regime_conditional_sharpe: Any = None
     selection_overlap_fraction: Any = None
     bootstrap_ci: Any = None
     placebo_percentile: Any = None

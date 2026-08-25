@@ -199,6 +199,19 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
         horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
         leverage_ceiling=3.0,
     ),
+    # Budgeted twin of growth_extreme: identical leverage_ceiling so the
+    # resolved exposure cap -- and therefore the deployed exposure -- is
+    # unchanged, while the 0.60 drawdown budget sits at the registered ceiling
+    # and makes the risk contract enforceable ex post.
+    "growth_extreme_budgeted": GrowthRiskEnvelope(
+        name="growth_extreme_budgeted",
+        max_drawdown=0.60,
+        max_drawdown_prob=0.10,
+        ruin_fraction=COMMITTEE_GROWTH_RUIN_FRACTION,
+        max_ruin_prob=COMMITTEE_GROWTH_MAX_RUIN_PROB,
+        horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
+        leverage_ceiling=3.0,
+    ),
 }
 
 GROWTH_ENVELOPE_DEFAULT: str = "conservative"
