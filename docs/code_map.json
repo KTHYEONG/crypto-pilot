@@ -214,7 +214,8 @@
     "architecture": "docs/specs/mhs_evidence_integrity.md"
   },
   "src/mhs/features.py": {
-    "testing": "tests/unit/mhs/test_features.py"
+    "testing": "tests/unit/mhs/test_features.py",
+    "architecture": "docs/specs/mhs_committee_coverage_pit_leak.md"
   },
   "src/mhs/funding.py": {
     "testing": "tests/unit/mhs/test_funding.py"
