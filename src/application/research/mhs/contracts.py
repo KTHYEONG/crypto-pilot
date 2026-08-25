@@ -131,6 +131,13 @@ class MhsDiagnosticRequest:
     )
     peg_chase_diagnostic: bool = field(default=False, metadata=cli_param(flag="--peg-chase-diagnostic", help="Additionally replay under OHLCV_PEG_CHASE_PROXY."))
     liquidity_cost_model: str = field(default="flat", metadata=cli_param(flag="--liquidity-cost-model", help="Taker crossing cost model: flat or corwin_schultz."))
+    passive_timeout_minutes: int = field(
+        default=30,
+        metadata=cli_param(
+            flag="--passive-timeout-minutes",
+            help="Execution window length per intent in minutes (the passive chase window).",
+        ),
+    )
     discovery_gate: bool = field(
         default=False,
         metadata=cli_param(flag="--discovery-gate", help="Run the discovery/qualification horizon gate."),

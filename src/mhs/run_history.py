@@ -16,8 +16,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
+
 RUN_HISTORY_SHARD_MAX_BYTES: int = 262144
 RUN_HISTORY_MAX_SHARDS: int = 12
+
+# Repository-canonical history directory used when a caller passes no explicit
+# directory; mirrors the persist-time ``<target.parent>/mhs_run_history`` layout.
+_DEFAULT_HISTORY_DIR = Path("docs") / "results" / "mhs_run_history"
 
 _ACTIVE_FILE_NAME = "active.jsonl"
 _LATEST_FILE_NAME = "latest.json"
@@ -80,3 +86,39 @@ def append_run_history_record(record: Mapping[str, Any], history_dir: Path) -> P
     latest = history_dir / _LATEST_FILE_NAME
     latest.write_text(line, encoding="utf-8")
     return active
+
+
+def derive_trials_attempted(history_dir: Path | str | None = None) -> tuple[int, str]:
+    """Audit-trials denominator for the DSR from the run history itself.
+
+    Counts the distinct flag configurations (each record's canonical ``flags``
+    payload) across every JSONL shard and returns ``(max(counted,
+    SEARCH_TRIALS_ATTEMPTED), source)`` so the registered constant is a floor,
+    never a substitute for observation. ``source`` is ``'history'`` when the
+    observed count exceeds the constant, ``'constant'`` when the constant
+    binds, or ``'constant_fallback'`` when the history is unreadable (missing
+    directory or malformed records). O(history_lines).
+    """
+    directory = Path(history_dir) if history_dir is not None else _DEFAULT_HISTORY_DIR
+    try:
+        seen: set[str] = set()
+        observed_records = 0
+        for shard in sorted(directory.glob("*.jsonl")):
+            with shard.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    record = json.loads(stripped)
+                    flags = record.get("flags") if isinstance(record, dict) else None
+                    seen.add(json.dumps(flags, ensure_ascii=False, sort_keys=True))
+                    observed_records += 1
+    except (OSError, json.JSONDecodeError):
+        return SEARCH_TRIALS_ATTEMPTED, "constant_fallback"
+    if observed_records == 0:
+        # No readable history at all: the denominator's provenance must say so.
+        return SEARCH_TRIALS_ATTEMPTED, "constant_fallback"
+    counted = len(seen)
+    if counted > SEARCH_TRIALS_ATTEMPTED:
+        return counted, "history"
+    return SEARCH_TRIALS_ATTEMPTED, "constant"

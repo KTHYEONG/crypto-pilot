@@ -109,7 +109,9 @@ class PipelineContext:
 
     # Folds / diagnostics (S7)
     trials_attempted: int = 0
+    trials_attempted_source: str | None = None
     deflated_sharpe_ratio: Any = None
+    selection_overlap_fraction: Any = None
     bootstrap_ci: Any = None
     placebo_percentile: Any = None
     participation: dict[str, float] = field(default_factory=dict)
