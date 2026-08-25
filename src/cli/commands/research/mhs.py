@@ -677,6 +677,18 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
+        "--final-oos-2026h1",
+        action="store_true",
+        default=False,
+        help=(
+            "One-time, narrowly-scoped extension of the sealed evaluation window "
+            "through 2026-06-30 for a genuine out-of-selection-window check "
+            "(2026-08-25 user-authorized decision). Default keeps the existing "
+            "2025-12-31 seal byte-identical; results under this flag must not "
+            "feed back into further parameter tuning."
+        ),
+    )
+    mhs.add_argument(
         "--committee-member-attribution",
         action="store_true",
         default=False,

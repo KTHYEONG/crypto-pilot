@@ -337,6 +337,13 @@ class MhsDiagnosticRequest:
             help="Replay committee members individually for attribution.",
         ),
     )
+    final_oos_2026h1: bool = field(
+        default=False,
+        metadata=cli_param(
+            flag="--final-oos-2026h1",
+            help="One-time, narrowly-scoped extension of the sealed evaluation window through 2026-06-30 for a genuine out-of-selection-window check.",
+        ),
+    )
 
     def __post_init__(self) -> None:
         from src.application.research.mhs.validation import validate_request
