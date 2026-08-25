@@ -21,7 +21,8 @@
     "testing": "tests/unit/application/research/mhs/test_marks.py"
   },
   "src/application/research/mhs/research_go.py": {
-    "testing": "tests/unit/application/research/mhs/test_research_go.py"
+    "testing": "tests/unit/application/research/mhs/test_research_go.py",
+    "architecture": "docs/specs/mhs_holdout_report_and_go_gate.md"
   },
   "src/application/research/mhs/resources.py": {
     "testing": "tests/unit/application/research/mhs/test_resources.py"
