@@ -104,6 +104,9 @@ class MhsHorizonDiagnosticReport:
     fold_committee_weight_leak: dict[str, float] | None = None
     # 인과 레짐(trailing high / trailing vol tercile, 1-bar shift) 조건부 Sharpe(관측 전용).
     regime_conditional_sharpe: dict[str, dict[str, float]] | None = None
+    # 봉인 경계(HOLDOUT_CUTOFF) 이후 hold-out 꼬리 구간 자체의 성과 요약
+    # (holdout_tail_evidence 결과); 보고 구간이 봉인을 넘지 않으면 None.
+    holdout_tail: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         from src.mhs.report.artifacts import _jsonable
