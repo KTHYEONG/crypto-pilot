@@ -483,3 +483,33 @@ def test_mhs_book_report_exposure_scale_defaults_to_none() -> None:
         primary_annualized_turnover=None, stress_naive_sharpe=None,
     )
     assert report.exposure_scale is None
+
+
+# SCENARIO_MHS_DSR_PASSAGE_PASSIVE_TIMEOUT_DIVISIBILITY_06
+def test_SCENARIO_MHS_DSR_PASSAGE_PASSIVE_TIMEOUT_DIVISIBILITY_06() -> None:
+    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+
+    # A 5-minute timeout can never land on the 3m execution grid, so the
+    # request fails closed at construction (validate_request runs from
+    # __post_init__, before any panel load or replay).
+    with pytest.raises(ValueError, match="passive_timeout_minutes") as excinfo:
+        MhsDiagnosticRequest(execution_timeframe="3m", passive_timeout_minutes=5)
+    message = str(excinfo.value)
+    assert "passive_timeout_minutes" in message
+    assert "3" in message
+
+    # Grid-aligned windows and the frozen default construct successfully.
+    assert MhsDiagnosticRequest(
+        execution_timeframe="3m", passive_timeout_minutes=6
+    ).passive_timeout_minutes == 6
+    assert MhsDiagnosticRequest(
+        execution_timeframe="3m", passive_timeout_minutes=15
+    ).passive_timeout_minutes == 15
+    assert MhsDiagnosticRequest().passive_timeout_minutes == 30
+
+    # The required multiple follows the execution timeframe.
+    with pytest.raises(ValueError, match="passive_timeout_minutes"):
+        MhsDiagnosticRequest(execution_timeframe="5m", passive_timeout_minutes=6)
+    assert MhsDiagnosticRequest(
+        execution_timeframe="5m", passive_timeout_minutes=10
+    ).passive_timeout_minutes == 10
