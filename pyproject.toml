@@ -78,6 +78,7 @@ ignore = [
 "tools/agent_skills/lean_check.py" = ["T20", "S607"]
  "src/application/research/mhs/evaluation.py" = ["I001"]  # contract wiring mandates exact single-line import strings
  "src/mhs/evaluation.py" = ["I001"]  # contract wiring mandates exact single-line import strings
+"src/mhs/pipeline/orchestrator.py" = ["I001"]  # contract wiring mandates exact adjacent import lines
  "src/cli/commands/research/mhs.py" = ["I001"]  # contract wiring mandates an exact application-layer import line
  "src/cli/commands/research/*.py" = ["T20"]  # deterministic JSON diagnostic stdout
 "tools/benchmark_library_admission.py" = ["T20"]  # deterministic JSON benchmark stdout
