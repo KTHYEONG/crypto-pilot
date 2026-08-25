@@ -102,3 +102,51 @@ def test_orchestrator_stops_sampler_even_if_run_stages_raises(
         orchestrator.run_mhs_diagnostic(MhsRunConfig())
 
     assert stopped == [True]
+
+
+# SCENARIO_MHS_SELECTION_EXEC_BOUNDED_CEILING_02
+def test_scenario_mhs_selection_exec_bounded_ceiling_02(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """final_oos_2026h1=True bounds end at MHS_FINAL_OOS_CUTOFF_2026H1: a
+    defaulted end resolves to exactly 2026-06-30 23:59:59 UTC without raising,
+    an explicit later end fails closed naming both dates, and the flag-off
+    default keeps rejecting ends past HOLDOUT_CUTOFF (I1 preserved)."""
+    from src.mhs.pipeline.context import PipelineContext
+
+    import src.mhs.pipeline.orchestrator as orchestrator
+
+    fake_report = _FakeReport(marker="stub")
+    captured: list[PipelineContext] = []
+
+    def _fake_run_stages(ctx: PipelineContext, telemetry: object) -> _FakeReport:
+        captured.append(ctx)
+        return fake_report
+
+    class _FakeSampler:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(orchestrator, "run_stages", _fake_run_stages)
+    monkeypatch.setattr(orchestrator, "_TreeMemorySampler", _FakeSampler)
+
+    orchestrator.run_mhs_diagnostic(MhsRunConfig(final_oos_2026h1=True))
+    assert captured[-1].end == pd.Timestamp("2026-06-30 23:59:59", tz="UTC")
+
+    with pytest.raises(RuntimeError, match="Holdout sealed") as excinfo:
+        orchestrator.run_mhs_diagnostic(
+            MhsRunConfig(final_oos_2026h1=True, end="2026-07-15")
+        )
+    message = str(excinfo.value)
+    assert "2026-07-15" in message
+    assert "2026-06-30" in message
+
+    with pytest.raises(RuntimeError) as sealed_excinfo:
+        orchestrator.run_mhs_diagnostic(MhsRunConfig(end="2026-01-15"))
+    assert "2025-12-31" in str(sealed_excinfo.value)
