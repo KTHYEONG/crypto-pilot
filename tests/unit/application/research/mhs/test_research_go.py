@@ -11,6 +11,7 @@ from src.application.research.mhs.contracts import (
     MhsFoldReport,
 )
 from src.application.research.mhs.research_go import (
+    GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
     _drawdown_budget_reasons,
     _mhs_research_go,
     _pooled_level_gate_reasons,
@@ -18,6 +19,7 @@ from src.application.research.mhs.research_go import (
     _resolved_growth_envelope,
 )
 from src.mhs.params import COMMITTEE_MEMBER_SETS, GROWTH_RISK_ENVELOPES
+from src.mhs.types import REGISTERED_POLICY_THRESHOLDS
 
 
 def test_resolved_committee_members_risk_premia() -> None:
@@ -58,11 +60,22 @@ class TestDrawdownGateReadsEnvelope:
 
     def test_none_primary_returns_empty(self) -> None:
         for env in GROWTH_RISK_ENVELOPES.values():
-            assert _drawdown_budget_reasons(None, env.max_drawdown) == ()
+            if env.max_drawdown > REGISTERED_POLICY_THRESHOLDS["max_drawdown_budget_ceiling"]:
+                # A non-binding budget blocks regardless of the observed value.
+                assert _drawdown_budget_reasons(None, env.max_drawdown) == (
+                    GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+                )
+            else:
+                assert _drawdown_budget_reasons(None, env.max_drawdown) == ()
 
     def test_nan_primary_returns_empty(self) -> None:
         for env in GROWTH_RISK_ENVELOPES.values():
-            assert _drawdown_budget_reasons(float("nan"), env.max_drawdown) == ()
+            if env.max_drawdown > REGISTERED_POLICY_THRESHOLDS["max_drawdown_budget_ceiling"]:
+                assert _drawdown_budget_reasons(float("nan"), env.max_drawdown) == (
+                    GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+                )
+            else:
+                assert _drawdown_budget_reasons(float("nan"), env.max_drawdown) == ()
 
 
 class TestResolvedGrowthEnvelope:
@@ -81,6 +94,38 @@ class TestResolvedGrowthEnvelope:
         object.__setattr__(req, "growth_envelope", "unregistered")
         with pytest.raises(ValueError, match="unknown growth_envelope"):
             _resolved_growth_envelope(req)
+
+
+# SCENARIO_MHS_DSR_05_NON_BINDING_BUDGET_BLOCKS_GO
+def test_SCENARIO_MHS_DSR_05_NON_BINDING_BUDGET_BLOCKS_GO() -> None:
+    # A budget at/above 1.0 can never bind (-100% is capital extinction), so
+    # it must block instead of silently passing -- regardless of the observed
+    # drawdown value.
+    assert _drawdown_budget_reasons(-0.389, max_drawdown=1.0) == (
+        GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+    )
+    assert _drawdown_budget_reasons(-0.95, max_drawdown=1.0) == (
+        GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+    )
+    # A binding budget keeps the original breach / pass semantics.
+    assert _drawdown_budget_reasons(-0.389, max_drawdown=0.25) == (
+        "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET",
+    )
+    assert _drawdown_budget_reasons(-0.10, max_drawdown=0.25) == ()
+    with pytest.raises(ValueError, match="max_drawdown"):
+        _drawdown_budget_reasons(-0.10, max_drawdown=0.0)
+
+
+# SCENARIO_MHS_DSR_05_NON_BINDING_BUDGET_BLOCKS_GO (ceiling boundary)
+def test_non_binding_code_fires_only_above_registered_ceiling() -> None:
+    ceiling = REGISTERED_POLICY_THRESHOLDS["max_drawdown_budget_ceiling"]
+    assert ceiling == 0.60
+    # At the ceiling the budget can still bind: no non-binding code.
+    assert _drawdown_budget_reasons(-0.10, max_drawdown=ceiling) == ()
+    # Strictly above it: always blocked.
+    assert _drawdown_budget_reasons(-0.10, max_drawdown=ceiling + 1e-9) == (
+        GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+    )
 
 
 # SCENARIO_MHS_POOLED_LEVEL_GATE_REPLACES_MIN_FOLD

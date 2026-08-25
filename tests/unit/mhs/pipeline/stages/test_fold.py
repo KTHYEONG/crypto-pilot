@@ -110,7 +110,7 @@ def test_run_folds_reaches_seam_functions_default_flags(monkeypatch: pytest.Monk
     monkeypatch.setattr(fold_stage, "_committee_diagnostic", _boom)
     monkeypatch.setattr(fold_stage, "_multi_feature_diagnostic", _boom)
     monkeypatch.setattr(
-        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: None,
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None),
     )
     monkeypatch.setattr(
         fold_stage._research_go, "_mhs_research_go",
@@ -169,7 +169,7 @@ def test_run_folds_resolves_boundary_growth_budget_vols(monkeypatch: pytest.Monk
     monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
     monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
     monkeypatch.setattr(
-        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: None,
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None),
     )
     monkeypatch.setattr(
         fold_stage._research_go, "_mhs_research_go",
@@ -233,7 +233,7 @@ def test_run_folds_slices_blend_exposure_scale_for_constant_risk(monkeypatch: py
     monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
     monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
     monkeypatch.setattr(
-        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: None,
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None),
     )
     monkeypatch.setattr(
         fold_stage._research_go, "_mhs_research_go",
@@ -313,7 +313,7 @@ def test_run_folds_skips_boundary_vols_outside_growth_budget(monkeypatch: pytest
     monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
     monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
     monkeypatch.setattr(
-        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: None,
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None),
     )
     monkeypatch.setattr(
         fold_stage._research_go, "_mhs_research_go",
@@ -348,7 +348,7 @@ def test_run_folds_reaches_committee_diagnostic_seam(monkeypatch: pytest.MonkeyP
         lambda *_a, **_k: calls.append("_committee_diagnostic") or "committee-diag-stub",
     )
     monkeypatch.setattr(
-        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: None,
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None),
     )
     monkeypatch.setattr(
         fold_stage._research_go, "_mhs_research_go",
