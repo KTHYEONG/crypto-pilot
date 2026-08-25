@@ -656,3 +656,97 @@ class TestFairnessInstrumentation:
         pd.testing.assert_frame_equal(enabled.simulated_fills, disabled.simulated_fills)
         assert math.isnan(disabled.min_notional_dropped_fraction)
         assert 0.0 <= enabled.min_notional_dropped_fraction <= 1.0
+
+
+class TestStrictProxyCostModelSharing:
+    """S8: the OHLCV_STRICT_PROXY timeout backstop shares the liquidity-aware
+    taker cost model with IMMEDIATE/PEG bounds instead of a legacy flat path."""
+
+    def _timeout_workload(self, days: int = 12, n_symbols: int = 4) -> dict[str, object]:
+        """Flat OHLCV exactly at the mark: strict trade-through requires a
+        strict inequality, so NO intent -- buy or rebalance-sell -- ever
+        crosses and every single one completes via the timeout backstop."""
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        frame = pd.DataFrame(100.0, index=grid, columns=symbols)
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        # 교대 가중치: 매 결정마다 절반은 신규 매수, 절반은 전량 청산 매도가
+        # 되어 순량이 항상 1e-12 스킵 문턱 위로 유지된다(전부 타임아웃).
+        data = np.zeros((len(decision_grid), n_symbols))
+        data[::2, : n_symbols // 2] = 0.01
+        data[1::2, n_symbols // 2 :] = 0.01
+        weights = pd.DataFrame(data, index=decision_grid, columns=symbols)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": frame.copy(),
+            "lows": frame.copy(),
+            "closes": frame.copy(),
+            "marks": frame.copy(),
+            "funding": pd.DataFrame(0.0, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    def _windows(self, wl: dict[str, object], n_windows: int = 3):
+        return _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=n_windows,
+        )
+
+    def test_SCENARIO_MHS_EVID_05_STRICT_PROXY_SHARES_ONE_COST_MODEL(self) -> None:
+        """SCENARIO_MHS_EVID_05_STRICT_PROXY_SHARES_ONE_COST_MODEL: with
+        liquidity_cost_model='corwin_schultz', an all-timeout STRICT_PROXY run
+        prices its backstop at taker_fee + the column's EWMA half-spread (never
+        taker_fee + flat slippage), and the notional-weighted shortfall departs
+        from the 'flat' run by more than 1e-9."""
+        wl = self._timeout_workload()
+        windows = self._windows(wl)
+        cs_spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+
+        acc = _BoundExecutionReplayAccumulator(windows[0], 1.0, "OHLCV_STRICT_PROXY", cs_spec, False)
+        assert np.isnan(acc.half_spread_bps).all()
+        acc.consume(windows[0])
+        n_first = len(acc.fill_reason)
+        first_fees = [
+            fee
+            for fee, reason in zip(acc.fill_fee_bps, acc.fill_reason, strict=True)
+            if reason == "timeout_taker"
+        ]
+        assert first_fees
+        # 첫 윈도우는 EWMA가 아직 nan이라 flat slippage로 폴백한다.
+        assert all(f == cs_spec.taker_fee_bps + cs_spec.taker_slippage_bps for f in first_fees)
+        est_snapshot = acc.half_spread_bps.copy()
+        assert np.isfinite(est_snapshot).all()
+        gcol_of = {s: i for i, s in enumerate(acc.columns)}
+        for window in windows[1:]:
+            acc.consume(window)
+        later = [
+            (fee, sym)
+            for fee, sym, reason in zip(
+                acc.fill_fee_bps[n_first:],
+                acc.fill_symbol[n_first:],
+                acc.fill_reason[n_first:],
+                strict=True,
+            )
+            if reason == "timeout_taker"
+        ]
+        assert later
+        for fee, sym in later:
+            # EWMA half-spread가 slippage를 대체한다(flat 고정비 아님).
+            assert fee == pytest.approx(cs_spec.taker_fee_bps + est_snapshot[gcol_of[sym]])
+            assert fee != cs_spec.taker_fee_bps + cs_spec.taker_slippage_bps
+
+        flat_report = replay_execution_windows(
+            self._windows(wl), 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        cs_report = replay_execution_windows(
+            self._windows(wl), 1.0, "OHLCV_STRICT_PROXY", cs_spec,
+        )
+        reasons = set(flat_report.simulated_fills["reason"])
+        assert "passive_fill" not in reasons  # 전부 타임아웃 백스톱으로 완결
+        assert len(flat_report.simulated_fills) > 0
+        assert abs(
+            cs_report.notional_weighted_shortfall_bps
+            - flat_report.notional_weighted_shortfall_bps
+        ) > 1e-9
