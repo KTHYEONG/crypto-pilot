@@ -90,4 +90,10 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         fill_mark_parity=ctx._fill_mark_parity_census,
         growth_envelope=ctx._growth_envelope_payload,
         committee_member_attribution=ctx.committee_member_attribution,
+        selection_overlap_fraction=(
+            float(ctx.selection_overlap_fraction)
+            if ctx.selection_overlap_fraction is not None
+            else None
+        ),
+        trials_attempted_source=ctx.trials_attempted_source,
     )

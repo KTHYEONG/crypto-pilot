@@ -198,6 +198,11 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     _liquidity_cost_model_action = mhs.add_argument("--liquidity-cost-model", choices=["flat", "corwin_schultz"], default="flat")
+    _passive_timeout_action = mhs.add_argument("--passive-timeout-minutes", type=int, default=30)
+    _passive_timeout_action.help = (
+        "Execution window per intent in minutes; sweeps the passive chase "
+        "window (with the IOC backstop at the deadline) without a code edit"
+    )
     _liquidity_cost_model_action.help = (
         "Taker crossing cost model: flat (frozen default, fixed 3bps "
         "slippage, bit-identical) or corwin_schultz (per-symbol half-spread "
