@@ -58,6 +58,7 @@ def passive_fill_shortfall_bps(
     timeout_price: float,
     side: int,
     spec: ExecutionSpec,
+    taker_cost_bps: float | None = None,
 ) -> float:
     """Implementation shortfall of one passive order against its decision price.
 
@@ -65,7 +66,9 @@ def passive_fill_shortfall_bps(
     ``side=-1`` is a sell and ``adverse_path`` carries the window's highs. A
     fill costs exactly the maker fee; a no-fill crosses at the timeout price
     and pays the all-in taker cost, so fee and adverse selection are always
-    accounted together.
+    accounted together. ``taker_cost_bps`` overrides the flat slippage term
+    when the caller supplies a liquidity-aware crossing cost; the default
+    reproduces the frozen all-in taker cost bit-identically.
     """
     if decision_price <= 0 or timeout_price <= 0:
         raise ValueError("decision_price and timeout_price must be > 0")
@@ -86,7 +89,8 @@ def passive_fill_shortfall_bps(
     if filled:
         return float(spec.maker_fee_bps)
     move_bps = side * (timeout_price / decision_price - 1.0) * 1e4
-    return float(move_bps + spec.taker_fee_bps + spec.taker_slippage_bps)
+    slippage = float(spec.taker_slippage_bps) if taker_cost_bps is None else float(taker_cost_bps)
+    return float(move_bps + spec.taker_fee_bps + slippage)
 
 
 def notional_weighted_shortfall_bps(
@@ -281,6 +285,119 @@ def peg_chase_fill_schedule(
             "backstop_taker",
         )
     return None
+
+def peg_chase_partial_schedule(
+    anchor_price: float,
+    side: int,
+    adverse: np.ndarray,
+    closes: np.ndarray,
+    spec: ExecutionSpec,
+    taker_cost_bps: float | None = None,
+) -> list[tuple[int, float, float, float, str]]:
+    """Tranched peg-chase schedule: equal sub-windows with carried quantity.
+
+    The window splits into ``spec.peg_chase_tranches`` equal sub-windows; each
+    tranche re-pegs from ``anchor_price`` and follows the same previous-close
+    chain (band-capped on the adverse side only) as ``peg_chase_fill_schedule``.
+    A tranche whose sub-window trades through fills its carried share as maker
+    at its peg; a failed non-final tranche carries its share forward; the final
+    residual crosses unconditionally at the deadline bar exactly like the
+    single-window backstop (passive fraction, then first finite close). With
+    ``peg_chase_tranches == 1`` the output is exactly the single-element
+    equivalent of ``peg_chase_fill_schedule``, so the default reproduces the
+    all-or-nothing fill bit-identically.
+
+    Returns ``(relative_fill_position, price, fee_bps, qty_fraction, reason)``
+    tuples in fill order; the ``qty_fraction`` values sum to 1.0 within double
+    precision whenever a finite close exists. An empty list is returned
+    exactly when the window holds no usable finite close for completion (a
+    data gap), never as a pricing decision.
+
+    ``taker_cost_bps`` overrides the all-in backstop fee term when the caller
+    supplies a liquidity-aware cost; otherwise it defaults to
+    ``taker_fee_bps + taker_slippage_bps``.
+    """
+    if side not in (-1, 1):
+        raise ValueError(f"side must be -1 or +1, got {side}")
+    if anchor_price <= 0:
+        raise ValueError(f"anchor_price must be > 0, got {anchor_price}")
+    tranches = int(spec.peg_chase_tranches)
+    if tranches < 1:
+        raise ValueError(f"peg_chase_tranches must be >= 1, got {spec.peg_chase_tranches}")
+    n = len(adverse)
+    if n == 0:
+        raise ValueError("adverse must not be empty")
+    if not np.isfinite(adverse).all():
+        raise ValueError("adverse must be finite")
+    if len(closes) < n:
+        raise ValueError("closes must be at least as long as adverse")
+
+    finite_close = np.isfinite(closes[:n])
+    if not finite_close.any():
+        return []
+
+    cap = anchor_price * (1.0 + side * spec.peg_chase_band_bps / 1e4)
+    backstop_fee = (
+        float(taker_cost_bps)
+        if taker_cost_bps is not None
+        else float(spec.taker_fee_bps + spec.taker_slippage_bps)
+    )
+    boundaries = [int(b) for b in np.linspace(0, n, tranches + 1)]
+
+    def _subwindow_fill(lo: int, hi: int, final: bool) -> tuple[int, float, float, str] | None:
+        length = hi - lo
+        if length <= 0:
+            return None
+        peg = np.empty(length, dtype="float64")
+        peg[0] = anchor_price
+        if length > 1:
+            peg[1:] = closes[lo : lo + length - 1]
+        if side == 1:
+            local_peg = np.minimum(peg, cap)
+            crossed = adverse[lo:hi] < local_peg
+        else:
+            local_peg = np.maximum(peg, cap)
+            crossed = adverse[lo:hi] > local_peg
+        passive_len = min(length, max(1, math.ceil(spec.peg_passive_fraction * length)))
+        if final:
+            crossed = crossed & (np.arange(length) < passive_len)
+        maker_hits = np.flatnonzero(crossed)
+        if maker_hits.size > 0:
+            hit = int(maker_hits[0])
+            return (hit, float(local_peg[hit]), float(spec.maker_fee_bps), "maker_fill")
+        if not final:
+            return None
+        backstop_from = min(passive_len, length - 1)
+        backstop_hits = np.flatnonzero(
+            (np.arange(length) >= backstop_from) & finite_close[lo:hi]
+        )
+        if backstop_hits.size > 0:
+            hit = int(backstop_hits[0])
+            return (hit, float(closes[lo + hit]), backstop_fee, "backstop_taker")
+        return None
+
+    schedule: list[tuple[int, float, float, float, str]] = []
+    filled_fraction = 0.0
+    carried = 0.0
+    for index in range(tranches):
+        lo = boundaries[index]
+        hi = boundaries[index + 1]
+        final = index == tranches - 1
+        share = 1.0 / tranches + carried
+        carried = 0.0
+        filled = _subwindow_fill(lo, hi, final)
+        if filled is None:
+            if final:
+                # No completable crossing (data gap): mirror the single-window
+                # None semantics by discarding the schedule to the residual path.
+                return []
+            carried = share
+            continue
+        rel_pos, price, fee_bps, reason = filled
+        qty_fraction = (1.0 - filled_fraction) if final else share
+        schedule.append((lo + rel_pos, price, fee_bps, qty_fraction, reason))
+        filled_fraction += qty_fraction
+    return schedule
 
 
 def corwin_schultz_half_spread_bps(
@@ -1943,84 +2060,85 @@ class _BoundExecutionReplayAccumulator:
                             )
                             continue
                         liquidity_cost_bps = self._taker_cost_bps(gcol)
-                        schedule = peg_chase_fill_schedule(
+                        schedule = peg_chase_partial_schedule(
                             decision_price, side, adverse, closes_window, self.spec,
                             taker_cost_bps=self.spec.taker_fee_bps + liquidity_cost_bps,
                         )
-                        if schedule is None:
+                        if not schedule:
                             # Residual: cash and units stay untouched (I3), so
                             # the next decision recomputes net from the stale
                             # position and carries the intent forward.
                             self.residual_count += 1
                             self.residual_notional += abs(net_units) * decision_price
                             continue
-                        rel_pos, fill_price, fee_bps, sched_reason = schedule
-                        fill_pos = spos + rel_pos
-                        reason = "passive_fill" if sched_reason == "maker_fill" else "timeout_taker"
-                        if reason == "passive_fill":
-                            self.fill_count += 1
-                        else:
-                            # Backstop conversion mirrors the strict/touch
-                            # timeout convention: one unfilled intent that
-                            # completed via the taker fallback.
-                            self.unfilled_count += 1
-                            self.fallback_count += 1
-                        if reason == "passive_fill":
-                            self._record_terms(decision_price, fill_price, side, self.spec.maker_fee_bps, 0.0)
-                        elif self.spec.liquidity_cost_model == "corwin_schultz":
-                            self._record_terms(
-                                decision_price, fill_price, side,
-                                self.spec.taker_fee_bps, liquidity_cost_bps,
+                        for rel_pos, fill_price, fee_bps, qty_fraction, sched_reason in schedule:
+                            qty = net_units * qty_fraction
+                            fill_pos = spos + rel_pos
+                            reason = "passive_fill" if sched_reason == "maker_fill" else "timeout_taker"
+                            if reason == "passive_fill":
+                                self.fill_count += 1
+                            else:
+                                # Backstop conversion mirrors the strict/touch
+                                # timeout convention: one unfilled intent that
+                                # completed via the taker fallback.
+                                self.unfilled_count += 1
+                                self.fallback_count += 1
+                            if reason == "passive_fill":
+                                self._record_terms(decision_price, fill_price, side, self.spec.maker_fee_bps, 0.0)
+                            elif self.spec.liquidity_cost_model == "corwin_schultz":
+                                self._record_terms(
+                                    decision_price, fill_price, side,
+                                    self.spec.taker_fee_bps, liquidity_cost_bps,
+                                )
+                            else:
+                                self._record_terms(
+                                    decision_price, fill_price, side,
+                                    self.spec.taker_fee_bps + liquidity_cost_bps, 0.0,
+                                )
+                            shortfall = (
+                                side * (fill_price / decision_price - 1.0) * 1e4
+                                + (
+                                    self.spec.maker_fee_bps
+                                    if sched_reason == "maker_fill"
+                                    else self.spec.taker_fee_bps + liquidity_cost_bps
+                                )
                             )
-                        else:
-                            self._record_terms(
-                                decision_price, fill_price, side,
-                                self.spec.taker_fee_bps + liquidity_cost_bps, 0.0,
-                            )
-                        shortfall = (
-                            side * (fill_price / decision_price - 1.0) * 1e4
-                            + (
-                                self.spec.maker_fee_bps
-                                if sched_reason == "maker_fill"
-                                else self.spec.taker_fee_bps + liquidity_cost_bps
-                            )
-                        )
-                        self.shortfalls.append(shortfall)
-                        self.shortfall_notionals.append(abs(net_units) * fill_price)
-                        fill_time = grid[fill_pos]
-                        submit_time = grid[submit_pos]
-                        mark_price = float(marks_values[fill_pos, col])
-                        if np.isfinite(self.last_prices_arr[gcol]):
-                            if np.isfinite(mark_price):
-                                self.cash += self.units_arr[gcol] * (mark_price - self.last_prices_arr[gcol])
+                            self.shortfalls.append(shortfall)
+                            self.shortfall_notionals.append(abs(qty) * fill_price)
+                            fill_time = grid[fill_pos]
+                            submit_time = grid[submit_pos]
+                            mark_price = float(marks_values[fill_pos, col])
+                            if np.isfinite(self.last_prices_arr[gcol]):
+                                if np.isfinite(mark_price):
+                                    self.cash += self.units_arr[gcol] * (mark_price - self.last_prices_arr[gcol])
+                                    self.last_prices_arr[gcol] = mark_price
+                            elif np.isfinite(mark_price):
                                 self.last_prices_arr[gcol] = mark_price
-                        elif np.isfinite(mark_price):
-                            self.last_prices_arr[gcol] = mark_price
-                        if not (np.isfinite(net_units) and np.isfinite(fill_price)):
-                            raise DataIntegrityError(
-                                "non-finite fill sizing breaches the capital accounting invariant "
-                                f"(symbol={sym!r} ts={fill_time!r} weight={weight!r} equity={equity!r} "
-                                f"decision_price={decision_price!r} qty={net_units!r} fill_price={fill_price!r})"
-                            )
-                        self.cash -= net_units * fill_price
-                        fee = fee_bps / 1e4 * abs(net_units) * fill_price
-                        self.cash -= fee
-                        self.units_arr[gcol] += net_units
-                        pre_trade_equity = self._equity_at(gpos)
-                        self.fill_ts.append(fill_time)
-                        self.fill_symbol.append(sym)
-                        self.fill_qty.append(net_units)
-                        self.fill_price.append(fill_price)
-                        self.fill_fee_bps.append(fee_bps)
-                        self.fill_reason.append(reason)
-                        self.fill_pre_trade_equity.append(pre_trade_equity)
-                        self.fill_times.append(fill_time)
-                        self.submit_times.append(submit_time)
-                        if self.retain_event_snapshots:
-                            marks_row = np.full(n_cols, np.nan, dtype="float64")
-                            marks_row[gpos] = marks_values[fill_pos]
-                            self.units_after_events.append((fill_time, self.units_arr.copy()))
-                            self.notional_after_events.append((fill_time, self.units_arr * marks_row))
+                            if not (np.isfinite(qty) and np.isfinite(fill_price)):
+                                raise DataIntegrityError(
+                                    "non-finite fill sizing breaches the capital accounting invariant "
+                                    f"(symbol={sym!r} ts={fill_time!r} weight={weight!r} equity={equity!r} "
+                                    f"decision_price={decision_price!r} qty={qty!r} fill_price={fill_price!r})"
+                                )
+                            self.cash -= qty * fill_price
+                            fee = fee_bps / 1e4 * abs(qty) * fill_price
+                            self.cash -= fee
+                            self.units_arr[gcol] += qty
+                            pre_trade_equity = self._equity_at(gpos)
+                            self.fill_ts.append(fill_time)
+                            self.fill_symbol.append(sym)
+                            self.fill_qty.append(qty)
+                            self.fill_price.append(fill_price)
+                            self.fill_fee_bps.append(fee_bps)
+                            self.fill_reason.append(reason)
+                            self.fill_pre_trade_equity.append(pre_trade_equity)
+                            self.fill_times.append(fill_time)
+                            self.submit_times.append(submit_time)
+                            if self.retain_event_snapshots:
+                                marks_row = np.full(n_cols, np.nan, dtype="float64")
+                                marks_row[gpos] = marks_values[fill_pos]
+                                self.units_after_events.append((fill_time, self.units_arr.copy()))
+                                self.notional_after_events.append((fill_time, self.units_arr * marks_row))
                         continue
                     if timeout_pos <= spos:
                         self.termination_counts["MISSING_DATA"] += 1
@@ -2084,7 +2202,7 @@ class _BoundExecutionReplayAccumulator:
                         self.fallback_count += 1
                         fill_pos = timeout_pos
                         fill_price = timeout_close
-                        fee_bps = self.spec.taker_fee_bps + self.spec.taker_slippage_bps
+                        fee_bps = self.spec.taker_fee_bps + self._taker_cost_bps(gcol)
                         reason = "timeout_taker"
                 if reason == "passive_fill":
                     self.fill_count += 1
@@ -2101,7 +2219,10 @@ class _BoundExecutionReplayAccumulator:
                         # term and the spread term stays exactly zero.
                         self._record_terms(decision_price, fill_price, side, fee_bps, 0.0)
                 else:
-                    shortfall = passive_fill_shortfall_bps(decision_price, adverse, timeout_close, side, self.spec)
+                    shortfall = passive_fill_shortfall_bps(
+                        decision_price, adverse, timeout_close, side, self.spec,
+                        taker_cost_bps=self._taker_cost_bps(gcol),
+                    )
                     # The residual after timing is the all-in fee component;
                     # deriving it keeps fee+spread+delay == shortfall exact
                     # even on degenerate exact-touch fills.

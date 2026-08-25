@@ -24,7 +24,6 @@ from src.application.research.mhs.evaluation import (
     COMMITTEE_MEMBERS,
     COMMITTEE_OOS_START,
     FEATURE_REGISTRY,
-    SEARCH_TRIALS_ATTEMPTED,
     DataIntegrityError,
     compute_deployment_readiness,
     feature_registry_panel_columns,
@@ -44,15 +43,19 @@ from src.application.research.mhs.stage_services import (
     _run_post_book_concurrently,
 )
 from src.mhs.calibration import NullShareCalibration, calibrate_max_share_null
+from src.mhs.evidence import selection_overlap_fraction
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
+from src.mhs.run_history import derive_trials_attempted
 from src.mhs.telemetry import StageTelemetry
 
 
 def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     """Run the fold pool and all post-book statistical diagnostics."""
-    ctx.trials_attempted = SEARCH_TRIALS_ATTEMPTED
+    ctx.trials_attempted, ctx.trials_attempted_source = derive_trials_attempted()
     ctx.deflated_sharpe_ratio = None
+    # Observational disclosure of the defaults' selection window overlap.
+    ctx.selection_overlap_fraction = selection_overlap_fraction(ctx.start, ctx.end)
 
     ctx.bootstrap_ci = None
     ctx.placebo_percentile = None
@@ -220,12 +223,20 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     level_reasons = _research_go._pooled_level_gate_reasons(ctx._pooled_fold_evidence)
     # 관측 전용 진단: 항상 빈 튜플이며 Research-GO reason 합산에 더하지 않는다.
     ctx.fold_realized_risk_parity, _risk_parity_reasons = _fold_realized_risk_parity(ctx.folds)
+    # 관측 전용 공시 코드(선택창 겹침)만 조건부로 추가된다. 차단 코드는 아니다.
+    extra_reasons: tuple[str, ...] = parity_reasons + concentration_reasons + level_reasons
+    if ctx.selection_overlap_fraction > 0:
+        extra_reasons = (
+            *extra_reasons,
+            _research_go.GO_REASON_SELECTION_WINDOW_OVERLAP,
+        )
     ctx.research_go = _research_go._mhs_research_go(
-        ctx.folds, ctx.book_reasons, parity_reasons + concentration_reasons + level_reasons,
+        ctx.folds, ctx.book_reasons, extra_reasons,
         blend_primary_max_drawdown=(
             ctx.blend_report.primary_max_drawdown if ctx.blend_report is not None else None
         ),
         max_drawdown=_research_go._resolved_growth_envelope(ctx.config).max_drawdown,
+        deflated_sharpe_ratio=ctx.deflated_sharpe_ratio,
     )
 
     if ctx.blend_report is not None and ctx.blend_report.primary is not None:

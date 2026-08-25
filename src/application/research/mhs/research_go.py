@@ -45,6 +45,15 @@ GO_REASON_FOLD_GROWTH_CONCENTRATION = "FOLD_GROWTH_CONCENTRATION"
 # the registered budget. NOT a data-integrity reason: the data was intact; the
 # risk contract was exceeded.
 GO_REASON_DRAWDOWN_OVER_BUDGET = "PRIMARY_MAX_DRAWDOWN_OVER_BUDGET"
+# Risk-contract codes for the Deflated Sharpe Ratio gate (never data-integrity
+# codes): a DSR under the registered threshold blocks the decision, and a
+# missing/non-finite DSR fails closed instead of passing silently.
+GO_REASON_DEFLATED_SHARPE_BELOW_THRESHOLD = "DEFLATED_SHARPE_BELOW_THRESHOLD"
+GO_REASON_DEFLATED_SHARPE_UNAVAILABLE = "DEFLATED_SHARPE_UNAVAILABLE"
+# Observational disclosure code: the report window intersects the window the
+# CLI defaults were selected on. Surfaced through extra_reasons; it never
+# blocks the decision by itself.
+GO_REASON_SELECTION_WINDOW_OVERLAP = "SELECTION_WINDOW_OVERLAP"
 # Data-integrity reason codes: fail-closed evidence that the canonical input
 # data itself was missing or invalid, as opposed to pure alpha-quality failures
 # (GO_REASON_PRIMARY_SHARPE / GO_REASON_STRESS_SHARPE) or the policy
@@ -159,12 +168,34 @@ def _pooled_level_gate_reasons(
     return tuple(reasons)
 
 
+def _deflated_sharpe_gate_reasons(
+    deflated_sharpe_ratio: float | None,
+) -> tuple[str, ...]:
+    """DSR gate: fail-closed under the registered ``deflated_sharpe_ratio`` cut.
+
+    A missing or non-finite DSR blocks with ``DEFLATED_SHARPE_UNAVAILABLE``
+    (silence would let uncorrected selection bias through), and a finite DSR
+    strictly below ``REGISTERED_POLICY_THRESHOLDS['deflated_sharpe_ratio']``
+    blocks with ``DEFLATED_SHARPE_BELOW_THRESHOLD``. An unregistered threshold
+    is treated as unavailable so the gate can never pass by omission.
+    """
+    threshold = REGISTERED_POLICY_THRESHOLDS.get("deflated_sharpe_ratio")
+    if deflated_sharpe_ratio is None or not np.isfinite(deflated_sharpe_ratio) or (
+        threshold is None
+    ):
+        return (GO_REASON_DEFLATED_SHARPE_UNAVAILABLE,)
+    if float(deflated_sharpe_ratio) < float(threshold):
+        return (GO_REASON_DEFLATED_SHARPE_BELOW_THRESHOLD,)
+    return ()
+
+
 def _mhs_research_go(
     folds: tuple[MhsFoldReport, ...],
     book_reasons: tuple[str, ...] = (),
     extra_reasons: tuple[str, ...] = (),
     blend_primary_max_drawdown: float | None = None,
     max_drawdown: float = COMMITTEE_GROWTH_MAX_DRAWDOWN,
+    deflated_sharpe_ratio: float | None = None,
 ) -> MhsResearchGoResult:
     """Fail-closed top-level Research-GO decision from fold and book evidence.
 
@@ -180,15 +211,20 @@ def _mhs_research_go(
     ``GrowthRiskEnvelope.max_drawdown`` -- ``COMMITTEE_GROWTH_MAX_DRAWDOWN`` by
     default, i.e. the ``conservative`` envelope) blocks the decision with
     ``PRIMARY_MAX_DRAWDOWN_OVER_BUDGET`` (a risk-contract code, never a
-    data-integrity code). The cap-30 roster and primary annual-return gate
-    thresholds live in ``REGISTERED_POLICY_THRESHOLDS``; while any is
-    unregistered (``None``) the decision reports ``UNSPECIFIED_POLICY`` and
-    stays conservative (false).
+    data-integrity code). ``deflated_sharpe_ratio`` feeds the DSR gate against
+    ``REGISTERED_POLICY_THRESHOLDS['deflated_sharpe_ratio']``: below-threshold
+    evidence blocks with ``DEFLATED_SHARPE_BELOW_THRESHOLD`` and an absent DSR
+    fails closed with ``DEFLATED_SHARPE_UNAVAILABLE``; the gate can only turn
+    ``eligible`` from True to False, never False to True. The cap-30 roster and
+    primary annual-return gate thresholds live in
+    ``REGISTERED_POLICY_THRESHOLDS``; while any is unregistered (``None``) the
+    decision reports ``UNSPECIFIED_POLICY`` and stays conservative (false).
     """
     reasons: list[str] = [
         *book_reasons,
         *extra_reasons,
         *_drawdown_budget_reasons(blend_primary_max_drawdown, max_drawdown),
+        *_deflated_sharpe_gate_reasons(deflated_sharpe_ratio),
     ]
     passed = 0
     for fold_report in folds:

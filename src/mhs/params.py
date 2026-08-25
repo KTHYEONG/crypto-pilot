@@ -205,6 +205,15 @@ GROWTH_ENVELOPE_DEFAULT: str = "conservative"
 
 SEARCH_TRIALS_ATTEMPTED: int = 70
 
+# The window the CLI defaults (growth_extreme, committee_kelly_sizing, breadth
+# 60) were measured on (see pipeline/config.py provenance notes). Any report
+# whose window intersects this span is partially in-sample for those defaults;
+# the overlap fraction is disclosed observationally, never silently omitted.
+DEFAULT_SELECTION_WINDOW: tuple[pd.Timestamp, pd.Timestamp] = (
+    pd.Timestamp("2021-01-01", tz="UTC"),
+    pd.Timestamp("2025-12-31", tz="UTC"),
+)
+
 RAM_BUDGET_FRACTION: float = 0.85
 RAM_RESERVE_FRACTION: float = 0.05
 RAM_RESERVE_FLOOR_BYTES: int = 256 * 2**20
@@ -214,6 +223,9 @@ WORKER_PEAK_RSS_BYTES: int = 3 * 2**30
 REGISTERED_POLICY_THRESHOLDS: dict[str, float | None] = {
     "cap_60_roster": 60.0,
     "primary_annual_return": 0.05,
+    # Conventional pass line for the Deflated Sharpe Ratio under the registered
+    # trials denominator; below-threshold DSR blocks the Research-GO decision.
+    "deflated_sharpe_ratio": 0.95,
 }
 
 FILL_MARK_PRICE_PROTECTION_BAND: float = 0.05
