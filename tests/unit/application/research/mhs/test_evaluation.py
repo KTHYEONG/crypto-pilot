@@ -1247,3 +1247,35 @@ def _gap_mixed_replay() -> object:
 # SCENARIO_MEMBER_ATTRIBUTION_PROXY_RANK_SPEARMAN
 
 
+# SCENARIO_MHS_DSR_PASSAGE_BUDGETED_ENVELOPE_BINDS_07
+def test_SCENARIO_MHS_DSR_PASSAGE_BUDGETED_ENVELOPE_BINDS_07() -> None:
+    from src.application.research.mhs.research_go import (
+        GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+        GO_REASON_DRAWDOWN_OVER_BUDGET,
+        _drawdown_budget_reasons,
+    )
+    from src.mhs.params import GROWTH_RISK_ENVELOPES, REGISTERED_POLICY_THRESHOLDS
+
+    budgeted = GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"]
+    # The rung's budget sits inside the registered ceiling, so the risk
+    # contract is enforceable...
+    assert budgeted.max_drawdown == 0.60
+    assert budgeted.max_drawdown <= REGISTERED_POLICY_THRESHOLDS["max_drawdown_budget_ceiling"]
+    assert budgeted.leverage_ceiling == 3.0
+
+    # ...the realized -0.389 drawdown stays inside it...
+    assert _drawdown_budget_reasons(-0.389, max_drawdown=0.60) == ()
+    # ...while an over-ceiling budget still fails closed as non-binding.
+    assert _drawdown_budget_reasons(-0.389, max_drawdown=1.0) == (
+        GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
+    )
+    assert _drawdown_budget_reasons(-0.72, max_drawdown=0.60) == (
+        GO_REASON_DRAWDOWN_OVER_BUDGET,
+    )
+
+    # The deployed growth_extreme rung itself is unedited.
+    extreme = GROWTH_RISK_ENVELOPES["growth_extreme"]
+    assert extreme.max_drawdown == 1.0
+    assert extreme.max_drawdown_prob == 1.0
+
+
