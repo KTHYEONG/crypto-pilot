@@ -226,6 +226,10 @@ REGISTERED_POLICY_THRESHOLDS: dict[str, float | None] = {
     # Conventional pass line for the Deflated Sharpe Ratio under the registered
     # trials denominator; below-threshold DSR blocks the Research-GO decision.
     "deflated_sharpe_ratio": 0.95,
+    # Upper bound on any admissible drawdown budget: an envelope whose
+    # max_drawdown exceeds this can never bind (-100% is capital extinction),
+    # so a GO judged under it must be blocked with DRAWDOWN_BUDGET_NON_BINDING.
+    "max_drawdown_budget_ceiling": 0.60,
 }
 
 FILL_MARK_PRICE_PROTECTION_BAND: float = 0.05

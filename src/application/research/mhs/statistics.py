@@ -16,7 +16,13 @@ import pandas as pd
 from src.application.research.mhs.contracts import MhsBookReport, MhsFoldReport
 from src.common.errors import DataIntegrityError
 from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.evidence import autocorrelation_adjusted_sharpe, deflated_sharpe_ratio
+from src.mhs.evidence import (
+    DsrDecomposition,
+    autocorrelation_adjusted_sharpe,
+    deflated_sharpe_decomposition,
+    deflated_sharpe_ratio,
+    effective_observation_count,
+)
 from src.mhs.execution import SimulatedInventoryLedgerResult
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.types import BookSpec
@@ -392,17 +398,24 @@ def _deflated_sharpe_evidence(
     blend_report: MhsBookReport | None,
     folds: tuple[MhsFoldReport, ...],
     n_trials: int,
-) -> float | None:
-    """Per-observation deflated Sharpe of the blend primary against anchored-fold trial dispersion."""
+) -> tuple[float | None, DsrDecomposition | None]:
+    """Per-observation deflated Sharpe of the blend primary against anchored-fold trial dispersion.
+
+    The sample count is the autocorrelation-corrected
+    ``effective_observation_count`` of the hourly returns -- serially
+    dependent observations overstate ``sqrt(n)`` and would inflate the DSR.
+    Returns the scalar plus its descriptive decomposition; both elements are
+    ``None`` when the statistic is unresolvable.
+    """
     if blend_report is None or blend_report.primary is None or not folds:
-        return None
+        return None, None
     _equity_1h, net_returns_1h, _turnover = _hourly_ledger_series(
         blend_report.primary.ledger.equity,
         blend_report.primary.ledger.fill_turnover,
     )
     observed_sr = _per_observation_sharpe(net_returns_1h)
     if not np.isfinite(observed_sr):
-        return None
+        return None, None
     trial_sharpes: list[float] = []
     for fold in folds:
         if fold.strict is None or fold.failures:
@@ -412,21 +425,42 @@ def _deflated_sharpe_evidence(
         )
         trial_sharpes.append(_per_observation_sharpe(fold_net))
     if not trial_sharpes:
-        return None
+        return None, None
     trial_variance = (
         float(np.var(trial_sharpes, ddof=1)) if len(trial_sharpes) >= 2 else 0.0
     )
     returns = net_returns_1h.dropna()
     if len(returns) < 2:
-        return None
+        return None, None
+    try:
+        n_obs_effective = effective_observation_count(returns)
+    except ValueError:
+        # Too few observations for the autocorrelation window: unresolvable.
+        return None, None
+    if n_obs_effective < 2:
+        return None, None
+    skew = float(returns.skew())
+    kurtosis = float(returns.kurt()) + 3.0
     result = deflated_sharpe_ratio(
         observed_sr,
         trial_variance,
         n_trials,
-        len(returns),
-        float(returns.skew()),
-        float(returns.kurt()) + 3.0,
+        n_obs_effective,
+        skew,
+        kurtosis,
     )
     # Fail closed: a degenerate skew/kurtosis can push the statistic to NaN,
     # which must never leak into the report payload as a real deflated value.
-    return result if np.isfinite(result) else None
+    if not np.isfinite(result):
+        return None, None
+    decomposition = deflated_sharpe_decomposition(
+        observed_sr,
+        trial_variance,
+        n_trials,
+        len(returns),
+        n_obs_effective,
+        skew,
+        kurtosis,
+        tuple(trial_sharpes),
+    )
+    return result, decomposition
