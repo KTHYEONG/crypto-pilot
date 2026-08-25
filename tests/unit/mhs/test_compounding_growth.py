@@ -173,7 +173,7 @@ class TestCommitteeBookCarryMix:
 
     def _mock_build(self, decision_grid, cols):
         """Return a mock build_feature_books that yields a dollar-neutral unit-gross book."""
-        def _build(specs, data, mask, grid, min_symbols=8):
+        def _build(specs, data, mask, grid, min_symbols=8, coverage_cutoff=None):
             # Simple dollar-neutral book: long A, short B, zero C
             n = len(grid)
             book = pd.DataFrame(0.0, index=grid, columns=cols)

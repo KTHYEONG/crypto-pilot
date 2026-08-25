@@ -131,6 +131,28 @@ def test_build_feature_books_excludes_low_coverage_fail_closed() -> None:
         )
 
 
+def test_build_feature_books_coverage_cutoff_ignores_post_cutoff_gap() -> None:
+    # SCENARIO_BUILD_FEATURE_BOOKS_COVERAGE_CUTOFF_IGNORES_POST_CUTOFF_GAP:
+    # without coverage_cutoff the post-2021 gap still excludes gap_feature
+    # (fail-closed regression guard); with coverage_cutoff at the 2022 boundary
+    # only year 2021 is audited (fully covered), so gap_feature is admitted --
+    # and its book still spans the FULL close.index, never a truncated range.
+    log_close, mask = _signal_panel(n=2 * 24 * 365, start="2021-01-01")
+    close = np.exp(log_close)
+    decision_grid = pd.date_range(close.index[0], close.index[-1], freq="24h", tz="UTC")
+    gap = _gap_spec()
+    books_no_cutoff = build_feature_books(
+        [gap], {"close": close}, mask, decision_grid, min_symbols=8,
+    )
+    assert "gap_feature" not in books_no_cutoff
+    books_with_cutoff = build_feature_books(
+        [gap], {"close": close}, mask, decision_grid, min_symbols=8,
+        coverage_cutoff=pd.Timestamp("2022-01-01", tz="UTC"),
+    )
+    assert "gap_feature" in books_with_cutoff
+    assert books_with_cutoff["gap_feature"].index.equals(close.index)
+
+
 def test_build_feature_books_are_dollar_neutral_on_decision_grid() -> None:
     # SCENARIO_BUILD_FEATURE_BOOKS_ARE_DOLLAR_NEUTRAL_ON_DECISION_GRID: every
     # returned book is dollar-neutral per qualifying row with row gross <= 1.0,
