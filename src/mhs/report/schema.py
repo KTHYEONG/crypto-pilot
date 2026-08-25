@@ -85,6 +85,11 @@ class MhsHorizonDiagnosticReport:
     committee_member_attribution: dict[str, Any] | None = None
     worker_plan: dict[str, int] = field(default_factory=dict)
     tree_memory: ProcessTreeMemoryStats | None = None
+    # 선택창 겹침 공시(I1): 보고 구간이 기본값 선택창과 겹치면 > 0 이며
+    # research_go.reason_codes 의 SELECTION_WINDOW_OVERLAP 와 짝을 이룬다.
+    selection_overlap_fraction: float | None = None
+    # DSR 분모(trials_attempted)의 출처: 'history' | 'constant' | 'constant_fallback'.
+    trials_attempted_source: str | None = None
 
     def to_payload(self) -> Any:
         from src.mhs.report.artifacts import _jsonable

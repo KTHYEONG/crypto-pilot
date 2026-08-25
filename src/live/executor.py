@@ -22,7 +22,7 @@ from src.live.audit import AuditLog
 from src.live.errors import LiveTradingError, OrderObsolete, VenueError
 from src.live.filters import _ZERO, SymbolFilters, quantize_to_multiple
 from src.live.planner import OrderIntent, build_client_order_id
-from src.live.rest import RateLimits, ShadowResponse
+from src.live.rest import PaperResponse, RateLimits, ShadowResponse
 
 _BPS_DENOMINATOR = Decimal(10_000)
 
@@ -254,9 +254,14 @@ def _cancel_and_settle(client: Any, rt: _IntentRuntime) -> None:
     """취소 직후 동일 주문을 재조회해 취소 시점 부분체결을 정산한다(-2011 benign).
 
     cancel 응답의 체결량을 폐기하면 그 사이 체결이 filled_total 에 누락되고
-    다음 사이클 정합성 검증에서 HALT 로 이어진다.
+    다음 사이클 정합성 검증에서 HALT 로 이어진다. PAPER 의 가상 주문은 조회할
+    실체가 없고 시뮬레이터가 체결을 이미 반영했으므로 로컬로만 해소한다.
     """
     assert rt.active_id is not None
+    if rt.paper_active:
+        rt.paper_active = False
+        rt.active_id = None
+        return
     _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
     executed = Decimal(
         str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
@@ -271,6 +276,29 @@ def _record_fill(rt: _IntentRuntime, executed: Decimal) -> None:
         rt.filled_total += delta_fill
         rt.fill_notional += delta_fill * rt.active_price
         rt.reported_executed = executed
+
+
+def _simulate_paper_fill(
+    rt: _IntentRuntime,
+    touch: tuple[Decimal, Decimal],
+    time_in_force: str,
+    price: Decimal,
+    post_qty: Decimal,
+) -> Decimal:
+    """PAPER 로컬 체결 시뮬레이터: 이번 tick 의 관측 touch 만 사용한다(I4).
+
+    GTX는 관측된 opposite touch 가 게시 가격을 관통할 때만(엄밀 trade-through)
+    메이커로 전량 체결되고, IOC는 캡 가격이 이미 마케터블이므로 즉시 전량
+    체결된다. 미래 호가 참조는 금지며, 체결 실패 시 0 을 반환해 chase 루프가
+    다음 tick 을 이어간다.
+    """
+    bid, ask = touch
+    is_buy = rt.intent.side == "BUY"
+    if time_in_force == "GTX":
+        traded_through = (ask < price) if is_buy else (bid > price)
+        if not traded_through:
+            return _ZERO
+    return post_qty
 
 
 @dataclass(slots=True)
@@ -290,6 +318,9 @@ class _IntentRuntime:
     ioc_attempts: int = 0
     posted_at: float = 0.0
     terminal_status: str | None = None
+    # PAPER 모드의 가상 활성 주문: 실제 주문이 없으므로 조회/취소가 아니라
+    # 시뮬레이터가 이미 반영한 체결로 정산한다.
+    paper_active: bool = False
 
     @property
     def done(self) -> bool:
@@ -438,9 +469,14 @@ def _poll_or_post(
 
     # 1) 활성 주문 조회: 체결 누적 및 상태 전이(FILL/CHASE/HOLD/IOC).
     if rt.active_id is not None:
-        executed = Decimal(
-            str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
-        )
+        if rt.paper_active:
+            # PAPER 가상 주문: 조회할 실체가 없고 시뮬레이터가 체결을
+            # 이미 반영했으므로 reported_executed 로 정산(no-op).
+            executed = rt.reported_executed
+        else:
+            executed = Decimal(
+                str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
+            )
         _record_fill(rt, executed)
         if rt.intent.quantity - rt.filled_total <= _ZERO:
             rt.terminal_status = "FILLED"
@@ -526,6 +562,35 @@ def _poll_or_post(
         # R8: SHADOW 억제 -> query_order 없이 즉시 종료한다.
         rt.terminal_status = "SHADOW"
         return
+    if isinstance(response, PaperResponse):
+        # PAPER 억제: 로컬 시뮬레이터로 체결을 확정하고 chase 루프를 계속
+        # 실행한다(IOC 백스톱/cancel-settle/잔량 경로가 모두 검증된다).
+        executed_qty = _simulate_paper_fill(rt, touch, time_in_force, price, post_qty)
+        if executed_qty > _ZERO:
+            rt.filled_total += executed_qty
+            rt.fill_notional += executed_qty * price
+            rt.reported_executed = rt.filled_total
+            if rt.intent.quantity - rt.filled_total <= _ZERO:
+                rt.terminal_status = "FILLED"
+                audit.record(
+                    "paper_filled",
+                    symbol=rt.intent.symbol,
+                    client_order_id=order_id,
+                    quantity=str(executed_qty),
+                    price=str(price),
+                    time_in_force=time_in_force,
+                )
+                return
+        if time_in_force == "IOC":
+            rt.ioc_attempts += 1
+        # 가상 활성 주문으로 등록해 passive->ioc 전이와 chase 재호가가
+        # SHADOW 와 동일한 협조 루프 상태 전이를 따르게 한다.
+        rt.active_id = order_id
+        rt.active_price = price
+        rt.paper_active = True
+        rt.posted_at = now
+        audit.record("order_posted", symbol=rt.intent.symbol, client_order_id=order_id, time_in_force=time_in_force, price=str(price), quantity=str(post_qty), simulated=True)
+        return
     rt.active_id = order_id
     rt.active_price = price
     rt.reported_executed = _ZERO
@@ -548,12 +613,14 @@ def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog) 
         if rt.done:
             continue
         if rt.active_id is not None:
-            _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
-            executed = Decimal(
-                str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
-            )
-            _record_fill(rt, executed)
+            if not rt.paper_active:
+                _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
+                executed = Decimal(
+                    str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
+                )
+                _record_fill(rt, executed)
             rt.active_id = None
+            rt.paper_active = False
         if rt.intent.quantity - rt.filled_total > _ZERO:
             rt.terminal_status = "RESIDUAL"
             audit.record(
