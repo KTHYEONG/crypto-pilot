@@ -9,13 +9,18 @@ arbitrary decision-clock offset?" and nothing else.
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
 from src.mhs.execution import mhs_ledger_pnl
-from src.mhs.params import DEFAULT_SELECTION_WINDOW, PERIODS_PER_YEAR_1H
+from src.mhs.params import (
+    DEFAULT_SELECTION_WINDOW,
+    PERIODS_PER_YEAR_1H,
+    PNL_VOL_TARGET_BURN_IN_DAYS,
+)
 from src.mhs.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
 
 _EULER_GAMMA = 0.577215664901532860606512090082402431
@@ -44,6 +49,47 @@ def selection_overlap_fraction(
     if overlap <= pd.Timedelta(0):
         return 0.0
     return float(min(overlap / span, 1.0))
+
+
+def holdout_tail_evidence(
+    equity: pd.Series,
+    cutoff: pd.Timestamp,
+    min_days: int = PNL_VOL_TARGET_BURN_IN_DAYS,
+) -> dict[str, Any] | None:
+    """Summary of the equity ledger's tail strictly after ``cutoff``.
+
+    Isolates the segment after the sealed evaluation boundary (typically
+    ``HOLDOUT_CUTOFF``) so a report crossing it discloses the truly-novel
+    segment's own performance separately from the dominant, already-tuned-
+    against portion before it. Returns ``None`` -- never a near-empty or
+    degenerate summary -- when fewer than ``min_days`` daily tail observations
+    exist, including every ordinary run that never crosses the boundary at
+    all. Pure function: the input ``equity`` series is never mutated.
+    """
+    daily_returns = equity.resample("1D").last().pct_change()
+    tail = daily_returns.loc[daily_returns.index > cutoff].dropna()
+    if len(tail) < min_days:
+        return None
+    curve = (1.0 + tail).cumprod()
+    n_days = len(tail)
+    years = n_days / 365.25  # n_days >= min_days >= 1 이므로 항상 양수.
+    total_return = float(curve.iloc[-1] - 1.0)
+    geometric_cagr = float(curve.iloc[-1] ** (1.0 / years) - 1.0)
+    running_max = curve.cummax()
+    max_drawdown = float((curve / running_max - 1.0).min())
+    std = float(tail.std(ddof=1))
+    naive_sharpe = (
+        float(tail.mean() / std * np.sqrt(365.25)) if std > 0 else float("nan")
+    )
+    return {
+        "start": str(tail.index[0]),
+        "end": str(tail.index[-1]),
+        "n_days": n_days,
+        "total_return": total_return,
+        "geometric_cagr": geometric_cagr,
+        "max_drawdown": max_drawdown,
+        "naive_sharpe": naive_sharpe,
+    }
 
 
 def _zero_variance(sd: float, mean: float) -> bool:
