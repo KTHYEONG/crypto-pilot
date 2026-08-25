@@ -217,7 +217,12 @@ def _mhs_research_go(
     strict replay rejection (capital invariant breach, execution gap, invalid
     primary, or resource-budget breach) is aggregated with the fold reasons.
     ``extra_reasons`` carries observational gate codes (e.g. fold/blend path
-    divergence) surfaced by report assembly. ``blend_primary_max_drawdown``
+    divergence) surfaced by report assembly.
+    ``GO_REASON_SELECTION_WINDOW_OVERLAP`` is disclosed in ``reason_codes`` but
+    excluded from the ``eligible`` computation -- it is an observational-only
+    code per its own module-level docstring in ``evidence.py``, and must never
+    block the decision by itself (matches the documented intent at its call
+    site in ``pipeline/stages/fold.py``). ``blend_primary_max_drawdown``
     feeds the registered drawdown-budget gate: a completed blend whose realized
     drawdown breaches ``max_drawdown`` (the caller's resolved
     ``GrowthRiskEnvelope.max_drawdown`` -- ``COMMITTEE_GROWTH_MAX_DRAWDOWN`` by
@@ -255,8 +260,12 @@ def _mhs_research_go(
     data_integrity_reasons = tuple(
         sorted(r for r in reasons if r in GO_REASON_DATA_INTEGRITY_CODES)
     )
+    # 관측 전용 공시 코드만 eligible 산출에서 제외(공시 자체는 유지).
+    blocking_reasons = tuple(
+        r for r in reasons if r != GO_REASON_SELECTION_WINDOW_OVERLAP
+    )
     return MhsResearchGoResult(
-        eligible=not reasons,
+        eligible=not blocking_reasons,
         reason_codes=tuple(reasons),
         evaluated_folds=len(folds),
         folds_passed=passed,
