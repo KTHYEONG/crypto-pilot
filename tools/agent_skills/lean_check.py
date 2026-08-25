@@ -302,6 +302,15 @@ def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
     return entries
 
 
+def _is_code_expression(expr: str) -> bool:
+    """서술형 wiring 문장(영어 prose)과 실제 코드 표현식을 구분한다."""
+    try:
+        ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return False
+    return True
+
+
 def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int, list[JsonDiag]]:
     diagnostics: list[JsonDiag] = []
     try:
@@ -351,7 +360,7 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
 
         with open(fh) as sf:
             sf_content = sf.read()
-            if kind in ("field", "dataclass_field"):
+            if kind in ("field", "dataclass_field", "new_field"):
                 field_name = name.split(".")[-1] if "." in name else name
                 pat = rf"\b{re.escape(field_name)}[\"']?\s*(?::|=)"
                 if not re.search(pat, sf_content, re.MULTILINE):
@@ -622,7 +631,13 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                             "fix_hint": f"Import {import_symbol} in {wf}",
                         }
                     )
-                if invocation_expr and invocation_expr not in wf_content:
+                # import_symbol 존재로 배선은 이미 검증됐고, 코드 표현식 형태의
+                # invocation만 리터럴 정합성을 추가 요구한다(서술형 문장 제외).
+                if (
+                    invocation_expr
+                    and _is_code_expression(invocation_expr)
+                    and invocation_expr not in wf_content
+                ):
                     diagnostics.append(
                         {
                             "file": wf,
