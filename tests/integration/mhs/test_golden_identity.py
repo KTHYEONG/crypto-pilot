@@ -12,6 +12,10 @@ The fixtures live under ``tests/fixtures/golden/`` as
 ``mhs_report_golden_<name>_digest.json`` + ``_summary.json`` pairs produced by
 ``capture_matrix.py``. A missing fixture FAILS the test (never skips): the
 bit-exactness gate must never go inert silently.
+
+SCENARIO_GOLDEN_IDENTITY_REGENERATED_AFTER_SCHEMA_CHANGE: report schema 키가
+바뀌면(예: holdout_tail 신설) capture_matrix.py로 재캡처 후 이 게이트로
+검증한다 — golden 파일은 수동 편집하지 않는다.
 """
 
 from __future__ import annotations

@@ -9,6 +9,9 @@ without running a real pipeline pass.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
 import pandas as pd
 
 from src.application.research.mhs.resources import _StageRecorder
@@ -16,6 +19,7 @@ from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.stages.assemble import assemble_report
 from src.mhs.telemetry import StageTelemetry
+from src.research.evaluation.policy import HOLDOUT_CUTOFF
 
 
 def _bare_context(recorder: _StageRecorder) -> PipelineContext:
@@ -65,3 +69,41 @@ def test_assemble_report_worker_plan_empty_when_no_fork_point_ran() -> None:
     report = assemble_report(ctx, ctx.telemetry)
 
     assert report.worker_plan == {}
+
+
+def _stub_blend_equity() -> pd.Series:
+    """봉인 경계를 넘는 합성 equity: cutoff 이후 양의 드리프트 꼬리 포함."""
+    rng = np.random.default_rng(20260825)
+    hours = pd.date_range("2025-01-01 00:00", "2026-06-30 23:00", freq="1h", tz="UTC")
+    post = hours > HOLDOUT_CUTOFF
+    hourly = np.where(post, 0.0002, rng.normal(0.0, 0.001, len(hours)))
+    return pd.Series(np.cumprod(1.0 + hourly), index=hours)
+
+
+# SCENARIO_ASSEMBLE_REPORT_HOLDOUT_TAIL_WIRING
+def test_assemble_report_holdout_tail_none_when_no_blend_report() -> None:
+    recorder = _StageRecorder(log_run=False)
+    ctx = _bare_context(recorder)
+    assert ctx.blend_report is None
+
+    report = assemble_report(ctx, ctx.telemetry)
+
+    assert report.holdout_tail is None
+
+
+# SCENARIO_ASSEMBLE_REPORT_HOLDOUT_TAIL_WIRING (populated past the boundary)
+def test_assemble_report_holdout_tail_populated_past_sealed_boundary() -> None:
+    recorder = _StageRecorder(log_run=False)
+    ctx = _bare_context(recorder)
+    ctx.blend_report = SimpleNamespace(
+        primary=SimpleNamespace(
+            ledger=SimpleNamespace(equity=_stub_blend_equity(), mark_source="OHLCV"),
+        ),
+    )
+
+    report = assemble_report(ctx, ctx.telemetry)
+
+    assert report.holdout_tail is not None
+    assert {"n_days", "geometric_cagr", "max_drawdown", "naive_sharpe"} <= set(
+        report.holdout_tail
+    )
