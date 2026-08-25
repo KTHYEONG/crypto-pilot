@@ -110,6 +110,9 @@ class MhsRunConfig:
     # Growth envelope & member attribution
     growth_envelope: str = CLI_GROWTH_ENVELOPE_DEFAULT  # was "conservative" (2026-08-22)
     committee_member_attribution: bool = False
+    # One-time, narrowly-scoped extension of the sealed evaluation window for a
+    # user-authorized final-OOS check (2026-08-25 decision) -- see MHS_FINAL_OOS_CUTOFF_2026H1.
+    final_oos_2026h1: bool = False
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> MhsRunConfig:
@@ -193,4 +196,5 @@ class MhsRunConfig:
             funding_carry_weight=(args.funding_carry_weight if funding_carry_sleeve else 0.0),
             growth_envelope=args.growth_envelope,
             committee_member_attribution=args.committee_member_attribution,
+            final_oos_2026h1=args.final_oos_2026h1,
         )
