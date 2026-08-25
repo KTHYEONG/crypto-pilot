@@ -513,3 +513,16 @@ def test_SCENARIO_MHS_DSR_PASSAGE_PASSIVE_TIMEOUT_DIVISIBILITY_06() -> None:
     assert MhsDiagnosticRequest(
         execution_timeframe="5m", passive_timeout_minutes=10
     ).passive_timeout_minutes == 10
+
+
+# SCENARIO_MHS_SELECTION_EXEC_REQUEST_FIELD_PARITY_05
+def test_SCENARIO_MHS_SELECTION_EXEC_REQUEST_FIELD_PARITY_05() -> None:
+    """Field-set parity: MhsDiagnosticRequest accepts every MhsRunConfig
+    asdict key (the CLI handler's **dataclasses.asdict(config) contract), and
+    final_oos_2026h1 defaults to False on both sides."""
+    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    assert request.final_oos_2026h1 is False
+    assert MhsDiagnosticRequest().final_oos_2026h1 is False
