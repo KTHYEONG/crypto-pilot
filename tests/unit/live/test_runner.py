@@ -382,3 +382,62 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     # 본 파일 포함 tests/unit/live 전체가 새 _market_client/_order_client
     # 시그니처(settings, decision_time)로 갱신되어 0 failed로 통과한다.
 )
+def test_SCENARIO_LIVE_29_CYCLE_REPORTS_MIN_NOTIONAL_DROP(artifact, live_env, tmp_path) -> None:
+    """SCENARIO_LIVE_29_CYCLE_REPORTS_MIN_NOTIONAL_DROP: at equity $2,000,
+    three symbols whose weights place them below minNotional surface in
+    CycleReport.dropped_notional_fraction as dropped target notional over
+    total target notional (strictly inside (0, 1)); a cycle with no drops
+    reports exactly 0.0."""
+
+    class FiveSymbolMarketClient(StubMarketClient):
+        def exchange_info(self) -> dict[str, Any]:
+            payload = super().exchange_info()
+            template = payload["symbols"][0]
+            for symbol in ("DRP1USDT", "DRP2USDT", "DRP3USDT"):
+                extra = dict(template)
+                extra["symbol"] = symbol
+                payload["symbols"].append(extra)
+            return payload
+
+    monkeypatch_market = FiveSymbolMarketClient()
+    original_market = runner_mod._market_client
+    runner_mod._market_client = lambda settings, decision_time: monkeypatch_market  # type: ignore[assignment, misc]
+    try:
+        weights = pd.DataFrame(
+            {
+                "AAAUSDT": [0.02],
+                "BUSDT": [-0.02],
+                "DRP1USDT": [0.0001],
+                "DRP2USDT": [0.0001],
+                "DRP3USDT": [0.0001],
+            },
+            index=pd.DatetimeIndex([DECISION_TIME]),
+        )
+        drop_path = artifact.parent / "with_drops.parquet"
+        weights.to_parquet(drop_path, index=True)
+
+        settings = LiveSettings(
+            notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_drop.json"),
+        )
+        report = run_shadow_cycle(settings, DECISION_TIME, drop_path, now=NOW)
+    finally:
+        runner_mod._market_client = original_market
+
+    assert report.status == "COMPLETE"
+    # 분자: 3 * $2000 * 0.0001 = $0.6, 분모: 유지 노셔널 $80 + 드롭 $0.6.
+    from decimal import Decimal as _D
+
+    dropped = _D("0.6")
+    total = _D("80") + dropped
+    expected = float(dropped / total)
+    assert 0.0 < report.dropped_notional_fraction < 1.0
+    assert report.dropped_notional_fraction == pytest.approx(expected, rel=1e-9)
+
+    no_drop_report = run_shadow_cycle(
+        LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_clean.json")),
+        DECISION_TIME,
+        artifact,
+        now=NOW,
+    )
+    assert no_drop_report.status == "COMPLETE"
+    assert no_drop_report.dropped_notional_fraction == 0.0

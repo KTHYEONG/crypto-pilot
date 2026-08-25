@@ -56,3 +56,13 @@ def test_mainnet_requires_exact_ack_string() -> None:
         api_secret=SecretStr("s"),
     )
     assert settings.mode is ExecutionMode.LIVE_MAINNET
+def test_SCENARIO_LIVE_30_PAPER_MODE_SETTINGS_ARE_SAFE() -> None:
+    """SCENARIO_LIVE_30_PAPER_MODE_SETTINGS_ARE_SAFE: mode='paper' constructs
+    without a mainnet acknowledgement and without any API credentials; PAPER is
+    distinct from LIVE_MAINNET so the suppressed transport path stays safe."""
+    settings = LiveSettings(mode="paper")
+    assert settings.mode is ExecutionMode.PAPER
+    assert ExecutionMode.PAPER != ExecutionMode.LIVE_MAINNET
+    assert settings.mainnet_trading_ack is None
+    assert settings.api_key is None
+    assert settings.api_secret is None

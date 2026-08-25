@@ -172,7 +172,7 @@ def _gate_fold(
 def test_level_codes_no_longer_derived_per_fold() -> None:
     # 경제하한 미달(autocorr 0.1 < 0.6) fold라도 무결성 문제가 없으면
     # fold별 level 코드가 붙지 않는다(level은 pooled 게이트 소유).
-    result = _mhs_research_go((_gate_fold(()),))
+    result = _mhs_research_go((_gate_fold(()),), deflated_sharpe_ratio=0.96)
     assert result.reason_codes == ()
     assert result.eligible is True
 

@@ -779,3 +779,65 @@ class TestEffectiveBreadth:
             effective_breadth(pd.DataFrame({"a": [1.0], "b": [2.0]}))
 
 
+
+
+# --- MHS evidence integrity: DSR gate ----------------------------------------
+
+def _passing_fold(index: int):  # type: ignore[no-untyped-def]
+    """A fully-measured fold with zero failures (strict/stress replayed)."""
+    from typing import cast
+
+    from src.application.research.mhs.contracts import MhsFoldReport
+    from src.mhs.execution import StrategyExecutionReplayResult
+
+    return MhsFoldReport(
+        fold_index=index,
+        validation_start="2022-01-08",
+        validation_end="2022-12-31",
+        strict=cast(StrategyExecutionReplayResult, object()),
+        stress=cast(StrategyExecutionReplayResult, object()),
+        primary_valid=True,
+        primary_autocorr_sharpe=1.2,
+        primary_naive_sharpe=1.3,
+        primary_net_ann=0.3,
+        primary_geometric_cagr=0.35,
+        primary_max_drawdown=-0.10,
+        stress_naive_sharpe=0.8,
+        decision_intents=100,
+        termination_counts={"MISSING_DATA": 0},
+        failures=(),
+        strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+    )
+
+
+def test_SCENARIO_MHS_EVID_01_DSR_GATE_BLOCKS_WEAK_EVIDENCE() -> None:
+    """SCENARIO_MHS_EVID_01_DSR_GATE_BLOCKS_WEAK_EVIDENCE: the gate consumes
+    the deflated Sharpe ratio -- 0.7039 blocks below the registered 0.95 cut,
+    0.96 passes with reason codes byte-identical to the pre-gate output
+    (monotone True->False only), and a missing DSR fails closed."""
+    from src.application.research.mhs.contracts import MhsFoldReport  # noqa: F401
+    from src.application.research.mhs.research_go import (
+        GO_REASON_DEFLATED_SHARPE_BELOW_THRESHOLD,
+        GO_REASON_DEFLATED_SHARPE_UNAVAILABLE,
+        _mhs_research_go,
+    )
+    from src.mhs.params import REGISTERED_POLICY_THRESHOLDS
+
+    assert REGISTERED_POLICY_THRESHOLDS["deflated_sharpe_ratio"] == 0.95
+
+    folds = (_passing_fold(0), _passing_fold(1))
+
+    weak = _mhs_research_go(folds, deflated_sharpe_ratio=0.7039)
+    assert weak.eligible is False
+    assert GO_REASON_DEFLATED_SHARPE_BELOW_THRESHOLD in weak.reason_codes
+
+    strong = _mhs_research_go(folds, deflated_sharpe_ratio=0.96)
+    assert strong.eligible is True
+    # Clearing the threshold adds nothing: identical to the pre-change build.
+    assert strong.reason_codes == ()
+    assert not any(code.startswith("DEFLATED_SHARPE") for code in strong.reason_codes)
+
+    unavailable = _mhs_research_go(folds, deflated_sharpe_ratio=None)
+    assert unavailable.eligible is False
+    assert GO_REASON_DEFLATED_SHARPE_UNAVAILABLE in unavailable.reason_codes
