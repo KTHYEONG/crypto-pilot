@@ -1,7 +1,7 @@
-"""Binance USDⓈ-M REST client with the SHADOW mutation chokepoint.
+"""Binance USDⓈ-M REST client with the SHADOW/PAPER mutation chokepoint.
 
-I-SHADOW-CHOKE: SHADOW 모드의 변이 요청은 전송 계층 최상단에서 억제되며 네트워크에
-절대 도달하지 않는다. 오류 처리 정책은 오직 레지스트리 결정만 따른다.
+I-SHADOW-CHOKE: SHADOW/PAPER 모드의 변이 요청은 전송 계층 최상단에서 억제되며
+네트워크에 절대 도달하지 않는다. 오류 처리 정책은 오직 레지스트리 결정만 따른다.
 """
 
 from __future__ import annotations
@@ -57,6 +57,25 @@ class ShadowResponse:
 
     @classmethod
     def suppressed(cls, method: str, path: str, payload_digest_str: str) -> ShadowResponse:
+        return cls(method=method, path=path, payload_digest=payload_digest_str)
+
+
+@dataclass(frozen=True, slots=True)
+class PaperResponse:
+    """PAPER 모드에서 억제된 변이 요청의 자리표시자 응답.
+
+    SHADOW 억제와 동일한 출처 필드(method/path/payload_digest)를 운반하지만
+    별개 타입이라 호출부가 로컬 체결 시뮬레이터로 라우팅할 수 있다. 이 응답이
+    반환되었다는 것은 요청이 네트워크에 절대 도달하지 않았음을 보증한다.
+    """
+
+    method: str
+    path: str
+    payload_digest: str
+    status: str = "suppressed"
+
+    @classmethod
+    def suppressed(cls, method: str, path: str, payload_digest_str: str) -> PaperResponse:
         return cls(method=method, path=path, payload_digest=payload_digest_str)
 
 
@@ -281,10 +300,12 @@ class BinanceFuturesRestClient:
         method = method.upper()
         base_params = dict(params or {})
 
-        if self._mode is ExecutionMode.SHADOW and method != "GET":
+        if self._mode in (ExecutionMode.SHADOW, ExecutionMode.PAPER) and method != "GET":
             if path not in SHADOW_ALLOWED_MUTATIONS:
                 digest = payload_digest(repr(base_params))
                 self._audit.record_suppressed(method, path, base_params)
+                if self._mode is ExecutionMode.PAPER:
+                    return PaperResponse.suppressed(method, path, digest)
                 return ShadowResponse.suppressed(method, path, digest)
             raise ShadowModeViolation(
                 f"mutation to {path} is not allowed by the shadow whitelist"

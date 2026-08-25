@@ -172,6 +172,9 @@ class ExecutionSpec:
     decision_anchor: Literal["decision_bar", "submit_bar"] = "decision_bar"
     peg_passive_fraction: float = 0.6
     peg_chase_band_bps: float = 10.0
+    # Equal sub-windows one intent's peg-chase is split into; 1 reproduces the
+    # all-or-nothing single fill bit-identically.
+    peg_chase_tranches: int = 1
     liquidity_cost_model: Literal["flat", "corwin_schultz"] = "flat"
     spread_ewma_alpha: float = 0.25
     min_notional_probe_usdt: float = 0.0
@@ -190,6 +193,8 @@ class ExecutionSpec:
             raise ValueError(f"peg_passive_fraction must be in (0.0, 1.0], got {self.peg_passive_fraction}")
         if self.peg_chase_band_bps <= 0:
             raise ValueError(f"peg_chase_band_bps must be > 0, got {self.peg_chase_band_bps}")
+        if self.peg_chase_tranches < 1:
+            raise ValueError(f"peg_chase_tranches must be >= 1, got {self.peg_chase_tranches}")
         if self.liquidity_cost_model not in ("flat", "corwin_schultz"):
             raise ValueError(
                 f"liquidity_cost_model must be 'flat' or 'corwin_schultz', got {self.liquidity_cost_model!r}"

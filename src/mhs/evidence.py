@@ -15,9 +15,35 @@ import pandas as pd
 from scipy.stats import norm
 
 from src.mhs.execution import mhs_ledger_pnl
+from src.mhs.params import DEFAULT_SELECTION_WINDOW
 from src.mhs.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
 
 _EULER_GAMMA = 0.577215664901532860606512090082402431
+
+
+def selection_overlap_fraction(
+    report_start: pd.Timestamp, report_end: pd.Timestamp
+) -> float:
+    """Fraction of the report window inside ``DEFAULT_SELECTION_WINDOW``.
+
+    Observational disclosure only (never a blocking gate): the CLI defaults
+    were selected on that window, so any overlap means partially in-sample
+    reporting. Returns ``|report ∩ selection| / |report|`` clipped to
+    ``[0.0, 1.0]``; ``0.0`` for a zero-length or disjoint report window;
+    raises ``ValueError`` when ``report_end < report_start``.
+    """
+    if report_end < report_start:
+        raise ValueError(
+            f"report_end ({report_end}) must not precede report_start ({report_start})"
+        )
+    span = report_end - report_start
+    if span <= pd.Timedelta(0):
+        return 0.0
+    window_start, window_end = DEFAULT_SELECTION_WINDOW
+    overlap = min(report_end, window_end) - max(report_start, window_start)
+    if overlap <= pd.Timedelta(0):
+        return 0.0
+    return float(min(overlap / span, 1.0))
 
 
 def _zero_variance(sd: float, mean: float) -> bool:

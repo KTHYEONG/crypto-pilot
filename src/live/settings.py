@@ -16,9 +16,14 @@ _MAX_RECV_WINDOW_MS = 60_000
 
 
 class ExecutionMode(str, Enum):  # noqa: UP042 - contract pins the (str, Enum) base
-    """실행 모드. SHADOW는 변이 요청을 전송 계층에서 억제한다."""
+    """실행 모드. SHADOW/PAPER는 변이 요청을 전송 계층에서 억제한다.
+
+    PAPER는 SHADOW와 동일한 전송 억제를 유지하되, 억제된 주문을 관측된
+    호가로 로컬 체결 시뮬레이션해 체결 경로(chase/IOC/정산)까지 검증한다.
+    """
 
     SHADOW = "shadow"
+    PAPER = "paper"
     LIVE_TESTNET = "live_testnet"
     LIVE_MAINNET = "live_mainnet"
 
