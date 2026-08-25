@@ -3022,7 +3022,10 @@ def _committee_evidence_weights_by_boundary(
     evidence weighting possible without loading a second wide panel per fold.
     Each boundary (fold or top-level OOS) then fits its own evidence weights
     from the shared proxy return series, so every fold sees only the training
-    data up to its own boundary.
+    data up to its own boundary. Admission is audited only up to
+    ``max(train_ends.values())``, so an OOS-only tail beyond every requested
+    boundary can never decide a member's availability for any of these fits
+    (I-COVERAGE-PIT).
     """
     _resolved = members or COMMITTEE_MEMBERS
     _member_specs = [
@@ -3033,6 +3036,7 @@ def _committee_evidence_weights_by_boundary(
         _member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
         execution_mask, decision_grid, min_symbols=min_symbols,
+        coverage_cutoff=max(train_ends.values()),
     )
     if not _committee_books:
         return {label: {} for label in train_ends}
@@ -3063,6 +3067,7 @@ def _committee_execution_book(
     carry_book: pd.DataFrame | None = None,
     carry_weight: float = 0.0,
     members: tuple[str, ...] | None = None,
+    coverage_cutoff: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
@@ -3079,7 +3084,10 @@ def _committee_execution_book(
     the raw book's own proxy return. ``target_gross`` rescales each decision row
     to an explicit gross. ``member_weights`` is an externally-fitted,
     already-normalized-or-not mapping this function applies and renormalizes over
-    admitted members.
+    admitted members. ``coverage_cutoff`` must match the boundary that produced
+    ``member_weights`` (I-COVERAGE-PIT) -- otherwise a member available when the
+    weights were fit can be silently dropped from the deployed book by a coverage
+    gap in a later OOS-only tail the fit itself never saw.
     """
     if tranche_count < 1:
         raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
@@ -3096,6 +3104,7 @@ def _committee_execution_book(
         _member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
         execution_mask, decision_grid, min_symbols=min_symbols,
+        coverage_cutoff=coverage_cutoff,
     )
     if not _committee_books:
         raise RuntimeError(
@@ -3304,6 +3313,7 @@ def _build_fold_target_weights(
             member_weights=committee_member_weights,
             carry_book=funding_carry_execution_book(bar_funding, execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(request),
+            coverage_cutoff=COMMITTEE_OOS_START,
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
