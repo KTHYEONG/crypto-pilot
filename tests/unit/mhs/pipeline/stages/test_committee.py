@@ -139,6 +139,7 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
 
     def _fake_committee_execution_book(*_a: object, **_k: object) -> pd.DataFrame:
         captured["member_weights"] = _k.get("member_weights")
+        captured["coverage_cutoff"] = _k.get("coverage_cutoff")
         return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
 
     monkeypatch.setattr(
@@ -196,3 +197,6 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
         1: {"member_a": 0.7, "member_b": 0.3},
     }
     assert captured["member_weights"] == {"member_a": 0.7, "member_b": 0.3}
+    # SCENARIO_MHS_COMMITTEE_STAGE_THREADS_COVERAGE_CUTOFF: the deployed book
+    # must be admitted under the SAME boundary that fit its member_weights.
+    assert captured["coverage_cutoff"] == committee_stage.COMMITTEE_OOS_START
