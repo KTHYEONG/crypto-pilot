@@ -7,6 +7,7 @@ I-LEDGER-DURABLE: 집행 구간은 try/finally 로 감싸 어떤 예외 경로�
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections.abc import Sequence
@@ -27,6 +28,11 @@ from src.live.account import (
 )
 from src.live.audit import AuditLog, default_audit_log_path
 from src.live.errors import LiveTradingError, RiskGateBreach
+from src.live.execution_quality import (
+    append_execution_quality,
+    build_execution_quality_records,
+    default_execution_quality_dir,
+)
 from src.live.executor import (
     ExecutionOutcome,
     PassiveExecutionPolicy,
@@ -189,6 +195,14 @@ def run_shadow_cycle(
             _persist_confirmed_fills(ledger_path, ledger_state, kept, _partial_outcomes(exc), equity)
             raise
         _persist_confirmed_fills(ledger_path, ledger_state, kept, outcomes, equity)
+        execution_quality_dir = Path(settings.execution_quality_dir) if settings.execution_quality_dir else default_execution_quality_dir()
+        try:
+            records = build_execution_quality_records(decision_time, settings.mode.value, weights, marks, kept, outcomes)
+            append_execution_quality(records, execution_quality_dir)
+        except Exception as exc:  # noqa: BLE001 - observability-only, never halts cycle
+            with contextlib.suppress(Exception):
+                audit.record("execution_quality_write_failed", error=str(exc))
+            logger.warning("[SYS] execution_quality write failed error=%s", exc)
 
         report = CycleReport(
             status="COMPLETE",

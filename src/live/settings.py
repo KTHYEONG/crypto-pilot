@@ -53,6 +53,7 @@ class LiveSettings(BaseSettings):
     # None이면 data/state/live_position_ledger.json(default_ledger_path)을 쓴다.
     # 병렬 실행/테스트 격리를 위해 경로를 오버라이드할 수 있다.
     ledger_path: str | None = None
+    execution_quality_dir: str | None = None
     # 배포 아티팩트 봉투(AES-256-GCM) 키. base64 인코딩 32바이트. env: LIVE_ARTIFACT_KEY.
     artifact_key: SecretStr | None = None
     # 신호 스테일 상한(시간). 초과 신호는 주문 0건으로 스킵한다. env: LIVE_MAX_SIGNAL_STALENESS_HOURS.
