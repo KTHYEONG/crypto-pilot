@@ -50,7 +50,11 @@ from src.mhs.evidence import (
 )
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
-from src.mhs.run_history import derive_trials_attempted, window_trial_sharpes
+from src.mhs.run_history import (
+    derive_trials_attempted,
+    trial_pool_disclosure,
+    window_trial_sharpes,
+)
 from src.mhs.telemetry import StageTelemetry
 
 
@@ -74,6 +78,9 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # DSR pool divides them by sqrt(PERIODS_PER_YEAR_1H) downstream.
     ctx.trials_attempted, ctx.trials_attempted_source = derive_trials_attempted()
     ctx.trial_sharpes = window_trial_sharpes((str(ctx.start), str(ctx.resolved_end)))
+    # Observational trial-pool accounting (exclusion grounds, ledger size);
+    # disclosure only -- it never emits a GO reason code.
+    ctx.trial_pool = trial_pool_disclosure((str(ctx.start), str(ctx.resolved_end)))
     ctx.deflated_sharpe_ratio = None
     # Observational disclosure of the defaults' selection window overlap.
     ctx.selection_overlap_fraction = selection_overlap_fraction(ctx.start, ctx.end)
