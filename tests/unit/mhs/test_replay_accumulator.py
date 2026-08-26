@@ -699,7 +699,11 @@ class TestStrictProxyCostModelSharing:
         liquidity_cost_model='corwin_schultz', an all-timeout STRICT_PROXY run
         prices its backstop at taker_fee + the column's EWMA half-spread (never
         taker_fee + flat slippage), and the notional-weighted shortfall departs
-        from the 'flat' run by more than 1e-9."""
+        from the 'flat' run by more than 1e-9.
+
+        SCENARIO_MHS_FORCED_EXIT_COST_MODEL_STRICT_PROXY_SHARING_STILL_PASSES:
+        this timeout_taker branch is untouched by the finalize() forced_exit
+        alignment and must keep passing completely unchanged."""
         wl = self._timeout_workload()
         windows = self._windows(wl)
         cs_spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
@@ -750,3 +754,62 @@ class TestStrictProxyCostModelSharing:
             cs_report.notional_weighted_shortfall_bps
             - flat_report.notional_weighted_shortfall_bps
         ) > 1e-9
+
+
+class TestForcedExitCostModelSharing:
+    """S8 연장: finalize()의 forced_exit 백스톱도 timeout_taker와 동일한
+    liquidity-aware taker cost model을 공유한다 -- flat 상수 하드코딩 금지."""
+
+    def _stale_position_workload(self) -> dict[str, object]:
+        """심볼 A의 OHLC가 그리드 중간에 영구 종료하고 포지션이 남는 워크로드.
+
+        데이터 종료 지점 전 high/low 밴드에 교대 폭 변동을 주어 CS 추정치가
+        유한하고 flat slippage와 명확히 달라지게 만든다."""
+        grid = pd.date_range("2021-01-01", periods=180, freq="5min", tz="UTC")
+        closes = pd.DataFrame(100.0, index=grid, columns=["A"])
+        closes.iloc[120:, 0] = np.nan
+        band = np.where(np.arange(len(grid)) % 2 == 0, 1.006, 1.004)
+        highs = closes.mul(band, axis=0)
+        lows = closes.div(band, axis=0)
+        weights = pd.DataFrame({"A": [1.0]}, index=[grid[0]])
+        return {
+            "grid": grid,
+            "highs": highs,
+            "lows": lows,
+            "closes": closes,
+            "marks": closes.copy(),
+            "funding": pd.DataFrame(0.0, index=grid, columns=["A"]),
+            "weights": weights,
+            "signals": pd.DatetimeIndex([grid[0]]),
+        }
+
+    def test_SCENARIO_MHS_FORCED_EXIT_COST_MODEL_CORWIN_SCHULTZ_CONSISTENCY(self) -> None:
+        """SCENARIO_MHS_FORCED_EXIT_COST_MODEL_CORWIN_SCHULTZ_CONSISTENCY:
+        corwin_schultz에서 forced_exit fill의 fee_bps는 taker_fee + 그 컬럼의
+        유한한 EWMA half-spread 추정치여야 하고, 수정 전의 잘못된 flat 값
+        (taker_fee + 고정 slippage)이 아니어야 한다."""
+        wl = self._stale_position_workload()
+        cs_spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=1,
+        )
+        acc = _BoundExecutionReplayAccumulator(windows[0], 1.0, "OHLCV_STRICT_PROXY", cs_spec, False)
+        assert np.isnan(acc.half_spread_bps).all()
+        acc.consume(windows[0])
+        # 진입은 trade-through로 즉시 체결되고 포지션은 데이터 종료까지 생존한다.
+        assert "passive_fill" in acc.fill_reason
+        gcol = {s: i for i, s in enumerate(acc.columns)}["A"]
+        est = float(acc.half_spread_bps[gcol])
+        assert np.isfinite(est)
+        assert abs(est - cs_spec.taker_slippage_bps) > 1e-9
+
+        result = acc.finalize()
+        assert result.termination_counts["UNKNOWN_TERMINATION"] == 1
+        assert result.forced_exit_count == 1
+        fills = result.simulated_fills
+        exits = fills[fills["reason"] == "forced_exit"]
+        assert len(exits) == 1
+        fee = float(exits["fee_bps"].iloc[0])
+        assert fee == pytest.approx(cs_spec.taker_fee_bps + acc.half_spread_bps[gcol])
+        assert abs(fee - (cs_spec.taker_fee_bps + cs_spec.taker_slippage_bps)) > 1e-9

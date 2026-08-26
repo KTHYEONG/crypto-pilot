@@ -5,6 +5,11 @@
   (replay_id, series, index) with golden/actual reprs from the landmarks.
 - Total digest+summary bytes for a 24-replay x 161941-bar report stay far
   below 400 KB (the full payload measured 1085.61 MB -- >= 2700x reduction).
+
+SCENARIO_MHS_FORCED_EXIT_COST_MODEL_GOLDEN_FIXTURES_UNCHANGED: every golden
+fixture was generated under ``liquidity_cost_model="flat"``, where the
+liquidity-aware forced_exit fee reduces bit-identically to the frozen
+slippage -- so all digests here must pass unchanged across that alignment.
 """
 
 from __future__ import annotations
