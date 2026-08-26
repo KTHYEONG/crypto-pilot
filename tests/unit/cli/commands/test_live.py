@@ -60,7 +60,33 @@ def test_SCENARIO_LIVE_DAEMON_09_cli_daemon_subcommand_registered(
     assert isinstance(state_path, Path)
 
 
+def test_SCENARIO_LIVE_CLI_EXECUTION_QUALITY_SUMMARY_SUBCOMMAND(monkeypatch) -> None:
+    parser = _live_parser()
+    args = parser.parse_args(["live", "execution-quality-summary"]) if False else parser.parse_args(["execution-quality-summary"])
+    assert args.live_command == "execution-quality-summary"
+    # handler calls summarize_execution_quality exactly once without extra args
+    calls: list[int] = []
+
+    import src.cli.commands.live as live_mod
+
+    original = getattr(live_mod, "_run_execution_quality_summary", None)
+
+    def fake_summarize(*_a, **_k):
+        calls.append(1)
+        return {"n_cycles": 0}
+
+    monkeypatch.setattr("src.live.execution_quality.summarize_execution_quality", fake_summarize)
+    # also need live_mod import path for handler's internal import; patch that module too
+    monkeypatch.setattr("src.live.execution_quality.summarize_execution_quality", fake_summarize)
+
+    # invoke handler directly
+    handler = args.handler
+    handler(args)
+    assert len(calls) == 1
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_09_CLI_DAEMON_SUBCOMMAND_REGISTERED",
+    "SCENARIO_LIVE_CLI_EXECUTION_QUALITY_SUMMARY_SUBCOMMAND",
 )
