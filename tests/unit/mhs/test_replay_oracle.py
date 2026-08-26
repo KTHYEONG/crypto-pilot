@@ -117,7 +117,12 @@ class TestStrategyReplay:
         (above-tolerance) held position whose data permanently ends mid-grid
         must keep forcing an exit through the windowed
         ``_BoundExecutionReplayAccumulator`` path exactly as the oracle does
-        above -- the tolerance change must not weaken this fail-closed gate."""
+        above -- the tolerance change must not weaken this fail-closed gate.
+
+        SCENARIO_MHS_FORCED_EXIT_COST_MODEL_FLAT_BACKWARD_COMPAT: under the
+        production-default ``liquidity_cost_model="flat"`` the forced_exit
+        fee_bps stays byte-identical -- the shared taker-cost wiring reduces
+        exactly to the frozen slippage under flat."""
         grid = pd.date_range("2021-01-01 00:00", periods=180, freq="1min", tz="UTC")
         px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
         px.loc["2021-01-01 02:00":, "A"] = np.nan
