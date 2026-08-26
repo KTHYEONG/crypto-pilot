@@ -150,3 +150,45 @@ def test_scenario_mhs_selection_exec_bounded_ceiling_02(
     with pytest.raises(RuntimeError) as sealed_excinfo:
         orchestrator.run_mhs_diagnostic(MhsRunConfig(end="2026-01-15"))
     assert "2025-12-31" in str(sealed_excinfo.value)
+
+
+# SCENARIO_MHS_ORCHESTRATOR_RECORDS_CANONICAL_WINDOW
+def test_SCENARIO_MHS_ORCHESTRATOR_RECORDS_CANONICAL_WINDOW(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ctx.resolved_end always carries the resolved canonical window: the
+    final-OOS path records MHS_FINAL_OOS_CUTOFF_2026H1 (never 'None') and the
+    default path stays byte-identical to the pre-change recorded value."""
+    from src.mhs.pipeline.context import PipelineContext
+    from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1
+
+    import src.mhs.pipeline.orchestrator as orchestrator
+
+    fake_report = _FakeReport(marker="stub")
+    captured: list[PipelineContext] = []
+
+    def _fake_run_stages(ctx: PipelineContext, telemetry: object) -> _FakeReport:
+        captured.append(ctx)
+        return fake_report
+
+    class _FakeSampler:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(orchestrator, "run_stages", _fake_run_stages)
+    monkeypatch.setattr(orchestrator, "_TreeMemorySampler", _FakeSampler)
+
+    orchestrator.run_mhs_diagnostic(MhsRunConfig(final_oos_2026h1=True))
+    final_ctx = captured[-1]
+    assert final_ctx.resolved_end == final_ctx.end == MHS_FINAL_OOS_CUTOFF_2026H1
+    assert str(final_ctx.resolved_end) != "None"
+
+    orchestrator.run_mhs_diagnostic(MhsRunConfig())
+    default_ctx = captured[-1]
+    assert str(default_ctx.resolved_end) == "2025-12-31 23:59:59+00:00"
