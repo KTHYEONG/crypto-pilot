@@ -239,7 +239,7 @@ def _committee_capital_replay_scale(
     return 0.5 * pnl_vol_target_scale + 0.5 * kelly_scale
 
 
-def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: float = PNL_TARGET_ANNUAL_VOL, halflife_days: int = PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS, min_days: int = PNL_VOL_TARGET_BURN_IN_DAYS, floor: float = PNL_VOL_TARGET_SCALE_FLOOR, cap: float = 1.0) -> pd.Series:
+def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: float = PNL_TARGET_ANNUAL_VOL, halflife_days: int = PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS, min_days: int = PNL_VOL_TARGET_BURN_IN_DAYS, floor: float = PNL_VOL_TARGET_SCALE_FLOOR, cap: float = 1.0, *, warmup_returns: pd.Series | None = None) -> pd.Series:
     """절대 ex-ante 변동성 타겟팅: 목표 변동성 대비 실현 변동성 비율로 스케일링.
 
     ``sigma_t = ewm(std, halflife=20d).shift(1) * sqrt(365)``
@@ -248,6 +248,13 @@ def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: flo
     _pnl_vol_target_scale와 달리 자가 trailing vol의 롤링 중앙값이 아닌
     절대 위험 기준이므로 저위험 연도(2023)에서도 충분한 노출을 유지한다.
     측정: 2023 vol 0.172 -> mean scale 0.991 vs _pnl_vol_target_scale 0.880.
+
+    ``warmup_returns``(optional)로 짧은 fold 창에서 ``min_periods``
+    burn-in dead-zone(fallback 1.0)을 제거한다: ``_constant_risk_scale``과
+    동일한 I-WARM 계약 -- EWMA는 ``concat(warmup, reference)``에서
+    워밍업된 뒤 ``reference.index``로 되돌려진다(FOLD_BLEND_PATH_DIVERGENCE
+    근본 원인: burn-in=90일이 분기 fold 길이 83~91일과 거의 같아 fold
+    구간 전체가 fallback에 걸림).
     """
     if target_vol <= 0:
         raise ValueError(f"target_vol must be > 0, got {target_vol}")
@@ -261,13 +268,27 @@ def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: flo
         raise ValueError(f"cap must be >= 1.0, got {cap}")
     if reference_daily_returns.empty:
         return pd.Series(1.0, index=reference_daily_returns.index)
+    if warmup_returns is not None:
+        overlapping = warmup_returns.index[
+            warmup_returns.index >= reference_daily_returns.index[0]
+        ]
+        if len(overlapping) > 0:
+            # 엄격 인과(I-WARM): 워밍업은 참조 첫 행 이전만 허용한다.
+            raise ValueError(
+                f"warmup_returns must precede reference_daily_returns "
+                f"({len(overlapping)} rows at or after "
+                f"{reference_daily_returns.index[0]}, first offender {overlapping[0]})"
+            )
+        combined = pd.concat([warmup_returns, reference_daily_returns])
+    else:
+        combined = reference_daily_returns
     sigma = (
-        reference_daily_returns
+        combined
         .ewm(halflife=halflife_days, min_periods=min_days)
         .std()
         .shift(1)
         * np.sqrt(365.0)
-    )
+    ).reindex(reference_daily_returns.index)
     scale = target_vol / sigma.where(sigma > 0)
     return scale.clip(lower=floor, upper=cap).fillna(1.0)
 
@@ -701,6 +722,7 @@ def _replay_exposure_scale(
             scale = _exante_vol_target_scale(
                 reference_daily_returns, target_vol=target_vol,
                 cap=resolved_exposure_cap(request),
+                warmup_returns=warmup_returns,
             )
     elif request.pnl_vol_target_mode == "growth_budget":
         envelope = _resolved_growth_envelope(request)
@@ -708,6 +730,7 @@ def _replay_exposure_scale(
         scale = _exante_vol_target_scale(
             reference_daily_returns, target_vol=target_vol,
             cap=resolved_exposure_cap(request),
+            warmup_returns=warmup_returns,
         )
     else:
         raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
