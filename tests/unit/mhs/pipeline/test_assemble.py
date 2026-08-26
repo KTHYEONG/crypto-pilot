@@ -10,14 +10,17 @@ without running a real pipeline pass.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.application.research.mhs.resources import _StageRecorder
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.stages.assemble import assemble_report
+from src.mhs.params import COMMITTEE_OOS_START
 from src.mhs.telemetry import StageTelemetry
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 
@@ -107,3 +110,58 @@ def test_assemble_report_holdout_tail_populated_past_sealed_boundary() -> None:
     assert {"n_days", "geometric_cagr", "max_drawdown", "naive_sharpe"} <= set(
         report.holdout_tail
     )
+
+
+# SCENARIO_ASSEMBLE_WIRES_PARAMETER_OOS_SPLIT_AT_COMMITTEE_OOS_START
+def test_assemble_wires_parameter_oos_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = {"boundary": "sentinel"}
+    calls: list[tuple[pd.Series, pd.Timestamp]] = []
+
+    def _spy(equity: pd.Series, boundary: pd.Timestamp) -> dict[str, Any] | None:
+        calls.append((equity, boundary))
+        return sentinel
+
+    monkeypatch.setattr(
+        "src.mhs.pipeline.stages.assemble.parameter_oos_split_evidence", _spy
+    )
+
+    recorder = _StageRecorder(log_run=False)
+    ctx = _bare_context(recorder)
+    equity = _stub_blend_equity()
+    ctx.blend_report = SimpleNamespace(
+        primary=SimpleNamespace(
+            ledger=SimpleNamespace(equity=equity, mark_source="OHLCV"),
+        ),
+    )
+
+    report = assemble_report(ctx, ctx.telemetry)
+
+    # 스파이가 반환한 센티넬 dict가 그대로 보고서에 전달된다.
+    assert report.parameter_oos_split is sentinel
+    assert len(calls) == 1
+    called_equity, called_boundary = calls[0]
+    assert called_boundary == COMMITTEE_OOS_START
+    assert called_equity is equity
+
+    # blend_report가 None이면 스파이 호출 없이 None.
+    calls.clear()
+    bare_ctx = _bare_context(_StageRecorder(log_run=False))
+    bare_report = assemble_report(bare_ctx, bare_ctx.telemetry)
+    assert bare_report.parameter_oos_split is None
+    assert calls == []
+
+    # I-OBSERVATIONAL: split 결과와 무관하게 research_go는 동일(게이트 아님).
+    go_with_sentinel = report.research_go
+    ctx2 = _bare_context(_StageRecorder(log_run=False))
+    ctx2.blend_report = SimpleNamespace(
+        primary=SimpleNamespace(
+            ledger=SimpleNamespace(equity=equity, mark_source="OHLCV"),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.mhs.pipeline.stages.assemble.parameter_oos_split_evidence",
+        lambda *_args: None,
+    )
+    report_none = assemble_report(ctx2, ctx2.telemetry)
+    assert report_none.parameter_oos_split is None
+    assert report_none.research_go == go_with_sentinel
