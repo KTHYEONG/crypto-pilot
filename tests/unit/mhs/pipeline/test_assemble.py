@@ -165,3 +165,90 @@ def test_assemble_wires_parameter_oos_split(monkeypatch: pytest.MonkeyPatch) -> 
     report_none = assemble_report(ctx2, ctx2.telemetry)
     assert report_none.parameter_oos_split is None
     assert report_none.research_go == go_with_sentinel
+
+
+# SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY (assemble wiring)
+def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.application.research.mhs.contracts import MhsResearchGoResult
+    from src.mhs.run_history import (
+        append_run_history_record,
+        trial_pool_disclosure,
+    )
+
+    recorder = _StageRecorder(log_run=False)
+    ctx = _bare_context(recorder)
+    go_before = MhsResearchGoResult(
+        eligible=False,
+        reason_codes=("SOME_BLOCKING_CODE",),
+        evaluated_folds=0,
+        folds_passed=0,
+    )
+    ctx.research_go = go_before
+
+    # Unset disclosure stays None on the report.
+    unset_report = assemble_report(ctx, ctx.telemetry)
+    assert unset_report.trial_pool is None
+
+    # The disclosure payload is attached verbatim and adds no GO reason code.
+    history_dir = tmp_path / "history"
+    window = ("2021-01-01T00:00:00+00:00", "2025-12-31T23:59:59+00:00")
+    gap_code = "RELEVANT_EXECUTION_DATA_GAP"
+
+    def _record(run_id: str, flags: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+        return {
+            "run_id": run_id,
+            "status": overrides.get("status", "COMPLETE"),
+            "flags": flags,
+            "start": window[0],
+            "resolved_end": overrides.get("resolved_end", window[1]),
+            "blend": {"primary_naive_sharpe": overrides.get("sharpe", 2.0)},
+            "research_go": {
+                "reason_codes": list(overrides.get("reason_codes", ())),
+                "data_integrity_reason_codes": [],
+            },
+        }
+
+    for record in (
+        _record("clean1", {"u": 1}, sharpe=1.5),
+        _record("gap", {"u": 2}, reason_codes=(gap_code,)),
+        _record("halted", {"u": 3}, status="RUNNING"),
+        _record("nonfinite", {"u": 4}, sharpe=None),
+    ):
+        append_run_history_record(record, history_dir)
+
+    disclosure = trial_pool_disclosure(window, history_dir)
+    expected_keys = {
+        "n_history_records",
+        "n_trial_records",
+        "excluded_data_integrity",
+        "excluded_not_complete",
+        "excluded_nonfinite_blend",
+        "distinct_trial_keys",
+        "neutral_flags_dropped",
+        "pool_window_span_days",
+        "ledger_size",
+        "source",
+    }
+    assert expected_keys <= set(disclosure)
+    assert disclosure["n_history_records"] == 4
+    assert disclosure["n_trial_records"] == 1
+    assert disclosure["excluded_data_integrity"] == 1
+    assert disclosure["excluded_not_complete"] == 1
+    assert disclosure["excluded_nonfinite_blend"] == 1
+    assert (
+        disclosure["n_trial_records"]
+        + disclosure["excluded_data_integrity"]
+        + disclosure["excluded_not_complete"]
+        + disclosure["excluded_nonfinite_blend"]
+        == disclosure["n_history_records"]
+    )
+    assert disclosure["source"] == "constant_plus_ledger"
+
+    ctx.trial_pool = disclosure
+    wired_report = assemble_report(ctx, ctx.telemetry)
+    assert wired_report.trial_pool is disclosure
+    assert wired_report.trial_pool == disclosure
+    # I-OBSERVATIONAL: the disclosure never touches the GO gate decision.
+    assert wired_report.research_go.reason_codes == go_before.reason_codes
