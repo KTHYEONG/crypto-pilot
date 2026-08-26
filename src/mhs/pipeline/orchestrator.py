@@ -42,7 +42,10 @@ def run_mhs_diagnostic(config: MhsRunConfig) -> MhsHorizonDiagnosticReport:
     the report as ``tree_memory`` (observational, never raises into the run).
     """
     _get_symbol_mark_frame.cache_clear()
-    resolved_end = resolve_evaluation_end(config.end, unseal_holdout=config.final_oos_2026h1)
+    _evaluation_ceiling = (
+        MHS_FINAL_OOS_CUTOFF_2026H1 if config.final_oos_2026h1 else HOLDOUT_CUTOFF
+    )
+    resolved_end = resolve_evaluation_end(config.end, unseal_holdout=config.final_oos_2026h1, ceiling=_evaluation_ceiling)
     _run_start = time.perf_counter()
     if config.partition != "dev":
         raise RuntimeError(
@@ -55,14 +58,7 @@ def run_mhs_diagnostic(config: MhsRunConfig) -> MhsHorizonDiagnosticReport:
     else:
         start = DISCOVERY_START
 
-    _evaluation_ceiling = (
-        MHS_FINAL_OOS_CUTOFF_2026H1 if config.final_oos_2026h1 else HOLDOUT_CUTOFF
-    )
-    if resolved_end is not None:
-        end = pd.Timestamp(resolved_end)
-        end = end.tz_localize("UTC") if end.tz is None else end.tz_convert("UTC")
-    else:
-        end = _evaluation_ceiling
+    end = resolved_end
     if end > _evaluation_ceiling:
         raise RuntimeError(f"Holdout sealed: requested end {end} past {_evaluation_ceiling}")
 
