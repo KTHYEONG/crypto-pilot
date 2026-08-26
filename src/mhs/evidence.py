@@ -22,6 +22,7 @@ from src.mhs.params import (
     PNL_VOL_TARGET_BURN_IN_DAYS,
 )
 from src.mhs.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
+from src.research.evaluation.policy import HOLDOUT_CUTOFF
 
 _EULER_GAMMA = 0.577215664901532860606512090082402431
 
@@ -815,48 +816,31 @@ class AnchoredPurgedFold:
 
 
 def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
-    """The four preregistered Level 2 anchored purged folds.
+    """Quarterly preregistered Level 2 anchored purged folds (expanding window).
 
     ``purge_hours`` derives from the maximum forward dependency (frozen at
-    168h for Phase 1); these folds are internal historical robustness, never
-    labelled OOS.  The 2022 fold is the only bear-regime fold available and
-    adds leak-free evidence; the concentration gate denominator widens from 3
-    to 4.
+    168h for Phase 1) and is independent of block length.  Every fold trains
+    on everything from ``DISCOVERY_START`` through a quarter-end boundary and
+    validates on the following quarter after the 168h purge plus a 24h
+    calendar-alignment slack; these folds are internal historical robustness,
+    never labelled OOS.  The final boundary stays pinned to the sealed holdout
+    cutoff so the evaluation window's outer edge never moves.
     """
-    purge = 168
-    return (
+    boundaries = pd.date_range(
+        start=pd.Timestamp("2021-12-31", tz="UTC"),
+        end=HOLDOUT_CUTOFF.normalize(),
+        freq="QE-DEC",
+    )
+    return tuple(
         AnchoredPurgedFold(
             DISCOVERY_START,
-            pd.Timestamp("2021-12-31", tz="UTC"),
-            pd.Timestamp("2022-01-08", tz="UTC"),
-            pd.Timestamp("2022-12-31", tz="UTC"),
+            boundaries[i],
+            boundaries[i] + pd.Timedelta(days=8),
+            boundaries[i + 1],
             168,
-            purge,
-        ),
-        AnchoredPurgedFold(
-            DISCOVERY_START,
-            pd.Timestamp("2022-12-31", tz="UTC"),
-            pd.Timestamp("2023-01-08", tz="UTC"),
-            pd.Timestamp("2023-12-31", tz="UTC"),
             168,
-            purge,
-        ),
-        AnchoredPurgedFold(
-            DISCOVERY_START,
-            pd.Timestamp("2023-12-31", tz="UTC"),
-            pd.Timestamp("2024-01-08", tz="UTC"),
-            pd.Timestamp("2024-12-31", tz="UTC"),
-            168,
-            purge,
-        ),
-        AnchoredPurgedFold(
-            DISCOVERY_START,
-            pd.Timestamp("2024-12-31", tz="UTC"),
-            pd.Timestamp("2025-01-08", tz="UTC"),
-            pd.Timestamp("2025-12-31", tz="UTC"),
-            168,
-            purge,
-        ),
+        )
+        for i in range(len(boundaries) - 1)
     )
 
 
