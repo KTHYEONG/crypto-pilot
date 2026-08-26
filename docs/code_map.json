@@ -296,7 +296,10 @@
     "testing": "tests/unit/mhs/report/test_schema.py"
   },
   "src/mhs/run_history.py": {
-    "testing": "tests/unit/mhs/test_result_log.py"
+    "testing": [
+      "tests/unit/mhs/test_result_log.py",
+      "tests/unit/mhs/test_run_history.py"
+    ]
   },
   "src/mhs/stability.py": {
     "testing": "tests/unit/mhs/test_stability.py"
