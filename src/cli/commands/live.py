@@ -55,6 +55,13 @@ def _run_daemon(args: argparse.Namespace) -> None:
     run_daemon(settings, Path(args.artifact), Path(args.state_path))
 
 
+def _run_execution_quality_summary(args: argparse.Namespace) -> None:  # noqa: ARG001
+    from src.live.execution_quality import summarize_execution_quality
+
+    summary = summarize_execution_quality()
+    logger.info("[EVAL] execution_quality %s", summary)
+
+
 def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     """``live`` 커맨드 그룹에 shadow-cycle/daemon 서브커맨드를 등록한다."""
     subparsers = live_parser.add_subparsers(dest="live_command", required=True)
@@ -94,3 +101,6 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         help="Path to the daemon last-processed decision_time state JSON",
     )
     daemon.set_defaults(handler=_run_daemon)
+
+    eq = subparsers.add_parser("execution-quality-summary", help="Summarize execution quality")
+    eq.set_defaults(handler=_run_execution_quality_summary)
