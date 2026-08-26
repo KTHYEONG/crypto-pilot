@@ -109,6 +109,9 @@ class MhsHorizonDiagnosticReport:
     holdout_tail: dict[str, Any] | None = None
     # parameter-fit 경계 기준 인샘플/OOS 성과 분할(parameter_oos_split_evidence 결과); 어느 한쪽 표본이 부족하면 None.
     parameter_oos_split: dict[str, Any] | None = None
+    # 시행 풀 계측 공시(I-DISCLOSURE): 배제 사유별 건수·distinct 키·원장 크기 등
+    # 관측 페이로드. GO reason code를 발생시키지 않는다.
+    trial_pool: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         from src.mhs.report.artifacts import _jsonable
