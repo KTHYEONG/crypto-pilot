@@ -283,18 +283,23 @@ class TestAnchoredPurgedFolds:
     """MHS-16-PURGED-ANCHOR-BOUNDARY: embargo is 168h, derived from the forward dependency."""
 
     def test_three_preregistered_folds(self) -> None:
+        # SCENARIO_MHS_FOLD_RESTRUCTURE_QUARTERLY_COUNT:
+        # SCENARIO_MHS_FOLD_RESTRUCTURE_ASCENDING_AND_EMBARGO: quarterly
+        # boundaries under the unchanged anchored/expanding window.
         folds = phase_1_anchored_purged_folds()
-        assert len(folds) == 4
-        assert [f.purge_hours for f in folds] == [168, 168, 168, 168]
+        assert len(folds) == 16
+        assert [f.purge_hours for f in folds] == [168] * 16
+        assert [f.forward_dependency_hours for f in folds] == [168] * 16
         assert folds[0].train_end == pd.Timestamp("2021-12-31", tz="UTC")
         assert folds[0].validation_start == pd.Timestamp("2022-01-08", tz="UTC")
-        assert folds[1].train_end == pd.Timestamp("2022-12-31", tz="UTC")
-        assert folds[1].validation_start == pd.Timestamp("2023-01-08", tz="UTC")
-        assert folds[2].train_end == pd.Timestamp("2023-12-31", tz="UTC")
-        assert folds[2].validation_start == pd.Timestamp("2024-01-08", tz="UTC")
-        assert folds[3].train_end == pd.Timestamp("2024-12-31", tz="UTC")
-        assert folds[3].validation_start == pd.Timestamp("2025-01-08", tz="UTC")
-        for fold in folds:
+        assert folds[0].validation_end == pd.Timestamp("2022-03-31", tz="UTC")
+        assert folds[-1].validation_end == pd.Timestamp("2025-12-31", tz="UTC")
+        boundaries = pd.date_range("2021-12-31", "2025-12-31", freq="QE-DEC", tz="UTC")
+        for i, fold in enumerate(folds):
+            assert fold.train_start < fold.train_end < fold.validation_start < fold.validation_end
+            assert fold.train_end == boundaries[i]
+            assert fold.validation_start == boundaries[i] + pd.Timedelta(days=8)
+            assert fold.validation_end == boundaries[i + 1]
             assert fold.purge_hours >= fold.forward_dependency_hours
             embargo = fold.validation_start - fold.train_end
             assert embargo >= pd.Timedelta(hours=fold.purge_hours)
@@ -311,27 +316,38 @@ class TestAnchoredPurgedFolds:
         folds = phase_1_anchored_purged_folds()
         # The first fold's training labels must end at or before train_end.
         assert folds[0].train_end == pd.Timestamp("2021-12-31", tz="UTC")
-        assert folds[1].train_end == pd.Timestamp("2022-12-31", tz="UTC")
+        assert folds[1].train_end == pd.Timestamp("2022-03-31", tz="UTC")
 
 
 class TestCompoundingAlphaAxesFolds:
-    """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_05: 4-fold coverage."""
+    """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_05: 16-fold quarterly coverage."""
 
-    def test_four_folds_with_correct_dates(self) -> None:
+    def test_sixteen_folds_with_correct_dates(self) -> None:
         folds = phase_1_anchored_purged_folds()
-        assert len(folds) == 4
+        assert len(folds) == 16
         assert [f.validation_start.strftime("%Y-%m-%d") for f in folds] == [
-            "2022-01-08", "2023-01-08", "2024-01-08", "2025-01-08",
+            "2022-01-08", "2022-04-08", "2022-07-08", "2022-10-08",
+            "2023-01-08", "2023-04-08", "2023-07-08", "2023-10-08",
+            "2024-01-08", "2024-04-08", "2024-07-08", "2024-10-08",
+            "2025-01-08", "2025-04-08", "2025-07-08", "2025-10-08",
         ]
         assert [f.validation_end.strftime("%Y-%m-%d") for f in folds] == [
-            "2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31",
+            "2022-03-31", "2022-06-30", "2022-09-30", "2022-12-31",
+            "2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31",
+            "2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+            "2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31",
         ]
 
     def test_all_folds_have_168h_purge(self) -> None:
+        # SCENARIO_MHS_FOLD_RESTRUCTURE_SEALED_HOLDOUT_UNCHANGED: the outermost
+        # validation boundary stays pinned to the sealed holdout cutoff.
+        from src.research.evaluation.policy import HOLDOUT_CUTOFF
+
         folds = phase_1_anchored_purged_folds()
         for fold in folds:
             assert fold.purge_hours == 168
             assert fold.forward_dependency_hours == 168
+        assert max(f.validation_end for f in folds) == HOLDOUT_CUTOFF.normalize()
 
     def test_all_folds_share_train_start_identity(self) -> None:
         from src.mhs.types import DISCOVERY_START
