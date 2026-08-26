@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260826_MHS_DSR_TRIAL_SET_INTEGRITY",
+      "date": "2026-08-26",
+      "adr_id": "ADR_20260826_ADR_20260826_MHS_DSR_TRIAL_SET_INTEGRITY",
+      "domain": "evidence",
+      "title": "MHS DSR 시행집합 정합화 + 평가창 정규화로 Research-GO 최초 달성",
+      "why": "DSR 게이트만 유일 차단코드로 남아 있었으나(16/16 fold 통과, 데이터무결성 0건), 시행 분모(N)가 무결성 실패 레코드·텔레메트리 플래그·스키마 드리프트를 전략 시행으로 오계수했고(146->실측 정합 시 102), resolve_evaluation_end가 unseal_holdout=True에서 None을 그대로 반환해 final-OOS 창의 trial pool이 3건<8로 붕괴되어 DEFLATED_SHARPE_UNAVAILABLE로 구조적으로 차단되고 있었음. 동일 전략(observed Sharpe 고정) 9회 연속 실행에서 DSR이 N 증가만으로 단조 하락(0.947->0.944)해 개선 루프 자체가 게이트를 닫는 구조였음.",
+      "resolution": "src/mhs/run_history.py에 RESEARCH_NEUTRAL_FLAGS(등록 화이트리스트)/trial_identity_key/is_trial_record/trial_pool_disclosure/TRIAL_POOL_WINDOW_TOLERANCE(=MHS_FINAL_OOS_CUTOFF_2026H1-HOLDOUT_CUTOFF) 신설 -- derive_trials_attempted와 window_trial_sharpes가 동일 술어/동일 동치키를 공유하도록 단일화(I-SAME-TRIAL-SET), 배제 술어는 status/등록된 GO_REASON_DATA_INTEGRITY_CODES/유한성만 참조해 Sharpe 부호·값을 절대 보지 않음(I-NO-OUTCOME-SELECTION, 배제군이 풀의 최솟값과 최댓값을 동시에 포함함을 실측 확인). append_run_history_record가 trials_ledger.json에 first-seen 동치키를 upsert(아카이브 프루닝 비대상)해 N을 단조화(I-MONOTONE-TRIALS). src/research/evaluation/policy.py의 resolve_evaluation_end에 ceiling 파라미터를 추가해 unseal_holdout=True에서도 항상 tz-aware Timestamp를 반환하도록 수정(None 반환 제거, 회귀 없음: unseal_holdout=False 기본경로는 str(HOLDOUT_CUTOFF)로 byte-identical). orchestrator.py가 ceiling을 policy 호출 이전으로 옮겨 배선. MhsHorizonDiagnosticReport/PipelineContext에 trial_pool 필드 추가, assemble.py/persist.py에 holdout_tail과 동일한 무조건 배선 패턴으로 부착, 골든 summary 5건 재캡처. 실행 검증: 선택창(5.0y) DSR 0.944->0.993, final-OOS창(5.5y, 1회) DSR 0.986 -- 양쪽 모두 research_go.eligible=True, reason_codes=[SELECTION_WINDOW_OVERLAP](공시 전용) 단독.",
+      "impact": "MHS Research-GO 최초 통과(reason_codes에 차단코드 0건). execution_go_eligible/pilot_go_eligible/scale_go_eligible은 compute_deployment_readiness에서 여전히 상수 False로 하드코딩(evidence.py:1230-1232) -- forward live 증거 부재로 백테스트만으로는 구조적으로 도달 불가, 다음 단계는 이미 구축된 shadow 실행 인프라(ADR_20260824_LIVE_BINANCE_SHADOW_EXECUTION)에서 실제 체결 데이터 축적. 잔존 리스크: fold 16개 중 5개 음수 net_ann·2023Q4~2024Q3 4분기 연속 손실, 원천 book(fast_reversal/slow_momentum) 단독 성과는 마이너스(committee 결합·노출 스케일링이 알파 원천), 회전율 261x/년."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_EVIDENCE_WEIGHT_REALISM",
       "date": "2026-08-26",
       "adr_id": "ADR_20260826_MHS_COMMITTEE_EVIDENCE_WEIGHT_REALISM",
@@ -989,16 +999,6 @@
       "why": "ladder 검증 전 'horizon 기반 전략 자체가 의미 있는지' 재확인하다, select_horizon_by_discovery_qualification의 worst-year 선택(min())과 admission 비교(best_score<2.0)가 momentum(sign=+1)에서만 우연히 맞고 reversal(sign=-1)에서는 min()이 best-year를 고르고 admission이 구조적으로 불가능(음수는 항상 2.0 미만)함을 발견함(docs/specs/mhs_discovery_gate_sign_fix.md §0).",
       "resolution": "worst-year 선택과 admission 비교를 'sign * net_t' oriented 좌표계로 통일(discovery.py). momentum 경로는 min(sign*t)==min(t)로 바이트 동일 회귀 보장, reversal 경로만 실질적으로 수정됨. tie-break/qualification 단계(이미 sign-agnostic)는 무변경. efficiency_ratio 조건화 레버도 함께 실측해 개선 없음을 확인(음의 결과, 미채택).",
       "impact": "수정 후 tranche_count=8로 재실행한 결과 reversal 최고 후보는 24h(worst-year net_t=-1.175), momentum은 336h(+0.220) -- 결론(admitted=False, 어느 후보도 미채택)은 우연히 유지됐으나 이전엔 '알고리즘이 reversal을 원천 차단해서' 나온 결론이었고 이제는 '데이터가 실제로 약해서' 나온 결론으로 근거가 바뀜. 부수적으로 discovery 2021년 전체가 non-finite(실질 2개 연도만 사용됨)라는 별도 데이터 무결성 이슈 발견, 후속 조사 필요."
-    },
-    {
-      "task_id": "TASK_MHS_EXECUTION_LADDER_AND_DISCOVERY_GATE",
-      "date": "2026-08-10",
-      "adr_id": "ADR_20260810_MHS_EXECUTION_LADDER_AND_DISCOVERY_GATE",
-      "domain": "execution",
-      "title": "MHS 에스컬레이팅 체결 사다리 + discovery/qualification 신호 선정 게이트",
-      "why": "이전 spec들은 결함 B(30분 타임아웃발 428-563bps 비용 폭증)와 horizon 선택 근거 부재를 진단만 하고 해법 없이 남겼음. 사용자가 진단이 아닌 구체적 해결책(체결 시스템 재설계, 신뢰성 있는 신호 선정 절차)을 요청함(docs/specs/mhs_execution_ladder_and_discovery_gate.md).",
-      "resolution": "Part A: laddered_fill_schedule(주문을 K개 tranche로 분할, 실패시 선형 리프라이스, 마지막 tranche만 시장가 폴백; K=1은 기존 STRICT proxy와 바이트 동일; strategy_aware_execution_replay/_BoundExecutionReplayAccumulator 양쪽에서 동일 함수 재사용) + OHLCV_LADDERED_PROXY bound + --ladder-diagnostic opt-in CLI. Part B: src/mhs/discovery.py의 select_horizon_by_discovery_qualification(discovery 2021-23 worst-year-robust 선택 -> qualification 2024-25 단일 재확인, 재탐색 없음, 기존 DISCOVERY_END/QUALIFICATION_END 컨벤션 재사용).",
-      "impact": "실측 결과 둘 다 단순 개선이 아님을 확인: (B) 이전 스윕에서 유일하게 통과했던 168h reversal이 worst-year-robust 기준(-1.81)에서 문턱(2.0) 미달로 탈락 -- 어떤 horizon도 discovery에서 admitted 안 됨(fail-closed). (A) --ladder-diagnostic 5년 실측: intent shortfall -12.5%(1000.29->875.43bps) 개선되었으나 naive Sharpe는 오히려 악화(-0.698->-0.909, 꼬리위험 감소가 평균비용 증가로 상쇄) -- primary 승격 보류. 남은 레버는 파라미터 재조정보다 신호/체결 접근 방식 자체의 재설계로 판단됨(docs/results/mhs-res.md §3)."
     }
   ]
 }
