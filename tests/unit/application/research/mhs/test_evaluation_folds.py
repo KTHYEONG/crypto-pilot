@@ -550,6 +550,8 @@ def test_book_outcome_blend_traces_carry_deployed_exposure_scale(mhs_market, mon
         forward_dependency_hours=1,
         purge_hours=50,
     )
+    # SCENARIO_MHS_FOLD_RESTRUCTURE_NO_HARDCODED_CONSUMERS: injected stub
+    # folds stay count-agnostic; the real schedule is asserted in test_evaluation.py.
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: (fold,))
 
     args = _build_book_outcome_args(mhs_market)
