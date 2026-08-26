@@ -200,3 +200,71 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
     # SCENARIO_MHS_COMMITTEE_STAGE_THREADS_COVERAGE_CUTOFF: the deployed book
     # must be admitted under the SAME boundary that fit its member_weights.
     assert captured["coverage_cutoff"] == committee_stage.COMMITTEE_OOS_START
+
+
+def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SCENARIO_BUILD_COMMITTEE_STAGE_THREADS_BETA_NEUTRALIZE: under
+    # committee_capital=True the stage computes a causal beta DataFrame and
+    # threads it into _committee_execution_book only when beta_neutralize is
+    # on; the default (False) passes beta=None (byte-identical default path).
+    captured: dict[str, object] = {}
+
+    def _fake_by_boundary(*_a: object, **_k: object) -> dict[str, dict[str, float]]:
+        return {"top_level": {"member_a": 0.7, "member_b": 0.3}}
+
+    def _fake_committee_execution_book(*_a: object, **_k: object) -> pd.DataFrame:
+        captured["beta"] = _k.get("beta")
+        return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
+
+    class _FoldStub:
+        def __init__(self, train_end: pd.Timestamp) -> None:
+            self.train_end = train_end
+
+    monkeypatch.setattr(
+        committee_stage, "_committee_evidence_weights_by_boundary", _fake_by_boundary,
+    )
+    monkeypatch.setattr(
+        committee_stage, "phase_1_anchored_purged_folds",
+        lambda: (_FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),),
+    )
+    monkeypatch.setattr(
+        committee_stage, "_committee_execution_book", _fake_committee_execution_book,
+    )
+    monkeypatch.setattr(committee_stage, "_phase_diagnostics", lambda *_a, **_k: "phase-result")
+    monkeypatch.setattr(
+        committee_stage, "_active_blend_book_and_grid",
+        lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid),
+    )
+    monkeypatch.setattr(
+        committee_stage, "realized_vol",
+        lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(
+        committee_stage, "horizon_log_return",
+        lambda log_close, horizon: pd.DataFrame(0.0, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(
+        committee_stage, "efficiency_ratio",
+        lambda log_close, horizon: pd.DataFrame(0.5, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(committee_stage._statistics, "_xs_rank_ic", lambda *_a, **_k: {"mean_ic": 0.0})
+    monkeypatch.setattr(committee_stage._statistics, "_date_clustered_ols", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        committee_stage._scaling, "_regime_cash_scale",
+        lambda vol_mean: pd.Series(1.0, index=vol_mean.index),
+    )
+    monkeypatch.setattr(
+        committee_stage, "funding_carry_execution_book", lambda *_a, **_k: None,
+    )
+
+    ctx = _bare_context()
+    ctx.config = dataclasses.replace(ctx.config, committee_capital=True)
+    committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
+    assert captured["beta"] is None
+
+    ctx_on = _bare_context()
+    ctx_on.config = dataclasses.replace(
+        ctx_on.config, committee_capital=True, beta_neutralize=True,
+    )
+    committee_stage.build_committee(ctx_on, StageTelemetry(log_run=False))
+    assert isinstance(captured["beta"], pd.DataFrame)
