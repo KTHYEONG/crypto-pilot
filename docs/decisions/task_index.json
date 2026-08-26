@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_PARAMETER_OOS_EVIDENCE",
+      "date": "2026-08-26",
+      "adr_id": "ADR_20260826_MHS_PARAMETER_OOS_EVIDENCE",
+      "domain": "evidence",
+      "title": "MHS 파라미터 OOS 분할 계측기 신설 + run-history 필드 누락 수정",
+      "why": "beta_neutralize 실측 악화(DSR 0.9429->0.9047, CAGR 318%->274%, MDD 불변) 원인 조사 중 DSR 게이트 자체가 오작동이 아님을 확인: 검증된 노출 샌드박스(daily_corr 0.9957)와 trial pool 재구성으로 2021-2026H1 포함 시 DSR이 0.9485->0.9106로 더 악화되고, 2.716 Sharpe로 0.95를 넘으려면 8.2년치 표본이 필요함을 실측. committee 멤버 가중치/growth-budget target vol이 전부 COMMITTEE_OOS_START(2023-01-01) 이전으로만 적합되므로 2023-2025 3년은 이미 모든 기본 실행에 포함된 파라미터 OOS 구간인데 한 번도 분리 계측된 적이 없어, 모든 의사결정이 인샘플/OOS를 섞은 헤드라인 위에서 이뤄지고 있었음. 구현 후 실측 검증 중 holdout_tail/parameter_oos_split 둘 다 원본 리포트(mhs_horizon_diagnostic.json)에는 정상 포함되지만 build_mhs_run_history_record의 고정 필드 allowlist에서 빠져 있어 active.jsonl/latest.json에는 두 필드 모두 노출된 적이 없었던 기존 결함을 부수 발견.",
+      "resolution": "src/mhs/evidence.py: 기존 holdout_tail_evidence의 지표 계산 본문을 _daily_segment_metrics(segment)로 추출(출력 byte-identical, 기존 테스트 무수정 통과), parameter_oos_split_evidence(equity, boundary, min_days) 신설 -- COMMITTEE_OOS_START 기준 인샘플/OOS 분할 후 양쪽에 동일 지표 적용하고 sharpe_decay_ratio 부착(인샘플 Sharpe<=0이면 부호반전 방지를 위해 None으로 fail-closed). 순수 관측 전용(_fold_realized_risk_parity와 동일하게 reason code 미발생, research_go 불변). MhsHorizonDiagnosticReport.parameter_oos_split 필드 추가, assemble.py에서 holdout_tail 옆에 매 실행 무조건 배선(플래그 비의존이라 향후 경계 조정에도 코드 수정 불필요). 골든 summary 5건 재캡처(digest 6/6 byte-identical 확인, summary는 parameter_oos_split 추가 외에 이전 4->16 fold 재구성 이후 미캡처됐던 무관한 stale diff도 함께 정리됨). 부수 수정: src/mhs/report/persist.py의 build_mhs_run_history_record 필드 딕셔너리에 holdout_tail/parameter_oos_split 두 줄 추가(committee_diagnostic과 동일한 verbatim passthrough 패턴), 회귀 테스트 신설(SCENARIO_MHS_HOLDOUT_TAIL_AND_PARAMETER_OOS_SPLIT_IN_RUN_HISTORY).",
+      "impact": "실측(uv run research run portfolio mhs-horizon-diagnostic, 기본 설정): parameter_oos_split = {in_sample(2021-01~2022-12, 730일) naive_sharpe=3.014 geometric_cagr=4.340 mdd=-0.205, out_of_sample(2023-01~2025-12, 1095일) naive_sharpe=2.449 geometric_cagr=2.567 mdd=-0.371, sharpe_decay_ratio=0.8126}. 헤드라인 MDD(-0.389)의 거의 전부(-0.371)가 파라미터 미학습 구간에서 발생함을 최초로 정량 공시. research_go는 설계대로 불변(eligible=False, DEFLATED_SHARPE_BELOW_THRESHOLD+SELECTION_WINDOW_OVERLAP). persist.py 수정 후 재실행으로 active.jsonl에 두 필드가 실제로 노출됨을 확인(이전엔 원본 리포트에만 있고 run-history 원장에는 부재). ruff/mypy/pytest(golden digest 6/6, persist/result_log 20+9건) 전부 PASS."
+    },
+    {
       "task_id": "TASK_MHS_COMMITTEE_BETA_NEUTRALIZE_WIRING",
       "date": "2026-08-26",
       "adr_id": "ADR_20260826_MHS_COMMITTEE_BETA_NEUTRALIZE_WIRING",
@@ -989,16 +999,6 @@
       "why": "3차 수정(fast_reversal admission 0.0)이 PHASE_1_BOOK_BLEND_WEIGHTS는 바꿨지만, blend의 실행 결정 격자·BookSpec은 _run_books_concurrent/_build_fold_target_weights/phase_blend 3곳에서 여전히 fast_reversal(6h/1h)에 하드코딩돼 있었음. blend가 slow_momentum과 가중치상 100% 동일한데도 fills가 4배(473,613 vs 118,557) 부풀려지고 autocorr Sharpe/MDD/turnover가 전부 열위였던 것이 그 증거(docs/specs/mhs_root_cause_reassessment.md §3.2).",
       "resolution": "PHASE_1_BOOK_BLEND_WEIGHTS를 유일한 진실 소스로 (spec, grid)를 파생하는 순수 함수 _active_blend_book_and_grid를 evaluation.py에 신설하고 3개 호출부에 배선(fast 가중치 nonzero면 fast/fast_grid 반환해 과거 50/50 동작 바이트 동일 보존, 아니면 fail-closed).",
       "impact": "blend이 slow_momentum과 step_hours/fills/autocorr Sharpe/MDD/turnover 전부 일치로 전환(격자 버그로 인한 4배 fills 팽창 해소). Research GO는 여전히 FALSE(folds_passed=0/3) — 남은 근본 원인은 strict proxy 30분 타임아웃발 428-563bps 비용 폭증(이미 별도 ADR로 측정됨, 후속 spec 필요)과 horizon 선택 근거 문서 부재(판단 보류)."
-    },
-    {
-      "task_id": "TASK_MHS_BOOK_ADMISSION_VOL_MASK",
-      "date": "2026-08-10",
-      "adr_id": "ADR_20260810_MHS_BOOK_ADMISSION_VOL_MASK",
-      "domain": "research",
-      "title": "MHS book admission 동결 + regime vol_mean roster 마스킹",
-      "why": "PHASE_1_BOOK_BLEND_WEIGHTS가 fast_reversal(prescreen t=-0.15, 미유의)에 자본 50%를 고정 배분해 살아있는 slow_momentum 신호를 구조적으로 희석시켰고, _regime_cash_scale의 vol_mean이 실행 roster(30종목)가 아닌 eligible 전체(446종목) 평균이라 실제 노출 리스크를 재지 못했다 (docs/specs/mhs_fundamental_redesign.md §2.A/§2.C)",
-      "resolution": "PHASE_1_BOOK_BLEND_WEIGHTS를 측정 근거 기반으로 {fast_reversal:0.0, slow_momentum:1.0}으로 동결(contracts.py), fold/top-level _regime_cash_scale의 vol_mean 계산을 execution_mask로 마스킹 후 산출하도록 변경(evaluation.py)",
-      "impact": "blend가 fast_reversal 자본잠식(CAPITAL_INVARIANT_BREACH) 없이 완주로 전환되고 slow_momentum과 동일 가중 기준이 됨. Research GO는 여전히 FALSE(folds_passed=0/3) — §2.B(roster N)·§2.D/E(cash floor 등) 미측정 상수가 후속 과제로 남음"
     }
   ]
 }
