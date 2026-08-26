@@ -186,7 +186,8 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
         leverage_ceiling=2.0,
     ),
     # Permanent rung: real 3m ledger replay measured CAGR 5.174 / MDD -0.542 /
-    # Calmar 9.54 with all four folds primary_valid and no
+    # Calmar 9.54 with every fold primary_valid (measured on the legacy
+    # annual 4-fold schedule) and no
     # CAPITAL_INVARIANT_BREACH, and leverage_frontier_scan reported
     # feasible=True through 8.0x on the pre-OOS train slice
     # (ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN).
