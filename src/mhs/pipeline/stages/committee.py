@@ -25,6 +25,8 @@ from src.application.research.mhs import scaling as _scaling
 from src.application.research.mhs import statistics as _statistics
 from src.application.research.mhs.evaluation import (
     BOOK_BLEND_WEIGHTS,
+    CAUSAL_BETA_LOOKBACK_BARS,
+    CAUSAL_BETA_MIN_PERIODS,
     COMMITTEE_OOS_START,
     COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     COMMITTEE_TRANCHE_COUNT,
@@ -37,6 +39,7 @@ from src.application.research.mhs.evaluation import (
     FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
     QUALIFICATION_END,
+    causal_market_beta,
     effective_breadth,
     efficiency_ratio,
     funding_carry_execution_book,
@@ -121,6 +124,14 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             carry_book=funding_carry_execution_book(ctx.bar_funding, ctx.execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, ctx.slow_grid, COMMITTEE_TRANCHE_COUNT, ctx.slow.min_symbols) if ctx.config.funding_carry_sleeve else None, carry_weight=ctx.config.funding_carry_weight if ctx.config.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(ctx.config),
             coverage_cutoff=COMMITTEE_OOS_START,
+            beta=(
+                causal_market_beta(
+                    ctx.log_close, ctx.eligible,
+                    CAUSAL_BETA_LOOKBACK_BARS, CAUSAL_BETA_MIN_PERIODS,
+                )
+                if ctx.config.beta_neutralize
+                else None
+            ),
         ).reindex(ctx.grid_1h).ffill().fillna(0.0)
         ctx.committee_execution_book = ctx.blend_1h
         # Build per-member attribution books (I5: observational only)

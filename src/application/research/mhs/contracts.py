@@ -184,7 +184,7 @@ class MhsDiagnosticRequest:
     )
     beta_neutralize: bool = field(
         default=False,
-        metadata=cli_param(flag="--beta-neutralize", help="Orthogonally project the slow book onto beta."),
+        metadata=cli_param(flag="--beta-neutralize", help="Orthogonally project the slow book (or the committee book under --committee-capital) onto beta."),
     )
     ensemble_signal: Literal["raw", "vol_normalized"] = field(
         default="raw",
