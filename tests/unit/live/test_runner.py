@@ -1,4 +1,6 @@
-"""SCENARIO_LIVE_10/18/19: 리스크 게이트, 원장 내구성, MTM 에쿼티/드로다운 HALT."""
+"""SCENARIO_LIVE_10/18/19: 리스크 게이트, 원장 내구성, MTM 에쿼티/드로다운 HALT.
+SCENARIO_LIVE_RUNNER_WRITES_EXECUTION_QUALITY_AND_NEVER_HALTS_ON_ITS_FAILURE
+"""
 
 from __future__ import annotations
 
@@ -441,3 +443,71 @@ def test_SCENARIO_LIVE_29_CYCLE_REPORTS_MIN_NOTIONAL_DROP(artifact, live_env, tm
     )
     assert no_drop_report.status == "COMPLETE"
     assert no_drop_report.dropped_notional_fraction == 0.0
+
+
+def test_SCENARIO_LIVE_RUNNER_WRITES_EXECUTION_QUALITY_AND_NEVER_HALTS_ON_ITS_FAILURE(
+    artifact, monkeypatch, tmp_path
+) -> None:
+    """Run shadow cycle writes execution quality and never halts on its failure."""
+    import pandas as pd
+
+    monkeypatch.setattr(
+        runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient()
+    )
+    monkeypatch.setattr(
+        runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient()
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "default_audit_log_path",
+        lambda name, for_date=None: tmp_path / f"{name}.jsonl",
+    )
+
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+        return tuple(
+            ExecutionOutcome(
+                symbol=intent.symbol,
+                filled_qty=intent.quantity,
+                unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"),
+                chases=0,
+                status="FILLED",
+            )
+            for intent in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+
+    eq_dir = tmp_path / "eq_quality"
+    ledger_path = tmp_path / "ledger_runner_eq.json"
+    settings = LiveSettings(
+        mode="paper",
+        notional_equity_usdt=2000.0,
+        ledger_path=str(ledger_path),
+        execution_quality_dir=str(eq_dir),
+    )
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    assert report.status == "COMPLETE"
+    # At least one record persisted with mark
+    shards = list(eq_dir.glob("*.parquet"))
+    assert len(shards) >= 1
+    df = pd.concat([pd.read_parquet(p) for p in shards], ignore_index=True)
+    assert len(df) >= 1
+    # mark_price_at_decision populated (proving runner marks now reach storage)
+    assert df["mark_price_at_decision"].notna().any()
+
+    # Monkeypatch append to raise OSError still returns COMPLETE and ledger written
+    def raise_oserror(records, history_dir):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner_mod, "append_execution_quality", raise_oserror)
+    ledger_path2 = tmp_path / "ledger_runner_eq2.json"
+    settings2 = LiveSettings(
+        mode="paper",
+        notional_equity_usdt=2000.0,
+        ledger_path=str(ledger_path2),
+        execution_quality_dir=str(tmp_path / "eq_quality2"),
+    )
+    report2 = run_shadow_cycle(settings2, DECISION_TIME, artifact, now=NOW)
+    assert report2.status == "COMPLETE"
+    assert ledger_path2.exists()
