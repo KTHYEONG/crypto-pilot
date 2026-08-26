@@ -91,6 +91,69 @@ class TestExanteVolTargetScale:
         assert float(result.iloc[-1]) == 1.0
 
 
+class TestExanteVolTargetScaleWarmup:
+    """SCENARIO_MHS_FOLD_WARMUP_BURN_IN_DEAD_ZONE_ELIMINATED / _LEAK_GUARD.
+
+    Root cause of the real-pipeline FOLD_BLEND_PATH_DIVERGENCE regression:
+    min_days=90 (PNL_VOL_TARGET_BURN_IN_DAYS) exceeds a quarterly fold's own
+    ~83-91 row validation window, so every row fell back to scale=1.0 without
+    warmup_returns while the continuously-running blend never hit that wall.
+
+    SCENARIO_MHS_FOLD_BLEND_DIVERGENCE_RESOLVED_REAL_PIPELINE is verified
+    separately by a real full-pipeline run (not a unit test here): pre-fix
+    fold_blend_parity.max_abs_log_deployed_gross_ratio=0.836 (over the 0.25
+    tolerance, FOLD_BLEND_PATH_DIVERGENCE in research_go.reason_codes) ->
+    post-fix 0.180 (under tolerance, code no longer present). See
+    docs/specs/mhs_fold_exposure_warmup.md section 5.
+    """
+
+    def test_warmup_eliminates_burn_in_dead_zone(self) -> None:
+        rng = np.random.default_rng(0)
+        warmup_idx = pd.date_range("2021-01-01", periods=370, freq="1D", tz="UTC")
+        warmup = pd.Series(rng.normal(0, 0.02, len(warmup_idx)), index=warmup_idx)
+        fold_idx = pd.date_range(
+            warmup_idx[-1] + pd.Timedelta(days=1), periods=85, freq="1D", tz="UTC",
+        )
+        fold_returns = pd.Series(rng.normal(0, 0.02, len(fold_idx)), index=fold_idx)
+
+        no_warmup = _exante_vol_target_scale(fold_returns, target_vol=0.20)
+        assert (no_warmup == 1.0).mean() == 1.0  # today's bug: 100% fallback
+
+        with_warmup = _exante_vol_target_scale(fold_returns, target_vol=0.20, warmup_returns=warmup)
+        assert (with_warmup == 1.0).mean() < 0.5
+
+    def test_warmup_matches_continuous_history_bit_identical(self) -> None:
+        rng = np.random.default_rng(1)
+        warmup_idx = pd.date_range("2021-01-01", periods=370, freq="1D", tz="UTC")
+        warmup = pd.Series(rng.normal(0, 0.02, len(warmup_idx)), index=warmup_idx)
+        fold_idx = pd.date_range(
+            warmup_idx[-1] + pd.Timedelta(days=1), periods=85, freq="1D", tz="UTC",
+        )
+        fold_returns = pd.Series(rng.normal(0, 0.02, len(fold_idx)), index=fold_idx)
+
+        with_warmup = _exante_vol_target_scale(fold_returns, target_vol=0.20, warmup_returns=warmup)
+        full_history = pd.concat([warmup, fold_returns])
+        continuous_reference = _exante_vol_target_scale(full_history, target_vol=0.20).loc[fold_idx]
+        pd.testing.assert_series_equal(with_warmup, continuous_reference)
+
+    def test_warmup_none_is_backward_compatible(self) -> None:
+        # SCENARIO_MHS_FOLD_WARMUP_BACKWARD_COMPAT
+        idx = pd.date_range("2021-01-01", periods=600, freq="1D", tz="UTC")
+        rng = np.random.default_rng(42)
+        returns = pd.Series(rng.normal(0, 0.02, 600), index=idx)
+        without_kwarg = _exante_vol_target_scale(returns, target_vol=0.20)
+        with_none = _exante_vol_target_scale(returns, target_vol=0.20, warmup_returns=None)
+        pd.testing.assert_series_equal(without_kwarg, with_none)
+
+    def test_warmup_leak_guard_raises(self) -> None:
+        # SCENARIO_MHS_FOLD_WARMUP_LEAK_GUARD
+        idx = pd.date_range("2021-01-01", periods=100, freq="1D", tz="UTC")
+        returns = pd.Series(0.01, index=idx)
+        overlapping_warmup = pd.Series(0.01, index=idx[50:60])
+        with pytest.raises(ValueError, match="must precede"):
+            _exante_vol_target_scale(returns, warmup_returns=overlapping_warmup)
+
+
 class TestExanteVolTargetScaleCap:
     """SCENARIO_MHS_FILL_MARK_PARITY_03: _exante_vol_target_scale cap parameter."""
 
@@ -147,6 +210,9 @@ class TestReplayExposureScale:
         pd.testing.assert_series_equal(result, expected)
 
     def test_exante_target_mode(self) -> None:
+        # SCENARIO_MHS_FOLD_WARMUP_CONSERVATIVE_ENVELOPE_UNCHANGED: default
+        # request resolves the I4-protected conservative envelope, which must
+        # stay byte-identical (no warmup_returns wiring) after the fix.
         rng = np.random.default_rng(42)
         idx = pd.date_range("2021-01-01", periods=400, freq="1D", tz="UTC")
         daily = pd.Series(rng.normal(0, 0.02, 400), index=idx)
