@@ -3068,6 +3068,7 @@ def _committee_execution_book(
     carry_weight: float = 0.0,
     members: tuple[str, ...] | None = None,
     coverage_cutoff: pd.Timestamp | None = None,
+    beta: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
@@ -3138,6 +3139,17 @@ def _committee_execution_book(
     else:
         smoothed = phase_tranche_book(book.reindex(decision_grid).fillna(0.0), tranche_count)
         result = smoothed.reindex(book.index, method="ffill").fillna(0.0)
+    # Beta-neutralize the pure committee book BEFORE the carry blend (carry's
+    # economics must not be distorted) and BEFORE target_gross scaling
+    # (renormalize_within_mask resets unit gross, which would silently
+    # override the deployed gross contract).
+    if beta is not None:
+        result = beta_neutralize_weights(
+            result,
+            beta.reindex(result.index),
+            execution_mask.reindex(result.index).fillna(False),
+            min_symbols,
+        )
     if carry_book is not None and carry_weight > 0.0:
         if target_gross is None:
             raise ValueError(
@@ -3267,13 +3279,20 @@ def _build_fold_target_weights(
         log_close, eligible, execution_mask, slow, slow_grid,
         request.slow_book_mode, request.ensemble_signal, slow_ema,
     )
-    if request.beta_neutralize:
+    # I-SINGLE-CONFIGURATION: one causal-beta computation shared by the legacy
+    # slow-book neutralize and the committee execution book below.
+    causal_beta = (
+        causal_market_beta(
+            log_close, eligible,
+            CAUSAL_BETA_LOOKBACK_BARS, CAUSAL_BETA_MIN_PERIODS,
+        )
+        if request.beta_neutralize
+        else None
+    )
+    if causal_beta is not None:
         w_slow_execution = beta_neutralize_weights(
             w_slow_execution,
-            causal_market_beta(
-                log_close, eligible,
-                CAUSAL_BETA_LOOKBACK_BARS, CAUSAL_BETA_MIN_PERIODS,
-            ).reindex(w_slow_execution.index),
+            causal_beta.reindex(w_slow_execution.index),
             execution_mask.reindex(w_slow_execution.index).fillna(False),
             slow.min_symbols,
         )
@@ -3314,6 +3333,7 @@ def _build_fold_target_weights(
             carry_book=funding_carry_execution_book(bar_funding, execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(request),
             coverage_cutoff=COMMITTEE_OOS_START,
+            beta=causal_beta,
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote
     else:
