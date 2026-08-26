@@ -382,5 +382,8 @@
   },
   "src/live/scheduler.py": {
     "testing": "tests/unit/live/test_scheduler.py"
+  },
+  "src/live/execution_quality.py": {
+    "testing": "tests/unit/live/test_execution_quality.py"
   }
 }
