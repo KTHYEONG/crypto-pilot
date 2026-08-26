@@ -204,7 +204,7 @@
       "tests/unit/mhs/test_result_log.py",
       "tests/unit/mhs/test_evidence.py"
     ],
-    "architecture": "docs/specs/mhs_dsr_passage.md"
+    "architecture": "docs/specs/mhs_fold_restructure.md"
   },
   "src/mhs/execution.py": {
     "testing": [

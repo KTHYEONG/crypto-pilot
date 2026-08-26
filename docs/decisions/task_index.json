@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_QUARTERLY_FOLD_RESTRUCTURE",
+      "date": "2026-08-26",
+      "adr_id": "ADR_20260826_MHS_QUARTERLY_FOLD_RESTRUCTURE",
+      "domain": "mhs",
+      "title": "MHS anchored-purged fold를 연간 4개에서 분기 16개로 재구성",
+      "why": "phase_1_anchored_purged_folds()의 4개 연간 fold는 통계적 설계가 아니라 5년 데이터(2021-2025)를 1년 검증 블록으로 나눈 산술적 상한이었다. FOLD_GROWTH_CONCENTRATION 등 분산 계열 게이트는 n=4의 낮은 검정력 때문에 실제로 2025년 fold가 자기교정 null의 92.6퍼센타일까지 근접해 억울한 탈락 직전이었고, 코드에는 이를 우회하기 위한 수작업 상수 패치(share threshold 0.40 하향, 고정 target-vol) 흔적이 남아 있었다(evidence.py:312-330).",
+      "resolution": "phase_1_anchored_purged_folds()를 연간 리터럴 4블록에서 quarter-end 경계 루프(pd.date_range, freq=QE-DEC) 기반 16-fold 생성으로 교체했다. train_start=DISCOVERY_START 앵커, purge_hours=168, validation_start=train_end+8일 관례는 그대로 유지했고 마지막 validation_end는 기존 sealed holdout(2025-12-31)과 bit-identical하다. 하위 소비자(_pooled_fold_evidence, _fold_growth_concentration, calibrate_max_share_null, DSR fold_proxy 등)는 len(folds)/fold span을 제네릭하게 읽어 단일 seam 변경으로 끝났다. tests/unit/mhs/test_evaluation.py, test_contracts.py의 4-fold 하드코딩 assertion을 16-fold 스케줄로 갱신했다.",
+      "impact": "실측(uv run research run portfolio mhs-horizon-diagnostic) 결과 max_fold_share가 0.558(92.6퍼센타일)에서 0.284(57.5퍼센타일)로 개선되어 concentration 게이트의 위양성 위험이 실제로 줄었다. 다만 fold 창이 짧아지며(83~91일) fold-local 노출스케일 EWMA 워밍업이 blend의 연속 추정치를 따라가지 못해 FOLD_BLEND_PATH_DIVERGENCE(deployed_gross_log_ratio -0.54~-0.84, 기존 -0.05~-0.12 대비 5~8배)가 신규로 발생했다 -- 후속 스펙에서 fold-local vol 워밍업 보강이 필요하다. pooled_sharpe_lcb는 purge 오버헤드 증가(32일→128일)로 1.378→1.073로 소폭 보수화됐으나 여전히 하한 위. Research-GO는 두 구성 모두 이미 불합격 상태였고 최종 판정을 뒤집지는 않았다. wall-clock은 360초→696초(가용 워커 제약 포함)."
+    },
+    {
       "task_id": "TASK_MHS_HOLDOUT_REPORT_AND_GO_GATE",
       "date": "2026-08-26",
       "adr_id": "ADR_20260826_MHS_HOLDOUT_REPORT_AND_GO_GATE",
@@ -989,16 +999,6 @@
       "why": "MHS persistence wrote 1 JSON + 5 lossless Parquet (~124MB) per run; all blanket-gitignored, blocking version-controlled research evidence",
       "resolution": "persist_mhs_horizon_diagnostic_report gains MhsOutputTier (COMPACT/FULL). COMPACT default: git-tracked stripped summary JSON (~12KB) + daily-resampled float32 daily_ledger.parquet (~0.6-0.8MB). FULL opt-in: pre-tiering 5-category unified Parquet + checksummed JSON under _full/ (gitignored). CLI --output-tier flag added",
       "impact": "COMPACT ~50x smaller than FULL ledger (42MB->0.8MB); research evidence (daily equity, fold PnL, GO gate) now diffable in git; FULL preserved for deep audit; existing FULL path tests updated to tier=FULL"
-    },
-    {
-      "task_id": "TASK_MHS_TOUCH_PROXY_FILL_MEASUREMENT",
-      "date": "2026-08-10",
-      "adr_id": "ADR_20260810_MHS_TOUCH_PROXY_FILL_MEASUREMENT",
-      "domain": "execution",
-      "title": "MHS Execution Touch-Proxy Fill Measurement -- Strict-Crossing Relaxation Falsified",
-      "why": "primary(OHLCV_STRICT_PROXY) replay shows 428-563bps intent shortfall vs stress(OHLCV_IMMEDIATE_TAKER) 5.7-33bps, flipping slow_momentum/blend Sharpe negative (0/3 Research-GO folds) despite a real statistical edge (prescreen net_sharpe t=1.63-1.86 at the realistic 2.64bps cost tier, underlying 48h feature xs_rank_ic t=68.4); hypothesized the require_trade_through strict-crossing boundary (adverse < decision_price) was the driver and OHLCV_TOUCH_PROXY (adverse <= decision_price, already declared in _ExecutionBound but never wired into any orchestration path) would close the gap",
-      "resolution": "Added opt-in touch_diagnostic:bool=False to MhsDiagnosticRequest, touch/touch_naive_sharpe fields to MhsBookReport, a third replay_execution_windows(...,'OHLCV_TOUCH_PROXY',...) pass in _book_outcome guarded by the flag, and a --touch-diagnostic CLI flag; verified default path is behavior-identical and touch weakly dominates strict fill count on synthetic data (lean_check PASS), then ran the full 2021-2025 real-data measurement",
-      "impact": "Falsified: touch_naive_sharpe equals primary_naive_sharpe to 4 decimals for all three books (slow_momentum -0.2313/-0.2313, fast_reversal -1.2045/-1.2045, blend -0.6245/-0.6245); fill_count rose <0.03%. Strict-vs-touch crossing semantics are not the shortfall driver -- exact-touch is a near-zero-probability event at 5m OHLCV resolution. The real STRICT-to-TAKER gap is structural: price does not return to the passive decision-price limit within the 30-minute timeout during signal-confirming (trending) moves. Next candidates: passive_timeout_minutes retuning or a partial-marketable-limit fill architecture, not crossing-boundary relaxation."
     }
   ]
 }
