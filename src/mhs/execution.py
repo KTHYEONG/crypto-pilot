@@ -2493,7 +2493,7 @@ class _BoundExecutionReplayAccumulator:
                 if self.execution_bound == "OHLCV_IMMEDIATE_TAKER"
                 else 0.0
             )
-            fee_bps = self.spec.taker_fee_bps + self.spec.taker_slippage_bps + penalty
+            fee_bps = self.spec.taker_fee_bps + self._taker_cost_bps(col) + penalty
             prev_price = (
                 float(self.last_prices_arr[col]) if np.isfinite(self.last_prices_arr[col]) else exit_price
             )
