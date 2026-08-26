@@ -7,6 +7,7 @@ SCENARIO_MHS_UNIT_REGRESSION_UNCHANGED: 아래 신설 케이스 포함, 이 디�
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from src.mhs.evidence import (
     distinct_trial_sr_variance,
     effective_observation_count,
     holdout_tail_evidence,
+    parameter_oos_split_evidence,
     regime_conditional_sharpe_blocks,
     selection_overlap_fraction,
 )
@@ -374,4 +376,98 @@ def test_holdout_tail_evidence_isolates_post_cutoff_performance() -> None:
     assert PNL_VOL_TARGET_BURN_IN_DAYS == 90
 
     # (d) 입력 Series 불변.
+    pd.testing.assert_series_equal(equity, snapshot)
+
+
+def _parameter_oos_equity(rng_seed: int, pre_drift: float, post_drift: float) -> pd.Series:
+    """400개 일간 수익(200+200)과 선행 1.0으로 만든 401포인트 일간 equity."""
+    rng = np.random.default_rng(rng_seed)
+    returns = np.concatenate(
+        [
+            pre_drift + 0.01 * rng.standard_normal(200),
+            post_drift + 0.01 * rng.standard_normal(200),
+        ]
+    )
+    return pd.Series(
+        np.concatenate([[1.0], (1.0 + returns).cumprod()]),
+        index=pd.date_range("2022-01-01", periods=401, freq="1D", tz="UTC"),
+    )
+
+
+def _closed_form_segment_metrics(segment: pd.Series) -> dict[str, Any]:
+    curve = (1.0 + segment).cumprod()
+    std = float(segment.std(ddof=1))
+    return {
+        "start": str(segment.index[0]),
+        "end": str(segment.index[-1]),
+        "n_days": len(segment),
+        "total_return": float(curve.iloc[-1] - 1.0),
+        "geometric_cagr": float(curve.iloc[-1] ** (365.25 / len(segment)) - 1.0),
+        "max_drawdown": float((curve / curve.cummax() - 1.0).min()),
+        "naive_sharpe": float(segment.mean() / std * np.sqrt(365.25)),
+    }
+
+
+# SCENARIO_PARAMETER_OOS_SPLIT_SEGMENTS_MATCH_CLOSED_FORM
+def test_parameter_oos_split_segments_match_closed_form() -> None:
+    equity = _parameter_oos_equity(11, 0.002, 0.001)
+    boundary = equity.index[200]
+    daily = equity.resample("1D").last().pct_change().dropna()
+
+    result = parameter_oos_split_evidence(equity, boundary=boundary, min_days=90)
+
+    assert result is not None
+    assert result["boundary"] == str(boundary)
+    assert result["in_sample"]["n_days"] + result["out_of_sample"]["n_days"] == 400
+    for key, segment in (
+        ("in_sample", daily.loc[daily.index <= boundary]),
+        ("out_of_sample", daily.loc[daily.index > boundary]),
+    ):
+        expected = _closed_form_segment_metrics(segment)
+        assert result[key]["start"] == expected["start"]
+        assert result[key]["end"] == expected["end"]
+        for metric in (
+            "n_days", "total_return", "geometric_cagr", "max_drawdown", "naive_sharpe",
+        ):
+            assert result[key][metric] == pytest.approx(expected[metric], abs=1e-12)
+    assert result["sharpe_decay_ratio"] == pytest.approx(
+        result["out_of_sample"]["naive_sharpe"] / result["in_sample"]["naive_sharpe"],
+        abs=1e-12,
+    )
+
+
+# SCENARIO_PARAMETER_OOS_SPLIT_NONE_WHEN_EITHER_SIDE_SHORT
+def test_parameter_oos_split_none_when_either_side_short() -> None:
+    equity = _parameter_oos_equity(11, 0.002, 0.001)
+
+    # 인샘플 측 50일 < 90일: None.
+    assert parameter_oos_split_evidence(equity, boundary=equity.index[50], min_days=90) is None
+    # OOS 측 50일 < 90일: None.
+    assert parameter_oos_split_evidence(equity, boundary=equity.index[350], min_days=90) is None
+    # 양쪽 모두 충분: 비어있지 않은 dict.
+    assert parameter_oos_split_evidence(equity, boundary=equity.index[200], min_days=90) is not None
+
+
+# SCENARIO_PARAMETER_OOS_SPLIT_RATIO_FAIL_CLOSED_ON_NONPOSITIVE_IN_SAMPLE
+def test_parameter_oos_split_ratio_fail_closed() -> None:
+    equity = _parameter_oos_equity(3, -0.002, 0.002)
+
+    result = parameter_oos_split_evidence(equity, boundary=equity.index[200], min_days=90)
+
+    assert result is not None
+    assert result["in_sample"]["naive_sharpe"] < 0.0
+    assert result["out_of_sample"]["naive_sharpe"] > 0.0
+    # 부호 반전을 decay로 오독하지 않도록 ratio는 None으로 fail-closed.
+    assert result["sharpe_decay_ratio"] is None
+    assert result["in_sample"]["n_days"] == 200
+    assert result["out_of_sample"]["n_days"] == 200
+
+
+# SCENARIO_PARAMETER_OOS_SPLIT_INPUT_UNCHANGED
+def test_parameter_oos_split_input_unchanged() -> None:
+    equity = _parameter_oos_equity(11, 0.002, 0.001)
+    snapshot = equity.copy(deep=True)
+
+    parameter_oos_split_evidence(equity, boundary=equity.index[200], min_days=90)
+
     pd.testing.assert_series_equal(equity, snapshot)

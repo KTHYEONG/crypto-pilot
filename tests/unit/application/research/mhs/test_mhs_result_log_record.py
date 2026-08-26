@@ -236,3 +236,38 @@ def test_record_includes_committee_diagnostic_when_committee_book() -> None:
     assert record_with["committee_diagnostic"] == with_committee.committee_diagnostic
     assert json.loads(json.dumps(record_without)) == record_without
     assert record_without["committee_diagnostic"] is None
+
+
+def test_record_includes_holdout_tail_and_parameter_oos_split() -> None:
+    # SCENARIO_MHS_HOLDOUT_TAIL_AND_PARAMETER_OOS_SPLIT_IN_RUN_HISTORY: both
+    # observation-only fields were computed on the full report but silently
+    # dropped by the run-history record's field allowlist -- active.jsonl/
+    # latest.json never carried them even though docs/results/
+    # mhs_horizon_diagnostic.json did. Verbatim passthrough, null when absent,
+    # additive (no key-set removal), mirrors committee_diagnostic.
+    with_both = dataclasses.replace(
+        _representative_report(),
+        holdout_tail={"n_days": 181, "geometric_cagr": 0.55, "max_drawdown": -0.156, "naive_sharpe": 1.106},
+        parameter_oos_split={
+            "boundary": "2023-01-01 00:00:00+00:00",
+            "in_sample": {"naive_sharpe": 3.014},
+            "out_of_sample": {"naive_sharpe": 2.449},
+            "sharpe_decay_ratio": 0.8126,
+        },
+    )
+    without_either = dataclasses.replace(
+        _representative_report(), holdout_tail=None, parameter_oos_split=None,
+    )
+    request = ev.MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    record_with = ev.build_mhs_run_history_record(
+        with_both, request, ev.MhsOutputTier.COMPACT, None,
+    )
+    record_without = ev.build_mhs_run_history_record(
+        without_either, request, ev.MhsOutputTier.COMPACT, None,
+    )
+    assert json.loads(json.dumps(record_with)) == record_with
+    assert record_with["holdout_tail"] == with_both.holdout_tail
+    assert record_with["parameter_oos_split"] == with_both.parameter_oos_split
+    assert json.loads(json.dumps(record_without)) == record_without
+    assert record_without["holdout_tail"] is None
+    assert record_without["parameter_oos_split"] is None
