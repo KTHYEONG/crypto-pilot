@@ -168,16 +168,16 @@ class TestFrozenLiterals:
         assert not blended.abs().gt(1.0).any().any()
 
     def test_mhs_discovery_start_single_sourced_in_folds(self) -> None:
-        # SCENARIO_MHS_GAP_HARDENING_04: DISCOVERY_START is the domain
-        # single source and all four folds derive train_start from it -- a
-        # regression guard against the constant re-diverging into independent
-        # literals.
+        # SCENARIO_MHS_GAP_HARDENING_04 / SCENARIO_MHS_FOLD_RESTRUCTURE_ANCHOR_IDENTITY:
+        # DISCOVERY_START is the domain single source and every fold derives
+        # train_start from it -- a regression guard against the constant
+        # re-diverging into independent literals.
         from src.mhs.types import DISCOVERY_START
         from src.mhs.evidence import phase_1_anchored_purged_folds
 
         assert pd.Timestamp("2021-01-01", tz="UTC") == DISCOVERY_START
         folds = phase_1_anchored_purged_folds()
-        assert len(folds) == 4
+        assert len(folds) == 16
         for fold in folds:
             assert fold.train_start == DISCOVERY_START
             assert fold.train_start is DISCOVERY_START
