@@ -122,4 +122,5 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         trials_attempted_source=ctx.trials_attempted_source,
         holdout_tail=holdout_tail,
         parameter_oos_split=parameter_oos_split,
+        trial_pool=ctx.trial_pool,
     )
