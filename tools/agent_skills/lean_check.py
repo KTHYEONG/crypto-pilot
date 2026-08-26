@@ -360,7 +360,7 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
 
         with open(fh) as sf:
             sf_content = sf.read()
-            if kind in ("field", "dataclass_field", "new_field"):
+            if kind in ("field", "dataclass_field", "new_field") or kind.endswith("field_metadata"):
                 field_name = name.split(".")[-1] if "." in name else name
                 pat = rf"\b{re.escape(field_name)}[\"']?\s*(?::|=)"
                 if not re.search(pat, sf_content, re.MULTILINE):
@@ -622,7 +622,10 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                         }
                     )
             if not pre_impl:
-                if import_symbol and import_symbol not in wf_content:
+                # import_symbol은 쉼표 구분 복수 심볼을 허용한다: 전부 개별 등장하면 배선 성공.
+                if import_symbol and not all(
+                    sym.strip() in wf_content for sym in import_symbol.split(",")
+                ):
                     diagnostics.append(
                         {
                             "file": wf,
