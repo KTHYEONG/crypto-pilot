@@ -130,7 +130,80 @@ def test_persist_mhs_report_signature_unchanged_without_flag() -> None:
     signature = inspect.signature(persist_mhs_report)
     assert "emit_target_weights" not in signature.parameters
 
+# ---------------------------------------------------------------------------
+# SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY: run-history passthrough
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace
+
+from src.application.research.mhs.contracts import MhsResearchGoResult
+from src.application.research.mhs.resources import _StageRecorder
+from src.mhs.pipeline.config import MhsRunConfig
+from src.mhs.pipeline.context import PipelineContext
+from src.mhs.pipeline.stages.assemble import assemble_report
+from src.mhs.report.persist import build_mhs_run_history_record
+from src.mhs.telemetry import StageTelemetry
+
+
+def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY() -> None:
+    """The assembled report's trial_pool lands verbatim on the run-history
+    record (same unconditional wiring as holdout_tail/parameter_oos_split)."""
+    grid = pd.DatetimeIndex([])
+    ctx = PipelineContext(
+        config=MhsRunConfig(),
+        resolved_end="2025-12-31 23:59:59+00:00",
+        start=pd.Timestamp("2021-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-12-31 23:59:59+00:00"),
+        rss_budget_bytes=None,
+        rss_reserve_bytes=None,
+        root="",
+        grid_1h=grid,
+        close=pd.DataFrame(),
+        opens=pd.DataFrame(),
+        quote_vol=pd.DataFrame(),
+        taker_buy_quote=None,
+        symbols=[],
+    )
+    ctx.run_start = 0.0
+    ctx.recorder = _StageRecorder(log_run=False)
+    ctx.telemetry = StageTelemetry(log_run=False)
+    ctx.folds = ()
+    ctx.deployment = SimpleNamespace(
+        geometric_cagr=0.0,
+        max_drawdown=0.0,
+        calmar=0.0,
+        probability_final_wealth_below_initial=0.0,
+        research_go_eligible=False,
+        execution_go_eligible=False,
+        pilot_go_eligible=False,
+        scale_go_eligible=False,
+    )
+    ctx.research_go = MhsResearchGoResult(
+        eligible=False, reason_codes=("X",), evaluated_folds=0, folds_passed=0,
+    )
+    payload = {
+        "n_history_records": 3,
+        "n_trial_records": 2,
+        "excluded_data_integrity": 1,
+        "excluded_not_complete": 0,
+        "excluded_nonfinite_blend": 0,
+        "distinct_trial_keys": 2,
+        "neutral_flags_dropped": 4,
+        "pool_window_span_days": 181.0,
+        "ledger_size": 2,
+        "source": "constant_plus_ledger",
+    }
+    ctx.trial_pool = payload
+
+    report = assemble_report(ctx, ctx.telemetry)
+    assert report.trial_pool is payload
+
+    record = build_mhs_run_history_record(report, None, MhsOutputTier.COMPACT, None)
+    assert record["trial_pool"] == payload
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_12_DEPLOYED_WEIGHTS_MATCH_REPLAY_FORMULA",
+    "SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY",
 )
