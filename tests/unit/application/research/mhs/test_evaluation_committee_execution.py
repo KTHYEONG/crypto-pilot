@@ -359,6 +359,69 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
     ev.run_mhs_horizon_diagnostic(request)
     assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
+@pytest.mark.slow
+def test_committee_beta_neutralize_threads_both_call_sites(
+    mhs_market_with_taker_buy_quote, monkeypatch,
+) -> None:
+    # SCENARIO_FOLD_TARGET_WEIGHTS_BETA_NEUTRALIZE_THREADS_COMMITTEE_CALL: with
+    # committee_capital=True and beta_neutralize=True the fold target builder
+    # AND the full diagnostic run thread a real causal beta DataFrame into the
+    # committee execution book; with the default beta_neutralize=False both
+    # call sites receive None and the default report is byte-identical to an
+    # explicit beta_neutralize=False run.
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request_on = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True, beta_neutralize=True,
+    )
+    seen: dict[str, pd.DataFrame | None] = {}
+    real = ev._committee_execution_book
+
+    def _spy(*args, **kwargs):
+        seen["beta"] = kwargs.get("beta")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "_committee_execution_book", _spy)
+    ev._build_fold_target_weights(str(root), _FOLD, request_on, funding_by_symbol)
+    assert isinstance(seen["beta"], pd.DataFrame)
+
+    seen.clear()
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    ev.run_mhs_horizon_diagnostic(request_on)
+    assert isinstance(seen["beta"], pd.DataFrame)
+
+    seen.clear()
+    request_default = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True,
+    )
+    ev._build_fold_target_weights(str(root), _FOLD, request_default, funding_by_symbol)
+    assert seen["beta"] is None
+
+    seen.clear()
+    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(
+        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    )
+    default_report = ev.run_mhs_horizon_diagnostic(request_default)
+    explicit_off = ev.run_mhs_horizon_diagnostic(
+        dataclasses.replace(request_default, beta_neutralize=False),
+    )
+    assert default_report.status == "COMPLETE"
+    for field in ("books", "blend", "blend_target_gross", "research_go", "folds"):
+        assert getattr(default_report, field) == getattr(explicit_off, field)
+
 def test_committee_kelly_sizing_requires_committee_book() -> None:
     # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_KELLY_SIZING_REQUIRES_COMMITTEE_BOOK:
     # committee_kelly_sizing=True without committee_book=True fails closed in
@@ -569,6 +632,48 @@ def test_committee_execution_book_coverage_cutoff_default_none_byte_identical() 
     book_no_arg = ev._committee_execution_book(**kwargs)
     book_none = ev._committee_execution_book(**kwargs, coverage_cutoff=None)
     pd.testing.assert_frame_equal(book_no_arg, book_none)
+
+def test_committee_execution_book_beta_default_none_byte_identical() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_BETA_DEFAULT_NONE_BYTE_IDENTICAL: an
+    # explicit beta=None call is byte-identical to the no-argument call (the
+    # default path is untouched; no golden recapture needed).
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
+    }
+    book_no_arg = ev._committee_execution_book(**kwargs)
+    book_none = ev._committee_execution_book(**kwargs, beta=None)
+    pd.testing.assert_frame_equal(book_no_arg, book_none)
+
+def test_committee_execution_book_beta_neutralizes_and_preserves_target_gross() -> None:
+    # SCENARIO_COMMITTEE_EXECUTION_BOOK_BETA_NEUTRALIZES_AND_PRESERVES_TARGET_GROSS:
+    # with a synthetic per-column-constant beta the neutralized book differs
+    # from the baseline and every live qualifying row keeps BOTH contracts --
+    # dollar-neutral (sum==0) AND the caller's target_gross (abs-sum==0.5),
+    # proving the neutralize step runs before the gross scaling.
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
+    }
+    col_beta = np.linspace(-1.0, 1.0, len(close.columns))
+    beta = pd.DataFrame(
+        np.repeat(col_beta[None, :], len(close.index), axis=0),
+        index=close.index, columns=close.columns,
+    )
+    base = ev._committee_execution_book(**kwargs, target_gross=0.5)
+    with_beta = ev._committee_execution_book(**kwargs, target_gross=0.5, beta=beta)
+    assert not base.equals(with_beta)
+    qualifying = (
+        mask.reindex(with_beta.index).fillna(False).sum(axis=1) >= kwargs["min_symbols"]
+    )
+    # Fail-closed warm-up rows (all-zero committee book) stay zero by design;
+    # every live qualifying row must carry the full target gross.
+    live = qualifying & (base.abs().sum(axis=1) > 1e-12)
+    assert float(live.sum()) > 0
+    assert float((with_beta.abs().sum(axis=1).loc[live] - 0.5).abs().max()) < 1e-9
+    assert float(with_beta.sum(axis=1).loc[live].abs().max()) < 1e-9
 
 def test_committee_execution_book_coverage_cutoff_admits_pre_cutoff_member() -> None:
     # SCENARIO_COMMITTEE_EXECUTION_BOOK_COVERAGE_CUTOFF_ADMITS_PRE_CUTOFF_MEMBER:

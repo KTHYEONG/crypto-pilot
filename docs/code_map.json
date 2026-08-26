@@ -12,7 +12,10 @@
     "testing": "tests/unit/application/research/mhs/test_contracts.py"
   },
   "src/application/research/mhs/evaluation.py": {
-    "testing": "tests/unit/application/research/mhs/test_evaluation.py"
+    "testing": [
+      "tests/unit/application/research/mhs/test_evaluation.py",
+      "tests/unit/application/research/mhs/test_evaluation_committee_execution.py"
+    ]
   },
   "src/application/research/mhs/leverage_scan.py": {
     "testing": "tests/unit/application/research/mhs/test_leverage_scan.py"
