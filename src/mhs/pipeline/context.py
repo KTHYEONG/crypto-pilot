@@ -111,6 +111,8 @@ class PipelineContext:
     trials_attempted: int = 0
     trials_attempted_source: str | None = None
     trial_sharpes: Any = None
+    # 시행 풀 계측 공시(I-DISCLOSURE): 배제 사유별 건수·원장 크기 등 관측 페이로드.
+    trial_pool: dict[str, Any] | None = None
     deflated_sharpe_ratio: Any = None
     dsr_decomposition: Any = None
     deflated_sharpe_ratio_fold_proxy: Any = None

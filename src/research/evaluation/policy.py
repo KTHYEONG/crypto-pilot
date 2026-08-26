@@ -12,22 +12,24 @@ def resolve_evaluation_end(
     end: str | pd.Timestamp | None,
     *,
     unseal_holdout: bool,
-) -> str | pd.Timestamp | None:
+    ceiling: pd.Timestamp = HOLDOUT_CUTOFF,
+) -> pd.Timestamp:
     """Apply the single sealed-holdout policy shared by every evaluation CLI.
 
-    Unless ``unseal_holdout`` is true, an explicit ``end`` past the sealed
-    cutoff raises ``RuntimeError`` and a missing ``end`` defaults to the sealed
-    cutoff. This is the only place the holdout decision is made, so every CLI
-    uses the same sealed policy.
+    Returns a tz-aware UTC ``pd.Timestamp`` on every branch -- never ``None``
+    nor the raw input -- so every consumer sees one canonical window key. A
+    missing ``end`` resolves to ``ceiling``; an explicit ``end`` past the
+    active limit raises ``RuntimeError``. The limit is ``ceiling`` when
+    ``unseal_holdout`` is true and the sealed ``HOLDOUT_CUTOFF`` otherwise,
+    so the default path keeps its exact historical message.
     """
-    if unseal_holdout:
-        return end
     if end is None:
-        return HOLDOUT_CUTOFF
+        return ceiling
     end_ts = pd.Timestamp(end, tz="UTC")
-    if end_ts > HOLDOUT_CUTOFF:
+    limit = ceiling if unseal_holdout else HOLDOUT_CUTOFF
+    if end_ts > limit:
         raise RuntimeError(
-            f"Holdout sealed: --end {end} > {HOLDOUT_CUTOFF}. "
+            f"Holdout sealed: --end {end} > {limit}. "
             "Pass --unseal-holdout to override."
         )
-    return end
+    return end_ts

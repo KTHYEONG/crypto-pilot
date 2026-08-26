@@ -253,6 +253,7 @@ def build_mhs_run_history_record(
         "committee_member_attribution": report.committee_member_attribution,
         "holdout_tail": report.holdout_tail,
         "parameter_oos_split": report.parameter_oos_split,
+        "trial_pool": report.trial_pool,
         "report_path": str(persisted_path) if persisted_path is not None else None,
     }
     return cast(dict[str, Any], _round_6(_jsonable(record)))
