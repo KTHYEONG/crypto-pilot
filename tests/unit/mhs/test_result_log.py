@@ -179,34 +179,39 @@ class TestFillMarkParityRunHistoryRecord:
 
 def test_SCENARIO_MHS_EVID_03_TRIALS_NEVER_UNDERSTATED(tmp_path) -> None:
     """SCENARIO_MHS_EVID_03_TRIALS_NEVER_UNDERSTATED: the DSR trials denominator
-    accumulates the history's distinct flag configurations on top of the
-    registered constant floor; an unreadable history falls back with an
+    accumulates the history's distinct admissible trial configurations on top
+    of the registered constant floor; an unreadable history falls back with an
     explicit 'constant_fallback' provenance."""
     from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
     from src.mhs.run_history import derive_trials_attempted
+
+    def _trial(run_id: str, universe_size: int) -> dict[str, object]:
+        return {
+            "run_id": run_id,
+            "status": "COMPLETE",
+            "flags": {"execution_universe_size": universe_size},
+            "blend": {"primary_naive_sharpe": 1.0},
+            "research_go": {"reason_codes": [], "data_integrity_reason_codes": []},
+        }
 
     # 6 distinct flag configurations: constant floor + observed history.
     small_dir = tmp_path / "history_small"
     for index in range(6):
         append_run_history_record(
-            {"run_id": f"r{index}", "flags": {"execution_universe_size": 30 + (index % 6)}},
-            small_dir,
+            _trial(f"r{index}", 30 + (index % 6)), small_dir
         )
     assert derive_trials_attempted(small_dir) == (
         SEARCH_TRIALS_ATTEMPTED + 6,
-        "constant_plus_history",
+        "constant_plus_ledger",
     )
 
     # 200 distinct configurations: every observation adds on top of the floor.
     big_dir = tmp_path / "history_big"
     for index in range(200):
-        append_run_history_record(
-            {"run_id": f"r{index}", "flags": {"execution_universe_size": index}},
-            big_dir,
-        )
+        append_run_history_record(_trial(f"r{index}", index), big_dir)
     assert derive_trials_attempted(big_dir) == (
         SEARCH_TRIALS_ATTEMPTED + 200,
-        "constant_plus_history",
+        "constant_plus_ledger",
     )
 
     # Missing directory: unreadable -> conservative fallback, never a guess.
