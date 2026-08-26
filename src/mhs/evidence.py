@@ -52,6 +52,30 @@ def selection_overlap_fraction(
     return float(min(overlap / span, 1.0))
 
 
+def _daily_segment_metrics(segment: pd.Series) -> dict[str, Any]:
+    """비어있지 않은 일간 수익률 구간 하나의 성과 요약(공통 계약)."""
+    curve = (1.0 + segment).cumprod()
+    n_days = len(segment)
+    years = n_days / 365.25  # segment는 비어있지 않음이 보장되므로 항상 양수.
+    total_return = float(curve.iloc[-1] - 1.0)
+    geometric_cagr = float(curve.iloc[-1] ** (1.0 / years) - 1.0)
+    running_max = curve.cummax()
+    max_drawdown = float((curve / running_max - 1.0).min())
+    std = float(segment.std(ddof=1))
+    naive_sharpe = (
+        float(segment.mean() / std * np.sqrt(365.25)) if std > 0 else float("nan")
+    )
+    return {
+        "start": str(segment.index[0]),
+        "end": str(segment.index[-1]),
+        "n_days": n_days,
+        "total_return": total_return,
+        "geometric_cagr": geometric_cagr,
+        "max_drawdown": max_drawdown,
+        "naive_sharpe": naive_sharpe,
+    }
+
+
 def holdout_tail_evidence(
     equity: pd.Series,
     cutoff: pd.Timestamp,
@@ -71,25 +95,42 @@ def holdout_tail_evidence(
     tail = daily_returns.loc[daily_returns.index > cutoff].dropna()
     if len(tail) < min_days:
         return None
-    curve = (1.0 + tail).cumprod()
-    n_days = len(tail)
-    years = n_days / 365.25  # n_days >= min_days >= 1 이므로 항상 양수.
-    total_return = float(curve.iloc[-1] - 1.0)
-    geometric_cagr = float(curve.iloc[-1] ** (1.0 / years) - 1.0)
-    running_max = curve.cummax()
-    max_drawdown = float((curve / running_max - 1.0).min())
-    std = float(tail.std(ddof=1))
-    naive_sharpe = (
-        float(tail.mean() / std * np.sqrt(365.25)) if std > 0 else float("nan")
+    return _daily_segment_metrics(tail)
+
+
+def parameter_oos_split_evidence(
+    equity: pd.Series,
+    boundary: pd.Timestamp,
+    min_days: int = PNL_VOL_TARGET_BURN_IN_DAYS,
+) -> dict[str, Any] | None:
+    """Observational in-sample/out-of-sample split at the parameter-fit boundary.
+
+    Splits the equity ledger's daily returns around ``boundary`` (typically
+    ``COMMITTEE_OOS_START``) and summarizes each side with the same metric
+    contract as ``holdout_tail_evidence``. Returns ``None`` when EITHER side
+    has fewer than ``min_days`` observations -- a one-sided split is not a
+    comparison. ``sharpe_decay_ratio`` is ``None`` whenever the in-sample
+    ``naive_sharpe`` is non-finite or non-positive, so a sign flip can never
+    masquerade as decay. Pure function; never mutates the input series.
+    """
+    daily_returns = equity.resample("1D").last().pct_change().dropna()
+    in_seg = daily_returns.loc[daily_returns.index <= boundary]
+    oos_seg = daily_returns.loc[daily_returns.index > boundary]
+    if len(in_seg) < min_days or len(oos_seg) < min_days:
+        return None
+    in_metrics = _daily_segment_metrics(in_seg)
+    oos_metrics = _daily_segment_metrics(oos_seg)
+    in_sharpe = in_metrics["naive_sharpe"]
+    sharpe_decay_ratio = (
+        float(oos_metrics["naive_sharpe"] / in_sharpe)
+        if np.isfinite(in_sharpe) and in_sharpe > 0.0
+        else None
     )
     return {
-        "start": str(tail.index[0]),
-        "end": str(tail.index[-1]),
-        "n_days": n_days,
-        "total_return": total_return,
-        "geometric_cagr": geometric_cagr,
-        "max_drawdown": max_drawdown,
-        "naive_sharpe": naive_sharpe,
+        "boundary": str(boundary),
+        "in_sample": in_metrics,
+        "out_of_sample": oos_metrics,
+        "sharpe_decay_ratio": sharpe_decay_ratio,
     }
 
 
