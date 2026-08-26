@@ -22,7 +22,8 @@ from src.application.research.mhs.evaluation import (
     required_cost_tiers,
     synthetic_stress_scenarios,
 )
-from src.mhs.evidence import holdout_tail_evidence
+from src.mhs.evidence import holdout_tail_evidence, parameter_oos_split_evidence
+from src.mhs.params import COMMITTEE_OOS_START
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.telemetry import StageTelemetry
@@ -41,6 +42,15 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
     # 봉인 경계 넘은 실행만 hold-out 꼬리 성과를 채운다(미통과는 None = 정직한 신호).
     holdout_tail = (
         holdout_tail_evidence(ctx.blend_report.primary.ledger.equity, HOLDOUT_CUTOFF)
+        if ctx.blend_report is not None and ctx.blend_report.primary is not None
+        else None
+    )
+
+    # 관측 전용 분할: parameter-fit 경계 기준 in-sample/OOS 대비(게이트로 절대 사용되지 않음).
+    parameter_oos_split = (
+        parameter_oos_split_evidence(
+            ctx.blend_report.primary.ledger.equity, COMMITTEE_OOS_START
+        )
         if ctx.blend_report is not None and ctx.blend_report.primary is not None
         else None
     )
@@ -111,4 +121,5 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         ),
         trials_attempted_source=ctx.trials_attempted_source,
         holdout_tail=holdout_tail,
+        parameter_oos_split=parameter_oos_split,
     )
