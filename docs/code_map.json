@@ -28,7 +28,11 @@
     "testing": "tests/unit/application/research/mhs/test_resources.py"
   },
   "src/application/research/mhs/scaling.py": {
-    "testing": "tests/unit/application/research/mhs/test_scaling.py"
+    "testing": [
+      "tests/unit/application/research/mhs/test_scaling.py",
+      "tests/unit/mhs/test_compounding_growth.py"
+    ],
+    "architecture": "docs/specs/mhs_fold_exposure_warmup.md"
   },
   "src/application/research/mhs/stage_services.py": {
     "testing": "tests/unit/application/research/mhs/test_stage_services.py"
