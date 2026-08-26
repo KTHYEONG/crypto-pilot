@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_COMMITTEE_EVIDENCE_WEIGHT_REALISM",
+      "date": "2026-08-26",
+      "adr_id": "ADR_20260826_MHS_COMMITTEE_EVIDENCE_WEIGHT_REALISM",
+      "domain": "risk",
+      "title": "MHS committee evidence-weight 현실성 보정 실측 기각: DSR 추가 악화 + FOLD_BLEND_PATH_DIVERGENCE 신규 발생",
+      "why": "'실질적 백테스팅 자산증식 성과 개선으로 Research-GO 달성' 요청에 따라 committee 5개 멤버를 실측(실제 5년 데이터, 프로덕션과 동일한 build_feature_books/FEATURE_REGISTRY primitive)으로 개별 분해한 결과, evidence-weighting이 쓰는 cost-free next-bar proxy(book*forward_return)와 실전 경제성(EMA/tranche/vol-tilt를 거친 완전한 북 + 8bps 비용, mhs_ledger_pnl) 사이에 결정적 불일치를 발견: mom3_skew_168h는 proxy t-stat=2.118로 34.7%(두 번째로 큰) 가중치를 받지만 실전 Sharpe는 인샘플/OOS 양쪽 다 음수(-0.052, -0.130). 반대로 xs_mom_336h는 proxy가 약해(-0.309) 가중치 0이지만 실전 Sharpe는 양수이며 OOS에서 개선(0.305->0.755). 이 불일치가 committee 자본배분을 왜곡하고 있다는 가설을 세워 evidence-weighting의 학습 신호를 현실화하는 스펙을 작성.",
+      "resolution": "_committee_evidence_weights_by_boundary(evaluation.py)에 opens/bar_funding/grid_1h 파라미터를 추가해 proxies 계산을 cost-free (book*fwd_ret) 방식에서 mhs_ledger_pnl 기반 실전 net return(MEASURED_EXECUTION_COST_TIERS_BPS['base'], D6 committee_member_proxy_sharpe와 동일 상수 재사용, 일별 캐던스는 log1p/expm1 컴파운딩으로 보존)으로 교체. committee.py의 유일한 호출부에 배선. 실측 재실행 시 growth_extreme_budgeted의 leverage_ceiling=3.0이 새 committee 구성의 부트스트랩 파산확률 프론티어(2.5x)를 넘어 파이프라인이 ValueError로 즉시 실패(_assert_envelope_leverage_ceiling_verified가 설계대로 작동) -- 사용자 승인 하에 leverage_ceiling을 실측 프론티어값 2.5로 맞춰 재실행해 실제 효과를 측정.",
+      "impact": "실측(leverage_ceiling=2.5 + evidence-weight 수정 동시 반영, 두 레버가 얽혀 있어 개별 기여도는 분리 불가): deflated_sharpe_ratio 0.9442->0.7344(대폭 악화, GO에서 더 멀어짐), primary_naive_sharpe 2.886->2.416(-16.3%), primary_geometric_cagr 3.184->1.663(-47.7%), primary_max_drawdown -0.389->-0.292(유일한 개선, -25%), research_go.reason_codes에 FOLD_BLEND_PATH_DIVERGENCE(data_integrity) 신규 발생(fold 경계별 실전-수익 기반 가중치 재적합이 fold 간 더 민감하게 흔들려 fold-blend 경로 정합성 붕괴로 추정, 근본원인 미조사). MDD 하나만 개선되고 DSR/Sharpe/CAGR 전부 악화 + 신규 데이터무결성 결함 발생으로 사용자 판단 하에 전체 되돌림(git checkout으로 evaluation.py/committee.py/params.py/골든픽스처/테스트/docs-results 전부 revert 확인, golden digest 6/6 + evidence_weights 테스트 재통과 확인). trend_sleeve/risk_premia_v2와 동일 패턴(개별 멤버 단위 정밀 분석이 맞아도 committee 전체 재조합 시 상관구조 재편 효과로 실측 반전)."
+    },
+    {
       "task_id": "TASK_MHS_PARAMETER_OOS_EVIDENCE",
       "date": "2026-08-26",
       "adr_id": "ADR_20260826_MHS_PARAMETER_OOS_EVIDENCE",
@@ -989,16 +999,6 @@
       "why": "이전 spec들은 결함 B(30분 타임아웃발 428-563bps 비용 폭증)와 horizon 선택 근거 부재를 진단만 하고 해법 없이 남겼음. 사용자가 진단이 아닌 구체적 해결책(체결 시스템 재설계, 신뢰성 있는 신호 선정 절차)을 요청함(docs/specs/mhs_execution_ladder_and_discovery_gate.md).",
       "resolution": "Part A: laddered_fill_schedule(주문을 K개 tranche로 분할, 실패시 선형 리프라이스, 마지막 tranche만 시장가 폴백; K=1은 기존 STRICT proxy와 바이트 동일; strategy_aware_execution_replay/_BoundExecutionReplayAccumulator 양쪽에서 동일 함수 재사용) + OHLCV_LADDERED_PROXY bound + --ladder-diagnostic opt-in CLI. Part B: src/mhs/discovery.py의 select_horizon_by_discovery_qualification(discovery 2021-23 worst-year-robust 선택 -> qualification 2024-25 단일 재확인, 재탐색 없음, 기존 DISCOVERY_END/QUALIFICATION_END 컨벤션 재사용).",
       "impact": "실측 결과 둘 다 단순 개선이 아님을 확인: (B) 이전 스윕에서 유일하게 통과했던 168h reversal이 worst-year-robust 기준(-1.81)에서 문턱(2.0) 미달로 탈락 -- 어떤 horizon도 discovery에서 admitted 안 됨(fail-closed). (A) --ladder-diagnostic 5년 실측: intent shortfall -12.5%(1000.29->875.43bps) 개선되었으나 naive Sharpe는 오히려 악화(-0.698->-0.909, 꼬리위험 감소가 평균비용 증가로 상쇄) -- primary 승격 보류. 남은 레버는 파라미터 재조정보다 신호/체결 접근 방식 자체의 재설계로 판단됨(docs/results/mhs-res.md §3)."
-    },
-    {
-      "task_id": "TASK_MHS_BLEND_GRID_COUPLING_FIX",
-      "date": "2026-08-10",
-      "adr_id": "ADR_20260810_MHS_BLEND_GRID_COUPLING_FIX",
-      "domain": "research",
-      "title": "MHS blend 실행 격자/spec을 admission 가중치 기반으로 재결합",
-      "why": "3차 수정(fast_reversal admission 0.0)이 PHASE_1_BOOK_BLEND_WEIGHTS는 바꿨지만, blend의 실행 결정 격자·BookSpec은 _run_books_concurrent/_build_fold_target_weights/phase_blend 3곳에서 여전히 fast_reversal(6h/1h)에 하드코딩돼 있었음. blend가 slow_momentum과 가중치상 100% 동일한데도 fills가 4배(473,613 vs 118,557) 부풀려지고 autocorr Sharpe/MDD/turnover가 전부 열위였던 것이 그 증거(docs/specs/mhs_root_cause_reassessment.md §3.2).",
-      "resolution": "PHASE_1_BOOK_BLEND_WEIGHTS를 유일한 진실 소스로 (spec, grid)를 파생하는 순수 함수 _active_blend_book_and_grid를 evaluation.py에 신설하고 3개 호출부에 배선(fast 가중치 nonzero면 fast/fast_grid 반환해 과거 50/50 동작 바이트 동일 보존, 아니면 fail-closed).",
-      "impact": "blend이 slow_momentum과 step_hours/fills/autocorr Sharpe/MDD/turnover 전부 일치로 전환(격자 버그로 인한 4배 fills 팽창 해소). Research GO는 여전히 FALSE(folds_passed=0/3) — 남은 근본 원인은 strict proxy 30분 타임아웃발 428-563bps 비용 폭증(이미 별도 ADR로 측정됨, 후속 spec 필요)과 horizon 선택 근거 문서 부재(판단 보류)."
     }
   ]
 }
