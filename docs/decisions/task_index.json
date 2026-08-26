@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FOLD_EXPOSURE_WARMUP_FIX",
+      "date": "2026-08-26",
+      "adr_id": "ADR_20260826_MHS_FOLD_EXPOSURE_WARMUP_FIX",
+      "domain": "mhs",
+      "title": "FOLD_BLEND_PATH_DIVERGENCE 근본 원인 수정: _exante_vol_target_scale에 warmup_returns 배선",
+      "why": "분기(16-fold) 재구성 이후 실측에서 FOLD_BLEND_PATH_DIVERGENCE(deployed_gross_log_ratio 최대 0.836, tolerance 0.25 초과)가 새로 발생했다. 근본 원인은 _exante_vol_target_scale의 EWMA burn-in(PNL_VOL_TARGET_BURN_IN_DAYS=90일)이 분기 fold 길이(83~91일)와 거의 같아 fold 검증구간 전체가 min_periods dead-zone에 걸려 scale이 fallback 1.0으로 주저앉는 반면, blend는 2021년부터 연속 실행돼 이미 워밍업이 끝나 있었다는 것. _constant_risk_scale에는 이미 warmup_returns concat+reindex 패턴(I-WARM)이 있었으나 growth_budget/exante_target 분기에는 배선되지 않았다(호출부는 이미 warmup_returns를 계산해 넘기고 있었음).",
+      "resolution": "_exante_vol_target_scale(scaling.py)에 warmup_returns 키워드 인자를 추가해 _constant_risk_scale과 동일한 concat+ewm+reindex 계약(워밍업 행은 reference 첫 행 이전만 허용, 위반 시 ValueError)을 구현했다. _replay_exposure_scale의 growth_budget 분기와 비-conservative exante_target 분기에서 이미 받고 있던 warmup_returns를 실제로 전달하도록 배선했다. I4로 보호된 conservative exante_target 특례는 건드리지 않았다. tests/unit/mhs/test_compounding_growth.py에 TestExanteVolTargetScaleWarmup(4개 테스트: burn-in dead-zone 해소, 연속 히스토리와 bit-identical, backward-compat, leak guard)을 추가했다. 합성 데이터로 먼저 수학적 증명(85일 fold 100% fallback -> fix 후 연속 추정치와 Series.equals()==True) 후 적용.",
+      "impact": "실제 파이프라인 재실행으로 확인: fold_blend_parity.max_abs_log_deployed_gross_ratio 0.836 -> 0.180(허용치 0.25 이내), research_go.reason_codes/data_integrity_reason_codes에서 FOLD_BLEND_PATH_DIVERGENCE 완전 소멸. 배포되는 blend 전략 성과(CAGR 318.4%, MDD -38.9%, Sharpe 2.36)는 수정 전후 bit-identical -- 이 fix는 fold 고립 리플레이 내부 노출스케일만 교정했고 실제 배포 전략에는 영향 없음. fold 자체의 고립 리플레이 성과(내부 검증용, 이전엔 flat 1.0x 폴백으로 저평가돼 있었음)는 정상 레버리지 반영으로 큰 폭 상향(예: fold15 CAGR 663%->2380%). 남은 Research-GO 차단 사유는 DEFLATED_SHARPE_BELOW_THRESHOLD(0.943<0.95, run_history 누적 trial 문제로 이번 수정과 무관, 수정 전후 값 동일 확인)와 관측전용 SELECTION_WINDOW_OVERLAP뿐 -- fold 관련 차단 사유는 완전 해소."
+    },
+    {
       "task_id": "TASK_MHS_QUARTERLY_FOLD_RESTRUCTURE",
       "date": "2026-08-26",
       "adr_id": "ADR_20260826_MHS_QUARTERLY_FOLD_RESTRUCTURE",
@@ -989,16 +999,6 @@
       "why": "MHS Research GO가 3개 anchored fold 전부 실패(Primary Autocorr Sharpe<<0.6). fast/slow 로직을 따라가 보니 rank_weight_book이 만든 dollar-neutral/unit-gross 북을 실행 roster(top-30 유동성)로 마스킹할 때 .where(mask, 0.0)만 적용하고 재정규화하지 않아, 실제 배포 gross가 5~10%로 붕괴하고 net 편향과 roster-churn turnover가 주입됨. slow_momentum은 prescreen(+0.73 Sharpe)에서 실재 edge가 있는데 primary 리플레이(-0.74)에서 파괴되는 것이 실행층 결함의 증거.",
       "resolution": "src/mhs/books.py에 renormalize_within_mask() 신규 추가(center+gross 재정규화, min_symbols 미달 fail-closed). fold 빌더/top-level 진단의 4개 호출부(w_fast_execution/w_slow_execution 생성 2곳, blend_replay 조합 1곳)를 재정규화 함수로 교체. fast/slow 조합(50/50 blend) 단계는 아키텍처 §2 불변식대로 미재정규화 유지.",
       "impact": "unit/application 테스트 신규 8개 시나리오 전부 PASS, lean_check --spec 계약 검증 PASS. fast_reversal은 prescreen부터 edge 없어 이번 수정으로 GO 통과 기대하지 않음(범위 밖 명시). MHS_REBALANCE_MIN_NOTIONAL_DELTA 재검토와 fast_reversal 알파 재설계는 후속 과제로 남김."
-    },
-    {
-      "task_id": "TASK_MHS_OUTPUT_TIERING",
-      "date": "2026-08-10",
-      "adr_id": "ADR_20260810_MHS_OUTPUT_TIERING",
-      "domain": "quant",
-      "title": "MHS Horizon Diagnostic Output Tiering",
-      "why": "MHS persistence wrote 1 JSON + 5 lossless Parquet (~124MB) per run; all blanket-gitignored, blocking version-controlled research evidence",
-      "resolution": "persist_mhs_horizon_diagnostic_report gains MhsOutputTier (COMPACT/FULL). COMPACT default: git-tracked stripped summary JSON (~12KB) + daily-resampled float32 daily_ledger.parquet (~0.6-0.8MB). FULL opt-in: pre-tiering 5-category unified Parquet + checksummed JSON under _full/ (gitignored). CLI --output-tier flag added",
-      "impact": "COMPACT ~50x smaller than FULL ledger (42MB->0.8MB); research evidence (daily equity, fold PnL, GO gate) now diffable in git; FULL preserved for deep audit; existing FULL path tests updated to tier=FULL"
     }
   ]
 }
