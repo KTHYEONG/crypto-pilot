@@ -107,6 +107,8 @@ class MhsHorizonDiagnosticReport:
     # 봉인 경계(HOLDOUT_CUTOFF) 이후 hold-out 꼬리 구간 자체의 성과 요약
     # (holdout_tail_evidence 결과); 보고 구간이 봉인을 넘지 않으면 None.
     holdout_tail: dict[str, Any] | None = None
+    # parameter-fit 경계 기준 인샘플/OOS 성과 분할(parameter_oos_split_evidence 결과); 어느 한쪽 표본이 부족하면 None.
+    parameter_oos_split: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         from src.mhs.report.artifacts import _jsonable
