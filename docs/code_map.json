@@ -214,9 +214,10 @@
     "testing": [
       "tests/unit/mhs/test_execution.py",
       "tests/unit/mhs/test_replay_fills.py",
-      "tests/unit/mhs/test_evidence.py"
+      "tests/unit/mhs/test_evidence.py",
+      "tests/unit/mhs/test_replay_accumulator.py"
     ],
-    "architecture": "docs/specs/mhs_evidence_integrity.md"
+    "architecture": "docs/specs/mhs_forced_exit_cost_model.md"
   },
   "src/mhs/features.py": {
     "testing": "tests/unit/mhs/test_features.py",
