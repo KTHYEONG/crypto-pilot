@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from src.common.config import DATA_DIR
 from src.common.errors import DataIntegrityError
@@ -22,6 +23,7 @@ from src.live.planner import OrderIntent
 
 _HWM_KEY = "equity_high_water_mark"
 _POSITIONS_KEY = "positions"
+_CASH_KEY = "cash_usdt"
 
 
 def default_ledger_path() -> Path:
@@ -34,6 +36,7 @@ class LedgerState:
 
     positions: dict[str, Decimal] = field(default_factory=dict)
     equity_high_water_mark: Decimal = Decimal(0)
+    cash_usdt: Decimal | None = None
 
 
 def load_ledger(path: Path) -> LedgerState:
@@ -50,6 +53,7 @@ def load_ledger(path: Path) -> LedgerState:
         # 레거시 평면 레이아웃({symbol: qty}) 하위 호환.
         positions_raw = raw
         hwm = Decimal(0)
+        cash_usdt: Decimal | None = None
     else:
         positions_raw = raw[_POSITIONS_KEY]
         hwm_raw = raw.get(_HWM_KEY, "0")
@@ -57,25 +61,49 @@ def load_ledger(path: Path) -> LedgerState:
             hwm = Decimal(str(hwm_raw))
         except Exception as exc:  # noqa: BLE001
             raise DataIntegrityError(f"ledger hwm is not numeric: {path}") from exc
+        if _CASH_KEY in raw:
+            cash_raw = raw[_CASH_KEY]
+            try:
+                cash_usdt = Decimal(str(cash_raw))
+            except Exception as exc:  # noqa: BLE001
+                raise DataIntegrityError(f"ledger cash_usdt is not numeric: {path}") from exc
+        else:
+            cash_usdt = None
     if not isinstance(positions_raw, dict):
         raise DataIntegrityError(f"ledger positions must be an object: {path}")
     try:
         positions = {str(symbol): Decimal(str(qty)) for symbol, qty in positions_raw.items()}
     except Exception as exc:  # noqa: BLE001
         raise DataIntegrityError(f"ledger position quantity is not numeric: {path}") from exc
-    return LedgerState(positions=positions, equity_high_water_mark=hwm)
+    return LedgerState(positions=positions, equity_high_water_mark=hwm, cash_usdt=cash_usdt)
 
 
 def save_ledger(path: Path, state: LedgerState) -> None:
     """임시파일 + os.replace 로 원자적 기록한다(부분 기록 JSON 은 영구 HALT 로 이어진다)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         _POSITIONS_KEY: {symbol: str(qty) for symbol, qty in state.positions.items() if qty != 0},
         _HWM_KEY: str(state.equity_high_water_mark),
     }
+    if state.cash_usdt is not None:
+        payload[_CASH_KEY] = str(state.cash_usdt)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     os.replace(tmp_path, path)
+
+
+def compute_fill_cash_flow(
+    intents: Sequence[OrderIntent],
+    outcomes: Sequence[ExecutionOutcome],
+) -> Decimal:
+    """체결 현금흐름을 계산한다. BUY는 음수, SELL은 양수."""
+    total = Decimal(0)
+    for intent, outcome in zip(intents, outcomes, strict=True):
+        if outcome.filled_qty <= 0 or outcome.avg_fill_price is None:
+            continue
+        signed = outcome.filled_qty if intent.side == "BUY" else -outcome.filled_qty
+        total -= signed * outcome.avg_fill_price
+    return total
 
 
 def apply_outcomes(
