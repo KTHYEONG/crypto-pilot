@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from src.live.executor import ExecutionOutcome
 from src.live.ledger import (
     LedgerState,
     apply_outcomes,
+    compute_fill_cash_flow,
     default_ledger_path,
     load_ledger,
     save_ledger,
@@ -133,3 +135,74 @@ def test_reconcile_uses_loaded_ledger_not_hardcoded_empty(tmp_path: Path) -> Non
 
     with pytest.raises(ReconciliationBreach):
         reconcile_or_halt(snapshot, ledger_positions, qty_tolerance_fraction=0.001)
+
+
+def test_SCENARIO_LIVE_43_LEDGER_CASH_ROUND_TRIPS_AND_STAYS_BACKWARD_COMPATIBLE(tmp_path: Path) -> None:
+    """SCENARIO_LIVE_43: cash_usdt round-trips; None omits the key entirely
+    (byte-compatible with pre-cash ledgers); legacy flat layout yields None."""
+    path = tmp_path / "ledger.json"
+    state = LedgerState(
+        positions={"AAAUSDT": Decimal("0.4")},
+        equity_high_water_mark=Decimal("2000"),
+        cash_usdt=Decimal("1234.5"),
+    )
+    save_ledger(path, state)
+    assert load_ledger(path) == state
+
+    none_path = tmp_path / "ledger_none.json"
+    save_ledger(none_path, LedgerState(positions={}, equity_high_water_mark=Decimal("0"), cash_usdt=None))
+    raw = json.loads(none_path.read_text(encoding="utf-8"))
+    assert "cash_usdt" not in raw
+    assert load_ledger(none_path).cash_usdt is None
+
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text('{"BTCUSDT": "1.5"}', encoding="utf-8")
+    assert load_ledger(legacy_path).cash_usdt is None
+
+
+def test_SCENARIO_LIVE_44_FILL_CASH_FLOW_SIGN_CONVENTION() -> None:
+    """SCENARIO_LIVE_44: BUY decreases cash, SELL increases it; unfilled/None
+    price contributes exactly 0; two intents sum algebraically."""
+    buy = _intent("AAAUSDT", "BUY", "2")
+    buy_outcome = ExecutionOutcome(
+        symbol="AAAUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
+        avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+    )
+    assert compute_fill_cash_flow([buy], [buy_outcome]) == Decimal("-200")
+
+    sell = _intent("AAAUSDT", "SELL", "2")
+    sell_outcome = ExecutionOutcome(
+        symbol="AAAUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
+        avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+    )
+    assert compute_fill_cash_flow([sell], [sell_outcome]) == Decimal("200")
+
+    zero_fill = ExecutionOutcome(
+        symbol="AAAUSDT", filled_qty=Decimal("0"), unfilled_qty=Decimal("2"),
+        avg_fill_price=Decimal("100"), chases=0, status="RESIDUAL",
+    )
+    assert compute_fill_cash_flow([buy], [zero_fill]) == Decimal("0")
+    no_price = ExecutionOutcome(
+        symbol="AAAUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
+        avg_fill_price=None, chases=0, status="SHADOW",
+    )
+    assert compute_fill_cash_flow([buy], [no_price]) == Decimal("0")
+
+    combined = compute_fill_cash_flow(
+        [buy, _intent("BBBUSDT", "SELL", "2")],
+        [
+            buy_outcome,
+            ExecutionOutcome(
+                symbol="BBBUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+            ),
+        ],
+    )
+    assert combined == Decimal("-200") + Decimal("200") == Decimal("0")
+
+
+#: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
+COVERED_SCENARIOS: tuple[str, ...] = (
+    "SCENARIO_LIVE_43_LEDGER_CASH_ROUND_TRIPS_AND_STAYS_BACKWARD_COMPATIBLE",
+    "SCENARIO_LIVE_44_FILL_CASH_FLOW_SIGN_CONVENTION",
+)

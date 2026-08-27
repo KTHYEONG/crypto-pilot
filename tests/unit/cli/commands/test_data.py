@@ -6,7 +6,7 @@ import argparse
 
 import pytest
 
-from src.cli.commands.data import _mhs_execution, add_data_commands
+from src.cli.commands.data import _mhs_execution, _refresh_live_universe, add_data_commands
 
 
 def _mhs_parser() -> argparse.ArgumentParser:
@@ -58,3 +58,97 @@ def test_data_collect_mhs_execution_threads_timeframe_to_plan(monkeypatch) -> No
     args = parser.parse_args(["data", "collect", "mhs-execution"])
     _mhs_execution(args)
     assert captured["timeframe"] == "3m"
+
+
+def test_data_refresh_live_universe_registered_and_dispatches(monkeypatch) -> None:
+    """SCENARIO_SIGNAL_10 (data side): ``data collect refresh-live-universe``
+    parses and dispatches to _refresh_live_universe, refreshing 1h/funding for
+    every cached symbol before the 3m roster (order matters: the roster ranks
+    by trailing 1h volume)."""
+    parser = _mhs_parser()
+    args = parser.parse_args(["data", "refresh-live-universe"])
+    assert args.handler is _refresh_live_universe
+
+    import glob as glob_mod
+
+    monkeypatch.setattr(glob_mod, "glob", lambda pattern: ["AAAUSDT.parquet", "BUSDT.parquet"])
+
+    call_order: list[str] = []
+
+    class FakeCollector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            call_order.append(f"ohlcv:{symbol}")
+
+        def ensure_funding_data(self, symbol, start, end):
+            call_order.append(f"funding:{symbol}")
+
+    monkeypatch.setattr(
+        "src.market_data.services.futures_collection.DataCollector", FakeCollector
+    )
+
+    class FakePlan:
+        symbols = ("AAAUSDT", "BUSDT")
+
+    def fake_build_plan(start, end, timeframe, execution_universe_size):
+        call_order.append("build_plan")
+        return FakePlan()
+
+    def fake_collect(plan, execute, workers):
+        call_order.append("collect_roster")
+        return {"mode": "completed"}
+
+    monkeypatch.setattr(
+        "src.application.data.mhs_execution_collection.build_mhs_execution_plan", fake_build_plan
+    )
+    monkeypatch.setattr(
+        "src.application.data.mhs_execution_collection.collect_mhs_execution_data", fake_collect
+    )
+
+    _refresh_live_universe(args)
+
+    assert "ohlcv:AAAUSDT" in call_order
+    assert "funding:AAAUSDT" in call_order
+    assert call_order.index("ohlcv:AAAUSDT") < call_order.index("build_plan")
+    assert "collect_roster" in call_order
+
+
+def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(monkeypatch) -> None:
+    """A single symbol's network failure is logged and skipped, not fatal."""
+    import glob as glob_mod
+
+    parser = _mhs_parser()
+    args = parser.parse_args(["data", "refresh-live-universe"])
+
+    monkeypatch.setattr(glob_mod, "glob", lambda pattern: ["AAAUSDT.parquet", "BUSDT.parquet"])
+
+    class FlakyCollector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            if symbol == "AAAUSDT":
+                raise OSError("network unreachable")
+
+        def ensure_funding_data(self, symbol, start, end):
+            pass
+
+    monkeypatch.setattr(
+        "src.market_data.services.futures_collection.DataCollector", FlakyCollector
+    )
+
+    class FakePlan:
+        symbols = ()
+
+    monkeypatch.setattr(
+        "src.application.data.mhs_execution_collection.build_mhs_execution_plan",
+        lambda start, end, timeframe, execution_universe_size: FakePlan(),
+    )
+    monkeypatch.setattr(
+        "src.application.data.mhs_execution_collection.collect_mhs_execution_data",
+        lambda plan, execute, workers: {"mode": "completed"},
+    )
+
+    _refresh_live_universe(args)  # must not raise despite AAAUSDT's failure
+
+
+#: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
+COVERED_SCENARIOS: tuple[str, ...] = (
+    "SCENARIO_SIGNAL_10_CLI_SUBCOMMANDS_AND_EXIT_CODES",  # data 측 dispatch 부분
+)
