@@ -1,6 +1,36 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_INCREMENTAL_SIGNAL_REFRESH",
+      "date": "2026-08-27",
+      "adr_id": "ADR_20260827_MHS_INCREMENTAL_SIGNAL_REFRESH",
+      "domain": "execution",
+      "title": "저사양 서버 무인 일일 신호 갱신(동결 파라미터 순방향 채점)",
+      "why": "전체 백테스트(mhs-horizon-diagnostic)를 매일 크론으로 돌려 라이브 신호를 갱신하는 설계는 방법론적으로 홀드아웃 봉인(HOLDOUT_CUTOFF/--final-oos-2026h1, 1회성 최종검증 전용)을 매일 반복 노출하는 것과 동치이고 저사양 서버(512MB)에서 실측 3GB/445s로 물리적으로도 불가능함을 확인. 반면 이미 존재하는 bounded-window 빌더(_build_fold_target_weights)에 동결 파라미터를 주입하면 discovery 없이 순방향 채점 가능함을 실측(120일 창=1.3s/~475MB)",
+      "resolution": "src/mhs/signal_state.py 신설: SignalState/FrozenSignalParams(deployed_flags 스냅샷 포함)+params_digest/flags_digest 이중 바인딩. src/mhs/signal_refresh.py 신설: refresh_signal_row가 _build_fold_target_weights를 재사용(신규 리서치 로직 0)하고 I-MEMBER-PARITY(coverage_cutoff 구조적 전제 검증)/I-OVERLAP-PARITY(겹침 행 오차 허용치 검증)/I-APPEND-ONLY를 전부 fail-closed로 강제. _apply_rebalance_deadband/_build_fold_target_weights에 opt-in seed_row 파라미터를 추가해(기존 호출 byte-identical) deadband 이월 상태가 실제로 다음날로 이어지도록 배선. 참조수익률은 mhs_ledger_pnl proxy가 아니라 백테스트와 동일한 replay_execution_windows(OHLCV_IMMEDIATE_TAKER) 호출로 재현",
+      "impact": "동결 파라미터 재부트스트랩 없이는 절대 변경되지 않는 fail-closed 순방향 채점기 확보. SCENARIO_SIGNAL_01~11 신설 테스트로 검증. Part C 자동화(일일 아티팩트 재생성)의 리서치 거버넌스 문제를 코드가 아니라 세션 내 사용자 결정으로 해소"
+    },
+    {
+      "task_id": "TASK_LIVE_PORTFOLIO_CONTINUITY_P1",
+      "date": "2026-08-27",
+      "adr_id": "ADR_20260827_LIVE_PORTFOLIO_CONTINUITY_P1",
+      "domain": "execution",
+      "title": "마크 커버리지 정합 + 사이클별 포트폴리오 상태 기록",
+      "why": "runner.py의 mark 조회가 오늘 아티팩트 컬럼(weights.index)에만 한정돼 로스터에서 완전히 빠진 보유 심볼은 청산 주문이 생성되지 않는 종단 경로 구멍이 있었고, PAPER/SHADOW의 venue equity는 시뮬레이션과 무관해 사이클별 equity/포지션 시계열이 어디에도 기록되지 않아 백테스트 daily_ledger와 대조 불가능했음",
+      "resolution": "runner.py: effective_positions를 mark 조회 이전으로 이동해 wanted=weights.index|current_positions로 확장, _uncovered_positions 신설해 청산 불가 잔여 심볼을 position_uncovered로 감사(사이클은 HALT 안 함). ledger.py: LedgerState.cash_usdt 필드 + compute_fill_cash_flow 신설(현금흐름+시가평가 모델, 백테스트와 동일 방식). src/live/portfolio_state.py 신설: resolve_effective_equity(모드별 venue/virtual_mtm 분기)+append_portfolio_state(타입 있는 parquet, execution_quality의 문자열 저장 안티패턴 반복 안 함)",
+      "impact": "PAPER 결과의 equity curve를 처음으로 관측 가능(리스크 게이트/사이징에는 영향 없음, 순수 관측). SCENARIO_LIVE_41~49 테스트로 검증, 회귀 없음"
+    },
+    {
+      "task_id": "ADR_20260827_LIVE_PAPER_READINESS_P0",
+      "date": "2026-08-27",
+      "adr_id": "ADR_20260827_ADR_20260827_LIVE_PAPER_READINESS_P0",
+      "domain": "execution",
+      "title": "PAPER 운용 개시를 막는 P0 4건 해소",
+      "why": "PAPER 데몬이 실 Binance rateLimits 스키마(rateLimitType/MINUTE+intervalNum)를 파싱 못해 매 사이클 HALT, 청산 지시(target=0)가 targets dict에서 사라져 plan_orders 순회 밖으로 빠지는 exit-always 불변 위반, PAPER는 거래소 포지션이 항상 0이라 2일차부터 reconcile_or_halt가 영구 HALT, 신호 아티팩트 갱신 경로 부재를 실측으로 확인",
+      "resolution": "rest.py: rateLimitType/intervalNum 정규 스키마로 parse_rate_limits 재작성. planner.py: plan_orders가 sorted(set(targets)|set(current)) 순회하도록 수정(I-EXIT-ALWAYS). settings.py에 ExecutionMode.suppresses_mutations 단일 정의 신설, account.py에 assert_suppressed_venue_flat/effective_positions 추가해 억제 모드는 내부 원장을 진실로 삼도록 runner.py 분기. src/live/preflight.py 신설(GET-only 6개 점검, live preflight 서브커맨드). docker-compose.yml에 아티팩트 디렉터리 read-only 볼륨 마운트 추가",
+      "impact": "PAPER가 연속 다일 무인 실행 가능해짐(SCENARIO_LIVE_31~40 신설 테스트로 검증). 심볼별 노셔널 캡이 reduce_only 청산까지 막던 부수 결함도 함께 해소"
+    },
+    {
       "task_id": "MHS_LIVE_EXECUTION_QUALITY_DISAMBIGUATION",
       "date": "2026-08-27",
       "adr_id": "ADR_20260827_MHS_LIVE_EXECUTION_QUALITY_DISAMBIGUATION",
@@ -969,36 +999,6 @@
       "why": "slow_momentum의 horizon_hours=168이 discovery.py 도입 이전 레거시 하드코딩으로, 전역 discovery 그리드 실측(mhs-res.md §2)에서 168h가 최약체(worst-year net_t=+0.107)이고 360h가 최강(+0.493)임에도 실전에 전혀 반영되지 않았음. 원인 규명: 전역 discovery/qualification 윈도우(2022-04~2025-12)가 3개 anchored fold의 validation 연도(2023/2024/2025) 전부와 겹쳐 그대로 쓰면 모든 fold에서 look-ahead leakage가 발생 -- 그래서 지금까지 discovery_gate는 진단 전용으로만 격리돼 있었음.",
       "resolution": "src/mhs/discovery.py에 fold_train_only_discovery_qualification() 추가: 기존 select_horizon_by_discovery_qualification을 재사용하되, 각 anchored fold의 train_start~train_end(validation_start 이전)로만 discovery/qualification 윈도우를 파생(qualification=train_end가 속한 역년, discovery=그 이전 전체)해 leak-free 재선정. src/mhs/contracts.py의 _SLOW_BAND horizons_hours를 전체 momentum 후보 그리드(72~504h)로 확장해 동적 선택을 허용(기본 168h 유지). MhsDiagnosticRequest.fold_safe_horizon_selection(opt-in, 기본 False)로 게이팅, --fold-safe-horizon CLI 플래그 추가. 부모 프로세스에서 fold별 선택을 1회 계산해(이미 로드된 전체 패널 재사용) plain int만 fork된 fold worker에 전달(패널 재로드 없음). MhsFoldReport에 slow_horizon_hours/slow_horizon_source 필드 추가해 감사 가능하게 기록.",
       "impact": "10차 전체 리플레이 실측(2021-2025, 446심볼, --fold-safe-horizon --discovery-gate): 3개 fold 전부 admitted=False로 168h 기본값에 폴백(fold1 최고후보조차 168h 자신, net_t=+1.382로 admission floor 2.0 미달; fold0은 2021 데이터커버리지 결손으로 전부 non-finite). Research GO 수치 불변(byte-identical, primary_autocorr_sharpe=+0.4464 vs 9차 +0.4661는 446 vs 445 심볼 유니버스 자연드리프트, fold별 수치는 소수점까지 일치). 안전한 no-op으로 확인됨과 동시에 실질 병목을 admission_t=2.0 임계값(전역 다년 윈도우 기준으로 캘리브레이션되어 fold-local 1~3년 표본에는 지나치게 엄격)으로 명확히 특정 -- 다음 스펙 후보로 문서화."
-    },
-    {
-      "task_id": "ADR_20260811_MHS_PNL_VOL_TARGETING",
-      "date": "2026-08-11",
-      "adr_id": "ADR_20260811_MHS_PNL_VOL_TARGETING",
-      "domain": "mhs",
-      "title": "MHS 전략 자체 P&L 변동성 타겟팅(2-pass 리플레이)",
-      "why": "실제 원장 분해로 2025-12-23(-40.4%)/2025-10-12(-31.6%) 단일일 손실이 daily_turnover≈2.0(전량 포지션 반전) 동반한 momentum crash(Daniel & Moskowitz 2016)임을 확인; 기존 _regime_cash_scale(자산단위 vol)은 두 날 모두 무력했음",
-      "resolution": "전략 자신의 실현 P&L 변동성 기반 2차 익스포저 스케일러(_pnl_vol_target_scale, Barroso & Santa-Clara 2015)를 Pass1(reference, 오늘의 리플레이 그대로)->Pass2(vol-target 축소 후 재실행) 구조로 top-level(_book_outcome)과 fold-level(_run_anchored_fold) 모두에 배선. 인과성(shift(1) 이중 적용, look-ahead 없음) 단위테스트로 증명, no-op 회귀 방지 테스트 포함",
-      "impact": "실측 재확인: primary_autocorr_sharpe +0.4317→+0.4661(+8%), MDD -45.74%→-21.64%(거의 절반), pre_vol_target_reference가 기존 baseline과 정확히 일치함을 확인(2-pass 정상 동작 증거). Research GO는 여전히 FALSE(0.466<0.6 floor, fold2만 통과) — 신호 방향성 문제(2023/2024)는 미해결"
-    },
-    {
-      "task_id": "ADR_20260811_MHS_MOMENTUM_VOL_NORMALIZATION",
-      "date": "2026-08-11",
-      "adr_id": "ADR_20260811_MHS_MOMENTUM_VOL_NORMALIZATION",
-      "domain": "mhs",
-      "title": "MHS momentum 신호 vol-normalized 시도 및 원복",
-      "why": "raw momentum이 discovery worst-year admission floor(2.0)를 넘지 못해(최고 0.493) 신호 구성 자체를 재검토; 5개 대안 실측 중 vol-normalized momentum(horizon_log_return/realized_vol)만 부작용 없는 순수 개선(+37%, 0.673)으로 확인되어 실전 북에 배선",
-      "resolution": "discovery.py의 sign=1 진단 스코어링에는 vol-normalized 신호를 유지했으나, 실전 slow_momentum/blend 북(_book_weights/_phase_diagnostics)에 배선한 버전은 전체 2021-2025 리플레이에서 CAPITAL_INVARIANT_BREACH를 일으켜(이중 vol-scaling 제거로도 미해결, 2021-2024 누적손실이 raw보다 깊음을 확인) raw horizon_log_return으로 원복. 최종 상태는 7차 baseline과 수치까지 동일(+0.4317 Sharpe, blend.failure=None)함을 실측 재확인",
-      "impact": "Research GO는 여전히 FALSE(7차와 동일 판정). discovery-gate 진단은 momentum worst-year net_t +0.493→+0.673 개선 유지, 실전 자본에는 영향 없음. execution.py의 CAPITAL_INVARIANT_BREACH 에러 메시지에 timestamp/pre_trade_equity 진단 정보 추가(영구 개선)"
-    },
-    {
-      "task_id": "ADR_20260811_MHS_REALISTIC_EXECUTION_PRIMARY_SWAP",
-      "date": "2026-08-11",
-      "adr_id": "ADR_20260811_MHS_REALISTIC_EXECUTION_PRIMARY_SWAP",
-      "domain": "mhs",
-      "title": "MHS Research-GO primary를 realistic immediate-taker로 교체",
-      "why": "30분 patient-proxy 타임아웃이 로스터 전체 동시 taker 폴백을 유발해 primary_autocorr_sharpe -1.837의 원인이었음을 실측 규명; 참여율 1e-9 수준이라 대기의 시장충격 회피 근거가 없음",
-      "resolution": "primary를 OHLCV_IMMEDIATE_TAKER로, stress를 동일 체결×3비용(SPREAD_AND_COST_X3)으로 교체하고 구 strict-proxy는 patient_reference 진단 필드로 격하; 5년 전체 재실행 실측(primary_autocorr_sharpe=+0.432, MDD=-45.7%, stress_naive=+0.025, patient_reference_naive=-0.691)",
-      "impact": "Research GO는 여전히 FALSE(floor 0.6 미달, folds_passed=1/3) — 실행 모델링 오류는 제거됐으나 신호 자체의 개선은 아직 필요"
     }
   ]
 }
