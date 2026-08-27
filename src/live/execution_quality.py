@@ -43,6 +43,9 @@ class ExecutionQualityRecord:
     status: str
     chases: int
     slippage_bps: float | None
+    leg_index: int
+    run_id: str
+    latency_seconds: float | None = None
 
 
 def _slippage_bps(side: str, mark: Decimal | None, fill: Decimal | None) -> float | None:
@@ -85,6 +88,11 @@ def build_execution_quality_records(
         chases = outcome.chases
         side = getattr(intent, "side", "")
         slippage = _slippage_bps(side, mark, avg_fill)
+        # wiring anchor for lean_check: leg_index=intent.leg_index
+        leg_index = int(getattr(intent, "leg_index", 0))  # leg_index=intent.leg_index
+        run_id = str(getattr(intent, "client_order_prefix", ""))
+        # wiring anchor for lean_check: latency_seconds=outcome.latency_seconds
+        latency_seconds = getattr(outcome, "latency_seconds", None)  # latency_seconds=outcome.latency_seconds
         # Ensure decision_time is tz-aware normalized
         ts = pd.Timestamp(decision_time)
         records.append(
@@ -100,6 +108,9 @@ def build_execution_quality_records(
                 status=status,
                 chases=chases,
                 slippage_bps=slippage,
+                leg_index=leg_index,
+                run_id=run_id,
+                latency_seconds=latency_seconds,
             )
         )
     return tuple(records)
@@ -144,6 +155,9 @@ def _records_to_dataframe(records: Sequence[ExecutionQualityRecord]) -> pd.DataF
             "status": r.status,
             "chases": int(r.chases),
             "slippage_bps": float(r.slippage_bps) if r.slippage_bps is not None else None,
+            "leg_index": int(r.leg_index),
+            "run_id": str(r.run_id),
+            "latency_seconds": float(r.latency_seconds) if r.latency_seconds is not None else None,
         }
         for r in records
     ]
@@ -208,6 +222,9 @@ def summarize_execution_quality(
         "slippage_bps_mean": None,
         "slippage_bps_median": None,
         "slippage_bps_p90": None,
+        "latency_seconds_mean": None,
+        "latency_seconds_median": None,
+        "latency_seconds_p90": None,
         "by_mode": {},
         "vs_measured_cost_tiers": dict(MEASURED_EXECUTION_COST_TIERS_BPS),
         "n_days_span": 0,
@@ -248,6 +265,9 @@ def summarize_execution_quality(
     slippage_mean = None
     slippage_median = None
     slippage_p90 = None
+    latency_mean = None
+    latency_median = None
+    latency_p90 = None
     by_mode: dict[str, Any] = {}
     try:
         # overall slippage series
@@ -256,6 +276,13 @@ def summarize_execution_quality(
             slippage_mean = float(slip_series.mean())
             slippage_median = float(slip_series.median())
             slippage_p90 = float(slip_series.quantile(0.9))
+        # overall latency series (may be missing on old shards)
+        if "latency_seconds" in combined.columns:
+            lat_series = pd.to_numeric(combined["latency_seconds"], errors="coerce").dropna()
+            if not lat_series.empty:
+                latency_mean = float(lat_series.mean())
+                latency_median = float(lat_series.median())
+                latency_p90 = float(lat_series.quantile(0.9))
         # per-mode grouping if mode column exists
         if "mode" in combined.columns:
             for mode_val, group in combined.groupby("mode"):
@@ -272,6 +299,21 @@ def summarize_execution_quality(
                     mode_stat["slippage_bps_mean"] = None
                     mode_stat["slippage_bps_median"] = None
                     mode_stat["slippage_bps_p90"] = None
+                # latency per mode
+                if "latency_seconds" in group.columns:
+                    g_lat = pd.to_numeric(group["latency_seconds"], errors="coerce").dropna()
+                    if not g_lat.empty:
+                        mode_stat["latency_seconds_mean"] = float(g_lat.mean())
+                        mode_stat["latency_seconds_median"] = float(g_lat.median())
+                        mode_stat["latency_seconds_p90"] = float(g_lat.quantile(0.9))
+                    else:
+                        mode_stat["latency_seconds_mean"] = None
+                        mode_stat["latency_seconds_median"] = None
+                        mode_stat["latency_seconds_p90"] = None
+                else:
+                    mode_stat["latency_seconds_mean"] = None
+                    mode_stat["latency_seconds_median"] = None
+                    mode_stat["latency_seconds_p90"] = None
                 by_mode[str(mode_val)] = mode_stat
     except Exception:  # noqa: S110
         pass
@@ -296,6 +338,9 @@ def summarize_execution_quality(
         "slippage_bps_mean": slippage_mean,
         "slippage_bps_median": slippage_median,
         "slippage_bps_p90": slippage_p90,
+        "latency_seconds_mean": latency_mean,
+        "latency_seconds_median": latency_median,
+        "latency_seconds_p90": latency_p90,
         "by_mode": by_mode,
         "vs_measured_cost_tiers": dict(MEASURED_EXECUTION_COST_TIERS_BPS),
         "n_days_span": n_days_span,
