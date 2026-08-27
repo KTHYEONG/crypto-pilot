@@ -346,6 +346,11 @@ CAUSAL_BETA_LOOKBACK_BARS: int = 720
 CAUSAL_BETA_MIN_PERIODS: int = 360
 
 
+SIGNAL_PANEL_WINDOW_DAYS: int = 120
+SIGNAL_REPLAY_WARMUP_DAYS: int = 30
+SIGNAL_RETURN_TAIL_DAYS: int = 400
+SIGNAL_OVERLAP_TOLERANCE: float = 1e-9
+
 # Sentinel distinguishing the registered default exposure from an explicit
 # committee_target_gross value: a bare MhsDiagnosticRequest() resolves to the
 # registered constant without triggering the committee_capital requirement,

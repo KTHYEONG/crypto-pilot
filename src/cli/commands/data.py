@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from typing import Any
 
 import pandas as pd
 
@@ -95,6 +96,68 @@ def _report_internal_gaps(args: argparse.Namespace) -> None:
     for sym, spans in sorted(gaps.items()):
         for start, end, length in spans:
             _logger.info("internal gap symbol=%s start=%s end=%s length_bars=%d", sym, start, end, length)
+
+
+def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) -> bool:
+    """Best-effort incremental tail top-up for one symbol. ``ensure_ohlcv_data``/
+    ``ensure_funding_data`` are themselves idempotent (they check the existing
+    cache and only fetch the missing tail), so a per-symbol network failure is
+    logged and skipped rather than aborting the whole refresh."""
+    try:
+        collector.ensure_ohlcv_data(symbol, "1h", start, end)
+        collector.ensure_funding_data(symbol, start, end)
+        return True
+    except Exception as exc:  # noqa: BLE001 - one symbol's flakiness must not abort the batch
+        _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)
+        return False
+
+
+def _refresh_live_universe(args: argparse.Namespace) -> None:
+    """Incremental tail top-up: 1h/funding for every cached dev symbol, then
+    the 3m roster for the deployed execution universe. 1h/funding MUST run
+    first -- ``build_mhs_execution_plan`` ranks the roster by trailing 1h
+    quote volume, so a stale 1h panel silently picks a stale roster."""
+    import concurrent.futures
+    import glob
+    import os
+    import time
+
+    from src.common.config import FUTURES_DATA_DIR
+    from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS
+
+    t0 = time.perf_counter()
+    now = pd.Timestamp.now(tz="UTC")
+    start = now - pd.Timedelta(days=SIGNAL_PANEL_WINDOW_DAYS)
+
+    ohlcv_paths = sorted(glob.glob(str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet")))
+    symbols = [os.path.basename(p).removesuffix(".parquet") for p in ohlcv_paths]
+
+    from src.market_data.services.futures_collection import DataCollector
+
+    collector = DataCollector()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(
+            pool.map(
+                lambda sym: _refresh_one_symbol_tail(collector, sym, str(start), str(now)), symbols,
+            )
+        )
+    failures = sum(1 for ok in results if not ok)
+
+    from src.application.data.mhs_execution_collection import (
+        build_mhs_execution_plan,
+        collect_mhs_execution_data,
+    )
+
+    exec_size = int(getattr(args, "execution_universe_size", 60) or 60)
+    plan = build_mhs_execution_plan(str(start), str(now), timeframe="3m", execution_universe_size=exec_size)
+    collect_mhs_execution_data(plan, execute=True, workers=2)
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    _logger.info(
+        "[DATA] stage=refresh_live_universe ohlcv_symbols=%d funding_symbols=%d roster_symbols=%d "
+        "failures=%d elapsed_ms=%d",
+        len(symbols), len(symbols), len(plan.symbols), failures, elapsed_ms,
+    )
 
 
 def _repair_spot_gap(args: argparse.Namespace) -> None:
@@ -207,3 +270,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     report_gaps.add_argument("--start", default="2019-01-01")
     report_gaps.add_argument("--end", required=True)
     report_gaps.set_defaults(handler=_report_internal_gaps)
+
+    # wiring: refresh.set_defaults(handler=_refresh_live_universe)
+    refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h/funding + 3m roster)")
+    refresh.set_defaults(handler=_refresh_live_universe)

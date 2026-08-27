@@ -95,6 +95,9 @@ class HttpResponse:
     body: bytes
 
 
+_RATE_LIMIT_INTERVAL_SECONDS: Mapping[str, int] = {"SECOND": 1, "MINUTE": 60, "HOUR": 3600, "DAY": 86400}
+
+
 @dataclass(frozen=True, slots=True)
 class RateLimits:
     """exchangeInfo.rateLimits 에서 파싱한 거래소 공식 한도(추정 금지)."""
@@ -115,14 +118,29 @@ def parse_rate_limits(exchange_info: Mapping[str, Any]) -> RateLimits:
     for entry in rate_limits:
         if not isinstance(entry, dict):
             continue
-        filter_type = entry.get("filterType")
+        rate_limit_type = entry.get("rateLimitType")
         interval = entry.get("interval")
+        interval_num = entry.get("intervalNum")
         limit = entry.get("limit")
-        if filter_type == "REQUEST_WEIGHT" and interval == "1m" and limit is not None:
+        if rate_limit_type not in ("REQUEST_WEIGHT", "ORDERS"):
+            continue
+        if not isinstance(interval, str):
+            continue
+        seconds_per = _RATE_LIMIT_INTERVAL_SECONDS.get(str(interval).upper())
+        if seconds_per is None:
+            continue
+        try:
+            interval_num_int = int(interval_num)  # type: ignore[arg-type]
+        except Exception:  # noqa: S112
+            continue
+        window_seconds = interval_num_int * seconds_per
+        if limit is None:
+            continue
+        if rate_limit_type == "REQUEST_WEIGHT" and window_seconds == 60 and weight_1m is None:
             weight_1m = int(limit)
-        elif filter_type == "ORDERS" and interval == "1m" and limit is not None:
+        elif rate_limit_type == "ORDERS" and window_seconds == 60 and orders_1m is None:
             orders_1m = int(limit)
-        elif filter_type == "ORDERS" and interval == "10s" and limit is not None:
+        elif rate_limit_type == "ORDERS" and window_seconds == 10 and orders_10s is None:
             orders_10s = int(limit)
     if weight_1m is None or orders_1m is None or orders_10s is None:
         raise DataIntegrityError(
@@ -300,7 +318,7 @@ class BinanceFuturesRestClient:
         method = method.upper()
         base_params = dict(params or {})
 
-        if self._mode in (ExecutionMode.SHADOW, ExecutionMode.PAPER) and method != "GET":
+        if self._mode.suppresses_mutations and method != "GET":
             if path not in SHADOW_ALLOWED_MUTATIONS:
                 digest = payload_digest(repr(base_params))
                 self._audit.record_suppressed(method, path, base_params)
