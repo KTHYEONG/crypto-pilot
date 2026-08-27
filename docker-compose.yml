@@ -10,7 +10,23 @@ services:
       # 원장/데몬 상태와 감사로그는 호스트에 보존된다(재배포 생존).
       - ./data/state:/app/data/state
       - ./logs:/app/logs
+      - ./docs/results/mhs_horizon_diagnostic_artifacts:/app/docs/results/mhs_horizon_diagnostic_artifacts:ro
     mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+  mhs-signal:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/crypto-pilot-live:latest
+    container_name: mhs-signal-refresh
+    restart: "no"
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./docs/results/mhs_horizon_diagnostic_artifacts:/app/docs/results/mhs_horizon_diagnostic_artifacts
+    mem_limit: 1g
+    command: ["sh", "-c", "uv run python -m src.cli.main data refresh-live-universe && uv run python -m src.cli.main live signal-refresh"]
     logging:
       driver: json-file
       options:

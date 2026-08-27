@@ -87,6 +87,131 @@ def emit_deployed_target_weights(
     return {"path": str(path), "rows": rows, "sealed": False}
 
 
+def emit_signal_state(
+    report: MhsHorizonDiagnosticReport,
+    request: MhsDiagnosticRequest,
+    artifact_root: Path,
+    *,
+    artifact_key: SecretStr | None = None,
+) -> dict[str, Any]:
+    """Bootstrap seam: persist the signal state beside the deployed weights.
+
+    Extracts frozen params from the completed report, the deadband held row
+    as the last row of report.blend.target_weights, and the
+    SIGNAL_RETURN_TAIL_DAYS tail of the blend replay's reference daily returns.
+    """
+    from src.common.errors import DataIntegrityError
+    from src.mhs.params import COMMITTEE_MEMBER_SETS, SIGNAL_RETURN_TAIL_DAYS
+    from src.mhs.signal_state import (
+        BOUND_FLAGS,
+        FrozenSignalParams,
+        SignalState,
+        compute_flags_digest,
+        compute_params_digest,
+        save_signal_state,
+    )
+
+    if report.blend is None or getattr(report.blend, "target_weights", None) is None:
+        raise DataIntegrityError("emit_signal_state requires a completed blend replay with target_weights")
+    tw = report.blend.target_weights
+    if tw is None or tw.empty:
+        raise DataIntegrityError("emit_signal_state requires a completed blend replay with target_weights")
+    primary = getattr(report.blend, "primary", None)
+    if primary is None or getattr(primary, "ledger", None) is None:
+        raise DataIntegrityError("emit_signal_state requires a completed blend replay with primary ledger")
+    last_decision_time = pd.Timestamp(tw.index[-1])
+    if last_decision_time.tzinfo is None:
+        raise DataIntegrityError("blend target_weights index must be tz-aware")
+    last_decision_time = last_decision_time.tz_convert("UTC")
+    held_row = {str(k): float(v) for k, v in tw.iloc[-1].items()}
+
+    # reference daily returns from unscaled book replay -- I-REFERENCE-FIDELITY:
+    # the SAME call the backtest uses (evaluation.py:2311-2316), never a proxy model.
+    equity = primary.ledger.equity
+    ref_returns = equity.resample("1D").last().pct_change().dropna()
+    tail = ref_returns.tail(SIGNAL_RETURN_TAIL_DAYS)
+    if not tail.empty and tail.index.tz is None:
+        tail.index = tail.index.tz_localize("UTC")
+
+    slow_horizon_raw = getattr(report.blend, "horizon_hours", None)
+    if slow_horizon_raw is None:
+        raise DataIntegrityError("emit_signal_state requires report.blend.horizon_hours")
+    slow_horizon = int(slow_horizon_raw)
+
+    # I-MEMBER-PARITY premise: with coverage_cutoff=COMMITTEE_OOS_START a rolling
+    # window entirely after that boundary admits every member of the pinned set
+    # unconditionally (feature_coverage_audit on an empty pre-cutoff slice
+    # returns {}), so the deployed admitted set IS the full registered member
+    # set keyed by the deployed committee_member_set -- never inferred from a
+    # diagnostic field that may be absent (committee_diagnostic is None on the
+    # deployed COMPACT report).
+    member_set_key = request.committee_member_set
+    if member_set_key not in COMMITTEE_MEMBER_SETS:
+        raise DataIntegrityError(
+            f"emit_signal_state: unregistered committee_member_set {member_set_key!r}"
+        )
+    admitted = tuple(COMMITTEE_MEMBER_SETS[member_set_key])
+    member_weights = {m: 1.0 / len(admitted) for m in admitted}
+
+    from src.mhs.params import GROWTH_RISK_ENVELOPES
+
+    envelope = GROWTH_RISK_ENVELOPES.get(str(request.growth_envelope))
+    if envelope is None:
+        raise DataIntegrityError(
+            f"emit_signal_state: unregistered growth_envelope {request.growth_envelope!r}"
+        )
+    from src.application.research.mhs.research_go import _resolved_committee_target_gross
+    from src.application.research.mhs.scaling import _growth_budget_target_vol, resolved_exposure_cap
+
+    gbtv = float(_growth_budget_target_vol(ref_returns, envelope=envelope))
+    exp_cap = float(resolved_exposure_cap(request))
+
+    # digests -- BOUND_FLAGS values are captured RESOLVED (never the raw
+    # COMMITTEE_TARGET_GROSS_UNSET sentinel object, which is not JSON-safe and
+    # is not what the strategy actually uses at runtime).
+    params_digest = compute_params_digest()
+    deployed_flags: dict[str, Any] = {}
+    for name in BOUND_FLAGS:
+        if not hasattr(request, name):
+            raise DataIntegrityError(f"emit_signal_state: request missing bound flag {name!r}")
+        value = _resolved_committee_target_gross(request) if name == "committee_target_gross" else getattr(request, name)
+        deployed_flags[name] = value
+    flags_digest = compute_flags_digest(deployed_flags)
+
+    frozen = FrozenSignalParams(
+        slow_horizon_hours=slow_horizon,
+        committee_member_weights=dict(member_weights),
+        admitted_members=tuple(admitted),
+        growth_budget_target_vol=gbtv,
+        exposure_cap=exp_cap,
+        growth_envelope=str(request.growth_envelope),
+        execution_universe_size=int(request.execution_universe_size),
+        pnl_vol_target_mode=str(request.pnl_vol_target_mode),
+        deployed_flags=deployed_flags,
+    )
+
+    state = SignalState(
+        schema_version=1,
+        params_digest=params_digest,
+        flags_digest=flags_digest,
+        frozen=frozen,
+        last_decision_time=last_decision_time,
+        held_target_row=held_row,
+        reference_daily_returns=tail,
+    )
+
+    artifact_root = Path(artifact_root)
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    dest = artifact_root / "signal_state.json"
+    saved = save_signal_state(dest, state, artifact_key=artifact_key)
+    return {
+        "path": str(saved),
+        "sealed": bool(artifact_key is not None),
+        "last_decision_time": last_decision_time.isoformat(),
+        "n_reference_returns": len(tail),
+    }
+
+
 def persist_mhs_report(
     report: MhsHorizonDiagnosticReport,
     target: str | Path,
