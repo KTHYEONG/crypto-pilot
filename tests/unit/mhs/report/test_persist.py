@@ -130,6 +130,87 @@ def test_persist_mhs_report_signature_unchanged_without_flag() -> None:
     signature = inspect.signature(persist_mhs_report)
     assert "emit_target_weights" not in signature.parameters
 
+
+def test_SCENARIO_SIGNAL_09_EMIT_SIGNAL_STATE_BOOTSTRAP_SEAM(tmp_path: Path) -> None:
+    """SCENARIO_SIGNAL_09: emit_signal_state extracts frozen params + carried
+    state from a completed blend replay, and fails closed on an incomplete one."""
+    import dataclasses
+
+    from src.application.research.mhs.contracts import (
+        MhsDiagnosticRequest,
+        MhsHorizonDiagnosticReport,
+        MhsResearchGoResult,
+    )
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evidence import DeploymentReadinessResult
+    from src.mhs.params import SIGNAL_RETURN_TAIL_DAYS
+    from src.mhs.report.persist import emit_signal_state
+    from src.mhs.signal_state import compute_flags_digest, compute_params_digest, load_signal_state
+    from tests.unit.mhs.test_golden_digest import _synthetic_book, _synthetic_fold, _synthetic_replay
+
+    replay = _synthetic_replay(n=600)
+    book_a = dataclasses.replace(_synthetic_book(replay), name="fast_reversal")
+    book_b = dataclasses.replace(_synthetic_book(replay), name="slow_momentum")
+    weights_index = pd.date_range("2026-06-01", periods=10, freq="24h", tz="UTC")
+    blend = dataclasses.replace(
+        _synthetic_book(replay), name="blend", horizon_hours=168,
+        target_weights=pd.DataFrame(
+            {"AAAUSDT": [0.02] * 10, "BUSDT": [-0.02] * 10}, index=weights_index
+        ),
+    )
+    folds = tuple(_synthetic_fold(i, replay) for i in range(2))
+    report = MhsHorizonDiagnosticReport(
+        feature="multi_horizon_market_state", status="COMPLETE", start="2021-01-01",
+        end="2026-06-30", resolved_end="2026-06-30", partition="dev",
+        execution_tiers_bps=(2.5, 5.0), books={"fast_reversal": book_a, "slow_momentum": book_b},
+        blend=blend,
+        blend_target_gross=0.9, blend_cash_fraction=0.1, eligible_symbols=2,
+        trials_attempted=1, deflated_sharpe_ratio=None, xs_rank_ic={},
+        date_clustered_regression={}, horizon_diagnostics={}, bootstrap_ci=None,
+        placebo_sharpe_percentile=None,
+        deployment_readiness=DeploymentReadinessResult(
+            0.01, -0.01, 1.0, -0.01, -0.01, -0.01, -0.01, 0, None, 0.5, 0.0, 0.0, {}, {},
+            {}, False, False, False, False,
+        ),
+        synthetic_stress={}, participation_warnings={}, termination_counts={},
+        unsupported_assumptions=(), anchored_folds=(), folds=folds,
+        research_go=MhsResearchGoResult(False, (), 0, 0),
+        fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="MARK_PRICE",
+        execution_timeframe="1m", execution_universe_size=1,
+        execution_symbols=("A",), run_elapsed_seconds=0.1,
+    )
+    request = MhsDiagnosticRequest(
+        committee_capital=True, committee_evidence_weighting=True, committee_kelly_sizing=True,
+        committee_member_set="flow_momentum", pnl_vol_target_mode="growth_budget",
+        growth_envelope="growth_extreme_budgeted", execution_universe_size=60,
+    )
+
+    result = emit_signal_state(report, request, tmp_path)
+    assert result["path"].endswith("signal_state.json")
+    assert result["sealed"] is False
+    assert result["n_reference_returns"] <= SIGNAL_RETURN_TAIL_DAYS
+
+    state = load_signal_state(Path(result["path"]))
+    assert state.last_decision_time == weights_index[-1]
+    assert state.held_target_row == {"AAAUSDT": pytest.approx(0.02), "BUSDT": pytest.approx(-0.02)}
+    assert len(state.reference_daily_returns) <= SIGNAL_RETURN_TAIL_DAYS
+    assert state.params_digest == compute_params_digest()
+
+    deployed_flags = {
+        name: (0.92 if name == "committee_target_gross" else getattr(request, name))
+        for name in state.frozen.deployed_flags
+    }
+    assert state.flags_digest == compute_flags_digest(deployed_flags)
+
+    no_blend_report = dataclasses.replace(report, blend=None)
+    with pytest.raises(DataIntegrityError):
+        emit_signal_state(no_blend_report, request, tmp_path)
+
+    no_weights_blend = dataclasses.replace(blend, target_weights=None)
+    no_weights_report = dataclasses.replace(report, blend=no_weights_blend)
+    with pytest.raises(DataIntegrityError):
+        emit_signal_state(no_weights_report, request, tmp_path)
+
 # ---------------------------------------------------------------------------
 # SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY: run-history passthrough
 # ---------------------------------------------------------------------------
@@ -206,4 +287,5 @@ def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY() -> None:
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_12_DEPLOYED_WEIGHTS_MATCH_REPLAY_FORMULA",
     "SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY",
+    "SCENARIO_SIGNAL_09_EMIT_SIGNAL_STATE_BOOTSTRAP_SEAM",
 )
