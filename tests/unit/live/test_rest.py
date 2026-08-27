@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from src.common.errors import DataIntegrityError
 from src.live.audit import AUDIT_LOG_ROOT, AuditLog, default_audit_log_path
-from src.live.rest import SHADOW_ALLOWED_MUTATIONS, BinanceFuturesRestClient, HttpResponse
+from src.live.rest import SHADOW_ALLOWED_MUTATIONS, BinanceFuturesRestClient, HttpResponse, parse_rate_limits
 from src.live.settings import ExecutionMode
 
 
@@ -85,8 +86,45 @@ class TestShadowChoke:
         assert path.is_relative_to(AUDIT_LOG_ROOT)
         assert "logs" in path.parts
 
+def test_SCENARIO_LIVE_31_RATE_LIMITS_PARSE_CANONICAL_BINANCE_SCHEMA() -> None:
+    """SCENARIO_LIVE_31_RATE_LIMITS_PARSE_CANONICAL_BINANCE_SCHEMA: the parser
+    reads the real rateLimitType/interval/intervalNum shape, not the legacy
+    filterType/'1m' shorthand it never actually receives from Binance."""
+    canonical = {
+        "rateLimits": [
+            {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
+            {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
+            {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300},
+        ]
+    }
+    limits = parse_rate_limits(canonical)
+    assert limits.request_weight_1m == 2400
+    assert limits.orders_1m == 1200
+    assert limits.orders_10s == 300
+
+    legacy_shorthand = {
+        "rateLimits": [
+            {"filterType": "REQUEST_WEIGHT", "interval": "1m", "limit": 2400},
+            {"filterType": "ORDERS", "interval": "1m", "limit": 1200},
+            {"filterType": "ORDERS", "interval": "10s", "limit": 300},
+        ]
+    }
+    with pytest.raises(DataIntegrityError):
+        parse_rate_limits(legacy_shorthand)
+
+    missing_orders_10s = {
+        "rateLimits": [
+            {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
+            {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
+        ]
+    }
+    with pytest.raises(DataIntegrityError):
+        parse_rate_limits(missing_orders_10s)
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_01_SHADOW_BLOCKS_ALL_MUTATIONS",
     "SCENARIO_LIVE_13_NO_NETWORK_IN_UNIT_TESTS",
+    "SCENARIO_LIVE_31_RATE_LIMITS_PARSE_CANONICAL_BINANCE_SCHEMA",
 )
