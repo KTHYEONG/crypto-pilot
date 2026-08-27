@@ -51,6 +51,8 @@ def _smooth_signal_ema(signal: pd.DataFrame, span_steps: int) -> pd.DataFrame:
 def _apply_rebalance_deadband(
     target: pd.DataFrame,
     position_fraction: float = REBALANCE_DEADBAND_POSITION_FRACTION,
+    *,
+    seed_row: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Suppress per-symbol rebalances smaller than a scale-relative deadband.
 
@@ -64,6 +66,14 @@ def _apply_rebalance_deadband(
     targets remain NaN (a delisting is never silently re-expressed), and a held
     NaN resets the deadband so a re-listed symbol trades from its own first
     finite target.
+
+    ``seed_row`` (opt-in, default ``None`` reproduces every existing call
+    byte-identically) lets a caller continue the deadband from an externally
+    carried decision -- e.g. a live daily refresh over a rebuilt rolling
+    window -- instead of resetting at ``target``'s own first row. When given,
+    row 0 is itself deadband-tested against ``seed_row`` (reindexed to
+    ``target.columns``, missing columns filled 0.0) rather than treated as an
+    unconditional decision.
     """
     if position_fraction < 0:
         raise ValueError(f"position_fraction must be >= 0, got {position_fraction}")
@@ -71,9 +81,14 @@ def _apply_rebalance_deadband(
         return target.copy()
     values = target.to_numpy(dtype="float64")
     out = values.copy()
-    held = out[0].copy()
     finite = np.isfinite(values)
-    for i in range(1, len(values)):
+    if seed_row is None:
+        held = out[0].copy()
+        start = 1
+    else:
+        held = seed_row.reindex(target.columns).fillna(0.0).to_numpy(dtype="float64")
+        start = 0
+    for i in range(start, len(values)):
         row = values[i]
         active = np.count_nonzero(np.abs(row) > 0.0)
         min_delta = (

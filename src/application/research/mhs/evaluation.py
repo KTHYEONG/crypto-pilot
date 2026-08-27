@@ -3175,6 +3175,8 @@ def _build_fold_target_weights(
     funding_by_symbol: dict[str, pd.Series],
     slow_horizon_override: int | None = None,
     committee_member_weights: dict[str, float] | None = None,
+    *,
+    deadband_seed_row: pd.Series | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Construct one fold's PIT decision targets with the quality calibration.
 
@@ -3188,6 +3190,14 @@ def _build_fold_target_weights(
     volatility-regime cash scale, and the turnover deadband cap on the final
     blend targets. All objects are local to this builder and released when it
     returns, keeping per-fold peak memory bounded.
+
+    ``deadband_seed_row`` (opt-in, default ``None`` reproduces every existing
+    call byte-identically) threads through to ``_apply_rebalance_deadband`` so
+    a live daily refresh over a rebuilt rolling window continues the deadband
+    from an externally carried decision instead of resetting at this window's
+    own first row (I-DEADBAND-CONTINUITY). Only defined under
+    ``rebalance_filter='per_symbol_deadband'``; combining it with
+    ``'portfolio_trigger'`` raises ``ValueError``.
     """
     ts = fold.train_start
     vs = fold.validation_start
@@ -3367,12 +3377,16 @@ def _build_fold_target_weights(
     del execution_mask
     del log_close
     if request.rebalance_filter == "portfolio_trigger":
+        if deadband_seed_row is not None:
+            raise ValueError("deadband_seed_row requires rebalance_filter='per_symbol_deadband'")
         # Gate the unscaled book, then apply gross scale to preserve de-risking dynamics.
         target_weights = portfolio_rebalance_trigger(
             target_weights, REBALANCE_TRACKING_ERROR_THRESHOLD,
         ).mul(regime_scale, axis=0)
     else:
-        target_weights = _scaling._apply_rebalance_deadband(target_weights.mul(regime_scale, axis=0))
+        target_weights = _scaling._apply_rebalance_deadband(
+            target_weights.mul(regime_scale, axis=0), seed_row=deadband_seed_row,
+        )
 
     if target_weights.empty:
         raise RuntimeError("fold decision grid is empty")

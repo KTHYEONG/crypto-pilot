@@ -14,6 +14,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.live.errors import ReconciliationBreach, RiskGateBreach
+from src.live.settings import ExecutionMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,3 +137,26 @@ def reconcile_or_halt(
                 f"position divergence for {symbol}: venue={venue_qty} "
                 f"ledger={ledger_qty} tolerance={qty_tolerance_fraction}"
             )
+
+
+def assert_suppressed_venue_flat(snapshot: AccountSnapshot) -> None:
+    """억제 모드에서 거래소 포지션이 모두 0임을 증명한다."""
+    non_zero = sorted(
+        symbol for symbol, qty in snapshot.positions.items() if qty != Decimal(0)
+    )
+    if non_zero:
+        raise ReconciliationBreach(
+            f"suppressed venue position non-zero for {', '.join(non_zero)}: "
+            f"venue={snapshot.positions}"
+        )
+
+
+def effective_positions(
+    mode: ExecutionMode,
+    snapshot: AccountSnapshot,
+    ledger_positions: Mapping[str, Decimal],
+) -> Mapping[str, Decimal]:
+    """억제 모드이면 원장을, 라이브이면 거래소 스냅샷을 반환한다."""
+    if mode.suppresses_mutations:
+        return ledger_positions
+    return snapshot.positions
