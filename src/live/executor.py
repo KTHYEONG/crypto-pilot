@@ -87,6 +87,7 @@ class ExecutionOutcome:
     avg_fill_price: Decimal | None
     chases: int
     status: str
+    latency_seconds: float | None = None
 
 
 def _slice_quantities(total: Decimal, slice_count: int, step_size: Decimal) -> list[Decimal]:
@@ -317,6 +318,7 @@ class _IntentRuntime:
     attempts: int = 0
     ioc_attempts: int = 0
     posted_at: float = 0.0
+    finalized_at: float = 0.0
     terminal_status: str | None = None
     # PAPER 모드의 가상 활성 주문: 실제 주문이 없으므로 조회/취소가 아니라
     # 시뮬레이터가 이미 반영한 체결로 정산한다.
@@ -334,6 +336,14 @@ class _IntentRuntime:
         else:
             status = "RESIDUAL"
         unfilled = max(self.intent.quantity - self.filled_total, _ZERO)
+        latency = (
+            (self.finalized_at - self.posted_at)
+            if self.posted_at > 0.0 and self.finalized_at > 0.0
+            else None
+        )
+        # Guard against spurious negative due to clock skew (contract I-LATENCY-NONNEGATIVE).
+        if latency is not None and latency < 0.0:
+            latency = 0.0
         return ExecutionOutcome(
             symbol=self.intent.symbol,
             filled_qty=self.filled_total,
@@ -343,6 +353,7 @@ class _IntentRuntime:
             ),
             chases=self.chases,
             status=status,
+            latency_seconds=latency,
         )
 
 
@@ -434,7 +445,7 @@ def _run_loop(
         # R1: 모든 tick 은 sleep 으로 끝난다(busy-wait 금지).
         sleep_fn(interval)
 
-    _finalize(client, live, audit)
+    _finalize(client, live, audit, clock)
 
 
 def _throttled_interval(
@@ -480,6 +491,7 @@ def _poll_or_post(
         _record_fill(rt, executed)
         if rt.intent.quantity - rt.filled_total <= _ZERO:
             rt.terminal_status = "FILLED"
+            rt.finalized_at = now
             return
         if rt.phase == "passive":
             timed_out = now - rt.posted_at >= policy.passive_deadline_s
@@ -505,6 +517,7 @@ def _poll_or_post(
     remaining = rt.intent.quantity - rt.filled_total
     if remaining <= _ZERO:
         rt.terminal_status = "FILLED"
+        rt.finalized_at = now
         return
     if rt.phase == "passive":
         price = _gtx_candidate(
@@ -515,6 +528,7 @@ def _poll_or_post(
         if rt.ioc_attempts >= policy.max_ioc_attempts:
             # 비마케터블/미체결 IOC 재게시 상한: 잔량을 RESIDUAL 로 확정한다.
             rt.terminal_status = "RESIDUAL"
+            rt.finalized_at = now
             return
         price = _capped_ioc_price(
             opposite_touch,
@@ -556,11 +570,13 @@ def _poll_or_post(
         raise
     except OrderObsolete:
         rt.terminal_status = "OBSOLETE"
+        rt.finalized_at = now
         audit.record("intent_obsolete", symbol=rt.intent.symbol, client_order_id=order_id)
         return
     if isinstance(response, ShadowResponse):
         # R8: SHADOW 억제 -> query_order 없이 즉시 종료한다.
         rt.terminal_status = "SHADOW"
+        rt.finalized_at = now
         return
     if isinstance(response, PaperResponse):
         # PAPER 억제: 로컬 시뮬레이터로 체결을 확정하고 chase 루프를 계속
@@ -572,6 +588,10 @@ def _poll_or_post(
             rt.reported_executed = rt.filled_total
             if rt.intent.quantity - rt.filled_total <= _ZERO:
                 rt.terminal_status = "FILLED"
+                # Paper immediate fill: ensure posted_at is stamped so latency is measurable.
+                if rt.posted_at == 0.0:
+                    rt.posted_at = now
+                rt.finalized_at = now
                 audit.record(
                     "paper_filled",
                     symbol=rt.intent.symbol,
@@ -607,11 +627,12 @@ def _poll_or_post(
     )
 
 
-def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog) -> None:
+def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog, clock: Callable[[], float]) -> None:
     """윈도우 종료 시 활성 주문을 정리하고 최종 체결을 확정한다."""
     for rt in runtimes:
         if rt.done:
             continue
+        now = clock()
         if rt.active_id is not None:
             if not rt.paper_active:
                 _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
@@ -623,6 +644,7 @@ def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog) 
             rt.paper_active = False
         if rt.intent.quantity - rt.filled_total > _ZERO:
             rt.terminal_status = "RESIDUAL"
+            rt.finalized_at = now
             audit.record(
                 "order_residual",
                 symbol=rt.intent.symbol,
@@ -630,6 +652,7 @@ def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog) 
             )
         else:
             rt.terminal_status = "FILLED"
+            rt.finalized_at = now
 
 
 def execute_intent(

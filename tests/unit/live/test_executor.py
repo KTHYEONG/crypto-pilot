@@ -654,8 +654,81 @@ def test_SCENARIO_LIVE_28_PAPER_EXERCISES_IOC_BACKSTOP(tmp_path) -> None:
     assert client.sent_cancels == []
 
 
+class OffsetSteppingClock:
+    """0이 아닌 값에서 시작하는 단조 증가 시계.
+
+    posted_at/finalized_at 는 0.0 을 '미설정' 센티널로 쓰므로(I-LATENCY-NONE-WHEN-UNPOSTED),
+    실제로 게시가 일어난 tick 이 0.0 과 우연히 겹치지 않도록 양수 오프셋에서 시작한다.
+    """
+
+    def __init__(self, start: float, step: float) -> None:
+        self._t = start - step
+        self._step = step
+
+    def __call__(self) -> float:
+        self._t += self._step
+        return self._t
+
+
+def test_SCENARIO_EXECUTOR_LATENCY_NONNEGATIVE_ON_FILL(tmp_path) -> None:
+    """PAPER 체결 시 latency_seconds 가 채워지고 항상 0 이상이다."""
+    paper_client = PaperStubClient(touches=[("100.00", "99.50")])
+    outcome = execute_intent(
+        paper_client,
+        _intent(),
+        _filters(tick_size="0.01"),
+        _policy(),
+        AuditLog(tmp_path / "latency_fill.jsonl"),
+        OffsetSteppingClock(1000.0, 3.0),
+    )
+    assert outcome.status == "FILLED"
+    assert outcome.latency_seconds is not None
+    assert outcome.latency_seconds >= 0.0
+
+
+def test_SCENARIO_EXECUTOR_LATENCY_NONE_WHEN_NEVER_POSTED(tmp_path) -> None:
+    """filters 맵에 심볼 엔트리가 없으면 즉시 RESIDUAL 확정되고 posted_at 은 결코
+    설정되지 않으므로 latency_seconds 는 반드시 None 이다."""
+    client = StubClient()
+    outcomes = execute_intents(
+        client,
+        [_intent()],
+        {},  # AAAUSDT 엔트리 부재 -> rt.filters is None -> 즉시 RESIDUAL
+        _policy(),
+        AuditLog(tmp_path / "latency_unposted.jsonl"),
+        lambda: 0.0,
+        lambda _seconds: None,
+    )
+    assert outcomes[0].status == "RESIDUAL"
+    assert outcomes[0].filled_qty == Decimal(0)
+    assert outcomes[0].latency_seconds is None
+    assert client.orders == []
+
+
+def test_SCENARIO_EXECUTOR_FINALIZE_RESIDUAL_HAS_LATENCY(tmp_path) -> None:
+    """게시는 됐지만(posted_at > 0) window_deadline_s 안에 체결되지 않아 _finalize 가
+    RESIDUAL 로 정산하는 경로: _finalize 에 새로 배선된 clock 이 finalized_at 을
+    찍어 latency_seconds 가 관측 가능해야 한다."""
+    client = StubClient()
+    outcome = execute_intent(
+        client,
+        _intent(),
+        _filters(),
+        _policy(window_deadline_s=7200.0),
+        AuditLog(tmp_path / "latency_finalize.jsonl"),
+        OffsetSteppingClock(1000.0, 2500.0),
+    )
+    assert outcome.status == "RESIDUAL"
+    assert outcome.unfilled_qty > 0
+    assert outcome.latency_seconds is not None
+    assert outcome.latency_seconds >= 0.0
+
+
 COVERED_SCENARIOS = (
     *COVERED_SCENARIOS,
     "SCENARIO_LIVE_27_PAPER_FILLS_WITHOUT_SENDING_ORDERS",
     "SCENARIO_LIVE_28_PAPER_EXERCISES_IOC_BACKSTOP",
+    "SCENARIO_EXECUTOR_LATENCY_NONNEGATIVE_ON_FILL",
+    "SCENARIO_EXECUTOR_LATENCY_NONE_WHEN_NEVER_POSTED",
+    "SCENARIO_EXECUTOR_FINALIZE_RESIDUAL_HAS_LATENCY",
 )
