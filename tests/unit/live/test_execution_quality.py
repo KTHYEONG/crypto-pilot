@@ -22,7 +22,7 @@ from src.live.audit import AUDIT_LOG_RETENTION_DAYS
 from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS
 
 
-def _intent(symbol: str, side: str, qty: str = "1.0") -> OrderIntent:
+def _intent(symbol: str, side: str, qty: str = "1.0", *, leg_index: int = 0, client_order_prefix: str = "20260101") -> OrderIntent:
     return OrderIntent(
         symbol=symbol,
         side=side,
@@ -30,8 +30,8 @@ def _intent(symbol: str, side: str, qty: str = "1.0") -> OrderIntent:
         reduce_only=False,
         target_qty=Decimal(qty),
         current_qty=Decimal("0"),
-        client_order_prefix="20260101",
-        leg_index=0,
+        client_order_prefix=client_order_prefix,
+        leg_index=leg_index,
         decision_price=Decimal("100"),
     )
 
@@ -228,6 +228,81 @@ def test_execution_quality_shard_constants_reference_run_history() -> None:
     assert eq_mod.EXECUTION_QUALITY_SHARD_MAX_BYTES == RUN_HISTORY_SHARD_MAX_BYTES
     assert eq_mod.EXECUTION_QUALITY_MAX_SHARDS == RUN_HISTORY_MAX_SHARDS
 
+def test_SCENARIO_EXECUTOR_REVERSAL_LEGS_HAVE_DISTINCT_LEG_INDEX() -> None:
+    """반전(reversal) 분해로 같은 심볼에 두 intent(청산=0, 신규=1)가 생겨도
+    leg_index 로 항상 구분 가능해야 한다(I-LEG-DISAMBIGUATION)."""
+    dt = pd.Timestamp("2026-01-01 00:00Z")
+    weights = pd.Series({"BTCUSDT": 0.1})
+    marks = {"BTCUSDT": Decimal("100")}
+    close_leg = _intent("BTCUSDT", "SELL", leg_index=0)
+    open_leg = _intent("BTCUSDT", "SELL", leg_index=1)
+    outcomes = [
+        ExecutionOutcome(symbol="BTCUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED"),
+        ExecutionOutcome(symbol="BTCUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED"),
+    ]
+    records = build_execution_quality_records(dt, "paper", weights, marks, [close_leg, open_leg], outcomes)
+    assert len(records) == 2
+    assert records[0].leg_index == 0
+    assert records[1].leg_index == 1
+    keys = {(r.symbol, r.leg_index) for r in records}
+    assert len(keys) == 2
+
+
+def test_SCENARIO_EXECUTOR_RUN_ID_MATCHES_CLIENT_ORDER_PREFIX() -> None:
+    """ExecutionQualityRecord.run_id 는 intent.client_order_prefix 를 그대로 옮긴다
+    (raw 감사로그 조인 키)."""
+    dt = pd.Timestamp("2026-01-01 00:00Z")
+    weights = pd.Series({"BTCUSDT": 0.1})
+    marks = {"BTCUSDT": Decimal("100")}
+    intent = _intent("BTCUSDT", "BUY", client_order_prefix="20260101")
+    outcome = ExecutionOutcome(symbol="BTCUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED")
+    records = build_execution_quality_records(dt, "paper", weights, marks, [intent], [outcome])
+    assert records[0].run_id == "20260101"
+
+
+def test_SCENARIO_EXECUTION_QUALITY_SCHEMA_EVOLUTION_NO_MIGRATION(tmp_path: Path) -> None:
+    """leg_index/run_id/latency_seconds 컬럼이 없는 구 스키마 샤드와 신규 스키마
+    레코드가 섞여도 summarize_execution_quality 는 예외 없이 동작하고 반환 dict의
+    최상위 키 집합이 이번 변경 전과 동일해야 한다."""
+    history_dir = tmp_path / "hist_schema_evolution"
+    history_dir.mkdir(parents=True)
+    old_schema_df = pd.DataFrame([
+        {
+            "decision_time": "2026-01-01T00:00:00+00:00",
+            "symbol": "OLDUSDT",
+            "mode": "paper",
+            "target_weight": 0.1,
+            "mark_price_at_decision": "100",
+            "avg_fill_price": "100.1",
+            "filled_qty": "1",
+            "unfilled_qty": "0",
+            "status": "FILLED",
+            "chases": 0,
+            "slippage_bps": 10.0,
+            # leg_index/run_id/latency_seconds 컬럼 부재 -> 구 스키마 시뮬레이션
+        }
+    ])
+    old_schema_df.to_parquet(history_dir / "active.parquet", index=False, compression="snappy")
+
+    dt = pd.Timestamp("2026-04-01 00:00Z")
+    weights = pd.Series({"NEWUSDT": 0.1})
+    marks = {"NEWUSDT": Decimal("100")}
+    intent = _intent("NEWUSDT", "BUY")
+    outcome = ExecutionOutcome(symbol="NEWUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.2"), chases=0, status="FILLED")
+    records = build_execution_quality_records(dt, "paper", weights, marks, [intent], [outcome])
+    append_execution_quality(records, history_dir)
+
+    summary = summarize_execution_quality(history_dir)
+    expected_keys = {
+        "n_cycles", "n_fill_records", "fill_rate",
+        "slippage_bps_mean", "slippage_bps_median", "slippage_bps_p90",
+        "latency_seconds_mean", "latency_seconds_median", "latency_seconds_p90",
+        "by_mode", "vs_measured_cost_tiers", "n_days_span", "sufficient_evidence",
+    }
+    assert set(summary.keys()) == expected_keys
+    assert summary["n_cycles"] == 2
+
+
 #: lean_check tracking
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_EXECUTION_QUALITY_SLIPPAGE_SIGN_CONVENTION",
@@ -236,4 +311,7 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_EXECUTION_QUALITY_ARCHIVE_NEVER_DELETES",
     "SCENARIO_LIVE_EXECUTION_QUALITY_SUMMARY_INSUFFICIENT_EVIDENCE",
     "SCENARIO_LIVE_DEPLOYMENT_READINESS_GATES_UNCHANGED",
+    "SCENARIO_EXECUTOR_REVERSAL_LEGS_HAVE_DISTINCT_LEG_INDEX",
+    "SCENARIO_EXECUTOR_RUN_ID_MATCHES_CLIENT_ORDER_PREFIX",
+    "SCENARIO_EXECUTION_QUALITY_SCHEMA_EVOLUTION_NO_MIGRATION",
 )
