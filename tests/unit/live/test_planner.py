@@ -106,9 +106,71 @@ def test_SCENARIO_LIVE_20_flip_legs_are_distinct_and_bounded() -> None:
         assert intent.decision_price == Decimal("100")
 
 
+def test_SCENARIO_LIVE_32_EXIT_ALWAYS_LIQUIDATES_ZERO_TARGET() -> None:
+    """SCENARIO_LIVE_32_EXIT_ALWAYS_LIQUIDATES_ZERO_TARGET: a symbol dropped
+    from targets (weight 0.0) with a held position still gets a reduce_only
+    exit intent for the full held quantity -- plan_orders must iterate the
+    union of targets and current, not targets alone."""
+    filters = {"AAAUSDT": _filters("AAAUSDT")}
+    marks = {"AAAUSDT": Decimal("100")}
+
+    long_exit = plan_orders({}, {"AAAUSDT": Decimal("0.4")}, filters, marks, "run1")
+    assert len(long_exit) == 1
+    intent = long_exit[0]
+    assert intent.symbol == "AAAUSDT"
+    assert intent.side == "SELL"
+    assert intent.quantity == Decimal("0.4")
+    assert intent.reduce_only is True
+    assert intent.leg_index == 0
+
+    short_exit = plan_orders({}, {"AAAUSDT": Decimal("-0.4")}, filters, marks, "run1")
+    assert len(short_exit) == 1
+    mirror = short_exit[0]
+    assert mirror.side == "BUY"
+    assert mirror.quantity == Decimal("0.4")
+    assert mirror.reduce_only is True
+
+
+def test_SCENARIO_LIVE_33_EXIT_ALWAYS_COVERS_DUST_AND_ROSTER_DROPOUT() -> None:
+    """SCENARIO_LIVE_33_EXIT_ALWAYS_COVERS_DUST_AND_ROSTER_DROPOUT: roster
+    dropout, sub-minNotional dust, sub-step dust, and missing filters/marks
+    all resolve per the reduce_only min-notional exemption (I-EXIT-ALWAYS)."""
+    filters = {"AAAUSDT": _filters("AAAUSDT")}
+
+    # (a) roster dropout: AAAUSDT absent from targets entirely.
+    dropout = plan_orders({}, {"AAAUSDT": Decimal("0.4")}, filters, {"AAAUSDT": Decimal("100")}, "run1")
+    assert len(dropout) == 1
+    assert dropout[0].reduce_only is True
+    assert dropout[0].quantity == Decimal("0.4")
+
+    # (b) $2 residual (qty 0.02 @ mark 100, min_notional 5): reduce_only
+    # min-notional exemption still liquidates it.
+    dust_notional = plan_orders(
+        {}, {"AAAUSDT": Decimal("0.02")}, filters, {"AAAUSDT": Decimal("100")}, "run1"
+    )
+    assert len(dust_notional) == 1
+    assert dust_notional[0].reduce_only is True
+    assert dust_notional[0].quantity == Decimal("0.02")
+
+    # (c) sub-step residual (qty 0.0004 < step_size 0.001): unrecoverable
+    # exchange-floor dust, left as 0 intents (not a defect).
+    sub_step = plan_orders(
+        {}, {"AAAUSDT": Decimal("0.0004")}, filters, {"AAAUSDT": Decimal("100")}, "run1"
+    )
+    assert sub_step == []
+
+    # (d) no filters entry or no positive mark: fail-closed, unchanged.
+    no_filters = plan_orders({}, {"BBBUSDT": Decimal("0.4")}, {}, {"BBBUSDT": Decimal("100")}, "run1")
+    assert no_filters == []
+    no_mark = plan_orders({}, {"AAAUSDT": Decimal("0.4")}, filters, {}, "run1")
+    assert no_mark == []
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_05_POSITION_FLIP_SPLITS_INTO_TWO_INTENTS",
     "SCENARIO_LIVE_06_CLIENT_ORDER_ID_DETERMINISTIC_AND_VALID",
     "SCENARIO_LIVE_20",  # FLIP_LEGS_ARE_DISTINCT_AND_BOUNDED
+    "SCENARIO_LIVE_32_EXIT_ALWAYS_LIQUIDATES_ZERO_TARGET",
+    "SCENARIO_LIVE_33_EXIT_ALWAYS_COVERS_DUST_AND_ROSTER_DROPOUT",
 )
