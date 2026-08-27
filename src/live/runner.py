@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -21,7 +21,9 @@ import pandas as pd
 from src.live.account import (
     AccountSnapshot,
     assert_drawdown_within_limit,
+    assert_suppressed_venue_flat,
     assert_venue_configuration,
+    effective_positions,
     fetch_account_snapshot,
     reconcile_or_halt,
     resolve_sizing_equity,
@@ -40,8 +42,21 @@ from src.live.executor import (
     execute_intents,
 )
 from src.live.filters import parse_exchange_filters
-from src.live.ledger import LedgerState, apply_outcomes, default_ledger_path, load_ledger, save_ledger
+from src.live.ledger import (
+    LedgerState,
+    apply_outcomes,
+    compute_fill_cash_flow,
+    default_ledger_path,
+    load_ledger,
+    save_ledger,
+)
 from src.live.planner import OrderIntent, plan_orders
+from src.live.portfolio_state import (
+    PortfolioStateRecord,
+    append_portfolio_state,
+    default_portfolio_state_dir,
+    resolve_effective_equity,
+)
 from src.live.rest import BinanceFuturesRestClient, parse_rate_limits
 from src.live.settings import LiveSettings
 from src.live.signal import assert_signal_available, assert_signal_fresh, latest_target_weights
@@ -142,14 +157,19 @@ def run_shadow_cycle(
 
         # 3) 고아 주문 정리는 재조정 '이전에' 이뤄져야 한다(GTX 잔존 -> 원장 괴리 방지).
         cancel_orphan_orders(order_client, run_id, audit)
-        reconcile_or_halt(snapshot, ledger_positions, qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION)
+        if settings.mode.suppresses_mutations:
+            assert_suppressed_venue_flat(snapshot)
+        else:
+            reconcile_or_halt(snapshot, ledger_positions, qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION)
 
         # 4) I-EQUITY-MTM / I-DD-HALT.
         equity = resolve_sizing_equity(snapshot, Decimal(str(settings.notional_equity_usdt)))
         assert_drawdown_within_limit(equity, ledger_state.equity_high_water_mark, settings.equity_drawdown_halt)
 
         weights = latest_target_weights(artifact_path, decision_time, artifact_key=settings.artifact_key)
-        marks = _marks_from_tickers(market_client, [str(symbol) for symbol in weights.index])
+        current_positions = effective_positions(settings.mode, snapshot, ledger_positions)
+        wanted_symbols = sorted({str(s) for s in weights.index} | set(current_positions))
+        marks = _marks_from_tickers(market_client, wanted_symbols)
 
         targets, dropped = target_quantities(weights, marks, filters, equity)
         for item in dropped:
@@ -172,7 +192,7 @@ def run_shadow_cycle(
             else 0.0
         )
 
-        intents = plan_orders(targets, snapshot.positions, filters, marks, run_id)
+        intents = plan_orders(targets, current_positions, filters, marks, run_id)
 
         # 사이클 수준 리스크 게이트를 먼저 검사한다(부분 집행 금지).
         check_risk_gates(intents, targets, marks, snapshot, settings, equity)
@@ -180,6 +200,9 @@ def run_shadow_cycle(
         # 종목별 노셔널 상한: 초과 심볼만 드롭한다(비중 재분배 없음).
         kept: list[OrderIntent] = []
         for intent in intents:
+            if intent.reduce_only:
+                kept.append(intent)
+                continue
             mark = marks.get(intent.symbol)
             if mark is not None and abs(intent.quantity * mark) / equity > Decimal(
                 str(settings.max_symbol_notional_fraction)
@@ -188,13 +211,33 @@ def run_shadow_cycle(
                 continue
             kept.append(intent)
 
+        for sym, reason in _uncovered_positions(current_positions, targets, filters, marks, kept):
+            with contextlib.suppress(Exception):
+                audit.record("position_uncovered", symbol=sym, reason=reason)
+
         policy = PassiveExecutionPolicy()
         try:
             outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits))
         except LiveTradingError as exc:
-            _persist_confirmed_fills(ledger_path, ledger_state, kept, _partial_outcomes(exc), equity)
+            _persist_confirmed_fills(
+                ledger_path,
+                ledger_state,
+                kept,
+                _partial_outcomes(exc),
+                equity,
+                track_cash=settings.mode.suppresses_mutations,
+                starting_capital=Decimal(str(settings.notional_equity_usdt)),
+            )
             raise
-        _persist_confirmed_fills(ledger_path, ledger_state, kept, outcomes, equity)
+        final_state = _persist_confirmed_fills(
+            ledger_path,
+            ledger_state,
+            kept,
+            outcomes,
+            equity,
+            track_cash=settings.mode.suppresses_mutations,
+            starting_capital=Decimal(str(settings.notional_equity_usdt)),
+        )
         execution_quality_dir = Path(settings.execution_quality_dir) if settings.execution_quality_dir else default_execution_quality_dir()
         try:
             records = build_execution_quality_records(decision_time, settings.mode.value, weights, marks, kept, outcomes)
@@ -203,6 +246,33 @@ def run_shadow_cycle(
             with contextlib.suppress(Exception):
                 audit.record("execution_quality_write_failed", error=str(exc))
             logger.warning("[SYS] execution_quality write failed error=%s", exc)
+        try:
+            equity_eff, equity_source = resolve_effective_equity(settings.mode, equity, final_state.cash_usdt, final_state.positions, marks)
+            gross_notional = sum(
+                (abs(qty * marks[symbol]) for symbol, qty in final_state.positions.items() if symbol in marks),
+                Decimal(0),
+            )
+            n_holdings = sum(1 for qty in final_state.positions.values() if qty != 0)
+            portfolio_record = PortfolioStateRecord(
+                decision_time=decision_time,
+                mode=settings.mode.value,
+                equity_usdt=float(equity_eff),
+                equity_source=equity_source,
+                cash_usdt=float(final_state.cash_usdt) if final_state.cash_usdt is not None else None,
+                wallet_balance_usdt=float(snapshot.wallet_balance) if snapshot.wallet_balance is not None else None,
+                unrealized_pnl_usdt=float(snapshot.unrealized_pnl) if snapshot.unrealized_pnl is not None else None,
+                equity_high_water_mark_usdt=float(final_state.equity_high_water_mark),
+                gross_notional_usdt=float(gross_notional),
+                n_holdings=int(n_holdings),
+                intent_count=len(outcomes),
+                dropped_notional_fraction=float(dropped_fraction),
+            )
+            portfolio_dir = Path(settings.portfolio_state_dir) if settings.portfolio_state_dir else default_portfolio_state_dir()
+            append_portfolio_state(portfolio_record, portfolio_dir)
+        except Exception as exc:  # noqa: BLE001 - observability-only, never halts cycle
+            with contextlib.suppress(Exception):
+                audit.record("portfolio_state_write_failed", error=str(exc))
+            logger.warning("[SYS] portfolio_state write failed error=%s", exc)
 
         report = CycleReport(
             status="COMPLETE",
@@ -224,6 +294,33 @@ def run_shadow_cycle(
         )
 
 
+def _uncovered_positions(
+    current: Mapping[str, Decimal],
+    targets: Mapping[str, Decimal],
+    filters: Mapping[str, Any],
+    marks: Mapping[str, Decimal],
+    intents: Sequence[OrderIntent],
+) -> list[tuple[str, str]]:
+    """보유 중 청산 불가 위험을 감지한다. 순수 함수, never raises."""
+    covered = {i.symbol for i in intents}
+    result: list[tuple[str, str]] = []
+    for symbol, qty in current.items():
+        if qty == Decimal(0):
+            continue
+        if symbol in covered:
+            continue
+        target = targets.get(symbol, Decimal(0))
+        if target == qty:
+            continue
+        if symbol not in filters:
+            result.append((symbol, "no_filters"))
+        elif symbol not in marks:
+            result.append((symbol, "no_mark"))
+        else:
+            continue
+    return result
+
+
 def _partial_outcomes(exc: LiveTradingError) -> list[ExecutionOutcome]:
     """execute_intents 가 부분 체결을 예외에 붙여 재전파한 경우 회복한다."""
     partial = exc.partial_outcomes or ()
@@ -236,24 +333,34 @@ def _persist_confirmed_fills(
     intents: Sequence[OrderIntent],
     outcomes: Sequence[ExecutionOutcome],
     equity: Decimal,
-) -> None:
+    *,
+    track_cash: bool = False,
+    starting_capital: Decimal = Decimal(0),
+) -> LedgerState:
     """확인된 체결과 단조 증가한 hwm 을 원자적으로 영속한다."""
+    paired_intents = list(intents)[: len(outcomes)]
+    if track_cash:
+        cash_before = base_state.cash_usdt if base_state.cash_usdt is not None else starting_capital
+        cash_usdt: Decimal | None = cash_before + compute_fill_cash_flow(paired_intents, outcomes)
+    else:
+        cash_usdt = None
     if not outcomes:
         # 체결이 없어도 hwm 은 ratchet 한다.
-        save_ledger(
-            ledger_path,
-            LedgerState(positions=dict(base_state.positions), equity_high_water_mark=max(base_state.equity_high_water_mark, equity)),
-        )
-        return
-    paired_intents = list(intents)[: len(outcomes)]
-    updated_positions = apply_outcomes(base_state.positions, paired_intents, outcomes)
-    save_ledger(
-        ledger_path,
-        LedgerState(
-            positions=updated_positions,
+        state = LedgerState(
+            positions=dict(base_state.positions),
             equity_high_water_mark=max(base_state.equity_high_water_mark, equity),
-        ),
+            cash_usdt=cash_usdt,
+        )
+        save_ledger(ledger_path, state)
+        return state
+    updated_positions = apply_outcomes(base_state.positions, paired_intents, outcomes)
+    state = LedgerState(
+        positions=updated_positions,
+        equity_high_water_mark=max(base_state.equity_high_water_mark, equity),
+        cash_usdt=cash_usdt,
     )
+    save_ledger(ledger_path, state)
+    return state
 
 
 def _marks_from_tickers(client: Any, symbols: Sequence[str]) -> dict[str, Decimal]:
@@ -264,7 +371,12 @@ def _marks_from_tickers(client: Any, symbols: Sequence[str]) -> dict[str, Decima
     if callable(batch_getter):
         payload_map = batch_getter()
     else:
-        payload_map = {symbol: client.book_ticker(symbol) for symbol in wanted}
+        payload_map = {}
+        for symbol in wanted:
+            try:
+                payload_map[symbol] = client.book_ticker(symbol)
+            except Exception:  # noqa: S112 - per-symbol fallback, skip failed symbol
+                continue
     marks: dict[str, Decimal] = {}
     for symbol in wanted:
         payload = payload_map.get(symbol)

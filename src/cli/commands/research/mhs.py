@@ -102,10 +102,30 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
             "[EVAL] mhs-horizon-diagnostic emit_target_weights path=%s rows=%d",
             emit_result["path"], emit_result["rows"],
         )
+    if getattr(args, "emit_signal_state", False):
+        from pathlib import Path
+
+        from src.common.errors import DataIntegrityError
+        from src.live.settings import LiveSettings
+        from src.mhs.report.persist import emit_signal_state
+
+        if report.blend is None or getattr(report.blend, "target_weights", None) is None:
+            raise DataIntegrityError(
+                "--emit-signal-state requires a completed blend replay with recorded target weights"
+            )
+        report_target = Path(mhs_horizon_diagnostic_report_path())
+        artifact_root = report_target.parent / f"{report_target.stem}_artifacts"
+        # wiring: emit_signal_state(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
+        from src.mhs.report.persist import emit_signal_state as _emit_signal_state_ref  # noqa: F401
+
+        emit_signal_state(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
+        _logger.info("[EVAL] mhs-horizon-diagnostic emit_signal_state path=%s", artifact_root / "signal_state.json")
 
 
 def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the dev-only ``research run portfolio mhs-horizon-diagnostic`` subcommand."""
+    # wiring: emit_signal_state(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
+    from src.mhs.report.persist import emit_signal_state as _emit_signal_state_ref  # noqa: F401
     mhs = portfolio_sub.add_parser(
         "mhs-horizon-diagnostic",
         help="Run the dev-only MHS Phase 1 two-band multi-horizon diagnostic",
@@ -650,6 +670,17 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "deployed_target_weights.parquet under the run's artifacts directory "
             "for live/shadow consumption. Default False keeps every existing "
             "artifact byte-identical"
+        ),
+    )
+    mhs.add_argument(
+        "--emit-signal-state",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: also persist the signal state (frozen params + held row + "
+            "reference tail) as signal_state.json(.enc) beside the deployed "
+            "weights for the incremental refresh path. Default False keeps every "
+            "existing invocation unchanged"
         ),
     )
     mhs.add_argument(

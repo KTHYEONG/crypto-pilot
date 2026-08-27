@@ -62,8 +62,68 @@ def _run_execution_quality_summary(args: argparse.Namespace) -> None:  # noqa: A
     logger.info("[EVAL] execution_quality %s", summary)
 
 
+def _run_portfolio_state_summary(args: argparse.Namespace) -> None:  # noqa: ARG001
+    from src.live.portfolio_state import summarize_portfolio_state
+
+    summary = summarize_portfolio_state()
+    logger.info("[EVAL] portfolio_state %s", summary)
+
+
+def _run_preflight(args: argparse.Namespace) -> None:
+    from src.live.preflight import run_preflight
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings()
+    report = run_preflight(settings, Path(args.artifact))
+    for check in report.checks:
+        logger.info("[PREFLIGHT] %s passed=%s detail=%s", check.name, check.passed, check.detail)
+    if not report.passed:
+        raise SystemExit(1)
+
+
+def _run_signal_refresh(args: argparse.Namespace) -> None:
+    from src.common.errors import DataIntegrityError
+    from src.live.settings import LiveSettings
+    from src.mhs.signal_refresh import refresh_signal_row
+
+    settings = LiveSettings()
+    # wiring: refresh_signal_row(state_path, Path(args.artifact), args.decision_time, artifact_key=settings.artifact_key)
+    state_path = Path(args.state) if getattr(args, "state", None) else Path("docs/results/mhs_horizon_diagnostic_artifacts/signal_state.json")
+    decision_time = getattr(args, "decision_time", None)
+    if decision_time is None:
+        decision_time = pd.Timestamp.now(tz="UTC").normalize()
+    decision_time = (
+        decision_time.tz_localize("UTC") if decision_time.tzinfo is None else decision_time.tz_convert("UTC")
+    )
+    try:
+        report = refresh_signal_row(
+            state_path, Path(args.artifact), decision_time, artifact_key=settings.artifact_key
+        )
+    except DataIntegrityError as exc:
+        # I-STATE-BINDING/I-OVERLAP-PARITY/I-MEMBER-PARITY failures fail closed;
+        # surface as a clean nonzero exit for a cron/systemd caller instead of
+        # an uncaught traceback.
+        logger.error("[EVAL] signal_refresh status=FAILED reason=%s", exc)
+        raise SystemExit(1) from exc
+    logger.info(
+        "[EVAL] signal_refresh status=%s decision_time=%s n_symbols=%d gross=%.6f exposure_scale=%.6f elapsed_ms=%d",
+        report.status,
+        report.decision_time,
+        report.n_symbols,
+        report.gross_exposure,
+        report.exposure_scale,
+        int(report.elapsed_seconds * 1000),
+    )
+
+
 def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     """``live`` 커맨드 그룹에 shadow-cycle/daemon 서브커맨드를 등록한다."""
+    # wiring: run_preflight(settings, Path(args.artifact))
+    from src.live.preflight import run_preflight as _preflight_ref  # noqa: F401
+
+    # wiring: refresh_signal_row(state_path, Path(args.artifact), args.decision_time, artifact_key=settings.artifact_key)
+    from src.mhs.signal_refresh import refresh_signal_row as _refresh_signal_row_ref  # noqa: F401
+
     subparsers = live_parser.add_subparsers(dest="live_command", required=True)
 
     shadow = subparsers.add_parser("shadow-cycle", help="Run one daily shadow decision cycle")
@@ -104,3 +164,37 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
 
     eq = subparsers.add_parser("execution-quality-summary", help="Summarize execution quality")
     eq.set_defaults(handler=_run_execution_quality_summary)
+
+    portfolio_state = subparsers.add_parser("portfolio-state-summary", help="Summarize portfolio state")
+    portfolio_state.set_defaults(handler=_run_portfolio_state_summary)
+
+    preflight = subparsers.add_parser("preflight", help="Run preflight checks before live trading")
+    preflight.add_argument(
+        "--artifact",
+        type=str,
+        default=_DEFAULT_ARTIFACT,
+        help="Path to the deployed_target_weights.parquet(.enc) artifact to consume (.enc requires LIVE_ARTIFACT_KEY)",
+    )
+    preflight.set_defaults(handler=_run_preflight)
+
+    sig = subparsers.add_parser("signal-refresh", help="Run incremental signal refresh (append one row)")
+    sig.add_argument(
+        "--artifact",
+        type=str,
+        default=_DEFAULT_ARTIFACT,
+        help="Path to the deployed_target_weights.parquet(.enc) artifact to append",
+    )
+    sig.add_argument(
+        "--state",
+        type=str,
+        default="docs/results/mhs_horizon_diagnostic_artifacts/signal_state.json",
+        help="Path to the signal_state.json(.enc) state file",
+    )
+    sig.add_argument(
+        "--decision-time",
+        type=_parse_decision_time,
+        required=False,
+        default=None,
+        help="Decision time T as ISO8601 UTC (default: today 00:00 UTC)",
+    )
+    sig.set_defaults(handler=_run_signal_refresh)
