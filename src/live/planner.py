@@ -54,7 +54,8 @@ def plan_orders(
 ) -> list[OrderIntent]:
     """부호 반대 델타(포지션 반전)는 reduceOnly 청산 후 신규 진입 두 intent로 분해한다."""
     intents: list[OrderIntent] = []
-    for symbol, target in targets.items():
+    for symbol in sorted(set(targets) | set(current)):
+        target = targets.get(symbol, _ZERO)
         symbol_filters = filters.get(symbol)
         mark = marks.get(symbol)
         if symbol_filters is None or mark is None or mark <= 0:
