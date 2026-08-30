@@ -1,6 +1,36 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_LIVE_RECORDS_AND_TAX_LEDGER",
+      "date": "2026-08-30",
+      "adr_id": "ADR_20260830_LIVE_RECORDS_AND_TAX_LEDGER",
+      "domain": "live",
+      "title": "라이브 기록: 타입 스키마·마이크로구조 수집·불변 세무 원장",
+      "why": "execution_quality가 Decimal/시각을 전부 문자열 저장(기인정 안티패턴)해 압축 무력화+방어파싱 강제. _prune_archives가 ~3MB에서 체결증거 영구 삭제. 백테스트가 못얻는 관측치 미수집. 2027 한국 가상자산 과세 대비 원장 부재.",
+      "resolution": "src/live/records.py(타입 월별 파티션), microstructure.py(호가/premiumIndex 수집), tax_ledger.py(워터마크 idempotent 수집, source purity fail-closed, moving_average/fifo 원가). cli/live에 세무 요약 커맨드 추가.",
+      "impact": "증거 불변 보존, 저장효율 회복, 과세 대응 원장 확보"
+    },
+    {
+      "task_id": "TASK_LIVE_DAEMON_RESILIENCE",
+      "date": "2026-08-30",
+      "adr_id": "ADR_20260830_LIVE_DAEMON_RESILIENCE",
+      "domain": "live",
+      "title": "24/7 라이브 데몬 견고성: 체결유실·리밸런스 스킵·영구HALT 경로 제거",
+      "why": "I-LEDGER-DURABLE이 실제로는 좁은 except LiveTradingError뿐이라 OSError/HTTPException/SIGTERM 탈출 시 확인된 체결 유실→다음 사이클 ReconciliationBreach로 영구 HALT. cancel_orphan_orders가 executedQty 미조회로 고아주문 체결 폐기.",
+      "resolution": "src/live/lifecycle.py 신설(ShutdownFlag, install_shutdown_handlers). scheduler 재기동/누락사이클 복구, runner try/finally 체결 영속, executor 고아주문 체결 재조회, rest/settings 연동, docker-compose 시그널 처리.",
+      "impact": "무인 운전 중 체결 유실·일일 리밸런스 스킵·영구 HALT 제거"
+    },
+    {
+      "task_id": "TASK_LIVE_BACKTEST_EXECUTION_PARITY",
+      "date": "2026-08-30",
+      "adr_id": "ADR_20260830_LIVE_BACKTEST_EXECUTION_PARITY",
+      "domain": "live",
+      "title": "라이브↔MHS 백테스트 집행 정합성 계측 및 슬라이스 정체 수정",
+      "why": "라이브/PAPER 집행이 자본운반 백테스트 bound(OHLCV_IMMEDIATE_TAKER)를 재현하는지 미검증. maker/taker 수수료·실지불액·체결앵커 편차 미기록, _poll_or_post가 활성주문 전량체결+부모잔량 상태를 인식못해 슬라이스 정체.",
+      "resolution": "src/live/fills.py 신설로 체결/수수료/앵커편차 타입기록. executor 슬라이스 상태전이에 활성주문 소진 분기 추가. runner/ledger/sizing/signal/account/execution_quality/marks/signal_refresh 연동.",
+      "impact": "라이브 집행 경제성 실측 기반 확보, RESIDUAL 정체 제거"
+    },
+    {
       "task_id": "TASK_MHS_INCREMENTAL_SIGNAL_REFRESH",
       "date": "2026-08-27",
       "adr_id": "ADR_20260827_MHS_INCREMENTAL_SIGNAL_REFRESH",
@@ -969,36 +999,6 @@
       "why": "12차 결과(백필 후 재측정)가 이전보다 크게 악화(primary_autocorr_sharpe 0.0915, fold0/1 강한 음수). mhs-res.md §6이 유니버스 확장의 정직한 반영인지 gap-trim 부작용인지 미분리 상태로 남겨둠.",
       "resolution": "scratch/trim_to_valid_segment_v2.py가 docstring(가장 이른 세그먼트 우선 보존)과 반대로 chosen=len(lengths)-1로 항상 최신 세그먼트만 남기도록 구현돼, 37개 주요 유동성 심볼(XRP/LTC/TRX/ETC/XLM 등)의 백필 이력 중앙값 806일을 프로덕션 parquet에서 삭제한 사실을 실측 확인. scratch/backfill_gap_backup_v3에서 75개 심볼 OHLCV+funding을 복원하고 손상 스크립트를 삭제. 기존 load_base_panel/liquid_half_eligibility/horizon_log_return이 이미 NaN 갭에 안전함을 확인해 대체 삭제 로직은 신설하지 않고, 대신 읽기 전용 detect_internal_gaps 진단 유틸(src/market_data/storage/gap_report.py)과 CLI report-internal-gaps 서브커맨드를 추가해 향후 동일한 물리적 삭제 재발을 방지.",
       "impact": "P0 데이터 손상 원인을 (b) gap-trim 구현 버그로 확정, 12차 수치는 오염된 데이터 기준으로 무효 처리. 13차 재실행 시도에서 별도의 신규 이슈(체결 레이어가 갭 진입 경계에서 마지막 유효 바의 포지션을 다음 바 NaN open/수익률로 청산하려다 DataIntegrityError fail-closed, FILUSDT 2022-02-26 결손에서 재현)를 발견 -- P0 수정으로 은폐돼 있던 별개의 갭-경계 처리 미비가 드러난 것으로, 후속 /spec 대상으로 분리."
-    },
-    {
-      "task_id": "TASK_MHS_2021_DATA_GAP_ROOT_CAUSE_CORRECTION",
-      "date": "2026-08-11",
-      "adr_id": "ADR_20260811_MHS_2021_DATA_GAP_ROOT_CAUSE_CORRECTION",
-      "domain": "data",
-      "title": "MHS 2021 데이터 결손 원인 정정: 시장 한계 → 수집 백필 결손",
-      "why": "11차 admission_t 검토 중 사용자가 '2021 데이터 부족이 수집 미비인지 원천 시장 자체 한계인지' 재확인을 요청. 기존 ADR_20260811_MHS_DISCOVERY_2021_GAP_AND_DENSE_GRID는 '데이터 커버리지 한계, 파이프라인 버그 아님'으로 기록돼 있었음.",
-      "resolution": "data/futures/ohlcv/1h/ 전체 652개 심볼 parquet의 첫 봉 시각을 직접 조사. 2022년 이전 데이터 보유 심볼은 9개뿐(BTC/ETH/LINK/ADA/ATOM/BNB/DOGE/DOT/AVAX, 전부 2020년 시작)이고 나머지 643개는 2022-04-01/2022-10-01/2023-01-01 등 특정 배치 시점에 수십개씩 몰려서 시작 -- 실제 상장일이 이렇게 매번 월初 자정에 무더기로 발생할 수 없으므로 배치 수집 작업의 시작 시점이지 상장일이 아님. task_index.json에 이미 기록된 '18종목 2022-10-01 taker_buy_ratio 수집 아카이브 버그'와 시점 정확히 일치해 교차 확인.",
-      "impact": "원인을 '시장 자체에 심볼이 없었다'에서 '수집 파이프라인이 대부분 심볼의 과거분을 백필하지 않았다'로 정정. eligibility 임계값 튜닝으로는 여전히 해결 불가하지만, 2021~2022 초 구간 과거분 추가 수집이면 fold-safe-horizon(ADR_20260811_MHS_FOLD_SAFE_HORIZON_SELECTION) fold 0의 admission 실패를 실제로 해소할 가능성이 생김 -- 별도 데이터 수집 과제로 분리, docs/results/mhs-res.md에 정정 반영."
-    },
-    {
-      "task_id": "TASK_MHS_HORIZON_SEARCH_EFFICIENCY",
-      "date": "2026-08-11",
-      "adr_id": "ADR_20260811_MHS_HORIZON_SEARCH_EFFICIENCY",
-      "domain": "mhs",
-      "title": "MHS horizon 탐색: 데이터충분성/평가기준 합리성 실측 검토 + discovery weight 캐싱으로 3배 중복제거",
-      "why": "fold-safe-horizon(ADR_20260811_MHS_FOLD_SAFE_HORIZON_SELECTION) 후속으로 (1) 2021 데이터 결손이 임계값 튜닝으로 해소 가능한지, (2) admission_t=2.0이 시간봉 net_t의 자기상관 인플레이션 때문에 비합리적으로 엄격한지, (3) horizon 탐색 자체를 공학적으로 더 효율화할 수 있는지 실측 검토 요청.",
-      "resolution": "(1) 데이터충분성: 2021년 내내 dev partition에 상장 심볼이 6개뿐임을 직접 측정 확인 -- min_symbols=8을 어떤 임계값 튜닝으로도 충족 불가능한 구조적 한계, 코드 변경 대상 아님. (2) 평가기준 합리성: naive 시간봉 net_t와 autocorrelation_adjusted_sharpe 기반 일별 보정 t-stat을 12개 (horizon, window) 조합에서 직접 비교 -- 두 통계량이 몇 % 이내로 일치(자기상관 인플레이션 가설 기각). rank_weight_book이 매시간 재랭킹되어 장기 horizon 신호가 거래 북 자체의 자기상관으로 전이되지 않음을 확인. admission_t/통계량 재설계 안 함(실패 가설로 기록). (3) 탐색 효율성: _horizon_weights가 discovery/qualification 윈도우와 무관한 순수함수임을 활용해 build_candidate_weights() 신설 + select_horizon_by_discovery_qualification/fold_train_only_discovery_qualification에 precomputed_candidate_weights 선택적 캐시 파라미터 추가(기본 None, 기존 호출 전부 byte-identical). run_mhs_horizon_diagnostic에서 fold 루프 진입 전 1회만 캐시 생성해 3개 fold에 공유.",
-      "impact": "실측: 19개 momentum 후보 weight book 1회 구축 56.4s vs 3회(캐시 없음) 174.9s -- 캐싱으로 약 118.5s(3배 중복분의 68%) 절감, 결과값(fold별 slow_horizon_hours/source, primary_autocorr_sharpe, research_go)은 완전 동일함을 통합테스트로 증명. Q1/Q2는 코드 변경 없는 확인된 부정적 결과로 기록 -- 향후 반복에서 재조사 불필요."
-    },
-    {
-      "task_id": "TASK_MHS_FOLD_SAFE_HORIZON_SELECTION",
-      "date": "2026-08-11",
-      "adr_id": "ADR_20260811_MHS_FOLD_SAFE_HORIZON_SELECTION",
-      "domain": "mhs",
-      "title": "MHS fold-safe(leak-free) discovery/qualification horizon 재선정",
-      "why": "slow_momentum의 horizon_hours=168이 discovery.py 도입 이전 레거시 하드코딩으로, 전역 discovery 그리드 실측(mhs-res.md §2)에서 168h가 최약체(worst-year net_t=+0.107)이고 360h가 최강(+0.493)임에도 실전에 전혀 반영되지 않았음. 원인 규명: 전역 discovery/qualification 윈도우(2022-04~2025-12)가 3개 anchored fold의 validation 연도(2023/2024/2025) 전부와 겹쳐 그대로 쓰면 모든 fold에서 look-ahead leakage가 발생 -- 그래서 지금까지 discovery_gate는 진단 전용으로만 격리돼 있었음.",
-      "resolution": "src/mhs/discovery.py에 fold_train_only_discovery_qualification() 추가: 기존 select_horizon_by_discovery_qualification을 재사용하되, 각 anchored fold의 train_start~train_end(validation_start 이전)로만 discovery/qualification 윈도우를 파생(qualification=train_end가 속한 역년, discovery=그 이전 전체)해 leak-free 재선정. src/mhs/contracts.py의 _SLOW_BAND horizons_hours를 전체 momentum 후보 그리드(72~504h)로 확장해 동적 선택을 허용(기본 168h 유지). MhsDiagnosticRequest.fold_safe_horizon_selection(opt-in, 기본 False)로 게이팅, --fold-safe-horizon CLI 플래그 추가. 부모 프로세스에서 fold별 선택을 1회 계산해(이미 로드된 전체 패널 재사용) plain int만 fork된 fold worker에 전달(패널 재로드 없음). MhsFoldReport에 slow_horizon_hours/slow_horizon_source 필드 추가해 감사 가능하게 기록.",
-      "impact": "10차 전체 리플레이 실측(2021-2025, 446심볼, --fold-safe-horizon --discovery-gate): 3개 fold 전부 admitted=False로 168h 기본값에 폴백(fold1 최고후보조차 168h 자신, net_t=+1.382로 admission floor 2.0 미달; fold0은 2021 데이터커버리지 결손으로 전부 non-finite). Research GO 수치 불변(byte-identical, primary_autocorr_sharpe=+0.4464 vs 9차 +0.4661는 446 vs 445 심볼 유니버스 자연드리프트, fold별 수치는 소수점까지 일치). 안전한 no-op으로 확인됨과 동시에 실질 병목을 admission_t=2.0 임계값(전역 다년 윈도우 기준으로 캘리브레이션되어 fold-local 1~3년 표본에는 지나치게 엄격)으로 명확히 특정 -- 다음 스펙 후보로 문서화."
     }
   ]
 }

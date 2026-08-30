@@ -367,5 +367,20 @@
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
+  },
+  "src/live/fills.py": {
+    "testing": "tests/unit/live/test_fills.py"
+  },
+  "src/live/lifecycle.py": {
+    "testing": "tests/unit/live/test_lifecycle.py"
+  },
+  "src/live/records.py": {
+    "testing": "tests/unit/live/test_records.py"
+  },
+  "src/live/microstructure.py": {
+    "testing": "tests/unit/live/test_microstructure.py"
+  },
+  "src/live/tax_ledger.py": {
+    "testing": "tests/unit/live/test_tax_ledger.py"
   }
 }
