@@ -148,6 +148,80 @@ def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(monkeypatc
     _refresh_live_universe(args)  # must not raise despite AAAUSDT's failure
 
 
+def test_stream_liquidations_subcommand_wires_asyncio_run(monkeypatch) -> None:
+    """``data collect stream-liquidations`` parses --symbols/--flush-interval-s
+    and drives run_liquidation_stream via asyncio.run with a shutdown flag."""
+    from src.cli.commands.data import _stream_liquidations
+
+    parser = _mhs_parser()
+    args = parser.parse_args(
+        ["data", "collect", "stream-liquidations", "--symbols", "BTCUSDT,ETHUSDT", "--flush-interval-s", "30"]
+    )
+    assert args.handler is _stream_liquidations
+    assert args.flush_interval_s == 30.0
+
+    captured: dict = {}
+
+    async def _fake_stream(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "src.market_data.streams.liquidations.run_liquidation_stream", _fake_stream
+    )
+    monkeypatch.setattr("src.live.lifecycle.install_shutdown_handlers", lambda *a, **k: None)
+
+    _stream_liquidations(args)
+
+    assert captured["symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert captured["flush_interval_s"] == 30.0
+    assert hasattr(captured["shutdown"], "requested")
+
+
+def test_refresh_live_universe_metrics_tail_is_failsoft(monkeypatch) -> None:
+    """A raising ensure_metrics_live_tail for one roster symbol is logged and
+    skipped; _refresh_live_universe completes and calls it for every symbol."""
+    import glob as glob_mod
+
+    parser = _mhs_parser()
+    args = parser.parse_args(["data", "refresh-live-universe"])
+
+    monkeypatch.setattr(glob_mod, "glob", lambda pattern: ["AAAUSDT.parquet"])
+
+    tail_calls: list[str] = []
+
+    class FakeCollector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            pass
+
+        def ensure_funding_data(self, symbol, start, end):
+            pass
+
+        def ensure_metrics_live_tail(self, symbol, *, lookback_days=7):
+            tail_calls.append(symbol)
+            if symbol == "R0USDT":
+                raise ConnectionError("metrics endpoint down")
+
+    monkeypatch.setattr(
+        "src.market_data.services.futures_collection.DataCollector", FakeCollector
+    )
+
+    class FakePlan:
+        symbols = ("R0USDT", "R1USDT", "R2USDT")
+
+    monkeypatch.setattr(
+        "src.application.data.mhs_execution_collection.build_mhs_execution_plan",
+        lambda start, end, timeframe, execution_universe_size: FakePlan(),
+    )
+    monkeypatch.setattr(
+        "src.application.data.mhs_execution_collection.collect_mhs_execution_data",
+        lambda plan, execute, workers: {"mode": "completed"},
+    )
+
+    _refresh_live_universe(args)  # must not raise
+
+    assert tail_calls == ["R0USDT", "R1USDT", "R2USDT"]
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_SIGNAL_10_CLI_SUBCOMMANDS_AND_EXIT_CODES",  # data 측 dispatch 부분

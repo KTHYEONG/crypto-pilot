@@ -29,7 +29,20 @@ def test_SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS() -> None:
     assert "./logs:/app/logs" in compose
 
 
+def test_docker_compose_has_independent_liquidation_collector_service() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    # 청산 스트림은 live 데몬과 독립된 서비스로 24/7 가동된다.
+    assert "stream-liquidations" in compose
+    assert '"data"' in compose  # command runs the data CLI group
+    assert "unless-stopped" in compose
+    assert "./data/futures/liquidations:/app/data/futures/liquidations" in compose
+    assert "env_file: .env" in compose
+    # 기존 live 데몬 서비스 계약이 깨지지 않는다.
+    assert "./data/state:/app/data/state" in compose
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS",
+    "test_docker_compose_has_independent_liquidation_collector_service",
 )

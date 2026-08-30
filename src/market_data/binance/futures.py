@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 import ccxt
 import pandas as pd
@@ -431,3 +432,78 @@ class BinanceClient:
         df = pd.DataFrame(all_rows, columns=["timestamp", "funding_rate"])
         df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df
+
+    def fetch_futures_data_metric(
+        self,
+        endpoint: str,
+        symbol: str,
+        *,
+        period: str = "5m",
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        allowed = {
+            "openInterestHist",
+            "globalLongShortAccountRatio",
+            "topLongShortPositionRatio",
+            "takerlongshortRatio",
+        }
+        if endpoint not in allowed:
+            raise ValueError(f"unsupported futures data endpoint: {endpoint}")
+        try:
+            market = self.exchange.market(symbol)
+            binance_symbol: str = str(market.get("id", symbol).replace("/", ""))
+        except Exception:
+            binance_symbol = str(symbol).replace("/", "")
+        base_url = f"https://fapi.binance.com/futures/data/{endpoint}"
+        params = {"symbol": binance_symbol, "period": period, "limit": int(limit)}
+        qs = urllib.parse.urlencode(params)
+        url = f"{base_url}?{qs}"
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"Invalid URL scheme: {url}")
+        timeout_sec = 30
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/91.0.4472.124 Safari/537.36"
+            )
+        }
+        req = urllib.request.Request(url, method="GET", headers=headers)  # noqa: S310
+        data: Any = None
+        retry_count = 0
+        while retry_count < 5:
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
+                    raw = resp.read().decode("utf-8")
+                    data = json.loads(raw)
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 429 or 500 <= e.code <= 599:
+                    retry_count += 1
+                    wait_sec = 2 * retry_count if e.code != 429 else 60
+                    self.logger.warning("HTTP %d for %s %s. Wait %ds...", e.code, endpoint, symbol, wait_sec)
+                    time.sleep(wait_sec)
+                    if retry_count >= 5:
+                        return []
+                    continue
+                if 400 <= e.code < 500:
+                    return []
+                retry_count += 1
+                time.sleep(2 * retry_count)
+                if retry_count >= 5:
+                    return []
+                continue
+            except Exception as e:  # noqa: BLE001
+                retry_count += 1
+                self.logger.warning("Error fetching %s for %s: %s (%d/5)", endpoint, symbol, e, retry_count)
+                if retry_count >= 5:
+                    return []
+                time.sleep(retry_count)
+                continue
+        if data is None:
+            return []
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            return [data]
+        return []
