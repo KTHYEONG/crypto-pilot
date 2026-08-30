@@ -61,3 +61,22 @@ def test_missing_filter_or_mark_dropped_as_not_tradable() -> None:
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_04_MIN_NOTIONAL_DROP_NO_REDISTRIBUTION",
 )
+
+def test_SCENARIO_PARITY_07_sizing_anchor_separation():
+    """SCENARIO_PARITY_07-sizing-anchor-separation"""
+    from decimal import Decimal
+    import pandas as pd
+    from src.live.sizing import target_quantities
+    from src.live.filters import SymbolFilters
+    weights = pd.Series([0.10], index=["S"], dtype="float64")
+    marks = {"S": Decimal("110")}
+    sizing_marks = {"S": Decimal("100")}
+    filters = {"S": SymbolFilters(symbol="S", tick_size=Decimal("0.01"), step_size=Decimal("0.001"), min_qty=Decimal("0.001"), min_notional=Decimal("5"), max_qty=Decimal("1000000"), quantity_precision=3, price_precision=2)}
+    targets, dropped = target_quantities(weights, marks, filters, Decimal("1000"), sizing_marks=sizing_marks)
+    assert targets["S"] == Decimal("1.000")
+    # empty sizing_marks -> dropped
+    targets2, dropped2 = target_quantities(weights, marks, filters, Decimal("1000"), sizing_marks={})
+    assert dropped2[0].reason == "DECISION_MARK_MISSING"
+    # None -> fallback 0.909
+    targets3, dropped3 = target_quantities(weights, marks, filters, Decimal("1000"), sizing_marks=None)
+    assert targets3["S"] == Decimal("0.909")
