@@ -172,6 +172,16 @@ def _compact_mark_series_for_path(
     )
 
 
+def decision_mark_row(symbols: list[str], decision_time: pd.Timestamp, *, timeframe: str = "1h") -> pd.Series:
+    panel = _cached_mark_panel(symbols, timeframe, pd.DatetimeIndex([decision_time]), 0)
+    if panel.empty:
+        return pd.Series(dtype="float64", name=pd.Timestamp(decision_time))
+    row = panel.iloc[0]
+    # Ensure UTC tz-aware index for decision_time
+    row.name = pd.Timestamp(decision_time)
+    return pd.Series(row, dtype="float64", name=pd.Timestamp(decision_time))
+
+
 def _prewarm_mark_frames(symbols: list[str], timeframe: str = "1h") -> None:
     """Populate the parent-side compact mark cache before forking workers.
 

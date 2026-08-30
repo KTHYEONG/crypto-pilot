@@ -459,3 +459,33 @@ class BinanceFuturesRestClient:
 
     def position_risk(self) -> Any:
         return self.request("GET", "/fapi/v2/positionRisk", signed=True)
+
+    def user_trades(self, symbol: str, *, from_id: int | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"symbol": symbol, "limit": limit}
+        if from_id is not None:
+            params["fromId"] = from_id
+        payload = self.request("GET", "/fapi/v1/userTrades", params, signed=True)
+        if not isinstance(payload, list):
+            raise DataIntegrityError("userTrades endpoint returned an unexpected schema")
+        return payload
+
+    def income(self, *, start_time_ms: int | None = None, income_type: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"limit": limit}
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        if income_type is not None:
+            params["incomeType"] = income_type
+        payload = self.request("GET", "/fapi/v1/income", params, signed=True)
+        if not isinstance(payload, list):
+            raise DataIntegrityError("income endpoint returned an unexpected schema")
+        return payload
+
+    def premium_index(self) -> dict[str, dict[str, Any]]:
+        payload = self.request("GET", "/fapi/v1/premiumIndex")
+        if not isinstance(payload, list):
+            raise DataIntegrityError("premiumIndex endpoint returned an unexpected schema")
+        indexed: dict[str, dict[str, Any]] = {}
+        for entry in payload:
+            if isinstance(entry, dict) and "symbol" in entry:
+                indexed[str(entry["symbol"])] = entry
+        return indexed
