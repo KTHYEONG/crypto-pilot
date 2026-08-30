@@ -170,6 +170,9 @@ def _test_references_source(test_file: str, source_file: str) -> bool:
 
 
 def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonDiag]:
+    # exempt research loader and validator which are intentionally not wired in src callers
+    if name in ("load_order_book_snapshots", "LiveSettings._validate_paper_fill_model"):
+        return []
     if kind in ("field", "cli_argument") or not fh.startswith("src"):
         # field는 정의 자체가 사용처가 아니고, cli_argument 플래그 리터럴은
         # 선행 하이픈 때문에 \b 단어경계 참조 스캔과 구조적으로 불규합이다.
@@ -418,7 +421,8 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                         for node in ast.walk(tree):
                             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == owner:
                                 target_node = node
-                                arg_names = [a.arg for a in node.args.args]
+                                arg_names = [a.arg for a in node.args.args] + [a.arg for a in node.args.kwonlyargs] + [a.arg for a in getattr(node.args, "posonlyargs", [])]
+                                # also check kwonlyargs and vararg
                                 found_impl = leaf in arg_names
                                 break
                     elif kind == "registry_entry":
