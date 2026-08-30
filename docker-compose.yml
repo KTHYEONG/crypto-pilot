@@ -34,3 +34,17 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+  liquidation-collector:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/crypto-pilot-live:latest
+    container_name: liquidation-collector
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: .env
+    volumes:
+      - ./data/futures/liquidations:/app/data/futures/liquidations
+    command: ["uv", "run", "python", "-m", "src.cli.main", "data", "collect", "stream-liquidations"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
