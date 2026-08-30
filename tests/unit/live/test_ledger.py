@@ -168,14 +168,14 @@ def test_SCENARIO_LIVE_44_FILL_CASH_FLOW_SIGN_CONVENTION() -> None:
         symbol="AAAUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
         avg_fill_price=Decimal("100"), chases=0, status="FILLED",
     )
-    assert compute_fill_cash_flow([buy], [buy_outcome]) == Decimal("-200")
+    assert compute_fill_cash_flow([buy], [buy_outcome]) == Decimal("-200.1")  # fee 5bps
 
     sell = _intent("AAAUSDT", "SELL", "2")
     sell_outcome = ExecutionOutcome(
         symbol="AAAUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
         avg_fill_price=Decimal("100"), chases=0, status="FILLED",
     )
-    assert compute_fill_cash_flow([sell], [sell_outcome]) == Decimal("200")
+    assert compute_fill_cash_flow([sell], [sell_outcome]) == Decimal("199.9")  # fee 5bps
 
     zero_fill = ExecutionOutcome(
         symbol="AAAUSDT", filled_qty=Decimal("0"), unfilled_qty=Decimal("2"),
@@ -198,7 +198,7 @@ def test_SCENARIO_LIVE_44_FILL_CASH_FLOW_SIGN_CONVENTION() -> None:
             ),
         ],
     )
-    assert combined == Decimal("-200") + Decimal("200") == Decimal("0")
+    assert combined == Decimal("-200.1") + Decimal("199.9") == Decimal("-0.2")
 
 
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
@@ -206,3 +206,21 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_43_LEDGER_CASH_ROUND_TRIPS_AND_STAYS_BACKWARD_COMPATIBLE",
     "SCENARIO_LIVE_44_FILL_CASH_FLOW_SIGN_CONVENTION",
 )
+
+def test_SCENARIO_PARITY_05_fee_accounted_cashflow():
+    """SCENARIO_PARITY_05-fee-accounted-cashflow"""
+    from decimal import Decimal
+    from src.live.planner import OrderIntent
+    from src.live.executor import ExecutionOutcome
+    from src.live.ledger import compute_fill_cash_flow
+    intent_buy = OrderIntent(symbol="AAAUSDT", side="BUY", quantity=Decimal("1.0"), reduce_only=False, target_qty=Decimal("1.0"), current_qty=Decimal("0"), client_order_prefix="run1", leg_index=0, decision_price=Decimal("100"))
+    # maker 2bps
+    outcome_maker = ExecutionOutcome(symbol="AAAUSDT", filled_qty=Decimal("1.0"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.0"), chases=0, status="FILLED", fills=((Decimal("1.0"), Decimal("100.0"), 2.0, "maker_fill", "maker"),), maker_qty=Decimal("1.0"), taker_qty=Decimal("0"))
+    assert compute_fill_cash_flow([intent_buy], [outcome_maker]) == Decimal("-100.02")
+    # taker 5bps
+    outcome_taker = ExecutionOutcome(symbol="AAAUSDT", filled_qty=Decimal("1.0"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.0"), chases=0, status="FILLED", fills=((Decimal("1.0"), Decimal("100.0"), 5.0, "timeout_taker", "taker"),), maker_qty=Decimal("0"), taker_qty=Decimal("1.0"))
+    assert compute_fill_cash_flow([intent_buy], [outcome_taker]) == Decimal("-100.05")
+    # SELL maker
+    intent_sell = OrderIntent(symbol="AAAUSDT", side="SELL", quantity=Decimal("1.0"), reduce_only=False, target_qty=Decimal("0"), current_qty=Decimal("1.0"), client_order_prefix="run1", leg_index=0, decision_price=Decimal("100"))
+    outcome_sell_maker = ExecutionOutcome(symbol="AAAUSDT", filled_qty=Decimal("1.0"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.0"), chases=0, status="FILLED", fills=((Decimal("1.0"), Decimal("100.0"), 2.0, "maker_fill", "maker"),), maker_qty=Decimal("1.0"), taker_qty=Decimal("0"))
+    assert compute_fill_cash_flow([intent_sell], [outcome_sell_maker]) == Decimal("99.98")
