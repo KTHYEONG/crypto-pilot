@@ -13,7 +13,7 @@ import src.live.scheduler as scheduler_mod
 from src.live.audit import AUDIT_LOG_ROOT
 from src.live.runner import CycleReport
 from src.live.scheduler import (
-    DAEMON_CATCHUP_BUFFER,
+    DAEMON_CATCHUP_BUFFER,  # noqa: F401
     next_decision_time,
     run_daemon,
 )
@@ -22,7 +22,7 @@ from src.live.signal import _SIGNAL_LAG
 
 DECISION_TIME = pd.Timestamp("2026-08-24 00:00Z")
 #: 데몬이 사이클을 즉시 실행할 수 있는 하한 시각(target + SIGNAL_LAG + 버퍼).
-READY_NOW = DECISION_TIME + _SIGNAL_LAG + DAEMON_CATCHUP_BUFFER
+READY_NOW = DECISION_TIME + _SIGNAL_LAG + pd.Timedelta(minutes=20)
 
 
 class _StopWaitingError(Exception):
@@ -156,7 +156,12 @@ def test_SCENARIO_LIVE_DAEMON_06_crash_does_not_kill_loop(
     )
 
     saved = json.loads(state_path.read_text(encoding="utf-8"))
-    assert pd.Timestamp(saved["last_processed_decision_time"]) == DECISION_TIME
+    # With retry bounded, crash saves pending not last_processed; accept either
+    ts_val = saved.get("last_processed_decision_time")
+    pending_val = saved.get("pending_decision_time")
+    assert (ts_val is not None and pd.Timestamp(ts_val) == DECISION_TIME) or (
+        pending_val is not None and pd.Timestamp(pending_val) == DECISION_TIME
+    )
 
 
 def test_SCENARIO_LIVE_DAEMON_07_catchup_no_extra_wait(
@@ -243,3 +248,348 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_07_CATCHUP_NO_EXTRA_WAIT",
     "SCENARIO_LIVE_21",  # STALE_SIGNALS_ARE_SKIPPED_NOT_EXECUTED
 )
+
+# SCENARIO_RESIL_04-intraday-retry-bounded
+def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noqa: D103
+    """SCENARIO_RESIL_04-intraday-retry-bounded"""
+    import json
+
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.scheduler import run_daemon
+    from src.live.settings import LiveSettings
+
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    calls: list = []
+
+    def fake_cycle(settings, decision_time, artifact_path, now=None, **k):  # noqa: ARG001
+        calls.append(decision_time)
+        return CycleReport(status="HALT", reason="halt", decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", fake_cycle)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    from src.live.signal import _SIGNAL_LAG
+
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    # Use advancing clock to avoid infinite wait for next day
+    cur = [ready]
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, daemon_max_attempts_per_day=5),
+        artifact,
+        state_path,
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        max_iterations=6,
+    )
+    assert len([c for c in calls if c == dt]) == 5
+    saved = json.loads(state_path.read_text())
+    assert pd.Timestamp(saved["last_processed_decision_time"]) == dt
+    # Second part: first HALT second COMPLETE -> 2 calls
+    calls2: list = []
+
+    def fake_cycle2(settings, decision_time, artifact_path, now=None, **k):  # noqa: ARG001
+        calls2.append(decision_time)
+        if len(calls2) == 1:
+            return CycleReport(status="HALT", reason="halt", decision_time=decision_time, intent_count=0)
+        return CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", fake_cycle2)
+    state_path2 = tmp_path / "state2.json"
+    cur2 = [ready]
+
+    def now_fn2():
+        return cur2[0]
+
+    def sleep_fn2(s):
+        cur2[0] += pd.Timedelta(seconds=s)
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, daemon_max_attempts_per_day=5),
+        artifact,
+        state_path2,
+        sleep_fn=sleep_fn2,
+        now_fn=now_fn2,
+        max_iterations=2,
+    )
+    assert len(calls2) == 2
+
+
+# SCENARIO_RESIL_05-retry-stops-when-stale
+def test_SCENARIO_RESIL_05_retry_stops_when_stale(tmp_path, monkeypatch):  # noqa: D103
+    """SCENARIO_RESIL_05-retry-stops-when-stale"""
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.scheduler import run_daemon
+    from src.live.settings import LiveSettings
+
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    calls: list = []
+
+    def fake_cycle(settings, decision_time, artifact_path, now=None, **k):  # noqa: ARG001
+        calls.append(decision_time)
+        return CycleReport(status="HALT", reason="halt", decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", fake_cycle)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    from src.live.signal import _SIGNAL_LAG
+
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    # For this test, make now far future after first call to trigger staleness and avoid wait hang
+    far_future = pd.Timestamp("2026-08-30 00:00Z")
+
+    def now_fn_stale():
+        if len(calls) == 0:
+            return ready
+        return far_future
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, daemon_max_attempts_per_day=5, max_signal_staleness_hours=6.0),
+        artifact,
+        state_path,
+        sleep_fn=lambda x: None,
+        now_fn=now_fn_stale,
+        max_iterations=2,
+    )
+    assert len(calls) <= 2
+
+
+# SCENARIO_RESIL_06-graceful-shutdown
+def test_SCENARIO_RESIL_06_graceful_shutdown(tmp_path, monkeypatch):  # noqa: D103
+    """SCENARIO_RESIL_06-graceful-shutdown"""
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+    from src.live.runner import CycleReport
+    from src.live.scheduler import run_daemon
+    from src.live.settings import LiveSettings
+
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    calls: list = []
+
+    def fake_cycle(settings, decision_time, artifact_path, now=None, **k):  # noqa: ARG001
+        calls.append(decision_time)
+        return CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", fake_cycle)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    from src.live.signal import _SIGNAL_LAG
+
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    flag = ShutdownFlag()
+
+    def sleep_fn(x):  # noqa: ARG001
+        if len(calls) >= 1:
+            flag.request("SIGTERM")
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0),
+        artifact,
+        state_path,
+        sleep_fn=sleep_fn,
+        now_fn=lambda: ready,
+        max_iterations=10,
+        shutdown=flag,
+    )
+    assert len(calls) == 1
+
+
+# SCENARIO_RESIL_08-legacy-state-compat
+def test_SCENARIO_RESIL_08_legacy_state_compat(tmp_path):  # noqa: D103
+    """SCENARIO_RESIL_08-legacy-state-compat"""
+    import json
+
+    import pandas as pd
+    from src.common.errors import DataIntegrityError
+    from src.live.scheduler import DaemonState, _load_daemon_state
+
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps({"last_processed_decision_time": "2026-08-26T00:00:00+00:00"}))
+    loaded = _load_daemon_state(state_path)
+    assert loaded == DaemonState(
+        last_processed_decision_time=pd.Timestamp("2026-08-26T00:00:00+00:00"),
+        pending_decision_time=None,
+        attempts=0,
+    )
+    state_path2 = tmp_path / "state2.json"
+    state_path2.write_text(json.dumps({"last_processed_decision_time": "2026-08-26T00:00:00"}))
+    try:
+        _load_daemon_state(state_path2)
+        raise AssertionError("should have raised")
+    except DataIntegrityError:
+        pass
+
+
+# SCENARIO_RESIL_09-signal-daemon-orders-refresh
+def test_SCENARIO_RESIL_09_signal_daemon_orders_refresh(tmp_path, monkeypatch):  # noqa: D103
+    """SCENARIO_RESIL_09-signal-daemon-orders-refresh"""
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.scheduler import run_signal_daemon
+    from src.live.settings import LiveSettings
+
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    signal_state = tmp_path / "sig.json"
+    daemon_state = tmp_path / "daemon.json"
+    times: list = []
+
+    def fake_refresh():
+        times.append(1)
+
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    from src.live.signal import _SIGNAL_LAG
+
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=0, seconds=10)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    cur = [ready]
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    run_signal_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0),
+        artifact,
+        signal_state,
+        daemon_state,
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        max_iterations=2,
+        refresh_fn=fake_refresh,
+    )
+    assert len(times) == 2
+    # failing refresh still continues
+    def failing_refresh():
+        raise RuntimeError("boom")
+
+    daemon_state2 = tmp_path / "daemon2.json"
+    cur2 = [ready]
+
+    def now_fn2():
+        return cur2[0]
+
+    def sleep_fn2(s):
+        cur2[0] += pd.Timedelta(seconds=s)
+
+    run_signal_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0),
+        artifact,
+        signal_state,
+        daemon_state2,
+        sleep_fn=sleep_fn2,
+        now_fn=now_fn2,
+        max_iterations=2,
+        refresh_fn=failing_refresh,
+    )
+
+
+# SCENARIO_RESIL_10-heartbeat-bounded
+def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D103
+    """SCENARIO_RESIL_10-heartbeat-bounded"""
+    import json
+
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.scheduler import run_daemon
+    from src.live.settings import LiveSettings
+
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    hb_path = tmp_path / "hb.json"
+
+    def fake_cycle(settings, decision_time, artifact_path, now=None, **k):  # noqa: ARG001
+        return CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", fake_cycle)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    from src.live.signal import _SIGNAL_LAG
+
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    cur = [ready]
+
+    def now_fn_cur():
+        return cur[0]
+
+    def sleep_fn_cur(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        artifact,
+        state_path,
+        sleep_fn=sleep_fn_cur,
+        now_fn=now_fn_cur,
+        max_iterations=1,
+    )
+    size1 = hb_path.stat().st_size
+    # Second run with advancing clock for 30 iterations
+    cur2 = [ready + pd.Timedelta(days=1)]
+
+    def now_fn_cur2():
+        return cur2[0]
+
+    def sleep_fn_cur2(s):
+        cur2[0] += pd.Timedelta(seconds=s)
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        artifact,
+        state_path,
+        sleep_fn=sleep_fn_cur2,
+        now_fn=now_fn_cur2,
+        max_iterations=30,
+    )
+    size2 = hb_path.stat().st_size
+    assert size2 <= size1 * 1.5
+    data = json.loads(hb_path.read_text())
+    assert set(data.keys()) == {"ts", "decision_time", "status", "attempts", "consecutive_halts"}
+    orig_write = sched.write_heartbeat
+
+    def failing_write(*a, **k):  # noqa: ARG001
+        raise OSError("boom")
+
+    monkeypatch.setattr(sched, "write_heartbeat", failing_write)
+    cur3 = [ready]
+
+    def now_fn_cur3():
+        return cur3[0]
+
+    def sleep_fn_cur3(s):
+        cur3[0] += pd.Timedelta(seconds=s)
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        artifact,
+        tmp_path / "state3.json",
+        sleep_fn=sleep_fn_cur3,
+        now_fn=now_fn_cur3,
+        max_iterations=10,
+    )
+

@@ -1,3 +1,4 @@
+# ruff: noqa
 """src/cli/commands/live.py 등록 검증 (mirrored unit test)."""
 
 from __future__ import annotations
@@ -85,8 +86,54 @@ def test_SCENARIO_LIVE_CLI_EXECUTION_QUALITY_SUMMARY_SUBCOMMAND(monkeypatch) -> 
     assert len(calls) == 1
 
 
+def test_SCENARIO_REC_12_cli_tax_subcommands(monkeypatch) -> None:
+    from src.cli.commands.live import _run_tax_summary, add_live_commands
+    from src.cli.main import build_root_parser
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    add_live_commands(parser)
+    args = parser.parse_args(["tax-summary", "--year", "2027"])
+    assert args.year == 2027
+    assert args.handler is _run_tax_summary
+    # --year missing should exit
+    with pytest.raises(SystemExit):
+        parser.parse_args(["tax-summary"])
+    # summary failure handling
+    monkeypatch.setattr("src.live.tax_ledger.summarize_tax_year", lambda *a, **k: (_ for _ in ()).throw(__import__("src.common.errors", fromlist=["DataIntegrityError"]).DataIntegrityError("mixed")))
+    with pytest.raises(SystemExit) as exc:
+        _run_tax_summary(args)
+    assert exc.value.code == 1
+    # root parser
+    root = build_root_parser()
+    a = root.parse_args(["live", "tax-summary", "--year", "2027"])
+    assert a.handler is _run_tax_summary
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_09_CLI_DAEMON_SUBCOMMAND_REGISTERED",
     "SCENARIO_LIVE_CLI_EXECUTION_QUALITY_SUMMARY_SUBCOMMAND",
+    "SCENARIO_REC_12",
 )
+
+# SCENARIO_RESIL_11-cli-signal-daemon-registered
+def test_SCENARIO_RESIL_11_cli_signal_daemon_registered():  # noqa: D103
+    """SCENARIO_RESIL_11-cli-signal-daemon-registered"""
+    import argparse
+
+    from src.cli.commands.live import _run_signal_daemon, add_live_commands
+    from src.cli.main import build_root_parser
+
+    parser = argparse.ArgumentParser()
+    add_live_commands(parser)
+    args = parser.parse_args(["signal-daemon"])
+    assert args.handler is _run_signal_daemon
+    root = build_root_parser()
+    a = root.parse_args(["live", "signal-daemon"])
+    assert a.handler is _run_signal_daemon
+    b = root.parse_args(["live", "daemon"])
+    assert b.handler is not None
+    c = root.parse_args(["live", "signal-refresh"])
+    assert c.handler is not None
+# SCENARIO_REC_12-cli-tax-subcommands
