@@ -18,7 +18,7 @@ from typing import Any
 
 from src.common.config import DATA_DIR
 from src.common.errors import DataIntegrityError
-from src.live.executor import ExecutionOutcome
+from src.live.executor import ExecutionOutcome, OrphanSettlement
 from src.live.planner import OrderIntent
 
 _HWM_KEY = "equity_high_water_mark"
@@ -99,10 +99,29 @@ def compute_fill_cash_flow(
     """체결 현금흐름을 계산한다. BUY는 음수, SELL은 양수."""
     total = Decimal(0)
     for intent, outcome in zip(intents, outcomes, strict=True):
+        # I-FEE-ACCOUNTED: fills가 있으면 per-fill 수수료 포함, 없으면 보수적 taker fallback
+        fills = getattr(outcome, "fills", ())
+        if fills:
+            for qty_abs, price, fee_bps, _reason, _liq in fills:
+                qty = Decimal(qty_abs)
+                px = Decimal(price)
+                fee = abs(qty * px) * Decimal(str(fee_bps)) / Decimal(10_000)
+                signed = qty if intent.side == "BUY" else -qty
+                total += -signed * px - fee
+            continue
         if outcome.filled_qty <= 0 or outcome.avg_fill_price is None:
             continue
         signed = outcome.filled_qty if intent.side == "BUY" else -outcome.filled_qty
-        total -= signed * outcome.avg_fill_price
+        # 구 스키마 fallback: 수수료는 taker로 보수적 부과
+        fee_bps = 5.0
+        try:
+            from src.mhs.types import ExecutionSpec  # noqa: PLC0415
+
+            fee_bps = ExecutionSpec().taker_fee_bps
+        except Exception:  # noqa: BLE001, S110
+            pass
+        fee = abs(outcome.filled_qty * outcome.avg_fill_price) * Decimal(str(fee_bps)) / Decimal(10_000)
+        total += -signed * outcome.avg_fill_price - fee
     return total
 
 
@@ -120,4 +139,14 @@ def apply_outcomes(
             raise ValueError(f"outcome/intent symbol mismatch: {outcome.symbol} != {intent.symbol}")
         signed_fill = outcome.filled_qty if intent.side == "BUY" else -outcome.filled_qty
         updated[intent.symbol] = updated.get(intent.symbol, Decimal(0)) + signed_fill
+    return updated
+
+
+def apply_orphan_settlements(
+    positions: Mapping[str, Decimal], settlements: Sequence[OrphanSettlement]
+) -> dict[str, Decimal]:
+    updated = dict(positions)
+    for s in settlements:
+        signed = s.executed_qty if s.side == "BUY" else -s.executed_qty
+        updated[s.symbol] = updated.get(s.symbol, Decimal(0)) + signed
     return updated

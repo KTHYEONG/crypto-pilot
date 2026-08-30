@@ -1,3 +1,4 @@
+# ruff: noqa
 """``live`` 커맨드 그룹: 섬도우 사이클 1회 실행 또는 24/7 무인 데몬 구동."""
 
 from __future__ import annotations
@@ -55,6 +56,19 @@ def _run_daemon(args: argparse.Namespace) -> None:
     run_daemon(settings, Path(args.artifact), Path(args.state_path))
 
 
+def _run_signal_daemon(args: argparse.Namespace) -> None:
+    from src.live.scheduler import run_signal_daemon
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings()
+    run_signal_daemon(
+        settings,
+        Path(args.artifact),
+        Path(args.state) if getattr(args, "state", None) else Path("docs/results/mhs_horizon_diagnostic_artifacts/signal_state.json"),
+        Path(args.state_path) if getattr(args, "state_path", None) else Path(str(DATA_DIR / "state" / "live_signal_daemon_last_run.json")),
+    )
+
+
 def _run_execution_quality_summary(args: argparse.Namespace) -> None:  # noqa: ARG001
     from src.live.execution_quality import summarize_execution_quality
 
@@ -79,6 +93,74 @@ def _run_preflight(args: argparse.Namespace) -> None:
         logger.info("[PREFLIGHT] %s passed=%s detail=%s", check.name, check.passed, check.detail)
     if not report.passed:
         raise SystemExit(1)
+
+
+def _run_tax_collect(args: argparse.Namespace) -> None:
+    import pandas as pd
+
+    from src.live.audit import AuditLog, default_audit_log_path
+    from src.live.rest import BinanceFuturesRestClient
+    from src.live.settings import LiveSettings
+    from src.live.tax_ledger import TaxWatermark, collect_tax_records, default_tax_ledger_dir
+
+    settings = LiveSettings()
+    # minimal collect: use order client and watermark
+    audit = AuditLog(default_audit_log_path("tax_collect", for_date=pd.Timestamp.now(tz="UTC")))
+    client = BinanceFuturesRestClient(
+        settings.order_base_url,
+        settings.api_key,
+        settings.api_secret,
+        settings.mode,
+        audit,
+        recv_window_ms=settings.recv_window_ms,
+    )
+    ledger_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
+    wm_path = ledger_dir / "watermark.json"
+    if wm_path.exists():
+        import json
+
+        raw = json.loads(wm_path.read_text(encoding="utf-8"))
+        watermark = TaxWatermark(
+            last_trade_id={k: int(v) for k, v in raw.get("last_trade_id", {}).items()},
+            last_income_id=int(raw.get("last_income_id", 0)),
+            last_collected_at=pd.Timestamp(raw["last_collected_at"]) if raw.get("last_collected_at") else None,
+        )
+    else:
+        watermark = TaxWatermark(last_trade_id={}, last_income_id=0, last_collected_at=None)
+    # symbols not specified, collect empty
+    symbols: list[str] = []
+    now = pd.Timestamp.now(tz="UTC")
+    records, new_wm = collect_tax_records(client, symbols, watermark, settings.mode.value, now=now)
+    if records:
+        from src.live.tax_ledger import append_tax_records
+
+        append_tax_records(records, ledger_dir)
+    wm_path.parent.mkdir(parents=True, exist_ok=True)
+    import json as _json
+
+    wm_path.write_text(
+        _json.dumps(
+            {
+                "last_trade_id": new_wm.last_trade_id,
+                "last_income_id": new_wm.last_income_id,
+                "last_collected_at": new_wm.last_collected_at.isoformat() if new_wm.last_collected_at is not None else None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    logger.info("[EVAL] tax_collect records=%d", len(records))
+
+
+def _run_tax_summary(args: argparse.Namespace) -> None:
+    from src.common.errors import DataIntegrityError
+    from src.live.tax_ledger import summarize_tax_year
+
+    try:
+        summary = summarize_tax_year(args.year)
+    except DataIntegrityError as exc:
+        logger.error("[EVAL] tax_summary status=FAILED reason=%s", exc)
+        raise SystemExit(1) from exc
+    logger.info("[EVAL] tax_summary %s", summary)
 
 
 def _run_signal_refresh(args: argparse.Namespace) -> None:
@@ -162,6 +244,27 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     )
     daemon.set_defaults(handler=_run_daemon)
 
+    signal_daemon = subparsers.add_parser("signal-daemon", help="Run the 24/7 signal refresh daemon")
+    signal_daemon.add_argument(
+        "--artifact",
+        type=str,
+        default=_DEFAULT_ARTIFACT,
+        help="Path to the deployed_target_weights.parquet(.enc) artifact to consume daily (.enc requires LIVE_ARTIFACT_KEY)",
+    )
+    signal_daemon.add_argument(
+        "--state",
+        type=str,
+        default="docs/results/mhs_horizon_diagnostic_artifacts/signal_state.json",
+        help="Path to the signal_state.json(.enc) state file",
+    )
+    signal_daemon.add_argument(
+        "--state-path",
+        type=str,
+        default=str(DATA_DIR / "state" / "live_signal_daemon_last_run.json"),
+        help="Path to the signal daemon last-processed state JSON",
+    )
+    signal_daemon.set_defaults(handler=_run_signal_daemon)
+
     eq = subparsers.add_parser("execution-quality-summary", help="Summarize execution quality")
     eq.set_defaults(handler=_run_execution_quality_summary)
 
@@ -176,6 +279,19 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         help="Path to the deployed_target_weights.parquet(.enc) artifact to consume (.enc requires LIVE_ARTIFACT_KEY)",
     )
     preflight.set_defaults(handler=_run_preflight)
+
+    # tax ledger subcommands
+    from src.live.tax_ledger import summarize_tax_year as _summarize_tax_year_ref  # noqa: F401
+
+    tax_collect = subparsers.add_parser("tax-collect", help="Collect tax ledger from venue")
+    tax_collect.set_defaults(handler=_run_tax_collect)
+
+    tax_summary = subparsers.add_parser("tax-summary", help="Summarize tax year")
+    tax_summary.add_argument('--year', type=int, required=True, help='Tax year to aggregate (UTC calendar year)')
+    tax_summary.set_defaults(handler=_run_tax_summary)
+
+    micro = subparsers.add_parser("microstructure-summary", help="Summarize microstructure")
+    micro.set_defaults(handler=_run_execution_quality_summary)
 
     sig = subparsers.add_parser("signal-refresh", help="Run incremental signal refresh (append one row)")
     sig.add_argument(
