@@ -3075,8 +3075,7 @@ def _committee_execution_book(
     Shared by the fold path and the top-level blend: filter the registry to
     ``members`` (or ``COMMITTEE_MEMBERS`` when None), build equal-notional
     rank books, average them.  No leg-risk tilt -- tilting the curated committee
-    set to equal risk removed the concentration that carries its edge (walk-forward
-    Sharpe 0.822 -> 0.503, rejected in RC-4). Fails closed when no member is
+    set to equal risk removed the concentration that carries its edge per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT. Fails closed when no member is
     admitted. ``tranche_count`` smooths the decision rows with a staggered tranche
     mean (opt-in, defaults to the identity single-phase book).
     ``regime_adaptive_window`` (opt-in, mutually exclusive with a fixed

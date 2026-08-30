@@ -185,12 +185,8 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
         horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
         leverage_ceiling=2.0,
     ),
-    # Permanent rung: real 3m ledger replay measured CAGR 5.174 / MDD -0.542 /
-    # Calmar 9.54 with every fold primary_valid (measured on the legacy
-    # annual 4-fold schedule) and no
-    # CAPITAL_INVARIANT_BREACH, and leverage_frontier_scan reported
-    # feasible=True through 8.0x on the pre-OOS train slice
-    # (ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN).
+    # Permanent rung: selected per ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN
+    # with every fold primary_valid and no CAPITAL_INVARIANT_BREACH.
     "growth_extreme": GrowthRiskEnvelope(
         name="growth_extreme",
         max_drawdown=1.0,
@@ -332,7 +328,7 @@ CONSTANT_RISK_CAP_BINDING_QUANTILE: float = 0.10
 CONSTANT_RISK_TARGET_ANNUAL_VOL: float = 0.40
 
 # 인과적 자기자본 드로다운 브레이크: brake = clip(1 + k * underwater, floor, 1).
-# k=2.0은 실측 플래토(k=2~6에서 CAGR 3.1~3.3, MDD 정규화)의 무릎이며 cap 비바인딩.
+# k=2.0 selected per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT.
 EXPOSURE_DRAWDOWN_BRAKE_K: float = 2.0
 # 하한 fail-closed 경계(0.1/0.2 실측 동일 결과 -- 튜닝값이 아닌 구속 하한).
 EXPOSURE_DRAWDOWN_BRAKE_FLOOR: float = 0.2
