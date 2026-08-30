@@ -182,6 +182,40 @@ def test_SCENARIO_REC_09_rest_endpoints_signed(tmp_path: Path) -> None:
         client2.premium_index()
 
 
+def test_depth_endpoint_is_unsigned_and_targets_fapi_v1_depth(tmp_path: Path) -> None:
+    from src.common.errors import DataIntegrityError
+    from src.live.audit import AuditLog
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse
+    from src.live.settings import ExecutionMode
+
+    captured: list[str] = []
+
+    class CapTransport:
+        def call(self, method: str, url: str, headers: dict[str, str]) -> HttpResponse:
+            captured.append(url)
+            return HttpResponse(status_code=200, headers={}, body=b'{"lastUpdateId":1,"bids":[["100","1"]],"asks":[["101","1"]]}')
+
+    client = BinanceFuturesRestClient(
+        "https://fapi.binance.com", None, None, ExecutionMode.SHADOW, AuditLog(tmp_path / "a.jsonl"), session=CapTransport()
+    )
+    res = client.depth("BTCUSDT", limit=20)
+    assert isinstance(res, dict)
+    assert captured[0].__contains__("/fapi/v1/depth")
+    assert "symbol=BTCUSDT" in captured[0]
+    assert "limit=20" in captured[0]
+    assert "signature=" not in captured[0]
+
+    class BadTransport:
+        def call(self, method: str, url: str, headers: dict[str, str]) -> HttpResponse:
+            return HttpResponse(status_code=200, headers={}, body=b'{"lastUpdateId":1,"bids":[["100","1"]]}')
+
+    client2 = BinanceFuturesRestClient(
+        "https://fapi.binance.com", None, None, ExecutionMode.SHADOW, AuditLog(tmp_path / "b.jsonl"), session=BadTransport()
+    )
+    with pytest.raises(DataIntegrityError, match=".*"):
+        client2.depth("BTCUSDT")
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_01_SHADOW_BLOCKS_ALL_MUTATIONS",

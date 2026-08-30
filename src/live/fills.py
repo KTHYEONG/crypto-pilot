@@ -11,7 +11,7 @@ import pandas as pd
 
 from src.common.config import DATA_DIR
 
-FILL_REASONS: frozenset[str] = frozenset({"maker_fill", "backstop_taker", "timeout_taker", "residual", "obsolete"})
+FILL_REASONS: frozenset[str] = frozenset({"maker_fill", "backstop_taker", "timeout_taker", "residual", "obsolete", "immediate_taker"})
 
 __all__ = ["FILL_REASONS", "_FILL_COLUMNS", "FillEvent", "append_fills", "default_fills_dir", "load_fills"]
 

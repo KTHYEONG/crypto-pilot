@@ -69,6 +69,14 @@ class LiveSettings(BaseSettings):
     heartbeat_path: str | None = None
     maker_fee_bps: float = ExecutionSpec().maker_fee_bps
     taker_fee_bps: float = ExecutionSpec().taker_fee_bps
+    taker_slippage_bps: float = ExecutionSpec().taker_slippage_bps
+    paper_fill_model: str = "immediate_taker"
+    orderbook_capture_enabled: bool = True
+    orderbook_capture_interval_s: float = 10.0
+    orderbook_capture_duration_s: float = 1800.0
+    orderbook_capture_depth_limit: int = 20
+    orderbook_capture_max_symbols: int = 40
+    orderbook_capture_dir: str | None = None
     fills_dir: str | None = None
     microstructure_dir: str | None = None
     tax_ledger_dir: str | None = None
@@ -87,6 +95,13 @@ class LiveSettings(BaseSettings):
     def _positive_equity(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("notional_equity_usdt must be > 0")
+        return value
+
+    @field_validator("paper_fill_model")
+    @classmethod
+    def _validate_paper_fill_model(cls, value: str) -> str:
+        if value not in {"immediate_taker", "peg_chase"}:
+            raise ValueError(f"paper_fill_model must be one of immediate_taker, peg_chase, got {value!r}")
         return value
 
     @field_validator("recv_window_ms")

@@ -244,6 +244,12 @@ __marimo__/
 # Ignore all json files everywhere in results/
 results/**/*.json
 
+# Research outputs: sealed envelopes only (I-SEALED-ONLY-IN-VCS)
+docs/results/**/*.json
+docs/results/**/*.jsonl
+docs/results/**/*.parquet
+!docs/results/**/*.enc
+
 # MHS horizon diagnostic: only the lossless full-resolution audit tier is
 # excluded; the compact daily-resampled ledger and summary JSON are tracked.
 docs/results/mhs_horizon_diagnostic_artifacts/_full/

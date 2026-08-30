@@ -110,6 +110,47 @@ def test_SCENARIO_REC_12_cli_tax_subcommands(monkeypatch) -> None:
     assert a.handler is _run_tax_summary
 
 
+def test_orderbook_capture_subcommand_invokes_capture_and_append(monkeypatch) -> None:
+    import argparse
+
+    import src.cli.commands.live as live_mod
+    from src.cli.commands.live import add_live_commands
+
+    parser = argparse.ArgumentParser()
+    add_live_commands(parser)
+    args = parser.parse_args(
+        ["orderbook-capture", "--symbols", "BTCUSDT,ETHUSDT", "--duration-s", "20", "--interval-s", "10"]
+    )
+    # handler should be _run_orderbook_capture
+    from src.cli.commands.live import _run_orderbook_capture
+
+    assert args.handler is _run_orderbook_capture
+
+    captured: dict = {}
+
+    def fake_capture(client, symbols, decision_time, *, mode, duration_s, interval_s, depth_limit, max_symbols, clock, sleep_fn, now_fn, shutdown=None):
+        captured["symbols"] = symbols
+        captured["duration_s"] = duration_s
+        captured["interval_s"] = interval_s
+        return []
+
+    def fake_append(snapshots, directory):
+        captured["append_called"] = True
+        return []
+
+    # handler imports inside function, so patch src.live.orderbook
+    import src.live.orderbook as ob_mod
+
+    monkeypatch.setattr(ob_mod, "capture_order_books", fake_capture)
+    monkeypatch.setattr(ob_mod, "append_order_book_snapshots", fake_append)
+
+    args.handler(args)
+    assert captured["symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert captured["duration_s"] == 20.0
+    assert captured["interval_s"] == 10.0
+    assert captured.get("append_called") is True
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_09_CLI_DAEMON_SUBCOMMAND_REGISTERED",
