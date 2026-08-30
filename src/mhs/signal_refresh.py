@@ -92,6 +92,15 @@ def _load_artifact_frame(artifact_path: Path, artifact_key: SecretStr | None) ->
         raise DataIntegrityError(f"artifact read failed: {candidate}: {exc}") from exc
 
 
+def _save_decision_marks(artifact_path: Path, marks_row: pd.Series, dt: pd.Timestamp, artifact_key: SecretStr | None) -> None:
+    path = Path(artifact_path)
+    marks_name = path.name.replace("deployed_target_weights", "deployed_decision_marks")
+    marks_path = path.parent / marks_name
+    frame = _load_artifact_frame(marks_path, artifact_key)
+    new_frame = _append_row(frame, marks_row, dt)
+    _save_artifact_frame(new_frame, marks_path, artifact_key)
+
+
 def _save_artifact_frame(frame: pd.DataFrame, artifact_path: Path, artifact_key: SecretStr | None) -> None:
     path = Path(artifact_path)
     is_enc = str(path).endswith(".enc")
@@ -276,6 +285,15 @@ def refresh_signal_row(
 
     new_frame = _append_row(artifact_frame, scaled_row, dt)
     _save_artifact_frame(new_frame, Path(artifact_path), artifact_key)
+    try:
+        from src.application.research.mhs.marks import decision_mark_row  # noqa: PLC0415
+
+        marks_row = decision_mark_row(list(scaled_row.index), dt)
+        _save_decision_marks(Path(artifact_path), marks_row, dt, artifact_key)
+    except Exception as exc:  # noqa: BLE001
+        import logging  # noqa: PLC0415
+
+        logging.getLogger("SignalRefresh").warning("decision marks save failed error=%s", exc)
 
     new_reference = _advance_reference_returns(state.reference_daily_returns, usable)
     held_dict = {str(k): float(v) for k, v in scaled_row.items() if pd.notna(v)}
