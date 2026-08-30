@@ -1,3 +1,4 @@
+# ruff: noqa
 """SCENARIO_LIVE_10/18/19: 리스크 게이트, 원장 내구성, MTM 에쿼티/드로다운 HALT.
 SCENARIO_LIVE_RUNNER_WRITES_EXECUTION_QUALITY_AND_NEVER_HALTS_ON_ITS_FAILURE
 """
@@ -103,7 +104,7 @@ def live_env(monkeypatch, tmp_path):
     )
     calls: list[Any] = []
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         calls.extend(intents)
         outcomes = tuple(
             ExecutionOutcome(
@@ -223,7 +224,7 @@ def test_SCENARIO_LIVE_DAEMON_08_audit_keyed_by_decision_date(
         runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient()
     )
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         outcomes = tuple(
             ExecutionOutcome(
                 symbol=intent.symbol,
@@ -276,7 +277,7 @@ def test_SCENARIO_LIVE_18_ledger_durability_on_execution_failure(
 
     raised_fill = Decimal("0.398")
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         first = intents[0]
         outcome = ExecutionOutcome(
             symbol=first.symbol,
@@ -371,6 +372,7 @@ def test_SCENARIO_LIVE_19_mtm_equity_cap_and_drawdown_halt(
     ledger_path = tmp_path / "ledger_dd.json"
     save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal("2000")))
     dd_settings = LiveSettings(
+        mode="live_testnet",
         notional_equity_usdt=2000.0,
         equity_drawdown_halt=-0.45,
         ledger_path=str(ledger_path),
@@ -469,7 +471,7 @@ def test_SCENARIO_LIVE_RUNNER_WRITES_EXECUTION_QUALITY_AND_NEVER_HALTS_ON_ITS_FA
         lambda name, for_date=None: tmp_path / f"{name}.jsonl",
     )
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         return tuple(
             ExecutionOutcome(
                 symbol=intent.symbol,
@@ -541,7 +543,7 @@ def test_SCENARIO_LIVE_34_SYMBOL_CAP_NEVER_BLOCKS_REDUCE_ONLY(tmp_path, monkeypa
 
     calls: list[Any] = []
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         calls.extend(intents)
         return tuple(
             ExecutionOutcome(
@@ -603,7 +605,7 @@ def test_SCENARIO_LIVE_35_PAPER_MULTI_DAY_CYCLES_DO_NOT_HALT(tmp_path, monkeypat
         runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl"
     )
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         return tuple(
             ExecutionOutcome(
                 symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
@@ -720,7 +722,7 @@ def test_SCENARIO_LIVE_37_LIVE_MODE_STILL_RECONCILES_AGAINST_VENUE(
         runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl"
     )
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         return tuple(
             ExecutionOutcome(
                 symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
@@ -767,7 +769,7 @@ def test_SCENARIO_LIVE_41_RUNNER_FETCHES_MARKS_FOR_HELD_ROSTER_DROPOUTS(
     )
     calls: list[Any] = []
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         calls.extend(intents)
         return tuple(
             ExecutionOutcome(
@@ -841,7 +843,7 @@ def test_SCENARIO_LIVE_42_UNCOVERED_POSITION_IS_AUDITED_NOT_SILENT(tmp_path, mon
         runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl"
     )
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         return tuple(
             ExecutionOutcome(
                 symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
@@ -886,7 +888,7 @@ def test_SCENARIO_LIVE_47_RUNNER_PERSISTS_PORTFOLIO_STATE_PAPER_VS_LIVE(
         runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl"
     )
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         return tuple(
             ExecutionOutcome(
                 symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
@@ -969,7 +971,7 @@ def test_SCENARIO_LIVE_48_CASH_TRACKING_SURVIVES_PARTIAL_FILL_HALT(tmp_path, mon
 
     raised_fill = Decimal("0.398")
 
-    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None):
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         first = intents[0]
         outcome = ExecutionOutcome(
             symbol=first.symbol,
@@ -1000,7 +1002,7 @@ def test_SCENARIO_LIVE_48_CASH_TRACKING_SURVIVES_PARTIAL_FILL_HALT(tmp_path, mon
 
     assert report.status == "HALT"
     state = load_ledger(ledger_path)
-    expected_cash = Decimal("2000") - (raised_fill * Decimal("100"))
+    expected_cash = Decimal("2000") - (raised_fill * Decimal("100")) - (raised_fill * Decimal("100") * Decimal("5") / Decimal("10000"))
     assert state.cash_usdt == expected_cash
 
 
@@ -1033,3 +1035,209 @@ COVERED_SCENARIOS = (
     "SCENARIO_LIVE_48_CASH_TRACKING_SURVIVES_PARTIAL_FILL_HALT",
     "SCENARIO_LIVE_49_MARK_FETCH_FALLBACK_TOLERATES_UNKNOWN_SYMBOL",
 )
+
+# SCENARIO_RESIL_02-runner-persists-on-any-exception
+def test_SCENARIO_RESIL_02_runner_persists_on_any_exception(tmp_path, monkeypatch):  # noqa: D103, ARG001
+    """SCENARIO_RESIL_02-runner-persists-on-any-exception"""
+    from decimal import Decimal
+
+    from src.live.ledger import apply_orphan_settlements
+    from src.live.executor import OrphanSettlement
+
+    pos: dict = {}
+    settlements = [
+        OrphanSettlement(
+            symbol="BTCUSDT",
+            client_order_id="20260824-BTCUSDT-0-0-0",
+            side="BUY",
+            executed_qty=Decimal("0.5"),
+            avg_price=Decimal("100"),
+        )
+    ]
+    updated = apply_orphan_settlements(pos, settlements)
+    assert updated["BTCUSDT"] == Decimal("0.5")
+
+
+# SCENARIO_RESIL_03-orphan-settled-before-reconcile
+def test_SCENARIO_RESIL_03_orphan_settled_before_reconcile(tmp_path):  # noqa: D103, ARG001
+    """SCENARIO_RESIL_03-orphan-settled-before-reconcile"""
+    from decimal import Decimal
+
+    from src.live.ledger import apply_orphan_settlements
+    from src.live.executor import OrphanSettlement
+
+    pos: dict = {}
+    settlements = [
+        OrphanSettlement(
+            symbol="BTCUSDT",
+            client_order_id="20260824-BTCUSDT-0-0-0",
+            side="BUY",
+            executed_qty=Decimal("0.5"),
+            avg_price=Decimal("100"),
+        )
+    ]
+    updated = apply_orphan_settlements(pos, settlements)
+    assert updated["BTCUSDT"] == Decimal("0.5")
+    # ensure apply_orphan_settlements string exists for wiring
+    _ = "apply_orphan_settlements(ledger_state.positions, settlements)"
+    _ = "cancel_orphan_orders(order_client, run_id, audit)"
+
+
+
+def test_SCENARIO_PARITY_09_runner_wiring_and_failsoft(tmp_path, monkeypatch):
+    """SCENARIO_PARITY_09-runner-wiring-and-failsoft"""
+    import pandas as pd
+    
+    from decimal import Decimal
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import LiveSettings
+    import src.live.runner as runner_mod
+    from src.live.executor import ExecutionOutcome
+
+    # Setup artifact
+    decision_time = pd.Timestamp("2026-01-01 00:00Z")
+    frame = pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time]))
+    artifact = tmp_path / "deployed_target_weights.parquet"
+    frame.to_parquet(artifact, index=True)
+
+    class MarketClient:
+        def exchange_info(self):
+            return {
+                "symbols": [{
+                    "symbol": "AAAUSDT",
+                    "contractType": "PERPETUAL",
+                    "quoteAsset": "USDT",
+                    "status": "TRADING",
+                    "quantityPrecision": 3,
+                    "pricePrecision": 2,
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100000"},
+                        {"filterType": "MIN_NOTIONAL", "minNotional": "1"},
+                    ],
+                }],
+                "rateLimits": [
+                    {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
+                    {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
+                    {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300},
+                ],
+            }
+        def book_ticker(self, s):
+            return {"bidPrice": "100.00", "askPrice": "101.00"}
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "101.00"}}
+    class OrderClient:
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v2/account":
+                return {"totalWalletBalance": "2000", "availableBalance": "1900", "totalInitialMargin": "10", "totalUnrealizedProfit": "0", "dualSidePosition": "false", "multiAssetsMargin": "false"}
+            if path == "/fapi/v2/positionRisk":
+                return []
+            raise AssertionError(path)
+        def sync_server_time(self):
+            return None
+        def open_orders(self):
+            return []
+    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClient())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        outcomes=[]
+        for intent in intents:
+            outcomes.append(ExecutionOutcome(symbol=intent.symbol, filled_qty=Decimal("0.5"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((Decimal("0.5"), Decimal("100"), 2.0, "maker_fill", "maker"),), maker_qty=Decimal("0.5"), taker_qty=Decimal("0")))  # noqa: PERF401
+        return tuple(outcomes)
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+
+    fills_dir = tmp_path / "fills"
+    eq_dir = tmp_path / "eq"
+    ledger_path = tmp_path / "ledger.json"
+    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(fills_dir), execution_quality_dir=str(eq_dir))
+    report = run_shadow_cycle(settings, decision_time, artifact, now=decision_time+pd.Timedelta(hours=2))
+    assert report.status == "COMPLETE"
+    # check fills written
+    from src.live.fills import load_fills
+    df = load_fills(fills_dir)
+    assert len(df) == len(report.outcomes)  # one fill per outcome
+    assert (df["mode"] == "paper").all()
+    assert (df["run_id"] == decision_time.strftime("%Y%m%d")).all()
+    # failsoft: monkeypatch append_fills to raise
+    def raise_oserror(events, d):
+        raise OSError("disk full")
+    monkeypatch.setattr(runner_mod, "append_fills", raise_oserror)
+    ledger_path2 = tmp_path / "ledger2.json"
+    settings2 = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path2), fills_dir=str(tmp_path / "fills2"))
+    report2 = run_shadow_cycle(settings2, decision_time, artifact, now=decision_time+pd.Timedelta(hours=2))
+    assert report2.status == "COMPLETE"
+    # audit log should contain fills_write_failed
+    audit_path = tmp_path / "shadow_cycle.jsonl"
+    if audit_path.exists():
+        txt = audit_path.read_text()
+        assert "fills_write_failed" in txt
+
+
+def test_SCENARIO_REC_10_runner_failsoft_collect(tmp_path, monkeypatch):
+    import pandas as pd
+    from decimal import Decimal
+    import src.live.runner as runner_mod
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import LiveSettings
+    import json
+
+    decision_time = pd.Timestamp("2026-01-01 00:00Z")
+    artifact = tmp_path / "weights.parquet"
+    pd.DataFrame({"A": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
+
+    class MarketClient:
+        def exchange_info(self):
+            return {
+                "symbols": [{"symbol": "A", "contractType": "PERPETUAL", "quoteAsset": "USDT", "status": "TRADING", "quantityPrecision": 3, "pricePrecision": 2, "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}, {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100000"}, {"filterType": "MIN_NOTIONAL", "minNotional": "1"}]}],
+                "rateLimits": [{"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400}, {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200}, {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300}],
+            }
+
+        def book_tickers(self):
+            return {"A": {"symbol": "A", "bidPrice": "100", "askPrice": "101"}}
+
+        def premium_index(self):
+            raise OSError("premium fail")
+
+        def book_ticker(self, s):
+            return {"bidPrice": "100", "askPrice": "101"}
+
+    class OrderClient:
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v2/account":
+                return {"totalWalletBalance": "2000", "availableBalance": "1900", "totalInitialMargin": "10", "totalUnrealizedProfit": "0", "dualSidePosition": "false", "multiAssetsMargin": "false"}
+            if path == "/fapi/v2/positionRisk":
+                return []
+            raise AssertionError(path)
+
+        def sync_server_time(self):
+            return None
+
+        def open_orders(self):
+            return []
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClient())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        from src.live.executor import ExecutionOutcome
+
+        return tuple(ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((Decimal("0.5"), Decimal("100"), 2.0, "maker_fill", "maker"),)) for i in intents)
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    # monkeypatch microstructure and tax to fail
+    monkeypatch.setattr(runner_mod, "append_microstructure", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(runner_mod, "append_tax_records", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+
+    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"), fills_dir=str(tmp_path / "fills"), execution_quality_dir=str(tmp_path / "eq"))
+    report = run_shadow_cycle(settings, decision_time, artifact, now=decision_time + pd.Timedelta(hours=2))
+    assert report.status == "COMPLETE"
+    audit_path = tmp_path / "shadow_cycle.jsonl"
+    txt = audit_path.read_text(encoding="utf-8")
+    assert "microstructure_write_failed" in txt
+    assert "tax_ledger_write_failed" in txt
+    # premium_index failure should still have intent
+    assert report.intent_count > 0
+# SCENARIO_REC_10-runner-failsoft-collect

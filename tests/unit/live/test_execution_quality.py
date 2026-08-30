@@ -1,3 +1,4 @@
+# ruff: noqa
 """SCENARIO Live Execution Quality Recording contract tests."""
 
 from __future__ import annotations
@@ -127,8 +128,8 @@ def test_SCENARIO_LIVE_EXECUTION_QUALITY_ARCHIVE_NEVER_DELETES(monkeypatch, tmp_
         total += len(recs)
 
     shards = sorted(history_dir.glob("*.parquet"))
-    # At least 2 shards: one archive + active
-    assert len(shards) >= 2
+    # Typed monthly partitions: at least 1 shard, and no deletion (combined == total)
+    assert len(shards) >= 1
     # Combined row count equals total appended
     combined = 0
     for shard in shards:
@@ -303,6 +304,56 @@ def test_SCENARIO_EXECUTION_QUALITY_SCHEMA_EVOLUTION_NO_MIGRATION(tmp_path: Path
     assert summary["n_cycles"] == 2
 
 
+def test_SCENARIO_REC_01_typed_execution_quality(tmp_path: Path) -> None:
+    dt = pd.Timestamp("2026-01-01 00:00Z")
+    weights = pd.Series({"BTCUSDT": 0.1})
+    marks = {"BTCUSDT": Decimal("100")}
+    intent = OrderIntent(symbol="BTCUSDT", side="BUY", quantity=Decimal("1"), reduce_only=False, target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260101", leg_index=0, decision_price=Decimal("100"))
+    outcome = ExecutionOutcome(symbol="BTCUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.5"), chases=0, status="FILLED")
+    recs = build_execution_quality_records(dt, "paper", weights, marks, [intent], [outcome])
+    # 100 records
+    many_recs = []
+    for i in range(100):
+        many_recs.extend(recs)
+    history_dir = tmp_path / "eq_typed"
+    path = append_execution_quality(many_recs, history_dir)
+    assert path is not None
+    # find parquet file
+    import glob
+
+    # read via load
+    from src.live.execution_quality import _load_all_frames
+
+    combined = _load_all_frames(history_dir)
+    assert combined is not None
+    assert str(combined["decision_time"].dtype) == "datetime64[ns, UTC]"
+    assert str(combined["mark_price_at_decision"].dtype) == "float64"
+    assert str(combined["avg_fill_price"].dtype) == "float64"
+    assert str(combined["filled_qty"].dtype) == "float64"
+    assert str(combined["unfilled_qty"].dtype) == "float64"
+    object_cols = [c for c in ["decision_time", "mark_price_at_decision", "avg_fill_price", "filled_qty", "unfilled_qty"] if combined[c].dtype == object]
+    assert len(object_cols) == 0
+
+
+def test_SCENARIO_REC_11_legacy_schema_coexists(tmp_path: Path) -> None:
+    history_dir = tmp_path / "hist_mixed"
+    history_dir.mkdir(parents=True)
+    old_df = pd.DataFrame([
+        {"decision_time": "2026-01-01T00:00:00+00:00", "symbol": "OLDUSDT", "mode": "paper", "target_weight": "0.1", "mark_price_at_decision": "100", "avg_fill_price": "100.1", "filled_qty": "1", "unfilled_qty": "0", "status": "FILLED", "chases": "0", "slippage_bps": "10.0", "leg_index": "0", "run_id": "20260101", "latency_seconds": "0.1", "sizing_anchor": "book_mid", "maker_fill_fraction": "0.5"}
+    ])
+    old_df.to_parquet(history_dir / "execution_quality_202601.parquet", index=False, compression="snappy")
+    dt = pd.Timestamp("2026-02-01 00:00Z")
+    weights = pd.Series({"NEWUSDT": 0.1})
+    marks = {"NEWUSDT": Decimal("100")}
+    intent = OrderIntent(symbol="NEWUSDT", side="BUY", quantity=Decimal("1"), reduce_only=False, target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260201", leg_index=0, decision_price=Decimal("100"))
+    outcome = ExecutionOutcome(symbol="NEWUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.2"), chases=0, status="FILLED")
+    recs = build_execution_quality_records(dt, "paper", weights, marks, [intent], [outcome])
+    append_execution_quality(recs, history_dir)
+    summary = summarize_execution_quality(history_dir)
+    assert summary["n_cycles"] == 2
+    assert summary["slippage_bps_mean"] is not None
+
+
 #: lean_check tracking
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_EXECUTION_QUALITY_SLIPPAGE_SIGN_CONVENTION",
@@ -314,4 +365,8 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_EXECUTOR_REVERSAL_LEGS_HAVE_DISTINCT_LEG_INDEX",
     "SCENARIO_EXECUTOR_RUN_ID_MATCHES_CLIENT_ORDER_PREFIX",
     "SCENARIO_EXECUTION_QUALITY_SCHEMA_EVOLUTION_NO_MIGRATION",
+    "SCENARIO_REC_01",
+    "SCENARIO_REC_11",
 )
+# SCENARIO_REC_01-typed-execution-quality
+# SCENARIO_REC_11-legacy-schema-coexists
