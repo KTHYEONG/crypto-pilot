@@ -432,6 +432,12 @@ class BinanceFuturesRestClient:
                 indexed[str(entry["symbol"])] = entry
         return indexed
 
+    def depth(self, symbol: str, *, limit: int = 20) -> dict[str, Any]:
+        payload = self.request("GET", "/fapi/v1/depth", {"symbol": symbol, "limit": limit})
+        if not isinstance(payload, dict) or "bids" not in payload or "asks" not in payload:
+            raise DataIntegrityError("depth endpoint returned an unexpected schema")
+        return cast(dict[str, Any], payload)
+
     def new_order(self, params: Mapping[str, Any]) -> Any:
         return self.request("POST", "/fapi/v1/order", params, signed=True)
 

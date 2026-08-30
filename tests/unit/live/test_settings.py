@@ -66,3 +66,29 @@ def test_SCENARIO_LIVE_30_PAPER_MODE_SETTINGS_ARE_SAFE() -> None:
     assert settings.mainnet_trading_ack is None
     assert settings.api_key is None
     assert settings.api_secret is None
+
+
+def test_paper_fill_model_default_and_validation() -> None:
+    from pydantic import ValidationError
+
+    from src.live.settings import LiveSettings
+
+    assert LiveSettings().paper_fill_model == "immediate_taker"
+    assert LiveSettings(paper_fill_model="peg_chase").paper_fill_model == "peg_chase"
+    with pytest.raises(ValidationError, match="paper_fill_model"):
+        LiveSettings(paper_fill_model="bogus")  # type: ignore[arg-type]
+
+
+def test_orderbook_capture_settings_defaults() -> None:
+    from src.mhs.types import ExecutionSpec
+
+    from src.live.settings import LiveSettings
+
+    s = LiveSettings()
+    assert s.orderbook_capture_enabled is True
+    assert s.orderbook_capture_interval_s == 10.0
+    assert s.orderbook_capture_duration_s == 1800.0
+    assert s.orderbook_capture_depth_limit == 20
+    assert s.orderbook_capture_max_symbols == 40
+    assert s.orderbook_capture_dir is None
+    assert s.taker_slippage_bps == ExecutionSpec().taker_slippage_bps
