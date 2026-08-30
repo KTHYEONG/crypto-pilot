@@ -70,6 +70,7 @@ class PassiveExecutionPolicy:
     rate_weight_budget_fraction: float = 0.5
     max_ioc_attempts: int = 10
     fee_schedule: FeeSchedule = FeeSchedule(maker_fee_bps=ExecutionSpec().maker_fee_bps, taker_fee_bps=ExecutionSpec().taker_fee_bps)
+    taker_slippage_bps: float = ExecutionSpec().taker_slippage_bps
 
     def __post_init__(self) -> None:
         if self.passive_deadline_s >= self.window_deadline_s:
@@ -478,6 +479,51 @@ def _order_budget_exceeded(client: Any, policy: PassiveExecutionPolicy, rate_lim
     )
 
 
+def simulate_immediate_taker_fills(
+    intents: Sequence[OrderIntent],
+    books: Mapping[str, tuple[Decimal, Decimal]],
+    policy: PassiveExecutionPolicy,
+) -> tuple[ExecutionOutcome, ...]:
+    fee_bps = policy.fee_schedule.taker_fee_bps + policy.taker_slippage_bps
+    outcomes: list[ExecutionOutcome] = []
+    for intent in intents:
+        touch = books.get(intent.symbol)
+        if touch is None:
+            outcomes.append(
+                ExecutionOutcome(
+                    symbol=intent.symbol,
+                    filled_qty=_ZERO,
+                    unfilled_qty=intent.quantity,
+                    avg_fill_price=None,
+                    chases=0,
+                    status="RESIDUAL",
+                    latency_seconds=0.0,
+                    fills=(),
+                    maker_qty=_ZERO,
+                    taker_qty=_ZERO,
+                )
+            )
+            continue
+        bid, ask = touch
+        mid = (bid + ask) / Decimal(2)
+        fills = ((intent.quantity, mid, fee_bps, "immediate_taker", "taker"),)
+        outcomes.append(
+            ExecutionOutcome(
+                symbol=intent.symbol,
+                filled_qty=intent.quantity,
+                unfilled_qty=_ZERO,
+                avg_fill_price=mid,
+                chases=0,
+                status="FILLED",
+                latency_seconds=0.0,
+                fills=fills,
+                maker_qty=_ZERO,
+                taker_qty=intent.quantity,
+            )
+        )
+    return tuple(outcomes)
+
+
 def execute_intents(
     client: Any,
     intents: Sequence[OrderIntent],
@@ -490,12 +536,32 @@ def execute_intents(
     rate_limits: RateLimits | None = None,
     outcome_sink: list[ExecutionOutcome] | None = None,
     shutdown: Any | None = None,
+    paper_fill_model: str | None = None,
 ) -> tuple[ExecutionOutcome, ...]:
     """단일 협조 루프(post-all/poll-all/예산 스로틀). 반환 순서는 intents 와 1:1.
 
     어떤 예외 경로에서도 이미 확인된 체결을 잃지 않도록 진행 중 부분 결과를
     발생 예외에 partial_outcomes 속성으로 붙여 재전파한다(I-LEDGER-DURABLE 채널).
     """
+    if paper_fill_model == "immediate_taker":
+        if not intents:
+            if outcome_sink is not None:
+                outcome_sink[:] = []
+            return ()
+        books = _fetch_books(client, sorted({i.symbol for i in intents}))
+        outcomes = simulate_immediate_taker_fills(intents, books, policy)
+        if outcome_sink is not None:
+            outcome_sink[:] = list(outcomes)
+        for it, oc in zip(intents, outcomes, strict=False):
+            audit.record(
+                "intent_outcome",
+                symbol=it.symbol,
+                status=oc.status,
+                filled_qty=str(oc.filled_qty),
+                unfilled_qty=str(oc.unfilled_qty),
+                chases=0,
+            )
+        return outcomes
     runtimes = [
         _IntentRuntime(intent=intent, filters=filters.get(intent.symbol))
         for intent in intents
