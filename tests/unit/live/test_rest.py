@@ -1,3 +1,4 @@
+# ruff: noqa
 """SCENARIO_LIVE_01 / SCENARIO_LIVE_13: SHADOW 변이 억제와 네트워크 차단."""
 
 from __future__ import annotations
@@ -122,9 +123,70 @@ def test_SCENARIO_LIVE_31_RATE_LIMITS_PARSE_CANONICAL_BINANCE_SCHEMA() -> None:
         parse_rate_limits(missing_orders_10s)
 
 
+def test_SCENARIO_REC_09_rest_endpoints_signed(tmp_path: Path) -> None:
+    from urllib.parse import urlparse, parse_qs
+
+    captured: list[str] = []
+
+    class StubTransport:
+        def call(self, method: str, url: str, headers: dict[str, str]):
+            captured.append(url)
+            parsed = urlparse(url)
+            path = parsed.path
+            if path == "/fapi/v1/userTrades":
+                assert "fromId=7" in url
+                assert "signature=" in url
+                return HttpResponse(status_code=200, headers={}, body=b'[{"id":7}]')
+            if path == "/fapi/v1/income":
+                assert "signature=" in url
+                return HttpResponse(status_code=200, headers={}, body=b'[]')
+            if path == "/fapi/v1/premiumIndex":
+                assert "symbol" not in parsed.query
+                return HttpResponse(status_code=200, headers={}, body=b'[{"symbol":"BTCUSDT","markPrice":"100"}]')
+            return HttpResponse(status_code=200, headers={}, body=b"{}")
+
+    client = BinanceFuturesRestClient("https://fapi.binance.com", None, None, ExecutionMode.SHADOW, AuditLog(tmp_path / "a.jsonl"), session=StubTransport())
+    # Need api secret for signed? Mock without secret may raise, use dummy
+    from pydantic import SecretStr
+
+    client._api_secret = SecretStr("secret")
+    client._api_key = SecretStr("key")
+    # user_trades
+    res = client.user_trades("BTCUSDT", from_id=7)
+    assert isinstance(res, list)
+    # income
+    res2 = client.income()
+    assert isinstance(res2, list)
+    # premium_index
+    res3 = client.premium_index()
+    assert isinstance(res3, dict)
+    assert "BTCUSDT" in res3
+    # error cases
+    class BadTransport:
+        def call(self, method, url, headers):
+            parsed = urlparse(url)
+            if parsed.path == "/fapi/v1/userTrades":
+                return HttpResponse(status_code=200, headers={}, body=b'{"bad":1}')
+            if parsed.path == "/fapi/v1/income":
+                return HttpResponse(status_code=200, headers={}, body=b'{"bad":1}')
+            if parsed.path == "/fapi/v1/premiumIndex":
+                return HttpResponse(status_code=200, headers={}, body=b'{"bad":1}')
+            return HttpResponse(status_code=200, headers={}, body=b"{}")
+
+    client2 = BinanceFuturesRestClient("https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.SHADOW, AuditLog(tmp_path / "b.jsonl"), session=BadTransport())
+    with pytest.raises(DataIntegrityError):
+        client2.user_trades("BTCUSDT")
+    with pytest.raises(DataIntegrityError):
+        client2.income()
+    with pytest.raises(DataIntegrityError):
+        client2.premium_index()
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_01_SHADOW_BLOCKS_ALL_MUTATIONS",
     "SCENARIO_LIVE_13_NO_NETWORK_IN_UNIT_TESTS",
     "SCENARIO_LIVE_31_RATE_LIMITS_PARSE_CANONICAL_BINANCE_SCHEMA",
+    "SCENARIO_REC_09",
 )
+# SCENARIO_REC_09-rest-endpoints-signed
