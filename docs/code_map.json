@@ -382,5 +382,9 @@
   },
   "src/live/tax_ledger.py": {
     "testing": "tests/unit/live/test_tax_ledger.py"
+  },
+  "src/live/orderbook.py": {
+    "architecture": "docs/specs/paper_execution_fidelity.md",
+    "testing": "tests/unit/live/test_orderbook.py"
   }
 }

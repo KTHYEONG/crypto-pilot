@@ -1022,3 +1022,230 @@ def test_SCENARIO_PARITY_02_avg_price_preferred(tmp_path):
     rt2.phase="passive"
     _record_fill(rt2, Decimal("1"), avg_price=None)
     assert rt2.fill_notional==Decimal("100.00")
+
+
+def test_simulate_immediate_taker_fills_fills_full_quantity_at_mid() -> None:
+    from src.live.executor import FeeSchedule, PassiveExecutionPolicy, simulate_immediate_taker_fills
+    from src.live.filters import _ZERO
+    from src.live.planner import OrderIntent
+
+    intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="BUY",
+        quantity=Decimal("2"),
+        reduce_only=False,
+        target_qty=Decimal("2"),
+        current_qty=Decimal("0"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("101"),
+    )
+    books = {"BTCUSDT": (Decimal("100"), Decimal("102"))}
+    policy = PassiveExecutionPolicy(
+        fee_schedule=FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0),
+        taker_slippage_bps=3.0,
+    )
+    outcomes = simulate_immediate_taker_fills([intent], books, policy)
+    assert len(outcomes) == 1
+    oc = outcomes[0]
+    assert oc.status == "FILLED"
+    assert oc.filled_qty == Decimal("2")
+    assert oc.unfilled_qty == _ZERO
+    assert oc.avg_fill_price == Decimal("101")
+    assert oc.chases == 0
+    assert oc.latency_seconds == 0.0
+    assert len(oc.fills) == 1
+    assert oc.fills[0] == (Decimal("2"), Decimal("101"), 8.0, "immediate_taker", "taker")
+    assert oc.taker_qty == Decimal("2")
+    assert oc.maker_qty == _ZERO
+
+
+def test_simulate_immediate_taker_fills_missing_book_returns_residual() -> None:
+    from src.live.executor import FeeSchedule, PassiveExecutionPolicy, simulate_immediate_taker_fills
+    from src.live.filters import _ZERO
+    from src.live.planner import OrderIntent
+
+    intent = OrderIntent(
+        symbol="ETHUSDT",
+        side="BUY",
+        quantity=Decimal("1.5"),
+        reduce_only=False,
+        target_qty=Decimal("1.5"),
+        current_qty=Decimal("0"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("100"),
+    )
+    policy = PassiveExecutionPolicy(
+        fee_schedule=FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0),
+        taker_slippage_bps=3.0,
+    )
+    outcomes = simulate_immediate_taker_fills([intent], {}, policy)
+    oc = outcomes[0]
+    assert oc.status == "RESIDUAL"
+    assert oc.filled_qty == _ZERO
+    assert oc.avg_fill_price is None
+    assert oc.unfilled_qty == intent.quantity
+    assert oc.fills == ()
+
+
+def test_execute_intents_immediate_taker_bypasses_peg_chase_loop(tmp_path) -> None:
+    from src.live.audit import AuditLog
+    from src.live.executor import FeeSchedule, PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.planner import OrderIntent
+    import json
+
+    filt = SymbolFilters(
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"),
+        min_notional=Decimal("1"),
+        max_qty=Decimal("100000"),
+        quantity_precision=3,
+        price_precision=2,
+    )
+    intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="BUY",
+        quantity=Decimal("1.0"),
+        reduce_only=False,
+        target_qty=Decimal("1.0"),
+        current_qty=Decimal("0"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("100"),
+    )
+    policy = PassiveExecutionPolicy(
+        fee_schedule=FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0),
+        taker_slippage_bps=3.0,
+    )
+
+    class NoMutClient:
+        def book_tickers(self):
+            return {"BTCUSDT": {"bidPrice": "100", "askPrice": "102"}}
+
+        def book_ticker(self, symbol):
+            return {"bidPrice": "100", "askPrice": "102"}
+
+        def new_order(self, params):
+            raise AssertionError("new_order must not be called in immediate_taker")
+
+        def query_order(self, *a, **k):
+            raise AssertionError("query_order must not be called in immediate_taker")
+
+        def cancel_order(self, *a, **k):
+            raise AssertionError("cancel_order must not be called in immediate_taker")
+
+    audit_path = tmp_path / "audit_immediate.jsonl"
+    audit = AuditLog(audit_path)
+    sleeps: list[float] = []
+
+    def sleep_fn(s):
+        sleeps.append(s)
+
+    sink: list = []
+    client = NoMutClient()
+    outcomes = execute_intents(
+        client,
+        [intent],
+        {"BTCUSDT": filt},
+        policy,
+        audit,
+        lambda: 0.0,
+        sleep_fn,
+        outcome_sink=sink,
+        paper_fill_model="immediate_taker",
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].status == "FILLED"
+    assert sleeps == []
+    assert sink == list(outcomes)
+    events = [json.loads(l) for l in audit_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert any(e.get("event") == "intent_outcome" for e in events)
+
+
+def test_execute_intents_default_model_preserves_peg_chase_path(tmp_path) -> None:
+    from src.live.audit import AuditLog
+    from src.live.executor import FeeSchedule, PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.planner import OrderIntent
+
+    filt = SymbolFilters(
+        symbol="AAAUSDT",
+        tick_size=Decimal("0.10"),
+        step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"),
+        min_notional=Decimal("1"),
+        max_qty=Decimal("100000"),
+        quantity_precision=3,
+        price_precision=2,
+    )
+    intent = OrderIntent(
+        symbol="AAAUSDT",
+        side="BUY",
+        quantity=Decimal("1.0"),
+        reduce_only=False,
+        target_qty=Decimal("1.0"),
+        current_qty=Decimal("0"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("100"),
+    )
+    policy = PassiveExecutionPolicy(
+        poll_interval_s=3.0,
+        passive_deadline_s=1000.0,
+        window_deadline_s=6000.0,
+        max_slices=1,
+        fee_schedule=FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0),
+        taker_slippage_bps=3.0,
+    )
+
+    class FillClient:
+        def __init__(self):
+            self.orders: list[dict] = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "99.00"}}
+
+        def book_ticker(self, symbol):
+            return {"bidPrice": "100.00", "askPrice": "99.00"}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, symbol, oid):
+            # return filled quantity as posted
+            for o in self.orders:
+                if o["newClientOrderId"] == oid:
+                    return {"executedQty": str(o["quantity"]), "avgPrice": o["price"]}
+            return {"executedQty": "0", "avgPrice": "0"}
+
+    audit = AuditLog(tmp_path / "peg.jsonl")
+    client = FillClient()
+    clock_val = [0.0]
+
+    def clock():
+        v = clock_val[0]
+        clock_val[0] += 3.0
+        return v
+
+    outcomes = execute_intents(
+        client,
+        [intent],
+        {"AAAUSDT": filt},
+        policy,
+        audit,
+        clock,
+        lambda s: None,
+    )
+    assert outcomes[0].status == "FILLED"
+    # reasons should be maker_fill or backstop_taker/timeout_taker
+    reasons = {r for _, _, _, r, _ in outcomes[0].fills}
+    assert reasons.issubset({"maker_fill", "timeout_taker", "backstop_taker"})
+    assert len(client.orders) >= 1

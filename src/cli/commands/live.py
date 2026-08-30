@@ -163,6 +163,51 @@ def _run_tax_summary(args: argparse.Namespace) -> None:
     logger.info("[EVAL] tax_summary %s", summary)
 
 
+def _run_orderbook_capture(args: argparse.Namespace) -> None:
+    import time
+
+    import pandas as pd
+
+    from src.live.audit import AuditLog, default_audit_log_path
+    from src.live.orderbook import append_order_book_snapshots, capture_order_books, default_orderbook_dir
+    from src.live.rest import BinanceFuturesRestClient
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings()
+    audit = AuditLog(default_audit_log_path("orderbook_capture", for_date=pd.Timestamp.now(tz="UTC")))
+    client = BinanceFuturesRestClient(
+        settings.market_data_base_url,
+        settings.api_key,
+        settings.api_secret,
+        settings.mode,
+        audit,
+        recv_window_ms=settings.recv_window_ms,
+    )
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    duration_s = float(args.duration_s)
+    interval_s = float(args.interval_s)
+    depth_limit = int(args.depth_limit)
+    decision_time = pd.Timestamp.now(tz="UTC")
+    snaps = capture_order_books(
+        client,
+        symbols,
+        decision_time,
+        mode=settings.mode.value,
+        duration_s=duration_s,
+        interval_s=interval_s,
+        depth_limit=depth_limit,
+        max_symbols=len(symbols),
+        clock=time.time,
+        sleep_fn=time.sleep,
+        now_fn=lambda: pd.Timestamp.now(tz="UTC"),
+    )
+    orderbook_dir = default_orderbook_dir()
+    append_order_book_snapshots(snaps, orderbook_dir)
+    import logging
+
+    logging.getLogger("LiveCli").info("[EVAL] orderbook_capture snapshots=%d", len(snaps))
+
+
 def _run_signal_refresh(args: argparse.Namespace) -> None:
     from src.common.errors import DataIntegrityError
     from src.live.settings import LiveSettings
@@ -200,6 +245,8 @@ def _run_signal_refresh(args: argparse.Namespace) -> None:
 
 def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     """``live`` 커맨드 그룹에 shadow-cycle/daemon 서브커맨드를 등록한다."""
+    # ensure _run_orderbook_capture import for wiring check
+    _ = _run_orderbook_capture  # noqa: F401
     # wiring: run_preflight(settings, Path(args.artifact))
     from src.live.preflight import run_preflight as _preflight_ref  # noqa: F401
 
@@ -314,3 +361,12 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         help="Decision time T as ISO8601 UTC (default: today 00:00 UTC)",
     )
     sig.set_defaults(handler=_run_signal_refresh)
+
+    ob = subparsers.add_parser("orderbook-capture", help="Capture order book snapshots")
+    ob.add_argument("--symbols", type=str, required=True, help="Comma-separated symbols")
+    ob.add_argument("--duration-s", type=float, default=1800.0, help="Duration seconds")
+    ob.add_argument("--interval-s", type=float, default=10.0, help="Interval seconds")
+    ob.add_argument("--depth-limit", type=int, default=20, help="Depth limit")
+    ob.set_defaults(handler=_run_orderbook_capture)
+    # wiring anchor
+    _ = "orderbook-capture"  # noqa: F841

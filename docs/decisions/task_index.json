@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_LIVE_PAPER_EXECUTION_FIDELITY",
+      "date": "2026-08-30",
+      "adr_id": "ADR_20260830_LIVE_PAPER_EXECUTION_FIDELITY",
+      "domain": "execution",
+      "title": "PAPER 즉시-taker 체결 정합 + 호가창 수집 인프라 + 전략 노출 하드닝",
+      "why": "PAPER 가상체결이 백테스트 OHLCV_IMMEDIATE_TAKER(전량 즉시 taker)와 경로·비용이 불일치했고, L2 호가 시계열이 없어 지정가/스마트주문 연구가 불가능했으며, public 리포에 연구 성과 산출물(daily_ledger·run_history·diagnostic json)과 코드 주석의 측정 CAGR/Sharpe/Calmar가 노출되어 있었다.",
+      "resolution": "src/live/executor.py: simulate_immediate_taker_fills 신설 + execute_intents(paper_fill_model=) 단락 경로(전량 book-mid 체결, fee_bps=taker_fee+taker_slippage, reason=immediate_taker); PassiveExecutionPolicy.taker_slippage_bps. src/live/orderbook.py 신설: fetch_order_book/capture_order_books(bounded·failsoft·shutdown-aware)/append_order_book_snapshots(일단위 zstd Parquet, flat top-20, qty float32, dedup key symbol+captured_at+last_update_id)/load_order_book_snapshots. src/live/rest.py: depth() 무서명 엔드포인트. LiveSettings 7필드(+paper_fill_model 검증). runner.py 배선(관측 전용 fail-soft, market_client, HALT 금지). live orderbook-capture CLI. .gitignore/.dockerignore로 docs/results는 .enc만 추적, daily_ledger·run_history·diagnostic json git rm --cached, config.py/params.py 성과수치 주석 스크럽, tests/contract/test_strategy_confidentiality.py 회귀 가드.",
+      "impact": "PAPER 검증 3개월 체결이 백테스트와 동형으로 기록되어 정합 비교 가능. 호가 스냅샷이 용량 효율적으로 축적되어 지정가 전환 연구 기반 확보. 공개 리포의 전략 방법론·성과 노출 표면 축소(HEAD·향후 유출 차단; 히스토리·봉인 파라미터는 범위 외)."
+    },
+    {
       "task_id": "TASK_LIVE_RECORDS_AND_TAX_LEDGER",
       "date": "2026-08-30",
       "adr_id": "ADR_20260830_LIVE_RECORDS_AND_TAX_LEDGER",
@@ -989,16 +999,6 @@
       "why": "P0 gap-trim 데이터 손상 복구(ADR_20260812_MHS_GAP_TRIM_CORRUPTION_FIX) 이후 13차 재실행에서 결손 경계 DataIntegrityError로 조기 종료. 전수조사 결과 데이터 기간 파라미터(MHS_DISCOVERY_START 등)가 여러 파일에 산발적으로 재선언되어 있어 유지보수 혼란도 확인.",
       "resolution": "src/mhs/contracts.py에 MHS_DISCOVERY_START 단일 소스 신설(src/mhs/evaluation.py 3개 fold + application/research/mhs/evaluation.py가 재사용), trend_screen_catalog.QUALIFICATION_END을 HOLDOUT_CUTOFF 참조로 교체, data.py 7개 CLI 서브커맨드의 --start 기본값을 _DEFAULT_COLLECTION_START 상수로 통합. XsCompositeSpec에 opt-in gap_carry 필드 추가(기본 False, 기존 15+ 호출부 무변화)로 run_xs_composite_ledger가 결손 진입 바에서 마지막 유효 open을 캐리(정밀 리플레이 엔진의 MISSING_HELD_MARK 패턴 재사용); mhs_ledger_pnl은 gap_carry=True 기본값으로 MHS 3개 호출부 자동 적용. /check 과정에서 무관한 XS growth-sizing 실데이터 의존 테스트 격리 버그(test_xs_screen_cli_parses_and_dispatches가 --no-growth-sizing 누락으로 실 프로덕션 parquet를 우회 로드)를 --no-growth-sizing 플래그 추가로 수정.",
       "impact": "결손 경계 크래시 해소로 13차 MHS 재측정 가능. 기간 파라미터 단일화로 향후 유사 사고(값 불일치 은닉) 재발 위험 감소. 비MHS 15+ 호출부(XS trend-screen/alpha blend 등) byte-identical 보존 확인(lean_check PASS)."
-    },
-    {
-      "task_id": "TASK_MHS_GAP_TRIM_CORRUPTION_FIX",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_GAP_TRIM_CORRUPTION_FIX",
-      "domain": "data",
-      "title": "MHS gap-trim 데이터 손상 규명 및 복구 + 재발방지 진단 유틸 추가",
-      "why": "12차 결과(백필 후 재측정)가 이전보다 크게 악화(primary_autocorr_sharpe 0.0915, fold0/1 강한 음수). mhs-res.md §6이 유니버스 확장의 정직한 반영인지 gap-trim 부작용인지 미분리 상태로 남겨둠.",
-      "resolution": "scratch/trim_to_valid_segment_v2.py가 docstring(가장 이른 세그먼트 우선 보존)과 반대로 chosen=len(lengths)-1로 항상 최신 세그먼트만 남기도록 구현돼, 37개 주요 유동성 심볼(XRP/LTC/TRX/ETC/XLM 등)의 백필 이력 중앙값 806일을 프로덕션 parquet에서 삭제한 사실을 실측 확인. scratch/backfill_gap_backup_v3에서 75개 심볼 OHLCV+funding을 복원하고 손상 스크립트를 삭제. 기존 load_base_panel/liquid_half_eligibility/horizon_log_return이 이미 NaN 갭에 안전함을 확인해 대체 삭제 로직은 신설하지 않고, 대신 읽기 전용 detect_internal_gaps 진단 유틸(src/market_data/storage/gap_report.py)과 CLI report-internal-gaps 서브커맨드를 추가해 향후 동일한 물리적 삭제 재발을 방지.",
-      "impact": "P0 데이터 손상 원인을 (b) gap-trim 구현 버그로 확정, 12차 수치는 오염된 데이터 기준으로 무효 처리. 13차 재실행 시도에서 별도의 신규 이슈(체결 레이어가 갭 진입 경계에서 마지막 유효 바의 포지션을 다음 바 NaN open/수익률로 청산하려다 DataIntegrityError fail-closed, FILUSDT 2022-02-26 결손에서 재현)를 발견 -- P0 수정으로 은폐돼 있던 별개의 갭-경계 처리 미비가 드러난 것으로, 후속 /spec 대상으로 분리."
     }
   ]
 }
