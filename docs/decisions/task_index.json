@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_ALPHA_SOURCE_DATA_COLLECTION",
+      "date": "2026-08-30",
+      "adr_id": "ADR_20260830_ALPHA_SOURCE_DATA_COLLECTION",
+      "domain": "data",
+      "title": "MHS 알파용 추가 원본 데이터 수집: 청산 WS 스트림 + OI/LSR REST live tail",
+      "why": "배포 MHS 전략의 알파는 전량 1h OHLCV+펀딩 파생. 청산(forced orders)은 Vision liquidationSnapshot 빈 디렉터리·allForceOrders 404로 소급 불가(WS만 유일), OI/LSR은 Vision daily/metrics로 수집되나 클라우드 데몬 로컬에 없고 발행 ~1-2일 지연.",
+      "resolution": "src/market_data/streams/liquidations.py 신설: LiquidationEvent/parse_liquidation(raw forceOrder+ccxt unified)/append_liquidation_events(일단위 zstd 파티션, price float64·qty float32·category, dedup key symbol+event_time_ms+price+orig_qty+filled_accum_qty)/load_liquidation_events/run_liquidation_stream(ccxt.pro watch_liquidations, 지수백오프 1→60s 무한재연결, bounded buffer, shutdown flush+close). BinanceClient.fetch_futures_data_metric(/futures/data/* 무서명, endpoint 화이트리스트). DataCollector._merge_metrics_frames(precedence 명시)+ensure_metrics_live_tail(4엔드포인트 5m outer-join→_METRICS_CANONICAL_COLUMNS, available_at=datetime+5min). data collect stream-liquidations CLI + _refresh_live_universe fail-soft 배선. docker-compose liquidation-collector 독립 서비스. 신규 의존성 0(ccxt 4.5.70 번들 ccxt.pro).",
+      "impact": "페이퍼 검증 기간 중 대체불가 청산 데이터셋 축적 시작. 클라우드 데몬이 OI/LSR을 canonical 스키마로 로컬 확보 → 향후 MHS feature registry 연결 시 재수집 불필요. 저장: 청산 <1MB/일, OI/LSR ~12KB/일/심볼."
+    },
+    {
       "task_id": "TASK_LIVE_PAPER_EXECUTION_FIDELITY",
       "date": "2026-08-30",
       "adr_id": "ADR_20260830_LIVE_PAPER_EXECUTION_FIDELITY",
@@ -989,16 +999,6 @@
       "why": "데이터 기간/gap-carry 스펙 적용 후 13차 재실행에서 fold0이 CAPITAL_INVARIANT_BREACH로 무효화됨. 5회 실측 계측(임시 디버그, 실행 후 원복)으로 원인이 결손 데이터(funding/OHLCV/mark 전부 배제 확인)나 이미 알려진 held_mark_trigger 범주가 아니라, _BoundExecutionReplayAccumulator.consume()의 self.cash 스칼라 누적값이 fill 처리 중 비유한 값에 무방비 상태임을 확인. 진짜 최초 트리거는 맥락 없이 수 시간 뒤에야 벡터화 검증에서 드러나 진단 비용이 매우 컸음.",
       "resolution": "같은 파일의 simulated_inventory_ledger가 이미 쓰는 fill 단위 유한성 가드 패턴을 스트리밍 accumulator의 두 fill-sizing 지점(래더드/멀티트랜치 분기, 단일 체결 분기)에 이식. 비유한 qty/fill_price 발생 시 심볼·결정시각·weight·equity·decision_price를 포함한 DataIntegrityError를 즉시 발생시키며, 메시지에 'capital accounting invariant' 키워드를 유지해 기존 _classify_execution_failure 분류(CAPITAL_INVARIANT_BREACH)와 호환. 강제청산 경로는 이미 자체 가드가 있어 무변경. 6개 회귀 테스트로 fail-fast 동작·분류 유지·정상 리플레이 무변화(오라클 동치)를 검증.",
       "impact": "다음 발생 시 즉시 심볼/시각/원인값 확보 가능해져 향후 진단 비용 대폭 절감. 근본 산술 원인(왜 처음 비유한이 되는지)은 여전히 미확정 -- 이번 계약은 진단 전제 조건만 마련했고, 실제 근본 수정은 재발 시 확보되는 새 예외 메시지를 근거로 별도 /spec 필요."
-    },
-    {
-      "task_id": "TASK_MHS_DATA_PERIOD_AND_GAP_HARDENING",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_DATA_PERIOD_AND_GAP_HARDENING",
-      "domain": "data",
-      "title": "데이터 기간 파라미터 단일화 + 결손 데이터 gap_carry 견고화",
-      "why": "P0 gap-trim 데이터 손상 복구(ADR_20260812_MHS_GAP_TRIM_CORRUPTION_FIX) 이후 13차 재실행에서 결손 경계 DataIntegrityError로 조기 종료. 전수조사 결과 데이터 기간 파라미터(MHS_DISCOVERY_START 등)가 여러 파일에 산발적으로 재선언되어 있어 유지보수 혼란도 확인.",
-      "resolution": "src/mhs/contracts.py에 MHS_DISCOVERY_START 단일 소스 신설(src/mhs/evaluation.py 3개 fold + application/research/mhs/evaluation.py가 재사용), trend_screen_catalog.QUALIFICATION_END을 HOLDOUT_CUTOFF 참조로 교체, data.py 7개 CLI 서브커맨드의 --start 기본값을 _DEFAULT_COLLECTION_START 상수로 통합. XsCompositeSpec에 opt-in gap_carry 필드 추가(기본 False, 기존 15+ 호출부 무변화)로 run_xs_composite_ledger가 결손 진입 바에서 마지막 유효 open을 캐리(정밀 리플레이 엔진의 MISSING_HELD_MARK 패턴 재사용); mhs_ledger_pnl은 gap_carry=True 기본값으로 MHS 3개 호출부 자동 적용. /check 과정에서 무관한 XS growth-sizing 실데이터 의존 테스트 격리 버그(test_xs_screen_cli_parses_and_dispatches가 --no-growth-sizing 누락으로 실 프로덕션 parquet를 우회 로드)를 --no-growth-sizing 플래그 추가로 수정.",
-      "impact": "결손 경계 크래시 해소로 13차 MHS 재측정 가능. 기간 파라미터 단일화로 향후 유사 사고(값 불일치 은닉) 재발 위험 감소. 비MHS 15+ 호출부(XS trend-screen/alpha blend 등) byte-identical 보존 확인(lean_check PASS)."
     }
   ]
 }

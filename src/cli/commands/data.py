@@ -112,6 +112,33 @@ def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) 
         return False
 
 
+def _stream_liquidations(args: argparse.Namespace) -> None:
+    import asyncio
+    from pathlib import Path
+
+    from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
+    from src.market_data.streams.liquidations import default_liquidations_dir, run_liquidation_stream
+
+    flag = ShutdownFlag()
+    install_shutdown_handlers(flag)
+    raw_symbols = getattr(args, "symbols", None)
+    symbols: list[str] | None = None
+    if raw_symbols:
+        parsed = [s.strip() for s in str(raw_symbols).split(",") if s.strip()]
+        symbols = parsed if parsed else None
+    dir_arg = getattr(args, "dir", None)
+    directory = Path(dir_arg) if dir_arg else default_liquidations_dir()
+    flush_interval_s = float(getattr(args, "flush_interval_s", 60.0))
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=symbols,
+            directory=directory,
+            flush_interval_s=flush_interval_s,
+            shutdown=flag,
+        )
+    )
+
+
 def _refresh_live_universe(args: argparse.Namespace) -> None:
     """Incremental tail top-up: 1h/funding for every cached dev symbol, then
     the 3m roster for the deployed execution universe. 1h/funding MUST run
@@ -151,6 +178,14 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
     exec_size = int(getattr(args, "execution_universe_size", 60) or 60)
     plan = build_mhs_execution_plan(str(start), str(now), timeframe="3m", execution_universe_size=exec_size)
     collect_mhs_execution_data(plan, execute=True, workers=2)
+    try:
+        for sym in plan.symbols:
+            try:
+                collector.ensure_metrics_live_tail(sym, lookback_days=7)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("[DATA] metrics_live_tail symbol=%s failed error=%s", sym, exc)
+    except Exception:  # noqa: BLE001
+        _logger.exception("[DATA] metrics_live_tail batch failed")
 
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     _logger.info(
@@ -270,6 +305,12 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     report_gaps.add_argument("--start", default="2019-01-01")
     report_gaps.add_argument("--end", required=True)
     report_gaps.set_defaults(handler=_report_internal_gaps)
+
+    stream_liq = collect_sub.add_parser("stream-liquidations", help="Stream liquidation events via WebSocket")
+    stream_liq.add_argument("--symbols", type=str, default=None, help="Comma-separated symbols (default: all market)")
+    stream_liq.add_argument("--flush-interval-s", type=float, default=60.0)
+    stream_liq.add_argument("--dir", type=str, default=None)
+    stream_liq.set_defaults(handler=_stream_liquidations)
 
     # wiring: refresh.set_defaults(handler=_refresh_live_universe)
     refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h/funding + 3m roster)")

@@ -386,5 +386,9 @@
   "src/live/orderbook.py": {
     "architecture": "docs/specs/paper_execution_fidelity.md",
     "testing": "tests/unit/live/test_orderbook.py"
+  },
+  "src/market_data/streams/liquidations.py": {
+    "architecture": "docs/specs/alpha_source_data_collection.md",
+    "testing": "tests/unit/market_data/test_liquidations.py"
   }
 }
