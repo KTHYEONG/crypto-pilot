@@ -67,6 +67,62 @@ def assert_signal_available(decision_time: pd.Timestamp, now: pd.Timestamp) -> N
         )
 
 
+def latest_decision_marks(
+    artifact_path: Path,
+    decision_time: pd.Timestamp,
+    *,
+    artifact_key: SecretStr | None = None,
+) -> pd.Series | None:
+    """deployed_decision_marks 아티팩트에서 decision_time 행을 읽는다."""
+    decision_ts = _as_utc(decision_time)
+    base = Path(artifact_path)
+    if "deployed_target_weights" not in base.name:
+        return None
+    # 파일명만 치환: deployed_target_weights -> deployed_decision_marks
+    marks_name = base.name.replace("deployed_target_weights", "deployed_decision_marks")
+    marks_path = base.parent / marks_name
+    # handle .enc vs plain: check both existence
+    candidate: Path | None = None
+    if marks_path.exists():
+        candidate = marks_path
+    elif artifact_key is not None:
+        # try .enc variant if not already
+        enc = marks_path if str(marks_path).endswith(".enc") else Path(f"{marks_path}.enc")
+        if enc.exists():
+            candidate = enc
+        else:
+            # also try direct marks_path as enc when base was .enc but name replacement lost .enc?
+            pass
+    if candidate is None:
+        # also check if plain path with .enc exists even without key? fallback
+        enc_alt = marks_path if str(marks_path).endswith(".enc") else Path(f"{marks_path}.enc")
+        if enc_alt.exists():
+            candidate = enc_alt
+        else:
+            return None
+    if candidate is None:
+        return None
+    if str(candidate).endswith(".enc"):
+        if artifact_key is None:
+            raise ArtifactSealError(f"sealed artifact requires a key: {candidate}")
+        frame = read_sealed_parquet(candidate, derive_key(artifact_key))
+    else:
+        try:
+            frame = pd.read_parquet(candidate)
+        except (FileNotFoundError, OSError) as exc:
+            raise DataIntegrityError(f"decision marks artifact missing: {candidate}") from exc
+    index = pd.DatetimeIndex(frame.index)
+    if index.tz is None:
+        raise DataIntegrityError("decision marks index must be tz-aware UTC")
+    # normalize decision_ts to match index tz
+    if decision_ts not in index:
+        raise DataIntegrityError(
+            f"decision_time {decision_ts} not present in decision marks artifact"
+        )
+    row = frame.loc[decision_ts]
+    return pd.Series(row, index=frame.columns, dtype="float64", name=decision_ts)
+
+
 def assert_signal_fresh(
     decision_time: pd.Timestamp, now: pd.Timestamp, max_staleness: pd.Timedelta
 ) -> None:

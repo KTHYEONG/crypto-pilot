@@ -74,12 +74,32 @@ def fetch_account_snapshot(client: Any, *, now: pd.Timestamp) -> AccountSnapshot
     )
 
 
-def resolve_sizing_equity(snapshot: AccountSnapshot, cap_usdt: Decimal) -> Decimal:
-    """I-EQUITY-MTM: E = min(wallet_balance + unrealized_pnl, cap_usdt).
-
-    cap 은 '목표 노셔널'이 아니라 사이징 에쿼티의 절대 상한 캡이다.
-    결과가 0 이하면 RiskGateBreach 로 전체 HALT 한다.
-    """
+def resolve_sizing_equity(
+    snapshot: AccountSnapshot,
+    cap_usdt: Decimal,
+    *,
+    mode: ExecutionMode | None = None,
+    cash_usdt: Decimal | None = None,
+    positions: Mapping[str, Decimal] | None = None,
+    marks: Mapping[str, Decimal] | None = None,
+) -> Decimal:
+    """I-EQUITY-MODE / I-EQUITY-MTM: 모드에 따라 가상 MTM 분기."""
+    if mode is not None and mode.suppresses_mutations:
+        # virtual MTM: cash + Σ qty*mark, 첫 사이클 cash None이면 cap으로 시드
+        cash = cash_usdt if cash_usdt is not None else cap_usdt
+        total = Decimal(cash)
+        if positions is not None and marks is not None:
+            for sym, qty in positions.items():
+                mk = marks.get(sym)
+                if mk is not None:
+                    total += qty * mk
+        equity = min(total, cap_usdt)
+        if equity <= Decimal(0):
+            raise RiskGateBreach(
+                f"sizing equity {equity} must be positive "
+                f"(virtual_mtm={total} cap={cap_usdt})"
+            )
+        return equity
     equity = min(snapshot.wallet_balance + snapshot.unrealized_pnl, cap_usdt)
     if equity <= Decimal(0):
         raise RiskGateBreach(

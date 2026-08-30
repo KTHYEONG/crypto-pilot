@@ -8,6 +8,7 @@ from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.mhs.params import GROWTH_RISK_ENVELOPES
+from src.mhs.types import ExecutionSpec
 
 #: LIVE_MAINNET 승인 문자열. 이 값과 정확히 일치해야만 실계좌 모드가 생성된다.
 MAINNET_TRADING_ACK = "I_UNDERSTAND_REAL_MONEY"
@@ -63,6 +64,15 @@ class LiveSettings(BaseSettings):
     artifact_key: SecretStr | None = None
     # 신호 스테일 상한(시간). 초과 신호는 주문 0건으로 스킵한다. env: LIVE_MAX_SIGNAL_STALENESS_HOURS.
     max_signal_staleness_hours: float = 6.0
+    daemon_catchup_buffer_minutes: float = 20.0
+    daemon_max_attempts_per_day: int = 5
+    heartbeat_path: str | None = None
+    maker_fee_bps: float = ExecutionSpec().maker_fee_bps
+    taker_fee_bps: float = ExecutionSpec().taker_fee_bps
+    fills_dir: str | None = None
+    microstructure_dir: str | None = None
+    tax_ledger_dir: str | None = None
+    tax_collection_enabled: bool = True
 
     # 리스크 게이트(등록 상한). 레버리지 천장은 리스크 엔벨로프 레지스트리에서 유도한다.
     max_gross_leverage: float = GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
