@@ -23,8 +23,10 @@ def target_quantities(
     marks: Mapping[str, Decimal],
     filters: Mapping[str, SymbolFilters],
     equity_usdt: Decimal,
+    *,
+    sizing_marks: Mapping[str, Decimal] | None = None,
 ) -> tuple[dict[str, Decimal], list[DroppedSymbol]]:
-    """종목별 목표 노셔널 = equity * weight, 목표 수량 = 노셔널 / mark."""
+    """종목별 목표 노셔널 = equity * weight, 목표 수량 = 노셔널 / sizing_mark."""
     targets: dict[str, Decimal] = {}
     dropped: list[DroppedSymbol] = []
     for symbol, weight in weights.items():
@@ -35,7 +37,15 @@ def target_quantities(
         if symbol_filters is None or mark is None or mark <= 0:
             dropped.append(DroppedSymbol(sym, "NOT_TRADABLE", target_notional))
             continue
-        raw_qty = target_notional / mark
+        # sizing anchor separation
+        if sizing_marks is not None:
+            s_mark = sizing_marks.get(sym)
+            if s_mark is None:
+                dropped.append(DroppedSymbol(sym, "DECISION_MARK_MISSING", target_notional))
+                continue
+            raw_qty = target_notional / s_mark
+        else:
+            raw_qty = target_notional / mark
         quantized = quantize_order(symbol_filters, raw_qty, mark, reduce_only=False)
         if quantized is None:
             reason = "MIN_QTY" if abs(raw_qty) < symbol_filters.min_qty else "MIN_NOTIONAL"

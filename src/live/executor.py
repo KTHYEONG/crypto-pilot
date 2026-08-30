@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any
 
@@ -23,11 +23,25 @@ from src.live.errors import LiveTradingError, OrderObsolete, VenueError
 from src.live.filters import _ZERO, SymbolFilters, quantize_to_multiple
 from src.live.planner import OrderIntent, build_client_order_id
 from src.live.rest import PaperResponse, RateLimits, ShadowResponse
+from src.mhs.types import ExecutionSpec
 
 _BPS_DENOMINATOR = Decimal(10_000)
 
 #: 부모 intent의 최대 슬라이스 노셔널(등록 상수).
 MAX_SLICE_NOTIONAL = Decimal("500")
+
+
+@dataclass(frozen=True, slots=True)
+class FeeSchedule:
+    maker_fee_bps: float
+    taker_fee_bps: float
+
+    def bps_for(self, liquidity: str) -> float:
+        if liquidity == "maker":
+            return self.maker_fee_bps
+        if liquidity == "taker":
+            return self.taker_fee_bps
+        raise ValueError(f"unknown liquidity {liquidity!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +69,7 @@ class PassiveExecutionPolicy:
     max_slices: int = 4
     rate_weight_budget_fraction: float = 0.5
     max_ioc_attempts: int = 10
+    fee_schedule: FeeSchedule = FeeSchedule(maker_fee_bps=ExecutionSpec().maker_fee_bps, taker_fee_bps=ExecutionSpec().taker_fee_bps)
 
     def __post_init__(self) -> None:
         if self.passive_deadline_s >= self.window_deadline_s:
@@ -88,6 +103,18 @@ class ExecutionOutcome:
     chases: int
     status: str
     latency_seconds: float | None = None
+    fills: tuple[tuple[Decimal, Decimal, float, str, str], ...] = ()
+    maker_qty: Decimal = _ZERO
+    taker_qty: Decimal = _ZERO
+
+
+@dataclass(frozen=True, slots=True)
+class OrphanSettlement:
+    symbol: str
+    client_order_id: str
+    side: str
+    executed_qty: Decimal
+    avg_price: Decimal | None
 
 
 def _slice_quantities(total: Decimal, slice_count: int, step_size: Decimal) -> list[Decimal]:
@@ -262,21 +289,46 @@ def _cancel_and_settle(client: Any, rt: _IntentRuntime) -> None:
     if rt.paper_active:
         rt.paper_active = False
         rt.active_id = None
+        rt.active_post_qty = _ZERO
         return
     _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
-    executed = Decimal(
-        str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
-    )
-    _record_fill(rt, executed)
+    payload = client.query_order(rt.intent.symbol, rt.active_id)
+    executed = Decimal(str(payload.get("executedQty", "0")))
+    avg_raw = payload.get("avgPrice") if "avgPrice" in payload else payload.get("avg_price")
+    avg_price: Decimal | None = None
+    if avg_raw is not None and str(avg_raw) not in ("", "0", "0.0", "0.00"):
+        try:
+            avg_price = Decimal(str(avg_raw))
+            if avg_price == _ZERO:
+                avg_price = None
+        except Exception:
+            avg_price = None
+    # fee schedule from active runtime? use default if not tracked
+    _record_fill(rt, executed, avg_price=avg_price)
     rt.active_id = None
+    rt.active_post_qty = _ZERO
 
 
-def _record_fill(rt: _IntentRuntime, executed: Decimal) -> None:
+def _record_fill(rt: _IntentRuntime, executed: Decimal, *, avg_price: Decimal | None = None, fee_schedule: FeeSchedule | None = None) -> None:
     delta_fill = executed - rt.reported_executed
-    if delta_fill > _ZERO:
-        rt.filled_total += delta_fill
-        rt.fill_notional += delta_fill * rt.active_price
-        rt.reported_executed = executed
+    if delta_fill <= _ZERO:
+        # even if no delta, update reported to executed for tracking
+        if executed != rt.reported_executed:
+            rt.reported_executed = executed
+        return
+    price = avg_price if avg_price is not None else rt.active_price
+    if price is None or price <= _ZERO:
+        price = rt.active_price
+    rt.filled_total += delta_fill
+    rt.fill_notional += delta_fill * price
+    rt.reported_executed = executed
+    # Determine liquidity: GTX->maker, IOC->taker based on phase or active timeInForce
+    # Use phase as proxy: passive => maker, ioc => taker
+    # If active timeInForce was tracked, use it; fallback phase.
+    liquidity = "maker" if rt.phase == "passive" else "taker"
+    fee_bps = fee_schedule.bps_for(liquidity) if fee_schedule is not None else (2.0 if liquidity == "maker" else 5.0)  # noqa: SIM108
+    reason = "maker_fill" if liquidity == "maker" else "timeout_taker"
+    rt.fills.append((delta_fill, price, fee_bps, reason, liquidity))
 
 
 def _simulate_paper_fill(
@@ -323,6 +375,8 @@ class _IntentRuntime:
     # PAPER 모드의 가상 활성 주문: 실제 주문이 없으므로 조회/취소가 아니라
     # 시뮬레이터가 이미 반영한 체결로 정산한다.
     paper_active: bool = False
+    active_post_qty: Decimal = _ZERO
+    fills: list[tuple[Decimal, Decimal, float, str, str]] = field(default_factory=list)
 
     @property
     def done(self) -> bool:
@@ -344,6 +398,10 @@ class _IntentRuntime:
         # Guard against spurious negative due to clock skew (contract I-LATENCY-NONNEGATIVE).
         if latency is not None and latency < 0.0:
             latency = 0.0
+        maker_qty = sum((qty for qty, _, _, _, liq in self.fills if liq == "maker"), _ZERO)
+        taker_qty = sum((qty for qty, _, _, _, liq in self.fills if liq == "taker"), _ZERO)
+        # If no fills recorded but filled_total>0 (fallback via paper path), assume maker for residual compatibility
+        # but maker_qty/taker_qty already zero; downstream cashflow will fallback.
         return ExecutionOutcome(
             symbol=self.intent.symbol,
             filled_qty=self.filled_total,
@@ -354,21 +412,70 @@ class _IntentRuntime:
             chases=self.chases,
             status=status,
             latency_seconds=latency,
+            fills=tuple(self.fills),
+            maker_qty=maker_qty,
+            taker_qty=taker_qty,
         )
 
 
-def cancel_orphan_orders(client: Any, client_order_prefix: str, audit: AuditLog) -> int:
-    """prefix 일치 고아 주문을 재조정 이전에 전량 취소하고 건수를 반환한다(-2011 benign)."""
+def cancel_orphan_orders(client: Any, client_order_prefix: str, audit: AuditLog) -> list[OrphanSettlement]:
+    """prefix 일치 고아 주문을 재조정 이전에 전량 취소하고 정산을 반환한다(-2011 benign)."""
     open_orders = client.open_orders()
-    cancelled = 0
+    settlements: list[OrphanSettlement] = []
     for entry in open_orders:
         order_id = str(entry.get("clientOrderId", ""))
         if not order_id.startswith(client_order_prefix):
             continue
-        _cancel_tolerating_benign(client, str(entry["symbol"]), order_id)
+        symbol = str(entry["symbol"])
+        _cancel_tolerating_benign(client, symbol, order_id)
         audit.record("orphan_cancelled", symbol=entry.get("symbol"), client_order_id=order_id)
-        cancelled += 1
-    return cancelled
+        try:
+            queried = client.query_order(symbol, order_id)
+        except VenueError as exc:
+            if exc.code == -2011:
+                continue
+            raise
+        try:
+            executed_qty = Decimal(str(queried.get("executedQty", "0")))
+        except Exception:
+            executed_qty = Decimal(0)
+        if executed_qty > _ZERO:
+            side = str(queried.get("side") or entry.get("side") or "BUY")
+            avg_raw = queried.get("avgPrice") if "avgPrice" in queried else queried.get("avg_price")
+            if avg_raw is None:
+                avg_raw = entry.get("avgPrice")
+            avg_price = Decimal(str(avg_raw)) if avg_raw is not None else None
+            settlements.append(
+                OrphanSettlement(
+                    symbol=symbol,
+                    client_order_id=order_id,
+                    side=side,
+                    executed_qty=executed_qty,
+                    avg_price=avg_price,
+                )
+            )
+            audit.record(
+                "orphan_settled",
+                symbol=symbol,
+                client_order_id=order_id,
+                executed_qty=str(executed_qty),
+            )
+    return settlements
+
+
+def _order_budget_exceeded(client: Any, policy: PassiveExecutionPolicy, rate_limits: RateLimits | None) -> bool:
+    if rate_limits is None:
+        return False
+    rate_state = getattr(client, "rate_state", None)
+    if rate_state is None:
+        return False
+    fraction = policy.rate_weight_budget_fraction
+    order_10s = getattr(rate_state, "order_count_10s", None)
+    order_1m = getattr(rate_state, "order_count_1m", None)
+    return bool(  # noqa: SIM103
+        (order_10s is not None and rate_limits.orders_10s > 0 and order_10s > fraction * rate_limits.orders_10s)
+        or (order_1m is not None and rate_limits.orders_1m > 0 and order_1m > fraction * rate_limits.orders_1m)
+    )
 
 
 def execute_intents(
@@ -381,6 +488,8 @@ def execute_intents(
     sleep_fn: Callable[[float], None],
     *,
     rate_limits: RateLimits | None = None,
+    outcome_sink: list[ExecutionOutcome] | None = None,
+    shutdown: Any | None = None,
 ) -> tuple[ExecutionOutcome, ...]:
     """단일 협조 루프(post-all/poll-all/예산 스로틀). 반환 순서는 intents 와 1:1.
 
@@ -393,13 +502,15 @@ def execute_intents(
     ]
     for rt in runtimes:
         if rt.filters is None:
-            # 필터 부재 심볼은 게시 자체가 불가능하므로 즉시 잔량 확정한다.
             rt.terminal_status = "RESIDUAL"
     try:
-        _run_loop(client, runtimes, policy, audit, clock, sleep_fn, rate_limits)
+        _run_loop(client, runtimes, policy, audit, clock, sleep_fn, rate_limits, shutdown)
     except LiveTradingError as exc:
         exc.partial_outcomes = tuple(rt.snapshot() for rt in runtimes)
         raise
+    finally:
+        if outcome_sink is not None:
+            outcome_sink[:] = [rt.snapshot() for rt in runtimes]
     for rt in runtimes:
         audit.record(
             "intent_outcome",
@@ -420,6 +531,7 @@ def _run_loop(
     clock: Callable[[], float],
     sleep_fn: Callable[[float], None],
     rate_limits: RateLimits | None,
+    shutdown: Any | None = None,
 ) -> None:
     live = [rt for rt in runtimes if not rt.done]
     if not live:
@@ -431,18 +543,19 @@ def _run_loop(
     ticks = 0
 
     while ticks < max_ticks and any(not rt.done for rt in live):
+        if shutdown is not None and getattr(shutdown, "requested", False):
+            break
         now = clock()
         if now - start >= policy.window_deadline_s:
             break
         books = _fetch_books(client, symbols)
         for rt in live:
             if not rt.done and rt.intent.symbol in books:
-                _poll_or_post(client, rt, books[rt.intent.symbol], now, policy, audit)
+                _poll_or_post(client, rt, books[rt.intent.symbol], now, policy, audit, rate_limits)
         ticks += 1
         if all(rt.done for rt in live):
             break
         interval = _throttled_interval(client, interval, policy, rate_limits)
-        # R1: 모든 tick 은 sleep 으로 끝난다(busy-wait 금지).
         sleep_fn(interval)
 
     _finalize(client, live, audit, clock)
@@ -452,12 +565,19 @@ def _throttled_interval(
     client: Any, interval: float, policy: PassiveExecutionPolicy, rate_limits: RateLimits | None
 ) -> float:
     """R2: 사용 weight 가 예산을 초과하면 poll 간격을 배증한다(상한 window_deadline_s/4)."""
-    if rate_limits is None or rate_limits.request_weight_1m <= 0:
+    if rate_limits is None:
         return interval
     rate_state = getattr(client, "rate_state", None)
-    used = getattr(rate_state, "used_weight_1m", None)
+    used = getattr(rate_state, "used_weight_1m", None) if rate_state is not None else None
     budget = policy.rate_weight_budget_fraction * rate_limits.request_weight_1m
-    if used is not None and used > budget:
+    if rate_limits.request_weight_1m > 0 and used is not None and used > budget:
+        return min(interval * 2, policy.window_deadline_s / 4)
+    order_10s = getattr(rate_state, "order_count_10s", None) if rate_state is not None else None
+    order_1m = getattr(rate_state, "order_count_1m", None) if rate_state is not None else None
+    fraction = policy.rate_weight_budget_fraction
+    if order_10s is not None and rate_limits.orders_10s > 0 and order_10s > fraction * rate_limits.orders_10s:
+        return min(interval * 2, policy.window_deadline_s / 4)
+    if order_1m is not None and rate_limits.orders_1m > 0 and order_1m > fraction * rate_limits.orders_1m:
         return min(interval * 2, policy.window_deadline_s / 4)
     return interval
 
@@ -469,6 +589,7 @@ def _poll_or_post(
     now: float,
     policy: PassiveExecutionPolicy,
     audit: AuditLog,
+    rate_limits: RateLimits | None = None,
 ) -> None:
     assert rt.filters is not None  # filters 부재 intent 는 생성 시 즉시 RESIDUAL 처리된다
     is_buy = rt.intent.side == "BUY"
@@ -481,14 +602,24 @@ def _poll_or_post(
     # 1) 활성 주문 조회: 체결 누적 및 상태 전이(FILL/CHASE/HOLD/IOC).
     if rt.active_id is not None:
         if rt.paper_active:
-            # PAPER 가상 주문: 조회할 실체가 없고 시뮬레이터가 체결을
-            # 이미 반영했으므로 reported_executed 로 정산(no-op).
             executed = rt.reported_executed
         else:
-            executed = Decimal(
-                str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
-            )
-        _record_fill(rt, executed)
+            payload = client.query_order(rt.intent.symbol, rt.active_id)
+            executed = Decimal(str(payload.get("executedQty", "0")))
+            avg_raw = payload.get("avgPrice") if "avgPrice" in payload else payload.get("avg_price")
+            avg_price: Decimal | None = None
+            if avg_raw is not None and str(avg_raw) not in ("", "0", "0.0", "0.00"):
+                try:
+                    avg_price = Decimal(str(avg_raw))
+                    if avg_price == _ZERO:
+                        avg_price = None
+                except Exception:
+                    avg_price = None
+            _record_fill(rt, executed, avg_price=avg_price, fee_schedule=policy.fee_schedule)
+            if avg_raw is None or str(avg_raw) in ("", "0", "0.0", "0.00"):
+                # ensure fill recorded with fallback price even if avgPrice missing
+                pass
+        # Check for terminal after fill
         if rt.intent.quantity - rt.filled_total <= _ZERO:
             rt.terminal_status = "FILLED"
             rt.finalized_at = now
@@ -497,12 +628,13 @@ def _poll_or_post(
             timed_out = now - rt.posted_at >= policy.passive_deadline_s
             exhausted = rt.chases >= policy.max_chases
             moved = abs(own_touch - rt.active_price) >= rt.filters.tick_size * policy.chase_ticks
+            slice_done = rt.active_post_qty > _ZERO and rt.reported_executed >= rt.active_post_qty and (rt.intent.quantity - rt.filled_total) > _ZERO
             if timed_out:
-                # passive -> ioc 전이는 timed_out 뿐이다.
                 _cancel_and_settle(client, rt)
                 rt.phase = "ioc"
+            elif slice_done:
+                _cancel_and_settle(client, rt)
             elif exhausted:
-                # chase 소진은 재펜그 중단: 현재 휴지 주문을 유지한다.
                 return
             elif moved:
                 _cancel_and_settle(client, rt)
@@ -510,7 +642,6 @@ def _poll_or_post(
             else:
                 return
         else:
-            # IOC 미체결분은 즉시 소멸하므로 잔량을 새 IOC 로 재게시한다.
             _cancel_and_settle(client, rt)
 
     # 2) 게시: 패시브(GTX, 밴드 내) 또는 백스톱(IOC, 캡+밴드 클램프).
@@ -526,7 +657,6 @@ def _poll_or_post(
         time_in_force = "GTX"
     else:
         if rt.ioc_attempts >= policy.max_ioc_attempts:
-            # 비마케터블/미체결 IOC 재게시 상한: 잔량을 RESIDUAL 로 확정한다.
             rt.terminal_status = "RESIDUAL"
             rt.finalized_at = now
             return
@@ -541,6 +671,9 @@ def _poll_or_post(
         time_in_force = "IOC"
     if price is None:
         return  # 리스크 레일 밖 이상 징후: 재게시하지 않고 대기한다.
+
+    if _order_budget_exceeded(client, policy, rate_limits):
+        return
 
     post_qty = _post_quantity(
         remaining, price, filters=rt.filters, max_slices=policy.max_slices
@@ -563,7 +696,6 @@ def _poll_or_post(
     try:
         response = client.new_order(params)
     except VenueError as exc:
-        # -5022/-4131 은 오류가 아니라 호가 이동 신호다 -> 다음 tick 에 재호가.
         if exc.code in (-5022, -4131):
             rt.chases += 1
             return
@@ -574,21 +706,30 @@ def _poll_or_post(
         audit.record("intent_obsolete", symbol=rt.intent.symbol, client_order_id=order_id)
         return
     if isinstance(response, ShadowResponse):
-        # R8: SHADOW 억제 -> query_order 없이 즉시 종료한다.
         rt.terminal_status = "SHADOW"
         rt.finalized_at = now
         return
     if isinstance(response, PaperResponse):
-        # PAPER 억제: 로컬 시뮬레이터로 체결을 확정하고 chase 루프를 계속
-        # 실행한다(IOC 백스톱/cancel-settle/잔량 경로가 모두 검증된다).
         executed_qty = _simulate_paper_fill(rt, touch, time_in_force, price, post_qty)
         if executed_qty > _ZERO:
+            # Use _record_fill for fee-aware notional and fills tuple
+            # For paper, we directly record delta without query
+            # Need to set active_price temporarily for _record_fill price fallback
+            # Simulate by setting active_price = price and using executed_qty as delta
+            # We bypass query, so we manually append fill
+            # Set up active_price before record
+            prev_active_price = rt.active_price
+            rt.active_price = price
+            liquidity = "maker" if time_in_force == "GTX" else "taker"
+            fee_bps = policy.fee_schedule.bps_for(liquidity)
+            reason = "maker_fill" if liquidity == "maker" else "timeout_taker"
             rt.filled_total += executed_qty
             rt.fill_notional += executed_qty * price
             rt.reported_executed = rt.filled_total
+            rt.fills.append((executed_qty, price, fee_bps, reason, liquidity))
+            rt.active_price = prev_active_price
             if rt.intent.quantity - rt.filled_total <= _ZERO:
                 rt.terminal_status = "FILLED"
-                # Paper immediate fill: ensure posted_at is stamped so latency is measurable.
                 if rt.posted_at == 0.0:
                     rt.posted_at = now
                 rt.finalized_at = now
@@ -603,16 +744,18 @@ def _poll_or_post(
                 return
         if time_in_force == "IOC":
             rt.ioc_attempts += 1
-        # 가상 활성 주문으로 등록해 passive->ioc 전이와 chase 재호가가
-        # SHADOW 와 동일한 협조 루프 상태 전이를 따르게 한다.
         rt.active_id = order_id
         rt.active_price = price
+        rt.active_post_qty = post_qty
         rt.paper_active = True
+        # For paper, reported_executed should reflect per-order executed already counted
+        # Keep it as filled_total for slice tracking; active_post_qty tracks slice
         rt.posted_at = now
         audit.record("order_posted", symbol=rt.intent.symbol, client_order_id=order_id, time_in_force=time_in_force, price=str(price), quantity=str(post_qty), simulated=True)
         return
     rt.active_id = order_id
     rt.active_price = price
+    rt.active_post_qty = post_qty
     rt.reported_executed = _ZERO
     rt.posted_at = now
     if time_in_force == "IOC":
@@ -636,11 +779,20 @@ def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog, 
         if rt.active_id is not None:
             if not rt.paper_active:
                 _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
-                executed = Decimal(
-                    str(client.query_order(rt.intent.symbol, rt.active_id).get("executedQty", "0"))
-                )
-                _record_fill(rt, executed)
+                payload = client.query_order(rt.intent.symbol, rt.active_id)
+                executed = Decimal(str(payload.get("executedQty", "0")))
+                avg_raw = payload.get("avgPrice") if "avgPrice" in payload else payload.get("avg_price")
+                avg_price: Decimal | None = None
+                if avg_raw is not None and str(avg_raw) not in ("", "0", "0.0", "0.00"):
+                    try:
+                        avg_price = Decimal(str(avg_raw))
+                        if avg_price == _ZERO:
+                            avg_price = None
+                    except Exception:
+                        avg_price = None
+                _record_fill(rt, executed, avg_price=avg_price)
             rt.active_id = None
+            rt.active_post_qty = _ZERO
             rt.paper_active = False
         if rt.intent.quantity - rt.filled_total > _ZERO:
             rt.terminal_status = "RESIDUAL"
