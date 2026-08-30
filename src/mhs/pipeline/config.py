@@ -15,12 +15,8 @@ from typing import Literal
 
 from src.mhs.params import COMMITTEE_TARGET_GROSS
 
-# Main-logic default as of 2026-08-23: measured full 2021-2025 replay of
-# growth_extreme + committee_kelly_sizing=True (breadth 60) gave CAGR 341.6%/
-# MDD -38.4%/Calmar 8.89, dominating the growth(2.0x)+Kelly-off baseline
-# (CAGR 349.8%/MDD -45.6%/Calmar 7.68) on MDD and Calmar simultaneously for a
-# 2.3% CAGR cost (ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING pre-registered
-# acceptance, treatment B). The budgeted twin rung keeps the identical
+# Main-logic default as of 2026-08-23: selected per ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING
+# (pre-registered acceptance, treatment B). The budgeted twin rung keeps the identical
 # leverage_ceiling=3.0 -- hence the identical resolved exposure cap and
 # deployed exposure -- while its max_drawdown=0.60 sits at the registered
 # budget ceiling, making the drawdown risk contract binding instead of
@@ -57,7 +53,7 @@ class MhsRunConfig:
     data_root: str | None = None
     mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"] = "cache_required"
     execution_timeframe: Literal["1m", "3m", "5m"] = "3m"
-    execution_universe_size: int = CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT  # was 30 (2026-08-23): breadth 30->60 measured CAGR +17.4%, Sharpe +20.2%, stress-tier Sharpe +14.8%, MDD flat
+    execution_universe_size: int = CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT  # was 30 (2026-08-23) per ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING
     max_rss_bytes: int | None = None
     log_run: bool = True
 

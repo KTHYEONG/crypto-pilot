@@ -268,15 +268,17 @@ def run_shadow_cycle(
                 audit.record("position_uncovered", symbol=sym, reason=reason)
 
         from src.live.executor import FeeSchedule  # noqa: PLC0415
+        from src.live.settings import ExecutionMode  # noqa: PLC0415
 
-        policy = PassiveExecutionPolicy(fee_schedule=FeeSchedule(maker_fee_bps=settings.maker_fee_bps, taker_fee_bps=settings.taker_fee_bps))
+        policy = PassiveExecutionPolicy(fee_schedule=FeeSchedule(maker_fee_bps=settings.maker_fee_bps, taker_fee_bps=settings.taker_fee_bps), taker_slippage_bps=settings.taker_slippage_bps)
+        paper_fill_model = settings.paper_fill_model if settings.mode is ExecutionMode.PAPER else None
         sink: list[ExecutionOutcome] = []
         persisted = False
         outcomes: list[ExecutionOutcome] = []
         final_state: LedgerState | None = None
         try:
             try:
-                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown))
+                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model))
                 final_state = _persist_confirmed_fills(
                     ledger_path,
                     ledger_state,
@@ -387,6 +389,32 @@ def run_shadow_cycle(
                 )
                 portfolio_dir = Path(settings.portfolio_state_dir) if settings.portfolio_state_dir else default_portfolio_state_dir()
                 append_portfolio_state(portfolio_record, portfolio_dir)
+                # orderbook capture (fail-soft)
+                try:
+                    from src.live.orderbook import append_order_book_snapshots, capture_order_books, default_orderbook_dir  # noqa: PLC0415
+
+                    if settings.orderbook_capture_enabled and kept:
+                        orderbook_dir = Path(settings.orderbook_capture_dir) if settings.orderbook_capture_dir else default_orderbook_dir()
+                        capture_syms = [i.symbol for i in sorted(kept, key=lambda x: abs(x.quantity * marks.get(x.symbol, Decimal(0))), reverse=True)]
+                        snaps = capture_order_books(
+                            market_client,
+                            capture_syms,
+                            decision_time,
+                            mode=settings.mode.value,
+                            duration_s=settings.orderbook_capture_duration_s,
+                            interval_s=settings.orderbook_capture_interval_s,
+                            depth_limit=settings.orderbook_capture_depth_limit,
+                            max_symbols=settings.orderbook_capture_max_symbols,
+                            clock=_clock,
+                            sleep_fn=time.sleep,
+                            now_fn=lambda: pd.Timestamp.now(tz="UTC"),
+                            shutdown=shutdown,
+                        )
+                        append_order_book_snapshots(snaps, orderbook_dir)
+                except Exception as exc:  # noqa: BLE001
+                    with contextlib.suppress(Exception):
+                        audit.record("orderbook_capture_failed", error=str(exc))
+                    logger.warning("[SYS] orderbook capture failed error=%s", exc)
             except Exception as exc:  # noqa: BLE001 - observability-only, never halts cycle
                 with contextlib.suppress(Exception):
                     audit.record("portfolio_state_write_failed", error=str(exc))

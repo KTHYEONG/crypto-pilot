@@ -180,9 +180,8 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Number of top-liquidity symbols in the execution replay roster "
             "(breadth N); default 60 matches the registered cap_60_roster "
-            "attestation and was adopted on a measured stress-cost tier pass "
-            "(vs breadth 30: CAGR +17.4%%, Sharpe +20.2%%, stress-tier Sharpe "
-            "+14.8%%, MDD flat). Sweep with care beyond 60: the flat-bps cost "
+            "attestation and was adopted per ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING. "
+            "Sweep with care beyond 60: the flat-bps cost "
             "model has no market-impact term, so breadth gains are optimistic "
             "by construction -- require a stress-cost tier pass before "
             "adopting a larger value"
@@ -306,12 +305,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "quarter-Kelly LCB overlay (f=0.25, z=1.0 one-SE shrinkage) "
             "instead of the flat vol-target scale alone. The Kelly term "
             "shares the resolved growth envelope's leverage_ceiling as its "
-            "clip cap -- previously a stale hard 1.0x cap made the 50/50 "
-            "blend a pure de-leverager. Real 3m replay (growth_extreme, "
-            "breadth 60) measured CAGR 341.6%%/MDD -38.4%%/Calmar 8.89 vs the "
-            "Kelly-off baseline's CAGR 349.8%%/MDD -45.6%%/Calmar 7.68 -- MDD "
-            "and Calmar both improve for a 2.3%% CAGR cost "
-            "(ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING); pass this flag to "
+            "clip cap per ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING; pass this flag to "
             "opt back out to the pure vol-target scale"
         ),
     )
@@ -339,9 +333,8 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "mean otherwise dilute to ~0.53 (47%% idle cash). DEFAULT (flag "
             "omitted): the registered COMMITTEE_TARGET_GROSS=0.92, the "
             "largest replay-certified exposure inside the registered "
-            "COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget (certified point "
-            "0.9231: CAGR 0.6996 / MDD -0.2311 / Calmar 3.03 / stress Sharpe "
-            "1.34, 3/3 anchored folds); the I4 drawdown-budget gate blocks "
+            "COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget per ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN; "
+            "the I4 drawdown-budget gate blocks "
             "Research-GO if a replay breaches the budget. Pass "
             "--no-committee-target-gross to restore the diluted book "
             "(None). The old CLI 'capital-invariant cliff at gross ~0.9039-0.9071' "
@@ -368,16 +361,11 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Main logic default is ON (requires committee capital, which is "
             "also on by default): weights the k=5 committee members by their "
             "TRAIN-ONLY realized proxy-return t-statistic instead of equal "
-            "weights, because measured member proxy Sharpes span +0.036 to "
-            "+1.784 (a 50x spread) while equal weighting gives a t=0.08 "
-            "member the same 20%% as a t=+3.99 member; weights are "
+            "weights per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT; weights are "
             "non-negative, sum to 1, and fall back to exact equal weights "
             "when no member has positive train evidence; fitted strictly "
             "before each fold's train_end (top-level: before the frozen "
-            "committee OOS start), never on evaluation data; walk-forward "
-            "measured mean OOS Sharpe +0.623->+1.266, improving in every "
-            "evaluated year 2022-2025; evidence is realized P&L, never rank "
-            "IC. Pass this flag to opt back out to equal-weighted members"
+            "committee OOS start), never on evaluation data. Pass this flag to opt back out to equal-weighted members"
         ),
     )
     mhs.add_argument(
@@ -405,11 +393,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "book with a 3-decision staggered tranche mean (effective 72h signal "
             "life) instead of fully repositioning every 24h -- the committee's "
             "shortest member lookback is 168h, so the 24h cadence oversamples its "
-            "own signals. Measured on the execution replay: CAGR 15.0%%->16.1%%, "
-            "MDD -28.3%%->-26.5%%, Calmar +14.7%%, annualized turnover -18%%, "
-            "cost-stress Sharpe +11%%; BUT anchored-fold pass count drops 2->1 "
-            "(2023 recovers 0.151->1.537 while 2024 degrades 0.968->0.481), so "
-            "top-level compounding improves while the Research GO fold gate worsens."
+            "own signals per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT."
         ),
     )
     mhs.add_argument(
@@ -423,21 +407,8 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "exclusive): per-decision-row choice between the raw committee book "
             "and its 3-decision tranche smooth, gated by a "
             "causal trailing lag-1 autocorrelation of the raw book's own proxy "
-            "return over the last 15 decision rows (negative/mean-reverting -> "
-            "smooth, non-negative/trending -> raw) -- root cause: "
-            "--committee-tranche-smoothing helps years where the raw book's own "
-            "returns whipsaw (negative autocorrelation) and hurts years where "
-            "they persist (positive autocorrelation), so a fixed choice always "
-            "sacrifices one regime. Measured on the execution replay: CAGR "
-            "15.0%%->20.7%%, MDD -28.3%%->-16.6%%, Calmar +135%%, annualized "
-            "turnover -21%%, cost-stress Sharpe +38%%, AND anchored-fold pass "
-            "count improves 2->3 (2023 0.151->1.16, 2024 0.968->0.85, 2025 "
-            "3.08->3.39, all comfortably above the 0.6 floor) -- dominates the "
-            "fixed-tranche choice on every fold simultaneously, not a tradeoff. "
-            "The 15-decision-row window is frozen (not CLI-tunable): windows "
-            "15-25 all pass every fold in real replay (plateau), but windows "
-            "10 and 90 both trigger CAPITAL_INVARIANT_BREACH -- this is not a "
-            "free parameter to fiddle with. Pass this flag to opt back out to "
+            "return over the last 15 decision rows per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT. "
+            "Pass this flag to opt back out to "
             "the raw (tranche_count=1) committee book."
         ),
     )
@@ -652,12 +623,8 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         choices=sorted(GROWTH_RISK_ENVELOPES),
         default=_CLI_GROWTH_ENVELOPE_DEFAULT,
         help=(
-            "Registered growth risk envelope: growth (main logic default -- "
-            "no drawdown-magnitude cap, only the registered ruin-probability "
-            "frontier binds, measured CAGR ~112%% on the full 2021-2025 "
-            "replay), balanced (MDD 0.35, 1x ceiling), or conservative "
-            "(MDD 0.25, 1x ceiling, byte-identical to the original pre-2026-08-22 "
-            "production default). Selects the drawdown budget for the "
+            "Registered growth risk envelope: growth, balanced, or conservative "
+            "per ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN. Selects the drawdown budget for the "
             "growth-optimal risk solver and the ex-ante vol-target cap"
         ),
     )
