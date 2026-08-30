@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -620,6 +621,159 @@ class DataCollector:
             )
         return report
 
+    @staticmethod
+    def _merge_metrics_frames(
+        cache: pd.DataFrame,
+        incoming: pd.DataFrame,
+        *,
+        incoming_is_authoritative: bool,
+    ) -> pd.DataFrame:
+        if cache.empty and incoming.empty:
+            return _empty_metrics_frame()
+        order = [cache, incoming] if incoming_is_authoritative else [incoming, cache]
+        parts = [f for f in order if not f.empty]
+        if not parts:
+            return _empty_metrics_frame()
+        return (
+            pd.concat(parts, ignore_index=True)
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+
+    def ensure_metrics_live_tail(self, symbol: str, *, lookback_days: int = 7) -> None:
+        oi_raw = self.client.fetch_futures_data_metric("openInterestHist", symbol, period="5m", limit=500)
+        gl_raw = self.client.fetch_futures_data_metric(
+            "globalLongShortAccountRatio", symbol, period="5m", limit=500
+        )
+        top_raw = self.client.fetch_futures_data_metric(
+            "topLongShortPositionRatio", symbol, period="5m", limit=500
+        )
+        taker_raw = self.client.fetch_futures_data_metric("takerlongshortRatio", symbol, period="5m", limit=500)
+
+        def _to_frame(raw: list[dict[str, Any]], endpoint: str) -> pd.DataFrame:
+            if not raw:
+                return pd.DataFrame(columns=["timestamp"])
+            df = pd.DataFrame(raw)
+            ts_col: str | None = None
+            for cand in ("timestamp", "time", "create_time", "T"):
+                if cand in df.columns:
+                    ts_col = cand
+                    break
+            if ts_col is None:
+                ts_col = str(df.columns[0])
+            df["timestamp"] = pd.to_numeric(df[ts_col], errors="coerce")
+            df = df.dropna(subset=["timestamp"])
+            if df.empty:
+                return pd.DataFrame(columns=["timestamp"])
+            df["timestamp"] = df["timestamp"].astype("int64")
+            if endpoint == "openInterestHist":
+                if "sumOpenInterest" in df.columns:
+                    df["sum_open_interest"] = pd.to_numeric(df["sumOpenInterest"], errors="coerce")
+                elif "sum_open_interest" in df.columns:
+                    df["sum_open_interest"] = pd.to_numeric(df["sum_open_interest"], errors="coerce")
+                else:
+                    df["sum_open_interest"] = pd.NA
+                if "sumOpenInterestValue" in df.columns:
+                    df["sum_open_interest_value"] = pd.to_numeric(
+                        df["sumOpenInterestValue"], errors="coerce"
+                    )
+                elif "sum_open_interest_value" in df.columns:
+                    df["sum_open_interest_value"] = pd.to_numeric(
+                        df["sum_open_interest_value"], errors="coerce"
+                    )
+                else:
+                    df["sum_open_interest_value"] = pd.NA
+                return df[["timestamp", "sum_open_interest", "sum_open_interest_value"]]
+            if endpoint == "globalLongShortAccountRatio":
+                if "longShortRatio" in df.columns:
+                    df["long_short_ratio"] = pd.to_numeric(df["longShortRatio"], errors="coerce")
+                elif "long_short_ratio" in df.columns:
+                    df["long_short_ratio"] = pd.to_numeric(df["long_short_ratio"], errors="coerce")
+                else:
+                    df["long_short_ratio"] = pd.NA
+                return df[["timestamp", "long_short_ratio"]]
+            if endpoint == "topLongShortPositionRatio":
+                if "longShortRatio" in df.columns:
+                    df["top_trader_long_short_ratio"] = pd.to_numeric(
+                        df["longShortRatio"], errors="coerce"
+                    )
+                elif "top_trader_long_short_ratio" in df.columns:
+                    df["top_trader_long_short_ratio"] = pd.to_numeric(
+                        df["top_trader_long_short_ratio"], errors="coerce"
+                    )
+                else:
+                    df["top_trader_long_short_ratio"] = pd.NA
+                return df[["timestamp", "top_trader_long_short_ratio"]]
+            if endpoint == "takerlongshortRatio":
+                if "buySellRatio" in df.columns:
+                    df["sum_taker_long_short_vol_ratio"] = pd.to_numeric(
+                        df["buySellRatio"], errors="coerce"
+                    )
+                elif "sum_taker_long_short_vol_ratio" in df.columns:
+                    df["sum_taker_long_short_vol_ratio"] = pd.to_numeric(
+                        df["sum_taker_long_short_vol_ratio"], errors="coerce"
+                    )
+                else:
+                    df["sum_taker_long_short_vol_ratio"] = pd.NA
+                return df[["timestamp", "sum_taker_long_short_vol_ratio"]]
+            return pd.DataFrame(columns=["timestamp"])
+
+        oi_df = _to_frame(oi_raw, "openInterestHist")
+        gl_df = _to_frame(gl_raw, "globalLongShortAccountRatio")
+        top_df = _to_frame(top_raw, "topLongShortPositionRatio")
+        taker_df = _to_frame(taker_raw, "takerlongshortRatio")
+
+        # outer join on timestamp
+        tail: pd.DataFrame | None = None
+        for part in (oi_df, gl_df, top_df, taker_df):
+            tail = part if tail is None else pd.merge(tail, part, on="timestamp", how="outer")
+        if tail is None or tail.empty:
+            return
+        tail = tail.sort_values("timestamp").reset_index(drop=True)
+        # keep last lookback_days relative to max timestamp in tail
+        if not tail.empty and lookback_days > 0:
+            max_ts = int(tail["timestamp"].max())
+            cutoff_ms = max_ts - int(lookback_days * 24 * 3600 * 1000)
+            tail = tail[tail["timestamp"] >= cutoff_ms].reset_index(drop=True)
+            if tail.empty:
+                return
+        tail["datetime"] = pd.to_datetime(tail["timestamp"], unit="ms", utc=True)
+        tail["available_at"] = tail["datetime"] + pd.Timedelta(minutes=5)
+        tail["symbol"] = symbol
+        # ensure all canonical columns present
+        for col in _METRICS_CANONICAL_COLUMNS:
+            if col not in tail.columns:
+                tail[col] = pd.NA
+        tail = tail.loc[:, list(_METRICS_CANONICAL_COLUMNS)]
+        # numeric coercion
+        for col in _METRICS_NUMERIC_COLUMNS:
+            tail[col] = pd.to_numeric(tail[col], errors="coerce")
+        tail = tail.sort_values("timestamp").reset_index(drop=True)
+
+        cache = self._load_metrics_cache(symbol)
+        combined = self._merge_metrics_frames(cache, tail, incoming_is_authoritative=False)
+        self._validate_metrics_frame(combined, symbol)
+        # interior-gap check restricted to before tail boundary
+        if not tail.empty and not combined.empty:
+            tail_max = tail["datetime"].max()
+            # only consider gaps before tail_max
+            coverage = self._metrics_coverage_report(
+                symbol, combined["datetime"].min(), tail_max, combined
+            )
+            interior_before_tail = [
+                day
+                for day in coverage["missing_dates"]
+                if pd.Timestamp(day, tz="UTC") > combined["datetime"].min()
+                and pd.Timestamp(day, tz="UTC") < tail_max
+            ]
+            if interior_before_tail:
+                raise DataIntegrityError(
+                    f"requested coverage gap for {symbol}: missing interior dates "
+                    f"{interior_before_tail}; never forward-filled"
+                )
+        self._save_metrics_cache(symbol, combined)
+
     def ensure_metrics_data(self, symbol: str, start_date: str, end_date: str) -> None:
         """Collect and persist canonical daily Vision metrics for one symbol.
 
@@ -643,19 +797,9 @@ class DataCollector:
         vision = BinanceVisionDownloader()
         raw = fetch_metrics_bulk(symbol, start_date, end_date)
         fetched = vision._normalize_metrics_frame(symbol, raw)  # noqa: SLF001
-        parts: list[pd.DataFrame] = []
-        if not cache_df.empty:
-            parts.append(cache_df)
-        if not fetched.empty:
-            parts.append(fetched)
-        if not parts:
+        if cache_df.empty and fetched.empty:
             return
-        combined = (
-            pd.concat(parts, ignore_index=True)
-            .drop_duplicates(subset=["timestamp"], keep="last")
-            .sort_values("timestamp")
-            .reset_index(drop=True)
-        )
+        combined = self._merge_metrics_frames(cache_df, fetched, incoming_is_authoritative=True)
         self._validate_metrics_frame(combined, symbol)
         coverage = self._metrics_coverage_report(symbol, req_start, req_end, combined)
         self._save_metrics_cache(symbol, combined)
