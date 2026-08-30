@@ -3,6 +3,7 @@ services:
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/crypto-pilot-live:latest
     container_name: mhs-live-daemon
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file: .env
     environment:
       - HARDWARE_MAX_WORKERS=1
@@ -20,13 +21,14 @@ services:
   mhs-signal:
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/crypto-pilot-live:latest
     container_name: mhs-signal-refresh
-    restart: "no"
+    restart: unless-stopped
+    stop_grace_period: 30s
     env_file: .env
     volumes:
       - ./data:/app/data
       - ./docs/results/mhs_horizon_diagnostic_artifacts:/app/docs/results/mhs_horizon_diagnostic_artifacts
     mem_limit: 1g
-    command: ["sh", "-c", "uv run python -m src.cli.main data refresh-live-universe && uv run python -m src.cli.main live signal-refresh"]
+    command: ["uv", "run", "python", "-m", "src.cli.main", "live", "signal-daemon"]
     logging:
       driver: json-file
       options:
