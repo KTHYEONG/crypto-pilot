@@ -732,3 +732,293 @@ COVERED_SCENARIOS = (
     "SCENARIO_EXECUTOR_LATENCY_NONE_WHEN_NEVER_POSTED",
     "SCENARIO_EXECUTOR_FINALIZE_RESIDUAL_HAS_LATENCY",
 )
+
+# SCENARIO_RESIL_01-sink-survives-non-live-error
+def test_SCENARIO_RESIL_01_sink_survives_non_live_error(tmp_path):  # noqa: D103
+    """SCENARIO_RESIL_01-sink-survives-non-live-error"""
+    import http.client
+    from decimal import Decimal
+
+    from src.live.audit import AuditLog
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.planner import OrderIntent
+    from src.live.rest import PaperResponse
+
+    def make_intent(symbol: str) -> OrderIntent:
+        return OrderIntent(
+            symbol=symbol,
+            side="BUY",
+            quantity=Decimal("1.000"),
+            reduce_only=False,
+            target_qty=Decimal("1.000"),
+            current_qty=Decimal("0"),
+            client_order_prefix="run1",
+            leg_index=0,
+            decision_price=Decimal("100"),
+        )
+
+    filt_a = SymbolFilters(
+        symbol="AAAUSDT",
+        tick_size=Decimal("0.10"),
+        step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"),
+        min_notional=Decimal("5"),
+        max_qty=Decimal("1000000"),
+        quantity_precision=3,
+        price_precision=2,
+    )
+    filt_b = SymbolFilters(
+        symbol="BBBUSDT",
+        tick_size=Decimal("0.10"),
+        step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"),
+        min_notional=Decimal("5"),
+        max_qty=Decimal("1000000"),
+        quantity_precision=3,
+        price_precision=2,
+    )
+    policy = PassiveExecutionPolicy(
+        poll_interval_s=3.0,
+        chase_ticks=2,
+        max_chases=3,
+        passive_deadline_s=50.0,
+        window_deadline_s=600.0,
+        taker_cap_bps=15.0,
+        max_slices=1,
+    )
+
+    class FillThenThrowClient:
+        def __init__(self, exc_type):
+            self.tick = 0
+            self.exc_type = exc_type
+
+        def book_tickers(self):
+            self.tick += 1
+            if self.tick == 2:
+                raise self.exc_type("boom")
+            return {
+                "AAAUSDT": {"bidPrice": "100.00", "askPrice": "99.50"},
+                "BBBUSDT": {"bidPrice": "100.00", "askPrice": "100.20"},
+            }
+
+        def book_ticker(self, symbol):  # noqa: ARG002
+            return {"bidPrice": "100.00", "askPrice": "99.50"}
+
+        def new_order(self, params):  # noqa: ARG002
+            return PaperResponse.suppressed("POST", "/fapi/v1/order", "0" * 12)
+
+        def cancel_order(self, *a, **k):  # noqa: ARG002
+            return {}
+
+        def query_order(self, *a, **k):  # noqa: ARG002
+            return {"executedQty": "0"}
+
+    intents = [make_intent("AAAUSDT"), make_intent("BBBUSDT")]
+    filters = {"AAAUSDT": filt_a, "BBBUSDT": filt_b}
+    for exc in (http.client.HTTPException, OSError, KeyboardInterrupt):
+        client = FillThenThrowClient(exc)
+        sink: list = []
+        try:
+            execute_intents(
+                client,
+                intents,
+                filters,
+                policy,
+                AuditLog(tmp_path / f"sink_{exc.__name__}.jsonl"),
+                lambda: 0.0,
+                lambda _s: None,
+                outcome_sink=sink,
+            )
+            raise AssertionError("should have raised")
+        except exc:
+            assert len(sink) == len(intents)
+            assert sink[0].filled_qty > 0
+
+
+# SCENARIO_RESIL_07-order-budget-throttle
+def test_SCENARIO_RESIL_07_order_budget_throttle(tmp_path):  # noqa: D103
+    """SCENARIO_RESIL_07-order-budget-throttle"""
+    from decimal import Decimal
+
+    from src.live.executor import PassiveExecutionPolicy, _order_budget_exceeded, _throttled_interval
+    from src.live.filters import SymbolFilters
+    from src.live.planner import OrderIntent
+    from src.live.rest import RateLimits
+
+    filt = SymbolFilters(
+        symbol="AAAUSDT",
+        tick_size=Decimal("0.10"),
+        step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"),
+        min_notional=Decimal("5"),
+        max_qty=Decimal("1000000"),
+        quantity_precision=3,
+        price_precision=2,
+    )
+    intent = OrderIntent(
+        symbol="AAAUSDT",
+        side="BUY",
+        quantity=Decimal("1.000"),
+        reduce_only=False,
+        target_qty=Decimal("1.000"),
+        current_qty=Decimal("0"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("100"),
+    )
+    policy = PassiveExecutionPolicy()
+    rate_limits = RateLimits(request_weight_1m=2400, orders_1m=1200, orders_10s=300)
+
+    class BudgetClient:
+        def __init__(self, order_10s):
+            self.rate_state = type("S", (), {"order_count_10s": order_10s, "order_count_1m": 0, "used_weight_1m": 0})()
+            self.orders: list = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def book_ticker(self, s):  # noqa: ARG002
+            return {"bidPrice": "100.00", "askPrice": "100.20"}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": 1}
+
+        def cancel_order(self, *a, **k):  # noqa: ARG002
+            return {}
+
+        def query_order(self, *a, **k):  # noqa: ARG002
+            return {"executedQty": "0"}
+
+    client_high = BudgetClient(order_10s=250)
+    assert _order_budget_exceeded(client_high, policy, rate_limits) is True
+    assert _throttled_interval(client_high, 3.0, policy, rate_limits) > 3.0
+    assert _order_budget_exceeded(client_high, policy, None) is False
+
+    client_low = BudgetClient(order_10s=100)
+    assert _order_budget_exceeded(client_low, policy, rate_limits) is False
+    assert _throttled_interval(client_low, 3.0, policy, rate_limits) == 3.0
+
+
+def test_SCENARIO_PARITY_01_slice_progress_no_stall(tmp_path):
+    """SCENARIO_PARITY_01-slice-progress-no-stall"""
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.audit import AuditLog
+    # Use 20 qty, price 100 => 2000 notional -> 4 slices (500 each) => slices 5 each?
+    # Stub that instantly fills posted slice (GTX trade-through)
+    from decimal import Decimal
+    from src.live.filters import SymbolFilters
+    from src.live.planner import OrderIntent
+    filters = {
+        "AAAUSDT": SymbolFilters(symbol="AAAUSDT", tick_size=Decimal("0.10"), step_size=Decimal("0.001"), min_qty=Decimal("0.001"), min_notional=Decimal("5"), max_qty=Decimal("1000000"), quantity_precision=3, price_precision=2)
+    }
+    intent = OrderIntent(symbol="AAAUSDT", side="BUY", quantity=Decimal("20"), reduce_only=False, target_qty=Decimal("20"), current_qty=Decimal("0"), client_order_prefix="20260101", leg_index=0, decision_price=Decimal("100"))
+    # Touch where ask < price for GTX to fill instantly (trade-through)
+    class SliceClient:
+        def __init__(self):
+            self.orders=[]
+            self._tick=0
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "99.00"}}
+        def book_ticker(self, s):
+            return {"bidPrice": "100.00", "askPrice": "99.00"}
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+        def cancel_order(self, *a, **k):
+            return {}
+        def query_order(self, symbol, oid):
+            # find order quantity
+            for o in self.orders:
+                if o["newClientOrderId"]==oid:
+                    return {"executedQty": str(o["quantity"]), "avgPrice": o["price"]}
+            return {"executedQty": "0", "avgPrice": "0"}
+        def open_orders(self):
+            return []
+    client = SliceClient()
+    policy = PassiveExecutionPolicy(poll_interval_s=3.0, passive_deadline_s=1000, window_deadline_s=6000, max_slices=4)
+    clock_val = [0.0]
+    def clock():
+        v=clock_val[0]
+        clock_val[0]+=3.0
+        return v
+    times=[]
+    orig_new=client.new_order
+    def rec(params):
+        times.append(clock_val[0])
+        return orig_new(params)
+    client.new_order=rec
+    audit=AuditLog(tmp_path/"p1.jsonl")
+    outcomes=execute_intents(client,[intent],filters,policy,audit,clock,lambda s: None)
+    # check intervals <=3.0 and all GTX
+    assert len(client.orders)>=2
+    for i in range(1,len(times)):
+        assert times[i]-times[i-1] <= 3.0+1e-9
+    assert all(o["timeInForce"]=="GTX" for o in client.orders)
+    assert not any(o["timeInForce"]=="IOC" for o in client.orders)
+    assert outcomes[0].status=="FILLED"
+    assert outcomes[0].maker_qty==Decimal("20")
+    assert outcomes[0].taker_qty==Decimal("0")
+
+def test_SCENARIO_PARITY_02_avg_price_preferred(tmp_path):
+    """SCENARIO_PARITY_02-avg-price-preferred"""
+    from decimal import Decimal
+    from src.live.filters import SymbolFilters
+    from src.live.planner import OrderIntent
+    from src.live.executor import PassiveExecutionPolicy
+    from src.live.audit import AuditLog
+    filters={"AAAUSDT": SymbolFilters(symbol="AAAUSDT", tick_size=Decimal("0.10"), step_size=Decimal("0.001"), min_qty=Decimal("0.001"), min_notional=Decimal("5"), max_qty=Decimal("1000000"), quantity_precision=3, price_precision=2)}
+    intent=OrderIntent(symbol="AAAUSDT", side="BUY", quantity=Decimal("1"), reduce_only=False, target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="run1", leg_index=0, decision_price=Decimal("100"))
+    class AvgClient:
+        def __init__(self, with_avg):
+            self.with_avg=with_avg
+            self.orders=[]
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "99.00", "askPrice": "100.00"}}
+        def book_ticker(self,s):
+            return {"bidPrice": "99.00", "askPrice": "100.00"}
+        def new_order(self, p):
+            # force IOC phase by using short passive_deadline and window
+            self.orders.append(p)
+            return {"orderId":1}
+        def cancel_order(self,*a,**k):
+            return {}
+        def query_order(self,s,oid):
+            if self.with_avg:
+                return {"executedQty":"1", "avgPrice":"99.50"}
+            else:
+                return {"executedQty":"1"}
+        def open_orders(self):
+            return []
+    # Test with avgPrice
+    client=AvgClient(True)
+    # Need to force IOC: set passive_deadline very small and make GTX not fill then IOC
+    # Simplify: directly test _record_fill via execute_intents with paper? Instead test execute path with stub that returns IOC
+    # We'll use a client that posts IOC immediately (phase ioc)
+    policy=PassiveExecutionPolicy(poll_interval_s=3.0, passive_deadline_s=0.1, window_deadline_s=600, taker_cap_bps=50, max_slices=1)
+    # To get IOC, we need to let first poll timeout -> phase ioc
+    clock_vals=[0,0,3]
+    idx=[0]
+    def clock():
+        v=clock_vals[idx[0]] if idx[0]<len(clock_vals) else clock_vals[-1]
+        idx[0]+=1
+        return v
+    audit=AuditLog(tmp_path/"p2.jsonl")
+    # Use stub that simulates IOC filled with avgPrice
+    # Our SliceClient logic needs to support IOC price not GTX band?
+    # Instead we test _record_fill directly
+    from src.live.executor import _IntentRuntime, _record_fill
+    rt=_IntentRuntime(intent=intent, filters=filters["AAAUSDT"])
+    rt.active_id="oid1"
+    rt.active_price=Decimal("100.00")
+    rt.phase="ioc"
+    _record_fill(rt, Decimal("1"), avg_price=Decimal("99.50"))
+    assert rt.fill_notional==Decimal("99.50")
+    # fallback without avgPrice
+    rt2=_IntentRuntime(intent=intent, filters=filters["AAAUSDT"])
+    rt2.active_id="oid2"
+    rt2.active_price=Decimal("100.00")
+    rt2.phase="passive"
+    _record_fill(rt2, Decimal("1"), avg_price=None)
+    assert rt2.fill_notional==Decimal("100.00")

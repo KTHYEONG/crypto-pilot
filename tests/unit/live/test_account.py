@@ -60,3 +60,22 @@ def test_venue_configuration_guard() -> None:
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_08_RECONCILE_HALTS_ON_DIVERGENCE",
 )
+
+def test_SCENARIO_PARITY_06_paper_virtual_mtm_equity():
+    """SCENARIO_PARITY_06-paper-virtual-mtm-equity"""
+    from decimal import Decimal
+    import pandas as pd
+    from src.live.account import AccountSnapshot, resolve_sizing_equity
+    from src.live.settings import ExecutionMode
+    from src.live.errors import RiskGateBreach
+    snapshot = AccountSnapshot(taken_at=pd.Timestamp("2026-01-01", tz="UTC"), wallet_balance=Decimal("0"), available_balance=Decimal("0"), total_maint_margin=Decimal("0"), unrealized_pnl=Decimal("0"), positions={}, dual_side_position=False, multi_assets_margin=False)
+    # PAPER virtual MTM: cash 1500 + positions 5*100=500 => min(2000, cap 2000)=2000
+    assert resolve_sizing_equity(snapshot, Decimal("2000"), mode=ExecutionMode.PAPER, cash_usdt=Decimal("1500"), positions={"BTCUSDT": Decimal("5")}, marks={"BTCUSDT": Decimal("100")}) == Decimal("2000")
+    # LIVE_TESTNET should breach because wallet 0 -> equity 0 -> RiskGateBreach
+    try:
+        resolve_sizing_equity(snapshot, Decimal("2000"), mode=ExecutionMode.LIVE_TESTNET, cash_usdt=Decimal("1500"), positions={"BTCUSDT": Decimal("5")}, marks={"BTCUSDT": Decimal("100")})
+        pytest.fail("should have raised")
+    except RiskGateBreach:
+        pass
+    # cash None seeds with cap -> no breach
+    assert resolve_sizing_equity(snapshot, Decimal("2000"), mode=ExecutionMode.PAPER, cash_usdt=None, positions={}, marks={}) == Decimal("2000")
