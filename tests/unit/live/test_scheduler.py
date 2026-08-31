@@ -493,3 +493,88 @@ def test_run_daemon_runs_signal_then_cycle(monkeypatch, tmp_path) -> None:
     assert [k for k, _ in order] == ["signal", "cycle"]
     assert order[0][1] == order[1][1]
 
+
+
+# --- auto appended from contract ---
+def test_run_daemon_awaiting_data_when_refresh_fails(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    step_calls: list[object] = []
+
+    def _bad_refresh() -> None:
+        raise RuntimeError("cold")
+
+    sched.run_daemon(
+        LiveSettings(),
+        artifact,
+        tmp_path / "state.json",
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: sched_now(),
+        max_iterations=1,
+        refresh_fn=_bad_refresh,
+        signal_step_fn=lambda *a, **k: step_calls.append(a),
+    )
+
+    hb = json.loads((tmp_path / "hb.json").read_text())
+    assert hb["status"] == "AWAITING_DATA"
+    assert step_calls == []
+
+
+def sched_now() -> "pd.Timestamp":
+    import pandas as pd
+    from src.live.signal import _SIGNAL_LAG
+
+    return pd.Timestamp("2026-08-24 00:00Z") + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+
+
+def test_run_daemon_alerts_once_on_halt_streak(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    events: list[str] = []
+    monkeypatch.setattr(
+        sched, "post_alert",
+        lambda url, *, event, detail, decision_time, now: events.append(event) or True,
+        raising=False,
+    )
+
+    def _halt_cycle(settings, decision_time, artifact, *, now):
+        from src.live.runner import CycleReport
+        return CycleReport(status="HALT", reason="x", decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _halt_cycle)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+
+    base = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [base + pd.Timedelta(days=5) + _SIGNAL_LAG + pd.Timedelta(minutes=20)]
+    def now_fn():
+        return cur[0]
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+    sched.run_daemon(
+        LiveSettings(alert_webhook_url="https://h.example", alert_halt_streak=2, daemon_max_attempts_per_day=1),
+        artifact,
+        tmp_path / "state.json",
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        max_iterations=3,
+        refresh_fn=lambda: None,
+        signal_step_fn=lambda *a, **k: None,
+    )
+
+    assert events.count("halt_streak") == 1
+
+
