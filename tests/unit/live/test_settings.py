@@ -17,7 +17,10 @@ def _clean_live_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_defaults_are_fail_safe() -> None:
     settings = LiveSettings()
     assert settings.mode is ExecutionMode.SHADOW
-    assert settings.order_base_url.endswith("testnet.binancefuture.com")
+    # SHADOW는 주문을 억제하므로 계좌 조회 GET은 실계좌 베뉴(메인넷)로 간다.
+    assert settings.order_base_url == "https://fapi.binance.com"
+    assert LiveSettings(mode="live_testnet").order_base_url.endswith("testnet.binancefuture.com")
+    assert LiveSettings(order_base_url="https://x").order_base_url == "https://x"
     assert settings.recv_window_ms <= 60_000
     assert settings.notional_equity_usdt > 0
 

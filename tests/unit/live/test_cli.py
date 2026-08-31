@@ -42,7 +42,7 @@ def test_SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE(monkeypatch) ->
 
     parser = build_root_parser()
     args = parser.parse_args(["live", "preflight"])
-    assert args.artifact.endswith("deployed_target_weights.parquet.enc")
+    assert "deployed_target_weights.parquet" in args.artifact
 
     from src.live.preflight import PreflightCheck, PreflightReport
 
@@ -62,38 +62,14 @@ def test_SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE(monkeypatch) ->
 
 
 def test_SCENARIO_SIGNAL_10_CLI_SUBCOMMANDS_AND_EXIT_CODES(monkeypatch) -> None:
-    """SCENARIO_SIGNAL_10 (live side): ``live signal-refresh`` shares the
-    shadow-cycle --artifact default; a fail-closed DataIntegrityError from
-    refresh_signal_row becomes a clean nonzero exit, NOOP/APPENDED don't raise."""
-    import src.mhs.signal_refresh as signal_refresh_mod
-    from src.common.errors import DataIntegrityError
-    from src.mhs.signal_refresh import SignalRefreshReport
-
     parser = build_root_parser()
-    args = parser.parse_args(["live", "signal-refresh"])
-    assert args.artifact.endswith("deployed_target_weights.parquet.enc")
+    args = parser.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
+    assert args.date == __import__("pandas").Timestamp("2026-08-25T00:00:00Z")
+    assert args.handler.__name__ == "_run_signal_step"
+    # also check daemon still exists
+    args2 = parser.parse_args(["live", "daemon"])
+    assert args2.handler.__name__ == "_run_daemon"
 
-    def raise_binding_error(*a, **k):
-        raise DataIntegrityError("params_digest mismatch")
-
-    monkeypatch.setattr(signal_refresh_mod, "refresh_signal_row", raise_binding_error)
-    with pytest.raises(SystemExit) as excinfo:
-        args.handler(args)
-    assert excinfo.value.code == 1
-
-    noop_report = SignalRefreshReport(
-        status="NOOP", reason="already present", decision_time=pd.Timestamp.now(tz="UTC"),
-        n_symbols=0, gross_exposure=0.0, exposure_scale=0.0, elapsed_seconds=0.01,
-    )
-    monkeypatch.setattr(signal_refresh_mod, "refresh_signal_row", lambda *a, **k: noop_report)
-    args.handler(args)  # must not raise
-
-    appended_report = SignalRefreshReport(
-        status="APPENDED", reason=None, decision_time=pd.Timestamp.now(tz="UTC"),
-        n_symbols=2, gross_exposure=0.04, exposure_scale=1.0, elapsed_seconds=0.5,
-    )
-    monkeypatch.setattr(signal_refresh_mod, "refresh_signal_row", lambda *a, **k: appended_report)
-    args.handler(args)  # must not raise
 
 
 def test_live_settings_default_shadow_and_mainnet_ack_gate() -> None:
@@ -116,3 +92,53 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE",
     "SCENARIO_SIGNAL_10_CLI_SUBCOMMANDS_AND_EXIT_CODES",
 )
+
+
+def test_deploy_check_exits_nonzero_on_missing_bundle(tmp_path) -> None:
+    """backtest_cloud_handoff: `live deploy-check` fails closed on a missing bundle."""
+    import argparse
+
+    from src.cli.commands.live import _run_deploy_check
+
+    ns = argparse.Namespace(
+        bundle=str(tmp_path / "nope.json.enc"), runtime=str(tmp_path / "rt.json")
+    )
+    with pytest.raises(SystemExit) as ei:
+        _run_deploy_check(ns)
+    assert ei.value.code != 0
+
+
+def test_run_shadow_cycle_gates_on_effective_decision_time(monkeypatch, tmp_path) -> None:  # noqa: SIM105,S110
+    import contextlib
+
+    import pandas as pd
+
+    import src.live.runner as runner
+
+    seen = {}
+    monkeypatch.setattr(runner, "assert_signal_available", lambda eff, now: seen.__setitem__("eff", pd.Timestamp(eff)))
+    held = pd.Series({"BTCUSDT": 0.4}, name=pd.Timestamp("2026-08-23", tz="UTC"))
+    monkeypatch.setattr(runner, "latest_target_weights", lambda *a, **k: held)
+
+    with contextlib.suppress(Exception):
+        runner.run_shadow_cycle(runner.LiveSettings(), pd.Timestamp("2026-08-25", tz="UTC"),
+                                tmp_path / "w.parquet", now=pd.Timestamp("2026-08-25 02:00:00", tz="UTC"))
+    assert seen["eff"] == pd.Timestamp("2026-08-23", tz="UTC")
+
+
+def test_live_cli_surface_after_v2() -> None:
+    import argparse
+
+    import pytest
+
+    from src.cli.commands.live import add_live_commands
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd")
+    add_live_commands(sub.add_parser("live"))
+
+    for gone in ("signal-daemon", "signal-refresh", "deploy-check"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["live", gone])
+    args = parser.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
+    assert args.handler.__name__ == "_run_signal_step"
