@@ -919,7 +919,7 @@ def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
     equity = pd.Series([100.0, 110.0], index=pd.DatetimeIndex([pd.Timestamp("2026-08-24", tz="UTC"), pd.Timestamp("2026-08-25", tz="UTC")]))
     fake_primary = types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))
     fake_blend = types.SimpleNamespace(target_weights=target_weights, exposure_scale=pd.Series([1.2, 1.3]), primary=fake_primary, horizon_hours=168)
-    fake_report = types.SimpleNamespace(status="OK", books=[], blend=fake_blend, research_go=types.SimpleNamespace(eligible=True))
+    fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=fake_blend, research_go=types.SimpleNamespace(eligible=True))
 
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: fake_report)
     monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
@@ -950,7 +950,7 @@ def test_mhs_emit_target_weights_fails_closed_without_blend(monkeypatch) -> None
     import src.application.research.mhs.evaluation as ev
     from src.common.errors import DataIntegrityError
 
-    fake_report = types.SimpleNamespace(status="OK", books=[], blend=None, research_go=types.SimpleNamespace(eligible=True))
+    fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=None, research_go=types.SimpleNamespace(eligible=True))
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: fake_report)
     monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
     monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
@@ -972,3 +972,21 @@ def test_emit_deployment_bundle_flag_registered() -> None:
     assert parser.parse_args(["--emit-deployment"]).emit_deployment is True
     assert parser.parse_args([]).deploy_push is False
     assert parser.parse_args(["--deploy-push"]).deploy_push is True
+
+
+
+def test_deploy_push_requires_key(monkeypatch) -> None:
+    import subprocess
+
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("git must not run"))
+
+    class _S:
+        artifact_key = None
+
+    monkeypatch.setattr(mhs_cli, "LiveSettings", lambda: _S(), raising=False)
+    with pytest.raises(SystemExit):
+        mhs_cli._assert_deploy_push_allowed()
