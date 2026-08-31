@@ -96,3 +96,33 @@ def test_SCENARIO_REC_08_moving_average_cost_basis(tmp_path: Path):
 # SCENARIO_REC_06-tax-watermark-idempotent
 # SCENARIO_REC_07-tax-source-purity-fail-closed
 # SCENARIO_REC_08-moving-average-cost-basis
+
+
+def test_simulated_tax_records_unique_id_across_cycles(tmp_path: Path) -> None:
+    """Paper/shadow simulated records must survive multi-day read-time dedup."""
+    from src.live.fills import FillEvent
+    from decimal import Decimal
+    from src.live.tax_ledger import simulated_tax_records
+
+    ledger_dir = tmp_path / "tax"
+
+    def _fill(day: str, sym: str, qty: str) -> FillEvent:
+        ts = pd.Timestamp(f"2026-0{day}", tz="UTC")
+        return FillEvent(
+            decision_time=ts, timestamp=ts, symbol=sym, quantity_delta=Decimal(qty),
+            fill_price=Decimal("100"), fee_bps=8.0, reason="immediate_taker",
+            pre_trade_equity=Decimal("2000"), liquidity="taker", mode="paper",
+            run_id=ts.strftime("%Y%m%d"), leg_index=0, client_order_id="c",
+        )
+
+    for day in ("3-01", "3-02", "3-03"):
+        recs = simulated_tax_records([_fill(day, "BTCUSDT", "1"), _fill(day, "ETHUSDT", "2")], "paper")
+        append_tax_records(recs, ledger_dir)
+
+    loaded = load_tax_records(ledger_dir, year=2026)
+    # 3 cycles x 2 symbols = 6 distinct records, none dropped by record_id dedup
+    assert len(loaded) == 6
+    assert loaded["record_id"].nunique() == 6
+    assert sorted(loaded["event_time"].dt.strftime("%Y-%m-%d").unique().tolist()) == [
+        "2026-03-01", "2026-03-02", "2026-03-03",
+    ]
