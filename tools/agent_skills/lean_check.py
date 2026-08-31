@@ -367,7 +367,7 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
 
         with open(fh) as sf:
             sf_content = sf.read()
-            if kind in ("field", "dataclass_field", "new_field") or kind.endswith("field_metadata"):
+            if kind in ("field", "dataclass_field", "new_field", "pydantic_settings_field") or kind.endswith("field") or kind.endswith("field_metadata"):
                 field_name = name.split(".")[-1] if "." in name else name
                 pat = rf"\b{re.escape(field_name)}[\"']?\s*(?::|=)"
                 if not re.search(pat, sf_content, re.MULTILINE):
@@ -389,7 +389,7 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                 found_impl = False
                 try:
                     tree = ast.parse(sf_content, filename=fh)
-                    if kind == "constant":
+                    if kind in ("constant", "module_constant"):
                         # 모듈 수준 상수(AnnAssign/Assign 타깃)를 인식한다.
                         for node in ast.walk(tree):
                             if (

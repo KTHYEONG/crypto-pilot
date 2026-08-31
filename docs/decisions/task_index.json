@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "LIVE_ALERT_EMAIL_CHANNEL",
+      "date": "2026-08-31",
+      "adr_id": "ADR_20260831_LIVE_ALERT_EMAIL_CHANNEL",
+      "domain": "live",
+      "title": "라이브 알림 Gmail SMTP 이메일 채널",
+      "why": "알림 경로가 LIVE_ALERT_WEBHOOK_URL(HTTP POST) 단일이라 webhook 중계 인프라 없이는 장애 통지를 받을 수 없었다.",
+      "resolution": "src/live/alerting.py에 send_email_alert() 추가(smtp.gmail.com:587 STARTTLS + 앱 비밀번호, stdlib smtplib만, opt-in·never-raise). LiveSettings에 alert_gmail_user/alert_gmail_app_password(SecretStr)/alert_email_to 추가. scheduler._daemon_alert가 post_alert와 함께 이메일로 fan-out. email_to 미지정 시 발신 주소로 폴백. .env.enc에 LIVE_ALERT_GMAIL_* 키 추가·재암호화, end-to-end 실발송 검증(SENT).",
+      "impact": "라이브 데몬 halt_streak/awaiting_params/data_refresh_failed 알림이 이메일로도 수신됨. 기존 webhook 경로·post_alert 시그니처 불변."
+    },
+    {
       "task_id": "TASK_CLOUD_DATA_LIFECYCLE",
       "date": "2026-08-31",
       "adr_id": "ADR_20260831_CLOUD_DATA_LIFECYCLE",
@@ -989,16 +999,6 @@
       "why": "docs/results/mhs-res.md 15차(crash_regime_tilt_alpha=0.2) 결과가 여전히 folds_passed=1/3, stress_naive_sharpe<0로 정체돼 근본 원인 재분석을 요청받음. 사전스크린 재측정으로 종목별 데드밴드(_apply_rebalance_deadband)가 달러중립성(|Σw| 0→0.10)과 레짐 디리스킹(corr(gross,scale) 0.72→-0.02)을 파괴하고, 19-호라이즌 discovery argmax가 고분산 선택편향을 발생시키며, 보고되는 xs_rank_ic가 신호 자신의 룩백과 겹치는 구간으로 계산돼(+0.096, t=113) 부호가 실제 거래가능 값(-0.028, t=-33)과 반대임을 확인.",
       "resolution": "src/mhs/books.py에 portfolio_rebalance_trigger(행 단위 홀드로 불변식 보존)·equal_weight_book_ensemble(선택 없는 19-호라이즌 동일가중 평균) 신설. src/mhs/regime.py에 causal_market_beta·beta_neutralize_weights(파라미터 0개 베타중립 대안) 신설. evaluation.py의 _xs_rank_ic/_date_clustered_ols가 forward_bars를 필수화해 opens.pct_change(h).shift(-(h+1))로 인과적 선행수익률을 내부에서 구성하도록 수정. MhsDiagnosticRequest에 slow_book_mode/rebalance_filter/beta_neutralize/ensemble_signal opt-in 필드 추가, CLI 플래그 배선. 신규 파라미터(트리거 임계값 등)는 엔지니어링 기본값으로 등록하고 전 구간 표로 확정하지 않음(fold-train-only 선택 절차로 분리). --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger 실전 검증: primary_autocorr_sharpe 0.182→0.526, primary_max_drawdown -0.392→-0.227, stress_naive_sharpe -0.084→+0.041, folds_passed 1→2/3.",
       "impact": "research run portfolio mhs-horizon-diagnostic --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger; docs/results/mhs-res.md 16차 갱신"
-    },
-    {
-      "task_id": "MHS_CRASH_REGIME_TILT_OVERLAY",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_CRASH_REGIME_TILT_OVERLAY",
-      "domain": "mhs",
-      "title": "MHS 크래시 레짐 방향성 틸트 오버레이 구현 + 실전 검증",
-      "why": "ADR_20260812_MHS_MOMENTUM_STRATEGY_REDESIGN_REVIEW가 완전 dollar-neutral 설계와 2022류 붕괴장 생존이 트레이드오프임을 확인한 뒤, 사용자가 regime.py 레짐 프록시를 실제로 slow_momentum 북에 연결하는 구체적 설계를 요청.",
-      "resolution": "src/mhs/regime.py에 crash_regime_tilt_weights(dollar-neutral 북과 BTCUSDT 추세 기반 방향성 틸트의 convex combination, alpha=0시 바이트 동일) 신설. MhsDiagnosticRequest.crash_regime_tilt_alpha(opt-in, 기본 None)로 게이팅해 _build_fold_target_weights에만 배선(상위 books 진단 경로는 의도적으로 미배선). 2021-2022만 사용한 사전등록 보정 실험(fold 검증연도 미사용)에서 alpha가 클수록 2022 개선·2021 악화의 단조 트레이드오프만 확인돼 특정 alpha를 프로덕션 기본값으로 심지 않기로 결정(리서치 정책 결정으로 분리). 설계검토 중 발견된 오류(convex combination이 gross를 항상 1.0으로 유지한다는 주장이 triangle inequality상 틀림, 실제로는 <=1.0)를 코드/스펙/컨트랙트 3곳에서 정정.",
-      "impact": "research run portfolio mhs-horizon-diagnostic --crash-regime-tilt-alpha 0.2 실전 실행 검증: status=COMPLETE, 크래시 0건, alpha=None 기본 경로는 상위 books 수치 바이트 동일 확인. fold 리플레이는 설계대로 변경됨 -- fold0(2023) Sharpe -0.15->+1.21(stress도 음수->양수 전환), fold1(2024) -0.50->-0.35 개선, fold2(2025) +1.61->+1.50로 소폭 하락(사전예측한 트레이드오프가 실전에서 재현됨). alpha=0.2를 프로덕션 값으로 확정하는 것은 아님(단일 임의값 시험, p-hack 방지 원칙상 별도 검증 필요)."
     }
   ]
 }
