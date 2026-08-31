@@ -160,6 +160,10 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
     ohlcv_paths = sorted(glob.glob(str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet")))
     symbols = [os.path.basename(p).removesuffix(".parquet") for p in ohlcv_paths]
 
+    from src.research.universe.pit_universe import symbol_partition
+
+    symbols = [s for s in symbols if symbol_partition(s) == "dev"]
+
     from src.live.scheduler import DAEMON_COLD_UNIVERSE_EXIT_CODE
     from src.live.settings import LiveSettings
 
@@ -184,28 +188,74 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
         )
     failures = sum(1 for ok in results if not ok)
 
-    # metrics tail
-    try:
-        for sym in symbols:
-            try:
-                collector.ensure_metrics_live_tail(sym, lookback_days=7)
-            except Exception as exc:  # noqa: BLE001
-                _logger.warning("[DATA] metrics_live_tail symbol=%s failed error=%s", sym, exc)
-    except Exception:  # noqa: BLE001
-        _logger.exception("[DATA] metrics_live_tail batch failed")
-
-    # NOTE: no trailing-tail prune here. A naive prune previously mis-read the
-    # positional RangeIndex of the `timestamp`-column parquets as epoch-ns and
-    # wiped every 1h/funding/mark file. load_base_panel already slices to the
-    # needed window at read time, so extra stored history is only disk cost, not
-    # a correctness issue. Re-introduce pruning only with explicit datetime-column
-    # detection AND a "never write an empty frame" guard.
-
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     _logger.info(
         "[DATA] stage=refresh_live_universe ohlcv_symbols=%d funding_symbols=%d failures=%d elapsed_ms=%d",
         len(symbols), len(symbols), failures, elapsed_ms,
     )
+
+
+def _seed_cloud(args: argparse.Namespace) -> None:
+    import concurrent.futures
+    import time
+
+    import pandas as pd
+
+    from src.live.settings import LiveSettings
+
+    lookback = int(getattr(args, "lookback_days", 0)) or LiveSettings().data_retention_days
+    now = pd.Timestamp.now(tz="UTC")
+    start = now - pd.Timedelta(days=lookback)
+    t0 = time.perf_counter()
+
+    from src.market_data.binance.vision import BinanceVisionDownloader
+    from src.research.universe.pit_universe import symbol_partition
+
+    syms = [
+        s
+        for s in BinanceVisionDownloader().list_all_symbols()
+        if s.endswith("USDT") and symbol_partition(s) == "dev"
+    ]
+    if not syms:
+        _logger.error("[DATA] stage=seed_cloud status=NO_UNIVERSE")
+        raise SystemExit(1)
+
+    from src.market_data.services.futures_collection import DataCollector
+
+    collector = DataCollector()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(
+            pool.map(
+                lambda sym: _refresh_one_symbol_tail(collector, sym, str(start), str(now)),
+                syms,
+            )
+        )
+    failures = sum(1 for ok in results if not ok)
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    _logger.info(
+        "[DATA] stage=seed_cloud symbols=%d failures=%d lookback_days=%d elapsed_ms=%d",
+        len(syms),
+        failures,
+        lookback,
+        elapsed_ms,
+    )
+    if failures == len(syms):
+        raise SystemExit(1)
+
+
+def _prune_live_data(args: argparse.Namespace) -> None:
+    import pandas as pd
+
+    from src.common.config import FUTURES_DATA_DIR
+    from src.live.orderbook import default_orderbook_dir
+    from src.live.settings import LiveSettings
+    from src.market_data.retention import prune_market_data, prune_orderbook_history
+
+    s = LiveSettings()
+    now = pd.Timestamp.now(tz="UTC")
+    md = prune_market_data(FUTURES_DATA_DIR, s.data_retention_days, now=now)
+    ob = prune_orderbook_history(default_orderbook_dir(), s.orderbook_retention_days, now=now)
+    _logger.info("[DATA] stage=prune_live_data market=%s orderbook_files_removed=%d", md, ob)
 
 
 def _repair_spot_gap(args: argparse.Namespace) -> None:
@@ -327,3 +377,10 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
 
     refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h/funding + markPriceKlines)")
     refresh.set_defaults(handler=_refresh_live_universe)
+
+    seed_cloud = collect.add_parser("seed-cloud", help="Cold-boot the box: fetch 1h OHLCV + mark/1h + funding for the dev universe")
+    seed_cloud.add_argument("--lookback-days", type=int, default=0)
+    seed_cloud.set_defaults(handler=_seed_cloud)
+
+    prune_live = collect.add_parser("prune-live-data", help="Age out market data + orderbook past the retention window")
+    prune_live.set_defaults(handler=_prune_live_data)

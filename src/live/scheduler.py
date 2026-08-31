@@ -203,8 +203,17 @@ def _default_data_refresh() -> None:
     """Production data-tail refresh: 1h/funding/mark top-up + prune."""
     subprocess.run(
         [sys.executable, "-m", "src.cli.main", "data", "refresh-live-universe"],
-        check=False,
+        check=True,
         timeout=1800,
+    )
+
+
+def _default_data_prune() -> None:
+    """Disk hygiene: age out market data + orderbook. check=False -- never disturbs the cycle."""
+    subprocess.run(
+        [sys.executable, "-m", "src.cli.main", "data", "prune-live-data"],
+        check=False,
+        timeout=600,
     )
 
 
@@ -236,6 +245,7 @@ def run_daemon(
     shutdown: ShutdownFlag | None = None,
     refresh_fn: Callable[[], None] = _default_data_refresh,
     signal_step_fn: Callable[..., None] = _default_signal_step,
+    prune_fn: Callable[[], None] = _default_data_prune,
 ) -> None:
     """Merged autonomous loop: data refresh + signal-step + execution.
 
@@ -298,6 +308,11 @@ def run_daemon(
             except Exception:
                 pass
             continue
+
+        try:
+            prune_fn()
+        except Exception:  # noqa: BLE001
+            logger.exception("[SYS] data prune failed decision_time=%s", target)
 
         signal_status = "COMPLETE"
         try:
