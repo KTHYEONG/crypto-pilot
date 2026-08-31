@@ -53,14 +53,13 @@ def mhs_horizon_diagnostic_report_path() -> str:
 
 
 def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest, artifact_root: Path, *, artifact_key: SecretStr | None = None) -> dict[str, Any]:
-    """Emit sealed strategy params + bootstrap."""
+    """Emit strategy params + bootstrap (sealed when artifact_key given, else plaintext)."""
     from src.common.errors import DataIntegrityError
-    from src.live.crypto import derive_key, seal_bytes
     from src.mhs.live_strategy import LiveStrategyParams, capture_params_snapshot, save_strategy_params
     from src.mhs.params import COMMITTEE_MEMBER_SETS, GROWTH_RISK_ENVELOPES, SIGNAL_RETURN_TAIL_DAYS
 
-    if report.status != "OK":
-        raise DataIntegrityError("deployment ineligible: report status not OK")
+    if report.status != "COMPLETE":
+        raise DataIntegrityError("deployment ineligible: report status not COMPLETE")
     if not getattr(report.research_go, "eligible", False):
         raise DataIntegrityError("deployment ineligible: research_go not eligible")
     if report.blend is None or getattr(report.blend, "target_weights", None) is None:
@@ -69,7 +68,7 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     if tw is None or tw.empty:
         raise DataIntegrityError("deployment ineligible: blend target_weights empty")
     if artifact_key is None:
-        raise DataIntegrityError("deployment ineligible: artifact_key is None")
+        logger.warning("[SYS] emit_deployment writing PLAINTEXT artifacts (LIVE_ARTIFACT_KEY unset); fine for local, seal before --deploy-push")
     # admitted members
     member_set_key = getattr(request, "committee_member_set", None)
     if member_set_key not in COMMITTEE_MEMBER_SETS:
@@ -142,19 +141,31 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     # ensure index tz-aware
     if not tail_df.empty and tail_df.index.tz is None:
         tail_df.index = tail_df.index.tz_localize("UTC")
+    import os
+
     buf = __import__("io").BytesIO()
     tail_df.to_parquet(buf, index=True)
-    from src.live.crypto import derive_key, seal_bytes
-    sealed = seal_bytes(buf.getvalue(), derive_key(artifact_key))
-    bootstrap_path = artifact_root / "strategy_bootstrap.parquet.enc"
-    import os
+    if artifact_key is not None:
+        from src.live.crypto import derive_key, seal_bytes
+
+        payload = seal_bytes(buf.getvalue(), derive_key(artifact_key))
+        bootstrap_path = artifact_root / "strategy_bootstrap.parquet.enc"
+    else:
+        payload = buf.getvalue()
+        bootstrap_path = artifact_root / "strategy_bootstrap.parquet"
     tmp = bootstrap_path.with_suffix(bootstrap_path.suffix + ".tmp")
-    tmp.write_bytes(sealed)
+    tmp.write_bytes(payload)
     os.replace(tmp, bootstrap_path)
     # compute digest for return (reload to get digest)
     from src.mhs.live_strategy import load_strategy_params
     loaded = load_strategy_params(params_path, artifact_key=artifact_key)
-    return {"strategy_digest": loaded.strategy_digest, "params_path": str(params_path), "bootstrap_path": str(bootstrap_path), "n_reference_rows": len(tail), "sealed": True}
+    return {
+        "strategy_digest": loaded.strategy_digest,
+        "params_path": str(params_path),
+        "bootstrap_path": str(bootstrap_path),
+        "n_reference_rows": len(tail),
+        "sealed": bool(artifact_key is not None),
+    }
 
 
 def persist_mhs_report(
