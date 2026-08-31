@@ -268,3 +268,5 @@ docs/results/**/deployed_target_weights.parquet
 docs/results/**/mhs_horizon_diagnostic_recipe.json
 !docs/results/**/deployed_target_weights.parquet.enc
 !docs/results/**/mhs_horizon_diagnostic_recipe.json.enc
+!docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json.enc
+!docs/results/mhs_horizon_diagnostic_artifacts/strategy_bootstrap.parquet.enc
