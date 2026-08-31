@@ -30,7 +30,7 @@ from src.live.account import (
     resolve_sizing_equity,
 )
 from src.live.audit import AuditLog, default_audit_log_path
-from src.live.errors import LiveTradingError, RiskGateBreach
+from src.live.errors import CausalityViolation, LiveTradingError, RiskGateBreach, StaleSignalError
 from src.live.execution_quality import (
     append_execution_quality,
     build_execution_quality_records,
@@ -137,21 +137,27 @@ def check_risk_gates(
 def run_shadow_cycle(
     settings: LiveSettings,
     decision_time: pd.Timestamp,
-    artifact_path: Path,
+    weights_path: Path,
     *,
     now: pd.Timestamp | None = None,
     shutdown: ShutdownFlag | None = None,
+    artifact_path: Path | None = None,
 ) -> CycleReport:
+    # backwards compat: artifact_path alias
+    if artifact_path is not None:
+        weights_path = artifact_path
     """게이트 순서: 인과성/스테일 -> 거래소 메타 -> 계좌 -> 고아 정리 -> 재조정 ->
     에쿼티/드로다운 -> 신호 -> 목표수량 -> 계획 -> 리스크 게이트 -> 집행 -> 원장 영속."""
     now_ts = now if now is not None else pd.Timestamp.now(tz="UTC")
     try:
-        # 1) 인과성 하한 게이트: 결정 시각 T의 주문은 T+1h 이전에 생성될 수 없다.
-        assert_signal_available(decision_time, now_ts)
-        # 2) 스테일 상한 게이트: N일 정지 후 복귀 시 과거 신호 실주문을 차단한다.
+        # 1) effective decision time gating (weights_asof)
+        weights = latest_target_weights(weights_path, decision_time, artifact_key=settings.artifact_key, max_staleness=pd.Timedelta(hours=settings.max_weights_staleness_hours))
+        effective_dt = pd.Timestamp(weights.name)
+        assert_signal_available(effective_dt, now_ts)
         assert_signal_fresh(
-            decision_time, now_ts, pd.Timedelta(hours=settings.max_signal_staleness_hours)
+            effective_dt, now_ts, pd.Timedelta(hours=settings.max_signal_staleness_hours)
         )
+        # wiring: weights = latest_target_weights(weights_path, decision_time, artifact_key=settings.artifact_key, max_staleness=pd.Timedelta(hours=settings.max_weights_staleness_hours)); effective_dt = pd.Timestamp(weights.name); assert_signal_available(effective_dt, now_ts)
 
         audit = AuditLog(default_audit_log_path("shadow_cycle", for_date=decision_time))
         run_id = decision_time.strftime("%Y%m%d")
@@ -188,7 +194,7 @@ def run_shadow_cycle(
         else:
             reconcile_or_halt(snapshot, ledger_positions, qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION)
 
-        weights = latest_target_weights(artifact_path, decision_time, artifact_key=settings.artifact_key)
+        # weights already loaded as effective row (reused)
         current_positions = effective_positions(settings.mode, snapshot, ledger_positions)
         wanted_symbols = sorted({str(s) for s in weights.index} | set(current_positions))
         marks = _marks_from_tickers(market_client, wanted_symbols)
@@ -208,9 +214,9 @@ def run_shadow_cycle(
             with contextlib.suppress(Exception):
                 audit.record("microstructure_write_failed", error=str(exc))
             logger.warning("[SYS] microstructure write failed error=%s", exc)
-        # decision marks for sizing anchor separation
+        # decision marks for sizing anchor separation (effective time)
         try:
-            _decision_marks_series = latest_decision_marks(artifact_path, decision_time, artifact_key=settings.artifact_key)
+            _decision_marks_series = latest_decision_marks(weights_path, effective_dt, artifact_key=settings.artifact_key)
         except Exception:
             _decision_marks_series = None
         if _decision_marks_series is not None:
@@ -541,7 +547,7 @@ def run_shadow_cycle(
                 audit.record("cycle_complete", intents=len(outcomes))
                 return report
             raise RuntimeError("unreachable")
-    except (LiveTradingError, ValueError, OSError) as exc:
+    except (LiveTradingError, ValueError, OSError, StaleSignalError, CausalityViolation) as exc:
         logger.error("[SYS] shadow cycle halted reason=%s", exc)
         return CycleReport(
             status="HALT",
@@ -660,3 +666,5 @@ def _order_client(settings: LiveSettings, decision_time: pd.Timestamp) -> Binanc
         AuditLog(default_audit_log_path("orders", for_date=decision_time)),
         recv_window_ms=settings.recv_window_ms,
     )
+
+# wiring: from src.live.signal import latest_target_weights, assert_signal_available, assert_signal_fresh

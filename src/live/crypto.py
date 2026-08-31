@@ -32,8 +32,12 @@ _GENERIC_SEAL_ERROR = "artifact seal envelope is invalid"
 
 def derive_key(secret: SecretStr) -> bytes:
     """base64 디코드 후 정확히 32 바이트(AES-256 키)여야 한다."""
+    raw = secret.get_secret_value().strip()
+    # env_file / sops exec-env 파이프라인이 값을 감싼 따옴표를 그대로 넘기는 경우가 있다.
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        raw = raw[1:-1].strip()
     try:
-        key = base64.b64decode(secret.get_secret_value().encode("ascii"), validate=True)
+        key = base64.b64decode(raw.encode("ascii"), validate=True)
     except Exception as exc:  # noqa: BLE001 - 유형 불문 잘못된 키는 동일하게 실패한다
         raise ArtifactSealError(_GENERIC_SEAL_ERROR) from exc
     if len(key) != _KEY_LEN:

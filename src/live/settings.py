@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.mhs.params import GROWTH_RISK_ENVELOPES
@@ -40,13 +40,24 @@ class LiveSettings(BaseSettings):
     # 비-LIVE_ 키를 걸러내지 않아 공유 .env(BINANCE_API_KEY 등)와 함께 쓰면 extra_forbidden 으로
     # 즉시 크래시한다. docker-compose 의 env_file: .env 가 이미 OS 환경변수로 주입하므로
     # OS 환경변수 소스(정상적으로 prefix 필터링됨)만 신뢰한다.
-    model_config = SettingsConfigDict(env_prefix="LIVE_", extra="forbid")
+    model_config = SettingsConfigDict(env_prefix="LIVE_", extra="forbid", populate_by_name=True)
 
     mode: ExecutionMode = ExecutionMode.SHADOW
     market_data_base_url: str = "https://fapi.binance.com"
-    order_base_url: str = "https://testnet.binancefuture.com"
-    api_key: SecretStr | None = None
-    api_secret: SecretStr | None = None
+    # 빈 값이면 mode에서 유도한다: LIVE_TESTNET만 테스트넷, 나머지(SHADOW/PAPER는 주문
+    # 억제, LIVE_MAINNET)는 메인넷. LIVE_ORDER_BASE_URL로 별도 주문 베뉴 오버라이드 가능.
+    order_base_url: str = ""
+    # 계정/마켓데이터(메인넷) 자격증명. 데이터 수집용 공유 .env 와 이름을 맞추기 위해
+    # 접두사 없는 BINANCE_* 도 대체로 인식한다(order_* 미설정 시 이 값이 주문에도 재사용됨).
+    api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LIVE_API_KEY", "BINANCE_API_KEY"),
+    )
+    api_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LIVE_API_SECRET", "BINANCE_SECRET_KEY", "BINANCE_SECRET"),
+    )
+    # 주문 전용 베뉴(기본 테스트넷) 자격증명. 미설정 시 api_key/api_secret 로 폴백한다.
     order_api_key: SecretStr | None = None
     order_api_secret: SecretStr | None = None
     mainnet_trading_ack: str | None = None
@@ -64,6 +75,7 @@ class LiveSettings(BaseSettings):
     artifact_key: SecretStr | None = None
     # 신호 스테일 상한(시간). 초과 신호는 주문 0건으로 스킵한다. env: LIVE_MAX_SIGNAL_STALENESS_HOURS.
     max_signal_staleness_hours: float = 6.0
+    max_weights_staleness_hours: float = 96.0
     daemon_catchup_buffer_minutes: float = 20.0
     daemon_max_attempts_per_day: int = 5
     heartbeat_path: str | None = None
@@ -113,6 +125,12 @@ class LiveSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _gate_mainnet(self) -> LiveSettings:
+        if not self.order_base_url:
+            self.order_base_url = (
+                "https://testnet.binancefuture.com"
+                if self.mode is ExecutionMode.LIVE_TESTNET
+                else "https://fapi.binance.com"
+            )
         if self.mode is ExecutionMode.LIVE_MAINNET and (
             self.mainnet_trading_ack != MAINNET_TRADING_ACK
         ):

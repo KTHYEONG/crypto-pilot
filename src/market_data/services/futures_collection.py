@@ -754,18 +754,16 @@ class DataCollector:
         cache = self._load_metrics_cache(symbol)
         combined = self._merge_metrics_frames(cache, tail, incoming_is_authoritative=False)
         self._validate_metrics_frame(combined, symbol)
-        # interior-gap check restricted to before tail boundary
+        # 라이브 tail은 방금 받은 5m 구간의 내부 연속성만 검증한다. 과거 일간 Vision
+        # 캐시의 아카이브 발행 지연(D+1 이상)은 ensure_metrics_data 소관이며 게이트 대상이 아니다.
         if not tail.empty and not combined.empty:
+            tail_min = tail["datetime"].min()
             tail_max = tail["datetime"].max()
-            # only consider gaps before tail_max
-            coverage = self._metrics_coverage_report(
-                symbol, combined["datetime"].min(), tail_max, combined
-            )
+            coverage = self._metrics_coverage_report(symbol, tail_min, tail_max, combined)
             interior_before_tail = [
                 day
                 for day in coverage["missing_dates"]
-                if pd.Timestamp(day, tz="UTC") > combined["datetime"].min()
-                and pd.Timestamp(day, tz="UTC") < tail_max
+                if tail_min < pd.Timestamp(day, tz="UTC") < tail_max
             ]
             if interior_before_tail:
                 raise DataIntegrityError(
