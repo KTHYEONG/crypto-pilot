@@ -173,3 +173,102 @@ def test_settings_with_mode_flag_overrides_env(monkeypatch) -> None:
     assert s.mode is ExecutionMode.PAPER
     s2 = _settings_with_mode(argparse.Namespace(mode=None))
     assert s2.mode is ExecutionMode.SHADOW
+
+
+# --- auto appended from contract ---
+def test_run_status_exit_nonzero_on_halt_heartbeat(tmp_path, monkeypatch) -> None:
+    import argparse
+    import json
+    import pandas as pd
+    import pytest
+    import src.cli.commands.live as live_mod
+    import src.live.scheduler as sched
+
+    hb = tmp_path / "hb.json"
+    hb.write_text(json.dumps({
+        "status": "HALT", "decision_time": "2026-08-31T00:00:00+00:00",
+        "consecutive_halts": 3, "attempts": 1,
+        "ts": pd.Timestamp.now(tz="UTC").isoformat(),
+    }))
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb)
+
+    with pytest.raises(SystemExit) as ei:
+        live_mod._run_status(argparse.Namespace(mode=None))
+
+    assert ei.value.code == 1
+
+
+def test_run_status_exit_zero_on_healthy_recent_heartbeat(tmp_path, monkeypatch) -> None:
+    import argparse
+    import json
+    import pandas as pd
+    import pytest
+    import src.cli.commands.live as live_mod
+    import src.live.scheduler as sched
+
+    hb = tmp_path / "hb.json"
+    hb.write_text(json.dumps({
+        "status": "COMPLETE", "decision_time": "2026-08-31T00:00:00+00:00",
+        "consecutive_halts": 0, "attempts": 0,
+        "ts": pd.Timestamp.now(tz="UTC").isoformat(),
+    }))
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb)
+
+    with pytest.raises(SystemExit) as ei:
+        live_mod._run_status(argparse.Namespace(mode=None))
+
+    assert ei.value.code == 0
+
+
+def test_signal_step_reconciles_params_digest_change(tmp_path, monkeypatch) -> None:
+    import argparse
+    import pandas as pd
+    import src.cli.commands.live as live_mod
+
+    seen = {}
+
+    def _fake_reconcile(runtime, params, boot):
+        seen["called"] = True
+        return runtime, "soft_swap"
+
+    def _fake_advance(params, runtime, weights_path, data_root, *, target, artifact_key=None, portfolio_state_dir=None, mode="shadow", **kw):
+        seen["mode"] = mode
+        return runtime, 1, 1.0
+
+    monkeypatch.setattr("src.mhs.live_runtime.reconcile_runtime_params", _fake_reconcile, raising=False)
+    monkeypatch.setattr(live_mod, "advance_to_date", _fake_advance, raising=False)
+    monkeypatch.setattr(live_mod, "_settings_with_mode", lambda a: _mk_settings_stub(), raising=False)
+    monkeypatch.setattr(
+        "src.mhs.live_strategy.load_strategy_params",
+        lambda *a, **k: _mk_params_stub(), raising=False,
+    )
+    monkeypatch.setattr(
+        "src.mhs.live_runtime.load_or_bootstrap_runtime",
+        lambda *a, **k: _mk_runtime_stub(), raising=False,
+    )
+    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", lambda *a, **k: None, raising=False)
+
+    live_mod._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
+
+    assert seen.get("called") is True
+
+
+def _mk_settings_stub():
+    from types import SimpleNamespace
+    from src.live.settings import ExecutionMode
+    return SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=ExecutionMode.PAPER)
+
+
+def _mk_params_stub():
+    from types import SimpleNamespace
+    return SimpleNamespace(strategy_digest="x")
+
+
+def _mk_runtime_stub():
+    from types import SimpleNamespace
+    import pandas as pd
+    return SimpleNamespace(
+        params_digest="old", last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
+    )
+
+
