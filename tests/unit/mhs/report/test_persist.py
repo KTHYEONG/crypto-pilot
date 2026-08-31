@@ -184,3 +184,30 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY",
     "SCENARIO_SIGNAL_09_EMIT_SIGNAL_STATE_BOOTSTRAP_SEAM",
 )
+
+
+
+def test_emit_deployment_plaintext_when_no_key(tmp_path, caplog) -> None:
+    import types
+
+    import pandas as pd
+
+    from src.mhs.report.persist import emit_deployment
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    report = types.SimpleNamespace(
+        status="COMPLETE", research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))),
+    )
+    import dataclasses
+
+    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))
+    res = emit_deployment(report, request, tmp_path, artifact_key=None)
+    assert res["sealed"] is False
+    assert (tmp_path / "strategy_params.json").exists()
+    assert any("PLAINTEXT" in r.message for r in caplog.records)

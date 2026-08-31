@@ -151,7 +151,7 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
     import time
 
     from src.common.config import FUTURES_DATA_DIR
-    from src.mhs.params import FOLD_PANEL_WARMUP_HOURS, SIGNAL_PANEL_WINDOW_DAYS
+    from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS
 
     t0 = time.perf_counter()
     now = pd.Timestamp.now(tz="UTC")
@@ -181,64 +181,12 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
     except Exception:  # noqa: BLE001
         _logger.exception("[DATA] metrics_live_tail batch failed")
 
-    # prune pass: trailing tail
-    try:
-        cutoff = now - pd.Timedelta(days=SIGNAL_PANEL_WINDOW_DAYS + FOLD_PANEL_WARMUP_HOURS / 24 + 10)
-        for pattern in [str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet"), str(FUTURES_DATA_DIR / "funding" / "*.parquet"), str(FUTURES_DATA_DIR / "markPriceKlines" / "1h" / "*.parquet")]:
-            for fp in glob.glob(pattern):
-                try:
-                    df = __import__("pandas").read_parquet(fp)
-                    if not df.empty and "open_time" in df.columns:
-                        df["open_time"] = __import__("pandas").to_datetime(df["open_time"], utc=True)
-                        df = df[df["open_time"] >= cutoff]
-                        df.to_parquet(fp, index=False)
-                    elif not df.empty and isinstance(df.index, __import__("pandas").DatetimeIndex):
-                        if df.index.tz is None:
-                            df.index = df.index.tz_localize("UTC")
-                        df = df[df.index >= cutoff]
-                        df.to_parquet(fp, index=True)
-                    else:
-                        # generic try index prune
-                        if not df.empty:
-                            try:
-                                idx = __import__("pandas").DatetimeIndex(df.index)
-                                if idx.tz is None:
-                                    idx = idx.tz_localize("UTC")
-                                df = df.loc[idx >= cutoff]
-                                df.to_parquet(fp, index=True)
-                            except Exception:
-                                pass
-                except Exception:
-                    continue
-        # skip/prune away symbols with no funding or stale 1h tail >7d
-        try:
-            import pandas as _pd
-            for p in list(glob.glob(str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet"))):
-                sym = os.path.basename(p).removesuffix(".parquet")
-                funding_fp = FUTURES_DATA_DIR / "funding" / f"{sym}.parquet"
-                if not funding_fp.exists():
-                    continue
-                try:
-                    df = _pd.read_parquet(p)
-                    if df.empty:
-                        continue
-                    # check staleness: last index
-                    if isinstance(df.index, _pd.DatetimeIndex):
-                        last = _pd.Timestamp(df.index.max())
-                    elif "open_time" in df.columns:
-                        last = _pd.Timestamp(df["open_time"].max())
-                    else:
-                        continue
-                    if last.tzinfo is None:
-                        last = last.tz_localize("UTC")
-                    if (now - last).days > 7:
-                        continue
-                except Exception:
-                    continue
-        except Exception:
-            pass
-    except Exception:
-        pass
+    # NOTE: no trailing-tail prune here. A naive prune previously mis-read the
+    # positional RangeIndex of the `timestamp`-column parquets as epoch-ns and
+    # wiped every 1h/funding/mark file. load_base_panel already slices to the
+    # needed window at read time, so extra stored history is only disk cost, not
+    # a correctness issue. Re-introduce pruning only with explicit datetime-column
+    # detection AND a "never write an empty frame" guard.
 
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     _logger.info(

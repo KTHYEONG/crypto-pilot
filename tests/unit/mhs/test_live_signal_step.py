@@ -53,7 +53,7 @@ def test_advance_to_date_scores_missing_days(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(step, "compute_signal_row", _fake_compute)
     path = tmp_path / "w.parquet"
-    new_rt, n = step.advance_to_date(params, rt, path, "", pd.Timestamp("2026-08-23", tz="UTC"))
+    new_rt, n, _sc = step.advance_to_date(params, rt, path, "", pd.Timestamp("2026-08-23", tz="UTC"))
     assert n == 3
     assert new_rt.last_decision_date == pd.Timestamp("2026-08-23", tz="UTC")
     assert new_rt.held_target_row["BTCUSDT"] == 0.2

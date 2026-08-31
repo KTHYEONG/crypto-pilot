@@ -156,6 +156,11 @@ def compute_signal_row(params: LiveStrategyParams, runtime: LiveRuntime, data_ro
     from src.mhs.params import PNL_VOL_TARGET_SCALE_FLOOR, SIGNAL_RETURN_TAIL_DAYS
     from src.mhs.types import ExecutionSpec
 
+    if not data_root:
+        from src.common.config import FUTURES_DATA_DIR
+
+        data_root = str(FUTURES_DATA_DIR / "ohlcv")
+
     dt = pd.Timestamp(date).tz_convert("UTC").normalize() if pd.Timestamp(date).tzinfo is not None else pd.Timestamp(date).tz_localize("UTC").normalize()
     fold = _synthetic_fold(dt, params)
     # reconstruct request from deployed_flags
@@ -244,35 +249,36 @@ def compute_signal_row(params: LiveStrategyParams, runtime: LiveRuntime, data_ro
     held_series = pd.Series(runtime.held_target_row, dtype="float64")
     taker_cost = float(ExecutionSpec().taker_fee_bps + ExecutionSpec().taker_slippage_bps)
     r_new = analytic_net_daily_return(held_series, raw_row, close_1d, funding_1d, dt, taker_cost_bps=taker_cost)
-    # reference update
+    # reference update. The persisted series is bootstrap-tail + every analytic
+    # forward day (tail-capped). The vol-target scale is computed on the FORWARD
+    # analytic days only, with the bootstrap tail passed as strictly-preceding
+    # warmup_returns (I-WARM / I-REFERENCE-ANCHORED): on day 1 the forward series
+    # is a single point warmed entirely by the 400-day backtest reference.
     tail_days = int(snapshot_value(params, "SIGNAL_RETURN_TAIL_DAYS"))
-    # need warmup returns
-    # warmup = reference before its own first analytic day
-    # per spec, tail-capped to SIGNAL_RETURN_TAIL_DAYS, with warmup_returns = the portion strictly before the first analytic day
-    # For new_reference we concat and tail
-    combined = pd.concat([runtime.reference_daily_returns, pd.Series([r_new], index=pd.DatetimeIndex([dt]))])
-    new_reference = combined.sort_index().tail(tail_days)
-    if new_reference.index.tz is None:
-        new_reference.index = new_reference.index.tz_localize("UTC")
-    # exposure scale
-    # warmup = reference before first analytic day (which is dt when reference first analytically appended? For bootstrap, first analytic day is after bootstrap)
-    # So warmup is runtime.reference_daily_returns (the bootstrap tail) before dt
-    warmup = runtime.reference_daily_returns if not runtime.reference_daily_returns.empty else None
-    if warmup is not None and not warmup.empty:
-        # ensure strictly before dt
-        warmup = warmup.loc[warmup.index < dt]
-        if warmup.empty:
-            warmup = None
-    # choose scale function based on pnl_vol_target_mode
+    bt_end = pd.Timestamp(params.backtest_window[1]).tz_convert("UTC")
+    prior = runtime.reference_daily_returns
+    if not prior.empty and prior.index.tz is None:
+        prior.index = prior.index.tz_localize("UTC")
+    combined = pd.concat([prior, pd.Series([r_new], index=pd.DatetimeIndex([dt], tz="UTC"))]).sort_index()
+    combined = combined[~combined.index.duplicated(keep="last")]
+    new_reference = combined.tail(tail_days)
+
+    warmup_src = combined[combined.index <= bt_end]
+    forward_ref = combined[combined.index > bt_end]
+    warmup = warmup_src if not warmup_src.empty else None
+    if forward_ref.empty:
+        forward_ref = combined  # no bootstrap boundary info -> use everything, no warmup
+        warmup = None
+
     cap = float(params.exposure_cap)
     target_vol = float(params.growth_budget_target_vol)
     if str(params.pnl_vol_target_mode) == "constant_risk":
-        base = _constant_risk_scale(new_reference, target_vol=target_vol, cap=cap, warmup_returns=warmup)
+        base = _constant_risk_scale(forward_ref, target_vol=target_vol, cap=cap, warmup_returns=warmup)
     else:
-        base = _exante_vol_target_scale(new_reference, target_vol=target_vol, cap=cap, warmup_returns=warmup)
+        base = _exante_vol_target_scale(forward_ref, target_vol=target_vol, cap=cap, warmup_returns=warmup)
     committee_capital = bool(params.deployed_flags.get("committee_capital", False))
     committee_kelly_sizing = bool(params.deployed_flags.get("committee_kelly_sizing", False))
-    scale_series = _committee_capital_replay_scale(base, new_reference, committee_capital, committee_kelly_sizing, cap=cap)
+    scale_series = _committee_capital_replay_scale(base, forward_ref, committee_capital, committee_kelly_sizing, cap=cap)
     scalar = float(scale_series.iloc[-1]) if not scale_series.empty else 1.0
     scalar = float(max(PNL_VOL_TARGET_SCALE_FLOOR, min(scalar, cap)))
     scaled_row = raw_row * scalar
@@ -285,30 +291,19 @@ def compute_signal_row(params: LiveStrategyParams, runtime: LiveRuntime, data_ro
     return scaled_row, new_reference, scalar
 
 
-def advance_to_date(params: LiveStrategyParams, runtime: LiveRuntime, weights_path: Path, data_root: str, target: pd.Timestamp, *, artifact_key: SecretStr | None = None, max_catchup_days: int = 30) -> tuple[LiveRuntime, int]:
+def advance_to_date(params: LiveStrategyParams, runtime: LiveRuntime, weights_path: Path, data_root: str, target: pd.Timestamp, *, artifact_key: SecretStr | None = None, max_catchup_days: int = 30) -> tuple[LiveRuntime, int, float]:
     from src.live.deployed_weights import append_weight_row, load_weights_frame
 
     target_dt = pd.Timestamp(target).tz_convert("UTC").normalize() if pd.Timestamp(target).tzinfo is not None else pd.Timestamp(target).tz_localize("UTC").normalize()
     last_dt = pd.Timestamp(runtime.last_decision_date).tz_convert("UTC").normalize() if pd.Timestamp(runtime.last_decision_date).tzinfo is not None else pd.Timestamp(runtime.last_decision_date).tz_localize("UTC").normalize()
     if target_dt <= last_dt:
-        return runtime, 0
+        return runtime, 0, 1.0
     gap_days = (target_dt - last_dt).days
     if gap_days > max_catchup_days:
-        # cold catchup: reseed reference from bootstrap (keep held), score only target
-        # For reseed, we reset reference to empty or keep? spec says reseed runtime.reference from params bootstrap tail (via load) -> but we don't have that series here; we keep held and reset reference to empty then score
-        # We'll implement as scoring only target with empty reference tail? But we preserve runtime.reference as is for now and score target alone
-        # To approximate reseed, we create a fresh runtime with empty reference then score
-        # However we don't have bootstrap reference series available without file; we will just keep held and clear reference to empty
-        # Let's keep held, clear reference, score single day
-        new_rt = LiveRuntime(
-            schema_version=runtime.schema_version,
-            params_digest=runtime.params_digest,
-            last_decision_date=runtime.last_decision_date,
-            held_target_row=dict(runtime.held_target_row),
-            reference_daily_returns=pd.Series(dtype="float64"),
-        )
-        runtime = new_rt
-        # score only target
+        # cold catchup: KEEP the bootstrap reference tail already carried on the
+        # runtime (I-REFERENCE-ANCHORED -- the 400-day backtest execution-replay
+        # reference is the reseed) and score only `target`, skipping day-by-day
+        # backfill of a large stale gap.
         scaled_row, new_reference, _scalar = compute_signal_row(params, runtime, data_root, target_dt)
         appended = append_weight_row(Path(weights_path), target_dt, scaled_row, artifact_key=artifact_key)
         updated = LiveRuntime(
@@ -318,11 +313,12 @@ def advance_to_date(params: LiveStrategyParams, runtime: LiveRuntime, weights_pa
             held_target_row={str(k): float(v) for k, v in scaled_row.items() if pd.notna(v)},
             reference_daily_returns=new_reference,
         )
-        return updated, 1 if appended else 0
+        return updated, (1 if appended else 0), float(_scalar)
 
     # sequential scoring
     cur_runtime = runtime
     rows_appended = 0
+    last_scalar = 1.0
     cur = last_dt + pd.Timedelta(days=1)
     while cur <= target_dt:
         frame = load_weights_frame(Path(weights_path), artifact_key=artifact_key)
@@ -339,6 +335,7 @@ def advance_to_date(params: LiveStrategyParams, runtime: LiveRuntime, weights_pa
             cur += pd.Timedelta(days=1)
             continue
         scaled_row, new_reference, _scalar = compute_signal_row(params, cur_runtime, data_root, cur)
+        last_scalar = float(_scalar)
         appended = append_weight_row(Path(weights_path), cur, scaled_row, artifact_key=artifact_key)
         if appended:
             rows_appended += 1
@@ -351,4 +348,4 @@ def advance_to_date(params: LiveStrategyParams, runtime: LiveRuntime, weights_pa
             reference_daily_returns=new_reference,
         )
         cur += pd.Timedelta(days=1)
-    return cur_runtime, rows_appended
+    return cur_runtime, rows_appended, last_scalar

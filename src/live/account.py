@@ -107,11 +107,13 @@ def resolve_sizing_equity(
                 mk = marks.get(sym)
                 if mk is not None:
                     total += qty * mk
-        equity = min(total, cap_usdt)
+        # 합성 원장은 캡을 적용하지 않는다: 백테스트의 자유 복리 vol-target 북과의
+        # 정합성을 위해 cap_usdt 는 첫 사이클 현금 시드로만 쓰인다(I-PAPER-IS-BACKTEST-CONTINUATION).
+        equity = total
         if equity <= Decimal(0):
             raise RiskGateBreach(
                 f"sizing equity {equity} must be positive "
-                f"(virtual_mtm={total} cap={cap_usdt})"
+                f"(virtual_mtm={total} seed={cap_usdt})"
             )
         return equity
     equity = min(snapshot.wallet_balance + snapshot.unrealized_pnl, cap_usdt)
@@ -171,6 +173,26 @@ def reconcile_or_halt(
                 f"position divergence for {symbol}: venue={venue_qty} "
                 f"ledger={ledger_qty} tolerance={qty_tolerance_fraction}"
             )
+
+
+def synthetic_flat_snapshot(now: pd.Timestamp) -> AccountSnapshot:
+    """자격증명 없는 PAPER/SHADOW용 합성 스냅샷: 플랫·one-way·단일 마진.
+
+    억제 모드는 베뉴를 건드리지 않으므로 실제 계좌 조회 없이 이 스냅샷으로
+    venue-config / flatness 가드를 통과시킨다(I-PAPER-NO-CREDENTIALS).
+    """
+    ts = pd.Timestamp(now)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    return AccountSnapshot(
+        taken_at=ts,
+        wallet_balance=Decimal(0),
+        available_balance=Decimal(0),
+        total_maint_margin=Decimal(0),
+        unrealized_pnl=Decimal(0),
+        positions={},
+        dual_side_position=False,
+        multi_assets_margin=False,
+    )
 
 
 def assert_suppressed_venue_flat(snapshot: AccountSnapshot) -> None:
