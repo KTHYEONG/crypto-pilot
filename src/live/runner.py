@@ -28,6 +28,7 @@ from src.live.account import (
     fetch_account_snapshot,
     reconcile_or_halt,
     resolve_sizing_equity,
+    synthetic_flat_snapshot,
 )
 from src.live.audit import AuditLog, default_audit_log_path
 from src.live.errors import CausalityViolation, LiveTradingError, RiskGateBreach, StaleSignalError
@@ -169,9 +170,13 @@ def run_shadow_cycle(
         rate_limits = parse_rate_limits(exchange_info_payload)
 
         order_client = _order_client(settings, decision_time)
-        # -1021 이후가 아니라 사전에 시계를 동기화한다.
-        order_client.sync_server_time()
-        snapshot = fetch_account_snapshot(order_client, now=now_ts)
+        if isinstance(order_client, NullOrderClient):
+            # 자격증명 없는 PAPER/SHADOW: 실계좌 조회 없이 합성 스냅샷(I-PAPER-NO-CREDENTIALS).
+            snapshot = synthetic_flat_snapshot(now_ts)
+        else:
+            # -1021 이후가 아니라 사전에 시계를 동기화한다.
+            order_client.sync_server_time()
+            snapshot = fetch_account_snapshot(order_client, now=now_ts)
         assert_venue_configuration(snapshot)
 
         ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
@@ -657,7 +662,50 @@ def _market_client(settings: LiveSettings, decision_time: pd.Timestamp) -> Binan
     )
 
 
-def _order_client(settings: LiveSettings, decision_time: pd.Timestamp) -> BinanceFuturesRestClient:
+class NullOrderClient:
+    """자격증명 없는 억제 모드(PAPER/SHADOW) 전용 주문 클라이언트.
+
+    공개 마켓데이터 읽기는 주입된 market client에 위임하고, 서명이 필요한
+    조회는 빈 결과로, 변이는 억제 응답으로 스텁한다. 실제 체결은
+    execute_intents 의 paper_fill_model 시뮬레이터가 관측 호가로 구동한다.
+    """
+
+    def __init__(self, market_client: Any, mode: Any) -> None:
+        self._market = market_client
+        self._mode = mode
+
+    def __getattr__(self, name: str) -> Any:
+        # 공개 마켓데이터 읽기(book_ticker/book_tickers/depth/premium_index 등)는 위임한다.
+        # _-접두 이름과 _market 미바인딩 시점(복사/피클/introspection)의 무한 재귀를 차단한다.
+        if name.startswith("_") or "_market" not in self.__dict__:
+            raise AttributeError(name)
+        return getattr(self._market, name)
+
+    def sync_server_time(self) -> None:
+        return None
+
+    def open_orders(self) -> list[dict[str, Any]]:
+        return []
+
+    def new_order(self, params: Mapping[str, Any]) -> Any:
+        from src.live.rest import PaperResponse, ShadowResponse
+        from src.live.settings import ExecutionMode
+
+        if self._mode is ExecutionMode.PAPER:
+            return PaperResponse.suppressed("POST", "/fapi/v1/order", "")
+        return ShadowResponse.suppressed("POST", "/fapi/v1/order", "")
+
+    def cancel_order(self, *_a: Any, **_k: Any) -> dict[str, Any]:
+        return {}
+
+    def query_order(self, *_a: Any, **_k: Any) -> dict[str, Any]:
+        return {}
+
+
+def _order_client(settings: LiveSettings, decision_time: pd.Timestamp) -> Any:
+    if settings.mode.suppresses_mutations and settings.api_key is None:
+        # 자격증명 없는 로컬 PAPER/SHADOW: 공개 GET만 쓰는 스텁 클라이언트(I-PAPER-NO-CREDENTIALS).
+        return NullOrderClient(_market_client(settings, decision_time), settings.mode)
     return BinanceFuturesRestClient(
         settings.order_base_url,
         settings.order_api_key or settings.api_key,

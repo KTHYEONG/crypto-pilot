@@ -70,7 +70,7 @@ def test_assert_deployment_eligible_rejects_research_go_fail() -> None:
     from src.mhs.live_strategy import assert_deployment_eligible
 
     tw = pd.DataFrame({"BTCUSDT": [0.1]}, index=pd.DatetimeIndex([pd.Timestamp("2026-08-30", tz="UTC")]))
-    report = types.SimpleNamespace(status="OK", research_go=types.SimpleNamespace(eligible=False), blend=types.SimpleNamespace(target_weights=tw))
+    report = types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=False), blend=types.SimpleNamespace(target_weights=tw))
     with pytest.raises(DataIntegrityError) as exc:
         assert_deployment_eligible(report)
     assert "deployment ineligible" in str(exc.value)
