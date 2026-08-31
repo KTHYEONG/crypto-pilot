@@ -54,6 +54,9 @@ def test_SCENARIO_LIVE_22_seal_roundtrip_deterministic_tamper_evident(
 
 def test_derive_key_validates_base64_32_bytes() -> None:
     assert derive_key(SecretStr(KEY_B64)) == KEY
+    # env 파이프라인이 감싼 따옴표/공백은 허용한다.
+    assert derive_key(SecretStr(f'  "{KEY_B64}"\n')) == KEY
+    assert derive_key(SecretStr(f"'{KEY_B64}'")) == KEY
     with pytest.raises(ArtifactSealError):
         derive_key(SecretStr("not-base64!!!"))
     with pytest.raises(ArtifactSealError):

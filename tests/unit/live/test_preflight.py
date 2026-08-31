@@ -35,16 +35,18 @@ class StubMarketClient:
 class StubOrderClient:
     def request(self, method: str, path: str, params=None, *, signed=False) -> Any:
         if path == "/fapi/v2/account":
+            # Real Binance omits dualSidePosition from this payload.
             return {
                 "totalWalletBalance": "2000",
                 "availableBalance": "1900",
                 "totalInitialMargin": "10",
                 "totalUnrealizedProfit": "0",
-                "dualSidePosition": "false",
                 "multiAssetsMargin": "false",
             }
         if path == "/fapi/v2/positionRisk":
             return []
+        if path == "/fapi/v1/positionSide/dual":
+            return {"dualSidePosition": False}
         raise AssertionError(f"unexpected path {path}")
 
 
