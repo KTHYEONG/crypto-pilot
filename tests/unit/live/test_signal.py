@@ -41,9 +41,11 @@ def test_latest_target_weights_exact_row_or_fail(artifact, tmp_path) -> None:
     weights = latest_target_weights(artifact, decision_time)
     assert weights["AAAUSDT"] == pytest.approx(0.2)
 
+    # v2: missing exact date returns most recent prior row within staleness
     missing_on_grid = pd.Timestamp("2026-08-25 00:00Z")
-    with pytest.raises(DataIntegrityError):
-        latest_target_weights(artifact, missing_on_grid)
+    held = latest_target_weights(artifact, missing_on_grid)
+    assert pd.Timestamp(held.name) == pd.Timestamp("2026-08-24 00:00Z")
+    assert held["AAAUSDT"] == pytest.approx(0.2)
 
     off_grid = pd.Timestamp("2026-08-24 03:00Z")
     with pytest.raises(ValueError, match="24h grid"):
