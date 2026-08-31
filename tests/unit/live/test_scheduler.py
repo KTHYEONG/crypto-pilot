@@ -660,3 +660,60 @@ def test_default_data_refresh_uses_check_true(monkeypatch) -> None:
     assert captured.get("check") is True
 
 
+
+def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "post_alert", lambda *a, **k: True, raising=False)
+
+    emails: list[tuple[str, str]] = []
+
+    def _fake_email(*, gmail_user, gmail_app_password, email_to, event, detail, decision_time, now):
+        emails.append((event, email_to))
+        return True
+
+    monkeypatch.setattr(sched, "send_email_alert", _fake_email, raising=False)
+
+    def _halt_cycle(settings, decision_time, artifact, *, now):
+        from src.live.runner import CycleReport
+        return CycleReport(status="HALT", reason="x", decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _halt_cycle)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+
+    base = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [base + pd.Timedelta(days=5) + _SIGNAL_LAG + pd.Timedelta(minutes=20)]
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    sched.run_daemon(
+        LiveSettings(
+            alert_halt_streak=2,
+            daemon_max_attempts_per_day=1,
+            alert_gmail_user="bot@gmail.com",
+            alert_gmail_app_password="pw",
+            alert_email_to="me@gmail.com",
+        ),
+        artifact,
+        tmp_path / "state.json",
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        max_iterations=3,
+        refresh_fn=lambda: None,
+        signal_step_fn=lambda *a, **k: None,
+        prune_fn=lambda: None,
+    )
+
+    assert ("halt_streak", "me@gmail.com") in emails
+    assert [e for e, _ in emails].count("halt_streak") == 1
