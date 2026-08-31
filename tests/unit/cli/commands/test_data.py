@@ -62,6 +62,7 @@ def test_data_collect_mhs_execution_threads_timeframe_to_plan(monkeypatch) -> No
 
 def test_data_refresh_live_universe_registered_and_dispatches(monkeypatch) -> None:
     """v2: refresh does 1h/funding + markPriceKlines, no 3m roster."""
+    monkeypatch.setenv("LIVE_MIN_UNIVERSE_SYMBOLS", "1")
     parser = _mhs_parser()
     args = parser.parse_args(["data", "refresh-live-universe"])
     assert args.handler is _refresh_live_universe
@@ -108,6 +109,7 @@ def test_data_refresh_live_universe_registered_and_dispatches(monkeypatch) -> No
 
 def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(monkeypatch) -> None:
     """A single symbol's network failure is logged and skipped, not fatal."""
+    monkeypatch.setenv("LIVE_MIN_UNIVERSE_SYMBOLS", "1")
     import glob as glob_mod
 
     parser = _mhs_parser()
@@ -167,6 +169,7 @@ def test_stream_liquidations_subcommand_wires_asyncio_run(monkeypatch) -> None:
 
 def test_refresh_live_universe_metrics_tail_is_failsoft(monkeypatch) -> None:
     """A raising ensure_metrics_live_tail for one symbol is logged and skipped."""
+    monkeypatch.setenv("LIVE_MIN_UNIVERSE_SYMBOLS", "1")
     import glob as glob_mod
 
     parser = _mhs_parser()
@@ -204,3 +207,28 @@ def test_refresh_live_universe_metrics_tail_is_failsoft(monkeypatch) -> None:
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_SIGNAL_10_CLI_SUBCOMMANDS_AND_EXIT_CODES",  # data 측 dispatch 부분
 )
+
+
+# --- auto appended from contract ---
+def test_refresh_live_universe_cold_box_fails_loud(tmp_path, monkeypatch) -> None:
+    import argparse
+    import pytest
+    import src.cli.commands.data as data_mod
+    from src.common import config as cfg
+
+    monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(data_mod, "FUTURES_DATA_DIR", tmp_path, raising=False)
+    (tmp_path / "ohlcv" / "1h").mkdir(parents=True)
+    (tmp_path / "ohlcv" / "1h" / "BTCUSDT.parquet").touch()
+
+    def _no_collector(*_a, **_k):
+        raise AssertionError("collector must not run on a cold box")
+
+    monkeypatch.setattr(data_mod, "DataCollector", _no_collector, raising=False)
+
+    with pytest.raises(SystemExit) as ei:
+        data_mod._refresh_live_universe(argparse.Namespace())
+
+    assert ei.value.code == 3
+
+
