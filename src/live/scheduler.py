@@ -30,6 +30,20 @@ from src.live.settings import LiveSettings
 from src.live.signal import _SIGNAL_LAG
 from src.mhs.live_strategy import STRATEGY_PARAMS_FILENAME  # wiring: import subprocess, sys; from src.mhs.live_strategy import STRATEGY_PARAMS_FILENAME
 
+try:
+    from src.live.alerting import post_alert  # noqa: F401
+except Exception:  # noqa: BLE001,S110
+
+    def post_alert(
+        webhook_url: str | None,
+        *,
+        event: str,
+        detail: str,
+        decision_time: pd.Timestamp | None,
+        now: pd.Timestamp,
+    ) -> bool:
+        return False
+
 logger = logging.getLogger("LiveScheduler")
 
 # wiring anchors for spec compliance
@@ -46,6 +60,7 @@ DAEMON_CATCHUP_BUFFER: pd.Timedelta = pd.Timedelta(minutes=5)
 DAEMON_MAX_ATTEMPTS_PER_DAY: int = 5
 DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
 SIGNAL_REFRESH_OFFSET_MINUTES: float = 0.0
+DAEMON_COLD_UNIVERSE_EXIT_CODE: int = 3
 
 _STATE_KEY = "last_processed_decision_time"
 
@@ -193,6 +208,18 @@ def _default_data_refresh() -> None:
     )
 
 
+def _daemon_alert(
+    settings: LiveSettings, sent: set[str], *, event: str, detail: str, decision_time: pd.Timestamp | None, now: pd.Timestamp
+) -> None:
+    if event in sent:
+        return
+    sent.add(event)
+    try:
+        post_alert(settings.alert_webhook_url, event=event, detail=detail, decision_time=decision_time, now=now)
+    except Exception:  # noqa: BLE001
+        logger.exception("[SYS] alert dispatch failed event=%s", event)
+
+
 def _default_signal_step(target: pd.Timestamp) -> None:
     """Production signal step: heavy compute isolated in a short-lived subprocess."""
     subprocess.run([sys.executable, "-m", "src.cli.main", "live", "signal-step", "--date", pd.Timestamp(target).isoformat()], check=True, timeout=1200)
@@ -218,6 +245,7 @@ def run_daemon(
     iteration = 0
     heartbeat_path = _resolve_heartbeat_path(settings)
     consecutive_halts = 0
+    alerts_sent: set[str] = set()
     buffer_td = pd.Timedelta(minutes=settings.daemon_catchup_buffer_minutes)
 
     while max_iterations is None or iteration < max_iterations:
@@ -249,6 +277,7 @@ def run_daemon(
                 write_heartbeat(heartbeat_path, decision_time=target, status="AWAITING", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
             except Exception:
                 logger.exception("[SYS] heartbeat write failed")
+            _daemon_alert(settings, alerts_sent, event="awaiting_params", detail="strategy_params missing", decision_time=target, now=now_fn())
             try:
                 sleep_fn(DAEMON_POLL_INTERVAL_SECONDS)
             except Exception:
@@ -257,8 +286,18 @@ def run_daemon(
 
         try:
             refresh_fn()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             logger.exception("[SYS] data refresh failed")
+            _daemon_alert(settings, alerts_sent, event="data_refresh_failed", detail=str(exc), decision_time=target, now=now_fn())
+            try:
+                write_heartbeat(heartbeat_path, decision_time=target, status="AWAITING_DATA", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
+            except Exception:
+                logger.exception("[SYS] heartbeat write failed")
+            try:
+                sleep_fn(DAEMON_POLL_INTERVAL_SECONDS)
+            except Exception:
+                pass
+            continue
 
         signal_status = "COMPLETE"
         try:
@@ -273,6 +312,8 @@ def run_daemon(
         if signal_status == "HALT":
             status = "HALT"
             consecutive_halts += 1
+            if consecutive_halts >= settings.alert_halt_streak:
+                _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts}", decision_time=target, now=now_fn())
             try:
                 write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
             except Exception:
@@ -317,8 +358,11 @@ def run_daemon(
 
         if status == "COMPLETE":
             consecutive_halts = 0
+            alerts_sent.clear()
         else:
             consecutive_halts += 1
+            if consecutive_halts >= settings.alert_halt_streak:
+                _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts}", decision_time=target, now=now_fn())
 
         try:
             write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
@@ -326,6 +370,7 @@ def run_daemon(
             logger.exception("[SYS] heartbeat write failed")
 
         if status == "COMPLETE":
+            alerts_sent.clear()
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
             _save_last_processed(state_path, target)
             continue

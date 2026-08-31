@@ -114,13 +114,53 @@ def _run_signal_step(args: argparse.Namespace) -> None:
     weights_path = default_weights_path()
     try:
         runtime = load_or_bootstrap_runtime(runtime_path, params, bootstrap_ref, artifact_key=settings.artifact_key)
-        runtime, n, scalar = advance_to_date(params, runtime, weights_path, "", target=date, artifact_key=settings.artifact_key)
+        from src.mhs.live_runtime import reconcile_runtime_params
+
+        runtime, swap_reason = reconcile_runtime_params(runtime, params, bootstrap_ref)
+        if swap_reason:
+            logger.info("[ALGO] params_swap reason=%s new_digest=%s", swap_reason, params.strategy_digest)
+        runtime, n, scalar = advance_to_date(
+            params,
+            runtime,
+            weights_path,
+            "",
+            target=date,
+            artifact_key=settings.artifact_key,
+            portfolio_state_dir=(Path(settings.portfolio_state_dir) if settings.portfolio_state_dir else None),
+            mode=settings.mode.value,
+        )
         save_runtime(runtime_path, runtime, artifact_key=settings.artifact_key)
         # compute exposure scale for log: we don't have scalar directly, but we can log n
         logger.info("[EVAL] signal_step rows_appended=%d last_date=%s exposure_scale=%.4f", n, runtime.last_decision_date.isoformat(), scalar)
     except (DataIntegrityError, ArtifactSealError) as exc:
         logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
         raise SystemExit(1) from exc
+
+
+def _run_status(args: argparse.Namespace) -> None:
+    import json
+
+    settings = _settings_with_mode(args)
+    from src.live.scheduler import _resolve_heartbeat_path
+
+    hb_path = _resolve_heartbeat_path(settings)
+    if not hb_path.exists():
+        logger.error("[SYS] status=NO_HEARTBEAT path=%s", hb_path)
+        raise SystemExit(1)
+    hb = json.loads(hb_path.read_text())
+    status = str(hb.get("status", "UNKNOWN"))
+    hb_ts = pd.Timestamp(hb["ts"])
+    age_min = (pd.Timestamp.now(tz="UTC") - hb_ts).total_seconds() / 60
+    logger.info(
+        "[SYS] status=%s decision_time=%s consecutive_halts=%s attempts=%s heartbeat_age_min=%.1f",
+        status,
+        hb.get("decision_time"),
+        hb.get("consecutive_halts"),
+        hb.get("attempts"),
+        age_min,
+    )
+    unhealthy = status in {"HALT", "AWAITING", "AWAITING_DATA"} or age_min > settings.max_signal_staleness_hours * 60
+    raise SystemExit(1 if unhealthy else 0)
 
 
 def _run_deploy_check(args: argparse.Namespace) -> None:
@@ -315,6 +355,10 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     )
     daemon.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     daemon.set_defaults(handler=_run_daemon)
+
+    status = subparsers.add_parser("status", help="Show daemon heartbeat status")
+    status.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
+    status.set_defaults(handler=_run_status)
 
     # wiring: signal-step
     step = subparsers.add_parser("signal-step", help="Run heavy signal compute (daemon subprocess)")
