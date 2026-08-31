@@ -51,12 +51,15 @@ def parse_liquidation(
         if pd.isna(ingested):
             return None
 
-        # Prefer raw info.o fields
+        # 원시 forceOrder 주문 오브젝트 우선. 현행 ccxt(binanceusdm)는 이를 info 로
+        # 평탄화해 전달하고(info.s/q/z/T ...), 과거 스키마는 info.o 로 중첩했다.
         info = msg.get("info") if isinstance(msg.get("info"), Mapping) else None
         o: Mapping[str, Any] | None = None
-        if isinstance(info, Mapping) and "o" in info and isinstance(info["o"], Mapping):
+        if isinstance(info, Mapping) and isinstance(info.get("o"), Mapping):
             o = info["o"]
-        elif "o" in msg and isinstance(msg["o"], Mapping):
+        elif isinstance(info, Mapping) and "s" in info and "T" in info:
+            o = info
+        elif isinstance(msg.get("o"), Mapping):
             o = msg["o"]
 
         if o is not None:
@@ -389,19 +392,13 @@ async def run_liquidation_stream(
         if _is_shutdown():
             break
         try:
-            if symbols is None:
-                # whole market
-                if hasattr(ex, "watch_liquidations"):
-                    raw = await ex.watch_liquidations()
-                else:
-                    raw = await ex.watch_liquidations_for_symbols(symbols)
+            # ccxt watch_liquidations(symbol) 는 symbol 필수. 전체 마켓은 빈 리스트로 조회한다.
+            if hasattr(ex, "watch_liquidations_for_symbols"):
+                raw = await ex.watch_liquidations_for_symbols(list(symbols) if symbols else [])
+            elif symbols and len(symbols) == 1 and hasattr(ex, "watch_liquidations"):
+                raw = await ex.watch_liquidations(symbols[0])
             else:
-                if hasattr(ex, "watch_liquidations_for_symbols"):
-                    raw = await ex.watch_liquidations_for_symbols(symbols)
-                elif hasattr(ex, "watch_liquidations"):
-                    raw = await ex.watch_liquidations()
-                else:
-                    raise AttributeError("exchange has no liquidation watch method")
+                raise AttributeError("exchange has no usable liquidation watch method")
             # raw may be list or single dict
             if raw is None:
                 items: list[Any] = []

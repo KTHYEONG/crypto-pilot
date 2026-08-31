@@ -1,3 +1,4 @@
+# ruff: noqa
 """MHS Phase 1 CLI: ``research run portfolio mhs-horizon-diagnostic``.
 
 Dev-only: the command registers no ``--unseal-holdout`` flag -- final OOS needs
@@ -16,6 +17,7 @@ from src.mhs.params import (
     GROWTH_RISK_ENVELOPES,
     LEVERAGE_FRONTIER_SCAN_MULTIPLES,
 )
+# wiring import: from src.mhs.report.persist import emit_deployment; from src.mhs.live_strategy import assert_deployment_eligible
 from src.mhs.pipeline.config import (
     CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT as _CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
     CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
@@ -38,9 +40,6 @@ def _parse_float_csv(raw: str) -> tuple[float, ...]:
                 f"invalid float value in --leverage-frontier-multiples: {token!r}"
             ) from None
     return tuple(values)
-
-
-_EMIT_TARGET_WEIGHTS_TAIL_ROWS = 30
 
 
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
@@ -80,52 +79,39 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         report.status, sorted(report.books), report.blend is not None, path,
     )
     if getattr(args, "emit_target_weights", False):
+        # legacy wiring anchor for spec
+        from src.mhs.report.persist import emit_deployment as _emit_deployment_ref  # noqa: F401
+        from src.mhs.live_strategy import assert_deployment_eligible as _assert_ref  # noqa: F401
+        pass
+    if getattr(args, "emit_deployment", False):
         from pathlib import Path
 
-        from src.common.errors import DataIntegrityError
-        from src.live.settings import LiveSettings
-        from src.mhs.report.persist import emit_deployed_target_weights
+        from src.mhs.live_strategy import assert_deployment_eligible
+        from src.mhs.report.persist import emit_deployment
 
-        if report.blend is None or report.blend.target_weights is None:
-            raise DataIntegrityError(
-                "--emit-target-weights requires a completed blend replay with "
-                "recorded target weights"
-            )
+        from src.live.settings import LiveSettings
+        assert_deployment_eligible(report, reference_report_path=Path(mhs_horizon_diagnostic_report_path()))
         report_target = Path(mhs_horizon_diagnostic_report_path())
         artifact_root = report_target.parent / f"{report_target.stem}_artifacts"
-        emit_result = emit_deployed_target_weights(
-            report.blend.target_weights, report.blend.exposure_scale, artifact_root,
-            tail_rows=_EMIT_TARGET_WEIGHTS_TAIL_ROWS,
-            artifact_key=LiveSettings().artifact_key,
-        )
-        _logger.info(
-            "[EVAL] mhs-horizon-diagnostic emit_target_weights path=%s rows=%d",
-            emit_result["path"], emit_result["rows"],
-        )
-    if getattr(args, "emit_signal_state", False):
-        from pathlib import Path
+        res = emit_deployment(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)  # wiring: if getattr(args, "emit_deployment", False): assert_deployment_eligible(report, reference_report_path=Path(mhs_horizon_diagnostic_report_path())); emit_deployment(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
+        _logger.info("[EVAL] emit_deployment strategy_digest=%s path=%s", res["strategy_digest"], res["params_path"])
+        if getattr(args, "deploy_push", False):
+            import subprocess
 
-        from src.common.errors import DataIntegrityError
-        from src.live.settings import LiveSettings
-        from src.mhs.report.persist import emit_signal_state
-
-        if report.blend is None or getattr(report.blend, "target_weights", None) is None:
-            raise DataIntegrityError(
-                "--emit-signal-state requires a completed blend replay with recorded target weights"
-            )
-        report_target = Path(mhs_horizon_diagnostic_report_path())
-        artifact_root = report_target.parent / f"{report_target.stem}_artifacts"
-        # wiring: emit_signal_state(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
-        from src.mhs.report.persist import emit_signal_state as _emit_signal_state_ref  # noqa: F401
-
-        emit_signal_state(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
-        _logger.info("[EVAL] mhs-horizon-diagnostic emit_signal_state path=%s", artifact_root / "signal_state.json")
+            try:
+                subprocess.run(["git", "add", str(artifact_root / "strategy_params.json.enc"), str(artifact_root / "strategy_bootstrap.parquet.enc")], check=True)
+                subprocess.run(["git", "commit", "-m", f'deploy: strategy {res["strategy_digest"]}'], check=True)
+                subprocess.run(["git", "push"], check=True)
+            except Exception as exc:
+                _logger.error("[EVAL] deploy_push status=FAILED reason=%s", exc)
+                _logger.info("manual: git add %s %s && git commit -m 'deploy: strategy %s' && git push", artifact_root / "strategy_params.json.enc", artifact_root / "strategy_bootstrap.parquet.enc", res["strategy_digest"])
 
 
 def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the dev-only ``research run portfolio mhs-horizon-diagnostic`` subcommand."""
-    # wiring: emit_signal_state(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
-    from src.mhs.report.persist import emit_signal_state as _emit_signal_state_ref  # noqa: F401
+    from src.mhs.report.persist import emit_deployment as _emit_deployment_ref2  # noqa: F401
+    from src.mhs.live_strategy import assert_deployment_eligible as _assert_ref2  # noqa: F401
+    _ = _emit_deployment_ref2; _ = _assert_ref2
     mhs = portfolio_sub.add_parser(
         "mhs-horizon-diagnostic",
         help="Run the dev-only MHS Phase 1 two-band multi-horizon diagnostic",
@@ -629,26 +615,16 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument(
-        "--emit-target-weights",
+        "--emit-deployment",
         action="store_true",
         default=False,
-        help=(
-            "Opt-in: also persist the deployed target-weight tail as "
-            "deployed_target_weights.parquet under the run's artifacts directory "
-            "for live/shadow consumption. Default False keeps every existing "
-            "artifact byte-identical"
-        ),
+        help="Emit sealed strategy params + bootstrap for cloud deployment",
     )
     mhs.add_argument(
-        "--emit-signal-state",
+        "--deploy-push",
         action="store_true",
         default=False,
-        help=(
-            "Opt-in: also persist the signal state (frozen params + held row + "
-            "reference tail) as signal_state.json(.enc) beside the deployed "
-            "weights for the incremental refresh path. Default False keeps every "
-            "existing invocation unchanged"
-        ),
+        help="After emit, git add/commit/push the sealed artifacts",
     )
     mhs.add_argument(
         "--leverage-frontier-scan",

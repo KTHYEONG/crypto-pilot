@@ -56,6 +56,36 @@ def test_parse_liquidation_from_raw_force_order_payload() -> None:
     assert ev.ingested_at == ingested
 
 
+#: 현행 ccxt(binanceusdm) watch_liquidations_for_symbols 가 실제로 내보내는 형태:
+#: 주문 오브젝트가 info 로 평탄화되고 quoteValue/baseValue 는 None 이다.
+_CCXT_FLAT_INFO_MSG = {
+    "info": {
+        "s": "BLESSUSDT", "S": "SELL", "o": "LIMIT", "f": "IOC",
+        "q": "31180", "p": "0.0107580", "ap": "0.0109660", "X": "FILLED",
+        "l": "6249", "z": "31180", "T": 1788092214457, "ps": "BLESSUSDT", "st": 1,
+    },
+    "symbol": "BLESS/USDT:USDT",
+    "contracts": 6249.0,
+    "price": 0.010966,
+    "side": "sell",
+    "baseValue": None,
+    "quoteValue": None,
+    "timestamp": 1788092214457,
+}
+
+
+def test_parse_liquidation_from_ccxt_flat_info_payload() -> None:
+    ev = parse_liquidation(_CCXT_FLAT_INFO_MSG, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z"))
+    assert ev is not None
+    assert ev.symbol == "BLESSUSDT"
+    assert ev.side == "SELL"
+    assert ev.order_type == "LIMIT"
+    assert ev.orig_qty == pytest.approx(31180.0)
+    assert ev.avg_price == pytest.approx(0.010966)
+    assert ev.status == "FILLED"
+    assert ev.event_time == pd.Timestamp(1788092214457, unit="ms", tz="UTC")
+
+
 def test_parse_liquidation_from_ccxt_unified_dict() -> None:
     unified = {
         "symbol": "ETH/USDT:USDT",
@@ -140,7 +170,8 @@ class _StubExchange:
         self.calls = 0
         self.closed = 0
 
-    async def watch_liquidations(self):  # noqa: D401 - stub
+    async def watch_liquidations_for_symbols(self, symbols, *a, **k):  # noqa: D401 - stub
+        self.last_symbols = symbols
         self.calls += 1
         if self._error_first and self.calls == 1:
             raise ConnectionError("ws dropped")
@@ -159,16 +190,7 @@ class _Flag:
 
 def test_run_liquidation_stream_flushes_and_stops_on_shutdown(tmp_path) -> None:
     flag = _Flag()
-    msg2 = {
-        "info": {
-            "o": {
-                "s": "ETHUSDT", "S": "BUY", "o": "LIMIT", "f": "IOC",
-                "q": "2", "p": "50", "ap": "50", "X": "FILLED",
-                "l": "2", "z": "2", "T": 1700000000000,
-            }
-        }
-    }
-    stub = _StubExchange([[_RAW_MSG, msg2]], flag)
+    stub = _StubExchange([[_RAW_MSG, _CCXT_FLAT_INFO_MSG]], flag)
     asyncio.run(
         run_liquidation_stream(
             symbols=None,
@@ -182,6 +204,8 @@ def test_run_liquidation_stream_flushes_and_stops_on_shutdown(tmp_path) -> None:
     total = sum(len(pd.read_parquet(f)) for f in files)
     assert total == 2
     assert stub.closed == 1
+    # 전체 마켓 구독은 빈 심볼 리스트로 호출된다(ccxt watch_liquidations 는 symbol 필수).
+    assert stub.last_symbols == []
 
 
 def test_run_liquidation_stream_reconnects_on_error_without_dying(tmp_path, monkeypatch) -> None:

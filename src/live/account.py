@@ -40,6 +40,14 @@ def _required_number(payload: Mapping[str, Any], key: str) -> Decimal:
         raise DataIntegrityError(f"account payload key {key} is not numeric") from exc
 
 
+def _fetch_flag(client: Any, path: str, key: str) -> Any:
+    """전용 설정 엔드포인트에서 단일 boolean 플래그를 읽는다(응답 스키마 불일치는 fail-closed)."""
+    payload = client.request("GET", path, signed=True)
+    if not isinstance(payload, dict) or key not in payload:
+        raise DataIntegrityError(f"{path} returned an unexpected schema")
+    return payload[key]
+
+
 def fetch_account_snapshot(client: Any, *, now: pd.Timestamp) -> AccountSnapshot:
     """GET /fapi/v2/account 및 /fapi/v2/positionRisk로 스냅샷을 구성한다."""
     account = client.request("GET", "/fapi/v2/account", signed=True)
@@ -57,8 +65,14 @@ def fetch_account_snapshot(client: Any, *, now: pd.Timestamp) -> AccountSnapshot
         if qty != 0:
             positions[str(entry["symbol"])] = qty
 
+    # dualSidePosition 은 /fapi/v2(v3)/account 응답에 없다 -- 전용 엔드포인트에서 조회한다.
+    # multiAssetsMargin 은 account 페이로드에 있으면 그대로, 없으면(v3) 전용 엔드포인트로 폴백.
     dual_side_raw = account.get("dualSidePosition")
+    if dual_side_raw is None:
+        dual_side_raw = _fetch_flag(client, "/fapi/v1/positionSide/dual", "dualSidePosition")
     multi_assets_raw = account.get("multiAssetsMargin")
+    if multi_assets_raw is None:
+        multi_assets_raw = _fetch_flag(client, "/fapi/v1/multiAssetsMargin", "multiAssetsMargin")
     if dual_side_raw is None or multi_assets_raw is None:
         raise DataIntegrityError("account payload missing dualSidePosition/multiAssetsMargin")
 

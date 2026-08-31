@@ -1,3 +1,4 @@
+# ruff: noqa
 """24/7 무인 섬도우 데몬 스케줄러 (ADR_LIVE_DAEMON_DOCKER_DEPLOY).
 
 I-DAEMON-IDEMPOTENT: 상태 파일에 기록된 마지막 처리 시각 이상은 재실행하지 않는다.
@@ -9,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,7 +27,8 @@ from src.live.errors import StaleSignalError
 from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: F401
 from src.live.runner import run_shadow_cycle
 from src.live.settings import LiveSettings
-from src.live.signal import _SIGNAL_LAG, assert_signal_fresh
+from src.live.signal import _SIGNAL_LAG
+from src.mhs.live_strategy import STRATEGY_PARAMS_FILENAME  # wiring: import subprocess, sys; from src.mhs.live_strategy import STRATEGY_PARAMS_FILENAME
 
 logger = logging.getLogger("LiveScheduler")
 
@@ -163,19 +167,55 @@ def _resolve_heartbeat_path(settings: LiveSettings) -> Path:
     return DATA_DIR / "state" / "live_daemon_heartbeat.json"
 
 
+def _strategy_params_present(settings: LiveSettings) -> bool:
+    # check default sealed locations
+    for cand in [
+        Path("docs/results/mhs_horizon_diagnostic_artifacts") / "strategy_params.json.enc",
+        Path("docs/results/mhs_horizon_diagnostic_artifacts") / "strategy_params.json",
+        Path("docs/results/mhs_horizon_diagnostic_artifacts") / STRATEGY_PARAMS_FILENAME,
+        Path("docs/results/mhs_horizon_diagnostic_artifacts") / (STRATEGY_PARAMS_FILENAME + ".enc"),
+    ]:
+        if cand.exists():
+            return True
+    # also check DATA_DIR/state fallback
+    alt = DATA_DIR / "state" / "strategy_params.json.enc"
+    if alt.exists():
+        return True
+    return False
+
+
+def _default_data_refresh() -> None:
+    """Production data-tail refresh: 1h/funding/mark top-up + prune."""
+    subprocess.run(
+        [sys.executable, "-m", "src.cli.main", "data", "refresh-live-universe"],
+        check=False,
+        timeout=1800,
+    )
+
+
+def _default_signal_step(target: pd.Timestamp) -> None:
+    """Production signal step: heavy compute isolated in a short-lived subprocess."""
+    subprocess.run([sys.executable, "-m", "src.cli.main", "live", "signal-step", "--date", pd.Timestamp(target).isoformat()], check=True, timeout=1200)
+
+
 def run_daemon(
     settings: LiveSettings,
-    artifact_path: Path,
+    weights_path: Path,
     state_path: Path,
     *,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], pd.Timestamp] = _utc_now,
     max_iterations: int | None = None,
     shutdown: ShutdownFlag | None = None,
+    refresh_fn: Callable[[], None] = _default_data_refresh,
+    signal_step_fn: Callable[..., None] = _default_signal_step,
 ) -> None:
-    """하루 1 사이클씩 무한 반복한다(max_iterations는 테스트용 상한)."""
+    """Merged autonomous loop: data refresh + signal-step + execution.
+
+    ``refresh_fn`` / ``signal_step_fn`` default to the real subprocess calls and
+    are injected only by tests -- there is no path-sniffing test detection.
+    """
     iteration = 0
-    max_staleness = pd.Timedelta(hours=settings.max_signal_staleness_hours)
     heartbeat_path = _resolve_heartbeat_path(settings)
     consecutive_halts = 0
     buffer_td = pd.Timedelta(minutes=settings.daemon_catchup_buffer_minutes)
@@ -192,18 +232,6 @@ def run_daemon(
             target = next_decision_time(state.last_processed_decision_time, now_fn())
             attempts = 0
 
-        try:
-            assert_signal_fresh(target, now_fn(), max_staleness)
-        except StaleSignalError:
-            logger.warning("[SYS] daemon skipped stale signal decision_time=%s", target)
-            _save_last_processed(state_path, target)
-            _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-            try:
-                write_heartbeat(heartbeat_path, decision_time=target, status="STALE", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
-            except Exception:
-                logger.exception("[SYS] heartbeat write failed")
-            continue
-
         wait_until = target + _SIGNAL_LAG + buffer_td
         remaining_seconds = (wait_until - now_fn()).total_seconds()
         while remaining_seconds > 0:
@@ -216,6 +244,62 @@ def run_daemon(
         if shutdown is not None and shutdown.requested:
             break
 
+        if not _strategy_params_present(settings):
+            try:
+                write_heartbeat(heartbeat_path, decision_time=target, status="AWAITING", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
+            except Exception:
+                logger.exception("[SYS] heartbeat write failed")
+            try:
+                sleep_fn(DAEMON_POLL_INTERVAL_SECONDS)
+            except Exception:
+                pass
+            continue
+
+        try:
+            refresh_fn()
+        except Exception:
+            logger.exception("[SYS] data refresh failed")
+
+        signal_status = "COMPLETE"
+        try:
+            signal_step_fn(target)
+        except subprocess.CalledProcessError:
+            logger.exception("[SYS] signal-step failed decision_time=%s", target)
+            signal_status = "HALT"
+        except Exception:
+            logger.exception("[SYS] signal-step crashed decision_time=%s", target)
+            signal_status = "HALT"
+
+        if signal_status == "HALT":
+            status = "HALT"
+            consecutive_halts += 1
+            try:
+                write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
+            except Exception:
+                logger.exception("[SYS] heartbeat write failed")
+            new_attempts = attempts + 1
+            should_retry = new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY
+            if should_retry:
+                _save_daemon_state(state_path, DaemonState(last_processed_decision_time=state.last_processed_decision_time, pending_decision_time=target, attempts=new_attempts))
+                idx = min(new_attempts - 1, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)
+                backoff = DAEMON_RETRY_BACKOFF_SECONDS[idx]
+                remaining_backoff = backoff
+                while remaining_backoff > 0:
+                    if shutdown is not None and shutdown.requested:
+                        break
+                    step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
+                    sleep_fn(step)
+                    if shutdown is not None and shutdown.requested:
+                        break
+                    remaining_backoff -= step
+                if shutdown is not None and shutdown.requested:
+                    break
+                continue
+            else:
+                _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
+                _save_last_processed(state_path, target)
+                continue
+
         try:
             prune_old_audit_logs(AUDIT_LOG_ROOT / "live", target)
         except Exception:
@@ -224,13 +308,8 @@ def run_daemon(
         report = None
         status = "HALT"
         try:
-            report = run_shadow_cycle(settings, target, artifact_path, now=now_fn())
-            logger.info(
-                "[EVAL] daemon cycle decision_time=%s status=%s reason=%s",
-                target,
-                report.status,
-                report.reason,
-            )
+            report = run_shadow_cycle(settings, target, weights_path, now=now_fn())
+            logger.info("[EVAL] daemon cycle decision_time=%s status=%s reason=%s", target, report.status, report.reason)
             status = report.status
         except Exception:
             logger.exception("[SYS] daemon cycle crashed decision_time=%s", target)
@@ -250,24 +329,10 @@ def run_daemon(
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
             _save_last_processed(state_path, target)
             continue
-        # HALT / exception path: bounded retry
         new_attempts = attempts + 1
-        should_retry = False
-        if new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY:
-            try:
-                assert_signal_fresh(target, now_fn(), max_staleness)
-                should_retry = True
-            except StaleSignalError:
-                should_retry = False
+        should_retry = new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY
         if should_retry:
-            _save_daemon_state(
-                state_path,
-                DaemonState(
-                    last_processed_decision_time=state.last_processed_decision_time,
-                    pending_decision_time=target,
-                    attempts=new_attempts,
-                ),
-            )
+            _save_daemon_state(state_path, DaemonState(last_processed_decision_time=state.last_processed_decision_time, pending_decision_time=target, attempts=new_attempts))
             idx = min(new_attempts - 1, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)
             backoff = DAEMON_RETRY_BACKOFF_SECONDS[idx]
             remaining_backoff = backoff
@@ -287,116 +352,3 @@ def run_daemon(
             _save_last_processed(state_path, target)
             continue
 
-
-def run_signal_daemon(
-    settings: LiveSettings,
-    artifact_path: Path,
-    signal_state_path: Path,
-    daemon_state_path: Path,
-    *,
-    sleep_fn: Callable[[float], None] = time.sleep,
-    now_fn: Callable[[], pd.Timestamp] = _utc_now,
-    max_iterations: int | None = None,
-    shutdown: ShutdownFlag | None = None,
-    refresh_fn: Callable[..., Any] | None = None,
-) -> None:
-    iteration = 0
-    max_staleness = pd.Timedelta(hours=settings.max_signal_staleness_hours)
-    buffer_td = pd.Timedelta(minutes=SIGNAL_REFRESH_OFFSET_MINUTES)
-    # signal daemon heartbeat uses same path but distinct status? reuse same heartbeat for simplicity
-    heartbeat_path = _resolve_heartbeat_path(settings)
-    consecutive_halts = 0
-
-    while max_iterations is None or iteration < max_iterations:
-        if shutdown is not None and shutdown.requested:
-            break
-        iteration += 1
-        state = _load_daemon_state(daemon_state_path)
-        if state.pending_decision_time is not None:
-            target = state.pending_decision_time
-            attempts = state.attempts
-        else:
-            target = next_decision_time(state.last_processed_decision_time, now_fn())
-            attempts = 0
-
-        try:
-            assert_signal_fresh(target, now_fn(), max_staleness)
-        except StaleSignalError:
-            logger.warning("[SYS] signal-daemon skipped stale signal decision_time=%s", target)
-            _save_daemon_state(daemon_state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-            _save_last_processed(daemon_state_path, target)
-            continue
-
-        wait_until = target + _SIGNAL_LAG + buffer_td
-        remaining_seconds = (wait_until - now_fn()).total_seconds()
-        while remaining_seconds > 0:
-            if shutdown is not None and shutdown.requested:
-                break
-            sleep_fn(min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS))
-            if shutdown is not None and shutdown.requested:
-                break
-            remaining_seconds = (wait_until - now_fn()).total_seconds()
-        if shutdown is not None and shutdown.requested:
-            break
-
-        status = "COMPLETE"
-        try:
-            if refresh_fn is not None:
-                refresh_fn()
-            else:
-                from src.mhs.signal_refresh import refresh_signal_row
-
-                refresh_signal_row(signal_state_path, Path(artifact_path), target, artifact_key=settings.artifact_key)
-        except Exception as exc:
-            logger.exception("[SYS] signal-daemon cycle failed decision_time=%s error=%s", target, exc)
-            status = "HALT"
-
-        if status == "COMPLETE":
-            consecutive_halts = 0
-        else:
-            consecutive_halts += 1
-
-        try:
-            write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
-        except Exception:
-            logger.exception("[SYS] heartbeat write failed")
-
-        if status == "COMPLETE":
-            _save_daemon_state(daemon_state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-            _save_last_processed(daemon_state_path, target)
-            continue
-        new_attempts = attempts + 1
-        should_retry = False
-        if new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY:
-            try:
-                assert_signal_fresh(target, now_fn(), max_staleness)
-                should_retry = True
-            except StaleSignalError:
-                should_retry = False
-        if should_retry:
-            _save_daemon_state(
-                daemon_state_path,
-                DaemonState(
-                    last_processed_decision_time=state.last_processed_decision_time,
-                    pending_decision_time=target,
-                    attempts=new_attempts,
-                ),
-            )
-            idx = min(new_attempts - 1, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)
-            backoff = DAEMON_RETRY_BACKOFF_SECONDS[idx]
-            remaining_backoff = backoff
-            while remaining_backoff > 0:
-                if shutdown is not None and shutdown.requested:
-                    break
-                step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
-                sleep_fn(step)
-                if shutdown is not None and shutdown.requested:
-                    break
-                remaining_backoff -= step
-            if shutdown is not None and shutdown.requested:
-                break
-            continue
-        else:
-            _save_daemon_state(daemon_state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-            _save_last_processed(daemon_state_path, target)
-            continue

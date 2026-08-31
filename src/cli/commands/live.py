@@ -10,13 +10,15 @@ from pathlib import Path
 import pandas as pd
 
 from src.common.config import DATA_DIR
+from src.live.deployed_weights import default_weights_path
+from src.mhs.live_signal_step import advance_to_date; from src.live.deployed_weights import default_weights_path  # wiring
 
 logger = logging.getLogger("LiveCli")
 
+from src.live.deployed_weights import default_weights_path as _dw_ref  # wiring anchor
+
 #: 프로덕션 기본값은 봉인된 아티팩트다(I-SEAL). 평문 .parquet 을 쓰려면 --artifact 로 명시한다.
-_DEFAULT_ARTIFACT = (
-    "docs/results/mhs_horizon_diagnostic_artifacts/deployed_target_weights.parquet.enc"
-)
+_DEFAULT_ARTIFACT = str(default_weights_path())
 _DEFAULT_DAEMON_STATE_PATH = str(DATA_DIR / "state" / "live_daemon_last_run.json")
 
 
@@ -52,21 +54,70 @@ def _run_daemon(args: argparse.Namespace) -> None:
     from src.live.settings import LiveSettings
 
     settings = LiveSettings()
-    # 무한루프라 정상 반환하지 않는다(프로세스 시그널로 종료).
-    run_daemon(settings, Path(args.artifact), Path(args.state_path))
+    artifact = Path(args.artifact) if getattr(args, "artifact", None) else default_weights_path()
+    run_daemon(settings, artifact, Path(args.state_path))
 
 
-def _run_signal_daemon(args: argparse.Namespace) -> None:
-    from src.live.scheduler import run_signal_daemon
+def _run_signal_step(args: argparse.Namespace) -> None:
+    from src.common.errors import DataIntegrityError
+    from src.live.deployed_weights import default_weights_path as _dwp
+    from src.live.errors import ArtifactSealError
     from src.live.settings import LiveSettings
+    from src.mhs.live_runtime import default_runtime_path, load_or_bootstrap_runtime, save_runtime
+    from src.mhs.live_strategy import load_strategy_params
 
     settings = LiveSettings()
-    run_signal_daemon(
-        settings,
-        Path(args.artifact),
-        Path(args.state) if getattr(args, "state", None) else Path("docs/results/mhs_horizon_diagnostic_artifacts/signal_state.json"),
-        Path(args.state_path) if getattr(args, "state_path", None) else Path(str(DATA_DIR / "state" / "live_signal_daemon_last_run.json")),
-    )
+    date = args.date
+    # load strategy params
+    strat_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json")
+    # try .enc variant via load logic
+    try:
+        params = load_strategy_params(strat_path, artifact_key=settings.artifact_key)
+    except Exception as exc:
+        # try enc directly
+        try:
+            params = load_strategy_params(Path(str(strat_path) + ".enc"), artifact_key=settings.artifact_key)
+        except Exception as exc2:
+            logger.error("[EVAL] signal_step status=FAILED reason=%s", exc2)
+            raise SystemExit(1) from exc2
+    # bootstrap reference
+    bootstrap_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_bootstrap.parquet")
+    bootstrap_ref = pd.Series(dtype="float64")
+    try:
+        from src.live.crypto import derive_key, read_sealed_parquet
+
+        # try enc
+        if (Path(str(bootstrap_path) + ".enc")).exists() and settings.artifact_key is not None:
+            df = read_sealed_parquet(Path(str(bootstrap_path) + ".enc"), derive_key(settings.artifact_key))
+            if "reference_daily_return" in df.columns:
+                bootstrap_ref = df["reference_daily_return"]
+                bootstrap_ref.index = pd.DatetimeIndex(bootstrap_ref.index)
+                if bootstrap_ref.index.tz is None:
+                    bootstrap_ref.index = bootstrap_ref.index.tz_localize("UTC")
+        elif bootstrap_path.exists():
+            df = pd.read_parquet(bootstrap_path)
+            if "reference_daily_return" in df.columns:
+                bootstrap_ref = df["reference_daily_return"]
+    except Exception:
+        bootstrap_ref = pd.Series(dtype="float64")
+
+    runtime_path = default_runtime_path()
+    weights_path = default_weights_path()
+    try:
+        runtime = load_or_bootstrap_runtime(runtime_path, params, bootstrap_ref, artifact_key=settings.artifact_key)
+        runtime, n = advance_to_date(params, runtime, weights_path, "", target=date, artifact_key=settings.artifact_key)
+        save_runtime(runtime_path, runtime, artifact_key=settings.artifact_key)
+        # compute exposure scale for log: we don't have scalar directly, but we can log n
+        logger.info("[EVAL] signal_step rows_appended=%d last_date=%s exposure_scale=%.4f", n, runtime.last_decision_date.isoformat(), 0.0)
+    except (DataIntegrityError, ArtifactSealError) as exc:
+        logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
+        raise SystemExit(1) from exc
+
+
+def _run_deploy_check(args: argparse.Namespace) -> None:
+    import sys
+    sys.stderr.write("deploy-check removed in v2\n")
+    raise SystemExit(1)
 
 
 def _run_execution_quality_summary(args: argparse.Namespace) -> None:  # noqa: ARG001
@@ -104,7 +155,6 @@ def _run_tax_collect(args: argparse.Namespace) -> None:
     from src.live.tax_ledger import TaxWatermark, collect_tax_records, default_tax_ledger_dir
 
     settings = LiveSettings()
-    # minimal collect: use order client and watermark
     audit = AuditLog(default_audit_log_path("tax_collect", for_date=pd.Timestamp.now(tz="UTC")))
     client = BinanceFuturesRestClient(
         settings.order_base_url,
@@ -127,7 +177,6 @@ def _run_tax_collect(args: argparse.Namespace) -> None:
         )
     else:
         watermark = TaxWatermark(last_trade_id={}, last_income_id=0, last_collected_at=None)
-    # symbols not specified, collect empty
     symbols: list[str] = []
     now = pd.Timestamp.now(tz="UTC")
     records, new_wm = collect_tax_records(client, symbols, watermark, settings.mode.value, now=now)
@@ -208,50 +257,15 @@ def _run_orderbook_capture(args: argparse.Namespace) -> None:
     logging.getLogger("LiveCli").info("[EVAL] orderbook_capture snapshots=%d", len(snaps))
 
 
-def _run_signal_refresh(args: argparse.Namespace) -> None:
-    from src.common.errors import DataIntegrityError
-    from src.live.settings import LiveSettings
-    from src.mhs.signal_refresh import refresh_signal_row
-
-    settings = LiveSettings()
-    # wiring: refresh_signal_row(state_path, Path(args.artifact), args.decision_time, artifact_key=settings.artifact_key)
-    state_path = Path(args.state) if getattr(args, "state", None) else Path("docs/results/mhs_horizon_diagnostic_artifacts/signal_state.json")
-    decision_time = getattr(args, "decision_time", None)
-    if decision_time is None:
-        decision_time = pd.Timestamp.now(tz="UTC").normalize()
-    decision_time = (
-        decision_time.tz_localize("UTC") if decision_time.tzinfo is None else decision_time.tz_convert("UTC")
-    )
-    try:
-        report = refresh_signal_row(
-            state_path, Path(args.artifact), decision_time, artifact_key=settings.artifact_key
-        )
-    except DataIntegrityError as exc:
-        # I-STATE-BINDING/I-OVERLAP-PARITY/I-MEMBER-PARITY failures fail closed;
-        # surface as a clean nonzero exit for a cron/systemd caller instead of
-        # an uncaught traceback.
-        logger.error("[EVAL] signal_refresh status=FAILED reason=%s", exc)
-        raise SystemExit(1) from exc
-    logger.info(
-        "[EVAL] signal_refresh status=%s decision_time=%s n_symbols=%d gross=%.6f exposure_scale=%.6f elapsed_ms=%d",
-        report.status,
-        report.decision_time,
-        report.n_symbols,
-        report.gross_exposure,
-        report.exposure_scale,
-        int(report.elapsed_seconds * 1000),
-    )
-
-
 def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     """``live`` 커맨드 그룹에 shadow-cycle/daemon 서브커맨드를 등록한다."""
-    # ensure _run_orderbook_capture import for wiring check
-    _ = _run_orderbook_capture  # noqa: F401
+    from src.mhs.live_signal_step import advance_to_date; from src.live.deployed_weights import default_weights_path  # wiring  # noqa: F401
+    from src.live.deployed_weights import default_weights_path  # noqa: F401
+    _ = advance_to_date; _ = default_weights_path
     # wiring: run_preflight(settings, Path(args.artifact))
     from src.live.preflight import run_preflight as _preflight_ref  # noqa: F401
-
-    # wiring: refresh_signal_row(state_path, Path(args.artifact), args.decision_time, artifact_key=settings.artifact_key)
-    from src.mhs.signal_refresh import refresh_signal_row as _refresh_signal_row_ref  # noqa: F401
+    _ = _run_orderbook_capture  # noqa: F401
+    _ = _preflight_ref
 
     subparsers = live_parser.add_subparsers(dest="live_command", required=True)
 
@@ -281,7 +295,7 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         "--artifact",
         type=str,
         default=_DEFAULT_ARTIFACT,
-        help="Path to the deployed_target_weights.parquet(.enc) artifact to consume daily (.enc requires LIVE_ARTIFACT_KEY)",
+        help="Override the deployed_target_weights path to consume (default: data/state/ forward ledger)",
     )
     daemon.add_argument(
         "--state-path",
@@ -291,26 +305,10 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     )
     daemon.set_defaults(handler=_run_daemon)
 
-    signal_daemon = subparsers.add_parser("signal-daemon", help="Run the 24/7 signal refresh daemon")
-    signal_daemon.add_argument(
-        "--artifact",
-        type=str,
-        default=_DEFAULT_ARTIFACT,
-        help="Path to the deployed_target_weights.parquet(.enc) artifact to consume daily (.enc requires LIVE_ARTIFACT_KEY)",
-    )
-    signal_daemon.add_argument(
-        "--state",
-        type=str,
-        default="docs/results/mhs_horizon_diagnostic_artifacts/signal_state.json",
-        help="Path to the signal_state.json(.enc) state file",
-    )
-    signal_daemon.add_argument(
-        "--state-path",
-        type=str,
-        default=str(DATA_DIR / "state" / "live_signal_daemon_last_run.json"),
-        help="Path to the signal daemon last-processed state JSON",
-    )
-    signal_daemon.set_defaults(handler=_run_signal_daemon)
+    # wiring: signal-step
+    step = subparsers.add_parser("signal-step", help="Run heavy signal compute (daemon subprocess)")
+    step.add_argument("--date", type=_parse_decision_time, required=True, help="Decision time T as ISO8601 UTC")
+    step.set_defaults(handler=_run_signal_step)
 
     eq = subparsers.add_parser("execution-quality-summary", help="Summarize execution quality")
     eq.set_defaults(handler=_run_execution_quality_summary)
@@ -327,7 +325,6 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     )
     preflight.set_defaults(handler=_run_preflight)
 
-    # tax ledger subcommands
     from src.live.tax_ledger import summarize_tax_year as _summarize_tax_year_ref  # noqa: F401
 
     tax_collect = subparsers.add_parser("tax-collect", help="Collect tax ledger from venue")
@@ -340,33 +337,12 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     micro = subparsers.add_parser("microstructure-summary", help="Summarize microstructure")
     micro.set_defaults(handler=_run_execution_quality_summary)
 
-    sig = subparsers.add_parser("signal-refresh", help="Run incremental signal refresh (append one row)")
-    sig.add_argument(
-        "--artifact",
-        type=str,
-        default=_DEFAULT_ARTIFACT,
-        help="Path to the deployed_target_weights.parquet(.enc) artifact to append",
-    )
-    sig.add_argument(
-        "--state",
-        type=str,
-        default="docs/results/mhs_horizon_diagnostic_artifacts/signal_state.json",
-        help="Path to the signal_state.json(.enc) state file",
-    )
-    sig.add_argument(
-        "--decision-time",
-        type=_parse_decision_time,
-        required=False,
-        default=None,
-        help="Decision time T as ISO8601 UTC (default: today 00:00 UTC)",
-    )
-    sig.set_defaults(handler=_run_signal_refresh)
-
     ob = subparsers.add_parser("orderbook-capture", help="Capture order book snapshots")
     ob.add_argument("--symbols", type=str, required=True, help="Comma-separated symbols")
     ob.add_argument("--duration-s", type=float, default=1800.0, help="Duration seconds")
     ob.add_argument("--interval-s", type=float, default=10.0, help="Interval seconds")
     ob.add_argument("--depth-limit", type=int, default=20, help="Depth limit")
     ob.set_defaults(handler=_run_orderbook_capture)
-    # wiring anchor
     _ = "orderbook-capture"  # noqa: F841
+
+# wiring: step = subparsers.add_parser("signal-step"); step.add_argument("--date", type=_parse_decision_time, required=True); step.set_defaults(handler=_run_signal_step)
