@@ -44,6 +44,22 @@ except Exception:  # noqa: BLE001,S110
     ) -> bool:
         return False
 
+try:
+    from src.live.alerting import send_email_alert  # noqa: F401
+except Exception:  # noqa: BLE001,S110
+
+    def send_email_alert(
+        *,
+        gmail_user: str | None,
+        gmail_app_password: str | None,
+        email_to: str | None,
+        event: str,
+        detail: str,
+        decision_time: pd.Timestamp | None,
+        now: pd.Timestamp,
+    ) -> bool:
+        return False
+
 logger = logging.getLogger("LiveScheduler")
 
 # wiring anchors for spec compliance
@@ -225,6 +241,19 @@ def _daemon_alert(
     sent.add(event)
     try:
         post_alert(settings.alert_webhook_url, event=event, detail=detail, decision_time=decision_time, now=now)
+        send_email_alert(
+            gmail_user=settings.alert_gmail_user,
+            gmail_app_password=(
+                settings.alert_gmail_app_password.get_secret_value()
+                if settings.alert_gmail_app_password is not None
+                else None
+            ),
+            email_to=settings.alert_email_to,
+            event=event,
+            detail=detail,
+            decision_time=decision_time,
+            now=now,
+        )
     except Exception:  # noqa: BLE001
         logger.exception("[SYS] alert dispatch failed event=%s", event)
 
