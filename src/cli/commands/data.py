@@ -160,6 +160,19 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
     ohlcv_paths = sorted(glob.glob(str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet")))
     symbols = [os.path.basename(p).removesuffix(".parquet") for p in ohlcv_paths]
 
+    from src.live.scheduler import DAEMON_COLD_UNIVERSE_EXIT_CODE
+    from src.live.settings import LiveSettings
+
+    _min = LiveSettings().min_universe_symbols
+    if len(symbols) < _min:
+        _logger.error(
+            "[DATA] stage=refresh_live_universe status=COLD_UNIVERSE symbols=%d min=%d remediation=%s",
+            len(symbols),
+            _min,
+            "seed data/futures/{ohlcv/1h,markPriceKlines/1h,funding} (scp from local box or run data collect) before starting the daemon",
+        )
+        raise SystemExit(DAEMON_COLD_UNIVERSE_EXIT_CODE)
+
     from src.market_data.services.futures_collection import DataCollector
 
     collector = DataCollector()
