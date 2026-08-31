@@ -42,6 +42,16 @@ def _parse_float_csv(raw: str) -> tuple[float, ...]:
     return tuple(values)
 
 
+def _assert_deploy_push_allowed() -> None:
+    """--deploy-push 는 봉인 키가 있어야 한다: 평문 전략을 git 커밋하지 않는다."""
+    from src.live.settings import LiveSettings
+
+    if LiveSettings().artifact_key is None:
+        raise SystemExit(
+            "--deploy-push requires LIVE_ARTIFACT_KEY (refusing to commit a plaintext strategy)"
+        )
+
+
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     if getattr(args, "leverage_frontier_scan", False):
         # Diagnostic-only short-circuit: reads an already-persisted ledger and
@@ -98,6 +108,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         if getattr(args, "deploy_push", False):
             import subprocess
 
+            _assert_deploy_push_allowed()
             try:
                 subprocess.run(["git", "add", str(artifact_root / "strategy_params.json.enc"), str(artifact_root / "strategy_bootstrap.parquet.enc")], check=True)
                 subprocess.run(["git", "commit", "-m", f'deploy: strategy {res["strategy_digest"]}'], check=True)
