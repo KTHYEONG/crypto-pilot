@@ -313,8 +313,8 @@ def load_strategy_params(path: Path, *, artifact_key: SecretStr | None = None) -
 
 
 def assert_deployment_eligible(report: Any, *, reference_report_path: Path | None = None) -> None:
-    if getattr(report, "status", None) != "OK":
-        raise DataIntegrityError("deployment ineligible: report status not OK")
+    if getattr(report, "status", None) != "COMPLETE":
+        raise DataIntegrityError("deployment ineligible: report status not COMPLETE")
     rg = getattr(report, "research_go", None)
     if rg is None or not getattr(rg, "eligible", False):
         raise DataIntegrityError("deployment ineligible: research_go not eligible")

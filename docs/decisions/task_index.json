@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_PAPER_MODE_FRICTIONLESS",
+      "date": "2026-08-31",
+      "adr_id": "ADR_20260831_PAPER_MODE_FRICTIONLESS",
+      "domain": "quant",
+      "title": "무마찰 PAPER 모드 + 로컬 검증 중 발견 버그 수정",
+      "why": "로컬 매매봇 검증에 LIVE_MODE/LIVE_NOTIONAL_EQUITY_USDT/BINANCE 키/LIVE_ARTIFACT_KEY 등 불필요한 사전설정이 요구됐고, PAPER 사이징이 notional_equity_usdt로 캡되어 백테스트의 자유 복리 vol-target 북과 정합성이 깨졌다. 실제 로컬 검증 실행 중 배포·신호경로에서 차단성 버그 다수 노출.",
+      "resolution": "PAPER/SHADOW sizing equity에서 min(total,cap) 제거(cap은 첫사이클 시드로만, LIVE만 파일럿 캡 유지); mode.suppresses_mutations & api_key None이면 _order_client가 NullOrderClient(공개 GET 위임, 서명 조회 스텁, __getattr__은 _-접두/미바인딩 시 AttributeError로 무한재귀 차단) 반환하고 run_shadow_cycle·preflight는 synthetic_flat_snapshot 사용 → 자격증명 0개; emit_deployment는 artifact_key None시 평문 strategy_params.json+strategy_bootstrap.parquet 기록+WARNING(--deploy-push는 _assert_deploy_push_allowed로 키 강제); live {shadow-cycle,daemon,signal-step,preflight} --mode 플래그(_settings_with_mode). 검증 중 수정: (1) data refresh-live-universe의 prune pass가 timestamp컬럼+RangeIndex 파케이를 epoch-ns로 오독해 1h OHLCV/mark/funding 전 파일을 0행으로 덮어쓰던 파괴적 버그 → prune 제거 (2) assert_deployment_eligible/emit_deployment가 report.status!='OK' 체크하나 파이프라인은 'COMPLETE'만 설정 → 'COMPLETE' (3) compute_signal_row가 data_root='' 그대로 _build_fold_target_weights에 전달 → FUTURES_DATA_DIR/ohlcv 해석 (4) advance_to_date cold-catchup이 bootstrap reference를 비워 vol-target scale 붕괴 → bootstrap tail을 warmup으로 유지하고 forward analytic 일자만 scale 계산; advance_to_date 3-tuple 반환으로 exposure_scale 실제값 로깅.",
+      "impact": "로컬 PAPER 검증 사전설정 0개(자격증명·env 불필요). 검증 완료: emit_deployment(평문), signal-step(rows_appended=1 exposure_scale~1.05 reference 400=398 bootstrap+2 forward), shadow-cycle --mode paper(COMPLETE 75 intents, fills/exec-quality/portfolio/microstructure 기록), preflight 6/6(account_configuration=synthetic), daemon AWAITING fail-closed. LIVE 경로는 api_key 존재 시 무회귀. lean_check 전체 PASS."
+    },
+    {
       "task_id": "TASK_BACKTEST_LIVE_HANDOFF_V2",
       "date": "2026-08-31",
       "adr_id": "ADR_20260831_BACKTEST_LIVE_HANDOFF_V2",
@@ -989,16 +999,6 @@
       "why": "OHLCV_IMMEDIATE_TAKER 결손 가드 수정 후 fold0(2023)/fold1(2024)이 처음 완주되며 fold Sharpe가 -0.15/-0.50/+1.61로 극심하게 갈리는 현상이 새로 드러남. 근본 원인이 신호 자체의 레짐 결함인지, horizon 고정(168h frozen_default)인지, 데이터/유니버스 문제인지 규명 필요.",
       "resolution": "discovery.py의 select_horizon_by_discovery_qualification이 이미 계산 후 min()으로 축약·폐기하던 (horizon x 연도) net_t를 실측 재현(scratch 스크립트)해 19개 momentum horizon x 2021-2025 전수 테이블 산출. 2022(LUNA/FTX)가 horizon 무관 전원 음수임을 확인해 근본 원인이 horizon 선택이 아닌 신호의 체계적 붕괴장 레짐 취약성임을 규명. 저위험 후속 조치로 그 (horizon x 연도) 테이블을 DiscoveryQualificationResult.yearly_net_t 필드로 프로덕션 진단 파이프라인에 정식 노출(새 계산 없이 기존 값 재사용, 기존 필드 바이트 동일 유지).",
       "impact": "docs/specs/mhs_momentum_regime_diagnosis.md에 진단 및 3개 전략적 개선 후보(크래시 레짐 오버레이/사전등록 장기 horizon 이전/worst-year floor 재검토) 기록, 사용자가 크래시 레짐 오버레이를 다음 방향으로 선택(미착수). yearly_net_t는 구현 완료, tests/unit/mhs/test_discovery.py 19/19 통과, /check PASS."
-    },
-    {
-      "task_id": "MHS_IMMEDIATE_TAKER_FILL_GUARD",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_IMMEDIATE_TAKER_FILL_GUARD",
-      "domain": "mhs",
-      "title": "MHS OHLCV_IMMEDIATE_TAKER 체결가 미검증 결손 가드 추가",
-      "why": "research run portfolio mhs-horizon-diagnostic가 CAPITAL_INVARIANT_BREACH로 미완주. 실제 원인은 프로덕션 execution bound인 OHLCV_IMMEDIATE_TAKER 분기가 closes_values[fill_pos, col]를 유한성 검증 없이 체결가로 사용하는 것(docs/feedback.md 2026-08-12). 오라클 경로(strategy_aware_execution_replay)는 사후 가드조차 없어 cash가 침묵 NaN 오염되는 더 위험한 잠재 결함도 함께 발견.",
-      "resolution": "src/mhs/execution.py의 strategy_aware_execution_replay와 _BoundExecutionReplayAccumulator.consume 양쪽 OHLCV_IMMEDIATE_TAKER 분기에 STRICT/TOUCH/LADDERED가 이미 쓰는 MISSING_ACTIVE_ORDER_OHLCV 스킵 가드를 동일 이식. 472개 심볼 1m OHLCV 전수 스캔으로 21개 심볼(4.4%)이 자기 거래구간 내부에 평균 61일급 타임스탬프 홀을 보유함을 실측 확인해 이 결손이 구조적·반복 조건임을 정량화.",
-      "impact": "동일 커맨드(research run portfolio mhs-horizon-diagnostic) 재실행으로 검증: status=COMPLETE, CAPITAL_INVARIANT_BREACH/DataIntegrityError/Traceback 0건, termination_counts.MISSING_DATA=76으로 결손이 크래시 대신 진단 데이터로 흡수됨. 결과는 docs/results/mhs-res.md 13차에 기록."
     }
   ]
 }

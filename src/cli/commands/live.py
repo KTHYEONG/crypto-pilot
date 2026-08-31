@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -29,11 +30,19 @@ def _parse_decision_time(raw: str) -> pd.Timestamp:
     return ts.tz_convert("UTC")
 
 
+def _settings_with_mode(args: argparse.Namespace) -> Any:
+    """--mode 플래그로 LIVE_MODE 를 덮어쓴다(비밀값은 여전히 env 전용)."""
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    m = getattr(args, "mode", None)
+    return LiveSettings(mode=ExecutionMode(m)) if m else LiveSettings()
+
+
 def _run_shadow_cycle(args: argparse.Namespace) -> None:
     from src.live.runner import run_shadow_cycle
     from src.live.settings import LiveSettings
 
-    settings = LiveSettings()
+    settings = _settings_with_mode(args)
     if args.dry_run:
         logger.info("[SYS] live shadow-cycle dry-run requested; mode=%s", settings.mode.value)
     report = run_shadow_cycle(
@@ -53,7 +62,7 @@ def _run_daemon(args: argparse.Namespace) -> None:
     from src.live.scheduler import run_daemon
     from src.live.settings import LiveSettings
 
-    settings = LiveSettings()
+    settings = _settings_with_mode(args)
     artifact = Path(args.artifact) if getattr(args, "artifact", None) else default_weights_path()
     run_daemon(settings, artifact, Path(args.state_path))
 
@@ -66,7 +75,7 @@ def _run_signal_step(args: argparse.Namespace) -> None:
     from src.mhs.live_runtime import default_runtime_path, load_or_bootstrap_runtime, save_runtime
     from src.mhs.live_strategy import load_strategy_params
 
-    settings = LiveSettings()
+    settings = _settings_with_mode(args)
     date = args.date
     # load strategy params
     strat_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json")
@@ -105,10 +114,10 @@ def _run_signal_step(args: argparse.Namespace) -> None:
     weights_path = default_weights_path()
     try:
         runtime = load_or_bootstrap_runtime(runtime_path, params, bootstrap_ref, artifact_key=settings.artifact_key)
-        runtime, n = advance_to_date(params, runtime, weights_path, "", target=date, artifact_key=settings.artifact_key)
+        runtime, n, scalar = advance_to_date(params, runtime, weights_path, "", target=date, artifact_key=settings.artifact_key)
         save_runtime(runtime_path, runtime, artifact_key=settings.artifact_key)
         # compute exposure scale for log: we don't have scalar directly, but we can log n
-        logger.info("[EVAL] signal_step rows_appended=%d last_date=%s exposure_scale=%.4f", n, runtime.last_decision_date.isoformat(), 0.0)
+        logger.info("[EVAL] signal_step rows_appended=%d last_date=%s exposure_scale=%.4f", n, runtime.last_decision_date.isoformat(), scalar)
     except (DataIntegrityError, ArtifactSealError) as exc:
         logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
         raise SystemExit(1) from exc
@@ -138,7 +147,7 @@ def _run_preflight(args: argparse.Namespace) -> None:
     from src.live.preflight import run_preflight
     from src.live.settings import LiveSettings
 
-    settings = LiveSettings()
+    settings = _settings_with_mode(args)
     report = run_preflight(settings, Path(args.artifact))
     for check in report.checks:
         logger.info("[PREFLIGHT] %s passed=%s detail=%s", check.name, check.passed, check.detail)
@@ -288,6 +297,7 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         default=False,
         help="Log the cycle without any state-changing intent beyond SHADOW suppression",
     )
+    shadow.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     shadow.set_defaults(handler=_run_shadow_cycle, dry_run=False)
 
     daemon = subparsers.add_parser("daemon", help="Run the 24/7 unattended shadow-cycle scheduler")
@@ -303,11 +313,13 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         default=_DEFAULT_DAEMON_STATE_PATH,
         help="Path to the daemon last-processed decision_time state JSON",
     )
+    daemon.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     daemon.set_defaults(handler=_run_daemon)
 
     # wiring: signal-step
     step = subparsers.add_parser("signal-step", help="Run heavy signal compute (daemon subprocess)")
     step.add_argument("--date", type=_parse_decision_time, required=True, help="Decision time T as ISO8601 UTC")
+    step.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     step.set_defaults(handler=_run_signal_step)
 
     eq = subparsers.add_parser("execution-quality-summary", help="Summarize execution quality")
@@ -323,6 +335,7 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         default=_DEFAULT_ARTIFACT,
         help="Path to the deployed_target_weights.parquet(.enc) artifact to consume (.enc requires LIVE_ARTIFACT_KEY)",
     )
+    preflight.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     preflight.set_defaults(handler=_run_preflight)
 
     from src.live.tax_ledger import summarize_tax_year as _summarize_tax_year_ref  # noqa: F401
