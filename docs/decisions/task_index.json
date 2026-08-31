@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_BACKTEST_LIVE_HANDOFF_V2",
+      "date": "2026-08-31",
+      "adr_id": "ADR_20260831_BACKTEST_LIVE_HANDOFF_V2",
+      "domain": "quant",
+      "title": "MHS 핸드오프 v2: 로컬은 파라미터만, 클라우드 데몬 완전 자율",
+      "why": "포워드 스코어러 스택(deployment_bundle/signal_runtime/signal_state digest 바인딩 + bounded-backfill/cold-jump/parity + 3m 실행 패널 replay + mhs-signal 데몬)이 과복잡하고, 이전 권장안(로컬 전체 weight 테이블 생성)은 로컬 PC 가동/CI 관리 의존이 컸다. 사용자는 로컬 백테스트로 파라미터만 도출하고 저사양 클라우드가 나머지를 자율 수행해야 한다.",
+      "resolution": "로컬: research --emit-deployment 가 strategy_params.json.enc(~2KB)+strategy_bootstrap.parquet.enc(백테스트 실제 reference 400일 tail)만 emit, --deploy-push로 git commit; 기존 deploy.yml SCP가 전달. 클라우드: 단일 mhs-live 데몬이 일별 루프(1h/funding/mark tail 갱신+prune → live signal-step 서브프로세스로 _build_fold_target_weights 1회 → vol-target reference를 해석적으로 계산[held·자산일수익 − turnover·taker비용 − funding drag, 3m·execution replay 제거] → exposure_scale → rolling weight 행 append[최근 500행] → run_shadow_cycle). 불변 params + rolling runtime, 새 params 자동 soft-swap. 신규 src/mhs/live_strategy.py·live_runtime.py·live_signal_step.py·src/live/deployed_weights.py. 삭제 signal_refresh/signal_state/signal_runtime/deployment_bundle/deployed_weights_ledger + mhs-signal 서비스 + emit_signal_state/emit_deployment_bundle/emit_deployed_target_weights + live signal-daemon/signal-refresh/deploy-check. run_daemon은 refresh_fn/signal_step_fn 주입형 단일 자율 루프(경로 스니핑 제거), params 부재 시 AWAITING idle. run_shadow_cycle은 실제 사용 행 timestamp(weights.name)로 인과성 게이트.",
+      "impact": "라이브 경로에서 알파 수학이 파이프라인 blend replay 1곳으로 수렴(parity drift 구조적 불가), 클라우드 3m 데이터/execution replay/두번째 데몬 제거, 사용자 반복 작업은 파라미터 변경 시 1커맨드. 순변경 -1420 LOC. 해석적 reference는 intra-day 체결 경로만 근사(vol 분모 2차, Kelly 평균 cost-drag 1차 보정, 400일 bootstrap 앵커)."
+    },
+    {
+      "task_id": "TASK_BACKTEST_CLOUD_HANDOFF",
+      "date": "2026-08-30",
+      "adr_id": "ADR_20260830_BACKTEST_CLOUD_HANDOFF",
+      "domain": "execution",
+      "title": "백테스트→클라우드 핸드오프: 자기완결 배포 번들 + 순방향 원장",
+      "why": "배포 아티팩트 분리(불변 번들 vs 가변 클라우드 상태) 및 순방향 원장 모듈 신설.",
+      "resolution": "signal_runtime.py: SignalRuntime + load_or_bootstrap_runtime + soft_swap. deployed_weights_ledger.py: append-only parquet + origin 사이드카.",
+      "impact": "클라우드 데몬이 번들만으로 부트스트랩/백필. code_map 등록."
+    },
+    {
       "task_id": "TASK_ALPHA_SOURCE_DATA_COLLECTION",
       "date": "2026-08-30",
       "adr_id": "ADR_20260830_ALPHA_SOURCE_DATA_COLLECTION",
@@ -979,26 +999,6 @@
       "why": "research run portfolio mhs-horizon-diagnostic가 CAPITAL_INVARIANT_BREACH로 미완주. 실제 원인은 프로덕션 execution bound인 OHLCV_IMMEDIATE_TAKER 분기가 closes_values[fill_pos, col]를 유한성 검증 없이 체결가로 사용하는 것(docs/feedback.md 2026-08-12). 오라클 경로(strategy_aware_execution_replay)는 사후 가드조차 없어 cash가 침묵 NaN 오염되는 더 위험한 잠재 결함도 함께 발견.",
       "resolution": "src/mhs/execution.py의 strategy_aware_execution_replay와 _BoundExecutionReplayAccumulator.consume 양쪽 OHLCV_IMMEDIATE_TAKER 분기에 STRICT/TOUCH/LADDERED가 이미 쓰는 MISSING_ACTIVE_ORDER_OHLCV 스킵 가드를 동일 이식. 472개 심볼 1m OHLCV 전수 스캔으로 21개 심볼(4.4%)이 자기 거래구간 내부에 평균 61일급 타임스탬프 홀을 보유함을 실측 확인해 이 결손이 구조적·반복 조건임을 정량화.",
       "impact": "동일 커맨드(research run portfolio mhs-horizon-diagnostic) 재실행으로 검증: status=COMPLETE, CAPITAL_INVARIANT_BREACH/DataIntegrityError/Traceback 0건, termination_counts.MISSING_DATA=76으로 결손이 크래시 대신 진단 데이터로 흡수됨. 결과는 docs/results/mhs-res.md 13차에 기록."
-    },
-    {
-      "task_id": "TASK_MHS_LADDERED_FILL_CLOSES_GAP_FIX",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_LADDERED_FILL_CLOSES_GAP_FIX",
-      "domain": "research",
-      "title": "MHS 래더드 체결 스케줄의 미검증 종가 경계 근본 수정",
-      "why": "직전 fail-fast 계측 스펙을 실전 데이터로 실행해 CAPITAL_INVARIANT_BREACH의 진짜 원인을 확보해야 했음. 이전엔 5회 재실행에도 원인 미확정 상태였음.",
-      "resolution": "laddered_fill_schedule 호출부 2곳(strategy_aware_execution_replay, _BoundExecutionReplayAccumulator.consume)에서 adverse(low/high) 검증 범위 [spos,timeout_pos)가 실제 소비되는 closes 범위 [spos,timeout_pos](경계 포함)보다 1바 좁아 경계 종가의 NaN이 무검증 통과함을 실증(FILUSDT 2022-02-26, BNXUSDT 2023-02-01 두 독립 사례로 재현). 두 호출부에 기존 MISSING_ACTIVE_ORDER_OHLCV 스킵 패턴을 동일 범위로 확장하고, laddered_fill_schedule 함수 자체에도 백스톱 ValueError 검증을 추가. 4개 회귀 테스트(경계/내부 anchor NaN 거부, 정상 케이스 무변화, 엔진 레벨 오라클/윈도우 동치 유지)로 검증.",
-      "impact": "가격/사이징 공식은 무변경 확인 -- 순수 검증 범위 누락이었음. 다음 재실행에서 fold0/상위 books가 결손 구간을 스킵하고 완주할 것으로 예상됨."
-    },
-    {
-      "task_id": "TASK_MHS_CAPITAL_INVARIANT_FOLD0_HARDENING",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_CAPITAL_INVARIANT_FOLD0_HARDENING",
-      "domain": "research",
-      "title": "MHS 정밀 체결 리플레이 엔진 자본 불변식 fail-fast 계측",
-      "why": "데이터 기간/gap-carry 스펙 적용 후 13차 재실행에서 fold0이 CAPITAL_INVARIANT_BREACH로 무효화됨. 5회 실측 계측(임시 디버그, 실행 후 원복)으로 원인이 결손 데이터(funding/OHLCV/mark 전부 배제 확인)나 이미 알려진 held_mark_trigger 범주가 아니라, _BoundExecutionReplayAccumulator.consume()의 self.cash 스칼라 누적값이 fill 처리 중 비유한 값에 무방비 상태임을 확인. 진짜 최초 트리거는 맥락 없이 수 시간 뒤에야 벡터화 검증에서 드러나 진단 비용이 매우 컸음.",
-      "resolution": "같은 파일의 simulated_inventory_ledger가 이미 쓰는 fill 단위 유한성 가드 패턴을 스트리밍 accumulator의 두 fill-sizing 지점(래더드/멀티트랜치 분기, 단일 체결 분기)에 이식. 비유한 qty/fill_price 발생 시 심볼·결정시각·weight·equity·decision_price를 포함한 DataIntegrityError를 즉시 발생시키며, 메시지에 'capital accounting invariant' 키워드를 유지해 기존 _classify_execution_failure 분류(CAPITAL_INVARIANT_BREACH)와 호환. 강제청산 경로는 이미 자체 가드가 있어 무변경. 6개 회귀 테스트로 fail-fast 동작·분류 유지·정상 리플레이 무변화(오라클 동치)를 검증.",
-      "impact": "다음 발생 시 즉시 심볼/시각/원인값 확보 가능해져 향후 진단 비용 대폭 절감. 근본 산술 원인(왜 처음 비유한이 되는지)은 여전히 미확정 -- 이번 계약은 진단 전제 조건만 마련했고, 실제 근본 수정은 재발 시 확보되는 새 예외 메시지를 근거로 별도 /spec 필요."
     }
   ]
 }

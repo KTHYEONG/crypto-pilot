@@ -287,6 +287,10 @@ def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = list(contract.get("contracts", []))
     default_target = contract.get("target_file", "")
     for change in contract.get("changes", []) + contract.get("symbols", []):
+        if change.get("action") == "delete":
+            continue
+        if change.get("kind") == "config":
+            continue
         symbol = change.get("symbol") or change.get("name", "")
         target = (
             change.get("target_file")
