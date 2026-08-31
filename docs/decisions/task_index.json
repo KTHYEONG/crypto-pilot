@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_LIVE_DAEMON_HARDENING",
+      "date": "2026-08-31",
+      "adr_id": "ADR_20260831_LIVE_DAEMON_HARDENING",
+      "domain": "quant",
+      "title": "저사양 클라우드 24h 무인 매매봇 견고화",
+      "why": "라이브 데몬이 analytic proxy로 vol-target을 근사하고(취약한 close 재구성+fallback), push된 새 params digest를 자동채택 못하며(adopt_params 미배선+심볼/알파북명 비교 버그), 빈 클라우드 박스에서 조용히 no-op하고, 실패 알림 경로가 없어 무인 운영이 불안정했다. 추가로 검증 중 페이퍼 세금원장 record_id가 사이클간 콜리전해 둘째날부터 거래가 read-time dedup에서 소실되는 버그 발견.",
+      "resolution": "R1 live_signal_step.py ruff:noqa 제거+fail-closed 재작성, analytic_net_daily_return 삭제. R2 realized_daily_returns(): PortfolioStateRecord.equity_usdt의 pct_change를 vol-target forward reference로, bootstrap 400일 tail을 strictly-preceding warmup(I-WARM)으로; runtime.reference_daily_returns는 불변 anchor. R3 reconcile_runtime_params를 _run_signal_step에 배선-digest 변경시 항상 soft_swap(보유·last_date 유지, anchor·digest 갱신), reseed_roster 버그경로 삭제. R4 refresh-live-universe가 symbols<min_universe_symbols(100)이면 SystemExit(3)+COLD_UNIVERSE 로그; run_daemon은 refresh 실패를 AWAITING_DATA heartbeat+알림+사이클skip으로 처리; live status 커맨드(unhealthy시 exit1). R5 src/live/alerting.py post_alert(): opt-in webhook(LIVE_ALERT_WEBHOOK_URL 미설정시 no-op, 절대 raise 안함), 연속HALT>=alert_halt_streak/AWAITING시 스트릭당 1회. 동반수정: simulated_tax_records record_id를 simulated:TRADE:{run_id}:{symbol}:{leg_index}:{seq}로 사이클-유일화.",
+      "impact": "사용자 액션이 로컬 백테스트->params push로 축소. 로컬 4일 백데이트 페이퍼 루프 실전검증: signal-step+shadow-cycle 전부 COMPLETE, exposure_scale이 bootstrap(0.9701)->realized forward(1.0440->1.0527) 전환, weight행 append/원장/fills/exec_quality/microstructure/tax 정상 기록, live status/cold-guard/params-swap 동작. 단위테스트 51+4 passed. 미검증: 실제 연속 daemon 루프(CLI --max-iterations 없음, 단위테스트만), webhook 실엔드포인트. 별도 후속: orderbook/market-data 리텐션(무한증가), tax JSONL 압축."
+    },
+    {
       "task_id": "TASK_PAPER_MODE_FRICTIONLESS",
       "date": "2026-08-31",
       "adr_id": "ADR_20260831_PAPER_MODE_FRICTIONLESS",
@@ -989,16 +999,6 @@
       "why": "직전 진단(ADR_20260812_MHS_MOMENTUM_REGIME_DIAGNOSIS)이 2022가 horizon 무관 전원 음수임을 밝힌 뒤, 사용자가 horizon이 아니라 cross-sectional momentum이라는 전략 유형 자체가 잘못된 것 아닌지 근본 재검토를 요청.",
       "resolution": "프로덕션과 동일 패널/tranche 구성으로 cross-sectional rank momentum(현재 설계, 완전 dollar-neutral) vs time-series/absolute momentum(방향성 허용) 헤드투헤드 실측 비교, 시장 레짐(causal trailing drawdown)과 xs P&L 상관 분석(+0.402, p<0.01), 균등가중 바스켓의 유니버스 구성 드리프트 confound 확인. 결론: 전략 설계가 틀렸다기보다 완전 market-neutral 목표와 2022류 붕괴장 생존이 트레이드오프 관계. 저위험 후속 조치로 구성 드리프트에 오염되지 않는 고정 기준 바스켓 기반 causal 레짐 프록시(reference_basket_trend/reference_basket_drawdown)를 src/mhs/regime.py에 신설(프로덕션 배선 없음, 순수 유틸리티+테스트만).",
       "impact": "docs/specs/mhs_momentum_strategy_redesign_review.md에 진단 기록. regime.py는 향후 크래시 레짐 오버레이 스펙의 기반 인프라로만 존재, 현재 어떤 프로덕션 경로에도 미배선(바이트 동일 보장). /check PASS(lint/type/test 전부)."
-    },
-    {
-      "task_id": "MHS_MOMENTUM_REGIME_DIAGNOSIS",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_MOMENTUM_REGIME_DIAGNOSIS",
-      "domain": "mhs",
-      "title": "MHS slow_momentum fold Sharpe 편차 근본 원인 진단 + yearly_net_t 진단 노출",
-      "why": "OHLCV_IMMEDIATE_TAKER 결손 가드 수정 후 fold0(2023)/fold1(2024)이 처음 완주되며 fold Sharpe가 -0.15/-0.50/+1.61로 극심하게 갈리는 현상이 새로 드러남. 근본 원인이 신호 자체의 레짐 결함인지, horizon 고정(168h frozen_default)인지, 데이터/유니버스 문제인지 규명 필요.",
-      "resolution": "discovery.py의 select_horizon_by_discovery_qualification이 이미 계산 후 min()으로 축약·폐기하던 (horizon x 연도) net_t를 실측 재현(scratch 스크립트)해 19개 momentum horizon x 2021-2025 전수 테이블 산출. 2022(LUNA/FTX)가 horizon 무관 전원 음수임을 확인해 근본 원인이 horizon 선택이 아닌 신호의 체계적 붕괴장 레짐 취약성임을 규명. 저위험 후속 조치로 그 (horizon x 연도) 테이블을 DiscoveryQualificationResult.yearly_net_t 필드로 프로덕션 진단 파이프라인에 정식 노출(새 계산 없이 기존 값 재사용, 기존 필드 바이트 동일 유지).",
-      "impact": "docs/specs/mhs_momentum_regime_diagnosis.md에 진단 및 3개 전략적 개선 후보(크래시 레짐 오버레이/사전등록 장기 horizon 이전/worst-year floor 재검토) 기록, 사용자가 크래시 레짐 오버레이를 다음 방향으로 선택(미착수). yearly_net_t는 구현 완료, tests/unit/mhs/test_discovery.py 19/19 통과, /check PASS."
     }
   ]
 }
