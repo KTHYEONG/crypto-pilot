@@ -95,3 +95,16 @@ def test_orderbook_capture_settings_defaults() -> None:
     assert s.orderbook_capture_max_symbols == 40
     assert s.orderbook_capture_dir is None
     assert s.taker_slippage_bps == ExecutionSpec().taker_slippage_bps
+
+
+def test_settings_data_retention_below_floor_rejected() -> None:
+    import pytest
+    from pydantic import ValidationError
+    from src.live.settings import LiveSettings
+    from src.market_data.retention import MARKET_DATA_MIN_RETENTION_DAYS
+
+    with pytest.raises(ValidationError):
+        LiveSettings(data_retention_days=MARKET_DATA_MIN_RETENTION_DAYS - 1)
+
+    ok = LiveSettings(data_retention_days=MARKET_DATA_MIN_RETENTION_DAYS + 5)
+    assert ok.data_retention_days == MARKET_DATA_MIN_RETENTION_DAYS + 5
