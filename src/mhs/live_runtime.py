@@ -1,4 +1,3 @@
-# ruff: noqa
 """Live runtime: cloud-owned rolling state."""
 
 from __future__ import annotations
@@ -195,23 +194,27 @@ def load_or_bootstrap_runtime(path: Path, params: Any, bootstrap_reference: pd.S
 
 
 def adopt_params(runtime: LiveRuntime, params: Any, bootstrap_reference: pd.Series) -> tuple[LiveRuntime, str]:
-    held_keys = set(runtime.held_target_row.keys())
-    admitted = set(params.admitted_members) if hasattr(params, "admitted_members") else set()
-    if held_keys and not held_keys.issubset(admitted):
-        reason = "reseed_roster"
-        new_held = dict(params.bootstrap_held_row)
-        new_ref = bootstrap_reference.copy() if not bootstrap_reference.empty else pd.Series(dtype="float64")
-        if not new_ref.empty:
-            new_ref = new_ref.sort_index()
-    else:
-        reason = "soft_swap"
-        new_held = dict(runtime.held_target_row)
-        new_ref = runtime.reference_daily_returns.copy() if not runtime.reference_daily_returns.empty else pd.Series(dtype="float64")
+    ref = bootstrap_reference.copy() if not bootstrap_reference.empty else pd.Series(dtype="float64")
+    if not ref.empty:
+        ref = ref.sort_index()
+        if ref.index.tz is None:
+            ref.index = ref.index.tz_localize("UTC")
+        else:
+            ref.index = ref.index.tz_convert("UTC")
+    reason = "bootstrap" if not runtime.held_target_row else "soft_swap"
     new_rt = LiveRuntime(
         schema_version=runtime.schema_version,
         params_digest=str(params.strategy_digest),
         last_decision_date=runtime.last_decision_date,
-        held_target_row=new_held,
-        reference_daily_returns=new_ref,
+        held_target_row=dict(runtime.held_target_row),
+        reference_daily_returns=ref,
     )
     return new_rt, reason
+
+
+def reconcile_runtime_params(
+    runtime: LiveRuntime, params: Any, bootstrap_reference: pd.Series
+) -> tuple[LiveRuntime, str | None]:
+    if runtime.params_digest == str(params.strategy_digest):
+        return runtime, None
+    return adopt_params(runtime, params, bootstrap_reference)

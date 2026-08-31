@@ -277,7 +277,11 @@ def simulated_tax_records(
         is_maker = liquidity == "maker"
         venue_id = seq
         seq -= 1
-        record_id = f"simulated:TRADE:{venue_id}"
+        # record_id 는 사이클 간 유일해야 한다: run_id(=decision_time YYYYMMDD)가
+        # 없으면 event_time 초 단위로 대체. leg_index+cycle-seq 로 부분체결까지 구분.
+        run_tag = str(getattr(ev, "run_id", "") or "") or event_time.strftime("%Y%m%dT%H%M%S")
+        leg_index = int(getattr(ev, "leg_index", 0) or 0)
+        record_id = f"simulated:TRADE:{run_tag}:{symbol}:{leg_index}:{-venue_id}"
         rec = TaxRecord(
             record_id=record_id,
             kind="TRADE",
