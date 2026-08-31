@@ -61,10 +61,7 @@ def test_data_collect_mhs_execution_threads_timeframe_to_plan(monkeypatch) -> No
 
 
 def test_data_refresh_live_universe_registered_and_dispatches(monkeypatch) -> None:
-    """SCENARIO_SIGNAL_10 (data side): ``data collect refresh-live-universe``
-    parses and dispatches to _refresh_live_universe, refreshing 1h/funding for
-    every cached symbol before the 3m roster (order matters: the roster ranks
-    by trailing 1h volume)."""
+    """v2: refresh does 1h/funding + markPriceKlines, no 3m roster."""
     parser = _mhs_parser()
     args = parser.parse_args(["data", "refresh-live-universe"])
     assert args.handler is _refresh_live_universe
@@ -82,34 +79,31 @@ def test_data_refresh_live_universe_registered_and_dispatches(monkeypatch) -> No
         def ensure_funding_data(self, symbol, start, end):
             call_order.append(f"funding:{symbol}")
 
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            call_order.append(f"mark:{symbol}")
+
+        def ensure_metrics_live_tail(self, symbol, *, lookback_days=7):
+            call_order.append(f"metrics:{symbol}")
+
     monkeypatch.setattr(
         "src.market_data.services.futures_collection.DataCollector", FakeCollector
     )
 
-    class FakePlan:
-        symbols = ("AAAUSDT", "BUSDT")
-
-    def fake_build_plan(start, end, timeframe, execution_universe_size):
-        call_order.append("build_plan")
-        return FakePlan()
-
-    def fake_collect(plan, execute, workers):
-        call_order.append("collect_roster")
-        return {"mode": "completed"}
-
+    # ensure 3m not called
     monkeypatch.setattr(
-        "src.application.data.mhs_execution_collection.build_mhs_execution_plan", fake_build_plan
+        "src.application.data.mhs_execution_collection.build_mhs_execution_plan",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("3m build_plan should not be called")),
     )
     monkeypatch.setattr(
-        "src.application.data.mhs_execution_collection.collect_mhs_execution_data", fake_collect
+        "src.application.data.mhs_execution_collection.collect_mhs_execution_data",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("3m collect should not be called")),
     )
 
     _refresh_live_universe(args)
 
     assert "ohlcv:AAAUSDT" in call_order
     assert "funding:AAAUSDT" in call_order
-    assert call_order.index("ohlcv:AAAUSDT") < call_order.index("build_plan")
-    assert "collect_roster" in call_order
+    assert "mark:AAAUSDT" in call_order
 
 
 def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(monkeypatch) -> None:
@@ -129,20 +123,14 @@ def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(monkeypatc
         def ensure_funding_data(self, symbol, start, end):
             pass
 
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            pass
+
+        def ensure_metrics_live_tail(self, symbol, *, lookback_days=7):
+            pass
+
     monkeypatch.setattr(
         "src.market_data.services.futures_collection.DataCollector", FlakyCollector
-    )
-
-    class FakePlan:
-        symbols = ()
-
-    monkeypatch.setattr(
-        "src.application.data.mhs_execution_collection.build_mhs_execution_plan",
-        lambda start, end, timeframe, execution_universe_size: FakePlan(),
-    )
-    monkeypatch.setattr(
-        "src.application.data.mhs_execution_collection.collect_mhs_execution_data",
-        lambda plan, execute, workers: {"mode": "completed"},
     )
 
     _refresh_live_universe(args)  # must not raise despite AAAUSDT's failure
@@ -178,14 +166,13 @@ def test_stream_liquidations_subcommand_wires_asyncio_run(monkeypatch) -> None:
 
 
 def test_refresh_live_universe_metrics_tail_is_failsoft(monkeypatch) -> None:
-    """A raising ensure_metrics_live_tail for one roster symbol is logged and
-    skipped; _refresh_live_universe completes and calls it for every symbol."""
+    """A raising ensure_metrics_live_tail for one symbol is logged and skipped."""
     import glob as glob_mod
 
     parser = _mhs_parser()
     args = parser.parse_args(["data", "refresh-live-universe"])
 
-    monkeypatch.setattr(glob_mod, "glob", lambda pattern: ["AAAUSDT.parquet"])
+    monkeypatch.setattr(glob_mod, "glob", lambda pattern: ["R0USDT.parquet", "R1USDT.parquet", "R2USDT.parquet"])
 
     tail_calls: list[str] = []
 
@@ -196,6 +183,9 @@ def test_refresh_live_universe_metrics_tail_is_failsoft(monkeypatch) -> None:
         def ensure_funding_data(self, symbol, start, end):
             pass
 
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            pass
+
         def ensure_metrics_live_tail(self, symbol, *, lookback_days=7):
             tail_calls.append(symbol)
             if symbol == "R0USDT":
@@ -203,18 +193,6 @@ def test_refresh_live_universe_metrics_tail_is_failsoft(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "src.market_data.services.futures_collection.DataCollector", FakeCollector
-    )
-
-    class FakePlan:
-        symbols = ("R0USDT", "R1USDT", "R2USDT")
-
-    monkeypatch.setattr(
-        "src.application.data.mhs_execution_collection.build_mhs_execution_plan",
-        lambda start, end, timeframe, execution_universe_size: FakePlan(),
-    )
-    monkeypatch.setattr(
-        "src.application.data.mhs_execution_collection.collect_mhs_execution_data",
-        lambda plan, execute, workers: {"mode": "completed"},
     )
 
     _refresh_live_universe(args)  # must not raise

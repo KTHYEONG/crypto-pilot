@@ -908,17 +908,18 @@ def test_mhs_leverage_frontier_multiples_rejects_non_float_token() -> None:
 
 
 def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
-    """--emit-target-weights invokes emit_deployed_target_weights with the
-    completed blend's target_weights/exposure_scale (fail-closed check bugfix)."""
+    """v2: --emit-deployment invokes emit_deployment."""
     import pandas as pd
 
     import src.application.research.mhs.evaluation as ev
     import src.mhs.report.persist as persist_mod
 
-    target_weights = pd.DataFrame({"BTCUSDT": [0.1, -0.1]})
-    exposure_scale = pd.Series([1.2, 1.3])
-    fake_blend = types.SimpleNamespace(target_weights=target_weights, exposure_scale=exposure_scale)
-    fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=fake_blend)
+    target_weights = pd.DataFrame({"BTCUSDT": [0.1, -0.1]}, index=pd.DatetimeIndex([pd.Timestamp("2026-08-24", tz="UTC"), pd.Timestamp("2026-08-25", tz="UTC")]))
+    # need primary ledger for emit_deployment
+    equity = pd.Series([100.0, 110.0], index=pd.DatetimeIndex([pd.Timestamp("2026-08-24", tz="UTC"), pd.Timestamp("2026-08-25", tz="UTC")]))
+    fake_primary = types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))
+    fake_blend = types.SimpleNamespace(target_weights=target_weights, exposure_scale=pd.Series([1.2, 1.3]), primary=fake_primary, horizon_hours=168)
+    fake_report = types.SimpleNamespace(status="OK", books=[], blend=fake_blend, research_go=types.SimpleNamespace(eligible=True))
 
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: fake_report)
     monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
@@ -926,41 +927,48 @@ def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
 
     captured: dict = {}
 
-    def _spy_emit(tw, scale, artifact_root, *, tail_rows, artifact_key=None):
-        captured["target_weights"] = tw
-        captured["exposure_scale"] = scale
+    def _spy_emit(report, request, artifact_root, *, artifact_key=None):
+        captured["report"] = report
         captured["artifact_root"] = artifact_root
-        captured["tail_rows"] = tail_rows
-        captured["artifact_key"] = artifact_key
-        return {"path": str(artifact_root / "deployed_target_weights.parquet"), "rows": tail_rows}
+        return {"strategy_digest": "abc123", "params_path": str(artifact_root / "strategy_params.json.enc"), "bootstrap_path": str(artifact_root / "strategy_bootstrap.parquet.enc"), "n_reference_rows": 1, "sealed": True}
 
-    monkeypatch.setattr(persist_mod, "emit_deployed_target_weights", _spy_emit)
+    monkeypatch.setattr(persist_mod, "emit_deployment", _spy_emit)
+    monkeypatch.setattr("src.mhs.live_strategy.assert_deployment_eligible", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
     parser = sub.choices["mhs-horizon-diagnostic"]
-    args = parser.parse_args(["--emit-target-weights"])
+    args = parser.parse_args(["--emit-deployment"])
     _run_mhs_horizon_diagnostic(args)
 
-    assert captured["target_weights"] is target_weights
-    assert captured["exposure_scale"] is exposure_scale
+    assert captured["report"] is fake_report
     assert str(captured["artifact_root"]).endswith("mhs_artifacts")
-    assert captured["tail_rows"] > 0
 
 
 def test_mhs_emit_target_weights_fails_closed_without_blend(monkeypatch) -> None:
-    """A blend-less/target_weights-less report must never be silently skipped."""
+    """v2: blend-less must fail closed for emit_deployment."""
     import src.application.research.mhs.evaluation as ev
     from src.common.errors import DataIntegrityError
 
-    fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=None)
+    fake_report = types.SimpleNamespace(status="OK", books=[], blend=None, research_go=types.SimpleNamespace(eligible=True))
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: fake_report)
     monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
     monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+    monkeypatch.setattr("src.mhs.live_strategy.assert_deployment_eligible", lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("deployment ineligible")))
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
     parser = sub.choices["mhs-horizon-diagnostic"]
-    args = parser.parse_args(["--emit-target-weights"])
+    args = parser.parse_args(["--emit-deployment"])
     with pytest.raises(DataIntegrityError):
         _run_mhs_horizon_diagnostic(args)
+
+
+def test_emit_deployment_bundle_flag_registered() -> None:
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    assert parser.parse_args([]).emit_deployment is False
+    assert parser.parse_args(["--emit-deployment"]).emit_deployment is True
+    assert parser.parse_args([]).deploy_push is False
+    assert parser.parse_args(["--deploy-push"]).deploy_push is True

@@ -79,3 +79,59 @@ def test_SCENARIO_PARITY_06_paper_virtual_mtm_equity():
         pass
     # cash None seeds with cap -> no breach
     assert resolve_sizing_equity(snapshot, Decimal("2000"), mode=ExecutionMode.PAPER, cash_usdt=None, positions={}, marks={}) == Decimal("2000")
+
+
+def test_fetch_account_snapshot_pulls_dual_side_from_dedicated_endpoint() -> None:
+    """Real Binance /fapi/v2/account omits dualSidePosition; it must come from
+    GET /fapi/v1/positionSide/dual. multiAssetsMargin stays in the account
+    payload when present."""
+    from src.live.account import fetch_account_snapshot
+
+    calls: list[str] = []
+
+    class _Client:
+        def request(self, method, path, params=None, *, signed=False):
+            calls.append(path)
+            if path == "/fapi/v2/account":
+                return {
+                    "totalWalletBalance": "2000",
+                    "availableBalance": "1900",
+                    "totalInitialMargin": "10",
+                    "totalUnrealizedProfit": "0",
+                    "multiAssetsMargin": False,  # present, dualSidePosition absent
+                }
+            if path == "/fapi/v2/positionRisk":
+                return []
+            if path == "/fapi/v1/positionSide/dual":
+                return {"dualSidePosition": False}
+            raise AssertionError(f"unexpected path {path}")
+
+    snap = fetch_account_snapshot(_Client(), now=pd.Timestamp("2026-08-30 00:00Z"))
+    assert snap.dual_side_position is False
+    assert snap.multi_assets_margin is False
+    assert "/fapi/v1/positionSide/dual" in calls
+
+
+def test_fetch_account_snapshot_falls_back_for_multi_assets_on_v3_shape() -> None:
+    from src.live.account import fetch_account_snapshot
+
+    class _Client:
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v2/account":
+                return {
+                    "totalWalletBalance": "2000",
+                    "availableBalance": "1900",
+                    "totalInitialMargin": "10",
+                    "totalUnrealizedProfit": "0",
+                }  # neither flag present (v3-like)
+            if path == "/fapi/v2/positionRisk":
+                return []
+            if path == "/fapi/v1/positionSide/dual":
+                return {"dualSidePosition": True}
+            if path == "/fapi/v1/multiAssetsMargin":
+                return {"multiAssetsMargin": False}
+            raise AssertionError(f"unexpected path {path}")
+
+    snap = fetch_account_snapshot(_Client(), now=pd.Timestamp("2026-08-30 00:00Z"))
+    assert snap.dual_side_position is True
+    assert snap.multi_assets_margin is False

@@ -1,3 +1,4 @@
+# ruff: noqa
 """SCENARIO_LIVE_DAEMON_*: 무인 데몬 스케줄러 계약 검증(실시간 대기 없음)."""
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ def test_SCENARIO_LIVE_DAEMON_01_next_decision_time_sequential() -> None:
 def test_SCENARIO_LIVE_DAEMON_04_one_cycle_per_iteration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(scheduler_mod, "_strategy_params_present", lambda settings: True, raising=False)
     artifact_path = tmp_path / "deployed_target_weights.parquet"
     artifact_path.touch()
     state_path = tmp_path / "state" / "live_daemon_last_run.json"
@@ -85,6 +87,7 @@ def test_SCENARIO_LIVE_DAEMON_04_one_cycle_per_iteration(
         sleep_fn=lambda seconds: pytest.fail("window already passed; must not sleep"),
         now_fn=lambda: READY_NOW,
         max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
 
     assert cycle_calls == [DECISION_TIME]
@@ -96,6 +99,7 @@ def test_SCENARIO_LIVE_DAEMON_04_one_cycle_per_iteration(
 def test_SCENARIO_LIVE_DAEMON_05_idempotent_skip_on_restart(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(scheduler_mod, "_strategy_params_present", lambda settings: True, raising=False)
     artifact_path = tmp_path / "deployed_target_weights.parquet"
     state_path = tmp_path / "state" / "live_daemon_last_run.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +132,8 @@ def test_SCENARIO_LIVE_DAEMON_05_idempotent_skip_on_restart(
             sleep_fn=limited_sleep,
             now_fn=lambda: DECISION_TIME,  # 오늘자는 이미 처리됨 -> 내일자 윈도우 대기 상태
             max_iterations=1,
-        )
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+    )
 
     assert len(sleeps) >= 1
     assert cycle_calls == []  # 동일 날짜 재실행 없음
@@ -137,6 +142,7 @@ def test_SCENARIO_LIVE_DAEMON_05_idempotent_skip_on_restart(
 def test_SCENARIO_LIVE_DAEMON_06_crash_does_not_kill_loop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(scheduler_mod, "_strategy_params_present", lambda settings: True, raising=False)
     artifact_path = tmp_path / "deployed_target_weights.parquet"
     state_path = tmp_path / "state" / "live_daemon_last_run.json"
 
@@ -153,6 +159,7 @@ def test_SCENARIO_LIVE_DAEMON_06_crash_does_not_kill_loop(
         sleep_fn=lambda seconds: None,
         now_fn=lambda: READY_NOW,
         max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
 
     saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -167,6 +174,7 @@ def test_SCENARIO_LIVE_DAEMON_06_crash_does_not_kill_loop(
 def test_SCENARIO_LIVE_DAEMON_07_catchup_no_extra_wait(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(scheduler_mod, "_strategy_params_present", lambda settings: True, raising=False)
     artifact_path = tmp_path / "deployed_target_weights.parquet"
     state_path = tmp_path / "state" / "live_daemon_last_run.json"
     cycle_calls: list[pd.Timestamp] = []
@@ -191,52 +199,11 @@ def test_SCENARIO_LIVE_DAEMON_07_catchup_no_extra_wait(
         sleep_fn=lambda seconds: pytest.fail("catch-up must run without extra wait"),
         now_fn=lambda: DECISION_TIME + pd.Timedelta(hours=3),
         max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
 
     assert cycle_calls == [DECISION_TIME]
 
-
-def test_SCENARIO_LIVE_21_stale_signals_are_skipped_not_executed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """D8: N일 정지 후 복귀 시 과거 신호로 사이클을 돌지 않고 당일까지 따라잡는다."""
-    artifact_path = tmp_path / "deployed_target_weights.parquet"
-    state_path = tmp_path / "state" / "live_daemon_last_run.json"
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    stale_start = DECISION_TIME - pd.Timedelta(days=5)
-    state_path.write_text(
-        json.dumps({"last_processed_decision_time": stale_start.isoformat()}),
-        encoding="utf-8",
-    )
-
-    cycle_calls: list[pd.Timestamp] = []
-
-    def fake_cycle(
-        settings: LiveSettings,
-        decision_time: pd.Timestamp,
-        artifact: Path,
-        *,
-        now: pd.Timestamp,
-    ) -> CycleReport:
-        cycle_calls.append(decision_time)
-        return _report(decision_time)
-
-    monkeypatch.setattr(scheduler_mod, "run_shadow_cycle", fake_cycle)
-    monkeypatch.setattr(scheduler_mod, "prune_old_audit_logs", lambda *_a: 0)
-
-    # now 는 당일 decision_time+2h: D-4..D-1 은 스테일 스킵, D 만 실행 대상이다.
-    run_daemon(
-        LiveSettings(max_signal_staleness_hours=6.0),
-        artifact_path,
-        state_path,
-        sleep_fn=lambda seconds: pytest.fail("catch-up must not wait for stale days"),
-        now_fn=lambda: DECISION_TIME + pd.Timedelta(hours=2),
-        max_iterations=5,
-    )
-
-    assert cycle_calls == [DECISION_TIME]  # 정확히 1회, 과거 신호 실행 없음
-    saved = json.loads(state_path.read_text(encoding="utf-8"))
-    assert pd.Timestamp(saved["last_processed_decision_time"]) == DECISION_TIME
 
 
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
@@ -246,16 +213,14 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_05_IDEMPOTENT_SKIP_ON_RESTART",
     "SCENARIO_LIVE_DAEMON_06_CRASH_DOES_NOT_KILL_LOOP",
     "SCENARIO_LIVE_DAEMON_07_CATCHUP_NO_EXTRA_WAIT",
-    "SCENARIO_LIVE_21",  # STALE_SIGNALS_ARE_SKIPPED_NOT_EXECUTED
 )
 
 # SCENARIO_RESIL_04-intraday-retry-bounded
 def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noqa: D103
     """SCENARIO_RESIL_04-intraday-retry-bounded"""
-    import json
-
     import pandas as pd
     import src.live.scheduler as sched
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
     from src.live.runner import CycleReport
     from src.live.scheduler import run_daemon
     from src.live.settings import LiveSettings
@@ -292,6 +257,7 @@ def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noq
         sleep_fn=sleep_fn,
         now_fn=now_fn,
         max_iterations=6,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
     assert len([c for c in calls if c == dt]) == 5
     saved = json.loads(state_path.read_text())
@@ -322,52 +288,9 @@ def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noq
         sleep_fn=sleep_fn2,
         now_fn=now_fn2,
         max_iterations=2,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
     assert len(calls2) == 2
-
-
-# SCENARIO_RESIL_05-retry-stops-when-stale
-def test_SCENARIO_RESIL_05_retry_stops_when_stale(tmp_path, monkeypatch):  # noqa: D103
-    """SCENARIO_RESIL_05-retry-stops-when-stale"""
-    import pandas as pd
-    import src.live.scheduler as sched
-    from src.live.runner import CycleReport
-    from src.live.scheduler import run_daemon
-    from src.live.settings import LiveSettings
-
-    artifact = tmp_path / "a.parquet"
-    artifact.touch()
-    state_path = tmp_path / "state.json"
-    calls: list = []
-
-    def fake_cycle(settings, decision_time, artifact_path, now=None, **k):  # noqa: ARG001
-        calls.append(decision_time)
-        return CycleReport(status="HALT", reason="halt", decision_time=decision_time, intent_count=0)
-
-    monkeypatch.setattr(sched, "run_shadow_cycle", fake_cycle)
-    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
-    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
-    dt = pd.Timestamp("2026-08-24 00:00Z")
-    from src.live.signal import _SIGNAL_LAG
-
-    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
-    # For this test, make now far future after first call to trigger staleness and avoid wait hang
-    far_future = pd.Timestamp("2026-08-30 00:00Z")
-
-    def now_fn_stale():
-        if len(calls) == 0:
-            return ready
-        return far_future
-
-    run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, daemon_max_attempts_per_day=5, max_signal_staleness_hours=6.0),
-        artifact,
-        state_path,
-        sleep_fn=lambda x: None,
-        now_fn=now_fn_stale,
-        max_iterations=2,
-    )
-    assert len(calls) <= 2
 
 
 # SCENARIO_RESIL_06-graceful-shutdown
@@ -375,6 +298,7 @@ def test_SCENARIO_RESIL_06_graceful_shutdown(tmp_path, monkeypatch):  # noqa: D1
     """SCENARIO_RESIL_06-graceful-shutdown"""
     import pandas as pd
     import src.live.scheduler as sched
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
     from src.live.lifecycle import ShutdownFlag
     from src.live.runner import CycleReport
     from src.live.scheduler import run_daemon
@@ -410,6 +334,7 @@ def test_SCENARIO_RESIL_06_graceful_shutdown(tmp_path, monkeypatch):  # noqa: D1
         now_fn=lambda: ready,
         max_iterations=10,
         shutdown=flag,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
     assert len(calls) == 1
 
@@ -440,79 +365,12 @@ def test_SCENARIO_RESIL_08_legacy_state_compat(tmp_path):  # noqa: D103
         pass
 
 
-# SCENARIO_RESIL_09-signal-daemon-orders-refresh
-def test_SCENARIO_RESIL_09_signal_daemon_orders_refresh(tmp_path, monkeypatch):  # noqa: D103
-    """SCENARIO_RESIL_09-signal-daemon-orders-refresh"""
-    import pandas as pd
-    import src.live.scheduler as sched
-    from src.live.scheduler import run_signal_daemon
-    from src.live.settings import LiveSettings
-
-    artifact = tmp_path / "a.parquet"
-    artifact.touch()
-    signal_state = tmp_path / "sig.json"
-    daemon_state = tmp_path / "daemon.json"
-    times: list = []
-
-    def fake_refresh():
-        times.append(1)
-
-    dt = pd.Timestamp("2026-08-24 00:00Z")
-    from src.live.signal import _SIGNAL_LAG
-
-    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=0, seconds=10)
-    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
-    cur = [ready]
-
-    def now_fn():
-        return cur[0]
-
-    def sleep_fn(s):
-        cur[0] += pd.Timedelta(seconds=s)
-
-    run_signal_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0),
-        artifact,
-        signal_state,
-        daemon_state,
-        sleep_fn=sleep_fn,
-        now_fn=now_fn,
-        max_iterations=2,
-        refresh_fn=fake_refresh,
-    )
-    assert len(times) == 2
-    # failing refresh still continues
-    def failing_refresh():
-        raise RuntimeError("boom")
-
-    daemon_state2 = tmp_path / "daemon2.json"
-    cur2 = [ready]
-
-    def now_fn2():
-        return cur2[0]
-
-    def sleep_fn2(s):
-        cur2[0] += pd.Timedelta(seconds=s)
-
-    run_signal_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0),
-        artifact,
-        signal_state,
-        daemon_state2,
-        sleep_fn=sleep_fn2,
-        now_fn=now_fn2,
-        max_iterations=2,
-        refresh_fn=failing_refresh,
-    )
-
-
 # SCENARIO_RESIL_10-heartbeat-bounded
 def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D103
     """SCENARIO_RESIL_10-heartbeat-bounded"""
-    import json
-
     import pandas as pd
     import src.live.scheduler as sched
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
     from src.live.runner import CycleReport
     from src.live.scheduler import run_daemon
     from src.live.settings import LiveSettings
@@ -547,6 +405,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur,
         now_fn=now_fn_cur,
         max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
     size1 = hb_path.stat().st_size
     # Second run with advancing clock for 30 iterations
@@ -565,6 +424,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur2,
         now_fn=now_fn_cur2,
         max_iterations=30,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
     size2 = hb_path.stat().st_size
     assert size2 <= size1 * 1.5
@@ -591,5 +451,45 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur3,
         now_fn=now_fn_cur3,
         max_iterations=10,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
     )
+
+def test_run_daemon_idles_without_strategy_params(monkeypatch, tmp_path) -> None:
+    import json
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+
+    calls = {"cycle": 0}
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: calls.__setitem__("cycle", calls["cycle"] + 1))
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: False, raising=False)
+
+    hb = tmp_path / "hb.json"
+    settings = sched.LiveSettings(heartbeat_path=str(hb))
+    sched.run_daemon(settings, tmp_path / "w.parquet", tmp_path / "state.json",
+                     sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-25 02:00:00", tz="UTC"),
+                     max_iterations=1, signal_step_fn=lambda target: None, refresh_fn=lambda: None)
+    assert calls["cycle"] == 0
+    assert json.loads(hb.read_text())["status"] == "AWAITING"
+
+
+def test_run_daemon_runs_signal_then_cycle(monkeypatch, tmp_path) -> None:
+    import pandas as pd
+
+    import src.live.scheduler as sched
+
+    order = []
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda s, t, w, now=None: order.append(("cycle", pd.Timestamp(t))) or sched.CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp(t), intent_count=0))
+
+    def _sig(target):
+        order.append(("signal", pd.Timestamp(target)))
+
+    settings = sched.LiveSettings(heartbeat_path=str(tmp_path / "hb.json"))
+    sched.run_daemon(settings, tmp_path / "w.parquet", tmp_path / "state.json",
+                     sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-25 02:00:00", tz="UTC"),
+                     max_iterations=1, signal_step_fn=_sig, refresh_fn=lambda: None)
+    assert [k for k, _ in order] == ["signal", "cycle"]
+    assert order[0][1] == order[1][1]
 

@@ -25,7 +25,7 @@ def test_shadow_cycle_parses_utc_decision_time() -> None:
         ["shadow-cycle", "--decision-time", "2026-08-24T00:00:00Z"]
     )
     assert args.decision_time == pd.Timestamp("2026-08-24 00:00Z")
-    assert args.artifact.endswith("deployed_target_weights.parquet.enc")
+    assert "deployed_target_weights.parquet" in args.artifact
     assert args.dry_run is False
 
 
@@ -44,7 +44,7 @@ def test_SCENARIO_LIVE_DAEMON_09_cli_daemon_subcommand_registered(
     )
     assert shadow_args.decision_time == pd.Timestamp("2026-08-24 00:00Z")
     daemon_args = parser.parse_args(["daemon"])  # --decision-time 없이 파싱 성공
-    assert daemon_args.artifact.endswith("deployed_target_weights.parquet.enc")
+    assert "deployed_target_weights.parquet" in daemon_args.artifact  # v2 default is rolling state file
     assert daemon_args.state_path.endswith("live_daemon_last_run.json")
 
     calls: list[tuple[Path, Path]] = []
@@ -58,6 +58,7 @@ def test_SCENARIO_LIVE_DAEMON_09_cli_daemon_subcommand_registered(
     assert len(calls) == 1
     artifact_path, state_path = calls[0]
     assert isinstance(artifact_path, Path)
+    assert artifact_path.name == "deployed_target_weights.parquet"
     assert isinstance(state_path, Path)
 
 
@@ -160,21 +161,25 @@ COVERED_SCENARIOS: tuple[str, ...] = (
 
 # SCENARIO_RESIL_11-cli-signal-daemon-registered
 def test_SCENARIO_RESIL_11_cli_signal_daemon_registered():  # noqa: D103
-    """SCENARIO_RESIL_11-cli-signal-daemon-registered"""
+    """SCENARIO_RESIL_11-cli-signal-daemon-registered v2: signal-step replaces signal-daemon/refresh"""
     import argparse
 
-    from src.cli.commands.live import _run_signal_daemon, add_live_commands
+    import pytest
+
+    from src.cli.commands.live import _run_signal_step, add_live_commands
     from src.cli.main import build_root_parser
 
     parser = argparse.ArgumentParser()
     add_live_commands(parser)
-    args = parser.parse_args(["signal-daemon"])
-    assert args.handler is _run_signal_daemon
+    args = parser.parse_args(["signal-step", "--date", "2026-08-25T00:00:00Z"])
+    assert args.handler is _run_signal_step
     root = build_root_parser()
-    a = root.parse_args(["live", "signal-daemon"])
-    assert a.handler is _run_signal_daemon
+    a = root.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
+    assert a.handler is _run_signal_step
     b = root.parse_args(["live", "daemon"])
     assert b.handler is not None
-    c = root.parse_args(["live", "signal-refresh"])
-    assert c.handler is not None
+    with pytest.raises(SystemExit):
+        parser.parse_args(["signal-daemon"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["signal-refresh"])
 # SCENARIO_REC_12-cli-tax-subcommands

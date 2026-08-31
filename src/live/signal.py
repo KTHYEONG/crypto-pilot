@@ -26,34 +26,26 @@ def _as_utc(timestamp: pd.Timestamp) -> pd.Timestamp:
 
 
 def latest_target_weights(
-    artifact_path: Path,
+    weights_path: Path,
     decision_time: pd.Timestamp,
     *,
     artifact_key: SecretStr | None = None,
+    artifact_path: Path | None = None,
+    max_staleness: pd.Timedelta | None = None,
 ) -> pd.Series:
-    """deployed_target_weights.parquet(.enc)에서 정확히 decision_time 행을 읽는다."""
+    """deployed_target_weights.parquet(.enc)에서 가장 최근 행을 읽는다 (weights_asof)."""
+    if artifact_path is not None:
+        weights_path = artifact_path
     decision_ts = _as_utc(decision_time)
     if (decision_ts.hour, decision_ts.minute, decision_ts.second) != (0, 0, 0):
         raise ValueError("decision_time must lie on the 24h grid (00:00 UTC)")
-    if artifact_path.suffix == ".enc":
-        if artifact_key is None:
-            raise ArtifactSealError(f"sealed artifact requires a key: {artifact_path}")
-        frame = read_sealed_parquet(artifact_path, derive_key(artifact_key))
-    else:
-        try:
-            frame = pd.read_parquet(artifact_path)
-        except (FileNotFoundError, OSError) as exc:
-            # 데몬 bare except 가 삼키지 않도록 계약 예외로 승격한다.
-            raise DataIntegrityError(f"target weights artifact missing: {artifact_path}") from exc
-    index = pd.DatetimeIndex(frame.index)
-    if index.tz is None:
-        raise DataIntegrityError("target weights index must be tz-aware UTC")
-    if decision_ts not in index:
-        raise DataIntegrityError(
-            f"decision_time {decision_ts} not present in target weights artifact"
-        )
-    row = frame.loc[decision_ts]
-    return pd.Series(row, index=frame.columns, dtype="float64", name=decision_ts)
+    from src.live.deployed_weights import load_weights_frame, weights_asof
+
+    frame = load_weights_frame(Path(weights_path), artifact_key=artifact_key)
+    if frame.empty:
+        raise DataIntegrityError(f"target weights artifact missing: {weights_path}")
+    return weights_asof(load_weights_frame(Path(weights_path), artifact_key=artifact_key), decision_ts, max_staleness=max_staleness or pd.Timedelta(hours=96))
+    # wiring: return weights_asof(load_weights_frame(Path(weights_path), artifact_key=artifact_key), decision_ts, max_staleness=max_staleness or pd.Timedelta(hours=96))
 
 
 def assert_signal_available(decision_time: pd.Timestamp, now: pd.Timestamp) -> None:

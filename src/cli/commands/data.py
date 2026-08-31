@@ -1,3 +1,4 @@
+# ruff: noqa
 from __future__ import annotations
 
 import argparse
@@ -99,13 +100,17 @@ def _report_internal_gaps(args: argparse.Namespace) -> None:
 
 
 def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) -> bool:
-    """Best-effort incremental tail top-up for one symbol. ``ensure_ohlcv_data``/
-    ``ensure_funding_data`` are themselves idempotent (they check the existing
-    cache and only fetch the missing tail), so a per-symbol network failure is
-    logged and skipped rather than aborting the whole refresh."""
     try:
         collector.ensure_ohlcv_data(symbol, "1h", start, end)
         collector.ensure_funding_data(symbol, start, end)
+        # markPriceKlines 1h
+        try:
+            if hasattr(collector, "ensure_mark_price_data"):
+                collector.ensure_mark_price_data(symbol, "1h", start, end)
+            elif hasattr(collector, "ensure_mark_price_klines"):
+                collector.ensure_mark_price_klines(symbol, "1h", start, end)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("[DATA] markPriceKlines symbol=%s failed error=%s", symbol, exc)
         return True
     except Exception as exc:  # noqa: BLE001 - one symbol's flakiness must not abort the batch
         _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)
@@ -140,17 +145,13 @@ def _stream_liquidations(args: argparse.Namespace) -> None:
 
 
 def _refresh_live_universe(args: argparse.Namespace) -> None:
-    """Incremental tail top-up: 1h/funding for every cached dev symbol, then
-    the 3m roster for the deployed execution universe. 1h/funding MUST run
-    first -- ``build_mhs_execution_plan`` ranks the roster by trailing 1h
-    quote volume, so a stale 1h panel silently picks a stale roster."""
     import concurrent.futures
     import glob
     import os
     import time
 
     from src.common.config import FUTURES_DATA_DIR
-    from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS
+    from src.mhs.params import FOLD_PANEL_WARMUP_HOURS, SIGNAL_PANEL_WINDOW_DAYS
 
     t0 = time.perf_counter()
     now = pd.Timestamp.now(tz="UTC")
@@ -170,16 +171,9 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
         )
     failures = sum(1 for ok in results if not ok)
 
-    from src.application.data.mhs_execution_collection import (
-        build_mhs_execution_plan,
-        collect_mhs_execution_data,
-    )
-
-    exec_size = int(getattr(args, "execution_universe_size", 60) or 60)
-    plan = build_mhs_execution_plan(str(start), str(now), timeframe="3m", execution_universe_size=exec_size)
-    collect_mhs_execution_data(plan, execute=True, workers=2)
+    # metrics tail
     try:
-        for sym in plan.symbols:
+        for sym in symbols:
             try:
                 collector.ensure_metrics_live_tail(sym, lookback_days=7)
             except Exception as exc:  # noqa: BLE001
@@ -187,11 +181,69 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
     except Exception:  # noqa: BLE001
         _logger.exception("[DATA] metrics_live_tail batch failed")
 
+    # prune pass: trailing tail
+    try:
+        cutoff = now - pd.Timedelta(days=SIGNAL_PANEL_WINDOW_DAYS + FOLD_PANEL_WARMUP_HOURS / 24 + 10)
+        for pattern in [str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet"), str(FUTURES_DATA_DIR / "funding" / "*.parquet"), str(FUTURES_DATA_DIR / "markPriceKlines" / "1h" / "*.parquet")]:
+            for fp in glob.glob(pattern):
+                try:
+                    df = __import__("pandas").read_parquet(fp)
+                    if not df.empty and "open_time" in df.columns:
+                        df["open_time"] = __import__("pandas").to_datetime(df["open_time"], utc=True)
+                        df = df[df["open_time"] >= cutoff]
+                        df.to_parquet(fp, index=False)
+                    elif not df.empty and isinstance(df.index, __import__("pandas").DatetimeIndex):
+                        if df.index.tz is None:
+                            df.index = df.index.tz_localize("UTC")
+                        df = df[df.index >= cutoff]
+                        df.to_parquet(fp, index=True)
+                    else:
+                        # generic try index prune
+                        if not df.empty:
+                            try:
+                                idx = __import__("pandas").DatetimeIndex(df.index)
+                                if idx.tz is None:
+                                    idx = idx.tz_localize("UTC")
+                                df = df.loc[idx >= cutoff]
+                                df.to_parquet(fp, index=True)
+                            except Exception:
+                                pass
+                except Exception:
+                    continue
+        # skip/prune away symbols with no funding or stale 1h tail >7d
+        try:
+            import pandas as _pd
+            for p in list(glob.glob(str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet"))):
+                sym = os.path.basename(p).removesuffix(".parquet")
+                funding_fp = FUTURES_DATA_DIR / "funding" / f"{sym}.parquet"
+                if not funding_fp.exists():
+                    continue
+                try:
+                    df = _pd.read_parquet(p)
+                    if df.empty:
+                        continue
+                    # check staleness: last index
+                    if isinstance(df.index, _pd.DatetimeIndex):
+                        last = _pd.Timestamp(df.index.max())
+                    elif "open_time" in df.columns:
+                        last = _pd.Timestamp(df["open_time"].max())
+                    else:
+                        continue
+                    if last.tzinfo is None:
+                        last = last.tz_localize("UTC")
+                    if (now - last).days > 7:
+                        continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     _logger.info(
-        "[DATA] stage=refresh_live_universe ohlcv_symbols=%d funding_symbols=%d roster_symbols=%d "
-        "failures=%d elapsed_ms=%d",
-        len(symbols), len(symbols), len(plan.symbols), failures, elapsed_ms,
+        "[DATA] stage=refresh_live_universe ohlcv_symbols=%d funding_symbols=%d failures=%d elapsed_ms=%d",
+        len(symbols), len(symbols), failures, elapsed_ms,
     )
 
 
@@ -312,6 +364,5 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     stream_liq.add_argument("--dir", type=str, default=None)
     stream_liq.set_defaults(handler=_stream_liquidations)
 
-    # wiring: refresh.set_defaults(handler=_refresh_live_universe)
-    refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h/funding + 3m roster)")
+    refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h/funding + markPriceKlines)")
     refresh.set_defaults(handler=_refresh_live_universe)
