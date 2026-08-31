@@ -8,27 +8,11 @@ services:
     environment:
       - HARDWARE_MAX_WORKERS=1
     volumes:
-      # 원장/데몬 상태와 감사로그는 호스트에 보존된다(재배포 생존).
-      - ./data/state:/app/data/state
-      - ./logs:/app/logs
-      - ./docs/results/mhs_horizon_diagnostic_artifacts:/app/docs/results/mhs_horizon_diagnostic_artifacts:ro
-    mem_limit: 512m
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
-  mhs-signal:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/crypto-pilot-live:latest
-    container_name: mhs-signal-refresh
-    restart: unless-stopped
-    stop_grace_period: 30s
-    env_file: .env
-    volumes:
       - ./data:/app/data
+      - ./logs:/app/logs
       - ./docs/results/mhs_horizon_diagnostic_artifacts:/app/docs/results/mhs_horizon_diagnostic_artifacts
-    mem_limit: 1g
-    command: ["uv", "run", "python", "-m", "src.cli.main", "live", "signal-daemon"]
+    mem_limit: 1200m
+    command: ["uv", "run", "python", "-m", "src.cli.main", "live", "daemon"]
     logging:
       driver: json-file
       options:
