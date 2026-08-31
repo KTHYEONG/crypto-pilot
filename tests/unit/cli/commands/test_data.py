@@ -168,7 +168,7 @@ def test_stream_liquidations_subcommand_wires_asyncio_run(monkeypatch) -> None:
 
 
 def test_refresh_live_universe_metrics_tail_is_failsoft(monkeypatch) -> None:
-    """A raising ensure_metrics_live_tail for one symbol is logged and skipped."""
+    """Metrics tail no longer exists; ensure_metrics_live_tail is never called."""
     monkeypatch.setenv("LIVE_MIN_UNIVERSE_SYMBOLS", "1")
     import glob as glob_mod
 
@@ -200,7 +200,7 @@ def test_refresh_live_universe_metrics_tail_is_failsoft(monkeypatch) -> None:
 
     _refresh_live_universe(args)  # must not raise
 
-    assert tail_calls == ["R0USDT", "R1USDT", "R2USDT"]
+    assert tail_calls == []
 
 
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
@@ -230,5 +230,101 @@ def test_refresh_live_universe_cold_box_fails_loud(tmp_path, monkeypatch) -> Non
         data_mod._refresh_live_universe(argparse.Namespace())
 
     assert ei.value.code == 3
+
+
+def test_refresh_live_universe_filters_dev_partition_and_no_metrics(tmp_path, monkeypatch) -> None:
+    import argparse
+    import src.cli.commands.data as data_mod
+    from src.common import config as cfg
+    from src.research.universe.pit_universe import symbol_partition
+
+    root = tmp_path
+    (root / "ohlcv" / "1h").mkdir(parents=True)
+    # build a mix until we have >= 100 dev symbols and some holdout
+    made_dev, made_holdout = [], []
+    i = 0
+    while len(made_dev) < 120 or len(made_holdout) < 5:
+        s = f"SYM{i}USDT"
+        (root / "ohlcv" / "1h" / f"{s}.parquet").touch()
+        (made_dev if symbol_partition(s) == "dev" else made_holdout).append(s)
+        i += 1
+    monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", root, raising=False)
+    monkeypatch.setattr(data_mod, "FUTURES_DATA_DIR", root, raising=False)
+
+    refreshed: list[str] = []
+    metrics_calls: list[str] = []
+
+    class _Collector:
+        def ensure_metrics_live_tail(self, sym, **k):
+            metrics_calls.append(sym)
+
+    monkeypatch.setattr(data_mod, "DataCollector", lambda *a, **k: _Collector(), raising=False)
+    monkeypatch.setattr(
+        data_mod, "_refresh_one_symbol_tail",
+        lambda collector, sym, start, end: refreshed.append(sym) or True,
+        raising=False,
+    )
+
+    data_mod._refresh_live_universe(argparse.Namespace())
+
+    assert set(refreshed) == set(made_dev)
+    assert not any(s in refreshed for s in made_holdout)
+    assert metrics_calls == []
+
+
+def test_seed_cloud_fetches_dev_usdt_universe_idempotent(monkeypatch) -> None:
+    import argparse
+    import src.cli.commands.data as data_mod
+    from src.research.universe.pit_universe import symbol_partition
+
+    listed = ["BTCUSDT", "ETHUSDT", "AAAUSDT", "BBBUSDT", "CCCUSDT", "SOMECOIN", "XRPUSDT", "BNBBUSD"]
+    expected = [s for s in listed if s.endswith("USDT") and symbol_partition(s) == "dev"]
+
+    class _Vision:
+        def list_all_symbols(self, **k):
+            return listed
+
+    monkeypatch.setattr("src.market_data.binance.vision.BinanceVisionDownloader", lambda *a, **k: _Vision(), raising=False)
+    monkeypatch.setattr(data_mod, "DataCollector", lambda *a, **k: object(), raising=False)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        data_mod, "_refresh_one_symbol_tail",
+        lambda collector, sym, start, end: seen.append(sym) or True,
+        raising=False,
+    )
+
+    data_mod._seed_cloud(argparse.Namespace(lookback_days=30))
+
+    assert sorted(seen) == sorted(expected)
+    assert expected  # non-empty guard sanity
+
+
+def test_prune_live_data_cli_dispatches_both_prunes(monkeypatch) -> None:
+    import argparse
+    import src.cli.commands.data as data_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr("src.market_data.retention.prune_market_data", lambda *a, **k: calls.append("market") or {}, raising=False)
+    monkeypatch.setattr("src.market_data.retention.prune_orderbook_history", lambda *a, **k: calls.append("orderbook") or 0, raising=False)
+
+    data_mod._prune_live_data(argparse.Namespace())
+
+    assert calls == ["market", "orderbook"]
+
+
+def test_seed_cloud_and_prune_live_data_subcommands_registered() -> None:
+    import argparse
+    import src.cli.commands.data as data_mod
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers()
+    data_mod.add_data_commands(sub.add_parser("data"))
+
+    a = parser.parse_args(["data", "seed-cloud", "--lookback-days", "200"])
+    assert a.handler is data_mod._seed_cloud
+    assert a.lookback_days == 200
+
+    b = parser.parse_args(["data", "prune-live-data"])
+    assert b.handler is data_mod._prune_live_data
 
 

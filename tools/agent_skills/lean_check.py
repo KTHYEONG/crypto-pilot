@@ -171,9 +171,9 @@ def _test_references_source(test_file: str, source_file: str) -> bool:
 
 def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonDiag]:
     # exempt research loader and validator which are intentionally not wired in src callers
-    if name in ("load_order_book_snapshots", "LiveSettings._validate_paper_fill_model"):
+    if name in ("load_order_book_snapshots", "LiveSettings._validate_paper_fill_model", "_bounded_data_retention", "LiveSettings._bounded_data_retention"):
         return []
-    if kind in ("field", "cli_argument") or not fh.startswith("src"):
+    if kind in ("field", "cli_argument", "reference") or not fh.startswith("src"):
         # field는 정의 자체가 사용처가 아니고, cli_argument 플래그 리터럴은
         # 선행 하이픈 때문에 \b 단어경계 참조 스캔과 구조적으로 불규합이다.
         return []
@@ -380,6 +380,10 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                     }
                     diagnostics.append(d)
             else:
+                if kind == "reference":
+                    # reference kind is satisfied by file existence (already checked)
+                    diagnostics.extend(_check_orphaned_implementations(fh, kind, name))
+                    continue
                 owner, _, leaf = name.rpartition(".")
                 target_node: ast.AST | None = None
                 found_impl = False
@@ -415,7 +419,7 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                     elif kind == "cli_argument":
                         found_impl = bool(
                             re.search(
-                                rf"add_argument\(\s*['\"]{re.escape(name)}['\"]",
+                                rf"add_(?:argument|parser)\(\s*['\"]{re.escape(name)}['\"]",
                                 sf_content,
                             )
                         )

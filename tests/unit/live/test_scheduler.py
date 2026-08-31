@@ -87,7 +87,7 @@ def test_SCENARIO_LIVE_DAEMON_04_one_cycle_per_iteration(
         sleep_fn=lambda seconds: pytest.fail("window already passed; must not sleep"),
         now_fn=lambda: READY_NOW,
         max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     assert cycle_calls == [DECISION_TIME]
@@ -132,7 +132,7 @@ def test_SCENARIO_LIVE_DAEMON_05_idempotent_skip_on_restart(
             sleep_fn=limited_sleep,
             now_fn=lambda: DECISION_TIME,  # 오늘자는 이미 처리됨 -> 내일자 윈도우 대기 상태
             max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     assert len(sleeps) >= 1
@@ -159,7 +159,7 @@ def test_SCENARIO_LIVE_DAEMON_06_crash_does_not_kill_loop(
         sleep_fn=lambda seconds: None,
         now_fn=lambda: READY_NOW,
         max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -199,7 +199,7 @@ def test_SCENARIO_LIVE_DAEMON_07_catchup_no_extra_wait(
         sleep_fn=lambda seconds: pytest.fail("catch-up must run without extra wait"),
         now_fn=lambda: DECISION_TIME + pd.Timedelta(hours=3),
         max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     assert cycle_calls == [DECISION_TIME]
@@ -257,7 +257,7 @@ def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noq
         sleep_fn=sleep_fn,
         now_fn=now_fn,
         max_iterations=6,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     assert len([c for c in calls if c == dt]) == 5
     saved = json.loads(state_path.read_text())
@@ -288,7 +288,7 @@ def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noq
         sleep_fn=sleep_fn2,
         now_fn=now_fn2,
         max_iterations=2,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     assert len(calls2) == 2
 
@@ -334,7 +334,7 @@ def test_SCENARIO_RESIL_06_graceful_shutdown(tmp_path, monkeypatch):  # noqa: D1
         now_fn=lambda: ready,
         max_iterations=10,
         shutdown=flag,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     assert len(calls) == 1
 
@@ -405,7 +405,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur,
         now_fn=now_fn_cur,
         max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     size1 = hb_path.stat().st_size
     # Second run with advancing clock for 30 iterations
@@ -424,7 +424,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur2,
         now_fn=now_fn_cur2,
         max_iterations=30,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     size2 = hb_path.stat().st_size
     assert size2 <= size1 * 1.5
@@ -451,7 +451,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur3,
         now_fn=now_fn_cur3,
         max_iterations=10,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
 def test_run_daemon_idles_without_strategy_params(monkeypatch, tmp_path) -> None:
@@ -469,7 +469,7 @@ def test_run_daemon_idles_without_strategy_params(monkeypatch, tmp_path) -> None
     settings = sched.LiveSettings(heartbeat_path=str(hb))
     sched.run_daemon(settings, tmp_path / "w.parquet", tmp_path / "state.json",
                      sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-25 02:00:00", tz="UTC"),
-                     max_iterations=1, signal_step_fn=lambda target: None, refresh_fn=lambda: None)
+                     max_iterations=1, signal_step_fn=lambda target: None, refresh_fn=lambda: None, prune_fn=lambda: None)
     assert calls["cycle"] == 0
     assert json.loads(hb.read_text())["status"] == "AWAITING"
 
@@ -489,7 +489,7 @@ def test_run_daemon_runs_signal_then_cycle(monkeypatch, tmp_path) -> None:
     settings = sched.LiveSettings(heartbeat_path=str(tmp_path / "hb.json"))
     sched.run_daemon(settings, tmp_path / "w.parquet", tmp_path / "state.json",
                      sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-25 02:00:00", tz="UTC"),
-                     max_iterations=1, signal_step_fn=_sig, refresh_fn=lambda: None)
+                     max_iterations=1, signal_step_fn=_sig, refresh_fn=lambda: None, prune_fn=lambda: None)
     assert [k for k, _ in order] == ["signal", "cycle"]
     assert order[0][1] == order[1][1]
 
@@ -520,6 +520,7 @@ def test_run_daemon_awaiting_data_when_refresh_fails(tmp_path, monkeypatch) -> N
         max_iterations=1,
         refresh_fn=_bad_refresh,
         signal_step_fn=lambda *a, **k: step_calls.append(a),
+        prune_fn=lambda: None,
     )
 
     hb = json.loads((tmp_path / "hb.json").read_text())
@@ -573,8 +574,89 @@ def test_run_daemon_alerts_once_on_halt_streak(tmp_path, monkeypatch) -> None:
         max_iterations=3,
         refresh_fn=lambda: None,
         signal_step_fn=lambda *a, **k: None,
+        prune_fn=lambda: None,
     )
 
     assert events.count("halt_streak") == 1
+
+
+def test_daemon_runs_prune_after_refresh_before_signal(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: __import__("src.live.runner", fromlist=["CycleReport"]).CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp("2026-08-24 00:00Z"), intent_count=0))
+    order: list[str] = []
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+
+    sched.run_daemon(
+        LiveSettings(),
+        artifact,
+        tmp_path / "state.json",
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: pd.Timestamp("2026-08-24 00:00Z") + _SIGNAL_LAG + pd.Timedelta(minutes=20),
+        max_iterations=1,
+        refresh_fn=lambda: order.append("refresh"),
+        signal_step_fn=lambda *a, **k: order.append("signal"),
+        prune_fn=lambda: order.append("prune"),
+    )
+
+    assert order == ["refresh", "prune", "signal"]
+
+
+def test_daemon_prune_failure_is_non_fatal(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: __import__("src.live.runner", fromlist=["CycleReport"]).CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp("2026-08-24 00:00Z"), intent_count=0))
+    ran: list[str] = []
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+
+    def _boom() -> None:
+        raise RuntimeError("disk busy")
+
+    sched.run_daemon(
+        LiveSettings(),
+        artifact,
+        tmp_path / "state.json",
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: pd.Timestamp("2026-08-24 00:00Z") + _SIGNAL_LAG + pd.Timedelta(minutes=20),
+        max_iterations=1,
+        refresh_fn=lambda: None,
+        signal_step_fn=lambda *a, **k: ran.append("signal"),
+        prune_fn=_boom,
+    )
+
+    assert ran == ["signal"]
+
+
+def test_default_data_refresh_uses_check_true(monkeypatch) -> None:
+    import subprocess
+    import pytest
+    import src.live.scheduler as sched
+
+    captured = {}
+
+    def _fake_run(cmd, **kw):
+        captured.update(kw)
+        raise subprocess.CalledProcessError(3, cmd)
+
+    monkeypatch.setattr(sched.subprocess, "run", _fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        sched._default_data_refresh()
+
+    assert captured.get("check") is True
 
 

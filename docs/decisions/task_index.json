@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_CLOUD_DATA_LIFECYCLE",
+      "date": "2026-08-31",
+      "adr_id": "ADR_20260831_CLOUD_DATA_LIFECYCLE",
+      "domain": "quant",
+      "title": "클라우드 데이터 수명주기: 최소 풋프린트 시드 + dev-only refresh + 안전 리텐션 프루닝",
+      "why": "저사양 클라우드 박스가 콜드부트 정의 없이(빈 박스 refresh no-op), 매 사이클 652종목 전체+라이브에서 안 읽는 metrics를 단일스레드 4-API로 수집, ohlcv/1h·mark·funding 행 히스토리와 orderbook 일별 파일이 무한 증가. 과거 prune은 RangeIndex를 epoch-ns로 오독해 전 파일을 0행으로 파괴한 이력.",
+      "resolution": "src/market_data/retention.py 신설: prune_market_data(재생성 가능한 ohlcv/1h·markPriceKlines/1h·funding만, timestamp 정수컬럼 없으면 skip·빈프레임/MIN_KEPT_ROWS 미만이면 skip·전행유지면 no-op·strict shrink만 atomic temp+replace, retention<SIGNAL_PANEL_WINDOW_DAYS+30이면 ValueError), prune_orderbook_history(live_orderbook_YYYYMMDD 일별 aged-out). data seed-cloud 커맨드(dev USDT-perp 유니버스에 3개 데이터셋만 fetch, _refresh_one_symbol_tail 재사용, 멱등, 전체실패만 non-zero). data prune-live-data 커맨드. _refresh_live_universe: dev 파티션 필터(symbol_partition=='dev') + metrics tail 루프 전면 삭제. LiveSettings.data_retention_days=220(field_validator로 floor 강제)·orderbook_retention_days=365. run_daemon: prune_fn 파라미터, refresh 성공 후·signal-step 전 호출(예외 삼킴 non-fatal). _default_data_refresh check=True(콜드가드 exit3→AWAITING_DATA 연결, 직전 spec latent gap 수정). docs/architecture/live_data_streams.md 데이터 사전. check FAIL 1건 수정: _default_data_prune의 PYTEST_CURRENT_TEST ghost-path 제거하고 test_scheduler.py run_daemon 호출들에 prune_fn 스텁 주입. lean_check.py: reference kind + add_parser cli_argument 인식 확장.",
+      "impact": "클라우드 박스 data/ 15GB→~150MB. refresh 사이클당 ~2600 metrics API 호출 제거, dev 필터로 유니버스 ~20% 축소. market data 무한증가 차단(재생성 가능하므로 무손실), orderbook 1년 보존. 프루닝은 명시적 가드로 과거 파괴 버그 재발 불가. 14+2 신규 테스트 통과. 미검증: 실제 클라우드 콜드부트 소요시간, seed-cloud Vision 네트워크 경로."
+    },
+    {
       "task_id": "TASK_LIVE_DAEMON_HARDENING",
       "date": "2026-08-31",
       "adr_id": "ADR_20260831_LIVE_DAEMON_HARDENING",
@@ -989,16 +999,6 @@
       "why": "ADR_20260812_MHS_MOMENTUM_STRATEGY_REDESIGN_REVIEW가 완전 dollar-neutral 설계와 2022류 붕괴장 생존이 트레이드오프임을 확인한 뒤, 사용자가 regime.py 레짐 프록시를 실제로 slow_momentum 북에 연결하는 구체적 설계를 요청.",
       "resolution": "src/mhs/regime.py에 crash_regime_tilt_weights(dollar-neutral 북과 BTCUSDT 추세 기반 방향성 틸트의 convex combination, alpha=0시 바이트 동일) 신설. MhsDiagnosticRequest.crash_regime_tilt_alpha(opt-in, 기본 None)로 게이팅해 _build_fold_target_weights에만 배선(상위 books 진단 경로는 의도적으로 미배선). 2021-2022만 사용한 사전등록 보정 실험(fold 검증연도 미사용)에서 alpha가 클수록 2022 개선·2021 악화의 단조 트레이드오프만 확인돼 특정 alpha를 프로덕션 기본값으로 심지 않기로 결정(리서치 정책 결정으로 분리). 설계검토 중 발견된 오류(convex combination이 gross를 항상 1.0으로 유지한다는 주장이 triangle inequality상 틀림, 실제로는 <=1.0)를 코드/스펙/컨트랙트 3곳에서 정정.",
       "impact": "research run portfolio mhs-horizon-diagnostic --crash-regime-tilt-alpha 0.2 실전 실행 검증: status=COMPLETE, 크래시 0건, alpha=None 기본 경로는 상위 books 수치 바이트 동일 확인. fold 리플레이는 설계대로 변경됨 -- fold0(2023) Sharpe -0.15->+1.21(stress도 음수->양수 전환), fold1(2024) -0.50->-0.35 개선, fold2(2025) +1.61->+1.50로 소폭 하락(사전예측한 트레이드오프가 실전에서 재현됨). alpha=0.2를 프로덕션 값으로 확정하는 것은 아님(단일 임의값 시험, p-hack 방지 원칙상 별도 검증 필요)."
-    },
-    {
-      "task_id": "MHS_MOMENTUM_STRATEGY_REDESIGN_REVIEW",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_MOMENTUM_STRATEGY_REDESIGN_REVIEW",
-      "domain": "mhs",
-      "title": "MHS slow_momentum 전략 유형 근본 재검토 + regime.py 레짐 프록시 신설",
-      "why": "직전 진단(ADR_20260812_MHS_MOMENTUM_REGIME_DIAGNOSIS)이 2022가 horizon 무관 전원 음수임을 밝힌 뒤, 사용자가 horizon이 아니라 cross-sectional momentum이라는 전략 유형 자체가 잘못된 것 아닌지 근본 재검토를 요청.",
-      "resolution": "프로덕션과 동일 패널/tranche 구성으로 cross-sectional rank momentum(현재 설계, 완전 dollar-neutral) vs time-series/absolute momentum(방향성 허용) 헤드투헤드 실측 비교, 시장 레짐(causal trailing drawdown)과 xs P&L 상관 분석(+0.402, p<0.01), 균등가중 바스켓의 유니버스 구성 드리프트 confound 확인. 결론: 전략 설계가 틀렸다기보다 완전 market-neutral 목표와 2022류 붕괴장 생존이 트레이드오프 관계. 저위험 후속 조치로 구성 드리프트에 오염되지 않는 고정 기준 바스켓 기반 causal 레짐 프록시(reference_basket_trend/reference_basket_drawdown)를 src/mhs/regime.py에 신설(프로덕션 배선 없음, 순수 유틸리티+테스트만).",
-      "impact": "docs/specs/mhs_momentum_strategy_redesign_review.md에 진단 기록. regime.py는 향후 크래시 레짐 오버레이 스펙의 기반 인프라로만 존재, 현재 어떤 프로덕션 경로에도 미배선(바이트 동일 보장). /check PASS(lint/type/test 전부)."
     }
   ]
 }
