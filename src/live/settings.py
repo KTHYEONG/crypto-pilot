@@ -96,6 +96,8 @@ class LiveSettings(BaseSettings):
     alert_webhook_url: str | None = None
     min_universe_symbols: int = 100
     alert_halt_streak: int = 2
+    data_retention_days: int = 220
+    orderbook_retention_days: int = 365
 
     # 리스크 게이트(등록 상한). 레버리지 천장은 리스크 엔벨로프 레지스트리에서 유도한다.
     max_gross_leverage: float = GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
@@ -124,6 +126,15 @@ class LiveSettings(BaseSettings):
     def _bounded_recv_window(cls, value: int) -> int:
         if not 0 < value <= _MAX_RECV_WINDOW_MS:
             raise ValueError(f"recv_window_ms must be in (0, {_MAX_RECV_WINDOW_MS}]")
+        return value
+
+    @field_validator("data_retention_days")
+    @classmethod
+    def _bounded_data_retention(cls, value: int) -> int:
+        from src.market_data.retention import MARKET_DATA_MIN_RETENTION_DAYS
+
+        if value < MARKET_DATA_MIN_RETENTION_DAYS:
+            raise ValueError(f"data_retention_days must be >= {MARKET_DATA_MIN_RETENTION_DAYS}")
         return value
 
     @model_validator(mode="after")
