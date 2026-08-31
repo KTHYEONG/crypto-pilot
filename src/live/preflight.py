@@ -143,17 +143,25 @@ def run_preflight(
     # --- account_configuration ---
     snapshot: Any | None = None
     try:
+        from src.live.account import assert_venue_configuration, synthetic_flat_snapshot
+        from src.live.runner import NullOrderClient
+
         o_client = order_client
         if o_client is None:
             from src.live.runner import _order_client as _runner_order_client
 
             o_client = _runner_order_client(settings, expected)
         order_client = o_client
-        from src.live.account import assert_venue_configuration, fetch_account_snapshot
+        if isinstance(o_client, NullOrderClient):
+            snapshot = synthetic_flat_snapshot(now_ts_utc)
+            assert_venue_configuration(snapshot)
+            checks.append(PreflightCheck(name="account_configuration", passed=True, detail="synthetic (paper, no credentials)"))
+        else:
+            from src.live.account import fetch_account_snapshot
 
-        snapshot = fetch_account_snapshot(o_client, now=now_ts_utc)
-        assert_venue_configuration(snapshot)
-        checks.append(PreflightCheck(name="account_configuration", passed=True, detail="ok"))
+            snapshot = fetch_account_snapshot(o_client, now=now_ts_utc)
+            assert_venue_configuration(snapshot)
+            checks.append(PreflightCheck(name="account_configuration", passed=True, detail="ok"))
     except Exception as exc:
         checks.append(PreflightCheck(name="account_configuration", passed=False, detail=str(exc)))
         snapshot = None

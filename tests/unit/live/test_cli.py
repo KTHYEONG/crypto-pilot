@@ -142,3 +142,34 @@ def test_live_cli_surface_after_v2() -> None:
             parser.parse_args(["live", gone])
     args = parser.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
     assert args.handler.__name__ == "_run_signal_step"
+
+
+
+def test_run_shadow_cycle_paper_no_credentials() -> None:
+    import pandas as pd
+
+    import src.live.runner as runner
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    settings = LiveSettings(mode=ExecutionMode.PAPER)
+    assert settings.api_key is None
+    client = runner._order_client(settings, pd.Timestamp("2026-08-24", tz="UTC"))
+    assert isinstance(client, runner.NullOrderClient)
+    # 서명 조회는 스텁: 실계좌 GET 없음
+    assert client.open_orders() == []
+    assert client.sync_server_time() is None
+    from src.live.rest import PaperResponse
+
+    assert isinstance(client.new_order({}), PaperResponse)
+
+def test_settings_with_mode_flag_overrides_env(monkeypatch) -> None:
+    import argparse
+
+    monkeypatch.setenv("LIVE_MODE", "shadow")
+    from src.cli.commands.live import _settings_with_mode
+    from src.live.settings import ExecutionMode
+
+    s = _settings_with_mode(argparse.Namespace(mode="paper"))
+    assert s.mode is ExecutionMode.PAPER
+    s2 = _settings_with_mode(argparse.Namespace(mode=None))
+    assert s2.mode is ExecutionMode.SHADOW

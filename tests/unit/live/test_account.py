@@ -135,3 +135,40 @@ def test_fetch_account_snapshot_falls_back_for_multi_assets_on_v3_shape() -> Non
     snap = fetch_account_snapshot(_Client(), now=pd.Timestamp("2026-08-30 00:00Z"))
     assert snap.dual_side_position is True
     assert snap.multi_assets_margin is False
+
+
+
+def test_resolve_sizing_equity_paper_uncapped() -> None:
+    from decimal import Decimal
+
+    from src.live.account import AccountSnapshot, resolve_sizing_equity
+    from src.live.settings import ExecutionMode
+    import pandas as pd
+
+    snap = AccountSnapshot(
+        taken_at=pd.Timestamp("2026-08-30", tz="UTC"), wallet_balance=Decimal(0), available_balance=Decimal(0),
+        total_maint_margin=Decimal(0), unrealized_pnl=Decimal(0), positions={"BTCUSDT": Decimal("1")},
+        dual_side_position=False, multi_assets_margin=False,
+    )
+    marks = {"BTCUSDT": Decimal("5000")}
+    eq = resolve_sizing_equity(snap, Decimal("2000"), mode=ExecutionMode.PAPER, cash_usdt=Decimal("0"), positions={"BTCUSDT": Decimal("1")}, marks=marks)
+    assert eq == Decimal("5000")
+
+    live_snap = AccountSnapshot(
+        taken_at=pd.Timestamp("2026-08-30", tz="UTC"), wallet_balance=Decimal("5000"), available_balance=Decimal("5000"),
+        total_maint_margin=Decimal(0), unrealized_pnl=Decimal(0), positions={}, dual_side_position=False, multi_assets_margin=False,
+    )
+    live_eq = resolve_sizing_equity(live_snap, Decimal("2000"), mode=ExecutionMode.LIVE_MAINNET)
+    assert live_eq == Decimal("2000")
+
+def test_synthetic_flat_snapshot_passes_guards() -> None:
+    import pandas as pd
+
+    from src.live.account import assert_suppressed_venue_flat, assert_venue_configuration, synthetic_flat_snapshot
+
+    snap = synthetic_flat_snapshot(pd.Timestamp("2026-08-30 01:00", tz="UTC"))
+    assert snap.positions == {}
+    assert snap.dual_side_position is False
+    assert snap.multi_assets_margin is False
+    assert_venue_configuration(snap)
+    assert_suppressed_venue_flat(snap)
