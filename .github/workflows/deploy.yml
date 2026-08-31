@@ -89,6 +89,16 @@ jobs:
           source: ".env.decrypted"
           target: "~/crypto-pilot/"
 
+      - name: Copy strategy params via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json.enc,docs/results/mhs_horizon_diagnostic_artifacts/strategy_bootstrap.parquet.enc"
+          target: "~/crypto-pilot/docs/results/mhs_horizon_diagnostic_artifacts/"
+        if: hashFiles('docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json.enc') != ''
+
       - name: SSH Deploy
         uses: appleboy/ssh-action@v1.0.3
         with:

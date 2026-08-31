@@ -390,5 +390,15 @@
   "src/market_data/streams/liquidations.py": {
     "architecture": "docs/specs/alpha_source_data_collection.md",
     "testing": "tests/unit/market_data/test_liquidations.py"
+  },
+  "src/mhs/deployment_bundle.py": {
+    "architecture": "docs/specs/backtest_cloud_handoff.md",
+    "testing": "tests/unit/mhs/test_deployment_bundle.py"
+  },
+  "src/mhs/signal_runtime.py": {
+    "testing": "tests/unit/mhs/test_signal_runtime.py"
+  },
+  "src/mhs/deployed_weights_ledger.py": {
+    "testing": "tests/unit/mhs/test_deployed_weights_ledger.py"
   }
 }
