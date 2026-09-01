@@ -20,8 +20,13 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.config import DATA_DIR
+from typing import TYPE_CHECKING
+
+from src.common.config import DATA_DIR, FUTURES_DATA_DIR
 from src.common.errors import DataIntegrityError
+
+if TYPE_CHECKING:
+    from src.live.data_refresh import RefreshReport
 from src.live.audit import AUDIT_LOG_ROOT, prune_old_audit_logs
 from src.live.errors import StaleSignalError
 from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: F401
@@ -215,12 +220,20 @@ def _strategy_params_present(settings: LiveSettings) -> bool:
     return False
 
 
-def _default_data_refresh() -> None:
-    """Production data-tail refresh: 1h/funding/mark top-up + prune."""
-    subprocess.run(
-        [sys.executable, "-m", "src.cli.main", "data", "refresh-live-universe"],
-        check=True,
-        timeout=1800,
+def _default_data_refresh() -> RefreshReport:
+    from src.common.config import FUTURES_DATA_DIR
+    from src.live.data_refresh import refresh_live_market_data
+
+    s = LiveSettings()
+    return refresh_live_market_data(
+        FUTURES_DATA_DIR,
+        now=_utc_now(),
+        lookback_days=s.refresh_lookback_days,
+        max_workers=s.refresh_max_workers,
+        deadline_s=s.refresh_deadline_s,
+        freshness_floor_hours=s.refresh_freshness_floor_hours,
+        min_symbols=s.min_universe_symbols,
+        max_fail_fraction=s.refresh_max_fail_fraction,
     )
 
 
@@ -272,7 +285,7 @@ def run_daemon(
     now_fn: Callable[[], pd.Timestamp] = _utc_now,
     max_iterations: int | None = None,
     shutdown: ShutdownFlag | None = None,
-    refresh_fn: Callable[[], None] = _default_data_refresh,
+    refresh_fn: Callable[[], Any] = _default_data_refresh,  # refresh_fn: Callable[[], None] = _default_data_refresh
     signal_step_fn: Callable[..., None] = _default_signal_step,
     prune_fn: Callable[[], None] = _default_data_prune,
 ) -> None:
@@ -323,20 +336,38 @@ def run_daemon(
                 pass
             continue
 
+        report = None
+        err = None
         try:
-            refresh_fn()
+            report = refresh_fn()  # RefreshReport | None; run_daemon staleness gate calls market_data_staleness_hours(FUTURES_DATA_DIR, now=now_fn())
         except Exception as exc:  # noqa: BLE001
             logger.exception("[SYS] data refresh failed")
-            _daemon_alert(settings, alerts_sent, event="data_refresh_failed", detail=str(exc), decision_time=target, now=now_fn())
+            err = exc
+        refresh_ok = err is None and (report is None or bool(getattr(report, "ok", True)))
+        if not refresh_ok:
             try:
-                write_heartbeat(heartbeat_path, decision_time=target, status="AWAITING_DATA", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
+                from src.live.data_refresh import market_data_staleness_hours
+
+                if report is not None and getattr(report, "staleness_hours", None) is not None:
+                    staleness_h = float(getattr(report, "staleness_hours", float("inf")))
+                else:
+                    staleness_h = float(market_data_staleness_hours(FUTURES_DATA_DIR, now=now_fn()))
             except Exception:
-                logger.exception("[SYS] heartbeat write failed")
-            try:
-                sleep_fn(DAEMON_POLL_INTERVAL_SECONDS)
-            except Exception:
-                pass
-            continue
+                staleness_h = float("inf")
+            if staleness_h <= settings.max_market_data_staleness_hours:
+                _daemon_alert(settings, alerts_sent, event="data_degraded", detail=f"staleness_h={staleness_h:.1f} err={err}", decision_time=target, now=now_fn())
+                logger.warning("[SYS] data refresh degraded; proceeding on cached panel staleness_h=%.1f", staleness_h)
+            else:
+                _daemon_alert(settings, alerts_sent, event="data_refresh_failed", detail=str(err) if err is not None else str(getattr(report, "staleness_hours", "")), decision_time=target, now=now_fn())
+                try:
+                    write_heartbeat(heartbeat_path, decision_time=target, status="AWAITING_DATA", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
+                except Exception:
+                    logger.exception("[SYS] heartbeat write failed")
+                try:
+                    sleep_fn(DAEMON_POLL_INTERVAL_SECONDS)
+                except Exception:
+                    pass
+                continue
 
         try:
             prune_fn()
