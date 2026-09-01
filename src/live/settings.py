@@ -101,6 +101,12 @@ class LiveSettings(BaseSettings):
     alert_halt_streak: int = 2
     data_retention_days: int = 220
     orderbook_retention_days: int = 365
+    refresh_max_workers: int = 12
+    refresh_lookback_days: int = 40
+    refresh_deadline_s: float = 900.0
+    refresh_freshness_floor_hours: float = 1.5
+    refresh_max_fail_fraction: float = 0.15
+    max_market_data_staleness_hours: float = 30.0
 
     # 리스크 게이트(등록 상한). 레버리지 천장은 리스크 엔벨로프 레지스트리에서 유도한다.
     max_gross_leverage: float = GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
@@ -140,6 +146,34 @@ class LiveSettings(BaseSettings):
             raise ValueError(f"data_retention_days must be >= {MARKET_DATA_MIN_RETENTION_DAYS}")
         return value
 
+    @field_validator("refresh_max_workers")
+    @classmethod
+    def _bounded_refresh_workers(cls, value: int) -> int:
+        if not 1 <= value <= 64:
+            raise ValueError("refresh_max_workers must be in [1, 64]")
+        return value
+
+    @field_validator("refresh_max_fail_fraction")
+    @classmethod
+    def _bounded_refresh_fail_fraction(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("refresh_max_fail_fraction must be in [0.0, 1.0]")
+        return value
+
+    @field_validator("refresh_lookback_days")
+    @classmethod
+    def _bounded_refresh_lookback(cls, value: int) -> int:
+        if value < 7:
+            raise ValueError("refresh_lookback_days must be >= 7")
+        return value
+
+    @field_validator("max_market_data_staleness_hours")
+    @classmethod
+    def _bounded_market_data_staleness(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("max_market_data_staleness_hours must be > 0")
+        return value
+
     @model_validator(mode="after")
     def _gate_mainnet(self) -> LiveSettings:
         if not self.order_base_url:
@@ -156,3 +190,17 @@ class LiveSettings(BaseSettings):
                 f"'{MAINNET_TRADING_ACK}'"
             )
         return self
+
+
+def refresh_settings_fields() -> tuple[str, ...]:
+    return (
+        "refresh_max_workers",
+        "refresh_lookback_days",
+        "refresh_deadline_s",
+        "refresh_freshness_floor_hours",
+        "refresh_max_fail_fraction",
+        "max_market_data_staleness_hours",
+    )
+
+
+_refresh_settings_fields_ref = refresh_settings_fields()

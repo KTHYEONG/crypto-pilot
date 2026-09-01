@@ -145,69 +145,42 @@ def _stream_liquidations(args: argparse.Namespace) -> None:
 
 
 def _refresh_live_universe(args: argparse.Namespace) -> None:
-    import concurrent.futures
-    import glob
-    import os
-    import time
+    import pandas as pd
 
     from src.common.config import FUTURES_DATA_DIR
-    from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS
-
-    t0 = time.perf_counter()
-    now = pd.Timestamp.now(tz="UTC")
-    start = now - pd.Timedelta(days=SIGNAL_PANEL_WINDOW_DAYS)
-
-    ohlcv_paths = sorted(glob.glob(str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet")))
-    symbols = [os.path.basename(p).removesuffix(".parquet") for p in ohlcv_paths]
-
-    from src.research.universe.pit_universe import symbol_partition
-
-    symbols = [s for s in symbols if symbol_partition(s) == "dev"]
-
+    from src.live.data_refresh import ColdUniverseError, refresh_live_market_data
     from src.live.scheduler import DAEMON_COLD_UNIVERSE_EXIT_CODE
     from src.live.settings import LiveSettings
 
-    _min = LiveSettings().min_universe_symbols
-    if len(symbols) < _min:
-        _logger.error(
-            "[DATA] stage=refresh_live_universe status=COLD_UNIVERSE symbols=%d min=%d remediation=%s",
-            len(symbols),
-            _min,
-            "seed data/futures/{ohlcv/1h,markPriceKlines/1h,funding} (scp from local box or run data collect) before starting the daemon",
+    s = LiveSettings()
+    try:
+        rep = refresh_live_market_data(
+            FUTURES_DATA_DIR,
+            now=pd.Timestamp.now(tz="UTC"),
+            lookback_days=s.refresh_lookback_days,
+            max_workers=s.refresh_max_workers,
+            deadline_s=s.refresh_deadline_s,
+            freshness_floor_hours=s.refresh_freshness_floor_hours,
+            min_symbols=s.min_universe_symbols,
+            max_fail_fraction=s.refresh_max_fail_fraction,
         )
-        raise SystemExit(DAEMON_COLD_UNIVERSE_EXIT_CODE)
-
-    from src.market_data.services.futures_collection import DataCollector
-
-    collector = DataCollector()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(
-            pool.map(
-                lambda sym: _refresh_one_symbol_tail(collector, sym, str(start), str(now)), symbols,
-            )
-        )
-    failures = sum(1 for ok in results if not ok)
-
-    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    except ColdUniverseError as exc:
+        _logger.error("[DATA] stage=refresh_live_universe status=COLD_UNIVERSE detail=%s", exc)
+        raise SystemExit(DAEMON_COLD_UNIVERSE_EXIT_CODE) from exc
     _logger.info(
-        "[DATA] stage=refresh_live_universe ohlcv_symbols=%d funding_symbols=%d failures=%d elapsed_ms=%d",
-        len(symbols), len(symbols), failures, elapsed_ms,
+        "[DATA] stage=refresh_live_universe total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d ok=%s",
+        rep.total, rep.fresh, rep.refreshed, rep.failed, rep.deadline_skipped, rep.ok,
     )
+    if not rep.ok:
+        raise SystemExit(1)
 
 
 def _seed_cloud(args: argparse.Namespace) -> None:
-    import concurrent.futures
-    import time
-
     import pandas as pd
 
+    from src.common.config import FUTURES_DATA_DIR
+    from src.live.data_refresh import refresh_live_market_data
     from src.live.settings import LiveSettings
-
-    lookback = int(getattr(args, "lookback_days", 0)) or LiveSettings().data_retention_days
-    now = pd.Timestamp.now(tz="UTC")
-    start = now - pd.Timedelta(days=lookback)
-    t0 = time.perf_counter()
-
     from src.market_data.binance.vision import BinanceVisionDownloader
     from src.research.universe.pit_universe import symbol_partition
 
@@ -219,27 +192,24 @@ def _seed_cloud(args: argparse.Namespace) -> None:
     if not syms:
         _logger.error("[DATA] stage=seed_cloud status=NO_UNIVERSE")
         raise SystemExit(1)
-
-    from src.market_data.services.futures_collection import DataCollector
-
-    collector = DataCollector()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(
-            pool.map(
-                lambda sym: _refresh_one_symbol_tail(collector, sym, str(start), str(now)),
-                syms,
-            )
-        )
-    failures = sum(1 for ok in results if not ok)
-    elapsed_ms = int((time.perf_counter() - t0) * 1000)
-    _logger.info(
-        "[DATA] stage=seed_cloud symbols=%d failures=%d lookback_days=%d elapsed_ms=%d",
-        len(syms),
-        failures,
-        lookback,
-        elapsed_ms,
+    s = LiveSettings()
+    lookback = int(getattr(args, "lookback_days", 0)) or s.data_retention_days
+    rep = refresh_live_market_data(
+        FUTURES_DATA_DIR,
+        now=pd.Timestamp.now(tz="UTC"),
+        lookback_days=lookback,
+        max_workers=s.refresh_max_workers,
+        deadline_s=s.refresh_deadline_s * 6,
+        freshness_floor_hours=0.0,
+        min_symbols=1,
+        max_fail_fraction=1.0,
+        symbols=syms,
     )
-    if failures == len(syms):
+    _logger.info(
+        "[DATA] stage=seed_cloud total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d ok=%s",
+        rep.total, rep.fresh, rep.refreshed, rep.failed, rep.deadline_skipped, rep.ok,
+    )
+    if rep.refreshed == 0 and rep.fresh == 0:
         raise SystemExit(1)
 
 
@@ -376,11 +346,11 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     stream_liq.set_defaults(handler=_stream_liquidations)
 
     refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h/funding + markPriceKlines)")
-    refresh.set_defaults(handler=_refresh_live_universe)
+    refresh.set_defaults(handler=_refresh_live_universe)  # _refresh_live_universe delegates to refresh_live_market_data
 
     seed_cloud = collect.add_parser("seed-cloud", help="Cold-boot the box: fetch 1h OHLCV + mark/1h + funding for the dev universe")
     seed_cloud.add_argument("--lookback-days", type=int, default=0)
-    seed_cloud.set_defaults(handler=_seed_cloud)
+    seed_cloud.set_defaults(handler=_seed_cloud)  # _seed_cloud delegates to refresh_live_market_data(symbols=syms)
 
     prune_live = collect.add_parser("prune-live-data", help="Age out market data + orderbook past the retention window")
     prune_live.set_defaults(handler=_prune_live_data)
