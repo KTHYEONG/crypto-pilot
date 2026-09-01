@@ -52,7 +52,7 @@ jobs:
           curl -fsSL "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.amd64" -o /tmp/sops
           sudo install -m 0755 /tmp/sops /usr/local/bin/sops
           sops --version
-          sops -d .env.enc > .env.decrypted
+          sops -d --input-type dotenv --output-type dotenv .env.enc > .env.decrypted
 
       - name: Deploy over Tailscale
         env:
