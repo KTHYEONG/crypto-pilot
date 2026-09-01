@@ -47,8 +47,11 @@ jobs:
         env:
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
-          curl -sL https://github.com/getsops/sops/releases/latest/download/sops-linux-amd64 -o /usr/local/bin/sops
-          sudo chmod +x /usr/local/bin/sops
+          set -euo pipefail
+          SOPS_VERSION=v3.9.3
+          curl -fsSL "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.amd64" -o /tmp/sops
+          sudo install -m 0755 /tmp/sops /usr/local/bin/sops
+          sops --version
           sops -d .env.enc > .env.decrypted
 
       - name: Deploy over Tailscale
