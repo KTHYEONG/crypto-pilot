@@ -36,6 +36,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Diagnose connectivity
+        env:
+          HOST: ${{ secrets.HOST }}
+        run: |
+          echo "runner_ip=$(curl -s https://checkip.amazonaws.com)"
+          if timeout 20 bash -c "cat < /dev/null > /dev/tcp/$HOST/22" 2>/dev/null; then
+            echo "port22=OPEN"
+          else
+            echo "port22=UNREACHABLE"
+          fi
+
       - name: Copy docker-compose.yml via SCP
         uses: appleboy/scp-action@v0.1.7
         with:
