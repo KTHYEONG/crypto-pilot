@@ -36,83 +36,52 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Diagnose connectivity
-        env:
-          HOST: ${{ secrets.HOST }}
-        run: |
-          echo "runner_ip=$(curl -s https://checkip.amazonaws.com)"
-          if timeout 20 bash -c "cat < /dev/null > /dev/tcp/$HOST/22" 2>/dev/null; then
-            echo "port22=OPEN"
-          else
-            echo "port22=UNREACHABLE"
-          fi
-
-      - name: Copy docker-compose.yml via SCP
-        uses: appleboy/scp-action@v0.1.7
+      # GitHub 러너(Azure 대역)는 Oracle Cloud 인바운드가 드롭되므로 Tailscale 사설망으로 접속한다.
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
         with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml"
-          target: "~/crypto-pilot/"
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          args: --accept-routes
 
       - name: Decrypt .env
         env:
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
           curl -sL https://github.com/getsops/sops/releases/latest/download/sops-linux-amd64 -o /usr/local/bin/sops
-          chmod +x /usr/local/bin/sops
+          sudo chmod +x /usr/local/bin/sops
           sops -d .env.enc > .env.decrypted
 
-      - name: Copy .env via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: ".env.decrypted"
-          target: "~/crypto-pilot/"
-
-      - name: Copy strategy params via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json.enc,docs/results/mhs_horizon_diagnostic_artifacts/strategy_bootstrap.parquet.enc"
-          target: "~/crypto-pilot/docs/results/mhs_horizon_diagnostic_artifacts/"
-        if: hashFiles('docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json.enc') != ''
-
-      - name: SSH Deploy
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Deploy over Tailscale
         env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          HOST: ${{ secrets.HOST }}
+          REMOTE_USER: ${{ secrets.USERNAME }}
           GHCR_USER: ${{ github.repository_owner }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: GHCR_USER,GHCR_PAT
-          script: |
-            cd ~/crypto-pilot
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          SSH_OPTS="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20"
+          PARAMS="docs/results/mhs_horizon_diagnostic_artifacts"
 
-            # 복호화된 .env를 compose 실행 전에 배치(이미지 밖, env_file 주입 전용)
-            if [ -f .env.decrypted ]; then
-              mv .env.decrypted .env
-            fi
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/$PARAMS"
 
-            # GHCR 로그인(private 패키지 pull용 read:packages PAT)
-            echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/crypto-pilot/"
+          scp $SSH_OPTS .env.decrypted "$REMOTE_USER@$HOST:~/crypto-pilot/.env"
+          if [ -f "$PARAMS/strategy_params.json.enc" ]; then
+            scp $SSH_OPTS "$PARAMS/strategy_params.json.enc" "$PARAMS/strategy_bootstrap.parquet.enc" \
+              "$REMOTE_USER@$HOST:~/crypto-pilot/$PARAMS/"
+          fi
 
-            # Docker Compose V1/V2 양쪽 호환
-            if docker compose version > /dev/null 2>&1; then
-              COMPOSE_CMD="docker compose"
-            else
-              COMPOSE_CMD="docker-compose"
-            fi
-
-            # --force-recreate: 이미지 변경 시 컨테이너 강제 재생성
-            # --remove-orphans: compose에서 제거된 서비스 컨테이너 정리
-            $COMPOSE_CMD pull
-            $COMPOSE_CMD up -d --force-recreate --remove-orphans
-            docker image prune -f
+          # PAT/USER는 로컬에서 확장해 원격 스크립트에 주입(GitHub PAT 문자셋은 셸 안전).
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF
+          set -e
+          cd ~/crypto-pilot
+          echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
+          if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
+          \$C pull
+          \$C up -d --force-recreate --remove-orphans
+          docker image prune -f
+          EOF
