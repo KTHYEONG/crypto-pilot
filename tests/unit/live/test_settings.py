@@ -108,3 +108,28 @@ def test_settings_data_retention_below_floor_rejected() -> None:
 
     ok = LiveSettings(data_retention_days=MARKET_DATA_MIN_RETENTION_DAYS + 5)
     assert ok.data_retention_days == MARKET_DATA_MIN_RETENTION_DAYS + 5
+
+
+def test_live_settings_refresh_field_defaults_and_bounds(monkeypatch) -> None:
+    import pytest
+    from pydantic import ValidationError
+    from src.live.settings import LiveSettings
+
+    for k in list(__import__("os").environ):
+        if k.startswith("LIVE_"):
+            monkeypatch.delenv(k, raising=False)
+
+    s = LiveSettings()
+    assert s.refresh_max_workers == 12
+    assert s.refresh_lookback_days == 40
+    assert s.refresh_deadline_s == 900.0
+    assert s.refresh_freshness_floor_hours == 1.5
+    assert s.refresh_max_fail_fraction == 0.15
+    assert s.max_market_data_staleness_hours == 30.0
+
+    with pytest.raises(ValidationError):
+        LiveSettings(refresh_max_workers=0)
+    with pytest.raises(ValidationError):
+        LiveSettings(refresh_max_fail_fraction=1.5)
+    with pytest.raises(ValidationError):
+        LiveSettings(refresh_lookback_days=3)
