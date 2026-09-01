@@ -1,39 +1,33 @@
-name: AWS CI/CD Pipeline
+name: Oracle CI/CD Pipeline
 
 on:
   push:
     branches: [ main ]
 
+env:
+  IMAGE: ghcr.io/kthyeong/crypto-pilot-live
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Login to Docker Hub
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push to ECR
+      - name: Build and Push to GHCR
         run: |
-          ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY=crypto-pilot-live
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker build -t "$IMAGE:latest" .
+          docker push "$IMAGE:latest"
 
   deploy:
     needs: build-and-push
@@ -41,27 +35,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Get GitHub Runner IP
-        id: ip
-        run: echo "ipv4=$(curl -s https://checkip.amazonaws.com)" >> $GITHUB_OUTPUT
-
-      - name: Whitelist SSH Port (Open)
-        run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ secrets.AWS_SG_ID }} \
-            --protocol tcp --port 22 --cidr ${{ steps.ip.outputs.ipv4 }}/32 || true
 
       - name: Copy docker-compose.yml via SCP
         uses: appleboy/scp-action@v0.1.7
@@ -101,42 +74,34 @@ jobs:
 
       - name: SSH Deploy
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          GHCR_USER: ${{ github.repository_owner }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: GHCR_USER,GHCR_PAT
           script: |
-            # 1. 서버에 AWS 인증 정보 전달
-            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            export AWS_DEFAULT_REGION=${{ secrets.AWS_REGION }}
-
             cd ~/crypto-pilot
 
-            # 2. 복호화된 .env를 compose 실행 전에 배치(이미지 밖, env_file 주입 전용)
+            # 복호화된 .env를 compose 실행 전에 배치(이미지 밖, env_file 주입 전용)
             if [ -f .env.decrypted ]; then
               mv .env.decrypted .env
             fi
 
-            # 3. ECR 로그인
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            # GHCR 로그인(private 패키지 pull용 read:packages PAT)
+            echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
-            # 4. Docker Compose V1/V2 양쪽 호환되게 처리
+            # Docker Compose V1/V2 양쪽 호환
             if docker compose version > /dev/null 2>&1; then
               COMPOSE_CMD="docker compose"
             else
               COMPOSE_CMD="docker-compose"
             fi
 
-            # --force-recreate: 이미지가 변경됐을 때 컨테이너를 반드시 재생성
-            # --remove-orphans: compose 파일에서 제거된 서비스의 컨테이너를 중지
+            # --force-recreate: 이미지 변경 시 컨테이너 강제 재생성
+            # --remove-orphans: compose에서 제거된 서비스 컨테이너 정리
             $COMPOSE_CMD pull
             $COMPOSE_CMD up -d --force-recreate --remove-orphans
             docker image prune -f
-
-      - name: Revoke SSH Port (Close)
-        if: always()
-        run: |
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ secrets.AWS_SG_ID }} \
-            --protocol tcp --port 22 --cidr ${{ steps.ip.outputs.ipv4 }}/32 || true

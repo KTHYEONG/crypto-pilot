@@ -1,6 +1,6 @@
 services:
   mhs-live:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/crypto-pilot-live:latest
+    image: ghcr.io/kthyeong/crypto-pilot-live:latest
     container_name: mhs-live-daemon
     restart: unless-stopped
     stop_grace_period: 30s
@@ -19,7 +19,7 @@ services:
         max-size: "10m"
         max-file: "5"
   liquidation-collector:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/crypto-pilot-live:latest
+    image: ghcr.io/kthyeong/crypto-pilot-live:latest
     container_name: liquidation-collector
     restart: unless-stopped
     stop_grace_period: 30s
