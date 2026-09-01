@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "DAEMON_INCREMENTAL_REFRESH",
+      "date": "2026-09-01",
+      "adr_id": "ADR_20260901_DAEMON_INCREMENTAL_REFRESH",
+      "domain": "live",
+      "title": "데몬 증분 시세 갱신 + 열화 허용 트레이딩",
+      "why": "데몬의 data refresh-live-universe가 종목당 now-120d 윈도우로 ensure_*를 호출해 524종목 @4worker 29분 소요, subprocess timeout=1800·check=True에 걸려 죽고 AWAITING_DATA로 그날 주문 0건. tail 윈도우로 좁히면 종목당 13.4s→0.02~1s.",
+      "resolution": "src/live/data_refresh.py 신설: refresh_live_market_data(디스크 tail 읽어 max(tail-2h, now-lookback) 구간만 fetch, freshness_floor 이내면 skip, deadline_s 초과시 중단, RefreshReport 반환), market_data_staleness_hours(p90 -- 상장폐지 심볼 outlier 방어), ColdUniverseError. _default_data_refresh in-process 전환. run_daemon: refresh 실패/부분/느림에도 staleness<=max_market_data_staleness_hours(30h)면 data_degraded 알림 후 prune·signal-step 진행, 초과시만 AWAITING_DATA. None 반환은 성공 취급(하위호환). _refresh_live_universe·_seed_cloud 위임. LiveSettings: refresh_max_workers=12/refresh_lookback_days=40/refresh_deadline_s=900/refresh_freshness_floor_hours=1.5/refresh_max_fail_fraction=0.15/max_market_data_staleness_hours=30 + 경계 validator.",
+      "impact": "데몬 refresh 29분→20초 실측, 1사이클 ~40초. 부분 실패시에도 캐시 패널로 거래 지속. 로컬 3단계 검증 통과(refresh ok/데몬 COMPLETE/열화 게이트 A=COMPLETE B=AWAITING_DATA). 신규 테스트 13개."
+    },
+    {
       "task_id": "LIVE_ALERT_EMAIL_CHANNEL",
       "date": "2026-08-31",
       "adr_id": "ADR_20260831_LIVE_ALERT_EMAIL_CHANNEL",
@@ -989,16 +999,6 @@
       "why": "16차(RC-1/RC-2 alpha-engine) 적용 후에도 primary_geometric_cagr가 0.00035→0.0063으로 사실상 0% 근처 정체 — 같은 원장의 primary_autocorr_sharpe는 0.18→0.53로 유의미하게 개선됐는데 왜 CAGR(자산증식 헤드라인)만 안 움직이는지 재조사 요청받음. _full/ledger.parquet 직접 검증으로 blend_primary 원장이 525,601행(5년×5분 격자)임을 확인했는데, _geometric_cagr/_naive_sharpe/_mean_ann/compute_deployment_readiness가 전부 하드코딩된 _PERIODS_PER_YEAR_1H(연 8,760, 1시간 격자 가정)를 그대로 적용해 연율화 지수가 정확히 12배(60분/5분) 축소되고 있었음을 규명. _daily_autocorr_sharpe/_mdd는 이미 일봉 리샘플·비율 기반이라 버그 없음 — Sharpe만 개선이 보이고 CAGR은 안 보였던 정확한 이유.",
       "resolution": "신규 헬퍼 _hourly_ledger_series(equity, fill_turnover)가 (equity_1h, net_returns_1h, turnover_1h)를 반환하도록 추가(equity는 resample('1h').last(), turnover는 resample('1h').sum() — 회전율은 합산이 맞는 집계). _naive_sharpe는 시그니처 불변으로 내부에서 ledger.equity를 1시간 리샘플한 net_returns를 사용하도록 수정(8개 호출부 전부 무수정). _book_outcome/_run_anchored_fold의 primary_net_ann/primary_geometric_cagr/primary_annualized_turnover를 _hourly_ledger_series 결과로 교체, primary_max_drawdown/primary_autocorr_sharpe는 원본 원장 그대로 유지(빈도 무관이라 버그 없었음). _run_post_diag_deploy의 compute_deployment_readiness 호출도 이미 바로 위에서 계산되던 equity_1h를 재사용하도록 1줄 교체(부트스트랩 mean_block_bars=168의 '1주' 의미도 동시에 복원). 신호·비용·체결 로직은 전혀 무변경. 실전 재실행(17차, docs/results/mhs-res.md)으로 예측된 배율(CAGR 12.4x, naive Sharpe sqrt(12), MDD/autocorr Sharpe 무변화)이 정확히 실측 재현됨: CAGR 0.63%→7.84%, 30%+ 낙폭확률 62.65%→47.0%. Research GO 게이트(Sharpe 기반)는 버그 영향을 받지 않아 eligible=false 무변화.",
       "impact": "research run portfolio mhs-horizon-diagnostic (모든 향후 실행의 CAGR/naive Sharpe/연율수익/연환산회전율/배포준비도 꼬리위험 수치가 이 수정의 영향을 받음); docs/results/mhs-res.md 17차 갱신"
-    },
-    {
-      "task_id": "MHS_ALPHA_ENGINE_REBUILD",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_ALPHA_ENGINE_REBUILD",
-      "domain": "mhs",
-      "title": "MHS 알파 엔진 재구축 — 실행 스택 불변식 결함 제거",
-      "why": "docs/results/mhs-res.md 15차(crash_regime_tilt_alpha=0.2) 결과가 여전히 folds_passed=1/3, stress_naive_sharpe<0로 정체돼 근본 원인 재분석을 요청받음. 사전스크린 재측정으로 종목별 데드밴드(_apply_rebalance_deadband)가 달러중립성(|Σw| 0→0.10)과 레짐 디리스킹(corr(gross,scale) 0.72→-0.02)을 파괴하고, 19-호라이즌 discovery argmax가 고분산 선택편향을 발생시키며, 보고되는 xs_rank_ic가 신호 자신의 룩백과 겹치는 구간으로 계산돼(+0.096, t=113) 부호가 실제 거래가능 값(-0.028, t=-33)과 반대임을 확인.",
-      "resolution": "src/mhs/books.py에 portfolio_rebalance_trigger(행 단위 홀드로 불변식 보존)·equal_weight_book_ensemble(선택 없는 19-호라이즌 동일가중 평균) 신설. src/mhs/regime.py에 causal_market_beta·beta_neutralize_weights(파라미터 0개 베타중립 대안) 신설. evaluation.py의 _xs_rank_ic/_date_clustered_ols가 forward_bars를 필수화해 opens.pct_change(h).shift(-(h+1))로 인과적 선행수익률을 내부에서 구성하도록 수정. MhsDiagnosticRequest에 slow_book_mode/rebalance_filter/beta_neutralize/ensemble_signal opt-in 필드 추가, CLI 플래그 배선. 신규 파라미터(트리거 임계값 등)는 엔지니어링 기본값으로 등록하고 전 구간 표로 확정하지 않음(fold-train-only 선택 절차로 분리). --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger 실전 검증: primary_autocorr_sharpe 0.182→0.526, primary_max_drawdown -0.392→-0.227, stress_naive_sharpe -0.084→+0.041, folds_passed 1→2/3.",
-      "impact": "research run portfolio mhs-horizon-diagnostic --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger; docs/results/mhs-res.md 16차 갱신"
     }
   ]
 }
