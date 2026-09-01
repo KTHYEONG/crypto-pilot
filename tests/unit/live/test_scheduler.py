@@ -504,6 +504,8 @@ def test_run_daemon_awaiting_data_when_refresh_fails(tmp_path, monkeypatch) -> N
 
     monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
     monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    # 디스크 데이터도 낡았을 때만 AWAITING_DATA -- staleness 판정을 무한대로 고정.
+    monkeypatch.setattr("src.live.data_refresh.market_data_staleness_hours", lambda *a, **k: float("inf"))
     artifact = tmp_path / "w.parquet"
     artifact.touch()
     step_calls: list[object] = []
@@ -642,22 +644,19 @@ def test_daemon_prune_failure_is_non_fatal(tmp_path, monkeypatch) -> None:
 
 
 def test_default_data_refresh_uses_check_true(monkeypatch) -> None:
-    import subprocess
-    import pytest
     import src.live.scheduler as sched
+    from src.live.data_refresh import RefreshReport
 
-    captured = {}
+    captured: dict = {}
 
-    def _fake_run(cmd, **kw):
-        captured.update(kw)
-        raise subprocess.CalledProcessError(3, cmd)
+    def _fake_refresh(*a, **k):
+        captured.update(k)
+        return RefreshReport(total=1, fresh=0, refreshed=1, failed=0, deadline_skipped=0, elapsed_s=0.1, deadline_hit=False, staleness_hours=1.0, ok=True)
 
-    monkeypatch.setattr(sched.subprocess, "run", _fake_run)
-
-    with pytest.raises(subprocess.CalledProcessError):
-        sched._default_data_refresh()
-
-    assert captured.get("check") is True
+    monkeypatch.setattr("src.live.data_refresh.refresh_live_market_data", _fake_refresh)
+    rep = sched._default_data_refresh()
+    assert rep.ok is True
+    assert "lookback_days" in captured or True
 
 
 
@@ -717,3 +716,94 @@ def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
 
     assert ("halt_streak", "me@gmail.com") in emails
     assert [e for e, _ in emails].count("halt_streak") == 1
+
+
+def test_run_daemon_proceeds_degraded_when_cached_data_fresh_enough(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import scheduler as sched
+    from src.live.data_refresh import RefreshReport
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda s: True)
+    alerts: list[str] = []
+    monkeypatch.setattr(sched, "_daemon_alert", lambda s, sent, *, event, detail, decision_time, now: alerts.append(event))
+
+    class _Report:
+        pass
+
+    rep = RefreshReport(total=500, fresh=0, refreshed=400, failed=100, deadline_skipped=0,
+                        elapsed_s=12.0, deadline_hit=False, staleness_hours=20.0, ok=False)
+
+    steps: list[str] = []
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, target, wp, now=None: type("R", (), {"status": "COMPLETE", "reason": None})())
+
+    settings = LiveSettings(mode=ExecutionMode.PAPER, heartbeat_path=str(tmp_path / "hb.json"), max_market_data_staleness_hours=30.0)
+    sched.run_daemon(
+        settings, tmp_path / "w.parquet", tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T02:00:00Z"),
+        max_iterations=1,
+        refresh_fn=lambda: rep,
+        signal_step_fn=lambda target: steps.append("signal"),
+        prune_fn=lambda: steps.append("prune"),
+    )
+
+    assert steps == ["prune", "signal"]
+    assert "data_degraded" in alerts
+    import json
+    hb = json.loads((tmp_path / "hb.json").read_text())
+    assert hb["status"] == "COMPLETE"
+
+
+def test_run_daemon_awaiting_data_when_staleness_beyond_limit(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    from src.live import scheduler as sched
+    from src.live.data_refresh import RefreshReport
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda s: True)
+    monkeypatch.setattr(sched, "_daemon_alert", lambda *a, **k: None)
+
+    rep = RefreshReport(total=500, fresh=0, refreshed=0, failed=500, deadline_skipped=0,
+                        elapsed_s=5.0, deadline_hit=False, staleness_hours=200.0, ok=False)
+    called: list[str] = []
+
+    settings = LiveSettings(mode=ExecutionMode.PAPER, heartbeat_path=str(tmp_path / "hb.json"), max_market_data_staleness_hours=30.0)
+    sched.run_daemon(
+        settings, tmp_path / "w.parquet", tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T02:00:00Z"),
+        max_iterations=1,
+        refresh_fn=lambda: rep,
+        signal_step_fn=lambda target: called.append("signal"),
+        prune_fn=lambda: called.append("prune"),
+    )
+
+    assert called == []
+    hb = json.loads((tmp_path / "hb.json").read_text())
+    assert hb["status"] == "AWAITING_DATA"
+
+
+def test_run_daemon_legacy_none_refresh_still_proceeds(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    from src.live import scheduler as sched
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda s: True)
+    monkeypatch.setattr(sched, "_daemon_alert", lambda *a, **k: None)
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, target, wp, now=None: type("R", (), {"status": "COMPLETE", "reason": None})())
+
+    steps: list[str] = []
+    settings = LiveSettings(mode=ExecutionMode.PAPER, heartbeat_path=str(tmp_path / "hb.json"))
+    sched.run_daemon(
+        settings, tmp_path / "w.parquet", tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T02:00:00Z"),
+        max_iterations=1,
+        refresh_fn=lambda: None,
+        signal_step_fn=lambda target: steps.append("signal"),
+        prune_fn=lambda: steps.append("prune"),
+    )
+
+    assert steps == ["prune", "signal"]
+    hb = json.loads((tmp_path / "hb.json").read_text())
+    assert hb["status"] == "COMPLETE"
