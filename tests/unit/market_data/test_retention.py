@@ -108,3 +108,46 @@ def test_prune_orderbook_history_removes_only_old_dailies(tmp_path) -> None:
     remaining = sorted(p.name for p in tmp_path.glob("live_orderbook_*.parquet"))
     assert remaining == ["live_orderbook_20260815.parquet", "live_orderbook_20260830.parquet"]
     assert (tmp_path / "notes.txt").exists()
+
+
+def test_check_orderbook_prune_impending_detects_warning(tmp_path) -> None:
+    import pandas as pd
+    from src.market_data.retention import check_orderbook_prune_impending
+
+    # now: 2026-09-01, retention 365 days -> expiry of 2025-09-05 is 2026-09-05 (4 days left)
+    (tmp_path / "live_orderbook_20250905.parquet").write_bytes(b"x")
+    (tmp_path / "live_orderbook_20260801.parquet").write_bytes(b"x")
+
+    impending, days_left, earliest = check_orderbook_prune_impending(
+        tmp_path, 365, now=pd.Timestamp("2026-09-01", tz="UTC"), warning_days=7
+    )
+    assert impending is True
+    assert days_left == 4
+    assert earliest == "2025-09-05"
+
+
+def test_check_orderbook_prune_impending_false_when_safe(tmp_path) -> None:
+    import pandas as pd
+    from src.market_data.retention import check_orderbook_prune_impending
+
+    # now: 2026-09-01, retention 365 days -> expiry of 2026-01-01 is 2027-01-01 (122 days left)
+    (tmp_path / "live_orderbook_20260101.parquet").write_bytes(b"x")
+
+    impending, days_left, earliest = check_orderbook_prune_impending(
+        tmp_path, 365, now=pd.Timestamp("2026-09-01", tz="UTC"), warning_days=7
+    )
+    assert impending is False
+    assert days_left > 7
+    assert earliest == "2026-01-01"
+
+
+def test_check_orderbook_prune_impending_empty_dir(tmp_path) -> None:
+    import pandas as pd
+    from src.market_data.retention import check_orderbook_prune_impending
+
+    impending, days_left, earliest = check_orderbook_prune_impending(
+        tmp_path, 365, now=pd.Timestamp("2026-09-01", tz="UTC"), warning_days=7
+    )
+    assert impending is False
+    assert days_left == 0
+    assert earliest is None
