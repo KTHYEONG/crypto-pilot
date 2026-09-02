@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_REPORT_PAYLOAD_OPTIMIZE",
+      "date": "2026-09-02",
+      "adr_id": "ADR_20260902_MHS_REPORT_PAYLOAD_OPTIMIZE",
+      "domain": "research",
+      "title": "MHS Full 티어 report.json 페이로드 경량화 및 중복 직렬화 제거",
+      "why": "MHS Full 티어 백테스트 실행 시 to_payload()가 비대해진 시계열/매트릭스를 텍스트 JSON으로 직렬화하면서 report.json이 1.6GB까지 폭증하여 디스크 및 분석 메모리 비효율 발생",
+      "resolution": "_persist_mhs_report_full에 _stubbed_report_for_payload 및 _wire_full_refs를 적용하여 원시 시계열을 Parquet으로 일원화하고 JSON에는 메타데이터 및 체크섬만 보존하도록 개선",
+      "impact": "_full/report.json 크기 1.6GB에서 327KB로 99.98% 축소, 5대 Parquet 테이블 무손실 보존, Live 봇 암호화 배포 및 Docker CI/CD 완벽 호환"
+    },
+    {
       "task_id": "DAEMON_INCREMENTAL_REFRESH",
       "date": "2026-09-01",
       "adr_id": "ADR_20260901_DAEMON_INCREMENTAL_REFRESH",
@@ -989,16 +999,6 @@
       "why": "docs/results/mhs-res.md 17차 이후, 유동성 median-split(720h)/top-30 로스터/fast-slow horizon 탐색범위/앙상블 가중/fast 0% 배분의 근거를 코드분석으로 재검토 요청받음. fast_reversal의 0% 자본배분이 48h 단일밴드 prescreen에만 근거했고 slow에 이미 구축된 7-후보 fold-train-only leak-free 재검증 인프라가 fast엔 한번도 적용된 적 없음을 발견.",
       "resolution": "_FAST_BAND.horizons_hours를 48h 단일값에서 REVERSAL_HORIZON_CANDIDATES_HOURS=(24,48,72,96,120,144,168) 7-후보 그리드로 확장(contracts.py). request.fold_safe_horizon_selection 블록에 fast용 fold_train_only_discovery_qualification(sign=-1)을 slow와 나란히 배선하고 MhsFoldReport에 fast_horizon_hours/fast_horizon_source 필드 추가(evaluation.py). PHASE_1_BOOK_BLEND_WEIGHTS/실제 fast 리플레이·원장은 전혀 변경하지 않는 진단 전용 계약. 18차 실전 실행(--fold-safe-horizon)으로 검증: 3개 fold 전부 fast_horizon_source=frozen_default로 폴백 -- 넓은 그리드에서도 admission floor(|t|>=2.0) 통과 후보 없음.",
       "impact": "blend/primary 지표(primary_autocorr_sharpe=0.5257, CAGR 7.84%, stress_naive_sharpe=+0.1420) 17차와 소수점까지 바이트 동일 확인 -- 진단 전용 계약이 실측으로 증명됨. Q4('fast 탐색이 무의미한가')에 대해 '48h만 봐서 성급했다'는 가설을 leak-free 증거로 기각하고 edge 부재를 재확인. 다음 우선순위(CAPITAL_INVARIANT_BREACH 근본원인, fold1 원인조사, 로스터 N 재검증, 결합 파라미터 탐색)를 mhs-res.md §7에 정렬. /check PASS(lint/type/test, Impact Level 3)."
-    },
-    {
-      "task_id": "MHS_EXECUTION_ANNUALIZATION_FIX",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_EXECUTION_ANNUALIZATION_FIX",
-      "domain": "mhs",
-      "title": "MHS 실행 원장 연율화 버그 규명 및 수정",
-      "why": "16차(RC-1/RC-2 alpha-engine) 적용 후에도 primary_geometric_cagr가 0.00035→0.0063으로 사실상 0% 근처 정체 — 같은 원장의 primary_autocorr_sharpe는 0.18→0.53로 유의미하게 개선됐는데 왜 CAGR(자산증식 헤드라인)만 안 움직이는지 재조사 요청받음. _full/ledger.parquet 직접 검증으로 blend_primary 원장이 525,601행(5년×5분 격자)임을 확인했는데, _geometric_cagr/_naive_sharpe/_mean_ann/compute_deployment_readiness가 전부 하드코딩된 _PERIODS_PER_YEAR_1H(연 8,760, 1시간 격자 가정)를 그대로 적용해 연율화 지수가 정확히 12배(60분/5분) 축소되고 있었음을 규명. _daily_autocorr_sharpe/_mdd는 이미 일봉 리샘플·비율 기반이라 버그 없음 — Sharpe만 개선이 보이고 CAGR은 안 보였던 정확한 이유.",
-      "resolution": "신규 헬퍼 _hourly_ledger_series(equity, fill_turnover)가 (equity_1h, net_returns_1h, turnover_1h)를 반환하도록 추가(equity는 resample('1h').last(), turnover는 resample('1h').sum() — 회전율은 합산이 맞는 집계). _naive_sharpe는 시그니처 불변으로 내부에서 ledger.equity를 1시간 리샘플한 net_returns를 사용하도록 수정(8개 호출부 전부 무수정). _book_outcome/_run_anchored_fold의 primary_net_ann/primary_geometric_cagr/primary_annualized_turnover를 _hourly_ledger_series 결과로 교체, primary_max_drawdown/primary_autocorr_sharpe는 원본 원장 그대로 유지(빈도 무관이라 버그 없었음). _run_post_diag_deploy의 compute_deployment_readiness 호출도 이미 바로 위에서 계산되던 equity_1h를 재사용하도록 1줄 교체(부트스트랩 mean_block_bars=168의 '1주' 의미도 동시에 복원). 신호·비용·체결 로직은 전혀 무변경. 실전 재실행(17차, docs/results/mhs-res.md)으로 예측된 배율(CAGR 12.4x, naive Sharpe sqrt(12), MDD/autocorr Sharpe 무변화)이 정확히 실측 재현됨: CAGR 0.63%→7.84%, 30%+ 낙폭확률 62.65%→47.0%. Research GO 게이트(Sharpe 기반)는 버그 영향을 받지 않아 eligible=false 무변화.",
-      "impact": "research run portfolio mhs-horizon-diagnostic (모든 향후 실행의 CAGR/naive Sharpe/연율수익/연환산회전율/배포준비도 꼬리위험 수치가 이 수정의 영향을 받음); docs/results/mhs-res.md 17차 갱신"
     }
   ]
 }

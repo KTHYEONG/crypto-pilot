@@ -211,3 +211,33 @@ def test_emit_deployment_plaintext_when_no_key(tmp_path, caplog) -> None:
     assert res["sealed"] is False
     assert (tmp_path / "strategy_params.json").exists()
     assert any("PLAINTEXT" in r.message for r in caplog.records)
+
+
+def test_persist_mhs_report_full_lightweight_json_and_parquet(tmp_path: Path) -> None:
+    import json
+    from tests.unit.mhs.test_report_persist_compact import _build_report
+    from src.mhs.report.artifacts import load_mhs_replay_artifact
+
+    report, _ = _build_report(with_touch_ladder=True)
+    target = tmp_path / "mhs_horizon_diagnostic.json"
+    persisted = persist_mhs_report(report, target, tier=MhsOutputTier.FULL)
+    assert persisted == tmp_path / "mhs_horizon_diagnostic_artifacts" / "_full" / "report.json"
+    assert persisted.exists()
+
+    # JSON should be lightweight (under 100KB for test report, not bloated with raw series)
+    assert persisted.stat().st_size < 100 * 1024
+    payload = json.loads(persisted.read_text(encoding="utf-8"))
+    assert "checksum_sha256" in payload["artifacts"]["ledger"]
+    assert "checksum_sha256" in payload["artifacts"]["fills"]
+    assert "fast_reversal_primary" in payload["replay_ids"]
+
+    # Verify all 5 parquet files exist and load_mhs_replay_artifact works
+    artifact_dir = persisted.parent
+    for cat in ("fills", "units", "notional_weights", "ledger", "times"):
+        p = artifact_dir / f"{cat}.parquet"
+        assert p.exists()
+        loaded = load_mhs_replay_artifact(artifact_dir, "fast_reversal_primary", cat)
+        assert isinstance(loaded, pd.DataFrame)
+    loaded_ledger = load_mhs_replay_artifact(artifact_dir, "fast_reversal_primary", "ledger")
+    assert not loaded_ledger.empty
+    assert "equity" in loaded_ledger.columns
