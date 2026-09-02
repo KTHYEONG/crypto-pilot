@@ -226,3 +226,48 @@ def test_live_settings_accepts_gmail_alert_env(monkeypatch) -> None:
     assert settings.alert_gmail_app_password.get_secret_value() == "abcd efgh ijkl mnop"
     assert "abcd" not in repr(settings.alert_gmail_app_password)
     assert settings.alert_email_to == "me@gmail.com"
+
+
+def test_send_email_alert_orderbook_backup_impending(monkeypatch) -> None:
+    import pandas as pd
+    import src.live.alerting as a
+
+    captured = {}
+
+    class _FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, msg):
+            captured["subject"] = msg["Subject"]
+            captured["body"] = msg.get_content()
+
+    monkeypatch.setattr(a.smtplib, "SMTP", _FakeSMTP)
+
+    out = a.send_email_alert(
+        gmail_user="bot@gmail.com",
+        gmail_app_password="pw",
+        email_to="me@gmail.com",
+        event="orderbook_backup_impending",
+        detail="earliest_date=2025-09-05 days_left=4",
+        decision_time=None,
+        now=pd.Timestamp("2026-09-01T01:00:00", tz="UTC"),
+    )
+
+    assert out is True
+    assert "백업 권장" in captured["subject"]
+    assert "orderbook_backup_impending" in captured["subject"]
+    assert "rsync" in captured["body"]
+    assert "earliest_date=2025-09-05" in captured["body"]

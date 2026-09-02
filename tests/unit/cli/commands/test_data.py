@@ -285,6 +285,35 @@ def test_prune_live_data_cli_dispatches_both_prunes(monkeypatch) -> None:
     assert calls == ["market", "orderbook"]
 
 
+def test_prune_live_data_sends_backup_alert_and_creates_marker(tmp_path, monkeypatch) -> None:
+    import argparse
+    import src.cli.commands.data as data_mod
+
+    alerts: list[dict] = []
+    monkeypatch.setattr("src.live.orderbook.default_orderbook_dir", lambda: tmp_path)
+    monkeypatch.setattr("src.market_data.retention.prune_market_data", lambda *a, **k: {})
+    monkeypatch.setattr("src.market_data.retention.prune_orderbook_history", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        "src.market_data.retention.check_orderbook_prune_impending",
+        lambda *a, **k: (True, 5, "2025-09-05"),
+    )
+    monkeypatch.setattr(
+        "src.live.alerting.send_email_alert",
+        lambda **k: alerts.append(k) or True,
+    )
+
+    data_mod._prune_live_data(argparse.Namespace())
+
+    assert len(alerts) == 1
+    assert alerts[0]["event"] == "orderbook_backup_impending"
+    assert "earliest_date=2025-09-05" in alerts[0]["detail"]
+    assert (tmp_path / ".backup_alert_20250905").exists()
+
+    # Second call should deduplicate via marker
+    data_mod._prune_live_data(argparse.Namespace())
+    assert len(alerts) == 1
+
+
 def test_seed_cloud_and_prune_live_data_subcommands_registered() -> None:
     import argparse
     import src.cli.commands.data as data_mod
