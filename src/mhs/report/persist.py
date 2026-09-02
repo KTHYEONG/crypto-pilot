@@ -459,12 +459,13 @@ def _persist_mhs_report_full(
     """
     artifact_root = target.parent / f"{target.stem}_artifacts" / "_full"
     artifact_root.mkdir(parents=True, exist_ok=True)
-    payload = report.to_payload()
     replay_entries = _collect_replay_entries(report)
 
     tables_by_replay: dict[str, dict[str, pd.DataFrame]] = {}
+    row_counts: dict[str, dict[str, int]] = {}
     for replay_id, replay in replay_entries:
         tables_by_replay[replay_id] = _build_replay_category_tables(replay)
+        row_counts[replay_id] = _replay_category_row_counts(replay)
 
     unified_tables = _write_unified_artifact_tables(tables_by_replay, artifact_root)
 
@@ -489,23 +490,11 @@ def _persist_mhs_report_full(
         for replay_id, replay in replay_entries
     }
 
-    for book_name, book_report in report.books.items():
-        book_payload = payload["books"][book_name]
-        if book_report.primary is not None:
-            book_payload["primary"] = replay_references[f"{book_name}_primary"]
-        if book_report.stress is not None:
-            book_payload["stress"] = replay_references[f"{book_name}_stress"]
-    if report.blend is not None:
-        if report.blend.primary is not None:
-            payload["blend"]["primary"] = replay_references["blend_primary"]
-        if report.blend.stress is not None:
-            payload["blend"]["stress"] = replay_references["blend_stress"]
-    for fold_report in report.folds:
-        fold_payload = payload["folds"][fold_report.fold_index]
-        if fold_report.strict is not None:
-            fold_payload["strict"] = replay_references[f"fold{fold_report.fold_index}_strict"]
-        if fold_report.stress is not None:
-            fold_payload["stress"] = replay_references[f"fold{fold_report.fold_index}_stress"]
+    # The stubbed copy never lets _jsonable expand heavy Series/DataFrames: every
+    # replay field is None before to_payload() runs, then full artifact references
+    # (with checksums & row bounds) are wired over the null keys.
+    payload = _stubbed_report_for_payload(report, row_counts).to_payload()
+    _wire_full_refs(payload, report, replay_entries, replay_references)
 
     payload["artifacts"] = {
         category: _artifact_reference(frame, path)
@@ -548,13 +537,13 @@ def _compact_replay_ref(row_counts: dict[str, int]) -> dict[str, dict[str, int]]
     return {category: {"row_count": row_counts[category]} for category in ARTIFACT_CATEGORIES}
 
 
-def _wire_compact_refs(
+def _wire_replay_refs(
     payload: Any,
     report: MhsHorizonDiagnosticReport,
     replay_entries: list[tuple[str, StrategyExecutionReplayResult]],
-    row_counts: dict[str, dict[str, int]],
+    refs_by_replay: dict[str, Any],
 ) -> None:
-    """Replace verbose per-replay artifact references with row-count stubs."""
+    """Wire per-replay artifact references (compact or full) into the payload."""
     # Longest-suffix match so underscore-bearing field names
     # (patient_reference, pre_vol_target_reference) split correctly.
     field_names = {
@@ -565,7 +554,7 @@ def _wire_compact_refs(
     }
     ordered_suffixes = sorted(field_names, key=len, reverse=True)
     for replay_id, _replay in replay_entries:
-        ref = _compact_replay_ref(row_counts[replay_id])
+        ref = refs_by_replay[replay_id]
         for suffix in ordered_suffixes:
             tag = f"_{suffix}"
             if not replay_id.endswith(tag):
@@ -580,6 +569,30 @@ def _wire_compact_refs(
             payload["folds"][int(container_name[len("fold"):])][suffix] = ref
         else:
             payload["books"][container_name][suffix] = ref
+
+
+def _wire_compact_refs(
+    payload: Any,
+    report: MhsHorizonDiagnosticReport,
+    replay_entries: list[tuple[str, StrategyExecutionReplayResult]],
+    row_counts: dict[str, dict[str, int]],
+) -> None:
+    """Replace verbose per-replay artifact references with row-count stubs."""
+    refs = {
+        replay_id: _compact_replay_ref(row_counts[replay_id])
+        for replay_id, _ in replay_entries
+    }
+    _wire_replay_refs(payload, report, replay_entries, refs)
+
+
+def _wire_full_refs(
+    payload: Any,
+    report: MhsHorizonDiagnosticReport,
+    replay_entries: list[tuple[str, StrategyExecutionReplayResult]],
+    replay_references: dict[str, Any],
+) -> None:
+    """Replace per-replay artifact references with full unified artifact references."""
+    _wire_replay_refs(payload, report, replay_entries, replay_references)
 
 
 def _persist_mhs_report_compact(
