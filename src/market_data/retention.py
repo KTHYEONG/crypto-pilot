@@ -94,3 +94,40 @@ def prune_orderbook_history(
             p.unlink()
             removed += 1
     return removed
+
+
+def check_orderbook_prune_impending(
+    orderbook_dir: Path,
+    retention_days: int,
+    *,
+    now: pd.Timestamp,
+    warning_days: int = 7,
+) -> tuple[bool, int, str | None]:
+    """Check if any orderbook history files are within warning_days of being pruned.
+
+    Returns (is_impending, days_left, earliest_date_str).
+    """
+    if retention_days < 1:
+        raise ValueError("orderbook_retention_days must be >= 1")
+    d = Path(orderbook_dir)
+    if not d.is_dir():
+        return False, 0, None
+    tags: list[str] = []
+    for p in d.glob("live_orderbook_*.parquet"):
+        tag = p.stem.removeprefix("live_orderbook_")
+        if len(tag) == 8 and tag.isdigit():
+            tags.append(tag)
+    if not tags:
+        return False, 0, None
+
+    earliest_tag = min(tags)
+    earliest_dt = pd.Timestamp(earliest_tag, tz="UTC")
+    t_now = pd.Timestamp(now)
+    now_utc = t_now.tz_localize("UTC") if t_now.tzinfo is None else t_now.tz_convert("UTC")
+
+    expiry_dt = earliest_dt + pd.Timedelta(days=retention_days)
+    days_left = int((expiry_dt - now_utc).total_seconds() // 86400)
+
+    if 0 <= days_left <= warning_days:
+        return True, days_left, earliest_dt.strftime("%Y-%m-%d")
+    return False, max(0, days_left), earliest_dt.strftime("%Y-%m-%d")
