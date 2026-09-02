@@ -222,6 +222,7 @@ def compute_signal_row(
         slow_horizon_override=int(params.slow_horizon_hours),
         committee_member_weights=dict(params.committee_member_weights),
         deadband_seed_row=seed_row,
+        require_minute_roster=False,
     )
     if dt not in target_weights.index:
         del grid_1h

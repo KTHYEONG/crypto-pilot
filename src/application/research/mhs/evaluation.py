@@ -3176,6 +3176,7 @@ def _build_fold_target_weights(
     committee_member_weights: dict[str, float] | None = None,
     *,
     deadband_seed_row: pd.Series | None = None,
+    require_minute_roster: bool = True,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Construct one fold's PIT decision targets with the quality calibration.
 
@@ -3394,7 +3395,9 @@ def _build_fold_target_weights(
         s for s in execution_symbols
         if os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
     ]
-    if not minute_roster:
+    # 라이브 경로는 target weights만 emit하고 분단위 실행 리플레이를 하지 않으므로
+    # minute roster 불변식은 백테스트(replay) 경로에서만 강제한다.
+    if require_minute_roster and not minute_roster:
         raise RuntimeError("no fold decision symbol has minute execution data")
     signal_available_at = target_weights.index + pd.Timedelta(hours=1)
     return target_weights, signal_available_at, minute_roster, grid_1h
