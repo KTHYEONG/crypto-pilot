@@ -217,14 +217,46 @@ def _prune_live_data(args: argparse.Namespace) -> None:
     import pandas as pd
 
     from src.common.config import FUTURES_DATA_DIR
+    from src.live.alerting import send_email_alert
     from src.live.orderbook import default_orderbook_dir
     from src.live.settings import LiveSettings
-    from src.market_data.retention import prune_market_data, prune_orderbook_history
+    from src.market_data.retention import (
+        check_orderbook_prune_impending,
+        prune_market_data,
+        prune_orderbook_history,
+    )
 
     s = LiveSettings()
     now = pd.Timestamp.now(tz="UTC")
     md = prune_market_data(FUTURES_DATA_DIR, s.data_retention_days, now=now)
-    ob = prune_orderbook_history(default_orderbook_dir(), s.orderbook_retention_days, now=now)
+    ob_dir = default_orderbook_dir()
+
+    try:
+        is_impending, days_left, earliest_date = check_orderbook_prune_impending(
+            ob_dir, s.orderbook_retention_days, now=now, warning_days=7
+        )
+        if is_impending and earliest_date is not None:
+            marker = ob_dir / f".backup_alert_{earliest_date.replace('-', '')}"
+            if not marker.exists():
+                sent = send_email_alert(
+                    gmail_user=s.alert_gmail_user,
+                    gmail_app_password=(
+                        s.alert_gmail_app_password.get_secret_value()
+                        if s.alert_gmail_app_password is not None
+                        else None
+                    ),
+                    email_to=s.alert_email_to,
+                    event="orderbook_backup_impending",
+                    detail=f"earliest_date={earliest_date} days_left={days_left}",
+                    decision_time=None,
+                    now=now,
+                )
+                if sent:
+                    marker.write_text(f"alerted_at={now.isoformat()}\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("[DATA] orderbook backup alert check failed: %s", exc)
+
+    ob = prune_orderbook_history(ob_dir, s.orderbook_retention_days, now=now)
     _logger.info("[DATA] stage=prune_live_data market=%s orderbook_files_removed=%d", md, ob)
 
 
