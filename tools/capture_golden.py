@@ -129,12 +129,12 @@ def _write_mhs_market(
 
 
 def main() -> None:
-    import src.application.research.mhs.marks as marks
-    import src.application.research.mhs.statistics as statistics
+    import src.mhs.marks as marks
+    import src.mhs.statistics as statistics
     import src.market_data.services.futures_collection as fc
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
-    from src.application.research.mhs.evaluation import run_mhs_horizon_diagnostic
-    from src.research.universe.pit_universe import symbol_partition
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+    from src.quant.universe.pit_universe import symbol_partition
 
     START = pd.Timestamp("2021-01-01", tz="UTC")
     DEV_SYMBOLS = [

@@ -36,8 +36,8 @@ def run_instrumented_baseline(
     externally sampled ``_TreeMemorySampler`` when it observed any sample,
     falling back to the report-attached stats otherwise.
     """
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
-    from src.application.research.mhs.resources import _TreeMemorySampler
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.resources import _TreeMemorySampler
     from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
