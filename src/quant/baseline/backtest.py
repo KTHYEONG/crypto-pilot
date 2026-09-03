@@ -7,7 +7,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.logging import setup_logger
-from src.research.contracts import CostModel, StrategySpec
+from src.quant.contracts import CostModel, StrategySpec
 
 _logger = setup_logger("Backtest")
 
@@ -103,7 +103,7 @@ def run_backtest(
     signal_delay_bars: int = 0,
     funding_rates: pd.Series | None = None,
 ) -> BacktestResult:
-    from src.research.baseline.signal import generate_signals
+    from src.quant.baseline.signal import generate_signals
 
     if signal_delay_bars < 0:
         raise ValueError(f"signal_delay_bars must be >= 0, got {signal_delay_bars}")
@@ -321,7 +321,7 @@ def _run_directional_engine(
     combined ledger never nets independent component returns and never re-enters
     on the same bar.
     """
-    from src.research.baseline.signal import generate_directional_funding_signals
+    from src.quant.baseline.signal import generate_directional_funding_signals
 
     if side not in (None, "long", "short"):
         raise ValueError(f"side must be one of None/'long'/'short', got {side}")

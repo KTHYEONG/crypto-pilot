@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import SecretStr
 
-from src.common.config import DATA_DIR
+from src.common.paths import DATA_DIR
 from src.common.errors import DataIntegrityError
 from src.live.errors import StaleSignalError, ArtifactSealError
 

@@ -8,7 +8,8 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.config import (
+from src.common.errors import DataIntegrityError
+from src.common.paths import (
     FUTURES_DATA_DIR,
     bookdepth_path,
     funding_path,
@@ -16,7 +17,6 @@ from src.common.config import (
     metrics_path,
     ohlcv_path,
 )
-from src.common.errors import DataIntegrityError
 from src.market_data.binance.futures import BinanceClient, BinanceKlinePermanentError
 from src.market_data.binance.vision import BinanceVisionDownloader, fetch_metrics_bulk
 from src.market_data.storage.ohlcv import write_ohlcv

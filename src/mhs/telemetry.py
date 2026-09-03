@@ -18,11 +18,7 @@ from pathlib import Path
 
 import psutil
 
-from src.common.config import BASE_DIR
-from src.common.logging import setup_logger
-
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+from src.common.logging import LOG_DIR, setup_logger
 
 _MAX_SEQUENCE_ITEMS = 5
 

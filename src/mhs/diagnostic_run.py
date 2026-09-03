@@ -6,13 +6,13 @@ import time
 
 import pandas as pd
 
-from src.application.research.mhs.contracts import MhsDiagnosticRequest, MhsHorizonDiagnosticReport
-from src.application.research.mhs.marks import _get_symbol_mark_frame
+from src.mhs.contracts import MhsDiagnosticRequest, MhsHorizonDiagnosticReport
+from src.mhs.marks import _get_symbol_mark_frame
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.runner import run_stages
 from src.mhs.telemetry import StageTelemetry
 from src.mhs.types import DISCOVERY_START
-from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
 
 
 def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagnosticReport:

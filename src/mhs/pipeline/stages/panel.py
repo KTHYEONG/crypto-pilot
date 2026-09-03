@@ -3,7 +3,7 @@
 Extracted verbatim from ``evaluation.py`` lines 3532-3610 (load_base_panel
 call, funding series load/align, the base_1h_panel and funding_alignment
 ``telemetry.record`` + ``[DATA]`` ``debug_log.log`` calls, and the
-``_guard_stage_or_breach`` calls at both checkpoints).
+``guards._guard_stage_or_breach`` calls at both checkpoints).
 
 Byte-identity (I-IDENTITY-v2): every local in the source block is threaded
 through ``ctx``; ``request`` -> ``ctx.config``, ``debug_log`` -> the
@@ -13,16 +13,16 @@ through ``ctx``; ``request`` -> ``ctx.config``, ``debug_log`` -> the
 
 from __future__ import annotations
 
-from src.application.research.mhs.evaluation import (
+from src.mhs.evaluation import (
     FUTURES_DATA_DIR,
     SOURCE_GAP_EXCLUDED_SYMBOLS,
     bar_funding_panel,
+    guards,
     load_base_panel,
 )
-from src.application.research.mhs.marks import _load_funding_series
-from src.application.research.mhs.resources import _resolve_ram_budget, _StageRecorder
-from src.application.research.mhs.stage_services import _guard_stage_or_breach
+from src.mhs.marks import _load_funding_series
 from src.mhs.pipeline.context import PipelineContext
+from src.mhs.resources import _resolve_ram_budget, _StageRecorder
 from src.mhs.telemetry import StageTelemetry, Tag
 
 
@@ -56,7 +56,7 @@ def load_panel(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         grid_start=str(ctx.grid_1h[0]), grid_end=str(ctx.grid_1h[-1]),
         symbols=sorted(ctx.symbols),
     )
-    _terminal = _guard_stage_or_breach(
+    _terminal = guards._guard_stage_or_breach(
         "base_1h_panel", ctx.rss_budget_bytes, ctx.rss_reserve_bytes,
         ctx.config, ctx.recorder, str(ctx.resolved_end), str(ctx.start), str(ctx.end),
     )
@@ -101,7 +101,7 @@ def load_panel(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         Tag.DATA, "funding_alignment",
         aligned_symbols=len(ctx.aligned_symbols), dropped=sorted(ctx.funding_dropped),
     )
-    _terminal = _guard_stage_or_breach(
+    _terminal = guards._guard_stage_or_breach(
         "funding_alignment", ctx.rss_budget_bytes, ctx.rss_reserve_bytes,
         ctx.config, ctx.recorder, str(ctx.resolved_end), str(ctx.start), str(ctx.end),
     )

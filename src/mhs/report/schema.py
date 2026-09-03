@@ -12,19 +12,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.application.research.mhs.contracts import (
+    from src.mhs.contracts import (
         MhsBookReport,
         MhsFoldReport,
         MhsResearchGoResult,
         MhsResourceMeasurement,
     )
-    from src.application.research.mhs.resources import ProcessTreeMemoryStats
     from src.mhs.discovery import DiscoveryQualificationResult
     from src.mhs.evidence import (
         AnchoredPurgedFold,
         DeploymentReadinessResult,
         DsrDecomposition,
     )
+    from src.mhs.resources import ProcessTreeMemoryStats
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +32,7 @@ class MhsHorizonDiagnosticReport:
     """Top-level MHS Phase 1 diagnostic report.
 
     Canonical definition (P1): moved out of
-    ``src.application.research.mhs.contracts``, which now re-exports this
+    ``src.mhs.contracts``, which now re-exports this
     class so every existing ``from ... import MhsHorizonDiagnosticReport``
     import path keeps working unchanged.
     """

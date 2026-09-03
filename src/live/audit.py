@@ -10,7 +10,7 @@ from typing import Any, TextIO
 
 import pandas as pd
 
-from src.common.config import BASE_DIR
+from src.common.paths import BASE_DIR
 
 #: 감사 로그가 허용되는 유일한 프로젝트 하위 루트(외부 /tmp 금지).
 AUDIT_LOG_ROOT = BASE_DIR / "logs"

@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsDiagnosticRequest,
     MhsFoldReport,
     MhsResearchGoResult,
