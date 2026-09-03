@@ -16,7 +16,7 @@ priority: 9
 - **Typing Standard:** Preserve the repository's existing typing level; strengthen type annotations in changed interfaces.
 - **Modern Syntax:** Use modern Python 3.11+ syntax (`asyncio.TaskGroup`, `|` union type, `Self`, etc.) when it improves code clarity or correctness.
 - **Configuration:** Manage settings via environment variables (`.env`) and `pydantic-settings`.
-- **Directory Isolation:** `tools/agent_skills/` is strictly for verification/sync tooling. All production logic must reside in `src/`.
+- **Directory Isolation:** `tools/agent_skills/` is strictly for verification/sync tooling. All production logic must reside in `src/`. `src/mhs/` is the strategy tree; `src/quant/` is the shared primitive library.
 
 ## 3. Structural Design & Scope Hygiene
 - **Modularity:** Target cohesive modules. Split when distinct architectural layers (e.g. DB, business logic, DTO mapping) become mixed.
