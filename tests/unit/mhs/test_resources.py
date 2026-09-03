@@ -9,7 +9,7 @@ import time
 import psutil
 import pytest
 
-from src.application.research.mhs import resources
+from src.mhs import resources
 from src.common.errors import DataIntegrityError
 
 

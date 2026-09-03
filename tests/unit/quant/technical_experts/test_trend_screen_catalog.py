@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.research.technical_experts.catalog import (
+from src.quant.technical_experts.catalog import (
     TECHNICAL_CANDIDATES,
     TECHNICAL_EXPERT_FAMILIES,
 )
-from src.research.technical_experts.trend_screen_catalog import (
+from src.quant.technical_experts.trend_screen_catalog import (
     DISCOVERY_END,
-    DISCOVERY_START,
     QUALIFICATION_END,
     QUALIFICATION_START,
+    TREND_SCREEN_DISCOVERY_START,
     TREND_SCREEN_CANDIDATES,
     TREND_SCREEN_FAMILIES,
     TREND_SCREEN_PROFILE_ID,
@@ -64,7 +64,7 @@ class TestTrendScreenCatalog:
 
     def test_profile_windows_are_chronological_and_sealed(self) -> None:
         assert TREND_SCREEN_PROFILE_ID == "baseline_gate_performance_v1"
-        assert DISCOVERY_START < DISCOVERY_END < QUALIFICATION_START < QUALIFICATION_END
+        assert TREND_SCREEN_DISCOVERY_START < DISCOVERY_END < QUALIFICATION_START < QUALIFICATION_END
         assert QUALIFICATION_END.normalize() + pd.Timedelta(days=1) > QUALIFICATION_END
         assert QUALIFICATION_END.year == 2025
 
@@ -72,7 +72,7 @@ class TestTrendScreenCatalog:
         # SCENARIO_MHS_GAP_HARDENING_05: QUALIFICATION_END must be the very
         # object as policy.HOLDOUT_CUTOFF -- a regression guard against the two
         # independently-typed literals silently diverging again.
-        from src.research.evaluation.policy import HOLDOUT_CUTOFF
+        from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
         assert QUALIFICATION_END is HOLDOUT_CUTOFF
         assert pd.Timestamp("2025-12-31 23:59:59", tz="UTC") == QUALIFICATION_END

@@ -8,14 +8,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.marks as marks
-import src.application.research.mhs.marks as mhs_marks
-import src.application.research.mhs.statistics as statistics
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+import src.mhs.marks as marks
+import src.mhs.marks as mhs_marks
+import src.mhs.statistics as statistics
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
     MhsHorizonDiagnosticReport,
-    run_mhs_horizon_diagnostic,
 )
 
 from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
@@ -32,7 +32,7 @@ class TestTypedArtifactRoundtrip:
     NaN-equity concealment."""
 
     def test_ledger_and_times_round_trip_as_utc(self, report, tmp_path) -> None:
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             MhsOutputTier,
             load_mhs_replay_artifact,
             persist_mhs_horizon_diagnostic_report,
@@ -68,7 +68,7 @@ class TestTypedArtifactRoundtrip:
     def test_json_reference_carries_schema_and_checksum(self, report, tmp_path) -> None:
         import json
 
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             MhsOutputTier,
             load_mhs_replay_artifact,
             persist_mhs_horizon_diagnostic_report,
@@ -96,7 +96,7 @@ class TestTypedArtifactRoundtrip:
         assert len(roundtrip) == ledger_ref["row_count"]
 
     def test_empty_replay_artifacts_round_trip(self, tmp_path) -> None:
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             _build_replay_category_tables,
             _write_unified_artifact_tables,
             load_mhs_replay_artifact,
@@ -125,7 +125,7 @@ class TestTypedArtifactRoundtrip:
     def test_completed_fold_artifacts_persisted(self, report, tmp_path) -> None:
         from dataclasses import replace
 
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             GO_REASON_UNSPECIFIED_POLICY,
             MhsFoldReport,
             MhsOutputTier,
@@ -183,7 +183,7 @@ class TestFullModeBackwardCompat:
         # FULL_MODE_BACKWARD_COMPAT
         import pandas as pd
 
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             MhsOutputTier,
             persist_mhs_horizon_diagnostic_report,
         )
@@ -473,10 +473,10 @@ class TestMhsRefactorBitIdenticalReport:
     dedup, byte-budgeted window materialization, dead-cache removal) must
     never alter a computed field of ``MhsHorizonDiagnosticReport``. The
     synthetic-market full pipeline is compared bit-identically to the
-    pre-refactor golden payload (docs/results/mhs_refactor_baseline.json,
+    pre-refactor golden payload (tests/fixtures/golden/mhs_refactor_baseline.json,
     generated from the pre-refactor commit)."""
 
-    _GOLDEN = Path(__file__).resolve().parents[3] / "docs" / "results" / "mhs_refactor_baseline.json"
+    _GOLDEN = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "golden" / "mhs_refactor_baseline.json"
 
     @pytest.fixture(scope="module")
     def refactor_report(self, synthetic_market) -> MhsHorizonDiagnosticReport:

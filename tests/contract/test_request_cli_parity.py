@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 
-from src.application.research.mhs.evaluation import MhsDiagnosticRequest
+from src.mhs.evaluation import MhsDiagnosticRequest
 from src.cli.commands.research.mhs import add_mhs_commands
 from src.cli.dataclass_args import build_parser_from_dataclass
 
@@ -39,6 +39,9 @@ def _mhs_cli_flags() -> set[str]:
     # 연구-라이브 seam 스위치: 완료된 리포트를 사후 소비할 뿐 요청 필드가 아니다.
     flags.discard("--emit-target-weights")
     flags.discard("--emit-signal-state")
+    # 배포 후처리 사이드 이펙트 스위치: 완료된 리포트를 소비할 뿐 요청 필드가 아니다.
+    flags.discard("--emit-deployment")
+    flags.discard("--deploy-push")
     return flags
 
 

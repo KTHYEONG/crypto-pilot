@@ -8,15 +8,16 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.statistics as statistics
-import src.application.research.mhs.research_go as _research_go
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.statistics as statistics
+import src.mhs.research_go as _research_go
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
 from src.mhs.types import ExecutionSpec
 from src.mhs.execution import strategy_aware_execution_replay
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
     _assert_books_equal,
@@ -220,7 +221,7 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, discovery_gate=True,
     )
-    report_on = ev.run_mhs_horizon_diagnostic(request_on)
+    report_on = run_mhs_horizon_diagnostic(request_on)
     assert report_on.status == "COMPLETE"
     slow_n_eff = report_on.horizon_diagnostics.get("slow_horizon_effective_breadth")
     fast_n_eff = report_on.horizon_diagnostics.get("fast_horizon_effective_breadth")
@@ -236,7 +237,7 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
     )
-    report_off = ev.run_mhs_horizon_diagnostic(request_off)
+    report_off = run_mhs_horizon_diagnostic(request_off)
     assert report_off.status == "COMPLETE"
     assert "slow_horizon_effective_breadth" not in report_off.horizon_diagnostics
     assert "fast_horizon_effective_breadth" not in report_off.horizon_diagnostics

@@ -12,10 +12,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.mhs import evaluation as ev
-from src.application.research.mhs import marks
+from src.mhs import evaluation as ev
+from src.mhs import marks
 from src.mhs import params
-from src.application.research.mhs.evaluation import (
+from src.mhs.evaluation import (
     GO_REASON_INVALID_PRIMARY,
     GO_REASON_RESOURCE_BREACH,
     MhsDiagnosticRequest,
@@ -23,12 +23,12 @@ from src.application.research.mhs.evaluation import (
     _run_anchored_fold,
     _verify_ledger_artifact,
 )
-from src.application.research.mhs.scaling import (
+from src.mhs.scaling import (
     _apply_rebalance_deadband,
     _regime_cash_scale,
     _smooth_signal_ema,
 )
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
 START = pd.Timestamp("2021-01-01", tz="UTC")
 N_HOURS = 3000

@@ -6,11 +6,12 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.resources as resources
-import src.application.research.mhs.scaling as scaling
-import src.application.research.mhs.research_go as _research_go
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.resources as resources
+import src.mhs.scaling as scaling
+import src.mhs.research_go as _research_go
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
     _assert_cache_required_marks,
     _iter_mhs_execution_windows,
@@ -18,8 +19,8 @@ from src.application.research.mhs.evaluation import (
 )
 from src.common.errors import DataIntegrityError
 from src.mhs.types import ExecutionSpec
-from src.research.universe.pit_universe import symbol_partition
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from src.quant.universe.pit_universe import symbol_partition
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
     _assert_books_equal,
@@ -250,7 +251,7 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert "vol_mean" in captured, "top-level diagnostic must feed _regime_cash_scale its vol_mean"
 
@@ -332,7 +333,7 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=universe_size,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert report.realized_execution_roster_size is not None
     assert np.isfinite(report.realized_execution_roster_size)
@@ -369,7 +370,7 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
     monkeypatch.setattr(
         ev, "_pit_execution_mask", lambda qv, el, usz: retention_mask,
     )
-    retention_report = ev.run_mhs_horizon_diagnostic(request)
+    retention_report = run_mhs_horizon_diagnostic(request)
     assert retention_report.realized_execution_roster_size == pytest.approx(retention_mean)
     assert retention_report.realized_execution_roster_size > universe_size
 
@@ -497,6 +498,8 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
     # blocking the other two books.
     args = _build_books_concurrent_args(mhs_market)
     real = ev._book_outcome
+    import src.mhs.evaluation.windows as windows_mod
+    real_windows = windows_mod._book_outcome
 
     def _failing(name, *a, **k):
         report, traces = real(name, *a, **k)
@@ -520,7 +523,30 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
             ), traces
         return report, traces
 
+    def _failing_windows(name, *a, **k):
+        report, traces = real_windows(name, *a, **k)
+        if name == "slow_momentum":
+            return dataclasses.replace(
+                report,
+                primary=None, stress=None,
+                primary_autocorr_sharpe=None,
+                primary_naive_sharpe=None,
+                primary_net_ann=None,
+                primary_geometric_cagr=None,
+                primary_max_drawdown=None,
+                primary_annualized_turnover=None,
+                stress_naive_sharpe=None,
+                failure=ev.MhsBookFailure(
+                    stage="replay_slow_momentum",
+                    error_class="DataIntegrityError",
+                    reason=ev.GO_REASON_EXECUTION_GAP,
+                    message="forced isolation failure",
+                ),
+            ), traces
+        return report, traces
+
     monkeypatch.setattr(ev, "_book_outcome", _failing)
+    monkeypatch.setattr(windows_mod, "_book_outcome", _failing_windows)
     fast, slow, blend, _, _ = ev._run_books_concurrent(**args)
     assert fast.primary is not None
     assert fast.failure is None
@@ -586,7 +612,7 @@ def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.committee_diagnostic
     assert diag["walk_forward"]["block_edges"][0] == ev.COMMITTEE_OOS_START.isoformat()
@@ -627,7 +653,7 @@ def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -
     )
     assert ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR not in completed_fold.failures
 
-    from src.application.research.mhs import research_go as _research_go_module
+    from src.mhs import research_go as _research_go_module
 
     low_return_evidence = {
         "n_measured_folds": 4,
@@ -753,7 +779,7 @@ class TestCommitteeMemberAttribution:
     """Tests for _committee_member_attribution proxy_vs_ledger_rank_spearman."""
 
     def test_perfect_correlation(self) -> None:
-        from src.application.research.mhs.evaluation import _committee_member_attribution
+        from src.mhs.evaluation import _committee_member_attribution
         ledger_sharpes = {"a": 3.0, "b": 2.0, "c": 1.0}
         proxy_sharpes = {"a": 3.0, "b": 2.0, "c": 1.0}
         result = _committee_member_attribution({}, proxy_sharpes)
@@ -761,14 +787,14 @@ class TestCommitteeMemberAttribution:
         assert result["proxy_vs_ledger_rank_spearman"] is None
 
     def test_empty_reports_yields_none_spearman(self) -> None:
-        from src.application.research.mhs.evaluation import _committee_member_attribution
+        from src.mhs.evaluation import _committee_member_attribution
         result = _committee_member_attribution({}, {"a": 1.0})
         assert result["proxy_vs_ledger_rank_spearman"] is None
         assert result["members"] == {}
         assert result["daily_return_correlation"] == {}
 
     def test_fewer_than_three_shared_yields_none(self) -> None:
-        from src.application.research.mhs.evaluation import _committee_member_attribution
+        from src.mhs.evaluation import _committee_member_attribution
         # Only 2 shared members < 3 threshold
         result = _committee_member_attribution({}, {"a": 1.0, "b": 2.0})
         assert result["proxy_vs_ledger_rank_spearman"] is None
@@ -789,8 +815,8 @@ def test_committee_member_attribution_observational_only(mhs_market_with_taker_b
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_capital=True,
     )
-    off = ev.run_mhs_horizon_diagnostic(base)
-    on = ev.run_mhs_horizon_diagnostic(
+    off = run_mhs_horizon_diagnostic(base)
+    on = run_mhs_horizon_diagnostic(
         dataclasses.replace(base, committee_member_attribution=True),
     )
     assert off.status == "COMPLETE"
@@ -805,6 +831,6 @@ def test_committee_member_attribution_observational_only(mhs_market_with_taker_b
     assert on.fold_growth_concentration == off.fold_growth_concentration
 
     assert on.committee_member_attribution is not None
-    from src.application.research.mhs.research_go import _resolved_committee_members
+    from src.mhs.research_go import _resolved_committee_members
     expected_members = set(_resolved_committee_members(base))
     assert set(on.committee_member_attribution["members"]) == expected_members

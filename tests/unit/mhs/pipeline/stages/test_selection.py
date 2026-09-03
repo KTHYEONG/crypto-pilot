@@ -8,6 +8,8 @@ existing evaluation/golden-identity suites; this isolates the opt-in wiring.
 """
 
 from __future__ import annotations
+import src.mhs.evaluation.folds as folds_mod
+import src.mhs.evaluation.books as books_mod
 
 import dataclasses
 
@@ -56,7 +58,7 @@ def test_select_horizons_reaches_fold_safe_discovery_via_seam(
     monkeypatch.setattr(
         selection_stage,
         "_fill_mark_parity_eligibility",
-        lambda close, eligible, _gate: (eligible, None),
+        lambda close, eligible, _gate: (eligible, None), raising=False
     )
 
     calls: list[str] = []
@@ -69,10 +71,12 @@ def test_select_horizons_reaches_fold_safe_discovery_via_seam(
         calls.append("_run_fold_safe_discovery_parallel")
         return ({2: 168}, {2: (48, "raw")}, {2: (None, None, "raw", None)})
 
-    monkeypatch.setattr(selection_stage, "_candidate_weight_books", _fake_candidate_weight_books)
+    monkeypatch.setattr(selection_stage, "_candidate_weight_books", _fake_candidate_weight_books, raising=False)
+    monkeypatch.setattr(books_mod, "_candidate_weight_books", _fake_candidate_weight_books, raising=False)
     monkeypatch.setattr(
-        selection_stage, "_run_fold_safe_discovery_parallel", _fake_run_fold_safe_discovery_parallel,
+        selection_stage, "_run_fold_safe_discovery_parallel", _fake_run_fold_safe_discovery_parallel, raising=False
     )
+    monkeypatch.setattr(folds_mod, "_run_fold_safe_discovery_parallel", _fake_run_fold_safe_discovery_parallel, raising=False)
 
     ctx = _bare_context(fold_safe=True)
     ctx.recorder = None
@@ -98,14 +102,16 @@ def test_select_horizons_skips_fold_safe_discovery_by_default(
     monkeypatch.setattr(
         selection_stage,
         "_fill_mark_parity_eligibility",
-        lambda close, eligible, _gate: (eligible, None),
+        lambda close, eligible, _gate: (eligible, None), raising=False
     )
 
     def _boom(*_a: object, **_k: object) -> None:
         raise AssertionError("fold-safe discovery must not run when the flag is off")
 
-    monkeypatch.setattr(selection_stage, "_candidate_weight_books", _boom)
-    monkeypatch.setattr(selection_stage, "_run_fold_safe_discovery_parallel", _boom)
+    monkeypatch.setattr(selection_stage, "_candidate_weight_books", _boom, raising=False)
+    monkeypatch.setattr(books_mod, "_candidate_weight_books", _boom, raising=False)
+    monkeypatch.setattr(selection_stage, "_run_fold_safe_discovery_parallel", _boom, raising=False)
+    monkeypatch.setattr(folds_mod, "_run_fold_safe_discovery_parallel", _boom, raising=False)
 
     ctx = _bare_context(fold_safe=False)
     selection_stage.select_horizons(ctx, StageTelemetry(log_run=False))

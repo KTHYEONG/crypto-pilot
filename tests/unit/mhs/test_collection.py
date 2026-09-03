@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.application.data import mhs_execution_collection as mc
+from src.market_data.services import mhs_execution as mc
 
 
 def test_mhs_execution_plan_is_pit_and_dry_run_writes_manifest(tmp_path, monkeypatch) -> None:

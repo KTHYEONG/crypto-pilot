@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.market_data.storage.loaders import timeframe_scale_factor
-from src.research.technical_experts.catalog import (
+from src.quant.technical_experts.catalog import (
     TECHNICAL_CANDIDATES,
     resolve_technical_candidate,
 )

@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.common.errors import DataIntegrityError
-from src.research.technical_experts.cross_sectional import (
+from src.quant.technical_experts.cross_sectional import (
     XsAlphaCompositeSpec,
     XsCompositeSpec,
     _causal_family_inverse_vol_weights,
@@ -43,7 +43,7 @@ from src.research.technical_experts.cross_sectional import (
     run_xs_composite_ledger,
 )
 
-from tests.unit.research.technical_experts.test_cross_sectional import (  # noqa: F401
+from tests.unit.quant.technical_experts.test_cross_sectional import (  # noqa: F401
     _alpha_inputs,
     _ref_zscore,
     _score_frame,

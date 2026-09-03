@@ -4,14 +4,16 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.statistics as statistics
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.evaluation.folds as folds_mod
+import src.mhs.statistics as statistics
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
 )
@@ -54,8 +56,8 @@ def test_trend_sleeve_default_off_bit_identical(mhs_market, monkeypatch) -> None
         "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
         "execution_universe_size": 8,
     }
-    default_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
-    explicit_off = ev.run_mhs_horizon_diagnostic(
+    default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    explicit_off = run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(**base, trend_sleeve=False, trend_sleeve_gross=0.0),
     )
     assert default_report.status == "COMPLETE"
@@ -82,7 +84,7 @@ def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, trend_sleeve=True, trend_sleeve_gross=0.3,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.trend_sleeve_diagnostic
     assert isinstance(diag, dict)
@@ -164,7 +166,9 @@ def test_trend_sleeve_overlay_off_byte_identical(mhs_market_with_taker_buy_quote
         raise AssertionError("sleeve machinery must not run when the overlay is off")
 
     monkeypatch.setattr(ev, "_trend_sleeve_position", _must_not_be_called)
+    monkeypatch.setattr(folds_mod, "_trend_sleeve_position", _must_not_be_called)
     monkeypatch.setattr(ev, "_apply_trend_sleeve", _must_not_be_called)
+    monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _must_not_be_called)
     target_patched, _sig, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
@@ -215,6 +219,7 @@ def test_trend_sleeve_overlay_additive_fold(mhs_market_with_taker_buy_quote, mon
         return out
 
     monkeypatch.setattr(ev, "_apply_trend_sleeve", _spy)
+    monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _spy)
     target_on, _sig, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
@@ -249,6 +254,7 @@ def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote,
         return out
 
     monkeypatch.setattr(ev, "_apply_trend_sleeve", _spy)
+    monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _spy)
     captured = {}
 
     def _fake_books(*args, **kwargs):
@@ -260,7 +266,7 @@ def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote,
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert "out" in spy_out
     assert float(spy_out["position"].abs().max()) > 0.0
@@ -294,6 +300,7 @@ def test_trend_sleeve_overlay_roster_no_starvation(mhs_market_with_taker_buy_quo
         return real(blend_1h, position, execution_mask, gross_budget)
 
     monkeypatch.setattr(ev, "_apply_trend_sleeve", _spy)
+    monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _spy)
     target_on, _sig, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
@@ -332,6 +339,7 @@ def test_trend_sleeve_fold_memory_order(mhs_market_with_taker_buy_quote, monkeyp
         return real(log_close, eligible, decision_grid)
 
     monkeypatch.setattr(ev, "_trend_sleeve_position", _spy)
+    monkeypatch.setattr(folds_mod, "_trend_sleeve_position", _spy)
     _target, _sig, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )

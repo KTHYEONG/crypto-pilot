@@ -8,6 +8,7 @@ the real end-to-end path is covered by tests/integration/mhs/test_golden_identit
 """
 
 from __future__ import annotations
+import src.mhs.evaluation.guards as guards_mod
 
 import pandas as pd
 import pytest
@@ -40,7 +41,7 @@ def _bare_context() -> PipelineContext:
 
 
 def test_load_panel_threads_symbols_and_funding(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(panel_stage, "_resolve_ram_budget", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(panel_stage, "_resolve_ram_budget", lambda *_a, **_k: (None, None), raising=False)
     monkeypatch.setattr(
         panel_stage,
         "load_base_panel",
@@ -51,11 +52,12 @@ def test_load_panel_threads_symbols_and_funding(monkeypatch: pytest.MonkeyPatch)
             "taker_buy_quote": pd.DataFrame(1.0, index=_GRID, columns=_SYMS),
         },
     )
-    monkeypatch.setattr(panel_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
+    monkeypatch.setattr(panel_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
     monkeypatch.setattr(
         panel_stage,
         "_load_funding_series",
-        lambda symbols: ({s: pd.Series(0.0001, index=_GRID) for s in symbols}, []),
+        lambda symbols: ({s: pd.Series(0.0001, index=_GRID) for s in symbols}, []), raising=False
     )
     monkeypatch.setattr(
         panel_stage,
@@ -79,7 +81,7 @@ def test_load_panel_threads_symbols_and_funding(monkeypatch: pytest.MonkeyPatch)
 def test_load_panel_short_circuits_on_guard_breach(monkeypatch: pytest.MonkeyPatch) -> None:
     """A breach at the first checkpoint sets `_terminal_report` and returns
     before the funding load ever runs."""
-    monkeypatch.setattr(panel_stage, "_resolve_ram_budget", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(panel_stage, "_resolve_ram_budget", lambda *_a, **_k: (None, None), raising=False)
     monkeypatch.setattr(
         panel_stage,
         "load_base_panel",
@@ -90,12 +92,13 @@ def test_load_panel_short_circuits_on_guard_breach(monkeypatch: pytest.MonkeyPat
             "taker_buy_quote": pd.DataFrame(1.0, index=_GRID, columns=_SYMS),
         },
     )
-    monkeypatch.setattr(panel_stage, "_guard_stage_or_breach", lambda *_a, **_k: "TERMINAL")
+    monkeypatch.setattr(panel_stage, "_guard_stage_or_breach", lambda *_a, **_k: "TERMINAL", raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: "TERMINAL", raising=False)
 
     def _boom(*_a: object, **_k: object) -> None:
         raise AssertionError("funding load must not run after a guard breach")
 
-    monkeypatch.setattr(panel_stage, "_load_funding_series", _boom)
+    monkeypatch.setattr(panel_stage, "_load_funding_series", _boom, raising=False)
 
     ctx = _bare_context()
     panel_stage.load_panel(ctx, StageTelemetry(log_run=False))

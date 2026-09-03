@@ -4,9 +4,9 @@ import os
 
 import pytest
 
-import src.core.settings as settings
+import src.common.settings as settings
 
-from src.core.settings import HARDWARE_MAX_WORKERS
+from src.common.settings import HARDWARE_MAX_WORKERS
 
 
 def test_hardware_max_workers_defaults_from_cpu_and_is_at_least_one() -> None:

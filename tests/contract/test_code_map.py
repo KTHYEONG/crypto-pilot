@@ -6,8 +6,9 @@ from pathlib import Path
 _CANONICAL_ROOTS = (
     "src/common",
     "src/market_data",
-    "src/research",
-    "src/application",
+    "src/quant",
+    "src/mhs",
+    "src/live",
     "src/cli",
 )
 
@@ -67,3 +68,14 @@ def test_code_map_has_no_stale_legacy_paths() -> None:
         source for source in _code_map() if any(frag in source for frag in banned_fragments)
     ]
     assert not offenders, f"code_map.json contains stale legacy paths: {offenders}"
+
+
+def test_code_map_is_current() -> None:
+    """Marker: the real gate is the existing code-map contract suite."""
+    import json
+    from pathlib import Path
+
+    entries = json.loads(Path("docs/code_map.json").read_text(encoding="utf-8"))
+    assert any(k.startswith("src/mhs/") for k in entries), (
+        "code map must cover the MHS tree"
+    )

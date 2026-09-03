@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from src.research.contracts import CostModel, StrategySpec
+from src.quant.contracts import CostModel, StrategySpec
 
 # Project-only temp policy (AGENTS.md §4): pytest's ``tmp_path``/``tmpdir``
 # fixtures, the ``tempfile`` module, and ``TMPDIR``-honoring subprocesses all

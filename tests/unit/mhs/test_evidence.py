@@ -32,7 +32,7 @@ from src.mhs.params import (
     PERIODS_PER_YEAR_1H,
     PNL_VOL_TARGET_BURN_IN_DAYS,
 )
-from src.research.evaluation.policy import HOLDOUT_CUTOFF
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 _UTC = "UTC"
 

@@ -8,7 +8,7 @@ import pytest
 
 from src.mhs.committee import growth_budget_annual_vol
 from src.mhs.params import GROWTH_RISK_ENVELOPES
-from src.research.risk.growth_sizing import (
+from src.quant.risk.growth_sizing import (
     FrontierScanPoint,
     GrowthHeadroomDiagnostic,
     GrowthSizingConfig,

@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.research.contracts import CostModel, StrategySpec
+from src.quant.contracts import CostModel, StrategySpec
 from src.market_data.storage.loaders import load_ohlcv_4h
-from src.research.baseline.backtest import run_backtest
+from src.quant.baseline.backtest import run_backtest
 
 BTC_PATH = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
 

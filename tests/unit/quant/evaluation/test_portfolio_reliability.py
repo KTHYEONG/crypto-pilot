@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.research.evaluation.reliability import (
+from src.quant.evaluation.reliability import (
     ReliabilityGateConfig,
     compute_portfolio_reliability_gate,
     derive_block_size,

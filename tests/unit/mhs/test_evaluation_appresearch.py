@@ -5,9 +5,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.scaling as scaling
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+import src.mhs.scaling as scaling
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
 from src.common.errors import DataIntegrityError
@@ -15,7 +15,7 @@ from src.mhs.types import BookSpec, ExecutionSpec, HorizonBand
 from src.mhs.execution import SimulatedInventoryLedgerResult
 from src.mhs.execution import strategy_aware_execution_replay
 from src.mhs.evidence import AnchoredPurgedFold
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 
@@ -1249,7 +1249,7 @@ def _gap_mixed_replay() -> object:
 
 # SCENARIO_MHS_DSR_PASSAGE_BUDGETED_ENVELOPE_BINDS_07
 def test_SCENARIO_MHS_DSR_PASSAGE_BUDGETED_ENVELOPE_BINDS_07() -> None:
-    from src.application.research.mhs.research_go import (
+    from src.mhs.research_go import (
         GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
         GO_REASON_DRAWDOWN_OVER_BUDGET,
         _drawdown_budget_reasons,

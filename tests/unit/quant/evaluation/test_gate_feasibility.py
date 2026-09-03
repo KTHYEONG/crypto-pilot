@@ -11,7 +11,7 @@ import dataclasses
 import numpy as np
 import pytest
 
-from src.research.evaluation.gate_feasibility import (
+from src.quant.evaluation.gate_feasibility import (
     BreadthRequirement,
     GateFeasibility,
     compute_breadth_requirement,
