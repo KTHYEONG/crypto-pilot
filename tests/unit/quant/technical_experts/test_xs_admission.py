@@ -24,21 +24,21 @@ overlay stack).
 import numpy as np
 import pandas as pd
 import pytest
-from src.research.evaluation.reliability import (
+from src.quant.evaluation.reliability import (
     FoldDistributionResult,
     ReliabilityGateConfig,
     ReliabilityGateResult,
     count_closed_trades,
     derive_block_size,
 )
-from src.research.technical_experts.cross_sectional import (
+from src.quant.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsReliabilityResult,
     apply_no_trade_band,
     evaluate_xs_admission,
     evaluate_xs_reliability,
 )
-from tests.unit.research.technical_experts.test_cross_sectional import (  # noqa: F401
+from tests.unit.quant.technical_experts.test_cross_sectional import (  # noqa: F401
     _alpha_inputs,
     _ref_zscore,
     _score_frame,

@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.mhs.scaling import _pnl_vol_target_scale, is_streaming_scale_mode
+from src.mhs.scaling import _pnl_vol_target_scale, is_streaming_scale_mode
 from src.mhs.execution import (
     DataIntegrityError,
     ExecutionReplayWindow,
@@ -150,7 +150,7 @@ def _two_pass_scaled_ledger(windows: list[ExecutionReplayWindow], scale: pd.Seri
 def test_streaming_mode_is_median_relative_only_for_this_probe() -> None:
     """Sanity: the scale function this test uses is one of the two modes the
     production `is_streaming_scale_mode` actually accepts."""
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     assert is_streaming_scale_mode(MhsDiagnosticRequest(pnl_vol_target_mode="median_relative"))
 

@@ -1,10 +1,10 @@
-"""Request contract pins for src.application.research.mhs.contracts."""
+"""Request contract pins for src.mhs.contracts."""
 
 from __future__ import annotations
 
 import dataclasses
 
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.contracts import MhsDiagnosticRequest
 
 
 def test_exposure_drawdown_brake_default_inert_and_declared_once() -> None:

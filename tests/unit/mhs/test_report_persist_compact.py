@@ -17,7 +17,7 @@ import tracemalloc
 import pandas as pd
 import pytest
 
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsBookReport,
     MhsFoldReport,
     MhsHorizonDiagnosticReport,

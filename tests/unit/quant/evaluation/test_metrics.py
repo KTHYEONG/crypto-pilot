@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.research.evaluation.metrics import compute_metrics
+from src.quant.evaluation.metrics import compute_metrics
 
 
 class TestMetrics:

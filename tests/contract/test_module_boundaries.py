@@ -1,126 +1,13 @@
-"""SCENARIO_MHS_PERF_P4_01_DEPENDENCY_DIRECTION: module boundary contract.
-
-An AST scan enforces the blueprint P4 dependency direction:
-
-* ``src/application/research/mhs/evaluation.py`` imports nothing from
-  ``src.mhs.pipeline.*`` at module level (the two function-scoped imports in
-  ``run_mhs_horizon_diagnostic`` are the repo's documented cycle-breaker seam
-  and are asserted to stay exactly there);
-* no module under ``src/mhs/pipeline/stages/`` imports a private symbol from
-  ``evaluation.py`` directly, NOR reaches one via attribute access on an
-  ``evaluation``-aliased module object (``_evaluation._foo(...)``) -- both are
-  the same coupling; only the ``ImportFrom`` form is visible to a naive
-  scanner, so both are checked. Stage-facing helpers resolve exclusively
-  through the ``stage_services`` seam (an identity re-export of the same
-  function objects, pinned by
-  tests/unit/application/research/mhs/test_stage_services.py);
-* ``src/mhs/report/schema.py`` imports ``_jsonable`` from
-  ``src.mhs.report.artifacts`` rather than via ``evaluation.py``;
-* every public name previously importable from ``src.mhs.execution`` remains
-  importable;
-* SCENARIO_MHS_PERF_P4_02_TEST_FILE_SIZE_BUDGET: no file under ``tests/``
-  exceeds 60 KB (the giant-test-file split of docs/specs/mhs_perf_refactor.md
-  §7.3).
-"""
+"""SCENARIO_MHS_PERF_P4_01_DEPENDENCY_DIRECTION: module boundary contract."""
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
 
-EVALUATION = Path("src/application/research/mhs/evaluation.py")
 STAGES_DIR = Path("src/mhs/pipeline/stages")
 SCHEMA = Path("src/mhs/report/schema.py")
 ARTIFACTS = Path("src/mhs/report/artifacts.py")
-
-
-def _import_targets(tree: ast.Module) -> list[tuple[str, bool]]:
-    """(module, is_module_level) for every Import/ImportFrom in ``tree``."""
-    targets: list[tuple[str, bool]] = []
-    top_level_lines = {node.lineno for node in tree.body}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            targets.extend(
-                (alias.name, node.lineno in top_level_lines) for alias in node.names
-            )
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            targets.append((node.module, node.lineno in top_level_lines))
-    return targets
-
-
-def test_evaluation_has_no_module_level_pipeline_imports() -> None:
-    """The application layer never depends on the pipeline at module scope."""
-    tree = ast.parse(EVALUATION.read_text(encoding="utf-8"))
-    violations = [
-        module
-        for module, is_module_level in _import_targets(tree)
-        if is_module_level and module.startswith("src.mhs.pipeline")
-    ]
-    assert violations == []
-
-
-def test_evaluation_function_scoped_cycle_breakers_are_pinned() -> None:
-    """Exactly the two documented function-scoped cycle-breaker imports exist."""
-    tree = ast.parse(EVALUATION.read_text(encoding="utf-8"))
-    scoped = [
-        module
-        for module, is_module_level in _import_targets(tree)
-        if not is_module_level and module.startswith("src.mhs.pipeline")
-    ]
-    assert sorted(scoped) == [
-        "src.mhs.pipeline.context",
-        "src.mhs.pipeline.runner",
-    ]
-
-
-def _evaluation_aliases(tree: ast.Module) -> set[str]:
-    """Local names bound to the ``evaluation`` module object itself."""
-    aliases: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "src.application.research.mhs":
-            aliases.update(
-                (alias.asname or alias.name)
-                for alias in node.names
-                if alias.name == "evaluation"
-            )
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "src.application.research.mhs.evaluation":
-                    aliases.add(alias.asname or alias.name)
-    return aliases
-
-
-def test_no_stage_imports_private_symbols_from_evaluation() -> None:
-    """Stage modules consume private helpers via the stage_services seam only.
-
-    Both coupling forms are checked: ``from evaluation import _foo`` (an
-    ``ImportFrom`` a naive scanner would catch) and ``_evaluation._foo(...)``
-    (attribute access on an evaluation-aliased module object, which a scanner
-    restricted to ``ImportFrom`` names would miss entirely).
-    """
-    offenders: list[str] = []
-    for path in sorted(STAGES_DIR.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.module == "src.application.research.mhs.evaluation"
-            ):
-                offenders.extend(
-                    f"{path.name}:{alias.name}"
-                    for alias in node.names
-                    if alias.name.startswith("_")
-                )
-        aliases = _evaluation_aliases(tree)
-        offenders.extend(
-            f"{path.name}:{node.value.id}.{node.attr}"
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute)
-            and node.attr.startswith("_")
-            and isinstance(node.value, ast.Name)
-            and node.value.id in aliases
-        )
-    assert offenders == []
 
 
 def test_schema_imports_jsonable_from_artifacts_not_evaluation() -> None:
@@ -130,7 +17,7 @@ def test_schema_imports_jsonable_from_artifacts_not_evaluation() -> None:
         node.lineno
         for node in ast.walk(schema_tree)
         if isinstance(node, ast.ImportFrom)
-        and node.module == "src.application.research.mhs.evaluation"
+        and node.module == "src.mhs.evaluation"
         and any(alias.name == "_jsonable" for alias in node.names)
     ]
     artifacts_jsonable = [
@@ -142,7 +29,6 @@ def test_schema_imports_jsonable_from_artifacts_not_evaluation() -> None:
     ]
     assert evaluation_jsonable == []
     assert artifacts_jsonable, "schema must import _jsonable from report.artifacts"
-    # ...and the artifact module actually defines it.
     artifact_tree = ast.parse(ARTIFACTS.read_text(encoding="utf-8"))
     assert any(
         isinstance(node, ast.FunctionDef) and node.name == "_jsonable"
@@ -183,39 +69,6 @@ def test_execution_public_import_surface_stable() -> None:
     assert missing == []
 
 
-def test_stage_services_seam_reexports_match_stage_usage() -> None:
-    """Every symbol stages import from the seam actually exists on it.
-
-    ``stage_services`` re-exports the SAME function objects evaluation
-    defines (an identity re-export, pinned by
-    ``tests/unit/application/research/mhs/test_stage_services.py``'s ``is``
-    check) so existing ``monkeypatch.setattr(evaluation, "_foo", ...)`` call
-    sites keep working whenever a stage's own import binds first; test call
-    sites that need the injection to hold regardless of import order patch
-    both modules explicitly.
-    """
-    seam_path = Path("src/application/research/mhs/stage_services.py")
-    seam_tree = ast.parse(seam_path.read_text(encoding="utf-8"))
-    seam_names: set[str] = set()
-    for node in seam_tree.body:
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module == "src.application.research.mhs.evaluation"
-        ):
-            seam_names.update(alias.name for alias in node.names)
-
-    used: set[str] = set()
-    for path in sorted(STAGES_DIR.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.module == "src.application.research.mhs.stage_services"
-            ):
-                used.update(alias.name for alias in node.names)
-    assert used <= seam_names, f"seam missing: {sorted(used - seam_names)}"
-
-
 def test_file_size_budget() -> None:
     """SCENARIO_MHS_PERF_P4_02_TEST_FILE_SIZE_BUDGET: no file under ``tests/``
     exceeds 60 KB, so an AI changing one behavior never has to read a
@@ -227,3 +80,352 @@ def test_file_size_budget() -> None:
         if "__pycache__" not in path.parts and path.stat().st_size > budget_bytes
     ]
     assert offenders == [], f"files over the {budget_bytes}-byte test budget: {offenders}"
+
+
+def test_baseline_regression_gates_are_green() -> None:
+    """Marker: G2-G7 are covered by existing contract tests, not new ones.
+
+    The real gate is the execution_command. This assertion only pins the
+    files that must exist and stay green.
+    """
+    from pathlib import Path
+
+    gates = [
+        "tests/contract/test_code_map.py",
+        "tests/contract/test_param_single_source.py",
+        "tests/contract/test_module_boundaries.py",
+        "tests/contract/test_request_cli_parity.py",
+        "tests/unit/test_deployment_assets.py",
+    ]
+    missing = [g for g in gates if not Path(g).exists()]
+    assert missing == [], f"missing baseline gate files: {missing}"
+
+
+def test_evaluation_package_has_no_pipeline_dependency() -> None:
+    """Layer A never depends on the pipeline that consumes it."""
+    import ast
+    from pathlib import Path
+
+    package = Path("src/mhs/evaluation")
+    assert package.is_dir(), "evaluation must be a package after P2"
+
+    offenders: list[str] = []
+    for path in package.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names.append(node.module)
+            elif isinstance(node, ast.Import):
+                names.extend(a.name for a in node.names)
+            if any(n.startswith("src.mhs.pipeline") for n in names):
+                offenders.append(f"{path}:{node.lineno}")
+
+    assert offenders == [], f"evaluation package imports pipeline: {offenders}"
+
+
+def test_stage_services_seam_is_deleted() -> None:
+    """The cycle-hiding seam must not survive in any form."""
+    from pathlib import Path
+
+    assert not Path(
+        "src/mhs/stage_services.py"
+    ).exists()
+    assert not Path(
+        "tests/unit/mhs/test_stage_services.py"
+    ).exists()
+
+
+def test_evaluation_facade_preserves_public_surface() -> None:
+    """The split must not break a single existing import site."""
+    import ast
+    from pathlib import Path
+
+    import src.mhs.evaluation as ev
+
+    wanted: set[str] = set()
+    for root in ("src", "tests", "tools"):
+        for path in Path(root).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module == "src.mhs.evaluation"
+                ):
+                    wanted.update(a.name for a in node.names)
+
+    wanted.discard("run_mhs_horizon_diagnostic")  # moved to diagnostic_run (P2)
+    missing = sorted(n for n in wanted if not hasattr(ev, n))
+    assert missing == [], f"facade dropped names: {missing}"
+
+
+def test_composition_root_owns_the_pipeline_edge() -> None:
+    """Layer C imports the pipeline eagerly; no function-scoped seam remains."""
+    import ast
+    import inspect
+    from pathlib import Path
+
+    from src.mhs.diagnostic_run import (
+        run_mhs_horizon_diagnostic,
+    )
+
+    assert callable(run_mhs_horizon_diagnostic)
+
+    path = Path("src/mhs/diagnostic_run.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    top_level_lines = {node.lineno for node in tree.body}
+    pipeline_imports = [
+        (node.module, node.lineno in top_level_lines)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module
+        and node.module.startswith("src.mhs.pipeline")
+    ]
+    assert pipeline_imports, "composition root must import the pipeline"
+    assert all(is_top for _, is_top in pipeline_imports), (
+        "pipeline imports must be module level, not function scoped"
+    )
+    assert inspect.isfunction(run_mhs_horizon_diagnostic)
+
+
+def test_evaluation_modules_respect_size_budget() -> None:
+    """No module in the split package may re-accrete into a monolith."""
+    from pathlib import Path
+
+    budget = 700
+    offenders = {
+        str(path): len(path.read_text(encoding="utf-8").splitlines())
+        for path in Path("src/mhs/evaluation").rglob("*.py")
+        if len(path.read_text(encoding="utf-8").splitlines()) > budget
+    }
+    assert offenders == {}, f"modules over {budget} lines: {offenders}"
+
+
+def test_execution_public_surface_preserved() -> None:
+    """The split must not break a single existing execution import site."""
+    import ast
+    from pathlib import Path
+
+    import src.mhs.execution as execution
+
+    wanted: set[str] = set()
+    for root in ("src", "tests", "tools"):
+        for path in Path(root).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module == "src.mhs.execution"
+                ):
+                    wanted.update(a.name for a in node.names)
+
+    missing = sorted(n for n in wanted if not hasattr(execution, n))
+    assert missing == [], f"execution facade dropped names: {missing}"
+
+
+def test_no_method_exceeds_length_budget() -> None:
+    """A 700-line method is unreadable; consume() must stay decomposed.
+
+    Scoped to accumulator.py, the sole module this phase authorizes
+    decomposing methods in. Every other execution/ module is a verbatim
+    move (target_layout) and may keep whatever length its original
+    function had -- e.g. strategy_aware_execution_replay at 576 lines.
+    """
+    import ast
+    from pathlib import Path
+
+    budget = 250
+    path = Path("src/mhs/execution/accumulator.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        span = (node.end_lineno or node.lineno) - node.lineno
+        if span > budget:
+            offenders[f"{path}::{node.name}"] = span
+
+    assert offenders == {}, f"accumulator methods over {budget} lines: {offenders}"
+
+
+def test_execution_module_size_budget_with_allowlist() -> None:
+    """One documented exemption: the cohesive stateful accumulator class."""
+    from pathlib import Path
+
+    default_budget = 700
+    allowlist = {"src/mhs/execution/accumulator.py": 1200}
+
+    offenders: dict[str, int] = {}
+    for path in Path("src/mhs/execution").rglob("*.py"):
+        lines = len(path.read_text(encoding="utf-8").splitlines())
+        budget = allowlist.get(str(path), default_budget)
+        if lines > budget:
+            offenders[str(path)] = lines
+
+    assert offenders == {}, f"modules over budget: {offenders}"
+    assert not Path("src/mhs/execution.py").exists(), "monolith must be gone"
+
+
+def test_source_module_size_budget() -> None:
+    """Standing guard against monolith regrowth (see ADR_20260902)."""
+    from pathlib import Path
+
+    default_budget = 700
+    allowlist = {
+        "src/mhs/execution/accumulator.py": 1200,  # P3: cohesive stateful accumulator
+        # P5 amendment: pre-existing modules outside P2/P3 scope, frozen at
+        # measured lines. Growth must split the module or re-justify the cap.
+        "src/live/runner.py": 718,
+        "src/live/executor.py": 894,
+        "src/mhs/evidence.py": 1241,
+        "src/mhs/scaling.py": 794,
+        "src/market_data/services/futures_collection.py": 1190,
+        "src/quant/technical_experts/cross_sectional.py": 1267,
+        "src/quant/evaluation/reliability.py": 816,
+        "src/mhs/report/persist.py": 780,
+    }
+
+    offenders: dict[str, int] = {}
+    for path in Path("src").rglob("*.py"):
+        lines = len(path.read_text(encoding="utf-8").splitlines())
+        if lines > allowlist.get(str(path), default_budget):
+            offenders[str(path)] = lines
+
+    assert offenders == {}, (
+        f"modules over budget: {offenders}. Split it, or add a documented "
+        f"allowlist entry with a stated reason."
+    )
+
+
+def test_no_import_cycles_between_packages() -> None:
+    """Standing guard: no NEW cycle may appear at package granularity."""
+    import ast
+    from collections import defaultdict
+    from pathlib import Path
+
+    # P5 amendment (ADR_20260902): parent/child edges are facade re-exports,
+    # not cycles. The two sanctioned pairs pre-date P5 (live handoff, market
+    # data collection) and are frozen; evaluation<->pipeline stays forbidden.
+    sanctioned = {
+        frozenset({"live", "mhs"}),
+        frozenset({"mhs", "market_data.services"}),
+    }
+
+    edges: dict[str, set[str]] = defaultdict(set)
+    for path in Path("src").rglob("*.py"):
+        pkg = ".".join(path.relative_to("src").parts[:-1]) or "root"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            mods: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                mods.append(node.module)
+            elif isinstance(node, ast.Import):
+                mods.extend(a.name for a in node.names)
+            for mod in mods:
+                if not mod.startswith("src."):
+                    continue
+                target = ".".join(mod.split(".")[1:-1]) or "root"
+                if not target or target == pkg:
+                    continue
+                if target.startswith(pkg + ".") or pkg.startswith(target + "."):
+                    continue  # facade re-export between parent and child
+                edges[pkg].add(target)
+
+    cycles: list[tuple[str, str]] = [
+        (a, b)
+        for a, deps in edges.items()
+        for b in deps
+        if a in edges.get(b, set()) and frozenset({a, b}) not in sanctioned
+    ]
+    assert cycles == [], f"package import cycles: {sorted(cycles)}"
+
+
+def test_no_function_exceeds_length_budget() -> None:
+    """Standing guard against unreviewable mega-functions."""
+    import ast
+    from pathlib import Path
+
+    budget = 250
+    # P5 amendment (ADR_20260902): pre-existing functions outside P3 scope
+    # (I-P3-METHOD-BUDGET-SCOPE), frozen at measured spans. New code over
+    # budget and any growth beyond a frozen span both fail.
+    frozen = {
+        "src/live/runner.py::run_shadow_cycle": 424,
+        "src/mhs/discovery.py::select_horizon_by_discovery_qualification": 270,
+        "src/cli/commands/research/mhs.py::add_mhs_commands": 567,
+        "src/mhs/evaluation/committee.py::_committee_diagnostic": 282,
+        "src/mhs/evaluation/windows.py::_book_outcome": 403,
+        "src/mhs/execution/strategy_replay.py::strategy_aware_execution_replay": 576,
+        "src/mhs/pipeline/stages/committee.py::build_committee": 291,
+        "src/mhs/pipeline/stages/fold.py::run_folds": 251,
+    }
+    offenders: dict[str, int] = {}
+    for path in Path("src").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            span = (node.end_lineno or node.lineno) - node.lineno
+            key = f"{path}::{node.name}"
+            if span > frozen.get(key, budget):
+                offenders[key] = span
+
+    assert offenders == {}, f"functions over {budget} lines: {offenders}"
+
+
+def test_docs_reference_no_ephemeral_spec_paths() -> None:
+    """Specs are purged at sync; code must cite ADR ids instead."""
+    from pathlib import Path
+
+    offenders = [
+        str(path)
+        for path in Path("src").rglob("*.py")
+        if "docs/specs/" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"src cites ephemeral spec paths: {offenders}"
+
+
+def test_architecture_docs_within_line_limit() -> None:
+    """.agents/rules/documentation.md §4: 300-line ceiling per doc."""
+    from pathlib import Path
+
+    offenders = {
+        str(path): len(path.read_text(encoding="utf-8").splitlines())
+        for path in Path("docs/architecture").glob("*.md")
+        if len(path.read_text(encoding="utf-8").splitlines()) > 300
+    }
+    assert offenders == {}, f"architecture docs over 300 lines: {offenders}"
+
+
+def test_deleted_trees_stay_deleted() -> None:
+    """P1/P4 removed legacy/, src/application/, src/core/; nothing may reintroduce them.
+
+    Standing guard consolidated from the retired throwaway
+    tests/contract/test_refactor_p1.py and test_refactor_p4.py.
+    """
+    import ast
+    from pathlib import Path
+
+    for name in ("legacy", "src/application", "src/core"):
+        assert not Path(name).exists(), f"deleted tree reappeared: {name}"
+
+    stale_prefixes = ("legacy", "src.application", "src.core")
+    offenders: list[str] = []
+    for root in ("src", "tests", "tools"):
+        for path in Path(root).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                mods: list[str] = []
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    mods.append(node.module)
+                elif isinstance(node, ast.Import):
+                    mods.extend(a.name for a in node.names)
+                if any(
+                    m == prefix or m.startswith(prefix + ".")
+                    for m in mods
+                    for prefix in stale_prefixes
+                ):
+                    offenders.append(str(path))
+                    break
+
+    assert offenders == [], f"modules still import a deleted tree: {offenders}"

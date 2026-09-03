@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
-from src.application.research.mhs.validation import validate_request
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.validation import validate_request
 from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET
 
 

@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.application.data import mhs_execution_collection
+from src.market_data.services import mhs_execution as mhs_execution_collection
 from src.common.errors import DataIntegrityError
 
 _START = "2023-01-01T00:00:00Z"

@@ -189,7 +189,7 @@ def test_scenario_mhs_kelly_two_sided_06_universe_default_promotion() -> None:
     owner only; the contract object MhsDiagnosticRequest keeps its frozen 30
     default (bit-exact fixtures), and an explicit --execution-universe-size
     still overrides."""
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
     from src.cli.main import build_root_parser
     from src.mhs.pipeline.config import CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
 

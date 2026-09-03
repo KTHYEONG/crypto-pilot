@@ -29,7 +29,7 @@ from src.mhs.execution import simulated_inventory_ledger
 
 def test_mhs_5m_02_pit_roster_uses_only_eligible_trailing_volume() -> None:
     """MHS-5M-02-PIT-ROSTER: ranking is causal and eligibility masked."""
-    from src.application.research.mhs.evaluation import _pit_execution_mask
+    from src.mhs.evaluation import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=720, freq="1h", tz="UTC")
     volume = pd.DataFrame({"A": 10.0, "B": 20.0, "C": 30.0}, index=idx)
@@ -47,7 +47,7 @@ def test_mhs_roster_hysteresis_enter_unchanged_from_baseline() -> None:
     mask is exactly ``{A: True, B: True, C: False}`` as before hysteresis was
     added -- entry via the top ``universe_size`` trailing-volume rank is
     unchanged."""
-    from src.application.research.mhs.evaluation import _pit_execution_mask
+    from src.mhs.evaluation import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=720, freq="1h", tz="UTC")
     volume = pd.DataFrame({"A": 10.0, "B": 20.0, "C": 30.0}, index=idx)
@@ -62,7 +62,7 @@ def test_mhs_roster_hysteresis_member_survives_rank_dip_within_exit_band() -> No
     a member whose rank worsens past ``universe_size`` but stays within the
     ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER`` band is retained,
     unlike the pre-fix hard cutoff which dropped it."""
-    from src.application.research.mhs.evaluation import _pit_execution_mask
+    from src.mhs.evaluation import _pit_execution_mask
     from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
@@ -92,7 +92,7 @@ def test_mhs_roster_hysteresis_member_exits_past_exit_band() -> None:
     """SCENARIO_MHS_HYSTERESIS_03_MEMBER_EXITS_PAST_EXIT_BAND: a member whose
     rank worsens past ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER``
     is dropped on that bar."""
-    from src.application.research.mhs.evaluation import _pit_execution_mask
+    from src.mhs.evaluation import _pit_execution_mask
     from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
@@ -119,7 +119,7 @@ def test_mhs_roster_hysteresis_ineligible_exits_immediately() -> None:
     """SCENARIO_MHS_HYSTERESIS_04_INELIGIBLE_EXITS_IMMEDIATELY_REGARDLESS_OF_HYSTERESIS:
     a held member whose eligible flag becomes False is excluded on that same bar
     even though its raw trailing-volume rank is still inside the exit band."""
-    from src.application.research.mhs.evaluation import _pit_execution_mask
+    from src.mhs.evaluation import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=721, freq="1h", tz="UTC")
     volume = pd.DataFrame(
@@ -341,7 +341,7 @@ class TestCompoundingAlphaAxesFolds:
     def test_all_folds_have_168h_purge(self) -> None:
         # SCENARIO_MHS_FOLD_RESTRUCTURE_SEALED_HOLDOUT_UNCHANGED: the outermost
         # validation boundary stays pinned to the sealed holdout cutoff.
-        from src.research.evaluation.policy import HOLDOUT_CUTOFF
+        from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
         folds = phase_1_anchored_purged_folds()
         for fold in folds:
@@ -803,7 +803,7 @@ def _passing_fold(index: int):  # type: ignore[no-untyped-def]
     """A fully-measured fold with zero failures (strict/stress replayed)."""
     from typing import cast
 
-    from src.application.research.mhs.contracts import MhsFoldReport
+    from src.mhs.contracts import MhsFoldReport
     from src.mhs.execution import StrategyExecutionReplayResult
 
     return MhsFoldReport(
@@ -832,8 +832,8 @@ def test_SCENARIO_MHS_EVID_01_DSR_GATE_BLOCKS_WEAK_EVIDENCE() -> None:
     the deflated Sharpe ratio -- 0.7039 blocks below the registered 0.95 cut,
     0.96 passes with reason codes byte-identical to the pre-gate output
     (monotone True->False only), and a missing DSR fails closed."""
-    from src.application.research.mhs.contracts import MhsFoldReport  # noqa: F401
-    from src.application.research.mhs.research_go import (
+    from src.mhs.contracts import MhsFoldReport  # noqa: F401
+    from src.mhs.research_go import (
         GO_REASON_DEFLATED_SHARPE_BELOW_THRESHOLD,
         GO_REASON_DEFLATED_SHARPE_UNAVAILABLE,
         _mhs_research_go,
@@ -865,7 +865,7 @@ def test_SCENARIO_MHS_DSR_07_GATE_STILL_MONOTONE() -> None:
     budget code can only remove eligibility -- a binding envelope with clean
     evidence still passes, the same evidence under a never-binding budget
     blocks with DRAWDOWN_BUDGET_NON_BINDING."""
-    from src.application.research.mhs.research_go import (
+    from src.mhs.research_go import (
         GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
         _mhs_research_go,
     )

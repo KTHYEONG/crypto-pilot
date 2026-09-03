@@ -16,13 +16,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.mhs.resources import _StageRecorder
+from src.mhs.resources import _StageRecorder
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.stages.assemble import assemble_report
 from src.mhs.params import COMMITTEE_OOS_START
 from src.mhs.telemetry import StageTelemetry
-from src.research.evaluation.policy import HOLDOUT_CUTOFF
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 
 def _bare_context(recorder: _StageRecorder) -> PipelineContext:
@@ -171,7 +171,7 @@ def test_assemble_wires_parameter_oos_split(monkeypatch: pytest.MonkeyPatch) -> 
 def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from src.application.research.mhs.contracts import MhsResearchGoResult
+    from src.mhs.contracts import MhsResearchGoResult
     from src.mhs.run_history import (
         append_run_history_record,
         trial_pool_disclosure,

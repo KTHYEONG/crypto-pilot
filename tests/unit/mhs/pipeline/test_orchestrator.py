@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 from src.mhs.pipeline.config import MhsRunConfig
-from src.research.evaluation.policy import HOLDOUT_CUTOFF
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

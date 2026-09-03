@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from src.mhs.panel import build_uniform_grid, liquid_half_eligibility, load_base_panel, partition_symbols
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
 
 class TestBasePanelProjection:

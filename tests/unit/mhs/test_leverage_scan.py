@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.mhs.leverage_scan import (
+from src.mhs.leverage_scan import (
     _load_pre_oos_reference_returns,
     run_leverage_frontier_scan,
 )

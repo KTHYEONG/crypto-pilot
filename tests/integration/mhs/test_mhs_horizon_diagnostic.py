@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import evaluation as ev
-from src.research.universe.pit_universe import symbol_partition
+from src.mhs import evaluation as ev
+from src.quant.universe.pit_universe import symbol_partition
 
 START = pd.Timestamp("2021-01-01", tz="UTC")
 N_HOURS = 2000
@@ -202,8 +202,8 @@ import json, sys
 sys.path.insert(0, sys.argv[1])
 import pandas as pd
 import src.market_data.services.futures_collection as fc
-import src.application.research.mhs.marks as marks
-from src.application.research.mhs.evaluation import persist_mhs_horizon_diagnostic_report
+import src.mhs.marks as marks
+from src.mhs.evaluation import persist_mhs_horizon_diagnostic_report
 
 root = Path(sys.argv[2])
 out = Path(sys.argv[3])

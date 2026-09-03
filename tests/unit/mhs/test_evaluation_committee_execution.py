@@ -5,13 +5,14 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
     _committee_synthetic_panels,
@@ -141,8 +142,8 @@ def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    default_report = ev.run_mhs_horizon_diagnostic(request)
-    explicit_off = ev.run_mhs_horizon_diagnostic(
+    default_report = run_mhs_horizon_diagnostic(request)
+    explicit_off = run_mhs_horizon_diagnostic(
         dataclasses.replace(request, committee_tranche_smoothing=False),
     )
     assert default_report.status == "COMPLETE"
@@ -186,7 +187,7 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    ev.run_mhs_horizon_diagnostic(request)
+    run_mhs_horizon_diagnostic(request)
     assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
 
 def test_committee_execution_book_regime_adaptive_differs_from_fixed_variants() -> None:
@@ -310,8 +311,8 @@ def test_committee_regime_adaptive_tranche_default_off_byte_identical(
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    default_report = ev.run_mhs_horizon_diagnostic(request)
-    explicit_off = ev.run_mhs_horizon_diagnostic(
+    default_report = run_mhs_horizon_diagnostic(request)
+    explicit_off = run_mhs_horizon_diagnostic(
         dataclasses.replace(request, committee_regime_adaptive_tranche=False),
     )
     assert default_report.status == "COMPLETE"
@@ -356,7 +357,7 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    ev.run_mhs_horizon_diagnostic(request)
+    run_mhs_horizon_diagnostic(request)
     assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
 @pytest.mark.slow
@@ -397,7 +398,7 @@ def test_committee_beta_neutralize_threads_both_call_sites(
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    ev.run_mhs_horizon_diagnostic(request_on)
+    run_mhs_horizon_diagnostic(request_on)
     assert isinstance(seen["beta"], pd.DataFrame)
 
     seen.clear()
@@ -414,8 +415,8 @@ def test_committee_beta_neutralize_threads_both_call_sites(
     monkeypatch.setattr(
         ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    default_report = ev.run_mhs_horizon_diagnostic(request_default)
-    explicit_off = ev.run_mhs_horizon_diagnostic(
+    default_report = run_mhs_horizon_diagnostic(request_default)
+    explicit_off = run_mhs_horizon_diagnostic(
         dataclasses.replace(request_default, beta_neutralize=False),
     )
     assert default_report.status == "COMPLETE"
@@ -449,7 +450,7 @@ def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monk
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     wf = report.committee_diagnostic["walk_forward"]
     assert wf["sizing_mode"] == "vol_target"
@@ -470,7 +471,7 @@ def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) 
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(
+    report = run_mhs_horizon_diagnostic(
         dataclasses.replace(base, committee_kelly_sizing=True),
     )
     assert report.status == "COMPLETE"

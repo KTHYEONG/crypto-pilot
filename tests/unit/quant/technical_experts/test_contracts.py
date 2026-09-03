@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.research.technical_experts.contracts import TechnicalCandidate
+from src.quant.technical_experts.contracts import TechnicalCandidate
 
 
 def _candidate(**overrides: object) -> TechnicalCandidate:

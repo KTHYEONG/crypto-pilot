@@ -28,14 +28,14 @@ import sys
 from pathlib import Path
 
 
-import src.application.research.mhs.marks as marks
+import src.mhs.marks as marks
 import src.market_data.services.futures_collection as fc
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
-from src.application.research.mhs.evaluation import run_mhs_horizon_diagnostic
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from tests.fixtures.golden.compare import GOLDEN_MATRIX_NAMES, assert_report_digest_identical
 from tests.fixtures.golden.digest import build_report_digest, build_report_summary
-from tests.unit.application.research.mhs.test_evaluation import (
+from tests.unit.mhs.test_evaluation_appresearch import (
     _START,
     _write_mhs_market,
 )

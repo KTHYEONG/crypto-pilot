@@ -7,14 +7,17 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.scaling as scaling
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+import src.mhs.evaluation.diagnostics as diagnostics_mod
+import src.mhs.books as books_mhs
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.scaling as scaling
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
 from src.mhs.horizons import vol_normalized_horizon_signal
-from src.research.universe.pit_universe import symbol_partition
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from src.quant.universe.pit_universe import symbol_partition
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
     _assert_books_equal,
@@ -84,6 +87,8 @@ def test_phase_diagnostics_momentum_keeps_raw_signal(monkeypatch) -> None:
         return real_rank(signal, elig, sign, min_symbols)
 
     monkeypatch.setattr(ev, "rank_weight_book", recording)
+    monkeypatch.setattr(diagnostics_mod, "rank_weight_book", recording)
+    monkeypatch.setattr(books_mhs, "rank_weight_book", recording)
     ev._phase_diagnostics(log_close, eligible, opens, bar_funding, idx, spec)
     assert captured
     phase_grid = idx[0 :: spec.step_hours]
@@ -106,6 +111,8 @@ def test_phase_diagnostics_reversal_keeps_raw_signal(monkeypatch) -> None:
         return real_rank(signal, elig, sign, min_symbols)
 
     monkeypatch.setattr(ev, "rank_weight_book", recording)
+    monkeypatch.setattr(diagnostics_mod, "rank_weight_book", recording)
+    monkeypatch.setattr(books_mhs, "rank_weight_book", recording)
     ev._phase_diagnostics(log_close, eligible, opens, bar_funding, idx, spec)
     assert captured
     phase_grid = idx[0 :: spec.step_hours]
@@ -143,7 +150,7 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     book = report.books["fast_reversal"]
     assert book.primary_autocorr_sharpe is not None
@@ -183,8 +190,8 @@ def test_mhs_fast_book_mode_ensemble_produces_different_executed_book(mhs_market
         "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
         "execution_universe_size": 8,
     }
-    report_default = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
-    report_ensemble = ev.run_mhs_horizon_diagnostic(
+    report_default = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    report_ensemble = run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(**base, fast_book_mode="horizon_ensemble"),
     )
     fast_default = report_default.books["fast_reversal"]

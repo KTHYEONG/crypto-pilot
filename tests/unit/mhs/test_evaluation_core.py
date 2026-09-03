@@ -2,7 +2,7 @@
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
     _assert_books_equal,
