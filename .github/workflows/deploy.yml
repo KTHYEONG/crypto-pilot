@@ -48,66 +48,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Debug Tailscale OAuth Credentials
-        run: |
-          set -u
-          echo "=== 1. OAuth 토큰 발급 테스트 ==="
-          TOKEN_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-            -u "${{ secrets.TS_OAUTH_CLIENT_ID }}:${{ secrets.TS_OAUTH_SECRET }}" \
-            https://api.tailscale.com/api/v2/oauth/token \
-            -d grant_type=client_credentials)
-          
-          HTTP_CODE=$(echo "$TOKEN_RESP" | grep "HTTP_STATUS" | cut -d':' -f2)
-          BODY=$(echo "$TOKEN_RESP" | sed '/HTTP_STATUS/d')
-          echo "OAuth Token HTTP Status: $HTTP_CODE"
-          
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ OAuth 토큰 발급 실패! 원본 응답:"
-            echo "$BODY"
-            exit 1
-          fi
-          
-          echo "✅ OAuth 토큰 발급 성공!"
-          echo "부여된 Scopes 메타데이터:"
-          echo "$BODY" | jq 'del(.access_token)'
-          ACCESS_TOKEN=$(echo "$BODY" | jq -r .access_token)
-          
-          echo "=== 1-1. 키 목록 조회(Read) 테스트 ==="
-          curl -s -w "\nHTTP_STATUS:%{http_code}\n" \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            https://api.tailscale.com/api/v2/tailnet/-/keys
-          
-          echo "=== 2. tag:ci ephemeral auth key 생성 권한 테스트 ==="
-          KEY_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:ci"]}}}}' \
-            https://api.tailscale.com/api/v2/tailnet/-/keys)
-          
-          KEY_HTTP_CODE=$(echo "$KEY_RESP" | grep "HTTP_STATUS" | cut -d':' -f2)
-          KEY_BODY=$(echo "$KEY_RESP" | sed '/HTTP_STATUS/d')
-          echo "Key Creation HTTP Status: $KEY_HTTP_CODE"
-          echo "원본 응답:"
-          echo "$KEY_BODY"
-
+      # GitHub 러너(Azure 대역)는 Oracle Cloud 인바운드가 드롭되므로 Tailscale 사설망으로 접속한다.
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-
-      - name: Diagnose Tailscale Connectivity
-        env:
-          HOST: ${{ secrets.HOST }}
-        run: |
-          echo "=== 1. Tailscale 상태 및 머신 목록 확인 ==="
-          tailscale status
-          echo "=== 2. Oracle 서버 Ping 테스트 ==="
-          tailscale ping -c 3 "$HOST" || true
-          echo "=== 3. 22번 포트 도달 확인 ==="
-          nc -zv -w 5 "$HOST" 22 || true
 
       - name: Decrypt .env
         env:
