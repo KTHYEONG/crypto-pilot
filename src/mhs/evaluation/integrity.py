@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs.research_go import (
+from src.mhs.research_go import (
     GO_REASON_CAPITAL_BREACH,
     GO_REASON_EXECUTION_GAP,
     GO_REASON_INVALID_PRIMARY,

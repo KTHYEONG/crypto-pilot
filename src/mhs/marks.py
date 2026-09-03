@@ -12,8 +12,8 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 import src.market_data.services.futures_collection as _futures_collection
-from src.common.config import funding_path
 from src.common.errors import DataIntegrityError
+from src.common.paths import funding_path
 from src.market_data.services.futures_collection import DataCollector
 from src.market_data.storage.loaders import load_funding_rates
 from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
@@ -47,7 +47,7 @@ def _load_funding_series(
             rates = load_funding_rates(str(path))
         except Exception as exc:  # noqa: BLE001
             dropped[sym] = f"load_error: {exc}"
-            _logger.warning("[MHS] funding load failed symbol=%s error=%s", sym, exc)
+            _logger.warning("[DATA] funding load failed symbol=%s error=%s", sym, exc)
             continue
         if len(rates):
             series[sym] = rates

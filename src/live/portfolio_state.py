@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.config import DATA_DIR
+from src.common.paths import DATA_DIR
 from src.live.settings import ExecutionMode
 from src.mhs.run_history import RUN_HISTORY_MAX_SHARDS, RUN_HISTORY_SHARD_MAX_BYTES
 

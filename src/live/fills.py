@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.common.config import DATA_DIR
+from src.common.paths import DATA_DIR
 
 FILL_REASONS: frozenset[str] = frozenset({"maker_fill", "backstop_taker", "timeout_taker", "residual", "obsolete", "immediate_taker"})
 

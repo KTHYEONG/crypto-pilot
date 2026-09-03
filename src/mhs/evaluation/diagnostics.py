@@ -10,15 +10,15 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
-from src.application.research.mhs.resources import _assert_stage_rss_budget, _StageRecorder
-from src.mhs.books import rank_weight_book
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
+from src.mhs.books import rank_weight_book  # noqa: F401 - re-exported for monkeypatch seams
 from src.mhs.discovery import yearly_net_t_diagnostic
 from src.mhs.evidence import (
     PhaseDiagnosticResult,
     effective_breadth,
-    phase_diagnostic_metrics,
+    phase_diagnostic_metrics,  # noqa: F401 - re-exported for monkeypatch seams
     year_restricted_correlation,
 )
 from src.mhs.execution import (
@@ -31,7 +31,7 @@ from src.mhs.features import (
     feature_coverage_audit,
     feature_registry_panel_columns,
 )
-from src.mhs.horizons import horizon_log_return
+from src.mhs.horizons import horizon_log_return  # noqa: F401 - re-exported for monkeypatch seams
 from src.mhs.panel import load_base_panel
 from src.mhs.params import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
@@ -52,7 +52,7 @@ def _phase_diagnostics(
     grid_1h: pd.DatetimeIndex,
     spec: BookSpec,
 ) -> PhaseDiagnosticResult:
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     phase_nets: dict[int, pd.Series] = {}
     signal = ev.horizon_log_return(log_close, spec.horizon_hours)
     for offset in range(spec.step_hours):

@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.research.evaluation.policy import HOLDOUT_CUTOFF
-from src.research.technical_experts.contracts import TechnicalCandidate
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF
+from src.quant.technical_experts.contracts import TechnicalCandidate
 
 TREND_SCREEN_PROFILE_ID = "baseline_gate_performance_v1"
 
@@ -39,7 +39,7 @@ TREND_SCREEN_SYMBOLS: tuple[str, ...] = (
 # Discovery 2022-04-01..2023-12-31; qualification 2024-01-01..2025-12-31.
 # The 23:59:59 boundaries keep the final bar of each window (matching the
 # shared HOLDOUT_CUTOFF convention for inclusive slicing).
-DISCOVERY_START = pd.Timestamp("2022-04-01", tz="UTC")
+TREND_SCREEN_DISCOVERY_START = pd.Timestamp("2022-04-01", tz="UTC")
 DISCOVERY_END = pd.Timestamp("2023-12-31 23:59:59", tz="UTC")
 QUALIFICATION_START = pd.Timestamp("2024-01-01", tz="UTC")
 QUALIFICATION_END = HOLDOUT_CUTOFF
@@ -126,7 +126,7 @@ TREND_SCREEN_CANDIDATES: tuple[TechnicalCandidate, ...] = _build_trend_screen_ca
 
 def _check_contract() -> None:
     """Executable assertions locking the 30-identity screen catalog surface."""
-    from src.research.technical_experts.catalog import TECHNICAL_CANDIDATES
+    from src.quant.technical_experts.catalog import TECHNICAL_CANDIDATES
 
     ids = [candidate.candidate_id for candidate in TREND_SCREEN_CANDIDATES]
     sources = [candidate.return_source for candidate in TREND_SCREEN_CANDIDATES]

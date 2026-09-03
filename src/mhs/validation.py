@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
 
 def _choice_error(field: str, value: Any, choices: tuple[str, ...]) -> str:

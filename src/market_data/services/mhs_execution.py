@@ -14,8 +14,8 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 import src.market_data.services.futures_collection as _futures_collection
-from src.common.config import FUTURES_DATA_DIR, funding_path
 from src.common.errors import DataIntegrityError
+from src.common.paths import FUTURES_DATA_DIR, funding_path
 from src.market_data.services.futures_collection import DataCollector
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.horizons import horizon_log_return

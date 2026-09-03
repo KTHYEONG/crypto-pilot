@@ -16,8 +16,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from src.common.config import DATA_DIR
 from src.common.errors import DataIntegrityError
+from src.common.paths import DATA_DIR
 from src.live.executor import ExecutionOutcome, OrphanSettlement
 from src.live.planner import OrderIntent
 

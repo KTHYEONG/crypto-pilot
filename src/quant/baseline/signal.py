@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.research.contracts import StrategySpec
+from src.quant.contracts import StrategySpec
 
 
 def donchian_upper(high: pd.Series, period: int) -> pd.Series:

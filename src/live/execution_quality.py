@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.config import DATA_DIR
+from src.common.paths import DATA_DIR
 from src.live.audit import AUDIT_LOG_RETENTION_DAYS
 from src.live.records import append_typed_frame
 from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS

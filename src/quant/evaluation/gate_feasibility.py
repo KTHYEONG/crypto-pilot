@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from statistics import NormalDist
 
-from src.research.evaluation.reliability import ReliabilityGateConfig
+from src.quant.evaluation.reliability import ReliabilityGateConfig
 
 
 @dataclass(frozen=True, slots=True)

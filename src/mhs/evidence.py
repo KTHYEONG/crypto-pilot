@@ -22,7 +22,7 @@ from src.mhs.params import (
     PNL_VOL_TARGET_BURN_IN_DAYS,
 )
 from src.mhs.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
-from src.research.evaluation.policy import HOLDOUT_CUTOFF
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 _EULER_GAMMA = 0.577215664901532860606512090082402431
 

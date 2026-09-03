@@ -19,7 +19,7 @@ from src.mhs.live_strategy import LiveStrategyParams, snapshot_value
 logger = logging.getLogger("LiveSignalStep")
 
 try:
-    from src.application.research.mhs.evaluation import _build_fold_target_weights  # noqa: F401
+    from src.mhs.evaluation import _build_fold_target_weights  # noqa: F401
 except Exception:  # noqa: BLE001,S110
 
     def _build_fold_target_weights(*_a: Any, **_k: Any) -> Any:  # type: ignore[misc]
@@ -146,13 +146,13 @@ def _load_funding_by_symbol(root_str: str) -> dict[str, pd.Series]:
     search_root = root_str if root_str else "data/futures"
     pattern = os.path.join(search_root, "1h", "*.parquet") if os.path.isdir(os.path.join(search_root, "1h")) else os.path.join(search_root, "ohlcv", "1h", "*.parquet")
     if not glob.glob(pattern):
-        from src.common.config import FUTURES_DATA_DIR
+        from src.common.paths import FUTURES_DATA_DIR
 
         pattern = str(FUTURES_DATA_DIR / "ohlcv" / "1h" / "*.parquet")
     for p in sorted(glob.glob(pattern)):
         sym = os.path.basename(p).removesuffix(".parquet")
         try:
-            from src.common.config import funding_path
+            from src.common.paths import funding_path
 
             fp = funding_path(sym)
             if fp.exists():
@@ -165,7 +165,7 @@ def _load_funding_by_symbol(root_str: str) -> dict[str, pd.Series]:
 
             fp_pattern = os.path.join(search_root, "funding", "*.parquet")
             if not _g.glob(fp_pattern):
-                from src.common.config import FUTURES_DATA_DIR as _fdd  # noqa: N811
+                from src.common.paths import FUTURES_DATA_DIR as _fdd  # noqa: N811
 
                 fp_pattern = str(_fdd / "funding" / "*.parquet")
             for fp in sorted(_g.glob(fp_pattern)):  # type: ignore[assignment]
@@ -191,21 +191,21 @@ def compute_signal_row(
     portfolio_state_dir: Path | None = None,
     mode: str = "shadow",
 ) -> tuple[pd.Series, pd.Series, float]:
-    from src.application.research.mhs.scaling import (
+    from src.mhs.params import PNL_VOL_TARGET_SCALE_FLOOR
+    from src.mhs.scaling import (
         _committee_capital_replay_scale,
         _constant_risk_scale,
         _exante_vol_target_scale,
     )
-    from src.mhs.params import PNL_VOL_TARGET_SCALE_FLOOR
 
     if not data_root:
-        from src.common.config import FUTURES_DATA_DIR
+        from src.common.paths import FUTURES_DATA_DIR
 
         data_root = str(FUTURES_DATA_DIR / "ohlcv")
 
     dt = pd.Timestamp(date).tz_convert("UTC").normalize() if pd.Timestamp(date).tzinfo is not None else pd.Timestamp(date).tz_localize("UTC").normalize()
     fold = _synthetic_fold(dt, params)
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     try:
         request = MhsDiagnosticRequest(**params.deployed_flags)

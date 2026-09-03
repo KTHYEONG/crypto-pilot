@@ -2,7 +2,7 @@
 
 Extracted verbatim from ``evaluation.py`` lines 3987-4059 (execution-symbol
 resolution, minute-grid construction, ``has_minute_data`` check,
-``_prewarm_mark_frames``, the ``_run_books_concurrent`` call, and the four
+``_prewarm_mark_frames``, the ``concurrency._run_books_concurrent`` call, and the four
 ``del`` statements at 4034-4037 released verbatim at the end of this function).
 
 The ``del w_fast, w_fast_execution, phase_fast`` / ``del w_slow,
@@ -18,12 +18,8 @@ import os
 
 import pandas as pd
 
-from src.application.research.mhs.marks import _prewarm_mark_frames
-from src.application.research.mhs.stage_services import (
-    _committee_member_attribution,
-    _guard_stage_or_breach,
-    _run_books_concurrent,
-)
+from src.mhs.evaluation import committee, concurrency, guards
+from src.mhs.marks import _prewarm_mark_frames
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -55,7 +51,7 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             grid_bars=len(ctx.minute_grid),
             n_symbols=len(ctx.execution_symbols),
         )
-        _terminal = _guard_stage_or_breach(
+        _terminal = guards._guard_stage_or_breach(
             "pre_books", ctx.rss_budget_bytes, ctx.rss_reserve_bytes,
             ctx.config, ctx.recorder, str(ctx.resolved_end), str(ctx.start), str(ctx.end),
         )
@@ -69,7 +65,7 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # books run concurrently in fork children (spec Phase 3, P10) with a
         # fraction of the former resident set.
         _prewarm_mark_frames(ctx.execution_symbols)
-        book_report_fast, book_report_slow, book_report_blend, ctx.blend_traces, member_reports = _run_books_concurrent(
+        book_report_fast, book_report_slow, book_report_blend, ctx.blend_traces, member_reports = concurrency._run_books_concurrent(
             ctx.root, ctx.config, len(ctx.funded), ctx.grid_1h, ctx.fast, ctx.slow, ctx.fast_grid, ctx.slow_grid,
             ctx.w_fast, ctx.w_slow, ctx.w_fast_execution, ctx.w_slow_execution, ctx.opens, ctx.bar_funding,
             ctx.phase_fast, ctx.phase_slow, ctx.phase_blend, ctx.start, ctx.end, ctx.funding_by_symbol,
@@ -90,12 +86,12 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # member_reports itself -- both sides must be independent sources or
         # proxy_vs_ledger_rank_spearman compares the 3m ledger to itself.
         if member_reports and ctx.config.committee_member_attribution:
-            ctx.committee_member_attribution = _committee_member_attribution(
+            ctx.committee_member_attribution = committee._committee_member_attribution(
                 member_reports, ctx.committee_member_proxy_sharpe or {},
             )
         else:
             ctx.committee_member_attribution = None
-        _terminal = _guard_stage_or_breach(
+        _terminal = guards._guard_stage_or_breach(
             "post_books", ctx.rss_budget_bytes, ctx.rss_reserve_bytes,
             ctx.config, ctx.recorder, str(ctx.resolved_end), str(ctx.start), str(ctx.end),
         )

@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.config import DATA_DIR
+from src.common.paths import DATA_DIR
 from src.live.deployed_weights import default_weights_path
 from src.mhs.live_signal_step import advance_to_date; from src.live.deployed_weights import default_weights_path  # wiring
 
@@ -190,7 +190,7 @@ def _run_preflight(args: argparse.Namespace) -> None:
     settings = _settings_with_mode(args)
     report = run_preflight(settings, Path(args.artifact))
     for check in report.checks:
-        logger.info("[PREFLIGHT] %s passed=%s detail=%s", check.name, check.passed, check.detail)
+        logger.info("[SYS] %s passed=%s detail=%s", check.name, check.passed, check.detail)
     if not report.passed:
         raise SystemExit(1)
 
