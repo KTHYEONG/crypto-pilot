@@ -1,2 +1,0 @@
-"""Legacy futures implementations."""
-
