@@ -11,7 +11,7 @@ from __future__ import annotations
 import dataclasses
 
 from src.market_data.storage.loaders import timeframe_scale_factor
-from src.research.technical_experts.contracts import TechnicalCandidate
+from src.quant.technical_experts.contracts import TechnicalCandidate
 
 TECHNICAL_CANDIDATES: tuple[TechnicalCandidate, ...] = (
     # ema_alignment: EMA 20/50/200 alignment and price reclaim in the slow trend.

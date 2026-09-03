@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 
-from src.application.research.mhs.evaluation import (
+from src.mhs.evaluation import (
     FEATURE_NAME,
     HOLDOUT_CUTOFF,
     phase_1_anchored_purged_folds,

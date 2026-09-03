@@ -26,7 +26,7 @@ from src.mhs.params import (
     PNL_VOL_TARGET_BURN_IN_DAYS,
 )
 from src.mhs.report.persist import mhs_horizon_diagnostic_report_path
-from src.research.risk.growth_sizing import (
+from src.quant.risk.growth_sizing import (
     FrontierScanPoint,
     GrowthSizingConfig,
     scan_leverage_frontier,

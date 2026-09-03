@@ -11,8 +11,8 @@ from typing import Any
 import pandas as pd
 from pydantic import SecretStr
 
-from src.common.config import DATA_DIR
 from src.common.errors import DataIntegrityError
+from src.common.paths import DATA_DIR
 from src.live.errors import ArtifactSealError
 
 SCHEMA_VERSION: int = 1

@@ -9,9 +9,9 @@ import numpy as np
 import pandas as pd
 
 from src.common.logging import setup_logger
-from src.research.baseline.backtest import BacktestResult, run_backtest
-from src.research.contracts import CostModel, StrategySpec
-from src.research.evaluation.metrics import compute_metrics
+from src.quant.baseline.backtest import BacktestResult, run_backtest
+from src.quant.contracts import CostModel, StrategySpec
+from src.quant.evaluation.metrics import compute_metrics
 
 _logger = setup_logger("ReliabilityGate")
 

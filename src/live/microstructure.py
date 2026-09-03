@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.config import DATA_DIR
+from src.common.paths import DATA_DIR
 from src.live.records import append_typed_frame
 
 _MICROSTRUCTURE_DTYPES: Mapping[str, str] = {

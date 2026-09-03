@@ -5,8 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from src.application.research.mhs.contracts import MhsFoldReport
-from src.application.research.mhs.research_go import GO_REASON_FOLD_GROWTH_CONCENTRATION, GO_REASON_PATH_DIVERGENCE
+from src.mhs.contracts import MhsFoldReport
+from src.mhs.research_go import GO_REASON_FOLD_GROWTH_CONCENTRATION, GO_REASON_PATH_DIVERGENCE
 from src.mhs.calibration import sharpe_lower_confidence_bound
 from src.mhs.params import EVIDENCE_GATE_ALPHA, FOLD_BLEND_PARITY_TOLERANCE, FOLD_REALIZED_RISK_PARITY_TOLERANCE
 

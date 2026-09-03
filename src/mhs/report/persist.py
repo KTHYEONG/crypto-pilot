@@ -1,7 +1,7 @@
 # ruff: noqa
 """Persist an MHS horizon diagnostic report to disk.
 
-Extracted verbatim from ``src.application.research.mhs.evaluation`` (the legacy
+Extracted verbatim from ``src.mhs.evaluation`` (the legacy
 monolith). The COMPACT tier writes a git-committable stripped summary JSON plus a
 daily-resampled ledger Parquet; the FULL tier writes the lossless 5-category
 unified Parquet audit tables. Both tiers append an observational run-history
@@ -23,13 +23,13 @@ import numpy as np
 import pandas as pd
 from pydantic import SecretStr
 
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsBookReport,
     MhsDiagnosticRequest,
     MhsFoldReport,
     MhsOutputTier,
 )
-from src.application.research.mhs.resources import _peak_rss_bytes
+from src.mhs.resources import _peak_rss_bytes
 from src.common.errors import DataIntegrityError
 from src.live.crypto import derive_key
 from src.mhs.execution import StrategyExecutionReplayResult
@@ -89,8 +89,8 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     envelope = _GRE.get(str(request.growth_envelope))
     if envelope is None:
         raise DataIntegrityError(f"emit_deployment: unregistered growth_envelope {request.growth_envelope!r}")
-    from src.application.research.mhs.scaling import _growth_budget_target_vol, resolved_exposure_cap
-    from src.application.research.mhs.research_go import _resolved_committee_target_gross
+    from src.mhs.scaling import _growth_budget_target_vol, resolved_exposure_cap
+    from src.mhs.research_go import _resolved_committee_target_gross
     from src.mhs.live_strategy import BOUND_FLAGS
 
     gbtv = float(_growth_budget_target_vol(ref_returns, envelope=envelope))
@@ -105,7 +105,7 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     held_row = {str(k): float(v) for k, v in tw.iloc[-1].items()}
     # backtest window
     try:
-        from src.research.evaluation.policy import resolve_evaluation_end as _resolve_end
+        from src.quant.evaluation.policy import resolve_evaluation_end as _resolve_end
         eval_end = _resolve_end(request.end, unseal_holdout=getattr(request, "final_oos_2026h1", False))
     except Exception:
         eval_end = pd.Timestamp(tw.index[-1])
@@ -207,7 +207,7 @@ def persist_mhs_report(
         )
     except Exception:  # noqa: BLE001 - observational; never break the research result
         logger.warning(
-            "[MHS] run-history record append failed path=%s",
+            "[EVAL] run-history record append failed path=%s",
             mhs_run_history_dir(target),
             exc_info=True,
         )
@@ -504,7 +504,7 @@ def _persist_mhs_report_full(
 
     report_path = artifact_root / "report.json"
     _write_json_report(report_path, payload)
-    logger.info("[MHS] full report persisted path=%s", report_path)
+    logger.info("[EVAL] full report persisted path=%s", report_path)
     return report_path
 
 
@@ -619,7 +619,7 @@ def _persist_mhs_report_compact(
             raise
         except Exception:  # noqa: BLE001
             logger.error(
-                "[MHS] compact daily resample failed replay_id=%s", replay_id, exc_info=True
+                "[EVAL] compact daily resample failed replay_id=%s", replay_id, exc_info=True
             )
             return None
         tagged = daily.copy()
@@ -655,9 +655,9 @@ def _persist_mhs_report_compact(
     size = target.stat().st_size
     if size > 50_000:
         logger.warning(
-            "[MHS] compact report exceeds 50KB size=%d path=%s", size, target
+            "[EVAL] compact report exceeds 50KB size=%d path=%s", size, target
         )
-    logger.info("[MHS] compact report persisted path=%s", target)
+    logger.info("[EVAL] compact report persisted path=%s", target)
     return target
 
 

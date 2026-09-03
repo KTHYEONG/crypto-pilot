@@ -1,7 +1,7 @@
 """S4: Committee evidence weighting + execution book + diagnostics.
 
 Extracted verbatim from ``evaluation.py`` lines 3753-3985 (committee evidence
-weighting, ``_committee_execution_book`` construction or the fast/slow blend
+weighting, ``committee._committee_execution_book`` construction or the fast/slow blend
 fallback, trend sleeve overlay, regime cash scale, phase diagnostics, the
 48h cross-sectional statistics, the discovery-gate qualification block, and
 effective-breadth diagnostics).
@@ -20,10 +20,10 @@ import gc
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import research_go as _research_go
-from src.application.research.mhs import scaling as _scaling
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.evaluation import (
+from src.mhs import research_go as _research_go
+from src.mhs import scaling as _scaling
+from src.mhs import statistics as _statistics
+from src.mhs.evaluation import (
     BOOK_BLEND_WEIGHTS,
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
@@ -39,9 +39,13 @@ from src.application.research.mhs.evaluation import (
     FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
     QUALIFICATION_END,
+    books,
     causal_market_beta,
+    committee,
+    diagnostics,
     effective_breadth,
     efficiency_ratio,
+    folds,
     funding_carry_execution_book,
     horizon_log_return,
     mhs_ledger_pnl,
@@ -51,17 +55,6 @@ from src.application.research.mhs.evaluation import (
     year_restricted_correlation,
     yearly_net_t_diagnostic,
 )
-from src.application.research.mhs.stage_services import (
-    _active_blend_book_and_grid,
-    _apply_trend_sleeve,
-    _committee_evidence_weights_by_boundary,
-    _committee_execution_book,
-    _committee_member_books,
-    _phase_diagnostics,
-    _prefer_funding_carry_selection,
-    _trend_sleeve_diagnostic,
-    _trend_sleeve_position,
-)
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
@@ -69,7 +62,7 @@ from src.mhs.telemetry import StageTelemetry
 
 def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     """Construct the committee execution book and all committee-tier diagnostics."""
-    from src.application.research.mhs.research_go import _resolved_growth_envelope
+    from src.mhs.research_go import _resolved_growth_envelope
 
     ctx._committee_weights_by_boundary = {}
     ctx._fold_committee_weights = None
@@ -91,7 +84,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             f"fold_{_i}": _f.train_end
             for _i, _f in enumerate(phase_1_anchored_purged_folds())
         })
-        ctx._committee_weights_by_boundary = _committee_evidence_weights_by_boundary(
+        ctx._committee_weights_by_boundary = committee._committee_evidence_weights_by_boundary(
             ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols, _train_ends,
             members=_research_go._resolved_committee_members(ctx.config),
         )
@@ -110,7 +103,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # RC-4: the reported blend is the committee execution book, not the
         # frozen momentum formula. Un-scaled copy feeds the concurrent replay
         # base so regime_scale applies exactly once (matching the fold path).
-        ctx.blend_1h = _committee_execution_book(
+        ctx.blend_1h = committee._committee_execution_book(
             ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols,
             COMMITTEE_TRANCHE_COUNT
             if (ctx.config.committee_tranche_smoothing or ctx.config.committee_regime_adaptive_tranche)
@@ -136,7 +129,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.committee_execution_book = ctx.blend_1h
         # Build per-member attribution books (I5: observational only)
         if ctx.config.committee_member_attribution:
-            ctx.committee_member_books = _committee_member_books(
+            ctx.committee_member_books = committee._committee_member_books(
                 ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask,
                 ctx.slow_grid, ctx.slow.min_symbols,
                 _research_go._resolved_committee_members(ctx.config),
@@ -174,12 +167,12 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # overlay rides the same de-risking machinery as the deployed book.
     ctx.current_book_for_diagnostic = ctx.blend_1h
     ctx.trend_position = (
-        _trend_sleeve_position(ctx.log_close, ctx.eligible, ctx.slow_grid)
+        folds._trend_sleeve_position(ctx.log_close, ctx.eligible, ctx.slow_grid)
         if (ctx.config.trend_sleeve and ctx.config.trend_sleeve_gross > 0.0)
         else None
     )
     if ctx.trend_position is not None:
-        ctx.blend_1h = _apply_trend_sleeve(
+        ctx.blend_1h = folds._apply_trend_sleeve(
             ctx.blend_1h, ctx.trend_position, ctx.execution_mask, ctx.config.trend_sleeve_gross,
         )
         if ctx.committee_execution_book is not None:
@@ -204,11 +197,11 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     del ctx.w_fast_1h, ctx.w_slow_1h
     gc.collect()
 
-    ctx.phase_fast = _phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast)
-    ctx.phase_slow = _phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.slow)
-    _blend_spec, _blend_grid = _active_blend_book_and_grid(ctx.fast, ctx.slow, ctx.fast_grid, ctx.slow_grid)
+    ctx.phase_fast = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast)
+    ctx.phase_slow = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.slow)
+    _blend_spec, _blend_grid = books._active_blend_book_and_grid(ctx.fast, ctx.slow, ctx.fast_grid, ctx.slow_grid)
     del _blend_grid
-    ctx.phase_blend = _phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, _blend_spec)
+    ctx.phase_blend = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, _blend_spec)
 
     # R3: the 48h cross-sectional statistics depend only on the 1h panel, not
     # the book replays.  Computing them here -- and computing ``signal_48h``
@@ -217,7 +210,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # (spec §3.1, ``memory_opt``).
     ctx.signal_48h = horizon_log_return(ctx.log_close, 48)
     ctx.xs_ic = _statistics._xs_rank_ic(ctx.signal_48h, ctx.opens, forward_bars=48)
-    ctx.trend_sleeve_diagnostic = _trend_sleeve_diagnostic(
+    ctx.trend_sleeve_diagnostic = diagnostics._trend_sleeve_diagnostic(
         ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.execution_mask,
         ctx.current_book_for_diagnostic, ctx.config,
     ) if ctx.config.trend_sleeve else None
@@ -306,7 +299,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 MEASURED_EXECUTION_COST_TIERS_BPS["base"], _PERIODS_PER_YEAR_1H,
             ),
         }
-        _fc_pick = _prefer_funding_carry_selection(
+        _fc_pick = folds._prefer_funding_carry_selection(
             ctx.discovery_qualification["funding_carry_long"],
             ctx.discovery_qualification["funding_carry_short"],
         )

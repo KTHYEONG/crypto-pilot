@@ -8,16 +8,16 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import scaling as _scaling
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.contracts import MhsDiagnosticRequest, MhsFoldReport
-from src.application.research.mhs.research_go import (
+from src.mhs import scaling as _scaling
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import MhsDiagnosticRequest, MhsFoldReport
+from src.mhs.research_go import (
     GO_REASON_EXECUTION_GAP,
     GO_REASON_INCOMPLETE_FOLD,
     GO_REASON_INVALID_PRIMARY,
     GO_REASON_NONFINITE_EQUITY,
 )
-from src.application.research.mhs.resources import (
+from src.mhs.resources import (
     _assert_execution_rss_budget,
     _assert_stage_rss_budget,
     _resolve_ram_budget,

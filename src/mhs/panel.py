@@ -16,7 +16,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
 
 def build_uniform_grid(start: pd.Timestamp, end: pd.Timestamp, interval: str) -> pd.DatetimeIndex:

@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
 try:
     from src.market_data.services.futures_collection import DataCollector

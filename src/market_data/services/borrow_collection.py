@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.common.config import borrow_path
 from src.common.errors import DataIntegrityError
+from src.common.paths import borrow_path
 from src.market_data.binance.margin import BinanceMarginClient
 from src.market_data.services.rate_common import (
     BORROW_CANONICAL_COLUMNS as _BORROW_CANONICAL_COLUMNS,

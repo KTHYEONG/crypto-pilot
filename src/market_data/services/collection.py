@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from src.common.config import BASE_DIR
+from src.common.paths import BASE_DIR
 from src.market_data.services.borrow_collection import (
     collect_binance_quote_borrow_history,
     import_quote_borrow_history,

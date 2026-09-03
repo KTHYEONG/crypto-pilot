@@ -7,9 +7,9 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.contracts import MhsBookReport
-from src.application.research.mhs.resources import _assert_stage_rss_budget, _StageRecorder
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import MhsBookReport
+from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
 from src.mhs.books import phase_tranche_book, scale_book_to_target_gross
 from src.mhs.committee import (
     committee_block_edges_from,
@@ -47,7 +47,7 @@ from src.mhs.params import (
 )
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.regime import beta_neutralize_weights
-from src.research.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
+from src.quant.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
 
 from . import diagnostics
 
@@ -563,7 +563,7 @@ def _committee_evidence_weights_by_boundary(
         spec for spec in FEATURE_REGISTRY
         if spec.name in set(_resolved)
     ]
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     _committee_books = ev.build_feature_books(
         _member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
@@ -632,7 +632,7 @@ def _committee_execution_book(
         spec for spec in FEATURE_REGISTRY
         if spec.name in set(_resolved)
     ]
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     _committee_books = ev.build_feature_books(
         _member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},

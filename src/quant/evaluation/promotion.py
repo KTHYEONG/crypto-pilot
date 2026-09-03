@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Literal
 
-from src.research.evaluation.reliability import FoldDistributionResult, ReliabilityGateResult
+from src.quant.evaluation.reliability import FoldDistributionResult, ReliabilityGateResult
 
 PromotionStatus = Literal["REJECTED", "OBSERVATION_PASS", "HOLDOUT_PASS"]
 GateVerdict = Literal["PASS", "FAIL", "PENDING"]
