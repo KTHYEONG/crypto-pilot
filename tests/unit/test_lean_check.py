@@ -13,37 +13,37 @@ _MODULE_SPEC.loader.exec_module(_lean_check)
 
 
 def test_feature_named_cli_test_matches_imported_source() -> None:
-    source = "src/application/research/mhs/evaluation.py"
-    test_file = "tests/integration/mhs/test_mhs_horizon_diagnostic.py"
+    source = "src/mhs/contracts.py"
+    test_file = "tests/integration/mhs/test_golden_identity.py"
 
     assert _lean_check._test_references_source(test_file, source)
 
 
 def test_unrelated_test_does_not_match_source() -> None:
     assert not _lean_check._test_references_source(
-        "tests/unit/research/evaluation/test_promotion.py",
-        "src/application/research/mhs/evaluation.py",
+        "tests/unit/quant/evaluation/test_promotion.py",
+        "src/mhs/evaluation/folds.py",
     )
 
 
 def test_find_test_files_includes_semantic_source_test() -> None:
-    files = _lean_check._find_test_files(["src/application/research/mhs/evaluation.py"])
+    files = _lean_check._find_test_files(["src/mhs/contracts.py"])
 
-    assert "tests/unit/application/research/mhs/test_evaluation.py" in files
+    assert "tests/unit/mhs/test_contracts.py" in files
 
 
 def test_import_index_contains_semantic_reference() -> None:
-    tf = "tests/unit/application/research/mhs/test_evaluation.py"
+    tf = "tests/unit/mhs/test_contracts_appresearch.py"
 
     mods = _lean_check._imported_source_modules(tf)
 
-    assert "src.application.research.mhs.evaluation" in mods
+    assert "src.mhs.contracts" in mods
 
 
 def test_semantic_match_builds_index_once() -> None:
     _lean_check._imported_source_modules.cache_clear()
-    tf = "tests/unit/application/research/mhs/test_evaluation.py"
-    src = "src/application/research/mhs/evaluation.py"
+    tf = "tests/unit/mhs/test_contracts_appresearch.py"
+    src = "src/mhs/contracts.py"
 
     assert _lean_check._test_references_source(tf, src)
     _lean_check._test_references_source(tf, src)

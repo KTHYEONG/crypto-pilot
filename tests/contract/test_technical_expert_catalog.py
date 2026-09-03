@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.research.technical_experts.catalog import (
+from src.quant.technical_experts.catalog import (
     ADMITTED_FAMILY_MATRIX,
     TECHNICAL_CANDIDATES,
     TECHNICAL_EXPERT_FAMILIES,

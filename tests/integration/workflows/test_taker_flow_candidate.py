@@ -5,12 +5,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.research.contracts import CostModel, StrategySpec
+from src.quant.contracts import CostModel, StrategySpec
 from src.common.errors import DataIntegrityError
 from src.market_data.storage.loaders import load_ohlcv_4h
-from src.research.baseline.backtest import run_backtest
-from src.research.evaluation.metrics import compute_metrics
-from src.research.evaluation.reliability import (
+from src.quant.baseline.backtest import run_backtest
+from src.quant.evaluation.metrics import compute_metrics
+from src.quant.evaluation.reliability import (
     compute_reliability_gate,
     compute_stress_test_gate,
 )

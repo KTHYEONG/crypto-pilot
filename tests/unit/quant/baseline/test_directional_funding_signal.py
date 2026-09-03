@@ -5,11 +5,11 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
-from src.research.baseline.signal import (
+from src.quant.baseline.signal import (
     _settled_funding_rates,
     generate_directional_funding_signals,
 )
-from src.research.contracts import StrategySpec
+from src.quant.contracts import StrategySpec
 
 _SPEC = StrategySpec(entry_period=5, exit_period=3, ema_period=5, atr_period=5)
 
@@ -62,8 +62,8 @@ def test_long_breakout_negative_funding_is_signal_only_at_next_open() -> None:
     assert features.loc[df.index[260], "long_entry_signal"]
     assert not features.loc[df.index[260], "short_entry_signal"]
 
-    from src.research.baseline.backtest import run_directional_backtest
-    from src.research.contracts import CostModel
+    from src.quant.baseline.backtest import run_directional_backtest
+    from src.quant.contracts import CostModel
 
     result = run_directional_backtest(df, _SPEC, CostModel(), funding)
     long_trades = result.trades[result.trades["side"] == "long"]

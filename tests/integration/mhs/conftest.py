@@ -5,14 +5,13 @@ from __future__ import annotations
 import pandas as pd
 from pathlib import Path
 
-import src.application.research.mhs.marks as marks
-from src.application.research.mhs import evaluation as ev
+import src.mhs.marks as marks
 import inspect
 
-from src.application.research.mhs import scaling
-from src.application.research.mhs import statistics
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
-from src.application.research.mhs.evaluation import run_mhs_horizon_diagnostic
+from src.mhs import scaling
+from src.mhs import statistics
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from tests.integration.mhs.test_mhs_horizon_diagnostic import (
     DEV_SYMBOLS,
     START,
@@ -139,7 +138,9 @@ def calibrated_report(synthetic_market):
         "regime_callers": mgr.list(),
         "deadband_callers": mgr.list(),
     })
-    real_book_weights = ev._book_weights
+    from src.mhs.evaluation import books as eval_books
+
+    real_book_weights = eval_books._book_weights
     real_regime = scaling._regime_cash_scale
     real_deadband = scaling._apply_rebalance_deadband
 
@@ -161,7 +162,7 @@ def calibrated_report(synthetic_market):
         captured["deadband_callers"].append(caller)
         return real_deadband(*args, **kwargs)
 
-    ev._book_weights = _book_weights
+    eval_books._book_weights = _book_weights
     scaling._regime_cash_scale = _regime
     scaling._apply_rebalance_deadband = _deadband
     try:
@@ -172,7 +173,7 @@ def calibrated_report(synthetic_market):
             ),
         )
     finally:
-        ev._book_weights = real_book_weights
+        eval_books._book_weights = real_book_weights
         scaling._regime_cash_scale = real_regime
         scaling._apply_rebalance_deadband = real_deadband
     yield report, captured
