@@ -1,2 +1,0 @@
-"""Legacy ML pipeline package."""
-
