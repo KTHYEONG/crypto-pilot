@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "REFACTOR_P0_P5_STRUCTURAL",
+      "date": "2026-09-03",
+      "adr_id": "ADR_20260903_REFACTOR_P0_P5_STRUCTURAL",
+      "domain": "architecture",
+      "title": "구조 리팩토링 P0-P5: 베이스라인 녹색화, legacy 삭제, evaluation/execution 분해, 레이아웃 통합, 문서 동기화 및 재부패 방지 가드",
+      "why": "단일 모듈 비대화(evaluation.py 4144줄, execution.py 3025줄)와 evaluation<->pipeline import cycle(함수 스코프 import + stage_services 우회로 봉합), vestigial src/application 3단 중첩과 common/core 이중 버킷, research 오명(실체는 live·offline 공용 quant 원시 라이브러리), 934파일 legacy 트리가 AI 컨텍스트와 코드맵을 오염. ADR_20260820 분해 이후에도 가드 없이 evaluation.py가 4144줄로 재비대화된 전례가 있어 테스트가 아닌 관습으로는 재발을 막을 수 없음.",
+      "resolution": "P0-P5 6단계 완료: 베이스라인 녹색화, legacy 삭제, evaluation.py/execution.py 패키지 분해 및 순환의존 제거, src/mhs 단일트리·src/quant 통합, 문서 동기화 및 재부패 방지 가드(test_module_boundaries.py) 도입. /check 감사에서 발견된 legacy/application/core 부재 가드 유실 1건 수정 완료(test_deleted_trees_stay_deleted 추가).",
+      "impact": "전체 스위트 녹색(benchmark 제외 0 failed), P0 골든이 P1-P4에서 bit-identical로 행위보존 증명. src/ 최대모듈 1267줄(cross_sectional, 동결)·최대함수 576줄(strategy_replay, 동결) — 신규 비대화·신규 사이클·신규 장함수·삭제트리 재도입은 계약 테스트가 즉시 실패."
+    },
+    {
       "task_id": "TASK_MHS_REPORT_PAYLOAD_OPTIMIZE",
       "date": "2026-09-02",
       "adr_id": "ADR_20260902_MHS_REPORT_PAYLOAD_OPTIMIZE",
@@ -989,16 +999,6 @@
       "why": "fast_reversal이 24-168h 전체 후보 그리드에서 leak-free 재검증 후에도 admission 실패(mhs-res.md 18차 §1-bis)해 독자 알파북으로서 근거가 없음이 확정됨. 동시에 whipsaw 억제용 EMA가 reversal 신호에도 무조건 적용돼 진단 헤드라인을 왜곡하고 있었고, fast_reversal의 독립적 CAPITAL_INVARIANT_BREACH(2025-07-14 음의 자기자본)가 향후 어떤 형태로든 자본 복원을 막는 최우선 차단 항목으로 기록돼 있었음(mhs-res.md §7).",
       "resolution": "(A) src/mhs/execution.py: _BoundExecutionReplayAccumulator/replay_execution_windows에 opt-in min_equity_fraction 방어 플로어 추가(기본 None=기존 동작 완전 동일), SimulatedInventoryLedgerResult.equity_floor_breached_at 타입드 필드 신설, _book_outcome의 Pass-1 reference replay에만 MHS_REFERENCE_PASS_EQUITY_FLOOR(=MHS_REGIME_CASH_SCALE_FLOOR 재사용)로 배선. (B) evaluation.py에 sign-aware _signal_ema_span 헬퍼 신설해 두 호출부(fold/top-level)의 fast_ema를 sign=-1일 때 None(무스무딩)으로 교체 -- slow_momentum 수치는 완전 불변. (C) src/mhs/regime.py에 trend_efficiency_scale 신설(efficiency_ratio 기반, _regime_cash_scale과 동일한 ratio-to-own-history 패턴, 방향만 반전), evaluation.py에 _trend_efficiency_overlay_scale 래퍼 + MhsDiagnosticRequest.trend_efficiency_overlay(opt-in bool, 기본 False) + CLI --trend-efficiency-overlay 플래그, 양쪽 호출부(_build_fold_target_weights/top-level run_mhs_horizon_diagnostic)에서 기존 regime_scale과 곱으로 합성. PHASE_1_BOOK_BLEND_WEIGHTS는 무변경(fast_reversal 여전히 0.0 자본).",
       "impact": "lean_check.py --spec docs/specs/mhs_fast_reversal_overlay_redesign_contract.json PASS(lint/type/test 전체), contract의 10개 시나리오 전부 대응하는 테스트가 tests/unit/mhs/test_regime.py, tests/unit/mhs/test_execution.py, tests/unit/application/research/mhs/test_fast_reversal_overlay_redesign.py에 추가되어 104 passed. trend_efficiency_overlay 기본값 False이므로 기존 프로덕션 경로/mhs-res.md 기록 수치는 불변. 실전 데이터 재실행(fold-train-only 오버레이 비교, EMA 수정 후 프리스크린 재검증)은 미실행 -- §4 검증 계획은 후속 실측 과제로 남음."
-    },
-    {
-      "task_id": "TASK_MHS_UNIVERSE_HORIZON_REDESIGN",
-      "date": "2026-08-12",
-      "adr_id": "ADR_20260812_MHS_UNIVERSE_HORIZON_REDESIGN",
-      "domain": "mhs",
-      "title": "MHS 유니버스/호라이즌/자본배분 개선안 스펙 + fast_reversal fold-safe 재검증",
-      "why": "docs/results/mhs-res.md 17차 이후, 유동성 median-split(720h)/top-30 로스터/fast-slow horizon 탐색범위/앙상블 가중/fast 0% 배분의 근거를 코드분석으로 재검토 요청받음. fast_reversal의 0% 자본배분이 48h 단일밴드 prescreen에만 근거했고 slow에 이미 구축된 7-후보 fold-train-only leak-free 재검증 인프라가 fast엔 한번도 적용된 적 없음을 발견.",
-      "resolution": "_FAST_BAND.horizons_hours를 48h 단일값에서 REVERSAL_HORIZON_CANDIDATES_HOURS=(24,48,72,96,120,144,168) 7-후보 그리드로 확장(contracts.py). request.fold_safe_horizon_selection 블록에 fast용 fold_train_only_discovery_qualification(sign=-1)을 slow와 나란히 배선하고 MhsFoldReport에 fast_horizon_hours/fast_horizon_source 필드 추가(evaluation.py). PHASE_1_BOOK_BLEND_WEIGHTS/실제 fast 리플레이·원장은 전혀 변경하지 않는 진단 전용 계약. 18차 실전 실행(--fold-safe-horizon)으로 검증: 3개 fold 전부 fast_horizon_source=frozen_default로 폴백 -- 넓은 그리드에서도 admission floor(|t|>=2.0) 통과 후보 없음.",
-      "impact": "blend/primary 지표(primary_autocorr_sharpe=0.5257, CAGR 7.84%, stress_naive_sharpe=+0.1420) 17차와 소수점까지 바이트 동일 확인 -- 진단 전용 계약이 실측으로 증명됨. Q4('fast 탐색이 무의미한가')에 대해 '48h만 봐서 성급했다'는 가설을 leak-free 증거로 기각하고 edge 부재를 재확인. 다음 우선순위(CAPITAL_INVARIANT_BREACH 근본원인, fold1 원인조사, 로스터 N 재검증, 결합 파라미터 탐색)를 mhs-res.md §7에 정렬. /check PASS(lint/type/test, Impact Level 3)."
     }
   ]
 }
