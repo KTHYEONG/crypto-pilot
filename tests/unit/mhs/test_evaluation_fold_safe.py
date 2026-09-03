@@ -3,13 +3,14 @@
 """Contract coverage for the MHS application evaluation resource telemetry."""
 import numpy as np
 import pytest
-from src.application.research.mhs import evaluation as ev
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
     _admitted_selection,
@@ -95,7 +96,7 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
 
     monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
     monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
-    top_report = ev.run_mhs_horizon_diagnostic(request)
+    top_report = run_mhs_horizon_diagnostic(request)
     assert top_report.status == "COMPLETE"
     assert calls["n"] == 0
     assert captured["fold_slow_horizons"] == {}
@@ -170,7 +171,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, fold_safe_horizon_selection=True,
     )
-    top_report = ev.run_mhs_horizon_diagnostic(request_on)
+    top_report = run_mhs_horizon_diagnostic(request_on)
     assert top_report.status == "COMPLETE"
     assert captured["fold_slow_horizons"] == {0: 360, 1: 360, 2: 360, 3: 360}
     # The fast re-verification is diagnostic-only: the parent threads the
@@ -219,7 +220,7 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, fold_safe_horizon_selection=True,
     )
-    top_report = ev.run_mhs_horizon_diagnostic(request_on)
+    top_report = run_mhs_horizon_diagnostic(request_on)
     assert top_report.status == "COMPLETE"
     assert calls["n"] == 1
 
@@ -246,7 +247,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
             execution_universe_size=8, fold_safe_horizon_selection=True,
         )
-        top_report = ev.run_mhs_horizon_diagnostic(request_on)
+        top_report = run_mhs_horizon_diagnostic(request_on)
         assert top_report.status == "COMPLETE"
         return captured["fold_funding_carry"]
 

@@ -6,10 +6,10 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.scaling as scaling
+from src.mhs import evaluation as ev
+import src.mhs.scaling as scaling
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
     _assert_books_equal,
     _build_book_outcome_args,

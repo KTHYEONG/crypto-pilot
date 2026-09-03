@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.application.research.mhs import marks
+from src.mhs import marks
 
 
 def test_pit_execution_mask_entry_and_exit_hysteresis() -> None:

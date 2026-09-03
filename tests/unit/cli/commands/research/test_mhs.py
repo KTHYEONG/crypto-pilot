@@ -47,7 +47,7 @@ def test_mhs_diagnostic_max_rss_bytes_flag_wired_to_request() -> None:
 def test_mhs_diagnostic_output_tier_flag_threaded_to_persist(monkeypatch) -> None:
     """``--output-tier full`` is parsed and threaded into the persist call;
     the default stays ``compact``."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
     sub = argparse.ArgumentParser().add_subparsers()
@@ -82,7 +82,7 @@ def test_mhs_diagnostic_touch_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_TOUCH_CLI_FLAG: ``--touch-diagnostic`` is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it
     defaults to False."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -117,7 +117,7 @@ def test_mhs_diagnostic_fold_safe_horizon_flag_threaded_to_request(monkeypatch) 
     """SCENARIO_MHS_FOLD_SAFE_HORIZON_08_CLI_FLAG_THREADS_THROUGH:
     ``--fold-safe-horizon`` is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it defaults to False."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -152,7 +152,7 @@ def test_mhs_diagnostic_ladder_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_LADDER_CLI_FLAG: ``--ladder-diagnostic`` is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it
     defaults to False."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -187,7 +187,7 @@ def test_mhs_diagnostic_crash_tilt_alpha_flag_threaded_to_request(monkeypatch) -
     """The opt-in ``--crash-regime-tilt-alpha`` is parsed and threaded into the
     constructed ``MhsDiagnosticRequest``; the default stays None (disabled,
     byte-identical to the fully dollar-neutral book)."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -226,7 +226,7 @@ def test_mhs_diagnostic_trend_sleeve_flags_threaded_to_request(monkeypatch) -> N
     False) and ``--trend-sleeve-gross`` (type=float, default 0.0) are parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting both yields
     the off values."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -270,7 +270,7 @@ def test_mhs_diagnostic_alpha_engine_flags_threaded_to_request(monkeypatch) -> N
     ``--beta-neutralize`` and ``--ensemble-signal`` parse into the matching
     ``MhsDiagnosticRequest`` fields, and omitting all three reproduces the
     current defaults."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -322,7 +322,7 @@ def test_mhs_diagnostic_multi_feature_flag_threaded_to_request(monkeypatch) -> N
     """SCENARIO_CLI_MULTI_FEATURE_FLAG: ``--multi-feature-book`` (store_true,
     default False) is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it yields multi_feature_book=False."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -360,7 +360,7 @@ def test_mhs_diagnostic_committee_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_CLI_COMMITTEE_FLAG: ``--committee-book`` (store_true, default
     False) is parsed and threaded into the constructed ``MhsDiagnosticRequest``;
     omitting it yields committee_book=False."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -401,7 +401,7 @@ def test_mhs_diagnostic_committee_kelly_sizing_defaults_on_and_opt_out(monkeypat
     ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING) is on by default whenever
     committee capital is active; ``--no-committee-kelly-sizing`` opts back out
     to the pure vol-target scale while leaving committee capital on."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -442,7 +442,7 @@ def test_mhs_diagnostic_committee_growth_diagnostic_flag_threaded_to_request(mon
     ``--committee-growth-diagnostic`` (store_true, default False, requires
     ``--committee-book``) is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it yields committee_growth_diagnostic=False."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -522,7 +522,7 @@ def test_mhs_diagnostic_committee_capital_defaults_on_and_opt_out(monkeypatch) -
     ``--no-committee-capital`` opts back out to committee_capital=False (which
     also forces committee_regime_adaptive_tranche=False, since it requires
     committee capital)."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -564,7 +564,7 @@ def test_mhs_diagnostic_committee_tranche_smoothing_flag_threaded_to_request(mon
     threaded into the constructed ``MhsDiagnosticRequest``; passing it
     overrides the regime-adaptive main-logic default (the two are mutually
     exclusive) rather than raising."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -608,7 +608,7 @@ def test_mhs_diagnostic_committee_regime_adaptive_tranche_defaults_on_and_opt_ou
     regime-adaptive tranche (the best-measured configuration) is on by default
     whenever committee capital is active; ``--no-committee-regime-adaptive-tranche``
     opts back out to the raw committee book while leaving committee capital on."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -649,7 +649,7 @@ def test_mhs_diagnostic_execution_coverage_gate_flag_threaded(monkeypatch) -> No
     ``--execution-coverage-gate`` (store_true, default False) is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it yields
     execution_coverage_gate=False."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -687,7 +687,7 @@ def test_mhs_diagnostic_persist_stage_logged(monkeypatch, caplog) -> None:
     """SCENARIO_MHS_CLI_PERSIST_STAGE_LOGGED: the persist step emits a [SYS]
     stage=persist_report elapsed_ms=<int> log line, so the post-run report
     serialization span is visible to the same [SYS] telemetry."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -709,7 +709,7 @@ def test_mhs_diagnostic_persist_stage_logged(monkeypatch, caplog) -> None:
 def test_mhs_diagnostic_persist_receives_request_object(monkeypatch) -> None:
     """SCENARIO_MHS_RESULT_LOG_07: ``_run_mhs_horizon_diagnostic`` threads the
     constructed ``MhsDiagnosticRequest`` into the persist call via ``request=``."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
     requests: list = []
@@ -747,7 +747,7 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
     ``args.execution_timeframe == "3m"``; ``--execution-timeframe 3m`` is
     accepted; and the constructed ``MhsDiagnosticRequest`` carries
     ``execution_timeframe="3m"``."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
 
     captured: dict = {}
 
@@ -783,7 +783,7 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
 
 def test_cli_flags_threaded(monkeypatch) -> None:
     """SCENARIO_CLI_FLAGS_THREADED: new CLI args are threaded into MhsDiagnosticRequest."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     import src.mhs.pipeline.orchestrator as orchestrator
     from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 
@@ -845,7 +845,7 @@ def test_mhs_diagnostic_leverage_frontier_scan_short_circuit_scenario_mhs_levera
     the handler before any heavy import -- the full pipeline must never run on
     the scan path, while the flag=False path still reaches the pipeline."""
     from src.mhs.params import LEVERAGE_FRONTIER_SCAN_MULTIPLES
-    import src.application.research.mhs.leverage_scan as leverage_scan
+    import src.mhs.leverage_scan as leverage_scan
 
     def _boom(config):
         raise AssertionError("full pipeline must not run")
@@ -911,7 +911,7 @@ def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
     """v2: --emit-deployment invokes emit_deployment."""
     import pandas as pd
 
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     import src.mhs.report.persist as persist_mod
 
     target_weights = pd.DataFrame({"BTCUSDT": [0.1, -0.1]}, index=pd.DatetimeIndex([pd.Timestamp("2026-08-24", tz="UTC"), pd.Timestamp("2026-08-25", tz="UTC")]))
@@ -947,7 +947,7 @@ def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
 
 def test_mhs_emit_target_weights_fails_closed_without_blend(monkeypatch) -> None:
     """v2: blend-less must fail closed for emit_deployment."""
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     from src.common.errors import DataIntegrityError
 
     fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=None, research_go=types.SimpleNamespace(eligible=True))

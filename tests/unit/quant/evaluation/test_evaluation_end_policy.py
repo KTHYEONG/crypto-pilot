@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1
-from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
 
 
 # SCENARIO_MHS_RESOLVE_EVALUATION_END_ALWAYS_RESOLVES

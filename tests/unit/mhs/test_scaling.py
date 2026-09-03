@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
-from src.application.research.mhs import scaling
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs import scaling
 from src.common.errors import DataIntegrityError
 from src.mhs.params import (
     COMMITTEE_OOS_START,
@@ -147,7 +147,7 @@ def _frontier_multiple(r: pd.Series, envelope_name: str) -> float | None:
         COMMITTEE_GROWTH_N_PATHS,
         COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
     )
-    from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
+    from src.quant.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
 
     env = GROWTH_RISK_ENVELOPES[envelope_name]
     x = r.dropna()
@@ -806,7 +806,7 @@ def test_scenario_mhs_dd_brake_05_drawdown_brake_fail_closed() -> None:
 
 # SCENARIO_MHS_DD_BRAKE_06_REPLAY_DEFAULT_BIT_IDENTICAL
 def test_scenario_mhs_dd_brake_06_drawdown_brake_replay_default_bit_identical() -> None:
-    from src.application.research.mhs.research_go import _resolved_growth_envelope
+    from src.mhs.research_go import _resolved_growth_envelope
 
     rng = np.random.default_rng(37)
     idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")

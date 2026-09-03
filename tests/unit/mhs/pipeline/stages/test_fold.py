@@ -8,6 +8,11 @@ Verifies the S7 stage reaches ``run_post_book_concurrently``/
 """
 
 from __future__ import annotations
+import src.mhs.evaluation.committee as committee_mod
+import src.mhs.evaluation.diagnostics as diagnostics_mod
+import src.mhs.evaluation.evidence as evidence_mod
+import src.mhs.evaluation.guards as guards_mod
+import src.mhs.evaluation.concurrency as concurrency_mod
 
 import dataclasses
 
@@ -15,7 +20,7 @@ import pandas as pd
 import pytest
 
 import src.mhs.pipeline.stages.fold as fold_stage
-from src.application.research.mhs.evaluation import DataIntegrityError
+from src.mhs.evaluation import DataIntegrityError
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
@@ -102,13 +107,20 @@ def test_run_folds_reaches_seam_functions_default_flags(monkeypatch: pytest.Monk
     def _boom(*_a: object, **_k: object) -> None:
         raise AssertionError("committee/multi-feature diagnostics must not run when both flags are off")
 
-    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently)
-    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", _fake_guard_stage_or_breach)
-    monkeypatch.setattr(fold_stage, "_fold_blend_parity", _fake_fold_blend_parity)
-    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", _fake_fold_growth_concentration)
-    monkeypatch.setattr(fold_stage, "_load_feature_panels", _boom)
-    monkeypatch.setattr(fold_stage, "_committee_diagnostic", _boom)
-    monkeypatch.setattr(fold_stage, "_multi_feature_diagnostic", _boom)
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently, raising=False)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _fake_run_post_book_concurrently, raising=False)
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", _fake_guard_stage_or_breach, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", _fake_guard_stage_or_breach, raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", _fake_fold_blend_parity, raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_blend_parity", _fake_fold_blend_parity, raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", _fake_fold_growth_concentration, raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_growth_concentration", _fake_fold_growth_concentration, raising=False)
+    monkeypatch.setattr(fold_stage, "_load_feature_panels", _boom, raising=False)
+    monkeypatch.setattr(diagnostics_mod, "_load_feature_panels", _boom, raising=False)
+    monkeypatch.setattr(fold_stage, "_committee_diagnostic", _boom, raising=False)
+    monkeypatch.setattr(committee_mod, "_committee_diagnostic", _boom, raising=False)
+    monkeypatch.setattr(fold_stage, "_multi_feature_diagnostic", _boom, raising=False)
+    monkeypatch.setattr(diagnostics_mod, "_multi_feature_diagnostic", _boom, raising=False)
     monkeypatch.setattr(
         fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None, None),
     )
@@ -164,10 +176,14 @@ def test_run_folds_resolves_boundary_growth_budget_vols(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(fold_stage._scaling, "_growth_budget_target_vol_by_boundary", _fake_by_boundary)
     monkeypatch.setattr(fold_stage, "phase_1_anchored_purged_folds", lambda: (_FoldStub(),))
-    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently)
-    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
-    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
-    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently, raising=False)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _fake_run_post_book_concurrently, raising=False)
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
     monkeypatch.setattr(
         fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None, None),
     )
@@ -228,10 +244,14 @@ def test_run_folds_slices_blend_exposure_scale_for_constant_risk(monkeypatch: py
         fold_stage._scaling, "_constant_risk_target_vol_by_boundary", _must_not_resolve,
     )
     monkeypatch.setattr(fold_stage, "phase_1_anchored_purged_folds", lambda: folds)
-    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently)
-    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
-    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
-    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _fake_run_post_book_concurrently, raising=False)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _fake_run_post_book_concurrently, raising=False)
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
     monkeypatch.setattr(
         fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None, None),
     )
@@ -280,7 +300,8 @@ def test_run_folds_constant_risk_requires_blend_exposure_scale(monkeypatch: pyte
         fold_stage, "phase_1_anchored_purged_folds",
         lambda: (_ExposureFoldStub(pd.Timestamp("2021-06-01", tz="UTC"), pd.Timestamp("2021-12-31", tz="UTC")),),
     )
-    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _must_not_run)
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _must_not_run, raising=False)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _must_not_run, raising=False)
 
     ctx = _bare_context(committee_book=False)
     ctx.config = dataclasses.replace(ctx.config, pnl_vol_target_mode="constant_risk")
@@ -308,10 +329,14 @@ def test_run_folds_skips_boundary_vols_outside_growth_budget(monkeypatch: pytest
         raise AssertionError("boundary resolver must not run outside growth_budget mode")
 
     monkeypatch.setattr(fold_stage._scaling, "_growth_budget_target_vol_by_boundary", _must_not_be_called)
-    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, [], None))
-    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
-    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
-    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, [], None), raising=False)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, [], None), raising=False)
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
     monkeypatch.setattr(
         fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None, None),
     )
@@ -334,19 +359,25 @@ def test_run_folds_reaches_committee_diagnostic_seam(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(
         fold_stage, "_run_post_book_concurrently",
-        lambda *_a, **_k: (None, None, {}, {}, [], "deployment-stub"),
+        lambda *_a, **_k: (None, None, {}, {}, [], "deployment-stub"), raising=False
     )
-    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None)
-    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()))
-    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *_a, **_k: (None, None, {}, {}, [], "deployment-stub"), raising=False)
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
     monkeypatch.setattr(
         fold_stage, "_load_feature_panels",
-        lambda *_a, **_k: calls.append("_load_feature_panels") or "panels-stub",
+        lambda *_a, **_k: calls.append("_load_feature_panels") or "panels-stub", raising=False
     )
+    monkeypatch.setattr(diagnostics_mod, "_load_feature_panels", lambda *_a, **_k: calls.append("_load_feature_panels") or "panels-stub", raising=False)
     monkeypatch.setattr(
         fold_stage, "_committee_diagnostic",
-        lambda *_a, **_k: calls.append("_committee_diagnostic") or "committee-diag-stub",
+        lambda *_a, **_k: calls.append("_committee_diagnostic") or "committee-diag-stub", raising=False
     )
+    monkeypatch.setattr(committee_mod, "_committee_diagnostic", lambda *_a, **_k: calls.append("_committee_diagnostic") or "committee-diag-stub", raising=False)
     monkeypatch.setattr(
         fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None, None),
     )

@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.research.contracts import StrategySpec
-from src.research.baseline.signal import atr, donchian_lower, donchian_upper, generate_signals
+from src.quant.contracts import StrategySpec
+from src.quant.baseline.signal import atr, donchian_lower, donchian_upper, generate_signals
 
 
 class TestDonchian:
@@ -41,7 +41,7 @@ class TestATR:
 
 class TestGenerateSignals:
     def test_columns_and_causality(self, bars_ramp: pd.DataFrame) -> None:
-        from src.research.contracts import StrategySpec
+        from src.quant.contracts import StrategySpec
         spec = StrategySpec()
         out = generate_signals(bars_ramp, spec)
         for col in ["upper", "exit_lower", "ema", "atr", "entry_signal"]:

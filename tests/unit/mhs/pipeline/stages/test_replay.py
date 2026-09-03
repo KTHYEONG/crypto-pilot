@@ -6,6 +6,8 @@ through the ``stage_services`` seam after the P4 refactor (previously private
 """
 
 from __future__ import annotations
+import src.mhs.evaluation.concurrency as concurrency_mod
+import src.mhs.evaluation.guards as guards_mod
 
 import dataclasses
 
@@ -75,7 +77,7 @@ def test_run_replays_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> 
     calls: list[str] = []
 
     monkeypatch.setattr(replay_stage.os.path, "exists", lambda _p: True)
-    monkeypatch.setattr(replay_stage, "_prewarm_mark_frames", lambda symbols: calls.append("prewarm"))
+    monkeypatch.setattr(replay_stage, "_prewarm_mark_frames", lambda symbols: calls.append("prewarm"), raising=False)
 
     def _fake_guard_stage_or_breach(*_a: object, **_k: object) -> None:
         calls.append("_guard_stage_or_breach")
@@ -89,8 +91,10 @@ def test_run_replays_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> 
         calls.append("_run_books_concurrent")
         return (fast_report, slow_report, blend_report, {}, {})
 
-    monkeypatch.setattr(replay_stage, "_guard_stage_or_breach", _fake_guard_stage_or_breach)
-    monkeypatch.setattr(replay_stage, "_run_books_concurrent", _fake_run_books_concurrent)
+    monkeypatch.setattr(replay_stage, "_guard_stage_or_breach", _fake_guard_stage_or_breach, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", _fake_guard_stage_or_breach, raising=False)
+    monkeypatch.setattr(replay_stage, "_run_books_concurrent", _fake_run_books_concurrent, raising=False)
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _fake_run_books_concurrent, raising=False)
 
     ctx = _bare_context()
     ctx.recorder = type("_R", (), {"record": lambda self, *a, **k: None})()

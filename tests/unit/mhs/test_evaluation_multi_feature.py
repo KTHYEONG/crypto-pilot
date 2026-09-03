@@ -4,13 +4,14 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.statistics as statistics
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.statistics as statistics
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
 )
 
@@ -41,8 +42,8 @@ def test_multi_feature_default_off_bit_identical(mhs_market, monkeypatch) -> Non
         "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
         "execution_universe_size": 8,
     }
-    default_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
-    explicit_off = ev.run_mhs_horizon_diagnostic(
+    default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    explicit_off = run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(**base, multi_feature_book=False),
     )
     assert default_report.status == "COMPLETE"
@@ -70,7 +71,7 @@ def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, mon
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, multi_feature_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.multi_feature_diagnostic
     assert isinstance(diag, dict)
@@ -123,7 +124,7 @@ def test_multi_feature_diagnostic_telemetry_stages_recorded(mhs_market_long, mon
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, multi_feature_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     stages = {m.stage for m in report.resource_measurements}
     assert "diagnostic_feature_panels" in stages

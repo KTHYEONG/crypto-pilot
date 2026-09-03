@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.research.universe.pit_universe import (
+from src.quant.universe.pit_universe import (
     PitUniverseSpec,
     SymbolCoverage,
     build_universe_schedule,
@@ -309,7 +309,7 @@ class TestNoLiteralStartDate:
     def test_module_contains_no_literal_calendar_date(self) -> None:
         import re
 
-        import src.research.universe.pit_universe as pit_universe
+        import src.quant.universe.pit_universe as pit_universe
 
         source = inspect.getsource(pit_universe)
         assert re.search(r"\b\d{4}-\d{2}-\d{2}\b", source) is None

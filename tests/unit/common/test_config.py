@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.common.config import (
+from src.common.paths import (
     bookdepth_path,
     borrow_path,
     funding_path,

@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.common.errors import DataIntegrityError
-from src.research.technical_experts.cross_sectional import (
+from src.quant.technical_experts.cross_sectional import (
     XsCompositeSpec,
     run_xs_composite_ledger,
 )

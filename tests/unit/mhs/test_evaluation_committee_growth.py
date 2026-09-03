@@ -3,12 +3,13 @@
 """Contract coverage for the MHS application evaluation resource telemetry."""
 import dataclasses
 import pytest
-from src.application.research.mhs import evaluation as ev
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
     _committee_growth_panels,
 )
@@ -82,7 +83,7 @@ def test_committee_growth_diagnostic_default_off_byte_identical(mhs_market_long,
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert report.committee_diagnostic["growth_headroom"] is None
     assert report.committee_diagnostic["walk_forward"]["sizing_mode"] == "vol_target"
@@ -102,8 +103,8 @@ def test_committee_growth_diagnostic_observational_only(mhs_market_long, monkeyp
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    off = ev.run_mhs_horizon_diagnostic(base)
-    on = ev.run_mhs_horizon_diagnostic(
+    off = run_mhs_horizon_diagnostic(base)
+    on = run_mhs_horizon_diagnostic(
         dataclasses.replace(base, committee_growth_diagnostic=True),
     )
     assert off.status == "COMPLETE"

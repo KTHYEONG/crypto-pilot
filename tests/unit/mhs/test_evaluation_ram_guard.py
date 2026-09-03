@@ -5,9 +5,10 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.resources as resources
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.resources as resources
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
     _StageRecorder,
     _assert_cache_required_ledger_valid,
@@ -16,7 +17,7 @@ from src.application.research.mhs.evaluation import (
 from src.common.errors import DataIntegrityError
 from src.mhs.types import ExecutionSpec
 from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
     _assert_books_equal,
@@ -73,7 +74,7 @@ def test_mhs_mem_03_rss_budget_fails_closed(monkeypatch) -> None:
         MhsDiagnosticRequest(max_rss_bytes=-1)
     assert MhsDiagnosticRequest(max_rss_bytes=1_000_000_000).max_rss_bytes == 1_000_000_000
 
-    monkeypatch.setattr("src.application.research.mhs.resources._current_rss_bytes", lambda: 5_000_000_000)
+    monkeypatch.setattr("src.mhs.resources._current_rss_bytes", lambda: 5_000_000_000)
     with pytest.raises(DataIntegrityError, match="execution RSS budget exceeded") as excinfo:
         _assert_execution_rss_budget("execution_window", 1_000_000_000, 7)
     message = str(excinfo.value)
@@ -199,7 +200,7 @@ def test_pipeline_ram_guard_fails_closed_before_oom(mhs_market_long) -> None:
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, max_rss_bytes=1,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert ev.GO_REASON_RESOURCE_BREACH in report.research_go.reason_codes
     assert report.research_go.eligible is False

@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.research.baseline.backtest import BacktestResult
-from src.research.evaluation.reliability import (
+from src.quant.baseline.backtest import BacktestResult
+from src.quant.evaluation.reliability import (
     derive_fold_concentration_threshold,
     compute_equal_duration_fold_distribution,
     compute_fold_distribution,

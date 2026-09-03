@@ -8,16 +8,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.marks as marks
-import src.application.research.mhs.statistics as statistics
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+import src.mhs.marks as marks
+import src.mhs.statistics as statistics
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
     MhsHorizonDiagnosticReport,
-    run_mhs_horizon_diagnostic,
 )
 from src.cli.commands.research.mhs import add_mhs_commands
-from src.research.evaluation.policy import HOLDOUT_CUTOFF
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
     DEV_SYMBOLS,
@@ -105,7 +105,7 @@ class TestMhsHorizonDiagnostic:
 
     def test_mhs_3m_01_default_execution_timeframe(self) -> None:
         """MHS-3M-01-DEFAULT: production requests default to 3m."""
-        from src.application.research.mhs.evaluation import MhsDiagnosticRequest
+        from src.mhs.evaluation import MhsDiagnosticRequest
 
         assert MhsDiagnosticRequest().execution_timeframe == "3m"
 
@@ -534,10 +534,10 @@ class TestAnchoredFoldGoGate:
         assert fold_report.stress_elapsed_seconds >= 0.0
 
     def test_gate_collects_each_fail_closed_reason(self) -> None:
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             MhsFoldReport,
         )
-        from src.application.research.mhs.research_go import _mhs_research_go
+        from src.mhs.research_go import _mhs_research_go
         from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
 
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
@@ -571,7 +571,7 @@ class TestAnchoredFoldGoGate:
                 stress_elapsed_seconds=0.01,
             )
 
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             GO_REASON_EXECUTION_GAP,
             GO_REASON_INCOMPLETE_FOLD,
             GO_REASON_PRIMARY_SHARPE,
@@ -697,7 +697,7 @@ class TestMhsPerfOptimizationO3FoldParity:
         fc._mark_price_path = originals["mark_price_path"]
 
     def test_parallel_folds_match_sequential_folds(self, fold_parity_request) -> None:
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             _run_anchored_fold,
             _run_folds_parallel,
         )

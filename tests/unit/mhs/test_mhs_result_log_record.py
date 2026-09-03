@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from src.application.research.mhs import evaluation as ev
+from src.mhs import evaluation as ev
 from src.mhs.discovery import DiscoveryQualificationResult
 
 

@@ -7,17 +7,17 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.marks as marks
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+import src.mhs.marks as marks
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
     _committee_execution_book,
 )
 from src.mhs.types import COMMITTEE_MEMBERS
 from src.mhs.evidence import AnchoredPurgedFold
 from src.mhs.features import FEATURE_REGISTRY, FeatureSpec, build_feature_books
-from src.research.universe.pit_universe import symbol_partition
-from tests.unit.application.research.mhs.test_evaluation import _write_mhs_market
+from src.quant.universe.pit_universe import symbol_partition
+from tests.unit.mhs.test_evaluation_appresearch import _write_mhs_market
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 

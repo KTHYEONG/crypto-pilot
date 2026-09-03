@@ -5,13 +5,13 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
 )

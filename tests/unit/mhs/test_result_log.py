@@ -108,7 +108,7 @@ class TestFillMarkParityRunHistoryRecord:
         False at the contract layer, I5)."""
         from src.mhs.evidence import DeploymentReadinessResult
 
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             MhsDiagnosticRequest,
             MhsHorizonDiagnosticReport,
             MhsOutputTier,

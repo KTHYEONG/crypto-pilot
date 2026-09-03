@@ -5,10 +5,10 @@ from __future__ import annotations
 import pandas as pd
 from pathlib import Path
 
-import src.application.research.mhs.marks as marks
+import src.mhs.marks as marks
 import src.market_data.services.futures_collection as fc
-from src.application.research.mhs import evaluation as ev
-from tests.unit.application.research.mhs.test_evaluation import (
+from src.mhs import evaluation as ev
+from tests.unit.mhs.test_evaluation_appresearch import (
     _write_3m_cache,
     _write_mhs_market,
 )
