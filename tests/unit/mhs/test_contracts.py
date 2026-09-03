@@ -364,10 +364,10 @@ class TestFrozenLiteralsCommitteeTiming:
 
         import dataclasses
 
-        from src.application.research.mhs.evaluation import (
+        from src.mhs.evaluation import (
             MhsDiagnosticRequest,
         )
-        from src.application.research.mhs.research_go import (
+        from src.mhs.research_go import (
             _resolved_committee_target_gross,
         )
 
@@ -451,8 +451,8 @@ class TestCompoundingAlphaAxesContract:
         assert callable(growth_budget_annual_vol)
 
     def test_resolved_committee_members(self) -> None:
-        from src.application.research.mhs.research_go import _resolved_committee_members
-        from src.application.research.mhs.contracts import MhsDiagnosticRequest
+        from src.mhs.research_go import _resolved_committee_members
+        from src.mhs.contracts import MhsDiagnosticRequest
         from src.mhs.params import COMMITTEE_MEMBER_SETS
 
         req_v2 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
@@ -472,7 +472,7 @@ def test_mhs_book_report_exposure_scale_defaults_to_none() -> None:
     # SCENARIO_MHS_BOOK_REPORT_EXPOSURE_SCALE_FIELD: exposure_scale is a purely
     # additive defaulted field -- every existing construction call site stays
     # valid unmodified and reads None when never populated (blend-only fill).
-    from src.application.research.mhs.contracts import MhsBookReport
+    from src.mhs.contracts import MhsBookReport
 
     report = MhsBookReport(
         name="fast_reversal", band="intraday", horizon_hours=48, step_hours=6,
@@ -487,7 +487,7 @@ def test_mhs_book_report_exposure_scale_defaults_to_none() -> None:
 
 # SCENARIO_MHS_DSR_PASSAGE_PASSIVE_TIMEOUT_DIVISIBILITY_06
 def test_SCENARIO_MHS_DSR_PASSAGE_PASSIVE_TIMEOUT_DIVISIBILITY_06() -> None:
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     # A 5-minute timeout can never land on the 3m execution grid, so the
     # request fails closed at construction (validate_request runs from
@@ -520,7 +520,7 @@ def test_SCENARIO_MHS_SELECTION_EXEC_REQUEST_FIELD_PARITY_05() -> None:
     """Field-set parity: MhsDiagnosticRequest accepts every MhsRunConfig
     asdict key (the CLI handler's **dataclasses.asdict(config) contract), and
     final_oos_2026h1 defaults to False on both sides."""
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.pipeline.config import MhsRunConfig
 
     request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))

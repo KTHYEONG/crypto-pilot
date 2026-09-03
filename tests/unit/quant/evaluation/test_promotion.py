@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.research.evaluation.promotion import (
+from src.quant.evaluation.promotion import (
     CandidateIdentity,
     PromotionResult,
     compose_promotion_verdict,
 )
-from src.research.evaluation.reliability import FoldDistributionResult, ReliabilityGateResult
+from src.quant.evaluation.reliability import FoldDistributionResult, ReliabilityGateResult
 
 
 def _gate(verdict: str) -> ReliabilityGateResult:

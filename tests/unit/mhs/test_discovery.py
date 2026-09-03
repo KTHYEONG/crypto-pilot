@@ -1,7 +1,7 @@
 """Discovery/qualification horizon-selection gate tests (spec §2, Part B)."""
 
 from __future__ import annotations
-from src.application.research.mhs import scaling
+from src.mhs import scaling
 
 import math
 

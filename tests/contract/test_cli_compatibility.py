@@ -67,10 +67,19 @@ def test_mhs_horizon_diagnostic_parses_into_mhs_handler(monkeypatch) -> None:
         lambda config: captured.append(config) or _Report(),
     )
     monkeypatch.setattr(
-        "src.application.research.mhs.evaluation.persist_mhs_horizon_diagnostic_report",
+        "src.mhs.evaluation.persist_mhs_horizon_diagnostic_report",
         lambda report, path, tier, **kwargs: path,
     )
     _run_mhs_horizon_diagnostic(args)
     assert len(captured) == 1
     assert captured[0].log_run is False
     assert "2021-01-01" in str(captured[0].start)
+
+
+def test_cli_contract_is_unchanged() -> None:
+    """The deployed daemon's entry point must survive the move."""
+    from src.cli.main import build_root_parser
+
+    parser = build_root_parser()
+    groups = parser._subparsers._group_actions[0].choices  # type: ignore[union-attr]
+    assert set(groups) == {"data", "research", "live"}

@@ -18,12 +18,13 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.marks as marks
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.marks as marks
 from src.mhs.types import ExecutionSpec
 from src.mhs.evidence import DeploymentReadinessResult
 from src.mhs.execution import strategy_aware_execution_replay
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 
@@ -234,33 +235,33 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
         participation_warnings={}, research_go_eligible=False,
         execution_go_eligible=False, pilot_go_eligible=False, scale_go_eligible=False,
     )
-    from src.application.research.mhs import stage_services
+    import src.mhs.evaluation.concurrency as concurrency_mod
 
     monkeypatch.setattr(
         ev, "_run_books_concurrent",
         lambda *a, **k: (blend_report, blend_report, blend_report, {}, None),
     )
     monkeypatch.setattr(
-        ev, "_run_post_book_concurrently",
-        lambda *a, **k: (None, None, {}, {}, (), deployment),
-    )
-    # The replay/fold stages consume these via the stage_services seam; patch
-    # there too so injection holds regardless of import order.
-    monkeypatch.setattr(
-        stage_services, "_run_books_concurrent",
+        concurrency_mod, "_run_books_concurrent",
         lambda *a, **k: (blend_report, blend_report, blend_report, {}, None),
     )
     monkeypatch.setattr(
-        stage_services, "_run_post_book_concurrently",
+        ev, "_run_post_book_concurrently",
         lambda *a, **k: (None, None, {}, {}, (), deployment),
     )
+    monkeypatch.setattr(
+        concurrency_mod, "_run_post_book_concurrently",
+        lambda *a, **k: (None, None, {}, {}, (), deployment),
+    )
+    # The replay/fold stages consume these via the concurrency leaf; patch
+    # there too so injection holds regardless of import order.
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
     request = ev.MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert report.fill_source == "OHLCV_IMMEDIATE_TAKER"
     assert report.mark_source == blend_report.primary.ledger.mark_source

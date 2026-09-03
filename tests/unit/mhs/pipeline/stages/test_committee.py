@@ -16,6 +16,9 @@ import pandas as pd
 import pytest
 
 import src.mhs.pipeline.stages.committee as committee_stage
+import src.mhs.evaluation.books as books_mod
+import src.mhs.evaluation.committee as committee_mod
+import src.mhs.evaluation.diagnostics as diagnostics_mod
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
@@ -83,10 +86,12 @@ def test_build_committee_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch)
         calls.append("_active_blend_book_and_grid")
         return slow, slow_grid
 
-    monkeypatch.setattr(committee_stage, "_phase_diagnostics", _fake_phase_diagnostics)
+    monkeypatch.setattr(committee_stage, "_phase_diagnostics", _fake_phase_diagnostics, raising=False)
+    monkeypatch.setattr(diagnostics_mod, "_phase_diagnostics", _fake_phase_diagnostics, raising=False)
     monkeypatch.setattr(
-        committee_stage, "_active_blend_book_and_grid", _fake_active_blend_book_and_grid,
+        committee_stage, "_active_blend_book_and_grid", _fake_active_blend_book_and_grid, raising=False
     )
+    monkeypatch.setattr(books_mod, "_active_blend_book_and_grid", _fake_active_blend_book_and_grid, raising=False)
     monkeypatch.setattr(
         committee_stage, "realized_vol",
         lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns),
@@ -143,8 +148,9 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
         return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
 
     monkeypatch.setattr(
-        committee_stage, "_committee_evidence_weights_by_boundary", _fake_by_boundary,
+        committee_stage, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False
     )
+    monkeypatch.setattr(committee_mod, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False)
     class _FoldStub:
         def __init__(self, train_end: pd.Timestamp) -> None:
             self.train_end = train_end
@@ -157,13 +163,16 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
         ),
     )
     monkeypatch.setattr(
-        committee_stage, "_committee_execution_book", _fake_committee_execution_book,
+        committee_stage, "_committee_execution_book", _fake_committee_execution_book, raising=False
     )
-    monkeypatch.setattr(committee_stage, "_phase_diagnostics", lambda *_a, **_k: "phase-result")
+    monkeypatch.setattr(committee_mod, "_committee_execution_book", _fake_committee_execution_book, raising=False)
+    monkeypatch.setattr(committee_stage, "_phase_diagnostics", lambda *_a, **_k: "phase-result", raising=False)
+    monkeypatch.setattr(diagnostics_mod, "_phase_diagnostics", lambda *_a, **_k: "phase-result", raising=False)
     monkeypatch.setattr(
         committee_stage, "_active_blend_book_and_grid",
-        lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid),
+        lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid), raising=False
     )
+    monkeypatch.setattr(books_mod, "_active_blend_book_and_grid", lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid), raising=False)
     monkeypatch.setattr(
         committee_stage, "realized_vol",
         lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns),
@@ -221,20 +230,24 @@ def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch
             self.train_end = train_end
 
     monkeypatch.setattr(
-        committee_stage, "_committee_evidence_weights_by_boundary", _fake_by_boundary,
+        committee_stage, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False
     )
+    monkeypatch.setattr(committee_mod, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False)
     monkeypatch.setattr(
         committee_stage, "phase_1_anchored_purged_folds",
         lambda: (_FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),),
     )
     monkeypatch.setattr(
-        committee_stage, "_committee_execution_book", _fake_committee_execution_book,
+        committee_stage, "_committee_execution_book", _fake_committee_execution_book, raising=False
     )
-    monkeypatch.setattr(committee_stage, "_phase_diagnostics", lambda *_a, **_k: "phase-result")
+    monkeypatch.setattr(committee_mod, "_committee_execution_book", _fake_committee_execution_book, raising=False)
+    monkeypatch.setattr(committee_stage, "_phase_diagnostics", lambda *_a, **_k: "phase-result", raising=False)
+    monkeypatch.setattr(diagnostics_mod, "_phase_diagnostics", lambda *_a, **_k: "phase-result", raising=False)
     monkeypatch.setattr(
         committee_stage, "_active_blend_book_and_grid",
-        lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid),
+        lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid), raising=False
     )
+    monkeypatch.setattr(books_mod, "_active_blend_book_and_grid", lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid), raising=False)
     monkeypatch.setattr(
         committee_stage, "realized_vol",
         lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns),

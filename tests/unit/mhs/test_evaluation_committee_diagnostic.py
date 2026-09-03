@@ -5,12 +5,13 @@ import logging
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.research.mhs import evaluation as ev
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
 
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
 )
 
@@ -40,8 +41,8 @@ def test_committee_default_off_bit_identical(mhs_market, monkeypatch) -> None:
         "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
         "execution_universe_size": 8,
     }
-    default_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
-    explicit_off = ev.run_mhs_horizon_diagnostic(
+    default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    explicit_off = run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(**base, committee_book=False),
     )
     assert default_report.status == "COMPLETE"
@@ -70,7 +71,7 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.committee_diagnostic
     assert isinstance(diag, dict)
@@ -131,7 +132,7 @@ def test_committee_diagnostic_per_tier_blocks_present(mhs_market_long, monkeypat
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     per_tier = report.committee_diagnostic["walk_forward"]["per_tier"]
     assert set(per_tier) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
@@ -161,7 +162,7 @@ def test_committee_diagnostic_block_logret_share_reported(mhs_market_long, monke
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     per_tier = report.committee_diagnostic["walk_forward"]["per_tier"]
     for tier, fields in per_tier.items():
@@ -196,7 +197,7 @@ def test_committee_diagnostic_block_return_autocorr_lag1_present(
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     per_tier = report.committee_diagnostic["walk_forward"]["per_tier"]
     for fields in per_tier.values():
@@ -237,7 +238,7 @@ def test_committee_diagnostic_block_return_autocorr_lag1_matches_manual_computat
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     base_wf = captured.get(ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"])
     assert base_wf is not None
@@ -274,7 +275,7 @@ def test_committee_diagnostic_block_existing_fields_unchanged(
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     prior_keys = {
         "block_start", "bars", "net_sharpe", "cagr", "mdd", "logret", "logret_share",
@@ -305,7 +306,7 @@ def test_committee_diagnostic_off_by_default_unchanged(
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert report.committee_diagnostic is None
 
@@ -325,7 +326,7 @@ def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, c
         execution_universe_size=8, committee_book=True,
     )
     with caplog.at_level(logging.DEBUG, logger="MhsHorizonDiagnostic"):
-        report = ev.run_mhs_horizon_diagnostic(request)
+        report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     messages = [r.message for r in caplog.records]
     for tag in (
@@ -352,7 +353,7 @@ def test_committee_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeyp
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     stages = {m.stage for m in report.resource_measurements}
     assert "diagnostic_feature_panels" in stages
@@ -377,7 +378,7 @@ def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monk
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     first_edge = report.committee_diagnostic["walk_forward"]["block_edges"][0]
     assert first_edge == ev.COMMITTEE_OOS_START.isoformat()
@@ -385,7 +386,7 @@ def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monk
 
     shifted = pd.Timestamp("2023-07-01", tz="UTC")
     monkeypatch.setattr(ev, "COMMITTEE_OOS_START", shifted)
-    report2 = ev.run_mhs_horizon_diagnostic(request)
+    report2 = run_mhs_horizon_diagnostic(request)
     assert report2.status == "COMPLETE"
     first_edge2 = report2.committee_diagnostic["walk_forward"]["block_edges"][0]
     assert first_edge2 == shifted.isoformat()
@@ -427,7 +428,7 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.committee_diagnostic
     assert "flow_imb_720h" not in diag["admitted"]
@@ -448,12 +449,12 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
         quote_vol = panels["quote_vol"]
         panels["taker_buy_quote"] = quote_vol * 0.5
         return panels
-    from src.application.research.mhs import stage_services
+    from src.mhs import stage_services
     import src.mhs.pipeline.stages.fold as fold_stage
     monkeypatch.setattr(ev, "_load_feature_panels", _full_coverage_panels)
     monkeypatch.setattr(stage_services, "_load_feature_panels", _full_coverage_panels)
     monkeypatch.setattr(fold_stage, "_load_feature_panels", _full_coverage_panels)
-    report_full = ev.run_mhs_horizon_diagnostic(request)
+    report_full = run_mhs_horizon_diagnostic(request)
     assert report_full.status == "COMPLETE"
     assert set(report_full.committee_diagnostic["admitted"]) == set(
         report_full.committee_diagnostic["members"]
@@ -475,7 +476,7 @@ def test_committee_diagnostic_reports_trials_and_warning(mhs_market_long, monkey
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.committee_diagnostic
     assert diag["trials_explored"] == 50
@@ -502,7 +503,7 @@ def test_evaluation_protocol_field_distinguishes_in_sample_from_oos(mhs_market_l
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True, multi_feature_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert report.committee_diagnostic["evaluation_protocol"] == "purged_walk_forward_oos"
     assert report.multi_feature_diagnostic["evaluation_protocol"] == "in_sample_full_period"
@@ -527,7 +528,7 @@ def test_committee_diagnostic_reports_skipped_blocks(mhs_market_long, monkeypatc
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     skipped = report.committee_diagnostic["walk_forward"]["skipped_blocks"]
     assert isinstance(skipped, list)
@@ -553,8 +554,8 @@ def test_committee_books_regression_unchanged_by_b1_b2(mhs_market_long, monkeypa
         "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
         "execution_universe_size": 8,
     }
-    off_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
-    on_report = ev.run_mhs_horizon_diagnostic(
+    off_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    on_report = run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(**base, committee_book=True),
     )
     assert off_report.status == "COMPLETE"

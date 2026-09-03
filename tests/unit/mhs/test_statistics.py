@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import statistics
+from src.mhs import statistics
 
 
 def test_xs_rank_ic_empty_on_no_overlap() -> None:

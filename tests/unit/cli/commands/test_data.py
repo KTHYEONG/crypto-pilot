@@ -33,7 +33,7 @@ def test_data_collect_mhs_execution_accepts_3m_and_rejects_out_of_contract() -> 
 def test_data_collect_mhs_execution_threads_timeframe_to_plan(monkeypatch) -> None:
     # SCENARIO_MHS_EXECUTION_PLAN_3M_DEFAULT: the CLI default threads into
     # ``build_mhs_execution_plan`` as the collection interval.
-    import src.application.data.mhs_execution_collection as mc
+    import src.market_data.services.mhs_execution as mc
 
     captured: dict = {}
     plan = mc.MhsExecutionCollectionPlan(
@@ -190,7 +190,7 @@ def test_refresh_live_universe_cold_box_fails_loud(tmp_path, monkeypatch) -> Non
     import argparse
     import pytest
     import src.cli.commands.data as data_mod
-    from src.common import config as cfg
+    from src.common import paths as cfg
 
     monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
     monkeypatch.setattr(data_mod, "FUTURES_DATA_DIR", tmp_path, raising=False)
@@ -211,9 +211,9 @@ def test_refresh_live_universe_cold_box_fails_loud(tmp_path, monkeypatch) -> Non
 def test_refresh_live_universe_filters_dev_partition_and_no_metrics(tmp_path, monkeypatch) -> None:
     import argparse
     import src.cli.commands.data as data_mod
-    from src.common import config as cfg
+    from src.common import paths as cfg
     from src.live.data_refresh import RefreshReport
-    from src.research.universe.pit_universe import symbol_partition
+    from src.quant.universe.pit_universe import symbol_partition
 
     root = tmp_path
     (root / "ohlcv" / "1h").mkdir(parents=True)
@@ -245,7 +245,7 @@ def test_seed_cloud_fetches_dev_usdt_universe_idempotent(monkeypatch) -> None:
     import argparse
     import src.cli.commands.data as data_mod
     from src.live.data_refresh import RefreshReport
-    from src.research.universe.pit_universe import symbol_partition
+    from src.quant.universe.pit_universe import symbol_partition
 
     listed = ["BTCUSDT", "ETHUSDT", "AAAUSDT", "BBBUSDT", "CCCUSDT", "SOMECOIN", "XRPUSDT", "BNBBUSD"]
     expected = [s for s in listed if s.endswith("USDT") and symbol_partition(s) == "dev"]

@@ -9,14 +9,16 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.marks as marks
-from src.application.research.mhs.evaluation import MhsDiagnosticRequest
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.evaluation.books as books_mod
+import src.mhs.marks as marks
+from src.mhs.evaluation import MhsDiagnosticRequest
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.types import BOOK_BLEND_WEIGHTS
 from src.mhs.evidence import AnchoredPurgedFold
 from src.mhs.horizons import horizon_log_return
-from src.research.universe.pit_universe import symbol_partition
+from src.quant.universe.pit_universe import symbol_partition
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 _DEV_SYMBOLS = (
@@ -246,19 +248,19 @@ class TestTrendEfficiencyOverlayDefaultOff:
         def _spy_post(*args, **kwargs):
             return (None, None, {}, {}, (), None)
 
-        from src.application.research.mhs import stage_services
+        import src.mhs.evaluation.concurrency as concurrency_mod
         import src.mhs.pipeline.stages.fold as fold_stage
         import src.mhs.pipeline.stages.replay as replay_stage
 
         monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
         monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
-        monkeypatch.setattr(stage_services, "_run_books_concurrent", _spy_books)
-        monkeypatch.setattr(stage_services, "_run_post_book_concurrently", _spy_post)
-        monkeypatch.setattr(replay_stage, "_run_books_concurrent", _spy_books)
-        monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _spy_post)
-        ev.run_mhs_horizon_diagnostic(_request(root, end))
+        monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
+        monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
+        monkeypatch.setattr(replay_stage, "_run_books_concurrent", _spy_books, raising=False)
+        monkeypatch.setattr(fold_stage, "_run_post_book_concurrently", _spy_post, raising=False)
+        run_mhs_horizon_diagnostic(_request(root, end))
         default_blend = captured["blend_1h"].copy()
-        ev.run_mhs_horizon_diagnostic(_request(root, end, trend_efficiency_overlay=False))
+        run_mhs_horizon_diagnostic(_request(root, end, trend_efficiency_overlay=False))
         explicit_blend = captured["blend_1h"]
         pd.testing.assert_frame_equal(default_blend, explicit_blend)
 
@@ -307,6 +309,7 @@ class TestTrendEfficiencyOverlayScalesSlowOnly:
             return original(log_close, eligible, spec, step_grid, ema_span=ema_span)
 
         monkeypatch.setattr(ev, "_book_weights", _spy_book_weights)
+        monkeypatch.setattr(books_mod, "_book_weights", _spy_book_weights)
         _fold_targets(choppy_market, _request(root, end), _CHOPPY_FOLD)
         n_off = recorded.get("fast_calls", 0)
         ema_off = recorded.get("fast_ema_span")

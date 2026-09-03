@@ -24,7 +24,7 @@ overlay stack).
 import numpy as np
 import pandas as pd
 import pytest
-from src.research.risk.growth_sizing import (
+from src.quant.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
     apply_realised_risk_overlay,
@@ -32,7 +32,7 @@ from src.research.risk.growth_sizing import (
     compute_discovery_target_vol,
     solve_growth_optimal_risk,
 )
-from src.research.technical_experts.cross_sectional import (
+from src.quant.technical_experts.cross_sectional import (
     XsAlphaCompositeSpec,
     XsCompositeSpec,
     _basis_score,
@@ -42,7 +42,7 @@ from src.research.technical_experts.cross_sectional import (
     select_vol_target_window,
     size_xs_alpha_growth_optimal,
 )
-from tests.unit.research.technical_experts.test_cross_sectional import (  # noqa: F401
+from tests.unit.quant.technical_experts.test_cross_sectional import (  # noqa: F401
     _alpha_inputs,
     _ref_zscore,
     _score_frame,

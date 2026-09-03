@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 import src.mhs.report.persist as persist_mod
-from src.application.research.mhs.contracts import MhsOutputTier
+from src.mhs.contracts import MhsOutputTier
 from src.mhs.report.persist import mhs_horizon_diagnostic_report_path, persist_mhs_report
 
 
@@ -112,8 +112,8 @@ def test_emit_deployment_exists(tmp_path: Path) -> None:
 
 from types import SimpleNamespace
 
-from src.application.research.mhs.contracts import MhsResearchGoResult
-from src.application.research.mhs.resources import _StageRecorder
+from src.mhs.contracts import MhsResearchGoResult
+from src.mhs.resources import _StageRecorder
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.stages.assemble import assemble_report
@@ -203,7 +203,7 @@ def test_emit_deployment_plaintext_when_no_key(tmp_path, caplog) -> None:
     )
     import dataclasses
 
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.pipeline.config import MhsRunConfig
 
     request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))

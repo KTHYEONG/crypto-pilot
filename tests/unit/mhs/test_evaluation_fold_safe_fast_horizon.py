@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.application.research.mhs.evaluation import _fold_safe_fast_horizon
+from src.mhs.evaluation import _fold_safe_fast_horizon
 from src.mhs.discovery import DiscoveryQualificationResult
 
 

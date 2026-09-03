@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.mhs.evaluation import (
+from src.mhs.evaluation import (
     GO_REASON_FOLD_GROWTH_CONCENTRATION,
     GO_REASON_PATH_DIVERGENCE,
     MhsFoldReport,
@@ -23,7 +23,7 @@ from src.application.research.mhs.evaluation import (
     _pooled_fold_evidence,
     build_mhs_run_history_record,
 )
-from src.application.research.mhs.research_go import _mhs_research_go
+from src.mhs.research_go import _mhs_research_go
 from src.mhs.evidence import AnchoredPurgedFold, DeploymentReadinessResult
 
 _FOLD = AnchoredPurgedFold(

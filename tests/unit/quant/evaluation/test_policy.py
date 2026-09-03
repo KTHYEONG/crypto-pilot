@@ -1,4 +1,4 @@
-"""Naming-convention bridge for ``src.research.evaluation.policy``.
+"""Naming-convention bridge for ``src.quant.evaluation.policy``.
 
 ``tools/agent_skills/lean_check.py`` resolves co-modification coverage by
 module filename (``test_<module>.py``). The canonical evaluation-end policy
@@ -9,7 +9,7 @@ run the identical tests.
 
 from __future__ import annotations
 
-from tests.unit.research.evaluation.test_evaluation_end_policy import (
+from tests.unit.quant.evaluation.test_evaluation_end_policy import (
     test_SCENARIO_MHS_RESOLVE_EVALUATION_END_ALWAYS_RESOLVES,
     test_unsealed_path_enforces_derived_ceiling,
 )

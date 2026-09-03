@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.research.baseline.backtest import calculate_position_size
+from src.quant.baseline.backtest import calculate_position_size
 
 
 class TestPositionSizing:

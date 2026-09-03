@@ -7,16 +7,17 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.application.data import mhs_execution_collection as mec
-from src.application.research.mhs import evaluation as ev
-import src.application.research.mhs.marks as marks
-import src.application.research.mhs.statistics as statistics
-from src.application.research.mhs.evaluation import (
+from src.market_data.services import mhs_execution as mec
+from src.mhs import evaluation as ev
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.marks as marks
+import src.mhs.statistics as statistics
+from src.mhs.evaluation import (
     MhsDiagnosticRequest,
 )
 from src.common.errors import DataIntegrityError
-from src.research.universe.pit_universe import symbol_partition
-from tests.unit.application.research.mhs.test_evaluation import (  # noqa: F401
+from src.quant.universe.pit_universe import symbol_partition
+from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
     _assert_books_equal,
@@ -62,7 +63,7 @@ def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypa
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, discovery_gate=True,
     )
-    report_on = ev.run_mhs_horizon_diagnostic(request_on)
+    report_on = run_mhs_horizon_diagnostic(request_on)
     assert report_on.status == "COMPLETE"
     assert report_on.discovery_qualification is not None
     assert set(report_on.discovery_qualification) == {
@@ -78,7 +79,7 @@ def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypa
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
     )
-    report_off = ev.run_mhs_horizon_diagnostic(request_off)
+    report_off = run_mhs_horizon_diagnostic(request_off)
     assert report_off.discovery_qualification is None
 
 @pytest.mark.slow
@@ -98,7 +99,7 @@ def test_mhs_full_history_yearly_net_t_and_worst_year_corr_exposed(mhs_market_fu
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8, discovery_gate=True,
     )
-    report_on = ev.run_mhs_horizon_diagnostic(request_on)
+    report_on = run_mhs_horizon_diagnostic(request_on)
     assert report_on.status == "COMPLETE"
     assert report_on.full_history_yearly_net_t is not None
     assert set(report_on.full_history_yearly_net_t) == {
@@ -122,7 +123,7 @@ def test_mhs_full_history_yearly_net_t_and_worst_year_corr_exposed(mhs_market_fu
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
     )
-    report_off = ev.run_mhs_horizon_diagnostic(request_off)
+    report_off = run_mhs_horizon_diagnostic(request_off)
     assert report_off.full_history_yearly_net_t is None
     assert report_off.funding_carry_worst_year_corr is None
 
@@ -146,8 +147,8 @@ def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monke
         "mark_mode": "cache_required", "execution_timeframe": "5m", "log_run": False,
         "execution_universe_size": 8,
     }
-    default_report = ev.run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
-    explicit_off = ev.run_mhs_horizon_diagnostic(
+    default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    explicit_off = run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(**base, execution_coverage_gate=False),
     )
     assert default_report.status == "COMPLETE"
@@ -176,7 +177,7 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
     }
     request = MhsDiagnosticRequest(**base)
     with pytest.raises(DataIntegrityError, match="removed every roster member"):
-        ev.run_mhs_horizon_diagnostic(
+        run_mhs_horizon_diagnostic(
             dataclasses.replace(request, execution_coverage_gate=True, committee_target_gross=None),
         )
     assert books_called == []
@@ -221,7 +222,7 @@ def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_marke
             mark_mode="cache_required", execution_timeframe="3m", log_run=False,
             execution_universe_size=8, execution_coverage_gate=True,
         )
-        report = ev.run_mhs_horizon_diagnostic(request)
+        report = run_mhs_horizon_diagnostic(request)
         assert report.status == "COMPLETE"
 
         # The same fixture blocks under the old full-universe scope (the gapped
@@ -290,7 +291,7 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
             execution_universe_size=8, execution_coverage_gate=True,
         )
         with pytest.raises(DataIntegrityError) as exc_info:
-            ev.run_mhs_horizon_diagnostic(request)
+            run_mhs_horizon_diagnostic(request)
         assert late_symbol in str(exc_info.value)
         assert window_calls["n"] == 0
     finally:
@@ -348,7 +349,7 @@ def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypat
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
             execution_universe_size=8, execution_coverage_gate=True,
         )
-        report = ev.run_mhs_horizon_diagnostic(request)
+        report = run_mhs_horizon_diagnostic(request)
         assert report.status == "COMPLETE"
     finally:
         if original_mark_bytes is None:
@@ -412,7 +413,7 @@ def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
         mark_mode="cache_required", log_run=False, execution_universe_size=8,
     )
     assert request.execution_timeframe == "3m"
-    report = ev.run_mhs_horizon_diagnostic(request)
+    report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert report.execution_timeframe == "3m"
     assert set(report.books) == {"fast_reversal", "slow_momentum"}
@@ -424,7 +425,7 @@ class TestFillMarkParityEligibility:
     """SCENARIO_MHS_FILL_MARK_PARITY_04: _fill_mark_parity_eligibility ALPACA regression."""
 
     def test_alpaca_shape_divergence(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from src.application.research.mhs.evaluation import _fill_mark_parity_eligibility
+        from src.mhs.evaluation import _fill_mark_parity_eligibility
 
         idx = pd.date_range("2025-04-01", periods=10, freq="1h", tz="UTC")
         symbols = ["GOOD", "FROZEN", "ALSO_GOOD"]
@@ -460,7 +461,7 @@ class TestFillMarkParityEligibility:
         assert "FROZEN" in census["symbols"]
 
     def test_enabled_false_returns_unchanged(self) -> None:
-        from src.application.research.mhs.evaluation import _fill_mark_parity_eligibility
+        from src.mhs.evaluation import _fill_mark_parity_eligibility
 
         idx = pd.date_range("2025-04-01", periods=5, freq="1h", tz="UTC")
         close = pd.DataFrame({"A": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=idx)

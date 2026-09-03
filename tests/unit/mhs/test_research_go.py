@@ -6,11 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsDiagnosticRequest,
     MhsFoldReport,
 )
-from src.application.research.mhs.research_go import (
+from src.mhs.research_go import (
     GO_REASON_DEFLATED_SHARPE_UNAVAILABLE,
     GO_REASON_DRAWDOWN_BUDGET_NON_BINDING,
     GO_REASON_SELECTION_WINDOW_OVERLAP,

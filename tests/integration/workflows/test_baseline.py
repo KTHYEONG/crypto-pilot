@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from src.research.contracts import CostModel, StrategySpec
+from src.quant.contracts import CostModel, StrategySpec
 from src.market_data.storage.loaders import load_ohlcv_4h
-from src.research.baseline.backtest import run_backtest
-from src.research.baseline.signal import generate_signals
-from src.research.evaluation.metrics import compute_metrics
-from src.research.evaluation.reliability import compute_reliability_gate
+from src.quant.baseline.backtest import run_backtest
+from src.quant.baseline.signal import generate_signals
+from src.quant.evaluation.metrics import compute_metrics
+from src.quant.evaluation.reliability import compute_reliability_gate
 
 BTC_PATH = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
 

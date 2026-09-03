@@ -6,6 +6,8 @@ after the P4 refactor (previously private ``evaluation.`` attribute lookups).
 """
 
 from __future__ import annotations
+import src.mhs.evaluation.books as books_mod
+import src.mhs.evaluation.specs as specs_mod
 
 import dataclasses
 
@@ -78,14 +80,17 @@ def test_build_books_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> 
         calls.append("_horizon_ensemble_execution_weights")
         return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
 
-    monkeypatch.setattr(book_stage, "_signal_ema_span", _fake_signal_ema_span)
-    monkeypatch.setattr(book_stage, "_book_weights", _fake_book_weights)
+    monkeypatch.setattr(book_stage, "_signal_ema_span", _fake_signal_ema_span, raising=False)
+    monkeypatch.setattr(specs_mod, "_signal_ema_span", _fake_signal_ema_span, raising=False)
+    monkeypatch.setattr(book_stage, "_book_weights", _fake_book_weights, raising=False)
+    monkeypatch.setattr(books_mod, "_book_weights", _fake_book_weights, raising=False)
     monkeypatch.setattr(
-        book_stage, "_horizon_ensemble_execution_weights", _fake_horizon_ensemble_execution_weights,
+        book_stage, "_horizon_ensemble_execution_weights", _fake_horizon_ensemble_execution_weights, raising=False
     )
+    monkeypatch.setattr(books_mod, "_horizon_ensemble_execution_weights", _fake_horizon_ensemble_execution_weights, raising=False)
     monkeypatch.setattr(
         book_stage, "_pit_execution_mask",
-        lambda quote_vol, eligible, universe_size: pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns),
+        lambda quote_vol, eligible, universe_size: pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns), raising=False
     )
     monkeypatch.setattr(
         book_stage, "inverse_realized_vol_tilt", lambda w, vol: w,

@@ -24,9 +24,9 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.application.research.mhs import evaluation as ev
-from src.application.research.mhs import marks as mhs_marks
-from src.application.research.mhs.evaluation import (
+from src.mhs import evaluation as ev
+from src.mhs import marks as mhs_marks
+from src.mhs.evaluation import (
     _cached_mark_panel,
     _candidate_weight_books,
     _fold_safe_discovery_worker,
@@ -339,7 +339,7 @@ def test_scenario_04_candidate_weight_books_covers_union() -> None:
     keys covering both the fold-safe BookSpec band horizons and the top-level
     DISCOVERY_* / funding-carry candidate sets, and every panel equals what
     ``build_candidate_weights`` would have produced for that key."""
-    from src.application.research.mhs.evaluation import (
+    from src.mhs.evaluation import (
         DISCOVERY_MOMENTUM_CANDIDATES,
         DISCOVERY_REVERSAL_CANDIDATES,
         FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
@@ -380,7 +380,7 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
     """SCENARIO_MHS_REFACTOR_06: no ProcessPoolExecutor.submit call in
     evaluation.py passes a pd.DataFrame or pd.Series argument; large read-only
     panels travel through fork_shared_payload tokens."""
-    import src.application.research.mhs.evaluation as ev_mod
+    import src.mhs.evaluation as ev_mod
 
     root = tmp_path / "market"
     _write_mark_market(root, _SYMBOLS, n_hours=2700)
@@ -415,9 +415,13 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
             recorded.append(list(args))
             return _SynchronousFuture(fn, args)
 
+    import src.mhs.evaluation.concurrency as concurrency_mod
+    import concurrent.futures as cf_mod
     monkeypatch.setattr(ev_mod, "ProcessPoolExecutor", _RecordingExecutor)
+    monkeypatch.setattr(concurrency_mod, "ProcessPoolExecutor", _RecordingExecutor)
+    monkeypatch.setattr(cf_mod, "ProcessPoolExecutor", _RecordingExecutor)
 
-    from src.application.research.mhs import evaluation as _ev
+    from src.mhs import evaluation as _ev
     args = _build_books_args_from_market(root, 2700)
     _ev._run_books_concurrent(**args)
 
@@ -429,8 +433,8 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
 
 def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]:
     """Minimal ``_run_books_concurrent`` arg set from a written market."""
-    import src.application.research.mhs.evaluation as ev_mod
-    from src.application.research.mhs import scaling as scaling_mod
+    import src.mhs.evaluation as ev_mod
+    from src.mhs import scaling as scaling_mod
 
     end = _START + pd.Timedelta(hours=n_hours)
     symbols = _SYMBOLS
@@ -689,7 +693,7 @@ def test_mark_panel_retained_bytes_at_most_40_percent_of_frame_cache(big_mark_ma
 
 def test_mark_panel_prewarm_populates_compact_cache(big_mark_market) -> None:
     """_prewarm_mark_frames warms _compact_mark_series; missing files skipped."""
-    from src.application.research.mhs.marks import (
+    from src.mhs.marks import (
     _compact_mark_series_for_path,
     _prewarm_mark_frames,
 )
