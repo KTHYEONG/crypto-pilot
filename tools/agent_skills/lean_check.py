@@ -355,6 +355,17 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                 }
                 diagnostics.append(d)
             continue
+        # Deletion contract: stage_services seam must be deleted — existence is violation, absence is PASS
+        if "stage_services" in fh:
+            if os.path.exists(fh):
+                d = {
+                    "file": fh,
+                    "line": 0,
+                    "error": f"Spec: file should be deleted but exists ({kind} {name})",
+                    "fix_hint": f"Delete {fh}",
+                }
+                diagnostics.append(d)
+            continue
         if not os.path.exists(fh):
             d = {
                 "file": fh,
@@ -363,6 +374,9 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                 "fix_hint": f"Create {fh}",
             }
             diagnostics.append(d)
+            continue
+        if os.path.isdir(fh):
+            # Directory target (e.g., evaluation package) — existence is sufficient for reference kind
             continue
 
         with open(fh) as sf:

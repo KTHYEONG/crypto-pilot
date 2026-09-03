@@ -37,7 +37,6 @@ line-length = 120
 target-version = "py311"
 exclude = [
     "data", 
-    "legacy", 
     "logs", 
     "results", 
     ".pytest_cache", 
@@ -76,7 +75,7 @@ ignore = [
 "tests/*" = ["S101", "E402", "N803", "N806", "N813", "N814", "ARG", "I001", "RUF059", "F841", "N802"]
 "scripts/*" = ["T20"]
 "tools/agent_skills/lean_check.py" = ["T20", "S607"]
- "src/application/research/mhs/evaluation.py" = ["I001"]  # contract wiring mandates exact single-line import strings
+ "src/mhs/evaluation/*" = ["I001"]  # contract wiring mandates exact single-line import strings
  "src/mhs/evaluation.py" = ["I001"]  # contract wiring mandates exact single-line import strings
 "src/mhs/pipeline/orchestrator.py" = ["I001"]  # contract wiring mandates exact adjacent import lines
  "src/cli/commands/research/mhs.py" = ["I001"]  # contract wiring mandates an exact application-layer import line
@@ -100,7 +99,6 @@ show_error_codes = true
 ignore_missing_imports = true
 exclude = [
     "data", 
-    "legacy", 
     "logs", 
     "results", 
     ".pytest_cache", 
@@ -113,11 +111,11 @@ exclude = [
 module = "tests.*"
 ignore_errors = true
 
-# evaluation.py intentionally re-exports many names imported from sibling mhs
+# evaluation package intentionally re-exports many names imported from sibling mhs
 # modules; stage functions import them from evaluation's namespace for
 # byte-identical object references during the orchestrator decomposition.
 [[tool.mypy.overrides]]
-module = "src.application.research.mhs.evaluation"
+module = "src.mhs.evaluation"
 no_implicit_reexport = false
 
 
@@ -126,7 +124,6 @@ no_implicit_reexport = false
 [tool.pyright]
 exclude = [
     "data", 
-    "legacy", 
     "logs", 
     "results", 
     ".pytest_cache", 
