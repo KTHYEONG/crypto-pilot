@@ -31,40 +31,40 @@ import pyarrow.parquet as pq
 # Facade re-exports consumed by the pipeline stage modules. evaluation used to
 # import these for its own monolith; the stages now import them from here, so
 # they are retained as a stable re-export surface (do not let ruff strip them).
-from src.application.data.mhs_execution_collection import (  # noqa: F401
+from src.market_data.services.mhs_execution import (  # noqa: F401
     apply_dynamic_gap_exclusion,
     apply_dynamic_mark_gap_exclusion,
     assert_relevant_execution_data_coverage,
     assert_relevant_mark_price_coverage,
 )
-from src.application.research.mhs import research_go as _research_go
-from src.application.research.mhs import scaling as _scaling
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.contracts import (
+from src.mhs import research_go as _research_go
+from src.mhs import scaling as _scaling
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import (
     MhsBookFailure as MhsBookFailure,
 )
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsBookReport as MhsBookReport,
 )
-from src.application.research.mhs.contracts import (  # noqa: F401  (facade re-export; public API)
+from src.mhs.contracts import (  # noqa: F401  (facade re-export; public API)
     MhsDiagnosticRequest as MhsDiagnosticRequest,
 )
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsFoldReport as MhsFoldReport,
 )
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsHorizonDiagnosticReport as MhsHorizonDiagnosticReport,
 )
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsOutputTier as MhsOutputTier,
 )
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsResearchGoResult as MhsResearchGoResult,
 )
-from src.application.research.mhs.contracts import (
+from src.mhs.contracts import (
     MhsResourceMeasurement as MhsResourceMeasurement,
 )
-from src.application.research.mhs.marks import (  # noqa: F401
+from src.mhs.marks import (  # noqa: F401
     _build_window_frames,
     _cached_mark_panel,
     _fill_mark_parity_eligibility,
@@ -77,7 +77,7 @@ from src.application.research.mhs.marks import (  # noqa: F401
 
 # Public GO reason-code constants are defined in research_go; re-exported here so
 # the established ``ev.GO_REASON_*`` external API surface stays importable.
-from src.application.research.mhs.research_go import (  # noqa: F401  (facade re-export of public GO reason-code constants)
+from src.mhs.research_go import (  # noqa: F401  (facade re-export of public GO reason-code constants)
     GO_REASON_CAPITAL_BREACH,  # noqa: F401
     GO_REASON_DATA_INTEGRITY_CODES,  # noqa: F401
     GO_REASON_DRAWDOWN_OVER_BUDGET,  # noqa: F401
@@ -93,14 +93,14 @@ from src.application.research.mhs.research_go import (  # noqa: F401  (facade re
     GO_REASON_STRESS_SHARPE,  # noqa: F401
     GO_REASON_UNSPECIFIED_POLICY,  # noqa: F401
 )
-from src.application.research.mhs.resources import (
+from src.mhs.resources import (
     _assert_execution_rss_budget,
     _assert_stage_rss_budget,
     _resolve_ram_budget,
     _StageRecorder,
     _worker_plan_observer,
 )
-from src.common.config import (
+from src.common.paths import (
     FUTURES_DATA_DIR,  # noqa: F401
     funding_path,
 )
@@ -288,9 +288,9 @@ from src.mhs.types import (
     BookSpec,
     ExecutionSpec,
 )
-from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
-from src.research.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
-from src.research.technical_experts.trend_screen_catalog import (  # noqa: F401
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
+from src.quant.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
+from src.quant.technical_experts.trend_screen_catalog import (  # noqa: F401
     DISCOVERY_END,
     QUALIFICATION_END,
 )

@@ -1,7 +1,7 @@
 """Declarative argparse generation from a request dataclass (I3 declare-once).
 
 ``build_parser_from_dataclass`` reads each field's ``cli`` metadata (produced by
-``src.application.research.mhs.contracts.cli_param``) and registers the matching
+``src.mhs.contracts.cli_param``) and registers the matching
 argparse option; ``request_from_namespace`` reconstructs the request from the
 parsed namespace. Adding one MHS execution option therefore requires editing
 exactly one request field: its flag, help, choices, and validation all derive

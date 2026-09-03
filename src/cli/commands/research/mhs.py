@@ -56,15 +56,15 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     if getattr(args, "leverage_frontier_scan", False):
         # Diagnostic-only short-circuit: reads an already-persisted ledger and
         # returns before any heavy pipeline import; never builds a request.
-        from src.application.research.mhs.leverage_scan import run_leverage_frontier_scan
+        from src.mhs.leverage_scan import run_leverage_frontier_scan
 
         run_leverage_frontier_scan(args.growth_envelope, tuple(args.leverage_frontier_multiples))
         return
 
     import dataclasses
 
-    from src.application.research.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
-    from src.application.research.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report
+    from src.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
+    from src.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report
     from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
@@ -314,7 +314,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Opt-in (requires --committee-book): report whether the committee's "
             "current exposure sits near its Monte-Carlo constrained growth-optimal "
             "point (block-bootstrap search over a discovery-window-only risk grid, "
-            "reusing src.research.risk.growth_sizing -- the same framework already "
+            "reusing src.quant.risk.growth_sizing -- the same framework already "
             "used for xs_alpha); observational only, never feeds back into sizing "
             "or capital allocation"
         ),

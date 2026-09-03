@@ -380,7 +380,7 @@ def growth_budget_annual_vol(
     path cannot honour.
     """
     from src.mhs.params import GrowthRiskEnvelope
-    from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
+    from src.quant.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
 
     if envelope is None:
         envelope = GrowthRiskEnvelope(

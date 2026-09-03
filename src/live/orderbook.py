@@ -11,8 +11,8 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.config import DATA_DIR
 from src.common.errors import DataIntegrityError
+from src.common.paths import DATA_DIR
 
 _ORDERBOOK_TOP_K: int = 20
 

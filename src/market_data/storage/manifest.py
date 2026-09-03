@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import cast
 
-from src.common.config import SPOT_DATA_DIR
+from src.common.paths import SPOT_DATA_DIR
 
 MANIFEST_PATH = SPOT_DATA_DIR / "manifest.json"
 MANIFEST_SCHEMA_VERSION = 1

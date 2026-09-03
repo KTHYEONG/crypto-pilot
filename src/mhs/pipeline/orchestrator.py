@@ -14,14 +14,14 @@ import time
 
 import pandas as pd
 
-from src.application.research.mhs.evaluation import (
+from src.mhs.evaluation import (
     DISCOVERY_START,
     HOLDOUT_CUTOFF,
     _get_symbol_mark_frame,
     resolve_evaluation_end,
 )
 from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1
-from src.application.research.mhs.resources import _TreeMemorySampler
+from src.mhs.resources import _TreeMemorySampler
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.runner import run_stages

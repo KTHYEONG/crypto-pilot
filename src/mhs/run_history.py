@@ -27,7 +27,7 @@ from typing import Any
 import pandas as pd
 
 from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1, SEARCH_TRIALS_ATTEMPTED
-from src.research.evaluation.policy import HOLDOUT_CUTOFF
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 RUN_HISTORY_SHARD_MAX_BYTES: int = 262144
 RUN_HISTORY_MAX_SHARDS: int = 12
@@ -147,7 +147,7 @@ def trial_identity_key(record: Mapping[str, Any]) -> str | None:
         return None
     from dataclasses import fields as dc_fields
 
-    from src.application.research.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     flags = record.get("flags")
     flags = flags if isinstance(flags, Mapping) else {}
@@ -182,7 +182,7 @@ def _carries_data_integrity_code(record: Mapping[str, Any]) -> bool:
             codes = (*codes, *declared)
     if not codes:
         return False
-    from src.application.research.mhs.research_go import GO_REASON_DATA_INTEGRITY_CODES
+    from src.mhs.research_go import GO_REASON_DATA_INTEGRITY_CODES
 
     return not GO_REASON_DATA_INTEGRITY_CODES.isdisjoint(codes)
 

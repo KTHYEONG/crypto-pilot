@@ -17,7 +17,7 @@ import logging
 
 import pandas as pd
 
-from src.application.research.mhs.evaluation import (
+from src.mhs.evaluation import (
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
     DataIntegrityError,
@@ -26,17 +26,14 @@ from src.application.research.mhs.evaluation import (
     assert_relevant_execution_data_coverage,
     assert_relevant_mark_price_coverage,
     beta_neutralize_weights,
+    books,
     causal_market_beta,
     inverse_realized_vol_tilt,
     realized_vol,
     renormalize_within_mask,
+    specs,
 )
-from src.application.research.mhs.marks import _pit_execution_mask
-from src.application.research.mhs.stage_services import (
-    _book_weights,
-    _horizon_ensemble_execution_weights,
-    _signal_ema_span,
-)
+from src.mhs.marks import _pit_execution_mask
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -48,10 +45,10 @@ def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     ctx.fast_grid = pd.date_range(ctx.start, ctx.end, freq="6h", tz="UTC")
     ctx.slow_grid = pd.date_range(ctx.start, ctx.end, freq="24h", tz="UTC")
 
-    ctx.fast_ema = _signal_ema_span(ctx.fast.band.sign, ctx.fast.horizon_hours, ctx.fast.step_hours)
-    ctx.slow_ema = _signal_ema_span(ctx.slow.band.sign, ctx.slow.horizon_hours, ctx.slow.step_hours)
-    ctx.w_fast = _book_weights(ctx.log_close, ctx.eligible, ctx.fast, ctx.fast_grid, ema_span=ctx.fast_ema)
-    ctx.w_slow = _book_weights(ctx.log_close, ctx.eligible, ctx.slow, ctx.slow_grid, ema_span=ctx.slow_ema)
+    ctx.fast_ema = specs._signal_ema_span(ctx.fast.band.sign, ctx.fast.horizon_hours, ctx.fast.step_hours)
+    ctx.slow_ema = specs._signal_ema_span(ctx.slow.band.sign, ctx.slow.horizon_hours, ctx.slow.step_hours)
+    ctx.w_fast = books._book_weights(ctx.log_close, ctx.eligible, ctx.fast, ctx.fast_grid, ema_span=ctx.fast_ema)
+    ctx.w_slow = books._book_weights(ctx.log_close, ctx.eligible, ctx.slow, ctx.slow_grid, ema_span=ctx.slow_ema)
     ctx.w_fast_1h = ctx.w_fast.reindex(ctx.grid_1h).ffill().fillna(0.0)
     ctx.w_slow_1h = ctx.w_slow.reindex(ctx.grid_1h).ffill().fillna(0.0)
     ctx.execution_mask = _pit_execution_mask(
@@ -112,7 +109,7 @@ def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             stale_hours=24 if ctx.config.mark_mode == "cache_required_stale_carry" else 0,
         )
     if ctx.config.fast_book_mode == "horizon_ensemble":
-        ctx.w_fast_execution = _horizon_ensemble_execution_weights(
+        ctx.w_fast_execution = books._horizon_ensemble_execution_weights(
             ctx.log_close, ctx.eligible, ctx.execution_mask, ctx.fast, ctx.fast_grid,
             "horizon_ensemble", "raw", ctx.fast_ema,
         )
@@ -123,7 +120,7 @@ def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.w_fast_execution = renormalize_within_mask(
             w_fast_tilted, ctx.execution_mask.reindex(ctx.w_fast.index).fillna(False), ctx.fast.min_symbols,
         )
-    ctx.w_slow_execution = _horizon_ensemble_execution_weights(
+    ctx.w_slow_execution = books._horizon_ensemble_execution_weights(
         ctx.log_close, ctx.eligible, ctx.execution_mask, ctx.slow, ctx.slow_grid,
         ctx.config.slow_book_mode, ctx.config.ensemble_signal, ctx.slow_ema,
     )

@@ -5,7 +5,7 @@ from dataclasses import dataclass, fields
 import numpy as np
 import pandas as pd
 
-from src.research.evaluation.reliability import derive_block_size
+from src.quant.evaluation.reliability import derive_block_size
 
 
 @dataclass(frozen=True, slots=True)

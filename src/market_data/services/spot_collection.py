@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.common.config import spot_ohlcv_path
 from src.common.errors import DataIntegrityError
+from src.common.paths import spot_ohlcv_path
 from src.market_data.binance.margin import BinanceMarginClient
 from src.market_data.binance.spot import BinanceSpotClient
 from src.market_data.services.borrow_collection import (

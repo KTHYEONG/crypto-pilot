@@ -17,8 +17,8 @@ from collections.abc import Callable
 
 import psutil
 
-from src.application.research.mhs.contracts import MhsResourceMeasurement
 from src.common.errors import DataIntegrityError
+from src.mhs.contracts import MhsResourceMeasurement
 from src.mhs.types import (
     RAM_BUDGET_FRACTION,
     RAM_RESERVE_FLOOR_BYTES,
