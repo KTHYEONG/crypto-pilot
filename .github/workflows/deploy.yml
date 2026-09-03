@@ -57,6 +57,17 @@ jobs:
           tags: tag:ci
           args: --accept-routes
 
+      - name: Diagnose Tailscale Connectivity
+        env:
+          HOST: ${{ secrets.HOST }}
+        run: |
+          echo "=== 1. Tailscale 상태 및 머신 목록 확인 ==="
+          tailscale status
+          echo "=== 2. Oracle 서버 Ping 테스트 ==="
+          tailscale ping -c 3 "$HOST" || true
+          echo "=== 3. 22번 포트 도달 확인 ==="
+          nc -zv -w 5 "$HOST" 22 || true
+
       - name: Decrypt .env
         env:
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
