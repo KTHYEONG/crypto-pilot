@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.research.evaluation.reliability import (
+from src.quant.evaluation.reliability import (
     FoldDistributionResult,
     ReliabilityGateConfig,
     ReliabilityGateResult,
@@ -30,7 +30,7 @@ from src.research.evaluation.reliability import (
     compute_equity_reliability_gate,
     count_closed_trades,
 )
-from src.research.risk.growth_sizing import (
+from src.quant.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
     apply_realised_risk_overlay,

@@ -22,7 +22,7 @@ import pandas as pd
 
 from typing import TYPE_CHECKING
 
-from src.common.config import DATA_DIR, FUTURES_DATA_DIR
+from src.common.paths import DATA_DIR, FUTURES_DATA_DIR
 from src.common.errors import DataIntegrityError
 
 if TYPE_CHECKING:
@@ -221,7 +221,7 @@ def _strategy_params_present(settings: LiveSettings) -> bool:
 
 
 def _default_data_refresh() -> RefreshReport:
-    from src.common.config import FUTURES_DATA_DIR
+    from src.common.paths import FUTURES_DATA_DIR
     from src.live.data_refresh import refresh_live_market_data
 
     s = LiveSettings()

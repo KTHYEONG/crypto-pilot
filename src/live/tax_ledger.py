@@ -10,8 +10,8 @@ from typing import Any, Literal
 
 import pandas as pd
 
-from src.common.config import DATA_DIR
 from src.common.errors import DataIntegrityError
+from src.common.paths import DATA_DIR
 from src.live.records import append_jsonl_partition
 
 TAX_RECORD_KINDS: frozenset[str] = frozenset({"TRADE", "REALIZED_PNL", "FUNDING_FEE", "COMMISSION", "TRANSFER"})

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from src.common.config import BASE_DIR
+from src.common.paths import BASE_DIR
 
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)

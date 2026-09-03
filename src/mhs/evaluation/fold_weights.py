@@ -8,10 +8,10 @@ import os
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import research_go as _research_go
-from src.application.research.mhs import scaling as _scaling
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
-from src.application.research.mhs.marks import (
+from src.mhs import research_go as _research_go
+from src.mhs import scaling as _scaling
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.marks import (
     _fill_mark_parity_eligibility,
     _get_symbol_mark_frame,
     _pit_execution_mask,
@@ -71,7 +71,7 @@ def _build_fold_target_weights(
     ts = fold.train_start
     vs = fold.validation_start
     ve = fold.validation_end
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     panel_start = max(ts, vs - pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS))
     _panel_columns = (
         ("close", "open", "quote_vol", "taker_buy_quote")
@@ -199,7 +199,7 @@ def _build_fold_target_weights(
             request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
         )
     if request.committee_capital:
-        import src.application.research.mhs.evaluation as ev
+        import src.mhs.evaluation as ev
         blend_1h = ev._committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
             COMMITTEE_TRANCHE_COUNT

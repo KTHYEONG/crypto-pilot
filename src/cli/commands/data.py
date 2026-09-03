@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.application.data import collection
+from src.market_data.services import collection
 from src.market_data.storage.gap_report import detect_internal_gaps
 
 _logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ def _ohlcv(args: argparse.Namespace) -> None:
 
 
 def _mhs_execution(args: argparse.Namespace) -> None:
-    from src.application.data.mhs_execution_collection import (
+    from src.market_data.services.mhs_execution import (
         build_mhs_execution_plan,
         collect_mhs_execution_data,
     )
@@ -82,7 +82,7 @@ def _collect_borrow(args: argparse.Namespace) -> None:
 
 
 def _report_internal_gaps(args: argparse.Namespace) -> None:
-    from src.common.config import FUTURES_DATA_DIR
+    from src.common.paths import FUTURES_DATA_DIR
     from src.mhs.panel import load_base_panel
 
     panel = load_base_panel(
@@ -147,7 +147,7 @@ def _stream_liquidations(args: argparse.Namespace) -> None:
 def _refresh_live_universe(args: argparse.Namespace) -> None:
     import pandas as pd
 
-    from src.common.config import FUTURES_DATA_DIR
+    from src.common.paths import FUTURES_DATA_DIR
     from src.live.data_refresh import ColdUniverseError, refresh_live_market_data
     from src.live.scheduler import DAEMON_COLD_UNIVERSE_EXIT_CODE
     from src.live.settings import LiveSettings
@@ -178,11 +178,11 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
 def _seed_cloud(args: argparse.Namespace) -> None:
     import pandas as pd
 
-    from src.common.config import FUTURES_DATA_DIR
+    from src.common.paths import FUTURES_DATA_DIR
     from src.live.data_refresh import refresh_live_market_data
     from src.live.settings import LiveSettings
     from src.market_data.binance.vision import BinanceVisionDownloader
-    from src.research.universe.pit_universe import symbol_partition
+    from src.quant.universe.pit_universe import symbol_partition
 
     syms = [
         s
@@ -216,7 +216,7 @@ def _seed_cloud(args: argparse.Namespace) -> None:
 def _prune_live_data(args: argparse.Namespace) -> None:
     import pandas as pd
 
-    from src.common.config import FUTURES_DATA_DIR
+    from src.common.paths import FUTURES_DATA_DIR
     from src.live.alerting import send_email_alert
     from src.live.orderbook import default_orderbook_dir
     from src.live.settings import LiveSettings

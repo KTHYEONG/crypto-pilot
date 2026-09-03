@@ -7,10 +7,10 @@ from typing import Any
 
 import pandas as pd
 
-import src.application.research.mhs.evaluation.participation as participation_mod
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.contracts import MhsBookReport, MhsDiagnosticRequest
-from src.application.research.mhs.resources import (
+import src.mhs.evaluation.participation as participation_mod
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import MhsBookReport, MhsDiagnosticRequest
+from src.mhs.resources import (
     _resolve_ram_budget,
     _StageRecorder,
     _worker_plan_observer,

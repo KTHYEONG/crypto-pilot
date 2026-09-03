@@ -1,6 +1,6 @@
 """S7: Anchored purged fold pool + post-book concurrent diagnostics.
 
-Extracted verbatim from ``evaluation.py`` lines 4061-4172 (``_run_post_book_concurrently``
+Extracted verbatim from ``evaluation.py`` lines 4061-4172 (``concurrency._run_post_book_concurrently``
 call, post-fold committee/multi-feature diagnostic opt-ins, deflated-sharpe
 evidence, fold blend parity / growth concentration, the research-GO gate, and
 the deployment-readiness patch). Calls the existing isolated functions unchanged;
@@ -17,39 +17,35 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from src.application.research.mhs import research_go as _research_go
-from src.application.research.mhs import scaling as _scaling
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.evaluation import (
+from src.mhs import research_go as _research_go
+from src.mhs import scaling as _scaling
+from src.mhs import statistics as _statistics
+from src.mhs.calibration import NullShareCalibration, calibrate_max_share_null
+from src.mhs.evaluation import (  # noqa: F401 - wiring contract expects these symbols
     COMMITTEE_MEMBERS,
     COMMITTEE_OOS_START,
     FEATURE_REGISTRY,
     DataIntegrityError,
-    _load_reference_close,
+    books,
+    committee,
     compute_deployment_readiness,
+    concurrency,
+    diagnostics,
+    evidence,
     feature_registry_panel_columns,
+    folds,
+    guards,
     phase_1_anchored_purged_folds,
+    regime,
 )
-from src.application.research.mhs.marks import _get_symbol_mark_frame
-from src.application.research.mhs.resources import _assert_stage_rss_budget
-from src.application.research.mhs.stage_services import (
-    _committee_diagnostic,
-    _fold_blend_parity,
-    _fold_growth_concentration,
-    _fold_realized_risk_parity,
-    _guard_stage_or_breach,
-    _load_feature_panels,
-    _multi_feature_diagnostic,
-    _pooled_fold_evidence,
-    _run_post_book_concurrently,
-)
-from src.mhs.calibration import NullShareCalibration, calibrate_max_share_null
 from src.mhs.evidence import (
     regime_conditional_sharpe_blocks,
     selection_overlap_fraction,
 )
+from src.mhs.marks import _get_symbol_mark_frame
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
+from src.mhs.resources import _assert_stage_rss_budget
 from src.mhs.run_history import (
     derive_trials_attempted,
     trial_pool_disclosure,
@@ -149,7 +145,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     (
         ctx.bootstrap_ci, ctx.placebo_percentile, ctx.participation, ctx.termination_counts,
         fold_reports, ctx.deployment,
-    ) = _run_post_book_concurrently(
+    ) = concurrency._run_post_book_concurrently(
         ctx.blend_report, ctx.root, ctx.config, ctx.execution_symbols, ctx.minute_grid,
         ctx.signal_48h, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast,
         ctx.fold_funding, ctx.initial_equity, ctx.recorder, ctx.fold_slow_horizons, ctx.fold_fast_horizons,
@@ -161,7 +157,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
     _get_symbol_mark_frame.cache_clear()
     gc.collect()
-    _terminal = _guard_stage_or_breach(
+    _terminal = guards._guard_stage_or_breach(
         "post_folds", ctx.rss_budget_bytes, ctx.rss_reserve_bytes,
         ctx.config, ctx.recorder, str(ctx.resolved_end), str(ctx.start), str(ctx.end),
     )
@@ -178,13 +174,13 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                     if spec.name in set(COMMITTEE_MEMBERS)
                 ],
             )
-        _diag_panels = _load_feature_panels(
+        _diag_panels = diagnostics._load_feature_panels(
             ctx.root, ctx.start, ctx.end, ctx.grid_1h, ctx.aligned_symbols, columns=_diag_panel_columns,
         )
         ctx.recorder.record("diagnostic_feature_panels")
         _assert_stage_rss_budget("diagnostic_feature_panels", ctx.rss_budget_bytes, ctx.rss_reserve_bytes)
         if ctx.config.committee_book:
-            ctx.committee_diagnostic = _committee_diagnostic(
+            ctx.committee_diagnostic = committee._committee_diagnostic(
                 ctx.root, ctx.start, ctx.end, ctx.grid_1h, ctx.aligned_symbols, ctx.execution_mask, ctx.opens,
                 ctx.bar_funding, panels=_diag_panels,
                 rss_budget_bytes=ctx.rss_budget_bytes,
@@ -195,7 +191,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             )
             ctx.recorder.record("committee_diagnostic")
         if ctx.config.multi_feature_book:
-            ctx.multi_feature_diagnostic = _multi_feature_diagnostic(
+            ctx.multi_feature_diagnostic = diagnostics._multi_feature_diagnostic(
                 ctx.root, ctx.start, ctx.end, ctx.grid_1h, ctx.aligned_symbols, ctx.execution_mask, ctx.opens,
                 ctx.bar_funding, panels=_diag_panels,
                 rss_budget_bytes=ctx.rss_budget_bytes,
@@ -227,7 +223,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 ctx.blend_report.primary.ledger.fill_turnover,
             )
         )
-        _regime_btc_close = _load_reference_close(ctx.root, ctx.start, ctx.end)
+        _regime_btc_close = regime._load_reference_close(ctx.root, ctx.start, ctx.end)
         ctx.regime_conditional_sharpe = (
             regime_conditional_sharpe_blocks(_regime_returns_1h, _regime_btc_close)
             if _regime_btc_close is not None
@@ -236,11 +232,11 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         del _regime_equity_1h, _regime_returns_1h, _regime_turnover, _regime_btc_close
     else:
         ctx.regime_conditional_sharpe = None
-    ctx.fold_blend_parity, parity_reasons = _fold_blend_parity(ctx.blend_traces, ctx.folds)
+    ctx.fold_blend_parity, parity_reasons = evidence._fold_blend_parity(ctx.blend_traces, ctx.folds)
     # I-FAMILY level 증거: fold별 min이 아니라 pooled 하한으로 판정한다.
-    ctx._pooled_fold_evidence = _pooled_fold_evidence(ctx.folds)
+    ctx._pooled_fold_evidence = evidence._pooled_fold_evidence(ctx.folds)
     # 관측치 선계산(임계값 무관 경계): 보정 임계값 도출의 observed_share 입력.
-    _observed_concentration, _observed_reasons = _fold_growth_concentration(ctx.folds, 1.0)
+    _observed_concentration, _observed_reasons = evidence._fold_growth_concentration(ctx.folds, 1.0)
     _share_calibration: NullShareCalibration | SimpleNamespace
     if ctx._pooled_fold_evidence["n_measured_folds"] >= 2:
         _measured_reports = [
@@ -275,10 +271,10 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # 영역)로 비활성한다. 보정값을 어떤 기본 임계값으로도 대체하지 않는다.
         ctx.evidence_calibration = None
         _share_calibration = SimpleNamespace(threshold=1.0)
-    ctx.fold_growth_concentration, concentration_reasons = _fold_growth_concentration(ctx.folds, _share_calibration.threshold)
+    ctx.fold_growth_concentration, concentration_reasons = evidence._fold_growth_concentration(ctx.folds, _share_calibration.threshold)
     level_reasons = _research_go._pooled_level_gate_reasons(ctx._pooled_fold_evidence)
     # 관측 전용 진단: 항상 빈 튜플이며 Research-GO reason 합산에 더하지 않는다.
-    ctx.fold_realized_risk_parity, _risk_parity_reasons = _fold_realized_risk_parity(ctx.folds)
+    ctx.fold_realized_risk_parity, _risk_parity_reasons = evidence._fold_realized_risk_parity(ctx.folds)
     # 관측 전용 공시 코드(선택창 겹침)만 조건부로 추가된다. 차단 코드는 아니다.
     extra_reasons: tuple[str, ...] = parity_reasons + concentration_reasons + level_reasons
     if ctx.selection_overlap_fraction > 0:

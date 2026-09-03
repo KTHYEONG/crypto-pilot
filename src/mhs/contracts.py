@@ -2,7 +2,7 @@
 
 ``cli_param`` builds the field-metadata dict that drives both the CLI argparse
 flag generation (``src.cli.dataclass_args.build_parser_from_dataclass``) and the
-metadata-driven request validator (``src.application.research.mhs.validation``),
+metadata-driven request validator (``src.mhs.validation``),
 so adding one MHS execution option requires editing exactly one request field.
 """
 
@@ -346,7 +346,7 @@ class MhsDiagnosticRequest:
     )
 
     def __post_init__(self) -> None:
-        from src.application.research.mhs.validation import validate_request
+        from src.mhs.validation import validate_request
         validate_request(self, COMMITTEE_TARGET_GROSS_UNSET)
 
 

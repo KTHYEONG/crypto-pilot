@@ -4,16 +4,16 @@ import dataclasses
 
 import pandas as pd
 
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.contracts import (
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import (
     MhsBookFailure,
     MhsBookReport,
     MhsDiagnosticRequest,
     MhsHorizonDiagnosticReport,
     MhsResearchGoResult,
 )
-from src.application.research.mhs.research_go import GO_REASON_RESOURCE_BREACH
-from src.application.research.mhs.resources import _assert_stage_rss_budget, _StageRecorder
+from src.mhs.research_go import GO_REASON_RESOURCE_BREACH
+from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
 from src.common.errors import DataIntegrityError
 from src.mhs.evidence import (
     PhaseDiagnosticResult,

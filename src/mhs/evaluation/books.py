@@ -6,7 +6,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import scaling as _scaling
+from src.mhs import scaling as _scaling
 from src.mhs.books import (
     equal_weight_book_ensemble,
     inverse_realized_vol_tilt,
@@ -23,7 +23,7 @@ from src.mhs.params import (
     DISCOVERY_REVERSAL_CANDIDATES,
     FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
 )
-from src.mhs.types import BOOK_BLEND_WEIGHTS, BookSpec
+from src.mhs.types import BOOK_BLEND_WEIGHTS, BookSpec  # noqa: F401 - re-exported for monkeypatch seams
 
 
 def _book_structure_trace(target_weights: pd.DataFrame) -> dict[str, float]:
@@ -154,7 +154,7 @@ def _active_blend_book_and_grid(
     same origin -- reproducing the pre-fix behavior byte-for-byte.  If no book
     carries capital the allocation invariant is violated and we fail closed.
     """
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     if ev.BOOK_BLEND_WEIGHTS["fast_reversal"] != 0.0:
         return fast, fast_grid
     if ev.BOOK_BLEND_WEIGHTS["slow_momentum"] != 0.0:

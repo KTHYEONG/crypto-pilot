@@ -8,8 +8,8 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs.contracts import MhsDiagnosticRequest
 from src.common.errors import DataIntegrityError
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.horizons import efficiency_ratio
 from src.mhs.params import (
     COMMITTEE_OOS_START,
@@ -593,7 +593,7 @@ def _envelope_exposure_cap(
     """
     del target_gross
     from src.mhs.params import COMMITTEE_GROWTH_BARS_PER_YEAR, COMMITTEE_GROWTH_N_PATHS, COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS  # noqa: I001
-    from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
+    from src.quant.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
 
     r = reference_daily_returns.dropna().replace([np.inf, -np.inf], np.nan).dropna()
     reference_risk = float(r.std(ddof=1)) if len(r) >= 2 else float("nan")
@@ -666,7 +666,7 @@ def resolved_exposure_cap(request: MhsDiagnosticRequest) -> float:
     if request.pnl_vol_target_mode == "median_relative":
         # median_relative는 자체 1.0 클립인 _pnl_vol_target_scale로 라우트된다.
         return 1.0
-    from src.application.research.mhs.research_go import _resolved_growth_envelope
+    from src.mhs.research_go import _resolved_growth_envelope
 
     envelope = _resolved_growth_envelope(request)
     if request.pnl_vol_target_mode == "exante_target" and envelope.name == "conservative":
@@ -692,7 +692,7 @@ def _replay_exposure_scale(
     constant_risk는 Kelly 블렌드를 경유하지 않고 즉시 반환하며
     ``warmup_returns``로 fold 검증 시작 이전 EWMA 워밍업을 받는다(I-WARM).
     """
-    from src.application.research.mhs.research_go import _resolved_growth_envelope
+    from src.mhs.research_go import _resolved_growth_envelope
 
     def _resolve_target_vol(envelope: GrowthRiskEnvelope) -> float:
         if growth_budget_target_vol is not None:
@@ -788,7 +788,7 @@ def is_streaming_scale_mode(request: MhsDiagnosticRequest) -> bool:
     if request.pnl_vol_target_mode == "median_relative":
         return True
     if request.pnl_vol_target_mode == "exante_target":
-        from src.application.research.mhs.research_go import _resolved_growth_envelope
+        from src.mhs.research_go import _resolved_growth_envelope
 
         return _resolved_growth_envelope(request).name == "conservative"
     return False

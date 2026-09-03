@@ -14,9 +14,9 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs.contracts import MhsBookReport, MhsFoldReport
 from src.common.errors import DataIntegrityError
 from src.mhs.books import phase_tranche_book, rank_weight_book
+from src.mhs.contracts import MhsBookReport, MhsFoldReport
 from src.mhs.evidence import (
     TRIAL_SHARPE_DEDUP_DECIMALS,
     DsrDecomposition,

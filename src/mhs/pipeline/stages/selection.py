@@ -2,7 +2,7 @@
 
 Extracted verbatim from ``evaluation.py`` lines 3612-3655 (eligibility mask,
 fill-mark-parity eligibility, ``log_close``, candidate weight books, the
-fold-safe horizon selection ``_run_fold_safe_discovery_parallel`` scan, and the
+fold-safe horizon selection ``folds._run_fold_safe_discovery_parallel`` scan, and the
 top-level horizon override via ``dataclasses.replace``).
 
 The ``del close`` at the original 3618-3619 is preserved here at the same
@@ -17,15 +17,13 @@ import dataclasses
 
 import numpy as np
 
-from src.application.research.mhs.evaluation import (
+from src.mhs.evaluation import (
     BOOK_SPECS,
+    books,
+    folds,
     liquid_half_eligibility,
 )
-from src.application.research.mhs.marks import _fill_mark_parity_eligibility
-from src.application.research.mhs.stage_services import (
-    _candidate_weight_books,
-    _run_fold_safe_discovery_parallel,
-)
+from src.mhs.marks import _fill_mark_parity_eligibility
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -59,7 +57,7 @@ def select_horizons(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # byte-identical duplicate build is eliminated: -5.23 GB peak, -70 s wall).
     ctx.candidate_books = None
     if ctx.config.fold_safe_horizon_selection or ctx.config.discovery_gate:
-        ctx.candidate_books = _candidate_weight_books(
+        ctx.candidate_books = books._candidate_weight_books(
             ctx.log_close, ctx.eligible, ctx.bar_funding, ctx.specs
         )
     if ctx.config.fold_safe_horizon_selection:
@@ -69,7 +67,7 @@ def select_horizons(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # sequential per-fold loop.
         (
             ctx.fold_slow_horizons, ctx.fold_fast_horizons, ctx.fold_funding_carry,
-        ) = _run_fold_safe_discovery_parallel(
+        ) = folds._run_fold_safe_discovery_parallel(
             ctx.specs, ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h,
             precomputed=ctx.candidate_books,
             telemetry=ctx.recorder,

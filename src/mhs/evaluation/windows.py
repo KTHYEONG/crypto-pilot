@@ -12,12 +12,12 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from src.application.research.mhs import research_go as _research_go
-from src.application.research.mhs import scaling as _scaling
-from src.application.research.mhs import statistics as _statistics
-from src.application.research.mhs.contracts import MhsBookFailure, MhsBookReport, MhsDiagnosticRequest
-from src.application.research.mhs.marks import _build_window_frames, _cached_mark_panel, _load_window_minute_frames
-from src.application.research.mhs.resources import _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
+from src.mhs import research_go as _research_go
+from src.mhs import scaling as _scaling
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import MhsBookFailure, MhsBookReport, MhsDiagnosticRequest
+from src.mhs.marks import _build_window_frames, _cached_mark_panel, _load_window_minute_frames
+from src.mhs.resources import _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
 from src.common.errors import DataIntegrityError
 from src.mhs.books import portfolio_rebalance_trigger
 from src.mhs.evidence import CostResponsePoint, PhaseDiagnosticResult, TailSensitivityResult, book_evidence, phase_1_anchored_purged_folds, required_cost_tiers
@@ -277,7 +277,7 @@ def _book_outcome(
     replay_weights_step: pd.DataFrame | None = None,
     telemetry: _StageRecorder | None = None,
 ) -> tuple[MhsBookReport, dict[int, dict[str, float]]]:
-    import src.application.research.mhs.evaluation as ev
+    import src.mhs.evaluation as ev
     weights_1h = weights_step.reindex(grid_1h).ffill().fillna(0.0)
     cost_grid = tuple(dict.fromkeys((0.0, 2.0, 4.0, 8.0, *required_cost_tiers())))
     reference_evidence = book_evidence(
