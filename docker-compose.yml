@@ -9,6 +9,7 @@ services:
       - HARDWARE_MAX_WORKERS=1
     volumes:
       - ./data:/app/data
+      - ./data/state:/app/data/state
       - ./logs:/app/logs
       - ./docs/results/mhs_horizon_diagnostic_artifacts:/app/docs/results/mhs_horizon_diagnostic_artifacts
     mem_limit: 1200m
@@ -26,6 +27,7 @@ services:
     env_file: .env
     volumes:
       - ./data/futures/liquidations:/app/data/futures/liquidations
+      - ./data/state:/app/data/state
     command: ["uv", "run", "python", "-m", "src.cli.main", "data", "collect", "stream-liquidations"]
     logging:
       driver: json-file

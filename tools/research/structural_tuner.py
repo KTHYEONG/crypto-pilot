@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from src.research.evaluation.falsification import FalsificationConfig, evaluate_parameter_plateau
+from src.quant.evaluation.falsification import FalsificationConfig, evaluate_parameter_plateau
 
 
 @dataclass(frozen=True, slots=True)
