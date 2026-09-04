@@ -449,6 +449,5 @@
   },
   "src/quant/universe/pit_universe.py": {
     "testing": "tests/unit/quant/universe/test_pit_universe.py"
-  },
-  "src/mhs/evaluation/__init__.py": {}
+  }
 }
