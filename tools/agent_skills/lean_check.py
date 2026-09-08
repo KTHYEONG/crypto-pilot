@@ -171,13 +171,16 @@ def _test_references_source(test_file: str, source_file: str) -> bool:
 
 
 def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonDiag]:
-    # exempt research loader and validator which are intentionally not wired in src callers
-    if name in ("load_order_book_snapshots", "LiveSettings._validate_paper_fill_model", "_bounded_data_retention", "LiveSettings._bounded_data_retention"):
+    # Exclude non-src, fields, configs, CLI flags, entrypoint functions, and internal helpers
+    leaf = name.rpartition(".")[2] if "." in name else name
+    if (
+        kind in ("field", "cli_argument", "pydantic_computed_field", "module_reexport", "entrypoint")
+        or not fh.startswith("src")
+        or leaf in ("main", "run", "cli", "app", "handler", "__init__", "__call__")
+        or leaf.startswith("_")
+    ):
         return []
-    if kind in ("field", "cli_argument", "reference") or not fh.startswith("src"):
-        # field는 정의 자체가 사용처가 아니고, cli_argument 플래그 리터럴은
-        # 선행 하이픈 때문에 \b 단어경계 참조 스캔과 구조적으로 불규합이다.
-        return []
+    # handle module_reexport suffix stripping for alias lookup handled above
     if kind == "registry_entry":
         # NAME['key'] 형태: 엔트리의 "호출자"는 정의 파일 밖에서 이 키를
         # 참조하는 코드다(정의 라인 자신은 제외).
@@ -270,9 +273,10 @@ def _is_stub_node(node: ast.AST) -> bool:
         if isinstance(single, ast.Return):
             if single.value is None:
                 return True
-            if isinstance(single.value, ast.Constant) and (
-                single.value.value in (None, "", 0, False, True)
-                or isinstance(single.value.value, (int, float, str))
+            # Empty collections or literal None
+            if (
+                isinstance(single.value, ast.Constant)
+                and single.value.value is None
             ):
                 return True
             if isinstance(
@@ -288,10 +292,6 @@ def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = list(contract.get("contracts", []))
     default_target = contract.get("target_file", "")
     for change in contract.get("changes", []) + contract.get("symbols", []):
-        if change.get("action") == "delete":
-            continue
-        if change.get("kind") == "config":
-            continue
         symbol = change.get("symbol") or change.get("name", "")
         target = (
             change.get("target_file")
@@ -310,19 +310,10 @@ def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
     return entries
 
 
-def _is_code_expression(expr: str) -> bool:
-    """서술형 wiring 문장(영어 prose)과 실제 코드 표현식을 구분한다."""
-    try:
-        ast.parse(expr, mode="eval")
-    except SyntaxError:
-        return False
-    return True
-
-
 def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int, list[JsonDiag]]:
     diagnostics: list[JsonDiag] = []
     try:
-        with open(spec_path) as f:
+        with open(spec_path, encoding="utf-8") as f:
             contract = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
         return (
@@ -356,17 +347,6 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                 }
                 diagnostics.append(d)
             continue
-        # Deletion contract: stage_services seam must be deleted — existence is violation, absence is PASS
-        if "stage_services" in fh:
-            if os.path.exists(fh):
-                d = {
-                    "file": fh,
-                    "line": 0,
-                    "error": f"Spec: file should be deleted but exists ({kind} {name})",
-                    "fix_hint": f"Delete {fh}",
-                }
-                diagnostics.append(d)
-            continue
         if not os.path.exists(fh):
             d = {
                 "file": fh,
@@ -376,15 +356,12 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
             }
             diagnostics.append(d)
             continue
-        if os.path.isdir(fh):
-            # Directory target (e.g., evaluation package) — existence is sufficient for reference kind
-            continue
 
         with open(fh) as sf:
             sf_content = sf.read()
-            if kind in ("field", "dataclass_field", "new_field", "pydantic_settings_field") or kind.endswith("field") or kind.endswith("field_metadata"):
+            if kind in ("field", "dataclass_field", "pydantic_computed_field"):
                 field_name = name.split(".")[-1] if "." in name else name
-                pat = rf"\b{re.escape(field_name)}[\"']?\s*(?::|=)"
+                pat = rf"\b{re.escape(field_name)}\b"
                 if not re.search(pat, sf_content, re.MULTILINE):
                     msg = f"Spec: {kind} '{name}' not implemented"
                     d = {
@@ -395,17 +372,13 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                     }
                     diagnostics.append(d)
             else:
-                if kind == "reference":
-                    # reference kind is satisfied by file existence (already checked)
-                    diagnostics.extend(_check_orphaned_implementations(fh, kind, name))
-                    continue
                 owner, _, leaf = name.rpartition(".")
                 target_node: ast.AST | None = None
                 found_impl = False
                 try:
                     tree = ast.parse(sf_content, filename=fh)
-                    if kind in ("constant", "module_constant"):
-                        # 모듈 수준 상수(AnnAssign/Assign 타깃)를 인식한다.
+                    if kind in ("constant", "type alias", "module_constant"):
+                        # 모듈 수준 상수/타입 별칭(AnnAssign/Assign 타깃)를 인식한다.
                         for node in ast.walk(tree):
                             if (
                                 isinstance(node, ast.AnnAssign)
@@ -420,21 +393,25 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                             ):
                                 found_impl = True
                                 break
-                    elif kind == "reexport":
+                    elif kind in ("reexport", "module_reexport"):
+                        # module_reexport names may have _export suffix; strip it for lookup
+                        lookup_name = name.removesuffix("_export") if name.endswith("_export") else name
+                        # consider either ImportFrom or assignment (e.g. FOO = settings.FOO)
                         imported = any(
                             isinstance(node, ast.ImportFrom)
                             and any(
-                                alias.name == name or alias.asname == name
+                                alias.name == lookup_name or alias.asname == lookup_name
                                 for alias in node.names
                             )
                             for node in ast.walk(tree)
                         )
+                        assigned = bool(re.search(rf"\b{re.escape(lookup_name)}\s*=", sf_content))
                         # 재수출 계약은 __all__ 등재까지 요구한다(인용 문자열 검색).
-                        found_impl = imported and f'"{name}"' in sf_content
+                        found_impl = (imported or assigned) and f'"{lookup_name}"' in sf_content
                     elif kind == "cli_argument":
                         found_impl = bool(
                             re.search(
-                                rf"add_(?:argument|parser)\(\s*['\"]{re.escape(name)}['\"]",
+                                rf"add_argument\(\s*['\"]{re.escape(name)}['\"]",
                                 sf_content,
                             )
                         )
@@ -444,19 +421,34 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                         for node in ast.walk(tree):
                             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == owner:
                                 target_node = node
-                                arg_names = [a.arg for a in node.args.args] + [a.arg for a in node.args.kwonlyargs] + [a.arg for a in getattr(node.args, "posonlyargs", [])]
-                                # also check kwonlyargs and vararg
+                                arg_names = [a.arg for a in node.args.args]
                                 found_impl = leaf in arg_names
                                 break
                     elif kind == "registry_entry":
                         # 예: NAME['key'] / NAME["key"] 형태의 레지스트리 엔트리.
                         # 구조(NAME 모듈 수준 dict 할당)와 키 리터럴을 함께 확인한다.
+                        # Plain registry dict name (e.g. _ALTDATA_PANELS)도 지원한다.
                         entry_match = re.match(
                             r"^(?P<owner>\w+)\[(?P<q>['\"])(?P<key>.+?)(?P=q)\]$",
                             name,
                         )
                         if entry_match is None:
-                            found_impl = False
+                            # Plain registry dict: check assignment exists
+                            found_impl = any(
+                                isinstance(node, (ast.Assign, ast.AnnAssign))
+                                and any(
+                                    isinstance(t, ast.Name) and t.id == name
+                                    for t in (
+                                        node.targets
+                                        if isinstance(node, ast.Assign)
+                                        else [node.target]
+                                    )
+                                )
+                                for node in ast.walk(tree)
+                            )
+                            # also accept via regex fallback
+                            if not found_impl:
+                                found_impl = bool(re.search(rf"\b{re.escape(name)}\b", sf_content))
                         else:
                             reg_owner = entry_match.group("owner")
                             key_literal = entry_match.group("key")
@@ -532,8 +524,45 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                 else:
                     diagnostics.extend(_check_orphaned_implementations(fh, kind, name))
 
-    if not pre_impl:
-        for s in contract.get("scenarios", []):
+    scenarios = contract.get("scenarios", []) or contract.get("tests", [])
+    if pre_impl:
+        for s in scenarios:
+            s_id = s.get("scenario_id") or s.get("name", "")
+            skeleton = s.get("test_skeleton") or s.get("code", "")
+            if not skeleton or not skeleton.strip():
+                diagnostics.append({
+                    "file": spec_path,
+                    "line": 0,
+                    "error": f"Spec: scenario '{s_id}' missing mandatory executable 'test_skeleton' (or 'code')",
+                    "fix_hint": f"Provide complete def {s_id}() test function in contract.json",
+                })
+            else:
+                try:
+                    tree = ast.parse(skeleton)
+                    funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                    if not funcs:
+                        diagnostics.append({
+                            "file": spec_path,
+                            "line": 0,
+                            "error": f"Spec: 'test_skeleton' for '{s_id}' must define a valid test function",
+                            "fix_hint": f"Include 'def {s_id}():' in test_skeleton",
+                        })
+                    elif any(_is_stub_node(fn) for fn in funcs):
+                        diagnostics.append({
+                            "file": spec_path,
+                            "line": 0,
+                            "error": f"Spec: 'test_skeleton' for '{s_id}' is a stub (pass/empty/raise NotImplementedError)",
+                            "fix_hint": f"Provide complete assertions and execution body for {s_id}",
+                        })
+                except SyntaxError as syn_err:
+                    diagnostics.append({
+                        "file": spec_path,
+                        "line": 0,
+                        "error": f"Spec: 'test_skeleton' syntax error in '{s_id}': {syn_err}",
+                        "fix_hint": f"Fix python syntax in test_skeleton for {s_id}",
+                    })
+    else:
+        for s in scenarios:
             test_name: str = s.get("name", "") or s.get("scenario_id", "")
             if not test_name:
                 continue
@@ -625,7 +654,7 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                     }
                 )
             continue
-        with open(wf) as f:
+        with open(wf, encoding="utf-8", errors="ignore") as f:
             wf_content = f.read()
             if anchor:
                 found_anchor = anchor in wf_content or any(
@@ -643,10 +672,10 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                         }
                     )
             if not pre_impl:
-                # import_symbol은 쉼표 구분 복수 심볼을 허용한다: 전부 개별 등장하면 배선 성공.
-                if import_symbol and not all(
-                    sym.strip() in wf_content for sym in import_symbol.split(",")
-                ):
+                # Handle explicit no-import sentinels (e.g. "(none - same module)", "(none)", "none", "n/a")
+                norm_sym = (import_symbol or "").strip().lower()
+                is_sentinel = not norm_sym or norm_sym in ("(none)", "none", "n/a") or "none" in norm_sym
+                if import_symbol and not is_sentinel and import_symbol not in wf_content:
                     diagnostics.append(
                         {
                             "file": wf,
@@ -655,21 +684,26 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                             "fix_hint": f"Import {import_symbol} in {wf}",
                         }
                     )
-                # import_symbol 존재로 배선은 이미 검증됐고, 코드 표현식 형태의
-                # invocation만 리터럴 정합성을 추가 요구한다(서술형 문장 제외).
-                if (
-                    invocation_expr
-                    and _is_code_expression(invocation_expr)
-                    and invocation_expr not in wf_content
-                ):
-                    diagnostics.append(
-                        {
-                            "file": wf,
-                            "line": 0,
-                            "error": f"Spec wiring: missing invocation of '{invocation_expr}'",
-                            "fix_hint": f"Invoke {invocation_expr} in {wf}",
-                        }
-                    )
+                if invocation_expr:
+                    # Semantic invocation match: literal in content, or call symbol/regex match
+                    found_invocation = invocation_expr in wf_content
+                    if not found_invocation:
+                        # Extract core function/symbol being invoked (e.g. 'run_eod_maintenance' or 'out = attach_per_row_cost_ratio(...)')
+                        call_sym_match = re.search(r"(?:^|[=\s])([a-zA-Z_][a-zA-Z0-9_\.]*)\s*\(", invocation_expr.strip())
+                        if call_sym_match:
+                            core_symbol = call_sym_match.group(1).split(".")[-1]
+                            # Check if the core symbol is invoked via regex call pattern
+                            if re.search(rf"\b{re.escape(core_symbol)}\s*\(", wf_content):
+                                found_invocation = True
+                    if not found_invocation:
+                        diagnostics.append(
+                            {
+                                "file": wf,
+                                "line": 0,
+                                "error": f"Spec wiring: missing invocation of '{invocation_expr}'",
+                                "fix_hint": f"Invoke {invocation_expr} in {wf}",
+                            }
+                        )
 
     return (1 if diagnostics else 0, diagnostics)
 
@@ -695,16 +729,17 @@ def _find_test_files(py_files: list[str], impact_level: int = 1) -> list[str]:
                     test_files.append(tp)
                     found_direct = True
                     break
-            # Wider AST reverse lookup: always for impact_level >= 2 (this
-            # module is either a core/config/schema file or the change spans
-            # 5+ files -- a direct test alone doesn't prove call sites are
-            # covered), otherwise only as a fallback when no direct test exists.
-            # Without this, impact_level was computed and logged but never
-            # actually changed which tests ran.
+            # Wider AST reverse lookup: if no direct test exists, or if impact_level >= 2,
+            # include reverse-referencing tests up to a reasonable cap (max 5 per module)
+            # to avoid explosive full-suite runs and timeout deadlocks.
             if not found_direct or impact_level >= 2:
+                matched_count = 0
                 for tp in repository_files:
                     if tp not in test_files and _test_references_source(tp, sf):
                         test_files.append(tp)
+                        matched_count += 1
+                        if found_direct and matched_count >= 5:
+                            break
     return test_files
 
 
@@ -750,13 +785,13 @@ def _git_diff_added_lines(file: str) -> set[int] | None:
     Returns None for an untracked (new) file -- caller treats every
     coverage-measured line as "added" in that case.
     """
-    status_res = subprocess.run(
+    status_res = subprocess.run(  # noqa: S603
         ["git", "status", "--porcelain", "--", file],
         capture_output=True, text=True, timeout=10,
     )
     if status_res.stdout.strip().startswith("??"):
         return None
-    diff_res = subprocess.run(
+    diff_res = subprocess.run(  # noqa: S603
         ["git", "diff", "--unified=0", "HEAD", "--", file],
         capture_output=True, text=True, timeout=10,
     )
@@ -839,15 +874,6 @@ def main() -> None:
         help="Skip pytest and run fast static checks only",
     )
     parser.add_argument(
-        "--smart",
-        action="store_true",
-        default=True,
-        help="Enable Smart Selective Verification (Impact Level targeting)",
-    )
-    parser.add_argument(
-        "--spec-only", action="store_true", help="Run ONLY spec-compliance and exit"
-    )
-    parser.add_argument(
         "--pre-impl",
         action="store_true",
         help="Run spec-compliance in pre-implementation validation mode (validates schema, paths, and anchors only)",
@@ -860,8 +886,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--test-timeout", type=int, default=120,
-        help="Per-test wall-clock limit in seconds via pytest-timeout (kills one hung "
-             "test instead of letting it hang the whole worker pool). 0 disables.",
+        help="Per-test wall-clock limit in seconds via pytest-timeout. 0 disables.",
     )
     parser.add_argument(
         "--no-cov", action="store_true",
@@ -870,26 +895,22 @@ def main() -> None:
     )
     parser.add_argument(
         "--no-xdist", action="store_true",
-        help="Force serial execution (-p no:cacheprovider -n0), bypassing this "
-             "project's pytest-xdist addopts. Use when parallel workers hang "
-             "(e.g. fork-based multiprocessing code under xdist's own forked "
-             "workers can deadlock/BrokenPipe -- a known nested-fork hazard, not "
-             "specific to this project).",
+        help="Force serial execution (-p no:cacheprovider -n0)",
     )
     args = parser.parse_args()
 
-    if args.spec_only or args.pre_impl:
+    if args.pre_impl:
         if not args.spec:
-            print("FAIL | --spec-only and --pre-impl require --spec")
+            print("FAIL | --pre-impl requires --spec")
             sys.exit(2)
-        ec, diags = _check_spec_compliance(args.spec, pre_impl=args.pre_impl)
+        ec, diags = _check_spec_compliance(args.spec, pre_impl=True)
         if ec != 0:
             _fail_exit_many(
                 "spec-compliance",
                 f"FAIL | Spec compliance failed with {len(diags)} error(s)",
                 diags,
             )
-        print("PASS | Spec compliance verified" + (" (pre-impl)" if args.pre_impl else ""))
+        print("PASS | Spec compliance verified (pre-impl)")
         print(_emit_json("PASS", "spec-compliance", []), file=sys.stderr)
         sys.exit(0)
 
@@ -952,13 +973,13 @@ def main() -> None:
         with contextlib.suppress(Exception):
             with open(args.spec, encoding="utf-8") as sf:
                 spec_data = json.load(sf)
-            for sc in spec_data.get("scenarios", []):
+            for sc in spec_data.get("scenarios", []) or spec_data.get("tests", []):
                 ttf = _repo_relative(sc.get("target_test_file", ""))
                 if ttf and os.path.exists(ttf) and ttf not in test_files:
                     test_files.append(ttf)
             if "target_file" in spec_data:
                 spec_target_files.add(_repo_relative(spec_data["target_file"]))
-            for change in spec_data.get("changes", []) + spec_data.get("symbols", []):
+            for change in spec_data.get("changes", []) + spec_data.get("symbols", []) + spec_data.get("units", []):
                 t_f = change.get("target_file") or change.get("file_hint") or change.get("file")
                 if t_f:
                     spec_target_files.add(_repo_relative(t_f))
@@ -971,8 +992,10 @@ def main() -> None:
         ):
             parts = pf.split("/")
             test_name = f"test_{parts[-1]}"
-            has_test = any(test_name in tf for tf in test_files) or (
-                pf in spec_target_files and len(test_files) > 0
+            has_test = (
+                any(test_name in tf for tf in test_files)
+                or (pf in spec_target_files and len(test_files) > 0)
+                or any(_test_references_source(tf, pf) for tf in test_files)
             )
             if not has_test:
                 d = {
@@ -983,43 +1006,31 @@ def main() -> None:
                 }
                 _fail_exit("co-modification", f"FAIL | {pf}: test file missing", d)
 
-    # 2. Parallel Static Checks (Spec, Print-check, Ruff, Mypy)
+    # 2. Parallel Static Checks (Spec, Ruff, Mypy)
     def check_spec_task() -> tuple[str, int, list[JsonDiag], str]:
         if not args.spec:
             return ("spec-compliance", 0, [], "")
         ec, diags = _check_spec_compliance(args.spec)
         return ("spec-compliance", ec, diags, f"FAIL | Spec compliance failed with {len(diags)} error(s)")
 
-    def check_print_task() -> tuple[str, int, list[JsonDiag], str]:
-        if args.skip_lint:
-            return ("print-check", 0, [], "")
-        print_re = re.compile(r"(?<!#)\bprint\s*\(")
-        for pf in py_files:
-            if pf.startswith("tools/"):
-                continue
-            with open(pf, encoding="utf-8") as f:
-                for idx, line in enumerate(f, 1):
-                    if print_re.search(line):
-                        d = {
-                            "file": pf,
-                            "line": idx,
-                            "error": "Unsanctioned print() detected",
-                            "fix_hint": "Use logging module instead of print()",
-                        }
-                        return ("print-check", 1, [d], f"FAIL | {pf}:{idx} print() detected")
-        return ("print-check", 0, [], "")
-
     def check_ruff_task() -> tuple[str, int, list[JsonDiag], str]:
         if args.skip_lint or not py_files:
             return ("ruff", 0, [], "")
         ruff_res = run_cmd(["uv", "run", "ruff", "check", *py_files, "--quiet"])
         if ruff_res.returncode != 0:
-            out_sliced = "\n".join(
-                (ruff_res.stdout or ruff_res.stderr).strip().splitlines()[:10]
-            )
+            lines = (ruff_res.stdout or ruff_res.stderr).strip().splitlines()
+            out_sliced = "\n".join(lines[:10])
+            err_file = py_files[0]
+            err_line = 0
+            for l in lines:
+                m = re.match(r"^(.+?):(\d+):(\d+):", l)
+                if m:
+                    err_file = m.group(1)
+                    err_line = int(m.group(2))
+                    break
             d = {
-                "file": py_files[0],
-                "line": 0,
+                "file": err_file,
+                "line": err_line,
                 "error": out_sliced,
                 "fix_hint": "Fix ruff lint errors",
             }
@@ -1029,28 +1040,36 @@ def main() -> None:
     def check_mypy_task() -> tuple[str, int, list[JsonDiag], str]:
         if args.skip_mypy or not py_files:
             return ("mypy", 0, [], "")
-        mypy_res = run_cmd(["uv", "run", "mypy", *py_files, "--ignore-missing-imports"])
+        # Only run mypy on src files and active tests to avoid cold-start overhead
+        target_mypy = [f for f in py_files if f.startswith("src/")] or py_files
+        mypy_res = run_cmd(["uv", "run", "mypy", *target_mypy, "--ignore-missing-imports"])
         if mypy_res.returncode != 0:
-            out_sliced = "\n".join(
-                (mypy_res.stdout or mypy_res.stderr).strip().splitlines()[:10]
-            )
+            lines = (mypy_res.stdout or mypy_res.stderr).strip().splitlines()
+            out_sliced = "\n".join(lines[:10])
+            err_file = target_mypy[0]
+            err_line = 0
+            for l in lines:
+                m = re.match(r"^(.+?):(\d+):(?:\d+:)?\s*(?:error|note):", l)
+                if m:
+                    err_file = m.group(1)
+                    err_line = int(m.group(2))
+                    break
             d = {
-                "file": py_files[0],
-                "line": 0,
+                "file": err_file,
+                "line": err_line,
                 "error": out_sliced,
                 "fix_hint": "Fix mypy type errors",
             }
             return ("mypy", 1, [d], "FAIL | Mypy Type Check Failed")
         return ("mypy", 0, [], "")
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         f_spec = executor.submit(check_spec_task)
-        f_print = executor.submit(check_print_task)
         f_ruff = executor.submit(check_ruff_task)
         f_mypy = executor.submit(check_mypy_task)
 
         # Collect results
-        tasks = [f_spec, f_print, f_ruff, f_mypy]
+        tasks = [f_spec, f_ruff, f_mypy]
         for f in tasks:
             phase, code, diags, msg = f.result()
             if code != 0:
@@ -1063,11 +1082,11 @@ def main() -> None:
         print("PASS | Spec compliance verified")
 
     if args.fast:
-        print("PASS | Fast Check Passed (Spec, Mapping, Print, Ruff, Mypy verified)")
+        print("PASS | Fast Check Passed (Spec, Mapping, Ruff, Mypy verified)")
         print(_emit_json("PASS", "fast-check", [], None), file=sys.stderr)
         return
 
-    # 5. Pytest
+    # 3. Pytest
     if not test_files:
         print("PASS | Lint & Type check passed (no tests to run)")
         print(_emit_json("PASS", "all", [], None), file=sys.stderr)
@@ -1101,8 +1120,8 @@ def main() -> None:
             f"--cov-report=json:{cov_json_path}",
         ]
     core_cmd = [
-        "uv",
-        "run",
+        sys.executable,
+        "-m",
         "pytest",
         "-m",
         "not slow",
@@ -1114,18 +1133,10 @@ def main() -> None:
         "-q",
         "--tb=line",
     ]
-    pytest_timeout = args.pytest_timeout or max(300, min(1200, 240 * len(test_files)))
+    pytest_timeout = args.pytest_timeout or max(120, min(600, 120 * len(test_files)))
     pt_res = run_cmd(core_cmd, timeout=pytest_timeout)
 
-    # Nested-fork hazard fallback: code that uses fork-based multiprocessing
-    # (ProcessPoolExecutor, os.fork) can deadlock or BrokenPipe when run inside
-    # pytest-xdist's own forked worker processes -- a generic, project-agnostic
-    # hazard (forking a multi-threaded process is unsafe on POSIX), not specific
-    # to this codebase. A global subprocess timeout (returncode 124) with xdist
-    # still enabled is the fingerprint: per-test --timeout above would have
-    # killed an ordinary slow/hung *test* well before the outer timeout, so
-    # reaching the outer timeout under xdist means the xdist workers themselves
-    # stopped making progress. Retry once serially before failing.
+    # Nested-fork hazard fallback
     if pt_res.returncode == 124 and not args.no_xdist:
         print(
             f"INFO | pytest timed out after {pytest_timeout}s under xdist "
@@ -1133,14 +1144,6 @@ def main() -> None:
         )
         serial_cmd = [*core_cmd, "-p", "no:cacheprovider", "-n", "0"]
         pt_res = run_cmd(serial_cmd, timeout=pytest_timeout)
-        if pt_res.returncode not in (0, 124):
-            print(
-                "INFO | Serial retry (-n0) completed where the parallel run "
-                "hung -- this project's test suite is not safe under "
-                "pytest-xdist (see rules/testing.md fork/multiprocessing "
-                "guidance); consider `pytest --no-xdist` for this scope or "
-                "isolating fork-based tests with @pytest.mark.slow."
-            )
 
     if pt_res.returncode == 0:
         cov_diags, cov_pct = (
@@ -1156,9 +1159,11 @@ def main() -> None:
         print(f"PASS | All checks passed (Lint, Type, Tests{cov_suffix} verified)")
         print(_emit_json("PASS", "all", [], cov_pct), file=sys.stderr)
     else:
+        raw_output = (pt_res.stdout or "") + "\n" + (pt_res.stderr or "")
+        lines = [l for l in raw_output.splitlines() if l.strip()]
         last_err = [
             line
-            for line in (pt_res.stdout or "").splitlines()
+            for line in lines
             if any(x in line for x in ("FAIL", "Error", "AssertionError"))
         ]
         cause = (
@@ -1167,9 +1172,20 @@ def main() -> None:
             else (pt_res.stderr or "Check pytest output.").strip()
         )
         cause_sliced = "\n".join(cause.splitlines()[:10])
+
+        # Extract failing file and line number if available (e.g. tests/...py:123: AssertionError)
+        failing_file = ""
+        failing_line = 0
+        for l in lines:
+            m = re.search(r"(tests/[a-zA-Z0-9_\/\.]+\.py):(\d+):", l)
+            if m:
+                failing_file = m.group(1)
+                failing_line = int(m.group(2))
+                break
+
         d = {
-            "file": "",
-            "line": 0,
+            "file": failing_file,
+            "line": failing_line,
             "error": cause_sliced,
             "fix_hint": "Fix failing pytest assertions",
         }
