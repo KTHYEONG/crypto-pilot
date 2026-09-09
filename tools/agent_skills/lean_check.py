@@ -171,14 +171,10 @@ def _test_references_source(test_file: str, source_file: str) -> bool:
 
 
 def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonDiag]:
-    # Exclude non-src, fields, configs, CLI flags, entrypoint functions, and internal helpers
-    leaf = name.rpartition(".")[2] if "." in name else name
-    if (
-        kind in ("field", "cli_argument", "pydantic_computed_field", "module_reexport", "entrypoint")
-        or not fh.startswith("src")
-        or leaf in ("main", "run", "cli", "app", "handler", "__init__", "__call__")
-        or leaf.startswith("_")
-    ):
+    if kind in ("field", "cli_argument", "pydantic_computed_field", "module_reexport") or not fh.startswith("src"):
+        # field는 정의 자체가 사용처가 아니고, cli_argument 플래그 리터럴은
+        # 선행 하이픈 때문에 \b 단어경계 참조 스캔과 구조적으로 불규합이다.
+        # pydantic computed field and module_reexport are config exports, not directly called
         return []
     # handle module_reexport suffix stripping for alias lookup handled above
     if kind == "registry_entry":
@@ -273,10 +269,9 @@ def _is_stub_node(node: ast.AST) -> bool:
         if isinstance(single, ast.Return):
             if single.value is None:
                 return True
-            # Empty collections or literal None
-            if (
-                isinstance(single.value, ast.Constant)
-                and single.value.value is None
+            if isinstance(single.value, ast.Constant) and (
+                single.value.value in (None, "", 0, False, True)
+                or isinstance(single.value.value, (int, float, str))
             ):
                 return True
             if isinstance(
@@ -286,6 +281,18 @@ def _is_stub_node(node: ast.AST) -> bool:
             ):
                 return True
     return False
+
+
+# Contract change kinds use new_/modified_ prefixes; normalize to the base kind
+# the compliance checks understand (e.g. new_constant is verified as constant).
+_KIND_ALIASES = {
+    "new_function": "function",
+    "modified_function": "function",
+    "new_constant": "constant",
+    "modified_constant": "constant",
+    "new_class": "class",
+    "modified_class": "class",
+}
 
 
 def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
@@ -299,11 +306,11 @@ def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
             or change.get("file")
             or default_target
         )
+        raw_kind = change.get("kind") or ("class" if symbol and symbol[0].isupper() else "function")
         entries.append(
             {
                 "file_hint": _repo_relative(target),
-                "kind": change.get("kind")
-                or ("class" if symbol and symbol[0].isupper() else "function"),
+                "kind": _KIND_ALIASES.get(raw_kind, raw_kind),
                 "name": symbol,
             }
         )
@@ -359,6 +366,67 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
 
         with open(fh) as sf:
             sf_content = sf.read()
+            if kind.startswith("deleted_"):
+                # Deleted symbol contract: verify symbol does NOT exist in target file
+                base_kind = kind.removeprefix("deleted_")
+                symbol_present = False
+                if base_kind in ("constant", "type alias", "module_constant"):
+                    try:
+                        tree = ast.parse(sf_content, filename=fh)
+                        for node in ast.walk(tree):
+                            if (
+                                isinstance(node, ast.AnnAssign)
+                                and isinstance(node.target, ast.Name)
+                                and node.target.id == name
+                            ) or (
+                                isinstance(node, ast.Assign)
+                                and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+                            ):
+                                symbol_present = True
+                                break
+                    except Exception:
+                        symbol_present = bool(re.search(rf"^\s*{re.escape(name)}\s*=", sf_content, re.MULTILINE))
+                elif base_kind in ("function", "class", "async_function"):
+                    owner, _, leaf = name.rpartition(".")
+                    try:
+                        tree = ast.parse(sf_content, filename=fh)
+                        if owner:
+                            for node in ast.walk(tree):
+                                if isinstance(node, ast.ClassDef) and node.name == owner:
+                                    for member in node.body:
+                                        if (
+                                            isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                            and member.name == leaf
+                                        ):
+                                            symbol_present = True
+                                            break
+                        else:
+                            for node in ast.walk(tree):
+                                if (
+                                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                                    and node.name == name
+                                ):
+                                    symbol_present = True
+                                    break
+                    except Exception:
+                        pat = rf"^\s*(?:class|def|async\s+def)\s+{re.escape(name)}\b"
+                        symbol_present = bool(re.search(pat, sf_content, re.MULTILINE))
+                else:
+                    # Fallback word-boundary check
+                    pat = rf"\b{re.escape(name)}\b"
+                    symbol_present = bool(re.search(pat, sf_content))
+
+                if symbol_present:
+                    msg = f"Spec: {kind} '{name}' still present in {fh} (should be removed)"
+                    d = {
+                        "file": fh,
+                        "line": 0,
+                        "error": msg,
+                        "fix_hint": f"Remove {name} from {fh}",
+                    }
+                    diagnostics.append(d)
+                continue
+
             if kind in ("field", "dataclass_field", "pydantic_computed_field"):
                 field_name = name.split(".")[-1] if "." in name else name
                 pat = rf"\b{re.escape(field_name)}\b"
@@ -672,10 +740,7 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                         }
                     )
             if not pre_impl:
-                # Handle explicit no-import sentinels (e.g. "(none - same module)", "(none)", "none", "n/a")
-                norm_sym = (import_symbol or "").strip().lower()
-                is_sentinel = not norm_sym or norm_sym in ("(none)", "none", "n/a") or "none" in norm_sym
-                if import_symbol and not is_sentinel and import_symbol not in wf_content:
+                if import_symbol and import_symbol not in wf_content:
                     diagnostics.append(
                         {
                             "file": wf,
@@ -684,26 +749,15 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                             "fix_hint": f"Import {import_symbol} in {wf}",
                         }
                     )
-                if invocation_expr:
-                    # Semantic invocation match: literal in content, or call symbol/regex match
-                    found_invocation = invocation_expr in wf_content
-                    if not found_invocation:
-                        # Extract core function/symbol being invoked (e.g. 'run_eod_maintenance' or 'out = attach_per_row_cost_ratio(...)')
-                        call_sym_match = re.search(r"(?:^|[=\s])([a-zA-Z_][a-zA-Z0-9_\.]*)\s*\(", invocation_expr.strip())
-                        if call_sym_match:
-                            core_symbol = call_sym_match.group(1).split(".")[-1]
-                            # Check if the core symbol is invoked via regex call pattern
-                            if re.search(rf"\b{re.escape(core_symbol)}\s*\(", wf_content):
-                                found_invocation = True
-                    if not found_invocation:
-                        diagnostics.append(
-                            {
-                                "file": wf,
-                                "line": 0,
-                                "error": f"Spec wiring: missing invocation of '{invocation_expr}'",
-                                "fix_hint": f"Invoke {invocation_expr} in {wf}",
-                            }
-                        )
+                if invocation_expr and invocation_expr not in wf_content:
+                    diagnostics.append(
+                        {
+                            "file": wf,
+                            "line": 0,
+                            "error": f"Spec wiring: missing invocation of '{invocation_expr}'",
+                            "fix_hint": f"Invoke {invocation_expr} in {wf}",
+                        }
+                    )
 
     return (1 if diagnostics else 0, diagnostics)
 
@@ -729,17 +783,16 @@ def _find_test_files(py_files: list[str], impact_level: int = 1) -> list[str]:
                     test_files.append(tp)
                     found_direct = True
                     break
-            # Wider AST reverse lookup: if no direct test exists, or if impact_level >= 2,
-            # include reverse-referencing tests up to a reasonable cap (max 5 per module)
-            # to avoid explosive full-suite runs and timeout deadlocks.
+            # Wider AST reverse lookup: always for impact_level >= 2 (this
+            # module is either a core/config/schema file or the change spans
+            # 5+ files -- a direct test alone doesn't prove call sites are
+            # covered), otherwise only as a fallback when no direct test exists.
+            # Without this, impact_level was computed and logged but never
+            # actually changed which tests ran.
             if not found_direct or impact_level >= 2:
-                matched_count = 0
                 for tp in repository_files:
                     if tp not in test_files and _test_references_source(tp, sf):
                         test_files.append(tp)
-                        matched_count += 1
-                        if found_direct and matched_count >= 5:
-                            break
     return test_files
 
 
@@ -785,13 +838,13 @@ def _git_diff_added_lines(file: str) -> set[int] | None:
     Returns None for an untracked (new) file -- caller treats every
     coverage-measured line as "added" in that case.
     """
-    status_res = subprocess.run(  # noqa: S603
+    status_res = subprocess.run(
         ["git", "status", "--porcelain", "--", file],
         capture_output=True, text=True, timeout=10,
     )
     if status_res.stdout.strip().startswith("??"):
         return None
-    diff_res = subprocess.run(  # noqa: S603
+    diff_res = subprocess.run(
         ["git", "diff", "--unified=0", "HEAD", "--", file],
         capture_output=True, text=True, timeout=10,
     )
@@ -992,10 +1045,8 @@ def main() -> None:
         ):
             parts = pf.split("/")
             test_name = f"test_{parts[-1]}"
-            has_test = (
-                any(test_name in tf for tf in test_files)
-                or (pf in spec_target_files and len(test_files) > 0)
-                or any(_test_references_source(tf, pf) for tf in test_files)
+            has_test = any(test_name in tf for tf in test_files) or (
+                pf in spec_target_files and len(test_files) > 0
             )
             if not has_test:
                 d = {
@@ -1018,19 +1069,12 @@ def main() -> None:
             return ("ruff", 0, [], "")
         ruff_res = run_cmd(["uv", "run", "ruff", "check", *py_files, "--quiet"])
         if ruff_res.returncode != 0:
-            lines = (ruff_res.stdout or ruff_res.stderr).strip().splitlines()
-            out_sliced = "\n".join(lines[:10])
-            err_file = py_files[0]
-            err_line = 0
-            for l in lines:
-                m = re.match(r"^(.+?):(\d+):(\d+):", l)
-                if m:
-                    err_file = m.group(1)
-                    err_line = int(m.group(2))
-                    break
+            out_sliced = "\n".join(
+                (ruff_res.stdout or ruff_res.stderr).strip().splitlines()[:10]
+            )
             d = {
-                "file": err_file,
-                "line": err_line,
+                "file": py_files[0],
+                "line": 0,
                 "error": out_sliced,
                 "fix_hint": "Fix ruff lint errors",
             }
@@ -1044,19 +1088,12 @@ def main() -> None:
         target_mypy = [f for f in py_files if f.startswith("src/")] or py_files
         mypy_res = run_cmd(["uv", "run", "mypy", *target_mypy, "--ignore-missing-imports"])
         if mypy_res.returncode != 0:
-            lines = (mypy_res.stdout or mypy_res.stderr).strip().splitlines()
-            out_sliced = "\n".join(lines[:10])
-            err_file = target_mypy[0]
-            err_line = 0
-            for l in lines:
-                m = re.match(r"^(.+?):(\d+):(?:\d+:)?\s*(?:error|note):", l)
-                if m:
-                    err_file = m.group(1)
-                    err_line = int(m.group(2))
-                    break
+            out_sliced = "\n".join(
+                (mypy_res.stdout or mypy_res.stderr).strip().splitlines()[:10]
+            )
             d = {
-                "file": err_file,
-                "line": err_line,
+                "file": target_mypy[0],
+                "line": 0,
                 "error": out_sliced,
                 "fix_hint": "Fix mypy type errors",
             }
@@ -1159,11 +1196,9 @@ def main() -> None:
         print(f"PASS | All checks passed (Lint, Type, Tests{cov_suffix} verified)")
         print(_emit_json("PASS", "all", [], cov_pct), file=sys.stderr)
     else:
-        raw_output = (pt_res.stdout or "") + "\n" + (pt_res.stderr or "")
-        lines = [l for l in raw_output.splitlines() if l.strip()]
         last_err = [
             line
-            for line in lines
+            for line in (pt_res.stdout or "").splitlines()
             if any(x in line for x in ("FAIL", "Error", "AssertionError"))
         ]
         cause = (
@@ -1172,20 +1207,9 @@ def main() -> None:
             else (pt_res.stderr or "Check pytest output.").strip()
         )
         cause_sliced = "\n".join(cause.splitlines()[:10])
-
-        # Extract failing file and line number if available (e.g. tests/...py:123: AssertionError)
-        failing_file = ""
-        failing_line = 0
-        for l in lines:
-            m = re.search(r"(tests/[a-zA-Z0-9_\/\.]+\.py):(\d+):", l)
-            if m:
-                failing_file = m.group(1)
-                failing_line = int(m.group(2))
-                break
-
         d = {
-            "file": failing_file,
-            "line": failing_line,
+            "file": "",
+            "line": 0,
             "error": cause_sliced,
             "fix_hint": "Fix failing pytest assertions",
         }
