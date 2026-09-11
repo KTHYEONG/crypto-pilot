@@ -27,7 +27,7 @@ last_verified: 2026-09-03
 ## 1. 개요 (Overview)
 본 문서는 Binance REST API (Futures FAPI, Spot SAPI/V3, Margin SAPI) 및 Binance Vision S3 아카이브(`data.binance.vision`)로부터 Perpetual Futures, Spot, Margin Borrow 및 Microstructure 데이터를 수집, 정규화, 무결성 검증 후 Parquet 데이터셋 및 JSON 매니페스트로 저장하고 관리하는 데이터 파이프라인 아키텍처를 정의합니다.
 
-연구(Research) 및 실거래(Live) 환경 모두에서 Point-In-Time (PIT) 인과성을 엄격히 유지하며, 미래 데이터 누출(Look-ahead bias)을 원천 차단합니다.
+연구(Research) 및 실거래(Live) 환경 모두에서 Point-In-Time (PIT) 인과성을 엄격히 유지하며, 미래 데이터 누출(Look-ahead bias)이 발생하지 않도록 설계되었습니다.
 
 ---
 
@@ -78,7 +78,7 @@ last_verified: 2026-09-03
 | **Spot OHLCV** (1h) | Spot `/api/v3/klines` | 2017-08-17 ~ 현재 (상장일 이후) | Parquet (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `datetime`, `quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`, `trades`) | Cash & Carry 차익거래 및 현물-선물 베이시스 분석용 현물 가격/거래량 데이터 |
 | **Funding Rate** (8h / Event) | FAPI `/fapi/v1/fundingRate` 및 Vision Monthly Funding (`monthly/fundingRate/`) | 2019-09-25 ~ 현재 | Parquet (`timestamp`, `funding_rate`, `datetime`) | 선물 펀딩비 결제 이력 (00:00, 08:00, 16:00 UTC). 원장의 `Accrued Funding Charge` 정산에 필수 |
 | **Futures Metrics** (5m) | Binance Vision S3 (`daily/metrics/`) | 2020-09-01 ~ 현재 (Vision 아카이브) | Parquet (`timestamp`, `datetime`, `available_at`, `symbol`, `sum_open_interest`, `sum_open_interest_value`, `long_short_ratio`, `top_trader_long_short_ratio`, `sum_taker_long_short_vol_ratio`) | 미결제약정(OI), 롱숏비율(LSR), 상위 트레이더 포지션 비율, Taker 볼륨 비율 (5분 릴리스 지연 `available_at` 필수 반영) |
-| **Indicator Klines** (Mark/Index/Premium) | Binance Vision S3 (`monthly/markPriceKlines`, `indexPriceKlines`, `premiumIndexKlines`) | 2020-01 ~ 현재 (Vision 아카이브) | Parquet (`timestamp`, `open`, `high`, `low`, `close`, `datetime`) | Mark Price(MTM 평가용 단일 진실원천), Index Price, Premium Index 시계열 데이터 |
+| **Indicator Klines** (Mark/Index/Premium) | Binance Vision S3 (`monthly/markPriceKlines`, `indexPriceKlines`, `premiumIndexKlines`) | 2020-01 ~ 현재 (Vision 아카이브) | Parquet (`timestamp`, `open`, `high`, `low`, `close`, `datetime`) | Mark Price(MTM 평가용 기준 가격), Index Price, Premium Index 시계열 데이터 |
 | **Orderbook Depth (5 Level)** | Binance Vision S3 (`daily/bookDepth/`) | 2020-01 ~ 현재 (Vision 아카이브) | Raw / Parquet (`timestamp`, `ask_price_1~5`, `ask_qty_1~5`, `bid_price_1~5`, `bid_qty_1~5` 등) | 호가창 스프레드(Half-spread), 오더북 비대칭도 및 슬리피지/시장 충격(Market Impact) 정밀 모델링용 |
 | **Margin Borrow Rate** (Hourly/Daily) | Margin SAPI `/sapi/v1/margin/interestRateHistory` 및 CSV Import | 최근 31일 (SAPI 제한) / 전체 과거 (CSV 수동 임포트) | Parquet (`timestamp`, `borrow_rate`, `accrual_seconds`) | 현물 마진 차입 이자율 (SAPI 31일 경계 제한 시 과거 CSV 수동 임포트와 무손실 병합) |
 
@@ -109,7 +109,7 @@ last_verified: 2026-09-03
 
 ### 반드시 준수해야 하는 규칙 (Must Follow)
 1. **Point-In-Time (PIT) 무결성 및 릴리스 지연 (Release Lag):**
-   - 모든 시계열 데이터는 타임스탬프 순으로 정렬되어야 하며 미래 데이터 참조를 원천 금지합니다.
+   - 모든 시계열 데이터는 타임스탬프 순으로 정렬되어야 하며 미래 데이터 참조를 엄격히 제한합니다.
    - 특히 Vision Metrics (OI, LSR 등)는 수집 시 `available_at = timestamp + 5분` 지연을 강제 적용하여 인과적 피드포워드(Causal Feedforward) 규칙을 엄격히 보장합니다.
 2. **전체 필드 보존 (Full Field Extraction):**
    - Binance REST Klines의 모든 11개 필드(`quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`, `trades` 등)를 온전히 보존하여 저장합니다.
