@@ -56,17 +56,6 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
 
-      - name: Decrypt .env
-        env:
-          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
-        run: |
-          set -euo pipefail
-          SOPS_VERSION=v3.9.3
-          curl -fsSL "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.amd64" -o /tmp/sops
-          sudo install -m 0755 /tmp/sops /usr/local/bin/sops
-          sops --version
-          sops -d --input-type dotenv --output-type dotenv .env.enc > .env.decrypted
-
       - name: Deploy over Tailscale
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -85,7 +74,7 @@ jobs:
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/$PARAMS"
 
           scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/crypto-pilot/"
-          scp $SSH_OPTS .env.decrypted "$REMOTE_USER@$HOST:~/crypto-pilot/.env"
+          # .env는 서버에 이미 배치된 것을 정본으로 쓴다(sops 폐기, CI가 더 이상 덮어쓰지 않음).
           if [ -f "$PARAMS/strategy_params.json.enc" ]; then
             scp $SSH_OPTS "$PARAMS/strategy_params.json.enc" "$PARAMS/strategy_bootstrap.parquet.enc" \
               "$REMOTE_USER@$HOST:~/crypto-pilot/$PARAMS/"
