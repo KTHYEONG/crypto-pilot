@@ -1,52 +1,174 @@
+"""lean_check import-index 캐싱 회귀 가드 테스트."""
+
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
-
-_SCRIPT_PATH = Path(__file__).parents[2] / "tools" / "agent_skills" / "lean_check.py"
-_MODULE_SPEC = importlib.util.spec_from_file_location("lean_check", _SCRIPT_PATH)
-assert _MODULE_SPEC is not None
-assert _MODULE_SPEC.loader is not None
-_lean_check = importlib.util.module_from_spec(_MODULE_SPEC)
-_MODULE_SPEC.loader.exec_module(_lean_check)
+from tools.agent_skills import lean_check
 
 
-def test_feature_named_cli_test_matches_imported_source() -> None:
-    source = "src/mhs/contracts.py"
-    test_file = "tests/integration/mhs/test_golden_identity.py"
+def test_import_index_includes_semantic_reference(tmp_path: Path) -> None:
+    test_dir = tmp_path / "tests"
+    test_dir.mkdir()
+    test_file = test_dir / "test_candidate_promotion_cli.py"
+    test_file.write_text(
+        "from src.candidate_promotion.cli import run_candidate_promotion\n",
+        encoding="utf-8",
+    )
+    lean_check._imported_source_modules.cache_clear()
+    lean_check._load_test_ast.cache_clear()
+    modules = lean_check._imported_source_modules(str(test_file))
+    assert "src.candidate_promotion.cli" in modules
+    assert lean_check._test_references_source(str(test_file), "src/candidate_promotion/cli.py")
 
-    assert _lean_check._test_references_source(test_file, source)
+
+def test_test_file_parsed_exactly_once_across_pair_checks(tmp_path: Path) -> None:
+    test_dir = tmp_path / "tests"
+    test_dir.mkdir()
+    test_file = test_dir / "test_foo.py"
+    test_file.write_text("import src.foo\n", encoding="utf-8")
+    lean_check._load_test_ast.cache_clear()
+    lean_check._imported_source_modules.cache_clear()
+    for _ in range(5):
+        lean_check._imported_source_modules(str(test_file))
+    assert lean_check._load_test_ast.cache_info().misses == 1
+    assert lean_check._imported_source_modules.cache_info().misses == 1
+    assert lean_check._imported_source_modules.cache_info().hits == 4
 
 
-def test_unrelated_test_does_not_match_source() -> None:
-    assert not _lean_check._test_references_source(
-        "tests/unit/quant/evaluation/test_promotion.py",
-        "src/mhs/evaluation/folds.py",
+def test_spec_compliance_enum_member_and_class_attribute(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    models_py = src_dir / "models.py"
+    models_py.write_text(
+        "from enum import StrEnum\n\n"
+        "class EvidenceKind(StrEnum):\n"
+        "    LIFECYCLE_EVENTS = 'lifecycle_events'\n"
+        "    OTHER_EVENT: str = 'other'\n",
+        encoding="utf-8",
     )
 
+    caller_py = src_dir / "caller.py"
+    caller_py.write_text(
+        "from src.models import EvidenceKind\n\ndef run():\n    return EvidenceKind.LIFECYCLE_EVENTS\n",
+        encoding="utf-8",
+    )
 
-def test_find_test_files_includes_semantic_source_test() -> None:
-    files = _lean_check._find_test_files(["src/mhs/contracts.py"])
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(
+        """{
+            "changes": [
+                {"target_file": "src/models.py", "kind": "enum_member", "symbol": "EvidenceKind.LIFECYCLE_EVENTS"},
+                {"target_file": "src/models.py", "kind": "class_attribute", "symbol": "EvidenceKind.OTHER_EVENT"}
+            ],
+            "wiring": [
+                {
+                    "target_file": "src/caller.py",
+                    "anchor": "run",
+                    "import_symbol": "EvidenceKind",
+                    "invocation_expression": "EvidenceKind.LIFECYCLE_EVENTS"
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
 
-    assert "tests/unit/mhs/test_contracts.py" in files
+    code, diags = lean_check._check_spec_compliance(str(spec_file), pre_impl=False)
+    assert code == 0, f"Expected 0 diagnostics, got: {diags}"
 
 
-def test_import_index_contains_semantic_reference() -> None:
-    tf = "tests/unit/mhs/test_contracts_appresearch.py"
+def test_spec_compliance_wiring_multiline(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    pipeline_py = src_dir / "pipeline.py"
+    pipeline_py.write_text(
+        "from src.service import process_items\n\n"
+        "def main_flow():\n"
+        "    # anchor: start processing\n"
+        "    result = process_items(\n"
+        "        arg1='foo',\n"
+        "        arg2='bar',\n"
+        "    )\n"
+        "    return result\n",
+        encoding="utf-8",
+    )
 
-    mods = _lean_check._imported_source_modules(tf)
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(
+        """{
+            "wiring": [
+                {
+                    "target_file": "src/pipeline.py",
+                    "anchor": "start processing",
+                    "import_symbol": "process_items",
+                    "invocation_expression": "process_items(arg1='foo', arg2='bar')"
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
 
-    assert "src.mhs.contracts" in mods
+    code, diags = lean_check._check_spec_compliance(str(spec_file), pre_impl=False)
+    assert code == 0, f"Expected 0 diagnostics, got: {diags}"
 
 
-def test_semantic_match_builds_index_once() -> None:
-    _lean_check._imported_source_modules.cache_clear()
-    tf = "tests/unit/mhs/test_contracts_appresearch.py"
-    src = "src/mhs/contracts.py"
+def test_spec_compliance_skeleton_with_dummy_callback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    foo_py = src_dir / "foo.py"
+    foo_py.write_text("def run(): pass\n", encoding="utf-8")
 
-    assert _lean_check._test_references_source(tf, src)
-    _lean_check._test_references_source(tf, src)
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(
+        """{
+            "scenarios": [
+                {
+                    "scenario_id": "test_feature_with_callback",
+                    "test_skeleton": "def test_feature_with_callback():\\n    def dummy_cb(x):\\n        pass\\n    assert dummy_cb(1) is None"
+                }
+            ],
+            "wiring": [
+                {
+                    "target_file": "src/foo.py",
+                    "anchor": "run"
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
 
-    idx = _lean_check._imported_source_modules.cache_info()
-    assert idx.misses == 1  # test file parsed exactly once, not once per pair
+    code, diags = lean_check._check_spec_compliance(str(spec_file), pre_impl=True)
+    assert code == 0, f"Expected 0 diagnostics, got: {diags}"
+
+
+def test_spec_compliance_deleted_enum_member(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    models_py = src_dir / "models.py"
+    models_py.write_text(
+        "from enum import Enum\n\nclass Status(Enum):\n    ACTIVE = 1\n",
+        encoding="utf-8",
+    )
+
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(
+        """{
+            "changes": [
+                {"target_file": "src/models.py", "kind": "deleted_enum_member", "symbol": "Status.DEPRECATED"}
+            ],
+            "wiring": [
+                {
+                    "target_file": "src/models.py",
+                    "anchor": "Status"
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
+
+    code, diags = lean_check._check_spec_compliance(str(spec_file), pre_impl=False)
+    assert code == 0, f"Expected 0 diagnostics, got: {diags}"

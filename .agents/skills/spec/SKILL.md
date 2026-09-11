@@ -31,6 +31,7 @@ Downstream `implement` models have low reasoning capacity and cannot extrapolate
    - `context_files`: Minimal prerequisite paths for zero-search context loading.
    - `changes` (or `symbols`): Array of `{ name, signature, kind, target_file }`.
    - `wiring`: Array of `{ caller_file, anchor, import_symbol, invocation_expression }` ensuring entry-point hookup.
+     - Keep `import_symbol` and `invocation_expression` syntactically valid Python code or clean identifier calls. Do NOT attach conversational or parenthetical annotations (e.g. avoid `(same module)` or `(function-local)`); put such notes in `requirements` or docstrings.
    - `requirements`: Explicit fail-closed boundary rules, invariant constraints, and complexity requirements.
    - `design_rationale`: `{ alternatives_considered, chosen_reason, failure_modes }` — carry over directly from `/probe` (`scratch/probe_<feature>.json`).
    - `performance_budget` (required when `target_file` touches backtesting, ML training, or bulk data I/O): `{ expected_data_scale, memory_target_mb, storage_format, dtype_precision, chunking_strategy, acceleration_candidate }` — carry over from `scratch/probe_<feature>.json` if present.
@@ -53,29 +54,41 @@ Downstream `implement` models have low reasoning capacity and cannot extrapolate
 
 ## Chat Output Format
 
-Keep chat response structured, scannable, and actionable using tables and clear bullet points (avoid dense wall-of-text paragraphs).
-**Language Requirement:** All instructions and template fields below are written in English, but the actual rendered chat response to the user MUST be translated and presented in Korean (한국어) for intuitive review.
+Keep chat response ultra-compact, scannable, and contract-focused. Strictly avoid narrative walls of text, multi-line table cells (`<br>`), or repeating full code skeletons that already exist in `contract.json`.
 
-### 📐 [SPEC] <Feature Name>
+**Output Directives:**
+- **Terminal-Safe Tables**: Keep table cells to single-line values (no `<br>` or nested bullets).
+- **Single Source of Truth**: Point directly to `docs/specs/<feature>_contract.json` for full skeletons and AST anchors.
+- **Telegraphic Bullets**: Use concise, telegraphic bullets (명사형/종결형 축약, 최대 1-2줄).
+- **Language Requirement**: All output rendered to the user MUST be written in Korean (한국어). Template titles and labels below MUST be presented in Korean as shown.
 
-#### 1. 변경 요약 (Changes & Wiring)
-| 구분 (Category) | 대상 파일 / 심볼 (Target / Symbol) | 변경 핵심 (Core Logic) |
+---
+
+### 📐 [SPEC] <기능명>
+> 📄 **계약 문서**: [`docs/specs/<feature>_contract.json`](file:///docs/specs/<feature>_contract.json)  
+> 📊 **작업 규모**: <N>개 파일 · <N>개 변경점 · <N>개 배선 · <N>개 시나리오 (단위: <U>, 배선: <W>)  
+> 🚦 **게이트 검증**: `lean_check --pre-impl` **PASS** (<N>/<N> AST 유효)
+
+#### 1. 계획 요약 (Plan Summary)
+- 🎯 **목표**: <구체화 대상 1줄 요약>
+- ⚠️ **영향도/파괴적 변경**: <없음 또는 핵심 영향 1줄>
+- 🚫 **범위 제외 (Out of Scope)**: <제외 또는 이연 항목 1줄>
+
+#### 2. 변경 및 배선 매트릭스 (Changes & Wiring)
+| 파일 경로 | 유형 | 대상 심볼 / 앵커 |
 | :--- | :--- | :--- |
-| **Target** | `<target_file>` / `<symbol_name>` | <Summary of role and behavior in Korean> |
-| **Wiring** | `<caller_file>` / `<anchor_location>` | <Summary of caller hookup in Korean> |
+| `[<target_file>](file:///<target_file>)` | Target | `<symbol_1>`, `<symbol_2>` |
+| `[<caller_file>](file:///<caller_file>)` | Wiring | `<anchor_symbol>` (호출부 주입) |
 
-#### 2. 핵심 요구사항 (Key Requirements)
-- <Core domain constraints, invariants, or performance criteria in Korean>
+#### 3. 핵심 불변식 및 가드레일 (Invariants & Guardrails)
+- 🛡️ **<INV-NAME>**: <Fail-Closed 조건 또는 경계 규칙 1줄 요약>
+- 🚪 **<GATE-RULE>**: <파라미터 검증 또는 조기 중단 기준 1줄 요약>
 
-#### 3. 검증 시나리오 (Test Scenarios: Total <N>)
-- **Unit (<N>):**
-  - `<test_scenario_1>`: <Condition and expected behavior in Korean>
-  - `<test_scenario_2>`: <Boundary and edge case handling in Korean>
-- **Wiring (<N>):**
-  - `<test_scenario_wiring>`: <Caller and pipeline integration behavior in Korean>
+#### 4. 검증 시나리오 (Verification Scenarios)
+| 구분 | 건수 | 대상 테스트 스위트 | 주요 검증 초점 |
+| :--- | :---: | :--- | :--- |
+| **단위 (Unit)** | <U> | `[<test_unit_file>](file:///<test_unit_file>)` | `<정상 + 경계 + fail-closed 케이스>` |
+| **배선 (Wiring)** | <W> | `[<test_caller_file>](file:///<test_caller_file>)` | `<호출부 통합 + 옵션 전달 케이스>` |
 
 ---
 👉 다음 단계: `/implement docs/specs/<feature>_contract.json`
-
-
-
