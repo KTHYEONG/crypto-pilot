@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_KELLY_LCB_RECALIBRATION",
+      "date": "2026-09-13",
+      "adr_id": "ADR_20260913_MHS_KELLY_LCB_RECALIBRATION",
+      "domain": "mhs",
+      "title": "MHS 위원회 Kelly-LCB 노출 스케일 재보정",
+      "why": "Kelly-LCB 항 미보정 상수(21d/f0.25/z1.0)의 페널티가 학습구간 일간 Sharpe를 초과해 스케일이 63% 구간에서 floor(0.2)에 고정되어 복리 성장이 억제됨",
+      "resolution": "_committee_kelly_scale 기본값을 등록 상수(window=42d, fraction=0.5, z=0.5)로 교체하고 fraction<=0.5 half-Kelly 가드 추가; 3m 전체 리플레이 실측으로 CAGR 3.114->4.133, MDD -0.392->-0.412, Calmar 7.95->10.04 확인",
+      "impact": "백테스트·라이브 공용 함수 기본값 변경(코드 재배포 필요, .enc 파라미터에는 미봉인); 기존 24건 실패 테스트는 무관, diff-coverage 100% PASS"
+    },
+    {
       "task_id": "mhs_execution_optimization",
       "date": "2026-09-12",
       "adr_id": "ADR_20260912_mhs_execution_optimization",
@@ -989,16 +999,6 @@
       "why": "21차까지 튜닝해온 호라이즌/종목 축이 실제로 breadth를 늘리는지 MHS 자체 데이터로 측정된 적이 없었다. 참조책/집행책 계측 정합화(21차) 이후에도 Sharpe가 0.5선에 갇힌 구조적 원인을 규명하기 위해 effective_breadth 계측을 신설하고, 파이프라인에 이미 로드되나 신호로 쓰인 적 없는 펀딩비율을 신규 수익원 후보로 검증했다.",
       "resolution": "effective_breadth(참여비율 통계) 순수함수 신설 및 discovery_gate 경로에 배선(slow/fast 호라이즌 축 노출). funding_carry_signal + build_funding_carry_candidate_weights(src/mhs/funding.py 신규) 신설, 기존 discovery.py 게이트를 sign-agnostic 그대로 재사용해 fold-train-only 검증 배선. PHASE_1_BOOK_SPECS/BLEND_WEIGHTS는 무변경(진단 전용, 자본 배분 없음). 22차 실측(2021-2025 dev, --discovery-gate --fold-safe-horizon): slow_horizon_effective_breadth=1.41/19, fast_horizon_effective_breadth=1.57/7 확정 — 호라이즌 축 포화 재확인. funding_carry는 전 구간 예비측정(net_t=+4.15@4.18bps)에서는 강했으나 3개 fold 전부 leak-free discovery/qualification에서 admission 실패(frozen_default)로 자본 배분 근거 없음.",
       "impact": "호라이즌 축 확장(16-18차)이 breadth를 사실상 늘리지 못했다는 것이 실측으로 확정됨 — 향후 호라이즌 그리드 재조정 시도는 근거 없이는 재개하지 않는다. 펀딩비 캐리는 유망해 보였으나 첫 leak-free 라운드에서 탈락 — 이 결과가 신호 자체의 부재인지 fold-local 표본에 과도히 엄격한 admission floor(ADR_20260811 기존 우려) 때문인지는 미해결로 남아 후속 판단 필요. 기존 primary/stress/folds/blend 수치는 바이트 동일(회귀 없음)."
-    },
-    {
-      "task_id": "TASK_MHS_STRATEGY_FOUNDATION_RESET",
-      "date": "2026-08-13",
-      "adr_id": "ADR_20260813_MHS_STRATEGY_FOUNDATION_RESET",
-      "domain": "research",
-      "title": "MHS 계측기 정합화(RC-1) 및 P1~P4 실행 마찰/노출 레이어 재조준",
-      "why": "20차까지의 반복 개선에도 무개선 — 모든 유의성 계측기(prescreen/phase/tail/xs_rank_ic)가 자본 0%인 참조책을 측정하고 있었고, Research-GO 게이트는 UNSPECIFIED_POLICY 무조건 append로 구조적으로 영구 False였다.",
-      "resolution": "P0: _book_outcome에 executed_prescreen/executed_tail(집행책 계측) 신설, deflated_sharpe_ratio 배선(trials_attempted=20), UNSPECIFIED_POLICY를 MHS_REGISTERED_POLICY_THRESHOLDS 미등록 조건부로 전환. P1: 로스터 재정규화 회전율 가설을 로스터 네이티브 랭킹 실측으로 기각, pnl_vol_target 플래그 신설(기본 True, 무회귀). P2: notional_weighted_shortfall_bps 및 실현 체결 통계를 MhsBookReport에 노출. P4: realized_execution_roster_size 노출. 21차 실측(2021-2025 dev)으로 검증: executed_prescreen net_t 0.642→1.505(slow_momentum), deflated_sharpe_ratio=0.532, realized_execution_roster_size=41.93.",
-      "impact": "기존 primary/stress/folds 수치는 바이트 동일(회귀 없음). research_go.eligible은 여전히 False(임계값 미등록, 의도된 상태)이나 이제 성과에 반응 가능한 구조. 20차까지의 fast_reversal 0% 배분/phase degenerate/xs_rank_ic 등 참조책 기준 결론은 전부 재판정 대상(P3, 후속 실행)."
     }
   ]
 }
