@@ -364,15 +364,19 @@ _KELLY_DRIFT_RETURNS = pd.Series(
 
 
 def _raw_kelly_ratio(r: pd.Series) -> pd.Series:
-    from src.mhs.params import PNL_VOL_TARGET_WINDOW_DAYS
+    from src.mhs.params import (
+        COMMITTEE_KELLY_FRACTION,
+        COMMITTEE_KELLY_LCB_Z,
+        COMMITTEE_KELLY_WINDOW_DAYS,
+    )
 
-    min_periods = max(5, PNL_VOL_TARGET_WINDOW_DAYS // 2)
-    trailing_mean = r.rolling(PNL_VOL_TARGET_WINDOW_DAYS, min_periods=min_periods).mean().shift(1)
-    trailing_std = r.rolling(PNL_VOL_TARGET_WINDOW_DAYS, min_periods=min_periods).std().shift(1)
-    trailing_n = r.rolling(PNL_VOL_TARGET_WINDOW_DAYS, min_periods=min_periods).count().shift(1)
+    min_periods = max(5, COMMITTEE_KELLY_WINDOW_DAYS // 2)
+    trailing_mean = r.rolling(COMMITTEE_KELLY_WINDOW_DAYS, min_periods=min_periods).mean().shift(1)
+    trailing_std = r.rolling(COMMITTEE_KELLY_WINDOW_DAYS, min_periods=min_periods).std().shift(1)
+    trailing_n = r.rolling(COMMITTEE_KELLY_WINDOW_DAYS, min_periods=min_periods).count().shift(1)
     se = trailing_std.div(np.sqrt(trailing_n))
     var = trailing_std.pow(2)
-    return 0.25 * (trailing_mean - 1.0 * se).div(var.where(var > 0))
+    return COMMITTEE_KELLY_FRACTION * (trailing_mean - COMMITTEE_KELLY_LCB_Z * se).div(var.where(var > 0))
 
 
 # SCENARIO_MHS_KELLY_TWO_SIDED_02
@@ -890,3 +894,92 @@ def test_scenario_mhs_dd_brake_09_drawdown_brake_request_validation() -> None:
         pnl_vol_target_mode="constant_risk",
         exposure_drawdown_brake=True,
     )
+
+
+def test_scenario_kelly_lcb_01_defaults_are_registered_constants() -> None:
+    # Given: 등록 상수와 결정론적 레퍼런스 수익률
+    import inspect
+
+    from src.mhs.params import (
+        COMMITTEE_KELLY_FRACTION,
+        COMMITTEE_KELLY_LCB_Z,
+        COMMITTEE_KELLY_WINDOW_DAYS,
+        PNL_VOL_TARGET_WINDOW_DAYS,
+    )
+
+    idx = pd.date_range("2021-01-01", periods=400, freq="D", tz="UTC")
+    r = pd.Series(np.random.default_rng(20260912).normal(0.00165, 0.01, 400), index=idx)
+
+    # When: 시그니처 기본값을 직접 조회하고 명시 호출과 대조
+    sig = inspect.signature(scaling._committee_kelly_scale)
+    explicit = scaling._committee_kelly_scale(
+        r,
+        window_days=COMMITTEE_KELLY_WINDOW_DAYS,
+        fraction=COMMITTEE_KELLY_FRACTION,
+        z=COMMITTEE_KELLY_LCB_Z,
+        cap=3.0,
+    )
+    defaulted = scaling._committee_kelly_scale(r, cap=3.0)
+
+    # Then: 기본값 = 등록 상수, 두 경로는 비트 동일, 구 상수(21)와는 분리
+    assert sig.parameters["window_days"].default == COMMITTEE_KELLY_WINDOW_DAYS
+    assert sig.parameters["fraction"].default == COMMITTEE_KELLY_FRACTION
+    assert sig.parameters["z"].default == COMMITTEE_KELLY_LCB_Z
+    assert COMMITTEE_KELLY_WINDOW_DAYS != PNL_VOL_TARGET_WINDOW_DAYS
+    pd.testing.assert_series_equal(defaulted, explicit, check_exact=True)
+
+
+def test_scenario_kelly_lcb_03_rejects_fraction_above_half_kelly() -> None:
+    # Given: 유한한 레퍼런스 수익률
+    idx = pd.date_range("2021-01-01", periods=120, freq="D", tz="UTC")
+    r = pd.Series(np.random.default_rng(7).normal(0.002, 0.01, 120), index=idx)
+
+    # When / Then: half-Kelly 상한 초과는 fail-closed
+    with pytest.raises(ValueError, match=r"fraction must be <= 0.5"):
+        scaling._committee_kelly_scale(r, fraction=0.75, cap=3.0)
+    with pytest.raises(ValueError, match=r"fraction must be > 0"):
+        scaling._committee_kelly_scale(r, fraction=0.0, cap=3.0)
+
+    # Then: 경계값 0.5 는 허용되고 유한한 스케일을 돌려준다
+    boundary = scaling._committee_kelly_scale(r, fraction=0.5, cap=3.0)
+    assert np.isfinite(boundary.to_numpy()).all()
+    assert boundary.max() <= 3.0 + 1e-12
+
+
+def test_scenario_kelly_lcb_04_lcb_no_longer_pinned_to_floor_at_book_edge() -> None:
+    # Given: 배포 레퍼런스 북의 학습구간 에지(mu/sigma = 0.165)를 재현한 합성 일간 수익률
+    from src.mhs.params import PNL_VOL_TARGET_SCALE_FLOOR
+
+    idx = pd.date_range("2021-01-01", periods=400, freq="D", tz="UTC")
+    r = pd.Series(np.random.default_rng(20260912).normal(0.00165, 0.01, 400), index=idx)
+
+    # When: 재보정 기본값과 폐기된 구 구성을 같은 cap 에서 비교
+    recalibrated = scaling._committee_kelly_scale(r, cap=3.0)
+    legacy = scaling._committee_kelly_scale(r, window_days=21, fraction=0.25, z=1.0, cap=3.0)
+
+    # Then: 구 구성은 대부분 floor 에 고정, 재보정본은 절반 이상 floor 를 벗어난다
+    above_floor_new = (recalibrated > PNL_VOL_TARGET_SCALE_FLOOR + 1e-12).mean()
+    above_floor_legacy = (legacy > PNL_VOL_TARGET_SCALE_FLOOR + 1e-12).mean()
+    assert above_floor_new > 0.5
+    assert above_floor_legacy < 0.4
+    assert recalibrated.mean() > legacy.mean()
+    assert recalibrated.max() <= 3.0 + 1e-12
+    assert recalibrated.min() >= PNL_VOL_TARGET_SCALE_FLOOR - 1e-12
+
+
+def test_scenario_kelly_lcb_05_min_periods_tracks_widened_window() -> None:
+    # Given: 워밍업 경계를 관찰할 수 있는 짧은 시계열
+    from src.mhs.params import COMMITTEE_KELLY_WINDOW_DAYS
+
+    idx = pd.date_range("2021-01-01", periods=60, freq="D", tz="UTC")
+    r = pd.Series(np.random.default_rng(1).normal(0.002, 0.01, 60), index=idx)
+
+    # When: 기본 window(42)로 스케일을 산출
+    scale = scaling._committee_kelly_scale(r, cap=3.0)
+
+    # Then: min_periods(=21) 이전은 fallback 1.0, 이후부터 실제 추정치
+    expected_min_periods = max(5, COMMITTEE_KELLY_WINDOW_DAYS // 2)
+    assert expected_min_periods == 21
+    assert (scale.iloc[:expected_min_periods] == 1.0).all()
+    assert scale.iloc[expected_min_periods] != 1.0
+    assert len(scale) == len(r)

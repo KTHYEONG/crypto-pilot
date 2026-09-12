@@ -222,3 +222,62 @@ def test_compute_signal_row_day_one_uses_bootstrap_warmup_only(tmp_path, monkeyp
     assert np.isfinite(scaled["BTCUSDT"])
 
 
+def test_scenario_kelly_lcb_06_live_signal_scalar_uses_recalibrated_defaults(tmp_path, monkeypatch) -> None:
+    # Given: 위원회 자본 + Kelly 사이징이 켜진 배포 플래그와 양의 에지 부트스트랩 레퍼런스
+    import numpy as np
+    import pandas as pd
+
+    import src.mhs.live_signal_step as m
+    from src.mhs import scaling
+    from src.mhs.live_runtime import LiveRuntime
+    from src.mhs.live_strategy import LiveStrategyParams
+
+    dt = pd.Timestamp("2026-08-31", tz="UTC")
+    tw = pd.DataFrame([[1.0]], index=pd.DatetimeIndex([dt]), columns=["BTCUSDT"])
+    monkeypatch.setattr(
+        m, "_build_fold_target_weights",
+        lambda *a, **k: (tw, pd.DatetimeIndex([dt]), [], pd.DatetimeIndex([dt])),
+    )
+    monkeypatch.setattr(m, "_load_funding_by_symbol", lambda *a, **k: {})
+    monkeypatch.setattr(m, "realized_daily_returns", lambda *a, **k: pd.Series(dtype="float64"))
+    boot = pd.Series(
+        np.random.default_rng(20260912).normal(0.0025, 0.010, 400),
+        index=pd.date_range("2025-08-01", periods=400, freq="1D", tz="UTC"),
+    )
+    params = LiveStrategyParams(
+        schema_version=1, strategy_digest="d",
+        backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")),
+        created_at=dt, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
+        admitted_members=("m",), growth_budget_target_vol=1.0, exposure_cap=3.0,
+        growth_envelope="growth_extreme", execution_universe_size=60,
+        pnl_vol_target_mode="growth_budget",
+        deployed_flags={"committee_capital": True, "committee_kelly_sizing": True},
+        params_snapshot={}, bootstrap_held_row={},
+    )
+    rt = LiveRuntime(
+        schema_version=1, params_digest="d",
+        last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
+        held_target_row={}, reference_daily_returns=boot,
+    )
+    original_kelly = scaling._committee_kelly_scale
+
+    # When: 재보정 기본값으로 1회, 이어서 구 상수를 주입해 1회 산출
+    _scaled_new, _ref, scalar_new = m.compute_signal_row(
+        params, rt, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper",
+    )
+    monkeypatch.setattr(
+        scaling, "_committee_kelly_scale",
+        lambda r, **kw: original_kelly(
+            r, window_days=21, fraction=0.25, z=1.0, cap=kw.get("cap", 1.0),
+        ),
+    )
+    _scaled_legacy, _ref_legacy, scalar_legacy = m.compute_signal_row(
+        params, rt, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper",
+    )
+
+    # Then: 라이브 경로가 재보정 값을 실제로 사용하며 cap 을 넘지 않는다
+    assert scalar_new > scalar_legacy
+    assert 0.0 < scalar_new <= 3.0
+    assert _scaled_new["BTCUSDT"] == pytest.approx(scalar_new)
+
+

@@ -12,6 +12,9 @@ from src.common.errors import DataIntegrityError
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.horizons import efficiency_ratio
 from src.mhs.params import (
+    COMMITTEE_KELLY_FRACTION,
+    COMMITTEE_KELLY_LCB_Z,
+    COMMITTEE_KELLY_WINDOW_DAYS,
     COMMITTEE_OOS_START,
     CONSTANT_RISK_CAP_BINDING_QUANTILE,
     CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
@@ -189,13 +192,13 @@ def _pnl_vol_target_scale(
 
 def _committee_kelly_scale(
     reference_daily_returns: pd.Series,
-    window_days: int = PNL_VOL_TARGET_WINDOW_DAYS,
-    fraction: float = 0.25,
-    z: float = 1.0,
+    window_days: int = COMMITTEE_KELLY_WINDOW_DAYS,
+    fraction: float = COMMITTEE_KELLY_FRACTION,
+    z: float = COMMITTEE_KELLY_LCB_Z,
     floor: float = PNL_VOL_TARGET_SCALE_FLOOR,
     cap: float = 1.0,
 ) -> pd.Series:
-    """Strategy-own-P&L trailing quarter-Kelly LCB exposure scale.
+    """Strategy-own-P&L trailing half-Kelly LCB exposure scale.
 
     ``scale_t = clip(fraction * lcb_mean_{t-1} / var_{t-1}, floor, cap)`` where
     ``lcb_mean = trailing_mean - z * trailing_std / sqrt(n)`` (Wald-style
@@ -203,8 +206,11 @@ def _committee_kelly_scale(
     shift(1)-before-use causality and floor clip exactly. The upper bound is
     supplied by the caller from the resolved growth envelope's
     ``leverage_ceiling`` (via ``resolved_exposure_cap``) and defaults to 1.0
-    for byte-identical legacy behaviour -- the former hardcoded 1.0 cap turned
-    the 50/50 blend into a pure de-leverager. A weak or negative LCB edge
+    -- the former hardcoded 1.0 cap turned the 50/50 blend into a pure
+    de-leverager. Registered defaults (window=42, fraction=0.5, z=0.5) keep
+    z/sqrt(window)=0.0772 below the train-slice daily Sharpe 0.1648, so the
+    LCB stays positive at the average edge; exposure is intentionally higher
+    than the legacy quarter-Kelly calibration. A weak or negative LCB edge
     shrinks the scale to ``floor``, same as the P&L-vol-target scale's
     momentum-crash de-risking.
     """
@@ -214,6 +220,8 @@ def _committee_kelly_scale(
         raise ValueError(f"window_days must be >= 1, got {window_days}")
     if fraction <= 0:
         raise ValueError(f"fraction must be > 0, got {fraction}")
+    if fraction > 0.5:
+        raise ValueError(f"fraction must be <= 0.5 (half-Kelly ceiling), got {fraction}")
     if z < 0:
         raise ValueError(f"z must be >= 0, got {z}")
     if cap < 1.0:
