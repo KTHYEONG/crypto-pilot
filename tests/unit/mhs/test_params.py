@@ -216,3 +216,27 @@ def test_SCENARIO_MHS_EVID_02_SELECTION_OVERLAP_IS_DISCLOSED() -> None:
         pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-01", tz="UTC")
     )
     assert zero_length == 0.0
+
+
+def test_scenario_kelly_lcb_02_penalty_below_registered_train_edge() -> None:
+    # Given: 등록된 Kelly-LCB 정책 상수와 측정 상수
+    import math
+
+    from src.mhs.params import (
+        COMMITTEE_KELLY_FRACTION,
+        COMMITTEE_KELLY_LCB_Z,
+        COMMITTEE_KELLY_TRAIN_DAILY_SHARPE,
+        COMMITTEE_KELLY_WINDOW_DAYS,
+    )
+
+    # When: LCB 페널티를 표준오차 배수로 환산
+    penalty = COMMITTEE_KELLY_LCB_Z / math.sqrt(COMMITTEE_KELLY_WINDOW_DAYS)
+    legacy_penalty = 1.0 / math.sqrt(21)
+
+    # Then: 평균 에지에서 LCB 가 양수여야 하며, 구 구성은 위반한다
+    assert penalty < COMMITTEE_KELLY_TRAIN_DAILY_SHARPE
+    assert legacy_penalty > COMMITTEE_KELLY_TRAIN_DAILY_SHARPE
+    assert 0.0 < COMMITTEE_KELLY_FRACTION <= 0.5
+    assert COMMITTEE_KELLY_WINDOW_DAYS == 42
+    assert COMMITTEE_KELLY_LCB_Z == 0.5
+    assert COMMITTEE_KELLY_TRAIN_DAILY_SHARPE == pytest.approx(0.1648)  # noqa: SIM300
