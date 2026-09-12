@@ -29,6 +29,7 @@
       "tests/unit/market_data/services/test_spot_collection.py",
       "tests/unit/market_data/storage/test_loaders.py",
       "tests/unit/market_data/test_futures_mark_price.py",
+      "tests/unit/mhs/report/test_persist.py",
       "tests/unit/mhs/test_calibration.py",
       "tests/unit/mhs/test_evaluation_appresearch.py",
       "tests/unit/mhs/test_evaluation_diagnostic_gates.py",
