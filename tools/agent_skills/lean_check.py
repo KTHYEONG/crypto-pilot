@@ -1255,9 +1255,8 @@ def main() -> None:
         # pytest-cov's --cov silently collects nothing for a bare file path
         # (coverage.py resolves it as a source, not a measured module) --
         # the dotted module form is what actually attaches instrumentation.
-        cov_modules = [f[:-3].replace("/", ".") for f in src_files]
         cov_args = [
-            *[f"--cov={m}" for m in cov_modules],
+            "--cov=src",
             f"--cov-report=json:{cov_json_path}",
         ]
     core_cmd = [
