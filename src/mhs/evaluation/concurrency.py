@@ -246,6 +246,7 @@ def _run_post_book_concurrently(
     fold_growth_budget_target_vol: dict[int, float] | None = None,
     exposure_warmup_returns: pd.Series | None = None,
     fold_blend_exposure_scale: dict[int, pd.Series] | None = None,
+    base_panel: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -294,7 +295,7 @@ def _run_post_book_concurrently(
     )
     _post_book_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     assert_fork_admission("post_book_folds", max_workers, WORKER_PEAK_RSS_BYTES, _post_book_reserve)
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
+    with fork_shared_payload({"base_panel": base_panel}), ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
         futures = {
             pool.submit(
                 folds._run_anchored_fold,

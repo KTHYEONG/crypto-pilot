@@ -4,13 +4,18 @@ from __future__ import annotations  # mypy: ignore-errors
 
 import dataclasses
 import gc
+import json
 import os
+import tempfile
+import zipfile
 from collections.abc import Iterable, Iterator
 from dataclasses import replace as dataclass_replace
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.ipc as pa_ipc
 
 from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
@@ -257,6 +262,137 @@ def _rescaled_windows(
         yield dataclasses.replace(w, target_weights=scaled)
 
 
+def _spill_window_to_ipc(window: ExecutionReplayWindow, target_path: str) -> None:
+    """Spill one execution window to an Arrow IPC scratch file (fail-closed).
+
+    Every frame's float64 values travel as an Arrow IPC stream inside a zip
+    container with a JSON header carrying the window metadata and per-frame
+    indexes; a load of the file reproduces the window bit-identically.
+    """
+    try:
+        minute_ns = np.asarray(window.minute_grid, dtype="datetime64[ns]").astype("int64")
+        signal_ns = np.asarray(window.signal_available_at, dtype="datetime64[ns]").astype("int64")
+        frames: dict[str, pd.DataFrame | None] = {
+            "highs": window.highs,
+            "lows": window.lows,
+            "closes": window.closes,
+            "marks": window.marks,
+            "bar_funding": window.bar_funding,
+            "target_weights": window.target_weights,
+        }
+        meta_frames: dict[str, Any] = {}
+        buffers: dict[str, bytes] = {}
+        for name, frame in frames.items():
+            if frame is None:
+                meta_frames[name] = None
+                continue
+            idx_ns = np.asarray(frame.index, dtype="datetime64[ns]").astype("int64").tolist()
+            meta_frames[name] = {"columns": list(frame.columns), "index_ns": idx_ns}
+            arrays = [
+                pa.array(frame[c].to_numpy(dtype="float64", copy=False), type=pa.float64())
+                for c in frame.columns
+            ]
+            schema = pa.schema([pa.field(c, pa.float64()) for c in frame.columns])
+            batch = pa.record_batch(arrays, schema=schema) if arrays else None
+            sink = pa.BufferOutputStream()
+            writer = pa_ipc.new_stream(sink, schema)
+            if batch is not None:
+                writer.write_batch(batch)
+            writer.close()
+            buffers[name] = bytes(sink.getvalue())
+        meta = {
+            "window_start_ns": int(window.window_start.value),
+            "window_end_ns": int(window.window_end.value),
+            "columns": list(window.columns),
+            "symbols": list(window.symbols),
+            "minute_grid_ns": minute_ns.tolist(),
+            "signal_ns": signal_ns.tolist(),
+            "frames": meta_frames,
+        }
+        with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_STORED) as zf:
+            zf.writestr("meta.json", json.dumps(meta))
+            for name, buf in buffers.items():
+                zf.writestr(f"{name}.arrow", buf)
+    except Exception as exc:
+        raise DataIntegrityError(f"window IPC spill failed for {target_path}: {exc}") from exc
+
+
+def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
+    """Load one spilled execution window bit-identically (fail-closed)."""
+    try:
+        with zipfile.ZipFile(target_path, "r") as zf:
+            meta = json.loads(zf.read("meta.json"))
+            buffers = {
+                name: zf.read(f"{name}.arrow")
+                for name, spec in meta["frames"].items()
+                if spec is not None
+            }
+        minute_grid = pd.DatetimeIndex(
+            pd.to_datetime(np.asarray(meta["minute_grid_ns"], dtype="int64"), unit="ns", utc=True)
+        )
+        signal_available_at = pd.DatetimeIndex(
+            pd.to_datetime(np.asarray(meta["signal_ns"], dtype="int64"), unit="ns", utc=True)
+        )
+        frames: dict[str, pd.DataFrame | None] = {}
+        for name, spec in meta["frames"].items():
+            if spec is None:
+                frames[name] = None
+                continue
+            reader = pa_ipc.open_stream(pa.py_buffer(buffers[name]))
+            table = reader.read_all()
+            idx = pd.DatetimeIndex(
+                pd.to_datetime(np.asarray(spec["index_ns"], dtype="int64"), unit="ns", utc=True)
+            )
+            data = {
+                c: np.asarray(table.column(c).to_pylist(), dtype="float64")
+                for c in spec["columns"]
+            }
+            frames[name] = pd.DataFrame(data, index=idx, columns=spec["columns"])
+            frames[name] = frames[name].astype("float64")
+        return ExecutionReplayWindow(
+            window_start=pd.Timestamp(meta["window_start_ns"], unit="ns", tz="UTC"),
+            window_end=pd.Timestamp(meta["window_end_ns"], unit="ns", tz="UTC"),
+            columns=tuple(meta["columns"]),
+            symbols=tuple(meta["symbols"]),
+            minute_grid=minute_grid,
+            highs=frames["highs"],
+            lows=frames["lows"],
+            closes=frames["closes"],
+            marks=frames["marks"],
+            bar_funding=frames["bar_funding"],
+            target_weights=frames["target_weights"],
+            signal_available_at=signal_available_at,
+        )
+    except Exception as exc:
+        raise DataIntegrityError(f"window IPC load failed for {target_path}: {exc}") from exc
+
+
+def _spill_and_stream_windows(
+    windows: Iterable[ExecutionReplayWindow], spill_dir: str
+) -> Iterator[ExecutionReplayWindow]:
+    """Pass-1 stream: yield each window while spilling it to ``spill_dir``.
+
+    Single-window spill buffer over the 31-day window stream; the caller owns
+    scratch-directory lifecycle (tempfile.TemporaryDirectory + try/finally).
+    """
+    os.makedirs(spill_dir, exist_ok=True)
+    for idx, window in enumerate(windows):
+        _spill_window_to_ipc(window, os.path.join(spill_dir, f"window_{idx:05d}.arrow"))
+        yield window
+
+
+def _iter_spilled_windows(spill_dir: str) -> Iterator[ExecutionReplayWindow]:
+    """Pass-2 stream: replay spilled windows from disk in filename order."""
+    try:
+        names = sorted(
+            n for n in os.listdir(spill_dir) if n.startswith("window_") and n.endswith(".arrow")
+        )
+    except Exception as exc:
+        raise DataIntegrityError(f"window IPC spill directory unreadable: {spill_dir}: {exc}") from exc
+    for name in names:
+        yield _load_window_from_ipc(os.path.join(spill_dir, name))
+
+
 def _book_outcome(
     name: str,
     spec: BookSpec,
@@ -461,10 +597,13 @@ def _book_outcome(
                 pre_vol_target_reference.ledger
             )
         else:
-            # Exact two-pass path: Phase A (reference, unscaled), then the
-            # P&L-vol-target scale, then Phase B (rescaled batch).
+            # Exact two-pass path: Phase A (reference, unscaled) spills each
+            # window to Arrow IPC scratch while streaming, then the
+            # P&L-vol-target scale, then Phase B (rescaled batch) streams the
+            # identical windows back from disk (0MB RAM amplification).
+            spill_temp = tempfile.TemporaryDirectory(prefix="mhs_windows_")
             primary_two_pass = replay_execution_windows(
-                _window_telemetry(_windows(), "execution_window"),
+                _window_telemetry(_spill_and_stream_windows(_windows(), spill_temp.name), "execution_window"),
                 initial_equity, "OHLCV_IMMEDIATE_TAKER", specs._resolved_base_execution_spec(request),
                 retain_event_snapshots=False,
                 min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
@@ -507,16 +646,20 @@ def _book_outcome(
                         )
             pre_vol_target_reference = primary_two_pass
             pre_vol_target_reference_naive_sharpe = _statistics._naive_sharpe(primary_two_pass.ledger)
-            batch = ev.replay_execution_window_batch_isolated(
-                _window_telemetry(
-                    _rescaled_windows(_windows(), replay_scale),
-                    "execution_window_rescaled",
-                ),
-                initial_equity, batch_bounds,
-                retain_event_snapshots=False,
-                min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
-                isolated_bound_indices=isolated_indices,
-            )
+            try:
+                batch = ev.replay_execution_window_batch_isolated(
+                    _window_telemetry(
+                        _rescaled_windows(_iter_spilled_windows(spill_temp.name), replay_scale),
+                        "execution_window_rescaled",
+                    ),
+                    initial_equity, batch_bounds,
+                    retain_event_snapshots=False,
+                    min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
+                    isolated_bound_indices=isolated_indices,
+                )
+            finally:
+                spill_temp.cleanup()
+                gc.collect()
         primary = batch.results[0]  # non-isolated index cannot be None
         stress = batch.results[1]
         patient_reference = batch.results[2]

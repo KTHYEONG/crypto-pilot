@@ -12,3 +12,11 @@ import src.mhs.evaluation.concurrency as concurrency
 def test_concurrency_module_present() -> None:
     assert concurrency.__name__ == "src.mhs.evaluation.concurrency"
     assert callable(concurrency._run_books_concurrent)
+
+
+def test_concurrency_post_book_base_panel_injection() -> None:
+    from src.mhs.evaluation import concurrency
+    import inspect
+
+    sig = inspect.signature(concurrency._run_post_book_concurrently)
+    assert "base_panel" in sig.parameters

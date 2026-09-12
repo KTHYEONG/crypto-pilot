@@ -264,13 +264,14 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
 
 class TestBookOutcomePaired:
     """SCENARIO_MHS_STREAM_BOOK_NO_MATERIALIZATION: the top-level book
-    orchestrator streams the execution-window generator twice (reference pass +
-    interleaved rescaled batch) instead of bulk materializing, routes the
+    orchestrator builds the execution-window generator once (reference pass
+    spills each window to Arrow IPC scratch) and replays the rescaled batch
+    from disk instead of regenerating from Parquet, routes the
     rescaled bounds through ``replay_execution_window_batch_isolated``, and preserves
     the typed book failure conversion."""
 
     def test_book_builds_window_iterator_twice_streaming(self, mhs_market, monkeypatch) -> None:
-        # Pins the two-pass generator contract; disable coupled streaming.
+        # Pins the spill-once generator contract; disable coupled streaming.
         monkeypatch.setattr(ev._scaling, "is_streaming_scale_mode", lambda _request: False)
         args = _build_book_outcome_args(mhs_market)
         calls = {"n": 0}
@@ -293,8 +294,8 @@ class TestBookOutcomePaired:
         assert report.primary is not None
         assert report.stress is not None
         assert report.failure is None
-        # Reference pass + one interleaved rescaled batch (bounded memory).
-        assert calls["n"] == 2
+        # Single generator build (reference spills to IPC) + one rescaled batch from disk.
+        assert calls["n"] == 1
         assert batch_calls["n"] == 1
 
     def test_book_strict_resource_breach_is_typed_failure(self, mhs_market, monkeypatch) -> None:

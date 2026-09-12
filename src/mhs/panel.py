@@ -135,6 +135,34 @@ def load_base_panel(
     }
 
 
+def slice_base_panel(
+    base_panel: dict[str, pd.DataFrame],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    min_bars: int = 2000,
+) -> dict[str, pd.DataFrame]:
+    """Slice a pre-loaded 1h base panel to ``[start, end]`` with survivor filtration.
+
+    In-memory counterpart of ``load_base_panel`` for fork-shared panels:
+    each field is sliced with ``.loc[start:end]`` (float64 preserved) and only
+    symbols with at least ``min_bars`` valid (non-NaN close, or first-field)
+    rows are retained, identically to the disk loader's survivor filter.
+    """
+    if not base_panel:
+        raise ValueError("base_panel must be non-empty")
+    ref_key = "close" if "close" in base_panel else next(iter(base_panel))
+    ref = base_panel[ref_key]
+    sliced_ref = ref.loc[start:end]
+    valid_counts = sliced_ref.notna().sum(axis=0)
+    survivors = [c for c in ref.columns if valid_counts[c] >= min_bars]
+    if not survivors:
+        raise ValueError("no symbol survived the panel filters")
+    return {
+        column: frame.loc[start:end, survivors].astype("float64")
+        for column, frame in base_panel.items()
+    }
+
+
 def liquid_half_eligibility(
     quote_volume: pd.DataFrame,
     lookback_bars: int,

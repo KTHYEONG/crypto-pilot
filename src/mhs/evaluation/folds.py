@@ -438,8 +438,9 @@ def _run_anchored_fold(
         window_prefix = f"anchored_fold_{fold_index}_window"
         # Streaming replay: reference pass streams directly; the rescaled
         # primary/stress pair reuses one regenerated window stream.
+        cached_windows = list(_windows())
         primary = replay_execution_windows(
-            _window_telemetry(_windows(), window_prefix),
+            _window_telemetry(iter(cached_windows), window_prefix),
             initial_equity, "OHLCV_IMMEDIATE_TAKER", specs._resolved_base_execution_spec(request),
             retain_event_snapshots=False,
         )
@@ -463,7 +464,7 @@ def _run_anchored_fold(
             )
         primary, stress = replay_execution_window_batch(
             _window_telemetry(
-                windows._rescaled_windows(_windows(), pnl_vol_target_scale),
+                windows._rescaled_windows(iter(cached_windows), pnl_vol_target_scale),
                 f"{window_prefix}_rescaled",
             ),
             initial_equity,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -102,6 +103,19 @@ def _data_collector() -> DataCollector:
 
 
 @lru_cache(maxsize=512)
+def _get_symbol_mark_frame_for_path(symbol: str, timeframe: str, path: str) -> pd.DataFrame:
+    """Full-period mark-price frame keyed on ``(symbol, timeframe, path)``.
+
+    Path-keying isolates same-symbol frames from different data roots so test
+    and production roots can never poison one another through the shared cache.
+    """
+    from pathlib import Path as _Path
+
+    del symbol, timeframe
+    return DataCollector._load_mark_price_cache(_Path(path))
+
+
+@lru_cache(maxsize=512)
 def _get_symbol_mark_frame(symbol: str, timeframe: str) -> pd.DataFrame:
     """Full-period mark-price frame for one symbol, cached for the process.
 
@@ -114,9 +128,8 @@ def _get_symbol_mark_frame(symbol: str, timeframe: str) -> pd.DataFrame:
     call time so test monkeypatches keep working; the returned frame is
     read-only.
     """
-    return DataCollector._load_mark_price_cache(
-        _futures_collection._mark_price_path(symbol, timeframe)
-    )
+    path = str(_futures_collection._mark_price_path(symbol, timeframe))
+    return _get_symbol_mark_frame_for_path(symbol, timeframe, path)
 
 
 def _compact_mark_series(symbol: str, timeframe: str) -> tuple[np.ndarray, np.ndarray]:
@@ -355,6 +368,38 @@ def _cached_mark_panel(
     return panel
 
 
+def _load_symbol_minute_frame(
+    path: str,
+    sym: str,
+    start_ms: int,
+    end_ms: int,
+    grid_start: pd.Timestamp,
+    grid_end: pd.Timestamp,
+) -> tuple[str, pd.DataFrame | None]:
+    """Load one symbol's minute slice; ``None`` when missing or empty."""
+    table = pq.read_table(
+        path,
+        columns=["timestamp", "high", "low", "close"],
+        filters=[
+            [
+                ("timestamp", ">=", start_ms),
+                ("timestamp", "<=", end_ms),
+            ]
+        ],
+    )
+    idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
+    frame = pd.DataFrame(
+        {
+            c: table.column(c).to_numpy().astype("float64")
+            for c in ("high", "low", "close")
+        },
+        index=idx,
+    )
+    frame = frame[(frame.index >= grid_start) & (frame.index <= grid_end)]
+    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+    return sym, (None if frame.empty else frame)
+
+
 def _load_window_minute_frames(
     root: str,
     symbols: list[str],
@@ -375,32 +420,22 @@ def _load_window_minute_frames(
     frames: dict[str, pd.DataFrame] = {}
     start_ms = int(grid_start.value // 1_000_000)
     end_ms = int(grid_end.value // 1_000_000)
-    for sym in symbols:
-        path = os.path.join(root, timeframe, f"{sym}.parquet")
-        if not os.path.exists(path):
-            continue
-        table = pq.read_table(
-            path,
-            columns=["timestamp", "high", "low", "close"],
-            filters=[
-                [
-                    ("timestamp", ">=", start_ms),
-                    ("timestamp", "<=", end_ms),
-                ]
-            ],
-        )
-        idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
-        frame = pd.DataFrame(
-            {
-                c: table.column(c).to_numpy().astype("float64")
-                for c in ("high", "low", "close")
-            },
-            index=idx,
-        )
-        frame = frame[(frame.index >= grid_start) & (frame.index <= grid_end)]
-        frame = frame[~frame.index.duplicated(keep="last")].sort_index()
-        if not frame.empty:
-            frames[sym] = frame
+    jobs = [
+        (os.path.join(root, timeframe, f"{sym}.parquet"), sym)
+        for sym in symbols
+        if os.path.exists(os.path.join(root, timeframe, f"{sym}.parquet"))
+    ]
+    if not jobs:
+        return frames
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(_load_symbol_minute_frame, path, sym, start_ms, end_ms, grid_start, grid_end)
+            for path, sym in jobs
+        ]
+        for fut in futures:
+            sym, frame = fut.result()
+            if frame is not None:
+                frames[sym] = frame
     return frames
 
 
