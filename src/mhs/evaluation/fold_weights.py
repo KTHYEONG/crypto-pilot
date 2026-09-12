@@ -22,7 +22,7 @@ from src.mhs.horizons import realized_vol
 from src.mhs.books import inverse_realized_vol_tilt, phase_tranche_book, portfolio_rebalance_trigger, renormalize_within_mask, scale_book_to_target_gross
 from src.mhs.funding import funding_carry_execution_book
 from src.mhs.features import build_feature_books
-from src.mhs.panel import liquid_half_eligibility, load_base_panel
+from src.mhs.panel import liquid_half_eligibility, load_base_panel, slice_base_panel
 from src.mhs.params import (
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
@@ -46,6 +46,7 @@ def _build_fold_target_weights(
     *,
     deadband_seed_row: pd.Series | None = None,
     require_minute_roster: bool = True,
+    base_panel: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Construct one fold's PIT decision targets with the quality calibration.
 
@@ -78,9 +79,13 @@ def _build_fold_target_weights(
         if request.committee_capital
         else ("close", "open", "quote_vol")
     )
-    panel = load_base_panel(
-        root, "1h", _panel_columns, panel_start, ve,
-        partition="dev", min_bars=2000,
+    panel = (
+        slice_base_panel(base_panel, panel_start, ve, min_bars=2000)
+        if base_panel is not None
+        else load_base_panel(
+            root, "1h", _panel_columns, panel_start, ve,
+            partition="dev", min_bars=2000,
+        )
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
     taker_buy_quote = panel["taker_buy_quote"] if request.committee_capital else None

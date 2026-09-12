@@ -42,6 +42,7 @@ class PipelineContext:
     quote_vol: pd.DataFrame
     taker_buy_quote: pd.DataFrame | None
     symbols: list[str]
+    base_panel: Any = None  # full 1h base panel shared copy-on-write to folds
 
     # Funding (S1)
     funding_by_symbol: dict[str, pd.Series] = field(default_factory=dict)
