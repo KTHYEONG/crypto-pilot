@@ -76,3 +76,17 @@ def test_rename_registry_only_covers_stated_migrations() -> None:
         "PHASE_1_BOOK_SPECS": "BOOK_SPECS",
         "PHASE_1_BOOK_BLEND_WEIGHTS": "BOOK_BLEND_WEIGHTS",
     }
+
+
+def test_report_schema_defaults_committee_member_weights_to_none() -> None:
+    """새 필드는 기본 None이며 to_payload 페이로드에 키로 노출된다."""
+    report = _minimal_report()
+
+    assert report.committee_member_weights is None
+
+    weighted = _minimal_report(committee_member_weights={"flow_imb_168h": 0.378})
+    payload = weighted.to_payload()
+
+    assert weighted.committee_member_weights == {"flow_imb_168h": 0.378}
+    assert payload["committee_member_weights"] == {"flow_imb_168h": 0.378}
+

@@ -58,6 +58,8 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
     run_elapsed_seconds = time.perf_counter() - ctx.run_start
     ctx.recorder.record("final_return")
 
+    committee_member_weights = (dict(ctx._committee_weights_by_boundary["top_level"]) if ctx._committee_weights_by_boundary.get("top_level") else None)
+
     return MhsHorizonDiagnosticReport(
         feature=FEATURE_NAME,
         status="COMPLETE",
@@ -114,6 +116,7 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         fill_mark_parity=ctx._fill_mark_parity_census,
         growth_envelope=ctx._growth_envelope_payload,
         committee_member_attribution=ctx.committee_member_attribution,
+        committee_member_weights=committee_member_weights,
         selection_overlap_fraction=(
             float(ctx.selection_overlap_fraction)
             if ctx.selection_overlap_fraction is not None

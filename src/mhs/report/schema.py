@@ -87,6 +87,8 @@ class MhsHorizonDiagnosticReport:
     fill_mark_parity: dict[str, Any] | None = None
     growth_envelope: dict[str, Any] | None = None
     committee_member_attribution: dict[str, Any] | None = None
+    # 배포가 재현해야 하는 top_level 경계 evidence 가중치(미사용 런은 None).
+    committee_member_weights: dict[str, float] | None = None
     worker_plan: dict[str, int] = field(default_factory=dict)
     tree_memory: ProcessTreeMemoryStats | None = None
     # 선택창 겹침 공시(I1): 보고 구간이 기본값 선택창과 겹치면 > 0 이며

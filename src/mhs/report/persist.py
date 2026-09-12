@@ -14,6 +14,7 @@ import dataclasses
 import io
 import json
 import logging
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -52,6 +53,29 @@ def mhs_horizon_diagnostic_report_path() -> str:
     return str(Path("docs/results") / "mhs_horizon_diagnostic.json")
 
 
+def _resolved_deployment_member_weights(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest, admitted: tuple[str, ...]) -> dict[str, float]:
+    """배포 봉인용 멤버 가중치를 확정한다(정규화 없이 원본 그대로 봉인)."""
+    if len(admitted) == 0:
+        raise DataIntegrityError("emit_deployment: empty member tuple cannot seal member weights")
+    if not getattr(request, "committee_evidence_weighting", False):
+        return {m: 1.0 / len(admitted) for m in admitted}
+    weights = getattr(report, "committee_member_weights", None)
+    if not weights:
+        raise DataIntegrityError("emit_deployment: committee_evidence_weighting=True but the report carries no committee_member_weights")
+    unknown = set(weights) - set(admitted)
+    if unknown:
+        raise DataIntegrityError(f"emit_deployment: non-admitted members {sorted(unknown)} not in admitted set")
+    for name, value in weights.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0.0:
+            raise DataIntegrityError(f"emit_deployment: member weight for {name!r} must be finite and >= 0")
+    total = sum(float(v) for v in weights.values())
+    if total <= 0.0:
+        raise DataIntegrityError("emit_deployment: committee_member_weights sum must be > 0")
+    logged = {k: round(float(v), 6) for k, v in weights.items()}
+    logger.info("[SYS] deployment_member_weights source=evidence n=%d sum=%.6f weights=%s", len(weights), total, logged)
+    return {k: float(v) for k, v in weights.items()}
+
+
 def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest, artifact_root: Path, *, artifact_key: SecretStr | None = None) -> dict[str, Any]:
     """Emit strategy params + bootstrap (sealed when artifact_key given, else plaintext)."""
     from src.common.errors import DataIntegrityError
@@ -74,7 +98,7 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     if member_set_key not in COMMITTEE_MEMBER_SETS:
         raise DataIntegrityError(f"emit_deployment: unregistered committee_member_set {member_set_key!r}")
     admitted = tuple(COMMITTEE_MEMBER_SETS[member_set_key])
-    member_weights = {m: 1.0 / len(admitted) for m in admitted}
+    member_weights = _resolved_deployment_member_weights(report, request, admitted)
     # reference returns for growth budget
     primary = getattr(report.blend, "primary", None)
     if primary is None or getattr(primary, "ledger", None) is None:
