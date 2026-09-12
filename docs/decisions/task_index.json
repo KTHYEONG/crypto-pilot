@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_execution_optimization",
+      "date": "2026-09-12",
+      "adr_id": "ADR_20260912_mhs_execution_optimization",
+      "domain": "performance",
+      "title": "MHS Multi-Stage Execution Optimization",
+      "why": "MHS run exceeded 10 minutes due to redundant parquet I/O, sequential phase diagnostics, and unshared fold panels.",
+      "resolution": "Added Arrow IPC window streaming for 2-pass replay, in-memory panel slicing for fold workers, and thread pool parallelism for mark frames and diagnostics.",
+      "impact": "Reduced runtime from 10+ minutes to ~3.5 minutes while keeping peak RAM under 3.5GB and preserving numerical bit-identity."
+    },
+    {
       "task_id": "MHS_LIVE_WEIGHT_PARITY",
       "date": "2026-09-12",
       "adr_id": "ADR_20260912_MHS_LIVE_WEIGHT_PARITY",
@@ -989,16 +999,6 @@
       "why": "20차까지의 반복 개선에도 무개선 — 모든 유의성 계측기(prescreen/phase/tail/xs_rank_ic)가 자본 0%인 참조책을 측정하고 있었고, Research-GO 게이트는 UNSPECIFIED_POLICY 무조건 append로 구조적으로 영구 False였다.",
       "resolution": "P0: _book_outcome에 executed_prescreen/executed_tail(집행책 계측) 신설, deflated_sharpe_ratio 배선(trials_attempted=20), UNSPECIFIED_POLICY를 MHS_REGISTERED_POLICY_THRESHOLDS 미등록 조건부로 전환. P1: 로스터 재정규화 회전율 가설을 로스터 네이티브 랭킹 실측으로 기각, pnl_vol_target 플래그 신설(기본 True, 무회귀). P2: notional_weighted_shortfall_bps 및 실현 체결 통계를 MhsBookReport에 노출. P4: realized_execution_roster_size 노출. 21차 실측(2021-2025 dev)으로 검증: executed_prescreen net_t 0.642→1.505(slow_momentum), deflated_sharpe_ratio=0.532, realized_execution_roster_size=41.93.",
       "impact": "기존 primary/stress/folds 수치는 바이트 동일(회귀 없음). research_go.eligible은 여전히 False(임계값 미등록, 의도된 상태)이나 이제 성과에 반응 가능한 구조. 20차까지의 fast_reversal 0% 배분/phase degenerate/xs_rank_ic 등 참조책 기준 결론은 전부 재판정 대상(P3, 후속 실행)."
-    },
-    {
-      "task_id": "TASK_MHS_CAPITAL_FLOOR_AND_OVERLAY_VALIDATION",
-      "date": "2026-08-13",
-      "adr_id": "ADR_20260813_MHS_CAPITAL_FLOOR_AND_OVERLAY_VALIDATION",
-      "domain": "mhs",
-      "title": "MHS 자본붕괴 완전방어·blend replay regime_scale 결함 수정·트렌드효율성 오버레이 실측(부정적 결과)",
-      "why": "19차가 code-only로 남긴 3개 gap을 실측 검증 요청받음: (1) fast_reversal Pass-2/stress가 여전히 무보호로 남아 CAPITAL_INVARIANT_BREACH가 오히려 악화(-144→-66,427), (2) trend_efficiency_overlay가 유닛테스트만 되고 fold-train-only 실측 비교 전무, (3) fold1(2024) 미달 원인 미상(이전 문서의 yearly_net_t 조회 가능 주장은 틀린 전제였음, DISCOVERY_END=2023-12-31로 2024열 구조적 NaN).",
-      "resolution": "(A) _book_outcome의 Pass-2/stress/patient_reference/touch/ladder 전체 replay_execution_windows 호출에 min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR 확장 배선 -- fast_reversal 표준 진단이 크래시 없이 완주(failure=None). (E, 신규 발견) C 실측 중 top-level blend.primary_autocorr_sharpe가 오버레이 on/off와 무관하게 불변임을 발견해 추적한 결과, _run_books_concurrent의 blend_replay가 w_fast_execution/w_slow_execution으로 독립 재구성되며 regime_scale(기존 _regime_cash_scale 포함) 곱셈이 17차 이래 한 번도 반영되지 않았던 결함을 확인·수정 -- regime_scale을 신규 옵셔널 파라미터로 스레딩해 blend_replay에만 적용(개별 북 무영향, fold 경로 무변경). 회귀 테스트 test_regime_scale_reaches_blend_replay_not_only_prescreen 추가(수정 전 실패, 수정 후 통과 확인). (C) --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon로 오버레이 on/off 각 전체 재실행 비교 -- 3-fold 전부 stress_naive_sharpe 악화, fold1(2024) primary/stress 둘 다 악화 확인, 기본값 False 유지 결정(코드 변경 없음, 실측 결과만 기록). (D) fold1 원인은 ledger.parquet의 replay_id='fold1_strict' 월별 손익 직접 조회로 재진단(12개월 중 8개월 손실, 단일크래시 없는 만성적 부진) -- 근본 해결은 미해결로 백로그 이월.",
-      "impact": "유닛/통합 테스트 전체 재통과(tests/unit/mhs, tests/unit/application/research/mhs, tests/integration/mhs), lean_check.py --spec-only PASS. 실데이터 재실행(4회, 2021-2025) 실측: fast_reversal.failure None 확인, blend.primary_autocorr_sharpe 0.5257->0.5196(MDD -0.2269->-0.2015 개선), slow_momentum 개별 북 0.5257 무변화(스케일이 blend 전용임을 실증), research_go.folds_passed 2/3 무변화(fold 경로는 원래 정상 배선이었으므로 게이트 판정 자체는 영향 없음 -- 이번 수정은 top-level 진단 리포트의 정확도 회복이 목적). trend_efficiency_overlay는 기본값 False 유지, 향후 이 신호 형태로는 재시도하지 않음."
     }
   ]
 }
