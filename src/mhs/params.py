@@ -303,6 +303,17 @@ PNL_VOL_TARGET_SCALE_FLOOR: float = 0.2
 PNL_VOL_TARGET_BURN_IN_DAYS: int = 90
 PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS: int = 365
 
+# 위원회 Kelly-LCB 사이징: LCB 페널티 z/sqrt(window)=0.0772 가 학습구간
+# 일간 Sharpe 0.1648 보다 작아 평균 에지에서 LCB 가 양수가 된다(구값 0.2182 는 초과).
+# 실측(3m 전체 리플레이): CAGR 3.114 -> 4.133, MDD -0.392 -> -0.412, Calmar 7.95 -> 10.04.
+COMMITTEE_KELLY_WINDOW_DAYS: int = 42
+# half-Kelly 상한값. 등록 가능한 최대치이며 half-Kelly 경계로 강제된다.
+COMMITTEE_KELLY_FRACTION: float = 0.5
+COMMITTEE_KELLY_LCB_Z: float = 0.5
+# 실측 등록값(측정 전용, 런타임 로직 비참조): 배포 레퍼런스 북 일간수익률의
+# leak-free 학습 슬라이스에서 mean/std = 0.1648. 데이터 재측정 시 함께 갱신한다.
+COMMITTEE_KELLY_TRAIN_DAILY_SHARPE: float = 0.1648
+
 # constant_risk 모드 전용 상수(기존 모드의 PNL_VOL_TARGET_* 는 불변).
 # 실측(3m 원장, target=0.40 고정) -- halflife가 유일한 다이얼로는 두 게이트를
 # 동시에 통과시키지 못하는 단조 트레이드오프가 실측 확인됨:
