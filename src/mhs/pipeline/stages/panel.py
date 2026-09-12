@@ -46,6 +46,7 @@ def load_panel(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ),
         ctx.start, ctx.end, partition="dev", min_bars=2000,
     )
+    ctx.base_panel = panel
     ctx.close, ctx.opens, ctx.quote_vol = panel["close"], panel["open"], panel["quote_vol"]
     ctx.taker_buy_quote = panel["taker_buy_quote"] if ctx.config.committee_capital else None
     ctx.grid_1h = ctx.close.index

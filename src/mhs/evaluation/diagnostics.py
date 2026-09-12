@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import gc
 import glob
 import os
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -53,21 +53,20 @@ def _phase_diagnostics(
     spec: BookSpec,
 ) -> PhaseDiagnosticResult:
     import src.mhs.evaluation as ev
-    phase_nets: dict[int, pd.Series] = {}
     signal = ev.horizon_log_return(log_close, spec.horizon_hours)
-    for offset in range(spec.step_hours):
+
+    def _eval_phase(offset: int) -> tuple[int, pd.Series]:
         phase_grid = grid_1h[offset :: spec.step_hours]
         sig = signal.reindex(phase_grid)
         el = eligible.reindex(phase_grid)
         weights = ev.rank_weight_book(sig, el, spec.band.sign, spec.min_symbols)
         weights_1h = weights.reindex(grid_1h, method="ffill").fillna(0.0)
         net, _turnover = ev.mhs_ledger_pnl(weights_1h, opens, bar_funding, 8.0)
-        phase_nets[offset] = net
-        # Each phase is independent.  Explicitly dropping its full-grid
-        # target/ledger intermediates prevents allocator high-water growth on
-        # multi-year, hundreds-of-symbol diagnostics.
-        del sig, el, weights, weights_1h, _turnover
-        gc.collect()
+        return offset, net
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(_eval_phase, offset) for offset in range(spec.step_hours)]
+        phase_nets = dict(f.result() for f in futures)
     return ev.phase_diagnostic_metrics(phase_nets, _PERIODS_PER_YEAR_1H)
 
 

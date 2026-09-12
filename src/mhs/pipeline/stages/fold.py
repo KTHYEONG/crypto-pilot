@@ -152,6 +152,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.fold_funding_carry, ctx._fold_committee_weights, ctx._fold_growth_budget_target_vol,
         ctx._fold_exposure_warmup_returns,
         fold_blend_exposure_scale=ctx._fold_blend_exposure_scale,
+        base_panel=getattr(ctx, 'base_panel', None),
     )
     ctx.folds = tuple(fold_reports)
     # Free mark frame cache so opt-in diagnostics run with minimal parent memory.

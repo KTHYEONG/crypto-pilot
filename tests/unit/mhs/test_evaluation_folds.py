@@ -115,10 +115,10 @@ class TestAnchoredFoldBounded:
 
     def test_fold_builds_window_iterator_twice_streaming(self, mhs_market, monkeypatch) -> None:
         """SCENARIO_MHS_STREAM_FOLD_TWO_GENERATIONS: the streaming fold
-        regenerates the execution windows exactly twice -- once for the
-        reference pass and once for the interleaved rescaled primary/stress
-        batch -- never once per bound (the bounded-memory successor of the
-        materialize-once invariant)."""
+        materializes the execution windows exactly once -- the reference pass
+        result is cached in memory and the rescaled primary/stress batch
+        reuses the cached list -- never once per bound (the bounded-memory
+        successor of the materialize-once invariant)."""
         root, end = mhs_market
         symbols = [
             s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -131,20 +131,20 @@ class TestAnchoredFoldBounded:
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         )
         calls = {"n": 0}
-        original = ev._iter_mhs_execution_windows
+        original = ev.windows._iter_mhs_execution_windows
 
         def counting(*args, **kwargs):
             calls["n"] += 1
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
+        monkeypatch.setattr(ev.windows, "_iter_mhs_execution_windows", counting)
         report = ev._run_anchored_fold(
             str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
         )
         assert report.strict is not None
         assert report.stress is not None
-        # Reference pass + one interleaved rescaled batch (bounded memory).
-        assert calls["n"] == 2
+        # Single materialization reused by the rescaled batch (bounded memory).
+        assert calls["n"] == 1
 
     def test_rss_budget_enforced_inside_fold_fails_closed(self, mhs_market, monkeypatch) -> None:
         monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 100_000_000_000)

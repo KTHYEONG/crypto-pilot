@@ -38,7 +38,7 @@ GOLDEN_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "golde
 # Wall-time and host-dependent fields can never be part of an identity gate.
 NON_DETERMINISTIC_FIELDS = frozenset({
     "elapsed_seconds", "run_elapsed_seconds", "resource_measurements",
-    "tree_memory", "worker_plan",
+    "tree_memory", "worker_plan", "trial_pool",
 })
 
 
