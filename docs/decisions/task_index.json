@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_LIVE_WEIGHT_PARITY",
+      "date": "2026-09-12",
+      "adr_id": "ADR_20260912_MHS_LIVE_WEIGHT_PARITY",
+      "domain": "mhs",
+      "title": "MHS 배포 봉인 위원회 가중치를 백테스트 evidence 가중치와 일치시킴",
+      "why": "emit_deployment이 evidence weighting 활성 런에서도 1/N 등가중을 봉인해 라이브가 백테스트와 다른 포트폴리오(증거 0인 멤버 2개에 40% 배분)를 거래 중이었음(probe에서 flow2_skew 실측=베이스라인 비트동일로 확인)",
+      "resolution": "_resolved_deployment_member_weights 신설: evidence_weighting=True면 report.committee_member_weights(top_level 경계, assemble_report가 ctx._committee_weights_by_boundary에서 배선)를 정규화 없이 그대로 봉인, False면 기존 1/N 유지; 5종 fail-closed(부재/비허용키/음수·비유한/합0/빈집합) 가드 추가",
+      "impact": "골든 summary 5개에 committee_member_weights:null 키만 추가(digest 5개 바이트 동일로 수치 불변 증명); 라이브 코드 무변경, 병합 후 --emit-deployment 재발행으로만 교정 반영됨(코드 범위 밖 운영 후속)"
+    },
+    {
       "task_id": "REFACTOR_P0_P5_STRUCTURAL",
       "date": "2026-09-03",
       "adr_id": "ADR_20260903_REFACTOR_P0_P5_STRUCTURAL",
@@ -989,16 +999,6 @@
       "why": "19차가 code-only로 남긴 3개 gap을 실측 검증 요청받음: (1) fast_reversal Pass-2/stress가 여전히 무보호로 남아 CAPITAL_INVARIANT_BREACH가 오히려 악화(-144→-66,427), (2) trend_efficiency_overlay가 유닛테스트만 되고 fold-train-only 실측 비교 전무, (3) fold1(2024) 미달 원인 미상(이전 문서의 yearly_net_t 조회 가능 주장은 틀린 전제였음, DISCOVERY_END=2023-12-31로 2024열 구조적 NaN).",
       "resolution": "(A) _book_outcome의 Pass-2/stress/patient_reference/touch/ladder 전체 replay_execution_windows 호출에 min_equity_fraction=MHS_REFERENCE_PASS_EQUITY_FLOOR 확장 배선 -- fast_reversal 표준 진단이 크래시 없이 완주(failure=None). (E, 신규 발견) C 실측 중 top-level blend.primary_autocorr_sharpe가 오버레이 on/off와 무관하게 불변임을 발견해 추적한 결과, _run_books_concurrent의 blend_replay가 w_fast_execution/w_slow_execution으로 독립 재구성되며 regime_scale(기존 _regime_cash_scale 포함) 곱셈이 17차 이래 한 번도 반영되지 않았던 결함을 확인·수정 -- regime_scale을 신규 옵셔널 파라미터로 스레딩해 blend_replay에만 적용(개별 북 무영향, fold 경로 무변경). 회귀 테스트 test_regime_scale_reaches_blend_replay_not_only_prescreen 추가(수정 전 실패, 수정 후 통과 확인). (C) --slow-book-mode horizon_ensemble --rebalance-filter portfolio_trigger --fold-safe-horizon로 오버레이 on/off 각 전체 재실행 비교 -- 3-fold 전부 stress_naive_sharpe 악화, fold1(2024) primary/stress 둘 다 악화 확인, 기본값 False 유지 결정(코드 변경 없음, 실측 결과만 기록). (D) fold1 원인은 ledger.parquet의 replay_id='fold1_strict' 월별 손익 직접 조회로 재진단(12개월 중 8개월 손실, 단일크래시 없는 만성적 부진) -- 근본 해결은 미해결로 백로그 이월.",
       "impact": "유닛/통합 테스트 전체 재통과(tests/unit/mhs, tests/unit/application/research/mhs, tests/integration/mhs), lean_check.py --spec-only PASS. 실데이터 재실행(4회, 2021-2025) 실측: fast_reversal.failure None 확인, blend.primary_autocorr_sharpe 0.5257->0.5196(MDD -0.2269->-0.2015 개선), slow_momentum 개별 북 0.5257 무변화(스케일이 blend 전용임을 실증), research_go.folds_passed 2/3 무변화(fold 경로는 원래 정상 배선이었으므로 게이트 판정 자체는 영향 없음 -- 이번 수정은 top-level 진단 리포트의 정확도 회복이 목적). trend_efficiency_overlay는 기본값 False 유지, 향후 이 신호 형태로는 재시도하지 않음."
-    },
-    {
-      "task_id": "TASK_MHS_FAST_REVERSAL_OVERLAY_REDESIGN",
-      "date": "2026-08-13",
-      "adr_id": "ADR_20260813_MHS_FAST_REVERSAL_OVERLAY_REDESIGN",
-      "domain": "mhs",
-      "title": "MHS fast_reversal 오버레이 재설계: 자본붕괴 방어·EMA 반전신호 버그 수정·트렌드효율성 타이밍 오버레이",
-      "why": "fast_reversal이 24-168h 전체 후보 그리드에서 leak-free 재검증 후에도 admission 실패(mhs-res.md 18차 §1-bis)해 독자 알파북으로서 근거가 없음이 확정됨. 동시에 whipsaw 억제용 EMA가 reversal 신호에도 무조건 적용돼 진단 헤드라인을 왜곡하고 있었고, fast_reversal의 독립적 CAPITAL_INVARIANT_BREACH(2025-07-14 음의 자기자본)가 향후 어떤 형태로든 자본 복원을 막는 최우선 차단 항목으로 기록돼 있었음(mhs-res.md §7).",
-      "resolution": "(A) src/mhs/execution.py: _BoundExecutionReplayAccumulator/replay_execution_windows에 opt-in min_equity_fraction 방어 플로어 추가(기본 None=기존 동작 완전 동일), SimulatedInventoryLedgerResult.equity_floor_breached_at 타입드 필드 신설, _book_outcome의 Pass-1 reference replay에만 MHS_REFERENCE_PASS_EQUITY_FLOOR(=MHS_REGIME_CASH_SCALE_FLOOR 재사용)로 배선. (B) evaluation.py에 sign-aware _signal_ema_span 헬퍼 신설해 두 호출부(fold/top-level)의 fast_ema를 sign=-1일 때 None(무스무딩)으로 교체 -- slow_momentum 수치는 완전 불변. (C) src/mhs/regime.py에 trend_efficiency_scale 신설(efficiency_ratio 기반, _regime_cash_scale과 동일한 ratio-to-own-history 패턴, 방향만 반전), evaluation.py에 _trend_efficiency_overlay_scale 래퍼 + MhsDiagnosticRequest.trend_efficiency_overlay(opt-in bool, 기본 False) + CLI --trend-efficiency-overlay 플래그, 양쪽 호출부(_build_fold_target_weights/top-level run_mhs_horizon_diagnostic)에서 기존 regime_scale과 곱으로 합성. PHASE_1_BOOK_BLEND_WEIGHTS는 무변경(fast_reversal 여전히 0.0 자본).",
-      "impact": "lean_check.py --spec docs/specs/mhs_fast_reversal_overlay_redesign_contract.json PASS(lint/type/test 전체), contract의 10개 시나리오 전부 대응하는 테스트가 tests/unit/mhs/test_regime.py, tests/unit/mhs/test_execution.py, tests/unit/application/research/mhs/test_fast_reversal_overlay_redesign.py에 추가되어 104 passed. trend_efficiency_overlay 기본값 False이므로 기존 프로덕션 경로/mhs-res.md 기록 수치는 불변. 실전 데이터 재실행(fold-train-only 오버레이 비교, EMA 수정 후 프리스크린 재검증)은 미실행 -- §4 검증 계획은 후속 실측 과제로 남음."
     }
   ]
 }
