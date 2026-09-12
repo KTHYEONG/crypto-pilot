@@ -267,7 +267,9 @@
   },
   "src/mhs/execution/accumulator.py": {},
   "src/mhs/execution/batch.py": {},
-  "src/mhs/execution/contracts.py": {},
+  "src/mhs/execution/contracts.py": {
+    "testing": "tests/unit/mhs/evaluation/test_windows.py"
+  },
   "src/mhs/execution/ledger.py": {},
   "src/mhs/execution/microstructure.py": {},
   "src/mhs/execution/pnl.py": {},
