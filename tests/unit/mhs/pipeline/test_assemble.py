@@ -252,3 +252,37 @@ def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY(
     assert wired_report.trial_pool == disclosure
     # I-OBSERVATIONAL: the disclosure never touches the GO gate decision.
     assert wired_report.research_go.reason_codes == go_before.reason_codes
+
+
+def test_assemble_report_carries_top_level_committee_member_weights() -> None:
+    """배선: top_level 경계 가중치만 리포트로 전달되며 ctx dict 별칭이 아니어야 한다."""
+    recorder = _StageRecorder(log_run=False)
+    ctx = _bare_context(recorder)
+    top_level = {
+        "flow_imb_720h": 0.27,
+        "flow_imb_168h": 0.378,
+        "xs_mom_336h": 0.0,
+        "xs_idio_mom_336h": 0.0,
+        "mom3_skew_168h": 0.352,
+    }
+    ctx._committee_weights_by_boundary = {
+        "top_level": top_level,
+        "fold_0": {"flow_imb_168h": 1.0},
+    }
+
+    report = assemble_report(ctx, ctx.telemetry)
+
+    assert report.committee_member_weights == top_level
+    assert report.committee_member_weights is not top_level
+
+
+def test_assemble_report_committee_member_weights_none_when_boundary_missing() -> None:
+    """evidence weighting 미사용 런은 빈 dict가 아니라 None을 남긴다."""
+    recorder = _StageRecorder(log_run=False)
+    ctx = _bare_context(recorder)
+    assert ctx._committee_weights_by_boundary == {}
+
+    report = assemble_report(ctx, ctx.telemetry)
+
+    assert report.committee_member_weights is None
+

@@ -188,29 +188,45 @@ COVERED_SCENARIOS: tuple[str, ...] = (
 
 
 def test_emit_deployment_plaintext_when_no_key(tmp_path, caplog) -> None:
+    """UPDATED existing test: the plaintext seal path now also carries the report evidence weights (the stub gained committee_member_weights)"""
+    import dataclasses
     import types
 
     import pandas as pd
 
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.report.persist import emit_deployment
 
     idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
     tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
     equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
     report = types.SimpleNamespace(
-        status="COMPLETE", research_go=types.SimpleNamespace(eligible=True),
-        blend=types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))),
+        status="COMPLETE",
+        research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(
+            target_weights=tw,
+            horizon_hours=168,
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+        ),
+        committee_member_weights={
+            "flow_imb_720h": 0.27,
+            "flow_imb_168h": 0.378,
+            "xs_mom_336h": 0.0,
+            "xs_idio_mom_336h": 0.0,
+            "mom3_skew_168h": 0.352,
+        },
     )
-    import dataclasses
-
-    from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
-
     request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))
+    assert request.committee_evidence_weighting is True
+
     res = emit_deployment(report, request, tmp_path, artifact_key=None)
+
     assert res["sealed"] is False
     assert (tmp_path / "strategy_params.json").exists()
     assert any("PLAINTEXT" in r.message for r in caplog.records)
+
+
 
 
 def test_persist_mhs_report_full_lightweight_json_and_parquet(tmp_path: Path) -> None:
@@ -241,3 +257,238 @@ def test_persist_mhs_report_full_lightweight_json_and_parquet(tmp_path: Path) ->
     loaded_ledger = load_mhs_replay_artifact(artifact_dir, "fast_reversal_primary", "ledger")
     assert not loaded_ledger.empty
     assert "equity" in loaded_ledger.columns
+
+
+def test_emit_deployment_seals_report_evidence_weights(tmp_path) -> None:
+    """GIVEN a report carrying the backtest top_level evidence weights WHEN emit_deployment seals params THEN the sealed committee_member_weights equal those evidence weights, never 1/N"""
+    import dataclasses
+    import types
+
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+    from src.mhs.live_strategy import load_strategy_params
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    report = types.SimpleNamespace(
+        status="COMPLETE",
+        research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(
+            target_weights=tw,
+            horizon_hours=168,
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+        ),
+        committee_member_weights={
+            "flow_imb_720h": 0.27,
+            "flow_imb_168h": 0.378,
+            "xs_mom_336h": 0.0,
+            "xs_idio_mom_336h": 0.0,
+            "mom3_skew_168h": 0.352,
+        },
+    )
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))
+    assert request.committee_evidence_weighting is True
+
+    emit_deployment(report, request, tmp_path, artifact_key=None)
+
+    loaded = load_strategy_params(tmp_path / "strategy_params.json", artifact_key=None)
+    assert loaded.committee_member_weights == pytest.approx(report.committee_member_weights)
+    assert loaded.committee_member_weights["xs_mom_336h"] == 0.0
+    assert loaded.committee_member_weights["xs_idio_mom_336h"] == 0.0
+    assert set(loaded.admitted_members) == set(report.committee_member_weights)
+
+
+def test_emit_deployment_fails_closed_without_report_member_weights(tmp_path) -> None:
+    """I-WEIGHT-PARITY fail-closed: evidence weighting on but the report carries no committee_member_weights raises DataIntegrityError instead of sealing equal weights"""
+    import dataclasses
+    import types
+
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+    from src.common.errors import DataIntegrityError
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    report = types.SimpleNamespace(
+        status="COMPLETE",
+        research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(
+            target_weights=tw,
+            horizon_hours=168,
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+        ),
+        committee_member_weights=None,
+    )
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))
+    assert request.committee_evidence_weighting is True
+
+    with pytest.raises(DataIntegrityError, match="committee_member_weights"):
+        emit_deployment(report, request, tmp_path, artifact_key=None)
+
+    assert not (tmp_path / "strategy_params.json").exists()
+
+
+def test_emit_deployment_fails_closed_on_non_admitted_member_weight(tmp_path) -> None:
+    """Fail-closed when the weights dict names a member outside the resolved committee_member_set (member-set drift between backtest and seal)"""
+    import dataclasses
+    import types
+
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+    from src.common.errors import DataIntegrityError
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    report = types.SimpleNamespace(
+        status="COMPLETE",
+        research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(
+            target_weights=tw,
+            horizon_hours=168,
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+        ),
+        committee_member_weights={"flow_imb_168h": 0.6, "rev_24h": 0.4},
+    )
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))
+    assert request.committee_evidence_weighting is True
+
+    with pytest.raises(DataIntegrityError, match="non-admitted"):
+        emit_deployment(report, request, tmp_path, artifact_key=None)
+
+
+def test_emit_deployment_fails_closed_on_negative_member_weight(tmp_path) -> None:
+    """Fail-closed on a negative or non-finite member weight (a short-the-member book is never a deployable evidence weight)"""
+    import dataclasses
+    import types
+
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+    from src.common.errors import DataIntegrityError
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    report = types.SimpleNamespace(
+        status="COMPLETE",
+        research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(
+            target_weights=tw,
+            horizon_hours=168,
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+        ),
+        committee_member_weights={"flow_imb_168h": 0.8, "flow_imb_720h": -0.1},
+    )
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))
+    assert request.committee_evidence_weighting is True
+
+    with pytest.raises(DataIntegrityError, match="finite"):
+        emit_deployment(report, request, tmp_path, artifact_key=None)
+
+    report.committee_member_weights = {"flow_imb_168h": True, "flow_imb_720h": 0.2}
+    with pytest.raises(DataIntegrityError, match="finite"):
+        emit_deployment(report, request, tmp_path, artifact_key=None)
+
+
+def test_emit_deployment_fails_closed_on_zero_weight_sum(tmp_path) -> None:
+    """Fail-closed when every evidence weight is zero: the deployed book would have no renormalizable mix"""
+    import dataclasses
+    import types
+
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+    from src.common.errors import DataIntegrityError
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    report = types.SimpleNamespace(
+        status="COMPLETE",
+        research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(
+            target_weights=tw,
+            horizon_hours=168,
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+        ),
+        committee_member_weights={"flow_imb_168h": 0.0, "flow_imb_720h": 0.0},
+    )
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))
+    assert request.committee_evidence_weighting is True
+
+    with pytest.raises(DataIntegrityError, match="sum must be"):
+        emit_deployment(report, request, tmp_path, artifact_key=None)
+
+
+def test_emit_deployment_equal_weights_when_evidence_weighting_disabled(tmp_path) -> None:
+    """Backward compatibility: with committee_evidence_weighting=False the backtest averages members equally, so emit_deployment must keep sealing 1/N"""
+    import dataclasses
+    import types
+
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+    from src.mhs.live_strategy import load_strategy_params
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    report = types.SimpleNamespace(
+        status="COMPLETE",
+        research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(
+            target_weights=tw,
+            horizon_hours=168,
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+        ),
+        committee_member_weights=None,
+    )
+    config = dataclasses.replace(
+        MhsRunConfig(start="2021-01-01", end=None), committee_evidence_weighting=False,
+    )
+    request = MhsDiagnosticRequest(**dataclasses.asdict(config))
+    assert request.committee_evidence_weighting is False
+
+    emit_deployment(report, request, tmp_path, artifact_key=None)
+
+    loaded = load_strategy_params(tmp_path / "strategy_params.json", artifact_key=None)
+    expected = 1.0 / len(loaded.admitted_members)
+    assert loaded.committee_member_weights == pytest.approx(
+        dict.fromkeys(loaded.admitted_members, expected)
+    )
+
+
+def test_resolved_deployment_member_weights_rejects_empty_admitted() -> None:
+    """멤버가 하나도 없는 집합은 1/N 계산 전에 fail-closed로 막는다."""
+    import dataclasses
+    import types
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import _resolved_deployment_member_weights
+
+    report = types.SimpleNamespace(committee_member_weights=None)
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", end=None)))
+
+    with pytest.raises(DataIntegrityError, match="empty member tuple"):
+        _resolved_deployment_member_weights(report, request, ())
+
