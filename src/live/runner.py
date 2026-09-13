@@ -19,9 +19,9 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.errors import DataIntegrityError
 from src.live.account import (
     AccountSnapshot,
-    assert_drawdown_within_limit,
     assert_suppressed_venue_flat,
     assert_venue_configuration,
     effective_positions,
@@ -47,6 +47,7 @@ from src.live.fills import FillEvent, append_fills, default_fills_dir
 from src.live.filters import parse_exchange_filters
 from src.live.ledger import (
     LedgerState,
+    accrue_paper_funding,
     apply_orphan_settlements,
     apply_outcomes,
     compute_fill_cash_flow,
@@ -72,6 +73,7 @@ from src.live.rest import BinanceFuturesRestClient, parse_rate_limits
 from src.live.settings import LiveSettings
 from src.live.signal import assert_signal_available, assert_signal_fresh, latest_decision_marks, latest_target_weights
 from src.live.sizing import target_quantities
+from src.mhs.params import REFERENCE_PASS_EQUITY_FLOOR
 from src.live.tax_ledger import (
     append_tax_records,
     collect_tax_records,
@@ -135,6 +137,68 @@ def check_risk_gates(
             raise RiskGateBreach(f"free margin fraction {free_fraction} below floor")
 
 
+def apply_ruin_guard(
+    weights: pd.Series, equity: Decimal, starting_capital: Decimal
+) -> tuple[pd.Series, bool]:
+    """백테스트 ruin 가드와 동일한 에쿼티 하한 평탄화.
+
+    equity <= REFERENCE_PASS_EQUITY_FLOOR * starting_capital 이면 비중을
+    0으로 평탄화하고 True를 반환한다(사이클은 계속되어 포지션을 청산한다).
+    """
+    if starting_capital <= 0:
+        raise ValueError(f"starting_capital must be > 0, got {starting_capital}")
+    floor = Decimal(str(REFERENCE_PASS_EQUITY_FLOOR)) * starting_capital
+    if equity <= floor:
+        return weights * 0.0, True
+    return weights, False
+
+
+def _load_paper_funding(symbols: Sequence[str]) -> dict[str, pd.Series]:
+    """존재하는 파일에 대해서만 펀딩 시리즈를 적재한다(없는 심볼은 스킵)."""
+    from src.common.paths import funding_path  # noqa: PLC0415
+    from src.market_data.storage.loaders import load_funding_rates  # noqa: PLC0415
+
+    funding_by_symbol: dict[str, pd.Series] = {}
+    for symbol in symbols:
+        path = funding_path(symbol)
+        if not path.exists():
+            continue
+        funding_by_symbol[symbol] = load_funding_rates(path)
+    return funding_by_symbol
+
+
+def _accrue_ledger_funding(
+    state: LedgerState,
+    marks: Mapping[str, Decimal],
+    now: pd.Timestamp,
+    ledger_path: Path,
+) -> LedgerState:
+    """원장에 페이퍼 펀딩비를 발생시키고 원자적으로 영속한다."""
+    held = {symbol: qty for symbol, qty in state.positions.items() if qty != 0}
+    if not held or state.funding_accrued_through is None:
+        updated = LedgerState(
+            positions=dict(state.positions),
+            equity_high_water_mark=state.equity_high_water_mark,
+            cash_usdt=state.cash_usdt,
+            funding_accrued_through=now,
+        )
+        save_ledger(ledger_path, updated)
+        return updated
+    if state.cash_usdt is None:
+        raise DataIntegrityError("paper funding accrual requires cash_usdt")
+    delta = accrue_paper_funding(
+        held, _load_paper_funding(sorted(held)), marks, state.funding_accrued_through, now
+    )
+    updated = LedgerState(
+        positions=dict(state.positions),
+        equity_high_water_mark=state.equity_high_water_mark,
+        cash_usdt=state.cash_usdt + delta,
+        funding_accrued_through=now,
+    )
+    save_ledger(ledger_path, updated)
+    return updated
+
+
 def run_shadow_cycle(
     settings: LiveSettings,
     decision_time: pd.Timestamp,
@@ -191,6 +255,7 @@ def run_shadow_cycle(
                 positions=updated,
                 equity_high_water_mark=ledger_state.equity_high_water_mark,
                 cash_usdt=ledger_state.cash_usdt,
+                funding_accrued_through=ledger_state.funding_accrued_through,
             )
             save_ledger(ledger_path, ledger_state)
             ledger_positions = ledger_state.positions
@@ -230,9 +295,14 @@ def run_shadow_cycle(
         else:
             decision_marks = None
             _sizing_anchor = "book_mid"
-        # 4) I-EQUITY-MTM / I-DD-HALT.
+        # 4) I-EQUITY-MTM / ruin guard (백테스트 패리티).
+        if settings.mode.suppresses_mutations:
+            ledger_state = _accrue_ledger_funding(ledger_state, marks, now_ts, ledger_path)
+            ledger_positions = ledger_state.positions
         equity = resolve_sizing_equity(snapshot, Decimal(str(settings.notional_equity_usdt)), mode=settings.mode, cash_usdt=ledger_state.cash_usdt, positions=ledger_positions, marks=marks)
-        assert_drawdown_within_limit(equity, ledger_state.equity_high_water_mark, settings.equity_drawdown_halt)
+        weights, ruin_flat = apply_ruin_guard(weights, equity, Decimal(str(settings.notional_equity_usdt)))
+        if ruin_flat:
+            audit.record("ruin_guard_flatten", equity=str(equity))
 
         targets, dropped = target_quantities(weights, marks, filters, equity, sizing_marks=decision_marks)
         for item in dropped:
@@ -260,28 +330,17 @@ def run_shadow_cycle(
         # 사이클 수준 리스크 게이트를 먼저 검사한다(부분 집행 금지).
         check_risk_gates(intents, targets, marks, snapshot, settings, equity)
 
-        # 종목별 노셔널 상한: 초과 심볼만 드롭한다(비중 재분배 없음).
-        kept: list[OrderIntent] = []
-        for intent in intents:
-            if intent.reduce_only:
-                kept.append(intent)
-                continue
-            mark = marks.get(intent.symbol)
-            if mark is not None and abs(intent.quantity * mark) / equity > Decimal(
-                str(settings.max_symbol_notional_fraction)
-            ):
-                audit.record("intent_dropped_symbol_cap", symbol=intent.symbol)
-                continue
-            kept.append(intent)
+        # NO-LIVE-ONLY-GATES: 종목별 노셔널 상한을 두지 않는다(백테스트 패리티).
+        kept: list[OrderIntent] = list(intents)
 
         for sym, reason in _uncovered_positions(current_positions, targets, filters, marks, kept):
             with contextlib.suppress(Exception):
                 audit.record("position_uncovered", symbol=sym, reason=reason)
 
-        from src.live.executor import FeeSchedule  # noqa: PLC0415
+        from src.live.executor import FeeSchedule, backtest_parity_execution_policy  # noqa: PLC0415
         from src.live.settings import ExecutionMode  # noqa: PLC0415
 
-        policy = PassiveExecutionPolicy(fee_schedule=FeeSchedule(maker_fee_bps=settings.maker_fee_bps, taker_fee_bps=settings.taker_fee_bps), taker_slippage_bps=settings.taker_slippage_bps)
+        policy = backtest_parity_execution_policy(FeeSchedule(maker_fee_bps=settings.maker_fee_bps, taker_fee_bps=settings.taker_fee_bps), settings.taker_slippage_bps)
         paper_fill_model = settings.paper_fill_model if settings.mode is ExecutionMode.PAPER else None
         sink: list[ExecutionOutcome] = []
         persisted = False
@@ -618,6 +677,7 @@ def _persist_confirmed_fills(
             positions=dict(base_state.positions),
             equity_high_water_mark=max(base_state.equity_high_water_mark, equity),
             cash_usdt=cash_usdt,
+            funding_accrued_through=base_state.funding_accrued_through,
         )
         save_ledger(ledger_path, state)
         return state
@@ -626,6 +686,7 @@ def _persist_confirmed_fills(
         positions=updated_positions,
         equity_high_water_mark=max(base_state.equity_high_water_mark, equity),
         cash_usdt=cash_usdt,
+        funding_accrued_through=base_state.funding_accrued_through,
     )
     save_ledger(ledger_path, state)
     return state

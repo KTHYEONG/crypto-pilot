@@ -224,3 +224,77 @@ def test_SCENARIO_PARITY_05_fee_accounted_cashflow():
     intent_sell = OrderIntent(symbol="AAAUSDT", side="SELL", quantity=Decimal("1.0"), reduce_only=False, target_qty=Decimal("0"), current_qty=Decimal("1.0"), client_order_prefix="run1", leg_index=0, decision_price=Decimal("100"))
     outcome_sell_maker = ExecutionOutcome(symbol="AAAUSDT", filled_qty=Decimal("1.0"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.0"), chases=0, status="FILLED", fills=((Decimal("1.0"), Decimal("100.0"), 2.0, "maker_fill", "maker"),), maker_qty=Decimal("1.0"), taker_qty=Decimal("0"))
     assert compute_fill_cash_flow([intent_sell], [outcome_sell_maker]) == Decimal("99.98")
+
+
+def test_accrue_paper_funding_charges_only_settlements_inside_window() -> None:
+    from decimal import Decimal
+    import pandas as pd
+    from src.live.ledger import accrue_paper_funding
+
+    start = pd.Timestamp("2026-09-01 01:03", tz="UTC")
+    end = pd.Timestamp("2026-09-02 01:03", tz="UTC")
+    funding_a = pd.Series([0.5, 0.001, 0.002, 0.7], index=pd.to_datetime(["2026-09-01 00:00", "2026-09-01 08:00", "2026-09-02 00:00:00.004", "2026-09-02 08:00"], utc=True, format="ISO8601"))
+    funding_b = pd.Series([-0.003], index=pd.to_datetime(["2026-09-01 16:00"], utc=True))
+    delta = accrue_paper_funding(
+        {"AAAUSDT": Decimal("2"), "BUSDT": Decimal("-1"), "ZEROUSDT": Decimal("0")},
+        {"AAAUSDT": funding_a, "BUSDT": funding_b},
+        {"AAAUSDT": Decimal("100"), "BUSDT": Decimal("50")},
+        start,
+        end,
+    )
+    assert delta == Decimal("-0.75")
+
+
+def test_accrue_paper_funding_fails_closed_on_missing_inputs() -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.live.ledger import accrue_paper_funding
+
+    start = pd.Timestamp("2026-09-01 01:03", tz="UTC")
+    end = pd.Timestamp("2026-09-02 01:03", tz="UTC")
+    series = pd.Series([0.001], index=pd.to_datetime(["2026-09-01 08:00"], utc=True))
+    with pytest.raises(DataIntegrityError, match="funding"):
+        accrue_paper_funding({"AAAUSDT": Decimal("1")}, {}, {"AAAUSDT": Decimal("100")}, start, end)
+    with pytest.raises(DataIntegrityError, match="mark"):
+        accrue_paper_funding({"AAAUSDT": Decimal("1")}, {"AAAUSDT": series}, {}, start, end)
+    with pytest.raises(ValueError, match="tz-aware"):
+        accrue_paper_funding({}, {}, {}, pd.Timestamp("2026-09-01"), end)
+    with pytest.raises(ValueError, match="end"):
+        accrue_paper_funding({}, {}, {}, end, start)
+
+
+def test_ledger_roundtrip_funding_accrued_through(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    import pandas as pd
+    from src.live.ledger import LedgerState, load_ledger, save_ledger
+
+    path = tmp_path / "ledger.json"
+    state = LedgerState(positions={"AAAUSDT": Decimal("1")}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("1900"), funding_accrued_through=pd.Timestamp("2026-09-01 01:03", tz="UTC"))
+    save_ledger(path, state)
+    assert load_ledger(path) == state
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.pop("funding_accrued_through")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert load_ledger(path).funding_accrued_through is None
+
+
+def test_ledger_corrupt_numerics_fail_closed(tmp_path) -> None:
+    import json
+    from src.common.errors import DataIntegrityError
+    from src.live.ledger import load_ledger
+
+    base = {"positions": {"AAAUSDT": "1"}, "equity_high_water_mark": "2000", "cash_usdt": "1900"}
+    cases = [
+        {**base, "equity_high_water_mark": "abc"},
+        {**base, "cash_usdt": "abc"},
+        {**base, "funding_accrued_through": "not-a-time"},
+        {"positions": {"AAAUSDT": "abc"}, "equity_high_water_mark": "2000"},
+    ]
+    for i, payload in enumerate(cases):
+        path = tmp_path / f"bad_{i}.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(DataIntegrityError):
+            load_ledger(path)

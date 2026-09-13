@@ -207,7 +207,7 @@ def test_emit_deployment_plaintext_when_no_key(tmp_path, caplog) -> None:
         blend=types.SimpleNamespace(
             target_weights=tw,
             horizon_hours=168,
-            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
         ),
         committee_member_weights={
             "flow_imb_720h": 0.27,
@@ -280,7 +280,7 @@ def test_emit_deployment_seals_report_evidence_weights(tmp_path) -> None:
         blend=types.SimpleNamespace(
             target_weights=tw,
             horizon_hours=168,
-            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
         ),
         committee_member_weights={
             "flow_imb_720h": 0.27,
@@ -323,7 +323,7 @@ def test_emit_deployment_fails_closed_without_report_member_weights(tmp_path) ->
         blend=types.SimpleNamespace(
             target_weights=tw,
             horizon_hours=168,
-            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
         ),
         committee_member_weights=None,
     )
@@ -357,7 +357,7 @@ def test_emit_deployment_fails_closed_on_non_admitted_member_weight(tmp_path) ->
         blend=types.SimpleNamespace(
             target_weights=tw,
             horizon_hours=168,
-            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
         ),
         committee_member_weights={"flow_imb_168h": 0.6, "rev_24h": 0.4},
     )
@@ -389,7 +389,7 @@ def test_emit_deployment_fails_closed_on_negative_member_weight(tmp_path) -> Non
         blend=types.SimpleNamespace(
             target_weights=tw,
             horizon_hours=168,
-            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
         ),
         committee_member_weights={"flow_imb_168h": 0.8, "flow_imb_720h": -0.1},
     )
@@ -425,7 +425,7 @@ def test_emit_deployment_fails_closed_on_zero_weight_sum(tmp_path) -> None:
         blend=types.SimpleNamespace(
             target_weights=tw,
             horizon_hours=168,
-            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
         ),
         committee_member_weights={"flow_imb_168h": 0.0, "flow_imb_720h": 0.0},
     )
@@ -457,7 +457,7 @@ def test_emit_deployment_equal_weights_when_evidence_weighting_disabled(tmp_path
         blend=types.SimpleNamespace(
             target_weights=tw,
             horizon_hours=168,
-            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
         ),
         committee_member_weights=None,
     )
@@ -508,7 +508,7 @@ def test_emit_deployment_v2_binds_policy_and_bootstrap(tmp_path) -> None:
     tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
     equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
     weights = {"flow_imb_720h": 0.27, "flow_imb_168h": 0.378, "xs_mom_336h": 0.0, "xs_idio_mom_336h": 0.0, "mom3_skew_168h": 0.352}
-    report = types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))), committee_member_weights=weights)
+    report = types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))), committee_member_weights=weights)
     request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01")))
     result = emit_deployment(report, request, tmp_path)
     params = load_strategy_params(tmp_path / "strategy_params.json")
@@ -534,7 +534,7 @@ def test_emit_deployment_v2_resolves_constant_risk_and_median_volumes(tmp_path) 
     equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
 
     def _report():
-        return types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))), committee_member_weights=None)
+        return types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))), committee_member_weights=None)
 
     base = dataclasses.asdict(MhsRunConfig(start="2021-01-01"))
     constant_request = MhsDiagnosticRequest(**{**base, "pnl_vol_target_mode": "constant_risk", "committee_evidence_weighting": False})
@@ -551,3 +551,67 @@ def test_emit_deployment_v2_resolves_constant_risk_and_median_volumes(tmp_path) 
     median_params = load_strategy_params(out_median / "strategy_params.json")
     assert median_params.policy.sizing.mode == "median_relative"
     assert median_params.policy.sizing.target_annual_vol == 0.2
+
+
+def test_emit_deployment_bootstrap_and_target_vol_use_unscaled_reference(tmp_path, monkeypatch) -> None:
+    import dataclasses
+    import types
+    import numpy as np
+    import pandas as pd
+    import src.mhs.scaling as scaling
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.live_strategy import load_strategy_bootstrap, load_strategy_params
+    from src.mhs.params import SIGNAL_RETURN_TAIL_DAYS
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+
+    idx = pd.date_range("2021-01-01", periods=900, freq="1D", tz="UTC")
+    rng = np.random.default_rng(3)
+    reference_returns = rng.normal(0.001, 0.02, len(idx))
+    reference_equity = pd.Series(np.cumprod(1.0 + reference_returns), index=idx)
+    primary_equity = pd.Series(np.cumprod(1.0 + 2.0 * reference_returns), index=idx)
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * len(idx)}, index=idx)
+    weights = {"flow_imb_720h": 0.27, "flow_imb_168h": 0.378, "xs_mom_336h": 0.0, "xs_idio_mom_336h": 0.0, "mom3_skew_168h": 0.352}
+    blend = types.SimpleNamespace(
+        target_weights=tw, horizon_hours=168,
+        primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=primary_equity)),
+        pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=reference_equity)),
+    )
+    report = types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=blend, committee_member_weights=weights)
+    captured: dict[str, pd.Series] = {}
+
+    def fake_target_vol(series, envelope=None, *args, **kwargs):
+        captured["series"] = series.copy()
+        return 0.5
+
+    monkeypatch.setattr(scaling, "_growth_budget_target_vol", fake_target_vol)
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01")))
+    emit_deployment(report, request, tmp_path)
+
+    expected_returns = reference_equity.resample("1D").last().pct_change().dropna()
+    pd.testing.assert_series_equal(captured["series"], expected_returns, check_names=False, check_freq=False)
+    params = load_strategy_params(tmp_path / "strategy_params.json")
+    bootstrap = load_strategy_bootstrap(tmp_path / "strategy_bootstrap.parquet", expected_sha256=params.bootstrap_sha256)
+    np.testing.assert_array_equal(bootstrap.to_numpy(), expected_returns.tail(SIGNAL_RETURN_TAIL_DAYS).to_numpy(dtype="float64"))
+    assert params.policy.sizing.target_annual_vol == 0.5
+
+
+def test_emit_deployment_requires_pre_vol_target_reference(tmp_path) -> None:
+    import dataclasses
+    import types
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    weights = {"flow_imb_720h": 0.27, "flow_imb_168h": 0.378, "xs_mom_336h": 0.0, "xs_idio_mom_336h": 0.0, "mom3_skew_168h": 0.352}
+    blend = types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)), pre_vol_target_reference=None)
+    report = types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=blend, committee_member_weights=weights)
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01")))
+    with pytest.raises(DataIntegrityError, match="pre_vol_target_reference"):
+        emit_deployment(report, request, tmp_path)

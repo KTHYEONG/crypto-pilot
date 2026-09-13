@@ -28,6 +28,7 @@ from src.mhs.params import (
     CAUSAL_BETA_MIN_PERIODS,
     COMMITTEE_TRANCHE_COUNT,
     FOLD_PANEL_WARMUP_HOURS,
+    PANEL_MIN_HISTORY_BARS,
     REBALANCE_TRACKING_ERROR_THRESHOLD,
 )
 from src.mhs.regime import beta_neutralize_weights, causal_market_beta, crash_regime_tilt_weights
@@ -49,6 +50,7 @@ def _build_fold_target_weights(
     base_panel: dict[str, pd.DataFrame] | None = None,
     panel_warmup_hours: int = FOLD_PANEL_WARMUP_HOURS,
     committee_oos_start: pd.Timestamp = COMMITTEE_OOS_START,
+    apply_rebalance_deadband: bool = True,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Construct one fold's PIT decision targets with the quality calibration.
 
@@ -74,6 +76,8 @@ def _build_fold_target_weights(
     ts = fold.train_start
     vs = fold.validation_start
     ve = fold.validation_end
+    if apply_rebalance_deadband is False and request.rebalance_filter != "per_symbol_deadband":
+        raise ValueError("apply_rebalance_deadband=False requires rebalance_filter='per_symbol_deadband'")
     import src.mhs.evaluation as ev
     panel_start = max(ts, vs - pd.Timedelta(hours=panel_warmup_hours))
     _panel_columns = (
@@ -82,11 +86,11 @@ def _build_fold_target_weights(
         else ("close", "open", "quote_vol")
     )
     panel = (
-        slice_base_panel(base_panel, panel_start, ve, min_bars=2000)
+        slice_base_panel(base_panel, panel_start, ve, min_bars=PANEL_MIN_HISTORY_BARS)  # liquid_half_eligibility min_history_bars와 동일(720)
         if base_panel is not None
         else load_base_panel(
             root, "1h", _panel_columns, panel_start, ve,
-            partition="dev", min_bars=2000,
+            partition="dev", min_bars=PANEL_MIN_HISTORY_BARS,  # liquid_half_eligibility min_history_bars와 동일(720)
         )
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
@@ -246,12 +250,7 @@ def _build_fold_target_weights(
     # The regime cash scale must read the traded execution roster, not the
     # full eligible universe: only the execution_mask symbols carry capital, so
     # their realized vol is the quantity that decides high-vol cash scaling.
-    vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(decision_grid).mean(axis=1)
-    regime_scale = _scaling._regime_cash_scale(vol_mean)
-    if request.trend_efficiency_overlay:
-        regime_scale = regime_scale.mul(
-            _scaling._trend_efficiency_overlay_scale(log_close, execution_mask, fast.horizon_hours, decision_grid),
-        )
+    regime_scale = _scaling.regime_cash_scale_1h(log_close, execution_mask, grid_1h, fast.horizon_hours, request.trend_efficiency_overlay).reindex(decision_grid).fillna(1.0)
     del execution_mask
     del log_close
     if request.rebalance_filter == "portfolio_trigger":
@@ -261,6 +260,8 @@ def _build_fold_target_weights(
         target_weights = portfolio_rebalance_trigger(
             target_weights, REBALANCE_TRACKING_ERROR_THRESHOLD,
         ).mul(regime_scale, axis=0)
+    elif apply_rebalance_deadband is False:
+        target_weights = target_weights.mul(regime_scale, axis=0)
     else:
         target_weights = _scaling._apply_rebalance_deadband(
             target_weights.mul(regime_scale, axis=0), seed_row=deadband_seed_row,

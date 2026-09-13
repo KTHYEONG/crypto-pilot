@@ -15,7 +15,7 @@ from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
 from src.live.errors import ArtifactSealError
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +69,7 @@ def _deserialize_runtime(raw: dict[str, Any]) -> LiveRuntime:
     if not isinstance(raw, dict):
         raise DataIntegrityError("live runtime must be a JSON object")
     schema = raw.get("schema_version")
-    if schema != SCHEMA_VERSION:
+    if schema not in (1, 2):
         raise DataIntegrityError(f"unknown schema_version {schema!r}")
     params_digest = raw.get("params_digest")
     if not isinstance(params_digest, str) or not params_digest:
@@ -88,13 +88,14 @@ def _deserialize_runtime(raw: dict[str, Any]) -> LiveRuntime:
     if not isinstance(held_raw, dict):
         raise DataIntegrityError("held_target_row must be object")
     held: dict[str, float] = {}
-    for k, v in held_raw.items():
-        if isinstance(v, bool):
-            raise DataIntegrityError(f"held_target_row non-numeric {k!r}")
-        try:
-            held[str(k)] = float(v)
-        except Exception as exc:
-            raise DataIntegrityError(f"held_target_row non-numeric {k!r}") from exc
+    if int(schema) != 1:
+        for k, v in held_raw.items():
+            if isinstance(v, bool):
+                raise DataIntegrityError(f"held_target_row non-numeric {k!r}")
+            try:
+                held[str(k)] = float(v)
+            except Exception as exc:
+                raise DataIntegrityError(f"held_target_row non-numeric {k!r}") from exc
     ref_raw = raw.get("reference_daily_returns")
     if not isinstance(ref_raw, dict):
         raise DataIntegrityError("reference_daily_returns must be object")
@@ -121,7 +122,7 @@ def _deserialize_runtime(raw: dict[str, Any]) -> LiveRuntime:
     else:
         series = pd.Series(dtype="float64")
     return LiveRuntime(
-        schema_version=int(schema),
+        schema_version=int(SCHEMA_VERSION),
         params_digest=str(params_digest),
         last_decision_date=last_ts,
         held_target_row=held,
@@ -203,7 +204,7 @@ def adopt_params(runtime: LiveRuntime, params: Any, bootstrap_reference: pd.Seri
             ref.index = ref.index.tz_convert("UTC")
     reason = "bootstrap" if not runtime.held_target_row else "soft_swap"
     new_rt = LiveRuntime(
-        schema_version=runtime.schema_version,
+        schema_version=int(SCHEMA_VERSION),
         params_digest=str(params.strategy_digest),
         last_decision_date=runtime.last_decision_date,
         held_target_row=dict(runtime.held_target_row),
