@@ -47,6 +47,8 @@ def _build_fold_target_weights(
     deadband_seed_row: pd.Series | None = None,
     require_minute_roster: bool = True,
     base_panel: dict[str, pd.DataFrame] | None = None,
+    panel_warmup_hours: int = FOLD_PANEL_WARMUP_HOURS,
+    committee_oos_start: pd.Timestamp = COMMITTEE_OOS_START,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Construct one fold's PIT decision targets with the quality calibration.
 
@@ -73,7 +75,7 @@ def _build_fold_target_weights(
     vs = fold.validation_start
     ve = fold.validation_end
     import src.mhs.evaluation as ev
-    panel_start = max(ts, vs - pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS))
+    panel_start = max(ts, vs - pd.Timedelta(hours=panel_warmup_hours))
     _panel_columns = (
         ("close", "open", "quote_vol", "taker_buy_quote")
         if request.committee_capital
@@ -218,7 +220,7 @@ def _build_fold_target_weights(
             member_weights=committee_member_weights,
             carry_book=funding_carry_execution_book(bar_funding, execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(request),
-            coverage_cutoff=COMMITTEE_OOS_START,
+            coverage_cutoff=committee_oos_start,
             beta=causal_beta,
         ).reindex(grid_1h).fillna(0.0)
         del close, taker_buy_quote

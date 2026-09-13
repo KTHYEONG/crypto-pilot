@@ -1,4 +1,19 @@
 # ruff: noqa
+import dataclasses as _dc2
+
+import pandas as _pd
+
+from src.mhs.contracts import MhsDiagnosticRequest as _Req2
+from src.mhs.deployment_policy import build_deployment_policy as _build2
+from src.mhs.pipeline.config import MhsRunConfig as _Cfg2
+
+
+def _v2_sig_params(mode="growth_budget", tv=1.0, cc=False, ks=False):
+    _req = _Req2(pnl_vol_target_mode=mode, committee_capital=cc, committee_kelly_sizing=ks)
+    _pol = _build2(_req, slow_horizon_hours=168, committee_member_weights={"m": 1.0}, admitted_members=("m",), target_annual_vol=tv, exposure_cap=3.0)
+    return __import__("src.mhs.live_strategy", fromlist=["LiveStrategyParams"]).LiveStrategyParams(schema_version=2, strategy_digest="d", backtest_window=(_pd.Timestamp("2021-01-01", tz="UTC"), _pd.Timestamp("2025-12-31", tz="UTC")), created_at=_pd.Timestamp("2026-08-31", tz="UTC"), policy=_pol, bootstrap_sha256="a" * 64, bootstrap_held_row={})
+
+
 import pytest
 
 
@@ -9,10 +24,7 @@ def test_advance_to_date_scores_missing_days(monkeypatch, tmp_path) -> None:
     from src.mhs.live_runtime import LiveRuntime
     from src.mhs.live_strategy import LiveStrategyParams
 
-    params = LiveStrategyParams(schema_version=1, strategy_digest="d", backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2026-08-20", tz="UTC")),
-        created_at=pd.Timestamp("2026-08-31", tz="UTC"), slow_horizon_hours=168, committee_member_weights={"m1": 1.0}, admitted_members=("m1",),
-        growth_budget_target_vol=0.35, exposure_cap=3.0, growth_envelope="g", execution_universe_size=60, pnl_vol_target_mode="constant_risk",
-        deployed_flags={}, params_snapshot={"SIGNAL_RETURN_TAIL_DAYS": 400}, bootstrap_held_row={"BTCUSDT": 0.1})
+    params = _v2_sig_params("constant_risk", 0.35, False, False)
     rt = LiveRuntime(schema_version=1, params_digest="d", last_decision_date=pd.Timestamp("2026-08-20", tz="UTC"),
                      held_target_row={"BTCUSDT": 0.1}, reference_daily_returns=pd.Series(dtype="float64"))
 
@@ -158,15 +170,7 @@ def test_compute_signal_row_scales_on_realized_forward_returns(tmp_path, monkeyp
         np.full(120, 0.001),
         index=pd.date_range("2025-09-01", periods=120, freq="1D", tz="UTC"),
     )
-    params = LiveStrategyParams(
-        schema_version=1, strategy_digest="d",
-        backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")),
-        created_at=dt, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
-        admitted_members=("m",), growth_budget_target_vol=1.0, exposure_cap=3.0,
-        growth_envelope="growth_extreme", execution_universe_size=60,
-        pnl_vol_target_mode="growth_budget", deployed_flags={}, params_snapshot={},
-        bootstrap_held_row={},
-    )
+    params = _v2_sig_params("growth_budget", 1.0, False, False)
     rt = LiveRuntime(
         schema_version=1, params_digest="d", last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
         held_target_row={"BTCUSDT": 0.5}, reference_daily_returns=boot,
@@ -200,15 +204,7 @@ def test_compute_signal_row_day_one_uses_bootstrap_warmup_only(tmp_path, monkeyp
         np.full(150, 0.002),
         index=pd.date_range("2025-08-01", periods=150, freq="1D", tz="UTC"),
     )
-    params = LiveStrategyParams(
-        schema_version=1, strategy_digest="d",
-        backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")),
-        created_at=dt, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
-        admitted_members=("m",), growth_budget_target_vol=1.0, exposure_cap=3.0,
-        growth_envelope="growth_extreme", execution_universe_size=60,
-        pnl_vol_target_mode="growth_budget", deployed_flags={}, params_snapshot={},
-        bootstrap_held_row={},
-    )
+    params = _v2_sig_params("growth_budget", 1.0, False, False)
     rt = LiveRuntime(
         schema_version=1, params_digest="d", last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
         held_target_row={}, reference_daily_returns=boot,
@@ -244,16 +240,7 @@ def test_scenario_kelly_lcb_06_live_signal_scalar_uses_recalibrated_defaults(tmp
         np.random.default_rng(20260912).normal(0.0025, 0.010, 400),
         index=pd.date_range("2025-08-01", periods=400, freq="1D", tz="UTC"),
     )
-    params = LiveStrategyParams(
-        schema_version=1, strategy_digest="d",
-        backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")),
-        created_at=dt, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
-        admitted_members=("m",), growth_budget_target_vol=1.0, exposure_cap=3.0,
-        growth_envelope="growth_extreme", execution_universe_size=60,
-        pnl_vol_target_mode="growth_budget",
-        deployed_flags={"committee_capital": True, "committee_kelly_sizing": True},
-        params_snapshot={}, bootstrap_held_row={},
-    )
+    params = _v2_sig_params("growth_budget", 1.0, True, True)
     rt = LiveRuntime(
         schema_version=1, params_digest="d",
         last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
@@ -281,3 +268,68 @@ def test_scenario_kelly_lcb_06_live_signal_scalar_uses_recalibrated_defaults(tmp
     assert _scaled_new["BTCUSDT"] == pytest.approx(scalar_new)
 
 
+
+
+
+def test_compute_signal_row_wires_policy_bootstrap_and_target_constants(tmp_path, monkeypatch) -> None:
+    import dataclasses
+    import pandas as pd
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_runtime import LiveRuntime
+    from src.mhs.live_strategy import LiveStrategyParams
+    from src.mhs.pipeline.config import MhsRunConfig
+    import src.mhs.live_signal_step as module
+
+    dt = pd.Timestamp("2026-08-31", tz="UTC")
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    policy = build_deployment_policy(request, slow_horizon_hours=168, committee_member_weights={"m": 1.0}, admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0)
+    params = LiveStrategyParams(schema_version=2, strategy_digest="d", backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")), created_at=dt, policy=policy, bootstrap_sha256="a" * 64, bootstrap_held_row={})
+    warm = pd.Series([0.01, 0.02], index=pd.date_range("2025-12-29", periods=2, freq="1D", tz="UTC"), dtype="float64")
+    runtime = LiveRuntime(schema_version=1, params_digest="d", last_decision_date=dt - pd.Timedelta(days=1), held_target_row={}, reference_daily_returns=warm)
+    target = pd.DataFrame({"BTCUSDT": [1.0]}, index=pd.DatetimeIndex([dt]))
+    captured = {}
+    def fake_builder(*args, **kwargs):
+        captured.update(request=args[2], panel=kwargs["panel_warmup_hours"], oos=kwargs["committee_oos_start"])
+        return target, pd.DatetimeIndex([dt]), [], pd.DatetimeIndex([dt])
+    def fake_scale(reference, sizing, *, warmup_returns=None):
+        captured.update(sizing=sizing, warmup=warmup_returns)
+        return pd.Series(2.0, index=reference.index, dtype="float64")
+    monkeypatch.setattr(module, "_build_fold_target_weights", fake_builder)
+    monkeypatch.setattr(module, "_load_funding_by_symbol", lambda *_: {})
+    monkeypatch.setattr(module, "realized_daily_returns", lambda *_a, **_k: pd.Series([0.01], index=pd.DatetimeIndex([pd.Timestamp("2026-08-30", tz="UTC")]), dtype="float64"))
+    monkeypatch.setattr(module, "compute_exposure_scale", fake_scale)
+    scaled, _, scalar = module.compute_signal_row(params, runtime, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper")
+    assert captured["request"].execution_universe_size == policy.target_weights.execution_universe_size
+    assert captured["panel"] == policy.signal_window.fold_panel_warmup_hours
+    assert captured["oos"] == policy.signal_window.committee_oos_start
+    assert captured["sizing"] is policy.sizing
+    pd.testing.assert_series_equal(captured["warmup"], warm)
+    assert scalar == 2.0 and scaled["BTCUSDT"] == 2.0
+
+
+
+def test_compute_signal_row_sorts_nonmonotonic_bootstrap_warmup(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.mhs.live_signal_step as module
+    from src.mhs.live_runtime import LiveRuntime
+
+    dt = pd.Timestamp("2026-08-31", tz="UTC")
+    params = _v2_sig_params("growth_budget", 1.0, False, False)
+    rev_idx = pd.DatetimeIndex([pd.Timestamp("2025-12-30", tz="UTC"), pd.Timestamp("2025-12-29", tz="UTC")])
+    rev = pd.Series([0.02, 0.01], index=rev_idx, dtype="float64")
+    runtime = LiveRuntime(schema_version=1, params_digest="d", last_decision_date=dt - pd.Timedelta(days=1), held_target_row={}, reference_daily_returns=rev)
+    target = pd.DataFrame({"BTCUSDT": [1.0]}, index=pd.DatetimeIndex([dt]))
+    captured = {}
+    module._build_fold_target_weights.__name__  # keep linter calm about the seam below
+    def fake_builder(*args, **kwargs):
+        return target, pd.DatetimeIndex([dt]), [], pd.DatetimeIndex([dt])
+    def fake_scale(reference, sizing, *, warmup_returns=None):
+        captured["warmup"] = warmup_returns
+        return pd.Series(2.0, index=reference.index, dtype="float64")
+    monkeypatch.setattr(module, "_build_fold_target_weights", fake_builder)
+    monkeypatch.setattr(module, "_load_funding_by_symbol", lambda *_: {})
+    monkeypatch.setattr(module, "realized_daily_returns", lambda *_a, **_k: pd.Series([0.01], index=pd.DatetimeIndex([pd.Timestamp("2026-08-30", tz="UTC")]), dtype="float64"))
+    monkeypatch.setattr(module, "compute_exposure_scale", fake_scale)
+    module.compute_signal_row(params, runtime, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper")
+    assert list(captured["warmup"].index) == sorted(captured["warmup"].index)

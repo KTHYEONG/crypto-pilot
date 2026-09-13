@@ -10,6 +10,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.deployment_policy import SizingPolicy
 from src.mhs.horizons import efficiency_ratio
 from src.mhs.params import (
     COMMITTEE_KELLY_FRACTION,
@@ -190,6 +191,40 @@ def _pnl_vol_target_scale(
     return scale.clip(lower=floor, upper=1.0).fillna(1.0)
 
 
+def _require_causal_warmup(
+    reference_daily_returns: pd.Series,
+    warmup_returns: pd.Series | None,
+) -> pd.Series | None:
+    """Validate warmup causality; return sorted warmup or None."""
+    if warmup_returns is None:
+        return None
+    ref_idx = reference_daily_returns.index
+    warm_idx = warmup_returns.index
+    if not isinstance(warm_idx, pd.DatetimeIndex) or not isinstance(ref_idx, pd.DatetimeIndex):
+        raise ValueError("warmup_returns and reference_daily_returns must have a DatetimeIndex")
+    if warm_idx.tz is None or ref_idx.tz is None:
+        raise ValueError("warmup_returns and reference_daily_returns must be tz-aware UTC")
+    warm_utc = warm_idx.tz_convert("UTC")
+    ref_utc = ref_idx.tz_convert("UTC")
+    warm_vals = warmup_returns.to_numpy(dtype="float64")
+    if not np.isfinite(warm_vals).all():
+        raise ValueError("warmup_returns must be finite (NaN/inf rejected)")
+    if not warm_utc.is_unique:
+        raise ValueError("warmup_returns index must be unique")
+    if not warm_utc.is_monotonic_increasing:
+        raise ValueError("warmup_returns index must be strictly increasing")
+    overlapping = warm_utc[warm_utc >= ref_utc[0]]
+    if len(overlapping) > 0:
+        raise ValueError(
+            f"warmup_returns must precede reference_daily_returns "
+            f"({len(overlapping)} rows at or after "
+            f"{ref_idx[0]}, first offender {overlapping[0]})"
+        )
+    out = warmup_returns.copy()
+    out.index = warm_utc
+    return out.sort_index()
+
+
 def _committee_kelly_scale(
     reference_daily_returns: pd.Series,
     window_days: int = COMMITTEE_KELLY_WINDOW_DAYS,
@@ -197,6 +232,8 @@ def _committee_kelly_scale(
     z: float = COMMITTEE_KELLY_LCB_Z,
     floor: float = PNL_VOL_TARGET_SCALE_FLOOR,
     cap: float = 1.0,
+    *,
+    warmup_returns: pd.Series | None = None,
 ) -> pd.Series:
     """Strategy-own-P&L trailing half-Kelly LCB exposure scale.
 
@@ -228,15 +265,17 @@ def _committee_kelly_scale(
         raise ValueError(f"cap must be >= 1.0, got {cap}")
     if reference_daily_returns.empty:
         return pd.Series(1.0, index=reference_daily_returns.index)
+    warmup = _require_causal_warmup(reference_daily_returns, warmup_returns)
+    combined = pd.concat([warmup, reference_daily_returns]) if warmup is not None else reference_daily_returns
     min_periods = max(5, window_days // 2)
-    trailing_mean = reference_daily_returns.rolling(window_days, min_periods=min_periods).mean().shift(1)
-    trailing_std = reference_daily_returns.rolling(window_days, min_periods=min_periods).std().shift(1)
-    trailing_n = reference_daily_returns.rolling(window_days, min_periods=min_periods).count().shift(1)
+    trailing_mean = combined.rolling(window_days, min_periods=min_periods).mean().shift(1)
+    trailing_std = combined.rolling(window_days, min_periods=min_periods).std().shift(1)
+    trailing_n = combined.rolling(window_days, min_periods=min_periods).count().shift(1)
     se = trailing_std.div(np.sqrt(trailing_n))
     lcb_mean = trailing_mean - z * se
     var = trailing_std.pow(2)
     raw_scale = fraction * lcb_mean.div(var.where(var > 0))
-    return raw_scale.clip(lower=floor, upper=cap).fillna(1.0)
+    return raw_scale.clip(lower=floor, upper=cap).fillna(1.0).reindex(reference_daily_returns.index)
 
 
 def _committee_capital_replay_scale(
@@ -683,6 +722,61 @@ def resolved_exposure_cap(request: MhsDiagnosticRequest) -> float:
     return float(envelope.leverage_ceiling)
 
 
+def compute_exposure_scale(
+    reference_daily_returns: pd.Series,
+    policy: SizingPolicy,
+    *,
+    warmup_returns: pd.Series | None = None,
+) -> pd.Series:
+    """Single pure exposure-scale function shared by replay and live.
+
+    The same sealed sizing policy plus the same causal return prefix yields
+    float64 exact-equal results in both paths. Warmup rows strictly precede
+    the reference and warm both the base and Kelly legs; the result index is
+    always the reference index.
+    """
+    if reference_daily_returns.empty:
+        return pd.Series(1.0, index=reference_daily_returns.index, dtype="float64")
+    warmup = _require_causal_warmup(reference_daily_returns, warmup_returns)
+    mode = str(policy.mode)
+    if mode == "median_relative":
+        if warmup is None:
+            base = _pnl_vol_target_scale(reference_daily_returns, floor=float(policy.scale_floor))
+        else:
+            combined = pd.concat([warmup, reference_daily_returns])
+            base = _pnl_vol_target_scale(combined, floor=float(policy.scale_floor)).reindex(reference_daily_returns.index)
+    elif mode in ("exante_target", "growth_budget"):
+        base = _exante_vol_target_scale(
+            reference_daily_returns, target_vol=float(policy.target_annual_vol),
+            cap=float(policy.exposure_cap), floor=float(policy.scale_floor),
+            warmup_returns=warmup,
+        )
+    elif mode == "constant_risk":
+        base = _constant_risk_scale(
+            reference_daily_returns, target_vol=float(policy.target_annual_vol),
+            cap=float(policy.exposure_cap), floor=float(policy.scale_floor),
+            warmup_returns=warmup,
+        )
+    else:
+        raise ValueError(f"unknown sizing mode '{mode}'")
+    if bool(policy.kelly_enabled) and mode != "constant_risk":
+        kelly = _committee_kelly_scale(
+            reference_daily_returns, window_days=int(policy.kelly_window_days),
+            fraction=float(policy.kelly_fraction), z=float(policy.kelly_lcb_z),
+            floor=float(policy.scale_floor), cap=float(policy.exposure_cap),
+            warmup_returns=warmup,
+        )
+        weight = float(policy.kelly_blend_weight)
+        blended = (1.0 - weight) * base + weight * kelly
+    else:
+        blended = base
+    if bool(policy.drawdown_brake):
+        blended = _equity_drawdown_brake_scale(reference_daily_returns, blended, cap=float(policy.exposure_cap))
+    out = pd.Series(blended.to_numpy(dtype="float64"), index=reference_daily_returns.index, dtype="float64")
+    out.index = reference_daily_returns.index
+    return out
+
+
 def _replay_exposure_scale(
     reference_daily_returns: pd.Series,
     request: MhsDiagnosticRequest,
@@ -690,16 +784,15 @@ def _replay_exposure_scale(
     *,
     warmup_returns: pd.Series | None = None,
 ) -> pd.Series:
-    """단일 디스패처: 노출 스케일 모드 선택 + committee_capital 합성.
+    """단일 디스패처: typed sizing policy로 resolve 후 단일 순수 함수에 위임.
 
     fold 경로와 top-level 경로 모두에서 동일 함수를 사용하여
     FOLD_BLEND_PATH_DIVERGENCE를 회피한다(I2). ``growth_budget_target_vol``이
     None이 아니면 growth_budget 및 non-conservative exante_target 모드에서
-    fold-local 재적합 대신 그 경계별 사전 적합값을 쓴다 -- fold 참조 수익률은
-    validation 윈도우만 담으므로 자기 적합은 leak이거나 fallback이다(I3/I4).
-    constant_risk는 Kelly 블렌드를 경유하지 않고 즉시 반환하며
-    ``warmup_returns``로 fold 검증 시작 이전 EWMA 워밍업을 받는다(I-WARM).
+    fold-local 재적합 대신 그 경계별 사전 적합값을 쓴다. constant_risk는
+    Kelly 블렌드를 경유하지 않고 ``warmup_returns``로 EWMA 워밍업을 받는다.
     """
+    from src.mhs.deployment_policy import SizingPolicy as _SizingPolicy
     from src.mhs.research_go import _resolved_growth_envelope
 
     def _resolve_target_vol(envelope: GrowthRiskEnvelope) -> float:
@@ -707,61 +800,38 @@ def _replay_exposure_scale(
             return growth_budget_target_vol
         return _growth_budget_target_vol(reference_daily_returns, envelope=envelope)
 
-    if request.pnl_vol_target_mode == "constant_risk":
-        envelope = _resolved_growth_envelope(request)
+    mode = str(request.pnl_vol_target_mode)
+    envelope = _resolved_growth_envelope(request)
+    if mode == "constant_risk":
         if growth_budget_target_vol is not None:
             target_vol = growth_budget_target_vol
         else:
-            # I2/I3: leak-free oos_start slice, mirroring the fold path's
-            # "top_level" boundary -- never fit sigma_book on the full
-            # unsliced series (FOLD_BLEND_PATH_DIVERGENCE root cause).
             target_vol = _constant_risk_target_vol(
                 reference_daily_returns, envelope,
                 drawdown_brake=request.exposure_drawdown_brake,
             )
-        # I-NO-PROCYCLIC: 경기순응 Kelly 항은 위험 상수성을 깨뜨린다.
-        scale = _constant_risk_scale(
-            reference_daily_returns, target_vol=target_vol,
-            cap=resolved_exposure_cap(request),
-            warmup_returns=warmup_returns,
-        )
-        if not request.exposure_drawdown_brake:
-            return scale
-        # 브레이크는 base scale 산출 직후 단일 합성점에서만 적용되며,
-        # blend의 exposure_scale에 이미 반영되므로 fold로 자동 전파된다.
-        return _equity_drawdown_brake_scale(reference_daily_returns, scale, cap=resolved_exposure_cap(request))
-    if request.pnl_vol_target_mode == "median_relative":
-        scale = _pnl_vol_target_scale(reference_daily_returns)
-    elif request.pnl_vol_target_mode == "exante_target":
-        envelope = _resolved_growth_envelope(request)
-        if envelope.name == "conservative":
-            # I4: the registered default envelope reproduces every
-            # pre-existing exante_target call byte-for-byte -- it must never
-            # route through the solver-fitted target_vol below, which would
-            # silently change the production default's exposure.
-            scale = _exante_vol_target_scale(reference_daily_returns, cap=resolved_exposure_cap(request))
-        else:
-            target_vol = _resolve_target_vol(envelope)
-            scale = _exante_vol_target_scale(
-                reference_daily_returns, target_vol=target_vol,
-                cap=resolved_exposure_cap(request),
-                warmup_returns=warmup_returns,
-            )
-    elif request.pnl_vol_target_mode == "growth_budget":
-        envelope = _resolved_growth_envelope(request)
+        kelly_enabled = False
+    elif mode == "median_relative" or (mode == "exante_target" and envelope.name == "conservative"):
+        target_vol = float(PNL_TARGET_ANNUAL_VOL)
+        kelly_enabled = bool(request.committee_capital and request.committee_kelly_sizing)
+    elif mode in ("exante_target", "growth_budget"):
         target_vol = _resolve_target_vol(envelope)
-        scale = _exante_vol_target_scale(
-            reference_daily_returns, target_vol=target_vol,
-            cap=resolved_exposure_cap(request),
-            warmup_returns=warmup_returns,
-        )
+        kelly_enabled = bool(request.committee_capital and request.committee_kelly_sizing)
     else:
         raise ValueError(f"unknown pnl_vol_target_mode '{request.pnl_vol_target_mode}'")
-    return _committee_capital_replay_scale(
-        scale, reference_daily_returns,
-        request.committee_capital, request.committee_kelly_sizing,
-        cap=resolved_exposure_cap(request),
+    policy = _SizingPolicy(
+        mode=mode,
+        target_annual_vol=float(target_vol),
+        exposure_cap=float(resolved_exposure_cap(request)),
+        scale_floor=float(PNL_VOL_TARGET_SCALE_FLOOR),
+        kelly_enabled=bool(kelly_enabled),
+        kelly_window_days=int(COMMITTEE_KELLY_WINDOW_DAYS),
+        kelly_fraction=float(COMMITTEE_KELLY_FRACTION),
+        kelly_lcb_z=float(COMMITTEE_KELLY_LCB_Z),
+        kelly_blend_weight=0.5,
+        drawdown_brake=bool(request.exposure_drawdown_brake),
     )
+    return compute_exposure_scale(reference_daily_returns, policy, warmup_returns=warmup_returns)
 
 
 def is_streaming_scale_mode(request: MhsDiagnosticRequest) -> bool:
