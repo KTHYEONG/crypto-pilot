@@ -298,6 +298,8 @@ def build_mhs_run_history_record(
     persisted_path: Path | None,
 ) -> dict[str, Any]:
     """Curated, structured summary of one MHS run."""
+    from src.mhs.live_strategy import capture_params_snapshot
+
     record: dict[str, Any] = {
         "run_at": datetime.now(UTC).isoformat(),
         "run_id": uuid4().hex,
@@ -307,6 +309,7 @@ def build_mhs_run_history_record(
         "end": report.end,
         "resolved_end": report.resolved_end,
         "flags": dataclasses.asdict(request) if request is not None else None,
+        "params_snapshot": capture_params_snapshot(),
         "perf": {
             "run_elapsed_seconds": report.run_elapsed_seconds,
             "peak_rss_bytes": _peak_rss_bytes(report.resource_measurements),

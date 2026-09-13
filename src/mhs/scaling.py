@@ -207,10 +207,10 @@ def _committee_kelly_scale(
     supplied by the caller from the resolved growth envelope's
     ``leverage_ceiling`` (via ``resolved_exposure_cap``) and defaults to 1.0
     -- the former hardcoded 1.0 cap turned the 50/50 blend into a pure
-    de-leverager. Registered defaults (window=42, fraction=0.5, z=0.5) keep
-    z/sqrt(window)=0.0772 below the train-slice daily Sharpe 0.1648, so the
-    LCB stays positive at the average edge; exposure is intentionally higher
-    than the legacy quarter-Kelly calibration. A weak or negative LCB edge
+    de-leverager. Registered defaults (window=42, fraction=0.5, z=0.0) apply
+    no LCB penalty, so the LCB equals the trailing mean at the average edge;
+    exposure is intentionally higher than the legacy quarter-Kelly
+    calibration. A weak or negative LCB edge
     shrinks the scale to ``floor``, same as the P&L-vol-target scale's
     momentum-crash de-risking.
     """

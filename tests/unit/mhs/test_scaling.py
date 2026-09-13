@@ -983,3 +983,21 @@ def test_scenario_kelly_lcb_05_min_periods_tracks_widened_window() -> None:
     assert (scale.iloc[:expected_min_periods] == 1.0).all()
     assert scale.iloc[expected_min_periods] != 1.0
     assert len(scale) == len(r)
+
+def test_mhs_kelly_z0_default_is_causal_and_registered() -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs import scaling
+    from src.mhs.params import COMMITTEE_KELLY_FRACTION, COMMITTEE_KELLY_LCB_Z, COMMITTEE_KELLY_WINDOW_DAYS, PNL_VOL_TARGET_SCALE_FLOOR
+
+    index = pd.date_range('2024-01-01', periods=64, freq='D', tz='UTC')
+    returns = pd.Series(np.linspace(-0.004, 0.008, len(index)), index=index, dtype='float64')
+    scale = scaling._committee_kelly_scale(returns, cap=3.0)
+    mean = returns.rolling(COMMITTEE_KELLY_WINDOW_DAYS, min_periods=COMMITTEE_KELLY_WINDOW_DAYS // 2).mean().shift(1)
+    variance = returns.rolling(COMMITTEE_KELLY_WINDOW_DAYS, min_periods=COMMITTEE_KELLY_WINDOW_DAYS // 2).std().shift(1).pow(2)
+    expected = (COMMITTEE_KELLY_FRACTION * mean.div(variance.where(variance > 0))).clip(lower=PNL_VOL_TARGET_SCALE_FLOOR, upper=3.0).fillna(1.0)
+    assert COMMITTEE_KELLY_LCB_Z == 0.0
+    pd.testing.assert_series_equal(scale, expected, check_exact=True)
+    changed_future = returns.copy()
+    changed_future.iloc[-1] = 10.0
+    pd.testing.assert_series_equal(scale.iloc[:-1], scaling._committee_kelly_scale(changed_future, cap=3.0).iloc[:-1], check_exact=True)
