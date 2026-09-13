@@ -35,15 +35,15 @@ last_verified: 2026-09-03
 
 | 컴포넌트 | 소스 경로 | 주요 책임 및 역할 |
 |---|---|---|
-| [`BinanceClient`](file:///home/kth/crypto-pilot/src/market_data/binance/futures.py) | [src/market_data/binance/futures.py](file:///home/kth/crypto-pilot/src/market_data/binance/futures.py) | Futures FAPI 원시 Klines (`/fapi/v1/klines`) 및 Funding Rate (`/fapi/v1/fundingRate`) 수집, Rate limit 및 재시도 제어 |
-| [`BinanceSpotClient`](file:///home/kth/crypto-pilot/src/market_data/binance/spot.py) | [src/market_data/binance/spot.py](file:///home/kth/crypto-pilot/src/market_data/binance/spot.py) | Spot REST API Klines (`/api/v3/klines`) 수집 및 타임프레임 변환 |
-| [`BinanceMarginClient`](file:///home/kth/crypto-pilot/src/market_data/binance/margin.py) | [src/market_data/binance/margin.py](file:///home/kth/crypto-pilot/src/market_data/binance/margin.py) | SAPI 차입 이자율 및 이력 (`/sapi/v1/margin/interestRateHistory`) 수집 |
-| [`BinanceVisionDownloader`](file:///home/kth/crypto-pilot/src/market_data/binance/vision.py) | [src/market_data/binance/vision.py](file:///home/kth/crypto-pilot/src/market_data/binance/vision.py) | Vision S3 아카이브(Klines, Funding, Metrics, BookDepth 등 `.zip`) 병렬 다운로드 및 SHA256 체크섬 검증 |
-| [`futures_collection.py`](file:///home/kth/crypto-pilot/src/market_data/services/futures_collection.py) | [src/market_data/services/futures_collection.py](file:///home/kth/crypto-pilot/src/market_data/services/futures_collection.py) | Futures OHLCV (1m/1h), Funding Rate, Vision Metrics 수집 및 캐시 오케스트레이션 서비스 |
-| [`spot_collection.py`](file:///home/kth/crypto-pilot/src/market_data/services/spot_collection.py) | [src/market_data/services/spot_collection.py](file:///home/kth/crypto-pilot/src/market_data/services/spot_collection.py) | Spot OHLCV (1h) 및 차입 이자율 병합 서비스 |
-| [`borrow_collection.py`](file:///home/kth/crypto-pilot/src/market_data/services/borrow_collection.py) | [src/market_data/services/borrow_collection.py](file:///home/kth/crypto-pilot/src/market_data/services/borrow_collection.py) | 현물 마진 차입 이자율 수집, 정규화 및 수동 CSV 임포트 서비스 |
-| [`mhs_execution.py`](file:///home/kth/crypto-pilot/src/market_data/services/mhs_execution.py) | [src/market_data/services/mhs_execution.py](file:///home/kth/crypto-pilot/src/market_data/services/mhs_execution.py) | MHS 체결 시뮬레이션 전용 5m OHLCV 및 1h Mark Price 데이터셋 수집 서비스 |
-| [`manifest.py`](file:///home/kth/crypto-pilot/src/market_data/storage/manifest.py) | [src/market_data/storage/manifest.py](file:///home/kth/crypto-pilot/src/market_data/storage/manifest.py) | 데이터 무결성 SHA256 지문, 레코드 수, 수집 메타데이터 및 품질(NaN 카운트 등) 매니페스트 관리 |
+| `BinanceClient` | `src/market_data/binance/futures.py` | Futures FAPI 원시 Klines (`/fapi/v1/klines`) 및 Funding Rate (`/fapi/v1/fundingRate`) 수집, Rate limit 및 재시도 제어 |
+| `BinanceSpotClient` | `src/market_data/binance/spot.py` | Spot REST API Klines (`/api/v3/klines`) 수집 및 타임프레임 변환 |
+| `BinanceMarginClient` | `src/market_data/binance/margin.py` | SAPI 차입 이자율 및 이력 (`/sapi/v1/margin/interestRateHistory`) 수집 |
+| `BinanceVisionDownloader` | `src/market_data/binance/vision.py` | Vision S3 아카이브(Klines, Funding, Metrics, BookDepth 등 `.zip`) 병렬 다운로드 및 SHA-256 체크섬 검증 |
+| `futures_collection.py` | `src/market_data/services/futures_collection.py` | Futures OHLCV (1m/1h), Funding Rate, Vision Metrics 수집 및 캐시 오케스트레이션 서비스 |
+| `spot_collection.py` | `src/market_data/services/spot_collection.py` | Spot OHLCV (1h) 및 차입 이자율 병합 서비스 |
+| `borrow_collection.py` | `src/market_data/services/borrow_collection.py` | 현물 마진 차입 이자율 수집, 정규화 및 수동 CSV 임포트 서비스 |
+| `mhs_execution.py` | `src/market_data/services/mhs_execution.py` | MHS 체결 시뮬레이션 전용 3m/5m OHLCV 및 1h Mark Price 데이터셋 수집 서비스 |
+| `manifest.py` | `src/market_data/storage/manifest.py` | 데이터 무결성 SHA-256 지문, 레코드 수, 수집 메타데이터 및 품질(NaN 카운트 등) 매니페스트 관리 |
 
 ---
 
@@ -58,8 +58,8 @@ last_verified: 2026-09-03
         ▼ (11개 raw 필드 정규화, 타임존 UTC 고정, 결손 감사)
 [Normalization & Imputation Audit (Full Field Extraction)]
         │
-        ▼ (기존 캐시 자가치유 병합 & SHA256 해시 등록)
-[SHA256 Manifest Tracking & Local Storage (Parquet, zstd)]
+        ▼ (기존 캐시 자가치유 병합 & SHA-256 해시 등록)
+[SHA-256 Manifest Tracking & Local Storage (Parquet, zstd)]
         │
         ▼
 [Research / MHS Execution / Live Replay Data Loaders]
@@ -74,7 +74,7 @@ last_verified: 2026-09-03
 | 데이터 종류 (Data Type) | 수집 경로 / 소스 | 가용 범위 (Available Range) | 저장 형식 및 정규화 컬럼 스키마 | 비고 / 주요 활용 |
 |---|---|---|---|---|
 | **Futures OHLCV** (1m, 1h) | FAPI `/fapi/v1/klines` (실시간/최근) 및 Vision Monthly Klines (`monthly/klines/`) | 2019-09-25 ~ 현재 (심볼별 상장일 이후) | Parquet (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `datetime`, `quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`, `trades`) | Taker 볼륨 및 거래 건수 포함 전체 11개 raw 필드 보존. 유동성 게이트 및 알파 신호 산출의 기본 데이터 |
-| **Futures Execution OHLCV** (5m) | FAPI `/fapi/v1/klines` 및 Vision Klines | 2021-01-01 ~ 현재 | Parquet (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `datetime`, `quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`, `trades`) | MHS 체결 리플레이([`simulated_inventory_ledger`](file:///home/kth/crypto-pilot/src/mhs/execution/ledger.py))의 5분봉 프록시 체결 및 슬리피지/수수료 시뮬레이션용 |
+| **Futures Execution OHLCV** (3m, 5m) | FAPI `/fapi/v1/klines` 및 Vision Klines | 2021-01-01 ~ 현재 | Parquet (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `datetime`, `quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`, `trades`) | MHS 체결 리플레이(`simulated_inventory_ledger`)의 3분봉 프록시 체결 및 슬리피지/수수료 시뮬레이션용 |
 | **Spot OHLCV** (1h) | Spot `/api/v3/klines` | 2017-08-17 ~ 현재 (상장일 이후) | Parquet (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `datetime`, `quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`, `trades`) | Cash & Carry 차익거래 및 현물-선물 베이시스 분석용 현물 가격/거래량 데이터 |
 | **Funding Rate** (8h / Event) | FAPI `/fapi/v1/fundingRate` 및 Vision Monthly Funding (`monthly/fundingRate/`) | 2019-09-25 ~ 현재 | Parquet (`timestamp`, `funding_rate`, `datetime`) | 선물 펀딩비 결제 이력 (00:00, 08:00, 16:00 UTC). 원장의 `Accrued Funding Charge` 정산에 필수 |
 | **Futures Metrics** (5m) | Binance Vision S3 (`daily/metrics/`) | 2020-09-01 ~ 현재 (Vision 아카이브) | Parquet (`timestamp`, `datetime`, `available_at`, `symbol`, `sum_open_interest`, `sum_open_interest_value`, `long_short_ratio`, `top_trader_long_short_ratio`, `sum_taker_long_short_vol_ratio`) | 미결제약정(OI), 롱숏비율(LSR), 상위 트레이더 포지션 비율, Taker 볼륨 비율 (5분 릴리스 지연 `available_at` 필수 반영) |
@@ -115,15 +115,15 @@ last_verified: 2026-09-03
    - Binance REST Klines의 모든 11개 필드(`quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`, `trades` 등)를 온전히 보존하여 저장합니다.
    - 거래대금이나 테이커 볼륨 누락 시 유동성 게이트, 플로우 불균형(`flow_imb`) 신호가 NaN으로 오염되는 것을 방지합니다.
 3. **매니페스트 지문 등록 (Manifest Fingerprinting):**
-   - 데이터셋 신규 생성 및 증분 업데이트 시 파일의 SHA256 해시, 레코드 수, 결손(NaN) 수, 수집 시각을 `manifest.json`에 기록하여 재현 가능한 데이터 출처(Data Provenance)를 보장합니다.
+   - 데이터셋 신규 생성 및 증분 업데이트 시 파일의 SHA-256 해시, 레코드 수, 결손(NaN) 수, 수집 시각을 `manifest.json`에 기록하여 재현 가능한 데이터 출처(Data Provenance)를 보장합니다.
 4. **캐시 자가치유 병합 (Self-healing Cache Merge Precedence):**
    - 기존 Parquet 캐시와 신규 수집 데이터를 병합할 때(`drop_duplicates(subset=["timestamp"], keep="last")`), 동일 timestamp에 대해서는 신규 fetch 데이터가 기존 캐시를 오버라이드하여 데이터 정정(Self-healing)을 보장합니다.
 
 ### 절대 금지해야 하는 행위 (Must Not Do)
 1. **결손 펀딩비/이자율 임의 대체 금지 (No Zero-Filling):**
-   - 누락된 펀딩비(funding rate)나 차입 이자율(borrow rate)을 절대로 `0.0`으로 임의 대체해서는 안 됩니다. 데이터 부재 시 [`DataIntegrityError`](file:///home/kth/crypto-pilot/src/common/errors.py)를 발생시키고 해당 구간 평가를 Fail-Closed 처리해야 합니다.
+   - 누락된 펀딩비(funding rate)나 차입 이자율(borrow rate)을 절대로 `0.0`으로 임의 대체해서는 안 됩니다. 데이터 부재 시 `DataIntegrityError`를 발생시키고 해당 구간 평가를 Fail-Closed 처리해야 합니다.
 2. **체크섬 미검증 다운로드 금지 (No Unverified Download):**
-   - Vision 아카이브 zip 파일 다운로드 시 함께 제공되는 `.CHECKSUM` 파일과의 SHA256 검증을 생략해서는 안 됩니다. 체크섬 불일치 시 즉시 폐기하고 재수집해야 합니다.
+   - Vision 아카이브 zip 파일 다운로드 시 함께 제공되는 `.CHECKSUM` 파일과의 SHA-256 검증을 생략해서는 안 됩니다. 체크섬 불일치 시 즉시 폐기하고 재수집해야 합니다.
 
 ---
 
@@ -134,7 +134,7 @@ data/
   ├── futures/
   │   ├── ohlcv/
   │   │   ├── 1m/ {SYMBOL}.parquet       # 1분봉 원시 캔들
-  │   │   ├── 5m/ {SYMBOL}.parquet       # 5분봉 MHS 체결 리플레이용 캔들
+  │   │   ├── 3m/ {SYMBOL}.parquet       # 3분봉 MHS 체결 리플레이용 캔들
   │   │   └── 1h/ {SYMBOL}.parquet       # 1시간봉 시그널 생성용 캔들
   │   ├── markPriceKlines/
   │   │   └── 1h/ {SYMBOL}.parquet       # 1시간봉 마크 가격 캔들
@@ -152,13 +152,13 @@ data/
   │   ├── live_portfolio_state/
   │   ├── live_orderbook/
   │   └── live_tax_ledger/
-  └── manifest.json                      # 전체 데이터셋 SHA256 무결성 매니페스트
+  └── manifest.json                      # 전체 데이터셋 SHA-256 무결성 매니페스트
 ```
 
 ---
 
 ## 8. 테스트 및 품질 검증 기준 (Testing Expectations)
-- **Continuity Test:** 타임스탬프 간격(1m, 5m, 1h 등)의 누락 구간 및 중복 검증.
-- **Integrity Test:** 저장된 Parquet 파일의 SHA256 해시가 `manifest.json` 지문과 100% 일치하는지 확인.
+- **Continuity Test:** 타임스탬프 간격(1m, 3m, 5m, 1h 등)의 누락 구간 및 중복 검증.
+- **Integrity Test:** 저장된 Parquet 파일의 SHA-256 해시가 `manifest.json` 지문과 100% 일치하는지 확인.
 - **Deterministic Isolation:** 단위 테스트 시 외부 Binance/Vision 엔드포인트를 직접 호출하지 않고 네트워크 계층을 Mocking하여 결정론적 테스트 수행.
 - **Boundary-Only Mocking:** 원시 바이트 수신 및 디코딩 경계만 Mocking하고, 내부 파싱/정규화/무결성 로직은 실제 구현 코드를 직접 구동하여 검증.
