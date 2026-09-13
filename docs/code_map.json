@@ -269,10 +269,7 @@
     "testing": "tests/unit/mhs/evaluation/test_specs.py"
   },
   "src/mhs/evaluation/windows.py": {
-    "testing": [
-      "tests/unit/mhs/evaluation/test_windows.py",
-      "tests/benchmark/mhs/test_mhs_ipc_numpy_restore_benchmark.py"
-    ]
+    "testing": "tests/unit/mhs/evaluation/test_windows.py"
   },
   "src/mhs/evidence.py": {
     "testing": "tests/unit/mhs/test_evidence.py"
