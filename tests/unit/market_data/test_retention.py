@@ -14,10 +14,10 @@ def test_prune_market_data_shrinks_only_old_rows(tmp_path) -> None:
     d.mkdir(parents=True)
     df.to_parquet(d / "BTCUSDT.parquet", index=False)
 
-    result = prune_market_data(tmp_path, 220, now=now)
+    result = prune_market_data(tmp_path, 450, now=now)
 
     out = pd.read_parquet(d / "BTCUSDT.parquet")
-    cutoff_ms = int((now - pd.Timedelta(days=220)).timestamp() * 1000)
+    cutoff_ms = int((now - pd.Timedelta(days=450)).timestamp() * 1000)
     assert (out["timestamp"] >= cutoff_ms).all()
     assert len(out) == 100  # only the 'recent' block survives
     assert result["ohlcv/1h"]["files_pruned"] == 1
@@ -43,7 +43,7 @@ def test_prune_market_data_skips_non_integer_timestamp_file(tmp_path) -> None:
     pd.DataFrame({"datetime": pd.date_range("2020-01-01", periods=50, freq="1D", tz="UTC"), "funding_rate": 0.0001}).to_parquet(p, index=False)
     before = p.read_bytes()
 
-    result = prune_market_data(tmp_path, 220, now=pd.Timestamp("2026-09-01", tz="UTC"))
+    result = prune_market_data(tmp_path, 450, now=pd.Timestamp("2026-09-01", tz="UTC"))
 
     assert p.read_bytes() == before
     assert result["funding"]["files_skipped"] == 1
@@ -65,7 +65,7 @@ def test_prune_market_data_never_writes_empty_frame(tmp_path) -> None:
     df.to_parquet(p, index=False)
     before = p.read_bytes()
 
-    result = prune_market_data(tmp_path, 220, now=pd.Timestamp("2026-09-01", tz="UTC"))
+    result = prune_market_data(tmp_path, 450, now=pd.Timestamp("2026-09-01", tz="UTC"))
 
     assert p.exists()
     assert p.read_bytes() == before
@@ -88,7 +88,7 @@ def test_prune_market_data_noop_when_all_rows_recent(tmp_path) -> None:
     df.to_parquet(p, index=False)
     before = p.read_bytes()
 
-    result = prune_market_data(tmp_path, 220, now=pd.Timestamp("2026-09-01", tz="UTC"))
+    result = prune_market_data(tmp_path, 450, now=pd.Timestamp("2026-09-01", tz="UTC"))
 
     assert p.read_bytes() == before
     assert result["markPriceKlines/1h"]["files_pruned"] == 0
@@ -151,3 +151,35 @@ def test_check_orderbook_prune_impending_empty_dir(tmp_path) -> None:
     assert impending is False
     assert days_left == 0
     assert earliest is None
+
+def test_prune_market_data_includes_metrics_1d_directory(tmp_path) -> None:
+    import pandas as pd
+    from src.market_data.retention import prune_market_data
+
+    now = pd.Timestamp("2026-09-01", tz="UTC")
+    old = pd.date_range("2025-01-01", periods=50, freq="1D", tz="UTC")
+    recent = pd.date_range("2026-06-01", periods=50, freq="1D", tz="UTC")
+    idx = old.append(recent)
+    df = pd.DataFrame({
+        "timestamp": ((idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")).astype("int64"),
+        "sum_open_interest": 1.0,
+        "sum_open_interest_value": 1.0,
+        "long_short_ratio": 1.0,
+        "top_trader_long_short_ratio": 1.0,
+        "sum_taker_long_short_vol_ratio": 1.0,
+        "datetime": idx,
+        "available_at": idx + pd.Timedelta(minutes=5),
+        "symbol": "AAAUSDT",
+    })
+    d = tmp_path / "metrics" / "1d"
+    d.mkdir(parents=True)
+    df.to_parquet(d / "AAAUSDT.parquet", index=False)
+
+    result = prune_market_data(tmp_path, 450, now=now)
+
+    out = pd.read_parquet(d / "AAAUSDT.parquet")
+    cutoff_ms = int((now - pd.Timedelta(days=450)).timestamp() * 1000)
+    assert (out["timestamp"] >= cutoff_ms).all()
+    assert len(out) == 50
+    assert result["metrics/1d"]["files_pruned"] == 1
+    assert result["metrics/1d"]["rows_removed"] == 50

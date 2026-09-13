@@ -174,3 +174,54 @@ def test_market_data_staleness_hours_p90_ignores_delisted_outliers(tmp_path, mon
         ts = [int((now - pd.Timedelta(hours=200 + k)).value // 10**6) for k in range(10)]
         pd.DataFrame({"timestamp": ts, "close": [1.0] * 10}).to_parquet(d / f"{sym}.parquet", index=False)
     assert data_refresh.market_data_staleness_hours(tmp_path, now=now) > 150.0
+
+def test_refresh_one_symbol_tail_calls_ensure_metrics_live_tail() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            return None
+
+        def ensure_funding_data(self, symbol, start, end):
+            return None
+
+        def ensure_metrics_live_tail(self, symbol):
+            calls.append(symbol)
+
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    assert ok is True
+    assert calls == ["AAAUSDT"]
+
+def test_refresh_one_symbol_tail_metrics_failure_is_failsoft_returns_true() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            return None
+
+        def ensure_funding_data(self, symbol, start, end):
+            return None
+
+        def ensure_metrics_live_tail(self, symbol):
+            raise RuntimeError("futures/data endpoint down")
+
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    assert ok is True
+
+def test_refresh_one_symbol_tail_missing_metrics_method_is_noop() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            return None
+
+        def ensure_funding_data(self, symbol, start, end):
+            return None
+
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    assert ok is True

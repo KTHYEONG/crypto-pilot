@@ -27,7 +27,7 @@ def prune_market_data(
         * 1000
     )
     result: dict[str, dict[str, int]] = {}
-    for rel in ("ohlcv/1h", "markPriceKlines/1h", "funding"):
+    for rel in ("ohlcv/1h", "markPriceKlines/1h", "funding", "metrics/1d"):
         d = Path(futures_root) / rel
         files_pruned = 0
         rows_removed = 0

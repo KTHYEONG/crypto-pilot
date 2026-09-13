@@ -332,6 +332,56 @@ def run_shadow_cycle(
 
         # NO-LIVE-ONLY-GATES: 종목별 노셔널 상한을 두지 않는다(백테스트 패리티).
         kept: list[OrderIntent] = list(intents)
+        try:
+            from src.live.orderbook import append_order_book_snapshots, capture_order_books, default_orderbook_dir  # noqa: PLC0415
+
+            if settings.orderbook_capture_enabled:
+                orderbook_dir = Path(settings.orderbook_capture_dir) if settings.orderbook_capture_dir else default_orderbook_dir()
+                pretrade_syms = [
+                    i.symbol
+                    for i in sorted(kept, key=lambda x: abs(x.quantity * marks.get(x.symbol, Decimal(0))), reverse=True)
+                ][: settings.orderbook_capture_pretrade_max_symbols]
+                if pretrade_syms:
+                    pre_snaps = capture_order_books(
+                        market_client,
+                        pretrade_syms,
+                        decision_time,
+                        mode=settings.mode.value,
+                        duration_s=0.0,
+                        interval_s=settings.orderbook_capture_interval_s,
+                        depth_limit=settings.orderbook_capture_depth_limit,
+                        max_symbols=settings.orderbook_capture_pretrade_max_symbols,
+                        clock=_clock,
+                        sleep_fn=time.sleep,
+                        now_fn=lambda: pd.Timestamp.now(tz="UTC"),
+                        shutdown=shutdown,
+                        phase="pre_trade",
+                    )
+                    append_order_book_snapshots(pre_snaps, orderbook_dir)
+                untraded_syms = sorted(set(wanted_symbols) - {i.symbol for i in kept})[
+                    : settings.orderbook_capture_baseline_max_symbols
+                ]
+                if untraded_syms:
+                    baseline_snaps = capture_order_books(
+                        market_client,
+                        untraded_syms,
+                        decision_time,
+                        mode=settings.mode.value,
+                        duration_s=0.0,
+                        interval_s=settings.orderbook_capture_interval_s,
+                        depth_limit=settings.orderbook_capture_depth_limit,
+                        max_symbols=settings.orderbook_capture_baseline_max_symbols,
+                        clock=_clock,
+                        sleep_fn=time.sleep,
+                        now_fn=lambda: pd.Timestamp.now(tz="UTC"),
+                        shutdown=shutdown,
+                        phase="baseline_untraded",
+                    )
+                    append_order_book_snapshots(baseline_snaps, orderbook_dir)
+        except Exception as exc:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                audit.record("pretrade_orderbook_capture_failed", error=str(exc))
+            logger.warning("[SYS] pretrade/baseline orderbook capture failed error=%s", exc)
 
         for sym, reason in _uncovered_positions(current_positions, targets, filters, marks, kept):
             with contextlib.suppress(Exception):
