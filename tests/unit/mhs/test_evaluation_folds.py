@@ -183,10 +183,10 @@ def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
     )
 
-    def _all_ones_scale(reference_daily_returns: pd.Series) -> pd.Series:
+    def _all_ones_scale(reference_daily_returns: pd.Series, *args: object, **kwargs: object) -> pd.Series:
         return pd.Series(1.0, index=reference_daily_returns.index)
 
-    def _forced_step_scale(reference_daily_returns: pd.Series) -> pd.Series:
+    def _forced_step_scale(reference_daily_returns: pd.Series, *args: object, **kwargs: object) -> pd.Series:
         idx = reference_daily_returns.index
         mid = idx[0] + (idx[-1] - idx[0]) / 2
         return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)

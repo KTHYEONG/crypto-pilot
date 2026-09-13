@@ -142,7 +142,7 @@ def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, m
     assert default_report.primary_naive_sharpe == pytest.approx(true_report.primary_naive_sharpe)
     assert default_report.stress_naive_sharpe == pytest.approx(true_report.stress_naive_sharpe)
 
-    def _forced_step_scale(reference_daily_returns: pd.Series) -> pd.Series:
+    def _forced_step_scale(reference_daily_returns: pd.Series, *args: object, **kwargs: object) -> pd.Series:
         idx = reference_daily_returns.index
         mid = idx[0] + (idx[-1] - idx[0]) / 2
         return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
