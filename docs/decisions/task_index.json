@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_STRATEGY_DELIVERY_PARITY",
+      "date": "2026-09-13",
+      "adr_id": "ADR_20260913_MHS_STRATEGY_DELIVERY_PARITY",
+      "domain": "quant",
+      "title": "MHS 배포 파라미터/부트스트랩 v2 정합 정책",
+      "why": "top-level 필드·deployed_flags·params_snapshot 3중 표현이 독립적으로 drift 가능해 replay-live sizing/target parity가 깨질 위험이 있었다",
+      "resolution": "TargetWeightPolicy/SizingPolicy/SignalWindowPolicy/MhsDeploymentPolicy 단일 typed 변환 seam(build_deployment_policy)과 SHA-256로 바인딩된 parquet bootstrap, compute_exposure_scale 단일 순수함수로 replay/live sizing을 통합했다",
+      "impact": "LiveStrategyParams schema_version=2로 fail-closed 전환(v1 거부), live_signal_step/CLI가 policy에서만 읽고 fold builder에 panel_warmup_hours/committee_oos_start를 명시 전달"
+    },
+    {
       "task_id": "mhs_kelly_z0_policy",
       "date": "2026-09-13",
       "adr_id": "ADR_20260913_mhs_kelly_z0_policy",
@@ -989,16 +999,6 @@
       "why": "cProfile 실측: worker CPU의 ~92%가 window 생성기(mark parquet 창×심볼 재읽기 + pass당 동일 window 재생성)이고 full-period minute preload(268심볼)가 4.5GB 상주, fold-safe discovery는 부모에서 순차 실행",
       "resolution": "C1 mark 프레임 프로세스당 1회 캐시(_get_symbol_mark_frame/_cached_mark_panel), C2 window 1회 materialize 후 pass 간 _rescaled_windows 재사용, C3 window 단위 parquet 필터 로드(_load_window_minute_frames)로 preload 제거, C4 fold-safe discovery fork 병렬화",
       "impact": "Full 5y 동일데이터 A/B: 684.9s→309.1s(−55%), peak RSS 5.40GB→3.15GB(−42%), 출력 bit-identical(primary_autocorr_sharpe·realized_execution_roster_size·benchmark checksum 불변); 6mo worker 31.7→7.1s, fold 61.5→17.5s"
-    },
-    {
-      "task_id": "MHS_CARRY_AND_FAST_FAIR_EVALUATION",
-      "date": "2026-08-13",
-      "adr_id": "ADR_20260813_MHS_CARRY_AND_FAST_FAIR_EVALUATION",
-      "domain": "research",
-      "title": "MHS 캐리·fast_reversal 공정 재심사",
-      "why": "22차 discovery 게이트가 funding_carry뿐 아니라 momentum도 탈락시켜 게이트 검정력 자체가 의심됐고, fast_reversal은 momentum이 받은 호라이즌 앙상블 구제책을 한 번도 받아본 적이 없었다",
-      "resolution": "yearly_net_t_diagnostic(5년 전체 보고용)/year_restricted_correlation(최악의 해 상관)/fast_book_mode 플래그(horizon_ensemble opt-in)/funding_carry top-level discovery 배선을 추가해 3개 후보를 동일 계측기·동일 창에서 공정 비교",
-      "impact": "fast_reversal은 구제책 적용 후에도 5년 전체 admission 가능한 해 없음, funding_carry는 5년 전 구간 일관된 손실로 edge 부재 결론 강화, admission_t/자본배분 무변경"
     }
   ]
 }
