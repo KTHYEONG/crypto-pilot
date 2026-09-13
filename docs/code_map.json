@@ -22,6 +22,7 @@
       "tests/unit/live/test_deployed_weights.py",
       "tests/unit/live/test_ledger.py",
       "tests/unit/live/test_rest.py",
+      "tests/unit/live/test_runner_shadow_cycle.py",
       "tests/unit/live/test_scheduler.py",
       "tests/unit/live/test_signal.py",
       "tests/unit/live/test_tax_ledger.py",
@@ -38,6 +39,8 @@
       "tests/unit/mhs/test_evaluation_ram_guard.py",
       "tests/unit/mhs/test_evaluation_report_persist.py",
       "tests/unit/mhs/test_execution.py",
+      "tests/unit/mhs/test_live_runtime.py",
+      "tests/unit/mhs/test_live_signal_step.py",
       "tests/unit/mhs/test_live_strategy.py",
       "tests/unit/mhs/test_mhs_perf_optimization.py",
       "tests/unit/mhs/test_parallel.py",
@@ -60,7 +63,8 @@
   "src/common/paths.py": {
     "testing": [
       "tests/unit/cli/commands/test_data.py",
-      "tests/unit/common/test_config.py"
+      "tests/unit/common/test_config.py",
+      "tests/unit/live/test_runner_shadow_cycle.py"
     ]
   },
   "src/common/settings.py": {
