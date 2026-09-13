@@ -37,28 +37,28 @@
 
 ## 3. Key Features
 
-1. **3분봉 고해상도 체결 원장 (`src/mhs/execution/ledger.py`)**
+1. **3분봉 고해상도 체결 원장**
    * *구현*: 바이낸스 네이티브 3분봉(`3m`) 단위로 High/Low 관통 검증, MTM 평가, 8시간 펀딩비 실정산, 3-tier 수수료(2.64~6.07 bps) 차감.
    * *효과*: 가상 비중 곱셈 방식의 수익률 과대 추정을 방지하고 체결 정밀도 +27% 향상.
-2. **Point-In-Time 유니버스 & Schmitt-Trigger (`src/quant/universe/pit_universe.py`)**
+2. **Point-In-Time 유니버스 & Schmitt-Trigger**
    * *구현*: 720h 거래대금 중앙값 50% 선별 $\rightarrow$ 상위 60위 진입 / 120위 탈락 히스테리시스 적용.
    * *효과*: 룩어헤드 바이어스를 원천 차단하고 불필요한 포지션 진동 매매(Churning) 억제.
-3. **$k=5$ 위원회 + 30% 펀딩 캐리 슬리브 (`src/mhs/committee.py`)**
+3. **$k=5$ 위원회 + 30% 펀딩 캐리 슬리브**
    * *구현*: 테이커 불균형(720h/168h), 모멘텀(336h), 잔차 모멘텀(336h), 왜도(168h)의 5개 직교 신호 + 펀딩 캐리 30% 결합.
    * *효과*: 단일 모멘텀 의존도를 낮추고 저변동성·횡보장에서도 안정적 캐리 수익 확보.
-4. **Causal Lag-1 자기상관 적응형 트랜치 평활 (`src/mhs/committee.py`)**
+4. **Causal Lag-1 자기상관 적응형 트랜치 평활**
    * *구현*: 위원회 북의 Causal Trailing Lag-1 자기상관을 측정하여 음수(휩소) 시 3행 평활, 양수(추세) 시 Raw 신호 집행.
    * *효과*: 평활에 따른 추세 진입 지연과 미평활에 따른 횡보장 슬리피지 손실 간의 트레이드오프 해소.
-5. **2중 레짐 방어 & 드로다운 예산 켈리 사이징 (`src/mhs/regime.py`, `src/mhs/scaling.py`)**
+5. **2중 레짐 방어 & 드로다운 예산 켈리 사이징**
    * *구현*: 720바 OLS 시장 베타 직교화 + BTC 급락 크래시 틸트 + 전략 21일 실현 변동성 타겟팅 기반 켈리 사이징.
    * *효과*: 시장 충격 국면에서 자본을 보존하여 자본 불변식 위반(`CAPITAL_INVARIANT_BREACH`) 방지.
-6. **168시간 엠바고 16-Fold Walk-Forward & DSR (`src/mhs/evidence.py`)**
+6. **168시간 엠바고 16-Fold Walk-Forward & DSR**
    * *구현*: 분기별 16개 OOS 윈도우 사이에 168시간(1주) 엠바고를 강제하고 96회 탐색 경로를 반영한 Deflated Sharpe Ratio 산출.
    * *효과*: 시계열 잔여 자기상관 정보 누출을 방지하고 다중 가설 검정 과적합을 통계적으로 입증.
-7. **디스크 Tail 증분 갱신 & 원자적 프루닝 (`src/live/data_refresh.py`, `src/market_data/retention.py`)**
+7. **디스크 Tail 증분 갱신 & 원자적 프루닝**
    * *구현*: 디스크 tail 기준 미수집 구간만 증분 패치하고, 220일 초과 시세는 원자적 임시 파일 대체(`tmp.replace`)로 안전 절단.
    * *효과*: 갱신 시간 29분 $\rightarrow$ 20초(98.8% 단축), 디스크 15GB $\rightarrow$ 150MB로 경량화하여 1.2GB RAM 환경 무인 운용.
-8. **SHA-256 불변 파라미터 봉인 & 제로 트러스트 배포 (`src/mhs/live_strategy.py`, `.github/workflows/deploy.yml`)**
+8. **SHA-256 불변 파라미터 봉인 & 제로 트러스트 배포**
    * *구현*: 전략 파라미터 SHA-256 봉인 검증, Mozilla SOPS + Age 비대칭 암호화, 인바운드 포트 없는 Tailscale 사설망 배포.
    * *효과*: 연구 환경과 라이브 런타임 간의 설정 드리프트(Config Drift)를 차단하고 API 키 평문 노출 방지.
 
@@ -68,13 +68,13 @@
 
 ```mermaid
 flowchart TD
-    subgraph DataLayer ["1. Data Layer (src/market_data/)"]
+    subgraph DataLayer ["1. Data Tier (시장 시세 수집 & 캐시)"]
         DS["Binance REST / Vision S3 / WebSocket"] --> DI["Data Ingestion Service"]
         DI --> FS["Columnar Parquet Store (data/futures/)"]
         FS --> PR["Tail Sync & Retention Pruning (20s latency, 150MB disk)"]
     end
 
-    subgraph ResearchPipeline ["2. MHS Research Pipeline (src/mhs/pipeline/)"]
+    subgraph ResearchPipeline ["2. MHS Research Tier (연구 & 백테스트 파이프라인)"]
         PR --> S1["1. Load Panel & RAM Budget Guard"]
         S1 --> S2["2. PIT Universe (Top-60/120 Schmitt-Trigger)"]
         S2 --> S3["3. Multi-Horizon Books (Reversal & Momentum)"]
@@ -84,7 +84,7 @@ flowchart TD
         S6 --> S7["7. Report & Parameter Sealing (strategy_params.json.enc)"]
     end
 
-    subgraph LiveDaemon ["3. Live Daemon Runtime (src/live/)"]
+    subgraph LiveDaemon ["3. Live Daemon Tier (24/7 무인 자동매매)"]
         S7 -->|"Cryptographic Seal (SHA-256)"| LD["Live Scheduler (00:00 UTC)"]
         LD --> SS["In-Process Live Signal Step"]
         SS --> SC["Cycle Runner & Risk Gates"]
@@ -98,16 +98,16 @@ flowchart TD
 
 ## 5. End-to-End Flow
 
-| 단계 | 파이프라인 처리 내용 | 핵심 모듈 경로 |
+| 단계 | 파이프라인 처리 내용 | 무결성 제약 및 불변식 |
 | :---: | :--- | :--- |
-| **1. Data Ingestion** | 1시간봉 OHLCV, 8시간 펀딩비, 1시간 마크 가격 수집 및 RAM 85% 가드 검증 | `src/mhs/pipeline/stages/panel.py` |
-| **2. PIT Universe** | 결손 심볼 배제 $\rightarrow$ 720h 거래대금 중앙값 50% $\rightarrow$ 상위 60위 진입/120위 탈락 히스테리시스 | `src/mhs/pipeline/stages/selection.py` |
-| **3. Alpha Books** | 48h Fast Reversal 북(자본 0%) 및 72h~504h 19개 지평 Slow Momentum 앙상블 북 구축 | `src/mhs/pipeline/stages/book.py` |
-| **4. Committee Blend**| 테이커 불균형(720h/168h), 모멘텀, 잔차 모멘텀, 왜도 결합 + 펀딩 캐리(30%) + 적응형 평활 | `src/mhs/pipeline/stages/committee.py` |
-| **5. Risk & Sizing** | 20% 추적 오차 리밸런스 필터 + 720바 OLS 시장 베타 직교화 + BTC 크래시 틸트 + 켈리 사이징 | `src/mhs/regime.py`, `src/mhs/scaling.py` |
-| **6. 3m Execution** | 3분봉 타임스탬프 순회: MTM 평가 $\rightarrow$ 펀딩비 정산 $\rightarrow$ 즉시 테이커 체결 및 3-tier 수수료 차감 | `src/mhs/pipeline/stages/replay.py` |
-| **7. Validation** | 168시간 엠바고 16-Fold Walk-Forward CV, Deflated Sharpe Ratio(DSR), 9대 합성 스트레스 검정 | `src/mhs/pipeline/stages/fold.py` |
-| **8. Live Daemon** | 00:00 UTC 스케줄러 기동 $\rightarrow$ 봉인 대조 $\rightarrow$ 증분 시세 갱신 $\rightarrow$ 신호 산출 $\rightarrow$ 주문 집행 및 정산 | `src/live/scheduler.py` |
+| **1. Data Ingestion** | 1시간봉 OHLCV, 8시간 펀딩비, 1시간 마크 가격 수집 | RAM 85% 한도 가드, 소스 갭 자동 격리 |
+| **2. PIT Universe** | 거래대금 중앙값 50% 필터 $\to$ Top-60/120 히스테리시스 | Look-Ahead 편향 0% 차단, 유니버스 경계선 진동 방지 |
+| **3. Alpha Books** | 48h Reversal 북 및 19개 Slow Momentum 앙상블 북 구축 | 단일 모멘텀 쏠림 완화 및 지평 다양성 확보 |
+| **4. Committee Blend**| $k=5$ 직교 신호 + 30% 펀딩 캐리 결합 및 적응형 평활 | Causal Lag-1 자기상관 기반 3행 평활 동적 선택 |
+| **5. Risk & Sizing** | 20% 추적오차 필터 + 720바 OLS 베타 직교화 + 켈리 사이징 | BTC 크래시 틸트 및 21일 실현 변동성 타겟팅 |
+| **6. 3m Execution** | 3분봉 타임스탬프 순회: MTM 평가 $\to$ 펀딩비 $\to$ 테이커 체결 | 3-tier 수수료 실차감, 가상 비중 곱셈 왜곡 배제 |
+| **7. Validation** | 168시간 엠바고 16-Fold Walk-Forward CV 및 DSR 산출 | 시계열 잔여 자기상관 차단, 96회 탐색 경로 보정 |
+| **8. Live Daemon** | 00:00 UTC 스케줄러 $\to$ 봉인 대조 $\to$ 증분 갱신 $\to$ 체결 | SHA-256 파라미터 봉인 일치 시에만 발주 허용 |
 
 ---
 
@@ -133,7 +133,17 @@ crypto-pilot/
 
 ---
 
-## 7. Technical Decisions
+## 7. Technical Decisions (ADR Summary)
+
+| ADR | 주제 | 채택된 솔루션 | 기각된 대안 | 엔지니어링 근거 및 트레이드오프 |
+| :--- | :--- | :--- | :--- | :--- |
+| **ADR-01** | **체결 회계 모델** | **3분봉 고해상도 모의 체결 원장 (`SimulatedInventoryLedger`)** | 1시간봉 종가 비중 곱셈(Target Weight) | 8h 펀딩비 및 3-tier 수수료 실정산 반영, 체결 정밀도 +27% 향상 (수익률 착시 제거) |
+| **ADR-02** | **시계열 검증 체계** | **168시간 엠바고 16-Fold Walk-Forward & DSR** | 단순 K-Fold, 무엠바고 워크포워드 | 최대 168h 신호의 시계열 자기상관 누출 방지 및 96회 탐색 다중 검정 과적합 보정 |
+| **ADR-03** | **유니버스 및 턴오버** | **Schmitt-Trigger 히스테리시스 (상위 60위 진입/120위 방출)** | 고정 Top-N 순위 컷오프 | 유니버스 경계선 부근의 잦은 진입/퇴출 진동을 억제하여 불필요한 턴오버 30% 절감 |
+| **ADR-04** | **신호 결합 & 평활** | **Causal Lag-1 적응형 트랜치 평활 ($k=5$ 위원회 + 30% 캐리)** | 고정 롤링 평활, 단일 모멘텀 의존 | 휩소 국면에서만 3행 평활을 발동하여 추세 진입 지연과 횡보장 슬리피지 간 트레이드오프 해소 |
+| **ADR-05** | **저사양 클라우드 운용** | **Tail 증분 동기화(20초) & 원자적 프루닝(150MB 디스크)** | 650개 전종목 전수 수집, 수동 디스크 청소 | 갱신 시간 29분 $\to$ 20초(98.8% 단축), 디스크 15GB $\to$ 150MB 경량화로 1.2GB RAM 무인 운용 |
+
+---
 
 ### Decision 1: 3분봉 단위 체결 리플레이 및 원장(Ledger) 중심 회계
 * **Decision**: 벡터화된 가상 가중치 곱셈 대신, 바이낸스 3분봉(`3m`) 단위로 현금·계약·수수료·펀딩비를 기록하는 `SimulatedInventoryLedger` 채택.

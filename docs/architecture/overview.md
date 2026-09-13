@@ -41,15 +41,15 @@
 ```mermaid
 flowchart TD
     subgraph DataTier ["데이터 수집 및 스토리지 계층"]
-        DS1["Binance REST API<br/>(FAPI / Spot v3 / Margin SAPI)"] --> DI["데이터 수집 엔진<br/>(src/market_data/)"]
-        DS2["Binance Vision S3 Archive<br/>(1h & 3m OHLCV, Metrics, Marks)"] --> DI
+        DS1["Binance REST API<br/>(FAPI / Spot v3 / Margin SAPI)"] --> DI["데이터 수집 서비스<br/>(Tail 증분 20초 패치)"]
+        DS2["Binance Vision S3 Archive<br/>(1h & 3m OHLCV, Marks)"] --> DI
         DS3["Binance WebSocket Stream<br/>(실시간 청산 이벤트)"] --> DI
         DI --> FS["컬럼형 Parquet 저장소 (zstd 압축)<br/>data/futures/{ohlcv, marks, funding}"]
-        FS --> PR["원자적 프루닝 및 Tail 증분 갱신<br/>(src/market_data/retention.py)"]
+        FS --> PR["원자적 프루닝 및 보존 관리<br/>(150MB 디스크 슬라이딩 유지)"]
     end
 
     subgraph ResearchTier ["MHS 연구 및 백테스트 파이프라인"]
-        FS --> S1["1단계: 패널 로드 & RAM 예산 가드<br/>(load_panel)"]
+        PR --> S1["1단계: 패널 로드 & RAM 예산 가드<br/>(load_panel)"]
         S1 --> S2["2단계: PIT 유니버스 (Top-60 슈미트 트리거)<br/>(select_horizons)"]
         S2 --> S3["3단계: 멀티 호라이즌 북 (반등 및 모멘텀)<br/>(build_books)"]
         S3 --> S4["4단계: 위원회 결합 & 펀딩 캐리 슬리브<br/>(build_committee)"]
@@ -60,10 +60,10 @@ flowchart TD
 
     subgraph LiveTier ["24/7 무인 라이브 데몬 런타임"]
         S7 -->|"SHA-256 암호학적 봉인"| ST["strategy_params.json.enc<br/>strategy_bootstrap.parquet.enc"]
-        ST --> LD["라이브 데몬 스케줄러 (매시간 00:00 UTC)<br/>(src/live/scheduler.py)"]
-        LD --> SS["인프로세스 실시간 신호 산출<br/>(src/mhs/live_signal_step.py)"]
-        SS --> SC["섀도우 / 페이퍼 트레이딩 러너<br/>(src/live/runner.py)"]
-        SC --> EX["주문 집행 및 잔고 대조 엔진<br/>(src/live/executor.py)"]
+        ST --> LD["라이브 데몬 스케줄러 (매시간 00:00 UTC)"]
+        LD --> SS["인프로세스 실시간 신호 산출<br/>(위원회 블렌드 & 적응형 평활)"]
+        SS --> SC["사이클 러너 & 리스크 게이트<br/>(추적오차 필터 & 베타 직교화)"]
+        SC --> EX["주문 집행 및 잔고 대조 엔진<br/>(섀도우/페이퍼/실거래 라우팅)"]
         EX --> AL["다채널 비상 경보<br/>(Gmail SMTP & Webhook POST)"]
     end
 ```
@@ -72,15 +72,15 @@ flowchart TD
 
 ## 4. 핵심 서브시스템 (Core Subsystems)
 
-| 서브시스템 | 주요 책임 | 핵심 파일 경로 |
+| 서브시스템 | 주요 책임 | 핵심 불변식 및 안전장치 |
 | :--- | :--- | :--- |
-| **Market Data** | 거래소 시세 수집, 디스크 tail 증분 갱신, 무손실 원자적 프루닝, 데이터 갭 검출 | `src/market_data/services/`, `src/market_data/retention.py` |
-| **Quant Primitives** | PIT 유니버스 선정, 횡단면 랭킹, 변동성 타겟팅, 블록 부트스트랩 계산 | `src/quant/universe/`, `src/quant/technical_experts/` |
-| **MHS Pipeline** | 7단계 연구 파이프라인 오케스트레이션, 신호 결합, 북 블렌딩, 리스크 포락선 관리 | `src/mhs/pipeline/orchestrator.py`, `src/mhs/pipeline/stages/` |
-| **Execution Engine** | 3분봉 바 단위 프록시 체결, 재고 및 현금 원장 회계, 펀딩비 실정산, MTM 평가 | `src/mhs/execution/ledger.py`, `src/mhs/execution/strategy_replay.py` |
-| **Validation Engine** | 16-Fold Purged Walk-Forward CV(168h 엠바고), DSR 다중 검정 보정, 9대 스트레스 시나리오 | `src/mhs/evidence.py`, `src/mhs/pipeline/stages/fold.py` |
-| **Live Runtime** | 24/7 무인 데몬 구동, 매시간 신호 계산, 상태 영속화, 섀도우/페이퍼/실거래 라우팅 | `src/live/scheduler.py`, `src/mhs/live_signal_step.py` |
-| **CLI & Ops** | 통합 CLI 진입점(`data`, `research`, `live`), 사전 점검(preflight), 세무 장부 요약 | `src/cli/main.py`, `src/cli/commands/` |
+| **Market Data** | 시세 수집, 디스크 tail 증분 갱신, 무손실 원자적 프루닝 | RAM 85% 한도 가드, 220일 초과 시세 임시파일 원자적 치환(`tmp.replace`) |
+| **Quant Primitives** | PIT 유니버스 선정, 횡단면 랭킹, 변동성 타겟팅, 부트스트랩 | 상위 60위 진입/120위 방출 히스테리시스, 720h 과거 거래대금 Causal 필터 |
+| **MHS Pipeline** | 7단계 연구 파이프라인 오케스트레이션, 직교 알파 결합 | $k=5$ 위원회 + 30% 펀딩 캐리, Lag-1 자기상관 기반 적응형 3행 평활 |
+| **Execution Engine** | 3분봉 단위 프록시 체결, 재고/현금 원장 회계, 펀딩비 실정산 | 3-tier 수수료(2.64~6.07 bps) 실차감, 8시간 펀딩비 직전 보유량 정산 |
+| **Validation Engine** | 16-Fold Purged Walk-Forward CV, DSR 과적합 보정 | 168시간(1주) 엠바고 강제, 96회 탐색 경로 반영 다중 검정 통계 검정 |
+| **Live Runtime** | 24/7 무인 데몬 구동, 매시간 신호 계산, 상태 영속화 | SHA-256 파라미터 봉인 검증, 세무 장부(`live_tax_ledger`) 무인 기록 |
+| **CLI & Ops** | 통합 CLI 진입점(`data`, `research`, `live`), 사전 점검 | 제로 트러스트: Tailscale 사설망 배포, SOPS 비대칭 키 복호화 |
 
 ---
 
