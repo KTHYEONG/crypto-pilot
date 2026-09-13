@@ -12,9 +12,11 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
@@ -24,6 +26,7 @@ from src.live.planner import OrderIntent
 _HWM_KEY = "equity_high_water_mark"
 _POSITIONS_KEY = "positions"
 _CASH_KEY = "cash_usdt"
+_FUNDING_THROUGH_KEY = "funding_accrued_through"
 
 
 def default_ledger_path() -> Path:
@@ -37,6 +40,7 @@ class LedgerState:
     positions: dict[str, Decimal] = field(default_factory=dict)
     equity_high_water_mark: Decimal = Decimal(0)
     cash_usdt: Decimal | None = None
+    funding_accrued_through: pd.Timestamp | None = None
 
 
 def load_ledger(path: Path) -> LedgerState:
@@ -54,28 +58,43 @@ def load_ledger(path: Path) -> LedgerState:
         positions_raw = raw
         hwm = Decimal(0)
         cash_usdt: Decimal | None = None
+        funding_accrued_through: pd.Timestamp | None = None
     else:
         positions_raw = raw[_POSITIONS_KEY]
         hwm_raw = raw.get(_HWM_KEY, "0")
         try:
             hwm = Decimal(str(hwm_raw))
-        except Exception as exc:  # noqa: BLE001
+        except (InvalidOperation, ValueError, TypeError, AttributeError) as exc:
             raise DataIntegrityError(f"ledger hwm is not numeric: {path}") from exc
         if _CASH_KEY in raw:
             cash_raw = raw[_CASH_KEY]
             try:
                 cash_usdt = Decimal(str(cash_raw))
-            except Exception as exc:  # noqa: BLE001
+            except (InvalidOperation, ValueError, TypeError, AttributeError) as exc:
                 raise DataIntegrityError(f"ledger cash_usdt is not numeric: {path}") from exc
         else:
             cash_usdt = None
+        if _FUNDING_THROUGH_KEY in raw and raw[_FUNDING_THROUGH_KEY] is not None:
+            try:
+                parsed = pd.Timestamp(str(raw[_FUNDING_THROUGH_KEY]))
+            except (ValueError, TypeError) as exc:
+                raise DataIntegrityError(f"ledger funding_accrued_through is not a timestamp: {path}") from exc
+            parsed = parsed.tz_localize("UTC") if parsed.tzinfo is None else parsed.tz_convert("UTC")
+            funding_accrued_through = parsed
+        else:
+            funding_accrued_through = None
     if not isinstance(positions_raw, dict):
         raise DataIntegrityError(f"ledger positions must be an object: {path}")
     try:
         positions = {str(symbol): Decimal(str(qty)) for symbol, qty in positions_raw.items()}
-    except Exception as exc:  # noqa: BLE001
+    except (InvalidOperation, ValueError, TypeError, AttributeError) as exc:
         raise DataIntegrityError(f"ledger position quantity is not numeric: {path}") from exc
-    return LedgerState(positions=positions, equity_high_water_mark=hwm, cash_usdt=cash_usdt)
+    return LedgerState(
+        positions=positions,
+        equity_high_water_mark=hwm,
+        cash_usdt=cash_usdt,
+        funding_accrued_through=funding_accrued_through,
+    )
 
 
 def save_ledger(path: Path, state: LedgerState) -> None:
@@ -87,6 +106,10 @@ def save_ledger(path: Path, state: LedgerState) -> None:
     }
     if state.cash_usdt is not None:
         payload[_CASH_KEY] = str(state.cash_usdt)
+    if state.funding_accrued_through is not None:
+        ts = pd.Timestamp(state.funding_accrued_through)
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+        payload[_FUNDING_THROUGH_KEY] = ts.isoformat()
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     os.replace(tmp_path, path)
@@ -150,3 +173,43 @@ def apply_orphan_settlements(
         signed = s.executed_qty if s.side == "BUY" else -s.executed_qty
         updated[s.symbol] = updated.get(s.symbol, Decimal(0)) + signed
     return updated
+
+
+def _require_tz_aware(value: pd.Timestamp, name: str) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
+        raise ValueError(f"{name} must be tz-aware")
+    return ts
+
+
+def accrue_paper_funding(
+    positions: Mapping[str, Decimal],
+    funding_by_symbol: Mapping[str, pd.Series],
+    marks: Mapping[str, Decimal],
+    start_exclusive: pd.Timestamp,
+    end_inclusive: pd.Timestamp,
+) -> Decimal:
+    """페이퍼 펀딩비 현금 증분을 계산한다. 반환값은 cash delta(지급은 음수).
+
+    start_exclusive < t <= end_inclusive 구간에 속한 settlement마다
+    -rate * qty * mark 를 합산한다. 0이 아닌 모든 포지션은 펀딩 시리즈와
+    mark를 반드시 가져야 하며, 없으면 fail-closed 한다.
+    """
+    start = _require_tz_aware(start_exclusive, "start_exclusive")
+    end = _require_tz_aware(end_inclusive, "end_inclusive")
+    if end < start:
+        raise ValueError("end_inclusive must be >= start_exclusive: end precedes start")
+    total = Decimal(0)
+    for symbol, qty in positions.items():
+        if qty == 0:
+            continue
+        if symbol not in funding_by_symbol:
+            raise DataIntegrityError(f"paper funding series missing for {symbol}")
+        if symbol not in marks:
+            raise DataIntegrityError(f"paper funding mark missing for {symbol}")
+        series = funding_by_symbol[symbol]
+        mark = marks[symbol]
+        window = series[(series.index > start) & (series.index <= end)]
+        for rate in window:
+            total += -(Decimal(str(rate)) * qty * mark)
+    return total

@@ -933,3 +933,64 @@ def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
     incomplete = ev._incomplete_fold_report(_FOLD, 0, ())
     assert incomplete.funding_carry_lookback_hours is None
     assert incomplete.funding_carry_source == "frozen_default"
+
+
+def test_fold_builder_regime_hourly_min_history_and_deadband_toggle(mhs_market, monkeypatch) -> None:
+    import dataclasses
+    import pandas as pd
+    import pytest
+    import src.mhs.evaluation as ev
+    import src.mhs.evaluation.fold_weights as fold_weights_mod
+    import src.mhs.scaling as scaling
+    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.params import PANEL_MIN_HISTORY_BARS
+    from src.quant.universe.pit_universe import symbol_partition
+    from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
+
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8,
+    )
+    captured: dict[str, object] = {"deadband_calls": 0}
+    real_scale = scaling._regime_cash_scale
+    real_load = fold_weights_mod.load_base_panel
+    real_deadband = scaling._apply_rebalance_deadband
+
+    def scale_spy(vol_mean, *args, **kwargs):
+        captured["vol_mean"] = vol_mean.copy()
+        return real_scale(vol_mean, *args, **kwargs)
+
+    def load_spy(*args, **kwargs):
+        captured["min_bars"] = kwargs["min_bars"]
+        return real_load(*args, **kwargs)
+
+    def deadband_spy(*args, **kwargs):
+        captured["deadband_calls"] = int(captured["deadband_calls"]) + 1
+        return real_deadband(*args, **kwargs)
+
+    monkeypatch.setattr(scaling, "_regime_cash_scale", scale_spy)
+    monkeypatch.setattr(fold_weights_mod, "load_base_panel", load_spy)
+    monkeypatch.setattr(scaling, "_apply_rebalance_deadband", deadband_spy)
+
+    target, _signal, _roster, grid_1h = ev._build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol, apply_rebalance_deadband=False,
+    )
+    assert not target.empty
+    assert captured["min_bars"] == PANEL_MIN_HISTORY_BARS
+    spacing = captured["vol_mean"].index.to_series().diff().dropna()
+    assert (spacing == pd.Timedelta(hours=1)).all()
+    assert captured["deadband_calls"] == 0
+
+    with pytest.raises(ValueError, match="apply_rebalance_deadband"):
+        ev._build_fold_target_weights(
+            str(root), _FOLD, dataclasses.replace(request, rebalance_filter="portfolio_trigger"),
+            funding_by_symbol, apply_rebalance_deadband=False,
+        )

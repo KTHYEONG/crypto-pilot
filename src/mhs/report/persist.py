@@ -99,10 +99,10 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
         raise DataIntegrityError(f"emit_deployment: unregistered committee_member_set {member_set_key!r}")
     admitted = tuple(COMMITTEE_MEMBER_SETS[member_set_key])
     member_weights = _resolved_deployment_member_weights(report, request, admitted)
-    primary = getattr(report.blend, "primary", None)
-    if primary is None or getattr(primary, "ledger", None) is None:
-        raise DataIntegrityError("emit_deployment requires primary ledger")
-    equity = primary.ledger.equity
+    reference = getattr(report.blend, "pre_vol_target_reference", None)
+    if reference is None or getattr(reference, "ledger", None) is None:
+        raise DataIntegrityError("emit_deployment requires pre_vol_target_reference ledger")
+    equity = reference.ledger.equity
     ref_returns = equity.resample("1D").last().pct_change().dropna()
     tail = ref_returns.tail(SIGNAL_RETURN_TAIL_DAYS)
     if not tail.empty and tail.index.tz is None:
@@ -110,15 +110,16 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     tail = pd.Series(tail.to_numpy(dtype="float64"), index=tail.index, dtype="float64", name="reference_daily_return")
     from src.mhs.params import PNL_TARGET_ANNUAL_VOL
     from src.mhs.research_go import _resolved_growth_envelope
-    from src.mhs.scaling import _constant_risk_target_vol, _growth_budget_target_vol, resolved_exposure_cap
+    import src.mhs.scaling as _scaling_mod
+    from src.mhs.scaling import resolved_exposure_cap
 
     envelope = _resolved_growth_envelope(request)
 
     mode = str(request.pnl_vol_target_mode)
     if mode == "constant_risk":
-        resolved_vol = float(_constant_risk_target_vol(ref_returns, envelope, drawdown_brake=request.exposure_drawdown_brake))
+        resolved_vol = float(_scaling_mod._constant_risk_target_vol(ref_returns, envelope, drawdown_brake=request.exposure_drawdown_brake))
     elif mode == "growth_budget" or (mode == "exante_target" and envelope.name != "conservative"):
-        resolved_vol = float(_growth_budget_target_vol(ref_returns, envelope=envelope))
+        resolved_vol = float(_scaling_mod._growth_budget_target_vol(ref_returns, envelope=envelope))
     else:
         resolved_vol = float(PNL_TARGET_ANNUAL_VOL)
     exp_cap = float(resolved_exposure_cap(request))

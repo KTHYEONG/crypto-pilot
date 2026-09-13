@@ -30,6 +30,9 @@ _BPS_DENOMINATOR = Decimal(10_000)
 #: 부모 intent의 최대 슬라이스 노셔널(등록 상수).
 MAX_SLICE_NOTIONAL = Decimal("500")
 
+#: 백테스트 3m 리플레이 바 하나에 대응하는 패시브 집행 상한(초).
+EXECUTION_BAR_SECONDS: float = 180.0
+
 
 @dataclass(frozen=True, slots=True)
 class FeeSchedule:
@@ -87,6 +90,24 @@ class PassiveExecutionPolicy:
                 f"max_cross_bps ({self.max_cross_bps}) must strictly exceed "
                 f"chase_band_bps ({self.chase_band_bps})"
             )
+
+
+def backtest_parity_execution_policy(
+    fee_schedule: FeeSchedule, taker_slippage_bps: float
+) -> PassiveExecutionPolicy:
+    """백테스트 즉시-테이커 타이밍에 수렴하는 라이브 집행 정책.
+
+    패시브 단계는 3m 리플레이 바 하나(EXECUTION_BAR_SECONDS)로, 전체 윈도우는
+    두 바로 묶으며, IOC 백스톱 캡은 taker 수수료 + 테이커 슬리피지로 둔다.
+    나머지 기본값은 그대로 둔다.
+    """
+    return PassiveExecutionPolicy(
+        passive_deadline_s=EXECUTION_BAR_SECONDS,
+        window_deadline_s=2 * EXECUTION_BAR_SECONDS,
+        taker_cap_bps=fee_schedule.taker_fee_bps + taker_slippage_bps,
+        fee_schedule=fee_schedule,
+        taker_slippage_bps=taker_slippage_bps,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +399,9 @@ class _IntentRuntime:
     paper_active: bool = False
     active_post_qty: Decimal = _ZERO
     fills: list[tuple[Decimal, Decimal, float, str, str]] = field(default_factory=list)
+    # 패시브 단계 진입 시각(phase-level 타임아웃 기준). 첫 _poll_or_post 호출에 기록되며
+    # 재게시 때마다 갱신되는 posted_at 과 달리 리포스트로 리셋되지 않는다.
+    passive_started_at: float = 0.0
 
     @property
     def done(self) -> bool:
@@ -658,6 +682,8 @@ def _poll_or_post(
     rate_limits: RateLimits | None = None,
 ) -> None:
     assert rt.filters is not None  # filters 부재 intent 는 생성 시 즉시 RESIDUAL 처리된다
+    if rt.passive_started_at == 0.0:
+        rt.passive_started_at = now
     is_buy = rt.intent.side == "BUY"
     bid, ask = touch
     own_touch = bid if is_buy else ask
@@ -691,7 +717,7 @@ def _poll_or_post(
             rt.finalized_at = now
             return
         if rt.phase == "passive":
-            timed_out = now - rt.posted_at >= policy.passive_deadline_s
+            timed_out = now - rt.passive_started_at >= policy.passive_deadline_s
             exhausted = rt.chases >= policy.max_chases
             moved = abs(own_touch - rt.active_price) >= rt.filters.tick_size * policy.chase_ticks
             slice_done = rt.active_post_qty > _ZERO and rt.reported_executed >= rt.active_post_qty and (rt.intent.quantity - rt.filled_total) > _ZERO
@@ -716,6 +742,10 @@ def _poll_or_post(
         rt.terminal_status = "FILLED"
         rt.finalized_at = now
         return
+    if rt.phase == "passive" and now - rt.passive_started_at >= policy.passive_deadline_s:
+        # 휴지 주문 없이 밴드 밖에서 대기한 경우에도 phase-level 타임아웃으로
+        # 캡 적용 IOC 백스톱으로 상승시킨다(리포스트 리셋 없음).
+        rt.phase = "ioc"
     if rt.phase == "passive":
         price = _gtx_candidate(
             own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high

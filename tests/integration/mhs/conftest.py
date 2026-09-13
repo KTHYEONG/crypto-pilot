@@ -142,6 +142,7 @@ def calibrated_report(synthetic_market):
 
     real_book_weights = eval_books._book_weights
     real_regime = scaling._regime_cash_scale
+    real_helper = scaling.regime_cash_scale_1h
     real_deadband = scaling._apply_rebalance_deadband
 
     def _book_weights(log_close, eligible, spec, step_grid, ema_span=None):
@@ -157,6 +158,11 @@ def calibrated_report(synthetic_market):
         captured["regime_callers"].append(caller)
         return real_regime(*args, **kwargs)
 
+    def _helper(*args, **kwargs):
+        caller = inspect.currentframe().f_back.f_code.co_name
+        captured["regime_callers"].append(caller)
+        return real_helper(*args, **kwargs)
+
     def _deadband(*args, **kwargs):
         caller = inspect.currentframe().f_back.f_code.co_name
         captured["deadband_callers"].append(caller)
@@ -164,6 +170,7 @@ def calibrated_report(synthetic_market):
 
     eval_books._book_weights = _book_weights
     scaling._regime_cash_scale = _regime
+    scaling.regime_cash_scale_1h = _helper
     scaling._apply_rebalance_deadband = _deadband
     try:
         report = run_mhs_horizon_diagnostic(
@@ -175,6 +182,7 @@ def calibrated_report(synthetic_market):
     finally:
         eval_books._book_weights = real_book_weights
         scaling._regime_cash_scale = real_regime
+        scaling.regime_cash_scale_1h = real_helper
         scaling._apply_rebalance_deadband = real_deadband
     yield report, captured
     mgr.shutdown()

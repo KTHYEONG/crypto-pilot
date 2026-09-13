@@ -133,3 +133,21 @@ def test_live_settings_refresh_field_defaults_and_bounds(monkeypatch) -> None:
         LiveSettings(refresh_max_fail_fraction=1.5)
     with pytest.raises(ValidationError):
         LiveSettings(refresh_lookback_days=3)
+
+
+def test_live_settings_backtest_parity_defaults() -> None:
+    import pytest
+    from pydantic import ValidationError
+    from src.live.settings import LiveSettings
+    from src.market_data.retention import MARKET_DATA_MIN_RETENTION_DAYS
+    from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS
+
+    settings = LiveSettings()
+    assert SIGNAL_PANEL_WINDOW_DAYS == 400
+    assert settings.data_retention_days == MARKET_DATA_MIN_RETENTION_DAYS == 430
+    assert settings.daemon_catchup_buffer_minutes == 3.0
+    assert settings.max_daily_turnover_fraction == 2.0 * settings.max_gross_leverage
+    with pytest.raises(ValidationError):
+        LiveSettings(max_symbol_notional_fraction=0.05)
+    with pytest.raises(ValidationError):
+        LiveSettings(equity_drawdown_halt=-0.45)

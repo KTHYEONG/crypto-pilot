@@ -35,6 +35,7 @@ from src.mhs.horizons import horizon_log_return  # noqa: F401 - re-exported for 
 from src.mhs.panel import load_base_panel
 from src.mhs.params import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
+    PANEL_MIN_HISTORY_BARS,
 )
 from src.mhs.params import (
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
@@ -196,7 +197,7 @@ def _load_feature_panels(
     panels: dict[str, pd.DataFrame] = {}
     if available:
         loaded = load_base_panel(
-            root, "1h", available, start, end, partition="dev", min_bars=2000,
+            root, "1h", available, start, end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS,  # liquid_half_eligibility min_history_bars와 동일(720)
         )
         for column in available:
             panels[column] = loaded[column].reindex(index=grid_1h, columns=aligned_symbols)
