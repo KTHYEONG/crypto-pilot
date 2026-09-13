@@ -344,7 +344,7 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
                 pd.to_datetime(np.asarray(spec["index_ns"], dtype="int64"), unit="ns", utc=True)
             )
             data = {
-                c: np.asarray(table.column(c).to_pylist(), dtype="float64")
+                c: np.asarray(table.column(c).to_numpy(zero_copy_only=False), dtype="float64")
                 for c in spec["columns"]
             }
             frames[name] = pd.DataFrame(data, index=idx, columns=spec["columns"])
