@@ -33,9 +33,8 @@ def test_multi_feature_default_off_bit_identical(mhs_market, monkeypatch) -> Non
     # is None and every pre-existing field is bit-identical to the explicit-off
     # baseline -- the multi-feature axis is inert unless explicitly enabled.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
@@ -62,9 +61,8 @@ def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, mon
     # excluded by the coverage gate are listed under an explicit excluded key
     # with their failing year, never silently dropped.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -115,9 +113,8 @@ def test_multi_feature_diagnostic_telemetry_stages_recorded(mhs_market_long, mon
     # multi_feature_book=True the resource_measurements carry the diagnostic
     # feature panel load and the multi-feature diagnostic stage.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),

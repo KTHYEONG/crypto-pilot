@@ -11,6 +11,7 @@ from src.market_data.services import mhs_execution as mec
 from src.mhs import evaluation as ev
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.marks as marks
+import src.mhs.pipeline.stages.book as book_stage
 import src.mhs.statistics as statistics
 from src.mhs.evaluation import (
     MhsDiagnosticRequest,
@@ -54,9 +55,8 @@ def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypa
     # the same instrumented window. With discovery_gate=False the keys are
     # absent (discovery_qualification stays None), matching the opt-in convention.
     root, end = mhs_market_funding_vary
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -90,9 +90,8 @@ def test_mhs_full_history_yearly_net_t_and_worst_year_corr_exposed(mhs_market_fu
     # 2021-2025 (not just the 2021-2023 discovery window) and a finite
     # funding_carry_worst_year_corr; both stay None when discovery_gate=False.
     root, end = mhs_market_funding_vary
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -138,9 +137,8 @@ def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monke
     # DataIntegrityError, and the report is byte-identical to the
     # explicit-off run.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
@@ -167,8 +165,7 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
     # execution_coverage_gate, which is no longer what triggers this case.
     root, end = mhs_market
     books_called: list[str] = []
-    monkeypatch.setattr(
-        ev, "_run_books_concurrent", lambda *a, **k: books_called.append("books"),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: books_called.append("books"),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
@@ -213,9 +210,9 @@ def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_marke
             return mask
 
         monkeypatch.setattr(ev, "_pit_execution_mask", _fixed_mask)
-        monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-        monkeypatch.setattr(
-            ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+        monkeypatch.setattr(book_stage, "_pit_execution_mask", _fixed_mask)
+        monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+        monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
         )
         request = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
@@ -277,6 +274,7 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
             return mask
 
         monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
+        monkeypatch.setattr(book_stage, "_pit_execution_mask", _all_roster)
         window_calls = {"n": 0}
         original_windows = ev._iter_mhs_execution_windows
 
@@ -344,6 +342,7 @@ def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypat
             return mask
 
         monkeypatch.setattr(ev, "_pit_execution_mask", _all_roster)
+        monkeypatch.setattr(book_stage, "_pit_execution_mask", _all_roster)
         request = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,

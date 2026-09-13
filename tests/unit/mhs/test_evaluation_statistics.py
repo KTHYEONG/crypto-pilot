@@ -212,9 +212,8 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
     # [1.0, nominal_candidate_count]; with discovery_gate=False (the default)
     # the two keys are absent -- opt-in, no default-path cost.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
