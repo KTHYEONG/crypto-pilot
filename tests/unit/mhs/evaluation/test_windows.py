@@ -178,3 +178,126 @@ def test_window_ipc_errors(tmp_path) -> None:
     with pytest.raises(DataIntegrityError, match="window IPC spill directory unreadable"):
         list(_iter_spilled_windows("/nonexistent_dir_1234"))
 
+
+def test_window_ipc_numpy_restore_preserves_exact_bits(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+
+    minute_grid = pd.date_range("2026-01-01", periods=4, freq="3min", tz="UTC")
+    decision_grid = pd.date_range("2026-01-01", periods=2, freq="6h", tz="UTC")
+    market_values = np.array(
+        [
+            [0x3FF0000000000000, 0x8000000000000000],
+            [0x7FF8000000000001, 0x7FF0000000000000],
+            [0xFFF0000000000000, 0x400C000000000000],
+            [0x401D000000000000, 0xC022000000000000],
+        ],
+        dtype=np.uint64,
+    ).view(np.float64)
+    weights = np.array([[0.25, -0.25], [0.0, 0.5]], dtype=np.float64)
+    frames = {
+        "highs": pd.DataFrame(market_values, index=minute_grid, columns=["BTC", "ETH"]),
+        "lows": pd.DataFrame(market_values - 1.0, index=minute_grid, columns=["BTC", "ETH"]),
+        "closes": pd.DataFrame(market_values, index=minute_grid, columns=["BTC", "ETH"]),
+        "marks": pd.DataFrame(market_values, index=minute_grid, columns=["BTC", "ETH"]),
+        "bar_funding": pd.DataFrame(np.zeros((4, 2), dtype=np.float64), index=minute_grid, columns=["BTC", "ETH"]),
+        "target_weights": pd.DataFrame(weights, index=decision_grid, columns=["BTC", "ETH"]),
+    }
+    expected = ExecutionReplayWindow(
+        window_start=minute_grid[0], window_end=minute_grid[-1], columns=("BTC", "ETH", "SOL"),
+        symbols=("BTC", "ETH"), minute_grid=minute_grid, highs=frames["highs"], lows=frames["lows"],
+        closes=frames["closes"], marks=frames["marks"], bar_funding=frames["bar_funding"],
+        target_weights=frames["target_weights"], signal_available_at=decision_grid + pd.Timedelta(hours=1),
+    )
+    path = str(tmp_path / "window_00000.arrow")
+    _spill_window_to_ipc(expected, path)
+
+    actual = _load_window_from_ipc(path)
+
+    assert actual.window_start == expected.window_start
+    assert actual.window_end == expected.window_end
+    assert actual.columns == expected.columns
+    assert actual.symbols == expected.symbols
+    assert actual.minute_grid.equals(expected.minute_grid)
+    assert actual.signal_available_at.equals(expected.signal_available_at)
+    for name in ("highs", "lows", "closes", "marks", "bar_funding", "target_weights"):
+        actual_frame = getattr(actual, name)
+        expected_frame = getattr(expected, name)
+        assert actual_frame is not None
+        assert expected_frame is not None
+        assert actual_frame.index.equals(expected_frame.index)
+        assert list(actual_frame.columns) == list(expected_frame.columns)
+        assert all(dtype == np.dtype("float64") for dtype in actual_frame.dtypes)
+        np.testing.assert_array_equal(
+            actual_frame.to_numpy(dtype=np.float64).view(np.uint64),
+            expected_frame.to_numpy(dtype=np.float64).view(np.uint64),
+        )
+
+
+def test_window_ipc_loader_has_no_python_value_list_conversion() -> None:
+    import ast
+    import inspect
+
+    from src.mhs.evaluation.windows import _load_window_from_ipc
+
+    source = inspect.getsource(_load_window_from_ipc)
+    tree = ast.parse(source)
+    attrs = [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)]
+
+    assert "to_pylist" not in attrs
+    assert "to_numpy" in attrs
+    assert "zero_copy_only=False" in source
+
+
+def test_iter_spilled_windows_keeps_filename_order_and_exact_values(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_spilled_windows, _spill_window_to_ipc
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+
+    spill = tmp_path / "spill"
+    spill.mkdir()
+    expected_starts = []
+    expected_bits = []
+    for index, value in ((1, -0.0), (0, 11.5)):
+        grid = pd.date_range("2026-01-01", periods=2, freq="3min", tz="UTC") + pd.Timedelta(days=index)
+        decisions = pd.DatetimeIndex([grid[0]])
+        highs = pd.DataFrame({"BTC": np.array([value, value + 1.0], dtype=np.float64)}, index=grid)
+        window = ExecutionReplayWindow(
+            window_start=grid[0], window_end=grid[-1], columns=("BTC",), symbols=("BTC",),
+            minute_grid=grid, highs=highs, lows=highs.copy(), closes=highs.copy(), marks=None,
+            bar_funding=pd.DataFrame({"BTC": [0.0, 0.0]}, index=grid, dtype=np.float64),
+            target_weights=pd.DataFrame({"BTC": [1.0]}, index=decisions, dtype=np.float64),
+            signal_available_at=decisions + pd.Timedelta(hours=1),
+        )
+        _spill_window_to_ipc(window, str(spill / f"window_{index:05d}.arrow"))
+        if index == 0:
+            expected_starts.insert(0, grid[0])
+            expected_bits.insert(0, highs.to_numpy().view(np.uint64))
+        else:
+            expected_starts.append(grid[0])
+            expected_bits.append(highs.to_numpy().view(np.uint64))
+
+    restored = list(_iter_spilled_windows(str(spill)))
+
+    assert [window.window_start for window in restored] == expected_starts
+    for window, bits in zip(restored, expected_bits, strict=True):
+        assert window.marks is None
+        np.testing.assert_array_equal(window.highs.to_numpy().view(np.uint64), bits)
+
+
+def test_window_ipc_numpy_restore_corruption_is_fail_closed(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.windows import _load_window_from_ipc
+
+    corrupt = tmp_path / "window_00000.arrow"
+    corrupt.write_bytes(b"not-a-valid-window")
+
+    with pytest.raises(DataIntegrityError, match="window IPC load failed"):
+        _load_window_from_ipc(str(corrupt))
