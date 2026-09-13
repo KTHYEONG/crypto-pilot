@@ -279,3 +279,100 @@ def test_load_order_book_snapshots_roundtrip(tmp_path) -> None:
     # missing dir -> empty
     df3 = load_order_book_snapshots(tmp_path / "missing")
     assert len(df3) == 0
+
+def test_fetch_order_book_default_phase_is_post_trade() -> None:
+    from src.live.orderbook import fetch_order_book
+    import pandas as pd
+
+    class StubClient:
+        def depth(self, symbol, *, limit=20):
+            return {"lastUpdateId": 1, "bids": [["100.0", "1.0"]], "asks": [["101.0", "1.0"]]}
+
+    ts = pd.Timestamp("2026-09-01 00:00:00", tz="UTC")
+    snap = fetch_order_book(
+        StubClient(), "BTCUSDT", ts, mode="paper", capture_seq=0, limit=20, now=ts
+    )
+
+    assert snap.phase == "post_trade"
+
+def test_fetch_order_book_accepts_explicit_phase() -> None:
+    from src.live.orderbook import fetch_order_book
+    import pandas as pd
+
+    class StubClient:
+        def depth(self, symbol, *, limit=20):
+            return {"lastUpdateId": 1, "bids": [["100.0", "1.0"]], "asks": [["101.0", "1.0"]]}
+
+    ts = pd.Timestamp("2026-09-01 00:00:00", tz="UTC")
+    snap = fetch_order_book(
+        StubClient(), "BTCUSDT", ts, mode="paper", capture_seq=0, limit=20, now=ts, phase="pre_trade"
+    )
+
+    assert snap.phase == "pre_trade"
+
+def test_capture_order_books_single_tick_threads_phase() -> None:
+    from src.live.orderbook import capture_order_books
+    import pandas as pd
+
+    class StubClient:
+        def depth(self, symbol, *, limit=20):
+            return {"lastUpdateId": 1, "bids": [["100.0", "1.0"]], "asks": [["101.0", "1.0"]]}
+
+    ts = pd.Timestamp("2026-09-01 00:00:00", tz="UTC")
+    snaps = capture_order_books(
+        StubClient(), ["AAAUSDT", "BBBUSDT"], ts,
+        mode="paper", duration_s=0.0, interval_s=10.0, depth_limit=20, max_symbols=80,
+        clock=lambda: 0.0, sleep_fn=lambda _s: None, now_fn=lambda: ts,
+        phase="baseline_untraded",
+    )
+
+    assert len(snaps) == 2
+    assert all(s.phase == "baseline_untraded" for s in snaps)
+
+def test_append_order_book_snapshots_writes_phase_column(tmp_path) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    from src.live.orderbook import OrderBookSnapshot, append_order_book_snapshots
+
+    ts = pd.Timestamp("2026-09-01 12:00:00", tz="UTC")
+    dt = pd.Timestamp("2026-09-01 00:00:00", tz="UTC")
+    snap = OrderBookSnapshot(
+        symbol="AAAUSDT", captured_at=ts, decision_time=dt, mode="paper", capture_seq=0,
+        bids=((Decimal("100"), Decimal("1")),), asks=((Decimal("101"), Decimal("1")),),
+        last_update_id=1, phase="pre_trade",
+    )
+
+    append_order_book_snapshots([snap], tmp_path)
+
+    df = pd.read_parquet(tmp_path / "live_orderbook_20260901.parquet")
+    assert "phase" in df.columns
+    assert df.loc[0, "phase"] == "pre_trade"
+
+def test_append_order_book_snapshots_backfills_legacy_missing_phase_as_post_trade(tmp_path) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    from src.live.orderbook import OrderBookSnapshot, append_order_book_snapshots, _flatten_snapshot
+
+    ts = pd.Timestamp("2026-09-01 12:00:00", tz="UTC")
+    dt = pd.Timestamp("2026-09-01 00:00:00", tz="UTC")
+    legacy_snap = OrderBookSnapshot(
+        symbol="AAAUSDT", captured_at=ts, decision_time=dt, mode="paper", capture_seq=0,
+        bids=((Decimal("100"), Decimal("1")),), asks=((Decimal("101"), Decimal("1")),),
+        last_update_id=1,
+    )
+    legacy_row = _flatten_snapshot(legacy_snap)
+    legacy_row.pop("phase", None)
+    legacy_path = tmp_path / "live_orderbook_20260901.parquet"
+    pd.DataFrame([legacy_row]).to_parquet(legacy_path, index=False, compression="zstd")
+
+    new_snap = OrderBookSnapshot(
+        symbol="BBBUSDT", captured_at=ts, decision_time=dt, mode="paper", capture_seq=0,
+        bids=((Decimal("200"), Decimal("1")),), asks=((Decimal("201"), Decimal("1")),),
+        last_update_id=2, phase="baseline_untraded",
+    )
+    append_order_book_snapshots([new_snap], tmp_path)
+
+    df = pd.read_parquet(legacy_path)
+    assert df["phase"].isna().sum() == 0
+    assert df.loc[df["symbol"] == "AAAUSDT", "phase"].iloc[0] == "post_trade"
+    assert df.loc[df["symbol"] == "BBBUSDT", "phase"].iloc[0] == "baseline_untraded"
