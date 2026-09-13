@@ -31,6 +31,7 @@
       "tests/unit/market_data/services/test_spot_collection.py",
       "tests/unit/market_data/storage/test_loaders.py",
       "tests/unit/market_data/test_futures_mark_price.py",
+      "tests/unit/mhs/evaluation/test_windows.py",
       "tests/unit/mhs/report/test_persist.py",
       "tests/unit/mhs/test_calibration.py",
       "tests/unit/mhs/test_evaluation_appresearch.py",
@@ -268,7 +269,10 @@
     "testing": "tests/unit/mhs/evaluation/test_specs.py"
   },
   "src/mhs/evaluation/windows.py": {
-    "testing": "tests/unit/mhs/evaluation/test_windows.py"
+    "testing": [
+      "tests/unit/mhs/evaluation/test_windows.py",
+      "tests/benchmark/mhs/test_mhs_ipc_numpy_restore_benchmark.py"
+    ]
   },
   "src/mhs/evidence.py": {
     "testing": "tests/unit/mhs/test_evidence.py"
@@ -276,7 +280,10 @@
   "src/mhs/execution/accumulator.py": {},
   "src/mhs/execution/batch.py": {},
   "src/mhs/execution/contracts.py": {
-    "testing": "tests/unit/mhs/evaluation/test_windows.py"
+    "testing": [
+      "tests/benchmark/mhs/test_mhs_ipc_numpy_restore_benchmark.py",
+      "tests/unit/mhs/evaluation/test_windows.py"
+    ]
   },
   "src/mhs/execution/ledger.py": {},
   "src/mhs/execution/microstructure.py": {},
