@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_live_backtest_parity",
+      "date": "2026-09-13",
+      "adr_id": "ADR_20260913_mhs_live_backtest_parity",
+      "domain": "quant",
+      "title": "MHS 라이브-백테스트 정합성 (parity)",
+      "why": "라이브 봇이 스케일된 수익률로 노출을 재적합하고 deadband seed가 스케일 후 값이라 백테스트 대비 목표비중이 최대 29% 어긋났고, 종목당 5% 상한/HWM 드로다운 정지 등 라이브 전용 게이트가 인증된 전략을 바꿔치기했다",
+      "resolution": "노출 스케일을 무스케일 기준수익률로 되돌리고(descale_realized_returns), deadband를 스케일 전 비중에 연속 적용하며, 페이퍼 원장에 펀딩을 반영하고 체결 정책을 3m 리플레이 타이밍에 맞췄으며, 라이브 전용 게이트(종목 상한/HWM DD)를 백테스트 규칙(ruin guard)으로 교체, 패널 PIT 편입 기준과 레짐 창 단위를 백테스트와 일치시켰다",
+      "impact": "런타임 스키마 v2 전환(v1 보유행 초기화), VPS 데이터 보존 430일로 재시딩 필요, 백테스트 인증 결과 변경으로 5년 재실행+research_go 재검증+재배포 필요"
+    },
+    {
       "task_id": "MHS_STRATEGY_DELIVERY_PARITY",
       "date": "2026-09-13",
       "adr_id": "ADR_20260913_MHS_STRATEGY_DELIVERY_PARITY",
@@ -989,16 +999,6 @@
       "why": "24차 실측(mhs-res.md §3)에서 momentum(유일한 실질 생존 후보)조차 discovery/qualification admission(|t|>=2.0)을 통과하지 못함. discovery.py의 net_t가 자기상관 보정이 없는 naive i.i.d. t-stat인 반면 최종 Research-GO Sharpe는 Bartlett 보정을 적용해 방법론 불일치 존재 -- 72h~504h 오버랩 윈도우 특성상 편향 가능성 의심.",
       "resolution": "discovery.py에 _bartlett_hac_denom/_score_masked_adjusted_net_t 신규 opt-in 진단 함수 추가, DiscoveryQualificationResult에 adjusted_* 필드 5종 병기(raw admitted/selected_horizon 등은 무변화, 기본값 False로 bit-identical 보장). MhsDiagnosticRequest.discovery_gate_adjusted_net_t + CLI --discovery-gate-adjusted-net-t로 옵트인 배선. 25차 실측(2026-08-13)으로 실행 검증: momentum 등 전 후보에서 raw vs adjusted 격차 5~10% 수준으로 admission_t=2.0 근접 이동 없음.",
       "impact": "가설 기각(자기상관 편향은 admission 실패의 원인이 아님) -- 근본 원인은 discovery window 2년(2021-2022) worst-year 소표본 설계로 확정. 후속 조치(window 구조 변경)는 더 큰 범위의 별도 스펙 + 사용자 승인 필요로 이관. Research-GO/자본배분/PHASE_1_BOOK_BLEND_WEIGHTS는 무변경."
-    },
-    {
-      "task_id": "TASK_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION",
-      "date": "2026-08-13",
-      "adr_id": "ADR_20260813_MHS_EXECUTION_PERFORMANCE_OPTIMIZATION",
-      "domain": "research",
-      "title": "MHS 실행 성능 최적화 (C1-C4)",
-      "why": "cProfile 실측: worker CPU의 ~92%가 window 생성기(mark parquet 창×심볼 재읽기 + pass당 동일 window 재생성)이고 full-period minute preload(268심볼)가 4.5GB 상주, fold-safe discovery는 부모에서 순차 실행",
-      "resolution": "C1 mark 프레임 프로세스당 1회 캐시(_get_symbol_mark_frame/_cached_mark_panel), C2 window 1회 materialize 후 pass 간 _rescaled_windows 재사용, C3 window 단위 parquet 필터 로드(_load_window_minute_frames)로 preload 제거, C4 fold-safe discovery fork 병렬화",
-      "impact": "Full 5y 동일데이터 A/B: 684.9s→309.1s(−55%), peak RSS 5.40GB→3.15GB(−42%), 출력 bit-identical(primary_autocorr_sharpe·realized_execution_roster_size·benchmark checksum 불변); 6mo worker 31.7→7.1s, fold 61.5→17.5s"
     }
   ]
 }
