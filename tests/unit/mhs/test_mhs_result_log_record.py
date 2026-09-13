@@ -271,3 +271,17 @@ def test_record_includes_holdout_tail_and_parameter_oos_split() -> None:
     assert json.loads(json.dumps(record_without)) == record_without
     assert record_without["holdout_tail"] is None
     assert record_without["parameter_oos_split"] is None
+
+def test_mhs_kelly_z0_history_record_carries_live_policy_snapshot() -> None:
+    import json
+    from pathlib import Path
+    from src.mhs import evaluation as ev
+    from src.mhs.params import COMMITTEE_KELLY_LCB_Z
+
+    report = _representative_report()
+    request = ev.MhsDiagnosticRequest(start='2021-01-01', end='2025-12-31')
+    record = ev.build_mhs_run_history_record(report, request, ev.MhsOutputTier.COMPACT, Path('docs/results/x.json'))
+    assert json.loads(json.dumps(record)) == record
+    assert record['params_snapshot']['COMMITTEE_KELLY_WINDOW_DAYS'] == 42
+    assert record['params_snapshot']['COMMITTEE_KELLY_FRACTION'] == 0.5
+    assert record['params_snapshot']['COMMITTEE_KELLY_LCB_Z'] == COMMITTEE_KELLY_LCB_Z

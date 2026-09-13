@@ -305,7 +305,10 @@
     "testing": "tests/unit/mhs/test_parallel.py"
   },
   "src/mhs/params.py": {
-    "testing": "tests/unit/mhs/test_params.py"
+    "testing": [
+      "tests/unit/mhs/test_params.py",
+      "tests/unit/mhs/test_live_strategy.py"
+    ]
   },
   "src/mhs/pipeline/config.py": {
     "testing": "tests/unit/mhs/pipeline/test_config.py"

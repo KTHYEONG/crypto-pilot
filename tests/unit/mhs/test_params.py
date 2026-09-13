@@ -238,5 +238,5 @@ def test_scenario_kelly_lcb_02_penalty_below_registered_train_edge() -> None:
     assert legacy_penalty > COMMITTEE_KELLY_TRAIN_DAILY_SHARPE
     assert 0.0 < COMMITTEE_KELLY_FRACTION <= 0.5
     assert COMMITTEE_KELLY_WINDOW_DAYS == 42
-    assert COMMITTEE_KELLY_LCB_Z == 0.5
+    assert COMMITTEE_KELLY_LCB_Z == 0.0
     assert COMMITTEE_KELLY_TRAIN_DAILY_SHARPE == pytest.approx(0.1648)  # noqa: SIM300

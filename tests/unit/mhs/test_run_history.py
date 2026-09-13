@@ -405,3 +405,21 @@ def test_disclosure_reports_all_ten_keys_and_accounting(tmp_path) -> None:
     missing = trial_pool_disclosure(_DEFAULT_WINDOW, tmp_path / "nope")
     assert missing["n_history_records"] == 0
     assert missing["source"] == "constant_fallback"
+
+def test_mhs_kelly_z0_run_history_policy_is_distinct_trial(tmp_path) -> None:
+    from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
+    from src.mhs.run_history import append_run_history_record, derive_trials_attempted, trial_identity_key
+
+    base = {'status': 'COMPLETE', 'flags': {}, 'start': '2021-01-01T00:00:00+00:00', 'resolved_end': '2025-12-31T23:59:59+00:00', 'blend': {'primary_naive_sharpe': 2.0}, 'research_go': {'reason_codes': [], 'data_integrity_reason_codes': []}}
+    z0 = {**base, 'params_snapshot': {'COMMITTEE_KELLY_WINDOW_DAYS': 42, 'COMMITTEE_KELLY_FRACTION': 0.5, 'COMMITTEE_KELLY_LCB_Z': 0.0}}
+    z05 = {**base, 'params_snapshot': {'COMMITTEE_KELLY_WINDOW_DAYS': 42, 'COMMITTEE_KELLY_FRACTION': 0.5, 'COMMITTEE_KELLY_LCB_Z': 0.5}}
+    legacy = dict(base)
+    malformed = {**base, 'params_snapshot': None}
+    assert trial_identity_key(z0) != trial_identity_key(z05)
+    assert trial_identity_key(z0) != trial_identity_key(legacy)
+    assert trial_identity_key(malformed) != trial_identity_key(legacy)
+    append_run_history_record(z0, tmp_path)
+    append_run_history_record(z05, tmp_path)
+    counted, source = derive_trials_attempted(tmp_path)
+    assert counted == SEARCH_TRIALS_ATTEMPTED + 2
+    assert source == 'constant_plus_ledger'
