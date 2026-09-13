@@ -252,8 +252,8 @@ class TestTrendEfficiencyOverlayDefaultOff:
         import src.mhs.pipeline.stages.fold as fold_stage
         import src.mhs.pipeline.stages.replay as replay_stage
 
-        monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
-        monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+        monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
+        monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
         monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
         monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
         monkeypatch.setattr(replay_stage, "_run_books_concurrent", _spy_books, raising=False)

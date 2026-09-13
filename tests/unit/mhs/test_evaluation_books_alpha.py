@@ -140,9 +140,8 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
         captured["w_fast_execution"] = args[10]
         return real_books(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently",
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently",
         lambda *a, **k: (None, None, {}, {}, (), _deployment_readiness()),
     )
     request = MhsDiagnosticRequest(
@@ -181,8 +180,7 @@ def test_mhs_fast_book_mode_ensemble_produces_different_executed_book(mhs_market
     # The slow book is untouched by the fast flag. Fails against pre-change
     # code, which has no fast_book_mode branch at all.
     root, end = mhs_market
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently",
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently",
         lambda *a, **k: (None, None, {}, {}, (), _deployment_readiness()),
     )
     base = {

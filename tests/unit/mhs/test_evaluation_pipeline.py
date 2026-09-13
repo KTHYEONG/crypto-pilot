@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from src.mhs import evaluation as ev
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.mhs.pipeline.stages.book as book_stage
 import src.mhs.resources as resources
 import src.mhs.scaling as scaling
 import src.mhs.research_go as _research_go
@@ -244,7 +245,7 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
         return real_scale(vol_mean, *args, **kwargs)
 
     monkeypatch.setattr(scaling, "_regime_cash_scale", spy)
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -327,7 +328,7 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
     ]
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     universe_size = 8
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -370,6 +371,9 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
     assert retention_mean > universe_size
     monkeypatch.setattr(
         ev, "_pit_execution_mask", lambda qv, el, usz: retention_mask,
+    )
+    monkeypatch.setattr(
+        book_stage, "_pit_execution_mask", lambda qv, el, usz: retention_mask,
     )
     retention_report = run_mhs_horizon_diagnostic(request)
     assert retention_report.realized_execution_roster_size == pytest.approx(retention_mean)
@@ -604,9 +608,8 @@ def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
     # blocks, finite per-tier fields) still holds after the per-member book
     # streaming + multi-tier ledger.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),

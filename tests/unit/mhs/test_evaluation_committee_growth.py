@@ -74,9 +74,8 @@ def test_committee_growth_diagnostic_default_off_byte_identical(mhs_market_long,
     # with committee_growth_diagnostic omitted (default False) the report's
     # growth_headroom is None and the vol-target walk-forward path is untouched.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -94,9 +93,8 @@ def test_committee_growth_diagnostic_observational_only(mhs_market_long, monkeyp
     # headroom diagnostic must not perturb the reported per-tier walk-forward --
     # the report field is observation-only, never a sizing feedback.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
