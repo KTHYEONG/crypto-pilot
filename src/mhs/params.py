@@ -288,13 +288,12 @@ PNL_VOL_TARGET_SCALE_FLOOR: float = 0.2
 PNL_VOL_TARGET_BURN_IN_DAYS: int = 90
 PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS: int = 365
 
-# 위원회 Kelly-LCB 사이징: LCB 페널티 z/sqrt(window)=0.0772 가 학습구간
-# 일간 Sharpe N 보다 작아 평균 에지에서 LCB 가 양수가 된다(구값 0.2182 는 초과).
-# 실측(3m 전체 리플레이): CAGR N -> 4.133, MDD N -> -0.412, Calmar N -> 10.04.
+# 위원회 Kelly 사이징: z=0 이므로 LCB 페널티가 없다(z/sqrt(window)=0).
+# 평균 에지에서 LCB 는 표본 평균과 동일하다. window=42/half-Kelly 0.5 유지.
 COMMITTEE_KELLY_WINDOW_DAYS: int = 42
 # half-Kelly 상한값. 등록 가능한 최대치이며 half-Kelly 경계로 강제된다.
 COMMITTEE_KELLY_FRACTION: float = 0.5
-COMMITTEE_KELLY_LCB_Z: float = 0.5
+COMMITTEE_KELLY_LCB_Z: float = 0.0
 [redacted]
 [redacted]
 [redacted]
