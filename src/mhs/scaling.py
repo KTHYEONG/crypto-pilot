@@ -11,7 +11,7 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.deployment_policy import SizingPolicy
-from src.mhs.horizons import efficiency_ratio
+from src.mhs.horizons import efficiency_ratio, realized_vol
 from src.mhs.params import (
     COMMITTEE_KELLY_FRACTION,
     COMMITTEE_KELLY_LCB_Z,
@@ -151,6 +151,23 @@ def _regime_cash_scale(
     scale = median.div(vol_mean.clip(lower=1e-12))
     scale = scale.clip(lower=floor, upper=1.0)
     return scale.fillna(1.0)
+
+
+def regime_cash_scale_1h(
+    log_close: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    grid_1h: pd.DatetimeIndex,
+    fast_horizon_hours: int,
+    trend_efficiency_overlay: bool,
+) -> pd.Series:
+    """Hourly-grid regime cash scale shared by top-level and fold paths."""
+    vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
+    scale = _regime_cash_scale(vol_mean)
+    if trend_efficiency_overlay:
+        scale = scale.mul(
+            _trend_efficiency_overlay_scale(log_close, execution_mask, fast_horizon_hours, grid_1h),
+        )
+    return scale
 
 
 def _pnl_vol_target_scale(

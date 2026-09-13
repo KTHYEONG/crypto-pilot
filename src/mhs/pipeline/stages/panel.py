@@ -21,6 +21,7 @@ from src.mhs.evaluation import (
     load_base_panel,
 )
 from src.mhs.marks import _load_funding_series
+from src.mhs.params import PANEL_MIN_HISTORY_BARS
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.resources import _resolve_ram_budget, _StageRecorder
 from src.mhs.telemetry import StageTelemetry, Tag
@@ -44,7 +45,7 @@ def load_panel(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             if ctx.config.committee_capital
             else ("close", "open", "quote_vol")
         ),
-        ctx.start, ctx.end, partition="dev", min_bars=2000,
+        ctx.start, ctx.end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS,  # liquid_half_eligibility min_history_bars와 동일(720)
     )
     ctx.base_panel = panel
     ctx.close, ctx.opens, ctx.quote_vol = panel["close"], panel["open"], panel["quote_vol"]

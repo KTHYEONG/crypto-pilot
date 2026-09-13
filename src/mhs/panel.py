@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from src.mhs.params import PANEL_MIN_HISTORY_BARS
 from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
 from src.quant.universe.pit_universe import symbol_partition
 
@@ -54,7 +55,7 @@ def load_base_panel(
     start: pd.Timestamp,
     end: pd.Timestamp,
     partition: Literal["dev", "holdout", "all"] = "dev",
-    min_bars: int = 2000,
+    min_bars: int = PANEL_MIN_HISTORY_BARS,
 ) -> dict[str, pd.DataFrame]:
     """Read ``<root>/<interval>/<SYMBOL>.parquet`` into wide per-column panels.
 
@@ -139,7 +140,7 @@ def slice_base_panel(
     base_panel: dict[str, pd.DataFrame],
     start: pd.Timestamp,
     end: pd.Timestamp,
-    min_bars: int = 2000,
+    min_bars: int = PANEL_MIN_HISTORY_BARS,
 ) -> dict[str, pd.DataFrame]:
     """Slice a pre-loaded 1h base panel to ``[start, end]`` with survivor filtration.
 

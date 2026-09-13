@@ -1249,3 +1249,32 @@ def test_execute_intents_default_model_preserves_peg_chase_path(tmp_path) -> Non
     reasons = {r for _, _, _, r, _ in outcomes[0].fills}
     assert reasons.issubset({"maker_fill", "timeout_taker", "backstop_taker"})
     assert len(client.orders) >= 1
+
+
+def test_backtest_parity_policy_bounds_passive_phase_without_resting_order(tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.executor import EXECUTION_BAR_SECONDS, FeeSchedule, PassiveExecutionPolicy, backtest_parity_execution_policy, execute_intent
+
+    policy = backtest_parity_execution_policy(FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0), 3.0)
+    assert EXECUTION_BAR_SECONDS == 180.0
+    assert policy.passive_deadline_s == EXECUTION_BAR_SECONDS
+    assert policy.window_deadline_s == 2 * EXECUTION_BAR_SECONDS
+    assert policy.taker_cap_bps == 8.0
+    assert policy.taker_slippage_bps == 3.0
+
+    client = StubClient(touches=[("100.20", "100.30")])
+    outcome = execute_intent(
+        client,
+        _intent(),
+        _filters(),
+        PassiveExecutionPolicy(poll_interval_s=3.0, max_chases=3, passive_deadline_s=20.0, window_deadline_s=600.0, taker_cap_bps=15.0, max_slices=1),
+        AuditLog(tmp_path / "parity.jsonl"),
+        SteppingClock(5.0),
+    )
+    gtx_orders = [o for o in client.orders if o["timeInForce"] == "GTX"]
+    ioc_orders = [o for o in client.orders if o["timeInForce"] == "IOC"]
+    assert gtx_orders == []
+    assert len(ioc_orders) >= 1
+    assert all(Decimal(o["price"]) <= Decimal("100.50") for o in ioc_orders)
+    assert outcome.status == "RESIDUAL"

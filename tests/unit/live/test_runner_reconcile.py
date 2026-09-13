@@ -14,7 +14,6 @@ import pytest
 import src.live.runner as runner_mod
 from src.live.account import (
     AccountSnapshot,
-    assert_drawdown_within_limit,
     assert_suppressed_venue_flat,
     resolve_sizing_equity,
 )

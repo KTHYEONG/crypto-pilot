@@ -125,23 +125,6 @@ def resolve_sizing_equity(
     return equity
 
 
-def assert_drawdown_within_limit(
-    equity: Decimal, high_water_mark: Decimal, limit_fraction: float
-) -> None:
-    """I-DD-HALT: equity/hwm - 1 <= limit_fraction 이면 RiskGateBreach.
-
-    high_water_mark <= 0 은 초기 사이클로 간주해 게이트를 통과시킨다.
-    """
-    if high_water_mark <= Decimal(0):
-        return
-    drawdown = equity / high_water_mark - Decimal(1)
-    if drawdown <= Decimal(str(limit_fraction)):
-        raise RiskGateBreach(
-            f"equity drawdown {drawdown} breaches halt limit {limit_fraction} "
-            f"(equity={equity} hwm={high_water_mark})"
-        )
-
-
 def assert_venue_configuration(snapshot: AccountSnapshot) -> None:
     """one-way / USDT 단일 마진 가정이 깨지면 HALT 한다."""
     if snapshot.multi_assets_margin:
