@@ -138,9 +138,8 @@ def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_
     )
     pd.testing.assert_frame_equal(target_default, target_off)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     default_report = run_mhs_horizon_diagnostic(request)
     explicit_off = run_mhs_horizon_diagnostic(
@@ -179,13 +178,13 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
         return real(*args, **kwargs)
 
     monkeypatch.setattr(ev, "_committee_execution_book", _spy)
+    monkeypatch.setattr(ev.committee, "_committee_execution_book", _spy)
     ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
     assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
 
     seen.clear()
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     run_mhs_horizon_diagnostic(request)
     assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
@@ -307,9 +306,8 @@ def test_committee_regime_adaptive_tranche_default_off_byte_identical(
     )
     pd.testing.assert_frame_equal(target_default, target_off)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     default_report = run_mhs_horizon_diagnostic(request)
     explicit_off = run_mhs_horizon_diagnostic(
@@ -349,13 +347,13 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(ev, "_committee_execution_book", _spy)
+    monkeypatch.setattr(ev.committee, "_committee_execution_book", _spy)
     ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
     assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
     seen.clear()
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     run_mhs_horizon_diagnostic(request)
     assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
@@ -390,13 +388,13 @@ def test_committee_beta_neutralize_threads_both_call_sites(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(ev, "_committee_execution_book", _spy)
+    monkeypatch.setattr(ev.committee, "_committee_execution_book", _spy)
     ev._build_fold_target_weights(str(root), _FOLD, request_on, funding_by_symbol)
     assert isinstance(seen["beta"], pd.DataFrame)
 
     seen.clear()
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     run_mhs_horizon_diagnostic(request_on)
     assert isinstance(seen["beta"], pd.DataFrame)
@@ -411,9 +409,8 @@ def test_committee_beta_neutralize_threads_both_call_sites(
     assert seen["beta"] is None
 
     seen.clear()
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     default_report = run_mhs_horizon_diagnostic(request_default)
     explicit_off = run_mhs_horizon_diagnostic(
@@ -441,9 +438,8 @@ def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monk
     # the committee walk-forward reports sizing_mode='vol_target' -- the pure
     # pre-change vol-target path.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -462,9 +458,8 @@ def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) 
     # committee_kelly_sizing=True the committee walk-forward reports
     # sizing_mode='kelly_blend' -- the opt-in 50/50 quarter-Kelly LCB overlay.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),

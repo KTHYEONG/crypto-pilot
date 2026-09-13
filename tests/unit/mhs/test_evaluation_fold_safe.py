@@ -94,8 +94,8 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
         captured["fold_slow_horizons"] = args[14] if len(args) > 14 else None
         return (None, None, {}, {}, (), None)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
-    monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
     top_report = run_mhs_horizon_diagnostic(request)
     assert top_report.status == "COMPLETE"
     assert calls["n"] == 0
@@ -154,18 +154,19 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
         return _admitted_selection(360)
 
     monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _admit_by_family)
+    monkeypatch.setattr(ev.folds, "fold_train_only_discovery_qualification", _admit_by_family)
 
     def _spy_books(*args, **kwargs):
         captured["top_level_slow"] = args[5]
-        return (None, None, None, {})
+        return (None, None, None, {}, None)
 
     def _spy_post(*args, **kwargs):
         captured["fold_slow_horizons"] = args[14] if len(args) > 14 else None
         captured["fold_fast_horizons"] = args[15] if len(args) > 15 else None
         return (None, None, {}, {}, (), None)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
-    monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -173,17 +174,13 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     )
     top_report = run_mhs_horizon_diagnostic(request_on)
     assert top_report.status == "COMPLETE"
-    assert captured["fold_slow_horizons"] == {0: 360, 1: 360, 2: 360, 3: 360}
+    n_folds = len(ev.phase_1_anchored_purged_folds())
+    assert captured["fold_slow_horizons"] == dict.fromkeys(range(n_folds), 360)
     # The fast re-verification is diagnostic-only: the parent threads the
     # resolved (horizon, source) pairs to the fold pool but never alters the
     # top-level fast spec (still the frozen 48h default, and blend weights
     # stay 0.0).
-    assert captured["fold_fast_horizons"] == {
-        0: (360, "fold_train_only_discovery"),
-        1: (360, "fold_train_only_discovery"),
-        2: (360, "fold_train_only_discovery"),
-        3: (360, "fold_train_only_discovery"),
-    }
+    assert captured["fold_fast_horizons"] == dict.fromkeys(range(n_folds), (360, "fold_train_only_discovery"))
     assert captured["top_level_slow"].horizon_hours == 360
     assert captured["top_level_slow"].band is ev.BOOK_SPECS["slow_momentum"].band
 
@@ -206,6 +203,7 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
         return real_builder(*args, **kwargs)
 
     monkeypatch.setattr(ev, "_candidate_weight_books", counting_builder)
+    monkeypatch.setattr(ev.books, "_candidate_weight_books", counting_builder)
 
     def _spy_books(*args, **kwargs):
         return (None, None, None, {}, None)
@@ -213,8 +211,8 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     def _spy_post(*args, **kwargs):
         return (None, None, {}, {}, (), None)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", _spy_books)
-    monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -235,13 +233,13 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
     captured: dict = {}
 
     def _run(captured):
-        monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+        monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
 
         def _spy_post(*args, **kwargs):
             captured["fold_funding_carry"] = args[16] if len(args) > 16 else None
             return (None, None, {}, {}, (), None)
 
-        monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+        monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
         request_on = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
             mark_mode="cache_required", execution_timeframe="1m", log_run=False,
@@ -257,8 +255,10 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
         return _admitted_selection(None)
 
     monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _admit_funding_only)
+    monkeypatch.setattr(ev.folds, "fold_train_only_discovery_qualification", _admit_funding_only)
     admitted = _run(captured)
-    assert set(admitted) == {0, 1, 2, 3}
+    n_folds = len(ev.phase_1_anchored_purged_folds())
+    assert set(admitted) == set(range(n_folds))
     for lookback, sign, source, corr in admitted.values():
         assert lookback == 72
         assert sign == 1
@@ -266,12 +266,14 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
         assert np.isfinite(corr)
 
     captured.clear()
-    monkeypatch.setattr(
-        ev, "fold_train_only_discovery_qualification",
-        lambda *a, **k: _admitted_selection(None),
-    )
+
+    def _always_none(*args: object, **kwargs: object) -> object:
+        return _admitted_selection(None)
+
+    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _always_none)
+    monkeypatch.setattr(ev.folds, "fold_train_only_discovery_qualification", _always_none)
     fail_closed = _run(captured)
-    assert set(fail_closed) == {0, 1, 2, 3}
+    assert set(fail_closed) == set(range(n_folds))
     for lookback, sign, source, corr in fail_closed.values():
         assert lookback is None
         assert sign is None

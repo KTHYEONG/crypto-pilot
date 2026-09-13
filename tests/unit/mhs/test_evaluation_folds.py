@@ -861,9 +861,8 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
     # caches are evicted by the time the run completes, and the committee
     # diagnostic is still populated (regression against the re-ordering).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     order: list[str] = []
     real_post = ev._run_post_book_concurrently
@@ -877,8 +876,9 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
         order.append("committee")
         return real_committee(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_run_post_book_concurrently", _spy_post)
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
     monkeypatch.setattr(ev, "_committee_diagnostic", _spy_committee)
+    monkeypatch.setattr(ev.committee, "_committee_diagnostic", _spy_committee)
 
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),

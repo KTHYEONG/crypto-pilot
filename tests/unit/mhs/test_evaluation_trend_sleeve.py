@@ -47,9 +47,8 @@ def test_trend_sleeve_default_off_bit_identical(mhs_market, monkeypatch) -> None
     # bit-identical to the explicit-off baseline -- the sleeve is inert unless
     # explicitly enabled, so a default run cannot change any existing output.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
@@ -75,9 +74,8 @@ def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
     # and the combined metrics; every value is finite or an explicit None,
     # never NaN silently coerced to 0.0.
     root, end = mhs_market
-    monkeypatch.setattr(ev, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
@@ -262,9 +260,8 @@ def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote,
         captured["committee_execution_book"] = kwargs.get("committee_execution_book")
         return (None, None, None, {}, None)
 
-    monkeypatch.setattr(ev, "_run_books_concurrent", _fake_books)
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _fake_books)
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
