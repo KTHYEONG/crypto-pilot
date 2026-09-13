@@ -243,6 +243,10 @@ def test_signal_step_reconciles_params_digest_change(tmp_path, monkeypatch) -> N
         lambda *a, **k: _mk_params_stub(), raising=False,
     )
     monkeypatch.setattr(
+        "src.mhs.live_strategy.load_strategy_bootstrap",
+        lambda *a, **k: __import__("pandas").Series([0.01], index=__import__("pandas").date_range("2026-08-01", periods=1, freq="1D", tz="UTC"), dtype="float64"), raising=False,
+    )
+    monkeypatch.setattr(
         "src.mhs.live_runtime.load_or_bootstrap_runtime",
         lambda *a, **k: _mk_runtime_stub(), raising=False,
     )
@@ -261,7 +265,7 @@ def _mk_settings_stub():
 
 def _mk_params_stub():
     from types import SimpleNamespace
-    return SimpleNamespace(strategy_digest="x")
+    return SimpleNamespace(strategy_digest="x", bootstrap_sha256="a" * 64)
 
 
 def _mk_runtime_stub():
@@ -272,3 +276,43 @@ def _mk_runtime_stub():
     )
 
 
+
+
+
+def test_signal_step_bootstrap_hash_failure_stops_before_runtime_swap(monkeypatch) -> None:
+    import argparse
+    import types
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    import src.cli.commands.live as module
+
+    calls = []
+    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
+    params = types.SimpleNamespace(bootstrap_sha256="a" * 64, strategy_digest="d")
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *_a, **_k: params)
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", lambda *_a, **_k: (_ for _ in ()).throw(DataIntegrityError("bootstrap_sha256 mismatch")))
+    monkeypatch.setattr("src.mhs.live_runtime.load_or_bootstrap_runtime", lambda *_a, **_k: calls.append("runtime"))
+    monkeypatch.setattr("src.mhs.live_runtime.reconcile_runtime_params", lambda *_a, **_k: calls.append("reconcile"))
+    monkeypatch.setattr(module, "advance_to_date", lambda *_a, **_k: calls.append("advance"))
+    with pytest.raises(SystemExit) as exc:
+        module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
+    assert exc.value.code == 1
+    assert calls == []
+
+
+
+def test_signal_step_params_load_failure_exits_one(monkeypatch) -> None:
+    import argparse
+    import types
+    import pandas as pd
+    import pytest
+    import src.cli.commands.live as module
+
+    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *_a, **_k: (_ for _ in ()).throw(FileNotFoundError("no params")))
+    with pytest.raises(SystemExit) as exc:
+        module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
+    assert exc.value.code == 1
