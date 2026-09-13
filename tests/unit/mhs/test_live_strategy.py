@@ -74,3 +74,20 @@ def test_assert_deployment_eligible_rejects_research_go_fail() -> None:
     with pytest.raises(DataIntegrityError) as exc:
         assert_deployment_eligible(report)
     assert "deployment ineligible" in str(exc.value)
+
+def test_mhs_kelly_z0_live_snapshot_changes_seal_digest(monkeypatch) -> None:
+    import pandas as pd
+
+    from src.mhs import params as mhs_params
+    from src.mhs.live_strategy import LiveStrategyParams, _compute_strategy_digest, capture_params_snapshot
+
+    snapshot = capture_params_snapshot()
+    assert snapshot['COMMITTEE_KELLY_WINDOW_DAYS'] == 42
+    assert snapshot['COMMITTEE_KELLY_FRACTION'] == 0.5
+    assert snapshot['COMMITTEE_KELLY_LCB_Z'] == 0.0
+    payload = {'schema_version': 1, 'backtest_window': (pd.Timestamp('2021-01-01', tz='UTC'), pd.Timestamp('2025-12-31', tz='UTC')), 'created_at': '2026-09-13T00:00:00+00:00', 'slow_horizon_hours': 168, 'committee_member_weights': {'m': 1.0}, 'admitted_members': ('m',), 'growth_budget_target_vol': 0.3, 'exposure_cap': 3.0, 'growth_envelope': 'growth_extreme', 'execution_universe_size': 60, 'pnl_vol_target_mode': 'growth_budget', 'deployed_flags': {'committee_capital': True, 'committee_kelly_sizing': True}, 'params_snapshot': snapshot, 'bootstrap_held_row': {'BTCUSDT': 0.1}, 'strategy_digest': ''}
+    baseline = _compute_strategy_digest(LiveStrategyParams(**payload))
+    monkeypatch.setattr(mhs_params, 'COMMITTEE_KELLY_LCB_Z', 0.5)
+    payload['params_snapshot'] = capture_params_snapshot()
+    changed = _compute_strategy_digest(LiveStrategyParams(**payload))
+    assert changed != baseline

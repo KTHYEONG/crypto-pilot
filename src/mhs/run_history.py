@@ -162,6 +162,17 @@ def trial_identity_key(record: Mapping[str, Any]) -> str | None:
         # Unknown keys are unregistered by construction: retain them fail-closed.
         if key not in normalized and key not in RESEARCH_NEUTRAL_FLAGS:
             normalized[key] = value
+    snapshot = record.get("params_snapshot")
+    if isinstance(snapshot, Mapping):
+        # Mapped snapshot keys and values are canonically retained, so newly
+        # sealed decision parameters cannot silently merge trials.
+        normalized["params_snapshot"] = dict(snapshot)
+    elif "params_snapshot" not in record:
+        normalized["params_snapshot"] = {"__legacy_params_snapshot__": "missing"}
+    else:
+        normalized["params_snapshot"] = {
+            "__legacy_params_snapshot__": f"non-mapping:{type(snapshot).__module__}.{type(snapshot).__qualname__}"
+        }
     return json.dumps(
         normalized,
         ensure_ascii=False,
