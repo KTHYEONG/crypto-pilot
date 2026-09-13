@@ -73,42 +73,23 @@ def _run_signal_step(args: argparse.Namespace) -> None:
     from src.live.errors import ArtifactSealError
     from src.live.settings import LiveSettings
     from src.mhs.live_runtime import default_runtime_path, load_or_bootstrap_runtime, save_runtime
-    from src.mhs.live_strategy import load_strategy_params
 
     settings = _settings_with_mode(args)
     date = args.date
-    # load strategy params
-    strat_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json")
-    # try .enc variant via load logic
-    try:
-        params = load_strategy_params(strat_path, artifact_key=settings.artifact_key)
-    except Exception as exc:
-        # try enc directly
-        try:
-            params = load_strategy_params(Path(str(strat_path) + ".enc"), artifact_key=settings.artifact_key)
-        except Exception as exc2:
-            logger.error("[EVAL] signal_step status=FAILED reason=%s", exc2)
-            raise SystemExit(1) from exc2
-    # bootstrap reference
-    bootstrap_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_bootstrap.parquet")
-    bootstrap_ref = pd.Series(dtype="float64")
-    try:
-        from src.live.crypto import derive_key, read_sealed_parquet
+    from src.mhs import live_strategy as _live_strategy
 
-        # try enc
-        if (Path(str(bootstrap_path) + ".enc")).exists() and settings.artifact_key is not None:
-            df = read_sealed_parquet(Path(str(bootstrap_path) + ".enc"), derive_key(settings.artifact_key))
-            if "reference_daily_return" in df.columns:
-                bootstrap_ref = df["reference_daily_return"]
-                bootstrap_ref.index = pd.DatetimeIndex(bootstrap_ref.index)
-                if bootstrap_ref.index.tz is None:
-                    bootstrap_ref.index = bootstrap_ref.index.tz_localize("UTC")
-        elif bootstrap_path.exists():
-            df = pd.read_parquet(bootstrap_path)
-            if "reference_daily_return" in df.columns:
-                bootstrap_ref = df["reference_daily_return"]
-    except Exception:
-        bootstrap_ref = pd.Series(dtype="float64")
+    strat_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json")
+    try:
+        params = _live_strategy.load_strategy_params(strat_path, artifact_key=settings.artifact_key)
+    except Exception as exc2:
+        logger.error("[EVAL] signal_step status=FAILED reason=%s", exc2)
+        raise SystemExit(1) from exc2
+    bootstrap_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_bootstrap.parquet")
+    try:
+        bootstrap_ref = _live_strategy.load_strategy_bootstrap(bootstrap_path, expected_sha256=params.bootstrap_sha256, artifact_key=settings.artifact_key)
+    except Exception as exc:
+        logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
+        raise SystemExit(1) from exc
 
     runtime_path = default_runtime_path()
     weights_path = default_weights_path()

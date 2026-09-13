@@ -29,7 +29,7 @@ def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
     assert report.primary is not None
     assert report.pre_vol_target_reference.fill_source == report.primary.fill_source
 
-    def _forced_step_scale(reference_daily_returns: pd.Series) -> pd.Series:
+    def _forced_step_scale(reference_daily_returns: pd.Series, *args: object, **kwargs: object) -> pd.Series:
         idx = reference_daily_returns.index
         mid = idx[0] + (idx[-1] - idx[0]) / 2
         return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)

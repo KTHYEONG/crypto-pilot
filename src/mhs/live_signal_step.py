@@ -14,7 +14,8 @@ from pydantic import SecretStr
 from src.common.errors import DataIntegrityError
 from src.live.portfolio_state import default_portfolio_state_dir
 from src.mhs.live_runtime import LiveRuntime
-from src.mhs.live_strategy import LiveStrategyParams, snapshot_value
+from src.mhs.live_strategy import LiveStrategyParams
+from src.mhs.scaling import compute_exposure_scale
 
 logger = logging.getLogger("LiveSignalStep")
 
@@ -106,24 +107,9 @@ def _synthetic_fold(date: pd.Timestamp, params: LiveStrategyParams) -> Any:
     from src.mhs.evidence import AnchoredPurgedFold
 
     dt = pd.Timestamp(date).tz_convert("UTC").normalize() if pd.Timestamp(date).tzinfo is not None else pd.Timestamp(date).tz_localize("UTC").normalize()
-    try:
-        window_days = int(snapshot_value(params, "SIGNAL_PANEL_WINDOW_DAYS"))
-    except DataIntegrityError:
-        from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS as _def_wd  # noqa: N811
-
-        window_days = int(_def_wd)
-    try:
-        warmup_hours = int(snapshot_value(params, "FOLD_PANEL_WARMUP_HOURS"))
-    except DataIntegrityError:
-        from src.mhs.params import FOLD_PANEL_WARMUP_HOURS as _def_wh  # noqa: N811
-
-        warmup_hours = int(_def_wh)
-    try:
-        purge_hours = int(snapshot_value(params, "COMMITTEE_PURGE_HOURS"))
-    except DataIntegrityError:
-        from src.mhs.params import COMMITTEE_PURGE_HOURS as _def_ph  # noqa: N811
-
-        purge_hours = int(_def_ph)
+    window_days = int(params.policy.signal_window.panel_window_days)
+    warmup_hours = int(params.policy.signal_window.fold_panel_warmup_hours)
+    purge_hours = int(params.policy.signal_window.committee_purge_hours)
     vs = dt - pd.Timedelta(days=window_days) + pd.Timedelta(hours=warmup_hours)
     if vs >= dt:
         raise DataIntegrityError("SIGNAL_PANEL_WINDOW_DAYS too small")
@@ -191,13 +177,6 @@ def compute_signal_row(
     portfolio_state_dir: Path | None = None,
     mode: str = "shadow",
 ) -> tuple[pd.Series, pd.Series, float]:
-    from src.mhs.params import PNL_VOL_TARGET_SCALE_FLOOR
-    from src.mhs.scaling import (
-        _committee_capital_replay_scale,
-        _constant_risk_scale,
-        _exante_vol_target_scale,
-    )
-
     if not data_root:
         from src.common.paths import FUTURES_DATA_DIR
 
@@ -205,12 +184,7 @@ def compute_signal_row(
 
     dt = pd.Timestamp(date).tz_convert("UTC").normalize() if pd.Timestamp(date).tzinfo is not None else pd.Timestamp(date).tz_localize("UTC").normalize()
     fold = _synthetic_fold(dt, params)
-    from src.mhs.contracts import MhsDiagnosticRequest
-
-    try:
-        request = MhsDiagnosticRequest(**params.deployed_flags)
-    except Exception as exc:
-        raise DataIntegrityError(f"failed to reconstruct request: {exc}") from exc
+    request = params.policy.target_weights.to_request()  # TargetWeightPolicy.to_request seam
     funding_by_symbol = _load_funding_by_symbol(data_root)
 
     seed_row = pd.Series(runtime.held_target_row, dtype="float64") if runtime.held_target_row else None
@@ -219,10 +193,12 @@ def compute_signal_row(
         fold,
         request,
         funding_by_symbol,
-        slow_horizon_override=int(params.slow_horizon_hours),
-        committee_member_weights=dict(params.committee_member_weights),
+        slow_horizon_override=int(params.policy.slow_horizon_hours),
+        committee_member_weights=dict(params.policy.committee_member_weights),
         deadband_seed_row=seed_row,
         require_minute_roster=False,
+        panel_warmup_hours=int(params.policy.signal_window.fold_panel_warmup_hours),
+        committee_oos_start=params.policy.signal_window.committee_oos_start,
     )
     if dt not in target_weights.index:
         del grid_1h
@@ -237,25 +213,21 @@ def compute_signal_row(
     else:
         bt_end = bt_end.tz_convert("UTC")
     bt_end = bt_end.normalize()
-    # warmup slice from frozen bootstrap anchor
     warmup_src = runtime.reference_daily_returns
     if not warmup_src.empty:
         if warmup_src.index.tz is None:
             warmup_src = warmup_src.copy()
             warmup_src.index = warmup_src.index.tz_localize("UTC")
-        else:
+        elif str(warmup_src.index.tz) != "UTC":
             warmup_src = warmup_src.tz_convert("UTC")
-        warmup_src = warmup_src.sort_index()
+        if not warmup_src.index.is_monotonic_increasing:
+            warmup_src = warmup_src.sort_index()
         warmup = warmup_src[warmup_src.index <= bt_end]
     else:
         warmup = pd.Series(dtype="float64")
-        # ensure tz-aware type
         warmup.index = pd.DatetimeIndex([], tz="UTC")
 
     forward = realized_daily_returns(psd, mode, bt_end=bt_end)
-    tv = float(params.growth_budget_target_vol)
-    cap = float(params.exposure_cap)
-    constant_risk = str(params.pnl_vol_target_mode) == "constant_risk"
 
     if forward.empty:
         if not warmup.empty:
@@ -267,15 +239,11 @@ def compute_signal_row(
         ref_series = forward
         warmup_arg = warmup if not warmup.empty else None
 
-    if constant_risk:
-        base = _constant_risk_scale(ref_series, target_vol=tv, cap=cap, warmup_returns=warmup_arg)
-    else:
-        base = _exante_vol_target_scale(ref_series, target_vol=tv, cap=cap, warmup_returns=warmup_arg)
-    committee_capital = bool(params.deployed_flags.get("committee_capital", False))
-    committee_kelly = bool(params.deployed_flags.get("committee_kelly_sizing", False))
-    scale_series = _committee_capital_replay_scale(base, ref_series, committee_capital, committee_kelly, cap=cap)
+    scale_series = compute_exposure_scale(ref_series, params.policy.sizing, warmup_returns=warmup_arg)
     scalar_raw = float(scale_series.iloc[-1]) if not scale_series.empty else 1.0
-    scalar = float(max(PNL_VOL_TARGET_SCALE_FLOOR, min(scalar_raw, cap)))
+    cap = float(params.policy.sizing.exposure_cap)
+    floor = float(params.policy.sizing.scale_floor)
+    scalar = float(max(floor, min(scalar_raw, cap)))
     scaled_row = raw_row * scalar
     try:  # noqa: SIM105
         del grid_1h

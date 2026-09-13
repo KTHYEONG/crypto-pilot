@@ -296,10 +296,10 @@ def test_emit_deployment_seals_report_evidence_weights(tmp_path) -> None:
     emit_deployment(report, request, tmp_path, artifact_key=None)
 
     loaded = load_strategy_params(tmp_path / "strategy_params.json", artifact_key=None)
-    assert loaded.committee_member_weights == pytest.approx(report.committee_member_weights)
-    assert loaded.committee_member_weights["xs_mom_336h"] == 0.0
-    assert loaded.committee_member_weights["xs_idio_mom_336h"] == 0.0
-    assert set(loaded.admitted_members) == set(report.committee_member_weights)
+    assert loaded.policy.committee_member_weights == pytest.approx(report.committee_member_weights)
+    assert loaded.policy.committee_member_weights["xs_mom_336h"] == 0.0
+    assert loaded.policy.committee_member_weights["xs_idio_mom_336h"] == 0.0
+    assert set(loaded.policy.admitted_members) == set(report.committee_member_weights)
 
 
 def test_emit_deployment_fails_closed_without_report_member_weights(tmp_path) -> None:
@@ -470,9 +470,9 @@ def test_emit_deployment_equal_weights_when_evidence_weighting_disabled(tmp_path
     emit_deployment(report, request, tmp_path, artifact_key=None)
 
     loaded = load_strategy_params(tmp_path / "strategy_params.json", artifact_key=None)
-    expected = 1.0 / len(loaded.admitted_members)
-    assert loaded.committee_member_weights == pytest.approx(
-        dict.fromkeys(loaded.admitted_members, expected)
+    expected = 1.0 / len(loaded.policy.admitted_members)
+    assert loaded.policy.committee_member_weights == pytest.approx(
+        dict.fromkeys(loaded.policy.admitted_members, expected)
     )
 
 
@@ -492,3 +492,62 @@ def test_resolved_deployment_member_weights_rejects_empty_admitted() -> None:
     with pytest.raises(DataIntegrityError, match="empty member tuple"):
         _resolved_deployment_member_weights(report, request, ())
 
+
+
+
+def test_emit_deployment_v2_binds_policy_and_bootstrap(tmp_path) -> None:
+    import dataclasses
+    import types
+    import pandas as pd
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.live_strategy import load_strategy_bootstrap, load_strategy_params
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    weights = {"flow_imb_720h": 0.27, "flow_imb_168h": 0.378, "xs_mom_336h": 0.0, "xs_idio_mom_336h": 0.0, "mom3_skew_168h": 0.352}
+    report = types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))), committee_member_weights=weights)
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01")))
+    result = emit_deployment(report, request, tmp_path)
+    params = load_strategy_params(tmp_path / "strategy_params.json")
+    bootstrap = load_strategy_bootstrap(tmp_path / "strategy_bootstrap.parquet", expected_sha256=params.bootstrap_sha256)
+    assert params.schema_version == 2
+    assert params.policy.committee_member_weights == weights
+    assert result["strategy_digest"] == params.strategy_digest
+    assert result["n_reference_rows"] == len(bootstrap)
+
+
+
+def test_emit_deployment_v2_resolves_constant_risk_and_median_volumes(tmp_path) -> None:
+    import dataclasses
+    import types
+    import pandas as pd
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.live_strategy import load_strategy_params
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+
+    def _report():
+        return types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=types.SimpleNamespace(target_weights=tw, horizon_hours=168, primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity))), committee_member_weights=None)
+
+    base = dataclasses.asdict(MhsRunConfig(start="2021-01-01"))
+    constant_request = MhsDiagnosticRequest(**{**base, "pnl_vol_target_mode": "constant_risk", "committee_evidence_weighting": False})
+    out = tmp_path / "constant"
+    result = emit_deployment(_report(), constant_request, out)
+    params = load_strategy_params(out / "strategy_params.json")
+    assert params.schema_version == 2
+    assert params.policy.sizing.mode == "constant_risk"
+    assert params.policy.sizing.kelly_enabled is False
+    assert result["n_reference_rows"] == 4
+    median_request = MhsDiagnosticRequest(**{**base, "pnl_vol_target_mode": "median_relative", "exposure_scale_two_sided": False, "committee_evidence_weighting": False})
+    out_median = tmp_path / "median"
+    emit_deployment(_report(), median_request, out_median)
+    median_params = load_strategy_params(out_median / "strategy_params.json")
+    assert median_params.policy.sizing.mode == "median_relative"
+    assert median_params.policy.sizing.target_annual_vol == 0.2

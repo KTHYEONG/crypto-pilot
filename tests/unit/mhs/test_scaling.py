@@ -1001,3 +1001,118 @@ def test_mhs_kelly_z0_default_is_causal_and_registered() -> None:
     changed_future = returns.copy()
     changed_future.iloc[-1] = 10.0
     pd.testing.assert_series_equal(scale.iloc[:-1], scaling._committee_kelly_scale(changed_future, cap=3.0).iloc[:-1], check_exact=True)
+
+
+
+def test_compute_exposure_scale_warmup_matches_full_causal_prefix() -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.deployment_policy import SizingPolicy
+    from src.mhs.scaling import compute_exposure_scale
+
+    rng = np.random.default_rng(20260913)
+    wi = pd.date_range("2025-01-01", periods=400, freq="1D", tz="UTC")
+    fi = pd.date_range(wi[-1] + pd.Timedelta(days=1), periods=22, freq="1D", tz="UTC")
+    warm = pd.Series(rng.normal(0.001, 0.01, len(wi)), index=wi, dtype="float64")
+    forward = pd.Series(rng.normal(0.001, 0.01, len(fi)), index=fi, dtype="float64")
+    policy = SizingPolicy(mode="growth_budget", target_annual_vol=0.35, exposure_cap=3.0, scale_floor=0.2, kelly_enabled=True, kelly_window_days=42, kelly_fraction=0.5, kelly_lcb_z=0.0, kelly_blend_weight=0.5, drawdown_brake=False)
+    warmed = compute_exposure_scale(forward, policy, warmup_returns=warm)
+    full = compute_exposure_scale(pd.concat([warm, forward]), policy).reindex(forward.index)
+    pd.testing.assert_series_equal(warmed, full, check_exact=True)
+    assert warmed.index.equals(forward.index)
+
+
+
+
+def test_compute_exposure_scale_uses_sealed_kelly_values_and_rejects_overlap() -> None:
+    import dataclasses
+    import numpy as np
+    import pandas as pd
+    import pytest
+    from src.mhs.deployment_policy import SizingPolicy
+    from src.mhs.scaling import compute_exposure_scale
+
+    idx = pd.date_range("2025-01-01", periods=120, freq="1D", tz="UTC")
+    returns = pd.Series(np.random.default_rng(7).normal(0.001, 0.01, len(idx)), index=idx, dtype="float64")
+    base = SizingPolicy(mode="growth_budget", target_annual_vol=0.35, exposure_cap=3.0, scale_floor=0.2, kelly_enabled=True, kelly_window_days=42, kelly_fraction=0.5, kelly_lcb_z=0.0, kelly_blend_weight=0.5, drawdown_brake=False)
+    assert not compute_exposure_scale(returns, base).equals(compute_exposure_scale(returns, dataclasses.replace(base, kelly_lcb_z=3.0)))
+    overlap = pd.Series([0.01], index=pd.DatetimeIndex([idx[0]]), dtype="float64")
+    with pytest.raises(ValueError, match="precede"):
+        compute_exposure_scale(returns, base, warmup_returns=overlap)
+
+
+
+
+def test_replay_exposure_scale_wires_resolved_policy_and_warmup(monkeypatch) -> None:
+    import pandas as pd
+    from src.mhs.contracts import MhsDiagnosticRequest
+    import src.mhs.scaling as module
+
+    idx = pd.date_range("2026-01-03", periods=3, freq="1D", tz="UTC")
+    ref = pd.Series([0.01, -0.01, 0.02], index=idx, dtype="float64")
+    warm = pd.Series([0.01, 0.01], index=pd.date_range("2026-01-01", periods=2, freq="1D", tz="UTC"), dtype="float64")
+    request = MhsDiagnosticRequest(pnl_vol_target_mode="growth_budget", committee_capital=True, committee_kelly_sizing=True, exposure_scale_two_sided=True, growth_envelope="growth")
+    captured = {}
+    def fake_compute(reference, policy, *, warmup_returns=None):
+        captured.update(reference=reference, policy=policy, warmup=warmup_returns)
+        return pd.Series(1.5, index=reference.index, dtype="float64")
+    monkeypatch.setattr(module, "compute_exposure_scale", fake_compute)
+    result = module._replay_exposure_scale(ref, request, 0.35, warmup_returns=warm)
+    assert captured["reference"] is ref
+    assert captured["warmup"] is warm
+    assert captured["policy"].target_annual_vol == 0.35
+    assert captured["policy"].kelly_enabled is True
+    assert result.eq(1.5).all()
+
+
+
+def test_compute_exposure_scale_rejects_noncausal_warmup_covers_empty_and_unknown_mode() -> None:
+    import numpy as np
+    import pandas as pd
+    import pytest
+    from src.mhs.deployment_policy import SizingPolicy
+    from src.mhs.scaling import compute_exposure_scale
+
+    idx = pd.date_range("2025-01-01", periods=60, freq="1D", tz="UTC")
+    ref = pd.Series(np.random.default_rng(11).normal(0.001, 0.01, len(idx)), index=idx, dtype="float64")
+    policy = SizingPolicy(mode="growth_budget", target_annual_vol=0.35, exposure_cap=3.0, scale_floor=0.2, kelly_enabled=True, kelly_window_days=42, kelly_fraction=0.5, kelly_lcb_z=0.0, kelly_blend_weight=0.5, drawdown_brake=False)
+    naive = pd.Series([0.01], index=pd.DatetimeIndex(["2024-12-31"]), dtype="float64")
+    with pytest.raises(ValueError, match="tz-aware"):
+        compute_exposure_scale(ref, policy, warmup_returns=naive)
+    nonfinite = pd.Series([np.nan], index=pd.date_range("2024-12-31", periods=1, freq="1D", tz="UTC"), dtype="float64")
+    with pytest.raises(ValueError, match="finite"):
+        compute_exposure_scale(ref, policy, warmup_returns=nonfinite)
+    dup_idx = pd.DatetimeIndex([pd.Timestamp("2024-12-30", tz="UTC"), pd.Timestamp("2024-12-30", tz="UTC")])
+    dup = pd.Series([0.01, 0.02], index=dup_idx, dtype="float64")
+    with pytest.raises(ValueError, match="unique"):
+        compute_exposure_scale(ref, policy, warmup_returns=dup)
+    rev_idx = pd.DatetimeIndex([pd.Timestamp("2024-12-31", tz="UTC"), pd.Timestamp("2024-12-30", tz="UTC")])
+    rev = pd.Series([0.01, 0.02], index=rev_idx, dtype="float64")
+    with pytest.raises(ValueError, match="increasing"):
+        compute_exposure_scale(ref, policy, warmup_returns=rev)
+    ranged = pd.Series([0.01], index=pd.RangeIndex(1), dtype="float64")
+    with pytest.raises(ValueError, match="DatetimeIndex"):
+        compute_exposure_scale(ref, policy, warmup_returns=ranged)
+    empty = pd.Series(dtype="float64")
+    out = compute_exposure_scale(empty, policy)
+    assert out.empty
+    bogus = SizingPolicy(mode="bogus", target_annual_vol=0.35, exposure_cap=3.0, scale_floor=0.2, kelly_enabled=False, kelly_window_days=42, kelly_fraction=0.5, kelly_lcb_z=0.0, kelly_blend_weight=0.5, drawdown_brake=False)
+    with pytest.raises(ValueError, match="unknown sizing mode"):
+        compute_exposure_scale(ref, bogus)
+
+
+def test_compute_exposure_scale_median_warmup_matches_full_prefix() -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.deployment_policy import SizingPolicy
+    from src.mhs.scaling import compute_exposure_scale
+
+    rng = np.random.default_rng(20260914)
+    wi = pd.date_range("2025-01-01", periods=400, freq="1D", tz="UTC")
+    fi = pd.date_range(wi[-1] + pd.Timedelta(days=1), periods=22, freq="1D", tz="UTC")
+    warm = pd.Series(rng.normal(0.001, 0.01, len(wi)), index=wi, dtype="float64")
+    forward = pd.Series(rng.normal(0.001, 0.01, len(fi)), index=fi, dtype="float64")
+    policy = SizingPolicy(mode="median_relative", target_annual_vol=0.2, exposure_cap=1.0, scale_floor=0.2, kelly_enabled=False, kelly_window_days=42, kelly_fraction=0.5, kelly_lcb_z=0.0, kelly_blend_weight=0.5, drawdown_brake=False)
+    warmed = compute_exposure_scale(forward, policy, warmup_returns=warm)
+    full = compute_exposure_scale(pd.concat([warm, forward]), policy).reindex(forward.index)
+    pd.testing.assert_series_equal(warmed, full, check_exact=True)
