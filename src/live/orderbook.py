@@ -27,6 +27,7 @@ class OrderBookSnapshot:
     bids: tuple[tuple[Decimal, Decimal], ...]
     asks: tuple[tuple[Decimal, Decimal], ...]
     last_update_id: int
+    phase: str = "post_trade"
 
 
 def fetch_order_book(
@@ -38,6 +39,7 @@ def fetch_order_book(
     capture_seq: int,
     limit: int,
     now: pd.Timestamp,
+    phase: str = "post_trade",
 ) -> OrderBookSnapshot:
     payload = client.depth(symbol, limit=limit)
     if not isinstance(payload, dict) or "bids" not in payload or "asks" not in payload:
@@ -83,6 +85,7 @@ def fetch_order_book(
         bids=tuple(bids),
         asks=tuple(asks),
         last_update_id=last_update_id,
+        phase=phase,
     )
 
 
@@ -100,6 +103,7 @@ def capture_order_books(
     sleep_fn: Callable[[float], None],
     now_fn: Callable[[], pd.Timestamp],
     shutdown: Any | None = None,
+    phase: str = "post_trade",
 ) -> list[OrderBookSnapshot]:
     syms = list(symbols)[:max_symbols]
     if not syms:
@@ -113,7 +117,7 @@ def capture_order_books(
         now = now_fn()
         for s in syms:
             try:
-                snap = fetch_order_book(client, s, decision_time, mode=mode, capture_seq=0, limit=depth_limit, now=now)
+                snap = fetch_order_book(client, s, decision_time, mode=mode, capture_seq=0, limit=depth_limit, now=now, phase=phase)
                 snapshots_single.append(snap)
             except Exception:  # noqa: S112
                 continue
@@ -132,7 +136,7 @@ def capture_order_books(
         now = now_fn()
         for s in syms:
             try:
-                snap = fetch_order_book(client, s, decision_time, mode=mode, capture_seq=seq, limit=depth_limit, now=now)
+                snap = fetch_order_book(client, s, decision_time, mode=mode, capture_seq=seq, limit=depth_limit, now=now, phase=phase)
                 snapshots.append(snap)
             except Exception:  # noqa: S112
                 continue
@@ -165,6 +169,7 @@ def _flatten_snapshot(snap: OrderBookSnapshot) -> dict[str, Any]:
         "captured_at": snap.captured_at,
         "decision_time": snap.decision_time,
         "mode": snap.mode,
+        "phase": snap.phase,
         "capture_seq": int(snap.capture_seq),
         "last_update_id": int(snap.last_update_id),
         "best_bid": best_bid,
@@ -222,6 +227,7 @@ def append_order_book_snapshots(
             try:
                 df_existing = pd.read_parquet(path)
                 combined = pd.concat([df_existing, df_new], ignore_index=True)
+                combined["phase"] = combined["phase"].fillna("post_trade")
                 # dedup
                 combined = combined.drop_duplicates(subset=["symbol", "captured_at", "last_update_id"])
                 # re-enforce dtypes for qty/px

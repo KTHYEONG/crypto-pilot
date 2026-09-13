@@ -128,6 +128,11 @@ def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) 
                 collector.ensure_mark_price_klines(symbol, "1h", start, end)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("[DATA] markPriceKlines symbol=%s failed error=%s", symbol, exc)
+        try:
+            if hasattr(collector, "ensure_metrics_live_tail"):
+                collector.ensure_metrics_live_tail(symbol)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("[DATA] metrics_live_tail symbol=%s failed error=%s", symbol, exc)
         return True
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)

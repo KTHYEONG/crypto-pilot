@@ -990,3 +990,123 @@ def test_load_paper_funding_skips_missing_symbols(tmp_path, monkeypatch) -> None
     out = runner_mod._load_paper_funding(["AAAUSDT", "MISSINGUSDT"])
     assert list(out) == ["AAAUSDT"]
     assert float(out["AAAUSDT"].iloc[0]) == 0.001
+
+def test_run_shadow_cycle_captures_pretrade_and_baseline_before_post_trade_orderbook(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.runner as runner_mod
+    import src.live.orderbook as ob_mod
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import LiveSettings
+
+    decision_time = pd.Timestamp("2026-08-24 00:00Z")
+    now = decision_time + pd.Timedelta(hours=2)
+    artifact = tmp_path / "weights.parquet"
+    pd.DataFrame(
+        {"AAAUSDT": [0.02], "BBBUSDT": [0.0]}, index=pd.DatetimeIndex([decision_time])
+    ).to_parquet(artifact, index=True)
+
+    class MarketClientOK:
+        def exchange_info(self):
+            return {
+                "symbols": [{
+                    "symbol": "AAAUSDT",
+                    "contractType": "PERPETUAL",
+                    "quoteAsset": "USDT",
+                    "status": "TRADING",
+                    "quantityPrecision": 3,
+                    "pricePrecision": 2,
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100000"},
+                        {"filterType": "MIN_NOTIONAL", "minNotional": "1"},
+                    ],
+                }],
+                "rateLimits": [
+                    {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
+                    {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
+                    {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300},
+                ],
+            }
+
+        def book_ticker(self, symbol):
+            return {"bidPrice": "100.00", "askPrice": "101.00"}
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "101.00", "symbol": "AAAUSDT"}}
+
+        def premium_index(self):
+            return {}
+
+        def depth(self, symbol, *, limit=20):
+            return {"lastUpdateId": 1, "bids": [["100", "1"]], "asks": [["101", "1"]]}
+
+    class OrderClient:
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v2/account":
+                return {"totalWalletBalance": "2000", "availableBalance": "1900", "totalInitialMargin": "10", "totalUnrealizedProfit": "0", "dualSidePosition": "false", "multiAssetsMargin": "false"}
+            if path == "/fapi/v2/positionRisk":
+                return []
+            raise AssertionError(path)
+
+        def sync_server_time(self):
+            return None
+
+        def open_orders(self):
+            return []
+
+        def book_ticker(self, s):
+            return {"bidPrice": "100.00", "askPrice": "101.00"}
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "101.00"}}
+
+    calls: list[tuple[tuple, str]] = []
+
+    def fake_capture(client, symbols, decision_time, **kwargs):
+        calls.append((tuple(symbols), kwargs.get("phase", "post_trade")))
+        return []
+
+    def fake_exec(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        from src.live.executor import ExecutionOutcome as EO
+
+        return tuple(
+            EO(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((i.quantity, Decimal("100"), 2.0, "maker_fill", "maker"),))
+            for i in intents
+        )
+
+    from decimal import Decimal
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClientOK())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_exec)
+    monkeypatch.setattr(ob_mod, "capture_order_books", fake_capture)
+
+    ledger_path = tmp_path / "ledger.json"
+    settings = LiveSettings(
+        notional_equity_usdt=2000.0,
+        ledger_path=str(ledger_path),
+        orderbook_capture_enabled=True,
+        orderbook_capture_dir=str(tmp_path / "ob"),
+        orderbook_capture_duration_s=0,
+        orderbook_capture_interval_s=10,
+        orderbook_capture_pretrade_max_symbols=15,
+        orderbook_capture_baseline_max_symbols=80,
+        microstructure_dir=str(tmp_path / "micro"),
+        execution_quality_dir=str(tmp_path / "eq"),
+        portfolio_state_dir=str(tmp_path / "port"),
+        fills_dir=str(tmp_path / "fills"),
+        tax_ledger_dir=str(tmp_path / "tax"),
+    )
+
+    report = run_shadow_cycle(settings, decision_time, artifact, now=now)
+
+    assert report.status == "COMPLETE"
+    phases = [c[1] for c in calls]
+    assert "pre_trade" in phases and "baseline_untraded" in phases and "post_trade" in phases
+    assert phases.index("pre_trade") < phases.index("post_trade")
+    assert phases.index("baseline_untraded") < phases.index("post_trade")
+    pretrade_call = next(c for c in calls if c[1] == "pre_trade")
+    assert pretrade_call[0] == ("AAAUSDT",)
+    baseline_call = next(c for c in calls if c[1] == "baseline_untraded")
+    assert baseline_call[0] == ("BBBUSDT",)

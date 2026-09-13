@@ -88,6 +88,8 @@ class LiveSettings(BaseSettings):
     orderbook_capture_duration_s: float = 1800.0
     orderbook_capture_depth_limit: int = 20
     orderbook_capture_max_symbols: int = 40
+    orderbook_capture_pretrade_max_symbols: int = 15
+    orderbook_capture_baseline_max_symbols: int = 80
     orderbook_capture_dir: str | None = None
     fills_dir: str | None = None
     microstructure_dir: str | None = None
