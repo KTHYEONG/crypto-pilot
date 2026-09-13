@@ -108,7 +108,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # rows strictly before that boundary's train_end, and only the small
         # float mapping crosses into the fork workers.
         _reference_daily_returns = (
-            ctx.blend_report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change()
+            ctx.blend_report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change().dropna()
         )
         if ctx.config.pnl_vol_target_mode == "constant_risk":
             # I-SCALE-IS-DEPLOYED-OVERLAY: exposure_scale은 blend가 배치 확정한
