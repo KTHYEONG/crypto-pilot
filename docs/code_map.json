@@ -18,6 +18,7 @@
     "testing": [
       "tests/integration/workflows/test_taker_flow_candidate.py",
       "tests/unit/cli/commands/research/test_mhs.py",
+      "tests/unit/live/test_cli.py",
       "tests/unit/live/test_deployed_weights.py",
       "tests/unit/live/test_ledger.py",
       "tests/unit/live/test_rest.py",
@@ -213,6 +214,9 @@
   "src/mhs/contracts.py": {
     "testing": "tests/unit/mhs/test_contracts.py"
   },
+  "src/mhs/deployment_policy.py": {
+    "testing": "tests/unit/mhs/test_deployment_policy.py"
+  },
   "src/mhs/diagnostic_run.py": {
     "testing": "tests/unit/mhs/test_diagnostic_run.py"
   },
@@ -305,10 +309,7 @@
     "testing": "tests/unit/mhs/test_parallel.py"
   },
   "src/mhs/params.py": {
-    "testing": [
-      "tests/unit/mhs/test_params.py",
-      "tests/unit/mhs/test_live_strategy.py"
-    ]
+    "testing": "tests/unit/mhs/test_params.py"
   },
   "src/mhs/pipeline/config.py": {
     "testing": "tests/unit/mhs/pipeline/test_config.py"
