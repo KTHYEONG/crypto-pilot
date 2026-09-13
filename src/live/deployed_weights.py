@@ -14,6 +14,26 @@ from src.common.paths import DATA_DIR
 from src.common.errors import DataIntegrityError
 from src.live.errors import StaleSignalError, ArtifactSealError
 
+EXPOSURE_SCALE_COLUMN: str = "exposure_scale"
+EXPOSURE_SCALE_KEEP_ROWS: int = 1_000_000
+
+
+def _sibling_with_token(weights_path: Path, replacement: str) -> Path:
+    p = Path(weights_path)
+    token = "deployed_target_weights"
+    name = p.name
+    if token not in name:
+        raise DataIntegrityError(f"weights path missing token 'deployed_target_weights': {p}")
+    return p.parent / name.replace(token, replacement)
+
+
+def exposure_scale_path(weights_path: Path) -> Path:
+    return _sibling_with_token(weights_path, "deployed_exposure_scale")
+
+
+def decision_marks_path(weights_path: Path) -> Path:
+    return _sibling_with_token(weights_path, "deployed_decision_marks")
+
 
 def default_weights_path() -> Path:
     return DATA_DIR / "state" / "deployed_target_weights.parquet"

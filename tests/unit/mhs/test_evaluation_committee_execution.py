@@ -785,3 +785,34 @@ def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_m
     # The spy was called and received member_weights
     assert "member_weights" in spy
     assert spy["member_weights"] == {"some_member": 1.0}
+
+
+def test_top_level_committee_regime_scale_uses_shared_hourly_helper(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
+    import pandas as pd
+    import src.mhs.evaluation as ev
+    import src.mhs.scaling as scaling
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+    from tests.unit.mhs.test_evaluation_appresearch import _START
+
+    root, end = mhs_market_with_taker_buy_quote
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True,
+    )
+    calls: list[pd.DatetimeIndex] = []
+    real_helper = scaling.regime_cash_scale_1h
+
+    def spy(log_close, execution_mask, grid_1h, fast_horizon_hours, trend_efficiency_overlay):
+        calls.append(grid_1h)
+        return real_helper(log_close, execution_mask, grid_1h, fast_horizon_hours, trend_efficiency_overlay)
+
+    monkeypatch.setattr(scaling, "regime_cash_scale_1h", spy)
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None))
+    report = run_mhs_horizon_diagnostic(request)
+    assert report.status == "COMPLETE"
+    assert calls
+    spacing = calls[0].to_series().diff().dropna()
+    assert (spacing == pd.Timedelta(hours=1)).all()

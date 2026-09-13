@@ -388,3 +388,66 @@ class TestFillMarkParityMask:
         mark = pd.DataFrame({"B": [1.0, 2.0, 3.0]}, index=idx)
         with pytest.raises(ValueError, match="column"):
             fill_mark_parity_mask(fill, mark)
+
+
+def test_load_base_panel_pit_min_history_admits_eligible_short_history_symbol(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+    from src.mhs.params import PANEL_MIN_HISTORY_BARS
+
+    assert PANEL_MIN_HISTORY_BARS == 720
+    start = pd.Timestamp("2024-01-01", tz="UTC")
+    root = tmp_path / "ohlcv"
+    (root / "1h").mkdir(parents=True)
+    for symbol, n_bars in (("SYMAUSDT", 800), ("SYMBUSDT", 700)):
+        idx = pd.date_range(start, periods=n_bars, freq="1h", tz="UTC")
+        frame = pd.DataFrame({"timestamp": np.array([ts.value // 1_000_000 for ts in idx], dtype="int64"), "close": np.linspace(1.0, 2.0, n_bars)})
+        frame.to_parquet(root / "1h" / f"{symbol}.parquet", index=False)
+    end = start + pd.Timedelta(hours=799)
+    panel = load_base_panel(str(root), "1h", ("close",), start, end, partition="all", min_bars=PANEL_MIN_HISTORY_BARS)
+    assert list(panel["close"].columns) == ["SYMAUSDT"]
+
+
+def test_load_panel_stage_uses_pit_min_history_bars(monkeypatch) -> None:
+    import types
+    import pandas as pd
+    import pytest
+    import src.mhs.pipeline.stages.panel as stage
+    from src.mhs.params import PANEL_MIN_HISTORY_BARS
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    captured: dict[str, object] = {}
+
+    def fake_load(*args, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop-after-load")
+
+    monkeypatch.setattr(stage, "load_base_panel", fake_load)
+    ctx = types.SimpleNamespace(
+        config=MhsRunConfig(data_root="/nonexistent-root", log_run=False),
+        start=pd.Timestamp("2024-01-01", tz="UTC"),
+        end=pd.Timestamp("2024-03-01", tz="UTC"),
+    )
+    with pytest.raises(RuntimeError, match="stop-after-load"):
+        stage.load_panel(ctx, None)
+    assert captured["min_bars"] == PANEL_MIN_HISTORY_BARS
+
+
+def test_load_feature_panels_uses_pit_min_history_bars(monkeypatch) -> None:
+    import pandas as pd
+    import src.mhs.evaluation.diagnostics as diagnostics
+    from src.mhs.params import PANEL_MIN_HISTORY_BARS
+
+    grid = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
+    captured: dict[str, object] = {}
+
+    def fake_load(root, interval, columns, start, end, partition="dev", min_bars=0):
+        captured["min_bars"] = min_bars
+        return {c: pd.DataFrame(1.0, index=grid, columns=["AAAUSDT"]) for c in columns}
+
+    monkeypatch.setattr(diagnostics, "_available_panel_columns", lambda root, requested: ("close",))
+    monkeypatch.setattr(diagnostics, "load_base_panel", fake_load)
+    panels = diagnostics._load_feature_panels("/root", grid[0], grid[-1], grid, ["AAAUSDT"], columns=("close",))
+    assert captured["min_bars"] == PANEL_MIN_HISTORY_BARS
+    assert list(panels["close"].columns) == ["AAAUSDT"]

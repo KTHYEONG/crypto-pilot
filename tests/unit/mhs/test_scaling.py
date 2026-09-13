@@ -1116,3 +1116,28 @@ def test_compute_exposure_scale_median_warmup_matches_full_prefix() -> None:
     warmed = compute_exposure_scale(forward, policy, warmup_returns=warm)
     full = compute_exposure_scale(pd.concat([warm, forward]), policy).reindex(forward.index)
     pd.testing.assert_series_equal(warmed, full, check_exact=True)
+
+
+def test_regime_cash_scale_1h_uses_hourly_median_window() -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs import scaling
+    from src.mhs.horizons import realized_vol
+
+    rng = np.random.default_rng(11)
+    grid = pd.date_range("2025-01-01", periods=24 * 80, freq="1h", tz="UTC")
+    sigma = np.where(np.arange(len(grid)) < 24 * 50, 0.005, 0.03)[:, None]
+    log_close = pd.DataFrame(np.cumsum(rng.normal(0.0, 1.0, (len(grid), 4)) * sigma, axis=0), index=grid, columns=["A", "B", "C", "D"])
+    mask = pd.DataFrame(True, index=grid, columns=log_close.columns)
+
+    out = scaling.regime_cash_scale_1h(log_close, mask, grid, 48, False)
+    expected = scaling._regime_cash_scale(realized_vol(log_close, 48).where(mask).reindex(grid).mean(axis=1))
+    pd.testing.assert_series_equal(out, expected, check_names=False)
+
+    decision_grid = grid[grid.hour == 0]
+    daily = scaling._regime_cash_scale(realized_vol(log_close, 48).where(mask).reindex(decision_grid).mean(axis=1))
+    assert not np.allclose(out.reindex(decision_grid).fillna(1.0).to_numpy(), daily.fillna(1.0).to_numpy())
+
+    overlay = scaling.regime_cash_scale_1h(log_close, mask, grid, 48, True)
+    expected_overlay = expected.mul(scaling._trend_efficiency_overlay_scale(log_close, mask, 48, grid))
+    pd.testing.assert_series_equal(overlay, expected_overlay, check_names=False)

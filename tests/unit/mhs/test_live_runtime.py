@@ -149,3 +149,61 @@ def test_reconcile_runtime_params_swaps_on_digest_change() -> None:
     assert out_rt.held_target_row == {"BTCUSDT": 0.5}
 
 
+
+
+def test_runtime_schema_v2_roundtrip_and_v1_migration_clears_held(tmp_path) -> None:
+    import json
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime, load_or_bootstrap_runtime, save_runtime
+
+    assert SCHEMA_VERSION == 2
+    ref = pd.Series([0.01], index=pd.DatetimeIndex([pd.Timestamp("2025-12-31", tz="UTC")]), dtype="float64")
+    runtime = LiveRuntime(schema_version=2, params_digest="d", last_decision_date=pd.Timestamp("2026-09-01", tz="UTC"), held_target_row={"AAAUSDT": 0.1}, reference_daily_returns=ref)
+    path = save_runtime(tmp_path / "rt.json", runtime)
+    loaded = load_or_bootstrap_runtime(path, None, pd.Series(dtype="float64"))
+    assert loaded.schema_version == 2
+    assert loaded.held_target_row == {"AAAUSDT": 0.1}
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = 1
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(raw), encoding="utf-8")
+    migrated = load_or_bootstrap_runtime(legacy, None, pd.Series(dtype="float64"))
+    assert migrated.schema_version == 2
+    assert migrated.held_target_row == {}
+    assert migrated.params_digest == "d"
+    assert migrated.last_decision_date == runtime.last_decision_date
+    pd.testing.assert_series_equal(migrated.reference_daily_returns, loaded.reference_daily_returns)
+
+    raw["schema_version"] = 3
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="schema_version"):
+        load_or_bootstrap_runtime(bad, None, pd.Series(dtype="float64"))
+
+
+def test_runtime_corrupt_held_row_fails_closed(tmp_path) -> None:
+    import json
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime, load_or_bootstrap_runtime, save_runtime
+
+    ref = pd.Series([0.01], index=pd.DatetimeIndex([pd.Timestamp("2025-12-31", tz="UTC")]), dtype="float64")
+    runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=pd.Timestamp("2026-09-01", tz="UTC"), held_target_row={"AAAUSDT": 0.1}, reference_daily_returns=ref)
+    path = save_runtime(tmp_path / "rt.json", runtime)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+
+    raw["held_target_row"] = {"AAAUSDT": "abc"}
+    bad = tmp_path / "bad_held.json"
+    bad.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="held_target_row"):
+        load_or_bootstrap_runtime(bad, None, pd.Series(dtype="float64"))
+
+    raw["held_target_row"] = {"AAAUSDT": True}
+    bad_bool = tmp_path / "bad_held_bool.json"
+    bad_bool.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="held_target_row"):
+        load_or_bootstrap_runtime(bad_bool, None, pd.Series(dtype="float64"))

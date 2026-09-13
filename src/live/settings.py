@@ -7,7 +7,7 @@ from enum import Enum
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.mhs.params import GROWTH_RISK_ENVELOPES
+from src.mhs.params import GROWTH_RISK_ENVELOPES, SIGNAL_PANEL_WINDOW_DAYS
 from src.mhs.types import ExecutionSpec
 
 #: LIVE_MAINNET 승인 문자열. 이 값과 정확히 일치해야만 실계좌 모드가 생성된다.
@@ -76,7 +76,7 @@ class LiveSettings(BaseSettings):
     # 신호 스테일 상한(시간). 초과 신호는 주문 0건으로 스킵한다. env: LIVE_MAX_SIGNAL_STALENESS_HOURS.
     max_signal_staleness_hours: float = 6.0
     max_weights_staleness_hours: float = 96.0
-    daemon_catchup_buffer_minutes: float = 20.0
+    daemon_catchup_buffer_minutes: float = 3.0
     daemon_max_attempts_per_day: int = 5
     heartbeat_path: str | None = None
     maker_fee_bps: float = ExecutionSpec().maker_fee_bps
@@ -99,7 +99,7 @@ class LiveSettings(BaseSettings):
     alert_email_to: str | None = None
     min_universe_symbols: int = 100
     alert_halt_streak: int = 2
-    data_retention_days: int = 220
+    data_retention_days: int = SIGNAL_PANEL_WINDOW_DAYS + 30
     orderbook_retention_days: int = 365
     refresh_max_workers: int = 12
     refresh_lookback_days: int = 40
@@ -110,10 +110,8 @@ class LiveSettings(BaseSettings):
 
     # 리스크 게이트(등록 상한). 레버리지 천장은 리스크 엔벨로프 레지스트리에서 유도한다.
     max_gross_leverage: float = GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
-    max_symbol_notional_fraction: float = 0.05
     max_daily_orders: int = 600
-    max_daily_turnover_fraction: float = 2.0
-    equity_drawdown_halt: float = -0.45
+    max_daily_turnover_fraction: float = 2.0 * GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
     min_free_margin_fraction: float = 0.15
 
     @field_validator("notional_equity_usdt")

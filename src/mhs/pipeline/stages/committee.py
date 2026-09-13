@@ -183,14 +183,8 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # its blended targets (_build_fold_target_weights) so top-level prescreen/
     # tail/execution diagnostics are comparable to fold primary evidence
     # (spec §3.2, ``regime_cash_scale``).
-    vol_mean = realized_vol(ctx.log_close, 48).where(ctx.execution_mask).reindex(ctx.grid_1h).mean(axis=1)
-    ctx.regime_scale = _scaling._regime_cash_scale(vol_mean)
-    if ctx.config.trend_efficiency_overlay:
-        ctx.regime_scale = ctx.regime_scale.mul(
-            _scaling._trend_efficiency_overlay_scale(ctx.log_close, ctx.execution_mask, ctx.fast.horizon_hours, ctx.grid_1h),
-        )
+    ctx.regime_scale = _scaling.regime_cash_scale_1h(ctx.log_close, ctx.execution_mask, ctx.grid_1h, ctx.fast.horizon_hours, ctx.config.trend_efficiency_overlay)
     ctx.blend_1h = ctx.blend_1h.mul(ctx.regime_scale, axis=0)
-    del vol_mean
     # The 1h book views are only consumed by ``blend_1h`` above.  Releasing
     # them before phase diagnostics and the top-level replays keeps two full
     # multi-year weight matrices out of the replay baseline (spec §3.1).
