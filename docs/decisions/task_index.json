@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ZOMBIE_MASK_RESEARCH_RERUN",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_ZOMBIE_MASK_RESEARCH_RERUN",
+      "domain": "mhs",
+      "title": "좀비봉 마스크 정책 연구/라이브 경로 배선",
+      "why": "SETTLING 심볼이 계속 내려받히는 flat 봉을 legacy 정책이 실거래처럼 취급해 연구·라이브 데이터 현실성이 어긋났다",
+      "resolution": "data_policy를 CLI/MhsRunConfig/MhsDiagnosticRequest에서 패널 로딩·fold 가중치·피처 패널·파라미터 생성·라이브 신호 단계까지 배선하고 좀비 꼬리는 격리 대상에서 제외했다",
+      "impact": "zombie_mask_v1 재백테스트 실측 CAGR 5.374->5.234, MDD -0.453->-0.454, Research-GO 16/16 유지; 코드 배선 없이는 파라미터만 바꿔도 라이브가 거부/정지했다"
+    },
+    {
       "task_id": "ZOMBIE_BAR_MASK_POLICY_20260914",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_ZOMBIE_BAR_MASK_POLICY_20260914",
@@ -989,16 +999,6 @@
       "why": "5m 캐시 50%(225/446 심볼)가 미수집 상태로 리플레이 도중에야 사후 발견되던 문제(ADR_20260815_MHS_EXECUTION_DATA_COVERAGE_GATE)를 계기로, 1m/3m/5m 체결 정밀도를 실측 비교함. 3m은 5m 대비 체결가 오차 median -27%(15.7→11.4bps)이며, 1m에서 3m을 합성하는 방식은 네이티브 3m 직접 수집 대비 약 10배 느리고 약 57배 메모리를 더 써 비합리적임을 실측 확인. Binance가 3m을 1st-class interval로 이미 지원해 신규 수집 코드 없이 네이티브 수집이 가능함을 확인.",
       "resolution": "사용자 지시로 data/futures/ohlcv/{1m,5m} 삭제(10.3GB 회수) 후 기존 collect_mhs_execution_data로 프로덕션 funded 유니버스 446개 심볼 전체를 네이티브 3m으로 재수집(446/446 PRESENT, 6.1GB, 1012.6초). 3m 전수 무결성검증 실행: 내부갭 36개 심볼 중 28개가 Binance Vision 소스 자체의 실제 결손(2022-02-25~03-01, 2022-03-31~04-03, 직접 아카이브 재조회로 확정, fold validation 윈도우 밖이라 Research-GO에 영향 없음)임을 검증. MhsDiagnosticRequest.execution_timeframe을 Literal['1m','3m','5m']로 확장하고 기본값을 '5m'->'3m'으로 변경(5m 캐시가 더 이상 없으므로 필수 변경), freq 매핑 5곳·_coverage() step 매핑·build_mhs_execution_plan 기본값·CLI choices/default를 동일하게 갱신. 커버리지 게이트(assert_execution_data_coverage 등)는 timeframe-agnostic이라 무변경 재사용.",
       "impact": "MHS 실행 리플레이가 기본적으로 3m 그리드로 전환되어 5m 대비 체결정밀도가 개선되고, 1m 유지 대비 저장공간·리플레이 메모리 부담이 크게 낮아짐. 2022년 2~4월 소스 결손은 문서화된 기존 게이트로 커버되어 별도 예외 로직 없이 안전하게 처리됨."
-    },
-    {
-      "task_id": "TASK_MHS_EXECUTION_DATA_COVERAGE_GATE",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_EXECUTION_DATA_COVERAGE_GATE",
-      "domain": "mhs",
-      "title": "MHS 실행 데이터 커버리지 게이트 및 결손/알파 사유 분리",
-      "why": "committee_capital(35e85649)가 fold 자본을 실제 5m 원장으로 흘리며 RELEVANT_EXECUTION_DATA_GAP이 fold2(2025)에서 처음 노출됨. 로컬 캐시 대조 결과 246개 funded 심볼(1000SHIBUSDT, AEROUSDT 등)이 5m OHLCV 캐시 자체가 없어 리플레이 도중에야 MISSING_DATA로 사후 발견되고, 알파 성과 실패와 데이터 결손 실패가 reason_codes에 구분 없이 섞여 있었음.",
-      "resolution": "mhs_execution_collection.py에 assert_execution_data_coverage() 신설(기존 _coverage() 재사용, root 파라미터 하위호환 추가), MhsDiagnosticRequest.execution_coverage_gate 옵트인 플래그(기본 False)로 funded 유니버스 확정 직후 리플레이 전 fail-closed 사전 검증 연결. MhsResearchGoResult.data_integrity_reason_codes 파생 필드와 MHS_GO_REASON_DATA_INTEGRITY_CODES 상수로 결손성 사유(RELEVANT_EXECUTION_DATA_GAP 등)와 알파 품질 사유(Sharpe 미달 등)를 분리해 run_history/CLI(--execution-coverage-gate)에 노출. 3m 타임프레임 도입과 5m→1m 전면 전환은 근거 부족(participation_warnings~1e-9, RAM 비용 증가)으로 스코프아웃.",
-      "impact": "리플레이 수백 초 소요 후 사후 발견되던 데이터 결손을 사전 즉시 차단(--execution-coverage-gate opt-in, 기본 byte-identical)하고, active.jsonl/latest.json 소비자가 '측정 경로 변경으로 성과가 바뀐 것'과 '데이터가 결손인 것'을 즉시 구분 가능해짐."
     }
   ]
 }

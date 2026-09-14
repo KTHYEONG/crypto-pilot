@@ -477,6 +477,5 @@
   },
   "src/quant/universe/pit_universe.py": {
     "testing": "tests/unit/quant/universe/test_pit_universe.py"
-  },
-  "tools/devops/daemon_idle_gate.py": {}
+  }
 }
