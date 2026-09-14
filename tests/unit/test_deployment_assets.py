@@ -46,3 +46,15 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS",
     "test_docker_compose_has_independent_liquidation_collector_service",
 )
+
+
+def test_deploy_workflow_waits_for_daemon_idle_gate_before_recreate() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+
+    gate = workflow.index("python3 tools/devops/daemon_idle_gate.py")
+    recreate = workflow.index("up -d --force-recreate")
+    assert gate < recreate
+    assert "cat ~/crypto-pilot/data/state/live_daemon_heartbeat.json" in workflow
+    assert '--waited-s "$waited"' in workflow
+    assert '"$rc" -ne 10' in workflow
+    assert "sleep 60" in workflow
