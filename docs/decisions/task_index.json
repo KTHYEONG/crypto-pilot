@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "SIGNAL_STEP_BOOTSTRAP_ORDER_FIXTURE_FIX",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_SIGNAL_STEP_BOOTSTRAP_ORDER_FIXTURE_FIX",
+      "domain": "live",
+      "title": "signal-step data_policy 픽스처 정합",
+      "why": "LIVE_RUNTIME_DATA_POLICY를 zombie_mask_v1로 전환하면서 테스트 2건의 하드코딩된 data_policy 리터럴이 낡아 실패했다",
+      "resolution": "두 테스트가 런타임 정책 상수를 동적으로 읽어 불일치/일치를 판단하도록 고쳐 상수 변경에 견고하게 만들었다",
+      "impact": "test_cli.py 22/22 통과, lean_check 전체 PASS 복구; 프로덕션 코드 변경 없음"
+    },
+    {
       "task_id": "HALT_REASON_PERSISTENCE",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_HALT_REASON_PERSISTENCE",
@@ -989,16 +999,6 @@
       "why": "정적 MHS_SOURCE_GAP_EXCLUDED_SYMBOLS 리스트는 시간이 지나 데이터가 백필되거나 요청 구간이 바뀌어도 갱신되지 않아, 더 이상 문제없는 심볼을 영구 배제하거나 새로 생긴 결손을 못 잡는 구조적 한계가 있었음. 사용자가 하드코딩 대신 매 실행마다 현재 캐시 상태를 기준으로 자동 판정하는 로직을 요청.",
       "resolution": "mhs_execution_collection.py에 MHS_DYNAMIC_GAP_EXCLUSION_HOURS=720(liquid_half_eligibility의 min_history_bars=720과 동일한 기존 불변량 재사용) 상수와 apply_dynamic_gap_exclusion()/apply_dynamic_mark_gap_exclusion() 신설 - roster_membership_intervals 기반으로 720시간 이상 연속 갭이 로스터 편입 구간과 겹치면 해당 구간만 execution_mask에서 자동 제외(720시간 미만은 기존 MISSING_DATA/RELEVANT_EXECUTION_DATA_GAP fold 리포팅에 위임). execution_coverage_gate 옵트인 플래그 하나로 동적 제외+기존 strict 게이트를 함께 묶어(이 저장소의 기존 옵트인 컨벤션 준수, 기본 byte-identical), 로스터 전체가 제외되면(전형적 설정 오류) fail-closed하는 안전장치도 추가.",
       "impact": "--execution-coverage-gate 사용 시 데이터가 나중에 백필되면 다음 실행에서 자동으로 재포함되고, 캐시가 훼손되면 자동으로 재배제되어 리스트 유지보수가 불필요해짐. 매직넘버 없이 기존 유동성 자격 불변량(720h)을 재사용."
-    },
-    {
-      "task_id": "TASK_MHS_DATA_INTEGRITY_RELEVANCE_SCOPING",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_DATA_INTEGRITY_RELEVANCE_SCOPING",
-      "domain": "mhs",
-      "title": "MHS 데이터 무결성 관련성 스코핑 및 마크가격 사전 게이트",
-      "why": "3m 전환 후 실제 실행에서 --execution-coverage-gate가 로스터에 전혀 편입되지 않는 심볼의 무관한 결손 36/36(100% 오탐)으로 과차단되는 동시에, 게이트를 끄면 markPriceKlines 결손(VETUSDT 등 13개 심볼, 로스터 편입이 마크 데이터 시작보다 최대 9,410시간 앞섬)으로 91초 뒤 리플레이 도중 크래시함을 실측함. 두 문제 모두 커버리지 검사가 '실제 체결되는 (심볼×시각)'이 아니라 '전체 심볼×전체기간'으로 정의된 동일한 설계 결함에서 발생.",
-      "resolution": "mhs_execution_collection.py에 roster_membership_intervals()(execution_mask에서 심볼별 연속 편입구간 벡터화 추출) 신설. 이를 재사용해 assert_relevant_execution_data_coverage()(구간별 결손만 검사, 기존 전체스코프 assert_execution_data_coverage는 백필검증용으로 유지)와 assert_relevant_mark_price_coverage()(_cached_mark_panel과 동일한 +1h 인과 시프트·양수 필터·stale_hours 정책 재현)를 신규 구현. run_mhs_horizon_diagnostic의 execution_mask 산출 직후로 게이트 호출 위치 이동. _load_funding_series가 손상 파일을 무성으로 탈락시키던 부분을 dropped 매핑 반환으로 관측 가능하게 변경.",
-      "impact": "무관한 데이터 결손으로 인한 진단 실행 과차단이 제거되고, 이전에는 91초 리플레이 후에야 발견되던 마크가격 결손이 실행 시작 전 즉시 심볼 단위로 보고됨. markPriceKlines 백필(67개 심볼, 소스 존재 확인됨) 후 재실행하면 3m 전환의 순수 효과를 마크 결손 오염 없이 측정 가능."
     }
   ]
 }
