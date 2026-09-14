@@ -344,6 +344,7 @@ class MhsDiagnosticRequest:
             help="One-time, narrowly-scoped extension of the sealed evaluation window through 2026-06-30 for a genuine out-of-selection-window check.",
         ),
     )
+    data_policy: Literal['legacy', 'zombie_mask_v1'] = field(default='legacy', metadata=cli_param(flag='--data-policy', help='Input-data contract for 1h panels (legacy keeps every bar; zombie_mask_v1 masks causally-detected delisted flat bars).', choices=('legacy', 'zombie_mask_v1')))
 
     def __post_init__(self) -> None:
         from src.mhs.validation import validate_request

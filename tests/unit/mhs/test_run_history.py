@@ -423,3 +423,15 @@ def test_mhs_kelly_z0_run_history_policy_is_distinct_trial(tmp_path) -> None:
     counted, source = derive_trials_attempted(tmp_path)
     assert counted == SEARCH_TRIALS_ATTEMPTED + 2
     assert source == 'constant_plus_ledger'
+
+
+def test_trial_identity_key_distinguishes_data_policy_and_keeps_legacy_records() -> None:
+    from src.mhs.run_history import trial_identity_key
+
+    snapshot = {"K": 1}
+    missing = trial_identity_key({"flags": {}, "params_snapshot": snapshot})
+    legacy = trial_identity_key({"flags": {"data_policy": "legacy"}, "params_snapshot": snapshot})
+    masked = trial_identity_key({"flags": {"data_policy": "zombie_mask_v1"}, "params_snapshot": snapshot})
+
+    assert missing == legacy
+    assert masked != legacy

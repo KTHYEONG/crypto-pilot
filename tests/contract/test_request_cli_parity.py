@@ -106,3 +106,23 @@ def test_scenario_mhs_dd_brake_10_cli_request_parity() -> None:
         == dataclasses.asdict(MhsRunConfig())
     )
     assert dataclasses.asdict(MhsRunConfig())["exposure_drawdown_brake"] is False
+
+
+def test_data_policy_choices_match_cli_and_metadata() -> None:
+    import argparse
+    import dataclasses
+
+    from src.cli.commands.research.mhs import add_mhs_commands
+    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.panel import DATA_POLICIES
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    cli_action = next(a for a in parser._actions if a.dest == "data_policy")
+    field = next(f for f in dataclasses.fields(MhsDiagnosticRequest) if f.name == "data_policy")
+
+    assert cli_action.default == "legacy"
+    assert set(cli_action.choices) == set(DATA_POLICIES)
+    assert set(field.metadata["choices"]) == set(DATA_POLICIES)
+    assert field.metadata["flag"] == "--data-policy"

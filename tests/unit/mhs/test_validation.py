@@ -21,3 +21,12 @@ def test_validate_request_pnl_vol_target_mode_growth_budget() -> None:
     req = MhsDiagnosticRequest(pnl_vol_target_mode="growth_budget")
     # Should not raise
     validate_request(req, COMMITTEE_TARGET_GROSS_UNSET)
+
+
+def test_request_rejects_unknown_data_policy() -> None:
+    import pytest
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    with pytest.raises(ValueError, match="data_policy"):
+        MhsDiagnosticRequest(data_policy="zombie_mask_v9")  # type: ignore[arg-type]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 import json
 import logging
@@ -280,7 +281,7 @@ def compute_signal_row(
     dt = pd.Timestamp(date).tz_convert("UTC").normalize() if pd.Timestamp(date).tzinfo is not None else pd.Timestamp(date).tz_localize("UTC").normalize()
     _assert_panel_history_available(data_root, dt - pd.Timedelta(days=int(params.policy.signal_window.panel_window_days)))
     fold = _synthetic_fold(dt, params)
-    request = params.policy.target_weights.to_request()  # TargetWeightPolicy.to_request seam
+    request = dataclasses.replace(params.policy.target_weights.to_request(), data_policy=params.data_policy)  # type: ignore[arg-type]  # TargetWeightPolicy.to_request seam
     funding_by_symbol = _load_funding_by_symbol(data_root, quarantine)
 
     target_weights, _signal_available_at, _minute_roster, grid_1h = _build_fold_target_weights(  # noqa: RUF059
