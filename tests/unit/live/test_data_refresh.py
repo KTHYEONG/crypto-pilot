@@ -1,16 +1,27 @@
 # ruff: noqa
 def test_refresh_live_market_data_skips_fresh_symbols(tmp_path, monkeypatch) -> None:
-    # Given: one dev symbol with a parquet whose tail == now
     import pandas as pd
     from src.live import data_refresh
 
     now = pd.Timestamp("2026-09-01T00:00:00Z")
-    d = tmp_path / "ohlcv" / "1h"
-    d.mkdir(parents=True)
-    ts = [int((now - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
-    pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / "BTCUSDT.parquet", index=False)
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    funding_dir = tmp_path / "funding"
+    funding_dir.mkdir(parents=True)
     monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
+    def _ms(ts: pd.Timestamp) -> int:
+        return int(ts.value // 10**6)
+
+    def _write_ohlcv(symbol: str, tail: pd.Timestamp) -> None:
+        stamps = [_ms(tail - pd.Timedelta(hours=h)) for h in range(48)]
+        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{symbol}.parquet", index=False)
+
+    def _write_funding(symbol: str, last: pd.Timestamp) -> None:
+        stamps = [_ms(last - pd.Timedelta(hours=8 * k)) for k in (2, 1, 0)]
+        pd.DataFrame({"timestamp": stamps, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
+    _write_ohlcv("BTCUSDT", now)
+    _write_funding("BTCUSDT", now)
     calls: list[str] = []
 
     class _Collector:
@@ -20,23 +31,15 @@ def test_refresh_live_market_data_skips_fresh_symbols(tmp_path, monkeypatch) -> 
                 return True
             return _rec
 
-    # When
     report = data_refresh.refresh_live_market_data(
-        tmp_path,
-        now=now,
-        lookback_days=40,
-        max_workers=2,
-        deadline_s=30.0,
-        freshness_floor_hours=1.5,
-        min_symbols=1,
-        max_fail_fraction=0.15,
-        collector=_Collector(),
+        tmp_path, now=now, lookback_days=40, max_workers=2, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=_Collector(),
     )
 
-    # Then
     assert report.total == 1
     assert report.fresh == 1
     assert report.refreshed == 0
+    assert report.funding_stale == 0
     assert calls == []
     assert report.ok is True
 
@@ -160,19 +163,17 @@ def test_market_data_staleness_hours_p90_ignores_delisted_outliers(tmp_path, mon
 
     d = tmp_path / "ohlcv" / "1h"
     d.mkdir(parents=True)
-    # 18 healthy symbols at 2h, 2 delisted at 2000h -> p90 must stay ~2h, not blow up
     plan = [(f"H{i}USDT", 2) for i in range(40)] + [("DEADAUSDT", 2000), ("DEADBUSDT", 2000)]
     for sym, lag_h in plan:
         ts = [int((now - pd.Timedelta(hours=lag_h + k)).value // 10**6) for k in range(10)]
-        pd.DataFrame({"timestamp": ts, "close": [1.0] * 10}).to_parquet(d / f"{sym}.parquet", index=False)
+        pd.DataFrame({"timestamp": ts, "close": [1.0] * 10, "volume": [1.0] * 10}).to_parquet(d / f"{sym}.parquet", index=False)
 
     got = data_refresh.market_data_staleness_hours(tmp_path, now=now)
-    assert got < 48.0  # robust to the 2 delisted outliers
+    assert got < 48.0
 
-    # a real systemic outage: every symbol stale -> metric rises
     for sym, _ in plan:
         ts = [int((now - pd.Timedelta(hours=200 + k)).value // 10**6) for k in range(10)]
-        pd.DataFrame({"timestamp": ts, "close": [1.0] * 10}).to_parquet(d / f"{sym}.parquet", index=False)
+        pd.DataFrame({"timestamp": ts, "close": [1.0] * 10, "volume": [1.0] * 10}).to_parquet(d / f"{sym}.parquet", index=False)
     assert data_refresh.market_data_staleness_hours(tmp_path, now=now) > 150.0
 
 def test_refresh_one_symbol_tail_calls_ensure_metrics_live_tail() -> None:
@@ -409,17 +410,29 @@ def test_refresh_live_market_data_aborts_remaining_symbols_on_ip_block(tmp_path,
 def test_refresh_live_market_data_keeps_fresh_count_during_ip_block(tmp_path, monkeypatch) -> None:
     import pandas as pd
     from src.live import data_refresh
-    from src.market_data.binance.futures import BinanceIpBlockedError
 
     now = pd.Timestamp("2026-09-01T00:00:00Z")
-    d = tmp_path / "ohlcv" / "1h"
-    d.mkdir(parents=True)
-    old = now - pd.Timedelta(days=5)
-    ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    funding_dir = tmp_path / "funding"
+    funding_dir.mkdir(parents=True)
     monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
-    pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / "AUSDT.parquet", index=False)
-    fresh_ts = [int((now - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
-    pd.DataFrame({"timestamp": fresh_ts, "close": [1.0] * 48}).to_parquet(d / "ZUSDT.parquet", index=False)
+
+    def _ms(ts: pd.Timestamp) -> int:
+        return int(ts.value // 10**6)
+
+    def _write_ohlcv(symbol: str, tail: pd.Timestamp) -> None:
+        stamps = [_ms(tail - pd.Timedelta(hours=h)) for h in range(48)]
+        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{symbol}.parquet", index=False)
+
+    def _write_funding(symbol: str, last: pd.Timestamp) -> None:
+        stamps = [_ms(last - pd.Timedelta(hours=8 * k)) for k in (2, 1, 0)]
+        pd.DataFrame({"timestamp": stamps, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    _write_ohlcv("AUSDT", now - pd.Timedelta(days=5))
+    _write_ohlcv("ZUSDT", now)
+    _write_funding("ZUSDT", now)
 
     def _fake_one(collector, symbol, start, end):
         raise BinanceIpBlockedError(http_code=429, url="https://fapi.binance.com/fapi/v1/klines")
@@ -442,13 +455,25 @@ def test_refresh_live_market_data_ignores_legacy_temp_artifacts(tmp_path, monkey
     from src.live import data_refresh
 
     now = pd.Timestamp("2026-09-01T00:00:00Z")
-    d = tmp_path / "ohlcv" / "1h"
-    d.mkdir(parents=True)
-    ts = [int((now - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
-    frame = pd.DataFrame({"timestamp": ts, "close": [1.0] * 48})
-    frame.to_parquet(d / "AUSDT.parquet", index=False)
-    frame.to_parquet(d / "AUSDT.tmp.parquet", index=False)
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    funding_dir = tmp_path / "funding"
+    funding_dir.mkdir(parents=True)
     monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+
+    def _ms(ts: pd.Timestamp) -> int:
+        return int(ts.value // 10**6)
+
+    def _write_ohlcv(symbol: str, tail: pd.Timestamp) -> None:
+        stamps = [_ms(tail - pd.Timedelta(hours=h)) for h in range(48)]
+        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{symbol}.parquet", index=False)
+
+    def _write_funding(symbol: str, last: pd.Timestamp) -> None:
+        stamps = [_ms(last - pd.Timedelta(hours=8 * k)) for k in (2, 1, 0)]
+        pd.DataFrame({"timestamp": stamps, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
+    _write_ohlcv("AUSDT", now)
+    _write_funding("AUSDT", now)
+    (ohlcv_dir / "AUSDT.tmp.parquet").write_bytes((ohlcv_dir / "AUSDT.parquet").read_bytes())
 
     report = data_refresh.refresh_live_market_data(
         tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
@@ -470,10 +495,133 @@ def test_market_data_staleness_hours_ignores_legacy_temp_artifacts(tmp_path, mon
     monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     healthy = [int((now - pd.Timedelta(hours=2 + k)).value // 10**6) for k in range(10)]
     stale = [int((now - pd.Timedelta(hours=2000 + k)).value // 10**6) for k in range(10)]
-    pd.DataFrame({"timestamp": healthy, "close": [1.0] * 10}).to_parquet(d / "AUSDT.parquet", index=False)
-    pd.DataFrame({"timestamp": stale, "close": [1.0] * 10}).to_parquet(d / "AUSDT.tmp.parquet", index=False)
+    pd.DataFrame({"timestamp": healthy, "close": [1.0] * 10, "volume": [1.0] * 10}).to_parquet(d / "AUSDT.parquet", index=False)
+    pd.DataFrame({"timestamp": stale, "close": [1.0] * 10, "volume": [1.0] * 10}).to_parquet(d / "AUSDT.tmp.parquet", index=False)
 
     got = data_refresh.market_data_staleness_hours(tmp_path, now=now)
 
     assert got == 2.0
+
+def test_refresh_live_market_data_refreshes_fresh_ohlcv_with_stale_funding(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    funding_dir = tmp_path / "funding"
+    funding_dir.mkdir(parents=True)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+
+    def _ms(ts: pd.Timestamp) -> int:
+        return int(ts.value // 10**6)
+
+    def _write_ohlcv(symbol: str, tail: pd.Timestamp) -> None:
+        stamps = [_ms(tail - pd.Timedelta(hours=h)) for h in range(48)]
+        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{symbol}.parquet", index=False)
+
+    def _write_funding(symbol: str, last: pd.Timestamp) -> None:
+        stamps = [_ms(last - pd.Timedelta(hours=8 * k)) for k in (2, 1, 0)]
+        pd.DataFrame({"timestamp": stamps, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
+    _write_ohlcv("AUSDT", now)
+    _write_funding("AUSDT", now - pd.Timedelta(hours=24))
+    calls: list[str] = []
+
+    def _fake_one(collector, symbol, start, end):
+        calls.append(symbol)
+        return True
+
+    monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
+
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
+    )
+
+    assert calls == ["AUSDT"]
+    assert report.fresh == 0
+    assert report.refreshed == 1
+
+
+def test_refresh_live_market_data_reports_funding_stale_after_run(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    funding_dir = tmp_path / "funding"
+    funding_dir.mkdir(parents=True)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+
+    def _ms(ts: pd.Timestamp) -> int:
+        return int(ts.value // 10**6)
+
+    def _write_ohlcv(symbol: str, tail: pd.Timestamp) -> None:
+        stamps = [_ms(tail - pd.Timedelta(hours=h)) for h in range(48)]
+        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{symbol}.parquet", index=False)
+
+    def _write_funding(symbol: str, last: pd.Timestamp) -> None:
+        stamps = [_ms(last - pd.Timedelta(hours=8 * k)) for k in (2, 1, 0)]
+        pd.DataFrame({"timestamp": stamps, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
+    _write_ohlcv("AUSDT", now)
+    _write_funding("AUSDT", now)
+    _write_ohlcv("BUSDT", now)
+    _write_funding("BUSDT", now - pd.Timedelta(hours=24))
+    monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", lambda collector, symbol, start, end: True)
+
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
+    )
+
+    assert report.fresh == 1
+    assert report.refreshed == 1
+    assert report.funding_stale == 1
+
+
+def test_funding_fresh_on_disk_treats_missing_or_unreadable_file_as_stale(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    funding_dir = tmp_path / "funding"
+    funding_dir.mkdir(parents=True)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+
+    def _ms(ts: pd.Timestamp) -> int:
+        return int(ts.value // 10**6)
+
+    def _write_ohlcv(symbol: str, tail: pd.Timestamp) -> None:
+        stamps = [_ms(tail - pd.Timedelta(hours=h)) for h in range(48)]
+        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{symbol}.parquet", index=False)
+
+    def _write_funding(symbol: str, last: pd.Timestamp) -> None:
+        stamps = [_ms(last - pd.Timedelta(hours=8 * k)) for k in (2, 1, 0)]
+        pd.DataFrame({"timestamp": stamps, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
+    assert data_refresh._funding_fresh_on_disk(tmp_path, "MISSINGUSDT", now) is False
+    (funding_dir / "BROKENUSDT.parquet").write_bytes(b"not a parquet")
+    assert data_refresh._funding_fresh_on_disk(tmp_path, "BROKENUSDT", now) is False
+    pd.DataFrame({"funding_rate": [0.0001]}).to_parquet(funding_dir / "NOTSUSDT.parquet", index=False)
+    assert data_refresh._funding_fresh_on_disk(tmp_path, "NOTSUSDT", now) is False
+    _write_funding("OKUSDT", now)
+    assert data_refresh._funding_fresh_on_disk(tmp_path, "OKUSDT", now) is True
+
+
+def test_market_data_staleness_hours_ignores_symbols_without_recent_volume(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+    healthy = [int((now - pd.Timedelta(hours=2 + k)).value // 10**6) for k in range(10)]
+    zombie = [int((now - pd.Timedelta(hours=k)).value // 10**6) for k in range(10)]
+    pd.DataFrame({"timestamp": healthy, "close": [1.0] * 10, "volume": [3.0] * 10}).to_parquet(d / "AUSDT.parquet", index=False)
+    pd.DataFrame({"timestamp": zombie, "close": [1.0] * 10, "volume": [0.0] * 10}).to_parquet(d / "ZUSDT.parquet", index=False)
+
+    assert data_refresh.market_data_staleness_hours(tmp_path, now=now) == 2.0
 

@@ -9,6 +9,7 @@ I-LEDGER-DURABLE: 집행 구간은 try/finally 로 감싸 어떤 예외 경로�
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -25,12 +26,17 @@ from src.live.account import (
     assert_suppressed_venue_flat,
     assert_venue_configuration,
     effective_positions,
+    ensure_venue_leverage,
     fetch_account_snapshot,
+    parse_leverage_brackets,
     reconcile_or_halt,
+    reject_intents_over_notional_cap,
     resolve_sizing_equity,
+    settled_delisting_symbols,
     synthetic_flat_snapshot,
 )
 from src.live.audit import AuditLog, default_audit_log_path
+from src.live.alerting import post_alert, send_email_alert
 from src.live.errors import CausalityViolation, LiveTradingError, RiskGateBreach, StaleSignalError
 from src.live.execution_quality import (
     append_execution_quality,
@@ -44,10 +50,12 @@ from src.live.executor import (
     execute_intents,
 )
 from src.live.fills import FillEvent, append_fills, default_fills_dir
-from src.live.filters import parse_exchange_filters
+from src.live.filters import is_delisted, parse_delivery_schedule, parse_exchange_filters
 from src.live.ledger import (
+    FundingAccrual,
     LedgerState,
-    accrue_paper_funding,
+    accrue_funding_by_watermark,
+    append_position_snapshot,
     apply_orphan_settlements,
     apply_outcomes,
     compute_fill_cash_flow,
@@ -62,6 +70,7 @@ from src.live.microstructure import (
     default_microstructure_dir,
     fetch_book_quotes,
 )
+from src.live.order_journal import OrderJournal, default_order_journal_path
 from src.live.planner import OrderIntent, plan_orders
 from src.live.portfolio_state import (
     PortfolioStateRecord,
@@ -153,6 +162,59 @@ def apply_ruin_guard(
     return weights, False
 
 
+PAPER_FUNDING_LAG_HALT: pd.Timedelta = pd.Timedelta(hours=24)
+PAPER_FUNDING_LAG_GRACE: pd.Timedelta = pd.Timedelta(hours=1)
+
+
+def _load_paper_marks(symbols: Sequence[str]) -> dict[str, pd.Series]:
+    from src.common.paths import indicator_kline_path  # noqa: PLC0415
+
+    marks_by_symbol: dict[str, pd.Series] = {}
+    for symbol in symbols:
+        path = indicator_kline_path("markPriceKlines", symbol, "1h")
+        if not path.exists():
+            continue
+        frame = pd.read_parquet(path, columns=["timestamp", "open"])
+        index = pd.DatetimeIndex(
+            pd.to_datetime(pd.to_numeric(frame["timestamp"]), unit="ms", utc=True)
+        )
+        series = pd.Series(
+            pd.to_numeric(frame["open"]).to_numpy(dtype="float64"), index=index
+        ).sort_index()
+        marks_by_symbol[symbol] = series[~series.index.duplicated(keep="last")]
+    return marks_by_symbol
+
+
+def _notify_event(
+    settings: LiveSettings,
+    *,
+    event: str,
+    detail: str,
+    decision_time: pd.Timestamp,
+    now: pd.Timestamp,
+) -> None:
+    post_alert(
+        settings.alert_webhook_url,
+        event=event,
+        detail=detail,
+        decision_time=decision_time,
+        now=now,
+    )
+    send_email_alert(
+        gmail_user=settings.alert_gmail_user,
+        gmail_app_password=(
+            settings.alert_gmail_app_password.get_secret_value()
+            if settings.alert_gmail_app_password is not None
+            else None
+        ),
+        email_to=settings.alert_email_to,
+        event=event,
+        detail=detail,
+        decision_time=decision_time,
+        now=now,
+    )
+
+
 def _load_paper_funding(symbols: Sequence[str]) -> dict[str, pd.Series]:
     """존재하는 파일에 대해서만 펀딩 시리즈를 적재한다(없는 심볼은 스킵)."""
     from src.common.paths import funding_path  # noqa: PLC0415
@@ -169,36 +231,140 @@ def _load_paper_funding(symbols: Sequence[str]) -> dict[str, pd.Series]:
 
 def _accrue_ledger_funding(
     state: LedgerState,
-    marks: Mapping[str, Decimal],
     now: pd.Timestamp,
     ledger_path: Path,
-) -> LedgerState:
-    """원장에 페이퍼 펀딩비를 발생시키고 원자적으로 영속한다."""
+    *,
+    closed_at: Mapping[str, pd.Timestamp] | None = None,
+) -> tuple[LedgerState, FundingAccrual]:
+    """원장에 페이퍼 펀딩비를 워터마크 기준으로 발생시키고 원자적으로 영속한다."""
     held = {symbol: qty for symbol, qty in state.positions.items() if qty != 0}
-    if not held or state.funding_accrued_through is None:
-        updated = LedgerState(
-            positions=dict(state.positions),
-            equity_high_water_mark=state.equity_high_water_mark,
-            cash_usdt=state.cash_usdt,
-            funding_accrued_through=now,
-            last_executed_decision_time=state.last_executed_decision_time,
+    history = state.position_history
+    if not history and held:
+        history = append_position_snapshot(
+            (), state.funding_accrued_through if state.funding_accrued_through is not None else now, held
         )
-        save_ledger(ledger_path, updated)
-        return updated
-    if state.cash_usdt is None:
-        raise DataIntegrityError("paper funding accrual requires cash_usdt")
-    delta = accrue_paper_funding(
-        held, _load_paper_funding(sorted(held)), marks, state.funding_accrued_through, now
+    symbols = sorted(set(held) | set(state.funding_watermarks))
+    accrual = accrue_funding_by_watermark(
+        history,
+        state.funding_watermarks,
+        _load_paper_funding(symbols),
+        _load_paper_marks(symbols),
+        now,
+        closed_at=closed_at,
     )
-    updated = LedgerState(
-        positions=dict(state.positions),
-        equity_high_water_mark=state.equity_high_water_mark,
-        cash_usdt=state.cash_usdt + delta,
+    if accrual.cash_delta != 0 and state.cash_usdt is None:
+        raise DataIntegrityError("paper funding accrual requires cash_usdt")
+    updated = dataclasses.replace(
+        state,
+        cash_usdt=None if state.cash_usdt is None else state.cash_usdt + accrual.cash_delta,
         funding_accrued_through=now,
-        last_executed_decision_time=state.last_executed_decision_time,
+        funding_watermarks=accrual.watermarks,
+        position_history=history,
+    )
+    save_ledger(ledger_path, updated)
+    return updated, accrual
+
+
+def _delisted_held_symbols(
+    positions: Mapping[str, Decimal],
+    exchange_info: Mapping[str, Any],
+    now: pd.Timestamp,
+) -> dict[str, pd.Timestamp]:
+    schedule = parse_delivery_schedule(exchange_info)
+    delisted: dict[str, pd.Timestamp] = {}
+    for symbol, qty in positions.items():
+        info = schedule.get(symbol)
+        if qty == 0 or info is None or info.delivery_time is None:
+            continue
+        if is_delisted(info, now):
+            delisted[symbol] = info.delivery_time
+    return delisted
+
+
+def _settle_delisted_paper_positions(
+    state: LedgerState,
+    delisted: Mapping[str, pd.Timestamp],
+    now: pd.Timestamp,
+    ledger_path: Path,
+    audit: AuditLog,
+    settings: LiveSettings,
+    decision_time: pd.Timestamp,
+) -> LedgerState:
+    if state.cash_usdt is None:
+        raise DataIntegrityError("paper delisted settlement requires cash_usdt")
+    marks = _load_paper_marks(sorted(delisted))
+    priced: dict[str, Decimal] = {}
+    for symbol in sorted(delisted):
+        series = marks.get(symbol)
+        bar = delisted[symbol].floor("h")
+        if series is None or bar not in series.index:
+            raise DataIntegrityError(
+                f"paper delisted mark missing symbol={symbol} bar={bar.isoformat()}"
+            )
+        priced[symbol] = Decimal(str(series.loc[bar]))
+    positions = dict(state.positions)
+    cash = state.cash_usdt
+    watermarks = dict(state.funding_watermarks)
+    for symbol in sorted(delisted):
+        qty = positions.get(symbol, Decimal(0))
+        mark = priced[symbol]
+        cash += qty * mark
+        positions.pop(symbol, None)
+        watermarks.pop(symbol, None)
+        audit.record(
+            "paper_delisted_close",
+            symbol=symbol,
+            qty=str(qty),
+            mark=str(mark),
+            delivery_time=delisted[symbol].isoformat(),
+        )
+        _notify_event(
+            settings,
+            event="paper_delisted_close",
+            detail=f"symbol={symbol} qty={qty} mark={mark} delivery={delisted[symbol].isoformat()}",
+            decision_time=decision_time,
+            now=now,
+        )
+    updated = dataclasses.replace(
+        state,
+        positions=positions,
+        cash_usdt=cash,
+        funding_watermarks=watermarks,
+        position_history=append_position_snapshot(state.position_history, now, positions),
     )
     save_ledger(ledger_path, updated)
     return updated
+
+
+def _enforce_funding_lag(
+    accrual: FundingAccrual,
+    settings: LiveSettings,
+    decision_time: pd.Timestamp,
+    now: pd.Timestamp,
+) -> None:
+    exceeded = sorted(
+        symbol for symbol, lag in accrual.lag_by_symbol.items() if lag > PAPER_FUNDING_LAG_HALT
+    )
+    if exceeded:
+        worst = max(accrual.lag_by_symbol[symbol] for symbol in exceeded)
+        worst_hours = worst / pd.Timedelta(hours=1)
+        raise DataIntegrityError(
+            f"paper funding lag exceeded symbols={','.join(exceeded)} max_lag_h={worst_hours:.1f}"
+        )
+    lagging = sorted(
+        symbol
+        for symbol in accrual.lag_by_symbol
+        if accrual.lag_by_symbol[symbol]
+        > 2 * accrual.interval_by_symbol[symbol] + PAPER_FUNDING_LAG_GRACE
+    )
+    if lagging:
+        _notify_event(
+            settings,
+            event="paper_funding_lag",
+            detail=f"symbols={len(lagging)} sample={','.join(lagging[:5])}",
+            decision_time=decision_time,
+            now=now,
+        )
 
 
 def run_shadow_cycle(
@@ -254,22 +420,31 @@ def run_shadow_cycle(
         ledger_positions = ledger_state.positions
 
         # 3) 고아 주문 정리는 재조정 '이전에' 이뤄져야 한다(GTX 잔존 -> 원장 괴리 방지).
-        settlements = cancel_orphan_orders(order_client, run_id, audit)
+        journal = OrderJournal(default_order_journal_path())
+        settlements = cancel_orphan_orders(order_client, run_id, audit, journal=journal)
         if settlements:
             updated = apply_orphan_settlements(ledger_state.positions, settlements)
-            ledger_state = LedgerState(
-                positions=updated,
-                equity_high_water_mark=ledger_state.equity_high_water_mark,
-                cash_usdt=ledger_state.cash_usdt,
-                funding_accrued_through=ledger_state.funding_accrued_through,
-                last_executed_decision_time=ledger_state.last_executed_decision_time,
-            )
+            ledger_state = dataclasses.replace(ledger_state, positions=updated)
             save_ledger(ledger_path, ledger_state)
             ledger_positions = ledger_state.positions
         if settings.mode.suppresses_mutations:
             assert_suppressed_venue_flat(snapshot)
         else:
-            reconcile_or_halt(snapshot, ledger_positions, qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION)
+            settled = settled_delisting_symbols(
+                exchange_info_payload, snapshot.positions, ledger_positions, now=now_ts
+            )
+            for symbol in settled:
+                audit.record(
+                    "delisting_settlement_pending",
+                    symbol=symbol,
+                    ledger_qty=str(ledger_positions[symbol]),
+                )
+            reconcile_or_halt(
+                snapshot,
+                ledger_positions,
+                qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION,
+                settled_symbols=settled,
+            )
 
         # weights already loaded as effective row (reused)
         current_positions = effective_positions(settings.mode, snapshot, ledger_positions)
@@ -304,8 +479,17 @@ def run_shadow_cycle(
             _sizing_anchor = "book_mid"
         # 4) I-EQUITY-MTM / ruin guard (백테스트 패리티).
         if settings.mode.suppresses_mutations:
-            ledger_state = _accrue_ledger_funding(ledger_state, marks, now_ts, ledger_path)
+            delisted = _delisted_held_symbols(ledger_state.positions, exchange_info_payload, now_ts)
+            ledger_state, accrual = _accrue_ledger_funding(
+                ledger_state, now_ts, ledger_path, closed_at=delisted
+            )
+            if delisted:
+                ledger_state = _settle_delisted_paper_positions(
+                    ledger_state, delisted, now_ts, ledger_path, audit, settings, decision_time
+                )
+            _enforce_funding_lag(accrual, settings, decision_time, now_ts)
             ledger_positions = ledger_state.positions
+            current_positions = effective_positions(settings.mode, snapshot, ledger_positions)
         equity = resolve_sizing_equity(snapshot, Decimal(str(settings.notional_equity_usdt)), mode=settings.mode, cash_usdt=ledger_state.cash_usdt, positions=ledger_positions, marks=marks)
         weights, ruin_flat = apply_ruin_guard(weights, equity, Decimal(str(settings.notional_equity_usdt)))
         if ruin_flat:
@@ -337,8 +521,21 @@ def run_shadow_cycle(
         # 사이클 수준 리스크 게이트를 먼저 검사한다(부분 집행 금지).
         check_risk_gates(intents, targets, marks, snapshot, settings, equity)
 
-        # NO-LIVE-ONLY-GATES: 종목별 노셔널 상한을 두지 않는다(백테스트 패리티).
+        # NO-LIVE-ONLY-GATES: 전략 차원의 종목별 노셔널 상한은 없다(백테스트 패리티). LIVE에서는 거래소 브래킷 notionalCap을 넘는 주문만 거부한다.
         kept: list[OrderIntent] = list(intents)
+        if not settings.mode.suppresses_mutations and kept:
+            brackets = parse_leverage_brackets(
+                order_client.request("GET", "/fapi/v1/leverageBracket", signed=True)
+            )
+            leverages = ensure_venue_leverage(
+                order_client,
+                sorted({intent.symbol for intent in kept}),
+                brackets,
+                max_gross_leverage=settings.max_gross_leverage,
+                buffer_fraction=settings.leverage_buffer_fraction,
+                audit=audit,
+            )
+            kept = reject_intents_over_notional_cap(kept, brackets, leverages, audit)
         try:
             from src.live.orderbook import append_order_book_snapshots, capture_order_books, default_orderbook_dir  # noqa: PLC0415
 
@@ -405,8 +602,8 @@ def run_shadow_cycle(
         final_state: LedgerState | None = None
         try:
             try:
-                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model))
-                final_state = _persist_confirmed_fills(ledger_path, ledger_state, kept, outcomes, equity, track_cash=settings.mode.suppresses_mutations, starting_capital=Decimal(str(settings.notional_equity_usdt)), executed_decision_time=decision_time)
+                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal))
+                final_state = _persist_confirmed_fills(ledger_path, ledger_state, kept, outcomes, equity, track_cash=settings.mode.suppresses_mutations, starting_capital=Decimal(str(settings.notional_equity_usdt)), executed_decision_time=decision_time, snapshot_at=now_ts)
                 persisted = True
             except LiveTradingError as exc:
                 to_persist = sink if sink else _partial_outcomes(exc)
@@ -441,6 +638,7 @@ def run_shadow_cycle(
                 equity,
                 track_cash=settings.mode.suppresses_mutations,
                 starting_capital=Decimal(str(settings.notional_equity_usdt)),
+                snapshot_at=now_ts,
             )
             persisted = True
         # Ensure outcomes and final_state are defined for success path
@@ -713,6 +911,7 @@ def _persist_confirmed_fills(
     track_cash: bool = False,
     starting_capital: Decimal = Decimal(0),
     executed_decision_time: pd.Timestamp | None = None,
+    snapshot_at: pd.Timestamp | None = None,
 ) -> LedgerState:
     """확인된 체결과 단조 증가한 hwm 을 원자적으로 영속한다."""
     last_executed = executed_decision_time if executed_decision_time is not None else base_state.last_executed_decision_time
@@ -724,22 +923,26 @@ def _persist_confirmed_fills(
         cash_usdt = None
     if not outcomes:
         # 체결이 없어도 hwm 은 ratchet 한다.
-        state = LedgerState(
-            positions=dict(base_state.positions),
+        state = dataclasses.replace(
+            base_state,
             equity_high_water_mark=max(base_state.equity_high_water_mark, equity),
             cash_usdt=cash_usdt,
-            funding_accrued_through=base_state.funding_accrued_through,
             last_executed_decision_time=last_executed,
         )
         save_ledger(ledger_path, state)
         return state
     updated_positions = apply_outcomes(base_state.positions, paired_intents, outcomes)
-    state = LedgerState(
+    state = dataclasses.replace(
+        base_state,
         positions=updated_positions,
         equity_high_water_mark=max(base_state.equity_high_water_mark, equity),
         cash_usdt=cash_usdt,
-        funding_accrued_through=base_state.funding_accrued_through,
         last_executed_decision_time=last_executed,
+        position_history=(
+            append_position_snapshot(base_state.position_history, snapshot_at, updated_positions)
+            if snapshot_at is not None
+            else base_state.position_history
+        ),
     )
     save_ledger(ledger_path, state)
     return state
@@ -787,6 +990,10 @@ class NullOrderClient:
     def __init__(self, market_client: Any, mode: Any) -> None:
         self._market = market_client
         self._mode = mode
+
+    @property
+    def mode(self) -> Any:
+        return self._market.mode
 
     def __getattr__(self, name: str) -> Any:
         # 공개 마켓데이터 읽기(book_ticker/book_tickers/depth/premium_index 등)는 위임한다.

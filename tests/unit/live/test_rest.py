@@ -224,3 +224,281 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_REC_09",
 )
 # SCENARIO_REC_09-rest-endpoints-signed
+
+
+def test_mutation_transport_failure_raises_status_unknown_without_resend(tmp_path, monkeypatch) -> None:
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse, OrderStatusUnknown
+    from src.live.settings import ExecutionMode
+
+    calls: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.live.rest.time.sleep", sleeps.append)
+
+    def _client(responder):
+        class _Transport:
+            def call(self, method, url, headers):
+                calls.append((method, url.split("?")[0]))
+                return responder(method, url)
+
+        return BinanceFuturesRestClient(
+            "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+            AuditLog(tmp_path / "rest_audit.jsonl"), session=_Transport(),
+        )
+
+    order_params = {"symbol": "AAAUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                    "quantity": "1", "price": "100", "newClientOrderId": "mh20260914-ABCDEFGHIJ-0-0-0"}
+
+    import pytest
+
+    def _timeout(method, url):
+        raise TimeoutError("read timed out")
+
+    client = _client(_timeout)
+
+    with pytest.raises(OrderStatusUnknown) as exc_info:
+        client.new_order(order_params)
+
+    assert calls == [("POST", "https://fapi.binance.com/fapi/v1/order")]
+    assert exc_info.value.http_status == 0
+    assert exc_info.value.path == "/fapi/v1/order"
+    assert sleeps == []
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("status,body", [
+    (503, b""),
+    (500, b'{"code": -1000, "msg": "unknown"}'),
+    (400, b'{"code": -1001, "msg": "disconnected"}'),
+    (408, b'{"code": -1007, "msg": "timeout"}'),
+])
+def test_mutation_unknown_outcomes_raise_status_unknown_without_resend(tmp_path, monkeypatch, status, body) -> None:
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse, OrderStatusUnknown
+    from src.live.settings import ExecutionMode
+
+    calls: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.live.rest.time.sleep", sleeps.append)
+
+    def _client(responder):
+        class _Transport:
+            def call(self, method, url, headers):
+                calls.append((method, url.split("?")[0]))
+                return responder(method, url)
+
+        return BinanceFuturesRestClient(
+            "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+            AuditLog(tmp_path / "rest_audit.jsonl"), session=_Transport(),
+        )
+
+    order_params = {"symbol": "AAAUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                    "quantity": "1", "price": "100", "newClientOrderId": "mh20260914-ABCDEFGHIJ-0-0-0"}
+
+    import pytest
+
+    client = _client(lambda method, url: HttpResponse(status_code=status, headers={}, body=body))
+
+    with pytest.raises(OrderStatusUnknown) as exc_info:
+        client.new_order(order_params)
+    with pytest.raises(OrderStatusUnknown):
+        client.cancel_order("AAAUSDT", "mh20260914-ABCDEFGHIJ-0-0-0")
+
+    assert [method for method, _ in calls] == ["POST", "DELETE"]
+    assert exc_info.value.http_status == status
+    assert sleeps == []
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("status,body,code", [
+    (429, b"", None),
+    (400, b'{"code": -1003, "msg": "too many requests"}', -1003),
+])
+def test_mutation_rate_limits_are_rejected_without_retry(tmp_path, monkeypatch, status, body, code) -> None:
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse, OrderStatusUnknown
+    from src.live.settings import ExecutionMode
+
+    calls: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.live.rest.time.sleep", sleeps.append)
+
+    def _client(responder):
+        class _Transport:
+            def call(self, method, url, headers):
+                calls.append((method, url.split("?")[0]))
+                return responder(method, url)
+
+        return BinanceFuturesRestClient(
+            "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+            AuditLog(tmp_path / "rest_audit.jsonl"), session=_Transport(),
+        )
+
+    order_params = {"symbol": "AAAUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                    "quantity": "1", "price": "100", "newClientOrderId": "mh20260914-ABCDEFGHIJ-0-0-0"}
+
+    import pytest
+
+    client = _client(lambda method, url: HttpResponse(status_code=status, headers={}, body=body))
+
+    with pytest.raises(VenueError) as exc_info:
+        client.new_order(order_params)
+
+    assert len(calls) == 1
+    assert exc_info.value.code == code
+    assert exc_info.value.http_status == status
+    assert sleeps == []
+
+def test_get_requests_keep_retry_backoff(tmp_path, monkeypatch) -> None:
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse, OrderStatusUnknown
+    from src.live.settings import ExecutionMode
+
+    calls: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.live.rest.time.sleep", sleeps.append)
+
+    def _client(responder):
+        class _Transport:
+            def call(self, method, url, headers):
+                calls.append((method, url.split("?")[0]))
+                return responder(method, url)
+
+        return BinanceFuturesRestClient(
+            "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+            AuditLog(tmp_path / "rest_audit.jsonl"), session=_Transport(),
+        )
+
+    order_params = {"symbol": "AAAUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                    "quantity": "1", "price": "100", "newClientOrderId": "mh20260914-ABCDEFGHIJ-0-0-0"}
+
+    responses = [
+        HttpResponse(status_code=500, headers={}, body=b'{"code": -1000, "msg": "unknown"}'),
+        HttpResponse(status_code=200, headers={}, body=b'{"status": "NEW", "executedQty": "0"}'),
+    ]
+    client = _client(lambda method, url: responses.pop(0))
+
+    payload = client.query_order("AAAUSDT", "mh20260914-ABCDEFGHIJ-0-0-0")
+
+    assert payload["status"] == "NEW"
+    assert [method for method, _ in calls] == ["GET", "GET"]
+    assert sleeps == [1.0]
+
+def test_mutation_clock_resync_is_the_only_resend(tmp_path, monkeypatch) -> None:
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse, OrderStatusUnknown
+    from src.live.settings import ExecutionMode
+
+    calls: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.live.rest.time.sleep", sleeps.append)
+
+    def _client(responder):
+        class _Transport:
+            def call(self, method, url, headers):
+                calls.append((method, url.split("?")[0]))
+                return responder(method, url)
+
+        return BinanceFuturesRestClient(
+            "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+            AuditLog(tmp_path / "rest_audit.jsonl"), session=_Transport(),
+        )
+
+    order_params = {"symbol": "AAAUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                    "quantity": "1", "price": "100", "newClientOrderId": "mh20260914-ABCDEFGHIJ-0-0-0"}
+
+    responses = [
+        HttpResponse(status_code=400, headers={}, body=b'{"code": -1021, "msg": "timestamp outside recvWindow"}'),
+        HttpResponse(status_code=200, headers={}, body=b'{"serverTime": 1}'),
+        HttpResponse(status_code=200, headers={}, body=b'{"orderId": 7}'),
+    ]
+    client = _client(lambda method, url: responses.pop(0))
+
+    payload = client.new_order(order_params)
+
+    assert payload == {"orderId": 7}
+    assert [method for method, _ in calls] == ["POST", "GET", "POST"]
+    assert client.mode is ExecutionMode.LIVE_TESTNET
+
+def test_keepalive_transport_sends_mutations_once_on_fresh_connection(monkeypatch) -> None:
+    import http.client
+    import pytest
+    from src.live.rest import KeepAliveTransport
+
+    created: list[object] = []
+    requests: list[str] = []
+
+    class _Conn:
+        def __init__(self, host, port, timeout=None):
+            created.append(self)
+
+        def request(self, method, path, body=None, headers=None):
+            requests.append(method)
+
+        def getresponse(self):
+            raise TimeoutError("read timed out")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", _Conn)
+    transport = KeepAliveTransport("https://fapi.binance.com")
+
+    with pytest.raises(TimeoutError):
+        transport.call("POST", "https://fapi.binance.com/fapi/v1/order?x=1", {})
+    assert requests == ["POST"]
+    assert len(created) == 1
+
+    with pytest.raises(TimeoutError):
+        transport.call("GET", "https://fapi.binance.com/fapi/v1/order?x=1", {})
+    assert requests == ["POST", "GET", "GET"]
+
+def test_get_transport_failure_propagates_unchanged(tmp_path, monkeypatch) -> None:
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse, OrderStatusUnknown
+    from src.live.settings import ExecutionMode
+
+    calls: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.live.rest.time.sleep", sleeps.append)
+
+    def _client(responder):
+        class _Transport:
+            def call(self, method, url, headers):
+                calls.append((method, url.split("?")[0]))
+                return responder(method, url)
+
+        return BinanceFuturesRestClient(
+            "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+            AuditLog(tmp_path / "rest_audit.jsonl"), session=_Transport(),
+        )
+
+    order_params = {"symbol": "AAAUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                    "quantity": "1", "price": "100", "newClientOrderId": "mh20260914-ABCDEFGHIJ-0-0-0"}
+
+    import pytest
+
+    def _reset(method, url):
+        raise ConnectionResetError("peer reset")
+
+    client = _client(_reset)
+
+    with pytest.raises(ConnectionResetError):
+        client.query_order("AAAUSDT", "mh20260914-ABCDEFGHIJ-0-0-0")
+
+    assert calls == [("GET", "https://fapi.binance.com/fapi/v1/order")]
+

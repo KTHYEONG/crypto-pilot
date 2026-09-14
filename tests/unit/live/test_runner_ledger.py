@@ -322,31 +322,34 @@ def test_accrue_ledger_funding_preserves_last_executed(tmp_path, monkeypatch) ->
     from decimal import Decimal
     import pandas as pd
     import src.live.runner as runner_mod
-    from src.live.ledger import LedgerState, load_ledger
+    from src.live.ledger import LedgerState, PositionSnapshot, load_ledger
 
     executed = pd.Timestamp("2026-08-23 00:00Z")
     now = pd.Timestamp("2026-08-24 12:00Z")
-    seed = runner_mod._accrue_ledger_funding(
-        LedgerState(positions={}, last_executed_decision_time=executed), {}, now, tmp_path / "seed.json",
+    epoch = pd.Timestamp("2026-08-24 08:00Z")
+    seed, _ = runner_mod._accrue_ledger_funding(
+        LedgerState(positions={}, last_executed_decision_time=executed), now, tmp_path / "seed.json",
     )
-    monkeypatch.setattr(
-        runner_mod, "_load_paper_funding",
-        lambda symbols: {"AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([pd.Timestamp("2026-08-24 08:00Z")]))},
-    )
-    held = runner_mod._accrue_ledger_funding(
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([epoch]))})
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {"AAAUSDT": pd.Series([100.0], index=pd.DatetimeIndex([epoch]))})
+    held, accrual = runner_mod._accrue_ledger_funding(
         LedgerState(
             positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"),
             funding_accrued_through=pd.Timestamp("2026-08-24 00:00Z"), last_executed_decision_time=executed,
         ),
-        {"AAAUSDT": Decimal("100")}, now, tmp_path / "held.json",
+        now, tmp_path / "held.json",
     )
 
     assert seed.last_executed_decision_time == executed
+    assert seed.funding_accrued_through == now
     assert held.last_executed_decision_time == executed
     assert held.cash_usdt == Decimal("1000") - Decimal("0.1")
-    assert load_ledger(tmp_path / "held.json").last_executed_decision_time == executed
-
-
+    assert held.position_history == (PositionSnapshot(effective_from=pd.Timestamp("2026-08-24 00:00Z"), positions={"AAAUSDT": Decimal("1")}),)
+    assert held.funding_watermarks == {"AAAUSDT": epoch}
+    assert accrual.lag_by_symbol == {"AAAUSDT": now - epoch}
+    reloaded = load_ledger(tmp_path / "held.json")
+    assert reloaded.last_executed_decision_time == executed
+    assert reloaded.funding_watermarks == {"AAAUSDT": epoch}
 def test_run_shadow_cycle_failed_execution_does_not_stamp_last_executed(artifact, monkeypatch, tmp_path) -> None:
     from decimal import Decimal
     import src.live.runner as runner_mod
@@ -382,3 +385,36 @@ def test_run_shadow_cycle_failed_execution_does_not_stamp_last_executed(artifact
     assert state.positions["AAAUSDT"] == Decimal("0.1")
     assert state.last_executed_decision_time is None
 
+
+
+def test_persist_confirmed_fills_appends_position_snapshot_only_on_change(tmp_path) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.executor import ExecutionOutcome
+    from src.live.ledger import LedgerState, PositionSnapshot, load_ledger
+    from src.live.planner import OrderIntent
+
+    t0 = pd.Timestamp("2026-08-23 01:26Z")
+    now = pd.Timestamp("2026-08-24 01:26Z")
+    base = LedgerState(
+        positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"),
+        funding_watermarks={"AAAUSDT": pd.Timestamp("2026-08-24 00:00Z")},
+        position_history=(PositionSnapshot(effective_from=t0, positions={"AAAUSDT": Decimal("1")}),),
+    )
+    intent = OrderIntent(
+        symbol="AAAUSDT", side="BUY", quantity=Decimal("1"), reduce_only=False,
+        target_qty=Decimal("2"), current_qty=Decimal("1"), client_order_prefix="run1",
+        leg_index=0, decision_price=Decimal("100"),
+    )
+    outcome = ExecutionOutcome(symbol="AAAUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED")
+
+    unchanged = runner_mod._persist_confirmed_fills(tmp_path / "a.json", base, [], [], Decimal("2000"), snapshot_at=now)
+    filled = runner_mod._persist_confirmed_fills(tmp_path / "b.json", base, [intent], [outcome], Decimal("2000"), snapshot_at=now)
+
+    assert unchanged.position_history == base.position_history
+    assert filled.position_history == (
+        PositionSnapshot(effective_from=t0, positions={"AAAUSDT": Decimal("1")}),
+        PositionSnapshot(effective_from=now, positions={"AAAUSDT": Decimal("2")}),
+    )
+    assert load_ledger(tmp_path / "b.json").funding_watermarks == base.funding_watermarks

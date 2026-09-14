@@ -344,3 +344,30 @@ def test_event_info_state_corrupt_is_critical_with_docker_action() -> None:
     assert "docker logs --tail 200 mhs-live-daemon" in info["action"]
     assert "live_daemon_last_run.json" in info["action"]
 
+
+# --- auto appended from contract: signal_input_quarantine ---
+
+
+def test_event_info_data_quarantine_is_warning_with_sidecar_and_repair_action() -> None:
+    from src.cli.main import build_root_parser
+    from src.live.alerting import EVENT_INFO
+
+    info = EVENT_INFO["data_quarantine"]
+
+    assert info["severity_label"] == "WARNING"
+    assert "signal_quarantine.json" in info["action"]
+    assert "src.cli.main data repair-ohlcv --symbol" in info["action"]
+    args = build_root_parser().parse_args(["data", "repair-ohlcv", "--symbol", "BTCUSDT"])
+    assert args.handler is not None
+
+
+def test_event_info_paper_ledger_events() -> None:
+    from src.live.alerting import EVENT_INFO
+
+    lag = EVENT_INFO["paper_funding_lag"]
+    close = EVENT_INFO["paper_delisted_close"]
+    assert lag["severity_label"] == "WARNING"
+    assert close["severity_label"] == "NOTICE"
+    for info in (lag, close):
+        assert "docker" in info["action"]
+        assert set(info) == {"title", "severity_badge", "severity_label", "header_color", "bg_color", "impact", "action"}

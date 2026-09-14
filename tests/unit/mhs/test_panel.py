@@ -472,3 +472,477 @@ def test_load_base_panel_ignores_legacy_temp_artifacts(tmp_path) -> None:
 
     assert list(panel["close"].columns) == ["AAAUSDT"]
 
+
+# --- auto appended from contract: signal_input_quarantine ---
+
+
+def test_panel_quarantine_records_unique_symbols() -> None:
+    from src.mhs.panel import PanelQuarantine, QuarantineRecord
+
+    quarantine = PanelQuarantine(protected=frozenset({"BTCUSDT"}))
+    quarantine.add("AAAUSDT", "unreadable:ArrowInvalid")
+    quarantine.add("AAAUSDT", "decision_bar_missing")
+    quarantine.add("BBBUSDT", "funding_unreadable:ValueError")
+
+    assert quarantine.records == [
+        QuarantineRecord(symbol="AAAUSDT", reason="unreadable:ArrowInvalid"),
+        QuarantineRecord(symbol="BBBUSDT", reason="funding_unreadable:ValueError"),
+    ]
+    assert quarantine.symbols == frozenset({"AAAUSDT", "BBBUSDT"})
+
+
+def test_panel_quarantine_protected_symbol_fails_closed() -> None:
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.panel import PanelQuarantine
+
+    quarantine = PanelQuarantine(protected=frozenset({"BTCUSDT", "ETHUSDT"}))
+
+    with pytest.raises(DataIntegrityError, match="protected symbol ETHUSDT"):
+        quarantine.add("ETHUSDT", "decision_bar_missing")
+
+    assert quarantine.records == []
+
+
+def test_panel_quarantine_enforce_limit_is_min_of_count_and_fraction() -> None:
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.panel import PanelQuarantine
+
+    large = PanelQuarantine(protected=frozenset())
+    for i in range(5):
+        large.add(f"S{i}USDT", "decision_bar_missing")
+    large.enforce_limit(522)
+    large.add("S5USDT", "decision_bar_missing")
+    with pytest.raises(DataIntegrityError, match="exceeds limit 5"):
+        large.enforce_limit(522)
+
+    small = PanelQuarantine(protected=frozenset())
+    small.add("AUSDT", "decision_bar_missing")
+    small.enforce_limit(50)
+    small.add("BUSDT", "decision_bar_missing")
+    with pytest.raises(DataIntegrityError, match="exceeds limit 1"):
+        small.enforce_limit(50)
+
+
+def test_load_base_panel_without_quarantine_keeps_fail_closed_on_corrupt_file(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2026-09-01", periods=100, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+
+    def _write(symbol: str, rows: slice, columns: tuple[str, ...] = ("close", "open", "quote_vol")) -> None:
+        frame = pd.DataFrame({"timestamp": epoch[rows]})
+        for column in columns:
+            frame[column] = np.linspace(1.0, 2.0, len(frame))
+        frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "open", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1, quarantine=quarantine,
+        )
+    import pyarrow as pa
+    import pytest
+
+    _write("AAAUSDT", slice(None))
+    (directory / "BBBUSDT.parquet").write_bytes(b"not a parquet")
+
+    with pytest.raises((OSError, pa.ArrowException)):
+        _load(None)
+
+
+def test_load_base_panel_quarantines_corrupt_file_in_survivor_scan(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2026-09-01", periods=100, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+
+    def _write(symbol: str, rows: slice, columns: tuple[str, ...] = ("close", "open", "quote_vol")) -> None:
+        frame = pd.DataFrame({"timestamp": epoch[rows]})
+        for column in columns:
+            frame[column] = np.linspace(1.0, 2.0, len(frame))
+        frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "open", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1, quarantine=quarantine,
+        )
+
+    from src.mhs.panel import PanelQuarantine
+
+    _write("AAAUSDT", slice(None))
+    (directory / "BBBUSDT.parquet").write_bytes(b"not a parquet")
+    quarantine = PanelQuarantine(protected=frozenset())
+
+    panel = _load(quarantine)
+
+    assert list(panel["close"].columns) == ["AAAUSDT"]
+    assert [(r.symbol, r.reason) for r in quarantine.records] == [("BBBUSDT", "unreadable:ArrowInvalid")]
+
+
+def test_load_base_panel_quarantines_missing_column_in_column_read(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2026-09-01", periods=100, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+
+    def _write(symbol: str, rows: slice, columns: tuple[str, ...] = ("close", "open", "quote_vol")) -> None:
+        frame = pd.DataFrame({"timestamp": epoch[rows]})
+        for column in columns:
+            frame[column] = np.linspace(1.0, 2.0, len(frame))
+        frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "open", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1, quarantine=quarantine,
+        )
+
+    from src.mhs.panel import PanelQuarantine
+
+    _write("AAAUSDT", slice(None))
+    _write("BBBUSDT", slice(None), columns=("close", "open"))
+    _write("CCCUSDT", slice(None))
+    quarantine = PanelQuarantine(protected=frozenset())
+
+    panel = _load(quarantine)
+
+    for field in ("close", "open", "quote_vol"):
+        assert list(panel[field].columns) == ["AAAUSDT", "CCCUSDT"]
+    assert np.allclose(panel["close"]["CCCUSDT"].to_numpy(), np.linspace(1.0, 2.0, 100))
+    assert [(r.symbol, r.reason) for r in quarantine.records] == [("BBBUSDT", "unreadable:ArrowInvalid")]
+
+
+def test_load_base_panel_quarantines_symbol_missing_recent_decision_bar(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2026-09-01", periods=100, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+
+    def _write(symbol: str, rows: slice, columns: tuple[str, ...] = ("close", "open", "quote_vol")) -> None:
+        frame = pd.DataFrame({"timestamp": epoch[rows]})
+        for column in columns:
+            frame[column] = np.linspace(1.0, 2.0, len(frame))
+        frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "open", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1, quarantine=quarantine,
+        )
+
+    from src.mhs.panel import PanelQuarantine
+
+    _write("AAAUSDT", slice(None))
+    _write("BBBUSDT", slice(0, 99))
+    _write("DEADUSDT", slice(0, 10))
+    quarantine = PanelQuarantine(protected=frozenset())
+
+    panel = _load(quarantine)
+
+    assert list(panel["close"].columns) == ["AAAUSDT", "DEADUSDT"]
+    assert pd.isna(panel["close"].loc[ts[-1], "DEADUSDT"])
+    assert [(r.symbol, r.reason) for r in quarantine.records] == [("BBBUSDT", "decision_bar_missing")]
+
+
+def test_load_base_panel_quarantine_over_limit_fails_closed(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2026-09-01", periods=100, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+
+    def _write(symbol: str, rows: slice, columns: tuple[str, ...] = ("close", "open", "quote_vol")) -> None:
+        frame = pd.DataFrame({"timestamp": epoch[rows]})
+        for column in columns:
+            frame[column] = np.linspace(1.0, 2.0, len(frame))
+        frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "open", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1, quarantine=quarantine,
+        )
+
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.panel import PanelQuarantine
+
+    _write("AAAUSDT", slice(None))
+    (directory / "BBBUSDT.parquet").write_bytes(b"not a parquet")
+    (directory / "CCCUSDT.parquet").write_bytes(b"not a parquet")
+
+    with pytest.raises(DataIntegrityError, match="exceeds limit 1"):
+        _load(PanelQuarantine(protected=frozenset()))
+
+
+def test_load_base_panel_protected_symbol_unreadable_fails_closed(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2026-09-01", periods=100, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+
+    def _write(symbol: str, rows: slice, columns: tuple[str, ...] = ("close", "open", "quote_vol")) -> None:
+        frame = pd.DataFrame({"timestamp": epoch[rows]})
+        for column in columns:
+            frame[column] = np.linspace(1.0, 2.0, len(frame))
+        frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "open", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1, quarantine=quarantine,
+        )
+
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.panel import PanelQuarantine
+
+    _write("AAAUSDT", slice(None))
+    (directory / "BBBUSDT.parquet").write_bytes(b"not a parquet")
+
+    with pytest.raises(DataIntegrityError, match="protected symbol BBBUSDT"):
+        _load(PanelQuarantine(protected=frozenset({"BBBUSDT"})))
+
+
+def test_load_base_panel_without_quarantine_keeps_fail_closed_on_missing_column(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2026-09-01", periods=100, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+
+    def _write(symbol: str, rows: slice, columns: tuple[str, ...] = ("close", "open", "quote_vol")) -> None:
+        frame = pd.DataFrame({"timestamp": epoch[rows]})
+        for column in columns:
+            frame[column] = np.linspace(1.0, 2.0, len(frame))
+        frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "open", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1, quarantine=quarantine,
+        )
+    import pyarrow as pa
+    import pytest
+
+    _write("AAAUSDT", slice(None), columns=("close", "open"))
+
+    with pytest.raises(pa.ArrowException):
+        _load(None)
+
+
+def test_load_base_panel_quarantine_dropping_every_survivor_raises_no_survivor(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2026-09-01", periods=100, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+
+    def _write(symbol: str, rows: slice, columns: tuple[str, ...] = ("close", "open", "quote_vol")) -> None:
+        frame = pd.DataFrame({"timestamp": epoch[rows]})
+        for column in columns:
+            frame[column] = np.linspace(1.0, 2.0, len(frame))
+        frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "open", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1, quarantine=quarantine,
+        )
+    import pytest
+    from src.mhs.panel import PanelQuarantine
+
+    _write("AAAUSDT", slice(None), columns=("close", "open"))
+    quarantine = PanelQuarantine(protected=frozenset())
+
+    with pytest.raises(ValueError, match="no symbol survived the panel filters"):
+        _load(quarantine)
+
+    assert [(r.symbol, r.reason) for r in quarantine.records] == [("AAAUSDT", "unreadable:ArrowInvalid")]
+
+
+def test_load_base_panel_legacy_policy_keeps_zombie_bars(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    def _write_symbol(path, flat_flags, start="2024-01-01"):
+        n = len(flat_flags)
+        ts = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+        flat = np.asarray(flat_flags, dtype=bool)
+        close = 100.0 + np.arange(n, dtype="float64")
+        pd.DataFrame({
+            "timestamp": (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+            "open": close,
+            "high": np.where(flat, close, close + 1.0),
+            "low": np.where(flat, close, close - 1.0),
+            "close": close,
+            "volume": np.where(flat, 0.0, 5.0),
+            "quote_vol": np.where(flat, 0.0, 500.0),
+        }).to_parquet(path, index=False)
+        return ts
+    from src.mhs.panel import DATA_POLICY_LEGACY, load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = _write_symbol(directory / "AAAUSDT.parquet", [False] * 10 + [True] * 40)
+
+    panel = load_base_panel(
+        root=str(tmp_path), interval="1h", columns=("close",), start=ts[0], end=ts[-1],
+        partition="all", min_bars=1, data_policy=DATA_POLICY_LEGACY,
+    )
+
+    assert panel["close"]["AAAUSDT"].notna().all()
+
+
+def test_load_base_panel_zombie_policy_masks_only_long_flat_runs(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    def _write_symbol(path, flat_flags, start="2024-01-01"):
+        n = len(flat_flags)
+        ts = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+        flat = np.asarray(flat_flags, dtype=bool)
+        close = 100.0 + np.arange(n, dtype="float64")
+        pd.DataFrame({
+            "timestamp": (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+            "open": close,
+            "high": np.where(flat, close, close + 1.0),
+            "low": np.where(flat, close, close - 1.0),
+            "close": close,
+            "volume": np.where(flat, 0.0, 5.0),
+            "quote_vol": np.where(flat, 0.0, 500.0),
+        }).to_parquet(path, index=False)
+        return ts
+    from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1, ZOMBIE_FLAT_RUN_BARS, load_base_panel
+
+    assert ZOMBIE_FLAT_RUN_BARS == 24
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    flags = [False] * 10 + [True] + [False] * 9 + [True] * 40
+    ts = _write_symbol(directory / "AAAUSDT.parquet", flags)
+
+    panel = load_base_panel(
+        root=str(tmp_path), interval="1h", columns=("close", "quote_vol"), start=ts[0], end=ts[-1],
+        partition="all", min_bars=1, data_policy=DATA_POLICY_ZOMBIE_MASK_V1,
+    )
+
+    close = panel["close"]["AAAUSDT"]
+    assert close.iloc[:43].notna().all()
+    assert close.iloc[43:].isna().all()
+    assert panel["quote_vol"]["AAAUSDT"].iloc[43:].isna().all()
+    assert close.iloc[10] == 110.0
+
+
+def test_load_base_panel_zombie_policy_uses_pre_window_bars_and_drops_fully_masked_symbol(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    def _write_symbol(path, flat_flags, start="2024-01-01"):
+        n = len(flat_flags)
+        ts = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+        flat = np.asarray(flat_flags, dtype=bool)
+        close = 100.0 + np.arange(n, dtype="float64")
+        pd.DataFrame({
+            "timestamp": (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+            "open": close,
+            "high": np.where(flat, close, close + 1.0),
+            "low": np.where(flat, close, close - 1.0),
+            "close": close,
+            "volume": np.where(flat, 0.0, 5.0),
+            "quote_vol": np.where(flat, 0.0, 500.0),
+        }).to_parquet(path, index=False)
+        return ts
+    from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1, load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = _write_symbol(directory / "AAAUSDT.parquet", [False] * 10 + [True] * 50)
+    _write_symbol(directory / "BBBUSDT.parquet", [False] * 60)
+
+    panel = load_base_panel(
+        root=str(tmp_path), interval="1h", columns=("close",), start=ts[50], end=ts[59],
+        partition="all", min_bars=1, data_policy=DATA_POLICY_ZOMBIE_MASK_V1,
+    )
+
+    assert list(panel["close"].columns) == ["BBBUSDT"]
+
+
+def test_load_base_panel_rejects_unknown_data_policy(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+    from src.mhs.panel import load_base_panel
+
+    with pytest.raises(ValueError, match="unknown data_policy"):
+        load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close",),
+            start=pd.Timestamp("2024-01-01", tz="UTC"), end=pd.Timestamp("2024-01-02", tz="UTC"),
+            partition="all", min_bars=1, data_policy="zombie_mask_v9",
+        )
+
+
+def test_zombie_masked_timestamps_requires_volume_high_low(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.panel import zombie_masked_timestamps
+
+    path = tmp_path / "AAAUSDT.parquet"
+    pd.DataFrame({"timestamp": [0, 3_600_000], "close": [1.0, 2.0]}).to_parquet(path, index=False)
+
+    with pytest.raises(DataIntegrityError, match="zombie mask requires"):
+        zombie_masked_timestamps(str(path), 0, 3_600_000, 3_600_000)
+
+
+def test_zombie_masked_timestamps_empty_range_and_duplicate_keep_last(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.panel import zombie_masked_timestamps
+
+    hour = 3_600_000
+    path = tmp_path / "AAAUSDT.parquet"
+    n = 30
+    ts = [i * hour for i in range(n)] + [5 * hour]
+    volume = [0.0] * n + [7.0]
+    high = [1.0] * n + [2.0]
+    low = [1.0] * (n + 1)
+    pd.DataFrame({"timestamp": ts, "volume": volume, "high": high, "low": low}).to_parquet(path, index=False)
+
+    empty = zombie_masked_timestamps(str(path), 1000 * hour, 1001 * hour, hour)
+    assert empty.dtype == np.int64
+    assert empty.size == 0
+
+    masked = zombie_masked_timestamps(str(path), 0, (n - 1) * hour, hour, 24)
+    assert masked.tolist() == [i * hour for i in range(29, n)]
+

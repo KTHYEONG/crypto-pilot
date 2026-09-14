@@ -28,10 +28,28 @@ _POSITIONS_KEY = "positions"
 _CASH_KEY = "cash_usdt"
 _FUNDING_THROUGH_KEY = "funding_accrued_through"
 _LAST_EXECUTED_KEY = "last_executed_decision_time"
+_WATERMARKS_KEY = "funding_watermarks"
+_HISTORY_KEY = "position_history"
+
+POSITION_HISTORY_MAX: int = 4
 
 
 def default_ledger_path() -> Path:
     return DATA_DIR / "state" / "live_position_ledger.json"
+
+
+@dataclass(frozen=True, slots=True)
+class PositionSnapshot:
+    effective_from: pd.Timestamp
+    positions: dict[str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
+class FundingAccrual:
+    cash_delta: Decimal
+    watermarks: dict[str, pd.Timestamp]
+    lag_by_symbol: dict[str, pd.Timedelta]
+    interval_by_symbol: dict[str, pd.Timedelta]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +61,27 @@ class LedgerState:
     cash_usdt: Decimal | None = None
     funding_accrued_through: pd.Timestamp | None = None
     last_executed_decision_time: pd.Timestamp | None = None
+    funding_watermarks: dict[str, pd.Timestamp] = field(default_factory=dict)
+    position_history: tuple[PositionSnapshot, ...] = ()
+
+
+def _parse_utc(value: Any, name: str, path: Path) -> pd.Timestamp:
+    try:
+        parsed = pd.Timestamp(str(value))
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"ledger {name} is not a timestamp: {path}") from exc
+    if parsed.tzinfo is None:
+        raise DataIntegrityError(f"ledger {name} must be tz-aware: {path}")
+    return parsed.tz_convert("UTC")
+
+
+def _parse_positions(raw: Any, name: str, path: Path) -> dict[str, Decimal]:
+    if not isinstance(raw, dict):
+        raise DataIntegrityError(f"ledger {name} must be an object: {path}")
+    try:
+        return {str(symbol): Decimal(str(qty)) for symbol, qty in raw.items()}
+    except (InvalidOperation, ValueError, TypeError, AttributeError) as exc:
+        raise DataIntegrityError(f"ledger {name} quantity is not numeric: {path}") from exc
 
 
 def load_ledger(path: Path) -> LedgerState:
@@ -102,12 +141,44 @@ def load_ledger(path: Path) -> LedgerState:
         positions = {str(symbol): Decimal(str(qty)) for symbol, qty in positions_raw.items()}
     except (InvalidOperation, ValueError, TypeError, AttributeError) as exc:
         raise DataIntegrityError(f"ledger position quantity is not numeric: {path}") from exc
+    if _POSITIONS_KEY not in raw:
+        watermarks: dict[str, pd.Timestamp] = {}
+        history: tuple[PositionSnapshot, ...] = ()
+    else:
+        watermarks_raw = raw.get(_WATERMARKS_KEY, {})
+        if not isinstance(watermarks_raw, dict):
+            raise DataIntegrityError(f"ledger funding_watermarks must be an object: {path}")
+        watermarks = {
+            str(symbol): _parse_utc(value, "funding_watermarks", path)
+            for symbol, value in watermarks_raw.items()
+        }
+        history_raw = raw.get(_HISTORY_KEY, [])
+        if not isinstance(history_raw, list):
+            raise DataIntegrityError(f"ledger position_history must be a list: {path}")
+        parsed_history: list[PositionSnapshot] = []
+        for entry in history_raw:
+            if (
+                not isinstance(entry, dict)
+                or "effective_from" not in entry
+                or "positions" not in entry
+            ):
+                raise DataIntegrityError(f"ledger position_history entry malformed: {path}")
+            parsed_history.append(
+                PositionSnapshot(
+                    effective_from=_parse_utc(entry["effective_from"], "position_history", path),
+                    positions=_parse_positions(entry["positions"], "position_history", path),
+                )
+            )
+        parsed_history.sort(key=lambda snap: snap.effective_from)
+        history = tuple(parsed_history)
     return LedgerState(
         positions=positions,
         equity_high_water_mark=hwm,
         cash_usdt=cash_usdt,
         funding_accrued_through=funding_accrued_through,
         last_executed_decision_time=last_executed,
+        funding_watermarks=watermarks,
+        position_history=history,
     )
 
 
@@ -126,6 +197,19 @@ def save_ledger(path: Path, state: LedgerState) -> None:
         payload[_FUNDING_THROUGH_KEY] = ts.isoformat()
     if state.last_executed_decision_time is not None:
         payload[_LAST_EXECUTED_KEY] = pd.Timestamp(state.last_executed_decision_time).tz_convert("UTC").isoformat()
+    if state.funding_watermarks:
+        payload[_WATERMARKS_KEY] = {
+            symbol: pd.Timestamp(ts).tz_convert("UTC").isoformat()
+            for symbol, ts in sorted(state.funding_watermarks.items())
+        }
+    if state.position_history:
+        payload[_HISTORY_KEY] = [
+            {
+                "effective_from": pd.Timestamp(snap.effective_from).tz_convert("UTC").isoformat(),
+                "positions": {symbol: str(qty) for symbol, qty in sorted(snap.positions.items())},
+            }
+            for snap in state.position_history
+        ]
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     os.replace(tmp_path, path)
@@ -198,34 +282,105 @@ def _require_tz_aware(value: pd.Timestamp, name: str) -> pd.Timestamp:
     return ts
 
 
-def accrue_paper_funding(
+def append_position_snapshot(
+    history: Sequence[PositionSnapshot],
+    effective_from: pd.Timestamp,
     positions: Mapping[str, Decimal],
-    funding_by_symbol: Mapping[str, pd.Series],
-    marks: Mapping[str, Decimal],
-    start_exclusive: pd.Timestamp,
-    end_inclusive: pd.Timestamp,
-) -> Decimal:
-    """페이퍼 펀딩비 현금 증분을 계산한다. 반환값은 cash delta(지급은 음수).
+) -> tuple[PositionSnapshot, ...]:
+    ts = _require_tz_aware(effective_from, "effective_from").tz_convert("UTC")
+    nonzero = {symbol: qty for symbol, qty in positions.items() if qty != 0}
+    if history and history[-1].positions == nonzero:
+        return tuple(history)
+    return (*history, PositionSnapshot(effective_from=ts, positions=nonzero))[
+        -POSITION_HISTORY_MAX:
+    ]
 
-    start_exclusive < t <= end_inclusive 구간에 속한 settlement마다
-    -rate * qty * mark 를 합산한다. 0이 아닌 모든 포지션은 펀딩 시리즈와
-    mark를 반드시 가져야 하며, 없으면 fail-closed 한다.
-    """
-    start = _require_tz_aware(start_exclusive, "start_exclusive")
-    end = _require_tz_aware(end_inclusive, "end_inclusive")
-    if end < start:
-        raise ValueError("end_inclusive must be >= start_exclusive: end precedes start")
+
+def position_at(
+    history: Sequence[PositionSnapshot], symbol: str, at: pd.Timestamp
+) -> Decimal:
+    latest: PositionSnapshot | None = None
+    for snap in history:
+        if snap.effective_from >= at:
+            break
+        latest = snap
+    if latest is None:
+        raise DataIntegrityError(
+            f"paper funding epoch {at.isoformat()} predates position history for {symbol}"
+        )
+    return latest.positions.get(symbol, Decimal(0))
+
+
+def _held_since(history: Sequence[PositionSnapshot], symbol: str) -> pd.Timestamp | None:
+    if not history or history[-1].positions.get(symbol, Decimal(0)) == 0:
+        return None
+    start = history[-1].effective_from
+    for snap in reversed(history[:-1]):
+        if snap.positions.get(symbol, Decimal(0)) == 0:
+            break
+        start = snap.effective_from
+    return start
+
+
+def _released_at(history: Sequence[PositionSnapshot], symbol: str) -> pd.Timestamp | None:
+    last_held: int | None = None
+    for idx, snap in enumerate(history):
+        if snap.positions.get(symbol, Decimal(0)) != 0:
+            last_held = idx
+    if last_held is None or last_held == len(history) - 1:
+        return None
+    return history[last_held + 1].effective_from
+
+
+def _funding_interval(series: pd.Series | None) -> pd.Timedelta:
+    if series is None or len(series) < 2:
+        return pd.Timedelta(hours=8)
+    idx = series.sort_index().index[-4:]
+    diffs = pd.Series(idx).diff().dropna()
+    median = diffs.median()
+    return pd.Timedelta(hours=max(1, round(median / pd.Timedelta(hours=1))))
+
+
+def accrue_funding_by_watermark(
+    history: Sequence[PositionSnapshot],
+    watermarks: Mapping[str, pd.Timestamp],
+    funding_by_symbol: Mapping[str, pd.Series],
+    mark_by_symbol: Mapping[str, pd.Series],
+    now: pd.Timestamp,
+    closed_at: Mapping[str, pd.Timestamp] | None = None,
+) -> FundingAccrual:
+    now_ts = _require_tz_aware(now, "now").tz_convert("UTC")
+    closed = dict(closed_at or {})
+    current = history[-1].positions if history else {}
     total = Decimal(0)
-    for symbol, qty in positions.items():
-        if qty == 0:
+    updated: dict[str, pd.Timestamp] = {}
+    lags: dict[str, pd.Timedelta] = {}
+    intervals: dict[str, pd.Timedelta] = {}
+    for symbol in sorted(set(watermarks) | set(current)):
+        watermark = watermarks.get(symbol) or _held_since(history, symbol)
+        if watermark is None:
             continue
-        if symbol not in funding_by_symbol:
-            raise DataIntegrityError(f"paper funding series missing for {symbol}")
-        if symbol not in marks:
-            raise DataIntegrityError(f"paper funding mark missing for {symbol}")
-        series = funding_by_symbol[symbol]
-        mark = marks[symbol]
-        window = series[(series.index > start) & (series.index <= end)]
-        for rate in window:
-            total += -(Decimal(str(rate)) * qty * mark)
-    return total
+        upper = min(now_ts, closed[symbol]) if symbol in closed else now_ts
+        series = funding_by_symbol.get(symbol)
+        marks = mark_by_symbol.get(symbol)
+        if series is not None:
+            window = series[(series.index > watermark) & (series.index <= upper)].sort_index()
+            for epoch, rate in window.items():
+                qty = position_at(history, symbol, epoch)
+                if qty != 0:
+                    bar = epoch.floor("h")
+                    if marks is None or bar not in marks.index:
+                        break
+                    total += -(Decimal(str(rate)) * qty * Decimal(str(marks.loc[bar])))
+                watermark = epoch
+        intervals[symbol] = _funding_interval(series)
+        if symbol in current and symbol not in closed:
+            updated[symbol] = watermark
+            lags[symbol] = now_ts - watermark
+        else:
+            released = _released_at(history, symbol)
+            if symbol in closed or (released is not None and watermark < released):
+                updated[symbol] = watermark
+                if symbol not in closed and released is not None and watermark < released:
+                    lags[symbol] = now_ts - watermark
+    return FundingAccrual(total, updated, lags, intervals)

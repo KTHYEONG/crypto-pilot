@@ -217,6 +217,14 @@ def test_SCENARIO_LIVE_35_PAPER_MULTI_DAY_CYCLES_DO_NOT_HALT(tmp_path, monkeypat
     """SCENARIO_LIVE_35_PAPER_MULTI_DAY_CYCLES_DO_NOT_HALT: PAPER cycles on
     unchanged target weights never HALT, and settle to 0 intents from the
     second cycle onward once the internal ledger already holds the target."""
+    from decimal import Decimal
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.executor import ExecutionOutcome
+    from src.live.ledger import load_ledger
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, StubMarketClient, StubOrderClient
     monkeypatch.setattr(
         runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient()
     )
@@ -240,7 +248,9 @@ def test_SCENARIO_LIVE_35_PAPER_MULTI_DAY_CYCLES_DO_NOT_HALT(tmp_path, monkeypat
     # PAPER funding accrual under the parity contract: stub per-symbol funding
     # I/O (empty series -> zero delta) so the multi-day continuity assertions
     # exercise sizing/ledger logic, not the on-disk funding store.
-    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {s: pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC")) for s in symbols})
+    epochs = pd.date_range(DECISION_TIME - pd.Timedelta(days=1), DECISION_TIME + pd.Timedelta(days=3), freq="4h")
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {s: pd.Series(0.0, index=epochs) for s in symbols})
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {s: pd.Series(100.0, index=epochs) for s in symbols})
 
     days = [DECISION_TIME + pd.Timedelta(days=i) for i in range(3)]
     weights = pd.DataFrame(
@@ -264,9 +274,6 @@ def test_SCENARIO_LIVE_35_PAPER_MULTI_DAY_CYCLES_DO_NOT_HALT(tmp_path, monkeypat
     assert reports[1].intent_count == 0
     assert reports[2].intent_count == 0
     assert ledger_snapshots[0] == ledger_snapshots[2]
-
-
-
 def test_SCENARIO_LIVE_47_RUNNER_PERSISTS_PORTFOLIO_STATE_PAPER_VS_LIVE(
     tmp_path, monkeypatch
 ) -> None:
@@ -943,6 +950,7 @@ def test_run_shadow_cycle_paper_accrues_funding_and_uses_parity_policy(tmp_path,
     monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
     monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": funding})
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {"AAAUSDT": pd.Series([101.0], index=pd.DatetimeIndex([decision_time]))})
     monkeypatch.setattr(runner_mod, "resolve_sizing_equity", equity_spy)
     monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
 
@@ -952,29 +960,30 @@ def test_run_shadow_cycle_paper_accrues_funding_and_uses_parity_policy(tmp_path,
     assert captured["cash_usdt"] == Decimal("1899.899")
     assert captured["policy"].passive_deadline_s == EXECUTION_BAR_SECONDS
     assert load_ledger(ledger_path).funding_accrued_through == now
-
-
-def test_accrue_ledger_funding_requires_cash(tmp_path) -> None:
+def test_accrue_ledger_funding_requires_cash(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
     import pandas as pd
     import pytest
+    import src.live.runner as runner_mod
     from src.common.errors import DataIntegrityError
     from src.live.ledger import LedgerState
 
+    epoch = pd.Timestamp("2026-09-02 00:00", tz="UTC")
     state = LedgerState(
         positions={"AAAUSDT": Decimal("1")},
         equity_high_water_mark=Decimal("2000"),
         cash_usdt=None,
         funding_accrued_through=pd.Timestamp("2026-09-01 01:03", tz="UTC"),
     )
-    with pytest.raises(DataIntegrityError, match="funding"):
-        runner_mod._accrue_ledger_funding(
-            state,
-            {"AAAUSDT": Decimal("100")},
-            pd.Timestamp("2026-09-02 01:03", tz="UTC"),
-            tmp_path / "ledger.json",
-        )
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {"AAAUSDT": pd.Series([100.0], index=pd.DatetimeIndex([epoch]))})
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))})
+    quiet, accrual = runner_mod._accrue_ledger_funding(state, pd.Timestamp("2026-09-02 01:03", tz="UTC"), tmp_path / "quiet.json")
+    assert quiet.cash_usdt is None
+    assert accrual.cash_delta == Decimal(0)
 
-
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([epoch]))})
+    with pytest.raises(DataIntegrityError, match="requires cash_usdt"):
+        runner_mod._accrue_ledger_funding(state, pd.Timestamp("2026-09-02 01:03", tz="UTC"), tmp_path / "ledger.json")
 def test_load_paper_funding_skips_missing_symbols(tmp_path, monkeypatch) -> None:
     import pandas as pd
     import src.common.paths as paths
@@ -1133,4 +1142,343 @@ def test_run_shadow_cycle_complete_stamps_ledger_and_rerun_does_not_trade(artifa
     assert (second.status, second.reason, second.intent_count) == ("COMPLETE", "already_executed", 0)
     assert len(live_env) == executed_after_first
     assert dict(load_ledger(ledger_path).positions) == positions_after_first
+
+
+
+def test_load_paper_marks_reads_open_by_bar_and_skips_missing(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.common.paths as paths
+    import src.live.runner as runner_mod
+
+    bars = pd.to_datetime(["2026-09-01 01:00", "2026-09-01 00:00", "2026-09-01 01:00"], utc=True)
+    pd.DataFrame({
+        "timestamp": (bars - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+        "open": [11.0, 10.0, 12.0], "high": 1.0, "low": 1.0, "close": 1.0,
+    }).to_parquet(tmp_path / "AUSDT.parquet", index=False)
+    monkeypatch.setattr(paths, "indicator_kline_path", lambda dataset, symbol, timeframe: tmp_path / f"{symbol}.parquet")
+
+    out = runner_mod._load_paper_marks(["AUSDT", "MISSINGUSDT"])
+
+    assert list(out) == ["AUSDT"]
+    assert out["AUSDT"].index.tolist() == list(pd.to_datetime(["2026-09-01 00:00", "2026-09-01 01:00"], utc=True))
+    assert out["AUSDT"].tolist() == [10.0, 12.0]
+
+
+def test_enforce_funding_lag_alerts_then_halts(monkeypatch) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import pytest
+    import src.live.runner as runner_mod
+    from src.common.errors import DataIntegrityError
+    from src.live.ledger import FundingAccrual
+    from src.live.settings import LiveSettings
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(runner_mod, "post_alert", lambda url, *, event, detail, decision_time, now: sent.append((event, detail)) or False)
+    monkeypatch.setattr(runner_mod, "send_email_alert", lambda **kwargs: False)
+    now = pd.Timestamp("2026-09-14 01:26Z")
+    decision = pd.Timestamp("2026-09-14 00:00Z")
+    fresh = FundingAccrual(Decimal(0), {}, {"AUSDT": pd.Timedelta(hours=9)}, {"AUSDT": pd.Timedelta(hours=4)})
+    lagging = FundingAccrual(Decimal(0), {}, {"AUSDT": pd.Timedelta(hours=9, minutes=1), "BUSDT": pd.Timedelta(hours=17)}, {"AUSDT": pd.Timedelta(hours=4), "BUSDT": pd.Timedelta(hours=8)})
+    stale = FundingAccrual(Decimal(0), {}, {"AUSDT": pd.Timedelta(hours=25), "BUSDT": pd.Timedelta(hours=30)}, {"AUSDT": pd.Timedelta(hours=4), "BUSDT": pd.Timedelta(hours=8)})
+
+    runner_mod._enforce_funding_lag(fresh, LiveSettings(), decision, now)
+    assert sent == []
+    runner_mod._enforce_funding_lag(lagging, LiveSettings(), decision, now)
+    assert sent == [("paper_funding_lag", "symbols=1 sample=AUSDT")]
+    with pytest.raises(DataIntegrityError, match=r"paper funding lag exceeded symbols=AUSDT,BUSDT max_lag_h=30.0"):
+        runner_mod._enforce_funding_lag(stale, LiveSettings(), decision, now)
+
+
+def test_settle_delisted_paper_positions_fails_closed_without_mark_or_cash(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import pytest
+    import src.live.runner as runner_mod
+    from src.common.errors import DataIntegrityError
+    from src.live.audit import AuditLog
+    from src.live.ledger import LedgerState
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {})
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    now = pd.Timestamp("2026-09-14 01:26Z")
+    delivery = {"AUSDT": pd.Timestamp("2026-09-10 08:30Z")}
+    path = tmp_path / "ledger.json"
+
+    with pytest.raises(DataIntegrityError, match="paper delisted mark missing symbol=AUSDT bar=2026-09-10T08:00:00"):
+        runner_mod._settle_delisted_paper_positions(
+            LedgerState(positions={"AUSDT": Decimal("1")}, cash_usdt=Decimal("100")), delivery, now, path, audit, LiveSettings(), now.normalize(),
+        )
+    with pytest.raises(DataIntegrityError, match="requires cash_usdt"):
+        runner_mod._settle_delisted_paper_positions(
+            LedgerState(positions={"AUSDT": Decimal("1")}), delivery, now, path, audit, LiveSettings(), now.normalize(),
+        )
+    assert not path.exists()
+
+
+def test_run_shadow_cycle_paper_settles_delisted_position_without_halt(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.executor import ExecutionOutcome
+    from src.live.ledger import LedgerState, PositionSnapshot, load_ledger, save_ledger
+    from src.live.settings import ExecutionMode, LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(runner_mod, "post_alert", lambda url, *, event, detail, decision_time, now: alerts.append((event, detail)) or False)
+    monkeypatch.setattr(runner_mod, "send_email_alert", lambda **kwargs: False)
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        return tuple(
+            ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED")
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    ledger_path = tmp_path / "ledger.json"
+    settings = LiveSettings(
+        mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
+        fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
+        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
+    )
+    weights_path = tmp_path / "weights.parquet"
+    pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+
+    delivery_ms = int(DECISION_TIME.value // 1_000_000)
+
+    class DelistingMarketClient(StubMarketClient):
+        def exchange_info(self):
+            info = super().exchange_info()
+            for entry in info["symbols"]:
+                if entry["symbol"] == "AAAUSDT":
+                    entry["status"] = "SETTLING"
+                    entry["deliveryDate"] = delivery_ms
+            return info
+
+        def book_tickers(self):
+            return {"BUSDT": {"symbol": "BUSDT", "bidPrice": "100.00", "askPrice": "101.00"}}
+
+        def premium_index(self):
+            return {}
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: DelistingMarketClient())
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {})
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {"AAAUSDT": pd.Series([90.0], index=pd.DatetimeIndex([DECISION_TIME]))})
+    captured: dict[str, object] = {}
+    real_equity = runner_mod.resolve_sizing_equity
+
+    def equity_spy(snapshot, cap_usdt, **kwargs):
+        captured["cash_usdt"] = kwargs["cash_usdt"]
+        captured["positions"] = dict(kwargs["positions"])
+        return real_equity(snapshot, cap_usdt, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "resolve_sizing_equity", equity_spy)
+    save_ledger(ledger_path, LedgerState(
+        positions={"AAAUSDT": Decimal("1")}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("1900"),
+        funding_accrued_through=NOW - pd.Timedelta(hours=1),
+    ))
+
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+
+    assert report.status == "COMPLETE"
+    assert captured["cash_usdt"] == Decimal("1990.0")
+    assert "AAAUSDT" not in captured["positions"]
+    assert "AAAUSDT" not in load_ledger(ledger_path).positions
+    assert [event for event, _ in alerts] == ["paper_delisted_close"]
+    assert "symbol=AAAUSDT qty=1 mark=90.0" in alerts[0][1]
+    assert "paper_delisted_close" in (tmp_path / "shadow_cycle.jsonl").read_text(encoding="utf-8")
+
+
+def test_run_shadow_cycle_paper_halts_when_held_funding_lag_exceeds_24h(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.executor import ExecutionOutcome
+    from src.live.ledger import LedgerState, PositionSnapshot, load_ledger, save_ledger
+    from src.live.settings import ExecutionMode, LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(runner_mod, "post_alert", lambda url, *, event, detail, decision_time, now: alerts.append((event, detail)) or False)
+    monkeypatch.setattr(runner_mod, "send_email_alert", lambda **kwargs: False)
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        return tuple(
+            ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED")
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    ledger_path = tmp_path / "ledger.json"
+    settings = LiveSettings(
+        mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
+        fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
+        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
+    )
+    weights_path = tmp_path / "weights.parquet"
+    pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+
+    calls: list[object] = []
+    monkeypatch.setattr(runner_mod, "execute_intents", lambda *a, **k: calls.append(a) or ())
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    stale_epoch = NOW - pd.Timedelta(hours=30)
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([stale_epoch]))})
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {})
+    save_ledger(ledger_path, LedgerState(
+        positions={"AAAUSDT": Decimal("1")}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("1900"),
+        funding_watermarks={"AAAUSDT": stale_epoch},
+        position_history=(PositionSnapshot(effective_from=NOW - pd.Timedelta(hours=50), positions={"AAAUSDT": Decimal("1")}),),
+    ))
+
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+
+    assert report.status == "HALT"
+    assert "paper funding lag exceeded symbols=AAAUSDT max_lag_h=30.0" in report.reason
+    assert calls == []
+
+
+def test_run_shadow_cycle_applies_orphan_settlements_before_reconcile(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.executor import OrphanSettlement
+    from src.live.ledger import load_ledger
+    from src.live.settings import ExecutionMode, LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+    monkeypatch.setattr(
+        runner_mod,
+        "cancel_orphan_orders",
+        lambda client, run_id, audit, **kwargs: [
+            OrphanSettlement(
+                symbol="AAAUSDT",
+                client_order_id=f"{run_id}-0",
+                side="BUY",
+                executed_qty=Decimal("0.5"),
+                avg_price=Decimal("100"),
+            )
+        ],
+    )
+    monkeypatch.setattr(runner_mod, "execute_intents", lambda *args, **kwargs: ())
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {})
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {})
+
+    ledger_path = tmp_path / "ledger.json"
+    settings = LiveSettings(
+        mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
+    )
+    weights_path = tmp_path / "weights.parquet"
+    pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+
+    assert report.status == "COMPLETE"
+    assert load_ledger(ledger_path).positions["AAAUSDT"] == Decimal("0.5")
+
+
+def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_executor(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.executor import ExecutionOutcome
+    from src.live.order_journal import OrderJournal
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    decision_time = pd.Timestamp("2026-08-24 00:00Z")
+    now = decision_time + pd.Timedelta(hours=2)
+    artifact = tmp_path / "weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
+
+    class MarketClient:
+        def exchange_info(self):
+            return {
+                "symbols": [{
+                    "symbol": "AAAUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "status": "TRADING",
+                    "quantityPrecision": 3, "pricePrecision": 2,
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100000"},
+                        {"filterType": "MIN_NOTIONAL", "minNotional": "1"},
+                    ],
+                }],
+                "rateLimits": [
+                    {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
+                    {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
+                    {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300},
+                ],
+            }
+
+        def book_ticker(self, s):
+            return {"bidPrice": "100", "askPrice": "101"}
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100", "askPrice": "101", "symbol": "AAAUSDT"}}
+
+        def premium_index(self):
+            return {}
+
+        def depth(self, symbol, *, limit=20):
+            return {"lastUpdateId": 1, "bids": [["100", "1"]], "asks": [["101", "1"]]}
+
+    class OrderClient:
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v2/account":
+                return {"totalWalletBalance": "2000", "availableBalance": "1900", "totalInitialMargin": "10",
+                        "totalUnrealizedProfit": "0", "dualSidePosition": "false", "multiAssetsMargin": "false"}
+            if path == "/fapi/v2/positionRisk":
+                return []
+            raise AssertionError(path)
+
+        def sync_server_time(self):
+            return None
+
+        def open_orders(self):
+            return []
+
+    journal_path = tmp_path / "journal" / "live_order_journal.jsonl"
+    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClient())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+    monkeypatch.setattr(runner_mod, "default_order_journal_path", lambda: journal_path)
+    captured: dict[str, object] = {}
+
+    def fake_orphans(client, client_order_prefix, audit, *, journal=None):
+        captured["orphan_journal"] = journal
+        captured["prefix"] = client_order_prefix
+        return []
+
+    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        captured["execute_journal"] = kwargs.get("journal")
+        return tuple(
+            ExecutionOutcome(symbol=i.symbol, filled_qty=Decimal("0"), unfilled_qty=i.quantity, avg_fill_price=None, chases=0, status="SHADOW")
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "cancel_orphan_orders", fake_orphans)
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    settings = LiveSettings(
+        mode=ExecutionMode.SHADOW, notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"),
+        fills_dir=str(tmp_path / "fills"), microstructure_dir=str(tmp_path / "micro"),
+        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"),
+        tax_ledger_dir=str(tmp_path / "tax"), orderbook_capture_enabled=False,
+    )
+
+    report = run_shadow_cycle(settings, decision_time, artifact, now=now)
+
+    assert report.status == "COMPLETE"
+    assert isinstance(captured["orphan_journal"], OrderJournal)
+    assert captured["orphan_journal"] is captured["execute_journal"]
+    assert captured["orphan_journal"].path == journal_path
+    assert captured["prefix"] == "20260824"
+    assert not journal_path.exists()
 

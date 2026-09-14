@@ -1278,3 +1278,1049 @@ def test_backtest_parity_policy_bounds_passive_phase_without_resting_order(tmp_p
     assert len(ioc_orders) >= 1
     assert all(Decimal(o["price"]) <= Decimal("100.50") for o in ioc_orders)
     assert outcome.status == "RESIDUAL"
+
+
+def test_execute_intents_unknown_submission_is_adopted_not_resent(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+    from src.live.rest import OrderStatusUnknown
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    class _Client:
+        def __init__(self):
+            self.posted: list[dict] = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            raise OrderStatusUnknown("timeout", path="/fapi/v1/order", http_status=0, code=None)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+
+    outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, policy, audit,
+                               clock, sleep_fn, journal=journal)
+
+    order_id = client.posted[0]["newClientOrderId"]
+    assert len(client.posted) == 1
+    assert order_id.startswith("mh20260914-")
+    assert order_id.endswith("-0-0")
+    assert outcomes[0].status == "FILLED"
+    assert outcomes[0].filled_qty == Decimal("1")
+    reloaded = OrderJournal(tmp_path / "journal.jsonl")
+    assert reloaded.next_submit_seq() == 1
+    assert reloaded.observed_qty(order_id) == Decimal("1")
+    assert "order_status_unknown" in _events()
+    assert "order_unknown_adopted" in _events()
+
+def test_execute_intents_unknown_submission_confirmed_absent_posts_new_seq(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+    from src.live.rest import OrderStatusUnknown
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    from src.live.executor import UNKNOWN_SUBMISSION_MISS_LIMIT
+
+    class _Client:
+        def __init__(self):
+            self.posted: list[dict] = []
+            self.lookups: list[str] = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            if len(self.posted) == 1:
+                raise OrderStatusUnknown("503", path="/fapi/v1/order", http_status=503, code=None)
+            return {"orderId": 2}
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            self.lookups.append(orig_client_order_id)
+            if orig_client_order_id == self.posted[0]["newClientOrderId"]:
+                raise VenueError("missing", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+
+    outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, policy, audit,
+                               clock, sleep_fn, journal=journal)
+
+    first_id = client.posted[0]["newClientOrderId"]
+    second_id = client.posted[1]["newClientOrderId"]
+    assert UNKNOWN_SUBMISSION_MISS_LIMIT == 2
+    assert len(client.posted) == 2
+    assert first_id.endswith("-0-0")
+    assert second_id.endswith("-0-1")
+    assert client.lookups.count(first_id) == 2
+    assert outcomes[0].status == "FILLED"
+    assert "order_unknown_not_placed" in _events()
+
+def test_execute_intents_rate_limited_submission_retries_next_tick_with_new_seq(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    class _Client:
+        def __init__(self):
+            self.posted: list[dict] = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            if len(self.posted) == 1:
+                raise VenueError("rate limited", code=None, http_status=429, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"orderId": 2}
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+
+    outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, policy, audit,
+                               clock, sleep_fn, journal=journal)
+
+    assert [p["newClientOrderId"][-4:] for p in client.posted] == ["-0-0", "-0-1"]
+    assert outcomes[0].status == "FILLED"
+    assert "order_rate_limited" in _events()
+
+def test_execute_intents_abort_cancels_and_settles_active_orders(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    import pytest
+
+    class _Client:
+        def __init__(self):
+            self.posted: list[dict] = []
+            self.cancels: list[str] = []
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            if params["symbol"] == "BBBUSDT":
+                raise VenueError("insufficient margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"orderId": 1}
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "CANCELED", "executedQty": "0.4", "avgPrice": "100.00"}
+
+    client = _Client()
+    filters = {"AAAUSDT": _filters("AAAUSDT"), "BBBUSDT": _filters("BBBUSDT")}
+
+    with pytest.raises(VenueError) as exc_info:
+        execute_intents(client, [_intent("AAAUSDT"), _intent("BBBUSDT")], filters, policy, audit,
+                        clock, sleep_fn, journal=journal)
+
+    aaa_id = client.posted[0]["newClientOrderId"]
+    assert client.cancels == [aaa_id]
+    partial = {o.symbol: o for o in exc_info.value.partial_outcomes}
+    assert partial["AAAUSDT"].filled_qty == Decimal("0.4")
+    assert partial["BBBUSDT"].filled_qty == Decimal("0")
+    assert OrderJournal(tmp_path / "journal.jsonl").observed_qty(aaa_id) == Decimal("0.4")
+
+def test_execute_intents_abort_cleanup_failure_does_not_mask_original_error(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    import pytest
+
+    class _Client:
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            if params["symbol"] == "BBBUSDT":
+                raise VenueError("insufficient margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"orderId": 1}
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            raise ConnectionError("network down")
+
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "NEW", "executedQty": "0"}
+
+    filters = {"AAAUSDT": _filters("AAAUSDT"), "BBBUSDT": _filters("BBBUSDT")}
+
+    with pytest.raises(VenueError) as exc_info:
+        execute_intents(_Client(), [_intent("AAAUSDT"), _intent("BBBUSDT")], filters, policy, audit,
+                        clock, sleep_fn, journal=journal)
+
+    assert exc_info.value.code == -2019
+    assert "abort_cleanup_failed" in _events()
+
+def test_execute_intents_abort_resolves_unknown_submission_at_exit(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+    from src.live.rest import OrderStatusUnknown
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    import pytest
+
+    class _Client:
+        def __init__(self):
+            self.posted: list[dict] = []
+            self.cancels: list[str] = []
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            if params["symbol"] == "AAAUSDT":
+                raise OrderStatusUnknown("timeout", path="/fapi/v1/order", http_status=0, code=None)
+            raise VenueError("insufficient margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "PARTIALLY_FILLED", "executedQty": "0.25", "avgPrice": "100.00"}
+
+    client = _Client()
+    filters = {"AAAUSDT": _filters("AAAUSDT"), "BBBUSDT": _filters("BBBUSDT")}
+
+    with pytest.raises(VenueError) as exc_info:
+        execute_intents(client, [_intent("AAAUSDT"), _intent("BBBUSDT")], filters, policy, audit,
+                        clock, sleep_fn, journal=journal)
+
+    aaa_id = client.posted[0]["newClientOrderId"]
+    assert client.cancels == [aaa_id]
+    partial = {o.symbol: o for o in exc_info.value.partial_outcomes}
+    assert partial["AAAUSDT"].filled_qty == Decimal("0.25")
+
+def test_execute_intents_window_end_drops_unknown_submission_confirmed_absent(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+    from src.live.rest import OrderStatusUnknown
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    short_policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=0.5, window_deadline_s=1.0)
+
+    class _Client:
+        def __init__(self):
+            self.posted: list[dict] = []
+            self.cancels: list[str] = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            raise OrderStatusUnknown("timeout", path="/fapi/v1/order", http_status=0, code=None)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            raise VenueError("missing", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+    client = _Client()
+
+    outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, short_policy, audit,
+                               clock, sleep_fn, journal=journal)
+
+    assert len(client.posted) == 1
+    assert client.cancels == []
+    assert outcomes[0].status == "RESIDUAL"
+
+def test_execute_intents_suppressed_client_never_writes_journal(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    from src.live.rest import PaperResponse
+    from src.live.settings import ExecutionMode
+
+    short_policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=1.5, window_deadline_s=3.0)
+
+    class _Client:
+        mode = ExecutionMode.PAPER
+
+        def __init__(self):
+            self.posted: list[dict] = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            return PaperResponse.suppressed("POST", "/fapi/v1/order", "")
+
+    client = _Client()
+
+    execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, short_policy, audit,
+                    clock, sleep_fn, journal=journal)
+
+    assert client.posted[0]["newClientOrderId"].endswith("-0-0")
+    assert not (tmp_path / "journal.jsonl").exists()
+
+def test_cancel_orphan_orders_settles_prior_day_and_legacy_orders_by_journal_delta(tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+
+    audit = AuditLog(tmp_path / "orphan_audit.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+
+    class _Client:
+        def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
+            self._open = open_orders
+            self._executed = executed
+            self.cancels: list[str] = []
+            self._cancel_unknown_status = cancel_unknown_status
+            if mode is not None:
+                self.mode = mode
+
+        def open_orders(self):
+            return list(self._open)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            if self._cancel_unknown_status is not None:
+                raise OrderStatusUnknown("cancel unknown", path="/fapi/v1/order", http_status=503, code=None)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            status = self._cancel_unknown_status or "CANCELED"
+            return {"status": status, "side": "BUY", "avgPrice": "100",
+                    "executedQty": self._executed.get(orig_client_order_id, "0")}
+
+    prior = "mh20260913-ABCDEFGHIJ-0-0-7"
+    booked = "mh20260914-KLMNOPQRST-1-0-8"
+    legacy = "20260912-BBBUSDT-0-0-1"
+    journal.record_observed(prior, Decimal("3"))
+    journal.record_observed(booked, Decimal("4"))
+    client = _Client(
+        [{"symbol": "AAAUSDT", "clientOrderId": prior}, {"symbol": "CCCUSDT", "clientOrderId": booked},
+         {"symbol": "BBBUSDT", "clientOrderId": legacy}],
+        {prior: "4", booked: "4", legacy: "2"},
+    )
+
+    settlements = cancel_orphan_orders(client, "20260914", audit, journal=journal)
+
+    assert client.cancels == [prior, booked, legacy]
+    assert [(s.symbol, s.executed_qty) for s in settlements] == [("AAAUSDT", Decimal("1")), ("BBBUSDT", Decimal("2"))]
+
+def test_cancel_orphan_orders_fails_closed_on_foreign_order_before_any_cancel(tmp_path) -> None:
+    from src.live.audit import AuditLog
+    from src.live.executor import ForeignOpenOrderError, cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+    from src.live.settings import ExecutionMode
+
+    audit = AuditLog(tmp_path / "orphan_audit.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+
+    class _Client:
+        def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
+            self._open = open_orders
+            self._executed = executed
+            self.cancels: list[str] = []
+            self._cancel_unknown_status = cancel_unknown_status
+            if mode is not None:
+                self.mode = mode
+
+        def open_orders(self):
+            return list(self._open)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            if self._cancel_unknown_status is not None:
+                raise OrderStatusUnknown("cancel unknown", path="/fapi/v1/order", http_status=503, code=None)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            status = self._cancel_unknown_status or "CANCELED"
+            return {"status": status, "side": "BUY", "avgPrice": "100",
+                    "executedQty": self._executed.get(orig_client_order_id, "0")}
+
+    import pytest
+
+    client = _Client(
+        [{"symbol": "AAAUSDT", "clientOrderId": "mh20260914-ABCDEFGHIJ-0-0-1"},
+         {"symbol": "BBBUSDT", "clientOrderId": "web_manual_123"}],
+        {},
+        mode=ExecutionMode.LIVE_TESTNET,
+    )
+
+    with pytest.raises(ForeignOpenOrderError):
+        cancel_orphan_orders(client, "20260914", audit, journal=journal)
+
+    assert client.cancels == []
+
+def test_cancel_orphan_orders_ignores_foreign_orders_in_suppressed_mode(tmp_path) -> None:
+    from src.live.audit import AuditLog
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+    from src.live.settings import ExecutionMode
+
+    audit = AuditLog(tmp_path / "orphan_audit.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+
+    class _Client:
+        def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
+            self._open = open_orders
+            self._executed = executed
+            self.cancels: list[str] = []
+            self._cancel_unknown_status = cancel_unknown_status
+            if mode is not None:
+                self.mode = mode
+
+        def open_orders(self):
+            return list(self._open)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            if self._cancel_unknown_status is not None:
+                raise OrderStatusUnknown("cancel unknown", path="/fapi/v1/order", http_status=503, code=None)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            status = self._cancel_unknown_status or "CANCELED"
+            return {"status": status, "side": "BUY", "avgPrice": "100",
+                    "executedQty": self._executed.get(orig_client_order_id, "0")}
+
+    client = _Client([{"symbol": "BBBUSDT", "clientOrderId": "web_manual_123"}], {}, mode=ExecutionMode.PAPER)
+
+    settlements = cancel_orphan_orders(client, "20260914", audit, journal=journal)
+
+    assert settlements == []
+    assert client.cancels == []
+    assert "foreign_open_order" in (tmp_path / "orphan_audit.jsonl").read_text(encoding="utf-8")
+
+def test_cancel_orphan_orders_cancel_status_unknown_resolved_by_lookup(tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+
+    audit = AuditLog(tmp_path / "orphan_audit.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+
+    class _Client:
+        def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
+            self._open = open_orders
+            self._executed = executed
+            self.cancels: list[str] = []
+            self._cancel_unknown_status = cancel_unknown_status
+            if mode is not None:
+                self.mode = mode
+
+        def open_orders(self):
+            return list(self._open)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            if self._cancel_unknown_status is not None:
+                raise OrderStatusUnknown("cancel unknown", path="/fapi/v1/order", http_status=503, code=None)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            status = self._cancel_unknown_status or "CANCELED"
+            return {"status": status, "side": "BUY", "avgPrice": "100",
+                    "executedQty": self._executed.get(orig_client_order_id, "0")}
+
+    import pytest
+
+    order = "mh20260914-ABCDEFGHIJ-0-0-3"
+    closed = _Client([{"symbol": "AAAUSDT", "clientOrderId": order}], {order: "1"}, cancel_unknown_status="CANCELED")
+
+    settlements = cancel_orphan_orders(closed, "20260914", audit, journal=journal)
+
+    assert closed.cancels == [order]
+    assert [s.executed_qty for s in settlements] == [Decimal("1")]
+
+    still_open = _Client([{"symbol": "AAAUSDT", "clientOrderId": order}], {order: "0"}, cancel_unknown_status="NEW")
+    with pytest.raises(OrderStatusUnknown):
+        cancel_orphan_orders(still_open, "20260914", audit, journal=journal)
+    assert still_open.cancels == [order]
+
+def test_cancel_orphan_orders_tolerates_order_gone_on_lookup(tmp_path) -> None:
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+
+    audit = AuditLog(tmp_path / "orphan_audit.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+
+    class _Client:
+        def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
+            self._open = open_orders
+            self._executed = executed
+            self.cancels: list[str] = []
+            self._cancel_unknown_status = cancel_unknown_status
+            if mode is not None:
+                self.mode = mode
+
+        def open_orders(self):
+            return list(self._open)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            if self._cancel_unknown_status is not None:
+                raise OrderStatusUnknown("cancel unknown", path="/fapi/v1/order", http_status=503, code=None)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            status = self._cancel_unknown_status or "CANCELED"
+            return {"status": status, "side": "BUY", "avgPrice": "100",
+                    "executedQty": self._executed.get(orig_client_order_id, "0")}
+
+    order = "mh20260914-ABCDEFGHIJ-0-0-3"
+
+    class _GoneClient(_Client):
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            raise VenueError("unknown order", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+        def query_order(self, symbol, orig_client_order_id):
+            raise VenueError("unknown order", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+    client = _GoneClient([{"symbol": "AAAUSDT", "clientOrderId": order}], {})
+
+    assert cancel_orphan_orders(client, "20260914", audit, journal=journal) == []
+    assert client.cancels == [order]
+
+def test_cancel_orphan_orders_propagates_non_benign_cancel_rejection(tmp_path) -> None:
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+
+    audit = AuditLog(tmp_path / "orphan_audit.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+
+    class _Client:
+        def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
+            self._open = open_orders
+            self._executed = executed
+            self.cancels: list[str] = []
+            self._cancel_unknown_status = cancel_unknown_status
+            if mode is not None:
+                self.mode = mode
+
+        def open_orders(self):
+            return list(self._open)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            if self._cancel_unknown_status is not None:
+                raise OrderStatusUnknown("cancel unknown", path="/fapi/v1/order", http_status=503, code=None)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            status = self._cancel_unknown_status or "CANCELED"
+            return {"status": status, "side": "BUY", "avgPrice": "100",
+                    "executedQty": self._executed.get(orig_client_order_id, "0")}
+
+    import pytest
+
+    order = "mh20260914-ABCDEFGHIJ-0-0-3"
+
+    class _RejectingClient(_Client):
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            raise VenueError("bad signature", code=-1022, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+    client = _RejectingClient([{"symbol": "AAAUSDT", "clientOrderId": order}], {order: "1"})
+
+    with pytest.raises(VenueError) as exc_info:
+        cancel_orphan_orders(client, "20260914", audit, journal=journal)
+
+    assert exc_info.value.code == -1022
+
+def test_cancel_orphan_orders_falls_back_to_open_order_avg_price(tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+
+    audit = AuditLog(tmp_path / "orphan_audit.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+
+    class _Client:
+        def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
+            self._open = open_orders
+            self._executed = executed
+            self.cancels: list[str] = []
+            self._cancel_unknown_status = cancel_unknown_status
+            if mode is not None:
+                self.mode = mode
+
+        def open_orders(self):
+            return list(self._open)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
+            if self._cancel_unknown_status is not None:
+                raise OrderStatusUnknown("cancel unknown", path="/fapi/v1/order", http_status=503, code=None)
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            status = self._cancel_unknown_status or "CANCELED"
+            return {"status": status, "side": "BUY", "avgPrice": "100",
+                    "executedQty": self._executed.get(orig_client_order_id, "0")}
+
+    order = "mh20260914-ABCDEFGHIJ-0-0-3"
+
+    class _NoAvgClient(_Client):
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "CANCELED", "side": "SELL", "executedQty": "2"}
+
+    client = _NoAvgClient([{"symbol": "AAAUSDT", "clientOrderId": order, "avgPrice": "99.5"}], {})
+
+    settlements = cancel_orphan_orders(client, "20260914", audit, journal=journal)
+
+    assert [(s.side, s.executed_qty, s.avg_price) for s in settlements] == [("SELL", Decimal("2"), Decimal("99.5"))]
+
+def test_execute_intents_unknown_ioc_submission_adopted_without_second_send(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+    from src.live.rest import OrderStatusUnknown
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    ioc_policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=0.0, window_deadline_s=20.0)
+
+    class _Client:
+        def __init__(self):
+            self.posted: list[dict] = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            raise OrderStatusUnknown("timeout", path="/fapi/v1/order", http_status=0, code=None)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.20"}
+
+    client = _Client()
+
+    outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, ioc_policy, audit,
+                               clock, sleep_fn, journal=journal)
+
+    assert [p["timeInForce"] for p in client.posted] == ["IOC"]
+    assert outcomes[0].status == "FILLED"
+
+def test_execute_intents_unknown_lookup_failure_propagates(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+    from src.live.rest import OrderStatusUnknown
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    import pytest
+
+    class _Client:
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            raise OrderStatusUnknown("timeout", path="/fapi/v1/order", http_status=0, code=None)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            raise VenueError("bad signature", code=-1022, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+    with pytest.raises(VenueError) as exc_info:
+        execute_intents(_Client(), [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, policy, audit,
+                        clock, sleep_fn, journal=journal)
+
+    assert exc_info.value.code == -1022
+
+def test_execute_intents_window_end_unknown_lookup_failure_propagates(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+    from src.live.rest import OrderStatusUnknown
+
+    def _filters(symbol):
+        return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                             min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                             quantity_precision=3, price_precision=2)
+
+    def _intent(symbol):
+        return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                           leg_index=0, decision_price=Decimal("100.10"))
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    audit_path = tmp_path / "exec_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(seconds):
+        clock_state[0] += seconds
+
+    def _events():
+        return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    import pytest
+
+    short_policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=0.5, window_deadline_s=1.0)
+
+    class _Client:
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            raise OrderStatusUnknown("timeout", path="/fapi/v1/order", http_status=0, code=None)
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            raise VenueError("bad signature", code=-1022, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+    with pytest.raises(VenueError) as exc_info:
+        execute_intents(_Client(), [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, short_policy, audit,
+                        clock, sleep_fn, journal=journal)
+
+    assert exc_info.value.code == -1022
+    assert "abort_cleanup_failed" in _events()
+
