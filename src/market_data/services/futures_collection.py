@@ -31,6 +31,7 @@ _TIMEFRAME_MS: dict[str, int] = {"1m": 60_000, "3m": 180_000, "5m": 300_000, "15
 FUNDING_DEFAULT_INTERVAL_MS: int = 8 * 3_600_000  # 8시간 기본 간격
 FUNDING_SETTLEMENT_GRACE_MS: int = 5 * 60_000  # 정산 직후 게시 지연 유예
 FUNDING_TIME_TOLERANCE_MS: int = 60_000  # fundingTime의 ms 단위 지터 허용
+FUNDING_GAP_THRESHOLD_MS: int = FUNDING_DEFAULT_INTERVAL_MS + 30 * 60_000  # 표준 최대 정산 간격(8h)을 넘는 간격만 공백으로 본다 -- 간격 변경(8h->4h->1h)을 공백으로 오탐해 매 사이클 재조회하는 것을 막는다.
 _FUNDING_INTERVAL_SAMPLE: int = 6
 
 
@@ -54,6 +55,23 @@ def funding_tail_is_fresh(timestamps_ms: Iterable[int], now: pd.Timestamp) -> bo
     if not ts:
         return False
     return max(ts) >= last_settled_funding_epoch_ms(now, infer_funding_interval_ms(ts)) - FUNDING_TIME_TOLERANCE_MS
+
+
+def funding_gap_start_ms(timestamps_ms: Iterable[int], window_start_ms: int) -> int | None:
+    """Return the last present settlement before the first internal funding gap.
+
+    Scans sorted unique timestamps for a gap wider than
+    ``FUNDING_GAP_THRESHOLD_MS`` whose right edge lies inside the window
+    (``b > window_start_ms``). Returns the left edge ``a`` (which may precede
+    ``window_start_ms``; callers clamp it) or ``None`` when no in-window gap
+    exists. A leading edge (cache starting after ``window_start_ms``) is not
+    a gap.
+    """
+    ts = sorted({int(t) for t in timestamps_ms})
+    for a, b in itertools.pairwise(ts):
+        if b > window_start_ms and b - a > FUNDING_GAP_THRESHOLD_MS:
+            return a
+    return None
 
 
 def _utc_now() -> pd.Timestamp:
@@ -1160,6 +1178,7 @@ class DataCollector:
         req_end = pd.to_datetime(end_date, utc=True)
         now = _utc_now()
         as_of = min(req_end, now)
+        req_start_ms = int(req_start.value // 1_000_000)
         cache_df = pd.DataFrame()
         if path.exists():
             try:
@@ -1174,6 +1193,7 @@ class DataCollector:
             not cache_df.empty
             and cache_df["datetime"].min() <= req_start + pd.Timedelta(days=1)
             and funding_tail_is_fresh(cache_df["timestamp"], as_of)
+            and funding_gap_start_ms(cache_df["timestamp"], req_start_ms) is None
         ):
             return
         api_cutoff = now.replace(
@@ -1219,7 +1239,12 @@ class DataCollector:
                 continue
             if latest_cached_dt is None or part_max_dt > latest_cached_dt:
                 latest_cached_dt = part_max_dt
-        remaining_start = max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
+        gap_ms = funding_gap_start_ms(cache_df["timestamp"], req_start_ms) if not cache_df.empty else None
+        if gap_ms is not None:
+            # 창 안 내부 공백은 꼬리가 최신이어도 공백 직전부터 재조회해 영구 누락을 막는다.
+            remaining_start = max(req_start, pd.Timestamp(gap_ms, unit="ms", tz="UTC"))
+        else:
+            remaining_start = max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
         if remaining_start < req_end:
             new_funding = self.client.fetch_funding_rate_history(symbol, str(remaining_start), str(req_end))
             if not new_funding.empty:

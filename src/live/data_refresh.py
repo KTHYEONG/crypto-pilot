@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 
 from src.market_data.binance.futures import BinanceIpBlockedError
-from src.market_data.services.futures_collection import funding_tail_is_fresh
+from src.market_data.services.futures_collection import funding_gap_start_ms, funding_tail_is_fresh
 from src.market_data.storage.ohlcv import is_temp_artifact
 from src.quant.universe.pit_universe import symbol_partition
 
@@ -80,7 +80,7 @@ def _disk_tail_ts(futures_root: Path, symbol: str, now: pd.Timestamp) -> pd.Time
         return None
 
 
-def _funding_fresh_on_disk(futures_root: Path, symbol: str, now: pd.Timestamp) -> bool:
+def _funding_fresh_on_disk(futures_root: Path, symbol: str, now: pd.Timestamp, window_start: pd.Timestamp | None = None) -> bool:
     path = Path(futures_root) / "funding" / f"{symbol}.parquet"
     if not path.exists():
         return False
@@ -90,7 +90,11 @@ def _funding_fresh_on_disk(futures_root: Path, symbol: str, now: pd.Timestamp) -
         _logger.debug("[DATA] funding tail unreadable symbol=%s error=%s", symbol, exc)
         return False
     stamps = pd.to_numeric(frame["timestamp"], errors="coerce").dropna().astype("int64").tolist()
-    return funding_tail_is_fresh(stamps, now)
+    if not funding_tail_is_fresh(stamps, now):
+        return False
+    if window_start is None:
+        return True
+    return funding_gap_start_ms(stamps, int(window_start.value // 1_000_000)) is None
 
 
 def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partition: str = "dev") -> float:
@@ -142,7 +146,7 @@ def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partit
         return float("inf")
 
 
-def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) -> bool:
+def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str, *, funding_start: str | None = None) -> bool:
     try:
         collector.ensure_ohlcv_data(symbol, "1h", start, end)
     except BinanceIpBlockedError:
@@ -152,7 +156,7 @@ def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) 
         return False
     funding_ok = True
     try:
-        collector.ensure_funding_data(symbol, start, end)
+        collector.ensure_funding_data(symbol, start if funding_start is None else funding_start, end)
     except BinanceIpBlockedError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -213,6 +217,7 @@ def refresh_live_market_data(
         collector = DataCollector()
 
     deadline_ts = time.perf_counter() + float(deadline_s)
+    funding_window_start = now - pd.Timedelta(days=lookback_days)
 
     ip_blocked = threading.Event()
 
@@ -221,7 +226,7 @@ def refresh_live_market_data(
         if time.perf_counter() > deadline_ts:
             return "deadline"
         tail = _disk_tail_ts(futures_root, sym, now)
-        if tail is not None and (now - tail) <= pd.Timedelta(hours=freshness_floor_hours) and _funding_fresh_on_disk(futures_root, sym, now):
+        if tail is not None and (now - tail) <= pd.Timedelta(hours=freshness_floor_hours) and _funding_fresh_on_disk(futures_root, sym, now, window_start=funding_window_start):
             return "fresh"
         if ip_blocked.is_set():
             return "ip_blocked"
@@ -230,7 +235,7 @@ def refresh_live_market_data(
         else:
             start = now - pd.Timedelta(days=lookback_days)
         try:
-            ok = _refresh_one_symbol_tail(collector, sym, str(start), str(now))
+            ok = _refresh_one_symbol_tail(collector, sym, str(start), str(now), funding_start=str(funding_window_start))
         except BinanceIpBlockedError as exc:
             ip_blocked.set()
             _logger.error("[DATA] stage=refresh_live_market_data ip_blocked=True symbol=%s http_code=%d", sym, exc.http_code)
@@ -272,7 +277,7 @@ def refresh_live_market_data(
     # So all will be deadline.
 
     staleness = market_data_staleness_hours(Path(futures_root), now=now, partition=partition)
-    funding_stale = sum(1 for sym in symbols_list if not _funding_fresh_on_disk(futures_root, sym, now))
+    funding_stale = sum(1 for sym in symbols_list if not _funding_fresh_on_disk(futures_root, sym, now, window_start=funding_window_start))
     ok = (fresh + refreshed) >= min_symbols and failed <= math.ceil(max_fail_fraction * total) and not ip_blocked.is_set()
     elapsed_s = time.perf_counter() - t0
 

@@ -857,3 +857,109 @@ def test_ensure_funding_data_historical_end_uses_request_end_as_clock(tmp_path, 
     collector.ensure_funding_data("XUSDT", "2024-01-01", "2024-01-01T20:00:00Z")
 
     assert pd.read_parquet(target)["timestamp"].tolist() == cached
+
+
+def test_funding_gap_start_ms_detects_internal_gap_within_window() -> None:
+    import pandas as pd
+    from src.market_data.services.futures_collection import FUNDING_GAP_THRESHOLD_MS, funding_gap_start_ms
+
+    h = 3_600_000
+    base = int(pd.Timestamp("2026-09-01", tz="UTC").value // 10**6)
+    four_h = [base + 4 * h * k for k in range(6)]
+    after_hole = [base + 48 * h + 4 * h * k for k in range(3)]
+    ts = after_hole + four_h + [four_h[0]]
+
+    # Given/When/Then: 8h 표준 최대 간격 + 30분 초과만 공백으로 본다
+    assert FUNDING_GAP_THRESHOLD_MS == 8 * h + 30 * 60_000  # noqa: SIM300 -- contract-mandated assert order
+    # 창 안의 공백: 공백 직전 행을 돌려준다(정렬/중복 무관)
+    assert funding_gap_start_ms(ts, base) == base + 20 * h
+    # 창 시작에 걸친 공백: 공백 직전 행(창 이전)을 돌려주고 호출부가 clamp 한다
+    assert funding_gap_start_ms(ts, base + 30 * h) == base + 20 * h
+    # 창 시작 이전에 끝난 공백은 무시
+    assert funding_gap_start_ms(ts, base + 48 * h) is None
+    # 8h 간격 + ms 지터, 간격 변경(8h -> 1h)은 공백이 아니다
+    eight_h = [base + 8 * h * k + (60_000 if k % 2 else 0) for k in range(5)]
+    assert funding_gap_start_ms(eight_h, base) is None
+    switch = [base, base + 8 * h, base + 16 * h, base + 17 * h, base + 18 * h]
+    assert funding_gap_start_ms(switch, base) is None
+    assert funding_gap_start_ms([], base) is None
+    assert funding_gap_start_ms([base], base) is None
+
+def test_ensure_funding_data_heals_internal_gap_despite_fresh_tail(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector, funding_gap_start_ms
+
+    def _ms(ts: str) -> int:
+        return int(pd.Timestamp(ts).value // 10**6)
+
+    class _NoVision:
+        def fetch_funding_rate_monthly(self, *args, **kwargs):
+            raise AssertionError("vision must not be used for a recent window")
+
+    target = tmp_path / "funding" / "XUSDT.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: target)
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", _NoVision)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T16:10:00Z"))
+    collector = DataCollector()
+    # Given: 꼬리는 최신(09-14 16:00)이지만 09-11 00:00 ~ 09-13 00:00 사이 정산이 통째로 빠진 캐시
+    before_hole = [_ms(t) for t in pd.date_range("2026-09-10", "2026-09-11", freq="4h", tz="UTC")]
+    after_hole = [_ms(t) for t in pd.date_range("2026-09-13", "2026-09-14T16:00", freq="4h", tz="UTC")]
+    cached = before_hole + after_hole
+    pd.DataFrame({"timestamp": cached, "funding_rate": [0.0001] * len(cached)}).to_parquet(target, index=False)
+    missing = [_ms(t) for t in pd.date_range("2026-09-11T04:00", "2026-09-12T20:00", freq="4h", tz="UTC")]
+    calls: list[tuple] = []
+
+    def _fetch(*args, **kwargs):
+        calls.append(args)
+        return pd.DataFrame({"timestamp": missing, "funding_rate": [0.0002] * len(missing)})
+
+    collector.client.fetch_funding_rate_history = _fetch
+
+    # When
+    collector.ensure_funding_data("XUSDT", "2026-09-10T00:00:00Z", "2026-09-14T16:10:00Z")
+
+    # Then: 공백 직전 행부터 재조회하고, 결과는 창 안에서 연속이다
+    assert len(calls) == 1
+    assert calls[0][1] == str(pd.Timestamp("2026-09-11T00:00:00Z"))
+    persisted = pd.read_parquet(target)["timestamp"].tolist()
+    assert persisted == sorted(cached + missing)
+    assert funding_gap_start_ms(persisted, _ms("2026-09-10T00:00Z")) is None
+
+def test_ensure_funding_data_ignores_gap_before_request_window(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    def _ms(ts: str) -> int:
+        return int(pd.Timestamp(ts).value // 10**6)
+
+    class _NoVision:
+        def fetch_funding_rate_monthly(self, *args, **kwargs):
+            raise AssertionError("vision must not be used for a recent window")
+
+    target = tmp_path / "funding" / "XUSDT.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: target)
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", _NoVision)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T16:10:00Z"))
+    collector = DataCollector()
+    # Given: 공백은 요청 창(09-13 00:00~) 이전에만 있고 창 안은 연속, 꼬리도 최신
+    before_hole = [_ms(t) for t in pd.date_range("2026-09-10", "2026-09-11", freq="4h", tz="UTC")]
+    in_window = [_ms(t) for t in pd.date_range("2026-09-13", "2026-09-14T16:00", freq="4h", tz="UTC")]
+    cached = before_hole + in_window
+    pd.DataFrame({"timestamp": cached, "funding_rate": [0.0001] * len(cached)}).to_parquet(target, index=False)
+    before = target.read_bytes()
+
+    def _fetch(*args, **kwargs):
+        raise AssertionError("must not fetch when the requested window is contiguous and fresh")
+
+    collector.client.fetch_funding_rate_history = _fetch
+
+    # When
+    collector.ensure_funding_data("XUSDT", "2026-09-13T00:00:00Z", "2026-09-14T16:10:00Z")
+
+    # Then
+    assert target.read_bytes() == before
+
