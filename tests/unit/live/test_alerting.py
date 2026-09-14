@@ -371,3 +371,20 @@ def test_event_info_paper_ledger_events() -> None:
     for info in (lag, close):
         assert "docker" in info["action"]
         assert set(info) == {"title", "severity_badge", "severity_label", "header_color", "bg_color", "impact", "action"}
+
+
+# --- auto appended from contract: live_alert_gaps ---
+def test_alert_gap_events_registered_and_digest_default_on() -> None:
+    from src.live.alerting import EVENT_INFO
+    from src.live.settings import LiveSettings
+
+    assert EVENT_INFO["cycle_interrupted"]["severity_label"] == "WARNING"
+    assert EVENT_INFO["daemon_crashed"]["severity_label"] == "CRITICAL"
+    assert EVENT_INFO["cycle_complete"]["severity_label"] == "NOTICE"
+    for event in ("cycle_interrupted", "daemon_crashed", "cycle_complete", "data_quarantine"):
+        for key in ("title", "severity_badge", "severity_label", "header_color", "bg_color", "impact", "action"):
+            assert EVENT_INFO[event][key]
+    assert LiveSettings().alert_daily_digest is True
+    assert LiveSettings(alert_daily_digest=False).alert_daily_digest is False
+
+

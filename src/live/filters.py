@@ -126,6 +126,12 @@ def is_delisted(info: DeliveryInfo, now: pd.Timestamp) -> bool:
     )
 
 
+def held_symbols_absent_from_exchange(positions: Mapping[str, Decimal], exchange_info: Mapping[str, Any]) -> list[str]:
+    """Return sorted nonzero held symbols missing from exchangeInfo listing."""
+    listed = {str(e.get("symbol")) for e in _required(exchange_info, "symbols", "exchangeInfo") if isinstance(e, Mapping)}
+    return sorted(s for s, q in positions.items() if q != 0 and s not in listed)
+
+
 def quantize_to_multiple(value: Decimal, multiple: Decimal, rounding: str) -> Decimal:
     """거래소 필터 규약(배수 기반) 양자화. Decimal.quantize 의 지수 기반 반올림과 혼동 금지."""
     if multiple <= _ZERO:
