@@ -195,11 +195,16 @@ def load_base_panel(
         keep_rows = (idx >= start) & (idx <= end)
         if masking:
             masks[path] = zombie_masked_timestamps(path, start_ms, end_ms, interval_ms)
+            window_ts = ts_ms[keep_rows]
+            # 좀비 꼬리(상장폐지 후 거래소가 계속 내주는 flat 봉)는 수집 누락이 아니라 생애 종료이므로 격리 대상이 아니다.
+            zombie_tail = bool(window_ts.size) and bool(np.isin(window_ts.max(), masks[path]))
             keep_rows &= ~np.isin(ts_ms, masks[path])
+        else:
+            zombie_tail = False
         idx = idx[keep_rows]
         if len(idx.drop_duplicates(keep="last")) < min_bars:
             continue
-        if quarantine is not None and idx.max() < end and idx.max() >= end - DECISION_BAR_LOOKBACK:
+        if quarantine is not None and not zombie_tail and idx.max() < end and idx.max() >= end - DECISION_BAR_LOOKBACK:
             quarantine.add(sym, "decision_bar_missing")
             scan_quarantined += 1
             continue

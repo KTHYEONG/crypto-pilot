@@ -51,6 +51,9 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
     # window must be a positive multiple of the execution timeframe's minutes;
     # rejected at request validation, before any panel load or replay.
     _validate_field_choices(request, "execution_timeframe", ("1m", "3m", "5m"))
+    from src.mhs.panel import DATA_POLICIES
+
+    _validate_field_choices(request, "data_policy", tuple(sorted(DATA_POLICIES)))
     _timeframe_minutes = {"1m": 1, "3m": 3, "5m": 5}[request.execution_timeframe]
     if request.passive_timeout_minutes < 1 or request.passive_timeout_minutes % _timeframe_minutes:
         raise ValueError(
