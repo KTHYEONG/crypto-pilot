@@ -160,13 +160,14 @@ def _run_status(args: argparse.Namespace) -> None:
     hb_ts = pd.Timestamp(hb["ts"])
     age_min = (pd.Timestamp.now(tz="UTC") - hb_ts).total_seconds() / 60
     logger.info(
-        "[SYS] status=%s stage=%s decision_time=%s consecutive_halts=%s attempts=%s heartbeat_age_min=%.1f",
+        "[SYS] status=%s stage=%s decision_time=%s consecutive_halts=%s attempts=%s heartbeat_age_min=%.1f detail=%s",
         status,
         hb.get("stage"),
         hb.get("decision_time"),
         hb.get("consecutive_halts"),
         hb.get("attempts"),
         age_min,
+        hb.get("detail", ""),
     )
     unhealthy = status in {"HALT", "AWAITING", "AWAITING_DATA", "STATE_CORRUPT"} or age_min > settings.max_signal_staleness_hours * 60
     raise SystemExit(1 if unhealthy else 0)

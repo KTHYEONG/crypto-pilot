@@ -171,7 +171,7 @@ def _save_daemon_state(state_path: Path, state: DaemonState) -> None:
     _atomic_write_text(state_path, json.dumps(payload))
 
 
-def write_heartbeat(path: Path, *, decision_time: pd.Timestamp, status: str, attempts: int, consecutive_halts: int, now: pd.Timestamp, stage: str = "idle") -> None:
+def write_heartbeat(path: Path, *, decision_time: pd.Timestamp, status: str, attempts: int, consecutive_halts: int, now: pd.Timestamp, stage: str = "idle", detail: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "ts": _as_utc(now).isoformat(),
@@ -180,6 +180,7 @@ def write_heartbeat(path: Path, *, decision_time: pd.Timestamp, status: str, att
         "attempts": int(attempts),
         "consecutive_halts": int(consecutive_halts),
         "stage": str(stage),
+        "detail": str(detail),
     }
     _atomic_write_text(path, json.dumps(payload, sort_keys=True))
 
@@ -342,9 +343,9 @@ def run_daemon(
     iteration = 0
     wait_fn: Callable[[float], object] = sleep_fn if sleep_fn is not None else (shutdown.wait if shutdown is not None else time.sleep)
     heartbeat_path = _resolve_heartbeat_path(settings)
-    def _beat(status: str, stage: str) -> None:
+    def _beat(status: str, stage: str, detail: str = '') -> None:
         try:
-            write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn(), stage=stage)
+            write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn(), stage=stage, detail=detail)
         except Exception:
             logger.exception("[SYS] heartbeat write failed")
     consecutive_halts = _restore_consecutive_halts(heartbeat_path)
@@ -362,7 +363,7 @@ def run_daemon(
             logger.error("[SYS] daemon state corrupt path=%s error=%s", state_path, exc)
             _daemon_alert(settings, alerts_sent, event="state_corrupt", detail=f"path={state_path.name} error={type(exc).__name__}", decision_time=None, now=now_fn())
             try:
-                write_heartbeat(heartbeat_path, decision_time=now_fn().normalize(), status="STATE_CORRUPT", attempts=0, consecutive_halts=consecutive_halts, now=now_fn())
+                write_heartbeat(heartbeat_path, decision_time=now_fn().normalize(), status="STATE_CORRUPT", attempts=0, consecutive_halts=consecutive_halts, now=now_fn(), detail=f"path={state_path.name} error={type(exc).__name__}")
             except Exception:
                 logger.exception("[SYS] heartbeat write failed")
             wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
@@ -401,7 +402,7 @@ def run_daemon(
             break
 
         if not _strategy_params_present(settings):
-            _beat("AWAITING", "idle")
+            _beat("AWAITING", "idle", detail="strategy_params missing")
             _daemon_alert(settings, alerts_sent, event="awaiting_params", detail="strategy_params missing", decision_time=target, now=now_fn())
             try:
                 wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
@@ -439,7 +440,7 @@ def run_daemon(
                 logger.warning("[SYS] data refresh degraded; proceeding on cached panel staleness_h=%.1f", staleness_h)
             else:
                 _daemon_alert(settings, alerts_sent, event="data_refresh_failed", detail=refresh_summary, decision_time=target, now=now_fn())
-                _beat("AWAITING_DATA", "idle")
+                _beat("AWAITING_DATA", "idle", detail=refresh_summary)
                 try:
                     wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
                 except Exception:
@@ -478,7 +479,7 @@ def run_daemon(
             consecutive_halts += 1
             if consecutive_halts >= settings.alert_halt_streak:
                 _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts} cause={failure_cause}", decision_time=target, now=now_fn())
-            _beat(status, "idle")
+            _beat(status, "idle", detail=failure_cause)
             new_attempts = attempts + 1
             should_retry = new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY
             if should_retry:
@@ -534,7 +535,7 @@ def run_daemon(
                 _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts} cause={failure_cause}", decision_time=target, now=now_fn())
 
         try:
-            write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
+            write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn(), detail=failure_cause)
         except Exception:
             logger.exception("[SYS] heartbeat write failed")
 
