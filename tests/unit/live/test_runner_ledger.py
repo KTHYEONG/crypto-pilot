@@ -418,3 +418,44 @@ def test_persist_confirmed_fills_appends_position_snapshot_only_on_change(tmp_pa
         PositionSnapshot(effective_from=now, positions={"AAAUSDT": Decimal("2")}),
     )
     assert load_ledger(tmp_path / "b.json").funding_watermarks == base.funding_watermarks
+
+
+def test_accrue_ledger_funding_stamps_accrual_start_on_bootstrap(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
+
+    import pandas as pd
+
+    import src.live.runner as runner_mod
+    from src.live.ledger import LedgerState, load_ledger
+
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {})
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {})
+    now = pd.Timestamp("2026-09-15 01:05Z")
+    later = pd.Timestamp("2026-09-16 01:05Z")
+
+    # Given: 레거시 원장(보유 있음, 이력/through 없음)
+    legacy = LedgerState(positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"))
+
+    # When
+    first, _ = runner_mod._accrue_ledger_funding(legacy, now, tmp_path / "ledger.json")
+
+    # Then: 부트스트랩 시각이 accrual 시작 마커로 영속
+    assert first.funding_accrual_started_at == now
+    assert load_ledger(tmp_path / "ledger.json").funding_accrual_started_at == now
+
+    # When: 이력이 생긴 뒤 재호출해도 마커 불변
+    second, _ = runner_mod._accrue_ledger_funding(first, later, tmp_path / "ledger.json")
+    assert second.funding_accrual_started_at == now
+
+    # Given: funding_accrued_through 가 있는 원장은 그 시각으로 부트스트랩
+    through = pd.Timestamp("2026-09-14 02:00Z")
+    seeded, _ = runner_mod._accrue_ledger_funding(
+        LedgerState(positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"), funding_accrued_through=through), now, tmp_path / "seeded.json"
+    )
+    assert seeded.funding_accrual_started_at == through
+
+    # Given: 보유 없음 -> 부트스트랩 없음 -> 마커 없음
+    flat, _ = runner_mod._accrue_ledger_funding(LedgerState(positions={}, cash_usdt=Decimal("1000")), now, tmp_path / "flat.json")
+    assert flat.funding_accrual_started_at is None
+
+

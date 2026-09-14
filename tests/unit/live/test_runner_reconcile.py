@@ -272,10 +272,13 @@ def test_SCENARIO_LIVE_42_UNCOVERED_POSITION_IS_AUDITED_NOT_SILENT(tmp_path, mon
     assert no_mark_gaps == [("AAAUSDT", "no_mark")]
 
     # 종단 경로: AAAUSDT가 필터에서 제거된 상태로 사이클을 완주시킨다.
+    # exchangeInfo 등재는 유지(SETTLING)해야 absent HALT가 아닌 uncovered 경로를 탄다.
     class NoAAAFiltersMarketClient(StubMarketClient):
         def exchange_info(self) -> dict[str, Any]:
             payload = super().exchange_info()
-            payload["symbols"] = [s for s in payload["symbols"] if s["symbol"] != "AAAUSDT"]
+            for s in payload["symbols"]:
+                if s["symbol"] == "AAAUSDT":
+                    s["status"] = "SETTLING"
             return payload
 
     monkeypatch.setattr(

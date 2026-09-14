@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +13,12 @@ from src.mhs.types import ExecutionSpec
 
 #: LIVE_MAINNET 승인 문자열. 이 값과 정확히 일치해야만 실계좌 모드가 생성된다.
 MAINNET_TRADING_ACK = "I_UNDERSTAND_REAL_MONEY"
+
+#: Mainnet futures REST venue.
+MAINNET_FAPI_URL = "https://fapi.binance.com"
+
+#: Testnet futures REST venue.
+TESTNET_FAPI_URL = "https://testnet.binancefuture.com"
 
 _MAX_RECV_WINDOW_MS = 60_000
 
@@ -33,6 +40,11 @@ class ExecutionMode(str, Enum):  # noqa: UP042 - contract pins the (str, Enum) b
         return self in (ExecutionMode.SHADOW, ExecutionMode.PAPER)
 
 
+def _venue_host(url: str) -> str:
+    """Return the lowercased network location of a venue URL."""
+    return urlsplit(url if "://" in url else f"https://{url}").netloc.lower()
+
+
 class LiveSettings(BaseSettings):
     """환경변수(LIVE_*) 또는 .env 로 주입되는 라이브 실행 설정."""
 
@@ -43,7 +55,8 @@ class LiveSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LIVE_", extra="forbid", populate_by_name=True)
 
     mode: ExecutionMode = ExecutionMode.SHADOW
-    market_data_base_url: str = "https://fapi.binance.com"
+    # 빈 값이면 mode에서 유도(LIVE_TESTNET만 테스트넷), 필터·호가·주문이 같은 베뉴여야 체결 경로 검증이 유효.
+    market_data_base_url: str = ""
     # 빈 값이면 mode에서 유도한다: LIVE_TESTNET만 테스트넷, 나머지(SHADOW/PAPER는 주문
     # 억제, LIVE_MAINNET)는 메인넷. LIVE_ORDER_BASE_URL로 별도 주문 베뉴 오버라이드 가능.
     order_base_url: str = ""
@@ -101,6 +114,7 @@ class LiveSettings(BaseSettings):
     alert_email_to: str | None = None
     min_universe_symbols: int = 100
     alert_halt_streak: int = 2
+    alert_daily_digest: bool = True
     data_retention_days: int = SIGNAL_PANEL_WINDOW_DAYS + 30
     orderbook_retention_days: int = 365
     refresh_max_workers: int = 12
@@ -184,18 +198,41 @@ class LiveSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _gate_mainnet(self) -> LiveSettings:
+        """Derive empty venues from mode and enforce live venue parity."""
+        # 빈 값은 mode에서 유도한다: LIVE_TESTNET만 테스트넷
+        venue = TESTNET_FAPI_URL if self.mode is ExecutionMode.LIVE_TESTNET else MAINNET_FAPI_URL
+        if not self.market_data_base_url:
+            self.market_data_base_url = venue
         if not self.order_base_url:
-            self.order_base_url = (
-                "https://testnet.binancefuture.com"
-                if self.mode is ExecutionMode.LIVE_TESTNET
-                else "https://fapi.binance.com"
-            )
+            self.order_base_url = venue
         if self.mode is ExecutionMode.LIVE_MAINNET and (
             self.mainnet_trading_ack != MAINNET_TRADING_ACK
         ):
             raise ValueError(
                 "mode='live_mainnet' requires mainnet_trading_ack="
                 f"'{MAINNET_TRADING_ACK}'"
+            )
+        # 반쪽 주문 자격증명은 키/시크릿 출처 혼선을 막기 위해 거부
+        if (self.order_api_key is None) != (self.order_api_secret is None):
+            raise ValueError("order_api_key and order_api_secret must be set together")
+        # 라이브 모드는 필터·호가 베뉴와 주문 베뉴가 같아야 검증이 유효
+        if not self.mode.suppresses_mutations and _venue_host(
+            self.market_data_base_url
+        ) != _venue_host(self.order_base_url):
+            raise ValueError(
+                f"venue parity: market_data_base_url host {_venue_host(self.market_data_base_url)}"
+                f" must equal order_base_url host {_venue_host(self.order_base_url)}"
+                f" in mode {self.mode.value}"
+            )
+        # 메인넷 키가 테스트넷 호스트로 전송되지 않도록 설정 단계에서 거부
+        if (
+            self.mode is ExecutionMode.LIVE_TESTNET
+            and self.api_key is not None
+            and self.order_api_key is None
+        ):
+            raise ValueError(
+                "live_testnet requires order_api_key/order_api_secret;"
+                " refusing to send mainnet api_key to the testnet venue"
             )
         return self
 

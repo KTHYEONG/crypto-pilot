@@ -557,3 +557,154 @@ def test_run_status_logs_heartbeat_detail(tmp_path, monkeypatch, caplog) -> None
 
     assert exit_info.value.code == 1
     assert "detail=signal_step ValueError" in caplog.text
+
+
+def test_cli_paper_funding_backfill_wires_flags_and_exit_codes(monkeypatch) -> None:
+    from decimal import Decimal
+
+    import pandas as pd
+    import pytest
+
+    import src.live.funding_backfill as backfill_mod
+    from src.cli.main import build_root_parser
+    from src.common.errors import DataIntegrityError
+    from src.live.funding_backfill import BackfillPlan
+
+    parser = build_root_parser()
+    args = parser.parse_args(["live", "paper-funding-backfill", "--apply", "--accrual-start", "2026-09-15T01:05:00Z", "--mode", "paper"])
+    assert args.apply is True
+    assert args.accrual_start == pd.Timestamp("2026-09-15 01:05Z")
+    defaults = parser.parse_args(["live", "paper-funding-backfill"])
+    assert defaults.apply is False
+    assert defaults.accrual_start is None
+
+    calls: list[dict] = []
+    plan = BackfillPlan(
+        start=pd.Timestamp("2026-09-02 01:26Z"), end=pd.Timestamp("2026-09-15 01:05Z"),
+        cash_delta=Decimal("1.9"), by_symbol={"AAAUSDT": Decimal("1.9")}, epochs=10, seeds_accrual_start=False,
+    )
+
+    def _ok(settings, *, apply, now, accrual_start=None, **_kwargs):
+        calls.append({"mode": settings.mode.value, "apply": apply, "accrual_start": accrual_start, "tz": str(now.tz)})
+        return plan
+
+    monkeypatch.setattr(backfill_mod, "run_paper_funding_backfill", _ok)
+    args.handler(args)
+    assert calls == [{"mode": "paper", "apply": True, "accrual_start": pd.Timestamp("2026-09-15 01:05Z"), "tz": "UTC"}]
+
+    def _fail(*_a, **_k):
+        raise DataIntegrityError("paper funding backfill already applied")
+
+    monkeypatch.setattr(backfill_mod, "run_paper_funding_backfill", _fail)
+    with pytest.raises(SystemExit) as excinfo:
+        args.handler(args)
+    assert excinfo.value.code == 1
+
+
+
+
+# --- auto appended from contract: live_alert_gaps ---
+def test_signal_step_cli_writes_result_sidecar_for_ok_failed_and_crash(tmp_path, monkeypatch, caplog) -> None:
+    import argparse
+    import json
+    import logging
+
+    import pandas as pd
+    import pytest
+
+    import src.cli.commands.live as live_mod
+    from src.common.errors import DataIntegrityError
+
+    # conftest 가 live_mod.default_weights_path 를 tmp_path/state 로 격리한다
+    result_path = tmp_path / "state" / "signal_step_result.json"
+    quarantine_path = tmp_path / "state" / "signal_quarantine.json"
+    quarantine_path.parent.mkdir(parents=True, exist_ok=True)
+    assert live_mod._signal_step_sidecar_paths() == (result_path, quarantine_path)
+    target = pd.Timestamp("2026-08-31", tz="UTC")
+    args = argparse.Namespace(date=target, mode=None)
+    monkeypatch.setattr(live_mod, "_settings_with_mode", lambda a: _mk_settings_stub())
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *a, **k: _mk_params_stub())
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", lambda *a, **k: pd.Series(dtype="float64"))
+    monkeypatch.setattr("src.mhs.live_runtime.load_or_bootstrap_runtime", lambda *a, **k: _mk_runtime_stub())
+    monkeypatch.setattr("src.mhs.live_runtime.reconcile_runtime_params", lambda runtime, params, boot: (runtime, None))
+    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", lambda *a, **k: None)
+
+    # Given/When: 성공 + 이번 결정일 격리 사이드카
+    def _advance_ok(params, runtime, weights_path, data_root, *, target, **kw):
+        quarantine_path.write_text(
+            json.dumps({"decision_time": "2026-08-31T00:00:00+00:00", "records": [{"symbol": "AAAUSDT", "reason": "decision_bar_missing"}]}),
+            encoding="utf-8",
+        )
+        return runtime, 1, 1.0
+
+    monkeypatch.setattr(live_mod, "advance_to_date", _advance_ok)
+    live_mod._run_signal_step(args)
+    assert json.loads(result_path.read_text(encoding="utf-8")) == {
+        "decision_time": "2026-08-31T00:00:00+00:00", "status": "OK", "error_type": "", "reason": "",
+        "quarantine": [{"symbol": "AAAUSDT", "reason": "decision_bar_missing"}],
+    }
+
+    # Given/When: 알려진 실패(DataIntegrityError)
+    monkeypatch.setattr(
+        live_mod, "advance_to_date",
+        lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("signal quarantine 6 symbols exceeds limit 5 of universe 600")),
+    )
+    with pytest.raises(SystemExit) as failed_exit:
+        live_mod._run_signal_step(args)
+    assert failed_exit.value.code == 1
+    failed = json.loads(result_path.read_text(encoding="utf-8"))
+    assert (failed["status"], failed["error_type"], failed["reason"]) == ("FAILED", "DataIntegrityError", "signal quarantine 6 symbols exceeds limit 5 of universe 600")
+    assert failed["quarantine"] == []
+
+    # Given/When: 예상 밖 크래시 -> traceback 로그 + FAILED + exit 1
+    monkeypatch.setattr(live_mod, "advance_to_date", lambda *a, **k: (_ for _ in ()).throw(KeyError("close")))
+    caplog.set_level(logging.ERROR, logger="LiveCli")
+    with pytest.raises(SystemExit) as crash_exit:
+        live_mod._run_signal_step(args)
+    assert crash_exit.value.code == 1
+    crashed = json.loads(result_path.read_text(encoding="utf-8"))
+    assert (crashed["status"], crashed["error_type"]) == ("FAILED", "KeyError")
+    assert any(record.exc_info and "signal_step status=CRASHED" in record.getMessage() for record in caplog.records)
+
+    # Given/When: 기존 파라미터 로드 실패 경로도 원인 타입을 남긴다
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no params")))
+    with pytest.raises(SystemExit):
+        live_mod._run_signal_step(args)
+    params_failed = json.loads(result_path.read_text(encoding="utf-8"))
+    assert (params_failed["status"], params_failed["error_type"], params_failed["reason"]) == ("FAILED", "FileNotFoundError", "no params")
+
+
+def test_run_daemon_cli_alerts_and_reraises_on_crash(tmp_path, monkeypatch, caplog) -> None:
+    import argparse
+    import logging
+
+    import pytest
+
+    import src.cli.commands.live as module
+    import src.live.lifecycle as lifecycle
+    import src.live.scheduler as sched
+
+    settings = object()
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _args: settings)
+    monkeypatch.setattr(lifecycle, "install_shutdown_handlers", lambda flag, **kwargs: None)
+
+    def _crash(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sched, "run_daemon", _crash)
+    alerts: list[tuple[object, str, str, object, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda s, sent, *, event, detail, decision_time, now: alerts.append((s, event, detail, decision_time, str(now.tz))) or True,
+    )
+    caplog.set_level(logging.ERROR, logger="LiveCli")
+
+    # When
+    with pytest.raises(OSError, match="disk full"):
+        module._run_daemon(argparse.Namespace(artifact=str(tmp_path / "w.parquet"), state_path=str(tmp_path / "state.json"), mode=None))
+
+    # Then: 알림 1회 + traceback 로그 + 원 예외 재전파(컨테이너 재시작 정책 유지)
+    assert alerts == [(settings, "daemon_crashed", "error=OSError: disk full", None, "UTC")]
+    assert any(record.exc_info and "daemon crashed" in record.getMessage() for record in caplog.records)
+
+

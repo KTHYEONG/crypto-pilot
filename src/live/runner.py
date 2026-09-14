@@ -50,7 +50,7 @@ from src.live.executor import (
     execute_intents,
 )
 from src.live.fills import FillEvent, append_fills, default_fills_dir
-from src.live.filters import is_delisted, parse_delivery_schedule, parse_exchange_filters
+from src.live.filters import held_symbols_absent_from_exchange, is_delisted, parse_delivery_schedule, parse_exchange_filters
 from src.live.ledger import (
     FundingAccrual,
     LedgerState,
@@ -239,10 +239,12 @@ def _accrue_ledger_funding(
     """원장에 페이퍼 펀딩비를 워터마크 기준으로 발생시키고 원자적으로 영속한다."""
     held = {symbol: qty for symbol, qty in state.positions.items() if qty != 0}
     history = state.position_history
+    accrual_started_at = state.funding_accrual_started_at
     if not history and held:
-        history = append_position_snapshot(
-            (), state.funding_accrued_through if state.funding_accrued_through is not None else now, held
-        )
+        bootstrap_at = state.funding_accrued_through if state.funding_accrued_through is not None else now
+        history = append_position_snapshot((), bootstrap_at, held)
+        if accrual_started_at is None:
+            accrual_started_at = bootstrap_at
     symbols = sorted(set(held) | set(state.funding_watermarks))
     accrual = accrue_funding_by_watermark(
         history,
@@ -258,6 +260,7 @@ def _accrue_ledger_funding(
         state,
         cash_usdt=None if state.cash_usdt is None else state.cash_usdt + accrual.cash_delta,
         funding_accrued_through=now,
+        funding_accrual_started_at=accrual_started_at,
         funding_watermarks=accrual.watermarks,
         position_history=history,
     )
@@ -479,6 +482,10 @@ def run_shadow_cycle(
             _sizing_anchor = "book_mid"
         # 4) I-EQUITY-MTM / ruin guard (백테스트 패리티).
         if settings.mode.suppresses_mutations:
+            absent_held = held_symbols_absent_from_exchange(ledger_state.positions, exchange_info_payload)
+            if absent_held:
+                audit.record("held_symbol_absent", symbols=absent_held)
+                raise DataIntegrityError(f"held symbols absent from exchangeInfo symbols={','.join(absent_held)}; close manually at the last mark")
             delisted = _delisted_held_symbols(ledger_state.positions, exchange_info_payload, now_ts)
             ledger_state, accrual = _accrue_ledger_funding(
                 ledger_state, now_ts, ledger_path, closed_at=delisted

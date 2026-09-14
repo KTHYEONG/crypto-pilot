@@ -632,3 +632,38 @@ def test_accrue_funding_by_watermark_skips_zero_holding_without_watermark() -> N
     assert result.cash_delta == Decimal(0)
     assert result.watermarks == {}
     assert result.lag_by_symbol == {}
+
+
+def test_ledger_roundtrips_funding_backfill_markers(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.ledger import LedgerState, load_ledger, save_ledger
+
+    path = tmp_path / "ledger.json"
+    started = pd.Timestamp("2026-09-15 01:05Z")
+    backfilled = pd.Timestamp("2026-09-15 01:05Z")
+
+    save_ledger(path, LedgerState(positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1"), funding_accrual_started_at=started, funding_backfilled_through=backfilled))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["funding_accrual_started_at"] == started.isoformat()
+    assert raw["funding_backfilled_through"] == backfilled.isoformat()
+    reloaded = load_ledger(path)
+    assert reloaded.funding_accrual_started_at == started
+    assert reloaded.funding_backfilled_through == backfilled
+
+    save_ledger(path, LedgerState(positions={"AAAUSDT": Decimal("1")}))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert "funding_accrual_started_at" not in raw
+    assert "funding_backfilled_through" not in raw
+    assert load_ledger(path).funding_backfilled_through is None
+
+    path.write_text(json.dumps({"positions": {}, "funding_backfilled_through": "2026-09-15 01:05"}), encoding="utf-8")
+    with pytest.raises(DataIntegrityError):
+        load_ledger(path)
+
+

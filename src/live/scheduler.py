@@ -34,6 +34,7 @@ from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: 
 from src.live.runner import run_shadow_cycle
 from src.live.settings import LiveSettings
 from src.live.signal import _SIGNAL_LAG
+from src.live.signal_step_result import SIGNAL_STEP_STATUS_FAILED, read_signal_step_result, signal_step_result_path
 from src.mhs.live_strategy import STRATEGY_PARAMS_FILENAME  # wiring: import subprocess, sys; from src.mhs.live_strategy import STRATEGY_PARAMS_FILENAME
 
 try:
@@ -80,6 +81,9 @@ DAEMON_CATCHUP_BUFFER: pd.Timedelta = pd.Timedelta(minutes=5)
 
 DAEMON_MAX_ATTEMPTS_PER_DAY: int = 5
 DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
+# tools/devops/daemon_idle_gate.py BUSY_STAGES 와 같은 의미
+INTERRUPTIBLE_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"})
+DAEMON_ALERT_SYMBOL_SAMPLE: int = 10
 SIGNAL_REFRESH_OFFSET_MINUTES: float = 0.0
 DAEMON_COLD_UNIVERSE_EXIT_CODE: int = 3
 
@@ -226,7 +230,7 @@ def _strategy_params_present(settings: LiveSettings) -> bool:
 
 def _default_data_refresh() -> RefreshReport:
     from src.common.paths import FUTURES_DATA_DIR
-    from src.live.data_refresh import refresh_live_market_data
+    from src.live.data_refresh import fetch_listed_symbols, refresh_live_market_data
 
     s = LiveSettings()
     return refresh_live_market_data(
@@ -238,6 +242,7 @@ def _default_data_refresh() -> RefreshReport:
         freshness_floor_hours=s.refresh_freshness_floor_hours,
         min_symbols=s.min_universe_symbols,
         max_fail_fraction=s.refresh_max_fail_fraction,
+        listed_symbols=fetch_listed_symbols(),
     )
 
 
@@ -252,27 +257,96 @@ def _default_data_prune() -> None:
 
 def _daemon_alert(
     settings: LiveSettings, sent: set[str], *, event: str, detail: str, decision_time: pd.Timestamp | None, now: pd.Timestamp
-) -> None:
+) -> bool:
     if event in sent:
-        return
-    sent.add(event)
+        return False
     try:
-        post_alert(settings.alert_webhook_url, event=event, detail=detail, decision_time=decision_time, now=now)
-        send_email_alert(
-            gmail_user=settings.alert_gmail_user,
-            gmail_app_password=(
-                settings.alert_gmail_app_password.get_secret_value()
-                if settings.alert_gmail_app_password is not None
-                else None
-            ),
-            email_to=settings.alert_email_to,
-            event=event,
-            detail=detail,
-            decision_time=decision_time,
-            now=now,
+        delivered = bool(post_alert(settings.alert_webhook_url, event=event, detail=detail, decision_time=decision_time, now=now))
+        emailed = bool(
+            send_email_alert(
+                gmail_user=settings.alert_gmail_user,
+                gmail_app_password=(
+                    settings.alert_gmail_app_password.get_secret_value()
+                    if settings.alert_gmail_app_password is not None
+                    else None
+                ),
+                email_to=settings.alert_email_to,
+                event=event,
+                detail=detail,
+                decision_time=decision_time,
+                now=now,
+            )
         )
     except Exception:  # noqa: BLE001
         logger.exception("[SYS] alert dispatch failed event=%s", event)
+        return False
+    # 발송 성공 시에만 중복 제거 집합에 기록
+    if delivered or emailed:
+        sent.add(event)
+        return True
+    if settings.alert_webhook_url or settings.alert_gmail_user:
+        logger.warning("[SYS] alert not delivered event=%s", event)
+    return False
+
+
+def _read_heartbeat(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw
+
+
+def _touch_heartbeat(path: Path, now: pd.Timestamp) -> None:
+    raw = _read_heartbeat(path)
+    if raw is None:
+        return
+    # 대기 중 생존 틱: ts만 갱신하고 상태 전이는 건드리지 않음
+    raw["ts"] = _as_utc(now).isoformat()
+    try:
+        _atomic_write_text(Path(path), json.dumps(raw, sort_keys=True))
+    except OSError as exc:
+        logger.warning("[SYS] heartbeat touch failed path=%s error=%s", path, exc)
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _handle_interrupted_stage(settings: LiveSettings, heartbeat_path: Path, sent: set[str], now: pd.Timestamp) -> None:
+    raw = _read_heartbeat(heartbeat_path)
+    if raw is None or raw.get("stage") not in INTERRUPTIBLE_STAGES:
+        return
+    stage = str(raw["stage"])
+    detail = f"stage={stage} decision_time={raw.get('decision_time')} heartbeat_ts={raw.get('ts')}"
+    logger.warning("[SYS] cycle interrupted %s", detail)
+    _daemon_alert(settings, sent, event="cycle_interrupted", detail=detail, decision_time=None, now=now)
+    try:
+        decision_time = pd.Timestamp(raw["decision_time"])
+        if decision_time.tzinfo is None:
+            raise ValueError("naive decision_time")
+    except (KeyError, ValueError, TypeError):
+        # 깨진 시각은 오늘 날짜로 복구
+        decision_time = _as_utc(now).normalize()
+    attempts = _int_or_zero(raw.get("attempts", 0))
+    consecutive_halts = _int_or_zero(raw.get("consecutive_halts", 0))
+    try:
+        write_heartbeat(heartbeat_path, decision_time=decision_time, status="INTERRUPTED", attempts=attempts, consecutive_halts=consecutive_halts, now=now, stage="idle", detail=f"interrupted stage={stage}")
+    except OSError:
+        logger.exception("[SYS] heartbeat write failed")
+
+
+def _refresh_note(report: Any, err: BaseException | None) -> str:
+    if err is not None:
+        return f"refresh=error:{type(err).__name__}"
+    if report is None or not hasattr(report, "failed"):
+        return "refresh=n/a"
+    return f"refresh fresh={getattr(report, 'fresh', 'n/a')} refreshed={getattr(report, 'refreshed', 'n/a')} failed={report.failed}/{getattr(report, 'total', 'n/a')} staleness_h={float(getattr(report, 'staleness_hours', float('nan'))):.1f}"
 
 
 def _terminate_child(proc: subprocess.Popen[bytes], grace_s: float) -> None:
@@ -343,6 +417,9 @@ def run_daemon(
     iteration = 0
     wait_fn: Callable[[float], object] = sleep_fn if sleep_fn is not None else (shutdown.wait if shutdown is not None else time.sleep)
     heartbeat_path = _resolve_heartbeat_path(settings)
+    def _wait(seconds: float) -> None:
+        wait_fn(seconds)
+        _touch_heartbeat(heartbeat_path, now_fn())
     def _beat(status: str, stage: str, detail: str = '') -> None:
         try:
             write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn(), stage=stage, detail=detail)
@@ -352,6 +429,9 @@ def run_daemon(
     alerts_sent: set[str] = set()
     alerts_decision_time: pd.Timestamp | None = None
     buffer_td = pd.Timedelta(minutes=settings.daemon_catchup_buffer_minutes)
+    startup = _read_heartbeat(heartbeat_path)
+    logger.info("[SYS] daemon start mode=%s pid=%d weights=%s state=%s heartbeat_stage=%s heartbeat_status=%s", settings.mode.value, os.getpid(), weights_path, state_path, (startup or {}).get("stage"), (startup or {}).get("status"))
+    _handle_interrupted_stage(settings, heartbeat_path, alerts_sent, now_fn())
 
     while max_iterations is None or iteration < max_iterations:
         if shutdown is not None and shutdown.requested:
@@ -366,7 +446,7 @@ def run_daemon(
                 write_heartbeat(heartbeat_path, decision_time=now_fn().normalize(), status="STATE_CORRUPT", attempts=0, consecutive_halts=consecutive_halts, now=now_fn(), detail=f"path={state_path.name} error={type(exc).__name__}")
             except Exception:
                 logger.exception("[SYS] heartbeat write failed")
-            wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
+            _wait(DAEMON_POLL_INTERVAL_SECONDS)
             continue
         if state.pending_decision_time is not None:
             target = state.pending_decision_time
@@ -394,7 +474,7 @@ def run_daemon(
         while remaining_seconds > 0:
             if shutdown is not None and shutdown.requested:
                 break
-            wait_fn(min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS))
+            _wait(min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS))
             if shutdown is not None and shutdown.requested:
                 break
             remaining_seconds = (wait_until - now_fn()).total_seconds()
@@ -405,7 +485,7 @@ def run_daemon(
             _beat("AWAITING", "idle", detail="strategy_params missing")
             _daemon_alert(settings, alerts_sent, event="awaiting_params", detail="strategy_params missing", decision_time=target, now=now_fn())
             try:
-                wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
+                _wait(DAEMON_POLL_INTERVAL_SECONDS)
             except Exception:
                 pass
             continue
@@ -423,6 +503,7 @@ def run_daemon(
             err = exc
         finally:
             _log_stage_elapsed("refresh", target, stage_started)
+        refresh_note = _refresh_note(report, err)
         refresh_ok = err is None and (report is None or bool(getattr(report, "ok", True)))
         if not refresh_ok:
             try:
@@ -442,7 +523,7 @@ def run_daemon(
                 _daemon_alert(settings, alerts_sent, event="data_refresh_failed", detail=refresh_summary, decision_time=target, now=now_fn())
                 _beat("AWAITING_DATA", "idle", detail=refresh_summary)
                 try:
-                    wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
+                    _wait(DAEMON_POLL_INTERVAL_SECONDS)
                 except Exception:
                     pass
                 continue
@@ -456,6 +537,12 @@ def run_daemon(
 
         signal_status = "COMPLETE"
         failure_cause = ""
+        result_path = signal_step_result_path(weights_path)
+        try:
+            result_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("[SYS] signal_step_result unlink failed path=%s error=%s", result_path, exc)
+        quarantined = 0
         _beat("RUNNING", "signal")
         stage_started = time.monotonic()
         try:
@@ -467,6 +554,10 @@ def run_daemon(
             logger.exception("[SYS] signal-step failed decision_time=%s", target)
             signal_status = "HALT"
             failure_cause = f"signal_step exit={exc.returncode}"
+            # 자식 프로세스가 남긴 typed 원인을 덧붙임
+            sidecar = read_signal_step_result(result_path, target)
+            if sidecar is not None and sidecar.status == SIGNAL_STEP_STATUS_FAILED:
+                failure_cause += f" {sidecar.error_type}: {sidecar.reason}"
         except Exception as exc:
             logger.exception("[SYS] signal-step crashed decision_time=%s", target)
             signal_status = "HALT"
@@ -491,7 +582,7 @@ def run_daemon(
                     if shutdown is not None and shutdown.requested:
                         break
                     step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
-                    wait_fn(step)
+                    _wait(step)
                     if shutdown is not None and shutdown.requested:
                         break
                     remaining_backoff -= step
@@ -504,6 +595,14 @@ def run_daemon(
                 continue
         if shutdown is not None and shutdown.requested:
             break
+        if signal_status == "COMPLETE":
+            sidecar = read_signal_step_result(result_path, target)
+            records = sidecar.quarantine if sidecar is not None else ()
+            quarantined = len(records)
+            if records:
+                detail = f"count={len(records)} symbols=" + ",".join(f"{s}:{r}" for s, r in records[:DAEMON_ALERT_SYMBOL_SAMPLE])
+                logger.warning("[DATA] stage=signal_quarantine_alert %s", detail)
+                _daemon_alert(settings, alerts_sent, event="data_quarantine", detail=detail, decision_time=target, now=now_fn())
 
         try:
             prune_old_audit_logs(AUDIT_LOG_ROOT / "live", target)
@@ -541,6 +640,9 @@ def run_daemon(
 
         if status == "COMPLETE":
             alerts_sent.clear()
+            if settings.alert_daily_digest:
+                digest_detail = f"intents={getattr(report, 'intent_count', 0)} reason={getattr(report, 'reason', None)} dropped_fraction={float(getattr(report, 'dropped_notional_fraction', 0.0)):.4f} quarantined={quarantined} {refresh_note}"
+                _daemon_alert(settings, alerts_sent, event="cycle_complete", detail=digest_detail, decision_time=target, now=now_fn())
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
             continue
         new_attempts = attempts + 1
@@ -554,7 +656,7 @@ def run_daemon(
                 if shutdown is not None and shutdown.requested:
                     break
                 step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
-                wait_fn(step)
+                _wait(step)
                 if shutdown is not None and shutdown.requested:
                     break
                 remaining_backoff -= step

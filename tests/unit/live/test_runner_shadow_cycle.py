@@ -1482,3 +1482,47 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
     assert captured["prefix"] == "20260824"
     assert not journal_path.exists()
 
+
+def test_run_shadow_cycle_paper_halts_when_held_symbol_absent_from_exchange(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
+
+    import pandas as pd
+
+    import src.live.runner as runner_mod
+    from src.live.ledger import LedgerState, load_ledger, save_ledger
+    from src.live.settings import ExecutionMode, LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(runner_mod, "post_alert", lambda url, *, event, detail, decision_time, now: alerts.append((event, detail)) or False)
+    monkeypatch.setattr(runner_mod, "send_email_alert", lambda **kwargs: False)
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+    executed: list[object] = []
+    monkeypatch.setattr(runner_mod, "execute_intents", lambda *a, **k: executed.append(a) or ())
+    accrued: list[object] = []
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: accrued.append(symbols) or {})
+    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {})
+    ledger_path = tmp_path / "ledger.json"
+    settings = LiveSettings(
+        mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
+        fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
+        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
+    )
+    weights_path = tmp_path / "weights.parquet"
+    pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    initial = LedgerState(positions={"GONEUSDT": Decimal("5"), "AAAUSDT": Decimal("1")}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("1900"))
+    save_ledger(ledger_path, initial)
+
+    # When: 보유 심볼 GONEUSDT 가 exchangeInfo 에서 완전히 사라짐(StubMarketClient 는 AAAUSDT/BUSDT 만)
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+
+    # Then: 조용한 MTM 누락/펀딩 지연 HALT 루프 대신 원인 명시 HALT, 원장·집행 불변
+    assert report.status == "HALT"
+    assert "held symbols absent from exchangeInfo symbols=GONEUSDT" in report.reason
+    assert executed == []
+    assert accrued == []
+    assert load_ledger(ledger_path).positions == initial.positions
+    assert "held_symbol_absent" in (tmp_path / "shadow_cycle.jsonl").read_text(encoding="utf-8")
+

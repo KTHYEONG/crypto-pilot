@@ -115,3 +115,20 @@ def test_parse_delivery_schedule_and_is_delisted() -> None:
     assert is_delisted(schedule["AUSDT"], pd.Timestamp("2026-09-10 07:59", tz="UTC")) is False
     assert is_delisted(schedule["BUSDT"], now) is False
     assert is_delisted(schedule["CUSDT"], now) is False
+
+
+def test_held_symbols_absent_from_exchange_lists_nonzero_unlisted_positions() -> None:
+    from decimal import Decimal
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.filters import held_symbols_absent_from_exchange
+
+    info = {"symbols": [{"symbol": "AAAUSDT", "status": "TRADING"}, {"symbol": "ZZZUSDT", "status": "SETTLING"}]}
+    positions = {"GONEUSDT": Decimal("-2"), "AAAUSDT": Decimal("1"), "ZZZUSDT": Decimal("3"), "FLATUSDT": Decimal("0"), "BGONEUSDT": Decimal("0.5")}
+
+    assert held_symbols_absent_from_exchange(positions, info) == ["BGONEUSDT", "GONEUSDT"]
+    assert held_symbols_absent_from_exchange({}, info) == []
+    with pytest.raises(DataIntegrityError):
+        held_symbols_absent_from_exchange(positions, {})
