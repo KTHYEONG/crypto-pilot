@@ -26,6 +26,13 @@ class BinanceKlinePermanentError(RuntimeError):
     url: str
 
 
+@dataclass(slots=True, frozen=True)
+class BinanceFundingFetchError(RuntimeError):
+    symbol: str
+    http_code: int | None
+    url: str
+
+
 class BinanceClient:
     def __init__(self, api_key: str | None = None, secret: str | None = None) -> None:
         self.exchange = ccxt.binanceusdm(
@@ -399,9 +406,10 @@ class BinanceClient:
                 with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                     raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
-            except Exception as e:
-                self.logger.error("Error fetching funding rate for %s: %s", symbol, e)
-                break
+            except urllib.error.HTTPError as e:
+                raise BinanceFundingFetchError(symbol=symbol, http_code=e.code, url=url) from e
+            except (OSError, ValueError) as e:
+                raise BinanceFundingFetchError(symbol=symbol, http_code=None, url=url) from e
 
             if not data:
                 break

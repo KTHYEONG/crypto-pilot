@@ -298,6 +298,7 @@ def run_daemon(
     heartbeat_path = _resolve_heartbeat_path(settings)
     consecutive_halts = 0
     alerts_sent: set[str] = set()
+    alerts_decision_time: pd.Timestamp | None = None
     buffer_td = pd.Timedelta(minutes=settings.daemon_catchup_buffer_minutes)
 
     while max_iterations is None or iteration < max_iterations:
@@ -311,6 +312,9 @@ def run_daemon(
         else:
             target = next_decision_time(state.last_processed_decision_time, now_fn())
             attempts = 0
+        if target != alerts_decision_time:
+            alerts_sent.clear()
+            alerts_decision_time = target
 
         wait_until = target + _SIGNAL_LAG + buffer_td
         remaining_seconds = (wait_until - now_fn()).total_seconds()
@@ -354,11 +358,12 @@ def run_daemon(
                     staleness_h = float(market_data_staleness_hours(FUTURES_DATA_DIR, now=now_fn()))
             except Exception:
                 staleness_h = float("inf")
+            refresh_summary = f"staleness_h={staleness_h:.1f} failed={report.failed}/{report.total} err={err}" if report is not None and hasattr(report, "failed") else f"staleness_h={staleness_h:.1f} failed=n/a err={err}"
             if staleness_h <= settings.max_market_data_staleness_hours:
-                _daemon_alert(settings, alerts_sent, event="data_degraded", detail=f"staleness_h={staleness_h:.1f} err={err}", decision_time=target, now=now_fn())
+                _daemon_alert(settings, alerts_sent, event="data_degraded", detail=refresh_summary, decision_time=target, now=now_fn())
                 logger.warning("[SYS] data refresh degraded; proceeding on cached panel staleness_h=%.1f", staleness_h)
             else:
-                _daemon_alert(settings, alerts_sent, event="data_refresh_failed", detail=str(err) if err is not None else str(getattr(report, "staleness_hours", "")), decision_time=target, now=now_fn())
+                _daemon_alert(settings, alerts_sent, event="data_refresh_failed", detail=refresh_summary, decision_time=target, now=now_fn())
                 try:
                     write_heartbeat(heartbeat_path, decision_time=target, status="AWAITING_DATA", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
                 except Exception:
@@ -375,20 +380,23 @@ def run_daemon(
             logger.exception("[SYS] data prune failed decision_time=%s", target)
 
         signal_status = "COMPLETE"
+        failure_cause = ""
         try:
             signal_step_fn(target)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
             logger.exception("[SYS] signal-step failed decision_time=%s", target)
             signal_status = "HALT"
-        except Exception:
+            failure_cause = f"signal_step exit={exc.returncode}"
+        except Exception as exc:
             logger.exception("[SYS] signal-step crashed decision_time=%s", target)
             signal_status = "HALT"
+            failure_cause = f"signal_step {type(exc).__name__}"
 
         if signal_status == "HALT":
             status = "HALT"
             consecutive_halts += 1
             if consecutive_halts >= settings.alert_halt_streak:
-                _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts}", decision_time=target, now=now_fn())
+                _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts} cause={failure_cause}", decision_time=target, now=now_fn())
             try:
                 write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
             except Exception:
@@ -412,6 +420,7 @@ def run_daemon(
                     break
                 continue
             else:
+                _daemon_alert(settings, alerts_sent, event="day_skipped", detail=f"attempts={new_attempts} cause={failure_cause}", decision_time=target, now=now_fn())
                 _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
                 _save_last_processed(state_path, target)
                 continue
@@ -427,9 +436,11 @@ def run_daemon(
             report = run_shadow_cycle(settings, target, weights_path, now=now_fn())
             logger.info("[EVAL] daemon cycle decision_time=%s status=%s reason=%s", target, report.status, report.reason)
             status = report.status
-        except Exception:
+            failure_cause = f"cycle status={status} reason={report.reason}"
+        except Exception as exc:
             logger.exception("[SYS] daemon cycle crashed decision_time=%s", target)
             status = "HALT"
+            failure_cause = f"cycle crashed {type(exc).__name__}"
 
         if status == "COMPLETE":
             consecutive_halts = 0
@@ -437,7 +448,7 @@ def run_daemon(
         else:
             consecutive_halts += 1
             if consecutive_halts >= settings.alert_halt_streak:
-                _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts}", decision_time=target, now=now_fn())
+                _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts} cause={failure_cause}", decision_time=target, now=now_fn())
 
         try:
             write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
@@ -468,6 +479,7 @@ def run_daemon(
                 break
             continue
         else:
+            _daemon_alert(settings, alerts_sent, event="day_skipped", detail=f"attempts={new_attempts} cause={failure_cause}", decision_time=target, now=now_fn())
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
             _save_last_processed(state_path, target)
             continue

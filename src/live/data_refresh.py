@@ -120,23 +120,28 @@ def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partit
 def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) -> bool:
     try:
         collector.ensure_ohlcv_data(symbol, "1h", start, end)
-        collector.ensure_funding_data(symbol, start, end)
-        try:
-            if hasattr(collector, "ensure_mark_price_data"):
-                collector.ensure_mark_price_data(symbol, "1h", start, end)
-            elif hasattr(collector, "ensure_mark_price_klines"):
-                collector.ensure_mark_price_klines(symbol, "1h", start, end)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] markPriceKlines symbol=%s failed error=%s", symbol, exc)
-        try:
-            if hasattr(collector, "ensure_metrics_live_tail"):
-                collector.ensure_metrics_live_tail(symbol)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] metrics_live_tail symbol=%s failed error=%s", symbol, exc)
-        return True
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)
         return False
+    funding_ok = True
+    try:
+        collector.ensure_funding_data(symbol, start, end)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("[DATA] funding symbol=%s failed error=%r", symbol, exc)
+        funding_ok = False
+    try:
+        if hasattr(collector, "ensure_mark_price_data"):
+            collector.ensure_mark_price_data(symbol, "1h", start, end)
+        elif hasattr(collector, "ensure_mark_price_klines"):
+            collector.ensure_mark_price_klines(symbol, "1h", start, end)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("[DATA] markPriceKlines symbol=%s failed error=%s", symbol, exc)
+    try:
+        if hasattr(collector, "ensure_metrics_live_tail"):
+            collector.ensure_metrics_live_tail(symbol)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("[DATA] metrics_live_tail symbol=%s failed error=%s", symbol, exc)
+    return funding_ok
 
 
 def refresh_live_market_data(

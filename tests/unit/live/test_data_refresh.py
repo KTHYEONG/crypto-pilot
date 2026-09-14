@@ -225,3 +225,107 @@ def test_refresh_one_symbol_tail_missing_metrics_method_is_noop() -> None:
     ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
     assert ok is True
+
+
+def test_refresh_one_symbol_tail_funding_failure_returns_false_but_refreshes_mark_and_metrics() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+    from src.market_data.binance.futures import BinanceFundingFetchError
+
+    calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            calls.append("ohlcv")
+
+        def ensure_funding_data(self, symbol, start, end):
+            raise BinanceFundingFetchError(symbol=symbol, http_code=403, url="https://fapi.binance.com/fapi/v1/fundingRate")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            calls.append("mark")
+
+        def ensure_metrics_live_tail(self, symbol):
+            calls.append("metrics")
+
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    assert ok is False
+    assert calls == ["ohlcv", "mark", "metrics"]
+
+
+def test_refresh_one_symbol_tail_ohlcv_failure_returns_false_and_skips_remaining() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            raise RuntimeError("kline endpoint down")
+
+        def ensure_funding_data(self, symbol, start, end):
+            calls.append("funding")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            calls.append("mark")
+
+        def ensure_metrics_live_tail(self, symbol):
+            calls.append("metrics")
+
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    assert ok is False
+    assert calls == []
+
+
+def test_refresh_live_market_data_counts_funding_failure_as_failed(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+    from src.market_data.binance.futures import BinanceFundingFetchError
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    old = now - pd.Timedelta(days=5)
+    ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / "AUSDT.parquet", index=False)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            return None
+
+        def ensure_funding_data(self, symbol, start, end):
+            raise BinanceFundingFetchError(symbol=symbol, http_code=403, url="https://fapi.binance.com/fapi/v1/fundingRate")
+
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=_Collector(),
+    )
+
+    assert report.failed == 1
+    assert report.refreshed == 0
+    assert report.ok is False
+
+
+def test_refresh_one_symbol_tail_legacy_mark_klines_failure_is_failsoft() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            calls.append("ohlcv")
+
+        def ensure_funding_data(self, symbol, start, end):
+            calls.append("funding")
+
+        def ensure_mark_price_klines(self, symbol, timeframe, start, end):
+            calls.append("mark_legacy")
+            raise RuntimeError("mark endpoint down")
+
+        def ensure_metrics_live_tail(self, symbol):
+            calls.append("metrics")
+
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    assert ok is True
+    assert calls == ["ohlcv", "funding", "mark_legacy", "metrics"]
