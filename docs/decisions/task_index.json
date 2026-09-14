@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "LIVE_DAEMON_OPS_HARDENING_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_LIVE_DAEMON_OPS_HARDENING_20260914",
+      "domain": "live",
+      "title": "라이브 데몬 halt 근본원인 수정 및 운영 알림 강화",
+      "why": "taker_buy 컬럼 스키마 드리프트로 halt_streak 발생, 알림이 원인/스킵을 드러내지 못함",
+      "resolution": "OHLCV 저장 시 taker_buy_base/quote 컬럼 보정, 펀딩 REST 실패를 failed로 집계, day_skipped 알림 및 결정일 단위 중복 제거 추가",
+      "impact": "펀딩 403 및 사이클 실패가 조용히 묻히지 않고 알림/집계에 반영됨"
+    },
+    {
       "task_id": "TASK_LIVE_MARKET_METRICS_CAPTURE",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_LIVE_MARKET_METRICS_CAPTURE",
@@ -989,16 +999,6 @@
       "why": "호라이즌 그리드 탐색 기반 단일 알파(momentum 168h) 구조의 실효 breadth가 1.41/19(상관 0.824)에 불과함을 실측. 프로덕션이 고정한 mom_168h는 2024-2025 구간에서 -0.690으로 부호 반전(같은 패밀리 336h는 +0.742 유지)했으나 현 discovery gate는 2021-2023 창에서 +0.615로 보여 이 반전을 원리적으로 탐지 불가. IC(xs_rank_ic)가 알파의 대리지표가 아님도 실증(lowvol_168h IC +0.147/t=105이나 실북 -0.038; taker_imb_168h는 IC 작아도 북 +0.990).",
       "resolution": "src/mhs/features.py 신규: FeatureSpec 레지스트리(커버리지 fail-closed)/feature_coverage_audit/build_feature_books/equal_risk_combination. src/mhs/stability.py 신규: StabilityResult/regime_split_stability(sign_consistent, min_window_sharpe, decay). MhsDiagnosticRequest.multi_feature_book opt-in(기본 False, bit-identical) 배선, 리포트에 multi_feature_diagnostic 필드 추가. no_trades 컬럼 커버리지 붕괴(2023년부터 0.00) 등 데이터 결함을 커버리지 게이트로 구조적 차단.",
       "impact": "자본 배분 무변경(기본 multi_feature_book=False). Stage 1은 ML 미도입, 등리스크 결합만; Stage 2(레짐 안정성 게이트)/Stage 3(게이트된 ML)는 별도 스펙+실측 후 진행."
-    },
-    {
-      "task_id": "TASK_MHS_DIRECTIONAL_TREND_SLEEVE",
-      "date": "2026-08-14",
-      "adr_id": "ADR_20260814_MHS_DIRECTIONAL_TREND_SLEEVE",
-      "domain": "mhs",
-      "title": "MHS 가산 시계열 추세 슬리브 추가",
-      "why": "dollar-neutral unit-gross 아키텍처가 순방향 노출을 구조적으로 보유할 수 없어 2022류 크래시 레짐에서 momentum 전 호라이즌이 동반 실패(discovery admission 실패의 근본 원인, docs/results/mhs-res.md §3.1-§3.2). crash_regime_tilt_weights는 unit-gross 내부 convex blend라 알파 북을 잠식해 이미 기각됨. 사용자가 futures 숏 활용도 재검토를 요청 -- 실측 결과 숏은 이미 100% 사용 중(rank_weight_book이 정확한 dollar-neutral 강제)이나, 방향성 시계열 추세 자체는 한 번도 가산 슬리브로 검증된 적 없었음.",
-      "resolution": "src/mhs/trend_sleeve.py 신규: market_basket_log_price(인과적 eligible 등가중 시장 지수)/time_series_trend_position(6-호라이즌 vol-정규화 앙상블, [-1,1] 클립)/trend_sleeve_weights(자체 gross 예산, 기존 북과 가산 결합, dollar-neutral 강제하지 않음). MhsDiagnosticRequest에 trend_sleeve/trend_sleeve_gross opt-in(기본 0.0, bit-identical) 배선, 리포트에 trend_sleeve_diagnostic 필드 추가. 실측(scratch 샌드박스, 인과성 교정 후): 슬리브 단독 net Sharpe 3개 비용 tier 전부 양(+0.091/+0.082/+0.070), 2022년 +0.22, XS 북과 상관 0.133, 턴오버 39x/yr(프로덕션 slow book 42x/yr 동급).",
-      "impact": "자본 배분 무변경(기본 gross_budget=0.0). 프로덕션 실측(--trend-sleeve --trend-sleeve-gross 검증) 및 사용자 승인 후 자본 배분 결정 별도 진행."
     }
   ]
 }
