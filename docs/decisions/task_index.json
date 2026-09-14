@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "HALT_REASON_PERSISTENCE",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_HALT_REASON_PERSISTENCE",
+      "domain": "live",
+      "title": "HALT 사유 heartbeat 영속화 + 비-ASCII 심볼 서명 회귀테스트",
+      "why": "재배포마다 daemon.log가 0바이트로 리셋되어 halt_streak 원인이 이메일 1회성으로만 남고 디스크에 없었다",
+      "resolution": "write_heartbeat/_beat에 detail 필드를 추가해 5개 halt/awaiting 경로의 기존 redacted 사유 문자열을 재배포에도 살아남는 heartbeat.json에 재사용 기록하고, 실거래 중인 비-ASCII 심볼(龙虾USDT) 서명 라운드트립 회귀테스트를 추가했다",
+      "impact": "SSH 로그 고고학 없이 live status 한 번으로 halt 원인 확인 가능; rest.py/planner.py는 이미 안전함을 실증해 프로덕션 변경 없음"
+    },
+    {
       "task_id": "ZOMBIE_MASK_RESEARCH_RERUN",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_ZOMBIE_MASK_RESEARCH_RERUN",
@@ -989,16 +999,6 @@
       "why": "3m 전환 후 실제 실행에서 --execution-coverage-gate가 로스터에 전혀 편입되지 않는 심볼의 무관한 결손 36/36(100% 오탐)으로 과차단되는 동시에, 게이트를 끄면 markPriceKlines 결손(VETUSDT 등 13개 심볼, 로스터 편입이 마크 데이터 시작보다 최대 9,410시간 앞섬)으로 91초 뒤 리플레이 도중 크래시함을 실측함. 두 문제 모두 커버리지 검사가 '실제 체결되는 (심볼×시각)'이 아니라 '전체 심볼×전체기간'으로 정의된 동일한 설계 결함에서 발생.",
       "resolution": "mhs_execution_collection.py에 roster_membership_intervals()(execution_mask에서 심볼별 연속 편입구간 벡터화 추출) 신설. 이를 재사용해 assert_relevant_execution_data_coverage()(구간별 결손만 검사, 기존 전체스코프 assert_execution_data_coverage는 백필검증용으로 유지)와 assert_relevant_mark_price_coverage()(_cached_mark_panel과 동일한 +1h 인과 시프트·양수 필터·stale_hours 정책 재현)를 신규 구현. run_mhs_horizon_diagnostic의 execution_mask 산출 직후로 게이트 호출 위치 이동. _load_funding_series가 손상 파일을 무성으로 탈락시키던 부분을 dropped 매핑 반환으로 관측 가능하게 변경.",
       "impact": "무관한 데이터 결손으로 인한 진단 실행 과차단이 제거되고, 이전에는 91초 리플레이 후에야 발견되던 마크가격 결손이 실행 시작 전 즉시 심볼 단위로 보고됨. markPriceKlines 백필(67개 심볼, 소스 존재 확인됨) 후 재실행하면 3m 전환의 순수 효과를 마크 결손 오염 없이 측정 가능."
-    },
-    {
-      "task_id": "TASK_MHS_EXECUTION_TIMEFRAME_3M",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_EXECUTION_TIMEFRAME_3M",
-      "domain": "mhs",
-      "title": "MHS execution_timeframe 3m 도입 및 1m/5m 폐기",
-      "why": "5m 캐시 50%(225/446 심볼)가 미수집 상태로 리플레이 도중에야 사후 발견되던 문제(ADR_20260815_MHS_EXECUTION_DATA_COVERAGE_GATE)를 계기로, 1m/3m/5m 체결 정밀도를 실측 비교함. 3m은 5m 대비 체결가 오차 median -27%(15.7→11.4bps)이며, 1m에서 3m을 합성하는 방식은 네이티브 3m 직접 수집 대비 약 10배 느리고 약 57배 메모리를 더 써 비합리적임을 실측 확인. Binance가 3m을 1st-class interval로 이미 지원해 신규 수집 코드 없이 네이티브 수집이 가능함을 확인.",
-      "resolution": "사용자 지시로 data/futures/ohlcv/{1m,5m} 삭제(10.3GB 회수) 후 기존 collect_mhs_execution_data로 프로덕션 funded 유니버스 446개 심볼 전체를 네이티브 3m으로 재수집(446/446 PRESENT, 6.1GB, 1012.6초). 3m 전수 무결성검증 실행: 내부갭 36개 심볼 중 28개가 Binance Vision 소스 자체의 실제 결손(2022-02-25~03-01, 2022-03-31~04-03, 직접 아카이브 재조회로 확정, fold validation 윈도우 밖이라 Research-GO에 영향 없음)임을 검증. MhsDiagnosticRequest.execution_timeframe을 Literal['1m','3m','5m']로 확장하고 기본값을 '5m'->'3m'으로 변경(5m 캐시가 더 이상 없으므로 필수 변경), freq 매핑 5곳·_coverage() step 매핑·build_mhs_execution_plan 기본값·CLI choices/default를 동일하게 갱신. 커버리지 게이트(assert_execution_data_coverage 등)는 timeframe-agnostic이라 무변경 재사용.",
-      "impact": "MHS 실행 리플레이가 기본적으로 3m 그리드로 전환되어 5m 대비 체결정밀도가 개선되고, 1m 유지 대비 저장공간·리플레이 메모리 부담이 크게 낮아짐. 2022년 2~4월 소스 결손은 문서화된 기존 게이트로 커버되어 별도 예외 로직 없이 안전하게 처리됨."
     }
   ]
 }
