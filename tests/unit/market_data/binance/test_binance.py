@@ -494,3 +494,75 @@ def test_fetch_mark_price_klines_normalizes_ohlc(monkeypatch) -> None:
     assert frame["timestamp"].tolist() == [1609459200000, 1609462800000]
     assert frame["close"].tolist() == [100.5, 101.0]
     assert frame["datetime"].is_monotonic_increasing
+
+
+def test_fetch_funding_rate_history_raises_on_http_error(monkeypatch) -> None:
+    import urllib.error
+    import pytest
+    from src.market_data.binance.futures import BinanceClient, BinanceFundingFetchError
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 1000)
+
+    def _raise(*args, **kwargs):
+        raise urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/fundingRate", 403, "Forbidden", None, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+    with pytest.raises(BinanceFundingFetchError) as exc_info:
+        client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z")
+
+    assert exc_info.value.http_code == 403
+    assert exc_info.value.symbol == "BTC/USDT"
+    assert "fundingRate" in exc_info.value.url
+    assert isinstance(exc_info.value.__cause__, urllib.error.HTTPError)
+
+
+def test_fetch_funding_rate_history_raises_on_transport_error(monkeypatch) -> None:
+    import urllib.error
+    import pytest
+    from src.market_data.binance.futures import BinanceClient, BinanceFundingFetchError
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 1000)
+
+    def _raise(*args, **kwargs):
+        raise urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+    with pytest.raises(BinanceFundingFetchError) as exc_info:
+        client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z")
+
+    assert exc_info.value.http_code is None
+
+
+def test_fetch_funding_rate_history_raises_on_malformed_body(monkeypatch) -> None:
+    import pytest
+    from src.market_data.binance.futures import BinanceClient, BinanceFundingFetchError
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 1000)
+
+
+    class Response:
+        headers: ClassVar[dict[str, str]] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return b"<html>blocked</html>"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Response())
+
+    with pytest.raises(BinanceFundingFetchError) as exc_info:
+        client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z")
+
+    assert exc_info.value.http_code is None

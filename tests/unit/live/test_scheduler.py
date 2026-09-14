@@ -537,49 +537,6 @@ def sched_now() -> "pd.Timestamp":
     return pd.Timestamp("2026-08-24 00:00Z") + _SIGNAL_LAG + pd.Timedelta(minutes=20)
 
 
-def test_run_daemon_alerts_once_on_halt_streak(tmp_path, monkeypatch) -> None:
-    import pandas as pd
-    import src.live.scheduler as sched
-    from src.live.settings import LiveSettings
-    from src.live.signal import _SIGNAL_LAG
-
-    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
-    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
-    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
-    events: list[str] = []
-    monkeypatch.setattr(
-        sched, "post_alert",
-        lambda url, *, event, detail, decision_time, now: events.append(event) or True,
-        raising=False,
-    )
-
-    def _halt_cycle(settings, decision_time, artifact, *, now):
-        from src.live.runner import CycleReport
-        return CycleReport(status="HALT", reason="x", decision_time=decision_time, intent_count=0)
-
-    monkeypatch.setattr(sched, "run_shadow_cycle", _halt_cycle)
-    artifact = tmp_path / "w.parquet"
-    artifact.touch()
-
-    base = pd.Timestamp("2026-08-24 00:00Z")
-    cur = [base + pd.Timedelta(days=5) + _SIGNAL_LAG + pd.Timedelta(minutes=20)]
-    def now_fn():
-        return cur[0]
-    def sleep_fn(s):
-        cur[0] += pd.Timedelta(seconds=s)
-    sched.run_daemon(
-        LiveSettings(alert_webhook_url="https://h.example", alert_halt_streak=2, daemon_max_attempts_per_day=1),
-        artifact,
-        tmp_path / "state.json",
-        sleep_fn=sleep_fn,
-        now_fn=now_fn,
-        max_iterations=3,
-        refresh_fn=lambda: None,
-        signal_step_fn=lambda *a, **k: None,
-        prune_fn=lambda: None,
-    )
-
-    assert events.count("halt_streak") == 1
 
 
 def test_daemon_runs_prune_after_refresh_before_signal(tmp_path, monkeypatch) -> None:
@@ -660,6 +617,7 @@ def test_default_data_refresh_uses_check_true(monkeypatch) -> None:
 
 
 
+
 def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
     import pandas as pd
     import src.live.scheduler as sched
@@ -715,7 +673,7 @@ def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
     )
 
     assert ("halt_streak", "me@gmail.com") in emails
-    assert [e for e, _ in emails].count("halt_streak") == 1
+    assert [e for e, _ in emails].count("halt_streak") == 2
 
 
 def test_run_daemon_proceeds_degraded_when_cached_data_fresh_enough(tmp_path, monkeypatch) -> None:
@@ -807,3 +765,304 @@ def test_run_daemon_legacy_none_refresh_still_proceeds(tmp_path, monkeypatch) ->
     assert steps == ["prune", "signal"]
     hb = json.loads((tmp_path / "hb.json").read_text())
     assert hb["status"] == "COMPLETE"
+
+
+def test_run_daemon_alerts_day_skipped_when_cycle_halts_on_last_attempt(tmp_path, monkeypatch) -> None:
+    import subprocess
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched,
+        "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+
+    import json
+
+    def _halt_cycle(settings, decision_time, artifact_path, *, now):
+        return CycleReport(status="HALT", reason="reconcile_breach", decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _halt_cycle)
+
+    sched.run_daemon(
+        LiveSettings(daemon_max_attempts_per_day=1, alert_halt_streak=5),
+        artifact,
+        state_path,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: ready,
+        max_iterations=1,
+        refresh_fn=lambda: None,
+        signal_step_fn=lambda *a, **k: None,
+        prune_fn=lambda: None,
+    )
+
+    skipped = [detail for event, detail in alerts if event == "day_skipped"]
+    assert skipped == ["attempts=1 cause=cycle status=HALT reason=reconcile_breach"]
+    saved = json.loads(state_path.read_text())
+    assert pd.Timestamp(saved["last_processed_decision_time"]) == target
+
+
+def test_run_daemon_alerts_day_skipped_when_signal_step_fails_on_last_attempt(tmp_path, monkeypatch) -> None:
+    import subprocess
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched,
+        "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+
+    cycle_calls: list[pd.Timestamp] = []
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, decision_time, artifact_path, *, now: cycle_calls.append(decision_time),
+    )
+
+    def _failing_signal_step(t):
+        raise subprocess.CalledProcessError(1, ["python", "-m", "src.cli.main", "live", "signal-step"])
+
+    sched.run_daemon(
+        LiveSettings(daemon_max_attempts_per_day=1, alert_halt_streak=1),
+        artifact,
+        state_path,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: ready,
+        max_iterations=1,
+        refresh_fn=lambda: None,
+        signal_step_fn=_failing_signal_step,
+        prune_fn=lambda: None,
+    )
+
+    assert cycle_calls == []
+    assert ("halt_streak", "consecutive_halts=1 cause=signal_step exit=1") in alerts
+    assert ("day_skipped", "attempts=1 cause=signal_step exit=1") in alerts
+
+
+def test_run_daemon_halt_streak_detail_names_crashed_cycle_exception(tmp_path, monkeypatch) -> None:
+    import subprocess
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched,
+        "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+
+    def _crash(settings, decision_time, artifact_path, *, now):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _crash)
+
+    sched.run_daemon(
+        LiveSettings(daemon_max_attempts_per_day=5, alert_halt_streak=1),
+        artifact,
+        state_path,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: ready,
+        max_iterations=1,
+        refresh_fn=lambda: None,
+        signal_step_fn=lambda *a, **k: None,
+        prune_fn=lambda: None,
+    )
+
+    assert alerts == [("halt_streak", "consecutive_halts=1 cause=cycle crashed RuntimeError")]
+
+
+def test_run_daemon_alerts_halt_streak_once_per_decision_day(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    events: list[tuple[str, pd.Timestamp]] = []
+    monkeypatch.setattr(
+        sched, "post_alert",
+        lambda url, *, event, detail, decision_time, now: events.append((event, decision_time)) or True,
+        raising=False,
+    )
+
+    def _halt_cycle(settings, decision_time, artifact, *, now):
+        return CycleReport(status="HALT", reason="x", decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _halt_cycle)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+
+    base = pd.Timestamp("2026-08-24 00:00Z")
+    day1 = base + pd.Timedelta(days=5)
+    cur = [day1 + _SIGNAL_LAG + pd.Timedelta(minutes=20)]
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    sched.run_daemon(
+        LiveSettings(alert_webhook_url="https://h.example", alert_halt_streak=2, daemon_max_attempts_per_day=1),
+        artifact,
+        tmp_path / "state.json",
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        max_iterations=3,
+        refresh_fn=lambda: None,
+        signal_step_fn=lambda *a, **k: None,
+        prune_fn=lambda: None,
+    )
+
+    day2 = day1 + pd.Timedelta(days=1)
+    day3 = day1 + pd.Timedelta(days=2)
+    assert [dt for ev, dt in events if ev == "halt_streak"] == [day2, day3]
+    assert [dt for ev, dt in events if ev == "day_skipped"] == [day1, day2, day3]
+
+
+def test_run_daemon_degraded_alert_detail_includes_refresh_failure_count(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import scheduler as sched
+    from src.live.data_refresh import RefreshReport
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda s: True)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda s, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    rep = RefreshReport(total=500, fresh=0, refreshed=21, failed=479, deadline_skipped=0,
+                        elapsed_s=12.0, deadline_hit=False, staleness_hours=0.1, ok=False)
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, target, wp, now=None: type("R", (), {"status": "COMPLETE", "reason": None})(),
+    )
+
+    settings = LiveSettings(mode=ExecutionMode.PAPER, heartbeat_path=str(tmp_path / "hb.json"), max_market_data_staleness_hours=30.0)
+    sched.run_daemon(
+        settings, tmp_path / "w.parquet", tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T02:00:00Z"),
+        max_iterations=1,
+        refresh_fn=lambda: rep,
+        signal_step_fn=lambda target: None,
+        prune_fn=lambda: None,
+    )
+
+    assert ("data_degraded", "staleness_h=0.1 failed=479/500 err=None") in alerts
+
+
+def test_run_daemon_refresh_failed_alert_detail_includes_refresh_failure_count(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import scheduler as sched
+    from src.live.data_refresh import RefreshReport
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda s: True)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda s, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    rep = RefreshReport(total=500, fresh=0, refreshed=0, failed=500, deadline_skipped=0,
+                        elapsed_s=5.0, deadline_hit=False, staleness_hours=200.0, ok=False)
+
+    settings = LiveSettings(mode=ExecutionMode.PAPER, heartbeat_path=str(tmp_path / "hb.json"), max_market_data_staleness_hours=30.0)
+    sched.run_daemon(
+        settings, tmp_path / "w.parquet", tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T02:00:00Z"),
+        max_iterations=1,
+        refresh_fn=lambda: rep,
+        signal_step_fn=lambda target: None,
+        prune_fn=lambda: None,
+    )
+
+    assert ("data_refresh_failed", "staleness_h=200.0 failed=500/500 err=None") in alerts
+
+
+def test_run_daemon_halt_streak_detail_names_generic_signal_step_exception(tmp_path, monkeypatch) -> None:
+    import subprocess
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched,
+        "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+
+    cycle_calls: list[pd.Timestamp] = []
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, decision_time, artifact_path, *, now: cycle_calls.append(decision_time),
+    )
+
+    def _crashing_signal_step(t):
+        raise RuntimeError("worker died")
+
+    sched.run_daemon(
+        LiveSettings(daemon_max_attempts_per_day=1, alert_halt_streak=1),
+        artifact,
+        state_path,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: ready,
+        max_iterations=1,
+        refresh_fn=lambda: None,
+        signal_step_fn=_crashing_signal_step,
+        prune_fn=lambda: None,
+    )
+
+    assert cycle_calls == []
+    assert ("halt_streak", "consecutive_halts=1 cause=signal_step RuntimeError") in alerts
+    assert ("day_skipped", "attempts=1 cause=signal_step RuntimeError") in alerts

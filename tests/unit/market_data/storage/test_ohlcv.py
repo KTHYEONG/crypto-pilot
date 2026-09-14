@@ -13,6 +13,42 @@ def _ms(index: pd.DatetimeIndex) -> pd.Series:
     return (index - _EPOCH) // pd.Timedelta("1ms")
 
 
+class TestWriteOhlcvTakerCanonicalColumns:
+    def test_rest_only_1h_frame_gains_canonical_taker_columns(self, tmp_path: Path) -> None:
+        # Given: a freshly listed symbol with REST rows only (no Vision month)
+        idx = pd.date_range("2024-01-01", periods=2, freq="1h", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": _ms(idx),
+            "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0],
+            "volume": [1.0, 1.0], "quote_vol": [1.0, 1.0],
+            "taker_buy_base_volume": [5.0, 6.0], "taker_buy_quote_volume": [500.0, 600.0],
+        })
+        path = tmp_path / "1h" / "NEWUSDT.parquet"
+        # When
+        write_ohlcv(path, df, timeframe="1h")
+        # Then: the columns the MHS panel loader requests are persisted
+        out = pd.read_parquet(path)
+        assert list(out["taker_buy_base"]) == [5.0, 6.0]
+        assert list(out["taker_buy_quote"]) == [500.0, 600.0]
+
+    def test_1m_frame_with_both_taker_forms_still_writes_canonical_layout(self, tmp_path: Path) -> None:
+        # Given: a 1m frame carrying both forms
+        idx = pd.date_range("2024-01-01", periods=2, freq="1min", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": _ms(idx),
+            "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0],
+            "volume": [1.0, 1.0], "quote_vol": [1.0, 1.0],
+            "taker_buy_base_volume": [5.0, 6.0], "taker_buy_quote_volume": [500.0, 600.0],
+        })
+        path = tmp_path / "1m" / "X.parquet"
+        # When
+        write_ohlcv(path, df, timeframe="1m")
+        # Then: 1m keeps its historical suffixed-only layout
+        out = pd.read_parquet(path)
+        assert "taker_buy_base" not in out.columns
+        assert list(out["taker_buy_base_volume"]) == [5.0, 6.0]
+
+
 class TestWriteOhlcv1m:
     def test_1m_layout_is_canonical_order_and_dtypes(self, tmp_path: Path) -> None:
         # SC-STORE-01: a 1m frame with the historical column order is persisted
