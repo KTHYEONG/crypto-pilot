@@ -58,7 +58,7 @@ def test_refresh_live_market_data_fetches_stale_symbol_with_tail_window(tmp_path
 
     seen: dict[str, str] = {}
 
-    def _fake_one(collector, symbol, start, end):
+    def _fake_one(collector, symbol, start, end, *, funding_start=None):
         seen["start"] = start
         seen["end"] = end
         return True
@@ -389,7 +389,7 @@ def test_refresh_live_market_data_aborts_remaining_symbols_on_ip_block(tmp_path,
         pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
     calls: list[str] = []
 
-    def _fake_one(collector, symbol, start, end):
+    def _fake_one(collector, symbol, start, end, *, funding_start=None):
         calls.append(symbol)
         raise BinanceIpBlockedError(http_code=418, url="https://fapi.binance.com/fapi/v1/klines")
 
@@ -434,7 +434,7 @@ def test_refresh_live_market_data_keeps_fresh_count_during_ip_block(tmp_path, mo
     _write_ohlcv("ZUSDT", now)
     _write_funding("ZUSDT", now)
 
-    def _fake_one(collector, symbol, start, end):
+    def _fake_one(collector, symbol, start, end, *, funding_start=None):
         raise BinanceIpBlockedError(http_code=429, url="https://fapi.binance.com/fapi/v1/klines")
 
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
@@ -527,7 +527,7 @@ def test_refresh_live_market_data_refreshes_fresh_ohlcv_with_stale_funding(tmp_p
     _write_funding("AUSDT", now - pd.Timedelta(hours=24))
     calls: list[str] = []
 
-    def _fake_one(collector, symbol, start, end):
+    def _fake_one(collector, symbol, start, end, *, funding_start=None):
         calls.append(symbol)
         return True
 
@@ -568,7 +568,7 @@ def test_refresh_live_market_data_reports_funding_stale_after_run(tmp_path, monk
     _write_funding("AUSDT", now)
     _write_ohlcv("BUSDT", now)
     _write_funding("BUSDT", now - pd.Timedelta(hours=24))
-    monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", lambda collector, symbol, start, end: True)
+    monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", lambda collector, symbol, start, end, *, funding_start=None: True)
 
     report = data_refresh.refresh_live_market_data(
         tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
@@ -624,4 +624,100 @@ def test_market_data_staleness_hours_ignores_symbols_without_recent_volume(tmp_p
     pd.DataFrame({"timestamp": zombie, "close": [1.0] * 10, "volume": [0.0] * 10}).to_parquet(d / "ZUSDT.parquet", index=False)
 
     assert data_refresh.market_data_staleness_hours(tmp_path, now=now) == 2.0
+
+
+
+def test_refresh_one_symbol_tail_uses_funding_start_for_funding_only() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    seen: dict[str, str] = {}
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            seen["ohlcv_start"] = start
+
+        def ensure_funding_data(self, symbol, start, end):
+            seen["funding_start"] = start
+            seen["funding_end"] = end
+
+    # When
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-09-13", "2026-09-14", funding_start="2026-08-05")
+
+    # Then: OHLCV 는 꼬리 기반 start, 펀딩은 lookback 창 start 로 요청한다
+    assert ok is True
+    assert seen == {"ohlcv_start": "2026-09-13", "funding_start": "2026-08-05", "funding_end": "2026-09-14"}
+
+def test_refresh_one_symbol_tail_funding_start_defaults_to_start() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    seen: dict[str, str] = {}
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            return None
+
+        def ensure_funding_data(self, symbol, start, end):
+            seen["funding_start"] = start
+
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-09-13", "2026-09-14")
+
+    assert ok is True
+    assert seen["funding_start"] == "2026-09-13"
+
+def test_funding_fresh_on_disk_treats_internal_gap_as_stale_when_window_given(tmp_path) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    funding_dir = tmp_path / "funding"
+    funding_dir.mkdir(parents=True)
+    # Given: 꼬리는 최신(now)이지만 now-64h ~ now-16h 사이가 비어 있는 8h 간격 펀딩
+    offsets_h = [72, 64, 16, 8, 0]
+    stamps = [int((now - pd.Timedelta(hours=o)).value // 10**6) for o in offsets_h]
+    pd.DataFrame({"timestamp": stamps, "funding_rate": [0.0001] * len(stamps)}).to_parquet(funding_dir / "GAPUSDT.parquet", index=False)
+
+    # When/Then: 창을 주지 않으면 기존 꼬리 판정 유지, 창을 주면 내부 공백 때문에 stale
+    assert data_refresh._funding_fresh_on_disk(tmp_path, "GAPUSDT", now) is True
+    assert data_refresh._funding_fresh_on_disk(tmp_path, "GAPUSDT", now, window_start=now - pd.Timedelta(days=40)) is False
+    assert data_refresh._funding_fresh_on_disk(tmp_path, "GAPUSDT", now, window_start=now - pd.Timedelta(hours=16)) is True
+
+def test_refresh_live_market_data_refetches_gap_symbol_with_lookback_funding_start(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    funding_dir = tmp_path / "funding"
+    funding_dir.mkdir(parents=True)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+
+    def _ms(ts: pd.Timestamp) -> int:
+        return int(ts.value // 10**6)
+
+    # Given: OHLCV 최신 + 펀딩 꼬리 최신이지만 내부 공백이 있는 심볼
+    ohlcv_stamps = [_ms(now - pd.Timedelta(hours=h)) for h in range(48)]
+    pd.DataFrame({"timestamp": ohlcv_stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / "GAPUSDT.parquet", index=False)
+    funding_stamps = [_ms(now - pd.Timedelta(hours=o)) for o in (72, 64, 16, 8, 0)]
+    pd.DataFrame({"timestamp": funding_stamps, "funding_rate": [0.0001] * 5}).to_parquet(funding_dir / "GAPUSDT.parquet", index=False)
+    seen: dict[str, object] = {}
+
+    def _fake_one(collector, symbol, start, end, *, funding_start=None):
+        seen["symbol"] = symbol
+        seen["funding_start"] = funding_start
+        return True
+
+    monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
+
+    # When
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
+    )
+
+    # Then: 공백 심볼은 fresh 로 건너뛰지 않고 lookback 창 start 로 재조회, 사후 funding_stale 도 공백을 센다
+    assert seen == {"symbol": "GAPUSDT", "funding_start": str(now - pd.Timedelta(days=40))}
+    assert report.fresh == 0
+    assert report.refreshed == 1
+    assert report.funding_stale == 1
 
