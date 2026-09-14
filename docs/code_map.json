@@ -151,6 +151,7 @@
   },
   "src/market_data/binance/futures.py": {
     "testing": [
+      "tests/unit/live/test_data_refresh.py",
       "tests/unit/market_data/binance/test_binance.py",
       "tests/unit/market_data/binance/test_futures_data_metric.py",
       "tests/unit/market_data/test_futures_mark_price.py"
