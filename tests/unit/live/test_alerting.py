@@ -271,3 +271,65 @@ def test_send_email_alert_orderbook_backup_impending(monkeypatch) -> None:
     assert "orderbook_backup_impending" in captured["subject"]
     assert "rsync" in captured["body"]
     assert "earliest_date=2025-09-05" in captured["body"]
+
+
+def test_send_email_alert_day_skipped_uses_event_info(monkeypatch) -> None:
+    import pandas as pd
+    import src.live.alerting as a
+
+    captured = {}
+
+    class _FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, msg):
+            captured["subject"] = msg["Subject"]
+            captured["body"] = msg.get_content()
+
+    monkeypatch.setattr(a.smtplib, "SMTP", _FakeSMTP)
+
+    out = a.send_email_alert(
+        gmail_user="bot@gmail.com",
+        gmail_app_password="pw",
+        email_to="me@gmail.com",
+        event="day_skipped",
+        detail="attempts=5 cause=signal_step exit=1",
+        decision_time=pd.Timestamp("2026-09-14", tz="UTC"),
+        now=pd.Timestamp("2026-09-14T02:05:00", tz="UTC"),
+    )
+
+    assert out is True
+    assert a.EVENT_INFO["day_skipped"]["severity_label"] == "CRITICAL"
+    assert a.EVENT_INFO["day_skipped"]["title"] in captured["subject"]
+    assert "docker logs --tail 200 mhs-live-daemon" in captured["body"]
+    assert "attempts=5 cause=signal_step exit=1" in captured["body"]
+
+
+def test_event_info_actions_reference_runnable_operator_commands() -> None:
+    from src.cli.main import build_root_parser
+    from src.live.alerting import EVENT_INFO
+
+    for event, info in EVENT_INFO.items():
+        assert "logs/live_daemon.log" not in info["action"], event
+        assert "refresh-live-market-data" not in info["action"], event
+    for event in ("halt_streak", "day_skipped", "data_refresh_failed"):
+        assert "docker logs --tail 200 mhs-live-daemon" in EVENT_INFO[event]["action"]
+    assert "src.cli.main live status" in EVENT_INFO["halt_streak"]["action"]
+    assert "src.cli.main data refresh-live-universe" in EVENT_INFO["data_refresh_failed"]["action"]
+
+    parser = build_root_parser()
+    assert parser.parse_args(["live", "status"]).handler is not None
+    assert parser.parse_args(["data", "refresh-live-universe"]).handler is not None

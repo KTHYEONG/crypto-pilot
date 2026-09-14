@@ -103,25 +103,29 @@ class TestDataCollectorCache:
         out = collector._normalize_df(frame)
         assert pd.api.types.is_numeric_dtype(out["open"])
 
-    def test_normalize_df_renames_rest_taker_columns_to_canonical(self) -> None:
-        # fetch_ohlcv_with_taker (REST) returns *_volume-suffixed taker columns
-        # while the Vision archive path returns the unsuffixed names that
-        # load_base_panel requests; a symbol with no Vision-eligible month
-        # (freshly listed) only ever sees the REST form, which used to leave
-        # its cache file missing the columns downstream panel loading needs.
+    def test_load_cache_keeps_file_carrying_both_taker_forms(self, tmp_path, monkeypatch) -> None:
+        # Given: an established 1h cache file carrying both taker column forms
+        # (Vision rows unsuffixed, REST-appended rows *_volume)
+        idx = pd.date_range("2024-01-01", periods=2, freq="1h", tz="UTC")
+        path = tmp_path / "X.parquet"
+        pd.DataFrame({
+            "timestamp": _ms(idx),
+            "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0],
+            "volume": [1.0, 1.0], "quote_vol": [1.0, 1.0],
+            "taker_buy_base": [0.4, float("nan")], "taker_buy_quote": [0.3, float("nan")],
+            "taker_buy_base_volume": [float("nan"), 0.6], "taker_buy_quote_volume": [float("nan"), 0.7],
+        }).to_parquet(path)
+        monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: path)
         collector = DataCollector()
-        frame = pd.DataFrame({
-            "timestamp": [0, 1],
-            "taker_buy_base_volume": [5.0, 6.0],
-            "taker_buy_quote_volume": [500.0, 600.0],
-        })
-        out = collector._normalize_df(frame)
-        assert "taker_buy_base" in out.columns
-        assert "taker_buy_quote" in out.columns
-        assert "taker_buy_base_volume" not in out.columns
-        assert "taker_buy_quote_volume" not in out.columns
-        assert list(out["taker_buy_base"]) == [5.0, 6.0]
-        assert list(out["taker_buy_quote"]) == [500.0, 600.0]
+        # When: load and re-save (the daily refresh round trip)
+        loaded = collector._load_cache("X", "1h")
+        collector._save_cache("X", "1h", loaded)
+        # Then: the cache is not discarded and the canonical tail is filled
+        assert path.exists()
+        persisted = pd.read_parquet(path)
+        assert not persisted.columns.duplicated().any()
+        assert list(persisted["taker_buy_base"]) == [0.4, 0.6]
+        assert list(persisted["taker_buy_quote"]) == [0.3, 0.7]
 
 
 class TestDataCollectorSaveCache:

@@ -68,7 +68,7 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "header_color": "#dc2626",
         "bg_color": "#fef2f2",
         "impact": "신호 계산 또는 체결 사이클 오류로 매매가 중단(HALT)되었습니다. 연속 누적으로 신규 주문이 생성되지 않습니다.",
-        "action": "uv run python -m src.cli.main live status\ntail -n 50 logs/live_daemon.log",
+        "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon uv run python -m src.cli.main live status",
     },
     "data_refresh_failed": {
         "title": "시세 데이터 갱신 실패",
@@ -77,7 +77,16 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "header_color": "#dc2626",
         "bg_color": "#fef2f2",
         "impact": "거래소 시세 데이터 수집 실패 및 데이터 지연이 허용치를 초과하여 이번 사이클을 건너뜁니다 (AWAITING_DATA).",
-        "action": "uv run python -m src.cli.main data refresh-live-market-data",
+        "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon uv run python -m src.cli.main data refresh-live-universe",
+    },
+    "day_skipped": {
+        "title": "당일 리밸런스 스킵",
+        "severity_badge": "🚨 긴급",
+        "severity_label": "CRITICAL",
+        "header_color": "#dc2626",
+        "bg_color": "#fef2f2",
+        "impact": "재시도 한도를 모두 소진해 이번 결정 시각의 리밸런스를 건너뛰고 다음 날로 진행했습니다. 기존 포지션은 조정 없이 유지됩니다.",
+        "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon uv run python -m src.cli.main live status",
     },
     "data_degraded": {
         "title": "시세 갱신 지연 (열화 모드 동작)",

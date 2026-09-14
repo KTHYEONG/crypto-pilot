@@ -15,6 +15,11 @@ _OHLCV_1M_COLUMNS: tuple[str, ...] = (
 
 _PRICE_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close")
 
+_TAKER_CANONICAL_SOURCES: tuple[tuple[str, str], ...] = (
+    ("taker_buy_base", "taker_buy_base_volume"),
+    ("taker_buy_quote", "taker_buy_quote_volume"),
+)
+
 
 def normalize_frame(df: pd.DataFrame) -> pd.DataFrame:
     """Coerce a raw kline frame into the shared UTC/numeric representation.
@@ -92,6 +97,14 @@ def write_ohlcv(path: Path, df: pd.DataFrame, *, timeframe: str) -> None:
             .drop_duplicates("timestamp", keep="last")
             .sort_values("timestamp")
         )
+    else:
+        # REST kline은 *_volume 명만, Vision 아카이브는 무접미사 명만 준다(같은 kline 9·10번 필드).
+        # Vision 월이 없는 신규 상장 심볼은 무접미사 컬럼이 없어 load_base_panel 요청이 실패하므로
+        # 저장 시 비어 있는 무접미사 값만 채운다. 리네임은 두 형식을 모두 가진 파일에서 중복 컬럼을 만든다.
+        for canonical, suffixed in _TAKER_CANONICAL_SOURCES:
+            if suffixed not in df.columns:
+                continue
+            df[canonical] = df[canonical].fillna(df[suffixed]) if canonical in df.columns else df[suffixed]
 
     df_to_save = df.copy()
     if "datetime" in df_to_save.columns:
