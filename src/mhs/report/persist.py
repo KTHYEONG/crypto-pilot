@@ -149,6 +149,7 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
         policy=policy,
         bootstrap_sha256=bootstrap_digest,
         bootstrap_held_row=held_row,
+        data_policy=str(request.data_policy),
     )
     params_path = save_strategy_params(artifact_root / "strategy_params.json", params, artifact_key=artifact_key)
     loaded = load_strategy_params(params_path, artifact_key=artifact_key)

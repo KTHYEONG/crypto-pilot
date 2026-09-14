@@ -32,7 +32,7 @@ from src.mhs.features import (
     feature_registry_panel_columns,
 )
 from src.mhs.horizons import horizon_log_return  # noqa: F401 - re-exported for monkeypatch seams
-from src.mhs.panel import load_base_panel
+from src.mhs.panel import DATA_POLICY_LEGACY, load_base_panel
 from src.mhs.params import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
     PANEL_MIN_HISTORY_BARS,
@@ -181,6 +181,8 @@ def _load_feature_panels(
     grid_1h: pd.DatetimeIndex,
     aligned_symbols: list[str],
     columns: tuple[str, ...] | None = None,
+    *,
+    data_policy: str = DATA_POLICY_LEGACY,
 ) -> dict[str, pd.DataFrame]:
     """Load the registry's raw 1h panels, NaN-filling absent columns.
 
@@ -197,7 +199,7 @@ def _load_feature_panels(
     panels: dict[str, pd.DataFrame] = {}
     if available:
         loaded = load_base_panel(
-            root, "1h", available, start, end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS,  # liquid_half_eligibility min_history_bars와 동일(720)
+            root, "1h", available, start, end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, data_policy=data_policy,  # liquid_half_eligibility min_history_bars와 동일(720)
         )
         for column in available:
             panels[column] = loaded[column].reindex(index=grid_1h, columns=aligned_symbols)

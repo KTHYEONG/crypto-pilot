@@ -45,7 +45,7 @@ def load_panel(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             if ctx.config.committee_capital
             else ("close", "open", "quote_vol")
         ),
-        ctx.start, ctx.end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS,  # liquid_half_eligibility min_history_bars와 동일(720)
+        ctx.start, ctx.end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, data_policy=ctx.config.data_policy,  # liquid_half_eligibility min_history_bars와 동일(720)
     )
     ctx.base_panel = panel
     ctx.close, ctx.opens, ctx.quote_vol = panel["close"], panel["open"], panel["quote_vol"]

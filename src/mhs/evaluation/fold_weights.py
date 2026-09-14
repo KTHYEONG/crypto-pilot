@@ -91,7 +91,7 @@ def _build_fold_target_weights(
         if base_panel is not None
         else load_base_panel(
             root, "1h", _panel_columns, panel_start, ve,
-            partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, quarantine=panel_quarantine,  # liquid_half_eligibility min_history_bars와 동일(720)
+            partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, data_policy=request.data_policy, quarantine=panel_quarantine,  # liquid_half_eligibility min_history_bars와 동일(720)
         )
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]

@@ -442,14 +442,16 @@ def test_load_feature_panels_uses_pit_min_history_bars(monkeypatch) -> None:
     grid = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
     captured: dict[str, object] = {}
 
-    def fake_load(root, interval, columns, start, end, partition="dev", min_bars=0):
+    def fake_load(root, interval, columns, start, end, partition="dev", min_bars=0, **kwargs):
         captured["min_bars"] = min_bars
+        captured["data_policy"] = kwargs.get("data_policy", "legacy")
         return {c: pd.DataFrame(1.0, index=grid, columns=["AAAUSDT"]) for c in columns}
 
     monkeypatch.setattr(diagnostics, "_available_panel_columns", lambda root, requested: ("close",))
     monkeypatch.setattr(diagnostics, "load_base_panel", fake_load)
     panels = diagnostics._load_feature_panels("/root", grid[0], grid[-1], grid, ["AAAUSDT"], columns=("close",))
     assert captured["min_bars"] == PANEL_MIN_HISTORY_BARS
+    assert captured["data_policy"] == "legacy"
     assert list(panels["close"].columns) == ["AAAUSDT"]
 
 
@@ -945,4 +947,96 @@ def test_zombie_masked_timestamps_empty_range_and_duplicate_keep_last(tmp_path) 
 
     masked = zombie_masked_timestamps(str(path), 0, (n - 1) * hour, hour, 24)
     assert masked.tolist() == [i * hour for i in range(29, n)]
+
+
+def test_load_base_panel_zombie_tail_is_not_quarantined_even_when_protected(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    def _write_symbol(path, flat_flags, start="2024-01-01", truncate=0):
+        n = len(flat_flags)
+        ts = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+        flat = np.asarray(flat_flags, dtype=bool)
+        close = 100.0 + np.arange(n, dtype="float64")
+        frame = pd.DataFrame({
+            "timestamp": (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+            "open": close,
+            "high": np.where(flat, close, close + 1.0),
+            "low": np.where(flat, close, close - 1.0),
+            "close": close,
+            "volume": np.where(flat, 0.0, 5.0),
+            "quote_vol": np.where(flat, 0.0, 500.0),
+        })
+        frame.iloc[: n - truncate].to_parquet(path, index=False)
+        return ts
+    from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1, PanelQuarantine, load_base_panel
+
+    # Given: 결정 시점 직전 상장폐지(24봉 이상 flat 꼬리)된 심볼 3개, 그중 1개는 보유(보호) 심볼
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    flags = [False] * 40 + [True] * 30
+    ts = _write_symbol(directory / "AAAUSDT.parquet", flags)
+    _write_symbol(directory / "BBBUSDT.parquet", flags)
+    _write_symbol(directory / "CCCUSDT.parquet", flags)
+    _write_symbol(directory / "DDDUSDT.parquet", [False] * 70)
+    quarantine = PanelQuarantine(protected=frozenset({"AAAUSDT"}))
+
+    # When
+    panel = load_base_panel(
+        root=str(tmp_path), interval="1h", columns=("close",), start=ts[0], end=ts[-1],
+        partition="all", min_bars=1, data_policy=DATA_POLICY_ZOMBIE_MASK_V1, quarantine=quarantine,
+    )
+
+    # Then: 격리 없음, 한도(ceil(1% of 4)=1) 미초과, 좀비 꼬리는 NaN 으로 남는다
+    assert quarantine.records == []
+    assert list(panel["close"].columns) == ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]
+    assert panel["close"]["AAAUSDT"].iloc[:63].notna().all()
+    assert panel["close"]["AAAUSDT"].iloc[63:].isna().all()
+    assert panel["close"]["DDDUSDT"].notna().all()
+
+
+def test_load_base_panel_zombie_policy_still_quarantines_genuine_missing_tail(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    def _write_symbol(path, flat_flags, start="2024-01-01", truncate=0):
+        n = len(flat_flags)
+        ts = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+        flat = np.asarray(flat_flags, dtype=bool)
+        close = 100.0 + np.arange(n, dtype="float64")
+        frame = pd.DataFrame({
+            "timestamp": (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+            "open": close,
+            "high": np.where(flat, close, close + 1.0),
+            "low": np.where(flat, close, close - 1.0),
+            "close": close,
+            "volume": np.where(flat, 0.0, 5.0),
+            "quote_vol": np.where(flat, 0.0, 500.0),
+        })
+        frame.iloc[: n - truncate].to_parquet(path, index=False)
+        return ts
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1, PanelQuarantine, load_base_panel
+
+    # Given: flat 이 아닌 정상 봉이 결정 시점 전에 끊긴 심볼(수집 누락)
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = _write_symbol(directory / "DDDUSDT.parquet", [False] * 200)
+    _write_symbol(directory / "AAAUSDT.parquet", [False] * 200, truncate=3)
+
+    def _load(quarantine):
+        return load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close",), start=ts[0], end=ts[-1],
+            partition="all", min_bars=1, data_policy=DATA_POLICY_ZOMBIE_MASK_V1, quarantine=quarantine,
+        )
+
+    # When / Then: 비보호면 decision_bar_missing 격리, 보호면 fail-closed
+    quarantine = PanelQuarantine(protected=frozenset())
+    panel = _load(quarantine)
+    assert [(r.symbol, r.reason) for r in quarantine.records] == [("AAAUSDT", "decision_bar_missing")]
+    assert list(panel["close"].columns) == ["DDDUSDT"]
+    with pytest.raises(DataIntegrityError, match="protected symbol AAAUSDT"):
+        _load(PanelQuarantine(protected=frozenset({"AAAUSDT"})))
 
