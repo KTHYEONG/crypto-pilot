@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -80,7 +81,7 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
 
 def _run_daemon(args: argparse.Namespace) -> None:
     from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
-    from src.live.scheduler import run_daemon
+    from src.live.scheduler import _default_signal_step, run_daemon
     from src.live.settings import LiveSettings
 
     _attach_process_log("daemon.log")
@@ -88,7 +89,7 @@ def _run_daemon(args: argparse.Namespace) -> None:
     artifact = Path(args.artifact) if getattr(args, "artifact", None) else default_weights_path()
     shutdown = ShutdownFlag()
     install_shutdown_handlers(shutdown)
-    run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown)
+    run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown, signal_step_fn=functools.partial(_default_signal_step, shutdown=shutdown))
 
 
 def _run_signal_step(args: argparse.Namespace) -> None:
@@ -106,6 +107,7 @@ def _run_signal_step(args: argparse.Namespace) -> None:
     strat_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json")
     try:
         params = _live_strategy.load_strategy_params(strat_path, artifact_key=settings.artifact_key)
+        _live_strategy.assert_runtime_data_policy(params)
     except Exception as exc2:
         logger.error("[EVAL] signal_step status=FAILED reason=%s", exc2)
         raise SystemExit(1) from exc2

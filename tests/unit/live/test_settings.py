@@ -151,3 +151,17 @@ def test_live_settings_backtest_parity_defaults() -> None:
         LiveSettings(max_symbol_notional_fraction=0.05)
     with pytest.raises(ValidationError):
         LiveSettings(equity_drawdown_halt=-0.45)
+
+
+def test_live_settings_leverage_buffer_fraction_default_and_bounds(monkeypatch) -> None:
+    import pytest
+    from pydantic import ValidationError
+    from src.live.settings import LiveSettings
+
+    monkeypatch.delenv("LIVE_LEVERAGE_BUFFER_FRACTION", raising=False)
+    assert LiveSettings().leverage_buffer_fraction == 0.25
+    assert LiveSettings(leverage_buffer_fraction=0.0).leverage_buffer_fraction == 0.0
+    for bad in (-0.01, 1.0):
+        with pytest.raises(ValidationError, match="leverage_buffer_fraction"):
+            LiveSettings(leverage_buffer_fraction=bad)
+

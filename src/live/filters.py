@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any, cast
 
+import pandas as pd
+
 from src.common.errors import DataIntegrityError
 
 _ZERO = Decimal(0)
@@ -89,6 +91,39 @@ def parse_exchange_filters(exchange_info: Mapping[str, Any]) -> dict[str, Symbol
             price_precision=int(_required(entry, "pricePrecision", symbol)),
         )
     return parsed
+
+
+DELISTED_STATUSES: frozenset[str] = frozenset({"SETTLING", "CLOSE"})
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryInfo:
+    status: str
+    delivery_time: pd.Timestamp | None
+
+
+def parse_delivery_schedule(exchange_info: Mapping[str, Any]) -> dict[str, DeliveryInfo]:
+    schedule: dict[str, DeliveryInfo] = {}
+    for entry in _required(exchange_info, "symbols", "exchangeInfo"):
+        symbol = entry.get("symbol")
+        if symbol is None:
+            continue
+        raw = entry.get("deliveryDate")
+        delivery_time = (
+            pd.Timestamp(int(raw), unit="ms", tz="UTC") if raw is not None else None
+        )
+        schedule[str(symbol)] = DeliveryInfo(
+            status=str(entry.get("status", "")), delivery_time=delivery_time
+        )
+    return schedule
+
+
+def is_delisted(info: DeliveryInfo, now: pd.Timestamp) -> bool:
+    return (
+        info.status in DELISTED_STATUSES
+        and info.delivery_time is not None
+        and now >= info.delivery_time
+    )
 
 
 def quantize_to_multiple(value: Decimal, multiple: Decimal, rounding: str) -> Decimal:

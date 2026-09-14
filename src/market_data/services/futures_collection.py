@@ -1,6 +1,9 @@
 import concurrent.futures
+import itertools
 import json
 import logging
+import statistics
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +27,33 @@ from src.market_data.storage.schemas import METRICS_CANONICAL_COLUMNS as _METRIC
 _logger = logging.getLogger("DataCollector")
 
 _TIMEFRAME_MS: dict[str, int] = {"1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000, "3d": 259_200_000, "1w": 604_800_000}
+
+FUNDING_DEFAULT_INTERVAL_MS: int = 8 * 3_600_000  # 8시간 기본 간격
+FUNDING_SETTLEMENT_GRACE_MS: int = 5 * 60_000  # 정산 직후 게시 지연 유예
+FUNDING_TIME_TOLERANCE_MS: int = 60_000  # fundingTime의 ms 단위 지터 허용
+_FUNDING_INTERVAL_SAMPLE: int = 6
+
+
+def infer_funding_interval_ms(timestamps_ms: Iterable[int]) -> int:
+    ts = sorted({int(t) for t in timestamps_ms})
+    if len(ts) < 2:
+        return FUNDING_DEFAULT_INTERVAL_MS
+    tail = ts[-(_FUNDING_INTERVAL_SAMPLE + 1):]
+    diffs = [b - a for a, b in itertools.pairwise(tail)]
+    median = statistics.median_low(diffs)
+    return max(1, round(median / 3_600_000)) * 3_600_000
+
+
+def last_settled_funding_epoch_ms(now: pd.Timestamp, interval_ms: int) -> int:
+    as_of_ms = int(now.value // 1_000_000) - FUNDING_SETTLEMENT_GRACE_MS
+    return (as_of_ms // interval_ms) * interval_ms
+
+
+def funding_tail_is_fresh(timestamps_ms: Iterable[int], now: pd.Timestamp) -> bool:
+    ts = [int(t) for t in timestamps_ms]
+    if not ts:
+        return False
+    return max(ts) >= last_settled_funding_epoch_ms(now, infer_funding_interval_ms(ts)) - FUNDING_TIME_TOLERANCE_MS
 
 
 def _utc_now() -> pd.Timestamp:
@@ -1128,6 +1158,8 @@ class DataCollector:
         path = funding_path(symbol)
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
+        now = _utc_now()
+        as_of = min(req_end, now)
         cache_df = pd.DataFrame()
         if path.exists():
             try:
@@ -1141,10 +1173,10 @@ class DataCollector:
         if (
             not cache_df.empty
             and cache_df["datetime"].min() <= req_start + pd.Timedelta(days=1)
-            and cache_df["datetime"].max() >= req_end - pd.Timedelta(hours=12)
+            and funding_tail_is_fresh(cache_df["timestamp"], as_of)
         ):
             return
-        api_cutoff = pd.Timestamp.now(tz="UTC").replace(
+        api_cutoff = now.replace(
             day=1, hour=0, minute=0, second=0, microsecond=0
         ) - pd.Timedelta(days=32)
         new_parts: list[pd.DataFrame] = []

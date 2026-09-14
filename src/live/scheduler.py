@@ -83,6 +83,14 @@ DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
 SIGNAL_REFRESH_OFFSET_MINUTES: float = 0.0
 DAEMON_COLD_UNIVERSE_EXIT_CODE: int = 3
 
+SIGNAL_STEP_TIMEOUT_S: float = 1200.0
+SIGNAL_STEP_POLL_SECONDS: float = 1.0
+SIGNAL_STEP_TERMINATE_GRACE_SECONDS: float = 20.0
+
+
+class SignalStepInterrupted(RuntimeError):
+    """Raised when the signal-step subprocess is terminated on shutdown."""
+
 _STATE_KEY = "last_processed_decision_time"
 
 
@@ -266,9 +274,51 @@ def _daemon_alert(
         logger.exception("[SYS] alert dispatch failed event=%s", event)
 
 
-def _default_signal_step(target: pd.Timestamp) -> None:
+def _terminate_child(proc: subprocess.Popen[bytes], grace_s: float) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def _run_signal_step_subprocess(
+    cmd: list[str],
+    *,
+    timeout_s: float,
+    shutdown: ShutdownFlag | None,
+    poll_s: float = SIGNAL_STEP_POLL_SECONDS,
+    terminate_grace_s: float = SIGNAL_STEP_TERMINATE_GRACE_SECONDS,
+    popen: Callable[[list[str]], subprocess.Popen[bytes]] = subprocess.Popen,
+) -> None:
+    proc = popen(cmd)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            returncode = proc.wait(timeout=poll_s)
+        except subprocess.TimeoutExpired:
+            if shutdown is not None and shutdown.requested:
+                _terminate_child(proc, terminate_grace_s)
+                raise SignalStepInterrupted("signal-step terminated on shutdown")
+            elif time.monotonic() >= deadline:
+                _terminate_child(proc, terminate_grace_s)
+                raise subprocess.TimeoutExpired(cmd, timeout_s)
+            else:
+                continue
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, cmd)
+        return None
+
+
+def _log_stage_elapsed(stage: str, target: pd.Timestamp, started: float) -> None:
+    elapsed_s = time.monotonic() - started
+    logger.info("[SYS] stage=%s decision_time=%s elapsed_s=%.1f", stage, _as_utc(target).isoformat(), elapsed_s)
+
+
+def _default_signal_step(target: pd.Timestamp, *, shutdown: ShutdownFlag | None = None) -> None:
     """Production signal step: heavy compute isolated in a short-lived subprocess."""
-    subprocess.run([sys.executable, "-m", "src.cli.main", "live", "signal-step", "--date", pd.Timestamp(target).isoformat()], check=True, timeout=1200)
+    _run_signal_step_subprocess([sys.executable, "-m", "src.cli.main", "live", "signal-step", "--date", pd.Timestamp(target).isoformat()], timeout_s=SIGNAL_STEP_TIMEOUT_S, shutdown=shutdown)
 
 
 def run_daemon(
@@ -361,6 +411,7 @@ def run_daemon(
         if shutdown is not None and shutdown.requested:
             break
         _beat("RUNNING", "refresh")
+        stage_started = time.monotonic()
 
         report = None
         err = None
@@ -369,6 +420,8 @@ def run_daemon(
         except Exception as exc:  # noqa: BLE001
             logger.exception("[SYS] data refresh failed")
             err = exc
+        finally:
+            _log_stage_elapsed("refresh", target, stage_started)
         refresh_ok = err is None and (report is None or bool(getattr(report, "ok", True)))
         if not refresh_ok:
             try:
@@ -403,8 +456,12 @@ def run_daemon(
         signal_status = "COMPLETE"
         failure_cause = ""
         _beat("RUNNING", "signal")
+        stage_started = time.monotonic()
         try:
             signal_step_fn(target)
+        except SignalStepInterrupted:
+            logger.warning("[SYS] signal-step interrupted by shutdown decision_time=%s", target)
+            break
         except subprocess.CalledProcessError as exc:
             logger.exception("[SYS] signal-step failed decision_time=%s", target)
             signal_status = "HALT"
@@ -413,6 +470,8 @@ def run_daemon(
             logger.exception("[SYS] signal-step crashed decision_time=%s", target)
             signal_status = "HALT"
             failure_cause = f"signal_step {type(exc).__name__}"
+        finally:
+            _log_stage_elapsed("signal", target, stage_started)
 
         if signal_status == "HALT":
             status = "HALT"
@@ -453,6 +512,7 @@ def run_daemon(
         report = None
         status = "HALT"
         _beat("RUNNING", "execute")
+        stage_started = time.monotonic()
         try:
             report = run_shadow_cycle(settings, target, weights_path, now=now_fn()) if shutdown is None else run_shadow_cycle(settings, target, weights_path, now=now_fn(), shutdown=shutdown)
             logger.info("[EVAL] daemon cycle decision_time=%s status=%s reason=%s", target, report.status, report.reason)
@@ -462,6 +522,8 @@ def run_daemon(
             logger.exception("[SYS] daemon cycle crashed decision_time=%s", target)
             status = "HALT"
             failure_cause = f"cycle crashed {type(exc).__name__}"
+        finally:
+            _log_stage_elapsed("execute", target, stage_started)
 
         if status == "COMPLETE":
             consecutive_halts = 0

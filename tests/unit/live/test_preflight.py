@@ -17,6 +17,7 @@ _EXPECTED_CHECK_NAMES = (
     "venue_rate_limits",
     "account_configuration",
     "position_reconciliation",
+    "venue_leverage_plan",
 )
 
 
@@ -134,15 +135,87 @@ def test_SCENARIO_LIVE_39_PREFLIGHT_AGGREGATES_ALL_CHECKS_WITHOUT_RAISING(tmp_pa
     )
 
     assert report.passed is False
-    assert len(report.checks) == 6
-    assert tuple(c.name for c in report.checks) == _EXPECTED_CHECK_NAMES
+    assert len(report.checks) == 7
+    assert tuple(c.name for c in report.checks) == (
+        "artifact_readable",
+        "artifact_covers_decision_time",
+        "venue_exchange_info",
+        "venue_rate_limits",
+        "account_configuration",
+        "position_reconciliation",
+        "venue_leverage_plan",
+    )
     assert all(c.passed is False for c in report.checks)
     assert mutation_calls == []
     assert not ledger_path.exists()
 
 
-#: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
-COVERED_SCENARIOS: tuple[str, ...] = (
-    "SCENARIO_LIVE_38_PREFLIGHT_FLAGS_STALE_ARTIFACT",
-    "SCENARIO_LIVE_39_PREFLIGHT_AGGREGATES_ALL_CHECKS_WITHOUT_RAISING",
-)
+def test_preflight_venue_leverage_plan_reports_pending_changes_in_live_mode(tmp_path) -> None:
+    class LeverageAwareClient(StubOrderClient):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def request(self, method, path, params=None, *, signed=False):
+            self.calls.append((method, path))
+            if path == "/fapi/v1/leverageBracket":
+                return [{"symbol": "AAAUSDT", "brackets": [
+                    {"bracket": 1, "initialLeverage": 20, "notionalCap": 50000, "notionalFloor": 0, "maintMarginRatio": 0.01, "cum": 0},
+                ]}]
+            if path == "/fapi/v2/positionRisk":
+                return [{"symbol": "AAAUSDT", "positionAmt": "0", "marginType": "isolated", "leverage": "20"}]
+            return super().request(method, path, params, signed=signed)
+    now = pd.Timestamp("2026-08-27 00:00Z")
+    artifact = tmp_path / "weights.parquet"
+    _write_artifact(artifact, pd.DatetimeIndex([now.normalize()]))
+    settings = LiveSettings(mode="live_testnet", ledger_path=str(tmp_path / "ledger.json"))
+    client = LeverageAwareClient()
+
+    report = run_preflight(settings, artifact, now=now, market_client=StubMarketClient(), order_client=client)
+
+    by_name = {c.name: c for c in report.checks}
+    assert by_name["venue_leverage_plan"].passed is True
+    assert by_name["venue_leverage_plan"].detail == "symbols=1 margin_type_changes=1 leverage_changes=1"
+    assert {method for method, _ in client.calls} == {"GET"}
+    assert ("GET", "/fapi/v1/leverageBracket") in client.calls
+
+
+def test_preflight_venue_leverage_plan_skips_venue_in_suppressed_mode(tmp_path) -> None:
+    now = pd.Timestamp("2026-08-27 00:00Z")
+    artifact = tmp_path / "weights.parquet"
+    _write_artifact(artifact, pd.DatetimeIndex([now.normalize()]))
+    settings = LiveSettings(mode="shadow", ledger_path=str(tmp_path / "ledger.json"))
+
+    report = run_preflight(settings, artifact, now=now, market_client=StubMarketClient(), order_client=StubOrderClient())
+
+    by_name = {c.name: c for c in report.checks}
+    assert by_name["venue_leverage_plan"].passed is True
+    assert by_name["venue_leverage_plan"].detail == "suppressed mode: venue leverage untouched"
+
+
+def test_preflight_venue_leverage_plan_fails_without_artifact_in_live_mode(tmp_path) -> None:
+    class LeverageAwareClient(StubOrderClient):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def request(self, method, path, params=None, *, signed=False):
+            self.calls.append((method, path))
+            if path == "/fapi/v1/leverageBracket":
+                return [{"symbol": "AAAUSDT", "brackets": [
+                    {"bracket": 1, "initialLeverage": 20, "notionalCap": 50000, "notionalFloor": 0, "maintMarginRatio": 0.01, "cum": 0},
+                ]}]
+            if path == "/fapi/v2/positionRisk":
+                return [{"symbol": "AAAUSDT", "positionAmt": "0", "marginType": "isolated", "leverage": "20"}]
+            return super().request(method, path, params, signed=signed)
+    now = pd.Timestamp("2026-08-27 00:00Z")
+    settings = LiveSettings(mode="live_testnet", ledger_path=str(tmp_path / "ledger.json"))
+
+    report = run_preflight(
+        settings, tmp_path / "missing.parquet", now=now,
+        market_client=StubMarketClient(), order_client=LeverageAwareClient(),
+    )
+
+    by_name = {c.name: c for c in report.checks}
+    assert by_name["account_configuration"].passed is True
+    assert by_name["venue_leverage_plan"].passed is False
+    assert "missing artifact" in by_name["venue_leverage_plan"].detail
+

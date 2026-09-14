@@ -13,6 +13,7 @@ ceil(window_deadline_s / poll_interval_s) + 1 로 유도된다.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
@@ -21,8 +22,9 @@ from typing import Any
 from src.live.audit import AuditLog
 from src.live.errors import LiveTradingError, OrderObsolete, VenueError
 from src.live.filters import _ZERO, SymbolFilters, quantize_to_multiple
-from src.live.planner import OrderIntent, build_client_order_id
-from src.live.rest import PaperResponse, RateLimits, ShadowResponse
+from src.live.order_journal import OrderJournal
+from src.live.planner import CLIENT_ORDER_NAMESPACE, OrderIntent, build_client_order_id
+from src.live.rest import OrderStatusUnknown, PaperResponse, RateLimits, ShadowResponse
 from src.mhs.types import ExecutionSpec
 
 _BPS_DENOMINATOR = Decimal(10_000)
@@ -32,6 +34,22 @@ MAX_SLICE_NOTIONAL = Decimal("500")
 
 #: 백테스트 3m 리플레이 바 하나에 대응하는 패시브 집행 상한(초).
 EXECUTION_BAR_SECONDS: float = 180.0
+
+#: 미확인 제출이 실제로 미체결로 확정되기까지 필요한 연속 -2013 조회 횟수.
+UNKNOWN_SUBMISSION_MISS_LIMIT: int = 2
+
+#: 취소/조회에서 benign(사라진 주문)으로 취급하는 베뉴 코드.
+_ORDER_GONE_CODES: frozenset[int] = frozenset({-2011, -2013})
+
+#: 취소 상태 미확인 시 해소 조회에서 '아직 열림'으로 판정하는 상태 집합.
+_OPEN_ORDER_STATUSES: frozenset[str] = frozenset({"NEW", "PARTIALLY_FILLED"})
+
+#: 네임스페이스 이전('%Y%m%d-' 접두) 레거시 client order id.
+_LEGACY_CLIENT_ORDER_ID = re.compile(r"^\d{8}-")
+
+
+class ForeignOpenOrderError(LiveTradingError):  # noqa: N818 - contract pins the name
+    """변이 모드에서 외부(수동) 미체결 주문이 존재해 정리를 거부한다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,12 +309,26 @@ def _gtx_candidate(
     return price
 
 
+def _suppresses_mutations(client: Any) -> bool:
+    """클라이언트 모드가 변이를 억제(PAPER/SHADOW)하면 True."""
+    mode = getattr(client, "mode", None)
+    return bool(getattr(mode, "suppresses_mutations", False))
+
+
 def _cancel_tolerating_benign(client: Any, symbol: str, client_order_id: str) -> None:
-    """취소 거절(-2011: 이미 체결/취소)은 benign이므로 무시한다."""
+    """취소 거절(-2011/-2013: 이미 체결/취소/소멸)은 benign이므로 무시한다.
+
+    취소 상태 미확인이면 절대 재전송하지 않고 조회로 해소한다: 아직 열려
+    있으면 미확인을 재전파하고, 닫혔으면 benign(호출부가 정산으로 진행)이다.
+    """
     try:
         client.cancel_order(symbol, client_order_id)
     except VenueError as exc:
-        if exc.code != -2011:
+        if exc.code not in _ORDER_GONE_CODES:
+            raise
+    except OrderStatusUnknown:
+        payload = client.query_order(symbol, client_order_id)
+        if str(payload.get("status", "")) in _OPEN_ORDER_STATUSES:
             raise
 
 
@@ -351,6 +383,8 @@ def _record_fill(rt: _IntentRuntime, executed: Decimal, *, avg_price: Decimal | 
     fee_bps = fee_schedule.bps_for(liquidity) if fee_schedule is not None else (2.0 if liquidity == "maker" else 5.0)  # noqa: SIM108
     reason = "maker_fill" if liquidity == "maker" else "timeout_taker"
     rt.fills.append((delta_fill, price, fee_bps, reason, liquidity))
+    if rt.journal is not None and rt.active_id is not None:
+        rt.journal.record_observed(rt.active_id, executed)
 
 
 def _simulate_paper_fill(
@@ -402,6 +436,13 @@ class _IntentRuntime:
     # 패시브 단계 진입 시각(phase-level 타임아웃 기준). 첫 _poll_or_post 호출에 기록되며
     # 재게시 때마다 갱신되는 posted_at 과 달리 리포스트로 리셋되지 않는다.
     passive_started_at: float = 0.0
+    # 실행 상태 미확인 제출(lookup-before-resend): 재게시 금지, 조회로 해소한다.
+    journal: OrderJournal | None = None
+    unresolved_id: str | None = None
+    unresolved_price: Decimal = _ZERO
+    unresolved_post_qty: Decimal = _ZERO
+    unresolved_tif: str = ""
+    unknown_misses: int = 0
 
     @property
     def done(self) -> bool:
@@ -443,48 +484,80 @@ class _IntentRuntime:
         )
 
 
-def cancel_orphan_orders(client: Any, client_order_prefix: str, audit: AuditLog) -> list[OrphanSettlement]:
-    """prefix 일치 고아 주문을 재조정 이전에 전량 취소하고 정산을 반환한다(-2011 benign)."""
+def cancel_orphan_orders(
+    client: Any, client_order_prefix: str, audit: AuditLog, *, journal: OrderJournal | None = None
+) -> list[OrphanSettlement]:
+    """네임스페이스 고아 주문을 재조정 이전에 전량 취소하고 정산을 반환한다.
+
+    'mh' 네임스페이스와 레거시 '%Y%m%d-' id 는 날짜와 무관하게 정리한다.
+    변이 모드에서 외부(수동) 미체결이 하나라도 있으면 취소 전에
+    ForeignOpenOrderError 로 fail-closed 한다. 정산 수량은 거래소
+    executedQty - 저널 observed qty(델타)이며 저널에는 절대 쓰지 않는다.
+    """
     open_orders = client.open_orders()
-    settlements: list[OrphanSettlement] = []
+    ours: list[Mapping[str, Any]] = []
+    foreign = 0
     for entry in open_orders:
         order_id = str(entry.get("clientOrderId", ""))
-        if not order_id.startswith(client_order_prefix):
-            continue
+        if order_id.startswith(CLIENT_ORDER_NAMESPACE) or _LEGACY_CLIENT_ORDER_ID.match(order_id):
+            ours.append(entry)
+        else:
+            foreign += 1
+            audit.record(
+                "foreign_open_order",
+                symbol=entry.get("symbol"),
+                client_order_id=order_id,
+            )
+    if foreign and not _suppresses_mutations(client):
+        raise ForeignOpenOrderError(
+            f"{foreign} foreign open order(s) present; refusing to reconcile"
+        )
+    settlements: list[OrphanSettlement] = []
+    for entry in ours:
+        order_id = str(entry.get("clientOrderId", ""))
         symbol = str(entry["symbol"])
         _cancel_tolerating_benign(client, symbol, order_id)
-        audit.record("orphan_cancelled", symbol=entry.get("symbol"), client_order_id=order_id)
+        audit.record(
+            "orphan_cancelled",
+            symbol=entry.get("symbol"),
+            client_order_id=order_id,
+            current_run=order_id.startswith(f"{CLIENT_ORDER_NAMESPACE}{client_order_prefix}"),
+        )
         try:
             queried = client.query_order(symbol, order_id)
         except VenueError as exc:
-            if exc.code == -2011:
+            if exc.code in _ORDER_GONE_CODES:
                 continue
             raise
         try:
             executed_qty = Decimal(str(queried.get("executedQty", "0")))
         except Exception:
             executed_qty = Decimal(0)
-        if executed_qty > _ZERO:
-            side = str(queried.get("side") or entry.get("side") or "BUY")
-            avg_raw = queried.get("avgPrice") if "avgPrice" in queried else queried.get("avg_price")
-            if avg_raw is None:
-                avg_raw = entry.get("avgPrice")
-            avg_price = Decimal(str(avg_raw)) if avg_raw is not None else None
-            settlements.append(
-                OrphanSettlement(
-                    symbol=symbol,
-                    client_order_id=order_id,
-                    side=side,
-                    executed_qty=executed_qty,
-                    avg_price=avg_price,
-                )
-            )
-            audit.record(
-                "orphan_settled",
+        already = journal.observed_qty(order_id) if journal is not None else Decimal(0)
+        delta = executed_qty - already
+        if delta <= _ZERO:
+            continue
+        side = str(queried.get("side") or entry.get("side") or "BUY")
+        avg_raw = queried.get("avgPrice") if "avgPrice" in queried else queried.get("avg_price")
+        if avg_raw is None:
+            avg_raw = entry.get("avgPrice")
+        avg_price = Decimal(str(avg_raw)) if avg_raw is not None else None
+        settlements.append(
+            OrphanSettlement(
                 symbol=symbol,
                 client_order_id=order_id,
-                executed_qty=str(executed_qty),
+                side=side,
+                executed_qty=delta,
+                avg_price=avg_price,
             )
+        )
+        audit.record(
+            "orphan_settled",
+            symbol=symbol,
+            client_order_id=order_id,
+            executed_qty=str(delta),
+            previously_observed=str(already),
+        )
     return settlements
 
 
@@ -561,6 +634,7 @@ def execute_intents(
     outcome_sink: list[ExecutionOutcome] | None = None,
     shutdown: Any | None = None,
     paper_fill_model: str | None = None,
+    journal: OrderJournal | None = None,
 ) -> tuple[ExecutionOutcome, ...]:
     """단일 협조 루프(post-all/poll-all/예산 스로틀). 반환 순서는 intents 와 1:1.
 
@@ -587,7 +661,7 @@ def execute_intents(
             )
         return outcomes
     runtimes = [
-        _IntentRuntime(intent=intent, filters=filters.get(intent.symbol))
+        _IntentRuntime(intent=intent, filters=filters.get(intent.symbol), journal=journal)
         for intent in intents
     ]
     for rt in runtimes:
@@ -595,8 +669,10 @@ def execute_intents(
             rt.terminal_status = "RESIDUAL"
     try:
         _run_loop(client, runtimes, policy, audit, clock, sleep_fn, rate_limits, shutdown)
-    except LiveTradingError as exc:
-        exc.partial_outcomes = tuple(rt.snapshot() for rt in runtimes)
+    except BaseException as exc:
+        _cleanup_on_abort(client, runtimes, audit, clock)
+        if isinstance(exc, LiveTradingError):
+            exc.partial_outcomes = tuple(rt.snapshot() for rt in runtimes)
         raise
     finally:
         if outcome_sink is not None:
@@ -672,6 +748,74 @@ def _throttled_interval(
     return interval
 
 
+def _cleanup_on_abort(
+    client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog, clock: Callable[[], float]
+) -> None:
+    """어떤 예외로 중단되든 활성/미확인 주문을 취소·정산한다.
+
+    정리 실패는 감사 기록만 남기고 원본 예외를 절대 가리지 않는다.
+    """
+    for rt in runtimes:
+        if rt.done or rt.paper_active or (rt.active_id is None and rt.unresolved_id is None):
+            continue
+        try:
+            _finalize(client, [rt], audit, clock)
+        except Exception as cleanup_exc:  # noqa: BLE001 - every intent must be attempted
+            audit.record(
+                "abort_cleanup_failed",
+                symbol=rt.intent.symbol,
+                client_order_id=rt.active_id or rt.unresolved_id,
+                error=type(cleanup_exc).__name__,
+            )
+
+
+def _adopt_unresolved(rt: _IntentRuntime, now: float) -> None:
+    """조회로 확인된 미확인 제출을 활성 주문으로 입양한다."""
+    rt.active_id = rt.unresolved_id
+    rt.active_price = rt.unresolved_price
+    rt.active_post_qty = rt.unresolved_post_qty
+    rt.reported_executed = _ZERO
+    rt.posted_at = now
+    if rt.unresolved_tif == "IOC":
+        rt.ioc_attempts += 1
+    rt.unresolved_id = None
+    rt.unknown_misses = 0
+
+
+def _resolve_unknown_submission(
+    client: Any, rt: _IntentRuntime, now: float, audit: AuditLog
+) -> bool:
+    """미확인 제출을 origClientOrderId 조회로 해소한다.
+
+    찾으면 입양하고 True, 연속 UNKNOWN_SUBMISSION_MISS_LIMIT 회 -2013이면
+    미체결 확정 후 True, 아직 판단 불가면 False(이번 tick 재게시 금지).
+    """
+    assert rt.unresolved_id is not None
+    try:
+        client.query_order(rt.intent.symbol, rt.unresolved_id)
+    except VenueError as exc:
+        if exc.code != -2013:
+            raise
+        rt.unknown_misses += 1
+        if rt.unknown_misses < UNKNOWN_SUBMISSION_MISS_LIMIT:
+            return False
+        audit.record(
+            "order_unknown_not_placed",
+            symbol=rt.intent.symbol,
+            client_order_id=rt.unresolved_id,
+        )
+        rt.unresolved_id = None
+        rt.unknown_misses = 0
+        return True
+    audit.record(
+        "order_unknown_adopted",
+        symbol=rt.intent.symbol,
+        client_order_id=rt.unresolved_id,
+    )
+    _adopt_unresolved(rt, now)
+    return True
+
+
 def _poll_or_post(
     client: Any,
     rt: _IntentRuntime,
@@ -690,6 +834,10 @@ def _poll_or_post(
     opposite_touch = ask if is_buy else bid
     band_low, band_high = _band(rt.intent, policy)
     rail_low, rail_high = _risk_rail(rt.intent, policy)
+
+    # 0) 미확인 제출: 조회로 해소될 때까지 재게시 금지.
+    if rt.unresolved_id is not None and not _resolve_unknown_submission(client, rt, now, audit):
+        return
 
     # 1) 활성 주문 조회: 체결 누적 및 상태 전이(FILL/CHASE/HOLD/IOC).
     if rt.active_id is not None:
@@ -774,9 +922,13 @@ def _poll_or_post(
     post_qty = _post_quantity(
         remaining, price, filters=rt.filters, max_slices=policy.max_slices
     )
+    journaled = rt.journal is not None and not _suppresses_mutations(client)
+    submit_seq = rt.journal.next_submit_seq() if journaled and rt.journal is not None else rt.attempts
     order_id = build_client_order_id(
-        rt.intent.client_order_prefix, rt.intent.symbol, rt.intent.leg_index, 0, rt.attempts
+        rt.intent.client_order_prefix, rt.intent.symbol, rt.intent.leg_index, 0, submit_seq
     )
+    if journaled and rt.journal is not None:
+        rt.journal.record_submit(order_id, rt.intent.symbol, submit_seq)
     rt.attempts += 1
     params: dict[str, Any] = {
         "symbol": rt.intent.symbol,
@@ -791,9 +943,28 @@ def _poll_or_post(
         params["reduceOnly"] = "true"
     try:
         response = client.new_order(params)
+    except OrderStatusUnknown:
+        rt.unresolved_id = order_id
+        rt.unresolved_price = price
+        rt.unresolved_post_qty = post_qty
+        rt.unresolved_tif = time_in_force
+        rt.unknown_misses = 0
+        audit.record(
+            "order_status_unknown",
+            symbol=rt.intent.symbol,
+            client_order_id=order_id,
+        )
+        return
     except VenueError as exc:
         if exc.code in (-5022, -4131):
             rt.chases += 1
+            return
+        if exc.http_status == 429 or exc.code == -1003:
+            audit.record(
+                "order_rate_limited",
+                symbol=rt.intent.symbol,
+                client_order_id=order_id,
+            )
             return
         raise
     except OrderObsolete:
@@ -872,6 +1043,15 @@ def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog, 
         if rt.done:
             continue
         now = clock()
+        if rt.unresolved_id is not None:
+            try:
+                client.query_order(rt.intent.symbol, rt.unresolved_id)
+            except VenueError as exc:
+                if exc.code != -2013:
+                    raise
+                rt.unresolved_id = None
+            else:
+                _adopt_unresolved(rt, now)
         if rt.active_id is not None:
             if not rt.paper_active:
                 _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)

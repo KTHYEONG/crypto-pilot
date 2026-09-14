@@ -58,3 +58,40 @@ def test_slice_base_panel_validation_errors() -> None:
     with pytest.raises(ValueError, match="no symbol survived the panel filters"):
         slice_base_panel({"close": close_df}, start, end, min_bars=100)
 
+
+# --- auto appended from contract: signal_input_quarantine ---
+
+
+def test_build_fold_target_weights_threads_panel_quarantine_to_loader(monkeypatch) -> None:
+    import dataclasses
+    import pandas as pd
+    import pytest
+    import src.mhs.evaluation.fold_weights as fold_weights
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.evidence import AnchoredPurgedFold
+    from src.mhs.panel import PanelQuarantine
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    class _StopError(Exception):
+        pass
+
+    captured: dict[str, object] = {}
+
+    def _fake_loader(*args, **kwargs):
+        captured.update(kwargs)
+        raise _StopError
+
+    monkeypatch.setattr(fold_weights, "load_base_panel", _fake_loader)
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    fold = AnchoredPurgedFold(
+        train_start=dt - pd.Timedelta(days=500), train_end=dt - pd.Timedelta(days=400),
+        validation_start=dt - pd.Timedelta(days=30), validation_end=dt,
+        forward_dependency_hours=24, purge_hours=24,
+    )
+    quarantine = PanelQuarantine(protected=frozenset({"BTCUSDT"}))
+
+    with pytest.raises(_StopError):
+        fold_weights._build_fold_target_weights("root", fold, request, {}, require_minute_roster=False, panel_quarantine=quarantine)
+
+    assert captured["quarantine"] is quarantine

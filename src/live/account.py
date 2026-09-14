@@ -5,16 +5,27 @@ I-RECONCILE-FIRST: 불일치 시 자동 보정 없이 예외만 발생시킨다.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.live.errors import ReconciliationBreach, RiskGateBreach
+from src.live.errors import ReconciliationBreach, RiskGateBreach, VenueError
 from src.live.settings import ExecutionMode
+
+if TYPE_CHECKING:
+    from src.live.audit import AuditLog
+    from src.live.planner import OrderIntent
+
+VENUE_MARGIN_TYPE: str = "CROSSED"
+DELISTED_SYMBOL_STATUSES: frozenset[str] = frozenset({"SETTLING", "CLOSE"})
+_CROSS_MARGIN_ALIASES: frozenset[str] = frozenset({"cross", "crossed"})
+BLOCKED_MARGIN_TYPE_CHANGE_CODES: frozenset[int] = frozenset({-4047, -4048})
+BLOCKED_LEVERAGE_CHANGE_CODES: frozenset[int] = frozenset({-4161})
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +40,223 @@ class AccountSnapshot:
     positions: Mapping[str, Decimal]
     dual_side_position: bool
     multi_assets_margin: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LeverageBracket:
+    """레버리지 브래킷: 초기 레버리지와 노셔널 상/하한."""
+
+    bracket: int
+    initial_leverage: int
+    notional_cap: Decimal
+    notional_floor: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class VenueSymbolConfig:
+    """positionRisk 행: cross 마진 종류(소문자)와 레버리지. 없으면 None."""
+
+    symbol: str
+    margin_type: str | None
+    leverage: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class VenueLeveragePlan:
+    """심볼별 목표 레버리지와 변경 대상(심볼 정렬)."""
+
+    target_leverage: Mapping[str, int]
+    margin_type_changes: tuple[str, ...]
+    leverage_changes: tuple[str, ...]
+
+
+def parse_leverage_brackets(payload: Any) -> dict[str, tuple[LeverageBracket, ...]]:
+    """GET /fapi/v1/leverageBracket 응답을 심볼별 브래킷 튜플로 파싱한다."""
+    if not isinstance(payload, list):
+        raise DataIntegrityError("leverageBracket returned an unexpected schema")
+    parsed: dict[str, tuple[LeverageBracket, ...]] = {}
+    for row in payload:
+        if not isinstance(row, dict) or "symbol" not in row:
+            raise DataIntegrityError("leverageBracket row malformed")
+        brackets_raw = row.get("brackets")
+        if not isinstance(brackets_raw, list) or not brackets_raw:
+            raise DataIntegrityError("leverageBracket row malformed")
+        brackets: list[LeverageBracket] = []
+        for entry in brackets_raw:
+            try:
+                brackets.append(
+                    LeverageBracket(
+                        bracket=int(entry["bracket"]),
+                        initial_leverage=int(entry["initialLeverage"]),
+                        notional_cap=Decimal(str(entry["notionalCap"])),
+                        notional_floor=Decimal(str(entry["notionalFloor"])),
+                    )
+                )
+            except (KeyError, TypeError) as exc:
+                raise DataIntegrityError("leverageBracket bracket missing required keys") from exc
+        parsed[str(row["symbol"])] = tuple(sorted(brackets, key=lambda item: item.bracket))
+    return parsed
+
+
+def parse_position_config(payload: Any) -> dict[str, VenueSymbolConfig]:
+    """GET /fapi/v2/positionRisk 응답을 심볼별 마진/레버리지 설정으로 파싱한다."""
+    if not isinstance(payload, list):
+        raise DataIntegrityError("positionRisk endpoint returned an unexpected schema")
+    configs: dict[str, VenueSymbolConfig] = {}
+    for row in payload:
+        if not isinstance(row, dict) or "symbol" not in row:
+            raise DataIntegrityError("positionRisk row missing symbol")
+        margin_type = str(row["marginType"]).lower() if "marginType" in row else None
+        leverage = int(row["leverage"]) if "leverage" in row else None
+        configs[str(row["symbol"])] = VenueSymbolConfig(
+            symbol=str(row["symbol"]), margin_type=margin_type, leverage=leverage
+        )
+    return configs
+
+
+def required_leverage(max_gross_leverage: float, buffer_fraction: float, bracket_max_leverage: int) -> int:
+    """버퍼를 반영한 필요 레버리지: min(브래킷 상한, ceil(ceiling/(1-buffer))), 최소 1."""
+    needed = math.ceil(max_gross_leverage / (1.0 - buffer_fraction))
+    return max(1, min(int(bracket_max_leverage), needed))
+
+
+def max_notional_at_leverage(brackets: Sequence[LeverageBracket], leverage: int) -> Decimal:
+    """레버리지 L에서 허용되는 최대 노셔널: 초기 레버리지가 L 이상인 브래킷 중 최대 cap."""
+    eligible = [b.notional_cap for b in brackets if b.initial_leverage >= leverage]
+    return max(eligible) if eligible else Decimal(0)
+
+
+def plan_venue_leverage(
+    symbols: Collection[str],
+    brackets: Mapping[str, Sequence[LeverageBracket]],
+    configs: Mapping[str, VenueSymbolConfig],
+    *,
+    max_gross_leverage: float,
+    buffer_fraction: float,
+) -> VenueLeveragePlan:
+    """목표 레버리지와 변경 대상(CROSSED/레버리지 불일치)을 계획한다. 멱등하다."""
+    targets: dict[str, int] = {}
+    margin_type_changes: list[str] = []
+    leverage_changes: list[str] = []
+    for symbol in sorted(set(symbols)):
+        symbol_brackets = brackets.get(symbol)
+        if not symbol_brackets:
+            raise RiskGateBreach(f"no leverage bracket for {symbol}")
+        target = required_leverage(max_gross_leverage, buffer_fraction, symbol_brackets[0].initial_leverage)
+        targets[symbol] = target
+        config = configs.get(symbol)
+        if config is None or config.margin_type not in _CROSS_MARGIN_ALIASES:
+            margin_type_changes.append(symbol)
+        if config is None or config.leverage != target:
+            leverage_changes.append(symbol)
+    return VenueLeveragePlan(
+        target_leverage=targets,
+        margin_type_changes=tuple(margin_type_changes),
+        leverage_changes=tuple(leverage_changes),
+    )
+
+
+def ensure_venue_leverage(
+    client: Any,
+    symbols: Collection[str],
+    brackets: Mapping[str, Sequence[LeverageBracket]],
+    *,
+    max_gross_leverage: float,
+    buffer_fraction: float,
+    audit: AuditLog,
+) -> dict[str, int]:
+    """마진 타입(CROSSED) 변경을 먼저, 레버리지 변경을 나중에 적용한다. 차단 코드는 fail-closed."""
+    configs = parse_position_config(client.request("GET", "/fapi/v2/positionRisk", signed=True))
+    plan = plan_venue_leverage(
+        symbols, brackets, configs, max_gross_leverage=max_gross_leverage, buffer_fraction=buffer_fraction
+    )
+    for symbol in plan.margin_type_changes:
+        try:
+            client.request(
+                "POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": VENUE_MARGIN_TYPE}, signed=True
+            )
+        except VenueError as exc:
+            if exc.code in BLOCKED_MARGIN_TYPE_CHANGE_CODES:
+                raise RiskGateBreach(
+                    f"margin type change to {VENUE_MARGIN_TYPE} blocked for {symbol} (code={exc.code})"
+                ) from exc
+            raise
+        audit.record("venue_margin_type_set", symbol=symbol, margin_type=VENUE_MARGIN_TYPE)
+    for symbol in plan.leverage_changes:
+        leverage = plan.target_leverage[symbol]
+        try:
+            client.request(
+                "POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, signed=True
+            )
+        except VenueError as exc:
+            if exc.code in BLOCKED_LEVERAGE_CHANGE_CODES:
+                raise RiskGateBreach(
+                    f"leverage change to {leverage} blocked for {symbol} (code={exc.code})"
+                ) from exc
+            raise
+        audit.record("venue_leverage_set", symbol=symbol, leverage=leverage)
+    return dict(plan.target_leverage)
+
+
+def reject_intents_over_notional_cap(
+    intents: Sequence[OrderIntent],
+    brackets: Mapping[str, Sequence[LeverageBracket]],
+    leverages: Mapping[str, int],
+    audit: AuditLog,
+) -> list[OrderIntent]:
+    """설정 레버리지에서 브래킷 cap을 초과하는 노출증가 intent를 버린다. reduce-only는 항상 통과."""
+    kept: list[OrderIntent] = []
+    for intent in intents:
+        if intent.reduce_only:
+            kept.append(intent)
+            continue
+        cap = max_notional_at_leverage(brackets[intent.symbol], leverages[intent.symbol])
+        target_notional = abs(intent.target_qty) * intent.decision_price
+        if target_notional > cap:
+            audit.record(
+                "notional_cap_rejected",
+                symbol=intent.symbol,
+                target_notional=str(target_notional),
+                notional_cap=str(cap),
+                leverage=leverages[intent.symbol],
+            )
+            continue
+        kept.append(intent)
+    return kept
+
+
+def settled_delisting_symbols(
+    exchange_info: Mapping[str, Any],
+    venue_positions: Mapping[str, Decimal],
+    ledger_positions: Mapping[str, Decimal],
+    *,
+    now: pd.Timestamp,
+) -> tuple[str, ...]:
+    """원장에만 남은 상장폐지 포지션 중 정산 완료(flat + SETTLING/CLOSE + delivery 경과)를 반환한다."""
+    entries = {
+        str(entry["symbol"]): entry
+        for entry in exchange_info.get("symbols", ())
+        if isinstance(entry, Mapping) and "symbol" in entry
+    }
+    now_ms = int(pd.Timestamp(now).value // 1_000_000)
+    settled: list[str] = []
+    for symbol in sorted(ledger_positions):
+        if ledger_positions[symbol] == 0:
+            continue
+        if venue_positions.get(symbol, Decimal(0)) != 0:
+            continue
+        entry = entries.get(symbol)
+        if entry is None:
+            continue
+        if entry.get("status") not in DELISTED_SYMBOL_STATUSES:
+            continue
+        delivery = entry.get("deliveryDate")
+        if delivery is None:
+            continue
+        if now_ms < int(delivery):
+            continue
+        settled.append(symbol)
+    return tuple(settled)
 
 
 def _required_number(payload: Mapping[str, Any], key: str) -> Decimal:
@@ -138,6 +366,7 @@ def reconcile_or_halt(
     ledger_positions: Mapping[str, Decimal],
     *,
     qty_tolerance_fraction: float,
+    settled_symbols: Collection[str] = (),
 ) -> None:
     """거래소 스냅샷과 내부 원장을 대조한다. 불일치 시 절대 보정하지 않고 breach만 발생시킨다."""
     if qty_tolerance_fraction < 0:
@@ -149,6 +378,8 @@ def reconcile_or_halt(
     for symbol in sorted(symbols):
         ledger_qty = ledger_positions.get(symbol, Decimal(0))
         venue_qty = snapshot.positions.get(symbol, Decimal(0))
+        if symbol in settled_symbols and venue_qty == 0:
+            continue
         denominator = max(abs(ledger_qty), epsilon)
         deviation = abs(venue_qty - ledger_qty) / denominator
         if deviation > Decimal(str(qty_tolerance_fraction)):

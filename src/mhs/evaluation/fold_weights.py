@@ -22,7 +22,7 @@ from src.mhs.horizons import realized_vol
 from src.mhs.books import inverse_realized_vol_tilt, phase_tranche_book, portfolio_rebalance_trigger, renormalize_within_mask, scale_book_to_target_gross
 from src.mhs.funding import funding_carry_execution_book
 from src.mhs.features import build_feature_books
-from src.mhs.panel import liquid_half_eligibility, load_base_panel, slice_base_panel
+from src.mhs.panel import PanelQuarantine, liquid_half_eligibility, load_base_panel, slice_base_panel
 from src.mhs.params import (
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
@@ -51,6 +51,7 @@ def _build_fold_target_weights(
     panel_warmup_hours: int = FOLD_PANEL_WARMUP_HOURS,
     committee_oos_start: pd.Timestamp = COMMITTEE_OOS_START,
     apply_rebalance_deadband: bool = True,
+    panel_quarantine: PanelQuarantine | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Construct one fold's PIT decision targets with the quality calibration.
 
@@ -90,7 +91,7 @@ def _build_fold_target_weights(
         if base_panel is not None
         else load_base_panel(
             root, "1h", _panel_columns, panel_start, ve,
-            partition="dev", min_bars=PANEL_MIN_HISTORY_BARS,  # liquid_half_eligibility min_history_bars와 동일(720)
+            partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, quarantine=panel_quarantine,  # liquid_half_eligibility min_history_bars와 동일(720)
         )
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]

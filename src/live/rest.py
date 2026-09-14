@@ -41,9 +41,25 @@ _RETRY_BACKOFF_LONG_SECONDS = 10.0
 _MAX_ATTEMPTS = 3
 _HTTP_TIMEOUT_SECONDS = 30.0
 
+_UNKNOWN_OUTCOME_CODES: frozenset[int] = frozenset({-1000, -1001, -1007})
+
 _USED_WEIGHT_1M_HEADER = "X-MBX-USED-WEIGHT-1M"
 _ORDER_COUNT_1M_HEADER = "X-MBX-ORDER-COUNT-1M"
 _ORDER_COUNT_10S_HEADER = "X-MBX-ORDER-COUNT-10S"
+
+
+class OrderStatusUnknown(LiveTradingError):  # noqa: N818 - contract pins the name
+    """변이 요청의 실행 상태가 확인 불가하다(전송 실패/5xx/알 수 없는 결과 코드).
+
+    Binance 문서의 'execution status unknown' 의미론을 따른다: 절대 블라인드
+    재전송하지 않고 origClientOrderId 조회로 해소한다.
+    """
+
+    def __init__(self, message: str, *, path: str, http_status: int, code: int | None) -> None:
+        super().__init__(message)
+        self.path = path
+        self.http_status = http_status
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,9 +204,15 @@ class KeepAliveTransport:
         path = parts.path or "/"
         if parts.query:
             path = f"{path}?{parts.query}"
+        is_mutation = method.upper() != "GET"
         last_error: Exception | None = None
-        for attempt in range(2):
-            connection = self._connection if attempt == 0 and self._connection else self._connect()
+        for attempt in range(1 if is_mutation else 2):
+            if is_mutation:
+                # 변이는 신선한 연결에서 정확히 1회만 전송한다(블라인드 재전송 금지).
+                self._drop()
+                connection = self._connect()
+            else:
+                connection = self._connection if attempt == 0 and self._connection else self._connect()
             try:
                 connection.request(method.upper(), path, body=None, headers=dict(headers))
                 response = connection.getresponse()
@@ -266,6 +288,10 @@ class BinanceFuturesRestClient:
         self.rate_state = RateLimitState()
         self._time_offset_ms = 0
 
+    @property
+    def mode(self) -> ExecutionMode:
+        return self._mode
+
     # ------------------------------------------------------------------ helpers
 
     def sync_server_time(self) -> None:
@@ -331,6 +357,7 @@ class BinanceFuturesRestClient:
 
         resynced_clock = False
         last_error: VenueError | None = None
+        is_mutation = method != "GET"
         for _attempt in range(1, _MAX_ATTEMPTS + 1):
             query = self._signed_query(base_params) if signed else (
                 urllib.parse.urlencode(base_params) if base_params else ""
@@ -340,7 +367,17 @@ class BinanceFuturesRestClient:
             if self._api_key is not None:
                 headers["X-MBX-APIKEY"] = self._api_key.get_secret_value()
 
-            response = self._transport.call(method, url, headers)
+            try:
+                response = self._transport.call(method, url, headers)
+            except (http.client.HTTPException, OSError) as exc:
+                if is_mutation:
+                    raise OrderStatusUnknown(
+                        f"transport failure at {path}; execution status unknown",
+                        path=path,
+                        http_status=0,
+                        code=None,
+                    ) from exc
+                raise
             self._update_rate_state(response.headers)
 
             body: Any = None
@@ -352,6 +389,14 @@ class BinanceFuturesRestClient:
 
             if response.status_code == 418:
                 raise LiveTradingError(f"IP ban received at {path}; halting")
+            if response.status_code == 429 and is_mutation:
+                raise VenueError(
+                    "rate limited; mutation not executed and not retried",
+                    code=None,
+                    http_status=429,
+                    path=path,
+                    payload_digest=payload_digest(response.body.decode("utf-8", errors="replace")),
+                )
             if response.status_code == 429:
                 retry_after = _header_value(response.headers, "Retry-After")
                 time.sleep(float(retry_after) if retry_after else _RETRY_BACKOFF_SECONDS)
@@ -364,6 +409,16 @@ class BinanceFuturesRestClient:
             error_code = self._error_code(body)
             if response.status_code < 400 and error_code is None:
                 return body
+
+            if is_mutation and (
+                response.status_code >= 500 or error_code in _UNKNOWN_OUTCOME_CODES
+            ):
+                raise OrderStatusUnknown(
+                    f"venue could not confirm {method} {path}; execution status unknown",
+                    path=path,
+                    http_status=response.status_code,
+                    code=error_code,
+                )
 
             action = resolve_error_action(error_code)
             if action is ErrorAction.FAIL_CLOSED or action is ErrorAction.RESYNC_THEN_DECIDE:
@@ -385,6 +440,16 @@ class BinanceFuturesRestClient:
             if action is ErrorAction.BENIGN_REPRICE:
                 raise VenueError(
                     "post-only rejection (reprice signal)",
+                    code=error_code,
+                    http_status=response.status_code,
+                    path=path,
+                    payload_digest=payload_digest(
+                        response.body.decode("utf-8", errors="replace") if response.body else ""
+                    ),
+                )
+            if is_mutation and action in (ErrorAction.RETRY_BACKOFF, ErrorAction.RETRY_BACKOFF_LONG):
+                raise VenueError(
+                    f"venue rejected {method} {path}; mutation not retried",
                     code=error_code,
                     http_status=response.status_code,
                     path=path,
