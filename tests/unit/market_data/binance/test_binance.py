@@ -728,3 +728,120 @@ def test_binance_error_types_survive_contextmanager_passthrough() -> None:
         error.add_note("context")
         assert error.__notes__ == ["context"]
 
+
+
+def test_token_bucket_allows_burst_then_paces_at_rate() -> None:
+    import pytest
+    from src.market_data.binance.futures import TokenBucket
+
+    clock = [100.0]
+    sleeps: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    bucket = TokenBucket(2.0, 3, clock=lambda: clock[0], sleep=_sleep)
+
+    waits = [bucket.acquire() for _ in range(5)]
+
+    assert waits[:3] == [0.0, 0.0, 0.0]
+    assert waits[3] == pytest.approx(0.5)
+    assert waits[4] == pytest.approx(0.5)
+    assert sleeps == [pytest.approx(0.5), pytest.approx(0.5)]
+    clock[0] += 10.0
+    assert [bucket.acquire() for _ in range(3)] == [0.0, 0.0, 0.0]
+
+
+def test_token_bucket_rejects_invalid_parameters() -> None:
+    import pytest
+    from src.market_data.binance.futures import TokenBucket
+
+    with pytest.raises(ValueError, match="rate_per_s"):
+        TokenBucket(0.0, 1)
+    with pytest.raises(ValueError, match="burst"):
+        TokenBucket(1.0, 0)
+
+
+def test_token_bucket_serializes_concurrent_acquires() -> None:
+    import threading
+    import time
+    from src.market_data.binance.futures import TokenBucket
+
+    bucket = TokenBucket(50.0, 1)
+    start = time.monotonic()
+
+    def _worker() -> None:
+        for _ in range(5):
+            bucket.acquire()
+
+    threads = [threading.Thread(target=_worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= (20 - 1) / 50.0 * 0.95
+
+
+def test_funding_rate_limiter_stays_within_binance_budget() -> None:
+    import pytest
+    from src.market_data.binance import futures
+
+    budget = (futures.FUNDING_RATE_LIMIT_PER_WINDOW, futures.FUNDING_RATE_WINDOW_S, futures.FUNDING_BURST)
+    assert budget == (500, 300.0, 5)
+    assert pytest.approx(500 / 300 * 0.8) == futures.FUNDING_REQUESTS_PER_SECOND
+    assert isinstance(futures.FUNDING_RATE_LIMITER, futures.TokenBucket)
+    assert futures.FUNDING_RATE_LIMITER.rate_per_s == pytest.approx(futures.FUNDING_REQUESTS_PER_SECOND)
+
+
+def test_fetch_funding_rate_history_acquires_limiter_per_page_without_fixed_sleep(monkeypatch) -> None:
+    import src.market_data.binance.futures as futures_module
+    from src.market_data.binance.futures import BinanceClient
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 3_600_000)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.market_data.binance.futures.time.sleep", sleeps.append)
+
+    events: list[str] = []
+
+    class _Spy:
+        def acquire(self) -> float:
+            events.append("acquire")
+            return 0.0
+
+    monkeypatch.setattr(futures_module, "FUNDING_RATE_LIMITER", _Spy())
+
+    class Response:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return self.payload
+
+    pages = iter([
+        Response(b'[{"fundingTime":1000,"fundingRate":"0.0001"}]'),
+        Response(b"[]"),
+    ])
+
+    def _urlopen(*args, **kwargs):
+        events.append("request")
+        return next(pages)
+
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+
+    rates = client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+
+    assert rates.to_dict("records") == [{"timestamp": 1000, "funding_rate": 0.0001}]
+    assert events == ["acquire", "request", "acquire", "request"]
+    assert sleeps == []

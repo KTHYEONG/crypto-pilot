@@ -174,3 +174,36 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_32_EXIT_ALWAYS_LIQUIDATES_ZERO_TARGET",
     "SCENARIO_LIVE_33_EXIT_ALWAYS_COVERS_DUST_AND_ROSTER_DROPOUT",
 )
+
+
+def test_build_client_order_id_encodes_non_ascii_symbols_within_binance_charset() -> None:
+    import re
+    from src.live.planner import CLIENT_ORDER_NAMESPACE, build_client_order_id, symbol_tag
+
+    pattern = re.compile(r"^[.A-Za-z0-9_-]{1,36}$")
+    symbols = ["龙虾USDT", "币安人生USDT", "我踏马来了USDT", "牛来USDT", "哈基米USDT", "1000000BABYDOGEUSDT", "BTCUSDT"]
+
+    ids = [build_client_order_id("20260914", symbol, 1, 999, 99999) for symbol in symbols]
+
+    assert CLIENT_ORDER_NAMESPACE == "mh"
+    assert all(pattern.fullmatch(coid) for coid in ids)
+    assert all(coid.startswith("mh20260914-") for coid in ids)
+    assert max(len(coid) for coid in ids) <= 36
+    assert len(set(ids)) == len(symbols)
+    assert ids[0] == build_client_order_id("20260914", "龙虾USDT", 1, 999, 99999)
+    tags = [symbol_tag(symbol) for symbol in symbols]
+    assert all(re.fullmatch(r"[A-Z2-7]{10}", tag) for tag in tags)
+
+def test_build_client_order_id_submit_seq_makes_ids_distinct() -> None:
+    import pytest
+    from src.live.planner import build_client_order_id
+
+    first = build_client_order_id("20260914", "AAAUSDT", 0, 0, 0)
+    second = build_client_order_id("20260914", "AAAUSDT", 0, 0, 1)
+
+    assert first != second
+    assert first.endswith("-0-0")
+    assert second.endswith("-0-1")
+    with pytest.raises(ValueError, match="client order id"):
+        build_client_order_id("20260914", "AAAUSDT", 0, 0, 10 ** 12)
+

@@ -115,6 +115,24 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "전략 파라미터 파일이 없어 주문을 생성하지 않고 대기(AWAITING) 중입니다.",
         "action": "ls -la models/params/ 또는 data/state/ 에서 파일 존재 여부 확인",
     },
+    "paper_funding_lag": {
+        "title": "페이퍼 펀딩비 정산 지연",
+        "severity_badge": "⚠️ 주의",
+        "severity_label": "WARNING",
+        "header_color": "#d97706",
+        "bg_color": "#fffbeb",
+        "impact": "보유 심볼의 펀딩비 데이터가 2회 정산 주기 이상 도착하지 않아 페이퍼 원장 펀딩 정산이 밀려 있습니다. 24시간을 넘기면 사이클이 HALT 됩니다.",
+        "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon ls -la /app/data/futures/funding",
+    },
+    "paper_delisted_close": {
+        "title": "상장폐지 보유 심볼 페이퍼 정산",
+        "severity_badge": "🔔 알림",
+        "severity_label": "NOTICE",
+        "header_color": "#2563eb",
+        "bg_color": "#eff6ff",
+        "impact": "보유 중이던 심볼이 상장폐지(정산)되어 deliveryDate 시점 mark 가격으로 페이퍼 포지션을 종료했습니다.",
+        "action": "docker exec mhs-live-daemon cat /app/data/state/live_position_ledger.json",
+    },
     "orderbook_backup_impending": {
         "title": "오더북 데이터 백업 권장 안내",
         "severity_badge": "🔔 백업 권장",
@@ -123,6 +141,15 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "bg_color": "#eff6ff",
         "impact": "1년(365일) 보존 기한이 도래하여 약 7일 후부터 가장 오래된 실시간 오더북 스냅샷이 순차적으로 자동 삭제됩니다.",
         "action": '# 로컬 PC 터미널에서 실행하여 오더북 데이터 다운로드\nrsync -avz -e "ssh -i <SSH_KEY_PATH>" <USER>@<SERVER_IP>:~/crypto-pilot/data/state/live_orderbook/ ./data/state/live_orderbook/',
+    },
+    "data_quarantine": {
+        "title": "신호 입력 심볼 격리",
+        "severity_badge": "⚠️ 주의",
+        "severity_label": "WARNING",
+        "header_color": "#d97706",
+        "bg_color": "#fffbeb",
+        "impact": "일부 심볼의 시세 파일이 손상되었거나 결정 봉이 없어 한도 내에서 이번 신호 계산에서 제외했습니다. 보유 심볼과 기준 심볼은 제외하지 않고 중단합니다.",
+        "action": "docker exec mhs-live-daemon cat /app/data/state/signal_quarantine.json\ndocker exec mhs-live-daemon uv run python -m src.cli.main data repair-ohlcv --symbol <SYMBOL>",
     },
 }
 

@@ -21,6 +21,13 @@ from pydantic import SecretStr
 from src.common.errors import DataIntegrityError
 from src.live.errors import ArtifactSealError
 from src.mhs.deployment_policy import MhsDeploymentPolicy, SignalWindowPolicy, SizingPolicy, TargetWeightPolicy
+from src.mhs.panel import DATA_POLICIES
+from src.mhs.panel import DATA_POLICY_LEGACY as _PANEL_DATA_POLICY_LEGACY
+
+#: Canonical policy set re-exported so params consumers share one definition.
+DATA_POLICY_LEGACY: str = _PANEL_DATA_POLICY_LEGACY
+
+LIVE_RUNTIME_DATA_POLICY: str = DATA_POLICY_LEGACY
 
 PARAMS_SNAPSHOT_KEYS: tuple[str, ...] = (
     "SIGNAL_PANEL_WINDOW_DAYS",
@@ -79,6 +86,8 @@ _ALLOWED_PARAMS_KEYS: frozenset[str] = frozenset(
     }
 )
 
+_OPTIONAL_PARAMS_KEYS: frozenset[str] = frozenset({"data_policy"})
+
 _ALLOWED_POLICY_KEYS: frozenset[str] = frozenset(
     {
         "target_weights",
@@ -115,6 +124,7 @@ class LiveStrategyParams:
     policy: MhsDeploymentPolicy
     bootstrap_sha256: str
     bootstrap_held_row: dict[str, float]
+    data_policy: str = DATA_POLICY_LEGACY
 
 
 def _canonical_policy(policy: MhsDeploymentPolicy) -> dict[str, Any]:
@@ -183,6 +193,9 @@ def _canonical_for_digest(params: LiveStrategyParams | dict[str, Any]) -> dict[s
             "bootstrap_sha256": str(params.bootstrap_sha256).lower(),
             "bootstrap_held_row": {str(k): float(v) for k, v in sorted(params.bootstrap_held_row.items())},
         }
+        policy_value = params.data_policy
+        if policy_value != DATA_POLICY_LEGACY:
+            data["data_policy"] = str(policy_value)
     else:
         bw = params.get("backtest_window")
         if isinstance(bw, (list, tuple)) and len(bw) == 2:
@@ -215,6 +228,9 @@ def _canonical_for_digest(params: LiveStrategyParams | dict[str, Any]) -> dict[s
             "bootstrap_sha256": str(params.get("bootstrap_sha256", "")).lower(),
             "bootstrap_held_row": {str(k): float(v) for k, v in sorted((params.get("bootstrap_held_row") or {}).items())},
         }
+        policy_value = params.get("data_policy", DATA_POLICY_LEGACY)
+        if policy_value != DATA_POLICY_LEGACY:
+            data["data_policy"] = str(policy_value)
     return data
 
 
@@ -303,7 +319,7 @@ def _deserialize_policy(raw: Any) -> MhsDeploymentPolicy:
 
 
 def _serialize_params(params: LiveStrategyParams) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "schema_version": int(params.schema_version),
         "strategy_digest": str(params.strategy_digest),
         "backtest_window": [
@@ -315,6 +331,9 @@ def _serialize_params(params: LiveStrategyParams) -> dict[str, Any]:
         "bootstrap_sha256": str(params.bootstrap_sha256).lower(),
         "bootstrap_held_row": {str(k): float(v) for k, v in params.bootstrap_held_row.items()},
     }
+    if params.data_policy != DATA_POLICY_LEGACY:
+        payload["data_policy"] = params.data_policy
+    return payload
 
 
 def _validate_bootstrap_sha256(value: Any) -> str:
@@ -326,7 +345,7 @@ def _validate_bootstrap_sha256(value: Any) -> str:
 def _deserialize_params(raw: dict[str, Any]) -> LiveStrategyParams:
     if not isinstance(raw, dict):
         raise DataIntegrityError("strategy params must be a JSON object")
-    unknown = set(raw) - set(_ALLOWED_PARAMS_KEYS)
+    unknown = set(raw) - set(_ALLOWED_PARAMS_KEYS) - set(_OPTIONAL_PARAMS_KEYS)
     if unknown:
         raise DataIntegrityError(f"unknown strategy params key {sorted(unknown)!r}")
     missing = set(_ALLOWED_PARAMS_KEYS) - set(raw)
@@ -335,6 +354,9 @@ def _deserialize_params(raw: dict[str, Any]) -> LiveStrategyParams:
     schema = raw.get("schema_version")
     if schema != 2:
         raise DataIntegrityError(f"unsupported schema_version {schema!r}; schema_version must be 2")
+    data_policy = raw.get("data_policy", DATA_POLICY_LEGACY)
+    if data_policy not in DATA_POLICIES:
+        raise DataIntegrityError(f"unknown data_policy {data_policy!r}")
     digest = raw.get("strategy_digest")
     if not isinstance(digest, str) or not digest:
         raise DataIntegrityError("strategy params missing strategy_digest")
@@ -378,6 +400,7 @@ def _deserialize_params(raw: dict[str, Any]) -> LiveStrategyParams:
         policy=policy,
         bootstrap_sha256=bootstrap_sha256,
         bootstrap_held_row=held,
+        data_policy=str(data_policy),
     )
 
 
@@ -395,6 +418,7 @@ def save_strategy_params(path: Path, params: LiveStrategyParams, *, artifact_key
         policy=params.policy,
         bootstrap_sha256=str(params.bootstrap_sha256).lower(),
         bootstrap_held_row=dict(params.bootstrap_held_row),
+        data_policy=params.data_policy,
     )
     payload = _serialize_params(params_with_digest)
     data = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -450,6 +474,16 @@ def load_strategy_params(path: Path, *, artifact_key: SecretStr | None = None) -
     if isinstance(raw, bytes):
         raise DataIntegrityError(f"strategy params file corrupt: {path}")
     return _deserialize_params(raw)
+
+
+def assert_runtime_data_policy(
+    params: LiveStrategyParams, runtime_policy: str = LIVE_RUNTIME_DATA_POLICY
+) -> None:
+    """INV-PARITY-GATE: params와 라이브 런타임의 data_policy 일치를 강제한다."""
+    if params.data_policy != runtime_policy:
+        raise DataIntegrityError(
+            f"data_policy mismatch: params={params.data_policy!r} runtime={runtime_policy!r}"
+        )
 
 
 def _validate_bootstrap_series(reference_daily_returns: pd.Series) -> pd.Series:

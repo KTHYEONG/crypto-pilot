@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -28,6 +30,12 @@ class BinanceKlinePermanentError(RuntimeError):
 
 IP_BLOCK_HTTP_CODES: frozenset[int] = frozenset({403, 418, 429})
 
+FUNDING_RATE_LIMIT_PER_WINDOW: int = 500
+FUNDING_RATE_WINDOW_S: float = 300.0
+FUNDING_RATE_UTILIZATION: float = 0.8
+FUNDING_REQUESTS_PER_SECOND: float = FUNDING_RATE_LIMIT_PER_WINDOW / FUNDING_RATE_WINDOW_S * FUNDING_RATE_UTILIZATION
+FUNDING_BURST: int = 5  # Binance 문서상 fundingRate는 fundingInfo와 IP당 5분 500회 한도를 공유하므로 80%로 운용.
+
 
 @dataclass(eq=False)
 class BinanceIpBlockedError(RuntimeError):
@@ -48,6 +56,43 @@ class BinanceFundingFetchError(RuntimeError):
     symbol: str
     http_code: int | None
     url: str
+
+
+class TokenBucket:
+    def __init__(self, rate_per_s: float, burst: int, *, clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> None:
+        if rate_per_s <= 0:
+            raise ValueError("rate_per_s must be > 0")
+        if burst < 1:
+            raise ValueError("burst must be >= 1")
+        self._rate = rate_per_s
+        self._capacity = float(burst)
+        self._tokens = float(burst)
+        self._clock = clock
+        self._sleep = sleep
+        self._last = clock()
+        self._lock = threading.Lock()
+
+    @property
+    def rate_per_s(self) -> float:
+        return self._rate
+
+    def acquire(self) -> float:
+        with self._lock:
+            now = self._clock()
+            self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            waited = 0.0
+            if self._tokens < 1.0:
+                waited = (1.0 - self._tokens) / self._rate
+                self._sleep(waited)
+                now = self._clock()
+                self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+                self._last = now
+            self._tokens -= 1.0
+            return waited
+
+
+FUNDING_RATE_LIMITER: TokenBucket = TokenBucket(FUNDING_REQUESTS_PER_SECOND, FUNDING_BURST)
 
 
 class BinanceClient:
@@ -414,6 +459,7 @@ class BinanceClient:
                     "Chrome/91.0.4472.124 Safari/537.36"
                 )
             }
+            FUNDING_RATE_LIMITER.acquire()
             req = urllib.request.Request(url, method="GET", headers=headers)  # noqa: S310
             try:
                 with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
@@ -447,7 +493,6 @@ class BinanceClient:
             since = last_ts + 1
             if last_ts >= end_ts:
                 break
-            time.sleep(0.1)
 
         if not all_rows:
             return pd.DataFrame(columns=["timestamp", "funding_rate"])

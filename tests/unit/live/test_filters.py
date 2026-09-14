@@ -88,3 +88,30 @@ def test_parse_exchange_filters_keeps_only_tradable_perpetuals() -> None:
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_03_FILTER_QUANTIZATION_EXACT",
 )
+
+
+def test_parse_delivery_schedule_and_is_delisted() -> None:
+    import pandas as pd
+    from src.live.filters import DELISTED_STATUSES, DeliveryInfo, is_delisted, parse_delivery_schedule
+
+    delivery_ms = int(pd.Timestamp("2026-09-10 08:00", tz="UTC").value // 1_000_000)
+    info = {
+        "symbols": [
+            {"symbol": "AUSDT", "status": "SETTLING", "deliveryDate": delivery_ms},
+            {"symbol": "BUSDT", "status": "TRADING", "deliveryDate": 4133404800000},
+            {"symbol": "CUSDT", "status": "CLOSE"},
+            {"status": "TRADING"},
+        ]
+    }
+
+    schedule = parse_delivery_schedule(info)
+
+    assert frozenset({"SETTLING", "CLOSE"}) == DELISTED_STATUSES
+    assert set(schedule) == {"AUSDT", "BUSDT", "CUSDT"}
+    assert schedule["AUSDT"] == DeliveryInfo(status="SETTLING", delivery_time=pd.Timestamp("2026-09-10 08:00", tz="UTC"))
+    assert schedule["CUSDT"].delivery_time is None
+    now = pd.Timestamp("2026-09-14 01:26", tz="UTC")
+    assert is_delisted(schedule["AUSDT"], now) is True
+    assert is_delisted(schedule["AUSDT"], pd.Timestamp("2026-09-10 07:59", tz="UTC")) is False
+    assert is_delisted(schedule["BUSDT"], now) is False
+    assert is_delisted(schedule["CUSDT"], now) is False
