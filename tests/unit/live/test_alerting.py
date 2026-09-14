@@ -333,3 +333,14 @@ def test_event_info_actions_reference_runnable_operator_commands() -> None:
     parser = build_root_parser()
     assert parser.parse_args(["live", "status"]).handler is not None
     assert parser.parse_args(["data", "refresh-live-universe"]).handler is not None
+
+
+def test_event_info_state_corrupt_is_critical_with_docker_action() -> None:
+    from src.live.alerting import EVENT_INFO
+
+    info = EVENT_INFO["state_corrupt"]
+
+    assert info["severity_label"] == "CRITICAL"
+    assert "docker logs --tail 200 mhs-live-daemon" in info["action"]
+    assert "live_daemon_last_run.json" in info["action"]
+

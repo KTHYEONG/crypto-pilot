@@ -118,19 +118,19 @@ class TestWriteOhlcvPreservesFuturesLayout:
         assert str(out["volume"].dtype) == "float64"
 
     def test_write_is_atomic_and_deterministic(self, tmp_path: Path) -> None:
-        idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
-        df = pd.DataFrame({
-            "timestamp": _ms(idx),
-            "open": [100.0] * 4, "high": [101.0] * 4, "low": [99.0] * 4,
-            "close": [100.5] * 4, "volume": [10.0] * 4,
-            "quote_vol": [1000.0] * 4,
-        })
-        path = tmp_path / "BTCUSDT.parquet"
-        write_ohlcv(path, df, timeframe="1h")
-        first = path.read_bytes()
-        write_ohlcv(path, df, timeframe="1h")
-        assert path.read_bytes() == first
-        assert not list(tmp_path.glob("*.tmp.parquet"))
+            idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+            df = pd.DataFrame({
+                "timestamp": _ms(idx),
+                "open": [100.0] * 4, "high": [101.0] * 4, "low": [99.0] * 4,
+                "close": [100.5] * 4, "volume": [10.0] * 4,
+                "quote_vol": [1000.0] * 4,
+            })
+            path = tmp_path / "BTCUSDT.parquet"
+            write_ohlcv(path, df, timeframe="1h")
+            first = path.read_bytes()
+            write_ohlcv(path, df, timeframe="1h")
+            assert path.read_bytes() == first
+            assert sorted(p.name for p in tmp_path.iterdir()) == ["BTCUSDT.parquet"]
 
     def test_empty_frame_is_noop(self, tmp_path: Path) -> None:
         path = tmp_path / "empty.parquet"
@@ -154,3 +154,40 @@ class TestMergeOhlcvFrames:
         assert len(merged) == 3
         last = merged[merged["timestamp"] == merged["timestamp"].iloc[-1]].iloc[0]
         assert last["open"] == 30.0
+
+
+def test_write_ohlcv_temp_file_is_hidden_and_process_unique(tmp_path, monkeypatch) -> None:
+    import os
+    import pathlib
+    import threading
+    import pandas as pd
+    from src.market_data.storage.ohlcv import write_ohlcv
+
+    replaced: list[str] = []
+    original_replace = pathlib.Path.replace
+
+    def _spy(self, target):
+        replaced.append(self.name)
+        return original_replace(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", _spy)
+    idx = pd.date_range("2024-01-01", periods=2, freq="1h", tz="UTC")
+    df = pd.DataFrame({
+        "timestamp": (idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    })
+
+    write_ohlcv(tmp_path / "BTCUSDT.parquet", df, timeframe="1h")
+
+    assert replaced == [f".BTCUSDT.parquet.{os.getpid()}.{threading.get_ident()}.tmp"]
+    assert not replaced[0].endswith(".parquet")
+
+
+def test_is_temp_artifact_flags_legacy_tmp_parquet_names() -> None:
+    from src.market_data.storage.ohlcv import is_temp_artifact
+
+    assert is_temp_artifact("BTCUSDT.tmp.parquet") is True
+    assert is_temp_artifact("BTCUSDT.prune.tmp.parquet") is True
+    assert is_temp_artifact("BTCUSDT.parquet") is False
+    assert is_temp_artifact("TMPUSDT.parquet") is False
+

@@ -451,3 +451,24 @@ def test_load_feature_panels_uses_pit_min_history_bars(monkeypatch) -> None:
     panels = diagnostics._load_feature_panels("/root", grid[0], grid[-1], grid, ["AAAUSDT"], columns=("close",))
     assert captured["min_bars"] == PANEL_MIN_HISTORY_BARS
     assert list(panels["close"].columns) == ["AAAUSDT"]
+
+
+def test_load_base_panel_ignores_legacy_temp_artifacts(tmp_path) -> None:
+    import pandas as pd
+    from src.mhs.panel import load_base_panel
+
+    directory = tmp_path / "1h"
+    directory.mkdir(parents=True)
+    ts = pd.date_range("2021-01-01", periods=4, freq="1h", tz="UTC")
+    epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+    frame = pd.DataFrame({"timestamp": epoch, "close": [1.0, 2.0, 3.0, 4.0], "quote_vol": [10.0] * 4})
+    frame.to_parquet(directory / "AAAUSDT.parquet")
+    frame.to_parquet(directory / "AAAUSDT.tmp.parquet")
+
+    panel = load_base_panel(
+        root=str(tmp_path), interval="1h", columns=("close", "quote_vol"),
+        start=ts[0], end=ts[-1], partition="all", min_bars=1,
+    )
+
+    assert list(panel["close"].columns) == ["AAAUSDT"]
+

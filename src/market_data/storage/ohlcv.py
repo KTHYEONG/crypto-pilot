@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -67,6 +69,10 @@ def merge_ohlcv_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     )
 
 
+def is_temp_artifact(name: str) -> bool:
+    return name.endswith(".tmp.parquet")
+
+
 def write_ohlcv(path: Path, df: pd.DataFrame, *, timeframe: str) -> None:
     """Atomically persist a canonical kline frame to ``path`` (zstd Parquet).
 
@@ -112,7 +118,7 @@ def write_ohlcv(path: Path, df: pd.DataFrame, *, timeframe: str) -> None:
     for col in _PRICE_COLUMNS:
         if col in df_to_save.columns:
             df_to_save[col] = df_to_save[col].astype("float32")
-    temp_path = path.with_suffix(".tmp.parquet")
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     df_to_save.to_parquet(temp_path, index=False, compression="zstd")
     temp_path.replace(path)
     _logger.info(

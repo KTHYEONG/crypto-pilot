@@ -183,3 +183,41 @@ def test_prune_market_data_includes_metrics_1d_directory(tmp_path) -> None:
     assert len(out) == 50
     assert result["metrics/1d"]["files_pruned"] == 1
     assert result["metrics/1d"]["rows_removed"] == 50
+
+
+def test_prune_market_data_uses_hidden_temp_and_skips_legacy_tmp_files(tmp_path, monkeypatch) -> None:
+    import os
+    import pathlib
+    import threading
+    import pandas as pd
+    from src.market_data.retention import prune_market_data
+
+    now = pd.Timestamp("2026-09-01", tz="UTC")
+    idx = pd.date_range("2025-01-01", periods=100, freq="1D", tz="UTC").append(
+        pd.date_range("2026-06-01", periods=100, freq="1D", tz="UTC")
+    )
+    df = pd.DataFrame({
+        "timestamp": ((idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")).astype("int64"),
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    })
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    df.to_parquet(d / "BTCUSDT.parquet", index=False)
+    df.to_parquet(d / "BTCUSDT.tmp.parquet", index=False)
+    leftover_before = (d / "BTCUSDT.tmp.parquet").read_bytes()
+
+    replaced: list[str] = []
+    original_replace = pathlib.Path.replace
+
+    def _spy(self, target):
+        replaced.append(self.name)
+        return original_replace(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", _spy)
+
+    result = prune_market_data(tmp_path, 450, now=now)
+
+    assert replaced == [f".BTCUSDT.parquet.{os.getpid()}.{threading.get_ident()}.prune.tmp"]
+    assert (d / "BTCUSDT.tmp.parquet").read_bytes() == leftover_before
+    assert result["ohlcv/1h"]["files_pruned"] == 1
+

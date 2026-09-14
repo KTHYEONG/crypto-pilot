@@ -506,17 +506,18 @@ def test_fetch_funding_rate_history_raises_on_http_error(monkeypatch) -> None:
     monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 1000)
 
     def _raise(*args, **kwargs):
-        raise urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/fundingRate", 403, "Forbidden", None, None)
+        raise urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/fundingRate", 400, "Bad Request", None, None)
 
     monkeypatch.setattr("urllib.request.urlopen", _raise)
 
     with pytest.raises(BinanceFundingFetchError) as exc_info:
         client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z")
 
-    assert exc_info.value.http_code == 403
+    assert exc_info.value.http_code == 400
     assert exc_info.value.symbol == "BTC/USDT"
     assert "fundingRate" in exc_info.value.url
     assert isinstance(exc_info.value.__cause__, urllib.error.HTTPError)
+
 
 
 def test_fetch_funding_rate_history_raises_on_transport_error(monkeypatch) -> None:
@@ -566,3 +567,164 @@ def test_fetch_funding_rate_history_raises_on_malformed_body(monkeypatch) -> Non
         client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z")
 
     assert exc_info.value.http_code is None
+
+
+
+
+@pytest.mark.parametrize("code", [403, 418, 429])
+def test_fetch_ohlcv_with_taker_raises_ip_blocked_without_retry(monkeypatch, code) -> None:
+    import urllib.error
+    import pytest
+    from src.market_data.binance.futures import BinanceClient
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 3_600_000)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.market_data.binance.futures.time.sleep", sleeps.append)
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    calls: list[int] = []
+
+    def _raise(*args, **kwargs):
+        calls.append(1)
+        raise urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/klines", code, "blocked", None, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+    with pytest.raises(BinanceIpBlockedError) as exc_info:
+        client.fetch_ohlcv_with_taker("BTC/USDT", "1h", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+
+    assert exc_info.value.http_code == code
+    assert "klines" in exc_info.value.url
+    assert calls == [1]
+    assert sleeps == []
+
+
+def test_fetch_ohlcv_with_taker_raises_permanent_on_400(monkeypatch) -> None:
+    import urllib.error
+    import pytest
+    from src.market_data.binance.futures import BinanceClient
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 3_600_000)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.market_data.binance.futures.time.sleep", sleeps.append)
+    from src.market_data.binance.futures import BinanceKlinePermanentError
+
+    def _raise(*args, **kwargs):
+        raise urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/klines", 400, "Invalid symbol", None, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+    with pytest.raises(BinanceKlinePermanentError) as exc_info:
+        client.fetch_ohlcv_with_taker("BTC/USDT", "1h", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+
+    assert exc_info.value.http_code == 400
+    assert sleeps == []
+
+
+def test_fetch_ohlcv_with_taker_raises_transient_after_5xx_exhaustion(monkeypatch) -> None:
+    import urllib.error
+    import pytest
+    from src.market_data.binance.futures import BinanceClient
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 3_600_000)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.market_data.binance.futures.time.sleep", sleeps.append)
+    from src.market_data.binance.futures import BinanceKlineTransientError
+
+    def _raise(*args, **kwargs):
+        raise urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/klines", 503, "unavailable", None, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+    with pytest.raises(BinanceKlineTransientError) as exc_info:
+        client.fetch_ohlcv_with_taker("BTC/USDT", "1h", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+
+    assert exc_info.value.http_code == 503
+    assert exc_info.value.symbol == "BTC/USDT"
+    assert exc_info.value.timeframe == "1h"
+    assert sleeps == [2, 4, 6, 8]
+
+
+def test_fetch_ohlcv_with_taker_raises_transient_after_transport_exhaustion(monkeypatch) -> None:
+    import urllib.error
+    import pytest
+    from src.market_data.binance.futures import BinanceClient
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 3_600_000)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.market_data.binance.futures.time.sleep", sleeps.append)
+    from src.market_data.binance.futures import BinanceKlineTransientError
+
+    def _raise(*args, **kwargs):
+        raise urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+    with pytest.raises(BinanceKlineTransientError) as exc_info:
+        client.fetch_ohlcv_with_taker("BTC/USDT", "1h", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+
+    assert exc_info.value.http_code is None
+    assert sleeps == [1, 2, 3, 4]
+
+
+
+
+@pytest.mark.parametrize("code", [403, 418, 429])
+def test_fetch_funding_rate_history_raises_ip_blocked_on_waf_codes(monkeypatch, code) -> None:
+    import urllib.error
+    import pytest
+    from src.market_data.binance.futures import BinanceClient
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 3_600_000)
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.market_data.binance.futures.time.sleep", sleeps.append)
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    def _raise(*args, **kwargs):
+        raise urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/fundingRate", code, "blocked", None, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+
+    with pytest.raises(BinanceIpBlockedError) as exc_info:
+        client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+
+    assert exc_info.value.http_code == code
+
+
+def test_binance_error_types_survive_contextmanager_passthrough() -> None:
+    import contextlib
+    import pytest
+    from src.market_data.binance.futures import (
+        BinanceFundingFetchError,
+        BinanceIpBlockedError,
+        BinanceKlinePermanentError,
+        BinanceKlineTransientError,
+    )
+
+    @contextlib.contextmanager
+    def _passthrough():
+        yield
+
+    errors = [
+        BinanceKlinePermanentError(symbol="X", timeframe="1h", http_code=400, start_time_ms=0, end_time_ms=1, url="u"),
+        BinanceFundingFetchError(symbol="X", http_code=400, url="u"),
+        BinanceIpBlockedError(http_code=418, url="u"),
+        BinanceKlineTransientError(symbol="X", timeframe="1h", http_code=503, url="u"),
+    ]
+    for error in errors:
+        with pytest.raises(type(error)) as exc_info, _passthrough():
+            raise error
+        assert exc_info.value is error
+        error.add_note("context")
+        assert error.__notes__ == ["context"]
+
