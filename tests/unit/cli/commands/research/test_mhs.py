@@ -990,3 +990,37 @@ def test_deploy_push_requires_key(monkeypatch) -> None:
     monkeypatch.setattr(mhs_cli, "LiveSettings", lambda: _S(), raising=False)
     with pytest.raises(SystemExit):
         mhs_cli._assert_deploy_push_allowed()
+
+
+def test_deploy_policy_guard_rejects_runtime_mismatch(monkeypatch) -> None:
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.live_strategy as live_strategy
+
+    monkeypatch.setattr(live_strategy, "LIVE_RUNTIME_DATA_POLICY", "legacy")
+    with pytest.raises(SystemExit, match="data_policy"):
+        mhs_cli._assert_deploy_policy_matches_runtime("zombie_mask_v1")
+    mhs_cli._assert_deploy_policy_matches_runtime("legacy")
+
+    monkeypatch.setattr(live_strategy, "LIVE_RUNTIME_DATA_POLICY", "zombie_mask_v1")
+    mhs_cli._assert_deploy_policy_matches_runtime("zombie_mask_v1")
+
+
+def test_deploy_push_policy_mismatch_fails_before_diagnostic_runs(monkeypatch) -> None:
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.live_strategy as live_strategy
+    import src.mhs.pipeline.orchestrator as orchestrator
+    from src.cli.main import build_root_parser
+
+    monkeypatch.setattr(live_strategy, "LIVE_RUNTIME_DATA_POLICY", "legacy")
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: pytest.fail("diagnostic must not run"))
+    args = build_root_parser().parse_args([
+        "research", "run", "portfolio", "mhs-horizon-diagnostic",
+        "--data-policy", "zombie_mask_v1", "--emit-deployment", "--deploy-push",
+    ])
+
+    with pytest.raises(SystemExit, match="data_policy"):
+        mhs_cli._run_mhs_horizon_diagnostic(args)

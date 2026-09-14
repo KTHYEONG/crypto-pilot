@@ -104,3 +104,26 @@ def test_load_panel_short_circuits_on_guard_breach(monkeypatch: pytest.MonkeyPat
     panel_stage.load_panel(ctx, StageTelemetry(log_run=False))
 
     assert ctx._terminal_report == "TERMINAL"
+
+
+def test_load_panel_threads_config_data_policy_to_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    import dataclasses
+
+    captured: dict[str, object] = {}
+
+    class _StopError(Exception):
+        pass
+
+    def _fake_loader(*_a: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+        raise _StopError
+
+    monkeypatch.setattr(panel_stage, "_resolve_ram_budget", lambda *_a, **_k: (None, None), raising=False)
+    monkeypatch.setattr(panel_stage, "load_base_panel", _fake_loader)
+    ctx = _bare_context()
+    ctx.config = dataclasses.replace(MhsRunConfig(), data_policy="zombie_mask_v1")
+
+    with pytest.raises(_StopError):
+        panel_stage.load_panel(ctx, StageTelemetry(log_run=False))
+
+    assert captured["data_policy"] == "zombie_mask_v1"

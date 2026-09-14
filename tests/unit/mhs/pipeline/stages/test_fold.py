@@ -395,3 +395,32 @@ def test_run_folds_reaches_committee_diagnostic_seam(monkeypatch: pytest.MonkeyP
 
     assert calls == ["_load_feature_panels", "_committee_diagnostic"]
     assert ctx.committee_diagnostic == "committee-diag-stub"
+
+
+def test_run_folds_threads_config_data_policy_to_feature_panels(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _StopError(Exception):
+        pass
+
+    def _capture_feature_panels(*_a: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+        raise _StopError
+
+    monkeypatch.setattr(
+        concurrency_mod, "_run_post_book_concurrently",
+        lambda *_a, **_k: (None, None, {}, {}, [], "deployment-stub"), raising=False,
+    )
+    monkeypatch.setattr(fold_stage, "_run_post_book_concurrently",
+                        lambda *_a, **_k: (None, None, {}, {}, [], "deployment-stub"), raising=False)
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(diagnostics_mod, "_load_feature_panels", _capture_feature_panels, raising=False)
+    monkeypatch.setattr(fold_stage, "_load_feature_panels", _capture_feature_panels, raising=False)
+    ctx = _bare_context(committee_book=True)
+    ctx.config = dataclasses.replace(ctx.config, data_policy="zombie_mask_v1")
+
+    with pytest.raises(_StopError):
+        fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
+
+    assert captured["data_policy"] == "zombie_mask_v1"

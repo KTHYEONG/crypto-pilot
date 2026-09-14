@@ -971,3 +971,39 @@ def test_advance_to_date_gap_branch_writes_quarantine_sidecar(tmp_path, monkeypa
     assert sidecar["decision_time"] == far.isoformat()
     assert sidecar["records"] == [{"symbol": "ZZZUSDT", "reason": "decision_bar_missing"}]
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_compute_signal_row_threads_params_data_policy_to_fold_builder(tmp_path, monkeypatch) -> None:
+    import dataclasses
+
+    import numpy as np
+    import pandas as pd
+
+    import src.mhs.live_signal_step as m
+    from src.mhs.live_runtime import LiveRuntime
+
+    dt = pd.Timestamp("2026-08-31", tz="UTC")
+    tw = pd.DataFrame([[0.6, -0.4]], index=pd.DatetimeIndex([dt]), columns=["BTCUSDT", "ETHUSDT"])
+    captured: dict[str, object] = {}
+
+    def _fake_builder(root, fold, request, *a, **k):
+        captured["request"] = request
+        return (tw, pd.DatetimeIndex([dt]), [], pd.DatetimeIndex([dt]))
+
+    monkeypatch.setattr(m, "_build_fold_target_weights", _fake_builder)
+    monkeypatch.setattr(m, "_load_funding_by_symbol", lambda *a, **k: {})
+    monkeypatch.setattr(m, "_assert_panel_history_available", lambda *a, **k: None)
+    rng = pd.date_range("2026-06-01", periods=60, freq="1D", tz="UTC")
+    fwd = pd.Series(np.r_[np.full(30, 0.05), np.full(30, -0.05)], index=rng)
+    monkeypatch.setattr(m, "realized_equity", lambda *a, **k: pd.Series(dtype="float64"))
+    monkeypatch.setattr(m, "descale_realized_returns", lambda equity, scale: fwd)
+    boot = pd.Series(np.full(120, 0.001), index=pd.date_range("2025-09-01", periods=120, freq="1D", tz="UTC"))
+    params = dataclasses.replace(_v2_sig_params("growth_budget", 1.0, False, False), data_policy="zombie_mask_v1")
+    rt = LiveRuntime(
+        schema_version=1, params_digest="d", last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
+        held_target_row={"BTCUSDT": 0.5}, reference_daily_returns=boot,
+    )
+
+    m.compute_signal_row(params, rt, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper")
+
+    assert captured["request"].data_policy == "zombie_mask_v1"

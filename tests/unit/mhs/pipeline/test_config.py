@@ -224,7 +224,8 @@ def test_constant_risk_cli_and_config_parity():
 # SCENARIO_MHS_SELECTION_EXEC_DEFAULT_UNCHANGED_01
 def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     """MhsRunConfig() and a no-arg CLI parse stay identical, both resolving
-    final_oos_2026h1=False as the ONLY key added to the pre-spec field set."""
+    final_oos_2026h1=False and data_policy='legacy' as the ONLY keys added
+    to the pre-spec field set."""
     from src.cli.main import build_root_parser
 
     pre_spec_fields = frozenset({
@@ -255,4 +256,28 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
     assert from_cli == bare
     assert bare["final_oos_2026h1"] is False
-    assert set(bare) == pre_spec_fields | {"final_oos_2026h1"}
+    assert bare["data_policy"] == "legacy"
+    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy"}
+
+
+def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:
+    import dataclasses
+
+    from src.cli.main import build_root_parser
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    # Given: 기본 설정과 --data-policy 지정 CLI
+    assert MhsRunConfig().data_policy == "legacy"
+    args = build_root_parser().parse_args(
+        ["research", "run", "portfolio", "mhs-horizon-diagnostic", "--data-policy", "zombie_mask_v1"],
+    )
+
+    # When
+    config = MhsRunConfig.from_namespace(args)
+    request = MhsDiagnosticRequest(**dataclasses.asdict(config))
+
+    # Then
+    assert config.data_policy == "zombie_mask_v1"
+    assert request.data_policy == "zombie_mask_v1"
+    assert MhsDiagnosticRequest().data_policy == "legacy"

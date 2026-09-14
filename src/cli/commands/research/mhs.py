@@ -12,6 +12,7 @@ import logging
 import time
 
 from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
+from src.mhs.panel import DATA_POLICIES
 from src.mhs.params import (
     COMMITTEE_DEFAULT_MEMBER_SET,
     GROWTH_RISK_ENVELOPES,
@@ -52,6 +53,14 @@ def _assert_deploy_push_allowed() -> None:
         )
 
 
+def _assert_deploy_policy_matches_runtime(data_policy: str) -> None:
+    """--deploy-push 는 라이브 런타임 data_policy 와 같은 정책의 파라미터만 푸시한다."""
+    import src.mhs.live_strategy as live_strategy
+
+    if data_policy != live_strategy.LIVE_RUNTIME_DATA_POLICY:
+        raise SystemExit(f"--deploy-push data_policy {data_policy!r} != LIVE_RUNTIME_DATA_POLICY {live_strategy.LIVE_RUNTIME_DATA_POLICY!r}; switch the runtime constant in the same commit")
+
+
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     if getattr(args, "leverage_frontier_scan", False):
         # Diagnostic-only short-circuit: reads an already-persisted ledger and
@@ -72,6 +81,8 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     # (committee_capital/regime-adaptive tranche/target-gross/funding-carry-sleeve
     # opt-out semantics); the CLI only parses and adapts to MhsDiagnosticRequest.
     config = MhsRunConfig.from_namespace(args)
+    if getattr(args, "deploy_push", False):
+        _assert_deploy_policy_matches_runtime(config.data_policy)
     request = MhsDiagnosticRequest(**dataclasses.asdict(config))
     report = run_mhs_diagnostic(config)
     persist_start = time.perf_counter()
@@ -685,4 +696,5 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "blend, weights, scales, or Research-GO"
         ),
     )
+    mhs.add_argument('--data-policy', choices=sorted(DATA_POLICIES), default='legacy', help='Input-data contract for 1h panels (legacy keeps every bar; zombie_mask_v1 masks causally-detected delisted flat bars).')
     mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)

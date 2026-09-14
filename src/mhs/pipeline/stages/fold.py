@@ -176,7 +176,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 ],
             )
         _diag_panels = diagnostics._load_feature_panels(
-            ctx.root, ctx.start, ctx.end, ctx.grid_1h, ctx.aligned_symbols, columns=_diag_panel_columns,
+            ctx.root, ctx.start, ctx.end, ctx.grid_1h, ctx.aligned_symbols, columns=_diag_panel_columns, data_policy=ctx.config.data_policy,
         )
         ctx.recorder.record("diagnostic_feature_panels")
         _assert_stage_rss_budget("diagnostic_feature_panels", ctx.rss_budget_bytes, ctx.rss_reserve_bytes)

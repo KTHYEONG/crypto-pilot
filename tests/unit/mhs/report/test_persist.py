@@ -615,3 +615,47 @@ def test_emit_deployment_requires_pre_vol_target_reference(tmp_path) -> None:
     request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01")))
     with pytest.raises(DataIntegrityError, match="pre_vol_target_reference"):
         emit_deployment(report, request, tmp_path)
+
+
+def test_emit_deployment_carries_request_data_policy(tmp_path) -> None:
+    import dataclasses
+    import types
+
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.live_strategy import load_strategy_params
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+
+    idx = pd.date_range("2021-01-01", periods=5, freq="1D", tz="UTC")
+    tw = pd.DataFrame({"BTCUSDT": [0.2] * 5}, index=idx)
+    equity = pd.Series([1.0, 1.01, 1.02, 1.03, 1.04], index=idx)
+    report = types.SimpleNamespace(
+        status="COMPLETE",
+        research_go=types.SimpleNamespace(eligible=True),
+        blend=types.SimpleNamespace(
+            target_weights=tw,
+            horizon_hours=168,
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+            pre_vol_target_reference=types.SimpleNamespace(ledger=types.SimpleNamespace(equity=equity)),
+        ),
+        committee_member_weights={
+            "flow_imb_720h": 0.27,
+            "flow_imb_168h": 0.378,
+            "xs_mom_336h": 0.0,
+            "xs_idio_mom_336h": 0.0,
+            "mom3_skew_168h": 0.352,
+        },
+    )
+    masked = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", data_policy="zombie_mask_v1")))
+    legacy = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01")))
+
+    masked_res = emit_deployment(report, masked, tmp_path / "masked", artifact_key=None)
+    legacy_res = emit_deployment(report, legacy, tmp_path / "legacy", artifact_key=None)
+
+    masked_params = load_strategy_params(masked_res["params_path"])
+    legacy_params = load_strategy_params(legacy_res["params_path"])
+    assert masked_params.data_policy == "zombie_mask_v1"
+    assert legacy_params.data_policy == "legacy"
+    assert masked_params.strategy_digest != legacy_params.strategy_digest
