@@ -288,7 +288,10 @@ def _mk_settings_stub():
 
 def _mk_params_stub():
     from types import SimpleNamespace
-    return SimpleNamespace(strategy_digest="x", bootstrap_sha256="a" * 64, data_policy="legacy")
+
+    import src.mhs.live_strategy as live_strategy
+    # 이 스텁은 data_policy가 아니라 digest 정합 로직을 검증하므로 항상 런타임 정책과 일치시킨다.
+    return SimpleNamespace(strategy_digest="x", bootstrap_sha256="a" * 64, data_policy=live_strategy.LIVE_RUNTIME_DATA_POLICY)
 
 
 def _mk_runtime_stub():
@@ -499,9 +502,18 @@ def test_signal_step_refuses_params_with_mismatched_data_policy(monkeypatch) -> 
     import pytest
     import src.cli.commands.live as module
 
+    import src.mhs.live_strategy as live_strategy
+    from src.mhs.panel import DATA_POLICY_LEGACY, DATA_POLICY_ZOMBIE_MASK_V1
+
     settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
     monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
-    params = types.SimpleNamespace(data_policy="zombie_mask_v1", bootstrap_sha256="a" * 64)
+    # 런타임 정책과 다른 값이어야 한다: 상수 자체가 바뀔 수 있으므로 반대 값을 동적으로 고른다.
+    mismatched_policy = (
+        DATA_POLICY_LEGACY
+        if live_strategy.LIVE_RUNTIME_DATA_POLICY != DATA_POLICY_LEGACY
+        else DATA_POLICY_ZOMBIE_MASK_V1
+    )
+    params = types.SimpleNamespace(data_policy=mismatched_policy, bootstrap_sha256="a" * 64)
     monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *_a, **_k: params)
 
     bootstrap_calls: list[str] = []
