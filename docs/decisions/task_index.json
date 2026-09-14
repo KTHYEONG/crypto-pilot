@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "FUNDING_GAP_HEAL",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_FUNDING_GAP_HEAL",
+      "domain": "live",
+      "title": "펀딩 데이터 내부 공백 복구",
+      "why": "펀딩 재조회 시작점이 OHLCV 꼬리 기준이라 그 이전 정산 공백이 영구히 누락되고 이후 fresh 판정에 가려졌다",
+      "resolution": "8h30m 절대 임계값으로 창 내 공백을 탐지하고 공백 직전부터 재조회하도록 ensure_funding_data/refresh_live_market_data를 수정했다",
+      "impact": "실측: CYSUSDT 내부 공백 복구, BMTUSDT 5회분 누락 복구; 보유 73개 중 59개가 내일 사이클 전 정상화됨"
+    },
+    {
       "task_id": "SIGNAL_STEP_BOOTSTRAP_ORDER_FIXTURE_FIX",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_SIGNAL_STEP_BOOTSTRAP_ORDER_FIXTURE_FIX",
@@ -989,16 +999,6 @@
       "why": "committee_capital 플래그가 fold 경로(_build_fold_target_weights)에만 반영되고 top-level blend_replay는 여전히 PHASE_1_BOOK_BLEND_WEIGHTS(단일 모멘텀축)로 고정돼 deployment_readiness/report.blend가 실제 자본 배분을 반영하지 못함. 축 확장(9~10 feature axes)·레그 역변동성 틸트·사전 변동성 타깃 오버레이는 walk-forward-safe(fold train 구간에서만 axis admit) 재검증에서 전부 기각(committee6 단독보다 성과 악화)되어 제외.",
       "resolution": "_committee_execution_book 헬퍼를 신설해 fold 경로 인라인 블록을 대체하고 top-level run_mhs_horizon_diagnostic/_run_books_concurrent의 blend_replay에도 동일 헬퍼를 배선. committee_capital=False 기본값은 byte-identical 유지. 실제 3분봉 리플레이(--committee-capital --no-ram-guard)로 검증: blend CAGR -0.0598->+0.1939, MDD -0.3438->-0.3090, Sharpe -0.670->0.718, Calmar -0.174->0.628, P(최종자산<초기자산) 0.915->0.068.",
       "impact": "research run portfolio mhs-horizon-diagnostic --committee-capital 실행 시 deployment_readiness/report.blend가 위원회6 자본배분을 정확히 반영. 기본 실행(플래그 미지정)은 무변경. research_go.eligible은 여전히 false(PRIMARY_AUTOCORR_SHARPE_BELOW_0_6/RELEVANT_EXECUTION_DATA_GAP/UNSPECIFIED_POLICY, 기존 정책 게이트로 이번 변경과 무관). 이 dev 박스에서는 committee_capital 실행 시 기본 ram_guard로 top-level blend/slow_momentum 북이 RESOURCE_BUDGET_BREACH로 조기 종료될 수 있어 --no-ram-guard 필요."
-    },
-    {
-      "task_id": "TASK_MHS_DYNAMIC_GAP_EXCLUSION",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_DYNAMIC_GAP_EXCLUSION",
-      "domain": "mhs",
-      "title": "MHS 동적 갭 제외(dynamic gap exclusion) - 하드코딩 리스트 대체",
-      "why": "정적 MHS_SOURCE_GAP_EXCLUDED_SYMBOLS 리스트는 시간이 지나 데이터가 백필되거나 요청 구간이 바뀌어도 갱신되지 않아, 더 이상 문제없는 심볼을 영구 배제하거나 새로 생긴 결손을 못 잡는 구조적 한계가 있었음. 사용자가 하드코딩 대신 매 실행마다 현재 캐시 상태를 기준으로 자동 판정하는 로직을 요청.",
-      "resolution": "mhs_execution_collection.py에 MHS_DYNAMIC_GAP_EXCLUSION_HOURS=720(liquid_half_eligibility의 min_history_bars=720과 동일한 기존 불변량 재사용) 상수와 apply_dynamic_gap_exclusion()/apply_dynamic_mark_gap_exclusion() 신설 - roster_membership_intervals 기반으로 720시간 이상 연속 갭이 로스터 편입 구간과 겹치면 해당 구간만 execution_mask에서 자동 제외(720시간 미만은 기존 MISSING_DATA/RELEVANT_EXECUTION_DATA_GAP fold 리포팅에 위임). execution_coverage_gate 옵트인 플래그 하나로 동적 제외+기존 strict 게이트를 함께 묶어(이 저장소의 기존 옵트인 컨벤션 준수, 기본 byte-identical), 로스터 전체가 제외되면(전형적 설정 오류) fail-closed하는 안전장치도 추가.",
-      "impact": "--execution-coverage-gate 사용 시 데이터가 나중에 백필되면 다음 실행에서 자동으로 재포함되고, 캐시가 훼손되면 자동으로 재배제되어 리스트 유지보수가 불필요해짐. 매직넘버 없이 기존 유동성 자격 불변량(720h)을 재사용."
     }
   ]
 }
