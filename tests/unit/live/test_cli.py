@@ -155,6 +155,7 @@ def test_run_shadow_cycle_paper_no_credentials() -> None:
     assert settings.api_key is None
     client = runner._order_client(settings, pd.Timestamp("2026-08-24", tz="UTC"))
     assert isinstance(client, runner.NullOrderClient)
+    assert client.mode is ExecutionMode.PAPER
     # 서명 조회는 스텁: 실계좌 GET 없음
     assert client.open_orders() == []
     assert client.sync_server_time() is None
@@ -287,7 +288,7 @@ def _mk_settings_stub():
 
 def _mk_params_stub():
     from types import SimpleNamespace
-    return SimpleNamespace(strategy_digest="x", bootstrap_sha256="a" * 64)
+    return SimpleNamespace(strategy_digest="x", bootstrap_sha256="a" * 64, data_policy="legacy")
 
 
 def _mk_runtime_stub():
@@ -460,4 +461,60 @@ def test_run_status_logs_heartbeat_stage(tmp_path, monkeypatch, caplog) -> None:
 
     assert exit_info.value.code == 0
     assert "stage=execute" in caplog.text
+
+
+
+def test_run_daemon_cli_binds_shutdown_into_default_signal_step(tmp_path, monkeypatch) -> None:
+    import argparse
+    import functools
+    import logging
+    import src.cli.commands.live as module
+    import src.live.lifecycle as lifecycle
+    import src.live.scheduler as sched
+
+    monkeypatch.setattr(module, "_LIVE_LOG_DIR", tmp_path / "live_logs")
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _args: object())
+    monkeypatch.setattr(lifecycle, "install_shutdown_handlers", lambda flag, **kwargs: None)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(sched, "run_daemon", lambda settings, weights_path, state_path, **kwargs: captured.update(kwargs))
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        module._run_daemon(argparse.Namespace(artifact=str(tmp_path / "w.parquet"), state_path=str(tmp_path / "state.json"), mode=None))
+    finally:
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+            handler.close()
+
+    step = captured["signal_step_fn"]
+    assert isinstance(step, functools.partial)
+    assert step.func is sched._default_signal_step
+    assert step.keywords == {"shutdown": captured["shutdown"]}
+
+
+def test_signal_step_refuses_params_with_mismatched_data_policy(monkeypatch) -> None:
+    import argparse
+    import types
+    import pandas as pd
+    import pytest
+    import src.cli.commands.live as module
+
+    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
+    params = types.SimpleNamespace(data_policy="zombie_mask_v1", bootstrap_sha256="a" * 64)
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *_a, **_k: params)
+
+    bootstrap_calls: list[str] = []
+
+    def _bootstrap(*_a, **_k):
+        bootstrap_calls.append("loaded")
+        raise RuntimeError("stop after bootstrap")
+
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", _bootstrap)
+
+    with pytest.raises(SystemExit) as exc:
+        module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
+
+    assert exc.value.code == 1
+    assert bootstrap_calls == []
 

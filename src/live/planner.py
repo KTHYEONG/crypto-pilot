@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -10,6 +12,13 @@ from decimal import Decimal
 from src.live.filters import _ZERO, SymbolFilters, quantize_order
 
 _CLIENT_ORDER_ID_PATTERN = re.compile(r"^[.A-Za-z0-9_-]{1,36}$")
+
+CLIENT_ORDER_NAMESPACE = "mh"
+
+
+def symbol_tag(symbol: str) -> str:
+    """심볼 식별 태그: sha256 -> base32 상위 10자(ASCII, Binance 문자셋)."""
+    return base64.b32encode(hashlib.sha256(symbol.encode("utf-8")).digest()).decode("ascii")[:10]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,12 +40,13 @@ class OrderIntent:
     decision_price: Decimal
 
 
-def build_client_order_id(run_id: str, symbol: str, leg_index: int, slice_idx: int, attempt: int) -> str:
+def build_client_order_id(run_id: str, symbol: str, leg_index: int, generation: int, submit_seq: int) -> str:
     """결정론적 client order id. Binance 제약(^[.A-Za-z0-9_-]{1,36}$) 위반 시 ValueError.
 
-    run_id는 '%Y%m%d'(8자). 최장 심볼(19자)+attempt 2자리에서 35자 <= 36을 만족한다.
+    'mh' 네임스페이스 + 심볼 태그(base32 10자) + leg/generation/submit_seq 로
+    계정 수명 전체에서 고유한 id 를 만든다. 비-ASCII 심볼도 태그로 인코딩된다.
     """
-    candidate = f"{run_id}-{symbol}-{leg_index}-{slice_idx}-{attempt}"
+    candidate = f"{CLIENT_ORDER_NAMESPACE}{run_id}-{symbol_tag(symbol)}-{leg_index}-{generation}-{submit_seq}"
     if not _CLIENT_ORDER_ID_PATTERN.fullmatch(candidate):
         raise ValueError(
             "client order id violates Binance constraint ^[.A-Za-z0-9_-]{1,36}$: "

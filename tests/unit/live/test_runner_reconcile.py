@@ -368,4 +368,253 @@ def test_SCENARIO_RESIL_03_orphan_settled_before_reconcile(tmp_path):  # noqa: D
     _ = "cancel_orphan_orders(order_client, run_id, audit)"
 
 
+def test_run_shadow_cycle_live_mode_sets_venue_leverage_before_execution(artifact, monkeypatch, tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.errors import VenueError
+
+    calls: list[tuple[str, str, dict]] = []
+    executed: list[list[str]] = []
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        executed.append([intent.symbol for intent in intents])
+        return tuple(
+            ExecutionOutcome(
+                symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+            )
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    ledger_path = tmp_path / "ledger_live.json"
+    save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
+    settings = LiveSettings(mode="live_testnet", notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
+
+    def _audit_events() -> list[dict]:
+        path = tmp_path / "shadow_cycle.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    class RecordingClient(StubOrderClient):
+        def request(self, method, path, params=None, *, signed=False):
+            calls.append((method, path, dict(params or {})))
+            return super().request(method, path, params, signed=signed)
+
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: RecordingClient())
+
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+
+    assert report.status == "COMPLETE"
+    assert [(path, params) for method, path, params in calls if method == "POST"] == [
+        ("/fapi/v1/marginType", {"symbol": "AAAUSDT", "marginType": "CROSSED"}),
+        ("/fapi/v1/marginType", {"symbol": "BUSDT", "marginType": "CROSSED"}),
+        ("/fapi/v1/leverage", {"symbol": "AAAUSDT", "leverage": 4}),
+        ("/fapi/v1/leverage", {"symbol": "BUSDT", "leverage": 4}),
+    ]
+    assert executed == [["AAAUSDT", "BUSDT"]]
+
+
+def test_run_shadow_cycle_live_mode_rejects_intent_over_notional_cap(artifact, monkeypatch, tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.errors import VenueError
+
+    calls: list[tuple[str, str, dict]] = []
+    executed: list[list[str]] = []
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        executed.append([intent.symbol for intent in intents])
+        return tuple(
+            ExecutionOutcome(
+                symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+            )
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    ledger_path = tmp_path / "ledger_live.json"
+    save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
+    settings = LiveSettings(mode="live_testnet", notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
+
+    def _audit_events() -> list[dict]:
+        path = tmp_path / "shadow_cycle.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    class TightCapClient(StubOrderClient):
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v1/leverageBracket":
+                rows = super().request(method, path, params, signed=signed)
+                rows[0]["brackets"][0]["notionalCap"] = 10
+                return rows
+            return super().request(method, path, params, signed=signed)
+
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: TightCapClient())
+
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+
+    assert report.status == "COMPLETE"
+    assert executed == [["BUSDT"]]
+    rejected = [e for e in _audit_events() if e["event"] == "notional_cap_rejected"]
+    assert [e["symbol"] for e in rejected] == ["AAAUSDT"]
+    assert rejected[0]["notional_cap"] == "10"
+
+
+def test_run_shadow_cycle_live_mode_halts_when_margin_change_blocked(artifact, monkeypatch, tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.errors import VenueError
+
+    calls: list[tuple[str, str, dict]] = []
+    executed: list[list[str]] = []
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        executed.append([intent.symbol for intent in intents])
+        return tuple(
+            ExecutionOutcome(
+                symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+            )
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    ledger_path = tmp_path / "ledger_live.json"
+    save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
+    settings = LiveSettings(mode="live_testnet", notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
+
+    def _audit_events() -> list[dict]:
+        path = tmp_path / "shadow_cycle.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    class BlockedClient(StubOrderClient):
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v1/marginType":
+                raise VenueError("venue rejected request", code=-4048, http_status=400, path=path, payload_digest="000000000000")
+            return super().request(method, path, params, signed=signed)
+
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: BlockedClient())
+
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+
+    assert report.status == "HALT"
+    assert "margin type change to CROSSED blocked for AAAUSDT (code=-4048)" in report.reason
+    assert executed == []
+
+
+def test_run_shadow_cycle_live_mode_accepts_settled_delisting_only_after_delivery(artifact, monkeypatch, tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.errors import VenueError
+
+    calls: list[tuple[str, str, dict]] = []
+    executed: list[list[str]] = []
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        executed.append([intent.symbol for intent in intents])
+        return tuple(
+            ExecutionOutcome(
+                symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+            )
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    ledger_path = tmp_path / "ledger_live.json"
+    save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
+    settings = LiveSettings(mode="live_testnet", notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
+
+    def _audit_events() -> list[dict]:
+        path = tmp_path / "shadow_cycle.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def _market_with(delivery_ms: int):
+        class DelistedMarketClient(StubMarketClient):
+            def exchange_info(self):
+                payload = super().exchange_info()
+                payload["symbols"].append({
+                    "symbol": "ZZZUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT",
+                    "status": "SETTLING", "deliveryDate": delivery_ms,
+                })
+                return payload
+        return DelistedMarketClient()
+
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+    save_ledger(ledger_path, LedgerState(positions={"ZZZUSDT": Decimal("1.5")}, equity_high_water_mark=Decimal(0)))
+
+    future_ms = int((NOW + pd.Timedelta(days=1)).value // 1_000_000)
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: _market_with(future_ms))
+    before = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    assert before.status == "HALT"
+    assert "position divergence for ZZZUSDT" in before.reason
+
+    past_ms = int((NOW - pd.Timedelta(hours=1)).value // 1_000_000)
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: _market_with(past_ms))
+    after = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    assert after.status == "COMPLETE"
+    pending = [e for e in _audit_events() if e["event"] == "delisting_settlement_pending"]
+    assert [(e["symbol"], e["ledger_qty"]) for e in pending] == [("ZZZUSDT", "1.5")]
+
+
+def test_run_shadow_cycle_paper_mode_never_touches_venue_leverage(artifact, monkeypatch, tmp_path) -> None:
+    from decimal import Decimal
+    from src.live.errors import VenueError
+
+    calls: list[tuple[str, str, dict]] = []
+    executed: list[list[str]] = []
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        executed.append([intent.symbol for intent in intents])
+        return tuple(
+            ExecutionOutcome(
+                symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+            )
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    ledger_path = tmp_path / "ledger_live.json"
+    save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
+    settings = LiveSettings(mode="live_testnet", notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
+
+    def _audit_events() -> list[dict]:
+        path = tmp_path / "shadow_cycle.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    class RecordingClient(StubOrderClient):
+        def request(self, method, path, params=None, *, signed=False):
+            calls.append((method, path, dict(params or {})))
+            return super().request(method, path, params, signed=signed)
+
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: RecordingClient())
+    paper = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_paper.json"))
+
+    report = run_shadow_cycle(paper, DECISION_TIME, artifact, now=NOW)
+
+    assert report.status == "COMPLETE"
+    touched = {path for _, path, _ in calls}
+    assert touched.isdisjoint({"/fapi/v1/leverageBracket", "/fapi/v1/marginType", "/fapi/v1/leverage"})
 

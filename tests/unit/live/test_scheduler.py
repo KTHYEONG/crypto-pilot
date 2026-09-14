@@ -1729,3 +1729,266 @@ def test_run_daemon_signal_step_halt_waits_backoff_and_keeps_pending(tmp_path, m
     assert cycles == []
     assert alerts == []
 
+
+
+def test_run_daemon_logs_elapsed_per_stage(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "_daemon_alert", lambda *a, **k: None)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    import re
+
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, decision_time, artifact_path, *, now: CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0),
+    )
+
+    with caplog.at_level(logging.INFO, logger="LiveScheduler"):
+        sched.run_daemon(
+            LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready,
+            max_iterations=1, refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        )
+
+    pattern = re.compile(r"^\[SYS\] stage=(refresh|signal|execute) decision_time=2026-08-24T00:00:00\+00:00 elapsed_s=\d+\.\d$")
+    stages = [m.group(1) for m in (pattern.match(r.getMessage()) for r in caplog.records) if m]
+    assert stages == ["refresh", "signal", "execute"]
+
+
+def test_run_daemon_logs_stage_elapsed_even_when_stage_fails(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "_daemon_alert", lambda *a, **k: None)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    import src.live.data_refresh as data_refresh
+
+    cycles: list[object] = []
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: cycles.append(a))
+    monkeypatch.setattr(data_refresh, "market_data_staleness_hours", lambda root, *, now, partition="dev": 0.0)
+
+    def _refresh_boom():
+        raise RuntimeError("refresh down")
+
+    def _signal_boom(t):
+        raise RuntimeError("signal down")
+
+    with caplog.at_level(logging.INFO, logger="LiveScheduler"):
+        sched.run_daemon(
+            LiveSettings(daemon_max_attempts_per_day=1), artifact, state_path,
+            sleep_fn=lambda s: None, now_fn=lambda: ready,
+            max_iterations=1, refresh_fn=_refresh_boom, signal_step_fn=_signal_boom, prune_fn=lambda: None,
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("[SYS] stage=refresh decision_time=") for m in messages)
+    assert any(m.startswith("[SYS] stage=signal decision_time=") for m in messages)
+    assert not any(m.startswith("[SYS] stage=execute") for m in messages)
+    assert cycles == []
+
+
+def test_run_daemon_signal_step_interrupted_by_shutdown_exits_without_consuming_attempt(tmp_path, monkeypatch) -> None:
+    import logging
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "_daemon_alert", lambda *a, **k: None)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    from src.live.lifecycle import ShutdownFlag
+
+    alerts: list[str] = []
+    monkeypatch.setattr(sched, "_daemon_alert", lambda settings, sent, *, event, detail, decision_time, now: alerts.append(event))
+    cycles: list[object] = []
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: cycles.append(a))
+    shutdown = ShutdownFlag()
+
+    def _interrupted(t):
+        shutdown.request("SIGTERM")
+        raise sched.SignalStepInterrupted("signal-step terminated on shutdown")
+
+    sched.run_daemon(
+        LiveSettings(alert_halt_streak=1, daemon_max_attempts_per_day=1), artifact, state_path,
+        sleep_fn=lambda s: None, now_fn=lambda: ready, shutdown=shutdown,
+        max_iterations=3, refresh_fn=lambda: None, signal_step_fn=_interrupted, prune_fn=lambda: None,
+    )
+
+    assert alerts == []
+    assert cycles == []
+    assert not state_path.exists()
+
+
+def test_run_signal_step_subprocess_returns_on_success() -> None:
+    import subprocess
+    import sys
+    import time
+    import pytest
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+
+    spawned: list[subprocess.Popen] = []
+
+    def _popen(cmd):
+        proc = subprocess.Popen(cmd)
+        spawned.append(proc)
+        return proc
+
+    result = sched._run_signal_step_subprocess(
+        [sys.executable, "-c", "pass"], timeout_s=30.0, shutdown=ShutdownFlag(), poll_s=0.05, terminate_grace_s=1.0, popen=_popen,
+    )
+
+    assert result is None
+    assert spawned[0].returncode == 0
+
+
+def test_run_signal_step_subprocess_raises_called_process_error_with_exit_code() -> None:
+    import subprocess
+    import sys
+    import time
+    import pytest
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+
+    spawned: list[subprocess.Popen] = []
+
+    def _popen(cmd):
+        proc = subprocess.Popen(cmd)
+        spawned.append(proc)
+        return proc
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        sched._run_signal_step_subprocess(
+            [sys.executable, "-c", "raise SystemExit(3)"], timeout_s=30.0, shutdown=None, poll_s=0.05, terminate_grace_s=1.0, popen=_popen,
+        )
+
+    assert exc_info.value.returncode == 3
+
+
+def test_run_signal_step_subprocess_terminates_child_on_shutdown() -> None:
+    import subprocess
+    import sys
+    import time
+    import pytest
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+
+    spawned: list[subprocess.Popen] = []
+
+    def _popen(cmd):
+        proc = subprocess.Popen(cmd)
+        spawned.append(proc)
+        return proc
+    import threading
+
+    shutdown = ShutdownFlag()
+    threading.Timer(0.3, lambda: shutdown.request("SIGTERM")).start()
+    started = time.monotonic()
+
+    with pytest.raises(sched.SignalStepInterrupted):
+        sched._run_signal_step_subprocess(
+            [sys.executable, "-c", "import time; time.sleep(60)"], timeout_s=120.0, shutdown=shutdown, poll_s=0.05, terminate_grace_s=5.0, popen=_popen,
+        )
+
+    assert time.monotonic() - started < 10.0
+    assert spawned[0].poll() is not None
+
+
+def test_run_signal_step_subprocess_kills_child_ignoring_sigterm() -> None:
+    import subprocess
+    import sys
+    import time
+    import pytest
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+
+    spawned: list[subprocess.Popen] = []
+
+    def _popen(cmd):
+        proc = subprocess.Popen(cmd)
+        spawned.append(proc)
+        return proc
+    import threading
+
+    shutdown = ShutdownFlag()
+    code = "import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)"
+    threading.Timer(1.0, lambda: shutdown.request("SIGTERM")).start()
+
+    with pytest.raises(sched.SignalStepInterrupted):
+        sched._run_signal_step_subprocess(
+            [sys.executable, "-c", code], timeout_s=120.0, shutdown=shutdown, poll_s=0.05, terminate_grace_s=0.5, popen=_popen,
+        )
+
+    assert spawned[0].returncode == -9
+
+
+def test_run_signal_step_subprocess_times_out_and_reaps_child() -> None:
+    import subprocess
+    import sys
+    import time
+    import pytest
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+
+    spawned: list[subprocess.Popen] = []
+
+    def _popen(cmd):
+        proc = subprocess.Popen(cmd)
+        spawned.append(proc)
+        return proc
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        sched._run_signal_step_subprocess(
+            [sys.executable, "-c", "import time; time.sleep(60)"], timeout_s=0.3, shutdown=ShutdownFlag(), poll_s=0.05, terminate_grace_s=5.0, popen=_popen,
+        )
+
+    assert spawned[0].poll() is not None
+
+
+def test_default_signal_step_runs_cli_command_with_timeout_and_shutdown(monkeypatch) -> None:
+    import sys
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(sched, "_run_signal_step_subprocess", lambda cmd, **kwargs: calls.append((cmd, kwargs)))
+    flag = ShutdownFlag()
+
+    sched._default_signal_step(pd.Timestamp("2026-09-15T00:00:00Z"), shutdown=flag)
+
+    assert sched.SIGNAL_STEP_TIMEOUT_S == 1200.0
+    assert calls == [(
+        [sys.executable, "-m", "src.cli.main", "live", "signal-step", "--date", "2026-09-15T00:00:00+00:00"],
+        {"timeout_s": 1200.0, "shutdown": flag},
+    )]

@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from src.market_data.binance.futures import BinanceIpBlockedError
+from src.market_data.services.futures_collection import funding_tail_is_fresh
 from src.market_data.storage.ohlcv import is_temp_artifact
 from src.quant.universe.pit_universe import symbol_partition
 
@@ -38,10 +39,14 @@ class RefreshReport:
     staleness_hours: float
     ok: bool
     ip_blocked: bool = False
+    funding_stale: int = 0
 
 
 class ColdUniverseError(RuntimeError):
     pass
+
+
+STALENESS_ACTIVE_WINDOW_HOURS: int = 72
 
 
 def _disk_tail_ts(futures_root: Path, symbol: str, now: pd.Timestamp) -> pd.Timestamp | None:
@@ -75,6 +80,19 @@ def _disk_tail_ts(futures_root: Path, symbol: str, now: pd.Timestamp) -> pd.Time
         return None
 
 
+def _funding_fresh_on_disk(futures_root: Path, symbol: str, now: pd.Timestamp) -> bool:
+    path = Path(futures_root) / "funding" / f"{symbol}.parquet"
+    if not path.exists():
+        return False
+    try:
+        frame = pd.read_parquet(path, columns=["timestamp"])
+    except (OSError, ValueError) as exc:
+        _logger.debug("[DATA] funding tail unreadable symbol=%s error=%s", symbol, exc)
+        return False
+    stamps = pd.to_numeric(frame["timestamp"], errors="coerce").dropna().astype("int64").tolist()
+    return funding_tail_is_fresh(stamps, now)
+
+
 def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partition: str = "dev") -> float:
     try:
         root = Path(futures_root) / "ohlcv" / "1h"
@@ -92,7 +110,7 @@ def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partit
             except Exception:
                 continue
             try:
-                df = pd.read_parquet(p, columns=["timestamp"])
+                df = pd.read_parquet(p, columns=["timestamp", "volume"])
             except Exception:
                 continue
             if df.empty or "timestamp" not in df.columns:
@@ -110,6 +128,9 @@ def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partit
             try:
                 tail = pd.Timestamp(int(max_val), unit="ms", tz="UTC")
             except Exception:
+                continue
+            recent = pd.to_numeric(df["timestamp"], errors="coerce") >= int((now - pd.Timedelta(hours=STALENESS_ACTIVE_WINDOW_HOURS)).value // 10**6)
+            if not (pd.to_numeric(df.loc[recent, "volume"], errors="coerce") > 0).any():
                 continue
             gaps.append((now - tail).total_seconds() / 3600.0)
         if not gaps:
@@ -200,7 +221,7 @@ def refresh_live_market_data(
         if time.perf_counter() > deadline_ts:
             return "deadline"
         tail = _disk_tail_ts(futures_root, sym, now)
-        if tail is not None and (now - tail) <= pd.Timedelta(hours=freshness_floor_hours):
+        if tail is not None and (now - tail) <= pd.Timedelta(hours=freshness_floor_hours) and _funding_fresh_on_disk(futures_root, sym, now):
             return "fresh"
         if ip_blocked.is_set():
             return "ip_blocked"
@@ -251,12 +272,13 @@ def refresh_live_market_data(
     # So all will be deadline.
 
     staleness = market_data_staleness_hours(Path(futures_root), now=now, partition=partition)
+    funding_stale = sum(1 for sym in symbols_list if not _funding_fresh_on_disk(futures_root, sym, now))
     ok = (fresh + refreshed) >= min_symbols and failed <= math.ceil(max_fail_fraction * total) and not ip_blocked.is_set()
     elapsed_s = time.perf_counter() - t0
 
     _logger.info(
-        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d deadline_hit=%s staleness_h=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s",
-        total, fresh, refreshed, failed, deadline_skipped, deadline_hit, staleness, elapsed_s, ok, ip_blocked.is_set(),
+        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d deadline_hit=%s staleness_h=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s funding_stale=%d",
+        total, fresh, refreshed, failed, deadline_skipped, deadline_hit, staleness, elapsed_s, ok, ip_blocked.is_set(), funding_stale,
     )
 
     return RefreshReport(
@@ -270,4 +292,5 @@ def refresh_live_market_data(
         staleness_hours=float(staleness),
         ok=bool(ok),
         ip_blocked=ip_blocked.is_set(),
+        funding_stale=funding_stale,
     )

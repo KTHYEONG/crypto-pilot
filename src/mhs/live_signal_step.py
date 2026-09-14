@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import gc
+import json
 import logging
+import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -17,11 +19,13 @@ from src.common.errors import DataIntegrityError
 from src.live.portfolio_state import default_portfolio_state_dir
 from src.mhs.live_runtime import LiveRuntime
 from src.mhs.live_strategy import LiveStrategyParams
+from src.mhs.panel import PanelQuarantine
 from src.mhs.scaling import compute_exposure_scale
 
 logger = logging.getLogger("LiveSignalStep")
 
 PANEL_HISTORY_REFERENCE_SYMBOL: str = "BTCUSDT"
+QUARANTINE_SIDECAR_NAME: str = "signal_quarantine.json"
 
 try:
     from src.mhs.evaluation import _build_fold_target_weights  # noqa: F401
@@ -29,6 +33,24 @@ except Exception:  # noqa: BLE001,S110
 
     def _build_fold_target_weights(*_a: Any, **_k: Any) -> Any:  # type: ignore[misc]
         raise DataIntegrityError("missing _build_fold_target_weights")
+
+
+def _signal_quarantine(runtime: LiveRuntime) -> PanelQuarantine:
+    held = {str(s) for s, w in runtime.held_target_row.items() if pd.notna(w) and float(w) != 0.0}
+    return PanelQuarantine(protected=frozenset(held | {PANEL_HISTORY_REFERENCE_SYMBOL}))
+
+
+def quarantine_sidecar_path(weights_path: Path) -> Path:
+    return Path(weights_path).parent / QUARANTINE_SIDECAR_NAME
+
+
+def write_quarantine_sidecar(weights_path: Path, decision_time: pd.Timestamp, quarantine: PanelQuarantine) -> None:
+    path = quarantine_sidecar_path(weights_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"decision_time": pd.Timestamp(decision_time).tz_convert("UTC").isoformat(), "records": [{"symbol": r.symbol, "reason": r.reason} for r in quarantine.records]}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _assert_panel_history_available(
@@ -60,7 +82,10 @@ def realized_equity(portfolio_state_dir: Path, mode: str, *, bt_end: pd.Timestam
         return pd.Series(dtype="float64")
     frames: list[pd.DataFrame] = []
     for shard in shards:
-        df = pd.read_parquet(shard)
+        try:
+            df = pd.read_parquet(shard)
+        except (OSError, ValueError) as exc:
+            raise DataIntegrityError(f"portfolio state shard unreadable: {shard}") from exc
         if not df.empty:
             frames.append(df)
     if not frames:
@@ -147,15 +172,22 @@ def decision_mark_row(
     for sym in symbols:
         path = Path(mark_path_fn(str(sym)))
         if not path.exists():
+            logger.warning("[DATA] stage=decision_mark symbol=%s reason=%s", sym, "file_missing")
             continue
-        df = pd.read_parquet(path, columns=["timestamp", "close"])
+        try:
+            df = pd.read_parquet(path, columns=["timestamp", "close"])
+        except (OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=decision_mark symbol=%s reason=%s", sym, f"unreadable:{type(exc).__name__}")
+            continue
         ts = pd.to_numeric(df["timestamp"], errors="coerce")
         cl = pd.to_numeric(df["close"], errors="coerce")
         hit = df.loc[ts == target_ms]
         if hit.empty:
+            logger.warning("[DATA] stage=decision_mark symbol=%s reason=%s", sym, "bar_missing")
             continue
         close_val = float(cl.loc[hit.index[0]])
         if not np.isfinite(close_val) or close_val <= 0:
+            logger.warning("[DATA] stage=decision_mark symbol=%s reason=%s", sym, "invalid_close")
             continue
         vals[str(sym)] = float(close_val)
     return pd.Series(vals, dtype="float64", name=dt)
@@ -180,7 +212,7 @@ def _synthetic_fold(date: pd.Timestamp, params: LiveStrategyParams) -> Any:
     )
 
 
-def _load_funding_by_symbol(root_str: str) -> dict[str, pd.Series]:
+def _load_funding_by_symbol(root_str: str, quarantine: PanelQuarantine | None = None) -> dict[str, pd.Series]:
     import glob
     import os
 
@@ -201,28 +233,31 @@ def _load_funding_by_symbol(root_str: str) -> dict[str, pd.Series]:
             fp = funding_path(sym)
             if fp.exists():
                 funding_by_symbol[sym] = load_funding_rates(str(fp))
-        except Exception:  # noqa: S112
+        except Exception as exc:
+            if quarantine is None:
+                raise DataIntegrityError(f"funding unreadable for {sym}: {type(exc).__name__}") from exc
+            quarantine.add(sym, f"funding_unreadable:{type(exc).__name__}")
             continue
     if not funding_by_symbol:
-        try:
-            import glob as _g
+        import glob as _g
 
-            fp_pattern = os.path.join(search_root, "funding", "*.parquet")
-            if not _g.glob(fp_pattern):
-                from src.common.paths import FUTURES_DATA_DIR as _fdd  # noqa: N811
+        fp_pattern = os.path.join(search_root, "funding", "*.parquet")
+        if not _g.glob(fp_pattern):
+            from src.common.paths import FUTURES_DATA_DIR as _fdd  # noqa: N811
 
-                fp_pattern = str(_fdd / "funding" / "*.parquet")
-            for fp in sorted(_g.glob(fp_pattern)):  # type: ignore[assignment]
-                sym = os.path.basename(fp).removesuffix(".parquet")
-                if sym not in funding_by_symbol:
-                    try:
-                        from src.market_data.storage.loaders import load_funding_rates as _lfr
+            fp_pattern = str(_fdd / "funding" / "*.parquet")
+        for fp in sorted(_g.glob(fp_pattern)):  # type: ignore[assignment]
+            sym = os.path.basename(fp).removesuffix(".parquet")
+            if sym not in funding_by_symbol:
+                try:
+                    from src.market_data.storage.loaders import load_funding_rates as _lfr
 
-                        funding_by_symbol[sym] = _lfr(fp)
-                    except Exception:  # noqa: S112
-                        continue
-        except Exception:  # noqa: S110
-            pass
+                    funding_by_symbol[sym] = _lfr(fp)
+                except Exception as exc:
+                    if quarantine is None:
+                        raise DataIntegrityError(f"funding unreadable for {sym}: {type(exc).__name__}") from exc
+                    quarantine.add(sym, f"funding_unreadable:{type(exc).__name__}")
+                    continue
     return funding_by_symbol
 
 
@@ -235,6 +270,7 @@ def compute_signal_row(
     portfolio_state_dir: Path | None = None,
     mode: str = "shadow",
     applied_scale: pd.Series | None = None,
+    quarantine: PanelQuarantine | None = None,
 ) -> tuple[pd.Series, pd.Series, float]:
     if not data_root:
         from src.common.paths import FUTURES_DATA_DIR
@@ -245,7 +281,7 @@ def compute_signal_row(
     _assert_panel_history_available(data_root, dt - pd.Timedelta(days=int(params.policy.signal_window.panel_window_days)))
     fold = _synthetic_fold(dt, params)
     request = params.policy.target_weights.to_request()  # TargetWeightPolicy.to_request seam
-    funding_by_symbol = _load_funding_by_symbol(data_root)
+    funding_by_symbol = _load_funding_by_symbol(data_root, quarantine)
 
     target_weights, _signal_available_at, _minute_roster, grid_1h = _build_fold_target_weights(  # noqa: RUF059
         data_root,
@@ -258,6 +294,7 @@ def compute_signal_row(
         panel_warmup_hours=int(params.policy.signal_window.fold_panel_warmup_hours),
         committee_oos_start=params.policy.signal_window.committee_oos_start,
         apply_rebalance_deadband=False,
+        panel_quarantine=quarantine,
     )
     if dt not in target_weights.index:
         del grid_1h
@@ -344,9 +381,11 @@ def advance_to_date(
         applied = _scale_frame[EXPOSURE_SCALE_COLUMN].astype("float64").sort_index()
     gap_days = (target_dt - last_dt).days
     if gap_days > max_catchup_days:
+        quarantine = _signal_quarantine(runtime)
         scaled_row, prescale_row, _scalar = compute_signal_row(
-            params, runtime, data_root, target_dt, portfolio_state_dir=portfolio_state_dir, mode=mode, applied_scale=applied
+            params, runtime, data_root, target_dt, portfolio_state_dir=portfolio_state_dir, mode=mode, applied_scale=applied, quarantine=quarantine
         )
+        write_quarantine_sidecar(Path(weights_path), target_dt, quarantine)
         # 스케일/마크를 weights 행보다 먼저 기록: weights 행이 있으면 스케일도 반드시 존재한다.
         append_weight_row(exposure_scale_path(Path(weights_path)), target_dt, pd.Series({EXPOSURE_SCALE_COLUMN: float(_scalar)}, dtype="float64"), artifact_key=artifact_key, keep_rows=EXPOSURE_SCALE_KEEP_ROWS)
         _syms = [str(s) for s in scaled_row.index if pd.notna(scaled_row[s]) and float(scaled_row[s]) != 0.0]
@@ -378,10 +417,12 @@ def advance_to_date(
             )
             cur += pd.Timedelta(days=1)
             continue
+        quarantine = _signal_quarantine(cur_runtime)
         scaled_row, prescale_row, _scalar = compute_signal_row(
-            params, cur_runtime, data_root, cur, portfolio_state_dir=portfolio_state_dir, mode=mode, applied_scale=applied
+            params, cur_runtime, data_root, cur, portfolio_state_dir=portfolio_state_dir, mode=mode, applied_scale=applied, quarantine=quarantine
         )
         last_scalar = float(_scalar)
+        write_quarantine_sidecar(Path(weights_path), cur, quarantine)
         # 스케일/마크를 weights 행보다 먼저 기록: weights 행이 있으면 스케일도 반드시 존재한다.
         append_weight_row(exposure_scale_path(Path(weights_path)), cur, pd.Series({EXPOSURE_SCALE_COLUMN: float(_scalar)}, dtype="float64"), artifact_key=artifact_key, keep_rows=EXPOSURE_SCALE_KEEP_ROWS)
         _syms = [str(s) for s in scaled_row.index if pd.notna(scaled_row[s]) and float(scaled_row[s]) != 0.0]

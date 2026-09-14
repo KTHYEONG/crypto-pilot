@@ -28,7 +28,7 @@ def test_advance_to_date_scores_missing_days(monkeypatch, tmp_path) -> None:
     rt = LiveRuntime(schema_version=1, params_digest="d", last_decision_date=pd.Timestamp("2026-08-20", tz="UTC"),
                      held_target_row={"BTCUSDT": 0.1}, reference_daily_returns=pd.Series(dtype="float64"))
 
-    def _fake_compute(p, r, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None):
+    def _fake_compute(p, r, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
         return pd.Series({"BTCUSDT": 0.4}, name=date), pd.Series({"BTCUSDT": 0.2}, name=date), 1.0
 
     monkeypatch.setattr(step, "compute_signal_row", _fake_compute)
@@ -556,7 +556,7 @@ def test_advance_to_date_persists_prescale_held_scale_and_decision_marks(tmp_pat
     runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=d1 - pd.Timedelta(days=1), held_target_row={}, reference_daily_returns=pd.Series(dtype="float64"))
     seen_scales: list[pd.Series] = []
 
-    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None):
+    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
         seen_scales.append(applied_scale.copy())
         return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
 
@@ -636,7 +636,7 @@ def test_advance_to_date_gap_branch_persists_prescale(tmp_path, monkeypatch) -> 
     far = d1 + pd.Timedelta(days=40)
     runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=d1 - pd.Timedelta(days=1), held_target_row={}, reference_daily_returns=pd.Series(dtype="float64"))
 
-    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None):
+    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
         return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
 
     monkeypatch.setattr(module, "compute_signal_row", fake_compute)
@@ -649,3 +649,325 @@ def test_advance_to_date_gap_branch_persists_prescale(tmp_path, monkeypatch) -> 
     assert new_rt.held_target_row == {"AAAUSDT": 0.1}
     scale_frame = load_weights_frame(exposure_scale_path(weights_path))
     assert float(scale_frame.loc[far, EXPOSURE_SCALE_COLUMN]) == 2.0
+
+
+# --- auto appended from contract: signal_input_quarantine ---
+
+
+def test_signal_quarantine_protects_held_and_reference_symbols() -> None:
+    import pandas as pd
+    from src.mhs.live_runtime import LiveRuntime
+    from src.mhs.live_signal_step import _signal_quarantine
+
+    runtime = LiveRuntime(
+        schema_version=1, params_digest="d", last_decision_date=pd.Timestamp("2026-09-04", tz="UTC"),
+        held_target_row={"ETHUSDT": -0.2, "XRPUSDT": 0.0}, reference_daily_returns=pd.Series(dtype="float64"),
+    )
+
+    quarantine = _signal_quarantine(runtime)
+
+    assert quarantine.protected == frozenset({"ETHUSDT", "BTCUSDT"})
+    assert quarantine.records == []
+
+
+def test_compute_signal_row_threads_quarantine_to_funding_and_panel(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.mhs.live_signal_step as m
+    from src.mhs.live_runtime import LiveRuntime
+    from src.mhs.panel import PanelQuarantine
+
+    dt = pd.Timestamp("2026-08-31", tz="UTC")
+    tw = pd.DataFrame([[1.0]], index=pd.DatetimeIndex([dt]), columns=["BTCUSDT"])
+    captured: dict[str, object] = {}
+
+    def _funding(root, quarantine):
+        captured["funding"] = quarantine
+        return {}
+
+    def _builder(*args, **kwargs):
+        captured["panel"] = kwargs["panel_quarantine"]
+        return tw, pd.DatetimeIndex([dt]), [], pd.DatetimeIndex([dt])
+
+    monkeypatch.setattr(m, "_load_funding_by_symbol", _funding)
+    monkeypatch.setattr(m, "_build_fold_target_weights", _builder)
+    monkeypatch.setattr(m, "_assert_panel_history_available", lambda *a, **k: None)
+    monkeypatch.setattr(m, "realized_equity", lambda *a, **k: pd.Series(dtype="float64"))
+    monkeypatch.setattr(
+        m, "compute_exposure_scale",
+        lambda reference, sizing, *, warmup_returns=None: pd.Series(1.0, index=reference.index, dtype="float64"),
+    )
+    params = _v2_sig_params("growth_budget", 1.0, False, False)
+    rt = LiveRuntime(
+        schema_version=1, params_digest="d", last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
+        held_target_row={}, reference_daily_returns=pd.Series(dtype="float64"),
+    )
+    quarantine = PanelQuarantine(protected=frozenset({"BTCUSDT"}))
+
+    m.compute_signal_row(params, rt, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper", quarantine=quarantine)
+
+    assert captured["funding"] is quarantine
+    assert captured["panel"] is quarantine
+
+
+def test_load_funding_by_symbol_quarantines_unreadable_funding(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+    import src.common.paths as paths_mod
+    import src.market_data.storage.loaders as loaders_mod
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import _load_funding_by_symbol
+    from src.mhs.panel import PanelQuarantine
+
+    (tmp_path / "1h").mkdir()
+    (tmp_path / "funding").mkdir()
+    good = pd.Series([0.0001], index=pd.DatetimeIndex(["2026-09-01"], tz="UTC"), dtype="float64")
+
+    def _loader(path):
+        if "BAD" in str(path):
+            raise ValueError("corrupt funding parquet")
+        return good
+
+    for sym in ("AAAUSDT", "BADUSDT"):
+        pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "1h" / f"{sym}.parquet", index=False)
+        pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "funding" / f"{sym}.parquet", index=False)
+    monkeypatch.setattr(paths_mod, "funding_path", lambda sym: tmp_path / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(loaders_mod, "load_funding_rates", _loader)
+    quarantine = PanelQuarantine(protected=frozenset())
+
+    out = _load_funding_by_symbol(str(tmp_path), quarantine)
+
+    assert list(out) == ["AAAUSDT"]
+    assert [(r.symbol, r.reason) for r in quarantine.records] == [("BADUSDT", "funding_unreadable:ValueError")]
+
+
+def test_load_funding_by_symbol_without_quarantine_fails_closed(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+    import src.common.paths as paths_mod
+    import src.market_data.storage.loaders as loaders_mod
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import _load_funding_by_symbol
+    from src.mhs.panel import PanelQuarantine
+
+    (tmp_path / "1h").mkdir()
+    (tmp_path / "funding").mkdir()
+    good = pd.Series([0.0001], index=pd.DatetimeIndex(["2026-09-01"], tz="UTC"), dtype="float64")
+
+    def _loader(path):
+        if "BAD" in str(path):
+            raise ValueError("corrupt funding parquet")
+        return good
+
+    pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "1h" / "BADUSDT.parquet", index=False)
+    pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "funding" / "BADUSDT.parquet", index=False)
+    monkeypatch.setattr(paths_mod, "funding_path", lambda sym: tmp_path / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(loaders_mod, "load_funding_rates", _loader)
+
+    with pytest.raises(DataIntegrityError, match="funding unreadable for BADUSDT"):
+        _load_funding_by_symbol(str(tmp_path))
+
+
+def test_load_funding_by_symbol_fallback_quarantines_unreadable_funding(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+    import src.common.paths as paths_mod
+    import src.market_data.storage.loaders as loaders_mod
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import _load_funding_by_symbol
+    from src.mhs.panel import PanelQuarantine
+
+    (tmp_path / "1h").mkdir()
+    (tmp_path / "funding").mkdir()
+    good = pd.Series([0.0001], index=pd.DatetimeIndex(["2026-09-01"], tz="UTC"), dtype="float64")
+
+    def _loader(path):
+        if "BAD" in str(path):
+            raise ValueError("corrupt funding parquet")
+        return good
+
+    pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "1h" / "CCCUSDT.parquet", index=False)
+    for sym in ("DDDUSDT", "BADUSDT"):
+        pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "funding" / f"{sym}.parquet", index=False)
+    monkeypatch.setattr(paths_mod, "funding_path", lambda sym: tmp_path / "nofunding" / f"{sym}.parquet")
+    monkeypatch.setattr(loaders_mod, "load_funding_rates", _loader)
+    quarantine = PanelQuarantine(protected=frozenset())
+
+    out = _load_funding_by_symbol(str(tmp_path), quarantine)
+
+    assert list(out) == ["DDDUSDT"]
+    assert [(r.symbol, r.reason) for r in quarantine.records] == [("BADUSDT", "funding_unreadable:ValueError")]
+
+
+def test_load_funding_by_symbol_fallback_without_quarantine_fails_closed(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+    import src.common.paths as paths_mod
+    import src.market_data.storage.loaders as loaders_mod
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import _load_funding_by_symbol
+    from src.mhs.panel import PanelQuarantine
+
+    (tmp_path / "1h").mkdir()
+    (tmp_path / "funding").mkdir()
+    good = pd.Series([0.0001], index=pd.DatetimeIndex(["2026-09-01"], tz="UTC"), dtype="float64")
+
+    def _loader(path):
+        if "BAD" in str(path):
+            raise ValueError("corrupt funding parquet")
+        return good
+
+    pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "1h" / "CCCUSDT.parquet", index=False)
+    pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "funding" / "BADUSDT.parquet", index=False)
+    monkeypatch.setattr(paths_mod, "funding_path", lambda sym: tmp_path / "nofunding" / f"{sym}.parquet")
+    monkeypatch.setattr(loaders_mod, "load_funding_rates", _loader)
+
+    with pytest.raises(DataIntegrityError, match="funding unreadable for BADUSDT"):
+        _load_funding_by_symbol(str(tmp_path))
+
+
+def test_load_funding_by_symbol_fallback_uses_lake_funding_dir_when_root_has_none(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+    import src.common.paths as paths_mod
+    import src.market_data.storage.loaders as loaders_mod
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import _load_funding_by_symbol
+    from src.mhs.panel import PanelQuarantine
+
+    (tmp_path / "1h").mkdir()
+    (tmp_path / "funding").mkdir()
+    good = pd.Series([0.0001], index=pd.DatetimeIndex(["2026-09-01"], tz="UTC"), dtype="float64")
+
+    def _loader(path):
+        if "BAD" in str(path):
+            raise ValueError("corrupt funding parquet")
+        return good
+
+    (tmp_path / "funding").rmdir()
+    lake = tmp_path / "lake"
+    (lake / "funding").mkdir(parents=True)
+    pd.DataFrame({"timestamp": [0]}).to_parquet(tmp_path / "1h" / "CCCUSDT.parquet", index=False)
+    pd.DataFrame({"timestamp": [0]}).to_parquet(lake / "funding" / "EEEUSDT.parquet", index=False)
+    monkeypatch.setattr(paths_mod, "funding_path", lambda sym: tmp_path / "nofunding" / f"{sym}.parquet")
+    monkeypatch.setattr(paths_mod, "FUTURES_DATA_DIR", lake)
+    monkeypatch.setattr(loaders_mod, "load_funding_rates", _loader)
+
+    out = _load_funding_by_symbol(str(tmp_path), PanelQuarantine(protected=frozenset()))
+
+    assert list(out) == ["EEEUSDT"]
+
+
+def test_realized_equity_unreadable_shard_fails_closed_with_named_error(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import realized_equity
+
+    d = tmp_path / "ps"
+    d.mkdir()
+    (d / "active.parquet").write_bytes(b"not a parquet")
+
+    with pytest.raises(DataIntegrityError, match="portfolio state shard unreadable"):
+        realized_equity(d, "paper", bt_end=pd.Timestamp("2025-12-31", tz="UTC"))
+
+
+def test_decision_mark_row_logs_each_omission_reason(tmp_path, caplog) -> None:
+    import logging
+    import pandas as pd
+    from src.mhs.live_signal_step import decision_mark_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    prior_ms = (dt - pd.Timedelta(hours=1)).value // 1_000_000
+    pd.DataFrame({"timestamp": [prior_ms], "close": [101.5]}).to_parquet(tmp_path / "OKUSDT.parquet", index=False)
+    (tmp_path / "BADUSDT.parquet").write_bytes(b"not a parquet")
+    pd.DataFrame({"timestamp": [dt.value // 1_000_000], "close": [55.0]}).to_parquet(tmp_path / "LATEUSDT.parquet", index=False)
+    pd.DataFrame({"timestamp": [prior_ms], "close": [0.0]}).to_parquet(tmp_path / "ZEROUSDT.parquet", index=False)
+
+    with caplog.at_level(logging.WARNING, logger="LiveSignalStep"):
+        row = decision_mark_row(
+            ["OKUSDT", "MISSINGUSDT", "BADUSDT", "LATEUSDT", "ZEROUSDT"], dt,
+            lambda symbol: tmp_path / f"{symbol}.parquet",
+        )
+
+    assert row.to_dict() == {"OKUSDT": 101.5}
+    text = caplog.text
+    assert "symbol=MISSINGUSDT reason=file_missing" in text
+    assert "symbol=BADUSDT reason=unreadable:ArrowInvalid" in text
+    assert "symbol=LATEUSDT reason=bar_missing" in text
+    assert "symbol=ZEROUSDT reason=invalid_close" in text
+
+
+def test_advance_to_date_writes_quarantine_sidecar_with_protected_quarantine(tmp_path, monkeypatch) -> None:
+    import dataclasses
+    import json
+    import pandas as pd
+    import src.mhs.live_signal_step as module
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime
+    from src.mhs.live_strategy import LiveStrategyParams
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    policy = build_deployment_policy(request, slow_horizon_hours=168, committee_member_weights={"m": 1.0}, admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0)
+    params = LiveStrategyParams(schema_version=2, strategy_digest="d", backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")), created_at=pd.Timestamp("2026-09-01", tz="UTC"), policy=policy, bootstrap_sha256="a" * 64, bootstrap_held_row={})
+    d1 = pd.Timestamp("2026-09-05", tz="UTC")
+    runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=d1 - pd.Timedelta(days=1), held_target_row={"AAAUSDT": 0.1, "FLATUSDT": 0.0}, reference_daily_returns=pd.Series(dtype="float64"))
+    seen: dict[str, object] = {}
+
+    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
+        seen["protected"] = quarantine.protected
+        quarantine.add("ZZZUSDT", "decision_bar_missing")
+        return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
+
+    monkeypatch.setattr(module, "compute_signal_row", fake_compute)
+    monkeypatch.setattr(module, "decision_mark_row", lambda symbols, date, mark_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+
+    module.advance_to_date(params, runtime, weights_path, "", d1)
+
+    sidecar = json.loads((tmp_path / "signal_quarantine.json").read_text(encoding="utf-8"))
+    assert seen["protected"] == frozenset({"AAAUSDT", "BTCUSDT"})
+    assert sidecar == {
+        "decision_time": "2026-09-05T00:00:00+00:00",
+        "records": [{"symbol": "ZZZUSDT", "reason": "decision_bar_missing"}],
+    }
+    assert module.quarantine_sidecar_path(weights_path) == tmp_path / "signal_quarantine.json"
+
+
+def test_advance_to_date_gap_branch_writes_quarantine_sidecar(tmp_path, monkeypatch) -> None:
+    import dataclasses
+    import json
+    import pandas as pd
+    import src.mhs.live_signal_step as module
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime
+    from src.mhs.live_strategy import LiveStrategyParams
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    policy = build_deployment_policy(request, slow_horizon_hours=168, committee_member_weights={"m": 1.0}, admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0)
+    params = LiveStrategyParams(schema_version=2, strategy_digest="d", backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")), created_at=pd.Timestamp("2026-09-01", tz="UTC"), policy=policy, bootstrap_sha256="a" * 64, bootstrap_held_row={})
+    d1 = pd.Timestamp("2026-09-05", tz="UTC")
+    runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=d1 - pd.Timedelta(days=1), held_target_row={"AAAUSDT": 0.1, "FLATUSDT": 0.0}, reference_daily_returns=pd.Series(dtype="float64"))
+    seen: dict[str, object] = {}
+
+    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
+        seen["protected"] = quarantine.protected
+        quarantine.add("ZZZUSDT", "decision_bar_missing")
+        return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
+
+    monkeypatch.setattr(module, "compute_signal_row", fake_compute)
+    monkeypatch.setattr(module, "decision_mark_row", lambda symbols, date, mark_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+
+    far = d1 + pd.Timedelta(days=40)
+
+    module.advance_to_date(params, runtime, weights_path, "", far, max_catchup_days=30)
+
+    sidecar = json.loads((tmp_path / "signal_quarantine.json").read_text(encoding="utf-8"))
+    assert seen["protected"] == frozenset({"AAAUSDT", "BTCUSDT"})
+    assert sidecar["decision_time"] == far.isoformat()
+    assert sidecar["records"] == [{"symbol": "ZZZUSDT", "reason": "decision_bar_missing"}]
+    assert not list(tmp_path.glob("*.tmp"))

@@ -378,3 +378,183 @@ def test_strategy_bootstrap_loader_fail_closed_branches(tmp_path) -> None:
     (tmp_path / "copied.parquet").write_bytes(enc_path.read_bytes())
     with pytest.raises(ArtifactSealError):
         load_strategy_bootstrap(tmp_path / "copied.parquet", expected_sha256=digest, artifact_key=wrong)
+
+
+def test_strategy_params_legacy_data_policy_is_implicit_and_digest_stable(tmp_path) -> None:
+    import dataclasses
+    import json
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_strategy import (
+        DATA_POLICY_LEGACY,
+        LiveStrategyParams,
+        _compute_strategy_digest,
+        load_strategy_params,
+        save_strategy_params,
+    )
+    from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    policy = build_deployment_policy(
+        request, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
+        admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0,
+    )
+
+    def _params(**overrides):
+        base = dict(
+            schema_version=2, strategy_digest="",
+            backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2026-06-30", tz="UTC")),
+            created_at=pd.Timestamp("2026-09-13", tz="UTC"), policy=policy,
+            bootstrap_sha256="a" * 64, bootstrap_held_row={"BTCUSDT": 0.2},
+        )
+        base.update(overrides)
+        return LiveStrategyParams(**base)
+
+    path = save_strategy_params(tmp_path / "strategy_params.json", _params())
+    raw = json.loads(path.read_text(encoding="utf-8"))
+
+    assert "data_policy" not in raw
+    loaded = load_strategy_params(path)
+    assert loaded.data_policy == DATA_POLICY_LEGACY
+    legacy_raw = {k: v for k, v in raw.items() if k != "strategy_digest"}
+    assert _compute_strategy_digest(legacy_raw) == raw["strategy_digest"]
+
+
+def test_strategy_params_non_legacy_data_policy_round_trips_into_digest(tmp_path) -> None:
+    import dataclasses
+    import json
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_strategy import (
+        DATA_POLICY_LEGACY,
+        LiveStrategyParams,
+        _compute_strategy_digest,
+        load_strategy_params,
+        save_strategy_params,
+    )
+    from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    policy = build_deployment_policy(
+        request, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
+        admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0,
+    )
+
+    def _params(**overrides):
+        base = dict(
+            schema_version=2, strategy_digest="",
+            backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2026-06-30", tz="UTC")),
+            created_at=pd.Timestamp("2026-09-13", tz="UTC"), policy=policy,
+            bootstrap_sha256="a" * 64, bootstrap_held_row={"BTCUSDT": 0.2},
+        )
+        base.update(overrides)
+        return LiveStrategyParams(**base)
+
+    legacy_path = save_strategy_params(tmp_path / "legacy.json", _params())
+    masked_path = save_strategy_params(tmp_path / "masked.json", _params(data_policy=DATA_POLICY_ZOMBIE_MASK_V1))
+    legacy_raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+    masked_raw = json.loads(masked_path.read_text(encoding="utf-8"))
+
+    assert masked_raw["data_policy"] == DATA_POLICY_ZOMBIE_MASK_V1
+    assert masked_raw["strategy_digest"] != legacy_raw["strategy_digest"]
+    assert load_strategy_params(masked_path).data_policy == DATA_POLICY_ZOMBIE_MASK_V1
+
+
+def test_strategy_params_data_policy_tamper_and_unknown_rejected(tmp_path) -> None:
+    import dataclasses
+    import json
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_strategy import (
+        DATA_POLICY_LEGACY,
+        LiveStrategyParams,
+        _compute_strategy_digest,
+        load_strategy_params,
+        save_strategy_params,
+    )
+    from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    policy = build_deployment_policy(
+        request, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
+        admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0,
+    )
+
+    def _params(**overrides):
+        base = dict(
+            schema_version=2, strategy_digest="",
+            backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2026-06-30", tz="UTC")),
+            created_at=pd.Timestamp("2026-09-13", tz="UTC"), policy=policy,
+            bootstrap_sha256="a" * 64, bootstrap_held_row={"BTCUSDT": 0.2},
+        )
+        base.update(overrides)
+        return LiveStrategyParams(**base)
+
+    path = save_strategy_params(tmp_path / "strategy_params.json", _params())
+    raw = json.loads(path.read_text(encoding="utf-8"))
+
+    tampered = dict(raw, data_policy=DATA_POLICY_ZOMBIE_MASK_V1)
+    tampered_path = tmp_path / "tampered.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="strategy_digest mismatch"):
+        load_strategy_params(tampered_path)
+
+    unknown = dict(raw, data_policy="zombie_mask_v9")
+    unknown_path = tmp_path / "unknown.json"
+    unknown_path.write_text(json.dumps(unknown), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="unknown data_policy"):
+        load_strategy_params(unknown_path)
+
+
+def test_assert_runtime_data_policy_rejects_mismatch(tmp_path) -> None:
+    import dataclasses
+    import json
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_strategy import (
+        DATA_POLICY_LEGACY,
+        LiveStrategyParams,
+        _compute_strategy_digest,
+        load_strategy_params,
+        save_strategy_params,
+    )
+    from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    policy = build_deployment_policy(
+        request, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
+        admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0,
+    )
+
+    def _params(**overrides):
+        base = dict(
+            schema_version=2, strategy_digest="",
+            backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2026-06-30", tz="UTC")),
+            created_at=pd.Timestamp("2026-09-13", tz="UTC"), policy=policy,
+            bootstrap_sha256="a" * 64, bootstrap_held_row={"BTCUSDT": 0.2},
+        )
+        base.update(overrides)
+        return LiveStrategyParams(**base)
+    from src.mhs.live_strategy import LIVE_RUNTIME_DATA_POLICY, assert_runtime_data_policy
+
+    assert LIVE_RUNTIME_DATA_POLICY == DATA_POLICY_LEGACY
+    assert assert_runtime_data_policy(_params()) is None
+    with pytest.raises(DataIntegrityError, match="data_policy mismatch"):
+        assert_runtime_data_policy(_params(data_policy=DATA_POLICY_ZOMBIE_MASK_V1))
+

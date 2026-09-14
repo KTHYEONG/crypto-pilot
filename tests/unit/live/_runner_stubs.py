@@ -55,6 +55,12 @@ class StubOrderClient:
             }
         if path == "/fapi/v2/positionRisk":
             return []
+        if path == "/fapi/v1/leverageBracket":
+            return [{"symbol": symbol, "brackets": [{"bracket": 1, "initialLeverage": 20, "notionalCap": 50000, "notionalFloor": 0, "maintMarginRatio": 0.01, "cum": 0}]} for symbol in ("AAAUSDT", "BUSDT")]
+        if path == "/fapi/v1/marginType":
+            return {"code": 200, "msg": "success"}
+        if path == "/fapi/v1/leverage":
+            return {"symbol": params["symbol"], "leverage": params["leverage"], "maxNotionalValue": "50000"}
         raise AssertionError(f"unexpected path {path}")
 
     def sync_server_time(self) -> None:

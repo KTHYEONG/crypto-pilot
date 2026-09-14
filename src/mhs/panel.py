@@ -7,18 +7,64 @@ every panel is reindexed onto it so phase offsets are integer row offsets.
 from __future__ import annotations
 
 import glob
+import logging
+import math
 import os
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.common.errors import DataIntegrityError
 from src.market_data.storage.ohlcv import is_temp_artifact
 from src.mhs.params import PANEL_MIN_HISTORY_BARS
 from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
 from src.quant.universe.pit_universe import symbol_partition
+
+DATA_POLICY_LEGACY: str = "legacy"
+DATA_POLICY_ZOMBIE_MASK_V1: str = "zombie_mask_v1"
+DATA_POLICIES: frozenset[str] = frozenset({DATA_POLICY_LEGACY, DATA_POLICY_ZOMBIE_MASK_V1})
+ZOMBIE_FLAT_RUN_BARS: int = 24
+
+logger = logging.getLogger("MhsPanel")
+
+
+@dataclass(frozen=True, slots=True)
+class QuarantineRecord:
+    symbol: str
+    reason: str
+
+
+QUARANTINE_MAX_SYMBOLS: int = 5
+QUARANTINE_MAX_FRACTION: float = 0.01
+DECISION_BAR_LOOKBACK: pd.Timedelta = pd.Timedelta(hours=72)
+
+
+@dataclass(slots=True)
+class PanelQuarantine:
+    protected: frozenset[str]
+    records: list[QuarantineRecord] = field(default_factory=list)
+
+    @property
+    def symbols(self) -> frozenset[str]:
+        return frozenset(r.symbol for r in self.records)
+
+    def add(self, symbol: str, reason: str) -> None:
+        if symbol in self.protected:
+            raise DataIntegrityError(f"protected symbol {symbol} failed signal input check: {reason}")
+        if symbol in self.symbols:
+            return
+        self.records.append(QuarantineRecord(symbol=symbol, reason=reason))
+        logger.warning("[DATA] stage=signal_quarantine symbol=%s reason=%s", symbol, reason)
+
+    def enforce_limit(self, universe_size: int) -> None:
+        limit = min(QUARANTINE_MAX_SYMBOLS, math.ceil(QUARANTINE_MAX_FRACTION * universe_size))
+        if len(self.records) > limit:
+            raise DataIntegrityError(f"signal quarantine {len(self.records)} symbols exceeds limit {limit} of universe {universe_size}")
 
 
 def build_uniform_grid(start: pd.Timestamp, end: pd.Timestamp, interval: str) -> pd.DatetimeIndex:
@@ -49,6 +95,43 @@ def partition_symbols(
     return [s for s in symbols if symbol_partition(s) == partition]
 
 
+def zombie_masked_timestamps(
+    path: str, start_ms: int, end_ms: int, interval_ms: int, run_bars: int = ZOMBIE_FLAT_RUN_BARS
+) -> np.ndarray:
+    """좀비 구간 마스크: run_bars 이상 연속된 flat(volume==0 and high==low) 바의 타임스탬프.
+
+    인과적이다: 각 바의 마스크 여부는 그 바 이전(포함) 바들로만 판단되며,
+    판정은 윈도우 시작 전 run_bars-1 구간을 함께 읽어 워밍업한다. 중복
+    타임스탬프는 keep-last 로 해소한다.
+    """
+    missing = {"volume", "high", "low"} - set(pq.read_schema(path).names)
+    if missing:
+        raise DataIntegrityError(f"zombie mask requires {sorted(missing)} in {path}")
+    table = pq.read_table(
+        path,
+        columns=["timestamp", "volume", "high", "low"],
+        filters=[[("timestamp", ">=", start_ms - (run_bars - 1) * interval_ms), ("timestamp", "<=", end_ms)]],
+    )
+    ts = table.column("timestamp").to_numpy().astype("int64", copy=False)
+    if ts.size == 0:
+        return np.empty(0, dtype="int64")
+    order = np.argsort(ts, kind="stable")
+    ordered = ts[order]
+    last = np.empty(ordered.size, dtype=bool)
+    last[:-1] = ordered[:-1] != ordered[1:]
+    last[-1] = True
+    rows = order[last]
+    stamps = ts[rows]
+    volume = table.column("volume").to_numpy(zero_copy_only=False).astype("float64")[rows]
+    high = table.column("high").to_numpy(zero_copy_only=False).astype("float64")[rows]
+    low = table.column("low").to_numpy(zero_copy_only=False).astype("float64")[rows]
+    flat = (volume == 0.0) & (high == low)
+    idx = np.arange(stamps.size)
+    last_break = np.maximum.accumulate(np.where(flat, -1, idx))
+    run = idx - last_break
+    return np.asarray(stamps[flat & (run >= run_bars) & (stamps >= start_ms)], dtype=np.int64)
+
+
 def load_base_panel(
     root: str,
     interval: str,
@@ -57,14 +140,22 @@ def load_base_panel(
     end: pd.Timestamp,
     partition: Literal["dev", "holdout", "all"] = "dev",
     min_bars: int = PANEL_MIN_HISTORY_BARS,
+    data_policy: str = DATA_POLICY_LEGACY,
+    *,
+    quarantine: PanelQuarantine | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Read ``<root>/<interval>/<SYMBOL>.parquet`` into wide per-column panels.
 
     Returns one wide DataFrame per requested column, all sharing
     ``build_uniform_grid(start, end, interval)`` as index and identical sorted
     column order. No survivorship filter: symbols that delisted inside the
-    window are kept with NaN outside their life.
+    window are kept with NaN outside their life. ``data_policy`` selects the
+    input-data contract: ``'legacy'`` keeps every bar, ``'zombie_mask_v1'``
+    masks causally-detected zombie (long flat) bars from both the survivor
+    count and every panel column.
     """
+    if data_policy not in DATA_POLICIES:
+        raise ValueError(f"unknown data_policy '{data_policy}'")
     grid = build_uniform_grid(start, end, interval)
     paths = sorted(p for p in glob.glob(os.path.join(root, interval, "*.parquet")) if not is_temp_artifact(os.path.basename(p)))
     names = [os.path.basename(p).removesuffix(".parquet") for p in paths]
@@ -72,6 +163,9 @@ def load_base_panel(
 
     start_ms = int(start.value // 1_000_000)
     end_ms = int(end.value // 1_000_000)
+    masking = data_policy == DATA_POLICY_ZOMBIE_MASK_V1
+    interval_ms = int(pd.Timedelta(interval).total_seconds() * 1000)
+    masks: dict[str, np.ndarray] = {}
 
     # Discover survivors before allocating the wide panel.  The prior
     # ``dict[Series] -> DataFrame -> reindex`` construction held as many as
@@ -80,17 +174,34 @@ def load_base_panel(
     # that transient amplification terminates the process before the
     # fail-closed replay/report path can run.
     survivors: list[tuple[str, str]] = []
+    scan_quarantined = 0
     for path, sym in zip(paths, names, strict=True):
         if sym not in keep:
             continue
-        table = pq.read_table(
-            path,
-            columns=["timestamp"],
-            filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
-        )
+        try:
+            table = pq.read_table(
+                path,
+                columns=["timestamp"],
+                filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
+            )
+        except (OSError, pa.ArrowException) as exc:
+            if quarantine is None:
+                raise
+            quarantine.add(sym, f"unreadable:{type(exc).__name__}")
+            scan_quarantined += 1
+            continue
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
-        idx = idx[(idx >= start) & (idx <= end)]
+        ts_ms = table.column("timestamp").to_numpy()
+        keep_rows = (idx >= start) & (idx <= end)
+        if masking:
+            masks[path] = zombie_masked_timestamps(path, start_ms, end_ms, interval_ms)
+            keep_rows &= ~np.isin(ts_ms, masks[path])
+        idx = idx[keep_rows]
         if len(idx.drop_duplicates(keep="last")) < min_bars:
+            continue
+        if quarantine is not None and idx.max() < end and idx.max() >= end - DECISION_BAR_LOOKBACK:
+            quarantine.add(sym, "decision_bar_missing")
+            scan_quarantined += 1
             continue
         survivors.append((path, sym))
 
@@ -101,14 +212,24 @@ def load_base_panel(
         column: np.full((len(grid), len(survivors)), np.nan, dtype="float64")
         for column in columns
     }
-    for column_index, (path, _) in enumerate(survivors):
-        table = pq.read_table(
-            path,
-            columns=["timestamp", *columns],
-            filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
-        )
+    failed_columns: list[int] = []
+    for column_index, (path, sym) in enumerate(survivors):
+        try:
+            table = pq.read_table(
+                path,
+                columns=["timestamp", *columns],
+                filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
+            )
+        except (OSError, pa.ArrowException) as exc:
+            if quarantine is None:
+                raise
+            quarantine.add(sym, f"unreadable:{type(exc).__name__}")
+            failed_columns.append(column_index)
+            continue
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
         in_window = (idx >= start) & (idx <= end)
+        if masking:
+            in_window &= ~np.isin(table.column("timestamp").to_numpy(), masks[path])
         window_sources = np.flatnonzero(in_window)
         positions = grid.get_indexer(idx[in_window])
         valid_positions = positions >= 0
@@ -130,9 +251,22 @@ def load_base_panel(
             field = table.column(column).to_numpy().astype("float64", copy=False)
             values[column][selected_targets, column_index] = field[selected_sources]
 
-    symbols = [sym for _, sym in survivors]
+    if quarantine is not None:
+        quarantine.enforce_limit(len(survivors) + scan_quarantined)
+
+    if not failed_columns:
+        symbols = [sym for _, sym in survivors]
+        return {
+            column: pd.DataFrame(values[column], index=grid, columns=symbols, copy=False)
+            for column in columns
+        }
+    keep_mask = np.ones(len(survivors), dtype=bool)
+    keep_mask[failed_columns] = False
+    symbols = [sym for (_, sym), keep in zip(survivors, keep_mask, strict=True) if keep]
+    if not symbols:
+        raise ValueError("no symbol survived the panel filters")
     return {
-        column: pd.DataFrame(values[column], index=grid, columns=symbols, copy=False)
+        column: pd.DataFrame(values[column][:, keep_mask], index=grid, columns=symbols, copy=False)
         for column in columns
     }
 

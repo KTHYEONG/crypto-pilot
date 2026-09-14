@@ -702,3 +702,158 @@ def test_ensure_ohlcv_data_rejects_unknown_timeframe(tmp_path, monkeypatch) -> N
     with pytest.raises(ValueError, match="unsupported timeframe"):
         collector.ensure_ohlcv_data("XUSDT", "1M", "2026-09-13T22:00:00Z", "2026-09-14T01:03:00Z")
 
+
+
+def test_infer_funding_interval_ms_from_series() -> None:
+    from src.market_data.services.futures_collection import FUNDING_DEFAULT_INTERVAL_MS, infer_funding_interval_ms
+
+    h = 3600000
+    assert 8 * h == FUNDING_DEFAULT_INTERVAL_MS
+    assert infer_funding_interval_ms([]) == 8 * h
+    assert infer_funding_interval_ms([5 * h]) == 8 * h
+    assert infer_funding_interval_ms([0, 4 * h + 3, 8 * h, 12 * h - 2]) == 4 * h
+    assert infer_funding_interval_ms([0, 8 * h, 16 * h, 24 * h]) == 8 * h
+    assert infer_funding_interval_ms([0, h, 2 * h, 3 * h, 4 * h]) == h
+    # interval switch 8h -> 4h is followed once the recent spacings dominate the median
+    series = [0, 8 * h, 16 * h, 20 * h, 24 * h, 28 * h, 32 * h, 36 * h]
+    assert infer_funding_interval_ms(series) == 4 * h
+
+
+def test_last_settled_funding_epoch_respects_publish_grace() -> None:
+    import pandas as pd
+    from src.market_data.services.futures_collection import FUNDING_SETTLEMENT_GRACE_MS, last_settled_funding_epoch_ms
+
+    h = 3600000
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+    def _ms(ts: str) -> int:
+        return int((pd.Timestamp(ts) - epoch) // pd.Timedelta("1ms"))
+
+    assert {"grace_ms": FUNDING_SETTLEMENT_GRACE_MS} == {"grace_ms": 5 * 60_000}
+    assert last_settled_funding_epoch_ms(pd.Timestamp("2026-09-14T16:10:00Z"), 4 * h) == _ms("2026-09-14T16:00Z")
+    assert last_settled_funding_epoch_ms(pd.Timestamp("2026-09-14T16:03:00Z"), 4 * h) == _ms("2026-09-14T12:00Z")
+    assert last_settled_funding_epoch_ms(pd.Timestamp("2026-09-14T16:10:00Z"), 8 * h) == _ms("2026-09-14T16:00Z")
+    assert last_settled_funding_epoch_ms(pd.Timestamp("2026-09-14T15:59:00Z"), 8 * h) == _ms("2026-09-14T08:00Z")
+
+
+def test_funding_tail_is_fresh_detects_missed_settlement() -> None:
+    import pandas as pd
+    from src.market_data.services.futures_collection import FUNDING_TIME_TOLERANCE_MS, funding_tail_is_fresh
+
+    h = 3600000
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    base = int((pd.Timestamp("2026-09-14T00:00Z") - epoch) // pd.Timedelta("1ms"))
+    now = pd.Timestamp("2026-09-14T16:10:00Z")
+
+    assert {"tolerance_ms": FUNDING_TIME_TOLERANCE_MS} == {"tolerance_ms": 60_000}
+    assert funding_tail_is_fresh([], now) is False
+    assert funding_tail_is_fresh([base, base + 4 * h, base + 8 * h], now) is False
+    assert funding_tail_is_fresh([base + 8 * h, base + 12 * h, base + 16 * h], now) is True
+    assert funding_tail_is_fresh([base + 8 * h, base + 12 * h, base + 16 * h - 30_000], now) is True
+
+
+def test_ensure_funding_data_fetches_missed_4h_settlement_within_12h(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+    def _ms(ts: str) -> int:
+        return int((pd.Timestamp(ts) - epoch) // pd.Timedelta("1ms"))
+
+    class _NoVision:
+        def fetch_funding_rate_monthly(self, *args, **kwargs):
+            raise AssertionError("vision must not be used for a recent tail")
+
+    target = tmp_path / "funding" / "XUSDT.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: target)
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", _NoVision)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T16:10:00Z"))
+    collector = DataCollector()
+    cached = [_ms("2026-09-14T00:00Z"), _ms("2026-09-14T04:00Z"), _ms("2026-09-14T08:00Z")]
+    pd.DataFrame({"timestamp": cached, "funding_rate": [0.0001] * 3}).to_parquet(target, index=False)
+    calls: list[tuple] = []
+
+    def _fetch(*args, **kwargs):
+        calls.append(args)
+        return pd.DataFrame({
+            "timestamp": [_ms("2026-09-14T12:00Z"), _ms("2026-09-14T16:00Z")],
+            "funding_rate": [0.0002, 0.0003],
+        })
+
+    collector.client.fetch_funding_rate_history = _fetch
+
+    collector.ensure_funding_data("XUSDT", "2026-09-14T00:00:00Z", "2026-09-14T16:10:00Z")
+
+    assert len(calls) == 1
+    persisted = pd.read_parquet(target)
+    assert persisted["timestamp"].tolist() == [*cached, _ms("2026-09-14T12:00Z"), _ms("2026-09-14T16:00Z")]
+
+
+def test_ensure_funding_data_early_returns_when_last_settlement_present(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+    def _ms(ts: str) -> int:
+        return int((pd.Timestamp(ts) - epoch) // pd.Timedelta("1ms"))
+
+    class _NoVision:
+        def fetch_funding_rate_monthly(self, *args, **kwargs):
+            raise AssertionError("vision must not be used for a recent tail")
+
+    target = tmp_path / "funding" / "XUSDT.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: target)
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", _NoVision)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T16:10:00Z"))
+    collector = DataCollector()
+    cached = [_ms("2026-09-14T08:00Z"), _ms("2026-09-14T12:00Z"), _ms("2026-09-14T16:00Z")]
+    pd.DataFrame({"timestamp": cached, "funding_rate": [0.0001] * 3}).to_parquet(target, index=False)
+    before = target.read_bytes()
+
+    def _fetch(*args, **kwargs):
+        raise AssertionError("must not fetch")
+
+    collector.client.fetch_funding_rate_history = _fetch
+
+    collector.ensure_funding_data("XUSDT", "2026-09-14T08:00:00Z", "2026-09-14T16:10:00Z")
+
+    assert target.read_bytes() == before
+
+
+def test_ensure_funding_data_historical_end_uses_request_end_as_clock(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+    def _ms(ts: str) -> int:
+        return int((pd.Timestamp(ts) - epoch) // pd.Timedelta("1ms"))
+
+    class _NoVision:
+        def fetch_funding_rate_monthly(self, *args, **kwargs):
+            raise AssertionError("vision must not be used for a recent tail")
+
+    target = tmp_path / "funding" / "XUSDT.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: target)
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", _NoVision)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T16:10:00Z"))
+    collector = DataCollector()
+    cached = [_ms("2024-01-01T00:00Z"), _ms("2024-01-01T08:00Z"), _ms("2024-01-01T16:00Z")]
+    pd.DataFrame({"timestamp": cached, "funding_rate": [0.0001] * 3}).to_parquet(target, index=False)
+
+    def _fetch(*args, **kwargs):
+        raise AssertionError("must not fetch")
+
+    collector.client.fetch_funding_rate_history = _fetch
+
+    collector.ensure_funding_data("XUSDT", "2024-01-01", "2024-01-01T20:00:00Z")
+
+    assert pd.read_parquet(target)["timestamp"].tolist() == cached

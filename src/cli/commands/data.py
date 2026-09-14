@@ -268,6 +268,27 @@ def _repair_spot_gap(args: argparse.Namespace) -> None:
     )
 
 
+def _repair_ohlcv(args: argparse.Namespace) -> None:
+    import pandas as pd
+
+    from src.common.paths import FUTURES_DATA_DIR
+    from src.live import data_repair
+    from src.market_data.retention import MARKET_DATA_MIN_RETENTION_DAYS
+    from src.market_data.services import futures_collection
+
+    result = data_repair.repair_ohlcv_file(
+        args.symbol,
+        now=pd.Timestamp.now(tz="UTC"),
+        lookback_days=args.lookback_days or MARKET_DATA_MIN_RETENTION_DAYS,
+        futures_root=FUTURES_DATA_DIR,
+        collector=futures_collection.DataCollector(),
+    )
+    _logger.info(
+        "[DATA] stage=repair_ohlcv symbol=%s status=%s moved_to=%s rows=%d",
+        result.symbol, result.status, result.moved_to, result.rows,
+    )
+
+
 def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     """Attach the ``data collect <subcommand>`` group to the root parser."""
     collect = data_parser.add_subparsers(dest="data_command", required=True)
@@ -379,6 +400,11 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
 
     refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h/funding + markPriceKlines)")
     refresh.set_defaults(handler=_refresh_live_universe)  # _refresh_live_universe delegates to refresh_live_market_data
+
+    repair = collect.add_parser("repair-ohlcv", help="Operator-invoked: move a corrupt 1h OHLCV cache aside and refetch the full panel window")
+    repair.add_argument("--symbol", required=True)
+    repair.add_argument("--lookback-days", type=int, default=0)
+    repair.set_defaults(handler=_repair_ohlcv)
 
     seed_cloud = collect.add_parser("seed-cloud", help="Cold-boot the box: fetch 1h OHLCV + mark/1h + funding for the dev universe")
     seed_cloud.add_argument("--lookback-days", type=int, default=0)

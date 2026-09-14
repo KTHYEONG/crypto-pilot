@@ -112,6 +112,7 @@ class LiveSettings(BaseSettings):
 
     # 리스크 게이트(등록 상한). 레버리지 천장은 리스크 엔벨로프 레지스트리에서 유도한다.
     max_gross_leverage: float = GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
+    leverage_buffer_fraction: float = 0.25
     max_daily_orders: int = 600
     max_daily_turnover_fraction: float = 2.0 * GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
     min_free_margin_fraction: float = 0.15
@@ -121,6 +122,13 @@ class LiveSettings(BaseSettings):
     def _positive_equity(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("notional_equity_usdt must be > 0")
+        return value
+
+    @field_validator("leverage_buffer_fraction")
+    @classmethod
+    def _bounded_buffer_fraction(cls, value: float) -> float:
+        if not 0.0 <= value < 1.0:
+            raise ValueError("leverage_buffer_fraction must be in [0.0, 1.0)")
         return value
 
     @field_validator("paper_fill_model")

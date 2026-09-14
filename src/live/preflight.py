@@ -185,4 +185,51 @@ def run_preflight(
     except Exception as exc:
         checks.append(PreflightCheck(name="position_reconciliation", passed=False, detail=str(exc)))
 
+    # --- venue_leverage_plan (GET-only: 같은 플래너로 계획을 보고만 한다) ---
+    try:
+        if snapshot is None:
+            raise DataIntegrityError("missing snapshot: cannot plan venue leverage")
+        if settings.mode.suppresses_mutations:
+            checks.append(
+                PreflightCheck(
+                    name="venue_leverage_plan",
+                    passed=True,
+                    detail="suppressed mode: venue leverage untouched",
+                )
+            )
+        else:
+            if frame is None:
+                raise DataIntegrityError("missing artifact: cannot plan venue leverage")
+            from src.live.account import parse_leverage_brackets, parse_position_config, plan_venue_leverage
+
+            latest = frame.sort_index().iloc[-1]
+            symbols = sorted(str(s) for s, w in latest.items() if pd.notna(w) and float(w) != 0.0)
+            plan_client: Any = order_client
+            brackets = parse_leverage_brackets(
+                plan_client.request("GET", "/fapi/v1/leverageBracket", signed=True)
+            )
+            configs = parse_position_config(
+                plan_client.request("GET", "/fapi/v2/positionRisk", signed=True)
+            )
+            plan = plan_venue_leverage(
+                symbols,
+                brackets,
+                configs,
+                max_gross_leverage=settings.max_gross_leverage,
+                buffer_fraction=settings.leverage_buffer_fraction,
+            )
+            checks.append(
+                PreflightCheck(
+                    name="venue_leverage_plan",
+                    passed=True,
+                    detail=(
+                        f"symbols={len(symbols)} "
+                        f"margin_type_changes={len(plan.margin_type_changes)} "
+                        f"leverage_changes={len(plan.leverage_changes)}"
+                    ),
+                )
+            )
+    except Exception as exc:
+        checks.append(PreflightCheck(name="venue_leverage_plan", passed=False, detail=str(exc)))
+
     return PreflightReport(checks=tuple(checks))
