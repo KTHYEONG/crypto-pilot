@@ -3,7 +3,7 @@ services:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
     container_name: mhs-live-daemon
     restart: unless-stopped
-    stop_grace_period: 30s
+    stop_grace_period: 120s
     env_file: .env
     environment:
       - HARDWARE_MAX_WORKERS=1
