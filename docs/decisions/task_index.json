@@ -1,6 +1,46 @@
 {
   "tasks": [
     {
+      "task_id": "TESTNET_VENUE_PARITY_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_TESTNET_VENUE_PARITY_20260914",
+      "domain": "live",
+      "title": "LIVE_TESTNET 거래소 정합성 강제",
+      "why": "LIVE_TESTNET이 메인넷 필터·호가로 테스트넷에 주문해 체결 경로 검증이 구조적으로 무효였다",
+      "resolution": "LiveSettings가 모드에서 market/order 베뉴를 함께 유도하고, 라이브 모드의 호스트 불일치와 테스트넷 전용 키 미설정 시 메인넷 키 전송을 설정 단계에서 거부하도록 했다",
+      "impact": "실측 463개 공통 심볼 중 137개 tickSize가 달라 무효였던 테스트넷 검증이 이제 동일 베뉴로 실행되고, 잘못된 키 전송이 기동 전 차단된다"
+    },
+    {
+      "task_id": "EXCHANGE_ABSENT_SYMBOLS_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_EXCHANGE_ABSENT_SYMBOLS_20260914",
+      "domain": "live",
+      "title": "거래소 제거 심볼 격리 및 보유분 fail-closed",
+      "why": "AERGO/BDXN/BTCST가 exchangeInfo에서 완전히 사라졌는데도 refreshed로 집계되고 펀딩 API가 가짜 행을 계속 반환했다",
+      "resolution": "메인넷 exchangeInfo 목록으로 갱신 유니버스를 필터링해 absent로 별도 집계하고(파일은 보존), 보유 심볼이 사라지면 원인 명시 HALT로 전환했다",
+      "impact": "제거 심볼이 refreshed/failed 집계를 오염시키지 않고, 보유 중 제거 시 조용한 MTM 누락·펀딩지연 HALT 루프 대신 즉시 원인이 드러난다"
+    },
+    {
+      "task_id": "LIVE_ALERT_GAPS_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_LIVE_ALERT_GAPS_20260914",
+      "domain": "live",
+      "title": "라이브 데몬 알림 공백 6건 해소",
+      "why": "격리·중단·크래시 알림이 없고 heartbeat가 대기 중 갱신되지 않아 daemon.log 없이는 원인 파악이 불가했다",
+      "resolution": "signal-step 결과 사이드카로 실패 원인·격리 목록을 데몬에 전달하고, 재시작 시 중단 단계 알림, 대기 중 heartbeat 생존 틱, 최상위 크래시 알림+traceback, 발송 성공 기반 중복 제거, 일일 완료 요약을 추가했다",
+      "impact": "signal-step 실패/격리/중단/크래시가 모두 알림·heartbeat detail에 원인과 함께 남고 완료 요약 부재가 인간 dead-man 신호가 된다"
+    },
+    {
+      "task_id": "PAPER_FUNDING_BACKFILL_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_PAPER_FUNDING_BACKFILL_20260914",
+      "domain": "live",
+      "title": "PAPER 원장 펀딩 소급 정산 CLI",
+      "why": "PAPER 원장이 09-02 가동 이후 펀딩을 한 번도 적립하지 않았고 워터마크 엔진이 과거분을 조용히 버릴 상황이었다",
+      "resolution": "체결 사이드카로 포지션 이력을 복원해 엔진과 동일한 공식으로 소급 계산하는 dry-run/--apply CLI(live paper-funding-backfill)를 추가하고 원장에 적립 시작/완료 마커를 영속했다",
+      "impact": "실측 누락 펀딩 +1.93 USDT(자산의 0.094%) 1회 정산 가능, 재적용은 fail-closed로 차단"
+    },
+    {
       "task_id": "FUNDING_GAP_HEAL",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_FUNDING_GAP_HEAL",
@@ -959,46 +999,6 @@
       "why": "위원회 자본 북이 24h 결정 격자에서 매번 완전 재포지셔닝하지만 최단 멤버 lookback은 168h로, 신호 갱신 속도보다 7배 빠른 구조적 오버샘플링이 회전율(연 32.9배)과 비용 드래그를 유발. discovery-only 스윕에서 24h/tranche=1은 14개 조합 중 하위권으로, 인과적 선택이었다면 고르지 않았을 지점임을 확인.",
       "resolution": "MHS_COMMITTEE_TRANCHE_COUNT=3 상수 신설 후 _committee_execution_book에 tranche_count 파라미터 추가(기본 1은 항등 조기반환으로 byte-identical). decision_grid 리샘플 -> phase_tranche_book -> 원 인덱스 ffill 복원 구성. MhsDiagnosticRequest.committee_tranche_smoothing(committee_capital 요구) + CLI --committee-tranche-smoothing 배선, fold 경로와 top-level blend 양쪽 동일 스레딩.",
       "impact": "실제 3분봉 리플레이(446심볼, 2021-2025): CAGR 15.00%->16.13%, MDD -28.28%->-26.52%, Calmar +14.7%, 연 회전율 -18.0%, 비용 3배 stress Sharpe +11.2%, gross는 오히려 감소(레버리지 무관). 반대급부로 anchored fold 통과 2/3->1/3(2023 0.151->1.537 회복, 2024 0.968->0.481 악화)이라 opt-in 기본 False 유지. 프록시 원장 최상위였던 grid_48h는 실제 리플레이에서 CAPITAL_INVARIANT_BREACH 실패 — 채택 근거는 실측 리플레이만 인정."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_KELLY_CAPITAL_WIRING",
-      "date": "2026-08-16",
-      "adr_id": "ADR_20260816_MHS_COMMITTEE_KELLY_CAPITAL_WIRING",
-      "domain": "mhs",
-      "title": "MHS committee_capital Kelly 사이징 배선 + 성장최적 사이징 재검토(부정 결과)",
-      "why": "ADR_20260816_MHS_COMMITTEE_CAPITAL_IMPROVE에서 설계한 Kelly 사이징(진단 전용, cap=1.5x)을 실제 자본 라우팅 경로(committee_capital)까지 확장 검증할 필요가 있었음. 이후 사용자가 CAGR/MDD 복리성장 개선을 추가 요구해, xs_alpha에 이미 실전 검증된 growth_sizing.py(제약조건-우선 Monte Carlo 성장최적화) 재사용 가능성도 조사.",
-      "resolution": "committee_capital 실제 실행 경로에 _committee_kelly_scale(cap=1.0, 레버리지 상향 없음)+_committee_capital_replay_scale(기존 pnl_vol_target_scale과 50/50 블렌드)을 신설 배선(top-level ~2801행, fold 경로 ~3881행), MhsDiagnosticRequest.committee_kelly_sizing 검증을 committee_book 또는 committee_capital로 완화. 실측 결과 k=5 단독(Kelly 미적용)이 이미 fold 통과 1/3->2/3 및 2024 fold 회생을 달성했고(이전에 Kelly 덕분이라 오귀인했던 효과), ad hoc Kelly(f=0.25/0.5/1.0 전부)와 xs_alpha 실전검증 growth_sizing.py 기반 제약조건-우선 성장최적 사이징(드로다운 래더 5개 임계값 변형 포함) 전부 baseline 대비 Calmar 악화 확인 -> 사이징 오버레이는 기본값 미적용 유지(이미 opt-in default False)로 결론, growth_sizing 기반 성장최적점 진단만 향후 opt-in 모니터링 도구로 재사용 권고(docs/specs/mhs_committee_kelly_compounding_improve.md, 미구현 상태로 스펙만 보존 예정이었으나 sync 시 정리됨).",
-      "impact": "committee_capital 실제 3분봉 리플레이 재확인: k=5+Kelly는 naive Sharpe 0.627/CAGR 10.1%/MDD -20.3%/Calmar 0.498/folds_passed 2/3 (k=5 단독은 naive Sharpe 0.804/CAGR 15.0%/MDD -28.3%/Calmar 0.531/folds_passed 2/3 -- Kelly의 fold-robustness 기여는 없음, MDD 개선 대신 Calmar 순손해). DSR 붕괴(0.945->~0)는 _deflated_sharpe_evidence의 trial_sr_variance 계산이 clean fold 1개->2개로 늘며 처음으로 진짜 다중시행 벤치마크가 활성화된 통계적 아티팩트로 근본원인 확인(전략 열화 아님). lean_check(ruff/mypy/pytest) 전체 PASS. 레버리지 상향 승인 필요 사안 없음(growth-optimal 탐색 결과 이미 1.0x가 최적, headroom 1.3%)."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_CAPITAL_IMPROVE",
-      "date": "2026-08-16",
-      "adr_id": "ADR_20260816_MHS_COMMITTEE_CAPITAL_IMPROVE",
-      "domain": "mhs",
-      "title": "MHS 위원회(k=6→k=5) 구성 재검토 + Kelly-LCB 총노출 사이징 오버레이",
-      "why": "committee_capital 배선(ADR_20260816) P0 실측 완료 후, ADR_20260815가 보류했던 Kelly 사이징(P2) 전제 조건이 해제됨. 실측 감사 결과 xs_mom_720h가 rank_weight_book의 퍼센타일 랭크 변환으로 xs_mom_336h와 구조적으로 중복(랭크는 행 상수이동 불변)됨을 확인, k=6 구성 자체가 ~50개 조합 비교로 선택된 selection-bias 경고 대상이었음.",
-      "resolution": "MHS_COMMITTEE_MEMBERS를 k=6->k=5로 축소(xs_mom_720h 제거, flow_imb_720h가 720h 최장 lookback 유지해 purge_hours=720 불변식 보존). src/mhs/committee.py에 kelly_lcb_scale(f=0.25 quarter-Kelly, z=1.0 LCB, cap=1.5x) 신규 원시함수 추가, purged_walk_forward에 opt-in sizing_mode(vol_target/kelly_blend) 파라미터로 배선(기본값 vol_target, byte-identical). MhsDiagnosticRequest.committee_kelly_sizing opt-in 플래그(committee_book 요구) + CLI --committee-kelly-sizing 배선. _committee_diagnostic 블록 리포트에 logret_share 추가(tail_sensitivity_curve의 top1_event_share 패턴 재사용, 게이트 아님 진단 전용).",
-      "impact": "실측(프록시 원장, 446심볼 2021-2025): k=5가 k=6 대비 전 지표 개선(Sharpe 1.930->2.092, CAGR 0.322->0.352, Calmar 2.685->2.866). vol-target/kelly 50/50 블렌드가 vol-target 단독 대비 Sharpe/MDD/Calmar 동시 개선(1.930->1.963, MDD -0.120->-0.109, Calmar 2.685->2.888) 전 비용 티어에서 일관. lean_check.py --spec 전체 PASS(Impact Level 3). committee_capital(자본 라우팅) 경로에는 아직 미배선 -- 3분봉 실행 리플레이 재검증 후 별도 승격 필요."
-    },
-    {
-      "task_id": "TASK_MHS_REPLAY_STREAMING",
-      "date": "2026-08-16",
-      "adr_id": "ADR_20260816_MHS_REPLAY_STREAMING",
-      "domain": "mhs",
-      "title": "MHS 리플레이 스트리밍 — RAM 가드 + committee_capital 완주 최적화",
-      "why": "committee_capital/committee_book 실행 시 기본 ram_guard가 3개 book worker의 bulk window materialization(_materialize_replay_windows, 16.8GB 주범)으로 시스템 reserve를 위반해 RESOURCE_BUDGET_BREACH로 조기 종료됨. ADR_20260814_MHS_RAM_GUARD_DIAGNOSTIC_OPT가 '리플레이 계약 회귀 위험'으로 별도 스펙 후보로 기록했던 구간.",
-      "resolution": "bulk materialization 제거 후 2-단계 streaming으로 전환: _book_outcome/_run_anchored_fold의 참조 pass는 generator를 직접 stream, rescaled pass는 _windows()를 1회 재생성해 replay_execution_window_batch(N-bound interleave, _BoundExecutionReplayAccumulator 재사용)로 primary/stress/patient_reference/touch/ladder를 한 stream에 fan-out. _materialize_replay_windows/_window_footprint_bytes 제거, _rescaled_windows를 Iterable로 확장, replay_execution_window_pair를 batch wrapper로 재구현. worker당 메모리 경계가 전체 window 집합 → window 1개로 축소, generation은 bound 수와 무관하게 정확히 2회.",
-      "impact": "ram_guard=True + committee_capital 완주 가능(기존 RESOURCE_BUDGET_BREACH 해소). 계산 산출물 bit-identical 유지(golden baseline 대조 PASS, lean_check 전체 PASS). 텔레메트리 스테이지가 execution_window_rescaled/anchored_fold_*_window_rescaled로 재구성됨(의도된 계약 변경, 관련 테스트 갱신)."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_CAPITAL_BLEND_WIRING",
-      "date": "2026-08-16",
-      "adr_id": "ADR_20260816_MHS_COMMITTEE_CAPITAL_BLEND_WIRING",
-      "domain": "mhs",
-      "title": "MHS committee_capital 배선을 top-level blend/deployment_readiness로 연결 (RC-4)",
-      "why": "committee_capital 플래그가 fold 경로(_build_fold_target_weights)에만 반영되고 top-level blend_replay는 여전히 PHASE_1_BOOK_BLEND_WEIGHTS(단일 모멘텀축)로 고정돼 deployment_readiness/report.blend가 실제 자본 배분을 반영하지 못함. 축 확장(9~10 feature axes)·레그 역변동성 틸트·사전 변동성 타깃 오버레이는 walk-forward-safe(fold train 구간에서만 axis admit) 재검증에서 전부 기각(committee6 단독보다 성과 악화)되어 제외.",
-      "resolution": "_committee_execution_book 헬퍼를 신설해 fold 경로 인라인 블록을 대체하고 top-level run_mhs_horizon_diagnostic/_run_books_concurrent의 blend_replay에도 동일 헬퍼를 배선. committee_capital=False 기본값은 byte-identical 유지. 실제 3분봉 리플레이(--committee-capital --no-ram-guard)로 검증: blend CAGR -0.0598->+0.1939, MDD -0.3438->-0.3090, Sharpe -0.670->0.718, Calmar -0.174->0.628, P(최종자산<초기자산) 0.915->0.068.",
-      "impact": "research run portfolio mhs-horizon-diagnostic --committee-capital 실행 시 deployment_readiness/report.blend가 위원회6 자본배분을 정확히 반영. 기본 실행(플래그 미지정)은 무변경. research_go.eligible은 여전히 false(PRIMARY_AUTOCORR_SHARPE_BELOW_0_6/RELEVANT_EXECUTION_DATA_GAP/UNSPECIFIED_POLICY, 기존 정책 게이트로 이번 변경과 무관). 이 dev 박스에서는 committee_capital 실행 시 기본 ram_guard로 top-level blend/slow_momentum 북이 RESOURCE_BUDGET_BREACH로 조기 종료될 수 있어 --no-ram-guard 필요."
     }
   ]
 }
