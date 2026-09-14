@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "LIVE_DAEMON_LIFECYCLE_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_LIVE_DAEMON_LIFECYCLE_20260914",
+      "domain": "live",
+      "title": "데몬 재집행 방지 및 상태 원자성 확보",
+      "why": "사후캡처 중 배포시 결정 재집행 위험, 상태파일 손상시 무알림 크래시루프, 상태파일 비원자적 쓰기",
+      "resolution": "원장에 last_executed_decision_time 기록해 재집행 차단, 상태/heartbeat 원자적 쓰기, 손상시 state_corrupt 알림 후 대기, 중단가능 대기, 캐치업 점프",
+      "impact": "배포 타이밍과 무관하게 같은 결정이 두번 집행되지 않고 상태파일 손상이 무알림 루프로 이어지지 않음"
+    },
+    {
+      "task_id": "LIVE_DATA_SAFETY_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_LIVE_DATA_SAFETY_20260914",
+      "domain": "live",
+      "title": "라이브 데이터 파괴/오염 경로 제거",
+      "why": "_load_cache 삭제로 BTCUSDT 유실, 미확정봉·8h 여유·IP차단 성공집계로 조용한 데이터 오염 발생",
+      "resolution": "캐시 읽기 무부작용화, 미확정봉 배제, 직전 확정봉 기준 조기반환, 403/418/429 즉시 중단, tmp 파일 격리",
+      "impact": "심볼 캐시가 더 이상 삭제되지 않고 IP 차단이 갱신 전체를 조용히 통과시키지 않음"
+    },
+    {
       "task_id": "LIVE_DAEMON_OPS_HARDENING_20260914",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_LIVE_DAEMON_OPS_HARDENING_20260914",
@@ -979,26 +999,6 @@
       "why": "29차 committee 진단 프로덕션 실행에서 OOM 직전 피크 RSS(16.8 GB→~28 GB)로 프로세스가 사망. WSL 32 GB 환경에서 실패-마감(계산 값 비변경) RAM 가드와 병목 구간 메모리/시간 최적화 필요",
       "resolution": "RAM 가드(MHS_RAM_BUDGET_FRACTION=0.85 자동 예산 + 리저브, 스테이지 배리어 fail-closed, 워커 리저브, --no-ram-guard)와 진단 최적화 구현: 진단을 폴드 풀 join+캐시 퇴거 후 재배치(~6GB 릴리스), 패널 컬럼 프루닝(committee 3/멀티피처 6컬럼, open 미로드), 멀티티어 ledger 및 스트리밍 accumul진단으로 O(개별) 단일패스(시간 2.9배 절감). 멀티티어 per-tier bit-identical 및 스트리밍 참조 비교 ULP 0으로 산출물 동결 유지",
       "impact": "계산 값 bit-identical 동결 유지하되 위원회/멀티피처 진단 피크 RSS를 자동 예산(85%) 아래로 보호하고 실행 시간을 개선. 책/폴드 스트리밍(_materialize_replay_windows, 16.8GB 주범)은 리플레이 계약 회귀 위험으로 별도 스펙 후보로 기록"
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE",
-      "date": "2026-08-14",
-      "adr_id": "ADR_20260814_MHS_COMMITTEE_DESIGN_AND_WEALTH_OBJECTIVE",
-      "domain": "mhs",
-      "title": "MHS 6인 위원회(committee) 및 자산증식 목적함수 도입",
-      "why": "다중피처 아키텍처(ADR_20260814_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE) 이후 규모/구성/조율기/목적함수를 실증으로 확정할 필요. purged walk-forward(336h purge, 6개월 블록) 실측 결과 학습 기반 조합기(shrinkage MV, train-Sharpe top-k, 레짐조건부)가 경제적 큐레이션 equal-risk에 전부 패배(최대 +0.867 vs +1.379). 무제약(롱숏) 조합기는 비용 부호 보정 후 전 tier 음수(-0.568~-1.813)로 확인.",
-      "resolution": "src/mhs/committee.py 신규: decompose_cost(2-tier 비용 분해)/score_weighted_net(비용 양방향 drag)/long_only_equal_risk_weights/wealth_metrics(CAGR/MDD/logret)/volatility_target_scale/purged_walk_forward. MHS_COMMITTEE_MEMBERS(6인: flow_imb_720h/168h, xs_mom_336h/720h, xs_idio_mom_336h, mom3_skew_168h) 경제 패밀리 선언(성과 랭킹 아님). MhsDiagnosticRequest.committee_book opt-in(기본 False) 배선. source_coverage_audit로 fillna 이전 원천 커버리지 감사 추가(funding 45/452 심볼만 실제 보유 결함 탐지).",
-      "impact": "자본 배분 무변경(기본 committee_book=False). 프로덕션 실측: base tier Sharpe +1.664(walk-forward 블록 시작점이 2021-01이라 스펙 샌드박스 +1.379보다 낙관적 — 후속 보정 필요, §9). ML 도입은 이 벤치마크(equal_risk 큐레이션)를 이길 때까지 보류."
-    },
-    {
-      "task_id": "TASK_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE",
-      "date": "2026-08-14",
-      "adr_id": "ADR_20260814_MHS_MULTI_FEATURE_ALPHA_ARCHITECTURE",
-      "domain": "mhs",
-      "title": "MHS 다중 피처 알파 아키텍처 도입 (Stage 1)",
-      "why": "호라이즌 그리드 탐색 기반 단일 알파(momentum 168h) 구조의 실효 breadth가 1.41/19(상관 0.824)에 불과함을 실측. 프로덕션이 고정한 mom_168h는 2024-2025 구간에서 -0.690으로 부호 반전(같은 패밀리 336h는 +0.742 유지)했으나 현 discovery gate는 2021-2023 창에서 +0.615로 보여 이 반전을 원리적으로 탐지 불가. IC(xs_rank_ic)가 알파의 대리지표가 아님도 실증(lowvol_168h IC +0.147/t=105이나 실북 -0.038; taker_imb_168h는 IC 작아도 북 +0.990).",
-      "resolution": "src/mhs/features.py 신규: FeatureSpec 레지스트리(커버리지 fail-closed)/feature_coverage_audit/build_feature_books/equal_risk_combination. src/mhs/stability.py 신규: StabilityResult/regime_split_stability(sign_consistent, min_window_sharpe, decay). MhsDiagnosticRequest.multi_feature_book opt-in(기본 False, bit-identical) 배선, 리포트에 multi_feature_diagnostic 필드 추가. no_trades 컬럼 커버리지 붕괴(2023년부터 0.00) 등 데이터 결함을 커버리지 게이트로 구조적 차단.",
-      "impact": "자본 배분 무변경(기본 multi_feature_book=False). Stage 1은 ML 미도입, 등리스크 결합만; Stage 2(레짐 안정성 게이트)/Stage 3(게이트된 ML)는 별도 스펙+실측 후 진행."
     }
   ]
 }
