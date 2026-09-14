@@ -16,7 +16,7 @@ import pandas as pd
 _logger = logging.getLogger("BinanceClient")
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(eq=False)
 class BinanceKlinePermanentError(RuntimeError):
     symbol: str
     timeframe: str
@@ -26,7 +26,24 @@ class BinanceKlinePermanentError(RuntimeError):
     url: str
 
 
-@dataclass(slots=True, frozen=True)
+IP_BLOCK_HTTP_CODES: frozenset[int] = frozenset({403, 418, 429})
+
+
+@dataclass(eq=False)
+class BinanceIpBlockedError(RuntimeError):
+    http_code: int
+    url: str
+
+
+@dataclass(eq=False)
+class BinanceKlineTransientError(RuntimeError):
+    symbol: str
+    timeframe: str
+    http_code: int | None
+    url: str
+
+
+@dataclass(eq=False)
 class BinanceFundingFetchError(RuntimeError):
     symbol: str
     http_code: int | None
@@ -134,34 +151,30 @@ class BinanceClient:
                     data = json.loads(raw)
                     retry_count = 0
                 except urllib.error.HTTPError as e:
-                    if e.code == 429 or 500 <= e.code <= 599:
-                        retry_count += 1
-                        wait_sec = 120 if e.code == 429 else 2 * retry_count
-                        self.logger.warning("HTTP %d for %s. Wait %ds...", e.code, symbol, wait_sec)
-                        time.sleep(wait_sec)
-                        if retry_count >= 5:
-                            self.logger.error("Failed chunks for %s. Skipping.", symbol)
-                            break
-                        continue
+                    if e.code in IP_BLOCK_HTTP_CODES:
+                        raise BinanceIpBlockedError(http_code=e.code, url=url) from e
                     if 400 <= e.code < 500:
                         raise BinanceKlinePermanentError(
                             symbol=symbol, timeframe=timeframe, http_code=e.code,
                             start_time_ms=int(since), end_time_ms=int(end_timestamp), url=url,
                         ) from e
                     retry_count += 1
-                    wait_sec = 120 if e.code == 429 else 2 * retry_count
-                    self.logger.error("Error (%d/5) for %s: %s", retry_count, symbol, e)
-                    time.sleep(wait_sec)
                     if retry_count >= 5:
-                        break
+                        raise BinanceKlineTransientError(
+                            symbol=symbol, timeframe=timeframe, http_code=e.code, url=url,
+                        ) from e
+                    wait_sec = 2 * retry_count
+                    self.logger.warning("HTTP %d for %s. Wait %ds...", e.code, symbol, wait_sec)
+                    time.sleep(wait_sec)
                     continue
-                except Exception as e:
+                except (OSError, ValueError) as e:
                     retry_count += 1
-                    wait_sec = retry_count
-                    self.logger.error("Error (%d/5) for %s: %s", retry_count, symbol, e)
                     if retry_count >= 5:
-                        break
-                    time.sleep(wait_sec)
+                        raise BinanceKlineTransientError(
+                            symbol=symbol, timeframe=timeframe, http_code=None, url=url,
+                        ) from e
+                    self.logger.error("Error (%d/5) for %s: %s", retry_count, symbol, e)
+                    time.sleep(retry_count)
                     continue
 
                 if not data:
@@ -407,6 +420,8 @@ class BinanceClient:
                     raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
             except urllib.error.HTTPError as e:
+                if e.code in IP_BLOCK_HTTP_CODES:
+                    raise BinanceIpBlockedError(http_code=e.code, url=url) from e
                 raise BinanceFundingFetchError(symbol=symbol, http_code=e.code, url=url) from e
             except (OSError, ValueError) as e:
                 raise BinanceFundingFetchError(symbol=symbol, http_code=None, url=url) from e

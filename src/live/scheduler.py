@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -68,7 +69,6 @@ except Exception:  # noqa: BLE001,S110
 logger = logging.getLogger("LiveScheduler")
 
 # wiring anchors for spec compliance
-# _save_last_processed(state_path, target)
 # report = run_shadow_cycle(settings, target, artifact_path, now=now_fn())
 # _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target))
 # write_heartbeat(heartbeat_path, decision_time=target, status=report.status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
@@ -112,29 +112,11 @@ def next_decision_time(last_processed: pd.Timestamp | None, now: pd.Timestamp) -
     return (_as_utc(last_processed) + pd.Timedelta(days=1)).normalize()
 
 
-def _load_last_processed(state_path: Path) -> pd.Timestamp | None:
-    if not state_path.exists():
-        return None
-    try:
-        raw = json.loads(state_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise DataIntegrityError(f"daemon state file corrupt: {state_path}") from exc
-    if not isinstance(raw, dict) or _STATE_KEY not in raw:
-        raise DataIntegrityError(f"daemon state file missing key {_STATE_KEY}: {state_path}")
-    try:
-        ts = pd.Timestamp(raw[_STATE_KEY])
-    except (ValueError, TypeError) as exc:
-        raise DataIntegrityError(f"daemon state file corrupt: {state_path}") from exc
-    if ts.tzinfo is None:
-        raise DataIntegrityError("daemon state timestamp must be tz-aware UTC")
-    return ts
-
-
-def _save_last_processed(state_path: Path, decision_time: pd.Timestamp) -> None:
-    # 단일 키 overwrite라 파일 크기가 절대 증가하지 않는다(원장과 동일 패턴).
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {_STATE_KEY: _as_utc(decision_time).isoformat()}
-    state_path.write_text(json.dumps(payload), encoding="utf-8")
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def _load_daemon_state(state_path: Path) -> DaemonState:
@@ -178,14 +160,10 @@ def _save_daemon_state(state_path: Path, state: DaemonState) -> None:
         "pending_decision_time": _as_utc(state.pending_decision_time).isoformat() if state.pending_decision_time is not None else None,
         "attempts": int(state.attempts),
     }
-    # For legacy single-key compatibility, if pending is None and attempts==0, we could store only legacy but we store full to keep bounded size.
-    # Ensure single JSON object overwrite (bounded).
-    # Remove None pending to keep same shape? Keep explicit null for clarity but size bounded.
-    # If legacy consumers read, they will ignore extra keys.
-    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    _atomic_write_text(state_path, json.dumps(payload))
 
 
-def write_heartbeat(path: Path, *, decision_time: pd.Timestamp, status: str, attempts: int, consecutive_halts: int, now: pd.Timestamp) -> None:
+def write_heartbeat(path: Path, *, decision_time: pd.Timestamp, status: str, attempts: int, consecutive_halts: int, now: pd.Timestamp, stage: str = "idle") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "ts": _as_utc(now).isoformat(),
@@ -193,8 +171,25 @@ def write_heartbeat(path: Path, *, decision_time: pd.Timestamp, status: str, att
         "status": str(status),
         "attempts": int(attempts),
         "consecutive_halts": int(consecutive_halts),
+        "stage": str(stage),
     }
-    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(payload, sort_keys=True))
+
+
+def _restore_consecutive_halts(heartbeat_path: Path) -> int:
+    if not heartbeat_path.exists():
+        return 0
+    try:
+        raw = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning("[SYS] heartbeat unreadable; consecutive_halts starts at 0 path=%s", heartbeat_path)
+        return 0
+    if not isinstance(raw, dict) or raw.get("status") == "COMPLETE":
+        return 0
+    try:
+        return max(0, int(raw.get("consecutive_halts", 0)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _resolve_heartbeat_path(settings: LiveSettings) -> Path:
@@ -281,7 +276,7 @@ def run_daemon(
     weights_path: Path,
     state_path: Path,
     *,
-    sleep_fn: Callable[[float], None] = time.sleep,
+    sleep_fn: Callable[[float], None] | None = None,
     now_fn: Callable[[], pd.Timestamp] = _utc_now,
     max_iterations: int | None = None,
     shutdown: ShutdownFlag | None = None,
@@ -295,8 +290,14 @@ def run_daemon(
     are injected only by tests -- there is no path-sniffing test detection.
     """
     iteration = 0
+    wait_fn: Callable[[float], object] = sleep_fn if sleep_fn is not None else (shutdown.wait if shutdown is not None else time.sleep)
     heartbeat_path = _resolve_heartbeat_path(settings)
-    consecutive_halts = 0
+    def _beat(status: str, stage: str) -> None:
+        try:
+            write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn(), stage=stage)
+        except Exception:
+            logger.exception("[SYS] heartbeat write failed")
+    consecutive_halts = _restore_consecutive_halts(heartbeat_path)
     alerts_sent: set[str] = set()
     alerts_decision_time: pd.Timestamp | None = None
     buffer_td = pd.Timedelta(minutes=settings.daemon_catchup_buffer_minutes)
@@ -305,7 +306,17 @@ def run_daemon(
         if shutdown is not None and shutdown.requested:
             break
         iteration += 1
-        state = _load_daemon_state(state_path)
+        try:
+            state = _load_daemon_state(state_path)
+        except DataIntegrityError as exc:
+            logger.error("[SYS] daemon state corrupt path=%s error=%s", state_path, exc)
+            _daemon_alert(settings, alerts_sent, event="state_corrupt", detail=f"path={state_path.name} error={type(exc).__name__}", decision_time=None, now=now_fn())
+            try:
+                write_heartbeat(heartbeat_path, decision_time=now_fn().normalize(), status="STATE_CORRUPT", attempts=0, consecutive_halts=consecutive_halts, now=now_fn())
+            except Exception:
+                logger.exception("[SYS] heartbeat write failed")
+            wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
+            continue
         if state.pending_decision_time is not None:
             target = state.pending_decision_time
             attempts = state.attempts
@@ -315,13 +326,24 @@ def run_daemon(
         if target != alerts_decision_time:
             alerts_sent.clear()
             alerts_decision_time = target
+        if state.pending_decision_time is not None or state.last_processed_decision_time is not None:
+            earliest_fresh = (now_fn() - pd.Timedelta(hours=settings.max_signal_staleness_hours)).ceil("D")
+            if target < earliest_fresh:
+                skipped_last = earliest_fresh - pd.Timedelta(days=1)
+                _daemon_alert(settings, alerts_sent, event="day_skipped", detail=f"catchup skipped={target.date().isoformat()}..{skipped_last.date().isoformat()}", decision_time=skipped_last, now=now_fn())
+                _save_daemon_state(state_path, DaemonState(last_processed_decision_time=skipped_last, pending_decision_time=None, attempts=0))
+                target = earliest_fresh
+                attempts = 0
+                if target != alerts_decision_time:
+                    alerts_sent.clear()
+                    alerts_decision_time = target
 
         wait_until = target + _SIGNAL_LAG + buffer_td
         remaining_seconds = (wait_until - now_fn()).total_seconds()
         while remaining_seconds > 0:
             if shutdown is not None and shutdown.requested:
                 break
-            sleep_fn(min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS))
+            wait_fn(min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS))
             if shutdown is not None and shutdown.requested:
                 break
             remaining_seconds = (wait_until - now_fn()).total_seconds()
@@ -329,16 +351,16 @@ def run_daemon(
             break
 
         if not _strategy_params_present(settings):
-            try:
-                write_heartbeat(heartbeat_path, decision_time=target, status="AWAITING", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
-            except Exception:
-                logger.exception("[SYS] heartbeat write failed")
+            _beat("AWAITING", "idle")
             _daemon_alert(settings, alerts_sent, event="awaiting_params", detail="strategy_params missing", decision_time=target, now=now_fn())
             try:
-                sleep_fn(DAEMON_POLL_INTERVAL_SECONDS)
+                wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
             except Exception:
                 pass
             continue
+        if shutdown is not None and shutdown.requested:
+            break
+        _beat("RUNNING", "refresh")
 
         report = None
         err = None
@@ -364,15 +386,14 @@ def run_daemon(
                 logger.warning("[SYS] data refresh degraded; proceeding on cached panel staleness_h=%.1f", staleness_h)
             else:
                 _daemon_alert(settings, alerts_sent, event="data_refresh_failed", detail=refresh_summary, decision_time=target, now=now_fn())
+                _beat("AWAITING_DATA", "idle")
                 try:
-                    write_heartbeat(heartbeat_path, decision_time=target, status="AWAITING_DATA", attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
-                except Exception:
-                    logger.exception("[SYS] heartbeat write failed")
-                try:
-                    sleep_fn(DAEMON_POLL_INTERVAL_SECONDS)
+                    wait_fn(DAEMON_POLL_INTERVAL_SECONDS)
                 except Exception:
                     pass
                 continue
+        if shutdown is not None and shutdown.requested:
+            break
 
         try:
             prune_fn()
@@ -381,6 +402,7 @@ def run_daemon(
 
         signal_status = "COMPLETE"
         failure_cause = ""
+        _beat("RUNNING", "signal")
         try:
             signal_step_fn(target)
         except subprocess.CalledProcessError as exc:
@@ -397,10 +419,7 @@ def run_daemon(
             consecutive_halts += 1
             if consecutive_halts >= settings.alert_halt_streak:
                 _daemon_alert(settings, alerts_sent, event="halt_streak", detail=f"consecutive_halts={consecutive_halts} cause={failure_cause}", decision_time=target, now=now_fn())
-            try:
-                write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
-            except Exception:
-                logger.exception("[SYS] heartbeat write failed")
+            _beat(status, "idle")
             new_attempts = attempts + 1
             should_retry = new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY
             if should_retry:
@@ -412,7 +431,7 @@ def run_daemon(
                     if shutdown is not None and shutdown.requested:
                         break
                     step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
-                    sleep_fn(step)
+                    wait_fn(step)
                     if shutdown is not None and shutdown.requested:
                         break
                     remaining_backoff -= step
@@ -422,8 +441,9 @@ def run_daemon(
             else:
                 _daemon_alert(settings, alerts_sent, event="day_skipped", detail=f"attempts={new_attempts} cause={failure_cause}", decision_time=target, now=now_fn())
                 _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-                _save_last_processed(state_path, target)
                 continue
+        if shutdown is not None and shutdown.requested:
+            break
 
         try:
             prune_old_audit_logs(AUDIT_LOG_ROOT / "live", target)
@@ -432,8 +452,9 @@ def run_daemon(
 
         report = None
         status = "HALT"
+        _beat("RUNNING", "execute")
         try:
-            report = run_shadow_cycle(settings, target, weights_path, now=now_fn())
+            report = run_shadow_cycle(settings, target, weights_path, now=now_fn()) if shutdown is None else run_shadow_cycle(settings, target, weights_path, now=now_fn(), shutdown=shutdown)
             logger.info("[EVAL] daemon cycle decision_time=%s status=%s reason=%s", target, report.status, report.reason)
             status = report.status
             failure_cause = f"cycle status={status} reason={report.reason}"
@@ -458,7 +479,6 @@ def run_daemon(
         if status == "COMPLETE":
             alerts_sent.clear()
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-            _save_last_processed(state_path, target)
             continue
         new_attempts = attempts + 1
         should_retry = new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY
@@ -471,7 +491,7 @@ def run_daemon(
                 if shutdown is not None and shutdown.requested:
                     break
                 step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
-                sleep_fn(step)
+                wait_fn(step)
                 if shutdown is not None and shutdown.requested:
                     break
                 remaining_backoff -= step
@@ -481,6 +501,5 @@ def run_daemon(
         else:
             _daemon_alert(settings, alerts_sent, event="day_skipped", detail=f"attempts={new_attempts} cause={failure_cause}", decision_time=target, now=now_fn())
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-            _save_last_processed(state_path, target)
             continue
 

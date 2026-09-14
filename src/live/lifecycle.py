@@ -7,17 +7,22 @@ from __future__ import annotations
 
 import signal
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
 class ShutdownFlag:
     requested: bool = False
     signal_name: str | None = None
+    _event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
     def request(self, signal_name: str) -> None:
         self.requested = True
         self.signal_name = signal_name
+        self._event.set()
+
+    def wait(self, timeout: float) -> bool:
+        return self._event.wait(timeout)
 
 
 def install_shutdown_handlers(
