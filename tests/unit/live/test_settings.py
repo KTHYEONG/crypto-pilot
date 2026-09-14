@@ -165,3 +165,67 @@ def test_live_settings_leverage_buffer_fraction_default_and_bounds(monkeypatch) 
         with pytest.raises(ValidationError, match="leverage_buffer_fraction"):
             LiveSettings(leverage_buffer_fraction=bad)
 
+
+def test_live_settings_derive_market_and_order_venue_per_mode() -> None:
+    from pydantic import SecretStr
+
+    from src.live.settings import MAINNET_FAPI_URL, MAINNET_TRADING_ACK, TESTNET_FAPI_URL, ExecutionMode, LiveSettings
+
+    assert MAINNET_FAPI_URL == "https://fapi.binance.com"
+    assert TESTNET_FAPI_URL == "https://testnet.binancefuture.com"
+    for mode in (ExecutionMode.SHADOW, ExecutionMode.PAPER):
+        settings = LiveSettings(mode=mode)
+        assert (settings.market_data_base_url, settings.order_base_url) == (MAINNET_FAPI_URL, MAINNET_FAPI_URL)
+    testnet = LiveSettings(mode=ExecutionMode.LIVE_TESTNET)
+    assert (testnet.market_data_base_url, testnet.order_base_url) == (TESTNET_FAPI_URL, TESTNET_FAPI_URL)
+    mainnet = LiveSettings(mode=ExecutionMode.LIVE_MAINNET, mainnet_trading_ack=MAINNET_TRADING_ACK, api_key=SecretStr("k"), api_secret=SecretStr("s"))
+    assert (mainnet.market_data_base_url, mainnet.order_base_url) == (MAINNET_FAPI_URL, MAINNET_FAPI_URL)
+    # 명시 오버라이드는 유지(같은 호스트면 라이브 모드도 허용)
+    custom = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, market_data_base_url="https://testnet.binancefuture.com/", order_base_url="https://TESTNET.binancefuture.com")
+    assert custom.market_data_base_url == "https://testnet.binancefuture.com/"
+    # 억제 모드는 주문 베뉴를 쓰지 않으므로 불일치 허용
+    assert LiveSettings(mode=ExecutionMode.PAPER, order_base_url="https://x").order_base_url == "https://x"
+
+
+def test_live_settings_reject_cross_venue_in_live_modes() -> None:
+    import pytest
+    from pydantic import SecretStr
+
+    from src.live.settings import MAINNET_FAPI_URL, MAINNET_TRADING_ACK, TESTNET_FAPI_URL, ExecutionMode, LiveSettings
+
+    with pytest.raises(ValueError, match="venue parity"):
+        LiveSettings(mode=ExecutionMode.LIVE_TESTNET, market_data_base_url=MAINNET_FAPI_URL)
+    with pytest.raises(ValueError, match="venue parity"):
+        LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_base_url=MAINNET_FAPI_URL)
+    with pytest.raises(ValueError, match="venue parity"):
+        LiveSettings(
+            mode=ExecutionMode.LIVE_MAINNET, mainnet_trading_ack=MAINNET_TRADING_ACK,
+            api_key=SecretStr("k"), api_secret=SecretStr("s"), market_data_base_url=TESTNET_FAPI_URL,
+        )
+
+
+def test_live_settings_testnet_requires_dedicated_order_credentials() -> None:
+    import pytest
+    from pydantic import SecretStr
+
+    from src.live.settings import MAINNET_TRADING_ACK, ExecutionMode, LiveSettings
+
+    # Given: 메인넷 키만 있는 LIVE_TESTNET -> 테스트넷으로 메인넷 키를 보내지 않는다
+    with pytest.raises(ValueError, match="refusing to send mainnet api_key"):
+        LiveSettings(mode=ExecutionMode.LIVE_TESTNET, api_key=SecretStr("main-k"), api_secret=SecretStr("main-s"))
+    # 주문 키 반쪽 설정은 모든 모드에서 거부
+    with pytest.raises(ValueError, match="must be set together"):
+        LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key=SecretStr("t-k"))
+    with pytest.raises(ValueError, match="must be set together"):
+        LiveSettings(mode=ExecutionMode.PAPER, order_api_secret=SecretStr("t-s"))
+
+    ok = LiveSettings(
+        mode=ExecutionMode.LIVE_TESTNET, api_key=SecretStr("main-k"), api_secret=SecretStr("main-s"),
+        order_api_key=SecretStr("t-k"), order_api_secret=SecretStr("t-s"),
+    )
+    assert ok.order_api_key is not None and ok.order_api_key.get_secret_value() == "t-k"  # noqa: PT018
+    # 자격증명 없는 LIVE_TESTNET 은 설정 단계에서 막지 않는다(preflight 가 담당)
+    assert LiveSettings(mode=ExecutionMode.LIVE_TESTNET).api_key is None
+    # 메인넷은 주문 키 폴백 허용(같은 베뉴)
+    LiveSettings(mode=ExecutionMode.LIVE_MAINNET, mainnet_trading_ack=MAINNET_TRADING_ACK, api_key=SecretStr("k"), api_secret=SecretStr("s"))
+

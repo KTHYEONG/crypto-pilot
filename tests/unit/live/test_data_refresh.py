@@ -721,3 +721,115 @@ def test_refresh_live_market_data_refetches_gap_symbol_with_lookback_funding_sta
     assert report.refreshed == 1
     assert report.funding_stale == 1
 
+
+def test_parse_listed_symbols_accepts_any_status_and_rejects_malformed() -> None:
+    from src.live.data_refresh import parse_listed_symbols
+
+    payload = {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}, {"symbol": "ZOMBIEUSDT", "status": "SETTLING"}, "junk", {"status": "TRADING"}]}
+    assert parse_listed_symbols(payload) == frozenset({"BTCUSDT", "ZOMBIEUSDT"})
+    assert parse_listed_symbols({}) is None
+    assert parse_listed_symbols({"symbols": "nope"}) is None
+    assert parse_listed_symbols({"symbols": []}) is None
+    assert parse_listed_symbols({"symbols": [{"status": "TRADING"}]}) is None
+
+
+def test_fetch_listed_symbols_fails_open_on_transport_or_payload_errors() -> None:
+    import json
+    import urllib.error
+
+    from src.live.data_refresh import EXCHANGE_INFO_TIMEOUT_S, EXCHANGE_INFO_URL, fetch_listed_symbols
+
+    seen: list[tuple[str, float]] = []
+
+    class _Resp:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self) -> bytes:
+            return self._body
+
+    def _ok(url, timeout):
+        seen.append((url, timeout))
+        return _Resp(json.dumps({"symbols": [{"symbol": "BTCUSDT"}]}).encode("utf-8"))
+
+    assert fetch_listed_symbols(opener=_ok) == frozenset({"BTCUSDT"})
+    assert seen == [(EXCHANGE_INFO_URL, EXCHANGE_INFO_TIMEOUT_S)]
+
+    def _blocked(url, timeout):
+        raise urllib.error.HTTPError(url, 418, "teapot", None, None)
+
+    def _timeout(url, timeout):
+        raise TimeoutError("slow")
+
+    assert fetch_listed_symbols(opener=_blocked) is None
+    assert fetch_listed_symbols(opener=_timeout) is None
+    assert fetch_listed_symbols(opener=lambda url, timeout: _Resp(b"{not json")) is None
+    assert fetch_listed_symbols(opener=lambda url, timeout: _Resp(b"{}")) is None
+    assert fetch_listed_symbols(opener=lambda url, timeout: _Resp(b"[]")) is None
+
+
+def test_split_absent_symbols_guards_untrusted_listing(monkeypatch) -> None:
+    from src.live import data_refresh
+
+    symbols = [f"S{i:02d}USDT" for i in range(40)]
+    listed = frozenset(symbols[:-1])
+
+    assert data_refresh.split_absent_symbols(symbols, None) == (symbols, [])
+    assert data_refresh.split_absent_symbols(symbols, listed) == (symbols[:-1], ["S39USDT"])
+    # 제거 비율이 상한을 넘으면 목록을 신뢰하지 않고 원래 유니버스를 유지
+    assert data_refresh.split_absent_symbols(symbols, frozenset(symbols[:30])) == (symbols, [])
+    # 상한은 호출 시점 모듈 상수로 읽는다
+    monkeypatch.setattr(data_refresh, "ABSENT_MAX_FRACTION", 0.5)
+    assert data_refresh.split_absent_symbols(symbols, frozenset(symbols[:30])) == (symbols[:30], symbols[30:])
+    assert data_refresh.split_absent_symbols([], listed) == ([], [])
+
+
+def test_refresh_live_market_data_excludes_absent_symbols(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    import pandas as pd
+
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    stale = now - pd.Timedelta(days=2)
+    for sym in ("AAAUSDT", "BBBUSDT", "GONEUSDT"):
+        stamps = [int((stale - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{sym}.parquet", index=False)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+    monkeypatch.setattr(data_refresh, "ABSENT_MAX_FRACTION", 0.5)
+    refreshed: list[str] = []
+    monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", lambda collector, symbol, start, end, **k: refreshed.append(symbol) or True)
+    caplog.set_level(logging.INFO, logger="src.live.data_refresh")
+
+    # When
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=2, deadline_s=30.0, freshness_floor_hours=1.5,
+        min_symbols=2, max_fail_fraction=0.15, collector=object(), listed_symbols=frozenset({"AAAUSDT", "BBBUSDT"}),
+    )
+
+    # Then: 거래소에 없는 심볼은 요청/집계/신선도 계산에서 모두 빠진다
+    assert sorted(refreshed) == ["AAAUSDT", "BBBUSDT"]
+    assert (report.total, report.refreshed, report.failed, report.absent) == (2, 2, 0, 1)
+    assert report.ok is True
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("absent_symbols=1 sample=GONEUSDT" in m for m in messages)
+    assert any("absent=1" in m and "stage=refresh_live_market_data total=2" in m for m in messages)
+
+    # Given: 목록 미제공(None)은 기존 동작
+    refreshed.clear()
+    legacy = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=2, deadline_s=30.0, freshness_floor_hours=1.5,
+        min_symbols=2, max_fail_fraction=0.15, collector=object(),
+    )
+    assert sorted(refreshed) == ["AAAUSDT", "BBBUSDT", "GONEUSDT"]
+    assert (legacy.total, legacy.absent) == (3, 0)
+

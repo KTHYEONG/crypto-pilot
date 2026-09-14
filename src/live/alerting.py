@@ -151,6 +151,33 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "일부 심볼의 시세 파일이 손상되었거나 결정 봉이 없어 한도 내에서 이번 신호 계산에서 제외했습니다. 보유 심볼과 기준 심볼은 제외하지 않고 중단합니다.",
         "action": "docker exec mhs-live-daemon cat /app/data/state/signal_quarantine.json\ndocker exec mhs-live-daemon uv run python -m src.cli.main data repair-ohlcv --symbol <SYMBOL>",
     },
+    "cycle_interrupted": {
+        "title": "결정 사이클 중단 후 재시작",
+        "severity_badge": "⚠️ 주의",
+        "severity_label": "WARNING",
+        "header_color": "#d97706",
+        "bg_color": "#fffbeb",
+        "impact": "이전 프로세스가 refresh/signal/execute 단계 도중 종료(배포·OOM·크래시)된 뒤 데몬이 재시작했습니다. 같은 결정일은 멱등 가드로 재집행되지 않고 재시도됩니다.",
+        "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon uv run python -m src.cli.main live status",
+    },
+    "daemon_crashed": {
+        "title": "라이브 데몬 프로세스 크래시",
+        "severity_badge": "🚨 긴급",
+        "severity_label": "CRITICAL",
+        "header_color": "#dc2626",
+        "bg_color": "#fef2f2",
+        "impact": "데몬 최상위 루프가 예외로 종료되었습니다. 컨테이너 재시작 정책으로 재기동되며 반복되면 크래시 루프입니다.",
+        "action": "cat logs/live/daemon.log | tail -200\ndocker ps --filter name=mhs-live-daemon",
+    },
+    "cycle_complete": {
+        "title": "일일 리밸런스 완료",
+        "severity_badge": "🔔 알림",
+        "severity_label": "NOTICE",
+        "header_color": "#2563eb",
+        "bg_color": "#eff6ff",
+        "impact": "결정 사이클이 정상 완료되었습니다. 이 메일이 오지 않는 날은 데몬·VPS·알림 채널 이상을 의심하세요.",
+        "action": "docker exec mhs-live-daemon uv run python -m src.cli.main live status",
+    },
 }
 
 

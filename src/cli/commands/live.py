@@ -81,7 +81,7 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
 
 def _run_daemon(args: argparse.Namespace) -> None:
     from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
-    from src.live.scheduler import _default_signal_step, run_daemon
+    from src.live.scheduler import _daemon_alert, _default_signal_step, run_daemon
     from src.live.settings import LiveSettings
 
     _attach_process_log("daemon.log")
@@ -89,18 +89,34 @@ def _run_daemon(args: argparse.Namespace) -> None:
     artifact = Path(args.artifact) if getattr(args, "artifact", None) else default_weights_path()
     shutdown = ShutdownFlag()
     install_shutdown_handlers(shutdown)
-    run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown, signal_step_fn=functools.partial(_default_signal_step, shutdown=shutdown))
+    try:
+        run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown, signal_step_fn=functools.partial(_default_signal_step, shutdown=shutdown))
+    except Exception as exc:  # 프로세스 경계라 광역 except 허용
+        logger.exception("[SYS] daemon crashed error=%s", type(exc).__name__)
+        _daemon_alert(settings, set(), event="daemon_crashed", detail=f"error={type(exc).__name__}: {str(exc)[:300]}", decision_time=None, now=pd.Timestamp.now(tz="UTC"))
+        raise
 
 
-def _run_signal_step(args: argparse.Namespace) -> None:
+def _signal_step_sidecar_paths() -> tuple[Path, Path]:
+    weights = default_weights_path()
+    from src.mhs.live_signal_step import quarantine_sidecar_path
+    from src.live.signal_step_result import signal_step_result_path
+    return (signal_step_result_path(weights), quarantine_sidecar_path(weights))
+
+
+def _record_signal_step_failure(path: Path, decision_time: pd.Timestamp, cause: BaseException) -> None:
+    from src.live.signal_step_result import SIGNAL_STEP_STATUS_FAILED, SignalStepResult, write_signal_step_result
+    # 디스크 장애 시 프로세스는 어차피 exit 1이라 쓰기 실패를 잡지 않음
+    write_signal_step_result(path, SignalStepResult(decision_time=decision_time, status=SIGNAL_STEP_STATUS_FAILED, error_type=type(cause).__name__, reason=str(cause)))
+
+
+def _signal_step_body(args: argparse.Namespace, settings: Any) -> None:
     from src.common.errors import DataIntegrityError
     from src.live.deployed_weights import default_weights_path as _dwp
     from src.live.errors import ArtifactSealError
     from src.live.settings import LiveSettings
     from src.mhs.live_runtime import default_runtime_path, load_or_bootstrap_runtime, save_runtime
 
-    _attach_process_log("signal_step.log")
-    settings = _settings_with_mode(args)
     date = args.date
     from src.mhs import live_strategy as _live_strategy
 
@@ -143,6 +159,25 @@ def _run_signal_step(args: argparse.Namespace) -> None:
     except (DataIntegrityError, ArtifactSealError) as exc:
         logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
         raise SystemExit(1) from exc
+
+
+def _run_signal_step(args: argparse.Namespace) -> None:
+    from src.live.signal_step_result import SIGNAL_STEP_STATUS_OK, SignalStepResult, load_quarantine_records, write_signal_step_result
+
+    _attach_process_log("signal_step.log")
+    settings = _settings_with_mode(args)
+    target = pd.Timestamp(args.date).tz_convert("UTC").normalize()
+    result_path, quarantine_path = _signal_step_sidecar_paths()
+    try:
+        _signal_step_body(args, settings)
+    except SystemExit as exc:
+        _record_signal_step_failure(result_path, target, exc.__cause__ if exc.__cause__ is not None else exc)
+        raise
+    except Exception as exc:  # 프로세스 경계라 광역 except 허용
+        logger.exception("[EVAL] signal_step status=CRASHED decision_time=%s", target.isoformat())
+        _record_signal_step_failure(result_path, target, exc)
+        raise SystemExit(1) from exc
+    write_signal_step_result(result_path, SignalStepResult(decision_time=target, status=SIGNAL_STEP_STATUS_OK, quarantine=load_quarantine_records(quarantine_path, target)))
 
 
 def _run_status(args: argparse.Namespace) -> None:
@@ -191,6 +226,27 @@ def _run_portfolio_state_summary(args: argparse.Namespace) -> None:  # noqa: ARG
 
     summary = summarize_portfolio_state()
     logger.info("[EVAL] portfolio_state %s", summary)
+
+
+def _run_paper_funding_backfill(args: argparse.Namespace) -> None:
+    from src.common.errors import DataIntegrityError
+
+    import src.live.funding_backfill as _backfill
+
+    settings = _settings_with_mode(args)
+    try:
+        plan = _backfill.run_paper_funding_backfill(
+            settings, apply=bool(args.apply), now=pd.Timestamp.now(tz="UTC"), accrual_start=args.accrual_start
+        )
+    except DataIntegrityError as exc:
+        logger.error("[PORTFOLIO] paper_funding_backfill status=FAILED reason=%s", exc)
+        raise SystemExit(1) from exc
+    logger.info(
+        "[PORTFOLIO] paper_funding_backfill status=%s cash_delta=%s end=%s",
+        "APPLIED" if args.apply else "DRY_RUN",
+        plan.cash_delta,
+        plan.end.isoformat(),
+    )
 
 
 def _run_preflight(args: argparse.Namespace) -> None:
@@ -391,6 +447,24 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     )
     preflight.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     preflight.set_defaults(handler=_run_preflight)
+
+    backfill = subparsers.add_parser(
+        "paper-funding-backfill", help="Backfill PAPER ledger funding never accrued (dry-run unless --apply)"
+    )
+    backfill.add_argument("--apply", action="store_true", default=False, help="Persist the backfill to the ledger")
+    backfill.add_argument(
+        "--accrual-start",
+        type=_parse_decision_time,
+        default=None,
+        help="Watermark engine start (ISO8601 UTC) when not derivable from the ledger",
+    )
+    backfill.add_argument(
+        "--mode",
+        choices=["shadow", "paper", "live_testnet", "live_mainnet"],
+        default=None,
+        help="Override LIVE_MODE for this run",
+    )
+    backfill.set_defaults(handler=_run_paper_funding_backfill)
 
     from src.live.tax_ledger import summarize_tax_year as _summarize_tax_year_ref  # noqa: F401
 

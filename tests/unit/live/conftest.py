@@ -19,6 +19,13 @@ def _block_network(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_signal_step_sidecars(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import src.cli.commands.live as live_cli
+
+    monkeypatch.setattr(live_cli, "default_weights_path", lambda: tmp_path / "state" / "deployed_target_weights.parquet.enc")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_live_process_logs(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """src.cli.commands.live 로그 디렉터리를 테스트 격리 경로로 돌린다."""
     import logging
