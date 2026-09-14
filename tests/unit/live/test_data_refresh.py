@@ -329,3 +329,151 @@ def test_refresh_one_symbol_tail_legacy_mark_klines_failure_is_failsoft() -> Non
 
     assert ok is True
     assert calls == ["ohlcv", "funding", "mark_legacy", "metrics"]
+
+
+def test_refresh_one_symbol_tail_propagates_ip_block_from_ohlcv() -> None:
+    import pytest
+    from src.live.data_refresh import _refresh_one_symbol_tail
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            raise BinanceIpBlockedError(http_code=418, url="https://fapi.binance.com/fapi/v1/klines")
+
+        def ensure_funding_data(self, symbol, start, end):
+            raise AssertionError("must not continue after an IP block")
+
+    with pytest.raises(BinanceIpBlockedError):
+        _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+
+def test_refresh_one_symbol_tail_propagates_ip_block_from_funding() -> None:
+    import pytest
+    from src.live.data_refresh import _refresh_one_symbol_tail
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            calls.append("ohlcv")
+
+        def ensure_funding_data(self, symbol, start, end):
+            raise BinanceIpBlockedError(http_code=403, url="https://fapi.binance.com/fapi/v1/fundingRate")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            calls.append("mark")
+
+        def ensure_metrics_live_tail(self, symbol):
+            calls.append("metrics")
+
+    with pytest.raises(BinanceIpBlockedError):
+        _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    assert calls == ["ohlcv"]
+
+
+def test_refresh_live_market_data_aborts_remaining_symbols_on_ip_block(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    old = now - pd.Timedelta(days=5)
+    ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+    for sym in ("AUSDT", "BUSDT", "CUSDT"):
+        pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
+    calls: list[str] = []
+
+    def _fake_one(collector, symbol, start, end):
+        calls.append(symbol)
+        raise BinanceIpBlockedError(http_code=418, url="https://fapi.binance.com/fapi/v1/klines")
+
+    monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
+
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
+    )
+
+    assert calls == ["AUSDT"]
+    assert report.ip_blocked is True
+    assert report.failed == 3
+    assert report.refreshed == 0
+    assert report.ok is False
+
+
+def test_refresh_live_market_data_keeps_fresh_count_during_ip_block(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    old = now - pd.Timedelta(days=5)
+    ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+    pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / "AUSDT.parquet", index=False)
+    fresh_ts = [int((now - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    pd.DataFrame({"timestamp": fresh_ts, "close": [1.0] * 48}).to_parquet(d / "ZUSDT.parquet", index=False)
+
+    def _fake_one(collector, symbol, start, end):
+        raise BinanceIpBlockedError(http_code=429, url="https://fapi.binance.com/fapi/v1/klines")
+
+    monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
+
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
+    )
+
+    assert report.fresh == 1
+    assert report.failed == 1
+    assert report.ip_blocked is True
+    assert report.ok is False
+
+
+def test_refresh_live_market_data_ignores_legacy_temp_artifacts(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    ts = [int((now - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    frame = pd.DataFrame({"timestamp": ts, "close": [1.0] * 48})
+    frame.to_parquet(d / "AUSDT.parquet", index=False)
+    frame.to_parquet(d / "AUSDT.tmp.parquet", index=False)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
+    )
+
+    assert report.total == 1
+    assert report.fresh == 1
+    assert report.ip_blocked is False
+
+
+def test_market_data_staleness_hours_ignores_legacy_temp_artifacts(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+    healthy = [int((now - pd.Timedelta(hours=2 + k)).value // 10**6) for k in range(10)]
+    stale = [int((now - pd.Timedelta(hours=2000 + k)).value // 10**6) for k in range(10)]
+    pd.DataFrame({"timestamp": healthy, "close": [1.0] * 10}).to_parquet(d / "AUSDT.parquet", index=False)
+    pd.DataFrame({"timestamp": stale, "close": [1.0] * 10}).to_parquet(d / "AUSDT.tmp.parquet", index=False)
+
+    got = data_refresh.market_data_staleness_hours(tmp_path, now=now)
+
+    assert got == 2.0
+

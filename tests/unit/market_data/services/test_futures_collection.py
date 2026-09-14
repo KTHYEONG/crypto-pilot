@@ -64,19 +64,27 @@ class TestNormalizeFundingFrame:
         assert _normalize_funding_frame(bad).empty
 
 
+def test_load_cache_raises_on_corrupt_file_without_deleting(tmp_path, monkeypatch) -> None:
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.market_data.services.futures_collection import DataCollector
+
+    collector = DataCollector()
+    missing = tmp_path / "missing" / "BTCUSDT.parquet"
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: missing)
+    assert collector._load_cache("BTCUSDT", "1h").empty
+
+    corrupt = tmp_path / "corrupt.parquet"
+    corrupt.write_bytes(b"not a parquet")
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: corrupt)
+
+    with pytest.raises(DataIntegrityError, match="ohlcv cache unreadable"):
+        collector._load_cache("BTCUSDT", "1h")
+
+    assert corrupt.read_bytes() == b"not a parquet"
+
+
 class TestDataCollectorCache:
-    def test_load_cache_returns_empty_for_missing_and_corrupt(self, tmp_path, monkeypatch) -> None:
-        collector = DataCollector()
-        missing = tmp_path / "missing" / "BTCUSDT.parquet"
-        monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: missing)
-        assert collector._load_cache("BTCUSDT", "1h").empty
-
-        corrupt = tmp_path / "corrupt.parquet"
-        corrupt.parent.mkdir(parents=True, exist_ok=True)
-        corrupt.write_bytes(b"not a parquet")
-        monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: corrupt)
-        assert collector._load_cache("BTCUSDT", "1h").empty
-
     def test_load_cache_strips_baggage_columns(self, tmp_path, monkeypatch) -> None:
         idx = pd.date_range("2024-01-01", periods=2, freq="1h", tz="UTC")
         frame = pd.DataFrame({
@@ -542,3 +550,155 @@ class TestDataCollectorBookdepth:
         monkeypatch.setattr(collector_module, "BinanceVisionDownloader", DupVision)
         with pytest.raises(DataIntegrityError, match="duplicate"):
             DataCollector().ensure_bookdepth_data("BTCUSDT", "2024-01-01", "2024-01-02")
+
+
+def test_load_cache_raises_on_frame_without_time_columns_without_deleting(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.market_data.services.futures_collection import DataCollector
+
+    path = tmp_path / "NOTSUSDT.parquet"
+    pd.DataFrame({"close": [1.0, 2.0]}).to_parquet(path, index=False)
+    before = path.read_bytes()
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: path)
+
+    with pytest.raises(DataIntegrityError, match="ohlcv cache invalid"):
+        DataCollector()._load_cache("NOTSUSDT", "1h")
+
+    assert path.read_bytes() == before
+
+
+def test_ensure_ohlcv_data_never_persists_open_bar(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+    def _ms(ts: str) -> int:
+        return int((pd.Timestamp(ts) - epoch) // pd.Timedelta("1ms"))
+
+    def _rest_frame(stamps: list[str]) -> pd.DataFrame:
+        return pd.DataFrame({
+            "timestamp": [_ms(s) for s in stamps],
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+            "quote_vol": 1.0, "taker_buy_base_volume": 0.5, "taker_buy_quote_volume": 0.5,
+        })
+
+    cache = tmp_path / "ohlcv" / "1h" / "XUSDT.parquet"
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: cache)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T01:03:00Z"))
+    collector = DataCollector()
+    collector.client.fetch_ohlcv_with_taker = lambda *a, **k: _rest_frame(
+        ["2026-09-13T23:00Z", "2026-09-14T00:00Z", "2026-09-14T01:00Z"]
+    )
+
+    collector.ensure_ohlcv_data("XUSDT", "1h", "2026-09-13T23:00:00Z", "2026-09-14T01:03:00Z")
+
+    persisted = pd.read_parquet(cache)
+    assert persisted["timestamp"].tolist() == [_ms("2026-09-13T23:00Z"), _ms("2026-09-14T00:00Z")]
+
+
+def test_ensure_ohlcv_data_refetches_when_latest_closed_bar_missing_within_8h(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+    def _ms(ts: str) -> int:
+        return int((pd.Timestamp(ts) - epoch) // pd.Timedelta("1ms"))
+
+    def _rest_frame(stamps: list[str]) -> pd.DataFrame:
+        return pd.DataFrame({
+            "timestamp": [_ms(s) for s in stamps],
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+            "quote_vol": 1.0, "taker_buy_base_volume": 0.5, "taker_buy_quote_volume": 0.5,
+        })
+
+    cache = tmp_path / "ohlcv" / "1h" / "XUSDT.parquet"
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: cache)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T01:03:00Z"))
+    collector = DataCollector()
+    from src.market_data.storage.ohlcv import write_ohlcv
+
+    write_ohlcv(cache, _rest_frame(["2026-09-13T20:00Z", "2026-09-13T21:00Z", "2026-09-13T22:00Z"]), timeframe="1h")
+    fetch_calls: list[tuple] = []
+
+    def _fetch(*args, **kwargs):
+        fetch_calls.append(args)
+        return _rest_frame(["2026-09-13T22:00Z", "2026-09-13T23:00Z", "2026-09-14T00:00Z", "2026-09-14T01:00Z"])
+
+    collector.client.fetch_ohlcv_with_taker = _fetch
+
+    collector.ensure_ohlcv_data("XUSDT", "1h", "2026-09-13T20:00:00Z", "2026-09-14T01:03:00Z")
+
+    assert len(fetch_calls) == 1
+    persisted = pd.read_parquet(cache)
+    assert persisted["timestamp"].max() == _ms("2026-09-14T00:00Z")
+    assert len(persisted) == 5
+
+
+def test_ensure_ohlcv_data_early_returns_when_latest_closed_bar_present(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+    def _ms(ts: str) -> int:
+        return int((pd.Timestamp(ts) - epoch) // pd.Timedelta("1ms"))
+
+    def _rest_frame(stamps: list[str]) -> pd.DataFrame:
+        return pd.DataFrame({
+            "timestamp": [_ms(s) for s in stamps],
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+            "quote_vol": 1.0, "taker_buy_base_volume": 0.5, "taker_buy_quote_volume": 0.5,
+        })
+
+    cache = tmp_path / "ohlcv" / "1h" / "XUSDT.parquet"
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: cache)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T01:03:00Z"))
+    collector = DataCollector()
+    from src.market_data.storage.ohlcv import write_ohlcv
+
+    write_ohlcv(cache, _rest_frame(["2026-09-13T22:00Z", "2026-09-13T23:00Z", "2026-09-14T00:00Z"]), timeframe="1h")
+    before = cache.read_bytes()
+
+    def _fetch(*args, **kwargs):
+        raise AssertionError("must not fetch")
+
+    collector.client.fetch_ohlcv_with_taker = _fetch
+
+    collector.ensure_ohlcv_data("XUSDT", "1h", "2026-09-13T22:00:00Z", "2026-09-14T01:03:00Z")
+
+    assert cache.read_bytes() == before
+
+
+def test_ensure_ohlcv_data_rejects_unknown_timeframe(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+    def _ms(ts: str) -> int:
+        return int((pd.Timestamp(ts) - epoch) // pd.Timedelta("1ms"))
+
+    def _rest_frame(stamps: list[str]) -> pd.DataFrame:
+        return pd.DataFrame({
+            "timestamp": [_ms(s) for s in stamps],
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+            "quote_vol": 1.0, "taker_buy_base_volume": 0.5, "taker_buy_quote_volume": 0.5,
+        })
+
+    cache = tmp_path / "ohlcv" / "1h" / "XUSDT.parquet"
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: cache)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T01:03:00Z"))
+    collector = DataCollector()
+    import pytest
+
+    with pytest.raises(ValueError, match="unsupported timeframe"):
+        collector.ensure_ohlcv_data("XUSDT", "1M", "2026-09-13T22:00:00Z", "2026-09-14T01:03:00Z")
+

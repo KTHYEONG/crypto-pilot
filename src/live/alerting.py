@@ -88,6 +88,15 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "재시도 한도를 모두 소진해 이번 결정 시각의 리밸런스를 건너뛰고 다음 날로 진행했습니다. 기존 포지션은 조정 없이 유지됩니다.",
         "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon uv run python -m src.cli.main live status",
     },
+    "state_corrupt": {
+        "title": "데몬 상태 파일 손상",
+        "severity_badge": "🚨 긴급",
+        "severity_label": "CRITICAL",
+        "header_color": "#dc2626",
+        "bg_color": "#fef2f2",
+        "impact": "데몬 상태 파일을 읽을 수 없어 사이클을 진행하지 않고 대기합니다. 자동으로 초기화하지 않습니다.",
+        "action": "docker exec mhs-live-daemon cat /app/data/state/live_daemon_last_run.json\ndocker logs --tail 200 mhs-live-daemon",
+    },
     "data_degraded": {
         "title": "시세 갱신 지연 (열화 모드 동작)",
         "severity_badge": "⚠️ 주의",

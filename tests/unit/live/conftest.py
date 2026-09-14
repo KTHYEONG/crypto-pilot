@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import socket
 
 import pytest
@@ -15,3 +16,19 @@ def _block_network(monkeypatch: pytest.MonkeyPatch):
         raise AssertionError("unit tests must not open network sockets")
 
     monkeypatch.setattr(socket.socket, "connect", _raise)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_live_process_logs(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """src.cli.commands.live 로그 디렉터리를 테스트 격리 경로로 돌린다."""
+    import logging
+
+    import src.cli.commands.live as live_cli
+
+    monkeypatch.setattr(live_cli, "_LIVE_LOG_DIR", tmp_path / "live_logs")
+    before = list(logging.getLogger().handlers)
+    yield
+    for handler in [h for h in logging.getLogger().handlers if h not in before]:
+        logging.getLogger().removeHandler(handler)
+        with contextlib.suppress(Exception):
+            handler.close()

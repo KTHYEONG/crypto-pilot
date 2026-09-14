@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from pathlib import Path
 
 import pandas as pd
 
+from src.market_data.storage.ohlcv import is_temp_artifact
 from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS
 
 MARKET_DATA_MIN_RETENTION_DAYS: int = SIGNAL_PANEL_WINDOW_DAYS + 30
@@ -40,6 +43,8 @@ def prune_market_data(
             }
             continue
         for p in sorted(d.glob("*.parquet")):
+            if is_temp_artifact(p.name):
+                continue
             try:
                 df = pd.read_parquet(p)
             except Exception:
@@ -57,7 +62,7 @@ def prune_market_data(
             if kept.empty or len(kept) < MARKET_DATA_MIN_KEPT_ROWS:
                 files_skipped += 1
                 continue
-            tmp = p.with_suffix(".prune.tmp.parquet")
+            tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.prune.tmp")
             kept.to_parquet(tmp, index=False, compression="zstd")
             tmp.replace(p)
             files_pruned += 1

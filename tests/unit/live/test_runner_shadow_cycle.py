@@ -1110,3 +1110,27 @@ def test_run_shadow_cycle_captures_pretrade_and_baseline_before_post_trade_order
     assert pretrade_call[0] == ("AAAUSDT",)
     baseline_call = next(c for c in calls if c[1] == "baseline_untraded")
     assert baseline_call[0] == ("BBBUSDT",)
+
+
+def test_run_shadow_cycle_complete_stamps_ledger_and_rerun_does_not_trade(artifact, live_env, tmp_path) -> None:
+    from src.live.ledger import load_ledger
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    ledger_path = tmp_path / "ledger_once.json"
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
+
+    first = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    executed_after_first = len(live_env)
+    positions_after_first = dict(load_ledger(ledger_path).positions)
+    second = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+
+    assert first.status == "COMPLETE"
+    assert first.reason is None
+    assert executed_after_first > 0
+    assert load_ledger(ledger_path).last_executed_decision_time == DECISION_TIME
+    assert (second.status, second.reason, second.intent_count) == ("COMPLETE", "already_executed", 0)
+    assert len(live_env) == executed_after_first
+    assert dict(load_ledger(ledger_path).positions) == positions_after_first
+

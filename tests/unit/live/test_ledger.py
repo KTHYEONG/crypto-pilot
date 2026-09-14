@@ -298,3 +298,53 @@ def test_ledger_corrupt_numerics_fail_closed(tmp_path) -> None:
         path.write_text(json.dumps(payload), encoding="utf-8")
         with pytest.raises(DataIntegrityError):
             load_ledger(path)
+
+
+def test_ledger_round_trips_last_executed_decision_time(tmp_path) -> None:
+    import json
+    from decimal import Decimal
+    import pandas as pd
+    from src.live.ledger import LedgerState, load_ledger, save_ledger
+
+    path = tmp_path / "ledger.json"
+    executed = pd.Timestamp("2026-09-14 00:00Z")
+    save_ledger(path, LedgerState(positions={"AAAUSDT": Decimal("1.5")}, last_executed_decision_time=executed))
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    loaded = load_ledger(path)
+
+    assert raw["last_executed_decision_time"] == "2026-09-14T00:00:00+00:00"
+    assert loaded.last_executed_decision_time == executed
+    assert loaded.positions == {"AAAUSDT": Decimal("1.5")}
+
+
+def test_ledger_legacy_file_without_last_executed_loads_none(tmp_path) -> None:
+    import json
+    from src.live.ledger import load_ledger, save_ledger
+
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps({"positions": {"AAAUSDT": "2"}, "equity_high_water_mark": "2000"}), encoding="utf-8")
+
+    loaded = load_ledger(path)
+    save_ledger(path, loaded)
+
+    assert loaded.last_executed_decision_time is None
+    assert "last_executed_decision_time" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_ledger_rejects_invalid_last_executed_decision_time(tmp_path) -> None:
+    import json
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.live.ledger import load_ledger
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"positions": {}, "last_executed_decision_time": "not-a-time"}), encoding="utf-8")
+    naive = tmp_path / "naive.json"
+    naive.write_text(json.dumps({"positions": {}, "last_executed_decision_time": "2026-09-14T00:00:00"}), encoding="utf-8")
+
+    with pytest.raises(DataIntegrityError):
+        load_ledger(bad)
+    with pytest.raises(DataIntegrityError):
+        load_ledger(naive)
+

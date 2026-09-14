@@ -181,6 +181,7 @@ def _accrue_ledger_funding(
             equity_high_water_mark=state.equity_high_water_mark,
             cash_usdt=state.cash_usdt,
             funding_accrued_through=now,
+            last_executed_decision_time=state.last_executed_decision_time,
         )
         save_ledger(ledger_path, updated)
         return updated
@@ -194,6 +195,7 @@ def _accrue_ledger_funding(
         equity_high_water_mark=state.equity_high_water_mark,
         cash_usdt=state.cash_usdt + delta,
         funding_accrued_through=now,
+        last_executed_decision_time=state.last_executed_decision_time,
     )
     save_ledger(ledger_path, updated)
     return updated
@@ -215,6 +217,11 @@ def run_shadow_cycle(
     에쿼티/드로다운 -> 신호 -> 목표수량 -> 계획 -> 리스크 게이트 -> 집행 -> 원장 영속."""
     now_ts = now if now is not None else pd.Timestamp.now(tz="UTC")
     try:
+        ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
+        last_executed = load_ledger(ledger_path).last_executed_decision_time
+        if last_executed is not None and decision_time <= last_executed:
+            logger.info("[EXEC] cycle skipped decision_time=%s reason=already_executed last_executed=%s", decision_time, last_executed)
+            return CycleReport(status="COMPLETE", reason="already_executed", decision_time=decision_time, intent_count=0)
         # 1) effective decision time gating (weights_asof)
         weights = latest_target_weights(weights_path, decision_time, artifact_key=settings.artifact_key, max_staleness=pd.Timedelta(hours=settings.max_weights_staleness_hours))
         effective_dt = pd.Timestamp(weights.name)
@@ -243,7 +250,6 @@ def run_shadow_cycle(
             snapshot = fetch_account_snapshot(order_client, now=now_ts)
         assert_venue_configuration(snapshot)
 
-        ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
         ledger_state = load_ledger(ledger_path)
         ledger_positions = ledger_state.positions
 
@@ -256,6 +262,7 @@ def run_shadow_cycle(
                 equity_high_water_mark=ledger_state.equity_high_water_mark,
                 cash_usdt=ledger_state.cash_usdt,
                 funding_accrued_through=ledger_state.funding_accrued_through,
+                last_executed_decision_time=ledger_state.last_executed_decision_time,
             )
             save_ledger(ledger_path, ledger_state)
             ledger_positions = ledger_state.positions
@@ -399,15 +406,7 @@ def run_shadow_cycle(
         try:
             try:
                 outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model))
-                final_state = _persist_confirmed_fills(
-                    ledger_path,
-                    ledger_state,
-                    kept,
-                    outcomes,
-                    equity,
-                    track_cash=settings.mode.suppresses_mutations,
-                    starting_capital=Decimal(str(settings.notional_equity_usdt)),
-                )
+                final_state = _persist_confirmed_fills(ledger_path, ledger_state, kept, outcomes, equity, track_cash=settings.mode.suppresses_mutations, starting_capital=Decimal(str(settings.notional_equity_usdt)), executed_decision_time=decision_time)
                 persisted = True
             except LiveTradingError as exc:
                 to_persist = sink if sink else _partial_outcomes(exc)
@@ -713,8 +712,10 @@ def _persist_confirmed_fills(
     *,
     track_cash: bool = False,
     starting_capital: Decimal = Decimal(0),
+    executed_decision_time: pd.Timestamp | None = None,
 ) -> LedgerState:
     """확인된 체결과 단조 증가한 hwm 을 원자적으로 영속한다."""
+    last_executed = executed_decision_time if executed_decision_time is not None else base_state.last_executed_decision_time
     paired_intents = list(intents)[: len(outcomes)]
     if track_cash:
         cash_before = base_state.cash_usdt if base_state.cash_usdt is not None else starting_capital
@@ -728,6 +729,7 @@ def _persist_confirmed_fills(
             equity_high_water_mark=max(base_state.equity_high_water_mark, equity),
             cash_usdt=cash_usdt,
             funding_accrued_through=base_state.funding_accrued_through,
+            last_executed_decision_time=last_executed,
         )
         save_ledger(ledger_path, state)
         return state
@@ -737,6 +739,7 @@ def _persist_confirmed_fills(
         equity_high_water_mark=max(base_state.equity_high_water_mark, equity),
         cash_usdt=cash_usdt,
         funding_accrued_through=base_state.funding_accrued_through,
+        last_executed_decision_time=last_executed,
     )
     save_ledger(ledger_path, state)
     return state

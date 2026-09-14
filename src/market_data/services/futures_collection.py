@@ -1,5 +1,4 @@
 import concurrent.futures
-import contextlib
 import json
 import logging
 from dataclasses import dataclass
@@ -23,6 +22,18 @@ from src.market_data.storage.ohlcv import write_ohlcv
 from src.market_data.storage.schemas import METRICS_CANONICAL_COLUMNS as _METRICS_CANONICAL_COLUMNS
 
 _logger = logging.getLogger("DataCollector")
+
+_TIMEFRAME_MS: dict[str, int] = {"1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000, "3d": 259_200_000, "1w": 604_800_000}
+
+
+def _utc_now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")
+
+
+def _timeframe_ms(timeframe: str) -> int:
+    if timeframe not in _TIMEFRAME_MS:
+        raise ValueError(f"unsupported timeframe for bar closure: {timeframe}")
+    return _TIMEFRAME_MS[timeframe]
 
 
 def _mark_price_path(symbol: str, timeframe: str) -> Path:
@@ -178,18 +189,14 @@ class DataCollector:
             return pd.DataFrame()
         try:
             df = pd.read_parquet(path)
-            if df.empty or ("timestamp" not in df.columns and "datetime" not in df.columns):
-                path.unlink()
-                return pd.DataFrame()
-            _baggage = [c for c in ("close_time", "no_trades", "ignore") if c in df.columns]
-            if _baggage:
-                df = df.drop(columns=_baggage)
-            return self._normalize_df(df)
         except Exception as exc:
-            with contextlib.suppress(Exception):
-                path.unlink()
-            self.logger.debug("Failed to load cache %s: %s", path, exc)
-            return pd.DataFrame()
+            raise DataIntegrityError(f"ohlcv cache unreadable: {path}") from exc
+        if df.empty or ("timestamp" not in df.columns and "datetime" not in df.columns):
+            raise DataIntegrityError(f"ohlcv cache invalid: {path}")
+        _baggage = [c for c in ("close_time", "no_trades", "ignore") if c in df.columns]
+        if _baggage:
+            df = df.drop(columns=_baggage)
+        return self._normalize_df(df)
 
     def _save_cache(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
         write_ohlcv(self._cache_path(symbol, timeframe), df, timeframe=timeframe)
@@ -197,14 +204,18 @@ class DataCollector:
     def ensure_ohlcv_data(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> None:
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
+        interval_ms = _timeframe_ms(timeframe)
         cache_df = self._load_cache(symbol, timeframe)
+        req_end_ms = int(req_end.value // 1_000_000)
+        latest_closed_open_ms = (req_end_ms // interval_ms) * interval_ms - interval_ms
         if (
             not cache_df.empty
             and cache_df["datetime"].min() <= req_start
-            and cache_df["datetime"].max() >= req_end - pd.Timedelta(hours=8)
+            and cache_df["datetime"].max() >= pd.Timestamp(latest_closed_open_ms, unit="ms", tz="UTC")
         ):
             return
-        api_cutoff = pd.Timestamp.now(tz="UTC").replace(
+        now = _utc_now()
+        api_cutoff = now.replace(
             day=1, hour=0, minute=0, second=0, microsecond=0
         ) - pd.Timedelta(days=32)
         new_parts: list[pd.DataFrame] = []
@@ -261,7 +272,11 @@ class DataCollector:
             try:
                 chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(remaining_start), str(req_end))
                 if not chunk.empty:
-                    new_parts.append(self._normalize_df(chunk))
+                    chunk = self._normalize_df(chunk)
+                    now_ms = int(now.value // 1_000_000)
+                    chunk = chunk[pd.to_numeric(chunk["timestamp"], errors="coerce") + interval_ms <= now_ms]
+                    if not chunk.empty:
+                        new_parts.append(chunk)
             except BinanceKlinePermanentError as exc:
                 self.logger.warning(
                     "Permanent OHLCV API failure for %s %s (%d). range=%s..%s",
