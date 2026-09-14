@@ -1,6 +1,76 @@
 {
   "tasks": [
     {
+      "task_id": "ZOMBIE_BAR_MASK_POLICY_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_ZOMBIE_BAR_MASK_POLICY_20260914",
+      "domain": "mhs",
+      "title": "좀비봉 마스크 정책 골격 및 패리티 게이트",
+      "why": "상장폐지후 거래량0 봉이 유동성필터를 오염시켜 백테스트/라이브 유니버스 불일치 유발",
+      "resolution": "K=24봉 인과적 마스크를 data_policy 파라미터로 opt-in(기본 legacy), params digest 불일치시 signal-step 거부",
+      "impact": "정책을 켜지 않는 한 기존 결과와 완전히 동일하며, 향후 연구재실행 후 안전하게 전환 가능"
+    },
+    {
+      "task_id": "LIVE_VENUE_PREFLIGHT_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_LIVE_VENUE_PREFLIGHT_20260914",
+      "domain": "live",
+      "title": "LIVE 레버리지·마진 사전점검 및 노셔널 한도",
+      "why": "레버리지/마진타입 설정 코드 부재, 브래킷 notionalCap 초과 주문이 그대로 나감",
+      "resolution": "CROSSED 마진과 브래킷 기반 레버리지 자동설정, notionalCap 초과 주문 사전거부",
+      "impact": "LIVE 전환시 거래소 브래킷 한도를 넘는 주문이 나가지 않음"
+    },
+    {
+      "task_id": "LIVE_ORDER_IDEMPOTENCY_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_LIVE_ORDER_IDEMPOTENCY_20260914",
+      "domain": "live",
+      "title": "주문 멱등성 저널 및 재전송 금지",
+      "why": "clientOrderId 재사용/블라인드재전송으로 이중체결 위험, 전일 GTX 주문 미정리",
+      "resolution": "전송전 저널기록+lifetime-unique submit_seq, 변이요청 재전송 금지 후 조회로 확정, 네임스페이스 기반 고아주문 정리",
+      "impact": "주문 재시도 경로에서 이중체결이 구조적으로 불가능해지고 미체결 주문이 날짜무관하게 정리됨"
+    },
+    {
+      "task_id": "PAPER_LEDGER_INTEGRITY_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_PAPER_LEDGER_INTEGRITY_20260914",
+      "domain": "live",
+      "title": "PAPER 펀딩 워터마크 정산 및 상장폐지 청산",
+      "why": "펀딩 누락구간을 0으로 적립후 워터마크 전진해 영구손실, 상장폐지 보유종목 영구HALT",
+      "resolution": "심볼별 정산epoch 워터마크와 보유구간 이력 기반 적립, 상장폐지는 deliveryDate mark로 1회 청산",
+      "impact": "지연 펀딩데이터가 나중에 와도 정확히 소급 적립되고 상장폐지가 HALT 대신 자동청산됨"
+    },
+    {
+      "task_id": "DEPLOY_GATE_STAGE_TIMING_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_DEPLOY_GATE_STAGE_TIMING_20260914",
+      "domain": "live",
+      "title": "배포 중 사이클 보호 및 단계별 소요시간 로그",
+      "why": "사이클 진행중 배포시 강제종료로 반복실행/중단 위험, 단계별 소요시간 미측정",
+      "resolution": "heartbeat stage 기반 CI 배포 대기 게이트, 단계 종료 로그, signal-step 자식프로세스 종료 시그널 전파",
+      "impact": "바쁜 시간대 배포가 최대 60분 대기 후 진행되고 단계별 소요시간이 로그로 남음"
+    },
+    {
+      "task_id": "SIGNAL_INPUT_QUARANTINE_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_SIGNAL_INPUT_QUARANTINE_20260914",
+      "domain": "mhs",
+      "title": "신호 입력 파일 격리 및 결정봉 가드",
+      "why": "파일 1개 손상/누락으로 신호계산 전체 크래시, 결정봉 존재 확인 장치 없음",
+      "resolution": "결정일당 min(5,1%) 한도로 심볼 격리, 보유/기준심볼은 fail-closed 보호, 수동 복구 CLI 추가",
+      "impact": "결함 심볼 하나가 전체 신호계산을 막지 않고 격리 기록이 남음"
+    },
+    {
+      "task_id": "FUNDING_FETCH_PACING_20260914",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_FUNDING_FETCH_PACING_20260914",
+      "domain": "live",
+      "title": "펀딩 요청 속도 제한 및 정산주기 신선도",
+      "why": "12워커가 초당 2.56회로 펀딩요청해 403 대량발생, 12h 여유로 정산 누락 감지 못함",
+      "resolution": "프로세스 전역 토큰버킷(초당 1.33회)과 정산epoch 기준 신선도 판정 도입, OHLCV+펀딩 모두 신선해야 fresh",
+      "impact": "펀딩 요청이 거래소 한도 안에서 페이싱되고 정산 누락이 fresh 판정에서 걸러짐"
+    },
+    {
       "task_id": "LIVE_DAEMON_LIFECYCLE_20260914",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_LIVE_DAEMON_LIFECYCLE_20260914",
@@ -929,76 +999,6 @@
       "why": "committee_capital(35e85649)가 fold 자본을 실제 5m 원장으로 흘리며 RELEVANT_EXECUTION_DATA_GAP이 fold2(2025)에서 처음 노출됨. 로컬 캐시 대조 결과 246개 funded 심볼(1000SHIBUSDT, AEROUSDT 등)이 5m OHLCV 캐시 자체가 없어 리플레이 도중에야 MISSING_DATA로 사후 발견되고, 알파 성과 실패와 데이터 결손 실패가 reason_codes에 구분 없이 섞여 있었음.",
       "resolution": "mhs_execution_collection.py에 assert_execution_data_coverage() 신설(기존 _coverage() 재사용, root 파라미터 하위호환 추가), MhsDiagnosticRequest.execution_coverage_gate 옵트인 플래그(기본 False)로 funded 유니버스 확정 직후 리플레이 전 fail-closed 사전 검증 연결. MhsResearchGoResult.data_integrity_reason_codes 파생 필드와 MHS_GO_REASON_DATA_INTEGRITY_CODES 상수로 결손성 사유(RELEVANT_EXECUTION_DATA_GAP 등)와 알파 품질 사유(Sharpe 미달 등)를 분리해 run_history/CLI(--execution-coverage-gate)에 노출. 3m 타임프레임 도입과 5m→1m 전면 전환은 근거 부족(participation_warnings~1e-9, RAM 비용 증가)으로 스코프아웃.",
       "impact": "리플레이 수백 초 소요 후 사후 발견되던 데이터 결손을 사전 즉시 차단(--execution-coverage-gate opt-in, 기본 byte-identical)하고, active.jsonl/latest.json 소비자가 '측정 경로 변경으로 성과가 바뀐 것'과 '데이터가 결손인 것'을 즉시 구분 가능해짐."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_CAPITAL_ROUTING",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_COMMITTEE_CAPITAL_ROUTING",
-      "domain": "mhs",
-      "title": "MHS 위원회(k=6) fold 자본 라우팅 + Kelly 사이징 설계(P0/P2 게이팅)",
-      "why": "committee-book 진단 결과(Sharpe 1.93)가 production blend(0.5257)와 직접 비교 불가능함을 감사로 확인: 위원회는 mhs_ledger_pnl_multi_tier(docstring상 'never Research GO, OOS, capital metrics' 명시된 프록시 원장)로 측정됐고, k=6 구성 자체가 2021-2025 전 구간 ~50개 조합 비교로 선택돼 위원회에는 deflated Sharpe가 미적용됐으며, 실현 레버리지(vol-target scale)가 계산 후 폐기돼 1.5x 계약 상한 검증이 불가능했음(C1-C4). Kelly 사이징을 이 프록시 mu에 바로 적용하면 선택편향이 제곱으로 증폭되는 최악의 순서.",
-      "resolution": "P0: MhsDiagnosticRequest.committee_capital(opt-in, 기본 False) 신규. _build_fold_target_weights에서 committee_capital=True일 때 k=6 멤버 book을 동일가중 결합해 blend_1h를 대체(fit 없음, 리스크/실행 경로는 momentum과 완전 동일하게 유지: regime scale, rebalance trigger, 5m 실원장, 3-fold anchored purged validation 전부 공유). CLI --committee-capital 플래그 배선. committee_book=False 시 완전 byte-identical, 멤버 미승인 시 RuntimeError fail-closed(momentum 폴백 금지). Kelly 사이징(P2, f=0.25 quarter-Kelly, train-only lower-confidence-bound mu)은 설계만 하고 구현은 P0 실측 확인 전까지 명시적으로 보류(spec §8 게이트).",
-      "impact": "실측(run_id 6c74ecc8): Fold0 autocorr 0.805→1.020, **Fold1(2024) -0.267→+1.102(부호 반전, 이번 조사 전체의 발단이었던 크래시 구간 해소)**, stress도 전 fold 양전환. research_go.eligible은 여전히 false이나 사유가 PRIMARY_AUTOCORR_SHARPE_BELOW_0_6/STRESS_SHARPE_NOT_POSITIVE(알파 실패)에서 RELEVANT_EXECUTION_DATA_GAP(데이터 정합성 이슈, Fold2=2025에서 신규 발생)로 전환 -- 알파 자체는 게이트를 통과하는 수준이나 실행 데이터 결측이 새 차단 요인. Fold2 CAGR 105%는 이 결측 플래그와 동시 발생해 검증 없이 신뢰 불가로 별도 진단 필요(사용자에게 보고, 후속 조사 권고). lean_check 전체 PASS 확인(xdist 워커 과밀로 인한 fork-admission RAM guard 환경성 flake 2회는 -n2 재실행으로 무관함 확정). 자본배분(PHASE_1_BOOK_BLEND_WEIGHTS) 무변경 -- committee_capital은 opt-in 실측 경로일 뿐 프로덕션 자본 결정은 미승인."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_DIAGNOSTIC_DETAIL_EXPANSION",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_COMMITTEE_DIAGNOSTIC_DETAIL_EXPANSION",
-      "domain": "mhs",
-      "title": "MHS 위원회 진단 DEBUG 로깅 및 블록 단위 결과 상세화",
-      "why": "committee-book 프로덕션 시도가 timeout으로 실패한 이후, 재실행 시 AI가 결과를 상세 분석할 수 있도록 요청받음. _committee_diagnostic은 로그 라인이 전혀 없었고(module logger _logger 미사용), tier별 walk-forward는 전체 OOS 구간을 단일 Sharpe/CAGR/MDD 스칼라로만 집계해 블록별 시기(연도/구간)별 성과를 구분할 수 없었음. 더 심각하게는 build_mhs_run_history_record가 committee_diagnostic 키 자체를 아예 포함하지 않아, committee-book이 성공적으로 완료되더라도 영구 보관되는 docs/results/mhs_run_history/ 이력에는 위원회 결과가 전혀 남지 않는 구조였음.",
-      "resolution": "_committee_diagnostic에 4개 지점 DEBUG 로그 추가([DATA] committee_source_coverage, [ALGO] committee_member, [EVAL] committee_block, [EVAL] committee_tier_summary, logging.md 태그 스키마 준수). purged_walk_forward/committee.py는 변경하지 않고, 이미 계산된 wf 시리즈를 기존 edges/purge 경계로 caller에서 사후 슬라이싱해 tier별 blocks:[{block_start,bars,net_sharpe,cagr,mdd}] 배열을 per_tier에 추가. build_mhs_run_history_record에 committee_diagnostic: report.committee_diagnostic 키 1줄 추가(기본 None, 기존 patient_reference 필드 추가 선례와 동일 패턴). committee_book=False 시 완전 byte-identical.",
-      "impact": "lean_check 전체 PASS(lint/type/pytest) 재현 확인. 이제 --committee-book 재실행 시 DEBUG 로그와 docs/results/mhs_run_history/ 이력만으로 블록/연도별 성과와 멤버별 admission 근거를 AI가 라이브 로그 캡처 없이 분석 가능. 계산값/Research-GO 게이트/자본배분 무변경."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_DIAGNOSTIC_STAGE_TELEMETRY",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_COMMITTEE_DIAGNOSTIC_STAGE_TELEMETRY",
-      "domain": "mhs",
-      "title": "MHS 위원회/멀티피처 진단 및 persist 단계 텔레메트리 계측",
-      "why": "--committee-book 프로덕션 시도가 10분 타임아웃(exit 124)으로 실패해 리포트가 저장되지 못함. peak RSS는 8.4GB로 안전(RAM guard 정상 동작, 과거 OOM 이슈 해소 확인)했으나, run_mhs_horizon_diagnostic 내부 [SYS] 텔레메트리는 final_return까지 약 310초만 기록해 나머지 최대 ~290초가 committee/multi_feature 진단 블록과 persist_mhs_horizon_diagnostic_report 호출 중 어디에서 소요됐는지 로그로 특정할 수 없었음(두 구간 모두 기존에 telemetry 계측 없음).",
-      "resolution": "evaluation.py의 run_mhs_horizon_diagnostic에 diagnostic_feature_panels/committee_diagnostic/multi_feature_diagnostic 3개 telemetry.record 스테이지 추가. _committee_diagnostic에 telemetry: _StageRecorder | None 파라미터 스레딩 후 3개 cost tier(optimistic/base/stress)별 committee_walk_forward_<tier> 스테이지 기록. CLI(mhs.py)에 persist_report 단계 elapsed_ms 로깅 추가(import time). 전부 순수 계측만 추가, 계산값/게이트/자본배분 무변경. /check 과정에서 추가로 발견: tests/conftest.py의 pytest_sessionfinish 훅이 pytest-xdist 하에서 워커 프로세스마다 독립 실행되어 공유 tmp root(tmp/pytest/)를 경합 삭제하며 매 실행마다 다른 테스트가 flaky하게 실패하던 버그를, session.config.workerinput 존재 시 즉시 return하는 컨트롤러 전용 가드로 수정.",
-      "impact": "lean_check.py 전체 PASS(lint/type/pytest, xdist 포함) 재현 확인. committee-book/multi-feature-book 재실행 시 [SYS] 로그만으로 병목 구간(feature panel load vs committee walk-forward vs report persist)을 정확히 특정 가능해짐 -- 다음 최적화 스펙의 전제 조건. 계산값/Research-GO 게이트/PHASE_1_BOOK_BLEND_WEIGHTS 무변경."
-    },
-    {
-      "task_id": "TASK_MHS_RESULT_LOGGING_AUTOMATION",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_RESULT_LOGGING_AUTOMATION",
-      "domain": "mhs",
-      "title": "MHS 실행 결과 자동 기록 시스템(회전형 JSONL 이력)",
-      "why": "사용자가 CLI 실행마다 AI에게 docs/results/mhs-res.md를 수동으로 채워달라 지시해온 워크플로우가 비효율적이었다. persist_mhs_horizon_diagnostic_report는 고정 파일명 덮어쓰기라 실행 이력 자체가 존재하지 않았고, mhs-res.md가 유일한 이력 저장소였다(사람이 읽는 산문 markdown, AI 분석 부적합, 무한 누적/용량 관리 없음).",
-      "resolution": "src/mhs/result_log.py 신규: append_run_history_record(JSONL append + 256KiB×12샤드 회전, 초과분 자동 삭제, latest.json 스냅샷)/mhs_run_history_dir(하드코딩 경로 없이 target.parent에서 파생 — 테스트 격리 보장). evaluation.py에 build_mhs_run_history_record 신규(books/folds/research_go/discovery_qualification/xs_rank_ic/deployment_readiness 등 스칼라 요약, 소수 6자리 반올림, git SHA 미포함). persist_mhs_horizon_diagnostic_report가 COMPACT/FULL 양쪽 경로(및 COMPACT 리샘플 실패로 None 반환되는 경우 포함) 완료 후 자동 호출, 실패는 _logger.warning으로 흡수(정상 실행 결과에 영향 없음). CLI(_run_mhs_horizon_diagnostic)가 request 객체를 전달하도록 배선. /check 과정에서 발견된 2건 추가 수정: (1) _round_6이 _jsonable 이전에 적용되어 dataclass 중첩 필드(discovery_qualification)가 반올림을 우회하던 버그를 _round_6(_jsonable(record)) 순서로 수정, (2) 이전 mhs_refactor 태스크가 커밋한 TestMhsRefactorBitIdenticalReport가 참조하는 docs/results/mhs_refactor_baseline.json 골든 파일이 생성된 적 없어 영구 FAIL 상태였던 것을, pre-refactor 커밋(d922d6a1)을 git worktree로 체크아웃해 동일 fixture 로직을 재현·캡처하여 해결.",
-      "impact": "docs/results/mhs_run_history/에 이력이 자동 축적(사람 개입 0), 총 용량 상한 ~3.3MB 고정(반복 실행 무한 누적 방지). docs/results/mhs-res.md는 더 이상 갱신 대상 아님(deprecated). lean_check --spec docs/specs/mhs_result_logging_contract.json PASS(lint/type/target pytest 전체, Impact Level 3). 부수적으로 이전 리팩토링 태스크의 미검증 골든 테스트를 실제로 통과 가능한 상태로 복구."
-    },
-    {
-      "task_id": "TASK_MHS_REFACTOR_LEGACY_ISOLATION_AND_OOM_BARRIER",
-      "date": "2026-08-15",
-      "adr_id": "ADR_20260815_MHS_REFACTOR_LEGACY_ISOLATION_AND_OOM_BARRIER",
-      "domain": "mhs",
-      "title": "MHS legacy 격리 및 fork OOM 배리어/실행 최적화",
-      "why": "OOM으로 WSL 세션 종료. mhs_refactor 스펙(docs/specs/mhs_refactor.md) 실측 결과, _run_fold_safe_discovery_parallel의 ProcessPoolExecutor.submit 인자 피클링이 fold-safe 병렬 구간에서 동시 31.4GB 수요를 유발(19.5GiB 박스)했고, build_candidate_weights가 fold-safe/top-level gate에서 byte-identical하게 중복 빌드되어 5.23GB/70s가 낭비되었으며, 기존 RSS 배리어는 stage 경계만 감시해 pool.submit() 내부 폭증을 못 막았다. 동시에 src/ 166개 파일 중 MHS 실행에 불필요한 142개(단일/전문가/포트폴리오 등 legacy 전략)가 유지보수 표면을 불필요하게 넓히고 있었다.",
-      "resolution": "src/mhs/parallel.py 신규: fork_shared_payload/resolve_fork_shared(토큰 기반 fork-COW 공유, submit 인자에서 대형 pd.DataFrame 제거)/plan_worker_count(psutil 가용 메모리 기반 워커 수 산정)/assert_fork_admission(fork 직전 fail-closed 배리어)/MHS_FORK_CONTEXT(fork 컨텍스트 고정). evaluation.py의 4개 ProcessPoolExecutor(_run_books_concurrent/_run_post_book_concurrently/_run_fold_safe_discovery_parallel/_run_folds_parallel) 전부 배선. _candidate_weight_books로 fold-safe/top-level 중복 빌드 통합. 죽은 미닛프레임 캐시(_get_symbol_minute_frame 등 5개 심볼) 제거. import 폐포 분석(scratch/dep_closure.py) 기반으로 src/ 142파일·tests/ 88파일을 legacy/로 이관, CLI 표면을 research run portfolio mhs-horizon-diagnostic 단일 리프로 축소. MHS 파이프라인 테스트에 psutil.virtual_memory ample-default autouse fixture 추가(fork-admission 게이트가 xdist 동시 워커 메모리 부하로 플레이키해지는 것 방지).",
-      "impact": "프로덕션 peak RSS 16.8GB→<10GB, wall 765s→<700s 목표(실측 근거 docs/specs/mhs_refactor.md §4). OOM 시 OS kill 대신 DataIntegrityError fail-closed. src/ 유지보수 표면 166→~75파일, tests/ 174→~86파일로 축소. lean_check --spec docs/specs/mhs_refactor_contract.json PASS(lint/type/target pytest 전체)."
-    },
-    {
-      "task_id": "MHS_REFACTOR_01",
-      "date": "2026-08-14",
-      "adr_id": "ADR_20260814_MHS_REFACTOR_01",
-      "domain": "mhs",
-      "title": "MHS 리팩토링: legacy 격리 + OOM 배리어 + 실행 최적화",
-      "why": "WSL 19.5GiB 환경에서 16.8GB peak가 budget 초과, OOM VM kill 재현",
-      "resolution": "fork-COW 공유 payload, RAM 인지 워커 계획, candidate weight 단일 빌더, 예산 기반 윈도우 materialize, 죽은 캐시 제거, 230개 파일 legacy 이관, CLI 축소",
-      "impact": "prod peak <10GB 목표, OOM->DataIntegrityError fail-closed, report bit-identical"
-    },
-    {
-      "task_id": "TASK_MHS_RAM_GUARD_DIAGNOSTIC_OPT",
-      "date": "2026-08-14",
-      "adr_id": "ADR_20260814_MHS_RAM_GUARD_DIAGNOSTIC_OPT",
-      "domain": "execution",
-      "title": "MHS RAM 가드 + 위원회/멀티피처 진단 메모리 최적화",
-      "why": "29차 committee 진단 프로덕션 실행에서 OOM 직전 피크 RSS(16.8 GB→~28 GB)로 프로세스가 사망. WSL 32 GB 환경에서 실패-마감(계산 값 비변경) RAM 가드와 병목 구간 메모리/시간 최적화 필요",
-      "resolution": "RAM 가드(MHS_RAM_BUDGET_FRACTION=0.85 자동 예산 + 리저브, 스테이지 배리어 fail-closed, 워커 리저브, --no-ram-guard)와 진단 최적화 구현: 진단을 폴드 풀 join+캐시 퇴거 후 재배치(~6GB 릴리스), 패널 컬럼 프루닝(committee 3/멀티피처 6컬럼, open 미로드), 멀티티어 ledger 및 스트리밍 accumul진단으로 O(개별) 단일패스(시간 2.9배 절감). 멀티티어 per-tier bit-identical 및 스트리밍 참조 비교 ULP 0으로 산출물 동결 유지",
-      "impact": "계산 값 bit-identical 동결 유지하되 위원회/멀티피처 진단 피크 RSS를 자동 예산(85%) 아래로 보호하고 실행 시간을 개선. 책/폴드 스트리밍(_materialize_replay_windows, 16.8GB 주범)은 리플레이 계약 회귀 위험으로 별도 스펙 후보로 기록"
     }
   ]
 }

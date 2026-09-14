@@ -18,9 +18,12 @@
     "testing": [
       "tests/integration/workflows/test_taker_flow_candidate.py",
       "tests/unit/cli/commands/research/test_mhs.py",
+      "tests/unit/live/test_account.py",
       "tests/unit/live/test_cli.py",
+      "tests/unit/live/test_data_repair.py",
       "tests/unit/live/test_deployed_weights.py",
       "tests/unit/live/test_ledger.py",
+      "tests/unit/live/test_order_journal.py",
       "tests/unit/live/test_rest.py",
       "tests/unit/live/test_runner_shadow_cycle.py",
       "tests/unit/live/test_scheduler.py",
@@ -44,6 +47,7 @@
       "tests/unit/mhs/test_live_signal_step.py",
       "tests/unit/mhs/test_live_strategy.py",
       "tests/unit/mhs/test_mhs_perf_optimization.py",
+      "tests/unit/mhs/test_panel.py",
       "tests/unit/mhs/test_parallel.py",
       "tests/unit/mhs/test_replay_accumulator.py",
       "tests/unit/mhs/test_replay_batch.py",
@@ -65,7 +69,9 @@
     "testing": [
       "tests/unit/cli/commands/test_data.py",
       "tests/unit/common/test_config.py",
-      "tests/unit/live/test_runner_shadow_cycle.py"
+      "tests/unit/live/test_order_journal.py",
+      "tests/unit/live/test_runner_shadow_cycle.py",
+      "tests/unit/mhs/test_live_signal_step.py"
     ]
   },
   "src/common/settings.py": {
@@ -85,6 +91,9 @@
   },
   "src/live/data_refresh.py": {
     "testing": "tests/unit/live/test_data_refresh.py"
+  },
+  "src/live/data_repair.py": {
+    "testing": "tests/unit/live/test_data_repair.py"
   },
   "src/live/deployed_weights.py": {
     "testing": "tests/unit/live/test_deployed_weights.py"
@@ -112,6 +121,9 @@
   },
   "src/live/microstructure.py": {
     "testing": "tests/unit/live/test_microstructure.py"
+  },
+  "src/live/order_journal.py": {
+    "testing": "tests/unit/live/test_order_journal.py"
   },
   "src/live/orderbook.py": {
     "testing": "tests/unit/live/test_orderbook.py"
@@ -465,5 +477,6 @@
   },
   "src/quant/universe/pit_universe.py": {
     "testing": "tests/unit/quant/universe/test_pit_universe.py"
-  }
+  },
+  "tools/devops/daemon_idle_gate.py": {}
 }
