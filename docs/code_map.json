@@ -22,6 +22,8 @@
       "tests/unit/live/test_cli.py",
       "tests/unit/live/test_data_repair.py",
       "tests/unit/live/test_deployed_weights.py",
+      "tests/unit/live/test_filters.py",
+      "tests/unit/live/test_funding_backfill.py",
       "tests/unit/live/test_ledger.py",
       "tests/unit/live/test_order_journal.py",
       "tests/unit/live/test_rest.py",
@@ -113,6 +115,9 @@
   "src/live/filters.py": {
     "testing": "tests/unit/live/test_filters.py"
   },
+  "src/live/funding_backfill.py": {
+    "testing": "tests/unit/live/test_funding_backfill.py"
+  },
   "src/live/ledger.py": {
     "testing": "tests/unit/live/test_ledger.py"
   },
@@ -154,6 +159,9 @@
   },
   "src/live/signal.py": {
     "testing": "tests/unit/live/test_signal.py"
+  },
+  "src/live/signal_step_result.py": {
+    "testing": "tests/unit/live/test_signal_step_result.py"
   },
   "src/live/sizing.py": {
     "testing": "tests/unit/live/test_sizing.py"
