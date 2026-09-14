@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from src.common.paths import DATA_DIR
+from src.common.paths import BASE_DIR, DATA_DIR
 from src.live.deployed_weights import default_weights_path
 from src.mhs.live_signal_step import advance_to_date; from src.live.deployed_weights import default_weights_path  # wiring
 
@@ -21,6 +23,24 @@ from src.live.deployed_weights import default_weights_path as _dw_ref  # wiring 
 #: 프로덕션 기본값은 봉인된 아티팩트다(I-SEAL). 평문 .parquet 을 쓰려면 --artifact 로 명시한다.
 _DEFAULT_ARTIFACT = str(default_weights_path())
 _DEFAULT_DAEMON_STATE_PATH = str(DATA_DIR / "state" / "live_daemon_last_run.json")
+
+_LIVE_LOG_DIR: Path = BASE_DIR / "logs" / "live"
+LIVE_LOG_MAX_BYTES: int = 10 * 1024 * 1024
+LIVE_LOG_BACKUP_COUNT: int = 5
+
+
+def _attach_process_log(filename: str) -> Path:
+    log_dir = _LIVE_LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / filename
+    root = logging.getLogger()
+    for h in root.handlers:
+        if isinstance(h, RotatingFileHandler) and h.baseFilename == os.path.abspath(path):
+            return path
+    handler = RotatingFileHandler(path, maxBytes=LIVE_LOG_MAX_BYTES, backupCount=LIVE_LOG_BACKUP_COUNT, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    root.addHandler(handler)
+    return path
 
 
 def _parse_decision_time(raw: str) -> pd.Timestamp:
@@ -59,12 +79,16 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
 
 
 def _run_daemon(args: argparse.Namespace) -> None:
+    from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
     from src.live.scheduler import run_daemon
     from src.live.settings import LiveSettings
 
+    _attach_process_log("daemon.log")
     settings = _settings_with_mode(args)
     artifact = Path(args.artifact) if getattr(args, "artifact", None) else default_weights_path()
-    run_daemon(settings, artifact, Path(args.state_path))
+    shutdown = ShutdownFlag()
+    install_shutdown_handlers(shutdown)
+    run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown)
 
 
 def _run_signal_step(args: argparse.Namespace) -> None:
@@ -74,6 +98,7 @@ def _run_signal_step(args: argparse.Namespace) -> None:
     from src.live.settings import LiveSettings
     from src.mhs.live_runtime import default_runtime_path, load_or_bootstrap_runtime, save_runtime
 
+    _attach_process_log("signal_step.log")
     settings = _settings_with_mode(args)
     date = args.date
     from src.mhs import live_strategy as _live_strategy
@@ -133,14 +158,15 @@ def _run_status(args: argparse.Namespace) -> None:
     hb_ts = pd.Timestamp(hb["ts"])
     age_min = (pd.Timestamp.now(tz="UTC") - hb_ts).total_seconds() / 60
     logger.info(
-        "[SYS] status=%s decision_time=%s consecutive_halts=%s attempts=%s heartbeat_age_min=%.1f",
+        "[SYS] status=%s stage=%s decision_time=%s consecutive_halts=%s attempts=%s heartbeat_age_min=%.1f",
         status,
+        hb.get("stage"),
         hb.get("decision_time"),
         hb.get("consecutive_halts"),
         hb.get("attempts"),
         age_min,
     )
-    unhealthy = status in {"HALT", "AWAITING", "AWAITING_DATA"} or age_min > settings.max_signal_staleness_hours * 60
+    unhealthy = status in {"HALT", "AWAITING", "AWAITING_DATA", "STATE_CORRUPT"} or age_min > settings.max_signal_staleness_hours * 60
     raise SystemExit(1 if unhealthy else 0)
 
 

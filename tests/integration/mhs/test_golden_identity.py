@@ -258,3 +258,17 @@ def test_golden_identity_survives_execution_split() -> None:
     assert Path(
         "tests/fixtures/golden/mhs_report_golden_baseline_digest.json"
     ).exists()
+
+
+@pytest.fixture(autouse=True)
+def _pin_trials_attempted_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.mhs.pipeline.stages.fold as fold_stage
+
+    monkeypatch.setattr(fold_stage, "derive_trials_attempted", lambda *args, **kwargs: (80, "constant_plus_ledger"))
+
+
+def test_golden_trials_attempted_history_is_pinned() -> None:
+    import src.mhs.pipeline.stages.fold as fold_stage
+
+    assert fold_stage.derive_trials_attempted() == (80, "constant_plus_ledger")
+

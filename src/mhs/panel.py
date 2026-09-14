@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from src.market_data.storage.ohlcv import is_temp_artifact
 from src.mhs.params import PANEL_MIN_HISTORY_BARS
 from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
 from src.quant.universe.pit_universe import symbol_partition
@@ -65,7 +66,7 @@ def load_base_panel(
     window are kept with NaN outside their life.
     """
     grid = build_uniform_grid(start, end, interval)
-    paths = sorted(glob.glob(os.path.join(root, interval, "*.parquet")))
+    paths = sorted(p for p in glob.glob(os.path.join(root, interval, "*.parquet")) if not is_temp_artifact(os.path.basename(p)))
     names = [os.path.basename(p).removesuffix(".parquet") for p in paths]
     keep = set(partition_symbols(names, partition))
 

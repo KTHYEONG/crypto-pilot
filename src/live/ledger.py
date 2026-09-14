@@ -27,6 +27,7 @@ _HWM_KEY = "equity_high_water_mark"
 _POSITIONS_KEY = "positions"
 _CASH_KEY = "cash_usdt"
 _FUNDING_THROUGH_KEY = "funding_accrued_through"
+_LAST_EXECUTED_KEY = "last_executed_decision_time"
 
 
 def default_ledger_path() -> Path:
@@ -41,6 +42,7 @@ class LedgerState:
     equity_high_water_mark: Decimal = Decimal(0)
     cash_usdt: Decimal | None = None
     funding_accrued_through: pd.Timestamp | None = None
+    last_executed_decision_time: pd.Timestamp | None = None
 
 
 def load_ledger(path: Path) -> LedgerState:
@@ -59,6 +61,7 @@ def load_ledger(path: Path) -> LedgerState:
         hwm = Decimal(0)
         cash_usdt: Decimal | None = None
         funding_accrued_through: pd.Timestamp | None = None
+        last_executed: pd.Timestamp | None = None
     else:
         positions_raw = raw[_POSITIONS_KEY]
         hwm_raw = raw.get(_HWM_KEY, "0")
@@ -83,6 +86,16 @@ def load_ledger(path: Path) -> LedgerState:
             funding_accrued_through = parsed
         else:
             funding_accrued_through = None
+        if _LAST_EXECUTED_KEY in raw and raw[_LAST_EXECUTED_KEY] is not None:
+            try:
+                parsed_exec = pd.Timestamp(str(raw[_LAST_EXECUTED_KEY]))
+            except (ValueError, TypeError) as exc:
+                raise DataIntegrityError(f"ledger last_executed_decision_time is not a timestamp: {path}") from exc
+            if parsed_exec.tzinfo is None:
+                raise DataIntegrityError(f"ledger last_executed_decision_time must be tz-aware: {path}")
+            last_executed = parsed_exec.tz_convert("UTC")
+        else:
+            last_executed = None
     if not isinstance(positions_raw, dict):
         raise DataIntegrityError(f"ledger positions must be an object: {path}")
     try:
@@ -94,6 +107,7 @@ def load_ledger(path: Path) -> LedgerState:
         equity_high_water_mark=hwm,
         cash_usdt=cash_usdt,
         funding_accrued_through=funding_accrued_through,
+        last_executed_decision_time=last_executed,
     )
 
 
@@ -110,6 +124,8 @@ def save_ledger(path: Path, state: LedgerState) -> None:
         ts = pd.Timestamp(state.funding_accrued_through)
         ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
         payload[_FUNDING_THROUGH_KEY] = ts.isoformat()
+    if state.last_executed_decision_time is not None:
+        payload[_LAST_EXECUTED_KEY] = pd.Timestamp(state.last_executed_decision_time).tz_convert("UTC").isoformat()
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     os.replace(tmp_path, path)

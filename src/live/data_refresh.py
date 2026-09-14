@@ -4,6 +4,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Any
 
 import pandas as pd
 
+from src.market_data.binance.futures import BinanceIpBlockedError
+from src.market_data.storage.ohlcv import is_temp_artifact
 from src.quant.universe.pit_universe import symbol_partition
 
 try:
@@ -34,6 +37,7 @@ class RefreshReport:
     deadline_hit: bool
     staleness_hours: float
     ok: bool
+    ip_blocked: bool = False
 
 
 class ColdUniverseError(RuntimeError):
@@ -76,7 +80,7 @@ def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partit
         root = Path(futures_root) / "ohlcv" / "1h"
         if not root.exists():
             return float("inf")
-        parquets = list(root.glob("*.parquet"))
+        parquets = [p for p in root.glob("*.parquet") if not is_temp_artifact(p.name)]
         if not parquets:
             return float("inf")
         gaps: list[float] = []
@@ -120,12 +124,16 @@ def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partit
 def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) -> bool:
     try:
         collector.ensure_ohlcv_data(symbol, "1h", start, end)
+    except BinanceIpBlockedError:
+        raise
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)
         return False
     funding_ok = True
     try:
         collector.ensure_funding_data(symbol, start, end)
+    except BinanceIpBlockedError:
+        raise
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[DATA] funding symbol=%s failed error=%r", symbol, exc)
         funding_ok = False
@@ -163,7 +171,7 @@ def refresh_live_market_data(
     if symbols is None:
         root = Path(futures_root) / "ohlcv" / "1h"
         parquets = sorted(root.glob("*.parquet")) if root.exists() else []
-        syms = [p.stem for p in parquets]
+        syms = [p.stem for p in parquets if not is_temp_artifact(p.name)]
         # filter dev
         filtered: list[str] = []
         for s in syms:
@@ -185,6 +193,8 @@ def refresh_live_market_data(
 
     deadline_ts = time.perf_counter() + float(deadline_s)
 
+    ip_blocked = threading.Event()
+
     # Per-symbol worker
     def _refresh_symbol(sym: str) -> str:
         if time.perf_counter() > deadline_ts:
@@ -192,11 +202,18 @@ def refresh_live_market_data(
         tail = _disk_tail_ts(futures_root, sym, now)
         if tail is not None and (now - tail) <= pd.Timedelta(hours=freshness_floor_hours):
             return "fresh"
+        if ip_blocked.is_set():
+            return "ip_blocked"
         if tail is not None:
             start = max(tail - pd.Timedelta(hours=2), now - pd.Timedelta(days=lookback_days))
         else:
             start = now - pd.Timedelta(days=lookback_days)
-        ok = _refresh_one_symbol_tail(collector, sym, str(start), str(now))
+        try:
+            ok = _refresh_one_symbol_tail(collector, sym, str(start), str(now))
+        except BinanceIpBlockedError as exc:
+            ip_blocked.set()
+            _logger.error("[DATA] stage=refresh_live_market_data ip_blocked=True symbol=%s http_code=%d", sym, exc.http_code)
+            return "ip_blocked"
         return "refreshed" if ok else "failed"
 
     fresh = 0
@@ -219,6 +236,8 @@ def refresh_live_market_data(
                 refreshed += 1
             elif outcome == "failed":
                 failed += 1
+            elif outcome == "ip_blocked":
+                failed += 1
             elif outcome == "deadline":
                 deadline_skipped += 1
             else:
@@ -232,12 +251,12 @@ def refresh_live_market_data(
     # So all will be deadline.
 
     staleness = market_data_staleness_hours(Path(futures_root), now=now, partition=partition)
-    ok = (fresh + refreshed) >= min_symbols and failed <= math.ceil(max_fail_fraction * total)
+    ok = (fresh + refreshed) >= min_symbols and failed <= math.ceil(max_fail_fraction * total) and not ip_blocked.is_set()
     elapsed_s = time.perf_counter() - t0
 
     _logger.info(
-        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d deadline_hit=%s staleness_h=%.1f elapsed_s=%.1f ok=%s",
-        total, fresh, refreshed, failed, deadline_skipped, deadline_hit, staleness, elapsed_s, ok,
+        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d deadline_hit=%s staleness_h=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s",
+        total, fresh, refreshed, failed, deadline_skipped, deadline_hit, staleness, elapsed_s, ok, ip_blocked.is_set(),
     )
 
     return RefreshReport(
@@ -250,4 +269,5 @@ def refresh_live_market_data(
         deadline_hit=bool(deadline_hit),
         staleness_hours=float(staleness),
         ok=bool(ok),
+        ip_blocked=ip_blocked.is_set(),
     )

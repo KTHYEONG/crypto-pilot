@@ -198,6 +198,28 @@ def test_run_status_exit_nonzero_on_halt_heartbeat(tmp_path, monkeypatch) -> Non
     assert ei.value.code == 1
 
 
+def test_run_status_exit_nonzero_on_state_corrupt_heartbeat(tmp_path, monkeypatch) -> None:
+    import argparse
+    import json
+    import pandas as pd
+    import pytest
+    import src.cli.commands.live as live_mod
+    import src.live.scheduler as sched
+
+    hb = tmp_path / "hb.json"
+    hb.write_text(json.dumps({
+        "status": "STATE_CORRUPT", "stage": "idle", "decision_time": "2026-08-31T00:00:00+00:00",
+        "consecutive_halts": 0, "attempts": 0,
+        "ts": pd.Timestamp.now(tz="UTC").isoformat(),
+    }))
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb)
+
+    with pytest.raises(SystemExit) as ei:
+        live_mod._run_status(argparse.Namespace(mode=None))
+
+    assert ei.value.code == 1
+
+
 def test_run_status_exit_zero_on_healthy_recent_heartbeat(tmp_path, monkeypatch) -> None:
     import argparse
     import json
@@ -316,3 +338,126 @@ def test_signal_step_params_load_failure_exits_one(monkeypatch) -> None:
     with pytest.raises(SystemExit) as exc:
         module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
     assert exc.value.code == 1
+
+
+def test_run_daemon_cli_installs_shutdown_handlers_and_process_log(tmp_path, monkeypatch) -> None:
+    import argparse
+    import logging
+    from logging.handlers import RotatingFileHandler
+    import src.cli.commands.live as module
+    import src.live.lifecycle as lifecycle
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+
+    monkeypatch.setattr(module, "_LIVE_LOG_DIR", tmp_path / "live_logs")
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _args: object())
+    installed: list[object] = []
+    monkeypatch.setattr(lifecycle, "install_shutdown_handlers", lambda flag, **kwargs: installed.append(flag))
+    captured: dict[str, object] = {}
+
+    def fake_run_daemon(settings, weights_path, state_path, **kwargs):
+        captured.update(kwargs)
+        captured["state_path"] = state_path
+
+    monkeypatch.setattr(sched, "run_daemon", fake_run_daemon)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        module._run_daemon(argparse.Namespace(artifact=str(tmp_path / "w.parquet"), state_path=str(tmp_path / "state.json"), mode=None))
+        added = [h for h in root.handlers if h not in before]
+    finally:
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+            handler.close()
+
+    rotating = [h for h in added if isinstance(h, RotatingFileHandler)]
+    assert len(installed) == 1
+    assert isinstance(installed[0], ShutdownFlag)
+    assert captured["shutdown"] is installed[0]
+    assert captured["state_path"] == tmp_path / "state.json"
+    assert [h.baseFilename for h in rotating] == [str(tmp_path / "live_logs" / "daemon.log")]
+    assert rotating[0].maxBytes == 10 * 1024 * 1024
+    assert rotating[0].backupCount == 5
+
+
+def test_signal_step_cli_attaches_separate_process_log(tmp_path, monkeypatch) -> None:
+    import argparse
+    import logging
+    import types
+    from logging.handlers import RotatingFileHandler
+    import pandas as pd
+    import pytest
+    import src.cli.commands.live as module
+
+    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
+    monkeypatch.setattr(module, "_LIVE_LOG_DIR", tmp_path / "live_logs")
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
+    monkeypatch.setattr(
+        "src.mhs.live_strategy.load_strategy_params",
+        lambda *_a, **_k: (_ for _ in ()).throw(FileNotFoundError("no params")),
+    )
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        with pytest.raises(SystemExit):
+            module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
+        added = [h for h in root.handlers if h not in before]
+    finally:
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+            handler.close()
+
+    assert [h.baseFilename for h in added if isinstance(h, RotatingFileHandler)] == [str(tmp_path / "live_logs" / "signal_step.log")]
+
+
+def test_attach_process_log_is_idempotent_and_writes_records(tmp_path, monkeypatch) -> None:
+    import logging
+    from logging.handlers import RotatingFileHandler
+    import src.cli.commands.live as module
+
+    monkeypatch.setattr(module, "_LIVE_LOG_DIR", tmp_path / "live_logs")
+    root = logging.getLogger()
+    before = list(root.handlers)
+    previous_level = root.level
+    try:
+        root.setLevel(logging.INFO)
+        first = module._attach_process_log("daemon.log")
+        second = module._attach_process_log("daemon.log")
+        logging.getLogger("LiveScheduler").info("[SYS] probe record")
+        added = [h for h in root.handlers if h not in before]
+        for handler in added:
+            handler.flush()
+        content = first.read_text(encoding="utf-8")
+    finally:
+        root.setLevel(previous_level)
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+            handler.close()
+
+    assert first == second == tmp_path / "live_logs" / "daemon.log"
+    assert len([h for h in added if isinstance(h, RotatingFileHandler)]) == 1
+    assert "[SYS] probe record" in content
+
+
+def test_run_status_logs_heartbeat_stage(tmp_path, monkeypatch, caplog) -> None:
+    import argparse
+    import json
+    import logging
+    import pandas as pd
+    import pytest
+    import src.cli.commands.live as live_mod
+    import src.live.scheduler as sched
+
+    hb = tmp_path / "hb.json"
+    hb.write_text(json.dumps({
+        "status": "RUNNING", "stage": "execute", "decision_time": "2026-08-31T00:00:00+00:00",
+        "consecutive_halts": 0, "attempts": 0, "ts": pd.Timestamp.now(tz="UTC").isoformat(),
+    }))
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb)
+
+    with caplog.at_level(logging.INFO, logger="LiveCli"), pytest.raises(SystemExit) as exit_info:
+        live_mod._run_status(argparse.Namespace(mode=None))
+
+    assert exit_info.value.code == 0
+    assert "stage=execute" in caplog.text
+
