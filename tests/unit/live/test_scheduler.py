@@ -611,6 +611,7 @@ def test_default_data_refresh_uses_check_true(monkeypatch) -> None:
         return RefreshReport(total=1, fresh=0, refreshed=1, failed=0, deadline_skipped=0, elapsed_s=0.1, deadline_hit=False, staleness_hours=1.0, ok=True)
 
     monkeypatch.setattr("src.live.data_refresh.refresh_live_market_data", _fake_refresh)
+    monkeypatch.setattr("src.live.data_refresh.fetch_listed_symbols", lambda *a, **k: None)
     rep = sched._default_data_refresh()
     assert rep.ok is True
     assert "lookback_days" in captured or True
@@ -2217,3 +2218,478 @@ def test_run_daemon_persists_state_corrupt_detail_to_heartbeat(tmp_path, monkeyp
     payload = json.loads(hb_path.read_text(encoding="utf-8"))
     assert payload["status"] == "STATE_CORRUPT"
     assert payload["detail"] == "path=state.json error=DataIntegrityError"
+
+
+# --- auto appended from contract: live_alert_gaps ---
+def test_run_daemon_signal_failure_cause_reads_fresh_result_sidecar(tmp_path, monkeypatch) -> None:
+
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+    from src.live.signal_step_result import SignalStepResult, signal_step_result_path, write_signal_step_result
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    result_path = signal_step_result_path(artifact)
+
+    cycles: list[object] = []
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: cycles.append(a))
+
+    def _failing_with_sidecar(t):
+        write_signal_step_result(
+            result_path,
+            SignalStepResult(decision_time=t, status="FAILED", error_type="DataIntegrityError", reason="protected symbol BTCUSDT failed signal input check: decision_bar_missing"),
+        )
+        raise subprocess.CalledProcessError(1, ["signal-step"])
+
+    # When
+    sched.run_daemon(
+        LiveSettings(daemon_max_attempts_per_day=1, alert_halt_streak=1), artifact, state_path,
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=_failing_with_sidecar, prune_fn=lambda: None,
+    )
+
+    # Then: exit code 뒤에 자식 프로세스가 남긴 원인이 붙는다
+    cause = "signal_step exit=1 DataIntegrityError: protected symbol BTCUSDT failed signal input check: decision_bar_missing"
+    assert ("halt_streak", f"consecutive_halts=1 cause={cause}") in alerts
+    assert ("day_skipped", f"attempts=1 cause={cause}") in alerts
+    assert json.loads(hb_path.read_text(encoding="utf-8"))["detail"] == cause
+    assert cycles == []
+
+    # Given: 같은 결정일 이전 시도의 FAILED 사이드카가 남았고 이번 시도는 사이드카 없이 죽는다(OOM 등)
+    write_signal_step_result(result_path, SignalStepResult(decision_time=target, status="FAILED", error_type="OldError", reason="stale"))
+    alerts.clear()
+
+    def _killed(t):
+        assert not result_path.exists()
+        raise subprocess.CalledProcessError(-9, ["signal-step"])
+
+    sched.run_daemon(
+        LiveSettings(daemon_max_attempts_per_day=1, alert_halt_streak=1), artifact, tmp_path / "state2.json",
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=_killed, prune_fn=lambda: None,
+    )
+
+    # Then: 낡은 원인을 붙이지 않는다
+    assert ("day_skipped", "attempts=1 cause=signal_step exit=-9") in alerts
+
+
+def test_run_daemon_alerts_quarantine_and_sends_daily_digest(tmp_path, monkeypatch) -> None:
+
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+    from src.live.signal_step_result import SignalStepResult, signal_step_result_path, write_signal_step_result
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    result_path = signal_step_result_path(artifact)
+
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, decision_time, artifact_path, *, now: CycleReport(
+            status="COMPLETE", reason=None, decision_time=decision_time, intent_count=7, dropped_notional_fraction=0.0251,
+        ),
+    )
+
+    def _ok_signal(t):
+        write_signal_step_result(
+            result_path,
+            SignalStepResult(decision_time=t, status="OK", quarantine=(("AAAUSDT", "decision_bar_missing"), ("BBBUSDT", "unreadable:ArrowInvalid"))),
+        )
+
+    refresh = SimpleNamespace(ok=True, total=500, fresh=480, refreshed=15, failed=5, staleness_hours=1.26)
+
+    # When
+    sched.run_daemon(
+        LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: refresh, signal_step_fn=_ok_signal, prune_fn=lambda: None,
+    )
+
+    # Then: 격리 알림 -> 완료 요약 순서
+    assert alerts == [
+        ("data_quarantine", "count=2 symbols=AAAUSDT:decision_bar_missing,BBBUSDT:unreadable:ArrowInvalid"),
+        ("cycle_complete", "intents=7 reason=None dropped_fraction=0.0251 quarantined=2 refresh fresh=480 refreshed=15 failed=5/500 staleness_h=1.3"),
+    ]
+
+    # Given: 요약 비활성 + 격리 없음
+    alerts.clear()
+    sched.run_daemon(
+        LiveSettings(alert_daily_digest=False), artifact, tmp_path / "state2.json", sleep_fn=lambda s: None, now_fn=lambda: ready,
+        max_iterations=1, refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+    assert alerts == []
+
+
+def test_run_daemon_alerts_interrupted_stage_once_and_logs_banner(tmp_path, monkeypatch, caplog) -> None:
+
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+    from src.live.signal_step_result import SignalStepResult, signal_step_result_path, write_signal_step_result
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    result_path = signal_step_result_path(artifact)
+
+    import logging
+
+    hb_path.write_text(
+        json.dumps({
+            "ts": "2026-08-24T01:10:00+00:00", "decision_time": "2026-08-24T00:00:00+00:00", "status": "RUNNING",
+            "attempts": 1, "consecutive_halts": 2, "stage": "signal", "detail": "",
+        }),
+        encoding="utf-8",
+    )
+
+    class _Stop(Exception):
+        pass
+
+    def _stop(seconds):
+        raise _Stop
+
+    early = target + pd.Timedelta(minutes=30)
+    caplog.set_level(logging.INFO, logger="LiveScheduler")
+
+    # When: 재시작 직후(아직 실행 창 전이라 대기에서 멈춤)
+    with pytest.raises(_Stop):
+        sched.run_daemon(
+            LiveSettings(), artifact, state_path, sleep_fn=_stop, now_fn=lambda: early, max_iterations=1,
+            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        )
+
+    # Then
+    assert alerts == [("cycle_interrupted", "stage=signal decision_time=2026-08-24T00:00:00+00:00 heartbeat_ts=2026-08-24T01:10:00+00:00")]
+    heartbeat = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert heartbeat["stage"] == "idle"
+    assert heartbeat["status"] == "INTERRUPTED"
+    assert heartbeat["detail"] == "interrupted stage=signal"
+    assert heartbeat["decision_time"] == "2026-08-24T00:00:00+00:00"
+    assert (heartbeat["attempts"], heartbeat["consecutive_halts"]) == (1, 2)
+    assert any("daemon start" in record.getMessage() for record in caplog.records)
+
+    # When: 다시 재시작 -> idle 이므로 재알림 없음
+    alerts.clear()
+    with pytest.raises(_Stop):
+        sched.run_daemon(
+            LiveSettings(), artifact, state_path, sleep_fn=_stop, now_fn=lambda: early, max_iterations=1,
+            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        )
+    assert alerts == []
+
+
+def test_run_daemon_touches_heartbeat_ts_while_waiting_without_creating_it(tmp_path, monkeypatch) -> None:
+
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+    from src.live.signal_step_result import SignalStepResult, signal_step_result_path, write_signal_step_result
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    result_path = signal_step_result_path(artifact)
+
+    base_payload = {
+        "decision_time": "2026-08-23T00:00:00+00:00", "status": "HALT", "attempts": 2,
+        "consecutive_halts": 3, "stage": "idle", "detail": "cycle status=HALT reason=x",
+    }
+    hb_path.write_text(json.dumps({"ts": "2026-08-23T02:00:00+00:00", **base_payload}), encoding="utf-8")
+    start = target + pd.Timedelta(minutes=10)
+    cur = [start]
+    calls: list[float] = []
+
+    class _Stop(Exception):
+        pass
+
+    def _sleep(seconds):
+        calls.append(seconds)
+        if len(calls) >= 2:
+            raise _Stop
+        cur[0] += pd.Timedelta(seconds=seconds)
+
+    # When: 실행 창 전 대기 1회 후 중단
+    with pytest.raises(_Stop):
+        sched.run_daemon(
+            LiveSettings(), artifact, state_path, sleep_fn=_sleep, now_fn=lambda: cur[0], max_iterations=1,
+            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        )
+
+    # Then: ts 만 갱신, 나머지 필드 보존
+    heartbeat = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert heartbeat["ts"] == (start + pd.Timedelta(seconds=calls[0])).isoformat()
+    assert {k: v for k, v in heartbeat.items() if k != "ts"} == base_payload
+
+    # Given: heartbeat 부재 -> 생존 틱이 파일을 만들지 않는다
+    hb_path.unlink()
+    calls.clear()
+    cur[0] = start
+    with pytest.raises(_Stop):
+        sched.run_daemon(
+            LiveSettings(), artifact, state_path, sleep_fn=_sleep, now_fn=lambda: cur[0], max_iterations=1,
+            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        )
+    assert not hb_path.exists()
+
+
+def test_daemon_alert_marks_sent_only_after_delivery(monkeypatch) -> None:
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    posts: list[str] = []
+    emails: list[str] = []
+    outcome = {"email": False}
+    monkeypatch.setattr(sched, "post_alert", lambda url, *, event, detail, decision_time, now: posts.append(event) or False)
+
+    def _email(**kwargs):
+        emails.append(kwargs["event"])
+        return outcome["email"]
+
+    monkeypatch.setattr(sched, "send_email_alert", _email)
+    settings = LiveSettings(alert_gmail_user="bot@gmail.com", alert_gmail_app_password="pw", alert_email_to="me@gmail.com")
+    sent: set[str] = set()
+    now = pd.Timestamp("2026-08-24 01:10Z")
+
+    # When: 모든 채널 실패 -> 미발송으로 남아 다음 호출에서 재시도
+    assert sched._daemon_alert(settings, sent, event="halt_streak", detail="d", decision_time=None, now=now) is False
+    assert sent == set()
+
+    # When: 이메일 성공
+    outcome["email"] = True
+    assert sched._daemon_alert(settings, sent, event="halt_streak", detail="d", decision_time=None, now=now) is True
+    assert sent == {"halt_streak"}
+
+    # When: 이미 발송된 이벤트
+    assert sched._daemon_alert(settings, sent, event="halt_streak", detail="d", decision_time=None, now=now) is False
+    assert emails == ["halt_streak", "halt_streak"]
+    assert posts == ["halt_streak", "halt_streak"]
+
+    # When: 채널 호출 자체가 예외 -> 로그 후 False, 미기록
+    def _boom(**kwargs):
+        raise RuntimeError("smtp down")
+
+    monkeypatch.setattr(sched, "send_email_alert", _boom)
+    assert sched._daemon_alert(settings, sent, event="day_skipped", detail="d", decision_time=None, now=now) is False
+    assert "day_skipped" not in sent
+
+    # When: 채널 미설정 -> 경고 없이 False
+    monkeypatch.setattr(sched, "send_email_alert", lambda **kwargs: False)
+    assert sched._daemon_alert(LiveSettings(), set(), event="data_degraded", detail="d", decision_time=None, now=now) is False
+
+
+def test_scheduler_alert_gap_helpers_tolerate_bad_inputs(tmp_path, monkeypatch) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    now = pd.Timestamp("2026-08-24 01:30Z")
+    hb = tmp_path / "hb.json"
+
+    # _read_heartbeat: 부재/깨짐/비-dict -> None
+    assert sched._read_heartbeat(hb) is None
+    hb.write_text("{", encoding="utf-8")
+    assert sched._read_heartbeat(hb) is None
+    hb.write_text("[1]", encoding="utf-8")
+    assert sched._read_heartbeat(hb) is None
+
+    # _touch_heartbeat: 비-dict 는 건드리지 않고, 쓰기 실패는 삼킨다
+    sched._touch_heartbeat(hb, now)
+    assert hb.read_text(encoding="utf-8") == "[1]"
+    hb.write_text(json.dumps({"ts": "old", "stage": "idle"}), encoding="utf-8")
+
+    def _disk_full(path, text):
+        raise OSError("disk full")
+
+    original_write = sched._atomic_write_text
+    monkeypatch.setattr(sched, "_atomic_write_text", _disk_full)
+    sched._touch_heartbeat(hb, now)
+    assert json.loads(hb.read_text(encoding="utf-8"))["ts"] == "old"
+    monkeypatch.setattr(sched, "_atomic_write_text", original_write)
+
+    # _refresh_note
+    assert sched._refresh_note(None, RuntimeError("x")) == "refresh=error:RuntimeError"
+    assert sched._refresh_note(None, None) == "refresh=n/a"
+    assert sched._refresh_note(SimpleNamespace(ok=True), None) == "refresh=n/a"
+
+    # _handle_interrupted_stage: naive decision_time/비정수 카운터는 안전한 기본값으로 기록
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(sched, "_daemon_alert", lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)))
+    hb.write_text(json.dumps({"stage": "execute", "decision_time": "2026-08-24T00:00:00", "attempts": "many", "ts": "t0"}), encoding="utf-8")
+    sched._handle_interrupted_stage(LiveSettings(), hb, set(), now)
+    rewritten = json.loads(hb.read_text(encoding="utf-8"))
+    assert alerts == [("cycle_interrupted", "stage=execute decision_time=2026-08-24T00:00:00 heartbeat_ts=t0")]
+    assert (rewritten["decision_time"], rewritten["attempts"], rewritten["consecutive_halts"]) == ("2026-08-24T00:00:00+00:00", 0, 0)
+    assert (rewritten["status"], rewritten["stage"]) == ("INTERRUPTED", "idle")
+
+    # heartbeat 재기록 실패도 시작을 막지 않는다
+    hb.write_text(json.dumps({"stage": "refresh", "decision_time": "2026-08-24T00:00:00+00:00", "ts": "t1"}), encoding="utf-8")
+
+    def _broken_heartbeat(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sched, "write_heartbeat", _broken_heartbeat)
+    sched._handle_interrupted_stage(LiveSettings(), hb, set(), now)
+    assert alerts[-1] == ("cycle_interrupted", "stage=refresh decision_time=2026-08-24T00:00:00+00:00 heartbeat_ts=t1")
+
+
+def test_run_daemon_signal_result_path_errors_do_not_break_cycle(tmp_path, monkeypatch) -> None:
+
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+    from src.live.signal_step_result import SignalStepResult, signal_step_result_path, write_signal_step_result
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    result_path = signal_step_result_path(artifact)
+
+    unreadable = tmp_path / "result_is_a_directory"
+    unreadable.mkdir()
+    monkeypatch.setattr(sched, "signal_step_result_path", lambda weights_path: unreadable)
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, decision_time, artifact_path, *, now: CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0),
+    )
+
+    # When: 사이드카 삭제/판독이 OSError(디렉터리) -> 관측 전용이라 사이클은 계속
+    sched.run_daemon(
+        LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+
+    # Then
+    assert json.loads(state_path.read_text(encoding="utf-8"))["last_processed_decision_time"] == "2026-08-24T00:00:00+00:00"
+    assert alerts == [("cycle_complete", "intents=0 reason=None dropped_fraction=0.0000 quarantined=0 refresh=n/a")]
+
+
+def test_default_data_refresh_passes_mainnet_listing(monkeypatch) -> None:
+    import src.live.scheduler as sched
+    from src.live.data_refresh import EXCHANGE_INFO_URL, RefreshReport
+
+    captured: dict = {}
+    fetched: list[str] = []
+
+    def _fake_refresh(*a, **k):
+        captured.update(k)
+        return RefreshReport(total=1, fresh=0, refreshed=1, failed=0, deadline_skipped=0, elapsed_s=0.1, deadline_hit=False, staleness_hours=1.0, ok=True)
+
+    def _fake_fetch(url=EXCHANGE_INFO_URL, **kwargs):
+        fetched.append(url)
+        return frozenset({"BTCUSDT"})
+
+    monkeypatch.setattr("src.live.data_refresh.refresh_live_market_data", _fake_refresh)
+    monkeypatch.setattr("src.live.data_refresh.fetch_listed_symbols", _fake_fetch)
+
+    rep = sched._default_data_refresh()
+
+    assert rep.ok is True
+    assert captured["listed_symbols"] == frozenset({"BTCUSDT"})
+    # DataCollector 가 메인넷 고정이므로 목록도 settings 베뉴와 무관하게 메인넷
+    assert fetched == [EXCHANGE_INFO_URL]
+
+

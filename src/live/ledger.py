@@ -30,6 +30,8 @@ _FUNDING_THROUGH_KEY = "funding_accrued_through"
 _LAST_EXECUTED_KEY = "last_executed_decision_time"
 _WATERMARKS_KEY = "funding_watermarks"
 _HISTORY_KEY = "position_history"
+_ACCRUAL_STARTED_KEY = "funding_accrual_started_at"
+_BACKFILLED_KEY = "funding_backfilled_through"
 
 POSITION_HISTORY_MAX: int = 4
 
@@ -63,6 +65,8 @@ class LedgerState:
     last_executed_decision_time: pd.Timestamp | None = None
     funding_watermarks: dict[str, pd.Timestamp] = field(default_factory=dict)
     position_history: tuple[PositionSnapshot, ...] = ()
+    funding_accrual_started_at: pd.Timestamp | None = None
+    funding_backfilled_through: pd.Timestamp | None = None
 
 
 def _parse_utc(value: Any, name: str, path: Path) -> pd.Timestamp:
@@ -101,6 +105,8 @@ def load_ledger(path: Path) -> LedgerState:
         cash_usdt: Decimal | None = None
         funding_accrued_through: pd.Timestamp | None = None
         last_executed: pd.Timestamp | None = None
+        funding_accrual_started_at: pd.Timestamp | None = None
+        funding_backfilled_through: pd.Timestamp | None = None
     else:
         positions_raw = raw[_POSITIONS_KEY]
         hwm_raw = raw.get(_HWM_KEY, "0")
@@ -135,6 +141,14 @@ def load_ledger(path: Path) -> LedgerState:
             last_executed = parsed_exec.tz_convert("UTC")
         else:
             last_executed = None
+        if raw.get(_ACCRUAL_STARTED_KEY) is not None:
+            funding_accrual_started_at = _parse_utc(raw.get(_ACCRUAL_STARTED_KEY), "funding_accrual_started_at", path)
+        else:
+            funding_accrual_started_at = None
+        if raw.get(_BACKFILLED_KEY) is not None:
+            funding_backfilled_through = _parse_utc(raw.get(_BACKFILLED_KEY), "funding_backfilled_through", path)
+        else:
+            funding_backfilled_through = None
     if not isinstance(positions_raw, dict):
         raise DataIntegrityError(f"ledger positions must be an object: {path}")
     try:
@@ -179,6 +193,8 @@ def load_ledger(path: Path) -> LedgerState:
         last_executed_decision_time=last_executed,
         funding_watermarks=watermarks,
         position_history=history,
+        funding_accrual_started_at=funding_accrual_started_at,
+        funding_backfilled_through=funding_backfilled_through,
     )
 
 
@@ -210,6 +226,10 @@ def save_ledger(path: Path, state: LedgerState) -> None:
             }
             for snap in state.position_history
         ]
+    if state.funding_accrual_started_at is not None:
+        payload[_ACCRUAL_STARTED_KEY] = pd.Timestamp(state.funding_accrual_started_at).tz_convert("UTC").isoformat()
+    if state.funding_backfilled_through is not None:
+        payload[_BACKFILLED_KEY] = pd.Timestamp(state.funding_backfilled_through).tz_convert("UTC").isoformat()
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     os.replace(tmp_path, path)

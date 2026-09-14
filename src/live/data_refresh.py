@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import math
 import threading
 import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +44,7 @@ class RefreshReport:
     ok: bool
     ip_blocked: bool = False
     funding_stale: int = 0
+    absent: int = 0
 
 
 class ColdUniverseError(RuntimeError):
@@ -47,6 +52,52 @@ class ColdUniverseError(RuntimeError):
 
 
 STALENESS_ACTIVE_WINDOW_HOURS: int = 72
+
+# DataCollector는 메인넷 fapi 고정이라 목록도 같은 베뉴를 쓴다.
+EXCHANGE_INFO_URL: str = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+EXCHANGE_INFO_TIMEOUT_S: float = 20.0
+# 실측 제거 비율 4/807≈0.5%를 크게 넘으면 잘못된 베뉴/응답으로 보고 목록 불신.
+ABSENT_MAX_FRACTION: float = 0.05
+ABSENT_LOG_SAMPLE: int = 10
+
+
+def parse_listed_symbols(payload: Mapping[str, Any]) -> frozenset[str] | None:
+    """Return listed symbols regardless of status; None on malformed/empty."""
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list):
+        return None
+    listed = {str(e["symbol"]) for e in symbols if isinstance(e, Mapping) and "symbol" in e}
+    if not listed:
+        return None
+    return frozenset(listed)
+
+
+def fetch_listed_symbols(url: str = EXCHANGE_INFO_URL, *, timeout_s: float = EXCHANGE_INFO_TIMEOUT_S, opener: Callable[..., Any] = urllib.request.urlopen) -> frozenset[str] | None:
+    """Fetch exchangeInfo listing; fail-open None on transport or payload errors."""
+    try:
+        with opener(url, timeout=timeout_s) as resp:
+            payload = json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        _logger.warning("[DATA] stage=exchange_listing fetch_failed error=%s", exc)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    listed = parse_listed_symbols(payload)
+    if listed is None:
+        _logger.warning("[DATA] stage=exchange_listing malformed_payload")
+        return None
+    return listed
+
+
+def split_absent_symbols(symbols: Sequence[str], listed: frozenset[str] | None) -> tuple[list[str], list[str]]:
+    """Split disk universe into listed and absent; fail-open on untrusted listing."""
+    if listed is None:
+        return (list(symbols), [])
+    absent = [s for s in symbols if s not in listed]
+    if symbols and len(absent) > ABSENT_MAX_FRACTION * len(symbols):
+        _logger.error("[DATA] stage=exchange_listing untrusted absent=%d total=%d", len(absent), len(symbols))
+        return (list(symbols), [])
+    return ([s for s in symbols if s in listed], absent)
 
 
 def _disk_tail_ts(futures_root: Path, symbol: str, now: pd.Timestamp) -> pd.Timestamp | None:
@@ -190,6 +241,7 @@ def refresh_live_market_data(
     symbols: list[str] | None = None,
     collector: Any | None = None,
     partition: str = "dev",
+    listed_symbols: frozenset[str] | None = None,
 ) -> RefreshReport:
     t0 = time.perf_counter()
     # 1) symbol list
@@ -208,6 +260,10 @@ def refresh_live_market_data(
         symbols_list = filtered
     else:
         symbols_list = list(symbols)
+
+    symbols_list, absent = split_absent_symbols(symbols_list, listed_symbols)
+    if absent:
+        _logger.warning("[DATA] stage=refresh_live_market_data absent_symbols=%d sample=%s", len(absent), ",".join(absent[:ABSENT_LOG_SAMPLE]))
 
     total = len(symbols_list)
     if total < min_symbols:
@@ -282,8 +338,8 @@ def refresh_live_market_data(
     elapsed_s = time.perf_counter() - t0
 
     _logger.info(
-        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d deadline_hit=%s staleness_h=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s funding_stale=%d",
-        total, fresh, refreshed, failed, deadline_skipped, deadline_hit, staleness, elapsed_s, ok, ip_blocked.is_set(), funding_stale,
+        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d deadline_hit=%s staleness_h=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s funding_stale=%d absent=%d",
+        total, fresh, refreshed, failed, deadline_skipped, deadline_hit, staleness, elapsed_s, ok, ip_blocked.is_set(), funding_stale, len(absent),
     )
 
     return RefreshReport(
@@ -298,4 +354,5 @@ def refresh_live_market_data(
         ok=bool(ok),
         ip_blocked=ip_blocked.is_set(),
         funding_stale=funding_stale,
+        absent=len(absent),
     )
