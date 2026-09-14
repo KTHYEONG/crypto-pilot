@@ -70,6 +70,18 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           SSH_OPTS="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20"
           PARAMS="docs/results/mhs_horizon_diagnostic_artifacts"
+          waited=0
+          while true; do
+            ssh $SSH_OPTS "$REMOTE_USER@$HOST" "cat ~/crypto-pilot/data/state/live_daemon_heartbeat.json 2>/dev/null || true" > heartbeat.json
+            set +e
+            python3 tools/devops/daemon_idle_gate.py --heartbeat-file heartbeat.json --waited-s "$waited"
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then break; fi
+            if [ "$rc" -ne 10 ]; then exit "$rc"; fi
+            sleep 60
+            waited=$((waited + 60))
+          done
 
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/$PARAMS"
 
