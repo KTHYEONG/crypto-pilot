@@ -103,6 +103,26 @@ class TestDataCollectorCache:
         out = collector._normalize_df(frame)
         assert pd.api.types.is_numeric_dtype(out["open"])
 
+    def test_normalize_df_renames_rest_taker_columns_to_canonical(self) -> None:
+        # fetch_ohlcv_with_taker (REST) returns *_volume-suffixed taker columns
+        # while the Vision archive path returns the unsuffixed names that
+        # load_base_panel requests; a symbol with no Vision-eligible month
+        # (freshly listed) only ever sees the REST form, which used to leave
+        # its cache file missing the columns downstream panel loading needs.
+        collector = DataCollector()
+        frame = pd.DataFrame({
+            "timestamp": [0, 1],
+            "taker_buy_base_volume": [5.0, 6.0],
+            "taker_buy_quote_volume": [500.0, 600.0],
+        })
+        out = collector._normalize_df(frame)
+        assert "taker_buy_base" in out.columns
+        assert "taker_buy_quote" in out.columns
+        assert "taker_buy_base_volume" not in out.columns
+        assert "taker_buy_quote_volume" not in out.columns
+        assert list(out["taker_buy_base"]) == [5.0, 6.0]
+        assert list(out["taker_buy_quote"]) == [500.0, 600.0]
+
 
 class TestDataCollectorSaveCache:
     def test_save_cache_1h_matches_store_output(self, tmp_path, monkeypatch) -> None:
