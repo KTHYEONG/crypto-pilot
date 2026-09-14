@@ -150,6 +150,16 @@ class DataCollector:
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return df
+        # fetch_ohlcv_with_taker returns REST-suffixed taker columns while the
+        # Vision archive path returns the unsuffixed names; symbols with no
+        # Vision-eligible month (freshly listed) only ever see the REST form,
+        # so cache files ended up with a schema that omits the unsuffixed
+        # columns load_base_panel requires. Normalize to one name here so
+        # every 1h+ cache file (new and reloaded) agrees on a single schema.
+        df = df.rename(columns={
+            "taker_buy_base_volume": "taker_buy_base",
+            "taker_buy_quote_volume": "taker_buy_quote",
+        })
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
             df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
