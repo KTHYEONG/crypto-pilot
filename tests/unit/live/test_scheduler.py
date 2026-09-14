@@ -429,7 +429,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
     size2 = hb_path.stat().st_size
     assert size2 <= size1 * 1.5
     data = json.loads(hb_path.read_text())
-    assert set(data.keys()) == {"ts", "decision_time", "status", "attempts", "consecutive_halts", "stage"}
+    assert set(data.keys()) == {"ts", "decision_time", "status", "attempts", "consecutive_halts", "stage", "detail"}
     orig_write = sched.write_heartbeat
 
     def failing_write(*a, **k):  # noqa: ARG001
@@ -1115,7 +1115,7 @@ def test_write_heartbeat_is_atomic_and_carries_stage(tmp_path, monkeypatch) -> N
         sched.write_heartbeat(hb, decision_time=decision, status="HALT", attempts=2, consecutive_halts=1, now=decision)
 
     assert running["stage"] == "signal"
-    assert set(running) == {"ts", "decision_time", "status", "attempts", "consecutive_halts", "stage"}
+    assert set(running) == {"ts", "decision_time", "status", "attempts", "consecutive_halts", "stage", "detail"}
     assert json.loads(complete_text)["stage"] == "idle"
     assert hb.read_text(encoding="utf-8") == complete_text
 
@@ -1252,7 +1252,7 @@ def test_run_daemon_heartbeat_stage_transitions_for_complete_cycle(tmp_path, mon
 
     beats: list[tuple[str, str]] = []
 
-    def _record(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle"):
+    def _record(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail=""):
         beats.append((status, stage))
 
     monkeypatch.setattr(sched, "write_heartbeat", _record)
@@ -1992,3 +1992,228 @@ def test_default_signal_step_runs_cli_command_with_timeout_and_shutdown(monkeypa
         [sys.executable, "-m", "src.cli.main", "live", "signal-step", "--date", "2026-09-15T00:00:00+00:00"],
         {"timeout_s": 1200.0, "shutdown": flag},
     )]
+
+
+
+# --- halt_reason_persistence contract: new scenarios ---
+
+def test_write_heartbeat_default_detail_is_empty_string(tmp_path) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+
+    # Given: no detail kwarg passed
+    hb = tmp_path / "hb.json"
+    decision = pd.Timestamp("2026-08-24 00:00Z")
+
+    # When
+    sched.write_heartbeat(hb, decision_time=decision, status="COMPLETE", attempts=0, consecutive_halts=0, now=decision)
+
+    # Then
+    payload = json.loads(hb.read_text(encoding="utf-8"))
+    assert payload["detail"] == ""
+
+def test_write_heartbeat_persists_explicit_detail(tmp_path) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+
+    # Given
+    hb = tmp_path / "hb.json"
+    decision = pd.Timestamp("2026-08-24 00:00Z")
+
+    # When
+    sched.write_heartbeat(
+        hb, decision_time=decision, status="HALT", attempts=2, consecutive_halts=1, now=decision,
+        stage="idle", detail="signal_step ValueError",
+    )
+
+    # Then
+    payload = json.loads(hb.read_text(encoding="utf-8"))
+    assert payload["detail"] == "signal_step ValueError"
+
+def test_run_daemon_persists_signal_halt_cause_to_heartbeat(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    # Given: strategy params present, refresh/prune no-ops, signal step raises ValueError
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    cur = [ready]
+
+    def now_fn(): return cur[0]
+    def sleep_fn(s): cur[0] += pd.Timedelta(seconds=s)
+
+    def boom_signal_step(target, **k):
+        raise ValueError("bad panel")
+
+    # When
+    sched.run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        artifact, state_path,
+        sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=boom_signal_step, prune_fn=lambda: None,
+    )
+
+    # Then: heartbeat detail carries the same redacted cause the alert would have used
+    payload = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "HALT"
+    assert payload["detail"] == "signal_step ValueError"
+
+def test_run_daemon_persists_execute_halt_cause_to_heartbeat(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    # Given: signal step succeeds, run_shadow_cycle reports a HALT with a reason code
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+
+    def fake_cycle(settings, decision_time, artifact_path, now=None, **k):  # noqa: ARG001
+        return CycleReport(status="HALT", reason="STALE_MARK", decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", fake_cycle)
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    cur = [ready]
+
+    def now_fn(): return cur[0]
+    def sleep_fn(s): cur[0] += pd.Timedelta(seconds=s)
+
+    # When
+    sched.run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        artifact, state_path,
+        sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+    )
+
+    # Then
+    payload = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "HALT"
+    assert payload["detail"] == "cycle status=HALT reason=STALE_MARK"
+
+def test_run_daemon_persists_awaiting_data_detail_to_heartbeat(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    # Given: strategy params present, refresh_fn raises and cached-panel staleness exceeds the hard ceiling
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    import src.live.data_refresh as data_refresh_mod
+    monkeypatch.setattr(data_refresh_mod, "market_data_staleness_hours", lambda *a, **k: 999.0)
+
+    def boom_refresh():
+        raise RuntimeError("network down")
+
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    cur = [ready]
+
+    def now_fn(): return cur[0]
+    def sleep_fn(s): cur[0] += pd.Timedelta(seconds=s)
+
+    # When
+    sched.run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path), max_market_data_staleness_hours=6.0),
+        artifact, state_path,
+        sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
+        refresh_fn=boom_refresh, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+    )
+
+    # Then: heartbeat detail carries the same staleness/err summary the data_refresh_failed alert used
+    payload = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "AWAITING_DATA"
+    assert "staleness_h=999.0" in payload["detail"]
+    assert "network down" in payload["detail"]
+
+def test_run_daemon_persists_awaiting_params_detail_to_heartbeat(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    # Given: strategy params never present
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: False, raising=False)
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+
+    dt = pd.Timestamp("2026-08-24 00:00Z")
+    ready = dt + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+    cur = [ready]
+
+    def now_fn(): return cur[0]
+    def sleep_fn(s): cur[0] += pd.Timedelta(seconds=s)
+
+    # When
+    sched.run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        artifact, state_path,
+        sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+    )
+
+    # Then
+    payload = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "AWAITING"
+    assert payload["detail"] == "strategy_params missing"
+
+def test_run_daemon_persists_state_corrupt_detail_to_heartbeat(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    # Given: daemon state file contains invalid JSON
+    artifact = tmp_path / "a.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{not valid json")
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+
+    now = pd.Timestamp("2026-08-24 00:00Z")
+
+    # When
+    sched.run_daemon(
+        LiveSettings(heartbeat_path=str(hb_path)),
+        artifact, state_path,
+        sleep_fn=lambda s: None, now_fn=lambda: now, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+    )
+
+    # Then: heartbeat detail carries the same path/error-type summary the state_corrupt alert used
+    payload = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "STATE_CORRUPT"
+    assert payload["detail"] == "path=state.json error=DataIntegrityError"

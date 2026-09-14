@@ -518,3 +518,30 @@ def test_signal_step_refuses_params_with_mismatched_data_policy(monkeypatch) -> 
     assert exc.value.code == 1
     assert bootstrap_calls == []
 
+
+
+
+# --- halt_reason_persistence contract: new scenarios ---
+
+def test_run_status_logs_heartbeat_detail(tmp_path, monkeypatch, caplog) -> None:
+    import argparse
+    import json
+    import logging
+    import pandas as pd
+    import pytest
+    import src.cli.commands.live as live_mod
+    import src.live.scheduler as sched
+
+    hb = tmp_path / "hb.json"
+    hb.write_text(json.dumps({
+        "status": "HALT", "stage": "idle", "decision_time": "2026-08-31T00:00:00+00:00",
+        "consecutive_halts": 1, "attempts": 2, "ts": pd.Timestamp.now(tz="UTC").isoformat(),
+        "detail": "signal_step ValueError",
+    }))
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb)
+
+    with caplog.at_level(logging.INFO, logger="LiveCli"), pytest.raises(SystemExit) as exit_info:
+        live_mod._run_status(argparse.Namespace(mode=None))
+
+    assert exit_info.value.code == 1
+    assert "detail=signal_step ValueError" in caplog.text

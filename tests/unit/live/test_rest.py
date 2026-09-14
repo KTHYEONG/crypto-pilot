@@ -502,3 +502,27 @@ def test_get_transport_failure_propagates_unchanged(tmp_path, monkeypatch) -> No
 
     assert calls == [("GET", "https://fapi.binance.com/fapi/v1/order")]
 
+
+
+
+# --- halt_reason_persistence contract: new scenarios ---
+
+def test_signed_query_round_trips_non_ascii_symbol(tmp_path: Path) -> None:
+    import urllib.parse
+
+    from pydantic import SecretStr
+
+    # Given: a real Binance-listed non-ASCII perpetual (Chinese meme coin) held live
+    client = BinanceFuturesRestClient(
+        "https://fapi.binance.com", SecretStr("k"), SecretStr("s"),
+        ExecutionMode.SHADOW, AuditLog(tmp_path / "a.jsonl"),
+    )
+
+    # When
+    signed = client._signed_query({"symbol": "\u9f99\u867eUSDT", "side": "BUY"})
+
+    # Then: percent-encoded UTF-8 round-trips exactly and a signature is appended
+    query_part, _, sig_part = signed.rpartition("&signature=")
+    assert len(sig_part) == 64
+    parsed = dict(urllib.parse.parse_qsl(query_part))
+    assert parsed["symbol"] == "\u9f99\u867eUSDT"
