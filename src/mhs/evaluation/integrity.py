@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -11,38 +13,77 @@ from src.mhs.research_go import (
     GO_REASON_RESOURCE_BREACH,
 )
 from src.common.errors import DataIntegrityError
-from src.mhs.execution import StrategyExecutionReplayResult, laddered_fill_schedule
+from src.mhs.execution import ExecutionDataGap, StrategyExecutionReplayResult, laddered_fill_schedule
 from src.mhs.types import ExecutionSpec
 
+# 2026-09-15 mhs_symbol_lifespan_pit_roster: the other 50 previously-listed symbols
+# (end-of-life: funding permanently ends before backtest end with zero internal gaps,
+# exchangeInfo status=SETTLING) are now handled dynamically by `ledger_terminal_only`
+# at finalize time instead of blanket exclusion.
 SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
-    "SLPUSDT", "CTKUSDT", "LITUSDT", "AERGOUSDT", "PUMPUSDT", "CVXUSDT", "CVCUSDT",
-    "BNXUSDT",
-    # 2026-09-15 실측: Binance Vision 원본 자체에 펀딩 이력이 없어 백필 불가(재조회로
-    # 복구되지 않음, 소스 아카이브의 진짜 공백).
-    "ICPUSDT",  # 펀딩 이력이 2022-09-01부터 시작(가격은 그 이전부터 존재) → 조기 진입 시 MISSING_ACTIVE_FUNDING
-    "AIAUSDT",  # 2025-12-11 12:00~2026-01-20 07:00 내부 공백(Vision 아카이브 자체가 비어 있음) → MISSING_HELD_FUNDING
-    "OMNIUSDT",  # 펀딩 이력이 2025-09-22에 종료(선물 상장폐지, OHLCV는 좀비 꼬리로 계속 나옴) → MISSING_HELD_FUNDING
-    "BAKEUSDT",  # 펀딩 이력이 2025-10-03 08:00에 종료, exchangeInfo status=SETTLING·deliveryDate 정확히 일치(선물 상장폐지) → MISSING_HELD_FUNDING
-    # 2026-09-15 실측: 3m/1h OHLCV 원본 자체에 내부 공백 — Vision 월간 아카이브와 REST
-    # klines 모두 해당 구간 데이터가 없음(재조회로 복구되지 않음, 소스 자체의 진짜 공백).
-    "MAVIAUSDT",  # 2025-03-26 00:00~16:00 내부 공백(3m 340봉) → MISSING_DECISION_MARK/ZERO_OR_UNKNOWN_VOLUME
-    # 2026-09-15 실측: exchangeInfo status=SETTLING(선물 상장폐지)으로 확인된 나머지 심볼.
-    # 펀딩 이력이 백테스트 구간(2025-12-31) 이전에 종료돼 좀비 꼬리 보유 시 MISSING_HELD_FUNDING을
-    # 유발한다. 37개는 실제 상장폐지일보다 한참 전인 2025-06-19 08:00에 일괄 종료됐는데(수집기가
-    # 청산 완료 심볼의 펀딩 폴링을 그 시점에 멈춘 것으로 보임) exchangeInfo status는 모두 SETTLING으로
-    # 일치해 상장폐지 자체는 확인됨.
-    "1000XUSDT", "AGIXUSDT", "AI16ZUSDT", "ALPACAUSDT", "ALPHAUSDT", "AMBUSDT", "BADGERUSDT", "BALUSDT",
-    "BLZUSDT", "BONDUSDT", "BSWUSDT", "COMBOUSDT", "DARUSDT", "DEFIUSDT", "DGBUSDT", "FISUSDT",
-    "FLMUSDT", "FTMUSDT", "FTTUSDT", "GLMRUSDT", "HIFIUSDT", "IDEXUSDT", "KDAUSDT", "KEYUSDT",
-    "KLAYUSDT", "LEVERUSDT", "LINAUSDT", "LOKAUSDT", "LOOMUSDT", "MDTUSDT", "MEMEFIUSDT", "MILKUSDT",
-    "MKRUSDT", "MYROUSDT", "NEIROETHUSDT", "NULSUSDT", "OBOLUSDT", "OCEANUSDT", "OMGUSDT", "ORBSUSDT",
-    "PERPUSDT", "PONKEUSDT", "PORT3USDT", "QUICKUSDT", "RADUSDT", "RAYUSDT", "REEFUSDT", "REIUSDT",
-    "RENUSDT", "SCUSDT", "SKATEUSDT", "SLERFUSDT", "SNTUSDT", "STMXUSDT", "STPTUSDT", "STRAXUSDT",
-    "SWELLUSDT", "TOKENUSDT", "TROYUSDT", "UNFIUSDT", "UXLINKUSDT", "VIDTUSDT", "VOXELUSDT", "WAVESUSDT",
-    "XCNUSDT", "XEMUSDT",
+    # Block1: OHLCV 캐시 없음/미미로 백테스트 구간 내내 재현 불가, 재수집 스윕 후보
+    "ALPHAUSDT", "BADGERUSDT", "BSWUSDT", "CVXUSDT", "FLMUSDT", "FTTUSDT", "IDEXUSDT",
+    "KLAYUSDT", "MKRUSDT", "NULSUSDT", "OBOLUSDT", "OCEANUSDT", "OMGUSDT", "SLERFUSDT",
+    "SLPUSDT", "STRAXUSDT", "TROYUSDT", "UNFIUSDT", "VIDTUSDT", "WAVESUSDT", "XEMUSDT",
+    # Block2: 펀딩 정상, 단일 영구 OHLCV 공백 8-17h, REST 확인으로 복구 불가
+    "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT",
+    # Block3: 백테스트 중간에 펀딩 공백이 발생했다가 재개되는 진짜 불확실성 구간, 제외 유지
+    "LITUSDT", "PUMPUSDT",
+    # Block4: 펀딩 커버리지가 가격 이력보다 한참 늦게 시작, BNXUSDT는 자체 영구 OHLCV 공백 추가 보유
+    "BNXUSDT", "ICPUSDT",
 })
 
 
+
+
+def _funding_gap_terminal_symbols(
+    data_gaps: Sequence[ExecutionDataGap],
+    simulated_fills: pd.DataFrame,
+) -> frozenset[str]:
+    """Post-hoc classification of terminal held-funding gaps.
+
+    This is a finalize-time classification only and is never fed back into any
+    trading decision (INV-PIT-RESUME-CAUSAL). A later fill for the same symbol
+    proves funding coverage resumed and the position kept trading normally, so
+    that symbol's gap is NOT terminal-equivalent.
+    """
+    missing_last: dict[str, pd.Timestamp] = {}
+    for g in data_gaps:
+        if g.code == "MISSING_HELD_FUNDING":
+            prev = missing_last.get(g.symbol)
+            if prev is None or g.timestamp > prev:
+                missing_last[g.symbol] = g.timestamp
+    if not missing_last:
+        return frozenset()
+    fill_symbols = simulated_fills["symbol"] if "symbol" in simulated_fills.columns else pd.Series(dtype="object")
+    fill_ts = pd.to_datetime(simulated_fills["timestamp"], utc=True) if "timestamp" in simulated_fills.columns else pd.Series(dtype="datetime64[ns, UTC]")
+    terminal: set[str] = set()
+    for sym, last_ts in missing_last.items():
+        if not bool(((fill_symbols == sym) & (fill_ts > last_ts)).any()):
+            terminal.add(sym)
+    return frozenset(terminal)
+
+
+def ledger_terminal_only(
+    data_gaps: Sequence[ExecutionDataGap],
+    simulated_fills: pd.DataFrame,
+) -> bool:
+    """Certify a ledger whose gaps are all disclosed terminal inventory.
+
+    Generalizes the existing UNKNOWN_TERMINATION-only exception to also accept
+    a MISSING_HELD_FUNDING episode that never recovers before the replay's own
+    grid end -- symmetric with the pre-existing 'held to backtest end is
+    disclosed evidence, not a crash' precedent; no fabricated settlement, no
+    change to funding accounting (INV-NO-FABRICATED-SETTLEMENT).
+    """
+    if not data_gaps:
+        return False
+    terminal_funding_symbols = _funding_gap_terminal_symbols(data_gaps, simulated_fills)
+    return all(
+        g.code == "UNKNOWN_TERMINATION"
+        or (g.code == "MISSING_HELD_FUNDING" and g.symbol in terminal_funding_symbols)
+        for g in data_gaps
+    )
 
 
 def _assert_cache_required_ledger_valid(
@@ -53,12 +94,14 @@ def _assert_cache_required_ledger_valid(
 
     ``cache_required_stale_carry`` and ``ohlcv_close_fallback`` are explicit
     diagnostic modes and never call this gate. Disclosed terminal inventory
-    (``UNKNOWN_TERMINATION`` gaps only) is evidence, not a crash: the position
-    stays open, the ledger stays invalid, and deployment is blocked downstream
-    by backtest-reliability certification instead of failing the book here.
+    (every gap is ``UNKNOWN_TERMINATION`` or a non-recovering
+    ``MISSING_HELD_FUNDING`` episode, see ``ledger_terminal_only``) is
+    evidence, not a crash: the position stays open, the ledger stays invalid,
+    and deployment is blocked downstream by backtest-reliability
+    certification instead of failing the book here.
     """
     gaps = primary.ledger.data_gaps
-    terminal_only = bool(primary.ledger.primary_valid) or (bool(gaps) and all(g.code == "UNKNOWN_TERMINATION" for g in gaps))
+    terminal_only = bool(primary.ledger.primary_valid) or ledger_terminal_only(gaps, primary.simulated_fills)
     if not terminal_only:
         raise DataIntegrityError(
             f"cache_required strict primary ledger invalid for {name}: "

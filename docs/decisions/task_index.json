@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_symbol_lifespan_pit_roster",
+      "date": "2026-09-15",
+      "adr_id": "ADR_20260915_mhs_symbol_lifespan_pit_roster",
+      "domain": "mhs",
+      "title": "MHS 심볼 생애주기 PIT 로스터 정합",
+      "why": "SOURCE_GAP_EXCLUDED_SYMBOLS가 심볼 단위 전체기간 배제라 상장폐지 심볼의 상장~폐지 이전 멀쩡한 구간까지 백테스트에서 못 썼다",
+      "resolution": "ledger_terminal_only가 finalize 시점에 펀딩 공백의 회복 여부를 사후판정(non-lookahead)해 UNKNOWN_TERMINATION 예외를 대칭 확장, 말기 50개 심볼을 whole-history 배제에서 제거하고 fold/북 양쪽 게이트에 동일 로직을 배선했다",
+      "impact": "상장폐지 심볼 50개(79개 중 63%)가 상장~폐지 전 구간 전체를 백테스트에 다시 활용, 잔여 29개는 재수집 필요/영구공백/중간공백/조기시작 사유별로 명확히 분류되어 배제 유지"
+    },
+    {
       "task_id": "mhs_replay_perf_accounting",
       "date": "2026-09-15",
       "adr_id": "ADR_20260915_mhs_replay_perf_accounting",
@@ -989,16 +999,6 @@
       "why": "regime-adaptive tranche 기본값 도입 이후 알파/데이터 게이트는 모두 해소됐으나 MHS_REGISTERED_POLICY_THRESHOLDS(cap_30_roster, primary_annual_return)가 미등록 상태라 research_go.eligible이 항상 UNSPECIFIED_POLICY로 차단됨. run history 12건 + ADR 30여건 교차검증으로 Kelly/레버리지/리스크패리티/크래시틸트/볼타겟 완화 등 표준 레버가 모두 이미 실측 기각·채택 완료임을 확인, 남은 유일한 차단 지점이 정책 등록임을 판별.",
       "resolution": "src/mhs/contracts.py에 cap_30_roster=30.0(기존 동결 execution_universe_size 재참조, attestation-only), primary_annual_return=0.05(최저 통과 폴드 net_ann 0.103 대비 여유) 등록. primary_annual_return은 단순 등록에 그치지 않고 _run_anchored_fold에 실제 집행 로직 추가(신규 사유 코드 MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR, 폴드별 primary_net_ann이 등록값 미만이면 게이트 실패). cap_30_roster는 실현 로스터(41.9)가 이미 30을 넘어 강제 집행 시 즉시 위반되므로 attestation-only로 유지, 강제 비교 로직 미추가. 관련 테스트(test_registered_policy_thresholds_contract 갱신, test_fold_primary_annual_return_floor_enforcement 신규) 및 docs/architecture/mhs-explain.md 최신 실측치 갱신 완료.",
       "impact": "실측 확인: research_go.eligible False->True(최초), reason_codes=[] (folds_passed=3/3), CAGR 19.2%/MDD -17.1%/Calmar 1.13. --no-pnl-vol-target(자본파괴 CAPITAL_INVARIANT_BREACH) 및 --beta-neutralize(committee_capital 경로 미배선 확인)는 실측 후 기각/무효 확인, 신규 알파 기회 아님으로 결론."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE",
-      "date": "2026-08-17",
-      "adr_id": "ADR_20260817_MHS_COMMITTEE_REGIME_ADAPTIVE_TRANCHE",
-      "domain": "mhs",
-      "title": "MHS 위원회 레짐 적응형 트랜치 — fold 게이트 후퇴 없는 복리성장 개선",
-      "why": "ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE에서 tranche=3 고정 평활이 2023을 살리고 2024를 죽이는 트레이드오프임을 위원회 raw 북 자체 return의 자기상관 부호(음=whipsaw/양=지속)로 설명. 고정 선택 대신 causal하게 레짐을 감지해 매 결정 행마다 raw/평활을 고르면 트레이드오프를 없앨 수 있는지 실제 3분봉 리플레이로 검증.",
-      "resolution": "_committee_execution_book에 regime_adaptive_window 파라미터 추가: causal trailing lag-1 자기상관(위원회 raw 북 자신의 proxy return, .shift(1)로 lookahead 차단)이 음수면 그 결정행은 3행 평활을, 0 이상이면 raw를 채택(book.mask 행단위 전량 교체). MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW=15 상수 신설(15~25 고원 확인, 10/90은 CAPITAL_INVARIANT_BREACH로 기각 — CLI에 노출하지 않고 상수 동결). MhsDiagnosticRequest.committee_regime_adaptive_tranche(committee_capital 요구, committee_tranche_smoothing과 상호배타) + CLI --committee-regime-adaptive-tranche 배선, fold 경로·top-level 블렌드 양쪽 동일 스레딩. 실제 3분봉 리플레이 6회로 검증 완료(production 플래그가 raw window=15 실험과 완전 동일함도 재확인).",
-      "impact": "이전 사이클과 달리 트레이드오프가 아니라 지배(dominance): 실제 리플레이에서 3개 fold 전부 baseline과 fixed tranche=3 양쪽을 동시에 능가(2023 0.151/1.537->1.158, 2024 0.968/0.481->0.853, 2025 3.076/2.918->3.387, 전부 0.6 게이트 통과 failures=[]). top-level CAGR 15.00%->20.70%, MDD -28.28%->-16.61%, Calmar 0.530->1.246, 연 회전율 32.94->26.12(레버리지 아님). research_go.eligible은 여전히 False이나 원인이 MHS_REGISTERED_POLICY_THRESHOLDS(cap_30_roster/primary_annual_return)가 코드베이스 전체에서 항상 미등록(None)인 별개의 정책 게이트임을 확인 — 전략 설계와 무관, folds_passed가 실질 지표."
     }
   ]
 }

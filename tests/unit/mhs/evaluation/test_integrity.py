@@ -15,10 +15,11 @@ def test_integrity_module_present() -> None:
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_permanent_funding_gaps() -> None:
-    # 2026-09-15 실측(Binance Vision 원본 자체 공백, 재조회로 복구 불가)으로 확인된 심볼:
-    # ICPUSDT(펀딩 이력 2022-09-01 시작), AIAUSDT(2025-12-11~2026-01-20 내부 공백),
-    # OMNIUSDT(펀딩 이력 2025-09-22 종료, 선물 상장폐지).
-    assert {"ICPUSDT", "AIAUSDT", "OMNIUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    # mhs_symbol_lifespan_pit_roster: ICPUSDT(조기 시작 공백)는 제외 유지.
+    # AIAUSDT/OMNIUSDT는 말기(end-of-life)라 ledger_terminal_only가 finalize 시점에
+    # 인증하므로 whole-history 배제에서 제거됨.
+    assert "ICPUSDT" in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert {"AIAUSDT", "OMNIUSDT"}.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert isinstance(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS, frozenset)
 
 
@@ -29,25 +30,347 @@ def test_source_gap_excluded_symbols_covers_2026_09_confirmed_permanent_ohlcv_ga
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_bake_delisting() -> None:
-    # 2026-09-15 실측: BAKEUSDT 펀딩 이력이 2025-10-03 08:00에 종료되고
-    # exchangeInfo status=SETTLING·deliveryDate가 정확히 일치(선물 상장폐지).
-    assert "BAKEUSDT" in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    # mhs_symbol_lifespan_pit_roster: BAKEUSDT(선물 상장폐지, 말기 공백)는
+    # ledger_terminal_only가 finalize 시점에 인증하므로 whole-history 배제에서 제거됨.
+    assert "BAKEUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_settling_batch() -> None:
-    # 2026-09-15 실측: exchangeInfo status=SETTLING으로 확인된 나머지 상장폐지 심볼
-    # 전량. 펀딩 이력이 백테스트 구간(2025-12-31) 이전에 종료돼 좀비 꼬리 보유 시
-    # MISSING_HELD_FUNDING을 유발한다.
-    settling_batch = {
-        "1000XUSDT", "AGIXUSDT", "AI16ZUSDT", "ALPACAUSDT", "ALPHAUSDT", "AMBUSDT", "BADGERUSDT", "BALUSDT",
-        "BLZUSDT", "BONDUSDT", "BSWUSDT", "COMBOUSDT", "DARUSDT", "DEFIUSDT", "DGBUSDT", "FISUSDT",
-        "FLMUSDT", "FTMUSDT", "FTTUSDT", "GLMRUSDT", "HIFIUSDT", "IDEXUSDT", "KDAUSDT", "KEYUSDT",
-        "KLAYUSDT", "LEVERUSDT", "LINAUSDT", "LOKAUSDT", "LOOMUSDT", "MDTUSDT", "MEMEFIUSDT", "MILKUSDT",
-        "MKRUSDT", "MYROUSDT", "NEIROETHUSDT", "NULSUSDT", "OBOLUSDT", "OCEANUSDT", "OMGUSDT", "ORBSUSDT",
+    # mhs_symbol_lifespan_pit_roster: 말기(end-of-life) 50개는 ledger_terminal_only가
+    # finalize 시점에 인증하므로 whole-history 배제에서 제거됨. Block1(OHLCV 재수집
+    # 후보) 잔류분만 제외 목록에 남는다.
+    removed_end_of_life = {
+        "1000XUSDT", "AGIXUSDT", "AI16ZUSDT", "ALPACAUSDT", "AMBUSDT", "BALUSDT",
+        "BLZUSDT", "BONDUSDT", "COMBOUSDT", "DARUSDT", "DEFIUSDT", "DGBUSDT", "FISUSDT",
+        "FTMUSDT", "GLMRUSDT", "HIFIUSDT", "KDAUSDT", "KEYUSDT",
+        "LEVERUSDT", "LINAUSDT", "LOKAUSDT", "LOOMUSDT", "MDTUSDT", "MEMEFIUSDT", "MILKUSDT",
+        "MYROUSDT", "NEIROETHUSDT", "ORBSUSDT",
         "PERPUSDT", "PONKEUSDT", "PORT3USDT", "QUICKUSDT", "RADUSDT", "RAYUSDT", "REEFUSDT", "REIUSDT",
-        "RENUSDT", "SCUSDT", "SKATEUSDT", "SLERFUSDT", "SNTUSDT", "STMXUSDT", "STPTUSDT", "STRAXUSDT",
-        "SWELLUSDT", "TOKENUSDT", "TROYUSDT", "UNFIUSDT", "UXLINKUSDT", "VIDTUSDT", "VOXELUSDT", "WAVESUSDT",
-        "XCNUSDT", "XEMUSDT",
+        "RENUSDT", "SCUSDT", "SKATEUSDT", "SNTUSDT", "STMXUSDT", "STPTUSDT",
+        "SWELLUSDT", "TOKENUSDT", "UXLINKUSDT", "VOXELUSDT", "XCNUSDT",
     }
-    assert len(settling_batch) == 66
-    assert settling_batch <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert removed_end_of_life.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
+
+
+def test_funding_gap_terminal_symbols_accepts_gap_with_no_later_fill() -> None:
+    from src.mhs.evaluation.integrity import _funding_gap_terminal_symbols
+
+    import pandas as pd
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+
+    def _gap(code, symbol, ts):
+        return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
+
+    def _fills(rows):
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp(ts, tz="UTC") for _, ts in rows],
+            "symbol": [sym for sym, _ in rows],
+            "quantity_delta": [1.0] * len(rows),
+            "fill_price": [1.0] * len(rows),
+            "fee_bps": [0.0] * len(rows),
+            "reason": ["timeout_taker"] * len(rows),
+            "pre_trade_equity": [1.0] * len(rows),
+        })
+
+    def _result(primary_valid, gaps, fills):
+        equity = pd.Series([1.0, 1.0], index=pd.date_range("2024-01-01", periods=2, freq="D", tz="UTC"))
+        ledger = SimulatedInventoryLedgerResult(
+            equity=equity, net_returns=equity * 0.0, simulated_units=None,
+            mark_to_market_pnl=equity * 0.0, funding_charge=equity * 0.0, fee_charge=equity * 0.0,
+            fill_turnover=equity * 0.0, fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            primary_valid=primary_valid, invalid_reasons=() if primary_valid else ("MISSING_DATA",),
+            data_gaps=tuple(gaps),
+        )
+        return StrategyExecutionReplayResult(
+            simulated_fills=fills, ledger=ledger, simulated_units=pd.DataFrame(), simulated_notional_weights=pd.DataFrame(),
+            fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            submit_times=pd.Series(dtype="datetime64[ns, UTC]"), fill_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_count=0, unfilled_count=0, fallback_count=0, all_intent_shortfall_bps=0.0,
+            forced_exit_count=0, forced_exit_notional=0.0,
+            termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+            unsupported_assumptions=(), elapsed_seconds=0.0, data_gaps=tuple(gaps),
+        )
+
+    # Given: HIFIUSDT held-funding-unknown gaps with no fill afterward (delisted, never trades again)
+    gaps = [
+        _gap("MISSING_HELD_FUNDING", "HIFIUSDT", "2025-10-03 09:00"),
+        _gap("MISSING_HELD_FUNDING", "HIFIUSDT", "2025-10-03 10:00"),
+        _gap("UNKNOWN_TERMINATION", "HIFIUSDT", "2025-12-31 00:00"),
+    ]
+    fills = _fills([("HIFIUSDT", "2025-10-03 08:00")])  # only the entry fill, before the gap
+    # When
+    terminal = _funding_gap_terminal_symbols(gaps, fills)
+    # Then
+    assert terminal == frozenset({"HIFIUSDT"})
+
+def test_funding_gap_terminal_symbols_excludes_symbol_with_later_fill() -> None:
+    from src.mhs.evaluation.integrity import _funding_gap_terminal_symbols
+
+    import pandas as pd
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+
+    def _gap(code, symbol, ts):
+        return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
+
+    def _fills(rows):
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp(ts, tz="UTC") for _, ts in rows],
+            "symbol": [sym for sym, _ in rows],
+            "quantity_delta": [1.0] * len(rows),
+            "fill_price": [1.0] * len(rows),
+            "fee_bps": [0.0] * len(rows),
+            "reason": ["timeout_taker"] * len(rows),
+            "pre_trade_equity": [1.0] * len(rows),
+        })
+
+    def _result(primary_valid, gaps, fills):
+        equity = pd.Series([1.0, 1.0], index=pd.date_range("2024-01-01", periods=2, freq="D", tz="UTC"))
+        ledger = SimulatedInventoryLedgerResult(
+            equity=equity, net_returns=equity * 0.0, simulated_units=None,
+            mark_to_market_pnl=equity * 0.0, funding_charge=equity * 0.0, fee_charge=equity * 0.0,
+            fill_turnover=equity * 0.0, fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            primary_valid=primary_valid, invalid_reasons=() if primary_valid else ("MISSING_DATA",),
+            data_gaps=tuple(gaps),
+        )
+        return StrategyExecutionReplayResult(
+            simulated_fills=fills, ledger=ledger, simulated_units=pd.DataFrame(), simulated_notional_weights=pd.DataFrame(),
+            fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            submit_times=pd.Series(dtype="datetime64[ns, UTC]"), fill_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_count=0, unfilled_count=0, fallback_count=0, all_intent_shortfall_bps=0.0,
+            forced_exit_count=0, forced_exit_notional=0.0,
+            termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+            unsupported_assumptions=(), elapsed_seconds=0.0, data_gaps=tuple(gaps),
+        )
+
+    # Given: AIAUSDT-style gap where funding later resumes and the symbol trades again
+    gaps = [
+        _gap("MISSING_HELD_FUNDING", "AIAUSDT", "2025-12-11 13:00"),
+        _gap("MISSING_HELD_FUNDING", "AIAUSDT", "2025-12-11 14:00"),
+    ]
+    fills = _fills([("AIAUSDT", "2025-12-11 12:00"), ("AIAUSDT", "2026-01-20 08:00")])  # resumes after the gap
+    # When
+    terminal = _funding_gap_terminal_symbols(gaps, fills)
+    # Then: not terminal -- a later fill proves funding coverage (and trading) resumed
+    assert terminal == frozenset()
+
+def test_funding_gap_terminal_symbols_empty_gaps_and_missing_columns_are_safe() -> None:
+    import pandas as pd
+    from src.mhs.evaluation.integrity import _funding_gap_terminal_symbols
+    # Given: no MISSING_HELD_FUNDING gaps at all
+    assert _funding_gap_terminal_symbols((), pd.DataFrame()) == frozenset()
+    # Given: a MISSING_HELD_FUNDING gap but an empty (columnless) fills frame -- must not KeyError
+    from src.mhs.execution import ExecutionDataGap
+    gaps = (ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="X", timestamp=pd.Timestamp("2025-01-01", tz="UTC")),)
+    assert _funding_gap_terminal_symbols(gaps, pd.DataFrame()) == frozenset({"X"})
+
+def test_ledger_terminal_only_accepts_mixed_unknown_termination_and_terminal_funding_gap() -> None:
+    from src.mhs.evaluation.integrity import ledger_terminal_only
+
+    import pandas as pd
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+
+    def _gap(code, symbol, ts):
+        return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
+
+    def _fills(rows):
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp(ts, tz="UTC") for _, ts in rows],
+            "symbol": [sym for sym, _ in rows],
+            "quantity_delta": [1.0] * len(rows),
+            "fill_price": [1.0] * len(rows),
+            "fee_bps": [0.0] * len(rows),
+            "reason": ["timeout_taker"] * len(rows),
+            "pre_trade_equity": [1.0] * len(rows),
+        })
+
+    def _result(primary_valid, gaps, fills):
+        equity = pd.Series([1.0, 1.0], index=pd.date_range("2024-01-01", periods=2, freq="D", tz="UTC"))
+        ledger = SimulatedInventoryLedgerResult(
+            equity=equity, net_returns=equity * 0.0, simulated_units=None,
+            mark_to_market_pnl=equity * 0.0, funding_charge=equity * 0.0, fee_charge=equity * 0.0,
+            fill_turnover=equity * 0.0, fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            primary_valid=primary_valid, invalid_reasons=() if primary_valid else ("MISSING_DATA",),
+            data_gaps=tuple(gaps),
+        )
+        return StrategyExecutionReplayResult(
+            simulated_fills=fills, ledger=ledger, simulated_units=pd.DataFrame(), simulated_notional_weights=pd.DataFrame(),
+            fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            submit_times=pd.Series(dtype="datetime64[ns, UTC]"), fill_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_count=0, unfilled_count=0, fallback_count=0, all_intent_shortfall_bps=0.0,
+            forced_exit_count=0, forced_exit_notional=0.0,
+            termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+            unsupported_assumptions=(), elapsed_seconds=0.0, data_gaps=tuple(gaps),
+        )
+
+    # Given: one symbol permanently cut off (no later fill), another simply held to backtest end
+    gaps = [
+        _gap("MISSING_HELD_FUNDING", "HIFIUSDT", "2025-10-03 09:00"),
+        _gap("UNKNOWN_TERMINATION", "HIFIUSDT", "2025-12-31 00:00"),
+        _gap("UNKNOWN_TERMINATION", "BTCUSDT", "2025-12-31 00:00"),
+    ]
+    fills = _fills([("HIFIUSDT", "2025-10-03 08:00")])
+    # When / Then
+    assert ledger_terminal_only(gaps, fills) is True
+
+def test_ledger_terminal_only_rejects_recovering_funding_gap_and_other_codes() -> None:
+    from src.mhs.evaluation.integrity import ledger_terminal_only
+
+    import pandas as pd
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+
+    def _gap(code, symbol, ts):
+        return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
+
+    def _fills(rows):
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp(ts, tz="UTC") for _, ts in rows],
+            "symbol": [sym for sym, _ in rows],
+            "quantity_delta": [1.0] * len(rows),
+            "fill_price": [1.0] * len(rows),
+            "fee_bps": [0.0] * len(rows),
+            "reason": ["timeout_taker"] * len(rows),
+            "pre_trade_equity": [1.0] * len(rows),
+        })
+
+    def _result(primary_valid, gaps, fills):
+        equity = pd.Series([1.0, 1.0], index=pd.date_range("2024-01-01", periods=2, freq="D", tz="UTC"))
+        ledger = SimulatedInventoryLedgerResult(
+            equity=equity, net_returns=equity * 0.0, simulated_units=None,
+            mark_to_market_pnl=equity * 0.0, funding_charge=equity * 0.0, fee_charge=equity * 0.0,
+            fill_turnover=equity * 0.0, fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            primary_valid=primary_valid, invalid_reasons=() if primary_valid else ("MISSING_DATA",),
+            data_gaps=tuple(gaps),
+        )
+        return StrategyExecutionReplayResult(
+            simulated_fills=fills, ledger=ledger, simulated_units=pd.DataFrame(), simulated_notional_weights=pd.DataFrame(),
+            fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            submit_times=pd.Series(dtype="datetime64[ns, UTC]"), fill_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_count=0, unfilled_count=0, fallback_count=0, all_intent_shortfall_bps=0.0,
+            forced_exit_count=0, forced_exit_notional=0.0,
+            termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+            unsupported_assumptions=(), elapsed_seconds=0.0, data_gaps=tuple(gaps),
+        )
+
+    # A recovering MISSING_HELD_FUNDING gap (later fill exists) must still block certification
+    recovering = [_gap("MISSING_HELD_FUNDING", "AIAUSDT", "2025-12-11 13:00")]
+    recovering_fills = _fills([("AIAUSDT", "2025-12-11 12:00"), ("AIAUSDT", "2026-01-20 08:00")])
+    assert ledger_terminal_only(recovering, recovering_fills) is False
+    # A non-funding, non-termination gap code must still block certification
+    other = [_gap("ZERO_OR_UNKNOWN_VOLUME", "XUSDT", "2025-01-01 00:00")]
+    assert ledger_terminal_only(other, _fills([])) is False
+    # Empty gaps: preserves the pre-existing quirk (no gaps -> not terminal_only)
+    assert ledger_terminal_only((), _fills([])) is False
+
+def test_assert_cache_required_ledger_valid_accepts_terminal_funding_gap() -> None:
+    from src.mhs.evaluation.integrity import _assert_cache_required_ledger_valid
+
+    import pandas as pd
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+
+    def _gap(code, symbol, ts):
+        return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
+
+    def _fills(rows):
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp(ts, tz="UTC") for _, ts in rows],
+            "symbol": [sym for sym, _ in rows],
+            "quantity_delta": [1.0] * len(rows),
+            "fill_price": [1.0] * len(rows),
+            "fee_bps": [0.0] * len(rows),
+            "reason": ["timeout_taker"] * len(rows),
+            "pre_trade_equity": [1.0] * len(rows),
+        })
+
+    def _result(primary_valid, gaps, fills):
+        equity = pd.Series([1.0, 1.0], index=pd.date_range("2024-01-01", periods=2, freq="D", tz="UTC"))
+        ledger = SimulatedInventoryLedgerResult(
+            equity=equity, net_returns=equity * 0.0, simulated_units=None,
+            mark_to_market_pnl=equity * 0.0, funding_charge=equity * 0.0, fee_charge=equity * 0.0,
+            fill_turnover=equity * 0.0, fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            primary_valid=primary_valid, invalid_reasons=() if primary_valid else ("MISSING_DATA",),
+            data_gaps=tuple(gaps),
+        )
+        return StrategyExecutionReplayResult(
+            simulated_fills=fills, ledger=ledger, simulated_units=pd.DataFrame(), simulated_notional_weights=pd.DataFrame(),
+            fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            submit_times=pd.Series(dtype="datetime64[ns, UTC]"), fill_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_count=0, unfilled_count=0, fallback_count=0, all_intent_shortfall_bps=0.0,
+            forced_exit_count=0, forced_exit_notional=0.0,
+            termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+            unsupported_assumptions=(), elapsed_seconds=0.0, data_gaps=tuple(gaps),
+        )
+
+    gaps = [
+        _gap("MISSING_HELD_FUNDING", "HIFIUSDT", "2025-10-03 09:00"),
+        _gap("UNKNOWN_TERMINATION", "HIFIUSDT", "2025-12-31 00:00"),
+    ]
+    fills = _fills([("HIFIUSDT", "2025-10-03 08:00")])
+    primary = _result(False, gaps, fills)
+    # When / Then: must not raise
+    _assert_cache_required_ledger_valid("slow_momentum", primary)
+
+def test_assert_cache_required_ledger_valid_rejects_recovering_funding_gap() -> None:
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.integrity import _assert_cache_required_ledger_valid
+
+    import pandas as pd
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+
+    def _gap(code, symbol, ts):
+        return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
+
+    def _fills(rows):
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp(ts, tz="UTC") for _, ts in rows],
+            "symbol": [sym for sym, _ in rows],
+            "quantity_delta": [1.0] * len(rows),
+            "fill_price": [1.0] * len(rows),
+            "fee_bps": [0.0] * len(rows),
+            "reason": ["timeout_taker"] * len(rows),
+            "pre_trade_equity": [1.0] * len(rows),
+        })
+
+    def _result(primary_valid, gaps, fills):
+        equity = pd.Series([1.0, 1.0], index=pd.date_range("2024-01-01", periods=2, freq="D", tz="UTC"))
+        ledger = SimulatedInventoryLedgerResult(
+            equity=equity, net_returns=equity * 0.0, simulated_units=None,
+            mark_to_market_pnl=equity * 0.0, funding_charge=equity * 0.0, fee_charge=equity * 0.0,
+            fill_turnover=equity * 0.0, fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            primary_valid=primary_valid, invalid_reasons=() if primary_valid else ("MISSING_DATA",),
+            data_gaps=tuple(gaps),
+        )
+        return StrategyExecutionReplayResult(
+            simulated_fills=fills, ledger=ledger, simulated_units=pd.DataFrame(), simulated_notional_weights=pd.DataFrame(),
+            fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            submit_times=pd.Series(dtype="datetime64[ns, UTC]"), fill_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_count=0, unfilled_count=0, fallback_count=0, all_intent_shortfall_bps=0.0,
+            forced_exit_count=0, forced_exit_notional=0.0,
+            termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+            unsupported_assumptions=(), elapsed_seconds=0.0, data_gaps=tuple(gaps),
+        )
+
+    gaps = [_gap("MISSING_HELD_FUNDING", "AIAUSDT", "2025-12-11 13:00")]
+    fills = _fills([("AIAUSDT", "2025-12-11 12:00"), ("AIAUSDT", "2026-01-20 08:00")])
+    primary = _result(False, gaps, fills)
+    with pytest.raises(DataIntegrityError, match="ledger invalid for blend"):
+        _assert_cache_required_ledger_valid("blend", primary)
+
+def test_source_gap_excluded_symbols_no_longer_blanket_excludes_resolved_end_of_life_symbols() -> None:
+    import src.mhs.evaluation.integrity as integrity
+    # 2026-09-15 실측(mhs_symbol_lifespan_pit_roster): 이 심볼들은 ledger_terminal_only가
+    # finalize 시점에 인증을 통과시키므로 더 이상 whole-history 배제가 필요 없다.
+    resolved = {
+        "BAKEUSDT", "HIFIUSDT", "OMNIUSDT", "AIAUSDT", "AGIXUSDT", "ALPACAUSDT", "FTMUSDT",
+    }
+    assert resolved.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
+    # 잔여 29개(재수집 필요/영구 OHLCV공백/중간공백/조기시작공백)는 그대로 배제된다.
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 29
+    assert {"LITUSDT", "PUMPUSDT", "ICPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+
