@@ -15,11 +15,11 @@ def test_integrity_module_present() -> None:
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_permanent_funding_gaps() -> None:
-    # mhs_symbol_lifespan_pit_roster: ICPUSDT(조기 시작 공백)는 제외 유지.
+    # mhs_time_scoped_roster_mask: ICPUSDT(조기 시작 공백)는 MISSING_ACTIVE_FUNDING이
+    # KNOWN_ZERO_VOLUME과 동일하게 무조건 미체결 처리되도록 확장되어 제외에서 제거됨.
     # AIAUSDT/OMNIUSDT는 말기(end-of-life)라 ledger_terminal_only가 finalize 시점에
     # 인증하므로 whole-history 배제에서 제거됨.
-    assert "ICPUSDT" in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert {"AIAUSDT", "OMNIUSDT"}.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
+    assert {"AIAUSDT", "OMNIUSDT", "ICPUSDT"}.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert isinstance(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS, frozenset)
 
 
@@ -64,7 +64,8 @@ def test_source_gap_excluded_symbols_after_ohlcv_recollection_sweep() -> None:
     }
     assert recovered.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert {"CVXUSDT", "SLPUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 10
+    # 2026-09-15 mhs_time_scoped_roster_mask: ICPUSDT도 이후 제거되어 잔여 9개.
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 9
 
 
 def test_funding_gap_terminal_symbols_accepts_gap_with_no_later_fill() -> None:
@@ -270,6 +271,36 @@ def test_ledger_terminal_only_accepts_mixed_unknown_termination_and_terminal_fun
     # When / Then
     assert ledger_terminal_only(gaps, fills) is True
 
+
+def test_ledger_terminal_only_accepts_non_recovering_held_mark_gap() -> None:
+    # 2026-09-15 mhs_time_scoped_roster_mask: MISSING_HELD_MARK가
+    # MISSING_HELD_FUNDING과 동일한 대칭 규칙(회복 없음=인증, 회복 있음=여전히 차단)을
+    # 따르는지 확인.
+    from src.mhs.evaluation.integrity import ledger_terminal_only
+
+    import pandas as pd
+    from src.mhs.execution import ExecutionDataGap
+
+    def _gap(code, symbol, ts):
+        return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
+
+    def _fills(rows):
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp(ts, tz="UTC") for _, ts in rows],
+            "symbol": [sym for sym, _ in rows],
+            "quantity_delta": [1.0] * len(rows), "fill_price": [1.0] * len(rows),
+            "fee_bps": [0.0] * len(rows), "reason": ["timeout_taker"] * len(rows),
+            "pre_trade_equity": [1.0] * len(rows),
+        })
+
+    # Given: never trades again after the held-mark gap -> permanent, terminal-equivalent
+    never_recovers = [_gap("MISSING_HELD_MARK", "XUSDT", "2025-04-30 08:00")]
+    assert ledger_terminal_only(never_recovers, _fills([])) is True
+    # Given: a later fill exists -> real unresolved risk during active trading, still blocks
+    recovers = [_gap("MISSING_HELD_MARK", "CTKUSDT", "2025-04-30 08:00")]
+    assert ledger_terminal_only(recovers, _fills([("CTKUSDT", "2025-04-30 11:00")])) is False
+
+
 def test_ledger_terminal_only_rejects_recovering_funding_gap_and_other_codes() -> None:
     from src.mhs.evaluation.integrity import ledger_terminal_only
 
@@ -425,8 +456,9 @@ def test_source_gap_excluded_symbols_no_longer_blanket_excludes_resolved_end_of_
         "BAKEUSDT", "HIFIUSDT", "OMNIUSDT", "AIAUSDT", "AGIXUSDT", "ALPACAUSDT", "FTMUSDT",
     }
     assert resolved.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
-    # 2026-09-15 후속 재수집 스윕(test_source_gap_excluded_symbols_after_ohlcv_recollection_sweep)
-    # 이후 잔여 10개(영구 OHLCV공백/중간공백/조기시작공백)만 그대로 배제된다.
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 10
-    assert {"LITUSDT", "PUMPUSDT", "ICPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    # 2026-09-15 mhs_time_scoped_roster_mask: ICPUSDT도 MISSING_ACTIVE_FUNDING 확장으로
+    # 제외에서 제거됨. 잔여 9개(영구 OHLCV공백/중간공백)만 실측 검증 대상으로 남는다.
+    assert "ICPUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 9
+    assert {"LITUSDT", "PUMPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
 

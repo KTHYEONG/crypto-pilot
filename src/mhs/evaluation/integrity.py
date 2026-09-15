@@ -29,36 +29,50 @@ from src.mhs.types import ExecutionSpec
 # (말기 종료는 ledger_terminal_only가 처리). CVXUSDT/SLPUSDT는 재수집 후에도
 # 2025-06-19~2025-07-23(34일) 펀딩 공백이 재개되는 진짜 불확실성 구간이 드러나
 # Block3(MID_LIFE_GAP)로 재분류.
+#
+# 2026-09-15 mhs_time_scoped_roster_mask: MISSING_ACTIVE_FUNDING(신규 진입 시도
+# 차단, 보유 리스크 없음)을 KNOWN_ZERO_VOLUME과 동일하게 무조건 미체결 처리하고,
+# ledger_terminal_only가 MISSING_HELD_MARK도 MISSING_HELD_FUNDING과 동일 규칙으로
+# 인증하도록 확장한 뒤 실측 리플레이로 재검증 중 -- ICPUSDT(조기시작)는 이 확장만
+# 으로 안전하게 해소되어 제외.
 SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
-    # Block2: 펀딩 정상, 단일 영구 OHLCV 공백 8-17h, REST 확인으로 복구 불가
+    # Block2: 펀딩 정상, 단일 영구 OHLCV 공백 8-17h, REST 확인으로 복구 불가.
+    # 실측 검증 대상(MISSING_HELD_MARK 확장으로 해소되는지 리플레이로 확인 중).
     "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT",
     # Block3: 백테스트 중간에 펀딩 공백이 발생했다가 재개되는 진짜 불확실성 구간, 제외 유지
     "LITUSDT", "PUMPUSDT", "CVXUSDT", "SLPUSDT",
-    # Block4: 펀딩 커버리지가 가격 이력보다 한참 늦게 시작, BNXUSDT는 자체 영구 OHLCV 공백 추가 보유
-    "BNXUSDT", "ICPUSDT",
+    # Block4: BNXUSDT는 조기시작 외에도 자체 영구 OHLCV 공백을 보유, 실측 검증 대상
+    "BNXUSDT",
 })
 
 
+
+
+#: Held-position gap codes eligible for the "later fill proves recovery"
+#: terminal-equivalence check. MISSING_HELD_FUNDING and MISSING_HELD_MARK
+#: share the same economics: valuation/funding during the gap never fabricates
+#: a number (carried at the last known value / zero-charged), so the gap is a
+#: bounded, disclosed limitation rather than a P&L-fabrication risk.
+_RECOVERABLE_HELD_GAP_CODES = frozenset({"MISSING_HELD_FUNDING", "MISSING_HELD_MARK"})
 
 
 def _funding_gap_terminal_symbols(
     data_gaps: Sequence[ExecutionDataGap],
     simulated_fills: pd.DataFrame,
 ) -> frozenset[str]:
-    """Post-hoc classification of terminal held-funding gaps.
+    """Post-hoc classification of terminal held-position gaps.
 
     This is a finalize-time classification only and is never fed back into any
     trading decision (INV-PIT-RESUME-CAUSAL). A later fill for the same symbol
-    proves funding coverage resumed and the position kept trading normally, so
-    that symbol's gap is NOT terminal-equivalent. A ``delist_settlement`` fill
-    (the causal idle-holdings settlement, ``_settle_idle_holdings``) is
-    excluded from that "later fill" evidence: it is itself the terminal
-    disclosure closing out a position that could never resume normal trading,
-    not proof that funding coverage recovered.
+    proves the position resumed normal trading, so that symbol's gap is NOT
+    terminal-equivalent. A ``delist_settlement`` fill (the causal idle-holdings
+    settlement, ``_settle_idle_holdings``) is excluded from that "later fill"
+    evidence: it is itself the terminal disclosure closing out a position that
+    could never resume normal trading, not proof that trading recovered.
     """
     missing_last: dict[str, pd.Timestamp] = {}
     for g in data_gaps:
-        if g.code == "MISSING_HELD_FUNDING":
+        if g.code in _RECOVERABLE_HELD_GAP_CODES:
             prev = missing_last.get(g.symbol)
             if prev is None or g.timestamp > prev:
                 missing_last[g.symbol] = g.timestamp
@@ -84,17 +98,18 @@ def ledger_terminal_only(
     """Certify a ledger whose gaps are all disclosed terminal inventory.
 
     Generalizes the existing UNKNOWN_TERMINATION-only exception to also accept
-    a MISSING_HELD_FUNDING episode that never recovers before the replay's own
-    grid end -- symmetric with the pre-existing 'held to backtest end is
-    disclosed evidence, not a crash' precedent; no fabricated settlement, no
-    change to funding accounting (INV-NO-FABRICATED-SETTLEMENT).
+    a MISSING_HELD_FUNDING or MISSING_HELD_MARK episode that never recovers
+    before the replay's own grid end -- symmetric with the pre-existing 'held
+    to backtest end is disclosed evidence, not a crash' precedent; no
+    fabricated settlement, no change to funding/mark accounting
+    (INV-NO-FABRICATED-SETTLEMENT).
     """
     if not data_gaps:
         return False
     terminal_funding_symbols = _funding_gap_terminal_symbols(data_gaps, simulated_fills)
     return all(
         g.code == "UNKNOWN_TERMINATION"
-        or (g.code == "MISSING_HELD_FUNDING" and g.symbol in terminal_funding_symbols)
+        or (g.code in _RECOVERABLE_HELD_GAP_CODES and g.symbol in terminal_funding_symbols)
         for g in data_gaps
     )
 

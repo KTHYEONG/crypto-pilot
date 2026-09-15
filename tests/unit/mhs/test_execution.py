@@ -406,12 +406,18 @@ def test_replay_flags_unknown_funding_on_held_and_active() -> None:
     result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
     assert not result.ledger.primary_valid
     assert any(g.code == 'MISSING_HELD_FUNDING' for g in result.ledger.data_gaps)
+    # 2026-09-15 mhs_symbol_lifespan_pit_roster 후속: 펀딩 unknown으로 막힌 신규
+    # 체결 시도는 보유 리스크가 없어(체결 전) KNOWN_ZERO_VOLUME과 동일하게 무효화
+    # 없이 미체결·재시도된다(NO_FUNDING_UNFILLED).
     blocked_known = px.notna()
     blocked_known.iloc[1, 0] = False
     wb = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=blocked_known, bar_available_at=grid+pd.Timedelta(minutes=3))
     blocked = replay_execution_windows((wb,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
     assert blocked.fill_count == 0
-    assert any(g.code == 'MISSING_ACTIVE_FUNDING' for g in blocked.ledger.data_gaps)
+    assert blocked.unfilled_count == 1
+    assert blocked.termination_counts['NO_FUNDING_UNFILLED'] == 1
+    assert not any(g.code == 'MISSING_ACTIVE_FUNDING' for g in blocked.ledger.data_gaps)
+    assert blocked.ledger.primary_valid
 
 
 def test_replay_ledger_and_causal_mirror_agree_when_unknown_bar_carries_a_nonzero_rate() -> None:
