@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_NAME_DRIFT_TRIM",
+      "date": "2026-09-16",
+      "adr_id": "ADR_20260916_MHS_NAME_DRIFT_TRIM",
+      "domain": "mhs",
+      "title": "MHS 단일 종목 드리프트 트림 도입",
+      "why": "리플레이 최대 낙폭의 대부분이 노출 수준 오버레이로는 손댈 수 없는 단일 종목 장중 드리프트(ALPACAUSDT 등)에서 발생함이 실측 확인됨",
+      "resolution": "옵트인 --name-drift-trim: 4시간마다 단일 종목 비중이 20%를 넘으면 기존 체결 경로로 캡까지 테이커 트림, 배포는 fail-closed로 거부(라이브 데몬 미대응)",
+      "impact": "실측 3m 전체 리플레이 CAGR 189.5%->199.8%, MDD -38.2%->-31.7%, Calmar 4.96->6.30, 최악 1일 -20.4%->-9.9%, 기본 경로 비트동일"
+    },
+    {
       "task_id": "mhs_symbol_lifespan_pit_roster",
       "date": "2026-09-15",
       "adr_id": "ADR_20260915_mhs_symbol_lifespan_pit_roster",
@@ -989,16 +999,6 @@
       "why": "committee_capital+committee_regime_adaptive_tranche 배포 이후 Research GO 통과(CAGR 19.23%, Calmar 1.128, MDD -17.05%)에도, ADR_20260814에서 낮은 상관(0.133)·양(+) 단독 Sharpe(0.070~0.091)로 측정된 가산형 추세 슬리브가 실제 배포 북에는 한 번도 결합되지 않았고, _trend_sleeve_diagnostic도 이미 대체된 frozen momentum 북과만 비교하도록 고정되어 있었음. 동적 레버리지/Kelly류 성장최적 사이징(ADR_20260816)은 이미 실측 후 전량 기각되어 재시도 대상에서 제외.",
       "resolution": "src/application/research/mhs/evaluation.py에 _trend_sleeve_position/_apply_trend_sleeve 헬퍼 신설, 기존 --trend-sleeve/--trend-sleeve-gross 플래그로 fold 경로(_build_fold_target_weights)와 top-level 경로 양쪽에서 regime cash-scale/rebalance filter 이전 지점에 가산 결합 배선(trend_sleeve_gross=0.0이면 byte-identical). _trend_sleeve_diagnostic에 current_book 파라미터 추가해 비교 대상을 frozen momentum 북에서 실제 배포 북으로 교체.",
       "impact": "170/171 테스트 통과(신규 6개 시나리오 포함), ruff/mypy clean. 유일 실패(test_mhs_diagnostic_3m_replay_end_to_end)는 git stash로 원본 코드 대비 재현해 사전 존재하던 순서-의존 flake임을 확인(회귀 아님). 실제 gross-budget 그리드(0.15/0.30) 백테스트를 통한 Calmar/CAGR/MDD 개선 검증은 아직 미실행 -- docs/specs 5절에 커맨드 명시, 다음 세션에서 실행 필요."
-    },
-    {
-      "task_id": "ADR_20260817_MHS_RESEARCH_GO_POLICY_REGISTRATION",
-      "date": "2026-08-17",
-      "adr_id": "ADR_20260817_MHS_RESEARCH_GO_POLICY_REGISTRATION",
-      "domain": "quant",
-      "title": "MHS Research-GO 정책 임계값 등록 및 최초 GO 통과",
-      "why": "regime-adaptive tranche 기본값 도입 이후 알파/데이터 게이트는 모두 해소됐으나 MHS_REGISTERED_POLICY_THRESHOLDS(cap_30_roster, primary_annual_return)가 미등록 상태라 research_go.eligible이 항상 UNSPECIFIED_POLICY로 차단됨. run history 12건 + ADR 30여건 교차검증으로 Kelly/레버리지/리스크패리티/크래시틸트/볼타겟 완화 등 표준 레버가 모두 이미 실측 기각·채택 완료임을 확인, 남은 유일한 차단 지점이 정책 등록임을 판별.",
-      "resolution": "src/mhs/contracts.py에 cap_30_roster=30.0(기존 동결 execution_universe_size 재참조, attestation-only), primary_annual_return=0.05(최저 통과 폴드 net_ann 0.103 대비 여유) 등록. primary_annual_return은 단순 등록에 그치지 않고 _run_anchored_fold에 실제 집행 로직 추가(신규 사유 코드 MHS_GO_REASON_PRIMARY_RETURN_BELOW_FLOOR, 폴드별 primary_net_ann이 등록값 미만이면 게이트 실패). cap_30_roster는 실현 로스터(41.9)가 이미 30을 넘어 강제 집행 시 즉시 위반되므로 attestation-only로 유지, 강제 비교 로직 미추가. 관련 테스트(test_registered_policy_thresholds_contract 갱신, test_fold_primary_annual_return_floor_enforcement 신규) 및 docs/architecture/mhs-explain.md 최신 실측치 갱신 완료.",
-      "impact": "실측 확인: research_go.eligible False->True(최초), reason_codes=[] (folds_passed=3/3), CAGR 19.2%/MDD -17.1%/Calmar 1.13. --no-pnl-vol-target(자본파괴 CAPITAL_INVARIANT_BREACH) 및 --beta-neutralize(committee_capital 경로 미배선 확인)는 실측 후 기각/무효 확인, 신규 알파 기회 아님으로 결론."
     }
   ]
 }
