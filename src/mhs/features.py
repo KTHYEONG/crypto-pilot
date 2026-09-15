@@ -200,6 +200,8 @@ def build_feature_books_by_boundary(
         built[spec.name] = feature
     books: dict[str, dict[str, pd.DataFrame]] = {}
     admitted: dict[str, dict[str, pd.DataFrame]] = {}
+    # rank 입력(feature, mask)은 경계와 무관 — 경계 17개 x feature 반복 재계산(실측 136 CPU-s) 제거, 결과 동일.
+    ranked: dict[str, pd.DataFrame] = {}
     for label, train_end in train_ends.items():
         in_cutoff = mask.index < train_end
         key_parts: list[str] = []
@@ -210,9 +212,11 @@ def build_feature_books_by_boundary(
             if any(cov < spec.min_coverage for cov in coverage.values()):
                 continue
             key_parts.append(spec.name)
-            step = rank_weight_book(feature, mask, 1, min_symbols)
-            sampled = step.reindex(decision_grid)
-            boundary_books[spec.name] = sampled.reindex(step.index, method="ffill").fillna(0.0)
+            if spec.name not in ranked:
+                step = rank_weight_book(feature, mask, 1, min_symbols)
+                sampled = step.reindex(decision_grid)
+                ranked[spec.name] = sampled.reindex(step.index, method="ffill").fillna(0.0)
+            boundary_books[spec.name] = ranked[spec.name]
         key = "\x00".join(key_parts)
         if key not in admitted:
             admitted[key] = boundary_books
