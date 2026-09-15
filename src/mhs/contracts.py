@@ -319,6 +319,7 @@ class MhsDiagnosticRequest:
             help="Scale exposure down by the strategy's own trailing equity drawdown.",
         ),
     )
+    name_drift_trim: bool = field(default=False, metadata=cli_param(flag="--name-drift-trim", help="Trim any single name whose drifted weight exceeds the registered cap at the registered intraday cadence."))
     ram_guard: bool = field(
         default=True,
         metadata=cli_param(flag="--ram-guard", help="Enable the RAM guard.", negate_flag="--no-ram-guard"),

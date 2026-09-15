@@ -4,7 +4,7 @@ from dataclasses import replace as dataclass_replace
 from typing import Any
 
 from src.mhs.execution import StrategyExecutionReplayResult
-from src.mhs.params import SIGNAL_EMA_HORIZON_SPAN, STRESS_COST_MULTIPLIER
+from src.mhs.params import NAME_DRIFT_TRIM_INTERVAL_HOURS, NAME_DRIFT_TRIM_MAX_WEIGHT, SIGNAL_EMA_HORIZON_SPAN, STRESS_COST_MULTIPLIER
 from src.mhs.types import ExecutionSpec
 
 
@@ -15,7 +15,7 @@ def _resolved_base_execution_spec(request: Any) -> ExecutionSpec:
     every replay bound; the frozen default 30 reproduces legacy specs exactly.
     """
     return dataclass_replace(
-        ExecutionSpec(), passive_timeout_minutes=int(request.passive_timeout_minutes)
+        ExecutionSpec(), passive_timeout_minutes=int(request.passive_timeout_minutes), name_drift_trim_max_weight=NAME_DRIFT_TRIM_MAX_WEIGHT if bool(request.name_drift_trim) else None, name_drift_trim_interval_hours=NAME_DRIFT_TRIM_INTERVAL_HOURS
     )
 
 
@@ -27,6 +27,8 @@ def _stress_cost_execution_spec(base: ExecutionSpec | None = None) -> ExecutionS
         taker_fee_bps=resolved.taker_fee_bps * STRESS_COST_MULTIPLIER,
         taker_slippage_bps=resolved.taker_slippage_bps * STRESS_COST_MULTIPLIER,
         passive_timeout_minutes=resolved.passive_timeout_minutes,
+        name_drift_trim_max_weight=resolved.name_drift_trim_max_weight,
+        name_drift_trim_interval_hours=resolved.name_drift_trim_interval_hours,
     )
 
 

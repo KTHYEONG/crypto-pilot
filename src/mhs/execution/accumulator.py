@@ -164,6 +164,7 @@ class _BoundExecutionReplayAccumulator:
         self.first_held_mark: tuple[str, pd.Timestamp] | None = None
         self.first_held_funding: tuple[str, pd.Timestamp] | None = None
         self.full_grid_end: pd.Timestamp = first.minute_grid[-1]
+        self._trim_anchor_ns: int | None = None
         self._t0 = time.perf_counter()
 
     def _equity_at(self, gpos: np.ndarray | None = None) -> float:
@@ -232,7 +233,9 @@ class _BoundExecutionReplayAccumulator:
         (n_cols, local_cols, n_local, gpos, grid, grid_ns, n_grid, bar_ns, marks_values, highs_values, lows_values, closes_values, close_finite, mark_valid, funding_matrix) = self._consume_validate_window(w)
         (last_close_idx, decision_ns_all, spos_all, dpos_all, on_grid_all, target_values, submit_anchored, fill_start, tw_index, sig_index) = self._consume_prepare_tables(w, grid_ns, n_grid, close_finite, local_cols)
         for i in range(len(tw_index)):
+            self._consume_drift_trims(int(decision_ns_all[i]), decision_ns_all, gpos, local_cols, submit_anchored, n_grid, grid_ns, closes_values, grid, marks_values, n_cols, mark_valid, last_close_idx, lows_values, highs_values, funding_matrix)
             self._consume_single_intent(i, decision_ns_all, dpos_all, on_grid_all, gpos, target_values, spos_all, marks_values, grid_ns, funding_matrix, tw_index, sig_index, mark_valid, last_close_idx, local_cols, submit_anchored, n_grid, closes_values, grid, n_cols, lows_values, highs_values)
+        self._consume_drift_trims(None, decision_ns_all, gpos, local_cols, submit_anchored, n_grid, grid_ns, closes_values, grid, marks_values, n_cols, mark_valid, last_close_idx, lows_values, highs_values, funding_matrix)
         self._consume_append_ledger(grid_ns, n_grid, local_cols, fill_start, n_local, marks_values, gpos, grid, funding_matrix, bar_ns, closes_values)
         self._advance_liquidity_carry(grid_ns, gpos, decision_ns_all)
         self._consume_update_spreads(highs_values, lows_values, gpos)
@@ -589,6 +592,60 @@ class _BoundExecutionReplayAccumulator:
         sig_index = w.signal_available_at
         return (last_close_idx, decision_ns_all, spos_all, dpos_all, on_grid_all, target_values, submit_anchored, fill_start, tw_index, sig_index)
 
+
+    def _consume_drift_trims(self, until_ns: int | None, decision_ns_all: np.ndarray, gpos: np.ndarray, local_cols: list[str], submit_anchored: bool, n_grid: int, grid_ns: np.ndarray, closes_values: np.ndarray, grid: pd.DatetimeIndex, marks_values: np.ndarray, n_cols: int, mark_valid: np.ndarray, last_close_idx: np.ndarray, lows_values: np.ndarray, highs_values: np.ndarray, funding_matrix: np.ndarray) -> None:
+        """Run due intraday single-name drift checks before a decision or the ledger."""
+        cap = self.spec.name_drift_trim_max_weight
+        if cap is None:
+            return
+        if self._trim_anchor_ns is None:
+            if len(decision_ns_all) == 0:
+                return
+            # 최초 결정 시각을 앵커로 고정하고 이후 절대 갱신하지 않는다.
+            self._trim_anchor_ns = int(decision_ns_all[0])
+        anchor = int(self._trim_anchor_ns)
+        step = int(self.spec.name_drift_trim_interval_hours) * 3_600_000_000_000
+        # 단조 last_time_ns를 하한으로 삼아 겹치는 윈도우에서 중복 검사를 막는다.
+        floor = anchor if self.last_time_ns is None else max(anchor, int(self.last_time_ns))
+        k = (floor - anchor) // step + 1
+        bar_ns = int(grid_ns[1] - grid_ns[0])
+        grid_end = int(grid_ns[-1])
+        while True:
+            dpos = int(np.searchsorted(grid_ns, anchor + k * step, side="left"))
+            k += 1
+            if dpos >= n_grid:
+                return
+            # 오프그리드 검사는 다음 바에 스냅하고 절대 건너뛰지 않는다.
+            check_ns = int(grid_ns[dpos])
+            resolve_ns = check_ns + bar_ns + self.timeout_ns_delta
+            # 결정 주문과 겹치는 검사는 건너뛰고 결정 리밸런스에 맡긴다.
+            if resolve_ns > grid_end or (until_ns is not None and resolve_ns >= until_ns):
+                return
+            self._consume_drift_trim_at(check_ns, dpos, cap, gpos, local_cols, submit_anchored, n_grid, grid_ns, closes_values, grid, marks_values, n_cols, mark_valid, last_close_idx, lows_values, highs_values, funding_matrix)
+
+    def _consume_drift_trim_at(self, check_ns: int, dpos: int, cap: float, gpos: np.ndarray, local_cols: list[str], submit_anchored: bool, n_grid: int, grid_ns: np.ndarray, closes_values: np.ndarray, grid: pd.DatetimeIndex, marks_values: np.ndarray, n_cols: int, mark_valid: np.ndarray, last_close_idx: np.ndarray, lows_values: np.ndarray, highs_values: np.ndarray, funding_matrix: np.ndarray) -> None:
+        """Trim names breached above the cap at one intraday check via taker fills."""
+        self._advance_window(check_ns, dpos, True, marks_values, self._w_mark_avail, grid_ns, funding_matrix, self._w_fknown, gpos)
+        equity = self._equity_at(gpos)
+        prices = self.last_prices_arr[gpos]
+        units = self.units_arr[gpos]
+        weights = np.where(np.isfinite(prices), units * prices, 0.0) / equity
+        trigger = cap * (1.0 + self.spec.one_way_taker_bps() / 1e4)
+        # cap에 정확히 맞추면 편도 테이커 비용 비율만큼 초과가 남으므로 밴드가 매 검사 재트림을 막는다.
+        over = (np.abs(units) >= QTY_EPS) & (np.abs(weights) > trigger)
+        if not bool(over.any()):
+            return
+        row = np.full(len(local_cols), np.nan, dtype="float64")
+        row[over] = np.sign(weights[over]) * cap
+        stamp = pd.DatetimeIndex([pd.Timestamp(check_ns, unit="ns", tz="UTC")])
+        spos = int(np.searchsorted(grid_ns, check_ns, side="right"))
+        for col in np.flatnonzero(over).tolist():
+            n_before = len(self.fill_reason)
+            self._consume_single_fill(0, col, gpos, local_cols, row, True, submit_anchored, dpos, spos, equity, n_grid, grid_ns, closes_values, grid, marks_values, n_cols, stamp, stamp, mark_valid, last_close_idx, lows_values, highs_values)
+            if len(self.fill_reason) > n_before:
+                for j in range(n_before, len(self.fill_reason)):
+                    self.fill_reason[j] = "drift_trim"
+                self.termination_counts["DRIFT_TRIM"] = self.termination_counts.get("DRIFT_TRIM", 0) + 1
 
     def _consume_single_intent(self, i: int, decision_ns_all: np.ndarray, dpos_all: np.ndarray, on_grid_all: np.ndarray, gpos: np.ndarray, target_values: np.ndarray, spos_all: np.ndarray, marks_values: np.ndarray, grid_ns: np.ndarray, funding_matrix: np.ndarray, tw_index: pd.DatetimeIndex, sig_index: pd.DatetimeIndex, mark_valid: np.ndarray, last_close_idx: np.ndarray, local_cols: list[str], submit_anchored: bool, n_grid: int, closes_values: np.ndarray, grid: pd.DatetimeIndex, n_cols: int, lows_values: np.ndarray, highs_values: np.ndarray) -> None:
         """Process one decision index across its active symbols."""
