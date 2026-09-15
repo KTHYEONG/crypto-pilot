@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_replay_perf_accounting",
+      "date": "2026-09-15",
+      "adr_id": "ADR_20260915_mhs_replay_perf_accounting",
+      "domain": "mhs",
+      "title": "MHS 리플레이 회계 정합·실행 공백·성능 개선",
+      "why": "상장폐지 보유 포지션이 로스터 이탈 시 원장 0원/미러 마크평가로 발산하고, 거래량0 공백이 실행을 무효화하며, 리플레이가 과도하게 느렸다",
+      "resolution": "인과적 상폐 정산(24h idle, 라이브 paper_delisted_close 패리티), 알려진 0거래량 미체결 재시도 분리, 먼지수량 QTY_EPS 통일, 로스터 이탈 트립와이어, OHLCV 내부공백 재조회, rank 캐시·fills span 커서·row group·spill 경로 등 비트동일 성능개선을 적용했다",
+      "impact": "slow_momentum/blend 원장-미러 회계 발산 근본원인 해소, fast_reversal/fold9·12 실행공백 오탐 제거, 리플레이 CPU 다수 구간 단축"
+    },
+    {
       "task_id": "LIVE_FUNDING_WAF_AND_OCI_SIZING_20260915",
       "date": "2026-09-15",
       "adr_id": "ADR_20260915_LIVE_FUNDING_WAF_AND_OCI_SIZING_20260915",
@@ -989,16 +999,6 @@
       "why": "ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE에서 tranche=3 고정 평활이 2023을 살리고 2024를 죽이는 트레이드오프임을 위원회 raw 북 자체 return의 자기상관 부호(음=whipsaw/양=지속)로 설명. 고정 선택 대신 causal하게 레짐을 감지해 매 결정 행마다 raw/평활을 고르면 트레이드오프를 없앨 수 있는지 실제 3분봉 리플레이로 검증.",
       "resolution": "_committee_execution_book에 regime_adaptive_window 파라미터 추가: causal trailing lag-1 자기상관(위원회 raw 북 자신의 proxy return, .shift(1)로 lookahead 차단)이 음수면 그 결정행은 3행 평활을, 0 이상이면 raw를 채택(book.mask 행단위 전량 교체). MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW=15 상수 신설(15~25 고원 확인, 10/90은 CAPITAL_INVARIANT_BREACH로 기각 — CLI에 노출하지 않고 상수 동결). MhsDiagnosticRequest.committee_regime_adaptive_tranche(committee_capital 요구, committee_tranche_smoothing과 상호배타) + CLI --committee-regime-adaptive-tranche 배선, fold 경로·top-level 블렌드 양쪽 동일 스레딩. 실제 3분봉 리플레이 6회로 검증 완료(production 플래그가 raw window=15 실험과 완전 동일함도 재확인).",
       "impact": "이전 사이클과 달리 트레이드오프가 아니라 지배(dominance): 실제 리플레이에서 3개 fold 전부 baseline과 fixed tranche=3 양쪽을 동시에 능가(2023 0.151/1.537->1.158, 2024 0.968/0.481->0.853, 2025 3.076/2.918->3.387, 전부 0.6 게이트 통과 failures=[]). top-level CAGR 15.00%->20.70%, MDD -28.28%->-16.61%, Calmar 0.530->1.246, 연 회전율 32.94->26.12(레버리지 아님). research_go.eligible은 여전히 False이나 원인이 MHS_REGISTERED_POLICY_THRESHOLDS(cap_30_roster/primary_annual_return)가 코드베이스 전체에서 항상 미등록(None)인 별개의 정책 게이트임을 확인 — 전략 설계와 무관, folds_passed가 실질 지표."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE",
-      "date": "2026-08-17",
-      "adr_id": "ADR_20260817_MHS_COMMITTEE_TRANCHE_REGIME_DIVERGENCE",
-      "domain": "mhs",
-      "title": "MHS 위원회 트랜치 평활 fold 게이트 후퇴 원인 규명 + 진단 필드 추가",
-      "why": "이전 사이클(ADR_20260817_MHS_COMMITTEE_DECISION_CADENCE)에서 tranche=3 평활 적용 시 top-level 복리성장은 개선되지만 anchored fold 게이트 통과가 2/3->1/3으로 후퇴(2023 0.151->1.537 회복, 2024 0.968->0.481 악화)한 원인이 미규명 상태로 남아 있었음. debug 계측 후 실제 3분봉 리플레이(committee_capital, 2021-2025) 재실행으로 근거 데이터 확보.",
-      "resolution": "_daily_autocorr_sharpe에 debug_tag 배선 + _log_autocorr_diagnostic 헬퍼로 Lo(2002) 조정 분해(sample_sharpe/lo_denom/rho1/rho3/rho7)를 fold 경로에 DEBUG 로그로 노출(비용 없음, isEnabledFor 가드). 실측 결과 fold 게이트 등락은 자기상관 조정(2차 효과, 5~10%)이 아니라 raw sample_sharpe 자체의 레짐 반전이 지배: 2023은 baseline rho1=-0.119(whipsaw)라 평활이 잡음을 걸러 sample_sharpe 11배 개선, 2024는 baseline rho1=+0.069(지속성)라 평활이 최신 신호를 희석해 거의 반토막. _committee_diagnostic 블록 리포트에 return_autocorr_lag1 진단 필드(관측 전용, 자본 미배선) 추가 완료.",
-      "impact": "이번 사이클 구현 범위(진단 필드)는 자본 배분에 영향 없음(committee_growth_diagnostic과 동일하게 관측 전용). 후속 발견: causal trailing rho1 게이팅 적응형 tranche 스위치의 방향성 스크린(실제 리플레이 데이터 재조합)에서 20일/90일 window가 2023·2024 fold 동시 통과를 보였으나 30일/60일은 실패해 window 선택에 민감 -> 다음 spec 사이클 후속 과제로 명시적 유보(단일 통합 리플레이로 전환 비용 반영 필요)."
     }
   ]
 }

@@ -17,6 +17,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 
+from src.common.paths import BASE_DIR
 from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
 from src.mhs import statistics as _statistics
@@ -33,6 +34,13 @@ from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.types import BookSpec, ExecutionSpec
 
 from . import books, integrity, specs
+
+
+def _window_spill_root() -> str:
+    """Disk-backed spill root for window IPC scratch files."""
+    root = os.environ.get("MHS_SPILL_DIR") or str(BASE_DIR / "tmp" / "mhs_spill")
+    os.makedirs(root, exist_ok=True)
+    return root
 
 
 def _resolve_ns_vectorized(
@@ -615,7 +623,8 @@ def _book_outcome(
             # window to Arrow IPC scratch while streaming, then the
             # P&L-vol-target scale, then Phase B (rescaled batch) streams the
             # identical windows back from disk (0MB RAM amplification).
-            spill_temp = tempfile.TemporaryDirectory(prefix="mhs_windows_")
+            # 북당 ~4.3GB IPC 스필 x 3북 동시 — RAM 기반 /tmp tmpfs(8.3GB)에서 ENOSPC·메모리 압박.
+            spill_temp = tempfile.TemporaryDirectory(prefix="mhs_windows_", dir=_window_spill_root())
             primary_two_pass = replay_execution_windows(
                 _window_telemetry(_spill_and_stream_windows(_windows(), spill_temp.name), "execution_window"),
                 initial_equity, "OHLCV_IMMEDIATE_TAKER", specs._resolved_base_execution_spec(request),

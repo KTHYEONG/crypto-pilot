@@ -64,3 +64,22 @@ def test_reconcile_causal_state_rejects_divergence() -> None:
     state = CausalPortfolioState(cash=0.0, units=np.zeros(1), last_marks=np.array([100.0]), last_event_ns=None)
     with pytest.raises(DataIntegrityError, match='diverged'):
         reconcile_causal_state(state, ledger)
+
+
+def test_causal_state_treats_dust_units_as_flat_for_unknown_funding() -> None:
+    import numpy as np
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.execution.accounting import QTY_EPS, CausalPortfolioState
+    assert QTY_EPS == 1e-12
+    # Given: dust inventory below QTY_EPS and an unknown-funding bar
+    state = CausalPortfolioState(cash=1.0, units=np.array([1e-15]), last_marks=np.array([np.nan]), last_event_ns=None)
+    # When: must not raise (dust is flat)
+    charged = state.advance_to(event_ns=1, marks=np.array([100.0]), funding_rates=np.array([0.0]), funding_known=np.array([False]))
+    assert charged == 0.0
+    # Then: a real position still fails closed
+    held = CausalPortfolioState(cash=1.0, units=np.array([1e-6]), last_marks=np.array([np.nan]), last_event_ns=None)
+    with pytest.raises(DataIntegrityError, match='unknown funding'):
+        held.advance_to(event_ns=1, marks=np.array([100.0]), funding_rates=np.array([0.0]), funding_known=np.array([False]))
+
+
