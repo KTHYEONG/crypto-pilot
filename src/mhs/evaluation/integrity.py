@@ -50,7 +50,11 @@ def _funding_gap_terminal_symbols(
     This is a finalize-time classification only and is never fed back into any
     trading decision (INV-PIT-RESUME-CAUSAL). A later fill for the same symbol
     proves funding coverage resumed and the position kept trading normally, so
-    that symbol's gap is NOT terminal-equivalent.
+    that symbol's gap is NOT terminal-equivalent. A ``delist_settlement`` fill
+    (the causal idle-holdings settlement, ``_settle_idle_holdings``) is
+    excluded from that "later fill" evidence: it is itself the terminal
+    disclosure closing out a position that could never resume normal trading,
+    not proof that funding coverage recovered.
     """
     missing_last: dict[str, pd.Timestamp] = {}
     for g in data_gaps:
@@ -60,8 +64,12 @@ def _funding_gap_terminal_symbols(
                 missing_last[g.symbol] = g.timestamp
     if not missing_last:
         return frozenset()
-    fill_symbols = simulated_fills["symbol"] if "symbol" in simulated_fills.columns else pd.Series(dtype="object")
-    fill_ts = pd.to_datetime(simulated_fills["timestamp"], utc=True) if "timestamp" in simulated_fills.columns else pd.Series(dtype="datetime64[ns, UTC]")
+    if "reason" in simulated_fills.columns:
+        resumable_fills = simulated_fills[simulated_fills["reason"] != "delist_settlement"]
+    else:
+        resumable_fills = simulated_fills
+    fill_symbols = resumable_fills["symbol"] if "symbol" in resumable_fills.columns else pd.Series(dtype="object")
+    fill_ts = pd.to_datetime(resumable_fills["timestamp"], utc=True) if "timestamp" in resumable_fills.columns else pd.Series(dtype="datetime64[ns, UTC]")
     terminal: set[str] = set()
     for sym, last_ts in missing_last.items():
         if not bool(((fill_symbols == sym) & (fill_ts > last_ts)).any()):
