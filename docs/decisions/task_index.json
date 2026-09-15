@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "LIVE_FUNDING_WAF_AND_OCI_SIZING_20260915",
+      "date": "2026-09-15",
+      "adr_id": "ADR_20260915_LIVE_FUNDING_WAF_AND_OCI_SIZING_20260915",
+      "domain": "live",
+      "title": "펀딩 WAF 403 격리 및 OCI 메모리 예산 재산정",
+      "why": "fundingRate limit=500이 Binance 앞단 AWS WAF(IP당 5분 ~124회, limit>=300)를 트리거해 사이클 전역 차단→OHLCV 스킵→결정봉 대량 격리→BCHUSDT halt_streak 발생, 수정 후에도 400일 패널 피크 RSS 1.83GB가 mem_limit 1200m OOM 재현",
+      "resolution": "fundingRate limit을 100으로 낮추고 펀딩 전용 FundingIpBlockedError로 차단 범위를 분리(OHLCV/mark/metrics는 계속 갱신), cgroup oom_kill 카운터 증가시에만 halt cause에 oom_killed 표기, mhs-live mem_limit 3g/liquidation-collector 768m로 재산정, 미사용 HARDWARE_MAX_WORKERS 제거",
+      "impact": "펀딩 엔드포인트 장애가 더 이상 매매 HALT로 번지지 않고, 실측 메모리 예산으로 신호계산 완주가 OOM 없이 가능해짐"
+    },
+    {
       "task_id": "TESTNET_VENUE_PARITY_20260914",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_TESTNET_VENUE_PARITY_20260914",
@@ -989,16 +999,6 @@
       "why": "이전 사이클(ADR_20260817_MHS_COMMITTEE_DECISION_CADENCE)에서 tranche=3 평활 적용 시 top-level 복리성장은 개선되지만 anchored fold 게이트 통과가 2/3->1/3으로 후퇴(2023 0.151->1.537 회복, 2024 0.968->0.481 악화)한 원인이 미규명 상태로 남아 있었음. debug 계측 후 실제 3분봉 리플레이(committee_capital, 2021-2025) 재실행으로 근거 데이터 확보.",
       "resolution": "_daily_autocorr_sharpe에 debug_tag 배선 + _log_autocorr_diagnostic 헬퍼로 Lo(2002) 조정 분해(sample_sharpe/lo_denom/rho1/rho3/rho7)를 fold 경로에 DEBUG 로그로 노출(비용 없음, isEnabledFor 가드). 실측 결과 fold 게이트 등락은 자기상관 조정(2차 효과, 5~10%)이 아니라 raw sample_sharpe 자체의 레짐 반전이 지배: 2023은 baseline rho1=-0.119(whipsaw)라 평활이 잡음을 걸러 sample_sharpe 11배 개선, 2024는 baseline rho1=+0.069(지속성)라 평활이 최신 신호를 희석해 거의 반토막. _committee_diagnostic 블록 리포트에 return_autocorr_lag1 진단 필드(관측 전용, 자본 미배선) 추가 완료.",
       "impact": "이번 사이클 구현 범위(진단 필드)는 자본 배분에 영향 없음(committee_growth_diagnostic과 동일하게 관측 전용). 후속 발견: causal trailing rho1 게이팅 적응형 tranche 스위치의 방향성 스크린(실제 리플레이 데이터 재조합)에서 20일/90일 window가 2023·2024 fold 동시 통과를 보였으나 30일/60일은 실패해 window 선택에 민감 -> 다음 spec 사이클 후속 과제로 명시적 유보(단일 통합 리플레이로 전환 비용 반영 필요)."
-    },
-    {
-      "task_id": "TASK_MHS_COMMITTEE_DECISION_CADENCE",
-      "date": "2026-08-17",
-      "adr_id": "ADR_20260817_MHS_COMMITTEE_DECISION_CADENCE",
-      "domain": "mhs",
-      "title": "MHS 위원회 결정 주기 정합화 — 트랜치 평활(opt-in)",
-      "why": "위원회 자본 북이 24h 결정 격자에서 매번 완전 재포지셔닝하지만 최단 멤버 lookback은 168h로, 신호 갱신 속도보다 7배 빠른 구조적 오버샘플링이 회전율(연 32.9배)과 비용 드래그를 유발. discovery-only 스윕에서 24h/tranche=1은 14개 조합 중 하위권으로, 인과적 선택이었다면 고르지 않았을 지점임을 확인.",
-      "resolution": "MHS_COMMITTEE_TRANCHE_COUNT=3 상수 신설 후 _committee_execution_book에 tranche_count 파라미터 추가(기본 1은 항등 조기반환으로 byte-identical). decision_grid 리샘플 -> phase_tranche_book -> 원 인덱스 ffill 복원 구성. MhsDiagnosticRequest.committee_tranche_smoothing(committee_capital 요구) + CLI --committee-tranche-smoothing 배선, fold 경로와 top-level blend 양쪽 동일 스레딩.",
-      "impact": "실제 3분봉 리플레이(446심볼, 2021-2025): CAGR 15.00%->16.13%, MDD -28.28%->-26.52%, Calmar +14.7%, 연 회전율 -18.0%, 비용 3배 stress Sharpe +11.2%, gross는 오히려 감소(레버리지 무관). 반대급부로 anchored fold 통과 2/3->1/3(2023 0.151->1.537 회복, 2024 0.968->0.481 악화)이라 opt-in 기본 False 유지. 프록시 원장 최상위였던 grid_48h는 실제 리플레이에서 CAPITAL_INVARIANT_BREACH 실패 — 채택 근거는 실측 리플레이만 인정."
     }
   ]
 }

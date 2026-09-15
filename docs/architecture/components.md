@@ -40,8 +40,8 @@ flowchart TD
 
 | 컴포넌트 | 핵심 책임 | 핵심 인터페이스 (Input / Output) | 장애 방어 및 불변식 (Fail-Closed) |
 | :--- | :--- | :--- | :--- |
-| **`MarketDataService`** | • Binance REST/S3/WSS 다중 소스로부터 시세 수집<br>• 디스크 tail 기반 증분 갱신 (20초 소요) | **In**: 거래소 API 응답, Vision S3 아카이브<br>**Out**: zstd 압축 컬럼형 Parquet 파일 | • **RAM 예산 가드**: 메모리 사용률 85% 초과 시 즉시 작업 중단<br>• **결손 심볼 자동 격리**: `SOURCE_GAP_EXCLUDED_SYMBOLS` 사전 필터링 |
-| **`RetentionService`** | • 무손실 원자적 슬라이딩 윈도우 프루닝<br>• 저사양 클라우드 디스크 용량 150MB 유지 | **In**: 로컬 Parquet 스토리지<br>**Out**: Prune 완료 파일, `RefreshReport` | • **원자적 치환 (`tmp.replace`)**: 파일 파손 방지<br>• **220일 보존 한도**: 초과 시세 안전 절단 |
+| **`MarketDataService`** | • Binance REST/S3/WSS 다중 소스로부터 시세 수집<br>• 디스크 tail 기반 증분 갱신 (~2분 소요) | **In**: 거래소 API 응답, Vision S3 아카이브<br>**Out**: zstd 압축 컬럼형 Parquet 파일 | • **RAM 예산 가드**: 메모리 사용률 85% 초과 시 즉시 작업 중단<br>• **결손 심볼 자동 격리**: `SOURCE_GAP_EXCLUDED_SYMBOLS` 사전 필터링<br>• **펀딩 엔드포인트 격리**: fundingRate WAF/IP 차단은 펀딩만 skip하고 OHLCV 갱신은 계속 |
+| **`RetentionService`** | • 무손실 원자적 슬라이딩 윈도우 프루닝<br>• 430일(`SIGNAL_PANEL_WINDOW_DAYS`+30) 보존 유지 | **In**: 로컬 Parquet 스토리지<br>**Out**: Prune 완료 파일, `RefreshReport` | • **원자적 치환 (`tmp.replace`)**: 파일 파손 방지<br>• **430일 보존 한도**: 초과 시세 안전 절단 |
 
 ---
 
