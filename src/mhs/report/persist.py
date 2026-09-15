@@ -83,6 +83,7 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     from src.mhs.live_strategy import LiveStrategyParams, load_strategy_params, save_strategy_bootstrap, save_strategy_params
     from src.mhs.params import COMMITTEE_MEMBER_SETS, SIGNAL_RETURN_TAIL_DAYS
 
+    if bool(getattr(request, "name_drift_trim", False)): raise DataIntegrityError("deployment ineligible: name_drift_trim has no live daemon counterpart")
     if report.status != "COMPLETE":
         raise DataIntegrityError("deployment ineligible: report status not COMPLETE")
     if not getattr(report.research_go, "eligible", False):

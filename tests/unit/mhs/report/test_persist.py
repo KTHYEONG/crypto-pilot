@@ -675,3 +675,19 @@ def test_emit_deployment_carries_request_data_policy(tmp_path) -> None:
     assert masked_params.data_policy == "zombie_mask_v1"
     assert legacy_params.data_policy == "legacy"
     assert masked_params.strategy_digest != legacy_params.strategy_digest
+
+def test_emit_deployment_refuses_name_drift_trim(tmp_path) -> None:
+    import dataclasses
+    import types
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.report.persist import emit_deployment
+
+    request = dataclasses.replace(MhsDiagnosticRequest(), name_drift_trim=True)
+    report = types.SimpleNamespace(status="COMPLETE")
+    with pytest.raises(DataIntegrityError, match="name_drift_trim"):
+        emit_deployment(report, request, tmp_path)
+

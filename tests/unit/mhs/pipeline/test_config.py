@@ -260,7 +260,8 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     assert bare["input_manifest_path"] is None
     assert bare["forward_execution_quality_dir"] is None
     assert bare["forward_strategy_digest"] is None
-    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest"}
+    assert bare["name_drift_trim"] is False
+    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest", "name_drift_trim"}
 
 
 def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:
@@ -301,3 +302,25 @@ def test_cli_uses_shared_data_policy_and_manifest_flags() -> None:
     assert config.input_manifest_path == 'inputs.json'
     assert config.forward_execution_quality_dir == 'quality'
     assert config.forward_strategy_digest == 'abc'
+
+def test_name_drift_trim_cli_flag_maps_to_config_and_request() -> None:
+    import dataclasses
+
+    from src.cli.main import build_root_parser
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    parser = build_root_parser()
+    base_argv = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    default_config = MhsRunConfig.from_namespace(parser.parse_args(base_argv))
+    assert default_config.name_drift_trim is False
+    assert MhsRunConfig().name_drift_trim is False
+
+    config = MhsRunConfig.from_namespace(parser.parse_args([*base_argv, "--name-drift-trim"]))
+    assert config.name_drift_trim is True
+    assert MhsDiagnosticRequest(**dataclasses.asdict(config)).name_drift_trim is True
+
+    field = next(f for f in dataclasses.fields(MhsDiagnosticRequest) if f.name == "name_drift_trim")
+    assert field.default is False
+    assert field.metadata["flag"] == "--name-drift-trim"
+
