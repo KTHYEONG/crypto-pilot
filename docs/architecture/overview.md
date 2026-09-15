@@ -99,6 +99,6 @@ flowchart TD
 ## 6. 외부 연동 및 인프라 명세 (External Dependencies)
 
 * **거래소 연동**: Binance USDT-M 선물 REST API (`/fapi/v1`), 현물 API v3 (`/api/v3`), 마진 SAPI (`/sapi/v1`), Binance Vision S3 공용 아카이브, Binance 실시간 청산 WebSocket (`ccxt.pro`).
-* **배포 환경**: Oracle Cloud Infrastructure (OCI) Ampere A1 (ARM64 아키텍처, 1 vCPU, 1.2GB RAM 할당 한도).
-* **보안 및 네트워크**: Tailscale 사설망 VPN (외부 공인 인바운드 포트 완전 차단), Mozilla SOPS + Age 비대칭 암호화 (`.env.enc` 및 배포 아티팩트 암호화), Docker Compose.
+* **배포 환경**: Oracle Cloud Infrastructure (OCI) Ampere A1.Flex (ARM64, 호스트 2 OCPU/12GB 공유), `mhs-live` 컨테이너 `mem_limit: 3g` / `liquidation-collector` `768m` 하드캡.
+* **보안 및 네트워크**: Tailscale 사설망 VPN (외부 공인 인바운드 포트 완전 차단), 서버에 배치된 `.env`를 정본으로 사용하고 전략 파라미터만 `LIVE_ARTIFACT_KEY`로 봉인한 `.enc` 아티팩트를 배포(sops 폐기), Docker Compose.
 * **파이썬 툴체인**: Python 3.11+, uv (패키지 동기화), NumPy 2.x, Pandas 2.2+, PyArrow, SciPy, CCXT 4.5+, Pydantic v2.
