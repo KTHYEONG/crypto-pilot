@@ -82,6 +82,9 @@ class TestStrategyReplay:
 
     def test_persistent_termination_creates_forced_exit_plus_stress_penalty(self) -> None:
         # A is held, then its minute data permanently ends mid-grid.
+        # INV-NO-FABRICATED-TERMINAL-FILL: no retrospective exit is
+        # fabricated; the open position is disclosed as UNKNOWN_TERMINATION
+        # and invalidates the primary ledger on both bounds.
         grid = pd.date_range("2021-01-01 01:01", periods=120, freq="1min", tz="UTC")
         px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
         px.loc["2021-01-01 02:00":, "A"] = np.nan
@@ -93,36 +96,30 @@ class TestStrategyReplay:
             "OHLCV_STRICT_PROXY", ExecutionSpec(),
         )
         assert strict.termination_counts["UNKNOWN_TERMINATION"] == 1
-        assert strict.forced_exit_count == 1
-        assert strict.forced_exit_notional > 0
-        assert "forced_exit" in strict.simulated_fills["reason"].tolist()
+        assert strict.forced_exit_count == 0
+        assert strict.forced_exit_notional == 0.0
+        assert "forced_exit" not in strict.simulated_fills["reason"].tolist()
+        assert not strict.ledger.primary_valid
+        assert any(g.code == "UNKNOWN_TERMINATION" for g in strict.ledger.data_gaps)
 
         stress = strategy_aware_execution_replay(
             target, signal_at, px, px, px, px,
             pd.DataFrame(0.0, index=grid, columns=["A"]), 1.0,
             "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
         )
-        strict_exit_fee = strict.simulated_fills[
-            strict.simulated_fills["reason"] == "forced_exit"
-        ]["fee_bps"].iloc[0]
-        stress_exit_fee = stress.simulated_fills[
-            stress.simulated_fills["reason"] == "forced_exit"
-        ]["fee_bps"].iloc[0]
-        assert stress_exit_fee > strict_exit_fee
+        assert stress.termination_counts["UNKNOWN_TERMINATION"] == 1
+        assert stress.forced_exit_count == 0
+        assert "forced_exit" not in stress.simulated_fills["reason"].tolist()
+        assert not stress.ledger.primary_valid
 
     def test_windowed_engine_real_stale_position_still_forced_exits(self) -> None:
-        """SCENARIO_MHS_FOLD0_REAL_STALE_POSITION_STILL_FORCE_EXITS.
+        """SCENARIO_MHS_FOLD0_REAL_STALE_POSITION_TERMINATION_DISCLOSED.
 
         Regression guard for the dust-tolerance fix below: a REAL
         (above-tolerance) held position whose data permanently ends mid-grid
-        must keep forcing an exit through the windowed
-        ``_BoundExecutionReplayAccumulator`` path exactly as the oracle does
-        above -- the tolerance change must not weaken this fail-closed gate.
-
-        SCENARIO_MHS_FORCED_EXIT_COST_MODEL_FLAT_BACKWARD_COMPAT: under the
-        production-default ``liquidity_cost_model="flat"`` the forced_exit
-        fee_bps stays byte-identical -- the shared taker-cost wiring reduces
-        exactly to the frozen slippage under flat."""
+        is disclosed as UNKNOWN_TERMINATION and invalidates the ledger --
+        no retrospective exit is fabricated (INV-NO-FABRICATED-TERMINAL-FILL).
+        """
         grid = pd.date_range("2021-01-01 00:00", periods=180, freq="1min", tz="UTC")
         px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
         px.loc["2021-01-01 02:00":, "A"] = np.nan
@@ -136,9 +133,11 @@ class TestStrategyReplay:
             windows, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
         )
         assert report.termination_counts["UNKNOWN_TERMINATION"] == 1
-        assert report.forced_exit_count == 1
-        assert report.forced_exit_notional > 0
-        assert "forced_exit" in report.simulated_fills["reason"].tolist()
+        assert report.forced_exit_count == 0
+        assert report.forced_exit_notional == 0.0
+        assert "forced_exit" not in report.simulated_fills["reason"].tolist()
+        assert not report.ledger.primary_valid
+        assert any(g.code == "UNKNOWN_TERMINATION" for g in report.ledger.data_gaps)
 
     def test_dust_residual_position_does_not_force_exit(self) -> None:
         """SCENARIO_MHS_FOLD0_DUST_NO_FORCED_EXIT.

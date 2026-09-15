@@ -110,8 +110,6 @@ def test_emit_deployment_exists(tmp_path: Path) -> None:
 # SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY: run-history passthrough
 # ---------------------------------------------------------------------------
 
-from types import SimpleNamespace
-
 from src.mhs.contracts import MhsResearchGoResult
 from src.mhs.resources import _StageRecorder
 from src.mhs.pipeline.config import MhsRunConfig
@@ -144,16 +142,34 @@ def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY() -> None:
     ctx.recorder = _StageRecorder(log_run=False)
     ctx.telemetry = StageTelemetry(log_run=False)
     ctx.folds = ()
-    ctx.deployment = SimpleNamespace(
-        geometric_cagr=0.0,
-        max_drawdown=0.0,
-        calmar=0.0,
-        probability_final_wealth_below_initial=0.0,
-        research_go_eligible=False,
-        execution_go_eligible=False,
-        pilot_go_eligible=False,
-        scale_go_eligible=False,
-    )
+    import dataclasses as _dataclasses
+
+    from src.mhs.evidence import DeploymentReadinessResult as _DeploymentReadinessResult
+
+    _deployment_fields = {f.name for f in _dataclasses.fields(_DeploymentReadinessResult)}
+    _deployment_values: dict[str, object] = {
+        "geometric_cagr": 0.0,
+        "max_drawdown": 0.0,
+        "calmar": 0.0,
+        "expected_shortfall": 0.0,
+        "worst_1d": 0.0,
+        "worst_7d": 0.0,
+        "worst_event": 0.0,
+        "time_under_water_bars": 0,
+        "recovery_bars": None,
+        "probability_final_wealth_below_initial": 0.0,
+        "probability_mdd_over_20pct": 0.0,
+        "probability_mdd_over_30pct": 0.0,
+        "leverage_ruin_probabilities": {},
+        "concentration": {},
+        "participation_warnings": {},
+        "research_go_eligible": False,
+        "execution_go_eligible": False,
+        "pilot_go_eligible": False,
+        "scale_go_eligible": False,
+    }
+    assert _deployment_fields == set(_deployment_values)
+    ctx.deployment = _DeploymentReadinessResult(**_deployment_values)  # type: ignore[arg-type]
     ctx.research_go = MhsResearchGoResult(
         eligible=False, reason_codes=("X",), evaluated_folds=0, folds_passed=0,
     )
@@ -649,7 +665,7 @@ def test_emit_deployment_carries_request_data_policy(tmp_path) -> None:
         },
     )
     masked = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", data_policy="zombie_mask_v1")))
-    legacy = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01")))
+    legacy = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(start="2021-01-01", data_policy="legacy")))
 
     masked_res = emit_deployment(report, masked, tmp_path / "masked", artifact_key=None)
     legacy_res = emit_deployment(report, legacy, tmp_path / "legacy", artifact_key=None)

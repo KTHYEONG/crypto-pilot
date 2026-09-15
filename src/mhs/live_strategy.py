@@ -22,8 +22,8 @@ from src.common.errors import DataIntegrityError
 from src.live.errors import ArtifactSealError
 from src.mhs.deployment_policy import MhsDeploymentPolicy, SignalWindowPolicy, SizingPolicy, TargetWeightPolicy
 from src.mhs.panel import DATA_POLICIES
+from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.panel import DATA_POLICY_LEGACY as _PANEL_DATA_POLICY_LEGACY
-from src.mhs.panel import DATA_POLICY_ZOMBIE_MASK_V1 as _PANEL_DATA_POLICY_ZOMBIE_MASK_V1
 
 #: Canonical policy set re-exported so params consumers share one definition.
 DATA_POLICY_LEGACY: str = _PANEL_DATA_POLICY_LEGACY
@@ -31,7 +31,7 @@ DATA_POLICY_LEGACY: str = _PANEL_DATA_POLICY_LEGACY
 # ADR_20260914_ZOMBIE_MASK_RESEARCH_RERUN: SETTLING(상장폐지) 심볼이 계속 내려주는
 # flat 봉을 legacy 정책은 실거래처럼 취급해 라이브 신호가 현실과 어긋난다. 인과적
 # K=24봉 마스크로 전환한다(실측: CAGR 5.374->5.234, MDD -0.453->-0.454, GO 16/16 유지).
-LIVE_RUNTIME_DATA_POLICY: str = _PANEL_DATA_POLICY_ZOMBIE_MASK_V1
+LIVE_RUNTIME_DATA_POLICY: str = MHS_DATA_POLICY_DEFAULT
 
 PARAMS_SNAPSHOT_KEYS: tuple[str, ...] = (
     "SIGNAL_PANEL_WINDOW_DAYS",
@@ -128,7 +128,7 @@ class LiveStrategyParams:
     policy: MhsDeploymentPolicy
     bootstrap_sha256: str
     bootstrap_held_row: dict[str, float]
-    data_policy: str = DATA_POLICY_LEGACY
+    data_policy: str = MHS_DATA_POLICY_DEFAULT
 
 
 def _canonical_policy(policy: MhsDeploymentPolicy) -> dict[str, Any]:
@@ -635,3 +635,6 @@ def assert_deployment_eligible(report: Any, *, reference_report_path: Path | Non
                 ref_digest = hashlib.sha256(ref_payload.encode("utf-8")).hexdigest()
                 if not hmac.compare_digest(cur_digest, ref_digest):
                     raise DataIntegrityError("deployment ineligible: flags digest drift")
+    reliability = getattr(report, "backtest_reliability", None)
+    if not bool(reliability and reliability.eligible):
+        raise DataIntegrityError("deployment ineligible: backtest_reliability not eligible")

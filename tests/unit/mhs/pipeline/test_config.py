@@ -224,7 +224,7 @@ def test_constant_risk_cli_and_config_parity():
 # SCENARIO_MHS_SELECTION_EXEC_DEFAULT_UNCHANGED_01
 def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     """MhsRunConfig() and a no-arg CLI parse stay identical, both resolving
-    final_oos_2026h1=False and data_policy='legacy' as the ONLY keys added
+    final_oos_2026h1=False and data_policy='zombie_mask_v1' as the ONLY keys added
     to the pre-spec field set."""
     from src.cli.main import build_root_parser
 
@@ -256,8 +256,11 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
     assert from_cli == bare
     assert bare["final_oos_2026h1"] is False
-    assert bare["data_policy"] == "legacy"
-    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy"}
+    assert bare["data_policy"] == "zombie_mask_v1"
+    assert bare["input_manifest_path"] is None
+    assert bare["forward_execution_quality_dir"] is None
+    assert bare["forward_strategy_digest"] is None
+    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest"}
 
 
 def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:
@@ -268,9 +271,9 @@ def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:
     from src.mhs.pipeline.config import MhsRunConfig
 
     # Given: 기본 설정과 --data-policy 지정 CLI
-    assert MhsRunConfig().data_policy == "legacy"
+    assert MhsRunConfig().data_policy == "zombie_mask_v1"
     args = build_root_parser().parse_args(
-        ["research", "run", "portfolio", "mhs-horizon-diagnostic", "--data-policy", "zombie_mask_v1"],
+        ["research", "run", "portfolio", "mhs-horizon-diagnostic", "--data-policy", "legacy"],
     )
 
     # When
@@ -278,6 +281,23 @@ def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:
     request = MhsDiagnosticRequest(**dataclasses.asdict(config))
 
     # Then
-    assert config.data_policy == "zombie_mask_v1"
-    assert request.data_policy == "zombie_mask_v1"
-    assert MhsDiagnosticRequest().data_policy == "legacy"
+    assert config.data_policy == "legacy"
+    assert request.data_policy == "legacy"
+    assert MhsDiagnosticRequest().data_policy == "zombie_mask_v1"
+
+
+def test_cli_uses_shared_data_policy_and_manifest_flags() -> None:
+    import argparse
+    from src.cli.commands.research.mhs import add_mhs_commands
+    from src.mhs.pipeline.config import MhsRunConfig
+    parser = argparse.ArgumentParser()
+    root = parser.add_subparsers(dest='root')
+    research = root.add_parser('research')
+    portfolio = research.add_subparsers(dest='portfolio')
+    add_mhs_commands(portfolio)
+    args = parser.parse_args(['research', 'mhs-horizon-diagnostic', '--input-manifest-path', 'inputs.json', '--forward-execution-quality-dir', 'quality', '--forward-strategy-digest', 'abc'])
+    config = MhsRunConfig.from_namespace(args)
+    assert config.data_policy == 'zombie_mask_v1'
+    assert config.input_manifest_path == 'inputs.json'
+    assert config.forward_execution_quality_dir == 'quality'
+    assert config.forward_strategy_digest == 'abc'

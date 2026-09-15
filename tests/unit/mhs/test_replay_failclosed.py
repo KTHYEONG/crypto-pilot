@@ -292,18 +292,20 @@ class TestEquityFloorProtection:
     def test_floor_forces_flat_and_records_breach_timestamps(self) -> None:
         """SCENARIO_MHS_EQUITY_FLOOR_FORCES_FLAT_09: a gradual squeeze (100 ->
         140 -> 180 -> 220) erodes live equity through the 0.5 floor at the
-        second and fourth decisions while the ledger-level pre-trade equity
+        third and fourth decisions while the ledger-level pre-trade equity
         stays positive, so the floor's forced-flat unwind completes the replay
-        and records the exact breach timestamps."""
+        and records the exact breach timestamps. Single-MTM accounting keeps
+        the 01:00 decision above the floor (0.599 > 0.5); the double-counted
+        trajectory used to breach there."""
         window = self._short_squeeze_window(price_levels=(100.0, 140.0, 180.0, 220.0))
         result = replay_execution_windows(
             [window], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), min_equity_fraction=0.5,
         )
         breaches = result.ledger.equity_floor_breached_at
-        assert len(breaches) >= 2
-        assert breaches[0] == pd.Timestamp("2021-01-01 01:00", tz="UTC")
-        assert breaches[1] == pd.Timestamp("2021-01-01 01:50", tz="UTC")
-        assert breaches[-1] == pd.Timestamp("2021-01-01 02:40", tz="UTC")
+        assert list(breaches) == [
+            pd.Timestamp("2021-01-01 01:50", tz="UTC"),
+            pd.Timestamp("2021-01-01 02:40", tz="UTC"),
+        ]
         assert result.ledger.equity.min() > 0.0
 
     def test_no_breach_is_empty_tuple_and_byte_identical_to_none(self) -> None:
@@ -356,9 +358,11 @@ class TestRuinGuardEquity:
         assert ruin_guard_equity(1.3599, float("-inf")) == pytest.approx(1.3599)
 
     def test_floor_guard_fires_on_ledger_track(self) -> None:
-        """When the finalized ledger equity falls below 0.2*initial while the
-        fill track stays above, the floor guard fires on the second window's
-        first decision and subsequent decision rows are targeted flat."""
+        """A corrupted ledger chunk below the floor still trips the floor
+        guard on the ledger track during consume -- and the causal
+        reconciliation in finalize then fails closed on the injected
+        divergence instead of emitting a ledger that disagrees with the
+        online accounting state (INV-ACCOUNTING-SINGLE-MTM)."""
         from src.mhs.execution import _BoundExecutionReplayAccumulator, ExecutionReplayWindow
         grid = pd.date_range("2021-01-01", periods=36, freq="5min", tz="UTC")
         symbols = ("AAAUSDT",)
@@ -402,9 +406,8 @@ class TestRuinGuardEquity:
             )
             acc.consume(w1)
             acc.consume(w2)
-            result = acc.finalize()
+            assert len(acc.equity_floor_breaches) > 0
+            with pytest.raises(DataIntegrityError, match="diverged"):
+                acc.finalize()
         finally:
             _BoundExecutionReplayAccumulator.consume = original_consume
-        assert len(acc.equity_floor_breaches) > 0
-        assert result.ledger.equity_floor_breached_at is not None
-        assert len(result.ledger.equity_floor_breached_at) > 0

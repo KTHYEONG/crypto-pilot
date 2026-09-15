@@ -981,13 +981,14 @@ def test_deploy_push_requires_key(monkeypatch) -> None:
     import pytest
 
     import src.cli.commands.research.mhs as mhs_cli
+    import src.live.settings as live_settings
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("git must not run"))
 
     class _S:
         artifact_key = None
 
-    monkeypatch.setattr(mhs_cli, "LiveSettings", lambda: _S(), raising=False)
+    monkeypatch.setattr(live_settings, "LiveSettings", lambda: _S())
     with pytest.raises(SystemExit):
         mhs_cli._assert_deploy_push_allowed()
 

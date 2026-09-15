@@ -18,6 +18,7 @@ from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR, funding_path
 from src.market_data.services.futures_collection import DataCollector
 from src.mhs.books import phase_tranche_book, rank_weight_book
+from src.mhs.data_provenance import resolve_required_mhs_input_paths, seal_mhs_input_manifest
 from src.mhs.horizons import horizon_log_return
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.mhs.types import BOOK_SPECS
@@ -505,5 +506,22 @@ def refresh_mhs_execution_manifest(manifest_path: str | Path) -> dict[str, objec
     }
     payload["statuses"] = statuses
     payload["mode"] = "validated_local"
+    symbols = [str(symbol) for symbol in payload["symbols"]]
+    attestation_path = path.with_name(path.stem + ".inputs.json")
+    payload["input_manifest_digest"] = seal_mhs_input_manifest(
+        [
+            candidate
+            for candidate in resolve_required_mhs_input_paths(
+                data_root=FUTURES_DATA_DIR,
+                panel_symbols=symbols,
+                execution_symbols=symbols,
+                execution_timeframe=str(payload["timeframe"]),
+            )
+            if candidate.exists()
+        ],
+        data_root=FUTURES_DATA_DIR,
+        output_path=attestation_path,
+    )
+    payload["input_manifest_path"] = str(attestation_path)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return cast(dict[str, object], payload)

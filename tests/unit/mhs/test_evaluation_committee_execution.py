@@ -486,25 +486,21 @@ def test_evidence_weighting_request_validation() -> None:
         MhsDiagnosticRequest(committee_evidence_weighting="yes")  # type: ignore[arg-type]
 
 def test_evidence_weights_by_boundary_builds_once(monkeypatch) -> None:
+    # PERF-BOUNDARY-FEATURE-ONCE: one boundary-admitted build across all
+    # boundaries (per-feature builders run once; admission is per boundary).
+    # The builder-call counting now lives on build_feature_books_by_boundary
+    # (tests/unit/mhs/test_features.py); here the per-boundary admits differ
+    # while sharing member books.
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
     train_ends = {
         "fold_0": pd.Timestamp("2022-01-01", tz="UTC"),
         "fold_1": pd.Timestamp("2023-01-01", tz="UTC"),
         "fold_2": pd.Timestamp("2024-01-01", tz="UTC"),
     }
-    call_count = {"n": 0}
-    real_build = ev.build_feature_books
-
-    def counting_build(*args, **kwargs):
-        call_count["n"] += 1
-        return real_build(*args, **kwargs)
-
-    monkeypatch.setattr(ev, "build_feature_books", counting_build)
     result = ev._committee_evidence_weights_by_boundary(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, train_ends=train_ends,
     )
-    assert call_count["n"] == 1
     assert set(result.keys()) == {"fold_0", "fold_1", "fold_2"}
     for label in train_ends:
         assert isinstance(result[label], dict)
@@ -529,7 +525,10 @@ def test_evidence_weights_by_boundary_differentiates(monkeypatch) -> None:
     for c in strong_col:
         close[c] = 100.0 * np.exp(np.cumsum(rng.normal(2e-4, 1e-5, len(grid))))
     train_ends = {
-        "early": pd.Timestamp("2021-03-01", tz="UTC"),
+        # INV-WALK-FORWARD-INDEPENDENCE: admission uses only pre-boundary
+        # rows, so the early boundary needs enough history for members to be
+        # admitted at all (a 2021-03-01 early fold correctly admits nothing).
+        "early": pd.Timestamp("2021-06-01", tz="UTC"),
         "late": pd.Timestamp("2021-10-01", tz="UTC"),
     }
     result = ev._committee_evidence_weights_by_boundary(

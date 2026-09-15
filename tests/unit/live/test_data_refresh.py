@@ -329,7 +329,7 @@ def test_refresh_one_symbol_tail_legacy_mark_klines_failure_is_failsoft() -> Non
     ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
     assert ok is True
-    assert calls == ["ohlcv", "funding", "mark_legacy", "metrics"]
+    assert calls == ["ohlcv", "mark_legacy", "metrics", "funding"]
 
 
 def test_refresh_one_symbol_tail_propagates_ip_block_from_ohlcv() -> None:
@@ -371,7 +371,7 @@ def test_refresh_one_symbol_tail_propagates_ip_block_from_funding() -> None:
     with pytest.raises(BinanceIpBlockedError):
         _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
-    assert calls == ["ohlcv"]
+    assert calls == ["ohlcv", "mark", "metrics"]
 
 
 def test_refresh_live_market_data_aborts_remaining_symbols_on_ip_block(tmp_path, monkeypatch) -> None:
@@ -832,4 +832,167 @@ def test_refresh_live_market_data_excludes_absent_symbols(tmp_path, monkeypatch,
     )
     assert sorted(refreshed) == ["AAAUSDT", "BBBUSDT", "GONEUSDT"]
     assert (legacy.total, legacy.absent) == (3, 0)
+
+
+
+def test_refresh_one_symbol_tail_refreshes_mark_and_metrics_before_funding() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    # Given
+    calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            calls.append("ohlcv")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            calls.append("mark")
+
+        def ensure_metrics_live_tail(self, symbol):
+            calls.append("metrics")
+
+        def ensure_funding_data(self, symbol, start, end):
+            calls.append("funding")
+
+    # When
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    # Then
+    assert ok is True
+    assert calls == ["ohlcv", "mark", "metrics", "funding"]
+
+def test_refresh_one_symbol_tail_funding_ip_block_raises_funding_error_after_klines_path() -> None:
+    import pytest
+    from src.live.data_refresh import FundingIpBlockedError, _refresh_one_symbol_tail
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    # Given
+    calls: list[str] = []
+    url = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=AAAUSDT&limit=100"
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            calls.append("ohlcv")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            calls.append("mark")
+
+        def ensure_metrics_live_tail(self, symbol):
+            calls.append("metrics")
+
+        def ensure_funding_data(self, symbol, start, end):
+            raise BinanceIpBlockedError(http_code=403, url=url)
+
+    # When
+    with pytest.raises(FundingIpBlockedError) as exc_info:
+        _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
+
+    # Then
+    assert isinstance(exc_info.value, BinanceIpBlockedError)
+    assert exc_info.value.http_code == 403
+    assert exc_info.value.url == url
+    assert calls == ["ohlcv", "mark", "metrics"]
+
+def test_refresh_one_symbol_tail_skip_funding_returns_false_without_funding_call() -> None:
+    from src.live.data_refresh import _refresh_one_symbol_tail
+
+    # Given
+    calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            calls.append("ohlcv")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            calls.append("mark")
+
+        def ensure_metrics_live_tail(self, symbol):
+            calls.append("metrics")
+
+        def ensure_funding_data(self, symbol, start, end):
+            raise AssertionError("funding must be skipped while funding endpoint is blocked")
+
+    # When
+    ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02", skip_funding=True)
+
+    # Then
+    assert ok is False
+    assert calls == ["ohlcv", "mark", "metrics"]
+
+def test_refresh_live_market_data_funding_block_keeps_ohlcv_refresh_for_remaining_symbols(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    # Given
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    old = now - pd.Timedelta(days=5)
+    ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+    for sym in ("AUSDT", "BUSDT", "CUSDT"):
+        pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
+    ohlcv_calls: list[str] = []
+    funding_calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            ohlcv_calls.append(symbol)
+
+        def ensure_funding_data(self, symbol, start, end):
+            funding_calls.append(symbol)
+            raise BinanceIpBlockedError(http_code=403, url="https://fapi.binance.com/fapi/v1/fundingRate")
+
+    # When
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=_Collector(),
+    )
+
+    # Then
+    assert ohlcv_calls == ["AUSDT", "BUSDT", "CUSDT"]
+    assert funding_calls == ["AUSDT"]
+    assert report.funding_blocked is True
+    assert report.ip_blocked is False
+    assert report.failed == 3
+    assert report.refreshed == 0
+    assert report.ok is False
+
+def test_refresh_live_market_data_klines_block_still_aborts_remaining_symbols(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import data_refresh
+    from src.market_data.binance.futures import BinanceIpBlockedError
+
+    # Given
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    d = tmp_path / "ohlcv" / "1h"
+    d.mkdir(parents=True)
+    old = now - pd.Timedelta(days=5)
+    ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
+    for sym in ("AUSDT", "BUSDT", "CUSDT"):
+        pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
+    ohlcv_calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            ohlcv_calls.append(symbol)
+            raise BinanceIpBlockedError(http_code=418, url="https://fapi.binance.com/fapi/v1/klines")
+
+        def ensure_funding_data(self, symbol, start, end):
+            raise AssertionError("funding must not run after a klines block")
+
+    # When
+    report = data_refresh.refresh_live_market_data(
+        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=_Collector(),
+    )
+
+    # Then
+    assert ohlcv_calls == ["AUSDT"]
+    assert report.ip_blocked is True
+    assert report.funding_blocked is False
+    assert report.failed == 3
+    assert report.ok is False
 

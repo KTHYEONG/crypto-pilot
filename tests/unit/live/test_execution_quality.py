@@ -370,3 +370,18 @@ COVERED_SCENARIOS: tuple[str, ...] = (
 )
 # SCENARIO_REC_01-typed-execution-quality
 # SCENARIO_REC_11-legacy-schema-coexists
+
+
+def test_execution_quality_persists_strategy_digest_and_observed_at(tmp_path) -> None:
+    from decimal import Decimal
+    from types import SimpleNamespace
+    import pandas as pd
+    from src.live.execution_quality import append_execution_quality, build_execution_quality_records, load_execution_quality_records
+    now = pd.Timestamp('2026-09-14', tz='UTC')
+    intent = SimpleNamespace(symbol='BTCUSDT', side='BUY', leg_index=0, client_order_prefix='r')
+    outcome = SimpleNamespace(avg_fill_price=Decimal('100'), filled_qty=Decimal('1'), unfilled_qty=Decimal('0'), status='FILLED', chases=0, fills=())
+    records = build_execution_quality_records(now, 'paper', pd.Series({'BTCUSDT': 0.1}), {'BTCUSDT': Decimal('100')}, [intent], [outcome], strategy_digest='abc', observed_at=now+pd.Timedelta(seconds=1))
+    append_execution_quality(records, tmp_path)
+    loaded = load_execution_quality_records(tmp_path)
+    assert loaded.loc[0, 'strategy_digest'] == 'abc'
+    assert pd.Timestamp(loaded.loc[0, 'observed_at']) == now+pd.Timedelta(seconds=1)

@@ -16,6 +16,8 @@ current_book_for_diagnostic`` (3850), and ``del log_close`` + ``gc.collect()``
 from __future__ import annotations
 
 import gc
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -60,6 +62,18 @@ from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
 
+def _fold_weights_from_boundaries(
+    weights_by_boundary: Mapping[str, Mapping[str, float]], folds: Sequence[Any],
+) -> dict[int, dict[str, float]]:
+    """Map each fold to its own boundary weight mix (INV-WALK-FORWARD-INDEPENDENCE).
+
+    Fold ``i`` validates the mix fitted strictly before its own boundary
+    (``fold_i``); the top-level deployed mix is never replicated across folds,
+    so early folds cannot borrow fits that saw their validation data.
+    """
+    return {i: dict(weights_by_boundary[f"fold_{i}"]) for i, _fold in enumerate(folds)}
+
+
 def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     """Construct the committee execution book and all committee-tier diagnostics."""
     from src.mhs.research_go import _resolved_growth_envelope
@@ -88,16 +102,11 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols, _train_ends,
             members=_research_go._resolved_committee_members(ctx.config),
         )
-        # I-SINGLE-CONFIGURATION (mirrors the constant_risk target_vol fix,
-        # ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL): the
-        # blend deploys ONE committee member-weight mix, resolved once at the
-        # top-level boundary, for the whole run. Anchored-purged folds must
-        # validate that SAME deployed mix -- not a per-fold-boundary leak-free
-        # refit of it, which drifts the fold's signal blend away from what the
-        # blend actually deploys (measured: dominant-member weight drift up to
-        # ~0.05, e.g. flow_imb_168h 0.389 top-level vs 0.442 for fold_0).
-        ctx._fold_committee_weights = dict.fromkeys(
-            range(len(phase_1_anchored_purged_folds())), ctx._committee_weights_by_boundary["top_level"],
+        # Each anchored-purged fold validates its OWN boundary mix
+        # (INV-WALK-FORWARD-INDEPENDENCE): the top-level deployed mix is used
+        # for the deployed blend only, never replicated across folds.
+        ctx._fold_committee_weights = _fold_weights_from_boundaries(
+            ctx._committee_weights_by_boundary, phase_1_anchored_purged_folds(),
         )
     if ctx.config.committee_capital:
         # RC-4: the reported blend is the committee execution book, not the

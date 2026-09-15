@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
 import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.mhs.execution.accounting import CausalPortfolioState, reconcile_causal_state
 from src.mhs.types import ExecutionSpec
 
-from . import TERMINATION_STRESS_PENALTY_BPS, _ExecutionBound, _MarkSource
+from . import _ExecutionBound, _MarkSource
 from . import contracts as _contracts
 from . import microstructure as _microstructure
 from . import pnl as _pnl
@@ -85,6 +87,24 @@ class _BoundExecutionReplayAccumulator:
         self.cash = float(initial_equity)
         self.last_prices_arr = np.full(self.n_cols, np.nan, dtype="float64")
         self.last_time_ns: int | None = None
+
+        # Causal accounting mirror (P1): shadows the fill track event by
+        # event and is reconciled against the independent ledger in
+        # ``finalize``. Queued fills drain in bar order inside the ledger
+        # append so funding always settles on pre-fill inventory.
+        self.accounting_state = CausalPortfolioState(
+            cash=float(initial_equity),
+            units=np.zeros(self.n_cols, dtype="float64"),
+            last_marks=np.full(self.n_cols, np.nan, dtype="float64"),
+            last_event_ns=None,
+        )
+        self._mirror_pending: list[tuple[int, int, float, float, float]] = []
+        self._w_qv = np.zeros((0, 0), dtype="float64")
+        self._w_fknown = np.zeros((0, 0), dtype=bool)
+        self._w_avail_ns: np.ndarray = np.zeros(0, dtype="int64")
+        self._w_mark_avail = np.zeros((0, 0), dtype="int64")
+        self.fill_bar_ns: list[int] = []
+        self.fill_gcol: list[int] = []
 
         self.ledger_cash = float(initial_equity)
         self.ledger_units = np.zeros(self.n_cols, dtype="float64")
@@ -207,7 +227,7 @@ class _BoundExecutionReplayAccumulator:
         (last_close_idx, decision_ns_all, spos_all, dpos_all, on_grid_all, target_values, submit_anchored, fill_start, tw_index, sig_index) = self._consume_prepare_tables(w, grid_ns, n_grid, close_finite, local_cols)
         for i in range(len(tw_index)):
             self._consume_single_intent(i, decision_ns_all, dpos_all, on_grid_all, gpos, target_values, spos_all, marks_values, grid_ns, funding_matrix, tw_index, sig_index, mark_valid, last_close_idx, local_cols, submit_anchored, n_grid, closes_values, grid, n_cols, lows_values, highs_values)
-        self._consume_append_ledger(grid_ns, n_grid, local_cols, fill_start, n_local, marks_values, gpos, grid, funding_matrix, bar_ns)
+        self._consume_append_ledger(grid_ns, n_grid, local_cols, fill_start, n_local, marks_values, gpos, grid, funding_matrix, bar_ns, closes_values)
         self._consume_update_spreads(highs_values, lows_values, gpos)
 
     def _consume_validate_window(self, w: ExecutionReplayWindow) -> tuple[int, list[str], int, np.ndarray, pd.DatetimeIndex, np.ndarray, int, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -249,43 +269,173 @@ class _BoundExecutionReplayAccumulator:
         if (finite_marks <= 0).any():
             raise DataIntegrityError("finite marks must be strictly positive")
 
-        for j in range(n_local):
-            idxs = np.flatnonzero(close_finite[:, j])
-            if not len(idxs):
-                continue
-            pos = int(idxs[-1])
-            ts = grid[pos]
-            prev_ts = self.last_close_ts.get(local_cols[j])
-            if prev_ts is None or ts > prev_ts:
-                self.last_close_ts[local_cols[j]] = ts
-                self.last_close_value[local_cols[j]] = float(closes_values[pos, j])
-                self.last_close_mark[local_cols[j]] = float(marks_values[pos, j])
+        # Window context for the causal replay: quote volumes (ones when the
+        # window carries none, preserving legacy direct construction),
+        # funding knowledge (all-known when absent), and per-bar availability
+        # (the grid itself when absent, so effective time equals the label).
+        n_grid_int = int(n_grid)
+        if w.quote_volumes is not None:
+            qv = np.full((n_grid_int, n_local), 1.0, dtype="float64")
+            for j, sym in enumerate(local_cols):
+                if sym in w.quote_volumes.columns:
+                    qv[:, j] = w.quote_volumes[sym].to_numpy(dtype="float64")
+        else:
+            qv = np.ones((n_grid_int, n_local), dtype="float64")
+        self._w_qv = qv
+        if w.funding_known is not None:
+            fknown = np.zeros((n_grid_int, n_local), dtype=bool)
+            for j, sym in enumerate(local_cols):
+                if sym in w.funding_known.columns:
+                    fknown[:, j] = w.funding_known[sym].to_numpy(dtype=bool)
+        else:
+            fknown = np.ones((n_grid_int, n_local), dtype=bool)
+        self._w_fknown = fknown
+        if w.bar_available_at is not None and len(w.bar_available_at) == n_grid_int:
+            avail_ns = np.asarray(w.bar_available_at, dtype="datetime64[ns]").astype("int64")
+        else:
+            avail_ns = grid_ns.copy()
+        self._w_avail_ns = avail_ns
+        # Mark availability trails bar availability by one bar: the mark read
+        # at a decision is sourced from the previous bar's close (hourly-carry
+        # semantics), so the decision bar's own close tolerance from F8 stays
+        # usable while strictly later bars fail the PIT check downstream.
+        bar_step = int(avail_ns[1] - avail_ns[0]) if len(avail_ns) > 1 else 0
+        self._w_mark_avail = np.repeat((avail_ns - bar_step)[:, None], n_local, axis=1)
         return (n_cols, local_cols, n_local, gpos, grid, grid_ns, n_grid, bar_ns, marks_values, highs_values, lows_values, closes_values, close_finite, mark_valid, funding_matrix)
 
 
-    def _advance_window(self, target_ns: int, dpos: int, on_grid: bool, marks_values: np.ndarray, grid_ns: np.ndarray, funding_matrix: np.ndarray, gpos: np.ndarray) -> None:
-        """Advance fill-track MTM and funding state to a decision time."""
+    def _advance_window(self, target_ns: int, dpos: int, on_grid: bool, marks_values: np.ndarray, mark_available_ns: np.ndarray, grid_ns: np.ndarray, funding_matrix: np.ndarray, funding_known: np.ndarray, gpos: np.ndarray) -> None:
+        """Advance fill-track MTM and funding state to a decision time.
+
+        Single-MTM (INV-ACCOUNTING-SINGLE-MTM): marks update last prices but
+        never touch cash; cash moves only through fills, fees, and funding.
+        Funding settles per bar on pre-fill inventory (INV-EVENT-ORDER): fills
+        recorded since the previous decision are backed out bar by bar so a
+        post-entry decision never charges pre-entry funding (F3). A mark read
+        whose availability postdates the decision is a FUTURE_DATA_REFERENCE
+        gap, never a sizing input (INV-PIT-SOURCE-TIME).
+        """
         if self.last_time_ns is not None and target_ns < self.last_time_ns:
             raise DataIntegrityError("decision times must be monotonically increasing")
         if on_grid:
             m = marks_values[dpos]
-            finite = np.isfinite(m)
+            avail = mark_available_ns[dpos]
+            usable = np.isfinite(m) & (m > 0.0) & (avail <= target_ns)
             prev = self.last_prices_arr[gpos]
-            mark_changed = finite & np.isfinite(prev)
-            if mark_changed.any():
-                self.cash += float(
-                    np.sum(self.units_arr[gpos][mark_changed] * (m[mark_changed] - prev[mark_changed]))
-                )
-            self.last_prices_arr[gpos] = np.where(finite, m, prev)
+            self.last_prices_arr[gpos] = np.where(usable, m, prev)
+            future_read = np.isfinite(m) & (m > 0.0) & ~usable
+            if bool(future_read.any()):
+                self.ledger_valid = False
+                self.invalid_reasons.add("MISSING_DATA")
+                event_ts = pd.Timestamp(target_ns, unit="ns", tz="UTC")
+                for j in np.flatnonzero(future_read).tolist():
+                    self.data_gaps.append(
+                        ExecutionDataGap(
+                            code="FUTURE_DATA_REFERENCE", symbol=self.columns[int(gpos[j])],
+                            timestamp=event_ts, execution_bound=self.execution_bound,
+                        )
+                    )
         lo = np.searchsorted(grid_ns, self.last_time_ns, side="right") if self.last_time_ns is not None else 0
         hi = int(np.searchsorted(grid_ns, target_ns, side="right"))
+        lo = int(lo)
         if lo < hi:
-            rates_block = funding_matrix[lo:hi, :]
-            priced = np.isfinite(self.last_prices_arr[gpos])
-            self.cash -= float(
-                np.sum(rates_block * self.units_arr[gpos] * np.where(priced, self.last_prices_arr[gpos], 0.0))
-            )
+            span_rates = funding_matrix[lo:hi, :]
+            span_known = funding_known[lo:hi, :]
+            span_marks = marks_values[lo:hi, :]
+            span_units = np.repeat(self.units_arr[gpos][None, :], hi - lo, axis=0)
+            for fns, fj, fqty in self._fills_in_span(self.last_time_ns, target_ns, grid_ns, lo, gpos):
+                span_units[:fns, int(fj)] -= float(fqty)
+            held_unknown = (span_units != 0.0) & ~span_known
+            if bool(held_unknown.any()):
+                self.ledger_valid = False
+                self.invalid_reasons.add("MISSING_DATA")
+                hit = np.flatnonzero(held_unknown.any(axis=1))[0]
+                witness = int(np.flatnonzero(held_unknown[int(hit)])[0])
+                self.data_gaps.append(
+                    ExecutionDataGap(
+                        code="MISSING_HELD_FUNDING", symbol=self.columns[int(gpos[witness])],
+                        timestamp=pd.Timestamp(int(grid_ns[lo + int(hit)]), unit="ns", tz="UTC"),
+                        execution_bound=self.execution_bound,
+                    )
+                )
+            priced = np.where(np.isfinite(span_marks), span_marks, 0.0)
+            self.cash -= float(np.sum(np.where(span_known, span_rates, 0.0) * span_units * priced))
         self.last_time_ns = target_ns
+
+    def _fills_in_span(
+        self,
+        last_ns: int | None,
+        target_ns: int,
+        grid_ns: np.ndarray,
+        lo: int,
+        gpos: np.ndarray,
+    ) -> list[tuple[int, int, float]]:
+        """Recorded fills inside ``(last_ns, target_ns]`` as span adjustments.
+
+        Returns ``(relative_bar, local_col, quantity)`` triples used to back
+        post-fill inventory out of pre-fill bars. ``relative_bar`` is clamped
+        at zero so fills predating the span leave every span bar untouched.
+        """
+        out: list[tuple[int, int, float]] = []
+        floor = -1 if last_ns is None else int(last_ns)
+        gpos_list = gpos.tolist()
+        for fns, gcol, fqty in zip(self.fill_bar_ns, self.fill_gcol, self.fill_qty, strict=True):
+            if int(fns) <= floor or int(fns) > int(target_ns):
+                continue
+            rel = int(np.searchsorted(grid_ns, int(fns), side="left")) - int(lo)
+            if int(gcol) in gpos_list:
+                out.append((max(rel, 0), gpos_list.index(int(gcol)), float(fqty)))
+        return out
+
+    def _bar_viability_gap(
+        self,
+        *,
+        fill_pos: int,
+        col: int,
+        sym: str,
+        decision_ts: pd.Timestamp,
+        signal_ts: pd.Timestamp,
+        submit_ns: int,
+        signal_ns: int,
+        avail_submit_ns: int,
+    ) -> ExecutionDataGap | None:
+        """Fail-closed per-fill viability: volume, funding knowledge, timing.
+
+        A fill bar with zero/unknown/non-positive quote volume is untradable
+        (INV-EXECUTION-VIABILITY); unknown funding at the fill bar cannot
+        price the order (INV-FUNDING-KNOWLEDGE); an order whose submit time
+        falls outside ``(signal, availability]`` has no causal standing
+        (INV-BAR-AVAILABILITY). Returns the blocking gap, else ``None``.
+        """
+        if not (float(self._w_qv[fill_pos, col]) > 0.0):
+            return ExecutionDataGap(
+                code="ZERO_OR_UNKNOWN_VOLUME", symbol=sym,
+                timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
+                execution_bound=self.execution_bound,
+            )
+        if not bool(self._w_fknown[fill_pos, col]):
+            return ExecutionDataGap(
+                code="MISSING_ACTIVE_FUNDING", symbol=sym,
+                timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
+                execution_bound=self.execution_bound,
+            )
+        if not (int(signal_ns) < int(submit_ns) <= int(avail_submit_ns)):
+            return ExecutionDataGap(
+                code="CAUSAL_TIMING_VIOLATION", symbol=sym,
+                timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
+                execution_bound=self.execution_bound,
+            )
+        return None
+
+    def _block_fill(
+        self, gap: ExecutionDataGap,
+    ) -> bool:
+        """Record a viability block as gap plus primary-invalid; skip the fill."""
+        self.data_gaps.append(gap)
+        self.ledger_valid = False
+        self.invalid_reasons.add("MISSING_DATA")
+        self.unfilled_count += 1
+        return True
 
 
     def _consume_decision_price(self, col: int, on_grid: bool, dpos: int, spos: int, marks_values: np.ndarray, mark_valid: np.ndarray, last_close_idx: np.ndarray, local_cols: list[str], n_grid: int) -> float | None:
@@ -341,7 +491,7 @@ class _BoundExecutionReplayAccumulator:
         dns = int(decision_ns_all[i])
         dpos = int(dpos_all[i])
         on_grid = bool(on_grid_all[i])
-        self._advance_window(dns, dpos, on_grid, marks_values, grid_ns, funding_matrix, gpos)
+        self._advance_window(dns, dpos, on_grid, marks_values, self._w_mark_avail, grid_ns, funding_matrix, self._w_fknown, gpos)
         equity = self._equity_at(gpos)
         last_ledger_equity: float | None = None
         if self.equity_chunks:
@@ -415,6 +565,14 @@ class _BoundExecutionReplayAccumulator:
             _proceed, fill_pos, fill_price, fee_bps, reason, timeout_close, adverse = self._consume_fill_strict_touch(timeout_pos, spos, sym, grid, side, lows_values, col, highs_values, decision_price, n_grid, grid_ns, timeout_ns, closes_values, gcol, tw_index, sig_index, i)
             if _proceed:
                 return True
+        block = self._bar_viability_gap(
+            fill_pos=fill_pos, col=col, sym=sym,
+            decision_ts=tw_index[i], signal_ts=sig_index[i],
+            submit_ns=int(grid_ns[submit_pos]), signal_ns=int(sig_index[i].value),
+            avail_submit_ns=int(self._w_avail_ns[submit_pos]),
+        )
+        if block is not None:
+            return self._block_fill(block)
         if reason == "passive_fill":
             self.fill_count += 1
         if self.execution_bound == "OHLCV_IMMEDIATE_TAKER":
@@ -445,14 +603,10 @@ class _BoundExecutionReplayAccumulator:
             )
         self.shortfalls.append(shortfall)
         self.shortfall_notionals.append(abs(net_units) * fill_price)
-        fill_time = grid[fill_pos]
-        submit_time = grid[submit_pos]
+        fill_time = pd.Timestamp(int(self._w_avail_ns[fill_pos]), unit="ns", tz="UTC")
+        submit_time = pd.Timestamp(int(self._w_avail_ns[submit_pos]), unit="ns", tz="UTC")
         mark_price = float(marks_values[fill_pos, col])
-        if np.isfinite(self.last_prices_arr[gcol]):
-            if np.isfinite(mark_price):
-                self.cash += self.units_arr[gcol] * (mark_price - self.last_prices_arr[gcol])
-                self.last_prices_arr[gcol] = mark_price
-        elif np.isfinite(mark_price):
+        if np.isfinite(mark_price):
             self.last_prices_arr[gcol] = mark_price
         if not (np.isfinite(net_units) and np.isfinite(fill_price)):
             raise DataIntegrityError(
@@ -464,6 +618,11 @@ class _BoundExecutionReplayAccumulator:
         fee = fee_bps / 1e4 * abs(net_units) * fill_price
         self.cash -= fee
         self.units_arr[gcol] += net_units
+        self.fill_bar_ns.append(int(grid_ns[fill_pos]))
+        self.fill_gcol.append(int(gcol))
+        self._mirror_pending.append(
+            (int(grid_ns[fill_pos]), int(gcol), float(net_units), float(fill_price), float(fee_bps))
+        )
         if reason in ("passive_fill", "timeout_taker"):
             pre_trade_equity = self._equity_at(gpos)
             self.fill_ts.append(fill_time)
@@ -560,6 +719,14 @@ class _BoundExecutionReplayAccumulator:
             fill_price = float(tranche_price)
             fee_bps = float(tranche_fee_bps)
             qty = net_units * float(qty_fraction)
+            block = self._bar_viability_gap(
+                fill_pos=fill_pos, col=col, sym=sym,
+                decision_ts=tw_index[i], signal_ts=sig_index[i],
+                submit_ns=int(grid_ns[submit_pos]), signal_ns=int(sig_index[i].value),
+                avail_submit_ns=int(self._w_avail_ns[submit_pos]),
+            )
+            if block is not None:
+                return self._block_fill(block)
             if reason == "passive_fill":
                 self._record_terms(
                     decision_price, fill_price, side, self.spec.maker_fee_bps, 0.0,
@@ -574,14 +741,10 @@ class _BoundExecutionReplayAccumulator:
             )
             self.shortfalls.append(shortfall)
             self.shortfall_notionals.append(abs(qty) * fill_price)
-            fill_time = grid[fill_pos]
-            submit_time = grid[submit_pos]
+            fill_time = pd.Timestamp(int(self._w_avail_ns[fill_pos]), unit="ns", tz="UTC")
+            submit_time = pd.Timestamp(int(self._w_avail_ns[submit_pos]), unit="ns", tz="UTC")
             mark_price = float(marks_values[fill_pos, col])
-            if np.isfinite(self.last_prices_arr[gcol]):
-                if np.isfinite(mark_price):
-                    self.cash += self.units_arr[gcol] * (mark_price - self.last_prices_arr[gcol])
-                    self.last_prices_arr[gcol] = mark_price
-            elif np.isfinite(mark_price):
+            if np.isfinite(mark_price):
                 self.last_prices_arr[gcol] = mark_price
             if not (np.isfinite(qty) and np.isfinite(fill_price)):
                 raise DataIntegrityError(
@@ -593,6 +756,11 @@ class _BoundExecutionReplayAccumulator:
             fee = fee_bps / 1e4 * abs(qty) * fill_price
             self.cash -= fee
             self.units_arr[gcol] += qty
+            self.fill_bar_ns.append(int(grid_ns[fill_pos]))
+            self.fill_gcol.append(int(gcol))
+            self._mirror_pending.append(
+                (int(grid_ns[fill_pos]), int(gcol), float(qty), float(fill_price), float(fee_bps))
+            )
             pre_trade_equity = self._equity_at(gpos)
             self.fill_ts.append(fill_time)
             self.fill_symbol.append(sym)
@@ -668,6 +836,14 @@ class _BoundExecutionReplayAccumulator:
             qty = net_units * qty_fraction
             fill_pos = spos + rel_pos
             reason = "passive_fill" if sched_reason == "maker_fill" else "timeout_taker"
+            block = self._bar_viability_gap(
+                fill_pos=fill_pos, col=col, sym=sym,
+                decision_ts=tw_index[i], signal_ts=sig_index[i],
+                submit_ns=int(grid[submit_pos].value), signal_ns=int(sig_index[i].value),
+                avail_submit_ns=int(self._w_avail_ns[submit_pos]),
+            )
+            if block is not None:
+                return self._block_fill(block)
             if reason == "passive_fill":
                 self.fill_count += 1
             else:
@@ -698,14 +874,10 @@ class _BoundExecutionReplayAccumulator:
             )
             self.shortfalls.append(shortfall)
             self.shortfall_notionals.append(abs(qty) * fill_price)
-            fill_time = grid[fill_pos]
-            submit_time = grid[submit_pos]
+            fill_time = pd.Timestamp(int(self._w_avail_ns[fill_pos]), unit="ns", tz="UTC")
+            submit_time = pd.Timestamp(int(self._w_avail_ns[submit_pos]), unit="ns", tz="UTC")
             mark_price = float(marks_values[fill_pos, col])
-            if np.isfinite(self.last_prices_arr[gcol]):
-                if np.isfinite(mark_price):
-                    self.cash += self.units_arr[gcol] * (mark_price - self.last_prices_arr[gcol])
-                    self.last_prices_arr[gcol] = mark_price
-            elif np.isfinite(mark_price):
+            if np.isfinite(mark_price):
                 self.last_prices_arr[gcol] = mark_price
             if not (np.isfinite(qty) and np.isfinite(fill_price)):
                 raise DataIntegrityError(
@@ -717,6 +889,11 @@ class _BoundExecutionReplayAccumulator:
             fee = fee_bps / 1e4 * abs(qty) * fill_price
             self.cash -= fee
             self.units_arr[gcol] += qty
+            self.fill_bar_ns.append(int(grid[fill_pos].value))
+            self.fill_gcol.append(int(gcol))
+            self._mirror_pending.append(
+                (int(grid[fill_pos].value), int(gcol), float(qty), float(fill_price), float(fee_bps))
+            )
             pre_trade_equity = self._equity_at(gpos)
             self.fill_ts.append(fill_time)
             self.fill_symbol.append(sym)
@@ -806,7 +983,7 @@ class _BoundExecutionReplayAccumulator:
         return False, fill_pos, fill_price, fee_bps, reason, timeout_close, adverse
 
 
-    def _consume_append_ledger(self, grid_ns: np.ndarray, n_grid: int, local_cols: list[str], fill_start: int, n_local: int, marks_values: np.ndarray, gpos: np.ndarray, grid: pd.DatetimeIndex, funding_matrix: np.ndarray, bar_ns: int) -> None:
+    def _consume_append_ledger(self, grid_ns: np.ndarray, n_grid: int, local_cols: list[str], fill_start: int, n_local: int, marks_values: np.ndarray, gpos: np.ndarray, grid: pd.DatetimeIndex, funding_matrix: np.ndarray, bar_ns: int, closes_values: np.ndarray) -> None:
         """Append this window streaming ledger chunk, vectorised per symbol."""
 
         # ---- streamed ledger chunk over [ledger_start_ns, grid end] ----
@@ -824,16 +1001,9 @@ class _BoundExecutionReplayAccumulator:
             turnover_qty_arr: np.ndarray
             turnover_price_arr: np.ndarray
             if n_fill:
-                wf_ts = np.asarray(
-                    [int(ts.value) for ts in self.fill_ts[fill_start:]], dtype="int64",
+                wf_pos = np.searchsorted(
+                    grid_ns, np.asarray(self.fill_bar_ns[fill_start:], dtype="int64"), side="left",
                 )
-                wf_pos = np.searchsorted(grid_ns, wf_ts, side="left")
-                wf_exact = np.minimum(wf_pos, n_grid - 1)
-                if (
-                    np.any(wf_pos >= n_grid)
-                    or np.any(grid_ns[wf_exact] != wf_ts)
-                ):
-                    raise DataIntegrityError("windowed fills must occur on the window minute grid")
                 wf_j = np.asarray(
                     [sym_to_local[s] for s in self.fill_symbol[fill_start:]],
                     dtype=np.intp,
@@ -985,8 +1155,85 @@ class _BoundExecutionReplayAccumulator:
             self.fee_chunks.append(fee_by_ts[p0:])
             self.turnover_chunks.append(turnover_arr)
             self.ledger_cash = float(cash_after[-1])
+        self._settle_mirror_window(grid_ns, n_grid, p0, marks_values, funding_matrix, self._w_fknown, gpos, grid)
+        # Carried last-finite-close provenance advances only over bars this
+        # window actually consumed: a decision can never see the window tail
+        # (F2), only strictly earlier closes from its own or prior windows.
+        close_finite_tail = np.isfinite(closes_values)
+        last_idx = np.where(close_finite_tail, np.arange(n_grid)[:, None], -1).max(axis=0)
+        for j in np.flatnonzero(last_idx >= 0).tolist():
+            sym = local_cols[j]
+            pos = int(last_idx[j])
+            ts = grid[pos]
+            prev_ts = self.last_close_ts.get(sym)
+            if prev_ts is None or ts > prev_ts:
+                self.last_close_ts[sym] = ts
+                self.last_close_value[sym] = float(closes_values[pos, j])
+                self.last_close_mark[sym] = float(marks_values[pos, j])
         self.ledger_start_ns = int(grid_ns[-1]) + bar_ns
 
+
+    def _settle_mirror_window(
+        self,
+        grid_ns: np.ndarray,
+        n_grid: int,
+        p0: int,
+        marks_values: np.ndarray,
+        funding_matrix: np.ndarray,
+        funding_known: np.ndarray,
+        gpos: np.ndarray,
+        grid: pd.DatetimeIndex,
+    ) -> None:
+        """Replay the kept bars through the causal mirror in timestamp order.
+
+        Each bar settles mark then known funding on pre-fill inventory before
+        that bar's queued fills are applied (INV-EVENT-ORDER), so the mirror
+        reproduces the independent ledger's economics exactly. Fills queued
+        before the kept region (window-overlap backlog) join inventory
+        without cash flow, mirroring the ledger chunk handoff. Unknown
+        funding over held inventory records MISSING_HELD_FUNDING and
+        invalidates instead of settling an invented cost.
+        """
+        state = self.accounting_state
+        p0_ns = int(grid_ns[p0])
+        queue = sorted(self._mirror_pending, key=lambda entry: entry[0])
+        self._mirror_pending = []
+        qi = 0
+        while qi < len(queue) and queue[qi][0] < p0_ns:
+            state.units[int(queue[qi][1])] += float(queue[qi][2])
+            qi += 1
+        gmarks = np.full(self.n_cols, np.nan, dtype="float64")
+        grates = np.zeros(self.n_cols, dtype="float64")
+        gknown = np.ones(self.n_cols, dtype=bool)
+        all_known = np.ones(self.n_cols, dtype=bool)
+        for b in range(int(p0), int(n_grid)):
+            bns = int(grid_ns[b])
+            gmarks[gpos] = marks_values[b]
+            grates[gpos] = funding_matrix[b]
+            gknown[gpos] = funding_known[b]
+            held_unknown = (state.units != 0.0) & ~gknown
+            if bool(held_unknown.any()):
+                self.ledger_valid = False
+                self.invalid_reasons.add("MISSING_DATA")
+                witness = int(np.flatnonzero(held_unknown)[0])
+                self.data_gaps.append(
+                    ExecutionDataGap(
+                        code="MISSING_HELD_FUNDING", symbol=self.columns[witness],
+                        timestamp=grid[b], execution_bound=self.execution_bound,
+                    )
+                )
+                state.advance_to(
+                    event_ns=bns, marks=gmarks,
+                    funding_rates=np.where(gknown, grates, 0.0), funding_known=all_known,
+                )
+            else:
+                state.advance_to(event_ns=bns, marks=gmarks, funding_rates=grates, funding_known=gknown)
+            while qi < len(queue) and queue[qi][0] == bns:
+                state.apply_fill(
+                    symbol_index=int(queue[qi][1]), quantity_delta=float(queue[qi][2]),
+                    fill_price=float(queue[qi][3]), fee_bps=float(queue[qi][4]),
+                )
+                qi += 1
 
     def _consume_update_spreads(self, highs_values: np.ndarray, lows_values: np.ndarray, gpos: np.ndarray) -> None:
         """Roll the liquidity-aware spread estimate forward, causally."""
@@ -1008,57 +1255,27 @@ class _BoundExecutionReplayAccumulator:
         columns = self.columns
         n_cols = self.n_cols
 
-        # Persistent source-end gap with held units: UNKNOWN_TERMINATION forced exit.
+        # Terminal inventory is never fabricated into an exit at a past close
+        # (INV-NO-FABRICATED-TERMINAL-FILL): held units stay open, are
+        # disclosed as UNKNOWN_TERMINATION, and invalidate the primary ledger.
+        # A separately-tagged diagnostic-only stress liquidation is the only
+        # allowed exception, never part of this result.
         forced_exit_count = 0
         forced_exit_notional = 0.0
         grid_end = self.full_grid_end
         for col in range(n_cols):
+            if abs(float(self.units_arr[col])) < 1e-12:
+                continue
             sym = columns[col]
-            if abs(self.units_arr[col]) < 1e-12:
-                continue
-            if sym not in self.last_close_ts or self.last_close_ts[sym] >= grid_end:
-                continue
-            exit_ts = self.last_close_ts[sym]
-            exit_price = self.last_close_value[sym]
-            if not np.isfinite(exit_price) or exit_price <= 0:
-                self.termination_counts["MISSING_DATA"] += 1
-                self.data_gaps.append(
-                    ExecutionDataGap(
-                        code="MISSING_FORCED_EXIT_CLOSE", symbol=sym, timestamp=exit_ts,
-                        execution_bound=self.execution_bound,
-                    )
-                )
-                continue
             self.termination_counts["UNKNOWN_TERMINATION"] += 1
-            forced_exit_count += 1
-            forced_exit_notional += abs(self.units_arr[col] * exit_price)
-            penalty = (
-                TERMINATION_STRESS_PENALTY_BPS
-                if self.execution_bound == "OHLCV_IMMEDIATE_TAKER"
-                else 0.0
+            self.ledger_valid = False
+            self.invalid_reasons.add("MISSING_DATA")
+            self.data_gaps.append(
+                ExecutionDataGap(
+                    code="UNKNOWN_TERMINATION", symbol=sym, timestamp=grid_end,
+                    execution_bound=self.execution_bound,
+                )
             )
-            fee_bps = self.spec.taker_fee_bps + self._taker_cost_bps(col) + penalty
-            prev_price = (
-                float(self.last_prices_arr[col]) if np.isfinite(self.last_prices_arr[col]) else exit_price
-            )
-            mark_price = self.last_close_mark.get(sym, float("nan"))
-            if np.isfinite(mark_price):
-                self.cash -= self.units_arr[col] * (mark_price - prev_price)
-                self.last_prices_arr[col] = mark_price
-            self.cash -= -self.units_arr[col] * exit_price
-            fee = fee_bps / 1e4 * abs(self.units_arr[col]) * exit_price
-            self.cash -= fee
-            self.fill_ts.append(exit_ts)
-            self.fill_symbol.append(sym)
-            self.fill_qty.append(-self.units_arr[col])
-            self.fill_price.append(exit_price)
-            self.fill_fee_bps.append(fee_bps)
-            self.fill_reason.append("forced_exit")
-            self.fill_pre_trade_equity.append(self._equity_at())
-            self.fill_times.append(exit_ts)
-            self.units_arr[col] = 0.0
-            if self.retain_event_snapshots:
-                self.units_after_events.append((exit_ts, self.units_arr.copy()))
         elapsed_seconds = time.perf_counter() - self._t0
 
         simulated_fills = pd.DataFrame(
@@ -1129,6 +1346,7 @@ class _BoundExecutionReplayAccumulator:
                 )
             )
         self.data_gaps.sort(key=lambda g: (g.timestamp, g.code, g.symbol))
+        ledger = dataclasses.replace(ledger, data_gaps=tuple(self.data_gaps))
 
         if self.units_after_events:
             events_index = pd.DatetimeIndex([t for t, _ in self.units_after_events])
@@ -1163,6 +1381,7 @@ class _BoundExecutionReplayAccumulator:
             if self.min_notional_probe_usdt > 0 and self.min_notional_total_notional > 0
             else float("nan")
         )
+        reconcile_causal_state(self.accounting_state, ledger)
         return StrategyExecutionReplayResult(
             simulated_fills=simulated_fills,
             ledger=ledger,

@@ -62,6 +62,7 @@ def _write_mhs_market(
                 "low": prices * 0.999,
                 "close": prices,
                 "quote_vol": [1000.0] * sym_n,
+                "volume": [1000.0] * sym_n,
             },
         ).to_parquet(hour_dir / f"{sym}.parquet")
 
