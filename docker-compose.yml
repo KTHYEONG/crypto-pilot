@@ -5,14 +5,12 @@ services:
     restart: unless-stopped
     stop_grace_period: 120s
     env_file: .env
-    environment:
-      - HARDWARE_MAX_WORKERS=1
     volumes:
       - ./data:/app/data
       - ./data/state:/app/data/state
       - ./logs:/app/logs
       - ./docs/results/mhs_horizon_diagnostic_artifacts:/app/docs/results/mhs_horizon_diagnostic_artifacts
-    mem_limit: 1200m
+    mem_limit: 3g
     command: ["uv", "run", "python", "-m", "src.cli.main", "live", "daemon"]
     logging:
       driver: json-file
@@ -24,6 +22,7 @@ services:
     container_name: liquidation-collector
     restart: unless-stopped
     stop_grace_period: 30s
+    mem_limit: 768m
     env_file: .env
     volumes:
       - ./data/futures/liquidations:/app/data/futures/liquidations
