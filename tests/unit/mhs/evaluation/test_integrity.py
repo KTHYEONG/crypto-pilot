@@ -52,6 +52,21 @@ def test_source_gap_excluded_symbols_covers_2026_09_confirmed_settling_batch() -
     assert removed_end_of_life.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
 
 
+def test_source_gap_excluded_symbols_after_ohlcv_recollection_sweep() -> None:
+    # 2026-09-15 후속 재수집: ensure_ohlcv_data로 재수집한 결과 Block1(OHLCV 캐시
+    # 없음/미미) 21개 중 19개는 backtest 구간 내부공백 0건으로 완전히 배제 해제됨
+    # (말기 종료는 ledger_terminal_only가 처리). CVXUSDT/SLPUSDT는 재수집 후에도
+    # 2025-06-19~2025-07-23 펀딩 공백이 재개되는 진짜 불확실성 구간이 드러나 남는다.
+    recovered = {
+        "ALPHAUSDT", "BADGERUSDT", "BSWUSDT", "FLMUSDT", "FTTUSDT", "IDEXUSDT",
+        "KLAYUSDT", "MKRUSDT", "NULSUSDT", "OBOLUSDT", "OCEANUSDT", "OMGUSDT",
+        "SLERFUSDT", "STRAXUSDT", "TROYUSDT", "UNFIUSDT", "VIDTUSDT", "WAVESUSDT", "XEMUSDT",
+    }
+    assert recovered.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
+    assert {"CVXUSDT", "SLPUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 10
+
+
 def test_funding_gap_terminal_symbols_accepts_gap_with_no_later_fill() -> None:
     from src.mhs.evaluation.integrity import _funding_gap_terminal_symbols
 
@@ -370,7 +385,8 @@ def test_source_gap_excluded_symbols_no_longer_blanket_excludes_resolved_end_of_
         "BAKEUSDT", "HIFIUSDT", "OMNIUSDT", "AIAUSDT", "AGIXUSDT", "ALPACAUSDT", "FTMUSDT",
     }
     assert resolved.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
-    # 잔여 29개(재수집 필요/영구 OHLCV공백/중간공백/조기시작공백)는 그대로 배제된다.
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 29
+    # 2026-09-15 후속 재수집 스윕(test_source_gap_excluded_symbols_after_ohlcv_recollection_sweep)
+    # 이후 잔여 10개(영구 OHLCV공백/중간공백/조기시작공백)만 그대로 배제된다.
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 10
     assert {"LITUSDT", "PUMPUSDT", "ICPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
 
