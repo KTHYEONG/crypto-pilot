@@ -1,0 +1,1050 @@
+{
+  "contract_version": "1.0",
+  "feature": "mhs_backtest_reliability",
+  "status": "READY_FOR_IMPLEMENTATION",
+  "target_file": "src/mhs/reliability.py",
+  "source_evidence": {
+    "audit_report": "scratch/mhs_reliability_audit/REPORT.md",
+    "probe_contract": null,
+    "note": "정식 scratch/probe_mhs_backtest_reliability.json은 없으며, 재현 코드와 대규모 데이터 스캔을 포함한 감사 보고서를 검증된 선행 근거로 사용한다.",
+    "reproduced_findings": [
+      "F1 sizing equity double-counts mark-to-market PnL",
+      "F2 a future window-tail mark changes an earlier order quantity",
+      "F3 pre-entry funding changes sizing equity despite zero ledger charge",
+      "F4 terminal forced-exit fees/fills are absent from the emitted ledger",
+      "F6 an active symbol with a missing execution file can disappear without a gap",
+      "F9 run-entry cache clearing leaves path and compact mark caches stale"
+    ],
+    "data_scan": {
+      "ohlcv_rows_scanned": 187137984,
+      "complete_3m_to_1h_buckets_checked": 8503947,
+      "structural_result": "중복·역행·오프그리드 타임스탬프, 비양수 가격, OHLC 위반 및 완전 버킷 집계 불일치는 발견되지 않음",
+      "known_limitations": "제로 거래량 평탄봉, 일부 파일/구간 공백, 과거 호가창·체결순서·정확한 공시시각 부재"
+    },
+    "test_baseline": "1449 passed, 1 failed; tests/unit/mhs/test_live_strategy.py::test_assert_runtime_data_policy_rejects_mismatch는 live zombie_mask_v1과 backtest/test legacy 기본값 불일치를 재현함",
+    "validation_baseline": "selection overlap 약 0.99945, 초기 4개 fold committee weight leak 1.0; 기존 Research-GO는 overlap을 관측 전용으로 취급함"
+  },
+  "objective": "MHS 백테스트를 회계·시점·실행가능성·검증독립성·입력재현성 관점에서 fail-closed로 만들고, 백테스트와 라이브가 동일한 데이터 정책을 사용하도록 통합한다.",
+  "context_files": [
+    "scratch/mhs_reliability_audit/REPORT.md",
+    ".agents/rules/quant.md",
+    ".agents/rules/performance.md",
+    ".agents/rules/code-style.md",
+    "src/mhs/execution/accumulator.py",
+    "src/mhs/execution/contracts.py",
+    "src/mhs/execution/ledger.py",
+    "src/mhs/execution/batch.py",
+    "src/mhs/execution/strategy_replay.py",
+    "src/mhs/evaluation/windows.py",
+    "src/mhs/marks.py",
+    "src/mhs/features.py",
+    "src/mhs/evaluation/committee.py",
+    "src/mhs/pipeline/stages/committee.py",
+    "src/mhs/pipeline/stages/fold.py",
+    "src/mhs/research_go.py",
+    "src/mhs/pipeline/orchestrator.py",
+    "src/mhs/pipeline/context.py",
+    "src/mhs/report/schema.py",
+    "src/mhs/pipeline/stages/assemble.py",
+    "src/mhs/panel.py",
+    "src/mhs/contracts.py",
+    "src/mhs/pipeline/config.py",
+    "src/mhs/live_strategy.py",
+    "src/live/settings.py",
+    "src/live/runner.py",
+    "src/market_data/services/mhs_execution.py",
+    "src/live/execution_quality.py",
+    "src/cli/commands/research/mhs.py"
+  ],
+  "implementation_phases": [
+    {
+      "phase": "P0_STOP_THE_LINE",
+      "goal": "기존 결과를 신뢰 가능하다고 오인하지 않도록 즉시 인증 게이트를 추가한다.",
+      "deliverables": [
+        "BacktestReliabilityResult 및 certification_level 도입",
+        "현재 재현된 F1/F2/F3/F4/F6/F9가 해소되기 전 deployment readiness 차단",
+        "selection overlap과 fold committee leakage를 독립 OOS 인증 차단 사유로 승격"
+      ],
+      "exit_gate": "결함 또는 입력 한계가 존재하는 보고서는 COMPLETE일 수 있으나 certification_level=UNCERTIFIED이고 deployment_ready=false여야 한다."
+    },
+    {
+      "phase": "P1_CAUSAL_EXECUTION_CORE",
+      "goal": "현금·재고·MTM·펀딩·수수료를 하나의 인과적 상태 전이로 교정한다.",
+      "deliverables": [
+        "CausalPortfolioState 도입 및 accumulator sizing 경로 전환",
+        "미래 window-tail 선스캔 제거와 source timestamp 가드",
+        "펀딩-체결 사건순서 명시 및 ledger 재계산 대조",
+        "종료 시점의 허구 forced exit 제거"
+      ],
+      "exit_gate": "F1/F2/F3/F4 재현이 모두 회귀 테스트로 고정되고 온라인 상태와 독립 ledger가 1e-12 이내로 일치해야 한다."
+    },
+    {
+      "phase": "P2_DATA_AND_POLICY_PARITY",
+      "goal": "실행 데이터의 거래가능성과 백테스트·라이브 정책을 단일 계약으로 통합한다.",
+      "deliverables": [
+        "활성 심볼 파일 누락을 roster에서 제거하지 않고 명시적 gap으로 전달",
+        "quote volume과 funding_known 마스크 도입",
+        "제로/비유한 거래량 체결 금지",
+        "모든 mark cache를 지우는 단일 공개 함수",
+        "MHS_DATA_POLICY_DEFAULT=zombie_mask_v1 단일 출처"
+      ],
+      "exit_gate": "F6/F9와 기존 live data_policy 실패가 해소되고, 정책 불일치 artifact는 계속 fail-closed여야 한다."
+    },
+    {
+      "phase": "P3_VALIDATION_AND_PROVENANCE",
+      "goal": "워크포워드 검증 독립성과 입력 파일 재현성, forward-observed 증거 승격 규칙을 완성한다.",
+      "deliverables": [
+        "경계별 feature admission 및 committee weight fit",
+        "retrospective deployed-config와 independent walk-forward 결과 분리",
+        "수집 시점 SHA-256 입력 manifest 및 실행 시 metadata 검증",
+        "archive_proxy와 forward_observed 등급 분리"
+      ],
+      "exit_gate": "초기 fold의 admission/weight가 후행 데이터 변경에 불변이고, 입력 manifest가 봉인된 실행만 REPRODUCIBLE 또는 FORWARD_VALIDATED 인증을 받을 수 있어야 한다."
+    }
+  ],
+  "changes": [
+    {
+      "name": "BacktestCertificationLevel",
+      "signature": "class BacktestCertificationLevel(StrEnum): UNCERTIFIED; HISTORICAL_ROBUSTNESS; REPRODUCIBLE; FORWARD_VALIDATED",
+      "kind": "new_class",
+      "target_file": "src/mhs/reliability.py"
+    },
+    {
+      "name": "BacktestReliabilityResult",
+      "signature": "@dataclass(frozen=True, slots=True) class BacktestReliabilityResult: eligible: bool; certification_level: BacktestCertificationLevel; reason_codes: tuple[str, ...]; limitations: tuple[str, ...]; input_manifest_digest: str | None; forward_observation_count: int",
+      "kind": "new_class",
+      "target_file": "src/mhs/reliability.py"
+    },
+    {
+      "name": "evaluate_backtest_reliability",
+      "signature": "def evaluate_backtest_reliability(*, primary_valid: bool, primary_invalid_reasons: tuple[str, ...], selection_overlap_fraction: float, fold_committee_weight_leak: Mapping[str, float] | None, input_provenance: DataProvenanceResult, data_limitations: tuple[str, ...], forward_provenance: DataProvenanceResult | None = None) -> BacktestReliabilityResult",
+      "kind": "new_function",
+      "target_file": "src/mhs/reliability.py"
+    },
+    {
+      "name": "CausalPortfolioState",
+      "signature": "@dataclass(slots=True) class CausalPortfolioState: cash: float; units: np.ndarray; last_marks: np.ndarray; last_event_ns: int | None",
+      "kind": "new_class",
+      "target_file": "src/mhs/execution/accounting.py"
+    },
+    {
+      "name": "CausalPortfolioState.equity",
+      "signature": "def equity(self, marks: np.ndarray | None = None) -> float",
+      "kind": "new_method",
+      "target_file": "src/mhs/execution/accounting.py"
+    },
+    {
+      "name": "CausalPortfolioState.advance_to",
+      "signature": "def advance_to(self, *, event_ns: int, marks: np.ndarray, funding_rates: np.ndarray, funding_known: np.ndarray) -> float",
+      "kind": "new_method",
+      "target_file": "src/mhs/execution/accounting.py"
+    },
+    {
+      "name": "CausalPortfolioState.apply_fill",
+      "signature": "def apply_fill(self, *, symbol_index: int, quantity_delta: float, fill_price: float, fee_bps: float) -> float",
+      "kind": "new_method",
+      "target_file": "src/mhs/execution/accounting.py"
+    },
+    {
+      "name": "reconcile_causal_state",
+      "signature": "def reconcile_causal_state(state: CausalPortfolioState, ledger: SimulatedInventoryLedgerResult, *, atol: float = 1e-12, rtol: float = 1e-12) -> None",
+      "kind": "new_function",
+      "target_file": "src/mhs/execution/accounting.py"
+    },
+    {
+      "name": "FundingAlignment",
+      "signature": "@dataclass(frozen=True, slots=True) class FundingAlignment: rates: pd.DataFrame; known: pd.DataFrame; source_failures: Mapping[str, str]",
+      "kind": "new_class",
+      "target_file": "src/mhs/execution/contracts.py"
+    },
+    {
+      "name": "align_funding_with_knowledge",
+      "signature": "def align_funding_with_knowledge(funding_by_symbol: Mapping[str, pd.Series], grid: pd.DatetimeIndex, *, symbols: Sequence[str], source_failures: Mapping[str, str] | None = None, max_observation_gap: pd.Timedelta = pd.Timedelta(hours=8, minutes=5)) -> FundingAlignment",
+      "kind": "new_function",
+      "target_file": "src/mhs/execution/contracts.py"
+    },
+    {
+      "name": "ExecutionReplayWindow.quote_volumes",
+      "signature": "quote_volumes: pd.DataFrame",
+      "kind": "new_field",
+      "target_file": "src/mhs/execution/contracts.py"
+    },
+    {
+      "name": "ExecutionReplayWindow.funding_known",
+      "signature": "funding_known: pd.DataFrame",
+      "kind": "new_field",
+      "target_file": "src/mhs/execution/contracts.py"
+    },
+    {
+      "name": "ExecutionReplayWindow.bar_available_at",
+      "signature": "bar_available_at: pd.DatetimeIndex",
+      "kind": "new_field",
+      "target_file": "src/mhs/execution/contracts.py"
+    },
+    {
+      "name": "_BoundExecutionReplayAccumulator._advance_window",
+      "signature": "def _advance_window(self, target_ns: int, dpos: int, on_grid: bool, marks_values: np.ndarray, mark_available_ns: np.ndarray, grid_ns: np.ndarray, funding_matrix: np.ndarray, funding_known: np.ndarray, gpos: np.ndarray) -> None",
+      "kind": "modified_method",
+      "target_file": "src/mhs/execution/accumulator.py"
+    },
+    {
+      "name": "_BoundExecutionReplayAccumulator.finalize",
+      "signature": "def finalize(self) -> StrategyExecutionReplayResult",
+      "kind": "modified_method",
+      "target_file": "src/mhs/execution/accumulator.py"
+    },
+    {
+      "name": "_delegate_single_panel_window",
+      "signature": "def _delegate_single_panel_window(window: ExecutionReplayWindow, *, initial_equity: float, execution_bound: _ExecutionBound, spec: ExecutionSpec, min_equity_fraction: float | None) -> StrategyExecutionReplayResult",
+      "kind": "new_function",
+      "target_file": "src/mhs/execution/strategy_replay.py"
+    },
+    {
+      "name": "_load_window_minute_frames",
+      "signature": "def _load_window_minute_frames(root: str, symbols: list[str], start: pd.Timestamp, end: pd.Timestamp, timeframe: str) -> dict[str, pd.DataFrame]",
+      "kind": "modified_function",
+      "target_file": "src/mhs/marks.py"
+    },
+    {
+      "name": "clear_mhs_market_data_caches",
+      "signature": "def clear_mhs_market_data_caches() -> None",
+      "kind": "new_function",
+      "target_file": "src/mhs/marks.py"
+    },
+    {
+      "name": "_iter_mhs_execution_windows",
+      "signature": "def _iter_mhs_execution_windows(target_weights: pd.DataFrame, signal_available_at: pd.DatetimeIndex, root: str, timeframe: Literal['1m', '3m', '5m'], start: pd.Timestamp, end: pd.Timestamp, funding_by_symbol: dict[str, pd.Series], mark_mode: Literal['cache_required', 'cache_required_stale_carry', 'ohlcv_close_fallback'], spec: ExecutionSpec, funding_failures: Mapping[str, str] | None = None) -> Iterator[MhsExecutionWindow]",
+      "kind": "modified_function",
+      "target_file": "src/mhs/evaluation/windows.py"
+    },
+    {
+      "name": "build_feature_books_by_boundary",
+      "signature": "def build_feature_books_by_boundary(specs: Sequence[FeatureSpec], panels: Mapping[str, pd.DataFrame], mask: pd.DataFrame, decision_grid: pd.DatetimeIndex, train_ends: Mapping[str, pd.Timestamp], min_symbols: int = 8) -> dict[str, dict[str, pd.DataFrame]]",
+      "kind": "new_function",
+      "target_file": "src/mhs/features.py"
+    },
+    {
+      "name": "_committee_evidence_weights_by_boundary",
+      "signature": "def _committee_evidence_weights_by_boundary(close: pd.DataFrame, quote_vol: pd.DataFrame, taker_buy_quote: pd.DataFrame, execution_mask: pd.DataFrame, decision_grid: pd.DatetimeIndex, min_symbols: int, train_ends: Mapping[str, pd.Timestamp], members: tuple[str, ...] | None = None) -> dict[str, dict[str, float]]",
+      "kind": "modified_function",
+      "target_file": "src/mhs/evaluation/committee.py"
+    },
+    {
+      "name": "MhsDataPolicy",
+      "signature": "class MhsDataPolicy(StrEnum): LEGACY = 'legacy'; ZOMBIE_MASK_V1 = 'zombie_mask_v1'",
+      "kind": "new_class",
+      "target_file": "src/mhs/data_policy.py"
+    },
+    {
+      "name": "MHS_DATA_POLICY_DEFAULT",
+      "signature": "MHS_DATA_POLICY_DEFAULT: Final[Literal['zombie_mask_v1']] = 'zombie_mask_v1'",
+      "kind": "new_constant",
+      "target_file": "src/mhs/data_policy.py"
+    },
+    {
+      "name": "DataEvidenceTier",
+      "signature": "class DataEvidenceTier(StrEnum): UNSEALED_ARCHIVE; ARCHIVE_PROXY; REPRODUCIBLE_ARCHIVE; FORWARD_OBSERVED",
+      "kind": "new_class",
+      "target_file": "src/mhs/data_provenance.py"
+    },
+    {
+      "name": "MhsInputFileAttestation",
+      "signature": "@dataclass(frozen=True, slots=True) class MhsInputFileAttestation: relative_path: str; sha256: str; size_bytes: int; mtime_ns: int; row_count: int; first_timestamp: str; last_timestamp: str; data_kind: str; symbol: str",
+      "kind": "new_class",
+      "target_file": "src/mhs/data_provenance.py"
+    },
+    {
+      "name": "DataProvenanceResult",
+      "signature": "@dataclass(frozen=True, slots=True) class DataProvenanceResult: tier: DataEvidenceTier; valid: bool; reason_codes: tuple[str, ...]; manifest_digest: str | None; files_checked: int",
+      "kind": "new_class",
+      "target_file": "src/mhs/data_provenance.py"
+    },
+    {
+      "name": "seal_mhs_input_manifest",
+      "signature": "def seal_mhs_input_manifest(paths: Sequence[Path], *, data_root: Path, output_path: Path) -> str",
+      "kind": "new_function",
+      "target_file": "src/mhs/data_provenance.py"
+    },
+    {
+      "name": "validate_mhs_input_manifest",
+      "signature": "def validate_mhs_input_manifest(manifest_path: Path | None, *, data_root: Path, required_paths: Sequence[Path]) -> DataProvenanceResult",
+      "kind": "new_function",
+      "target_file": "src/mhs/data_provenance.py"
+    },
+    {
+      "name": "resolve_required_mhs_input_paths",
+      "signature": "def resolve_required_mhs_input_paths(*, data_root: Path, panel_symbols: Sequence[str], execution_symbols: Sequence[str], execution_timeframe: str) -> tuple[Path, ...]",
+      "kind": "new_function",
+      "target_file": "src/mhs/data_provenance.py"
+    },
+    {
+      "name": "validate_forward_execution_observations",
+      "signature": "def validate_forward_execution_observations(records: pd.DataFrame, *, frozen_strategy_digest: str) -> DataProvenanceResult",
+      "kind": "new_function",
+      "target_file": "src/mhs/data_provenance.py"
+    },
+    {
+      "name": "ExecutionQualityRecord.strategy_digest",
+      "signature": "strategy_digest: str | None = None",
+      "kind": "new_field",
+      "target_file": "src/live/execution_quality.py"
+    },
+    {
+      "name": "_EXECUTION_QUALITY_DTYPES",
+      "signature": "_EXECUTION_QUALITY_DTYPES: Mapping[str, str]",
+      "kind": "modified_constant",
+      "target_file": "src/live/execution_quality.py"
+    },
+    {
+      "name": "ExecutionQualityRecord.observed_at",
+      "signature": "observed_at: pd.Timestamp | None = None",
+      "kind": "new_field",
+      "target_file": "src/live/execution_quality.py"
+    },
+    {
+      "name": "build_execution_quality_records",
+      "signature": "def build_execution_quality_records(decision_time: pd.Timestamp, mode: str, weights: pd.Series, marks: Mapping[str, Decimal], intents: Sequence[Any], outcomes: Sequence[Any], *, strategy_digest: str | None = None, observed_at: pd.Timestamp | None = None) -> tuple[ExecutionQualityRecord, ...]",
+      "kind": "modified_function",
+      "target_file": "src/live/execution_quality.py"
+    },
+    {
+      "name": "load_execution_quality_records",
+      "signature": "def load_execution_quality_records(history_dir: Path | str) -> pd.DataFrame",
+      "kind": "new_function",
+      "target_file": "src/live/execution_quality.py"
+    },
+    {
+      "name": "LiveSettings.strategy_digest",
+      "signature": "strategy_digest: str | None = None",
+      "kind": "new_field",
+      "target_file": "src/live/settings.py"
+    },
+    {
+      "name": "_execution_quality_metadata",
+      "signature": "def _execution_quality_metadata(settings: LiveSettings, observed_at: pd.Timestamp) -> dict[str, Any]",
+      "kind": "new_function",
+      "target_file": "src/live/runner.py"
+    },
+    {
+      "name": "_fold_weights_from_boundaries",
+      "signature": "def _fold_weights_from_boundaries(weights_by_boundary: Mapping[str, Mapping[str, float]], folds: Sequence[Any]) -> dict[int, dict[str, float]]",
+      "kind": "new_function",
+      "target_file": "src/mhs/pipeline/stages/committee.py"
+    },
+    {
+      "name": "gate_deployment_readiness",
+      "signature": "def gate_deployment_readiness(deployment: DeploymentReadinessResult, reliability: BacktestReliabilityResult) -> DeploymentReadinessResult",
+      "kind": "new_function",
+      "target_file": "src/mhs/reliability.py"
+    },
+    {
+      "name": "build_validation_track_disclosure",
+      "signature": "def build_validation_track_disclosure(*, selection_overlap_fraction: float, fold_committee_weight_leak: Mapping[str, float] | None, top_level_boundary: pd.Timestamp, fold_boundaries: Sequence[pd.Timestamp]) -> dict[str, Any]",
+      "kind": "new_function",
+      "target_file": "src/mhs/reliability.py"
+    },
+    {
+      "name": "MhsDiagnosticRequest.input_manifest_path",
+      "signature": "input_manifest_path: str | None = field(default=None, metadata=cli_param(flag='--input-manifest-path', help='Sealed MHS input manifest path.'))",
+      "kind": "new_field",
+      "target_file": "src/mhs/contracts.py"
+    },
+    {
+      "name": "MhsRunConfig.input_manifest_path",
+      "signature": "input_manifest_path: str | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/pipeline/config.py"
+    },
+    {
+      "name": "MhsDiagnosticRequest.forward_execution_quality_dir",
+      "signature": "forward_execution_quality_dir: str | None = field(default=None, metadata=cli_param(flag='--forward-execution-quality-dir', help='Append-only live execution-quality directory.'))",
+      "kind": "new_field",
+      "target_file": "src/mhs/contracts.py"
+    },
+    {
+      "name": "MhsRunConfig.forward_execution_quality_dir",
+      "signature": "forward_execution_quality_dir: str | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/pipeline/config.py"
+    },
+    {
+      "name": "MhsDiagnosticRequest.forward_strategy_digest",
+      "signature": "forward_strategy_digest: str | None = field(default=None, metadata=cli_param(flag='--forward-strategy-digest', help='Frozen strategy digest expected in forward observations.'))",
+      "kind": "new_field",
+      "target_file": "src/mhs/contracts.py"
+    },
+    {
+      "name": "MhsRunConfig.forward_strategy_digest",
+      "signature": "forward_strategy_digest: str | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/pipeline/config.py"
+    },
+    {
+      "name": "MhsRunConfig.from_namespace",
+      "signature": "@classmethod def from_namespace(cls, args: argparse.Namespace) -> MhsRunConfig",
+      "kind": "modified_method",
+      "target_file": "src/mhs/pipeline/config.py"
+    },
+    {
+      "name": "PipelineContext.backtest_reliability",
+      "signature": "backtest_reliability: BacktestReliabilityResult | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/pipeline/context.py"
+    },
+    {
+      "name": "PipelineContext.input_provenance",
+      "signature": "input_provenance: DataProvenanceResult | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/pipeline/context.py"
+    },
+    {
+      "name": "PipelineContext.forward_provenance",
+      "signature": "forward_provenance: DataProvenanceResult | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/pipeline/context.py"
+    },
+    {
+      "name": "PipelineContext.validation_tracks",
+      "signature": "validation_tracks: dict[str, Any] | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/pipeline/context.py"
+    },
+    {
+      "name": "MhsHorizonDiagnosticReport.backtest_reliability",
+      "signature": "backtest_reliability: BacktestReliabilityResult | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/report/schema.py"
+    },
+    {
+      "name": "MhsHorizonDiagnosticReport.validation_tracks",
+      "signature": "validation_tracks: dict[str, Any] | None = None",
+      "kind": "new_field",
+      "target_file": "src/mhs/report/schema.py"
+    }
+  ],
+  "wiring": [
+    {
+      "caller_file": "src/mhs/execution/accumulator.py",
+      "anchor": "class _BoundExecutionReplayAccumulator",
+      "import_symbol": "from src.mhs.execution.accounting import CausalPortfolioState, reconcile_causal_state",
+      "invocation_expression": "self.accounting_state.advance_to(event_ns=target_ns, marks=marks, funding_rates=rates, funding_known=known)"
+    },
+    {
+      "caller_file": "src/mhs/execution/accumulator.py",
+      "anchor": "def _consume_single_intent",
+      "import_symbol": "from src.mhs.execution.accounting import CausalPortfolioState",
+      "invocation_expression": "self.accounting_state.apply_fill(symbol_index=col, quantity_delta=quantity_delta, fill_price=fill_price, fee_bps=fee_bps)"
+    },
+    {
+      "caller_file": "src/mhs/execution/accumulator.py",
+      "anchor": "def finalize",
+      "import_symbol": "from src.mhs.execution.accounting import reconcile_causal_state",
+      "invocation_expression": "reconcile_causal_state(self.accounting_state, ledger)"
+    },
+    {
+      "caller_file": "src/mhs/execution/strategy_replay.py",
+      "anchor": "def strategy_aware_execution_replay",
+      "import_symbol": "from src.mhs.execution.batch import replay_execution_windows",
+      "invocation_expression": "replay_execution_windows((window,), initial_equity, execution_bound, spec, retain_event_snapshots=True, min_equity_fraction=min_equity_fraction)"
+    },
+    {
+      "caller_file": "src/mhs/evaluation/windows.py",
+      "anchor": "def _iter_mhs_execution_windows",
+      "import_symbol": "from src.mhs.execution import ExecutionReplayWindow, align_funding_with_knowledge",
+      "invocation_expression": "align_funding_with_knowledge(funding_by_symbol, minute_grid, symbols=roster, source_failures=funding_failures)"
+    },
+    {
+      "caller_file": "src/mhs/evaluation/windows.py",
+      "anchor": "roster_set = active | prev_active",
+      "import_symbol": "from src.mhs.marks import _build_window_frames, _load_window_minute_frames",
+      "invocation_expression": "_load_window_minute_frames(root, roster, grid_start, grid_end, timeframe)"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/orchestrator.py",
+      "anchor": "def run_mhs_diagnostic",
+      "import_symbol": "from src.mhs.marks import clear_mhs_market_data_caches",
+      "invocation_expression": "clear_mhs_market_data_caches()"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/stages/committee.py",
+      "anchor": "ctx._fold_committee_weights = dict.fromkeys",
+      "import_symbol": "from src.mhs.evaluation import committee",
+      "invocation_expression": "_fold_weights_from_boundaries(ctx._committee_weights_by_boundary, phase_1_anchored_purged_folds())"
+    },
+    {
+      "caller_file": "src/mhs/evaluation/committee.py",
+      "anchor": "def _committee_evidence_weights_by_boundary",
+      "import_symbol": "from src.mhs.features import build_feature_books_by_boundary",
+      "invocation_expression": "build_feature_books_by_boundary(_member_specs, panels, execution_mask, decision_grid, train_ends, min_symbols=min_symbols)"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/stages/assemble.py",
+      "anchor": "return MhsHorizonDiagnosticReport(",
+      "import_symbol": "from src.mhs.data_provenance import resolve_required_mhs_input_paths, validate_mhs_input_manifest",
+      "invocation_expression": "validate_mhs_input_manifest(manifest_path, data_root=data_root, required_paths=required_paths)"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/stages/assemble.py",
+      "anchor": "def assemble_report",
+      "import_symbol": "from src.mhs.reliability import evaluate_backtest_reliability, gate_deployment_readiness",
+      "invocation_expression": "evaluate_backtest_reliability(primary_valid=primary_valid, primary_invalid_reasons=primary_invalid_reasons, selection_overlap_fraction=ctx.selection_overlap_fraction, fold_committee_weight_leak=ctx.fold_committee_weight_leak, input_provenance=ctx.input_provenance, data_limitations=ctx.unsupported, forward_provenance=ctx.forward_provenance)"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/stages/assemble.py",
+      "anchor": "def assemble_report",
+      "import_symbol": "from src.live.execution_quality import load_execution_quality_records",
+      "invocation_expression": "validate_forward_execution_observations(load_execution_quality_records(ctx.config.forward_execution_quality_dir), frozen_strategy_digest=ctx.config.forward_strategy_digest)"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/stages/assemble.py",
+      "anchor": "deployment_readiness=ctx.deployment",
+      "import_symbol": "from src.mhs.reliability import gate_deployment_readiness",
+      "invocation_expression": "gate_deployment_readiness(ctx.deployment, ctx.backtest_reliability)"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/stages/assemble.py",
+      "anchor": "trial_pool=ctx.trial_pool",
+      "import_symbol": "from src.mhs.report.schema import MhsHorizonDiagnosticReport",
+      "invocation_expression": "MhsHorizonDiagnosticReport(backtest_reliability=ctx.backtest_reliability)"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/stages/assemble.py",
+      "anchor": "def assemble_report",
+      "import_symbol": "from src.mhs.reliability import build_validation_track_disclosure",
+      "invocation_expression": "build_validation_track_disclosure(selection_overlap_fraction=ctx.selection_overlap_fraction, fold_committee_weight_leak=ctx.fold_committee_weight_leak, top_level_boundary=COMMITTEE_OOS_START, fold_boundaries=[fold.train_end for fold in phase_1_anchored_purged_folds()])"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/stages/assemble.py",
+      "anchor": "trial_pool=ctx.trial_pool",
+      "import_symbol": "from src.mhs.report.schema import MhsHorizonDiagnosticReport",
+      "invocation_expression": "MhsHorizonDiagnosticReport(validation_tracks=ctx.validation_tracks)"
+    },
+    {
+      "caller_file": "src/mhs/panel.py",
+      "anchor": "DATA_POLICY_ZOMBIE_MASK_V1",
+      "import_symbol": "from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT, MhsDataPolicy",
+      "invocation_expression": "str(MhsDataPolicy(data_policy))"
+    },
+    {
+      "caller_file": "src/mhs/contracts.py",
+      "anchor": "class MhsDiagnosticRequest",
+      "import_symbol": "from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT",
+      "invocation_expression": "field(default=MHS_DATA_POLICY_DEFAULT, metadata=cli_param(flag='--data-policy', help='MHS input data policy', choices=('legacy', 'zombie_mask_v1')))"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/config.py",
+      "anchor": "class MhsRunConfig",
+      "import_symbol": "from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT",
+      "invocation_expression": "MHS_DATA_POLICY_DEFAULT"
+    },
+    {
+      "caller_file": "src/mhs/pipeline/config.py",
+      "anchor": "def from_namespace",
+      "import_symbol": "MhsRunConfig",
+      "invocation_expression": "cls(input_manifest_path=args.input_manifest_path, forward_execution_quality_dir=args.forward_execution_quality_dir, forward_strategy_digest=args.forward_strategy_digest)"
+    },
+    {
+      "caller_file": "src/mhs/live_strategy.py",
+      "anchor": "LIVE_RUNTIME_DATA_POLICY",
+      "import_symbol": "from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT",
+      "invocation_expression": "assert_runtime_data_policy(params, MHS_DATA_POLICY_DEFAULT)"
+    },
+    {
+      "caller_file": "src/mhs/live_strategy.py",
+      "anchor": "def assert_deployment_eligible",
+      "import_symbol": "from src.mhs.reliability import BacktestReliabilityResult",
+      "invocation_expression": "bool(report.backtest_reliability and report.backtest_reliability.eligible)"
+    },
+    {
+      "caller_file": "src/cli/commands/research/mhs.py",
+      "anchor": "mhs.add_argument('--data-policy'",
+      "import_symbol": "from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT",
+      "invocation_expression": "mhs.add_argument('--data-policy', choices=sorted(DATA_POLICIES), default=MHS_DATA_POLICY_DEFAULT)"
+    },
+    {
+      "caller_file": "src/cli/commands/research/mhs.py",
+      "anchor": "mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)",
+      "import_symbol": "from src.mhs.pipeline.config import MhsRunConfig",
+      "invocation_expression": "mhs.add_argument('--input-manifest-path', default=None)"
+    },
+    {
+      "caller_file": "src/cli/commands/research/mhs.py",
+      "anchor": "mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)",
+      "import_symbol": "from src.mhs.pipeline.config import MhsRunConfig",
+      "invocation_expression": "mhs.add_argument('--forward-execution-quality-dir', default=None)"
+    },
+    {
+      "caller_file": "src/cli/commands/research/mhs.py",
+      "anchor": "mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)",
+      "import_symbol": "from src.mhs.pipeline.config import MhsRunConfig",
+      "invocation_expression": "mhs.add_argument('--forward-strategy-digest', default=None)"
+    },
+    {
+      "caller_file": "src/market_data/services/mhs_execution.py",
+      "anchor": "def refresh_mhs_execution_manifest",
+      "import_symbol": "from src.mhs.data_provenance import seal_mhs_input_manifest",
+      "invocation_expression": "seal_mhs_input_manifest(paths, data_root=data_root, output_path=attestation_path)"
+    },
+    {
+      "caller_file": "src/live/execution_quality.py",
+      "anchor": "def _records_to_dataframe",
+      "import_symbol": "ExecutionQualityRecord",
+      "invocation_expression": "pd.Timestamp(r.observed_at)"
+    },
+    {
+      "caller_file": "src/live/runner.py",
+      "anchor": "records = build_execution_quality_records",
+      "import_symbol": "from src.live.execution_quality import build_execution_quality_records",
+      "invocation_expression": "build_execution_quality_records(decision_time, settings.mode.value, weights, marks, kept, outcomes, **_execution_quality_metadata(settings, now_ts))"
+    }
+  ],
+  "requirements": [
+    {
+      "id": "INV-ACCOUNTING-SINGLE-MTM",
+      "rule": "현금은 체결 대금·수수료·펀딩으로만 변한다. 가격 변동은 cash에 적립하지 않고 equity=cash+sum(units*현재가)에서 정확히 한 번만 반영한다.",
+      "failure": "회계 대조 불일치 시 DataIntegrityError; 해당 replay는 primary_valid=false로 격리하고 Research/Deployment 인증을 차단한다."
+    },
+    {
+      "id": "INV-PIT-SOURCE-TIME",
+      "rule": "의사결정·주문·체결 상태에서 읽는 모든 mark/OHLCV/funding 값의 available_at은 해당 사건 시각 이하여야 한다. window 전체를 선스캔해 last_close를 갱신하는 행위를 금지한다.",
+      "failure": "available_at 위반은 FUTURE_DATA_REFERENCE gap과 primary invalid 처리한다."
+    },
+    {
+      "id": "INV-EVENT-ORDER",
+      "rule": "동일 타임스탬프의 순서는 기존 재고에 대한 mark -> 알려진 funding settlement -> fill -> fee로 고정한다. 신규 체결 수량에 과거 펀딩을 소급하지 않는다.",
+      "failure": "순서가 불명확한 timestamp는 체결을 생성하지 않고 invalid 처리한다."
+    },
+    {
+      "id": "INV-BAR-AVAILABILITY",
+      "rule": "OHLCV 인덱스는 bar open label로 해석하고 bar_available_at=open+timeframe으로 둔다. intra-bar exact fill time을 알 수 없는 archive proxy 체결은 bar_available_at에만 효력을 갖는다.",
+      "failure": "signal_time < submit_time <= bar_available_at가 아니면 CAUSAL_TIMING_VIOLATION으로 차단한다."
+    },
+    {
+      "id": "INV-NO-FABRICATED-TERMINAL-FILL",
+      "rule": "소스 종료 시 보유 포지션을 마지막 과거 close로 강제 청산하지 않는다. UNKNOWN_TERMINATION gap을 기록하고 미결 포지션·미실현가치를 그대로 공시한다.",
+      "failure": "primary_valid=false, forced_exit_count=0, fabricated fill/fee/turnover=0; 별도 스트레스 청산은 diagnostic_only 태그로만 허용한다."
+    },
+    {
+      "id": "INV-ACTIVE-ROSTER-PRESERVED",
+      "rule": "활성 또는 전 윈도우 보유 심볼은 파일 존재 여부와 무관하게 roster에 남긴다. 누락 파일은 전부 NaN frame으로 전달해 MISSING_ORDER_OHLCV 또는 MISSING_HELD_MARK를 발생시킨다.",
+      "failure": "활성 심볼이 조용히 roster에서 탈락하면 테스트 실패 및 인증 차단이다."
+    },
+    {
+      "id": "INV-EXECUTION-VIABILITY",
+      "rule": "archive OHLCV에서 fill bar quote_vol이 0, NaN, inf 또는 음수면 거래 불가능/불명으로 간주하여 fill을 금지한다. 거래량으로 호가 깊이·시장충격을 추정해 확정값으로 만들지 않는다.",
+      "failure": "ZERO_OR_UNKNOWN_VOLUME gap과 primary invalid; 주문은 unfilled로 남긴다."
+    },
+    {
+      "id": "INV-FUNDING-KNOWLEDGE",
+      "rule": "rate와 known을 분리한다. 소스 누락·파손·범위 밖·연속 관측 간격 8시간5분 초과는 unknown이다. known 구간의 무이벤트 bar만 0으로 둘 수 있다.",
+      "failure": "unknown이 활성 주문 또는 보유 구간과 겹치면 MISSING_HELD_FUNDING 또는 MISSING_ACTIVE_FUNDING으로 primary invalid; 비활성 구간은 제한사항만 기록한다."
+    },
+    {
+      "id": "INV-CACHE-RUN-ISOLATION",
+      "rule": "각 run 시작 시 mark full-frame/path/compact cache와 DataCollector singleton을 한 함수에서 모두 초기화한다.",
+      "failure": "디스크 파일 교체 후 같은 프로세스의 다음 run이 이전 값을 반환하면 실패한다."
+    },
+    {
+      "id": "INV-POLICY-SINGLE-SOURCE",
+      "rule": "MhsDiagnosticRequest, MhsRunConfig, LiveStrategyParams, live runtime은 MHS_DATA_POLICY_DEFAULT를 공유한다. 새 기본값은 zombie_mask_v1이며 legacy artifact는 명시적 migration 없이 자동 승격하지 않는다.",
+      "failure": "저장 artifact와 runtime 정책 불일치는 기존처럼 DataIntegrityError로 fail-closed한다."
+    },
+    {
+      "id": "INV-WALK-FORWARD-INDEPENDENCE",
+      "rule": "각 fold의 feature admission과 committee evidence weight는 오직 그 fold train_end 이전 데이터로 결정한다. top_level weight를 모든 fold에 복제하지 않는다.",
+      "failure": "후행 데이터 변경이 과거 fold admission/weight를 바꾸면 독립 OOS 인증을 차단한다."
+    },
+    {
+      "id": "PERF-BOUNDARY-FEATURE-ONCE",
+      "rule": "build_feature_books_by_boundary는 feature builder를 feature당 정확히 한 번 실행하고, boundary별로 coverage admission과 weight fitting만 반복한다. 동일하게 admitted된 boundary는 불변 book 객체를 재사용할 수 있다.",
+      "failure": "fold 수만큼 wide feature panel을 재계산하거나 복제해 peak RSS/시간 예산을 넘기면 구현 불합격이다."
+    },
+    {
+      "id": "INV-TWO-EVIDENCE-TRACKS",
+      "rule": "현재 배포 구성의 전기간 retrospective replay와 경계별 independent_walk_forward를 별도 필드로 보고한다. 전자를 OOS라고 표기하거나 후자의 신호를 배포 구성과 동일하다고 주장하지 않는다.",
+      "failure": "selection_window_overlap_fraction>0 또는 fold leak>0이면 HISTORICAL_ROBUSTNESS를 넘을 수 없다."
+    },
+    {
+      "id": "INV-INPUT-SEAL",
+      "rule": "SHA-256/row bounds는 수집·refresh 시 한 번 생성하고 hot replay에서 7.8GB를 재해시하지 않는다. 실행 시 path/size/mtime와 설정·panel/execution roster로 계산한 required path 집합을 manifest에 대조한다.",
+      "failure": "manifest 부재·stale·누락 파일은 진단 실행 자체를 숨기지 않되 tier=UNSEALED_ARCHIVE, eligible=false로 처리한다."
+    },
+    {
+      "id": "INV-MANIFEST-CANONICAL-ATOMIC",
+      "rule": "manifest entry는 data_root 상대 POSIX 경로로 정규화·중복 제거·정렬하고 path traversal을 거부한다. canonical JSON digest를 기록하며 같은 디렉터리 임시파일 fsync 후 os.replace로 원자 교체한다.",
+      "failure": "부분 파일, duplicate path, root 밖 path, sha256/row-bound 불일치는 manifest 생성을 실패시키며 기존 정상 manifest를 덮어쓰지 않는다."
+    },
+    {
+      "id": "INV-FORWARD-EVIDENCE-IMMUTABILITY",
+      "rule": "VPS/live 관측치는 strategy_digest와 observed_at을 기록한다. 기존 레코드처럼 digest가 없는 행은 보존하지만 인증 표본에서 제외한다. 동결 digest와 다른 관측도 제외하며, forward 데이터는 이미 동결된 alpha/stop/exit/sizing을 변경할 수 없다.",
+      "failure": "digest 누락·mismatch 또는 decision_time 이후 관측 여부를 검증할 수 없으면 해당 행을 제외하고, 유효 행이 없으면 FORWARD_OBSERVED 승격을 거부한다."
+    },
+    {
+      "id": "GATE-FORWARD-SAMPLE",
+      "rule": "FORWARD_OBSERVED는 명시적으로 제공된 forward_strategy_digest와 일치하고 observed_at>=decision_time인 레코드만 사용하며, 최소 EXECUTION_QUALITY_MIN_EVIDENCE_DAYS의 실제 UTC 일수 범위를 충족해야 한다. 동일 디렉터리의 다른 digest와 legacy digest-null 행은 분모에 넣지 않는다.",
+      "failure": "경로와 digest 중 하나만 제공되거나 기간이 부족하면 FORWARD_EVIDENCE_INCOMPLETE reason으로 REPRODUCIBLE 등급을 유지한다."
+    },
+    {
+      "id": "INV-NO-SCOPE-SHRINK",
+      "rule": "187,137,984-row 규모와 요청 전 기간을 보존한다. 정확성 문제를 피하려고 심볼·날짜·fold·stress tier를 축소하지 않는다.",
+      "failure": "성능 문제는 계측 후 chunking/column pruning으로 해결하며 범위 축소는 계약 위반이다."
+    },
+    {
+      "id": "GATE-DEPLOYMENT",
+      "rule": "deployment_ready는 research_go.eligible AND backtest_reliability.eligible일 때만 true다. 기존 alpha Research-GO의 의미는 보존하고 신뢰성 게이트를 별도로 결합한다.",
+      "failure": "primary invalid, 독립성 누출, unsealed inputs 중 하나라도 있으면 deployment_ready=false다."
+    }
+  ],
+  "design_rationale": {
+    "alternatives_considered": [
+      {
+        "alternative": "현재 accumulator 수치만 국소 보정",
+        "rejected_reason": "sizing 상태와 최종 ledger에 중복된 회계식이 남아 동일 결함 재발 가능성이 높다."
+      },
+      {
+        "alternative": "과거 제로 거래량 봉과 funding 공백을 0 또는 carry-forward로 보간",
+        "rejected_reason": "거래 가능성 및 공시 여부를 발명하여 결과를 낙관화한다."
+      },
+      {
+        "alternative": "마지막 관측 close로 강제 청산",
+        "rejected_reason": "실제 청산 가능 시점·가격·수수료가 없고 ledger와 fill telemetry를 불일치시킨다."
+      },
+      {
+        "alternative": "top-level 배포 weight를 fold 전체에 고정하고 OOS로 표기",
+        "rejected_reason": "배포 구성 parity는 보존하지만 조기 fold에서 미래 train 구간을 참조하므로 독립 OOS 주장이 불가능하다."
+      },
+      {
+        "alternative": "매 실행마다 모든 parquet SHA-256 재계산",
+        "rejected_reason": "대규모 I/O를 반복하며 replay hot path 성능을 훼손한다."
+      }
+    ],
+    "chosen_reason": "회계는 단일 인과 상태로, 결과 검증은 독립 ledger 재계산으로 이중화한다. 데이터가 없으면 추정하지 않고 명시적 knowledge mask와 인증 등급으로 격리한다. 정책은 단일 모듈에 모으고, retrospective parity와 independent OOS를 분리해 각각의 의미를 보존한다. 입력 hash는 수집 시 봉인하고 실행 시 저비용 metadata로 검증한다.",
+    "failure_modes": [
+      "MTM을 cash와 equity 양쪽에 반영",
+      "window tail 선스캔으로 미래 mark carry",
+      "체결 전 funding 소급",
+      "종료 forced fill과 ledger 불일치",
+      "누락 실행 파일의 silent roster drop",
+      "zero-volume bar 체결",
+      "unknown funding의 zero fill",
+      "부분 cache clear로 stale data 재사용",
+      "bar open label을 체결 완료시각으로 오인",
+      "백테스트/live default policy divergence",
+      "fold별 feature admission 및 committee weight leakage",
+      "selection overlap을 독립 OOS로 오인",
+      "unsealed input으로 결과 재현 불가",
+      "forward 관측으로 동결 전략을 사후 변경"
+    ]
+  },
+  "performance_budget": {
+    "expected_data_scale": "현재 187,137,984 OHLCV rows, 452-symbol 1h panel, 최대 31일 execution windows, 전체 요청 기간/fold/stress tier 유지",
+    "memory_target_mb": 12288,
+    "storage_format": "Parquet 원본 + canonical JSON input manifest + SHA-256; forward observations는 기존 append-only execution-quality 저장 형식 유지",
+    "dtype_precision": "현금·수량·가격·수수료·펀딩·equity는 float64; timestamp는 UTC int64 ns; known mask는 bool; 금융 결과 downcast 금지",
+    "chunking_strategy": "기존 31일 window streaming 유지, active/held columns만 column-pruned read, manifest hash는 collection/refresh 시 1회만 계산, replay는 stat metadata만 검증",
+    "acceleration_candidate": "상태 전이는 NumPy vector block을 우선 유지하고, 실제 프로파일에서 병목이 확인될 때만 Numba/native recurrence 검토; 멀티프로세스 범위·worker 수 임의 확대 금지",
+    "acceptance": "동일 입력에서 기존 전체 범위 대비 peak RSS +10% 이하, wall time +15% 이하; 초과 시 프로파일 첨부 후 정확성을 유지한 최적화만 허용"
+  },
+  "migration": {
+    "artifact_schema": "report에 backtest_reliability를 additive nullable field로 추가한다. 기존 저장 artifact는 UNSEALED_ARCHIVE/UNCERTIFIED로 읽되 파싱은 유지한다.",
+    "data_policy": "새 run 및 새 artifact 기본값은 zombie_mask_v1. data_policy가 누락된 기존 artifact는 digest 호환을 위해 legacy로 해석하며 live에서 자동 실행하지 않고 명시적 재생성/승인을 요구한다.",
+    "oracle": "strategy_aware_execution_replay는 독립 회계 oracle 역할을 중단하고 window batch API에 위임한다. 독립성 검증은 simulate_inventory_ledger 재계산과 hand-calculated tests가 담당한다.",
+    "historical_data": "과거 호가창·체결순서가 없는 구간은 ARCHIVE_PROXY로 유지한다. 소급 합성하지 않으며 forward 관측이 충분해도 과거 구간 자체를 FORWARD_OBSERVED로 재라벨하지 않는다."
+  },
+  "certification_matrix": [
+    {
+      "level": "UNCERTIFIED",
+      "eligible": false,
+      "condition": "primary_valid=false 또는 회계/PIT/실행가능성 불변식 위반",
+      "deployment_effect": "research_go_eligible=false; execution/pilot/scale 모두 false"
+    },
+    {
+      "level": "HISTORICAL_ROBUSTNESS",
+      "eligible": false,
+      "condition": "primary는 유효하지만 selection overlap, fold leak, unsealed/stale manifest 중 하나 이상 존재",
+      "deployment_effect": "진단 및 비교만 허용; 독립 OOS·배포 인증 금지"
+    },
+    {
+      "level": "REPRODUCIBLE",
+      "eligible": true,
+      "condition": "primary 유효, overlap=0, 모든 fold leak=0, REPRODUCIBLE_ARCHIVE manifest 유효",
+      "deployment_effect": "Research-GO 결합 허용; L2 부재 때문에 execution/pilot/scale는 기존처럼 false"
+    },
+    {
+      "level": "FORWARD_VALIDATED",
+      "eligible": true,
+      "condition": "REPRODUCIBLE 조건 + 동결 digest 일치 + 인과시각 유효 + 최소 관측기간을 충족한 FORWARD_OBSERVED evidence",
+      "deployment_effect": "forward execution calibration 근거로 사용 가능하나 alpha/stop/exit/sizing 변경 권한은 부여하지 않음"
+    }
+  ],
+  "out_of_scope": [
+    "새 alpha/feature/하이퍼파라미터 개발 또는 수익률 개선",
+    "과거 L2 order book, trade sequence, exchange latency의 소급 합성",
+    "동결된 stop/exit/sizing architecture의 forward-data 기반 변경",
+    "거래량만으로 시장충격·체결확률을 새로 캘리브레이션",
+    "누락 과거 데이터를 외부 공급자에서 즉시 재수집하는 작업"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "test_causal_state_marks_unrealized_pnl_once",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/execution/test_accounting.py",
+      "execution_command": "uv run pytest tests/unit/mhs/execution/test_accounting.py -k marks_unrealized_pnl_once --tb=short",
+      "expected_behavior": "1000 cash에서 10개를 100에 매수하고 mark 110이면 cash=0, equity=1100이며 MTM이 중복되지 않는다.",
+      "test_skeleton": "def test_causal_state_marks_unrealized_pnl_once() -> None:\n    import numpy as np\n    from src.mhs.execution.accounting import CausalPortfolioState\n    state = CausalPortfolioState(cash=1000.0, units=np.zeros(1), last_marks=np.array([100.0]), last_event_ns=None)\n    state.apply_fill(symbol_index=0, quantity_delta=10.0, fill_price=100.0, fee_bps=0.0)\n    state.advance_to(event_ns=1, marks=np.array([110.0]), funding_rates=np.zeros(1), funding_known=np.ones(1, dtype=bool))\n    assert state.cash == 0.0\n    assert state.equity() == 1100.0"
+    },
+    {
+      "scenario_id": "test_causal_state_does_not_charge_pre_entry_funding",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/execution/test_accounting.py",
+      "execution_command": "uv run pytest tests/unit/mhs/execution/test_accounting.py -k pre_entry_funding --tb=short",
+      "expected_behavior": "포지션 진입 전에 발생한 funding은 신규 수량에 소급되지 않는다.",
+      "test_skeleton": "def test_causal_state_does_not_charge_pre_entry_funding() -> None:\n    import numpy as np\n    from src.mhs.execution.accounting import CausalPortfolioState\n    state = CausalPortfolioState(cash=1000.0, units=np.zeros(1), last_marks=np.array([100.0]), last_event_ns=None)\n    charged = state.advance_to(event_ns=1, marks=np.array([100.0]), funding_rates=np.array([0.01]), funding_known=np.ones(1, dtype=bool))\n    state.apply_fill(symbol_index=0, quantity_delta=10.0, fill_price=100.0, fee_bps=0.0)\n    assert charged == 0.0\n    assert state.equity() == 1000.0"
+    },
+    {
+      "scenario_id": "test_causal_state_rejects_unknown_funding_for_held_position",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/execution/test_accounting.py",
+      "execution_command": "uv run pytest tests/unit/mhs/execution/test_accounting.py -k unknown_funding --tb=short",
+      "expected_behavior": "보유 중 funding known=false면 상태 전이가 fail-closed한다.",
+      "test_skeleton": "def test_causal_state_rejects_unknown_funding_for_held_position() -> None:\n    import numpy as np\n    import pytest\n    from src.common.errors import DataIntegrityError\n    from src.mhs.execution.accounting import CausalPortfolioState\n    state = CausalPortfolioState(cash=0.0, units=np.array([10.0]), last_marks=np.array([100.0]), last_event_ns=0)\n    with pytest.raises(DataIntegrityError, match='funding'):\n        state.advance_to(event_ns=1, marks=np.array([100.0]), funding_rates=np.array([0.0]), funding_known=np.zeros(1, dtype=bool))"
+    },
+    {
+      "scenario_id": "test_replay_is_invariant_to_future_tail_mark",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/test_execution.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_execution.py -k future_tail_mark --tb=short",
+      "expected_behavior": "마지막 미래 mark만 바꿔도 그 이전 fill 수량·가격·시각이 변하지 않는다.",
+      "test_skeleton": "def test_replay_is_invariant_to_future_tail_mark() -> None:\n    import dataclasses\n    import numpy as np\n    import pandas as pd\n    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows\n    grid = pd.date_range('2025-01-01', periods=5, freq='3min', tz='UTC')\n    weights = pd.DataFrame({'BTCUSDT': [1.0]}, index=pd.DatetimeIndex([grid[0]]))\n    def run(last: float):\n        price = pd.DataFrame({'BTCUSDT': [100.0, 100.0, 100.0, 100.0, last]}, index=grid)\n        window = ExecutionReplayWindow(window_start=grid[0], window_end=grid[-1], columns=('BTCUSDT',), symbols=('BTCUSDT',), minute_grid=grid, highs=price, lows=price, closes=price, marks=price, bar_funding=price*0.0, target_weights=weights, signal_available_at=pd.DatetimeIndex([grid[0]]), quote_volumes=price*0.0+1000.0, funding_known=price.notna(), bar_available_at=grid+pd.Timedelta(minutes=3))\n        return replay_execution_windows((window,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())\n    a, b = run(100.0), run(200.0)\n    cols = ['timestamp', 'quantity_delta', 'fill_price']\n    pd.testing.assert_frame_equal(a.simulated_fills[cols], b.simulated_fills[cols])"
+    },
+    {
+      "scenario_id": "test_replay_does_not_fabricate_terminal_exit",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/test_execution.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_execution.py -k fabricate_terminal_exit --tb=short",
+      "expected_behavior": "소스 종료 보유 포지션은 UNKNOWN_TERMINATION이며 forced_exit fill/fee를 만들지 않는다.",
+      "test_skeleton": "def test_replay_does_not_fabricate_terminal_exit() -> None:\n    import pandas as pd\n    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows\n    grid = pd.date_range('2025-01-01', periods=4, freq='3min', tz='UTC')\n    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)\n    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=px.notna(), bar_available_at=grid+pd.Timedelta(minutes=3))\n    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())\n    assert result.forced_exit_count == 0\n    assert 'forced_exit' not in set(result.simulated_fills['reason'])\n    assert not result.ledger.primary_valid\n    assert any(g.code == 'UNKNOWN_TERMINATION' for g in result.ledger.data_gaps)"
+    },
+    {
+      "scenario_id": "test_zero_volume_bar_cannot_fill",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/test_execution.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_execution.py -k zero_volume_bar --tb=short",
+      "expected_behavior": "가격이 유효해도 quote_vol=0이면 fill이 없고 gap이 남는다.",
+      "test_skeleton": "def test_zero_volume_bar_cannot_fill() -> None:\n    import pandas as pd\n    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows\n    grid = pd.date_range('2025-01-01', periods=4, freq='3min', tz='UTC')\n    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)\n    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0, funding_known=px.notna(), bar_available_at=grid+pd.Timedelta(minutes=3))\n    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())\n    assert result.fill_count == 0\n    assert any(g.code == 'ZERO_OR_UNKNOWN_VOLUME' for g in result.ledger.data_gaps)"
+    },
+    {
+      "scenario_id": "test_missing_active_execution_file_stays_in_roster",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/evaluation/test_windows.py",
+      "execution_command": "uv run pytest tests/unit/mhs/evaluation/test_windows.py -k missing_active_execution_file --tb=short",
+      "expected_behavior": "활성 심볼의 파일이 없어도 window.symbols에 남고 OHLCV/volume은 NaN이다.",
+      "test_skeleton": "def test_missing_active_execution_file_stays_in_roster(tmp_path) -> None:\n    import pandas as pd\n    from src.mhs.evaluation.windows import _iter_mhs_execution_windows\n    from src.mhs.types import ExecutionSpec\n    idx = pd.DatetimeIndex([pd.Timestamp('2025-01-01', tz='UTC')])\n    weights = pd.DataFrame({'MISSUSDT': [1.0]}, index=idx)\n    windows = list(_iter_mhs_execution_windows(weights, idx, str(tmp_path), '3m', idx[0], idx[0]+pd.Timedelta(minutes=9), {}, 'ohlcv_close_fallback', ExecutionSpec(), funding_failures={'MISSUSDT': 'missing'}))\n    assert windows[0].symbols == ('MISSUSDT',)\n    assert windows[0].closes['MISSUSDT'].isna().all()\n    assert windows[0].quote_volumes['MISSUSDT'].isna().all()"
+    },
+    {
+      "scenario_id": "test_funding_alignment_distinguishes_known_zero_from_unknown",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/execution/test_contracts.py",
+      "execution_command": "uv run pytest tests/unit/mhs/execution/test_contracts.py -k known_zero_from_unknown --tb=short",
+      "expected_behavior": "정상 커버리지 내부 0 rate는 known=true이고 누락 심볼은 rate=0이어도 known=false다.",
+      "test_skeleton": "def test_funding_alignment_distinguishes_known_zero_from_unknown() -> None:\n    import pandas as pd\n    from src.mhs.execution.contracts import align_funding_with_knowledge\n    grid = pd.date_range('2025-01-01', periods=4, freq='1h', tz='UTC')\n    source = pd.Series([0.0, 0.001], index=pd.DatetimeIndex([grid[0], grid[-1]]))\n    result = align_funding_with_knowledge({'BTCUSDT': source}, grid, symbols=['BTCUSDT', 'MISSUSDT'], source_failures={'MISSUSDT': 'missing'})\n    assert result.known['BTCUSDT'].all()\n    assert not result.known['MISSUSDT'].any()\n    assert (result.rates['MISSUSDT'] == 0.0).all()"
+    },
+    {
+      "scenario_id": "test_clear_market_data_caches_reloads_replaced_file",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_marks.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_marks.py -k reloads_replaced_file --tb=short",
+      "expected_behavior": "동일 process에서 파일을 교체하고 clear 후 재조회하면 새 mark를 반환한다.",
+      "test_skeleton": "def test_clear_market_data_caches_reloads_replaced_file(monkeypatch) -> None:\n    import pandas as pd\n    import src.mhs.marks as marks\n    state = {'close': 100.0}\n    frame = lambda: pd.DataFrame({'datetime': [pd.Timestamp('2025-01-01', tz='UTC')], 'close': [state['close']]})\n    monkeypatch.setattr(marks.DataCollector, '_load_mark_price_cache', staticmethod(lambda path: frame()))\n    monkeypatch.setattr(marks._futures_collection, '_mark_price_path', lambda symbol, timeframe: '/tmp/fake.parquet')\n    first = marks._get_symbol_mark_frame('BTCUSDT', '1h')['close'].iloc[0]\n    state['close'] = 200.0\n    marks.clear_mhs_market_data_caches()\n    second = marks._get_symbol_mark_frame('BTCUSDT', '1h')['close'].iloc[0]\n    assert (first, second) == (100.0, 200.0)"
+    },
+    {
+      "scenario_id": "test_orchestrator_clears_all_market_data_caches",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/pipeline/test_orchestrator.py",
+      "execution_command": "uv run pytest tests/unit/mhs/pipeline/test_orchestrator.py -k clears_all_market_data_caches --tb=short",
+      "expected_behavior": "run_mhs_diagnostic 진입 시 통합 cache clear 함수가 정확히 한 번 호출된다.",
+      "test_skeleton": "def test_orchestrator_clears_all_market_data_caches(monkeypatch) -> None:\n    import pytest\n    import src.mhs.pipeline.orchestrator as module\n    calls = []\n    monkeypatch.setattr(module, 'clear_mhs_market_data_caches', lambda: calls.append('clear'))\n    monkeypatch.setattr(module, 'resolve_evaluation_end', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop')) )\n    with pytest.raises(RuntimeError, match='stop'):\n        module.run_mhs_diagnostic(module.MhsRunConfig())\n    assert calls == ['clear']"
+    },
+    {
+      "scenario_id": "test_all_mhs_entrypoints_share_zombie_mask_default",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/test_data_policy.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_data_policy.py -k share_zombie_mask_default --tb=short",
+      "expected_behavior": "진단 request, run config, live params와 runtime 상수가 동일한 zombie_mask_v1 기본값을 쓴다.",
+      "test_skeleton": "def test_all_mhs_entrypoints_share_zombie_mask_default() -> None:\n    from src.mhs.contracts import MhsDiagnosticRequest\n    from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT\n    from src.mhs.live_strategy import LIVE_RUNTIME_DATA_POLICY, LiveStrategyParams\n    from src.mhs.pipeline.config import MhsRunConfig\n    assert MHS_DATA_POLICY_DEFAULT == 'zombie_mask_v1'\n    assert MhsDiagnosticRequest().data_policy == MHS_DATA_POLICY_DEFAULT\n    assert MhsRunConfig().data_policy == MHS_DATA_POLICY_DEFAULT\n    assert LiveStrategyParams.__dataclass_fields__['data_policy'].default == MHS_DATA_POLICY_DEFAULT\n    assert LIVE_RUNTIME_DATA_POLICY == MHS_DATA_POLICY_DEFAULT"
+    },
+    {
+      "scenario_id": "test_legacy_artifact_policy_does_not_auto_upgrade",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/test_live_strategy.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_live_strategy.py -k legacy_artifact_policy --tb=short",
+      "expected_behavior": "data_policy 누락 legacy artifact는 legacy digest로 읽히며 zombie runtime에서 거부된다.",
+      "test_skeleton": "def test_legacy_artifact_policy_does_not_auto_upgrade(tmp_path) -> None:\n    import dataclasses\n    import json\n    import pandas as pd\n    import pytest\n    from src.common.errors import DataIntegrityError\n    from src.mhs.contracts import MhsDiagnosticRequest\n    from src.mhs.deployment_policy import build_deployment_policy\n    from src.mhs.live_strategy import LiveStrategyParams, assert_runtime_data_policy, load_strategy_params, save_strategy_params\n    from src.mhs.pipeline.config import MhsRunConfig\n    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(data_policy='legacy')))\n    policy = build_deployment_policy(request, slow_horizon_hours=168, committee_member_weights={'m': 1.0}, admitted_members=('m',), target_annual_vol=0.35, exposure_cap=3.0)\n    params = LiveStrategyParams(schema_version=2, strategy_digest='', backtest_window=(pd.Timestamp('2021-01-01', tz='UTC'), pd.Timestamp('2025-01-01', tz='UTC')), created_at=pd.Timestamp('2025-01-02', tz='UTC'), policy=policy, bootstrap_sha256='a'*64, bootstrap_held_row={}, data_policy='legacy')\n    path = save_strategy_params(tmp_path/'legacy.json', params)\n    assert 'data_policy' not in json.loads(path.read_text(encoding='utf-8'))\n    loaded = load_strategy_params(path)\n    assert loaded.data_policy == 'legacy'\n    with pytest.raises(DataIntegrityError, match='data_policy mismatch'):\n        assert_runtime_data_policy(loaded)"
+    },
+    {
+      "scenario_id": "test_boundary_feature_admission_ignores_later_coverage",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_features.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_features.py -k boundary_feature_admission --tb=short",
+      "expected_behavior": "후행 구간의 feature 결측 변경이 이전 boundary의 admission과 book을 바꾸지 않는다.",
+      "test_skeleton": "def test_boundary_feature_admission_ignores_later_coverage() -> None:\n    import pandas as pd\n    from src.mhs.features import FeatureSpec, build_feature_books_by_boundary\n    idx = pd.date_range('2024-01-01', periods=12, freq='1h', tz='UTC')\n    mask = pd.DataFrame({'A': True, 'B': True}, index=idx)\n    base = pd.DataFrame({'A': range(12), 'B': range(12)}, index=idx, dtype=float)\n    calls = []\n    def build(panels):\n        calls.append(1)\n        return panels['close']\n    spec = FeatureSpec('x', ('close',), 1.0, build)\n    ends = {'early': idx[6], 'late': idx[-1]+pd.Timedelta(hours=1)}\n    first = build_feature_books_by_boundary((spec,), {'close': base}, mask, idx, ends, min_symbols=2)\n    assert len(calls) == 1\n    changed = base.copy(); changed.loc[idx[7]:, 'A'] = float('nan')\n    second = build_feature_books_by_boundary((spec,), {'close': changed}, mask, idx, ends, min_symbols=2)\n    assert len(calls) == 2\n    pd.testing.assert_frame_equal(first['early']['x'], second['early']['x'])"
+    },
+    {
+      "scenario_id": "test_fold_committee_uses_its_own_boundary_weights",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/pipeline/stages/test_committee.py",
+      "execution_command": "uv run pytest tests/unit/mhs/pipeline/stages/test_committee.py -k own_boundary_weights --tb=short",
+      "expected_behavior": "fold_i에는 fold_i weight가 배선되고 top_level weight dict가 복제되지 않는다.",
+      "test_skeleton": "def test_fold_committee_uses_its_own_boundary_weights(monkeypatch) -> None:\n    import src.mhs.pipeline.stages.committee as stage\n    weights = {'top_level': {'a': 0.9}, 'fold_0': {'a': 0.1}, 'fold_1': {'a': 0.2}}\n    folds = [type('F', (), {'train_end': i})() for i in (1, 2)]\n    mapped = stage._fold_weights_from_boundaries(weights, folds)\n    assert mapped == {0: {'a': 0.1}, 1: {'a': 0.2}}\n    assert mapped[0] is not weights['top_level']"
+    },
+    {
+      "scenario_id": "test_reliability_blocks_invalid_primary_and_overlap",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_reliability.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_reliability.py -k invalid_primary_and_overlap --tb=short",
+      "expected_behavior": "primary invalid 또는 selection overlap은 독립 인증을 차단하고 reason code를 보존한다.",
+      "test_skeleton": "def test_reliability_blocks_invalid_primary_and_overlap() -> None:\n    from src.mhs.data_provenance import DataEvidenceTier, DataProvenanceResult\n    from src.mhs.reliability import BacktestCertificationLevel, evaluate_backtest_reliability\n    provenance = DataProvenanceResult(DataEvidenceTier.REPRODUCIBLE_ARCHIVE, True, (), 'a'*64, 3)\n    result = evaluate_backtest_reliability(primary_valid=False, primary_invalid_reasons=('MISSING_ORDER_OHLCV',), selection_overlap_fraction=0.5, fold_committee_weight_leak=None, input_provenance=provenance, data_limitations=())\n    assert not result.eligible\n    assert result.certification_level is BacktestCertificationLevel.UNCERTIFIED\n    assert 'PRIMARY_EXECUTION_INVALID' in result.reason_codes\n    assert 'SELECTION_WINDOW_OVERLAP' in result.reason_codes"
+    },
+    {
+      "scenario_id": "test_reliability_separates_historical_from_forward_validation",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_reliability.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_reliability.py -k historical_from_forward --tb=short",
+      "expected_behavior": "봉인 archive만으로는 REPRODUCIBLE, 검증된 forward observations가 있어야 FORWARD_VALIDATED다.",
+      "test_skeleton": "def test_reliability_separates_historical_from_forward_validation() -> None:\n    from src.mhs.data_provenance import DataEvidenceTier, DataProvenanceResult\n    from src.mhs.reliability import BacktestCertificationLevel, evaluate_backtest_reliability\n    archive = DataProvenanceResult(DataEvidenceTier.REPRODUCIBLE_ARCHIVE, True, (), 'a'*64, 3)\n    observed = DataProvenanceResult(DataEvidenceTier.FORWARD_OBSERVED, True, (), None, 100)\n    base = dict(primary_valid=True, primary_invalid_reasons=(), selection_overlap_fraction=0.0, fold_committee_weight_leak={'fold_0': 0.0}, input_provenance=archive, data_limitations=('NO_HISTORICAL_L2',))\n    historical = evaluate_backtest_reliability(**base)\n    forward = evaluate_backtest_reliability(**base, forward_provenance=observed)\n    assert historical.certification_level is BacktestCertificationLevel.REPRODUCIBLE\n    assert forward.certification_level is BacktestCertificationLevel.FORWARD_VALIDATED"
+    },
+    {
+      "scenario_id": "test_input_manifest_detects_post_seal_mutation",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_data_provenance.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_data_provenance.py -k post_seal_mutation --tb=short",
+      "expected_behavior": "봉인 후 file size/mtime가 변하면 hot validation이 stale manifest를 검출한다.",
+      "test_skeleton": "def test_input_manifest_detects_post_seal_mutation(tmp_path) -> None:\n    import pandas as pd\n    from src.mhs.data_provenance import DataEvidenceTier, seal_mhs_input_manifest, validate_mhs_input_manifest\n    path = tmp_path/'BTCUSDT.parquet'\n    pd.DataFrame({'datetime': [pd.Timestamp('2025-01-01', tz='UTC')], 'close': [1.0]}).to_parquet(path)\n    manifest = tmp_path/'inputs.json'\n    seal_mhs_input_manifest([path], data_root=tmp_path, output_path=manifest)\n    with path.open('ab') as handle:\n        handle.write(b'x')\n    result = validate_mhs_input_manifest(manifest, data_root=tmp_path, required_paths=[path])\n    assert not result.valid\n    assert result.tier is DataEvidenceTier.UNSEALED_ARCHIVE\n    assert 'STALE_INPUT_MANIFEST' in result.reason_codes"
+    },
+    {
+      "scenario_id": "test_input_manifest_requires_every_consumed_path",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_data_provenance.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_data_provenance.py -k every_consumed_path --tb=short",
+      "expected_behavior": "실제 소비 파일이 manifest에서 빠지면 재현성 인증을 거부한다.",
+      "test_skeleton": "def test_input_manifest_requires_every_consumed_path(tmp_path) -> None:\n    import pandas as pd\n    from src.mhs.data_provenance import seal_mhs_input_manifest, validate_mhs_input_manifest\n    a, b = tmp_path/'a.parquet', tmp_path/'b.parquet'\n    frame = pd.DataFrame({'datetime': [pd.Timestamp('2025-01-01', tz='UTC')], 'close': [1.0]})\n    frame.to_parquet(a); frame.to_parquet(b)\n    manifest = tmp_path/'inputs.json'\n    seal_mhs_input_manifest([a], data_root=tmp_path, output_path=manifest)\n    result = validate_mhs_input_manifest(manifest, data_root=tmp_path, required_paths=[a, b])\n    assert not result.valid\n    assert 'UNATTESTED_REQUIRED_FILE' in result.reason_codes"
+    },
+    {
+      "scenario_id": "test_forward_observation_digest_mismatch_cannot_upgrade",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_data_provenance.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_data_provenance.py -k digest_mismatch --tb=short",
+      "expected_behavior": "다른 strategy digest의 live 관측치는 forward evidence로 승격되지 않는다.",
+      "test_skeleton": "def test_forward_observation_digest_mismatch_cannot_upgrade() -> None:\n    import pandas as pd\n    from src.mhs.data_provenance import DataEvidenceTier, validate_forward_execution_observations\n    records = pd.DataFrame({'decision_time': [pd.Timestamp('2025-01-01', tz='UTC')], 'observed_at': [pd.Timestamp('2025-01-01 00:01', tz='UTC')], 'strategy_digest': ['other']})\n    result = validate_forward_execution_observations(records, frozen_strategy_digest='frozen')\n    assert not result.valid\n    assert result.tier is not DataEvidenceTier.FORWARD_OBSERVED\n    assert 'STRATEGY_DIGEST_MISMATCH' in result.reason_codes"
+    },
+    {
+      "scenario_id": "test_report_wires_reliability_and_blocks_deployment",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/pipeline/stages/test_assemble.py",
+      "execution_command": "uv run pytest tests/unit/mhs/pipeline/stages/test_assemble.py -k wires_reliability --tb=short",
+      "expected_behavior": "조립된 report가 reliability를 보존하고 reliability 불합격이면 deployment readiness가 false다.",
+      "test_skeleton": "def test_report_wires_reliability_and_blocks_deployment() -> None:\n    import dataclasses\n    from src.mhs.evidence import DeploymentReadinessResult\n    from src.mhs.reliability import BacktestCertificationLevel, BacktestReliabilityResult, gate_deployment_readiness\n    fields = {f.name: 0.0 for f in dataclasses.fields(DeploymentReadinessResult)}\n    fields.update(time_under_water_bars=0, recovery_bars=None, leverage_ruin_probabilities={}, concentration={}, participation_warnings={}, research_go_eligible=True, execution_go_eligible=False, pilot_go_eligible=False, scale_go_eligible=False)\n    deployment = DeploymentReadinessResult(**fields)\n    reliability = BacktestReliabilityResult(False, BacktestCertificationLevel.UNCERTIFIED, ('PRIMARY_EXECUTION_INVALID',), (), None, 0)\n    gated = gate_deployment_readiness(deployment, reliability)\n    assert not gated.research_go_eligible\n    assert deployment.research_go_eligible"
+    },
+    {
+      "scenario_id": "test_execution_manifest_refresh_wires_attestation",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/test_collection.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_collection.py -k manifest_refresh_wires_attestation --tb=short",
+      "expected_behavior": "execution manifest refresh가 수집된 parquet 전체를 seal 함수에 전달한다.",
+      "test_skeleton": "def test_execution_manifest_refresh_wires_attestation(tmp_path, monkeypatch) -> None:\n    import json\n    import src.market_data.services.mhs_execution as module\n    manifest = tmp_path/'plan.json'\n    manifest.write_text(json.dumps({'timeframe': '3m', 'start': '2025-01-01', 'end': '2025-01-02', 'symbols': []}), encoding='utf-8')\n    calls = []\n    monkeypatch.setattr(module, 'seal_mhs_input_manifest', lambda paths, **kwargs: calls.append((list(paths), kwargs)) or 'a'*64)\n    module.refresh_mhs_execution_manifest(manifest)\n    assert len(calls) == 1\n    assert calls[0][1]['output_path'].name.endswith('.inputs.json')"
+    },
+    {
+      "scenario_id": "test_fill_effective_time_is_not_before_bar_availability",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_execution.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_execution.py -k effective_time --tb=short",
+      "expected_behavior": "archive proxy fill_time은 사용한 OHLCV bar의 available_at보다 빠를 수 없다.",
+      "test_skeleton": "def test_fill_effective_time_is_not_before_bar_availability() -> None:\n    import pandas as pd\n    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows\n    grid = pd.date_range('2025-01-01', periods=4, freq='3min', tz='UTC')\n    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)\n    available = grid + pd.Timedelta(minutes=3)\n    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=px.notna(), bar_available_at=available)\n    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())\n    assert (pd.to_datetime(result.simulated_fills['timestamp'], utc=True) >= available[1]).all()"
+    },
+    {
+      "scenario_id": "test_strategy_replay_delegates_to_causal_window_engine",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/test_execution.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_execution.py -k delegates_to_causal --tb=short",
+      "expected_behavior": "legacy single-panel API도 동일 window engine을 호출해 별도 회계식이 남지 않는다.",
+      "test_skeleton": "def test_strategy_replay_delegates_to_causal_window_engine(monkeypatch) -> None:\n    import src.mhs.execution.strategy_replay as module\n    sentinel = object(); calls = []\n    monkeypatch.setattr(module, 'replay_execution_windows', lambda *args, **kwargs: calls.append((args, kwargs)) or sentinel)\n    result = module._delegate_single_panel_window(object(), initial_equity=1.0, execution_bound='OHLCV_IMMEDIATE_TAKER', spec=object(), min_equity_fraction=None)\n    assert result is sentinel\n    assert len(calls) == 1"
+    },
+    {
+      "scenario_id": "test_required_input_paths_include_panel_execution_mark_and_funding",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_data_provenance.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_data_provenance.py -k required_input_paths --tb=short",
+      "expected_behavior": "required path 집합에 1h panel, execution timeframe, mark, funding 입력이 모두 포함된다.",
+      "test_skeleton": "def test_required_input_paths_include_panel_execution_mark_and_funding(tmp_path) -> None:\n    from src.mhs.data_provenance import resolve_required_mhs_input_paths\n    paths = resolve_required_mhs_input_paths(data_root=tmp_path, panel_symbols=['BTCUSDT'], execution_symbols=['BTCUSDT'], execution_timeframe='3m')\n    rendered = {str(p.relative_to(tmp_path)) for p in paths}\n    assert any('1h' in p and 'BTCUSDT' in p for p in rendered)\n    assert any('3m' in p and 'BTCUSDT' in p for p in rendered)\n    assert any('funding' in p and 'BTCUSDT' in p for p in rendered)\n    assert any('mark' in p and 'BTCUSDT' in p for p in rendered)"
+    },
+    {
+      "scenario_id": "test_execution_quality_persists_strategy_digest_and_observed_at",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/live/test_execution_quality.py",
+      "execution_command": "uv run pytest tests/unit/live/test_execution_quality.py -k persists_strategy_digest --tb=short",
+      "expected_behavior": "새 live record/shard가 strategy_digest와 observed_at을 손실 없이 저장한다.",
+      "test_skeleton": "def test_execution_quality_persists_strategy_digest_and_observed_at(tmp_path) -> None:\n    from decimal import Decimal\n    from types import SimpleNamespace\n    import pandas as pd\n    from src.live.execution_quality import append_execution_quality, build_execution_quality_records, load_execution_quality_records\n    now = pd.Timestamp('2026-09-14', tz='UTC')\n    intent = SimpleNamespace(symbol='BTCUSDT', side='BUY', leg_index=0, client_order_prefix='r')\n    outcome = SimpleNamespace(avg_fill_price=Decimal('100'), filled_qty=Decimal('1'), unfilled_qty=Decimal('0'), status='FILLED', chases=0, fills=())\n    records = build_execution_quality_records(now, 'paper', pd.Series({'BTCUSDT': 0.1}), {'BTCUSDT': Decimal('100')}, [intent], [outcome], strategy_digest='abc', observed_at=now+pd.Timedelta(seconds=1))\n    append_execution_quality(records, tmp_path)\n    loaded = load_execution_quality_records(tmp_path)\n    assert loaded.loc[0, 'strategy_digest'] == 'abc'\n    assert pd.Timestamp(loaded.loc[0, 'observed_at']) == now+pd.Timedelta(seconds=1)"
+    },
+    {
+      "scenario_id": "test_live_runner_metadata_carries_configured_digest",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/live/test_runner.py",
+      "execution_command": "uv run pytest tests/unit/live/test_runner.py -k execution_quality_metadata --tb=short",
+      "expected_behavior": "runner가 VPS 설정의 digest와 실제 기록시각을 execution-quality builder에 전달한다.",
+      "test_skeleton": "def test_live_runner_metadata_carries_configured_digest() -> None:\n    import pandas as pd\n    from src.live.runner import _execution_quality_metadata\n    from src.live.settings import LiveSettings\n    now = pd.Timestamp('2026-09-14', tz='UTC')\n    settings = LiveSettings(strategy_digest='abc')\n    assert _execution_quality_metadata(settings, now) == {'strategy_digest': 'abc', 'observed_at': now}"
+    },
+    {
+      "scenario_id": "test_assert_deployment_eligible_requires_backtest_reliability",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/test_live_strategy.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_live_strategy.py -k requires_backtest_reliability --tb=short",
+      "expected_behavior": "alpha Research-GO가 true여도 reliability가 false면 deployment artifact 생성을 거부한다.",
+      "test_skeleton": "def test_assert_deployment_eligible_requires_backtest_reliability() -> None:\n    from types import SimpleNamespace\n    import pandas as pd\n    import pytest\n    from src.common.errors import DataIntegrityError\n    from src.mhs.live_strategy import assert_deployment_eligible\n    weights = pd.DataFrame({'BTCUSDT': [0.1]}, index=pd.DatetimeIndex([pd.Timestamp('2026-01-01', tz='UTC')]))\n    report = SimpleNamespace(status='COMPLETE', research_go=SimpleNamespace(eligible=True), backtest_reliability=SimpleNamespace(eligible=False), blend=SimpleNamespace(target_weights=weights))\n    with pytest.raises(DataIntegrityError, match='reliability'):\n        assert_deployment_eligible(report)"
+    },
+    {
+      "scenario_id": "test_cli_uses_shared_data_policy_and_manifest_flags",
+      "scope": "wiring",
+      "target_test_file": "tests/unit/mhs/pipeline/test_config.py",
+      "execution_command": "uv run pytest tests/unit/mhs/pipeline/test_config.py -k shared_data_policy_and_manifest --tb=short",
+      "expected_behavior": "CLI default가 shared zombie policy이며 manifest/forward 경로와 digest가 config로 전달된다.",
+      "test_skeleton": "def test_cli_uses_shared_data_policy_and_manifest_flags() -> None:\n    import argparse\n    from src.cli.commands.research.mhs import add_mhs_commands\n    from src.mhs.pipeline.config import MhsRunConfig\n    parser = argparse.ArgumentParser(); root = parser.add_subparsers(dest='root'); research = root.add_parser('research'); portfolio = research.add_subparsers(dest='portfolio')\n    add_mhs_commands(portfolio)\n    args = parser.parse_args(['research', 'mhs-horizon-diagnostic', '--input-manifest-path', 'inputs.json', '--forward-execution-quality-dir', 'quality', '--forward-strategy-digest', 'abc'])\n    config = MhsRunConfig.from_namespace(args)\n    assert config.data_policy == 'zombie_mask_v1'\n    assert config.input_manifest_path == 'inputs.json'\n    assert config.forward_execution_quality_dir == 'quality'\n    assert config.forward_strategy_digest == 'abc'"
+    },
+    {
+      "scenario_id": "test_validation_tracks_never_label_retrospective_as_oos",
+      "scope": "unit",
+      "target_test_file": "tests/unit/mhs/test_reliability.py",
+      "execution_command": "uv run pytest tests/unit/mhs/test_reliability.py -k never_label_retrospective --tb=short",
+      "expected_behavior": "top-level deployed-config replay와 경계별 walk-forward 결과의 주장 범위가 분리된다.",
+      "test_skeleton": "def test_validation_tracks_never_label_retrospective_as_oos() -> None:\n    import pandas as pd\n    from src.mhs.reliability import build_validation_track_disclosure\n    top = pd.Timestamp('2025-01-01', tz='UTC')\n    tracks = build_validation_track_disclosure(selection_overlap_fraction=0.25, fold_committee_weight_leak={'fold_0': 0.0}, top_level_boundary=top, fold_boundaries=[pd.Timestamp('2023-01-01', tz='UTC')])\n    assert tracks['retrospective_deployed_config']['independent_oos'] is False\n    assert tracks['independent_walk_forward']['independent_oos'] is False\n    assert 'SELECTION_WINDOW_OVERLAP' in tracks['independent_walk_forward']['limitations']"
+    }
+  ],
+  "acceptance_commands": [
+    "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_backtest_reliability_contract.json --pre-impl",
+    "uv run pytest tests/unit/mhs/execution/test_accounting.py tests/unit/mhs/test_execution.py tests/unit/mhs/evaluation/test_windows.py tests/unit/mhs/execution/test_contracts.py tests/unit/mhs/test_marks.py --tb=short",
+    "uv run pytest tests/unit/mhs/test_data_policy.py tests/unit/mhs/test_live_strategy.py tests/unit/mhs/test_features.py tests/unit/mhs/pipeline/stages/test_committee.py tests/unit/mhs/test_reliability.py tests/unit/mhs/test_data_provenance.py --tb=short",
+    "uv run pytest tests/unit/mhs/pipeline/test_orchestrator.py tests/unit/mhs/pipeline/stages/test_assemble.py tests/unit/mhs/test_collection.py --tb=short",
+    "uv run pytest tests/unit/mhs --tb=short",
+    "uv run ruff check src/mhs src/market_data/services/mhs_execution.py src/live/execution_quality.py tests/unit/mhs",
+    "uv run mypy src/mhs/reliability.py src/mhs/data_policy.py src/mhs/data_provenance.py src/mhs/execution/accounting.py",
+    "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_backtest_reliability_contract.json"
+  ],
+  "release_gate": {
+    "required": [
+      "모든 신규·기존 MHS unit tests PASS",
+      "F1/F2/F3/F4/F6/F9 empirical repro 모두 regression PASS",
+      "전체 기간과 stress tiers를 축소하지 않은 representative full replay 완료",
+      "동일 봉인 manifest + seed의 report 핵심 수치와 artifact checksum 재현",
+      "peak RSS +10% 및 wall time +15% 예산 충족 또는 프로파일 근거 승인",
+      "과거 archive 결과는 최소 ARCHIVE_PROXY 한계를 명시하고, 독립성/manifest 게이트 미충족 시 deployment 차단"
+    ],
+    "forbidden_shortcuts": [
+      "primary_valid를 true로 강제",
+      "unknown funding/volume을 zero로 간주",
+      "미래 mark를 carry-forward source로 사용",
+      "forced terminal fill을 ledger 밖 telemetry로만 추가",
+      "과거 fold에 top-level committee weights 복제",
+      "기존 legacy artifact의 data_policy 자동 변경",
+      "테스트 통과를 위한 날짜·심볼·trial·fold 축소"
+    ]
+  }
+}
