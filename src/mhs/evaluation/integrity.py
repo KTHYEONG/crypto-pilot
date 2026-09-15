@@ -22,6 +22,24 @@ SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
     "ICPUSDT",  # 펀딩 이력이 2022-09-01부터 시작(가격은 그 이전부터 존재) → 조기 진입 시 MISSING_ACTIVE_FUNDING
     "AIAUSDT",  # 2025-12-11 12:00~2026-01-20 07:00 내부 공백(Vision 아카이브 자체가 비어 있음) → MISSING_HELD_FUNDING
     "OMNIUSDT",  # 펀딩 이력이 2025-09-22에 종료(선물 상장폐지, OHLCV는 좀비 꼬리로 계속 나옴) → MISSING_HELD_FUNDING
+    "BAKEUSDT",  # 펀딩 이력이 2025-10-03 08:00에 종료, exchangeInfo status=SETTLING·deliveryDate 정확히 일치(선물 상장폐지) → MISSING_HELD_FUNDING
+    # 2026-09-15 실측: 3m/1h OHLCV 원본 자체에 내부 공백 — Vision 월간 아카이브와 REST
+    # klines 모두 해당 구간 데이터가 없음(재조회로 복구되지 않음, 소스 자체의 진짜 공백).
+    "MAVIAUSDT",  # 2025-03-26 00:00~16:00 내부 공백(3m 340봉) → MISSING_DECISION_MARK/ZERO_OR_UNKNOWN_VOLUME
+    # 2026-09-15 실측: exchangeInfo status=SETTLING(선물 상장폐지)으로 확인된 나머지 심볼.
+    # 펀딩 이력이 백테스트 구간(2025-12-31) 이전에 종료돼 좀비 꼬리 보유 시 MISSING_HELD_FUNDING을
+    # 유발한다. 37개는 실제 상장폐지일보다 한참 전인 2025-06-19 08:00에 일괄 종료됐는데(수집기가
+    # 청산 완료 심볼의 펀딩 폴링을 그 시점에 멈춘 것으로 보임) exchangeInfo status는 모두 SETTLING으로
+    # 일치해 상장폐지 자체는 확인됨.
+    "1000XUSDT", "AGIXUSDT", "AI16ZUSDT", "ALPACAUSDT", "ALPHAUSDT", "AMBUSDT", "BADGERUSDT", "BALUSDT",
+    "BLZUSDT", "BONDUSDT", "BSWUSDT", "COMBOUSDT", "DARUSDT", "DEFIUSDT", "DGBUSDT", "FISUSDT",
+    "FLMUSDT", "FTMUSDT", "FTTUSDT", "GLMRUSDT", "HIFIUSDT", "IDEXUSDT", "KDAUSDT", "KEYUSDT",
+    "KLAYUSDT", "LEVERUSDT", "LINAUSDT", "LOKAUSDT", "LOOMUSDT", "MDTUSDT", "MEMEFIUSDT", "MILKUSDT",
+    "MKRUSDT", "MYROUSDT", "NEIROETHUSDT", "NULSUSDT", "OBOLUSDT", "OCEANUSDT", "OMGUSDT", "ORBSUSDT",
+    "PERPUSDT", "PONKEUSDT", "PORT3USDT", "QUICKUSDT", "RADUSDT", "RAYUSDT", "REEFUSDT", "REIUSDT",
+    "RENUSDT", "SCUSDT", "SKATEUSDT", "SLERFUSDT", "SNTUSDT", "STMXUSDT", "STPTUSDT", "STRAXUSDT",
+    "SWELLUSDT", "TOKENUSDT", "TROYUSDT", "UNFIUSDT", "UXLINKUSDT", "VIDTUSDT", "VOXELUSDT", "WAVESUSDT",
+    "XCNUSDT", "XEMUSDT",
 })
 
 
