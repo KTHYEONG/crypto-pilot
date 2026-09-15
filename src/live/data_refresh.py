@@ -45,10 +45,15 @@ class RefreshReport:
     ip_blocked: bool = False
     funding_stale: int = 0
     absent: int = 0
+    funding_blocked: bool = False
 
 
 class ColdUniverseError(RuntimeError):
     pass
+
+
+class FundingIpBlockedError(BinanceIpBlockedError):
+    """IP/WAF block raised by the funding endpoint only; klines path stays usable."""
 
 
 STALENESS_ACTIVE_WINDOW_HOURS: int = 72
@@ -197,7 +202,7 @@ def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partit
         return float("inf")
 
 
-def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str, *, funding_start: str | None = None) -> bool:
+def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str, *, funding_start: str | None = None, skip_funding: bool = False) -> bool:
     try:
         collector.ensure_ohlcv_data(symbol, "1h", start, end)
     except BinanceIpBlockedError:
@@ -205,14 +210,6 @@ def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str, 
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)
         return False
-    funding_ok = True
-    try:
-        collector.ensure_funding_data(symbol, start if funding_start is None else funding_start, end)
-    except BinanceIpBlockedError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("[DATA] funding symbol=%s failed error=%r", symbol, exc)
-        funding_ok = False
     try:
         if hasattr(collector, "ensure_mark_price_data"):
             collector.ensure_mark_price_data(symbol, "1h", start, end)
@@ -225,7 +222,16 @@ def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str, 
             collector.ensure_metrics_live_tail(symbol)
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[DATA] metrics_live_tail symbol=%s failed error=%s", symbol, exc)
-    return funding_ok
+    if skip_funding:
+        return False
+    try:
+        collector.ensure_funding_data(symbol, start if funding_start is None else funding_start, end)
+    except BinanceIpBlockedError as exc:
+        raise FundingIpBlockedError(http_code=exc.http_code, url=exc.url) from exc
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("[DATA] funding symbol=%s failed error=%r", symbol, exc)
+        return False
+    return True
 
 
 def refresh_live_market_data(
@@ -276,6 +282,7 @@ def refresh_live_market_data(
     funding_window_start = now - pd.Timedelta(days=lookback_days)
 
     ip_blocked = threading.Event()
+    funding_blocked = threading.Event()
 
     # Per-symbol worker
     def _refresh_symbol(sym: str) -> str:
@@ -291,7 +298,14 @@ def refresh_live_market_data(
         else:
             start = now - pd.Timedelta(days=lookback_days)
         try:
-            ok = _refresh_one_symbol_tail(collector, sym, str(start), str(now), funding_start=str(funding_window_start))
+            if funding_blocked.is_set():
+                ok = _refresh_one_symbol_tail(collector, sym, str(start), str(now), funding_start=str(funding_window_start), skip_funding=True)
+            else:
+                ok = _refresh_one_symbol_tail(collector, sym, str(start), str(now), funding_start=str(funding_window_start))
+        except FundingIpBlockedError as exc:
+            funding_blocked.set()
+            _logger.error("[DATA] stage=refresh_live_market_data funding_blocked=True symbol=%s http_code=%d", sym, exc.http_code)
+            return "funding_blocked"
         except BinanceIpBlockedError as exc:
             ip_blocked.set()
             _logger.error("[DATA] stage=refresh_live_market_data ip_blocked=True symbol=%s http_code=%d", sym, exc.http_code)
@@ -320,6 +334,8 @@ def refresh_live_market_data(
                 failed += 1
             elif outcome == "ip_blocked":
                 failed += 1
+            elif outcome == "funding_blocked":
+                failed += 1
             elif outcome == "deadline":
                 deadline_skipped += 1
             else:
@@ -334,12 +350,12 @@ def refresh_live_market_data(
 
     staleness = market_data_staleness_hours(Path(futures_root), now=now, partition=partition)
     funding_stale = sum(1 for sym in symbols_list if not _funding_fresh_on_disk(futures_root, sym, now, window_start=funding_window_start))
-    ok = (fresh + refreshed) >= min_symbols and failed <= math.ceil(max_fail_fraction * total) and not ip_blocked.is_set()
+    ok = (fresh + refreshed) >= min_symbols and failed <= math.ceil(max_fail_fraction * total) and not ip_blocked.is_set() and not funding_blocked.is_set()
     elapsed_s = time.perf_counter() - t0
 
     _logger.info(
-        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d deadline_hit=%s staleness_h=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s funding_stale=%d absent=%d",
-        total, fresh, refreshed, failed, deadline_skipped, deadline_hit, staleness, elapsed_s, ok, ip_blocked.is_set(), funding_stale, len(absent),
+        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d deadline_hit=%s staleness_h=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s funding_stale=%d absent=%d funding_blocked=%s",
+        total, fresh, refreshed, failed, deadline_skipped, deadline_hit, staleness, elapsed_s, ok, ip_blocked.is_set(), funding_stale, len(absent), funding_blocked.is_set(),
     )
 
     return RefreshReport(
@@ -355,4 +371,5 @@ def refresh_live_market_data(
         ip_blocked=ip_blocked.is_set(),
         funding_stale=funding_stale,
         absent=len(absent),
+        funding_blocked=funding_blocked.is_set(),
     )

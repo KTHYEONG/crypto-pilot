@@ -30,6 +30,7 @@ from pathlib import Path
 
 import src.mhs.marks as marks
 import src.market_data.services.futures_collection as fc
+import src.mhs.pipeline.stages.fold as fold_stage
 from src.mhs import statistics as _statistics
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
@@ -88,6 +89,7 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
             orig_replicates = _statistics._BOOTSTRAP_REPLICATES
             orig_block = _statistics._BOOTSTRAP_MEAN_BLOCK
             orig_seed = _statistics._BOOTSTRAP_SEED
+            orig_derive = fold_stage.derive_trials_attempted
             marks.funding_path = lambda sym, _root=root: _root / "funding" / f"{sym}.parquet"
             fc._mark_price_path = (
                 lambda symbol, timeframe, _root=root: _root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
@@ -95,6 +97,9 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
             _statistics._BOOTSTRAP_REPLICATES = 20
             _statistics._BOOTSTRAP_MEAN_BLOCK = 24
             _statistics._BOOTSTRAP_SEED = 20260807
+            # Match the golden tests' hermetic history pin
+            # (_pin_trials_attempted_history in test_golden_identity.py).
+            fold_stage.derive_trials_attempted = lambda *args, **kwargs: (80, "constant_plus_ledger")
             try:
                 request = MhsDiagnosticRequest(
                     start=str(_START),
@@ -116,6 +121,7 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
                 _statistics._BOOTSTRAP_REPLICATES = orig_replicates
                 _statistics._BOOTSTRAP_MEAN_BLOCK = orig_block
                 _statistics._BOOTSTRAP_SEED = orig_seed
+                fold_stage.derive_trials_attempted = orig_derive
             _write_json(out_path, digest)
             _write_json(summary_path, summary)
             written[name] = out_path

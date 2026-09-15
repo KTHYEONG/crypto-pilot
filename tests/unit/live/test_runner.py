@@ -16,7 +16,11 @@ def test_runner_market_client_uses_testnet_venue_under_live_testnet(tmp_path, mo
 
     monkeypatch.setattr(runner_mod, "BinanceFuturesRestClient", _FakeClient)
     monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
-    settings = LiveSettings(mode=ExecutionMode.LIVE_TESTNET)
+    settings = LiveSettings(
+        mode=ExecutionMode.LIVE_TESTNET,
+        order_api_key="testnet-key",
+        order_api_secret="testnet-secret",
+    )
     decision = pd.Timestamp("2026-09-15 00:00Z")
 
     runner_mod._market_client(settings, decision)
@@ -24,3 +28,12 @@ def test_runner_market_client_uses_testnet_venue_under_live_testnet(tmp_path, mo
 
     # Then: 필터/호가 조회와 주문이 같은 테스트넷 베뉴
     assert captured == [TESTNET_FAPI_URL, TESTNET_FAPI_URL]
+
+
+def test_live_runner_metadata_carries_configured_digest() -> None:
+    import pandas as pd
+    from src.live.runner import _execution_quality_metadata
+    from src.live.settings import LiveSettings
+    now = pd.Timestamp('2026-09-14', tz='UTC')
+    settings = LiveSettings(strategy_digest='abc')
+    assert _execution_quality_metadata(settings, now) == {'strategy_digest': 'abc', 'observed_at': now}

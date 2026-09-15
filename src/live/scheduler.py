@@ -88,6 +88,8 @@ SIGNAL_REFRESH_OFFSET_MINUTES: float = 0.0
 DAEMON_COLD_UNIVERSE_EXIT_CODE: int = 3
 
 SIGNAL_STEP_TIMEOUT_S: float = 1200.0
+# 컨테이너(cgroup v2) 자신의 메모리 이벤트. oom_kill 증가로만 OOM을 확정해 SIGKILL 일반과 구분한다.
+CGROUP_MEMORY_EVENTS_PATH: Path = Path("/sys/fs/cgroup/memory.events")
 SIGNAL_STEP_POLL_SECONDS: float = 1.0
 SIGNAL_STEP_TERMINATE_GRACE_SECONDS: float = 20.0
 
@@ -386,6 +388,18 @@ def _run_signal_step_subprocess(
         return None
 
 
+def _cgroup_oom_kill_count(events_path: Path = CGROUP_MEMORY_EVENTS_PATH) -> int | None:
+    try:
+        text = events_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "oom_kill" and parts[1].isdigit():
+            return int(parts[1])
+    return None
+
+
 def _log_stage_elapsed(stage: str, target: pd.Timestamp, started: float) -> None:
     elapsed_s = time.monotonic() - started
     logger.info("[SYS] stage=%s decision_time=%s elapsed_s=%.1f", stage, _as_utc(target).isoformat(), elapsed_s)
@@ -516,6 +530,8 @@ def run_daemon(
             except Exception:
                 staleness_h = float("inf")
             refresh_summary = f"staleness_h={staleness_h:.1f} failed={report.failed}/{report.total} err={err}" if report is not None and hasattr(report, "failed") else f"staleness_h={staleness_h:.1f} failed=n/a err={err}"
+            if report is not None and getattr(report, "funding_blocked", False):
+                refresh_summary += " funding_blocked=True"
             if staleness_h <= settings.max_market_data_staleness_hours:
                 _daemon_alert(settings, alerts_sent, event="data_degraded", detail=refresh_summary, decision_time=target, now=now_fn())
                 logger.warning("[SYS] data refresh degraded; proceeding on cached panel staleness_h=%.1f", staleness_h)
@@ -544,6 +560,7 @@ def run_daemon(
             logger.warning("[SYS] signal_step_result unlink failed path=%s error=%s", result_path, exc)
         quarantined = 0
         _beat("RUNNING", "signal")
+        oom_kills_before = _cgroup_oom_kill_count()
         stage_started = time.monotonic()
         try:
             signal_step_fn(target)
@@ -554,6 +571,9 @@ def run_daemon(
             logger.exception("[SYS] signal-step failed decision_time=%s", target)
             signal_status = "HALT"
             failure_cause = f"signal_step exit={exc.returncode}"
+            oom_kills_after = _cgroup_oom_kill_count()
+            if oom_kills_before is not None and oom_kills_after is not None and oom_kills_after > oom_kills_before:
+                failure_cause += " oom_killed"
             # 자식 프로세스가 남긴 typed 원인을 덧붙임
             sidecar = read_signal_step_result(result_path, target)
             if sidecar is not None and sidecar.status == SIGNAL_STEP_STATUS_FAILED:

@@ -17,9 +17,9 @@ import pandas as pd
 from src.mhs.evaluation import (
     DISCOVERY_START,
     HOLDOUT_CUTOFF,
-    _get_symbol_mark_frame,
     resolve_evaluation_end,
 )
+from src.mhs.marks import clear_mhs_market_data_caches
 from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1
 from src.mhs.resources import _TreeMemorySampler
 from src.mhs.pipeline.config import MhsRunConfig
@@ -41,7 +41,7 @@ def run_mhs_diagnostic(config: MhsRunConfig) -> MhsHorizonDiagnosticReport:
     of the run; its COW-correct PSS/USS/available-floor stats are attached to
     the report as ``tree_memory`` (observational, never raises into the run).
     """
-    _get_symbol_mark_frame.cache_clear()
+    clear_mhs_market_data_caches()
     _evaluation_ceiling = (
         MHS_FINAL_OOS_CUTOFF_2026H1 if config.final_oos_2026h1 else HOLDOUT_CUTOFF
     )

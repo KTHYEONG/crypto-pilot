@@ -12,6 +12,7 @@ import logging
 import time
 
 from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
+from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.panel import DATA_POLICIES
 from src.mhs.params import (
     COMMITTEE_DEFAULT_MEMBER_SET,
@@ -696,5 +697,8 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "blend, weights, scales, or Research-GO"
         ),
     )
-    mhs.add_argument('--data-policy', choices=sorted(DATA_POLICIES), default='legacy', help='Input-data contract for 1h panels (legacy keeps every bar; zombie_mask_v1 masks causally-detected delisted flat bars).')
+    mhs.add_argument('--data-policy', choices=sorted(DATA_POLICIES), default=MHS_DATA_POLICY_DEFAULT, help='Input-data contract for 1h panels (legacy keeps every bar; zombie_mask_v1 masks causally-detected delisted flat bars).')
+    mhs.add_argument('--input-manifest-path', default=None)
+    mhs.add_argument('--forward-execution-quality-dir', default=None)
+    mhs.add_argument('--forward-strategy-digest', default=None)
     mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)

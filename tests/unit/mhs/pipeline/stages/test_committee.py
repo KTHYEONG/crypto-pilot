@@ -128,11 +128,10 @@ def test_build_committee_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pytest.MonkeyPatch) -> None:
-    # SCENARIO_MHS_COMMITTEE_FOLD_BROADCASTS_TOP_LEVEL_WEIGHTS (I-SINGLE-CONFIGURATION,
-    # mirrors the constant_risk target_vol fix): under committee_capital=True with
-    # evidence weighting on, every fold index must receive the SAME top-level
-    # member-weight mix -- never a per-fold-boundary leak-free refit of it, which
-    # would drift the fold's signal blend away from what the blend actually deploys.
+    # SCENARIO_MHS_COMMITTEE_FOLD_BOUNDARY_WEIGHTS (INV-WALK-FORWARD-INDEPENDENCE):
+    # under committee_capital=True with evidence weighting on, every fold index
+    # receives its OWN boundary-fitted member-weight mix -- the top-level mix
+    # is never replicated across folds.
     captured: dict[str, object] = {}
 
     def _fake_by_boundary(*_a: object, **_k: object) -> dict[str, dict[str, float]]:
@@ -202,8 +201,8 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
     committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
 
     assert ctx._fold_committee_weights == {
-        0: {"member_a": 0.7, "member_b": 0.3},
-        1: {"member_a": 0.7, "member_b": 0.3},
+        0: {"member_a": 0.9, "member_b": 0.1},
+        1: {"member_a": 0.5, "member_b": 0.5},
     }
     assert captured["member_weights"] == {"member_a": 0.7, "member_b": 0.3}
     # SCENARIO_MHS_COMMITTEE_STAGE_THREADS_COVERAGE_CUTOFF: the deployed book
@@ -219,7 +218,10 @@ def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch
     captured: dict[str, object] = {}
 
     def _fake_by_boundary(*_a: object, **_k: object) -> dict[str, dict[str, float]]:
-        return {"top_level": {"member_a": 0.7, "member_b": 0.3}}
+        return {
+            "top_level": {"member_a": 0.7, "member_b": 0.3},
+            "fold_0": {"member_a": 0.7, "member_b": 0.3},
+        }
 
     def _fake_committee_execution_book(*_a: object, **_k: object) -> pd.DataFrame:
         captured["beta"] = _k.get("beta")
@@ -281,3 +283,12 @@ def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch
     )
     committee_stage.build_committee(ctx_on, StageTelemetry(log_run=False))
     assert isinstance(captured["beta"], pd.DataFrame)
+
+
+def test_fold_committee_uses_its_own_boundary_weights(monkeypatch) -> None:
+    import src.mhs.pipeline.stages.committee as stage
+    weights = {'top_level': {'a': 0.9}, 'fold_0': {'a': 0.1}, 'fold_1': {'a': 0.2}}
+    folds = [type('F', (), {'train_end': i})() for i in (1, 2)]
+    mapped = stage._fold_weights_from_boundaries(weights, folds)
+    assert mapped == {0: {'a': 0.1}, 1: {'a': 0.2}}
+    assert mapped[0] is not weights['top_level']

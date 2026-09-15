@@ -2693,3 +2693,136 @@ def test_default_data_refresh_passes_mainnet_listing(monkeypatch) -> None:
     assert fetched == [EXCHANGE_INFO_URL]
 
 
+
+
+def test_cgroup_oom_kill_count_reads_counter_and_tolerates_unavailable_file(tmp_path) -> None:
+    import src.live.scheduler as sched
+
+    # Given
+    events = tmp_path / "memory.events"
+    events.write_text("low 0\nhigh 0\nmax 877\noom 2\noom_kill 3\noom_group_kill 0\n", encoding="utf-8")
+    malformed = tmp_path / "malformed.events"
+    malformed.write_text("max 1\noom 0\n", encoding="utf-8")
+
+    # When / Then
+    assert sched._cgroup_oom_kill_count(events) == 3
+    assert sched._cgroup_oom_kill_count(tmp_path / "missing.events") is None
+    assert sched._cgroup_oom_kill_count(malformed) is None
+    assert sched.CGROUP_MEMORY_EVENTS_PATH.as_posix() == "/sys/fs/cgroup/memory.events"
+
+def test_run_daemon_marks_oom_killed_cause_when_cgroup_counter_increases(tmp_path, monkeypatch) -> None:
+    import json
+    import subprocess
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    # Given
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: None)
+    counts = iter([4, 5])
+    monkeypatch.setattr(sched, "_cgroup_oom_kill_count", lambda: next(counts))
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+
+    def _oom_killed(t):
+        raise subprocess.CalledProcessError(-9, ["signal-step"])
+
+    # When
+    sched.run_daemon(
+        LiveSettings(daemon_max_attempts_per_day=1, alert_halt_streak=1), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=_oom_killed, prune_fn=lambda: None,
+    )
+
+    # Then
+    cause = "signal_step exit=-9 oom_killed"
+    assert ("halt_streak", f"consecutive_halts=1 cause={cause}") in alerts
+    assert ("day_skipped", f"attempts=1 cause={cause}") in alerts
+    assert json.loads(hb_path.read_text(encoding="utf-8"))["detail"] == cause
+
+def test_run_daemon_keeps_plain_exit_cause_when_oom_counter_unchanged_or_unavailable(tmp_path, monkeypatch) -> None:
+    import subprocess
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.signal import _SIGNAL_LAG
+
+    # Given
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: None)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + _SIGNAL_LAG + pd.Timedelta(minutes=20)
+
+    def _killed(t):
+        raise subprocess.CalledProcessError(-9, ["signal-step"])
+
+    for idx, sequence in enumerate(([7, 7], [None, None])):
+        counts = iter(sequence)
+        monkeypatch.setattr(sched, "_cgroup_oom_kill_count", lambda: next(counts))
+        alerts.clear()
+
+        # When
+        sched.run_daemon(
+            LiveSettings(daemon_max_attempts_per_day=1, alert_halt_streak=1), artifact, tmp_path / f"state{idx}.json",
+            sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+            refresh_fn=lambda: None, signal_step_fn=_killed, prune_fn=lambda: None,
+        )
+
+        # Then
+        assert ("day_skipped", "attempts=1 cause=signal_step exit=-9") in alerts
+
+def test_run_daemon_degraded_alert_detail_flags_funding_block(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from src.live import scheduler as sched
+    from src.live.data_refresh import RefreshReport
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    # Given
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda s: True)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda s, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+    )
+    rep = RefreshReport(total=500, fresh=0, refreshed=21, failed=479, deadline_skipped=0,
+                        elapsed_s=12.0, deadline_hit=False, staleness_hours=0.1, ok=False, funding_blocked=True)
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, target, wp, now=None: type("R", (), {"status": "COMPLETE", "reason": None})(),
+    )
+    settings = LiveSettings(mode=ExecutionMode.PAPER, heartbeat_path=str(tmp_path / "hb.json"), max_market_data_staleness_hours=30.0)
+
+    # When
+    sched.run_daemon(
+        settings, tmp_path / "w.parquet", tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T02:00:00Z"),
+        max_iterations=1,
+        refresh_fn=lambda: rep,
+        signal_step_fn=lambda target: None,
+        prune_fn=lambda: None,
+    )
+
+    # Then
+    assert ("data_degraded", "staleness_h=0.1 failed=479/500 err=None funding_blocked=True") in alerts
+

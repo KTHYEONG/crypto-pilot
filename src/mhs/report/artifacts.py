@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,6 +45,8 @@ def _jsonable(value: Any) -> Any:
         return [_jsonable(v) for v in value.tolist()]
     if isinstance(value, np.bool_):
         return bool(value)
+    if isinstance(value, Enum) and isinstance(value, str):
+        return str(value)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return _jsonable(dataclasses.asdict(value))
     if value is None or isinstance(value, (bool, int, float, str)):

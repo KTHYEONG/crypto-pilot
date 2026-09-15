@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 
 from src.common.errors import DataIntegrityError
 from src.market_data.storage.ohlcv import is_temp_artifact
+from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT, MhsDataPolicy
 from src.mhs.params import PANEL_MIN_HISTORY_BARS
 from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
 from src.quant.universe.pit_universe import symbol_partition
@@ -155,7 +156,8 @@ def load_base_panel(
     count and every panel column.
     """
     if data_policy not in DATA_POLICIES:
-        raise ValueError(f"unknown data_policy '{data_policy}'")
+        raise ValueError(f"unknown data_policy '{data_policy}' (shared default {MHS_DATA_POLICY_DEFAULT})")
+    data_policy = str(MhsDataPolicy(data_policy))
     grid = build_uniform_grid(start, end, interval)
     paths = sorted(p for p in glob.glob(os.path.join(root, interval, "*.parquet")) if not is_temp_artifact(os.path.basename(p)))
     names = [os.path.basename(p).removesuffix(".parquet") for p in paths]

@@ -301,3 +301,15 @@ def test_window_ipc_numpy_restore_corruption_is_fail_closed(tmp_path) -> None:
 
     with pytest.raises(DataIntegrityError, match="window IPC load failed"):
         _load_window_from_ipc(str(corrupt))
+
+
+def test_missing_active_execution_file_stays_in_roster(tmp_path) -> None:
+    import pandas as pd
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.types import ExecutionSpec
+    idx = pd.DatetimeIndex([pd.Timestamp('2025-01-01', tz='UTC')])
+    weights = pd.DataFrame({'MISSUSDT': [1.0]}, index=idx)
+    windows = list(_iter_mhs_execution_windows(weights, idx, str(tmp_path), '3m', idx[0], idx[0]+pd.Timedelta(minutes=9), {}, 'ohlcv_close_fallback', ExecutionSpec(), funding_failures={'MISSUSDT': 'missing'}))
+    assert windows[0].symbols == ('MISSUSDT',)
+    assert windows[0].closes['MISSUSDT'].isna().all()
+    assert windows[0].quote_volumes['MISSUSDT'].isna().all()

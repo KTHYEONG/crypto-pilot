@@ -113,6 +113,7 @@ def test_data_policy_choices_match_cli_and_metadata() -> None:
     import dataclasses
 
     from src.cli.commands.research.mhs import add_mhs_commands
+    from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
     from src.mhs.evaluation import MhsDiagnosticRequest
     from src.mhs.panel import DATA_POLICIES
 
@@ -122,7 +123,8 @@ def test_data_policy_choices_match_cli_and_metadata() -> None:
     cli_action = next(a for a in parser._actions if a.dest == "data_policy")
     field = next(f for f in dataclasses.fields(MhsDiagnosticRequest) if f.name == "data_policy")
 
-    assert cli_action.default == "legacy"
+    assert cli_action.default == MHS_DATA_POLICY_DEFAULT
+    assert MhsDiagnosticRequest().data_policy == MHS_DATA_POLICY_DEFAULT
     assert set(cli_action.choices) == set(DATA_POLICIES)
     assert set(field.metadata["choices"]) == set(DATA_POLICIES)
     assert field.metadata["flag"] == "--data-policy"

@@ -370,6 +370,11 @@ def _enforce_funding_lag(
         )
 
 
+def _execution_quality_metadata(settings: LiveSettings, observed_at: pd.Timestamp) -> dict[str, Any]:
+    """Forward-evidence metadata: the configured digest plus the record time."""
+    return {"strategy_digest": settings.strategy_digest, "observed_at": observed_at}
+
+
 def run_shadow_cycle(
     settings: LiveSettings,
     decision_time: pd.Timestamp,
@@ -652,7 +657,7 @@ def run_shadow_cycle(
         if persisted:
             execution_quality_dir = Path(settings.execution_quality_dir) if settings.execution_quality_dir else default_execution_quality_dir()
             try:
-                records = build_execution_quality_records(decision_time, settings.mode.value, weights, marks, kept, outcomes)
+                records = build_execution_quality_records(decision_time, settings.mode.value, weights, marks, kept, outcomes, **_execution_quality_metadata(settings, now_ts))
                 append_execution_quality(records, execution_quality_dir)
             except Exception as exc:  # noqa: BLE001 - observability-only, never halts cycle
                 with contextlib.suppress(Exception):

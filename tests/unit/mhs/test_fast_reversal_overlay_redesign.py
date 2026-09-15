@@ -65,7 +65,8 @@ def _write_market(root: Path, n_hours: int, log_price_fn, include_minute: bool =
         prices = np.exp(log_px)
         pd.DataFrame(
             {"timestamp": epoch, "open": prices, "high": prices * 1.001,
-             "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours},
+             "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours,
+             "volume": [1000.0] * n_hours},
         ).to_parquet(hdir / f"{sym}.parquet")
         pd.DataFrame(
             {"timestamp": epoch, "funding_rate": [0.00005] * n_hours, "datetime": hourly},

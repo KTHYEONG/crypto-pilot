@@ -25,6 +25,7 @@ from src.mhs.features import (
     FEATURE_REGISTRY,
     FeatureSpec,
     build_feature_books,
+    build_feature_books_by_boundary,
     feature_registry_panel_columns,
     source_coverage_audit,
 )
@@ -548,40 +549,31 @@ def _committee_evidence_weights_by_boundary(
 ) -> dict[str, dict[str, float]]:
     """Build per-boundary evidence weights for committee members.
 
-    Member books and proxy return series are constructed exactly once
-    regardless of ``len(train_ends)`` -- this is what makes fold-level
-    evidence weighting possible without loading a second wide panel per fold.
-    Each boundary (fold or top-level OOS) then fits its own evidence weights
-    from the shared proxy return series, so every fold sees only the training
-    data up to its own boundary. Admission is audited only up to
-    ``max(train_ends.values())``, so an OOS-only tail beyond every requested
-    boundary can never decide a member's availability for any of these fits
-    (I-COVERAGE-PIT).
+    Member books are built exactly once per feature; each boundary (fold or
+    top-level OOS) then admits members and fits its own evidence weights from
+    training data strictly before its own boundary, so no fold sees future
+    coverage or future fits (INV-WALK-FORWARD-INDEPENDENCE).
     """
     _resolved = members or COMMITTEE_MEMBERS
     _member_specs = [
         spec for spec in FEATURE_REGISTRY
         if spec.name in set(_resolved)
     ]
-    import src.mhs.evaluation as ev
-    _committee_books = ev.build_feature_books(
+    _books_by_boundary = build_feature_books_by_boundary(
         _member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
-        execution_mask, decision_grid, min_symbols=min_symbols,
-        coverage_cutoff=max(train_ends.values()),
+        execution_mask, decision_grid, train_ends, min_symbols=min_symbols,
     )
-    if not _committee_books:
-        return {label: {} for label in train_ends}
     close_grid = close.reindex(decision_grid).ffill()
     fwd_ret = np.log(close_grid).shift(-1) - np.log(close_grid)
-    proxies: dict[str, pd.Series] = {}
-    for name, book in _committee_books.items():
-        book_grid = book.reindex(decision_grid).fillna(0.0)
-        proxies[name] = (book_grid * fwd_ret).sum(axis=1)
     result: dict[str, dict[str, float]] = {}
     for label, train_end in train_ends.items():
+        proxies: dict[str, pd.Series] = {}
+        for name, book in _books_by_boundary[label].items():
+            book_grid = book.reindex(decision_grid).fillna(0.0)
+            proxies[name] = (book_grid * fwd_ret).sum(axis=1)
         train_mask = pd.Series(decision_grid < train_end, index=decision_grid)
-        result[label] = train_evidence_weights(proxies, train_mask)
+        result[label] = train_evidence_weights(proxies, train_mask) if proxies else {}
     return result
 
 

@@ -35,6 +35,8 @@ FUNDING_RATE_WINDOW_S: float = 300.0
 FUNDING_RATE_UTILIZATION: float = 0.8
 FUNDING_REQUESTS_PER_SECOND: float = FUNDING_RATE_LIMIT_PER_WINDOW / FUNDING_RATE_WINDOW_S * FUNDING_RATE_UTILIZATION
 FUNDING_BURST: int = 5  # Binance 문서상 fundingRate는 fundingInfo와 IP당 5분 500회 한도를 공유하므로 80%로 운용.
+# Binance 앞단 AWS WAF가 fundingRate limit>=300 요청만 IP당 5분 ~124회로 차단(403)하므로 계수 대상이 아닌 기본값 100을 쓴다.
+FUNDING_RATE_REQUEST_LIMIT: int = 100
 
 
 @dataclass(eq=False)
@@ -403,7 +405,7 @@ class BinanceClient:
     ) -> pd.DataFrame:
         base_url = "https://fapi.binance.com/fapi/v1/fundingRate"
         timeout_sec = 30
-        limit = 500
+        limit = FUNDING_RATE_REQUEST_LIMIT
 
         try:
             market = self.exchange.market(symbol)

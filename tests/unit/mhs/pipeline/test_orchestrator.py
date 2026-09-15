@@ -192,3 +192,14 @@ def test_SCENARIO_MHS_ORCHESTRATOR_RECORDS_CANONICAL_WINDOW(
     orchestrator.run_mhs_diagnostic(MhsRunConfig())
     default_ctx = captured[-1]
     assert str(default_ctx.resolved_end) == "2025-12-31 23:59:59+00:00"
+
+
+def test_orchestrator_clears_all_market_data_caches(monkeypatch) -> None:
+    import pytest
+    import src.mhs.pipeline.orchestrator as module
+    calls = []
+    monkeypatch.setattr(module, 'clear_mhs_market_data_caches', lambda: calls.append('clear'))
+    monkeypatch.setattr(module, 'resolve_evaluation_end', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop')) )
+    with pytest.raises(RuntimeError, match='stop'):
+        module.run_mhs_diagnostic(module.MhsRunConfig())
+    assert calls == ['clear']
