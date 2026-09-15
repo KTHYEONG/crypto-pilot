@@ -994,3 +994,85 @@ def test_fold_builder_regime_hourly_min_history_and_deadband_toggle(mhs_market, 
             str(root), _FOLD, dataclasses.replace(request, rebalance_filter="portfolio_trigger"),
             funding_by_symbol, apply_rebalance_deadband=False,
         )
+
+
+def test_run_anchored_fold_accepts_terminal_funding_gap_via_shared_helper(mhs_market, monkeypatch) -> None:
+    # SCENARIO_MHS_FOLD_LEDGER_TERMINAL_ONLY_SHARED_HELPER: _run_anchored_fold must
+    # use the SAME integrity.ledger_terminal_only classification as the top-level
+    # book gate, so a fold touching a permanently-delisted symbol is not spuriously
+    # failed just because it happens to fall inside a fold's validation window.
+    import pandas as pd
+    import src.mhs.evaluation.folds as folds_mod
+    from src.mhs import evaluation as ev
+    from src.mhs.evaluation import MhsDiagnosticRequest, _StageRecorder  # noqa: F401
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.quant.universe.pit_universe import symbol_partition
+    from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
+
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    daily_idx = pd.date_range(_FOLD.validation_start.normalize(), _FOLD.validation_end.normalize(), freq="D", tz="UTC")
+    blend_scale = pd.Series(1.0, index=daily_idx)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        pnl_vol_target_mode="constant_risk",
+    )
+
+    def _gap(code, symbol, ts):
+        return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
+
+    def _fills(rows):
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp(ts, tz="UTC") for _, ts in rows],
+            "symbol": [sym for sym, _ in rows],
+            "quantity_delta": [1.0] * len(rows), "fill_price": [1.0] * len(rows),
+            "fee_bps": [0.0] * len(rows), "reason": ["timeout_taker"] * len(rows),
+            "pre_trade_equity": [1.0] * len(rows),
+        })
+
+    def _result(primary_valid, gaps, fills):
+        eq_idx = pd.date_range(_FOLD.validation_start, periods=2, freq="D", tz="UTC")
+        equity = pd.Series([1.0, 1.0], index=eq_idx)
+        ledger = SimulatedInventoryLedgerResult(
+            equity=equity, net_returns=equity * 0.0, simulated_units=None,
+            mark_to_market_pnl=equity * 0.0, funding_charge=equity * 0.0, fee_charge=equity * 0.0,
+            fill_turnover=equity * 0.0, fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            primary_valid=primary_valid, invalid_reasons=() if primary_valid else ("MISSING_DATA",),
+            data_gaps=tuple(gaps),
+        )
+        return StrategyExecutionReplayResult(
+            simulated_fills=fills, ledger=ledger, simulated_units=pd.DataFrame(), simulated_notional_weights=pd.DataFrame(),
+            fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="OHLCV_CLOSE_FALLBACK",
+            submit_times=pd.Series(dtype="datetime64[ns, UTC]"), fill_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_count=0, unfilled_count=0, fallback_count=0, all_intent_shortfall_bps=0.0,
+            forced_exit_count=0, forced_exit_notional=0.0,
+            termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+            unsupported_assumptions=(), elapsed_seconds=0.0, data_gaps=tuple(gaps),
+        )
+
+    reference_ok = _result(True, [], _fills([]))
+    terminal_gaps = [
+        _gap("MISSING_HELD_FUNDING", "MHSAUSDT", str(_FOLD.validation_start + pd.Timedelta(hours=1))),
+        _gap("UNKNOWN_TERMINATION", "MHSAUSDT", str(_FOLD.validation_end)),
+    ]
+    primary_terminal = _result(False, terminal_gaps, _fills([("MHSAUSDT", str(_FOLD.validation_start))]))
+    stress_ok = _result(True, [], _fills([]))
+
+    monkeypatch.setattr(folds_mod, "replay_execution_windows", lambda *a, **k: reference_ok)
+    monkeypatch.setattr(folds_mod, "replay_execution_window_batch", lambda *a, **k: (primary_terminal, stress_ok))
+
+    report = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+        blend_exposure_scale=blend_scale,
+    )
+    # Then: the fold-level gate accepted the terminal-equivalent funding gap
+    assert report.strict is not None
+    assert report.failures == ()
+
