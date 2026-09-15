@@ -303,7 +303,7 @@
     "testing": "tests/unit/mhs/execution/test_accounting.py"
   },
   "src/mhs/execution/accumulator.py": {
-    "testing": "tests/unit/mhs/test_execution.py"
+    "testing": "tests/unit/mhs/execution/test_accumulator.py"
   },
   "src/mhs/execution/batch.py": {},
   "src/mhs/execution/contracts.py": {
