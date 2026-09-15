@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,6 +12,73 @@ from src.common.errors import DataIntegrityError
 from src.quant.baseline.backtest import _align_funding_rates
 
 from . import _ExecutionBound, _ExecutionGapCode, _MarkSource
+
+_DEFAULT_MAX_OBSERVATION_GAP = pd.Timedelta(hours=8, minutes=5)
+
+
+@dataclass(frozen=True, slots=True)
+class FundingAlignment:
+    """Funding rates split from funding knowledge (INV-FUNDING-KNOWLEDGE).
+
+    ``rates`` carries the per-bar settlement rates (0.0 where unknown);
+    ``known`` marks the bars whose funding state is actually observed.
+    Unknown funding overlapping held inventory or an active order fails
+    closed downstream; unknown funding over inactive stretches is a recorded
+    limitation only. ``source_failures`` echoes the per-symbol load failures.
+    """
+
+    rates: pd.DataFrame
+    known: pd.DataFrame
+    source_failures: Mapping[str, str]
+
+
+def align_funding_with_knowledge(
+    funding_by_symbol: Mapping[str, pd.Series],
+    grid: pd.DatetimeIndex,
+    *,
+    symbols: Sequence[str],
+    source_failures: Mapping[str, str] | None = None,
+    max_observation_gap: pd.Timedelta = _DEFAULT_MAX_OBSERVATION_GAP,
+) -> FundingAlignment:
+    """Align funding onto ``grid`` with an explicit known/unknown mask.
+
+    ``funding_by_symbol`` carries full-history series: rates settle from the
+    window slice, while ``known`` reflects the file's own coverage (only
+    no-event bars inside a covered span may read as zero). A symbol absent
+    from the mapping, listed in ``source_failures``, or carrying an empty
+    series is unknown everywhere (rates 0.0). Bars outside the observed span
+    or strictly inside an inter-observation gap longer than
+    ``max_observation_gap`` are unknown. Financial results stay float64;
+    knowledge stays bool (no downcast, per the performance budget).
+    """
+    failed = dict(source_failures) if source_failures else {}
+    gap_ns = int(max_observation_gap.value)
+    grid_ns = np.asarray(grid, dtype="datetime64[ns]").astype("int64")
+    period = grid[1] - grid[0] if len(grid) > 1 else pd.Timedelta(minutes=1)
+    rate_cols: dict[str, pd.Series] = {}
+    known_cols: dict[str, pd.Series] = {}
+    for sym in symbols:
+        series = funding_by_symbol.get(sym)
+        if sym in failed or series is None or len(series) == 0:
+            rate_cols[sym] = pd.Series(np.zeros(len(grid), dtype="float64"), index=grid, dtype="float64")
+            known_cols[sym] = pd.Series(np.zeros(len(grid), dtype=bool), index=grid, dtype=bool)
+            continue
+        full_ts = np.asarray(pd.DatetimeIndex(pd.to_datetime(series.index, utc=True)), dtype="datetime64[ns]").astype("int64")
+        full_ts = np.sort(full_ts)
+        windowed = series.loc[(series.index >= grid[0]) & (series.index < grid[-1] + period)]
+        aligned = np.asarray(_align_funding_rates(windowed, grid), dtype="float64")
+        in_span = (grid_ns >= full_ts[0]) & (grid_ns <= full_ts[-1])
+        prev = np.searchsorted(full_ts, grid_ns, side="right") - 1
+        after_gap = np.zeros(len(grid), dtype=bool)
+        wide = np.diff(full_ts) > gap_ns
+        for k in np.flatnonzero(wide):
+            after_gap |= (grid_ns > full_ts[k]) & (grid_ns < full_ts[k + 1])
+        known = in_span & (prev >= 0) & ~after_gap
+        rate_cols[sym] = pd.Series(aligned, index=grid, dtype="float64")
+        known_cols[sym] = pd.Series(known, index=grid, dtype=bool)
+    rates = pd.DataFrame(rate_cols, index=grid).astype("float64")
+    known_frame = pd.DataFrame(known_cols, index=grid).astype(bool)
+    return FundingAlignment(rates=rates, known=known_frame, source_failures=failed)
 
 
 def bar_funding_panel(
@@ -75,6 +142,13 @@ class ExecutionReplayWindow:
     bar_funding: pd.DataFrame
     target_weights: pd.DataFrame
     signal_available_at: pd.DatetimeIndex
+    # Tradability and knowledge overlays (P2_DATA_AND_POLICY_PARITY). ``None``
+    # preserves the legacy direct-construction semantics (all bars tradable,
+    # all funding known, effective time equals the grid label); the window
+    # generator always materializes explicit frames.
+    quote_volumes: pd.DataFrame | None = None
+    funding_known: pd.DataFrame | None = None
+    bar_available_at: pd.DatetimeIndex | None = None
 
 
 @dataclass(frozen=True, slots=True)

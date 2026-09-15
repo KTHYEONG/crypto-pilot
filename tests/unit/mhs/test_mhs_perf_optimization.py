@@ -160,11 +160,11 @@ def test_mhs_perf_opt_window_slice_equivalence(mark_market) -> None:
     assert set(windowed) == set(_SYMBOLS)
     for sym in _SYMBOLS:
         table = ev.pq.read_table(
-            f"{root}/5m/{sym}.parquet", columns=["timestamp", "high", "low", "close"],
+            f"{root}/5m/{sym}.parquet", columns=["timestamp", "high", "low", "close", "quote_vol"],
         )
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
         full = pd.DataFrame(
-            {c: table.column(c).to_numpy().astype("float64") for c in ("high", "low", "close")},
+            {c: table.column(c).to_numpy().astype("float64") for c in ("high", "low", "close", "quote_vol")},
             index=idx,
         )
         full = full[~full.index.duplicated(keep="last")].sort_index()

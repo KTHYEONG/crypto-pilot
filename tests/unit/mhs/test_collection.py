@@ -26,3 +26,15 @@ def test_mhs_execution_plan_is_pit_and_dry_run_writes_manifest(tmp_path, monkeyp
     assert len(plan.symbols) <= 8
     assert result["mode"] == "dry_run"
     assert (tmp_path / "plan.json").exists()
+
+
+def test_execution_manifest_refresh_wires_attestation(tmp_path, monkeypatch) -> None:
+    import json
+    import src.market_data.services.mhs_execution as module
+    manifest = tmp_path/'plan.json'
+    manifest.write_text(json.dumps({'timeframe': '3m', 'start': '2025-01-01', 'end': '2025-01-02', 'symbols': []}), encoding='utf-8')
+    calls = []
+    monkeypatch.setattr(module, 'seal_mhs_input_manifest', lambda paths, **kwargs: calls.append((list(paths), kwargs)) or 'a'*64)
+    module.refresh_mhs_execution_manifest(manifest)
+    assert len(calls) == 1
+    assert calls[0][1]['output_path'].name.endswith('.inputs.json')

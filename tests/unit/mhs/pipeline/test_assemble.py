@@ -286,3 +286,30 @@ def test_assemble_report_committee_member_weights_none_when_boundary_missing() -
 
     assert report.committee_member_weights is None
 
+
+def test_assemble_report_wires_forward_provenance(tmp_path) -> None:
+    import dataclasses
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.live.execution_quality import append_execution_quality, build_execution_quality_records
+    from src.mhs.resources import _StageRecorder
+    from src.mhs.pipeline.stages.assemble import assemble_report
+
+    def _record(at: pd.Timestamp):
+        intent = SimpleNamespace(symbol='BTCUSDT', side='BUY', leg_index=0, client_order_prefix='r')
+        outcome = SimpleNamespace(avg_fill_price=Decimal('100'), filled_qty=Decimal('1'), unfilled_qty=Decimal('0'), status='FILLED', chases=0, fills=())
+        return build_execution_quality_records(at, 'paper', pd.Series({'BTCUSDT': 0.1}), {'BTCUSDT': Decimal('100')}, [intent], [outcome], strategy_digest='frozen', observed_at=at + pd.Timedelta(seconds=1))
+
+    now = pd.Timestamp('2025-01-01', tz='UTC')
+    quality_dir = tmp_path / 'quality'
+    append_execution_quality(_record(now - pd.Timedelta(days=100)), quality_dir)
+    append_execution_quality(_record(now), quality_dir)
+    ctx = _bare_context(_StageRecorder(log_run=False))
+    ctx.config = dataclasses.replace(ctx.config, forward_execution_quality_dir=str(quality_dir), forward_strategy_digest='frozen')
+    report = assemble_report(ctx, ctx.telemetry)
+    assert ctx.forward_provenance is not None
+    assert ctx.forward_provenance.valid
+    assert report.backtest_reliability is not None

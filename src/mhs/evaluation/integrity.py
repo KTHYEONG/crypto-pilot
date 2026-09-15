@@ -29,9 +29,14 @@ def _assert_cache_required_ledger_valid(
     """Fail closed when a cache-required strict primary ledger is invalid.
 
     ``cache_required_stale_carry`` and ``ohlcv_close_fallback`` are explicit
-    diagnostic modes and never call this gate.
+    diagnostic modes and never call this gate. Disclosed terminal inventory
+    (``UNKNOWN_TERMINATION`` gaps only) is evidence, not a crash: the position
+    stays open, the ledger stays invalid, and deployment is blocked downstream
+    by backtest-reliability certification instead of failing the book here.
     """
-    if not primary.ledger.primary_valid:
+    gaps = primary.ledger.data_gaps
+    terminal_only = bool(primary.ledger.primary_valid) or (bool(gaps) and all(g.code == "UNKNOWN_TERMINATION" for g in gaps))
+    if not terminal_only:
         raise DataIntegrityError(
             f"cache_required strict primary ledger invalid for {name}: "
             f"{', '.join(primary.ledger.invalid_reasons)}"

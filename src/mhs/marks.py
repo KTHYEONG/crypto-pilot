@@ -368,6 +368,21 @@ def _cached_mark_panel(
     return panel
 
 
+def clear_mhs_market_data_caches() -> None:
+    """Invalidate every MHS market-data cache for run isolation (INV-CACHE-RUN-ISOLATION).
+
+    Clears the full-frame cache, the path-keyed frame cache, the compact
+    mark-series cache, and the shared ``DataCollector`` singleton together:
+    a refreshed on-disk file must never read stale through a partially
+    cleared layer in the next run of the same process.
+    """
+    global _DATA_COLLECTOR
+    _get_symbol_mark_frame.cache_clear()
+    _get_symbol_mark_frame_for_path.cache_clear()
+    _compact_mark_series_for_path.cache_clear()
+    _DATA_COLLECTOR = None
+
+
 def _load_symbol_minute_frame(
     path: str,
     sym: str,
@@ -376,10 +391,17 @@ def _load_symbol_minute_frame(
     grid_start: pd.Timestamp,
     grid_end: pd.Timestamp,
 ) -> tuple[str, pd.DataFrame | None]:
-    """Load one symbol's minute slice; ``None`` when missing or empty."""
+    """Load one symbol's minute slice; ``None`` when missing or empty.
+
+    ``quote_vol`` travels with the OHLCV slice when the file carries it; a
+    file without a quote-volume column yields a frame without one and the
+    window layer treats its bars as unknown volume (untradable).
+    """
+    available = set(pq.ParquetFile(path).schema_arrow.names)
+    columns = ["timestamp", "high", "low", "close"] + (["quote_vol"] if "quote_vol" in available else [])
     table = pq.read_table(
         path,
-        columns=["timestamp", "high", "low", "close"],
+        columns=columns,
         filters=[
             [
                 ("timestamp", ">=", start_ms),
@@ -391,7 +413,8 @@ def _load_symbol_minute_frame(
     frame = pd.DataFrame(
         {
             c: table.column(c).to_numpy().astype("float64")
-            for c in ("high", "low", "close")
+            for c in table.column_names
+            if c != "timestamp"
         },
         index=idx,
     )

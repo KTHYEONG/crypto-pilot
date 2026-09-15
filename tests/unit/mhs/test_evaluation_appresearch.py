@@ -59,6 +59,7 @@ def _write_mhs_market(
         columns = {
             "timestamp": epoch, "open": prices, "high": prices * 1.001,
             "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours,
+            "volume": [1000.0] * n_hours,
         }
         if include_taker_buy_quote:
             buy_ratio = 0.5 + 0.05 * (i + 1) / len(symbols)

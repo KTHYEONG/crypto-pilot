@@ -414,7 +414,7 @@ def test_strategy_params_legacy_data_policy_is_implicit_and_digest_stable(tmp_pa
         base.update(overrides)
         return LiveStrategyParams(**base)
 
-    path = save_strategy_params(tmp_path / "strategy_params.json", _params())
+    path = save_strategy_params(tmp_path / "strategy_params.json", _params(data_policy=DATA_POLICY_LEGACY))
     raw = json.loads(path.read_text(encoding="utf-8"))
 
     assert "data_policy" not in raw
@@ -458,7 +458,7 @@ def test_strategy_params_non_legacy_data_policy_round_trips_into_digest(tmp_path
         base.update(overrides)
         return LiveStrategyParams(**base)
 
-    legacy_path = save_strategy_params(tmp_path / "legacy.json", _params())
+    legacy_path = save_strategy_params(tmp_path / "legacy.json", _params(data_policy=DATA_POLICY_LEGACY))
     masked_path = save_strategy_params(tmp_path / "masked.json", _params(data_policy=DATA_POLICY_ZOMBIE_MASK_V1))
     legacy_raw = json.loads(legacy_path.read_text(encoding="utf-8"))
     masked_raw = json.loads(masked_path.read_text(encoding="utf-8"))
@@ -502,7 +502,7 @@ def test_strategy_params_data_policy_tamper_and_unknown_rejected(tmp_path) -> No
         base.update(overrides)
         return LiveStrategyParams(**base)
 
-    path = save_strategy_params(tmp_path / "strategy_params.json", _params())
+    path = save_strategy_params(tmp_path / "strategy_params.json", _params(data_policy=DATA_POLICY_LEGACY))
     raw = json.loads(path.read_text(encoding="utf-8"))
 
     tampered = dict(raw, data_policy=DATA_POLICY_ZOMBIE_MASK_V1)
@@ -553,8 +553,41 @@ def test_assert_runtime_data_policy_rejects_mismatch(tmp_path) -> None:
         return LiveStrategyParams(**base)
     from src.mhs.live_strategy import LIVE_RUNTIME_DATA_POLICY, assert_runtime_data_policy
 
-    assert LIVE_RUNTIME_DATA_POLICY == DATA_POLICY_LEGACY
+    assert LIVE_RUNTIME_DATA_POLICY == DATA_POLICY_ZOMBIE_MASK_V1
     assert assert_runtime_data_policy(_params()) is None
     with pytest.raises(DataIntegrityError, match="data_policy mismatch"):
-        assert_runtime_data_policy(_params(data_policy=DATA_POLICY_ZOMBIE_MASK_V1))
+        assert_runtime_data_policy(_params(data_policy=DATA_POLICY_LEGACY))
 
+
+
+def test_legacy_artifact_policy_does_not_auto_upgrade(tmp_path) -> None:
+    import dataclasses
+    import json
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_strategy import LiveStrategyParams, assert_runtime_data_policy, load_strategy_params, save_strategy_params
+    from src.mhs.pipeline.config import MhsRunConfig
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(data_policy='legacy')))
+    policy = build_deployment_policy(request, slow_horizon_hours=168, committee_member_weights={'m': 1.0}, admitted_members=('m',), target_annual_vol=0.35, exposure_cap=3.0)
+    params = LiveStrategyParams(schema_version=2, strategy_digest='', backtest_window=(pd.Timestamp('2021-01-01', tz='UTC'), pd.Timestamp('2025-01-01', tz='UTC')), created_at=pd.Timestamp('2025-01-02', tz='UTC'), policy=policy, bootstrap_sha256='a'*64, bootstrap_held_row={}, data_policy='legacy')
+    path = save_strategy_params(tmp_path/'legacy.json', params)
+    assert 'data_policy' not in json.loads(path.read_text(encoding='utf-8'))
+    loaded = load_strategy_params(path)
+    assert loaded.data_policy == 'legacy'
+    with pytest.raises(DataIntegrityError, match='data_policy mismatch'):
+        assert_runtime_data_policy(loaded)
+
+
+def test_assert_deployment_eligible_requires_backtest_reliability() -> None:
+    from types import SimpleNamespace
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_strategy import assert_deployment_eligible
+    weights = pd.DataFrame({'BTCUSDT': [0.1]}, index=pd.DatetimeIndex([pd.Timestamp('2026-01-01', tz='UTC')]))
+    report = SimpleNamespace(status='COMPLETE', research_go=SimpleNamespace(eligible=True), backtest_reliability=SimpleNamespace(eligible=False), blend=SimpleNamespace(target_weights=weights))
+    with pytest.raises(DataIntegrityError, match='reliability'):
+        assert_deployment_eligible(report)

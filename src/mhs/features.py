@@ -166,6 +166,60 @@ def build_feature_books(
     return books
 
 
+def build_feature_books_by_boundary(
+    specs: Sequence[FeatureSpec],
+    panels: Mapping[str, pd.DataFrame],
+    mask: pd.DataFrame,
+    decision_grid: pd.DatetimeIndex,
+    train_ends: Mapping[str, pd.Timestamp],
+    min_symbols: int = 8,
+) -> dict[str, dict[str, pd.DataFrame]]:
+    """Build once, admit per boundary (INV-WALK-FORWARD-INDEPENDENCE).
+
+    Each feature builder runs exactly once over the full panels; admission is
+    then audited separately per boundary using only rows strictly before that
+    boundary's ``train_end``, so later coverage can never decide an earlier
+    boundary's member set. Boundaries admitting an identical feature set share
+    the same immutable book objects (no per-fold wide-panel recomputation, no
+    duplication: PERF-BOUNDARY-FEATURE-ONCE).
+    """
+    if min_symbols < 2:
+        raise ValueError(f"min_symbols must be >= 2, got {min_symbols}")
+    built: dict[str, pd.DataFrame] = {}
+    for spec in specs:
+        missing = [c for c in spec.required_columns if c not in panels]
+        if missing:
+            raise ValueError(
+                f"spec '{spec.name}' required_columns absent from panels: {missing}"
+            )
+        feature = spec.builder(panels)
+        if not feature.index.equals(mask.index) or list(feature.columns) != list(mask.columns):
+            raise ValueError(
+                f"feature '{spec.name}' and mask must be identically indexed and columned"
+            )
+        built[spec.name] = feature
+    books: dict[str, dict[str, pd.DataFrame]] = {}
+    admitted: dict[str, dict[str, pd.DataFrame]] = {}
+    for label, train_end in train_ends.items():
+        in_cutoff = mask.index < train_end
+        key_parts: list[str] = []
+        boundary_books: dict[str, pd.DataFrame] = {}
+        for spec in specs:
+            feature = built[spec.name]
+            coverage = feature_coverage_audit(feature.loc[in_cutoff], mask.loc[in_cutoff])
+            if any(cov < spec.min_coverage for cov in coverage.values()):
+                continue
+            key_parts.append(spec.name)
+            step = rank_weight_book(feature, mask, 1, min_symbols)
+            sampled = step.reindex(decision_grid)
+            boundary_books[spec.name] = sampled.reindex(step.index, method="ffill").fillna(0.0)
+        key = "\x00".join(key_parts)
+        if key not in admitted:
+            admitted[key] = boundary_books
+        books[label] = admitted[key]
+    return books
+
+
 def equal_risk_combination(
     books: Mapping[str, pd.DataFrame],
     scale_returns: Mapping[str, pd.Series],

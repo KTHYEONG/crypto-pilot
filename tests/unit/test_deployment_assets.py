@@ -58,3 +58,23 @@ def test_deploy_workflow_waits_for_daemon_idle_gate_before_recreate() -> None:
     assert '--waited-s "$waited"' in workflow
     assert '"$rc" -ne 10' in workflow
     assert "sleep 60" in workflow
+
+
+def test_docker_compose_memory_budget_fits_oci_a1_host() -> None:
+    from pathlib import Path
+
+    # Given
+    root = Path(__file__).resolve().parents[2]
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+
+    # When
+    live_block, liquidation_block = compose.split("  liquidation-collector:\n", 1)
+
+    # Then
+    assert "container_name: mhs-live-daemon" in live_block
+    assert "mem_limit: 3g" in live_block
+    assert "mem_limit: 1200m" not in compose
+    assert "container_name: liquidation-collector" in liquidation_block
+    assert "mem_limit: 768m" in liquidation_block
+    assert "HARDWARE_MAX_WORKERS" not in compose
+

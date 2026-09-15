@@ -398,3 +398,42 @@ def test_xs_mom_builder_rank_invariance() -> None:
     xs_book = rank_weight_book(xs_signal, mask, 1, 2)
     mom_book = rank_weight_book(mom_signal, mask, 1, 2)
     assert xs_book.equals(mom_book)
+
+
+def test_boundary_feature_admission_ignores_later_coverage() -> None:
+    import pandas as pd
+    from src.mhs.features import FeatureSpec, build_feature_books_by_boundary
+    idx = pd.date_range('2024-01-01', periods=12, freq='1h', tz='UTC')
+    mask = pd.DataFrame({'A': True, 'B': True}, index=idx)
+    base = pd.DataFrame({'A': range(12), 'B': range(12)}, index=idx, dtype=float)
+    calls = []
+    def build(panels):
+        calls.append(1)
+        return panels['close']
+    spec = FeatureSpec('x', ('close',), 1.0, build)
+    ends = {'early': idx[6], 'late': idx[-1]+pd.Timedelta(hours=1)}
+    first = build_feature_books_by_boundary((spec,), {'close': base}, mask, idx, ends, min_symbols=2)
+    assert len(calls) == 1
+    changed = base.copy()
+    changed.loc[idx[7]:, 'A'] = float('nan')
+    second = build_feature_books_by_boundary((spec,), {'close': changed}, mask, idx, ends, min_symbols=2)
+    assert len(calls) == 2
+    pd.testing.assert_frame_equal(first['early']['x'], second['early']['x'])
+
+
+def test_boundary_books_reject_bad_inputs() -> None:
+    import pandas as pd
+    import pytest
+    from src.mhs.features import FeatureSpec, build_feature_books_by_boundary
+    idx = pd.date_range('2024-01-01', periods=4, freq='1h', tz='UTC')
+    mask = pd.DataFrame({'A': True}, index=idx)
+    base = pd.DataFrame({'A': [1.0, 2.0, 3.0, 4.0]}, index=idx)
+    spec = FeatureSpec('x', ('close',), 1.0, lambda panels: panels['close'])
+    with pytest.raises(ValueError, match='min_symbols'):
+        build_feature_books_by_boundary((spec,), {'close': base}, mask, idx, {'b': idx[0]}, min_symbols=1)
+    with pytest.raises(ValueError, match='required_columns'):
+        build_feature_books_by_boundary((spec,), {}, mask, idx, {'b': idx[0]})
+    shifted = base.copy()
+    shifted.index = shifted.index + pd.Timedelta(hours=1)
+    with pytest.raises(ValueError, match='identically indexed'):
+        build_feature_books_by_boundary((spec,), {'close': shifted}, mask, idx, {'b': idx[0]})

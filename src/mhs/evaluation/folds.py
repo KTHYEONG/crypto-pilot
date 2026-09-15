@@ -487,11 +487,16 @@ def _run_anchored_fold(
         )
         if not np.isfinite(equity.to_numpy()).all() or not (equity > 0).all():
             failures.append(GO_REASON_NONFINITE_EQUITY)
-        if not primary.ledger.primary_valid:
+        # Disclosed terminal inventory is evidence, not data loss: gaps that
+        # are exclusively UNKNOWN_TERMINATION keep the alpha verdict clean
+        # (deployment is still blocked downstream by backtest reliability).
+        ledger_gaps = primary.ledger.data_gaps
+        terminal_only = bool(ledger_gaps) and all(g.code == "UNKNOWN_TERMINATION" for g in ledger_gaps)
+        if not primary.ledger.primary_valid and not terminal_only:
             failures.append(GO_REASON_INVALID_PRIMARY)
         if (
             primary.termination_counts.get("MISSING_DATA", 0) > 0
-            or primary.termination_counts.get("UNKNOWN_TERMINATION", 0) > 0
+            or (primary.termination_counts.get("UNKNOWN_TERMINATION", 0) > 0 and not terminal_only)
         ):
             failures.append(GO_REASON_EXECUTION_GAP)
         _fold_debug_mode = (

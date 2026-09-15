@@ -135,6 +135,11 @@ class PipelineContext:
     evidence_calibration: Any = None
     research_go: Any = None
     deployment: Any = None
+    # Backtest reliability certification (P0/P3): populated by assemble_report.
+    backtest_reliability: Any = None
+    input_provenance: Any = None
+    forward_provenance: Any = None
+    validation_tracks: dict[str, Any] | None = None
 
     # Diagnostic results
     xs_ic: dict[str, float] = field(default_factory=dict)

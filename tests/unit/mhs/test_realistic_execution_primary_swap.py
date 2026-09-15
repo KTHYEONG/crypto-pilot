@@ -66,7 +66,8 @@ def _write_mhs_market(root: Path) -> pd.Timestamp:
         prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, n_hours)))
         pd.DataFrame(
             {"timestamp": epoch, "open": prices, "high": prices * 1.001,
-             "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours},
+             "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours,
+             "volume": [1000.0] * n_hours},
         ).to_parquet(hdir / f"{sym}.parquet")
         # 1m fills track the same underlying instrument as the 1h close within
         # a tight intra-hour noise band (mirrors real exchange data); an

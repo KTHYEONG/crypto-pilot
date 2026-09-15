@@ -130,14 +130,30 @@ def calibrated_report(synthetic_market):
     of mutating a copy-on-write shadow.
     """
     from multiprocessing import Manager
+    from queue import Empty
 
     root, end = synthetic_market
-    mgr = Manager()
-    captured = mgr.dict({
-        "ema_spans": mgr.dict(),
-        "regime_callers": mgr.list(),
-        "deadband_callers": mgr.list(),
-    })
+    # Some constrained CI/sandbox runners deny the socket option used by
+    # ``multiprocessing.Manager``.  The diagnostic itself only needs a small
+    # append-only observation stream; use an inherited queue in that case so
+    # fork workers remain observable without weakening the production path.
+    try:
+        mgr = Manager()
+    except (EOFError, OSError, PermissionError):
+        mgr = None
+        event_queue = __import__("multiprocessing").Queue()
+        captured = {
+            "ema_spans": {},
+            "regime_callers": [],
+            "deadband_callers": [],
+        }
+    else:
+        event_queue = None
+        captured = mgr.dict({
+            "ema_spans": mgr.dict(),
+            "regime_callers": mgr.list(),
+            "deadband_callers": mgr.list(),
+        })
     from src.mhs.evaluation import books as eval_books
 
     real_book_weights = eval_books._book_weights
@@ -146,26 +162,38 @@ def calibrated_report(synthetic_market):
     real_deadband = scaling._apply_rebalance_deadband
 
     def _book_weights(log_close, eligible, spec, step_grid, ema_span=None):
-        spans = captured["ema_spans"].get(spec.band.name)
-        if spans is None:
-            spans = mgr.list()
-            captured["ema_spans"][spec.band.name] = spans
-        spans.append(ema_span)
+        if mgr is None:
+            event_queue.put(("ema", spec.band.name, ema_span))
+        else:
+            spans = captured["ema_spans"].get(spec.band.name)
+            if spans is None:
+                spans = mgr.list()
+                captured["ema_spans"][spec.band.name] = spans
+            spans.append(ema_span)
         return real_book_weights(log_close, eligible, spec, step_grid, ema_span=ema_span)
 
     def _regime(*args, **kwargs):
         caller = inspect.currentframe().f_back.f_code.co_name
-        captured["regime_callers"].append(caller)
+        if mgr is None:
+            event_queue.put(("regime", caller))
+        else:
+            captured["regime_callers"].append(caller)
         return real_regime(*args, **kwargs)
 
     def _helper(*args, **kwargs):
         caller = inspect.currentframe().f_back.f_code.co_name
-        captured["regime_callers"].append(caller)
+        if mgr is None:
+            event_queue.put(("regime", caller))
+        else:
+            captured["regime_callers"].append(caller)
         return real_helper(*args, **kwargs)
 
     def _deadband(*args, **kwargs):
         caller = inspect.currentframe().f_back.f_code.co_name
-        captured["deadband_callers"].append(caller)
+        if mgr is None:
+            event_queue.put(("deadband", caller))
+        else:
+            captured["deadband_callers"].append(caller)
         return real_deadband(*args, **kwargs)
 
     eval_books._book_weights = _book_weights
@@ -184,5 +212,20 @@ def calibrated_report(synthetic_market):
         scaling._regime_cash_scale = real_regime
         scaling.regime_cash_scale_1h = real_helper
         scaling._apply_rebalance_deadband = real_deadband
+    if mgr is None:
+        while True:
+            try:
+                kind, value, *extra = event_queue.get_nowait()
+            except Empty:
+                break
+            if kind == "ema":
+                captured["ema_spans"].setdefault(value, []).append(extra[0])
+            elif kind == "regime":
+                captured["regime_callers"].append(value)
+            elif kind == "deadband":
+                captured["deadband_callers"].append(value)
+        event_queue.close()
+        event_queue.join_thread()
     yield report, captured
-    mgr.shutdown()
+    if mgr is not None:
+        mgr.shutdown()

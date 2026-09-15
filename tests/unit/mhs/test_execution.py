@@ -312,3 +312,143 @@ def test_equity_at_infinite_price_raises_data_integrity_error() -> None:
     acc.last_prices_arr[1] = -np.inf
     with pytest.raises(DataIntegrityError):
         acc._equity_at()
+
+
+def test_replay_is_invariant_to_future_tail_mark() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01', periods=5, freq='3min', tz='UTC')
+    weights = pd.DataFrame({'BTCUSDT': [1.0]}, index=pd.DatetimeIndex([grid[0]]))
+    def run(last: float):
+        price = pd.DataFrame({'BTCUSDT': [100.0, 100.0, 100.0, 100.0, last]}, index=grid)
+        window = ExecutionReplayWindow(window_start=grid[0], window_end=grid[-1], columns=('BTCUSDT',), symbols=('BTCUSDT',), minute_grid=grid, highs=price, lows=price, closes=price, marks=price, bar_funding=price*0.0, target_weights=weights, signal_available_at=pd.DatetimeIndex([grid[0]]), quote_volumes=price*0.0+1000.0, funding_known=price.notna(), bar_available_at=grid+pd.Timedelta(minutes=3))
+        return replay_execution_windows((window,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
+    a, b = run(100.0), run(200.0)
+    cols = ['timestamp', 'quantity_delta', 'fill_price']
+    pd.testing.assert_frame_equal(a.simulated_fills[cols], b.simulated_fills[cols])
+
+
+def test_replay_does_not_fabricate_terminal_exit() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01', periods=4, freq='3min', tz='UTC')
+    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=px.notna(), bar_available_at=grid+pd.Timedelta(minutes=3))
+    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
+    assert result.forced_exit_count == 0
+    assert 'forced_exit' not in set(result.simulated_fills['reason'])
+    assert not result.ledger.primary_valid
+    assert any(g.code == 'UNKNOWN_TERMINATION' for g in result.ledger.data_gaps)
+
+
+def test_zero_volume_bar_cannot_fill() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01', periods=4, freq='3min', tz='UTC')
+    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0, funding_known=px.notna(), bar_available_at=grid+pd.Timedelta(minutes=3))
+    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
+    assert result.fill_count == 0
+    assert any(g.code == 'ZERO_OR_UNKNOWN_VOLUME' for g in result.ledger.data_gaps)
+
+
+def test_fill_effective_time_is_not_before_bar_availability() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01', periods=4, freq='3min', tz='UTC')
+    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)
+    available = grid + pd.Timedelta(minutes=3)
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=px.notna(), bar_available_at=available)
+    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
+    assert (pd.to_datetime(result.simulated_fills['timestamp'], utc=True) >= available[1]).all()
+
+
+def test_strategy_replay_delegates_to_causal_window_engine(monkeypatch) -> None:
+    import src.mhs.execution.strategy_replay as module
+    sentinel = object()
+    calls = []
+    monkeypatch.setattr(module, 'replay_execution_windows', lambda *args, **kwargs: calls.append((args, kwargs)) or sentinel)
+    result = module._delegate_single_panel_window(object(), initial_equity=1.0, execution_bound='OHLCV_IMMEDIATE_TAKER', spec=object(), min_equity_fraction=None)
+    assert result is sentinel
+    assert len(calls) == 1
+
+
+def test_replay_flags_future_mark_reference() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01', periods=4, freq='3min', tz='UTC')
+    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=px.notna(), bar_available_at=grid+pd.Timedelta(hours=1))
+    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
+    assert not result.ledger.primary_valid
+    assert any(g.code == 'FUTURE_DATA_REFERENCE' for g in result.ledger.data_gaps)
+
+
+def test_replay_blocks_fill_after_bar_availability() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01', periods=4, freq='3min', tz='UTC')
+    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=px.notna(), bar_available_at=grid-pd.Timedelta(hours=1))
+    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
+    assert result.fill_count == 0
+    assert any(g.code == 'CAUSAL_TIMING_VIOLATION' for g in result.ledger.data_gaps)
+
+
+def test_replay_flags_unknown_funding_on_held_and_active() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01', periods=5, freq='3min', tz='UTC')
+    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)
+    known = px.notna()
+    known.iloc[2, 0] = False
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0, 1.0]}, index=[grid[0], grid[2]]), pd.DatetimeIndex([grid[0], grid[2]]), quote_volumes=px*0.0+1.0, funding_known=known, bar_available_at=grid+pd.Timedelta(minutes=3))
+    result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
+    assert not result.ledger.primary_valid
+    assert any(g.code == 'MISSING_HELD_FUNDING' for g in result.ledger.data_gaps)
+    blocked_known = px.notna()
+    blocked_known.iloc[1, 0] = False
+    wb = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=blocked_known, bar_available_at=grid+pd.Timedelta(minutes=3))
+    blocked = replay_execution_windows((wb,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
+    assert blocked.fill_count == 0
+    assert any(g.code == 'MISSING_ACTIVE_FUNDING' for g in blocked.ledger.data_gaps)
+
+
+def test_laddered_proxy_blocks_zero_volume_fill() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01', periods=12, freq='3min', tz='UTC')
+    px = pd.DataFrame({'BTCUSDT': 100.0}, index=grid)
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0, funding_known=px.notna(), bar_available_at=grid+pd.Timedelta(minutes=3))
+    result = replay_execution_windows((w,), 1000.0, 'OHLCV_LADDERED_PROXY', ExecutionSpec())
+    assert result.fill_count == 0
+    assert any(g.code == 'ZERO_OR_UNKNOWN_VOLUME' for g in result.ledger.data_gaps)
+
+
+def test_peg_chase_proxy_books_effective_time_fill() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01 12:00', periods=40, freq='5min', tz='UTC')
+    px = pd.DataFrame({'A': [100.20] * len(grid)}, index=grid)
+    marks = px.copy()
+    marks.iloc[0, 0] = 100.0
+    target = pd.DataFrame({'A': [0.01]}, index=pd.DatetimeIndex([pd.Timestamp('2025-01-01 12:00', tz='UTC')]))
+    signal_at = pd.DatetimeIndex([pd.Timestamp('2025-01-01 13:00', tz='UTC')])
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('A',), ('A',), grid, px, px, px, marks, px*0.0, target, signal_at, quote_volumes=px*0.0+1000.0, funding_known=px.notna(), bar_available_at=grid+pd.Timedelta(minutes=5))
+    result = replay_execution_windows((w,), 1.0, 'OHLCV_PEG_CHASE_PROXY', ExecutionSpec())
+    assert not result.simulated_fills.empty
+
+
+def test_peg_chase_proxy_blocks_zero_volume_fill() -> None:
+    import pandas as pd
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    grid = pd.date_range('2025-01-01 12:00', periods=40, freq='5min', tz='UTC')
+    px = pd.DataFrame({'A': [100.20] * len(grid)}, index=grid)
+    marks = px.copy()
+    marks.iloc[0, 0] = 100.0
+    target = pd.DataFrame({'A': [0.01]}, index=pd.DatetimeIndex([pd.Timestamp('2025-01-01 12:00', tz='UTC')]))
+    signal_at = pd.DatetimeIndex([pd.Timestamp('2025-01-01 13:00', tz='UTC')])
+    w = ExecutionReplayWindow(grid[0], grid[-1], ('A',), ('A',), grid, px, px, px, marks, px*0.0, target, signal_at, quote_volumes=px*0.0, funding_known=px.notna(), bar_available_at=grid+pd.Timedelta(minutes=5))
+    result = replay_execution_windows((w,), 1.0, 'OHLCV_PEG_CHASE_PROXY', ExecutionSpec())
+    assert result.fill_count == 0
+    assert any(g.code == 'ZERO_OR_UNKNOWN_VOLUME' for g in result.ledger.data_gaps)

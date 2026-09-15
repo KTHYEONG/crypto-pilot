@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
+from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.params import COMMITTEE_TARGET_GROSS
 
 # Main-logic default as of 2026-08-23: selected per ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING
@@ -109,7 +110,10 @@ class MhsRunConfig:
     # One-time, narrowly-scoped extension of the sealed evaluation window for a
     # user-authorized final-OOS check (2026-08-25 decision) -- see MHS_FINAL_OOS_CUTOFF_2026H1.
     final_oos_2026h1: bool = False
-    data_policy: Literal['legacy', 'zombie_mask_v1'] = 'legacy'
+    data_policy: Literal['legacy', 'zombie_mask_v1'] = MHS_DATA_POLICY_DEFAULT
+    input_manifest_path: str | None = None
+    forward_execution_quality_dir: str | None = None
+    forward_strategy_digest: str | None = None
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> MhsRunConfig:
@@ -195,4 +199,7 @@ class MhsRunConfig:
             committee_member_attribution=args.committee_member_attribution,
             final_oos_2026h1=args.final_oos_2026h1,
             data_policy=args.data_policy,
+            input_manifest_path=args.input_manifest_path,
+            forward_execution_quality_dir=args.forward_execution_quality_dir,
+            forward_strategy_digest=args.forward_strategy_digest,
         )

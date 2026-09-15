@@ -158,3 +158,18 @@ def test_load_funding_series_missing_and_loaded(tmp_path, monkeypatch) -> None:
     assert dropped["A"] == "missing"
     assert "B" in series
     assert series["B"].equals(loaded)
+
+
+def test_clear_market_data_caches_reloads_replaced_file(monkeypatch) -> None:
+    import pandas as pd
+    import src.mhs.marks as marks
+    state = {'close': 100.0}
+    def frame():
+        return pd.DataFrame({'datetime': [pd.Timestamp('2025-01-01', tz='UTC')], 'close': [state['close']]})
+    monkeypatch.setattr(marks.DataCollector, '_load_mark_price_cache', staticmethod(lambda path: frame()))
+    monkeypatch.setattr(marks._futures_collection, '_mark_price_path', lambda symbol, timeframe: '/tmp/fake.parquet')  # noqa: S108
+    first = marks._get_symbol_mark_frame('BTCUSDT', '1h')['close'].iloc[0]
+    state['close'] = 200.0
+    marks.clear_mhs_market_data_caches()
+    second = marks._get_symbol_mark_frame('BTCUSDT', '1h')['close'].iloc[0]
+    assert (first, second) == (100.0, 200.0)
