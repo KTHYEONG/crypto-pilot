@@ -467,6 +467,12 @@ class _BoundExecutionReplayAccumulator:
             self.unfilled_count += 1
             self.termination_counts["NO_VOLUME_UNFILLED"] = self.termination_counts.get("NO_VOLUME_UNFILLED", 0) + 1
             return True
+        if gap.code == "MISSING_ACTIVE_FUNDING":
+            # 펀딩 unknown으로 막힌 신규/청산 체결 시도는 보유 리스크가 없다(체결 전이라
+            # 자본 노출이 아직 없음) — KNOWN_ZERO_VOLUME과 동일하게 미체결·재시도.
+            self.unfilled_count += 1
+            self.termination_counts["NO_FUNDING_UNFILLED"] = self.termination_counts.get("NO_FUNDING_UNFILLED", 0) + 1
+            return True
         self.data_gaps.append(gap)
         self.ledger_valid = False
         self.invalid_reasons.add("MISSING_DATA")
