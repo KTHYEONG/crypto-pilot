@@ -48,6 +48,7 @@ from src.mhs.params import (
     GROWTH_RISK_ENVELOPES,
     MEASURED_EXECUTION_COST_TIERS_BPS,
     MOMENTUM_HORIZON_CANDIDATES_HOURS,
+    NAME_DRIFT_TRIM_INTERVAL_HOURS,
     PNL_TARGET_ANNUAL_VOL,
     PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
     PNL_VOL_TARGET_MAX_SCALE,
@@ -179,8 +180,14 @@ class ExecutionSpec:
     spread_ewma_alpha: float = 0.25
     min_notional_probe_usdt: float = 0.0
     reference_equity_usdt: float = 2000.0
+    name_drift_trim_max_weight: float | None = None
+    name_drift_trim_interval_hours: int = NAME_DRIFT_TRIM_INTERVAL_HOURS
 
     def __post_init__(self) -> None:
+        if self.name_drift_trim_max_weight is not None and not (0.0 < self.name_drift_trim_max_weight < 1.0):
+            raise ValueError(f"name_drift_trim_max_weight must be in (0.0, 1.0) when set, got {self.name_drift_trim_max_weight}")
+        if self.name_drift_trim_interval_hours < 1:
+            raise ValueError(f"name_drift_trim_interval_hours must be >= 1, got {self.name_drift_trim_interval_hours}")
         if min(self.maker_fee_bps, self.taker_fee_bps, self.taker_slippage_bps) < 0:
             raise ValueError("fees and slippage must be non-negative")
         if self.passive_timeout_minutes < 1:
