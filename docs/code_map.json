@@ -74,6 +74,7 @@
       "tests/unit/common/test_config.py",
       "tests/unit/live/test_order_journal.py",
       "tests/unit/live/test_runner_shadow_cycle.py",
+      "tests/unit/mhs/evaluation/test_windows.py",
       "tests/unit/mhs/test_live_signal_step.py"
     ]
   },
@@ -93,8 +94,7 @@
     "testing": "tests/unit/live/test_crypto.py"
   },
   "src/live/data_refresh.py": {
-    "testing": "tests/unit/live/test_data_refresh.py",
-    "architecture": "docs/architecture/design-decisions.md"
+    "testing": "tests/unit/live/test_data_refresh.py"
   },
   "src/live/data_repair.py": {
     "testing": "tests/unit/live/test_data_repair.py"
@@ -301,7 +301,9 @@
   "src/mhs/execution/accounting.py": {
     "testing": "tests/unit/mhs/execution/test_accounting.py"
   },
-  "src/mhs/execution/accumulator.py": {},
+  "src/mhs/execution/accumulator.py": {
+    "testing": "tests/unit/mhs/test_execution.py"
+  },
   "src/mhs/execution/batch.py": {},
   "src/mhs/execution/contracts.py": {
     "testing": "tests/unit/mhs/execution/test_contracts.py"

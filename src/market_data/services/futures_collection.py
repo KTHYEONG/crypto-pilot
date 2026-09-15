@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
@@ -72,6 +73,19 @@ def funding_gap_start_ms(timestamps_ms: Iterable[int], window_start_ms: int) -> 
         if b > window_start_ms and b - a > FUNDING_GAP_THRESHOLD_MS:
             return a
     return None
+
+
+def ohlcv_gap_start_ms(sorted_timestamps_ms: np.ndarray, window_start_ms: int, interval_ms: int) -> int | None:
+    """Return the left edge of the first internal OHLCV gap in the window.
+
+    Mirrors funding_gap_start_ms semantics: the left edge is returned, and a
+    leading edge (cache starting after the window start) is not a gap.
+    """
+    ts = np.asarray(sorted_timestamps_ms, dtype="int64")
+    if ts.size < 2:
+        return None
+    hits = np.flatnonzero((ts[1:] > int(window_start_ms)) & (np.diff(ts) > int(interval_ms)))
+    return int(ts[hits[0]]) if hits.size else None
 
 
 def _utc_now() -> pd.Timestamp:
@@ -256,10 +270,15 @@ class DataCollector:
         cache_df = self._load_cache(symbol, timeframe)
         req_end_ms = int(req_end.value // 1_000_000)
         latest_closed_open_ms = (req_end_ms // interval_ms) * interval_ms - interval_ms
+        # min/max 스팬만 보면 내부 공백(2022-02-26~28, 04-01~02 등)을 영구히 놓친다 — 펀딩과 같은 규칙.
+        cache_ts = np.unique(pd.to_numeric(cache_df["timestamp"], errors="coerce").dropna().to_numpy(dtype="int64")) if not cache_df.empty else np.empty(0, dtype="int64")
+        req_start_ms = int(req_start.value // 1_000_000)
+        span_gap_ms = ohlcv_gap_start_ms(cache_ts, req_start_ms, interval_ms)
         if (
             not cache_df.empty
             and cache_df["datetime"].min() <= req_start
             and cache_df["datetime"].max() >= pd.Timestamp(latest_closed_open_ms, unit="ms", tz="UTC")
+            and (span_gap_ms is None or span_gap_ms >= latest_closed_open_ms)
         ):
             return
         now = _utc_now()
@@ -272,10 +291,14 @@ class DataCollector:
         vision_tasks: list[tuple[int, int]] = []
         while current_month_start < min(req_end, api_cutoff):
             month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
+            month_start_ms = int(current_month_start.value // 1_000_000)
+            month_end_ms = int(month_end.value // 1_000_000)
+            month_gap_ms = ohlcv_gap_start_ms(cache_ts, month_start_ms, interval_ms)
             if (
                 cache_df.empty
                 or cache_df["datetime"].min() > current_month_start
                 or cache_df["datetime"].max() < month_end
+                or (month_gap_ms is not None and month_gap_ms < month_end_ms)
             ):
                 vision_tasks.append((current_month_start.year, current_month_start.month))
             current_month_start += pd.offsets.MonthBegin(1)
@@ -1205,10 +1228,16 @@ class DataCollector:
         vision_tasks: list[tuple[int, int]] = []
         while current_month_start < min(req_end, api_cutoff):
             month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
+            month_start_ms = int(current_month_start.value // 1_000_000)
+            month_end_ms = int(month_end.value // 1_000_000)
+            # min/max 스팬만 보면 이 달 앞뒤로 캐시가 있다는 이유로 달 통째 내부공백을
+            # 놓친다: 이 달과 겹치는 첫 내부공백이 있는지 별도로 확인한다.
+            gap_ms = funding_gap_start_ms(cache_df["timestamp"], month_start_ms) if not cache_df.empty else None
             if (
                 cache_df.empty
                 or cache_df["datetime"].min() > current_month_start
                 or cache_df["datetime"].max() < month_end
+                or (gap_ms is not None and gap_ms < month_end_ms)
             ):
                 vision_tasks.append((current_month_start.year, current_month_start.month))
             current_month_start += pd.offsets.MonthBegin(1)

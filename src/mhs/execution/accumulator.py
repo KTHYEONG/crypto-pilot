@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.execution.accounting import CausalPortfolioState, reconcile_causal_state
+from src.mhs.execution.accounting import QTY_EPS, CausalPortfolioState, reconcile_causal_state
 from src.mhs.types import ExecutionSpec
 
 from . import _ExecutionBound, _MarkSource
@@ -22,6 +22,9 @@ from .contracts import (
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
 )
+
+# 마지막 유동 봉 이후 24h(zombie_mask_v1 K=24 1h와 동일 기간) — 실측 거래소 전체 중단 최장 69분이라 중단을 상폐로 오판하지 않는다.
+DELIST_SETTLEMENT_IDLE_NS: int = 24 * 3600 * 1_000_000_000
 
 
 class _BoundExecutionReplayAccumulator:
@@ -103,6 +106,9 @@ class _BoundExecutionReplayAccumulator:
         self._w_fknown = np.zeros((0, 0), dtype=bool)
         self._w_avail_ns: np.ndarray = np.zeros(0, dtype="int64")
         self._w_mark_avail = np.zeros((0, 0), dtype="int64")
+        self.last_liquid_ns = np.full(self.n_cols, -1, dtype="int64")
+        self._w_last_liquid_idx = np.zeros((0, 0), dtype=np.intp)
+        self._span_scan_from = 0
         self.fill_bar_ns: list[int] = []
         self.fill_gcol: list[int] = []
 
@@ -228,6 +234,7 @@ class _BoundExecutionReplayAccumulator:
         for i in range(len(tw_index)):
             self._consume_single_intent(i, decision_ns_all, dpos_all, on_grid_all, gpos, target_values, spos_all, marks_values, grid_ns, funding_matrix, tw_index, sig_index, mark_valid, last_close_idx, local_cols, submit_anchored, n_grid, closes_values, grid, n_cols, lows_values, highs_values)
         self._consume_append_ledger(grid_ns, n_grid, local_cols, fill_start, n_local, marks_values, gpos, grid, funding_matrix, bar_ns, closes_values)
+        self._advance_liquidity_carry(grid_ns, gpos, decision_ns_all)
         self._consume_update_spreads(highs_values, lows_values, gpos)
 
     def _consume_validate_window(self, w: ExecutionReplayWindow) -> tuple[int, list[str], int, np.ndarray, pd.DatetimeIndex, np.ndarray, int, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -240,6 +247,12 @@ class _BoundExecutionReplayAccumulator:
         local_cols = list(w.symbols)
         n_local = len(local_cols)
         gpos = np.asarray([gpos_of[s] for s in local_cols], dtype=np.intp)
+        in_window = np.zeros(n_cols, dtype=bool)
+        in_window[gpos] = True
+        outside = np.flatnonzero((np.abs(self.units_arr) >= QTY_EPS) & ~in_window)
+        if outside.size:
+            j = int(outside[0])
+            raise DataIntegrityError(f"held position outside execution window roster (symbol={columns[j]!r} units={float(self.units_arr[j])!r})")
         grid = w.minute_grid
         grid_ns = np.asarray(grid, dtype="datetime64[ns]").astype("int64")
         n_grid = len(grid_ns)
@@ -282,6 +295,7 @@ class _BoundExecutionReplayAccumulator:
         else:
             qv = np.ones((n_grid_int, n_local), dtype="float64")
         self._w_qv = qv
+        self._w_last_liquid_idx = np.maximum.accumulate(np.where(qv > 0.0, np.arange(n_grid_int)[:, None], -1), axis=0)
         if w.funding_known is not None:
             fknown = np.zeros((n_grid_int, n_local), dtype=bool)
             for j, sym in enumerate(local_cols):
@@ -345,7 +359,7 @@ class _BoundExecutionReplayAccumulator:
             span_units = np.repeat(self.units_arr[gpos][None, :], hi - lo, axis=0)
             for fns, fj, fqty in self._fills_in_span(self.last_time_ns, target_ns, grid_ns, lo, gpos):
                 span_units[:fns, int(fj)] -= float(fqty)
-            held_unknown = (span_units != 0.0) & ~span_known
+            held_unknown = (np.abs(span_units) >= QTY_EPS) & ~span_known
             if bool(held_unknown.any()):
                 self.ledger_valid = False
                 self.invalid_reasons.add("MISSING_DATA")
@@ -378,13 +392,23 @@ class _BoundExecutionReplayAccumulator:
         """
         out: list[tuple[int, int, float]] = []
         floor = -1 if last_ns is None else int(last_ns)
-        gpos_list = gpos.tolist()
-        for fns, gcol, fqty in zip(self.fill_bar_ns, self.fill_gcol, self.fill_qty, strict=True):
-            if int(fns) <= floor or int(fns) > int(target_ns):
+        target = int(target_ns)
+        n = len(self.fill_bar_ns)
+        start = self._span_scan_from
+        # last_time_ns가 단조증가하므로 floor 이하 접두 체결은 이후 모든 호출에서도 제외 — 커서로 건너뛰어 O(전체 체결) 재주사를 없앤다.
+        while start < n and int(self.fill_bar_ns[start]) <= floor:
+            start += 1
+        self._span_scan_from = start
+        local_of = {int(g): j for j, g in enumerate(gpos.tolist())}
+        for k in range(start, n):
+            fns = int(self.fill_bar_ns[k])
+            if fns <= floor or fns > target:
                 continue
-            rel = int(np.searchsorted(grid_ns, int(fns), side="left")) - int(lo)
-            if int(gcol) in gpos_list:
-                out.append((max(rel, 0), gpos_list.index(int(gcol)), float(fqty)))
+            j = local_of.get(int(self.fill_gcol[k]))
+            if j is None:
+                continue
+            rel = int(np.searchsorted(grid_ns, fns, side="left")) - int(lo)
+            out.append((max(rel, 0), j, float(self.fill_qty[k])))
         return out
 
     def _bar_viability_gap(
@@ -407,7 +431,14 @@ class _BoundExecutionReplayAccumulator:
         falls outside ``(signal, availability]`` has no causal standing
         (INV-BAR-AVAILABILITY). Returns the blocking gap, else ``None``.
         """
-        if not (float(self._w_qv[fill_pos, col]) > 0.0):
+        qv = float(self._w_qv[fill_pos, col])
+        if qv == 0.0:
+            return ExecutionDataGap(
+                code="KNOWN_ZERO_VOLUME", symbol=sym,
+                timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
+                execution_bound=self.execution_bound,
+            )
+        if not (qv > 0.0):
             return ExecutionDataGap(
                 code="ZERO_OR_UNKNOWN_VOLUME", symbol=sym,
                 timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
@@ -431,12 +462,79 @@ class _BoundExecutionReplayAccumulator:
         self, gap: ExecutionDataGap,
     ) -> bool:
         """Record a viability block as gap plus primary-invalid; skip the fill."""
+        if gap.code == "KNOWN_ZERO_VOLUME":
+            # 알려진 0 거래량은 데이터 공백이 아니라 체결 불가(거래소 중단·상폐 꼬리) — 다음 결정에서 재시도(라이브와 동일).
+            self.unfilled_count += 1
+            self.termination_counts["NO_VOLUME_UNFILLED"] = self.termination_counts.get("NO_VOLUME_UNFILLED", 0) + 1
+            return True
         self.data_gaps.append(gap)
         self.ledger_valid = False
         self.invalid_reasons.add("MISSING_DATA")
         self.unfilled_count += 1
         return True
 
+
+    def _settle_idle_holdings(self, dns: int, spos: int, gpos: np.ndarray, local_cols: list[str], grid_ns: np.ndarray, marks_values: np.ndarray, n_grid: int, n_cols: int) -> None:
+        """Settle delisted idle holdings at the signal-bar mark (causal)."""
+        row = int(np.searchsorted(self._w_avail_ns, dns, side="right")) - 1
+        for col, gcol in enumerate(gpos.tolist()):
+            units = float(self.units_arr[gcol])
+            if abs(units) < QTY_EPS:
+                continue
+            if row < 0 or float(self._w_qv[row, col]) != 0.0:
+                continue
+            idx = int(self._w_last_liquid_idx[row, col])
+            last_liquid = max(int(self.last_liquid_ns[gcol]), int(grid_ns[idx]) if idx >= 0 else -1)
+            if last_liquid < 0 or dns - last_liquid < DELIST_SETTLEMENT_IDLE_NS:
+                continue
+            if spos >= n_grid:
+                continue
+            price = float(marks_values[spos, col])
+            if not (np.isfinite(price) and price > 0):
+                continue
+            self._book_delist_settlement(col, gcol, local_cols[col], spos, units, price, grid_ns, marks_values, gpos, n_cols)
+
+    def _book_delist_settlement(self, col: int, gcol: int, sym: str, spos: int, units: float, price: float, grid_ns: np.ndarray, marks_values: np.ndarray, gpos: np.ndarray, n_cols: int) -> None:
+        """Book a causal delisting settlement.
+
+        Settles like live paper_delisted_close (mark, no fee), booked on fill track, ledger and mirror identically.
+        """
+        qty = -units
+        self.last_prices_arr[gcol] = price
+        self.cash -= qty * price
+        self.units_arr[gcol] = 0.0
+        self.fill_bar_ns.append(int(grid_ns[spos]))
+        self.fill_gcol.append(int(gcol))
+        self._mirror_pending.append((int(grid_ns[spos]), int(gcol), float(qty), float(price), 0.0))
+        fill_time = pd.Timestamp(int(self._w_avail_ns[spos]), unit="ns", tz="UTC")
+        pre_trade_equity = self._equity_at(gpos)
+        self.fill_ts.append(fill_time)
+        self.fill_symbol.append(sym)
+        self.fill_qty.append(qty)
+        self.fill_price.append(price)
+        self.fill_fee_bps.append(0.0)
+        self.fill_reason.append("delist_settlement")
+        self.fill_pre_trade_equity.append(pre_trade_equity)
+        self.fill_times.append(fill_time)
+        self.submit_times.append(fill_time)
+        self.termination_counts["DELIST_SETTLEMENT"] = self.termination_counts.get("DELIST_SETTLEMENT", 0) + 1
+        if self.retain_event_snapshots:
+            marks_row = np.full(n_cols, np.nan, dtype="float64")
+            marks_row[gpos] = marks_values[spos]
+            self.units_after_events.append((fill_time, self.units_arr.copy()))
+            self.notional_after_events.append((fill_time, self.units_arr * marks_row))
+
+    def _advance_liquidity_carry(self, grid_ns: np.ndarray, gpos: np.ndarray, decision_ns_all: np.ndarray) -> None:
+        """Carry last-liquid timestamps forward to the next window (causal)."""
+        if len(decision_ns_all) == 0 or len(gpos) == 0:
+            return
+        rows = int(np.searchsorted(self._w_avail_ns, int(decision_ns_all[-1]), side="right"))
+        if rows <= 0:
+            return
+        idx = self._w_last_liquid_idx[rows - 1]
+        cand = np.where(idx >= 0, grid_ns[np.maximum(idx, 0)], -1).astype("int64")
+        # 다음 윈도우는 이 윈도우의 마지막 결정 시각부터 시작하므로 그 시각까지 가용한 봉만 이월한다(미래 봉 누설 없음).
+        self.last_liquid_ns[gpos] = np.maximum(self.last_liquid_ns[gpos], cand)
 
     def _consume_decision_price(self, col: int, on_grid: bool, dpos: int, spos: int, marks_values: np.ndarray, mark_valid: np.ndarray, last_close_idx: np.ndarray, local_cols: list[str], n_grid: int) -> float | None:
         """Resolve the anchor price for one intent, carried closes included."""
@@ -492,6 +590,7 @@ class _BoundExecutionReplayAccumulator:
         dpos = int(dpos_all[i])
         on_grid = bool(on_grid_all[i])
         self._advance_window(dns, dpos, on_grid, marks_values, self._w_mark_avail, grid_ns, funding_matrix, self._w_fknown, gpos)
+        self._settle_idle_holdings(dns, int(spos_all[i]), gpos, local_cols, grid_ns, marks_values, n_grid, n_cols)
         equity = self._equity_at(gpos)
         last_ledger_equity: float | None = None
         if self.equity_chunks:
@@ -1058,7 +1157,7 @@ class _BoundExecutionReplayAccumulator:
                 0.0,
             )
 
-            held = units_before != 0.0
+            held = np.abs(units_before) >= QTY_EPS
             joint = np.zeros_like(sym_finite, dtype=bool)
             joint[1:] = sym_finite[1:] & sym_finite[:-1]
             kept_region = np.arange(n_grid)[:, None] >= p0
@@ -1091,16 +1190,21 @@ class _BoundExecutionReplayAccumulator:
                 else np.zeros(n_grid, dtype="float64")
             )
 
+            # 마크가 유한해도 그 바의 펀딩이 causal mirror 기준 unknown이면(self._w_fknown)
+            # 원장도 미러와 똑같이 그 바의 펀딩을 0으로 처리해야 한다. sym_finite만 보면
+            # 정렬된 펀딩값이 남아 있는 unknown 바를 조용히 청구해 reconcile_causal_state가
+            # 실제 데이터(AIAUSDT/OMNIUSDT 펀딩 공백, 2026-09-15)에서 터진다.
+            usable = sym_finite & self._w_fknown
             charged = funding_matrix * units_before * marks_values
-            charged = np.where(sym_finite, charged, 0.0)
-            held_funding_trigger = (~sym_finite & held & (funding_matrix != 0.0)) & kept_region
+            charged = np.where(usable, charged, 0.0)
+            held_funding_trigger = (~usable & held & (funding_matrix != 0.0)) & kept_region
             if held_funding_trigger.any():
                 self.ledger_valid = False
                 self.invalid_reasons.add("MISSING_DATA")
                 if self.first_held_funding is None:
                     col_hit = held_funding_trigger.any(axis=0)
                     j0 = int(np.argmax(col_hit))
-                    mask_col = (~sym_finite & held & (funding_matrix != 0.0))[:, j0]
+                    mask_col = (~usable & held & (funding_matrix != 0.0))[:, j0]
                     trigger_pos = int(np.argmax(held_funding_trigger[:, j0][mask_col]))
                     self.first_held_funding = (local_cols[j0], grid[p0 + trigger_pos])
             funding_arr = (
@@ -1211,7 +1315,7 @@ class _BoundExecutionReplayAccumulator:
             gmarks[gpos] = marks_values[b]
             grates[gpos] = funding_matrix[b]
             gknown[gpos] = funding_known[b]
-            held_unknown = (state.units != 0.0) & ~gknown
+            held_unknown = (np.abs(state.units) >= QTY_EPS) & ~gknown
             if bool(held_unknown.any()):
                 self.ledger_valid = False
                 self.invalid_reasons.add("MISSING_DATA")

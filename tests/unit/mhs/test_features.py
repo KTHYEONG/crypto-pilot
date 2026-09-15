@@ -437,3 +437,37 @@ def test_boundary_books_reject_bad_inputs() -> None:
     shifted.index = shifted.index + pd.Timedelta(hours=1)
     with pytest.raises(ValueError, match='identically indexed'):
         build_feature_books_by_boundary((spec,), {'close': shifted}, mask, idx, {'b': idx[0]})
+
+
+def test_boundary_books_rank_each_admitted_feature_once(monkeypatch) -> None:
+    import pandas as pd
+    import src.mhs.features as features_module
+    from src.mhs.books import rank_weight_book
+    from src.mhs.features import FeatureSpec, build_feature_books_by_boundary
+    idx = pd.date_range('2024-01-01', periods=12, freq='1h', tz='UTC')
+    mask = pd.DataFrame({'A': True, 'B': True, 'C': True}, index=idx)
+    base = pd.DataFrame({'A': range(12), 'B': range(12, 0, -1), 'C': [1.0, 3.0] * 6}, index=idx, dtype=float)
+    calls = []
+
+    def counting(signal, eligible, sign, min_symbols):
+        calls.append(sign)
+        return rank_weight_book(signal, eligible, sign, min_symbols)
+
+    monkeypatch.setattr(features_module, 'rank_weight_book', counting)
+    specs = (
+        FeatureSpec('x', ('close',), 0.5, lambda p: p['close']),
+        FeatureSpec('y', ('close',), 0.5, lambda p: -p['close']),
+    )
+    ends = {f'b{i}': idx[3 + i] for i in range(5)}
+    # When
+    books = build_feature_books_by_boundary(specs, {'close': base}, mask, idx, ends, min_symbols=2)
+    # Then: one rank pass per feature, not per boundary x feature
+    assert len(calls) == 2
+    monkeypatch.setattr(features_module, 'rank_weight_book', rank_weight_book)
+    for label in ends:
+        for spec in specs:
+            step = rank_weight_book(spec.builder({'close': base}), mask, 1, 2)
+            expected = step.reindex(idx).reindex(step.index, method='ffill').fillna(0.0)
+            pd.testing.assert_frame_equal(books[label][spec.name], expected)
+
+

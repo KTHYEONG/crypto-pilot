@@ -17,6 +17,11 @@ from src.mhs.types import ExecutionSpec
 SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
     "SLPUSDT", "CTKUSDT", "LITUSDT", "AERGOUSDT", "PUMPUSDT", "CVXUSDT", "CVCUSDT",
     "BNXUSDT",
+    # 2026-09-15 실측: Binance Vision 원본 자체에 펀딩 이력이 없어 백필 불가(재조회로
+    # 복구되지 않음, 소스 아카이브의 진짜 공백).
+    "ICPUSDT",  # 펀딩 이력이 2022-09-01부터 시작(가격은 그 이전부터 존재) → 조기 진입 시 MISSING_ACTIVE_FUNDING
+    "AIAUSDT",  # 2025-12-11 12:00~2026-01-20 07:00 내부 공백(Vision 아카이브 자체가 비어 있음) → MISSING_HELD_FUNDING
+    "OMNIUSDT",  # 펀딩 이력이 2025-09-22에 종료(선물 상장폐지, OHLCV는 좀비 꼬리로 계속 나옴) → MISSING_HELD_FUNDING
 })
 
 

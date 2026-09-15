@@ -313,3 +313,41 @@ def test_missing_active_execution_file_stays_in_roster(tmp_path) -> None:
     assert windows[0].symbols == ('MISSUSDT',)
     assert windows[0].closes['MISSUSDT'].isna().all()
     assert windows[0].quote_volumes['MISSUSDT'].isna().all()
+
+
+def test_window_spill_root_prefers_env_and_defaults_to_repo_tmp(tmp_path, monkeypatch) -> None:
+    import os
+    from src.common.paths import BASE_DIR
+    from src.mhs.evaluation.windows import _window_spill_root
+    target = tmp_path / "custom_spill"
+    monkeypatch.setenv("MHS_SPILL_DIR", str(target))
+    assert _window_spill_root() == str(target)
+    assert target.is_dir()
+    monkeypatch.delenv("MHS_SPILL_DIR")
+    default = _window_spill_root()
+    assert default == str(BASE_DIR / "tmp" / "mhs_spill")
+    assert os.path.isdir(default)
+
+
+def test_book_outcome_spills_windows_under_window_spill_root(mhs_market, monkeypatch, tmp_path) -> None:
+    import dataclasses
+    import tempfile
+    from src.mhs import evaluation as ev
+    from tests.unit.mhs.test_evaluation_appresearch import _build_book_outcome_args
+    spill_root = tmp_path / "spill_root"
+    monkeypatch.setenv("MHS_SPILL_DIR", str(spill_root))
+    seen: list[object] = []
+    real = tempfile.TemporaryDirectory
+
+    def _recording(*args, **kwargs):
+        seen.append(kwargs.get("dir"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", _recording)
+    args = _build_book_outcome_args(mhs_market)
+    # When: the exact two-pass path spills windows
+    ev._book_outcome(**{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=False, committee_target_gross=None)})
+    # Then: the spill directory lives under the configured disk-backed root, not the system tmpfs
+    assert str(spill_root) in seen
+
+

@@ -21,6 +21,9 @@ from src.common.errors import DataIntegrityError
 
 from .contracts import SimulatedInventoryLedgerResult
 
+# 먼지 수량 임계, finalize의 기존 1e-12 및 net_units 임계와 동일
+QTY_EPS: float = 1e-12
+
 
 @dataclass(slots=True)
 class CausalPortfolioState:
@@ -52,7 +55,7 @@ class CausalPortfolioState:
             )
         finite = np.isfinite(marks)
         self.last_marks = np.where(finite, marks, self.last_marks)
-        held_unknown = (self.units != 0.0) & ~np.asarray(funding_known, dtype=bool)
+        held_unknown = (np.abs(self.units) >= QTY_EPS) & ~np.asarray(funding_known, dtype=bool)
         if bool(np.any(held_unknown)):
             raise DataIntegrityError(
                 "unknown funding for a held position fails closed: cannot settle funding"
