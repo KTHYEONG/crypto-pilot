@@ -254,6 +254,10 @@ PNL_VOL_TARGET_MAX_SCALE: float = 1.0 / COMMITTEE_TARGET_GROSS
 
 DISCOVERY_GATE_TRANCHE_COUNT: int = 8
 STRESS_COST_MULTIPLIER: float = 3.0
+# 단일 종목 드리프트 상한: 4개 균등 슬롯(0.05 = 레버리지 상한 3.0 / 실행 유니버스 60)이 상한에 걸린 값.
+NAME_DRIFT_TRIM_MAX_WEIGHT: float = 0.20
+# 4시간 점검은 시간별 점검과 동일한 MDD 감소, 결정 시점 단일 점검은 무효.
+NAME_DRIFT_TRIM_INTERVAL_HOURS: int = 4
 
 DISCOVERY_REVERSAL_CANDIDATES: tuple[int, ...] = (24, 48, 72, 96, 120, 144, 168)
 DISCOVERY_MOMENTUM_CANDIDATES: tuple[int, ...] = MOMENTUM_HORIZON_CANDIDATES_HOURS

@@ -1025,3 +1025,23 @@ def test_deploy_push_policy_mismatch_fails_before_diagnostic_runs(monkeypatch) -
 
     with pytest.raises(SystemExit, match="data_policy"):
         mhs_cli._run_mhs_horizon_diagnostic(args)
+
+def test_cli_emit_deployment_with_name_drift_trim_fails_before_run(monkeypatch) -> None:
+    import argparse
+
+    import pytest
+
+    import src.mhs.pipeline.orchestrator as orchestrator
+    from src.cli.commands.research.mhs import _run_mhs_horizon_diagnostic, add_mhs_commands
+
+    def _must_not_run(config):
+        raise AssertionError("pipeline must not start when the deployment is refused")
+
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", _must_not_run)
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    args = parser.parse_args(["--name-drift-trim", "--emit-deployment"])
+    with pytest.raises(SystemExit, match="name-drift-trim"):
+        _run_mhs_horizon_diagnostic(args)
+

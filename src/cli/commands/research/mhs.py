@@ -82,6 +82,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     # (committee_capital/regime-adaptive tranche/target-gross/funding-carry-sleeve
     # opt-out semantics); the CLI only parses and adapts to MhsDiagnosticRequest.
     config = MhsRunConfig.from_namespace(args)
+    if getattr(args, "emit_deployment", False) and config.name_drift_trim: raise SystemExit("--emit-deployment refuses --name-drift-trim: the live daemon has no intraday trim loop")
     if getattr(args, "deploy_push", False):
         _assert_deploy_policy_matches_runtime(config.data_policy)
     request = MhsDiagnosticRequest(**dataclasses.asdict(config))
@@ -635,6 +636,17 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "Registered growth risk envelope: growth, balanced, or conservative "
             "per ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN. Selects the drawdown budget for the "
             "growth-optimal risk solver and the ex-ante vol-target cap"
+        ),
+    )
+    mhs.add_argument(
+        "--name-drift-trim",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in execution-replay trim every NAME_DRIFT_TRIM_INTERVAL_HOURS "
+            "after the first decision, cut back to NAME_DRIFT_TRIM_MAX_WEIGHT "
+            "with an ordinary taker fill, research-only, refused with "
+            "--emit-deployment, default False (byte-identical)"
         ),
     )
     mhs.add_argument(
