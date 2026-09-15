@@ -36,9 +36,16 @@ _ExecutionGapCode = Literal[
     "MISSING_HELD_MARK",
     "MISSING_HELD_FUNDING",
     "MISSING_FORCED_EXIT_CLOSE",
+    "MISSING_ORDER_OHLCV",
+    "MISSING_ACTIVE_FUNDING",
+    "ZERO_OR_UNKNOWN_VOLUME",
+    "FUTURE_DATA_REFERENCE",
+    "CAUSAL_TIMING_VIOLATION",
+    "UNKNOWN_TERMINATION",
 ]
 
 # Facade keeps every existing src.mhs.execution import site working.
+from .accounting import CausalPortfolioState, reconcile_causal_state  # noqa: E402
 from .accumulator import _BoundExecutionReplayAccumulator  # noqa: E402
 from .batch import (  # noqa: E402  # noqa: E402  # noqa: E402
     _rescale_window_weights,
@@ -53,9 +60,11 @@ from .contracts import (  # noqa: E402  # noqa: E402
     ExecutionDataGap,
     ExecutionReplayWindow,
     ForwardExecutionObservation,
+    FundingAlignment,
     IsolatedBoundFailure,
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
+    align_funding_with_knowledge,
     bar_funding_panel,
     ruin_guard_equity,
 )
@@ -75,11 +84,13 @@ __all__ = [
     "SPREAD_ESTIMATE_CEILING_BPS",
     "TERMINATION_STRESS_PENALTY_BPS",
     "BatchReplayOutcome",
+    "CausalPortfolioState",
     "DataIntegrityError",
     "ExecutionDataGap",
     "ExecutionReplayWindow",
     "ExecutionSpec",
     "ForwardExecutionObservation",
+    "FundingAlignment",
     "IsolatedBoundFailure",
     "SimulatedInventoryLedgerResult",
     "StrategyExecutionReplayResult",
@@ -89,6 +100,7 @@ __all__ = [
     "_MarkSource",
     "_column_order_row_sum",
     "_rescale_window_weights",
+    "align_funding_with_knowledge",
     "bar_funding_panel",
     "corwin_schultz_half_spread_bps",
     "laddered_fill_schedule",
@@ -98,6 +110,7 @@ __all__ = [
     "passive_fill_shortfall_bps",
     "peg_chase_fill_schedule",
     "peg_chase_partial_schedule",
+    "reconcile_causal_state",
     "replay_execution_window_batch",
     "replay_execution_window_batch_isolated",
     "replay_execution_window_pair",

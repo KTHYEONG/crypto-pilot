@@ -845,3 +845,103 @@ def test_fetch_funding_rate_history_acquires_limiter_per_page_without_fixed_slee
     assert rates.to_dict("records") == [{"timestamp": 1000, "funding_rate": 0.0001}]
     assert events == ["acquire", "request", "acquire", "request"]
     assert sleeps == []
+
+
+def test_fetch_funding_rate_history_uses_waf_safe_request_limit(monkeypatch) -> None:
+    import urllib.parse
+    import src.market_data.binance.futures as futures_module
+    from src.market_data.binance.futures import BinanceClient, FUNDING_RATE_REQUEST_LIMIT
+
+    # Given
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if "00:00:00" in value else 3_600_000)
+
+    class _Spy:
+        def acquire(self) -> float:
+            return 0.0
+
+    monkeypatch.setattr(futures_module, "FUNDING_RATE_LIMITER", _Spy())
+
+    class Response:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return self.payload
+
+    urls: list[str] = []
+
+    def _urlopen(req, *args, **kwargs):
+        urls.append(req.full_url)
+        return Response(b"[]")
+
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+
+    # When
+    client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+
+    # Then
+    assert FUNDING_RATE_REQUEST_LIMIT == 100
+    assert len(urls) == 1
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(urls[0]).query)
+    assert query["limit"] == [str(FUNDING_RATE_REQUEST_LIMIT)]
+
+def test_fetch_funding_rate_history_paginates_beyond_request_limit(monkeypatch) -> None:
+    import json
+    import urllib.parse
+    import src.market_data.binance.futures as futures_module
+    from src.market_data.binance.futures import BinanceClient, FUNDING_RATE_REQUEST_LIMIT
+
+    # Given
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(client.exchange, "parse8601", lambda value: 0 if value.startswith("2024-01-01") else 10_000_000)
+
+    class _Spy:
+        def acquire(self) -> float:
+            return 0.0
+
+    monkeypatch.setattr(futures_module, "FUNDING_RATE_LIMITER", _Spy())
+
+    class Response:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return self.payload
+
+    first = [{"fundingTime": t, "fundingRate": "0.0001"} for t in range(1, FUNDING_RATE_REQUEST_LIMIT + 1)]
+    second = [{"fundingTime": 200, "fundingRate": "0.0002"}]
+    pages = iter([json.dumps(first).encode(), json.dumps(second).encode(), b"[]"])
+    starts: list[int] = []
+
+    def _urlopen(req, *args, **kwargs):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(req.full_url).query)
+        starts.append(int(query["startTime"][0]))
+        return Response(next(pages))
+
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+
+    # When
+    rates = client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")
+
+    # Then
+    assert starts == [0, 101, 201]
+    assert len(rates) == FUNDING_RATE_REQUEST_LIMIT + 1
+    assert rates["timestamp"].tolist()[-1] == 200
+

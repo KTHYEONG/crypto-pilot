@@ -257,11 +257,16 @@ class TestFoldWindowTelemetryOracle:
         self, root: Path, funding_by_symbol: dict[str, pd.Series],
     ):
         """Replicate the fold's pre-replay decision construction via the shared
-        ``_build_fold_target_weights`` builder and run the dense single-panel
-        oracle (``strategy_aware_execution_replay``) over the whole validation
-        window."""
+        ``_build_fold_target_weights`` builder and run the single-panel
+        window through the same causal window engine (with the fold's
+        quote-volume, funding-knowledge, and bar-availability overlays) over
+        the whole validation window."""
+        from src.mhs.execution import (
+            ExecutionReplayWindow,
+            align_funding_with_knowledge,
+            replay_execution_windows,
+        )
         from src.mhs.types import ExecutionSpec
-        from src.mhs.execution import strategy_aware_execution_replay
 
         fold = FOLD_WINDOW_FOLD
         vs, ve = fold.validation_start, fold.validation_end
@@ -278,27 +283,52 @@ class TestFoldWindowTelemetryOracle:
         target_replay, signal_available_at, _censored = ev._truncate_replayable_decisions(
             target_replay, signal_available_at, minute_grid, ExecutionSpec(),
         )
+        loaded_frames = ev._load_window_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m")
         minute_frames = mhs_marks._align_minute_frames(
-            ev._load_window_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m"),
+            loaded_frames,
             "1m", vs, ve,
         )
         assert minute_frames is not None
         highs, lows, closes = minute_frames
+        symbols = list(closes.columns)
         marks = ev.DataCollector().load_mark_price_panel(
-            list(closes.columns), "1h", minute_grid, max_stale_hours=0,
+            symbols, "1h", minute_grid, max_stale_hours=0,
         )
         mper = minute_grid[1] - minute_grid[0]
-        mfwin = {
-            s: funding_by_symbol[s].loc[
-                (funding_by_symbol[s].index >= minute_grid[0])
-                & (funding_by_symbol[s].index < minute_grid[-1] + mper)
-            ]
-            for s in list(closes.columns)
-        }
-        minute_funding = ev.bar_funding_panel(mfwin, minute_grid).reindex(columns=list(closes.columns))
-        oracle = strategy_aware_execution_replay(
-            target_replay, signal_available_at, highs, lows, closes, marks,
-            minute_funding, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        funding_alignment = align_funding_with_knowledge(funding_by_symbol, minute_grid, symbols=symbols)
+        quote_volumes = pd.DataFrame(
+            {
+                s: loaded_frames[s]["quote_vol"]
+                for s in symbols
+                if s in loaded_frames and "quote_vol" in loaded_frames[s].columns
+            },
+            index=minute_grid,
+        )
+        for s in symbols:
+            if s not in quote_volumes.columns:
+                quote_volumes[s] = np.nan
+        quote_volumes = quote_volumes.reindex(columns=symbols)
+        oracle = replay_execution_windows(
+            (
+                ExecutionReplayWindow(
+                    window_start=minute_grid[0],
+                    window_end=minute_grid[-1],
+                    columns=tuple(symbols),
+                    symbols=tuple(symbols),
+                    minute_grid=minute_grid,
+                    highs=highs,
+                    lows=lows,
+                    closes=closes,
+                    marks=marks,
+                    bar_funding=funding_alignment.rates,
+                    target_weights=target_replay,
+                    signal_available_at=signal_available_at,
+                    quote_volumes=quote_volumes,
+                    funding_known=funding_alignment.known,
+                    bar_available_at=minute_grid + mper,
+                ),
+            ),
+            1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
         )
         return oracle
 

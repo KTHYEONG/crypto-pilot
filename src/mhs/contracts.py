@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET, GROWTH_ENVELOPE_DEFAULT
 
 if TYPE_CHECKING:
@@ -344,7 +345,10 @@ class MhsDiagnosticRequest:
             help="One-time, narrowly-scoped extension of the sealed evaluation window through 2026-06-30 for a genuine out-of-selection-window check.",
         ),
     )
-    data_policy: Literal['legacy', 'zombie_mask_v1'] = field(default='legacy', metadata=cli_param(flag='--data-policy', help='Input-data contract for 1h panels (legacy keeps every bar; zombie_mask_v1 masks causally-detected delisted flat bars).', choices=('legacy', 'zombie_mask_v1')))
+    data_policy: Literal['legacy', 'zombie_mask_v1'] = field(default=MHS_DATA_POLICY_DEFAULT, metadata=cli_param(flag='--data-policy', help='Input-data contract for 1h panels (legacy keeps every bar; zombie_mask_v1 masks causally-detected delisted flat bars).', choices=('legacy', 'zombie_mask_v1')))
+    input_manifest_path: str | None = field(default=None, metadata=cli_param(flag='--input-manifest-path', help='Sealed MHS input manifest path.'))
+    forward_execution_quality_dir: str | None = field(default=None, metadata=cli_param(flag='--forward-execution-quality-dir', help='Append-only live execution-quality directory.'))
+    forward_strategy_digest: str | None = field(default=None, metadata=cli_param(flag='--forward-strategy-digest', help='Frozen strategy digest expected in forward observations.'))
 
     def __post_init__(self) -> None:
         from src.mhs.validation import validate_request

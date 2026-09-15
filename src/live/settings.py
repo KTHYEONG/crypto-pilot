@@ -115,6 +115,9 @@ class LiveSettings(BaseSettings):
     min_universe_symbols: int = 100
     alert_halt_streak: int = 2
     alert_daily_digest: bool = True
+    # Frozen strategy digest stamped onto execution-quality observations so
+    # forward evidence can be attributed to an immutable strategy version.
+    strategy_digest: str | None = None
     data_retention_days: int = SIGNAL_PANEL_WINDOW_DAYS + 30
     orderbook_retention_days: int = 365
     refresh_max_workers: int = 12

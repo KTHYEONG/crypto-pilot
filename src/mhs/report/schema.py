@@ -114,6 +114,11 @@ class MhsHorizonDiagnosticReport:
     # 시행 풀 계측 공시(I-DISCLOSURE): 배제 사유별 건수·distinct 키·원장 크기 등
     # 관측 페이로드. GO reason code를 발생시키지 않는다.
     trial_pool: dict[str, Any] | None = None
+    # 백테스트 신뢰성 인증(P0): 회계·PIT·실행가능성·독립성·입력봉인 게이트.
+    # 기존 저장 artifact는 None으로 읽되 파싱은 유지한다(가산 필드).
+    backtest_reliability: Any | None = None
+    # Retrospective deployed-config와 independent walk-forward의 분리 공시.
+    validation_tracks: dict[str, Any] | None = None
 
     def to_payload(self) -> Any:
         from src.mhs.report.artifacts import _jsonable

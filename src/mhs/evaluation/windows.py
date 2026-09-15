@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 import zipfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import replace as dataclass_replace
 from typing import Any, Literal
 
@@ -26,7 +26,7 @@ from src.mhs.resources import _assert_execution_rss_budget, _resolve_ram_budget,
 from src.common.errors import DataIntegrityError
 from src.mhs.books import portfolio_rebalance_trigger
 from src.mhs.evidence import CostResponsePoint, PhaseDiagnosticResult, TailSensitivityResult, book_evidence, phase_1_anchored_purged_folds, required_cost_tiers
-from src.mhs.execution import ExecutionReplayWindow, StrategyExecutionReplayResult, bar_funding_panel, replay_execution_window_batch_isolated, replay_execution_windows, replay_execution_windows_coupled
+from src.mhs.execution import ExecutionReplayWindow, StrategyExecutionReplayResult, align_funding_with_knowledge, bar_funding_panel, replay_execution_window_batch_isolated, replay_execution_windows, replay_execution_windows_coupled
 from src.mhs.parallel import resolve_fork_shared
 from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS, REBALANCE_TRACKING_ERROR_THRESHOLD, REFERENCE_PASS_EQUITY_FLOOR
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
@@ -71,6 +71,7 @@ def _iter_mhs_execution_windows(
     funding_by_symbol: dict[str, pd.Series],
     mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"],
     spec: ExecutionSpec,
+    funding_failures: Mapping[str, str] | None = None,
 ) -> Iterator[MhsExecutionWindow]:
     """Yield at-most-31-day execution windows with only the active roster read.
 
@@ -150,10 +151,11 @@ def _iter_mhs_execution_windows(
         active = set(w_weights.columns[non_zero.any(axis=0)])
         roster_set = active | prev_active
         prev_active = active
-        roster = [
-            s for s in columns
-            if s in roster_set and os.path.exists(os.path.join(root, timeframe, f"{s}.parquet"))
-        ]
+        # Active (or previously held) symbols stay on the roster even when
+        # their execution file is missing (INV-ACTIVE-ROSTER-PRESERVED): the
+        # missing frame travels as all-NaN so the replay reports an explicit
+        # gap instead of silently dropping the symbol.
+        roster = [s for s in columns if s in roster_set]
 
         symbol_frames = _load_window_minute_frames(
             root, roster, grid_start, grid_end, timeframe,
@@ -189,21 +191,22 @@ def _iter_mhs_execution_windows(
                 minute_marks = pd.DataFrame(index=minute_grid)
 
         minute_period = minute_grid[1] - minute_grid[0] if len(minute_grid) > 1 else pd.Timedelta(minutes=1)
-        funding_window = {
-            s: funding_by_symbol[s].loc[
-                (funding_by_symbol[s].index >= grid_start)
-                & (funding_by_symbol[s].index < grid_end + minute_period)
-            ]
-            for s in roster
-            if s in funding_by_symbol
-        }
-        minute_funding = (
-            bar_funding_panel(funding_window, minute_grid)
-            .reindex(columns=roster)
-            .replace([np.inf, -np.inf], np.nan)
-            .ffill()
-            .fillna(0.0)
+        funding_alignment = align_funding_with_knowledge(funding_by_symbol, minute_grid, symbols=roster, source_failures=funding_failures)
+        minute_funding = funding_alignment.rates
+        funding_known = funding_alignment.known
+        quote_volumes = pd.DataFrame(
+            {
+                s: symbol_frames[s]["quote_vol"]
+                for s in roster
+                if s in symbol_frames and "quote_vol" in symbol_frames[s].columns
+            },
+            index=minute_grid,
         )
+        for s in roster:
+            if s not in quote_volumes.columns:
+                quote_volumes[s] = np.nan
+        quote_volumes = quote_volumes.reindex(columns=roster)
+        bar_available_at = minute_grid + minute_period
 
         yield ExecutionReplayWindow(
             window_start=grid_start,
@@ -218,6 +221,9 @@ def _iter_mhs_execution_windows(
             bar_funding=minute_funding,
             target_weights=w_weights[roster],
             signal_available_at=w_signals,
+            quote_volumes=quote_volumes,
+            funding_known=funding_known,
+            bar_available_at=bar_available_at,
         )
 
 
@@ -279,6 +285,8 @@ def _spill_window_to_ipc(window: ExecutionReplayWindow, target_path: str) -> Non
             "marks": window.marks,
             "bar_funding": window.bar_funding,
             "target_weights": window.target_weights,
+            "quote_volumes": window.quote_volumes,
+            "funding_known": window.funding_known.astype("float64") if window.funding_known is not None else None,
         }
         meta_frames: dict[str, Any] = {}
         buffers: dict[str, bytes] = {}
@@ -307,6 +315,7 @@ def _spill_window_to_ipc(window: ExecutionReplayWindow, target_path: str) -> Non
             "symbols": list(window.symbols),
             "minute_grid_ns": minute_ns.tolist(),
             "signal_ns": signal_ns.tolist(),
+            "bar_available_ns": np.asarray(window.bar_available_at, dtype="datetime64[ns]").astype("int64").tolist() if window.bar_available_at is not None else None,
             "frames": meta_frames,
         }
         with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_STORED) as zf:
@@ -349,6 +358,8 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
             }
             frames[name] = pd.DataFrame(data, index=idx, columns=spec["columns"])
             frames[name] = frames[name].astype("float64")
+        known_frame = frames["funding_known"].astype(bool) if frames["funding_known"] is not None else None
+        available = pd.DatetimeIndex(pd.to_datetime(np.asarray(meta.get("bar_available_ns"), dtype="int64"), unit="ns", utc=True)) if meta.get("bar_available_ns") is not None else None
         return ExecutionReplayWindow(
             window_start=pd.Timestamp(meta["window_start_ns"], unit="ns", tz="UTC"),
             window_end=pd.Timestamp(meta["window_end_ns"], unit="ns", tz="UTC"),
@@ -362,6 +373,9 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
             bar_funding=frames["bar_funding"],
             target_weights=frames["target_weights"],
             signal_available_at=signal_available_at,
+            quote_volumes=frames["quote_volumes"],
+            funding_known=known_frame,
+            bar_available_at=available,
         )
     except Exception as exc:
         raise DataIntegrityError(f"window IPC load failed for {target_path}: {exc}") from exc

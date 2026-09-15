@@ -156,6 +156,10 @@ def trial_identity_key(record: Mapping[str, Any]) -> str | None:
         value = flags.get(field.name, field.default)
         if value is None:
             value = field.default
+        if field.name == "data_policy" and "data_policy" not in flags:
+            # Migration: a data_policy-less legacy record keeps its legacy
+            # identity instead of adopting the new zombie default.
+            value = "legacy"
         if field.name not in RESEARCH_NEUTRAL_FLAGS:
             normalized[field.name] = value
     for key, value in flags.items():

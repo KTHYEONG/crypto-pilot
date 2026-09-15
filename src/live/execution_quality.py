@@ -25,6 +25,7 @@ EXECUTION_QUALITY_MAX_SHARDS: int = RUN_HISTORY_MAX_SHARDS
 
 _EXECUTION_QUALITY_DTYPES: Mapping[str, str] = {
     "decision_time": "datetime64[ns, UTC]",
+    "observed_at": "datetime64[ns, UTC]",
     "mark_price_at_decision": "float64",
     "avg_fill_price": "float64",
     "filled_qty": "float64",
@@ -54,6 +55,8 @@ class ExecutionQualityRecord:
     latency_seconds: float | None = None
     sizing_anchor: str = "book_mid"
     maker_fill_fraction: float | None = None
+    strategy_digest: str | None = None
+    observed_at: pd.Timestamp | None = None
 
 
 def _slippage_bps(side: str, mark: Decimal | None, fill: Decimal | None) -> float | None:
@@ -75,6 +78,9 @@ def build_execution_quality_records(
     marks: Mapping[str, Decimal],
     intents: Sequence[Any],
     outcomes: Sequence[Any],
+    *,
+    strategy_digest: str | None = None,
+    observed_at: pd.Timestamp | None = None,
 ) -> tuple[ExecutionQualityRecord, ...]:
     records: list[ExecutionQualityRecord] = []
     for intent, outcome in zip(intents, outcomes, strict=False):
@@ -130,6 +136,8 @@ def build_execution_quality_records(
                 latency_seconds=latency_seconds,
                 sizing_anchor=sizing_anchor,
                 maker_fill_fraction=maker_fill_fraction,
+                strategy_digest=strategy_digest,
+                observed_at=observed_at,
             )
         )
     return tuple(records)
@@ -158,6 +166,8 @@ def _records_to_dataframe(records: Sequence[ExecutionQualityRecord]) -> pd.DataF
             "latency_seconds": float(r.latency_seconds) if r.latency_seconds is not None else float("nan"),
             "sizing_anchor": str(r.sizing_anchor),
             "maker_fill_fraction": float(r.maker_fill_fraction) if r.maker_fill_fraction is not None else float("nan"),
+            "strategy_digest": r.strategy_digest,
+            "observed_at": pd.Timestamp(r.observed_at) if r.observed_at is not None else pd.NaT,
         }
         for r in records
     ]
@@ -202,6 +212,21 @@ def _load_all_frames(history_dir: Path) -> pd.DataFrame | None:
     if not frames:
         return None
     return pd.concat(frames, ignore_index=True)
+
+
+def load_execution_quality_records(history_dir: Path | str) -> pd.DataFrame:
+    """Load every execution-quality shard into one frame (forward evidence).
+
+    Legacy shards without ``strategy_digest``/``observed_at`` load with nulls
+    (preserved, excluded from certification) instead of failing.
+    """
+    loaded = _load_all_frames(Path(history_dir))
+    frame = pd.DataFrame() if loaded is None else loaded.copy()
+    frame["strategy_digest"] = frame.get("strategy_digest", None)
+    frame["observed_at"] = pd.to_datetime(frame.get("observed_at", pd.NaT), utc=True, errors="coerce")
+    if "decision_time" in frame.columns:
+        frame["decision_time"] = pd.to_datetime(frame["decision_time"], utc=True, errors="coerce")
+    return frame
 
 
 def summarize_execution_quality(

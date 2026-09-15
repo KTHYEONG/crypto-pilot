@@ -19,6 +19,26 @@ def _block_network(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_exchange_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep developer-shell exchange credentials out of hermetic unit tests.
+
+    ``LiveSettings`` intentionally accepts legacy ``BINANCE_*`` aliases for
+    real deployments.  A host shell may export those aliases, however, and
+    then silently change a test's default ``LIVE_TESTNET`` construction into
+    a rejected mainnet-to-testnet credential mix.  Individual tests that
+    exercise environment loading can still opt in with ``setenv``.
+    """
+    for key in (
+        "BINANCE_API_KEY",
+        "BINANCE_SECRET_KEY",
+        "BINANCE_SECRET",
+        "LIVE_API_KEY",
+        "LIVE_API_SECRET",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_signal_step_sidecars(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     import src.cli.commands.live as live_cli
 
