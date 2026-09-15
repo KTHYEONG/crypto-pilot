@@ -16,6 +16,14 @@ from . import _ExecutionBound, _ExecutionGapCode, _MarkSource
 _DEFAULT_MAX_OBSERVATION_GAP = pd.Timedelta(hours=8, minutes=5)
 
 
+def _utc_epoch_ns(index: pd.Index) -> np.ndarray:
+    """Fast UTC epoch-nanosecond conversion, bit-identical to the legacy path."""
+    if isinstance(index, pd.DatetimeIndex):
+        utc = index.tz_convert("UTC") if index.tz is not None else index.tz_localize("UTC")
+        return np.asarray(utc.as_unit("ns").asi8, dtype="int64")
+    return np.asarray(pd.DatetimeIndex(pd.to_datetime(index, utc=True)), dtype="datetime64[ns]").astype("int64")
+
+
 @dataclass(frozen=True, slots=True)
 class FundingAlignment:
     """Funding rates split from funding knowledge (INV-FUNDING-KNOWLEDGE).
@@ -63,7 +71,7 @@ def align_funding_with_knowledge(
             rate_cols[sym] = pd.Series(np.zeros(len(grid), dtype="float64"), index=grid, dtype="float64")
             known_cols[sym] = pd.Series(np.zeros(len(grid), dtype=bool), index=grid, dtype=bool)
             continue
-        full_ts = np.asarray(pd.DatetimeIndex(pd.to_datetime(series.index, utc=True)), dtype="datetime64[ns]").astype("int64")
+        full_ts = _utc_epoch_ns(series.index)
         full_ts = np.sort(full_ts)
         windowed = series.loc[(series.index >= grid[0]) & (series.index < grid[-1] + period)]
         aligned = np.asarray(_align_funding_rates(windowed, grid), dtype="float64")

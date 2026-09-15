@@ -191,3 +191,28 @@ def test_is_temp_artifact_flags_legacy_tmp_parquet_names() -> None:
     assert is_temp_artifact("BTCUSDT.parquet") is False
     assert is_temp_artifact("TMPUSDT.parquet") is False
 
+
+
+def test_write_ohlcv_uses_31_day_row_groups_for_intraday_timeframes(tmp_path) -> None:
+    import pandas as pd
+    import pyarrow.parquet as pq
+    from src.market_data.storage.ohlcv import write_ohlcv
+    n = 480 * 31 + 5
+    stamps = pd.date_range("2024-01-01", periods=n, freq="3min", tz="UTC")
+    frame = pd.DataFrame({
+        "timestamp": (stamps.asi8 // 10**6 if stamps.unit == "ns" else stamps.as_unit("ms").asi8),
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0, "quote_vol": 1.0,
+    })
+    three = tmp_path / "3m" / "X.parquet"
+    write_ohlcv(three, frame, timeframe="3m")
+    meta = pq.ParquetFile(three).metadata
+    assert meta.num_row_groups == 2
+    assert meta.row_group(0).num_rows == 480 * 31
+    back = pd.read_parquet(three)
+    assert back["timestamp"].tolist() == frame["timestamp"].tolist()
+    # a timeframe without an intraday bars-per-day entry keeps the writer default (single group here)
+    daily = tmp_path / "1d" / "X.parquet"
+    write_ohlcv(daily, frame.head(10), timeframe="1d")
+    assert pq.ParquetFile(daily).metadata.num_row_groups == 1
+
+

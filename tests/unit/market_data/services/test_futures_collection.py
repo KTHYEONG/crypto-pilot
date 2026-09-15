@@ -963,3 +963,119 @@ def test_ensure_funding_data_ignores_gap_before_request_window(tmp_path, monkeyp
     # Then
     assert target.read_bytes() == before
 
+
+def test_ensure_funding_data_refetches_vision_month_hidden_by_wide_span_gap(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    def _ms(ts: str) -> int:
+        return int(pd.Timestamp(ts).value // 10**6)
+
+    target = tmp_path / "funding" / "XUSDT.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: target)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T00:00:00Z"))
+    collector = DataCollector()
+    # Given: 캐시 전체 범위(min/max)는 4월~8월을 덮지만, 5월 한 달이 통째로 비어 있다
+    # (min/max span 검사만으로는 이 내부공백을 '이미 커버됨'으로 오판한다).
+    april = [_ms(t) for t in pd.date_range("2026-04-01", "2026-04-30", freq="8h", tz="UTC")]
+    august = [_ms(t) for t in pd.date_range("2026-08-01", "2026-08-31", freq="8h", tz="UTC")]
+    cached = april + august
+    pd.DataFrame({"timestamp": cached, "funding_rate": [0.0001] * len(cached)}).to_parquet(target, index=False)
+    requested_months: list[tuple[int, int]] = []
+
+    class _RecordingVision:
+        def fetch_funding_rate_monthly(self, symbol, year, month):
+            requested_months.append((year, month))
+            if (year, month) == (2026, 5):
+                may = [_ms(t) for t in pd.date_range("2026-05-01", "2026-05-31", freq="8h", tz="UTC")]
+                return pd.DataFrame({"timestamp": may, "funding_rate": [0.0003] * len(may)})
+            return pd.DataFrame(columns=["timestamp", "funding_rate"])
+
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", _RecordingVision)
+
+    # REST는 스팬 전체를 대상으로 한 번 더 보정 조회를 시도할 수 있다(기존 동작,
+    # 이 테스트의 관심사는 vision_tasks가 5월을 놓치지 않는지이다); 빈 응답이면 무해하다.
+    collector.client.fetch_funding_rate_history = lambda *a, **k: pd.DataFrame(columns=["timestamp", "funding_rate"])
+
+    # When
+    collector.ensure_funding_data("XUSDT", "2026-04-01T00:00:00Z", "2026-08-31T00:00:00Z")
+
+    # Then: 5월이 vision_tasks에 포함되고, 영구 누락 없이 채워진다
+    assert (2026, 5) in requested_months
+    persisted = pd.read_parquet(target)
+    may_start_ms = _ms("2026-05-01T00:00:00Z")
+    may_end_ms = _ms("2026-06-01T00:00:00Z")
+    may_rows = persisted[(persisted["timestamp"] >= may_start_ms) & (persisted["timestamp"] < may_end_ms)]
+    assert len(may_rows) > 0
+
+
+
+def test_ohlcv_gap_start_ms_detects_only_in_window_internal_gaps() -> None:
+    import numpy as np
+    from src.market_data.services.futures_collection import ohlcv_gap_start_ms
+    h = 3_600_000
+    continuous = np.arange(0, 10 * h, h, dtype='int64')
+    assert ohlcv_gap_start_ms(continuous, 0, h) is None
+    holed = np.concatenate([np.arange(0, 5 * h, h), np.arange(8 * h, 12 * h, h)]).astype('int64')
+    # gap (4h -> 8h) right edge lies after the window start -> left edge returned
+    assert ohlcv_gap_start_ms(holed, 0, h) == 4 * h
+    assert ohlcv_gap_start_ms(holed, 7 * h, h) == 4 * h
+    # a window starting at/after the right edge ignores the earlier gap
+    assert ohlcv_gap_start_ms(holed, 8 * h, h) is None
+    # empty and single-row inputs have no gap
+    assert ohlcv_gap_start_ms(np.array([], dtype='int64'), 0, h) is None
+    assert ohlcv_gap_start_ms(np.array([5 * h], dtype='int64'), 0, h) is None
+
+
+def test_ensure_ohlcv_data_refetches_vision_month_hidden_by_internal_gap(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+    from src.market_data.storage.ohlcv import write_ohlcv
+
+    def _ms(ts) -> int:
+        return int(pd.Timestamp(ts).value // 10**6)
+
+    def _frame(stamps) -> pd.DataFrame:
+        return pd.DataFrame({
+            "timestamp": [_ms(s) for s in stamps],
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+            "quote_vol": 1.0, "taker_buy_base_volume": 0.5, "taker_buy_quote_volume": 0.5,
+        })
+
+    cache = tmp_path / "ohlcv" / "1h" / "XUSDT.parquet"
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: cache)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-09-14T00:00:00Z"))
+    collector = DataCollector()
+    # Given: min/max span covers April..June but all of May is missing
+    april = pd.date_range("2026-04-01", "2026-04-30 23:00", freq="1h", tz="UTC")
+    june = pd.date_range("2026-06-01", "2026-06-30 23:00", freq="1h", tz="UTC")
+    write_ohlcv(cache, _frame(list(april) + list(june)), timeframe="1h")
+    requested: list[tuple[int, int]] = []
+    may = pd.date_range("2026-05-01", "2026-05-31 23:00", freq="1h", tz="UTC")
+
+    class _RecordingVision:
+        def fetch_klines_archive_monthly(self, symbol, timeframe, year, month):
+            requested.append((year, month))
+            if (year, month) != (2026, 5):
+                return pd.DataFrame()
+            n = len(may)
+            return pd.DataFrame({
+                "timestamp": [_ms(t) for t in may], "open": [1.0] * n, "high": [1.0] * n, "low": [1.0] * n,
+                "close": [1.0] * n, "volume": [1.0] * n, "close_time": [0] * n, "quote_vol": [1.0] * n,
+                "no_trades": [1] * n, "taker_buy_base": [0.5] * n, "taker_buy_quote": [0.5] * n, "ignore": [0] * n,
+            })
+
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", _RecordingVision)
+    collector.client.fetch_ohlcv_with_taker = lambda *a, **k: pd.DataFrame()
+    # When
+    collector.ensure_ohlcv_data("XUSDT", "1h", "2026-04-01T00:00:00Z", "2026-06-30T23:00:00Z")
+    # Then: May is requested from Vision and persisted
+    assert (2026, 5) in requested
+    persisted = pd.read_parquet(cache)
+    may_rows = persisted[(persisted["timestamp"] >= _ms("2026-05-01T00:00Z")) & (persisted["timestamp"] < _ms("2026-06-01T00:00Z"))]
+    assert len(may_rows) == len(may)
+
+
