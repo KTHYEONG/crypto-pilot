@@ -1042,6 +1042,6 @@ def test_cli_emit_deployment_with_name_drift_trim_fails_before_run(monkeypatch) 
     add_mhs_commands(sub)
     parser = sub.choices["mhs-horizon-diagnostic"]
     args = parser.parse_args(["--name-drift-trim", "--emit-deployment"])
-    with pytest.raises(SystemExit, match="name-drift-trim"):
+    with pytest.raises(SystemExit, match="name_drift_trim"):
         _run_mhs_horizon_diagnostic(args)
 

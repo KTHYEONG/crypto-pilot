@@ -82,7 +82,10 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     # (committee_capital/regime-adaptive tranche/target-gross/funding-carry-sleeve
     # opt-out semantics); the CLI only parses and adapts to MhsDiagnosticRequest.
     config = MhsRunConfig.from_namespace(args)
-    if getattr(args, "emit_deployment", False) and config.name_drift_trim: raise SystemExit("--emit-deployment refuses --name-drift-trim: the live daemon has no intraday trim loop")
+    from src.mhs.deployment_policy import live_parity_blockers
+    _blockers = live_parity_blockers(config)
+    if getattr(args, "emit_deployment", False) and _blockers:
+        raise SystemExit(f"--emit-deployment refuses {','.join(_blockers)}: no live daemon counterpart")
     if getattr(args, "deploy_push", False):
         _assert_deploy_policy_matches_runtime(config.data_policy)
     request = MhsDiagnosticRequest(**dataclasses.asdict(config))

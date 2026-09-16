@@ -27,6 +27,8 @@ logger = logging.getLogger("LiveSignalStep")
 
 PANEL_HISTORY_REFERENCE_SYMBOL: str = "BTCUSDT"
 QUARANTINE_SIDECAR_NAME: str = "signal_quarantine.json"
+REALIZED_RETURN_STEP: pd.Timedelta = pd.Timedelta(days=1)
+LIVE_WARMUP_GAP_WARN_DAYS: int = 7
 
 try:
     from src.mhs.evaluation import _build_fold_target_weights  # noqa: F401
@@ -143,6 +145,8 @@ def descale_realized_returns(equity: pd.Series, applied_scale: pd.Series) -> pd.
         return empty
     out_idx: list[pd.Timestamp] = []
     out_vals: list[float] = []
+    skipped_pairs = 0
+    first_gap_days = 0.0
     for i in range(start, len(idx)):
         prev = idx[i - 1]
         cur = idx[i]
@@ -151,14 +155,34 @@ def descale_realized_returns(equity: pd.Series, applied_scale: pd.Series) -> pd.
         s = float(applied_scale.loc[prev])
         if not np.isfinite(s) or s <= 0:
             raise DataIntegrityError(f"applied scale non-positive/non-finite at {prev}: {s!r}")
+        # FAIL-OPEN-BY-DESIGN: a HALT gap must not become a permanent HALT, so a
+        # non-daily pair is excluded (never raised, never synthetically split).
+        if cur - prev != REALIZED_RETURN_STEP:
+            skipped_pairs += 1
+            if skipped_pairs == 1:
+                first_gap_days = (cur - prev).total_seconds() / 86400.0
+            continue
         prev_eq = float(eq_vals[i - 1])
         cur_eq = float(eq_vals[i])
         val = (cur_eq / prev_eq - 1.0) / s
         out_idx.append(cur)
         out_vals.append(val)
+    if skipped_pairs:
+        logger.warning("[DATA] stage=descale_realized skipped_pairs=%d first_gap_days=%.1f", skipped_pairs, first_gap_days)
     out = pd.Series(out_vals, index=pd.DatetimeIndex(out_idx, tz="UTC"), dtype="float64")
     out = out.sort_index()
     return out
+
+
+def warmup_reference_gap_days(warmup_returns: pd.Series, reference_start: pd.Timestamp) -> float | None:
+    """Calendar gap in days between the warmup tail row and the reference start."""
+    if len(warmup_returns) == 0:
+        return None
+    last = pd.Timestamp(warmup_returns.index[-1])
+    ref = pd.Timestamp(reference_start)
+    last = last.tz_localize("UTC") if last.tzinfo is None else last.tz_convert("UTC")
+    ref = ref.tz_localize("UTC") if ref.tzinfo is None else ref.tz_convert("UTC")
+    return float((ref - last).total_seconds()) / 86400.0
 
 
 def decision_mark_row(
@@ -335,6 +359,9 @@ def compute_signal_row(
     reference = placeholder if forward.empty else pd.concat([forward, placeholder])
     warmup_arg = warmup if not warmup.empty else None
 
+    gap_days = warmup_reference_gap_days(warmup, reference.index[0])
+    if gap_days is not None and gap_days > LIVE_WARMUP_GAP_WARN_DAYS:
+        logger.warning("[ALGO] stage=exposure_scale warmup_gap_days=%.1f threshold_days=%d", gap_days, LIVE_WARMUP_GAP_WARN_DAYS)
     scale_series = compute_exposure_scale(reference, params.policy.sizing, warmup_returns=warmup_arg)
     scalar_raw = float(scale_series.loc[dt])
     cap = float(params.policy.sizing.exposure_cap)
