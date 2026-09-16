@@ -31,6 +31,7 @@ from src.mhs.contracts import (
     MhsOutputTier,
 )
 from src.mhs.deployment_policy import live_parity_blockers
+from src.mhs.deploy_gate import deploy_gate_from_report
 from src.mhs.resources import _peak_rss_bytes
 from src.common.errors import DataIntegrityError
 from src.live.crypto import derive_key
@@ -84,13 +85,9 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     from src.mhs.live_strategy import LiveStrategyParams, load_strategy_params, save_strategy_bootstrap, save_strategy_params
     from src.mhs.params import COMMITTEE_MEMBER_SETS, SIGNAL_RETURN_TAIL_DAYS
 
-    blockers = live_parity_blockers(request)
-    if blockers:
-        raise DataIntegrityError(f"deployment ineligible: no live daemon counterpart for {','.join(blockers)}")
-    if report.status != "COMPLETE":
-        raise DataIntegrityError("deployment ineligible: report status not COMPLETE")
-    if not getattr(report.research_go, "eligible", False):
-        raise DataIntegrityError("deployment ineligible: research_go not eligible")
+    gate = deploy_gate_from_report(report, request)
+    if not gate.go:
+        raise DataIntegrityError(f"deployment ineligible: {','.join(gate.reason_codes)}")
     if report.blend is None or getattr(report.blend, "target_weights", None) is None:
         raise DataIntegrityError("deployment ineligible: blend target_weights empty")
     tw = report.blend.target_weights
@@ -265,6 +262,20 @@ def _fold_summary(fold: MhsFoldReport) -> dict[str, Any]:
     }
 
 
+def _deploy_gate_record(
+    report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest | None
+) -> dict[str, Any] | None:
+    """JSON-serializable deploy-gate verdict for the run-history record."""
+    if request is None:
+        return None
+    gate = deploy_gate_from_report(report, request)
+    return {
+        "go": bool(gate.go),
+        "reason_codes": list(gate.reason_codes),
+        "metrics": {k: float(v) for k, v in gate.metrics.items()},
+    }
+
+
 def build_mhs_run_history_record(
     report: MhsHorizonDiagnosticReport,
     request: MhsDiagnosticRequest | None,
@@ -284,6 +295,7 @@ def build_mhs_run_history_record(
         "resolved_end": report.resolved_end,
         "flags": dataclasses.asdict(request) if request is not None else None,
         "live_parity_blockers": list(live_parity_blockers(request)) if request is not None else None,
+        "deploy_gate": _deploy_gate_record(report, request),
         "params_snapshot": capture_params_snapshot(),
         "perf": {
             "run_elapsed_seconds": report.run_elapsed_seconds,
