@@ -51,6 +51,7 @@
       "tests/unit/mhs/test_deploy_gate.py",
       "tests/unit/mhs/test_evaluation_appresearch.py",
       "tests/unit/mhs/test_evaluation_diagnostic_gates.py",
+      "tests/unit/mhs/test_evaluation_folds.py",
       "tests/unit/mhs/test_evaluation_pipeline.py",
       "tests/unit/mhs/test_evaluation_ram_guard.py",
       "tests/unit/mhs/test_evaluation_report_persist.py",
