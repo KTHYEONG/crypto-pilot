@@ -24,7 +24,7 @@ def test_SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS() -> None:
     assert "*.pem" in dockerignore
 
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "env_file: .env" in compose  # 시크릿은 env_file 주입만 허용된다
+    assert "env_file: /home/ubuntu/quant-secrets/crypto-pilot.env" in compose  # 시크릿은 env_file 주입만 허용된다
     assert "./data/state:/app/data/state" in compose  # I-STATE-SURVIVES-REDEPLOY
     assert "./logs:/app/logs" in compose
 
@@ -36,7 +36,7 @@ def test_docker_compose_has_independent_liquidation_collector_service() -> None:
     assert '"data"' in compose  # command runs the data CLI group
     assert "unless-stopped" in compose
     assert "./data/futures/liquidations:/app/data/futures/liquidations" in compose
-    assert "env_file: .env" in compose
+    assert "env_file: /home/ubuntu/quant-secrets/crypto-pilot.env" in compose
     # 기존 live 데몬 서비스 계약이 깨지지 않는다.
     assert "./data/state:/app/data/state" in compose
 
@@ -45,6 +45,10 @@ def test_docker_compose_has_independent_liquidation_collector_service() -> None:
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS",
     "test_docker_compose_has_independent_liquidation_collector_service",
+    "test_dockerfile_keeps_uv_cache_out_of_image",
+    "test_dockerignore_excludes_workspace_caches",
+    "test_compose_uses_absolute_secret_path_and_declares_live_mode",
+    "test_deploy_workflow_builds_native_arm64_and_tags_commit_sha",
 )
 
 
@@ -77,4 +81,59 @@ def test_docker_compose_memory_budget_fits_oci_a1_host() -> None:
     assert "container_name: liquidation-collector" in liquidation_block
     assert "mem_limit: 768m" in liquidation_block
     assert "HARDWARE_MAX_WORKERS" not in compose
+
+
+def test_dockerfile_keeps_uv_cache_out_of_image() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+
+    assert dockerfile.splitlines()[0].startswith("# syntax=docker/dockerfile:1")
+    assert "UV_CACHE_DIR=/root/.cache/uv" in dockerfile
+    assert dockerfile.count("--mount=type=cache,target=/root/.cache/uv,sharing=locked") == 2
+    assert "UV_NO_SYNC=1" in dockerfile
+    assert 'CMD ["uv", "run", "python", "-m", "src.cli.main", "live", "daemon"]' in dockerfile
+    assert "scratch/uv-cache" not in dockerfile
+
+
+def test_dockerignore_excludes_workspace_caches() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    dockerignore = (root / ".dockerignore").read_text(encoding="utf-8")
+
+    for entry in ("scratch/", "tmp/", ".mypy_cache", ".ruff_cache", ".serena"):
+        assert entry in dockerignore, entry
+    assert ".env" in dockerignore
+    assert "*.pem" in dockerignore
+
+
+def test_compose_uses_absolute_secret_path_and_declares_live_mode() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert compose.count("env_file: /home/ubuntu/quant-secrets/crypto-pilot.env") == 2
+    assert "env_file: .env" not in compose
+    assert "LIVE_MODE=paper" in compose
+    assert "live_mainnet" not in compose
+    assert "./data/state:/app/data/state" in compose
+    assert "./logs:/app/logs" in compose
+
+
+def test_deploy_workflow_builds_native_arm64_and_tags_commit_sha() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+
+    assert "runs-on: ubuntu-24.04-arm" in workflow
+    assert "platforms: linux/arm64" in workflow
+    assert "linux/amd64" not in workflow
+    assert "setup-qemu-action" not in workflow
+    assert "sha-${{ github.sha }}" in workflow
+    assert "${{ env.IMAGE }}:latest" in workflow
+    assert "python3 tools/devops/daemon_idle_gate.py" in workflow
 
