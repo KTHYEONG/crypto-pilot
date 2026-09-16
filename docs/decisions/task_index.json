@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_GO_CRITERIA_REDESIGN",
+      "date": "2026-09-16",
+      "adr_id": "ADR_20260916_MHS_GO_CRITERIA_REDESIGN",
+      "domain": "mhs",
+      "title": "MHS 배포 GO 판정 3축 7게이트 재설계",
+      "why": "기존 19종 게이트 중 알파/리스크 계열이 항상통과·절대발화·사문 상태라 복리 자산증식 신뢰성을 실질적으로 판별하지 못했다",
+      "resolution": "무결성(I0-I4)→엣지(E1-E3, 절대0 귀무+이항 폭 검정)→생존(S1-S3, 부트스트랩 분포+시간셔플 집중도)의 단일 DeployGateResult로 통합해 assert_deployment_eligible/emit_deployment/run-history를 재배선했다",
+      "impact": "판별력 없는 게이트(DSR 상시통과, 단일경로 MDD 확률오류, SELECTION_WINDOW_OVERLAP 상시발화 등) 제거, 실제 원장에서 2025년 성장 집중(63.5%) 같은 진짜 위험을 S3가 최초로 검출, 회귀 전건 green"
+    },
+    {
       "task_id": "MHS_BACKTEST_LIVE_STRATEGY_PARITY",
       "date": "2026-09-16",
       "adr_id": "ADR_20260916_MHS_BACKTEST_LIVE_STRATEGY_PARITY",
@@ -989,16 +999,6 @@
       "why": "_pnl_vol_target_scale가 expanding(min_periods=90).median()으로 2021년 이후 전체 이력을 영구 기억 — 형제 메커니즘 _regime_cash_scale은 이미 rolling(720h)를 쓰는데(파일 내 유일한 .expanding( 호출) 이 함수만 예외. 실측 결과 벤치마크가 2021~2023 평온기에 영구 고정되어 전략이 가장 잘 작동한 2025년(fold2 autocorr Sharpe 3.14)에 평균 scale이 0.899(2021)->0.623(2025)로 가장 세게 억제됨. --no-pnl-vol-target/regime_scale=1.0 고정 두 대안가설 모두 ablation 실측으로 기각(현재 Calmar 2.71이 최선)하여 releveraging이 아닌 순수 정합성 버그로 확정.",
       "resolution": "MHS_PNL_VOL_TARGET_MEDIAN_WINDOW_DAYS=365 신설, expanding_target을 rolling_target(median_window_days, min_periods=BURN_IN)으로 교체. window_days<BURN_IN_DAYS일 때 fail-closed ValueError 추가. 기존 2개 호출부(top-level blend, per-fold)는 신규 파라미터 기본값 덕에 무변경. 180d~1095d 스윕에서 in-sample argmax(180d)가 아닌 Barroso&Santa-Clara 표준 1년 창을 채택해 과적합 회피. 단위테스트 4건 신규(적응성/burn-in 항등성/검증/회귀없음) + 기존 9건 전부 그린.",
       "impact": "실측 재검증(파일 최종 저장 이후 재실행): CAGR 33.45%->34.69%(+1.24%p), MDD -12.35%->-12.28%(사실상 불변), Calmar 2.71->2.83 — spec 예측치(+1.1%p CAGR, Calmar 2.88)와 근접 일치, MDD 불변이면서 CAGR·Calmar 동시개선(risk/return trade-off 아닌 순수 정합성 개선 신호). check 단계에서 파일 mtime보다 앞선 4회 검증 실행이 전부 픽스 이전 코드를 테스트한 허위경보였음을 확인 후 재실행으로 해소."
-    },
-    {
-      "task_id": "ADR_20260818_MHS_REBALANCE_DEADBAND_SCALE_RELATIVE",
-      "date": "2026-08-18",
-      "adr_id": "ADR_20260818_MHS_REBALANCE_DEADBAND_SCALE_RELATIVE",
-      "domain": "mhs",
-      "title": "MHS 리밸런스 데드밴드 절대상수→스케일비례 전환 + fold/blend 경로 정합성 게이트",
-      "why": "절대 데드밴드(2% notional)가 종목당 목표비중(gross 0.53/roster 42 ≈ 1.26%)보다 커서 로스터 이탈 청산이 영구 억제, 보유종목이 40→122로 단조 누적. 동일 설정에서 fold2_strict와 blend_primary의 일간수익 상관 0.238, 횡단면 비중 상관 0.48로 Research GO 게이트와 deployment_readiness가 서로 다른 전략을 측정.",
-      "resolution": "_apply_rebalance_deadband를 절대상수(MHS_REBALANCE_MIN_NOTIONAL_DELTA=0.02, 제거)에서 스케일비례 불변식(position_fraction * gross/n_active, 기본 0.25)으로 재작성. 목표 0.0은 항상 청산(exit-always) 처리하고 holdings_out<=holdings_in 불변식 위반 시 DataIntegrityError로 fail-closed. _book_structure_trace/_fold_blend_parity 신설해 fold-blend 정합성을 관측하고 이탈 시 FOLD_BLEND_PATH_DIVERGENCE를 데이터 무결성 차단 사유로 research_go에 편입. 실측 재실행 완료.",
-      "impact": "CAGR 19.23%->33.45%, MDD -17.05%->-12.35%, Calmar 1.13->2.71 개선(좌초 포지션 제거 효과). fold/blend 보유종목 log비율 0.80(결손)->0.040(정합) 통과. 연환산 회전율 26.3x->61.7x 상승이 fold 0(2023) 실행데이터 결손을 새로 노출시켜 research_go가 3/3->2/3(RELEVANT_EXECUTION_DATA_GAP)으로 후퇴 -- 알파 결함이 아닌 데이터 커버리지 이슈, 재통과의 유일한 남은 차단 사유. 부수적으로 --output-tier full 직렬화 경로(_build_replay_artifact_reference, 기존 코드)에서 numpy 스칼라가 _jsonable 우회로 orjson에 유입되는 결함 발견(범위 외, 별도 스펙 필요)."
     }
   ]
 }

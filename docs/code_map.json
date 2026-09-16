@@ -48,6 +48,7 @@
       "tests/unit/mhs/execution/test_accounting.py",
       "tests/unit/mhs/report/test_persist.py",
       "tests/unit/mhs/test_calibration.py",
+      "tests/unit/mhs/test_deploy_gate.py",
       "tests/unit/mhs/test_evaluation_appresearch.py",
       "tests/unit/mhs/test_evaluation_diagnostic_gates.py",
       "tests/unit/mhs/test_evaluation_pipeline.py",
@@ -250,6 +251,9 @@
   },
   "src/mhs/data_provenance.py": {
     "testing": "tests/unit/mhs/test_data_provenance.py"
+  },
+  "src/mhs/deploy_gate.py": {
+    "testing": "tests/unit/mhs/test_deploy_gate.py"
   },
   "src/mhs/deployment_policy.py": {
     "testing": "tests/unit/mhs/test_deployment_policy.py"
