@@ -243,9 +243,6 @@ def _run_post_book_concurrently(
     fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
     fold_committee_weights: dict[int, dict[str, float]] | None = None,
-    fold_growth_budget_target_vol: dict[int, float] | None = None,
-    exposure_warmup_returns: pd.Series | None = None,
-    fold_blend_exposure_scale: dict[int, pd.Series] | None = None,
     base_panel: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
@@ -266,6 +263,20 @@ def _run_post_book_concurrently(
     """
     fold_list = phase_1_anchored_purged_folds()
     has_primary = blend_report is not None and blend_report.primary is not None
+    # The request crosses a fork-worker pickle boundary below. Resolve the
+    # identity sentinel in the parent so a default committee gross is preserved.
+    from dataclasses import replace
+
+    from src.mhs.research_go import _resolved_committee_target_gross
+
+    worker_request = (
+        replace(
+            request,
+            committee_target_gross=_resolved_committee_target_gross(request),
+        )
+        if request is not None and request.committee_capital
+        else request
+    )
 
     bootstrap_ci: tuple[float, float] | None = None
     placebo_percentile: float | None = None
@@ -299,14 +310,11 @@ def _run_post_book_concurrently(
         futures = {
             pool.submit(
                 folds._run_anchored_fold,
-                root, fold, request, fold_funding, initial_equity, fold_index, None,
+                root, fold, worker_request, fold_funding, initial_equity, fold_index, None,
                 (fold_slow_horizons or {}).get(fold_index),
                 (fold_fast_horizons or {}).get(fold_index),
                 (fold_funding_carry or {}).get(fold_index),
                 (fold_committee_weights or {}).get(fold_index),
-                growth_budget_target_vol=(fold_growth_budget_target_vol or {}).get(fold_index),
-                exposure_warmup_returns=exposure_warmup_returns,
-                blend_exposure_scale=(fold_blend_exposure_scale or {}).get(fold_index),
             ): fold_index
             for fold_index, fold in enumerate(fold_list)
         }

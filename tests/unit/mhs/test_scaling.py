@@ -1241,3 +1241,29 @@ def test_leverage_ceiling_audit_survives_grid_maximum_frontier(monkeypatch) -> N
     assert scaling._assert_envelope_leverage_ceiling_verified(
         GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"], returns,
     ) is None
+
+
+def test_fold_local_target_vol_is_unchanged_by_future_reference_suffix() -> None:
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs import scaling
+    from src.mhs.params import GROWTH_RISK_ENVELOPES
+
+    index = pd.date_range("2021-01-01", periods=500, freq="1D", tz="UTC")
+    reference = pd.Series(np.full(len(index), 0.001), index=index)
+    train_end = index[300]
+    before = scaling._growth_budget_target_vol_by_boundary(
+        reference,
+        GROWTH_RISK_ENVELOPES["balanced"],
+        {"fold_0": train_end},
+    )
+    polluted = reference.copy()
+    polluted.loc[polluted.index >= train_end] = -0.90
+    after = scaling._growth_budget_target_vol_by_boundary(
+        polluted,
+        GROWTH_RISK_ENVELOPES["balanced"],
+        {"fold_0": train_end},
+    )
+
+    assert after == before

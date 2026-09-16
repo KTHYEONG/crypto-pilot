@@ -1,5 +1,5 @@
 # mypy: ignore-errors
-# ruff: noqa: F401, F821, I001, E402
+# ruff: noqa: F401, F821, I001, E402, E701
 from __future__ import annotations  # mypy: ignore-errors
 
 import dataclasses
@@ -45,6 +45,8 @@ def _build_fold_target_weights(
     slow_horizon_override: int | None = None,
     committee_member_weights: dict[str, float] | None = None,
     *,
+    decision_start: pd.Timestamp | None = None,
+    decision_end: pd.Timestamp | None = None,
     deadband_seed_row: pd.Series | None = None,
     require_minute_roster: bool = True,
     base_panel: dict[str, pd.DataFrame] | None = None,
@@ -75,8 +77,14 @@ def _build_fold_target_weights(
     ``'portfolio_trigger'`` raises ``ValueError``.
     """
     ts = fold.train_start
-    vs = fold.validation_start
-    ve = fold.validation_end
+    effective_start = fold.validation_start if decision_start is None else decision_start
+    effective_end = fold.validation_end if decision_end is None else decision_end
+    if not isinstance(effective_start, pd.Timestamp) or effective_start.tzinfo is None: raise ValueError("effective fold window bounds must be tz-aware UTC timestamps")
+    if not isinstance(effective_end, pd.Timestamp) or effective_end.tzinfo is None: raise ValueError("effective fold window bounds must be tz-aware UTC timestamps")
+    if str(effective_start.tzinfo) != "UTC" or str(effective_end.tzinfo) != "UTC": raise ValueError("effective fold window bounds must be UTC")
+    if effective_start < ts or effective_start >= effective_end: raise ValueError("effective fold window is empty or precedes fold train_start")
+    vs = effective_start
+    ve = effective_end
     if apply_rebalance_deadband is False and request.rebalance_filter != "per_symbol_deadband":
         raise ValueError("apply_rebalance_deadband=False requires rebalance_filter='per_symbol_deadband'")
     import src.mhs.evaluation as ev
