@@ -23,6 +23,15 @@ data/*.db
 results/*.json
 !results/best_params_*.json
 
+# Workspace caches (local-first: never enter the build context)
+scratch/
+tmp/
+.mypy_cache
+.ruff_cache
+.serena
+.codex
+.claude
+
 # Documentation
 README.md
 # 연구->라이브 유일 인계 산출물 봉투(.enc)만 이미지에 포함한다.
