@@ -531,11 +531,7 @@ def _run_anchored_fold(
             or (primary.termination_counts.get("UNKNOWN_TERMINATION", 0) > 0 and not certified)
         ):
             failures.append(GO_REASON_EXECUTION_GAP)
-        _fold_debug_mode = (
-            "adaptive" if request.committee_regime_adaptive_tranche
-            else "3" if request.committee_tranche_smoothing
-            else "1"
-        )
+        _fold_debug_mode = ("adaptive" if request.committee_regime_adaptive_tranche else str(request.committee_tranche_count) if request.committee_tranche_smoothing else "1")
         _fold_debug_tag = (
             f"fold{fold_index}_tranche{_fold_debug_mode}"
             if request.committee_capital else None

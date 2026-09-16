@@ -85,6 +85,18 @@ def _resolved_committee_target_gross(request: MhsDiagnosticRequest) -> float | N
     return request.committee_target_gross
 
 
+def _resolved_committee_tranche_count(request: MhsDiagnosticRequest) -> int:
+    """Effective tranche count passed to the committee execution book.
+
+    Returns the configured count when fixed smoothing or the regime-adaptive
+    tranche is active, else 1 (single-phase identity book). Bounds are owned
+    by ``validate_request``.
+    """
+    if request.committee_tranche_smoothing or request.committee_regime_adaptive_tranche:
+        return int(request.committee_tranche_count)
+    return 1
+
+
 def _resolved_committee_members(request: MhsDiagnosticRequest) -> tuple[str, ...]:
     """Single resolution seam for committee member set (invariant I4).
 

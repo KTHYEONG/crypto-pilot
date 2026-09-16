@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from src.mhs.params import COMMITTEE_TRANCHE_COUNT
+
 if TYPE_CHECKING:
     from src.mhs.contracts import MhsDiagnosticRequest
 
@@ -47,6 +49,7 @@ class TargetWeightPolicy:
     funding_carry_sleeve: bool
     funding_carry_weight: float
     fill_mark_parity_gate: bool
+    committee_tranche_count: int = COMMITTEE_TRANCHE_COUNT
 
     def to_request(self) -> MhsDiagnosticRequest:
         from src.mhs.contracts import MhsDiagnosticRequest
@@ -68,6 +71,7 @@ class TargetWeightPolicy:
             committee_member_set=self.committee_member_set,  # type: ignore[arg-type]
             committee_tranche_smoothing=bool(self.committee_tranche_smoothing),
             committee_regime_adaptive_tranche=bool(self.committee_regime_adaptive_tranche),
+            committee_tranche_count=int(self.committee_tranche_count),
             committee_target_gross=None if not capital else (None if self.committee_target_gross is None else float(self.committee_target_gross)),
             funding_carry_sleeve=bool(self.funding_carry_sleeve) and capital,
             funding_carry_weight=float(self.funding_carry_weight) if (bool(self.funding_carry_sleeve) and capital) else 0.0,
@@ -195,6 +199,7 @@ def build_deployment_policy(
         committee_member_set=str(request.committee_member_set),
         committee_tranche_smoothing=bool(request.committee_tranche_smoothing),
         committee_regime_adaptive_tranche=bool(request.committee_regime_adaptive_tranche),
+        committee_tranche_count=int(request.committee_tranche_count),
         committee_target_gross=_resolved_committee_target_gross(request),
         funding_carry_sleeve=bool(request.funding_carry_sleeve),
         funding_carry_weight=float(request.funding_carry_weight),

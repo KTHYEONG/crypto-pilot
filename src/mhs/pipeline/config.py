@@ -14,7 +14,7 @@ from enum import StrEnum
 from typing import Literal
 
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-from src.mhs.params import COMMITTEE_TARGET_GROSS
+from src.mhs.params import COMMITTEE_TARGET_GROSS, COMMITTEE_TRANCHE_COUNT
 
 # Main-logic default as of 2026-08-23: selected per ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING
 # (pre-registered acceptance, treatment B). The budgeted twin rung keeps the identical
@@ -90,6 +90,7 @@ class MhsRunConfig:
     committee_member_set: MemberSet = MemberSet.FLOW_MOMENTUM  # was "risk_premia_v2" vs params "flow_momentum_v1"
     committee_tranche_smoothing: bool = False
     committee_regime_adaptive_tranche: bool = True  # was False + CLI override
+    committee_tranche_count: int = COMMITTEE_TRANCHE_COUNT
     committee_target_gross: float | None = COMMITTEE_TARGET_GROSS  # was _UNSET sentinel
     committee_evidence_weighting: bool = True  # was False + CLI override True (2026-08-22)
 
@@ -175,6 +176,7 @@ class MhsRunConfig:
             committee_member_set=MemberSet(args.committee_member_set),
             committee_tranche_smoothing=args.committee_tranche_smoothing,
             committee_regime_adaptive_tranche=committee_regime_adaptive_tranche,
+            committee_tranche_count=args.committee_tranche_count,
             committee_target_gross=committee_target_gross,
             committee_evidence_weighting=committee_evidence_weighting,
             execution_coverage_gate=args.execution_coverage_gate,

@@ -25,6 +25,7 @@ from src.mhs.deploy_gate import deploy_gate_from_report
 from src.mhs.panel import DATA_POLICIES
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.panel import DATA_POLICY_LEGACY as _PANEL_DATA_POLICY_LEGACY
+from src.mhs.params import COMMITTEE_TRANCHE_COUNT
 
 #: Canonical policy set re-exported so params consumers share one definition.
 DATA_POLICY_LEGACY: str = _PANEL_DATA_POLICY_LEGACY
@@ -59,6 +60,7 @@ BOUND_FLAGS: frozenset[str] = frozenset(
         "committee_member_set",
         "committee_regime_adaptive_tranche",
         "committee_tranche_smoothing",
+        "committee_tranche_count",
         "committee_target_gross",
         "beta_neutralize",
         "trend_sleeve",
@@ -155,6 +157,9 @@ def _canonical_policy(policy: MhsDeploymentPolicy) -> dict[str, Any]:
         "trend_sleeve": bool(tw.trend_sleeve),
         "trend_sleeve_gross": float(tw.trend_sleeve_gross),
     }
+    # 기본값은 생략해 기존 봉인 digest를 보존한다.
+    if int(tw.committee_tranche_count) != COMMITTEE_TRANCHE_COUNT:
+        tw_dict["committee_tranche_count"] = int(tw.committee_tranche_count)
     sz = policy.sizing
     sz_dict: dict[str, Any] = {
         "drawdown_brake": bool(sz.drawdown_brake),
@@ -247,8 +252,7 @@ def _compute_strategy_digest(params: LiveStrategyParams | dict[str, Any]) -> str
 
 def _serialize_policy(policy: MhsDeploymentPolicy) -> dict[str, Any]:
     tw = policy.target_weights
-    return {
-        "target_weights": {
+    tw_out: dict[str, Any] = {
             "execution_timeframe": str(tw.execution_timeframe),
             "execution_universe_size": int(tw.execution_universe_size),
             "fast_book_mode": str(tw.fast_book_mode),
@@ -268,7 +272,12 @@ def _serialize_policy(policy: MhsDeploymentPolicy) -> dict[str, Any]:
             "funding_carry_sleeve": bool(tw.funding_carry_sleeve),
             "funding_carry_weight": float(tw.funding_carry_weight),
             "fill_mark_parity_gate": bool(tw.fill_mark_parity_gate),
-        },
+    }
+    # 기본값은 생략해 기존 봉인 digest를 보존한다(_canonical_policy와 동일 규칙).
+    if int(tw.committee_tranche_count) != COMMITTEE_TRANCHE_COUNT:
+        tw_out["committee_tranche_count"] = int(tw.committee_tranche_count)
+    return {
+        "target_weights": tw_out,
         "sizing": {
             "mode": str(policy.sizing.mode),
             "target_annual_vol": float(policy.sizing.target_annual_vol),
