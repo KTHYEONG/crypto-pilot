@@ -5,6 +5,9 @@
   "src/cli/commands/live.py": {
     "testing": "tests/unit/cli/commands/test_live.py"
   },
+  "src/cli/commands/ops.py": {
+    "testing": "tests/unit/cli/test_ops_commands.py"
+  },
   "src/cli/commands/research/mhs.py": {
     "testing": "tests/unit/cli/commands/research/test_mhs.py"
   },
@@ -14,10 +17,14 @@
   "src/cli/main.py": {
     "testing": "tests/unit/cli/test_main.py"
   },
+  "src/common/env_provisioning.py": {
+    "testing": "tests/unit/common/test_env_provisioning.py"
+  },
   "src/common/errors.py": {
     "testing": [
       "tests/integration/workflows/test_taker_flow_candidate.py",
       "tests/unit/cli/commands/research/test_mhs.py",
+      "tests/unit/common/test_env_provisioning.py",
       "tests/unit/live/test_account.py",
       "tests/unit/live/test_cli.py",
       "tests/unit/live/test_data_repair.py",

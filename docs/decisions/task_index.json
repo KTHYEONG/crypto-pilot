@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_VPS_CICD_LOCAL_FIRST",
+      "date": "2026-09-16",
+      "adr_id": "ADR_20260916_VPS_CICD_LOCAL_FIRST",
+      "domain": "infrastructure",
+      "title": "VPS CI/CD 로컬 우선 재구성: 시크릿 프로비저닝·이미지 경량화·네이티브 ARM 빌드",
+      "why": "이미지가 uv 캐시(scratch/uv-cache) 유입으로 비대해지고 VPS .env가 로컬 SSOT와 표류하며 QEMU 에뮬레이션이 빌드를 느리게 함",
+      "resolution": "env_provisioning.py로 허용목록 기반 SSH stdin 시크릿 설치(ops provision-env) 도입, Dockerfile BuildKit 캐시 마운트, .dockerignore 캐시 제외, compose 절대경로 시크릿+LIVE_MODE 평문화, deploy.yml 네이티브 arm64 러너 전환",
+      "impact": "이미지 1.54GB->933MB, cold 빌드 64.94s->48.33s, LIVE_MODE 변경은 PR 리뷰 필수화, 시크릿 값은 SSH stdin으로만 전달되고 로그/argv에 노출 안 됨"
+    },
+    {
       "task_id": "MHS_FRONTIER_GUARD_TOLERANCE",
       "date": "2026-09-16",
       "adr_id": "ADR_20260916_MHS_FRONTIER_GUARD_TOLERANCE",
@@ -989,16 +999,6 @@
       "why": "ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT 조사 중 BNXUSDT를 MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에 추가했으나, committee_capital 베이스라인(트렌드 슬리브 미사용, 현재 배포 후보)을 재실측한 결과 Calmar 1.128->0.786(약 30% 상대하락), CAGR 19.23%->14.21%로 크게 악화됨을 확인.",
       "resolution": "MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에서 BNXUSDT 제거, 원상 복구. 트렌드 슬리브 작업 자체를 중단하기로 한 이상 2023-01-31~02-22 결손 구간은 현재 어떤 배포 설정에도 영향을 주지 않으므로 데이터 위생보다 베이스라인 성과 보존을 우선함. evaluation.py 주석에 결손 사실과 되돌림 근거를 명시해 향후 재조사 시 반복 실측을 방지.",
       "impact": "베이스라인 재검증 완료: CAGR 19.23%, Calmar 1.128, MDD -17.05%, 3/3 fold 통과로 원 수치 재확인(run_id 9b1f7361f4ec4bb98522bab49920809c). BNXUSDT 결손은 향후 execution_mask 전 종목 균등배분 방식의 다른 기능(예: 재시도되는 슬리브류)을 만들 때만 재검토 필요."
-    },
-    {
-      "task_id": "ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT",
-      "date": "2026-08-17",
-      "adr_id": "ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT",
-      "domain": "risk",
-      "title": "MHS 추세 슬리브 실측 결과: 자본붕괴로 기각, BNXUSDT 결손 발견·제외",
-      "why": "ADR_20260817_MHS_TREND_SLEEVE_COMMITTEE_OVERLAY로 배선 완료 후 committee_capital+regime_adaptive_tranche 베이스라인 대비 --trend-sleeve-gross 0.15/0.30 실측 백테스트를 수행해 실제 배포 안전성을 검증.",
-      "resolution": "gross=0.15: fold CAGR 19.23%->35.01%, Calmar 1.128->1.267, stress Sharpe 0.833->1.141 개선되었으나 fold 0(2023)에서 RELEVANT_EXECUTION_DATA_GAP 발생. --output-tier full로 원장 대조해 원인을 BNXUSDT 단일 종목으로 특정(위원회 북은 이 구간 비중 ~0이라 결손을 회피했으나 슬리브는 execution_mask 전 종목에 균등배분해 결손을 노출). fapi.binance.com REST 직접 조회로 2023-01-31 23:57~02-22 14:45 UTC 구간 원천 자체에 BNXUSDT 캔들이 없음(상장정지/재상장 추정)을 확인해 backfill 불가 판정, MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에 BNXUSDT 추가(evaluation.py). 제외 후 재실행 결과 3-fold는 전부 통과했으나 top-level 연속 전체기간(2021-2025) 리플레이가 2025-10-03 CAPITAL_INVARIANT_BREACH(pre_trade_equity=-0.0038, 자본 마이너스)로 실패 -- BNXUSDT 한 종목 제외만으로 발동 시점이 완전히 다른 자본붕괴가 노출될 만큼 슬리브 오버레이가 유니버스 구성 변화에 취약함을 확인. gross=0.30도 별도로 실측해 Calmar가 0.15(1.267)보다 낮은 1.157로 하락하고 fold 통과가 1/3까지 떨어짐을 확인(과다노출 시 악화 확인, 별개로 기각 사유 아님).",
-      "impact": "트렌드 슬리브 가산 결합(--trend-sleeve-gross > 0.0)은 fold 통계만으로는 배포 결정에 불충분함을 실증 -- 연속 전체기간 원장의 CAPITAL_INVARIANT_BREACH 점검이 fold pass/fail보다 우선하는 안전 게이트여야 함을 확인. 코드(evaluation.py의 _apply_trend_sleeve/_trend_sleeve_position 배선)는 opt-in(trend_sleeve_gross=0.0 기본값, byte-identical)이라 제거하지 않고 유지하되 CLI --help에 부정 결과 경고 추가(src/cli/commands/research/mhs.py). BNXUSDT 제외는 트렌드 슬리브와 무관하게 데이터 위생상 유지. [수정 2026-08-17] BNXUSDT 영구 제외는 committee_capital 베이스라인 Calmar를 1.128->0.786(~30% 상대하락)로 악화시킴이 재실측되어 되돌림(MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에 미포함 유지) -- 트렌드 슬리브를 중단하기로 한 이상 이 결손은 현재 어떤 배포 설정에도 영향 없음. 베이스라인은 원래 수치(CAGR 19.23%, Calmar 1.128, 3/3 fold)로 재확인 완료."
     }
   ]
 }
