@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_FRONTIER_GUARD_TOLERANCE",
+      "date": "2026-09-16",
+      "adr_id": "ADR_20260916_MHS_FRONTIER_GUARD_TOLERANCE",
+      "domain": "mhs",
+      "title": "성장 리스크 상한 검증의 부동소수점 오탐 수정",
+      "why": "리스크 그리드 최댓값에서 selected_risk를 reference_risk로 되나누면 3.0이 2.9999999999999996으로 반올림돼 등록 상한이 자기 자신을 초과한 것으로 오판되어 런이 중단됨",
+      "resolution": "비교를 그리드 생성과 동일한 곱셈 공간(reference_risk * ceiling > selected_risk)으로 전환, 허용오차 상수 없이 정확한 재현으로 해결",
+      "impact": "그리드 최댓값 경계에서의 오탐 중단 해소, 실제 위반(프론티어 미달) 차단은 그대로 유지, 기존 스위트 전부 그린"
+    },
+    {
       "task_id": "MHS_NAME_DRIFT_TRIM",
       "date": "2026-09-16",
       "adr_id": "ADR_20260916_MHS_NAME_DRIFT_TRIM",
@@ -989,16 +999,6 @@
       "why": "ADR_20260817_MHS_TREND_SLEEVE_COMMITTEE_OVERLAY로 배선 완료 후 committee_capital+regime_adaptive_tranche 베이스라인 대비 --trend-sleeve-gross 0.15/0.30 실측 백테스트를 수행해 실제 배포 안전성을 검증.",
       "resolution": "gross=0.15: fold CAGR 19.23%->35.01%, Calmar 1.128->1.267, stress Sharpe 0.833->1.141 개선되었으나 fold 0(2023)에서 RELEVANT_EXECUTION_DATA_GAP 발생. --output-tier full로 원장 대조해 원인을 BNXUSDT 단일 종목으로 특정(위원회 북은 이 구간 비중 ~0이라 결손을 회피했으나 슬리브는 execution_mask 전 종목에 균등배분해 결손을 노출). fapi.binance.com REST 직접 조회로 2023-01-31 23:57~02-22 14:45 UTC 구간 원천 자체에 BNXUSDT 캔들이 없음(상장정지/재상장 추정)을 확인해 backfill 불가 판정, MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에 BNXUSDT 추가(evaluation.py). 제외 후 재실행 결과 3-fold는 전부 통과했으나 top-level 연속 전체기간(2021-2025) 리플레이가 2025-10-03 CAPITAL_INVARIANT_BREACH(pre_trade_equity=-0.0038, 자본 마이너스)로 실패 -- BNXUSDT 한 종목 제외만으로 발동 시점이 완전히 다른 자본붕괴가 노출될 만큼 슬리브 오버레이가 유니버스 구성 변화에 취약함을 확인. gross=0.30도 별도로 실측해 Calmar가 0.15(1.267)보다 낮은 1.157로 하락하고 fold 통과가 1/3까지 떨어짐을 확인(과다노출 시 악화 확인, 별개로 기각 사유 아님).",
       "impact": "트렌드 슬리브 가산 결합(--trend-sleeve-gross > 0.0)은 fold 통계만으로는 배포 결정에 불충분함을 실증 -- 연속 전체기간 원장의 CAPITAL_INVARIANT_BREACH 점검이 fold pass/fail보다 우선하는 안전 게이트여야 함을 확인. 코드(evaluation.py의 _apply_trend_sleeve/_trend_sleeve_position 배선)는 opt-in(trend_sleeve_gross=0.0 기본값, byte-identical)이라 제거하지 않고 유지하되 CLI --help에 부정 결과 경고 추가(src/cli/commands/research/mhs.py). BNXUSDT 제외는 트렌드 슬리브와 무관하게 데이터 위생상 유지. [수정 2026-08-17] BNXUSDT 영구 제외는 committee_capital 베이스라인 Calmar를 1.128->0.786(~30% 상대하락)로 악화시킴이 재실측되어 되돌림(MHS_SOURCE_GAP_EXCLUDED_SYMBOLS에 미포함 유지) -- 트렌드 슬리브를 중단하기로 한 이상 이 결손은 현재 어떤 배포 설정에도 영향 없음. 베이스라인은 원래 수치(CAGR 19.23%, Calmar 1.128, 3/3 fold)로 재확인 완료."
-    },
-    {
-      "task_id": "ADR_20260817_MHS_TREND_SLEEVE_COMMITTEE_OVERLAY",
-      "date": "2026-08-17",
-      "adr_id": "ADR_20260817_MHS_TREND_SLEEVE_COMMITTEE_OVERLAY",
-      "domain": "risk",
-      "title": "MHS 추세 슬리브 위원회 자본 가산 결합 배선",
-      "why": "committee_capital+committee_regime_adaptive_tranche 배포 이후 Research GO 통과(CAGR 19.23%, Calmar 1.128, MDD -17.05%)에도, ADR_20260814에서 낮은 상관(0.133)·양(+) 단독 Sharpe(0.070~0.091)로 측정된 가산형 추세 슬리브가 실제 배포 북에는 한 번도 결합되지 않았고, _trend_sleeve_diagnostic도 이미 대체된 frozen momentum 북과만 비교하도록 고정되어 있었음. 동적 레버리지/Kelly류 성장최적 사이징(ADR_20260816)은 이미 실측 후 전량 기각되어 재시도 대상에서 제외.",
-      "resolution": "src/application/research/mhs/evaluation.py에 _trend_sleeve_position/_apply_trend_sleeve 헬퍼 신설, 기존 --trend-sleeve/--trend-sleeve-gross 플래그로 fold 경로(_build_fold_target_weights)와 top-level 경로 양쪽에서 regime cash-scale/rebalance filter 이전 지점에 가산 결합 배선(trend_sleeve_gross=0.0이면 byte-identical). _trend_sleeve_diagnostic에 current_book 파라미터 추가해 비교 대상을 frozen momentum 북에서 실제 배포 북으로 교체.",
-      "impact": "170/171 테스트 통과(신규 6개 시나리오 포함), ruff/mypy clean. 유일 실패(test_mhs_diagnostic_3m_replay_end_to_end)는 git stash로 원본 코드 대비 재현해 사전 존재하던 순서-의존 flake임을 확인(회귀 아님). 실제 gross-budget 그리드(0.15/0.30) 백테스트를 통한 Calmar/CAGR/MDD 개선 검증은 아직 미실행 -- docs/specs 5절에 커맨드 명시, 다음 세션에서 실행 필요."
     }
   ]
 }
