@@ -30,6 +30,7 @@ from src.mhs.contracts import (
     MhsFoldReport,
     MhsOutputTier,
 )
+from src.mhs.deployment_policy import live_parity_blockers
 from src.mhs.resources import _peak_rss_bytes
 from src.common.errors import DataIntegrityError
 from src.live.crypto import derive_key
@@ -83,7 +84,9 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     from src.mhs.live_strategy import LiveStrategyParams, load_strategy_params, save_strategy_bootstrap, save_strategy_params
     from src.mhs.params import COMMITTEE_MEMBER_SETS, SIGNAL_RETURN_TAIL_DAYS
 
-    if bool(getattr(request, "name_drift_trim", False)): raise DataIntegrityError("deployment ineligible: name_drift_trim has no live daemon counterpart")
+    blockers = live_parity_blockers(request)
+    if blockers:
+        raise DataIntegrityError(f"deployment ineligible: no live daemon counterpart for {','.join(blockers)}")
     if report.status != "COMPLETE":
         raise DataIntegrityError("deployment ineligible: report status not COMPLETE")
     if not getattr(report.research_go, "eligible", False):
@@ -280,6 +283,7 @@ def build_mhs_run_history_record(
         "end": report.end,
         "resolved_end": report.resolved_end,
         "flags": dataclasses.asdict(request) if request is not None else None,
+        "live_parity_blockers": list(live_parity_blockers(request)) if request is not None else None,
         "params_snapshot": capture_params_snapshot(),
         "perf": {
             "run_elapsed_seconds": report.run_elapsed_seconds,

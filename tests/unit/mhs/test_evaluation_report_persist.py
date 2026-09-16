@@ -263,3 +263,62 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
     )
 
     assert isolated == baseline
+
+
+def test_emit_deployment_refuses_live_parity_blockers(tmp_path) -> None:
+    import dataclasses
+    import types
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import emit_deployment
+
+    # Given: trim ON 요청과, status 검사 단계에서만 걸리도록 만든 더미 리포트
+    trim_request = MhsDiagnosticRequest(
+        **dataclasses.asdict(MhsRunConfig(name_drift_trim=True))
+    )
+    sentinel_report = types.SimpleNamespace(status="INCOMPLETE")
+
+    # When / Then: 리포트 접근 전에 차단
+    with pytest.raises(DataIntegrityError, match="name_drift_trim"):
+        emit_deployment(sentinel_report, trim_request, tmp_path)
+
+    # Given: 기본 요청은 이 가드를 통과하고 status 검사에서 걸린다
+    plain_request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    with pytest.raises(DataIntegrityError, match="report status not COMPLETE"):
+        emit_deployment(sentinel_report, plain_request, tmp_path)
+
+
+def test_run_history_record_discloses_live_parity_blockers() -> None:
+    import dataclasses
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.report.persist import build_mhs_run_history_record
+
+    # Given
+    report = _build_compact_report()
+    trim_request = MhsDiagnosticRequest(
+        **dataclasses.asdict(MhsRunConfig(name_drift_trim=True))
+    )
+    plain_request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+
+    # When
+    trim_record = build_mhs_run_history_record(
+        report, trim_request, ev.MhsOutputTier.COMPACT, None
+    )
+    plain_record = build_mhs_run_history_record(
+        report, plain_request, ev.MhsOutputTier.COMPACT, None
+    )
+    none_record = build_mhs_run_history_record(
+        report, None, ev.MhsOutputTier.COMPACT, None
+    )
+
+    # Then
+    assert trim_record["live_parity_blockers"] == ["name_drift_trim"]
+    assert plain_record["live_parity_blockers"] == []
+    assert none_record["live_parity_blockers"] is None
+    assert trim_record["flags"]["name_drift_trim"] is True

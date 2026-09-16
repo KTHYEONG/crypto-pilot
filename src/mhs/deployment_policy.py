@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 if TYPE_CHECKING:
     from src.mhs.contracts import MhsDiagnosticRequest
+
+LIVE_UNSUPPORTED_REQUEST_FLAGS: dict[str, str] = {"name_drift_trim": "live daemon has no intraday trim loop"}
+
+
+def live_parity_blockers(config: Any) -> tuple[str, ...]:
+    """Return sorted live-parity blocker flag names set on ``config``.
+
+    ``config`` is typed as ``Any`` because both ``MhsDiagnosticRequest`` and
+    ``MhsRunConfig`` are accepted via duck-typed ``getattr`` (no isinstance
+    check), so a union annotation would couple this seam to both types.
+    """
+    if config is None:
+        return ()
+    return tuple(sorted(k for k in LIVE_UNSUPPORTED_REQUEST_FLAGS if bool(getattr(config, k, False))))
 
 
 @dataclass(frozen=True, slots=True)
