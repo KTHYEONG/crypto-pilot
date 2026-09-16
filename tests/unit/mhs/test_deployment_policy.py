@@ -58,3 +58,31 @@ def test_sizing_signal_and_deployment_policies_validate_all_bounds() -> None:
         MhsDeploymentPolicy(target_weights=target, sizing=sizing, signal_window=window, slow_horizon_hours=168, committee_member_weights={"m": -1.0}, admitted_members=("m",))
     with pytest.raises(ValueError, match="sum must be"):
         MhsDeploymentPolicy(target_weights=target, sizing=sizing, signal_window=window, slow_horizon_hours=168, committee_member_weights={"m": 0.0}, admitted_members=("m",))
+
+
+def test_live_parity_blockers_is_single_registry_seam() -> None:
+    import dataclasses
+    from dataclasses import fields
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import (
+        LIVE_UNSUPPORTED_REQUEST_FLAGS,
+        live_parity_blockers,
+    )
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    # Given: 등록부의 모든 키는 실제 요청 필드여야 한다(오탈자 fail-closed)
+    request_fields = {f.name for f in fields(MhsDiagnosticRequest)}
+    assert set(LIVE_UNSUPPORTED_REQUEST_FLAGS) <= request_fields
+    assert "name_drift_trim" in LIVE_UNSUPPORTED_REQUEST_FLAGS
+
+    # When / Then: 기본값은 차단 없음
+    assert live_parity_blockers(MhsRunConfig()) == ()
+    assert live_parity_blockers(MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))) == ()
+    assert live_parity_blockers(None) == ()
+
+    # When / Then: trim ON 은 두 타입 모두에서 동일하게 차단
+    trim_config = MhsRunConfig(name_drift_trim=True)
+    trim_request = MhsDiagnosticRequest(**dataclasses.asdict(trim_config))
+    assert live_parity_blockers(trim_config) == ("name_drift_trim",)
+    assert live_parity_blockers(trim_request) == ("name_drift_trim",)

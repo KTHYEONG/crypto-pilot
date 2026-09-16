@@ -1007,3 +1007,190 @@ def test_compute_signal_row_threads_params_data_policy_to_fold_builder(tmp_path,
     m.compute_signal_row(params, rt, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper")
 
     assert captured["request"].data_policy == "zombie_mask_v1"
+
+
+def test_descale_realized_returns_skips_non_daily_steps() -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.live_signal_step import descale_realized_returns
+
+    # Given: 09-02가 HALT로 빠진 실현 equity (09-01, 09-03, 09-04)
+    idx = pd.to_datetime(["2026-09-01", "2026-09-03", "2026-09-04"], utc=True)
+    equity = pd.Series([100.0, 121.0, 132.0], index=idx, dtype="float64")
+    applied = pd.Series([2.0, 2.0, 2.0], index=idx, dtype="float64")
+
+    # When
+    out = descale_realized_returns(equity, applied)
+
+    # Then: 09-01 -> 09-03 (2일)은 배제, 09-03 -> 09-04 (1일)만 방출
+    assert list(out.index) == [pd.Timestamp("2026-09-04", tz="UTC")]
+    np.testing.assert_allclose(
+        out.to_numpy(), [(132.0 / 121.0 - 1.0) / 2.0], rtol=0.0, atol=1e-15
+    )
+    assert out.dtype == np.float64
+
+
+def test_descale_realized_returns_preserves_contiguous_daily_series() -> None:
+    import numpy as np
+    import pandas as pd
+    from src.mhs.live_signal_step import descale_realized_returns
+
+    # Given: 결손 없는 일간 equity
+    idx = pd.to_datetime(["2026-09-01", "2026-09-02", "2026-09-03"], utc=True)
+    equity = pd.Series([100.0, 110.0, 99.0], index=idx, dtype="float64")
+    applied = pd.Series([2.0, 1.0], index=idx[:2], dtype="float64")
+
+    # When
+    out = descale_realized_returns(equity, applied)
+
+    # Then: 모든 후속 행 유지
+    assert list(out.index) == list(idx[1:])
+    np.testing.assert_allclose(
+        out.to_numpy(),
+        [0.10 / 2.0, (99.0 / 110.0 - 1.0) / 1.0],
+        rtol=0.0,
+        atol=1e-15,
+    )
+
+
+def test_descale_realized_returns_gap_does_not_raise_and_recovers() -> None:
+    import pandas as pd
+    from src.mhs.live_signal_step import descale_realized_returns
+
+    # Given: 2025-12-31 이후 8개월 공백, 이후 3일 연속
+    idx = pd.to_datetime(
+        ["2025-12-31", "2026-09-01", "2026-09-02", "2026-09-03"], utc=True
+    )
+    equity = pd.Series([100.0, 150.0, 151.0, 152.0], index=idx, dtype="float64")
+    applied = pd.Series([1.0, 1.0, 1.0, 1.0], index=idx, dtype="float64")
+
+    # When: 예외 없이 통과
+    out = descale_realized_returns(equity, applied)
+
+    # Then: 공백 쌍만 배제되고 재개 구간은 살아 있다
+    assert list(out.index) == [
+        pd.Timestamp("2026-09-02", tz="UTC"),
+        pd.Timestamp("2026-09-03", tz="UTC"),
+    ]
+    assert out.notna().all()
+
+
+def test_warmup_reference_gap_days_measures_calendar_gap() -> None:
+    import pandas as pd
+    import pytest
+    from src.mhs.live_signal_step import warmup_reference_gap_days
+
+    # Given / When / Then: 빈 워밍업
+    empty = pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
+    assert warmup_reference_gap_days(empty, pd.Timestamp("2026-09-16", tz="UTC")) is None
+
+    # Given: 2025-12-31에 끝나는 봉인 부트스트랩
+    warm = pd.Series(
+        [0.001, 0.002],
+        index=pd.to_datetime(["2025-12-30", "2025-12-31"], utc=True),
+        dtype="float64",
+    )
+
+    # Then: 인접 일간은 1일
+    assert warmup_reference_gap_days(
+        warm, pd.Timestamp("2026-01-01", tz="UTC")
+    ) == pytest.approx(1.0)
+
+    # Then: 실제 봉인 번들 공백
+    assert warmup_reference_gap_days(
+        warm, pd.Timestamp("2026-09-16", tz="UTC")
+    ) == pytest.approx(259.0)
+
+    # Then: tz-naive 참조는 UTC로 해석
+    assert warmup_reference_gap_days(
+        warm, pd.Timestamp("2026-01-01")
+    ) == pytest.approx(1.0)
+
+
+def test_compute_signal_row_discloses_warmup_gap_without_halting(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    import numpy as np
+    import pandas as pd
+    import src.mhs.live_signal_step as m
+    from src.mhs.live_runtime import LiveRuntime
+
+    # Given: 2025-12-28에 끝나는 부트스트랩, 결정일은 2026-08-31 (246일 공백)
+    dt = pd.Timestamp("2026-08-31", tz="UTC")
+    tw = pd.DataFrame([[1.0]], index=pd.DatetimeIndex([dt]), columns=["BTCUSDT"])
+    monkeypatch.setattr(
+        m,
+        "_build_fold_target_weights",
+        lambda *a, **k: (tw, pd.DatetimeIndex([dt]), [], pd.DatetimeIndex([dt])),
+    )
+    monkeypatch.setattr(m, "_load_funding_by_symbol", lambda *a, **k: {})
+    monkeypatch.setattr(m, "_assert_panel_history_available", lambda *a, **k: None)
+    monkeypatch.setattr(m, "realized_equity", lambda *a, **k: pd.Series(dtype="float64"))
+    boot = pd.Series(
+        np.full(150, 0.002),
+        index=pd.date_range("2025-08-01", periods=150, freq="1D", tz="UTC"),
+        dtype="float64",
+    )
+    params = _v2_sig_params("growth_budget", 1.0, False, False)
+    rt = LiveRuntime(
+        schema_version=1,
+        params_digest="d",
+        last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
+        held_target_row={},
+        reference_daily_returns=boot,
+    )
+
+    # When
+    with caplog.at_level(logging.WARNING, logger="LiveSignalStep"):
+        scaled, _prescale, scalar = m.compute_signal_row(
+            params, rt, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper"
+        )
+
+    # Then: 매매는 계속되고(예외 없음) 공백은 공시된다
+    assert np.isfinite(scaled["BTCUSDT"])
+    assert 0.0 < scalar <= 3.0
+    assert any("warmup_gap_days" in rec.getMessage() for rec in caplog.records)
+
+
+def test_compute_signal_row_silent_when_warmup_is_contiguous(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    import numpy as np
+    import pandas as pd
+    import src.mhs.live_signal_step as m
+    from src.mhs.live_runtime import LiveRuntime
+
+    # Given: 결정일 직전까지 이어지는 부트스트랩
+    dt = pd.Timestamp("2026-08-31", tz="UTC")
+    tw = pd.DataFrame([[1.0]], index=pd.DatetimeIndex([dt]), columns=["BTCUSDT"])
+    monkeypatch.setattr(
+        m,
+        "_build_fold_target_weights",
+        lambda *a, **k: (tw, pd.DatetimeIndex([dt]), [], pd.DatetimeIndex([dt])),
+    )
+    monkeypatch.setattr(m, "_load_funding_by_symbol", lambda *a, **k: {})
+    monkeypatch.setattr(m, "_assert_panel_history_available", lambda *a, **k: None)
+    monkeypatch.setattr(m, "realized_equity", lambda *a, **k: pd.Series(dtype="float64"))
+    boot = pd.Series(
+        np.full(150, 0.002),
+        index=pd.date_range(end="2026-08-30", periods=150, freq="1D", tz="UTC"),
+        dtype="float64",
+    )
+    params = _v2_sig_params("growth_budget", 1.0, False, False)
+    rt = LiveRuntime(
+        schema_version=1,
+        params_digest="d",
+        last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
+        held_target_row={},
+        reference_daily_returns=boot,
+    )
+
+    # When
+    with caplog.at_level(logging.WARNING, logger="LiveSignalStep"):
+        _scaled, _prescale, scalar = m.compute_signal_row(
+            params, rt, str(tmp_path), dt, portfolio_state_dir=tmp_path, mode="paper"
+        )
+
+    # Then: 경고 없음
+    assert 0.0 < scalar <= 3.0
+    assert not any("warmup_gap_days" in rec.getMessage() for rec in caplog.records)
