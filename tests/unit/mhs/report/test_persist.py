@@ -203,7 +203,14 @@ COVERED_SCENARIOS: tuple[str, ...] = (
 
 
 
-def test_emit_deployment_plaintext_when_no_key(tmp_path, caplog) -> None:
+def test_emit_deployment_plaintext_when_no_key(tmp_path, caplog, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     """UPDATED existing test: the plaintext seal path now also carries the report evidence weights (the stub gained committee_member_weights)"""
     import dataclasses
     import types
@@ -275,7 +282,14 @@ def test_persist_mhs_report_full_lightweight_json_and_parquet(tmp_path: Path) ->
     assert "equity" in loaded_ledger.columns
 
 
-def test_emit_deployment_seals_report_evidence_weights(tmp_path) -> None:
+def test_emit_deployment_seals_report_evidence_weights(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     """GIVEN a report carrying the backtest top_level evidence weights WHEN emit_deployment seals params THEN the sealed committee_member_weights equal those evidence weights, never 1/N"""
     import dataclasses
     import types
@@ -318,7 +332,14 @@ def test_emit_deployment_seals_report_evidence_weights(tmp_path) -> None:
     assert set(loaded.policy.admitted_members) == set(report.committee_member_weights)
 
 
-def test_emit_deployment_fails_closed_without_report_member_weights(tmp_path) -> None:
+def test_emit_deployment_fails_closed_without_report_member_weights(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     """I-WEIGHT-PARITY fail-closed: evidence weighting on but the report carries no committee_member_weights raises DataIntegrityError instead of sealing equal weights"""
     import dataclasses
     import types
@@ -352,7 +373,14 @@ def test_emit_deployment_fails_closed_without_report_member_weights(tmp_path) ->
     assert not (tmp_path / "strategy_params.json").exists()
 
 
-def test_emit_deployment_fails_closed_on_non_admitted_member_weight(tmp_path) -> None:
+def test_emit_deployment_fails_closed_on_non_admitted_member_weight(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     """Fail-closed when the weights dict names a member outside the resolved committee_member_set (member-set drift between backtest and seal)"""
     import dataclasses
     import types
@@ -384,7 +412,14 @@ def test_emit_deployment_fails_closed_on_non_admitted_member_weight(tmp_path) ->
         emit_deployment(report, request, tmp_path, artifact_key=None)
 
 
-def test_emit_deployment_fails_closed_on_negative_member_weight(tmp_path) -> None:
+def test_emit_deployment_fails_closed_on_negative_member_weight(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     """Fail-closed on a negative or non-finite member weight (a short-the-member book is never a deployable evidence weight)"""
     import dataclasses
     import types
@@ -420,7 +455,14 @@ def test_emit_deployment_fails_closed_on_negative_member_weight(tmp_path) -> Non
         emit_deployment(report, request, tmp_path, artifact_key=None)
 
 
-def test_emit_deployment_fails_closed_on_zero_weight_sum(tmp_path) -> None:
+def test_emit_deployment_fails_closed_on_zero_weight_sum(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     """Fail-closed when every evidence weight is zero: the deployed book would have no renormalizable mix"""
     import dataclasses
     import types
@@ -452,7 +494,14 @@ def test_emit_deployment_fails_closed_on_zero_weight_sum(tmp_path) -> None:
         emit_deployment(report, request, tmp_path, artifact_key=None)
 
 
-def test_emit_deployment_equal_weights_when_evidence_weighting_disabled(tmp_path) -> None:
+def test_emit_deployment_equal_weights_when_evidence_weighting_disabled(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     """Backward compatibility: with committee_evidence_weighting=False the backtest averages members equally, so emit_deployment must keep sealing 1/N"""
     import dataclasses
     import types
@@ -511,7 +560,14 @@ def test_resolved_deployment_member_weights_rejects_empty_admitted() -> None:
 
 
 
-def test_emit_deployment_v2_binds_policy_and_bootstrap(tmp_path) -> None:
+def test_emit_deployment_v2_binds_policy_and_bootstrap(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     import dataclasses
     import types
     import pandas as pd
@@ -536,7 +592,14 @@ def test_emit_deployment_v2_binds_policy_and_bootstrap(tmp_path) -> None:
 
 
 
-def test_emit_deployment_v2_resolves_constant_risk_and_median_volumes(tmp_path) -> None:
+def test_emit_deployment_v2_resolves_constant_risk_and_median_volumes(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     import dataclasses
     import types
     import pandas as pd
@@ -570,6 +633,13 @@ def test_emit_deployment_v2_resolves_constant_risk_and_median_volumes(tmp_path) 
 
 
 def test_emit_deployment_bootstrap_and_target_vol_use_unscaled_reference(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     import dataclasses
     import types
     import numpy as np
@@ -612,7 +682,14 @@ def test_emit_deployment_bootstrap_and_target_vol_use_unscaled_reference(tmp_pat
     assert params.policy.sizing.target_annual_vol == 0.5
 
 
-def test_emit_deployment_requires_pre_vol_target_reference(tmp_path) -> None:
+def test_emit_deployment_requires_pre_vol_target_reference(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     import dataclasses
     import types
     import pandas as pd
@@ -633,7 +710,14 @@ def test_emit_deployment_requires_pre_vol_target_reference(tmp_path) -> None:
         emit_deployment(report, request, tmp_path)
 
 
-def test_emit_deployment_carries_request_data_policy(tmp_path) -> None:
+def test_emit_deployment_carries_request_data_policy(tmp_path, monkeypatch) -> None:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        persist_mod,
+        "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
     import dataclasses
     import types
 
@@ -688,6 +772,6 @@ def test_emit_deployment_refuses_name_drift_trim(tmp_path) -> None:
 
     request = dataclasses.replace(MhsDiagnosticRequest(), name_drift_trim=True)
     report = types.SimpleNamespace(status="COMPLETE")
-    with pytest.raises(DataIntegrityError, match="name_drift_trim"):
+    with pytest.raises(DataIntegrityError, match="I4_LIVE_PARITY_BLOCKED"):
         emit_deployment(report, request, tmp_path)
 

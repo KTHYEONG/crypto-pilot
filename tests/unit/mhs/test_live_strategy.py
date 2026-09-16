@@ -59,18 +59,22 @@ def test_load_strategy_params_tamper_detected(tmp_path) -> None:
         load_strategy_params(path)
 
 def test_assert_deployment_eligible_rejects_research_go_fail() -> None:
+    import dataclasses
     import types
 
     import pandas as pd
     import pytest
 
     from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.live_strategy import assert_deployment_eligible
+    from src.mhs.pipeline.config import MhsRunConfig
 
     tw = pd.DataFrame({"BTCUSDT": [0.1]}, index=pd.DatetimeIndex([pd.Timestamp("2026-08-30", tz="UTC")]))
     report = types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=False), blend=types.SimpleNamespace(target_weights=tw))
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
     with pytest.raises(DataIntegrityError) as exc:
-        assert_deployment_eligible(report)
+        assert_deployment_eligible(report, request)
     assert "deployment ineligible" in str(exc.value)
 
 def test_mhs_kelly_z0_live_snapshot_changes_seal_digest(monkeypatch) -> None:
@@ -335,22 +339,6 @@ def test_strategy_bootstrap_rejects_corrupt_payloads(tmp_path) -> None:
     pd.testing.assert_series_equal(load_strategy_bootstrap(path, expected_sha256=tiny_digest), tiny, check_exact=False, check_freq=False)
 
 
-def test_assert_deployment_eligible_rejects_flags_drift(tmp_path) -> None:
-    import json
-    import types
-    import pandas as pd
-    import pytest
-    from src.common.errors import DataIntegrityError
-    from src.mhs.live_strategy import assert_deployment_eligible
-
-    tw = pd.DataFrame({"BTCUSDT": [0.1]}, index=pd.DatetimeIndex([pd.Timestamp("2026-08-30", tz="UTC")]))
-    report = types.SimpleNamespace(status="COMPLETE", research_go=types.SimpleNamespace(eligible=True), blend=types.SimpleNamespace(target_weights=tw), flags={"a": 1})
-    ref = tmp_path / "ref.json"
-    ref.write_text(json.dumps({"flags": {"a": 2}}), encoding="utf-8")
-    with pytest.raises(DataIntegrityError, match="flags digest drift"):
-        assert_deployment_eligible(report, reference_report_path=ref)
-
-
 def test_strategy_bootstrap_loader_fail_closed_branches(tmp_path) -> None:
     import pandas as pd
     import pytest
@@ -582,12 +570,71 @@ def test_legacy_artifact_policy_does_not_auto_upgrade(tmp_path) -> None:
 
 
 def test_assert_deployment_eligible_requires_backtest_reliability() -> None:
+    import dataclasses
     from types import SimpleNamespace
     import pandas as pd
     import pytest
     from src.common.errors import DataIntegrityError
+    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.live_strategy import assert_deployment_eligible
+    from src.mhs.pipeline.config import MhsRunConfig
     weights = pd.DataFrame({'BTCUSDT': [0.1]}, index=pd.DatetimeIndex([pd.Timestamp('2026-01-01', tz='UTC')]))
     report = SimpleNamespace(status='COMPLETE', research_go=SimpleNamespace(eligible=True), backtest_reliability=SimpleNamespace(eligible=False), blend=SimpleNamespace(target_weights=weights))
-    with pytest.raises(DataIntegrityError, match='reliability'):
-        assert_deployment_eligible(report)
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    with pytest.raises(DataIntegrityError, match='I3_INPUT_UNSEALED'):
+        assert_deployment_eligible(report, request)
+
+def test_assert_deployment_eligible_delegates_to_deploy_gate(monkeypatch) -> None:
+    import types
+
+    import pytest
+
+    import src.mhs.live_strategy as live_strategy
+    from src.common.errors import DataIntegrityError
+    from src.mhs.deploy_gate import DeployGateResult
+
+    seen: list[tuple[object, object]] = []
+
+    def _blocked(report, request, **_kw):
+        seen.append((report, request))
+        return DeployGateResult(go=False, reason_codes=("E1_OOS_GROWTH_LCB_NOT_POSITIVE", "S3_GROWTH_TIME_CONCENTRATED"), metrics={})
+
+    monkeypatch.setattr(live_strategy, "deploy_gate_from_report", _blocked)
+    report = types.SimpleNamespace(status="COMPLETE")
+    request = types.SimpleNamespace()
+
+    # When / Then: 차단 사유가 메시지에 그대로 실린다
+    with pytest.raises(DataIntegrityError, match="S3_GROWTH_TIME_CONCENTRATED"):
+        live_strategy.assert_deployment_eligible(report, request)
+    assert seen == [(report, request)]
+
+    # Given: 통과 판정이면 조용히 반환
+    monkeypatch.setattr(
+        live_strategy, "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={"n_folds": 16.0}),
+    )
+    assert live_strategy.assert_deployment_eligible(report, request) is None
+
+
+def test_assert_deployment_eligible_still_rejects_flags_drift(tmp_path, monkeypatch) -> None:
+    import json
+    import types
+
+    import pytest
+
+    import src.mhs.live_strategy as live_strategy
+    from src.common.errors import DataIntegrityError
+    from src.mhs.deploy_gate import DeployGateResult
+
+    monkeypatch.setattr(
+        live_strategy, "deploy_gate_from_report",
+        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
+    )
+    report = types.SimpleNamespace(status="COMPLETE", flags={"a": 1})
+    ref = tmp_path / "ref.json"
+    ref.write_text(json.dumps({"flags": {"a": 2}}), encoding="utf-8")
+
+    # When / Then
+    with pytest.raises(DataIntegrityError, match="flags digest drift"):
+        live_strategy.assert_deployment_eligible(report, types.SimpleNamespace(), reference_report_path=ref)
+

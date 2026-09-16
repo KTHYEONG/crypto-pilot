@@ -116,10 +116,10 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         from src.mhs.report.persist import emit_deployment
 
         from src.live.settings import LiveSettings
-        assert_deployment_eligible(report, reference_report_path=Path(mhs_horizon_diagnostic_report_path()))
+        assert_deployment_eligible(report, request, reference_report_path=Path(mhs_horizon_diagnostic_report_path()))
         report_target = Path(mhs_horizon_diagnostic_report_path())
         artifact_root = report_target.parent / f"{report_target.stem}_artifacts"
-        res = emit_deployment(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)  # wiring: if getattr(args, "emit_deployment", False): assert_deployment_eligible(report, reference_report_path=Path(mhs_horizon_diagnostic_report_path())); emit_deployment(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
+        res = emit_deployment(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)  # wiring: if getattr(args, "emit_deployment", False): assert_deployment_eligible(report, request, reference_report_path=Path(mhs_horizon_diagnostic_report_path())); emit_deployment(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
         _logger.info("[EVAL] emit_deployment strategy_digest=%s path=%s", res["strategy_digest"], res["params_path"])
         if getattr(args, "deploy_push", False):
             import subprocess
