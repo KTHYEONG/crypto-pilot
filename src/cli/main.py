@@ -5,6 +5,7 @@ import logging
 
 from src.cli.commands.data import add_data_commands
 from src.cli.commands.live import add_live_commands
+from src.cli.commands.ops import add_ops_commands
 from src.cli.commands.research import add_research_commands
 
 _LOG_LEVELS = {
@@ -21,9 +22,9 @@ def configure_logging(*, level: int = logging.INFO, debug_streams: bool = False)
 
 
 def build_root_parser() -> argparse.ArgumentParser:
-    """Compose the single documented CLI entry point with three command groups.
+    """Compose the single documented CLI entry point with four command groups.
 
-    Top-level groups are ``data``, ``research`` and ``live``.
+    Top-level groups are ``data``, ``research``, ``live`` and ``ops``.
     """
     parser = argparse.ArgumentParser(
         prog="python -m src.cli.main",
@@ -45,6 +46,7 @@ def build_root_parser() -> argparse.ArgumentParser:
     add_data_commands(subparsers.add_parser("data", help="Collect and manage market data"))
     add_research_commands(subparsers.add_parser("research", help="Run sealed research evaluations"))
     add_live_commands(subparsers.add_parser("live", help="Live/shadow exchange execution"))
+    add_ops_commands(subparsers.add_parser("ops", help="Operational provisioning for the VPS runtime"))
     return parser
 
 
