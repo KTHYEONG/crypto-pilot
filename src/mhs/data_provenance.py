@@ -203,3 +203,28 @@ def validate_forward_execution_observations(
             DataEvidenceTier.UNSEALED_ARCHIVE, False, (*reasons, "FORWARD_EVIDENCE_INCOMPLETE"), None, len(usable),
         )
     return DataProvenanceResult(DataEvidenceTier.FORWARD_OBSERVED, True, (), None, len(usable))
+
+
+def mhs_sealable_input_paths(*, data_root: Path, execution_timeframe: str) -> tuple[Path, ...]:
+    """Enumerate sealable inputs: only symbols owning the complete required set.
+
+    Symbols are discovered from ``<data_root>/ohlcv/1h/*.parquet`` sorted by
+    stem; the required-path layout comes solely from
+    :func:`resolve_required_mhs_input_paths`. A symbol contributes its paths
+    only when every required file exists -- a symbol missing any required
+    file contributes nothing (never seal a partial symbol).
+    """
+    root = Path(data_root)
+    symbols = sorted({path.stem for path in (root / "ohlcv" / "1h").glob("*.parquet")})
+    sealed: list[Path] = []
+    for symbol in symbols:
+        required = resolve_required_mhs_input_paths(
+            data_root=root,
+            panel_symbols=[symbol],
+            execution_symbols=[symbol],
+            execution_timeframe=execution_timeframe,
+        )
+        # 일부 파일이 빠진 심볼은 통째로 제외한다(부분 봉인 금지).
+        if all(path.exists() for path in required):
+            sealed.extend(required)
+    return tuple(dict.fromkeys(sealed))

@@ -1076,3 +1076,77 @@ def test_run_anchored_fold_accepts_terminal_funding_gap_via_shared_helper(mhs_ma
     assert report.strict is not None
     assert report.failures == ()
 
+
+def test_run_anchored_fold_certifies_valid_ledger_via_shared_helper(mhs_market, monkeypatch) -> None:
+    # Given: a strict primary replay whose ledger is valid and gap-free
+    import pandas as pd
+
+    import src.mhs.evaluation.folds as folds_mod
+    from src.mhs import evaluation as ev
+    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.quant.universe.pit_universe import symbol_partition
+    from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
+
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    daily_idx = pd.date_range(
+        _FOLD.validation_start.normalize(), _FOLD.validation_end.normalize(), freq="D", tz="UTC",
+    )
+    blend_scale = pd.Series(1.0, index=daily_idx)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        pnl_vol_target_mode="constant_risk",
+    )
+
+    def _fills():
+        return pd.DataFrame({
+            "timestamp": pd.Series(dtype="datetime64[ns, UTC]"),
+            "symbol": pd.Series(dtype="object"),
+            "quantity_delta": pd.Series(dtype="float64"),
+            "fill_price": pd.Series(dtype="float64"),
+            "fee_bps": pd.Series(dtype="float64"),
+            "reason": pd.Series(dtype="object"),
+            "pre_trade_equity": pd.Series(dtype="float64"),
+        })
+
+    def _result():
+        eq_idx = pd.date_range(_FOLD.validation_start, periods=2, freq="D", tz="UTC")
+        equity = pd.Series([1.0, 1.0], index=eq_idx)
+        ledger = SimulatedInventoryLedgerResult(
+            equity=equity, net_returns=equity * 0.0, simulated_units=None,
+            mark_to_market_pnl=equity * 0.0, funding_charge=equity * 0.0, fee_charge=equity * 0.0,
+            fill_turnover=equity * 0.0, fill_source="OHLCV_IMMEDIATE_TAKER",
+            mark_source="OHLCV_CLOSE_FALLBACK", primary_valid=True, invalid_reasons=(),
+            data_gaps=(),
+        )
+        return StrategyExecutionReplayResult(
+            simulated_fills=_fills(), ledger=ledger, simulated_units=pd.DataFrame(),
+            simulated_notional_weights=pd.DataFrame(), fill_source="OHLCV_IMMEDIATE_TAKER",
+            mark_source="OHLCV_CLOSE_FALLBACK",
+            submit_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_times=pd.Series(dtype="datetime64[ns, UTC]"),
+            fill_count=0, unfilled_count=0, fallback_count=0, all_intent_shortfall_bps=0.0,
+            forced_exit_count=0, forced_exit_notional=0.0,
+            termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+            unsupported_assumptions=(), elapsed_seconds=0.0, data_gaps=(),
+        )
+
+    monkeypatch.setattr(folds_mod, "replay_execution_windows", lambda *a, **k: _result())
+    monkeypatch.setattr(folds_mod, "replay_execution_window_batch", lambda *a, **k: (_result(), _result()))
+
+    # When
+    report = ev._run_anchored_fold(
+        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+        blend_exposure_scale=blend_scale,
+    )
+
+    # Then: the shared certification accepts a valid ledger exactly as before
+    assert report.strict is not None
+    assert report.failures == ()
