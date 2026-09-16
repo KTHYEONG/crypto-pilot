@@ -245,7 +245,6 @@ def _prune_live_data(args: argparse.Namespace) -> None:
                         if s.alert_gmail_app_password is not None
                         else None
                     ),
-                    email_to=s.alert_email_to,
                     event="orderbook_backup_impending",
                     detail=f"earliest_date={earliest_date} days_left={days_left}",
                     decision_time=None,

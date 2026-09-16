@@ -207,7 +207,6 @@ def _notify_event(
             if settings.alert_gmail_app_password is not None
             else None
         ),
-        email_to=settings.alert_email_to,
         event=event,
         detail=detail,
         decision_time=decision_time,
