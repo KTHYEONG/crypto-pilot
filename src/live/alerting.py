@@ -200,7 +200,6 @@ def send_email_alert(
     *,
     gmail_user: str | None,
     gmail_app_password: str | None,
-    email_to: str | None,
     event: str,
     detail: str,
     decision_time: pd.Timestamp | None,
@@ -208,7 +207,6 @@ def send_email_alert(
 ) -> bool:
     if not gmail_user or not gmail_app_password:
         return False
-    recipient = email_to or gmail_user
     try:
         import html
 
@@ -239,7 +237,7 @@ def send_email_alert(
 
         msg = EmailMessage()
         msg["From"] = gmail_user
-        msg["To"] = recipient
+        msg["To"] = gmail_user
         msg["Subject"] = subject
 
         html_content = (

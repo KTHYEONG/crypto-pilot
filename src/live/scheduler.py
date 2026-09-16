@@ -59,7 +59,6 @@ except Exception:  # noqa: BLE001,S110
         *,
         gmail_user: str | None,
         gmail_app_password: str | None,
-        email_to: str | None,
         event: str,
         detail: str,
         decision_time: pd.Timestamp | None,
@@ -272,7 +271,6 @@ def _daemon_alert(
                     if settings.alert_gmail_app_password is not None
                     else None
                 ),
-                email_to=settings.alert_email_to,
                 event=event,
                 detail=detail,
                 decision_time=decision_time,
