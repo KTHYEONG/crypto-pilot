@@ -111,7 +111,6 @@ class LiveSettings(BaseSettings):
     alert_webhook_url: str | None = None
     alert_gmail_user: str | None = None
     alert_gmail_app_password: SecretStr | None = None
-    alert_email_to: str | None = None
     min_universe_symbols: int = 100
     alert_halt_streak: int = 2
     alert_daily_digest: bool = True

@@ -630,10 +630,10 @@ def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
     monkeypatch.setattr(sched, "post_alert", lambda *a, **k: True, raising=False)
 
-    emails: list[tuple[str, str]] = []
+    emails: list[str] = []
 
-    def _fake_email(*, gmail_user, gmail_app_password, email_to, event, detail, decision_time, now):
-        emails.append((event, email_to))
+    def _fake_email(*, gmail_user, gmail_app_password, event, detail, decision_time, now):
+        emails.append(event)
         return True
 
     monkeypatch.setattr(sched, "send_email_alert", _fake_email, raising=False)
@@ -661,7 +661,6 @@ def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
             daemon_max_attempts_per_day=1,
             alert_gmail_user="bot@gmail.com",
             alert_gmail_app_password="pw",
-            alert_email_to="me@gmail.com",
         ),
         artifact,
         tmp_path / "state.json",
@@ -673,8 +672,8 @@ def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
         prune_fn=lambda: None,
     )
 
-    assert ("halt_streak", "me@gmail.com") in emails
-    assert [e for e, _ in emails].count("halt_streak") == 2
+    assert "halt_streak" in emails
+    assert emails.count("halt_streak") == 2
 
 
 def test_run_daemon_proceeds_degraded_when_cached_data_fresh_enough(tmp_path, monkeypatch) -> None:
@@ -2527,7 +2526,7 @@ def test_daemon_alert_marks_sent_only_after_delivery(monkeypatch) -> None:
         return outcome["email"]
 
     monkeypatch.setattr(sched, "send_email_alert", _email)
-    settings = LiveSettings(alert_gmail_user="bot@gmail.com", alert_gmail_app_password="pw", alert_email_to="me@gmail.com")
+    settings = LiveSettings(alert_gmail_user="bot@gmail.com", alert_gmail_app_password="pw")
     sent: set[str] = set()
     now = pd.Timestamp("2026-08-24 01:10Z")
 
