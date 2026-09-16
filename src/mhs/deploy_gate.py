@@ -222,6 +222,10 @@ def integrity_reasons_from_report(report: Any, request: Any) -> tuple[str, ...]:
     Only ``getattr(obj, name, None)`` defaults are used; no broad
     ``try/except`` fallback exists.
     """
+    # 지연 임포트: mhs.evaluation 패키지 초기화가 report.persist -> deploy_gate로
+    # 되돌아 들어오는 순환을 모듈 최상단에서 피한다(INV-SINGLE-CERTIFICATION).
+    from src.mhs.evaluation.integrity import replay_ledger_certified
+
     codes: list[str] = []
     if getattr(report, "status", None) != "COMPLETE":
         codes.append(GATE_REPORT_NOT_COMPLETE)
@@ -237,9 +241,8 @@ def integrity_reasons_from_report(report: Any, request: Any) -> tuple[str, ...]:
                 break
     blend = getattr(report, "blend", None)
     primary = getattr(blend, "primary", None) if blend is not None else None
-    ledger = getattr(primary, "ledger", None) if primary is not None else None
-    primary_valid = getattr(ledger, "primary_valid", None) if ledger is not None else None
-    if blend is None or primary is None or primary_valid is not True:
+    # 단일 인증 헬퍼가 말기 재고 공개 여부를 판정한다(인라인 추출 금지).
+    if blend is None or primary is None or not replay_ledger_certified(primary):
         codes.append(GATE_BLEND_LEDGER_INVALID)
     reliability = getattr(report, "backtest_reliability", None)
     digest = (

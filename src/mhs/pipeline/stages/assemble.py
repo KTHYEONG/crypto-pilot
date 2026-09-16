@@ -29,6 +29,7 @@ from src.mhs.evaluation import (
     required_cost_tiers,
     synthetic_stress_scenarios,
 )
+from src.mhs.evaluation.integrity import replay_ledger_certified
 from src.mhs.evidence import holdout_tail_evidence, parameter_oos_split_evidence
 from src.mhs.params import COMMITTEE_OOS_START
 from src.mhs.pipeline.context import PipelineContext
@@ -91,9 +92,11 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
             load_execution_quality_records(ctx.config.forward_execution_quality_dir),
             frozen_strategy_digest=ctx.config.forward_strategy_digest,
         )
-    blend_primary_ledger = getattr(getattr(ctx.blend_report, "primary", None), "ledger", None)
-    primary_valid = bool(getattr(blend_primary_ledger, "primary_valid", False))
-    primary_invalid_reasons = tuple(getattr(blend_primary_ledger, "invalid_reasons", None) or ())
+    # 단일 인증 헬퍼의 판정을 그대로 전달한다(원시 플래그 직접 사용 금지).
+    blend_primary = getattr(ctx.blend_report, "primary", None) if ctx.blend_report is not None else None
+    blend_primary_ledger = getattr(blend_primary, "ledger", None)
+    primary_valid = replay_ledger_certified(blend_primary) if blend_primary is not None else False
+    primary_invalid_reasons = () if primary_valid else tuple(getattr(blend_primary_ledger, "invalid_reasons", None) or ())
     overlap_fraction = float(ctx.selection_overlap_fraction) if ctx.selection_overlap_fraction is not None else 0.0
     ctx.backtest_reliability = evaluate_backtest_reliability(
         primary_valid=primary_valid,

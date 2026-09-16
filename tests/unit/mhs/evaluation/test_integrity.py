@@ -462,3 +462,105 @@ def test_source_gap_excluded_symbols_no_longer_blanket_excludes_resolved_end_of_
     assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 9
     assert {"LITUSDT", "PUMPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
 
+
+def test_replay_ledger_certified_accepts_valid_ledger() -> None:
+    # Given: a ledger the execution layer already marked valid
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.mhs.evaluation.integrity import replay_ledger_certified
+
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=True, data_gaps=()),
+        simulated_fills=pd.DataFrame(),
+    )
+
+    # When / Then: certified with no gap inspection needed
+    assert replay_ledger_certified(replay) is True
+
+def test_replay_ledger_certified_accepts_terminal_only_gaps() -> None:
+    # Given: positions still open at grid end (UNKNOWN_TERMINATION) invalidated the ledger
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.mhs.evaluation.integrity import replay_ledger_certified
+    from src.mhs.execution import ExecutionDataGap
+
+    gaps = (
+        ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-31", tz="UTC")),
+        ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="BBBUSDT", timestamp=pd.Timestamp("2025-12-31", tz="UTC")),
+    )
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=False, data_gaps=gaps),
+        simulated_fills=pd.DataFrame(),
+    )
+
+    # When / Then: disclosed terminal inventory is evidence, not a defect
+    assert replay_ledger_certified(replay) is True
+
+def test_replay_ledger_certified_rejects_recovering_gap() -> None:
+    # Given: a mid-life funding gap that later recovers (a real data defect)
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.mhs.evaluation.integrity import replay_ledger_certified
+    from src.mhs.execution import ExecutionDataGap
+
+    gaps = (
+        ExecutionDataGap(
+            code="MISSING_HELD_FUNDING", symbol="AAAUSDT",
+            timestamp=pd.Timestamp("2024-06-01", tz="UTC"),
+        ),
+    )
+    fills = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-07-01", tz="UTC")],
+            "symbol": ["AAAUSDT"],
+            "quantity_delta": [1.0],
+            "fill_price": [1.0],
+            "fee_bps": [0.0],
+            "reason": ["timeout_taker"],
+            "pre_trade_equity": [1.0],
+        }
+    )
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=False, data_gaps=gaps),
+        simulated_fills=fills,
+    )
+
+    # When / Then: recovery proves the gap was not terminal
+    assert replay_ledger_certified(replay) is False
+
+def test_replay_ledger_certified_fails_closed_on_missing_evidence() -> None:
+    # Given: progressively degraded replay doubles
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.mhs.evaluation.integrity import replay_ledger_certified
+    from src.mhs.execution import ExecutionDataGap
+
+    no_ledger = SimpleNamespace(simulated_fills=pd.DataFrame())
+    no_gaps = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=False),
+        simulated_fills=pd.DataFrame(),
+    )
+    no_fills = SimpleNamespace(
+        ledger=SimpleNamespace(
+            primary_valid=False,
+            data_gaps=(
+                ExecutionDataGap(
+                    code="UNKNOWN_TERMINATION", symbol="AAAUSDT",
+                    timestamp=pd.Timestamp("2025-12-31", tz="UTC"),
+                ),
+            ),
+        ),
+    )
+
+    # When / Then: every absence blocks instead of raising
+    assert replay_ledger_certified(no_ledger) is False
+    assert replay_ledger_certified(no_gaps) is False
+    assert replay_ledger_certified(no_fills) is False

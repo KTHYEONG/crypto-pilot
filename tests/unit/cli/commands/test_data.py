@@ -423,3 +423,63 @@ def test_data_repair_ohlcv_cli_wires_repair_with_retention_default_lookback(monk
     explicit = _mhs_parser().parse_args(["data", "repair-ohlcv", "--symbol", "ETHUSDT", "--lookback-days", "60"])
     explicit.handler(explicit)
     assert captured["lookback_days"] == 60
+
+def test_data_seal_mhs_inputs_seals_complete_symbols(tmp_path) -> None:
+    # Given: a corpus with one complete and one partial symbol
+    import json
+
+    import pandas as pd
+    import pytest
+
+    from src.cli.commands.data import add_data_commands
+
+    def _write(rel: str) -> None:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {"timestamp": [pd.Timestamp("2025-01-01", tz="UTC")], "close": [1.0]}
+        ).to_parquet(path)
+
+    for rel in (
+        "ohlcv/1h/COMPLETEUSDT.parquet",
+        "ohlcv/3m/COMPLETEUSDT.parquet",
+        "funding/COMPLETEUSDT.parquet",
+        "markPriceKlines/1h/COMPLETEUSDT.parquet",
+        "ohlcv/1h/PARTIALUSDT.parquet",
+    ):
+        _write(rel)
+
+    parser = argparse.ArgumentParser()
+    add_data_commands(parser.add_subparsers(dest="group", required=True).add_parser("data"))
+    out = tmp_path / "manifest" / "input_manifest.json"
+
+    # When
+    args = parser.parse_args([
+        "data", "seal-mhs-inputs",
+        "--data-root", str(tmp_path),
+        "--execution-timeframe", "3m",
+        "--output", str(out),
+    ])
+    args.handler(args)
+
+    # Then: only the complete symbol is attested
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    attested = {entry["relative_path"] for entry in payload["files"]}
+    assert attested == {
+        "ohlcv/1h/COMPLETEUSDT.parquet",
+        "ohlcv/3m/COMPLETEUSDT.parquet",
+        "funding/COMPLETEUSDT.parquet",
+        "markPriceKlines/1h/COMPLETEUSDT.parquet",
+    }
+    assert payload["digest"]
+
+    # And: an empty corpus fails closed instead of writing an empty manifest
+    empty_root = tmp_path / "empty"
+    (empty_root / "ohlcv" / "1h").mkdir(parents=True)
+    empty_args = parser.parse_args([
+        "data", "seal-mhs-inputs",
+        "--data-root", str(empty_root),
+        "--output", str(tmp_path / "never.json"),
+    ])
+    with pytest.raises(SystemExit):
+        empty_args.handler(empty_args)

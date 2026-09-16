@@ -494,3 +494,60 @@ def test_evaluate_deploy_gate_blocks_on_time_concentrated_growth() -> None:
     assert result.metrics["profitable_folds"] == 16.0
     assert result.metrics["profitable_folds_stress"] == 16.0
     assert result.metrics["tail_share_observed"] > result.metrics["tail_share_null_quantile"]
+
+def test_integrity_reasons_accepts_terminal_only_blend_ledger() -> None:
+    # Given: a COMPLETE report whose blend ledger is invalid only via UNKNOWN_TERMINATION
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.mhs.deploy_gate import GATE_BLEND_LEDGER_INVALID, integrity_reasons_from_report
+    from src.mhs.execution import ExecutionDataGap
+
+    terminal_gaps = (
+        ExecutionDataGap(
+            code="UNKNOWN_TERMINATION", symbol="AAAUSDT",
+            timestamp=pd.Timestamp("2025-12-31", tz="UTC"),
+        ),
+    )
+
+    def _report(gaps, fills):
+        return SimpleNamespace(
+            status="COMPLETE",
+            folds=[SimpleNamespace(fold_index=0, strict=object(), failures=())],
+            blend=SimpleNamespace(
+                primary=SimpleNamespace(
+                    ledger=SimpleNamespace(primary_valid=False, data_gaps=gaps),
+                    simulated_fills=fills,
+                )
+            ),
+            backtest_reliability=SimpleNamespace(input_manifest_digest="deadbeef"),
+        )
+
+    request = SimpleNamespace(name_drift_trim=False)
+    recovering_fills = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-01-05", tz="UTC")],
+            "symbol": ["AAAUSDT"],
+            "quantity_delta": [1.0],
+            "fill_price": [1.0],
+            "fee_bps": [0.0],
+            "reason": ["timeout_taker"],
+            "pre_trade_equity": [1.0],
+        }
+    )
+    recovering_gaps = (
+        ExecutionDataGap(
+            code="MISSING_HELD_FUNDING", symbol="AAAUSDT",
+            timestamp=pd.Timestamp("2025-06-01", tz="UTC"),
+        ),
+    )
+
+    # When
+    certified = integrity_reasons_from_report(_report(terminal_gaps, pd.DataFrame()), request)
+    uncertified = integrity_reasons_from_report(_report(recovering_gaps, recovering_fills), request)
+
+    # Then: terminal inventory clears axis 0; a recovering gap still blocks
+    assert GATE_BLEND_LEDGER_INVALID not in certified
+    assert certified == ()
+    assert GATE_BLEND_LEDGER_INVALID in uncertified

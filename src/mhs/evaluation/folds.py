@@ -487,17 +487,16 @@ def _run_anchored_fold(
         )
         if not np.isfinite(equity.to_numpy()).all() or not (equity > 0).all():
             failures.append(GO_REASON_NONFINITE_EQUITY)
-        # Disclosed terminal inventory is evidence, not data loss: gaps that
-        # are all UNKNOWN_TERMINATION or a non-recovering MISSING_HELD_FUNDING
-        # episode (integrity.ledger_terminal_only) keep the alpha verdict clean
+        # Disclosed terminal inventory is evidence, not data loss: the shared
+        # integrity.replay_ledger_certified verdict keeps the alpha verdict clean
         # (deployment is still blocked downstream by backtest reliability).
-        ledger_gaps = primary.ledger.data_gaps
-        terminal_only = integrity.ledger_terminal_only(ledger_gaps, primary.simulated_fills)
-        if not primary.ledger.primary_valid and not terminal_only:
+        # 단일 인증 헬퍼로 합산 판정한다(인라인 중복 규칙 금지).
+        certified = integrity.replay_ledger_certified(primary)
+        if not certified:
             failures.append(GO_REASON_INVALID_PRIMARY)
         if (
             primary.termination_counts.get("MISSING_DATA", 0) > 0
-            or (primary.termination_counts.get("UNKNOWN_TERMINATION", 0) > 0 and not terminal_only)
+            or (primary.termination_counts.get("UNKNOWN_TERMINATION", 0) > 0 and not certified)
         ):
             failures.append(GO_REASON_EXECUTION_GAP)
         _fold_debug_mode = (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -112,6 +113,27 @@ def ledger_terminal_only(
         or (g.code in _RECOVERABLE_HELD_GAP_CODES and g.symbol in terminal_funding_symbols)
         for g in data_gaps
     )
+
+
+def replay_ledger_certified(replay: Any) -> bool:
+    """Single certification point for a replay's execution ledger.
+
+    Returns True when the ledger was already marked ``primary_valid``;
+    otherwise delegates unchanged to :func:`ledger_terminal_only`. Fails
+    closed to False when the replay carries no ledger, no data gaps, or no
+    fills. This is the only place the terminal-inventory exception is
+    expressed; all consumers must call it instead of re-implementing the
+    ``primary_valid or ledger_terminal_only(...)`` pair inline.
+    """
+    ledger = getattr(replay, "ledger", None)
+    if getattr(ledger, "primary_valid", None) is True:
+        return True
+    # 실행층 판정이 없는 결측 증거는 인증하지 않고 닫는다(fail-closed).
+    gaps = getattr(ledger, "data_gaps", None)
+    fills = getattr(replay, "simulated_fills", None)
+    if gaps is None or fills is None:
+        return False
+    return bool(ledger_terminal_only(gaps, fills))
 
 
 def _assert_cache_required_ledger_valid(
