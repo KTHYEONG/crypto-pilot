@@ -1141,3 +1141,103 @@ def test_regime_cash_scale_1h_uses_hourly_median_window() -> None:
     overlay = scaling.regime_cash_scale_1h(log_close, mask, grid, 48, True)
     expected_overlay = expected.mul(scaling._trend_efficiency_overlay_scale(log_close, mask, 48, grid))
     pd.testing.assert_series_equal(overlay, expected_overlay, check_names=False)
+
+
+def _grid_max_solver(selected_index: int):
+    """Stub solver returning one registered grid point, bypassing the bootstrap."""
+    import src.quant.risk.growth_sizing as growth_sizing
+
+    def _stub(unit_returns, config, *, use_drawdown_overlay=True):
+        return growth_sizing.GrowthSizingResult(
+            selected_risk=config.risk_grid[selected_index],
+            median_log_growth=0.1,
+            mdd_breach_prob=0.0,
+            ruin_prob=0.0,
+            feasible_risks=config.risk_grid,
+            binding_constraint="plateau",
+            block_size_used=8,
+        )
+
+    return _stub
+
+
+def _edge_returns():
+    """2-row series whose std makes selected_risk/reference_risk round below 3.0."""
+    import pandas as pd
+
+    return pd.Series(
+        [-0.04650061549277669, -0.004375833278650915],
+        index=pd.date_range("2021-01-01", periods=2, freq="D", tz="UTC"),
+    )
+
+
+def test_envelope_exposure_cap_accepts_ceiling_at_grid_maximum(monkeypatch) -> None:
+    import src.quant.risk.growth_sizing as growth_sizing
+    from src.mhs import scaling
+    from src.mhs.params import GROWTH_RISK_ENVELOPES
+
+    # Given: the grid point is exactly reference_risk * 3.0, but the reverse
+    # division rounds to 2.9999999999999996.
+    returns = _edge_returns()
+    reference_risk = float(returns.std(ddof=1))
+    assert (reference_risk * 3.0) / reference_risk < 3.0
+    envelope = GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"]
+    assert envelope.leverage_ceiling == 3.0
+    monkeypatch.setattr(growth_sizing, "solve_growth_optimal_risk", _grid_max_solver(-1))
+
+    # When / Then: the registered ceiling sits exactly on the frontier and is returned.
+    assert scaling._envelope_exposure_cap(envelope, None, returns) == 3.0
+
+
+def test_envelope_exposure_cap_still_fails_closed_below_frontier(monkeypatch) -> None:
+    import pytest
+
+    import src.quant.risk.growth_sizing as growth_sizing
+    from src.mhs import scaling
+    from src.mhs.params import GROWTH_RISK_ENVELOPES
+
+    # Given: the solver selects 2.5x, one registered grid point below the 3.0 ceiling.
+    monkeypatch.setattr(growth_sizing, "solve_growth_optimal_risk", _grid_max_solver(-2))
+
+    with pytest.raises(ValueError, match=r"allows only 2\.500000x"):
+        scaling._envelope_exposure_cap(
+            GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"], None, _edge_returns(),
+        )
+
+
+def test_envelope_exposure_cap_infeasible_frontier_still_raises(monkeypatch) -> None:
+    import pytest
+
+    import src.quant.risk.growth_sizing as growth_sizing
+    from src.mhs import scaling
+    from src.mhs.params import GROWTH_RISK_ENVELOPES
+
+    def _infeasible(unit_returns, config, *, use_drawdown_overlay=True):
+        return growth_sizing.GrowthSizingResult(None, 0.0, 0.0, 0.0, (), "infeasible", 8)
+
+    monkeypatch.setattr(growth_sizing, "solve_growth_optimal_risk", _infeasible)
+    with pytest.raises(ValueError, match="infeasible"):
+        scaling._envelope_exposure_cap(
+            GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"], None, _edge_returns(),
+        )
+
+
+def test_leverage_ceiling_audit_survives_grid_maximum_frontier(monkeypatch) -> None:
+    import numpy as np
+    import pandas as pd
+
+    import src.quant.risk.growth_sizing as growth_sizing
+    from src.mhs import scaling
+    from src.mhs.params import GROWTH_RISK_ENVELOPES
+
+    # Given: 95 pre-OOS rows (>= PNL_VOL_TARGET_BURN_IN_DAYS) hitting the same float edge.
+    values = np.random.default_rng(17).normal(0.001, 0.02, 95)
+    returns = pd.Series(values, index=pd.date_range("2021-01-01", periods=95, freq="D", tz="UTC"))
+    reference_risk = float(returns.std(ddof=1))
+    assert (reference_risk * 3.0) / reference_risk < 3.0
+    monkeypatch.setattr(growth_sizing, "solve_growth_optimal_risk", _grid_max_solver(-1))
+
+    # When / Then: the once-per-run replay audit no longer aborts the run.
+    assert scaling._assert_envelope_leverage_ceiling_verified(
+        GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"], returns,
+    ) is None

@@ -687,8 +687,11 @@ def _envelope_exposure_cap(
             f"but the bootstrap ruin frontier is infeasible on reference_daily_returns; "
             f"ceiling must not exceed the frontier"
         )
-    frontier_multiple = result.selected_risk / reference_risk
-    if envelope.leverage_ceiling > frontier_multiple:
+    # 비교는 그리드를 만든 것과 동일한 곱셈 공간에서 한다 -- selected_risk를
+    # reference_risk로 되나누면 그리드 최댓값에서 3.0이 2.9999999999999996으로
+    # 반올림돼 등록 상한이 자기 자신을 초과한 것으로 오판되고 런이 중단된다.
+    if reference_risk * float(envelope.leverage_ceiling) > result.selected_risk:
+        frontier_multiple = result.selected_risk / reference_risk
         raise ValueError(
             f"envelope '{envelope.name}' has leverage_ceiling={envelope.leverage_ceiling} "
             f"but the bootstrap ruin frontier on reference_daily_returns allows only "
