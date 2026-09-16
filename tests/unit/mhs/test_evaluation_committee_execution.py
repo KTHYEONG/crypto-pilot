@@ -189,6 +189,65 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
     run_mhs_horizon_diagnostic(request)
     assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
 
+@pytest.mark.slow
+def test_committee_tranche_count_threads_committee_and_carry_books_at_both_call_sites(
+    mhs_market_with_taker_buy_quote, monkeypatch
+) -> None:
+    # 비기본 트랜치 수가 fold 가중치 빌더와 top-level 위원회 단계 양쪽에서
+    # 위원회 북과 펀딩 캐리 북에 동일하게 전달되는지 검증한다(fold/blend 정합).
+    import src.mhs.evaluation.fold_weights as fold_weights_mod
+    import src.mhs.pipeline.stages.committee as committee_stage_mod
+
+    root, end = mhs_market_with_taker_buy_quote
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ]
+    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    count = 5
+    assert count != ev.COMMITTEE_TRANCHE_COUNT
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_universe_size=8, committee_capital=True, committee_tranche_smoothing=True,
+        committee_tranche_count=count, funding_carry_sleeve=True, funding_carry_weight=0.3,
+    )
+    seen: dict[str, list[int]] = {"committee": [], "carry": []}
+    real_book = ev._committee_execution_book
+    real_carry = fold_weights_mod.funding_carry_execution_book
+
+    def _book_spy(*args, **kwargs):
+        seen["committee"].append(args[6] if len(args) > 6 else kwargs.get("tranche_count", 1))
+        return real_book(*args, **kwargs)
+
+    def _carry_spy(*args, **kwargs):
+        seen["carry"].append(args[4] if len(args) > 4 else kwargs["tranche_count"])
+        return real_carry(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "_committee_execution_book", _book_spy)
+    monkeypatch.setattr(ev.committee, "_committee_execution_book", _book_spy)
+    monkeypatch.setattr(fold_weights_mod, "funding_carry_execution_book", _carry_spy)
+    monkeypatch.setattr(committee_stage_mod, "funding_carry_execution_book", _carry_spy)
+
+    # When the fold target builder runs
+    ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    # Then both books received the configured count, never the module default
+    assert seen == {"committee": [count], "carry": [count]}
+
+    # When the top-level pipeline builds the committee book
+    seen["committee"].clear()
+    seen["carry"].clear()
+    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None))
+    run_mhs_horizon_diagnostic(request)
+    # Then the top-level call site threads the identical count
+    assert seen["committee"]
+    assert set(seen["committee"]) == {count}
+    assert seen["carry"]
+    assert set(seen["carry"]) == {count}
+
+
 def test_committee_execution_book_regime_adaptive_differs_from_fixed_variants() -> None:
     # SCENARIO_COMMITTEE_EXECUTION_BOOK_REGIME_ADAPTIVE_DIFFERS_FROM_FIXED:
     # regime_adaptive_window selects per-row between the raw (tranche=1) book

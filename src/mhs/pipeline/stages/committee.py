@@ -31,7 +31,6 @@ from src.mhs.evaluation import (
     CAUSAL_BETA_MIN_PERIODS,
     COMMITTEE_OOS_START,
     COMMITTEE_REGIME_ADAPTIVE_WINDOW,
-    COMMITTEE_TRANCHE_COUNT,
     DISCOVERY_END,
     DISCOVERY_GATE_TRANCHE_COUNT,
     DISCOVERY_MOMENTUM_CANDIDATES,
@@ -114,16 +113,14 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # base so regime_scale applies exactly once (matching the fold path).
         ctx.blend_1h = committee._committee_execution_book(
             ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols,
-            COMMITTEE_TRANCHE_COUNT
-            if (ctx.config.committee_tranche_smoothing or ctx.config.committee_regime_adaptive_tranche)
-            else 1,
+            _research_go._resolved_committee_tranche_count(ctx.config),
             regime_adaptive_window=(
                 COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if ctx.config.committee_regime_adaptive_tranche else None
             ),
             target_gross=_research_go._resolved_committee_target_gross(ctx.config),
             member_weights=(ctx._committee_weights_by_boundary.get("top_level") if ctx.config.committee_evidence_weighting else None),
-            carry_book=funding_carry_execution_book(ctx.bar_funding, ctx.execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, ctx.slow_grid, COMMITTEE_TRANCHE_COUNT, ctx.slow.min_symbols) if ctx.config.funding_carry_sleeve else None, carry_weight=ctx.config.funding_carry_weight if ctx.config.funding_carry_sleeve else 0.0,
+            carry_book=funding_carry_execution_book(ctx.bar_funding, ctx.execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, ctx.slow_grid, ctx.config.committee_tranche_count, ctx.slow.min_symbols) if ctx.config.funding_carry_sleeve else None, carry_weight=ctx.config.funding_carry_weight if ctx.config.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(ctx.config),
             coverage_cutoff=COMMITTEE_OOS_START,
             beta=(
