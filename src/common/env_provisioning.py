@@ -8,6 +8,7 @@ the VPS over SSH stdin with 0600 atomic replacement.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,9 +98,18 @@ def build_runtime_fragment(source_path: Path) -> str:
 
 
 def install_runtime_fragment(host: str, fragment: str) -> None:
-    """Install ``fragment`` at :data:`REMOTE_RUNTIME_ENV_PATH` via SSH stdin."""
+    """Install ``fragment`` at :data:`REMOTE_RUNTIME_ENV_PATH` via SSH stdin.
+
+    ssh concatenates argv[2:] with spaces before handing it to the remote
+    login shell, so passing ("bash", "-c", SCRIPT) as separate elements lets
+    the newline-bearing SCRIPT get re-split: -c only receives the first
+    word ("set"), and the remaining lines execute in the outer login shell.
+    That stray ``bash -c set`` dumps the whole shell environment to stdout
+    (measured). ``shlex.quote`` collapses the script into one argv element
+    so the remote shell parses it as exactly ``bash -c <SCRIPT>``.
+    """
     subprocess.run(  # noqa: S603 - contract R7 pins ssh argv; fragment via stdin only
-        ["ssh", host, "bash", "-c", REMOTE_RUNTIME_INSTALL_SCRIPT],  # noqa: S607 - ssh resolved via PATH
+        ["ssh", host, f"bash -c {shlex.quote(REMOTE_RUNTIME_INSTALL_SCRIPT)}"],  # noqa: S607
         input=fragment,
         text=True,
         check=True,
