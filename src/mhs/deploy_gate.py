@@ -40,6 +40,7 @@ GATE_FOLD_INTEGRITY: str = "I1_FOLD_INTEGRITY_FAILURE"
 GATE_BLEND_LEDGER_INVALID: str = "I2_BLEND_LEDGER_INVALID"
 GATE_INPUT_UNSEALED: str = "I3_INPUT_UNSEALED"
 GATE_LIVE_PARITY_BLOCKED: str = "I4_LIVE_PARITY_BLOCKED"
+GATE_BACKTEST_RELIABILITY_NOT_ELIGIBLE: str = "I5_BACKTEST_RELIABILITY_NOT_ELIGIBLE"
 GATE_OOS_GROWTH: str = "E1_OOS_GROWTH_LCB_NOT_POSITIVE"
 GATE_STRESS_GROWTH: str = "E2_STRESS_GROWTH_LCB_NOT_POSITIVE"
 GATE_EDGE_BREADTH: str = "E3_EDGE_BREADTH_BELOW_BINOMIAL_CRITICAL"
@@ -153,7 +154,10 @@ def survival_probabilities(
     path_len = round(horizon_years * DEPLOY_GATE_BARS_PER_YEAR)
     paths = block_bootstrap_paths(x, n_paths=n_paths, path_len=path_len, seed=seed)
     cum = np.cumprod(1.0 + paths, axis=1)
-    mdd = (1.0 - cum / np.maximum.accumulate(cum, axis=1)).max(axis=1)
+    augmented = np.concatenate(
+        [np.ones((cum.shape[0], 1), dtype="float64"), cum.astype("float64")], axis=1
+    )
+    mdd = (1.0 - augmented / np.maximum.accumulate(augmented, axis=1)).max(axis=1)
     return (
         float(np.mean(mdd > max_drawdown)),
         float(np.mean(cum[:, -1] < ruin_fraction)),
@@ -252,6 +256,8 @@ def integrity_reasons_from_report(report: Any, request: Any) -> tuple[str, ...]:
     )
     if reliability is None or digest is None:
         codes.append(GATE_INPUT_UNSEALED)
+    if reliability is None or getattr(reliability, "eligible", None) is not True:
+        codes.append(GATE_BACKTEST_RELIABILITY_NOT_ELIGIBLE)
     if live_parity_blockers(request):
         codes.append(GATE_LIVE_PARITY_BLOCKED)
     return tuple(sorted(set(codes)))

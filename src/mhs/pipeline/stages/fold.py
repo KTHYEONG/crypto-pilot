@@ -18,7 +18,6 @@ from types import SimpleNamespace
 import pandas as pd
 
 from src.mhs import research_go as _research_go
-from src.mhs import scaling as _scaling
 from src.mhs import statistics as _statistics
 from src.mhs.calibration import NullShareCalibration, calibrate_max_share_null
 from src.mhs.evaluation import (  # noqa: F401 - wiring contract expects these symbols
@@ -96,63 +95,15 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # The top-level feature matrices stay alive through that thread and are
     # released after it joins so the wide multi-year panels never coexist with
     # the final assembly.
-    ctx._fold_growth_budget_target_vol = None
-    ctx._fold_exposure_warmup_returns = None
-    ctx._fold_blend_exposure_scale = None
-    if (
-        ctx.config.pnl_vol_target_mode in ("growth_budget", "constant_risk")
-        and ctx.blend_report is not None
-        and ctx.blend_report.pre_vol_target_reference is not None
-    ):
-        # I2/I3/I4: each boundary's target vol is fit once here, on reference
-        # rows strictly before that boundary's train_end, and only the small
-        # float mapping crosses into the fork workers.
-        _reference_daily_returns = (
-            ctx.blend_report.pre_vol_target_reference.ledger.equity.resample("1D").last().pct_change().dropna()
-        )
-        if ctx.config.pnl_vol_target_mode == "constant_risk":
-            # I-SCALE-IS-DEPLOYED-OVERLAY: exposure_scale은 blend가 배치 확정한
-            # 리스크 오버레이로, fold는 자신의 검증 구간만큼 슬라이스해 읽기만
-            # 한다 -- fold-local EWMA 재적합은 FOLD_BLEND_PATH_DIVERGENCE의
-            # 실측 원인이므로 금지. 누락 시 침묵 폴백 없이 fail-closed.
-            _exposure_scale = ctx.blend_report.exposure_scale
-            if ctx.blend_report is None or _exposure_scale is None:
-                raise DataIntegrityError(
-                    "constant_risk folds require the blend book's deployed "
-                    f"exposure_scale (pnl_vol_target_mode={ctx.config.pnl_vol_target_mode})"
-                )
-            ctx._fold_blend_exposure_scale = {
-                _i: _exposure_scale.loc[
-                    (_exposure_scale.index >= _f.validation_start)
-                    & (_exposure_scale.index <= _f.validation_end)
-                ]
-                for _i, _f in enumerate(phase_1_anchored_purged_folds())
-            }
-        else:
-            _train_ends = {"top_level": COMMITTEE_OOS_START}
-            _train_ends.update({
-                f"fold_{_i}": _f.train_end
-                for _i, _f in enumerate(phase_1_anchored_purged_folds())
-            })
-            _boundary_target_vols = _scaling._growth_budget_target_vol_by_boundary(
-                _reference_daily_returns, _research_go._resolved_growth_envelope(ctx.config), _train_ends,
-            )
-            ctx._fold_growth_budget_target_vol = {
-                _i: _boundary_target_vols[f"fold_{_i}"]
-                for _i in range(len(phase_1_anchored_purged_folds()))
-            }
-        ctx._fold_exposure_warmup_returns = _reference_daily_returns
     (
         ctx.bootstrap_ci, ctx.placebo_percentile, ctx.participation, ctx.termination_counts,
         fold_reports, ctx.deployment,
     ) = concurrency._run_post_book_concurrently(
         ctx.blend_report, ctx.root, ctx.config, ctx.execution_symbols, ctx.minute_grid,
         ctx.signal_48h, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast,
-        ctx.fold_funding, ctx.initial_equity, ctx.recorder, ctx.fold_slow_horizons, ctx.fold_fast_horizons,
-        ctx.fold_funding_carry, ctx._fold_committee_weights, ctx._fold_growth_budget_target_vol,
-        ctx._fold_exposure_warmup_returns,
-        fold_blend_exposure_scale=ctx._fold_blend_exposure_scale,
-        base_panel=getattr(ctx, 'base_panel', None),
+        ctx.fold_funding, ctx.initial_equity, ctx.recorder, ctx.fold_slow_horizons,
+        ctx.fold_fast_horizons, ctx.fold_funding_carry, ctx._fold_committee_weights,
+        base_panel=getattr(ctx, "base_panel", None),
     )
     ctx.folds = tuple(fold_reports)
     # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
