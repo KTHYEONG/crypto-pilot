@@ -313,3 +313,78 @@ def test_assemble_report_wires_forward_provenance(tmp_path) -> None:
     assert ctx.forward_provenance is not None
     assert ctx.forward_provenance.valid
     assert report.backtest_reliability is not None
+
+def test_assemble_report_reliability_certifies_terminal_only_blend_ledger() -> None:
+    # Given: a blend ledger invalidated only by positions open at grid end
+    import pandas as pd
+
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.resources import _StageRecorder
+
+    gaps = (
+        ExecutionDataGap(
+            code="UNKNOWN_TERMINATION", symbol="AAAUSDT",
+            timestamp=pd.Timestamp("2025-12-31", tz="UTC"),
+        ),
+    )
+    ctx = _bare_context(_StageRecorder(log_run=False))
+    ctx.blend_report = SimpleNamespace(
+        primary=SimpleNamespace(
+            ledger=SimpleNamespace(
+                equity=_stub_blend_equity(), mark_source="OHLCV",
+                primary_valid=False, invalid_reasons=("MISSING_DATA",), data_gaps=gaps,
+            ),
+            simulated_fills=pd.DataFrame(),
+        ),
+    )
+
+    # When
+    report = assemble_report(ctx, ctx.telemetry)
+
+    # Then: the certified verdict replaces the raw primary_valid flag
+    assert report.backtest_reliability is not None
+    assert "PRIMARY_EXECUTION_INVALID" not in report.backtest_reliability.reason_codes
+    assert "MISSING_DATA" not in report.backtest_reliability.reason_codes
+
+def test_assemble_report_reliability_still_blocks_recovering_blend_gap() -> None:
+    # Given: a mid-life funding gap followed by a normal fill for the same symbol
+    import pandas as pd
+
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.resources import _StageRecorder
+
+    gaps = (
+        ExecutionDataGap(
+            code="MISSING_HELD_FUNDING", symbol="AAAUSDT",
+            timestamp=pd.Timestamp("2024-06-01", tz="UTC"),
+        ),
+    )
+    fills = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-07-01", tz="UTC")],
+            "symbol": ["AAAUSDT"],
+            "quantity_delta": [1.0],
+            "fill_price": [1.0],
+            "fee_bps": [0.0],
+            "reason": ["timeout_taker"],
+            "pre_trade_equity": [1.0],
+        }
+    )
+    ctx = _bare_context(_StageRecorder(log_run=False))
+    ctx.blend_report = SimpleNamespace(
+        primary=SimpleNamespace(
+            ledger=SimpleNamespace(
+                equity=_stub_blend_equity(), mark_source="OHLCV",
+                primary_valid=False, invalid_reasons=("MISSING_DATA",), data_gaps=gaps,
+            ),
+            simulated_fills=fills,
+        ),
+    )
+
+    # When
+    report = assemble_report(ctx, ctx.telemetry)
+
+    # Then: real data loss still blocks, with its reason detail intact
+    assert report.backtest_reliability is not None
+    assert "PRIMARY_EXECUTION_INVALID" in report.backtest_reliability.reason_codes
+    assert "MISSING_DATA" in report.backtest_reliability.reason_codes
