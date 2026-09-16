@@ -26,7 +26,6 @@ from src.mhs.panel import PanelQuarantine, liquid_half_eligibility, load_base_pa
 from src.mhs.params import (
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
-    COMMITTEE_TRANCHE_COUNT,
     FOLD_PANEL_WARMUP_HOURS,
     PANEL_MIN_HISTORY_BARS,
     REBALANCE_TRACKING_ERROR_THRESHOLD,
@@ -222,16 +221,14 @@ def _build_fold_target_weights(
         import src.mhs.evaluation as ev
         blend_1h = ev._committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
-            COMMITTEE_TRANCHE_COUNT
-            if (request.committee_tranche_smoothing or request.committee_regime_adaptive_tranche)
-            else 1,
+            _research_go._resolved_committee_tranche_count(request),
             regime_adaptive_window=(
                 COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
             target_gross=_research_go._resolved_committee_target_gross(request),
             member_weights=committee_member_weights,
-            carry_book=funding_carry_execution_book(bar_funding, execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, COMMITTEE_TRANCHE_COUNT, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
+            carry_book=funding_carry_execution_book(bar_funding, execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, request.committee_tranche_count, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(request),
             coverage_cutoff=committee_oos_start,
             beta=causal_beta,
