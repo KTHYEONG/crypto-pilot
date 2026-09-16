@@ -1038,10 +1038,19 @@ def _order_client(settings: LiveSettings, decision_time: pd.Timestamp) -> Any:
     if settings.mode.suppresses_mutations and settings.api_key is None:
         # 자격증명 없는 로컬 PAPER/SHADOW: 공개 GET만 쓰는 스텁 클라이언트(I-PAPER-NO-CREDENTIALS).
         return NullOrderClient(_market_client(settings, decision_time), settings.mode)
+    if settings.mode.suppresses_mutations:
+        # PAPER/SHADOW는 항상 메인넷 read-only 조회 키(api_key)만 쓴다. order_api_key는
+        # LIVE_TESTNET 주문 로직 검증 전용 테스트넷 자격증명이라 mainnet인 order_base_url로
+        # 보내면 -2015로 거부된다(테스트넷 키 ≠ 메인넷 키).
+        order_api_key = settings.api_key
+        order_api_secret = settings.api_secret
+    else:
+        order_api_key = settings.order_api_key or settings.api_key
+        order_api_secret = settings.order_api_secret or settings.api_secret
     return BinanceFuturesRestClient(
         settings.order_base_url,
-        settings.order_api_key or settings.api_key,
-        settings.order_api_secret or settings.api_secret,
+        order_api_key,
+        order_api_secret,
         settings.mode,
         AuditLog(default_audit_log_path("orders", for_date=decision_time)),
         recv_window_ms=settings.recv_window_ms,
