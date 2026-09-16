@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET, GROWTH_ENVELOPE_DEFAULT
+from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET, COMMITTEE_TRANCHE_COUNT, GROWTH_ENVELOPE_DEFAULT
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -265,6 +265,14 @@ class MhsDiagnosticRequest:
             flag="--committee-regime-adaptive-tranche",
             help="Per-row adaptive tranche choice.",
             negate_flag="--no-committee-regime-adaptive-tranche",
+        ),
+    )
+    committee_tranche_count: int = field(
+        default=COMMITTEE_TRANCHE_COUNT,
+        metadata=cli_param(
+            flag="--committee-tranche-count",
+            help="Committee tranche mean length (decision rows) for smoothing or regime-adaptive tranche.",
+            requires=("committee_capital",),
         ),
     )
     committee_target_gross: float | None = field(

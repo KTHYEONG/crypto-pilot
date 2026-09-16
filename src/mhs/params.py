@@ -124,6 +124,10 @@ COMMITTEE_OOS_START: pd.Timestamp = pd.Timestamp("2023-01-01", tz="UTC")
 
 COMMITTEE_TRANCHE_COUNT: int = 3
 
+# 트랜치 평균 창(개수 x 24h 결정 간격)이 flow_momentum 최단 멤버 룩백 168h를
+# 넘으면 북이 신호 수명보다 늦게 반응하므로 7을 상한으로 둔다.
+COMMITTEE_TRANCHE_COUNT_MAX: int = 7
+
 COMMITTEE_REGIME_ADAPTIVE_WINDOW: int = 15
 
 COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS: tuple[float, ...] = (

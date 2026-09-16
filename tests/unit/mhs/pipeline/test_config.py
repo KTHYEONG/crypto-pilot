@@ -225,7 +225,7 @@ def test_constant_risk_cli_and_config_parity():
 def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     """MhsRunConfig() and a no-arg CLI parse stay identical, both resolving
     final_oos_2026h1=False and data_policy='zombie_mask_v1' as the ONLY keys added
-    to the pre-spec field set."""
+    to the pre-spec field set, plus the sealed committee_tranche_count field."""
     from src.cli.main import build_root_parser
 
     pre_spec_fields = frozenset({
@@ -261,7 +261,7 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     assert bare["forward_execution_quality_dir"] is None
     assert bare["forward_strategy_digest"] is None
     assert bare["name_drift_trim"] is False
-    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest", "name_drift_trim"}
+    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest", "name_drift_trim", "committee_tranche_count"}
 
 
 def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:

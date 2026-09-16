@@ -16,6 +16,7 @@ from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.panel import DATA_POLICIES
 from src.mhs.params import (
     COMMITTEE_DEFAULT_MEMBER_SET,
+    COMMITTEE_TRANCHE_COUNT,
     GROWTH_RISK_ENVELOPES,
     LEVERAGE_FRONTIER_SCAN_MULTIPLES,
 )
@@ -409,6 +410,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "own signals per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT."
         ),
     )
+    mhs.add_argument("--committee-tranche-count", type=int, default=COMMITTEE_TRANCHE_COUNT, help="Committee tranche mean length in 24h decision rows (1..7). Non-default values require --committee-tranche-smoothing or the default regime-adaptive tranche.")
     mhs.add_argument(
         "--no-committee-regime-adaptive-tranche",
         action="store_true",

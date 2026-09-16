@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.mhs.contracts import MhsDiagnosticRequest
 
+from src.mhs.params import COMMITTEE_TRANCHE_COUNT, COMMITTEE_TRANCHE_COUNT_MAX
+
 
 def _choice_error(field: str, value: Any, choices: tuple[str, ...]) -> str:
     return f"unknown {field} '{value}'"
@@ -31,6 +33,33 @@ def _validate_field_bounds(request: MhsDiagnosticRequest, field: str, bounds: tu
     lo, hi = bounds
     if not (lo <= value <= hi):
         raise ValueError(f"{field} must be in [{lo}, {hi}]")
+
+
+def _validate_committee_tranche_count(request: MhsDiagnosticRequest) -> None:
+    """Fail-closed bounds for the committee tranche count.
+
+    Raises:
+        ValueError: non-int (including bool) value, value outside
+            ``[1, COMMITTEE_TRANCHE_COUNT_MAX]``, or a non-default value while
+            neither fixed smoothing nor the regime-adaptive tranche is active
+            (the count would otherwise be a silent no-op on the committee book).
+    """
+    value = request.committee_tranche_count
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("committee_tranche_count must be an int")
+    if value < 1 or value > COMMITTEE_TRANCHE_COUNT_MAX:
+        raise ValueError(
+            f"committee_tranche_count must be in [1, {COMMITTEE_TRANCHE_COUNT_MAX}], got {value}"
+        )
+    if (
+        value != COMMITTEE_TRANCHE_COUNT
+        and not request.committee_tranche_smoothing
+        and not request.committee_regime_adaptive_tranche
+    ):
+        raise ValueError(
+            "committee_tranche_count other than the default requires "
+            "committee_tranche_smoothing or committee_regime_adaptive_tranche"
+        )
 
 
 def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset: object) -> None:
@@ -118,6 +147,7 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
                 "committee_regime_adaptive_tranche is mutually exclusive with "
                 "committee_tranche_smoothing"
             )
+    _validate_committee_tranche_count(request)
     if not isinstance(request.committee_growth_diagnostic, bool):
         raise ValueError("committee_growth_diagnostic must be a bool")
     if request.committee_growth_diagnostic and not request.committee_book:
