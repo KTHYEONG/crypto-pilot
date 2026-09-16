@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_committee_tranche_count",
+      "date": "2026-09-16",
+      "adr_id": "ADR_20260916_mhs_committee_tranche_count",
+      "domain": "mhs",
+      "title": "MHS 위원회 트랜치 수 봉인 설정화",
+      "why": "COMMITTEE_TRANCHE_COUNT가 4개 모듈에 상수로 박혀 스트레스 성장 하한(E2)을 처음 양수로 만든 유일한 실측 레버를 조정할 수 없었다",
+      "resolution": "resolved_committee_tranche_count 단일 함수로 위원회 북과 펀딩 캐리 북 두 호출 지점을 통일하고, CLI 플래그·검증·배포 정책·라이브 digest에 봉인해 기본값(3)은 byte-identical로 유지했다",
+      "impact": "회전율을 낮추는 실측 레버가 배포 가능해졌으나 E3 스트레스 폭과 I5 무결성 게이트는 여전히 막혀 있어 go 판정에는 아직 도달하지 못한다",
+      "caveat": "committee_tranche_count 상향은 committee_tranche_smoothing 또는 committee_regime_adaptive_tranche가 켜져 있을 때만 유효하며 상한은 7(=168h/24h)이다"
+    },
+    {
       "task_id": "TASK_MHS_COMPOUNDING_GO",
       "date": "2026-09-16",
       "adr_id": "ADR_20260916_MHS_COMPOUNDING_GO",
@@ -990,16 +1001,6 @@
       "why": "docs/results/mhs_run_history 31개 런 분석 결과, xs_rank_ic는 전 런에 걸쳐 동일(-0.0409, t=-46)한데 blend CAGR은 사이징 노브 튜닝만으로 -6%~+45% 요동; 최신 런은 3개 폴드 중 2025 폴드 1개가 전체 로그성장의 79%를 차지(fold0 11.8%, fold1 8.1%, fold2 105%)함에도 research_go.eligible=True로 통과됨. 단일 폴드 의존 결과가 복리 재현성 증거 없이 GO 판정을 받는 구조적 공백.",
       "resolution": "src/application/research/mhs/evaluation.py에 _fold_growth_concentration 순수함수 추가(기존 _fold_blend_parity와 동일한 (payload, reason_codes) 계약). 단일 폴드의 log1p(cagr) 점유율이 전체 대비 50% 초과 시 신규 사유코드 MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION 발생, _mhs_research_go의 extra_reasons로 병합. MhsHorizonDiagnosticReport.fold_growth_concentration 필드 추가 및 build_mhs_run_history_record를 통해 docs/results/mhs_run_history/*.jsonl에 영속화. 재현/가중치/스케일 경로 변경 없음(byte-identical replay). 테스트 5건 신규(tests/unit/mhs/test_evaluation_fold_report.py), 전량 통과, ruff/mypy 통과.",
       "impact": "research_go 판정이 이제 폴드 간 복리 일관성을 검증; 현재 latest.json 설정은 재적용 시 max_fold_share≈0.79로 게이트가 발동해 research_go.eligible이 False로 전환됨(회귀 아님, 의도된 정책 강화). 후속 과제 2건은 docs/specs/mhs_fold_growth_concentration_gate.md §6에 결정 대기 상태로 문서화: (1) fast_reversal 북의 강한 반전 신호(t=-46)와 순손실의 불일치 규명, (2) committee_growth_diagnostic을 committee_capital 경로에도 개방."
-    },
-    {
-      "task_id": "TASK_MHS_FOLD_REGIME_CHARACTERIZATION",
-      "date": "2026-08-18",
-      "adr_id": "ADR_20260818_MHS_FOLD_REGIME_CHARACTERIZATION",
-      "domain": "quant",
-      "title": "MHS 폴드 레짐 특성화 진단 필드 추가",
-      "why": "committee_capital 블렌드 위 리스크/알파 레버 6건(방향성 크래시 틸트 2변형, 리밸런스 필터, 베타 직교화, 펀딩 극단치 축소, committee 6번째 멤버 rev_24h)과 이전 세션 trend_efficiency_overlay가 전부 fold 1(2024)을 동일한 방향(stress Sharpe 붕괴)으로 파괴 -- 실측으로 fold 1이 최고변동성·최저휩쏘율의 진짜 상승장임을 확인. 향후 탐색이 이미 낙제한 가설을 맹목적으로 재시도하지 않도록 fold별 레짐을 영구 기록할 필요.",
-      "resolution": "MhsFoldReport에 report-only regime_characterization 필드 추가(_regime_reference_characterization 순수함수 + _fold_regime_characterization I/O 래퍼, BTCUSDT 1h close를 fold 검증구간만 인과적으로 읽음). 트레이딩 로직/게이트에는 절대 관여하지 않음. dataclasses.asdict 자동 직렬화로 별도 payload 배선 불필요. negative-result 문서에 6번째(rev_24h) 부정 결과 추가.",
-      "impact": "ruff/mypy clean, 신규 시나리오 6건 전부 통과. 기존 실패(test_mhs_diagnostic_3m_replay_end_to_end)는 git stash로 원본 baseline에서도 동일 재현 확인 -- 본 변경과 무관."
     }
   ]
 }

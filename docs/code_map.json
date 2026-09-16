@@ -9,7 +9,10 @@
     "testing": "tests/unit/cli/test_ops_commands.py"
   },
   "src/cli/commands/research/mhs.py": {
-    "testing": "tests/unit/cli/commands/research/test_mhs.py"
+    "testing": [
+      "tests/unit/cli/commands/research/test_mhs.py",
+      "tests/unit/mhs/test_committee_tranche_count.py"
+    ]
   },
   "src/cli/dataclass_args.py": {
     "testing": "tests/unit/cli/test_dataclass_args.py"
@@ -48,6 +51,7 @@
       "tests/unit/mhs/execution/test_accounting.py",
       "tests/unit/mhs/report/test_persist.py",
       "tests/unit/mhs/test_calibration.py",
+      "tests/unit/mhs/test_committee_tranche_count.py",
       "tests/unit/mhs/test_deploy_gate.py",
       "tests/unit/mhs/test_evaluation_appresearch.py",
       "tests/unit/mhs/test_evaluation_diagnostic_gates.py",
