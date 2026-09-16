@@ -275,6 +275,7 @@ def test_integrity_reasons_from_report_is_fail_closed_on_missing_evidence() -> N
         GATE_BLEND_LEDGER_INVALID,
         GATE_FOLD_INTEGRITY,
         GATE_INPUT_UNSEALED,
+        GATE_BACKTEST_RELIABILITY_NOT_ELIGIBLE,
         GATE_LIVE_PARITY_BLOCKED,
         GATE_REPORT_NOT_COMPLETE,
         integrity_reasons_from_report,
@@ -290,6 +291,7 @@ def test_integrity_reasons_from_report_is_fail_closed_on_missing_evidence() -> N
     assert set(reasons) == {
         GATE_REPORT_NOT_COMPLETE, GATE_FOLD_INTEGRITY,
         GATE_BLEND_LEDGER_INVALID, GATE_INPUT_UNSEALED,
+        GATE_BACKTEST_RELIABILITY_NOT_ELIGIBLE,
     }
     assert list(reasons) == sorted(reasons)
 
@@ -299,7 +301,7 @@ def test_integrity_reasons_from_report_is_fail_closed_on_missing_evidence() -> N
         status="COMPLETE",
         folds=(good_fold,),
         blend=types.SimpleNamespace(primary=types.SimpleNamespace(ledger=types.SimpleNamespace(primary_valid=True))),
-        backtest_reliability=types.SimpleNamespace(input_manifest_digest="a" * 64),
+        backtest_reliability=types.SimpleNamespace(input_manifest_digest="a" * 64, eligible=True),
     )
     assert integrity_reasons_from_report(good, plain) == ()
 
@@ -349,7 +351,7 @@ def test_deploy_gate_from_report_reads_strict_fold_ledgers() -> None:
     report = types.SimpleNamespace(
         status="COMPLETE", folds=shuffled,
         blend=types.SimpleNamespace(primary=types.SimpleNamespace(ledger=types.SimpleNamespace(primary_valid=True))),
-        backtest_reliability=types.SimpleNamespace(input_manifest_digest="b" * 64),
+        backtest_reliability=types.SimpleNamespace(input_manifest_digest="b" * 64, eligible=True),
     )
 
     # When
@@ -521,7 +523,7 @@ def test_integrity_reasons_accepts_terminal_only_blend_ledger() -> None:
                     simulated_fills=fills,
                 )
             ),
-            backtest_reliability=SimpleNamespace(input_manifest_digest="deadbeef"),
+            backtest_reliability=SimpleNamespace(input_manifest_digest="deadbeef", eligible=True),
         )
 
     request = SimpleNamespace(name_drift_trim=False)
@@ -551,3 +553,58 @@ def test_integrity_reasons_accepts_terminal_only_blend_ledger() -> None:
     assert GATE_BLEND_LEDGER_INVALID not in certified
     assert certified == ()
     assert GATE_BLEND_LEDGER_INVALID in uncertified
+
+
+def test_survival_probabilities_counts_first_return_drawdown_from_initial_nav() -> None:
+    import pandas as pd
+
+    from src.mhs.deploy_gate import survival_probabilities
+
+    returns = pd.Series(
+        [-0.30], index=pd.DatetimeIndex([pd.Timestamp("2025-01-01", tz="UTC")])
+    )
+
+    p_mdd, p_ruin = survival_probabilities(
+        returns,
+        max_drawdown=0.20,
+        ruin_fraction=0.60,
+        horizon_years=1.0 / 365.0,
+        n_paths=32,
+        seed=7,
+    )
+
+    assert p_mdd == 1.0
+    assert p_ruin == 0.0
+
+
+def test_integrity_reasons_require_eligible_reliability() -> None:
+    import dataclasses
+    import types
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deploy_gate import (
+        GATE_BACKTEST_RELIABILITY_NOT_ELIGIBLE,
+        integrity_reasons_from_report,
+    )
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    good_fold = types.SimpleNamespace(fold_index=0, strict=object(), stress=object(), failures=())
+    report = types.SimpleNamespace(
+        status="COMPLETE",
+        folds=(good_fold,),
+        blend=types.SimpleNamespace(
+            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(primary_valid=True))
+        ),
+        backtest_reliability=types.SimpleNamespace(
+            input_manifest_digest="a" * 64,
+            eligible=False,
+        ),
+    )
+
+    assert integrity_reasons_from_report(report, request) == (
+        GATE_BACKTEST_RELIABILITY_NOT_ELIGIBLE,
+    )
+
+    report.backtest_reliability.eligible = True
+    assert integrity_reasons_from_report(report, request) == ()

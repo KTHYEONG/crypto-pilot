@@ -606,12 +606,11 @@ def test_book_outcome_blend_traces_carry_deployed_exposure_scale(mhs_market, mon
     assert reasons == (ev.GO_REASON_PATH_DIVERGENCE,)
 
 
-def test_constant_risk_fold_reuses_blend_exposure_scale(mhs_market, monkeypatch) -> None:
-    # SCENARIO_MHS_RUN_ANCHORED_FOLD_USES_BLEND_SCALE_DIRECTLY: under
-    # constant_risk the fold consumes blend_exposure_scale verbatim
-    # (I-SCALE-IS-DEPLOYED-OVERLAY) -- book_structure's exposure_scale_mean
-    # equals the passed series mean over the validation dates, and the
-    # fold-local replay dispatcher is never invoked.
+def test_constant_risk_fold_uses_fold_local_reference(mhs_market, monkeypatch) -> None:
+    # constant_risk sizing no longer imports a blend-owned scale. It must reach
+    # the dispatcher with a fold-local warmup reference and locally fitted target.
+    import src.mhs.evaluation.folds as folds_mod
+
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -622,36 +621,30 @@ def test_constant_risk_fold_reuses_blend_exposure_scale(mhs_market, monkeypatch)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
-        pnl_vol_target_mode="constant_risk",
+        pnl_vol_target_mode="growth_budget",
     )
-    daily_idx = pd.date_range(
-        _FOLD.validation_start.normalize(), _FOLD.validation_end.normalize(),
-        freq="D", tz="UTC",
-    )
-    # 날짜별로 구분 가능하면서 배치 가능한(자본 불변 위반이 없는) 현실적 스케일.
-    blend_scale = pd.Series(
-        0.8 + 0.4 * (daily_idx.dayofyear.to_numpy(dtype="float64") / 366.0),
-        index=daily_idx,
-    )
+    local_index = pd.date_range(_FOLD.train_start, periods=100, freq="D", tz="UTC")
+    local_returns = pd.Series(0.001, index=local_index)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(folds_mod, "_fold_train_reference_returns", lambda *_a, **_k: local_returns)
+    monkeypatch.setattr(scaling, "_growth_budget_target_vol_by_boundary", lambda *_a, **_k: {"fold_0": 0.25})
+    def capture_scale(reference, request, target, *, warmup_returns):
+        captured["target"] = target
+        captured["warmup"] = warmup_returns
+        return pd.Series(1.0, index=reference.index, dtype="float64")
 
-    def _must_not_replay(*_a: object, **_k: object) -> pd.Series:
-        raise AssertionError("constant_risk folds must consume the blend scale, never re-replay it")
-
-    monkeypatch.setattr(scaling, "_replay_exposure_scale", _must_not_replay)
-    report = ev._run_anchored_fold(
-        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
-        blend_exposure_scale=blend_scale,
-    )
-    assert report.strict is not None
+    monkeypatch.setattr(scaling, "_replay_exposure_scale", capture_scale)
+    report = ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
+    assert report.strict is not None, report.failures
     assert report.failures == ()
-    assert report.book_structure["exposure_scale_mean"] == pytest.approx(float(blend_scale.mean()))
+    assert captured["target"] == 0.25
+    pd.testing.assert_series_equal(captured["warmup"], local_returns)
 
 
-def test_constant_risk_fold_missing_blend_scale_fails_closed(mhs_market) -> None:
-    # SCENARIO_MHS_RUN_ANCHORED_FOLD_USES_BLEND_SCALE_DIRECTLY (case 2): a
-    # missing blend_exposure_scale converts into a typed incomplete-fold
-    # failure through the existing try/except DataIntegrityError wrapper --
-    # never an uncaught error and never a silent unscaled fallback.
+def test_constant_risk_fold_missing_local_reference_fails_closed(mhs_market, monkeypatch) -> None:
+    import src.mhs.evaluation.folds as folds_mod
+    from src.common.errors import DataIntegrityError
+
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -663,6 +656,10 @@ def test_constant_risk_fold_missing_blend_scale_fails_closed(mhs_market) -> None
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         pnl_vol_target_mode="constant_risk",
+    )
+    monkeypatch.setattr(
+        folds_mod, "_fold_train_reference_returns",
+        lambda *_a, **_k: (_ for _ in ()).throw(DataIntegrityError("fold 0: train reference unavailable")),
     )
     report = ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
     assert report.strict is None
@@ -698,23 +695,15 @@ def _capturing_anchored_fold(
     root, fold, request, funding_by_symbol, initial_equity, fold_index,
     telemetry=None, slow_horizon_override=None, fast_horizon_override=None,
     funding_carry_override=None, committee_member_weights=None,
-    growth_budget_target_vol=None, exposure_warmup_returns=None,
-    blend_exposure_scale=None,
 ):
     _CAPTURED_FOLD_SUBMISSIONS.append({
         "fold_index": fold_index,
-        "growth_budget_target_vol": growth_budget_target_vol,
-        "exposure_warmup_returns": exposure_warmup_returns,
-        "blend_exposure_scale": blend_exposure_scale,
+        "committee_member_weights": committee_member_weights,
     })
     return ev._incomplete_fold_report(fold, fold_index, ())
 
 
-def test_post_book_concurrently_forwards_boundary_growth_budget_vols(monkeypatch) -> None:
-    # SCENARIO_MHS_FOLD_GROWTH_BUDGET_PROPAGATION_06: the boundary-resolved
-    # target-vol mapping reaches each fold submission as its trailing keyword;
-    # a None mapping forwards None everywhere so every other run stays
-    # byte-identical.
+def test_post_book_concurrently_forwards_only_fold_local_policy(monkeypatch) -> None:
     import src.mhs.evaluation.concurrency as concurrency_mod
     import src.mhs.evaluation.folds as folds_mod
     import src.mhs.evidence as evidence_mod
@@ -739,41 +728,12 @@ def test_post_book_concurrently_forwards_boundary_growth_budget_vols(monkeypatch
     _CAPTURED_FOLD_SUBMISSIONS.clear()
     ev._run_post_book_concurrently(
         None, "root", request, [], None, None, None, None, None, None, None, {}, 1.0, None,
-        fold_growth_budget_target_vol={0: 0.30, 1: 0.31, 2: 0.32, 3: 0.33},
     )
     forwarded = {
-        int(c["fold_index"]): c["growth_budget_target_vol"]
+        int(c["fold_index"]): c["committee_member_weights"]
         for c in _CAPTURED_FOLD_SUBMISSIONS
     }
-    assert forwarded == {0: 0.30, 1: 0.31, 2: 0.32, 3: 0.33}
-
-    _CAPTURED_FOLD_SUBMISSIONS.clear()
-    ev._run_post_book_concurrently(
-        None, "root", request, [], None, None, None, None, None, None, None, {}, 1.0, None,
-    )
-    forwarded_none = {
-        int(c["fold_index"]): c["growth_budget_target_vol"]
-        for c in _CAPTURED_FOLD_SUBMISSIONS
-    }
-    assert forwarded_none == {0: None, 1: None, 2: None, 3: None}
-
-    _CAPTURED_FOLD_SUBMISSIONS.clear()
-    blend_slices = {
-        0: pd.Series([1.0], index=pd.DatetimeIndex([pd.Timestamp("2021-06-01", tz="UTC")])),
-        3: pd.Series([2.0], index=pd.DatetimeIndex([pd.Timestamp("2024-06-01", tz="UTC")])),
-    }
-    ev._run_post_book_concurrently(
-        None, "root", request, [], None, None, None, None, None, None, None, {}, 1.0, None,
-        fold_blend_exposure_scale=blend_slices,
-    )
-    forwarded_blend = {
-        int(c["fold_index"]): c["blend_exposure_scale"]
-        for c in _CAPTURED_FOLD_SUBMISSIONS
-    }
-    assert forwarded_blend[0] is blend_slices[0]
-    assert forwarded_blend[3] is blend_slices[3]
-    assert forwarded_blend[1] is None
-    assert forwarded_blend[2] is None
+    assert forwarded == {0: None, 1: None, 2: None, 3: None}
 
 
 def test_p14_postbook_concurrent_parity() -> None:
@@ -833,6 +793,8 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
     # (horizon, source) on the report while the slow fields stay on the frozen
     # default -- mirroring the slow_horizon_* recording path and keeping the
     # fast re-verification diagnostic-only (no BookSpec/weight construction).
+    import src.mhs.evaluation.folds as folds_mod
+
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -844,6 +806,12 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
+    )
+    monkeypatch.setattr(
+        folds_mod, "_fold_train_reference_returns",
+        lambda *_a, **_k: pd.Series(
+            [0.001], index=pd.DatetimeIndex([_FOLD.train_end - pd.Timedelta(days=1)])
+        ),
     )
     report = ev._run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
@@ -895,12 +863,14 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
     # frame caches were removed in the fork-COW refactor).
     assert ev._get_symbol_mark_frame.cache_info().currsize == 0
 
-def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
+def test_fold_worker_records_funding_carry_override(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_REPORT_CARRIES_FUNDING_CARRY_DISCOVERY_05 (fold worker
     # path): a fold run resolved with a funding-carry override records all four
     # fields on the report; without the override (flag off / no admission) they
     # fail closed to their dataclass defaults -- existing construction sites
     # are unaffected.
+    import src.mhs.evaluation.folds as folds_mod
+
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -912,6 +882,12 @@ def test_fold_worker_records_funding_carry_override(mhs_market) -> None:
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
         execution_universe_size=8,
+    )
+    monkeypatch.setattr(
+        folds_mod, "_fold_train_reference_returns",
+        lambda *_a, **_k: pd.Series(
+            [0.001], index=pd.DatetimeIndex([_FOLD.train_end - pd.Timedelta(days=1)])
+        ),
     )
     report = ev._run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
@@ -1017,12 +993,9 @@ def test_run_anchored_fold_accepts_terminal_funding_gap_via_shared_helper(mhs_ma
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = ev._load_funding_series(symbols)
-    daily_idx = pd.date_range(_FOLD.validation_start.normalize(), _FOLD.validation_end.normalize(), freq="D", tz="UTC")
-    blend_scale = pd.Series(1.0, index=daily_idx)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
-        pnl_vol_target_mode="constant_risk",
     )
 
     def _gap(code, symbol, ts):
@@ -1067,11 +1040,14 @@ def test_run_anchored_fold_accepts_terminal_funding_gap_via_shared_helper(mhs_ma
 
     monkeypatch.setattr(folds_mod, "replay_execution_windows", lambda *a, **k: reference_ok)
     monkeypatch.setattr(folds_mod, "replay_execution_window_batch", lambda *a, **k: (primary_terminal, stress_ok))
-
-    report = ev._run_anchored_fold(
-        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
-        blend_exposure_scale=blend_scale,
+    monkeypatch.setattr(
+        folds_mod, "_fold_train_reference_returns",
+        lambda *_a, **_k: pd.Series(
+            [0.001], index=pd.DatetimeIndex([_FOLD.train_end - pd.Timedelta(days=1)])
+        ),
     )
+
+    report = ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
     # Then: the fold-level gate accepted the terminal-equivalent funding gap
     assert report.strict is not None
     assert report.failures == ()
@@ -1095,14 +1071,9 @@ def test_run_anchored_fold_certifies_valid_ledger_via_shared_helper(mhs_market, 
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = ev._load_funding_series(symbols)
-    daily_idx = pd.date_range(
-        _FOLD.validation_start.normalize(), _FOLD.validation_end.normalize(), freq="D", tz="UTC",
-    )
-    blend_scale = pd.Series(1.0, index=daily_idx)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         mark_mode="cache_required", execution_timeframe="1m", log_run=False,
-        pnl_vol_target_mode="constant_risk",
     )
 
     def _fills():
@@ -1140,13 +1111,70 @@ def test_run_anchored_fold_certifies_valid_ledger_via_shared_helper(mhs_market, 
 
     monkeypatch.setattr(folds_mod, "replay_execution_windows", lambda *a, **k: _result())
     monkeypatch.setattr(folds_mod, "replay_execution_window_batch", lambda *a, **k: (_result(), _result()))
+    monkeypatch.setattr(
+        folds_mod, "_fold_train_reference_returns",
+        lambda *_a, **_k: pd.Series(
+            [0.001], index=pd.DatetimeIndex([_FOLD.train_end - pd.Timedelta(days=1)])
+        ),
+    )
 
     # When
-    report = ev._run_anchored_fold(
-        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
-        blend_exposure_scale=blend_scale,
-    )
+    report = ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
 
     # Then: the shared certification accepts a valid ledger exactly as before
     assert report.strict is not None
     assert report.failures == ()
+
+
+def test_fold_train_reference_returns_uses_only_fold_train_window(monkeypatch) -> None:
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.evaluation import folds as subject
+
+    fold = subject.phase_1_anchored_purged_folds()[1]
+    captured: dict[str, object] = {}
+
+    def fake_targets(*args, **kwargs):
+        captured.update(kwargs)
+        idx = pd.date_range(kwargs["decision_start"], kwargs["decision_end"], freq="1D", tz="UTC")
+        return pd.DataFrame({"BTCUSDT": 1.0}, index=idx), idx, ["BTCUSDT"], idx
+
+    def fake_replay(*args, **kwargs):
+        list(args[0])
+        idx = pd.date_range(fold.train_start, fold.train_end, periods=120, tz="UTC")
+        ledger = type("Ledger", (), {"equity": pd.Series(np.linspace(1.0, 1.2, len(idx)), index=idx)})()
+        return type("Replay", (), {"ledger": ledger})()
+
+    monkeypatch.setattr(subject.fold_weights, "_build_fold_target_weights", fake_targets)
+    monkeypatch.setattr(subject.specs, "_resolved_base_execution_spec", lambda _request: object())
+    monkeypatch.setattr(
+        subject.integrity, "_truncate_replayable_decisions",
+        lambda target, signals, _grid, _spec: (target, signals, 0),
+    )
+    monkeypatch.setattr(subject.windows, "_iter_mhs_execution_windows", lambda *_args: iter(()))
+    monkeypatch.setattr(subject, "replay_execution_windows", fake_replay)
+
+    request = type("Request", (), {"execution_timeframe": "1m", "mark_mode": "cache_required"})()
+    returns = subject._fold_train_reference_returns(
+        "root", fold, request, {}, 1.0, 1, None, None,
+    )
+
+    assert captured["decision_end"] == fold.train_end
+    assert captured["decision_start"] < fold.train_end
+    assert returns.index.max() < fold.train_end
+    assert returns.index.is_monotonic_increasing
+    assert returns.index.is_unique
+    assert np.isfinite(returns.to_numpy()).all()
+
+
+def test_run_anchored_fold_never_accepts_top_level_sizing_arguments() -> None:
+    import inspect
+
+    from src.mhs.evaluation.folds import _run_anchored_fold
+
+    signature = inspect.signature(_run_anchored_fold)
+
+    assert "growth_budget_target_vol" not in signature.parameters
+    assert "exposure_warmup_returns" not in signature.parameters
+    assert "blend_exposure_scale" not in signature.parameters

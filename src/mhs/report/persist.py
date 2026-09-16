@@ -247,6 +247,8 @@ def _book_summary(book: MhsBookReport) -> dict[str, Any]:
 
 def _fold_summary(fold: MhsFoldReport) -> dict[str, Any]:
     """Curated scalar slice of one anchored-fold report."""
+    book_structure = getattr(fold, "book_structure", None)
+    book_structure = book_structure if isinstance(book_structure, dict) else {}
     return {
         "fold_index": fold.fold_index,
         "validation_start": fold.validation_start,
@@ -259,6 +261,9 @@ def _fold_summary(fold: MhsFoldReport) -> dict[str, Any]:
         "primary_max_drawdown": fold.primary_max_drawdown,
         "stress_naive_sharpe": fold.stress_naive_sharpe,
         "failures": fold.failures,
+        "sizing_reference_start": book_structure.get("sizing_reference_start"),
+        "sizing_reference_end": book_structure.get("sizing_reference_end"),
+        "sizing_reference_daily_rows": book_structure.get("sizing_reference_daily_rows"),
     }
 
 
