@@ -75,3 +75,36 @@ def test_removed_provenance_group_raises_system_exit() -> None:
         build_root_parser().parse_args(["provenance"])
     with pytest.raises(SystemExit):
         build_root_parser().parse_args(["provenance", "compare-runs"])
+
+
+def test_cli_emit_deployment_refuses_live_parity_blockers(monkeypatch) -> None:
+    import argparse
+
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.pipeline.orchestrator as orchestrator
+
+    # Given: 실제 파서로 인자 구성 (수동 Namespace 조립 금지)
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd")
+    mhs_cli.add_mhs_commands(sub)
+
+    def _fail(*_a, **_k):
+        raise AssertionError("diagnostic must not run when a parity blocker is set")
+
+    # run_mhs_diagnostic 은 핸들러 안에서 지연 import 되므로 원본 모듈에 패치한다
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", _fail)
+
+    blocked = parser.parse_args(
+        ["mhs-horizon-diagnostic", "--name-drift-trim", "--emit-deployment"]
+    )
+
+    # When / Then: 진단 실행 전에 거부
+    with pytest.raises(SystemExit, match="name_drift_trim"):
+        mhs_cli._run_mhs_horizon_diagnostic(blocked)
+
+    # Given: emit-deployment 없이 trim 만이면 이 가드를 통과해 진단으로 진행한다
+    allowed = parser.parse_args(["mhs-horizon-diagnostic", "--name-drift-trim"])
+    with pytest.raises(AssertionError, match="diagnostic must not run"):
+        mhs_cli._run_mhs_horizon_diagnostic(allowed)
