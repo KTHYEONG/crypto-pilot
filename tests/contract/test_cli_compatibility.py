@@ -82,4 +82,4 @@ def test_cli_contract_is_unchanged() -> None:
 
     parser = build_root_parser()
     groups = parser._subparsers._group_actions[0].choices  # type: ignore[union-attr]
-    assert set(groups) == {"data", "research", "live"}
+    assert set(groups) == {"data", "research", "live", "ops"}
