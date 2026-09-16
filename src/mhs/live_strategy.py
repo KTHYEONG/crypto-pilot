@@ -21,6 +21,7 @@ from pydantic import SecretStr
 from src.common.errors import DataIntegrityError
 from src.live.errors import ArtifactSealError
 from src.mhs.deployment_policy import MhsDeploymentPolicy, SignalWindowPolicy, SizingPolicy, TargetWeightPolicy
+from src.mhs.deploy_gate import deploy_gate_from_report
 from src.mhs.panel import DATA_POLICIES
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.panel import DATA_POLICY_LEGACY as _PANEL_DATA_POLICY_LEGACY
@@ -605,18 +606,10 @@ def load_strategy_bootstrap(path: Path, *, expected_sha256: str, artifact_key: S
     return loaded
 
 
-def assert_deployment_eligible(report: Any, *, reference_report_path: Path | None = None) -> None:
-    if getattr(report, "status", None) != "COMPLETE":
-        raise DataIntegrityError("deployment ineligible: report status not COMPLETE")
-    rg = getattr(report, "research_go", None)
-    if rg is None or not getattr(rg, "eligible", False):
-        raise DataIntegrityError("deployment ineligible: research_go not eligible")
-    blend = getattr(report, "blend", None)
-    if blend is None:
-        raise DataIntegrityError("deployment ineligible: blend is None")
-    tw = getattr(blend, "target_weights", None)
-    if tw is None or (hasattr(tw, "empty") and tw.empty) or (hasattr(tw, "__len__") and len(tw) == 0):
-        raise DataIntegrityError("deployment ineligible: blend target_weights empty")
+def assert_deployment_eligible(report: Any, request: Any, *, reference_report_path: Path | None = None) -> None:
+    gate = deploy_gate_from_report(report, request)
+    if not gate.go:
+        raise DataIntegrityError(f"deployment ineligible: {','.join(gate.reason_codes)}")
     if reference_report_path is not None:
         ref_path = Path(reference_report_path)
         if ref_path.exists():
@@ -635,6 +628,3 @@ def assert_deployment_eligible(report: Any, *, reference_report_path: Path | Non
                 ref_digest = hashlib.sha256(ref_payload.encode("utf-8")).hexdigest()
                 if not hmac.compare_digest(cur_digest, ref_digest):
                     raise DataIntegrityError("deployment ineligible: flags digest drift")
-    reliability = getattr(report, "backtest_reliability", None)
-    if not bool(reliability and reliability.eligible):
-        raise DataIntegrityError("deployment ineligible: backtest_reliability not eligible")
