@@ -1,5 +1,5 @@
 # mypy: ignore-errors
-# ruff: noqa: F401, F821, I001, E402
+# ruff: noqa: F401, F821, I001, E402, E701
 from __future__ import annotations  # mypy: ignore-errors
 
 import logging
@@ -44,8 +44,10 @@ from src.mhs.parallel import (
 )
 from src.mhs.params import (
     DISCOVERY_GATE_TRANCHE_COUNT,
+    FOLD_PANEL_WARMUP_HOURS,
     FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
+    PNL_VOL_TARGET_BURN_IN_DAYS,
 )
 from src.mhs.params import (
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
@@ -362,6 +364,44 @@ def _fold_exposure_warmup(
     ]
 
 
+def _fold_train_reference_returns(
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    initial_equity: float,
+    fold_index: int,
+    slow_horizon_override: int | None,
+    committee_member_weights: dict[str, float] | None,
+) -> pd.Series:
+    reference_start = fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS)
+    reference_end = fold.train_end
+    if not reference_start < reference_end: raise DataIntegrityError(f"fold {fold_index}: train reference window is empty; do not borrow pre-DISCOVERY data")
+    target_weights, signal_available_at, minute_roster, _grid_1h = fold_weights._build_fold_target_weights(
+        root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
+        decision_start=reference_start, decision_end=reference_end,
+    )
+    target_replay = target_weights[minute_roster]
+    def _ref_windows():
+        base_spec = specs._resolved_base_execution_spec(request)
+        execution_grid = pd.date_range(reference_start, reference_end, freq={"1m": "1min", "3m": "3min", "5m": "5min"}[request.execution_timeframe], tz="UTC")
+        truncated, truncated_signals, _censored = integrity._truncate_replayable_decisions(target_replay, signal_available_at, execution_grid, base_spec)
+        yield from windows._iter_mhs_execution_windows(truncated, truncated_signals, root, request.execution_timeframe, reference_start, reference_end, funding_by_symbol, request.mark_mode, base_spec)
+    _ref_iter = _ref_windows()
+    base_spec = specs._resolved_base_execution_spec(request)
+    ref_replay = replay_execution_windows(_ref_iter, initial_equity, "OHLCV_IMMEDIATE_TAKER", base_spec, retain_event_snapshots=False)
+    daily = ref_replay.ledger.equity.resample("1D").last().dropna().pct_change().dropna().astype("float64")
+    daily = pd.Series(daily.to_numpy(dtype="float64"), index=daily.index, dtype="float64")
+    daily = daily.loc[daily.index < fold.train_end]
+    if not bool(np.isfinite(daily.to_numpy(dtype="float64")).all()): raise DataIntegrityError(f"fold {fold_index}: train reference returns must be finite")
+    if not daily.index.is_unique or not daily.index.is_monotonic_increasing: raise DataIntegrityError(f"fold {fold_index}: train reference index must be unique and monotonic")
+    if not str(getattr(daily.index, "tz", None)) == "UTC": raise DataIntegrityError(f"fold {fold_index}: train reference index must be UTC")
+    if not (daily.index < fold.train_end).all(): raise DataIntegrityError(f"fold {fold_index}: train reference extends into validation")
+    if len(daily.dropna()) < PNL_VOL_TARGET_BURN_IN_DAYS: raise DataIntegrityError(f"fold {fold_index}: train reference has {len(daily.dropna())} rows, require >= {PNL_VOL_TARGET_BURN_IN_DAYS}")
+    del target_weights, target_replay
+    return daily
+
+
 def _run_anchored_fold(
     root: str,
     fold: AnchoredPurgedFold,
@@ -374,9 +414,6 @@ def _run_anchored_fold(
     fast_horizon_override: tuple[int, str] | None = None,
     funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
     committee_member_weights: dict[str, float] | None = None,
-    growth_budget_target_vol: float | None = None,
-    exposure_warmup_returns: pd.Series | None = None,
-    blend_exposure_scale: pd.Series | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
@@ -393,6 +430,12 @@ def _run_anchored_fold(
     try:
         vs = fold.validation_start
         ve = fold.validation_end
+        train_reference = _fold_train_reference_returns(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights)
+        if telemetry is not None: telemetry.record(f"anchored_fold_{fold_index}_sizing_reference", grid_bars=len(train_reference), window_start=str(train_reference.index[0]), window_end=str(train_reference.index[-1]))
+        from src.mhs.research_go import _resolved_growth_envelope as _resolve_envelope
+        _envelope = _resolve_envelope(request)
+        if str(request.pnl_vol_target_mode) in ("growth_budget", "constant_risk"): _local_target_vol: float | None = _scaling._growth_budget_target_vol_by_boundary(train_reference, _envelope, {f"fold_{fold_index}": fold.train_end})[f"fold_{fold_index}"]
+        else: _local_target_vol = None
         target_weights, signal_available_at, minute_roster, _grid_1h = fold_weights._build_fold_target_weights(
             root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
         )
@@ -445,23 +488,12 @@ def _run_anchored_fold(
             retain_event_snapshots=False,
         )
         # Two-pass primary (reference -> P&L-vol-target rescale -> reported):
-        # constant_risk는 blend가 배치 확정한 exposure_scale을 그대로 슬라이스
-        # 재사용한다(I-SCALE-IS-DEPLOYED-OVERLAY, fold-local EWMA 재적합 금지).
+        # fold-local train reference로 적합한 단일 target을 모든 모드에 그대로 쓴다.
         reference_daily_returns = primary.ledger.equity.resample("1D").last().pct_change()
-        if request.pnl_vol_target_mode == "constant_risk":
-            if blend_exposure_scale is None:
-                raise DataIntegrityError(f"fold {fold_index}: constant_risk requires blend_exposure_scale")
-            pnl_vol_target_scale = blend_exposure_scale.reindex(reference_daily_returns.index)
-            if pnl_vol_target_scale.isna().any():
-                raise DataIntegrityError(
-                    f"fold {fold_index}: blend exposure_scale missing for "
-                    f"{int(pnl_vol_target_scale.isna().sum())} validation dates"
-                )
-        else:
-            pnl_vol_target_scale = _scaling._replay_exposure_scale(
-                reference_daily_returns, request, growth_budget_target_vol,
-                warmup_returns=_fold_exposure_warmup(exposure_warmup_returns, vs),
-            )
+        pnl_vol_target_scale = _scaling._replay_exposure_scale(
+            reference_daily_returns, request, _local_target_vol,
+            warmup_returns=train_reference,
+        )
         primary, stress = replay_execution_window_batch(
             _window_telemetry(
                 windows._rescaled_windows(iter(cached_windows), pnl_vol_target_scale),
@@ -584,6 +616,9 @@ def _run_anchored_fold(
                 "exposure_scale_cap_binding_fraction": float(
                     (pnl_vol_target_scale >= _scaling.resolved_exposure_cap(request) - 1e-12).mean(),
                 ),
+                "sizing_reference_start": str(train_reference.index[0]),
+                "sizing_reference_end": str(train_reference.index[-1]),
+                "sizing_reference_daily_rows": float(len(train_reference)),
             },
             regime_characterization=regime._fold_regime_characterization(root, fold),
             realized_annualized_vol=realized_annualized_vol,
@@ -602,7 +637,7 @@ def _run_folds_parallel(
     fold_slow_horizons: dict[int, int | None] | None = None,
     fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
-    exposure_warmup_returns: pd.Series | None = None,
+    fold_committee_weights: dict[int, dict[str, float]] | None = None,
 ) -> tuple[MhsFoldReport, ...]:
     """Run the three anchored folds concurrently, one process each.
 
@@ -641,7 +676,7 @@ def _run_folds_parallel(
                 (fold_slow_horizons or {}).get(idx),
                 (fold_fast_horizons or {}).get(idx),
                 (fold_funding_carry or {}).get(idx),
-                exposure_warmup_returns=exposure_warmup_returns,
+                (fold_committee_weights or {}).get(idx),
             ): idx
             for idx, fold in enumerate(folds)
         }
