@@ -8,17 +8,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.common.errors import DataIntegrityError
 from src.mhs.process import (
     ema_smoothing_rate,
-    estimation_adjusted_kelly_exposure,
     estimation_adjusted_mean,
     ledoit_wolf_covariance,
     long_only_growth_weights,
     monthly_refit_schedule,
-    select_smoothing_halflife,
     smoothed_book_path,
     step_proxy_net_returns,
+    volatility_scaled_exposure,
 )
 
 
@@ -140,48 +138,69 @@ def test_step_proxy_net_returns_hand_computed() -> None:
         step_proxy_net_returns(weights, log_close, funding, -1.0)
 
 
-def test_select_smoothing_halflife_prefers_longer_on_whipsaw() -> None:
+def test_volatility_scaled_exposure_constant_vol_at_cap() -> None:
+    rng = np.random.default_rng(0)
     index = pd.date_range("2022-01-01", periods=60, freq="24h", tz="UTC")
-    whipsaw = pd.DataFrame({"a": [0.5 if i % 2 == 0 else -0.5 for i in range(60)]}, index=index)
-    persistent = pd.DataFrame({"a": [0.5] * 60}, index=index)
-    log_close = pd.DataFrame({"a": np.log(np.linspace(100, 160, 60))}, index=index)
-    zero_fund = pd.DataFrame({"a": np.zeros(60)}, index=index)
-    train_end = index[40] + pd.Timedelta(hours=12)
-    whipsaw_pick = select_smoothing_halflife(whipsaw, log_close, zero_fund, 100.0, train_end)
-    calm_pick = select_smoothing_halflife(persistent, log_close, zero_fund, 0.0, train_end)
-    assert whipsaw_pick > calm_pick
-    flat = pd.DataFrame({"a": np.zeros(60)}, index=index)
-    assert select_smoothing_halflife(flat, log_close, zero_fund, 10.0, train_end) == 8.0
-    with pytest.raises(ValueError, match=r".+"):
-        select_smoothing_halflife(whipsaw, log_close, zero_fund, 10.0, index[0])
+    returns = pd.Series(rng.normal(0, 0.01, 60), index=index)
+    exposure = volatility_scaled_exposure(returns, cap=3.0, halflife_days=5)
+    assert (exposure.iloc[:5] == 0.0).all()
+    assert bool(((exposure >= 0.0) & (exposure <= 3.0)).all())
+    assert exposure.index.equals(index)
+    vol = returns.ewm(halflife=5, min_periods=5).std().shift(1)
+    median = vol.expanding().median()
+    expected = (3.0 * median / vol.where(vol > 0)).clip(lower=0.0, upper=3.0).fillna(0.0)
+    assert np.allclose(exposure.to_numpy(), expected.to_numpy(), atol=1e-12)
+    steady = exposure.loc[vol == median]
+    if len(steady):
+        assert np.allclose(steady.to_numpy(), 3.0, atol=1e-9)
+    alternating = pd.Series(np.where(np.arange(60) % 2 == 0, 0.01, -0.01), index=index)
+    alt_exposure = volatility_scaled_exposure(alternating, cap=3.0, halflife_days=5)
+    assert np.allclose(alt_exposure.iloc[10:].to_numpy(), 3.0, atol=1e-9)
 
 
-def test_select_smoothing_halflife_raises_on_ruin() -> None:
+def test_volatility_scaled_exposure_derisks_when_vol_triples() -> None:
+    rng = np.random.default_rng(1)
+    index = pd.date_range("2022-01-01", periods=80, freq="24h", tz="UTC")
+    calm = rng.normal(0, 0.01, 60)
+    storm = rng.normal(0, 0.03, 20)
+    returns = pd.Series(np.concatenate([calm, storm]), index=index)
+    exposure = volatility_scaled_exposure(returns, cap=3.0, halflife_days=5)
+    tail = exposure.iloc[-10:]
+    assert bool(((tail < 3.0) & (tail > 0.0)).all())
+
+
+def test_volatility_scaled_exposure_all_zero_is_zero() -> None:
+    index = pd.date_range("2022-01-01", periods=30, freq="24h", tz="UTC")
+    exposure = volatility_scaled_exposure(pd.Series(0.0, index=index), cap=3.0, halflife_days=5)
+    assert (exposure == 0.0).all()
+
+
+def test_volatility_scaled_exposure_causal() -> None:
+    rng = np.random.default_rng(2)
+    index = pd.date_range("2022-01-01", periods=60, freq="24h", tz="UTC")
+    returns = pd.Series(rng.normal(0, 0.01, 60), index=index)
+    shocked = returns.copy()
+    shocked.iloc[30:] = 0.5
+    before = volatility_scaled_exposure(returns, cap=3.0, halflife_days=5)
+    after = volatility_scaled_exposure(shocked, cap=3.0, halflife_days=5)
+    assert np.allclose(before.iloc[:31].to_numpy(), after.iloc[:31].to_numpy())
+
+
+def test_volatility_scaled_exposure_rejects_bad_inputs() -> None:
     index = pd.date_range("2022-01-01", periods=10, freq="24h", tz="UTC")
-    targets = pd.DataFrame({"a": [1.0 if i % 2 == 0 else -1.0 for i in range(10)]}, index=index)
-    log_close = pd.DataFrame({"a": np.zeros(10)}, index=index)
-    funding = pd.DataFrame({"a": np.zeros(10)}, index=index)
-    with pytest.raises(DataIntegrityError, match=r".+"):
-        select_smoothing_halflife(targets, log_close, funding, 100000.0, index[6], ladder=(0.0,))
-
-
-def test_estimation_adjusted_kelly_exposure_properties() -> None:
-    index = pd.date_range("2022-01-01", periods=100, freq="24h", tz="UTC")
-    active = index[10]
-    drift = pd.Series(np.linspace(0.001, 0.01, 100), index=index)
-    exposure = estimation_adjusted_kelly_exposure(drift, active_from=active, cap=2.0)
-    assert (exposure.loc[index[:10]] == 0.0).all()
-    assert bool(((exposure.loc[index[30:]] > 0) & (exposure.loc[index[30:]] <= 2.0)).all())
-    assert (estimation_adjusted_kelly_exposure(
-        pd.Series(-0.01, index=index), active_from=active, cap=2.0
-    ) == 0.0).all()
-    altered = drift.copy()
-    altered.iloc[80:] = 5.0
-    before = estimation_adjusted_kelly_exposure(drift, active_from=active, cap=2.0)
-    after = estimation_adjusted_kelly_exposure(altered, active_from=active, cap=2.0)
-    assert before.loc[index[50]] == after.loc[index[50]]
+    good = pd.Series(0.01, index=index)
     with pytest.raises(ValueError, match=r".+"):
-        estimation_adjusted_kelly_exposure(drift, active_from=pd.Timestamp("2022-01-01"), cap=2.0)
+        volatility_scaled_exposure(good, cap=0.0, halflife_days=5)
+    with pytest.raises(ValueError, match=r".+"):
+        volatility_scaled_exposure(good, cap=-1.0, halflife_days=5)
+    with pytest.raises(ValueError, match=r".+"):
+        volatility_scaled_exposure(good, cap=2.0, halflife_days=0)
+    with pytest.raises(ValueError, match=r".+"):
+        volatility_scaled_exposure(good.iloc[::-1], cap=2.0, halflife_days=5)
+    with pytest.raises(ValueError, match=r".+"):
+        volatility_scaled_exposure(
+            pd.Series([1.0, np.nan] + [1.0] * 8, index=index), cap=2.0, halflife_days=5
+        )
 
 
 def test_monthly_refit_schedule_rejects_order_and_nonpositive() -> None:
@@ -249,42 +268,3 @@ def test_step_proxy_net_returns_edge_cases() -> None:
         weights.iloc[:1], log_close.iloc[:1], funding.iloc[:1], 1.0
     )
     assert single_out.empty
-
-
-def test_select_smoothing_halflife_rejects_empty_ladder() -> None:
-    index = pd.date_range("2022-01-01", periods=5, freq="24h", tz="UTC")
-    targets = pd.DataFrame({"a": np.ones(5)}, index=index)
-    log_close = pd.DataFrame({"a": np.zeros(5)}, index=index)
-    funding = pd.DataFrame({"a": np.zeros(5)}, index=index)
-    with pytest.raises(ValueError, match=r".+"):
-        select_smoothing_halflife(targets, log_close, funding, 1.0, index[-1], ladder=())
-    with pytest.raises(ValueError, match=r".+"):
-        select_smoothing_halflife(
-            targets.iloc[:1], log_close.iloc[:1], funding.iloc[:1], 1.0, index[-1]
-        )
-
-
-def test_estimation_adjusted_kelly_exposure_rejects_bad_inputs() -> None:
-    index = pd.date_range("2022-01-01", periods=5, freq="24h", tz="UTC")
-    good = pd.Series(0.01, index=index)
-    active = pd.Timestamp("2022-01-01", tz="UTC")
-    with pytest.raises(ValueError, match=r".+"):
-        estimation_adjusted_kelly_exposure(good.iloc[::-1], active_from=active, cap=2.0)
-    with pytest.raises(ValueError, match=r".+"):
-        estimation_adjusted_kelly_exposure(
-            pd.Series([1.0, np.nan, 1.0, 1.0, 1.0], index=index),
-            active_from=active, cap=2.0,
-        )
-    with pytest.raises(ValueError, match=r".+"):
-        estimation_adjusted_kelly_exposure(good, active_from=active, cap=0.0)
-    with pytest.raises(ValueError, match=r".+"):
-        estimation_adjusted_kelly_exposure(good, active_from=active, cap=2.0, ewma_lambda=1.0)
-
-
-def test_estimation_adjusted_kelly_exposure_constant_history_is_zero() -> None:
-    index = pd.date_range("2022-01-01", periods=10, freq="24h", tz="UTC")
-    constant = pd.Series(0.005, index=index)
-    out = estimation_adjusted_kelly_exposure(
-        constant, active_from=index[0], cap=2.0
-    )
-    assert (out == 0.0).all()
