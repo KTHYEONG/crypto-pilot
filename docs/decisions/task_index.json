@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_forward_preregistration",
+      "date": "2026-09-17",
+      "adr_id": "ADR_20260917_mhs_forward_preregistration",
+      "domain": "mhs",
+      "title": "MHS 사전등록 전진 평가 프로토콜",
+      "why": "109회 시행이 모두 2021~2025 구간에서 이뤄져 E1/E2가 시행수 보정에서 전부 음전환하고, 심볼축 홀드아웃은 과거 데이터가 없으며, 폴드 경계가 HOLDOUT_CUTOFF에 고정돼 새 데이터가 폴드로 자라지 못해 어떤 설정도 GO를 구조적으로 통과할 수 없었다",
+      "resolution": "절차를 데이터보다 먼저 git 원장에 digest로 봉인하고, 봉인 시각 이후 완료된 분기만 전진 폴드로 인정해 최소 4분기·시닥 보정 알파로 배포 판정을 내리며 과거 폴드는 공시로만 남기도록 deploy_gate·orchestrator·CLI·검증을 재배선했다",
+      "impact": "실측 확인: 기존 봉인 경로(레지스트리 미사용)는 골든 동일성 11건 포함 byte-identical, 시행원장 키 희소화로 필드 추가 시 중복 계산되던 N이 줄었고, 3m 수집계획기는 창 앞 2000봉 워밍업을 읽어 84일 미만 전진 구간도 계획 가능해졌다",
+      "caveat": "2026-10-08(2026Q4 첫 폴드 validation_start) 전에 기본 설정과 트랜치7 설정 두 절차를 등록하고 레지스트리를 즉시 커밋해야 하며, 첫 판정은 4개 전진 분기가 쌓이는 2027-09-30 이후에나 가능하다"
+    },
+    {
       "task_id": "mhs_committee_tranche_count",
       "date": "2026-09-16",
       "adr_id": "ADR_20260916_mhs_committee_tranche_count",
@@ -991,16 +1002,6 @@
       "why": "docs/results/mhs_run_history/latest.json 및 daily_ledger.parquet 실측 분석 결과, k=5 위원회 평균과 tranche 평활이 재정규화 없이 blend_target_gross를 1.0에서 0.530(현금 47%)으로 희석시키고 있음을 확인. 이 47%는 리스크 판단이 아닌 산술적 잔여물이며, 하류의 두 리스크 레이어(_pnl_vol_target_scale, _regime_cash_scale)는 스케일 불변(소수점 6자리까지 동일)임을 실증하여 노출 복원이 하류에서 상쇄되지 않음을 확인. 프로젝트 자체 registered growth-optimal 솔버(solve_growth_optimal_risk)도 등록 상수(MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25)로 독립적으로 1.5x 선택, 실현 참여율(5e-9)로 선형비용가정 유효함을 확인.",
       "resolution": "src/mhs/books.py에 scale_book_to_target_gross 순수함수 추가(행별 절대값합을 target_gross로 재정규화, 달러중립·상대비중 보존, np.divide safe-division). MhsDiagnosticRequest.committee_target_gross: float|None=None 필드 및 (0.0,2.0] 검증 추가. _committee_execution_book에 target_gross 파라미터 추가, 단일 종료지점에서 tranche/regime-adaptive 평활 이후 리스케일 적용. fold 경로와 top-level blend 경로 양쪽 호출부 모두에 배선(누락 시 _fold_blend_parity의 FOLD_BLEND_PATH_DIVERGENCE 유발 가능하므로 필수). CLI --committee-target-gross 플래그 추가. 신규 테스트 6건(tests/unit/mhs/test_books.py 5건 + test_evaluation.py 1건) 전량 통과, 관련 전체 스위트(tests/unit/mhs/, tests/unit/application/research/mhs/test_evaluation.py) 회귀 없음, ruff/mypy 통과. target_gross=None(기본값)은 기존 동작과 byte-identical.",
       "impact": "opt-in 파라미터 추가만으로 완료됨 -- 기본값 None은 기존 프로덕션 경로에 어떤 영향도 주지 않음(회귀 없음). 실측 백테스트 경로 시뮬레이션(returns 배율 적용, 실제 리플레이 아님) 기준으로 gross=0.795는 CAGR 34.7%->54.7%(MDD -17.2%), gross=1.0(불변식 완전복원)은 CAGR 34.7%->71.3%(MDD -21.2%) -- 둘 다 등록된 25% MDD 예산 이내이며 차입 불필요. 단, ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT 전례(fold 단위는 개선했으나 연속 전체이력 리플레이에서 CAPITAL_INVARIANT_BREACH 발생)에 따라 실제 노출값 채택 전 --committee-target-gross 플래그로 실제 리플레이 실행 및 termination_counts/research_go 검증이 필수 선행조건임을 스펙 §5에 명시. 집중도 게이트(FOLD_GROWTH_CONCENTRATION)와 deflated_sharpe_ratio≈0 문제는 이 변경으로 해결되지 않음(자본배치 효율화이지 신규 알파 아님) -- 후속 과제로 fast_reversal 신호 재조정과 committee_growth_diagnostic의 committee_capital 경로 개방이 남음."
-    },
-    {
-      "task_id": "MHS_FOLD_GROWTH_CONCENTRATION_GATE",
-      "date": "2026-08-19",
-      "adr_id": "ADR_20260819_MHS_FOLD_GROWTH_CONCENTRATION_GATE",
-      "domain": "quant",
-      "title": "MHS 폴드 성장 집중도 게이트 추가",
-      "why": "docs/results/mhs_run_history 31개 런 분석 결과, xs_rank_ic는 전 런에 걸쳐 동일(-0.0409, t=-46)한데 blend CAGR은 사이징 노브 튜닝만으로 -6%~+45% 요동; 최신 런은 3개 폴드 중 2025 폴드 1개가 전체 로그성장의 79%를 차지(fold0 11.8%, fold1 8.1%, fold2 105%)함에도 research_go.eligible=True로 통과됨. 단일 폴드 의존 결과가 복리 재현성 증거 없이 GO 판정을 받는 구조적 공백.",
-      "resolution": "src/application/research/mhs/evaluation.py에 _fold_growth_concentration 순수함수 추가(기존 _fold_blend_parity와 동일한 (payload, reason_codes) 계약). 단일 폴드의 log1p(cagr) 점유율이 전체 대비 50% 초과 시 신규 사유코드 MHS_GO_REASON_FOLD_GROWTH_CONCENTRATION 발생, _mhs_research_go의 extra_reasons로 병합. MhsHorizonDiagnosticReport.fold_growth_concentration 필드 추가 및 build_mhs_run_history_record를 통해 docs/results/mhs_run_history/*.jsonl에 영속화. 재현/가중치/스케일 경로 변경 없음(byte-identical replay). 테스트 5건 신규(tests/unit/mhs/test_evaluation_fold_report.py), 전량 통과, ruff/mypy 통과.",
-      "impact": "research_go 판정이 이제 폴드 간 복리 일관성을 검증; 현재 latest.json 설정은 재적용 시 max_fold_share≈0.79로 게이트가 발동해 research_go.eligible이 False로 전환됨(회귀 아님, 의도된 정책 강화). 후속 과제 2건은 docs/specs/mhs_fold_growth_concentration_gate.md §6에 결정 대기 상태로 문서화: (1) fast_reversal 북의 강한 반전 신호(t=-46)와 순손실의 불일치 규명, (2) committee_growth_diagnostic을 committee_capital 경로에도 개방."
     }
   ]
 }

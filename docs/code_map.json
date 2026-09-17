@@ -11,7 +11,7 @@
   "src/cli/commands/research/mhs.py": {
     "testing": [
       "tests/unit/cli/commands/research/test_mhs.py",
-      "tests/unit/mhs/test_committee_tranche_count.py"
+      "tests/unit/mhs/test_forward_preregistration.py"
     ]
   },
   "src/cli/dataclass_args.py": {
@@ -60,6 +60,7 @@
       "tests/unit/mhs/test_evaluation_ram_guard.py",
       "tests/unit/mhs/test_evaluation_report_persist.py",
       "tests/unit/mhs/test_execution.py",
+      "tests/unit/mhs/test_forward_preregistration.py",
       "tests/unit/mhs/test_live_runtime.py",
       "tests/unit/mhs/test_live_signal_step.py",
       "tests/unit/mhs/test_live_strategy.py",
@@ -408,6 +409,9 @@
   },
   "src/mhs/pipeline/stages/selection.py": {
     "testing": "tests/unit/mhs/pipeline/stages/test_selection.py"
+  },
+  "src/mhs/preregistration.py": {
+    "testing": "tests/unit/mhs/test_forward_preregistration.py"
   },
   "src/mhs/regime.py": {
     "testing": "tests/unit/mhs/test_regime.py"
