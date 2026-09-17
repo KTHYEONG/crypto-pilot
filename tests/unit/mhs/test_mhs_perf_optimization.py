@@ -60,30 +60,30 @@ def _write_mark_market(
     symbols: list[str],
     n_hours: int = 96,
 ) -> None:
-    """1h mark + 5m OHLCV + 1h funding synthetic market (MHS convention)."""
+    """1h mark + 3m OHLCV + 1h funding synthetic market (MHS convention)."""
     hourly = pd.date_range(_START, periods=n_hours, freq="1h", tz="UTC")
-    minute = pd.date_range(_START, _START + pd.Timedelta(hours=n_hours - 1), freq="5min", tz="UTC")
+    minute = pd.date_range(_START, _START + pd.Timedelta(hours=n_hours - 1), freq="3min", tz="UTC")
     rng = np.random.default_rng(20260807)
     epoch_h = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
     epoch_m = (minute - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    for d in (root / "5m", root / "1m", root / "1h", root / "funding", root / "markPriceKlines" / "1h"):
+    for d in (root / "3m", root / "1h", root / "funding", root / "markPriceKlines" / "1h"):
         d.mkdir(parents=True, exist_ok=True)
     for i, sym in enumerate(symbols):
         drift = 1e-5 * (i - len(symbols) / 2.0)
         prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, n_hours)))
         mp = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, len(minute))))
-        five = (
-            pd.Series(mp, index=minute).resample("5min").last().dropna()
+        three = (
+            pd.Series(mp, index=minute).resample("3min").last().dropna()
         )
         pd.DataFrame(
             {"timestamp": epoch_h, "open": prices, "high": prices * 1.001,
              "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours},
         ).to_parquet(root / "1h" / f"{sym}.parquet")
         pd.DataFrame(
-            {"timestamp": epoch_m[: len(five)], "open": five.to_numpy(),
-             "high": five.to_numpy() * 1.0005, "low": five.to_numpy() * 0.9995,
-             "close": five.to_numpy(), "quote_vol": [1000.0] * len(five)},
-        ).to_parquet(root / "5m" / f"{sym}.parquet")
+            {"timestamp": epoch_m[: len(three)], "open": three.to_numpy(),
+             "high": three.to_numpy() * 1.0005, "low": three.to_numpy() * 0.9995,
+             "close": three.to_numpy(), "quote_vol": [1000.0] * len(three)},
+        ).to_parquet(root / "3m" / f"{sym}.parquet")
         pd.DataFrame(
             {"timestamp": epoch_h, "funding_rate": [0.00005] * n_hours, "datetime": hourly},
         ).to_parquet(root / "funding" / f"{sym}.parquet")
@@ -133,18 +133,20 @@ def test_mhs_perf_opt_mark_panel_equivalence(mark_market) -> None:
 
 def test_mhs_perf_opt_mark_cache_read_once(mark_market) -> None:
     """The per-process mark caches read each symbol's parquet exactly once:
-    the first window warms the frame + compact series caches, and every later
-    window is served from the compact series without touching Parquet again."""
+    the first window warms the compact series cache without populating the
+    full-frame LRU, and every later window is served from the compact series
+    without touching Parquet again."""
     ev._get_symbol_mark_frame.cache_clear()
+    mhs_marks._compact_mark_series_for_path.cache_clear()
     grid = pd.date_range(_START, _START + pd.Timedelta(hours=47), freq="5min", tz="UTC")
     _cached_mark_panel(_SYMBOLS, "1h", grid, 0)
     info = ev._get_symbol_mark_frame.cache_info()
-    assert info.hits == 0
-    assert info.misses == len(_SYMBOLS)
+    assert info.misses == 0
+    assert info.currsize == 0
     _cached_mark_panel(_SYMBOLS, "1h", grid, 0)
     # The second window is served entirely from the compact-series tier: no
-    # new frame loads (misses unchanged) and no parquet re-read.
-    assert ev._get_symbol_mark_frame.cache_info().misses == len(_SYMBOLS)
+    # full-frame loads and no parquet re-read.
+    assert ev._get_symbol_mark_frame.cache_info().misses == 0
     compact_info = mhs_marks._compact_mark_series_for_path.cache_info()
     assert compact_info.misses == len(_SYMBOLS)
     assert compact_info.currsize == len(_SYMBOLS)
@@ -156,11 +158,11 @@ def test_mhs_perf_opt_window_slice_equivalence(mark_market) -> None:
     root = str(mark_market)
     ws = _START + pd.Timedelta(hours=24)
     we = _START + pd.Timedelta(hours=72)
-    windowed = _load_window_minute_frames(root, _SYMBOLS, ws, we, "5m")
+    windowed = _load_window_minute_frames(root, _SYMBOLS, ws, we, "3m")
     assert set(windowed) == set(_SYMBOLS)
     for sym in _SYMBOLS:
         table = ev.pq.read_table(
-            f"{root}/5m/{sym}.parquet", columns=["timestamp", "high", "low", "close", "quote_vol"],
+            f"{root}/3m/{sym}.parquet", columns=["timestamp", "high", "low", "close", "quote_vol"],
         )
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
         full = pd.DataFrame(
@@ -202,7 +204,7 @@ def test_mhs_perf_opt_window_reuse_equivalence(mark_market) -> None:
 
     def gen(t: pd.DataFrame):
         return _iter_mhs_execution_windows(
-            t, signals, root, "5m", _START, end, funding, "cache_required", ExecutionSpec(),
+            t, signals, root, "3m", _START, end, funding, "cache_required", ExecutionSpec(),
         )
 
     spec = ExecutionSpec()
@@ -241,7 +243,7 @@ def test_mhs_perf_opt_lazy_frame_scope(mark_market, monkeypatch) -> None:
         return real_read_table(*args, **kwargs)
 
     monkeypatch.setattr(ev.pq, "read_table", counting_read_table)
-    frames = _load_window_minute_frames(root, _SYMBOLS, ws, we, "5m")
+    frames = _load_window_minute_frames(root, _SYMBOLS, ws, we, "3m")
     assert set(frames) == set(_SYMBOLS)
     assert len(calls) == len(_SYMBOLS)
     for filt in calls:
@@ -311,7 +313,7 @@ def test_mhs_perf_opt_rescaled_windows_guards_zero_pattern(mark_market) -> None:
     signals = decision_grid + pd.Timedelta(hours=1)
     funding = _build_small_funding(mark_market)
     windows = _iter_mhs_execution_windows(
-        target, signals, str(mark_market), "5m", _START, end,
+        target, signals, str(mark_market), "3m", _START, end,
         funding, "cache_required", ExecutionSpec(),
     )
     zero_scale = pd.Series(0.0, index=target.index)
@@ -441,7 +443,7 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
     funding_by_symbol = _build_small_funding(root)
     request = ev_mod.MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="5m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     panel = ev_mod.load_base_panel(

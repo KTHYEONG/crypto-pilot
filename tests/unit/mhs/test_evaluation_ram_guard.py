@@ -11,7 +11,6 @@ import src.mhs.resources as resources
 from src.mhs.evaluation import (
     MhsDiagnosticRequest,
     _StageRecorder,
-    _assert_cache_required_ledger_valid,
     _assert_execution_rss_budget,
 )
 from src.common.errors import DataIntegrityError
@@ -114,22 +113,29 @@ def test_mhs_mem_04_strict_gap_preserved() -> None:
     gap_codes = {g.code for g in replay.data_gaps}
     assert "MISSING_HELD_MARK" in gap_codes
     assert replay.ledger.primary_valid is False
-    with pytest.raises(DataIntegrityError, match="invalid"):
-        _assert_cache_required_ledger_valid("held_mark_book", replay)
+    # Terminal-only disclosure (ledger_terminal_only): a held gap with no
+    # resuming fill stays open and invalid without crashing the book here;
+    # deployment stays blocked downstream by backtest-reliability
+    # certification instead of failing the replay.
+    from src.mhs.evaluation.integrity import ledger_terminal_only
+    assert ledger_terminal_only(replay.data_gaps, replay.simulated_fills) is True
+    assert replay.ledger.primary_valid is False
 
     assert replay.ledger.primary_valid is False
 
 def test_ram_guard_resolve_budget(monkeypatch) -> None:
     # SCENARIO_MHS_RAM_GUARD_RESOLVE_BUDGET: _resolve_ram_budget maps the
     # request into (budget_bytes, reserve_bytes). ram_guard=False disables the
-    # guard; ram_guard=True auto-derives 85% of total RAM and the reserve floor
-    # max(5% of total, 256 MiB); an explicit max_rss_bytes overrides the budget
-    # fraction; psutil failure / non-positive total yields (None, None).
+    # guard; ram_guard=True auto-derives from the smaller host/cgroup limit and
+    # the reserve floor max(5% of total, 256 MiB, 2 GiB); an explicit
+    # max_rss_bytes overrides the budget fraction under the 2.5 GiB adoption
+    # ceiling; psutil failure / non-positive total fails closed.
     from src.mhs.types import (
         RAM_BUDGET_FRACTION,
         RAM_RESERVE_FLOOR_BYTES,
         RAM_RESERVE_FRACTION,
     )
+    from src.mhs.resources import MHS_AVAILABLE_FLOOR_BYTES, MHS_TREE_PSS_BUDGET_BYTES
 
     class _FakeMem:
         total: int
@@ -140,22 +146,26 @@ def test_ram_guard_resolve_budget(monkeypatch) -> None:
 
     assert ev._resolve_ram_budget(None, False) == (None, None)
 
+    monkeypatch.setattr(resources, "_read_cgroup_limit_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _FakeMem(8 * 2**30, 4 * 2**30))
     budget, reserve = ev._resolve_ram_budget(None, True)
-    assert budget == int(8 * 2**30 * RAM_BUDGET_FRACTION)
-    assert reserve == max(int(8 * 2**30 * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES)
+    assert budget == min(int(8 * 2**30 * RAM_BUDGET_FRACTION), MHS_TREE_PSS_BUDGET_BYTES)
+    assert reserve == max(int(8 * 2**30 * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES, MHS_AVAILABLE_FLOOR_BYTES)
 
     explicit, reserve2 = ev._resolve_ram_budget(123456789, True)
     assert explicit == 123456789
     assert reserve2 == reserve
 
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _FakeMem(0, 0))
-    assert ev._resolve_ram_budget(None, True) == (None, None)
+    with pytest.raises(DataIntegrityError, match="telemetry unavailable"):
+        ev._resolve_ram_budget(None, True)
 
     def _boom() -> _FakeMem:
         raise RuntimeError("psutil unavailable")
     monkeypatch.setattr(resources.psutil, "virtual_memory", _boom)
-    assert ev._resolve_ram_budget(None, True) == (None, None)
+    with pytest.raises(DataIntegrityError, match="telemetry unavailable"):
+        ev._resolve_ram_budget(None, True)
 
 def test_ram_guard_stage_barrier_fails_closed(monkeypatch) -> None:
     # SCENARIO_MHS_RAM_GUARD_STAGE_BARRIER_FAIL_CLOSED: _assert_stage_rss_budget

@@ -61,6 +61,7 @@ def _synthetic_data(n_days: int = 500, seed: int = 7) -> ProcessMarketData:
     noise = noise.sub(noise.mean(axis=1), axis=0)
     gross = noise.abs().sum(axis=1).replace(0, np.nan)
     noise = noise.div(gross, axis=0).fillna(0.0)
+    execution_mask = pd.DataFrame(True, index=decision_grid, columns=symbols)
     return ProcessMarketData(
         grid_1h=grid_1h,
         decision_grid=decision_grid,
@@ -69,6 +70,7 @@ def _synthetic_data(n_days: int = 500, seed: int = 7) -> ProcessMarketData:
         log_close_step=log_close_step,
         funding_step=funding_step,
         member_books={"planted": planted, "inverse": inverse, "noise": noise},
+        execution_mask=execution_mask,
     )
 
 
@@ -106,6 +108,7 @@ def test_run_process_path_perturbation_invariance() -> None:
         log_close_step=perturbed_close,
         funding_step=perturbed_funding,
         member_books=data.member_books,
+        execution_mask=data.execution_mask,
     )
     replay = run_process_paths(perturbed, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0]
     for before, after in zip(base.refits, replay.refits, strict=True):
@@ -303,6 +306,7 @@ def test_run_process_path_rejects_empty_books() -> None:
         log_close_step=data.log_close_step,
         funding_step=data.funding_step,
         member_books={},
+        execution_mask=data.execution_mask,
     )
     with pytest.raises(ValueError, match=r".+"):
         run_process_paths(empty, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
@@ -346,12 +350,30 @@ def test_load_process_market_data_from_synthetic_lake(tmp_path, monkeypatch) -> 
             "volume": rng.uniform(10.0, 100.0, len(grid)),
         })
         frame.to_parquet(lake / f"{sym}.parquet", index=False)
+    lake_3m = tmp_path / "ohlcv" / "3m"
+    lake_3m.mkdir(parents=True)
+    grid_3m = pd.date_range(start, end, freq="3min", tz="UTC")
+    ms_3m = ((grid_3m - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    for sym in symbols:
+        pd.DataFrame({"timestamp": ms_3m}).to_parquet(lake_3m / f"{sym}.parquet", index=False)
     funding = {
         sym: pd.Series(rng.normal(0, 1e-5, len(grid)), index=grid) for sym in symbols
     }
     monkeypatch.setattr(
         pb, "_load_funding_series",
         lambda syms: ({s: funding[s] for s in syms if s in funding}, {}),
+    )
+    mark_dir = tmp_path / "markPriceKlines" / "1h"
+    mark_dir.mkdir(parents=True)
+    for sym in symbols:
+        pd.DataFrame({"timestamp": ms, "datetime": grid, "close": 100.0}).to_parquet(
+            mark_dir / f"{sym}.parquet", index=False
+        )
+    import src.market_data.services.futures_collection as fc
+
+    monkeypatch.setattr(
+        fc, "_mark_price_path",
+        lambda symbol, timeframe: mark_dir / f"{symbol}.parquet",
     )
     data = pb.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
     expected_keys = list(PROCESS_FEATURE_CANDIDATES) + [
@@ -360,6 +382,10 @@ def test_load_process_market_data_from_synthetic_lake(tmp_path, monkeypatch) -> 
     assert list(data.member_books.keys()) == expected_keys
     assert (data.decision_grid == pd.date_range(start, end, freq="24h", tz="UTC")).all()
     assert set(data.opens_1h.columns) == set(symbols)
+    assert data.execution_mask.index.equals(data.decision_grid)
+    assert list(data.execution_mask.columns) == list(next(iter(data.member_books.values())).columns)
+    assert bool((data.execution_mask.dtypes.apply(lambda dt: dt.kind == "b")).all())
+    assert bool(data.execution_mask.to_numpy().any())
     late_row = data.member_books[expected_keys[0]].iloc[-1]
     assert abs(late_row.sum()) < 1e-8
 
@@ -897,3 +923,896 @@ def test_replay_rejects_remaining_provenance_branches() -> None:
             path, iter([w1, late]), initial_equity=1000.0,
             execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
         )
+
+
+def test_refit_effective_slices_partition_oos_exactly_once() -> None:
+    """Each evaluated date is covered by exactly one refit effective range."""
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    (path,) = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    oos = data.decision_grid[
+        (data.decision_grid >= schedule[0].effective_from) & (data.decision_grid < schedule[-1].effective_to)
+    ]
+    assert path.target_weights.index.equals(oos)
+    assert not path.target_weights.index.has_duplicates
+    assert path.target_weights.index.is_monotonic_increasing
+    for i, point in enumerate(schedule):
+        governed = oos[(oos >= point.effective_from) & (oos < point.effective_to)]
+        assert len(governed) > 0
+        if i + 1 < len(schedule):
+            assert governed[-1] < schedule[i + 1].effective_from
+
+
+def test_refit_slice_matches_full_history_book_restriction() -> None:
+    """A single-refit slice reproduces the scaled book through manual EMA."""
+    from src.mhs.books import scale_book_to_target_gross
+    from src.mhs.params import PROCESS_SMOOTHING_HALFLIFE_DAYS
+    from src.mhs.process import RefitPoint, ema_smoothing_rate
+
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    point = RefitPoint(
+        effective_from=schedule[0].effective_from,
+        effective_to=schedule[-1].effective_to,
+        train_end=schedule[0].train_end,
+    )
+    (path,) = run_process_paths(data, (point,), decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    names = list(data.member_books.keys())
+    (record,) = path.refits
+    combined = sum(
+        (record.member_weights.get(n, 0.0) * data.member_books[n] for n in names),
+        start=data.member_books[names[0]] * 0.0,
+    )
+    raw = scale_book_to_target_gross(combined, 1.0).loc[path.unit_target_weights.index]
+    rate = ema_smoothing_rate(PROCESS_SMOOTHING_HALFLIFE_DAYS)
+    state = np.zeros(len(raw.columns))
+    expected = np.empty_like(raw.to_numpy(dtype="float64"))
+    for i, row in enumerate(raw.to_numpy(dtype="float64")):
+        state = state + rate * (row - state)
+        expected[i] = state
+    assert np.allclose(
+        path.unit_target_weights.to_numpy(dtype="float64"), expected, rtol=0.0, atol=1e-12,
+    )
+
+
+def test_shared_tier_targets_independent_of_consumer_mutation() -> None:
+    """Mutating an owned copy leaves shared tier inputs unchanged."""
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    base, stress = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0, 24.0), leverage_cap=2.0)
+    assert base.target_weights is stress.target_weights
+    before = base.target_weights.to_numpy(dtype="float64").copy()
+    owned = base.target_weights.copy()
+    owned.iloc[:, :] = 0.0
+    assert np.array_equal(base.target_weights.to_numpy(dtype="float64"), before)
+    assert np.array_equal(stress.target_weights.to_numpy(dtype="float64"), before)
+
+
+def test_masked_symbol_target_is_exactly_zero_despite_ema_residue() -> None:
+    """Post-adoption masking zeroes an unavailable symbol; others are untouched."""
+    import dataclasses
+
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    oos_start = schedule[0].effective_from
+    masked_days = data.decision_grid[
+        (data.decision_grid >= max(data.decision_grid[300], oos_start))
+        & (data.decision_grid < schedule[-1].effective_to)
+    ]
+    assert len(masked_days) > 0
+    blocked = data.execution_mask.copy()
+    blocked.loc[masked_days, "S00USDT"] = False
+    masked = dataclasses.replace(data, execution_mask=blocked)
+    (plain,) = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    (path,) = run_process_paths(masked, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    assert bool((path.target_weights.loc[masked_days, "S00USDT"] == 0.0).all())
+    assert bool((plain.target_weights.loc[masked_days, "S00USDT"] != 0.0).any())
+    rest = [c for c in data.opens_1h.columns if c != "S00USDT"]
+    masked_p = path.target_weights[rest].to_numpy(dtype="float64")
+    plain_q = plain.target_weights[rest].to_numpy(dtype="float64")
+    # No redistribution: other cells keep exact per-day ratios (a shared
+    # exposure scalar may still resize every cell together).
+    assert masked_p.shape == plain_q.shape
+    for i in range(len(masked_p)):
+        nz = np.abs(plain_q[i]) > 1e-15
+        assert ((masked_p[i] == 0.0) == (plain_q[i] == 0.0)).all()
+        if bool(nz.any()):
+            ratio = masked_p[i][nz] / plain_q[i][nz]
+            assert np.allclose(ratio, ratio[0], rtol=1e-12, atol=1e-12)
+
+
+def test_availability_overrides_tracking_error_hold() -> None:
+    """A hold-retained unavailable target is still masked to exactly zero."""
+    import dataclasses
+
+    from src.mhs.process import ProcessExecutionPolicy
+
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    policy = ProcessExecutionPolicy(tracking_error_threshold=0.05)
+    oos_start = schedule[0].effective_from
+    masked_days = data.decision_grid[
+        (data.decision_grid >= max(data.decision_grid[300], oos_start))
+        & (data.decision_grid < schedule[-1].effective_to)
+    ]
+    assert len(masked_days) > 0
+    blocked = data.execution_mask.copy()
+    blocked.loc[masked_days, "S00USDT"] = False
+    masked = dataclasses.replace(data, execution_mask=blocked)
+    (held,) = run_process_paths(
+        data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0,
+        execution_policy=policy,
+    )
+    (path,) = run_process_paths(
+        masked, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0,
+        execution_policy=policy,
+    )
+    assert bool((held.target_weights.loc[masked_days, "S00USDT"] != 0.0).any())
+    assert bool((path.target_weights.loc[masked_days, "S00USDT"] == 0.0).all())
+
+
+def test_execution_availability_rejects_misaligned_mask() -> None:
+    """Label, column or value mismatches fail closed instead of reindexing."""
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.process_backtest import apply_process_execution_availability
+
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    (path,) = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    targets = path.target_weights
+    short = data.execution_mask.loc[targets.index].iloc[1:]
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        apply_process_execution_availability(targets, short)
+    renamed = data.execution_mask.copy()
+    renamed.columns = [f"X{c}" for c in renamed.columns]
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        apply_process_execution_availability(targets, renamed.loc[targets.index])
+    numeric = data.execution_mask.loc[targets.index].astype("int64")
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        apply_process_execution_availability(targets, numeric)
+    assert apply_process_execution_availability(
+        targets, data.execution_mask.loc[targets.index]
+    ).equals(targets)
+
+
+def test_zeroed_target_with_unfillable_exit_holds_inventory_without_certification() -> None:
+    """A masked exit that cannot fill keeps units held and blocks certification."""
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+
+    data = _synthetic_data(n_days=60)
+    grid = pd.date_range(data.decision_grid[0], periods=24, freq="3min", tz="UTC")
+    px = pd.DataFrame({"S00USDT": 100.0}, index=grid)
+    weights = pd.DataFrame({"S00USDT": [0.5, 0.0]}, index=pd.DatetimeIndex([grid[0], grid[12]]))
+    window = ExecutionReplayWindow(
+        window_start=grid[0], window_end=grid[-1], columns=("S00USDT",), symbols=("S00USDT",),
+        minute_grid=grid, highs=px, lows=px, closes=px, marks=px, bar_funding=px * 0.0,
+        target_weights=weights, signal_available_at=pd.DatetimeIndex([grid[0], grid[12]]),
+        quote_volumes=pd.DataFrame({"S00USDT": [1000.0] * 12 + [0.0] * 12}, index=grid),
+        funding_known=px.notna(), bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+    result = replay_execution_windows((window,), 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+    assert abs(float(result.ledger.equity.iloc[-1] - result.ledger.equity.iloc[0])) >= 0.0
+    assert not result.ledger.primary_valid
+    assert any(g.code in ("UNKNOWN_TERMINATION", "MISSING_HELD_MARK") for g in result.ledger.data_gaps)
+
+
+def test_execution_availability_rejects_nullable_missing_mask() -> None:
+    """A boolean mask carrying missing values fails closed."""
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.process_backtest import apply_process_execution_availability
+
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    (path,) = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    targets = path.target_weights
+    missing = data.execution_mask.loc[targets.index].astype("boolean")
+    missing.iloc[0, 0] = pd.NA
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        apply_process_execution_availability(targets, missing)
+
+
+def _inventory_test_targets(n_days: int = 3, symbols: tuple[str, ...] = ("AUSDT", "BUSDT")) -> pd.DataFrame:
+    index = pd.date_range("2022-01-01", periods=n_days, freq="24h", tz="UTC")
+    weights = [[0.5 if j == 0 else -0.5 if j == 1 else 0.0 for j in range(len(symbols))] for _ in range(n_days)]
+    return pd.DataFrame(weights, index=index, columns=list(symbols), dtype="float64")
+
+
+def _inventory_test_path(targets: pd.DataFrame) -> ProcessPath:
+    hourly = pd.date_range(targets.index[0], targets.index[-1] + pd.Timedelta(hours=23), freq="1h", tz="UTC")
+    return ProcessPath(
+        one_way_bps=8.0,
+        daily_returns=pd.Series(0.01, index=targets.index),
+        unit_daily_returns=pd.Series(0.01, index=targets.index),
+        exposure=pd.Series(1.0, index=targets.index),
+        refits=(),
+        leverage_cap=2.0,
+        execution_policy=ProcessExecutionPolicy(None),
+        unit_target_weights=targets,
+        target_weights=targets,
+        turnover_1h=pd.Series(0.01, index=hourly),
+    )
+
+
+def _inventory_test_proxy(targets: pd.DataFrame) -> ProcessBacktestReport:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    path = _inventory_test_path(targets)
+    return ProcessBacktestReport(
+        start=targets.index[0],
+        end=targets.index[-1],
+        certification_level=PROCESS_CERTIFICATION_LEVEL,
+        n_candidates=len(targets.columns),
+        base=path,
+        stress=path,
+        gate=DeployGateResult(go=False, reason_codes=("X",), metrics={"n_folds": 1.0}),
+    )
+
+
+def _inventory_frame(value: float, grid: pd.DatetimeIndex, roster: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(value, index=grid, columns=roster, dtype="float64")
+
+
+def _inventory_test_windows(
+    targets: pd.DataFrame,
+    *,
+    funding_known: bool = True,
+    funding_rate: float = 0.0,
+    funding_known_per_window: tuple[bool, ...] | None = None,
+    nan_mark_symbol: str | None = None,
+    local_symbols: tuple[str, ...] | None = None,
+    final_availability_offset: pd.Timedelta | None = None,
+) -> list:
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+
+    availability_offset = final_availability_offset or pd.Timedelta(0)
+
+    cols = list(targets.columns)
+    roster = list(local_symbols) if local_symbols is not None else cols
+    windows = []
+    for i, day in enumerate(targets.index):
+        start = day if i == 0 else targets.index[i - 1]
+        grid = pd.date_range(start, day + pd.Timedelta(hours=23, minutes=57), freq="3min", tz="UTC")
+        marks = _inventory_frame(100.0, grid, roster)
+        if nan_mark_symbol is not None and nan_mark_symbol in roster:
+            marks.loc[grid[grid >= day], nan_mark_symbol] = float("nan")
+        flag = funding_known_per_window[i] if funding_known_per_window is not None else funding_known
+        frame = _inventory_frame(1.0, grid, roster) if flag else _inventory_frame(0.0, grid, roster)
+        known = frame.astype(bool)
+        windows.append(
+            ExecutionReplayWindow(
+                window_start=grid[0],
+                window_end=grid[-1],
+                columns=tuple(cols),
+                symbols=tuple(roster),
+                minute_grid=grid,
+                highs=_inventory_frame(100.5, grid, roster),
+                lows=_inventory_frame(99.5, grid, roster),
+                closes=_inventory_frame(100.0, grid, roster),
+                marks=marks,
+                bar_funding=_inventory_frame(funding_rate, grid, roster),
+                target_weights=targets.loc[[day], roster],
+                signal_available_at=pd.DatetimeIndex([day + pd.Timedelta(hours=1)]),
+                quote_volumes=_inventory_frame(1e6, grid, roster),
+                funding_known=known,
+                bar_available_at=grid + availability_offset,
+            )
+        )
+    return windows
+
+
+def _patch_inventory_stack(monkeypatch, targets: pd.DataFrame, **window_kwargs):
+    import src.mhs.process_backtest as pb
+
+    proxy = _inventory_test_proxy(targets)
+    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, {}))
+    made = _inventory_test_windows(targets, **window_kwargs)
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter(made))
+    return proxy
+
+
+def _inventory_empty_proxy() -> ProcessBacktestReport:
+    from src.mhs.deploy_gate import DeployGateResult
+
+    empty_frame = pd.DataFrame(columns=["AUSDT", "BUSDT"], dtype="float64")
+    empty_series = pd.Series(dtype="float64")
+    path = ProcessPath(
+        one_way_bps=8.0,
+        daily_returns=empty_series,
+        unit_daily_returns=empty_series,
+        exposure=empty_series,
+        refits=(),
+        leverage_cap=2.0,
+        execution_policy=ProcessExecutionPolicy(None),
+        unit_target_weights=empty_frame,
+        target_weights=empty_frame,
+        turnover_1h=empty_series,
+    )
+    stamp = pd.Timestamp("2022-01-01", tz="UTC")
+    return ProcessBacktestReport(
+        start=stamp,
+        end=stamp + pd.Timedelta(days=1),
+        certification_level=PROCESS_CERTIFICATION_LEVEL,
+        n_candidates=2,
+        base=path,
+        stress=path,
+        gate=DeployGateResult(go=False, reason_codes=("X",), metrics={"n_folds": 1.0}),
+    )
+
+
+def _inventory_fake_result(
+    equity: pd.Series, *, valid: bool, fill_count: int = 0, n_fills: int = 0
+):
+    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+
+    zeros = pd.Series(0.0, index=equity.index, dtype="float64")
+    ledger = SimulatedInventoryLedgerResult(
+        equity=equity,
+        net_returns=equity.pct_change().dropna(),
+        simulated_units=None,
+        mark_to_market_pnl=zeros,
+        funding_charge=zeros,
+        fee_charge=zeros,
+        fill_turnover=zeros,
+        fill_source="OHLCV_IMMEDIATE_TAKER",
+        mark_source="MARK_PRICE",
+        primary_valid=valid,
+        invalid_reasons=() if valid else ("MISSING_DATA",),
+    )
+    stamps = pd.DatetimeIndex(equity.index[:n_fills]) if n_fills else pd.DatetimeIndex([], tz="UTC")
+    fills = pd.DataFrame(
+        {
+            "timestamp": stamps,
+            "symbol": ["AUSDT"] * n_fills,
+            "quantity_delta": [0.0] * n_fills,
+            "fill_price": [100.0] * n_fills,
+            "fee_bps": [8.0] * n_fills,
+            "reason": ["immediate_taker"] * n_fills,
+            "pre_trade_equity": [1.0] * n_fills,
+        }
+    )
+    return StrategyExecutionReplayResult(
+        simulated_fills=fills,
+        ledger=ledger,
+        simulated_units=pd.DataFrame(columns=["AUSDT"]),
+        simulated_notional_weights=pd.DataFrame(columns=["AUSDT"]),
+        fill_source="OHLCV_IMMEDIATE_TAKER",
+        mark_source="MARK_PRICE",
+        submit_times=pd.Series(dtype="float64"),
+        fill_times=pd.Series(dtype="float64"),
+        fill_count=fill_count,
+        unfilled_count=0,
+        fallback_count=0,
+        all_intent_shortfall_bps=0.0,
+        forced_exit_count=0,
+        forced_exit_notional=0.0,
+        termination_counts={},
+        unsupported_assumptions=(),
+        elapsed_seconds=0.0,
+    )
+
+
+def test_evaluate_inventory_replays_identical_sized_targets(monkeypatch) -> None:
+    """Base and stress replay one shared window stream with tiered costs."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    seen: dict = {}
+    real_batch = pb.replay_execution_window_batch
+
+    def _spy(windows, equity, bounds, *args, **kwargs):
+        seen["bounds"] = list(bounds)
+        seen["n_windows"] = 0
+        seen["has_live_accumulators"] = kwargs.get("live_accumulators") is not None
+
+        def _counted():
+            for window in windows:
+                seen["n_windows"] += 1
+                yield window
+
+        return real_batch(_counted(), equity, bounds, *args, **kwargs)
+
+    monkeypatch.setattr(pb, "replay_execution_window_batch", _spy)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert seen["n_windows"] == len(targets)
+    assert seen["bounds"][0][0] == seen["bounds"][1][0] == "OHLCV_IMMEDIATE_TAKER"
+    assert seen["bounds"][1][1].taker_fee_bps == pytest.approx(seen["bounds"][0][1].taker_fee_bps * 3.0)
+    assert {f["symbol"] for f in report.base.simulated_fills.to_dict(orient="records")} == (
+        {f["symbol"] for f in report.stress.simulated_fills.to_dict(orient="records")}
+    )
+    assert seen["has_live_accumulators"] is True
+    stages = [m.stage for m in report.resource_measurements]
+    assert stages[0] == "process_inventory_start"
+    assert "process_inventory_proxy" in stages
+    assert "process_inventory_replay" in stages
+    assert stages[-1] == "process_inventory_total"
+    assert sum(1 for s in stages if s.startswith("process_3m_window_")) == len(targets)
+    assert report.memory_stats.samples_taken >= 0
+
+
+def test_replay_process_execution_accepts_local_and_final_bar() -> None:
+    """Local rosters and the fence-aligned final bar pass the adapter."""
+    from src.mhs.types import ExecutionSpec
+
+    targets = _inventory_test_targets(n_days=2, symbols=("AUSDT", "BUSDT", "CUSDT"))
+    path = _inventory_test_path(targets)
+    windows = _inventory_test_windows(
+        targets, local_symbols=("AUSDT", "BUSDT"), final_availability_offset=pd.Timedelta(minutes=3)
+    )
+    result = replay_process_execution(
+        path, iter(windows), initial_equity=1.0,
+        execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
+    )
+    assert len(result.simulated_fills) > 0
+
+
+def test_persist_inventory_report_uses_ledger_primary(monkeypatch, tmp_path) -> None:
+    """Primary metrics and gate come from the 3m ledger, proxy stays labelled."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    out = pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    daily = pb._inventory_daily_returns(report.base)
+    assert set(payload["base"]["daily_returns"]) == {ts.isoformat() for ts in daily.index}
+    assert payload["base"]["cagr"] == pytest.approx(
+        float(((1.0 + daily).cumprod().iloc[-1]) ** (365.25 / len(daily)) - 1.0)
+    )
+    assert payload["gate"]["metrics"] == dict(report.gate.metrics)
+    assert payload["proxy"]["scope"] == "hourly_proxy_comparison"
+    assert payload["proxy"]["base"]["daily_returns"] != payload["base"]["daily_returns"]
+
+
+def test_evaluate_inventory_blocks_gate_on_unknown_funding(monkeypatch) -> None:
+    """Unknown funding over held inventory fails the ledger and the gate."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(
+        monkeypatch, targets, funding_rate=0.0001, funding_known_per_window=(True, False, False)
+    )
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert report.base.ledger.primary_valid is False
+    assert report.gate.go is False
+    assert "INVENTORY_LEDGER_INVALID" in report.gate.reason_codes
+    assert "MISSING_HELD_FUNDING" in {g.code for g in report.base.ledger.data_gaps}
+
+
+def test_finalize_discloses_open_inventory_without_fabricated_exit(monkeypatch) -> None:
+    """Marked terminal holdings are disclosed open with certification intact."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    terminal = pb._inventory_terminal_state(report.base)
+    assert set(terminal["open_inventory"]) == {"AUSDT", "BUSDT"}
+    assert terminal["primary_valid"] is False
+    assert terminal["terminal_certified"] is True
+    assert terminal["unpriced_terminal_symbols"] == []
+    reasons = report.base.simulated_fills.get("reason", pd.Series(dtype="object")).tolist()
+    assert "delist_settlement" not in reasons
+
+
+def test_unpriced_terminal_not_ordinary_inventory(monkeypatch) -> None:
+    """A held asset without final marks is separated from marked inventory."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets, nan_mark_symbol="AUSDT")
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    terminal = pb._inventory_terminal_state(report.base)
+    assert terminal["unpriced_terminal_symbols"] == ["AUSDT"]
+    assert "AUSDT" not in terminal["open_inventory"]
+    assert "BUSDT" in terminal["open_inventory"]
+    assert terminal["terminal_certified"] is False
+
+
+def test_serialized_fill_counts_total_and_passive() -> None:
+    """Total fills count rows while passive fills keep the engine meaning."""
+    import src.mhs.process_backtest as pb
+
+    grid = pd.date_range("2022-01-01", periods=732, freq="3min", tz="UTC")
+    result = _inventory_fake_result(pd.Series(1.0, index=grid), valid=True, fill_count=0, n_fills=732)
+    payload = pb._inventory_result_payload(result)
+    assert payload["total_fills"] == 732
+    assert payload["passive_fills"] == 0
+
+
+def test_evaluate_inventory_failure_carries_provenance(monkeypatch) -> None:
+    """A missing decision mark fails with source, time and symbol evidence."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets(n_days=2, symbols=("AUSDT", "ANCUSDT"))
+    proxy = _inventory_test_proxy(targets)
+    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, {}))
+
+    def _boom(*args, **kwargs):
+        raise DataIntegrityError(
+            "cache_required: no finite positive mark (MISSING_DECISION_MARK) "
+            "symbol=ANCUSDT decision=2022-07-13T00:00:00+00:00 signal=2022-07-13T01:00:00+00:00 for window"
+        )
+
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _boom)
+    with pytest.raises(DataIntegrityError, match="ANCUSDT"):
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert "ANCUSDT" in proxy.base.target_weights.columns
+
+
+def test_persist_inventory_preserves_hourly_evidence(monkeypatch, tmp_path) -> None:
+    """Inventory persistence never overwrites reserved hourly evidence."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    hourly_path = tmp_path / "hourly.json"
+    hourly_path.write_text('{"hourly": true}', encoding="utf-8")
+    monkeypatch.setattr(pb, "PROCESS_REPORT_PATH", hourly_path)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    assert hourly_path.read_text(encoding="utf-8") == '{"hourly": true}'
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.persist_process_inventory_report(report, hourly_path)
+    with pytest.raises(ValueError, match=r".+"):
+        pb.persist_process_inventory_report(report, tmp_path / "inventory.csv")
+
+
+def test_serialized_fee_funding_signs_and_turnover_units(monkeypatch, tmp_path) -> None:
+    """Serialized costs keep engine signs and turnover uses engine units."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    out = pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    ledger = report.base.ledger
+    daily = pb._inventory_daily_returns(report.base)
+    assert payload["base"]["total_fees"] == pytest.approx(float(ledger.fee_charge.sum()))
+    assert payload["base"]["total_funding"] == pytest.approx(float(ledger.funding_charge.sum()))
+    assert payload["base"]["annualized_turnover"] == pytest.approx(
+        float(ledger.fill_turnover.sum() * 365.0 / len(daily))
+    )
+
+
+def test_evaluate_inventory_rejects_invalid_inputs(monkeypatch) -> None:
+    """Dates, policy, empty targets, budget and window coverage fail closed."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    proxy = _inventory_test_proxy(targets)
+    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, {}))
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter(_inventory_test_windows(targets)))
+    start = targets.index[0]
+    end = targets.index[-1] + pd.Timedelta(days=1)
+    with pytest.raises(ValueError, match=r".+"):
+        pb.evaluate_process_inventory_backtest(pd.Timestamp("2022-01-01"), end)
+    with pytest.raises(ValueError, match=r".+"):
+        pb.evaluate_process_inventory_backtest(end, start)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.evaluate_process_inventory_backtest(start, PROCESS_EVALUATION_CEILING + pd.Timedelta(seconds=1))
+    with pytest.raises(ValueError, match=r".+"):
+        pb.evaluate_process_inventory_backtest(start, end, execution_policy="bad")  # type: ignore[arg-type]
+    empty = _inventory_empty_proxy()
+    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: empty)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.evaluate_process_inventory_backtest(start, end)
+    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(
+        pb, "_resolve_ram_budget", lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("no telemetry"))
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.evaluate_process_inventory_backtest(start, end)
+
+
+def test_inventory_window_coverage_must_be_complete(monkeypatch) -> None:
+    """A window stream skipping decisions fails instead of certifying a prefix."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    partial = _inventory_test_windows(targets)[:1]
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter(partial))
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+
+
+def test_inventory_gate_from_valid_ledger() -> None:
+    """A valid two-quarter ledger reaches the gate formula without integrity blocks."""
+    import src.mhs.process_backtest as pb
+
+    grid = pd.date_range("2022-01-01", periods=200 * 480, freq="3min", tz="UTC")
+    equity = pd.Series(1.0 + 0.0000005 * np.arange(len(grid)), index=grid, dtype="float64")
+    base = _inventory_fake_result(equity, valid=True)
+    stress = _inventory_fake_result(equity * 0.999999, valid=True)
+    gate = pb._inventory_gate(base, stress)
+    assert gate.metrics["n_folds"] == 3.0
+    assert "INVENTORY_LEDGER_INVALID" not in gate.reason_codes
+
+
+def test_inventory_helpers_handle_empty_ledger() -> None:
+    """Empty ledgers serialize to neutral zeros without missing keys."""
+    import src.mhs.process_backtest as pb
+
+    empty_equity = pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
+    result = _inventory_fake_result(empty_equity, valid=False)
+    summary = pb._inventory_ledger_summary(result)
+    assert summary == {
+        "cagr": 0.0,
+        "max_drawdown": 0.0,
+        "annualized_turnover": 0.0,
+        "total_fees": 0.0,
+        "total_funding": 0.0,
+    }
+    payload = pb._inventory_result_payload(result)
+    assert payload["daily_returns"] == {}
+    assert payload["total_fills"] == 0
+    terminal = pb._inventory_terminal_state(result)
+    assert terminal["open_inventory"] == {}
+    assert terminal["primary_valid"] is False
+
+
+def test_inventory_daily_returns_anchors_first_day_loss() -> None:
+    """A 1.0 to 0.5 first-day drop is reported instead of vanishing."""
+    import src.mhs.process_backtest as pb
+
+    grid = pd.date_range("2022-01-01", periods=480, freq="3min", tz="UTC")
+    equity = pd.Series(np.linspace(1.0, 0.5, len(grid)), index=grid, dtype="float64")
+    result = _inventory_fake_result(equity, valid=True)
+    daily = pb._inventory_daily_returns(result)
+    assert len(daily) == 1
+    assert daily.iloc[0] == pytest.approx(-0.5)
+    summary = pb._inventory_ledger_summary(result)
+    assert summary["max_drawdown"] == pytest.approx(-0.5)
+    assert summary["cagr"] < 0.0
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb._inventory_daily_returns(result, initial_equity=0.0)
+
+
+def test_inventory_single_day_drawdown_includes_base() -> None:
+    """Single-observation wealth anchors MDD to the initial equity base."""
+    import src.mhs.process_backtest as pb
+
+    grid = pd.date_range("2022-01-01", periods=10, freq="3min", tz="UTC")
+    equity = pd.Series([1.0 - 0.05 * i for i in range(10)], index=grid, dtype="float64")
+    result = _inventory_fake_result(equity, valid=True)
+    summary = pb._inventory_ledger_summary(result)
+    assert summary["max_drawdown"] == pytest.approx(float(equity.iloc[-1] - 1.0))
+
+
+def test_inventory_wires_live_required_symbols(monkeypatch) -> None:
+    """Carried inventory stays in the roster through the live symbol hook."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    seen: dict = {}
+    real_iter = pb._iter_mhs_execution_windows
+    real_batch = pb.replay_execution_window_batch
+
+    def _spy_iter(*args, **kwargs):
+        seen["required_symbols"] = kwargs.get("required_symbols")
+        return real_iter(*args, **kwargs)
+
+    def _spy_batch(windows, equity, bounds, *args, **kwargs):
+        seen["live_accumulators"] = kwargs.get("live_accumulators")
+
+        def _counted():
+            for window in windows:
+                required = seen.get("required_symbols")
+                if callable(required):
+                    required()
+                yield window
+
+        return real_batch(_counted(), equity, bounds, *args, **kwargs)
+
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _spy_iter)
+    monkeypatch.setattr(pb, "replay_execution_window_batch", _spy_batch)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert callable(seen["required_symbols"])
+    assert seen["live_accumulators"] is not None
+    assert len(report.base.simulated_fills) > 0
+
+
+def test_inventory_window_stream_keeps_held_symbols_in_roster(monkeypatch) -> None:
+    """Live held symbols join the active roster even when targets go flat."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.resources import _StageRecorder
+    from src.mhs.types import ExecutionSpec
+
+    targets = _inventory_test_targets(n_days=2)
+    path = _inventory_test_path(targets)
+    signal_available_at = pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1))
+    recorder = _StageRecorder(log_run=False)
+    held = frozenset({"AUSDT"})
+    seen: dict = {}
+
+    def _capture(*args, **kwargs):
+        seen["required_symbols"] = kwargs.get("required_symbols")
+        return iter([])
+
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _capture)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        list(
+            pb._inventory_window_stream(
+                path,
+                signal_available_at,
+                "unused-root",
+                targets.index[0],
+                targets.index[-1] + pd.Timedelta(hours=1),
+                {},
+                {},
+                ExecutionSpec(),
+                None,
+                None,
+                recorder,
+                lambda: held,
+            )
+        )
+    assert callable(seen["required_symbols"])
+    assert seen["required_symbols"]() == held
+
+
+def test_evaluate_inventory_failure_preserves_resource_telemetry(monkeypatch) -> None:
+    """A replay failure still carries staged resource evidence on the error."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+
+    def _boom(windows, *args, **kwargs):
+        for _ in windows:
+            pass
+        raise DataIntegrityError("boom")
+
+    monkeypatch.setattr(pb, "replay_execution_window_batch", _boom)
+    with pytest.raises(DataIntegrityError) as excinfo:
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    measurements = getattr(excinfo.value, "resource_measurements", ())
+    stats = getattr(excinfo.value, "memory_stats", None)
+    stages = [m.stage for m in measurements]
+    assert "process_inventory_start" in stages
+    assert "process_inventory_failed" in stages
+    assert stats is not None
+    assert stats.samples_taken >= 0
+
+
+def test_process_mask_preblocks_3m_missing_symbol(tmp_path, monkeypatch) -> None:
+    """A symbol with 1h coverage but no 3m file is pre-blocked from targets."""
+    import src.mhs.process_backtest as pb
+    from src.quant.universe.pit_universe import symbol_partition
+
+    candidates = [f"LAKE{i:03d}USDT" for i in range(24)]
+    symbols = [s for s in candidates if symbol_partition(s) == "dev"][:10]
+    assert len(symbols) == 10
+    missing = symbols[0]
+    start = pd.Timestamp("2021-01-01", tz="UTC")
+    end = pd.Timestamp("2021-02-15", tz="UTC")
+    grid = pd.date_range(start, end, freq="1h", tz="UTC")
+    rng = np.random.default_rng(11)
+    lake = tmp_path / "ohlcv" / "1h"
+    lake.mkdir(parents=True)
+    ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    for j, sym in enumerate(symbols):
+        close = 100.0 + j + np.cumsum(rng.normal(0, 0.5, len(grid)))
+        pd.DataFrame({
+            "timestamp": ms,
+            "close": close,
+            "open": close,
+            "high": close + 0.3,
+            "low": close - 0.3,
+            "quote_vol": rng.uniform(1e6, 2e6, len(grid)),
+            "taker_buy_quote": rng.uniform(4e5, 6e5, len(grid)),
+            "volume": rng.uniform(10.0, 100.0, len(grid)),
+        }).to_parquet(lake / f"{sym}.parquet", index=False)
+    lake_3m = tmp_path / "ohlcv" / "3m"
+    lake_3m.mkdir(parents=True)
+    grid_3m = pd.date_range(start, end, freq="3min", tz="UTC")
+    ms_3m = ((grid_3m - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    for sym in symbols:
+        if sym == missing:
+            continue
+        pd.DataFrame({"timestamp": ms_3m}).to_parquet(lake_3m / f"{sym}.parquet", index=False)
+    funding = {
+        sym: pd.Series(rng.normal(0, 1e-5, len(grid)), index=grid) for sym in symbols
+    }
+    monkeypatch.setattr(
+        pb, "_load_funding_series",
+        lambda syms: ({s: funding[s] for s in syms if s in funding}, {}),
+    )
+    mark_dir = tmp_path / "markPriceKlines" / "1h"
+    mark_dir.mkdir(parents=True)
+    for sym in symbols:
+        pd.DataFrame({"timestamp": ms, "datetime": grid, "close": 100.0}).to_parquet(
+            mark_dir / f"{sym}.parquet", index=False
+        )
+    import src.market_data.services.futures_collection as fc
+
+    monkeypatch.setattr(
+        fc, "_mark_price_path",
+        lambda symbol, timeframe: mark_dir / f"{symbol}.parquet",
+    )
+    data = pb.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    assert bool((~data.execution_mask[missing]).all())
+    assert bool(data.execution_mask.drop(columns=[missing]).to_numpy().any())
+
+
+def test_inventory_replay_uses_dedicated_budget(monkeypatch) -> None:
+    """The 3m replay resolves the dedicated 1.5GiB budget into admission."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.resources import MHS_REPLAY_BUDGET_BYTES
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    seen: dict = {}
+    real_resolve = pb._resolve_ram_budget
+    real_iter = pb._iter_mhs_execution_windows
+
+    def _spy_resolve(max_rss_bytes, ram_guard):
+        seen["max_rss_bytes"] = max_rss_bytes
+        seen["ram_guard"] = ram_guard
+        return real_resolve(max_rss_bytes, ram_guard)
+
+    def _spy_iter(*args, **kwargs):
+        seen["budget_bytes"] = kwargs.get("budget_bytes")
+        seen["reserve_bytes"] = kwargs.get("reserve_bytes")
+        return real_iter(*args, **kwargs)
+
+    monkeypatch.setattr(pb, "_resolve_ram_budget", _spy_resolve)
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _spy_iter)
+    pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert seen["max_rss_bytes"] == MHS_REPLAY_BUDGET_BYTES
+    assert seen["ram_guard"] is True
+    assert seen["budget_bytes"] is not None
+    assert seen["budget_bytes"] <= MHS_REPLAY_BUDGET_BYTES
+    assert seen["reserve_bytes"] is not None
+
+
+def test_inventory_window_measured_budget_verified(monkeypatch) -> None:
+    """Measured RSS checks guard every 3m window and the replay stage."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    seen: dict = {}
+    real_window_check = pb._assert_execution_rss_budget
+    real_stage_check = pb._assert_stage_rss_budget
+
+    def _spy_window(stage, budget, completed, reserve_bytes=None):
+        seen.setdefault("windows", []).append((stage, budget, completed))
+        return real_window_check(stage, budget, completed, reserve_bytes=reserve_bytes)
+
+    def _spy_stage(stage, budget, reserve):
+        seen["stage"] = (stage, budget, reserve)
+        return real_stage_check(stage, budget, reserve)
+
+    monkeypatch.setattr(pb, "_assert_execution_rss_budget", _spy_window)
+    monkeypatch.setattr(pb, "_assert_stage_rss_budget", _spy_stage)
+    pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert len(seen["windows"]) == len(targets)
+    assert seen["stage"][0] == "process_3m_replay"
+    assert all(budget == seen["stage"][1] for _, budget, _ in seen["windows"])
+
+
+def test_inventory_window_budget_breach_fails_closed(monkeypatch) -> None:
+    """A measured RSS breach aborts the replay with telemetry preserved."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+
+    def _boom(stage, budget, completed, reserve_bytes=None):
+        raise DataIntegrityError(f"execution RSS budget exceeded at window boundary: stage={stage}")
+
+    monkeypatch.setattr(pb, "_assert_execution_rss_budget", _boom)
+    with pytest.raises(DataIntegrityError, match="RSS budget"):
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))

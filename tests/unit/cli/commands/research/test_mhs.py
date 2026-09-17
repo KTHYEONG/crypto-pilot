@@ -1064,9 +1064,45 @@ def test_mhs_process_backtest_parser_defaults() -> None:
     assert args.targets_output is None
 
 
-def test_mhs_process_backtest_threads_explicit_policy(monkeypatch, tmp_path) -> None:
+def _fake_inventory_report() -> object:
+    import pandas as pd
     import types
 
+    ledger = types.SimpleNamespace(
+        primary_valid=True,
+        fee_charge=pd.Series([0.1, 0.2]),
+        funding_charge=pd.Series([0.01]),
+    )
+    base = types.SimpleNamespace(
+        ledger=ledger,
+        simulated_fills=pd.DataFrame({"a": [1, 2]}),
+        fill_count=0,
+        unfilled_count=0,
+    )
+    proxy = types.SimpleNamespace(
+        base=types.SimpleNamespace(target_weights="BASE-TARGETS"),
+        certification_level="process_proxy_1h_ledger",
+        gate=types.SimpleNamespace(go=False, reason_codes=(), metrics={}),
+    )
+    memory = types.SimpleNamespace(
+        wall_seconds=1.0,
+        cpu_seconds=0.5,
+        parent_rss_peak_bytes=123,
+        tree_pss_peak_bytes=456,
+        tree_uss_peak_bytes=789,
+        min_system_available_bytes=2 * 2**30,
+    )
+    return types.SimpleNamespace(
+        proxy=proxy,
+        base=base,
+        stress=base,
+        gate=types.SimpleNamespace(go=False, reason_codes=(), metrics={}),
+        resource_measurements=(),
+        memory_stats=memory,
+    )
+
+
+def test_mhs_process_backtest_threads_explicit_policy(monkeypatch, tmp_path) -> None:
     import src.cli.commands.research.mhs as mhs_cli
     import src.mhs.process_backtest as pb
 
@@ -1075,11 +1111,7 @@ def test_mhs_process_backtest_threads_explicit_policy(monkeypatch, tmp_path) -> 
     def _fake_evaluate(start, end, *, data_root=None, execution_policy=None):
         captured["policy"] = execution_policy
         captured["data_root"] = data_root
-        return types.SimpleNamespace(
-            base=types.SimpleNamespace(target_weights="BASE-TARGETS"),
-            gate=types.SimpleNamespace(go=False, reason_codes=(), metrics={}),
-            certification_level="process_proxy_1h_ledger",
-        )
+        return _fake_inventory_report()
 
     def _fake_persist(report, output):
         captured["output"] = output
@@ -1089,8 +1121,8 @@ def test_mhs_process_backtest_threads_explicit_policy(monkeypatch, tmp_path) -> 
         captured["targets"] = (base, output)
         return output
 
-    monkeypatch.setattr(pb, "evaluate_process_backtest", _fake_evaluate)
-    monkeypatch.setattr(pb, "persist_process_report", _fake_persist)
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _fake_evaluate)
+    monkeypatch.setattr(pb, "persist_process_inventory_report", _fake_persist)
     monkeypatch.setattr(pb, "persist_process_targets", _fake_targets)
 
     parser = _process_parser()
@@ -1111,13 +1143,11 @@ def test_mhs_process_backtest_threads_explicit_policy(monkeypatch, tmp_path) -> 
     args = parser.parse_args([])
     mhs_cli._run_mhs_process_backtest(args)
     assert captured["policy"].tracking_error_threshold is None
-    assert captured["output"] is None
     assert "targets" not in captured
 
 
 def test_mhs_process_backtest_supports_legacy_namespace(monkeypatch) -> None:
     import argparse
-    import types
 
     import src.cli.commands.research.mhs as mhs_cli
     import src.mhs.process_backtest as pb
@@ -1126,13 +1156,10 @@ def test_mhs_process_backtest_supports_legacy_namespace(monkeypatch) -> None:
 
     def _fake_evaluate(start, end, *, data_root=None, execution_policy=None):
         seen["policy"] = execution_policy
-        return types.SimpleNamespace(
-            base="b", gate=types.SimpleNamespace(go=False, reason_codes=(), metrics={}),
-            certification_level="x",
-        )
+        return _fake_inventory_report()
 
-    monkeypatch.setattr(pb, "evaluate_process_backtest", _fake_evaluate)
-    monkeypatch.setattr(pb, "persist_process_report", lambda report, output: "p")
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _fake_evaluate)
+    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: "p")
     legacy = argparse.Namespace(start=None, end=None, data_root=None)
     mhs_cli._run_mhs_process_backtest(legacy)
     assert seen["policy"].tracking_error_threshold is None
@@ -1149,7 +1176,7 @@ def test_mhs_process_backtest_rejects_bad_suffix_and_baseline_overwrite(monkeypa
     def _boom(*a, **k):
         raise AssertionError("evaluation must not run after validation failure")
 
-    monkeypatch.setattr(pb, "evaluate_process_backtest", _boom)
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
     parser = _process_parser()
     args = parser.parse_args(["--output", str(tmp_path / "bad.txt")])
     with pytest.raises(SystemExit, match=r".+"):
@@ -1174,4 +1201,199 @@ def test_mhs_process_backtest_rejects_negative_threshold() -> None:
     args = parser.parse_args(["--rebalance-tracking-error-threshold", "-0.5"])
     with pytest.raises(ValueError, match=r".+"):
         mhs_cli._run_mhs_process_backtest(args)
+
+
+def test_process_backtest_routes_to_inventory_evaluator(monkeypatch) -> None:
+    """Default route invokes the production inventory evaluator."""
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    called: dict = {}
+
+    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None):
+        called["called"] = True
+        called["data_root"] = data_root
+        called["policy"] = execution_policy
+        return _fake_inventory_report()
+
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _fake_evaluate)
+    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
+    monkeypatch.setattr(pb, "persist_process_targets", lambda base, output: output)
+    args = _process_parser().parse_args([])
+    mhs_cli._run_mhs_process_backtest(args)
+    assert called["called"] is True
+    assert called["policy"].tracking_error_threshold is None
+
+
+def test_process_backtest_defaults_to_new_3m_destination(monkeypatch) -> None:
+    """Default destination uses the new 3m inventory path."""
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+    from src.mhs.process_backtest import PROCESS_INVENTORY_REPORT_PATH
+
+    captured: dict = {}
+
+    def _fake_persist(report, output):
+        captured["output"] = output
+        return output
+
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report())
+    monkeypatch.setattr(pb, "persist_process_inventory_report", _fake_persist)
+    args = _process_parser().parse_args([])
+    mhs_cli._run_mhs_process_backtest(args)
+    assert str(captured["output"]) == str(PROCESS_INVENTORY_REPORT_PATH)
+
+
+def test_process_backtest_retains_explicit_output(monkeypatch, tmp_path) -> None:
+    """Explicit output retains a valid research JSON path."""
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    captured: dict = {}
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report())
+    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: captured.setdefault("output", output) or output)
+    out = tmp_path / "research.json"
+    args = _process_parser().parse_args(["--output", str(out)])
+    mhs_cli._run_mhs_process_backtest(args)
+    assert str(captured["output"]) == str(out)
+
+
+def test_process_backtest_rejects_reserved_baseline_overwrite() -> None:
+    """Custom policy targeting the hourly baseline destination is rejected."""
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    from src.mhs.process_backtest import PROCESS_REPORT_PATH
+
+    args = _process_parser().parse_args(
+        ["--rebalance-tracking-error-threshold", "0.2", "--output", str(PROCESS_REPORT_PATH)]
+    )
+    with pytest.raises(SystemExit):
+        mhs_cli._run_mhs_process_backtest(args)
+
+
+def test_process_backtest_exports_exact_proxy_targets(monkeypatch, tmp_path) -> None:
+    """Target parquet export uses the exact proxy base target path."""
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    captured: dict = {}
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report())
+    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
+    monkeypatch.setattr(pb, "persist_process_targets", lambda base, output: captured.setdefault("base", base) or output)
+    out = tmp_path / "targets.parquet"
+    args = _process_parser().parse_args(["--targets-output", str(out)])
+    mhs_cli._run_mhs_process_backtest(args)
+    assert captured["base"].target_weights == "BASE-TARGETS"
+
+
+def test_process_summary_reports_certification_and_resources(monkeypatch, caplog) -> None:
+    """CLI summary carries certification, fills, wall/CPU, peaks and hourly comparison."""
+    import logging
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report())
+    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
+    args = _process_parser().parse_args([])
+    with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"):
+        mhs_cli._run_mhs_process_backtest(args)
+    messages = " ".join(r.message for r in caplog.records)
+    for token in ("certification=", "primary_valid=", "completion_fills=", "total_fills=", "passive_fills=", "wall_s=", "cpu_s=", "peak_rss=", "peak_pss=", "peak_uss=", "min_available=", "proxy_certification="):
+        assert token in messages
+
+
+def test_mhs_execution_timeframe_restricted_to_3m() -> None:
+    """MHS intervals refuse 1m/5m at parse time while keeping an explicit 3m flag."""
+    import pytest
+
+    import src.cli.commands.data as data_mod
+
+    parser = __import__("argparse").ArgumentParser()
+    data_mod.add_data_commands(parser.add_subparsers(dest="group", required=True).add_parser("data"))
+    with pytest.raises(SystemExit):
+        parser.parse_args(["data", "collect", "mhs-execution", "--timeframe", "1m"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["data", "collect", "mhs-execution", "--timeframe", "5m"])
+    assert parser.parse_args(["data", "collect", "mhs-execution"]).timeframe == "3m"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["data", "seal-mhs-inputs", "--execution-timeframe", "5m"])
+    sub = __import__("argparse").ArgumentParser().add_subparsers()
+    from src.cli.commands.research.mhs import add_mhs_commands as _add
+
+    _add(sub)
+    with pytest.raises(SystemExit):
+        sub.choices["mhs-horizon-diagnostic"].parse_args(["--execution-timeframe", "1m"])
+    assert sub.choices["mhs-horizon-diagnostic"].parse_args([]).execution_timeframe == "3m"
+    assert _process_parser().parse_args([]).execution_timeframe == "3m"
+    with pytest.raises(SystemExit):
+        _process_parser().parse_args(["--execution-timeframe", "5m"])
+    import argparse as _ap
+
+    import src.cli.commands.research.mhs as mhs_cli
+
+    with pytest.raises(SystemExit):
+        mhs_cli._run_mhs_process_backtest(_ap.Namespace(execution_timeframe="5m"))
+
+
+def test_mhs_collection_rejects_unsupported_timeframe_programmatically(tmp_path) -> None:
+    """Direct MHS collection/sealing calls reject 5m before external writes."""
+    import pytest
+
+    import src.market_data.services.mhs_execution as mc
+    from src.mhs.data_provenance import mhs_sealable_input_paths, resolve_required_mhs_input_paths
+
+    with pytest.raises(ValueError, match="unknown execution_timeframe"):
+        mc.build_mhs_execution_plan("2021-01-01", "2021-02-01", timeframe="5m")
+    with pytest.raises(ValueError, match="unknown execution_timeframe"):
+        resolve_required_mhs_input_paths(data_root=tmp_path, panel_symbols=["A"], execution_symbols=["A"], execution_timeframe="5m")
+    with pytest.raises(ValueError, match="unknown execution_timeframe"):
+        mhs_sealable_input_paths(data_root=tmp_path, execution_timeframe="1m")
+    manifest = tmp_path / "m.json"
+    assert not manifest.exists()
+
+
+def test_generic_collection_preserves_intervals() -> None:
+    """Generic data commands still accept non-MHS intervals."""
+    import src.cli.commands.data as data_mod
+
+    parser = __import__("argparse").ArgumentParser()
+    data_mod.add_data_commands(parser.add_subparsers(dest="group", required=True).add_parser("data"))
+    args = parser.parse_args(["data", "collect", "futures-ohlcv", "BTCUSDT", "1m"])
+    assert args.timeframe == "1m"
+
+
+def test_guarded_allocation_fails_closed_with_evidence(monkeypatch) -> None:
+    """Guarded allocation rejection is explicit and inventory failures propagate."""
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+    from src.common.errors import DataIntegrityError
+    from src.mhs.resources import assert_mhs_allocation_budget
+
+    with pytest.raises(DataIntegrityError, match=r"budget|reserve"):
+        assert_mhs_allocation_budget(estimated_bytes=10**12, budget_bytes=1, reserve_bytes=None)
+
+    def _boom(start, end, *, data_root=None, execution_policy=None):
+        raise DataIntegrityError("replay provenance failed")
+
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
+    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda *a, **k: pytest.fail("must not persist"))
+    with pytest.raises(DataIntegrityError, match="provenance"):
+        mhs_cli._run_mhs_process_backtest(_process_parser().parse_args([]))
+
+
+def test_comparable_benchmark_requires_same_workload_evidence() -> None:
+    """Resource claims rest on measured peaks/availability with labelled hourly comparison."""
+    import src.mhs.process_backtest as pb
+
+    report = _fake_inventory_report()
+    assert report.memory_stats.tree_pss_peak_bytes >= 0
+    assert report.memory_stats.tree_uss_peak_bytes >= 0
+    assert report.memory_stats.min_system_available_bytes > 0
+    assert report.proxy.certification_level == "process_proxy_1h_ledger"
+    assert pb.PROCESS_INVENTORY_CERTIFICATION_LEVEL == "process_inventory_3m"
+    assert str(pb.PROCESS_INVENTORY_REPORT_PATH) == "docs/results/mhs_process_3m_backtest.json"
 

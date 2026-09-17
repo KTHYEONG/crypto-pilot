@@ -53,7 +53,7 @@ class MhsRunConfig:
     partition: Literal["dev", "holdout", "all"] = "dev"
     data_root: str | None = None
     mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"] = "cache_required"
-    execution_timeframe: Literal["1m", "3m", "5m"] = "3m"
+    execution_timeframe: Literal["3m"] = "3m"
     execution_universe_size: int = CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT  # was 30 (2026-08-23) per ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING
     max_rss_bytes: int | None = None
     log_run: bool = True

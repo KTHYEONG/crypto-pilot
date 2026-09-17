@@ -62,7 +62,7 @@ class TestAnchoredFoldBounded:
         funding_by_symbol, _ = ev._load_funding_series(symbols)
         request = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
-            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            mark_mode="cache_required", execution_timeframe="3m", log_run=False,
             max_rss_bytes=max_rss_bytes,
         )
         return ev._run_anchored_fold(
@@ -86,7 +86,7 @@ class TestAnchoredFoldBounded:
         funding_by_symbol, _ = ev._load_funding_series(symbols)
         request = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
-            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         )
         recorder = _StageRecorder(log_run=False)
         ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, recorder)
@@ -128,7 +128,7 @@ class TestAnchoredFoldBounded:
         funding_by_symbol, _ = ev._load_funding_series(symbols)
         request = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
-            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         )
         calls = {"n": 0}
         original = ev.windows._iter_mhs_execution_windows
@@ -180,7 +180,7 @@ def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
     )
 
     def _all_ones_scale(reference_daily_returns: pd.Series, *args: object, **kwargs: object) -> pd.Series:
@@ -223,7 +223,7 @@ def test_fold_execution_weights_are_renormalized(mhs_market, monkeypatch) -> Non
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     import src.mhs.evaluation.fold_weights as fold_weights_mod
@@ -268,7 +268,7 @@ def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypa
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
 
@@ -360,7 +360,7 @@ def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> No
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     captured: dict[str, pd.Series] = {}
@@ -402,7 +402,7 @@ def test_fold_decision_grid_matches_slow_cadence(mhs_market) -> None:
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
     )
     target_weights, _signal, _roster, _grid = ev._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
@@ -427,7 +427,7 @@ def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_q
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         fill_mark_parity_gate=False,
     )
     assert request.committee_capital is False
@@ -459,7 +459,7 @@ def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote)
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         rebalance_filter="portfolio_trigger", fill_mark_parity_gate=False,
     )
     target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
@@ -487,7 +487,7 @@ def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quot
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         committee_capital=True,
     )
     import src.mhs.evaluation.committee as committee_mod
@@ -620,7 +620,7 @@ def test_constant_risk_fold_uses_fold_local_reference(mhs_market, monkeypatch) -
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         pnl_vol_target_mode="growth_budget",
     )
     local_index = pd.date_range(_FOLD.train_start, periods=100, freq="D", tz="UTC")
@@ -654,7 +654,7 @@ def test_constant_risk_fold_missing_local_reference_fails_closed(mhs_market, mon
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         pnl_vol_target_mode="constant_risk",
     )
     monkeypatch.setattr(
@@ -802,7 +802,7 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     monkeypatch.setattr(
@@ -848,7 +848,7 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
 
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -878,7 +878,7 @@ def test_fold_worker_records_funding_carry_override(mhs_market, monkeypatch) -> 
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     monkeypatch.setattr(
@@ -930,7 +930,7 @@ def test_fold_builder_regime_hourly_min_history_and_deadband_toggle(mhs_market, 
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     captured: dict[str, object] = {"deadband_calls": 0}
@@ -993,7 +993,7 @@ def test_run_anchored_fold_accepts_terminal_funding_gap_via_shared_helper(mhs_ma
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
     )
 
     def _gap(code, symbol, ts):
@@ -1071,7 +1071,7 @@ def test_run_anchored_fold_certifies_valid_ledger_via_shared_helper(mhs_market, 
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
     )
 
     def _fills():
@@ -1132,6 +1132,7 @@ def test_fold_train_reference_returns_uses_only_fold_train_window(monkeypatch) -
 
     fold = subject.phase_1_anchored_purged_folds()[1]
     captured: dict[str, object] = {}
+    seen_grids: list[object] = []
 
     def fake_targets(*args, **kwargs):
         captured.update(kwargs)
@@ -1148,12 +1149,12 @@ def test_fold_train_reference_returns_uses_only_fold_train_window(monkeypatch) -
     monkeypatch.setattr(subject.specs, "_resolved_base_execution_spec", lambda _request: object())
     monkeypatch.setattr(
         subject.integrity, "_truncate_replayable_decisions",
-        lambda target, signals, _grid, _spec: (target, signals, 0),
+        lambda target, signals, _grid, _spec: (seen_grids.append(_grid), (target, signals, 0))[1],
     )
     monkeypatch.setattr(subject.windows, "_iter_mhs_execution_windows", lambda *_args: iter(()))
     monkeypatch.setattr(subject, "replay_execution_windows", fake_replay)
 
-    request = type("Request", (), {"execution_timeframe": "1m", "mark_mode": "cache_required"})()
+    request = type("Request", (), {"execution_timeframe": "3m", "mark_mode": "cache_required"})()
     returns = subject._fold_train_reference_returns(
         "root", fold, request, {}, 1.0, 1, None, None,
     )
@@ -1164,6 +1165,9 @@ def test_fold_train_reference_returns_uses_only_fold_train_window(monkeypatch) -
     assert returns.index.is_monotonic_increasing
     assert returns.index.is_unique
     assert np.isfinite(returns.to_numpy()).all()
+    assert seen_grids, "the train reference replay must build an execution grid"
+    grid = seen_grids[0]
+    assert (grid[1] - grid[0]) == pd.Timedelta(minutes=3)
 
 
 def test_run_anchored_fold_never_accepts_top_level_sizing_arguments() -> None:

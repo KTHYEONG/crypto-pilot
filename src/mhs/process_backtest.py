@@ -9,9 +9,11 @@ targets through the minute execution replay.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,12 +22,24 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
+from src.market_data.services.mhs_execution import (
+    apply_dynamic_gap_exclusion,
+    apply_dynamic_mark_gap_exclusion,
+)
 from src.mhs.books import rank_weight_book, scale_book_to_target_gross
+from src.mhs.contracts import MhsResourceMeasurement
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.deploy_gate import DeployGateResult, evaluate_deploy_gate
-from src.mhs.evaluation.integrity import SOURCE_GAP_EXCLUDED_SYMBOLS
+from src.mhs.evaluation.integrity import SOURCE_GAP_EXCLUDED_SYMBOLS, replay_ledger_certified
+from src.mhs.evaluation.specs import _stress_cost_execution_spec
+from src.mhs.evaluation.windows import _iter_mhs_execution_windows
 from src.mhs.execution import _ExecutionBound
-from src.mhs.execution.batch import replay_execution_windows
+from src.mhs.execution.batch import (
+    _LiveAccumulatorSets,
+    live_required_symbols,
+    replay_execution_window_batch,
+    replay_execution_windows,
+)
 from src.mhs.execution.contracts import (
     ExecutionReplayWindow,
     StrategyExecutionReplayResult,
@@ -67,6 +81,15 @@ from src.mhs.process import (
     volatility_scaled_exposure,
 )
 from src.mhs.regime import beta_neutralize_weights, causal_market_beta
+from src.mhs.resources import (
+    MHS_REPLAY_BUDGET_BYTES,
+    ProcessTreeMemoryStats,
+    _assert_execution_rss_budget,
+    _assert_stage_rss_budget,
+    _resolve_ram_budget,
+    _StageRecorder,
+    _TreeMemorySampler,
+)
 from src.mhs.types import ExecutionSpec
 
 _logger = logging.getLogger(__name__)
@@ -74,6 +97,13 @@ _logger = logging.getLogger(__name__)
 PROCESS_REPORT_PATH: Path = Path("docs") / "results" / "mhs_process_backtest.json"
 PROCESS_POLICY_REPORT_PATH: Path = Path("docs") / "results" / "mhs_process_execution_policy.json"
 PROCESS_CERTIFICATION_LEVEL: str = "process_proxy_1h_ledger"
+PROCESS_INVENTORY_REPORT_PATH: Path = Path("docs") / "results" / "mhs_process_3m_backtest.json"
+PROCESS_INVENTORY_CERTIFICATION_LEVEL: str = "process_inventory_3m"
+PROCESS_INVENTORY_INITIAL_EQUITY: float = 1.0
+_INVENTORY_LEDGER_INVALID: str = "INVENTORY_LEDGER_INVALID"
+_UNPRICED_TERMINAL_CODES: frozenset[str] = frozenset(
+    {"MISSING_HELD_MARK", "MISSING_HELD_FUNDING", "MISSING_DECISION_MARK"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +117,7 @@ class ProcessMarketData:
     log_close_step: pd.DataFrame
     funding_step: pd.DataFrame
     member_books: dict[str, pd.DataFrame]
+    execution_mask: pd.DataFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +216,10 @@ def load_process_market_data(
 ) -> ProcessMarketData:
     """Load the dev 1h panel, align funding, and build candidate books.
 
+    The execution mask intersects hourly OHLCV/mark gaps with the causal
+    3m OHLCV gaps, so a symbol missing 3m replay coverage is pre-blocked
+    from process targets instead of failing mid-replay.
+
     Raises:
         RuntimeError: no dev symbol has aligned funding.
     """
@@ -236,8 +271,13 @@ def load_process_market_data(
     funding_step = pd.DataFrame(prefix[right] - prefix[left], index=decision_grid, columns=aligned)
     _logger.info("[DATA] stage=decision_grid days=%d symbols=%d", len(decision_grid), len(aligned))
     panels: dict[str, pd.DataFrame] = {k: panel[k][aligned] for k in ("close", "open", "high", "low", "quote_vol", "taker_buy_quote")}
-    member_books = build_candidate_member_books(panels, bar_funding, eligible, mask, decision_grid)
+    causal_mask, _ = apply_dynamic_gap_exclusion(mask, "1h", root=root)
+    causal_mask, _ = apply_dynamic_mark_gap_exclusion(causal_mask)
+    causal_mask, _ = apply_dynamic_gap_exclusion(causal_mask, "3m", root=root)
+    member_books = build_candidate_member_books(panels, bar_funding, eligible, causal_mask, decision_grid)
     _logger.info("[DATA] stage=member_books candidates=%d", len(member_books))
+    book_columns = list(next(iter(member_books.values())).columns)
+    execution_mask = causal_mask.reindex(decision_grid, fill_value=False)[book_columns]
     return ProcessMarketData(
         grid_1h=grid_1h,
         decision_grid=decision_grid,
@@ -246,7 +286,32 @@ def load_process_market_data(
         log_close_step=log_close_step,
         funding_step=funding_step,
         member_books=member_books,
+        execution_mask=execution_mask,
     )
+
+
+def apply_process_execution_availability(target_weights: pd.DataFrame, execution_mask: pd.DataFrame) -> pd.DataFrame:
+    """Prevent unavailable targets from being revived by smoothing or adoption.
+
+    Args:
+        target_weights: Smoothed and adopted canonical decision targets.
+        execution_mask: Exactly aligned causal execution eligibility.
+
+    Returns:
+        Targets with unavailable cells exactly zero and available cells unchanged.
+
+    Raises:
+        DataIntegrityError: Labels, symbols or mask values are inconsistent.
+    """
+    if not target_weights.index.equals(execution_mask.index):
+        raise DataIntegrityError("execution_mask must share target_weights decision labels exactly")
+    if list(target_weights.columns) != list(execution_mask.columns):
+        raise DataIntegrityError("execution_mask must share target_weights symbol columns exactly")
+    if bool((execution_mask.dtypes.apply(lambda dt: dt.kind != "b")).any()):
+        raise DataIntegrityError("execution_mask must be boolean")
+    if bool(execution_mask.isna().to_numpy().any()):
+        raise DataIntegrityError("execution_mask must not be missing")
+    return target_weights.where(execution_mask, other=0.0)
 
 
 def run_process_paths(
@@ -258,28 +323,22 @@ def run_process_paths(
     leverage_cap: float,
     execution_policy: ProcessExecutionPolicy | None = None,
 ) -> tuple[ProcessPath, ...]:
-    """Evaluate one continuous process with an explicit adoption policy.
-
-    Refit evidence, smoothing, adoption, and exposure are decided once at
-    decision_bps. Every evaluation tier prices the identical sized targets;
-    changing evaluation friction never selects different trades.
+    """Evaluate unchanged process decisions without retaining whole-history refit books.
 
     Args:
-        data: Causally aligned market inputs and registered candidate books.
-        schedule: Chronological monthly refits with purged training cutoffs.
-        decision_bps: Non-negative finite friction used for process decisions.
-        evaluation_bps: Nonempty sequence of finite non-negative cost tiers.
+        data: Causally aligned features and registered candidate books.
+        schedule: Chronological monthly refits and purged training cutoffs.
+        decision_bps: Finite nonnegative decision friction.
+        evaluation_bps: Nonempty ordered evaluation cost tiers.
         leverage_cap: Positive finite exposure ceiling.
-        execution_policy: Explicit adoption control; None uses the baseline.
+        execution_policy: Existing adoption policy; None preserves baseline.
 
     Returns:
-        Paths in evaluation_bps order, including exact targets and turnover.
+        Ordered process paths with identical decision targets and proxy evidence.
 
     Raises:
-        ValueError: The schedule, candidates, cost tiers, leverage ceiling,
-            or policy inputs violate the process contract.
-        DataIntegrityError: An evaluated active ledger cell is invalid or
-            a net return is non-finite or does not exceed minus one.
+        ValueError: Schedule, policy, friction or exposure contract is invalid.
+        DataIntegrityError: Required evaluated ledger inputs are invalid.
     """
     if not schedule:
         raise ValueError("schedule must not be empty")
@@ -327,6 +386,7 @@ def run_process_paths(
             for name in names
         }
     )
+    del smoothed_members
     step = member_net.index[1] - member_net.index[0]
     refit_targets: list[pd.DataFrame] = []
     records: list[RefitRecord] = []
@@ -341,7 +401,12 @@ def run_process_paths(
             start=data.member_books[names[0]] * 0.0,
         )
         target = scale_book_to_target_gross(combined, 1.0)
-        refit_targets.append(target)
+        del combined
+        effective = target.loc[
+            (target.index >= point.effective_from) & (target.index < point.effective_to)
+        ]
+        del target
+        refit_targets.append(effective)
         records.append(
             RefitRecord(
                 point=point,
@@ -352,14 +417,15 @@ def run_process_paths(
     oos_start = schedule[0].effective_from
     oos_end = schedule[-1].effective_to
     oos_days = data.decision_grid[(data.decision_grid >= oos_start) & (data.decision_grid < oos_end)]
-    starts = pd.DatetimeIndex([p.effective_from for p in schedule])
-    target_rows: list[pd.Series] = []
-    for day in oos_days:
-        idx = int(starts.searchsorted(day, side="right")) - 1
-        target_rows.append(refit_targets[idx].loc[day])
-    targets_oos = pd.DataFrame(target_rows, index=oos_days)
+    targets_oos = pd.concat(refit_targets)
+    del refit_targets
     smoothed_targets = smoothed_book_path(targets_oos, pd.Series(rate, index=oos_days))
+    del targets_oos
     sized_targets = apply_process_execution_policy(smoothed_targets, policy)
+    execution_mask = data.execution_mask
+    sized_targets = apply_process_execution_availability(
+        sized_targets, execution_mask.reindex(sized_targets.index)
+    )
     unit_1h = sized_targets.reindex(data.grid_1h, method="ffill").fillna(0.0)
     unit_net_1h, _ = mhs_ledger_pnl(unit_1h, data.opens_1h, data.bar_funding_1h, decision_value)
     _reject_invalid_ledger_returns(unit_net_1h)
@@ -399,6 +465,7 @@ def run_process_paths(
                 turnover_1h=turnover_1h,
             )
         )
+    del unit_1h, sized_1h
     return tuple(paths)
 
 
@@ -646,28 +713,57 @@ def _validate_replay_window(
     cursor: int,
     fence: pd.Timestamp,
 ) -> int:
+    """Validate local execution planes against canonical process decisions.
+
+    Args:
+        window: Explicit market and decision provenance for one partition.
+        expected_columns: Canonical ordered symbols.
+        expected_targets: Exact sized decision book.
+        cursor: First unchecked decision row.
+        fence: End of the evaluation interval.
+
+    Returns:
+        Next unchecked decision position.
+
+    Raises:
+        DataIntegrityError: Targets, publication times or coverage conflict.
+    """
     if not isinstance(window, ExecutionReplayWindow):
         raise DataIntegrityError("windows must be ExecutionReplayWindow")
     if tuple(window.columns) != tuple(expected_columns):
         raise DataIntegrityError("window columns must equal the ordered path target columns")
-    if list(window.target_weights.columns) != expected_columns:
-        raise DataIntegrityError("window target columns must equal the ordered path target columns")
+    symbols = list(window.symbols)
+    if len(set(symbols)) != len(symbols):
+        raise DataIntegrityError("window symbols must be unique")
+    if set(symbols) - set(expected_columns):
+        raise DataIntegrityError("window symbols must be a subset of the canonical columns")
+    if [c for c in expected_columns if c in set(symbols)] != symbols:
+        raise DataIntegrityError("window symbols must follow canonical order")
+    if list(window.target_weights.columns) != symbols:
+        raise DataIntegrityError("window target columns must equal local symbols")
     decisions = window.target_weights.index
     if not isinstance(decisions, pd.DatetimeIndex):
         raise DataIntegrityError("window decisions must have a DatetimeIndex")
     n = len(decisions)
     if n == 0:
         raise DataIntegrityError("window must contain at least one decision")
+    if decisions.has_duplicates or not decisions.is_monotonic_increasing:
+        raise DataIntegrityError("window decisions must be chronological without duplication")
     expected_slice = expected_targets.index[cursor : cursor + n]
     if len(expected_slice) != n or not decisions.equals(expected_slice):
         raise DataIntegrityError("window decisions must be the next slice of path.target_weights")
-    expected_values = expected_targets.to_numpy(dtype="float64")[cursor : cursor + n]
     try:
         window_values = window.target_weights.to_numpy(dtype="float64")
     except (TypeError, ValueError):
         raise DataIntegrityError("window targets must be numeric") from None
-    if window_values.shape != expected_values.shape or not bool((window_values == expected_values).all()):
+    local_values = expected_targets.loc[decisions, symbols].to_numpy(dtype="float64")
+    if window_values.shape != local_values.shape or not bool((window_values == local_values).all()):
         raise DataIntegrityError("window targets must exactly match path.target_weights")
+    omitted = [c for c in expected_columns if c not in set(symbols)]
+    if omitted:
+        omitted_values = expected_targets.loc[decisions, omitted].to_numpy(dtype="float64")
+        if not bool((omitted_values == 0.0).all()):
+            raise DataIntegrityError("omitted canonical targets must be exactly zero")
     if window.marks is None or window.quote_volumes is None:
         raise DataIntegrityError("window requires explicit marks and quote_volumes")
     if window.funding_known is None or window.bar_available_at is None:
@@ -678,7 +774,6 @@ def _validate_replay_window(
     diffs = minute_grid.to_series().diff().dropna().unique()
     if len(diffs) != 1 or diffs[0] <= pd.Timedelta(0):
         raise DataIntegrityError("minute_grid must have a constant positive bar interval")
-    symbols = list(window.symbols)
     frames = {
         "highs": window.highs,
         "lows": window.lows,
@@ -707,9 +802,12 @@ def _validate_replay_window(
     for bar_label, avail_label in zip(minute_grid, bar_at, strict=True):
         if avail_label < bar_label:
             raise DataIntegrityError("bar_available_at must be no earlier than its bar label")
-    for label in list(minute_grid) + list(signal_at) + list(bar_at):
+    for label in list(minute_grid) + list(signal_at):
         if label >= fence:
-            raise DataIntegrityError("execution bar labels and availability must be before the fence")
+            raise DataIntegrityError("execution bar labels and signals must be before the fence")
+    for avail_label in bar_at:
+        if avail_label > fence:
+            raise DataIntegrityError("completed bar availability must not be beyond the fence")
     return cursor + n
 
 
@@ -780,3 +878,345 @@ def replay_process_execution(
         retain_event_snapshots=retain_event_snapshots,
         min_equity_fraction=min_equity_fraction,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessInventoryReport:
+    """Production 3m inventory evidence for identical process decisions."""
+
+    proxy: ProcessBacktestReport
+    base: StrategyExecutionReplayResult
+    stress: StrategyExecutionReplayResult
+    gate: DeployGateResult
+    resource_measurements: tuple[MhsResourceMeasurement, ...]
+    memory_stats: ProcessTreeMemoryStats
+
+
+def _inventory_daily_returns(
+    result: StrategyExecutionReplayResult,
+    *,
+    initial_equity: float = PROCESS_INVENTORY_INITIAL_EQUITY,
+) -> pd.Series:
+    """Daily net returns resampled from the 3m inventory equity ledger.
+
+    The first daily bar is anchored to ``initial_equity`` so first-day
+    profit and loss is never dropped by ``pct_change``.
+    """
+    if initial_equity <= 0:
+        raise DataIntegrityError("initial_equity must be > 0")
+    levels = result.ledger.equity.resample("1D").last().astype("float64")
+    if len(levels) == 0:
+        return levels
+    first = pd.Series(
+        [float(levels.iloc[0] / initial_equity - 1.0)],
+        index=levels.index[:1],
+        dtype="float64",
+    )
+    if len(levels) == 1:
+        return first
+    rest = levels.pct_change().iloc[1:].astype("float64")
+    daily = pd.concat([first, rest]).astype("float64")
+    return daily
+
+
+def _inventory_ledger_summary(result: StrategyExecutionReplayResult) -> dict[str, float]:
+    """Primary performance totals derived from the 3m ledger engine fields."""
+    daily = _inventory_daily_returns(result)
+    if len(daily):
+        curve = (1.0 + daily).cumprod()
+        years = len(daily) / 365.25
+        cagr = float(curve.iloc[-1] ** (1.0 / years) - 1.0)
+        anchored = np.concatenate([[1.0], curve.to_numpy(dtype="float64")])
+        peak = np.maximum.accumulate(anchored)
+        mdd = float((anchored / peak - 1.0).min())
+        turnover = float(result.ledger.fill_turnover.sum() * 365.0 / len(daily))
+    else:
+        cagr = 0.0
+        mdd = 0.0
+        turnover = 0.0
+    return {
+        "cagr": cagr,
+        "max_drawdown": mdd,
+        "annualized_turnover": turnover,
+        "total_fees": float(result.ledger.fee_charge.sum()),
+        "total_funding": float(result.ledger.funding_charge.sum()),
+    }
+
+
+def _inventory_terminal_state(result: StrategyExecutionReplayResult) -> dict[str, object]:
+    """Disclosed terminal inventory split by mark availability."""
+    gaps = list(result.ledger.data_gaps)
+    unpriced = sorted({g.symbol for g in gaps if g.code in _UNPRICED_TERMINAL_CODES})
+    unpriced_set = set(unpriced)
+    open_inventory: dict[str, float] = {}
+    fills = result.simulated_fills
+    if len(fills) and "symbol" in fills.columns and "quantity_delta" in fills.columns:
+        totals = fills.groupby("symbol")["quantity_delta"].sum()
+        for symbol, quantity in totals.items():
+            if float(quantity) != 0.0 and str(symbol) not in unpriced_set:
+                open_inventory[str(symbol)] = float(quantity)
+    return {
+        "primary_valid": bool(result.ledger.primary_valid),
+        "invalid_reasons": list(result.ledger.invalid_reasons),
+        "terminal_certified": bool(replay_ledger_certified(result)),
+        "open_inventory": open_inventory,
+        "unpriced_terminal_symbols": unpriced,
+        "data_gaps": [
+            {"code": g.code, "symbol": g.symbol, "timestamp": g.timestamp.isoformat()} for g in gaps
+        ],
+    }
+
+
+def _inventory_result_payload(result: StrategyExecutionReplayResult) -> dict[str, object]:
+    """Serializable 3m ledger evidence with engine-native fill accounting."""
+    daily = _inventory_daily_returns(result)
+    summary = _inventory_ledger_summary(result)
+    fills = result.simulated_fills
+    return {
+        "daily_returns": {ts.isoformat(): float(v) for ts, v in daily.items()},
+        "cagr": summary["cagr"],
+        "max_drawdown": summary["max_drawdown"],
+        "annualized_turnover": summary["annualized_turnover"],
+        "total_fees": summary["total_fees"],
+        "total_funding": summary["total_funding"],
+        "total_fills": len(fills),
+        "passive_fills": int(result.fill_count),
+        "unfilled_count": int(result.unfilled_count),
+        "fallback_count": int(result.fallback_count),
+        "forced_exit_count": int(result.forced_exit_count),
+        "forced_exit_notional": float(result.forced_exit_notional),
+        "termination_counts": dict(result.termination_counts),
+        "terminal": _inventory_terminal_state(result),
+    }
+
+
+def _inventory_gate(
+    base: StrategyExecutionReplayResult,
+    stress: StrategyExecutionReplayResult,
+) -> DeployGateResult:
+    """Deploy gate over valid inventory daily returns with integrity reasons."""
+    base_daily = _inventory_daily_returns(base)
+    stress_daily = _inventory_daily_returns(stress)
+    if bool(base.ledger.primary_valid) and bool(stress.ledger.primary_valid):
+        integrity: tuple[str, ...] = ()
+    else:
+        integrity = (_INVENTORY_LEDGER_INVALID,)
+    envelope = GROWTH_RISK_ENVELOPES[CLI_GROWTH_ENVELOPE_DEFAULT]
+    return evaluate_deploy_gate(
+        fold_returns=quarter_fold_returns(base_daily),
+        fold_stress_returns=quarter_fold_returns(stress_daily),
+        integrity_reasons=integrity,
+        envelope=envelope,
+    )
+
+
+def _inventory_window_stream(
+    path: ProcessPath,
+    signal_available_at: pd.DatetimeIndex,
+    root: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    funding_by_symbol: dict[str, pd.Series],
+    funding_failures: Mapping[str, str],
+    spec: ExecutionSpec,
+    budget_bytes: int | None,
+    reserve_bytes: int | None,
+    recorder: _StageRecorder,
+    required_symbols: Callable[[], frozenset[str]] | None = None,
+) -> Iterator[ExecutionReplayWindow]:
+    """Validate canonical targets through one production 3m window stream."""
+    targets = path.target_weights
+    expected_columns = list(targets.columns)
+    fence = _execution_fence(targets)
+    cursor = 0
+    for index, window in enumerate(
+        _iter_mhs_execution_windows(
+            targets,
+            signal_available_at,
+            root,
+            "3m",
+            start,
+            end,
+            funding_by_symbol,
+            "cache_required",
+            spec,
+            funding_failures=funding_failures,
+            budget_bytes=budget_bytes,
+            reserve_bytes=reserve_bytes,
+            required_symbols=required_symbols,
+        )
+    ):
+        cursor = _validate_replay_window(
+            window,
+            expected_columns=expected_columns,
+            expected_targets=targets,
+            cursor=cursor,
+            fence=fence,
+        )
+        recorder.record(
+            f"process_3m_window_{index}",
+            grid_bars=len(window.minute_grid),
+            n_symbols=len(window.symbols),
+            window_start=str(window.window_start),
+            window_end=str(window.window_end),
+            active_symbols=len(window.symbols),
+        )
+        yield window
+        _assert_execution_rss_budget(
+            f"process_3m_window_{index}", budget_bytes, index + 1, reserve_bytes=reserve_bytes
+        )
+    if cursor != len(targets):
+        raise DataIntegrityError("windows must cover every path decision exactly once")
+
+
+def evaluate_process_inventory_backtest(
+    start: pd.Timestamp = DISCOVERY_START,
+    end: pd.Timestamp = PROCESS_EVALUATION_CEILING,
+    *,
+    data_root: str | None = None,
+    execution_policy: ProcessExecutionPolicy | None = None,
+) -> ProcessInventoryReport:
+    """Evaluate identical process decisions through production 3m inventory accounting.
+
+    Args:
+        start: Timezone-aware source start.
+        end: Timezone-aware end within the registered evaluation ceiling.
+        data_root: Existing source root override, resolved per dataset contract.
+        execution_policy: Existing adoption policy; None preserves baseline.
+
+    Returns:
+        Inventory base/stress results, explicitly comparative hourly evidence,
+        gate validity, gap provenance and measured resource evidence.
+
+    Raises:
+        ValueError: Dates or policy are invalid.
+        DataIntegrityError: Required execution inputs or budget are invalid.
+    """
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("timestamps must be tz-aware")
+    if start >= end:
+        raise ValueError("start must be before end")
+    if end > PROCESS_EVALUATION_CEILING:
+        raise DataIntegrityError(f"end {end} exceeds PROCESS_EVALUATION_CEILING")
+    if execution_policy is not None and not isinstance(execution_policy, ProcessExecutionPolicy):
+        raise ValueError("execution_policy must be a ProcessExecutionPolicy or None")
+    sampler = _TreeMemorySampler()
+    recorder = _StageRecorder(log_run=False)
+    sampler.start()
+    recorder.record("process_inventory_start")
+    try:
+        budget_bytes, reserve_bytes = _resolve_ram_budget(MHS_REPLAY_BUDGET_BYTES, True)
+        proxy = evaluate_process_backtest(start, end, data_root=data_root, execution_policy=execution_policy)
+        recorder.record("process_inventory_proxy")
+        path = proxy.base
+        targets = path.target_weights
+        if len(targets) == 0:
+            raise DataIntegrityError("path.target_weights must not be empty")
+        signal_available_at = pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1))
+        columns = list(targets.columns)
+        funding_by_symbol, funding_failures = _load_funding_series(columns)
+        root = data_root or str(FUTURES_DATA_DIR / "ohlcv")
+        window_start = targets.index[0]
+        window_end = _execution_fence(targets)
+        base_spec = ExecutionSpec()
+        stress_spec = _stress_cost_execution_spec(base_spec)
+        live_sets: _LiveAccumulatorSets = []
+
+        def _live_required() -> frozenset[str]:
+            if not live_sets:
+                return frozenset()
+            return live_required_symbols(live_sets[-1])
+
+        stream = _inventory_window_stream(
+            path,
+            signal_available_at,
+            root,
+            window_start,
+            window_end,
+            funding_by_symbol,
+            funding_failures,
+            base_spec,
+            budget_bytes,
+            reserve_bytes,
+            recorder,
+            _live_required,
+        )
+        bound: _ExecutionBound = "OHLCV_IMMEDIATE_TAKER"
+        base, stress = replay_execution_window_batch(
+            stream,
+            PROCESS_INVENTORY_INITIAL_EQUITY,
+            [(bound, base_spec), (bound, stress_spec)],
+            live_accumulators=live_sets,
+        )
+        _assert_stage_rss_budget("process_3m_replay", budget_bytes, reserve_bytes)
+        recorder.record("process_inventory_replay")
+        gate = _inventory_gate(base, stress)
+        recorder.record("process_inventory_total")
+        memory_stats = sampler.stop()
+    except Exception as exc:
+        with suppress(Exception):
+            recorder.record("process_inventory_failed")
+        failure_stats = sampler.stop()
+        setattr(exc, "resource_measurements", recorder.records)  # noqa: B010 - Exception injection preserves failure telemetry
+        setattr(exc, "memory_stats", failure_stats)  # noqa: B010 - Exception injection preserves failure telemetry
+        raise
+    return ProcessInventoryReport(
+        proxy=proxy,
+        base=base,
+        stress=stress,
+        gate=gate,
+        resource_measurements=recorder.records,
+        memory_stats=memory_stats,
+    )
+
+
+def persist_process_inventory_report(report: ProcessInventoryReport, output: Path) -> Path:
+    """Persist separately identified 3m execution evidence.
+
+    Args:
+        report: Inventory evaluation and explicit comparison evidence.
+        output: JSON destination distinct from reserved hourly evidence.
+
+    Returns:
+        The persisted report destination.
+
+    Raises:
+        ValueError: Output format is unsupported.
+        DataIntegrityError: Destination would overwrite reserved evidence.
+    """
+    out = Path(output)
+    if out.suffix != ".json":
+        raise ValueError(f"destination must be a JSON path, got {output}")
+    reserved = {PROCESS_REPORT_PATH.resolve(), PROCESS_POLICY_REPORT_PATH.resolve()}
+    if out.resolve() in reserved:
+        raise DataIntegrityError(f"destination {out} would overwrite reserved hourly evidence")
+    decisions = report.proxy.base.target_weights.index
+    payload = {
+        "start": report.proxy.start.isoformat(),
+        "end": report.proxy.end.isoformat(),
+        "certification_level": PROCESS_INVENTORY_CERTIFICATION_LEVEL,
+        "source_policy": {"tracking_error_threshold": report.proxy.base.execution_policy.tracking_error_threshold},
+        "periods": {
+            "decision_start": decisions[0].isoformat() if len(decisions) else None,
+            "decision_end": decisions[-1].isoformat() if len(decisions) else None,
+            "n_decisions": len(decisions),
+        },
+        "gate": {
+            "go": report.gate.go,
+            "reason_codes": list(report.gate.reason_codes),
+            "metrics": dict(report.gate.metrics),
+        },
+        "base": _inventory_result_payload(report.base),
+        "stress": _inventory_result_payload(report.stress),
+        "proxy": {
+            "scope": "hourly_proxy_comparison",
+            "certification_level": report.proxy.certification_level,
+            "base": _tier_payload(report.proxy.base),
+            "stress": _tier_payload(report.proxy.stress),
+        },
+        "resource_measurements": [dataclasses.asdict(m) for m in report.resource_measurements],
+        "memory_stats": dataclasses.asdict(report.memory_stats),
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+    return out

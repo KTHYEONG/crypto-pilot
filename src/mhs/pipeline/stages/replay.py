@@ -38,7 +38,7 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     ctx.initial_equity = 1.0
     ctx.minute_grid = pd.date_range(
         ctx.start, ctx.end,
-        freq={"1m": "1min", "3m": "3min", "5m": "5min"}[ctx.config.execution_timeframe],
+        freq="3min",
         tz="UTC",
     )
     ctx.has_minute_data = any(

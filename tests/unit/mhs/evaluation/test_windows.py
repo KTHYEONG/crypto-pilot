@@ -353,3 +353,636 @@ def test_book_outcome_spills_windows_under_window_spill_root(mhs_market, monkeyp
     assert str(spill_root) in seen
 
 
+
+
+def _local_replay_fixtures(n_decisions: int = 2):
+    """Canonical five-column path with two-symbol local windows."""
+    import pandas as pd
+
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.mhs.process_backtest import ProcessPath
+    from src.mhs.process import ProcessExecutionPolicy
+
+    cols = ["AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT"]
+    local = ["AUSDT", "CUSDT"]
+    idx = pd.date_range("2022-01-01", periods=n_decisions, freq="24h", tz="UTC")
+    tgt = pd.DataFrame(0.0, index=idx, columns=cols, dtype="float64")
+    tgt.loc[:, "AUSDT"] = 0.5
+    tgt.loc[:, "CUSDT"] = -0.25
+    hourly = pd.date_range(idx[0], idx[-1] + pd.Timedelta(hours=23), freq="1h", tz="UTC")
+    path = ProcessPath(
+        one_way_bps=8.0,
+        daily_returns=pd.Series(0.0, index=idx),
+        unit_daily_returns=pd.Series(0.0, index=idx),
+        exposure=pd.Series(1.0, index=idx),
+        refits=(),
+        leverage_cap=2.0,
+        execution_policy=ProcessExecutionPolicy(None),
+        unit_target_weights=tgt,
+        target_weights=tgt,
+        turnover_1h=pd.Series(0.0, index=hourly),
+    )
+
+    def _window(day: pd.Timestamp, row: pd.DataFrame) -> ExecutionReplayWindow:
+        mg = pd.date_range(day, day + pd.Timedelta(hours=23, minutes=59), freq="1min", tz="UTC")
+
+        def _mk(v: float) -> pd.DataFrame:
+            return pd.DataFrame(v, index=mg, columns=local, dtype="float64")
+
+        return ExecutionReplayWindow(
+            window_start=mg[0], window_end=mg[-1], columns=tuple(cols), symbols=tuple(local),
+            minute_grid=mg, highs=_mk(100.0), lows=_mk(99.0), closes=_mk(99.5),
+            marks=_mk(99.5), bar_funding=_mk(0.0), target_weights=row[local],
+            signal_available_at=pd.DatetimeIndex([day]),
+            quote_volumes=_mk(1e6),
+            funding_known=pd.DataFrame(True, index=mg, columns=local),
+            bar_available_at=mg,
+        )
+
+    windows = [_window(day, tgt.iloc[[i]]) for i, day in enumerate(idx)]
+    return path, windows
+
+
+def test_validate_local_targets_accepted() -> None:
+    """Ordered local targets validate against the canonical book and replay."""
+    from src.mhs.execution.batch import replay_execution_windows
+    from src.mhs.process_backtest import replay_process_execution
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _local_replay_fixtures(2)
+    spec = ExecutionSpec()
+    ref = replay_execution_windows(windows, 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    got = replay_process_execution(
+        path, iter(windows), initial_equity=1000.0,
+        execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    assert ref.ledger.equity.equals(got.ledger.equity)
+    assert [s for w in windows for s in w.symbols] == ["AUSDT", "CUSDT"] * 2
+
+
+def test_validate_omitted_nonzero_target_rejected() -> None:
+    """A nonzero omitted canonical target fails validation exactly, not approximately."""
+    import dataclasses
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.process_backtest import replay_process_execution
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _local_replay_fixtures(2)
+    tainted = path.target_weights.copy()
+    tainted.iloc[0, tainted.columns.get_loc("BUSDT")] = 1e-15
+    bad_path = dataclasses.replace(path, target_weights=tainted, unit_target_weights=tainted)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            bad_path, iter(windows), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
+        )
+
+
+def test_validate_last_complete_bar_accepted() -> None:
+    """A bar publishing exactly at the fence is complete and accepted."""
+    import dataclasses
+
+    import pandas as pd
+
+    from src.mhs.process_backtest import _execution_fence, _validate_replay_window
+
+    path, windows = _local_replay_fixtures(2)
+    fence = _execution_fence(path.target_weights)
+    w1 = windows[0]
+    assert (w1.bar_available_at < fence).all()
+    arr = w1.bar_available_at.as_unit("ns").asi8.copy()
+    arr[-1] = fence.value
+    stamped = dataclasses.replace(w1, bar_available_at=pd.DatetimeIndex(arr, tz="UTC"))
+    nxt = _validate_replay_window(
+        stamped, expected_columns=list(path.target_weights.columns),
+        expected_targets=path.target_weights, cursor=0, fence=fence,
+    )
+    assert nxt == 1
+
+
+def test_validate_incomplete_bar_rejected() -> None:
+    """A bar publishing beyond the fence is incomplete and rejected."""
+    import dataclasses
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.process_backtest import _execution_fence, _validate_replay_window
+
+    path, windows = _local_replay_fixtures(2)
+    fence = _execution_fence(path.target_weights)
+    w1 = windows[0]
+    arr = w1.bar_available_at.as_unit("ns").asi8.copy()
+    arr[-1] = (fence + pd.Timedelta(minutes=1)).value
+    stamped = dataclasses.replace(w1, bar_available_at=pd.DatetimeIndex(arr, tz="UTC"))
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _validate_replay_window(
+            stamped, expected_columns=list(path.target_weights.columns),
+            expected_targets=path.target_weights, cursor=0, fence=fence,
+        )
+
+
+def test_validate_partition_skip_rejected() -> None:
+    """Skipped decisions break cursor coverage and fail validation."""
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.process_backtest import replay_process_execution
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _local_replay_fixtures(3)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([windows[0], windows[2]]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
+        )
+
+
+def _write_3m_ohlcv(root, symbol, labels, quote_vol=1000.0) -> None:
+    import pandas as pd
+
+    ms = (labels - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)
+    n = len(labels)
+    close = 100.0 + 0.01 * (labels.asi8 // 180_000_000_000)
+    pd.DataFrame(
+        {
+            "timestamp": ms.to_numpy(dtype="int64"),
+            "open": close,
+            "high": close * 1.001,
+            "low": close * 0.999,
+            "close": close,
+            "quote_vol": quote_vol,
+        }
+    ).to_parquet(root / f"{symbol}.parquet")
+
+
+def _stream_market(tmp_path, symbols, n_days=70, funding_through=None):
+    """3m OHLCV lake plus funding aligned to the full grid."""
+    import pandas as pd
+
+    start = pd.Timestamp("2022-01-01", tz="UTC")
+    grid = pd.date_range(start, start + pd.Timedelta(days=n_days) - pd.Timedelta(minutes=3), freq="3min", tz="UTC")
+    lake = tmp_path / "ohlcv" / "3m"
+    lake.mkdir(parents=True, exist_ok=True)
+    for sym in symbols:
+        _write_3m_ohlcv(lake, sym, grid)
+    observed = grid if funding_through is None else grid[grid < funding_through]
+    funding = {sym: pd.Series(0.0, index=observed) for sym in symbols}
+    decisions = pd.date_range(start, periods=n_days, freq="24h", tz="UTC")
+    return grid, decisions, funding
+
+
+def test_generator_required_symbols_stay_in_roster(tmp_path) -> None:
+    """A held symbol with zero targets remains in every required roster."""
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    grid, decisions, funding = _stream_market(tmp_path, ["AUSDT", "BUSDT"], n_days=70)
+    targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT", "BUSDT"])
+    targets.iloc[:6, 0] = 0.5
+    signals = decisions + pd.Timedelta(hours=1)
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
+            funding, "ohlcv_close_fallback", ExecutionSpec(),
+            required_symbols=lambda: frozenset({"AUSDT"}),
+        )
+    )
+    assert len(windows) >= 2
+    assert all("AUSDT" in w.symbols for w in windows)
+    assert all(w.logical_partition is not None for w in windows)
+    tags = [w.logical_partition for w in windows]
+    assert tags == sorted(tags)
+
+
+def test_generator_unknown_required_symbol_rejected(tmp_path) -> None:
+    """A required symbol outside canonical columns fails closed."""
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    grid, decisions, funding = _stream_market(tmp_path, ["AUSDT"], n_days=3)
+    targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT"])
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        list(
+            _iter_mhs_execution_windows(
+                targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"), "3m",
+                grid[0], grid[-1], funding, "ohlcv_close_fallback", ExecutionSpec(),
+                required_symbols=lambda: frozenset({"GHOSTUSDT"}),
+            )
+        )
+
+
+def _split_stream(windows):
+    """Hand-split each window into two overlapping pieces sharing its tag."""
+    import dataclasses
+
+    pieces = []
+    for w in windows:
+        n = len(w.minute_grid)
+        mid = n // 2
+        boundary = w.minute_grid[mid]
+        k = int((w.target_weights.index < boundary).sum())
+        if k <= 0 or k >= len(w.target_weights):
+            pieces.append(w)
+            continue
+        for t_lo, t_hi, lo, hi in ((0, k, 0, mid + 1), (k, len(w.target_weights), mid, n)):
+            sl = slice(lo, hi)
+            pieces.append(
+                dataclasses.replace(
+                    w,
+                    minute_grid=w.minute_grid[sl],
+                    highs=w.highs.iloc[sl],
+                    lows=w.lows.iloc[sl],
+                    closes=w.closes.iloc[sl],
+                    marks=w.marks.iloc[sl] if w.marks is not None else None,
+                    bar_funding=w.bar_funding.iloc[sl],
+                    target_weights=w.target_weights.iloc[t_lo:t_hi],
+                    signal_available_at=w.signal_available_at[t_lo:t_hi],
+                    quote_volumes=w.quote_volumes.iloc[sl] if w.quote_volumes is not None else None,
+                    funding_known=w.funding_known.iloc[sl] if w.funding_known is not None else None,
+                    bar_available_at=w.bar_available_at[sl] if w.bar_available_at is not None else None,
+                )
+            )
+    return pieces
+
+
+def _run_split_parity(tmp_path, cost_model: str):
+    import dataclasses
+
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution import replay_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    grid, decisions, funding = _stream_market(tmp_path, ["AUSDT", "BUSDT"], n_days=40)
+    targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT", "BUSDT"])
+    targets.iloc[:, 0] = 0.05
+    targets.iloc[:, 1] = -0.03
+    signals = decisions + pd.Timedelta(hours=1)
+    spec = ExecutionSpec() if cost_model == "flat" else dataclasses.replace(
+        ExecutionSpec(), liquidity_cost_model="corwin_schultz"
+    )
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
+            funding, "ohlcv_close_fallback", spec,
+        )
+    )
+    ref = replay_execution_windows(iter(windows), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    split = replay_execution_windows(
+        iter(_split_stream(windows)), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec
+    )
+    return ref, split
+
+
+def test_flat_split_parity_within_1e12(tmp_path) -> None:
+    """Smaller IO pieces under one logical clock keep flat equity within 1e-12."""
+    import numpy as np
+
+    ref, split = _run_split_parity(tmp_path, "flat")
+    assert np.allclose(
+        ref.ledger.equity.to_numpy(), split.ledger.equity.to_numpy(), rtol=0.0, atol=1e-12
+    )
+    assert len(ref.simulated_fills) == len(split.simulated_fills)
+
+
+def test_spread_split_parity_within_1e12(tmp_path) -> None:
+    """Corwin-Schultz state, fills and costs match the unsplit reference."""
+    import numpy as np
+
+    ref, split = _run_split_parity(tmp_path, "corwin_schultz")
+    assert np.allclose(
+        ref.ledger.equity.to_numpy(), split.ledger.equity.to_numpy(), rtol=0.0, atol=1e-12
+    )
+    assert ref.simulated_fills["fill_price"].to_numpy().shape == split.simulated_fills["fill_price"].to_numpy().shape
+    assert np.allclose(
+        ref.simulated_fills["fill_price"].to_numpy(dtype="float64"),
+        split.simulated_fills["fill_price"].to_numpy(dtype="float64"),
+        rtol=0.0, atol=1e-12,
+    )
+
+
+def test_no_future_pricing_across_pieces(tmp_path) -> None:
+    """Perturbed future highs/lows leave earlier fills priced identically."""
+    import numpy as np
+
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution import replay_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    grid, decisions, funding = _stream_market(tmp_path, ["AUSDT"], n_days=40)
+    targets = pd.DataFrame(0.05, index=decisions, columns=["AUSDT"])
+    signals = decisions + pd.Timedelta(hours=1)
+    spec = ExecutionSpec(liquidity_cost_model="corwin_schultz")
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
+            funding, "ohlcv_close_fallback", spec,
+        )
+    )
+    pieces = _split_stream(windows)
+    base = replay_execution_windows(iter(pieces), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    shocked = list(pieces)
+    last = shocked[-1]
+    import dataclasses
+
+    shocked[-1] = dataclasses.replace(
+        last, highs=last.highs * 2.0, lows=last.lows * 2.0,
+    )
+    moved = replay_execution_windows(iter(shocked), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    cutoff = pieces[1].minute_grid[0]
+    base_early = base.simulated_fills[base.simulated_fills["timestamp"] < cutoff]
+    moved_early = moved.simulated_fills[moved.simulated_fills["timestamp"] < cutoff]
+    assert len(base_early) == len(moved_early) > 0
+    assert np.array_equal(
+        base_early["fill_price"].to_numpy(), moved_early["fill_price"].to_numpy()
+    )
+    assert np.array_equal(
+        base_early["fee_bps"].to_numpy(), moved_early["fee_bps"].to_numpy()
+    )
+
+
+def test_required_symbols_track_units_without_pruning() -> None:
+    """required_symbols exposes nonzero units exactly, however tiny."""
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.execution.accumulator import _BoundExecutionReplayAccumulator
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.mhs.types import ExecutionSpec
+
+    grid = pd.date_range("2022-01-01", periods=8, freq="3min", tz="UTC")
+    cols = ("AUSDT", "BUSDT")
+    px = pd.DataFrame(100.0, index=grid, columns=list(cols))
+    window = ExecutionReplayWindow(
+        window_start=grid[0], window_end=grid[-1], columns=cols, symbols=cols,
+        minute_grid=grid, highs=px, lows=px, closes=px, marks=px, bar_funding=px * 0.0,
+        target_weights=pd.DataFrame(0.0, index=[grid[0]], columns=list(cols)),
+        signal_available_at=pd.DatetimeIndex([grid[0]]),
+        quote_volumes=px * 0.0 + 1.0, funding_known=px.notna(),
+        bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+    acc = _BoundExecutionReplayAccumulator(window, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+    assert acc.required_symbols() == frozenset()
+    acc.units_arr[0] = 1e-15
+    acc.units_arr[1] = -2.5
+    assert acc.required_symbols() == frozenset({"AUSDT", "BUSDT"})
+    assert isinstance(acc.required_symbols(), frozenset)
+    assert np.isnan(acc.half_spread_bps).all()
+
+
+def test_live_required_symbols_union_and_empty() -> None:
+    """The batch union skips dead bounds and starts empty."""
+    from src.mhs.execution.batch import live_required_symbols
+
+    assert live_required_symbols([]) == frozenset()
+
+    class _Stub:
+        def __init__(self, symbols):
+            self._symbols = symbols
+
+        def required_symbols(self):
+            return frozenset(self._symbols)
+
+    assert live_required_symbols([None, None]) == frozenset()
+    assert live_required_symbols([_Stub({"AUSDT"}), None, _Stub({"BUSDT"})]) == frozenset(
+        {"AUSDT", "BUSDT"}
+    )
+
+
+def _held_exit_market(tmp_path, n_days=70):
+    """Entry fills early, then targets vanish while exits cannot fill.
+
+    Exits are blocked by unknown funding (not zero volume, which would be a
+    delisting settlement), so inventory stays held across windows.
+    """
+    import pandas as pd
+
+    symbols = ["AUSDT", "BUSDT"]
+    exit_block_from = pd.Timestamp("2022-01-01", tz="UTC") + pd.Timedelta(days=6)
+    grid, decisions, funding = _stream_market(
+        tmp_path, symbols, n_days=n_days, funding_through=exit_block_from,
+    )
+    targets = pd.DataFrame(0.0, index=decisions, columns=symbols)
+    targets.iloc[:6, 0] = 0.5
+    signals = decisions + pd.Timedelta(hours=1)
+    return grid, decisions, funding, targets, signals
+
+
+def test_batch_live_roster_holds_unfilled_exit(tmp_path) -> None:
+    """Held inventory stays in every required roster across windows."""
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution import live_required_symbols, replay_execution_window_batch_isolated
+    from src.mhs.types import ExecutionSpec
+
+    grid, decisions, funding, targets, signals = _held_exit_market(tmp_path)
+    spec = ExecutionSpec()
+    cell: list = []
+    seen: list = []
+
+    def _recording():
+        gen = _iter_mhs_execution_windows(
+            targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
+            funding, "ohlcv_close_fallback", spec,
+            required_symbols=lambda: live_required_symbols(cell[0] if cell else []),
+        )
+        for w in gen:
+            seen.append(w.symbols)
+            yield w
+
+    outcome = replay_execution_window_batch_isolated(
+        _recording(), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec)],
+        live_accumulators=cell,
+    )
+    assert outcome.results[0] is not None
+    assert len(seen) >= 3
+    assert all("AUSDT" in symbols for symbols in seen)
+    assert cell
+    assert cell[0]
+    assert "AUSDT" in live_required_symbols(cell[0])
+
+
+def test_batch_without_live_cell_drops_stale_roster_member(tmp_path) -> None:
+    """Without live requirements the legacy roster drops the held symbol."""
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution import replay_execution_window_batch_isolated
+    from src.mhs.types import ExecutionSpec
+
+    grid, decisions, funding, targets, signals = _held_exit_market(tmp_path)
+    spec = ExecutionSpec()
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
+            funding, "ohlcv_close_fallback", spec,
+        )
+    )
+    assert len(windows) >= 3
+    assert "AUSDT" not in windows[-1].symbols
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_execution_window_batch_isolated(
+            iter(windows), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec)]
+        )
+
+
+def test_single_and_coupled_live_cells_populated(tmp_path) -> None:
+    """Single and coupled replays publish their live accumulators."""
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution import (
+        live_required_symbols,
+        replay_execution_windows,
+        replay_execution_windows_coupled,
+    )
+    from src.mhs.types import ExecutionSpec
+
+    grid, decisions, funding = _stream_market(tmp_path, ["AUSDT"], n_days=10)
+    targets = pd.DataFrame(0.05, index=decisions, columns=["AUSDT"])
+    signals = decisions + pd.Timedelta(hours=1)
+    spec = ExecutionSpec()
+    args = (
+        targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
+        funding, "ohlcv_close_fallback", spec,
+    )
+    cell_single: list = []
+    replay_execution_windows(
+        _iter_mhs_execution_windows(*args), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec,
+        live_accumulators=cell_single,
+    )
+    assert cell_single
+    assert cell_single[0]
+    assert live_required_symbols(cell_single[0]) == frozenset({"AUSDT"})
+    cell_coupled: list = []
+    scale = pd.Series(1.0, index=decisions)
+    reference, outcome = replay_execution_windows_coupled(
+        _iter_mhs_execution_windows(*args), 1000.0,
+        ("OHLCV_IMMEDIATE_TAKER", spec),
+        [("OHLCV_IMMEDIATE_TAKER", spec)],
+        lambda daily_returns: scale,
+        live_accumulators=cell_coupled,
+    )
+    assert reference is not None
+    assert outcome.results[0] is not None
+    assert cell_coupled
+    assert cell_coupled[0]
+    assert "AUSDT" in live_required_symbols(cell_coupled[0])
+
+
+def test_ipc_round_trip_preserves_logical_partition(tmp_path) -> None:
+    """Spilled windows reload with their cost-clock tag intact."""
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import (
+        _iter_mhs_execution_windows,
+        _load_window_from_ipc,
+        _spill_window_to_ipc,
+    )
+    from src.mhs.types import ExecutionSpec
+
+    grid, decisions, funding = _stream_market(tmp_path, ["AUSDT"], n_days=40)
+    targets = pd.DataFrame(0.05, index=decisions, columns=["AUSDT"])
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"), "3m",
+            grid[0], grid[-1], funding, "ohlcv_close_fallback", ExecutionSpec(),
+        )
+    )
+    path = str(tmp_path / "tagged.arrow")
+    _spill_window_to_ipc(windows[0], path)
+    loaded = _load_window_from_ipc(path)
+    assert loaded.logical_partition == windows[0].logical_partition != (None,)
+
+
+def test_untagged_corwin_windows_keep_legacy_per_window_update() -> None:
+    """Direct-built windows update spreads immediately without a clock."""
+    import dataclasses
+
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.execution import replay_execution_windows
+    from src.mhs.execution.accumulator import _BoundExecutionReplayAccumulator
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.mhs.types import ExecutionSpec
+
+    grid = pd.date_range("2022-01-01", periods=24, freq="3min", tz="UTC")
+    cols = ["AUSDT"]
+    px = pd.DataFrame(100.0, index=grid, columns=cols)
+    window = ExecutionReplayWindow(
+        window_start=grid[0], window_end=grid[-1], columns=tuple(cols), symbols=tuple(cols),
+        minute_grid=grid, highs=px * 1.002, lows=px * 0.998, closes=px, marks=px,
+        bar_funding=px * 0.0,
+        target_weights=pd.DataFrame({"AUSDT": [0.5]}, index=pd.DatetimeIndex([grid[0]])),
+        signal_available_at=pd.DatetimeIndex([grid[0]]),
+        quote_volumes=px * 0.0 + 1.0, funding_known=px.notna(),
+        bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+    spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+    acc = _BoundExecutionReplayAccumulator(window, 1000.0, "OHLCV_IMMEDIATE_TAKER", spec, False)
+    assert window.logical_partition is None
+    acc.consume(window)
+    assert np.isfinite(acc.half_spread_bps).all()
+    result = acc.finalize()
+    assert len(result.simulated_fills) > 0
+    replayed = replay_execution_windows(
+        iter([window]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec,
+    )
+    assert replayed.ledger.equity.equals(result.ledger.equity)
+
+
+def test_validate_symbol_contract_rejected() -> None:
+    """Duplicated, foreign, or misordered symbols fail validation."""
+    import dataclasses
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.process_backtest import _validate_replay_window
+
+    path, windows = _local_replay_fixtures(2)
+    kwargs = {
+        "expected_columns": list(path.target_weights.columns),
+        "expected_targets": path.target_weights,
+        "cursor": 0,
+        "fence": path.target_weights.index[-1] + pd.Timedelta(days=1),
+    }
+    w1 = windows[0]
+    dup = dataclasses.replace(w1, symbols=("AUSDT", "AUSDT"))
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _validate_replay_window(dup, **kwargs)
+    foreign = dataclasses.replace(
+        w1,
+        symbols=("AUSDT", "ZZZUSDT"),
+        target_weights=w1.target_weights.rename(columns={"CUSDT": "ZZZUSDT"}),
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _validate_replay_window(foreign, **kwargs)
+    shuffled = dataclasses.replace(
+        w1,
+        symbols=("CUSDT", "AUSDT"),
+        target_weights=w1.target_weights[["CUSDT", "AUSDT"]],
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _validate_replay_window(shuffled, **kwargs)
+    bad_days = pd.concat([w1.target_weights, windows[1].target_weights])
+    bad_days.index = pd.DatetimeIndex([bad_days.index[0], bad_days.index[0]])
+    jumbled = dataclasses.replace(w1, target_weights=bad_days)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _validate_replay_window(jumbled, **kwargs)

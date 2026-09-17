@@ -27,6 +27,11 @@ from src.mhs.types import (
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
+MHS_TREE_PSS_BUDGET_BYTES: int = int(2.5 * 2**30)
+MHS_REPLAY_BUDGET_BYTES: int = int(1.5 * 2**30)
+MHS_AVAILABLE_FLOOR_BYTES: int = 2 * 2**30
+
+
 def _current_rss_bytes() -> int:
     try:
         return int(psutil.Process().memory_info().rss)
@@ -34,35 +39,187 @@ def _current_rss_bytes() -> int:
         return -1
 
 
+def _read_cgroup_limit_bytes() -> int | None:
+    try:
+        with open("/sys/fs/cgroup/memory.max", encoding="utf-8") as handle:
+            raw = handle.read().strip()
+        if raw == "" or raw == "max":
+            return None
+        limit = int(raw)
+        return limit if limit > 0 else None
+    except (OSError, ValueError):
+        pass
+    try:
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", encoding="utf-8") as handle:
+            limit = int(handle.read().strip())
+        return limit if limit > 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _read_cgroup_remaining_bytes() -> int | None:
+    try:
+        with open("/sys/fs/cgroup/memory.current", encoding="utf-8") as handle:
+            current = int(handle.read().strip())
+        with open("/sys/fs/cgroup/memory.max", encoding="utf-8") as handle:
+            raw = handle.read().strip()
+        if raw == "" or raw == "max":
+            return None
+        remaining = int(raw) - current
+        return remaining if remaining > 0 else 0
+    except (OSError, ValueError):
+        pass
+    try:
+        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes", encoding="utf-8") as handle:
+            usage = int(handle.read().strip())
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", encoding="utf-8") as handle:
+            limit = int(handle.read().strip())
+        remaining = limit - usage
+        return remaining if remaining > 0 else 0
+    except (OSError, ValueError):
+        return None
+
+
+def _host_total_bytes() -> int:
+    try:
+        total = int(psutil.virtual_memory().total)
+    except Exception as exc:  # noqa: BLE001
+        raise DataIntegrityError(f"physical-memory telemetry unavailable: cannot read host total: {exc}") from exc
+    if total <= 0:
+        raise DataIntegrityError(f"physical-memory telemetry unavailable: non-positive host total {total}")
+    return total
+
+
+def _current_available_bytes() -> int:
+    try:
+        available = int(psutil.virtual_memory().available)
+    except Exception as exc:  # noqa: BLE001
+        raise DataIntegrityError(f"physical-memory telemetry unavailable: cannot read available memory: {exc}") from exc
+    if available < 0:
+        raise DataIntegrityError(f"physical-memory telemetry unavailable: negative available {available}")
+    return available
+
+
+def _current_tree_pss_bytes() -> int:
+    try:
+        me = psutil.Process(os.getpid())
+        procs = [me, *me.children(recursive=True)]
+    except Exception as exc:  # noqa: BLE001
+        raise DataIntegrityError(f"physical-memory telemetry unavailable: cannot enumerate process tree: {exc}") from exc
+    total = 0
+    observed = 0
+    for proc in procs:
+        try:
+            total += int(getattr(proc.memory_full_info(), "pss", 0))
+            observed += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:  # noqa: BLE001, S112 - single unreadable process never fails admission
+            continue
+    if observed == 0:
+        raise DataIntegrityError("physical-memory telemetry unavailable: no process-tree PSS observation")
+    return total
+
+
+def _current_tree_swap_bytes() -> int | None:
+    try:
+        me = psutil.Process(os.getpid())
+        procs = [me, *me.children(recursive=True)]
+    except Exception:  # noqa: BLE001 - optional observation
+        return None
+    total = 0
+    observed = False
+    for proc in procs:
+        try:
+            total += int(getattr(proc.memory_full_info(), "swap", 0))
+            observed = True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:  # noqa: BLE001, S112 - optional observation
+            continue
+    return total if observed else None
+
+
 def _resolve_ram_budget(
     max_rss_bytes: int | None,
     ram_guard: bool,
 ) -> tuple[int | None, int | None]:
-    """Resolve the automatic RAM-guard budget and reserve from the environment.
+    """Resolve safe physical-memory admission limits.
 
-    Returns ``(budget_bytes, reserve_bytes)``. With ``ram_guard=False`` both are
-    ``None`` (the legacy unlimited semantics). With the guard on, the budget is
-    ``max_rss_bytes`` when explicitly set, otherwise ``int(total *
-    RAM_BUDGET_FRACTION)``, and the reserve is
-    ``max(int(total * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES)``.
-    A psutil failure or a non-positive total yields ``(None, None)`` -- an
-    observational failure disables the guard and never alters computed values.
+    Args:
+        max_rss_bytes: Optional positive explicit working-set ceiling.
+        ram_guard: Whether physical-memory safeguards are required.
+
+    Returns:
+        Effective budget and available-memory reserve in bytes.
+
+    Raises:
+        ValueError: The explicit budget is invalid.
+        DataIntegrityError: Required physical-memory telemetry is unavailable.
     """
     if not ram_guard:
         return (None, None)
-    try:
-        total = int(psutil.virtual_memory().total)
-    except Exception:  # noqa: BLE001
-        return (None, None)
-    if total <= 0:
-        return (None, None)
-    budget = (
-        max_rss_bytes
-        if max_rss_bytes is not None
-        else int(total * RAM_BUDGET_FRACTION)
-    )
-    reserve = max(int(total * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES)
+    if max_rss_bytes is not None and max_rss_bytes <= 0:
+        raise ValueError(f"max_rss_bytes must be positive, got {max_rss_bytes}")
+    total = _host_total_bytes()
+    cgroup_limit = _read_cgroup_limit_bytes()
+    effective = min(total, cgroup_limit) if cgroup_limit is not None and cgroup_limit > 0 else total
+    if max_rss_bytes is not None:
+        budget = min(max_rss_bytes, MHS_TREE_PSS_BUDGET_BYTES)
+    else:
+        budget = min(int(effective * RAM_BUDGET_FRACTION), MHS_TREE_PSS_BUDGET_BYTES)
+    remaining = _read_cgroup_remaining_bytes()
+    if remaining is not None and remaining > 0:
+        budget = min(budget, remaining)
+    if budget <= 0:
+        raise DataIntegrityError(
+            f"minimum safe work is impossible: effective total {effective} leaves no usable budget"
+        )
+    reserve = max(int(effective * RAM_RESERVE_FRACTION), RAM_RESERVE_FLOOR_BYTES, MHS_AVAILABLE_FLOOR_BYTES)
     return (budget, reserve)
+
+
+def assert_mhs_allocation_budget(*, estimated_bytes: int, budget_bytes: int | None, reserve_bytes: int | None) -> None:
+    """Reject unsafe allocation before decoding or constructing execution planes.
+
+    Args:
+        estimated_bytes: Conservative additional working-set estimate.
+        budget_bytes: Effective process-tree budget.
+        reserve_bytes: Required available physical-memory floor.
+
+    Returns:
+        None when both budget and reserve admit allocation.
+
+    Raises:
+        DataIntegrityError: Admission is unsafe or cannot be measured.
+    """
+    if budget_bytes is None and reserve_bytes is None:
+        return
+    if estimated_bytes < 0:
+        raise DataIntegrityError(f"mhs allocation estimate is invalid: estimated_bytes={estimated_bytes}")
+    if budget_bytes is not None:
+        if budget_bytes <= 0:
+            raise DataIntegrityError(f"mhs allocation budget is invalid: budget_bytes={budget_bytes}")
+        current = _current_tree_pss_bytes()
+        if current + estimated_bytes > budget_bytes:
+            raise DataIntegrityError(
+                f"mhs allocation budget exceeded: tree_pss={current} estimated={estimated_bytes} "
+                f"budget={budget_bytes}; no decoder or plane allocation begins"
+            )
+    if reserve_bytes is not None:
+        if reserve_bytes <= 0:
+            raise DataIntegrityError(f"mhs allocation reserve is invalid: reserve_bytes={reserve_bytes}")
+        available = _current_available_bytes()
+        if available < reserve_bytes or available - estimated_bytes < reserve_bytes:
+            raise DataIntegrityError(
+                f"mhs allocation reserve breached: available={available} estimated={estimated_bytes} "
+                f"reserve={reserve_bytes}"
+            )
+    swap = _current_tree_swap_bytes()
+    if swap is not None and swap > 0:
+        raise DataIntegrityError(
+            f"mhs allocation swap growth detected: tree_swap={swap}; replay aborts safely with diagnostics"
+        )
 
 
 def _assert_stage_rss_budget(
@@ -234,7 +391,10 @@ class ProcessTreeMemoryStats:
 
     Sum-of-RSS is deliberately NOT a field: it double-counts COW-shared parent
     pages (measured 16.61 GB vs a true 11.88 GB PSS). OOM safety is judged on
-    ``min_system_available_bytes`` only.
+    ``min_system_available_bytes`` only. Sampling peaks are sampled observations,
+    not exact instantaneous guarantees. Missing optional observations are null,
+    not zero; ``MhsResourceMeasurement`` stays per-stage evidence and is never
+    used as an aggregate PSS record.
     """
 
     tree_pss_peak_bytes: int
@@ -242,6 +402,11 @@ class ProcessTreeMemoryStats:
     min_system_available_bytes: int
     max_concurrent_procs: int
     samples_taken: int
+    parent_rss_peak_bytes: int | None = None
+    child_rss_peak_bytes: int | None = None
+    wall_seconds: float = 0.0
+    cpu_seconds: float = 0.0
+    process_swap_growth_bytes: int | None = None
 
 
 class _TreeMemorySampler:
@@ -266,10 +431,24 @@ class _TreeMemorySampler:
         self._min_system_available_bytes = -1
         self._max_concurrent_procs = 0
         self._samples_taken = 0
+        self._parent_rss_peak_bytes = -1
+        self._child_rss_peak_bytes = -1
+        self._swap_peak_bytes = -1
+        self._swap_start_bytes: int | None = None
+        self._start_wall: float | None = None
+        self._start_cpu: float | None = None
 
     def start(self) -> None:
         if self._thread is not None:
             return
+        try:
+            self._start_wall = time.perf_counter()
+            cpu = psutil.Process(os.getpid()).cpu_times()
+            self._start_cpu = float(cpu.user + cpu.system)
+        except Exception:  # noqa: BLE001 - observational
+            self._start_wall = time.perf_counter()
+            self._start_cpu = None
+        self._swap_start_bytes = _current_tree_swap_bytes()
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._sample_loop, name="mhs-tree-memory-sampler", daemon=True,
@@ -282,29 +461,59 @@ class _TreeMemorySampler:
         self._thread = None
         if thread is not None and thread.is_alive():
             thread.join(timeout=max(2.0 * self._interval, 2.0))
+        end_wall = time.perf_counter()
+        wall = end_wall - self._start_wall if self._start_wall is not None else 0.0
+        cpu: float = 0.0
+        try:
+            now_cpu = psutil.Process(os.getpid()).cpu_times()
+            now_total = float(now_cpu.user + now_cpu.system)
+            if self._start_cpu is not None:
+                cpu = max(now_total - self._start_cpu, 0.0)
+        except Exception:  # noqa: BLE001 - observational
+            cpu = 0.0
         with self._lock:
+            parent_peak = self._parent_rss_peak_bytes if self._parent_rss_peak_bytes >= 0 else None
+            child_peak = self._child_rss_peak_bytes if self._child_rss_peak_bytes >= 0 else None
+            if self._swap_peak_bytes >= 0 and self._swap_start_bytes is not None:
+                swap_growth: int | None = max(self._swap_peak_bytes - self._swap_start_bytes, 0)
+            else:
+                swap_growth = None
             return ProcessTreeMemoryStats(
                 tree_pss_peak_bytes=max(self._tree_pss_peak_bytes, 0),
                 tree_uss_peak_bytes=max(self._tree_uss_peak_bytes, 0),
                 min_system_available_bytes=max(self._min_system_available_bytes, 0),
                 max_concurrent_procs=self._max_concurrent_procs,
                 samples_taken=self._samples_taken,
+                parent_rss_peak_bytes=parent_peak,
+                child_rss_peak_bytes=child_peak,
+                wall_seconds=float(wall),
+                cpu_seconds=float(cpu),
+                process_swap_growth_bytes=swap_growth,
             )
 
     def _sample_once(self) -> None:
         pss_sum = 0
         uss_sum = 0
+        swap_sum = 0
         n_procs = 0
+        parent_rss = -1
+        child_peak = -1
         try:
             me = psutil.Process(os.getpid())
             procs = [me, *me.children(recursive=True)]
         except Exception:  # noqa: BLE001 - observational
             procs = []
-        for proc in procs:
+        for index, proc in enumerate(procs):
             try:
                 info = proc.memory_full_info()
                 pss_sum += int(getattr(info, "pss", 0))
                 uss_sum += int(getattr(info, "uss", 0))
+                swap_sum += int(getattr(info, "swap", 0))
+                rss = int(info.rss)
+                if index == 0:
+                    parent_rss = rss
+                else:
+                    child_peak = max(child_peak, rss)
                 n_procs += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -320,6 +529,11 @@ class _TreeMemorySampler:
                 self._max_concurrent_procs = max(self._max_concurrent_procs, n_procs)
                 self._tree_pss_peak_bytes = max(self._tree_pss_peak_bytes, pss_sum)
                 self._tree_uss_peak_bytes = max(self._tree_uss_peak_bytes, uss_sum)
+                self._swap_peak_bytes = max(self._swap_peak_bytes, swap_sum)
+                if parent_rss >= 0:
+                    self._parent_rss_peak_bytes = max(self._parent_rss_peak_bytes, parent_rss)
+                if child_peak >= 0:
+                    self._child_rss_peak_bytes = max(self._child_rss_peak_bytes, child_peak)
             if available >= 0:
                 if self._min_system_available_bytes < 0:
                     self._min_system_available_bytes = available
