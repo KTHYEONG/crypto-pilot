@@ -6,6 +6,7 @@ Behavioral coverage lives in the moved suite
 
 from __future__ import annotations
 
+import pytest
 import src.mhs.evaluation.windows as windows
 
 
@@ -329,6 +330,7 @@ def test_window_spill_root_prefers_env_and_defaults_to_repo_tmp(tmp_path, monkey
     assert os.path.isdir(default)
 
 
+@pytest.mark.slow
 def test_book_outcome_spills_windows_under_window_spill_root(mhs_market, monkeypatch, tmp_path) -> None:
     import dataclasses
     import tempfile

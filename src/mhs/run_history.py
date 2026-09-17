@@ -16,6 +16,7 @@ which archive rotation never touches (I-MONOTONE-TRIALS).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import time
@@ -133,6 +134,37 @@ def append_run_history_record(record: Mapping[str, Any], history_dir: Path) -> P
 # --- trial-set definition (single source for N and V) ------------------------
 
 
+def _identity_dump(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=lambda o: f"<{type(o).__module__}.{type(o).__qualname__}>",
+    )
+
+
+def _equals_field_default(value: Any, field: Any) -> bool:
+    if field.default is dataclasses.MISSING:
+        return False
+    return _identity_dump(value) == _identity_dump(field.default)
+
+
+def _sparse_identity_key(key: str) -> str:
+    """Re-key one stored identity (dense or sparse) into the sparse form."""
+    try:
+        parsed = json.loads(key)
+    except json.JSONDecodeError:
+        return key
+    if not isinstance(parsed, dict):
+        return key
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    for field in dataclasses.fields(MhsDiagnosticRequest):
+        if field.name in parsed and _equals_field_default(parsed[field.name], field):
+            del parsed[field.name]
+    return _identity_dump(parsed)
+
+
 def trial_identity_key(record: Mapping[str, Any]) -> str | None:
     """Canonical identity key of one recorded configuration.
 
@@ -141,7 +173,8 @@ def trial_identity_key(record: Mapping[str, Any]) -> str | None:
     drops the registered ``RESEARCH_NEUTRAL_FLAGS``, retains every other key
     (fail-closed against new alpha fields), and serializes canonically. Two
     records share a trial iff they denote the same strategy decision path,
-    regardless of schema drift or telemetry-only flag differences.
+    regardless of schema drift or telemetry-only flag differences. Fields equal to their registered default are
+    omitted, so adding a defaulted request field never re-keys existing configurations.
     """
     if not isinstance(record, Mapping):
         return None
@@ -152,6 +185,7 @@ def trial_identity_key(record: Mapping[str, Any]) -> str | None:
     flags = record.get("flags")
     flags = flags if isinstance(flags, Mapping) else {}
     normalized: dict[str, Any] = {}
+    registered = {f.name for f in dc_fields(MhsDiagnosticRequest)}
     for field in dc_fields(MhsDiagnosticRequest):
         value = flags.get(field.name, field.default)
         if value is None:
@@ -160,12 +194,12 @@ def trial_identity_key(record: Mapping[str, Any]) -> str | None:
             # Migration: a data_policy-less legacy record keeps its legacy
             # identity instead of adopting the new zombie default.
             value = "legacy"
-        if field.name not in RESEARCH_NEUTRAL_FLAGS:
+        if field.name not in RESEARCH_NEUTRAL_FLAGS and not _equals_field_default(value, field):
             normalized[field.name] = value
     for key, value in flags.items():
         # Unknown keys are unregistered by construction: retain them fail-closed.
-        if key not in normalized and key not in RESEARCH_NEUTRAL_FLAGS:
-            normalized[key] = value
+        if key not in registered and key not in RESEARCH_NEUTRAL_FLAGS:
+            normalized[key] = value  # noqa: PERF403
     snapshot = record.get("params_snapshot")
     if isinstance(snapshot, Mapping):
         # Mapped snapshot keys and values are canonically retained, so newly
@@ -177,12 +211,7 @@ def trial_identity_key(record: Mapping[str, Any]) -> str | None:
         normalized["params_snapshot"] = {
             "__legacy_params_snapshot__": f"non-mapping:{type(snapshot).__module__}.{type(snapshot).__qualname__}"
         }
-    return json.dumps(
-        normalized,
-        ensure_ascii=False,
-        sort_keys=True,
-        default=lambda o: f"<{type(o).__module__}.{type(o).__qualname__}>",
-    )
+    return _identity_dump(normalized)
 
 
 def _carries_data_integrity_code(record: Mapping[str, Any]) -> bool:
@@ -250,7 +279,12 @@ def _load_trials_ledger(directory: Path) -> dict[str, str] | None:
         return None
     if not isinstance(loaded, dict):
         return None
-    return {str(key): str(value) for key, value in loaded.items()}
+    rekeyed: dict[str, str] = {}
+    for key, value in loaded.items():
+        sparse = _sparse_identity_key(str(key))
+        first = str(value)
+        rekeyed[sparse] = min(rekeyed[sparse], first) if sparse in rekeyed else first
+    return rekeyed
 
 
 def _upsert_trials_ledger(record: Mapping[str, Any], history_dir: Path) -> None:

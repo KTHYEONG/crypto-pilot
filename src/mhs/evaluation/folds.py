@@ -29,7 +29,7 @@ from src.mhs.discovery import (
     DiscoveryQualificationResult,
     fold_train_only_discovery_qualification,
 )
-from src.mhs.evidence import AnchoredPurgedFold, phase_1_anchored_purged_folds
+from src.mhs.evidence import AnchoredPurgedFold, phase_1_anchored_purged_folds, resolved_anchored_folds
 from src.mhs.execution import (
     mhs_ledger_pnl,
     replay_execution_window_batch,
@@ -654,7 +654,7 @@ def _run_folds_parallel(
     top-level matrices and minute-frame retention, not to fork-COW sharing, so
     spawn would not reduce it.
     """
-    folds = phase_1_anchored_purged_folds()
+    folds = resolved_anchored_folds(request)
     if not folds:
         return ()
     reports: dict[int, MhsFoldReport] = {}

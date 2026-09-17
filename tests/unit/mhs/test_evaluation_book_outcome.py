@@ -16,6 +16,8 @@ from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _build_books_concurrent_args,
 )
 
+pytestmark = pytest.mark.slow
+
 def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
     # SCENARIO_BOOK_OUTCOME_IS_TWO_PASS: the reported primary is the
     # P&L-vol-target-rescaled Pass-2 replay, with Pass 1 kept as the

@@ -8,6 +8,7 @@ carry the exact historical ``ValueError`` message strings so the 56
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -148,6 +149,7 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
                 "committee_tranche_smoothing"
             )
     _validate_committee_tranche_count(request)
+    _validate_forward_registration(request)
     if not isinstance(request.committee_growth_diagnostic, bool):
         raise ValueError("committee_growth_diagnostic must be a bool")
     if request.committee_growth_diagnostic and not request.committee_book:
@@ -220,3 +222,23 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
         raise ValueError("funding_carry_weight must be in [0.0, 1.0)")
     if request.funding_carry_weight > 0.0 and not request.funding_carry_sleeve:
         raise ValueError("funding_carry_weight > 0.0 requires funding_carry_sleeve=True")
+
+
+def _validate_forward_registration(request: MhsDiagnosticRequest) -> None:
+    """Fail-closed preconditions for a registered forward evaluation."""
+    digest = request.forward_registration_digest
+    if digest is None:
+        return
+    from src.mhs.params import DISCOVERY_START
+    from src.mhs.preregistration import _utc, is_quarter_end_date
+
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{32}", digest) is None:
+        raise ValueError("forward_registration_digest must be 32 lowercase hex characters")
+    if request.end is None or not is_quarter_end_date(request.end):
+        raise ValueError("forward_registration_digest requires end at a calendar quarter-end date")
+    if request.final_oos_2026h1:
+        raise ValueError("forward_registration_digest is mutually exclusive with final_oos_2026h1")
+    if request.fold_safe_horizon_selection:
+        raise ValueError("forward_registration_digest requires fold_safe_horizon_selection=False")
+    if request.start is not None and _utc(request.start) != DISCOVERY_START:
+        raise ValueError("forward_registration_digest requires start at DISCOVERY_START")

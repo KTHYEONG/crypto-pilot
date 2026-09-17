@@ -271,6 +271,7 @@ class TestBookOutcomePaired:
     rescaled bounds through ``replay_execution_window_batch_isolated``, and preserves
     the typed book failure conversion."""
 
+    @pytest.mark.slow
     def test_book_builds_window_iterator_twice_streaming(self, mhs_market, monkeypatch) -> None:
         # Pins the spill-once generator contract; disable coupled streaming.
         monkeypatch.setattr(ev._scaling, "is_streaming_scale_mode", lambda _request: False)
@@ -474,6 +475,7 @@ def test_p11_resolve_ns_bit_identical() -> None:
         _reference_resolve_ns_scalar(spos_all, grid_ns, n_grid, odd_delta),
     )
 
+@pytest.mark.slow
 def test_p10_concurrent_books_parity(mhs_market) -> None:
     # SCENARIO_P10_CONCURRENT / SCENARIO_MHS_REGIME_SCALE_OMITTED_BYTE_IDENTICAL_02:
     # three books executed concurrently in fork workers produce bit-identical
@@ -497,6 +499,7 @@ def test_p10_mark_cache_warmable_per_symbol(mhs_market) -> None:
         assert ev._get_symbol_mark_frame(s, "1h") is not None
     assert ev._get_symbol_mark_frame.cache_info().currsize >= len(syms)
 
+@pytest.mark.slow
 def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
     # SCENARIO_P10_ISOLATION: a book whose outcome is a typed failure (primary
     # dropped, failure set) is delivered through the process pool without
@@ -561,6 +564,7 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
     assert blend.primary is not None
     assert blend.failure is None
 
+@pytest.mark.slow
 def test_regime_scale_reaches_blend_replay_not_only_prescreen(mhs_market) -> None:
     # SCENARIO_MHS_REGIME_SCALE_REACHES_BLEND_REPLAY_01: blend replay reflects regime scale.
     args = _build_books_concurrent_args(mhs_market)
@@ -719,6 +723,7 @@ def test_target_gross_request_validation() -> None:
     with pytest.raises(ValueError, match="committee_target_gross"):
         MhsDiagnosticRequest(committee_target_gross=2.5, committee_capital=True)
 
+@pytest.mark.slow
 def test_reference_bound_degraded_preserves_primary(mhs_market, monkeypatch) -> None:
     """SCENARIO_MHS_REFERENCE_BOUND_DEGRADED: when the isolated batch returns
     a None result for the strict-proxy slot plus an IsolatedBoundFailure,

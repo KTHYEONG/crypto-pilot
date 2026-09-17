@@ -50,11 +50,13 @@ from src.mhs.evaluation import (
     funding_carry_execution_book,
     horizon_log_return,
     mhs_ledger_pnl,
-    phase_1_anchored_purged_folds,
     realized_vol,
     select_horizon_by_discovery_qualification,
     year_restricted_correlation,
     yearly_net_t_diagnostic,
+)
+from src.mhs.evidence import (  # noqa: F401 -- legacy monkeypatch seam
+    resolved_anchored_folds,
 )
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
@@ -95,7 +97,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         _train_ends = {"top_level": COMMITTEE_OOS_START}
         _train_ends.update({
             f"fold_{_i}": _f.train_end
-            for _i, _f in enumerate(phase_1_anchored_purged_folds())
+            for _i, _f in enumerate(resolved_anchored_folds(ctx.config))
         })
         ctx._committee_weights_by_boundary = committee._committee_evidence_weights_by_boundary(
             ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols, _train_ends,
@@ -105,7 +107,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         # (INV-WALK-FORWARD-INDEPENDENCE): the top-level deployed mix is used
         # for the deployed blend only, never replicated across folds.
         ctx._fold_committee_weights = _fold_weights_from_boundaries(
-            ctx._committee_weights_by_boundary, phase_1_anchored_purged_folds(),
+            ctx._committee_weights_by_boundary, resolved_anchored_folds(ctx.config),
         )
     if ctx.config.committee_capital:
         # RC-4: the reported blend is the committee execution book, not the
