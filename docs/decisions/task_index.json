@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_continuous_process_backtest",
+      "date": "2026-09-17",
+      "adr_id": "ADR_20260917_mhs_continuous_process_backtest",
+      "domain": "mhs",
+      "title": "MHS 연속 과정 백테스트 및 생존편향 데이터 복구",
+      "why": "분기 폴드 개별 재생이 사이징 상태를 매번 리셋해 실거래 경로와 어긋났고, 멤버·트랜치·사이징 등 사람이 정한 상수 15개가 전체 기간 결과를 보고 고정돼 있었으며, 개발용 유니버스에 삭제·개명된 코인 22종이 누락돼 생존편향이 있었다",
+      "resolution": "2021-01부터 2026-06-30까지 매월 재적합하는 단일 인과 경로로 후보 18개(피처 13+펀딩캐리 5)를 베타중립·성장가중치·추정오차반영 Kelly로 자동 선택하는 process.py/process_backtest.py를 신설하고, Vision 목록 페이지네이션과 underlyingType 기반 비크립토(주식·상품·지수) 제외 필터를 갖춘 universe-gaps 수집 명령을 추가했다",
+      "impact": "실측: 생존편향 수집으로 MATIC/EOS/LUNA/SRM/TOMO/RNDR 등 21종 복구(7종은 거래소에 실제 이력 없음 확인), 연속 백테스트 1분51초·RAM피크 8.98GB로 기존 745초 대비 85% 단축, go=false(E1/E2/E3 FAIL)이나 노출 추정기가 기본비용에서 2022~2024 3년간 노출 0·스트레스비용에서 전 구간 노출 0으로 확인돼 이번 FAIL이 엣지 부재가 아니라 사이징 추정기 과보수성에 의한 것임을 실측 확인",
+      "caveat": "노출 추정기(누적 전체기록 평균 기반 t²>1 유의성 게이트)가 과도하게 보수적이라 재설계 전에는 재실행해도 같은 결과가 나올 가능성이 크며, 현재 리포트는 1h 원장 근사 등급(process_proxy_1h_ledger)으로 배포 판정이 아니다"
+    },
+    {
       "task_id": "mhs_forward_preregistration",
       "date": "2026-09-17",
       "adr_id": "ADR_20260917_mhs_forward_preregistration",
@@ -992,16 +1003,6 @@
       "why": "직전 ADR_20260819_MHS_COMMITTEE_EVIDENCE_WEIGHTING이 --committee-evidence-weighting을 배선했으나, 실제 백테스트 실행 후 fold별 CAGR이 플래그 on/off와 무관하게 baseline과 소수점까지 완전히 동일함을 발견. 원인 추적 결과 _build_fold_target_weights가 메모리 절감을 위해 fold 패널을 validation_start-38일부터만 로드하는데(기존 설계), sign_train_end=fold.train_end로 가중치를 그 잘린 패널 안에서 피팅하려 하면 336h~720h 룩백이 필요한 멤버들이 전부 NaN이 되어 train_evidence_weights의 min_train_rows fail-closed 폴백이 매번 등가중으로 조용히 무효화시킴을 재현 스크립트로 확정(넓은 패널로 같은 train_end를 계산하면 44%/32%/24%/0%/0%처럼 명확히 차등화된 가중치가 나옴 -- 우연한 수렴이 아니라 데이터 부족).",
       "resolution": "src/application/research/mhs/evaluation.py에 신규 함수 _committee_evidence_weights_by_boundary 추가: top-level의 이미 로드된 연속 2021-2025 패널에서 위원회 멤버 북/proxy를 단 한 번만 만들고, top-level(MHS_COMMITTEE_OOS_START)과 3개 fold의 train_end 총 4개 경계에 대해 가중치를 한 번에 계산. _committee_execution_book은 sign_train_end 파라미터와 내부 피팅 로직을 완전히 제거하고 member_weights(외부에서 미리 계산된 매핑)를 적용·admitted 멤버 기준 재정규화·fail-closed만 담당하도록 단순화(가중치 피팅과 북 구성의 책임 분리). 계산된 fold별 가중치(dict[int,dict[str,float]], 작은 데이터)를 _run_post_book_concurrently -> pool.submit(_run_anchored_fold) -> _build_fold_target_weights 체인에 신규 trailing 파라미터로 배선(패널 자체는 fork 워커로 전달하지 않아 기존 메모리 경계 유지). 모든 신규 파라미터는 None 기본값이라 committee_evidence_weighting=False 시 완전 byte-identical. 감사(/check) 중 구현물이 _run_post_book_concurrently의 fold별 telemetry.record 호출을 스코프 밖에서 삭제한 회귀를 발견해 별도로 복원 완료(tests/integration의 test_ordered_non_negative_stage_records 재통과 확인). 신규 시나리오 테스트 6건, 관련 전체 unit/integration 스위트 검증, ruff/mypy 통과.",
       "impact": "fold 경로 배선이 실제로 작동함을 실측 리플레이로 확정 -- fold0 11.83%->12.89%, fold1 8.15%->4.81%, fold2 105.02%->67.33%로 3개 fold 전부 baseline과 명확히 달라짐(이전엔 소수점까지 동일해 버그가 조용히 숨어 있었음). top-level 연속 리플레이 성과(CAGR 38.53%, Calmar 3.037)는 이번 수정으로 영향받지 않음(원래도 정상 작동했음). 다만 정직한 신규 발견: fold별로는 순수 개선이 아니며, fold1(2024)이 등가중보다 나빠져 Sharpe가 0.535로 MHS_GO_PRIMARY_SHARPE_FLOOR(0.6) 미달 + STRESS_SHARPE_NOT_POSITIVE 신규 위반, research_go.folds_passed가 3->2로 하락. leak-free 학습 데이터가 fold마다 다른 길이라 가중치 추정 안정성이 fold별로 다르다는 뜻으로 해석 -- committee_evidence_weighting을 기본값으로 전환하기 전 fold1 불안정성의 근본 원인(학습 데이터 부족 또는 특정 멤버 과적합) 규명이 선행 과제로 남음."
-    },
-    {
-      "task_id": "MHS_COMMITTEE_TARGET_GROSS",
-      "date": "2026-08-19",
-      "adr_id": "ADR_20260819_MHS_COMMITTEE_TARGET_GROSS",
-      "domain": "quant",
-      "title": "MHS 위원회 목표 총노출(target gross) 복원",
-      "why": "docs/results/mhs_run_history/latest.json 및 daily_ledger.parquet 실측 분석 결과, k=5 위원회 평균과 tranche 평활이 재정규화 없이 blend_target_gross를 1.0에서 0.530(현금 47%)으로 희석시키고 있음을 확인. 이 47%는 리스크 판단이 아닌 산술적 잔여물이며, 하류의 두 리스크 레이어(_pnl_vol_target_scale, _regime_cash_scale)는 스케일 불변(소수점 6자리까지 동일)임을 실증하여 노출 복원이 하류에서 상쇄되지 않음을 확인. 프로젝트 자체 registered growth-optimal 솔버(solve_growth_optimal_risk)도 등록 상수(MHS_COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25)로 독립적으로 1.5x 선택, 실현 참여율(5e-9)로 선형비용가정 유효함을 확인.",
-      "resolution": "src/mhs/books.py에 scale_book_to_target_gross 순수함수 추가(행별 절대값합을 target_gross로 재정규화, 달러중립·상대비중 보존, np.divide safe-division). MhsDiagnosticRequest.committee_target_gross: float|None=None 필드 및 (0.0,2.0] 검증 추가. _committee_execution_book에 target_gross 파라미터 추가, 단일 종료지점에서 tranche/regime-adaptive 평활 이후 리스케일 적용. fold 경로와 top-level blend 경로 양쪽 호출부 모두에 배선(누락 시 _fold_blend_parity의 FOLD_BLEND_PATH_DIVERGENCE 유발 가능하므로 필수). CLI --committee-target-gross 플래그 추가. 신규 테스트 6건(tests/unit/mhs/test_books.py 5건 + test_evaluation.py 1건) 전량 통과, 관련 전체 스위트(tests/unit/mhs/, tests/unit/application/research/mhs/test_evaluation.py) 회귀 없음, ruff/mypy 통과. target_gross=None(기본값)은 기존 동작과 byte-identical.",
-      "impact": "opt-in 파라미터 추가만으로 완료됨 -- 기본값 None은 기존 프로덕션 경로에 어떤 영향도 주지 않음(회귀 없음). 실측 백테스트 경로 시뮬레이션(returns 배율 적용, 실제 리플레이 아님) 기준으로 gross=0.795는 CAGR 34.7%->54.7%(MDD -17.2%), gross=1.0(불변식 완전복원)은 CAGR 34.7%->71.3%(MDD -21.2%) -- 둘 다 등록된 25% MDD 예산 이내이며 차입 불필요. 단, ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT 전례(fold 단위는 개선했으나 연속 전체이력 리플레이에서 CAPITAL_INVARIANT_BREACH 발생)에 따라 실제 노출값 채택 전 --committee-target-gross 플래그로 실제 리플레이 실행 및 termination_counts/research_go 검증이 필수 선행조건임을 스펙 §5에 명시. 집중도 게이트(FOLD_GROWTH_CONCENTRATION)와 deflated_sharpe_ratio≈0 문제는 이 변경으로 해결되지 않음(자본배치 효율화이지 신규 알파 아님) -- 후속 과제로 fast_reversal 신호 재조정과 committee_growth_diagnostic의 committee_capital 경로 개방이 남음."
     }
   ]
 }
