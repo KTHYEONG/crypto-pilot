@@ -50,6 +50,50 @@ def _funding(args: argparse.Namespace) -> None:
     _logger.info("Funding collection complete for %s (through %s)", args.symbol, args.end)
 
 
+def _universe_gaps(args: argparse.Namespace) -> None:
+    """List (and with ``--execute`` collect) Vision perpetuals missing from the local lake.
+
+    Collects OHLCV and funding for each gap symbol so the MHS panel keeps it
+    (symbols without funding are dropped downstream).
+    """
+    from src.common.paths import FUTURES_DATA_DIR
+    from src.market_data.binance.vision import BinanceVisionDownloader
+    from src.market_data.services.universe_gaps import (
+        fetch_exchange_info,
+        historical_universe_gaps,
+        local_futures_symbols,
+        non_crypto_symbols,
+    )
+
+    vision = BinanceVisionDownloader()
+    monthly = vision.list_all_symbols(dataset_prefix="data/futures/um/monthly/klines/")
+    daily = vision.list_all_symbols()
+    # 한쪽 목록만 실패해도 합집합이 불완전하므로 조용히 진행하지 않는다.
+    if not monthly or not daily:
+        raise SystemExit("[DATA] stage=universe_gaps status=LISTING_FAILED")
+    listed = set(monthly) | set(daily)
+    # Vision USDT 영구계약 명명 규칙을 토큰화 주식/원자재/지수도 함께 쓴다
+    # (TSLAUSDT, XAUUSDT, HK0700USDT 등); underlyingType != COIN만 제외한다.
+    try:
+        exclude = non_crypto_symbols(fetch_exchange_info())
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"[DATA] stage=universe_gaps status=EXCHANGE_INFO_FAILED detail={exc}") from exc
+    gaps = historical_universe_gaps(
+        listed,
+        local_futures_symbols(FUTURES_DATA_DIR / "ohlcv", args.timeframe),
+        partition=args.partition,
+        exclude=exclude,
+    )
+    _logger.info(
+        "[DATA] stage=universe_gaps partition=%s timeframe=%s gaps=%d symbols=%s execute=%s",
+        args.partition, args.timeframe, len(gaps), ",".join(gaps), args.execute,
+    )
+    if args.execute:
+        for symbol in gaps:
+            collection.collect_ohlcv(symbol, args.timeframe, args.start, args.end)
+            collection.collect_funding(symbol, args.start, args.end)
+
+
 def _metrics(args: argparse.Namespace) -> None:
     collection.collect_metrics(args.symbol, args.start, args.end)
     _logger.info("Metrics collection complete for %s (through %s)", args.symbol, args.end)
@@ -349,6 +393,16 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     funding.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     funding.add_argument("--end", required=True)
     funding.set_defaults(handler=_funding)
+
+    universe_gaps = collect_sub.add_parser(
+        "universe-gaps", help="List or collect Vision perpetuals missing from the local lake",
+    )
+    universe_gaps.add_argument("--timeframe", default="1h")
+    universe_gaps.add_argument("--partition", choices=["dev", "holdout", "all"], default="dev")
+    universe_gaps.add_argument("--start", default="2021-01-01")
+    universe_gaps.add_argument("--end", required=True)
+    universe_gaps.add_argument("--execute", action="store_true")
+    universe_gaps.set_defaults(handler=_universe_gaps)
 
     metrics = collect_sub.add_parser(
         "metrics", help="Collect daily futures metrics (open interest) for one symbol",

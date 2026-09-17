@@ -361,22 +361,50 @@ class BinanceVisionDownloader:
         dataset_prefix: str = "data/futures/um/daily/klines/",
         timeout: int | None = None,
     ) -> list[str]:
-        """Parses S3 XML listing and returns symbol list within dataset directory."""
-        query = urllib.parse.urlencode({"prefix": dataset_prefix, "delimiter": "/"})
-        url = f"{self.S3_LISTING_URL}?{query}"
+        """Parse every page of the S3 XML listing and return the symbols under ``dataset_prefix``.
+
+        The bucket listing caps one response at 1000 common prefixes and the UM
+        futures archive exceeds that, so pages are followed via ``marker`` until
+        ``IsTruncated`` is false; an unpaginated read silently truncates the
+        alphabetical tail of the universe. Any page failure returns ``[]`` (the
+        historical contract) -- callers that must not mistake a failure for an
+        empty universe fail closed on the empty result.
+        """
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        symbols: set[str] = set()
+        marker: str | None = None
         try:
-            body = self._read_url_bytes(url, timeout=timeout)
-            root = ElementTree.fromstring(body)  # noqa: S314
-            symbols: list[str] = []
-            ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
-            for node in root.findall(f".//{ns}CommonPrefixes/{ns}Prefix"):
-                prefix = (node.text or "").strip()
-                if not prefix.startswith(dataset_prefix):
-                    continue
-                remain = prefix[len(dataset_prefix) :].strip("/")
-                if remain:
-                    symbols.append(remain.split("/")[0])
-            return sorted(set(symbols))
+            while True:
+                params: dict[str, str] = {"prefix": dataset_prefix, "delimiter": "/"}
+                if marker is not None:
+                    params["marker"] = marker
+                query = urllib.parse.urlencode(params)
+                url = f"{self.S3_LISTING_URL}?{query}"
+                body = self._read_url_bytes(url, timeout=timeout)
+                root = ElementTree.fromstring(body)  # noqa: S314
+                prefixes = root.findall(f".//{ns}CommonPrefixes/{ns}Prefix")
+                page_prefixes: list[str] = [(node.text or "").strip() for node in prefixes]
+                for prefix in page_prefixes:
+                    if not prefix.startswith(dataset_prefix):
+                        continue
+                    remain = prefix[len(dataset_prefix):].strip("/")
+                    if remain:
+                        symbols.add(remain.split("/")[0])
+                truncated_node = root.find(f".//{ns}IsTruncated")
+                is_truncated = (
+                    truncated_node is not None
+                    and (truncated_node.text or "").strip().lower() == "true"
+                )
+                if not is_truncated or not page_prefixes:
+                    break
+                next_marker_node = root.find(f".//{ns}NextMarker")
+                next_marker = (
+                    (next_marker_node.text or "").strip()
+                    if next_marker_node is not None and next_marker_node.text
+                    else ""
+                )
+                marker = next_marker if next_marker else page_prefixes[-1]
+            return sorted(symbols)
         except Exception as e:
             self.logger.warning("Failed to list symbols from Vision S3 XML listing: %s", e)
             return []

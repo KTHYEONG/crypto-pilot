@@ -113,6 +113,72 @@ def test_s3_listing_parses_symbols(downloader, monkeypatch) -> None:
     assert downloader.list_all_symbols() == ["ETHUSDT"]
 
 
+def _vision_page(prefixes: list[str], truncated: bool, next_marker: str | None = None) -> bytes:
+    ns = "http://s3.amazonaws.com/doc/2006-03-01/"
+    parts = [f'<ListBucketResult xmlns="{ns}">']
+    parts.extend(f"<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>" for prefix in prefixes)
+    parts.append(f"<IsTruncated>{'true' if truncated else 'false'}</IsTruncated>")
+    if next_marker is not None:
+        parts.append(f"<NextMarker>{next_marker}</NextMarker>")
+    parts.append("</ListBucketResult>")
+    return "".join(parts).encode()
+
+
+def test_s3_listing_follows_next_marker(downloader, monkeypatch) -> None:
+    prefix = "data/futures/um/daily/klines/"
+    first = _vision_page([f"{prefix}AAAUSDT/", f"{prefix}BBBUSDT/"], True, "MARKER-1")
+    second = _vision_page([f"{prefix}ZZZUSDT/"], False)
+    urls: list[str] = []
+
+    def _fake(url, timeout=None):
+        urls.append(url)
+        return first if len(urls) == 1 else second
+
+    monkeypatch.setattr(downloader, "_read_url_bytes", _fake)
+    assert downloader.list_all_symbols() == ["AAAUSDT", "BBBUSDT", "ZZZUSDT"]
+    assert "marker=MARKER-1" in urls[1]
+
+
+def test_s3_listing_falls_back_to_last_prefix(downloader, monkeypatch) -> None:
+    prefix = "data/futures/um/daily/klines/"
+    first = _vision_page([f"{prefix}AAAUSDT/", f"{prefix}MMMUSDT/"], True)
+    second = _vision_page([f"{prefix}ZZZUSDT/"], False)
+    urls: list[str] = []
+
+    def _fake(url, timeout=None):
+        urls.append(url)
+        return first if len(urls) == 1 else second
+
+    monkeypatch.setattr(downloader, "_read_url_bytes", _fake)
+    assert downloader.list_all_symbols() == ["AAAUSDT", "MMMUSDT", "ZZZUSDT"]
+    assert "marker=" in urls[1]
+
+
+def test_s3_listing_second_page_failure_returns_empty(downloader, monkeypatch) -> None:
+    prefix = "data/futures/um/daily/klines/"
+    first = _vision_page([f"{prefix}AAAUSDT/"], True, "MARKER-1")
+    calls = 0
+
+    def _fake(url, timeout=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return first
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(downloader, "_read_url_bytes", _fake)
+    assert downloader.list_all_symbols() == []
+
+
+def test_s3_listing_skips_foreign_and_empty_prefixes(downloader, monkeypatch) -> None:
+    prefix = "data/futures/um/daily/klines/"
+    body = _vision_page(
+        [f"{prefix}AAAUSDT/", "data/futures/um/monthly/klines/BBBUSDT/", prefix], False
+    )
+    monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: body)
+    assert downloader.list_all_symbols() == ["AAAUSDT"]
+
+
 def test_normalize_metrics_frame_string_and_numeric_timestamps() -> None:
     d = BinanceVisionDownloader()
     string_frame = pd.DataFrame({

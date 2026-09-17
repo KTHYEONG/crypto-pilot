@@ -376,3 +376,27 @@ SIGNAL_OVERLAP_TOLERANCE: float = 1e-9
 # registered constant without triggering the committee_capital requirement,
 # while an explicit non-None value keeps requiring committee_capital=True.
 COMMITTEE_TARGET_GROSS_UNSET: object = object()
+
+# --- continuous process backtest -------------------------------------------------
+# 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).
+PROCESS_REFIT_FREQUENCY: str = "MS"
+# 첫 적합은 펀딩/계절 주기 1회(365일)의 학습 표본을 요구한다.
+PROCESS_MIN_TRAIN_DAYS: int = 365
+# 학습 끝과 적용 시작 사이 퍼지: 최장 멤버 룩백(720h)과 동일.
+PROCESS_PURGE_HOURS: int = COMMITTEE_PURGE_HOURS
+# 평활 반감기 사다리(일): 0=즉시 추종, 상한 8일=측정된 가장 느린 신호 감쇠(flow_imb).
+PROCESS_SMOOTHING_HALFLIFE_LADDER_DAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0)
+# RiskMetrics 일간 분산 감쇠(외부 관례값, 이 데이터로 적합하지 않음).
+PROCESS_RISK_EWMA_LAMBDA: float = 0.94
+# rank_weight_book 전체에서 쓰는 최소 종목 수 하한과 동일.
+PROCESS_MIN_SYMBOLS: int = 8
+# 캔들로 계산 가능한 전체 등록 피처. 동일 북을 만드는 중복(taker_imb_168h≡flow_imb_168h,
+# mom_336h≡xs_mom_336h)과 레이크에 없는 컬럼(no_trades)이 필요한 avg_trade_size는 제외.
+PROCESS_FEATURE_CANDIDATES: tuple[str, ...] = (
+    "mom_168h", "rev_24h", "taker_imb_24h", "amihud", "lowvol_168h", "hl_range_168h",
+    "turnover_chg", "flow_imb_168h", "flow_imb_720h", "xs_mom_336h", "xs_mom_720h",
+    "xs_idio_mom_336h", "mom3_skew_168h",
+)
+PROCESS_FUNDING_CARRY_CANDIDATES_HOURS: tuple[int, ...] = FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+# 2026-07-01 이후 미사용 전진 구간을 보존하는 평가 상한.
+PROCESS_EVALUATION_CEILING: pd.Timestamp = MHS_FINAL_OOS_CUTOFF_2026H1
