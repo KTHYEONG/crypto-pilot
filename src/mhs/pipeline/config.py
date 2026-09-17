@@ -112,6 +112,7 @@ class MhsRunConfig:
     # One-time, narrowly-scoped extension of the sealed evaluation window for a
     # user-authorized final-OOS check (2026-08-25 decision) -- see MHS_FINAL_OOS_CUTOFF_2026H1.
     final_oos_2026h1: bool = False
+    forward_registration_digest: str | None = None
     data_policy: Literal['legacy', 'zombie_mask_v1'] = MHS_DATA_POLICY_DEFAULT
     input_manifest_path: str | None = None
     forward_execution_quality_dir: str | None = None
@@ -202,6 +203,7 @@ class MhsRunConfig:
             growth_envelope=args.growth_envelope,
             committee_member_attribution=args.committee_member_attribution,
             final_oos_2026h1=args.final_oos_2026h1,
+            forward_registration_digest=args.forward_registration_digest,
             data_policy=args.data_policy,
             input_manifest_path=args.input_manifest_path,
             forward_execution_quality_dir=args.forward_execution_quality_dir,

@@ -19,7 +19,7 @@ from src.common.errors import DataIntegrityError
 from src.mhs.evidence import (
     DeploymentReadinessResult,
     compute_deployment_readiness,
-    phase_1_anchored_purged_folds,
+    resolved_anchored_folds,
 )
 from src.mhs.parallel import (
     FORK_CONTEXT,
@@ -261,7 +261,7 @@ def _run_post_book_concurrently(
     fold order; ``blend_participation``/``statistical_diagnostics`` telemetry is
     left to the caller so the ordered-stage contract is preserved deterministically.
     """
-    fold_list = phase_1_anchored_purged_folds()
+    fold_list = resolved_anchored_folds(request)
     has_primary = blend_report is not None and blend_report.primary is not None
     # The request crosses a fork-worker pickle boundary below. Resolve the
     # identity sentinel in the parent so a default committee gross is preserved.

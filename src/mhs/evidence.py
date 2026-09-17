@@ -856,22 +856,21 @@ class AnchoredPurgedFold:
             raise ValueError("the purge embargo must be positive")
 
 
-def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
-    """Quarterly preregistered Level 2 anchored purged folds (expanding window).
+def anchored_purged_folds_through(final_boundary: pd.Timestamp) -> tuple[AnchoredPurgedFold, ...]:
+    """Quarterly anchored purged folds whose last validation quarter ends at ``final_boundary``.
 
-    ``purge_hours`` derives from the maximum forward dependency (frozen at
-    168h for Phase 1) and is independent of block length.  Every fold trains
-    on everything from ``DISCOVERY_START`` through a quarter-end boundary and
-    validates on the following quarter after the 168h purge plus a 24h
-    calendar-alignment slack; these folds are internal historical robustness,
-    never labelled OOS.  The final boundary stays pinned to the sealed holdout
-    cutoff so the evaluation window's outer edge never moves.
+    Raises:
+        ValueError: ``final_boundary`` is naive or yields no complete validation quarter.
     """
+    if not isinstance(final_boundary, pd.Timestamp) or final_boundary.tzinfo is None:
+        raise ValueError("final_boundary must be a tz-aware pd.Timestamp")
     boundaries = pd.date_range(
         start=pd.Timestamp("2021-12-31", tz="UTC"),
-        end=HOLDOUT_CUTOFF.normalize(),
+        end=final_boundary.tz_convert("UTC").normalize(),
         freq="QE-DEC",
     )
+    if len(boundaries) < 2:
+        raise ValueError("final_boundary yields no complete validation quarter")
     return tuple(
         AnchoredPurgedFold(
             DISCOVERY_START,
@@ -883,6 +882,33 @@ def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
         )
         for i in range(len(boundaries) - 1)
     )
+
+
+def resolved_anchored_folds(request: Any) -> tuple[AnchoredPurgedFold, ...]:
+    """Fold set for one run: legacy sealed folds, or folds through a registered forward end.
+
+    ``request`` is ``Any`` because callers pass both ``MhsDiagnosticRequest`` and
+    ``MhsRunConfig``.
+    """
+    if getattr(request, "forward_registration_digest", None) is None:
+        return phase_1_anchored_purged_folds()
+    end = pd.Timestamp(request.end)
+    end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
+    return anchored_purged_folds_through(end)
+
+
+def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
+    """Quarterly preregistered Level 2 anchored purged folds (expanding window).
+
+    ``purge_hours`` derives from the maximum forward dependency (frozen at
+    168h for Phase 1) and is independent of block length.  Every fold trains
+    on everything from ``DISCOVERY_START`` through a quarter-end boundary and
+    validates on the following quarter after the 168h purge plus a 24h
+    calendar-alignment slack; these folds are internal historical robustness,
+    never labelled OOS.  The final boundary stays pinned to the sealed holdout
+    cutoff so the evaluation window's outer edge never moves.
+    """
+    return anchored_purged_folds_through(HOLDOUT_CUTOFF)
 
 
 @dataclass(frozen=True, slots=True)

@@ -90,6 +90,12 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     if getattr(args, "deploy_push", False):
         _assert_deploy_policy_matches_runtime(config.data_policy)
     request = MhsDiagnosticRequest(**dataclasses.asdict(config))
+    if getattr(args, "register_procedure", False):
+        import pandas as pd
+        from src.mhs.preregistration import register_procedure
+        registration = register_procedure(request, now=pd.Timestamp.now(tz="UTC"))
+        _logger.info("[EVAL] procedure_registered digest=%s effective_start=%s", registration.procedure_digest, registration.effective_start.isoformat())
+        return
     report = run_mhs_diagnostic(config)
     persist_start = time.perf_counter()
     path = persist_mhs_horizon_diagnostic_report(
@@ -702,6 +708,8 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "feed back into further parameter tuning."
         ),
     )
+    mhs.add_argument("--forward-registration", dest="forward_registration_digest", default=None, help="Evaluate a pre-registered MHS procedure (digest) through a completed calendar quarter end; requires --end at that quarter end.")
+    mhs.add_argument("--register-procedure", action="store_true", default=False, help="Freeze this flag set as a pre-registered procedure in the git-tracked registry and exit without running.")
     mhs.add_argument(
         "--committee-member-attribution",
         action="store_true",

@@ -580,7 +580,7 @@ def test_book_outcome_blend_traces_carry_deployed_exposure_scale(mhs_market, mon
     import src.mhs.evidence as evidence_mod
 
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: (fold,))
-    monkeypatch.setattr(windows_mod, "phase_1_anchored_purged_folds", lambda: (fold,))
+    monkeypatch.setattr(windows_mod, "resolved_anchored_folds", lambda _req: (fold,))
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: (fold,))
 
     args = _build_book_outcome_args(mhs_market)
@@ -710,7 +710,6 @@ def test_post_book_concurrently_forwards_only_fold_local_policy(monkeypatch) -> 
     import src.mhs.parallel as parallel_mod
 
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
-    monkeypatch.setattr(concurrency_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
     monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
     monkeypatch.setattr(ev, "_run_anchored_fold", _capturing_anchored_fold)
@@ -770,7 +769,6 @@ def test_p14_postbook_no_deadlock(monkeypatch) -> None:
     import src.mhs.evidence as evidence_mod
 
     monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
-    monkeypatch.setattr(concurrency_mod, "phase_1_anchored_purged_folds", lambda: ())
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
     calls = {"n": 0}
 

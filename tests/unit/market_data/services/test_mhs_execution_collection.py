@@ -307,3 +307,34 @@ def test_relevant_mark_coverage_stale_carry_allowance(tmp_path, monkeypatch) -> 
     assert mhs_execution_collection.assert_relevant_mark_price_coverage(
         mask, stale_hours=24,
     ) is None
+
+
+def test_mhs_execution_plan_reads_warmup_so_short_windows_plan(tmp_path, monkeypatch) -> None:
+    idx = pd.date_range("2026-03-01", periods=4700, freq="1h", tz="UTC")
+    quote = pd.DataFrame({f"S{i:02d}": float(i + 1) for i in range(16)}, index=idx)
+    close = pd.DataFrame(
+        {symbol: 100.0 + (i + 1) * pd.Series(range(len(idx)), index=idx)
+         for i, symbol in enumerate(quote.columns)},
+    )
+    captured: dict[str, pd.Timestamp] = {}
+
+    def _panel(root, interval, columns, start, end, **kwargs):
+        captured["start"] = start
+        captured["end"] = end
+        return {"close": close, "quote_vol": quote}
+
+    monkeypatch.setattr(mhs_execution_collection, "load_base_panel", _panel)
+    monkeypatch.setattr(mhs_execution_collection, "funding_path", lambda symbol: tmp_path / f"{symbol}.parquet")
+    for symbol in quote.columns:
+        (tmp_path / f"{symbol}.parquet").touch()
+
+    # When planning a 75-day forward window
+    plan = mhs_execution_collection.build_mhs_execution_plan("2026-07-01", "2026-09-14", execution_universe_size=8)
+
+    # Then the panel read starts one warmup before the window and symbols are selected
+    assert captured["start"] == pd.Timestamp("2026-07-01", tz="UTC") - pd.Timedelta(
+        hours=mhs_execution_collection.MHS_EXECUTION_PLAN_WARMUP_HOURS
+    )
+    assert captured["end"] == pd.Timestamp("2026-09-14", tz="UTC")
+    assert len(plan.symbols) > 0
+    assert plan.start == pd.Timestamp("2026-07-01", tz="UTC").isoformat()
