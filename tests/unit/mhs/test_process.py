@@ -268,3 +268,110 @@ def test_step_proxy_net_returns_edge_cases() -> None:
         weights.iloc[:1], log_close.iloc[:1], funding.iloc[:1], 1.0
     )
     assert single_out.empty
+
+
+def _policy_frame(rows: list[list[float]]) -> pd.DataFrame:
+    index = pd.date_range("2022-01-01", periods=len(rows), freq="24h", tz="UTC")
+    return pd.DataFrame(rows, index=index, columns=["a", "b"])
+
+
+def test_policy_config_boundary() -> None:
+    from src.mhs.process import ProcessExecutionPolicy
+
+    assert ProcessExecutionPolicy(None).tracking_error_threshold is None
+    assert ProcessExecutionPolicy(0.0).tracking_error_threshold == 0.0
+    assert ProcessExecutionPolicy(0.10).tracking_error_threshold == 0.10
+    assert ProcessExecutionPolicy(0.20).tracking_error_threshold == 0.20
+    with pytest.raises(ValueError, match=r".+"):
+        ProcessExecutionPolicy(-0.1)
+    with pytest.raises(ValueError, match=r".+"):
+        ProcessExecutionPolicy(float("nan"))
+    with pytest.raises(ValueError, match=r".+"):
+        ProcessExecutionPolicy(float("inf"))
+    with pytest.raises(ValueError, match=r".+"):
+        ProcessExecutionPolicy(float("-inf"))
+    with pytest.raises(ValueError, match=r".+"):
+        ProcessExecutionPolicy("not-a-number")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=r".+"):
+        ProcessExecutionPolicy("0.2")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=r".+"):
+        ProcessExecutionPolicy(True)  # type: ignore[arg-type]
+
+
+def test_policy_identity_and_empty() -> None:
+    from src.mhs.process import ProcessExecutionPolicy, apply_process_execution_policy
+
+    frame = _policy_frame([[0.5, -0.5], [0.25, -0.25]])
+    for policy in (ProcessExecutionPolicy(None), ProcessExecutionPolicy(0.0)):
+        out = apply_process_execution_policy(frame, policy)
+        assert out.values.tolist() == frame.values.tolist()
+        assert list(out.columns) == ["a", "b"]
+        assert str(out.dtypes.iloc[0]) == "float64"
+        out.iloc[0, 0] = 999.0
+        assert frame.iloc[0, 0] != 999.0
+    empty = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC"), columns=["a", "b"])
+    out_empty = apply_process_execution_policy(empty, ProcessExecutionPolicy(None))
+    assert out_empty.shape == (0, 2)
+    fully_empty = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC"))
+    out_fully = apply_process_execution_policy(fully_empty, ProcessExecutionPolicy(None))
+    assert out_fully.shape == (0, 0)
+
+
+def test_policy_adoption_boundary() -> None:
+    from src.mhs.process import ProcessExecutionPolicy, apply_process_execution_policy
+
+    frame = _policy_frame([[0.5, -0.5], [0.5625, -0.5625], [0.625, -0.625]])
+    out = apply_process_execution_policy(frame, ProcessExecutionPolicy(0.25))
+    assert out.values.tolist() == [[0.5, -0.5], [0.5, -0.5], [0.625, -0.625]]
+
+
+def test_policy_rejects_labels_and_anomalies() -> None:
+    from src.mhs.process import ProcessExecutionPolicy, apply_process_execution_policy
+
+    good = _policy_frame([[0.5, -0.5], [0.5, -0.5]])
+    policies = (ProcessExecutionPolicy(None), ProcessExecutionPolicy(0.25))
+    bad_index = pd.DataFrame([[0.5]], index=[0], columns=["a"])
+    dup_index = pd.DataFrame(
+        [[0.5, -0.5], [0.5, -0.5]],
+        index=[good.index[0], good.index[0]],
+        columns=["a", "b"],
+    )
+    unordered = good.iloc[::-1]
+    naive = pd.DataFrame(
+        [[0.5, -0.5]], index=pd.DatetimeIndex(["2022-01-01"]), columns=["a", "b"]
+    )
+    non_utc = pd.DataFrame(
+        [[0.5, -0.5]],
+        index=pd.DatetimeIndex(["2022-01-01"], tz="America/New_York"),
+        columns=["a", "b"],
+    )
+    nat_index = good.copy()
+    nat_index.index = pd.DatetimeIndex([pd.NaT, good.index[1]])
+    dup_cols = pd.DataFrame(
+        [[0.5, 0.5]], index=good.index[:1], columns=["a", "a"]
+    )
+    zero_cols = pd.DataFrame(index=good.index)
+    non_numeric = pd.DataFrame(
+        [["x", "y"], ["z", "w"]], index=good.index, columns=["a", "b"]
+    )
+    non_finite = good.copy()
+    non_finite.iloc[0, 0] = float("nan")
+    inf_frame = good.copy()
+    inf_frame.iloc[0, 0] = float("inf")
+    cases = [
+        bad_index,
+        dup_index,
+        unordered,
+        naive,
+        non_utc,
+        nat_index,
+        dup_cols,
+        zero_cols,
+        non_numeric,
+        non_finite,
+        inf_frame,
+    ]
+    for bad in cases:
+        for policy in policies:
+            with pytest.raises(ValueError, match=r".+"):
+                apply_process_execution_policy(bad, policy)

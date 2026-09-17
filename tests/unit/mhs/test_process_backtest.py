@@ -16,15 +16,25 @@ from src.mhs.params import (
     PROCESS_FUNDING_CARRY_CANDIDATES_HOURS,
     PROCESS_SMOOTHING_HALFLIFE_DAYS,
 )
-from src.mhs.process import monthly_refit_schedule
+from src.mhs.process import ProcessExecutionPolicy, monthly_refit_schedule
 from src.mhs.process_backtest import (
     PROCESS_CERTIFICATION_LEVEL,
+    PROCESS_POLICY_REPORT_PATH,
+    PROCESS_REPORT_PATH,
     ProcessBacktestReport,
     ProcessMarketData,
+    ProcessPath,
+    _execution_fence,
+    _reject_invalid_ledger_returns,
+    _require_utc_index,
+    _resolve_process_report_path,
+    _tier_payload,
     build_candidate_member_books,
     evaluate_process_backtest,
     persist_process_report,
+    persist_process_targets,
     quarter_fold_returns,
+    replay_process_execution,
     run_process_paths,
 )
 
@@ -386,4 +396,504 @@ def test_load_process_market_data_raises_without_aligned_funding(monkeypatch) ->
     with pytest.raises(RuntimeError, match=r".+"):
         pb.load_process_market_data(
             pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2021-01-02", tz="UTC")
+        )
+
+
+def test_run_process_paths_rejects_invalid_costs_and_policy() -> None:
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps="bad", evaluation_bps=(8.0,), leverage_cap=2.0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=-1.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=float("inf"), evaluation_bps=(8.0,), leverage_cap=2.0)
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(float("nan"),), leverage_cap=2.0)
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(-1.0,), leverage_cap=2.0)
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=("bad",), leverage_cap=2.0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap="bad")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=0.0)
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=float("inf"))
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(
+            data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0,
+            execution_policy="bad",  # type: ignore[arg-type]
+        )
+
+
+def test_reject_invalid_ledger_returns() -> None:
+    idx = pd.date_range("2022-01-01", periods=3, freq="24h", tz="UTC")
+    _reject_invalid_ledger_returns(pd.Series([0.01, -0.5, 0.0], index=idx))
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _reject_invalid_ledger_returns(pd.Series([0.01, float("nan")], index=idx[:2]))
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _reject_invalid_ledger_returns(pd.Series([0.01, -1.0], index=idx[:2]))
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _reject_invalid_ledger_returns(pd.Series([0.01, -1.5], index=idx[:2]))
+
+
+def test_tier_payload_empty_and_nonempty() -> None:
+    idx = pd.date_range("2022-01-01", periods=2, freq="24h", tz="UTC")
+    cols = ["A", "B"]
+    unit = pd.DataFrame([[0.5, -0.5], [0.5, -0.5]], index=idx, columns=cols)
+    hourly = pd.date_range(idx[0], idx[-1] + pd.Timedelta(hours=23), freq="1h", tz="UTC")
+    turnover = pd.Series(0.01, index=hourly)
+    path = ProcessPath(
+        one_way_bps=8.0,
+        daily_returns=pd.Series([0.01, 0.02], index=idx),
+        unit_daily_returns=pd.Series([0.01, 0.02], index=idx),
+        exposure=pd.Series([1.0, 1.0], index=idx),
+        refits=(),
+        leverage_cap=2.0,
+        execution_policy=ProcessExecutionPolicy(0.2),
+        unit_target_weights=unit,
+        target_weights=unit,
+        turnover_1h=turnover,
+    )
+    payload = _tier_payload(path)
+    assert payload["execution_policy"] == {"tracking_error_threshold": 0.2}
+    assert payload["ann_turnover"] == pytest.approx(float(turnover.sum() * 365.0 / 2))
+    assert payload["mean_unit_gross"] == pytest.approx(1.0)
+    assert payload["mean_effective_gross"] == pytest.approx(1.0)
+    empty_path = ProcessPath(
+        one_way_bps=8.0,
+        daily_returns=pd.Series(dtype="float64"),
+        unit_daily_returns=pd.Series(dtype="float64"),
+        exposure=pd.Series(dtype="float64"),
+        refits=(),
+        leverage_cap=2.0,
+        execution_policy=ProcessExecutionPolicy(None),
+        unit_target_weights=pd.DataFrame(),
+        target_weights=pd.DataFrame(),
+        turnover_1h=pd.Series(dtype="float64"),
+    )
+    empty_payload = _tier_payload(empty_path)
+    assert empty_payload["ann_turnover"] == 0.0
+    assert empty_payload["mean_unit_gross"] == 0.0
+    assert empty_payload["mean_effective_gross"] == 0.0
+
+
+def _report_with_policy(threshold: float | None) -> ProcessBacktestReport:
+    idx = pd.date_range("2022-01-01", periods=2, freq="24h", tz="UTC")
+    unit = pd.DataFrame([[0.5, -0.5], [0.5, -0.5]], index=idx, columns=["A", "B"])
+    hourly = pd.date_range(idx[0], idx[-1] + pd.Timedelta(hours=23), freq="1h", tz="UTC")
+    path = ProcessPath(
+        one_way_bps=8.0,
+        daily_returns=pd.Series([0.0, 0.0], index=idx),
+        unit_daily_returns=pd.Series([0.0, 0.0], index=idx),
+        exposure=pd.Series([1.0, 1.0], index=idx),
+        refits=(),
+        leverage_cap=2.0,
+        execution_policy=ProcessExecutionPolicy(threshold),
+        unit_target_weights=unit,
+        target_weights=unit,
+        turnover_1h=pd.Series(0.0, index=hourly),
+    )
+    from src.mhs.deploy_gate import DeployGateResult
+
+    return ProcessBacktestReport(
+        start=idx[0], end=idx[-1], certification_level=PROCESS_CERTIFICATION_LEVEL,
+        n_candidates=1, base=path, stress=path,
+        gate=DeployGateResult(go=False, reason_codes=("X",), metrics={"n_folds": 1.0}),
+    )
+
+
+def test_resolve_process_report_path_routing(tmp_path) -> None:
+    assert _resolve_process_report_path(_report_with_policy(None), None) == PROCESS_REPORT_PATH
+    assert _resolve_process_report_path(_report_with_policy(0.0), None) == PROCESS_POLICY_REPORT_PATH
+    assert _resolve_process_report_path(_report_with_policy(0.2), None) == PROCESS_POLICY_REPORT_PATH
+    out = _resolve_process_report_path(_report_with_policy(None), tmp_path / "custom.json")
+    assert out == tmp_path / "custom.json"
+    with pytest.raises(ValueError, match=r".+"):
+        _resolve_process_report_path(_report_with_policy(None), tmp_path / "bad.txt")
+    with pytest.raises(ValueError, match=r".+"):
+        _resolve_process_report_path(_report_with_policy(0.2), PROCESS_REPORT_PATH)
+
+
+def test_persist_process_report_evidence_keys(tmp_path) -> None:
+    report = _report_with_policy(0.2)
+    out = persist_process_report(report, tmp_path / "r.json")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["evidence_scope"] == "retrospective_discovery"
+    assert payload["multiplicity_adjusted"] is False
+    assert payload["base"]["execution_policy"] == {"tracking_error_threshold": 0.2}
+
+
+def test_persist_process_targets_round_trip(tmp_path) -> None:
+    report = _report_with_policy(None)
+    out = persist_process_targets(report.base, tmp_path / "t.parquet")
+    back = pd.read_parquet(out)
+    expected = report.base.target_weights.copy().astype("float64")
+    pd.testing.assert_frame_equal(back, expected, check_freq=False)
+    with pytest.raises(ValueError, match=r".+"):
+        persist_process_targets(report.base, tmp_path / "t.csv")
+
+
+def test_execution_fence_uses_earlier_day() -> None:
+    from src.mhs.params import PROCESS_EVALUATION_CEILING
+
+    early_idx = pd.date_range("2022-01-01", periods=2, freq="24h", tz="UTC")
+    early = pd.DataFrame([[0.5]], index=early_idx, columns=["A"])
+    assert _execution_fence(early) == pd.Timestamp("2022-01-03", tz="UTC")
+    late_idx = pd.DatetimeIndex([PROCESS_EVALUATION_CEILING - pd.Timedelta(hours=1)])
+    late = pd.DataFrame([[0.5]], index=late_idx, columns=["A"])
+    expected = (PROCESS_EVALUATION_CEILING.normalize() + pd.Timedelta(days=1)).tz_convert("UTC")
+    assert _execution_fence(late) == expected
+
+
+def test_require_utc_index_rejects() -> None:
+    good = pd.date_range("2022-01-01", periods=2, freq="1min", tz="UTC")
+    assert _require_utc_index(good, "g").equals(good)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _require_utc_index(pd.Index([0, 1]), "bad")  # type: ignore[arg-type]
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _require_utc_index(pd.DatetimeIndex([pd.NaT, good[1]]), "bad")
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _require_utc_index(pd.DatetimeIndex(["2022-01-01", "2022-01-02"]), "bad")
+    eastern = pd.DatetimeIndex(["2022-01-01", "2022-01-02"], tz="America/New_York")
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _require_utc_index(eastern, "bad")
+
+
+def _replay_fixtures(n_decisions: int = 2):
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+
+    cols = ["AUSDT", "BUSDT"]
+    idx = pd.date_range("2022-01-01", periods=n_decisions, freq="24h", tz="UTC")
+    tgt = pd.DataFrame(
+        [[0.5, -0.5]] * n_decisions, index=idx, columns=cols, dtype="float64"
+    )
+    hourly = pd.date_range(idx[0], idx[-1] + pd.Timedelta(hours=23), freq="1h", tz="UTC")
+    path = ProcessPath(
+        one_way_bps=8.0,
+        daily_returns=pd.Series(0.0, index=idx),
+        unit_daily_returns=pd.Series(0.0, index=idx),
+        exposure=pd.Series(1.0, index=idx),
+        refits=(),
+        leverage_cap=2.0,
+        execution_policy=ProcessExecutionPolicy(None),
+        unit_target_weights=tgt,
+        target_weights=tgt,
+        turnover_1h=pd.Series(0.0, index=hourly),
+    )
+
+    def _window(day: pd.Timestamp, row: pd.DataFrame) -> ExecutionReplayWindow:
+        mg = pd.date_range(day, day + pd.Timedelta(hours=23, minutes=59), freq="1min", tz="UTC")
+
+        def _mk(v: float) -> pd.DataFrame:
+            return pd.DataFrame(v, index=mg, columns=cols, dtype="float64")
+
+        return ExecutionReplayWindow(
+            window_start=mg[0], window_end=mg[-1], columns=tuple(cols), symbols=tuple(cols),
+            minute_grid=mg, highs=_mk(100.0), lows=_mk(99.0), closes=_mk(99.5),
+            marks=_mk(99.5), bar_funding=_mk(0.0), target_weights=row,
+            signal_available_at=pd.DatetimeIndex([day]),
+            quote_volumes=_mk(1e6),
+            funding_known=pd.DataFrame(True, index=mg, columns=cols),
+            bar_available_at=mg,
+        )
+
+    windows = [_window(day, tgt.iloc[[i]]) for i, day in enumerate(idx)]
+    return path, windows
+
+
+def test_replay_parity_and_coverage() -> None:
+    from src.mhs.execution.batch import replay_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _replay_fixtures(2)
+    spec = ExecutionSpec()
+    ref = replay_execution_windows(windows, 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    got = replay_process_execution(
+        path, iter(windows), initial_equity=1000.0,
+        execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    assert (ref.simulated_fills.values == got.simulated_fills.values).all()
+    assert ref.ledger.equity.equals(got.ledger.equity)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter(windows[:1]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+
+
+def test_replay_rejects_empty_path() -> None:
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _replay_fixtures(2)
+    import dataclasses
+
+    empty = dataclasses.replace(path, target_weights=path.target_weights.iloc[:0])
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            empty, iter(windows), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
+        )
+    no_cols = dataclasses.replace(path, target_weights=path.target_weights.drop(columns=["AUSDT", "BUSDT"]))
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            no_cols, iter([]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
+        )
+
+
+def test_replay_rejects_bad_windows() -> None:
+    import dataclasses
+
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _replay_fixtures(2)
+    spec = ExecutionSpec()
+    w1, w2 = windows
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter(["not-a-window"]), initial_equity=1000.0,  # type: ignore[list-item]
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dataclasses.replace(w1, columns=("AUSDT",)), w2]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dataclasses.replace(w1, target_weights=w1.target_weights.rename(columns={"AUSDT": "X"})), w2]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dataclasses.replace(w1, marks=None), w2]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dataclasses.replace(w1, funding_known=None), w2]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    changed = w1.target_weights.copy()
+    changed.iloc[0, 0] = 0.99
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dataclasses.replace(w1, target_weights=changed), w2]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([w2, w1]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+
+
+def test_replay_rejects_provenance_gaps() -> None:
+    import dataclasses
+
+    import pandas as pd
+
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _replay_fixtures(2)
+    spec = ExecutionSpec()
+    w1, w2 = windows
+    short_grid = w1.minute_grid[:5]
+    short = dataclasses.replace(w1, minute_grid=short_grid)
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([short, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    unknown_known = pd.DataFrame(True, index=w1.minute_grid, columns=["AUSDT", "BUSDT"], dtype="boolean")
+    unknown_known.iloc[0, 0] = pd.NA
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dataclasses.replace(w1, funding_known=unknown_known), w2]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    bad_signal = dataclasses.replace(
+        w1, signal_available_at=pd.DatetimeIndex([w1.target_weights.index[0] - pd.Timedelta(hours=1)])
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([bad_signal, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+
+
+def test_evaluate_rejects_bad_policy(monkeypatch) -> None:
+    with pytest.raises(ValueError, match=r".+"):
+        evaluate_process_backtest(
+            DISCOVERY_START, DISCOVERY_START + pd.Timedelta(days=10),
+            execution_policy="bad",  # type: ignore[arg-type]
+        )
+
+
+def test_evaluate_threads_explicit_policy(monkeypatch) -> None:
+    import src.mhs.process_backtest as pb
+
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    seen: dict = {}
+
+    def _fake_load(start, end, data_root=None):
+        return data
+
+    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None):
+        seen["policy"] = execution_policy
+        return run_process_paths(
+            loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps,
+            leverage_cap=leverage_cap, execution_policy=execution_policy,
+        )
+
+    monkeypatch.setattr(pb, "load_process_market_data", _fake_load)
+    monkeypatch.setattr(pb, "run_process_paths", _spy)
+    policy = ProcessExecutionPolicy(0.2)
+    report = evaluate_process_backtest(
+        data.decision_grid[0], data.decision_grid[100], execution_policy=policy
+    )
+    assert seen["policy"] is policy
+    assert report.base.execution_policy is policy
+
+
+def test_replay_rejects_remaining_provenance_branches() -> None:
+    import dataclasses
+
+    import pandas as pd
+
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _replay_fixtures(2)
+    spec = ExecutionSpec()
+    w1, w2 = windows
+    bad_decisions = dataclasses.replace(
+        w1, target_weights=w1.target_weights.set_axis(pd.Index([0], dtype="int64"))
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([bad_decisions, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    empty_row = w1.target_weights.iloc[:0]
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dataclasses.replace(w1, target_weights=empty_row), w2]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    non_numeric = w1.target_weights.copy()
+    non_numeric = non_numeric.astype(object)
+    non_numeric.iloc[0, 0] = "bad"
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dataclasses.replace(w1, target_weights=non_numeric), w2]),
+            initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    single_bar = w1.minute_grid[:1]
+    cols = ["AUSDT", "BUSDT"]
+
+    def _mk1(v: float) -> pd.DataFrame:
+        return pd.DataFrame(v, index=single_bar, columns=cols, dtype="float64")
+
+    one_bar = dataclasses.replace(
+        w1, minute_grid=single_bar, highs=_mk1(100.0), lows=_mk1(99.0), closes=_mk1(99.5),
+        marks=_mk1(99.5), bar_funding=_mk1(0.0), quote_volumes=_mk1(1e6),
+        funding_known=pd.DataFrame(True, index=single_bar, columns=cols),
+        bar_available_at=single_bar,
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([one_bar, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    dup_grid = pd.DatetimeIndex([w1.minute_grid[0], w1.minute_grid[0], *list(w1.minute_grid[1:])])
+
+    def _dup_frames(v: float) -> pd.DataFrame:
+        return pd.DataFrame(v, index=dup_grid, columns=cols, dtype="float64")
+
+    dup = dataclasses.replace(
+        w1, minute_grid=dup_grid, highs=_dup_frames(100.0), lows=_dup_frames(99.0),
+        closes=_dup_frames(99.5), marks=_dup_frames(99.5), bar_funding=_dup_frames(0.0),
+        quote_volumes=_dup_frames(1e6),
+        funding_known=pd.DataFrame(True, index=dup_grid, columns=cols),
+        bar_available_at=dup_grid,
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([dup, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    int_known = dataclasses.replace(
+        w1, funding_known=pd.DataFrame(1, index=w1.minute_grid, columns=cols, dtype="int64")
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([int_known, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    bad_frame = dataclasses.replace(w1, highs=w1.highs.drop(columns=["BUSDT"]))
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([bad_frame, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    bad_sig_len = dataclasses.replace(
+        w1,
+        signal_available_at=pd.DatetimeIndex(
+            [w1.target_weights.index[0], w1.target_weights.index[0] + pd.Timedelta(hours=1)]
+        ),
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([bad_sig_len, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    ir_grid = w1.minute_grid.delete(5)
+    ir_frames = {
+        name: getattr(w1, name).reindex(ir_grid)
+        for name in ("highs", "lows", "closes", "marks", "bar_funding", "quote_volumes")
+    }
+    irregular = dataclasses.replace(
+        w1, minute_grid=ir_grid, bar_available_at=ir_grid,
+        funding_known=pd.DataFrame(True, index=ir_grid, columns=cols),
+        **ir_frames,
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([irregular, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    bad_bar_len = dataclasses.replace(w1, bar_available_at=w1.bar_available_at[:5])
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([bad_bar_len, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    early_bar = dataclasses.replace(
+        w1, bar_available_at=w1.minute_grid - pd.Timedelta(minutes=1)
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([early_bar, w2]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+        )
+    fence = _execution_fence(path.target_weights)
+    late_grid = w2.minute_grid + (fence - w2.minute_grid[-1] + pd.Timedelta(minutes=1))
+
+    def _mk_late(v: float) -> pd.DataFrame:
+        return pd.DataFrame(v, index=late_grid, columns=cols, dtype="float64")
+
+    late = dataclasses.replace(
+        w2, minute_grid=late_grid, highs=_mk_late(100.0), lows=_mk_late(99.0),
+        closes=_mk_late(99.5), marks=_mk_late(99.5), bar_funding=_mk_late(0.0),
+        quote_volumes=_mk_late(1e6),
+        funding_known=pd.DataFrame(True, index=late_grid, columns=cols),
+        bar_available_at=late_grid,
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        replay_process_execution(
+            path, iter([w1, late]), initial_equity=1000.0,
+            execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
         )

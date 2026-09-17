@@ -13,6 +13,7 @@ import pandas as pd
 from scipy.linalg import solve_triangular
 from scipy.optimize import nnls
 
+from src.mhs.books import portfolio_rebalance_trigger
 from src.mhs.params import (
     PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
     PROCESS_MIN_TRAIN_DAYS,
@@ -292,3 +293,99 @@ def volatility_scaled_exposure(
     exposure = (cap * median / vol.where(vol > 0)).clip(lower=0.0, upper=cap).fillna(0.0)
     exposure.index = unit_returns.index
     return exposure
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessExecutionPolicy:
+    """Explicit research control for adopting a smoothed unit book.
+
+    The threshold measures the portfolio L1 distance to the last adopted
+    unit book, before volatility sizing. It is not a cash fraction, a
+    per-symbol limit, or a forecast of trading profitability. No discovered
+    threshold is selected implicitly.
+
+    Args:
+        tracking_error_threshold: Non-negative finite L1 distance. None
+            disables trade deferral and preserves the baseline path.
+
+    Raises:
+        ValueError: A supplied threshold is non-finite or negative.
+    """
+
+    tracking_error_threshold: float | None = None
+
+    def __post_init__(self) -> None:
+        """Reject invalid research controls before any market data is read."""
+        threshold = self.tracking_error_threshold
+        if threshold is None:
+            return
+        if isinstance(threshold, bool) or not isinstance(
+            threshold, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError(f"tracking_error_threshold must be finite, got {threshold}") from None
+        value = float(threshold)
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"tracking_error_threshold must be finite and >= 0, got {threshold}")
+        object.__setattr__(self, "tracking_error_threshold", value)
+
+
+def _validate_unit_targets(unit_targets: pd.DataFrame) -> None:
+    if not isinstance(unit_targets.index, pd.DatetimeIndex):
+        raise ValueError("unit_targets must have a DatetimeIndex")
+    index = unit_targets.index
+    if len(index) == 0 and len(unit_targets.columns) == 0:
+        return
+    if len(unit_targets.columns) == 0:
+        raise ValueError("unit_targets must have at least one symbol column")
+    if index.hasnans:
+        raise ValueError("unit_targets index must not contain NaT")
+    if index.has_duplicates:
+        raise ValueError("unit_targets index must be unique")
+    if not index.is_monotonic_increasing:
+        raise ValueError("unit_targets index must be increasing")
+    if index.tz is None:
+        raise ValueError("unit_targets index must be timezone-aware UTC")
+    utc_index = index.tz_convert("UTC")
+    if not utc_index.equals(index):
+        raise ValueError("unit_targets index must be UTC")
+    if len(unit_targets.columns) != len(set(unit_targets.columns)):
+        raise ValueError("unit_targets columns must be unique")
+    if len(unit_targets) == 0:
+        return
+    try:
+        values = unit_targets.to_numpy(dtype="float64")
+    except (TypeError, ValueError):
+        raise ValueError("unit_targets must be numeric") from None
+    if values.size and not bool(np.isfinite(values).all()):
+        raise ValueError("unit_targets must be finite")
+
+
+def apply_process_execution_policy(
+    unit_targets: pd.DataFrame,
+    policy: ProcessExecutionPolicy,
+) -> pd.DataFrame:
+    """Adopt complete unit-book rows only when portfolio change warrants it.
+
+    A complete-row adoption preserves the input book's neutrality and
+    relative weights. Volatility sizing and execution safeguards remain
+    downstream so this control cannot freeze a risk reduction or substitute
+    an adopted target for actual held inventory.
+
+    Args:
+        unit_targets: Finite decision-time books with a unique, increasing
+            UTC DatetimeIndex and unique ordered symbol columns.
+        policy: Explicit control; None or a zero threshold is the identity.
+
+    Returns:
+        A float64 frame with identical labels. Every output row is an
+        unchanged copy of a row observed at or before that decision.
+
+    Raises:
+        ValueError: Targets are non-finite, non-numeric, or have invalid
+            decision-time or symbol labels.
+    """
+    _validate_unit_targets(unit_targets)
+    threshold = policy.tracking_error_threshold
+    if threshold is None or threshold == 0.0:
+        return unit_targets.copy().astype("float64")
+    return portfolio_rebalance_trigger(unit_targets.copy().astype("float64"), threshold)
