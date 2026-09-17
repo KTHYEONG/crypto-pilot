@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_PROCESS_EXECUTION_POLICY",
+      "date": "2026-09-17",
+      "adr_id": "ADR_20260917_MHS_PROCESS_EXECUTION_POLICY",
+      "domain": "mhs",
+      "title": "MHS 프로세스 실행 정책 및 인벤토리 리플레이 검증",
+      "why": "MHS 백테스트에서 포트폴리오 거래 지연이 스트레스 복리성과와 턴오버를 개선했지만 운영 기본값으로 승인할 근거는 부족했다.",
+      "resolution": "명시적 tracking-error 정책, 연속 경로 적용, 후보 스트리밍, 정책·대상 감사 산출물, 인벤토리 실행 리플레이 검증과 fail-closed 무결성 게이트를 구현했다.",
+      "impact": "정책별 CAGR·스트레스·턴오버를 재현 가능하게 비교하고 실제 체결 엔진과 동일한 대상 비중·가용성·평가 펜스를 검증할 수 있다.",
+      "caveat": "0.10/0.20 임계값은 탐색 결과일 뿐 운영 기본값으로 승격하지 않았으며 보유기간 추정과 결합 성장 최적화는 후속 probe가 필요하다."
+    },
+    {
       "task_id": "mhs_process_sizing_redesign",
       "date": "2026-09-17",
       "adr_id": "ADR_20260917_mhs_process_sizing_redesign",
@@ -994,16 +1005,6 @@
       "why": "FOLD_GROWTH_CONCENTRATION(2025 폴드 몰빵, max_share 0.808)이 유일한 Research-GO 차단 사유. 근본원인: _pnl_vol_target_scale이 자기 trailing vol의 롤링 중앙값 대비 상대평가라 저위험 연도(2023 vol 0.172)를 고위험 연도(2025 vol 0.286)보다 더 세게 de-risk하는 역스케일 구조였음.",
       "resolution": "src/mhs/contracts.py에 MHS_PNL_TARGET_ANNUAL_VOL=0.20/MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS=20/MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS=168/MHS_FUNDING_CARRY_SLEEVE_WEIGHT=0.30 등록. evaluation.py에 절대기준 _exante_vol_target_scale과 디스패처 _replay_exposure_scale 추가(기존 _pnl_vol_target_scale은 median_relative 모드로 유지, 기본값 byte-identical). src/mhs/funding.py에 funding_carry_execution_book 추가(고펀딩 숏/저펀딩 롱 캐리 슬리브, fold/blend 양쪽 경로에 동일 함수로 배선). MhsDiagnosticRequest에 pnl_vol_target_mode/funding_carry_sleeve/funding_carry_weight 필드 및 fail-closed 검증 추가. CLI 신규 기본값: --pnl-vol-target-mode exante_target, funding-carry-sleeve on(committee_capital 필요, opt-out 패턴).",
       "impact": "3m 원장 실측(신규 기본값): fold0(2023) CAGR 0.218->0.351(+61%), fold1(2024) CAGR 0.117->0.247(+111%), fold_growth_concentration.max_fold_share 0.808->0.614(개선했으나 0.50 게이트 미달), primary_max_drawdown -0.230->-0.176(개선). 단 primary_geometric_cagr 0.696->0.521, calmar 3.03->2.96로 총 성장은 오히려 감소(1h 프록시가 예측한 +16% CAGR과 반대 방향) -- 실행 마찰(3m 체결/로스터 히스테리시스)이 exante 타겟팅의 반응성과 상호작용해 2025 고분산 구간 실제 노출을 프록시보다 더 깎은 것으로 추정. research_go.reason_codes는 여전히 ['FOLD_GROWTH_CONCENTRATION'] 하나만 남음(정책 임계값 미달, 데이터무결성 이슈 아님). 추가 조사 필요: target_vol 완화 또는 캐리 비중 재조정으로 총 CAGR 회복 여부."
-    },
-    {
-      "task_id": "MHS_GROWTH_EXPOSURE_BUDGET",
-      "date": "2026-08-19",
-      "adr_id": "ADR_20260819_MHS_GROWTH_EXPOSURE_BUDGET",
-      "domain": "quant",
-      "title": "MHS 위원회 노출 예산 복원 및 참조전용 바운드 격리",
-      "why": "docs/results/mhs_run_history 34개 런 분석 결과 xs_rank_ic는 전 런 동일(-0.0409)한데 --committee-target-gross를 0.907 이상으로 올리면 매번 CAPITAL_INVARIANT_BREACH로 blend 전체가 폐기됨. scratch/diag_capital_cliff.py로 재현한 결과 파산 원인은 자본을 싣는 OHLCV_IMMEDIATE_TAKER 북이 아니라 참고용 지표인 OHLCV_STRICT_PROXY(patient reference, 현재 노출에서도 CAGR -8.7%/MDD -60%)였음. _book_outcome이 pass-2 배치의 모든 바운드를 단일 try/except로 묶어 참조 바운드의 파산이 건강한 자본 원장 전체를 폐기시키고 있었음.",
-      "resolution": "src/mhs/execution.py에 replay_execution_window_batch_isolated 신설(바운드별 격리 실패, BatchReplayOutcome/IsolatedBoundFailure로 typed 반환, 격리 안 된 인덱스는 기존과 동일하게 fail-closed 전파); replay_execution_window_batch는 이를 감싸는 byte-identical 래퍼로 유지. ruin_guard_equity 순수함수로 파산가드가 fill-track과 이미 확정된 ledger-chunk 트랙 중 더 보수적인 값을 인과적으로 사용하도록 수정(두 트랙이 사실상 170배 괴리되어 가드가 무력화되던 버그). src/mhs/contracts.py에 MHS_COMMITTEE_TARGET_GROSS=0.92 등록(리플레이로 인증된, 등록 드로다운예산 25% 이내 최대 노출; 0.9231->CAGR 0.6996/MDD -0.2311, 1.05/1.20은 예산초과로 기각). MhsDiagnosticRequest.committee_target_gross 기본값을 sentinel 패턴으로 등록상수 해석(단, dataclasses.replace() 호환을 위해 __post_init__에서 필드를 직접 mutate하지 않고 _resolved_committee_target_gross 헬퍼로 두 소비지점에서만 지연 해석). _mhs_research_go에 PRIMARY_MAX_DRAWDOWN_OVER_BUDGET 리스크게이트 추가(데이터무결성 코드 아님). CLI --committee-target-gross 기본값이 등록상수로 전환, --no-committee-target-gross로 희석북 복귀 가능. 실측: CLI 순정 실행(--output-tier compact)에서 CAGR 38.5%->69.6%, MDD -12.7%->-23.0%(예산내), Calmar 3.03(불변), 3/3 폴드 통과, blend.failure=None, data_integrity_reason_codes=[] 확인. 남은 유일한 Research-GO 차단사유 FOLD_GROWTH_CONCENTRATION은 노출과 무관(0.81, 전 노출구간에서 불변)하여 이번 작업 범위 밖으로 명시.",
-      "impact": "committee_capital=True(기본값) 사용 시 CAGR이 약 1.8배로 증가하고 실현 MDD가 등록 위험예산(25%) 이내로 게이트됨. 과거 문서화된 'gross 0.9039-0.9071 자본불변식 절벽'은 참조전용 계측기의 파산이었음이 확정되어 재발하지 않음. 부트스트랩 꼬리위험(P(MDD>30%) 0.3%->37%)은 성장 확대의 실제 대가로 스펙/CLI 도움말에 명시."
     }
   ]
 }
