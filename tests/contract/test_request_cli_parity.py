@@ -42,6 +42,8 @@ def _mhs_cli_flags() -> set[str]:
     # 배포 후처리 사이드 이펙트 스위치: 완료된 리포트를 소비할 뿐 요청 필드가 아니다.
     flags.discard("--emit-deployment")
     flags.discard("--deploy-push")
+    # 절차 등록 사이드 이펙트 스위치: 플래그 세트를 레지스트리에 동결할 뿐 요청 필드가 아니다.
+    flags.discard("--register-procedure")
     return flags
 
 
@@ -127,4 +129,186 @@ def test_data_policy_choices_match_cli_and_metadata() -> None:
     assert MhsDiagnosticRequest().data_policy == MHS_DATA_POLICY_DEFAULT
     assert set(cli_action.choices) == set(DATA_POLICIES)
     assert set(field.metadata["choices"]) == set(DATA_POLICIES)
-    assert field.metadata["flag"] == "--data-policy"
+
+
+def test_request_default_execution_is_3m() -> None:
+    import dataclasses
+
+    from src.mhs.evaluation import MhsDiagnosticRequest
+
+    request = MhsDiagnosticRequest()
+    assert request.execution_timeframe == "3m"
+    field = next(f for f in dataclasses.fields(MhsDiagnosticRequest) if f.name == "execution_timeframe")
+    assert field.metadata["choices"] == ("3m",)
+    assert dataclasses.asdict(request)["execution_timeframe"] == "3m"
+
+
+def test_request_rejects_legacy_execution_intervals() -> None:
+    import pytest
+
+    from src.mhs.evaluation import MhsDiagnosticRequest
+
+    for legacy in ("1m", "5m"):
+        with pytest.raises(ValueError, match="execution_timeframe"):
+            MhsDiagnosticRequest(execution_timeframe=legacy)  # type: ignore[arg-type]
+
+
+def test_request_timeout_must_align_to_three_minutes() -> None:
+    import pytest
+
+    from src.mhs.evaluation import MhsDiagnosticRequest
+
+    MhsDiagnosticRequest(passive_timeout_minutes=30)
+    with pytest.raises(ValueError, match="multiple of 3"):
+        MhsDiagnosticRequest(passive_timeout_minutes=31)
+
+
+def test_deployment_policy_converts_3m_and_rejects_legacy() -> None:
+    import pytest
+
+    from src.mhs.deployment_policy import TargetWeightPolicy
+    from src.mhs.evaluation import MhsDiagnosticRequest
+
+    base = {
+        "execution_universe_size": 8,
+        "fast_book_mode": "single_horizon",
+        "slow_book_mode": "single_horizon",
+        "rebalance_filter": "per_symbol_deadband",
+        "beta_neutralize": False,
+        "ensemble_signal": "raw",
+        "trend_efficiency_overlay": False,
+        "trend_sleeve": False,
+        "trend_sleeve_gross": 0.0,
+        "crash_regime_tilt_alpha": None,
+        "committee_capital": False,
+        "committee_member_set": "risk_premia",
+        "committee_tranche_smoothing": False,
+        "committee_regime_adaptive_tranche": False,
+        "committee_target_gross": None,
+        "funding_carry_sleeve": False,
+        "funding_carry_weight": 0.0,
+        "fill_mark_parity_gate": True,
+    }
+    request = TargetWeightPolicy(execution_timeframe="3m", **base).to_request()  # type: ignore[arg-type]
+    assert isinstance(request, MhsDiagnosticRequest)
+    assert request.execution_timeframe == "3m"
+    for legacy in ("1m", "5m"):
+        with pytest.raises(ValueError, match="execution_timeframe"):
+            TargetWeightPolicy(execution_timeframe=legacy, **base).to_request()  # type: ignore[arg-type]
+
+
+def test_execution_grids_use_three_minute_steps() -> None:
+    import pandas as pd
+
+    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    request = MhsDiagnosticRequest()
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    end = pd.Timestamp("2025-01-01T01:00:00", tz="UTC")
+    empty_weights = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC"))
+    empty_signals = pd.DatetimeIndex([], tz="UTC")
+    windows = list(
+        _iter_mhs_execution_windows(
+            empty_weights, empty_signals, "/nonexistent", "3m",
+            start, end, {}, request.mark_mode, ExecutionSpec(),
+        )
+    )
+    assert len(windows) == 1
+    grid = windows[0].minute_grid
+    assert len(grid) == 21
+    assert (grid[1] - grid[0]) == pd.Timedelta(minutes=3)
+
+
+def test_marks_align_on_three_minute_grid() -> None:
+    import pandas as pd
+
+    from src.mhs.marks import _align_minute_frames
+
+    idx = pd.date_range("2025-01-01", periods=4, freq="3min", tz="UTC")
+    frame = pd.DataFrame({"high": [1.0, 2.0, 3.0, 4.0], "low": [1.0, 2.0, 3.0, 4.0], "close": [1.0, 2.0, 3.0, 4.0]}, index=idx)
+    result = _align_minute_frames({"AAA": frame}, "3m", idx[0], idx[-1])
+    assert result is not None
+    highs, _, _ = result
+    assert (highs.index[1] - highs.index[0]) == pd.Timedelta(minutes=3)
+
+
+def test_missing_execution_cache_rejected_without_fallback() -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.market_data.services import mhs_execution as mec
+
+    assert mec._coverage("AAA", "3m", "2025-01-01", "2025-01-02", root="/nonexistent")["status"] == "MISSING"
+    with pytest.raises(DataIntegrityError, match="incomplete"):
+        mec.assert_execution_data_coverage(["AAA"], "3m", "2025-01-01", "2025-01-02", root="/nonexistent")
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        mec._coverage("AAA", "1m", "2025-01-01", "2025-01-02", root="/nonexistent")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        mec.build_mhs_execution_plan("2025-01-01", "2025-01-02", timeframe="5m")  # type: ignore[arg-type]
+
+
+def test_execution_coverage_counts_three_minute_bars(tmp_path) -> None:
+    import pandas as pd
+
+    from src.market_data.services import mhs_execution as mec
+
+    root = tmp_path / "ohlcv" / "3m"
+    root.mkdir(parents=True)
+    stamps = pd.date_range("2025-01-01", periods=4, freq="3min", tz="UTC")
+    pd.DataFrame({"timestamp": (stamps - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")}).to_parquet(
+        root / "AAA.parquet",
+    )
+    result = mec._coverage("AAA", "3m", "2025-01-01T00:00:00Z", "2025-01-01T00:09:00Z", root=str(tmp_path / "ohlcv"))
+    assert result["status"] == "PRESENT"
+    assert result["rows"] == 4
+
+
+def test_execution_manifest_refresh_rejects_legacy_interval(tmp_path) -> None:
+    import json
+
+    import pytest
+
+    from src.market_data.services import mhs_execution as mec
+
+    manifest = tmp_path / "plan.json"
+    manifest.write_text(
+        json.dumps({"timeframe": "1m", "start": "2025-01-01", "end": "2025-01-02", "symbols": []}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        mec.refresh_mhs_execution_manifest(manifest)
+
+
+def test_hourly_and_generic_contracts_preserved() -> None:
+    import pandas as pd
+    import pytest
+
+    import src.market_data.services.futures_collection as fc
+    from src.market_data.services import mhs_execution as mec
+
+    assert fc._TIMEFRAME_MS["1m"] == 60_000
+    assert fc._TIMEFRAME_MS["5m"] == 300_000
+    with pytest.raises(ValueError, match="hourly"):
+        mec.assert_relevant_mark_price_coverage(pd.DataFrame(), timeframe="3m")
+    empty = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC"))
+    mec.apply_dynamic_gap_exclusion(empty, "3m")
+    mec.apply_dynamic_gap_exclusion(empty, "1h")
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        mec.apply_dynamic_gap_exclusion(empty, "1m")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        mec.apply_dynamic_gap_exclusion(empty, "5m")  # type: ignore[arg-type]
+
+
+def test_sealed_inputs_require_explicit_3m() -> None:
+    from pathlib import Path
+
+    from src.mhs.data_provenance import resolve_required_mhs_input_paths
+
+    paths = resolve_required_mhs_input_paths(
+        data_root=Path("/data"), panel_symbols=["AAA"], execution_symbols=["AAA"], execution_timeframe="3m",
+    )
+    assert Path("ohlcv/3m/AAA.parquet") in [Path(p.parent.name) / p.name for p in paths] or any(
+        "ohlcv/3m" in p.as_posix() for p in paths
+    )

@@ -360,6 +360,78 @@ def peg_chase_partial_schedule(
     return schedule
 
 
+def _corwin_schultz_pair_sums_counts(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    first_pair_allowed: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Additive Corwin-Schultz sufficient statistics per column.
+
+    Returns ``(pair_sums, pair_counts, bar_counts)`` using exactly the pair
+    validity, degeneracy floor, and averaging inputs of
+    :func:`corwin_schultz_half_spread_bps`, so combining per-piece statistics
+    reproduces the whole-range estimate. ``first_pair_allowed`` optionally
+    gates the leading pair per column (used for the cross-piece boundary
+    pair); ``bar_counts`` counts valid rows of the given arrays, so callers
+    prepending a carry row subtract the carry validity themselves.
+    """
+    high_arr = np.asarray(highs, dtype="float64")
+    low_arr = np.asarray(lows, dtype="float64")
+    if high_arr.shape != low_arr.shape:
+        raise ValueError(
+            f"highs and lows must share one shape, got {high_arr.shape} vs {low_arr.shape}"
+        )
+    if high_arr.ndim != 2 or high_arr.shape[0] < 2:
+        raise ValueError(f"highs/lows must be 2-D with >= 2 rows, got shape {high_arr.shape}")
+
+    valid = (
+        np.isfinite(high_arr)
+        & np.isfinite(low_arr)
+        & (high_arr > 0.0)
+        & (low_arr > 0.0)
+        & (high_arr >= low_arr)
+    )
+    pair_ok = valid[:-1] & valid[1:]
+    if first_pair_allowed is not None:
+        gated = pair_ok.copy()
+        gated[0] &= np.asarray(first_pair_allowed, dtype=bool)
+        pair_ok = gated
+
+    h0 = np.where(pair_ok, high_arr[:-1], np.nan)
+    l0 = np.where(pair_ok, low_arr[:-1], np.nan)
+    h1 = np.where(pair_ok, high_arr[1:], np.nan)
+    l1 = np.where(pair_ok, low_arr[1:], np.nan)
+
+    b = np.log(h0 / l0) ** 2 + np.log(h1 / l1) ** 2
+    g = np.log(np.maximum(h0, h1) / np.minimum(l0, l1)) ** 2
+    k = 3.0 - 2.0 * np.sqrt(2.0)
+    a = (np.sqrt(2.0 * b) - np.sqrt(b)) / k - np.sqrt(g / k)
+    # tanh(a/2) == (e^a - 1)/(e^a + 1) without the overflow at large |a|.
+    spread = 2.0 * np.tanh(a / 2.0)
+    floored = np.maximum(spread, 0.0)
+
+    pair_counts = np.sum(np.isfinite(floored), axis=0)
+    pair_sums = np.nansum(floored, axis=0)
+    bar_counts = np.sum(valid, axis=0)
+    return pair_sums, pair_counts, bar_counts
+
+
+def _corwin_schultz_combine_half_spread_bps(
+    pair_sums: np.ndarray,
+    pair_counts: np.ndarray,
+    bar_counts: np.ndarray,
+) -> np.ndarray:
+    """Finalize a half-spread estimate from combined sufficient statistics."""
+    mean_spread = np.where(
+        pair_counts > 0,
+        pair_sums / np.where(pair_counts > 0, pair_counts, 1),
+        np.nan,
+    )
+    half_bps = mean_spread / 2.0 * 1e4
+    half_bps = np.where(bar_counts >= 3, half_bps, np.nan)
+    return np.clip(half_bps, 0.0, SPREAD_ESTIMATE_CEILING_BPS)
+
+
 def corwin_schultz_half_spread_bps(
     highs: np.ndarray,
     lows: np.ndarray,
@@ -384,43 +456,5 @@ def corwin_schultz_half_spread_bps(
     with matching highs/lows and at least 2 rows (both fail closed with
     ``ValueError``); output shape ``(n_cols,)``. Fully vectorised over bars.
     """
-    high_arr = np.asarray(highs, dtype="float64")
-    low_arr = np.asarray(lows, dtype="float64")
-    if high_arr.shape != low_arr.shape:
-        raise ValueError(
-            f"highs and lows must share one shape, got {high_arr.shape} vs {low_arr.shape}"
-        )
-    if high_arr.ndim != 2 or high_arr.shape[0] < 2:
-        raise ValueError(f"highs/lows must be 2-D with >= 2 rows, got shape {high_arr.shape}")
-
-    valid = (
-        np.isfinite(high_arr)
-        & np.isfinite(low_arr)
-        & (high_arr > 0.0)
-        & (low_arr > 0.0)
-        & (high_arr >= low_arr)
-    )
-    pair_ok = valid[:-1] & valid[1:]
-
-    h0 = np.where(pair_ok, high_arr[:-1], np.nan)
-    l0 = np.where(pair_ok, low_arr[:-1], np.nan)
-    h1 = np.where(pair_ok, high_arr[1:], np.nan)
-    l1 = np.where(pair_ok, low_arr[1:], np.nan)
-
-    b = np.log(h0 / l0) ** 2 + np.log(h1 / l1) ** 2
-    g = np.log(np.maximum(h0, h1) / np.minimum(l0, l1)) ** 2
-    k = 3.0 - 2.0 * np.sqrt(2.0)
-    a = (np.sqrt(2.0 * b) - np.sqrt(b)) / k - np.sqrt(g / k)
-    # tanh(a/2) == (e^a - 1)/(e^a + 1) without the overflow at large |a|.
-    spread = 2.0 * np.tanh(a / 2.0)
-    floored = np.maximum(spread, 0.0)
-
-    pair_counts = np.sum(np.isfinite(floored), axis=0)
-    pair_sums = np.nansum(floored, axis=0)
-    mean_spread = np.where(
-        pair_counts > 0, pair_sums / np.where(pair_counts > 0, pair_counts, 1), np.nan,
-    )
-    half_bps = mean_spread / 2.0 * 1e4
-    bar_counts = np.sum(valid, axis=0)
-    half_bps = np.where(bar_counts >= 3, half_bps, np.nan)
-    return np.clip(half_bps, 0.0, SPREAD_ESTIMATE_CEILING_BPS)
+    pair_sums, pair_counts, bar_counts = _corwin_schultz_pair_sums_counts(highs, lows)
+    return _corwin_schultz_combine_half_spread_bps(pair_sums, pair_counts, bar_counts)

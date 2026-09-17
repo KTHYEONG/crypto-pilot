@@ -94,6 +94,7 @@ from src.mhs.research_go import (  # noqa: F401  (facade re-export of public GO 
     GO_REASON_UNSPECIFIED_POLICY,  # noqa: F401
 )
 from src.mhs.resources import (
+    assert_mhs_allocation_budget,
     _assert_execution_rss_budget,
     _assert_stage_rss_budget,
     _resolve_ram_budget,
@@ -152,6 +153,7 @@ from src.mhs.execution import (
     StrategyExecutionReplayResult,
     bar_funding_panel,
     laddered_fill_schedule,
+    live_required_symbols,
     mhs_ledger_pnl,
     mhs_ledger_pnl_multi_tier,
     replay_execution_window_batch,

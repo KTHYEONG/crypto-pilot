@@ -7,7 +7,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -30,7 +30,7 @@ MHS_EXECUTION_PLAN_WARMUP_HOURS: int = 2000
 
 @dataclass(frozen=True, slots=True)
 class MhsExecutionCollectionPlan:
-    timeframe: str
+    timeframe: Literal["3m"]
     start: str
     end: str
     execution_universe_size: int
@@ -53,18 +53,18 @@ def _funded_symbols(symbols: list[str]) -> list[str]:
     return [s for s in symbols if funding_path(s).exists()]
 
 
-def _manifest_path(timeframe: str, start: pd.Timestamp, end: pd.Timestamp) -> Path:
+def _manifest_path(timeframe: Literal["3m"], start: pd.Timestamp, end: pd.Timestamp) -> Path:
     safe_start = start.strftime("%Y%m%d")
     safe_end = end.strftime("%Y%m%d")
     return FUTURES_DATA_DIR / "mhs_execution" / f"{timeframe}_{safe_start}_{safe_end}.json"
 
 
 def build_mhs_execution_plan(
-    start: str, end: str, timeframe: str = "3m", execution_universe_size: int = 30,
+    start: str, end: str, timeframe: Literal["3m"] = "3m", execution_universe_size: int = 30,
 ) -> MhsExecutionCollectionPlan:
     """Derive the exact PIT replay symbol union without network access."""
-    if timeframe not in ("1m", "3m", "5m"):
-        raise ValueError("timeframe must be '1m', '3m' or '5m'")
+    if timeframe != "3m":
+        raise ValueError(f"unknown execution_timeframe '{timeframe}'")
     if execution_universe_size < 8:
         raise ValueError("execution_universe_size must be >= 8")
     start_ts = pd.Timestamp(start, tz="UTC")
@@ -112,8 +112,10 @@ def build_mhs_execution_plan(
 
 
 def _coverage(
-    symbol: str, timeframe: str, start: str, end: str, root: str | None = None,
+    symbol: str, timeframe: Literal["3m"], start: str, end: str, root: str | None = None,
 ) -> dict[str, object]:
+    if timeframe != "3m":
+        raise ValueError(f"unknown execution_timeframe '{timeframe}'")
     base = Path(root) if root else FUTURES_DATA_DIR / "ohlcv"
     path = base / timeframe / f"{symbol}.parquet"
     if not path.exists():
@@ -126,7 +128,7 @@ def _coverage(
     observed = idx[(idx >= req_start) & (idx <= req_end)]
     missing_internal = 0
     if len(observed) > 1:
-        step = pd.Timedelta(minutes={"1m": 1, "3m": 3, "5m": 5}[timeframe])
+        step = pd.Timedelta(minutes=3)
         expected = int((observed[-1] - observed[0]) / step) + 1
         missing_internal = max(0, expected - len(observed))
     return {
@@ -140,7 +142,7 @@ def _coverage(
 
 
 def assert_execution_data_coverage(
-    symbols: Sequence[str], timeframe: str, start: str, end: str, root: str | None = None,
+    symbols: Sequence[str], timeframe: Literal["3m"], start: str, end: str, root: str | None = None,
 ) -> None:
     """Fail closed unless every symbol has full ``[start, end]`` execution cache coverage.
 
@@ -205,7 +207,7 @@ def roster_membership_intervals(
 
 def assert_relevant_execution_data_coverage(
     execution_mask: pd.DataFrame,
-    timeframe: str,
+    timeframe: Literal["3m"],
     root: str | None = None,
 ) -> None:
     """Fail closed unless every roster-membership interval has full cache coverage.
@@ -338,107 +340,162 @@ def assert_relevant_mark_price_coverage(
 # backfilled, and a symbol excluded tomorrow if its cache degrades.
 DYNAMIC_GAP_EXCLUSION_HOURS = 720.0
 
+_OHLCV_BAR_STEP_MINUTES = {"3m": 3, "1h": 60}
+_MARK_AVAILABILITY_LAG_HOURS = 1
 
-def _execution_gap_windows(
-    symbol: str,
-    timeframe: str,
-    iv_start: pd.Timestamp,
-    iv_end: pd.Timestamp,
-    root: str | None,
-    min_gap_hours: float,
-) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
-    """Contiguous OHLCV coverage gaps ``>= min_gap_hours`` inside ``[iv_start, iv_end]``.
 
-    A missing file or a window with zero observed bars is treated as one gap
-    spanning the entire requested interval. Leading/trailing gaps (before the
-    first or after the last observed bar within the interval) are included, not
-    just internal holes, since either leaves the symbol without a fill price
-    for part of its roster membership.
+def _require_gap_threshold(min_gap_hours: float) -> float:
+    """Validate the structural history-gap threshold shared by gap exclusion."""
+    try:
+        value = float(min_gap_hours)
+    except (TypeError, ValueError):
+        raise ValueError(f"min_gap_hours must be finite, got {min_gap_hours}") from None
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"min_gap_hours must be finite and > 0, got {min_gap_hours}")
+    return value
+
+
+def _read_ohlcv_labels(symbol: str, timeframe: Literal["3m", "1h"], root: str | None) -> np.ndarray | None:
+    """Sorted unique OHLCV bar labels in nanoseconds, or None when the file is absent.
+
+    Raises:
+        DataIntegrityError: The source file exists but its provenance cannot
+            be established (unreadable or missing the timestamp column).
     """
     base = Path(root) if root else FUTURES_DATA_DIR / "ohlcv"
     path = base / timeframe / f"{symbol}.parquet"
-    min_gap = pd.Timedelta(hours=min_gap_hours)
     if not path.exists():
-        return ((iv_start, iv_end),)
-    table = pq.read_table(path, columns=["timestamp"])
-    idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
-    idx = pd.DatetimeIndex(idx).drop_duplicates().sort_values()
-    observed = idx[(idx >= iv_start) & (idx <= iv_end)]
-    if observed.empty:
-        return ((iv_start, iv_end),)
-    gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-    if observed[0] - iv_start >= min_gap:
-        gaps.append((iv_start, observed[0]))
-    diffs = observed.to_series().diff()
-    big = diffs[diffs >= min_gap]
-    for ts, delta in big.items():
-        gaps.append((ts - delta, ts))
-    if iv_end - observed[-1] >= min_gap:
-        gaps.append((observed[-1], iv_end))
-    return tuple(gaps)
+        return None
+    try:
+        table = pq.read_table(path, columns=["timestamp"])
+    except Exception as exc:
+        raise DataIntegrityError(f"execution source unreadable symbol={symbol!r} path={path}") from exc
+    idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True, errors="coerce")
+    labels = pd.DatetimeIndex(idx).dropna().drop_duplicates().sort_values()
+    return np.asarray(labels.as_unit("ns").asi8, dtype="int64")
+
+
+def _read_mark_labels(symbol: str, timeframe: str) -> np.ndarray | None:
+    """Sorted unique valid mark labels in nanoseconds, or None when the file is absent.
+
+    Only rows with finite strictly-positive ``close`` count, mirroring
+    ``_cached_mark_panel``. Mark availability is the label plus one hour; the
+    caller applies that lag.
+
+    Raises:
+        DataIntegrityError: Mark provenance is inconsistent (unreadable file
+            or missing timestamp/close columns).
+    """
+    path = _futures_collection._mark_price_path(symbol, timeframe)
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path)
+    except Exception as exc:
+        raise DataIntegrityError(f"mark source unreadable symbol={symbol!r} path={path}") from exc
+    if df.empty or "close" not in df.columns:
+        raise DataIntegrityError(f"mark source schema inconsistent symbol={symbol!r} path={path}")
+    if "datetime" in df.columns:
+        dt = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+    elif "timestamp" in df.columns:
+        dt = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+    else:
+        raise DataIntegrityError(f"mark source schema inconsistent symbol={symbol!r} path={path}")
+    close = pd.to_numeric(df["close"], errors="coerce")
+    valid = dt.notna() & close.notna() & (close > 0)
+    labels = pd.DatetimeIndex(dt[valid].drop_duplicates()).sort_values()
+    return np.asarray(labels.as_unit("ns").asi8, dtype="int64")
+
+
+def _causal_gap_excluded(
+    member: np.ndarray,
+    decision_ns: np.ndarray,
+    labels_ns: np.ndarray | None,
+    lag_ns: int,
+    gap_ns: int,
+) -> np.ndarray:
+    """Per-decision structural exclusion using only bars available at each decision.
+
+    A decision at ``T`` observes exactly the labels with ``label + lag <= T``.
+    With history, exclusion starts once the trailing absence reaches the
+    threshold, so the last genuinely observed bar stays usable at its
+    publication time. With no observable bar yet, the leading span is excluded
+    only once it reaches the threshold measured from the current membership
+    run start -- future recovery can only add labels, never move this
+    boundary retroactively.
+    """
+    n = len(decision_ns)
+    excluded = np.zeros(n, dtype=bool)
+    if labels_ns is None or len(labels_ns) == 0:
+        return np.ones(n, dtype=bool)
+    pos = np.searchsorted(labels_ns, decision_ns - lag_ns, side="right") - 1
+    has = pos >= 0
+    absent = decision_ns - labels_ns[np.maximum(pos, 0)]
+    excluded[has] = absent[has] >= gap_ns
+    if bool((~has).any()):
+        prev = np.empty(n, dtype=bool)
+        prev[0] = False
+        prev[1:] = member[:-1]
+        run_idx = np.flatnonzero(member & ~prev)
+        at = np.searchsorted(run_idx, np.arange(n), side="right") - 1
+        run_start = decision_ns[run_idx[np.maximum(at, 0)]]
+        first = int(labels_ns[0])
+        excluded[~has] = (first - run_start[~has]) >= gap_ns
+    return excluded
+
+
+def _apply_causal_gap_exclusion(
+    execution_mask: pd.DataFrame,
+    intervals: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]],
+    labels_by_symbol: dict[str, np.ndarray | None],
+    lag_ns: int,
+    gap_ns: int,
+) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
+    """Zero membership cells under structural gaps; report newly excluded runs."""
+    decision_ns = np.asarray(execution_mask.index.as_unit("ns").asi8, dtype="int64")
+    adjusted = execution_mask.copy()
+    for symbol in intervals:
+        member = execution_mask[symbol].to_numpy(dtype=bool)
+        dropped = _causal_gap_excluded(member, decision_ns, labels_by_symbol[symbol], lag_ns, gap_ns)
+        adjusted[symbol] = member & ~dropped
+    dropped_frame = execution_mask & ~adjusted
+    return adjusted, roster_membership_intervals(dropped_frame)
 
 
 def apply_dynamic_gap_exclusion(
     execution_mask: pd.DataFrame,
-    timeframe: str,
+    timeframe: Literal["3m", "1h"],
     root: str | None = None,
     min_gap_hours: float = DYNAMIC_GAP_EXCLUSION_HOURS,
 ) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
-    """Zero out roster membership wherever a large OHLCV gap overlaps it.
+    """Restrict membership using only execution gaps observable at each decision.
 
-    Replaces a static per-symbol exclusion list with a live computation: a gap
-    ``< min_gap_hours`` inside a membership interval is left untouched (the
-    existing per-event ``MISSING_DATA``/``RELEVANT_EXECUTION_DATA_GAP`` fold
-    reporting already handles it correctly without pre-flight over-blocking); a
-    gap ``>= min_gap_hours`` structurally cannot support the eligibility
-    computation's own trailing-history requirement, so that sub-window is
-    excluded from the returned mask. Returns the adjusted mask plus a mapping
-    of excluded ``(symbol -> gap windows)`` for observability.
+    Args:
+        execution_mask: UTC decision-time membership.
+        timeframe: Three-minute execution interval (1h panel-stage masks keep
+            their hourly source interval).
+        root: Execution source root.
+        min_gap_hours: Existing structural history-gap threshold.
+
+    Returns:
+        Causal membership and observed exclusion intervals for diagnostics.
+
+    Raises:
+        ValueError: Interval or threshold is unsupported.
+        DataIntegrityError: Source provenance cannot be established.
     """
+    if timeframe not in _OHLCV_BAR_STEP_MINUTES:
+        raise ValueError(f"unknown execution_timeframe '{timeframe}'")
+    gap_hours = _require_gap_threshold(min_gap_hours)
     intervals = roster_membership_intervals(execution_mask)
     if not intervals:
         return execution_mask, {}
-    adjusted = execution_mask.copy()
-    excluded: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]] = {}
-    for symbol, ivs in intervals.items():
-        symbol_gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-        for iv_start, iv_end in ivs:
-            for g_start, g_end in _execution_gap_windows(
-                symbol, timeframe, iv_start, iv_end, root, min_gap_hours,
-            ):
-                adjusted.loc[(adjusted.index >= g_start) & (adjusted.index <= g_end), symbol] = False
-                symbol_gaps.append((g_start, g_end))
-        if symbol_gaps:
-            excluded[symbol] = tuple(symbol_gaps)
-    return adjusted, excluded
-
-
-def _mark_gap_windows(
-    avail: pd.DatetimeIndex,
-    iv_start: pd.Timestamp,
-    iv_end: pd.Timestamp,
-    min_gap_hours: float,
-) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
-    """Contiguous mark-availability gaps ``>= min_gap_hours`` inside ``[iv_start, iv_end]``.
-
-    ``avail`` must already carry ``_mark_availability_index``'s causal ``+1h``
-    shift and finite/strictly-positive ``close`` filter, so this sees exactly
-    the same availability points the replay does.
-    """
-    min_gap = pd.Timedelta(hours=min_gap_hours)
-    observed = avail[(avail >= iv_start) & (avail <= iv_end)]
-    if observed.empty:
-        return ((iv_start, iv_end),)
-    gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-    if observed[0] - iv_start >= min_gap:
-        gaps.append((iv_start, observed[0]))
-    diffs = observed.to_series().diff()
-    big = diffs[diffs >= min_gap]
-    for ts, delta in big.items():
-        gaps.append((ts - delta, ts))
-    if iv_end - observed[-1] >= min_gap:
-        gaps.append((observed[-1], iv_end))
-    return tuple(gaps)
+    labels_by_symbol = {
+        symbol: _read_ohlcv_labels(symbol, timeframe, root) for symbol in intervals
+    }
+    lag_ns = _OHLCV_BAR_STEP_MINUTES[timeframe] * 60_000_000_000
+    gap_ns = int(gap_hours * 3_600_000_000_000)
+    return _apply_causal_gap_exclusion(execution_mask, intervals, labels_by_symbol, lag_ns, gap_ns)
 
 
 def apply_dynamic_mark_gap_exclusion(
@@ -447,32 +504,31 @@ def apply_dynamic_mark_gap_exclusion(
     root: str | None = None,
     min_gap_hours: float = DYNAMIC_GAP_EXCLUSION_HOURS,
 ) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
-    """Zero out roster membership wherever a large mark-price gap overlaps it.
+    """Restrict membership using published hourly mark observations.
 
-    Same self-healing, threshold-based replacement for a static exclusion list
-    as ``apply_dynamic_gap_exclusion``, scoped to ``markPriceKlines`` via
-    ``_mark_availability_index`` instead of OHLCV. ``root`` is accepted for
-    signature symmetry but mark-price paths are always resolved through
-    ``futures_collection._mark_price_path`` (no synthetic-root override exists
-    for mark data).
+    Args:
+        execution_mask: UTC decision-time membership.
+        timeframe: Hourly mark source interval.
+        root: Existing compatibility argument; it must not imply root isolation.
+        min_gap_hours: Existing structural history-gap threshold.
+
+    Returns:
+        Causal membership and observed mark exclusion intervals.
+
+    Raises:
+        ValueError: Mark interval or threshold is unsupported.
+        DataIntegrityError: Mark provenance is inconsistent.
     """
     if timeframe != "1h":
         raise ValueError(f"unsupported timeframe '{timeframe}' (mark coverage is hourly)")
+    gap_hours = _require_gap_threshold(min_gap_hours)
     intervals = roster_membership_intervals(execution_mask)
     if not intervals:
         return execution_mask, {}
-    adjusted = execution_mask.copy()
-    excluded: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]] = {}
-    for symbol, ivs in intervals.items():
-        avail = _mark_availability_index(_futures_collection._mark_price_path(symbol, timeframe))
-        symbol_gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-        for iv_start, iv_end in ivs:
-            for g_start, g_end in _mark_gap_windows(avail, iv_start, iv_end, min_gap_hours):
-                adjusted.loc[(adjusted.index >= g_start) & (adjusted.index <= g_end), symbol] = False
-                symbol_gaps.append((g_start, g_end))
-        if symbol_gaps:
-            excluded[symbol] = tuple(symbol_gaps)
-    return adjusted, excluded
+    labels_by_symbol = {symbol: _read_mark_labels(symbol, timeframe) for symbol in intervals}
+    lag_ns = _MARK_AVAILABILITY_LAG_HOURS * 3_600_000_000_000
+    gap_ns = int(gap_hours * 3_600_000_000_000)
+    return _apply_causal_gap_exclusion(execution_mask, intervals, labels_by_symbol, lag_ns, gap_ns)
 
 
 def collect_mhs_execution_data(
@@ -504,8 +560,12 @@ def refresh_mhs_execution_manifest(manifest_path: str | Path) -> dict[str, objec
     """Refresh per-symbol coverage from local files without network access."""
     path = Path(manifest_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
+    timeframe = str(payload["timeframe"])
+    if timeframe != "3m":
+        raise ValueError(f"unknown execution_timeframe '{timeframe}'")
+    execution_timeframe: Literal["3m"] = "3m"
     statuses = {
-        symbol: _coverage(symbol, str(payload["timeframe"]), str(payload["start"]), str(payload["end"]))
+        symbol: _coverage(symbol, execution_timeframe, str(payload["start"]), str(payload["end"]))
         for symbol in payload["symbols"]
     }
     payload["statuses"] = statuses
@@ -519,7 +579,7 @@ def refresh_mhs_execution_manifest(manifest_path: str | Path) -> dict[str, objec
                 data_root=FUTURES_DATA_DIR,
                 panel_symbols=symbols,
                 execution_symbols=symbols,
-                execution_timeframe=str(payload["timeframe"]),
+                execution_timeframe=execution_timeframe,
             )
             if candidate.exists()
         ],

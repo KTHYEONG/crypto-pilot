@@ -142,19 +142,35 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
 
 
 def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
-    """Run the continuous process backtest proxy and persist its report."""
+    """Run the guarded production 3m process replay and persist execution evidence.
+
+    Args:
+        args: Existing process command arguments and explicit output controls.
+
+    Returns:
+        None; persist the inventory report and optionally exact target parquet.
+
+    Raises:
+        SystemExit: An argument or reserved destination is invalid.
+        DataIntegrityError: Replay provenance or resource admission fails.
+    """
     import pandas as pd
     from pathlib import Path
 
     from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
     from src.mhs.process import ProcessExecutionPolicy
     from src.mhs.process_backtest import (
+        PROCESS_INVENTORY_CERTIFICATION_LEVEL,
+        PROCESS_INVENTORY_REPORT_PATH,
+        PROCESS_POLICY_REPORT_PATH,
         PROCESS_REPORT_PATH,
-        evaluate_process_backtest,
-        persist_process_report,
+        evaluate_process_inventory_backtest,
+        persist_process_inventory_report,
         persist_process_targets,
     )
 
+    if getattr(args, "execution_timeframe", "3m") != "3m":
+        raise SystemExit(f"execution-timeframe must be 3m, got {getattr(args, 'execution_timeframe')!r}")
     policy = ProcessExecutionPolicy(
         tracking_error_threshold=getattr(args, "rebalance_tracking_error_threshold", None),
     )
@@ -166,21 +182,38 @@ def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
         raise SystemExit(f"output must be a JSON path, got {output_arg!r}")
     if targets_output is not None and targets_output.suffix != ".parquet":
         raise SystemExit(f"targets-output must be a parquet path, got {targets_arg!r}")
-    if output is not None and policy.tracking_error_threshold is not None:
-        if output.resolve() == PROCESS_REPORT_PATH.resolve():
-            raise SystemExit("enabled-policy report would overwrite the reserved baseline destination")
+    if output is not None and output.resolve() in {PROCESS_REPORT_PATH.resolve(), PROCESS_POLICY_REPORT_PATH.resolve()}:
+        raise SystemExit("inventory report would overwrite the reserved hourly evidence destination")
     start = pd.Timestamp(args.start, tz="UTC") if getattr(args, "start", None) else DISCOVERY_START
     end = pd.Timestamp(args.end, tz="UTC") if getattr(args, "end", None) else PROCESS_EVALUATION_CEILING
-    report = evaluate_process_backtest(start, end, data_root=args.data_root, execution_policy=policy)
-    path = persist_process_report(report, output)
+    report = evaluate_process_inventory_backtest(start, end, data_root=args.data_root, execution_policy=policy)
+    path = persist_process_inventory_report(report, output if output is not None else PROCESS_INVENTORY_REPORT_PATH)
     if targets_output is not None:
-        persist_process_targets(report.base, targets_output)
-    metrics = report.gate.metrics
+        persist_process_targets(report.proxy.base, targets_output)
+    base = report.base
+    memory = report.memory_stats
     _logger.info(
-        "[EVAL] stage=process_backtest certification=%s go=%s reasons=%s oos_lcb=%s stress_lcb=%s threshold=%s path=%s",
-        report.certification_level, report.gate.go, ",".join(report.gate.reason_codes),
-        metrics.get("oos_ann_log_growth_lcb"), metrics.get("stress_ann_log_growth_lcb"),
-        policy.tracking_error_threshold, path,
+        "[EVAL] stage=process_backtest certification=%s primary_valid=%s completion_fills=%d unfilled=%d total_fills=%d passive_fills=%d total_fees=%s total_funding=%s go=%s reasons=%s wall_s=%s cpu_s=%s peak_rss=%s peak_pss=%s peak_uss=%s min_available=%s proxy_certification=%s proxy_go=%s threshold=%s path=%s",
+        PROCESS_INVENTORY_CERTIFICATION_LEVEL,
+        bool(base.ledger.primary_valid),
+        len(base.simulated_fills),
+        int(base.unfilled_count),
+        len(base.simulated_fills),
+        int(base.fill_count),
+        float(base.ledger.fee_charge.sum()),
+        float(base.ledger.funding_charge.sum()),
+        report.gate.go,
+        ",".join(report.gate.reason_codes),
+        float(memory.wall_seconds),
+        float(memory.cpu_seconds),
+        memory.parent_rss_peak_bytes,
+        int(memory.tree_pss_peak_bytes),
+        int(memory.tree_uss_peak_bytes),
+        int(memory.min_system_available_bytes),
+        report.proxy.certification_level,
+        report.proxy.gate.go,
+        policy.tracking_error_threshold,
+        path,
     )
 
 
@@ -228,7 +261,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument("--no-log-run", action="store_true", default=False)
     mhs.add_argument(
         "--execution-timeframe",
-        choices=["1m", "3m", "5m"],
+        choices=["3m"],
         default="3m",
         help=(
             "OHLCV execution replay resolution; signal construction remains 1h. "
@@ -785,4 +818,5 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     )
     process.add_argument("--output", default=None, help="Explicit JSON proxy evidence destination.")
     process.add_argument("--targets-output", default=None, help="Optional parquet export of exact sized targets.")
+    process.add_argument("--execution-timeframe", choices=["3m"], default="3m", help="Execution replay resolution; fixed to 3m.")
     process.set_defaults(handler=_run_mhs_process_backtest)

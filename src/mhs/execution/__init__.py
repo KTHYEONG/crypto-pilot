@@ -50,6 +50,7 @@ from .accounting import CausalPortfolioState, reconcile_causal_state  # noqa: E4
 from .accumulator import _BoundExecutionReplayAccumulator  # noqa: E402
 from .batch import (  # noqa: E402  # noqa: E402  # noqa: E402
     _rescale_window_weights,
+    live_required_symbols,
     replay_execution_window_batch,
     replay_execution_window_batch_isolated,
     replay_execution_window_pair,
@@ -105,6 +106,7 @@ __all__ = [
     "bar_funding_panel",
     "corwin_schultz_half_spread_bps",
     "laddered_fill_schedule",
+    "live_required_symbols",
     "mhs_ledger_pnl",
     "mhs_ledger_pnl_multi_tier",
     "notional_weighted_shortfall_bps",

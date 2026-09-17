@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 import zipfile
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace as dataclass_replace
 from typing import Any, Literal
 
@@ -23,7 +23,7 @@ from src.mhs import scaling as _scaling
 from src.mhs import statistics as _statistics
 from src.mhs.contracts import MhsBookFailure, MhsBookReport, MhsDiagnosticRequest
 from src.mhs.marks import _build_window_frames, _cached_mark_panel, _load_window_minute_frames
-from src.mhs.resources import _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
+from src.mhs.resources import assert_mhs_allocation_budget, _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
 from src.common.errors import DataIntegrityError
 from src.mhs.books import portfolio_rebalance_trigger
 from src.mhs.evidence import CostResponsePoint, PhaseDiagnosticResult, TailSensitivityResult, book_evidence, required_cost_tiers, resolved_anchored_folds
@@ -73,31 +73,47 @@ def _iter_mhs_execution_windows(
     target_weights: pd.DataFrame,
     signal_available_at: pd.DatetimeIndex,
     root: str,
-    timeframe: Literal["1m", "3m", "5m"],
+    timeframe: Literal["3m"],
     start: pd.Timestamp,
     end: pd.Timestamp,
     funding_by_symbol: dict[str, pd.Series],
     mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"],
     spec: ExecutionSpec,
     funding_failures: Mapping[str, str] | None = None,
+    *,
+    required_symbols: Callable[[], frozenset[str]] | None = None,
+    budget_bytes: int | None = None,
+    reserve_bytes: int | None = None,
 ) -> Iterator[MhsExecutionWindow]:
-    """Yield at-most-31-day execution windows with only the active roster read.
+    """Stream local execution inputs while preserving carried inventory sources.
 
-    Each window's minute grid starts at the previous window's last decision
-    (the decision-time funding/MTM lead) and ends at the final order's strict
-    timeout bar; the last window covers the full evaluation grid so a forced
-    exit can always resolve. Only symbols with a non-zero target in the window
-    or carried inventory from the previous window are read; the canonical
-    column order is preserved on every window for artifact-shape equivalence.
-    In ``cache_required`` mode each window's decision marks are asserted
-    fail-closed before the window is yielded.
+    Args:
+        target_weights: Canonical sized targets.
+        signal_available_at: Explicit aligned signal publication times.
+        root: Execution OHLCV root.
+        timeframe: Fixed three-minute execution interval.
+        start: UTC evaluation start.
+        end: UTC evaluation fence.
+        funding_by_symbol: Funding publication inputs.
+        mark_mode: Existing explicit mark provenance policy.
+        spec: Existing execution cost and timeout contract.
+        funding_failures: Existing funding source failures.
+        required_symbols: Current union of live bound inventory/order requirements.
+        budget_bytes: Effective process-tree budget for pre-decode admission.
+        reserve_bytes: Required available physical-memory floor for admission.
+
+    Returns:
+        Chronological local windows with complete required market provenance.
+
+    Raises:
+        DataIntegrityError: Decisions, sources or evaluation bounds conflict.
     """
     if len(target_weights) != len(signal_available_at):
         raise DataIntegrityError("signal_available_at must align with target_weights")
     if start >= end:
         raise DataIntegrityError("start must precede end")
     columns = tuple(target_weights.columns)
-    freq = {"1m": "1min", "3m": "3min", "5m": "5min"}[timeframe]
+    freq = "3min"
     full_grid = pd.date_range(start, end, freq=freq, tz="UTC")
     full_grid_ns = np.asarray(full_grid, dtype="datetime64[ns]").astype("int64")
     n_grid = len(full_grid_ns)
@@ -157,13 +173,26 @@ def _iter_mhs_execution_windows(
         minute_grid = pd.date_range(grid_start, grid_end, freq=freq, tz="UTC")
         non_zero = w_weights.notna() & w_weights.ne(0.0)
         active = set(w_weights.columns[non_zero.any(axis=0)])
-        roster_set = active | prev_active
+        if required_symbols is not None:
+            live_required = set(required_symbols())
+            unknown = live_required - set(columns)
+            if unknown:
+                raise DataIntegrityError(
+                    f"required symbols {sorted(unknown)} are not in canonical columns; "
+                    "missing held symbols must never disappear"
+                )
+            roster_set = active | live_required
+        else:
+            roster_set = active | prev_active
         prev_active = active
         # Active (or previously held) symbols stay on the roster even when
         # their execution file is missing (INV-ACTIVE-ROSTER-PRESERVED): the
         # missing frame travels as all-NaN so the replay reports an explicit
         # gap instead of silently dropping the symbol.
         roster = [s for s in columns if s in roster_set]
+
+        estimated_bytes = len(minute_grid) * max(len(roster), 1) * 8 * 8
+        assert_mhs_allocation_budget(estimated_bytes=estimated_bytes, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes)
 
         symbol_frames = _load_window_minute_frames(
             root, roster, grid_start, grid_end, timeframe,
@@ -232,6 +261,7 @@ def _iter_mhs_execution_windows(
             quote_volumes=quote_volumes,
             funding_known=funding_known,
             bar_available_at=bar_available_at,
+            logical_partition=(i0, i1),
         )
 
 
@@ -324,6 +354,7 @@ def _spill_window_to_ipc(window: ExecutionReplayWindow, target_path: str) -> Non
             "minute_grid_ns": minute_ns.tolist(),
             "signal_ns": signal_ns.tolist(),
             "bar_available_ns": np.asarray(window.bar_available_at, dtype="datetime64[ns]").astype("int64").tolist() if window.bar_available_at is not None else None,
+            "logical_partition": list(window.logical_partition) if window.logical_partition is not None else None,
             "frames": meta_frames,
         }
         with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_STORED) as zf:
@@ -368,6 +399,7 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
             frames[name] = frames[name].astype("float64")
         known_frame = frames["funding_known"].astype(bool) if frames["funding_known"] is not None else None
         available = pd.DatetimeIndex(pd.to_datetime(np.asarray(meta.get("bar_available_ns"), dtype="int64"), unit="ns", utc=True)) if meta.get("bar_available_ns") is not None else None
+        logical_partition = meta.get("logical_partition")
         return ExecutionReplayWindow(
             window_start=pd.Timestamp(meta["window_start_ns"], unit="ns", tz="UTC"),
             window_end=pd.Timestamp(meta["window_end_ns"], unit="ns", tz="UTC"),
@@ -384,6 +416,7 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
             quote_volumes=frames["quote_volumes"],
             funding_known=known_frame,
             bar_available_at=available,
+            logical_partition=tuple(logical_partition) if logical_partition is not None else None,
         )
     except Exception as exc:
         raise DataIntegrityError(f"window IPC load failed for {target_path}: {exc}") from exc
@@ -491,7 +524,7 @@ def _book_outcome(
     signal_available_at = step_grid + pd.Timedelta(hours=1)
     execution_grid = pd.date_range(
         start, end,
-        freq={"1m": "1min", "3m": "3min", "5m": "5min"}[request.execution_timeframe],
+        freq="3min",
         tz="UTC",
     )
     target_replay, signal_replay, censored = integrity._truncate_replayable_decisions(
@@ -501,13 +534,13 @@ def _book_outcome(
 
     # Fork workers get the SYSTEM reserve check (not the auto 85% budget, whose
     # fork-child RSS would double-count COW-shared parent pages).
-    _window_rss_reserve = _resolve_ram_budget(None, request.ram_guard)[1]
+    _window_budget, _window_rss_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)
 
     def _windows() -> Iterator[MhsExecutionWindow]:
         return ev._iter_mhs_execution_windows(
             target_replay, signal_replay, root, request.execution_timeframe,
             start, end, funding_by_symbol, request.mark_mode, specs._resolved_base_execution_spec(request),
-        )
+            budget_bytes=_window_budget, reserve_bytes=_window_rss_reserve)
 
     def _window_telemetry(
         gen: Iterator[MhsExecutionWindow], prefix: str,
