@@ -125,6 +125,8 @@ class TestExitBarSurface:
 @pytest.mark.slow
 class TestSignalDelayBars:
     def test_signal_delay_bars_zero_is_byte_identical(self) -> None:
+        if not BTC_PATH.exists():
+            pytest.skip(f"{BTC_PATH} not present")
         df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
         spec = StrategySpec()
         costs = CostModel()

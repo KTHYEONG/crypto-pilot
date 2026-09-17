@@ -23,6 +23,10 @@ from src.mhs.horizons import horizon_log_return
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.mhs.types import BOOK_SPECS
 
+# 유동성 순위(720봉)와 모멘텀 신호가 창 시작 시점에 이미 완성돼 있어야 PIT 계획이 성립하므로
+# 창 앞쪽 2000봉을 워밍업으로 읽고, 선택 자체는 창 안 결정 그리드에서만 한다.
+MHS_EXECUTION_PLAN_WARMUP_HOURS: int = 2000
+
 
 @dataclass(frozen=True, slots=True)
 class MhsExecutionCollectionPlan:
@@ -68,7 +72,7 @@ def build_mhs_execution_plan(
     if start_ts >= end_ts:
         raise ValueError("start must precede end")
     root = str(FUTURES_DATA_DIR / "ohlcv")
-    panel = load_base_panel(root, "1h", ("close", "quote_vol"), start_ts, end_ts, partition="dev", min_bars=2000)
+    panel = load_base_panel(root, "1h", ("close", "quote_vol"), start_ts - pd.Timedelta(hours=MHS_EXECUTION_PLAN_WARMUP_HOURS), end_ts, partition="dev", min_bars=2000)
     symbols = _funded_symbols(list(panel["close"].columns))
     if not symbols:
         raise RuntimeError("no funded dev symbols available for MHS execution plan")

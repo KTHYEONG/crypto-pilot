@@ -25,12 +25,11 @@ from src.mhs.data_provenance import (
 from src.mhs.evaluation import (
     FEATURE_NAME,
     HOLDOUT_CUTOFF,
-    phase_1_anchored_purged_folds,
     required_cost_tiers,
     synthetic_stress_scenarios,
 )
 from src.mhs.evaluation.integrity import replay_ledger_certified
-from src.mhs.evidence import holdout_tail_evidence, parameter_oos_split_evidence
+from src.mhs.evidence import holdout_tail_evidence, parameter_oos_split_evidence, resolved_anchored_folds
 from src.mhs.params import COMMITTEE_OOS_START
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.reliability import (
@@ -111,7 +110,7 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         selection_overlap_fraction=overlap_fraction,
         fold_committee_weight_leak=ctx.fold_committee_weight_leak,
         top_level_boundary=COMMITTEE_OOS_START,
-        fold_boundaries=[fold.train_end for fold in phase_1_anchored_purged_folds()],
+        fold_boundaries=[fold.train_end for fold in resolved_anchored_folds(ctx.config)],
     )
     gated_deployment = ctx.deployment
     if ctx.deployment is not None:
@@ -147,7 +146,7 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
         participation_warnings=ctx.participation,
         termination_counts=ctx.termination_counts,
         unsupported_assumptions=ctx.unsupported,
-        anchored_folds=phase_1_anchored_purged_folds(),
+        anchored_folds=resolved_anchored_folds(ctx.config),
         folds=ctx.folds,
         research_go=ctx.research_go,
         fill_source=fill_source,

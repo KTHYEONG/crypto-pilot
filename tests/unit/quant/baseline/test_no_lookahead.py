@@ -26,6 +26,8 @@ def costs() -> CostModel:
 
 class TestNoLookahead:
     def test_future_perturbation(self, spec: StrategySpec, costs: CostModel) -> None:
+        if not BTC_PATH.exists():
+            pytest.skip(f"{BTC_PATH} not present")
         df = load_ohlcv_4h(BTC_PATH, end="2025-12-31")
         cut = pd.Timestamp("2024-06-30", tz="UTC")
         base_result = run_backtest(df, spec, costs)
