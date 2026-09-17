@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -158,9 +158,11 @@ def validate_mhs_input_manifest(
 
 
 def resolve_required_mhs_input_paths(
-    *, data_root: Path, panel_symbols: Sequence[str], execution_symbols: Sequence[str], execution_timeframe: str
+    *, data_root: Path, panel_symbols: Sequence[str], execution_symbols: Sequence[str], execution_timeframe: Literal["3m"]
 ) -> tuple[Path, ...]:
     """Required sealed inputs: 1h panel, execution timeframe, mark, funding."""
+    if execution_timeframe != "3m":
+        raise ValueError(f"unknown execution_timeframe {execution_timeframe!r}")
     root = Path(data_root)
     ordered = list(dict.fromkeys([*panel_symbols, *execution_symbols]))
     paths = [
@@ -205,7 +207,7 @@ def validate_forward_execution_observations(
     return DataProvenanceResult(DataEvidenceTier.FORWARD_OBSERVED, True, (), None, len(usable))
 
 
-def mhs_sealable_input_paths(*, data_root: Path, execution_timeframe: str) -> tuple[Path, ...]:
+def mhs_sealable_input_paths(*, data_root: Path, execution_timeframe: Literal["3m"]) -> tuple[Path, ...]:
     """Enumerate sealable inputs: only symbols owning the complete required set.
 
     Symbols are discovered from ``<data_root>/ohlcv/1h/*.parquet`` sorted by
@@ -214,6 +216,8 @@ def mhs_sealable_input_paths(*, data_root: Path, execution_timeframe: str) -> tu
     only when every required file exists -- a symbol missing any required
     file contributes nothing (never seal a partial symbol).
     """
+    if execution_timeframe != "3m":
+        raise ValueError(f"unknown execution_timeframe {execution_timeframe!r}")
     root = Path(data_root)
     symbols = sorted({path.stem for path in (root / "ohlcv" / "1h").glob("*.parquet")})
     sealed: list[Path] = []

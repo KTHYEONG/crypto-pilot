@@ -898,3 +898,26 @@ def test_idle_settlement_skipped_when_settle_bar_mark_is_not_finite() -> None:
     assert abs(float(acc.units_arr[0])) > 0.0
 
 
+
+
+def test_bounded_ledger_held_unknown_funding_stays_visible() -> None:
+    """Held inventory over unknown nonzero funding invalidates without charging."""
+    grid = pd.date_range("2025-01-01", periods=6, freq="3min", tz="UTC")
+    px = pd.DataFrame({"A": 100.0}, index=grid)
+    funding = pd.DataFrame({"A": 0.0001}, index=grid)
+    known = pd.DataFrame({"A": [True, True, True, False, False, False]}, index=grid)
+    window = ExecutionReplayWindow(
+        window_start=grid[0], window_end=grid[-1], columns=("A",), symbols=("A",),
+        minute_grid=grid, highs=px, lows=px, closes=px, marks=px, bar_funding=funding,
+        target_weights=pd.DataFrame({"A": [1.0]}, index=pd.DatetimeIndex([grid[0]])),
+        signal_available_at=pd.DatetimeIndex([grid[0]]),
+        quote_volumes=pd.DataFrame({"A": 1000.0}, index=grid),
+        funding_known=known, bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+    acc = _BoundExecutionReplayAccumulator(window, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+    acc.consume(window)
+    result = acc.finalize()
+    assert acc.first_held_funding is not None
+    assert acc.first_held_funding[0] == "A"
+    assert not result.ledger.primary_valid
+    assert any(g.code == "MISSING_HELD_FUNDING" for g in result.ledger.data_gaps)

@@ -64,12 +64,17 @@ def _validate_committee_tranche_count(request: MhsDiagnosticRequest) -> None:
 
 
 def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset: object) -> None:
-    """Run every declared validation rule over the request, fail closed.
+    """Validate the registered MHS domain contract, including fixed 3m execution.
 
-    ``committee_target_gross_unset`` is the caller's ``COMMITTEE_TARGET_GROSS_UNSET``
-    sentinel; its object identity distinguishes the registered default exposure
-    from an explicit value (the sentinel is never resolved into the frozen
-    field, so identity is preserved across ``dataclasses.replace``).
+    Args:
+        request: Complete diagnostic request.
+        committee_target_gross_unset: Existing sentinel for unset gross controls.
+
+    Returns:
+        None for a valid request.
+
+    Raises:
+        ValueError: Execution interval or another request field is unsupported.
     """
     # Choice membership (closed sets).
     _validate_field_choices(request, "partition", ("dev", "holdout", "all"))
@@ -80,11 +85,11 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
     # Terminal-decision censoring needs an exact grid hit, so the passive
     # window must be a positive multiple of the execution timeframe's minutes;
     # rejected at request validation, before any panel load or replay.
-    _validate_field_choices(request, "execution_timeframe", ("1m", "3m", "5m"))
+    _validate_field_choices(request, "execution_timeframe", ("3m",))
     from src.mhs.panel import DATA_POLICIES
 
     _validate_field_choices(request, "data_policy", tuple(sorted(DATA_POLICIES)))
-    _timeframe_minutes = {"1m": 1, "3m": 3, "5m": 5}[request.execution_timeframe]
+    _timeframe_minutes = 3
     if request.passive_timeout_minutes < 1 or request.passive_timeout_minutes % _timeframe_minutes:
         raise ValueError(
             f"passive_timeout_minutes must be a positive multiple of "

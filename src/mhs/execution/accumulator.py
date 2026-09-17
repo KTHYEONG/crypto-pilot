@@ -15,7 +15,6 @@ from src.mhs.types import ExecutionSpec
 from . import _ExecutionBound, _MarkSource
 from . import contracts as _contracts
 from . import microstructure as _microstructure
-from . import pnl as _pnl
 from .contracts import (
     ExecutionDataGap,
     ExecutionReplayWindow,
@@ -140,6 +139,18 @@ class _BoundExecutionReplayAccumulator:
         # Liquidity-aware taker cost state: one half-spread estimate per
         # canonical column, nan until a window's bars have been consumed.
         self.half_spread_bps = np.full(self.n_cols, np.nan, dtype="float64")
+        # Logical cost-clock observations for the in-progress decision
+        # partition: additive Corwin-Schultz sufficient statistics plus the
+        # previous piece's closing bar per column for the cross-piece
+        # boundary pair. O(window) scratch per piece and O(symbols) retained,
+        # never full high/low histories.
+        self._spread_pending_key: tuple[int, int] | None = None
+        self._spread_pair_sums = np.zeros(self.n_cols, dtype="float64")
+        self._spread_pair_counts = np.zeros(self.n_cols, dtype="float64")
+        self._spread_bar_counts = np.zeros(self.n_cols, dtype="float64")
+        self._spread_carry_high = np.full(self.n_cols, np.nan, dtype="float64")
+        self._spread_carry_low = np.full(self.n_cols, np.nan, dtype="float64")
+        self._spread_carry_ns = np.full(self.n_cols, -1, dtype="int64")
         # Cost decomposition terms paired 1:1 with ``self.shortfalls``.
         self.fee_terms: list[float] = []
         self.spread_terms: list[float] = []
@@ -166,6 +177,16 @@ class _BoundExecutionReplayAccumulator:
         self.full_grid_end: pd.Timestamp = first.minute_grid[-1]
         self._trim_anchor_ns: int | None = None
         self._t0 = time.perf_counter()
+
+    def required_symbols(self) -> frozenset[str]:
+        """Expose actual carried inventory and unresolved-order source requirements.
+
+        Returns:
+            Symbols with nonzero units or unresolved orders, without tiny-unit pruning.
+        """
+        held = {self.columns[int(i)] for i in np.flatnonzero(self.units_arr != 0.0).tolist()}
+        pending = {self.columns[int(gcol)] for (_, gcol, _, _, _) in self._mirror_pending}
+        return frozenset(held | pending)
 
     def _equity_at(self, gpos: np.ndarray | None = None) -> float:
         # NaN-only zeroing instead of nan_to_num: bit-identical on the
@@ -231,6 +252,7 @@ class _BoundExecutionReplayAccumulator:
     def consume(self, w: ExecutionReplayWindow) -> None:
         """Consume one window through the ordered replay phases."""
         (n_cols, local_cols, n_local, gpos, grid, grid_ns, n_grid, bar_ns, marks_values, highs_values, lows_values, closes_values, close_finite, mark_valid, funding_matrix) = self._consume_validate_window(w)
+        self._advance_spread_clock(w.logical_partition)
         (last_close_idx, decision_ns_all, spos_all, dpos_all, on_grid_all, target_values, submit_anchored, fill_start, tw_index, sig_index) = self._consume_prepare_tables(w, grid_ns, n_grid, close_finite, local_cols)
         for i in range(len(tw_index)):
             self._consume_drift_trims(int(decision_ns_all[i]), decision_ns_all, gpos, local_cols, submit_anchored, n_grid, grid_ns, closes_values, grid, marks_values, n_cols, mark_valid, last_close_idx, lows_values, highs_values, funding_matrix)
@@ -238,7 +260,7 @@ class _BoundExecutionReplayAccumulator:
         self._consume_drift_trims(None, decision_ns_all, gpos, local_cols, submit_anchored, n_grid, grid_ns, closes_values, grid, marks_values, n_cols, mark_valid, last_close_idx, lows_values, highs_values, funding_matrix)
         self._consume_append_ledger(grid_ns, n_grid, local_cols, fill_start, n_local, marks_values, gpos, grid, funding_matrix, bar_ns, closes_values)
         self._advance_liquidity_carry(grid_ns, gpos, decision_ns_all)
-        self._consume_update_spreads(highs_values, lows_values, gpos)
+        self._observe_spread_partition(highs_values, lows_values, gpos, grid_ns, bar_ns, w.logical_partition)
 
     def _consume_validate_window(self, w: ExecutionReplayWindow) -> tuple[int, list[str], int, np.ndarray, pd.DatetimeIndex, np.ndarray, int, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Validate one window and stage its grids, marks, and funding."""
@@ -1146,7 +1168,27 @@ class _BoundExecutionReplayAccumulator:
 
 
     def _consume_append_ledger(self, grid_ns: np.ndarray, n_grid: int, local_cols: list[str], fill_start: int, n_local: int, marks_values: np.ndarray, gpos: np.ndarray, grid: pd.DatetimeIndex, funding_matrix: np.ndarray, bar_ns: int, closes_values: np.ndarray) -> None:
-        """Append this window streaming ledger chunk, vectorised per symbol."""
+        """Append reconciled inventory accounting with bounded scratch storage.
+
+        Args:
+            grid_ns: Nanosecond execution labels.
+            n_grid: Number of labels.
+            local_cols: Ordered local symbols.
+            fill_start: First fill belonging to this window.
+            n_local: Local symbol count.
+            marks_values: Published valuation prices.
+            gpos: Local-to-canonical positions.
+            grid: UTC execution labels.
+            funding_matrix: Existing funding and knowledge representation.
+            bar_ns: Execution interval in nanoseconds.
+            closes_values: Observed closes.
+
+        Returns:
+            None; append chronological ledger series and preserve carried state.
+
+        Raises:
+            DataIntegrityError: Accounting or required provenance is invalid.
+        """
 
         # ---- streamed ledger chunk over [ledger_start_ns, grid end] ----
         p0 = 0 if self.ledger_start_ns is None else int(np.searchsorted(grid_ns, self.ledger_start_ns, side="left"))
@@ -1154,9 +1196,6 @@ class _BoundExecutionReplayAccumulator:
             raise DataIntegrityError("execution windows must not leave an uncovered grid gap")
         chunk_len = n_grid - p0
         if chunk_len:
-            # Vectorized fill scatter over the (grid, symbol) plane: the scalar
-            # per-fill ``local_cols.index`` / ``searchsorted`` / list append is
-            # replaced by one searchsorted + one add.at over the window's fills.
             sym_to_local = {s: j for j, s in enumerate(local_cols)}
             n_fill = len(self.fill_ts) - fill_start
             turnover_pos_arr: np.ndarray
@@ -1174,12 +1213,6 @@ class _BoundExecutionReplayAccumulator:
                 wf_price = np.asarray(self.fill_price[fill_start:], dtype="float64")
                 wf_fee = np.asarray(self.fill_fee_bps[fill_start:], dtype="float64")
                 wf_fee_amt = wf_fee / 1e4 * np.abs(wf_qty) * wf_price
-                d_flat = np.ravel_multi_index(
-                    (wf_pos, wf_j), (n_grid, n_local),
-                )
-                d_matrix = np.zeros(n_grid * n_local, dtype="float64")
-                np.add.at(d_matrix, d_flat, wf_qty)
-                d_matrix = d_matrix.reshape((n_grid, n_local))
                 fill_flow = np.zeros(n_grid, dtype="float64")
                 fee_by_ts = np.zeros(n_grid, dtype="float64")
                 np.add.at(fill_flow, wf_pos, -(wf_qty * wf_price + wf_fee_amt))
@@ -1188,105 +1221,80 @@ class _BoundExecutionReplayAccumulator:
                 turnover_qty_arr = wf_qty
                 turnover_price_arr = wf_price
             else:
-                d_matrix = np.zeros((n_grid, n_local), dtype="float64")
+                wf_pos = np.empty(0, dtype=np.intp)
+                wf_j = np.empty(0, dtype=np.intp)
+                wf_qty = np.empty(0, dtype="float64")
                 fill_flow = np.zeros(n_grid, dtype="float64")
                 fee_by_ts = np.zeros(n_grid, dtype="float64")
                 turnover_pos_arr = np.empty(0, dtype=np.intp)
                 turnover_qty_arr = np.empty(0, dtype="float64")
                 turnover_price_arr = np.empty(0, dtype="float64")
 
-            # Vectorized (grid, symbol) ledger pass.  Each column's arithmetic is
-            # bit-identical to the scalar per-symbol loop; only the iteration
-            # order changes (column-major collapse into one 2-D broadcast).
-            sym_finite = np.isfinite(marks_values)
-            units_state = np.cumsum(d_matrix, axis=0) + self.ledger_units[gpos][None, :]
-            units_before = np.zeros_like(units_state)
-            units_before[0] = self.ledger_units[gpos]
-            units_before[1:] = units_state[:-1]
-
-            # Vectorized forward-fill of the last valid mark per symbol
-            # (replaces the ``for i in range(n_grid)`` carry loop).
-            last_finite_idx = np.maximum.accumulate(
-                np.where(sym_finite, np.arange(n_grid)[:, None], -1), axis=0,
-            )
-            m_ff = marks_values[last_finite_idx, np.arange(n_local)[None, :]]
-            carry_row = np.asarray(self.last_valid_mark[gpos], dtype="float64")[None, :]
-            m_ff = np.where(sym_finite, marks_values, np.where(last_finite_idx >= 0, m_ff, carry_row))
-            self.last_valid_mark[gpos] = m_ff[-1]
-
-            valuation = np.where(
-                sym_finite | (units_state != 0.0),
-                np.where(sym_finite, marks_values, m_ff),
-                0.0,
-            )
-
-            held = np.abs(units_before) >= QTY_EPS
-            joint = np.zeros_like(sym_finite, dtype=bool)
-            joint[1:] = sym_finite[1:] & sym_finite[:-1]
-            kept_region = np.arange(n_grid)[:, None] >= p0
-            # Held-gap provenance is judged only on this window's kept chunk
-            # region: bars before p0 belong to the previous chunk's ledger,
-            # where the carried state (not this window's frames) is correct.
-            held_mark_trigger = (held & ~joint) & kept_region
-            if held_mark_trigger.any():
-                self.ledger_valid = False
-                self.invalid_reasons.add("MISSING_DATA")
-                if self.first_held_mark is None:
-                    col_hit = held_mark_trigger.any(axis=0)
-                    j0 = int(np.argmax(col_hit))
-                    mask_col = (held & ~joint)[:, j0]
-                    trigger_pos = int(np.argmax(held_mark_trigger[:, j0][mask_col]))
-                    self.first_held_mark = (local_cols[j0], grid[p0 + trigger_pos])
-
-            delta_price = np.zeros_like(marks_values)
-            delta_price[1:] = marks_values[1:] - marks_values[:-1]
-            mtm_contrib = np.zeros_like(marks_values)
-            mtm_contrib[1:] = np.where(
-                joint[1:], units_before[1:] * delta_price[1:], 0.0,
-            )
-            # Sequential-order column sum (I-LEDGER): _column_order_row_sum is
-            # bit-identical to cumsum's last column; an empty roster
-            # (n_local == 0) yields a zero contribution series.
-            mtm_arr = (
-                _pnl._column_order_row_sum(mtm_contrib)
-                if n_local
-                else np.zeros(n_grid, dtype="float64")
-            )
-
-            # 마크가 유한해도 그 바의 펀딩이 causal mirror 기준 unknown이면(self._w_fknown)
-            # 원장도 미러와 똑같이 그 바의 펀딩을 0으로 처리해야 한다. sym_finite만 보면
-            # 정렬된 펀딩값이 남아 있는 unknown 바를 조용히 청구해 reconcile_causal_state가
-            # 실제 데이터(AIAUSDT/OMNIUSDT 펀딩 공백, 2026-09-15)에서 터진다.
-            usable = sym_finite & self._w_fknown
-            charged = funding_matrix * units_before * marks_values
-            charged = np.where(usable, charged, 0.0)
-            held_funding_trigger = (~usable & held & (funding_matrix != 0.0)) & kept_region
-            if held_funding_trigger.any():
-                self.ledger_valid = False
-                self.invalid_reasons.add("MISSING_DATA")
-                if self.first_held_funding is None:
-                    col_hit = held_funding_trigger.any(axis=0)
-                    j0 = int(np.argmax(col_hit))
-                    mask_col = (~usable & held & (funding_matrix != 0.0))[:, j0]
-                    trigger_pos = int(np.argmax(held_funding_trigger[:, j0][mask_col]))
-                    self.first_held_funding = (local_cols[j0], grid[p0 + trigger_pos])
-            funding_arr = (
-                _pnl._column_order_row_sum(charged)
-                if n_local
-                else np.zeros(n_grid, dtype="float64")
-            )
-
-            notional_arr = (
-                _pnl._column_order_row_sum(units_state * valuation)
-                if n_local
-                else np.zeros(n_grid, dtype="float64")
-            )
-            notional_before_arr = (
-                _pnl._column_order_row_sum(units_before * valuation)
-                if n_local
-                else np.zeros(n_grid, dtype="float64")
-            )
-            self.ledger_units[gpos] = units_state[-1]
+            # Bounded per-symbol pass: each column's arithmetic matches the
+            # legacy window-by-symbol plane, accumulated left to right in
+            # canonical order. Scratch stays O(window bars).
+            row_idx = np.arange(n_grid)
+            mtm_arr = np.zeros(n_grid, dtype="float64")
+            funding_arr = np.zeros(n_grid, dtype="float64")
+            notional_arr = np.zeros(n_grid, dtype="float64")
+            notional_before_arr = np.zeros(n_grid, dtype="float64")
+            start_units = np.asarray(self.ledger_units[gpos], dtype="float64")
+            start_valid = np.asarray(self.last_valid_mark[gpos], dtype="float64")
+            end_units = np.empty(n_local, dtype="float64")
+            end_valid = np.empty(n_local, dtype="float64")
+            for j in range(n_local):
+                d_col = np.zeros(n_grid, dtype="float64")
+                sel = wf_j == j
+                if bool(sel.any()):
+                    np.add.at(d_col, wf_pos[sel], wf_qty[sel])
+                units = np.cumsum(d_col) + float(start_units[j])
+                before = np.empty(n_grid, dtype="float64")
+                before[0] = float(start_units[j])
+                before[1:] = units[:-1]
+                marks_col = marks_values[:, j].astype("float64", copy=True)
+                finite = np.isfinite(marks_col)
+                last_idx = np.maximum.accumulate(np.where(finite, row_idx, -1))
+                ff_base = marks_col[np.maximum(last_idx, 0)]
+                carry = float(start_valid[j])
+                m_ff_col = np.where(finite, marks_col, np.where(last_idx >= 0, ff_base, carry))
+                valuation_col = np.where(
+                    finite | (units != 0.0),
+                    np.where(finite, marks_col, m_ff_col),
+                    0.0,
+                )
+                held = np.abs(before) >= QTY_EPS
+                joint = np.zeros(n_grid, dtype=bool)
+                joint[1:] = finite[1:] & finite[:-1]
+                kept = row_idx >= p0
+                if bool(((held & ~joint) & kept).any()):
+                    self.ledger_valid = False
+                    self.invalid_reasons.add("MISSING_DATA")
+                    if self.first_held_mark is None:
+                        first_pos = int(np.flatnonzero((held & ~joint) & kept)[0])
+                        self.first_held_mark = (local_cols[j], grid[first_pos])
+                mtm_col = np.zeros(n_grid, dtype="float64")
+                mtm_col[1:] = np.where(
+                    joint[1:], before[1:] * (marks_col[1:] - marks_col[:-1]), 0.0,
+                )
+                mtm_arr += mtm_col
+                fknown_col = self._w_fknown[:, j]
+                funding_col = funding_matrix[:, j]
+                usable = finite & fknown_col
+                charged_col = np.where(usable, funding_col * before * marks_col, 0.0)
+                funding_arr += charged_col
+                if bool(((~usable & held & (funding_col != 0.0)) & kept).any()):
+                    self.ledger_valid = False
+                    self.invalid_reasons.add("MISSING_DATA")
+                    if self.first_held_funding is None:
+                        first_pos = int(np.flatnonzero((~usable & held & (funding_col != 0.0)) & kept)[0])
+                        self.first_held_funding = (local_cols[j], grid[first_pos])
+                notional_arr += units * valuation_col
+                notional_before_arr += before * valuation_col
+                end_units[j] = float(units[-1])
+                end_valid[j] = float(m_ff_col[-1])
+            if n_local:
+                self.ledger_units[gpos] = end_units
+                self.last_valid_mark[gpos] = end_valid
 
             # The cash cumsum starts at the chunk's first bar (p0): positions
             # [0, p0) belong to the previous chunk's ledger and must not be
@@ -1417,10 +1425,89 @@ class _BoundExecutionReplayAccumulator:
             merged = np.where(np.isnan(est), old, updated)
             self.half_spread_bps[gpos] = np.where(np.isnan(old), est, merged)
 
+    def _advance_spread_clock(self, logical_partition: tuple[int, int] | None) -> None:
+        """Settle the previous logical partition before pricing this window.
+
+        Untagged windows keep the legacy per-window update. Tagged windows
+        sharing one partition key accumulate observations without updating;
+        the pending partition settles exactly once when the key advances, so
+        fills are always priced with estimates from strictly earlier
+        observations and an IO split alone never triggers an update.
+        """
+        if self.spec.liquidity_cost_model != "corwin_schultz":
+            return
+        if logical_partition is None:
+            return
+        if self._spread_pending_key is not None and self._spread_pending_key != logical_partition:
+            self._finalize_spread_partition()
+
+    def _observe_spread_partition(
+        self,
+        highs_values: np.ndarray,
+        lows_values: np.ndarray,
+        gpos: np.ndarray,
+        grid_ns: np.ndarray,
+        bar_ns: int,
+        logical_partition: tuple[int, int] | None,
+    ) -> None:
+        """Record this window's bars into the logical cost-clock observations.
+
+        Untagged windows keep the legacy immediate per-window update.
+        """
+        if self.spec.liquidity_cost_model != "corwin_schultz":
+            return
+        if logical_partition is None:
+            self._consume_update_spreads(highs_values, lows_values, gpos)
+            return
+        carry_high = self._spread_carry_high[gpos]
+        carry_low = self._spread_carry_low[gpos]
+        carry_ns = self._spread_carry_ns[gpos]
+        adjacent = (carry_ns + bar_ns == grid_ns[0]) & np.isfinite(carry_high) & np.isfinite(carry_low)
+        ext_high = np.vstack([carry_high[None, :], highs_values])
+        ext_low = np.vstack([carry_low[None, :], lows_values])
+        sums, counts, bars = _microstructure._corwin_schultz_pair_sums_counts(
+            ext_high, ext_low, first_pair_allowed=adjacent,
+        )
+        carry_valid = (
+            np.isfinite(carry_high)
+            & np.isfinite(carry_low)
+            & (carry_high > 0.0)
+            & (carry_low > 0.0)
+            & (carry_high >= carry_low)
+        )
+        self._spread_pair_sums[gpos] += sums
+        self._spread_pair_counts[gpos] += counts
+        self._spread_bar_counts[gpos] += bars - carry_valid.astype("float64")
+        self._spread_carry_high[gpos] = highs_values[-1]
+        self._spread_carry_low[gpos] = lows_values[-1]
+        self._spread_carry_ns[gpos] = grid_ns[-1]
+        self._spread_pending_key = logical_partition
+
+    def _finalize_spread_partition(self) -> None:
+        """Settle the pending logical partition into the EWMA, once per partition."""
+        if self.spec.liquidity_cost_model != "corwin_schultz":
+            self._spread_pending_key = None
+            return
+        if self._spread_pending_key is None:
+            return
+        self._spread_pending_key = None
+        est = _microstructure._corwin_schultz_combine_half_spread_bps(
+            self._spread_pair_sums, self._spread_pair_counts, self._spread_bar_counts,
+        )
+        old = self.half_spread_bps
+        alpha = self.spec.spread_ewma_alpha
+        updated = alpha * est + (1.0 - alpha) * old
+        merged = np.where(np.isnan(est), old, updated)
+        self.half_spread_bps = np.where(np.isnan(old), est, merged)
+        self._spread_pair_sums[:] = 0.0
+        self._spread_pair_counts[:] = 0.0
+        self._spread_bar_counts[:] = 0.0
+
 
     def finalize(self) -> StrategyExecutionReplayResult:
         columns = self.columns
         n_cols = self.n_cols
+        self._finalize_spread_partition()
 
         # Terminal inventory is never fabricated into an exit at a past close
         # (INV-NO-FABRICATED-TERMINAL-FILL): held units stay open, are
