@@ -483,3 +483,175 @@ def test_data_seal_mhs_inputs_seals_complete_symbols(tmp_path) -> None:
     ])
     with pytest.raises(SystemExit):
         empty_args.handler(empty_args)
+
+
+def test_universe_gaps_no_execute_skips_collection(monkeypatch) -> None:
+    import argparse
+    import src.cli.commands.data as data_mod
+    from src.quant.universe.pit_universe import symbol_partition
+
+    listed = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]
+    dev = sorted(s for s in listed if symbol_partition(s) == "dev")
+    assert dev
+
+    class _Vision:
+        def list_all_symbols(self, **k):
+            return list(listed)
+
+    monkeypatch.setattr("src.market_data.binance.vision.BinanceVisionDownloader", lambda *a, **k: _Vision())
+    monkeypatch.setattr(
+        "src.market_data.services.universe_gaps.local_futures_symbols",
+        lambda root, timeframe: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.market_data.services.universe_gaps.fetch_exchange_info",
+        lambda **k: {"symbols": []},
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        data_mod.collection, "collect_ohlcv", lambda *a, **k: calls.append(("ohlcv", a))
+    )
+    monkeypatch.setattr(
+        data_mod.collection, "collect_funding", lambda *a, **k: calls.append(("funding", a))
+    )
+    args = argparse.Namespace(
+        timeframe="1h", partition="dev", start="2021-01-01", end="2022-01-01", execute=False
+    )
+    data_mod._universe_gaps(args)
+    assert calls == []
+
+
+def test_universe_gaps_execute_collects_in_sorted_order(monkeypatch) -> None:
+    import argparse
+    import src.cli.commands.data as data_mod
+    from src.quant.universe.pit_universe import symbol_partition
+
+    listed = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]
+    dev = sorted(s for s in listed if symbol_partition(s) == "dev")
+    assert dev
+
+    class _Vision:
+        def list_all_symbols(self, **k):
+            return list(listed)
+
+    monkeypatch.setattr("src.market_data.binance.vision.BinanceVisionDownloader", lambda *a, **k: _Vision())
+    monkeypatch.setattr(
+        "src.market_data.services.universe_gaps.local_futures_symbols",
+        lambda root, timeframe: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.market_data.services.universe_gaps.fetch_exchange_info",
+        lambda **k: {"symbols": []},
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        data_mod.collection, "collect_ohlcv", lambda *a, **k: calls.append(("ohlcv", a))
+    )
+    monkeypatch.setattr(
+        data_mod.collection, "collect_funding", lambda *a, **k: calls.append(("funding", a))
+    )
+    args = argparse.Namespace(
+        timeframe="1h", partition="dev", start="2021-01-01", end="2022-01-01", execute=True
+    )
+    data_mod._universe_gaps(args)
+    symbols = [a[0] for kind, a in calls if kind == "ohlcv"]
+    assert symbols == sorted(symbols) == dev
+    assert len([c for c in calls if c[0] == "funding"]) == len(dev)
+
+
+def test_data_collect_universe_gaps_argv() -> None:
+    parser = _mhs_parser()
+    args = parser.parse_args(["data", "collect", "universe-gaps", "--end", "2022-01-01"])
+    from src.cli.commands.data import _universe_gaps
+
+    assert args.handler is _universe_gaps
+    with __import__("pytest").raises(SystemExit):
+        parser.parse_args(["data", "collect", "universe-gaps"])
+
+
+def test_universe_gaps_fails_closed_when_one_listing_is_empty(monkeypatch) -> None:
+    import argparse
+    import pytest
+    import src.cli.commands.data as data_mod
+
+    class _Vision:
+        def list_all_symbols(self, **k):
+            # 월간 목록만 실패(빈 결과)한 경우: 불완전한 합집합으로 진행하면 안 된다.
+            return [] if "dataset_prefix" in k else ["BTCUSDT"]
+
+    monkeypatch.setattr("src.market_data.binance.vision.BinanceVisionDownloader", lambda *a, **k: _Vision())
+    calls: list = []
+    monkeypatch.setattr(data_mod.collection, "collect_ohlcv", lambda *a, **k: calls.append(a))
+    args = argparse.Namespace(
+        timeframe="1h", partition="dev", start="2021-01-01", end="2022-01-01", execute=True
+    )
+    with pytest.raises(SystemExit):
+        data_mod._universe_gaps(args)
+    assert calls == []
+
+
+def test_universe_gaps_fails_closed_on_exchange_info_failure(monkeypatch) -> None:
+    import argparse
+    import pytest
+    import src.cli.commands.data as data_mod
+
+    class _Vision:
+        def list_all_symbols(self, **k):
+            return ["BTCUSDT"]
+
+    monkeypatch.setattr("src.market_data.binance.vision.BinanceVisionDownloader", lambda *a, **k: _Vision())
+    monkeypatch.setattr(
+        "src.market_data.services.universe_gaps.fetch_exchange_info",
+        lambda **k: (_ for _ in ()).throw(OSError("network unreachable")),
+    )
+    calls: list = []
+    monkeypatch.setattr(data_mod.collection, "collect_ohlcv", lambda *a, **k: calls.append(a))
+    args = argparse.Namespace(
+        timeframe="1h", partition="dev", start="2021-01-01", end="2022-01-01", execute=True
+    )
+    with pytest.raises(SystemExit):
+        data_mod._universe_gaps(args)
+    assert calls == []
+
+
+def test_universe_gaps_excludes_tokenized_equity(monkeypatch) -> None:
+    """SCENARIO: a stock/commodity/index perpetual sharing the USDT-suffix
+    naming convention (e.g. TSLAUSDT) must never enter the crypto MHS lake."""
+    import argparse
+    import src.cli.commands.data as data_mod
+    from src.quant.universe.pit_universe import symbol_partition
+
+    listed = ["BTCUSDT", "TSLAUSDT", "XAUUSDT", "HK0700USDT"]
+    dev_crypto = [s for s in listed if symbol_partition(s) == "dev" and s == "BTCUSDT"]
+    assert dev_crypto == ["BTCUSDT"]
+
+    class _Vision:
+        def list_all_symbols(self, **k):
+            return list(listed)
+
+    monkeypatch.setattr("src.market_data.binance.vision.BinanceVisionDownloader", lambda *a, **k: _Vision())
+    monkeypatch.setattr(
+        "src.market_data.services.universe_gaps.local_futures_symbols",
+        lambda root, timeframe: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.market_data.services.universe_gaps.fetch_exchange_info",
+        lambda **k: {
+            "symbols": [
+                {"symbol": "TSLAUSDT", "underlyingType": "EQUITY"},
+                {"symbol": "XAUUSDT", "underlyingType": "COMMODITY"},
+                {"symbol": "HK0700USDT", "underlyingType": "HK_EQUITY"},
+                {"symbol": "BTCUSDT", "underlyingType": "COIN"},
+            ]
+        },
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        data_mod.collection, "collect_ohlcv", lambda *a, **k: calls.append(a[0])
+    )
+    monkeypatch.setattr(data_mod.collection, "collect_funding", lambda *a, **k: None)
+    args = argparse.Namespace(
+        timeframe="1h", partition="dev", start="2021-01-01", end="2022-01-01", execute=True
+    )
+    data_mod._universe_gaps(args)
+    assert calls == ["BTCUSDT"]

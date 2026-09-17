@@ -141,6 +141,25 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
                 _logger.info("manual: git add %s %s && git commit -m 'deploy: strategy %s' && git push", artifact_root / "strategy_params.json.enc", artifact_root / "strategy_bootstrap.parquet.enc", res["strategy_digest"])
 
 
+def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
+    """Run the continuous process backtest proxy and persist its report."""
+    import pandas as pd
+
+    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.mhs.process_backtest import evaluate_process_backtest, persist_process_report
+
+    start = pd.Timestamp(args.start, tz="UTC") if getattr(args, "start", None) else DISCOVERY_START
+    end = pd.Timestamp(args.end, tz="UTC") if getattr(args, "end", None) else PROCESS_EVALUATION_CEILING
+    report = evaluate_process_backtest(start, end, data_root=args.data_root)
+    path = persist_process_report(report)
+    metrics = report.gate.metrics
+    _logger.info(
+        "[EVAL] stage=process_backtest certification=%s go=%s reasons=%s oos_lcb=%s stress_lcb=%s path=%s",
+        report.certification_level, report.gate.go, ",".join(report.gate.reason_codes),
+        metrics.get("oos_ann_log_growth_lcb"), metrics.get("stress_ann_log_growth_lcb"), path,
+    )
+
+
 def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the dev-only ``research run portfolio mhs-horizon-diagnostic`` subcommand."""
     from src.mhs.report.persist import emit_deployment as _emit_deployment_ref2  # noqa: F401
@@ -727,3 +746,11 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument('--forward-execution-quality-dir', default=None)
     mhs.add_argument('--forward-strategy-digest', default=None)
     mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)
+    process = portfolio_sub.add_parser(
+        "mhs-process-backtest",
+        help="Continuous causal MHS process backtest on the 1h ledger proxy (never a deploy verdict)",
+    )
+    process.add_argument("--start", default=None)
+    process.add_argument("--end", default=None)
+    process.add_argument("--data-root", default=None)
+    process.set_defaults(handler=_run_mhs_process_backtest)
