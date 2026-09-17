@@ -1045,3 +1045,133 @@ def test_cli_emit_deployment_with_name_drift_trim_fails_before_run(monkeypatch) 
     with pytest.raises(SystemExit, match="name_drift_trim"):
         _run_mhs_horizon_diagnostic(args)
 
+
+def _process_parser() -> argparse.ArgumentParser:
+    import argparse
+
+    from src.cli.commands.research.mhs import add_mhs_commands
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    return sub.choices["mhs-process-backtest"]
+
+
+def test_mhs_process_backtest_parser_defaults() -> None:
+    parser = _process_parser()
+    args = parser.parse_args([])
+    assert args.rebalance_tracking_error_threshold is None
+    assert args.output is None
+    assert args.targets_output is None
+
+
+def test_mhs_process_backtest_threads_explicit_policy(monkeypatch, tmp_path) -> None:
+    import types
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    captured: dict = {}
+
+    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None):
+        captured["policy"] = execution_policy
+        captured["data_root"] = data_root
+        return types.SimpleNamespace(
+            base=types.SimpleNamespace(target_weights="BASE-TARGETS"),
+            gate=types.SimpleNamespace(go=False, reason_codes=(), metrics={}),
+            certification_level="process_proxy_1h_ledger",
+        )
+
+    def _fake_persist(report, output):
+        captured["output"] = output
+        return output if output is not None else "resolved"
+
+    def _fake_targets(base, output):
+        captured["targets"] = (base, output)
+        return output
+
+    monkeypatch.setattr(pb, "evaluate_process_backtest", _fake_evaluate)
+    monkeypatch.setattr(pb, "persist_process_report", _fake_persist)
+    monkeypatch.setattr(pb, "persist_process_targets", _fake_targets)
+
+    parser = _process_parser()
+    out_json = tmp_path / "custom.json"
+    out_parquet = tmp_path / "targets.parquet"
+    args = parser.parse_args(
+        ["--rebalance-tracking-error-threshold", "0.2", "--output", str(out_json),
+         "--targets-output", str(out_parquet)]
+    )
+    assert args.rebalance_tracking_error_threshold == 0.2
+    mhs_cli._run_mhs_process_backtest(args)
+    assert captured["policy"].tracking_error_threshold == 0.2
+    assert str(captured["output"]) == str(out_json)
+    assert captured["targets"][0].target_weights == "BASE-TARGETS"
+    assert captured["targets"][1] == out_parquet
+
+    captured.clear()
+    args = parser.parse_args([])
+    mhs_cli._run_mhs_process_backtest(args)
+    assert captured["policy"].tracking_error_threshold is None
+    assert captured["output"] is None
+    assert "targets" not in captured
+
+
+def test_mhs_process_backtest_supports_legacy_namespace(monkeypatch) -> None:
+    import argparse
+    import types
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    seen: dict = {}
+
+    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None):
+        seen["policy"] = execution_policy
+        return types.SimpleNamespace(
+            base="b", gate=types.SimpleNamespace(go=False, reason_codes=(), metrics={}),
+            certification_level="x",
+        )
+
+    monkeypatch.setattr(pb, "evaluate_process_backtest", _fake_evaluate)
+    monkeypatch.setattr(pb, "persist_process_report", lambda report, output: "p")
+    legacy = argparse.Namespace(start=None, end=None, data_root=None)
+    mhs_cli._run_mhs_process_backtest(legacy)
+    assert seen["policy"].tracking_error_threshold is None
+
+
+def test_mhs_process_backtest_rejects_bad_suffix_and_baseline_overwrite(monkeypatch, tmp_path) -> None:
+
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+    from src.mhs.process_backtest import PROCESS_REPORT_PATH
+
+    def _boom(*a, **k):
+        raise AssertionError("evaluation must not run after validation failure")
+
+    monkeypatch.setattr(pb, "evaluate_process_backtest", _boom)
+    parser = _process_parser()
+    args = parser.parse_args(["--output", str(tmp_path / "bad.txt")])
+    with pytest.raises(SystemExit, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(args)
+    args = parser.parse_args(["--targets-output", str(tmp_path / "bad.csv")])
+    with pytest.raises(SystemExit, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(args)
+    args = parser.parse_args(
+        ["--rebalance-tracking-error-threshold", "0.2", "--output", str(PROCESS_REPORT_PATH)]
+    )
+    with pytest.raises(SystemExit, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(args)
+
+
+def test_mhs_process_backtest_rejects_negative_threshold() -> None:
+
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+
+    parser = _process_parser()
+    args = parser.parse_args(["--rebalance-tracking-error-threshold", "-0.5"])
+    with pytest.raises(ValueError, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(args)
+

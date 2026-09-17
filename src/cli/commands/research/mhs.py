@@ -144,19 +144,43 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
 def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
     """Run the continuous process backtest proxy and persist its report."""
     import pandas as pd
+    from pathlib import Path
 
     from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
-    from src.mhs.process_backtest import evaluate_process_backtest, persist_process_report
+    from src.mhs.process import ProcessExecutionPolicy
+    from src.mhs.process_backtest import (
+        PROCESS_REPORT_PATH,
+        evaluate_process_backtest,
+        persist_process_report,
+        persist_process_targets,
+    )
 
+    policy = ProcessExecutionPolicy(
+        tracking_error_threshold=getattr(args, "rebalance_tracking_error_threshold", None),
+    )
+    output_arg = getattr(args, "output", None)
+    targets_arg = getattr(args, "targets_output", None)
+    output = Path(output_arg) if output_arg is not None else None
+    targets_output = Path(targets_arg) if targets_arg is not None else None
+    if output is not None and output.suffix != ".json":
+        raise SystemExit(f"output must be a JSON path, got {output_arg!r}")
+    if targets_output is not None and targets_output.suffix != ".parquet":
+        raise SystemExit(f"targets-output must be a parquet path, got {targets_arg!r}")
+    if output is not None and policy.tracking_error_threshold is not None:
+        if output.resolve() == PROCESS_REPORT_PATH.resolve():
+            raise SystemExit("enabled-policy report would overwrite the reserved baseline destination")
     start = pd.Timestamp(args.start, tz="UTC") if getattr(args, "start", None) else DISCOVERY_START
     end = pd.Timestamp(args.end, tz="UTC") if getattr(args, "end", None) else PROCESS_EVALUATION_CEILING
-    report = evaluate_process_backtest(start, end, data_root=args.data_root)
-    path = persist_process_report(report)
+    report = evaluate_process_backtest(start, end, data_root=args.data_root, execution_policy=policy)
+    path = persist_process_report(report, output)
+    if targets_output is not None:
+        persist_process_targets(report.base, targets_output)
     metrics = report.gate.metrics
     _logger.info(
-        "[EVAL] stage=process_backtest certification=%s go=%s reasons=%s oos_lcb=%s stress_lcb=%s path=%s",
+        "[EVAL] stage=process_backtest certification=%s go=%s reasons=%s oos_lcb=%s stress_lcb=%s threshold=%s path=%s",
         report.certification_level, report.gate.go, ",".join(report.gate.reason_codes),
-        metrics.get("oos_ann_log_growth_lcb"), metrics.get("stress_ann_log_growth_lcb"), path,
+        metrics.get("oos_ann_log_growth_lcb"), metrics.get("stress_ann_log_growth_lcb"),
+        policy.tracking_error_threshold, path,
     )
 
 
@@ -753,4 +777,12 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     process.add_argument("--start", default=None)
     process.add_argument("--end", default=None)
     process.add_argument("--data-root", default=None)
+    process.add_argument(
+        "--rebalance-tracking-error-threshold",
+        type=float,
+        default=None,
+        help="Research-only portfolio L1 adoption threshold before volatility sizing; omitted preserves baseline.",
+    )
+    process.add_argument("--output", default=None, help="Explicit JSON proxy evidence destination.")
+    process.add_argument("--targets-output", default=None, help="Optional parquet export of exact sized targets.")
     process.set_defaults(handler=_run_mhs_process_backtest)
