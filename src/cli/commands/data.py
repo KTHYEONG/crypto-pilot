@@ -355,7 +355,14 @@ def _seal_mhs_inputs(args: argparse.Namespace) -> None:
 
 
 def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
-    """Attach the ``data collect <subcommand>`` group to the root parser."""
+    """Register data commands while fixing MHS execution collection to 3m.
+
+    Args:
+        data_parser: Existing data command parser.
+
+    Returns:
+        None; register existing commands with MHS-only interval restrictions.
+    """
     collect = data_parser.add_subparsers(dest="data_command", required=True)
     collect_p = collect.add_parser("collect", help="Collect market data from Binance")
     collect_sub = collect_p.add_subparsers(dest="collect_command", required=True)
@@ -370,7 +377,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     mhs_execution = collect_sub.add_parser(
         "mhs-execution", help="Plan or collect PIT MHS execution OHLCV (dry-run by default)",
     )
-    mhs_execution.add_argument("--timeframe", choices=["1m", "3m", "5m"], default="3m")
+    mhs_execution.add_argument("--timeframe", choices=["3m"], default="3m")
     mhs_execution.add_argument("--start", default="2021-01-01")
     mhs_execution.add_argument("--end", default=None)
     mhs_execution.add_argument("--execution-universe-size", type=int, default=30)
@@ -493,6 +500,6 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     # 명시적 봉인 명령만 등록한다(진단 실행의 자동 봉인 금지).
     seal_inputs = collect.add_parser("seal-mhs-inputs", help="Seal the complete MHS input corpus into a canonical manifest")
     seal_inputs.add_argument("--data-root", default=str(FUTURES_DATA_DIR))
-    seal_inputs.add_argument("--execution-timeframe", choices=["1m", "3m", "5m"], default="3m")
+    seal_inputs.add_argument("--execution-timeframe", choices=["3m"], default="3m")
     seal_inputs.add_argument("--output", default=str(FUTURES_DATA_DIR / "mhs_execution" / "input_manifest.json"))
     seal_inputs.set_defaults(handler=_seal_mhs_inputs)

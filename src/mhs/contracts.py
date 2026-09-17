@@ -61,22 +61,11 @@ def cli_param(
 
 @dataclass(frozen=True, slots=True)
 class MhsDiagnosticRequest:
-    """Immutable request; the CLI carries ``--start``/``--end``/``--mark-mode``/``--no-log-run``.
+    """Describe MHS research inputs with fixed three-minute execution.
 
-    ``partition`` is forced to ``'dev'`` (a holdout request raises); ``data_root``
-    allows tests to run against a synthetic market. ``mark_mode`` is a
-    reproducibility parameter: ``cache_required`` builds the strict causal mark
-    panel and fails closed, while ``cache_required_stale_carry`` permits a
-    bounded 24-hour causal carry for diagnostic-only continuity. The latter is
-    never a strict Research-GO source. ``ohlcv_close_fallback`` deliberately
-    passes ``None`` for fixtures and explicit comparison runs only.
-
-    ``execution_universe_size`` is the ENTRY rank threshold for the PIT
-    top-volume execution roster, not the realized holdings count: hysteresis
-    retains members past the entry rank, so realized holdings are approximately
-    ``execution_universe_size * (1 + hysteresis effect)``, NOT
-    ``execution_universe_size`` (see ``realized_execution_roster_size`` on
-    ``MhsHorizonDiagnosticReport``).
+    The execution_timeframe field has type Literal["3m"], default "3m",
+    and CLI metadata choices ("3m",). Existing unrelated fields retain
+    their types, defaults and ordering.
     """
 
     start: str | pd.Timestamp | None = field(
@@ -97,12 +86,12 @@ class MhsDiagnosticRequest:
             choices=("cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"),
         ),
     )
-    execution_timeframe: Literal["1m", "3m", "5m"] = field(
+    execution_timeframe: Literal["3m"] = field(
         default="3m",
         metadata=cli_param(
             flag="--execution-timeframe",
             help="OHLCV execution replay resolution.",
-            choices=("1m", "3m", "5m"),
+            choices=("3m",),
         ),
     )
     execution_universe_size: int = field(

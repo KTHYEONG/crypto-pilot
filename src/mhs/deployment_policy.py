@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
 
@@ -30,7 +30,7 @@ def live_parity_blockers(config: Any) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class TargetWeightPolicy:
-    execution_timeframe: str
+    execution_timeframe: Literal["3m"]
     execution_universe_size: int
     fast_book_mode: str
     slow_book_mode: str
@@ -54,9 +54,11 @@ class TargetWeightPolicy:
     def to_request(self) -> MhsDiagnosticRequest:
         from src.mhs.contracts import MhsDiagnosticRequest
 
+        if self.execution_timeframe != "3m":
+            raise ValueError(f"unknown execution_timeframe '{self.execution_timeframe}'")
         capital = bool(self.committee_capital)
-        return MhsDiagnosticRequest(
-            execution_timeframe=self.execution_timeframe,  # type: ignore[arg-type]
+        request = MhsDiagnosticRequest(
+            execution_timeframe=self.execution_timeframe,
             execution_universe_size=int(self.execution_universe_size),
             fast_book_mode=self.fast_book_mode,  # type: ignore[arg-type]
             slow_book_mode=self.slow_book_mode,  # type: ignore[arg-type]
@@ -77,6 +79,7 @@ class TargetWeightPolicy:
             funding_carry_weight=float(self.funding_carry_weight) if (bool(self.funding_carry_sleeve) and capital) else 0.0,
             fill_mark_parity_gate=bool(self.fill_mark_parity_gate),
         )
+        return request
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +187,7 @@ def build_deployment_policy(
     from src.mhs.research_go import _resolved_committee_target_gross
 
     target = TargetWeightPolicy(
-        execution_timeframe=str(request.execution_timeframe),
+        execution_timeframe=request.execution_timeframe,
         execution_universe_size=int(request.execution_universe_size),
         fast_book_mode=str(request.fast_book_mode),
         slow_book_mode=str(request.slow_book_mode),

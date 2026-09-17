@@ -20,6 +20,9 @@ from .contracts import (
     StrategyExecutionReplayResult,
 )
 
+_BoundAccumulators = list[_BoundExecutionReplayAccumulator | None]
+_LiveAccumulatorSets = list[_BoundAccumulators]
+
 
 def replay_execution_windows(
     windows: Iterable[ExecutionReplayWindow],
@@ -28,6 +31,8 @@ def replay_execution_windows(
     spec: ExecutionSpec,
     retain_event_snapshots: bool = False,
     min_equity_fraction: float | None = None,
+    *,
+    live_accumulators: _LiveAccumulatorSets | None = None,
 ) -> StrategyExecutionReplayResult:
     """Stateful windowed replay equivalent to ``strategy_aware_execution_replay``.
 
@@ -56,6 +61,8 @@ def replay_execution_windows(
     accumulator = _accumulator._BoundExecutionReplayAccumulator(
         first, initial_equity, execution_bound, spec, retain_event_snapshots, min_equity_fraction,
     )
+    if live_accumulators is not None:
+        live_accumulators.append([accumulator])
     accumulator.consume(first)
     del first
     for w in it:
@@ -71,6 +78,8 @@ def replay_execution_window_batch_isolated(
     retain_event_snapshots: bool = False,
     min_equity_fraction: float | None = None,
     isolated_bound_indices: frozenset[int] = frozenset(),
+    *,
+    live_accumulators: _LiveAccumulatorSets | None = None,
 ) -> BatchReplayOutcome:
     bound_list = list(bounds)
     if not bound_list:
@@ -88,6 +97,8 @@ def replay_execution_window_batch_isolated(
         )
         for (bound, spec) in bound_list
     ]
+    if live_accumulators is not None:
+        live_accumulators.append(accumulators)
     active: list[bool] = [True] * len(bound_list)
     windows_consumed: list[int] = [0] * len(bound_list)
     failures: list[IsolatedBoundFailure] = []
@@ -173,6 +184,21 @@ def _rescale_window_weights(
     return dataclass_replace(w, target_weights=scaled)
 
 
+def live_required_symbols(
+    accumulators: Iterable[_BoundExecutionReplayAccumulator | None],
+) -> frozenset[str]:
+    """Union source requirements from every live cost bound.
+
+    Batch consumers call this with their live accumulator list before
+    requesting the next window, so carried inventory and unresolved orders
+    from every bound stay in the generated roster. Empty (or all-None)
+    input yields the empty set, so the first window correctly relies on
+    active targets alone.
+    """
+    required = frozenset().union(*(acc.required_symbols() for acc in accumulators if acc is not None))
+    return required
+
+
 def replay_execution_windows_coupled(
     windows: Iterable[ExecutionReplayWindow],
     initial_equity: float,
@@ -182,6 +208,8 @@ def replay_execution_windows_coupled(
     retain_event_snapshots: bool = False,
     min_equity_fraction: float | None = None,
     isolated_bound_indices: frozenset[int] = frozenset(),
+    *,
+    live_accumulators: _LiveAccumulatorSets | None = None,
 ) -> tuple[StrategyExecutionReplayResult, BatchReplayOutcome]:
     """One-pass coupled reference/rescaled replay (D1).
 
@@ -230,6 +258,8 @@ def replay_execution_windows_coupled(
         )
         for bound, spec in bound_list
     ]
+    if live_accumulators is not None:
+        live_accumulators.append([reference, *scaled_accumulators])
     active: list[bool] = [True] * len(bound_list)
     windows_consumed: list[int] = [0] * len(bound_list)
 
@@ -347,6 +377,8 @@ def replay_execution_window_batch(
     bounds: Iterable[tuple[_ExecutionBound, ExecutionSpec]],
     retain_event_snapshots: bool = False,
     min_equity_fraction: float | None = None,
+    *,
+    live_accumulators: _LiveAccumulatorSets | None = None,
 ) -> tuple[StrategyExecutionReplayResult, ...]:
     """Replay one shared window stream into N independent bounds.
 
@@ -359,9 +391,19 @@ def replay_execution_window_batch(
     the single-bound ``replay_execution_windows`` path. A fatal
     ``DataIntegrityError`` raised by an earlier bound propagates unchanged; no
     later bound result is fabricated.
+
+    When ``live_accumulators`` is provided, the live bound accumulators are
+    appended so a coupled window generator can keep carried inventory and
+    unresolved orders in the roster via ``live_required_symbols``.
     """
     outcome = replay_execution_window_batch_isolated(
-        windows, initial_equity, bounds, retain_event_snapshots, min_equity_fraction, isolated_bound_indices=frozenset(),
+        windows,
+        initial_equity,
+        bounds,
+        retain_event_snapshots,
+        min_equity_fraction,
+        isolated_bound_indices=frozenset(),
+        live_accumulators=live_accumulators,
     )
     # isolated set empty guarantees no None results
     return tuple(result for result in outcome.results if result is not None)

@@ -154,20 +154,54 @@ def _compact_mark_series_for_path(
     timeframe: str,
     path_key: str,
 ) -> tuple[np.ndarray, np.ndarray]:
-    del path_key  # identity-only: separates same-symbol data from different roots
-    cache = _get_symbol_mark_frame(symbol, timeframe)
-    if cache.empty or "close" not in cache.columns:
+    """Load compact published marks without retaining full OHLCV frames.
+
+    Args:
+        symbol: Registered market symbol.
+        timeframe: Existing hourly mark source interval.
+        path_key: Exact source path and cache identity.
+
+    Returns:
+        Contiguous int64 nanosecond availability and float64 close arrays.
+
+    Raises:
+        DataIntegrityError: Source schema or provenance is inconsistent.
+    """
+    from pathlib import Path as _Path
+
+    del symbol, timeframe
+    path = _Path(path_key)
+    if not path.exists():
         return (
             np.empty(0, dtype="int64"),
             np.empty(0, dtype="float64"),
         )
-    valid = (
-        cache["datetime"].notna()
-        & cache["close"].notna()
-        & (cache["close"] > 0)
-    )
+    try:
+        available = set(pq.ParquetFile(path).schema_arrow.names)
+    except Exception as exc:
+        raise DataIntegrityError(f"mark source unreadable path={path_key!r}: {exc}") from exc
+    if "timestamp" not in available or "close" not in available:
+        raise DataIntegrityError(f"mark source schema inconsistent path={path_key!r}")
+    columns = ["timestamp", "close"] + (["datetime"] if "datetime" in available else [])
+    try:
+        table = pq.read_table(path, columns=columns)
+    except Exception as exc:
+        raise DataIntegrityError(f"mark source unreadable path={path_key!r}: {exc}") from exc
+    frame = table.to_pandas()
+    if frame.empty:
+        return (
+            np.empty(0, dtype="int64"),
+            np.empty(0, dtype="float64"),
+        )
+    if "datetime" in frame.columns:
+        frame["datetime"] = pd.to_datetime(frame["datetime"], utc=True, errors="coerce")
+    else:
+        frame["datetime"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True, errors="coerce")
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    frame = frame.dropna(subset=["datetime"]).drop_duplicates(subset=["timestamp"], keep="last")
+    valid = frame["close"].notna() & (frame["close"] > 0)
     closes = (
-        cache.loc[valid, ["datetime", "close"]]
+        frame.loc[valid, ["datetime", "close"]]
         .drop_duplicates(subset=["datetime"], keep="last")
         .sort_values("datetime")
     )
@@ -428,7 +462,7 @@ def _load_window_minute_frames(
     symbols: list[str],
     grid_start: pd.Timestamp,
     grid_end: pd.Timestamp,
-    timeframe: Literal["1m", "3m", "5m"],
+    timeframe: Literal["3m"],
 ) -> dict[str, pd.DataFrame]:
     """Load one execution window's minute OHLCV slices directly from Parquet.
 
@@ -468,7 +502,7 @@ def _build_window_frames(
     grid_start: pd.Timestamp,
     grid_end: pd.Timestamp,
     minute_grid: pd.DatetimeIndex,
-    timeframe: Literal["1m", "3m", "5m"],
+    timeframe: Literal["3m"],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     """Slice per-symbol full-period frames onto a window minute grid.
 
@@ -498,7 +532,7 @@ def _build_window_frames(
 
 
 def _align_minute_frames(
-    frames: dict[str, pd.DataFrame], timeframe: Literal["1m", "3m", "5m"],
+    frames: dict[str, pd.DataFrame], timeframe: Literal["3m"],
     start: pd.Timestamp, end: pd.Timestamp,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     if not frames:
@@ -510,7 +544,7 @@ def _align_minute_frames(
     # horizon is never shortened by the union of first-observed timestamps.
     grid = pd.date_range(
         start, end,
-        freq={"1m": "1min", "3m": "3min", "5m": "5min"}[timeframe],
+        freq="3min",
         tz="UTC",
     )
     highs = pd.DataFrame({s: f["high"] for s, f in frames.items()}).reindex(grid)

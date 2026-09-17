@@ -13,7 +13,7 @@ from src.mhs.execution import StrategyExecutionReplayResult
 def _load_symbol_quote_volume(
     root: str,
     symbol: str,
-    timeframe: Literal["1m", "3m", "5m"],
+    timeframe: Literal["3m"],
     start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> pd.Series | None:
@@ -48,7 +48,7 @@ def _load_symbol_quote_volume(
 def _participation_warnings(
     replay: StrategyExecutionReplayResult,
     root: str,
-    timeframe: Literal["1m", "3m", "5m"],
+    timeframe: Literal["3m"],
     symbols: list[str],
     minute_grid: pd.DatetimeIndex,
 ) -> dict[str, float]:

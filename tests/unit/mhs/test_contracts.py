@@ -507,12 +507,12 @@ def test_SCENARIO_MHS_DSR_PASSAGE_PASSIVE_TIMEOUT_DIVISIBILITY_06() -> None:
     ).passive_timeout_minutes == 15
     assert MhsDiagnosticRequest().passive_timeout_minutes == 30
 
-    # The required multiple follows the execution timeframe.
-    with pytest.raises(ValueError, match="passive_timeout_minutes"):
-        MhsDiagnosticRequest(execution_timeframe="5m", passive_timeout_minutes=6)
-    assert MhsDiagnosticRequest(
-        execution_timeframe="5m", passive_timeout_minutes=10
-    ).passive_timeout_minutes == 10
+    # Legacy execution intervals are explicitly incompatible: no coercion,
+    # no fallback mapping -- a historical 1m/5m policy fails closed here.
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        MhsDiagnosticRequest(execution_timeframe="5m", passive_timeout_minutes=10)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        MhsDiagnosticRequest(execution_timeframe="1m", passive_timeout_minutes=30)  # type: ignore[arg-type]
 
 
 # SCENARIO_MHS_SELECTION_EXEC_REQUEST_FIELD_PARITY_05

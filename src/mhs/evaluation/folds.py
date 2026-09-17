@@ -384,7 +384,7 @@ def _fold_train_reference_returns(
     target_replay = target_weights[minute_roster]
     def _ref_windows():
         base_spec = specs._resolved_base_execution_spec(request)
-        execution_grid = pd.date_range(reference_start, reference_end, freq={"1m": "1min", "3m": "3min", "5m": "5min"}[request.execution_timeframe], tz="UTC")
+        execution_grid = pd.date_range(reference_start, reference_end, freq="3min", tz="UTC")
         truncated, truncated_signals, _censored = integrity._truncate_replayable_decisions(target_replay, signal_available_at, execution_grid, base_spec)
         yield from windows._iter_mhs_execution_windows(truncated, truncated_signals, root, request.execution_timeframe, reference_start, reference_end, funding_by_symbol, request.mark_mode, base_spec)
     _ref_iter = _ref_windows()
@@ -442,7 +442,7 @@ def _run_anchored_fold(
         target_replay = target_weights[minute_roster]
         execution_grid = pd.date_range(
             vs, ve,
-            freq={"1m": "1min", "3m": "3min", "5m": "5min"}[request.execution_timeframe],
+            freq="3min",
             tz="UTC",
         )
         target_replay, signal_available_at, terminal_censored = integrity._truncate_replayable_decisions(

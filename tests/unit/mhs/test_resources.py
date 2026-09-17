@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import multiprocessing
 import time
 
@@ -11,6 +12,17 @@ import pytest
 
 from src.mhs import resources
 from src.common.errors import DataIntegrityError
+
+
+def _isolate_cgroup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(resources, "_read_cgroup_limit_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+
+
+def _admit_all(monkeypatch: pytest.MonkeyPatch, *, available: int = 10**12) -> None:
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: available)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
 
 
 def test_resolve_ram_budget_guard_disabled_returns_none_pair() -> None:
@@ -24,6 +36,7 @@ def test_resolve_ram_budget_explicit_max_rss_overrides_auto_budget(monkeypatch) 
         total = 100_000_000_000
 
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
+    _isolate_cgroup(monkeypatch)
 
     budget, reserve = resources._resolve_ram_budget(max_rss_bytes=42, ram_guard=True)
 
@@ -32,12 +45,36 @@ def test_resolve_ram_budget_explicit_max_rss_overrides_auto_budget(monkeypatch) 
     assert reserve > 0
 
 
+def test_resolve_ram_budget_explicit_budget_capped_by_adoption_ceiling(monkeypatch) -> None:
+    """An explicit budget above the tree ceiling is capped at 2.5GiB."""
+    class _Mem:
+        total = 100_000_000_000
+
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
+    _isolate_cgroup(monkeypatch)
+
+    budget, _ = resources._resolve_ram_budget(max_rss_bytes=10 * 2**30, ram_guard=True)
+
+    assert budget == resources.MHS_TREE_PSS_BUDGET_BYTES
+
+
+def test_resolve_ram_budget_invalid_explicit_budget_rejected(monkeypatch) -> None:
+    """A non-positive explicit budget raises ValueError."""
+    _isolate_cgroup(monkeypatch)
+
+    with pytest.raises(ValueError, match="max_rss_bytes"):
+        resources._resolve_ram_budget(max_rss_bytes=0, ram_guard=True)
+    with pytest.raises(ValueError, match="max_rss_bytes"):
+        resources._resolve_ram_budget(max_rss_bytes=-8, ram_guard=True)
+
+
 def test_resolve_ram_budget_auto_budget_from_total(monkeypatch) -> None:
     """With no explicit cap, the budget is total * RAM_BUDGET_FRACTION."""
     class _Mem:
         total = 1_000_000_000
 
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
+    _isolate_cgroup(monkeypatch)
 
     budget, reserve = resources._resolve_ram_budget(max_rss_bytes=None, ram_guard=True)
 
@@ -45,27 +82,438 @@ def test_resolve_ram_budget_auto_budget_from_total(monkeypatch) -> None:
     assert reserve == max(
         int(1_000_000_000 * resources.RAM_RESERVE_FRACTION),
         resources.RAM_RESERVE_FLOOR_BYTES,
+        resources.MHS_AVAILABLE_FLOOR_BYTES,
     )
+    assert reserve >= resources.MHS_AVAILABLE_FLOOR_BYTES
 
 
-def test_resolve_ram_budget_psutil_failure_disables_guard(monkeypatch) -> None:
-    """A psutil failure is an observational failure: guard disables, never raises."""
+def test_resolve_ram_budget_telemetry_failure_fails_closed(monkeypatch) -> None:
+    """A psutil failure with the guard on fails closed, never bypasses."""
     def _raise() -> None:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _raise())
 
-    assert resources._resolve_ram_budget(max_rss_bytes=None, ram_guard=True) == (None, None)
+    with pytest.raises(DataIntegrityError, match="telemetry unavailable"):
+        resources._resolve_ram_budget(max_rss_bytes=None, ram_guard=True)
 
 
-def test_resolve_ram_budget_nonpositive_total_disables_guard(monkeypatch) -> None:
-    """A non-positive reported total disables the guard rather than dividing by it."""
+def test_resolve_ram_budget_nonpositive_total_fails_closed(monkeypatch) -> None:
+    """A non-positive reported total fails closed rather than disabling the guard."""
     class _Mem:
         total = 0
 
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
 
-    assert resources._resolve_ram_budget(max_rss_bytes=None, ram_guard=True) == (None, None)
+    with pytest.raises(DataIntegrityError, match="telemetry unavailable"):
+        resources._resolve_ram_budget(max_rss_bytes=None, ram_guard=True)
+
+
+def test_resolve_ram_budget_impossible_work_fails_closed(monkeypatch) -> None:
+    """A trivially small effective total leaves no usable budget."""
+    class _Mem:
+        total = 1
+
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
+    _isolate_cgroup(monkeypatch)
+
+    with pytest.raises(DataIntegrityError, match="minimum safe work"):
+        resources._resolve_ram_budget(max_rss_bytes=None, ram_guard=True)
+
+
+def test_resolve_ram_budget_smaller_cgroup_limit_governs(monkeypatch) -> None:
+    """A readable cgroup limit below the host total governs the budget."""
+    class _Mem:
+        total = 2 * 2**30
+
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
+    monkeypatch.setattr(resources, "_read_cgroup_limit_bytes", lambda: 1 * 2**30)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+
+    budget, _ = resources._resolve_ram_budget(max_rss_bytes=None, ram_guard=True)
+
+    assert budget == int(1 * 2**30 * resources.RAM_BUDGET_FRACTION)
+
+
+def test_resolve_ram_budget_cgroup_remaining_caps_budget(monkeypatch) -> None:
+    """Remaining cgroup capacity below the computed budget caps admission."""
+    class _Mem:
+        total = 8 * 2**30
+
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
+    monkeypatch.setattr(resources, "_read_cgroup_limit_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: 100)
+
+    budget, _ = resources._resolve_ram_budget(max_rss_bytes=None, ram_guard=True)
+
+    assert budget == 100
+
+
+def _fake_open(files: dict[str, str]):  # type: ignore[no-untyped-def]
+    def _open(path: object, *args: object, **kwargs: object) -> io.StringIO:
+        key = str(path)
+        if key in files:
+            return io.StringIO(files[key])
+        raise OSError(f"missing {key}")
+
+    return _open
+
+
+def test_read_cgroup_limit_numeric_v2(monkeypatch) -> None:
+    """A numeric cgroup v2 limit is read."""
+    monkeypatch.setattr("builtins.open", _fake_open({"/sys/fs/cgroup/memory.max": "4294967296\n"}))
+
+    assert resources._read_cgroup_limit_bytes() == 4294967296
+
+
+def test_read_cgroup_limit_unlimited_v2_returns_none(monkeypatch) -> None:
+    """A 'max' cgroup v2 limit means no readable cap."""
+    monkeypatch.setattr("builtins.open", _fake_open({"/sys/fs/cgroup/memory.max": "max\n"}))
+
+    assert resources._read_cgroup_limit_bytes() is None
+
+
+def test_read_cgroup_limit_falls_back_to_v1(monkeypatch) -> None:
+    """A missing v2 hierarchy falls back to the v1 limit file."""
+    monkeypatch.setattr(
+        "builtins.open",
+        _fake_open({"/sys/fs/cgroup/memory/memory.limit_in_bytes": "1073741824\n"}),
+    )
+
+    assert resources._read_cgroup_limit_bytes() == 1073741824
+
+
+def test_read_cgroup_limit_invalid_and_missing_returns_none(monkeypatch) -> None:
+    """Unparseable or absent limits are treated as unreadable, not zero."""
+    monkeypatch.setattr("builtins.open", _fake_open({"/sys/fs/cgroup/memory.max": "not-a-number\n"}))
+
+    assert resources._read_cgroup_limit_bytes() is None
+
+    monkeypatch.setattr("builtins.open", _fake_open({}))
+
+    assert resources._read_cgroup_limit_bytes() is None
+
+
+def test_read_cgroup_remaining_v2_reports_headroom(monkeypatch) -> None:
+    """Remaining v2 capacity is limit minus current usage."""
+    monkeypatch.setattr(
+        "builtins.open",
+        _fake_open({"/sys/fs/cgroup/memory.max": "1000\n", "/sys/fs/cgroup/memory.current": "400\n"}),
+    )
+
+    assert resources._read_cgroup_remaining_bytes() == 600
+
+
+def test_read_cgroup_remaining_exhausted_reports_zero(monkeypatch) -> None:
+    """Usage at or above the limit reports zero, never negative."""
+    monkeypatch.setattr(
+        "builtins.open",
+        _fake_open({"/sys/fs/cgroup/memory.max": "1000\n", "/sys/fs/cgroup/memory.current": "1500\n"}),
+    )
+
+    assert resources._read_cgroup_remaining_bytes() == 0
+
+
+def test_read_cgroup_remaining_unlimited_or_missing_returns_none(monkeypatch) -> None:
+    """An unlimited or absent hierarchy yields no remaining-capacity cap."""
+    monkeypatch.setattr(
+        "builtins.open",
+        _fake_open({"/sys/fs/cgroup/memory.max": "max\n", "/sys/fs/cgroup/memory.current": "10\n"}),
+    )
+
+    assert resources._read_cgroup_remaining_bytes() is None
+
+    monkeypatch.setattr("builtins.open", _fake_open({}))
+
+    assert resources._read_cgroup_remaining_bytes() is None
+
+
+def test_read_cgroup_remaining_falls_back_to_v1(monkeypatch) -> None:
+    """A missing v2 hierarchy falls back to the v1 usage/limit files."""
+    monkeypatch.setattr(
+        "builtins.open",
+        _fake_open({
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes": "300\n",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes": "1000\n",
+        }),
+    )
+
+    assert resources._read_cgroup_remaining_bytes() == 700
+
+
+def test_allocation_budget_bypass_when_both_none() -> None:
+    """No budget and no reserve keeps the intentional legacy bypass."""
+    resources.assert_mhs_allocation_budget(estimated_bytes=10**18, budget_bytes=None, reserve_bytes=None)
+
+
+def test_allocation_budget_available_probe_failure_fails_closed(monkeypatch) -> None:
+    """A psutil failure while reading available memory fails closed."""
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+
+    def _boom() -> object:
+        raise RuntimeError("psutil unavailable")
+
+    monkeypatch.setattr(resources.psutil, "virtual_memory", _boom)
+
+    with pytest.raises(DataIntegrityError, match="cannot read available"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=8, budget_bytes=None, reserve_bytes=1000)
+
+
+def test_allocation_budget_tree_enumeration_failure_fails_closed(monkeypatch) -> None:
+    """A psutil failure while enumerating the tree fails closed."""
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("no process")
+
+    monkeypatch.setattr(resources.psutil, "Process", _boom)
+
+    with pytest.raises(DataIntegrityError, match="cannot enumerate"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=8, budget_bytes=1000, reserve_bytes=None)
+
+
+def test_tree_swap_unmeasurable_returns_none(monkeypatch) -> None:
+    """An unmeasurable tree yields null swap, never a fabricated zero."""
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("no process")
+
+    monkeypatch.setattr(resources.psutil, "Process", _boom)
+
+    assert resources._current_tree_swap_bytes() is None
+
+
+def test_tree_helpers_skip_unreadable_process(monkeypatch) -> None:
+    """A generically unreadable process is skipped, not fatal."""
+    class _BadProc:
+        def memory_full_info(self) -> object:
+            raise RuntimeError("unreadable")
+
+        def children(self, recursive: bool = True) -> list[object]:
+            return [self]
+
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args: _BadProc())
+
+    with pytest.raises(DataIntegrityError, match="no process-tree PSS"):
+        resources._current_tree_pss_bytes()
+    assert resources._current_tree_swap_bytes() is None
+
+
+def test_allocation_budget_rejects_estimate_exceeding_budget(monkeypatch) -> None:
+    """An estimate that would exceed budget raises before any allocation begins."""
+    _admit_all(monkeypatch)
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 900)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+
+    with pytest.raises(DataIntegrityError, match="no decoder or plane allocation begins"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=200, budget_bytes=1000, reserve_bytes=None)
+
+
+def test_allocation_budget_admits_estimate_within_budget(monkeypatch) -> None:
+    """An estimate fully inside budget and reserve is admitted."""
+    _admit_all(monkeypatch)
+
+    resources.assert_mhs_allocation_budget(estimated_bytes=100, budget_bytes=1000, reserve_bytes=128)
+
+
+def test_allocation_budget_rejects_low_available(monkeypatch) -> None:
+    """Small tree usage with available below the floor is rejected."""
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 8)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 16)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+
+    with pytest.raises(DataIntegrityError, match="reserve breached"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=8, budget_bytes=10**12, reserve_bytes=2 * 2**30)
+
+
+def test_allocation_budget_rejects_estimate_consuming_reserve(monkeypatch) -> None:
+    """An estimate that would push available below the floor is rejected."""
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+
+    with pytest.raises(DataIntegrityError, match="reserve breached"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=900, budget_bytes=10**12, reserve_bytes=500)
+
+
+def test_allocation_budget_telemetry_failure_fails_closed(monkeypatch) -> None:
+    """Unmeasurable tree or available memory fails closed."""
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+
+    def _boom() -> int:
+        raise DataIntegrityError("cannot measure")
+
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", _boom)
+
+    with pytest.raises(DataIntegrityError, match="cannot measure"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=8, budget_bytes=1000, reserve_bytes=None)
+
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+
+    def _boom_available() -> int:
+        raise DataIntegrityError("cannot read available")
+
+    monkeypatch.setattr(resources, "_current_available_bytes", _boom_available)
+
+    with pytest.raises(DataIntegrityError, match="cannot read available"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=8, budget_bytes=None, reserve_bytes=1000)
+
+
+def test_allocation_budget_rejects_invalid_inputs(monkeypatch) -> None:
+    """Negative estimates and non-positive limits are rejected deterministically."""
+    _admit_all(monkeypatch)
+
+    with pytest.raises(DataIntegrityError, match="estimate is invalid"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=-1, budget_bytes=100, reserve_bytes=None)
+    with pytest.raises(DataIntegrityError, match="budget is invalid"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=1, budget_bytes=0, reserve_bytes=None)
+    with pytest.raises(DataIntegrityError, match="reserve is invalid"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=1, budget_bytes=None, reserve_bytes=0)
+
+
+def test_allocation_budget_aborts_on_swap_growth(monkeypatch) -> None:
+    """Observed per-process swap growth aborts replay safely with diagnostics."""
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 4096)
+
+    with pytest.raises(DataIntegrityError, match="swap growth"):
+        resources.assert_mhs_allocation_budget(estimated_bytes=8, budget_bytes=10**12, reserve_bytes=128)
+
+
+def test_tree_pss_uses_shared_page_accounting(monkeypatch) -> None:
+    """Tree memory sums PSS, never substituting summed RSS for shared pages."""
+    class _Info:
+        def __init__(self, pss: int, rss: int) -> None:
+            self.pss = pss
+            self.rss = rss
+            self.uss = pss
+            self.swap = 0
+
+    class _Proc:
+        def __init__(self, info: _Info, children: list[_Proc]) -> None:
+            self._info = info
+            self._children = children
+
+        def memory_full_info(self) -> _Info:
+            return self._info
+
+        def children(self, recursive: bool = True) -> list[_Proc]:
+            return self._children
+
+    parent = _Proc(_Info(pss=100, rss=1000), [])
+    child = _Proc(_Info(pss=50, rss=900), [])
+    parent._children.append(child)
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args: parent)
+    monkeypatch.setattr(resources.os, "getpid", lambda: 1)
+
+    assert resources._current_tree_pss_bytes() == 150
+
+
+def test_tree_pss_unmeasurable_tree_fails_closed(monkeypatch) -> None:
+    """A tree with no readable process fails admission instead of reporting zero."""
+    class _Proc:
+        def memory_full_info(self):  # type: ignore[no-untyped-def]
+            raise psutil.NoSuchProcess(pid=1)
+
+        def children(self, recursive: bool = True) -> list[object]:
+            return [self]
+
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args: _Proc())
+
+    with pytest.raises(DataIntegrityError, match="no process-tree PSS"):
+        resources._current_tree_pss_bytes()
+    assert resources._current_tree_swap_bytes() is None
+
+
+def test_available_negative_reading_fails_closed(monkeypatch) -> None:
+    """A negative available reading is treated as missing telemetry."""
+    class _Mem:
+        available = -1
+
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
+
+    with pytest.raises(DataIntegrityError, match="telemetry unavailable"):
+        resources._current_available_bytes()
+
+
+def test_worker_plan_bounded_before_fork(monkeypatch) -> None:
+    """Parallel private demand beyond budget bounds workers before fork."""
+    from src.mhs.parallel import plan_worker_count
+    import src.mhs.parallel as parallel
+
+    class _Mem:
+        available = 3 * 2**30
+
+    monkeypatch.setattr(parallel.psutil, "virtual_memory", lambda: _Mem())
+    monkeypatch.setattr(parallel.psutil, "cpu_count", lambda: 8)
+    monkeypatch.setattr(parallel, "_system_reserve_bytes", lambda: 2 * 2**30)
+
+    granted = plan_worker_count(8, 1 * 2**30, True)
+
+    assert granted == 1
+
+
+def test_wide_window_splits_without_changing_strategy_inputs(monkeypatch) -> None:
+    """An over-budget wide window is split into admittable IO pieces only."""
+    from src.mhs.types import ExecutionSpec
+
+    _admit_all(monkeypatch)
+    spec = ExecutionSpec()
+    clock_before = spec.passive_timeout_minutes
+    wide_estimate = 1500
+    budget = 1000
+
+    with pytest.raises(DataIntegrityError, match="budget exceeded"):
+        resources.assert_mhs_allocation_budget(
+            estimated_bytes=wide_estimate, budget_bytes=budget, reserve_bytes=None
+        )
+    for piece in (wide_estimate // 2, wide_estimate - wide_estimate // 2):
+        resources.assert_mhs_allocation_budget(estimated_bytes=piece, budget_bytes=budget, reserve_bytes=None)
+
+    assert spec.passive_timeout_minutes == clock_before
+
+
+def test_resource_scope_reports_times_and_peaks_on_failure() -> None:
+    """A controlled failure still leaves elapsed times and sampled peaks available."""
+    sampler = resources._TreeMemorySampler(interval_seconds=0.01)
+    sampler.start()
+    try:
+        sampler._sample_once()
+        raise RuntimeError("controlled replay failure")
+    except RuntimeError:
+        stats = sampler.stop()
+
+    assert stats.samples_taken >= 1
+    assert stats.wall_seconds >= 0.0
+    assert stats.cpu_seconds >= 0.0
+    assert stats.tree_pss_peak_bytes >= 0
+    assert stats.parent_rss_peak_bytes is not None
+
+
+def test_sampler_stop_without_start_reports_null_peaks() -> None:
+    """A sampler that never started reports null optional peaks, not zeros."""
+    stats = resources._TreeMemorySampler(interval_seconds=0.01).stop()
+
+    assert stats.samples_taken == 0
+    assert stats.wall_seconds == 0.0
+    assert stats.parent_rss_peak_bytes is None
+    assert stats.child_rss_peak_bytes is None
+    assert stats.process_swap_growth_bytes is None
+
+
+def test_sampler_stop_survives_cpu_probe_failure(monkeypatch) -> None:
+    """A failing CPU probe at stop still yields wall time without raising."""
+    sampler = resources._TreeMemorySampler(interval_seconds=0.01)
+    sampler.start()
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("cpu unavailable")
+
+    monkeypatch.setattr(resources.psutil, "Process", _boom)
+    stats = sampler.stop()
+
+    assert stats.wall_seconds >= 0.0
+    assert stats.cpu_seconds == 0.0
 
 
 def test_assert_stage_rss_budget_noop_when_both_none() -> None:
@@ -191,7 +639,7 @@ def test_peak_rss_bytes_returns_max_rss_across_measurements() -> None:
     assert peak == max(r.rss_bytes for r in recorder.records)
 
 
-def _child_hold_private_bytes(ready_queue, release_queue, nbytes: int) -> None:
+def _child_hold_private_bytes(ready_queue, release_queue, nbytes: int) -> None:  # type: ignore[no-untyped-def]
     """Fork child: allocate ``nbytes`` private pages and hold until released."""
     buf = bytearray(nbytes)
     for i in range(0, nbytes, 4096):
@@ -201,7 +649,7 @@ def _child_hold_private_bytes(ready_queue, release_queue, nbytes: int) -> None:
 
 
 class TestProcessTreeMemoryStats:
-    """SCENARIO_MHS_PERF_P0_03_TREE_MEMORY_METRIC."""
+    """Process-tree memory telemetry uses PSS and carries sampled run evidence."""
 
     def test_has_no_sum_of_rss_field(self) -> None:
         """Sum-of-RSS is deliberately absent: it double-counts COW-shared pages."""
@@ -212,8 +660,29 @@ class TestProcessTreeMemoryStats:
             "min_system_available_bytes",
             "max_concurrent_procs",
             "samples_taken",
+            "parent_rss_peak_bytes",
+            "child_rss_peak_bytes",
+            "wall_seconds",
+            "cpu_seconds",
+            "process_swap_growth_bytes",
         }
-        assert not any("rss" in name for name in names)
+        assert not any("sum" in name for name in names)
+
+    def test_optional_observations_default_to_null(self) -> None:
+        """Missing optional observations are null, not zero."""
+        stats = resources.ProcessTreeMemoryStats(
+            tree_pss_peak_bytes=1,
+            tree_uss_peak_bytes=2,
+            min_system_available_bytes=3,
+            max_concurrent_procs=1,
+            samples_taken=0,
+        )
+
+        assert stats.parent_rss_peak_bytes is None
+        assert stats.child_rss_peak_bytes is None
+        assert stats.process_swap_growth_bytes is None
+        assert stats.wall_seconds == 0.0
+        assert stats.cpu_seconds == 0.0
 
     def test_fork_child_private_allocation_exceeds_parent_rss(self) -> None:
         """A child's private 200 MB shows up in tree PSS but not parent RSS."""
@@ -252,7 +721,6 @@ class TestProcessTreeMemoryStats:
 
     def test_min_system_available_below_total(self) -> None:
         """The available floor can never exceed total memory."""
-        ctx = multiprocessing.get_context("fork")
         sampler = resources._TreeMemorySampler(interval_seconds=0.05)
         sampler.start()
         try:
@@ -264,7 +732,7 @@ class TestProcessTreeMemoryStats:
 
     def test_psutil_failure_never_raises_into_the_run(self, monkeypatch) -> None:
         """An injected psutil failure yields samples_taken >= 0 with no raise."""
-        def _boom(*_args, **_kwargs):
+        def _boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
             raise RuntimeError("injected psutil failure")
 
         monkeypatch.setattr(resources.psutil, "virtual_memory", _boom)

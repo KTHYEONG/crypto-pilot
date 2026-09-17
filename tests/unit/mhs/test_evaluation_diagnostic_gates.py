@@ -46,6 +46,19 @@ from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _write_quote_volume_market,
 )
 
+
+@pytest.fixture(autouse=True)
+def _clear_mhs_market_data_caches() -> None:
+    """Run isolation for the module-scoped shared market root.
+
+    Several tests rewrite mark parquet files in place and restore the bytes
+    afterwards; the process-level mark caches keyed by source path would
+    otherwise serve pre-rewrite arrays to later tests in the module.
+    """
+    marks.clear_mhs_market_data_caches()
+    yield
+    marks.clear_mhs_market_data_caches()
+
 @pytest.mark.slow
 def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypatch) -> None:
     # SCENARIO_MHS_FUNDING_CARRY_TOP_LEVEL_DISCOVERY_05: with discovery_gate=True
