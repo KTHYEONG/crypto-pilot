@@ -26,7 +26,7 @@ from src.mhs.marks import _build_window_frames, _cached_mark_panel, _load_window
 from src.mhs.resources import _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
 from src.common.errors import DataIntegrityError
 from src.mhs.books import portfolio_rebalance_trigger
-from src.mhs.evidence import CostResponsePoint, PhaseDiagnosticResult, TailSensitivityResult, book_evidence, phase_1_anchored_purged_folds, required_cost_tiers
+from src.mhs.evidence import CostResponsePoint, PhaseDiagnosticResult, TailSensitivityResult, book_evidence, required_cost_tiers, resolved_anchored_folds
 from src.mhs.execution import ExecutionReplayWindow, StrategyExecutionReplayResult, align_funding_with_knowledge, bar_funding_panel, replay_execution_window_batch_isolated, replay_execution_windows, replay_execution_windows_coupled
 from src.mhs.parallel import resolve_fork_shared
 from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS, REBALANCE_TRACKING_ERROR_THRESHOLD, REFERENCE_PASS_EQUITY_FLOOR
@@ -486,7 +486,7 @@ def _book_outcome(
                     & (target_weights.index <= fold.validation_end)
                 ]
             )
-            for idx, fold in enumerate(phase_1_anchored_purged_folds())
+            for idx, fold in enumerate(resolved_anchored_folds(request))
         }
     signal_available_at = step_grid + pd.Timedelta(hours=1)
     execution_grid = pd.date_range(
@@ -657,7 +657,7 @@ def _book_outcome(
                 # I4 observability: resolve the cap once per run -- it is a
                 # data-independent policy constant, never per-fold state.
                 _resolved_cap = _scaling.resolved_exposure_cap(request)
-                for _idx, _fold in enumerate(phase_1_anchored_purged_folds()):
+                for _idx, _fold in enumerate(resolved_anchored_folds(request)):
                     _fold_scale = _deployed_scale.loc[
                         (_deployed_scale.index >= _fold.validation_start)
                         & (_deployed_scale.index <= _fold.validation_end)

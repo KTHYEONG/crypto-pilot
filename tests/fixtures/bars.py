@@ -113,4 +113,6 @@ def bars_both_touch() -> pd.DataFrame:
 def btc_4h_slice() -> pd.DataFrame:
     from src.market_data.storage.loaders import load_ohlcv_4h
     path = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
+    if not path.exists():
+        pytest.skip("data/futures/ohlcv/1h/BTCUSDT.parquet not present")
     return load_ohlcv_4h(path, end="2025-12-31")

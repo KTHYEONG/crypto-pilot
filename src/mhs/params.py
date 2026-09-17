@@ -232,6 +232,10 @@ DEFAULT_SELECTION_WINDOW: tuple[pd.Timestamp, pd.Timestamp] = (
 # strictly narrower than any unseal of the shared HOLDOUT_CUTOFF gate.
 MHS_FINAL_OOS_CUTOFF_2026H1: pd.Timestamp = pd.Timestamp("2026-06-30 23:59:59", tz="UTC")
 
+# 전진 판정 최소 표본: 계절·펀딩 국면이 모두 한 번씩 포함되는 1년(4분기).
+# 실측 스트레스 통계로 E2 검정력에 필요한 전진 길이가 1.0~1.4년이라 이보다 짧으면 평가하지 않는다.
+FORWARD_MIN_FOLDS: int = 4
+
 RAM_BUDGET_FRACTION: float = 0.85
 RAM_RESERVE_FRACTION: float = 0.05
 RAM_RESERVE_FLOOR_BYTES: int = 256 * 2**20

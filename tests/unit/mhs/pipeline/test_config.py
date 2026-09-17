@@ -261,7 +261,7 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     assert bare["forward_execution_quality_dir"] is None
     assert bare["forward_strategy_digest"] is None
     assert bare["name_drift_trim"] is False
-    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest", "name_drift_trim", "committee_tranche_count"}
+    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest", "forward_registration_digest", "name_drift_trim", "committee_tranche_count"}
 
 
 def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:
@@ -324,3 +324,9 @@ def test_name_drift_trim_cli_flag_maps_to_config_and_request() -> None:
     assert field.default is False
     assert field.metadata["flag"] == "--name-drift-trim"
 
+
+
+def test_config_forward_registration_default_none():
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    assert MhsRunConfig().forward_registration_digest is None

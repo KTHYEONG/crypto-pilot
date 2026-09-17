@@ -14,9 +14,12 @@ import time
 
 import pandas as pd
 
+from src.common.errors import DataIntegrityError
+from src.mhs import preregistration as _prereg
 from src.mhs.evaluation import (
     DISCOVERY_START,
     HOLDOUT_CUTOFF,
+    MhsDiagnosticRequest,
     resolve_evaluation_end,
 )
 from src.mhs.marks import clear_mhs_market_data_caches
@@ -42,10 +45,17 @@ def run_mhs_diagnostic(config: MhsRunConfig) -> MhsHorizonDiagnosticReport:
     the report as ``tree_memory`` (observational, never raises into the run).
     """
     clear_mhs_market_data_caches()
-    _evaluation_ceiling = (
-        MHS_FINAL_OOS_CUTOFF_2026H1 if config.final_oos_2026h1 else HOLDOUT_CUTOFF
-    )
-    resolved_end = resolve_evaluation_end(config.end, unseal_holdout=config.final_oos_2026h1, ceiling=_evaluation_ceiling)
+    if config.forward_registration_digest is not None:
+        _now = pd.Timestamp.now(tz="UTC")
+        _registration = _prereg.find_registration(config.forward_registration_digest)
+        if _prereg.procedure_identity_digest(MhsDiagnosticRequest(**dataclasses.asdict(config))) != _registration.procedure_digest:
+            raise DataIntegrityError("run flags do not match the registered procedure digest")
+        _evaluation_ceiling = _prereg.forward_evaluation_end_ceiling(_now)
+        resolved_end = resolve_evaluation_end(config.end, unseal_holdout=True, ceiling=_evaluation_ceiling)
+        _prereg.record_forward_evaluation(_registration, resolved_end, now=_now)
+    else:
+        _evaluation_ceiling = MHS_FINAL_OOS_CUTOFF_2026H1 if config.final_oos_2026h1 else HOLDOUT_CUTOFF
+        resolved_end = resolve_evaluation_end(config.end, unseal_holdout=config.final_oos_2026h1, ceiling=_evaluation_ceiling)
     _run_start = time.perf_counter()
     if config.partition != "dev":
         raise RuntimeError(

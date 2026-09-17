@@ -26,6 +26,8 @@ from src.mhs.evidence import DeploymentReadinessResult
 from src.mhs.execution import strategy_aware_execution_replay
 from src.quant.universe.pit_universe import symbol_partition
 
+pytestmark = pytest.mark.slow
+
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 
 _FOLD = ev.AnchoredPurgedFold(

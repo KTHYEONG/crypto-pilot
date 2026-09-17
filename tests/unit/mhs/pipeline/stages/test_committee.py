@@ -155,8 +155,8 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
             self.train_end = train_end
 
     monkeypatch.setattr(
-        committee_stage, "phase_1_anchored_purged_folds",
-        lambda: (
+        committee_stage, "resolved_anchored_folds",
+        lambda _cfg: (
             _FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),
             _FoldStub(pd.Timestamp("2023-01-01", tz="UTC")),
         ),
@@ -236,8 +236,8 @@ def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch
     )
     monkeypatch.setattr(committee_mod, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False)
     monkeypatch.setattr(
-        committee_stage, "phase_1_anchored_purged_folds",
-        lambda: (_FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),),
+        committee_stage, "resolved_anchored_folds",
+        lambda _cfg: (_FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),),
     )
     monkeypatch.setattr(
         committee_stage, "_committee_execution_book", _fake_committee_execution_book, raising=False

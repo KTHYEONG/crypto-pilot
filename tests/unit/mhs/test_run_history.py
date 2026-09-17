@@ -435,3 +435,45 @@ def test_trial_identity_key_distinguishes_data_policy_and_keeps_legacy_records()
 
     assert missing == legacy
     assert masked != legacy
+
+
+def test_trial_identity_key_is_sparse_and_stable_when_a_defaulted_field_is_added(tmp_path) -> None:
+    import json
+    from dataclasses import fields
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.run_history import RESEARCH_NEUTRAL_FLAGS, _load_trials_ledger, trial_identity_key
+
+    snapshot = {"K": 1}
+    registered = [f for f in fields(MhsDiagnosticRequest) if f.name not in RESEARCH_NEUTRAL_FLAGS]
+    data_policy_default = next(f.default for f in registered if f.name == "data_policy")
+    record = {"flags": {"committee_capital": True, "data_policy": data_policy_default}, "params_snapshot": snapshot}
+
+    # When the same configuration is written with explicit defaults
+    explicit = {f.name: f.default for f in registered}
+    explicit.update(record["flags"])
+    assert trial_identity_key(record) == trial_identity_key({"flags": explicit, "params_snapshot": snapshot})
+
+    # Given a dense ledger key from an older schema missing the last registered field
+    dense = {f.name: f.default for f in registered[:-1]}
+    dense.update(record["flags"])
+    dense["params_snapshot"] = snapshot
+    dense_key = json.dumps(dense, ensure_ascii=False, sort_keys=True,
+                           default=lambda o: f"<{type(o).__module__}.{type(o).__qualname__}>")
+    (tmp_path / "trials_ledger.json").write_text(
+        json.dumps({dense_key: "2026-09-02T00:00:00+00:00", trial_identity_key(record): "2026-09-10T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    # Then both collapse onto one sparse identity keeping the earliest first-seen
+    loaded = _load_trials_ledger(tmp_path)
+    assert loaded == {trial_identity_key(record): "2026-09-02T00:00:00+00:00"}
+
+
+def test_sparse_identity_key_passes_through_non_identity_keys() -> None:
+    import dataclasses
+    from types import SimpleNamespace
+    from src.mhs.run_history import _equals_field_default, _sparse_identity_key
+
+    assert _sparse_identity_key("not-json") == "not-json"
+    assert _sparse_identity_key("[1, 2]") == "[1, 2]"
+    assert _equals_field_default(None, SimpleNamespace(default=dataclasses.MISSING)) is False

@@ -354,6 +354,13 @@ class MhsDiagnosticRequest:
             help="One-time, narrowly-scoped extension of the sealed evaluation window through 2026-06-30 for a genuine out-of-selection-window check.",
         ),
     )
+    forward_registration_digest: str | None = field(
+        default=None,
+        metadata=cli_param(
+            flag="--forward-registration",
+            help="Evaluate a pre-registered procedure through a completed quarter end.",
+        ),
+    )
     data_policy: Literal['legacy', 'zombie_mask_v1'] = field(default=MHS_DATA_POLICY_DEFAULT, metadata=cli_param(flag='--data-policy', help='Input-data contract for 1h panels (legacy keeps every bar; zombie_mask_v1 masks causally-detected delisted flat bars).', choices=('legacy', 'zombie_mask_v1')))
     input_manifest_path: str | None = field(default=None, metadata=cli_param(flag='--input-manifest-path', help='Sealed MHS input manifest path.'))
     forward_execution_quality_dir: str | None = field(default=None, metadata=cli_param(flag='--forward-execution-quality-dir', help='Append-only live execution-quality directory.'))

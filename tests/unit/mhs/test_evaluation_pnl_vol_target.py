@@ -123,6 +123,7 @@ def test_pnl_vol_target_existing_suite_unchanged() -> None:
     # the individual tests above which are collected and run by pytest.
     pass
 
+@pytest.mark.slow
 def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_PNL_VOL_TARGET_FLAG_DEFAULTS_TRUE_AND_IS_IDENTITY_05: the
     # flag defaults True (a run at the default is byte-identical to today), a
