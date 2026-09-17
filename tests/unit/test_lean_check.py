@@ -83,3 +83,70 @@ def test_emit_json_format() -> None:
     fail_data = json.loads(fail_json)
     assert fail_data["status"] == "FAIL"
     assert fail_data["exit_code"] == 1
+
+
+def test_find_test_files_spec_markdown_invariant_scenarios(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tests_dir = tmp_path / "tests" / "unit"
+    tests_dir.mkdir(parents=True)
+    test_file = tests_dir / "test_invariant_feature.py"
+    test_file.write_text("def test_invariant(): pass\n", encoding="utf-8")
+
+    spec_file = tmp_path / "feature_spec.md"
+    spec_file.write_text(
+        "# Feature Spec\n\n## Invariant Scenarios: tests/unit/test_invariant_feature.py\n",
+        encoding="utf-8",
+    )
+
+    matched = lean_check._find_test_files([], spec_path=str(spec_file))
+    assert "tests/unit/test_invariant_feature.py" in matched
+
+
+def test_check_pre_impl_spec_valid(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    src_dir = tmp_path / "src" / "pkg"
+    src_dir.mkdir(parents=True)
+    caller_file = src_dir / "caller.py"
+    caller_file.write_text("def run():\n    anchor_symbol()\n", encoding="utf-8")
+
+    tests_dir = tmp_path / "tests" / "unit"
+    tests_dir.mkdir(parents=True)
+
+    spec_file = tmp_path / "valid_spec.md"
+    spec_file.write_text(
+        "## Target: src/pkg/target.py\n\n"
+        "## Wiring: src/pkg/caller.py\n"
+        "- Anchor: anchor_symbol\n\n"
+        "## Invariant Scenarios: tests/unit/test_target.py\n",
+        encoding="utf-8",
+    )
+
+    code, diags = lean_check._check_pre_impl_spec(str(spec_file))
+    assert code == 0
+    assert diags == []
+
+
+def test_check_pre_impl_spec_invalid_anchor_and_missing_caller(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    src_dir = tmp_path / "src" / "pkg"
+    src_dir.mkdir(parents=True)
+    caller_file = src_dir / "caller.py"
+    caller_file.write_text("def run():\n    pass\n", encoding="utf-8")
+
+    spec_file = tmp_path / "invalid_spec.md"
+    spec_file.write_text(
+        "## Target: non_existent_dir/sub/target.py\n\n"
+        "## Wiring: src/pkg/caller.py\n"
+        "- Anchor: missing_anchor\n\n"
+        "## Invariant Scenarios: bad_dir/test_target.py\n",
+        encoding="utf-8",
+    )
+
+    code, diags = lean_check._check_pre_impl_spec(str(spec_file))
+    assert code == 1
+    assert len(diags) == 3
+    errors = [d["error"] for d in diags]
+    assert any("Target parent directory does not exist" in e for e in errors)
+    assert any("Wiring anchor 'missing_anchor' not found" in e for e in errors)
+    assert any("Test suite directory does not exist" in e for e in errors)
+
