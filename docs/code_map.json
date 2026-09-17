@@ -519,5 +519,9 @@
   },
   "src/quant/universe/pit_universe.py": {
     "testing": "tests/unit/quant/universe/test_pit_universe.py"
+  },
+  "src/mhs/process_backtest.py": {
+    "architecture": "docs/architecture/data-flow.md",
+    "testing": "tests/unit/mhs/test_process_backtest.py"
   }
 }

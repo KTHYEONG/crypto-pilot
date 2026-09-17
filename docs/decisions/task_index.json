@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_3M_MEMORY_3M_MIGRATION",
+      "date": "2026-09-17",
+      "adr_id": "ADR_20260917_MHS_3M_MEMORY_3M_MIGRATION",
+      "domain": "execution",
+      "title": "MHS 3분봉 인벤토리 리플레이 및 메모리 최적화",
+      "why": "1시간 프록시가 실제 체결 성과를 대표하지 못하고 3분봉 전체 재생의 메모리 위험이 확인되었다.",
+      "resolution": "기존 인벤토리 엔진을 3분봉 기본 경로로 연결하고 인과적 데이터 공백 처리, 스트리밍 원장, 비용 시계 보존, 프로세스 자원 예산과 성과 보고를 적용했다.",
+      "impact": "실제 3분봉 체결에서 CAGR·MDD·회전율·수수료·펀딩과 wall/CPU/RAM peak를 분리 보고하고 동일 입력의 메모리 절감 검증이 가능해진다.",
+      "caveat": "전체 성과와 메모리 목표는 원천 데이터 완전성과 감독된 동일 3분봉 백테스트 실행으로 별도 확인해야 하며 결측 보유 포지션은 강제 청산하지 않는다."
+    },
+    {
       "task_id": "MHS_PROCESS_EXECUTION_POLICY",
       "date": "2026-09-17",
       "adr_id": "ADR_20260917_MHS_PROCESS_EXECUTION_POLICY",
@@ -995,16 +1006,6 @@
       "why": "상장폐지 후 합성 zero-volume 고정가 바(52개 심볼, 2025 패널 8%)를 기존 gap 탐지기가 통과시켜, 로스터 보유 바에서 체결가(OHLCV close)와 평가가(markPriceKlines)가 최대 14.25배 괴리(ALPACAUSDT 실측). 매도 체결마다 무위험 가공손익을 계상해 fold2(2025) 로그성장의 50.3%를 5일에 집중시키고 FOLD_GROWTH_CONCENTRATION(0.614>0.50) 유일 차단사유를 만듦. 동시에 ex-ante vol target scale이 upper=1.0 단측이라 저변동성 구간에서 리스크예산 미달.",
       "resolution": "src/mhs/panel.py에 fill_mark_parity_mask 순수함수 추가(|log(fill/mark)|<=log1p(0.05), Binance price-protection band, 결측/비정합 시 fail-open). src/mhs/contracts.py에 MHS_FILL_MARK_PRICE_PROTECTION_BAND/MHS_FILL_MARK_MAX_LOG_DIVERGENCE/MHS_PNL_VOL_TARGET_MAX_SCALE(=1/target_gross, unit-gross 불변식 유지) 등록. evaluation.py에 _contemporaneous_mark_close_panel(+1h shift 미적용, 동시점 비교)과 _fill_mark_parity_eligibility(fold/top-level 양쪽 동일 함수 배선)를 추가하고 fill_mark_parity_gate=True를 의도적 non-byte-identical 기본값으로 설정(--no-fill-mark-parity-gate로 opt-out). _exante_vol_target_scale에 cap 파라미터 추가, exposure_scale_two_sided=False(opt-in, exante_target 모드 필수)로 양측 스케일 배선. 구현 중 프로세스 전역 lru_cache(_get_symbol_mark_frame)가 module-scoped 공유 테스트 fixture의 서로 다른 root 간 mark 데이터를 오염시키는 결함을 발견해 _build_fold_target_weights와 5개 fixture에 cache_clear() 추가, 합성 테스트 fixture의 독립 랜덤워크 fill/mark 가격을 상관되도록 수정, 손상된 mark 캐시에 대한 fail-open try/except 추가.",
       "impact": "3m 원장 실측(2021-2025 전체): primary_geometric_cagr 0.521->0.560(+3.9%p), primary_naive_sharpe 2.088->2.232, primary_max_drawdown -0.176(불변), deflated_sharpe_ratio 0.364, data_integrity_reason_codes=[](클린). 게이트가 로스터 보유 9837셀(ALPACAUSDT 719/BNXUSDT 702/MEMEFIUSDT 634/PORT3USDT 712/UXLINKUSDT 637 등)을 정확히 배제. 단, 원 가설(가격아티팩트 제거->FOLD_GROWTH_CONCENTRATION 개선)은 반증됨: max_fold_share 0.614->0.649(악화), fold2(2025) CAGR 129.4%->161.7%로 오히려 증가 -- 오염 심볼 제외 후 자본이 재배분되며 2025 모멘텀 신호가 더 강하게 집중, 즉 fold2 쏠림은 가격 아티팩트가 아니라 진짜 경제적 신호(단일 연도 의존)였음이 실측 확인됨. research_go.eligible은 여전히 False, reason_codes=['FOLD_GROWTH_CONCENTRATION']로 불변. run_elapsed_seconds 278s->541.5s로 약 2배 증가 -- fold-path가 fork 이전 mark 캐시를 prewarm하지 않아 3개 fold worker가 각각 최대 446개 mark parquet를 캐시 없이 재읽음(스펙에 명시한 기지 성능 갭, 실측으로 확인). 후속 과제: (1) fold-path mark prewarm 배선, (2) 2025 쏠림의 진짜 원인(과최적화 vs 진짜 알파) 규명."
-    },
-    {
-      "task_id": "MHS_COMPOUNDING_GROWTH",
-      "date": "2026-08-19",
-      "adr_id": "ADR_20260819_MHS_COMPOUNDING_GROWTH",
-      "domain": "mhs",
-      "title": "MHS 절대 ex-ante 변동성 타겟팅 + 펀딩캐리 슬리브 도입",
-      "why": "FOLD_GROWTH_CONCENTRATION(2025 폴드 몰빵, max_share 0.808)이 유일한 Research-GO 차단 사유. 근본원인: _pnl_vol_target_scale이 자기 trailing vol의 롤링 중앙값 대비 상대평가라 저위험 연도(2023 vol 0.172)를 고위험 연도(2025 vol 0.286)보다 더 세게 de-risk하는 역스케일 구조였음.",
-      "resolution": "src/mhs/contracts.py에 MHS_PNL_TARGET_ANNUAL_VOL=0.20/MHS_PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS=20/MHS_FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS=168/MHS_FUNDING_CARRY_SLEEVE_WEIGHT=0.30 등록. evaluation.py에 절대기준 _exante_vol_target_scale과 디스패처 _replay_exposure_scale 추가(기존 _pnl_vol_target_scale은 median_relative 모드로 유지, 기본값 byte-identical). src/mhs/funding.py에 funding_carry_execution_book 추가(고펀딩 숏/저펀딩 롱 캐리 슬리브, fold/blend 양쪽 경로에 동일 함수로 배선). MhsDiagnosticRequest에 pnl_vol_target_mode/funding_carry_sleeve/funding_carry_weight 필드 및 fail-closed 검증 추가. CLI 신규 기본값: --pnl-vol-target-mode exante_target, funding-carry-sleeve on(committee_capital 필요, opt-out 패턴).",
-      "impact": "3m 원장 실측(신규 기본값): fold0(2023) CAGR 0.218->0.351(+61%), fold1(2024) CAGR 0.117->0.247(+111%), fold_growth_concentration.max_fold_share 0.808->0.614(개선했으나 0.50 게이트 미달), primary_max_drawdown -0.230->-0.176(개선). 단 primary_geometric_cagr 0.696->0.521, calmar 3.03->2.96로 총 성장은 오히려 감소(1h 프록시가 예측한 +16% CAGR과 반대 방향) -- 실행 마찰(3m 체결/로스터 히스테리시스)이 exante 타겟팅의 반응성과 상호작용해 2025 고분산 구간 실제 노출을 프록시보다 더 깎은 것으로 추정. research_go.reason_codes는 여전히 ['FOLD_GROWTH_CONCENTRATION'] 하나만 남음(정책 임계값 미달, 데이터무결성 이슈 아님). 추가 조사 필요: target_vol 완화 또는 캐리 비중 재조정으로 총 CAGR 회복 여부."
     }
   ]
 }
