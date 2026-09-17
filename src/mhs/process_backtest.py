@@ -40,6 +40,7 @@ from src.mhs.params import (
     PROCESS_FEATURE_CANDIDATES,
     PROCESS_FUNDING_CARRY_CANDIDATES_HOURS,
     PROCESS_MIN_SYMBOLS,
+    PROCESS_SMOOTHING_HALFLIFE_DAYS,
     STRESS_COST_MULTIPLIER,
 )
 from src.mhs.pipeline.config import (
@@ -49,14 +50,13 @@ from src.mhs.pipeline.config import (
 from src.mhs.process import (
     RefitPoint,
     ema_smoothing_rate,
-    estimation_adjusted_kelly_exposure,
     estimation_adjusted_mean,
     ledoit_wolf_covariance,
     long_only_growth_weights,
     monthly_refit_schedule,
-    select_smoothing_halflife,
     smoothed_book_path,
     step_proxy_net_returns,
+    volatility_scaled_exposure,
 )
 from src.mhs.regime import beta_neutralize_weights, causal_market_beta
 from src.mhs.types import ExecutionSpec
@@ -224,34 +224,50 @@ def load_process_market_data(
     )
 
 
-def run_process_path(
+def run_process_paths(
     data: ProcessMarketData,
     schedule: tuple[RefitPoint, ...],
     *,
-    one_way_bps: float,
+    decision_bps: float,
+    evaluation_bps: tuple[float, ...],
     leverage_cap: float,
-) -> ProcessPath:
-    """Replay the process continuously over ``schedule`` at one cost tier.
+) -> tuple[ProcessPath, ...]:
+    """Replay one set of process decisions continuously and evaluate it at each cost tier.
+
+    Member weights, execution smoothing, and exposure are decided once at
+    ``decision_bps``; every ``evaluation_bps`` tier replays those identical
+    decisions through the hourly ledger, so a stress tier measures cost
+    sensitivity of the same strategy rather than a re-optimized one. Member
+    evidence is scored on books smoothed by ``PROCESS_SMOOTHING_HALFLIFE_DAYS``,
+    the same smoothing the executed book receives.
 
     Raises:
-        ValueError: empty ``schedule`` or no candidate books.
+        ValueError: empty ``schedule``, no candidate books, or empty ``evaluation_bps``.
     """
     if not schedule:
         raise ValueError("schedule must not be empty")
     if not data.member_books:
         raise ValueError("no candidate books")
+    if not evaluation_bps:
+        raise ValueError("evaluation_bps must not be empty")
+    rate = ema_smoothing_rate(PROCESS_SMOOTHING_HALFLIFE_DAYS)
     names = list(data.member_books.keys())
+    smoothed_members = {
+        name: smoothed_book_path(
+            data.member_books[name], pd.Series(rate, index=data.member_books[name].index)
+        )
+        for name in names
+    }
     member_net = pd.DataFrame(
         {
             name: step_proxy_net_returns(
-                data.member_books[name], data.log_close_step, data.funding_step, one_way_bps
+                smoothed_members[name], data.log_close_step, data.funding_step, decision_bps
             )
             for name in names
         }
     )
     step = member_net.index[1] - member_net.index[0]
     refit_targets: list[pd.DataFrame] = []
-    refit_rates: list[float] = []
     records: list[RefitRecord] = []
     for point in schedule:
         train_rows = member_net.index[member_net.index + step <= point.train_end]
@@ -264,49 +280,54 @@ def run_process_path(
             start=data.member_books[names[0]] * 0.0,
         )
         target = scale_book_to_target_gross(combined, 1.0)
-        halflife = select_smoothing_halflife(
-            target, data.log_close_step, data.funding_step, one_way_bps, point.train_end
-        )
         refit_targets.append(target)
-        refit_rates.append(ema_smoothing_rate(halflife))
         records.append(
             RefitRecord(
                 point=point,
                 member_weights={n: float(weights[n]) for n in names if float(weights[n]) != 0.0},
-                smoothing_halflife_days=halflife,
+                smoothing_halflife_days=PROCESS_SMOOTHING_HALFLIFE_DAYS,
             )
         )
     oos_start = schedule[0].effective_from
     oos_end = schedule[-1].effective_to
     oos_days = data.decision_grid[(data.decision_grid >= oos_start) & (data.decision_grid < oos_end)]
-    target_rows: list[pd.Series] = []
-    rate_rows: list[float] = []
     starts = pd.DatetimeIndex([p.effective_from for p in schedule])
+    target_rows: list[pd.Series] = []
     for day in oos_days:
         idx = int(starts.searchsorted(day, side="right")) - 1
         target_rows.append(refit_targets[idx].loc[day])
-        rate_rows.append(refit_rates[idx])
     targets_oos = pd.DataFrame(target_rows, index=oos_days)
-    rates_oos = pd.Series(rate_rows, index=oos_days)
-    sized_targets = smoothed_book_path(targets_oos, rates_oos)
+    sized_targets = smoothed_book_path(targets_oos, pd.Series(rate, index=oos_days))
     unit_1h = sized_targets.reindex(data.grid_1h, method="ffill").fillna(0.0)
-    unit_net_1h, _ = mhs_ledger_pnl(unit_1h, data.opens_1h, data.bar_funding_1h, one_way_bps)
-    unit_daily = ((1.0 + unit_net_1h).resample("1D").prod() - 1.0).reindex(oos_days).fillna(0.0)
-    exposure = estimation_adjusted_kelly_exposure(
-        unit_daily, active_from=schedule[0].effective_from, cap=leverage_cap
+    unit_net_1h, _ = mhs_ledger_pnl(unit_1h, data.opens_1h, data.bar_funding_1h, decision_bps)
+    decision_unit_daily = (
+        ((1.0 + unit_net_1h).resample("1D").prod() - 1.0).reindex(oos_days).fillna(0.0)
     )
+    exposure = volatility_scaled_exposure(decision_unit_daily, cap=leverage_cap)
     sized = sized_targets.mul(exposure.reindex(sized_targets.index).fillna(0.0), axis=0)
     sized_1h = sized.reindex(data.grid_1h, method="ffill").fillna(0.0)
-    net_1h, _ = mhs_ledger_pnl(sized_1h, data.opens_1h, data.bar_funding_1h, one_way_bps)
-    daily_returns = ((1.0 + net_1h).resample("1D").prod() - 1.0).reindex(oos_days).fillna(0.0)
-    return ProcessPath(
-        one_way_bps=one_way_bps,
-        daily_returns=daily_returns,
-        unit_daily_returns=unit_daily,
-        exposure=exposure,
-        refits=tuple(records),
-        leverage_cap=leverage_cap,
-    )
+    paths: list[ProcessPath] = []
+    for bps in evaluation_bps:
+        net_1h, _ = mhs_ledger_pnl(sized_1h, data.opens_1h, data.bar_funding_1h, bps)
+        daily_returns = ((1.0 + net_1h).resample("1D").prod() - 1.0).reindex(oos_days).fillna(0.0)
+        if bps == decision_bps:
+            unit_daily_returns = decision_unit_daily
+        else:
+            alt_net_1h, _ = mhs_ledger_pnl(unit_1h, data.opens_1h, data.bar_funding_1h, bps)
+            unit_daily_returns = (
+                ((1.0 + alt_net_1h).resample("1D").prod() - 1.0).reindex(oos_days).fillna(0.0)
+            )
+        paths.append(
+            ProcessPath(
+                one_way_bps=bps,
+                daily_returns=daily_returns,
+                unit_daily_returns=unit_daily_returns,
+                exposure=exposure,
+                refits=tuple(records),
+                leverage_cap=leverage_cap,
+            )
+        )
+    return tuple(paths)
 
 
 def quarter_fold_returns(daily_returns: pd.Series) -> tuple[pd.Series, ...]:
@@ -328,7 +349,7 @@ def evaluate_process_backtest(
     *,
     data_root: str | None = None,
 ) -> ProcessBacktestReport:
-    """Run base and stress paths and evaluate their quarterly slices with the deploy gate.
+    """Evaluate base and same-decision stress paths with the deploy gate.
 
     Raises:
         DataIntegrityError: ``end`` exceeds ``PROCESS_EVALUATION_CEILING``.
@@ -345,8 +366,13 @@ def evaluate_process_backtest(
     stress_bps = base_bps * STRESS_COST_MULTIPLIER
     data = load_process_market_data(start, end, data_root=data_root)
     schedule = monthly_refit_schedule(data.decision_grid[0], data.decision_grid[-1])
-    base = run_process_path(data, schedule, one_way_bps=base_bps, leverage_cap=envelope.leverage_ceiling)
-    stress = run_process_path(data, schedule, one_way_bps=stress_bps, leverage_cap=envelope.leverage_ceiling)
+    base, stress = run_process_paths(
+        data,
+        schedule,
+        decision_bps=base_bps,
+        evaluation_bps=(base_bps, stress_bps),
+        leverage_cap=envelope.leverage_ceiling,
+    )
     gate = evaluate_deploy_gate(
         fold_returns=quarter_fold_returns(base.daily_returns),
         fold_stress_returns=quarter_fold_returns(stress.daily_returns),

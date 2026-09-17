@@ -14,6 +14,7 @@ from src.mhs.params import (
     PROCESS_EVALUATION_CEILING,
     PROCESS_FEATURE_CANDIDATES,
     PROCESS_FUNDING_CARRY_CANDIDATES_HOURS,
+    PROCESS_SMOOTHING_HALFLIFE_DAYS,
 )
 from src.mhs.process import monthly_refit_schedule
 from src.mhs.process_backtest import (
@@ -24,7 +25,7 @@ from src.mhs.process_backtest import (
     evaluate_process_backtest,
     persist_process_report,
     quarter_fold_returns,
-    run_process_path,
+    run_process_paths,
 )
 
 
@@ -68,19 +69,20 @@ def _schedule_for(data: ProcessMarketData):
 def test_run_process_path_selects_planted_book() -> None:
     data = _synthetic_data()
     schedule = _schedule_for(data)
-    path = run_process_path(data, schedule, one_way_bps=8.0, leverage_cap=2.0)
+    path = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0]
     assert path.daily_returns.index[0] == schedule[0].effective_from
     assert bool((path.exposure >= 0).all())
     assert bool((path.exposure <= 2.0 + 1e-12).all())
     first = path.refits[0]
     assert first.member_weights.get("planted", 0.0) > 0
     assert first.member_weights.get("inverse", 0.0) == 0.0
+    assert all(r.smoothing_halflife_days == PROCESS_SMOOTHING_HALFLIFE_DAYS for r in path.refits)
 
 
 def test_run_process_path_perturbation_invariance() -> None:
     data = _synthetic_data()
     schedule = _schedule_for(data)
-    base = run_process_path(data, schedule, one_way_bps=8.0, leverage_cap=2.0)
+    base = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0]
     cutoff = data.decision_grid[300]
     perturbed_close = data.log_close_step.copy()
     perturbed_close.loc[perturbed_close.index > cutoff] += 0.5
@@ -95,7 +97,7 @@ def test_run_process_path_perturbation_invariance() -> None:
         funding_step=perturbed_funding,
         member_books=data.member_books,
     )
-    replay = run_process_path(perturbed, schedule, one_way_bps=8.0, leverage_cap=2.0)
+    replay = run_process_paths(perturbed, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0]
     for before, after in zip(base.refits, replay.refits, strict=True):
         if before.point.train_end <= cutoff:
             assert before == after
@@ -112,11 +114,54 @@ def test_run_process_path_perturbation_invariance() -> None:
 def test_run_process_path_stress_does_not_beat_base() -> None:
     data = _synthetic_data()
     schedule = _schedule_for(data)
-    base = run_process_path(data, schedule, one_way_bps=2.0, leverage_cap=2.0)
-    stress = run_process_path(data, schedule, one_way_bps=50.0, leverage_cap=2.0)
+    base, stress = run_process_paths(data, schedule, decision_bps=2.0, evaluation_bps=(2.0, 50.0), leverage_cap=2.0)
+    assert (base.one_way_bps, stress.one_way_bps) == (2.0, 50.0)
+    assert base.exposure.equals(stress.exposure)
+    assert base.refits == stress.refits
     assert float(np.log1p(stress.daily_returns).sum()) <= float(np.log1p(base.daily_returns).sum())
     with pytest.raises(ValueError, match=r".+"):
-        run_process_path(data, (), one_way_bps=2.0, leverage_cap=2.0)
+        run_process_paths(data, (), decision_bps=2.0, evaluation_bps=(2.0,), leverage_cap=2.0)
+
+
+def test_run_process_paths_same_decision_tiers() -> None:
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    base, stress = run_process_paths(
+        data, schedule, decision_bps=8.0, evaluation_bps=(8.0, 24.0), leverage_cap=2.0
+    )
+    assert len((base, stress)) == 2
+    assert base.one_way_bps == 8.0
+    assert stress.one_way_bps == 24.0
+    assert base.exposure.equals(stress.exposure)
+    assert base.refits == stress.refits
+    assert float(np.log1p(stress.daily_returns).sum()) <= float(np.log1p(base.daily_returns).sum())
+
+
+def test_run_process_paths_whipsaw_gets_zero_weight() -> None:
+    data = _synthetic_data()
+    n_days = len(data.decision_grid)
+    whipsaw = pd.DataFrame(0.0, index=data.decision_grid, columns=data.opens_1h.columns)
+    signs = np.where(np.arange(n_days) % 2 == 0, 0.5, -0.5)
+    whipsaw["S00USDT"] = signs
+    books = dict(data.member_books)
+    books["whipsaw"] = whipsaw
+    import dataclasses
+
+    wdata = dataclasses.replace(data, member_books=books)
+    schedule = _schedule_for(wdata)
+    (path,) = run_process_paths(
+        wdata, schedule, decision_bps=100.0, evaluation_bps=(100.0,), leverage_cap=2.0
+    )
+    assert len(path.refits) > 0
+    for record in path.refits:
+        assert record.member_weights.get("whipsaw", 0.0) == 0.0
+
+
+def test_run_process_paths_rejects_empty_evaluation() -> None:
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    with pytest.raises(ValueError, match=r".+"):
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(), leverage_cap=2.0)
 
 
 def test_quarter_fold_returns_split() -> None:
@@ -150,15 +195,26 @@ def test_evaluate_uses_gate_and_stress_triple(monkeypatch) -> None:
     def _fake_load(start, end, data_root=None):
         return data
 
-    def _fake_run(loaded, sched, one_way_bps, leverage_cap):
-        seen.setdefault("bps", []).append(one_way_bps)
-        return run_process_path(loaded, sched, one_way_bps=one_way_bps, leverage_cap=leverage_cap)
+    def _fake_run(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap):
+        seen["decision"] = decision_bps
+        seen["evaluation"] = evaluation_bps
+        seen.setdefault("bps", []).append(decision_bps)
+        return run_process_paths(loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps, leverage_cap=leverage_cap)
+
+    calls: list = []
+
+    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap):
+        calls.append((decision_bps, evaluation_bps))
+        return _fake_run(loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps, leverage_cap=leverage_cap)
 
     monkeypatch.setattr(pb, "load_process_market_data", _fake_load)
-    monkeypatch.setattr(pb, "run_process_path", _fake_run)
+    monkeypatch.setattr(pb, "run_process_paths", _spy)
     report = evaluate_process_backtest(data_root=None)
     assert report.certification_level == "process_proxy_1h_ledger"
-    assert seen["bps"][1] == pytest.approx(seen["bps"][0] * 3.0)
+    assert len(calls) == 1
+    assert calls[0][0] == seen["decision"]
+    assert calls[0][1] == (seen["decision"], seen["decision"] * 3.0)
+    assert calls[0][1][1] == pytest.approx(calls[0][1][0] * 3.0)
     assert report.n_candidates == len(data.member_books)
     assert report.gate.metrics["n_folds"] == len(quarter_fold_returns(report.base.daily_returns))
 
@@ -166,7 +222,7 @@ def test_evaluate_uses_gate_and_stress_triple(monkeypatch) -> None:
 def test_persist_process_report_round_trip(tmp_path) -> None:
     data = _synthetic_data()
     schedule = monthly_refit_schedule(data.decision_grid[0], data.decision_grid[-1])
-    path = run_process_path(data, schedule, one_way_bps=8.0, leverage_cap=2.0)
+    path = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0]
     report = ProcessBacktestReport(
         start=data.decision_grid[0],
         end=data.decision_grid[-1],
@@ -239,7 +295,7 @@ def test_run_process_path_rejects_empty_books() -> None:
         member_books={},
     )
     with pytest.raises(ValueError, match=r".+"):
-        run_process_path(empty, schedule, one_way_bps=8.0, leverage_cap=2.0)
+        run_process_paths(empty, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
 
 
 def test_quarter_fold_returns_empty() -> None:
