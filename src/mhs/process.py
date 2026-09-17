@@ -13,13 +13,11 @@ import pandas as pd
 from scipy.linalg import solve_triangular
 from scipy.optimize import nnls
 
-from src.common.errors import DataIntegrityError
 from src.mhs.params import (
+    PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
     PROCESS_MIN_TRAIN_DAYS,
     PROCESS_PURGE_HOURS,
     PROCESS_REFIT_FREQUENCY,
-    PROCESS_RISK_EWMA_LAMBDA,
-    PROCESS_SMOOTHING_HALFLIFE_LADDER_DAYS,
 )
 
 
@@ -261,92 +259,36 @@ def step_proxy_net_returns(
     return pd.Series(rets[:-1], index=weights.index[:-1])
 
 
-def select_smoothing_halflife(
-    targets: pd.DataFrame,
-    log_close: pd.DataFrame,
-    funding: pd.DataFrame,
-    one_way_bps: float,
-    train_end: pd.Timestamp,
-    ladder: tuple[float, ...] = PROCESS_SMOOTHING_HALFLIFE_LADDER_DAYS,
-) -> float:
-    """Ladder half-life with the highest mean train log-growth of the smoothed book.
-
-    Cost and signal decay trade off jointly inside the train window; ties go to
-    the longer half-life (fewer trades).
-
-    Raises:
-        ValueError: empty ladder or no train row whose forward step ends by ``train_end``.
-        DataIntegrityError: a train step return at or below -1.
-    """
-    if len(ladder) == 0:
-        raise ValueError("ladder must not be empty")
-    if len(targets.index) < 2:
-        raise ValueError("no train row whose forward step ends by train_end")
-    step = targets.index[1] - targets.index[0]
-    positions = [i for i, t in enumerate(targets.index) if t + step <= train_end]
-    if not positions:
-        raise ValueError("no train row whose forward step ends by train_end")
-    last = positions[-1]
-    extended = list(range(last + 2)) if last + 1 < len(targets.index) else list(range(last + 1))
-    sub_targets = targets.iloc[extended]
-    sub_log = log_close.reindex(sub_targets.index)
-    sub_fund = funding.reindex(sub_targets.index)
-    train_rows = targets.index[positions]
-    best: float = ladder[0]
-    best_score = float("-inf")
-    for halflife in ladder:
-        rate = ema_smoothing_rate(halflife)
-        rates = pd.Series(rate, index=sub_targets.index)
-        smoothed = smoothed_book_path(sub_targets, rates)
-        rets = step_proxy_net_returns(smoothed, sub_log, sub_fund, one_way_bps)
-        train_rets = rets.loc[train_rows]
-        if bool((train_rets.to_numpy(dtype="float64") <= -1.0).any()):
-            raise DataIntegrityError("train step return at or below -1")
-        score = float(np.log1p(train_rets.to_numpy(dtype="float64")).mean())
-        if score > best_score or (score == best_score and halflife > best):
-            best_score = score
-            best = halflife
-    return best
-
-
-def estimation_adjusted_kelly_exposure(
+def volatility_scaled_exposure(
     unit_returns: pd.Series,
     *,
-    active_from: pd.Timestamp,
     cap: float,
-    ewma_lambda: float = PROCESS_RISK_EWMA_LAMBDA,
+    halflife_days: int = PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
 ) -> pd.Series:
-    """Daily exposure multiple from the process's own out-of-sample unit returns.
+    """Daily exposure multiple ``cap * median(vol) / vol`` clipped to ``[0, cap]``.
 
-    ``f_t = clip(mean / ewma_var * max(0, 1 - 1/t^2), 0, cap)`` over returns in
-    ``[active_from, t)``: the mean is the whole out-of-sample record (edge moves
-    slowly), the variance is RiskMetrics EWMA (risk clusters), and the
-    estimation factor withholds leverage until the record itself is significant.
-    ``cap`` is the user's risk envelope, the only non-estimated input.
+    Realized Kelly leverage of the unit book is several times any registered cap,
+    so growth is maximized at the cap in ordinary regimes; the ratio of the
+    expanding median forecast volatility to the current forecast only de-risks
+    when risk is elevated relative to the strategy's own history. The forecast
+    for day ``t`` uses returns strictly before ``t``; days without a positive
+    forecast carry zero exposure (unobservable risk is never levered).
 
     Raises:
-        ValueError: naive ``active_from``, non-increasing index, non-finite returns,
-            ``cap <= 0``, or ``ewma_lambda`` outside ``(0, 1)``.
+        ValueError: ``cap <= 0``, ``halflife_days < 1``, non-increasing index, or
+            non-finite returns.
     """
-    if active_from.tzinfo is None:
-        raise ValueError("active_from must be tz-aware")
+    if cap <= 0:
+        raise ValueError(f"cap must be > 0, got {cap}")
+    if halflife_days < 1:
+        raise ValueError(f"halflife_days must be >= 1, got {halflife_days}")
     if not unit_returns.index.is_monotonic_increasing:
-        raise ValueError("unit_returns index must be strictly increasing")
+        raise ValueError("unit_returns index must be non-decreasing")
     values = unit_returns.to_numpy(dtype="float64")
     if values.size and not bool(np.isfinite(values).all()):
         raise ValueError("unit_returns must be finite")
-    if cap <= 0:
-        raise ValueError(f"cap must be > 0, got {cap}")
-    if not (0.0 < ewma_lambda < 1.0):
-        raise ValueError(f"ewma_lambda must be in (0, 1), got {ewma_lambda}")
-    active = unit_returns.loc[unit_returns.index >= active_from]
-    # shift(1): t일 노출은 t 이전 수익만 읽는다.
-    n = pd.Series(np.arange(len(active), dtype="float64"), index=active.index)
-    mean = active.expanding().mean().shift(1)
-    std = active.expanding().std(ddof=1).shift(1)
-    ewma_var = (active**2).ewm(alpha=1.0 - ewma_lambda, adjust=True).mean().shift(1)
-    valid = (n >= 2) & (mean > 0) & (std > 0) & (ewma_var > 0)
-    t2 = (n * mean * mean / (std * std)).where(valid)
-    factor = (1.0 - 1.0 / t2).clip(lower=0.0)
-    raw = (mean / ewma_var * factor).where(valid, 0.0).fillna(0.0).clip(lower=0.0, upper=cap)
-    return raw.reindex(unit_returns.index).fillna(0.0)
+    vol = unit_returns.ewm(halflife=halflife_days, min_periods=halflife_days).std().shift(1)
+    median = vol.expanding().median()
+    exposure = (cap * median / vol.where(vol > 0)).clip(lower=0.0, upper=cap).fillna(0.0)
+    exposure.index = unit_returns.index
+    return exposure

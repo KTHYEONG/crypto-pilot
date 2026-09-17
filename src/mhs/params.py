@@ -384,10 +384,9 @@ PROCESS_REFIT_FREQUENCY: str = "MS"
 PROCESS_MIN_TRAIN_DAYS: int = 365
 # 학습 끝과 적용 시작 사이 퍼지: 최장 멤버 룩백(720h)과 동일.
 PROCESS_PURGE_HOURS: int = COMMITTEE_PURGE_HOURS
-# 평활 반감기 사다리(일): 0=즉시 추종, 상한 8일=측정된 가장 느린 신호 감쇠(flow_imb).
-PROCESS_SMOOTHING_HALFLIFE_LADDER_DAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0)
-# RiskMetrics 일간 분산 감쇠(외부 관례값, 이 데이터로 적합하지 않음).
-PROCESS_RISK_EWMA_LAMBDA: float = 0.94
+# 집행 평활 반감기(일): 측정된 가장 느린 멤버 신호 감쇠(flow_imb 8일). 학습 구간에서 고르면
+# 같은 구간으로 적합한 가중치 때문에 알파가 부풀어 항상 0(무평활)이 선택된다.
+PROCESS_SMOOTHING_HALFLIFE_DAYS: float = 8.0
 # rank_weight_book 전체에서 쓰는 최소 종목 수 하한과 동일.
 PROCESS_MIN_SYMBOLS: int = 8
 # 캔들로 계산 가능한 전체 등록 피처. 동일 북을 만드는 중복(taker_imb_168h≡flow_imb_168h,
