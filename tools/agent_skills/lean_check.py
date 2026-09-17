@@ -171,13 +171,125 @@ def _find_test_files(py_files: list[str], spec_path: str | None = None) -> list[
         with contextlib.suppress(OSError):
             with open(spec_path, encoding="utf-8", errors="ignore") as f:
                 content = f.read()
-            matches = re.findall(r"(?m)^##\s+Test\s+Suite:\s*`?([^\n`]+)`?", content)
+            matches = re.findall(
+                r"(?m)^##\s+(?:Test\s+Suite|Invariant\s+Scenarios):\s*`?([^\n`]+)`?",
+                content,
+            )
             for m in matches:
-                tf = m.strip()
+                tf = m.strip().strip("`").strip()
                 if os.path.isfile(tf) and tf not in test_files:
                     test_files.append(tf)
 
     return sorted(dict.fromkeys(test_files))
+
+
+def _check_pre_impl_spec(spec_path: str) -> tuple[int, list[JsonDiag]]:
+    """Validate spec blueprint paths, targets, caller files, and anchors before implementation."""
+    diags: list[JsonDiag] = []
+    if not os.path.isfile(spec_path):
+        return 1, [
+            {
+                "file": spec_path,
+                "line": 0,
+                "error": f"Spec file not found: {spec_path}",
+                "fix_hint": "Check spec file path",
+            }
+        ]
+
+    try:
+        with open(spec_path, encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except OSError as e:
+        return 1, [
+            {
+                "file": spec_path,
+                "line": 0,
+                "error": f"Cannot read spec file: {e}",
+                "fix_hint": "Check file permissions",
+            }
+        ]
+
+    current_caller: str | None = None
+    target_found = False
+
+    for idx, line in enumerate(lines, start=1):
+        stripped = line.strip()
+
+        # Check Target
+        m_target = re.match(r"^##\s+Target:\s*`?([^\n`]+)`?", stripped)
+        if m_target:
+            target_file = m_target.group(1).strip().strip("`").strip()
+            target_found = True
+            parent = os.path.dirname(target_file)
+            if parent and not os.path.isdir(parent):
+                diags.append(
+                    {
+                        "file": spec_path,
+                        "line": idx,
+                        "error": f"Target parent directory does not exist: '{parent}' for target '{target_file}'",
+                        "fix_hint": f"Create directory {parent} or fix path in spec",
+                    }
+                )
+
+        # Check Wiring caller file
+        m_wiring = re.match(r"^##\s+Wiring:\s*`?([^\n`]+)`?", stripped)
+        if m_wiring:
+            current_caller = m_wiring.group(1).strip().strip("`").strip()
+            if not os.path.isfile(current_caller):
+                diags.append(
+                    {
+                        "file": spec_path,
+                        "line": idx,
+                        "error": f"Wiring caller file does not exist: '{current_caller}'",
+                        "fix_hint": f"Verify caller file path in {spec_path}",
+                    }
+                )
+
+        # Check Anchor in caller file
+        m_anchor = re.match(r"^-\s*(?:Anchor|anchor):\s*`?([^\n`]+)`?", stripped)
+        if m_anchor and current_caller and os.path.isfile(current_caller):
+            anchor = m_anchor.group(1).strip().strip("`").strip()
+            try:
+                with open(current_caller, encoding="utf-8", errors="ignore") as cf:
+                    caller_content = cf.read()
+                if anchor not in caller_content:
+                    diags.append(
+                        {
+                            "file": current_caller,
+                            "line": 0,
+                            "error": f"Wiring anchor '{anchor}' not found in caller file '{current_caller}'",
+                            "fix_hint": f"Ensure anchor '{anchor}' matches an existing symbol or line in {current_caller}",
+                        }
+                    )
+            except OSError:
+                pass
+
+        # Check Invariant Scenarios / Test Suite test file
+        m_test = re.match(r"^##\s+(?:Invariant\s+Scenarios|Test\s+Suite):\s*`?([^\n`]+)`?", stripped)
+        if m_test:
+            test_file = m_test.group(1).strip().strip("`").strip()
+            parent = os.path.dirname(test_file)
+            if parent and not os.path.isdir(parent):
+                diags.append(
+                    {
+                        "file": spec_path,
+                        "line": idx,
+                        "error": f"Test suite directory does not exist: '{parent}' for '{test_file}'",
+                        "fix_hint": f"Create directory {parent} or fix path in spec",
+                    }
+                )
+
+    if not target_found:
+        diags.append(
+            {
+                "file": spec_path,
+                "line": 0,
+                "error": "Spec missing mandatory '## Target: <path>' section",
+                "fix_hint": "Add '## Target: <relative_path>' section to spec",
+            }
+        )
+
+    return (1 if diags else 0), diags
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +387,38 @@ def main() -> None:
     parser.add_argument("--no-cov", action="store_true", help="Disable diff-coverage gate")
     parser.add_argument("--no-xdist", action="store_true", help="Force serial pytest execution (-n 0)")
     parser.add_argument("--timeout", type=int, default=None, help="Pytest timeout in seconds")
+    parser.add_argument(
+        "--pre-impl",
+        action="store_true",
+        help="Validate spec blueprint paths and wiring anchors before implementation",
+    )
     args = parser.parse_args()
+
+    # 0. Pre-implementation Spec Blueprint Gate
+    if args.pre_impl:
+        if not args.spec:
+            _exit_with_diags(
+                "pre-impl",
+                "FAIL | --pre-impl requires --spec <spec_file>",
+                [
+                    {
+                        "file": "",
+                        "line": 0,
+                        "error": "--pre-impl requires --spec argument",
+                        "fix_hint": "Pass --spec docs/specs/<feature>_spec.md",
+                    }
+                ],
+            )
+        code, diags = _check_pre_impl_spec(args.spec)
+        if code != 0:
+            _exit_with_diags(
+                "pre-impl",
+                f"FAIL | Pre-impl spec validation failed ({len(diags)} error(s))",
+                diags,
+            )
+        print("PASS | Spec blueprint paths and wiring anchors verified (pre-impl)")
+        print(_emit_json("PASS", "pre-impl", []), file=sys.stderr)
+        return
 
     # 1. File discovery from git if not explicitly passed
     if not args.files:

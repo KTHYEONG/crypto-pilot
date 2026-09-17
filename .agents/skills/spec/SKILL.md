@@ -35,7 +35,7 @@ Your output in `/spec` focuses strictly on:
    - Bulleted test scenarios: Given / When / Invariant (contract assertion, boundary, or fail-closed expectation).
 
 3. **Validation**:
-   Validate spec path and target directories:
+   Validate blueprint paths and caller anchors:
    ```bash
    uv run python tools/agent_skills/lean_check.py --spec docs/specs/<feature>_spec.md --pre-impl
    ```
@@ -49,7 +49,7 @@ Keep chat output ultra-compact:
 > 🚦 **하네스 검증**: `lean_check --pre-impl` **PASS**
 
 - 🎯 **작업 요약**: <구현할 핵심 기능 1줄 요약>
-- 📦 **작업 규모**: <N>개 파일 수정 · <N>개 테스트 작성 완료
+- 📦 **작업 규모**: <N>개 파일 대상 · <N>개 테스트 시나리오 명세
 
 ---
 👉 **다음 단계**: `/implement docs/specs/<feature>_spec.md`
