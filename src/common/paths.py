@@ -6,7 +6,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 FUTURES_DATA_DIR = DATA_DIR / "futures"
 SPOT_DATA_DIR = DATA_DIR / "spot"
-RESULTS_DIR: Path = BASE_DIR / "docs" / "results"
+DEPLOY_MHS_DIR: Path = BASE_DIR / "deploy" / "mhs"
+"""Repository delivery boundary for sealed MHS runtime artifacts."""
+BACKTESTS_DIR: Path = DATA_DIR / "backtests"
 
 
 def _safe_symbol(symbol: str) -> str:

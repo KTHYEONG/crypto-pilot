@@ -22,16 +22,28 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import src.mhs.evaluation.books as books
+import src.mhs.evaluation.committee as committee
+import src.mhs.evaluation.diagnostics as diagnostics
+import src.mhs.evaluation.folds as folds
 from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
 from src.mhs import statistics as _statistics
-from src.mhs.evaluation import (
+from src.mhs.discovery import select_horizon_by_discovery_qualification, yearly_net_t_diagnostic
+from src.mhs.evidence import (  # noqa: F401 -- legacy monkeypatch seam
+    effective_breadth,
+    resolved_anchored_folds,
+    year_restricted_correlation,
+)
+from src.mhs.execution import mhs_ledger_pnl
+from src.mhs.funding import funding_carry_execution_book
+from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol
+from src.mhs.params import (
     BOOK_BLEND_WEIGHTS,
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
     COMMITTEE_OOS_START,
     COMMITTEE_REGIME_ADAPTIVE_WINDOW,
-    DISCOVERY_END,
     DISCOVERY_GATE_TRANCHE_COUNT,
     DISCOVERY_MOMENTUM_CANDIDATES,
     DISCOVERY_REVERSAL_CANDIDATES,
@@ -39,28 +51,12 @@ from src.mhs.evaluation import (
     FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
     FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
-    QUALIFICATION_END,
-    books,
-    causal_market_beta,
-    committee,
-    diagnostics,
-    effective_breadth,
-    efficiency_ratio,
-    folds,
-    funding_carry_execution_book,
-    horizon_log_return,
-    mhs_ledger_pnl,
-    realized_vol,
-    select_horizon_by_discovery_qualification,
-    year_restricted_correlation,
-    yearly_net_t_diagnostic,
-)
-from src.mhs.evidence import (  # noqa: F401 -- legacy monkeypatch seam
-    resolved_anchored_folds,
 )
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
+from src.mhs.regime import causal_market_beta
 from src.mhs.telemetry import StageTelemetry
+from src.quant.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
 
 
 def _fold_weights_from_boundaries(

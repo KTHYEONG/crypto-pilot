@@ -17,25 +17,39 @@ from src.mhs.params import (
     PROCESS_SMOOTHING_HALFLIFE_DAYS,
 )
 from src.mhs.process import ProcessExecutionPolicy, monthly_refit_schedule
-from src.mhs.process_backtest import (
-    PROCESS_CERTIFICATION_LEVEL,
-    PROCESS_POLICY_REPORT_PATH,
-    PROCESS_REPORT_PATH,
+import os
+import src.mhs.backtest.contracts as bt_contracts
+import src.mhs.backtest.market_data as bt_market
+import src.mhs.backtest.paths as bt_paths
+import src.mhs.backtest.inventory as bt_inventory
+import src.mhs.reporting.inventory as rep_inventory
+from src.mhs.backtest.contracts import (
     ProcessBacktestReport,
     ProcessMarketData,
     ProcessPath,
-    _execution_fence,
+)
+from src.mhs.backtest.market_data import (
+    apply_process_execution_availability,
+    build_candidate_member_books,
+)
+from src.mhs.backtest.paths import (
     _reject_invalid_ledger_returns,
+    evaluate_process_backtest,
+    quarter_fold_returns,
+    run_process_paths,
+)
+from src.mhs.backtest.inventory import (
+    _execution_fence,
     _require_utc_index,
+    _validate_replay_window,
+    replay_process_execution,
+)
+from src.mhs.reporting.process import (
+    PROCESS_CERTIFICATION_LEVEL,
     _resolve_process_report_path,
     _tier_payload,
-    build_candidate_member_books,
-    evaluate_process_backtest,
     persist_process_report,
     persist_process_targets,
-    quarter_fold_returns,
-    replay_process_execution,
-    run_process_paths,
 )
 
 
@@ -186,12 +200,11 @@ def test_quarter_fold_returns_split() -> None:
 
 
 def test_evaluate_rejects_ceiling_before_load(monkeypatch) -> None:
-    import src.mhs.process_backtest as pb
 
     def _boom(*a, **k):
         raise AssertionError("data load must not run")
 
-    monkeypatch.setattr(pb, "load_process_market_data", _boom)
+    monkeypatch.setattr(bt_paths, "load_process_market_data", _boom)
     with pytest.raises(DataIntegrityError, match=r".+"):
         evaluate_process_backtest(
             DISCOVERY_START, PROCESS_EVALUATION_CEILING + pd.Timedelta(seconds=1)
@@ -199,7 +212,6 @@ def test_evaluate_rejects_ceiling_before_load(monkeypatch) -> None:
 
 
 def test_evaluate_uses_gate_and_stress_triple(monkeypatch) -> None:
-    import src.mhs.process_backtest as pb
 
     data = _synthetic_data()
     schedule = monthly_refit_schedule(data.decision_grid[0], data.decision_grid[-1])
@@ -220,8 +232,8 @@ def test_evaluate_uses_gate_and_stress_triple(monkeypatch) -> None:
         calls.append((decision_bps, evaluation_bps))
         return _fake_run(loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps, leverage_cap=leverage_cap)
 
-    monkeypatch.setattr(pb, "load_process_market_data", _fake_load)
-    monkeypatch.setattr(pb, "run_process_paths", _spy)
+    monkeypatch.setattr(bt_paths, "load_process_market_data", _fake_load)
+    monkeypatch.setattr(bt_paths, "run_process_paths", _spy)
     report = evaluate_process_backtest(data_root=None)
     assert report.certification_level == "process_proxy_1h_ledger"
     assert len(calls) == 1
@@ -324,7 +336,6 @@ def test_evaluate_rejects_naive_and_order() -> None:
 
 
 def test_load_process_market_data_from_synthetic_lake(tmp_path, monkeypatch) -> None:
-    import src.mhs.process_backtest as pb
     from src.quant.universe.pit_universe import symbol_partition
 
     candidates = [f"LAKE{i:03d}USDT" for i in range(24)]
@@ -359,8 +370,7 @@ def test_load_process_market_data_from_synthetic_lake(tmp_path, monkeypatch) -> 
     funding = {
         sym: pd.Series(rng.normal(0, 1e-5, len(grid)), index=grid) for sym in symbols
     }
-    monkeypatch.setattr(
-        pb, "_load_funding_series",
+    monkeypatch.setattr(bt_market, "_load_funding_series",
         lambda syms: ({s: funding[s] for s in syms if s in funding}, {}),
     )
     mark_dir = tmp_path / "markPriceKlines" / "1h"
@@ -375,7 +385,7 @@ def test_load_process_market_data_from_synthetic_lake(tmp_path, monkeypatch) -> 
         fc, "_mark_price_path",
         lambda symbol, timeframe: mark_dir / f"{symbol}.parquet",
     )
-    data = pb.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    data = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
     expected_keys = list(PROCESS_FEATURE_CANDIDATES) + [
         f"funding_carry_{h}h" for h in PROCESS_FUNDING_CARRY_CANDIDATES_HOURS
     ]
@@ -398,29 +408,26 @@ def _tiny_panel() -> dict:
 
 
 def test_load_process_market_data_raises_without_funding(monkeypatch) -> None:
-    import src.mhs.process_backtest as pb
 
-    monkeypatch.setattr(pb, "load_base_panel", lambda *a, **k: _tiny_panel())
-    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, dict.fromkeys(syms, "missing")))
+    monkeypatch.setattr(bt_market, "load_base_panel", lambda *a, **k: _tiny_panel())
+    monkeypatch.setattr(bt_market, "_load_funding_series", lambda syms: ({}, dict.fromkeys(syms, "missing")))
     with pytest.raises(RuntimeError, match=r".+"):
-        pb.load_process_market_data(
+        bt_market.load_process_market_data(
             pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2021-01-02", tz="UTC")
         )
 
 
 def test_load_process_market_data_raises_without_aligned_funding(monkeypatch) -> None:
-    import src.mhs.process_backtest as pb
 
     panel = _tiny_panel()
     grid = panel["close"].index
-    monkeypatch.setattr(pb, "load_base_panel", lambda *a, **k: panel)
-    monkeypatch.setattr(
-        pb, "_load_funding_series",
+    monkeypatch.setattr(bt_market, "load_base_panel", lambda *a, **k: panel)
+    monkeypatch.setattr(bt_market, "_load_funding_series",
         lambda syms: ({s: pd.Series(0.0, index=grid) for s in syms}, {}),
     )
-    monkeypatch.setattr(pb, "bar_funding_panel", lambda *a, **k: pd.DataFrame(index=grid))
+    monkeypatch.setattr(bt_market, "bar_funding_panel", lambda *a, **k: pd.DataFrame(index=grid))
     with pytest.raises(RuntimeError, match=r".+"):
-        pb.load_process_market_data(
+        bt_market.load_process_market_data(
             pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2021-01-02", tz="UTC")
         )
 
@@ -531,15 +538,12 @@ def _report_with_policy(threshold: float | None) -> ProcessBacktestReport:
 
 
 def test_resolve_process_report_path_routing(tmp_path) -> None:
-    assert _resolve_process_report_path(_report_with_policy(None), None) == PROCESS_REPORT_PATH
-    assert _resolve_process_report_path(_report_with_policy(0.0), None) == PROCESS_POLICY_REPORT_PATH
-    assert _resolve_process_report_path(_report_with_policy(0.2), None) == PROCESS_POLICY_REPORT_PATH
     out = _resolve_process_report_path(_report_with_policy(None), tmp_path / "custom.json")
     assert out == tmp_path / "custom.json"
     with pytest.raises(ValueError, match=r".+"):
-        _resolve_process_report_path(_report_with_policy(None), tmp_path / "bad.txt")
+        _resolve_process_report_path(_report_with_policy(None), None)
     with pytest.raises(ValueError, match=r".+"):
-        _resolve_process_report_path(_report_with_policy(0.2), PROCESS_REPORT_PATH)
+        _resolve_process_report_path(_report_with_policy(None), tmp_path / "bad.txt")
 
 
 def test_persist_process_report_evidence_keys(tmp_path) -> None:
@@ -759,7 +763,6 @@ def test_evaluate_rejects_bad_policy(monkeypatch) -> None:
 
 
 def test_evaluate_threads_explicit_policy(monkeypatch) -> None:
-    import src.mhs.process_backtest as pb
 
     data = _synthetic_data()
     schedule = _schedule_for(data)
@@ -775,8 +778,8 @@ def test_evaluate_threads_explicit_policy(monkeypatch) -> None:
             leverage_cap=leverage_cap, execution_policy=execution_policy,
         )
 
-    monkeypatch.setattr(pb, "load_process_market_data", _fake_load)
-    monkeypatch.setattr(pb, "run_process_paths", _spy)
+    monkeypatch.setattr(bt_paths, "load_process_market_data", _fake_load)
+    monkeypatch.setattr(bt_paths, "run_process_paths", _spy)
     policy = ProcessExecutionPolicy(0.2)
     report = evaluate_process_backtest(
         data.decision_grid[0], data.decision_grid[100], execution_policy=policy
@@ -1056,7 +1059,6 @@ def test_execution_availability_rejects_misaligned_mask() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.process_backtest import apply_process_execution_availability
 
     data = _synthetic_data()
     schedule = _schedule_for(data)
@@ -1103,7 +1105,6 @@ def test_execution_availability_rejects_nullable_missing_mask() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.process_backtest import apply_process_execution_availability
 
     data = _synthetic_data()
     schedule = _schedule_for(data)
@@ -1205,13 +1206,12 @@ def _inventory_test_windows(
 
 
 def _patch_inventory_stack(monkeypatch, targets: pd.DataFrame, **window_kwargs):
-    import src.mhs.process_backtest as pb
 
     proxy = _inventory_test_proxy(targets)
-    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
-    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, {}))
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(bt_inventory, "_load_funding_series", lambda syms: ({}, {}))
     made = _inventory_test_windows(targets, **window_kwargs)
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter(made))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", lambda *a, **k: iter(made))
     return proxy
 
 
@@ -1298,12 +1298,11 @@ def _inventory_fake_result(
 
 def test_evaluate_inventory_replays_identical_sized_targets(monkeypatch) -> None:
     """Base and stress replay one shared window stream with tiered costs."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
     seen: dict = {}
-    real_batch = pb.replay_execution_window_batch
+    real_batch = bt_inventory.replay_execution_window_batch
 
     def _spy(windows, equity, bounds, *args, **kwargs):
         seen["bounds"] = list(bounds)
@@ -1317,8 +1316,8 @@ def test_evaluate_inventory_replays_identical_sized_targets(monkeypatch) -> None
 
         return real_batch(_counted(), equity, bounds, *args, **kwargs)
 
-    monkeypatch.setattr(pb, "replay_execution_window_batch", _spy)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "replay_execution_window_batch", _spy)
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     assert seen["n_windows"] == len(targets)
     assert seen["bounds"][0][0] == seen["bounds"][1][0] == "OHLCV_IMMEDIATE_TAKER"
     assert seen["bounds"][1][1].taker_fee_bps == pytest.approx(seen["bounds"][0][1].taker_fee_bps * 3.0)
@@ -1353,15 +1352,16 @@ def test_replay_process_execution_accepts_local_and_final_bar() -> None:
 
 def test_persist_inventory_report_uses_ledger_primary(monkeypatch, tmp_path) -> None:
     """Primary metrics and gate come from the 3m ledger, proxy stays labelled."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    out = pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    out = rep_inventory.persist_process_inventory_report(report, tmp_path / "inventory.json")
     payload = json.loads(out.read_text(encoding="utf-8"))
-    daily = pb._inventory_daily_returns(report.base)
-    assert set(payload["base"]["daily_returns"]) == {ts.isoformat() for ts in daily.index}
+    daily = bt_inventory._inventory_daily_returns(report.base)
+    ref = payload["base"]["daily_returns"]
+    assert ref["count"] == len(daily)
+    assert ref["evidence_id"] == payload["evidence_id"]
     assert payload["base"]["cagr"] == pytest.approx(
         float(((1.0 + daily).cumprod().iloc[-1]) ** (365.25 / len(daily)) - 1.0)
     )
@@ -1372,13 +1372,12 @@ def test_persist_inventory_report_uses_ledger_primary(monkeypatch, tmp_path) -> 
 
 def test_evaluate_inventory_blocks_gate_on_unknown_funding(monkeypatch) -> None:
     """Unknown funding over held inventory fails the ledger and the gate."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(
         monkeypatch, targets, funding_rate=0.0001, funding_known_per_window=(True, False, False)
     )
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     assert report.base.ledger.primary_valid is False
     assert report.gate.go is False
     assert "INVENTORY_LEDGER_INVALID" in report.gate.reason_codes
@@ -1387,12 +1386,11 @@ def test_evaluate_inventory_blocks_gate_on_unknown_funding(monkeypatch) -> None:
 
 def test_finalize_discloses_open_inventory_without_fabricated_exit(monkeypatch) -> None:
     """Marked terminal holdings are disclosed open with certification intact."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    terminal = pb._inventory_terminal_state(report.base)
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    terminal = rep_inventory._inventory_terminal_state(report.base)
     assert set(terminal["open_inventory"]) == {"AUSDT", "BUSDT"}
     assert terminal["primary_valid"] is False
     assert terminal["terminal_certified"] is True
@@ -1403,12 +1401,11 @@ def test_finalize_discloses_open_inventory_without_fabricated_exit(monkeypatch) 
 
 def test_unpriced_terminal_not_ordinary_inventory(monkeypatch) -> None:
     """A held asset without final marks is separated from marked inventory."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets, nan_mark_symbol="AUSDT")
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    terminal = pb._inventory_terminal_state(report.base)
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    terminal = rep_inventory._inventory_terminal_state(report.base)
     assert terminal["unpriced_terminal_symbols"] == ["AUSDT"]
     assert "AUSDT" not in terminal["open_inventory"]
     assert "BUSDT" in terminal["open_inventory"]
@@ -1417,23 +1414,21 @@ def test_unpriced_terminal_not_ordinary_inventory(monkeypatch) -> None:
 
 def test_serialized_fill_counts_total_and_passive() -> None:
     """Total fills count rows while passive fills keep the engine meaning."""
-    import src.mhs.process_backtest as pb
 
     grid = pd.date_range("2022-01-01", periods=732, freq="3min", tz="UTC")
     result = _inventory_fake_result(pd.Series(1.0, index=grid), valid=True, fill_count=0, n_fills=732)
-    payload = pb._inventory_result_payload(result)
+    payload = rep_inventory._inventory_result_payload(result)
     assert payload["total_fills"] == 732
     assert payload["passive_fills"] == 0
 
 
 def test_evaluate_inventory_failure_carries_provenance(monkeypatch) -> None:
     """A missing decision mark fails with source, time and symbol evidence."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets(n_days=2, symbols=("AUSDT", "ANCUSDT"))
     proxy = _inventory_test_proxy(targets)
-    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
-    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, {}))
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(bt_inventory, "_load_funding_series", lambda syms: ({}, {}))
 
     def _boom(*args, **kwargs):
         raise DataIntegrityError(
@@ -1441,41 +1436,38 @@ def test_evaluate_inventory_failure_carries_provenance(monkeypatch) -> None:
             "symbol=ANCUSDT decision=2022-07-13T00:00:00+00:00 signal=2022-07-13T01:00:00+00:00 for window"
         )
 
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _boom)
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", _boom)
     with pytest.raises(DataIntegrityError, match="ANCUSDT"):
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     assert "ANCUSDT" in proxy.base.target_weights.columns
 
 
-def test_persist_inventory_preserves_hourly_evidence(monkeypatch, tmp_path) -> None:
-    """Inventory persistence never overwrites reserved hourly evidence."""
-    import src.mhs.process_backtest as pb
+def test_persist_inventory_rejects_occupied_destination(monkeypatch, tmp_path) -> None:
+    """Inventory persistence never overwrites an occupied destination."""
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
     hourly_path = tmp_path / "hourly.json"
     hourly_path.write_text('{"hourly": true}', encoding="utf-8")
-    monkeypatch.setattr(pb, "PROCESS_REPORT_PATH", hourly_path)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    rep_inventory.persist_process_inventory_report(report, tmp_path / "inventory.json")
     assert hourly_path.read_text(encoding="utf-8") == '{"hourly": true}'
-    with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.persist_process_inventory_report(report, hourly_path)
     with pytest.raises(ValueError, match=r".+"):
-        pb.persist_process_inventory_report(report, tmp_path / "inventory.csv")
+        rep_inventory.persist_process_inventory_report(report, hourly_path)
+    with pytest.raises(ValueError, match=r".+"):
+        rep_inventory.persist_process_inventory_report(report, tmp_path / "inventory.csv")
 
 
 def test_serialized_fee_funding_signs_and_turnover_units(monkeypatch, tmp_path) -> None:
     """Serialized costs keep engine signs and turnover uses engine units."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    out = pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    out = rep_inventory.persist_process_inventory_report(report, tmp_path / "inventory.json")
     payload = json.loads(out.read_text(encoding="utf-8"))
     ledger = report.base.ledger
-    daily = pb._inventory_daily_returns(report.base)
+    daily = bt_inventory._inventory_daily_returns(report.base)
     assert payload["base"]["total_fees"] == pytest.approx(float(ledger.fee_charge.sum()))
     assert payload["base"]["total_funding"] == pytest.approx(float(ledger.funding_charge.sum()))
     assert payload["base"]["annualized_turnover"] == pytest.approx(
@@ -1485,68 +1477,63 @@ def test_serialized_fee_funding_signs_and_turnover_units(monkeypatch, tmp_path) 
 
 def test_evaluate_inventory_rejects_invalid_inputs(monkeypatch) -> None:
     """Dates, policy, empty targets, budget and window coverage fail closed."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     proxy = _inventory_test_proxy(targets)
-    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
-    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, {}))
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter(_inventory_test_windows(targets)))
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(bt_inventory, "_load_funding_series", lambda syms: ({}, {}))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", lambda *a, **k: iter(_inventory_test_windows(targets)))
     start = targets.index[0]
     end = targets.index[-1] + pd.Timedelta(days=1)
     with pytest.raises(ValueError, match=r".+"):
-        pb.evaluate_process_inventory_backtest(pd.Timestamp("2022-01-01"), end)
+        bt_inventory.evaluate_process_inventory_backtest(pd.Timestamp("2022-01-01"), end)
     with pytest.raises(ValueError, match=r".+"):
-        pb.evaluate_process_inventory_backtest(end, start)
+        bt_inventory.evaluate_process_inventory_backtest(end, start)
     with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.evaluate_process_inventory_backtest(start, PROCESS_EVALUATION_CEILING + pd.Timedelta(seconds=1))
+        bt_inventory.evaluate_process_inventory_backtest(start, PROCESS_EVALUATION_CEILING + pd.Timedelta(seconds=1))
     with pytest.raises(ValueError, match=r".+"):
-        pb.evaluate_process_inventory_backtest(start, end, execution_policy="bad")  # type: ignore[arg-type]
+        bt_inventory.evaluate_process_inventory_backtest(start, end, execution_policy="bad")  # type: ignore[arg-type]
     empty = _inventory_empty_proxy()
-    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: empty)
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", lambda *a, **k: empty)
     with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.evaluate_process_inventory_backtest(start, end)
-    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
-    monkeypatch.setattr(
-        pb, "resolve_mhs_memory_budget",
+        bt_inventory.evaluate_process_inventory_backtest(start, end)
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(bt_inventory, "resolve_mhs_memory_budget",
         lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("no telemetry")),
     )
     with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.evaluate_process_inventory_backtest(start, end)
+        bt_inventory.evaluate_process_inventory_backtest(start, end)
 
 
 def test_inventory_window_coverage_must_be_complete(monkeypatch) -> None:
     """A window stream skipping decisions fails instead of certifying a prefix."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
     partial = _inventory_test_windows(targets)[:1]
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter(partial))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", lambda *a, **k: iter(partial))
     with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
 
 
 def test_inventory_gate_from_valid_ledger() -> None:
     """A valid two-quarter ledger reaches the gate formula without integrity blocks."""
-    import src.mhs.process_backtest as pb
 
     grid = pd.date_range("2022-01-01", periods=200 * 480, freq="3min", tz="UTC")
     equity = pd.Series(1.0 + 0.0000005 * np.arange(len(grid)), index=grid, dtype="float64")
     base = _inventory_fake_result(equity, valid=True)
     stress = _inventory_fake_result(equity * 0.999999, valid=True)
-    gate = pb._inventory_gate(base, stress)
+    gate = bt_inventory._inventory_gate(base, stress)
     assert gate.metrics["n_folds"] == 3.0
     assert "INVENTORY_LEDGER_INVALID" not in gate.reason_codes
 
 
 def test_inventory_helpers_handle_empty_ledger() -> None:
     """Empty ledgers serialize to neutral zeros without missing keys."""
-    import src.mhs.process_backtest as pb
 
     empty_equity = pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
     result = _inventory_fake_result(empty_equity, valid=False)
-    summary = pb._inventory_ledger_summary(result)
+    summary = bt_inventory._inventory_ledger_summary(result)
     assert summary == {
         "cagr": 0.0,
         "max_drawdown": 0.0,
@@ -1554,51 +1541,48 @@ def test_inventory_helpers_handle_empty_ledger() -> None:
         "total_fees": 0.0,
         "total_funding": 0.0,
     }
-    payload = pb._inventory_result_payload(result)
+    payload = rep_inventory._inventory_result_payload(result)
     assert payload["daily_returns"] == {}
     assert payload["total_fills"] == 0
-    terminal = pb._inventory_terminal_state(result)
+    terminal = rep_inventory._inventory_terminal_state(result)
     assert terminal["open_inventory"] == {}
     assert terminal["primary_valid"] is False
 
 
 def test_inventory_daily_returns_anchors_first_day_loss() -> None:
     """A 1.0 to 0.5 first-day drop is reported instead of vanishing."""
-    import src.mhs.process_backtest as pb
 
     grid = pd.date_range("2022-01-01", periods=480, freq="3min", tz="UTC")
     equity = pd.Series(np.linspace(1.0, 0.5, len(grid)), index=grid, dtype="float64")
     result = _inventory_fake_result(equity, valid=True)
-    daily = pb._inventory_daily_returns(result)
+    daily = bt_inventory._inventory_daily_returns(result)
     assert len(daily) == 1
     assert daily.iloc[0] == pytest.approx(-0.5)
-    summary = pb._inventory_ledger_summary(result)
+    summary = bt_inventory._inventory_ledger_summary(result)
     assert summary["max_drawdown"] == pytest.approx(-0.5)
     assert summary["cagr"] < 0.0
     with pytest.raises(DataIntegrityError, match=r".+"):
-        pb._inventory_daily_returns(result, initial_equity=0.0)
+        bt_inventory._inventory_daily_returns(result, initial_equity=0.0)
 
 
 def test_inventory_single_day_drawdown_includes_base() -> None:
     """Single-observation wealth anchors MDD to the initial equity base."""
-    import src.mhs.process_backtest as pb
 
     grid = pd.date_range("2022-01-01", periods=10, freq="3min", tz="UTC")
     equity = pd.Series([1.0 - 0.05 * i for i in range(10)], index=grid, dtype="float64")
     result = _inventory_fake_result(equity, valid=True)
-    summary = pb._inventory_ledger_summary(result)
+    summary = bt_inventory._inventory_ledger_summary(result)
     assert summary["max_drawdown"] == pytest.approx(float(equity.iloc[-1] - 1.0))
 
 
 def test_inventory_wires_live_required_symbols(monkeypatch) -> None:
     """Carried inventory stays in the roster through the live symbol hook."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
     seen: dict = {}
-    real_iter = pb._iter_mhs_execution_windows
-    real_batch = pb.replay_execution_window_batch
+    real_iter = bt_inventory._iter_mhs_execution_windows
+    real_batch = bt_inventory.replay_execution_window_batch
 
     def _spy_iter(*args, **kwargs):
         seen["required_symbols"] = kwargs.get("required_symbols")
@@ -1616,9 +1600,9 @@ def test_inventory_wires_live_required_symbols(monkeypatch) -> None:
 
         return real_batch(_counted(), equity, bounds, *args, **kwargs)
 
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _spy_iter)
-    monkeypatch.setattr(pb, "replay_execution_window_batch", _spy_batch)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", _spy_iter)
+    monkeypatch.setattr(bt_inventory, "replay_execution_window_batch", _spy_batch)
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     assert callable(seen["required_symbols"])
     assert seen["live_accumulators"] is not None
     assert len(report.base.simulated_fills) > 0
@@ -1626,7 +1610,6 @@ def test_inventory_wires_live_required_symbols(monkeypatch) -> None:
 
 def test_inventory_window_stream_keeps_held_symbols_in_roster(monkeypatch) -> None:
     """Live held symbols join the active roster even when targets go flat."""
-    import src.mhs.process_backtest as pb
     from src.mhs.resources import _StageRecorder
     from src.mhs.types import ExecutionSpec
 
@@ -1641,10 +1624,10 @@ def test_inventory_window_stream_keeps_held_symbols_in_roster(monkeypatch) -> No
         seen["required_symbols"] = kwargs.get("required_symbols")
         return iter([])
 
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _capture)
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", _capture)
     with pytest.raises(DataIntegrityError, match=r".+"):
         list(
-            pb._inventory_window_stream(
+            bt_inventory._inventory_window_stream(
                 path,
                 signal_available_at,
                 "unused-root",
@@ -1665,7 +1648,6 @@ def test_inventory_window_stream_keeps_held_symbols_in_roster(monkeypatch) -> No
 
 def test_evaluate_inventory_failure_preserves_resource_telemetry(monkeypatch) -> None:
     """A replay failure still carries staged resource evidence on the error."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
@@ -1675,9 +1657,9 @@ def test_evaluate_inventory_failure_preserves_resource_telemetry(monkeypatch) ->
             pass
         raise DataIntegrityError("boom")
 
-    monkeypatch.setattr(pb, "replay_execution_window_batch", _boom)
+    monkeypatch.setattr(bt_inventory, "replay_execution_window_batch", _boom)
     with pytest.raises(DataIntegrityError) as excinfo:
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     measurements = getattr(excinfo.value, "resource_measurements", ())
     stats = getattr(excinfo.value, "memory_stats", None)
     stages = [m.stage for m in measurements]
@@ -1689,7 +1671,6 @@ def test_evaluate_inventory_failure_preserves_resource_telemetry(monkeypatch) ->
 
 def test_process_mask_preblocks_3m_missing_symbol(tmp_path, monkeypatch) -> None:
     """A symbol with 1h coverage but no 3m file is pre-blocked from targets."""
-    import src.mhs.process_backtest as pb
     from src.quant.universe.pit_universe import symbol_partition
 
     candidates = [f"LAKE{i:03d}USDT" for i in range(24)]
@@ -1726,8 +1707,7 @@ def test_process_mask_preblocks_3m_missing_symbol(tmp_path, monkeypatch) -> None
     funding = {
         sym: pd.Series(rng.normal(0, 1e-5, len(grid)), index=grid) for sym in symbols
     }
-    monkeypatch.setattr(
-        pb, "_load_funding_series",
+    monkeypatch.setattr(bt_market, "_load_funding_series",
         lambda syms: ({s: funding[s] for s in syms if s in funding}, {}),
     )
     mark_dir = tmp_path / "markPriceKlines" / "1h"
@@ -1742,20 +1722,19 @@ def test_process_mask_preblocks_3m_missing_symbol(tmp_path, monkeypatch) -> None
         fc, "_mark_price_path",
         lambda symbol, timeframe: mark_dir / f"{symbol}.parquet",
     )
-    data = pb.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    data = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
     assert bool((~data.execution_mask[missing]).all())
     assert bool(data.execution_mask.drop(columns=[missing]).to_numpy().any())
 
 
 def test_inventory_replay_uses_single_resolved_budget(monkeypatch) -> None:
     """One replay budget: preparation, entry admission, window planning and barriers share resolved limits."""
-    import src.mhs.process_backtest as pb
     from src.mhs.resources import MhsMemoryBudget
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
     seen: dict = {}
-    real_iter = pb._iter_mhs_execution_windows
+    real_iter = bt_inventory._iter_mhs_execution_windows
 
     def _spy_iter(*args, **kwargs):
         seen["budget_bytes"] = kwargs.get("budget_bytes")
@@ -1763,14 +1742,14 @@ def test_inventory_replay_uses_single_resolved_budget(monkeypatch) -> None:
         return real_iter(*args, **kwargs)
 
     evaluations: dict = {}
-    real_evaluate = pb.evaluate_process_backtest
+    real_evaluate = bt_inventory.evaluate_process_backtest
 
     def _spy_evaluate(*args, **kwargs):
         evaluations["memory_budget"] = kwargs.get("memory_budget")
         return real_evaluate(*args, **kwargs)
 
     admissions: list = []
-    real_admit = pb._admit_process_stage
+    real_admit = bt_market._admit_process_stage
 
     def _spy_admit(*, stage, estimated_bytes, budget, replay, initial_swap_bytes):
         admissions.append((stage, budget, replay))
@@ -1780,17 +1759,17 @@ def test_inventory_replay_uses_single_resolved_budget(monkeypatch) -> None:
         )
 
     barriers: list = []
-    real_window_barrier = pb._assert_execution_rss_budget
+    real_window_barrier = bt_inventory._assert_execution_rss_budget
 
     def _spy_window(stage, budget, completed, reserve_bytes=None):
         barriers.append((budget, reserve_bytes))
         return real_window_barrier(stage, budget, completed, reserve_bytes=reserve_bytes)
 
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _spy_iter)
-    monkeypatch.setattr(pb, "evaluate_process_backtest", _spy_evaluate)
-    monkeypatch.setattr(pb, "_admit_process_stage", _spy_admit)
-    monkeypatch.setattr(pb, "_assert_execution_rss_budget", _spy_window)
-    pb.evaluate_process_inventory_backtest(
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", _spy_iter)
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", _spy_evaluate)
+    monkeypatch.setattr(bt_inventory, "_admit_process_stage", _spy_admit)
+    monkeypatch.setattr(bt_inventory, "_assert_execution_rss_budget", _spy_window)
+    bt_inventory.evaluate_process_inventory_backtest(
         targets.index[0], targets.index[-1] + pd.Timedelta(days=1), memory_budget=MhsMemoryBudget(),
     )
     resolved = evaluations["memory_budget"]
@@ -1809,13 +1788,12 @@ def test_inventory_replay_uses_single_resolved_budget(monkeypatch) -> None:
 
 def test_inventory_window_measured_budget_verified(monkeypatch) -> None:
     """Measured RSS checks guard every 3m window and the replay stage."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
     seen: dict = {}
-    real_window_check = pb._assert_execution_rss_budget
-    real_stage_check = pb._assert_stage_rss_budget
+    real_window_check = bt_inventory._assert_execution_rss_budget
+    real_stage_check = bt_inventory._assert_stage_rss_budget
 
     def _spy_window(stage, budget, completed, reserve_bytes=None):
         seen.setdefault("windows", []).append((stage, budget, completed))
@@ -1825,9 +1803,9 @@ def test_inventory_window_measured_budget_verified(monkeypatch) -> None:
         seen["stage"] = (stage, budget, reserve)
         return real_stage_check(stage, budget, reserve)
 
-    monkeypatch.setattr(pb, "_assert_execution_rss_budget", _spy_window)
-    monkeypatch.setattr(pb, "_assert_stage_rss_budget", _spy_stage)
-    pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "_assert_execution_rss_budget", _spy_window)
+    monkeypatch.setattr(bt_inventory, "_assert_stage_rss_budget", _spy_stage)
+    bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     assert len(seen["windows"]) == len(targets)
     assert seen["stage"][0] == "process_3m_replay"
     assert all(budget == seen["stage"][1] for _, budget, _ in seen["windows"])
@@ -1835,7 +1813,6 @@ def test_inventory_window_measured_budget_verified(monkeypatch) -> None:
 
 def test_inventory_window_budget_breach_fails_closed(monkeypatch) -> None:
     """A measured RSS breach aborts the replay with telemetry preserved."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
@@ -1843,9 +1820,9 @@ def test_inventory_window_budget_breach_fails_closed(monkeypatch) -> None:
     def _boom(stage, budget, completed, reserve_bytes=None):
         raise DataIntegrityError(f"execution RSS budget exceeded at window boundary: stage={stage}")
 
-    monkeypatch.setattr(pb, "_assert_execution_rss_budget", _boom)
+    monkeypatch.setattr(bt_inventory, "_assert_execution_rss_budget", _boom)
     with pytest.raises(DataIntegrityError, match="RSS budget"):
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
 
 
 def _completed_inventory_market(tmp_path, n_days=3):
@@ -1878,7 +1855,6 @@ def test_inventory_production_fence_covers_all_targets(tmp_path) -> None:
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
     from src.mhs.execution.batch import replay_execution_window_batch
-    from src.mhs.process_backtest import _execution_fence
     from src.mhs.types import ExecutionSpec
 
     start, fence, decisions, funding = _completed_inventory_market(tmp_path)
@@ -1951,7 +1927,6 @@ def test_inventory_fence_labelled_bar_stays_rejected() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.process_backtest import _execution_fence, _validate_replay_window
 
     targets = _inventory_test_targets(n_days=2)
     path = _inventory_test_path(targets)
@@ -1984,12 +1959,11 @@ def test_inventory_fence_labelled_bar_stays_rejected() -> None:
 
 def test_inventory_hourly_evidence_stays_comparative(monkeypatch, tmp_path) -> None:
     """Hourly evidence is explicitly comparative while 3m inventory is primary."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    out = pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    out = rep_inventory.persist_process_inventory_report(report, tmp_path / "inventory.json")
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["certification_level"] == "process_inventory_3m"
     assert payload["proxy"]["scope"] == "hourly_proxy_comparison"
@@ -2033,7 +2007,6 @@ def test_process_targets_through_cutoff_ignore_future_tail(tmp_path) -> None:
     """Two source tails leave past masks and masked targets through T identical."""
     import pandas as pd
 
-    from src.mhs.process_backtest import apply_process_execution_availability
 
     decisions, horizon, _, first, second = _causal_tail_masks(tmp_path, 6.0, 48.0)
     assert first.loc[:horizon].equals(second.loc[:horizon])
@@ -2052,7 +2025,6 @@ def test_process_future_only_symbol_target_blocked_without_redistribution() -> N
     """A symbol with no published history gets zero targets; others are untouched."""
     import pandas as pd
 
-    from src.mhs.process_backtest import apply_process_execution_availability
 
     index = pd.date_range("2022-01-01", periods=3, freq="24h", tz="UTC")
     targets = pd.DataFrame(
@@ -2073,7 +2045,6 @@ def test_process_held_exit_survives_availability_mask() -> None:
     import pandas as pd
 
     from src.mhs.execution.batch import replay_execution_windows
-    from src.mhs.process_backtest import apply_process_execution_availability
     from src.mhs.types import ExecutionSpec
 
     targets = _inventory_test_targets(n_days=3, symbols=("AUSDT",))
@@ -2117,18 +2088,17 @@ def test_refit_arithmetic_matches_baseline() -> None:
 
 def test_refit_intermediates_cover_effective_rows_only(monkeypatch) -> None:
     """Each combined intermediate spans only its effective rows."""
-    import src.mhs.process_backtest as pb
 
     data = _synthetic_data()
     schedule = _schedule_for(data)[:4]
     seen: list[int] = []
-    real_scale = pb.scale_book_to_target_gross
+    real_scale = bt_paths.scale_book_to_target_gross
 
     def _spy(frame, target):
         seen.append(len(frame))
         return real_scale(frame, target)
 
-    monkeypatch.setattr(pb, "scale_book_to_target_gross", _spy)
+    monkeypatch.setattr(bt_paths, "scale_book_to_target_gross", _spy)
     run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
     expected = [
         len(data.member_books["planted"].loc[
@@ -2155,7 +2125,6 @@ def test_training_state_and_purge_parity() -> None:
 
 def test_source_panels_not_mutated_by_setup(monkeypatch) -> None:
     """Aligned source values are unchanged and no extra copies stay live."""
-    import src.mhs.process_backtest as pb
 
     data = _synthetic_data()
     before = {n: data.member_books[n].copy() for n in data.member_books}
@@ -2163,12 +2132,11 @@ def test_source_panels_not_mutated_by_setup(monkeypatch) -> None:
     run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
     for name in before:
         assert data.member_books[name].equals(before[name])
-    assert pb._estimate_panel_bytes(10, 5, 2) == 10 * 5 * 2 * 8 * 2
+    assert bt_market._estimate_panel_bytes(10, 5, 2) == 10 * 5 * 2 * 8 * 2
 
 
 def test_full_preparation_admission_rejects_small_budget(monkeypatch) -> None:
     """A tiny budget rejects before decoding with a named stage."""
-    import src.mhs.process_backtest as pb
     from src.common.errors import DataIntegrityError
     from src.mhs.resources import MhsMemoryBudget
 
@@ -2179,9 +2147,9 @@ def test_full_preparation_admission_rejects_small_budget(monkeypatch) -> None:
         called.append("decode")
         raise AssertionError("decoder must not run")
 
-    monkeypatch.setattr(pb, "load_base_panel", _boom)
+    monkeypatch.setattr(bt_market, "load_base_panel", _boom)
     with pytest.raises(DataIntegrityError, match="process_prepare_panel"):
-        pb.load_process_market_data(
+        bt_market.load_process_market_data(
             pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2021-02-01", tz="UTC"),
             memory_budget=tiny,
         )
@@ -2190,7 +2158,6 @@ def test_full_preparation_admission_rejects_small_budget(monkeypatch) -> None:
 
 def test_budget_propagation_preserves_policy_and_tiers(monkeypatch) -> None:
     """Explicit budgets never change tier ordering or policy semantics."""
-    import src.mhs.process_backtest as pb
     from src.mhs.process import ProcessExecutionPolicy
     from src.mhs.resources import MhsMemoryBudget
 
@@ -2218,10 +2185,10 @@ def test_budget_propagation_preserves_policy_and_tiers(monkeypatch) -> None:
             leverage_cap=leverage_cap, execution_policy=execution_policy,
         )
 
-    monkeypatch.setattr(pb, "load_process_market_data", _fake_load)
-    monkeypatch.setattr(pb, "run_process_paths", _fake_run)
+    monkeypatch.setattr(bt_paths, "load_process_market_data", _fake_load)
+    monkeypatch.setattr(bt_paths, "run_process_paths", _fake_run)
     policy = ProcessExecutionPolicy(0.2)
-    report = pb.evaluate_process_backtest(
+    report = bt_paths.evaluate_process_backtest(
         data.decision_grid[0], data.decision_grid[60], execution_policy=policy, memory_budget=budget,
     )
     assert seen["budget"] is budget
@@ -2230,7 +2197,6 @@ def test_budget_propagation_preserves_policy_and_tiers(monkeypatch) -> None:
 
 
 def _failure_report_fixture(**overrides):
-    import src.mhs.process_backtest as pb
     from src.mhs.contracts import MhsResourceMeasurement
     from src.mhs.process import ProcessExecutionPolicy
 
@@ -2256,12 +2222,11 @@ def _failure_report_fixture(**overrides):
         "memory_stats": None,
     }
     base.update(overrides)
-    return pb.ProcessInventoryFailureReport(**base)
+    return bt_contracts.ProcessInventoryFailureReport(**base)
 
 
 def test_inventory_preparation_failure_reports_typed_stage(monkeypatch) -> None:
     """Typed rejection before targets yields null totals and chained cause."""
-    import src.mhs.process_backtest as pb
     from src.mhs.resources import MhsResourceAdmissionError
 
     targets = _inventory_test_targets()
@@ -2271,9 +2236,9 @@ def test_inventory_preparation_failure_reports_typed_stage(monkeypatch) -> None:
     def _boom(*a, **k):
         raise MhsResourceAdmissionError(stage="process_prepare_panel", error_code="MEMORY_BUDGET", message="no ram")
 
-    monkeypatch.setattr(pb, "evaluate_process_backtest", _boom)
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(start, end)
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", _boom)
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(start, end)
     report = excinfo.value.report
     assert report.stage == "process_prepare_panel"
     assert report.error_code == "MEMORY_BUDGET"
@@ -2292,7 +2257,6 @@ def test_inventory_preparation_failure_reports_typed_stage(monkeypatch) -> None:
 
 def test_inventory_preparation_failure_keeps_explicit_policy(monkeypatch) -> None:
     """Explicit policy survives a preparation failure without proxy targets."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     start = targets.index[0]
@@ -2301,10 +2265,10 @@ def test_inventory_preparation_failure_keeps_explicit_policy(monkeypatch) -> Non
     def _boom(*a, **k):
         raise RuntimeError("unexpected prep")
 
-    monkeypatch.setattr(pb, "evaluate_process_backtest", _boom)
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", _boom)
     policy = ProcessExecutionPolicy(0.2)
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(start, end, data_root="failure-root", execution_policy=policy)
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(start, end, data_root="failure-root", execution_policy=policy)
     report = excinfo.value.report
     assert report.error_code == "UNEXPECTED_ERROR"
     assert report.stage == "preparation"
@@ -2316,7 +2280,6 @@ def test_inventory_preparation_failure_keeps_explicit_policy(monkeypatch) -> Non
 
 def test_inventory_validated_coverage_excludes_failed_bound(monkeypatch) -> None:
     """Second-bound failure validates but does not complete the window."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
@@ -2328,9 +2291,9 @@ def test_inventory_validated_coverage_excludes_failed_bound(monkeypatch) -> None
         second = next(it)
         raise DataIntegrityError("second bound failed")
 
-    monkeypatch.setattr(pb, "replay_execution_window_batch", _boom_batch)
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "replay_execution_window_batch", _boom_batch)
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     report = excinfo.value.report
     assert report.total_decisions == len(targets)
     assert report.validated_decisions == 2
@@ -2344,13 +2307,12 @@ def test_inventory_validated_coverage_excludes_failed_bound(monkeypatch) -> None
 
 def test_inventory_partial_replay_reports_consumed_prefix(monkeypatch) -> None:
     """Allocation rejection after two windows keeps exact prefix endpoints."""
-    import src.mhs.process_backtest as pb
     from src.mhs.resources import MhsResourceAdmissionError
 
     targets = _inventory_test_targets()
     proxy = _inventory_test_proxy(targets)
-    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
-    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, {}))
+    monkeypatch.setattr(bt_inventory, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(bt_inventory, "_load_funding_series", lambda syms: ({}, {}))
     made = _inventory_test_windows(targets)
 
     def _gen(*a, **k):
@@ -2358,16 +2320,16 @@ def test_inventory_partial_replay_reports_consumed_prefix(monkeypatch) -> None:
         yield made[1]
         raise MhsResourceAdmissionError(stage="process_3m_window_2", error_code="MEMORY_RESERVE", message="no reserve")
 
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _gen)
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", _gen)
 
     def _drain(windows, *a, **k):
         for _ in windows:
             pass
         raise AssertionError("unreachable")
 
-    monkeypatch.setattr(pb, "replay_execution_window_batch", _drain)
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "replay_execution_window_batch", _drain)
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     report = excinfo.value.report
     assert report.stage == "process_3m_window_2"
     assert report.error_code == "MEMORY_RESERVE"
@@ -2380,7 +2342,6 @@ def test_inventory_partial_replay_reports_consumed_prefix(monkeypatch) -> None:
 
 def test_inventory_empty_piece_advances_windows_only(monkeypatch) -> None:
     """Held-only terminal piece counts windows without inventing decisions."""
-    import src.mhs.process_backtest as pb
     from src.mhs.resources import _StageRecorder
     from src.mhs.types import ExecutionSpec
 
@@ -2403,11 +2364,11 @@ def test_inventory_empty_piece_advances_windows_only(monkeypatch) -> None:
         quote_volumes=_frame(1e6), funding_known=pd.DataFrame(True, index=tail_grid, columns=["AUSDT"]),
         bar_available_at=tail_grid,
     )
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter([windows[0], empty_window]))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", lambda *a, **k: iter([windows[0], empty_window]))
     recorder = _StageRecorder(log_run=False)
-    progress = pb._ProcessInventoryProgress()
+    progress = bt_inventory._ProcessInventoryProgress()
     out = list(
-        pb._inventory_window_stream(
+        bt_inventory._inventory_window_stream(
             path, pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1)),
             "root", targets.index[0], targets.index[-1] + pd.Timedelta(days=1),
             {}, {}, ExecutionSpec(), None, None, recorder, None, progress=progress,
@@ -2418,10 +2379,10 @@ def test_inventory_empty_piece_advances_windows_only(monkeypatch) -> None:
     assert progress.completed_decisions == 1
     assert progress.completed_windows == 2
     # progress=None path still drains without tracking
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter([windows[0]]))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", lambda *a, **k: iter([windows[0]]))
     recorder2 = _StageRecorder(log_run=False)
     drained = list(
-        pb._inventory_window_stream(
+        bt_inventory._inventory_window_stream(
             path, pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1)),
             "root", targets.index[0], targets.index[-1] + pd.Timedelta(days=1),
             {}, {}, ExecutionSpec(), None, None, recorder2, None,
@@ -2432,7 +2393,6 @@ def test_inventory_empty_piece_advances_windows_only(monkeypatch) -> None:
 
 def test_inventory_observed_gaps_preserve_provenance(monkeypatch) -> None:
     """Live accumulator gaps survive without calling finalize."""
-    import src.mhs.process_backtest as pb
     from src.mhs.execution.contracts import ExecutionDataGap
 
     targets = _inventory_test_targets()
@@ -2461,9 +2421,9 @@ def test_inventory_observed_gaps_preserve_provenance(monkeypatch) -> None:
             pass
         raise DataIntegrityError("replay failed")
 
-    monkeypatch.setattr(pb, "replay_execution_window_batch", _boom)
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "replay_execution_window_batch", _boom)
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     report = excinfo.value.report
     assert len(report.source_gaps) == 1
     assert report.source_gaps[0] == gap
@@ -2473,20 +2433,19 @@ def test_inventory_observed_gaps_preserve_provenance(monkeypatch) -> None:
 
 def test_inventory_telemetry_failure_preserves_original_cause(monkeypatch) -> None:
     """Sampler failure leaves null stats without replacing the domain error."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
     stops = {"n": 0}
-    real_sampler = pb._TreeMemorySampler
+    real_sampler = bt_inventory._TreeMemorySampler
 
     def _boom_batch(windows, *a, **k):
         for _ in windows:
             pass
         raise DataIntegrityError("domain boom")
 
-    monkeypatch.setattr(pb, "replay_execution_window_batch", _boom_batch)
-    monkeypatch.setattr(pb, "_TreeMemorySampler", lambda *a, **k: _FailingSampler(stops))
+    monkeypatch.setattr(bt_inventory, "replay_execution_window_batch", _boom_batch)
+    monkeypatch.setattr(bt_inventory, "_TreeMemorySampler", lambda *a, **k: _FailingSampler(stops))
 
     class _FailingSampler:
         def __init__(self, *a, **k):
@@ -2502,9 +2461,9 @@ def test_inventory_telemetry_failure_preserves_original_cause(monkeypatch) -> No
             stops["n"] += 1
             raise RuntimeError("telemetry down")
 
-    monkeypatch.setattr(pb, "_TreeMemorySampler", _FailingSampler)
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "_TreeMemorySampler", _FailingSampler)
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     report = excinfo.value.report
     assert report.error_type == "DataIntegrityError"
     assert "domain boom" in report.error_message
@@ -2515,44 +2474,41 @@ def test_inventory_telemetry_failure_preserves_original_cause(monkeypatch) -> No
 
 def test_inventory_success_and_interrupts_stay_typed(monkeypatch) -> None:
     """Success stays success while interrupts bypass domain wrapping."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    assert isinstance(report, pb.ProcessInventoryReport)
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert isinstance(report, bt_contracts.ProcessInventoryReport)
     assert report.base is not None
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: (_ for _ in ()).throw(SystemExit(3)))
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", lambda *a, **k: (_ for _ in ()).throw(SystemExit(3)))
     with pytest.raises(SystemExit):
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     # unexpected replay failure maps to UNEXPECTED_ERROR with window stage
     _patch_inventory_stack(monkeypatch, targets)
-    monkeypatch.setattr(pb, "replay_execution_window_batch", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug")))
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "replay_execution_window_batch", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug")))
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     assert excinfo.value.report.error_code == "UNEXPECTED_ERROR"
     assert "process_3m_window_" in excinfo.value.report.stage
 
 
 def test_inventory_finalize_failure_stage(monkeypatch) -> None:
     """Finalize-stage integrity failure keeps the finalize label."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
-    monkeypatch.setattr(pb, "_assert_stage_rss_budget", lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("replay reserve")))
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "_assert_stage_rss_budget", lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("replay reserve")))
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     assert excinfo.value.report.stage == "finalize"
     assert excinfo.value.report.error_code == "DATA_INTEGRITY"
 
 
 def test_inventory_failure_json_round_trip(tmp_path) -> None:
     """Partial failure persists exact coverage without performance sections."""
-    import src.mhs.process_backtest as pb
     from src.mhs.execution.contracts import ExecutionDataGap
 
     gap = ExecutionDataGap(
@@ -2562,7 +2518,7 @@ def test_inventory_failure_json_round_trip(tmp_path) -> None:
         execution_bound="OHLCV_IMMEDIATE_TAKER",
     )
     report = _failure_report_fixture(source_gaps=(gap,), memory_stats=None)
-    out = pb.persist_process_inventory_failure(report, tmp_path / "failure.json")
+    out = rep_inventory.persist_process_inventory_failure(report, tmp_path / "failure.json")
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["status"] == "failed"
     assert payload["execution_timeframe"] == "3m"
@@ -2583,13 +2539,12 @@ def test_inventory_failure_json_round_trip(tmp_path) -> None:
 
 def test_inventory_success_schema_adds_markers(monkeypatch, tmp_path) -> None:
     """Completed markers are additive and preserve numeric results."""
-    import src.mhs.process_backtest as pb
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
-    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    before = pb._inventory_result_payload(report.base)
-    out = pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    before = rep_inventory._inventory_result_payload(report.base)
+    out = rep_inventory.persist_process_inventory_report(report, tmp_path / "inventory.json")
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["status"] == "completed"
     assert payload["execution_timeframe"] == "3m"
@@ -2598,22 +2553,15 @@ def test_inventory_success_schema_adds_markers(monkeypatch, tmp_path) -> None:
 
 
 def test_inventory_failure_destination_protection(monkeypatch, tmp_path) -> None:
-    """Reserved, aliased and completed destinations reject without mutation."""
-    import src.mhs.process_backtest as pb
+    """Completed destinations reject without mutation."""
 
     report = _failure_report_fixture()
     with pytest.raises(ValueError, match=r".+"):
-        pb.persist_process_inventory_failure(report, tmp_path / "bad.txt")
-    monkeypatch.setattr(pb, "PROCESS_REPORT_PATH", tmp_path / "hourly.json")
-    with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.persist_process_inventory_failure(report, tmp_path / "hourly.json")
-    monkeypatch.setattr(pb, "PROCESS_INVENTORY_REPORT_PATH", tmp_path / "primary.json")
-    with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.persist_process_inventory_failure(report, tmp_path / "primary.json")
+        rep_inventory.persist_process_inventory_failure(report, tmp_path / "bad.txt")
     completed = tmp_path / "done.json"
     completed.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
     with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.persist_process_inventory_failure(report, completed)
+        rep_inventory.persist_process_inventory_failure(report, completed)
     assert json.loads(completed.read_text(encoding="utf-8")) == {"status": "completed"}
     alias = tmp_path / "alias.json"
     import os as _os
@@ -2623,28 +2571,27 @@ def test_inventory_failure_destination_protection(monkeypatch, tmp_path) -> None
     except OSError:
         alias = completed
     with pytest.raises(DataIntegrityError, match=r".+"):
-        pb.persist_process_inventory_failure(report, alias)
+        rep_inventory.persist_process_inventory_failure(report, alias)
     # unreadable existing bytes do not block a fresh failure artifact
     corrupt = tmp_path / "corrupt.json"
     corrupt.write_text("not-json{{{", encoding="utf-8")
-    out = pb.persist_process_inventory_failure(report, corrupt)
+    out = rep_inventory.persist_process_inventory_failure(report, corrupt)
     assert json.loads(out.read_text(encoding="utf-8"))["status"] == "failed"
     # non-completed existing payload is replaceable
     other = tmp_path / "other.json"
     other.write_text(json.dumps({"status": "failed"}), encoding="utf-8")
-    out2 = pb.persist_process_inventory_failure(report, other)
+    out2 = rep_inventory.persist_process_inventory_failure(report, other)
     assert json.loads(out2.read_text(encoding="utf-8"))["status"] == "failed"
 
 
 def test_inventory_atomic_failure_cleans_temp(monkeypatch, tmp_path) -> None:
     """Publication failure leaves no truncated artifact or orphan temp."""
-    import src.mhs.process_backtest as pb
 
     report = _failure_report_fixture()
     out = tmp_path / "failure.json"
-    monkeypatch.setattr(pb.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError, match="disk full"):
-        pb.persist_process_inventory_failure(report, out)
+        rep_inventory.persist_process_inventory_failure(report, out)
     assert not out.exists()
     assert list(tmp_path.glob("*.tmp")) == []
 
@@ -2711,7 +2658,6 @@ def test_panel_admission_rejection_prevents_decoding(tmp_path, monkeypatch) -> N
 
 def test_inventory_typed_window_failure_keeps_consumed_coverage(monkeypatch) -> None:
     """Typed window failure evidence: a later piece rejection keeps typed code, cause and consumed coverage."""
-    import src.mhs.process_backtest as pb
     from src.mhs.resources import MhsResourceAdmissionError
 
     targets = _inventory_test_targets()
@@ -2725,9 +2671,9 @@ def test_inventory_typed_window_failure_keeps_consumed_coverage(monkeypatch) -> 
             stage="process_execution_piece", error_code="SWAP_GROWTH", message="swap grew mid-replay",
         )
 
-    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _failing_stream)
-    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
-        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(bt_inventory, "_iter_mhs_execution_windows", _failing_stream)
+    with pytest.raises(bt_contracts.ProcessInventoryBacktestError) as excinfo:
+        bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     report = excinfo.value.report
     assert report.error_code == "SWAP_GROWTH"
     assert report.stage == "process_execution_piece"

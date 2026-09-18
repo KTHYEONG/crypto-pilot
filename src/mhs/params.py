@@ -217,6 +217,10 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
 
 GROWTH_ENVELOPE_DEFAULT: str = "conservative"
 
+CLI_GROWTH_ENVELOPE_DEFAULT: str = "growth_extreme_budgeted"
+
+CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT: int = 60
+
 SEARCH_TRIALS_ATTEMPTED: int = 70
 
 # The window the CLI defaults (growth_extreme, committee_kelly_sizing, breadth
@@ -376,6 +380,12 @@ SIGNAL_OVERLAP_TOLERANCE: float = 1e-9
 # registered constant without triggering the committee_capital requirement,
 # while an explicit non-None value keeps requiring committee_capital=True.
 COMMITTEE_TARGET_GROSS_UNSET: object = object()
+
+# --- canonical run retention -------------------------------------------------------
+# Default detail-retention quotas for canonical 3-minute runs; None keeps every
+# managed bundle. The CLI references these names instead of hiding literals.
+DEFAULT_DETAIL_RETENTION_MAX_BYTES: int | None = None
+DEFAULT_DETAIL_RETENTION_MAX_RUNS: int | None = None
 
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).

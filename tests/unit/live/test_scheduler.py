@@ -2825,3 +2825,47 @@ def test_run_daemon_degraded_alert_detail_flags_funding_block(tmp_path, monkeypa
     # Then
     assert ("data_degraded", "staleness_h=0.1 failed=479/500 err=None funding_blocked=True") in alerts
 
+
+
+def test_strategy_params_present_ready_with_complete_sealed_pair(tmp_path, monkeypatch) -> None:
+    import src.cli.commands.live as live_mod
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    (tmp_path / "strategy_params.json.enc").write_bytes(b"params")
+    (tmp_path / "strategy_bootstrap.parquet.enc").write_bytes(b"bootstrap")
+    monkeypatch.setattr(live_mod, "DEPLOY_MHS_DIR", tmp_path)
+    assert sched._strategy_params_present(LiveSettings()) is True
+
+
+def test_strategy_params_present_ignores_legacy_docs_path(tmp_path, monkeypatch) -> None:
+    from pathlib import Path as _Path
+
+    import src.cli.commands.live as live_mod
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(live_mod, "DEPLOY_MHS_DIR", tmp_path)
+    legacy = _Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json.enc")
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        legacy.write_bytes(b"legacy")
+        assert sched._strategy_params_present(LiveSettings()) is False
+    finally:
+        legacy.unlink(missing_ok=True)
+        try:
+            legacy.parent.rmdir()
+        except OSError:
+            pass
+
+
+def test_runtime_state_remains_separate_from_delivery_boundary() -> None:
+    from src.cli.commands.live import deployed_strategy_artifact_paths
+    from src.common.paths import DATA_DIR, DEPLOY_MHS_DIR
+    from src.mhs.live_runtime import default_runtime_path
+
+    params_path, bootstrap_path = deployed_strategy_artifact_paths()
+    assert DATA_DIR not in DEPLOY_MHS_DIR.parents
+    assert default_runtime_path().is_relative_to(DATA_DIR / "state")
+    assert not params_path.is_relative_to(DATA_DIR)
+    assert not bootstrap_path.is_relative_to(DATA_DIR)

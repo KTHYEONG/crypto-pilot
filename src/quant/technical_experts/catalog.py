@@ -137,11 +137,11 @@ def _build_admitted_family_matrix() -> dict[str, dict[tuple[str, str], bool]]:
     The matrix is the evidence gate for catalog membership: a family must show
     at least one admission pass across all measured ``(symbol, timeframe)``
     cells or it is pruned from the catalog. It is populated from the §1
-    timeframe census (``docs/results/timeframe-census.md``) when available;
-    pending that census run it records the measured baseline evidence from
-    ``docs/results/rolling-res.md`` (the ``technical-5symbol-rolling`` profile
-    at ``4h``, whose eighteen long/short candidates are the current admitted
-    universe). Non-measured cells are ``False`` and never fabricated.
+    timeframe census markdown when available; pending that census run it
+    records the measured baseline evidence from the rolling results profile
+    (the ``technical-5symbol-rolling`` profile at ``4h``, whose eighteen
+    long/short candidates are the current admitted universe). Non-measured
+    cells are ``False`` and never fabricated.
     """
     matrix: dict[str, dict[tuple[str, str], bool]] = {}
     for family in TECHNICAL_EXPERT_FAMILIES:

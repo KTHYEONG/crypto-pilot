@@ -8,6 +8,12 @@ from __future__ import annotations
 
 import pytest
 import src.mhs.evaluation.windows as windows
+from src.mhs.backtest.contracts import ProcessPath
+from src.mhs.backtest.inventory import (
+    _execution_fence,
+    _validate_replay_window,
+    replay_process_execution,
+)
 
 
 def test_windows_module_present() -> None:
@@ -161,7 +167,7 @@ def test_mark_frame_path_keyed_cache(tmp_path) -> None:
 
 def test_window_ipc_errors(tmp_path) -> None:
     import pytest
-    from src.mhs.evaluation import DataIntegrityError
+    from src.common.errors import DataIntegrityError
     from src.mhs.evaluation.windows import (
         _spill_window_to_ipc,
         _load_window_from_ipc,
@@ -334,7 +340,7 @@ def test_window_spill_root_prefers_env_and_defaults_to_repo_tmp(tmp_path, monkey
 def test_book_outcome_spills_windows_under_window_spill_root(mhs_market, monkeypatch, tmp_path) -> None:
     import dataclasses
     import tempfile
-    from src.mhs import evaluation as ev
+    import src.mhs.evaluation.windows as ev_windows
     from tests.unit.mhs.test_evaluation_appresearch import _build_book_outcome_args
     spill_root = tmp_path / "spill_root"
     monkeypatch.setenv("MHS_SPILL_DIR", str(spill_root))
@@ -348,11 +354,9 @@ def test_book_outcome_spills_windows_under_window_spill_root(mhs_market, monkeyp
     monkeypatch.setattr(tempfile, "TemporaryDirectory", _recording)
     args = _build_book_outcome_args(mhs_market)
     # When: the exact two-pass path spills windows
-    ev._book_outcome(**{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=False, committee_target_gross=None)})
+    ev_windows._book_outcome(**{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=False, committee_target_gross=None)})
     # Then: the spill directory lives under the configured disk-backed root, not the system tmpfs
     assert str(spill_root) in seen
-
-
 
 
 def _local_replay_fixtures(n_decisions: int = 2):
@@ -360,7 +364,6 @@ def _local_replay_fixtures(n_decisions: int = 2):
     import pandas as pd
 
     from src.mhs.execution.contracts import ExecutionReplayWindow
-    from src.mhs.process_backtest import ProcessPath
     from src.mhs.process import ProcessExecutionPolicy
 
     cols = ["AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT"]
@@ -406,7 +409,6 @@ def _local_replay_fixtures(n_decisions: int = 2):
 def test_validate_local_targets_accepted() -> None:
     """Ordered local targets validate against the canonical book and replay."""
     from src.mhs.execution.batch import replay_execution_windows
-    from src.mhs.process_backtest import replay_process_execution
     from src.mhs.types import ExecutionSpec
 
     path, windows = _local_replay_fixtures(2)
@@ -427,7 +429,6 @@ def test_validate_omitted_nonzero_target_rejected() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.process_backtest import replay_process_execution
     from src.mhs.types import ExecutionSpec
 
     path, windows = _local_replay_fixtures(2)
@@ -447,7 +448,6 @@ def test_validate_last_complete_bar_accepted() -> None:
 
     import pandas as pd
 
-    from src.mhs.process_backtest import _execution_fence, _validate_replay_window
 
     path, windows = _local_replay_fixtures(2)
     fence = _execution_fence(path.target_weights)
@@ -471,7 +471,6 @@ def test_validate_incomplete_bar_rejected() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.process_backtest import _execution_fence, _validate_replay_window
 
     path, windows = _local_replay_fixtures(2)
     fence = _execution_fence(path.target_weights)
@@ -491,7 +490,6 @@ def test_validate_partition_skip_rejected() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.process_backtest import replay_process_execution
     from src.mhs.types import ExecutionSpec
 
     path, windows = _local_replay_fixtures(3)
@@ -954,7 +952,6 @@ def test_validate_symbol_contract_rejected() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.process_backtest import _validate_replay_window
 
     path, windows = _local_replay_fixtures(2)
     kwargs = {
@@ -1077,6 +1074,7 @@ def test_generator_never_decodes_out_of_fence_row(tmp_path, monkeypatch) -> None
     import pandas as pd
 
     import src.mhs.marks as marks
+    import src.mhs.execution.window_stream as window_stream
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
 
     start = pd.Timestamp("2023-06-01", tz="UTC")
@@ -1091,9 +1089,7 @@ def test_generator_never_decodes_out_of_fence_row(tmp_path, monkeypatch) -> None
         return real(root, symbols, grid_start, grid_end, timeframe)
 
     monkeypatch.setattr(marks, "_load_window_minute_frames", _spy)
-    monkeypatch.setattr(
-        "src.mhs.evaluation.windows._load_window_minute_frames", _spy
-    )
+    monkeypatch.setattr(window_stream, "_load_window_minute_frames", _spy)
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
@@ -1198,6 +1194,7 @@ def test_adaptive_decode_splits_with_no_missing_decisions(tmp_path, monkeypatch)
     import pandas as pd
 
     from src.mhs import resources as _res
+    import src.mhs.execution.window_stream as window_stream
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
 
     start, end, decisions, funding, targets, spec = _adaptive_fixture(tmp_path, days=3)
@@ -1205,9 +1202,7 @@ def test_adaptive_decode_splits_with_no_missing_decisions(tmp_path, monkeypatch)
     admitted: list[int] = []
     orig = _res.assert_mhs_allocation_budget
     monkeypatch.setattr(_res, "assert_mhs_allocation_budget", lambda **k: (admitted.append(k["estimated_bytes"]), orig(**k))[1])
-    import src.mhs.evaluation.windows as _w
-
-    monkeypatch.setattr(_w, "assert_mhs_allocation_budget", lambda **k: (admitted.append(k["estimated_bytes"]), orig(**k))[1])
+    monkeypatch.setattr(window_stream, "assert_mhs_allocation_budget", lambda **k: (admitted.append(k["estimated_bytes"]), orig(**k))[1])
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
@@ -1230,11 +1225,12 @@ def test_adaptive_decode_streams_empty_pieces_before_next_daily_decision(tmp_pat
 
     import pandas as pd
 
+    import src.mhs.execution.window_stream as _stream
     import src.mhs.evaluation.windows as _w
 
     start, end, decisions, funding, targets, spec = _adaptive_fixture(tmp_path, days=3)
     _tight_telemetry(monkeypatch)
-    monkeypatch.setattr(_w, "plan_mhs_execution_bars", lambda **_kwargs: 100)
+    monkeypatch.setattr(_stream, "plan_mhs_execution_bars", lambda **_kwargs: 100)
     windows = list(
         _w._iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
@@ -1273,12 +1269,13 @@ def test_adaptive_decode_rejects_plan_shorter_than_first_signal_span(tmp_path, m
     import pandas as pd
     import pytest
 
+    import src.mhs.execution.window_stream as _stream
     import src.mhs.evaluation.windows as _w
     from src.common.errors import DataIntegrityError
 
     start, end, decisions, funding, targets, spec = _adaptive_fixture(tmp_path, days=2)
     _tight_telemetry(monkeypatch)
-    monkeypatch.setattr(_w, "plan_mhs_execution_bars", lambda **_kwargs: 1)
+    monkeypatch.setattr(_stream, "plan_mhs_execution_bars", lambda **_kwargs: 1)
     with pytest.raises(DataIntegrityError, match="unresolved"):
         list(
             _w._iter_mhs_execution_windows(
@@ -1296,12 +1293,13 @@ def test_adaptive_empty_piece_rejects_unknown_live_roster(tmp_path, monkeypatch)
     import pandas as pd
     import pytest
 
+    import src.mhs.execution.window_stream as _stream
     import src.mhs.evaluation.windows as _w
     from src.common.errors import DataIntegrityError
 
     start, end, decisions, funding, targets, spec = _adaptive_fixture(tmp_path, days=3)
     _tight_telemetry(monkeypatch)
-    monkeypatch.setattr(_w, "plan_mhs_execution_bars", lambda **_kwargs: 100)
+    monkeypatch.setattr(_stream, "plan_mhs_execution_bars", lambda **_kwargs: 100)
     calls = itertools.count()
 
     def _live_roster() -> frozenset[str]:
@@ -1793,9 +1791,7 @@ def test_book_outcome_propagates_live_bound_count(monkeypatch, tmp_path) -> None
         captured.update(k)
         return iter(())
 
-    import src.mhs.evaluation as _ev
-
-    monkeypatch.setattr(_ev, "_iter_mhs_execution_windows", _capture)
+    monkeypatch.setattr(_w, "_iter_mhs_execution_windows", _capture)
     request = MhsDiagnosticRequest(touch_diagnostic=True)
     phase = type("P", (), {})()
     report, _ = _w._book_outcome(

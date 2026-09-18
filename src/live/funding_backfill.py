@@ -39,7 +39,7 @@ from src.market_data.services.futures_collection import FUNDING_GAP_THRESHOLD_MS
 logger = logging.getLogger("LiveFundingBackfill")
 
 BACKFILL_AUDIT_NAME: str = "paper_funding_backfill"
-# 운영 의미는 tools/devops/daemon_idle_gate.py 의 BUSY_STAGES/DEFAULT_STALE_AFTER_S 와 동일(도구 스크립트 import 금지라 값 복제).
+# 운영 의미는 src/application/ops/daemon_idle_gate.py 의 BUSY_STAGES/DEFAULT_STALE_AFTER_S 와 동일(도구 스크립트 import 금지라 값 복제).
 BACKFILL_BUSY_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"})
 BACKFILL_BUSY_STALE_S: float = 2700.0
 

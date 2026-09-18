@@ -54,27 +54,7 @@ def _build_fold_target_weights(
     apply_rebalance_deadband: bool = True,
     panel_quarantine: PanelQuarantine | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
-    """Construct one fold's PIT decision targets with the quality calibration.
-
-    Returns ``(target_weights, signal_available_at, minute_roster, grid_1h)``:
-    the blend decision targets over the validation window, their ``+1h``
-    signal-availability stamps, the minute-data roster, and the 1h feature
-    grid. The 1h panel is sliced to ``[validation_start - warmup, validation_end]``
-    (spec §3.1) so warm-up history feeds the 720-bar eligibility lookback and
-    the 168h slow horizon without holding the full ``[train_start, validation_end]``
-    panel. Signal quality (spec §3.2) applies EMA smoothing on each book, a
-    volatility-regime cash scale, and the turnover deadband cap on the final
-    blend targets. All objects are local to this builder and released when it
-    returns, keeping per-fold peak memory bounded.
-
-    ``deadband_seed_row`` (opt-in, default ``None`` reproduces every existing
-    call byte-identically) threads through to ``_apply_rebalance_deadband`` so
-    a live daily refresh over a rebuilt rolling window continues the deadband
-    from an externally carried decision instead of resetting at this window's
-    own first row (I-DEADBAND-CONTINUITY). Only defined under
-    ``rebalance_filter='per_symbol_deadband'``; combining it with
-    ``'portfolio_trigger'`` raises ``ValueError``.
-    """
+    """Construct the maintained horizon/committee decision targets with their existing point-in-time calibration. Args: source root, fold, frozen request, funding, existing overrides, explicit decision window, carried deadband state, source roster control, warmup panel and quarantine. Returns: identical targets, signal release timestamps, minute roster and hourly grid. Raises: existing validation and data-integrity errors for conflicting provenance or controls. This builder preserves the deployed strategy and is not the continuous process candidate allocator."""
     ts = fold.train_start
     effective_start = fold.validation_start if decision_start is None else decision_start
     effective_end = fold.validation_end if decision_end is None else decision_end
@@ -86,7 +66,6 @@ def _build_fold_target_weights(
     ve = effective_end
     if apply_rebalance_deadband is False and request.rebalance_filter != "per_symbol_deadband":
         raise ValueError("apply_rebalance_deadband=False requires rebalance_filter='per_symbol_deadband'")
-    import src.mhs.evaluation as ev
     panel_start = max(ts, vs - pd.Timedelta(hours=panel_warmup_hours))
     _panel_columns = (
         ("close", "open", "quote_vol", "taker_buy_quote")
@@ -168,10 +147,10 @@ def _build_fold_target_weights(
             "horizon_ensemble", "raw", fast_ema,
         )
     else:
-        w_fast_tilted = ev.inverse_realized_vol_tilt(
+        w_fast_tilted = inverse_realized_vol_tilt(
             w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
         )
-        w_fast_execution = ev.renormalize_within_mask(
+        w_fast_execution = renormalize_within_mask(
             w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
         )
     w_slow_execution = books._horizon_ensemble_execution_weights(
@@ -211,15 +190,14 @@ def _build_fold_target_weights(
         del w_fast_tilted
     w_slow_execution_1h = w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
     if request.crash_regime_tilt_alpha is not None:
-        w_slow_execution_1h = ev.crash_regime_tilt_weights(
+        w_slow_execution_1h = crash_regime_tilt_weights(
             w_slow_execution_1h, log_close,
             execution_mask.reindex(grid_1h).ffill().fillna(False),
             CRASH_REGIME_REFERENCE_SYMBOLS, slow.horizon_hours,
             request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
         )
     if request.committee_capital:
-        import src.mhs.evaluation as ev
-        blend_1h = ev._committee_execution_book(
+        blend_1h = committee._committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
             _research_go._resolved_committee_tranche_count(request),
             regime_adaptive_window=(

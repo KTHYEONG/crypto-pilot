@@ -17,31 +17,24 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+import src.mhs.evaluation.committee as committee
+import src.mhs.evaluation.concurrency as concurrency
+import src.mhs.evaluation.diagnostics as diagnostics
+import src.mhs.evaluation.evidence as evidence
+import src.mhs.evaluation.guards as guards
+import src.mhs.evaluation.regime as regime
+from src.common.errors import DataIntegrityError
 from src.mhs import research_go as _research_go
 from src.mhs import statistics as _statistics
 from src.mhs.calibration import NullShareCalibration, calibrate_max_share_null
-from src.mhs.evaluation import (  # noqa: F401 - wiring contract expects these symbols
-    COMMITTEE_MEMBERS,
-    COMMITTEE_OOS_START,
-    FEATURE_REGISTRY,
-    DataIntegrityError,
-    books,
-    committee,
-    compute_deployment_readiness,
-    concurrency,
-    diagnostics,
-    evidence,
-    feature_registry_panel_columns,
-    folds,
-    guards,
-    phase_1_anchored_purged_folds,
-    regime,
-)
 from src.mhs.evidence import (
+    compute_deployment_readiness,
     regime_conditional_sharpe_blocks,
     selection_overlap_fraction,
 )
+from src.mhs.features import FEATURE_REGISTRY, feature_registry_panel_columns
 from src.mhs.marks import _get_symbol_mark_frame
+from src.mhs.params import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.resources import _assert_stage_rss_budget

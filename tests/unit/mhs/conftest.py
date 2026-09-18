@@ -7,7 +7,7 @@ from pathlib import Path
 
 import src.mhs.marks as marks
 import src.market_data.services.futures_collection as fc
-from src.mhs import evaluation as ev
+from src.mhs.marks import _get_symbol_mark_frame
 from tests.unit.mhs.test_evaluation_appresearch import (
     _write_3m_cache,
     _write_mhs_market,
@@ -74,7 +74,7 @@ def mhs_market_long(_mhs_shared_roots, monkeypatch):
     # reuses the same symbol names across five distinct roots, so a test that
     # already populated the cache from a different root would otherwise leak
     # stale mark data into this one.
-    ev._get_symbol_mark_frame.cache_clear()
+    _get_symbol_mark_frame.cache_clear()
     return root, end
 
 @pytest.fixture
@@ -87,7 +87,7 @@ def mhs_market(_mhs_shared_roots, monkeypatch):
     # reuses the same symbol names across five distinct roots, so a test that
     # already populated the cache from a different root would otherwise leak
     # stale mark data into this one.
-    ev._get_symbol_mark_frame.cache_clear()
+    _get_symbol_mark_frame.cache_clear()
     return root, end
 
 @pytest.fixture
@@ -100,7 +100,7 @@ def mhs_market_with_btc(_mhs_shared_roots, monkeypatch):
     # reuses the same symbol names across five distinct roots, so a test that
     # already populated the cache from a different root would otherwise leak
     # stale mark data into this one.
-    ev._get_symbol_mark_frame.cache_clear()
+    _get_symbol_mark_frame.cache_clear()
     return root, end
 
 @pytest.fixture
@@ -113,7 +113,7 @@ def mhs_market_funding_vary(_mhs_shared_roots, monkeypatch):
     # reuses the same symbol names across five distinct roots, so a test that
     # already populated the cache from a different root would otherwise leak
     # stale mark data into this one.
-    ev._get_symbol_mark_frame.cache_clear()
+    _get_symbol_mark_frame.cache_clear()
     return root, end
 
 @pytest.fixture
@@ -126,5 +126,5 @@ def mhs_market_with_taker_buy_quote(_mhs_shared_roots, monkeypatch):
     # reuses the same symbol names across five distinct roots, so a test that
     # already populated the cache from a different root would otherwise leak
     # stale mark data into this one.
-    ev._get_symbol_mark_frame.cache_clear()
+    _get_symbol_mark_frame.cache_clear()
     return root, end

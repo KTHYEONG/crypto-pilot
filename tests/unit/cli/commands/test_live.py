@@ -183,3 +183,115 @@ def test_SCENARIO_RESIL_11_cli_signal_daemon_registered():  # noqa: D103
     with pytest.raises(SystemExit):
         parser.parse_args(["signal-refresh"])
 # SCENARIO_REC_12-cli-tax-subcommands
+
+
+def test_deployed_strategy_artifact_paths_targets_delivery_boundary() -> None:
+    from src.cli.commands.live import deployed_strategy_artifact_paths
+    from src.common.paths import DEPLOY_MHS_DIR
+
+    params_path, bootstrap_path = deployed_strategy_artifact_paths()
+    assert params_path.parent == DEPLOY_MHS_DIR
+    assert bootstrap_path.parent == DEPLOY_MHS_DIR
+    assert params_path.name.endswith(".enc")
+    assert bootstrap_path.name.endswith(".enc")
+    assert "docs" not in params_path.parts
+    assert "docs" not in bootstrap_path.parts
+
+
+def test_deployed_strategy_artifact_paths_fails_closed_on_incomplete_pair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import argparse
+    import types
+
+    import src.cli.commands.live as live_mod
+    from src.common.errors import DataIntegrityError
+
+    (tmp_path / "strategy_params.json.enc").write_bytes(b"params-only")
+    monkeypatch.setattr(live_mod, "DEPLOY_MHS_DIR", tmp_path)
+    with pytest.raises(DataIntegrityError):
+        live_mod.deployed_strategy_artifact_paths()
+
+    def _boom_save(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("must exit before mutating runtime state or weights")
+
+    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", _boom_save)
+    monkeypatch.setattr("src.mhs.live_runtime.load_or_bootstrap_runtime", _boom_save)
+    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="shadow"))
+    args = argparse.Namespace(date=pd.Timestamp("2026-08-25 00:00Z"), artifact=None, mode=None)
+    with pytest.raises(SystemExit):
+        live_mod._signal_step_body(args, settings)
+
+
+def test_signal_step_explicit_plaintext_artifact_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import argparse
+    import types
+
+    import src.cli.commands.live as live_mod
+    from src.common.paths import DEPLOY_MHS_DIR
+
+    calls: dict[str, Path] = {}
+    sentinel_params = types.SimpleNamespace(bootstrap_sha256="a" * 64, strategy_digest="digest", bootstrap_held_row={})
+
+    def _fake_load_params(path: Any, *, artifact_key: Any = None) -> Any:
+        calls["params_path"] = Path(path)
+        return sentinel_params
+
+    def _fake_load_bootstrap(path: Any, *, expected_sha256: str, artifact_key: Any = None) -> Any:
+        calls["bootstrap_path"] = Path(path)
+        return pd.Series([0.01], index=pd.DatetimeIndex([pd.Timestamp("2026-08-24", tz="UTC")]), dtype="float64")
+
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", _fake_load_params)
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", _fake_load_bootstrap)
+    monkeypatch.setattr("src.mhs.live_strategy.assert_runtime_data_policy", lambda params: None)
+    sentinel_runtime = types.SimpleNamespace(last_decision_date=pd.Timestamp("2026-08-25 00:00Z"))
+    monkeypatch.setattr("src.mhs.live_runtime.load_or_bootstrap_runtime", lambda *a, **k: sentinel_runtime)
+    monkeypatch.setattr("src.mhs.live_runtime.reconcile_runtime_params", lambda runtime, params, ref: (runtime, ""))
+    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", lambda *a, **k: None)
+    monkeypatch.setattr(live_mod, "advance_to_date", lambda *a, **k: (sentinel_runtime, 1, 1.0))
+
+    before = live_mod.deployed_strategy_artifact_paths()
+    explicit = tmp_path / "dev" / "strategy_params.json"
+    explicit.parent.mkdir(parents=True, exist_ok=True)
+    explicit.write_bytes(b"dev-plaintext")
+    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="shadow"))
+    args = argparse.Namespace(date=pd.Timestamp("2026-08-25 00:00Z"), artifact=str(explicit), mode=None)
+    live_mod._signal_step_body(args, settings)
+
+    assert calls["params_path"] == explicit
+    assert calls["bootstrap_path"] == explicit.parent / "strategy_bootstrap.parquet"
+    assert live_mod.deployed_strategy_artifact_paths() == before
+    assert before[0].parent == DEPLOY_MHS_DIR
+
+
+def test_signal_step_rejects_digest_mismatch_without_live_cycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import argparse
+    import types
+
+    import src.cli.commands.live as live_mod
+    from src.common.errors import DataIntegrityError
+
+    (tmp_path / "strategy_params.json.enc").write_bytes(b"params")
+    (tmp_path / "strategy_bootstrap.parquet.enc").write_bytes(b"bootstrap")
+    monkeypatch.setattr(live_mod, "DEPLOY_MHS_DIR", tmp_path)
+    sentinel_params = types.SimpleNamespace(bootstrap_sha256="b" * 64, strategy_digest="digest", bootstrap_held_row={})
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda path, *, artifact_key=None: sentinel_params)
+    monkeypatch.setattr("src.mhs.live_strategy.assert_runtime_data_policy", lambda params: None)
+
+    def _mismatched_bootstrap(path: Any, *, expected_sha256: str, artifact_key: Any = None) -> Any:
+        raise DataIntegrityError("bootstrap_sha256 mismatch")
+
+    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", _mismatched_bootstrap)
+
+    def _boom_save(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("no live cycle executes on digest mismatch")
+
+    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", _boom_save)
+    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="shadow"))
+    args = argparse.Namespace(date=pd.Timestamp("2026-08-25 00:00Z"), artifact=None, mode=None)
+    with pytest.raises(SystemExit):
+        live_mod._signal_step_body(args, settings)

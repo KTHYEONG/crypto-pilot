@@ -5,13 +5,19 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
-from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.resources as resources
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-    _StageRecorder,
-    _assert_execution_rss_budget,
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.common.errors import DataIntegrityError as _DataIntegrityError
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.research_go import GO_REASON_RESOURCE_BREACH as _GO_REASON_RESOURCE_BREACH
+from src.mhs.resources import _StageRecorder, _assert_execution_rss_budget
+import types as _types
+
+ev = _types.SimpleNamespace(
+    DataIntegrityError=_DataIntegrityError,
+    GO_REASON_RESOURCE_BREACH=_GO_REASON_RESOURCE_BREACH,
+    _assert_stage_rss_budget=resources._assert_stage_rss_budget,
+    _resolve_ram_budget=resources._resolve_ram_budget,
 )
 from src.common.errors import DataIntegrityError
 from src.mhs.types import ExecutionSpec
@@ -224,7 +230,7 @@ _GIB = 2**30
 
 
 def test_resolve_mhs_memory_budget_conservative_defaults(monkeypatch) -> None:
-    """Conservative defaults: adequate capacity keeps 2.5/1.5 GiB ceilings and 2 GiB reserve."""
+    """Measured defaults: adequate capacity keeps 6/4 GiB ceilings and 2 GiB reserve."""
     from src.mhs.resources import (
         MHS_AVAILABLE_FLOOR_BYTES,
         MHS_REPLAY_BUDGET_BYTES,

@@ -45,14 +45,10 @@ from src.mhs.report.artifacts import (
     _verify_ledger_artifact,
 )
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
-from src.mhs.run_history import append_run_history_record, mhs_run_history_dir
+from src.mhs.run_history import append_run_history_record, canonical_history_registry
+from src.common.paths import DEPLOY_MHS_DIR
 
 logger = logging.getLogger("MhsHorizonDiagnostic")
-
-
-def mhs_horizon_diagnostic_report_path() -> str:
-    """Single source-controlled report path, sibling to the other ``*_report_path`` helpers."""
-    return str(Path("docs/results") / "mhs_horizon_diagnostic.json")
 
 
 def _resolved_deployment_member_weights(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest, admitted: tuple[str, ...]) -> dict[str, float]:
@@ -78,8 +74,14 @@ def _resolved_deployment_member_weights(report: MhsHorizonDiagnosticReport, requ
     return {k: float(v) for k, v in weights.items()}
 
 
-def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest, artifact_root: Path, *, artifact_key: SecretStr | None = None) -> dict[str, Any]:
-    """Emit v2 strategy params + bound bootstrap (sealed when artifact_key given)."""
+def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest, artifact_root: Path | None = None, *, artifact_key: SecretStr | None = None) -> dict[str, Any]:
+    """Emit v2 strategy params + bound bootstrap (sealed when artifact_key given).
+
+    Deployment output resolves to the sealed delivery boundary
+    (`deploy/mhs`) when the caller supplies no explicit root. Plaintext
+    payloads are local-only and never tracked; only sealed envelopes leave
+    the boundary. Seal-before-read verification applies before return.
+    """
     from src.common.errors import DataIntegrityError
     from src.mhs.deployment_policy import build_deployment_policy
     from src.mhs.live_strategy import LiveStrategyParams, load_strategy_params, save_strategy_bootstrap, save_strategy_params
@@ -138,7 +140,7 @@ def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRe
     eval_end = eval_end.tz_localize("UTC") if eval_end.tzinfo is None else eval_end.tz_convert("UTC")
     created_at = pd.Timestamp.now(tz="UTC")
     held_row = {str(k): float(v) for k, v in tw.iloc[-1].items()}
-    artifact_root = Path(artifact_root)
+    artifact_root = DEPLOY_MHS_DIR if artifact_root is None else Path(artifact_root)
     artifact_root.mkdir(parents=True, exist_ok=True)
     bootstrap_path = artifact_root / "strategy_bootstrap.parquet"
     saved_bootstrap_path, bootstrap_digest = save_strategy_bootstrap(bootstrap_path, tail, artifact_key=artifact_key)
@@ -198,12 +200,12 @@ def persist_mhs_report(
     try:
         append_run_history_record(
             build_mhs_run_history_record(report, request, tier, persisted),
-            mhs_run_history_dir(target),
+            canonical_history_registry().parent,
         )
     except Exception:  # noqa: BLE001 - observational; never break the research result
         logger.warning(
             "[EVAL] run-history record append failed path=%s",
-            mhs_run_history_dir(target),
+            canonical_history_registry(),
             exc_info=True,
         )
     return persisted

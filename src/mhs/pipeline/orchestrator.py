@@ -16,12 +16,9 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.mhs import preregistration as _prereg
-from src.mhs.evaluation import (
-    DISCOVERY_START,
-    HOLDOUT_CUTOFF,
-    MhsDiagnosticRequest,
-    resolve_evaluation_end,
-)
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.params import DISCOVERY_START
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
 from src.mhs.marks import clear_mhs_market_data_caches
 from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1
 from src.mhs.resources import _TreeMemorySampler

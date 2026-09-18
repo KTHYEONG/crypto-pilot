@@ -787,13 +787,13 @@ def _admit_setup(monkeypatch, *, pss: int = 100, available: int = 10**12, swap: 
 
 
 def test_memory_budget_defaults_and_validation() -> None:
-    """Defaults are 2.5/1.5/2 GiB with replay bounded by total."""
+    """Defaults are 6/4/2 GiB with replay bounded by total."""
     budget = resources.MhsMemoryBudget()
     assert budget.total_tree_pss_bytes == resources.MHS_TREE_PSS_BUDGET_BYTES
     assert budget.replay_tree_pss_bytes == resources.MHS_REPLAY_BUDGET_BYTES
     assert budget.min_available_bytes == resources.MHS_AVAILABLE_FLOOR_BYTES
-    assert budget.total_tree_pss_bytes == int(2.5 * 2**30)
-    assert budget.replay_tree_pss_bytes == int(1.5 * 2**30)
+    assert budget.total_tree_pss_bytes == 6 * 2**30
+    assert budget.replay_tree_pss_bytes == 4 * 2**30
     assert budget.min_available_bytes == 2 * 2**30
     with pytest.raises(ValueError, match="positive integer"):
         resources.MhsMemoryBudget(total_tree_pss_bytes=0)
@@ -1143,3 +1143,73 @@ def test_plan_reserve_breach_skips_large_grids(monkeypatch) -> None:
     with pytest.raises(DataIntegrityError, match="cannot enumerate"):
         resources.plan_mhs_execution_bars(requested_bars=5, minimum_bars=2, allocation=_plan_allocation(), budget_bytes=100, reserve_bytes=None)
     assert resources.plan_mhs_execution_bars(requested_bars=7, minimum_bars=2, allocation=_plan_allocation(), budget_bytes=None, reserve_bytes=None) == 7
+
+
+def test_resolve_default_measured_profile(monkeypatch) -> None:
+    """Adequate capacity resolves the measured 6/4 GiB ceilings with 2 GiB reserve."""
+    monkeypatch.setattr(resources, "_host_total_bytes", lambda: 16 * 2**30)
+    monkeypatch.setattr(resources, "_read_cgroup_limit_bytes", lambda: None)
+    resolved = resources.resolve_mhs_memory_budget(None)
+    assert resolved.total_tree_pss_bytes == 6 * 2**30
+    assert resolved.replay_tree_pss_bytes == 4 * 2**30
+    assert resolved.min_available_bytes == 2 * 2**30
+
+
+def test_resolve_small_host_clamps_without_source_reduction(monkeypatch) -> None:
+    """A 4 GiB host clamps both ceilings to 2 GiB; tighter reserve rejects deterministically."""
+    requested = resources.MhsMemoryBudget(
+        total_tree_pss_bytes=6 * 2**30, replay_tree_pss_bytes=4 * 2**30, min_available_bytes=2 * 2**30,
+    )
+    monkeypatch.setattr(resources, "_host_total_bytes", lambda: 4 * 2**30)
+    monkeypatch.setattr(resources, "_read_cgroup_limit_bytes", lambda: None)
+    resolved = resources.resolve_mhs_memory_budget(requested)
+    assert resolved.total_tree_pss_bytes == 2 * 2**30
+    assert resolved.replay_tree_pss_bytes == 2 * 2**30
+    monkeypatch.setattr(resources, "_host_total_bytes", lambda: 2 * 2**30)
+    with pytest.raises(resources.MhsResourceAdmissionError) as excinfo:
+        resources.resolve_mhs_memory_budget(requested)
+    assert excinfo.value.error_code == "MEMORY_RESERVE"
+
+
+def test_admission_preserves_swap_and_telemetry_provenance(monkeypatch) -> None:
+    """Swap growth and missing telemetry keep typed rejection under the measured defaults."""
+    budget = resources.MhsMemoryBudget()
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 16 * 2**30)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 512)
+    with pytest.raises(resources.MhsResourceAdmissionError) as excinfo:
+        resources.assert_mhs_stage_allocation(
+            stage="process_candidate_books", estimated_bytes=0, budget=budget,
+            replay=False, initial_swap_bytes=0,
+        )
+    assert excinfo.value.error_code == "SWAP_GROWTH"
+
+    def _boom() -> int:
+        raise DataIntegrityError("no host telemetry")
+
+    monkeypatch.setattr(resources, "_host_total_bytes", _boom)
+    with pytest.raises(resources.MhsResourceAdmissionError) as excinfo2:
+        resources.resolve_mhs_memory_budget(None)
+    assert excinfo2.value.error_code == "RESOURCE_TELEMETRY"
+
+
+def test_explicit_low_ceiling_rejected_before_allocation(monkeypatch) -> None:
+    """An explicit ceiling below residency fails admission instead of escalating silently."""
+    small = resources.MhsMemoryBudget(
+        total_tree_pss_bytes=2**30, replay_tree_pss_bytes=2**30, min_available_bytes=2 * 2**30,
+    )
+    monkeypatch.setattr(resources, "_host_total_bytes", lambda: 16 * 2**30)
+    monkeypatch.setattr(resources, "_read_cgroup_limit_bytes", lambda: None)
+    resolved = resources.resolve_mhs_memory_budget(small)
+    assert resolved.total_tree_pss_bytes == 2**30
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 2**30)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 16 * 2**30)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+    with pytest.raises(resources.MhsResourceAdmissionError) as excinfo:
+        resources.assert_mhs_stage_allocation(
+            stage="process_prepare_panel", estimated_bytes=1, budget=resolved,
+            replay=False, initial_swap_bytes=0,
+        )
+    assert excinfo.value.error_code == "MEMORY_BUDGET"

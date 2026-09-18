@@ -4,7 +4,8 @@ from dataclasses import replace as dataclass_replace
 from typing import Any
 
 from src.mhs.execution import StrategyExecutionReplayResult
-from src.mhs.params import NAME_DRIFT_TRIM_INTERVAL_HOURS, NAME_DRIFT_TRIM_MAX_WEIGHT, SIGNAL_EMA_HORIZON_SPAN, STRESS_COST_MULTIPLIER
+from src.mhs.execution.specs import _stress_cost_execution_spec as _stress_cost_execution_spec
+from src.mhs.params import NAME_DRIFT_TRIM_INTERVAL_HOURS, NAME_DRIFT_TRIM_MAX_WEIGHT, SIGNAL_EMA_HORIZON_SPAN
 from src.mhs.types import ExecutionSpec
 
 
@@ -17,21 +18,6 @@ def _resolved_base_execution_spec(request: Any) -> ExecutionSpec:
     return dataclass_replace(
         ExecutionSpec(), passive_timeout_minutes=int(request.passive_timeout_minutes), name_drift_trim_max_weight=NAME_DRIFT_TRIM_MAX_WEIGHT if bool(request.name_drift_trim) else None, name_drift_trim_interval_hours=NAME_DRIFT_TRIM_INTERVAL_HOURS
     )
-
-
-def _stress_cost_execution_spec(base: ExecutionSpec | None = None) -> ExecutionSpec:
-    """SPREAD_AND_COST_X3: the same realistic fill mechanic at 3x cost."""
-    resolved = ExecutionSpec() if base is None else base
-    return ExecutionSpec(
-        maker_fee_bps=resolved.maker_fee_bps * STRESS_COST_MULTIPLIER,
-        taker_fee_bps=resolved.taker_fee_bps * STRESS_COST_MULTIPLIER,
-        taker_slippage_bps=resolved.taker_slippage_bps * STRESS_COST_MULTIPLIER,
-        passive_timeout_minutes=resolved.passive_timeout_minutes,
-        name_drift_trim_max_weight=resolved.name_drift_trim_max_weight,
-        name_drift_trim_interval_hours=resolved.name_drift_trim_interval_hours,
-    )
-
-
 
 
 def _signal_ema_span(band_sign: int, horizon_hours: int, step_hours: int) -> int | None:
