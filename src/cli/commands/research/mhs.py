@@ -142,7 +142,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
 
 
 def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
-    """Persist guarded three-minute execution outcomes without masking failures.
+    """Persist direct three-minute inventory outcomes for the legacy process command.
 
     Args:
         args: Existing process controls and distinct evidence destinations.
@@ -163,6 +163,7 @@ def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
 
     from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
     from src.mhs.process import ProcessExecutionPolicy
+    from src.mhs.resources import MhsMemoryBudget
     from src.mhs.process_backtest import (
         PROCESS_INVENTORY_CERTIFICATION_LEVEL,
         PROCESS_INVENTORY_REPORT_PATH,
@@ -179,6 +180,15 @@ def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
         raise SystemExit(f"execution-timeframe must be 3m, got {getattr(args, 'execution_timeframe')!r}")
     policy = ProcessExecutionPolicy(
         tracking_error_threshold=getattr(args, "rebalance_tracking_error_threshold", None),
+    )
+    defaults = MhsMemoryBudget()
+    total = getattr(args, "total_tree_pss_bytes", None)
+    replay = getattr(args, "replay_tree_pss_bytes", None)
+    reserve = getattr(args, "min_available_bytes", None)
+    budget = MhsMemoryBudget(
+        total_tree_pss_bytes=defaults.total_tree_pss_bytes if total is None else total,
+        replay_tree_pss_bytes=defaults.replay_tree_pss_bytes if replay is None else replay,
+        min_available_bytes=defaults.min_available_bytes if reserve is None else reserve,
     )
     output_arg = getattr(args, "output", None)
     failure_arg = getattr(args, "failure_output", None)
@@ -210,7 +220,9 @@ def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
     start = pd.Timestamp(args.start, tz="UTC") if getattr(args, "start", None) else DISCOVERY_START
     end = pd.Timestamp(args.end, tz="UTC") if getattr(args, "end", None) else PROCESS_EVALUATION_CEILING
     try:
-        report = evaluate_process_inventory_backtest(start, end, data_root=args.data_root, execution_policy=policy)
+        report = evaluate_process_inventory_backtest(
+            start, end, data_root=args.data_root, execution_policy=policy, memory_budget=budget,
+        )
     except ProcessInventoryBacktestError as exc:
         try:
             persist_process_inventory_failure(exc.report, failure_output)
@@ -844,7 +856,10 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)
     process = portfolio_sub.add_parser(
         "mhs-process-backtest",
-        help="Continuous causal MHS process backtest on the 1h ledger proxy (never a deploy verdict)",
+        help=(
+            "Direct 3m inventory evaluation with comparative hourly evidence "
+            "(compatibility path; use `backtest mhs` for supervised execution)"
+        ),
     )
     process.add_argument("--start", default=None)
     process.add_argument("--end", default=None)
@@ -855,8 +870,11 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         default=None,
         help="Research-only portfolio L1 adoption threshold before volatility sizing; omitted preserves baseline.",
     )
-    process.add_argument("--output", default=None, help="Explicit JSON proxy evidence destination.")
+    process.add_argument("--output", default=None, help="Explicit JSON 3m inventory primary destination.")
     process.add_argument("--failure-output", default=None, help="Dedicated JSON failure diagnostics destination.")
     process.add_argument("--targets-output", default=None, help="Optional parquet export of exact sized targets.")
     process.add_argument("--execution-timeframe", choices=["3m"], default="3m", help="Execution replay resolution; fixed to 3m.")
+    process.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
+    process.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
+    process.add_argument("--min-available-bytes", type=int, default=None, help="Minimum effective physical headroom in bytes.")
     process.set_defaults(handler=_run_mhs_process_backtest)

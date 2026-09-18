@@ -108,11 +108,16 @@ def _materialize_execution_piece(
     window_start: pd.Timestamp,
     window_end: pd.Timestamp,
     logical_partition: tuple[int, int],
+    initial_swap_bytes: int | None = None,
 ) -> ExecutionReplayWindow:
-    """Decode, align and admit one physical piece without changing decisions."""
+    """Decode, align and admit one physical piece without changing decisions.
+
+    Args:
+        initial_swap_bytes: Observed run-entry process-tree swap baseline; existing swapped pages are not classified as growth.
+    """
     bars = len(piece_grid)
     estimated = int(allocation.fixed_bytes) + bars * int(allocation.bytes_per_bar) + int(allocation.decoder_bytes)
-    assert_mhs_allocation_budget(estimated_bytes=estimated, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes)
+    assert_mhs_allocation_budget(estimated_bytes=estimated, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, stage="process_execution_piece", initial_swap_bytes=initial_swap_bytes)
     symbol_frames = _load_window_minute_frames(root, roster, piece_grid[0], piece_grid[-1], timeframe)
     aligned = _build_window_frames(symbol_frames, roster, piece_grid[0], piece_grid[-1], piece_grid, timeframe)
     if aligned is None:
@@ -191,6 +196,7 @@ def _iter_mhs_execution_windows(
     budget_bytes: int | None = None,
     reserve_bytes: int | None = None,
     execution_bound_count: int = 2,
+    initial_swap_bytes: int | None = None,
 ) -> Iterator[MhsExecutionWindow]:
     """Stream completed three-minute bars within a half-open evaluation range.
 
@@ -209,6 +215,7 @@ def _iter_mhs_execution_windows(
         budget_bytes: Process-tree allocation budget.
         reserve_bytes: Minimum available physical memory.
         execution_bound_count: Positive number of concurrently live replay bounds used to account for bound-specific staging memory.
+        initial_swap_bytes: Observed run-entry process-tree swap baseline; existing swapped pages are not classified as growth.
 
     Returns:
         Chronological windows containing only bars published by the fence.
@@ -319,7 +326,7 @@ def _iter_mhs_execution_windows(
                 piece_grid=minute_grid, piece_weights=w_weights, piece_signals=w_signals,
                 roster=roster, columns=columns, root=root, timeframe=timeframe,
                 funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                allocation=legacy_alloc, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes,
+                allocation=legacy_alloc, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
                 window_start=grid_start, window_end=grid_end, logical_partition=(i0, i1),
             )
             yield window
@@ -389,7 +396,7 @@ def _iter_mhs_execution_windows(
                 piece_grid=full_grid, piece_weights=w_weights, piece_signals=w_signals,
                 roster=roster, columns=columns, root=root, timeframe=timeframe,
                 funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes,
+                allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
                 window_start=grid_start, window_end=grid_end, logical_partition=(i0, i1),
             )
             yield window
@@ -435,7 +442,7 @@ def _iter_mhs_execution_windows(
                     piece_grid=piece_grid, piece_weights=empty_weights, piece_signals=empty_signals,
                     roster=roster, columns=columns, root=root, timeframe=timeframe,
                     funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                    allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes,
+                    allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
                     window_start=piece_grid[0], window_end=piece_grid[-1] + step,
                     logical_partition=(i0, i1),
                 )
@@ -467,7 +474,7 @@ def _iter_mhs_execution_windows(
                 piece_grid=piece_grid, piece_weights=piece_weights, piece_signals=piece_signals,
                 roster=roster, columns=columns, root=root, timeframe=timeframe,
                 funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes,
+                allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
                 window_start=piece_grid[0], window_end=piece_end, logical_partition=(i0, i1),
             )
             yield window
@@ -502,7 +509,7 @@ def _iter_mhs_execution_windows(
                     piece_grid=tail_grid, piece_weights=empty_weights, piece_signals=empty_signals,
                     roster=roster, columns=columns, root=root, timeframe=timeframe,
                     funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                    allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes,
+                    allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
                     window_start=tail_grid[0], window_end=piece_end, logical_partition=(i0, i1),
                 )
                 yield window

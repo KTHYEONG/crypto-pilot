@@ -1108,7 +1108,7 @@ def test_mhs_process_backtest_threads_explicit_policy(monkeypatch, tmp_path) -> 
 
     captured: dict = {}
 
-    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None):
+    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
         captured["policy"] = execution_policy
         captured["data_root"] = data_root
         return _fake_inventory_report()
@@ -1154,7 +1154,7 @@ def test_mhs_process_backtest_supports_legacy_namespace(monkeypatch) -> None:
 
     seen: dict = {}
 
-    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None):
+    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
         seen["policy"] = execution_policy
         return _fake_inventory_report()
 
@@ -1210,7 +1210,7 @@ def test_process_backtest_routes_to_inventory_evaluator(monkeypatch) -> None:
 
     called: dict = {}
 
-    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None):
+    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
         called["called"] = True
         called["data_root"] = data_root
         called["policy"] = execution_policy
@@ -1376,7 +1376,7 @@ def test_guarded_allocation_fails_closed_with_evidence(monkeypatch) -> None:
     with pytest.raises(DataIntegrityError, match=r"budget|reserve"):
         assert_mhs_allocation_budget(estimated_bytes=10**12, budget_bytes=1, reserve_bytes=None)
 
-    def _boom(start, end, *, data_root=None, execution_policy=None):
+    def _boom(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
         raise DataIntegrityError("replay provenance failed")
 
     monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
@@ -1444,7 +1444,7 @@ def test_process_backtest_typed_failure_writes_diagnostics(monkeypatch, tmp_path
     typed.__cause__ = cause
     captured: dict = {}
 
-    def _boom(start, end, *, data_root=None, execution_policy=None):
+    def _boom(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
         raise typed
 
     def _spy_failure(report, output):
@@ -1616,3 +1616,64 @@ def test_process_backtest_completed_reporting(monkeypatch, tmp_path, caplog) -> 
     for token in ("wall_s=", "cpu_s=", "peak_rss=", "peak_pss=", "peak_uss=", "min_available="):
         assert token in messages
 
+
+
+def test_mhs_process_backtest_threads_explicit_budget(monkeypatch, tmp_path) -> None:
+    """Legacy resource override: explicit byte controls reach the evaluator as validated limits."""
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+    from src.mhs.resources import MhsMemoryBudget
+
+    captured: dict = {}
+
+    def _spy_evaluate(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
+        captured["memory_budget"] = memory_budget
+        return _fake_inventory_report()
+
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _spy_evaluate)
+    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
+    parser = _process_parser()
+    defaults = {action.dest: action.default for action in parser._actions}
+    assert defaults["total_tree_pss_bytes"] is None
+    assert defaults["replay_tree_pss_bytes"] is None
+    assert defaults["min_available_bytes"] is None
+    out = tmp_path / "custom.json"
+    args = parser.parse_args(
+        ["--output", str(out),
+         "--total-tree-pss-bytes", str(4 * 2**30),
+         "--replay-tree-pss-bytes", str(3 * 2**30),
+         "--min-available-bytes", str(2 * 2**30)]
+    )
+    mhs_cli._run_mhs_process_backtest(args)
+    assert captured["memory_budget"] == MhsMemoryBudget(
+        total_tree_pss_bytes=4 * 2**30,
+        replay_tree_pss_bytes=3 * 2**30,
+        min_available_bytes=2 * 2**30,
+    )
+    captured.clear()
+    args = parser.parse_args(["--output", str(out)])
+    mhs_cli._run_mhs_process_backtest(args)
+    assert captured["memory_budget"] == MhsMemoryBudget()
+    args = parser.parse_args(["--replay-tree-pss-bytes", str(4 * 2**30)])
+    with pytest.raises(ValueError, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(args)
+
+
+def test_mhs_process_backtest_legacy_help_marks_compatibility() -> None:
+    """Legacy direct compatibility: help describes 3m inventory evidence and points at backtest mhs."""
+    import argparse
+
+    import src.cli.commands.research.mhs as mhs_cli
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    mhs_cli.add_mhs_commands(sub)
+    pseudo = next(a for a in sub._choices_actions if a.dest == "mhs-process-backtest")
+    assert "backtest mhs" in pseudo.help
+    assert "3m" in pseudo.help
+    parser = sub.choices["mhs-process-backtest"]
+    output_action = next(a for a in parser._actions if a.dest == "output")
+    assert "3m" in output_action.help
+    assert "proxy" not in output_action.help
+    assert mhs_cli._run_mhs_process_backtest.__doc__.startswith(
+        "Persist direct three-minute inventory outcomes for the legacy process command."
+    )
