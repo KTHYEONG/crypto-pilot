@@ -1397,3 +1397,222 @@ def test_comparable_benchmark_requires_same_workload_evidence() -> None:
     assert pb.PROCESS_INVENTORY_CERTIFICATION_LEVEL == "process_inventory_3m"
     assert str(pb.PROCESS_INVENTORY_REPORT_PATH) == "docs/results/mhs_process_3m_backtest.json"
 
+
+def _typed_failure_report():
+    import pandas as pd
+
+    import src.mhs.process_backtest as pb
+    from src.mhs.contracts import MhsResourceMeasurement
+    from src.mhs.evaluation.integrity import SOURCE_GAP_EXCLUDED_SYMBOLS
+    from src.mhs.process import ProcessExecutionPolicy
+
+    return pb.ProcessInventoryFailureReport(
+        status="failed",
+        start=pd.Timestamp("2022-01-01", tz="UTC"),
+        end=pd.Timestamp("2022-01-04", tz="UTC"),
+        data_root=None,
+        execution_policy=ProcessExecutionPolicy(None),
+        stage="process_3m_window_1",
+        error_code="DATA_INTEGRITY",
+        error_type="DataIntegrityError",
+        error_message="partialEvaluatorFailed",
+        total_decisions=3,
+        validated_decisions=2,
+        completed_decisions=1,
+        completed_windows=1,
+        completed_decision_start=pd.Timestamp("2022-01-01", tz="UTC"),
+        completed_decision_end=pd.Timestamp("2022-01-01", tz="UTC"),
+        source_gaps=(),
+        source_gap_excluded_symbols=tuple(sorted(SOURCE_GAP_EXCLUDED_SYMBOLS)),
+        resource_measurements=(MhsResourceMeasurement(stage="s", elapsed_ms=1, rss_bytes=2),),
+        memory_stats=None,
+    )
+
+
+def test_process_backtest_typed_failure_writes_diagnostics(monkeypatch, tmp_path, caplog) -> None:
+    """Partial typed error persists failure JSON without success or targets."""
+    import logging
+
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    failure_report = _typed_failure_report()
+    cause = pb.DataIntegrityError("partialEvaluatorFailed")
+    typed = pb.ProcessInventoryBacktestError(failure_report)
+    typed.__cause__ = cause
+    captured: dict = {}
+
+    def _boom(start, end, *, data_root=None, execution_policy=None):
+        raise typed
+
+    def _spy_failure(report, output):
+        captured["report"] = report
+        captured["output"] = output
+        return output
+
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
+    monkeypatch.setattr(pb, "persist_process_inventory_failure", _spy_failure)
+    monkeypatch.setattr(
+        pb, "persist_process_inventory_report",
+        lambda *a, **k: pytest.fail("primary must not persist on failure"),
+    )
+    monkeypatch.setattr(
+        pb, "persist_process_targets",
+        lambda *a, **k: pytest.fail("targets must not persist on failure"),
+    )
+    out = tmp_path / "primary.json"
+    fail = tmp_path / "primary.failure.json"
+    args = _process_parser().parse_args(["--output", str(out), "--failure-output", str(fail)])
+    with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"), pytest.raises(
+        pb.ProcessInventoryBacktestError
+    ):
+        mhs_cli._run_mhs_process_backtest(args)
+    assert captured["report"] is failure_report
+    assert str(captured["output"]) == str(fail)
+    assert not out.exists()
+    assert "status=failed" in " ".join(r.message for r in caplog.records)
+    assert "stage=process_3m_window_1" in " ".join(r.message for r in caplog.records)
+
+
+def test_process_backtest_double_failure_preserves_cause(monkeypatch, tmp_path, caplog) -> None:
+    """Failure-persistence errors are logged while the evaluation cause survives."""
+    import logging
+
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    failure_report = _typed_failure_report()
+    cause = pb.DataIntegrityError("partialEvaluatorFailed")
+    typed = pb.ProcessInventoryBacktestError(failure_report)
+    typed.__cause__ = cause
+
+    monkeypatch.setattr(
+        pb, "evaluate_process_inventory_backtest",
+        lambda *a, **k: (_ for _ in ()).throw(typed),
+    )
+    monkeypatch.setattr(
+        pb, "persist_process_inventory_failure",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    args = _process_parser().parse_args(
+        ["--output", str(tmp_path / "p.json"), "--failure-output", str(tmp_path / "p.failure.json")]
+    )
+    with caplog.at_level(logging.ERROR, logger="MhsHorizonDiagnosticCli"), pytest.raises(
+        pb.ProcessInventoryBacktestError
+    ) as excinfo:
+        mhs_cli._run_mhs_process_backtest(args)
+    assert excinfo.value is typed
+    assert excinfo.value.__cause__ is cause
+    messages = " ".join(r.message for r in caplog.records)
+    assert "status=failed" in messages
+    assert "disk full" in messages
+
+
+def test_process_backtest_path_collisions_fail_fast(monkeypatch, tmp_path) -> None:
+    """Alias and completed-artifact collisions fail before evaluation."""
+    import json
+
+    import pytest
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+    from src.mhs.process_backtest import PROCESS_REPORT_PATH
+
+    def _boom(*a, **k):
+        raise AssertionError("evaluator must not run")
+
+    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
+    out = tmp_path / "p.json"
+    with pytest.raises(SystemExit, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(
+            _process_parser().parse_args(["--output", str(out), "--failure-output", str(out)])
+        )
+    with pytest.raises(SystemExit, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(
+            _process_parser().parse_args(["--output", str(PROCESS_REPORT_PATH)])
+        )
+    with pytest.raises(SystemExit, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(
+            _process_parser().parse_args(
+                ["--output", str(out), "--targets-output", str(out.with_suffix(".json"))]
+            )
+        )
+    done = tmp_path / "done.failure.json"
+    done.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    with pytest.raises(SystemExit, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(
+            _process_parser().parse_args(["--output", str(out), "--failure-output", str(done)])
+        )
+    assert json.loads(done.read_text(encoding="utf-8"))["status"] == "completed"
+    with pytest.raises(SystemExit, match=r".+"):
+        mhs_cli._run_mhs_process_backtest(
+            _process_parser().parse_args(
+                ["--output", str(out), "--failure-output", str(tmp_path / "bad.txt")]
+            )
+        )
+    aliased = tmp_path / "aliased.parquet"
+    try:
+        aliased.symlink_to(out)
+    except OSError:
+        aliased = None
+    if aliased is not None:
+        with pytest.raises(SystemExit, match=r".+"):
+            mhs_cli._run_mhs_process_backtest(
+                _process_parser().parse_args(
+                    ["--output", str(out), "--targets-output", str(aliased)]
+                )
+            )
+
+
+def test_process_backtest_unreadable_failure_output_proceeds(monkeypatch, tmp_path) -> None:
+    """Corrupt pre-existing failure bytes do not block a fresh evaluation."""
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    monkeypatch.setattr(
+        pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report()
+    )
+    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
+    out = tmp_path / "p.json"
+    corrupt = tmp_path / "p.failure.json"
+    corrupt.write_text("not-json{{{", encoding="utf-8")
+    mhs_cli._run_mhs_process_backtest(
+        _process_parser().parse_args(["--output", str(out), "--failure-output", str(corrupt)])
+    )
+
+
+def test_process_backtest_completed_reporting(monkeypatch, tmp_path, caplog) -> None:
+    """Successful dispatch keeps primary values with completed markers and units."""
+    import json
+    import logging
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.process_backtest as pb
+
+    monkeypatch.setattr(
+        pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report()
+    )
+
+    def _persist(report, output):
+        payload = {"status": "completed", "execution_timeframe": "3m", "marker": 1}
+        output.write_text(json.dumps(payload), encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(pb, "persist_process_inventory_report", _persist)
+    out = tmp_path / "primary.json"
+    args = _process_parser().parse_args(["--output", str(out)])
+    with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"):
+        mhs_cli._run_mhs_process_backtest(args)
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["execution_timeframe"] == "3m"
+    messages = " ".join(r.message for r in caplog.records)
+    assert "completed" in messages
+    assert str(out) in messages
+    for token in ("wall_s=", "cpu_s=", "peak_rss=", "peak_pss=", "peak_uss=", "min_available="):
+        assert token in messages
+

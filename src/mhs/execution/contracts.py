@@ -157,13 +157,10 @@ class ExecutionReplayWindow:
     quote_volumes: pd.DataFrame | None = None
     funding_known: pd.DataFrame | None = None
     bar_available_at: pd.DatetimeIndex | None = None
-    # Logical cost-clock partition set by the window generator: the
-    # ``(first_decision_ordinal, decision_count)`` range of the 31-day logical
-    # decision partition this window belongs to. ``None`` preserves the legacy
-    # direct-construction semantics (every window is its own observation
-    # range). Windows sharing one key belong to one logical partition: cost
-    # observation state accumulates across them and settles once, so an IO
-    # split alone can never trigger a spread update.
+    # Half-open global decision-ordinal range `(first_ordinal, stop_ordinal)` of the
+    # existing logical cost partition. Physical pieces sharing this key accumulate
+    # one observation and settle costs once. None retains legacy direct-construction
+    # semantics where each window is its own observation range.
     logical_partition: tuple[int, int] | None = None
 
 
