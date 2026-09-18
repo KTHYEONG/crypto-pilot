@@ -1,16 +1,16 @@
-"""Supervised production 3m process evaluation runner.
+"""Supervised source-owned three-minute process evaluation.
 
-The supervisor launches the existing production CLI in a dedicated process
+The supervisor launches the source-owned worker module in a dedicated process
 group, waits for actual termination, samples the workload tree, and persists
-an atomic outcome report. It never imports a scratch strategy.
+an atomic outcome report.
 """
 
 from __future__ import annotations
 
-import argparse
 import dataclasses
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -26,16 +26,29 @@ from typing import Literal
 
 import pandas as pd
 
+from src.mhs.process import ProcessExecutionPolicy
+from src.mhs.process_backtest import (
+    PROCESS_INVENTORY_REPORT_PATH,
+    PROCESS_POLICY_REPORT_PATH,
+    PROCESS_REPORT_PATH,
+)
+from src.mhs.resources import (
+    MhsMemoryBudget,
+    current_mhs_headroom_bytes,
+    resolve_mhs_memory_budget,
+)
+
 _logger = logging.getLogger(__name__)
 
-PSS_LIMIT_BYTES: int = int(2.5 * 2**30)
-HEADROOM_FLOOR_BYTES: int = 2 * 2**30
 GRACE_SECONDS: float = 5.0
 HEARTBEAT_SECONDS: float = 30.0
 CPU_SCOPE: str = "waited workload user+system CPU seconds via GNU time when available"
 MEMORY_SCOPE: str = (
     "sampled child-tree PSS/USS bytes at poll interval; "
     "GNU max RSS is maximum individual-process bytes"
+)
+_RESOURCE_ERROR_CODES: frozenset[str] = frozenset(
+    {"MEMORY_BUDGET", "MEMORY_RESERVE", "SWAP_GROWTH", "RESOURCE_TELEMETRY"}
 )
 _GNU_LINE_RE = re.compile(
     r"MHS_GNU_TIME elapsed=([0-9.eE+-]+) user=([0-9.eE+-]+) sys=([0-9.eE+-]+) maxrss=([0-9]+)"
@@ -70,6 +83,7 @@ class MhsSupervisedRun:
     cpu_scope: str
     memory_scope: str
     termination_reason: str | None
+    memory_budget: MhsMemoryBudget
 
 
 def _workload_pss_uss(pid: int) -> tuple[int, int]:
@@ -94,34 +108,25 @@ def _workload_pss_uss(pid: int) -> tuple[int, int]:
     return pss, uss
 
 
-def _system_headroom_bytes() -> int:
-    """Minimum of host available and known cgroup remaining bytes."""
+def _workload_swap_bytes(pid: int) -> int | None:
+    """Return swap bytes for the supervised process tree, or null if unavailable."""
     import psutil
 
-    available = int(psutil.virtual_memory().available)
-    remaining: int | None = None
-    try:
-        with open("/sys/fs/cgroup/memory.current", encoding="utf-8") as handle:
-            current = int(handle.read().strip())
-        with open("/sys/fs/cgroup/memory.max", encoding="utf-8") as handle:
-            raw = handle.read().strip()
-        if raw not in ("", "max"):
-            remaining = int(raw) - current
-    except (OSError, ValueError):
-        remaining = None
-    if remaining is not None and remaining >= 0:
-        return min(available, remaining)
-    return available
-
-
-def _swap_used_bytes() -> int | None:
-    """Current swap used bytes, or null when unreadable."""
-    try:
-        import psutil
-
-        return int(psutil.swap_memory().used)
-    except Exception:  # noqa: BLE001
-        return None
+    root = psutil.Process(pid)
+    procs = [root, *root.children(recursive=True)]
+    total = 0
+    observed = False
+    for proc in procs:
+        try:
+            info = proc.memory_full_info()
+            value = getattr(info, "swap", None)
+            if value is None:
+                raise OSError("process swap telemetry unavailable")
+            total += int(value)
+            observed = True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return total if observed else None
 
 
 def _gnu_time_prefix() -> list[str]:
@@ -204,6 +209,27 @@ def _primary_completed(path: Path) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "completed"
 
 
+def _failure_resource_code(path: Path) -> str | None:
+    """Typed worker failure code from the dedicated failure artifact, if present."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(payload, dict):
+        code = payload.get("error_code")
+        if isinstance(code, str):
+            return code
+    return None
+
+
+def _validate_positive_interval(value: float | None, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a positive finite number, got {value!r}")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric <= 0:
+        raise ValueError(f"{label} must be a positive finite number, got {value!r}")
+
+
 def run_mhs_process_backtest(
     *, start: pd.Timestamp, end: pd.Timestamp, data_root: str | None,
     output: Path, failure_output: Path, run_output: Path,
@@ -211,27 +237,27 @@ def run_mhs_process_backtest(
     tracking_error_threshold: float | None = None,
     timeout_seconds: float | None = None,
     poll_seconds: float = 0.25,
+    memory_budget: MhsMemoryBudget | None = None,
 ) -> MhsSupervisedRun:
-    """Wait for production evaluation termination and persist scoped measurements.
+    """Wait for a source-owned three-minute evaluation and persist observed outcome.
 
     Args:
-        start: Explicit timezone-aware input start.
+        start: Explicit timezone-aware source start.
         end: Explicit timezone-aware registered evaluation end.
         data_root: Existing OHLCV root override.
-        output: Fresh primary performance destination.
-        failure_output: Fresh dedicated domain failure destination.
+        output: Fresh primary inventory report destination.
+        failure_output: Fresh domain-failure evidence destination.
         run_output: Fresh supervisor outcome destination.
         targets_output: Optional fresh exact-target parquet destination.
-        tracking_error_threshold: Existing process adoption control.
-        timeout_seconds: Positive optional wall timeout, not a strategy horizon.
-        poll_seconds: Positive observation interval in seconds.
-
+        tracking_error_threshold: Existing optional process adoption control.
+        timeout_seconds: Optional positive finite wall timeout.
+        poll_seconds: Positive finite resource observation interval.
+        memory_budget: Stage ceilings and reserve shared with the worker.
     Returns:
-        Final child outcome after process-group completion and atomic reporting.
-
+        Outcome after process-group termination and atomic evidence persistence.
     Raises:
-        ValueError: Controls or fresh/distinct evidence destinations are invalid.
-        OSError: Child launch or supervisor evidence persistence fails.
+        ValueError: Controls or fresh/distinct destinations are invalid.
+        OSError: Launch or supervisor evidence persistence fails.
     """
     if not isinstance(start, pd.Timestamp) or start.tzinfo is None:
         raise ValueError("start must be a timezone-aware Timestamp")
@@ -250,24 +276,14 @@ def run_mhs_process_backtest(
         not isinstance(targets_output, Path) or targets_output.suffix != ".parquet"
     ):
         raise ValueError("targets_output must be a parquet path")
-    if not isinstance(poll_seconds, (int, float)) or not float(poll_seconds) > 0:
-        raise ValueError("poll_seconds must be positive")
-    if timeout_seconds is not None and (
-        not isinstance(timeout_seconds, (int, float)) or not float(timeout_seconds) > 0
-    ):
-        raise ValueError("timeout_seconds must be positive")
+    _validate_positive_interval(poll_seconds, "poll_seconds")
+    if timeout_seconds is not None:
+        _validate_positive_interval(timeout_seconds, "timeout_seconds")
     if tracking_error_threshold is not None and not isinstance(
         tracking_error_threshold, (int, float)
     ):
         raise ValueError("tracking_error_threshold must be numeric")
-    try:
-        from src.mhs.process_backtest import (
-            PROCESS_INVENTORY_REPORT_PATH,
-            PROCESS_POLICY_REPORT_PATH,
-            PROCESS_REPORT_PATH,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError(f"reserved destination lookup failed: {exc}") from exc
+    ProcessExecutionPolicy(tracking_error_threshold=tracking_error_threshold)
     reserved = {
         PROCESS_REPORT_PATH.resolve(),
         PROCESS_POLICY_REPORT_PATH.resolve(),
@@ -292,11 +308,14 @@ def run_mhs_process_backtest(
         seen.add(resolved)
         if os.path.lexists(candidate):
             raise ValueError(f"{label} must be fresh: {candidate} already exists")
+    budget = resolve_mhs_memory_budget(memory_budget)
     command = [
-        sys.executable, "-m", "src.cli.main",
-        "research", "run", "portfolio", "mhs-process-backtest",
+        sys.executable, "-m", "src.application.mhs_worker",
         "--start", start.isoformat(), "--end", end.isoformat(),
         "--output", str(output), "--failure-output", str(failure_output),
+        "--total-tree-pss-bytes", str(budget.total_tree_pss_bytes),
+        "--replay-tree-pss-bytes", str(budget.replay_tree_pss_bytes),
+        "--min-available-bytes", str(budget.min_available_bytes),
     ]
     if data_root is not None:
         command += ["--data-root", str(data_root)]
@@ -310,27 +329,25 @@ def run_mhs_process_backtest(
     pss_peak: int | None = None
     uss_peak: int | None = None
     min_available: int | None = None
-    swap_baseline = _swap_used_bytes()
+    swap_baseline: int | None = None
     swap_growth: int | None = None
     timed_out = False
     resource_reason: str | None = None
     interrupted = False
     last_heartbeat = wall_start
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        log_handle = open(log_path, "w", encoding="utf-8")  # noqa: PTH123
-    except OSError:
-        raise
+    log_handle = open(log_path, "w", encoding="utf-8")  # noqa: PTH123
     proc: subprocess.Popen[bytes] | None = None
     try:
-        try:
-            proc = subprocess.Popen(  # noqa: S603
-                scoped_command, stdout=log_handle, stderr=subprocess.STDOUT,
-                start_new_session=True, shell=False,
-            )
-        except OSError:
-            raise
+        proc = subprocess.Popen(  # noqa: S603
+            scoped_command, stdout=log_handle, stderr=subprocess.STDOUT,
+            start_new_session=True, shell=False,
+        )
         pid = proc.pid
+        try:
+            swap_baseline = _workload_swap_bytes(pid)
+        except Exception:  # noqa: BLE001 - optional measurement
+            swap_baseline = None
         while True:
             try:
                 returncode = proc.wait(timeout=float(poll_seconds))
@@ -350,7 +367,7 @@ def run_mhs_process_backtest(
                 break
             try:
                 pss, uss = _workload_pss_uss(pid)
-                headroom = _system_headroom_bytes()
+                headroom = current_mhs_headroom_bytes()
             except Exception as tel_exc:  # noqa: BLE001
                 resource_reason = f"missing safety telemetry: {tel_exc}"
                 _terminate_group(proc)
@@ -360,18 +377,25 @@ def run_mhs_process_backtest(
             pss_peak = pss if pss_peak is None else max(pss_peak, pss)
             uss_peak = uss if uss_peak is None else max(uss_peak, uss)
             min_available = headroom if min_available is None else min(min_available, headroom)
-            swap_current = _swap_used_bytes()
+            try:
+                swap_current = _workload_swap_bytes(pid)
+            except Exception:  # noqa: BLE001 - optional measurement
+                swap_current = None
             if swap_baseline is not None and swap_current is not None:
                 growth = swap_current - swap_baseline
                 if growth > 0:
                     swap_growth = growth if swap_growth is None else max(swap_growth, growth)
-            if pss > PSS_LIMIT_BYTES:
-                resource_reason = f"sampled tree PSS {pss} exceeds {PSS_LIMIT_BYTES}"
+            if pss > budget.total_tree_pss_bytes:
+                resource_reason = (
+                    f"sampled tree PSS {pss} exceeds {budget.total_tree_pss_bytes}"
+                )
                 _terminate_group(proc)
                 returncode = proc.wait()
                 break
-            if headroom < HEADROOM_FLOOR_BYTES:
-                resource_reason = f"headroom {headroom} below {HEADROOM_FLOOR_BYTES}"
+            if headroom < budget.min_available_bytes:
+                resource_reason = (
+                    f"headroom {headroom} below {budget.min_available_bytes}"
+                )
                 _terminate_group(proc)
                 returncode = proc.wait()
                 break
@@ -394,14 +418,10 @@ def run_mhs_process_backtest(
     wall_seconds = time.monotonic() - wall_start
     if proc is None:
         raise OSError("child process failed to launch")
-    if returncode is None:
-        try:
-            returncode = proc.wait(timeout=GRACE_SECONDS)
-        except Exception:  # noqa: BLE001
-            returncode = proc.poll()
     cpu_seconds, gnu_rss = _parse_gnu_metrics(log_path)
     primary_written = output.exists()
     failure_written = failure_output.exists()
+    failure_code = _failure_resource_code(failure_output) if failure_written else None
     exit_code: int | None = returncode if returncode is not None and returncode >= 0 else None
     signal_number: int | None = -returncode if returncode is not None and returncode < 0 else None
     termination_reason: str | None = None
@@ -418,6 +438,9 @@ def run_mhs_process_backtest(
     elif interrupted:
         status = "interrupted"
         termination_reason = "supervisor interrupted"
+    elif failure_code in _RESOURCE_ERROR_CODES:
+        status = "resource_rejected"
+        termination_reason = f"worker reported {failure_code}"
     elif returncode is not None and returncode < 0:
         status = "signaled"
         termination_reason = f"signal {-returncode}"
@@ -454,62 +477,7 @@ def run_mhs_process_backtest(
         cpu_scope=CPU_SCOPE,
         memory_scope=MEMORY_SCOPE,
         termination_reason=termination_reason,
+        memory_budget=budget,
     )
-    _atomic_write_json(run_output, dataclasses.asdict(run))  # type: ignore[arg-type]
+    _atomic_write_json(run_output, dataclasses.asdict(run))
     return run
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Supervised production 3m process evaluation.")
-    parser.add_argument("--start", required=True)
-    parser.add_argument("--end", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--failure-output", required=True)
-    parser.add_argument("--run-output", required=True)
-    parser.add_argument("--data-root", default=None)
-    parser.add_argument("--targets-output", default=None)
-    parser.add_argument("--rebalance-tracking-error-threshold", type=float, default=None)
-    parser.add_argument("--timeout-seconds", type=float, default=None)
-    parser.add_argument("--poll-seconds", type=float, default=0.25)
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Run the production process CLI under explicit resource supervision.
-
-    Args:
-        argv: Explicit controls or command-line arguments.
-
-    Returns:
-        Zero only for completed evaluation; nonzero for every other outcome.
-
-    Raises:
-        SystemExit: CLI arguments are invalid.
-    """
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    try:
-        start = pd.Timestamp(args.start, tz="UTC")
-        end = pd.Timestamp(args.end, tz="UTC")
-    except (ValueError, TypeError) as exc:
-        raise SystemExit(f"invalid start/end: {exc}") from exc
-    try:
-        run = run_mhs_process_backtest(
-            start=start,
-            end=end,
-            data_root=args.data_root,
-            output=Path(args.output),
-            failure_output=Path(args.failure_output),
-            run_output=Path(args.run_output),
-            targets_output=Path(args.targets_output) if args.targets_output else None,
-            tracking_error_threshold=args.rebalance_tracking_error_threshold,
-            timeout_seconds=args.timeout_seconds,
-            poll_seconds=args.poll_seconds,
-        )
-    except ValueError as exc:
-        raise SystemExit(f"invalid supervisor arguments: {exc}") from exc
-    return 0 if run.status == "completed" else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -60,11 +60,7 @@ def test_registered_complete_acceptance(tmp_path) -> None:
     """Full supervised evaluation satisfies budgets with actual outcomes reported."""
     if os.environ.get(FULL_ACCEPTANCE_ENV) != "1":
         pytest.skip("full-data acceptance requires MHS_FULL_COMPLETION_ACCEPTANCE=1")
-    from tools.mhs_process_backtest_run import (
-        HEADROOM_FLOOR_BYTES,
-        PSS_LIMIT_BYTES,
-        run_mhs_process_backtest,
-    )
+    from src.application.mhs_supervisor import run_mhs_process_backtest
 
     primary, failure, run_out, _ = _fresh_paths(tmp_path, "acceptance")
     run = run_mhs_process_backtest(
@@ -83,9 +79,9 @@ def test_registered_complete_acceptance(tmp_path) -> None:
     assert payload["status"] == "completed"
     assert payload["execution_timeframe"] == "3m"
     assert run.sampled_tree_pss_peak_bytes is not None
-    assert run.sampled_tree_pss_peak_bytes <= PSS_LIMIT_BYTES
+    assert run.sampled_tree_pss_peak_bytes <= run.memory_budget.total_tree_pss_bytes
     assert run.min_available_bytes is not None
-    assert run.min_available_bytes >= HEADROOM_FLOOR_BYTES
+    assert run.min_available_bytes >= run.memory_budget.min_available_bytes
     assert (run.process_swap_growth_bytes or 0) == 0
     assert "sampled" in run.memory_scope
 

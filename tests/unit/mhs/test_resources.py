@@ -362,22 +362,30 @@ def test_allocation_budget_rejects_invalid_inputs(monkeypatch) -> None:
     """Negative estimates and non-positive limits are rejected deterministically."""
     _admit_all(monkeypatch)
 
-    with pytest.raises(DataIntegrityError, match="estimate is invalid"):
+    with pytest.raises(ValueError, match="estimated_bytes"):
         resources.assert_mhs_allocation_budget(estimated_bytes=-1, budget_bytes=100, reserve_bytes=None)
-    with pytest.raises(DataIntegrityError, match="budget is invalid"):
+    with pytest.raises(ValueError, match="budget_bytes"):
         resources.assert_mhs_allocation_budget(estimated_bytes=1, budget_bytes=0, reserve_bytes=None)
-    with pytest.raises(DataIntegrityError, match="reserve is invalid"):
+    with pytest.raises(ValueError, match="reserve_bytes"):
         resources.assert_mhs_allocation_budget(estimated_bytes=1, budget_bytes=None, reserve_bytes=0)
 
 
 def test_allocation_budget_aborts_on_swap_growth(monkeypatch) -> None:
-    """Observed per-process swap growth aborts replay safely with diagnostics."""
+    """Swap above the run-entry baseline aborts replay safely with diagnostics."""
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 4096)
 
     with pytest.raises(DataIntegrityError, match="swap growth"):
-        resources.assert_mhs_allocation_budget(estimated_bytes=8, budget_bytes=10**12, reserve_bytes=128)
+        resources.assert_mhs_allocation_budget(
+            estimated_bytes=8, budget_bytes=10**12, reserve_bytes=128, initial_swap_bytes=0,
+        )
+    resources.assert_mhs_allocation_budget(
+        estimated_bytes=8, budget_bytes=10**12, reserve_bytes=128, initial_swap_bytes=4096,
+    )
+    resources.assert_mhs_allocation_budget(
+        estimated_bytes=8, budget_bytes=10**12, reserve_bytes=128, initial_swap_bytes=None,
+    )
 
 
 def test_tree_pss_uses_shared_page_accounting(monkeypatch) -> None:

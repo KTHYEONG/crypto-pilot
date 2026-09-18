@@ -86,17 +86,16 @@ from src.mhs.process import (
 )
 from src.mhs.regime import beta_neutralize_weights, causal_market_beta
 from src.mhs.resources import (
-    MHS_REPLAY_BUDGET_BYTES,
     MhsMemoryBudget,
     MhsResourceAdmissionError,
     ProcessTreeMemoryStats,
     _assert_execution_rss_budget,
     _assert_stage_rss_budget,
     _current_tree_swap_bytes,
-    _resolve_ram_budget,
     _StageRecorder,
     _TreeMemorySampler,
     assert_mhs_stage_allocation,
+    resolve_mhs_memory_budget,
 )
 from src.mhs.types import ExecutionSpec
 
@@ -217,7 +216,7 @@ def build_candidate_member_books(
 
 
 def _process_memory_budget(budget: MhsMemoryBudget | None) -> MhsMemoryBudget:
-    return budget if budget is not None else MhsMemoryBudget()
+    return resolve_mhs_memory_budget(budget)
 
 
 def _admit_process_stage(
@@ -258,17 +257,24 @@ def load_process_market_data(
     """
     budget = _process_memory_budget(memory_budget)
     initial_swap_bytes = _current_tree_swap_bytes()
-    span_hours = max(int((end - start).total_seconds() // 3600), 1)
     _admit_process_stage(
-        stage="process_prepare_panel", estimated_bytes=_estimate_panel_bytes(span_hours + PANEL_MIN_HISTORY_BARS, CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT),
+        stage="process_prepare_panel", estimated_bytes=0,
         budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
     )
     root = data_root or str(FUTURES_DATA_DIR / "ohlcv")
+
+    def admit_panel(estimated_bytes: int) -> None:
+        _admit_process_stage(
+            stage="process_prepare_panel", estimated_bytes=estimated_bytes,
+            budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
+        )
+
     panel = load_base_panel(
         root, "1h",
         ("close", "open", "high", "low", "quote_vol", "taker_buy_quote"),
         start, end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS,
         data_policy=MHS_DATA_POLICY_DEFAULT,
+        allocation_admission=admit_panel,
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
     grid_1h = close.index
@@ -1142,6 +1148,7 @@ def _inventory_window_stream(
     recorder: _StageRecorder,
     required_symbols: Callable[[], frozenset[str]] | None = None, *,
     progress: _ProcessInventoryProgress | None = None,
+    initial_swap_bytes: int | None = None,
 ) -> Iterator[ExecutionReplayWindow]:
     """Validate canonical targets and record observed all-bound replay coverage.
 Completed coverage advances only after the consumer returns from a yielded
@@ -1166,6 +1173,7 @@ window. Validation alone cannot certify a consumed decision or result."""
             reserve_bytes=reserve_bytes,
             execution_bound_count=2,
             required_symbols=required_symbols,
+            initial_swap_bytes=initial_swap_bytes,
         )
     ):
         n = len(window.target_weights)
@@ -1248,7 +1256,7 @@ def evaluate_process_inventory_backtest(
         raise DataIntegrityError(f"end {end} exceeds PROCESS_EVALUATION_CEILING")
     if execution_policy is not None and not isinstance(execution_policy, ProcessExecutionPolicy):
         raise ValueError("execution_policy must be a ProcessExecutionPolicy or None")
-    budget = _process_memory_budget(memory_budget)
+    budget = resolve_mhs_memory_budget(memory_budget)
     run_swap_baseline = _current_tree_swap_bytes()
     sampler = _TreeMemorySampler()
     recorder = _StageRecorder(log_run=False)
@@ -1262,10 +1270,10 @@ def evaluate_process_inventory_backtest(
     live_sets: _LiveAccumulatorSets = []
     current_stage = "preparation"
     try:
-        budget_bytes, reserve_bytes = _resolve_ram_budget(MHS_REPLAY_BUDGET_BYTES, True)
+        budget_bytes, reserve_bytes = budget.replay_tree_pss_bytes, budget.min_available_bytes
         proxy = evaluate_process_backtest(
             start, end, data_root=data_root, execution_policy=execution_policy,
-            memory_budget=memory_budget,
+            memory_budget=budget,
         )
         recorder.record("process_inventory_proxy")
         path = proxy.base
@@ -1296,6 +1304,7 @@ def evaluate_process_inventory_backtest(
             path, signal_available_at, root, window_start, window_end,
             funding_by_symbol, funding_failures, base_spec, budget_bytes,
             reserve_bytes, recorder, _live_required, progress=progress,
+            initial_swap_bytes=run_swap_baseline,
         )
         bound: _ExecutionBound = "OHLCV_IMMEDIATE_TAKER"
         base, stress = replay_execution_window_batch(

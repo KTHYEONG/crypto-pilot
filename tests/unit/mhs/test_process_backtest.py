@@ -1508,7 +1508,8 @@ def test_evaluate_inventory_rejects_invalid_inputs(monkeypatch) -> None:
         pb.evaluate_process_inventory_backtest(start, end)
     monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
     monkeypatch.setattr(
-        pb, "_resolve_ram_budget", lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("no telemetry"))
+        pb, "resolve_mhs_memory_budget",
+        lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("no telemetry")),
     )
     with pytest.raises(DataIntegrityError, match=r".+"):
         pb.evaluate_process_inventory_backtest(start, end)
@@ -1746,35 +1747,64 @@ def test_process_mask_preblocks_3m_missing_symbol(tmp_path, monkeypatch) -> None
     assert bool(data.execution_mask.drop(columns=[missing]).to_numpy().any())
 
 
-def test_inventory_replay_uses_dedicated_budget(monkeypatch) -> None:
-    """The 3m replay resolves the dedicated 1.5GiB budget into admission."""
+def test_inventory_replay_uses_single_resolved_budget(monkeypatch) -> None:
+    """One replay budget: preparation, entry admission, window planning and barriers share resolved limits."""
     import src.mhs.process_backtest as pb
-    from src.mhs.resources import MHS_REPLAY_BUDGET_BYTES
+    from src.mhs.resources import MhsMemoryBudget
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
     seen: dict = {}
-    real_resolve = pb._resolve_ram_budget
     real_iter = pb._iter_mhs_execution_windows
-
-    def _spy_resolve(max_rss_bytes, ram_guard):
-        seen["max_rss_bytes"] = max_rss_bytes
-        seen["ram_guard"] = ram_guard
-        return real_resolve(max_rss_bytes, ram_guard)
 
     def _spy_iter(*args, **kwargs):
         seen["budget_bytes"] = kwargs.get("budget_bytes")
         seen["reserve_bytes"] = kwargs.get("reserve_bytes")
         return real_iter(*args, **kwargs)
 
-    monkeypatch.setattr(pb, "_resolve_ram_budget", _spy_resolve)
+    evaluations: dict = {}
+    real_evaluate = pb.evaluate_process_backtest
+
+    def _spy_evaluate(*args, **kwargs):
+        evaluations["memory_budget"] = kwargs.get("memory_budget")
+        return real_evaluate(*args, **kwargs)
+
+    admissions: list = []
+    real_admit = pb._admit_process_stage
+
+    def _spy_admit(*, stage, estimated_bytes, budget, replay, initial_swap_bytes):
+        admissions.append((stage, budget, replay))
+        return real_admit(
+            stage=stage, estimated_bytes=estimated_bytes, budget=budget,
+            replay=replay, initial_swap_bytes=initial_swap_bytes,
+        )
+
+    barriers: list = []
+    real_window_barrier = pb._assert_execution_rss_budget
+
+    def _spy_window(stage, budget, completed, reserve_bytes=None):
+        barriers.append((budget, reserve_bytes))
+        return real_window_barrier(stage, budget, completed, reserve_bytes=reserve_bytes)
+
     monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _spy_iter)
-    pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
-    assert seen["max_rss_bytes"] == MHS_REPLAY_BUDGET_BYTES
-    assert seen["ram_guard"] is True
-    assert seen["budget_bytes"] is not None
-    assert seen["budget_bytes"] <= MHS_REPLAY_BUDGET_BYTES
-    assert seen["reserve_bytes"] is not None
+    monkeypatch.setattr(pb, "evaluate_process_backtest", _spy_evaluate)
+    monkeypatch.setattr(pb, "_admit_process_stage", _spy_admit)
+    monkeypatch.setattr(pb, "_assert_execution_rss_budget", _spy_window)
+    pb.evaluate_process_inventory_backtest(
+        targets.index[0], targets.index[-1] + pd.Timedelta(days=1), memory_budget=MhsMemoryBudget(),
+    )
+    resolved = evaluations["memory_budget"]
+    assert isinstance(resolved, MhsMemoryBudget)
+    assert seen["budget_bytes"] == resolved.replay_tree_pss_bytes
+    assert seen["reserve_bytes"] == resolved.min_available_bytes
+    assert barriers
+    for budget, reserve in barriers:
+        assert budget == resolved.replay_tree_pss_bytes
+        assert reserve == resolved.min_available_bytes
+    assert any(
+        stage == "process_replay_entry" and budget is resolved and replay
+        for stage, budget, replay in admissions
+    )
 
 
 def test_inventory_window_measured_budget_verified(monkeypatch) -> None:
@@ -2617,3 +2647,95 @@ def test_inventory_atomic_failure_cleans_temp(monkeypatch, tmp_path) -> None:
         pb.persist_process_inventory_failure(report, out)
     assert not out.exists()
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def _panel_lake(tmp_path, n_symbols: int, n_bars: int = 8):
+    start = pd.Timestamp("2021-01-01", tz="UTC")
+    grid = pd.date_range(start, periods=n_bars, freq="1h", tz="UTC")
+    ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    lake = tmp_path / "ohlcv" / "1h"
+    lake.mkdir(parents=True)
+    symbols = [f"DIM{i:04d}USDT" for i in range(n_symbols)]
+    for j, sym in enumerate(symbols):
+        close = 100.0 + j + np.arange(n_bars) * 0.01
+        pd.DataFrame({"timestamp": ms, "close": close}).to_parquet(lake / f"{sym}.parquet", index=False)
+    return str(tmp_path / "ohlcv"), grid, symbols
+
+
+def test_panel_admission_uses_actual_source_dimensions(tmp_path) -> None:
+    """Actual source dimensions: the pre-allocation estimate uses actual survivors, not 60."""
+    from src.mhs.panel import load_base_panel
+
+    root, grid, _symbols = _panel_lake(tmp_path, 65)
+    seen: list[int] = []
+    panels = load_base_panel(
+        root, "1h", ("close",), grid[0], grid[-1], partition="all", min_bars=2,
+        allocation_admission=lambda estimated: seen.append(estimated),
+    )
+    assert len(panels["close"].columns) == 65
+    assert seen == [len(grid) * 65 * 1 * 8 * 2]
+    plain = load_base_panel(root, "1h", ("close",), grid[0], grid[-1], partition="all", min_bars=2)
+    pd.testing.assert_frame_equal(panels["close"], plain["close"])
+
+
+def test_panel_admission_rejection_prevents_decoding(tmp_path, monkeypatch) -> None:
+    """Decode prevented by rejection: a rejecting callback stops wide-plane decode with sources untouched."""
+    import src.mhs.panel as panel_mod
+    from src.mhs.panel import load_base_panel
+    from src.mhs.resources import MhsResourceAdmissionError
+
+    root, grid, _symbols = _panel_lake(tmp_path, 4)
+    requested: list[list[str]] = []
+    real_read = panel_mod.pq.read_table
+
+    def _spy(path, columns=None, filters=None):
+        requested.append(list(columns or []))
+        return real_read(path, columns=columns, filters=filters)
+
+    def _reject(estimated: int) -> None:
+        raise MhsResourceAdmissionError(
+            stage="process_prepare_panel", error_code="MEMORY_BUDGET",
+            message=f"no room for {estimated}",
+        )
+
+    monkeypatch.setattr(panel_mod.pq, "read_table", _spy)
+    with pytest.raises(DataIntegrityError, match="no room"):
+        load_base_panel(
+            root, "1h", ("close",), grid[0], grid[-1], partition="all", min_bars=2,
+            allocation_admission=_reject,
+        )
+    assert requested, "discovery must run before admission"
+    assert all("close" not in cols for cols in requested)
+    assert len(list((tmp_path / "ohlcv" / "1h").glob("*.parquet"))) == 4
+
+
+def test_inventory_typed_window_failure_keeps_consumed_coverage(monkeypatch) -> None:
+    """Typed window failure evidence: a later piece rejection keeps typed code, cause and consumed coverage."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.resources import MhsResourceAdmissionError
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    made = _inventory_test_windows(targets)
+
+    def _failing_stream(*args, **kwargs):
+        yield made[0]
+        yield made[1]
+        raise MhsResourceAdmissionError(
+            stage="process_execution_piece", error_code="SWAP_GROWTH", message="swap grew mid-replay",
+        )
+
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _failing_stream)
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    report = excinfo.value.report
+    assert report.error_code == "SWAP_GROWTH"
+    assert report.stage == "process_execution_piece"
+    assert report.error_type == "MhsResourceAdmissionError"
+    assert isinstance(excinfo.value.__cause__, MhsResourceAdmissionError)
+    assert report.total_decisions == len(targets)
+    assert report.validated_decisions == 2
+    assert report.completed_decisions == 2
+    assert report.completed_windows == 2
+    assert report.completed_decision_start == targets.index[0]
+    assert report.completed_decision_end == targets.index[1]

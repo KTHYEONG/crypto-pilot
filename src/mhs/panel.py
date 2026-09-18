@@ -10,7 +10,7 @@ import glob
 import logging
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -144,6 +144,7 @@ def load_base_panel(
     data_policy: str = DATA_POLICY_LEGACY,
     *,
     quarantine: PanelQuarantine | None = None,
+    allocation_admission: Callable[[int], None] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Read ``<root>/<interval>/<SYMBOL>.parquet`` into wide per-column panels.
 
@@ -154,6 +155,12 @@ def load_base_panel(
     input-data contract: ``'legacy'`` keeps every bar, ``'zombie_mask_v1'``
     masks causally-detected zombie (long flat) bars from both the survivor
     count and every panel column.
+
+    Args:
+        allocation_admission: Optional pre-allocation admission of additional dense panel and conversion working memory after source survivor discovery. Rejection preserves source coverage and prevents wide-plane allocation.
+
+    Raises:
+        DataIntegrityError: Supplied resource admission rejects wide panel construction.
     """
     if data_policy not in DATA_POLICIES:
         raise ValueError(f"unknown data_policy '{data_policy}' (shared default {MHS_DATA_POLICY_DEFAULT})")
@@ -214,6 +221,9 @@ def load_base_panel(
 
     if not survivors:
         raise ValueError("no symbol survived the panel filters")
+
+    if allocation_admission is not None:
+        allocation_admission(len(grid) * len(survivors) * len(columns) * 8 * 2)
 
     values = {
         column: np.full((len(grid), len(survivors)), np.nan, dtype="float64")
