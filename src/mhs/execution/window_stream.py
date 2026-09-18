@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.execution.contracts import ExecutionReplayWindow, align_funding_with_knowledge
+from src.mhs.execution.contracts import ExecutionReplayWindow, align_funding_with_knowledge, funding_coverage_gaps
 from src.mhs.marks import _build_window_frames, _cached_mark_panel, _load_window_minute_frames
 from src.mhs.resources import (
     MhsExecutionAllocation,
@@ -129,6 +129,7 @@ def _materialize_execution_piece(
     funding_alignment = align_funding_with_knowledge(funding_by_symbol, piece_grid, symbols=roster, source_failures=funding_failures)
     minute_funding = funding_alignment.rates
     funding_known = funding_alignment.known
+    coverage_gaps = funding_coverage_gaps(funding_alignment, piece_grid)
     quote_volumes = pd.DataFrame(
         {s: symbol_frames[s]["quote_vol"] for s in roster if s in symbol_frames and "quote_vol" in symbol_frames[s].columns},
         index=piece_grid,
@@ -155,6 +156,7 @@ def _materialize_execution_piece(
         funding_known=funding_known,
         bar_available_at=bar_available_at,
         logical_partition=logical_partition,
+        funding_coverage_gaps=coverage_gaps,
     )
     del symbol_frames
     del aligned

@@ -37,7 +37,7 @@ from src.mhs.reporting.process import _tier_payload
 
 if TYPE_CHECKING:
     from src.mhs.backtest.contracts import ProcessInventoryFailureReport, ProcessInventoryReport
-    from src.mhs.execution.contracts import ExecutionDataGap, StrategyExecutionReplayResult
+    from src.mhs.execution.contracts import ExecutionDataGap, FundingCoverageGap, StrategyExecutionReplayResult
 
 _MANIFEST_VERSION = 1
 _MANIFEST_NAME = "manifest.json"
@@ -102,12 +102,34 @@ def _gaps_table(gaps: Sequence[ExecutionDataGap]) -> pa.Table:
     )
 
 
+def _coverage_table(gaps: Sequence[FundingCoverageGap]) -> pa.Table:
+    return pa.table(
+        {
+            "ordinal": pa.array(range(len(gaps)), type=pa.int64()),
+            "symbol": pa.array([str(gap.symbol) for gap in gaps], type=pa.string()),
+            "start": pa.array(_utc_index([gap.start for gap in gaps]), type=pa.timestamp("ns", tz="UTC")),
+            "end": pa.array(_utc_index([gap.end for gap in gaps]), type=pa.timestamp("ns", tz="UTC")),
+            "reason": pa.array([str(gap.reason) for gap in gaps], type=pa.string()),
+        }
+    )
+
+
+def _coverage_payload(gap: FundingCoverageGap) -> dict[str, object]:
+    return {
+        "symbol": str(gap.symbol),
+        "start": gap.start.isoformat(),
+        "end": gap.end.isoformat(),
+        "reason": str(gap.reason),
+    }
+
+
 def _tier_tables(tier: str, result: StrategyExecutionReplayResult, daily: pd.Series) -> dict[str, pa.Table]:
     tables = {f"{tier}_daily.parquet": _daily_table(daily)}
     for field in _LEDGER_SERIES_FIELDS:
         tables[f"{tier}_ledger_{field}.parquet"] = _ledger_table(getattr(result.ledger, field), field)
     tables[f"{tier}_fills.parquet"] = _fills_table(result.simulated_fills)
     tables[f"{tier}_gaps.parquet"] = _gaps_table(list(result.ledger.data_gaps))
+    tables[f"{tier}_coverage.parquet"] = _coverage_table(list(result.funding_coverage_gaps))
     return tables
 
 
@@ -253,6 +275,7 @@ def persist_inventory_evidence(
     daily_stress = _inventory_daily_returns(report.stress)
     tables = _tier_tables("base", report.base, daily_base)
     tables.update(_tier_tables("stress", report.stress, daily_stress))
+    tables["coverage.parquet"] = _coverage_table(list(report.funding_coverage_gaps))
     bundle, identity = _publish_bundle(root, tables)
     if registry_path is not None and run_id is not None:
         _record_publication_lease(Path(registry_path), run_id, bundle, identity)
@@ -260,6 +283,7 @@ def persist_inventory_evidence(
     summary["schema_version"] = _SCHEMA_VERSION
     summary["evidence_id"] = identity
     summary["evidence"] = {"evidence_id": identity, "bundle_path": str(bundle), "manifest": _MANIFEST_NAME}
+    summary["funding_coverage_gaps"] = _detail_reference(identity, "coverage", len(report.funding_coverage_gaps))
     for tier_key, tier_role, daily, gaps in (
         ("base", "base", daily_base, report.base.ledger.data_gaps),
         ("stress", "stress", daily_stress, report.stress.ledger.data_gaps),
@@ -269,6 +293,13 @@ def persist_inventory_evidence(
         tier["daily_returns"] = _detail_reference(identity, f"{tier_role}_daily", len(daily))
         terminal["data_gaps"] = _detail_reference(identity, f"{tier_role}_gaps", len(gaps))
         tier["terminal"] = terminal
+        summary[tier_key] = tier
+    for tier_key, tier_role, result in (
+        ("base", "base", report.base),
+        ("stress", "stress", report.stress),
+    ):
+        tier = cast(dict[str, object], summary[tier_key])
+        tier["funding_coverage_gaps"] = _detail_reference(identity, f"{tier_role}_coverage", len(result.funding_coverage_gaps))
         summary[tier_key] = tier
     _atomic_write_json(out, summary)
     return out, identity
@@ -295,12 +326,14 @@ def export_inventory_json(summary_path: Path, output: Path) -> Path:
     bundle = Path(bundle_path)
     _verify_bundle(bundle, evidence_id)
     payload = {key: value for key, value in summary.items() if key not in ("schema_version", "evidence_id", "evidence")}
+    payload["funding_coverage_gaps"] = _restore_coverage(bundle, "coverage")
     for tier in ("base", "stress"):
         tier_payload = cast(dict[str, object], payload[tier])
         terminal = cast(dict[str, object], tier_payload["terminal"])
         tier_payload["daily_returns"] = _restore_daily_returns(bundle, tier)
         terminal["data_gaps"] = _restore_gap_provenance(bundle, tier)
         tier_payload["terminal"] = terminal
+        tier_payload["funding_coverage_gaps"] = _restore_coverage(bundle, f"{tier}_coverage")
         payload[tier] = tier_payload
     _atomic_write_json(out, payload)
     return out
@@ -327,6 +360,23 @@ def _restore_gap_provenance(bundle: Path, tier: str) -> list[dict[str, object]]:
             "code": str(row.code),
             "symbol": str(row.symbol),
             "timestamp": pd.Timestamp(row.timestamp).isoformat(),
+        }
+        for row in frame.itertuples()
+    ]
+
+
+def _restore_coverage(bundle: Path, role: str) -> list[dict[str, object]]:
+    try:
+        table = pq.read_table(bundle / f"{role}.parquet")
+    except Exception as exc:
+        raise DataIntegrityError(f"missing detail evidence: {role}.parquet") from exc
+    frame = table.to_pandas().sort_values("ordinal", kind="stable")
+    return [
+        {
+            "symbol": str(row.symbol),
+            "start": pd.Timestamp(row.start).isoformat(),
+            "end": pd.Timestamp(row.end).isoformat(),
+            "reason": str(row.reason),
         }
         for row in frame.itertuples()
     ]
@@ -387,6 +437,7 @@ def _inventory_result_payload(result: StrategyExecutionReplayResult) -> dict[str
         "forced_exit_notional": float(result.forced_exit_notional),
         "termination_counts": dict(result.termination_counts),
         "terminal": _inventory_terminal_state(result),
+        "funding_coverage_gaps": [_coverage_payload(g) for g in result.funding_coverage_gaps],
     }
 
 
@@ -420,6 +471,7 @@ def _inventory_summary_payload(report: ProcessInventoryReport) -> dict[str, obje
         },
         "resource_measurements": [dataclasses.asdict(m) for m in report.resource_measurements],
         "memory_stats": dataclasses.asdict(report.memory_stats),
+        "funding_coverage_gaps": [_coverage_payload(g) for g in report.funding_coverage_gaps],
     }
 
 
@@ -523,6 +575,7 @@ def persist_process_inventory_failure(
         ),
         "source_gaps": [_failure_gap_payload(g) for g in report.source_gaps],
         "source_gap_excluded_symbols": list(report.source_gap_excluded_symbols),
+        "funding_coverage_gaps": [_coverage_payload(g) for g in report.funding_coverage_gaps],
         "resource_measurements": [dataclasses.asdict(m) for m in report.resource_measurements],
         "memory_stats": (
             dataclasses.asdict(report.memory_stats) if report.memory_stats is not None else None

@@ -34,6 +34,7 @@ from src.mhs.execution.batch import (
 from src.mhs.execution.contracts import (
     ExecutionDataGap,
     ExecutionReplayWindow,
+    FundingCoverageGap,
     StrategyExecutionReplayResult,
 )
 from src.mhs.execution.specs import _stress_cost_execution_spec
@@ -45,7 +46,7 @@ from src.mhs.params import (
     GROWTH_RISK_ENVELOPES,
     PROCESS_EVALUATION_CEILING,
 )
-from src.mhs.process import ProcessExecutionPolicy
+from src.mhs.process import ProcessExecutionPolicy, ProcessRiskSizingSpec
 from src.mhs.resources import (
     MhsMemoryBudget,
     MhsResourceAdmissionError,
@@ -448,11 +449,35 @@ window. Validation alone cannot certify a consumed decision or result."""
         raise DataIntegrityError("windows must cover every path decision exactly once")
 
 
+def _union_funding_coverage(
+    *sources: tuple[FundingCoverageGap, ...],
+) -> tuple[FundingCoverageGap, ...]:
+    """Union coverage intervals without duplicate identical entries."""
+    seen: dict[tuple[str, pd.Timestamp, pd.Timestamp, str], FundingCoverageGap] = {}
+    for gaps in sources:
+        for gap in gaps:
+            seen[(gap.symbol, gap.start, gap.end, gap.reason)] = gap
+    return tuple(sorted(seen.values(), key=lambda g: (g.start, g.end, g.symbol)))
+
+
+def _live_funding_coverage(live_sets: _LiveAccumulatorSets) -> tuple[FundingCoverageGap, ...]:
+    """Union coverage intervals observed by live accumulators."""
+    seen: dict[tuple[str, pd.Timestamp, pd.Timestamp, str], FundingCoverageGap] = {}
+    for acc_set in live_sets:
+        for acc in acc_set:
+            if acc is None:
+                continue
+            for gap in acc.funding_coverage_gaps.values():
+                seen[(gap.symbol, gap.start, gap.end, gap.reason)] = gap
+    return tuple(sorted(seen.values(), key=lambda g: (g.start, g.end, g.symbol)))
+
+
 def evaluate_process_inventory_backtest(
     start: pd.Timestamp = DISCOVERY_START,
     end: pd.Timestamp = PROCESS_EVALUATION_CEILING, *,
     data_root: str | None = None,
     execution_policy: ProcessExecutionPolicy | None = None,
+    risk_sizing: ProcessRiskSizingSpec | None = None,
     memory_budget: MhsMemoryBudget | None = None,
 ) -> ProcessInventoryReport:
     """Replay original process targets through the primary three-minute engine.
@@ -466,6 +491,7 @@ def evaluate_process_inventory_backtest(
         end: Existing timezone-aware source end within the registered ceiling.
         data_root: Existing OHLCV source override.
         execution_policy: Existing adoption policy or baseline.
+        risk_sizing: Research-only causal volatility sizing; None preserves baseline.
         memory_budget: Explicit stage limits or validated defaults.
     Returns:
         Original base/stress inventory evidence with independent validity flags.
@@ -481,6 +507,8 @@ def evaluate_process_inventory_backtest(
         raise DataIntegrityError(f"end {end} exceeds PROCESS_EVALUATION_CEILING")
     if execution_policy is not None and not isinstance(execution_policy, ProcessExecutionPolicy):
         raise ValueError("execution_policy must be a ProcessExecutionPolicy or None")
+    if risk_sizing is not None and not isinstance(risk_sizing, ProcessRiskSizingSpec):
+        raise ValueError("risk_sizing must be a ProcessRiskSizingSpec or None")
     budget = resolve_mhs_memory_budget(memory_budget)
     run_swap_baseline = _current_tree_swap_bytes()
     sampler = _TreeMemorySampler()
@@ -498,7 +526,7 @@ def evaluate_process_inventory_backtest(
         budget_bytes, reserve_bytes = budget.replay_tree_pss_bytes, budget.min_available_bytes
         proxy = evaluate_process_backtest(
             start, end, data_root=data_root, execution_policy=execution_policy,
-            memory_budget=budget,
+            risk_sizing=risk_sizing, memory_budget=budget,
         )
         recorder.record("process_inventory_proxy")
         path = proxy.base
@@ -610,6 +638,7 @@ def evaluate_process_inventory_backtest(
             source_gap_excluded_symbols=tuple(sorted(SOURCE_GAP_EXCLUDED_SYMBOLS)),
             resource_measurements=recorder.records,
             memory_stats=failure_stats,
+            funding_coverage_gaps=_live_funding_coverage(live_sets),
         )
         failure = ProcessInventoryBacktestError(failure_report)
         setattr(failure, "resource_measurements", recorder.records)  # noqa: B010
@@ -622,4 +651,5 @@ def evaluate_process_inventory_backtest(
         gate=gate,
         resource_measurements=recorder.records,
         memory_stats=memory_stats,
+        funding_coverage_gaps=_union_funding_coverage(base.funding_coverage_gaps, stress.funding_coverage_gaps),
     )
