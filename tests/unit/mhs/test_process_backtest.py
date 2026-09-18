@@ -205,10 +205,10 @@ def test_evaluate_uses_gate_and_stress_triple(monkeypatch) -> None:
     schedule = monthly_refit_schedule(data.decision_grid[0], data.decision_grid[-1])
     seen: dict = {}
 
-    def _fake_load(start, end, data_root=None):
+    def _fake_load(start, end, data_root=None, memory_budget=None):
         return data
 
-    def _fake_run(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap):
+    def _fake_run(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None):
         seen["decision"] = decision_bps
         seen["evaluation"] = evaluation_bps
         seen.setdefault("bps", []).append(decision_bps)
@@ -216,7 +216,7 @@ def test_evaluate_uses_gate_and_stress_triple(monkeypatch) -> None:
 
     calls: list = []
 
-    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap):
+    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None):
         calls.append((decision_bps, evaluation_bps))
         return _fake_run(loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps, leverage_cap=leverage_cap)
 
@@ -765,10 +765,10 @@ def test_evaluate_threads_explicit_policy(monkeypatch) -> None:
     schedule = _schedule_for(data)
     seen: dict = {}
 
-    def _fake_load(start, end, data_root=None):
+    def _fake_load(start, end, data_root=None, memory_budget=None):
         return data
 
-    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None):
+    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None):
         seen["policy"] = execution_policy
         return run_process_paths(
             loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps,
@@ -1816,3 +1816,804 @@ def test_inventory_window_budget_breach_fails_closed(monkeypatch) -> None:
     monkeypatch.setattr(pb, "_assert_execution_rss_budget", _boom)
     with pytest.raises(DataIntegrityError, match="RSS budget"):
         pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+
+
+def _completed_inventory_market(tmp_path, n_days=3):
+    import pandas as pd
+
+    start = pd.Timestamp("2023-06-01", tz="UTC")
+    decisions = pd.date_range(start, periods=n_days, freq="24h", tz="UTC")
+    fence = decisions[-1] + pd.Timedelta(days=1)
+    grid = pd.date_range(start, fence, freq="3min", tz="UTC")
+    lake = tmp_path / "ohlcv" / "3m"
+    lake.mkdir(parents=True, exist_ok=True)
+    ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    n = len(grid)
+    for sym in ("AUSDT", "BUSDT"):
+        pd.DataFrame({
+            "timestamp": ms,
+            "open": 100.0,
+            "high": 100.1,
+            "low": 99.9,
+            "close": 100.0,
+            "quote_vol": 1e6,
+        }).to_parquet(lake / f"{sym}.parquet")
+    funding = {s: pd.Series(0.0, index=grid) for s in ("AUSDT", "BUSDT")}
+    return start, fence, decisions, funding
+
+
+def test_inventory_production_fence_covers_all_targets(tmp_path) -> None:
+    """Unmocked generator and replay cover every row with bars published by the fence."""
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution.batch import replay_execution_window_batch
+    from src.mhs.process_backtest import _execution_fence
+    from src.mhs.types import ExecutionSpec
+
+    start, fence, decisions, funding = _completed_inventory_market(tmp_path)
+    targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT", "BUSDT"])
+    targets.iloc[:, 0] = 0.05
+    targets.iloc[:, 1] = -0.03
+    signals = decisions + pd.Timedelta(hours=1)
+    spec = ExecutionSpec()
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, signals, str(tmp_path / "ohlcv"), "3m",
+            start, fence, funding, "ohlcv_close_fallback", spec,
+        )
+    )
+    assert _execution_fence(targets) == fence
+    covered = pd.concat([w.target_weights for w in windows])
+    pd.testing.assert_frame_equal(covered, targets)
+    for window in windows:
+        assert (window.minute_grid < fence).all()
+        assert (window.bar_available_at <= fence).all()
+    base, stress = replay_execution_window_batch(
+        iter(windows), 1.0,
+        [("OHLCV_IMMEDIATE_TAKER", spec), ("OHLCV_IMMEDIATE_TAKER", spec)],
+    )
+    assert base is not None
+    assert stress is not None
+    assert (windows[-1].bar_available_at <= fence).all()
+
+
+def test_inventory_nonzero_fills_reconcile_across_bounds(tmp_path) -> None:
+    """Controlled entry and exit produce nonzero fills with consistent accounting."""
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution.batch import replay_execution_window_batch
+    from src.mhs.types import ExecutionSpec
+
+    start, fence, decisions, funding = _completed_inventory_market(tmp_path, n_days=4)
+    targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT", "BUSDT"])
+    targets.iloc[0, 0] = 0.5
+    targets.iloc[2, 0] = 0.0
+    signals = decisions + pd.Timedelta(hours=1)
+    spec = ExecutionSpec()
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, signals, str(tmp_path / "ohlcv"), "3m",
+            start, fence, funding, "ohlcv_close_fallback", spec,
+        )
+    )
+    base, stress = replay_execution_window_batch(
+        iter(windows), 1000.0,
+        [("OHLCV_IMMEDIATE_TAKER", spec), ("OHLCV_IMMEDIATE_TAKER", spec)],
+    )
+    assert base is not None
+    assert stress is not None
+    assert len(base.simulated_fills) > 0
+    assert len(stress.simulated_fills) > 0
+    assert float(base.ledger.fee_charge.sum()) > 0.0
+    assert float(stress.ledger.fee_charge.sum()) > 0.0
+    for result in (base, stress):
+        totals = result.simulated_fills.groupby("symbol")["quantity_delta"].sum()
+        assert abs(float(totals.get("AUSDT", 0.0))) < 1e-6
+
+
+def test_inventory_fence_labelled_bar_stays_rejected() -> None:
+    """A bar labelled at the fence is still a mandatory validation failure."""
+    import dataclasses
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.process_backtest import _execution_fence, _validate_replay_window
+
+    targets = _inventory_test_targets(n_days=2)
+    path = _inventory_test_path(targets)
+    fence = _execution_fence(path.target_weights)
+    windows = _inventory_test_windows(targets)
+    tainted_grid = windows[0].minute_grid.union(pd.DatetimeIndex([fence]))
+
+    def _extend(frame: pd.DataFrame) -> pd.DataFrame:
+        row = pd.DataFrame(100.0, index=pd.DatetimeIndex([fence]), columns=frame.columns)
+        return pd.concat([frame, row]).reindex(tainted_grid)
+
+    tainted = dataclasses.replace(
+        windows[0],
+        minute_grid=tainted_grid,
+        highs=_extend(windows[0].highs),
+        lows=_extend(windows[0].lows),
+        closes=_extend(windows[0].closes),
+        marks=_extend(windows[0].marks),
+        bar_funding=_extend(windows[0].bar_funding),
+        quote_volumes=_extend(windows[0].quote_volumes),
+        funding_known=_extend(windows[0].funding_known.astype("float64")).astype(bool),
+        bar_available_at=tainted_grid + pd.Timedelta(minutes=3),
+    )
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        _validate_replay_window(
+            tainted, expected_columns=list(targets.columns),
+            expected_targets=targets, cursor=0, fence=fence,
+        )
+
+
+def test_inventory_hourly_evidence_stays_comparative(monkeypatch, tmp_path) -> None:
+    """Hourly evidence is explicitly comparative while 3m inventory is primary."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    out = pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["certification_level"] == "process_inventory_3m"
+    assert payload["proxy"]["scope"] == "hourly_proxy_comparison"
+    assert payload["proxy"]["certification_level"] == "process_proxy_1h_ledger"
+    assert set(payload["base"]) >= {"daily_returns", "cagr", "total_fills"}
+
+
+def _causal_tail_masks(tmp_path, tail_a_hours: float, tail_b_hours: float):
+    import pandas as pd
+
+    from src.market_data.services.mhs_execution import apply_dynamic_gap_exclusion
+
+    decisions = pd.date_range("2022-01-01", periods=72, freq="1h", tz="UTC")
+    horizon = decisions[24]
+    prefix = pd.date_range(decisions[0], horizon, freq="3min", tz="UTC")
+    root = tmp_path / "ohlcv"
+    (root / "3m").mkdir(parents=True, exist_ok=True)
+
+    def _write(tail_hours: float) -> None:
+        tail = pd.date_range(
+            horizon + pd.Timedelta(minutes=3),
+            horizon + pd.Timedelta(hours=tail_hours),
+            freq="3min",
+            tz="UTC",
+        )
+        labels = prefix.union(tail)
+        ms = (labels - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)
+        pd.DataFrame({"timestamp": ms.to_numpy(dtype="int64")}).to_parquet(
+            root / "3m" / "S0.parquet"
+        )
+
+    mask = pd.DataFrame(True, index=decisions, columns=["S0"])
+    _write(tail_a_hours)
+    first, _ = apply_dynamic_gap_exclusion(mask, "3m", root=str(root), min_gap_hours=1.0)
+    _write(tail_b_hours)
+    second, _ = apply_dynamic_gap_exclusion(mask, "3m", root=str(root), min_gap_hours=1.0)
+    return decisions, horizon, mask, first, second
+
+
+def test_process_targets_through_cutoff_ignore_future_tail(tmp_path) -> None:
+    """Two source tails leave past masks and masked targets through T identical."""
+    import pandas as pd
+
+    from src.mhs.process_backtest import apply_process_execution_availability
+
+    decisions, horizon, _, first, second = _causal_tail_masks(tmp_path, 6.0, 48.0)
+    assert first.loc[:horizon].equals(second.loc[:horizon])
+    targets = pd.DataFrame(
+        {"S0": [0.5 if i % 2 == 0 else -0.25 for i in range(len(decisions))]},
+        index=decisions,
+        dtype="float64",
+    )
+    past = targets.loc[:horizon]
+    masked_first = apply_process_execution_availability(past, first.loc[:horizon])
+    masked_second = apply_process_execution_availability(past, second.loc[:horizon])
+    assert masked_first.equals(masked_second)
+
+
+def test_process_future_only_symbol_target_blocked_without_redistribution() -> None:
+    """A symbol with no published history gets zero targets; others are untouched."""
+    import pandas as pd
+
+    from src.mhs.process_backtest import apply_process_execution_availability
+
+    index = pd.date_range("2022-01-01", periods=3, freq="24h", tz="UTC")
+    targets = pd.DataFrame(
+        {"NEWSYM": [0.5, 0.5, 0.5], "OLD": [0.25, 0.25, 0.25]},
+        index=index,
+        dtype="float64",
+    )
+    mask = pd.DataFrame(True, index=index, columns=["NEWSYM", "OLD"])
+    mask.loc[:, "NEWSYM"] = False
+    masked = apply_process_execution_availability(targets, mask)
+    assert bool((masked["NEWSYM"] == 0.0).all())
+    assert masked["OLD"].equals(targets["OLD"])
+    assert list(masked.columns) == ["NEWSYM", "OLD"]
+
+
+def test_process_held_exit_survives_availability_mask() -> None:
+    """A blocked hold never deletes the exit row; valid exit data still closes."""
+    import pandas as pd
+
+    from src.mhs.execution.batch import replay_execution_windows
+    from src.mhs.process_backtest import apply_process_execution_availability
+    from src.mhs.types import ExecutionSpec
+
+    targets = _inventory_test_targets(n_days=3, symbols=("AUSDT",))
+    targets.iloc[0, 0] = 0.5
+    targets.iloc[1, 0] = 0.5
+    targets.iloc[2, 0] = 0.0
+    mask = pd.DataFrame(True, index=targets.index, columns=["AUSDT"])
+    mask.iloc[1, 0] = False
+    masked = apply_process_execution_availability(targets, mask)
+    assert masked.iloc[0, 0] == 0.5
+    assert masked.iloc[1, 0] == 0.0
+    assert masked.iloc[2, 0] == 0.0
+    assert list(masked.columns) == ["AUSDT"]
+    windows = _inventory_test_windows(targets)
+    result = replay_execution_windows(
+        iter(windows), 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+    )
+    assert len(result.simulated_fills) > 0
+    totals = result.simulated_fills.groupby("symbol")["quantity_delta"].sum()
+    assert abs(float(totals.get("AUSDT", 0.0))) < 1e-6
+
+
+def test_refit_arithmetic_matches_baseline() -> None:
+    """Interval-local assembly matches the corrected baseline exactly."""
+    data = _synthetic_data()
+    schedule = _schedule_for(data)[:3]
+    first = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0]
+    second = run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0]
+    assert np.allclose(
+        first.unit_target_weights.to_numpy(dtype="float64"),
+        second.unit_target_weights.to_numpy(dtype="float64"),
+        rtol=1e-12, atol=1e-12,
+    )
+    assert np.allclose(
+        first.target_weights.to_numpy(dtype="float64"),
+        second.target_weights.to_numpy(dtype="float64"),
+        rtol=1e-12, atol=1e-12,
+    )
+    assert (first.unit_target_weights == 0.0).equals(second.unit_target_weights == 0.0)
+
+
+def test_refit_intermediates_cover_effective_rows_only(monkeypatch) -> None:
+    """Each combined intermediate spans only its effective rows."""
+    import src.mhs.process_backtest as pb
+
+    data = _synthetic_data()
+    schedule = _schedule_for(data)[:4]
+    seen: list[int] = []
+    real_scale = pb.scale_book_to_target_gross
+
+    def _spy(frame, target):
+        seen.append(len(frame))
+        return real_scale(frame, target)
+
+    monkeypatch.setattr(pb, "scale_book_to_target_gross", _spy)
+    run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    expected = [
+        len(data.member_books["planted"].loc[
+            (data.member_books["planted"].index >= p.effective_from)
+            & (data.member_books["planted"].index < p.effective_to)
+        ])
+        for p in schedule
+    ]
+    assert seen == expected
+
+
+def test_training_state_and_purge_parity() -> None:
+    """Training membership and exposure match across identical runs."""
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    first, second = (
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0],
+        run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)[0],
+    )
+    assert first.target_weights.equals(second.target_weights)
+    assert first.exposure.equals(second.exposure)
+    assert first.refits == second.refits
+
+
+def test_source_panels_not_mutated_by_setup(monkeypatch) -> None:
+    """Aligned source values are unchanged and no extra copies stay live."""
+    import src.mhs.process_backtest as pb
+
+    data = _synthetic_data()
+    before = {n: data.member_books[n].copy() for n in data.member_books}
+    schedule = _schedule_for(data)
+    run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    for name in before:
+        assert data.member_books[name].equals(before[name])
+    assert pb._estimate_panel_bytes(10, 5, 2) == 10 * 5 * 2 * 8 * 2
+
+
+def test_full_preparation_admission_rejects_small_budget(monkeypatch) -> None:
+    """A tiny budget rejects before decoding with a named stage."""
+    import src.mhs.process_backtest as pb
+    from src.common.errors import DataIntegrityError
+    from src.mhs.resources import MhsMemoryBudget
+
+    tiny = MhsMemoryBudget(total_tree_pss_bytes=1, replay_tree_pss_bytes=1, min_available_bytes=1)
+    called: list[str] = []
+
+    def _boom(*args, **kwargs):
+        called.append("decode")
+        raise AssertionError("decoder must not run")
+
+    monkeypatch.setattr(pb, "load_base_panel", _boom)
+    with pytest.raises(DataIntegrityError, match="process_prepare_panel"):
+        pb.load_process_market_data(
+            pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2021-02-01", tz="UTC"),
+            memory_budget=tiny,
+        )
+    assert called == []
+
+
+def test_budget_propagation_preserves_policy_and_tiers(monkeypatch) -> None:
+    """Explicit budgets never change tier ordering or policy semantics."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.process import ProcessExecutionPolicy
+    from src.mhs.resources import MhsMemoryBudget
+
+    data = _synthetic_data()
+    schedule = _schedule_for(data)
+    budget = MhsMemoryBudget()
+    default = run_process_paths(data, schedule, decision_bps=2.0, evaluation_bps=(2.0, 9.0), leverage_cap=2.0)
+    budgeted = run_process_paths(
+        data, schedule, decision_bps=2.0, evaluation_bps=(2.0, 9.0), leverage_cap=2.0,
+        memory_budget=budget,
+    )
+    assert budgeted[0].target_weights.equals(default[0].target_weights)
+    assert budgeted[1].target_weights.equals(default[1].target_weights)
+    assert float(np.log1p(budgeted[1].daily_returns).sum()) <= float(np.log1p(budgeted[0].daily_returns).sum())
+    seen: dict = {}
+
+    def _fake_load(start, end, data_root=None, memory_budget=None):
+        seen["budget"] = memory_budget
+        return data
+
+    def _fake_run(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None):
+        seen["run_budget"] = memory_budget
+        return run_process_paths(
+            loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps,
+            leverage_cap=leverage_cap, execution_policy=execution_policy,
+        )
+
+    monkeypatch.setattr(pb, "load_process_market_data", _fake_load)
+    monkeypatch.setattr(pb, "run_process_paths", _fake_run)
+    policy = ProcessExecutionPolicy(0.2)
+    report = pb.evaluate_process_backtest(
+        data.decision_grid[0], data.decision_grid[60], execution_policy=policy, memory_budget=budget,
+    )
+    assert seen["budget"] is budget
+    assert seen["run_budget"] is budget
+    assert report.base.execution_policy is policy
+
+
+def _failure_report_fixture(**overrides):
+    import src.mhs.process_backtest as pb
+    from src.mhs.contracts import MhsResourceMeasurement
+    from src.mhs.process import ProcessExecutionPolicy
+
+    base = {
+        "status": "failed",
+        "start": pd.Timestamp("2022-01-01", tz="UTC"),
+        "end": pd.Timestamp("2022-01-04", tz="UTC"),
+        "data_root": None,
+        "execution_policy": ProcessExecutionPolicy(None),
+        "stage": "process_3m_window_1",
+        "error_code": "DATA_INTEGRITY",
+        "error_type": "DataIntegrityError",
+        "error_message": "boom",
+        "total_decisions": 3,
+        "validated_decisions": 2,
+        "completed_decisions": 1,
+        "completed_windows": 1,
+        "completed_decision_start": pd.Timestamp("2022-01-01", tz="UTC"),
+        "completed_decision_end": pd.Timestamp("2022-01-01", tz="UTC"),
+        "source_gaps": (),
+        "source_gap_excluded_symbols": tuple(sorted(__import__("src.mhs.evaluation.integrity", fromlist=["SOURCE_GAP_EXCLUDED_SYMBOLS"]).SOURCE_GAP_EXCLUDED_SYMBOLS)),
+        "resource_measurements": (MhsResourceMeasurement(stage="s", elapsed_ms=0, rss_bytes=1),),
+        "memory_stats": None,
+    }
+    base.update(overrides)
+    return pb.ProcessInventoryFailureReport(**base)
+
+
+def test_inventory_preparation_failure_reports_typed_stage(monkeypatch) -> None:
+    """Typed rejection before targets yields null totals and chained cause."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.resources import MhsResourceAdmissionError
+
+    targets = _inventory_test_targets()
+    start = targets.index[0]
+    end = targets.index[-1] + pd.Timedelta(days=1)
+
+    def _boom(*a, **k):
+        raise MhsResourceAdmissionError(stage="process_prepare_panel", error_code="MEMORY_BUDGET", message="no ram")
+
+    monkeypatch.setattr(pb, "evaluate_process_backtest", _boom)
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(start, end)
+    report = excinfo.value.report
+    assert report.stage == "process_prepare_panel"
+    assert report.error_code == "MEMORY_BUDGET"
+    assert report.total_decisions is None
+    assert report.validated_decisions == 0
+    assert report.completed_decisions == 0
+    assert report.completed_windows == 0
+    assert report.completed_decision_start is None
+    assert report.completed_decision_end is None
+    assert report.memory_stats is not None
+    assert isinstance(excinfo.value.__cause__, MhsResourceAdmissionError)
+    # default policy branch when proxy is missing and no explicit policy
+    assert report.execution_policy.tracking_error_threshold is None
+    assert report.data_root is None
+
+
+def test_inventory_preparation_failure_keeps_explicit_policy(monkeypatch) -> None:
+    """Explicit policy survives a preparation failure without proxy targets."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    start = targets.index[0]
+    end = targets.index[-1] + pd.Timedelta(days=1)
+
+    def _boom(*a, **k):
+        raise RuntimeError("unexpected prep")
+
+    monkeypatch.setattr(pb, "evaluate_process_backtest", _boom)
+    policy = ProcessExecutionPolicy(0.2)
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(start, end, data_root="failure-root", execution_policy=policy)
+    report = excinfo.value.report
+    assert report.error_code == "UNEXPECTED_ERROR"
+    assert report.stage == "preparation"
+    assert report.execution_policy is policy
+    assert report.data_root == "failure-root"
+    assert report.total_decisions is None
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def test_inventory_validated_coverage_excludes_failed_bound(monkeypatch) -> None:
+    """Second-bound failure validates but does not complete the window."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    made = _inventory_test_windows(targets)
+
+    def _boom_batch(windows, *a, **k):
+        it = iter(windows)
+        first = next(it)
+        second = next(it)
+        raise DataIntegrityError("second bound failed")
+
+    monkeypatch.setattr(pb, "replay_execution_window_batch", _boom_batch)
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    report = excinfo.value.report
+    assert report.total_decisions == len(targets)
+    assert report.validated_decisions == 2
+    assert report.completed_decisions == 1
+    assert report.completed_windows == 1
+    assert report.completed_decision_start == targets.index[0]
+    assert report.completed_decision_end == targets.index[0]
+    assert report.error_code == "DATA_INTEGRITY"
+    assert "process_3m_window_" in report.stage
+
+
+def test_inventory_partial_replay_reports_consumed_prefix(monkeypatch) -> None:
+    """Allocation rejection after two windows keeps exact prefix endpoints."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.resources import MhsResourceAdmissionError
+
+    targets = _inventory_test_targets()
+    proxy = _inventory_test_proxy(targets)
+    monkeypatch.setattr(pb, "evaluate_process_backtest", lambda *a, **k: proxy)
+    monkeypatch.setattr(pb, "_load_funding_series", lambda syms: ({}, {}))
+    made = _inventory_test_windows(targets)
+
+    def _gen(*a, **k):
+        yield made[0]
+        yield made[1]
+        raise MhsResourceAdmissionError(stage="process_3m_window_2", error_code="MEMORY_RESERVE", message="no reserve")
+
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", _gen)
+
+    def _drain(windows, *a, **k):
+        for _ in windows:
+            pass
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(pb, "replay_execution_window_batch", _drain)
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    report = excinfo.value.report
+    assert report.stage == "process_3m_window_2"
+    assert report.error_code == "MEMORY_RESERVE"
+    assert report.completed_decisions == 2
+    assert report.completed_windows == 2
+    assert report.completed_decision_start == targets.index[0]
+    assert report.completed_decision_end == targets.index[1]
+    assert report.total_decisions == len(targets)
+
+
+def test_inventory_empty_piece_advances_windows_only(monkeypatch) -> None:
+    """Held-only terminal piece counts windows without inventing decisions."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.resources import _StageRecorder
+    from src.mhs.types import ExecutionSpec
+
+    targets = _inventory_test_targets(n_days=1)
+    path = _inventory_test_path(targets)
+    windows = _inventory_test_windows(targets)
+    empty_weights = targets.iloc[0:0].reindex(columns=["AUSDT"])
+    empty = windows[0]
+    import dataclasses
+
+    tail_grid = pd.date_range(targets.index[0] + pd.Timedelta(hours=24), targets.index[0] + pd.Timedelta(hours=25), freq="3min", tz="UTC")
+
+    def _frame(v):
+        return pd.DataFrame(v, index=tail_grid, columns=["AUSDT"], dtype="float64")
+
+    empty_window = dataclasses.replace(
+        empty, target_weights=empty_weights,
+        minute_grid=tail_grid, highs=_frame(100.0), lows=_frame(99.0),
+        closes=_frame(100.0), marks=_frame(100.0), bar_funding=_frame(0.0),
+        quote_volumes=_frame(1e6), funding_known=pd.DataFrame(True, index=tail_grid, columns=["AUSDT"]),
+        bar_available_at=tail_grid,
+    )
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter([windows[0], empty_window]))
+    recorder = _StageRecorder(log_run=False)
+    progress = pb._ProcessInventoryProgress()
+    out = list(
+        pb._inventory_window_stream(
+            path, pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1)),
+            "root", targets.index[0], targets.index[-1] + pd.Timedelta(days=1),
+            {}, {}, ExecutionSpec(), None, None, recorder, None, progress=progress,
+        )
+    )
+    assert len(out) == 2
+    assert progress.validated_decisions == 1
+    assert progress.completed_decisions == 1
+    assert progress.completed_windows == 2
+    # progress=None path still drains without tracking
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: iter([windows[0]]))
+    recorder2 = _StageRecorder(log_run=False)
+    drained = list(
+        pb._inventory_window_stream(
+            path, pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1)),
+            "root", targets.index[0], targets.index[-1] + pd.Timedelta(days=1),
+            {}, {}, ExecutionSpec(), None, None, recorder2, None,
+        )
+    )
+    assert len(drained) == 1
+
+
+def test_inventory_observed_gaps_preserve_provenance(monkeypatch) -> None:
+    """Live accumulator gaps survive without calling finalize."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.execution.contracts import ExecutionDataGap
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    gap = ExecutionDataGap(
+        code="MISSING_HELD_MARK", symbol="AUSDT",
+        timestamp=pd.Timestamp("2022-01-02", tz="UTC"),
+        decision_time=pd.Timestamp("2022-01-02", tz="UTC"),
+        signal_time=pd.Timestamp("2022-01-02", tz="UTC") + pd.Timedelta(hours=1),
+        execution_bound="OHLCV_IMMEDIATE_TAKER",
+    )
+    finalized = {"called": False}
+
+    class _FakeAcc:
+        def __init__(self) -> None:
+            self.data_gaps = [gap, gap]
+
+        def finalize(self):
+            finalized["called"] = True
+
+    def _boom(windows, *a, **kwargs):
+        live = kwargs.get("live_accumulators")
+        assert live is not None
+        live.append([_FakeAcc(), None])
+        for _ in windows:
+            pass
+        raise DataIntegrityError("replay failed")
+
+    monkeypatch.setattr(pb, "replay_execution_window_batch", _boom)
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    report = excinfo.value.report
+    assert len(report.source_gaps) == 1
+    assert report.source_gaps[0] == gap
+    assert finalized["called"] is False
+    assert len(report.source_gap_excluded_symbols) > 0
+
+
+def test_inventory_telemetry_failure_preserves_original_cause(monkeypatch) -> None:
+    """Sampler failure leaves null stats without replacing the domain error."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    stops = {"n": 0}
+    real_sampler = pb._TreeMemorySampler
+
+    def _boom_batch(windows, *a, **k):
+        for _ in windows:
+            pass
+        raise DataIntegrityError("domain boom")
+
+    monkeypatch.setattr(pb, "replay_execution_window_batch", _boom_batch)
+    monkeypatch.setattr(pb, "_TreeMemorySampler", lambda *a, **k: _FailingSampler(stops))
+
+    class _FailingSampler:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def set_stage(self, *a, **k):
+            pass
+
+        def stop(self):
+            stops["n"] += 1
+            raise RuntimeError("telemetry down")
+
+    monkeypatch.setattr(pb, "_TreeMemorySampler", _FailingSampler)
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    report = excinfo.value.report
+    assert report.error_type == "DataIntegrityError"
+    assert "domain boom" in report.error_message
+    assert report.memory_stats is None
+    assert stops["n"] == 1
+    assert isinstance(excinfo.value.__cause__, DataIntegrityError)
+
+
+def test_inventory_success_and_interrupts_stay_typed(monkeypatch) -> None:
+    """Success stays success while interrupts bypass domain wrapping."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert isinstance(report, pb.ProcessInventoryReport)
+    assert report.base is not None
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    monkeypatch.setattr(pb, "_iter_mhs_execution_windows", lambda *a, **k: (_ for _ in ()).throw(SystemExit(3)))
+    with pytest.raises(SystemExit):
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    # unexpected replay failure maps to UNEXPECTED_ERROR with window stage
+    _patch_inventory_stack(monkeypatch, targets)
+    monkeypatch.setattr(pb, "replay_execution_window_batch", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug")))
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert excinfo.value.report.error_code == "UNEXPECTED_ERROR"
+    assert "process_3m_window_" in excinfo.value.report.stage
+
+
+def test_inventory_finalize_failure_stage(monkeypatch) -> None:
+    """Finalize-stage integrity failure keeps the finalize label."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    monkeypatch.setattr(pb, "_assert_stage_rss_budget", lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("replay reserve")))
+    with pytest.raises(pb.ProcessInventoryBacktestError) as excinfo:
+        pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    assert excinfo.value.report.stage == "finalize"
+    assert excinfo.value.report.error_code == "DATA_INTEGRITY"
+
+
+def test_inventory_failure_json_round_trip(tmp_path) -> None:
+    """Partial failure persists exact coverage without performance sections."""
+    import src.mhs.process_backtest as pb
+    from src.mhs.execution.contracts import ExecutionDataGap
+
+    gap = ExecutionDataGap(
+        code="MISSING_HELD_FUNDING", symbol="BUSDT",
+        timestamp=pd.Timestamp("2022-01-03", tz="UTC"),
+        decision_time=None, signal_time=None,
+        execution_bound="OHLCV_IMMEDIATE_TAKER",
+    )
+    report = _failure_report_fixture(source_gaps=(gap,), memory_stats=None)
+    out = pb.persist_process_inventory_failure(report, tmp_path / "failure.json")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["execution_timeframe"] == "3m"
+    assert payload["validated_decisions"] == 2
+    assert payload["completed_decisions"] == 1
+    assert payload["total_decisions"] == 3
+    assert payload["completed_decision_start"] == "2022-01-01T00:00:00+00:00"
+    assert payload["stage"] == "process_3m_window_1"
+    assert payload["source_gaps"][0]["symbol"] == "BUSDT"
+    assert payload["source_gaps"][0]["decision_time"] is None
+    assert payload["memory_stats"] is None
+    assert "cagr" not in payload
+    assert "sharpe" not in payload
+    assert "base" not in payload
+    assert "stress" not in payload
+    assert "final_equity" not in json.dumps(payload)
+
+
+def test_inventory_success_schema_adds_markers(monkeypatch, tmp_path) -> None:
+    """Completed markers are additive and preserve numeric results."""
+    import src.mhs.process_backtest as pb
+
+    targets = _inventory_test_targets()
+    _patch_inventory_stack(monkeypatch, targets)
+    report = pb.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
+    before = pb._inventory_result_payload(report.base)
+    out = pb.persist_process_inventory_report(report, tmp_path / "inventory.json")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["execution_timeframe"] == "3m"
+    assert payload["base"]["cagr"] == pytest.approx(before["cagr"])
+    assert payload["base"]["total_fees"] == pytest.approx(before["total_fees"])
+
+
+def test_inventory_failure_destination_protection(monkeypatch, tmp_path) -> None:
+    """Reserved, aliased and completed destinations reject without mutation."""
+    import src.mhs.process_backtest as pb
+
+    report = _failure_report_fixture()
+    with pytest.raises(ValueError, match=r".+"):
+        pb.persist_process_inventory_failure(report, tmp_path / "bad.txt")
+    monkeypatch.setattr(pb, "PROCESS_REPORT_PATH", tmp_path / "hourly.json")
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.persist_process_inventory_failure(report, tmp_path / "hourly.json")
+    monkeypatch.setattr(pb, "PROCESS_INVENTORY_REPORT_PATH", tmp_path / "primary.json")
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.persist_process_inventory_failure(report, tmp_path / "primary.json")
+    completed = tmp_path / "done.json"
+    completed.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.persist_process_inventory_failure(report, completed)
+    assert json.loads(completed.read_text(encoding="utf-8")) == {"status": "completed"}
+    alias = tmp_path / "alias.json"
+    import os as _os
+
+    try:
+        _os.symlink(completed, alias)
+    except OSError:
+        alias = completed
+    with pytest.raises(DataIntegrityError, match=r".+"):
+        pb.persist_process_inventory_failure(report, alias)
+    # unreadable existing bytes do not block a fresh failure artifact
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("not-json{{{", encoding="utf-8")
+    out = pb.persist_process_inventory_failure(report, corrupt)
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "failed"
+    # non-completed existing payload is replaceable
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps({"status": "failed"}), encoding="utf-8")
+    out2 = pb.persist_process_inventory_failure(report, other)
+    assert json.loads(out2.read_text(encoding="utf-8"))["status"] == "failed"
+
+
+def test_inventory_atomic_failure_cleans_temp(monkeypatch, tmp_path) -> None:
+    """Publication failure leaves no truncated artifact or orphan temp."""
+    import src.mhs.process_backtest as pb
+
+    report = _failure_report_fixture()
+    out = tmp_path / "failure.json"
+    monkeypatch.setattr(pb.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        pb.persist_process_inventory_failure(report, out)
+    assert not out.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
