@@ -527,5 +527,6 @@
   "src/application/mhs_backtest.py": {
     "testing": "tests/unit/application/test_mhs_backtest.py"
   },
-  "src/application/mhs_worker.py": {}
+  "src/application/mhs_worker.py": {},
+  "src/mhs/backtest/contracts.py": {}
 }

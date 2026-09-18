@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FUNDING_COVERAGE_AND_CAUSAL_RISK_SIZING",
+      "date": "2026-09-18",
+      "adr_id": "ADR_20260918_MHS_FUNDING_COVERAGE_AND_CAUSAL_RISK_SIZING",
+      "domain": "risk",
+      "title": "MHS 3분봉 펀딩 커버리지 인증과 인과적 위험 조절",
+      "why": "최신 3분봉 원장은 CAGR 21.52%와 MDD 35.41%였고 펀딩 결측으로 리밸런싱이 차단되어 성과 최적화 전에 실행 무결성 확인이 필요했다.",
+      "resolution": "FundingCoverageGap 증거를 실행창·인벤토리 보고서까지 전달하고 ProcessRiskSizingSpec 기반의 미래정보 차단 EWMA 노출 조절을 공개 백테스트와 3분봉 진입점에 배선했다.",
+      "impact": "펀딩 결측과 위험 조절 설정이 재현 가능한 증거로 남고 동일 설정을 시간봉·3분봉에서 검증할 수 있다.",
+      "caveat": "현재 데이터 결측이 해소되고 primary_valid와 terminal_certified가 통과된 뒤에만 위험 조절 후보를 성과·배포 판단에 사용할 수 있다."
+    },
+    {
       "task_id": "TASK_MHS_RESULTS_STORE_REFACTOR",
       "date": "2026-09-18",
       "adr_id": "ADR_20260918_MHS_RESULTS_STORE_REFACTOR",
@@ -1001,16 +1012,6 @@
       "why": "사용자가 docs/results/mhs_run_history의 실측 결과를 기반으로 복리 자산증식을 극대화할 근거있는 개선안을 요청. 분석 결과 노출 스케일 세 계층(target_gross/regime_cash/pnl_vol_target)이 전부 상한 1.0의 단방향 감쇠라 등록 드로다운 예산에 도달할 수 없었고, growth_budget 모드의 목표변동성이 fold 4개 중 3개에서 leak 또는 전역 fallback(0.20)으로 조용히 대체되어(D1) Research-GO가 배포되지 않을 노출 정책의 fold 증거로 판정하고 있었음. 이후 사용자가 드로다운 크기를 신경쓰지 않는다고 명시적으로 확인하고 growth envelope(파산확률 1% 한도만 남김) + evidence_weighting 조합을 메인 로직 기본값으로 설정해달라고 요청.",
       "resolution": "src/application/research/mhs/scaling.py에 _growth_budget_target_vol_by_boundary 신설(각 fold의 train_end 이전 데이터로만 leak-free 적합, 실패시 DataIntegrityError). _envelope_exposure_cap을 부트스트랩 파산확률 프론티어에서 유도하도록 수정하고 leverage_ceiling이 프론티어를 넘으면 fail-closed(ValueError). src/mhs/pipeline/stages/fold.py에 경계별 target_vol을 fold pool에 배선. src/application/research/mhs/evaluation.py의 _fold_blend_parity에 배포된(post-scale) gross 비교를 추가하고 top-level blend_traces에도 실제 적용된 exposure_scale_mean을 기록(이전에는 fold쪽만 채워져 있어 발산 감지가 원리적으로 불가능했던 D2 결함 수정). 정책 결정: src/mhs/pipeline/config.py의 MhsRunConfig(CLI 실효 기본값의 단일 소유자) growth_envelope/pnl_vol_target_mode/committee_evidence_weighting 기본값을 conservative/exante_target/False에서 growth/growth_budget/True로 전환, --no-committee-evidence-weighting 네게이트 플래그 신설. MhsDiagnosticRequest(계약 객체) 자체 기본값과 GROWTH_ENVELOPE_DEFAULT 상수, golden fixture 매트릭스는 완전히 보존(committee_capital의 기존 패턴을 그대로 재사용)하여 40여개 기존 bit-exact 회귀 테스트에 영향 없음.",
       "impact": "무인자 CLI 실행 기준 CAGR 56.0%->112.5%, MDD -17.6%->-26.5%, Sharpe 2.23->2.33, DSR 0.36->0.66, Calmar 3.30->4.25. 예전 기본값은 --growth-envelope conservative --pnl-vol-target-mode exante_target --no-committee-evidence-weighting로 계속 접근 가능하며 회귀 테스트로 정확한 수치(CAGR 56.0204%) 고정. leverage_ceiling=2.0 양방향 옵션(--exposure-scale-two-sided)은 실측 파산확률 프론티어를 넘어 fail-closed로 거부됨을 실행으로 확인, 메인 기본값에는 미포함. 잔여 차단사유는 FOLD_GROWTH_CONCENTRATION(2025년 한 해에 복리성장 59% 쏠림)과 RELEVANT_EXECUTION_DATA_GAP(fold 0 MISSING_DATA)이며 둘 다 이번 작업 범위 밖."
-    },
-    {
-      "task_id": "MHS_PERF_STAGE_SERVICES_AND_COUPLED_REPLAY_HAZARD_FIX",
-      "date": "2026-08-22",
-      "adr_id": "ADR_20260822_MHS_PERF_STAGE_SERVICES_AND_COUPLED_REPLAY_HAZARD_FIX",
-      "domain": "mhs",
-      "title": "MHS 성능 리팩토링 stage_services 결합 수정 + P5 결합 replay fail-closed 가드 결함 수정",
-      "why": "code-review에서 stage_services.py가 evaluation.py 사설 심볼을 wrapper 함수로 감싸며 이름을 공개(무언더스코어)로 바꿔 기존 test_stage_services.py의 identity(is) 검증과 monkeypatch.setattr(evaluation, ...) 계약을 깨뜨렸음을 발견. 이를 고치는 과정에서 replay_execution_windows_coupled(P5, D1)의 fail-closed completeness gate가 자기 window 소비 이후 coverage와 비교하는 구조라 논리적으로 절대 발동하지 않는 dead guard였음을 실측 테스트로 확인.",
-      "resolution": "stage_services.py를 evaluation.py 사설 심볼의 identity re-export로 되돌리고 6개 pipeline stage 모듈의 _evaluation.<private>() attribute 접근을 전부 stage_services의 언더스코어 이름 import로 교체. test_module_boundaries.py에 attribute-access 우회 탐지 테스트를 추가. replay_execution_windows_coupled의 gap 체크를 window 소비 이전(prior_coverage_ns)의 window_start 비교로 재작성하고 tests/integration/mhs/test_coupled_replay_equivalence.py로 실측 등가성·gap fail-closed 검증.",
-      "impact": "P4 의존성 경계 게이트가 실질적 결합을 다시 탐지하도록 복구, monkeypatch 기반 기존 테스트 전부 회복. P5 고위험 기능의 fail-closed 안전장치가 실제로 작동하도록 수정되어 향후 window 생성 로직 변경 시 gap이 조용히 통과하는 회귀를 막음."
     }
   ]
 }
