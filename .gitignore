@@ -244,15 +244,14 @@ __marimo__/
 # Ignore all json files everywhere in results/
 results/**/*.json
 
-# Research outputs: sealed envelopes only (I-SEALED-ONLY-IN-VCS)
-docs/results/**/*.json
-docs/results/**/*.jsonl
-docs/results/**/*.parquet
-!docs/results/**/*.enc
+# Research outputs are ignored local data, never documentation history.
+# No generated JSON, JSONL, Parquet, log, or run directory beneath docs/
+# is tracked; the documentation tree carries authored records only.
+docs/results/
 
-# MHS horizon diagnostic: only the lossless full-resolution audit tier is
-# excluded; the compact daily-resampled ledger and summary JSON are tracked.
-docs/results/mhs_horizon_diagnostic_artifacts/_full/
+# MHS research and backtest evidence: ignored local data under data/.
+data/research/
+data/backtests/
 
 # Ignore all enc files everywhere in results/ (default)
 results/**/*.enc
@@ -262,11 +261,9 @@ results/**/*.enc
 !results/**/best_params_*.enc
 !results/**/best_spot_*.enc
 
-# Live deployed artifacts: plaintext weights/recipe are secrets; only their
-# sealed envelopes (.enc) may be tracked.
-docs/results/**/deployed_target_weights.parquet
-docs/results/**/mhs_horizon_diagnostic_recipe.json
-!docs/results/**/deployed_target_weights.parquet.enc
-!docs/results/**/mhs_horizon_diagnostic_recipe.json.enc
-!docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json.enc
-!docs/results/mhs_horizon_diagnostic_artifacts/strategy_bootstrap.parquet.enc
+# Live delivery boundary: only sealed envelopes (.enc) may be tracked.
+# Plaintext parameters, bootstrap, and weights are secrets and stay ignored.
+deploy/mhs/*.json
+deploy/mhs/*.parquet
+deploy/mhs/*.log
+!deploy/mhs/*.enc
