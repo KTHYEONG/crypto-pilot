@@ -58,6 +58,16 @@ def _tier_payload(path: ProcessPath) -> dict[str, object]:
         "exposure_zero_share": zero_share,
         "exposure_cap_share": cap_share,
         "execution_policy": {"tracking_error_threshold": path.execution_policy.tracking_error_threshold},
+        "risk_sizing": (
+            {
+                "annual_volatility_target": path.risk_sizing.annual_volatility_target,
+                "ewma_halflife_days": path.risk_sizing.ewma_halflife_days,
+                "minimum_observations": path.risk_sizing.minimum_observations,
+                "leverage_cap": path.risk_sizing.leverage_cap,
+            }
+            if path.risk_sizing is not None
+            else None
+        ),
         "ann_turnover": ann_turnover,
         "mean_unit_gross": mean_unit_gross,
         "mean_effective_gross": mean_effective_gross,

@@ -10,8 +10,8 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import MhsResourceMeasurement
 from src.mhs.deploy_gate import DeployGateResult
-from src.mhs.execution.contracts import ExecutionDataGap, StrategyExecutionReplayResult
-from src.mhs.process import ProcessExecutionPolicy, RefitPoint
+from src.mhs.execution.contracts import ExecutionDataGap, FundingCoverageGap, StrategyExecutionReplayResult
+from src.mhs.process import ProcessExecutionPolicy, ProcessRiskSizingSpec, RefitPoint
 from src.mhs.resources import ProcessTreeMemoryStats
 
 PROCESS_CERTIFICATION_LEVEL: str = "process_proxy_1h_ledger"
@@ -59,6 +59,7 @@ class ProcessPath:
     unit_target_weights: pd.DataFrame
     target_weights: pd.DataFrame
     turnover_1h: pd.Series
+    risk_sizing: ProcessRiskSizingSpec | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +85,7 @@ class ProcessInventoryReport:
     gate: DeployGateResult
     resource_measurements: tuple[MhsResourceMeasurement, ...]
     memory_stats: ProcessTreeMemoryStats
+    funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +118,7 @@ deployment certification or proof of operating-system OOM."""
     source_gap_excluded_symbols: tuple[str, ...]
     resource_measurements: tuple[MhsResourceMeasurement, ...]
     memory_stats: ProcessTreeMemoryStats | None
+    funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
 
 
 class ProcessInventoryBacktestError(DataIntegrityError):

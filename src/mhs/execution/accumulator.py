@@ -18,6 +18,7 @@ from . import microstructure as _microstructure
 from .contracts import (
     ExecutionDataGap,
     ExecutionReplayWindow,
+    FundingCoverageGap,
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
 )
@@ -161,6 +162,7 @@ class _BoundExecutionReplayAccumulator:
         self.min_notional_dropped_notional = 0.0
         self.termination_counts: dict[str, int] = {"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0}
         self.data_gaps: list[ExecutionDataGap] = []
+        self.funding_coverage_gaps: dict[tuple[str, pd.Timestamp, pd.Timestamp, str], FundingCoverageGap] = {}
         self.units_after_events: list[tuple[pd.Timestamp, np.ndarray]] = []
         self.notional_after_events: list[tuple[pd.Timestamp, np.ndarray]] = []
 
@@ -252,6 +254,8 @@ class _BoundExecutionReplayAccumulator:
     def consume(self, w: ExecutionReplayWindow) -> None:
         """Consume one window through the ordered replay phases. Physical IO boundaries do not reset inventory, liquidity or the logical spread clock. Overlap observations and settlements are applied once."""
         (n_cols, local_cols, n_local, gpos, grid, grid_ns, n_grid, bar_ns, marks_values, highs_values, lows_values, closes_values, close_finite, mark_valid, funding_matrix) = self._consume_validate_window(w)
+        for gap in w.funding_coverage_gaps:
+            self.funding_coverage_gaps[(gap.symbol, gap.start, gap.end, gap.reason)] = gap
         self._advance_spread_clock(w.logical_partition)
         (last_close_idx, decision_ns_all, spos_all, dpos_all, on_grid_all, target_values, submit_anchored, fill_start, tw_index, sig_index) = self._consume_prepare_tables(w, grid_ns, n_grid, close_finite, local_cols)
         for i in range(len(tw_index)):
@@ -1637,6 +1641,7 @@ class _BoundExecutionReplayAccumulator:
             else float("nan")
         )
         reconcile_causal_state(self.accounting_state, ledger)
+        coverage = tuple(sorted(self.funding_coverage_gaps.values(), key=lambda g: (g.start, g.end, g.symbol)))
         return StrategyExecutionReplayResult(
             simulated_fills=simulated_fills,
             ledger=ledger,
@@ -1670,4 +1675,5 @@ class _BoundExecutionReplayAccumulator:
             notional_weighted_spread_bps=weighted_spread_bps,
             notional_weighted_delay_bps=weighted_delay_bps,
             min_notional_dropped_fraction=probe_fraction,
+            funding_coverage_gaps=coverage,
         )
