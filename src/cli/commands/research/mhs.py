@@ -142,18 +142,22 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
 
 
 def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
-    """Run the guarded production 3m process replay and persist execution evidence.
+    """Persist guarded three-minute execution outcomes without masking failures.
 
     Args:
-        args: Existing process command arguments and explicit output controls.
+        args: Existing process controls and distinct evidence destinations.
 
     Returns:
-        None; persist the inventory report and optionally exact target parquet.
+        None on completed evaluation, after primary evidence is persisted.
 
     Raises:
-        SystemExit: An argument or reserved destination is invalid.
-        DataIntegrityError: Replay provenance or resource admission fails.
+        SystemExit: Arguments or evidence destinations conflict.
+        ProcessInventoryBacktestError: Evaluation failed; dedicated diagnostics
+            are persisted when possible and the failure remains nonzero.
+        OSError: Successful-result persistence fails.
     """
+    import json
+
     import pandas as pd
     from pathlib import Path
 
@@ -164,7 +168,9 @@ def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
         PROCESS_INVENTORY_REPORT_PATH,
         PROCESS_POLICY_REPORT_PATH,
         PROCESS_REPORT_PATH,
+        ProcessInventoryBacktestError,
         evaluate_process_inventory_backtest,
+        persist_process_inventory_failure,
         persist_process_inventory_report,
         persist_process_targets,
     )
@@ -175,25 +181,57 @@ def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
         tracking_error_threshold=getattr(args, "rebalance_tracking_error_threshold", None),
     )
     output_arg = getattr(args, "output", None)
+    failure_arg = getattr(args, "failure_output", None)
     targets_arg = getattr(args, "targets_output", None)
-    output = Path(output_arg) if output_arg is not None else None
+    primary = Path(output_arg) if output_arg is not None else PROCESS_INVENTORY_REPORT_PATH
+    failure_output = Path(failure_arg) if failure_arg is not None else primary.parent / f"{primary.stem}.failure.json"
     targets_output = Path(targets_arg) if targets_arg is not None else None
-    if output is not None and output.suffix != ".json":
+    if primary.suffix != ".json":
         raise SystemExit(f"output must be a JSON path, got {output_arg!r}")
+    if failure_output.suffix != ".json":
+        raise SystemExit(f"failure-output must be a JSON path, got {failure_arg!r}")
     if targets_output is not None and targets_output.suffix != ".parquet":
         raise SystemExit(f"targets-output must be a parquet path, got {targets_arg!r}")
-    if output is not None and output.resolve() in {PROCESS_REPORT_PATH.resolve(), PROCESS_POLICY_REPORT_PATH.resolve()}:
+    reserved = {PROCESS_REPORT_PATH.resolve(), PROCESS_POLICY_REPORT_PATH.resolve()}
+    if primary.resolve() in reserved or failure_output.resolve() in reserved:
         raise SystemExit("inventory report would overwrite the reserved hourly evidence destination")
+    if failure_output.resolve() == primary.resolve():
+        raise SystemExit("failure-output must differ from the primary output destination")
+    resolved_targets = targets_output.resolve() if targets_output is not None else None
+    if resolved_targets is not None and resolved_targets in {primary.resolve(), failure_output.resolve()}:
+        raise SystemExit("targets-output must differ from primary and failure destinations")
+    if failure_output.exists():
+        try:
+            prior = json.loads(failure_output.read_text(encoding="utf-8"))
+        except Exception:
+            prior = None
+        if isinstance(prior, dict) and prior.get("status") == "completed":
+            raise SystemExit("failure-output would overwrite completed evidence")
     start = pd.Timestamp(args.start, tz="UTC") if getattr(args, "start", None) else DISCOVERY_START
     end = pd.Timestamp(args.end, tz="UTC") if getattr(args, "end", None) else PROCESS_EVALUATION_CEILING
-    report = evaluate_process_inventory_backtest(start, end, data_root=args.data_root, execution_policy=policy)
-    path = persist_process_inventory_report(report, output if output is not None else PROCESS_INVENTORY_REPORT_PATH)
+    try:
+        report = evaluate_process_inventory_backtest(start, end, data_root=args.data_root, execution_policy=policy)
+    except ProcessInventoryBacktestError as exc:
+        try:
+            persist_process_inventory_failure(exc.report, failure_output)
+        except Exception as persist_exc:
+            _logger.error(
+                "[EVAL] status=failed stage=%s error_code=%s failure_path=%s persist_error=%s",
+                exc.report.stage, exc.report.error_code, failure_output, persist_exc,
+            )
+            raise exc
+        _logger.info(
+            "[EVAL] status=failed stage=%s error_code=%s failure_path=%s",
+            exc.report.stage, exc.report.error_code, failure_output,
+        )
+        raise
+    path = persist_process_inventory_report(report, primary)
     if targets_output is not None:
         persist_process_targets(report.proxy.base, targets_output)
     base = report.base
     memory = report.memory_stats
     _logger.info(
-        "[EVAL] stage=process_backtest certification=%s primary_valid=%s completion_fills=%d unfilled=%d total_fills=%d passive_fills=%d total_fees=%s total_funding=%s go=%s reasons=%s wall_s=%s cpu_s=%s peak_rss=%s peak_pss=%s peak_uss=%s min_available=%s proxy_certification=%s proxy_go=%s threshold=%s path=%s",
+        "[EVAL] status=completed stage=process_backtest certification=%s primary_valid=%s completion_fills=%d unfilled=%d total_fills=%d passive_fills=%d total_fees=%s total_funding=%s go=%s reasons=%s wall_s=%s cpu_s=%s peak_rss=%s peak_pss=%s peak_uss=%s min_available=%s proxy_certification=%s proxy_go=%s threshold=%s path=%s output=%s",
         PROCESS_INVENTORY_CERTIFICATION_LEVEL,
         bool(base.ledger.primary_valid),
         len(base.simulated_fills),
@@ -213,6 +251,7 @@ def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
         report.proxy.certification_level,
         report.proxy.gate.go,
         policy.tracking_error_threshold,
+        path,
         path,
     )
 
@@ -817,6 +856,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help="Research-only portfolio L1 adoption threshold before volatility sizing; omitted preserves baseline.",
     )
     process.add_argument("--output", default=None, help="Explicit JSON proxy evidence destination.")
+    process.add_argument("--failure-output", default=None, help="Dedicated JSON failure diagnostics destination.")
     process.add_argument("--targets-output", default=None, help="Optional parquet export of exact sized targets.")
     process.add_argument("--execution-timeframe", choices=["3m"], default="3m", help="Execution replay resolution; fixed to 3m.")
     process.set_defaults(handler=_run_mhs_process_backtest)

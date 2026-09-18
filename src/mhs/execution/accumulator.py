@@ -250,7 +250,7 @@ class _BoundExecutionReplayAccumulator:
             self.min_notional_dropped_notional += dollar
 
     def consume(self, w: ExecutionReplayWindow) -> None:
-        """Consume one window through the ordered replay phases."""
+        """Consume one window through the ordered replay phases. Physical IO boundaries do not reset inventory, liquidity or the logical spread clock. Overlap observations and settlements are applied once."""
         (n_cols, local_cols, n_local, gpos, grid, grid_ns, n_grid, bar_ns, marks_values, highs_values, lows_values, closes_values, close_finite, mark_valid, funding_matrix) = self._consume_validate_window(w)
         self._advance_spread_clock(w.logical_partition)
         (last_close_idx, decision_ns_all, spos_all, dpos_all, on_grid_all, target_values, submit_anchored, fill_start, tw_index, sig_index) = self._consume_prepare_tables(w, grid_ns, n_grid, close_finite, local_cols)
@@ -1426,7 +1426,7 @@ class _BoundExecutionReplayAccumulator:
             self.half_spread_bps[gpos] = np.where(np.isnan(old), est, merged)
 
     def _advance_spread_clock(self, logical_partition: tuple[int, int] | None) -> None:
-        """Settle the previous logical partition before pricing this window.
+        """Settle the previous logical partition before pricing this window. Physical IO boundaries do not reset inventory, liquidity or the logical spread clock. Overlap observations and settlements are applied once.
 
         Untagged windows keep the legacy per-window update. Tagged windows
         sharing one partition key accumulate observations without updating;
@@ -1505,6 +1505,7 @@ class _BoundExecutionReplayAccumulator:
 
 
     def finalize(self) -> StrategyExecutionReplayResult:
+        """Finalize the streamed replay into one result. Physical IO boundaries do not reset inventory, liquidity or the logical spread clock. Overlap observations and settlements are applied once."""
         columns = self.columns
         n_cols = self.n_cols
         self._finalize_spread_partition()
