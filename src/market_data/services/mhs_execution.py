@@ -355,56 +355,194 @@ def _require_gap_threshold(min_gap_hours: float) -> float:
     return value
 
 
-def _read_ohlcv_labels(symbol: str, timeframe: Literal["3m", "1h"], root: str | None) -> np.ndarray | None:
-    """Sorted unique OHLCV bar labels in nanoseconds, or None when the file is absent.
+def _row_group_ms_min_ns(column: object) -> int | None:
+    """Minimum label of an ms timestamp chunk in nanoseconds, or None if unknown."""
+    try:
+        if column is None:
+            return None
+        stats = getattr(column, "statistics", None)
+        if stats is None or not getattr(column, "is_stats_set", False) or not getattr(stats, "has_min_max", False):
+            return None
+        minimum = stats.min
+        if minimum is None or (isinstance(minimum, float) and not np.isfinite(minimum)):
+            return None
+        if isinstance(minimum, bool) or not isinstance(minimum, (int, np.integer, float)):
+            return None
+        return int(minimum) * 1_000_000
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _row_group_datetime_min_ns(column: object) -> int | None:
+    """Minimum label of a datetime chunk in nanoseconds, or None if unknown."""
+    try:
+        if column is None:
+            return None
+        stats = getattr(column, "statistics", None)
+        if stats is None or not getattr(column, "is_stats_set", False) or not getattr(stats, "has_min_max", False):
+            return None
+        minimum = stats.min
+        if minimum is None:
+            return None
+        stamp = pd.to_datetime(minimum, utc=True, errors="coerce")
+        if not isinstance(stamp, pd.Timestamp) or pd.isna(stamp):
+            return None
+        return int(stamp.as_unit("ns").value)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _read_ohlcv_labels(
+    symbol: str, timeframe: Literal["3m", "1h"], root: str | None,
+    *, observed_through_ns: int | None = None,
+) -> np.ndarray | None:
+    """Read compact OHLCV labels without decoding irrelevant source planes.
+
+    Args:
+        symbol: Existing registered source symbol.
+        timeframe: Existing hourly or three-minute source interval.
+        root: Existing OHLCV root override.
+        observed_through_ns: Inclusive latest useful label, or full audit range.
+
+    Returns:
+        Sorted unique int64 UTC labels, or None for an absent file.
 
     Raises:
-        DataIntegrityError: The source file exists but its provenance cannot
-            be established (unreadable or missing the timestamp column).
+        DataIntegrityError: Existing source schema or decoding is inconsistent.
     """
     base = Path(root) if root else FUTURES_DATA_DIR / "ohlcv"
     path = base / timeframe / f"{symbol}.parquet"
     if not path.exists():
         return None
     try:
-        table = pq.read_table(path, columns=["timestamp"])
+        reader = pq.ParquetFile(path)
+        names = list(reader.schema_arrow.names)
     except Exception as exc:
         raise DataIntegrityError(f"execution source unreadable symbol={symbol!r} path={path}") from exc
-    idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True, errors="coerce")
-    labels = pd.DatetimeIndex(idx).dropna().drop_duplicates().sort_values()
-    return np.asarray(labels.as_unit("ns").asi8, dtype="int64")
+    if "timestamp" not in names:
+        raise DataIntegrityError(f"execution source schema inconsistent symbol={symbol!r} path={path}")
+    try:
+        meta = reader.metadata
+        positions = {meta.row_group(0).column(j).path_in_schema: j for j in range(meta.row_group(0).num_columns)} if meta.num_row_groups else {"timestamp": 0}
+        stamp_pos = positions.get("timestamp", names.index("timestamp"))
+        chunks: list[np.ndarray] = []
+        for group in range(meta.num_row_groups):
+            if observed_through_ns is not None:
+                earliest = _row_group_ms_min_ns(meta.row_group(group).column(stamp_pos))
+                if earliest is not None and earliest > int(observed_through_ns):
+                    continue
+            try:
+                table = reader.read_row_group(group, columns=["timestamp"], use_threads=False)
+                raw = table.column("timestamp").to_numpy()
+                del table
+            except Exception as exc:
+                raise DataIntegrityError(f"execution source unreadable symbol={symbol!r} path={path}") from exc
+            idx = pd.to_datetime(raw, unit="ms", utc=True, errors="coerce")
+            del raw
+            valid = pd.DatetimeIndex(idx).dropna()
+            del idx
+            if len(valid) == 0:
+                continue
+            values = np.asarray(valid.as_unit("ns").asi8, dtype="int64")
+            del valid
+            if observed_through_ns is not None:
+                values = values[values <= int(observed_through_ns)]
+                if len(values) == 0:
+                    continue
+            chunks.append(values)
+    except DataIntegrityError:
+        raise
+    except Exception as exc:
+        raise DataIntegrityError(f"execution source unreadable symbol={symbol!r} path={path}") from exc
+    if not chunks:
+        return np.zeros(0, dtype="int64")
+    combined = np.concatenate(chunks)
+    del chunks
+    return np.unique(combined).astype("int64", copy=False)
 
 
-def _read_mark_labels(symbol: str, timeframe: str) -> np.ndarray | None:
-    """Sorted unique valid mark labels in nanoseconds, or None when the file is absent.
+def _read_mark_labels(
+    symbol: str, timeframe: str, *, observed_through_ns: int | None = None,
+) -> np.ndarray | None:
+    """Read compact valid mark labels from their established source root.
 
-    Only rows with finite strictly-positive ``close`` count, mirroring
-    ``_cached_mark_panel``. Mark availability is the label plus one hour; the
-    caller applies that lag.
+    Args:
+        symbol: Existing mark source symbol.
+        timeframe: Existing hourly mark interval.
+        observed_through_ns: Inclusive latest useful label, or full audit range.
+
+    Returns:
+        Sorted unique int64 UTC labels with finite positive closes, or None.
 
     Raises:
-        DataIntegrityError: Mark provenance is inconsistent (unreadable file
-            or missing timestamp/close columns).
+        DataIntegrityError: Existing mark provenance cannot be established.
     """
     path = _futures_collection._mark_price_path(symbol, timeframe)
     if not path.exists():
         return None
     try:
-        df = pd.read_parquet(path)
+        reader = pq.ParquetFile(path)
+        names = list(reader.schema_arrow.names)
     except Exception as exc:
         raise DataIntegrityError(f"mark source unreadable symbol={symbol!r} path={path}") from exc
-    if df.empty or "close" not in df.columns:
+    if "close" not in names or ("datetime" not in names and "timestamp" not in names):
         raise DataIntegrityError(f"mark source schema inconsistent symbol={symbol!r} path={path}")
-    if "datetime" in df.columns:
-        dt = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
-    elif "timestamp" in df.columns:
-        dt = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
-    else:
-        raise DataIntegrityError(f"mark source schema inconsistent symbol={symbol!r} path={path}")
-    close = pd.to_numeric(df["close"], errors="coerce")
-    valid = dt.notna() & close.notna() & (close > 0)
-    labels = pd.DatetimeIndex(dt[valid].drop_duplicates()).sort_values()
-    return np.asarray(labels.as_unit("ns").asi8, dtype="int64")
+    use_datetime = "datetime" in names
+    time_column = "datetime" if use_datetime else "timestamp"
+    columns = [time_column, "close"]
+    try:
+        meta = reader.metadata
+        if meta.num_rows == 0:
+            raise DataIntegrityError(f"mark source schema inconsistent symbol={symbol!r} path={path}")
+        positions = {meta.row_group(0).column(j).path_in_schema: j for j in range(meta.row_group(0).num_columns)} if meta.num_row_groups else {time_column: 0}
+        time_pos = positions.get(time_column, names.index(time_column))
+        chunks: list[np.ndarray] = []
+        for group in range(meta.num_row_groups):
+            if observed_through_ns is not None:
+                chunk_meta = meta.row_group(group).column(time_pos)
+                earliest = _row_group_datetime_min_ns(chunk_meta) if use_datetime else _row_group_ms_min_ns(chunk_meta)
+                if earliest is not None and earliest > int(observed_through_ns):
+                    continue
+            try:
+                table = reader.read_row_group(group, columns=columns, use_threads=False)
+                if use_datetime:
+                    time_raw = table.column("datetime").to_pandas()
+                else:
+                    time_raw = table.column("timestamp").to_numpy()
+                close_raw = table.column("close").to_numpy()
+                del table
+            except Exception as exc:
+                raise DataIntegrityError(f"mark source unreadable symbol={symbol!r} path={path}") from exc
+            if use_datetime:
+                moments = pd.to_datetime(time_raw, utc=True, errors="coerce")
+            else:
+                moments = pd.to_datetime(time_raw, unit="ms", utc=True, errors="coerce")
+            del time_raw
+            closes = np.asarray(pd.to_numeric(close_raw, errors="coerce"), dtype="float64")
+            del close_raw
+            keep = np.asarray(moments.notna()) & np.isfinite(closes) & (closes > 0.0)
+            del closes
+            if not bool(np.any(keep)):
+                del moments, keep
+                continue
+            valid = pd.DatetimeIndex(moments[keep]).sort_values()
+            del moments, keep
+            values = np.asarray(valid.as_unit("ns").asi8, dtype="int64")
+            del valid
+            if observed_through_ns is not None:
+                values = values[values <= int(observed_through_ns)]
+                if len(values) == 0:
+                    continue
+            chunks.append(values)
+    except DataIntegrityError:
+        raise
+    except Exception as exc:
+        raise DataIntegrityError(f"mark source unreadable symbol={symbol!r} path={path}") from exc
+    if not chunks:
+        return np.zeros(0, dtype="int64")
+    combined = np.concatenate(chunks)
+    del chunks
+    return np.unique(combined).astype("int64", copy=False)
 
 
 def _causal_gap_excluded(
@@ -414,33 +552,48 @@ def _causal_gap_excluded(
     lag_ns: int,
     gap_ns: int,
 ) -> np.ndarray:
-    """Per-decision structural exclusion using only bars available at each decision.
+    """Exclude new exposure using only observations published at each decision.
 
-    A decision at ``T`` observes exactly the labels with ``label + lag <= T``.
-    With history, exclusion starts once the trailing absence reaches the
-    threshold, so the last genuinely observed bar stays usable at its
-    publication time. With no observable bar yet, the leading span is excluded
-    only once it reaches the threshold measured from the current membership
-    run start -- future recovery can only add labels, never move this
-    boundary retroactively.
+    Args:
+        member: Aligned boolean point-in-time membership.
+        decision_ns: Chronological UTC decision nanoseconds.
+        labels_ns: Sorted unique source labels, or absent provenance.
+        lag_ns: Positive source publication lag in nanoseconds.
+        gap_ns: Positive existing structural-gap threshold in nanoseconds.
+
+    Returns:
+        Aligned boolean exclusions; no observed history fails closed.
+
+    Raises:
+        ValueError: Array alignment or temporal parameters are invalid.
     """
+    if (
+        not isinstance(member, np.ndarray)
+        or not isinstance(decision_ns, np.ndarray)
+        or member.ndim != 1
+        or decision_ns.ndim != 1
+        or member.shape != decision_ns.shape
+    ):
+        raise ValueError("member and decision_ns must be aligned one-dimensional arrays")
+    if labels_ns is not None and (not isinstance(labels_ns, np.ndarray) or labels_ns.ndim != 1):
+        raise ValueError("labels_ns must be a one-dimensional array or absent provenance")
+    try:
+        lag = int(lag_ns)
+        gap = int(gap_ns)
+    except (TypeError, ValueError):
+        raise ValueError("lag_ns and gap_ns must be positive integers") from None
+    if lag <= 0 or gap <= 0 or lag != lag_ns or gap != gap_ns:
+        raise ValueError("lag_ns and gap_ns must be positive integers")
     n = len(decision_ns)
-    excluded = np.zeros(n, dtype=bool)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
     if labels_ns is None or len(labels_ns) == 0:
         return np.ones(n, dtype=bool)
-    pos = np.searchsorted(labels_ns, decision_ns - lag_ns, side="right") - 1
+    pos = np.searchsorted(labels_ns, decision_ns - lag, side="right") - 1
+    excluded = np.ones(n, dtype=bool)
     has = pos >= 0
-    absent = decision_ns - labels_ns[np.maximum(pos, 0)]
-    excluded[has] = absent[has] >= gap_ns
-    if bool((~has).any()):
-        prev = np.empty(n, dtype=bool)
-        prev[0] = False
-        prev[1:] = member[:-1]
-        run_idx = np.flatnonzero(member & ~prev)
-        at = np.searchsorted(run_idx, np.arange(n), side="right") - 1
-        run_start = decision_ns[run_idx[np.maximum(at, 0)]]
-        first = int(labels_ns[0])
-        excluded[~has] = (first - run_start[~has]) >= gap_ns
+    latest = labels_ns[np.maximum(pos, 0)]
+    excluded[has] = (decision_ns[has] - latest[has]) >= gap
     return excluded
 
 
@@ -490,12 +643,20 @@ def apply_dynamic_gap_exclusion(
     intervals = roster_membership_intervals(execution_mask)
     if not intervals:
         return execution_mask, {}
-    labels_by_symbol = {
-        symbol: _read_ohlcv_labels(symbol, timeframe, root) for symbol in intervals
-    }
     lag_ns = _OHLCV_BAR_STEP_MINUTES[timeframe] * 60_000_000_000
     gap_ns = int(gap_hours * 3_600_000_000_000)
-    return _apply_causal_gap_exclusion(execution_mask, intervals, labels_by_symbol, lag_ns, gap_ns)
+    decision_ns = np.asarray(execution_mask.index.as_unit("ns").asi8, dtype="int64")
+    observed_through_ns = int(decision_ns[-1]) - lag_ns
+    adjusted = execution_mask.copy()
+    for symbol in intervals:
+        member = execution_mask[symbol].to_numpy(dtype=bool)
+        labels = _read_ohlcv_labels(
+            symbol, timeframe, root, observed_through_ns=observed_through_ns,
+        )
+        dropped = _causal_gap_excluded(member, decision_ns, labels, lag_ns, gap_ns)
+        del labels
+        adjusted[symbol] = member & ~dropped
+    return adjusted, roster_membership_intervals(execution_mask & ~adjusted)
 
 
 def apply_dynamic_mark_gap_exclusion(
@@ -525,10 +686,20 @@ def apply_dynamic_mark_gap_exclusion(
     intervals = roster_membership_intervals(execution_mask)
     if not intervals:
         return execution_mask, {}
-    labels_by_symbol = {symbol: _read_mark_labels(symbol, timeframe) for symbol in intervals}
     lag_ns = _MARK_AVAILABILITY_LAG_HOURS * 3_600_000_000_000
     gap_ns = int(gap_hours * 3_600_000_000_000)
-    return _apply_causal_gap_exclusion(execution_mask, intervals, labels_by_symbol, lag_ns, gap_ns)
+    decision_ns = np.asarray(execution_mask.index.as_unit("ns").asi8, dtype="int64")
+    observed_through_ns = int(decision_ns[-1]) - lag_ns
+    adjusted = execution_mask.copy()
+    for symbol in intervals:
+        member = execution_mask[symbol].to_numpy(dtype=bool)
+        labels = _read_mark_labels(
+            symbol, timeframe, observed_through_ns=observed_through_ns,
+        )
+        dropped = _causal_gap_excluded(member, decision_ns, labels, lag_ns, gap_ns)
+        del labels
+        adjusted[symbol] = member & ~dropped
+    return adjusted, roster_membership_intervals(execution_mask & ~adjusted)
 
 
 def collect_mhs_execution_data(

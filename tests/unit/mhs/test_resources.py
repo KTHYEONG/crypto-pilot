@@ -292,7 +292,7 @@ def test_tree_helpers_skip_unreadable_process(monkeypatch) -> None:
 
     monkeypatch.setattr(resources.psutil, "Process", lambda *args: _BadProc())
 
-    with pytest.raises(DataIntegrityError, match="no process-tree PSS"):
+    with pytest.raises(DataIntegrityError, match="cannot read process memory"):
         resources._current_tree_pss_bytes()
     assert resources._current_tree_swap_bytes() is None
 
@@ -522,16 +522,16 @@ def test_assert_stage_rss_budget_noop_when_both_none() -> None:
 
 
 def test_assert_stage_rss_budget_raises_when_rss_exceeds_budget(monkeypatch) -> None:
-    """A current RSS above the budget raises DataIntegrityError naming the stage."""
-    monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 1000)
+    """A current tree PSS above the budget raises DataIntegrityError naming the stage."""
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 1000)
 
     with pytest.raises(DataIntegrityError, match="my_stage"):
         resources._assert_stage_rss_budget("my_stage", budget_bytes=500, reserve_bytes=None)
 
 
 def test_assert_stage_rss_budget_passes_when_rss_within_budget(monkeypatch) -> None:
-    """A current RSS at or below the budget does not raise."""
-    monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 100)
+    """A current tree PSS at or below the budget does not raise."""
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 100)
 
     resources._assert_stage_rss_budget("my_stage", budget_bytes=500, reserve_bytes=None)
 
@@ -548,13 +548,14 @@ def test_assert_stage_rss_budget_raises_when_reserve_breached(monkeypatch) -> No
 
 
 def test_assert_stage_rss_budget_swallows_psutil_failure_on_reserve_probe(monkeypatch) -> None:
-    """A psutil failure while probing the reserve is swallowed (observational)."""
+    """A psutil failure while probing required headroom fails closed."""
     def _raise() -> None:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _raise())
 
-    resources._assert_stage_rss_budget("my_stage", budget_bytes=None, reserve_bytes=1000)
+    with pytest.raises(DataIntegrityError, match="telemetry unavailable"):
+        resources._assert_stage_rss_budget("my_stage", budget_bytes=None, reserve_bytes=1000)
 
 
 def test_assert_execution_rss_budget_noop_when_both_none() -> None:
@@ -563,8 +564,8 @@ def test_assert_execution_rss_budget_noop_when_both_none() -> None:
 
 
 def test_assert_execution_rss_budget_raises_with_window_context(monkeypatch) -> None:
-    """An exceeded budget raises with stage, observed rss, budget, and window count."""
-    monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 2000)
+    """An exceeded budget raises with stage, observed pss, budget, and window count."""
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 2000)
 
     with pytest.raises(DataIntegrityError, match="completed_windows=7"):
         resources._assert_execution_rss_budget(
@@ -578,7 +579,7 @@ def test_assert_execution_rss_budget_reserve_breach_maps_to_rss_budget_message(m
         available = 5
 
     monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: _Mem())
-    monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
 
     with pytest.raises(DataIntegrityError, match="execution RSS budget"):
         resources._assert_execution_rss_budget(
@@ -665,6 +666,8 @@ class TestProcessTreeMemoryStats:
             "wall_seconds",
             "cpu_seconds",
             "process_swap_growth_bytes",
+            "preparation_tree_pss_peak_bytes",
+            "replay_tree_pss_peak_bytes",
         }
         assert not any("sum" in name for name in names)
 
@@ -760,3 +763,375 @@ def test_worker_plan_observer_records_stage_and_budget() -> None:
 def test_worker_plan_observer_none_recorder_is_none() -> None:
     """No recorder means no observer: existing call sites stay untouched."""
     assert resources._worker_plan_observer(None, "books") is None
+
+
+def _stage_budget(total: int = 1000, replay: int = 400, floor: int = 100) -> object:
+    return resources.MhsMemoryBudget(
+        total_tree_pss_bytes=total, replay_tree_pss_bytes=replay, min_available_bytes=floor,
+    )
+
+
+def _admit_setup(monkeypatch, *, pss: int = 100, available: int = 10**12, swap: int | None = 0) -> None:
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: pss)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: available)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: swap)
+
+
+def test_memory_budget_defaults_and_validation() -> None:
+    """Defaults are 2.5/1.5/2 GiB with replay bounded by total."""
+    budget = resources.MhsMemoryBudget()
+    assert budget.total_tree_pss_bytes == resources.MHS_TREE_PSS_BUDGET_BYTES
+    assert budget.replay_tree_pss_bytes == resources.MHS_REPLAY_BUDGET_BYTES
+    assert budget.min_available_bytes == resources.MHS_AVAILABLE_FLOOR_BYTES
+    assert budget.total_tree_pss_bytes == int(2.5 * 2**30)
+    assert budget.replay_tree_pss_bytes == int(1.5 * 2**30)
+    assert budget.min_available_bytes == 2 * 2**30
+    with pytest.raises(ValueError, match="positive integer"):
+        resources.MhsMemoryBudget(total_tree_pss_bytes=0)
+    with pytest.raises(ValueError, match="positive integer"):
+        resources.MhsMemoryBudget(min_available_bytes=-5)
+    with pytest.raises(ValueError, match="cannot exceed"):
+        resources.MhsMemoryBudget(total_tree_pss_bytes=100, replay_tree_pss_bytes=200)
+    with pytest.raises(ValueError, match="positive integer"):
+        resources.MhsMemoryBudget(total_tree_pss_bytes=True)  # type: ignore[arg-type]
+    err = resources.MhsResourceAdmissionError(stage="s", error_code="MEMORY_BUDGET", message="m")
+    assert err.stage == "s"
+    assert err.error_code == "MEMORY_BUDGET"
+    assert isinstance(err, DataIntegrityError)
+
+
+def test_stage_admission_applies_separate_limits(monkeypatch) -> None:
+    """Same residency passes total but fails replay; phase peaks stay distinct."""
+    _admit_setup(monkeypatch, pss=500, available=10**12)
+    budget = _stage_budget(total=1000, replay=400, floor=100)
+    resources.assert_mhs_stage_allocation(
+        stage="setup", estimated_bytes=100, budget=budget, replay=False, initial_swap_bytes=0,
+    )
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_stage_allocation(
+            stage="replay", estimated_bytes=100, budget=budget, replay=True, initial_swap_bytes=0,
+        )
+    assert exc.value.stage == "replay"
+    assert exc.value.error_code == "MEMORY_BUDGET"
+    sampler = resources._TreeMemorySampler(interval_seconds=0.01)
+    sampler.set_stage("preparation")
+    sampler._sample_once()
+    sampler.set_stage("replay")
+    sampler._sample_once()
+    stats = sampler.stop()
+    assert stats.preparation_tree_pss_peak_bytes is not None
+    assert stats.replay_tree_pss_peak_bytes is not None
+    assert stats.tree_pss_peak_bytes >= 0
+    fresh = resources._TreeMemorySampler(interval_seconds=0.01).stop()
+    assert fresh.preparation_tree_pss_peak_bytes is None
+    assert fresh.replay_tree_pss_peak_bytes is None
+    with pytest.raises(ValueError, match="unsupported"):
+        sampler.set_stage("invalid")  # type: ignore[arg-type]
+    sampler.set_stage("replay")
+
+
+def test_stage_admission_rejects_before_decoder_runs(monkeypatch) -> None:
+    """An inadmissible estimate fails before any decoder constructor runs."""
+    _admit_setup(monkeypatch, pss=900, available=10**12)
+    budget = _stage_budget(total=1000, replay=1000, floor=100)
+    called: list[str] = []
+
+    def _decoder() -> None:
+        called.append("decode")
+
+    with pytest.raises(DataIntegrityError, match="tree_pss=900"):
+        resources.assert_mhs_stage_allocation(
+            stage="process_prepare_panel", estimated_bytes=200, budget=budget,
+            replay=False, initial_swap_bytes=0,
+        )
+    assert called == []
+
+
+def test_stage_admission_rejects_unreadable_live_child(monkeypatch) -> None:
+    """An inaccessible live child fails closed with the named stage."""
+    class _Info:
+        pss = 10
+        uss = 10
+        swap = 0
+        rss = 10
+
+    class _Good:
+        def memory_full_info(self) -> object:
+            return _Info()
+
+        def children(self, recursive: bool = True) -> list[object]:
+            return [_Bad()]
+
+    class _Bad:
+        def memory_full_info(self) -> object:
+            raise resources.psutil.AccessDenied(pid=9)
+
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args: _Good())
+    with pytest.raises(DataIntegrityError, match="unreadable live process"):
+        resources._current_tree_pss_bytes()
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_stage_allocation(
+            stage="named", estimated_bytes=10**12, budget=_stage_budget(),
+            replay=False, initial_swap_bytes=0,
+        )
+    assert exc.value.stage == "named"
+
+
+def test_stage_admission_rejects_tighter_headroom(monkeypatch) -> None:
+    """Whichever of host or cgroup headroom is tighter governs rejection."""
+    budget = _stage_budget(total=10**12, replay=10**12, floor=1000)
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 500)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_stage_allocation(
+            stage="host", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=0,
+        )
+    assert exc.value.error_code == "MEMORY_RESERVE"
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: 100)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc2:
+        resources.assert_mhs_stage_allocation(
+            stage="cgroup", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=0,
+        )
+    assert exc2.value.error_code == "MEMORY_RESERVE"
+    assert exc2.value.stage == "cgroup"
+
+
+def test_stage_admission_swap_baseline_behaviour(monkeypatch) -> None:
+    """Only measured swap growth triggers the swap error; unknown stays null."""
+    budget = _stage_budget(total=10**12, replay=10**12, floor=100)
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 100)
+    resources.assert_mhs_stage_allocation(
+        stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=100,
+    )
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 200)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_stage_allocation(
+            stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=100,
+        )
+    assert exc.value.error_code == "SWAP_GROWTH"
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: None)
+    resources.assert_mhs_stage_allocation(
+        stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=100,
+    )
+    resources.assert_mhs_stage_allocation(
+        stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=None,
+    )
+
+
+def test_stage_admission_telemetry_and_parameter_errors(monkeypatch) -> None:
+    """Required telemetry failures and malformed inputs raise explicitly."""
+    budget = _stage_budget()
+
+    def _boom() -> int:
+        raise DataIntegrityError("cannot enumerate")
+
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", _boom)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_stage_allocation(
+            stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=0,
+        )
+    assert exc.value.error_code == "RESOURCE_TELEMETRY"
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+
+    def _boom_host() -> int:
+        raise DataIntegrityError("cannot read available")
+
+    monkeypatch.setattr(resources, "_current_available_bytes", _boom_host)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc2:
+        resources.assert_mhs_stage_allocation(
+            stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=0,
+        )
+    assert exc2.value.error_code == "RESOURCE_TELEMETRY"
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+    with pytest.raises(ValueError, match="stage"):
+        resources.assert_mhs_stage_allocation(
+            stage="", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=0,
+        )
+    with pytest.raises(ValueError, match="estimated_bytes"):
+        resources.assert_mhs_stage_allocation(
+            stage="s", estimated_bytes=-1, budget=budget, replay=False, initial_swap_bytes=0,
+        )
+    with pytest.raises(ValueError, match="replay"):
+        resources.assert_mhs_stage_allocation(
+            stage="s", estimated_bytes=0, budget=budget, replay="yes", initial_swap_bytes=0,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="initial_swap_bytes"):
+        resources.assert_mhs_stage_allocation(
+            stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=-1,
+        )
+    with pytest.raises(ValueError, match="budget"):
+        resources.assert_mhs_stage_allocation(
+            stage="s", estimated_bytes=0, budget="bad", replay=False, initial_swap_bytes=0,  # type: ignore[arg-type]
+        )
+
+
+def test_tree_pss_missing_observation_fails_closed(monkeypatch) -> None:
+    """A live process without PSS and vanishing children never fabricate zero."""
+    class _NoPss:
+        uss = 1
+        swap = 0
+        rss = 1
+
+    class _Proc:
+        def memory_full_info(self) -> object:
+            return _NoPss()
+
+        def children(self, recursive: bool = True) -> list[object]:
+            return []
+
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args: _Proc())
+    with pytest.raises(DataIntegrityError, match="PSS observation missing"):
+        resources._current_tree_pss_bytes()
+
+    class _Vanish:
+        def children(self, recursive: bool = True) -> list[object]:
+            raise resources.psutil.NoSuchProcess(pid=1)
+
+    class _Me:
+        def children(self, recursive: bool = True) -> list[object]:
+            return []
+
+        def memory_full_info(self) -> object:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(pss=5, uss=5, swap=0, rss=5)
+
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args: _Me())
+    assert resources._current_tree_pss_bytes() == 5
+    with pytest.raises(ValueError, match="budget"):
+        resources._resolve_memory_budget("bad")  # type: ignore[arg-type]
+    assert resources._resolve_memory_budget(None).total_tree_pss_bytes == resources.MHS_TREE_PSS_BUDGET_BYTES
+
+    class _BadPss:
+        pss = "bad"
+        uss = 1
+        swap = 0
+        rss = 1
+
+    class _BadPssProc:
+        def memory_full_info(self) -> object:
+            return _BadPss()
+
+        def children(self, recursive: bool = True) -> list[object]:
+            return []
+
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args: _BadPssProc())
+    with pytest.raises(DataIntegrityError, match="invalid PSS"):
+        resources._current_tree_pss_bytes()
+
+
+def test_sampler_stage_boundary_failures_stay_observational(monkeypatch) -> None:
+    """Boundary observation failures never raise into the run."""
+    sampler = resources._TreeMemorySampler(interval_seconds=0.01)
+
+    def _boom(*args, **kwargs) -> object:
+        raise RuntimeError("no tree")
+
+    monkeypatch.setattr(resources.psutil, "Process", _boom)
+    sampler.set_stage("preparation")
+    sampler.set_stage("replay")
+    stats = sampler.stop()
+    assert stats.preparation_tree_pss_peak_bytes is None
+    assert stats.replay_tree_pss_peak_bytes is None
+
+    class _BadMem:
+        def memory_full_info(self) -> object:
+            raise RuntimeError("unreadable")
+
+    class _BadTree:
+        def children(self, recursive: bool = True) -> list[object]:
+            return [self]
+
+        def memory_full_info(self) -> object:
+            raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args: _BadTree())
+    sampler2 = resources._TreeMemorySampler(interval_seconds=0.01)
+    sampler2.set_stage("preparation")
+    assert sampler2.stop().preparation_tree_pss_peak_bytes is None
+    assert _BadMem is not None
+
+
+def _plan_allocation(fixed: int = 1000, per_bar: int = 100, decoder: int = 500) -> object:
+    return resources.MhsExecutionAllocation(fixed_bytes=fixed, bytes_per_bar=per_bar, decoder_bytes=decoder)
+
+
+def _plan_setup(monkeypatch, *, pss: int = 0, available: int = 10**12) -> None:
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: pss)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: available)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+
+
+def test_plan_returns_largest_legal_grid(monkeypatch) -> None:
+    """Largest admissible grid within both budgets never exceeds the request."""
+    _plan_setup(monkeypatch, pss=0, available=10**12)
+    alloc = _plan_allocation(fixed=1000, per_bar=100, decoder=500)
+    got = resources.plan_mhs_execution_bars(requested_bars=20, minimum_bars=2, allocation=alloc, budget_bytes=3000, reserve_bytes=100)
+    assert got == 15
+    assert got <= 20
+
+
+def test_plan_minimum_failure_names_bytes(monkeypatch) -> None:
+    """Insufficient space for the minimum timeout grid fails before any decode."""
+    _plan_setup(monkeypatch, pss=900, available=10**12)
+    alloc = _plan_allocation(fixed=1000, per_bar=100, decoder=500)
+    with pytest.raises(DataIntegrityError, match="require"):
+        resources.plan_mhs_execution_bars(requested_bars=10, minimum_bars=5, allocation=alloc, budget_bytes=1000, reserve_bytes=None)
+
+
+def test_plan_decoder_dominance_constrains(monkeypatch) -> None:
+    """Large decoder transients constrain the plan rather than being ignored."""
+    _plan_setup(monkeypatch, pss=0, available=10**12)
+    small = resources.plan_mhs_execution_bars(requested_bars=100, minimum_bars=2, allocation=_plan_allocation(100, 10, 5000), budget_bytes=6000, reserve_bytes=None)
+    large = resources.plan_mhs_execution_bars(requested_bars=100, minimum_bars=2, allocation=_plan_allocation(100, 10, 100), budget_bytes=6000, reserve_bytes=None)
+    assert small < large
+
+
+def test_plan_invalid_and_unknown_fails_closed(monkeypatch) -> None:
+    """Invalid components or unavailable telemetry fail without zero grids."""
+    _plan_setup(monkeypatch)
+    with pytest.raises(ValueError, match="bytes_per_bar"):
+        resources.MhsExecutionAllocation(fixed_bytes=0, bytes_per_bar=0, decoder_bytes=0)
+    with pytest.raises(ValueError, match="non-negative"):
+        resources.MhsExecutionAllocation(fixed_bytes=-1, bytes_per_bar=10, decoder_bytes=0)
+    with pytest.raises(ValueError, match="requested_bars"):
+        resources.plan_mhs_execution_bars(requested_bars=1, minimum_bars=2, allocation=_plan_allocation(), budget_bytes=100, reserve_bytes=None)
+    with pytest.raises(ValueError, match="minimum_bars"):
+        resources.plan_mhs_execution_bars(requested_bars=5, minimum_bars=1, allocation=_plan_allocation(), budget_bytes=100, reserve_bytes=None)
+    with pytest.raises(ValueError, match="allocation"):
+        resources.plan_mhs_execution_bars(requested_bars=5, minimum_bars=2, allocation="bad", budget_bytes=100, reserve_bytes=None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="budget_bytes"):
+        resources.plan_mhs_execution_bars(requested_bars=5, minimum_bars=2, allocation=_plan_allocation(), budget_bytes=0, reserve_bytes=None)
+    with pytest.raises(ValueError, match="requested_bars"):
+        resources.plan_mhs_execution_bars(requested_bars=0, minimum_bars=2, allocation=_plan_allocation(), budget_bytes=100, reserve_bytes=None)
+
+
+def test_plan_reserve_breach_skips_large_grids(monkeypatch) -> None:
+    """Post-allocation reserve skips large grids before returning a smaller one."""
+    _plan_setup(monkeypatch, pss=0, available=5000)
+    alloc = _plan_allocation(fixed=100, per_bar=10, decoder=100)
+    got = resources.plan_mhs_execution_bars(requested_bars=100, minimum_bars=2, allocation=alloc, budget_bytes=None, reserve_bytes=4000)
+    assert got < 100
+    assert got >= 2
+
+    def _boom() -> int:
+        raise DataIntegrityError("cannot enumerate")
+
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", _boom)
+    with pytest.raises(DataIntegrityError, match="cannot enumerate"):
+        resources.plan_mhs_execution_bars(requested_bars=5, minimum_bars=2, allocation=_plan_allocation(), budget_bytes=100, reserve_bytes=None)
+    assert resources.plan_mhs_execution_bars(requested_bars=7, minimum_bars=2, allocation=_plan_allocation(), budget_bytes=None, reserve_bytes=None) == 7

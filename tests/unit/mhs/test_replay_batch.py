@@ -208,3 +208,116 @@ class TestIsolatedBoundReplay:
             replay_execution_window_batch_isolated(
                 iter(windows), 1.0, bounds, isolated_bound_indices=frozenset(),
             )
+
+
+def _split_fixture() -> dict[str, object]:
+    import pandas as pd
+
+    grid = pd.date_range("2021-01-01", periods=200, freq="3min", tz="UTC")
+    symbols = ["AUSDT", "BUSDT"]
+    rng = np.random.default_rng(11)
+    closes = pd.DataFrame({s: 100.0 + np.cumsum(rng.normal(0, 0.1, len(grid))) for s in symbols}, index=grid)
+    highs = closes + 0.05
+    lows = closes - 0.05
+    marks = closes.copy()
+    funding = pd.DataFrame(1e-5, index=grid, columns=symbols)
+    decisions = pd.DatetimeIndex([grid[10], grid[60], grid[120]])
+    weights = pd.DataFrame([[0.1, 0.0], [0.0, 0.1], [-0.05, 0.05]], index=decisions, columns=symbols)
+    signals = decisions + pd.Timedelta(minutes=3)
+    return {"grid": grid, "symbols": symbols, "highs": highs, "lows": lows, "closes": closes, "marks": marks, "funding": funding, "weights": weights, "signals": signals}
+
+
+def _make_window(fx, grid_slice, w_slice, s_slice, key) -> object:
+    from src.mhs.execution import ExecutionReplayWindow
+
+    return ExecutionReplayWindow(
+        window_start=grid_slice[0], window_end=grid_slice[-1],
+        columns=tuple(fx["symbols"]), symbols=tuple(fx["symbols"]),
+        minute_grid=grid_slice, highs=fx["highs"].loc[grid_slice], lows=fx["lows"].loc[grid_slice],
+        closes=fx["closes"].loc[grid_slice], marks=fx["marks"].loc[grid_slice],
+        bar_funding=fx["funding"].loc[grid_slice], target_weights=w_slice, signal_available_at=s_slice,
+        quote_volumes=pd.DataFrame(1.0, index=grid_slice, columns=fx["symbols"]),
+        funding_known=pd.DataFrame(True, index=grid_slice, columns=fx["symbols"]),
+        bar_available_at=grid_slice + pd.Timedelta(minutes=3), logical_partition=key,
+    )
+
+
+def test_flat_split_parity() -> None:
+    """Unsplit and physically split widths match ledgers at 1e-12."""
+    from src.mhs.execution import replay_execution_windows
+
+    fx = _split_fixture()
+    spec = ExecutionSpec()
+    key = (0, 3)
+    whole = _make_window(fx, fx["grid"], fx["weights"], fx["signals"], key)
+    oracle = replay_execution_windows(iter([whole]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    g1 = fx["grid"][:120]
+    g2 = fx["grid"][60:]
+    w1 = _make_window(fx, g1, fx["weights"].iloc[:2], fx["signals"][:2], key)
+    w2 = _make_window(fx, g2, fx["weights"].iloc[2:], fx["signals"][2:], key)
+    split = replay_execution_windows(iter([w1, w2]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    np.testing.assert_allclose(split.ledger.equity.to_numpy(), oracle.ledger.equity.to_numpy(), rtol=1e-12, atol=1e-12)
+    assert (split.simulated_fills[["symbol", "quantity_delta"]].to_numpy() == oracle.simulated_fills[["symbol", "quantity_delta"]].to_numpy()).all()
+
+
+def test_corwin_split_parity() -> None:
+    """Volatile paths keep spread observations and ledgers identical across widths."""
+    from src.mhs.execution import replay_execution_windows
+
+    fx = _split_fixture()
+    spec = ExecutionSpec(liquidity_cost_model="corwin_schultz")
+    key = (0, 3)
+    whole = _make_window(fx, fx["grid"], fx["weights"], fx["signals"], key)
+    oracle = replay_execution_windows(iter([whole]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    g1 = fx["grid"][:100]
+    g2 = fx["grid"][60:]
+    w1 = _make_window(fx, g1, fx["weights"].iloc[:2], fx["signals"][:2], key)
+    w2 = _make_window(fx, g2, fx["weights"].iloc[2:], fx["signals"][2:], key)
+    split = replay_execution_windows(iter([w1, w2]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    np.testing.assert_allclose(split.ledger.equity.to_numpy(), oracle.ledger.equity.to_numpy(), rtol=1e-12, atol=1e-12)
+
+
+def test_overlap_settlement_parity() -> None:
+    """Fees, funding, MTM and fills appear once with identical timestamps and cash."""
+    from src.mhs.execution import replay_execution_windows
+
+    fx = _split_fixture()
+    spec = ExecutionSpec()
+    key = (0, 3)
+    whole = _make_window(fx, fx["grid"], fx["weights"], fx["signals"], key)
+    oracle = replay_execution_windows(iter([whole]), 1000.0, "OHLCV_STRICT_PROXY", spec)
+    mid = 100
+    w1 = _make_window(fx, fx["grid"][:mid], fx["weights"].iloc[:2], fx["signals"][:2], key)
+    w2 = _make_window(fx, fx["grid"][60:], fx["weights"].iloc[2:], fx["signals"][2:], key)
+    split = replay_execution_windows(iter([w1, w2]), 1000.0, "OHLCV_STRICT_PROXY", spec)
+    assert list(split.simulated_fills["timestamp"]) == list(oracle.simulated_fills["timestamp"])
+    np.testing.assert_allclose(split.ledger.fee_charge.to_numpy(), oracle.ledger.fee_charge.to_numpy(), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(split.ledger.funding_charge.to_numpy(), oracle.ledger.funding_charge.to_numpy(), rtol=1e-12, atol=1e-12)
+
+
+def test_held_only_tail_and_legacy_mode() -> None:
+    """Decision-empty tails stay priced and None keys keep legacy semantics."""
+    from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
+
+    fx = _split_fixture()
+    spec = ExecutionSpec()
+    key = (0, 3)
+    w1 = _make_window(fx, fx["grid"][:150], fx["weights"], fx["signals"], key)
+    tail_grid = fx["grid"][149:]
+    empty_w = pd.DataFrame(index=fx["weights"].index[:0], columns=fx["symbols"], dtype="float64")
+    empty_s = fx["signals"][:0]
+    wtail = ExecutionReplayWindow(
+        window_start=tail_grid[0], window_end=tail_grid[-1], columns=tuple(fx["symbols"]), symbols=tuple(fx["symbols"]),
+        minute_grid=tail_grid, highs=fx["highs"].loc[tail_grid], lows=fx["lows"].loc[tail_grid],
+        closes=fx["closes"].loc[tail_grid], marks=fx["marks"].loc[tail_grid], bar_funding=fx["funding"].loc[tail_grid],
+        target_weights=empty_w, signal_available_at=empty_s,
+        quote_volumes=pd.DataFrame(1.0, index=tail_grid, columns=fx["symbols"]),
+        funding_known=pd.DataFrame(True, index=tail_grid, columns=fx["symbols"]),
+        bar_available_at=tail_grid + pd.Timedelta(minutes=3), logical_partition=key,
+    )
+    res = replay_execution_windows(iter([w1, wtail]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    assert len(res.ledger.equity) > 0
+    legacy = _make_window(fx, fx["grid"][:50], fx["weights"].iloc[:1], fx["signals"][:1], None)
+    legacy = dataclasses.replace(legacy, logical_partition=None)
+    res2 = replay_execution_windows(iter([legacy]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    assert res2 is not None

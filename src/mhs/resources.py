@@ -14,6 +14,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from typing import Literal
 
 import psutil
 
@@ -30,6 +31,44 @@ _logger = logging.getLogger("MhsHorizonDiagnostic")
 MHS_TREE_PSS_BUDGET_BYTES: int = int(2.5 * 2**30)
 MHS_REPLAY_BUDGET_BYTES: int = int(1.5 * 2**30)
 MHS_AVAILABLE_FLOOR_BYTES: int = 2 * 2**30
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MhsMemoryBudget:
+    """Stage-specific process-tree memory limits in bytes. Total and replay limits constrain resident state plus admitted allocations; physical-memory reserve also accounts for cgroup headroom. Limits never alter financial decisions or source coverage. All fields are positive integers and the replay limit cannot exceed the total limit."""
+
+    total_tree_pss_bytes: int = MHS_TREE_PSS_BUDGET_BYTES
+    replay_tree_pss_bytes: int = MHS_REPLAY_BUDGET_BYTES
+    min_available_bytes: int = MHS_AVAILABLE_FLOOR_BYTES
+
+    def __post_init__(self) -> None:
+        for name in ("total_tree_pss_bytes", "replay_tree_pss_bytes", "min_available_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+        if self.replay_tree_pss_bytes > self.total_tree_pss_bytes:
+            raise ValueError(
+                f"replay_tree_pss_bytes={self.replay_tree_pss_bytes} cannot exceed "
+                f"total_tree_pss_bytes={self.total_tree_pss_bytes}"
+            )
+
+
+class MhsResourceAdmissionError(DataIntegrityError):
+    """Typed resource rejection carrying measured stage and cause. The diagnostic message preserves observed and requested bytes; classification does not infer OOM from text, RSS peaks or a nonzero exit status."""
+
+    def __init__(
+        self, *, stage: str, error_code: Literal["MEMORY_BUDGET", "MEMORY_RESERVE", "SWAP_GROWTH", "RESOURCE_TELEMETRY"], message: str,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.error_code = error_code
+
+
+def _resolve_memory_budget(budget: MhsMemoryBudget | None) -> MhsMemoryBudget:
+    resolved = budget if budget is not None else MhsMemoryBudget()
+    if not isinstance(resolved, MhsMemoryBudget):
+        raise ValueError(f"budget must be MhsMemoryBudget or None, got {resolved!r}")
+    return resolved
 
 
 def _current_rss_bytes() -> int:
@@ -110,12 +149,21 @@ def _current_tree_pss_bytes() -> int:
     observed = 0
     for proc in procs:
         try:
-            total += int(getattr(proc.memory_full_info(), "pss", 0))
-            observed += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            info = proc.memory_full_info()
+        except psutil.NoSuchProcess:
             continue
-        except Exception:  # noqa: BLE001, S112 - single unreadable process never fails admission
-            continue
+        except psutil.AccessDenied as exc:
+            raise DataIntegrityError(f"physical-memory telemetry unavailable: unreadable live process: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise DataIntegrityError(f"physical-memory telemetry unavailable: cannot read process memory: {exc}") from exc
+        pss = getattr(info, "pss", None)
+        if pss is None:
+            raise DataIntegrityError("physical-memory telemetry unavailable: process-tree PSS observation missing")
+        try:
+            total += int(pss)
+        except (TypeError, ValueError) as exc:
+            raise DataIntegrityError(f"physical-memory telemetry unavailable: invalid PSS observation: {exc}") from exc
+        observed += 1
     if observed == 0:
         raise DataIntegrityError("physical-memory telemetry unavailable: no process-tree PSS observation")
     return total
@@ -222,6 +270,74 @@ def assert_mhs_allocation_budget(*, estimated_bytes: int, budget_bytes: int | No
         )
 
 
+def _tree_headroom_bytes() -> int:
+    """Minimum of host available and known cgroup remaining bytes."""
+    available = _current_available_bytes()
+    remaining = _read_cgroup_remaining_bytes()
+    if remaining is None:
+        return available
+    return min(available, remaining)
+
+
+def assert_mhs_stage_allocation(
+    *, stage: str, estimated_bytes: int, budget: MhsMemoryBudget,
+    replay: bool, initial_swap_bytes: int | None,
+) -> None:
+    """Admit a named allocation before its decoder or financial buffers start.
+
+    Args:
+        stage: Stable diagnostic stage identifier.
+        estimated_bytes: Conservative additional simultaneously live bytes.
+        budget: Validated process-tree and available-memory limits.
+        replay: Whether the stricter replay limit applies.
+        initial_swap_bytes: Run-entry tree swap baseline, if measurable.
+
+    Returns:
+        None when measured tree PSS and physical headroom admit allocation.
+
+    Raises:
+        DataIntegrityError: Admission is unsafe or required telemetry is unknown.
+        ValueError: Budget fields, stage or allocation size are invalid.
+    """
+    if not isinstance(stage, str) or not stage:
+        raise ValueError(f"stage must be a non-empty string, got {stage!r}")
+    if isinstance(estimated_bytes, bool) or not isinstance(estimated_bytes, int) or estimated_bytes < 0:
+        raise ValueError(f"estimated_bytes must be a non-negative integer, got {estimated_bytes!r}")
+    resolved = _resolve_memory_budget(budget)
+    if not isinstance(replay, bool):
+        raise ValueError(f"replay must be bool, got {replay!r}")
+    if initial_swap_bytes is not None and (
+        isinstance(initial_swap_bytes, bool) or not isinstance(initial_swap_bytes, int) or initial_swap_bytes < 0
+    ):
+        raise ValueError(f"initial_swap_bytes must be a non-negative integer or None, got {initial_swap_bytes!r}")
+    limit = resolved.replay_tree_pss_bytes if replay else resolved.total_tree_pss_bytes
+    try:
+        current = _current_tree_pss_bytes()
+    except DataIntegrityError as exc:
+        raise MhsResourceAdmissionError(stage=stage, error_code="RESOURCE_TELEMETRY", message=f"resource telemetry unavailable at stage '{stage}': {exc}") from exc
+    if current + estimated_bytes > limit:
+        raise MhsResourceAdmissionError(
+            stage=stage, error_code="MEMORY_BUDGET",
+            message=f"mhs stage allocation rejected at '{stage}': tree_pss={current} estimated={estimated_bytes} budget={limit}",
+        )
+    try:
+        headroom = _tree_headroom_bytes()
+    except DataIntegrityError as exc:
+        raise MhsResourceAdmissionError(stage=stage, error_code="RESOURCE_TELEMETRY", message=f"resource telemetry unavailable at stage '{stage}': {exc}") from exc
+    if headroom - estimated_bytes < resolved.min_available_bytes:
+        raise MhsResourceAdmissionError(
+            stage=stage, error_code="MEMORY_RESERVE",
+            message=f"mhs stage reserve breached at '{stage}': headroom={headroom} estimated={estimated_bytes} reserve={resolved.min_available_bytes}",
+        )
+    if initial_swap_bytes is not None:
+        current_swap = _current_tree_swap_bytes()
+        if current_swap is not None and current_swap > initial_swap_bytes:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="SWAP_GROWTH",
+                message=f"mhs stage swap growth at '{stage}': initial_swap={initial_swap_bytes} current_swap={current_swap}",
+            )
+
+
 def _assert_stage_rss_budget(
     stage: str,
     budget_bytes: int | None,
@@ -229,30 +345,24 @@ def _assert_stage_rss_budget(
 ) -> None:
     """Deterministic fail-closed RAM barrier at a named stage boundary.
 
-    (a) A positive ``budget_bytes`` exceeded by the current process RSS raises
-    ``DataIntegrityError`` naming the stage. (b) When ``reserve_bytes`` is set
-    and the system's available memory drops below it, ``DataIntegrityError`` is
-    raised BEFORE the OS OOM killer can fire (WSL kills the whole VM, so the
-    process must abort while headroom remains). psutil exceptions inside the
-    reserve probe are swallowed (observational). Both ``None`` makes it a no-op.
-    The guard never alters computed values.
+    Budget compares complete live process-tree PSS and reserve compares the
+    minimum of host available and known cgroup remaining bytes; required
+    telemetry failures raise instead of passing silently. Both ``None`` makes
+    it a no-op. The guard never alters computed values.
     """
     if budget_bytes is not None:
-        observed = _current_rss_bytes()
+        observed = _current_tree_pss_bytes()
         if observed > budget_bytes:
             raise DataIntegrityError(
                 f"RAM budget exceeded at stage '{stage}': "
-                f"rss={observed} > budget={budget_bytes}"
+                f"tree_pss={observed} > budget={budget_bytes}"
             )
     if reserve_bytes is not None:
-        try:
-            available = int(psutil.virtual_memory().available)
-        except Exception:  # noqa: BLE001
-            return
-        if available < reserve_bytes:
+        headroom = _tree_headroom_bytes()
+        if headroom < reserve_bytes:
             raise DataIntegrityError(
                 f"system RAM reserve breached at stage '{stage}': "
-                f"available={available} < reserve={reserve_bytes}"
+                f"headroom={headroom} < reserve={reserve_bytes}"
             )
 
 
@@ -264,16 +374,30 @@ def _assert_execution_rss_budget(
 ) -> None:
     """Deterministic fail-closed provenance for a configured RSS budget.
 
-    A positive ``budget`` exceeded at a window boundary raises
-    ``DataIntegrityError`` carrying the stage, observed RSS, configured budget,
-    and completed window count; the default ``None`` applies no artificial cap.
-    When ``reserve_bytes`` is set and the system's available memory drops below
-    it, the same stable ``rss budget``-prefixed ``DataIntegrityError`` is raised
-    so ``_classify_execution_failure`` keeps mapping it to
-    ``GO_REASON_RESOURCE_BREACH`` -- the fork-worker OOM guard (only the
-    system reserve applies to workers; the auto 85% budget is parent-only
-    because fork-child RSS double-counts COW-shared pages).
+    Budget compares complete live process-tree PSS and reserve compares the
+    minimum of host available and known cgroup remaining bytes; required
+    telemetry failures raise instead of passing silently. The default ``None``
+    applies no artificial cap. The stable ``rss budget``-prefixed messages keep
+    mapping to ``GO_REASON_RESOURCE_BREACH``.
     """
+    if budget is None and reserve_bytes is None:
+        return
+    if budget is not None:
+        observed = _current_tree_pss_bytes()
+        if observed > budget:
+            raise DataIntegrityError(
+                "execution RSS budget exceeded at window boundary: "
+                f"stage={stage} observed_tree_pss={observed} "
+                f"budget={budget} completed_windows={completed_windows}"
+            )
+    if reserve_bytes is not None:
+        headroom = _tree_headroom_bytes()
+        if headroom < reserve_bytes:
+            raise DataIntegrityError(
+                "execution RSS budget (system reserve) breached at window boundary: "
+                f"stage={stage} headroom={headroom} "
+                f"reserve={reserve_bytes} completed_windows={completed_windows}"
+            )
     if budget is None and reserve_bytes is None:
         return
     observed = _current_rss_bytes()
@@ -389,12 +513,15 @@ class _StageRecorder:
 class ProcessTreeMemoryStats:
     """COW-correct memory footprint of one run's whole process tree.
 
-    Sum-of-RSS is deliberately NOT a field: it double-counts COW-shared parent
-    pages (measured 16.61 GB vs a true 11.88 GB PSS). OOM safety is judged on
-    ``min_system_available_bytes`` only. Sampling peaks are sampled observations,
-    not exact instantaneous guarantees. Missing optional observations are null,
-    not zero; ``MhsResourceMeasurement`` stays per-stage evidence and is never
-    used as an aggregate PSS record.
+    Global sampled tree PSS/USS peaks cover every sample; stage-specific
+    sampled PSS peaks isolate preparation versus replay residency; optional
+    individual RSS peaks and headroom describe single-process evidence.
+    Admission uses dual PSS/headroom limits: tree PSS plus admitted bytes must
+    stay within the stage budget and post-allocation headroom must keep the
+    reserve. Sampling peaks are sampled observations, not exact instantaneous
+    guarantees. Missing optional observations are null, not zero;
+    ``MhsResourceMeasurement`` stays per-stage evidence and is never used as
+    an aggregate PSS record.
     """
 
     tree_pss_peak_bytes: int
@@ -407,6 +534,8 @@ class ProcessTreeMemoryStats:
     wall_seconds: float = 0.0
     cpu_seconds: float = 0.0
     process_swap_growth_bytes: int | None = None
+    preparation_tree_pss_peak_bytes: int | None = None
+    replay_tree_pss_peak_bytes: int | None = None
 
 
 class _TreeMemorySampler:
@@ -437,6 +566,48 @@ class _TreeMemorySampler:
         self._swap_start_bytes: int | None = None
         self._start_wall: float | None = None
         self._start_cpu: float | None = None
+        self._stage: str | None = None
+        self._preparation_pss_peak_bytes = -1
+        self._replay_pss_peak_bytes = -1
+
+    def set_stage(self, stage: Literal["preparation", "replay"]) -> None:
+        """Attribute subsequent resource samples to the current physical phase.
+
+        Args:
+            stage: Preparation or replay, without changing financial engine state.
+
+        Returns:
+            None; existing global peaks and swap baseline remain continuous.
+
+        Raises:
+            ValueError: The phase is unsupported.
+        """
+        if stage not in ("preparation", "replay"):
+            raise ValueError(f"unsupported stage '{stage}'")
+        with self._lock:
+            if self._stage == stage:
+                return
+            self._stage = stage
+            try:
+                me = psutil.Process(os.getpid())
+                procs = [me, *me.children(recursive=True)]
+            except Exception:  # noqa: BLE001 - observational boundary
+                return
+            boundary = 0
+            seen = False
+            for proc in procs:
+                try:
+                    boundary += int(getattr(proc.memory_full_info(), "pss", 0))
+                    seen = True
+                except Exception:  # noqa: BLE001, S112 - observational boundary
+                    continue
+            if not seen:
+                return
+            self._tree_pss_peak_bytes = max(self._tree_pss_peak_bytes, boundary)
+            if stage == "preparation":
+                self._preparation_pss_peak_bytes = max(self._preparation_pss_peak_bytes, boundary)
+            else:
+                self._replay_pss_peak_bytes = max(self._replay_pss_peak_bytes, boundary)
 
     def start(self) -> None:
         if self._thread is not None:
@@ -478,6 +649,8 @@ class _TreeMemorySampler:
                 swap_growth: int | None = max(self._swap_peak_bytes - self._swap_start_bytes, 0)
             else:
                 swap_growth = None
+            preparation_peak = self._preparation_pss_peak_bytes if self._preparation_pss_peak_bytes >= 0 else None
+            replay_peak = self._replay_pss_peak_bytes if self._replay_pss_peak_bytes >= 0 else None
             return ProcessTreeMemoryStats(
                 tree_pss_peak_bytes=max(self._tree_pss_peak_bytes, 0),
                 tree_uss_peak_bytes=max(self._tree_uss_peak_bytes, 0),
@@ -489,9 +662,13 @@ class _TreeMemorySampler:
                 wall_seconds=float(wall),
                 cpu_seconds=float(cpu),
                 process_swap_growth_bytes=swap_growth,
+                preparation_tree_pss_peak_bytes=preparation_peak,
+                replay_tree_pss_peak_bytes=replay_peak,
             )
 
     def _sample_once(self) -> None:
+        with self._lock:
+            active = self._stage
         pss_sum = 0
         uss_sum = 0
         swap_sum = 0
@@ -530,6 +707,10 @@ class _TreeMemorySampler:
                 self._tree_pss_peak_bytes = max(self._tree_pss_peak_bytes, pss_sum)
                 self._tree_uss_peak_bytes = max(self._tree_uss_peak_bytes, uss_sum)
                 self._swap_peak_bytes = max(self._swap_peak_bytes, swap_sum)
+                if active == "preparation":
+                    self._preparation_pss_peak_bytes = max(self._preparation_pss_peak_bytes, pss_sum)
+                elif active == "replay":
+                    self._replay_pss_peak_bytes = max(self._replay_pss_peak_bytes, pss_sum)
                 if parent_rss >= 0:
                     self._parent_rss_peak_bytes = max(self._parent_rss_peak_bytes, parent_rss)
                 if child_peak >= 0:
@@ -578,3 +759,77 @@ def _peak_rss_bytes(
     resource_measurements: tuple[MhsResourceMeasurement, ...],
 ) -> int | None:
     return max((m.rss_bytes for m in resource_measurements), default=None)
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MhsExecutionAllocation:
+    """Additional simultaneously live execution bytes. Fixed bytes include per-piece metadata and symbol/state staging; per-bar bytes include all decoded/aligned planes and every bound's temporary arrays; decoder bytes bound projected row-group and conversion transients. Resident history and retained results are measured separately as tree PSS. Components are nonnegative integers and bytes_per_bar is positive."""
+
+    fixed_bytes: int
+    bytes_per_bar: int
+    decoder_bytes: int
+
+    def __post_init__(self) -> None:
+        for name in ("fixed_bytes", "decoder_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+        value = self.bytes_per_bar
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"bytes_per_bar must be a positive integer, got {value!r}")
+
+
+def plan_mhs_execution_bars(
+    *,
+    requested_bars: int,
+    minimum_bars: int,
+    allocation: MhsExecutionAllocation,
+    budget_bytes: int | None,
+    reserve_bytes: int | None,
+) -> int:
+    """Plan an admissible physical grid without changing logical decisions.
+
+    Args:
+        requested_bars: Preferred physical grid size for the logical partition.
+        minimum_bars: Smallest grid preserving the next decision and timeout.
+        allocation: Conservative additional working-set model.
+        budget_bytes: Effective replay tree-PSS limit.
+        reserve_bytes: Minimum host and cgroup physical headroom.
+
+    Returns:
+        Largest admissible grid size between minimum and requested bars.
+
+    Raises:
+        ValueError: Planning dimensions or allocation components are invalid.
+        DataIntegrityError: Required measurements fail or the minimum cannot fit.
+    """
+    for name, value in (("requested_bars", requested_bars), ("minimum_bars", minimum_bars)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    if minimum_bars < 2:
+        raise ValueError(f"minimum_bars must preserve at least two completed bars, got {minimum_bars!r}")
+    if requested_bars < minimum_bars:
+        raise ValueError(
+            f"requested_bars={requested_bars} cannot be smaller than minimum_bars={minimum_bars}"
+        )
+    if not isinstance(allocation, MhsExecutionAllocation):
+        raise ValueError(f"allocation must be MhsExecutionAllocation, got {allocation!r}")
+    for limit_name, limit_value in (("budget_bytes", budget_bytes), ("reserve_bytes", reserve_bytes)):
+        if limit_value is not None and (isinstance(limit_value, bool) or not isinstance(limit_value, int) or limit_value <= 0):
+            raise ValueError(f"{limit_name} must be a positive integer or None, got {limit_value!r}")
+    if budget_bytes is None and reserve_bytes is None:
+        return int(requested_bars)
+    current = _current_tree_pss_bytes()
+    headroom = _tree_headroom_bytes()
+    for bars in range(int(requested_bars), int(minimum_bars) - 1, -1):
+        estimated = int(allocation.fixed_bytes) + bars * int(allocation.bytes_per_bar) + int(allocation.decoder_bytes)
+        if budget_bytes is not None and current + estimated > budget_bytes:
+            continue
+        if reserve_bytes is not None and headroom - estimated < reserve_bytes:
+            continue
+        return int(bars)
+    minimum_estimated = int(allocation.fixed_bytes) + int(minimum_bars) * int(allocation.bytes_per_bar) + int(allocation.decoder_bytes)
+    raise DataIntegrityError(
+        f"mhs execution plan rejected: minimum {minimum_bars} bars require {minimum_estimated} bytes "
+        f"but tree_pss={current} headroom={headroom} budget={budget_bytes} reserve={reserve_bytes}; "
+        "no decoder or plane allocation begins"
+    )
