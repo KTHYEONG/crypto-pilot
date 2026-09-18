@@ -11,7 +11,7 @@ services:
       - ./data:/app/data
       - ./data/state:/app/data/state
       - ./logs:/app/logs
-      - ./docs/results/mhs_horizon_diagnostic_artifacts:/app/docs/results/mhs_horizon_diagnostic_artifacts
+      - ./deploy/mhs:/app/deploy/mhs
     mem_limit: 3g
     command: ["uv", "run", "python", "-m", "src.cli.main", "live", "daemon"]
     logging:

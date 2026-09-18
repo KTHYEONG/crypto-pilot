@@ -80,10 +80,7 @@ ignore = [
 "src/mhs/pipeline/orchestrator.py" = ["I001"]  # contract wiring mandates exact adjacent import lines
  "src/cli/commands/research/mhs.py" = ["I001"]  # contract wiring mandates an exact application-layer import line
  "src/cli/commands/research/*.py" = ["T20"]  # deterministic JSON diagnostic stdout
-"tools/benchmark_library_admission.py" = ["T20"]  # deterministic JSON benchmark stdout
-"tools/devops/seal_artifact.py" = ["T20"]  # keygen stdout is the tool's contract
-"tools/devops/clean_logs.py" = ["T20"]  # ops CLI progress output
-"tools/research/xs_alpha_blend_joint_search.py" = ["T20", "E402", "I001"]  # one-shot search tool: prints its plateau audit to stdout (contract-mandated); imports tools.* only after a script-run sys.path bootstrap; contract wiring mandates exact single-line import strings
+"tools/maintenance/clean_logs.py" = ["T20"]  # ops CLI progress output
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

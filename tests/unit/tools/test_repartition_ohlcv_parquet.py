@@ -18,7 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from src.common.errors import DataIntegrityError
-from tools.devops.repartition_ohlcv_parquet import (
+from tools.maintenance.repartition_ohlcv_parquet import (
     overlapping_row_groups,
     repartition_ohlcv_parquet,
 )
@@ -91,6 +91,8 @@ def test_repartition_produces_day_bounded_row_groups_and_identical_rows(
 
 def test_filtered_read_touches_strictly_fewer_row_groups(synthetic_market_dir) -> None:
     path = synthetic_market_dir / "3m" / "AAAUSDT.parquet"
+    if pq.read_metadata(path).num_row_groups == 1:
+        repartition_ohlcv_parquet(synthetic_market_dir, "3m", window_days=WINDOW_DAYS, dry_run=False)
     total = pq.read_metadata(path).num_row_groups
 
     # A 31-day window in the middle of the file's span.
@@ -106,7 +108,7 @@ def test_filtered_read_touches_strictly_fewer_row_groups(synthetic_market_dir) -
 def test_verification_failure_leaves_original_untouched(
     synthetic_market_dir, monkeypatch
 ) -> None:
-    from tools.devops import repartition_ohlcv_parquet as tool
+    from tools.maintenance import repartition_ohlcv_parquet as tool
 
     path = synthetic_market_dir / "3m" / "AAAUSDT.parquet"
     before_bytes = path.read_bytes()
