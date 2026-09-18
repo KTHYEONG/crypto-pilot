@@ -71,6 +71,50 @@ def _resolve_memory_budget(budget: MhsMemoryBudget | None) -> MhsMemoryBudget:
     return resolved
 
 
+def resolve_mhs_memory_budget(budget: MhsMemoryBudget | None) -> MhsMemoryBudget:
+    """Resolve one run's process-tree ceilings against physical capacity.
+
+    Args:
+        budget: Explicit stage ceilings and reserve, or conservative defaults.
+    Returns:
+        Positive stage ceilings bounded by effective host/cgroup capacity and
+        the unchanged requested available-memory reserve.
+    Raises:
+        ValueError: The budget contract is invalid.
+        MhsResourceAdmissionError: Required telemetry is unavailable or physical
+            capacity cannot preserve the requested reserve.
+    """
+    if budget is None:
+        requested = MhsMemoryBudget()
+    elif isinstance(budget, MhsMemoryBudget):
+        requested = budget
+    else:
+        raise ValueError(f"budget must be MhsMemoryBudget or None, got {budget!r}")
+    try:
+        total = _host_total_bytes()
+    except DataIntegrityError as exc:
+        raise MhsResourceAdmissionError(
+            stage="process_prepare_panel", error_code="RESOURCE_TELEMETRY",
+            message=f"resource telemetry unavailable while resolving memory budget: {exc}",
+        ) from exc
+    cgroup_limit = _read_cgroup_limit_bytes()
+    effective = total if cgroup_limit is None else min(total, cgroup_limit)
+    reserve = requested.min_available_bytes
+    if effective <= reserve:
+        raise MhsResourceAdmissionError(
+            stage="process_prepare_panel", error_code="MEMORY_RESERVE",
+            message=f"mhs memory budget cannot preserve reserve: effective={effective} reserve={reserve}",
+        )
+    cap = effective - reserve
+    total_ceiling = min(requested.total_tree_pss_bytes, cap)
+    replay_ceiling = min(requested.replay_tree_pss_bytes, cap, total_ceiling)
+    return MhsMemoryBudget(
+        total_tree_pss_bytes=total_ceiling,
+        replay_tree_pss_bytes=replay_ceiling,
+        min_available_bytes=reserve,
+    )
+
+
 def _current_rss_bytes() -> int:
     try:
         return int(psutil.Process().memory_info().rss)
@@ -227,47 +271,67 @@ def _resolve_ram_budget(
     return (budget, reserve)
 
 
-def assert_mhs_allocation_budget(*, estimated_bytes: int, budget_bytes: int | None, reserve_bytes: int | None) -> None:
-    """Reject unsafe allocation before decoding or constructing execution planes.
+def assert_mhs_allocation_budget(*, estimated_bytes: int, budget_bytes: int | None, reserve_bytes: int | None, stage: str = "execution_allocation", initial_swap_bytes: int | None = None) -> None:
+    """Reject unsafe additional working memory before execution decoding.
 
     Args:
-        estimated_bytes: Conservative additional working-set estimate.
-        budget_bytes: Effective process-tree budget.
-        reserve_bytes: Required available physical-memory floor.
-
+        estimated_bytes: Additional simultaneously live allocation estimate.
+        budget_bytes: Total admitted resident process-tree PSS ceiling.
+        reserve_bytes: Minimum remaining effective physical headroom.
+        stage: Stable failure provenance for the allocation boundary.
+        initial_swap_bytes: Run-entry tree swap, if observable.
     Returns:
-        None when both budget and reserve admit allocation.
-
+        None when tree PSS, physical headroom and swap-growth checks pass.
     Raises:
-        DataIntegrityError: Admission is unsafe or cannot be measured.
+        ValueError: A supplied size, limit or stage is invalid.
+        MhsResourceAdmissionError: Admission or required telemetry fails.
     """
     if budget_bytes is None and reserve_bytes is None:
         return
-    if estimated_bytes < 0:
-        raise DataIntegrityError(f"mhs allocation estimate is invalid: estimated_bytes={estimated_bytes}")
+    if isinstance(estimated_bytes, bool) or not isinstance(estimated_bytes, int) or estimated_bytes < 0:
+        raise ValueError(f"estimated_bytes must be a non-negative integer, got {estimated_bytes!r}")
+    if not isinstance(stage, str) or not stage:
+        raise ValueError(f"stage must be a non-empty string, got {stage!r}")
+    for limit_name, limit_value in (("budget_bytes", budget_bytes), ("reserve_bytes", reserve_bytes)):
+        if limit_value is not None and (isinstance(limit_value, bool) or not isinstance(limit_value, int) or limit_value <= 0):
+            raise ValueError(f"{limit_name} must be a positive integer or None, got {limit_value!r}")
+    if initial_swap_bytes is not None and (
+        isinstance(initial_swap_bytes, bool) or not isinstance(initial_swap_bytes, int) or initial_swap_bytes < 0
+    ):
+        raise ValueError(f"initial_swap_bytes must be a non-negative integer or None, got {initial_swap_bytes!r}")
     if budget_bytes is not None:
-        if budget_bytes <= 0:
-            raise DataIntegrityError(f"mhs allocation budget is invalid: budget_bytes={budget_bytes}")
-        current = _current_tree_pss_bytes()
+        try:
+            current = _current_tree_pss_bytes()
+        except DataIntegrityError as exc:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="RESOURCE_TELEMETRY",
+                message=f"resource telemetry unavailable at stage '{stage}': {exc}",
+            ) from exc
         if current + estimated_bytes > budget_bytes:
-            raise DataIntegrityError(
-                f"mhs allocation budget exceeded: tree_pss={current} estimated={estimated_bytes} "
-                f"budget={budget_bytes}; no decoder or plane allocation begins"
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="MEMORY_BUDGET",
+                message=f"mhs allocation budget exceeded at '{stage}': tree_pss={current} estimated={estimated_bytes} budget={budget_bytes}; no decoder or plane allocation begins",
             )
     if reserve_bytes is not None:
-        if reserve_bytes <= 0:
-            raise DataIntegrityError(f"mhs allocation reserve is invalid: reserve_bytes={reserve_bytes}")
-        available = _current_available_bytes()
-        if available < reserve_bytes or available - estimated_bytes < reserve_bytes:
-            raise DataIntegrityError(
-                f"mhs allocation reserve breached: available={available} estimated={estimated_bytes} "
-                f"reserve={reserve_bytes}"
+        try:
+            headroom = _tree_headroom_bytes()
+        except DataIntegrityError as exc:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="RESOURCE_TELEMETRY",
+                message=f"resource telemetry unavailable at stage '{stage}': {exc}",
+            ) from exc
+        if headroom - estimated_bytes < reserve_bytes:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="MEMORY_RESERVE",
+                message=f"mhs allocation reserve breached at '{stage}': headroom={headroom} estimated={estimated_bytes} reserve={reserve_bytes}",
             )
-    swap = _current_tree_swap_bytes()
-    if swap is not None and swap > 0:
-        raise DataIntegrityError(
-            f"mhs allocation swap growth detected: tree_swap={swap}; replay aborts safely with diagnostics"
-        )
+    if initial_swap_bytes is not None:
+        current_swap = _current_tree_swap_bytes()
+        if current_swap is not None and current_swap > initial_swap_bytes:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="SWAP_GROWTH",
+                message=f"mhs allocation swap growth at '{stage}': initial_swap={initial_swap_bytes} current_swap={current_swap}",
+            )
 
 
 def _tree_headroom_bytes() -> int:
@@ -277,6 +341,17 @@ def _tree_headroom_bytes() -> int:
     if remaining is None:
         return available
     return min(available, remaining)
+
+
+def current_mhs_headroom_bytes() -> int:
+    """Observe effective physical headroom for worker and supervisor admission.
+
+    Returns:
+        Minimum host available and known nonnegative cgroup remaining bytes.
+    Raises:
+        DataIntegrityError: Required host telemetry is unavailable or invalid.
+    """
+    return _tree_headroom_bytes()
 
 
 def assert_mhs_stage_allocation(
@@ -350,19 +425,33 @@ def _assert_stage_rss_budget(
     telemetry failures raise instead of passing silently. Both ``None`` makes
     it a no-op. The guard never alters computed values.
     """
+    if budget_bytes is None and reserve_bytes is None:
+        return
     if budget_bytes is not None:
-        observed = _current_tree_pss_bytes()
+        try:
+            observed = _current_tree_pss_bytes()
+        except DataIntegrityError as exc:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="RESOURCE_TELEMETRY",
+                message=f"resource telemetry unavailable at stage '{stage}': {exc}",
+            ) from exc
         if observed > budget_bytes:
-            raise DataIntegrityError(
-                f"RAM budget exceeded at stage '{stage}': "
-                f"tree_pss={observed} > budget={budget_bytes}"
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="MEMORY_BUDGET",
+                message=f"RAM budget exceeded at stage '{stage}': tree_pss={observed} > budget={budget_bytes}",
             )
     if reserve_bytes is not None:
-        headroom = _tree_headroom_bytes()
+        try:
+            headroom = _tree_headroom_bytes()
+        except DataIntegrityError as exc:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="RESOURCE_TELEMETRY",
+                message=f"resource telemetry unavailable at stage '{stage}': {exc}",
+            ) from exc
         if headroom < reserve_bytes:
-            raise DataIntegrityError(
-                f"system RAM reserve breached at stage '{stage}': "
-                f"headroom={headroom} < reserve={reserve_bytes}"
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="MEMORY_RESERVE",
+                message=f"system RAM reserve breached at stage '{stage}': headroom={headroom} < reserve={reserve_bytes}",
             )
 
 
@@ -383,40 +472,34 @@ def _assert_execution_rss_budget(
     if budget is None and reserve_bytes is None:
         return
     if budget is not None:
-        observed = _current_tree_pss_bytes()
+        try:
+            observed = _current_tree_pss_bytes()
+        except DataIntegrityError as exc:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="RESOURCE_TELEMETRY",
+                message=f"resource telemetry unavailable at stage '{stage}': {exc}",
+            ) from exc
         if observed > budget:
-            raise DataIntegrityError(
-                "execution RSS budget exceeded at window boundary: "
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="MEMORY_BUDGET",
+                message="execution RSS budget exceeded at window boundary: "
                 f"stage={stage} observed_tree_pss={observed} "
-                f"budget={budget} completed_windows={completed_windows}"
+                f"budget={budget} completed_windows={completed_windows}",
             )
-    if reserve_bytes is not None:
-        headroom = _tree_headroom_bytes()
-        if headroom < reserve_bytes:
-            raise DataIntegrityError(
-                "execution RSS budget (system reserve) breached at window boundary: "
-                f"stage={stage} headroom={headroom} "
-                f"reserve={reserve_bytes} completed_windows={completed_windows}"
-            )
-    if budget is None and reserve_bytes is None:
-        return
-    observed = _current_rss_bytes()
-    if budget is not None and observed > budget:
-        raise DataIntegrityError(
-            "execution RSS budget exceeded at window boundary: "
-            f"stage={stage} observed_rss={observed} "
-            f"budget={budget} completed_windows={completed_windows}"
-        )
     if reserve_bytes is not None:
         try:
-            available = int(psutil.virtual_memory().available)
-        except Exception:  # noqa: BLE001
-            return
-        if available < reserve_bytes:
-            raise DataIntegrityError(
-                "execution RSS budget (system reserve) breached at window boundary: "
-                f"stage={stage} available={available} "
-                f"reserve={reserve_bytes} completed_windows={completed_windows}"
+            headroom = _tree_headroom_bytes()
+        except DataIntegrityError as exc:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="RESOURCE_TELEMETRY",
+                message=f"resource telemetry unavailable at stage '{stage}': {exc}",
+            ) from exc
+        if headroom < reserve_bytes:
+            raise MhsResourceAdmissionError(
+                stage=stage, error_code="MEMORY_RESERVE",
+                message="execution RSS budget (system reserve) breached at window boundary: "
+                f"stage={stage} headroom={headroom} "
+                f"reserve={reserve_bytes} completed_windows={completed_windows}",
             )
 
 
@@ -800,7 +883,7 @@ def plan_mhs_execution_bars(
 
     Raises:
         ValueError: Planning dimensions or allocation components are invalid.
-        DataIntegrityError: Required measurements fail or the minimum cannot fit.
+        MhsResourceAdmissionError: Required measurements fail or the minimum cannot fit.
     """
     for name, value in (("requested_bars", requested_bars), ("minimum_bars", minimum_bars)):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -828,8 +911,13 @@ def plan_mhs_execution_bars(
             continue
         return int(bars)
     minimum_estimated = int(allocation.fixed_bytes) + int(minimum_bars) * int(allocation.bytes_per_bar) + int(allocation.decoder_bytes)
-    raise DataIntegrityError(
-        f"mhs execution plan rejected: minimum {minimum_bars} bars require {minimum_estimated} bytes "
+    if budget_bytes is not None and current + minimum_estimated > budget_bytes:
+        error_code: Literal["MEMORY_BUDGET", "MEMORY_RESERVE", "SWAP_GROWTH", "RESOURCE_TELEMETRY"] = "MEMORY_BUDGET"
+    else:
+        error_code = "MEMORY_RESERVE"
+    raise MhsResourceAdmissionError(
+        stage="process_execution_plan", error_code=error_code,
+        message=f"mhs execution plan rejected: minimum {minimum_bars} bars require {minimum_estimated} bytes "
         f"but tree_pss={current} headroom={headroom} budget={budget_bytes} reserve={reserve_bytes}; "
-        "no decoder or plane allocation begins"
+        "no decoder or plane allocation begins",
     )
