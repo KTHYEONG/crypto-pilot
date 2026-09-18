@@ -34,10 +34,9 @@ tmp/
 
 # Documentation
 README.md
-# 연구->라이브 유일 인계 산출물 봉투(.enc)만 이미지에 포함한다.
+# Research outputs never enter the build context; documentation carries no
+# runtime payloads.
 docs/*
-!docs/results
-docs/results/*
-!docs/results/mhs_horizon_diagnostic_artifacts
-docs/results/mhs_horizon_diagnostic_artifacts/*
-!docs/results/mhs_horizon_diagnostic_artifacts/*.enc
+# Live delivery boundary: only sealed envelopes (.enc) ship.
+deploy/mhs/*
+!deploy/mhs/*.enc
