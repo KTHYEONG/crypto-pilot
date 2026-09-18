@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.paths import BASE_DIR, DATA_DIR
+from src.common.paths import BASE_DIR, DATA_DIR, DEPLOY_MHS_DIR
 from src.live.deployed_weights import default_weights_path
 from src.mhs.live_signal_step import advance_to_date; from src.live.deployed_weights import default_weights_path  # wiring
 
@@ -28,6 +28,26 @@ _DEFAULT_DAEMON_STATE_PATH = str(DATA_DIR / "state" / "live_daemon_last_run.json
 _LIVE_LOG_DIR: Path = BASE_DIR / "logs" / "live"
 LIVE_LOG_MAX_BYTES: int = 10 * 1024 * 1024
 LIVE_LOG_BACKUP_COUNT: int = 5
+
+
+def deployed_strategy_artifact_paths() -> tuple[Path, Path]:
+    """Return the sealed strategy parameters and bootstrap inputs required by live signal generation.
+
+    Returns:
+        Existing deployment-bound parameter and bootstrap paths under `deploy/mhs`.
+    Raises:
+        DataIntegrityError: Either required sealed artifact is absent or ambiguous.
+    """
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_strategy import STRATEGY_BOOTSTRAP_FILENAME, STRATEGY_PARAMS_FILENAME
+
+    params_path = DEPLOY_MHS_DIR / f"{STRATEGY_PARAMS_FILENAME}.enc"
+    bootstrap_path = DEPLOY_MHS_DIR / f"{STRATEGY_BOOTSTRAP_FILENAME}.enc"
+    params_hits = sorted(DEPLOY_MHS_DIR.glob("strategy_params*.enc"))
+    bootstrap_hits = sorted(DEPLOY_MHS_DIR.glob("strategy_bootstrap*.enc"))
+    if not params_path.is_file() or not bootstrap_path.is_file() or len(params_hits) != 1 or len(bootstrap_hits) != 1:
+        raise DataIntegrityError(f"deployed strategy artifacts absent or ambiguous under {DEPLOY_MHS_DIR}")
+    return params_path, bootstrap_path
 
 
 def _attach_process_log(filename: str) -> Path:
@@ -120,14 +140,23 @@ def _signal_step_body(args: argparse.Namespace, settings: Any) -> None:
     date = args.date
     from src.mhs import live_strategy as _live_strategy
 
-    strat_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_params.json")
+    explicit_raw = getattr(args, "artifact", None)
+    if explicit_raw is not None:
+        strat_path = Path(explicit_raw)
+        suffix = ".enc" if str(strat_path).endswith(".enc") else ""
+        bootstrap_path = strat_path.parent / f"{_live_strategy.STRATEGY_BOOTSTRAP_FILENAME}{suffix}"
+    else:
+        try:
+            strat_path, bootstrap_path = deployed_strategy_artifact_paths()
+        except Exception as exc:
+            logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
+            raise SystemExit(1) from exc
     try:
         params = _live_strategy.load_strategy_params(strat_path, artifact_key=settings.artifact_key)
         _live_strategy.assert_runtime_data_policy(params)
     except Exception as exc2:
         logger.error("[EVAL] signal_step status=FAILED reason=%s", exc2)
         raise SystemExit(1) from exc2
-    bootstrap_path = Path("docs/results/mhs_horizon_diagnostic_artifacts/strategy_bootstrap.parquet")
     try:
         bootstrap_ref = _live_strategy.load_strategy_bootstrap(bootstrap_path, expected_sha256=params.bootstrap_sha256, artifact_key=settings.artifact_key)
     except Exception as exc:
@@ -429,6 +458,7 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     # wiring: signal-step
     step = subparsers.add_parser("signal-step", help="Run heavy signal compute (daemon subprocess)")
     step.add_argument("--date", type=_parse_decision_time, required=True, help="Decision time T as ISO8601 UTC")
+    step.add_argument("--artifact", type=str, default=None, help="Explicit local-development params artifact override (plaintext opt-in; deployment defaults stay sealed)")
     step.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     step.set_defaults(handler=_run_signal_step)
 

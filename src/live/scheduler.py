@@ -35,7 +35,6 @@ from src.live.runner import run_shadow_cycle
 from src.live.settings import LiveSettings
 from src.live.signal import _SIGNAL_LAG
 from src.live.signal_step_result import SIGNAL_STEP_STATUS_FAILED, read_signal_step_result, signal_step_result_path
-from src.mhs.live_strategy import STRATEGY_PARAMS_FILENAME  # wiring: import subprocess, sys; from src.mhs.live_strategy import STRATEGY_PARAMS_FILENAME
 
 try:
     from src.live.alerting import post_alert  # noqa: F401
@@ -80,7 +79,7 @@ DAEMON_CATCHUP_BUFFER: pd.Timedelta = pd.Timedelta(minutes=5)
 
 DAEMON_MAX_ATTEMPTS_PER_DAY: int = 5
 DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
-# tools/devops/daemon_idle_gate.py BUSY_STAGES 와 같은 의미
+# src/application/ops/daemon_idle_gate.py BUSY_STAGES 와 같은 의미
 INTERRUPTIBLE_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"})
 DAEMON_ALERT_SYMBOL_SAMPLE: int = 10
 SIGNAL_REFRESH_OFFSET_MINUTES: float = 0.0
@@ -213,20 +212,13 @@ def _resolve_heartbeat_path(settings: LiveSettings) -> Path:
 
 
 def _strategy_params_present(settings: LiveSettings) -> bool:
-    # check default sealed locations
-    for cand in [
-        Path("docs/results/mhs_horizon_diagnostic_artifacts") / "strategy_params.json.enc",
-        Path("docs/results/mhs_horizon_diagnostic_artifacts") / "strategy_params.json",
-        Path("docs/results/mhs_horizon_diagnostic_artifacts") / STRATEGY_PARAMS_FILENAME,
-        Path("docs/results/mhs_horizon_diagnostic_artifacts") / (STRATEGY_PARAMS_FILENAME + ".enc"),
-    ]:
-        if cand.exists():
-            return True
-    # also check DATA_DIR/state fallback
-    alt = DATA_DIR / "state" / "strategy_params.json.enc"
-    if alt.exists():
-        return True
-    return False
+    try:
+        from src.cli.commands.live import deployed_strategy_artifact_paths
+
+        params_path, bootstrap_path = deployed_strategy_artifact_paths()
+    except Exception:
+        return False
+    return params_path.is_file() and bootstrap_path.is_file()
 
 
 def _default_data_refresh() -> RefreshReport:

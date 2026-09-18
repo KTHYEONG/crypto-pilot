@@ -5,11 +5,61 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.mhs import evaluation as ev
-import src.mhs.scaling as scaling
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
+import types as _types
+
+import src.mhs.evaluation.books as _ev_books
+import src.mhs.evaluation.diagnostics as _ev_diagnostics
+import src.mhs.evaluation.participation as _ev_participation
+import src.mhs.evaluation.windows as _ev_windows
+from src.mhs import books as _books
+from src.mhs import horizons as _horizons
+from src.mhs import marks as _marks
+from src.mhs import panel as _panel
+from src.mhs.contracts import MhsBookReport as _MhsBookReport
+from src.mhs.contracts import MhsFoldReport as _MhsFoldReport
+from src.mhs.contracts import MhsResearchGoResult as _MhsResearchGoResult
+from src.mhs.discovery import DiscoveryQualificationResult as _DiscoveryQualificationResult
+from src.mhs.evidence import DeploymentReadinessResult as _DeploymentReadinessResult
+from src.mhs.evidence import PhaseDiagnosticResult as _PhaseDiagnosticResult
+from src.mhs.evidence import TailSensitivityResult as _TailSensitivityResult
+from src.mhs.params import BOOK_BLEND_WEIGHTS as _BOOK_BLEND_WEIGHTS
+from src.mhs.params import COMMITTEE_OOS_START as _COMMITTEE_OOS_START
+from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs.report.schema import MhsHorizonDiagnosticReport as _MhsHorizonDiagnosticReport
+from src.mhs.types import BOOK_SPECS as _BOOK_SPECS
+
+ev = _types.SimpleNamespace(
+    BOOK_BLEND_WEIGHTS=_BOOK_BLEND_WEIGHTS,
+    BOOK_SPECS=_BOOK_SPECS,
+    COMMITTEE_OOS_START=_COMMITTEE_OOS_START,
+    DeploymentReadinessResult=_DeploymentReadinessResult,
+    DiscoveryQualificationResult=_DiscoveryQualificationResult,
+    MhsBookReport=_MhsBookReport,
+    MhsFoldReport=_MhsFoldReport,
+    MhsHorizonDiagnosticReport=_MhsHorizonDiagnosticReport,
+    MhsResearchGoResult=_MhsResearchGoResult,
+    PhaseDiagnosticResult=_PhaseDiagnosticResult,
+    TailSensitivityResult=_TailSensitivityResult,
+    _PERIODS_PER_YEAR_1H=_PERIODS_PER_YEAR_1H,
+    _active_blend_book_and_grid=_ev_books._active_blend_book_and_grid,
+    _book_outcome=_ev_windows._book_outcome,
+    _book_weights=_ev_books._book_weights,
+    _load_funding_series=_marks._load_funding_series,
+    _load_symbol_quote_volume=_ev_participation._load_symbol_quote_volume,
+    _phase_diagnostics=_ev_diagnostics._phase_diagnostics,
+    _pit_execution_mask=_marks._pit_execution_mask,
+    bar_funding_panel=__import__("src.mhs.execution", fromlist=["bar_funding_panel"]).bar_funding_panel,
+    horizon_log_return=_horizons.horizon_log_return,
+    inverse_realized_vol_tilt=_books.inverse_realized_vol_tilt,
+    liquid_half_eligibility=_panel.liquid_half_eligibility,
+    load_base_panel=_panel.load_base_panel,
+    phase_tranche_book=_books.phase_tranche_book,
+    rank_weight_book=_books.rank_weight_book,
+    realized_vol=_horizons.realized_vol,
+    renormalize_within_mask=_books.renormalize_within_mask,
 )
+import src.mhs.scaling as scaling
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.common.errors import DataIntegrityError
 from src.mhs.types import BookSpec, ExecutionSpec, HorizonBand
 from src.mhs.execution import SimulatedInventoryLedgerResult

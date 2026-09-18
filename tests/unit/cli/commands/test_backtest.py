@@ -38,7 +38,7 @@ def _install_supervisor(monkeypatch, status: str = "completed") -> dict:
 
 def test_backtest_mhs_canonical_default(tmp_path, monkeypatch) -> None:
     """Canonical default: no overrides select existing dates, budget and 3m supervision."""
-    monkeypatch.setattr(backtest_mod, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
     args = _parse(["backtest", "mhs"])
     assert args.handler is run_mhs_backtest
     seen = _install_supervisor(monkeypatch)
@@ -52,52 +52,35 @@ def test_backtest_mhs_canonical_default(tmp_path, monkeypatch) -> None:
 
 
 def test_backtest_mhs_evidence_destinations(tmp_path, monkeypatch) -> None:
-    """Evidence destinations: omitted output yields unique run dirs; explicit output yields siblings."""
-    import src.mhs.process_backtest as pb
+    """Evidence destinations: omitted output yields unique run dirs with one result envelope."""
 
-    monkeypatch.setattr(backtest_mod, "RESULTS_DIR", tmp_path)
-    reserved = {
-        pb.PROCESS_REPORT_PATH.resolve(),
-        pb.PROCESS_POLICY_REPORT_PATH.resolve(),
-        pb.PROCESS_INVENTORY_REPORT_PATH.resolve(),
-    }
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
     first = _install_supervisor(monkeypatch)
     run_mhs_backtest(_parse(["backtest", "mhs"]))
     second = _install_supervisor(monkeypatch)
     run_mhs_backtest(_parse(["backtest", "mhs"]))
-    assert first["output"] != second["output"]
+    assert first["result_output"] != second["result_output"]
     for seen in (first, second):
-        assert seen["output"].parent.parent == tmp_path / "mhs_backtest"
-        assert seen["output"].name == "primary.json"
-        assert seen["failure_output"].name == "failure.json"
-        assert seen["run_output"].name == "run.json"
-        for candidate in (seen["output"], seen["failure_output"], seen["run_output"]):
-            assert candidate.resolve() not in reserved
+        assert seen["result_output"].parent.parent == tmp_path / "runs"
+        assert seen["result_output"].name == "result.json"
+        assert tmp_path in seen["result_output"].parents
     out = tmp_path / "custom.json"
     explicit = _install_supervisor(monkeypatch)
     run_mhs_backtest(
         _parse(
             [
                 "backtest", "mhs", "--output", str(out),
-                "--failure-output", str(tmp_path / "custom.failure.json"),
-                "--run-output", str(tmp_path / "custom.run.json"),
                 "--targets-output", str(tmp_path / "custom.targets.parquet"),
             ]
         )
     )
-    assert explicit["output"] == out
-    assert explicit["failure_output"] == tmp_path / "custom.failure.json"
-    assert explicit["run_output"] == tmp_path / "custom.run.json"
+    assert explicit["result_output"] == out
     assert explicit["targets_output"] == tmp_path / "custom.targets.parquet"
-    inferred = _install_supervisor(monkeypatch)
-    run_mhs_backtest(_parse(["backtest", "mhs", "--output", str(out)]))
-    assert inferred["failure_output"] == tmp_path / "custom.failure.json"
-    assert inferred["run_output"] == tmp_path / "custom.run.json"
 
 
 def test_backtest_mhs_aware_dates(tmp_path, monkeypatch) -> None:
     """Aware dates: date-only UTC and timezone-aware ISO inputs normalize to identical instants."""
-    monkeypatch.setattr(backtest_mod, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
     plain = _install_supervisor(monkeypatch)
     run_mhs_backtest(_parse(["backtest", "mhs", "--start", "2022-01-01", "--end", "2022-01-04"]))
     assert plain["start"] == pd.Timestamp("2022-01-01", tz="UTC")
@@ -129,7 +112,7 @@ def test_backtest_mhs_aware_dates(tmp_path, monkeypatch) -> None:
 
 def test_backtest_mhs_explicit_budget(tmp_path, monkeypatch) -> None:
     """Explicit budget: 4/3/2 GiB controls reach supervision without an added CLI cap."""
-    monkeypatch.setattr(backtest_mod, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
     seen = _install_supervisor(monkeypatch)
     run_mhs_backtest(
         _parse(
@@ -162,7 +145,12 @@ def test_backtest_mhs_rejects_invalid_controls(tmp_path, monkeypatch) -> None:
         run_mhs_backtest(args)
     with pytest.raises(SystemExit, match=r".+"):
         run_mhs_backtest(
-            _parse(["backtest", "mhs", "--output", str(out), "--replay-tree-pss-bytes", str(4 * 2**30)])
+            _parse(
+                [
+                    "backtest", "mhs", "--output", str(out),
+                    "--replay-tree-pss-bytes", str(MhsMemoryBudget().total_tree_pss_bytes + 1),
+                ]
+            )
         )
     with pytest.raises(SystemExit, match=r".+"):
         run_mhs_backtest(_parse(["backtest", "mhs", "--output", str(out), "--start", "not-a-date"]))
@@ -178,7 +166,7 @@ def test_backtest_mhs_rejects_invalid_controls(tmp_path, monkeypatch) -> None:
 
 def test_backtest_mhs_nonsuccess_exit(tmp_path, monkeypatch) -> None:
     """Non-success exit: every non-completed supervisor status exits nonzero after outcome recording."""
-    monkeypatch.setattr(backtest_mod, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
     out = tmp_path / "custom.json"
     for status in ("failed", "timed_out", "signaled", "resource_rejected", "interrupted"):
         _install_supervisor(monkeypatch, status=status)

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 import pandas as pd
 
 from src.application.mhs_backtest import MhsBacktestRequest, execute_mhs_backtest
-from src.mhs.process_backtest import ProcessInventoryBacktestError
+from src.mhs.backtest.contracts import ProcessInventoryBacktestError
 from src.mhs.resources import MhsMemoryBudget
+
+_logger = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -18,28 +21,35 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
     parser.add_argument("--data-root", default=None)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--failure-output", required=True)
+    parser.add_argument("--result-output", required=True)
     parser.add_argument("--targets-output", default=None)
     parser.add_argument("--rebalance-tracking-error-threshold", type=float, default=None)
     parser.add_argument("--total-tree-pss-bytes", type=int, required=True)
     parser.add_argument("--replay-tree-pss-bytes", type=int, required=True)
     parser.add_argument("--min-available-bytes", type=int, required=True)
+    parser.add_argument("--evidence-root", default=None)
+    parser.add_argument("--registry-path", default=None)
+    parser.add_argument("--run-id", default=None)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Execute one inventory backtest without recursive supervision.
+    """Execute one inventory backtest with visible source-owned diagnostics.
+
+    This subprocess configures its own standard logging because parent CLI
+    configuration is not inherited across process execution.
 
     Args:
         argv: Explicit worker controls or process arguments.
     Returns:
-        Zero only after successful inventory and requested target persistence.
+        Zero after execution and requested evidence persistence complete;
+        financial validity remains a separate report field.
     Raises:
         SystemExit: Worker arguments are invalid.
-        ProcessInventoryBacktestError: Evaluation failed with preserved diagnostics.
-        OSError: Requested evidence persistence failed.
+        ProcessInventoryBacktestError: Evaluation fails with preserved diagnostics.
+        OSError: Requested evidence persistence fails.
     """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     args = _build_parser().parse_args(argv)
     try:
         start = pd.Timestamp(args.start)
@@ -56,13 +66,25 @@ def main(argv: list[str] | None = None) -> int:
             start=start,
             end=end,
             data_root=args.data_root,
-            output=Path(args.output),
-            failure_output=Path(args.failure_output),
+            result_output=Path(args.result_output),
             targets_output=Path(args.targets_output) if args.targets_output else None,
             tracking_error_threshold=args.rebalance_tracking_error_threshold,
             memory_budget=budget,
+            evidence_root=Path(args.evidence_root) if args.evidence_root else None,
+            registry_path=Path(args.registry_path) if args.registry_path else None,
+            run_id=args.run_id,
+        )
+        _logger.info(
+            "[WORKER] status=start start=%s end=%s result_output=%s",
+            start.isoformat(),
+            end.isoformat(),
+            request.result_output,
         )
         execute_mhs_backtest(request)
+        _logger.info(
+            "[WORKER] status=persistence_complete result_output=%s",
+            request.result_output,
+        )
     except ProcessInventoryBacktestError:
         raise
     except ValueError as exc:

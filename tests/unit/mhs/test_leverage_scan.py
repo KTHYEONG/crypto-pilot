@@ -131,3 +131,11 @@ class TestRunLeverageFrontierScan:
         for key in sorted(GROWTH_RISK_ENVELOPES):
             assert key in str(excinfo.value)
         assert self._snapshot(self.artifact_dir) == before
+
+
+def test_default_artifact_path_has_no_docs_fallback() -> None:
+    from src.common.errors import DataIntegrityError
+    from src.mhs.leverage_scan import _default_artifact_path
+
+    with pytest.raises(DataIntegrityError, match="data/research/mhs"):
+        _default_artifact_path()

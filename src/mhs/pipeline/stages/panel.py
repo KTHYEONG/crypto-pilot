@@ -13,14 +13,12 @@ through ``ctx``; ``request`` -> ``ctx.config``, ``debug_log`` -> the
 
 from __future__ import annotations
 
-from src.mhs.evaluation import (
-    FUTURES_DATA_DIR,
-    SOURCE_GAP_EXCLUDED_SYMBOLS,
-    bar_funding_panel,
-    guards,
-    load_base_panel,
-)
+import src.mhs.evaluation.guards as guards
+from src.common.paths import FUTURES_DATA_DIR
+from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
+from src.mhs.execution import bar_funding_panel
 from src.mhs.marks import _load_funding_series
+from src.mhs.panel import load_base_panel
 from src.mhs.params import PANEL_MIN_HISTORY_BARS
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.resources import _resolve_ram_budget, _StageRecorder

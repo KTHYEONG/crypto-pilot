@@ -15,16 +15,14 @@ from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.panel import DATA_POLICIES
 from src.mhs.params import (
+    CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT as _CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
+    CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
     COMMITTEE_DEFAULT_MEMBER_SET,
     COMMITTEE_TRANCHE_COUNT,
     GROWTH_RISK_ENVELOPES,
     LEVERAGE_FRONTIER_SCAN_MULTIPLES,
 )
 # wiring import: from src.mhs.report.persist import emit_deployment; from src.mhs.live_strategy import assert_deployment_eligible
-from src.mhs.pipeline.config import (
-    CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT as _CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
-    CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
-)
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -74,8 +72,9 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
 
     import dataclasses
 
-    from src.mhs.evaluation import MhsDiagnosticRequest, MhsOutputTier
-    from src.mhs.evaluation import mhs_horizon_diagnostic_report_path, persist_mhs_horizon_diagnostic_report
+    from src.common.paths import DATA_DIR, DEPLOY_MHS_DIR
+    from src.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
+    from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
     from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
@@ -98,8 +97,12 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         return
     report = run_mhs_diagnostic(config)
     persist_start = time.perf_counter()
+    from uuid import uuid4
+
+    run_id = getattr(args, "run_id", None) or uuid4().hex
+    report_path = DATA_DIR / "research" / "mhs" / run_id / "mhs_horizon_diagnostic.json"
     path = persist_mhs_horizon_diagnostic_report(
-        report, mhs_horizon_diagnostic_report_path(),
+        report, report_path,
         tier=MhsOutputTier(args.output_tier),
         request=request,
     )
@@ -117,155 +120,24 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         from src.mhs.live_strategy import assert_deployment_eligible as _assert_ref  # noqa: F401
         pass
     if getattr(args, "emit_deployment", False):
-        from pathlib import Path
-
         from src.mhs.live_strategy import assert_deployment_eligible
         from src.mhs.report.persist import emit_deployment
 
         from src.live.settings import LiveSettings
-        assert_deployment_eligible(report, request, reference_report_path=Path(mhs_horizon_diagnostic_report_path()))
-        report_target = Path(mhs_horizon_diagnostic_report_path())
-        artifact_root = report_target.parent / f"{report_target.stem}_artifacts"
-        res = emit_deployment(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)  # wiring: if getattr(args, "emit_deployment", False): assert_deployment_eligible(report, request, reference_report_path=Path(mhs_horizon_diagnostic_report_path())); emit_deployment(report, request, artifact_root, artifact_key=LiveSettings().artifact_key)
+        assert_deployment_eligible(report, request, reference_report_path=report_path)
+        res = emit_deployment(report, request, DEPLOY_MHS_DIR, artifact_key=LiveSettings().artifact_key)
         _logger.info("[EVAL] emit_deployment strategy_digest=%s path=%s", res["strategy_digest"], res["params_path"])
         if getattr(args, "deploy_push", False):
             import subprocess
 
             _assert_deploy_push_allowed()
             try:
-                subprocess.run(["git", "add", str(artifact_root / "strategy_params.json.enc"), str(artifact_root / "strategy_bootstrap.parquet.enc")], check=True)
+                subprocess.run(["git", "add", str(DEPLOY_MHS_DIR / "strategy_params.json.enc"), str(DEPLOY_MHS_DIR / "strategy_bootstrap.parquet.enc")], check=True)
                 subprocess.run(["git", "commit", "-m", f'deploy: strategy {res["strategy_digest"]}'], check=True)
                 subprocess.run(["git", "push"], check=True)
             except Exception as exc:
                 _logger.error("[EVAL] deploy_push status=FAILED reason=%s", exc)
-                _logger.info("manual: git add %s %s && git commit -m 'deploy: strategy %s' && git push", artifact_root / "strategy_params.json.enc", artifact_root / "strategy_bootstrap.parquet.enc", res["strategy_digest"])
-
-
-def _run_mhs_process_backtest(args: argparse.Namespace) -> None:
-    """Persist direct three-minute inventory outcomes for the legacy process command.
-
-    Args:
-        args: Existing process controls and distinct evidence destinations.
-
-    Returns:
-        None on completed evaluation, after primary evidence is persisted.
-
-    Raises:
-        SystemExit: Arguments or evidence destinations conflict.
-        ProcessInventoryBacktestError: Evaluation failed; dedicated diagnostics
-            are persisted when possible and the failure remains nonzero.
-        OSError: Successful-result persistence fails.
-    """
-    import json
-
-    import pandas as pd
-    from pathlib import Path
-
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
-    from src.mhs.process import ProcessExecutionPolicy
-    from src.mhs.resources import MhsMemoryBudget
-    from src.mhs.process_backtest import (
-        PROCESS_INVENTORY_CERTIFICATION_LEVEL,
-        PROCESS_INVENTORY_REPORT_PATH,
-        PROCESS_POLICY_REPORT_PATH,
-        PROCESS_REPORT_PATH,
-        ProcessInventoryBacktestError,
-        evaluate_process_inventory_backtest,
-        persist_process_inventory_failure,
-        persist_process_inventory_report,
-        persist_process_targets,
-    )
-
-    if getattr(args, "execution_timeframe", "3m") != "3m":
-        raise SystemExit(f"execution-timeframe must be 3m, got {getattr(args, 'execution_timeframe')!r}")
-    policy = ProcessExecutionPolicy(
-        tracking_error_threshold=getattr(args, "rebalance_tracking_error_threshold", None),
-    )
-    defaults = MhsMemoryBudget()
-    total = getattr(args, "total_tree_pss_bytes", None)
-    replay = getattr(args, "replay_tree_pss_bytes", None)
-    reserve = getattr(args, "min_available_bytes", None)
-    budget = MhsMemoryBudget(
-        total_tree_pss_bytes=defaults.total_tree_pss_bytes if total is None else total,
-        replay_tree_pss_bytes=defaults.replay_tree_pss_bytes if replay is None else replay,
-        min_available_bytes=defaults.min_available_bytes if reserve is None else reserve,
-    )
-    output_arg = getattr(args, "output", None)
-    failure_arg = getattr(args, "failure_output", None)
-    targets_arg = getattr(args, "targets_output", None)
-    primary = Path(output_arg) if output_arg is not None else PROCESS_INVENTORY_REPORT_PATH
-    failure_output = Path(failure_arg) if failure_arg is not None else primary.parent / f"{primary.stem}.failure.json"
-    targets_output = Path(targets_arg) if targets_arg is not None else None
-    if primary.suffix != ".json":
-        raise SystemExit(f"output must be a JSON path, got {output_arg!r}")
-    if failure_output.suffix != ".json":
-        raise SystemExit(f"failure-output must be a JSON path, got {failure_arg!r}")
-    if targets_output is not None and targets_output.suffix != ".parquet":
-        raise SystemExit(f"targets-output must be a parquet path, got {targets_arg!r}")
-    reserved = {PROCESS_REPORT_PATH.resolve(), PROCESS_POLICY_REPORT_PATH.resolve()}
-    if primary.resolve() in reserved or failure_output.resolve() in reserved:
-        raise SystemExit("inventory report would overwrite the reserved hourly evidence destination")
-    if failure_output.resolve() == primary.resolve():
-        raise SystemExit("failure-output must differ from the primary output destination")
-    resolved_targets = targets_output.resolve() if targets_output is not None else None
-    if resolved_targets is not None and resolved_targets in {primary.resolve(), failure_output.resolve()}:
-        raise SystemExit("targets-output must differ from primary and failure destinations")
-    if failure_output.exists():
-        try:
-            prior = json.loads(failure_output.read_text(encoding="utf-8"))
-        except Exception:
-            prior = None
-        if isinstance(prior, dict) and prior.get("status") == "completed":
-            raise SystemExit("failure-output would overwrite completed evidence")
-    start = pd.Timestamp(args.start, tz="UTC") if getattr(args, "start", None) else DISCOVERY_START
-    end = pd.Timestamp(args.end, tz="UTC") if getattr(args, "end", None) else PROCESS_EVALUATION_CEILING
-    try:
-        report = evaluate_process_inventory_backtest(
-            start, end, data_root=args.data_root, execution_policy=policy, memory_budget=budget,
-        )
-    except ProcessInventoryBacktestError as exc:
-        try:
-            persist_process_inventory_failure(exc.report, failure_output)
-        except Exception as persist_exc:
-            _logger.error(
-                "[EVAL] status=failed stage=%s error_code=%s failure_path=%s persist_error=%s",
-                exc.report.stage, exc.report.error_code, failure_output, persist_exc,
-            )
-            raise exc
-        _logger.info(
-            "[EVAL] status=failed stage=%s error_code=%s failure_path=%s",
-            exc.report.stage, exc.report.error_code, failure_output,
-        )
-        raise
-    path = persist_process_inventory_report(report, primary)
-    if targets_output is not None:
-        persist_process_targets(report.proxy.base, targets_output)
-    base = report.base
-    memory = report.memory_stats
-    _logger.info(
-        "[EVAL] status=completed stage=process_backtest certification=%s primary_valid=%s completion_fills=%d unfilled=%d total_fills=%d passive_fills=%d total_fees=%s total_funding=%s go=%s reasons=%s wall_s=%s cpu_s=%s peak_rss=%s peak_pss=%s peak_uss=%s min_available=%s proxy_certification=%s proxy_go=%s threshold=%s path=%s output=%s",
-        PROCESS_INVENTORY_CERTIFICATION_LEVEL,
-        bool(base.ledger.primary_valid),
-        len(base.simulated_fills),
-        int(base.unfilled_count),
-        len(base.simulated_fills),
-        int(base.fill_count),
-        float(base.ledger.fee_charge.sum()),
-        float(base.ledger.funding_charge.sum()),
-        report.gate.go,
-        ",".join(report.gate.reason_codes),
-        float(memory.wall_seconds),
-        float(memory.cpu_seconds),
-        memory.parent_rss_peak_bytes,
-        int(memory.tree_pss_peak_bytes),
-        int(memory.tree_uss_peak_bytes),
-        int(memory.min_system_available_bytes),
-        report.proxy.certification_level,
-        report.proxy.gate.go,
-        policy.tracking_error_threshold,
-        path,
-        path,
-    )
+                _logger.info("manual: git add %s %s && git commit -m 'deploy: strategy %s' && git push", DEPLOY_MHS_DIR / "strategy_params.json.enc", DEPLOY_MHS_DIR / "strategy_bootstrap.parquet.enc", res["strategy_digest"])
 
 
 def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -853,28 +725,5 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument('--input-manifest-path', default=None)
     mhs.add_argument('--forward-execution-quality-dir', default=None)
     mhs.add_argument('--forward-strategy-digest', default=None)
+    mhs.add_argument('--run-id', default=None, help='Explicit run identity for research output under data/research/mhs/<run_id>/; omitted generates one.')
     mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)
-    process = portfolio_sub.add_parser(
-        "mhs-process-backtest",
-        help=(
-            "Direct 3m inventory evaluation with comparative hourly evidence "
-            "(compatibility path; use `backtest mhs` for supervised execution)"
-        ),
-    )
-    process.add_argument("--start", default=None)
-    process.add_argument("--end", default=None)
-    process.add_argument("--data-root", default=None)
-    process.add_argument(
-        "--rebalance-tracking-error-threshold",
-        type=float,
-        default=None,
-        help="Research-only portfolio L1 adoption threshold before volatility sizing; omitted preserves baseline.",
-    )
-    process.add_argument("--output", default=None, help="Explicit JSON 3m inventory primary destination.")
-    process.add_argument("--failure-output", default=None, help="Dedicated JSON failure diagnostics destination.")
-    process.add_argument("--targets-output", default=None, help="Optional parquet export of exact sized targets.")
-    process.add_argument("--execution-timeframe", choices=["3m"], default="3m", help="Execution replay resolution; fixed to 3m.")
-    process.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
-    process.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
-    process.add_argument("--min-available-bytes", type=int, default=None, help="Minimum effective physical headroom in bytes.")
-    process.set_defaults(handler=_run_mhs_process_backtest)
