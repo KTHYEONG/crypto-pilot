@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_3M_COMPLETION_MEMORY_REPLAY",
+      "date": "2026-09-18",
+      "adr_id": "ADR_20260918_MHS_3M_COMPLETION_MEMORY_REPLAY",
+      "domain": "execution",
+      "title": "MHS 3분봉 완주 경계·메모리·감독 계약",
+      "why": "3분봉 인벤토리 백테스트가 완료봉 경계 오류와 준비·replay 메모리 admission 한계로 완주하지 못했다.",
+      "resolution": "완료봉 half-open 경계, 미래 비의존 eligibility, row-group 원천 스캔, 단계별 tree PSS 예산, 적응형 물리 창, 비용 시계 보존, typed 실패 산출물과 supervised 실행을 production 경로에 연결했다.",
+      "impact": "3분봉 체결 원장이 일일 결정 간격의 빈 구간을 포함해 메모리 예산 안에서 재생되고, 성공·부분·실패의 성과와 wall·CPU·RSS·PSS·USS를 혼동 없이 비교할 수 있다.",
+      "caveat": "전체 기간 성과와 예산 달성은 등록된 원천 데이터로 감독된 fresh-process 실행에서 별도 확인하며 결측 보유 포지션은 강제 청산하지 않는다."
+    },
+    {
       "task_id": "MHS_3M_MEMORY_3M_MIGRATION",
       "date": "2026-09-17",
       "adr_id": "ADR_20260917_MHS_3M_MEMORY_3M_MIGRATION",
@@ -996,16 +1007,6 @@
       "why": "src/application/research/mhs/evaluation.py 6364줄 단일 모듈과 MHS_* 상수 73개가 2개 모듈에 분산되어 AI 작업 토큰 효율과 유지보수성 저하; 옵션 1개 추가 시 상수/필드/검증/CLI 플래그/매핑 5곳 동시 수정 필요. 착수 전 베이스라인이 RED(29건 실패)여서 fill_mark_parity_gate 회귀와 무관한 잔여 결함 4건을 먼저 진단·수정함.",
       "resolution": "죽은 코드(src/research/sleeve_blend/ 등 564줄) 제거, MHS_* 상수를 src/mhs/params.py로 단일화, MhsDiagnosticRequest를 cli_param 메타데이터 기반 선언적 검증/CLI 생성(src/cli/dataclass_args.py, validation.py)으로 전환, evaluation.py를 13개 모듈(contracts/marks/scaling/statistics/diagnostics/windows/books/folds/research_go/resources/validation 등)로 순수 이동 분해하고 공개 API만 재수출하는 파사드로 축소. 병행하여 테스트 fixture의 비결합 가격 생성, fill_mark_parity 정책 문구 노후화, 모듈 스코프 fixture 누수(TestPitExecutionGrid), mypy strict 위반(marks.py 미정의 전역, validation.py object 타입), 테스트 import 경로 노후화 5건을 수정. 652종목 실데이터 재실행으로 리팩토링 전후 계산 필드 완전 동일(log_run 제외) 확인.",
       "impact": "src 76→87 파일, 최대 파일 6364→약 700줄 이하로 분해. MHS_* 상수 중복 선언 6종 및 파라미터 3중 선언 문제 해소. ruff/mypy strict/pytest 전량 GREEN. TestMhsRefactorBitIdenticalReport 골든 테스트 및 실데이터 검증 모두 비트 동일 확인."
-    },
-    {
-      "task_id": "MHS_FILL_MARK_PARITY_GATE",
-      "date": "2026-08-20",
-      "adr_id": "ADR_20260820_MHS_FILL_MARK_PARITY_GATE",
-      "domain": "mhs",
-      "title": "MHS 체결/평가 정합성 게이트 도입 + 양측 노출 스케일",
-      "why": "상장폐지 후 합성 zero-volume 고정가 바(52개 심볼, 2025 패널 8%)를 기존 gap 탐지기가 통과시켜, 로스터 보유 바에서 체결가(OHLCV close)와 평가가(markPriceKlines)가 최대 14.25배 괴리(ALPACAUSDT 실측). 매도 체결마다 무위험 가공손익을 계상해 fold2(2025) 로그성장의 50.3%를 5일에 집중시키고 FOLD_GROWTH_CONCENTRATION(0.614>0.50) 유일 차단사유를 만듦. 동시에 ex-ante vol target scale이 upper=1.0 단측이라 저변동성 구간에서 리스크예산 미달.",
-      "resolution": "src/mhs/panel.py에 fill_mark_parity_mask 순수함수 추가(|log(fill/mark)|<=log1p(0.05), Binance price-protection band, 결측/비정합 시 fail-open). src/mhs/contracts.py에 MHS_FILL_MARK_PRICE_PROTECTION_BAND/MHS_FILL_MARK_MAX_LOG_DIVERGENCE/MHS_PNL_VOL_TARGET_MAX_SCALE(=1/target_gross, unit-gross 불변식 유지) 등록. evaluation.py에 _contemporaneous_mark_close_panel(+1h shift 미적용, 동시점 비교)과 _fill_mark_parity_eligibility(fold/top-level 양쪽 동일 함수 배선)를 추가하고 fill_mark_parity_gate=True를 의도적 non-byte-identical 기본값으로 설정(--no-fill-mark-parity-gate로 opt-out). _exante_vol_target_scale에 cap 파라미터 추가, exposure_scale_two_sided=False(opt-in, exante_target 모드 필수)로 양측 스케일 배선. 구현 중 프로세스 전역 lru_cache(_get_symbol_mark_frame)가 module-scoped 공유 테스트 fixture의 서로 다른 root 간 mark 데이터를 오염시키는 결함을 발견해 _build_fold_target_weights와 5개 fixture에 cache_clear() 추가, 합성 테스트 fixture의 독립 랜덤워크 fill/mark 가격을 상관되도록 수정, 손상된 mark 캐시에 대한 fail-open try/except 추가.",
-      "impact": "3m 원장 실측(2021-2025 전체): primary_geometric_cagr 0.521->0.560(+3.9%p), primary_naive_sharpe 2.088->2.232, primary_max_drawdown -0.176(불변), deflated_sharpe_ratio 0.364, data_integrity_reason_codes=[](클린). 게이트가 로스터 보유 9837셀(ALPACAUSDT 719/BNXUSDT 702/MEMEFIUSDT 634/PORT3USDT 712/UXLINKUSDT 637 등)을 정확히 배제. 단, 원 가설(가격아티팩트 제거->FOLD_GROWTH_CONCENTRATION 개선)은 반증됨: max_fold_share 0.614->0.649(악화), fold2(2025) CAGR 129.4%->161.7%로 오히려 증가 -- 오염 심볼 제외 후 자본이 재배분되며 2025 모멘텀 신호가 더 강하게 집중, 즉 fold2 쏠림은 가격 아티팩트가 아니라 진짜 경제적 신호(단일 연도 의존)였음이 실측 확인됨. research_go.eligible은 여전히 False, reason_codes=['FOLD_GROWTH_CONCENTRATION']로 불변. run_elapsed_seconds 278s->541.5s로 약 2배 증가 -- fold-path가 fork 이전 mark 캐시를 prewarm하지 않아 3개 fold worker가 각각 최대 446개 mark parquet를 캐시 없이 재읽음(스펙에 명시한 기지 성능 갭, 실측으로 확인). 후속 과제: (1) fold-path mark prewarm 배선, (2) 2025 쏠림의 진짜 원인(과최적화 vs 진짜 알파) 규명."
     }
   ]
 }
