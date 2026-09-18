@@ -33,8 +33,10 @@ from src.mhs.params import (
 )
 from src.mhs.process import (
     ProcessExecutionPolicy,
+    ProcessRiskSizingSpec,
     RefitPoint,
     apply_process_execution_policy,
+    causal_volatility_scaled_exposure,
     ema_smoothing_rate,
     estimation_adjusted_mean,
     ledoit_wolf_covariance,
@@ -52,6 +54,7 @@ def run_process_paths(
     data: ProcessMarketData, schedule: tuple[RefitPoint, ...], *,
     decision_bps: float, evaluation_bps: tuple[float, ...], leverage_cap: float,
     execution_policy: ProcessExecutionPolicy | None = None,
+    risk_sizing: ProcessRiskSizingSpec | None = None,
     memory_budget: MhsMemoryBudget | None = None,
 ) -> tuple[ProcessPath, ...]:
     """Construct identical process decisions with interval-local refit buffers.
@@ -63,6 +66,7 @@ def run_process_paths(
         evaluation_bps: Nonempty ordered evaluation tiers.
         leverage_cap: Positive finite exposure ceiling.
         execution_policy: Existing adoption policy or baseline.
+        risk_sizing: Causal volatility sizing contract or legacy behavior.
         memory_budget: Explicit limits or validated defaults.
 
     Returns:
@@ -103,6 +107,8 @@ def run_process_paths(
         raise ValueError(f"leverage_cap must be finite and > 0, got {leverage_cap}")
     if execution_policy is not None and not isinstance(execution_policy, ProcessExecutionPolicy):
         raise ValueError("execution_policy must be a ProcessExecutionPolicy or None")
+    if risk_sizing is not None and not isinstance(risk_sizing, ProcessRiskSizingSpec):
+        raise ValueError("risk_sizing must be a ProcessRiskSizingSpec or None")
     policy = execution_policy if execution_policy is not None else ProcessExecutionPolicy()
     rate = ema_smoothing_rate(PROCESS_SMOOTHING_HALFLIFE_DAYS)
     names = list(data.member_books.keys())
@@ -178,7 +184,14 @@ def run_process_paths(
         ((1.0 + unit_net_1h).resample("1D").prod() - 1.0).reindex(oos_days).fillna(0.0)
     )
     _reject_invalid_ledger_returns(decision_unit_daily)
-    exposure = volatility_scaled_exposure(decision_unit_daily, cap=cap_value)
+    if risk_sizing is not None and risk_sizing.leverage_cap != cap_value:
+        raise ValueError(
+            f"risk_sizing leverage_cap {risk_sizing.leverage_cap} must equal leverage_cap {cap_value}"
+        )
+    if risk_sizing is None:
+        exposure = volatility_scaled_exposure(decision_unit_daily, cap=cap_value)
+    else:
+        exposure = causal_volatility_scaled_exposure(decision_unit_daily, risk_sizing)
     sized = sized_targets.mul(exposure.reindex(sized_targets.index).fillna(0.0), axis=0)
     sized_1h = sized.reindex(data.grid_1h, method="ffill").fillna(0.0)
     paths: list[ProcessPath] = []
@@ -208,6 +221,7 @@ def run_process_paths(
                 unit_target_weights=sized_targets,
                 target_weights=sized,
                 turnover_1h=turnover_1h,
+                risk_sizing=risk_sizing,
             )
         )
     del unit_1h, sized_1h
@@ -240,6 +254,7 @@ def evaluate_process_backtest(
     end: pd.Timestamp = PROCESS_EVALUATION_CEILING, *,
     data_root: str | None = None,
     execution_policy: ProcessExecutionPolicy | None = None,
+    risk_sizing: ProcessRiskSizingSpec | None = None,
     memory_budget: MhsMemoryBudget | None = None,
 ) -> ProcessBacktestReport:
     """Evaluate an explicitly configured process as hourly proxy evidence.
@@ -253,6 +268,7 @@ def evaluate_process_backtest(
         end: Timezone-aware input end within the registered ceiling.
         data_root: Optional hourly OHLCV root using the existing dev loader.
         execution_policy: Explicit adoption control; None preserves baseline.
+        risk_sizing: Research-only causal volatility sizing; None preserves baseline.
         memory_budget: Explicit process-tree limits or validated stage defaults.
 
     Returns:
@@ -271,6 +287,8 @@ def evaluate_process_backtest(
         raise DataIntegrityError(f"end {end} exceeds PROCESS_EVALUATION_CEILING")
     if execution_policy is not None and not isinstance(execution_policy, ProcessExecutionPolicy):
         raise ValueError("execution_policy must be a ProcessExecutionPolicy or None")
+    if risk_sizing is not None and not isinstance(risk_sizing, ProcessRiskSizingSpec):
+        raise ValueError("risk_sizing must be a ProcessRiskSizingSpec or None")
     envelope = GROWTH_RISK_ENVELOPES[CLI_GROWTH_ENVELOPE_DEFAULT]
     base_bps = ExecutionSpec().one_way_taker_bps()
     stress_bps = base_bps * STRESS_COST_MULTIPLIER
@@ -280,13 +298,13 @@ def evaluate_process_backtest(
         base, stress = run_process_paths(
             data, schedule, decision_bps=base_bps,
             evaluation_bps=(base_bps, stress_bps), leverage_cap=envelope.leverage_ceiling,
-            execution_policy=execution_policy, memory_budget=memory_budget,
+            execution_policy=execution_policy, risk_sizing=risk_sizing, memory_budget=memory_budget,
         )
     else:
         base, stress = run_process_paths(
             data, schedule, decision_bps=base_bps,
             evaluation_bps=(base_bps, stress_bps), leverage_cap=envelope.leverage_ceiling,
-            execution_policy=execution_policy, memory_budget=memory_budget,
+            execution_policy=execution_policy, risk_sizing=risk_sizing, memory_budget=memory_budget,
         )
     gate = evaluate_deploy_gate(
         fold_returns=quarter_fold_returns(base.daily_returns),

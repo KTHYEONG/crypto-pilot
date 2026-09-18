@@ -89,6 +89,103 @@ def align_funding_with_knowledge(
     return FundingAlignment(rates=rates, known=known_frame, source_failures=failed)
 
 
+@dataclass(frozen=True, slots=True)
+class FundingCoverageGap:
+    """One uncovered funding interval that makes inventory economics uncertifiable.
+
+    The interval is expressed on the requested execution grid. It describes
+    unavailable source knowledge, never an assumed zero payment.
+
+    Args:
+        symbol: Canonical perpetual-futures symbol.
+        start: First grid label whose funding state is unknown.
+        end: Last grid label whose funding state is unknown.
+        reason: Stable source-coverage reason.
+    """
+
+    symbol: str
+    start: pd.Timestamp
+    end: pd.Timestamp
+    reason: str
+
+
+def _require_coverage_grid(grid: pd.DatetimeIndex, alignment: FundingAlignment) -> None:
+    """Validate the coverage grid against the alignment frames."""
+    if not isinstance(grid, pd.DatetimeIndex):
+        raise DataIntegrityError("grid must be a DatetimeIndex")
+    if len(grid) == 0:
+        raise DataIntegrityError("grid must be non-empty")
+    if grid.hasnans:
+        raise DataIntegrityError("grid must not contain NaT")
+    if grid.tz is None:
+        raise DataIntegrityError("grid must be timezone-aware UTC")
+    converted = grid.tz_convert("UTC")
+    if not converted.equals(grid):
+        raise DataIntegrityError("grid must be UTC")
+    if grid.has_duplicates or not grid.is_monotonic_increasing:
+        raise DataIntegrityError("grid must be unique and increasing")
+    if not alignment.rates.index.equals(grid):
+        raise DataIntegrityError("alignment rates index must equal grid")
+    if not alignment.known.index.equals(grid):
+        raise DataIntegrityError("alignment known index must equal grid")
+    if list(alignment.rates.columns) != list(alignment.known.columns):
+        raise DataIntegrityError("rate and known columns must match exactly")
+
+
+def funding_coverage_gaps(
+    alignment: FundingAlignment,
+    grid: pd.DatetimeIndex,
+) -> tuple[FundingCoverageGap, ...]:
+    """Compress unknown funding knowledge into deterministic source intervals.
+
+    Args:
+        alignment: Existing rate and knowledge alignment for the same grid.
+        grid: Strictly increasing UTC execution labels.
+
+    Returns:
+        Time-ordered, symbol-ordered maximal unknown intervals.
+
+    Raises:
+        DataIntegrityError: Alignment or grid shapes, labels, or columns differ.
+    """
+    _require_coverage_grid(grid, alignment)
+    failures = alignment.source_failures
+    out: list[FundingCoverageGap] = []
+    for symbol in list(alignment.rates.columns):
+        known = alignment.known[symbol].to_numpy(dtype=bool)
+        if bool(known.all()):
+            continue
+        reason = "SOURCE_UNAVAILABLE" if symbol in failures or not bool(known.any()) else "OBSERVATION_GAP"
+        idx = np.flatnonzero(~known)
+        run_start = int(idx[0])
+        prev = int(idx[0])
+        for pos in idx[1:].tolist():
+            pos = int(pos)
+            if pos == prev + 1:
+                prev = pos
+                continue
+            out.append(
+                FundingCoverageGap(
+                    symbol=symbol,
+                    start=grid[run_start],
+                    end=grid[prev],
+                    reason=reason,
+                )
+            )
+            run_start = pos
+            prev = pos
+        out.append(
+            FundingCoverageGap(
+                symbol=symbol,
+                start=grid[run_start],
+                end=grid[prev],
+                reason=reason,
+            )
+        )
+    out.sort(key=lambda g: (g.start, g.end, g.symbol))
+    return tuple(out)
+
+
 def bar_funding_panel(
     funding_by_symbol: Mapping[str, pd.Series],
     grid: pd.DatetimeIndex,
@@ -162,6 +259,7 @@ class ExecutionReplayWindow:
     # one observation and settle costs once. None retains legacy direct-construction
     # semantics where each window is its own observation range.
     logical_partition: tuple[int, int] | None = None
+    funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +340,7 @@ class StrategyExecutionReplayResult:
     notional_weighted_spread_bps: float = float("nan")
     notional_weighted_delay_bps: float = float("nan")
     min_notional_dropped_fraction: float = float("nan")
+    funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

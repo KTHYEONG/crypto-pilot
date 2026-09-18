@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 
 from src.mhs.process import (
+    ProcessRiskSizingSpec,
+    causal_volatility_scaled_exposure,
     ema_smoothing_rate,
     estimation_adjusted_mean,
     ledoit_wolf_covariance,
@@ -375,3 +377,144 @@ def test_policy_rejects_labels_and_anomalies() -> None:
         for policy in policies:
             with pytest.raises(ValueError, match=r".+"):
                 apply_process_execution_policy(bad, policy)
+
+
+def _risk_series(values: list[float], start: str = "2022-01-01") -> pd.Series:
+    index = pd.date_range(start, periods=len(values), freq="24h", tz="UTC")
+    return pd.Series(values, index=index, dtype="float64")
+
+
+def _risk_spec(**overrides: object) -> ProcessRiskSizingSpec:
+    params: dict[str, object] = {
+        "annual_volatility_target": 0.25,
+        "ewma_halflife_days": 60,
+        "minimum_observations": 60,
+        "leverage_cap": 3.0,
+    }
+    params.update(overrides)
+    return ProcessRiskSizingSpec(**params)  # type: ignore[arg-type]
+
+
+def test_causal_exposure_zero_before_minimum_observations() -> None:
+    series = _risk_series([0.01, -0.01] * 20)
+    exposure = causal_volatility_scaled_exposure(series, _risk_spec())
+    assert bool((exposure == 0.0).all())
+
+
+def test_causal_exposure_uses_prior_observations_only() -> None:
+    rng = np.random.default_rng(3)
+    base_values = list(rng.normal(0.0, 0.01, 100))
+    later_values = list(base_values)
+    later_values[51:] = list(rng.normal(0.05, 0.01, 49))
+    first = causal_volatility_scaled_exposure(_risk_series(base_values), _risk_spec(minimum_observations=10, ewma_halflife_days=10))
+    second = causal_volatility_scaled_exposure(_risk_series(later_values), _risk_spec(minimum_observations=10, ewma_halflife_days=10))
+    pd.testing.assert_series_equal(first.iloc[:51], second.iloc[:51])
+
+
+def test_causal_exposure_scales_with_target_ratio() -> None:
+    values = [0.01, -0.01] * 60
+    small = causal_volatility_scaled_exposure(_risk_series(values), _risk_spec(annual_volatility_target=0.2, ewma_halflife_days=10, minimum_observations=10, leverage_cap=5.0))
+    large = causal_volatility_scaled_exposure(_risk_series(values), _risk_spec(annual_volatility_target=0.4, ewma_halflife_days=10, minimum_observations=10, leverage_cap=5.0))
+    eligible = small > 0
+    assert bool(eligible.any())
+    assert bool((large <= 5.0).all())
+    assert np.allclose(large[eligible].to_numpy(), 2.0 * small[eligible].to_numpy(), rtol=1e-12)
+
+
+def test_causal_exposure_cap_binds() -> None:
+    values = [0.005, -0.005] * 60
+    exposure = causal_volatility_scaled_exposure(_risk_series(values), _risk_spec(annual_volatility_target=10.0, ewma_halflife_days=10, minimum_observations=10, leverage_cap=3.0))
+    assert bool((exposure <= 3.0).all())
+    assert bool((exposure[exposure > 0] == 3.0).all())
+
+
+def test_causal_exposure_zero_volatility_fails_closed() -> None:
+    series = _risk_series([0.001] * 80)
+    exposure = causal_volatility_scaled_exposure(series, _risk_spec(minimum_observations=10, ewma_halflife_days=10))
+    assert bool((exposure.iloc[10:] == 0.0).all())
+
+
+def test_causal_exposure_nonfinite_return_fails_closed() -> None:
+    good = _risk_series([0.01] * 70)
+    bad_nan = good.copy()
+    bad_nan.iloc[65] = float("nan")
+    bad_inf = good.copy()
+    bad_inf.iloc[65] = float("inf")
+    for bad in (bad_nan, bad_inf):
+        with pytest.raises(ValueError, match=r".+"):
+            causal_volatility_scaled_exposure(bad, _risk_spec())
+
+
+def test_causal_exposure_loss_beyond_equity_fails_closed() -> None:
+    for ruin in (-1.0, -1.5):
+        values = [0.01] * 69 + [ruin]
+        with pytest.raises(ValueError, match=r".+"):
+            causal_volatility_scaled_exposure(_risk_series(values), _risk_spec())
+
+
+def test_causal_exposure_naive_timestamps_fail_closed() -> None:
+    from datetime import timedelta, timezone
+
+    series = _risk_series([0.01] * 70)
+    naive = pd.Series(series.to_numpy(), index=pd.DatetimeIndex(series.index.tz_localize(None)))
+    with pytest.raises(ValueError, match=r".+"):
+        causal_volatility_scaled_exposure(naive, _risk_spec())
+    eastern = pd.Series(
+        series.to_numpy(),
+        index=pd.DatetimeIndex(series.index.tz_convert(timezone(timedelta(hours=-5)))),
+    )
+    with pytest.raises(ValueError, match=r".+"):
+        causal_volatility_scaled_exposure(eastern, _risk_spec())
+
+
+def test_causal_exposure_unordered_timestamps_fail_closed() -> None:
+    series = _risk_series([0.01] * 70)
+    duplicated = series.copy()
+    duplicated.index = pd.DatetimeIndex([*list(series.index[:-1]), series.index[-2]])
+    with pytest.raises(ValueError, match=r".+"):
+        causal_volatility_scaled_exposure(duplicated, _risk_spec())
+    with pytest.raises(ValueError, match=r".+"):
+        causal_volatility_scaled_exposure(series.iloc[::-1], _risk_spec())
+
+
+def test_risk_sizing_spec_invalid_controls_fail_closed() -> None:
+    for field, bad_values in (
+        ("annual_volatility_target", [0.0, -0.25, float("nan"), float("inf"), True]),
+        ("leverage_cap", [0.0, -3.0, float("nan"), float("inf"), False]),
+        ("ewma_halflife_days", [0, -5, True, 2.5, "60"]),
+        ("minimum_observations", [0, -60, False, 7.5, "60"]),
+    ):
+        for bad in bad_values:
+            with pytest.raises(ValueError, match=r".+"):
+                _risk_spec(**{field: bad})
+
+
+def test_causal_exposure_malformed_inputs_fail_closed() -> None:
+    from typing import cast
+
+    series = _risk_series([0.01] * 70)
+    with pytest.raises(ValueError, match=r".+"):
+        causal_volatility_scaled_exposure(series, cast(ProcessRiskSizingSpec, "not-a-spec"))
+    with pytest.raises(ValueError, match=r".+"):
+        causal_volatility_scaled_exposure(cast(pd.Series, [0.01] * 70), _risk_spec())
+    non_dt = pd.Series([0.01] * 70, index=list(range(70)))
+    with pytest.raises(ValueError, match=r".+"):
+        causal_volatility_scaled_exposure(non_dt, _risk_spec())
+    nat = series.copy()
+    nat.index = pd.DatetimeIndex([series.index[0], pd.NaT, *list(series.index[2:])])
+    with pytest.raises(ValueError, match=r".+"):
+        causal_volatility_scaled_exposure(nat, _risk_spec())
+
+
+def test_causal_exposure_output_contract() -> None:
+    rng = np.random.default_rng(11)
+    series = _risk_series(list(rng.normal(0.0, 0.01, 120)))
+    spec = _risk_spec(minimum_observations=20, ewma_halflife_days=20)
+    exposure = causal_volatility_scaled_exposure(series, spec)
+    pd.testing.assert_index_equal(exposure.index, series.index)
+    assert str(exposure.dtype) == "float64"
+    assert bool(np.isfinite(exposure.to_numpy()).all())
+    assert bool((exposure >= 0.0).all())
+    assert bool((exposure <= spec.leverage_cap).all())
+    again = causal_volatility_scaled_exposure(series, spec)
+    pd.testing.assert_series_equal(exposure, again)

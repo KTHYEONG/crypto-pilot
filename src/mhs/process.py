@@ -296,6 +296,101 @@ def volatility_scaled_exposure(
 
 
 @dataclass(frozen=True, slots=True)
+class ProcessRiskSizingSpec:
+    """Causal portfolio-volatility sizing contract for a unit process book.
+
+    The specification controls exposure only after unit-book composition is
+    known. It prevents future returns, missing risk observations, and
+    unbounded leverage from being translated into historical or live exposure.
+
+    Args:
+        annual_volatility_target: Positive annualized arithmetic-return target.
+        ewma_halflife_days: Positive integral EWMA half-life in daily bars.
+        minimum_observations: Positive count of prior daily returns required.
+        leverage_cap: Positive finite maximum gross exposure multiple.
+    """
+
+    annual_volatility_target: float
+    ewma_halflife_days: int
+    minimum_observations: int
+    leverage_cap: float
+
+    def __post_init__(self) -> None:
+        """Validate every control before any market data is read."""
+        target = self.annual_volatility_target
+        if isinstance(target, bool) or not isinstance(target, (int, float, np.integer, np.floating)):
+            raise ValueError(f"annual_volatility_target must be finite and > 0, got {target!r}")
+        if not np.isfinite(float(target)) or float(target) <= 0.0:
+            raise ValueError(f"annual_volatility_target must be finite and > 0, got {target!r}")
+        for name in ("ewma_halflife_days", "minimum_observations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+            if int(value) < 1:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+        cap = self.leverage_cap
+        if isinstance(cap, bool) or not isinstance(cap, (int, float, np.integer, np.floating)):
+            raise ValueError(f"leverage_cap must be finite and > 0, got {cap!r}")
+        if not np.isfinite(float(cap)) or float(cap) <= 0.0:
+            raise ValueError(f"leverage_cap must be finite and > 0, got {cap!r}")
+        object.__setattr__(self, "annual_volatility_target", float(target))
+        object.__setattr__(self, "ewma_halflife_days", int(self.ewma_halflife_days))
+        object.__setattr__(self, "minimum_observations", int(self.minimum_observations))
+        object.__setattr__(self, "leverage_cap", float(cap))
+
+
+def causal_volatility_scaled_exposure(
+    unit_returns: pd.Series,
+    spec: ProcessRiskSizingSpec,
+) -> pd.Series:
+    """Return bounded next-day exposure from strictly preceding unit returns.
+
+    Args:
+        unit_returns: Finite chronological daily net returns before sizing.
+        spec: Validated risk-sizing parameters for this evaluation.
+
+    Returns:
+        Float64 exposure indexed exactly as `unit_returns` and bounded by cap.
+
+    Raises:
+        ValueError: Returns or sizing controls violate temporal or numeric
+            requirements.
+    """
+    if not isinstance(spec, ProcessRiskSizingSpec):
+        raise ValueError(f"spec must be a ProcessRiskSizingSpec, got {type(spec).__name__}")
+    if not isinstance(unit_returns, pd.Series):
+        raise ValueError("unit_returns must be a Series")
+    index = unit_returns.index
+    if not isinstance(index, pd.DatetimeIndex):
+        raise ValueError("unit_returns must have a DatetimeIndex")
+    if index.hasnans:
+        raise ValueError("unit_returns index must not contain NaT")
+    if index.has_duplicates or not index.is_monotonic_increasing:
+        raise ValueError("unit_returns index must be unique and increasing")
+    if index.tz is None:
+        raise ValueError("unit_returns index must be timezone-aware UTC")
+    if not index.tz_convert("UTC").equals(index):
+        raise ValueError("unit_returns index must be UTC")
+    values = unit_returns.to_numpy(dtype="float64")
+    if values.size and not bool(np.isfinite(values).all()):
+        raise ValueError("unit_returns must be finite")
+    if values.size and bool((values <= -1.0).any()):
+        raise ValueError("unit_returns must exceed minus one")
+    prior_vol = unit_returns.ewm(
+        halflife=spec.ewma_halflife_days, min_periods=spec.minimum_observations
+    ).std().shift(1)
+    annualized = prior_vol * float(np.sqrt(365.0))
+    exposure = (
+        (spec.annual_volatility_target / annualized.where(annualized > 0.0))
+        .clip(lower=0.0, upper=spec.leverage_cap)
+        .fillna(0.0)
+    )
+    exposure = exposure.astype("float64")
+    exposure.index = unit_returns.index
+    return exposure
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessExecutionPolicy:
     """Explicit research control for adopting a smoothed unit book.
 

@@ -142,6 +142,10 @@ def _spill_window_to_ipc(window: ExecutionReplayWindow, target_path: str) -> Non
             "bar_available_ns": np.asarray(window.bar_available_at, dtype="datetime64[ns]").astype("int64").tolist() if window.bar_available_at is not None else None,
             "logical_partition": list(window.logical_partition) if window.logical_partition is not None else None,
             "frames": meta_frames,
+            "funding_coverage_gaps": [
+                {"symbol": g.symbol, "start_ns": int(g.start.value), "end_ns": int(g.end.value), "reason": g.reason}
+                for g in window.funding_coverage_gaps
+            ],
         }
         with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_STORED) as zf:
             zf.writestr("meta.json", json.dumps(meta))
@@ -186,6 +190,17 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
         known_frame = frames["funding_known"].astype(bool) if frames["funding_known"] is not None else None
         available = pd.DatetimeIndex(pd.to_datetime(np.asarray(meta.get("bar_available_ns"), dtype="int64"), unit="ns", utc=True)) if meta.get("bar_available_ns") is not None else None
         logical_partition = meta.get("logical_partition")
+        from src.mhs.execution.contracts import FundingCoverageGap as _FundingCoverageGap
+
+        coverage = tuple(
+            _FundingCoverageGap(
+                symbol=str(entry["symbol"]),
+                start=pd.Timestamp(int(entry["start_ns"]), unit="ns", tz="UTC"),
+                end=pd.Timestamp(int(entry["end_ns"]), unit="ns", tz="UTC"),
+                reason=str(entry["reason"]),
+            )
+            for entry in meta.get("funding_coverage_gaps", [])
+        )
         return ExecutionReplayWindow(
             window_start=pd.Timestamp(meta["window_start_ns"], unit="ns", tz="UTC"),
             window_end=pd.Timestamp(meta["window_end_ns"], unit="ns", tz="UTC"),
@@ -203,6 +218,7 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
             funding_known=known_frame,
             bar_available_at=available,
             logical_partition=tuple(logical_partition) if logical_partition is not None else None,
+            funding_coverage_gaps=coverage,
         )
     except Exception as exc:
         raise DataIntegrityError(f"window IPC load failed for {target_path}: {exc}") from exc
