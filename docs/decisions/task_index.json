@@ -1,6 +1,39 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_RESULTS_STORE_REFACTOR",
+      "date": "2026-09-18",
+      "adr_id": "ADR_20260918_MHS_RESULTS_STORE_REFACTOR",
+      "domain": "mhs",
+      "title": "MHS 결과 저장소 정리 및 실행 기록 통합",
+      "why": "docs/results에 구형 백테스트·research·live 산출물이 혼재해 결과 추적과 유지보수가 어려웠다.",
+      "resolution": "trial history를 registry로 이관하고 3분봉 실행을 단일 result envelope로 통합하며 live sealed artifact를 deploy/mhs로 이전하고 docs 생성물 경로를 폐기했다.",
+      "impact": "반복 실행 중복과 결과 디렉터리 오염을 줄이고 MHS 실행·증거·배포 경계를 명확히 한다.",
+      "caveat": "기존 연구 history는 registry 의미 동등성 검증 후 제거하며 재실행 fingerprint는 MHS 소스와 입력 데이터 snapshot을 포함한다."
+    },
+    {
+      "task_id": "TASK_MHS_MAINTENANCE_REFACTOR",
+      "date": "2026-09-18",
+      "adr_id": "ADR_20260918_MHS_MAINTENANCE_REFACTOR",
+      "domain": "mhs",
+      "title": "MHS 실행 저장 통합과 process 책임 분리",
+      "why": "반복 백테스트가 상세 실행 폴더와 별도 run_history를 누적하고 메인 실행이 과거 연구 facade 및 거대 모듈에 결합되어 유지보수가 어려웠다.",
+      "resolution": "SQLite 실행 registry와 content-addressed lossless 증거 보존을 도입하고 process 실행·reporting·execution core·운영 도구를 책임별로 분리하며 확인된 dead tools와 미사용 연구 테스트를 제거했다.",
+      "impact": "canonical 3m backtest의 실행 상태·금융 유효성·trial identity가 분리 보존되고 동일 증거 재사용과 명시적 retention으로 누적을 통제하며 전체 lean check가 diff coverage 100%로 통과했다.",
+      "caveat": "라이브 target builder, 배포 sealing, unresolved financial failure evidence, legacy research CLI의 사용 중 경로와 기존 금융 계산은 보존하며 funding causality 문제는 별도 작업으로 남긴다."
+    },
+    {
+      "task_id": "MHS_PREPARATION_MEMORY_AND_OBSERVABILITY",
+      "date": "2026-09-18",
+      "adr_id": "ADR_20260918_MHS_PREPARATION_MEMORY_AND_OBSERVABILITY",
+      "domain": "execution",
+      "title": "MHS 3분봉 준비 메모리 최적화와 실행 관측",
+      "why": "전체 3분봉 실행은 가능했지만 기존 RAM 기본값이 실제 준비 피크보다 낮고 worker 강제 종료 시 단계 증거가 부족했다.",
+      "resolution": "결정일 우선 특징·순위 계산과 종목 블록 버퍼를 src 경로에 연결하고 검증된 6/4GiB 준비·재생 프로파일 및 worker 단계 로그를 적용했다.",
+      "impact": "전체 기간 3분봉 실행이 0 swap으로 완료되며 준비·재생·window 소비 진행과 자원 거부 원인을 재현 가능하게 기록한다.",
+      "caveat": "실제 원장에는 장기 펀딩·OHLCV 공백과 미래 관측 의존 판정이 남아 있어 성과 인증은 차단되며 펀딩 인과성은 별도 probe 후 구현해야 한다."
+    },
+    {
       "task_id": "TASK_MHS_3M_SOURCE_OWNED_BACKTEST",
       "date": "2026-09-18",
       "adr_id": "ADR_20260918_MHS_3M_SOURCE_OWNED_BACKTEST",
@@ -978,36 +1011,6 @@
       "why": "code-review에서 stage_services.py가 evaluation.py 사설 심볼을 wrapper 함수로 감싸며 이름을 공개(무언더스코어)로 바꿔 기존 test_stage_services.py의 identity(is) 검증과 monkeypatch.setattr(evaluation, ...) 계약을 깨뜨렸음을 발견. 이를 고치는 과정에서 replay_execution_windows_coupled(P5, D1)의 fail-closed completeness gate가 자기 window 소비 이후 coverage와 비교하는 구조라 논리적으로 절대 발동하지 않는 dead guard였음을 실측 테스트로 확인.",
       "resolution": "stage_services.py를 evaluation.py 사설 심볼의 identity re-export로 되돌리고 6개 pipeline stage 모듈의 _evaluation.<private>() attribute 접근을 전부 stage_services의 언더스코어 이름 import로 교체. test_module_boundaries.py에 attribute-access 우회 탐지 테스트를 추가. replay_execution_windows_coupled의 gap 체크를 window 소비 이전(prior_coverage_ns)의 window_start 비교로 재작성하고 tests/integration/mhs/test_coupled_replay_equivalence.py로 실측 등가성·gap fail-closed 검증.",
       "impact": "P4 의존성 경계 게이트가 실질적 결합을 다시 탐지하도록 복구, monkeypatch 기반 기존 테스트 전부 회복. P5 고위험 기능의 fail-closed 안전장치가 실제로 작동하도록 수정되어 향후 window 생성 로직 변경 시 gap이 조용히 통과하는 회귀를 막음."
-    },
-    {
-      "task_id": "MHS_GROWTH_ENVELOPE_AND_MEMBER_ATTRIBUTION",
-      "date": "2026-08-22",
-      "adr_id": "ADR_20260822_MHS_GROWTH_ENVELOPE_AND_MEMBER_ATTRIBUTION",
-      "domain": "mhs",
-      "title": "MHS 성장 리스크 envelope 사다리 + 위원회 멤버 귀속 계측기 도입",
-      "why": "실측 결과(scratch 스크립트, docs/results/mhs_horizon_diagnostic_artifacts/daily_ledger.parquet 재구성) 배치 노출이 등록된 성장 목적함수가 아니라 서로 충돌하는 두 임의 상수(PNL_TARGET_ANNUAL_VOL=0.20 하드코딩, COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25)로 결정되어 북의 평균 62.8%만 배치됨을 확인. 동시에 위원회 멤버 선택이 1h 프록시로만 이루어지고 3m 원장 리플레이에서 3회 연속 역전(ADR_20260819/20260817/20260820)된 문제도 계측 공백으로 남아있었음.",
-      "resolution": "src/mhs/params.py에 GrowthRiskEnvelope(frozen dataclass) + GROWTH_RISK_ENVELOPES 사다리(conservative/balanced/growth, ruin_fraction/max_ruin_prob는 전 rung 동일 미스윕) 등록. _resolved_growth_envelope 단일 해석 seam(research_go.py) 도입해 _mhs_research_go의 드로다운 게이트와 scaling.py의 _replay_exposure_scale 노출 스케일을 동일 envelope로 정합화(fold.py 콜사이트에서 envelope.max_drawdown 명시 전달). exante_target 모드(프로덕션 기본값)에서도 growth_envelope가 실효를 갖도록 conservative 특례(byte-identical 유지) + balanced/growth는 growth_budget 솔버 기반 target_vol/cap 사용하도록 배선. _envelope_exposure_cap의 fail-closed 실현가능성 검증을 하드코딩 합성배열에서 실제 reference_daily_returns 기반으로 교체. validation.py의 growth_envelope 선택지를 하드코딩 튜플 대신 GROWTH_RISK_ENVELOPES에서 유도. committee_member_attribution opt-in 플래그 + _committee_member_books/_committee_member_attribution(proxy_vs_ledger_rank_spearman 포함, I5 관측전용) 추가, committee.py 스테이지에서 1h 프록시 Sharpe를 3m 원장과 독립된 mhs_ledger_pnl 소스로 계산해 replay.py에 배선(최초 구현이 동일 3m 소스를 양쪽에 사용해 상관계수가 항상 자기자신과 비교되던 버그를 /check 감사에서 발견·수정). 6개 골든 픽스처(mhs_report_golden*.json)에 growth_envelope/committee_member_attribution 키를 서베이트로 패치(값이 아닌 키 추가만, 골든 identity 7/7 bit-exact 재확인). /check 감사 중 test_fast_reversal_overlay_redesign.py+test_realistic_execution_primary_swap.py 조합 실행 시 발견된 실패는 조사 결과 이번 변경과 무관한 기존 결함(replay.py가 정적 import로 _run_books_concurrent를 바인딩해 ev 모듈에 대한 monkeypatch가 실제로 가로채지 못하는 monkeypatch-through-facade 데드패치, ADR_20260821에서 부분 수정된 것과 동일 패턴)으로 확인, 별도 후속 과제로 남김.",
-      "impact": "committee_capital=True 기본 프로덕션 경로 CAGR/Sharpe/MDD 완전 불변(conservative envelope 기본값, golden identity 7/7 bit-exact 확인). growth_envelope='balanced'/'growth' opt-in 시 사이징 병목 해소 경로 확보(단, 사전등록 승격 규칙 미충족 시 기본값 승격 안 됨 -- 실데이터 인증 리플레이는 후속 과제). committee_member_attribution=True opt-in으로 위원회 멤버별 1h-프록시 vs 3m-원장 Sharpe 순위 상관 계측 가능해져, FOLD_GROWTH_CONCENTRATION 해소를 위한 후속 작업의 선행 계측기 확보. FOLD_GROWTH_CONCENTRATION(Research-GO 유일 잔여 차단사유) 자체는 이번 범위 밖. 발견된 monkeypatch-through-facade 데드패치(test_fast_reversal_overlay_redesign.py, test_realistic_execution_primary_swap.py)도 후속 과제로 등록 필요."
-    },
-    {
-      "task_id": "ADR_20260821_MHS_STAGE_DECOMPOSITION_GOLDEN_VERIFICATION",
-      "date": "2026-08-21",
-      "adr_id": "ADR_20260821_MHS_STAGE_DECOMPOSITION_GOLDEN_VERIFICATION",
-      "domain": "mhs",
-      "title": "MHS 파이프라인 분해 골든 검증 및 check 도구 xdist 안정화",
-      "why": "이전 세션이 MHS 오케스트레이터를 717줄 단일 함수에서 6-스테이지(panel/selection/book/committee/replay/fold)로 분해했으나, golden identity 테스트가 여전히 구 monolith 경로만 검증하고 committee_capital=True 등 프로덕션 기본 경로는 골든 매트릭스가 아예 캡처되지 않아 회귀를 탐지 못하는 맹점이 있었음. 별도로 lean_check.py의 전체 스코프 pytest 실행이 pytest-xdist 워커 안에서 fork 기반 ProcessPoolExecutor 테스트가 중첩 fork되며 BrokenPipeError로 무한정 멈추는 문제, test_evaluation.py의 50개 테스트가 @pytest.mark.slow 없이 매번 전체 파이프라인을 돌려 testing.md Fast Feedback Default를 위반하는 문제 발견.",
-      "resolution": "capture_matrix.py에 funding_path/mark_price_path 몽키패치 누락 버그 수정 후 committee/discovery/trend_sleeve/fold_safe 4개 골든 캡처 완료. test_golden_identity_matrix의 request.param indirect 파라미터화 누락 버그 및 baseline 마켓 라이터 불일치 수정, 5개 골든 전부 bit-exact 통과 확인. Step 6(persist/artifacts 이동)이 남긴 monkeypatch-through-facade 데드패치 4건(append_run_history_record/_daily_resample_ledger)을 실제 호출 지점인 src.mhs.report.persist로 재타겟팅, 소스텍스트 단언 2건을 분해된 구조(committee.py의 del ctx.log_close + runner.py 스테이지 순서)로 재작성. tools/agent_skills/lean_check.py에 pytest-timeout 플러그인 도입(--test-timeout)과 xdist 타임아웃 시 -n0 자동 직렬 재시도 폴백을 추가해 프로젝트 범용으로 재사용 가능하게 함. test_evaluation.py 50개 + test_mhs_horizon_diagnostic.py 3개 테스트에 @pytest.mark.slow 추가. 최종적으로 프로덕션 CLI(committee_capital=True 기본)를 실데이터(446 심볼, 2021-2025)로 실행해 status=COMPLETE, CAGR 56.0%/MDD -17.6%/Calmar 3.18, 4/4 fold valid 확인.",
-      "impact": "golden identity 테스트 6/7 -> 7/7 bit-exact 통과, test_evaluation.py 기본(not slow) 실행 수십분/다수실패 -> 82초/0실패로 단축, lean_check.py xdist 안정화 기능은 다른 프로젝트에도 재사용 가능. RELEVANT_EXECUTION_DATA_GAP이 신규 Research-GO 차단 사유로 관측되어 별도 조사 필요 항목으로 남음."
-    },
-    {
-      "task_id": "ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES",
-      "date": "2026-08-20",
-      "adr_id": "ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES",
-      "domain": "mhs",
-      "title": "MHS 위원회 축 재구성(risk_premia_v2) 실측 및 fold 커버리지 확장",
-      "why": "committee growth solver(등록 리스크예산: MDD<=25%, ruin<=1%, 3y horizon)가 이미 노출 1.00x를 선택(1.25x는 전 학습구간 infeasible) -- 노출 레버가 소진되어 남은 유일한 성장 지렛대는 Sharpe. 1h 프록시 실측 결과 위원회 5명 중 3명(flow_imb_720h, xs_mom_336h, xs_idio_mom_336h)이 5년 Sharpe<=0.1인 반면, xs_mom_336h는 rank_weight_book이 mom_336h와 rank 완전 동일(행평균 차감이 rank 불변)해 사실상 중복. 위원회 밖의 lowvol_168h(Sharpe 1.68)/rev_24h(Sharpe 0.67)는 5년 전부 양수. 2022(베어장) fold가 3-fold 세트에 부재해 leak-free 증거가 편중.",
-      "resolution": "src/mhs/params.py에 MHS_COMMITTEE_MEMBER_SETS(flow_momentum_v1/risk_premia_v2) 및 _resolved_committee_members 단일 해석 seam(research_go.py) 도입, MhsDiagnosticRequest.committee_member_set 필드 + CLI --committee-member-set 배선(fold/top-level 양쪽 경로 공유, I4). src/mhs/committee.py에 growth_budget_annual_vol(등록 성장 솔버를 use_drawdown_overlay=False로 소비 -- overlay 활성 시 모든 grid point가 허위로 feasible 판정되는 결함 회피) 및 scaling.py에 _growth_budget_target_vol/pnl_vol_target_mode='growth_budget' 추가(leak-free, OOS 이전 학습구간만 사용). src/mhs/evaluation.py의 phase_1_anchored_purged_folds()에 2022 fold를 선두 추가(3->4개, 반환타입을 가변 tuple로 확장). 실제 3m 전체기간(2021-2025) 리플레이로 M1(flow_momentum_v1+4fold)과 M2(risk_premia_v2+4fold) 두 가설을 검증: M1은 blend 지표가 원 3-fold 베이스라인과 바이트 동일(CAGR 0.560/Sharpe 2.232/MDD -17.6%, I5 확인)이나 신규 2022 fold에서 RELEVANT_EXECUTION_DATA_GAP 발생(3m 데이터가 94/446 심볼만 2022-01-08 이전 커버 -- 축 변경과 무관한 별도 결함). M2는 사전 등록한 채택임계값(CAGR>=0.560, Sharpe>=2.232, MDD>-25%, data_integrity_reason_codes=[])을 전부 미달: CAGR 0.441, Sharpe 1.846, MDD -31.4%(등록 25% 예산 초과로 PRIMARY_MAX_DRAWDOWN_OVER_BUDGET 신규 발동), 2개 fold가 STRESS_SHARPE_NOT_POSITIVE로 전환 -- 1h 프록시가 예측한 방향과 정반대의 실측 결과. 스펙의 명시적 롤백 규칙에 따라 MHS_COMMITTEE_DEFAULT_MEMBER_SET을 flow_momentum_v1으로 유지(risk_premia_v2는 opt-in 비-기본값으로만 존재), 관련 프로덕션 기본값 테스트 3건 및 CLI help 텍스트 갱신, docs/results/mhs_refactor_baseline.json 골든 픽스처를 4-fold 반영으로 재생성(committee_capital=False 경로라 축 선택과 무관, blend/books 수치 전부 바이트 동일 확인 후 fold 배열만 갱신).",
-      "impact": "기본 프로덕션 경로는 CAGR/Sharpe/MDD 불변(committee_member_set 기본값 회귀 없음); risk_premia_v2는 opt-in으로 남아 향후 실행 마찰 완화(비용/스무딩/포지션 히스테리시스 재조정) 연구에 재사용 가능. fold 커버리지 확장(3->4)은 채택되어 2022 베어장의 leak-free 증거를 프로덕션에 추가했으나, 부수효과로 RELEVANT_EXECUTION_DATA_GAP이 research_go.reason_codes에 신규 등재(기존엔 FOLD_GROWTH_CONCENTRATION 단독)되어 research_go.eligible은 여전히 False. fold_growth_concentration.max_fold_share는 4-fold 분모 확장으로 0.649->0.571로 기계적 개선(스펙에 집중도 해결책이 아님을 명시). 후속 과제: (1) 2022 3m 실행 데이터 갭 근본원인 규명(데이터 백필 또는 fold0 실행타임프레임 완화), (2) risk_premia_v2가 왜 1h 프록시와 반대로 실측 악화됐는지(체결마찰/스무딩 상호작용 추정) 조사 -- ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT와 동일 패턴(fold 단위 프록시 개선이 연속 리플레이 악화로 반전)."
     }
   ]
 }
