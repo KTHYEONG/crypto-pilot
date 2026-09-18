@@ -523,5 +523,8 @@
   "src/mhs/process_backtest.py": {
     "architecture": "docs/architecture/data-flow.md",
     "testing": "tests/unit/mhs/test_process_backtest.py"
+  },
+  "src/application/mhs_backtest.py": {
+    "testing": "tests/unit/application/test_mhs_backtest.py"
   }
 }

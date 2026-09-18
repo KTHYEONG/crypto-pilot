@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_3M_SOURCE_OWNED_BACKTEST",
+      "date": "2026-09-18",
+      "adr_id": "ADR_20260918_MHS_3M_SOURCE_OWNED_BACKTEST",
+      "domain": "execution",
+      "title": "MHS 소스 소유 3분봉 백테스트와 RAM 계약",
+      "why": "3분봉 인벤토리 백테스트가 tools 감독기와 분산된 RAM 가드 때문에 기본 실행 경로와 실패 원인을 명확히 설명하지 못했다.",
+      "resolution": "3분봉 인벤토리 실행을 src application과 canonical CLI로 연결하고 단일 tree PSS·headroom·swap 계약을 준비·재생·감독 전반에 전달했다.",
+      "impact": "기본 backtest mhs 명령이 3분봉 증거를 생성하며 성공·실패·자원 거부와 메모리 측정값을 분리해 재현 가능하게 기록한다.",
+      "caveat": "전체 기간 완주와 새 메모리 예산은 실제 원천 데이터의 fresh-process 실행으로 별도 확인해야 하며 라이브 전략과 과거 연구 코드는 후속 단계에서 분리한다."
+    },
+    {
       "task_id": "MHS_3M_COMPLETION_MEMORY_REPLAY",
       "date": "2026-09-18",
       "adr_id": "ADR_20260918_MHS_3M_COMPLETION_MEMORY_REPLAY",
@@ -997,16 +1008,6 @@
       "why": "committee growth solver(등록 리스크예산: MDD<=25%, ruin<=1%, 3y horizon)가 이미 노출 1.00x를 선택(1.25x는 전 학습구간 infeasible) -- 노출 레버가 소진되어 남은 유일한 성장 지렛대는 Sharpe. 1h 프록시 실측 결과 위원회 5명 중 3명(flow_imb_720h, xs_mom_336h, xs_idio_mom_336h)이 5년 Sharpe<=0.1인 반면, xs_mom_336h는 rank_weight_book이 mom_336h와 rank 완전 동일(행평균 차감이 rank 불변)해 사실상 중복. 위원회 밖의 lowvol_168h(Sharpe 1.68)/rev_24h(Sharpe 0.67)는 5년 전부 양수. 2022(베어장) fold가 3-fold 세트에 부재해 leak-free 증거가 편중.",
       "resolution": "src/mhs/params.py에 MHS_COMMITTEE_MEMBER_SETS(flow_momentum_v1/risk_premia_v2) 및 _resolved_committee_members 단일 해석 seam(research_go.py) 도입, MhsDiagnosticRequest.committee_member_set 필드 + CLI --committee-member-set 배선(fold/top-level 양쪽 경로 공유, I4). src/mhs/committee.py에 growth_budget_annual_vol(등록 성장 솔버를 use_drawdown_overlay=False로 소비 -- overlay 활성 시 모든 grid point가 허위로 feasible 판정되는 결함 회피) 및 scaling.py에 _growth_budget_target_vol/pnl_vol_target_mode='growth_budget' 추가(leak-free, OOS 이전 학습구간만 사용). src/mhs/evaluation.py의 phase_1_anchored_purged_folds()에 2022 fold를 선두 추가(3->4개, 반환타입을 가변 tuple로 확장). 실제 3m 전체기간(2021-2025) 리플레이로 M1(flow_momentum_v1+4fold)과 M2(risk_premia_v2+4fold) 두 가설을 검증: M1은 blend 지표가 원 3-fold 베이스라인과 바이트 동일(CAGR 0.560/Sharpe 2.232/MDD -17.6%, I5 확인)이나 신규 2022 fold에서 RELEVANT_EXECUTION_DATA_GAP 발생(3m 데이터가 94/446 심볼만 2022-01-08 이전 커버 -- 축 변경과 무관한 별도 결함). M2는 사전 등록한 채택임계값(CAGR>=0.560, Sharpe>=2.232, MDD>-25%, data_integrity_reason_codes=[])을 전부 미달: CAGR 0.441, Sharpe 1.846, MDD -31.4%(등록 25% 예산 초과로 PRIMARY_MAX_DRAWDOWN_OVER_BUDGET 신규 발동), 2개 fold가 STRESS_SHARPE_NOT_POSITIVE로 전환 -- 1h 프록시가 예측한 방향과 정반대의 실측 결과. 스펙의 명시적 롤백 규칙에 따라 MHS_COMMITTEE_DEFAULT_MEMBER_SET을 flow_momentum_v1으로 유지(risk_premia_v2는 opt-in 비-기본값으로만 존재), 관련 프로덕션 기본값 테스트 3건 및 CLI help 텍스트 갱신, docs/results/mhs_refactor_baseline.json 골든 픽스처를 4-fold 반영으로 재생성(committee_capital=False 경로라 축 선택과 무관, blend/books 수치 전부 바이트 동일 확인 후 fold 배열만 갱신).",
       "impact": "기본 프로덕션 경로는 CAGR/Sharpe/MDD 불변(committee_member_set 기본값 회귀 없음); risk_premia_v2는 opt-in으로 남아 향후 실행 마찰 완화(비용/스무딩/포지션 히스테리시스 재조정) 연구에 재사용 가능. fold 커버리지 확장(3->4)은 채택되어 2022 베어장의 leak-free 증거를 프로덕션에 추가했으나, 부수효과로 RELEVANT_EXECUTION_DATA_GAP이 research_go.reason_codes에 신규 등재(기존엔 FOLD_GROWTH_CONCENTRATION 단독)되어 research_go.eligible은 여전히 False. fold_growth_concentration.max_fold_share는 4-fold 분모 확장으로 0.649->0.571로 기계적 개선(스펙에 집중도 해결책이 아님을 명시). 후속 과제: (1) 2022 3m 실행 데이터 갭 근본원인 규명(데이터 백필 또는 fold0 실행타임프레임 완화), (2) risk_premia_v2가 왜 1h 프록시와 반대로 실측 악화됐는지(체결마찰/스무딩 상호작용 추정) 조사 -- ADR_20260817_MHS_TREND_SLEEVE_NEGATIVE_RESULT와 동일 패턴(fold 단위 프록시 개선이 연속 리플레이 악화로 반전)."
-    },
-    {
-      "task_id": "mhs_structural_refactor_phase1_4",
-      "date": "2026-08-20",
-      "adr_id": "ADR_20260820_mhs_structural_refactor_phase1_4",
-      "domain": "architecture",
-      "title": "MHS 오케스트레이터 구조 리팩토링 (Phase 1-4) 및 회귀 수정",
-      "why": "src/application/research/mhs/evaluation.py 6364줄 단일 모듈과 MHS_* 상수 73개가 2개 모듈에 분산되어 AI 작업 토큰 효율과 유지보수성 저하; 옵션 1개 추가 시 상수/필드/검증/CLI 플래그/매핑 5곳 동시 수정 필요. 착수 전 베이스라인이 RED(29건 실패)여서 fill_mark_parity_gate 회귀와 무관한 잔여 결함 4건을 먼저 진단·수정함.",
-      "resolution": "죽은 코드(src/research/sleeve_blend/ 등 564줄) 제거, MHS_* 상수를 src/mhs/params.py로 단일화, MhsDiagnosticRequest를 cli_param 메타데이터 기반 선언적 검증/CLI 생성(src/cli/dataclass_args.py, validation.py)으로 전환, evaluation.py를 13개 모듈(contracts/marks/scaling/statistics/diagnostics/windows/books/folds/research_go/resources/validation 등)로 순수 이동 분해하고 공개 API만 재수출하는 파사드로 축소. 병행하여 테스트 fixture의 비결합 가격 생성, fill_mark_parity 정책 문구 노후화, 모듈 스코프 fixture 누수(TestPitExecutionGrid), mypy strict 위반(marks.py 미정의 전역, validation.py object 타입), 테스트 import 경로 노후화 5건을 수정. 652종목 실데이터 재실행으로 리팩토링 전후 계산 필드 완전 동일(log_run 제외) 확인.",
-      "impact": "src 76→87 파일, 최대 파일 6364→약 700줄 이하로 분해. MHS_* 상수 중복 선언 6종 및 파라미터 3중 선언 문제 해소. ruff/mypy strict/pytest 전량 GREEN. TestMhsRefactorBitIdenticalReport 골든 테스트 및 실데이터 검증 모두 비트 동일 확인."
     }
   ]
 }
