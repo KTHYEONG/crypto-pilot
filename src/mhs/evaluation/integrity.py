@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
-
 import numpy as np
 import pandas as pd
 
@@ -14,126 +11,19 @@ from src.mhs.research_go import (
     GO_REASON_RESOURCE_BREACH,
 )
 from src.common.errors import DataIntegrityError
-from src.mhs.execution import ExecutionDataGap, StrategyExecutionReplayResult, laddered_fill_schedule
+from src.mhs.execution import StrategyExecutionReplayResult, laddered_fill_schedule
 from src.mhs.types import ExecutionSpec
 
-# 2026-09-15 mhs_symbol_lifespan_pit_roster: the other 50 previously-listed symbols
-# (end-of-life: funding permanently ends before backtest end with zero internal gaps,
-# exchangeInfo status=SETTLING) are now handled dynamically by `ledger_terminal_only`
-# at finalize time instead of blanket exclusion.
-#
-# 2026-09-15 후속 재수집 스윕: 이전 Block1(OHLCV 캐시 없음/미미) 21개 심볼을
-# ensure_ohlcv_data로 재수집한 결과 전부 복구됨(수집 누락이었음, 소스 공백 아님).
-# 19개(ALPHAUSDT/BADGERUSDT/BSWUSDT/FLMUSDT/FTTUSDT/IDEXUSDT/KLAYUSDT/MKRUSDT/
-# NULSUSDT/OBOLUSDT/OCEANUSDT/OMGUSDT/SLERFUSDT/STRAXUSDT/TROYUSDT/UNFIUSDT/
-# VIDTUSDT/WAVESUSDT/XEMUSDT)는 backtest 구간 내부공백 0건으로 완전히 배제 해제됨
-# (말기 종료는 ledger_terminal_only가 처리). CVXUSDT/SLPUSDT는 재수집 후에도
-# 2025-06-19~2025-07-23(34일) 펀딩 공백이 재개되는 진짜 불확실성 구간이 드러나
-# Block3(MID_LIFE_GAP)로 재분류.
-#
-# 2026-09-15 mhs_time_scoped_roster_mask: MISSING_ACTIVE_FUNDING(신규 진입 시도
-# 차단, 보유 리스크 없음)을 KNOWN_ZERO_VOLUME과 동일하게 무조건 미체결 처리하고,
-# ledger_terminal_only가 MISSING_HELD_MARK도 MISSING_HELD_FUNDING과 동일 규칙으로
-# 인증하도록 확장한 뒤 실측 리플레이로 재검증 중 -- ICPUSDT(조기시작)는 이 확장만
-# 으로 안전하게 해소되어 제외.
-SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
-    # Block2: 펀딩 정상, 단일 영구 OHLCV 공백 8-17h, REST 확인으로 복구 불가.
-    # 실측 검증 대상(MISSING_HELD_MARK 확장으로 해소되는지 리플레이로 확인 중).
-    "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT",
-    # Block3: 백테스트 중간에 펀딩 공백이 발생했다가 재개되는 진짜 불확실성 구간, 제외 유지
-    "LITUSDT", "PUMPUSDT", "CVXUSDT", "SLPUSDT",
-    # Block4: BNXUSDT는 조기시작 외에도 자체 영구 OHLCV 공백을 보유, 실측 검증 대상
-    "BNXUSDT",
-})
+from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS as SOURCE_GAP_EXCLUDED_SYMBOLS
+from src.mhs.execution.integrity import (
+    _funding_gap_terminal_symbols as _funding_gap_terminal_symbols,
+)
+from src.mhs.execution.integrity import ledger_terminal_only as ledger_terminal_only
+from src.mhs.execution.integrity import replay_ledger_certified as replay_ledger_certified
 
 
 
 
-#: Held-position gap codes eligible for the "later fill proves recovery"
-#: terminal-equivalence check. MISSING_HELD_FUNDING and MISSING_HELD_MARK
-#: share the same economics: valuation/funding during the gap never fabricates
-#: a number (carried at the last known value / zero-charged), so the gap is a
-#: bounded, disclosed limitation rather than a P&L-fabrication risk.
-_RECOVERABLE_HELD_GAP_CODES = frozenset({"MISSING_HELD_FUNDING", "MISSING_HELD_MARK"})
-
-
-def _funding_gap_terminal_symbols(
-    data_gaps: Sequence[ExecutionDataGap],
-    simulated_fills: pd.DataFrame,
-) -> frozenset[str]:
-    """Post-hoc classification of terminal held-position gaps.
-
-    This is a finalize-time classification only and is never fed back into any
-    trading decision (INV-PIT-RESUME-CAUSAL). A later fill for the same symbol
-    proves the position resumed normal trading, so that symbol's gap is NOT
-    terminal-equivalent. A ``delist_settlement`` fill (the causal idle-holdings
-    settlement, ``_settle_idle_holdings``) is excluded from that "later fill"
-    evidence: it is itself the terminal disclosure closing out a position that
-    could never resume normal trading, not proof that trading recovered.
-    """
-    missing_last: dict[str, pd.Timestamp] = {}
-    for g in data_gaps:
-        if g.code in _RECOVERABLE_HELD_GAP_CODES:
-            prev = missing_last.get(g.symbol)
-            if prev is None or g.timestamp > prev:
-                missing_last[g.symbol] = g.timestamp
-    if not missing_last:
-        return frozenset()
-    if "reason" in simulated_fills.columns:
-        resumable_fills = simulated_fills[simulated_fills["reason"] != "delist_settlement"]
-    else:
-        resumable_fills = simulated_fills
-    fill_symbols = resumable_fills["symbol"] if "symbol" in resumable_fills.columns else pd.Series(dtype="object")
-    fill_ts = pd.to_datetime(resumable_fills["timestamp"], utc=True) if "timestamp" in resumable_fills.columns else pd.Series(dtype="datetime64[ns, UTC]")
-    terminal: set[str] = set()
-    for sym, last_ts in missing_last.items():
-        if not bool(((fill_symbols == sym) & (fill_ts > last_ts)).any()):
-            terminal.add(sym)
-    return frozenset(terminal)
-
-
-def ledger_terminal_only(
-    data_gaps: Sequence[ExecutionDataGap],
-    simulated_fills: pd.DataFrame,
-) -> bool:
-    """Certify a ledger whose gaps are all disclosed terminal inventory.
-
-    Generalizes the existing UNKNOWN_TERMINATION-only exception to also accept
-    a MISSING_HELD_FUNDING or MISSING_HELD_MARK episode that never recovers
-    before the replay's own grid end -- symmetric with the pre-existing 'held
-    to backtest end is disclosed evidence, not a crash' precedent; no
-    fabricated settlement, no change to funding/mark accounting
-    (INV-NO-FABRICATED-SETTLEMENT).
-    """
-    if not data_gaps:
-        return False
-    terminal_funding_symbols = _funding_gap_terminal_symbols(data_gaps, simulated_fills)
-    return all(
-        g.code == "UNKNOWN_TERMINATION"
-        or (g.code in _RECOVERABLE_HELD_GAP_CODES and g.symbol in terminal_funding_symbols)
-        for g in data_gaps
-    )
-
-
-def replay_ledger_certified(replay: Any) -> bool:
-    """Single certification point for a replay's execution ledger.
-
-    Returns True when the ledger was already marked ``primary_valid``;
-    otherwise delegates unchanged to :func:`ledger_terminal_only`. Fails
-    closed to False when the replay carries no ledger, no data gaps, or no
-    fills. This is the only place the terminal-inventory exception is
-    expressed; all consumers must call it instead of re-implementing the
-    ``primary_valid or ledger_terminal_only(...)`` pair inline.
-    """
-    ledger = getattr(replay, "ledger", None)
-    if getattr(ledger, "primary_valid", None) is True:
-        return True
-    # 실행층 판정이 없는 결측 증거는 인증하지 않고 닫는다(fail-closed).
-    gaps = getattr(ledger, "data_gaps", None)
-    fills = getattr(replay, "simulated_fills", None)
-    if gaps is None or fills is None:
-        return False
-    return bool(ledger_terminal_only(gaps, fills))
 
 
 def _assert_cache_required_ledger_valid(

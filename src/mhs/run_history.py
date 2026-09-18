@@ -18,17 +18,24 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import math
+import sqlite3
 import time
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
 from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1, SEARCH_TRIALS_ATTEMPTED
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
+
+logger = logging.getLogger("MhsRunHistory")
+
+_REGISTRY_NAMESPACE = "mhs_legacy_horizon"
+_LIVE_SOURCE_ID = "live"
 
 RUN_HISTORY_SHARD_MAX_BYTES: int = 262144
 RUN_HISTORY_MAX_SHARDS: int = 12
@@ -103,32 +110,100 @@ def _prune_archives(history_dir: Path) -> None:
         stale.unlink()
 
 
-def append_run_history_record(record: Mapping[str, Any], history_dir: Path) -> Path:
-    """Append one run record to the ledger, rotating/pruning as needed.
+def canonical_history_registry() -> Path:
+    """Return the sole persistent registry for MHS trial-history provenance.
 
-    Returns the active shard path. Rotation and pruning happen only when the
-    append would push the active shard past the byte budget, so the steady
-    state is a single small append with no directory scan per run. Valid trial
-    records additionally upsert their identity key into ``trials_ledger.json``
-    (first-seen wins); that file is never a pruning target, keeping the trial
-    denominator monotone across archive rotation. A ledger failure is
-    observational and never breaks the append itself.
+    Returns:
+        The backtest registry path used for trial denominators and window outcomes.
     """
-    history_dir.mkdir(parents=True, exist_ok=True)
-    active = history_dir / _ACTIVE_FILE_NAME
-    line = _serialize_record(record) + "\n"
+    from src.common.paths import BACKTESTS_DIR
 
-    if active.exists() and active.stat().st_size + len(line.encode("utf-8")) > RUN_HISTORY_SHARD_MAX_BYTES:
-        active.rename(_unique_archive_path(history_dir))
-        _prune_archives(history_dir)
+    return BACKTESTS_DIR / "registry.sqlite3"
 
-    with active.open("a", encoding="utf-8") as fh:
-        fh.write(line)
 
-    latest = history_dir / _LATEST_FILE_NAME
-    latest.write_text(line, encoding="utf-8")
-    _upsert_trials_ledger(record, history_dir)
-    return active
+def _is_canonical_history_request(history_dir: Path | str | None) -> bool:
+    if history_dir is None:
+        return True
+    if str(history_dir).endswith("docs/results/mhs_run_history"):
+        return True
+    return _resolve_history_registry(history_dir) == canonical_history_registry()
+
+
+def _resolve_history_registry(history_dir: Path | str | None) -> Path:
+    """Map a compatibility history location to its unified registry file."""
+    if history_dir is None:
+        return canonical_history_registry()
+    text = str(history_dir)
+    if text.endswith("docs/results/mhs_run_history"):
+        return canonical_history_registry()
+    return Path(text) / "registry.sqlite3"
+
+
+def _load_registry_state(registry: Path) -> tuple[list[dict[str, Any]], dict[str, str]] | None:
+    """Read registry history rows and trial ledger; None when no imported evidence."""
+    if not registry.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(str(registry), timeout=5.0)
+        try:
+            rows = conn.execute(
+                "SELECT record_json FROM history_records WHERE namespace = ? ORDER BY source_id, ordinal",
+                (_REGISTRY_NAMESPACE,),
+            ).fetchall()
+            ledger_rows = conn.execute(
+                "SELECT identity_key, first_seen FROM trials WHERE namespace = ?",
+                (_REGISTRY_NAMESPACE,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return None
+    if not rows and not ledger_rows:
+        return None
+    records: list[dict[str, Any]] = []
+    for (payload,) in rows:
+        try:
+            parsed = json.loads(str(payload))
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    ledger = {str(key): str(seen) for key, seen in ledger_rows}
+    return records, ledger
+
+
+def append_run_history_record(record: Mapping[str, Any], history_dir: Path | str | None) -> Path:
+    """Persist one legacy-horizon summary into the unified transactional registry. Args: raw history record and compatibility history location. Returns: the registry file path. Raises: sqlite3.Error or OSError if durable persistence fails."""
+    from src.backtests.registry import initialize_registry
+
+    registry = _resolve_history_registry(history_dir)
+    initialize_registry(registry)
+    payload = json.dumps(dict(record), ensure_ascii=False, sort_keys=True)
+    admitted = is_trial_record(record)
+    identity = trial_identity_key(record) if admitted else None
+    first_seen = record.get("run_at") if isinstance(record.get("run_at"), str) else datetime.now(UTC).isoformat()
+    conn = sqlite3.connect(str(registry), timeout=5.0, isolation_level="DEFERRED")
+    try:
+        with conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(ordinal), -1) FROM history_records WHERE source_id = ?",
+                (_LIVE_SOURCE_ID,),
+            ).fetchone()
+            ordinal = int(row[0]) + 1
+            conn.execute(
+                "INSERT INTO history_records (source_id, ordinal, namespace, record_json, admitted, identity_key)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (_LIVE_SOURCE_ID, ordinal, _REGISTRY_NAMESPACE, payload, 1 if admitted else 0, identity),
+            )
+            if admitted and identity is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO trials (namespace, identity_key, first_seen, provenance_json)"
+                    " VALUES (?, ?, ?, ?)",
+                    (_REGISTRY_NAMESPACE, identity, str(first_seen), payload),
+                )
+    finally:
+        conn.close()
+    return registry
 
 
 # --- trial-set definition (single source for N and V) ------------------------
@@ -327,12 +402,29 @@ def derive_trials_attempted(history_dir: Path | str | None = None) -> tuple[int,
     ``(SEARCH_TRIALS_ATTEMPTED + counted, source)`` where ``source`` is
     ``'constant_plus_ledger'``, ``'constant_plus_history'`` (no usable
     ledger), or ``'constant_fallback'`` when no readable evidence exists at
-    all. O(history_lines).
+    all. O(history_lines). The unified registry preserves imported source provenance and monotone trial identity; source compatibility labels remain unchanged.
     """
+    registry = _resolve_history_registry(history_dir)
+    state = _load_registry_state(registry)
+    if state is not None:
+        records, ledger_map = state
+        seen: set[str] = set()
+        for record in records:
+            if not is_trial_record(record):
+                continue
+            key = trial_identity_key(record)
+            if key is not None:
+                seen.add(key)
+        union = seen | set(ledger_map)
+        if ledger_map:
+            return SEARCH_TRIALS_ATTEMPTED + len(union), "constant_plus_ledger"
+        return SEARCH_TRIALS_ATTEMPTED + len(union), "constant_plus_history"
+    if _is_canonical_history_request(history_dir):
+        return SEARCH_TRIALS_ATTEMPTED, "constant_fallback"
     directory = Path(history_dir) if history_dir is not None else _DEFAULT_HISTORY_DIR
     ledger = _load_trials_ledger(directory)
     try:
-        seen: set[str] = set()
+        seen = set()
         observed_records = 0
         for record in _iter_history_records(directory):
             observed_records += 1
@@ -379,16 +471,38 @@ def window_trial_sharpes(
     evaluation window pools with the sealed window it extends). A re-run of
     one configuration with the same outcome collapses to a single entry;
     distinct outcomes of one configuration stay distinct entries. Returns the
-    outcomes ascending; an unreadable or missing history yields ``()``.
+    outcomes ascending; an unreadable or missing history yields ``()``. The unified registry preserves imported source provenance and monotone trial identity; source compatibility labels remain unchanged.
     """
-    directory = Path(history_dir) if history_dir is not None else _DEFAULT_HISTORY_DIR
+    registry = _resolve_history_registry(history_dir)
+    state = _load_registry_state(registry)
     wanted_start = _parse_utc_timestamp(window[0])
     wanted_end = _parse_utc_timestamp(window[1])
     if wanted_start is None or wanted_end is None:
         return ()
-    try:
+    if state is not None:
+        records, _ = state
         seen_entries: set[tuple[str, float]] = set()
         outcomes: list[float] = []
+        for record in records:
+            if not is_trial_record(record):
+                continue
+            blend = record["blend"]
+            sharpe = float(blend["primary_naive_sharpe"])  # finite: is_trial_record
+            if not _matches_window(record, wanted_start, wanted_end):
+                continue
+            identity = cast(str, trial_identity_key(record))
+            entry = (identity, sharpe)
+            if entry in seen_entries:
+                continue
+            seen_entries.add(entry)
+            outcomes.append(sharpe)
+        return tuple(sorted(outcomes))
+    if _is_canonical_history_request(history_dir):
+        return ()
+    directory = Path(history_dir) if history_dir is not None else _DEFAULT_HISTORY_DIR
+    try:
+        seen_entries = set()
+        outcomes = []
         for record in _iter_history_records(directory):
             if not is_trial_record(record):
                 continue
@@ -421,18 +535,61 @@ def trial_pool_disclosure(
     ``distinct_trial_keys`` and ``pool_window_span_days`` describe the
     tolerance-merged pool actually matched for ``window`` (its end-date
     heterogeneity, in days). Emits no GO reason code and degrades to zeros
-    with ``source='constant_fallback'`` on any unreadable input.
+    with ``source='constant_fallback'`` on any unreadable input. The unified registry preserves imported source provenance and monotone trial identity; source compatibility labels remain unchanged.
     """
-    directory = Path(history_dir) if history_dir is not None else _DEFAULT_HISTORY_DIR
+    registry = _resolve_history_registry(history_dir)
+    state = _load_registry_state(registry)
     wanted_start = _parse_utc_timestamp(window[0])
     wanted_end = _parse_utc_timestamp(window[1])
     if wanted_start is None or wanted_end is None:
         return {**_EMPTY_DISCLOSURE}
-    ledger = _load_trials_ledger(directory)
-    disclosure: dict[str, Any] = {**_EMPTY_DISCLOSURE}
-    try:
+    if state is not None:
+        records, ledger_map = state
+        disclosure: dict[str, Any] = {**_EMPTY_DISCLOSURE}
         matched_keys: set[str] = set()
         matched_ends: list[pd.Timestamp] = []
+        for record in records:
+            disclosure["n_history_records"] += 1
+            flags = record.get("flags")
+            if isinstance(flags, Mapping):
+                disclosure["neutral_flags_dropped"] += sum(
+                    1 for name in flags if name in RESEARCH_NEUTRAL_FLAGS
+                )
+            if record.get("status") != "COMPLETE":
+                disclosure["excluded_not_complete"] += 1
+                continue
+            if _carries_data_integrity_code(record):
+                disclosure["excluded_data_integrity"] += 1
+                continue
+            if not _has_finite_blend_sharpe(record):
+                disclosure["excluded_nonfinite_blend"] += 1
+                continue
+            if _matches_window(record, wanted_start, wanted_end):
+                resolved_end = _parse_utc_timestamp(record.get("resolved_end"))
+                if resolved_end is not None:
+                    matched_ends.append(resolved_end)
+                key = trial_identity_key(record)
+                if key is not None:
+                    matched_keys.add(key)
+            disclosure["n_trial_records"] += 1
+        disclosure["distinct_trial_keys"] = len(matched_keys)
+        if len(matched_ends) >= 2:
+            span_seconds = (max(matched_ends) - min(matched_ends)).total_seconds()
+            disclosure["pool_window_span_days"] = float(span_seconds / 86400.0)
+        disclosure["ledger_size"] = len(ledger_map)
+        if ledger_map:
+            disclosure["source"] = "constant_plus_ledger"
+        elif disclosure["n_history_records"] > 0:
+            disclosure["source"] = "constant_plus_history"
+        return disclosure
+    if _is_canonical_history_request(history_dir):
+        return {**_EMPTY_DISCLOSURE}
+    directory = Path(history_dir) if history_dir is not None else _DEFAULT_HISTORY_DIR
+    ledger = _load_trials_ledger(directory)
+    disclosure = {**_EMPTY_DISCLOSURE}
+    try:
+        matched_keys = set()
+        matched_ends = []
         for record in _iter_history_records(directory):
             disclosure["n_history_records"] += 1
             flags = record.get("flags")

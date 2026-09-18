@@ -22,15 +22,15 @@ from src.mhs.data_provenance import (
     validate_forward_execution_observations,
     validate_mhs_input_manifest,
 )
-from src.mhs.evaluation import (
-    FEATURE_NAME,
-    HOLDOUT_CUTOFF,
+from src.mhs.evidence import (
+    holdout_tail_evidence,
+    parameter_oos_split_evidence,
     required_cost_tiers,
+    resolved_anchored_folds,
     synthetic_stress_scenarios,
 )
-from src.mhs.evaluation.integrity import replay_ledger_certified
-from src.mhs.evidence import holdout_tail_evidence, parameter_oos_split_evidence, resolved_anchored_folds
-from src.mhs.params import COMMITTEE_OOS_START
+from src.mhs.execution.integrity import replay_ledger_certified
+from src.mhs.params import COMMITTEE_OOS_START, FEATURE_NAME
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.reliability import (
     build_validation_track_disclosure,
@@ -39,6 +39,7 @@ from src.mhs.reliability import (
 )
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.telemetry import StageTelemetry
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 
 def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHorizonDiagnosticReport:

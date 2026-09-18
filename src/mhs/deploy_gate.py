@@ -324,7 +324,7 @@ def integrity_reasons_from_report(report: Any, request: Any) -> tuple[str, ...]:
     """
     # 지연 임포트: mhs.evaluation 패키지 초기화가 report.persist -> deploy_gate로
     # 되돌아 들어오는 순환을 모듈 최상단에서 피한다(INV-SINGLE-CERTIFICATION).
-    from src.mhs.evaluation.integrity import replay_ledger_certified
+    from src.mhs.execution.integrity import replay_ledger_certified
 
     codes: list[str] = []
     if getattr(report, "status", None) != "COMPLETE":

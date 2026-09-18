@@ -116,7 +116,7 @@ def test_cli_emit_deployment_passes_request_to_eligibility_gate(monkeypatch, tmp
     import pytest
 
     import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.evaluation as mhs_evaluation
+    import src.mhs.report.persist as mhs_persist
     import src.mhs.live_strategy as live_strategy
     import src.mhs.pipeline.orchestrator as orchestrator
 
@@ -127,7 +127,7 @@ def test_cli_emit_deployment_passes_request_to_eligibility_gate(monkeypatch, tmp
 
     report = types.SimpleNamespace(status="COMPLETE", books={}, blend=None)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda *_a, **_k: report)
-    monkeypatch.setattr(mhs_evaluation, "persist_mhs_horizon_diagnostic_report", lambda *_a, **_k: tmp_path / "r.json")
+    monkeypatch.setattr(mhs_persist, "persist_mhs_horizon_diagnostic_report", lambda *_a, **_k: tmp_path / "r.json")
 
     captured: dict[str, object] = {}
 
@@ -143,37 +143,3 @@ def test_cli_emit_deployment_passes_request_to_eligibility_gate(monkeypatch, tmp
         mhs_cli._run_mhs_horizon_diagnostic(args)
     assert captured["report"] is report
     assert getattr(captured["request"], "execution_timeframe", None) == "3m"
-
-
-def test_research_portfolio_mhs_process_backtest_parses_and_dispatches(monkeypatch, tmp_path) -> None:
-    from src.cli.main import build_root_parser
-
-    args = build_root_parser().parse_args(
-        ["research", "run", "portfolio", "mhs-process-backtest", "--end", "2026-06-30"],
-    )
-    assert args.portfolio_command == "mhs-process-backtest"
-    assert callable(args.handler)
-
-    captured: dict = {}
-
-    class _Report:
-        certification_level = "process_proxy_1h_ledger"
-        gate = type("G", (), {"go": False, "reason_codes": (), "metrics": {}})()
-
-    def _fake_evaluate(start, end, data_root=None):
-        captured.update(start=start, end=end, data_root=data_root)
-        return _Report()
-
-    persisted: list = []
-
-    def _fake_persist(report):
-        persisted.append(report)
-        return str(tmp_path / "report.json")
-
-    monkeypatch.setattr("src.mhs.process_backtest.evaluate_process_backtest", _fake_evaluate)
-    monkeypatch.setattr("src.mhs.process_backtest.persist_process_report", _fake_persist)
-    args.handler(args)
-    import pandas as pd
-
-    assert captured["end"] == pd.Timestamp("2026-06-30", tz="UTC")
-    assert persisted == [_Report()] or len(persisted) == 1

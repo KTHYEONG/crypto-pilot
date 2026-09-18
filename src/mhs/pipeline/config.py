@@ -14,22 +14,12 @@ from enum import StrEnum
 from typing import Literal
 
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-from src.mhs.params import COMMITTEE_TARGET_GROSS, COMMITTEE_TRANCHE_COUNT
-
-# Main-logic default as of 2026-08-23: selected per ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING
-# (pre-registered acceptance, treatment B). The budgeted twin rung keeps the identical
-# leverage_ceiling=3.0 -- hence the identical resolved exposure cap and
-# deployed exposure -- while its max_drawdown=0.60 sits at the registered
-# budget ceiling, making the drawdown risk contract binding instead of
-# permanently DRAWDOWN_BUDGET_NON_BINDING. Deliberately decoupled from
-# ``src.mhs.params.GROWTH_ENVELOPE_DEFAULT`` ("conservative"), which stays the
-# frozen default for ``MhsDiagnosticRequest`` and the golden fixture matrix --
-# neither is touched by this change.
-CLI_GROWTH_ENVELOPE_DEFAULT = "growth_extreme_budgeted"
-
-# Single owner of the CLI effective breadth default; the contract object
-# (MhsDiagnosticRequest) keeps its frozen 30 for bit-exact fixtures.
-CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT = 60
+from src.mhs.params import (
+    CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
+    CLI_GROWTH_ENVELOPE_DEFAULT,
+    COMMITTEE_TARGET_GROSS,
+    COMMITTEE_TRANCHE_COUNT,
+)
 
 
 class MemberSet(StrEnum):

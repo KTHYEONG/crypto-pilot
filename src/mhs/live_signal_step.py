@@ -18,6 +18,7 @@ from pydantic import SecretStr
 import src.mhs.scaling as _scaling
 from src.common.errors import DataIntegrityError
 from src.live.portfolio_state import default_portfolio_state_dir
+from src.mhs.evaluation.fold_weights import _build_fold_target_weights
 from src.mhs.live_runtime import LiveRuntime
 from src.mhs.live_strategy import LiveStrategyParams
 from src.mhs.panel import PanelQuarantine
@@ -29,13 +30,6 @@ PANEL_HISTORY_REFERENCE_SYMBOL: str = "BTCUSDT"
 QUARANTINE_SIDECAR_NAME: str = "signal_quarantine.json"
 REALIZED_RETURN_STEP: pd.Timedelta = pd.Timedelta(days=1)
 LIVE_WARMUP_GAP_WARN_DAYS: int = 7
-
-try:
-    from src.mhs.evaluation import _build_fold_target_weights  # noqa: F401
-except Exception:  # noqa: BLE001,S110
-
-    def _build_fold_target_weights(*_a: Any, **_k: Any) -> Any:  # type: ignore[misc]
-        raise DataIntegrityError("missing _build_fold_target_weights")
 
 
 def _signal_quarantine(runtime: LiveRuntime) -> PanelQuarantine:

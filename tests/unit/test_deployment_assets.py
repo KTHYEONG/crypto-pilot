@@ -55,7 +55,7 @@ COVERED_SCENARIOS: tuple[str, ...] = (
 def test_deploy_workflow_waits_for_daemon_idle_gate_before_recreate() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
 
-    gate = workflow.index("python3 tools/devops/daemon_idle_gate.py")
+    gate = workflow.index("python3 -m src.application.ops.daemon_idle_gate")
     recreate = workflow.index("up -d --force-recreate")
     assert gate < recreate
     assert "cat ~/crypto-pilot/data/state/live_daemon_heartbeat.json" in workflow
@@ -135,5 +135,140 @@ def test_deploy_workflow_builds_native_arm64_and_tags_commit_sha() -> None:
     assert "setup-qemu-action" not in workflow
     assert "sha-${{ github.sha }}" in workflow
     assert "${{ env.IMAGE }}:latest" in workflow
-    assert "python3 tools/devops/daemon_idle_gate.py" in workflow
+    assert "python3 -m src.application.ops.daemon_idle_gate" in workflow
+
+
+def test_gate_waits_on_fresh_busy_heartbeat() -> None:
+    from datetime import datetime
+
+    from src.application.ops.daemon_idle_gate import BUSY_STAGES, decide_deploy
+
+    assert frozenset({"refresh", "signal", "execute"}) == BUSY_STAGES
+    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
+    heartbeat = {"stage": "signal", "status": "RUNNING", "ts": "2026-09-15T01:29:00+00:00"}
+    decision = decide_deploy(heartbeat, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
+    assert decision.action == "wait"
+    assert decision.reason == "busy:signal"
+
+
+def test_gate_proceeds_on_idle_heartbeat() -> None:
+    from datetime import datetime
+
+    from src.application.ops.daemon_idle_gate import decide_deploy, main
+
+    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
+    decision = decide_deploy(
+        {"stage": "idle", "ts": "2026-09-15T01:29:00+00:00"},
+        now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0,
+    )
+    assert (decision.action, decision.reason) == ("proceed", "idle")
+    import json
+    import tempfile
+    from pathlib import Path as _Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        hb = _Path(tmp) / "hb.json"
+        hb.write_text(json.dumps({"stage": "idle", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
+        assert main(["--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"]) == 0
+
+
+def test_gate_preserves_strict_stale_boundary() -> None:
+    from datetime import datetime
+
+    from src.application.ops.daemon_idle_gate import decide_deploy
+
+    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
+    at_threshold = {"stage": "execute", "ts": "2026-09-15T00:45:00+00:00"}
+    over_threshold = {"stage": "execute", "ts": "2026-09-15T00:44:59+00:00"}
+    at_decision = decide_deploy(at_threshold, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
+    assert at_decision.action == "wait"
+    over_decision = decide_deploy(over_threshold, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
+    assert over_decision.action == "proceed_stale"
+    assert over_decision.reason.startswith("stale:execute age_s=")
+
+
+def test_gate_proceeds_on_wait_timeout() -> None:
+    from datetime import datetime
+
+    from src.application.ops.daemon_idle_gate import decide_deploy, main
+
+    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
+    heartbeat = {"stage": "signal", "status": "RUNNING", "ts": "2026-09-15T01:29:30+00:00"}
+    decision = decide_deploy(heartbeat, now=now, waited_s=3600.0, max_wait_s=3600.0, stale_after_s=2700.0)
+    assert decision.action == "proceed_timeout"
+    assert decision.reason == "max_wait:signal waited_s=3600"
+    import json
+    import tempfile
+    from pathlib import Path as _Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        hb = _Path(tmp) / "hb.json"
+        hb.write_text(json.dumps(heartbeat), encoding="utf-8")
+        assert main(["--heartbeat-file", str(hb), "--waited-s", "3600", "--now", "2026-09-15T01:30:00+00:00"]) == 0
+
+
+def test_gate_keeps_malformed_heartbeat_behavior(tmp_path, capsys) -> None:
+    import json
+
+    from src.application.ops.daemon_idle_gate import decide_deploy, main
+
+    from datetime import datetime
+
+    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
+    for heartbeat in (None, {}, {"stage": "signal"}, {"stage": "signal", "ts": "not-a-time"}):
+        decision = decide_deploy(heartbeat, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
+        assert (decision.action, decision.reason) == ("proceed", "no_heartbeat")
+    import pytest
+
+    with pytest.raises(ValueError, match="tz-aware"):
+        decide_deploy({"stage": "idle", "ts": "2026-09-15T01:29:00+00:00"}, now=datetime(2026, 9, 15, 1, 30), waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
+    busy = tmp_path / "busy.json"
+    busy.write_text(json.dumps({"stage": "signal", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
+    assert main(["--heartbeat-file", str(busy), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"]) == 10
+    assert capsys.readouterr().out.strip() == "action=wait reason=busy:signal"
+    for raw in ("", "<html>", "[1, 2]"):
+        target = tmp_path / "case.json"
+        target.write_text(raw, encoding="utf-8")
+        assert main(["--heartbeat-file", str(target), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"]) == 0
+        assert capsys.readouterr().out.strip() == "action=proceed reason=no_heartbeat"
+
+
+def test_gate_runs_under_bare_python_and_matches_workflow(tmp_path) -> None:
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert "python3 -m src.application.ops.daemon_idle_gate" in workflow
+    hb = tmp_path / "hb.json"
+    hb.write_text(json.dumps({"stage": "refresh", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - fixed argv: this interpreter + the repo gate module
+        [sys.executable, "-I", "-m", "src.application.ops.daemon_idle_gate", "--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"],
+        capture_output=True, text=True, check=False, cwd=root,
+    )
+    assert result.returncode == 10
+    assert result.stdout.strip() == "action=wait reason=busy:refresh"
+
+
+def test_ops_cli_delegates_daemon_idle_gate(tmp_path, capsys) -> None:
+    import json
+
+    import pytest
+
+    from src.cli.main import build_root_parser
+
+    hb = tmp_path / "hb.json"
+    hb.write_text(json.dumps({"stage": "signal", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
+    parser = build_root_parser()
+    args = parser.parse_args(["ops", "daemon-idle-gate", "--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"])
+    with pytest.raises(SystemExit) as exc:
+        args.handler(args)
+    assert exc.value.code == 10
+    assert capsys.readouterr().out.strip() == "action=wait reason=busy:signal"
+    idle = tmp_path / "idle.json"
+    idle.write_text(json.dumps({"stage": "idle", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
+    idle_args = parser.parse_args(["ops", "daemon-idle-gate", "--heartbeat-file", str(idle), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"])
+    assert idle_args.handler(idle_args) is None
 

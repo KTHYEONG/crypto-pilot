@@ -11,6 +11,7 @@ import pytest
 
 from src.cli.commands.research.mhs import _run_mhs_horizon_diagnostic, add_mhs_commands
 import src.mhs.pipeline.orchestrator as orchestrator
+import src.mhs.reporting.inventory as rep_inventory
 
 
 def _fake_report() -> types.SimpleNamespace:
@@ -47,7 +48,6 @@ def test_mhs_diagnostic_max_rss_bytes_flag_wired_to_request() -> None:
 def test_mhs_diagnostic_output_tier_flag_threaded_to_persist(monkeypatch) -> None:
     """``--output-tier full`` is parsed and threaded into the persist call;
     the default stays ``compact``."""
-    import src.mhs.evaluation as ev
 
     captured: dict = {}
     sub = argparse.ArgumentParser().add_subparsers()
@@ -63,8 +63,7 @@ def test_mhs_diagnostic_output_tier_flag_threaded_to_persist(monkeypatch) -> Non
         captured.update(kwargs)
         return None
 
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", _spy_persist)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", _spy_persist)
 
     args = parser.parse_args(["--output-tier", "full"])
     assert args.output_tier == "full"
@@ -82,20 +81,19 @@ def test_mhs_diagnostic_touch_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_TOUCH_CLI_FLAG: ``--touch-diagnostic`` is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it
     defaults to False."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -117,20 +115,19 @@ def test_mhs_diagnostic_fold_safe_horizon_flag_threaded_to_request(monkeypatch) 
     """SCENARIO_MHS_FOLD_SAFE_HORIZON_08_CLI_FLAG_THREADS_THROUGH:
     ``--fold-safe-horizon`` is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it defaults to False."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -152,20 +149,19 @@ def test_mhs_diagnostic_ladder_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_LADDER_CLI_FLAG: ``--ladder-diagnostic`` is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it
     defaults to False."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -187,20 +183,19 @@ def test_mhs_diagnostic_crash_tilt_alpha_flag_threaded_to_request(monkeypatch) -
     """The opt-in ``--crash-regime-tilt-alpha`` is parsed and threaded into the
     constructed ``MhsDiagnosticRequest``; the default stays None (disabled,
     byte-identical to the fully dollar-neutral book)."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -226,20 +221,19 @@ def test_mhs_diagnostic_trend_sleeve_flags_threaded_to_request(monkeypatch) -> N
     False) and ``--trend-sleeve-gross`` (type=float, default 0.0) are parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting both yields
     the off values."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -270,20 +264,19 @@ def test_mhs_diagnostic_alpha_engine_flags_threaded_to_request(monkeypatch) -> N
     ``--beta-neutralize`` and ``--ensemble-signal`` parse into the matching
     ``MhsDiagnosticRequest`` fields, and omitting all three reproduces the
     current defaults."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -322,20 +315,19 @@ def test_mhs_diagnostic_multi_feature_flag_threaded_to_request(monkeypatch) -> N
     """SCENARIO_CLI_MULTI_FEATURE_FLAG: ``--multi-feature-book`` (store_true,
     default False) is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it yields multi_feature_book=False."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -360,20 +352,19 @@ def test_mhs_diagnostic_committee_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_CLI_COMMITTEE_FLAG: ``--committee-book`` (store_true, default
     False) is parsed and threaded into the constructed ``MhsDiagnosticRequest``;
     omitting it yields committee_book=False."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -401,20 +392,19 @@ def test_mhs_diagnostic_committee_kelly_sizing_defaults_on_and_opt_out(monkeypat
     ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING) is on by default whenever
     committee capital is active; ``--no-committee-kelly-sizing`` opts back out
     to the pure vol-target scale while leaving committee capital on."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -442,20 +432,19 @@ def test_mhs_diagnostic_committee_growth_diagnostic_flag_threaded_to_request(mon
     ``--committee-growth-diagnostic`` (store_true, default False, requires
     ``--committee-book``) is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it yields committee_growth_diagnostic=False."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -522,20 +511,19 @@ def test_mhs_diagnostic_committee_capital_defaults_on_and_opt_out(monkeypatch) -
     ``--no-committee-capital`` opts back out to committee_capital=False (which
     also forces committee_regime_adaptive_tranche=False, since it requires
     committee capital)."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -564,20 +552,19 @@ def test_mhs_diagnostic_committee_tranche_smoothing_flag_threaded_to_request(mon
     threaded into the constructed ``MhsDiagnosticRequest``; passing it
     overrides the regime-adaptive main-logic default (the two are mutually
     exclusive) rather than raising."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -608,20 +595,19 @@ def test_mhs_diagnostic_committee_regime_adaptive_tranche_defaults_on_and_opt_ou
     regime-adaptive tranche (the best-measured configuration) is on by default
     whenever committee capital is active; ``--no-committee-regime-adaptive-tranche``
     opts back out to the raw committee book while leaving committee capital on."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -649,20 +635,19 @@ def test_mhs_diagnostic_execution_coverage_gate_flag_threaded(monkeypatch) -> No
     ``--execution-coverage-gate`` (store_true, default False) is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it yields
     execution_coverage_gate=False."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -687,15 +672,13 @@ def test_mhs_diagnostic_persist_stage_logged(monkeypatch, caplog) -> None:
     """SCENARIO_MHS_CLI_PERSIST_STAGE_LOGGED: the persist step emits a [SYS]
     stage=persist_report elapsed_ms=<int> log line, so the post-run report
     serialization span is visible to the same [SYS] telemetry."""
-    import src.mhs.evaluation as ev
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
     parser = sub.choices["mhs-horizon-diagnostic"]
 
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     args = parser.parse_args([])
     with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"):
@@ -709,26 +692,25 @@ def test_mhs_diagnostic_persist_stage_logged(monkeypatch, caplog) -> None:
 def test_mhs_diagnostic_persist_receives_request_object(monkeypatch) -> None:
     """SCENARIO_MHS_RESULT_LOG_07: ``_run_mhs_horizon_diagnostic`` threads the
     constructed ``MhsDiagnosticRequest`` into the persist call via ``request=``."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
     requests: list = []
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         req = real_request(*args, **kwargs)
         requests.append(req)
         return req
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
 
     def _spy_persist(*args, **kwargs):
         captured.update(kwargs)
         return None
 
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", _spy_persist)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", _spy_persist)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -747,20 +729,19 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
     ``args.execution_timeframe == "3m"``; ``--execution-timeframe 3m`` is
     accepted; and the constructed ``MhsDiagnosticRequest`` carries
     ``execution_timeframe="3m"``."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     captured: dict = {}
 
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -783,21 +764,20 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
 
 def test_cli_flags_threaded(monkeypatch) -> None:
     """SCENARIO_CLI_FLAGS_THREADED: new CLI args are threaded into MhsDiagnosticRequest."""
-    import src.mhs.evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest
     import src.mhs.pipeline.orchestrator as orchestrator
     from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 
     captured: dict = {}
-    real_request = ev.MhsDiagnosticRequest
+    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
         captured.update(kwargs)
         return real_request(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
     add_mhs_commands(sub)
@@ -911,8 +891,8 @@ def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
     """v2: --emit-deployment invokes emit_deployment."""
     import pandas as pd
 
-    import src.mhs.evaluation as ev
     import src.mhs.report.persist as persist_mod
+    from src.common.paths import DEPLOY_MHS_DIR
 
     target_weights = pd.DataFrame({"BTCUSDT": [0.1, -0.1]}, index=pd.DatetimeIndex([pd.Timestamp("2026-08-24", tz="UTC"), pd.Timestamp("2026-08-25", tz="UTC")]))
     # need primary ledger for emit_deployment
@@ -922,8 +902,7 @@ def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
     fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=fake_blend, research_go=types.SimpleNamespace(eligible=True))
 
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: fake_report)
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     captured: dict = {}
 
@@ -942,18 +921,16 @@ def test_mhs_emit_target_weights_calls_persist_seam(monkeypatch) -> None:
     _run_mhs_horizon_diagnostic(args)
 
     assert captured["report"] is fake_report
-    assert str(captured["artifact_root"]).endswith("mhs_artifacts")
+    assert captured["artifact_root"] == DEPLOY_MHS_DIR
 
 
 def test_mhs_emit_target_weights_fails_closed_without_blend(monkeypatch) -> None:
     """v2: blend-less must fail closed for emit_deployment."""
-    import src.mhs.evaluation as ev
     from src.common.errors import DataIntegrityError
 
     fake_report = types.SimpleNamespace(status="COMPLETE", books=[], blend=None, research_go=types.SimpleNamespace(eligible=True))
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: fake_report)
-    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
-    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
     monkeypatch.setattr("src.mhs.live_strategy.assert_deployment_eligible", lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("deployment ineligible")))
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -972,7 +949,6 @@ def test_emit_deployment_bundle_flag_registered() -> None:
     assert parser.parse_args(["--emit-deployment"]).emit_deployment is True
     assert parser.parse_args([]).deploy_push is False
     assert parser.parse_args(["--deploy-push"]).deploy_push is True
-
 
 
 def test_deploy_push_requires_key(monkeypatch) -> None:
@@ -1046,264 +1022,6 @@ def test_cli_emit_deployment_with_name_drift_trim_fails_before_run(monkeypatch) 
         _run_mhs_horizon_diagnostic(args)
 
 
-def _process_parser() -> argparse.ArgumentParser:
-    import argparse
-
-    from src.cli.commands.research.mhs import add_mhs_commands
-
-    sub = argparse.ArgumentParser().add_subparsers()
-    add_mhs_commands(sub)
-    return sub.choices["mhs-process-backtest"]
-
-
-def test_mhs_process_backtest_parser_defaults() -> None:
-    parser = _process_parser()
-    args = parser.parse_args([])
-    assert args.rebalance_tracking_error_threshold is None
-    assert args.output is None
-    assert args.targets_output is None
-
-
-def _fake_inventory_report() -> object:
-    import pandas as pd
-    import types
-
-    ledger = types.SimpleNamespace(
-        primary_valid=True,
-        fee_charge=pd.Series([0.1, 0.2]),
-        funding_charge=pd.Series([0.01]),
-    )
-    base = types.SimpleNamespace(
-        ledger=ledger,
-        simulated_fills=pd.DataFrame({"a": [1, 2]}),
-        fill_count=0,
-        unfilled_count=0,
-    )
-    proxy = types.SimpleNamespace(
-        base=types.SimpleNamespace(target_weights="BASE-TARGETS"),
-        certification_level="process_proxy_1h_ledger",
-        gate=types.SimpleNamespace(go=False, reason_codes=(), metrics={}),
-    )
-    memory = types.SimpleNamespace(
-        wall_seconds=1.0,
-        cpu_seconds=0.5,
-        parent_rss_peak_bytes=123,
-        tree_pss_peak_bytes=456,
-        tree_uss_peak_bytes=789,
-        min_system_available_bytes=2 * 2**30,
-    )
-    return types.SimpleNamespace(
-        proxy=proxy,
-        base=base,
-        stress=base,
-        gate=types.SimpleNamespace(go=False, reason_codes=(), metrics={}),
-        resource_measurements=(),
-        memory_stats=memory,
-    )
-
-
-def test_mhs_process_backtest_threads_explicit_policy(monkeypatch, tmp_path) -> None:
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    captured: dict = {}
-
-    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
-        captured["policy"] = execution_policy
-        captured["data_root"] = data_root
-        return _fake_inventory_report()
-
-    def _fake_persist(report, output):
-        captured["output"] = output
-        return output if output is not None else "resolved"
-
-    def _fake_targets(base, output):
-        captured["targets"] = (base, output)
-        return output
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _fake_evaluate)
-    monkeypatch.setattr(pb, "persist_process_inventory_report", _fake_persist)
-    monkeypatch.setattr(pb, "persist_process_targets", _fake_targets)
-
-    parser = _process_parser()
-    out_json = tmp_path / "custom.json"
-    out_parquet = tmp_path / "targets.parquet"
-    args = parser.parse_args(
-        ["--rebalance-tracking-error-threshold", "0.2", "--output", str(out_json),
-         "--targets-output", str(out_parquet)]
-    )
-    assert args.rebalance_tracking_error_threshold == 0.2
-    mhs_cli._run_mhs_process_backtest(args)
-    assert captured["policy"].tracking_error_threshold == 0.2
-    assert str(captured["output"]) == str(out_json)
-    assert captured["targets"][0].target_weights == "BASE-TARGETS"
-    assert captured["targets"][1] == out_parquet
-
-    captured.clear()
-    args = parser.parse_args([])
-    mhs_cli._run_mhs_process_backtest(args)
-    assert captured["policy"].tracking_error_threshold is None
-    assert "targets" not in captured
-
-
-def test_mhs_process_backtest_supports_legacy_namespace(monkeypatch) -> None:
-    import argparse
-
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    seen: dict = {}
-
-    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
-        seen["policy"] = execution_policy
-        return _fake_inventory_report()
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _fake_evaluate)
-    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: "p")
-    legacy = argparse.Namespace(start=None, end=None, data_root=None)
-    mhs_cli._run_mhs_process_backtest(legacy)
-    assert seen["policy"].tracking_error_threshold is None
-
-
-def test_mhs_process_backtest_rejects_bad_suffix_and_baseline_overwrite(monkeypatch, tmp_path) -> None:
-
-    import pytest
-
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-    from src.mhs.process_backtest import PROCESS_REPORT_PATH
-
-    def _boom(*a, **k):
-        raise AssertionError("evaluation must not run after validation failure")
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
-    parser = _process_parser()
-    args = parser.parse_args(["--output", str(tmp_path / "bad.txt")])
-    with pytest.raises(SystemExit, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(args)
-    args = parser.parse_args(["--targets-output", str(tmp_path / "bad.csv")])
-    with pytest.raises(SystemExit, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(args)
-    args = parser.parse_args(
-        ["--rebalance-tracking-error-threshold", "0.2", "--output", str(PROCESS_REPORT_PATH)]
-    )
-    with pytest.raises(SystemExit, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(args)
-
-
-def test_mhs_process_backtest_rejects_negative_threshold() -> None:
-
-    import pytest
-
-    import src.cli.commands.research.mhs as mhs_cli
-
-    parser = _process_parser()
-    args = parser.parse_args(["--rebalance-tracking-error-threshold", "-0.5"])
-    with pytest.raises(ValueError, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(args)
-
-
-def test_process_backtest_routes_to_inventory_evaluator(monkeypatch) -> None:
-    """Default route invokes the production inventory evaluator."""
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    called: dict = {}
-
-    def _fake_evaluate(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
-        called["called"] = True
-        called["data_root"] = data_root
-        called["policy"] = execution_policy
-        return _fake_inventory_report()
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _fake_evaluate)
-    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
-    monkeypatch.setattr(pb, "persist_process_targets", lambda base, output: output)
-    args = _process_parser().parse_args([])
-    mhs_cli._run_mhs_process_backtest(args)
-    assert called["called"] is True
-    assert called["policy"].tracking_error_threshold is None
-
-
-def test_process_backtest_defaults_to_new_3m_destination(monkeypatch) -> None:
-    """Default destination uses the new 3m inventory path."""
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-    from src.mhs.process_backtest import PROCESS_INVENTORY_REPORT_PATH
-
-    captured: dict = {}
-
-    def _fake_persist(report, output):
-        captured["output"] = output
-        return output
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report())
-    monkeypatch.setattr(pb, "persist_process_inventory_report", _fake_persist)
-    args = _process_parser().parse_args([])
-    mhs_cli._run_mhs_process_backtest(args)
-    assert str(captured["output"]) == str(PROCESS_INVENTORY_REPORT_PATH)
-
-
-def test_process_backtest_retains_explicit_output(monkeypatch, tmp_path) -> None:
-    """Explicit output retains a valid research JSON path."""
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    captured: dict = {}
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report())
-    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: captured.setdefault("output", output) or output)
-    out = tmp_path / "research.json"
-    args = _process_parser().parse_args(["--output", str(out)])
-    mhs_cli._run_mhs_process_backtest(args)
-    assert str(captured["output"]) == str(out)
-
-
-def test_process_backtest_rejects_reserved_baseline_overwrite() -> None:
-    """Custom policy targeting the hourly baseline destination is rejected."""
-    import pytest
-
-    import src.cli.commands.research.mhs as mhs_cli
-    from src.mhs.process_backtest import PROCESS_REPORT_PATH
-
-    args = _process_parser().parse_args(
-        ["--rebalance-tracking-error-threshold", "0.2", "--output", str(PROCESS_REPORT_PATH)]
-    )
-    with pytest.raises(SystemExit):
-        mhs_cli._run_mhs_process_backtest(args)
-
-
-def test_process_backtest_exports_exact_proxy_targets(monkeypatch, tmp_path) -> None:
-    """Target parquet export uses the exact proxy base target path."""
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    captured: dict = {}
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report())
-    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
-    monkeypatch.setattr(pb, "persist_process_targets", lambda base, output: captured.setdefault("base", base) or output)
-    out = tmp_path / "targets.parquet"
-    args = _process_parser().parse_args(["--targets-output", str(out)])
-    mhs_cli._run_mhs_process_backtest(args)
-    assert captured["base"].target_weights == "BASE-TARGETS"
-
-
-def test_process_summary_reports_certification_and_resources(monkeypatch, caplog) -> None:
-    """CLI summary carries certification, fills, wall/CPU, peaks and hourly comparison."""
-    import logging
-
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report())
-    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
-    args = _process_parser().parse_args([])
-    with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"):
-        mhs_cli._run_mhs_process_backtest(args)
-    messages = " ".join(r.message for r in caplog.records)
-    for token in ("certification=", "primary_valid=", "completion_fills=", "total_fills=", "passive_fills=", "wall_s=", "cpu_s=", "peak_rss=", "peak_pss=", "peak_uss=", "min_available=", "proxy_certification="):
-        assert token in messages
-
-
 def test_mhs_execution_timeframe_restricted_to_3m() -> None:
     """MHS intervals refuse 1m/5m at parse time while keeping an explicit 3m flag."""
     import pytest
@@ -1326,15 +1044,6 @@ def test_mhs_execution_timeframe_restricted_to_3m() -> None:
     with pytest.raises(SystemExit):
         sub.choices["mhs-horizon-diagnostic"].parse_args(["--execution-timeframe", "1m"])
     assert sub.choices["mhs-horizon-diagnostic"].parse_args([]).execution_timeframe == "3m"
-    assert _process_parser().parse_args([]).execution_timeframe == "3m"
-    with pytest.raises(SystemExit):
-        _process_parser().parse_args(["--execution-timeframe", "5m"])
-    import argparse as _ap
-
-    import src.cli.commands.research.mhs as mhs_cli
-
-    with pytest.raises(SystemExit):
-        mhs_cli._run_mhs_process_backtest(_ap.Namespace(execution_timeframe="5m"))
 
 
 def test_mhs_collection_rejects_unsupported_timeframe_programmatically(tmp_path) -> None:
@@ -1364,316 +1073,117 @@ def test_generic_collection_preserves_intervals() -> None:
     assert args.timeframe == "1m"
 
 
-def test_guarded_allocation_fails_closed_with_evidence(monkeypatch) -> None:
-    """Guarded allocation rejection is explicit and inventory failures propagate."""
-    import pytest
-
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-    from src.common.errors import DataIntegrityError
-    from src.mhs.resources import assert_mhs_allocation_budget
-
-    with pytest.raises(DataIntegrityError, match=r"budget|reserve"):
-        assert_mhs_allocation_budget(estimated_bytes=10**12, budget_bytes=1, reserve_bytes=None)
-
-    def _boom(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
-        raise DataIntegrityError("replay provenance failed")
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
-    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda *a, **k: pytest.fail("must not persist"))
-    with pytest.raises(DataIntegrityError, match="provenance"):
-        mhs_cli._run_mhs_process_backtest(_process_parser().parse_args([]))
-
-
 def test_comparable_benchmark_requires_same_workload_evidence() -> None:
     """Resource claims rest on measured peaks/availability with labelled hourly comparison."""
-    import src.mhs.process_backtest as pb
+    import types
 
-    report = _fake_inventory_report()
+    memory = types.SimpleNamespace(
+        tree_pss_peak_bytes=456,
+        tree_uss_peak_bytes=789,
+        min_system_available_bytes=2 * 2**30,
+    )
+    proxy = types.SimpleNamespace(certification_level="process_proxy_1h_ledger")
+    report = types.SimpleNamespace(proxy=proxy, memory_stats=memory)
     assert report.memory_stats.tree_pss_peak_bytes >= 0
     assert report.memory_stats.tree_uss_peak_bytes >= 0
     assert report.memory_stats.min_system_available_bytes > 0
     assert report.proxy.certification_level == "process_proxy_1h_ledger"
-    assert pb.PROCESS_INVENTORY_CERTIFICATION_LEVEL == "process_inventory_3m"
-    assert str(pb.PROCESS_INVENTORY_REPORT_PATH) == "docs/results/mhs_process_3m_backtest.json"
+    assert rep_inventory.PROCESS_INVENTORY_CERTIFICATION_LEVEL == "process_inventory_3m"
 
 
-def _typed_failure_report():
-    import pandas as pd
-
-    import src.mhs.process_backtest as pb
-    from src.mhs.contracts import MhsResourceMeasurement
-    from src.mhs.evaluation.integrity import SOURCE_GAP_EXCLUDED_SYMBOLS
-    from src.mhs.process import ProcessExecutionPolicy
-
-    return pb.ProcessInventoryFailureReport(
-        status="failed",
-        start=pd.Timestamp("2022-01-01", tz="UTC"),
-        end=pd.Timestamp("2022-01-04", tz="UTC"),
-        data_root=None,
-        execution_policy=ProcessExecutionPolicy(None),
-        stage="process_3m_window_1",
-        error_code="DATA_INTEGRITY",
-        error_type="DataIntegrityError",
-        error_message="partialEvaluatorFailed",
-        total_decisions=3,
-        validated_decisions=2,
-        completed_decisions=1,
-        completed_windows=1,
-        completed_decision_start=pd.Timestamp("2022-01-01", tz="UTC"),
-        completed_decision_end=pd.Timestamp("2022-01-01", tz="UTC"),
-        source_gaps=(),
-        source_gap_excluded_symbols=tuple(sorted(SOURCE_GAP_EXCLUDED_SYMBOLS)),
-        resource_measurements=(MhsResourceMeasurement(stage="s", elapsed_ms=1, rss_bytes=2),),
-        memory_stats=None,
-    )
-
-
-def test_process_backtest_typed_failure_writes_diagnostics(monkeypatch, tmp_path, caplog) -> None:
-    """Partial typed error persists failure JSON without success or targets."""
-    import logging
-
-    import pytest
-
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    failure_report = _typed_failure_report()
-    cause = pb.DataIntegrityError("partialEvaluatorFailed")
-    typed = pb.ProcessInventoryBacktestError(failure_report)
-    typed.__cause__ = cause
-    captured: dict = {}
-
-    def _boom(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
-        raise typed
-
-    def _spy_failure(report, output):
-        captured["report"] = report
-        captured["output"] = output
-        return output
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
-    monkeypatch.setattr(pb, "persist_process_inventory_failure", _spy_failure)
-    monkeypatch.setattr(
-        pb, "persist_process_inventory_report",
-        lambda *a, **k: pytest.fail("primary must not persist on failure"),
-    )
-    monkeypatch.setattr(
-        pb, "persist_process_targets",
-        lambda *a, **k: pytest.fail("targets must not persist on failure"),
-    )
-    out = tmp_path / "primary.json"
-    fail = tmp_path / "primary.failure.json"
-    args = _process_parser().parse_args(["--output", str(out), "--failure-output", str(fail)])
-    with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"), pytest.raises(
-        pb.ProcessInventoryBacktestError
-    ):
-        mhs_cli._run_mhs_process_backtest(args)
-    assert captured["report"] is failure_report
-    assert str(captured["output"]) == str(fail)
-    assert not out.exists()
-    assert "status=failed" in " ".join(r.message for r in caplog.records)
-    assert "stage=process_3m_window_1" in " ".join(r.message for r in caplog.records)
-
-
-def test_process_backtest_double_failure_preserves_cause(monkeypatch, tmp_path, caplog) -> None:
-    """Failure-persistence errors are logged while the evaluation cause survives."""
-    import logging
-
-    import pytest
-
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    failure_report = _typed_failure_report()
-    cause = pb.DataIntegrityError("partialEvaluatorFailed")
-    typed = pb.ProcessInventoryBacktestError(failure_report)
-    typed.__cause__ = cause
-
-    monkeypatch.setattr(
-        pb, "evaluate_process_inventory_backtest",
-        lambda *a, **k: (_ for _ in ()).throw(typed),
-    )
-    monkeypatch.setattr(
-        pb, "persist_process_inventory_failure",
-        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
-    )
-    args = _process_parser().parse_args(
-        ["--output", str(tmp_path / "p.json"), "--failure-output", str(tmp_path / "p.failure.json")]
-    )
-    with caplog.at_level(logging.ERROR, logger="MhsHorizonDiagnosticCli"), pytest.raises(
-        pb.ProcessInventoryBacktestError
-    ) as excinfo:
-        mhs_cli._run_mhs_process_backtest(args)
-    assert excinfo.value is typed
-    assert excinfo.value.__cause__ is cause
-    messages = " ".join(r.message for r in caplog.records)
-    assert "status=failed" in messages
-    assert "disk full" in messages
-
-
-def test_process_backtest_path_collisions_fail_fast(monkeypatch, tmp_path) -> None:
-    """Alias and completed-artifact collisions fail before evaluation."""
-    import json
-
-    import pytest
-
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-    from src.mhs.process_backtest import PROCESS_REPORT_PATH
-
-    def _boom(*a, **k):
-        raise AssertionError("evaluator must not run")
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _boom)
-    out = tmp_path / "p.json"
-    with pytest.raises(SystemExit, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(
-            _process_parser().parse_args(["--output", str(out), "--failure-output", str(out)])
-        )
-    with pytest.raises(SystemExit, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(
-            _process_parser().parse_args(["--output", str(PROCESS_REPORT_PATH)])
-        )
-    with pytest.raises(SystemExit, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(
-            _process_parser().parse_args(
-                ["--output", str(out), "--targets-output", str(out.with_suffix(".json"))]
-            )
-        )
-    done = tmp_path / "done.failure.json"
-    done.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
-    with pytest.raises(SystemExit, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(
-            _process_parser().parse_args(["--output", str(out), "--failure-output", str(done)])
-        )
-    assert json.loads(done.read_text(encoding="utf-8"))["status"] == "completed"
-    with pytest.raises(SystemExit, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(
-            _process_parser().parse_args(
-                ["--output", str(out), "--failure-output", str(tmp_path / "bad.txt")]
-            )
-        )
-    aliased = tmp_path / "aliased.parquet"
-    try:
-        aliased.symlink_to(out)
-    except OSError:
-        aliased = None
-    if aliased is not None:
-        with pytest.raises(SystemExit, match=r".+"):
-            mhs_cli._run_mhs_process_backtest(
-                _process_parser().parse_args(
-                    ["--output", str(out), "--targets-output", str(aliased)]
-                )
-            )
-
-
-def test_process_backtest_unreadable_failure_output_proceeds(monkeypatch, tmp_path) -> None:
-    """Corrupt pre-existing failure bytes do not block a fresh evaluation."""
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    monkeypatch.setattr(
-        pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report()
-    )
-    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
-    out = tmp_path / "p.json"
-    corrupt = tmp_path / "p.failure.json"
-    corrupt.write_text("not-json{{{", encoding="utf-8")
-    mhs_cli._run_mhs_process_backtest(
-        _process_parser().parse_args(["--output", str(out), "--failure-output", str(corrupt)])
-    )
-
-
-def test_process_backtest_completed_reporting(monkeypatch, tmp_path, caplog) -> None:
-    """Successful dispatch keeps primary values with completed markers and units."""
-    import json
-    import logging
-
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-
-    monkeypatch.setattr(
-        pb, "evaluate_process_inventory_backtest", lambda *a, **k: _fake_inventory_report()
-    )
-
-    def _persist(report, output):
-        payload = {"status": "completed", "execution_timeframe": "3m", "marker": 1}
-        output.write_text(json.dumps(payload), encoding="utf-8")
-        return output
-
-    monkeypatch.setattr(pb, "persist_process_inventory_report", _persist)
-    out = tmp_path / "primary.json"
-    args = _process_parser().parse_args(["--output", str(out)])
-    with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"):
-        mhs_cli._run_mhs_process_backtest(args)
-    payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["status"] == "completed"
-    assert payload["execution_timeframe"] == "3m"
-    messages = " ".join(r.message for r in caplog.records)
-    assert "completed" in messages
-    assert str(out) in messages
-    for token in ("wall_s=", "cpu_s=", "peak_rss=", "peak_pss=", "peak_uss=", "min_available="):
-        assert token in messages
-
-
-
-def test_mhs_process_backtest_threads_explicit_budget(monkeypatch, tmp_path) -> None:
-    """Legacy resource override: explicit byte controls reach the evaluator as validated limits."""
-    import src.cli.commands.research.mhs as mhs_cli
-    import src.mhs.process_backtest as pb
-    from src.mhs.resources import MhsMemoryBudget
-
-    captured: dict = {}
-
-    def _spy_evaluate(start, end, *, data_root=None, execution_policy=None, memory_budget=None):
-        captured["memory_budget"] = memory_budget
-        return _fake_inventory_report()
-
-    monkeypatch.setattr(pb, "evaluate_process_inventory_backtest", _spy_evaluate)
-    monkeypatch.setattr(pb, "persist_process_inventory_report", lambda report, output: output)
-    parser = _process_parser()
-    defaults = {action.dest: action.default for action in parser._actions}
-    assert defaults["total_tree_pss_bytes"] is None
-    assert defaults["replay_tree_pss_bytes"] is None
-    assert defaults["min_available_bytes"] is None
-    out = tmp_path / "custom.json"
-    args = parser.parse_args(
-        ["--output", str(out),
-         "--total-tree-pss-bytes", str(4 * 2**30),
-         "--replay-tree-pss-bytes", str(3 * 2**30),
-         "--min-available-bytes", str(2 * 2**30)]
-    )
-    mhs_cli._run_mhs_process_backtest(args)
-    assert captured["memory_budget"] == MhsMemoryBudget(
-        total_tree_pss_bytes=4 * 2**30,
-        replay_tree_pss_bytes=3 * 2**30,
-        min_available_bytes=2 * 2**30,
-    )
-    captured.clear()
-    args = parser.parse_args(["--output", str(out)])
-    mhs_cli._run_mhs_process_backtest(args)
-    assert captured["memory_budget"] == MhsMemoryBudget()
-    args = parser.parse_args(["--replay-tree-pss-bytes", str(4 * 2**30)])
-    with pytest.raises(ValueError, match=r".+"):
-        mhs_cli._run_mhs_process_backtest(args)
-
-
-def test_mhs_process_backtest_legacy_help_marks_compatibility() -> None:
-    """Legacy direct compatibility: help describes 3m inventory evidence and points at backtest mhs."""
+def test_research_mhs_process_leaf_is_absent() -> None:
     import argparse
 
+    from src.cli.commands.research.mhs import add_mhs_commands
+    from src.cli.main import build_root_parser
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    assert set(sub.choices) == {"mhs-horizon-diagnostic"}
+
+    args = build_root_parser().parse_args(["research", "run", "portfolio", "mhs-horizon-diagnostic"])
+    assert args.portfolio_command == "mhs-horizon-diagnostic"
+    with pytest.raises(SystemExit):
+        build_root_parser().parse_args(["research", "run", "portfolio", "mhs-process-backtest"])
+
+
+def test_research_diagnostic_output_has_data_boundary(monkeypatch) -> None:
+    import argparse
+    from pathlib import Path
+
     import src.cli.commands.research.mhs as mhs_cli
+    from src.common.paths import DATA_DIR
+
+    captured: dict = {}
+
+    def _spy_persist(report, target, **kwargs):
+        captured["target"] = Path(target)
+        return captured["target"]
+
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", _spy_persist)
 
     sub = argparse.ArgumentParser().add_subparsers()
     mhs_cli.add_mhs_commands(sub)
-    pseudo = next(a for a in sub._choices_actions if a.dest == "mhs-process-backtest")
-    assert "backtest mhs" in pseudo.help
-    assert "3m" in pseudo.help
-    parser = sub.choices["mhs-process-backtest"]
-    output_action = next(a for a in parser._actions if a.dest == "output")
-    assert "3m" in output_action.help
-    assert "proxy" not in output_action.help
-    assert mhs_cli._run_mhs_process_backtest.__doc__.startswith(
-        "Persist direct three-minute inventory outcomes for the legacy process command."
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    mhs_cli._run_mhs_horizon_diagnostic(parser.parse_args([]))
+    assert DATA_DIR / "research" / "mhs" in captured["target"].parents
+    assert "docs" not in captured["target"].parts
+
+    captured.clear()
+    mhs_cli._run_mhs_horizon_diagnostic(parser.parse_args(["--run-id", "abc123"]))
+    assert captured["target"] == DATA_DIR / "research" / "mhs" / "abc123" / "mhs_horizon_diagnostic.json"
+
+
+def test_canonical_backtest_route_remains_unique() -> None:
+    from src.cli.commands.backtest import run_mhs_backtest
+    from src.cli.main import build_root_parser
+
+    args = build_root_parser().parse_args(["backtest", "mhs"])
+    assert args.handler is run_mhs_backtest
+
+
+def test_retired_report_path_constants_have_no_callers() -> None:
+    import pytest
+
+    from pathlib import Path as _Path
+
+    retired = ("PROCESS_INVENTORY_REPORT_PATH", "PROCESS_REPORT_PATH", "PROCESS_POLICY_REPORT_PATH")
+    violations = [
+        str(path)
+        for path in sorted(_Path("src").rglob("*.py"))
+        if any(name in path.read_text(encoding="utf-8") for name in retired)
+    ]
+    assert violations == []
+    with pytest.raises(ImportError):
+        from src.mhs.reporting.process import PROCESS_REPORT_PATH  # noqa: F401
+
+
+def test_deploy_push_failure_logs_manual_recovery(monkeypatch, caplog) -> None:
+    import argparse
+    import logging
+    import subprocess as _subprocess
+
+    import src.cli.commands.research.mhs as mhs_cli
+    import src.mhs.report.persist as persist_mod
+
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr("src.mhs.live_strategy.assert_deployment_eligible", lambda *a, **k: None)
+    monkeypatch.setattr(
+        persist_mod, "emit_deployment",
+        lambda *a, **k: {"strategy_digest": "abc", "params_path": "p", "bootstrap_path": "b", "n_reference_rows": 1, "sealed": True},
     )
+    monkeypatch.setattr(mhs_cli, "_assert_deploy_push_allowed", lambda: None)
+
+    def _boom(*args, **kwargs):
+        raise _subprocess.CalledProcessError(1, ["git", "add"])
+
+    monkeypatch.setattr(_subprocess, "run", _boom)
+    sub = argparse.ArgumentParser().add_subparsers()
+    mhs_cli.add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    args = parser.parse_args(["--emit-deployment", "--deploy-push"])
+    with caplog.at_level(logging.INFO, logger="MhsHorizonDiagnosticCli"):
+        mhs_cli._run_mhs_horizon_diagnostic(args)
+    assert any("manual: git add" in record.message for record in caplog.records)

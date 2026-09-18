@@ -624,8 +624,7 @@ def _committee_execution_book(
         spec for spec in FEATURE_REGISTRY
         if spec.name in set(_resolved)
     ]
-    import src.mhs.evaluation as ev
-    _committee_books = ev.build_feature_books(
+    _committee_books = build_feature_books(
         _member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
         execution_mask, decision_grid, min_symbols=min_symbols,
