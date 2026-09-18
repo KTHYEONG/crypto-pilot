@@ -10,7 +10,7 @@ SCENARIO_MHS_PERF_ACCEPT_01_FULL_RUN (docs/specs/mhs_perf_refactor_contract.json
 this synthetic benchmark is the fast proxy this file automates; the full
 production-shaped acceptance gate (446 symbols, wall/memory thresholds against
 the HEAD baseline) is a manual reproduction run, not a pytest scenario --
-``uv run python tools/devops/mhs_baseline_run.py``, per
+``uv run python -m src.cli.main backtest mhs``, per
 docs/specs/mhs_perf_refactor.md §10-11.
 """
 

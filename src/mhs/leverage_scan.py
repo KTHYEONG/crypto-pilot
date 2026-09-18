@@ -3,7 +3,7 @@
 Read-only by contract: loads an already-persisted daily ledger artifact,
 slices the leak-free pre-OOS reference window, and reports the bootstrap
 mdd-breach/ruin frontier per candidate leverage multiple. It never writes to
-docs/results/, never mutates ``GROWTH_RISK_ENVELOPES`` or
+the ignored research-data tree, never mutates ``GROWTH_RISK_ENVELOPES`` or
 ``COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS``, and never constructs a diagnostic
 request -- adopting a new ceiling still requires a human-registered envelope
 rung plus a real replay re-verification.
@@ -25,7 +25,6 @@ from src.mhs.params import (
     GROWTH_RISK_ENVELOPES,
     PNL_VOL_TARGET_BURN_IN_DAYS,
 )
-from src.mhs.report.persist import mhs_horizon_diagnostic_report_path
 from src.quant.risk.growth_sizing import (
     FrontierScanPoint,
     GrowthSizingConfig,
@@ -38,9 +37,10 @@ _REFERENCE_REPLAY_ID = "blend_pre_vol_target_reference"
 
 
 def _default_artifact_path() -> pathlib.Path:
-    """Mirror persist.py's compact artifact_root derivation exactly."""
-    report = pathlib.Path(mhs_horizon_diagnostic_report_path())
-    return report.parent / f"{report.stem}_artifacts" / "daily_ledger.parquet"
+    """Retired default: ledgers live under run-scoped data/research directories."""
+    raise DataIntegrityError(
+        "daily ledger has no default location; pass artifact_path for a run under data/research/mhs/<run_id>/"
+    )
 
 
 def _load_pre_oos_reference_returns(

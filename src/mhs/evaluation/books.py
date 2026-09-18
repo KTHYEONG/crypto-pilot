@@ -154,10 +154,9 @@ def _active_blend_book_and_grid(
     same origin -- reproducing the pre-fix behavior byte-for-byte.  If no book
     carries capital the allocation invariant is violated and we fail closed.
     """
-    import src.mhs.evaluation as ev
-    if ev.BOOK_BLEND_WEIGHTS["fast_reversal"] != 0.0:
+    if BOOK_BLEND_WEIGHTS["fast_reversal"] != 0.0:
         return fast, fast_grid
-    if ev.BOOK_BLEND_WEIGHTS["slow_momentum"] != 0.0:
+    if BOOK_BLEND_WEIGHTS["slow_momentum"] != 0.0:
         return slow, slow_grid
     raise ValueError(
         "BOOK_BLEND_WEIGHTS allocates no capital to either book; "

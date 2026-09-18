@@ -17,15 +17,13 @@ import dataclasses
 
 import numpy as np
 
-from src.mhs.evaluation import (
-    BOOK_SPECS,
-    books,
-    folds,
-    liquid_half_eligibility,
-)
+import src.mhs.evaluation.books as books
+import src.mhs.evaluation.folds as folds
 from src.mhs.marks import _fill_mark_parity_eligibility
+from src.mhs.panel import liquid_half_eligibility
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
+from src.mhs.types import BOOK_SPECS
 
 
 def select_horizons(ctx: PipelineContext, telemetry: StageTelemetry) -> None:

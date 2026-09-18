@@ -28,8 +28,8 @@ from src.mhs.types import (
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
-MHS_TREE_PSS_BUDGET_BYTES: int = int(2.5 * 2**30)
-MHS_REPLAY_BUDGET_BYTES: int = int(1.5 * 2**30)
+MHS_TREE_PSS_BUDGET_BYTES: int = 6 * 2**30
+MHS_REPLAY_BUDGET_BYTES: int = 4 * 2**30
 MHS_AVAILABLE_FLOOR_BYTES: int = 2 * 2**30
 
 
@@ -72,17 +72,17 @@ def _resolve_memory_budget(budget: MhsMemoryBudget | None) -> MhsMemoryBudget:
 
 
 def resolve_mhs_memory_budget(budget: MhsMemoryBudget | None) -> MhsMemoryBudget:
-    """Resolve one run's process-tree ceilings against physical capacity.
+    """Resolve one run's measured-profile ceilings against physical capacity.
 
     Args:
-        budget: Explicit stage ceilings and reserve, or conservative defaults.
+        budget: Explicit stage ceilings and reserve, or the full-period profile.
     Returns:
-        Positive stage ceilings bounded by effective host/cgroup capacity and
-        the unchanged requested available-memory reserve.
+        Positive stage ceilings bounded by host/cgroup capacity while preserving
+        the requested physical reserve. A ceiling is not a memory reservation.
     Raises:
         ValueError: The budget contract is invalid.
-        MhsResourceAdmissionError: Required telemetry is unavailable or physical
-            capacity cannot preserve the requested reserve.
+        MhsResourceAdmissionError: Required telemetry is unavailable or capacity
+            cannot preserve the requested physical reserve.
     """
     if budget is None:
         requested = MhsMemoryBudget()

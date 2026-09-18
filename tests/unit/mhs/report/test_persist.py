@@ -16,13 +16,11 @@ import pytest
 
 import src.mhs.report.persist as persist_mod
 from src.mhs.contracts import MhsOutputTier
-from src.mhs.report.persist import mhs_horizon_diagnostic_report_path, persist_mhs_report
+from src.mhs.report.persist import persist_mhs_report
 
 
-def test_report_path_is_source_controlled() -> None:
-    assert mhs_horizon_diagnostic_report_path() == str(
-        Path("docs/results") / "mhs_horizon_diagnostic.json"
-    )
+def test_report_path_helper_retired() -> None:
+    assert not hasattr(persist_mod, "mhs_horizon_diagnostic_report_path")
 
 
 def _patch_history(monkeypatch: pytest.MonkeyPatch) -> None:

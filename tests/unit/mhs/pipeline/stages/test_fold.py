@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 
 import src.mhs.pipeline.stages.fold as fold_stage
-from src.mhs.evaluation import DataIntegrityError
+from src.common.errors import DataIntegrityError
 from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry

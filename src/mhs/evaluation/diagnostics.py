@@ -53,22 +53,21 @@ def _phase_diagnostics(
     grid_1h: pd.DatetimeIndex,
     spec: BookSpec,
 ) -> PhaseDiagnosticResult:
-    import src.mhs.evaluation as ev
-    signal = ev.horizon_log_return(log_close, spec.horizon_hours)
+    signal = horizon_log_return(log_close, spec.horizon_hours)
 
     def _eval_phase(offset: int) -> tuple[int, pd.Series]:
         phase_grid = grid_1h[offset :: spec.step_hours]
         sig = signal.reindex(phase_grid)
         el = eligible.reindex(phase_grid)
-        weights = ev.rank_weight_book(sig, el, spec.band.sign, spec.min_symbols)
+        weights = rank_weight_book(sig, el, spec.band.sign, spec.min_symbols)
         weights_1h = weights.reindex(grid_1h, method="ffill").fillna(0.0)
-        net, _turnover = ev.mhs_ledger_pnl(weights_1h, opens, bar_funding, 8.0)
+        net, _turnover = mhs_ledger_pnl(weights_1h, opens, bar_funding, 8.0)
         return offset, net
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(_eval_phase, offset) for offset in range(spec.step_hours)]
         phase_nets = dict(f.result() for f in futures)
-    return ev.phase_diagnostic_metrics(phase_nets, _PERIODS_PER_YEAR_1H)
+    return phase_diagnostic_metrics(phase_nets, _PERIODS_PER_YEAR_1H)
 
 
 

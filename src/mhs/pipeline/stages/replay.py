@@ -18,7 +18,9 @@ import os
 
 import pandas as pd
 
-from src.mhs.evaluation import committee, concurrency, guards
+import src.mhs.evaluation.committee as committee
+import src.mhs.evaluation.concurrency as concurrency
+import src.mhs.evaluation.guards as guards
 from src.mhs.marks import _prewarm_mark_frames
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
