@@ -242,8 +242,12 @@ uv run pytest
 uv run mypy src/
 uv run ruff check src/
 
-# 3. 퀀트 연구 백테스트 진단 실행 (MHS 3분봉 원장 체결)
-uv run python -m src.cli.main research run portfolio mhs-horizon-diagnostic
+# 3. 정식 3분봉 백테스트 실행 (소스 소유 감독 + 3분봉 인벤토리 증거)
+uv run python -m src.cli.main backtest mhs
+
+# 3분봉 인벤토리 성과는 1차 증거이며, 배포 승인과는 별개이다.
+# 바이트 제어: --total-tree-pss-bytes --replay-tree-pss-bytes --min-available-bytes
+uv run python -m src.cli.main backtest mhs --help
 
 # 4. 라이브 데몬 상태 조회
 uv run python -m src.cli.main live status
