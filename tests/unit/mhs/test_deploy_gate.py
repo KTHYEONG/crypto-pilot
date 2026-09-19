@@ -300,7 +300,12 @@ def test_integrity_reasons_from_report_is_fail_closed_on_missing_evidence() -> N
     good = types.SimpleNamespace(
         status="COMPLETE",
         folds=(good_fold,),
-        blend=types.SimpleNamespace(primary=types.SimpleNamespace(ledger=types.SimpleNamespace(primary_valid=True))),
+        blend=types.SimpleNamespace(
+            primary=types.SimpleNamespace(
+                ledger=types.SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
+                terminal_positions=(),
+            )
+        ),
         backtest_reliability=types.SimpleNamespace(input_manifest_digest="a" * 64, eligible=True),
     )
     assert integrity_reasons_from_report(good, plain) == ()
@@ -350,7 +355,12 @@ def test_deploy_gate_from_report_reads_strict_fold_ledgers() -> None:
     shuffled = tuple(folds[::-1])
     report = types.SimpleNamespace(
         status="COMPLETE", folds=shuffled,
-        blend=types.SimpleNamespace(primary=types.SimpleNamespace(ledger=types.SimpleNamespace(primary_valid=True))),
+        blend=types.SimpleNamespace(
+            primary=types.SimpleNamespace(
+                ledger=types.SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
+                terminal_positions=(),
+            )
+        ),
         backtest_reliability=types.SimpleNamespace(input_manifest_digest="b" * 64, eligible=True),
     )
 
@@ -497,8 +507,8 @@ def test_evaluate_deploy_gate_blocks_on_time_concentrated_growth() -> None:
     assert result.metrics["profitable_folds_stress"] == 16.0
     assert result.metrics["tail_share_observed"] > result.metrics["tail_share_null_quantile"]
 
-def test_integrity_reasons_accepts_terminal_only_blend_ledger() -> None:
-    # Given: a COMPLETE report whose blend ledger is invalid only via UNKNOWN_TERMINATION
+def test_integrity_reasons_rejects_terminal_only_blend_ledger() -> None:
+    # Given: a COMPLETE report whose blend ledger is invalid via UNKNOWN_TERMINATION
     from types import SimpleNamespace
 
     import pandas as pd
@@ -513,14 +523,19 @@ def test_integrity_reasons_accepts_terminal_only_blend_ledger() -> None:
         ),
     )
 
-    def _report(gaps, fills):
+    def _report(gaps, fills, valid=False):
         return SimpleNamespace(
             status="COMPLETE",
             folds=[SimpleNamespace(fold_index=0, strict=object(), failures=())],
             blend=SimpleNamespace(
                 primary=SimpleNamespace(
-                    ledger=SimpleNamespace(primary_valid=False, data_gaps=gaps),
+                    ledger=SimpleNamespace(
+                        primary_valid=valid,
+                        invalid_reasons=() if valid else ("MISSING_DATA",),
+                        data_gaps=gaps,
+                    ),
                     simulated_fills=fills,
+                    terminal_positions=(),
                 )
             ),
             backtest_reliability=SimpleNamespace(input_manifest_digest="deadbeef", eligible=True),
@@ -546,12 +561,11 @@ def test_integrity_reasons_accepts_terminal_only_blend_ledger() -> None:
     )
 
     # When
-    certified = integrity_reasons_from_report(_report(terminal_gaps, pd.DataFrame()), request)
+    terminal = integrity_reasons_from_report(_report(terminal_gaps, pd.DataFrame()), request)
     uncertified = integrity_reasons_from_report(_report(recovering_gaps, recovering_fills), request)
 
-    # Then: terminal inventory clears axis 0; a recovering gap still blocks
-    assert GATE_BLEND_LEDGER_INVALID not in certified
-    assert certified == ()
+    # Then: the terminal-gap exception is superseded -- both block axis 0
+    assert GATE_BLEND_LEDGER_INVALID in terminal
     assert GATE_BLEND_LEDGER_INVALID in uncertified
 
 
@@ -594,7 +608,10 @@ def test_integrity_reasons_require_eligible_reliability() -> None:
         status="COMPLETE",
         folds=(good_fold,),
         blend=types.SimpleNamespace(
-            primary=types.SimpleNamespace(ledger=types.SimpleNamespace(primary_valid=True))
+            primary=types.SimpleNamespace(
+                ledger=types.SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
+                terminal_positions=(),
+            )
         ),
         backtest_reliability=types.SimpleNamespace(
             input_manifest_digest="a" * 64,

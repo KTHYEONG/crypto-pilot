@@ -79,7 +79,13 @@ def _attest_one(path: Path, data_root: Path) -> MhsInputFileAttestation:
     schema_names = set(parquet_file.schema_arrow.names)
     ts_column = "timestamp" if "timestamp" in schema_names else "datetime"
     bounds = pd.read_parquet(resolved, columns=[ts_column]).iloc[:, 0]
-    stamps = pd.to_datetime(bounds, utc=True, errors="coerce")
+    # Binance futures Parquet ``timestamp`` columns are epoch milliseconds;
+    # omitting ``unit`` silently interpreted them as nanoseconds and sealed
+    # every bound in 1970, making provenance metadata non-auditable.
+    if pd.api.types.is_numeric_dtype(bounds):
+        stamps = pd.to_datetime(bounds, unit="ms", utc=True, errors="coerce")
+    else:
+        stamps = pd.to_datetime(bounds, utc=True, errors="coerce")
     parts = Path(rel).parts
     kind = "funding" if "funding" in parts else ("mark" if any("mark" in part for part in parts) else "ohlcv")
     return MhsInputFileAttestation(

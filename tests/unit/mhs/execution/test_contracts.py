@@ -19,7 +19,13 @@ def test_funding_alignment_marks_wide_observation_gaps_unknown() -> None:
     result = align_funding_with_knowledge({'BTCUSDT': source}, grid, symbols=['BTCUSDT'])
     assert bool(result.known['BTCUSDT'].iloc[0])
     assert bool(result.known['BTCUSDT'].iloc[-1])
-    assert not bool(result.known['BTCUSDT'].iloc[1:11].any())
+    # Prefix-only archive recency: each row depends only on events at/before it,
+    # so the recency-observable prefix stays known while the stale tail is unknown.
+    assert bool(result.known['BTCUSDT'].iloc[8])
+    assert not bool(result.known['BTCUSDT'].iloc[9])
+    assert not bool(result.known['BTCUSDT'].iloc[10])
+    assert result.knowledge_source == "archive_recency_proxy"
+    assert result.limitations != ()
 
 
 def test_utc_epoch_ns_matches_legacy_to_datetime_conversion() -> None:

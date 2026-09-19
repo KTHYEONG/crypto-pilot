@@ -40,11 +40,7 @@ def _resolve_ns_vectorized(
     s = np.minimum(spos_all, n_grid - 1)
     timeout_ns = full_grid_ns[s] + timeout_ns_delta
     tpos = np.searchsorted(full_grid_ns, timeout_ns, side="left")
-    valid = (
-        (spos_all < n_grid)
-        & (tpos < n_grid)
-        & (full_grid_ns[np.minimum(tpos, n_grid - 1)] == timeout_ns)
-    )
+    valid = (spos_all < n_grid) & (tpos < n_grid) & (full_grid_ns[np.minimum(tpos, n_grid - 1)] == timeout_ns)
     resolve_ns[valid] = timeout_ns[valid]
     return resolve_ns
 
@@ -59,7 +55,9 @@ def _estimate_mhs_execution_allocation(*, n_symbols: int, n_columns: int, bound_
     per_symbol = 112 + int(bound_count) * 64
     bytes_per_bar = max(n_sym, 1) * per_symbol
     decoder_bytes = n_sym * 65536 + 1048576
-    return MhsExecutionAllocation(fixed_bytes=int(fixed_bytes), bytes_per_bar=int(bytes_per_bar), decoder_bytes=int(decoder_bytes))
+    return MhsExecutionAllocation(
+        fixed_bytes=int(fixed_bytes), bytes_per_bar=int(bytes_per_bar), decoder_bytes=int(decoder_bytes)
+    )
 
 
 def _minimum_mhs_execution_bars(timeout_ns_delta: int, step_ns: int) -> int:
@@ -92,12 +90,21 @@ def _materialize_execution_piece(
 ) -> ExecutionReplayWindow:
     """Decode, align and admit one physical piece without changing decisions.
 
+    Carry the source of funding knowledge onto every physical execution window.
+    Archive recency is not recorded no-settlement or publication evidence.
+
     Args:
         initial_swap_bytes: Observed run-entry process-tree swap baseline; existing swapped pages are not classified as growth.
     """
     bars = len(piece_grid)
     estimated = int(allocation.fixed_bytes) + bars * int(allocation.bytes_per_bar) + int(allocation.decoder_bytes)
-    assert_mhs_allocation_budget(estimated_bytes=estimated, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, stage="process_execution_piece", initial_swap_bytes=initial_swap_bytes)
+    assert_mhs_allocation_budget(
+        estimated_bytes=estimated,
+        budget_bytes=budget_bytes,
+        reserve_bytes=reserve_bytes,
+        stage="process_execution_piece",
+        initial_swap_bytes=initial_swap_bytes,
+    )
     symbol_frames = _load_window_minute_frames(root, roster, piece_grid[0], piece_grid[-1], timeframe)
     aligned = _build_window_frames(symbol_frames, roster, piece_grid[0], piece_grid[-1], piece_grid, timeframe)
     if aligned is None:
@@ -126,12 +133,18 @@ def _materialize_execution_piece(
         else:
             minute_marks = pd.DataFrame(index=piece_grid)
     minute_period = piece_grid[1] - piece_grid[0] if len(piece_grid) > 1 else pd.Timedelta(minutes=1)
-    funding_alignment = align_funding_with_knowledge(funding_by_symbol, piece_grid, symbols=roster, source_failures=funding_failures)
+    funding_alignment = align_funding_with_knowledge(
+        funding_by_symbol, piece_grid, symbols=roster, source_failures=funding_failures
+    )
     minute_funding = funding_alignment.rates
     funding_known = funding_alignment.known
     coverage_gaps = funding_coverage_gaps(funding_alignment, piece_grid)
     quote_volumes = pd.DataFrame(
-        {s: symbol_frames[s]["quote_vol"] for s in roster if s in symbol_frames and "quote_vol" in symbol_frames[s].columns},
+        {
+            s: symbol_frames[s]["quote_vol"]
+            for s in roster
+            if s in symbol_frames and "quote_vol" in symbol_frames[s].columns
+        },
         index=piece_grid,
     )
     for s in roster:
@@ -157,6 +170,7 @@ def _materialize_execution_piece(
         bar_available_at=bar_available_at,
         logical_partition=logical_partition,
         funding_coverage_gaps=coverage_gaps,
+        funding_knowledge_source=funding_alignment.knowledge_source,
     )
     del symbol_frames
     del aligned
@@ -209,7 +223,9 @@ def _iter_mhs_execution_windows(
     if target_weights.empty:
         completed_grid = pd.date_range(start, end - step, freq=freq, tz="UTC")
         empty_marks = (
-            pd.DataFrame(index=completed_grid) if mark_mode in ("cache_required", "cache_required_stale_carry") else None
+            pd.DataFrame(index=completed_grid)
+            if mark_mode in ("cache_required", "cache_required_stale_carry")
+            else None
         )
         yield ExecutionReplayWindow(
             window_start=start,
@@ -238,7 +254,11 @@ def _iter_mhs_execution_windows(
         bounds.append((i0, i1))
         i0 = i1
 
-    if isinstance(execution_bound_count, bool) or not isinstance(execution_bound_count, int) or execution_bound_count <= 0:
+    if (
+        isinstance(execution_bound_count, bool)
+        or not isinstance(execution_bound_count, int)
+        or execution_bound_count <= 0
+    ):
         raise ValueError(f"execution_bound_count must be a positive integer, got {execution_bound_count!r}")
     bound_count = int(execution_bound_count)
     minimum_bars = _minimum_mhs_execution_bars(timeout_ns_delta, step_ns)
@@ -281,13 +301,27 @@ def _iter_mhs_execution_windows(
                 roster_set = active | prev_active
             prev_active = active
             roster = [s for s in columns if s in roster_set]
-            legacy_alloc = _estimate_mhs_execution_allocation(n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count)
+            legacy_alloc = _estimate_mhs_execution_allocation(
+                n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
+            )
             window = _materialize_execution_piece(
-                piece_grid=minute_grid, piece_weights=w_weights, piece_signals=w_signals,
-                roster=roster, columns=columns, root=root, timeframe=timeframe,
-                funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                allocation=legacy_alloc, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
-                window_start=grid_start, window_end=grid_end, logical_partition=(i0, i1),
+                piece_grid=minute_grid,
+                piece_weights=w_weights,
+                piece_signals=w_signals,
+                roster=roster,
+                columns=columns,
+                root=root,
+                timeframe=timeframe,
+                funding_by_symbol=funding_by_symbol,
+                mark_mode=mark_mode,
+                funding_failures=funding_failures,
+                allocation=legacy_alloc,
+                budget_bytes=budget_bytes,
+                reserve_bytes=reserve_bytes,
+                initial_swap_bytes=initial_swap_bytes,
+                window_start=grid_start,
+                window_end=grid_end,
+                logical_partition=(i0, i1),
             )
             yield window
             del window
@@ -308,7 +342,9 @@ def _iter_mhs_execution_windows(
         else:
             live_now = set(prev_active)
         roster_full = [s for s in columns if s in (active_full | live_now)]
-        allocation = _estimate_mhs_execution_allocation(n_symbols=len(roster_full), n_columns=len(columns), bound_count=bound_count)
+        allocation = _estimate_mhs_execution_allocation(
+            n_symbols=len(roster_full), n_columns=len(columns), bound_count=bound_count
+        )
         decision_pos = np.searchsorted(
             full_ns,
             np.asarray(decision_times[i0:i1], dtype="datetime64[ns]").astype("int64"),
@@ -332,8 +368,11 @@ def _iter_mhs_execution_windows(
                 f"but only {n_full} completed bars remain before the fence"
             )
         planned = plan_mhs_execution_bars(
-            requested_bars=n_full, minimum_bars=minimum_piece_bars,
-            allocation=allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes,
+            requested_bars=n_full,
+            minimum_bars=minimum_piece_bars,
+            allocation=allocation,
+            budget_bytes=budget_bytes,
+            reserve_bytes=reserve_bytes,
         )
         if planned >= n_full:
             non_zero = w_weights.notna() & w_weights.ne(0.0)
@@ -351,13 +390,27 @@ def _iter_mhs_execution_windows(
                 roster_set = active | prev_active
             prev_active = active
             roster = [s for s in columns if s in roster_set]
-            piece_allocation = _estimate_mhs_execution_allocation(n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count)
+            piece_allocation = _estimate_mhs_execution_allocation(
+                n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
+            )
             window = _materialize_execution_piece(
-                piece_grid=full_grid, piece_weights=w_weights, piece_signals=w_signals,
-                roster=roster, columns=columns, root=root, timeframe=timeframe,
-                funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
-                window_start=grid_start, window_end=grid_end, logical_partition=(i0, i1),
+                piece_grid=full_grid,
+                piece_weights=w_weights,
+                piece_signals=w_signals,
+                roster=roster,
+                columns=columns,
+                root=root,
+                timeframe=timeframe,
+                funding_by_symbol=funding_by_symbol,
+                mark_mode=mark_mode,
+                funding_failures=funding_failures,
+                allocation=piece_allocation,
+                budget_bytes=budget_bytes,
+                reserve_bytes=reserve_bytes,
+                initial_swap_bytes=initial_swap_bytes,
+                window_start=grid_start,
+                window_end=grid_end,
+                logical_partition=(i0, i1),
             )
             yield window
             del window
@@ -392,18 +445,31 @@ def _iter_mhs_execution_windows(
                 else:
                     roster_set = set(prev_active)
                 roster = [s for s in columns if s in roster_set]
-                piece_grid = full_grid[g0:g1 + 1]
+                piece_grid = full_grid[g0 : g1 + 1]
                 empty_weights = target_weights.iloc[0:0].reindex(columns=roster)
                 empty_signals = signal_available_at[0:0]
                 piece_allocation = _estimate_mhs_execution_allocation(
-                    n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count,
+                    n_symbols=len(roster),
+                    n_columns=len(columns),
+                    bound_count=bound_count,
                 )
                 window = _materialize_execution_piece(
-                    piece_grid=piece_grid, piece_weights=empty_weights, piece_signals=empty_signals,
-                    roster=roster, columns=columns, root=root, timeframe=timeframe,
-                    funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                    allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
-                    window_start=piece_grid[0], window_end=piece_grid[-1] + step,
+                    piece_grid=piece_grid,
+                    piece_weights=empty_weights,
+                    piece_signals=empty_signals,
+                    roster=roster,
+                    columns=columns,
+                    root=root,
+                    timeframe=timeframe,
+                    funding_by_symbol=funding_by_symbol,
+                    mark_mode=mark_mode,
+                    funding_failures=funding_failures,
+                    allocation=piece_allocation,
+                    budget_bytes=budget_bytes,
+                    reserve_bytes=reserve_bytes,
+                    initial_swap_bytes=initial_swap_bytes,
+                    window_start=piece_grid[0],
+                    window_end=piece_grid[-1] + step,
                     logical_partition=(i0, i1),
                 )
                 yield window
@@ -411,8 +477,8 @@ def _iter_mhs_execution_windows(
                 gc.collect()
                 g0 = g1
                 continue
-            piece_weights = target_weights.iloc[i0 + d:i0 + d1]
-            piece_signals = signal_available_at[i0 + d:i0 + d1]
+            piece_weights = target_weights.iloc[i0 + d : i0 + d1]
+            piece_signals = signal_available_at[i0 + d : i0 + d1]
             piece_active = set(piece_weights.columns[(piece_weights.notna() & piece_weights.ne(0.0)).any(axis=0)])
             if required_symbols is not None:
                 live_required = set(required_symbols())
@@ -427,15 +493,29 @@ def _iter_mhs_execution_windows(
                 roster_set = piece_active | prev_active
             prev_active = set(piece_active)
             roster = [s for s in columns if s in roster_set]
-            piece_allocation = _estimate_mhs_execution_allocation(n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count)
-            piece_grid = full_grid[g0:g1 + 1]
+            piece_allocation = _estimate_mhs_execution_allocation(
+                n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
+            )
+            piece_grid = full_grid[g0 : g1 + 1]
             piece_end = grid_end if (g1 == n_full - 1 and d1 == n_dec) else piece_grid[-1] + step
             window = _materialize_execution_piece(
-                piece_grid=piece_grid, piece_weights=piece_weights, piece_signals=piece_signals,
-                roster=roster, columns=columns, root=root, timeframe=timeframe,
-                funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
-                window_start=piece_grid[0], window_end=piece_end, logical_partition=(i0, i1),
+                piece_grid=piece_grid,
+                piece_weights=piece_weights,
+                piece_signals=piece_signals,
+                roster=roster,
+                columns=columns,
+                root=root,
+                timeframe=timeframe,
+                funding_by_symbol=funding_by_symbol,
+                mark_mode=mark_mode,
+                funding_failures=funding_failures,
+                allocation=piece_allocation,
+                budget_bytes=budget_bytes,
+                reserve_bytes=reserve_bytes,
+                initial_swap_bytes=initial_swap_bytes,
+                window_start=piece_grid[0],
+                window_end=piece_end,
+                logical_partition=(i0, i1),
             )
             yield window
             del window
@@ -448,7 +528,7 @@ def _iter_mhs_execution_windows(
             tail_start = g0
             while tail_start < n_full - 1:
                 tail_end = min(tail_start + planned - 1, n_full - 1)
-                tail_grid = full_grid[tail_start:tail_end + 1]
+                tail_grid = full_grid[tail_start : tail_end + 1]
                 if required_symbols is not None:
                     live_required = set(required_symbols())
                     unknown = live_required - set(columns)
@@ -463,14 +543,28 @@ def _iter_mhs_execution_windows(
                 roster = [s for s in columns if s in roster_set]
                 empty_weights = target_weights.iloc[0:0].reindex(columns=roster)
                 empty_signals = signal_available_at[0:0]
-                piece_allocation = _estimate_mhs_execution_allocation(n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count)
+                piece_allocation = _estimate_mhs_execution_allocation(
+                    n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
+                )
                 piece_end = grid_end if tail_end == n_full - 1 else tail_grid[-1] + step
                 window = _materialize_execution_piece(
-                    piece_grid=tail_grid, piece_weights=empty_weights, piece_signals=empty_signals,
-                    roster=roster, columns=columns, root=root, timeframe=timeframe,
-                    funding_by_symbol=funding_by_symbol, mark_mode=mark_mode, funding_failures=funding_failures,
-                    allocation=piece_allocation, budget_bytes=budget_bytes, reserve_bytes=reserve_bytes, initial_swap_bytes=initial_swap_bytes,
-                    window_start=tail_grid[0], window_end=piece_end, logical_partition=(i0, i1),
+                    piece_grid=tail_grid,
+                    piece_weights=empty_weights,
+                    piece_signals=empty_signals,
+                    roster=roster,
+                    columns=columns,
+                    root=root,
+                    timeframe=timeframe,
+                    funding_by_symbol=funding_by_symbol,
+                    mark_mode=mark_mode,
+                    funding_failures=funding_failures,
+                    allocation=piece_allocation,
+                    budget_bytes=budget_bytes,
+                    reserve_bytes=reserve_bytes,
+                    initial_swap_bytes=initial_swap_bytes,
+                    window_start=tail_grid[0],
+                    window_end=piece_end,
+                    logical_partition=(i0, i1),
                 )
                 yield window
                 del window

@@ -32,12 +32,17 @@ from src.mhs.backtest.inventory import (
     _inventory_daily_returns,
     _inventory_ledger_summary,
 )
+from src.mhs.execution.contracts import TerminalPositionEvidence
 from src.mhs.execution.integrity import replay_ledger_certified
 from src.mhs.reporting.process import _tier_payload
 
 if TYPE_CHECKING:
+    from src.mhs.backtest.certification import ProcessValidationResult
     from src.mhs.backtest.contracts import ProcessInventoryFailureReport, ProcessInventoryReport
     from src.mhs.execution.contracts import ExecutionDataGap, FundingCoverageGap, StrategyExecutionReplayResult
+
+_VALIDATION_SCHEMA = "process_validation/1"
+_LEGACY_VALIDATION_ABSENT = "LEGACY_VALIDATION_ABSENT"
 
 _MANIFEST_VERSION = 1
 _MANIFEST_NAME = "manifest.json"
@@ -94,9 +99,7 @@ def _gaps_table(gaps: Sequence[ExecutionDataGap]) -> pa.Table:
             "decision_time": pa.array(
                 _utc_index([gap.decision_time for gap in gaps]), type=pa.timestamp("ns", tz="UTC")
             ),
-            "signal_time": pa.array(
-                _utc_index([gap.signal_time for gap in gaps]), type=pa.timestamp("ns", tz="UTC")
-            ),
+            "signal_time": pa.array(_utc_index([gap.signal_time for gap in gaps]), type=pa.timestamp("ns", tz="UTC")),
             "execution_bound": pa.array([str(gap.execution_bound) for gap in gaps], type=pa.string()),
         }
     )
@@ -239,7 +242,7 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-            tmp.write(json.dumps(payload, sort_keys=True, indent=2))
+            tmp.write(json.dumps(payload, sort_keys=True, indent=2, allow_nan=False))
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp_name, path)
@@ -254,8 +257,12 @@ def _detail_reference(identity: str, role: str, count: int) -> dict[str, object]
 
 
 def persist_inventory_evidence(
-    report: ProcessInventoryReport, output: Path, *, evidence_root: Path,
-    registry_path: Path | None = None, run_id: str | None = None,
+    report: ProcessInventoryReport,
+    output: Path,
+    *,
+    evidence_root: Path,
+    registry_path: Path | None = None,
+    run_id: str | None = None,
 ) -> tuple[Path, str]:
     """Persist compact three-minute inventory evidence and its lossless content-addressed details. Execution completion does not certify the financial ledger. Args: evaluated report, fresh summary destination, evidence root and paired optional registry/execution identity for managed publication protection. Returns: summary destination and verified evidence identity. Raises: ValueError for invalid paths or incomplete ownership context; DataIntegrityError for conflicting evidence; OSError or sqlite3.Error for persistence failure."""
 
@@ -299,7 +306,9 @@ def persist_inventory_evidence(
         ("stress", "stress", report.stress),
     ):
         tier = cast(dict[str, object], summary[tier_key])
-        tier["funding_coverage_gaps"] = _detail_reference(identity, f"{tier_role}_coverage", len(result.funding_coverage_gaps))
+        tier["funding_coverage_gaps"] = _detail_reference(
+            identity, f"{tier_role}_coverage", len(result.funding_coverage_gaps)
+        )
         summary[tier_key] = tier
     _atomic_write_json(out, summary)
     return out, identity
@@ -326,6 +335,22 @@ def export_inventory_json(summary_path: Path, output: Path) -> Path:
     bundle = Path(bundle_path)
     _verify_bundle(bundle, evidence_id)
     payload = {key: value for key, value in summary.items() if key not in ("schema_version", "evidence_id", "evidence")}
+    if "validation" not in payload:
+        payload["validation"] = process_validation_payload(None)
+        gate = payload.get("gate")
+        if isinstance(gate, dict):
+            raw_metrics = gate.get("metrics")
+            raw_reasons = gate.get("reason_codes")
+            gate_metrics: dict[object, object] = dict(raw_metrics) if isinstance(raw_metrics, dict) else {}
+            gate_reasons: list[object] = list(raw_reasons) if isinstance(raw_reasons, list) else []
+            payload["gate"] = {
+                "go": False,
+                "reason_codes": sorted(set(gate_reasons) | {_LEGACY_VALIDATION_ABSENT}),
+                "metrics": dict(gate_metrics),
+            }
+            financial = payload.get("financial")
+            if isinstance(financial, dict):
+                payload["financial"] = {"gate": dict(cast(dict[object, object], payload["gate"]))}
     payload["funding_coverage_gaps"] = _restore_coverage(bundle, "coverage")
     for tier in ("base", "stress"):
         tier_payload = cast(dict[str, object], payload[tier])
@@ -387,14 +412,116 @@ __all__ = [
     "persist_inventory_evidence",
     "persist_process_inventory_failure",
     "persist_process_inventory_report",
+    "process_validation_payload",
 ]
 
 
 PROCESS_INVENTORY_CERTIFICATION_LEVEL: str = "process_inventory_3m"
 
 
+def _require_json_finite(value: object) -> object:
+    if value is None:
+        return None
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        raise DataIntegrityError("validation numeric output must be finite")
+    return value
+
+
+def _terminal_position_payload(position: TerminalPositionEvidence) -> dict[str, object]:
+    return {
+        "symbol": position.symbol,
+        "quantity": float(position.quantity),
+        "cutoff": position.cutoff.isoformat(),
+        "status": position.status,
+        "mark": None if position.mark is None else float(position.mark),
+        "mark_available_at": None if position.mark_available_at is None else position.mark_available_at.isoformat(),
+        "funding_complete": bool(position.funding_complete),
+        "reason_codes": list(position.reason_codes),
+    }
+
+
+def process_validation_payload(validation: ProcessValidationResult | None) -> dict[str, object]:
+    """Serialize evidence-state acceptance without converting absent proof into success.
+
+    Args:
+        validation: Source-owned assessment or absent legacy validation evidence.
+    Returns:
+        Versioned requirement statuses, reasons and diagnostic/inferential values;
+        missing legacy validation is explicitly unverified and deployment-ineligible.
+    """
+    if validation is None:
+        return {
+            "schema": _VALIDATION_SCHEMA,
+            "status": "legacy_unverified",
+            "go": False,
+            "accounting_valid": None,
+            "historical_acceptance": "unverified",
+            "forward_acceptance": "unverified",
+            "requirements": [],
+            "reason_codes": [_LEGACY_VALIDATION_ABSENT],
+            "diagnostics": {},
+            "gate": {"go": False, "reason_codes": [_LEGACY_VALIDATION_ABSENT], "metrics": {}},
+            "procedure_digest": None,
+            "code_digest": None,
+            "input_manifest_digest": None,
+            "interval_start": None,
+            "interval_end": None,
+            "evidence_role": None,
+            "actual_capital": None,
+            "look_ordinal": None,
+        }
+    requirements = [
+        {
+            "requirement": check.requirement,
+            "status": check.status,
+            "procedure_digest": check.procedure_digest,
+            "input_manifest_digest": check.input_manifest_digest,
+            "code_digest": check.code_digest,
+            "interval_start": check.interval_start.isoformat(),
+            "interval_end": check.interval_end.isoformat(),
+            "artifact_digest": check.artifact_digest,
+            "reason_codes": list(check.reason_codes),
+        }
+        for check in validation.requirements
+    ]
+    digests = {check.procedure_digest for check in validation.requirements}
+    codes = {check.code_digest for check in validation.requirements}
+    manifests = {check.input_manifest_digest for check in validation.requirements}
+    starts = {check.interval_start.isoformat() for check in validation.requirements}
+    ends = {check.interval_end.isoformat() for check in validation.requirements}
+    diagnostics = {key: _require_json_finite(value) for key, value in dict(validation.diagnostic_metrics).items()}
+    gate_metrics = {key: _require_json_finite(value) for key, value in dict(validation.gate.metrics).items()}
+    return {
+        "schema": _VALIDATION_SCHEMA,
+        "status": "assessed",
+        "go": bool(validation.gate.go),
+        "accounting_valid": bool(validation.accounting_valid),
+        "historical_acceptance": validation.historical_acceptance,
+        "forward_acceptance": validation.forward_acceptance,
+        "requirements": requirements,
+        "reason_codes": list(validation.reason_codes),
+        "diagnostics": diagnostics,
+        "gate": {
+            "go": bool(validation.gate.go),
+            "reason_codes": list(validation.gate.reason_codes),
+            "metrics": gate_metrics,
+        },
+        "procedure_digest": next(iter(digests)) if len(digests) == 1 else None,
+        "code_digest": next(iter(codes)) if len(codes) == 1 else None,
+        "input_manifest_digest": next(iter(manifests)) if len(manifests) == 1 else None,
+        "interval_start": next(iter(starts)) if len(starts) == 1 else None,
+        "interval_end": next(iter(ends)) if len(ends) == 1 else None,
+        "evidence_role": None,
+        "actual_capital": None,
+        "look_ordinal": None,
+    }
+
+
 def _inventory_terminal_state(result: StrategyExecutionReplayResult) -> dict[str, object]:
-    """Disclosed terminal inventory split by mark availability."""
+    """Serialize engine-native priced-open, settled and unresolved terminal evidence.
+    Historical economic gaps remain visible even if a later terminal mark is known;
+    no serialization step may invent a closing trade or forgive missing financing.
+    """
     gaps = list(result.ledger.data_gaps)
     unpriced = sorted({g.symbol for g in gaps if g.code in _UNPRICED_TERMINAL_CODES})
     unpriced_set = set(unpriced)
@@ -405,15 +532,18 @@ def _inventory_terminal_state(result: StrategyExecutionReplayResult) -> dict[str
         for symbol, quantity in totals.items():
             if float(quantity) != 0.0 and str(symbol) not in unpriced_set:
                 open_inventory[str(symbol)] = float(quantity)
+    positions = [_terminal_position_payload(p) for p in list(result.terminal_positions)]
     return {
         "primary_valid": bool(result.ledger.primary_valid),
         "invalid_reasons": list(result.ledger.invalid_reasons),
         "terminal_certified": bool(replay_ledger_certified(result)),
         "open_inventory": open_inventory,
         "unpriced_terminal_symbols": unpriced,
-        "data_gaps": [
-            {"code": g.code, "symbol": g.symbol, "timestamp": g.timestamp.isoformat()} for g in gaps
-        ],
+        "terminal_positions": positions,
+        "priced_open_symbols": sorted({str(p["symbol"]) for p in positions if p["status"] == "open_marked"}),
+        "settled_symbols": sorted({str(p["symbol"]) for p in positions if p["status"] == "settled"}),
+        "unresolved_symbols": sorted({str(p["symbol"]) for p in positions if p["status"] == "unresolved"}),
+        "data_gaps": [{"code": g.code, "symbol": g.symbol, "timestamp": g.timestamp.isoformat()} for g in gaps],
     }
 
 
@@ -422,11 +552,13 @@ def _inventory_result_payload(result: StrategyExecutionReplayResult) -> dict[str
     daily = _inventory_daily_returns(result)
     summary = _inventory_ledger_summary(result)
     fills = result.simulated_fills
+    certified = bool(replay_ledger_certified(result))
     return {
         "daily_returns": {ts.isoformat(): float(v) for ts, v in daily.items()},
         "cagr": summary["cagr"],
         "max_drawdown": summary["max_drawdown"],
         "annualized_turnover": summary["annualized_turnover"],
+        "diagnostic_only": not certified,
         "total_fees": summary["total_fees"],
         "total_funding": summary["total_funding"],
         "total_fills": len(fills),
@@ -444,6 +576,13 @@ def _inventory_result_payload(result: StrategyExecutionReplayResult) -> dict[str
 def _inventory_summary_payload(report: ProcessInventoryReport) -> dict[str, object]:
     """Assemble the full-JSON inventory payload with engine-native fill accounting."""
     decisions = report.proxy.base.target_weights.index
+    validation_payload = process_validation_payload(report.validation)
+    gate = report.validation.gate if report.validation is not None else report.gate
+    gate_payload: dict[str, object] = {
+        "go": gate.go,
+        "reason_codes": list(gate.reason_codes),
+        "metrics": dict(gate.metrics),
+    }
     return {
         "status": "completed",
         "execution_timeframe": "3m",
@@ -456,11 +595,9 @@ def _inventory_summary_payload(report: ProcessInventoryReport) -> dict[str, obje
             "decision_end": decisions[-1].isoformat() if len(decisions) else None,
             "n_decisions": len(decisions),
         },
-        "gate": {
-            "go": report.gate.go,
-            "reason_codes": list(report.gate.reason_codes),
-            "metrics": dict(report.gate.metrics),
-        },
+        "gate": gate_payload,
+        "financial": {"gate": dict(gate_payload)},
+        "validation": validation_payload,
         "base": _inventory_result_payload(report.base),
         "stress": _inventory_result_payload(report.stress),
         "proxy": {
@@ -476,7 +613,9 @@ def _inventory_summary_payload(report: ProcessInventoryReport) -> dict[str, obje
 
 
 def persist_process_inventory_report(
-    report: ProcessInventoryReport, output: Path, *,
+    report: ProcessInventoryReport,
+    output: Path,
+    *,
     evidence_root: Path | None = None,
     registry_path: Path | None = None,
     run_id: str | None = None,
@@ -504,7 +643,11 @@ def persist_process_inventory_report(
     """
     root = Path(evidence_root) if evidence_root is not None else Path(output).parent / ".evidence"
     summary_path, _evidence_id = persist_inventory_evidence(
-        report, output, evidence_root=root, registry_path=registry_path, run_id=run_id,
+        report,
+        output,
+        evidence_root=root,
+        registry_path=registry_path,
+        run_id=run_id,
     )
     return summary_path
 
@@ -521,7 +664,8 @@ def _failure_gap_payload(gap: ExecutionDataGap) -> dict[str, object]:
 
 
 def persist_process_inventory_failure(
-    report: ProcessInventoryFailureReport, output: Path,
+    report: ProcessInventoryFailureReport,
+    output: Path,
 ) -> Path:
     """Persist failure diagnostics without overwriting certified evidence.
 
@@ -554,9 +698,7 @@ def persist_process_inventory_failure(
         "start": report.start.isoformat(),
         "end": report.end.isoformat(),
         "data_root": report.data_root,
-        "execution_policy": {
-            "tracking_error_threshold": report.execution_policy.tracking_error_threshold
-        },
+        "execution_policy": {"tracking_error_threshold": report.execution_policy.tracking_error_threshold},
         "stage": report.stage,
         "error_code": report.error_code,
         "error_type": report.error_type,
@@ -566,20 +708,16 @@ def persist_process_inventory_failure(
         "completed_decisions": report.completed_decisions,
         "completed_windows": report.completed_windows,
         "completed_decision_start": (
-            report.completed_decision_start.isoformat()
-            if report.completed_decision_start is not None else None
+            report.completed_decision_start.isoformat() if report.completed_decision_start is not None else None
         ),
         "completed_decision_end": (
-            report.completed_decision_end.isoformat()
-            if report.completed_decision_end is not None else None
+            report.completed_decision_end.isoformat() if report.completed_decision_end is not None else None
         ),
         "source_gaps": [_failure_gap_payload(g) for g in report.source_gaps],
         "source_gap_excluded_symbols": list(report.source_gap_excluded_symbols),
         "funding_coverage_gaps": [_coverage_payload(g) for g in report.funding_coverage_gaps],
         "resource_measurements": [dataclasses.asdict(m) for m in report.resource_measurements],
-        "memory_stats": (
-            dataclasses.asdict(report.memory_stats) if report.memory_stats is not None else None
-        ),
+        "memory_stats": (dataclasses.asdict(report.memory_stats) if report.memory_stats is not None else None),
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp_path: str | None = None

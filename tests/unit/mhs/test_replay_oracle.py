@@ -83,8 +83,8 @@ class TestStrategyReplay:
     def test_persistent_termination_creates_forced_exit_plus_stress_penalty(self) -> None:
         # A is held, then its minute data permanently ends mid-grid.
         # INV-NO-FABRICATED-TERMINAL-FILL: no retrospective exit is
-        # fabricated; the open position is disclosed as UNKNOWN_TERMINATION
-        # and invalidates the primary ledger on both bounds.
+        # fabricated; the stale held mark is disclosed as an unresolved
+        # terminal position and invalidates the primary ledger on both bounds.
         grid = pd.date_range("2021-01-01 01:01", periods=120, freq="1min", tz="UTC")
         px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
         px.loc["2021-01-01 02:00":, "A"] = np.nan
@@ -95,30 +95,33 @@ class TestStrategyReplay:
             pd.DataFrame(0.0, index=grid, columns=["A"]), 1.0,
             "OHLCV_STRICT_PROXY", ExecutionSpec(),
         )
-        assert strict.termination_counts["UNKNOWN_TERMINATION"] == 1
+        assert strict.termination_counts["UNKNOWN_TERMINATION"] == 0
         assert strict.forced_exit_count == 0
         assert strict.forced_exit_notional == 0.0
         assert "forced_exit" not in strict.simulated_fills["reason"].tolist()
         assert not strict.ledger.primary_valid
-        assert any(g.code == "UNKNOWN_TERMINATION" for g in strict.ledger.data_gaps)
+        assert any(g.code == "MISSING_HELD_MARK" for g in strict.ledger.data_gaps)
+        assert [p.status for p in strict.terminal_positions] == ["unresolved"]
 
         stress = strategy_aware_execution_replay(
             target, signal_at, px, px, px, px,
             pd.DataFrame(0.0, index=grid, columns=["A"]), 1.0,
             "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
         )
-        assert stress.termination_counts["UNKNOWN_TERMINATION"] == 1
+        assert stress.termination_counts["UNKNOWN_TERMINATION"] == 0
         assert stress.forced_exit_count == 0
         assert "forced_exit" not in stress.simulated_fills["reason"].tolist()
         assert not stress.ledger.primary_valid
+        assert [p.status for p in stress.terminal_positions] == ["unresolved"]
 
     def test_windowed_engine_real_stale_position_still_forced_exits(self) -> None:
         """SCENARIO_MHS_FOLD0_REAL_STALE_POSITION_TERMINATION_DISCLOSED.
 
         Regression guard for the dust-tolerance fix below: a REAL
         (above-tolerance) held position whose data permanently ends mid-grid
-        is disclosed as UNKNOWN_TERMINATION and invalidates the ledger --
-        no retrospective exit is fabricated (INV-NO-FABRICATED-TERMINAL-FILL).
+        is disclosed as an unresolved terminal position and invalidates the
+        ledger -- no retrospective exit is fabricated
+        (INV-NO-FABRICATED-TERMINAL-FILL).
         """
         grid = pd.date_range("2021-01-01 00:00", periods=180, freq="1min", tz="UTC")
         px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
@@ -132,12 +135,13 @@ class TestStrategyReplay:
         report = replay_execution_windows(
             windows, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
         )
-        assert report.termination_counts["UNKNOWN_TERMINATION"] == 1
+        assert report.termination_counts["UNKNOWN_TERMINATION"] == 0
         assert report.forced_exit_count == 0
         assert report.forced_exit_notional == 0.0
         assert "forced_exit" not in report.simulated_fills["reason"].tolist()
         assert not report.ledger.primary_valid
-        assert any(g.code == "UNKNOWN_TERMINATION" for g in report.ledger.data_gaps)
+        assert any(g.code == "MISSING_HELD_MARK" for g in report.ledger.data_gaps)
+        assert [p.status for p in report.terminal_positions] == ["unresolved"]
 
     def test_dust_residual_position_does_not_force_exit(self) -> None:
         """SCENARIO_MHS_FOLD0_DUST_NO_FORCED_EXIT.

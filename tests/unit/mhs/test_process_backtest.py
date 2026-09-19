@@ -85,6 +85,7 @@ def _synthetic_data(n_days: int = 500, seed: int = 7) -> ProcessMarketData:
         funding_step=funding_step,
         member_books={"planted": planted, "inverse": inverse, "noise": noise},
         execution_mask=execution_mask,
+        funding_known_1h=pd.DataFrame(True, index=grid_1h, columns=symbols),
     )
 
 
@@ -220,7 +221,7 @@ def test_evaluate_uses_gate_and_stress_triple(monkeypatch) -> None:
     def _fake_load(start, end, data_root=None, memory_budget=None):
         return data
 
-    def _fake_run(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None):
+    def _fake_run(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None, **_):
         seen["decision"] = decision_bps
         seen["evaluation"] = evaluation_bps
         seen.setdefault("bps", []).append(decision_bps)
@@ -228,7 +229,7 @@ def test_evaluate_uses_gate_and_stress_triple(monkeypatch) -> None:
 
     calls: list = []
 
-    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None):
+    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None, **_):
         calls.append((decision_bps, evaluation_bps))
         return _fake_run(loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps, leverage_cap=leverage_cap)
 
@@ -771,7 +772,7 @@ def test_evaluate_threads_explicit_policy(monkeypatch) -> None:
     def _fake_load(start, end, data_root=None, memory_budget=None):
         return data
 
-    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None):
+    def _spy(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None, **_):
         seen["policy"] = execution_policy
         return run_process_paths(
             loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps,
@@ -1079,8 +1080,8 @@ def test_execution_availability_rejects_misaligned_mask() -> None:
     ).equals(targets)
 
 
-def test_zeroed_target_with_unfillable_exit_holds_inventory_without_certification() -> None:
-    """A masked exit that cannot fill keeps units held and blocks certification."""
+def test_zeroed_target_with_unfillable_exit_holds_inventory_as_open_marked() -> None:
+    """A masked exit that cannot fill keeps units held as priced open inventory."""
     from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
 
     data = _synthetic_data(n_days=60)
@@ -1096,8 +1097,10 @@ def test_zeroed_target_with_unfillable_exit_holds_inventory_without_certificatio
     )
     result = replay_execution_windows((window,), 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert abs(float(result.ledger.equity.iloc[-1] - result.ledger.equity.iloc[0])) >= 0.0
-    assert not result.ledger.primary_valid
-    assert any(g.code in ("UNKNOWN_TERMINATION", "MISSING_HELD_MARK") for g in result.ledger.data_gaps)
+    assert "delist_settlement" not in set(result.simulated_fills["reason"])
+    assert result.ledger.primary_valid
+    assert [p.status for p in result.terminal_positions] == ["open_marked"]
+    assert abs(float(result.terminal_positions[0].quantity)) > 0.0
 
 
 def test_execution_availability_rejects_nullable_missing_mask() -> None:
@@ -1392,7 +1395,7 @@ def test_finalize_discloses_open_inventory_without_fabricated_exit(monkeypatch) 
     report = bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     terminal = rep_inventory._inventory_terminal_state(report.base)
     assert set(terminal["open_inventory"]) == {"AUSDT", "BUSDT"}
-    assert terminal["primary_valid"] is False
+    assert terminal["primary_valid"] is True
     assert terminal["terminal_certified"] is True
     assert terminal["unpriced_terminal_symbols"] == []
     reasons = report.base.simulated_fills.get("reason", pd.Series(dtype="object")).tolist()
@@ -2178,11 +2181,15 @@ def test_budget_propagation_preserves_policy_and_tiers(monkeypatch) -> None:
         seen["budget"] = memory_budget
         return data
 
-    def _fake_run(loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None, memory_budget=None):
+    def _fake_run(
+        loaded, sched, *, decision_bps, evaluation_bps, leverage_cap, execution_policy=None,
+        risk_sizing=None, memory_budget=None, clock=None, member_evidence=None,
+    ):
         seen["run_budget"] = memory_budget
         return run_process_paths(
             loaded, sched, decision_bps=decision_bps, evaluation_bps=evaluation_bps,
             leverage_cap=leverage_cap, execution_policy=execution_policy,
+            risk_sizing=risk_sizing, clock=clock, member_evidence=member_evidence,
         )
 
     monkeypatch.setattr(bt_paths, "load_process_market_data", _fake_load)
@@ -2409,6 +2416,7 @@ def test_inventory_observed_gaps_preserve_provenance(monkeypatch) -> None:
     class _FakeAcc:
         def __init__(self) -> None:
             self.data_gaps = [gap, gap]
+            self.funding_coverage_gaps = {}
 
         def finalize(self):
             finalized["called"] = True

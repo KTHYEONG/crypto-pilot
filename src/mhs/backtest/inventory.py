@@ -6,13 +6,19 @@ import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
+from src.mhs.backtest.certification import (
+    REQUIRED_CHECK_NAMES,
+    EvaluationContext,
+    EvidenceCheck,
+    assess_process_validation,
+)
 from src.mhs.backtest.contracts import (
     ProcessBacktestReport,
     ProcessInventoryBacktestError,
@@ -58,6 +64,10 @@ from src.mhs.resources import (
     resolve_mhs_memory_budget,
 )
 from src.mhs.types import ExecutionSpec
+
+if TYPE_CHECKING:
+    from src.mhs.backtest.journal import ProcessProcedureDefinition
+    from src.mhs.backtest.labels import MaturedMemberReturns
 
 _logger = logging.getLogger(__name__)
 
@@ -267,7 +277,7 @@ def replay_process_execution(
 @dataclass(slots=True)
 class _ProcessInventoryProgress:
     """Monotonic production replay coverage shared with the evaluator.
-Validation and successful all-bound consumption are distinct observations."""
+    Validation and successful all-bound consumption are distinct observations."""
 
     validated_decisions: int = 0
     completed_decisions: int = 0
@@ -348,18 +358,25 @@ def _inventory_gate(
 
 
 def _inventory_window_stream(
-    path: ProcessPath, signal_available_at: pd.DatetimeIndex, root: str,
-    start: pd.Timestamp, end: pd.Timestamp,
-    funding_by_symbol: dict[str, pd.Series], funding_failures: Mapping[str, str],
-    spec: ExecutionSpec, budget_bytes: int | None, reserve_bytes: int | None,
+    path: ProcessPath,
+    signal_available_at: pd.DatetimeIndex,
+    root: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    funding_by_symbol: dict[str, pd.Series],
+    funding_failures: Mapping[str, str],
+    spec: ExecutionSpec,
+    budget_bytes: int | None,
+    reserve_bytes: int | None,
     recorder: _StageRecorder,
-    required_symbols: Callable[[], frozenset[str]] | None = None, *,
+    required_symbols: Callable[[], frozenset[str]] | None = None,
+    *,
     progress: _ProcessInventoryProgress | None = None,
     initial_swap_bytes: int | None = None,
 ) -> Iterator[ExecutionReplayWindow]:
     """Validate canonical targets and record observed all-bound replay coverage.
-Completed coverage advances only after the consumer returns from a yielded
-window. Validation alone cannot certify a consumed decision or result."""
+    Completed coverage advances only after the consumer returns from a yielded
+    window. Validation alone cannot certify a consumed decision or result."""
     targets = path.target_weights
     expected_columns = list(targets.columns)
     fence = _execution_fence(targets)
@@ -394,16 +411,18 @@ window. Validation alone cannot certify a consumed decision or result."""
                 active_symbols=len(window.symbols),
             )
             _logger.info(
-                "[DATA] stage=process_3m_window_loaded window=%d decisions=0", index,
+                "[DATA] stage=process_3m_window_loaded window=%d decisions=0",
+                index,
             )
             if progress is not None:
                 progress.completed_windows += 1
             yield window
             if progress is not None:
                 _logger.info(
-                    "[DATA] stage=process_3m_window_consumed window=%d completed_windows=%d "
-                    "completed_decisions=%d",
-                    index, progress.completed_windows, progress.completed_decisions,
+                    "[DATA] stage=process_3m_window_consumed window=%d completed_windows=%d completed_decisions=%d",
+                    index,
+                    progress.completed_windows,
+                    progress.completed_decisions,
                 )
             _assert_execution_rss_budget(
                 f"process_3m_window_{index}", budget_bytes, index + 1, reserve_bytes=reserve_bytes
@@ -427,7 +446,9 @@ window. Validation alone cannot certify a consumed decision or result."""
             active_symbols=len(window.symbols),
         )
         _logger.info(
-            "[DATA] stage=process_3m_window_loaded window=%d decisions=%d", index, n,
+            "[DATA] stage=process_3m_window_loaded window=%d decisions=%d",
+            index,
+            n,
         )
         yield window
         if progress is not None:
@@ -439,12 +460,13 @@ window. Validation alone cannot certify a consumed decision or result."""
             _logger.info(
                 "[DATA] stage=process_3m_window_consumed window=%d completed_windows=%d "
                 "completed_decisions=%d completed_decision_start=%s completed_decision_end=%s",
-                index, progress.completed_windows, progress.completed_decisions,
-                progress.completed_decision_start, progress.completed_decision_end,
+                index,
+                progress.completed_windows,
+                progress.completed_decisions,
+                progress.completed_decision_start,
+                progress.completed_decision_end,
             )
-        _assert_execution_rss_budget(
-            f"process_3m_window_{index}", budget_bytes, index + 1, reserve_bytes=reserve_bytes
-        )
+        _assert_execution_rss_budget(f"process_3m_window_{index}", budget_bytes, index + 1, reserve_bytes=reserve_bytes)
     if cursor != len(targets):
         raise DataIntegrityError("windows must cover every path decision exactly once")
 
@@ -472,13 +494,81 @@ def _live_funding_coverage(live_sets: _LiveAccumulatorSets) -> tuple[FundingCove
     return tuple(sorted(seen.values(), key=lambda g: (g.start, g.end, g.symbol)))
 
 
+def build_process_evidence_checks(
+    procedure: ProcessProcedureDefinition,
+    context: EvaluationContext,
+    proxy: ProcessBacktestReport,
+    base: StrategyExecutionReplayResult,
+    stress: StrategyExecutionReplayResult,
+    *,
+    memory_budget: MhsMemoryBudget,
+) -> tuple[EvidenceCheck, ...]:
+    """Produce requirement evidence from source-owned validated outputs, not caller flags.
+
+    Args:
+        procedure: Exact frozen decision and economic definition.
+        context: Journal-reserved identities and assessed interval.
+        proxy: Auditable label, policy-choice and target generation evidence.
+        base: Primary execution accounting and terminal observations.
+        stress: Exact-decision cost-stress execution result.
+        memory_budget: Existing guards for input validation and evidence evaluation.
+    Returns:
+        One matching passed, failed or unverified record for every required check.
+    Raises:
+        DataIntegrityError: Producer identities, inputs or interval coverage conflict.
+    """
+    from src.mhs.backtest.journal import ProcessProcedureDefinition as _Procedure
+    from src.mhs.backtest.journal import process_procedure_digest as _digest
+
+    if not isinstance(procedure, _Procedure):
+        raise DataIntegrityError("procedure must be a ProcessProcedureDefinition")
+    if not isinstance(context, EvaluationContext):
+        raise DataIntegrityError("context must be an EvaluationContext")
+    if not isinstance(proxy, ProcessBacktestReport):
+        raise DataIntegrityError("proxy must be a ProcessBacktestReport")
+    if not isinstance(base, StrategyExecutionReplayResult):
+        raise DataIntegrityError("base must be a StrategyExecutionReplayResult")
+    if not isinstance(stress, StrategyExecutionReplayResult):
+        raise DataIntegrityError("stress must be a StrategyExecutionReplayResult")
+    if not isinstance(memory_budget, MhsMemoryBudget):
+        raise DataIntegrityError("memory_budget must be a MhsMemoryBudget")
+    if context.procedure_digest != _digest(procedure):
+        raise DataIntegrityError("context procedure identity does not match the procedure")
+    if context.code_digest != procedure.code_digest:
+        raise DataIntegrityError("context code identity does not match the procedure")
+    names = tuple(procedure.required_checks)
+    if len(set(names)) != len(names):
+        raise DataIntegrityError("procedure required checks must be unique")
+    for name in names:
+        if name not in REQUIRED_CHECK_NAMES:
+            raise DataIntegrityError(f"unknown requirement '{name}'")
+    return tuple(
+        EvidenceCheck(
+            requirement=name,
+            status="unverified",
+            procedure_digest=context.procedure_digest,
+            input_manifest_digest=context.input_manifest_digest,
+            code_digest=context.code_digest,
+            interval_start=context.interval_start,
+            interval_end=context.interval_end,
+            artifact_digest=None,
+            reason_codes=("PRODUCER_ABSENT",),
+        )
+        for name in names
+    )
+
+
 def evaluate_process_inventory_backtest(
     start: pd.Timestamp = DISCOVERY_START,
-    end: pd.Timestamp = PROCESS_EVALUATION_CEILING, *,
+    end: pd.Timestamp = PROCESS_EVALUATION_CEILING,
+    *,
     data_root: str | None = None,
     execution_policy: ProcessExecutionPolicy | None = None,
     risk_sizing: ProcessRiskSizingSpec | None = None,
     memory_budget: MhsMemoryBudget | None = None,
+    procedure: ProcessProcedureDefinition | None = None,
+    evaluation_context: EvaluationContext | None = None,
+    member_evidence: MaturedMemberReturns | None = None,
 ) -> ProcessInventoryReport:
     """Replay original process targets through the primary three-minute engine.
 
@@ -493,6 +583,9 @@ def evaluate_process_inventory_backtest(
         execution_policy: Existing adoption policy or baseline.
         risk_sizing: Research-only causal volatility sizing; None preserves baseline.
         memory_budget: Explicit stage limits or validated defaults.
+        procedure: Frozen decision definition; None preserves legacy research.
+        evaluation_context: Reserved journal context; None yields historical context.
+        member_evidence: Inventory-native labels admitted only on identity match.
     Returns:
         Original base/stress inventory evidence with independent validity flags.
     Raises:
@@ -509,6 +602,18 @@ def evaluate_process_inventory_backtest(
         raise ValueError("execution_policy must be a ProcessExecutionPolicy or None")
     if risk_sizing is not None and not isinstance(risk_sizing, ProcessRiskSizingSpec):
         raise ValueError("risk_sizing must be a ProcessRiskSizingSpec or None")
+    if procedure is not None:
+        from src.mhs.backtest.journal import ProcessProcedureDefinition as _Procedure
+
+        if not isinstance(procedure, _Procedure):
+            raise DataIntegrityError("procedure must be a ProcessProcedureDefinition or None")
+    if evaluation_context is not None and not isinstance(evaluation_context, EvaluationContext):
+        raise DataIntegrityError("evaluation_context must be an EvaluationContext or None")
+    if member_evidence is not None:
+        from src.mhs.backtest.labels import MaturedMemberReturns as _Labels
+
+        if not isinstance(member_evidence, _Labels):
+            raise DataIntegrityError("member_evidence must be MaturedMemberReturns or None")
     budget = resolve_mhs_memory_budget(memory_budget)
     run_swap_baseline = _current_tree_swap_bytes()
     sampler = _TreeMemorySampler()
@@ -525,8 +630,14 @@ def evaluate_process_inventory_backtest(
     try:
         budget_bytes, reserve_bytes = budget.replay_tree_pss_bytes, budget.min_available_bytes
         proxy = evaluate_process_backtest(
-            start, end, data_root=data_root, execution_policy=execution_policy,
-            risk_sizing=risk_sizing, memory_budget=budget,
+            start,
+            end,
+            data_root=data_root,
+            execution_policy=execution_policy,
+            risk_sizing=risk_sizing,
+            memory_budget=budget,
+            procedure=procedure,
+            member_evidence=member_evidence,
         )
         recorder.record("process_inventory_proxy")
         path = proxy.base
@@ -535,11 +646,18 @@ def evaluate_process_inventory_backtest(
             raise DataIntegrityError("path.target_weights must not be empty")
         sampler.set_stage("replay")
         current_stage = "replay"
-        signal_available_at = pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1))
+        signal_available_at = (
+            path.signal_available_at
+            if path.signal_available_at is not None
+            else pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1))
+        )
         columns = list(targets.columns)
         _admit_process_stage(
-            stage="process_replay_entry", estimated_bytes=_estimate_panel_bytes(len(targets), len(columns), 4),
-            budget=budget, replay=True, initial_swap_bytes=run_swap_baseline,
+            stage="process_replay_entry",
+            estimated_bytes=_estimate_panel_bytes(len(targets), len(columns), 4),
+            budget=budget,
+            replay=True,
+            initial_swap_bytes=run_swap_baseline,
         )
         funding_by_symbol, funding_failures = _load_funding_series(columns)
         root = data_root or str(FUTURES_DATA_DIR / "ohlcv")
@@ -554,17 +672,28 @@ def evaluate_process_inventory_backtest(
             return live_required_symbols(live_sets[-1])
 
         stream = _inventory_window_stream(
-            path, signal_available_at, root, window_start, window_end,
-            funding_by_symbol, funding_failures, base_spec, budget_bytes,
-            reserve_bytes, recorder, _live_required, progress=progress,
+            path,
+            signal_available_at,
+            root,
+            window_start,
+            window_end,
+            funding_by_symbol,
+            funding_failures,
+            base_spec,
+            budget_bytes,
+            reserve_bytes,
+            recorder,
+            _live_required,
+            progress=progress,
             initial_swap_bytes=run_swap_baseline,
         )
         bound: _ExecutionBound = "OHLCV_IMMEDIATE_TAKER"
         recorder.record("process_inventory_replay_start")
         _logger.info("[DATA] stage=replay_start windows=%d", len(targets))
+        initial_equity = float(procedure.initial_equity) if procedure is not None else PROCESS_INVENTORY_INITIAL_EQUITY
         base, stress = replay_execution_window_batch(
             stream,
-            PROCESS_INVENTORY_INITIAL_EQUITY,
+            initial_equity,
             [(bound, base_spec), (bound, stress_spec)],
             live_accumulators=live_sets,
         )
@@ -573,7 +702,61 @@ def evaluate_process_inventory_backtest(
         _logger.info("[DATA] stage=finalize_start completed_windows=%d", progress.completed_windows)
         _assert_stage_rss_budget("process_3m_replay", budget_bytes, reserve_bytes)
         recorder.record("process_inventory_replay")
-        gate = _inventory_gate(base, stress)
+        if procedure is not None:
+            from src.mhs.backtest.journal import process_procedure_digest as _digest
+
+            envelope = procedure.envelope
+            interval_start = start.tz_convert("UTC")
+            interval_end = end.tz_convert("UTC")
+            if evaluation_context is not None:
+                resolved_context = evaluation_context
+            else:
+                resolved_context = EvaluationContext(
+                    role="historical",
+                    procedure_digest=_digest(procedure),
+                    code_digest=procedure.code_digest,
+                    input_manifest_digest=None,
+                    interval_start=interval_start,
+                    interval_end=interval_end,
+                    registered_at=None,
+                    consulted_through=None,
+                    family_id=None,
+                    look_ordinal=None,
+                    inference_spec=procedure.inference,
+                    journal_complete=False,
+                    observed_through=interval_end,
+                )
+            checks = build_process_evidence_checks(
+                procedure, resolved_context, proxy, base, stress, memory_budget=budget
+            )
+            validation = assess_process_validation(
+                base, stress, context=resolved_context, checks=checks, envelope=envelope, memory_budget=budget
+            )
+        else:
+            envelope = GROWTH_RISK_ENVELOPES[CLI_GROWTH_ENVELOPE_DEFAULT]
+            interval_start = start.tz_convert("UTC")
+            interval_end = end.tz_convert("UTC")
+            legacy_context = evaluation_context
+            if legacy_context is None:
+                legacy_context = EvaluationContext(
+                    role="historical",
+                    procedure_digest="unregistered",
+                    code_digest="unregistered",
+                    input_manifest_digest=None,
+                    interval_start=interval_start,
+                    interval_end=interval_end,
+                    registered_at=None,
+                    consulted_through=None,
+                    family_id=None,
+                    look_ordinal=None,
+                    inference_spec=None,
+                    journal_complete=False,
+                    observed_through=interval_end,
+                )
+            evidence_checks: tuple[EvidenceCheck, ...] = ()
+            validation = assess_process_validation(
+                base, stress, context=legacy_context, checks=evidence_checks, envelope=envelope, memory_budget=budget
+            )
         recorder.record("process_inventory_total")
         memory_stats = sampler.stop()
     except Exception as exc:
@@ -585,8 +768,12 @@ def evaluate_process_inventory_backtest(
             failure_stats = None
         stage: str
         error_code: Literal[
-            "MEMORY_BUDGET", "MEMORY_RESERVE", "SWAP_GROWTH",
-            "RESOURCE_TELEMETRY", "DATA_INTEGRITY", "UNEXPECTED_ERROR",
+            "MEMORY_BUDGET",
+            "MEMORY_RESERVE",
+            "SWAP_GROWTH",
+            "RESOURCE_TELEMETRY",
+            "DATA_INTEGRITY",
+            "UNEXPECTED_ERROR",
         ]
         if isinstance(exc, MhsResourceAdmissionError):
             stage = exc.stage
@@ -605,8 +792,12 @@ def evaluate_process_inventory_backtest(
                     continue
                 for gap in acc.data_gaps:
                     key = (
-                        gap.code, gap.symbol, gap.timestamp,
-                        gap.decision_time, gap.signal_time, gap.execution_bound,
+                        gap.code,
+                        gap.symbol,
+                        gap.timestamp,
+                        gap.decision_time,
+                        gap.signal_time,
+                        gap.execution_bound,
                     )
                     if key not in seen_keys:
                         seen_keys.add(key)
@@ -648,8 +839,9 @@ def evaluate_process_inventory_backtest(
         proxy=proxy,
         base=base,
         stress=stress,
-        gate=gate,
+        gate=validation.gate,
         resource_measurements=recorder.records,
         memory_stats=memory_stats,
         funding_coverage_gaps=_union_funding_coverage(base.funding_coverage_gaps, stress.funding_coverage_gaps),
+        validation=validation,
     )
