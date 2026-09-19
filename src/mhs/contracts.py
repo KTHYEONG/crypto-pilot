@@ -280,12 +280,6 @@ class MhsDiagnosticRequest:
         default=False,
         metadata=cli_param(flag="--execution-coverage-gate", help="Pre-flight coverage check."),
     )
-    fill_mark_parity_gate: bool = field(
-        default=True,
-        metadata=cli_param(
-            flag="--fill-mark-parity-gate", help="Apply the fill/mark parity gate.", negate_flag="--no-fill-mark-parity-gate",
-        ),
-    )
     exposure_scale_two_sided: bool = field(
         default=False,
         metadata=cli_param(

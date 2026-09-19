@@ -42,12 +42,9 @@ def test_weights_asof_holds_recent_row_and_flags_stale() -> None:
 def test_sibling_artifact_paths_require_weights_token(tmp_path) -> None:
     import pytest
     from src.common.errors import DataIntegrityError
-    from src.live.deployed_weights import decision_marks_path, exposure_scale_path
+    from src.live.deployed_weights import exposure_scale_path
 
     base = tmp_path / "deployed_target_weights.parquet.enc"
     assert exposure_scale_path(base) == tmp_path / "deployed_exposure_scale.parquet.enc"
-    assert decision_marks_path(base) == tmp_path / "deployed_decision_marks.parquet.enc"
     with pytest.raises(DataIntegrityError, match="deployed_target_weights"):
         exposure_scale_path(tmp_path / "w.parquet")
-    with pytest.raises(DataIntegrityError, match="deployed_target_weights"):
-        decision_marks_path(tmp_path / "w.parquet")

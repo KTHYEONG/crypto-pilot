@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from pydantic import SecretStr
 
@@ -59,62 +60,6 @@ def assert_signal_available(decision_time: pd.Timestamp, now: pd.Timestamp) -> N
         )
 
 
-def latest_decision_marks(
-    artifact_path: Path,
-    decision_time: pd.Timestamp,
-    *,
-    artifact_key: SecretStr | None = None,
-) -> pd.Series | None:
-    """deployed_decision_marks 아티팩트에서 decision_time 행을 읽는다."""
-    decision_ts = _as_utc(decision_time)
-    base = Path(artifact_path)
-    if "deployed_target_weights" not in base.name:
-        return None
-    # 파일명만 치환: deployed_target_weights -> deployed_decision_marks
-    marks_name = base.name.replace("deployed_target_weights", "deployed_decision_marks")
-    marks_path = base.parent / marks_name
-    # handle .enc vs plain: check both existence
-    candidate: Path | None = None
-    if marks_path.exists():
-        candidate = marks_path
-    elif artifact_key is not None:
-        # try .enc variant if not already
-        enc = marks_path if str(marks_path).endswith(".enc") else Path(f"{marks_path}.enc")
-        if enc.exists():
-            candidate = enc
-        else:
-            # also try direct marks_path as enc when base was .enc but name replacement lost .enc?
-            pass
-    if candidate is None:
-        # also check if plain path with .enc exists even without key? fallback
-        enc_alt = marks_path if str(marks_path).endswith(".enc") else Path(f"{marks_path}.enc")
-        if enc_alt.exists():
-            candidate = enc_alt
-        else:
-            return None
-    if candidate is None:
-        return None
-    if str(candidate).endswith(".enc"):
-        if artifact_key is None:
-            raise ArtifactSealError(f"sealed artifact requires a key: {candidate}")
-        frame = read_sealed_parquet(candidate, derive_key(artifact_key))
-    else:
-        try:
-            frame = pd.read_parquet(candidate)
-        except (FileNotFoundError, OSError) as exc:
-            raise DataIntegrityError(f"decision marks artifact missing: {candidate}") from exc
-    index = pd.DatetimeIndex(frame.index)
-    if index.tz is None:
-        raise DataIntegrityError("decision marks index must be tz-aware UTC")
-    # normalize decision_ts to match index tz
-    if decision_ts not in index:
-        raise DataIntegrityError(
-            f"decision_time {decision_ts} not present in decision marks artifact"
-        )
-    row = frame.loc[decision_ts]
-    return pd.Series(row, index=frame.columns, dtype="float64", name=decision_ts)
-
-
 def assert_signal_fresh(
     decision_time: pd.Timestamp, now: pd.Timestamp, max_staleness: pd.Timedelta
 ) -> None:
@@ -126,3 +71,52 @@ def assert_signal_fresh(
             f"signal for {decision_ts} is stale: now={now_ts} "
             f"max_staleness={max_staleness}"
         )
+
+
+def latest_decision_ohlcv_close(
+    artifact_path: Path,
+    decision_time: pd.Timestamp,
+    *,
+    artifact_key: SecretStr | None = None,
+) -> pd.Series:
+    """Load the source-labelled completed OHLCV decision close for exact-date sizing. Missing, empty, malformed or stale anchors are data-integrity failures, never permission to use a different price source."""
+    decision_ts = _as_utc(decision_time)
+    base = Path(artifact_path)
+    if "deployed_target_weights" not in base.name:
+        raise DataIntegrityError(f"weights path missing token 'deployed_target_weights': {base}")
+    close_path = base.parent / base.name.replace("deployed_target_weights", "deployed_decision_ohlcv_close")
+    candidate: Path | None = None
+    if close_path.exists():
+        candidate = close_path
+    else:
+        enc = close_path if str(close_path).endswith(".enc") else Path(f"{close_path}.enc")
+        if enc.exists():
+            candidate = enc
+    if candidate is None:
+        raise DataIntegrityError(f"decision OHLCV close artifact missing: {close_path}")
+    if str(candidate).endswith(".enc"):
+        if artifact_key is None:
+            raise ArtifactSealError(f"sealed artifact requires a key: {candidate}")
+        frame = read_sealed_parquet(candidate, derive_key(artifact_key))
+    else:
+        try:
+            frame = pd.read_parquet(candidate)
+        except (OSError, ValueError) as exc:
+            raise DataIntegrityError(f"decision OHLCV close artifact unreadable: {candidate}") from exc
+    if frame.empty:
+        raise DataIntegrityError(f"decision OHLCV close artifact empty: {candidate}")
+    index = pd.DatetimeIndex(frame.index)
+    if index.tz is None:
+        raise DataIntegrityError("decision OHLCV close index must be tz-aware UTC")
+    if decision_ts not in index:
+        raise DataIntegrityError(f"decision_time {decision_ts} not present in decision OHLCV close artifact")
+    row = frame.loc[decision_ts]
+    if not isinstance(row, pd.Series):
+        raise DataIntegrityError(f"decision OHLCV close has duplicate rows for {decision_ts}")
+    vals = pd.to_numeric(row, errors="coerce").astype("float64")
+    present = vals.dropna()
+    if present.empty:
+        raise DataIntegrityError(f"decision OHLCV close invalid for {decision_ts}: no symbols")
+    if bool((~np.isfinite(present.to_numpy())).any()) or bool((present.to_numpy() <= 0).any()):
+        raise DataIntegrityError(f"decision OHLCV close invalid for {decision_ts}")
+    return pd.Series(present.to_numpy(dtype="float64"), index=present.index, dtype="float64", name=decision_ts)

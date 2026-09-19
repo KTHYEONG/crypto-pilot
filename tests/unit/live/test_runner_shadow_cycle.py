@@ -42,7 +42,21 @@ def artifact(tmp_path):
     )
     path = tmp_path / "deployed_target_weights.parquet"
     frame.to_parquet(path, index=True)
+    _seed_close_artifact(path)
     return path
+
+
+def _seed_close_artifact(weights_path: Path, close: float = 100.0) -> Path:
+    """Mirror every weights row into the new decision-close artifact for tests."""
+    from src.live.deployed_weights import decision_ohlcv_close_path
+
+    frame = pd.read_parquet(Path(weights_path))
+    closes = pd.DataFrame(
+        float(close), index=pd.DatetimeIndex(frame.index), columns=list(frame.columns), dtype="float64",
+    )
+    out = decision_ohlcv_close_path(Path(weights_path))
+    closes.to_parquet(out, index=True)
+    return out
 
 @pytest.fixture
 def live_env(monkeypatch, tmp_path):
@@ -113,8 +127,9 @@ def test_SCENARIO_LIVE_29_CYCLE_REPORTS_MIN_NOTIONAL_DROP(artifact, live_env, tm
             },
             index=pd.DatetimeIndex([DECISION_TIME]),
         )
-        drop_path = artifact.parent / "with_drops.parquet"
+        drop_path = artifact.parent / "deployed_target_weights_drops.parquet"
         weights.to_parquet(drop_path, index=True)
+        _seed_close_artifact(drop_path)
 
         settings = LiveSettings(
             notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_drop.json"),
@@ -256,8 +271,10 @@ def test_SCENARIO_LIVE_35_PAPER_MULTI_DAY_CYCLES_DO_NOT_HALT(tmp_path, monkeypat
     weights = pd.DataFrame(
         {"AAAUSDT": [0.02] * 3, "BUSDT": [-0.02] * 3}, index=pd.DatetimeIndex(days)
     )
-    weights_path = tmp_path / "paper_weights.parquet"
+    weights_path = tmp_path / "deployed_target_weights_paper.parquet"
     weights.to_parquet(weights_path, index=True)
+    # Seed at the stub book-mid so continuity is exercised without anchor/mark divergence dust.
+    _seed_close_artifact(weights_path, close=100.5)
 
     ledger_path = tmp_path / "ledger_paper_multi.json"
     settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
@@ -301,8 +318,9 @@ def test_SCENARIO_LIVE_47_RUNNER_PERSISTS_PORTFOLIO_STATE_PAPER_VS_LIVE(
     weights = pd.DataFrame(
         {"AAAUSDT": [0.02], "BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])
     )
-    weights_path = tmp_path / "weights.parquet"
+    weights_path = tmp_path / "deployed_target_weights.parquet"
     weights.to_parquet(weights_path, index=True)
+    _seed_close_artifact(weights_path)
 
     monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
     paper_dir = tmp_path / "portfolio_paper"
@@ -388,6 +406,7 @@ def test_SCENARIO_PARITY_09_runner_wiring_and_failsoft(tmp_path, monkeypatch):
     frame = pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time]))
     artifact = tmp_path / "deployed_target_weights.parquet"
     frame.to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
 
     class MarketClient:
         def exchange_info(self):
@@ -474,8 +493,9 @@ def test_SCENARIO_REC_10_runner_failsoft_collect(tmp_path, monkeypatch):
     import json
 
     decision_time = pd.Timestamp("2026-01-01 00:00Z")
-    artifact = tmp_path / "weights.parquet"
+    artifact = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"A": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
 
     class MarketClient:
         def exchange_info(self):
@@ -540,8 +560,9 @@ def test_run_shadow_cycle_paper_mode_records_immediate_taker_fills(tmp_path, mon
 
     decision_time = pd.Timestamp("2026-08-24 00:00Z")
     now = decision_time + pd.Timedelta(hours=2)
-    artifact = tmp_path / "weights.parquet"
+    artifact = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
 
     class MarketClient:
         def exchange_info(self):
@@ -652,8 +673,9 @@ def test_run_shadow_cycle_captures_orderbook_and_never_halts_on_failure(tmp_path
 
     decision_time = pd.Timestamp("2026-08-24 00:00Z")
     now = decision_time + pd.Timedelta(hours=2)
-    artifact = tmp_path / "weights.parquet"
+    artifact = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
 
     class MarketClientOK:
         def exchange_info(self):
@@ -754,8 +776,9 @@ def test_run_shadow_cycle_captures_orderbook_and_never_halts_on_failure(tmp_path
     monkeypatch.setattr(ob_mod, "capture_order_books", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("depth fail")))
     # need fresh ledger for second decision time to avoid duplicate? use same ledger but different decision_time
     decision_time2 = pd.Timestamp("2026-08-25 00:00Z")
-    artifact2 = tmp_path / "weights2.parquet"
+    artifact2 = tmp_path / "deployed_target_weights2.parquet"
     pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time2])).to_parquet(artifact2, index=True)
+    _seed_close_artifact(artifact2)
     ledger_path2 = tmp_path / "ledger2.json"
     settings2 = LiveSettings(
         notional_equity_usdt=2000.0,
@@ -786,8 +809,9 @@ def test_run_shadow_cycle_shadow_mode_does_not_use_immediate_taker(tmp_path, mon
 
     decision_time = pd.Timestamp("2026-08-24 00:00Z")
     now = decision_time + pd.Timedelta(hours=2)
-    artifact = tmp_path / "weights.parquet"
+    artifact = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
 
     class MarketClient:
         def exchange_info(self):
@@ -930,8 +954,9 @@ def test_run_shadow_cycle_paper_accrues_funding_and_uses_parity_policy(tmp_path,
 
     decision_time = pd.Timestamp("2026-08-24 00:00Z")
     now = decision_time + pd.Timedelta(hours=2)
-    artifact = tmp_path / "weights.parquet"
+    artifact = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
     ledger_path = tmp_path / "ledger.json"
     save_ledger(ledger_path, LedgerState(positions={"AAAUSDT": Decimal("1")}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("1900"), funding_accrued_through=decision_time - pd.Timedelta(hours=23)))
     funding = pd.Series([0.5, 0.001], index=pd.DatetimeIndex([decision_time - pd.Timedelta(hours=24), decision_time]))
@@ -1009,10 +1034,11 @@ def test_run_shadow_cycle_captures_pretrade_and_baseline_before_post_trade_order
 
     decision_time = pd.Timestamp("2026-08-24 00:00Z")
     now = decision_time + pd.Timedelta(hours=2)
-    artifact = tmp_path / "weights.parquet"
+    artifact = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame(
         {"AAAUSDT": [0.02], "BBBUSDT": [0.0]}, index=pd.DatetimeIndex([decision_time])
     ).to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
 
     class MarketClientOK:
         def exchange_info(self):
@@ -1250,8 +1276,9 @@ def test_run_shadow_cycle_paper_halts_on_delisted_holding_without_synthetic_sett
         fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
     )
-    weights_path = tmp_path / "weights.parquet"
+    weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    _seed_close_artifact(weights_path)
 
     delivery_ms = int(DECISION_TIME.value // 1_000_000)
 
@@ -1336,8 +1363,9 @@ def test_run_shadow_cycle_paper_halts_when_held_funding_lag_exceeds_24h(tmp_path
         fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
     )
-    weights_path = tmp_path / "weights.parquet"
+    weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    _seed_close_artifact(weights_path)
 
     calls: list[object] = []
     monkeypatch.setattr(runner_mod, "execute_intents", lambda *a, **k: calls.append(a) or ())
@@ -1391,8 +1419,9 @@ def test_run_shadow_cycle_applies_orphan_settlements_before_reconcile(tmp_path, 
     settings = LiveSettings(
         mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
     )
-    weights_path = tmp_path / "weights.parquet"
+    weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    _seed_close_artifact(weights_path)
 
     report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
 
@@ -1411,8 +1440,9 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
 
     decision_time = pd.Timestamp("2026-08-24 00:00Z")
     now = decision_time + pd.Timedelta(hours=2)
-    artifact = tmp_path / "weights.parquet"
+    artifact = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
 
     class MarketClient:
         def exchange_info(self):
@@ -1525,8 +1555,9 @@ def test_run_shadow_cycle_paper_halts_when_held_symbol_absent_from_exchange(tmp_
         fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
     )
-    weights_path = tmp_path / "weights.parquet"
+    weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    _seed_close_artifact(weights_path)
     initial = LedgerState(positions={"GONEUSDT": Decimal("5"), "AAAUSDT": Decimal("1")}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("1900"))
     save_ledger(ledger_path, initial)
 
@@ -1541,3 +1572,220 @@ def test_run_shadow_cycle_paper_halts_when_held_symbol_absent_from_exchange(tmp_
     assert load_ledger(ledger_path).positions == initial.positions
     assert "held_symbol_absent" in (tmp_path / "shadow_cycle.jsonl").read_text(encoding="utf-8")
 
+
+
+def test_runner_missing_anchor_blocks_orders(artifact, live_env, tmp_path) -> None:
+    """Nonzero targets with no decision-close artifact fail before intents."""
+    from src.live.deployed_weights import decision_ohlcv_close_path
+
+    decision_ohlcv_close_path(artifact).unlink()
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_missing.json"))
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    assert report.status == "HALT"
+    assert "missing" in (report.reason or "")
+    assert report.intent_count == 0
+    assert live_env == []
+
+
+def test_runner_sparse_anchor_blocks_active_target(artifact, live_env, tmp_path) -> None:
+    """A sparse roster row must still contain every nonzero target close."""
+    from src.live.deployed_weights import decision_ohlcv_close_path
+
+    pd.DataFrame(
+        {"AAAUSDT": [100.0]}, index=pd.DatetimeIndex([DECISION_TIME]),
+    ).to_parquet(decision_ohlcv_close_path(artifact), index=True)
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_sparse.json"))
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    assert report.status == "HALT"
+    assert "missing for active targets: BUSDT" in (report.reason or "")
+    assert report.intent_count == 0
+    assert live_env == []
+
+
+def test_runner_old_mark_artifact_ignored(artifact, live_env, tmp_path) -> None:
+    """Only a legacy decision-marks artifact never restores sizing."""
+    import pandas as pd
+
+    from src.live.deployed_weights import decision_ohlcv_close_path
+
+    decision_ohlcv_close_path(artifact).unlink()
+    pd.DataFrame(
+        {"AAAUSDT": [999.0], "BUSDT": [999.0]}, index=pd.DatetimeIndex([DECISION_TIME]),
+    ).to_parquet(artifact.parent / "deployed_decision_marks.parquet", index=True)
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_legacymark.json"))
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    assert report.status == "HALT"
+    assert report.intent_count == 0
+    assert live_env == []
+
+
+def test_runner_stale_anchor_row_fails(artifact, live_env, tmp_path) -> None:
+    """A prior-day close row never forward-fills the current decision."""
+    import pandas as pd
+
+    from src.live.deployed_weights import decision_ohlcv_close_path
+
+    pd.DataFrame(
+        {"AAAUSDT": [100.0], "BUSDT": [100.0]},
+        index=pd.DatetimeIndex([DECISION_TIME - pd.Timedelta(days=1)]),
+    ).to_parquet(decision_ohlcv_close_path(artifact), index=True)
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_stale.json"))
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    assert report.status == "HALT"
+    assert "not present" in (report.reason or "")
+    assert report.intent_count == 0
+    assert live_env == []
+
+
+def test_runner_current_ticker_remains_execution_check(artifact, live_env, tmp_path, monkeypatch) -> None:
+    """A valid decision close with no current ticker stays NOT_TRADABLE."""
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_notradable.json"))
+    monkeypatch.setattr(runner_mod, "_marks_from_tickers", lambda client, symbols: {})
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+    assert report.status == "COMPLETE"
+    assert report.intent_count == 0
+
+
+def test_reader_missing_anchor_fails(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.signal import latest_decision_ohlcv_close
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    with pytest.raises(DataIntegrityError, match="missing"):
+        latest_decision_ohlcv_close(weights_path, DECISION_TIME)
+
+
+def test_reader_empty_anchor_fails(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    from src.live.signal import latest_decision_ohlcv_close
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    pd.DataFrame(columns=["AAAUSDT"]).to_parquet(decision_ohlcv_close_path(weights_path), index=True)
+    with pytest.raises(DataIntegrityError, match="empty"):
+        latest_decision_ohlcv_close(weights_path, DECISION_TIME)
+
+
+def test_reader_corrupt_anchor_fails(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    from src.live.signal import latest_decision_ohlcv_close
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    decision_ohlcv_close_path(weights_path).write_bytes(b"not a parquet")
+    with pytest.raises(DataIntegrityError, match="unreadable"):
+        latest_decision_ohlcv_close(weights_path, DECISION_TIME)
+
+
+def test_reader_naive_index_fails(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    from src.live.signal import latest_decision_ohlcv_close
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    pd.DataFrame({"AAAUSDT": [100.0]}, index=pd.DatetimeIndex([pd.Timestamp("2026-08-24")])).to_parquet(
+        decision_ohlcv_close_path(weights_path), index=True,
+    )
+    with pytest.raises(DataIntegrityError, match="tz-aware"):
+        latest_decision_ohlcv_close(weights_path, DECISION_TIME)
+
+
+def test_reader_missing_row_fails(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    from src.live.signal import latest_decision_ohlcv_close
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    pd.DataFrame({"AAAUSDT": [100.0]}, index=pd.DatetimeIndex([DECISION_TIME - pd.Timedelta(days=1)])).to_parquet(
+        decision_ohlcv_close_path(weights_path), index=True,
+    )
+    with pytest.raises(DataIntegrityError, match="not present"):
+        latest_decision_ohlcv_close(weights_path, DECISION_TIME)
+
+
+def test_reader_invalid_values_fail(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    from src.live.signal import latest_decision_ohlcv_close
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    for bad in (0.0, float("nan"), -5.0):
+        pd.DataFrame({"AAAUSDT": [bad]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(
+            decision_ohlcv_close_path(weights_path), index=True,
+        )
+        with pytest.raises(DataIntegrityError, match="invalid"):
+            latest_decision_ohlcv_close(weights_path, DECISION_TIME)
+
+
+def test_reader_duplicate_rows_fail(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    from src.live.signal import latest_decision_ohlcv_close
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    dup = pd.DataFrame(
+        {"AAAUSDT": [100.0, 101.0]}, index=pd.DatetimeIndex([DECISION_TIME, DECISION_TIME]),
+    )
+    dup.to_parquet(decision_ohlcv_close_path(weights_path), index=True)
+    with pytest.raises(DataIntegrityError, match="duplicate"):
+        latest_decision_ohlcv_close(weights_path, DECISION_TIME)
+
+
+def test_reader_rejects_non_weights_token(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.signal import latest_decision_ohlcv_close
+
+    other = tmp_path / "other.parquet"
+    pd.DataFrame({"AAAUSDT": [100.0]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(other, index=True)
+    with pytest.raises(DataIntegrityError, match="missing token"):
+        latest_decision_ohlcv_close(other, DECISION_TIME)
+
+
+def test_runner_sealed_anchor_roundtrip(tmp_path) -> None:
+    """A sealed close artifact reads with the valid key and fails closed otherwise."""
+    import base64
+
+    import pytest
+    from pydantic import SecretStr
+
+    from src.live.deployed_weights import append_weight_row, decision_ohlcv_close_path
+    from src.live.errors import ArtifactSealError
+    from src.live.signal import latest_decision_ohlcv_close
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    key = SecretStr(base64.b64encode(b"0" * 32).decode())
+    assert append_weight_row(
+        decision_ohlcv_close_path(weights_path), DECISION_TIME,
+        pd.Series({"AAAUSDT": 100.0}, dtype="float64"), artifact_key=key,
+    ) is True
+    got = latest_decision_ohlcv_close(weights_path, DECISION_TIME, artifact_key=key)
+    assert got.to_dict() == {"AAAUSDT": 100.0}
+    assert got.dtype == "float64"
+    with pytest.raises(ArtifactSealError):
+        latest_decision_ohlcv_close(weights_path, DECISION_TIME, artifact_key=SecretStr(base64.b64encode(b"1" * 32).decode()))
+    with pytest.raises(ArtifactSealError):
+        latest_decision_ohlcv_close(weights_path, DECISION_TIME)
