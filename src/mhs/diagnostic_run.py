@@ -7,7 +7,7 @@ import time
 import pandas as pd
 
 from src.mhs.contracts import MhsDiagnosticRequest, MhsHorizonDiagnosticReport
-from src.mhs.marks import _get_symbol_mark_frame
+from src.mhs.marks import clear_mhs_market_data_caches
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.runner import run_stages
 from src.mhs.telemetry import StageTelemetry
@@ -25,7 +25,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     by ``run_stages``; this wrapper builds the shared ``PipelineContext`` from the
     request and returns the assembled report (byte-identical to the monolith).
     """
-    _get_symbol_mark_frame.cache_clear()
+    clear_mhs_market_data_caches()
     resolved_end = resolve_evaluation_end(request.end, unseal_holdout=False)
     _run_start = time.perf_counter()
     if request.partition != "dev":

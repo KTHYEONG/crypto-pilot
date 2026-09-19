@@ -331,7 +331,7 @@ def test_accrue_ledger_funding_preserves_last_executed(tmp_path, monkeypatch) ->
         LedgerState(positions={}, last_executed_decision_time=executed), now, tmp_path / "seed.json",
     )
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([epoch]))})
-    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {"AAAUSDT": pd.Series([100.0], index=pd.DatetimeIndex([epoch]))})
+    monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {"AAAUSDT": pd.Series([100.0], index=pd.DatetimeIndex([epoch]))})
     held, accrual = runner_mod._accrue_ledger_funding(
         LedgerState(
             positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"),
@@ -429,7 +429,7 @@ def test_accrue_ledger_funding_stamps_accrual_start_on_bootstrap(tmp_path, monke
     from src.live.ledger import LedgerState, load_ledger
 
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {})
-    monkeypatch.setattr(runner_mod, "_load_paper_marks", lambda symbols: {})
+    monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {})
     now = pd.Timestamp("2026-09-15 01:05Z")
     later = pd.Timestamp("2026-09-16 01:05Z")
 

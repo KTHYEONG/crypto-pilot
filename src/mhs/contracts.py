@@ -61,12 +61,7 @@ def cli_param(
 
 @dataclass(frozen=True, slots=True)
 class MhsDiagnosticRequest:
-    """Describe MHS research inputs with fixed three-minute execution.
-
-    The execution_timeframe field has type Literal["3m"], default "3m",
-    and CLI metadata choices ("3m",). Existing unrelated fields retain
-    their types, defaults and ordering.
-    """
+    """Describe an MHS research replay against completed Binance trade OHLCV and settled funding. The request has a single fixed three-minute execution and valuation source; changing a research flag cannot silently switch the accounting price."""
 
     start: str | pd.Timestamp | None = field(
         default=None,
@@ -78,14 +73,6 @@ class MhsDiagnosticRequest:
     )
     partition: Literal["dev", "holdout", "all"] = "dev"
     data_root: str | None = None
-    mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"] = field(
-        default="cache_required",
-        metadata=cli_param(
-            flag="--mark-mode",
-            help="Mark-price valuation source.",
-            choices=("cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"),
-        ),
-    )
     execution_timeframe: Literal["3m"] = field(
         default="3m",
         metadata=cli_param(

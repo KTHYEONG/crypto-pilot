@@ -130,7 +130,7 @@ def test_compute_funding_backfill_fails_closed_on_missing_mark() -> None:
     # Given: 16:00 봉 mark 누락 (08:00 epoch 은 ms 지터가 있어도 floor('h') 로 매칭된다)
     marks = {"AAAUSDT": pd.Series([100.0], index=pd.DatetimeIndex(["2026-09-02 08:00"], tz="UTC"))}
 
-    with pytest.raises(DataIntegrityError, match="mark missing"):
+    with pytest.raises(DataIntegrityError, match="trade-price missing"):
         compute_funding_backfill(history, funding, marks, end=end)
 
 
@@ -328,7 +328,7 @@ def test_run_paper_funding_backfill_dry_run_then_apply_is_idempotent(tmp_path) -
     (audit_dir / "2026-09-02.jsonl").write_text('{"event": "intent_outcome", "run_id": "20260902", "ts": "2026-09-02T01:30:00+00:00"}\n', encoding="utf-8")
     epochs = pd.DatetimeIndex(["2026-09-02 08:00", "2026-09-02 16:00", "2026-09-03 00:00"], tz="UTC")
     funding_loader = lambda symbols: {"AAAUSDT": pd.Series([0.001, 0.001, 0.001], index=epochs)}
-    mark_loader = lambda symbols: {"AAAUSDT": pd.Series([100.0, 100.0, 100.0], index=epochs)}
+    trade_close_loader = lambda symbols: {"AAAUSDT": pd.Series([100.0, 100.0, 100.0], index=epochs)}
     settings = LiveSettings(mode="paper", ledger_path=str(ledger_path), fills_dir=str(fills_dir))
     now = pd.Timestamp("2026-09-03 02:00Z")
 
@@ -341,7 +341,7 @@ def test_run_paper_funding_backfill_dry_run_then_apply_is_idempotent(tmp_path) -
     from src.live.ledger import load_ledger
 
     kwargs = dict(
-        now=now, funding_loader=funding_loader, mark_loader=mark_loader, shadow_audit_dir=audit_dir,
+        now=now, funding_loader=funding_loader, trade_close_loader=trade_close_loader, shadow_audit_dir=audit_dir,
         backfill_audit_path=tmp_path / "backfill.jsonl", heartbeat_path=tmp_path / "missing_heartbeat.json",
     )
 
@@ -406,7 +406,7 @@ def test_run_paper_funding_backfill_guards(tmp_path) -> None:
     (audit_dir / "2026-09-02.jsonl").write_text('{"event": "intent_outcome", "run_id": "20260902", "ts": "2026-09-02T01:30:00+00:00"}\n', encoding="utf-8")
     epochs = pd.DatetimeIndex(["2026-09-02 08:00", "2026-09-02 16:00", "2026-09-03 00:00"], tz="UTC")
     funding_loader = lambda symbols: {"AAAUSDT": pd.Series([0.001, 0.001, 0.001], index=epochs)}
-    mark_loader = lambda symbols: {"AAAUSDT": pd.Series([100.0, 100.0, 100.0], index=epochs)}
+    trade_close_loader = lambda symbols: {"AAAUSDT": pd.Series([100.0, 100.0, 100.0], index=epochs)}
     settings = LiveSettings(mode="paper", ledger_path=str(ledger_path), fills_dir=str(fills_dir))
     now = pd.Timestamp("2026-09-03 02:00Z")
 
@@ -420,7 +420,7 @@ def test_run_paper_funding_backfill_guards(tmp_path) -> None:
 
     heartbeat = tmp_path / "heartbeat.json"
     kwargs = dict(
-        now=now, funding_loader=funding_loader, mark_loader=mark_loader, shadow_audit_dir=audit_dir,
+        now=now, funding_loader=funding_loader, trade_close_loader=trade_close_loader, shadow_audit_dir=audit_dir,
         backfill_audit_path=tmp_path / "backfill.jsonl", heartbeat_path=heartbeat,
     )
 

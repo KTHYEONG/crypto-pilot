@@ -152,16 +152,6 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument("--start", default=None)
     mhs.add_argument("--end", default=None)
     mhs.add_argument(
-        "--mark-mode",
-        choices=["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"],
-        default="cache_required",
-        help=(
-            "Mark-price valuation source: cache_required builds the causal mark "
-            "panel and fails closed; cache_required_stale_carry allows bounded "
-            "diagnostic continuity; ohlcv_close_fallback is fixture-only"
-        ),
-    )
-    mhs.add_argument(
         "--max-rss-bytes",
         type=int,
         default=None,

@@ -22,9 +22,7 @@ import src.mhs.evaluation.specs as specs
 from src.common.errors import DataIntegrityError
 from src.market_data.services.mhs_execution import (
     apply_dynamic_gap_exclusion,
-    apply_dynamic_mark_gap_exclusion,
     assert_relevant_execution_data_coverage,
-    assert_relevant_mark_price_coverage,
 )
 from src.mhs.books import inverse_realized_vol_tilt, renormalize_within_mask
 from src.mhs.horizons import realized_vol
@@ -38,7 +36,7 @@ _logger = logging.getLogger("MhsHorizonDiagnostic")
 
 
 def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
-    """Construct fast/slow book weights, execution roster, and execution weights."""
+    """Build causal signal books and an execution roster from completed 1h trade bars and observed 3m execution coverage. The optional coverage gate checks relevant trade OHLCV and funding, never mark-price cache completeness."""
     ctx.fast_grid = pd.date_range(ctx.start, ctx.end, freq="6h", tz="UTC")
     ctx.slow_grid = pd.date_range(ctx.start, ctx.end, freq="24h", tz="UTC")
 
@@ -68,11 +66,10 @@ def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.execution_mask, _execution_gap_excluded = apply_dynamic_gap_exclusion(
             ctx.execution_mask, ctx.config.execution_timeframe, root=ctx.config.data_root,
         )
-        ctx.execution_mask, _mark_gap_excluded = apply_dynamic_mark_gap_exclusion(ctx.execution_mask)
-        if _execution_gap_excluded or _mark_gap_excluded:
+        if _execution_gap_excluded:
             _logger.info(
-                "[DATA] stage=dynamic_gap_exclusion execution_symbols=%d mark_symbols=%d",
-                len(_execution_gap_excluded), len(_mark_gap_excluded),
+                "[DATA] stage=dynamic_gap_exclusion execution_symbols=%d",
+                len(_execution_gap_excluded),
             )
         if _had_any_roster_member and not bool(ctx.execution_mask.to_numpy().any()):
             # Dynamic exclusion is meant to drop individual symbols/periods
@@ -89,22 +86,14 @@ def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             )
         # Relevance-scoped pre-flight gates: the full-universe
         # Cartesian-product gate is replaced here by per-roster-membership
-        # scope -- gaps outside a symbol's membership interval are ignored, and
-        # mark-price coverage is validated with the exact causal availability
-        # semantics the replay applies, so a pass cannot die mid-replay. Runs
-        # after dynamic exclusion, so this now only ever fires on sub-threshold
-        # gaps for users who want zero-tolerance instead of the default
-        # auto-exclusion.
+        # scope -- gaps outside a symbol's membership interval are ignored, so a
+        # pass cannot die mid-replay. Runs after dynamic exclusion, so this now
+        # only ever fires on sub-threshold gaps for users who want zero-tolerance
+        # instead of the default auto-exclusion.
         assert_relevant_execution_data_coverage(
             ctx.execution_mask, ctx.config.execution_timeframe, root=ctx.config.data_root,
         )
     ctx.realized_execution_roster_size = float(ctx.execution_mask.sum(axis=1).mean())
-    if ctx.config.execution_coverage_gate:
-        assert_relevant_mark_price_coverage(
-            ctx.execution_mask,
-            "1h",
-            stale_hours=24 if ctx.config.mark_mode == "cache_required_stale_carry" else 0,
-        )
     if ctx.config.fast_book_mode == "horizon_ensemble":
         ctx.w_fast_execution = books._horizon_ensemble_execution_weights(
             ctx.log_close, ctx.eligible, ctx.execution_mask, ctx.fast, ctx.fast_grid,

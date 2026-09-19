@@ -192,7 +192,6 @@ def test_held_symbol_window_carries_funding_knowledge_source(monkeypatch: pytest
             pd.DataFrame(1.0, index=grid, columns=["AAA", "BBB"]),
         ),
     )
-    monkeypatch.setattr(ws, "_cached_mark_panel", lambda *a, **k: pd.DataFrame(1.0, index=grid, columns=["AAA", "BBB"]))
     import src.mhs.evaluation.integrity as integ
 
     monkeypatch.setattr(integ, "_assert_cache_required_marks", lambda *a, **k: None)
@@ -206,7 +205,6 @@ def test_held_symbol_window_carries_funding_knowledge_source(monkeypatch: pytest
         root="ohlcv-root",
         timeframe="3m",
         funding_by_symbol=funding,
-        mark_mode="cache_required",
         funding_failures={},
         allocation=allocation,
         budget_bytes=None,
@@ -215,6 +213,7 @@ def test_held_symbol_window_carries_funding_knowledge_source(monkeypatch: pytest
         window_end=grid[-1] + pd.Timedelta(minutes=3),
         logical_partition=(0, 2),
     )
+    assert window.marks is None
     assert window.funding_knowledge_source == "archive_recency_proxy"
     assert window.funding_known is not None
     assert window.bar_funding is not None

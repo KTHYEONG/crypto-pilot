@@ -23,7 +23,7 @@ def test_mhs_diagnostic_defaults_and_mark_mode_choices() -> None:
     add_mhs_commands(sub)
     parser = sub.choices["mhs-horizon-diagnostic"]
     defaults = {action.dest: action.default for action in parser._actions}
-    assert defaults["mark_mode"] == "cache_required"
+    assert "mark_mode" not in defaults
     assert defaults["execution_timeframe"] == "3m"
     assert defaults["max_rss_bytes"] is None
     assert defaults["no_log_run"] is False
@@ -41,8 +41,8 @@ def test_mhs_diagnostic_max_rss_bytes_flag_wired_to_request() -> None:
     parser = sub.choices["mhs-horizon-diagnostic"]
     args = parser.parse_args(["--max-rss-bytes", "8000000000"])
     assert args.max_rss_bytes == 8_000_000_000
-    args2 = parser.parse_args(["--mark-mode", "cache_required_stale_carry"])
-    assert args2.mark_mode == "cache_required_stale_carry"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--mark-mode", "cache_required_stale_carry"])
 
 
 def test_mhs_diagnostic_output_tier_flag_threaded_to_persist(monkeypatch) -> None:

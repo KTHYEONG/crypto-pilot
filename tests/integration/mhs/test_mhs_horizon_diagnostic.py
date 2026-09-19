@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.mhs import evaluation as ev
+from src.mhs.evidence import AnchoredPurgedFold
 from src.quant.universe.pit_universe import symbol_partition
 
 START = pd.Timestamp("2021-01-01", tz="UTC")
@@ -33,11 +33,13 @@ def _write_mhs_market(
 
     hour_dir = root / "1h"
     minute_dir = root / "1m"
+    three_dir = root / "3m"
     five_dir = root / "5m"
     funding_dir = root / "funding"
     mark_dir = root / "markPriceKlines" / "1h"
     hour_dir.mkdir(parents=True, exist_ok=True)
     minute_dir.mkdir(parents=True, exist_ok=True)
+    three_dir.mkdir(parents=True, exist_ok=True)
     five_dir.mkdir(parents=True, exist_ok=True)
     funding_dir.mkdir(parents=True, exist_ok=True)
     mark_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +91,28 @@ def _write_mhs_market(
                 "quote_vol": [1000.0] * sym_n_min,
             },
         ).to_parquet(minute_dir / f"{sym}.parquet")
+
+        three_frame = pd.DataFrame(
+            {
+                "open": minute_prices,
+                "high": minute_prices * 1.0005,
+                "low": minute_prices * 0.9995,
+                "close": minute_prices,
+            },
+            index=sym_minute,
+        ).resample("3min").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last"},
+        ).dropna()
+        pd.DataFrame(
+            {
+                "timestamp": (three_frame.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"),
+                "open": three_frame["open"].to_numpy(),
+                "high": three_frame["high"].to_numpy(),
+                "low": three_frame["low"].to_numpy(),
+                "close": three_frame["close"].to_numpy(),
+                "quote_vol": np.full(len(three_frame), 3000.0),
+            },
+        ).to_parquet(three_dir / f"{sym}.parquet")
 
         # 5-minute execution grid for the default ``execution_timeframe="5m"``
         # runs (SCENARIO_MHS_ANNUALIZATION_04), derived from the same minute
@@ -184,7 +208,7 @@ LATE_START = pd.Timestamp("2021-02-01", tz="UTC")
 
 
 
-FOLD_WINDOW_FOLD = ev.AnchoredPurgedFold(
+FOLD_WINDOW_FOLD = AnchoredPurgedFold(
     pd.Timestamp("2021-01-01", tz="UTC"),
     pd.Timestamp("2021-01-31", tz="UTC"),
     pd.Timestamp("2021-02-10", tz="UTC"),
@@ -201,23 +225,27 @@ FOLD_WINDOW_FOLD = ev.AnchoredPurgedFold(
 _SUBPROCESS_SCRIPT = """
 import json, sys
 sys.path.insert(0, sys.argv[1])
+from pathlib import Path
 import pandas as pd
 import src.market_data.services.futures_collection as fc
 import src.mhs.marks as marks
-from src.mhs.evaluation import persist_mhs_horizon_diagnostic_report
+import src.mhs.statistics as statistics
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
 root = Path(sys.argv[2])
 out = Path(sys.argv[3])
 marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
 fc._mark_price_path = lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-ev._BOOTSTRAP_REPLICATES = 20
-ev._BOOTSTRAP_MEAN_BLOCK = 24
-ev._BOOTSTRAP_SEED = 20260807
+statistics._BOOTSTRAP_REPLICATES = 20
+statistics._BOOTSTRAP_MEAN_BLOCK = 24
+statistics._BOOTSTRAP_SEED = 20260807
 report = run_mhs_horizon_diagnostic(
     MhsDiagnosticRequest(
-        start="2021-01-01", end=str(ev.pd.Timestamp(sys.argv[4])),
-        data_root=str(root), mark_mode="cache_required",
-        execution_timeframe="1m", log_run=False,
+        start="2021-01-01", end=str(pd.Timestamp(sys.argv[4])),
+        data_root=str(root),
+        execution_timeframe="3m", log_run=False,
         max_rss_bytes=int(sys.argv[5]),
     ),
 )
@@ -242,4 +270,3 @@ sys.stdout.write(json.dumps({
 # full-panel replay cost.  The acceptance criterion requires at least one
 # fold's primary_geometric_cagr to differ from the frozen equal-weight
 # baseline [0.1183, 0.0815, 1.0502] by more than 1e-3.
-
