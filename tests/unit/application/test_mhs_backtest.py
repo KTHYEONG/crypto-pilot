@@ -291,6 +291,7 @@ def test_validate_managed_context_requires_registered_run(tmp_path) -> None:
     evidence_root = tmp_path / "evidence"
     good = _request(
         tmp_path, evidence_root=evidence_root, registry_path=db, run_id=run_id,
+        procedure_code_digest="a" * 64,
     )
     validate_mhs_backtest_request(good)
     with pytest.raises(ValueError, match=r".+"):
@@ -518,12 +519,14 @@ def test_worker_main_forwards_managed_context(tmp_path, monkeypatch) -> None:
     run_id = uuid.uuid4().hex
     evidence_root = tmp_path / "evidence"
     db = _managed_registry(tmp_path, run_id)
+    digest = "a" * 64
     assert worker.main(
         _worker_args(
             tmp_path, **{
                 "evidence-root": str(evidence_root),
                 "registry-path": str(db),
                 "run-id": run_id,
+                "procedure-code-digest": digest,
             }
         )
     ) == 0
@@ -531,6 +534,7 @@ def test_worker_main_forwards_managed_context(tmp_path, monkeypatch) -> None:
     assert request.evidence_root == evidence_root
     assert request.registry_path == db
     assert request.run_id == run_id
+    assert request.procedure_code_digest == digest
 
 
 def test_worker_main_defaults_to_standalone_context(tmp_path, monkeypatch) -> None:
@@ -550,3 +554,181 @@ def test_worker_main_defaults_to_standalone_context(tmp_path, monkeypatch) -> No
     assert request.evidence_root is None
     assert request.registry_path is None
     assert request.run_id is None
+
+
+def test_execute_managed_request_requires_source_identity(tmp_path, monkeypatch) -> None:
+    """Managed canonical run without a digest is rejected before evaluation."""
+    import uuid
+
+    import src.application.mhs_backtest as svc
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("evaluation must not run")
+
+    monkeypatch.setattr(svc, "evaluate_process_inventory_backtest", _boom)
+    run_id = uuid.uuid4().hex
+    db = _managed_registry(tmp_path, run_id)
+    request = _request(
+        tmp_path, evidence_root=tmp_path / "evidence", registry_path=db, run_id=run_id,
+    )
+    with pytest.raises(ValueError, match="procedure_code_digest"):
+        execute_mhs_backtest(request)
+    assert not request.result_output.exists()
+
+
+def test_malformed_procedure_identity_rejected(tmp_path, monkeypatch) -> None:
+    """Malformed digest is rejected by worker and service before any procedure."""
+    import uuid
+
+    import src.application.mhs_backtest as svc
+    from src.application import mhs_worker as worker
+    import src.application.mhs_worker as wmod
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("evaluation must not run")
+
+    monkeypatch.setattr(svc, "evaluate_process_inventory_backtest", _boom)
+    monkeypatch.setattr(wmod, "execute_mhs_backtest", _boom)
+    run_id = uuid.uuid4().hex
+    db = _managed_registry(tmp_path, run_id)
+    for bad in ("not-hex", "A" * 64, "a" * 63, 12345, "a" * 64 + "b"):
+        bad_request = _request(
+            tmp_path, evidence_root=tmp_path / "evidence", registry_path=db,
+            run_id=run_id, procedure_code_digest=bad,
+        )
+        with pytest.raises(ValueError, match="procedure_code_digest"):
+            validate_mhs_backtest_request(bad_request)
+        with pytest.raises(SystemExit, match="invalid worker arguments"):
+            worker.main(
+                _worker_args(
+                    tmp_path, **{
+                        "evidence-root": str(tmp_path / "evidence"),
+                        "registry-path": str(db),
+                        "run-id": run_id,
+                        "procedure-code-digest": str(bad),
+                    }
+                )
+            )
+
+
+def test_worker_forwards_supervisor_identity(tmp_path, monkeypatch) -> None:
+    """Worker dispatch carries the supervisor digest unchanged into the request."""
+    import uuid
+
+    import src.application.mhs_worker as wmod
+    from src.application import mhs_worker as worker
+
+    seen: dict = {}
+    monkeypatch.setattr(wmod, "execute_mhs_backtest", lambda request: seen.update(request=request))
+    run_id = uuid.uuid4().hex
+    db = _managed_registry(tmp_path, run_id)
+    digest = "b" * 64
+    assert worker.main(
+        _worker_args(
+            tmp_path, **{
+                "evidence-root": str(tmp_path / "evidence"),
+                "registry-path": str(db),
+                "run-id": run_id,
+                "procedure-code-digest": digest,
+            }
+        )
+    ) == 0
+    assert seen["request"].procedure_code_digest == digest
+
+
+def test_execute_canonical_request_constructs_typed_procedure(tmp_path, monkeypatch) -> None:
+    """Canonical service builds one typed baseline procedure with the nested pool."""
+    import uuid
+
+    import src.application.mhs_backtest as svc
+    from src.mhs.backtest.journal import ProcessProcedureDefinition
+
+    report = _completed_report()
+    seen: dict = {}
+    calls = {"n": 0}
+    real_baseline = svc.baseline_process_procedure
+
+    def _counting(*, code_digest):
+        calls["n"] += 1
+        return real_baseline(code_digest=code_digest)
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return report
+
+    monkeypatch.setattr(svc, "baseline_process_procedure", _counting)
+    monkeypatch.setattr(svc, "evaluate_process_inventory_backtest", _spy)
+    run_id = uuid.uuid4().hex
+    db = _managed_registry(tmp_path, run_id)
+    digest = "c" * 64
+    request = _request(
+        tmp_path, evidence_root=tmp_path / "evidence", registry_path=db,
+        run_id=run_id, procedure_code_digest=digest,
+    )
+    assert execute_mhs_backtest(request) is report
+    assert calls["n"] == 1
+    procedure = seen["procedure"]
+    assert isinstance(procedure, ProcessProcedureDefinition)
+    assert procedure.code_digest == digest
+    assert tuple(p.policy_id for p in procedure.selection.policies) == (
+        "expanding", "rolling_12m", "rolling_24m", "equal_member",
+    )
+    assert procedure.selection.control_policy_id == "equal_member"
+
+
+def test_execute_legacy_direct_call_without_typed_procedure(tmp_path, monkeypatch) -> None:
+    """Unmanaged direct request stays legacy with no typed procedure."""
+    import src.application.mhs_backtest as svc
+
+    report = _completed_report()
+    seen: dict = {}
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return report
+
+    monkeypatch.setattr(svc, "evaluate_process_inventory_backtest", _spy)
+    request = _request(tmp_path)
+    assert execute_mhs_backtest(request) is report
+    assert seen["procedure"] is None
+
+
+def test_partial_typed_procedure_context_rejected(tmp_path, monkeypatch) -> None:
+    """Partial typed context is rejected in service and worker."""
+    import uuid
+
+    import src.application.mhs_backtest as svc
+    from src.application import mhs_worker as worker
+    import src.application.mhs_worker as wmod
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("evaluation must not run")
+
+    monkeypatch.setattr(svc, "evaluate_process_inventory_backtest", _boom)
+    monkeypatch.setattr(wmod, "execute_mhs_backtest", _boom)
+    standalone_with_digest = _request(tmp_path, procedure_code_digest="d" * 64)
+    with pytest.raises(ValueError, match="standalone"):
+        validate_mhs_backtest_request(standalone_with_digest)
+    with pytest.raises(SystemExit, match="invalid worker arguments"):
+        worker.main(_worker_args(tmp_path, **{"procedure-code-digest": "d" * 64}))
+    run_id = uuid.uuid4().hex
+    db = _managed_registry(tmp_path, run_id)
+    with pytest.raises(SystemExit, match="invalid worker arguments"):
+        worker.main(
+            _worker_args(
+                tmp_path, **{
+                    "evidence-root": str(tmp_path / "evidence"),
+                    "registry-path": str(db),
+                    "run-id": run_id,
+                }
+            )
+        )
+    with pytest.raises(SystemExit, match="invalid worker arguments"):
+        worker.main(
+            _worker_args(
+                tmp_path, **{
+                    "evidence-root": str(tmp_path / "evidence"),
+                    "procedure-code-digest": "d" * 64,
+                }
+            )
+        )

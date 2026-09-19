@@ -304,23 +304,22 @@ def test_code_identity_null_when_worker_unreadable(tmp_path, monkeypatch) -> Non
     start, end = _stamps()
     result = _result(tmp_path, "noid")
 
-    def _on_start(proc):
-        staging = result.parent / ".staging_domain.json"
-        staging.parent.mkdir(parents=True, exist_ok=True)
-        staging.write_text(json.dumps(_completed_domain()))
+    def _boom(*args, **kwargs):
+        raise AssertionError("worker must not launch")
 
-    _install_fake(monkeypatch, 0, 0.0, _on_start)
+    monkeypatch.setattr(subprocess, "Popen", _boom)
     real_read_bytes = Path.read_bytes
 
-    def _boom(self, *args, **kwargs):
+    def _read_boom(self, *args, **kwargs):
         if self.name == "mhs_worker.py":
             raise OSError("injected provenance boom")
         return real_read_bytes(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", _boom)
-    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
-    assert run.status == "completed"
+    monkeypatch.setattr(Path, "read_bytes", _read_boom)
+    with pytest.raises(ValueError, match="source identity"):
+        sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
     assert sup._code_identity() is None
+    assert not result.exists()
 
 
 def test_find_reused_run_skips_unusable_registry_entries(tmp_path) -> None:
@@ -886,3 +885,106 @@ def test_data_snapshot_unreadable_when_walk_fails(tmp_path, monkeypatch) -> None
 
     monkeypatch.setattr(Path, "rglob", _boom)
     assert sup._snapshot_data_tree(root) == "unreadable"
+
+
+def test_supervised_launch_shares_source_identity(tmp_path, monkeypatch) -> None:
+    """Registry request and worker command contain the same source digest."""
+    import sqlite3 as _sqlite3
+    import subprocess as _subprocess
+
+    start, end = _stamps()
+    result = _result(tmp_path, "shared")
+    db = tmp_path / "registry.sqlite3"
+    run_id = "a" * 32
+    digest = "e" * 64
+    monkeypatch.setattr(sup, "_code_identity", lambda: digest)
+    seen: dict = {}
+
+    def _capture(*args, **kwargs):
+        seen["command"] = list(args[0])
+        proc = _FakeProc(1, 0.0)
+        return proc
+
+    monkeypatch.setattr(_subprocess, "Popen", _capture)
+    monkeypatch.setattr(sup, "_gnu_time_prefix", lambda: [])
+    monkeypatch.setattr(sup, "_parse_gnu_metrics", lambda *a, **k: (None, None))
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result,
+        poll_seconds=0.05, registry_path=db, run_id=run_id,
+    )
+    assert run.status == "failed"
+    assert "--procedure-code-digest" in seen["command"]
+    assert seen["command"][seen["command"].index("--procedure-code-digest") + 1] == digest
+    conn = _sqlite3.connect(str(db))
+    try:
+        row = conn.execute("SELECT request_json FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    finally:
+        conn.close()
+    request = json.loads(row[0])
+    assert request["code_identity"] == digest
+    assert request["fingerprint"] == sup.request_fingerprint(
+        start=start, end=end, data_root=None, tracking_error_threshold=None, code_digest=digest,
+    )
+
+
+def test_supervised_launch_blocked_without_source_identity(tmp_path, monkeypatch) -> None:
+    """Source hashing failure blocks worker launch and run registration."""
+    import subprocess as _subprocess
+
+    start, end = _stamps()
+    result = _result(tmp_path, "blocked")
+    db = tmp_path / "registry.sqlite3"
+
+    def _no_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch")
+
+    monkeypatch.setattr(_subprocess, "Popen", _no_launch)
+    monkeypatch.setattr(sup, "_code_identity", lambda: None)
+    with pytest.raises(ValueError, match="source identity"):
+        sup.run_mhs_process_backtest(
+            start=start, end=end, data_root=None, result_output=result,
+            poll_seconds=0.05, registry_path=db, run_id="b" * 32,
+        )
+    assert not result.exists()
+    assert not db.exists()
+    monkeypatch.setattr(sup, "_code_identity", lambda: "NOT-HEX")
+    with pytest.raises(ValueError, match="source identity"):
+        sup.run_mhs_process_backtest(
+            start=start, end=end, data_root=None, result_output=result,
+            poll_seconds=0.05, registry_path=db, run_id="b" * 32,
+        )
+
+
+def test_fingerprint_changes_with_source_identity(tmp_path) -> None:
+    """Distinct source identities yield distinct fingerprints blocking reuse."""
+    from src.backtests.contracts import RunFinalization, RunRegistration
+    from src.backtests.registry import finalize_run, initialize_registry, register_run
+
+    start, end = _stamps()
+    first = sup.request_fingerprint(
+        start=start, end=end, data_root=None, tracking_error_threshold=None, code_digest="a" * 64,
+    )
+    second = sup.request_fingerprint(
+        start=start, end=end, data_root=None, tracking_error_threshold=None, code_digest="b" * 64,
+    )
+    assert first != second
+    registry = tmp_path / "registry.sqlite3"
+    initialize_registry(registry)
+    register_run(
+        registry,
+        RunRegistration(
+            run_id="c" * 32, strategy_id="process_inventory_3m",
+            registered_at="2026-01-01T00:00:00+00:00",
+            request={"fingerprint": first}, managed_directory=None,
+        ),
+    )
+    finalize_run(
+        registry,
+        RunFinalization(
+            run_id="c" * 32, status="completed", finalized_at="2026-01-02T00:00:00+00:00",
+            primary_valid=True, terminal_certified=True, outcome={"ok": True},
+        ),
+        (),
+    )
+    assert sup.find_reused_run(registry, first)[0] == "c" * 32
+    assert sup.find_reused_run(registry, second) is None
