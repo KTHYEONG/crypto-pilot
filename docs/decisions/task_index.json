@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_VALIDATION_EXECUTION_PARITY",
+      "date": "2026-09-19",
+      "adr_id": "ADR_20260919_MHS_VALIDATION_EXECUTION_PARITY",
+      "domain": "mhs",
+      "title": "MHS 실행 가능성 보존형 중첩 검증",
+      "why": "기존 정책 선택과 멤버 라벨이 실행 가능성·라벨 완료시점·절차 연결을 일관되게 보장하지 못해 미래참조와 선택편향 위험이 있었다.",
+      "resolution": "스무딩 후 실행 마스크를 재적용하고 결합 포트폴리오 경제성으로 시간순 내부 정책을 선택하며 감독 CLI에 소스 식별 기반 typed procedure를 연결했다.",
+      "impact": "일간 증거는 실제 결과 완료 뒤에만 선택에 사용되고 공통 유효 표본·감사·provenance가 보존되어 정상 백테스트의 재현성과 신뢰성이 높아진다.",
+      "caveat": "내부 증거는 hourly proxy이며 3분봉 실행 증거와 funding coverage가 완전하게 인증되기 전에는 배포 판정에 사용할 수 없다."
+    },
+    {
       "task_id": "TASK_MHS_VALIDATION_NESTED_POLICY_SELECTION",
       "date": "2026-09-19",
       "adr_id": "ADR_20260919_MHS_VALIDATION_NESTED_POLICY_SELECTION",
@@ -1003,16 +1014,6 @@
       "why": "노출 상한(leverage_ceiling)이 수동 등록 하이퍼파라미터인데 후보마다 4~6분짜리 전체 3m 리플레이가 필요함. 또한 MDD를 낮추면서 CAGR을 유지/향상하는 레버리지 외 근본 대안이 있는지 데이터로 판정 요청.",
       "resolution": "src/research/risk/growth_sizing.py에 FrontierScanPoint + scan_leverage_frontier 신설(diagnose_growth_headroom과 동일하게 solve_growth_optimal_risk를 호출하지 않고 부트스트랩 루프를 의도적으로 중복구현 -- plateau 규칙이 음의 성장률 후보의 mdd_breach_prob/ruin_prob를 0으로 가려버리는 것을 실측 확인했기 때문). src/application/research/mhs/leverage_scan.py 신규(_load_pre_oos_reference_returns/run_leverage_frontier_scan, 기존 daily_ledger.parquet 아티팩트만 읽고 전체 파이프라인 재실행 없음, fail-closed). src/cli/commands/research/mhs.py에 --leverage-frontier-scan/--leverage-frontier-multiples opt-in 플래그 추가(신규 서브커맨드 트리 아님, 기존 reduced-CLI-surface 불변식 보존; 플래그 True 시 무거운 파이프라인 임포트 전에 단락). tests/contract/test_request_cli_parity.py의 CLI/계약 1:1 대응 불변식에 신규 플래그 2개를 --output-tier와 동일하게 discard 처리. src/mhs/params.py에 LEVERAGE_FRONTIER_SCAN_MULTIPLES(0.25~5.0) 신설, 프로덕션 COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS(0.25~3.0)와 분리 유지. 실측 병행 진단: growth(2.0x) 원장의 실제 MDD(-41.8%, 2024-02-27)가 단일 급락이 아니라 2023-12~2024-04 4개월짜리 완만한 침식(BTC 2년차 강세장)임을 확인, 실현 드로다운 기반 디리스크 오버레이 10개 조합을 인과적으로 시뮬레이션했으나 단 하나도 baseline을 파레토 지배(CAGR유지/향상 AND MDD감소)하지 못함을 반증(전량 트레이드오프, ADR_20260812 crash_regime_tilt·ADR_20260823 mom3_skew 제거와 동일 패턴) -- 코드 미구현, 문서화만.",
       "impact": "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_leverage_frontier_scan_contract.json --fast PASS(spec/lint/mypy). 타겟 테스트(test_growth_sizing.py/test_leverage_scan.py/test_mhs.py/test_request_cli_parity.py) 82건 전체 PASS. tests/integration/mhs/test_golden_identity.py 1건 FAIL은 이번 변경 스택 이전(prior ADR_20260822/23) golden fixture drift로 stash 비교를 통해 이번 세션 변경과 무관함을 확인, 별도 후속 수정 필요."
-    },
-    {
-      "task_id": "TASK_MHS_GROWTH_EXPOSURE_CEILING",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_GROWTH_EXPOSURE_CEILING",
-      "domain": "risk",
-      "title": "MHS 노출 상한을 프론티어 재적합값에서 등록 정책 상수로 정합화",
-      "why": "노출/사이징 계층이 복리성장을 억제하는지 코드 로직 감사 요청. exposure_scale_two_sided 기본 False로 cap=1.0 고정돼 growth_budget 솔버·GrowthRiskEnvelope 전체가 no-op임을 원장 실측(logret 차이 0.005%)으로 확인, 추가로 leverage_ceiling이 상한이 아니라 하한 assert로만 쓰이고 실제 반환값은 부트스트랩 그리드 절단면(선택 risk/ref=3.0=grid max)이었음을 규명.",
-      "resolution": "src/application/research/mhs/scaling.py: _envelope_exposure_cap 반환을 frontier_multiple에서 envelope.leverage_ceiling(등록 정책 상수)로 교체(검증 로직·양쪽 ValueError 분기는 보존), _assert_envelope_leverage_ceiling_verified 신설(OOS 이전 슬라이스로 1회 감사, fold-local 윈도우는 no-op), _replay_exposure_scale의 exante_target/growth_budget cap 표현식을 상수 참조로 교체. src/mhs/params.py에 GROWTH_RISK_ENVELOPES 중간 rung growth_moderate(leverage_ceiling=1.5) 등록. src/mhs/pipeline/config.py CLI 실효 기본값 exposure_scale_two_sided True 전환(MhsDiagnosticRequest 자체 기본값은 False 유지), execution_universe_size 신규 CLI 배선. src/cli/commands/research/mhs.py --no-exposure-scale-two-sided 네게이트 플래그 + --execution-universe-size 신규, help 텍스트 정정.",
-      "impact": "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_growth_exposure_ceiling_contract.json 전체 PASS(lint/type/target pytest, spec compliance). 실측 사다리(no-exposure-scale-two-sided baseline / growth_moderate / growth)는 사전 등록 판정기준(§5.3)에 따라 코드 변경과 분리된 별도 실행으로 후속 확인 필요 -- 이번 세션은 계약 정합화까지 완료, 3m 원장 재실행은 미실시."
     }
   ]
 }
