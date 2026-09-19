@@ -10,10 +10,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
-from src.market_data.services.mhs_execution import (
-    apply_dynamic_gap_exclusion,
-    apply_dynamic_mark_gap_exclusion,
-)
+from src.market_data.services.mhs_execution import apply_dynamic_gap_exclusion
 from src.mhs.backtest.availability import (
     ObservationAvailability,
     observed_history_mask,
@@ -162,13 +159,7 @@ def load_process_market_data(
     data_root: str | None = None,
     memory_budget: MhsMemoryBudget | None = None,
 ) -> ProcessMarketData:
-    """Prepare original process inputs without retaining expired wide buffers.
-
-    Prepare causal-history observations without future-dependent symbol removal.
-    Archive publication assumptions and funding knowledge are carried with the
-    result; they cannot independently establish live delivery or tradability.
-    Resource limits protect the full requested history rather than changing
-    its dates, precision, candidates or source coverage.
+    """Build the causal hourly process panel from completed Binance trade OHLCV and observed funding. A symbol's signal eligibility uses only information published by the signal time; later source coverage, mark-price availability and terminal survival never choose earlier members. Three-minute execution completeness belongs to the replay and cannot be inferred from one-hour coverage.
 
     Args:
         start: Timezone-aware source start.
@@ -270,16 +261,21 @@ def load_process_market_data(
     _logger.info("[DATA] stage=decision_grid days=%d symbols=%d", len(decision_grid), len(aligned))
     panels: dict[str, pd.DataFrame] = {k: panel[k][list(roster)] for k in ("close", "open", "high", "low", "quote_vol", "taker_buy_quote")}
     del panel, close, quote_vol, prefix, funding_by_symbol, funding_window, published_close
-    causal_mask, _ = apply_dynamic_gap_exclusion(mask, "1h", root=root)
-    causal_mask, _ = apply_dynamic_mark_gap_exclusion(causal_mask)
-    causal_mask, _ = apply_dynamic_gap_exclusion(causal_mask, "3m", root=root)
+    signal_mask, excluded_1h = apply_dynamic_gap_exclusion(mask, "1h", root=root)
+    causal_mask, excluded_3m = apply_dynamic_gap_exclusion(signal_mask, "3m", root=root)
+    _logger.info(
+        "[DATA] stage=causal_gap_exclusion reason=source_observations_available_by_decision "
+        "excluded_1h_symbols=%d excluded_3m_symbols=%d",
+        len(excluded_1h),
+        len(excluded_3m),
+    )
     n_candidates = len(PROCESS_FEATURE_CANDIDATES) + len(PROCESS_FUNDING_CARRY_CANDIDATES_HOURS)
     _admit_process_stage(
         stage="process_candidate_books", estimated_bytes=_estimate_panel_bytes(len(decision_grid), len(aligned), n_candidates),
         budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
     )
     member_books = build_candidate_member_books(
-        panels, bar_funding, eligible, causal_mask, decision_grid,
+        panels, bar_funding, eligible, signal_mask, decision_grid,
         funding_known_1h=funding_known_1h,
     )
     del panels

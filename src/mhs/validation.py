@@ -64,7 +64,7 @@ def _validate_committee_tranche_count(request: MhsDiagnosticRequest) -> None:
 
 
 def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset: object) -> None:
-    """Validate the registered MHS domain contract, including fixed 3m execution.
+    """Validate the single-source MHS diagnostic request and its timing, capital and execution controls without authorizing a mark-price valuation branch.
 
     Args:
         request: Complete diagnostic request.
@@ -78,10 +78,6 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
     """
     # Choice membership (closed sets).
     _validate_field_choices(request, "partition", ("dev", "holdout", "all"))
-    _validate_field_choices(
-        request, "mark_mode",
-        ("cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"),
-    )
     # Terminal-decision censoring needs an exact grid hit, so the passive
     # window must be a positive multiple of the execution timeframe's minutes;
     # rejected at request validation, before any panel load or replay.

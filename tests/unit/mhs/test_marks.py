@@ -1,4 +1,4 @@
-"""Tests for the MHS mark-price / minute-frame loading module."""
+"""Tests for the MHS observed-funding / PIT-roster / minute-frame loading module."""
 
 from __future__ import annotations
 
@@ -160,122 +160,31 @@ def test_load_funding_series_missing_and_loaded(tmp_path, monkeypatch) -> None:
     assert series["B"].equals(loaded)
 
 
-def test_clear_market_data_caches_reloads_replaced_file(monkeypatch) -> None:
+def test_clear_market_data_caches_keeps_retained_loaders_stateless(tmp_path, monkeypatch) -> None:
+    """Retired mark caches are gone; retained loaders always read the lake file."""
     import pandas as pd
-    import src.mhs.marks as marks
-    state = {'close': 100.0}
-    def frame():
-        return pd.DataFrame({'datetime': [pd.Timestamp('2025-01-01', tz='UTC')], 'close': [state['close']]})
-    monkeypatch.setattr(marks.DataCollector, '_load_mark_price_cache', staticmethod(lambda path: frame()))
-    monkeypatch.setattr(marks._futures_collection, '_mark_price_path', lambda symbol, timeframe: '/tmp/fake.parquet')  # noqa: S108
-    first = marks._get_symbol_mark_frame('BTCUSDT', '1h')['close'].iloc[0]
-    state['close'] = 200.0
+
+    assert not hasattr(marks, "_cached_mark_panel")
+    assert not hasattr(marks, "_get_symbol_mark_frame")
+    assert not hasattr(marks, "_compact_mark_series_for_path")
+
+    frame = pd.DataFrame(
+        {"timestamp": [1640995200000], "high": [1.0], "low": [1.0], "close": [100.0]},
+    )
+    path = tmp_path / "AUSDT.parquet"
+    frame.to_parquet(path)
+    sym, first = marks._load_symbol_minute_frame(
+        str(path), "AUSDT", 0, 4102444800000,
+        pd.Timestamp("2022-01-01", tz="UTC"), pd.Timestamp("2022-01-02", tz="UTC"),
+    )
+    assert first is not None
+    assert float(first["close"].iloc[0]) == 100.0
+    # Replacing the file is observed immediately with no cache to invalidate.
+    frame.assign(close=[200.0]).to_parquet(path)
     marks.clear_mhs_market_data_caches()
-    second = marks._get_symbol_mark_frame('BTCUSDT', '1h')['close'].iloc[0]
-    assert (first, second) == (100.0, 200.0)
-
-
-def test_compact_mark_series_missing_file_returns_typed_empty(tmp_path) -> None:
-    """A missing source yields correctly typed empty arrays."""
-    import numpy as np
-
-    marks._compact_mark_series_for_path.cache_clear()
-    avail, close = marks._compact_mark_series_for_path(
-        "MISUSDT", "1h", str(tmp_path / "missing.parquet"),
+    _, second = marks._load_symbol_minute_frame(
+        str(path), "AUSDT", 0, 4102444800000,
+        pd.Timestamp("2022-01-01", tz="UTC"), pd.Timestamp("2022-01-02", tz="UTC"),
     )
-    assert avail.dtype == np.dtype("int64")
-    assert close.dtype == np.dtype("float64")
-    assert avail.size == 0
-    assert close.size == 0
-    marks._compact_mark_series_for_path.cache_clear()
-
-
-def test_compact_mark_series_schema_without_close_raises(tmp_path) -> None:
-    """A parquet without the close column fails closed."""
-    import pandas as pd
-    import pytest
-
-    from src.common.errors import DataIntegrityError
-
-    pd.DataFrame({"timestamp": [1640995200000]}).to_parquet(tmp_path / "noclose.parquet")
-    marks._compact_mark_series_for_path.cache_clear()
-    with pytest.raises(DataIntegrityError):
-        marks._compact_mark_series_for_path("NCUSDT", "1h", str(tmp_path / "noclose.parquet"))
-    marks._compact_mark_series_for_path.cache_clear()
-
-
-def test_compact_mark_series_corrupt_file_raises(tmp_path) -> None:
-    """An unreadable parquet fails closed instead of returning empty."""
-    import pytest
-
-    from src.common.errors import DataIntegrityError
-
-    (tmp_path / "corrupt.parquet").write_bytes(b"not a parquet file")
-    marks._compact_mark_series_for_path.cache_clear()
-    with pytest.raises(DataIntegrityError):
-        marks._compact_mark_series_for_path("COUSDT", "1h", str(tmp_path / "corrupt.parquet"))
-    marks._compact_mark_series_for_path.cache_clear()
-
-
-def test_compact_mark_series_read_failure_raises(tmp_path, monkeypatch) -> None:
-    """A schema-valid file that fails on read fails closed."""
-    import pandas as pd
-    import pytest
-
-    import pyarrow.parquet as _pq
-
-    from src.common.errors import DataIntegrityError
-
-    stamps = pd.date_range("2022-01-01", periods=2, freq="1h", tz="UTC")
-    epoch_ms = (stamps - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    pd.DataFrame({"timestamp": epoch_ms.to_numpy(), "close": [10.0, 20.0]}).to_parquet(
-        tmp_path / "readfail.parquet",
-    )
-    real_read_table = _pq.read_table
-
-    def _fail_first(path, *args, **kwargs):
-        if str(path).endswith("readfail.parquet") and kwargs.get("columns"):
-            raise RuntimeError("simulated read failure")
-        return real_read_table(path, *args, **kwargs)
-
-    monkeypatch.setattr(_pq, "read_table", _fail_first)
-    marks._compact_mark_series_for_path.cache_clear()
-    with pytest.raises(DataIntegrityError):
-        marks._compact_mark_series_for_path("RFUSDT", "1h", str(tmp_path / "readfail.parquet"))
-    marks._compact_mark_series_for_path.cache_clear()
-
-
-def test_compact_mark_series_without_datetime_derives_availability(tmp_path) -> None:
-    """A timestamp/close-only file maps availability to timestamp + 1h."""
-    import numpy as np
-    import pandas as pd
-
-    stamps = pd.date_range("2022-01-01", periods=3, freq="1h", tz="UTC")
-    epoch_ms = (stamps - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    pd.DataFrame({"timestamp": epoch_ms.to_numpy(), "close": [10.0, 20.0, 30.0]}).to_parquet(
-        tmp_path / "nodt.parquet",
-    )
-    marks._compact_mark_series_for_path.cache_clear()
-    avail, close = marks._compact_mark_series_for_path("NDUSDT", "1h", str(tmp_path / "nodt.parquet"))
-    assert np.array_equal(avail, (stamps + pd.Timedelta(hours=1)).as_unit("ns").asi8)
-    assert np.array_equal(close, np.array([10.0, 20.0, 30.0]))
-    marks._compact_mark_series_for_path.cache_clear()
-
-
-def test_compact_mark_series_root_isolation(tmp_path) -> None:
-    """Two roots for one symbol never share cached values."""
-    import pandas as pd
-
-    stamps = pd.date_range("2022-01-01", periods=2, freq="1h", tz="UTC")
-    epoch_ms = (stamps - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    for root, price in (("a", 11.0), ("b", 22.0)):
-        d = tmp_path / root
-        d.mkdir()
-        pd.DataFrame(
-            {"timestamp": epoch_ms.to_numpy(), "close": [price, price], "datetime": stamps},
-        ).to_parquet(d / "ISOUSDT.parquet")
-    marks._compact_mark_series_for_path.cache_clear()
-    _, close_a = marks._compact_mark_series_for_path("ISOUSDT", "1h", str(tmp_path / "a" / "ISOUSDT.parquet"))
-    _, close_b = marks._compact_mark_series_for_path("ISOUSDT", "1h", str(tmp_path / "b" / "ISOUSDT.parquet"))
-    assert (close_a[0], close_b[0]) == (11.0, 22.0)
-    marks._compact_mark_series_for_path.cache_clear()
+    assert second is not None
+    assert float(second["close"].iloc[0]) == 200.0

@@ -6,17 +6,38 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import pyarrow.parquet as pq
+import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.pipeline.stages.book as book_stage
 import src.mhs.resources as resources
 import src.mhs.scaling as scaling
 import src.mhs.research_go as _research_go
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
+from src.mhs.contracts import MhsBookFailure, MhsDiagnosticRequest
+from src.mhs.evaluation.books import _active_blend_book_and_grid
+from src.mhs.evaluation.concurrency import _run_books_concurrent
+from src.mhs.evaluation.folds import _run_anchored_fold
+from src.mhs.evaluation.integrity import (
     _assert_cache_required_marks,
-    _iter_mhs_execution_windows,
     _truncate_replayable_decisions,
+)
+from src.mhs.evaluation.windows import _book_outcome
+from src.mhs.execution.batch import replay_execution_window_batch_isolated
+from src.mhs.execution.window_stream import (
+    _iter_mhs_execution_windows,
+    _resolve_ns_vectorized,
+)
+from src.mhs.marks import (
+    _build_window_frames,
+    _load_funding_series,
+    _load_window_minute_frames,
+    _pit_execution_mask,
+)
+from src.mhs.params import (
+    COMMITTEE_OOS_START,
+    COMMITTEE_TARGET_GROSS,
+    MEASURED_EXECUTION_COST_TIERS_BPS,
+    PNL_VOL_TARGET_SCALE_FLOOR,
 )
 from src.common.errors import DataIntegrityError
 from src.mhs.types import ExecutionSpec
@@ -101,9 +122,9 @@ def test_cache_required_marks_raise_structured_provenance() -> None:
 def test_iter_mhs_execution_windows_preserves_columns_and_active_roster(tmp_path) -> None:
     start = pd.Timestamp("2021-01-01", tz="UTC")
     end = pd.Timestamp("2021-03-01", tz="UTC")
-    grid = pd.date_range(start, end, freq="1min", tz="UTC")
+    grid = pd.date_range(start, end, freq="3min", tz="UTC")
     symbols = ["AAAUSDT", "BBBUSDT", "CCCUSDT"]
-    (tmp_path / "1m").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "3m").mkdir(parents=True, exist_ok=True)
     for sym in symbols:
         frame = pd.DataFrame(
             {
@@ -115,7 +136,7 @@ def test_iter_mhs_execution_windows_preserves_columns_and_active_roster(tmp_path
             index=grid,
         )
         frame["timestamp"] = frame["timestamp"].astype("int64")
-        frame.reset_index(drop=True).to_parquet(tmp_path / "1m" / f"{sym}.parquet")
+        frame.reset_index(drop=True).to_parquet(tmp_path / "3m" / f"{sym}.parquet")
 
     decision_grid = pd.date_range(start, end, freq="6h", tz="UTC")
     weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
@@ -125,8 +146,8 @@ def test_iter_mhs_execution_windows_preserves_columns_and_active_roster(tmp_path
 
     windows = list(
         _iter_mhs_execution_windows(
-            weights, signals, str(tmp_path), "1m", start, end, funding,
-            "ohlcv_close_fallback", ExecutionSpec(),
+            weights, signals, str(tmp_path), "3m", start, end, funding,
+            ExecutionSpec(),
         )
     )
     assert windows
@@ -136,7 +157,7 @@ def test_iter_mhs_execution_windows_preserves_columns_and_active_roster(tmp_path
         assert w.target_weights.columns.tolist() == list(w.symbols)
         assert w.minute_grid.tz is not None
         assert len(w.minute_grid) > 1
-    assert windows[-1].minute_grid[-1] == end
+    assert windows[-1].minute_grid[-1] == end - pd.Timedelta(minutes=3)
 
 def test_request_validation_adjusted_without_gate() -> None:
     """SCENARIO_REQUEST_VALIDATION_ADJUSTED_WITHOUT_GATE: requesting the
@@ -207,7 +228,7 @@ class TestReplayExposureScaleGrowthBudget:
         result = scaling._replay_exposure_scale(r, request)
         assert result.index.equals(r.index)
         assert np.isfinite(result.to_numpy()).all()
-        assert (result >= ev.PNL_VOL_TARGET_SCALE_FLOOR).all()
+        assert (result >= PNL_VOL_TARGET_SCALE_FLOOR).all()
         assert (result <= 1.0).all()
 
 class TestCommitteeMemberSetValidation:
@@ -236,7 +257,7 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     captured: dict[str, pd.Series] = {}
     real_scale = scaling._regime_cash_scale
 
@@ -245,11 +266,15 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
         return real_scale(vol_mean, *args, **kwargs)
 
     monkeypatch.setattr(scaling, "_regime_cash_scale", spy)
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    import src.mhs.evaluation.folds as folds_mod
+    import src.mhs.evidence as evidence_mod
+
+    monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
+    monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -274,25 +299,27 @@ class TestBookOutcomePaired:
     @pytest.mark.slow
     def test_book_builds_window_iterator_twice_streaming(self, mhs_market, monkeypatch) -> None:
         # Pins the spill-once generator contract; disable coupled streaming.
-        monkeypatch.setattr(ev._scaling, "is_streaming_scale_mode", lambda _request: False)
+        import src.mhs.evaluation.windows as windows_mod
+
+        monkeypatch.setattr(scaling, "is_streaming_scale_mode", lambda _request: False)
         args = _build_book_outcome_args(mhs_market)
         calls = {"n": 0}
-        original = ev._iter_mhs_execution_windows
+        original = _iter_mhs_execution_windows
 
         def counting(*_args, **_kwargs):
             calls["n"] += 1
             return original(*_args, **_kwargs)
 
-        monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
+        monkeypatch.setattr(windows_mod, "_iter_mhs_execution_windows", counting)
         batch_calls = {"n": 0}
-        original_batch = ev.replay_execution_window_batch_isolated
+        original_batch = replay_execution_window_batch_isolated
 
         def counting_batch(*_args, **_kwargs):
             batch_calls["n"] += 1
             return original_batch(*_args, **_kwargs)
 
-        monkeypatch.setattr(ev, "replay_execution_window_batch_isolated", counting_batch)
-        report, _ = ev._book_outcome(**args)
+        monkeypatch.setattr(windows_mod, "replay_execution_window_batch_isolated", counting_batch)
+        report, _ = _book_outcome(**args)
         assert report.primary is not None
         assert report.stress is not None
         assert report.failure is None
@@ -304,16 +331,16 @@ class TestBookOutcomePaired:
         args = _build_book_outcome_args(mhs_market)
         args["request"] = MhsDiagnosticRequest(
             start=str(_START), end=str(args["end"]), data_root=args["root"],
-            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            execution_timeframe="3m", log_run=False,
             max_rss_bytes=1_000,
         )
         monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 100_000_000_000)
-        report, _ = ev._book_outcome(**args)
+        report, _ = _book_outcome(**args)
         assert report.primary is None
         assert report.stress is None
         assert report.failure is not None
         assert report.failure.stage == "replay_fast_reversal"
-        assert report.failure.reason == ev.GO_REASON_RESOURCE_BREACH
+        assert report.failure.reason == _research_go.GO_REASON_RESOURCE_BREACH
 
 @pytest.mark.slow
 def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None:
@@ -327,13 +354,17 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     universe_size = 8
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    import src.mhs.evaluation.folds as folds_mod
+    import src.mhs.evidence as evidence_mod
+
+    monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
+    monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=universe_size,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -365,14 +396,11 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
         1000.0 - 10.0 * i for i in range(len(cols) - universe_size)
     ]
     eligible_all = pd.DataFrame(True, index=engine_idx, columns=cols)
-    retention_mask = ev._pit_execution_mask(
+    retention_mask = _pit_execution_mask(
         engineered_vol, eligible_all, universe_size,
     )
     retention_mean = float(retention_mask.sum(axis=1).mean())
     assert retention_mean > universe_size
-    monkeypatch.setattr(
-        ev, "_pit_execution_mask", lambda qv, el, usz: retention_mask,
-    )
     monkeypatch.setattr(
         book_stage, "_pit_execution_mask", lambda qv, el, usz: retention_mask,
     )
@@ -388,23 +416,23 @@ def test_mhs_perf_opt_004_window_frames_read_window_only(mhs_market, monkeypatch
     root, end = mhs_market
     syms = ["MHSAUSDT", "MHSBUSDT"]
     calls = {"n": 0}
-    original = ev.pq.read_table
+    original = pq.read_table
 
     def counting(*args, **kwargs):
         calls["n"] += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(ev.pq, "read_table", counting)
+    monkeypatch.setattr(pq, "read_table", counting)
 
     ws = _START + pd.Timedelta(hours=6)
     we = _START + pd.Timedelta(hours=30)
-    a = ev._load_window_minute_frames(str(root), syms, ws, we, "1m")
+    a = _load_window_minute_frames(str(root), syms, ws, we, "1m")
     assert a
     assert calls["n"] == len(syms)
     for k in a:
         assert a[k].index.min() >= ws
         assert a[k].index.max() <= we
-    b = ev._load_window_minute_frames(str(root), syms, ws, we, "1m")
+    b = _load_window_minute_frames(str(root), syms, ws, we, "1m")
     assert set(b) == set(a)
 
 def test_mhs_phase2_o6_window_frames_parity(mhs_market) -> None:
@@ -417,15 +445,15 @@ def test_mhs_phase2_o6_window_frames_parity(mhs_market) -> None:
     we = pd.Timestamp("2021-01-02 06:00", tz="UTC")
     grid = pd.date_range(ws, we, freq="1min", tz="UTC")
 
-    window_frames = ev._load_window_minute_frames(str(root), syms, ws, we, "1m")
-    window_aligned = ev._build_window_frames(window_frames, syms, ws, we, grid, "1m")
+    window_frames = _load_window_minute_frames(str(root), syms, ws, we, "1m")
+    window_aligned = _build_window_frames(window_frames, syms, ws, we, grid, "1m")
     assert window_aligned is not None
 
     full_frames = {
-        s: ev._load_window_minute_frames(str(root), [s], _START, end, "1m").get(s)
+        s: _load_window_minute_frames(str(root), [s], _START, end, "1m").get(s)
         for s in syms
     }
-    slice_aligned = ev._build_window_frames(full_frames, syms, ws, we, grid, "1m")
+    slice_aligned = _build_window_frames(full_frames, syms, ws, we, grid, "1m")
     assert slice_aligned is not None
 
     window_highs, window_lows, window_closes = window_aligned
@@ -445,7 +473,7 @@ def test_mhs_phase2_o6_missing_symbol_skipped(mhs_market) -> None:
     # O6: the window loader silently skips a missing parquet (no full-period
     # cache exists to fail on after the fork-COW refactor).
     root, _end = mhs_market
-    frames = ev._load_window_minute_frames(
+    frames = _load_window_minute_frames(
         str(root), ["MHSAUSDT", "NOSUCHUSDT"], _START, _START + pd.Timedelta(hours=24), "1m",
     )
     assert "MHSAUSDT" in frames
@@ -462,7 +490,7 @@ def test_p11_resolve_ns_bit_identical() -> None:
     for _ in range(5):
         spos_all = rng.integers(-10, n_grid + 10, size=300)
         expected = _reference_resolve_ns_scalar(spos_all, grid_ns, n_grid, timeout_delta)
-        actual = ev._resolve_ns_vectorized(spos_all, grid_ns, n_grid, timeout_delta)
+        actual = _resolve_ns_vectorized(spos_all, grid_ns, n_grid, timeout_delta)
         assert actual.dtype == np.int64
         assert len(actual) == len(spos_all)
         assert np.array_equal(actual, expected)
@@ -471,7 +499,7 @@ def test_p11_resolve_ns_bit_identical() -> None:
     odd_delta = 37 * 60_000_000_000
     spos_all = rng.integers(0, n_grid - 1, size=200)
     assert np.array_equal(
-        ev._resolve_ns_vectorized(spos_all, grid_ns, n_grid, odd_delta),
+        _resolve_ns_vectorized(spos_all, grid_ns, n_grid, odd_delta),
         _reference_resolve_ns_scalar(spos_all, grid_ns, n_grid, odd_delta),
     )
 
@@ -484,20 +512,19 @@ def test_p10_concurrent_books_parity(mhs_market) -> None:
     # stays byte-identical after the regime_scale parameter was added.
     args = _build_books_concurrent_args(mhs_market)
     sequential = _sequential_book_reports(args)
-    concurrent_fast, concurrent_slow, concurrent_blend, _, _ = ev._run_books_concurrent(**args)
+    concurrent_fast, concurrent_slow, concurrent_blend, _, _ = _run_books_concurrent(**args)
     concurrent = (concurrent_fast, concurrent_slow, concurrent_blend)
     assert len(concurrent) == 3
     for seq, con, name in zip(sequential, concurrent, ("fast_reversal", "slow_momentum", "blend"), strict=True):
         _assert_books_equal(seq, con, name)
 
-def test_p10_mark_cache_warmable_per_symbol(mhs_market) -> None:
-    # Mark frame cache warms one symbol's mark parquet per call for COW inheritance.
-    root, end = mhs_market
-    syms = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
-    ev._get_symbol_mark_frame.cache_clear()
-    for s in syms:
-        assert ev._get_symbol_mark_frame(s, "1h") is not None
-    assert ev._get_symbol_mark_frame.cache_info().currsize >= len(syms)
+def test_p10_mark_cache_retired_no_process_cache(mhs_market) -> None:
+    # The mark frame cache is retired for COW inheritance: retained loaders
+    # are stateless, so there is no per-symbol process cache to warm.
+    import src.mhs.marks as marks_mod
+
+    assert not hasattr(marks_mod, "_get_symbol_mark_frame")
+    marks_mod.clear_mhs_market_data_caches()
 
 @pytest.mark.slow
 def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
@@ -505,31 +532,8 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
     # dropped, failure set) is delivered through the process pool without
     # blocking the other two books.
     args = _build_books_concurrent_args(mhs_market)
-    real = ev._book_outcome
     import src.mhs.evaluation.windows as windows_mod
     real_windows = windows_mod._book_outcome
-
-    def _failing(name, *a, **k):
-        report, traces = real(name, *a, **k)
-        if name == "slow_momentum":
-            return dataclasses.replace(
-                report,
-                primary=None, stress=None,
-                primary_autocorr_sharpe=None,
-                primary_naive_sharpe=None,
-                primary_net_ann=None,
-                primary_geometric_cagr=None,
-                primary_max_drawdown=None,
-                primary_annualized_turnover=None,
-                stress_naive_sharpe=None,
-                failure=ev.MhsBookFailure(
-                    stage="replay_slow_momentum",
-                    error_class="DataIntegrityError",
-                    reason=ev.GO_REASON_EXECUTION_GAP,
-                    message="forced isolation failure",
-                ),
-            ), traces
-        return report, traces
 
     def _failing_windows(name, *a, **k):
         report, traces = real_windows(name, *a, **k)
@@ -544,23 +548,22 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
                 primary_max_drawdown=None,
                 primary_annualized_turnover=None,
                 stress_naive_sharpe=None,
-                failure=ev.MhsBookFailure(
+                failure=MhsBookFailure(
                     stage="replay_slow_momentum",
                     error_class="DataIntegrityError",
-                    reason=ev.GO_REASON_EXECUTION_GAP,
+                    reason=_research_go.GO_REASON_EXECUTION_GAP,
                     message="forced isolation failure",
                 ),
             ), traces
         return report, traces
 
-    monkeypatch.setattr(ev, "_book_outcome", _failing)
     monkeypatch.setattr(windows_mod, "_book_outcome", _failing_windows)
-    fast, slow, blend, _, _ = ev._run_books_concurrent(**args)
+    fast, slow, blend, _, _ = _run_books_concurrent(**args)
     assert fast.primary is not None
     assert fast.failure is None
     assert slow.primary is None
     assert slow.failure is not None
-    assert slow.failure.reason == ev.GO_REASON_EXECUTION_GAP
+    assert slow.failure.reason == _research_go.GO_REASON_EXECUTION_GAP
     assert blend.primary is not None
     assert blend.failure is None
 
@@ -568,15 +571,15 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
 def test_regime_scale_reaches_blend_replay_not_only_prescreen(mhs_market) -> None:
     # SCENARIO_MHS_REGIME_SCALE_REACHES_BLEND_REPLAY_01: blend replay reflects regime scale.
     args = _build_books_concurrent_args(mhs_market)
-    active_grid = ev._active_blend_book_and_grid(
+    active_grid = _active_blend_book_and_grid(
         args["fast"], args["slow"], args["fast_grid"], args["slow_grid"],
     )[1]
     half = len(active_grid) // 2
     scale = pd.Series(1.0, index=active_grid)
     scale.iloc[:half] = 0.5
 
-    fast_base, slow_base, blend_base, _, _ = ev._run_books_concurrent(**args)
-    fast_scaled, slow_scaled, blend_scaled, _, _ = ev._run_books_concurrent(**args, regime_scale=scale)
+    fast_base, slow_base, blend_base, _, _ = _run_books_concurrent(**args)
+    fast_scaled, slow_scaled, blend_scaled, _, _ = _run_books_concurrent(**args, regime_scale=scale)
 
     assert blend_base.failure is None
     assert blend_scaled.failure is None
@@ -612,22 +615,22 @@ def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
     # blocks, finite per-tier fields) still holds after the per-member book
     # streaming + multi-tier ledger.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.committee_diagnostic
-    assert diag["walk_forward"]["block_edges"][0] == ev.COMMITTEE_OOS_START.isoformat()
+    assert diag["walk_forward"]["block_edges"][0] == COMMITTEE_OOS_START.isoformat()
     assert diag["walk_forward"]["purge_hours"] == 720
     assert diag["walk_forward"]["skipped_blocks"] == []
     per_tier = diag["walk_forward"]["per_tier"]
-    assert set(per_tier) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    assert set(per_tier) == set(MEASURED_EXECUTION_COST_TIERS_BPS)
     for fields in per_tier.values():
         assert isinstance(fields["bars"], int)
         assert fields["bars"] >= 0
@@ -648,18 +651,18 @@ def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
 
     # I-FAMILY: fold replay는 level 코드를 만들지 않는다(무결성 코드만).
-    completed_fold = ev._run_anchored_fold(
+    completed_fold = _run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
     )
-    assert ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR not in completed_fold.failures
+    assert _research_go.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR not in completed_fold.failures
 
     from src.mhs import research_go as _research_go_module
 
@@ -674,7 +677,7 @@ def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -
         {"cap_60_roster": 60.0, "primary_annual_return": 10.0},
     )
     assert _research_go_module._pooled_level_gate_reasons(low_return_evidence) == (
-        ev.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR,
+        _research_go.GO_REASON_PRIMARY_RETURN_BELOW_FLOOR,
     )
 
     monkeypatch.setattr(
@@ -708,7 +711,7 @@ def test_target_gross_request_validation() -> None:
     # committee_capital=True. The unresolved sentinel is never mutated into
     # the frozen field (that would break dataclasses.replace()); resolution
     # happens lazily via _resolved_committee_target_gross.
-    assert _research_go._resolved_committee_target_gross(default) == ev.COMMITTEE_TARGET_GROSS
+    assert _research_go._resolved_committee_target_gross(default) == COMMITTEE_TARGET_GROSS
 
     valid = MhsDiagnosticRequest(committee_target_gross=0.795, committee_capital=True)
     assert valid.committee_target_gross == 0.795
@@ -731,10 +734,11 @@ def test_reference_bound_degraded_preserves_primary(mhs_market, monkeypatch) -> 
     finite, patient_reference None, and reference_bound_failures has exactly
     one entry."""
     # Pins two-pass degraded-reference semantics; disable coupled streaming.
-    monkeypatch.setattr(ev._scaling, "is_streaming_scale_mode", lambda _request: False)
+    monkeypatch.setattr(scaling, "is_streaming_scale_mode", lambda _request: False)
+    import src.mhs.evaluation.windows as windows_mod
     from src.mhs.execution import IsolatedBoundFailure, BatchReplayOutcome
     args = _build_book_outcome_args(mhs_market)
-    baseline, _ = ev._book_outcome(**args)
+    baseline, _ = _book_outcome(**args)
     # Build a mock result for the strict slot
     strict_fallback = baseline.primary
     assert strict_fallback is not None
@@ -750,10 +754,10 @@ def test_reference_bound_degraded_preserves_primary(mhs_market, monkeypatch) -> 
             ),
         ),
     )
-    real_isolated = ev.replay_execution_window_batch_isolated
-    monkeypatch.setattr(ev, "replay_execution_window_batch_isolated", lambda *a, **k: mock_outcome)
-    report, _ = ev._book_outcome(**args)
-    monkeypatch.setattr(ev, "replay_execution_window_batch_isolated", real_isolated)
+    real_isolated = replay_execution_window_batch_isolated
+    monkeypatch.setattr(windows_mod, "replay_execution_window_batch_isolated", lambda *a, **k: mock_outcome)
+    report, _ = _book_outcome(**args)
+    monkeypatch.setattr(windows_mod, "replay_execution_window_batch_isolated", real_isolated)
     assert report.failure is None
     assert report.primary is not None
     assert np.isfinite(report.primary_geometric_cagr)
@@ -788,7 +792,7 @@ class TestCommitteeMemberAttribution:
     """Tests for _committee_member_attribution proxy_vs_ledger_rank_spearman."""
 
     def test_perfect_correlation(self) -> None:
-        from src.mhs.evaluation import _committee_member_attribution
+        from src.mhs.evaluation.committee import _committee_member_attribution
         ledger_sharpes = {"a": 3.0, "b": 2.0, "c": 1.0}
         proxy_sharpes = {"a": 3.0, "b": 2.0, "c": 1.0}
         result = _committee_member_attribution({}, proxy_sharpes)
@@ -796,14 +800,14 @@ class TestCommitteeMemberAttribution:
         assert result["proxy_vs_ledger_rank_spearman"] is None
 
     def test_empty_reports_yields_none_spearman(self) -> None:
-        from src.mhs.evaluation import _committee_member_attribution
+        from src.mhs.evaluation.committee import _committee_member_attribution
         result = _committee_member_attribution({}, {"a": 1.0})
         assert result["proxy_vs_ledger_rank_spearman"] is None
         assert result["members"] == {}
         assert result["daily_return_correlation"] == {}
 
     def test_fewer_than_three_shared_yields_none(self) -> None:
-        from src.mhs.evaluation import _committee_member_attribution
+        from src.mhs.evaluation.committee import _committee_member_attribution
         # Only 2 shared members < 3 threshold
         result = _committee_member_attribution({}, {"a": 1.0, "b": 2.0})
         assert result["proxy_vs_ledger_rank_spearman"] is None
@@ -821,7 +825,7 @@ def test_committee_member_attribution_observational_only(mhs_market_with_taker_b
     root, end = mhs_market_with_taker_buy_quote
     base = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
     )
     off = run_mhs_horizon_diagnostic(base)

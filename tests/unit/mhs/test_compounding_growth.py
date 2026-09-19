@@ -8,10 +8,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
+from src.mhs.evaluation.committee import (
     _committee_execution_book,
 )
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.scaling import (
     _committee_capital_replay_scale,
     _exante_vol_target_scale,
@@ -263,7 +263,7 @@ class TestCommitteeBookCarryMix:
         carry["B"] = -0.5
 
         with patch(
-            "src.mhs.evaluation.build_feature_books",
+            "src.mhs.evaluation.committee.build_feature_books",
             side_effect=self._mock_build(decision_grid, cols),
         ):
             result = _committee_execution_book(
@@ -288,7 +288,7 @@ class TestCommitteeBookCarryMix:
         carry["B"] = -0.5
 
         with patch(
-            "src.mhs.evaluation.build_feature_books",
+            "src.mhs.evaluation.committee.build_feature_books",
             side_effect=self._mock_build(decision_grid, cols),
         ):
             without_carry = _committee_execution_book(
@@ -316,7 +316,7 @@ class TestCommitteeBookCarryMix:
         carry["B"] = -0.5
 
         with patch(
-            "src.mhs.evaluation.build_feature_books",
+            "src.mhs.evaluation.committee.build_feature_books",
             side_effect=self._mock_build(decision_grid, cols),
         ):
             with pytest.raises(ValueError, match="target_gross"):

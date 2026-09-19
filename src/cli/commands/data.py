@@ -144,17 +144,10 @@ def _report_internal_gaps(args: argparse.Namespace) -> None:
 
 
 def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) -> bool:
+    """Refresh the MHS live-universe data required by the declared trade-OHLCV and funding contract. The command does not create mark-price or daily-metrics artifacts as a hidden prerequisite."""
     try:
         collector.ensure_ohlcv_data(symbol, "1h", start, end)
         collector.ensure_funding_data(symbol, start, end)
-        # markPriceKlines 1h
-        try:
-            if hasattr(collector, "ensure_mark_price_data"):
-                collector.ensure_mark_price_data(symbol, "1h", start, end)
-            elif hasattr(collector, "ensure_mark_price_klines"):
-                collector.ensure_mark_price_klines(symbol, "1h", start, end)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] markPriceKlines symbol=%s failed error=%s", symbol, exc)
         return True
     except Exception as exc:  # noqa: BLE001 - one symbol's flakiness must not abort the batch
         _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)
@@ -480,7 +473,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     stream_liq.add_argument("--dir", type=str, default=None)
     stream_liq.set_defaults(handler=_stream_liquidations)
 
-    refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h/funding + markPriceKlines)")
+    refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h trade OHLCV + settled funding)")
     refresh.set_defaults(handler=_refresh_live_universe)  # _refresh_live_universe delegates to refresh_live_market_data
 
     repair = collect.add_parser("repair-ohlcv", help="Operator-invoked: move a corrupt 1h OHLCV cache aside and refetch the full panel window")
@@ -488,7 +481,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     repair.add_argument("--lookback-days", type=int, default=0)
     repair.set_defaults(handler=_repair_ohlcv)
 
-    seed_cloud = collect.add_parser("seed-cloud", help="Cold-boot the box: fetch 1h OHLCV + mark/1h + funding for the dev universe")
+    seed_cloud = collect.add_parser("seed-cloud", help="Cold-boot the box: fetch 1h trade OHLCV + settled funding for the dev universe")
     seed_cloud.add_argument("--lookback-days", type=int, default=0)
     seed_cloud.set_defaults(handler=_seed_cloud)  # _seed_cloud delegates to refresh_live_market_data(symbols=syms)
 

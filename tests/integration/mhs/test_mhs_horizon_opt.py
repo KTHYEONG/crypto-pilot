@@ -12,17 +12,28 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs import evaluation as ev
 from src.mhs import marks
 from src.mhs import params
-from src.mhs.evaluation import (
-    GO_REASON_INVALID_PRIMARY,
-    GO_REASON_RESOURCE_BREACH,
-    MhsDiagnosticRequest,
-    _book_structure_trace,
-    _run_anchored_fold,
+from src.common.errors import DataIntegrityError
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evaluation.books import _book_structure_trace
+from src.mhs.evaluation.folds import _run_anchored_fold
+from src.mhs.evidence import AnchoredPurgedFold
+from src.mhs.marks import _load_funding_series
+from src.mhs.report.artifacts import (
+    _build_replay_artifact_reference,
     _verify_ledger_artifact,
 )
+from src.mhs.report.persist import (
+    _build_replay_category_tables,
+    _write_unified_artifact_tables,
+)
+from src.mhs.evaluation.regime import (
+    _fold_regime_characterization,
+    _regime_reference_characterization,
+)
+from src.mhs.research_go import GO_REASON_INVALID_PRIMARY, GO_REASON_RESOURCE_BREACH
+from src.mhs.resources import _StageRecorder
 from src.mhs.scaling import (
     _apply_rebalance_deadband,
     _regime_cash_scale,
@@ -38,7 +49,7 @@ DEV_SYMBOLS = [
     if symbol_partition(sym) == "dev"
 ][:8]
 
-OPT_FOLD = ev.AnchoredPurgedFold(
+OPT_FOLD = AnchoredPurgedFold(
     pd.Timestamp("2021-01-01", tz="UTC"),
     pd.Timestamp("2021-01-31", tz="UTC"),
     pd.Timestamp("2021-02-10", tz="UTC"),
@@ -106,13 +117,13 @@ def fold_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
 @pytest.fixture(scope="module")
 def funding(fold_market) -> dict[str, pd.Series]:
     root, _end = fold_market
-    return ev._load_funding_series(DEV_SYMBOLS)[0]
+    return _load_funding_series(DEV_SYMBOLS)[0]
 
 
 def _request(root: Path, end: pd.Timestamp, **overrides) -> MhsDiagnosticRequest:
     params = {
         "start": str(START), "end": str(end), "data_root": str(root),
-        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
     }
     params.update(overrides)
     return MhsDiagnosticRequest(**params)
@@ -143,7 +154,7 @@ class TestMemoryBudget:
 
     def test_fold_completes_under_fixed_rss_budget(self, fold_market, funding) -> None:
         root, end = fold_market
-        recorder = ev._StageRecorder(log_run=False)
+        recorder = _StageRecorder(log_run=False)
         report = _run_anchored_fold(
             str(root), OPT_FOLD, _request(root, end, max_rss_bytes=int(2.5 * 1024**3)),
             funding, 1.0, 0, recorder,
@@ -315,7 +326,7 @@ class TestMhsEvalIntegrity:
 
         monkeypatch.setattr(np, "where", _regressed_where)
         try:
-            with pytest.raises(ev.DataIntegrityError, match="holdings"):
+            with pytest.raises(DataIntegrityError, match="holdings"):
                 _apply_rebalance_deadband(target)
         finally:
             monkeypatch.setattr(np, "where", real_where)
@@ -365,10 +376,10 @@ class TestFoldIntegrity:
         root, end = fold_market
         report = _run_anchored_fold(str(root), OPT_FOLD, _request(root, end), funding, 1.0, 0)
         assert report.strict is not None
-        tables = ev._build_replay_category_tables(report.strict)
-        unified = ev._write_unified_artifact_tables({"strict": tables}, tmp_path)
+        tables = _build_replay_category_tables(report.strict)
+        unified = _write_unified_artifact_tables({"strict": tables}, tmp_path)
         ledger_path = unified["ledger"][0]
-        ref = ev._build_replay_artifact_reference(
+        ref = _build_replay_artifact_reference(
             "strict", report.strict, tables, tmp_path, unified,
         )
         assert ref["ledger"]["row_count"] == len(pd.read_parquet(ledger_path))
@@ -377,7 +388,7 @@ class TestFoldIntegrity:
         tampered.loc[0, "equity"] = float("nan")
         tampered_path = tmp_path / "tampered_ledger.parquet"
         tampered.to_parquet(tampered_path, index=False)
-        with pytest.raises(ev.DataIntegrityError):
+        with pytest.raises(DataIntegrityError):
             _verify_ledger_artifact(tampered_path, "strict", len(tampered))
 
 
@@ -417,7 +428,7 @@ class TestRegimeCharacterization:
         idx = pd.date_range("2021-01-01", periods=200, freq="1h", tz="UTC")
         prices = 100.0 * np.exp(np.linspace(0, 0.5, 200))
         close = pd.Series(prices, index=idx)
-        result = ev._regime_reference_characterization(close)
+        result = _regime_reference_characterization(close)
         assert result is not None
         assert result["total_return"] > 0
         assert result["direction_flip_rate_24h"] < 0.05
@@ -437,7 +448,7 @@ class TestRegimeCharacterization:
             sign = 1.0 if t % 2 == 0 else -1.0
             prices.append(prices[t - 24] * (1.0 + sign * 0.05))
         close = pd.Series(prices, index=idx)
-        result = ev._regime_reference_characterization(close)
+        result = _regime_reference_characterization(close)
         assert result is not None
         assert result["direction_flip_rate_24h"] > 0.9
 
@@ -446,7 +457,7 @@ class TestRegimeCharacterization:
         # returns None, not a dict with NaN values.
         idx = pd.date_range("2021-01-01", periods=30, freq="1h", tz="UTC")
         close = pd.Series(100.0 + np.arange(30), index=idx)
-        result = ev._regime_reference_characterization(close)
+        result = _regime_reference_characterization(close)
         assert result is None
 
     def test_fold_regime_characterization_missing_reference_returns_none(self, tmp_path) -> None:
@@ -454,7 +465,7 @@ class TestRegimeCharacterization:
         # BTCUSDT.parquet yields None, not an exception.
         root = tmp_path / "market"
         (root / "1h").mkdir(parents=True)
-        fold = ev.AnchoredPurgedFold(
+        fold = AnchoredPurgedFold(
             pd.Timestamp("2021-01-01", tz="UTC"),
             pd.Timestamp("2021-01-31", tz="UTC"),
             pd.Timestamp("2021-02-10", tz="UTC"),
@@ -462,7 +473,7 @@ class TestRegimeCharacterization:
             168,
             168,
         )
-        result = ev._fold_regime_characterization(str(root), fold)
+        result = _fold_regime_characterization(str(root), fold)
         assert result is None
 
     def test_fold_regime_characterization_reads_only_validation_window(self, tmp_path) -> None:
@@ -475,7 +486,7 @@ class TestRegimeCharacterization:
         train_end = pd.Timestamp("2021-01-31", tz="UTC")
         val_start = pd.Timestamp("2021-02-10", tz="UTC")
         val_end = pd.Timestamp("2021-04-19 08:00", tz="UTC")
-        fold = ev.AnchoredPurgedFold(train_start, train_end, val_start, val_end, 168, 168)
+        fold = AnchoredPurgedFold(train_start, train_end, val_start, val_end, 168, 168)
         # Build synthetic data: flat in train, sharply trending in validation
         train_hours = pd.date_range(train_start, train_end, freq="1h", tz="UTC")
         val_hours = pd.date_range(val_start, val_end, freq="1h", tz="UTC")
@@ -487,7 +498,7 @@ class TestRegimeCharacterization:
         df = pd.DataFrame({"timestamp": epoch_ms, "open": all_prices, "high": all_prices,
                            "low": all_prices, "close": all_prices, "quote_vol": [1000.0] * len(all_hours)})
         df.to_parquet(root / "1h" / "BTCUSDT.parquet", index=False)
-        result = ev._fold_regime_characterization(str(root), fold)
+        result = _fold_regime_characterization(str(root), fold)
         assert result is not None
         # Compute expected values from validation-only slice
         val_arr = np.array(val_prices, dtype="float64")

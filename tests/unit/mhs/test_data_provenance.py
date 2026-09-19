@@ -60,7 +60,13 @@ def test_required_input_paths_include_panel_execution_mark_and_funding(tmp_path)
     assert any('1h' in p and 'BTCUSDT' in p for p in rendered)
     assert any('3m' in p and 'BTCUSDT' in p for p in rendered)
     assert any('funding' in p and 'BTCUSDT' in p for p in rendered)
-    assert any('mark' in p and 'BTCUSDT' in p for p in rendered)
+    assert not any('mark' in p for p in rendered)
+    assert not any('metrics' in p or '1d' in p.split('/') for p in rendered)
+    assert rendered == {
+        'ohlcv/1h/BTCUSDT.parquet',
+        'ohlcv/3m/BTCUSDT.parquet',
+        'funding/BTCUSDT.parquet',
+    }
 
 
 def test_provenance_absent_manifest_and_seal_success(tmp_path) -> None:
@@ -117,7 +123,7 @@ def test_provenance_absent_manifest_and_seal_success(tmp_path) -> None:
     assert good.files_checked == 2
 
 def test_mhs_sealable_input_paths_skips_incomplete_symbols(tmp_path) -> None:
-    # Given: COMPLETEUSDT has all four required files, PARTIALUSDT lacks funding
+    # Given: COMPLETEUSDT has all three required files, PARTIALUSDT lacks funding
     import pandas as pd
 
     from src.mhs.data_provenance import mhs_sealable_input_paths
@@ -133,25 +139,24 @@ def test_mhs_sealable_input_paths_skips_incomplete_symbols(tmp_path) -> None:
         "ohlcv/1h/COMPLETEUSDT.parquet",
         "ohlcv/3m/COMPLETEUSDT.parquet",
         "funding/COMPLETEUSDT.parquet",
-        "markPriceKlines/1h/COMPLETEUSDT.parquet",
         "ohlcv/1h/PARTIALUSDT.parquet",
         "ohlcv/3m/PARTIALUSDT.parquet",
-        "markPriceKlines/1h/PARTIALUSDT.parquet",
     ):
         _write(rel)
 
     # When
     paths = mhs_sealable_input_paths(data_root=tmp_path, execution_timeframe="3m")
 
-    # Then: exactly the four complete-symbol files, no partial symbol at all
+    # Then: existing required files are sealed, mark never enters the identity
     names = {p.relative_to(tmp_path).as_posix() for p in paths}
     assert names == {
         "ohlcv/1h/COMPLETEUSDT.parquet",
         "ohlcv/3m/COMPLETEUSDT.parquet",
         "funding/COMPLETEUSDT.parquet",
-        "markPriceKlines/1h/COMPLETEUSDT.parquet",
+        "ohlcv/1h/PARTIALUSDT.parquet",
+        "ohlcv/3m/PARTIALUSDT.parquet",
     }
-    assert all("PARTIALUSDT" not in p.name for p in paths)
+    assert not any("mark" in name for name in names)
     assert len(paths) == len(set(paths))
 
 def test_seal_then_validate_round_trip_is_reproducible_archive(tmp_path) -> None:
@@ -170,7 +175,6 @@ def test_seal_then_validate_round_trip_is_reproducible_archive(tmp_path) -> None
         "ohlcv/1h/COMPLETEUSDT.parquet",
         "ohlcv/3m/COMPLETEUSDT.parquet",
         "funding/COMPLETEUSDT.parquet",
-        "markPriceKlines/1h/COMPLETEUSDT.parquet",
     ):
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,3 +198,133 @@ def test_seal_then_validate_round_trip_is_reproducible_archive(tmp_path) -> None
     assert result.tier is DataEvidenceTier.REPRODUCIBLE_ARCHIVE
     assert result.reason_codes == ()
     assert result.manifest_digest == digest
+
+
+def test_required_files_are_exactly_consumed_sources() -> None:
+    from pathlib import Path
+
+    from src.mhs.data_provenance import resolve_required_mhs_input_paths
+
+    paths = resolve_required_mhs_input_paths(
+        data_root=Path("/data"),
+        panel_symbols=["PANELONLYUSDT", "BOTHUSDT"],
+        execution_symbols=["BOTHUSDT", "EXEConlyUSDT".upper()],
+        execution_timeframe="3m",
+    )
+    rendered = {p.as_posix() for p in paths}
+    assert "/data/ohlcv/1h/PANELONLYUSDT.parquet" in rendered
+    assert "/data/funding/PANELONLYUSDT.parquet" in rendered
+    assert not any("PANELONLYUSDT" in p and "/3m/" in p for p in rendered)
+    assert "/data/ohlcv/1h/BOTHUSDT.parquet" in rendered
+    assert "/data/ohlcv/3m/BOTHUSDT.parquet" in rendered
+    assert "/data/funding/BOTHUSDT.parquet" in rendered
+    assert "/data/ohlcv/3m/EXECONLYUSDT.parquet" in rendered
+    assert "/data/funding/EXECONLYUSDT.parquet" in rendered
+    assert not any("markPriceKlines" in p for p in rendered)
+    assert not any("/metrics/" in p or p.endswith("/1d") for p in rendered)
+    assert list(paths) == sorted(paths, key=lambda p: p.as_posix())
+
+
+def test_mark_presence_cannot_change_digest(tmp_path) -> None:
+    import pandas as pd
+
+    from src.mhs.data_provenance import mhs_sealable_input_paths, seal_mhs_input_manifest
+
+    def _write(rel: str) -> None:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1735689600000], "close": [1.0]}).to_parquet(path)
+
+    for rel in (
+        "ohlcv/1h/AUSDT.parquet",
+        "ohlcv/3m/AUSDT.parquet",
+        "funding/AUSDT.parquet",
+    ):
+        _write(rel)
+    first = mhs_sealable_input_paths(data_root=tmp_path, execution_timeframe="3m")
+    digest_first = seal_mhs_input_manifest(first, data_root=tmp_path, output_path=tmp_path / "m1.json")
+    _write("markPriceKlines/1h/AUSDT.parquet")
+    second = mhs_sealable_input_paths(data_root=tmp_path, execution_timeframe="3m")
+    digest_second = seal_mhs_input_manifest(second, data_root=tmp_path, output_path=tmp_path / "m2.json")
+    assert digest_first == digest_second
+    assert {p.as_posix() for p in first} == {p.as_posix() for p in second}
+
+
+def test_missing_execution_source_remains_visible(tmp_path) -> None:
+    import pandas as pd
+
+    from src.mhs.data_provenance import (
+        resolve_required_mhs_input_paths,
+        seal_mhs_input_manifest,
+        validate_mhs_input_manifest,
+    )
+
+    for rel in ("ohlcv/1h/AUSDT.parquet", "funding/AUSDT.parquet"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1735689600000], "close": [1.0]}).to_parquet(path)
+    required = resolve_required_mhs_input_paths(
+        data_root=tmp_path, panel_symbols=["AUSDT"], execution_symbols=["AUSDT"], execution_timeframe="3m",
+    )
+    assert any(p.as_posix().endswith("ohlcv/3m/AUSDT.parquet") for p in required)
+    existing = [p for p in required if p.exists()]
+    digest = seal_mhs_input_manifest(existing, data_root=tmp_path, output_path=tmp_path / "m.json")
+    assert isinstance(digest, str)
+    result = validate_mhs_input_manifest(tmp_path / "m.json", data_root=tmp_path, required_paths=required)
+    assert not result.valid
+    assert "UNATTESTED_REQUIRED_FILE" in result.reason_codes
+
+
+def test_missing_funding_remains_visible(tmp_path) -> None:
+    import pandas as pd
+
+    from src.mhs.data_provenance import (
+        resolve_required_mhs_input_paths,
+        seal_mhs_input_manifest,
+        validate_mhs_input_manifest,
+    )
+
+    for rel in ("ohlcv/1h/AUSDT.parquet", "ohlcv/3m/AUSDT.parquet"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1735689600000], "close": [1.0]}).to_parquet(path)
+    required = resolve_required_mhs_input_paths(
+        data_root=tmp_path, panel_symbols=["AUSDT"], execution_symbols=["AUSDT"], execution_timeframe="3m",
+    )
+    assert any(p.as_posix().endswith("funding/AUSDT.parquet") for p in required)
+    existing = [p for p in required if p.exists()]
+    seal_mhs_input_manifest(existing, data_root=tmp_path, output_path=tmp_path / "m.json")
+    result = validate_mhs_input_manifest(tmp_path / "m.json", data_root=tmp_path, required_paths=required)
+    assert not result.valid
+    assert "UNATTESTED_REQUIRED_FILE" in result.reason_codes
+
+
+def test_input_identity_is_deterministic(tmp_path) -> None:
+    import pandas as pd
+
+    from src.mhs.data_provenance import (
+        resolve_required_mhs_input_paths,
+        seal_mhs_input_manifest,
+    )
+
+    for rel in (
+        "ohlcv/1h/AUSDT.parquet",
+        "ohlcv/3m/AUSDT.parquet",
+        "funding/AUSDT.parquet",
+        "ohlcv/1h/BUSDT.parquet",
+        "ohlcv/3m/BUSDT.parquet",
+        "funding/BUSDT.parquet",
+    ):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1735689600000], "close": [1.0]}).to_parquet(path)
+    forward = resolve_required_mhs_input_paths(
+        data_root=tmp_path, panel_symbols=["AUSDT", "BUSDT"], execution_symbols=["BUSDT", "AUSDT"], execution_timeframe="3m",
+    )
+    reverse = resolve_required_mhs_input_paths(
+        data_root=tmp_path, panel_symbols=["BUSDT", "AUSDT"], execution_symbols=["AUSDT", "BUSDT"], execution_timeframe="3m",
+    )
+    assert list(forward) == list(reverse)
+    digest_forward = seal_mhs_input_manifest(list(forward), data_root=tmp_path, output_path=tmp_path / "m1.json")
+    digest_reverse = seal_mhs_input_manifest(list(reversed(reverse)), data_root=tmp_path, output_path=tmp_path / "m2.json")
+    assert digest_forward == digest_reverse

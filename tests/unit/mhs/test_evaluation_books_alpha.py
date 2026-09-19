@@ -7,15 +7,26 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
+import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
 import src.mhs.books as books_mhs
+from src.mhs.books import (
+    inverse_realized_vol_tilt,
+    phase_tranche_book,
+    rank_weight_book,
+    renormalize_within_mask,
+)
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.scaling as scaling
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-)
-from src.mhs.horizons import vol_normalized_horizon_signal
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evaluation.books import _book_weights, _horizon_ensemble_execution_weights
+from src.mhs.evaluation.concurrency import _run_books_concurrent
+from src.mhs.evaluation.diagnostics import _phase_diagnostics
+from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
+from src.mhs.marks import _load_funding_series
+from src.mhs.params import SIGNAL_EMA_HORIZON_SPAN
+from src.mhs.types import BOOK_SPECS
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
@@ -49,11 +60,11 @@ def test_book_weights_momentum_keeps_raw_signal() -> None:
     """Verify book_weights keeps raw log return for momentum books."""
     log_close, eligible, _, _, idx = _signal_disagreement_panel()
     spec = _dispatch_spec(sign=1)
-    weights = ev._book_weights(log_close, eligible, spec, idx)
+    weights = _book_weights(log_close, eligible, spec, idx)
     expected = _reference_weights(log_close, eligible, idx, spec)
     pd.testing.assert_frame_equal(weights, expected)
-    vol_normalized = ev.phase_tranche_book(
-        ev.rank_weight_book(
+    vol_normalized = phase_tranche_book(
+        rank_weight_book(
             vol_normalized_horizon_signal(log_close, spec.horizon_hours).reindex(idx),
             eligible.reindex(idx),
             spec.band.sign,
@@ -69,7 +80,7 @@ def test_book_weights_reversal_keeps_raw_signal() -> None:
     sign=-1 spec stays on raw ``horizon_log_return``."""
     log_close, eligible, _, _, idx = _signal_disagreement_panel()
     spec = _dispatch_spec(sign=-1)
-    weights = ev._book_weights(log_close, eligible, spec, idx)
+    weights = _book_weights(log_close, eligible, spec, idx)
     expected = _reference_weights(log_close, eligible, idx, spec)
     pd.testing.assert_frame_equal(weights, expected)
 
@@ -80,19 +91,18 @@ def test_phase_diagnostics_momentum_keeps_raw_signal(monkeypatch) -> None:
     log_close, eligible, opens, bar_funding, idx = _signal_disagreement_panel()
     spec = _dispatch_spec(sign=1)
     captured: list[pd.DataFrame] = []
-    real_rank = ev.rank_weight_book
+    real_rank = rank_weight_book
 
     def recording(signal, elig, sign, min_symbols):
         captured.append(signal)
         return real_rank(signal, elig, sign, min_symbols)
 
-    monkeypatch.setattr(ev, "rank_weight_book", recording)
     monkeypatch.setattr(diagnostics_mod, "rank_weight_book", recording)
     monkeypatch.setattr(books_mhs, "rank_weight_book", recording)
-    ev._phase_diagnostics(log_close, eligible, opens, bar_funding, idx, spec)
+    _phase_diagnostics(log_close, eligible, opens, bar_funding, idx, spec)
     assert captured
     phase_grid = idx[0 :: spec.step_hours]
-    expected = ev.horizon_log_return(log_close, spec.horizon_hours).reindex(phase_grid)
+    expected = horizon_log_return(log_close, spec.horizon_hours).reindex(phase_grid)
     vol_normalized = vol_normalized_horizon_signal(log_close, spec.horizon_hours).reindex(phase_grid)
     pd.testing.assert_frame_equal(captured[0], expected)
     with pytest.raises(AssertionError):
@@ -104,19 +114,18 @@ def test_phase_diagnostics_reversal_keeps_raw_signal(monkeypatch) -> None:
     log_close, eligible, opens, bar_funding, idx = _signal_disagreement_panel()
     spec = _dispatch_spec(sign=-1)
     captured: list[pd.DataFrame] = []
-    real_rank = ev.rank_weight_book
+    real_rank = rank_weight_book
 
     def recording(signal, elig, sign, min_symbols):
         captured.append(signal)
         return real_rank(signal, elig, sign, min_symbols)
 
-    monkeypatch.setattr(ev, "rank_weight_book", recording)
     monkeypatch.setattr(diagnostics_mod, "rank_weight_book", recording)
     monkeypatch.setattr(books_mhs, "rank_weight_book", recording)
-    ev._phase_diagnostics(log_close, eligible, opens, bar_funding, idx, spec)
+    _phase_diagnostics(log_close, eligible, opens, bar_funding, idx, spec)
     assert captured
     phase_grid = idx[0 :: spec.step_hours]
-    expected = ev.horizon_log_return(log_close, spec.horizon_hours).reindex(phase_grid)
+    expected = horizon_log_return(log_close, spec.horizon_hours).reindex(phase_grid)
     pd.testing.assert_frame_equal(captured[0], expected)
 
 @pytest.mark.slow
@@ -134,19 +143,19 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
 
     root, end = mhs_market
     captured: dict = {}
-    real_books = ev._run_books_concurrent
+    real_books = _run_books_concurrent
 
     def _spy_books(*args, **kwargs):
         captured["w_fast_execution"] = args[10]
         return real_books(*args, **kwargs)
 
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently",
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently",
         lambda *a, **k: (None, None, {}, {}, (), _deployment_readiness()),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -158,12 +167,12 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
     assert np.isfinite(book.executed_prescreen_net_t)
 
     log_close, eligible, execution_mask, _req, _grid, _end = _slow_book_panel_inputs(mhs_market)
-    fast = ev.BOOK_SPECS["fast_reversal"]
+    fast = BOOK_SPECS["fast_reversal"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
-    w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
-    ref_execution = ev.renormalize_within_mask(
-        ev.inverse_realized_vol_tilt(
-            w_fast, ev.realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
+    w_fast = _book_weights(log_close, eligible, fast, fast_grid)
+    ref_execution = renormalize_within_mask(
+        inverse_realized_vol_tilt(
+            w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
         ),
         execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
@@ -180,12 +189,12 @@ def test_mhs_fast_book_mode_ensemble_produces_different_executed_book(mhs_market
     # The slow book is untouched by the fast flag. Fails against pre-change
     # code, which has no fast_book_mode branch at all.
     root, end = mhs_market
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently",
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently",
         lambda *a, **k: (None, None, {}, {}, (), _deployment_readiness()),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
-        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
     report_default = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
@@ -208,13 +217,13 @@ def test_mhs_alpha_engine_slow_book_single_horizon_is_byte_identical(mhs_market)
     # ``_horizon_ensemble_execution_weights`` reproduces the pre-change
     # ``_book_weights`` + tilt + renormalize sequence exactly.
     log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
-    slow = ev.BOOK_SPECS["slow_momentum"]
+    slow = BOOK_SPECS["slow_momentum"]
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
-    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
+    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * SIGNAL_EMA_HORIZON_SPAN))
     expected = _pre_change_slow_book(
         log_close, eligible, execution_mask, slow, slow_grid, slow_ema,
     )
-    actual = ev._horizon_ensemble_execution_weights(
+    actual = _horizon_ensemble_execution_weights(
         log_close, eligible, execution_mask, slow, slow_grid,
         "single_horizon", "raw", slow_ema,
     )
@@ -226,9 +235,9 @@ def test_mhs_alpha_engine_slow_book_ensemble_is_rowwise_mean_with_consensus_gros
     # neutral, with strictly smaller mean gross than any single horizon on a
     # panel where the horizons disagree (consensus-scaled exposure).
     log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
-    slow = ev.BOOK_SPECS["slow_momentum"]
+    slow = BOOK_SPECS["slow_momentum"]
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
-    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
+    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * SIGNAL_EMA_HORIZON_SPAN))
     per_horizon: dict[int, pd.DataFrame] = {}
     for h in slow.band.horizons_hours:
         spec = dataclasses.replace(slow, horizon_hours=h)
@@ -236,7 +245,7 @@ def test_mhs_alpha_engine_slow_book_ensemble_is_rowwise_mean_with_consensus_gros
             log_close, eligible, execution_mask, spec, slow_grid, slow_ema,
         )
     expected = sum(per_horizon.values()) / len(per_horizon)
-    actual = ev._horizon_ensemble_execution_weights(
+    actual = _horizon_ensemble_execution_weights(
         log_close, eligible, execution_mask, slow, slow_grid,
         "horizon_ensemble", "raw", slow_ema,
     )
@@ -249,15 +258,15 @@ def test_mhs_alpha_engine_slow_book_ensemble_is_rowwise_mean_with_consensus_gros
 
 def test_mhs_alpha_engine_slow_book_validates_mode_and_signal_kind(mhs_market) -> None:
     log_close, eligible, execution_mask, _request, _grid, end = _slow_book_panel_inputs(mhs_market)
-    slow = ev.BOOK_SPECS["slow_momentum"]
+    slow = BOOK_SPECS["slow_momentum"]
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
     with pytest.raises(ValueError, match="mode"):
-        ev._horizon_ensemble_execution_weights(
+        _horizon_ensemble_execution_weights(
             log_close, eligible, execution_mask, slow, slow_grid,
             "bogus", "raw", None,
         )
     with pytest.raises(ValueError, match="signal_kind"):
-        ev._horizon_ensemble_execution_weights(
+        _horizon_ensemble_execution_weights(
             log_close, eligible, execution_mask, slow, slow_grid,
             "single_horizon", "bogus", None,
         )
@@ -274,7 +283,7 @@ def test_mhs_alpha_engine_fold_portfolio_trigger_preserves_invariants(mhs_market
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     forced_scale: dict[str, pd.Series] = {}
 
     def _forced_step_scale(vol_mean: pd.Series) -> pd.Series:
@@ -288,10 +297,10 @@ def test_mhs_alpha_engine_fold_portfolio_trigger_preserves_invariants(mhs_market
     monkeypatch.setattr(scaling, "_regime_cash_scale", _forced_step_scale)
     request_trig = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         rebalance_filter="portfolio_trigger",
     )
-    target_trig, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_trig, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request_trig, funding_by_symbol,
     )
     scale = forced_scale["series"].reindex(target_trig.index)
@@ -300,7 +309,7 @@ def test_mhs_alpha_engine_fold_portfolio_trigger_preserves_invariants(mhs_market
     assert target_trig.abs().sum(axis=1).max() <= 1.0 + 1e-9
 
     request_dead = dataclasses.replace(request_trig, rebalance_filter="per_symbol_deadband", committee_target_gross=None)
-    target_dead, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_dead, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request_dead, funding_by_symbol,
     )
     assert target_dead.sum(axis=1).abs().max() > 1e-3

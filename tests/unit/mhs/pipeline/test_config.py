@@ -229,7 +229,7 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     from src.cli.main import build_root_parser
 
     pre_spec_fields = frozenset({
-        "start", "end", "partition", "data_root", "mark_mode",
+        "start", "end", "partition", "data_root",
         "execution_timeframe", "execution_universe_size", "max_rss_bytes",
         "log_run", "touch_diagnostic", "ladder_diagnostic",
         "peg_chase_diagnostic", "liquidity_cost_model",

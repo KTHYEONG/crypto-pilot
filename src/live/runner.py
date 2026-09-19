@@ -166,23 +166,34 @@ PAPER_FUNDING_LAG_HALT: pd.Timedelta = pd.Timedelta(hours=24)
 PAPER_FUNDING_LAG_GRACE: pd.Timedelta = pd.Timedelta(hours=1)
 
 
-def _load_paper_marks(symbols: Sequence[str]) -> dict[str, pd.Series]:
-    from src.common.paths import indicator_kline_path  # noqa: PLC0415
+def _load_paper_trade_closes(symbols: Sequence[str]) -> dict[str, pd.Series]:
+    """Load completed historical 1h trade closes for paper funding-notional estimates. Each close becomes usable only after its bar completes; missing prices or unknown funding keep the paper cash delta unresolved. A delisting announcement alone does not supply a settlement price."""
+    from src.common.paths import ohlcv_path  # noqa: PLC0415
 
-    marks_by_symbol: dict[str, pd.Series] = {}
+    closes_by_symbol: dict[str, pd.Series] = {}
     for symbol in symbols:
-        path = indicator_kline_path("markPriceKlines", symbol, "1h")
+        path = ohlcv_path(symbol, "1h")
         if not path.exists():
             continue
-        frame = pd.read_parquet(path, columns=["timestamp", "open"])
-        index = pd.DatetimeIndex(
-            pd.to_datetime(pd.to_numeric(frame["timestamp"]), unit="ms", utc=True)
-        )
+        frame = pd.read_parquet(path)
+        if "close" not in frame.columns:
+            continue
+        if "timestamp" in frame.columns:
+            index_open = pd.DatetimeIndex(
+                pd.to_datetime(pd.to_numeric(frame["timestamp"]), unit="ms", utc=True)
+            )
+        elif "datetime" in frame.columns:
+            index_open = pd.DatetimeIndex(pd.to_datetime(frame["datetime"], utc=True))
+        else:
+            continue
+        # Each close is indexed by its bar completion time (open + 1h) so a
+        # just-opened bar can never value a funding event at its open boundary.
+        index_completed = index_open + pd.Timedelta(hours=1)
         series = pd.Series(
-            pd.to_numeric(frame["open"]).to_numpy(dtype="float64"), index=index
+            pd.to_numeric(frame["close"]).to_numpy(dtype="float64"), index=index_completed
         ).sort_index()
-        marks_by_symbol[symbol] = series[~series.index.duplicated(keep="last")]
-    return marks_by_symbol
+        closes_by_symbol[symbol] = series[~series.index.duplicated(keep="last")]
+    return closes_by_symbol
 
 
 def _notify_event(
@@ -249,7 +260,7 @@ def _accrue_ledger_funding(
         history,
         state.funding_watermarks,
         _load_paper_funding(symbols),
-        _load_paper_marks(symbols),
+        _load_paper_trade_closes(symbols),
         now,
         closed_at=closed_at,
     )
@@ -292,50 +303,40 @@ def _settle_delisted_paper_positions(
     settings: LiveSettings,
     decision_time: pd.Timestamp,
 ) -> LedgerState:
-    if state.cash_usdt is None:
-        raise DataIntegrityError("paper delisted settlement requires cash_usdt")
-    marks = _load_paper_marks(sorted(delisted))
-    priced: dict[str, Decimal] = {}
-    for symbol in sorted(delisted):
-        series = marks.get(symbol)
-        bar = delisted[symbol].floor("h")
-        if series is None or bar not in series.index:
-            raise DataIntegrityError(
-                f"paper delisted mark missing symbol={symbol} bar={bar.isoformat()}"
-            )
-        priced[symbol] = Decimal(str(series.loc[bar]))
-    positions = dict(state.positions)
-    cash = state.cash_usdt
-    watermarks = dict(state.funding_watermarks)
-    for symbol in sorted(delisted):
-        qty = positions.get(symbol, Decimal(0))
-        mark = priced[symbol]
-        cash += qty * mark
-        positions.pop(symbol, None)
-        watermarks.pop(symbol, None)
+    """A delisting announcement alone does not supply a settlement price.
+
+    Never synthesize a liquidation at the last trade close, a mark candle or
+    zero. The held position and cash stay unresolved; the reason is recorded
+    and new risk is stopped until a separately evidenced actual settlement or
+    live account reconciliation resolves it.
+    """
+    held = {
+        symbol: state.positions.get(symbol, Decimal(0))
+        for symbol in sorted(delisted)
+        if state.positions.get(symbol, Decimal(0)) != 0
+    }
+    if not held:
+        return state
+    for symbol in sorted(held):
         audit.record(
-            "paper_delisted_close",
+            "paper_delisted_unresolved",
             symbol=symbol,
-            qty=str(qty),
-            mark=str(mark),
+            qty=str(held[symbol]),
             delivery_time=delisted[symbol].isoformat(),
+            reason="delisting_announcement_is_not_settlement",
         )
-        _notify_event(
-            settings,
-            event="paper_delisted_close",
-            detail=f"symbol={symbol} qty={qty} mark={mark} delivery={delisted[symbol].isoformat()}",
-            decision_time=decision_time,
-            now=now,
-        )
-    updated = dataclasses.replace(
-        state,
-        positions=positions,
-        cash_usdt=cash,
-        funding_watermarks=watermarks,
-        position_history=append_position_snapshot(state.position_history, now, positions),
+    _notify_event(
+        settings,
+        event="paper_delisted_unresolved",
+        detail=f"symbols={','.join(sorted(held))} reason=delisting_announcement_is_not_settlement",
+        decision_time=decision_time,
+        now=now,
     )
-    save_ledger(ledger_path, updated)
-    return updated
+    raise DataIntegrityError(
+        f"paper delisted holding unresolved symbols={','.join(sorted(held))}; "
+        "no synthetic settlement booked, new risk stopped pending actual "
+        "settlement or live account reconciliation"
+    )
 
 
 def _enforce_funding_lag(
@@ -489,7 +490,7 @@ def run_shadow_cycle(
             absent_held = held_symbols_absent_from_exchange(ledger_state.positions, exchange_info_payload)
             if absent_held:
                 audit.record("held_symbol_absent", symbols=absent_held)
-                raise DataIntegrityError(f"held symbols absent from exchangeInfo symbols={','.join(absent_held)}; close manually at the last mark")
+                raise DataIntegrityError(f"held symbols absent from exchangeInfo symbols={','.join(absent_held)}; resolve via actual venue settlement or live account reconciliation")
             delisted = _delisted_held_symbols(ledger_state.positions, exchange_info_payload, now_ts)
             ledger_state, accrual = _accrue_ledger_funding(
                 ledger_state, now_ts, ledger_path, closed_at=delisted

@@ -108,6 +108,22 @@ def test_scenario_02_rejects_non_positive_per_worker(monkeypatch) -> None:
         plan_worker_count(3, -1, True)
 
 
+def test_worker_plan_uses_the_same_reserve_as_fork_admission(monkeypatch) -> None:
+    """A RAM-clamped plan remains admissible under its caller's reserve."""
+    monkeypatch.setattr(
+        psutil, "virtual_memory", lambda: _fake_virtual_memory(16.58, 10.6),
+    )
+    monkeypatch.setattr(psutil, "cpu_count", lambda: 8)
+
+    reserve = int(2.0 * _GB)
+    workers = plan_worker_count(
+        3, int(3.0 * _GB), True, reserve_bytes=reserve,
+    )
+
+    assert workers == 2
+    assert_fork_admission("books", workers, int(3.0 * _GB), reserve)
+
+
 def test_scenario_03_admission_raises_when_reserve_breached(monkeypatch) -> None:
     """SCENARIO_MHS_REFACTOR_03: projected demand breaching reserve fails."""
     monkeypatch.setattr(

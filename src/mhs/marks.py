@@ -1,28 +1,30 @@
-"""Mark-price / minute-frame loading and parity (I4 seam: pit_execution_mask, funding_path)."""
+"""Load observed funding events and derive the point-in-time trade-volume execution roster without an external mark-price history.
+
+MHS historical and paper consumers price completed trade OHLCV and observed
+funding only: no mark-price cache, panel or replay-valuation helper remains in
+this module. The optional fill/mark parity gate (explicitly user-enabled) is
+the sole remaining mark reader; all canonical preparation and replay paths use
+the funding series, the PIT roster mask and the minute-frame loaders below.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-import src.market_data.services.futures_collection as _futures_collection
-from src.common.errors import DataIntegrityError
 from src.common.paths import funding_path
-from src.market_data.services.futures_collection import DataCollector
+from src.market_data.services import futures_collection as _futures_collection
 from src.market_data.storage.loaders import load_funding_rates
 from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
-
-_DATA_COLLECTOR: DataCollector | None = None
 
 
 def _load_funding_series(
@@ -87,162 +89,6 @@ def _pit_execution_mask(
     return pd.DataFrame(out, index=quote_volume.index, columns=quote_volume.columns)
 
 
-def _data_collector() -> DataCollector:
-    """Lazily-instantiated shared mark-price collector.
-
-    ``_iter_mhs_execution_windows`` previously constructed one ``DataCollector``
-    per 31-day window; a module-level singleton pays the collector's
-    construction cost once per diagnostic run instead of once per window
-    (spec O5).  ``load_mark_price_panel`` resolves ``_mark_price_path``
-    dynamically at call time, so test monkeypatches keep working.
-    """
-    global _DATA_COLLECTOR
-    if _DATA_COLLECTOR is None:
-        _DATA_COLLECTOR = DataCollector()
-    return _DATA_COLLECTOR
-
-
-@lru_cache(maxsize=512)
-def _get_symbol_mark_frame_for_path(symbol: str, timeframe: str, path: str) -> pd.DataFrame:
-    """Full-period mark-price frame keyed on ``(symbol, timeframe, path)``.
-
-    Path-keying isolates same-symbol frames from different data roots so test
-    and production roots can never poison one another through the shared cache.
-    """
-    from pathlib import Path as _Path
-
-    del symbol, timeframe
-    return DataCollector._load_mark_price_cache(_Path(path))
-
-
-@lru_cache(maxsize=512)
-def _get_symbol_mark_frame(symbol: str, timeframe: str) -> pd.DataFrame:
-    """Full-period mark-price frame for one symbol, cached for the process.
-
-    The ``markPriceKlines`` parquet is read once per ``(symbol, timeframe)`` per
-    process and sliced per window instead of being re-read for every window. The
-    frame is produced through ``DataCollector._load_mark_price_cache`` so its
-    preprocessing (ms->datetime, numeric coercion,
-    ``drop_duplicates(keep="last")``, ``sort_values``) is byte-identical to the
-    DataCollector panel path. ``_mark_price_path`` is resolved dynamically at
-    call time so test monkeypatches keep working; the returned frame is
-    read-only.
-    """
-    path = str(_futures_collection._mark_price_path(symbol, timeframe))
-    return _get_symbol_mark_frame_for_path(symbol, timeframe, path)
-
-
-def _compact_mark_series(symbol: str, timeframe: str) -> tuple[np.ndarray, np.ndarray]:
-    """Validated ``(availability_ns int64, close float64)`` arrays, built once.
-
-    Applies the per-symbol prologue (``datetime.notna() & close.notna() &
-    close > 0``, ``drop_duplicates(subset=['datetime'], keep='last')``,
-    ``sort_values('datetime')`` and the ``+1h`` availability shift) a single
-    time per symbol instead of once per window. A malformed or empty mark
-    cache yields empty arrays; the missing-mark fail-closed path downstream is
-    unchanged. Retention drops from six cached columns to the two ever read.
-    The resolved source path is part of the cache key so redirected data roots
-    (tests, synthetic markets) can never poison one another.
-    """
-    path = str(_futures_collection._mark_price_path(symbol, timeframe))
-    return _compact_mark_series_for_path(symbol, timeframe, path)
-
-
-@lru_cache(maxsize=512)
-def _compact_mark_series_for_path(
-    symbol: str,
-    timeframe: str,
-    path_key: str,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Load compact published marks without retaining full OHLCV frames.
-
-    Args:
-        symbol: Registered market symbol.
-        timeframe: Existing hourly mark source interval.
-        path_key: Exact source path and cache identity.
-
-    Returns:
-        Contiguous int64 nanosecond availability and float64 close arrays.
-
-    Raises:
-        DataIntegrityError: Source schema or provenance is inconsistent.
-    """
-    from pathlib import Path as _Path
-
-    del symbol, timeframe
-    path = _Path(path_key)
-    if not path.exists():
-        return (
-            np.empty(0, dtype="int64"),
-            np.empty(0, dtype="float64"),
-        )
-    try:
-        available = set(pq.ParquetFile(path).schema_arrow.names)
-    except Exception as exc:
-        raise DataIntegrityError(f"mark source unreadable path={path_key!r}: {exc}") from exc
-    if "timestamp" not in available or "close" not in available:
-        raise DataIntegrityError(f"mark source schema inconsistent path={path_key!r}")
-    columns = ["timestamp", "close"] + (["datetime"] if "datetime" in available else [])
-    try:
-        table = pq.read_table(path, columns=columns)
-    except Exception as exc:
-        raise DataIntegrityError(f"mark source unreadable path={path_key!r}: {exc}") from exc
-    frame = table.to_pandas()
-    if frame.empty:
-        return (
-            np.empty(0, dtype="int64"),
-            np.empty(0, dtype="float64"),
-        )
-    if "datetime" in frame.columns:
-        frame["datetime"] = pd.to_datetime(frame["datetime"], utc=True, errors="coerce")
-    else:
-        frame["datetime"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True, errors="coerce")
-    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
-    frame = frame.dropna(subset=["datetime"]).drop_duplicates(subset=["timestamp"], keep="last")
-    valid = frame["close"].notna() & (frame["close"] > 0)
-    closes = (
-        frame.loc[valid, ["datetime", "close"]]
-        .drop_duplicates(subset=["datetime"], keep="last")
-        .sort_values("datetime")
-    )
-    if closes.empty:
-        return (
-            np.empty(0, dtype="int64"),
-            np.empty(0, dtype="float64"),
-        )
-    availability_ns = (closes["datetime"] + pd.Timedelta(hours=1)).to_numpy(
-        dtype="datetime64[ns]",
-    ).astype("int64")
-    return (
-        np.ascontiguousarray(availability_ns),
-        np.ascontiguousarray(closes["close"].to_numpy(dtype="float64")),
-    )
-
-
-def decision_mark_row(symbols: list[str], decision_time: pd.Timestamp, *, timeframe: str = "1h") -> pd.Series:
-    panel = _cached_mark_panel(symbols, timeframe, pd.DatetimeIndex([decision_time]), 0)
-    if panel.empty:
-        return pd.Series(dtype="float64", name=pd.Timestamp(decision_time))
-    row = panel.iloc[0]
-    # Ensure UTC tz-aware index for decision_time
-    row.name = pd.Timestamp(decision_time)
-    return pd.Series(row, dtype="float64", name=pd.Timestamp(decision_time))
-
-
-def _prewarm_mark_frames(symbols: list[str], timeframe: str = "1h") -> None:
-    """Populate the parent-side compact mark cache before forking workers.
-
-    Fork children inherit the warmed compact arrays copy-on-write, so the three
-    books and the anchored folds share one set of validated
-    ``(availability_ns, close)`` arrays instead of each process re-reading its
-    own copy. Missing mark parquet files stay skipped (the window path applies
-    the same existence semantics for non-roster symbols).
-    """
-    for sym in symbols:
-        if os.path.exists(_futures_collection._mark_price_path(sym, timeframe)):
-            _compact_mark_series(sym, timeframe)
-
-
 def _contemporaneous_mark_close_panel(
     symbols: list[str],
     grid: pd.DatetimeIndex,
@@ -250,31 +96,42 @@ def _contemporaneous_mark_close_panel(
     """Contemporaneous mark-price close panel (no +1h shift, no ffill).
 
     An absent mark stays NaN so the parity mask fails open per I2.  Deliberately
-    does NOT apply ``_cached_mark_panel``'s ``+1h`` availability shift — the gate
-    detects a stalled price feed, not the replay's valuation lag.
+    does NOT apply any ``+1h`` availability shift — the gate detects a stalled
+    price feed, not the replay's valuation lag. Mark paths resolve dynamically
+    at call time so test monkeypatches keep working.
     """
     panel = pd.DataFrame(index=grid, columns=list(symbols), dtype="float64")
     for sym in symbols:
         try:
-            cache = _get_symbol_mark_frame(sym, "1h")
-        except (KeyError, ValueError):
-            # A malformed/incomplete mark cache (e.g. missing the
-            # open/high/low columns DataCollector._load_mark_price_cache
-            # unconditionally coerces) is a data-integrity condition the
-            # existing mark gates (_assert_cache_required_marks,
-            # apply_dynamic_mark_gap_exclusion) already own; this parity
-            # gate stays fail-open per I2 rather than pre-empting them with
-            # an unrelated crash.
+            path = _futures_collection._mark_price_path(sym, "1h")
+            if not path.exists():
+                continue
+            available = set(pq.ParquetFile(path).schema_arrow.names)
+            if "close" not in available or ("datetime" not in available and "timestamp" not in available):
+                continue
+            columns = (
+                ["datetime", "close"] if "datetime" in available else ["timestamp", "close"]
+            )
+            frame = pq.read_table(path, columns=columns).to_pandas()
+        except (KeyError, ValueError, OSError):
+            # A malformed/incomplete mark cache is a data-integrity condition
+            # owned elsewhere; this parity gate stays fail-open per I2 rather
+            # than pre-empting it with an unrelated crash.
             continue
-        if cache.empty or "close" not in cache.columns:
+        if frame.empty:
             continue
+        if "datetime" in frame.columns:
+            frame["datetime"] = pd.to_datetime(frame["datetime"], utc=True, errors="coerce")
+        else:
+            frame["datetime"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True, errors="coerce")
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
         valid = (
-            cache["datetime"].notna()
-            & cache["close"].notna()
-            & (cache["close"] > 0)
+            frame["datetime"].notna()
+            & frame["close"].notna()
+            & (frame["close"] > 0)
         )
         closes = (
-            cache.loc[valid, ["datetime", "close"]]
+            frame.loc[valid, ["datetime", "close"]]
             .drop_duplicates(subset=["datetime"], keep="last")
             .sort_values("datetime")
         )
@@ -330,91 +187,15 @@ def _fill_mark_parity_eligibility(
     return eligible & parity, census
 
 
-def _cached_mark_panel(
-    roster: list[str],
-    timeframe: str,
-    minute_grid: pd.DatetimeIndex,
-    max_stale_hours: int,
-) -> pd.DataFrame:
-    """Build the causal mark-price panel from per-symbol cached mark series.
-
-    Element-for-element equivalent to
-    ``DataCollector.load_mark_price_panel`` (same validation, same ``+1h``
-    availability shift, same ``ffill`` limit, same NaN for absent/non-finite/
-    non-positive marks) but sources each symbol from the process-level
-    ``_compact_mark_series`` cache instead of re-running the frame prologue per
-    window. The returned frame has exactly ``minute_grid`` as its index and
-    exactly ``roster`` as its column order.
-    """
-    if timeframe != "1h":
-        raise ValueError(f"unsupported timeframe '{timeframe}'")
-    if max_stale_hours < 0:
-        raise ValueError("max_stale_hours must be non-negative")
-    if not isinstance(minute_grid, pd.DatetimeIndex) or minute_grid.empty:
-        raise DataIntegrityError("grid must be a non-empty DatetimeIndex")
-    if minute_grid.tz is None:
-        raise DataIntegrityError("grid must be tz-aware UTC")
-    if not minute_grid.is_monotonic_increasing or minute_grid.has_duplicates:
-        raise DataIntegrityError("grid must be monotonically increasing with no duplicates")
-    if not roster:
-        raise DataIntegrityError("roster must be non-empty")
-    if len(set(roster)) != len(roster):
-        raise DataIntegrityError("roster must be unique")
-
-    panel = pd.DataFrame(index=minute_grid, columns=list(roster), dtype="float64")
-    if len(minute_grid) > 1:
-        step = minute_grid[1] - minute_grid[0]
-        step_minutes = step / pd.Timedelta(minutes=1)
-        if step_minutes <= 0 or 60 % step_minutes != 0:
-            raise DataIntegrityError(
-                "grid frequency must be a positive divisor of one hour"
-            )
-        if max_stale_hours == 0:
-            ffill_limit = int(60 // step_minutes - 1)
-        else:
-            ffill_limit = int(max_stale_hours * 60 // step_minutes - 1)
-    else:
-        ffill_limit = 0
-    grid_ns = np.asarray(minute_grid, dtype="datetime64[ns]").astype("int64")
-    n_grid = len(grid_ns)
-    grid_pos = np.arange(n_grid, dtype=np.intp)
-    for sym in roster:
-        avail_ns, close_arr = _compact_mark_series(sym, timeframe)
-        if avail_ns.size == 0:
-            continue
-        # reindex() places a source value only where its timestamp EXACTLY
-        # equals a grid stamp; method='ffill', limit=L then carries it into at
-        # most L consecutive missing grid rows. Reproduced exactly: fill
-        # origins are exact matches only, carried while i - last_match <= L.
-        hit = np.searchsorted(avail_ns, grid_ns, side="left")
-        hit_clipped = np.minimum(hit, len(avail_ns) - 1)
-        matched = (hit < len(avail_ns)) & (avail_ns[hit_clipped] == grid_ns)
-        last_match = np.maximum.accumulate(np.where(matched, grid_pos, -1))
-        carry_idx = np.maximum(last_match, 0)
-        values = np.where(matched, close_arr[hit_clipped], np.nan)
-        filled = values[carry_idx]
-        ok = (
-            matched
-            if ffill_limit == 0
-            else (last_match >= 0) & ((grid_pos - last_match) <= ffill_limit)
-        )
-        panel[sym] = np.where(ok, filled, np.nan)
-    return panel
-
-
 def clear_mhs_market_data_caches() -> None:
-    """Invalidate every MHS market-data cache for run isolation (INV-CACHE-RUN-ISOLATION).
+    """Invalidate MHS market-data caches for run isolation (INV-CACHE-RUN-ISOLATION).
 
-    Clears the full-frame cache, the path-keyed frame cache, the compact
-    mark-series cache, and the shared ``DataCollector`` singleton together:
-    a refreshed on-disk file must never read stale through a partially
-    cleared layer in the next run of the same process.
+    The retired mark-price frame/series caches no longer exist; the retained
+    funding, roster and minute-frame loaders are stateless and read the lake
+    directly, so repeated runs in one process always observe refreshed files.
+    Kept as the single invalidation entry point for pipeline orchestration,
+    diagnostics and test isolation.
     """
-    global _DATA_COLLECTOR
-    _get_symbol_mark_frame.cache_clear()
-    _get_symbol_mark_frame_for_path.cache_clear()
-    _compact_mark_series_for_path.cache_clear()
-    _DATA_COLLECTOR = None
 
 
 def _load_symbol_minute_frame(

@@ -9,6 +9,7 @@ I-DD-HALT: equity_high_water_mark 는 여기에 단조 증가로 영속된다.
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -365,10 +366,11 @@ def accrue_funding_by_watermark(
     history: Sequence[PositionSnapshot],
     watermarks: Mapping[str, pd.Timestamp],
     funding_by_symbol: Mapping[str, pd.Series],
-    mark_by_symbol: Mapping[str, pd.Series],
+    trade_close_by_symbol: Mapping[str, pd.Series],
     now: pd.Timestamp,
     closed_at: Mapping[str, pd.Timestamp] | None = None,
 ) -> FundingAccrual:
+    """Accrue observed funding rates against held paper units using completed trade-price notional estimates. The result is a paper cash estimate, with explicit unresolved status when price or funding evidence is missing."""
     now_ts = _require_tz_aware(now, "now").tz_convert("UTC")
     closed = dict(closed_at or {})
     current = history[-1].positions if history else {}
@@ -382,16 +384,28 @@ def accrue_funding_by_watermark(
             continue
         upper = min(now_ts, closed[symbol]) if symbol in closed else now_ts
         series = funding_by_symbol.get(symbol)
-        marks = mark_by_symbol.get(symbol)
+        trade_closes = trade_close_by_symbol.get(symbol)
         if series is not None:
             window = series[(series.index > watermark) & (series.index <= upper)].sort_index()
             for epoch, rate in window.items():
                 qty = position_at(history, symbol, epoch)
                 if qty != 0:
-                    bar = epoch.floor("h")
-                    if marks is None or bar not in marks.index:
+                    try:
+                        rate_f = float(rate)
+                    except (TypeError, ValueError):
                         break
-                    total += -(Decimal(str(rate)) * qty * Decimal(str(marks.loc[bar])))
+                    if not math.isfinite(rate_f):
+                        break
+                    bar = epoch.floor("h")
+                    if trade_closes is None or bar not in trade_closes.index:
+                        break
+                    try:
+                        px_f = float(trade_closes.loc[bar])
+                    except (TypeError, ValueError, KeyError):
+                        break
+                    if not math.isfinite(px_f) or px_f <= 0:
+                        break
+                    total += -(Decimal(str(rate)) * qty * Decimal(str(px_f)))
                 watermark = epoch
         intervals[symbol] = _funding_interval(series)
         if symbol in current and symbol not in closed:

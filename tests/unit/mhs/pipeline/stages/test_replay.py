@@ -77,7 +77,7 @@ def test_run_replays_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> 
     calls: list[str] = []
 
     monkeypatch.setattr(replay_stage.os.path, "exists", lambda _p: True)
-    monkeypatch.setattr(replay_stage, "_prewarm_mark_frames", lambda symbols: calls.append("prewarm"), raising=False)
+    assert not hasattr(replay_stage, "_prewarm_mark_frames")
 
     def _fake_guard_stage_or_breach(*_a: object, **_k: object) -> None:
         calls.append("_guard_stage_or_breach")
@@ -101,7 +101,8 @@ def test_run_replays_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> 
 
     replay_stage.run_replays(ctx, StageTelemetry(log_run=False))
 
-    assert calls == ["_guard_stage_or_breach", "prewarm", "_run_books_concurrent", "_guard_stage_or_breach"]
+    # Window-keyed reads need no mark preload: guards bracket the concurrent run directly.
+    assert calls == ["_guard_stage_or_breach", "_run_books_concurrent", "_guard_stage_or_breach"]
     assert ctx.books == {"fast_reversal": fast_report, "slow_momentum": slow_report}
     assert ctx.blend_report is blend_report
     assert ctx.committee_member_attribution is None

@@ -25,6 +25,7 @@ def _load_horizon_diagnostic_helpers():
 
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import psutil
 import pytest
@@ -41,6 +42,13 @@ _AMPLE_MEMORY = SimpleNamespace(total=64 * 2**30, available=60 * 2**30)
 @pytest.fixture(autouse=True)
 def _mhs_ample_virtual_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(psutil, "virtual_memory", lambda: _AMPLE_MEMORY)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _mhs_module_ample_virtual_memory() -> None:
+    """Keep module-scoped diagnostic fixtures independent of host RAM load."""
+    with patch("src.mhs.parallel.psutil.virtual_memory", return_value=_AMPLE_MEMORY):
+        yield
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +86,7 @@ def report(synthetic_market):
     _, start, _ = _load_horizon_diagnostic_helpers()
     root, end = synthetic_market
     return run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(start=str(start), end=str(end), data_root=str(root), execution_timeframe="1m", log_run=False),
+        MhsDiagnosticRequest(start=str(start), end=str(end), data_root=str(root), execution_timeframe="3m", log_run=False),
     )
 
 
@@ -89,7 +97,7 @@ def touch_report(synthetic_market):
     return run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(
             start=str(start), end=str(end), data_root=str(root),
-            execution_timeframe="1m", log_run=False, touch_diagnostic=True,
+            execution_timeframe="3m", log_run=False, touch_diagnostic=True,
         ),
     )
 
@@ -121,7 +129,7 @@ def annualization_report(synthetic_market):
         return run_mhs_horizon_diagnostic(
             MhsDiagnosticRequest(
                 start=str(start), end=str(end), data_root=str(root),
-                execution_timeframe="5m", log_run=False,
+                execution_timeframe="3m", log_run=False,
             ),
         )
     finally:
@@ -215,7 +223,7 @@ def calibrated_report(synthetic_market):
         report = run_mhs_horizon_diagnostic(
             MhsDiagnosticRequest(
                 start=str(start), end=str(end), data_root=str(root),
-                execution_timeframe="1m", log_run=False,
+                execution_timeframe="3m", log_run=False,
             ),
         )
     finally:

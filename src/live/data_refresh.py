@@ -203,6 +203,7 @@ def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partit
 
 
 def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str, *, funding_start: str | None = None, skip_funding: bool = False) -> bool:
+    """Refresh live MHS signal and paper-accounting inputs from 1h trade candles and settled funding. The historical 3m execution corpus is collected and audited by the backtest data workflow; an indicator cache cannot decide live refresh success or trading eligibility."""
     try:
         collector.ensure_ohlcv_data(symbol, "1h", start, end)
     except BinanceIpBlockedError:
@@ -210,18 +211,6 @@ def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str, 
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)
         return False
-    try:
-        if hasattr(collector, "ensure_mark_price_data"):
-            collector.ensure_mark_price_data(symbol, "1h", start, end)
-        elif hasattr(collector, "ensure_mark_price_klines"):
-            collector.ensure_mark_price_klines(symbol, "1h", start, end)
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("[DATA] markPriceKlines symbol=%s failed error=%s", symbol, exc)
-    try:
-        if hasattr(collector, "ensure_metrics_live_tail"):
-            collector.ensure_metrics_live_tail(symbol)
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("[DATA] metrics_live_tail symbol=%s failed error=%s", symbol, exc)
     if skip_funding:
         return False
     try:

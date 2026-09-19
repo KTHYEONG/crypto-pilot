@@ -3,11 +3,22 @@
 """Contract coverage for the MHS application evaluation resource telemetry."""
 import numpy as np
 import pytest
-from src.mhs import evaluation as ev
+import src.mhs.evaluation.books as books_mod
+import src.mhs.evaluation.concurrency as concurrency_mod
+import src.mhs.evaluation.folds as folds_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
+from src.mhs.contracts import MhsDiagnosticRequest, MhsFoldReport
+from src.mhs.discovery import DiscoveryQualificationResult, fold_train_only_discovery_qualification
+from src.mhs.evaluation.books import _candidate_weight_books
+from src.mhs.evaluation.folds import (
+    _fold_safe_slow_book_spec,
+    _incomplete_fold_report,
+    _run_anchored_fold,
 )
+from src.mhs.evidence import phase_1_anchored_purged_folds
+from src.mhs.marks import _load_funding_series
+from src.mhs.params import FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+from src.mhs.types import BOOK_SPECS
 from src.quant.universe.pit_universe import symbol_partition
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
@@ -23,24 +34,24 @@ def test_fold_safe_slow_book_spec_admitted_vs_fallback() -> None:
     # a candidate; only then does it build a BookSpec whose horizon is the
     # selected candidate with band/step_hours/min_symbols identical to the
     # default.
-    default = ev.BOOK_SPECS["slow_momentum"]
-    fallback = ev.DiscoveryQualificationResult(
+    default = BOOK_SPECS["slow_momentum"]
+    fallback = DiscoveryQualificationResult(
         selected_horizon=None, admitted=False, discovery_scores=(),
         discovery_aggregate_net_t=None, qualification_net_t=None,
         qualification_sign_consistent=None,
     )
-    spec, horizon, source = ev._fold_safe_slow_book_spec(fallback, default)
+    spec, horizon, source = _fold_safe_slow_book_spec(fallback, default)
     assert spec is default
     assert horizon == 168
     assert source == "frozen_default"
 
     admitted_none = _admitted_selection(selected_horizon=None)
-    spec, horizon, source = ev._fold_safe_slow_book_spec(admitted_none, default)
+    spec, horizon, source = _fold_safe_slow_book_spec(admitted_none, default)
     assert spec is default
     assert source == "frozen_default"
 
     admitted = _admitted_selection(360)
-    spec, horizon, source = ev._fold_safe_slow_book_spec(admitted, default)
+    spec, horizon, source = _fold_safe_slow_book_spec(admitted, default)
     assert source == "fold_train_only_discovery"
     assert horizon == 360
     assert spec is not default
@@ -62,23 +73,25 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     assert request.fold_safe_horizon_selection is False
 
     calls = {"n": 0}
-    real_fn = ev.fold_train_only_discovery_qualification
+    real_fn = fold_train_only_discovery_qualification
 
     def counting(*args, **kwargs):
         calls["n"] += 1
         return real_fn(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", counting)
-    report = ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
+    import src.mhs.evaluation.folds as folds_mod
+
+    monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", counting)
+    report = _run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
     assert calls["n"] == 0
     assert report.slow_horizon_hours == 168
     assert report.slow_horizon_source == "frozen_default"
@@ -94,8 +107,8 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
         captured["fold_slow_horizons"] = args[14] if len(args) > 14 else None
         return (None, None, {}, {}, (), None)
 
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
     top_report = run_mhs_horizon_diagnostic(request)
     assert top_report.status == "COMPLETE"
     assert calls["n"] == 0
@@ -108,7 +121,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     # _incomplete_fold_report keeps that default, and a fold run resolved with a
     # 360h fold-scoped override records slow_horizon_hours==360 with source
     # "fold_train_only_discovery".
-    default_report = ev.MhsFoldReport(
+    default_report = MhsFoldReport(
         fold_index=0, validation_start="2021-02-10", validation_end="2021-04-19",
         strict=None, stress=None, primary_valid=False, primary_autocorr_sharpe=0.0,
         primary_naive_sharpe=0.0, primary_net_ann=0.0, primary_geometric_cagr=0.0,
@@ -119,7 +132,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     assert default_report.slow_horizon_hours == 168
     assert default_report.slow_horizon_source == "frozen_default"
 
-    incomplete = ev._incomplete_fold_report(_FOLD, 0, ())
+    incomplete = _incomplete_fold_report(_FOLD, 0, ())
     assert incomplete.slow_horizon_source == "frozen_default"
     assert incomplete.slow_horizon_hours == 168
 
@@ -129,13 +142,13 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
-    report = ev._run_anchored_fold(
+    report = _run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None, slow_horizon_override=360,
     )
     assert report.slow_horizon_hours == 360
@@ -149,12 +162,11 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     def _admit_by_family(*args, **kwargs):
         # The funding-carry family's selected lookback must come from its own
         # measured grid; the slow/fast families keep the 360h selection.
-        if kwargs.get("horizon_candidates") == ev.FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
+        if kwargs.get("horizon_candidates") == FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
             return _admitted_selection(72)
         return _admitted_selection(360)
 
-    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _admit_by_family)
-    monkeypatch.setattr(ev.folds, "fold_train_only_discovery_qualification", _admit_by_family)
+    monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", _admit_by_family)
 
     def _spy_books(*args, **kwargs):
         captured["top_level_slow"] = args[5]
@@ -165,16 +177,16 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
         captured["fold_fast_horizons"] = args[15] if len(args) > 15 else None
         return (None, None, {}, {}, (), None)
 
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, fold_safe_horizon_selection=True,
     )
     top_report = run_mhs_horizon_diagnostic(request_on)
     assert top_report.status == "COMPLETE"
-    n_folds = len(ev.phase_1_anchored_purged_folds())
+    n_folds = len(phase_1_anchored_purged_folds())
     assert captured["fold_slow_horizons"] == dict.fromkeys(range(n_folds), 360)
     # The fast re-verification is diagnostic-only: the parent threads the
     # resolved (horizon, source) pairs to the fold pool but never alters the
@@ -182,7 +194,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     # stay 0.0).
     assert captured["fold_fast_horizons"] == dict.fromkeys(range(n_folds), (360, "fold_train_only_discovery"))
     assert captured["top_level_slow"].horizon_hours == 360
-    assert captured["top_level_slow"].band is ev.BOOK_SPECS["slow_momentum"].band
+    assert captured["top_level_slow"].band is BOOK_SPECS["slow_momentum"].band
 
 @pytest.mark.slow
 def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds(mhs_market, monkeypatch) -> None:
@@ -196,14 +208,13 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     # ``test_mhs_perf_opt_fold_discovery_parallel_equivalence``.
     root, end = mhs_market
     calls = {"n": 0}
-    real_builder = ev._candidate_weight_books
+    real_builder = _candidate_weight_books
 
     def counting_builder(*args, **kwargs):
         calls["n"] += 1
         return real_builder(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_candidate_weight_books", counting_builder)
-    monkeypatch.setattr(ev.books, "_candidate_weight_books", counting_builder)
+    monkeypatch.setattr(books_mod, "_candidate_weight_books", counting_builder)
 
     def _spy_books(*args, **kwargs):
         return (None, None, None, {}, None)
@@ -211,11 +222,11 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
     def _spy_post(*args, **kwargs):
         return (None, None, {}, {}, (), None)
 
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, fold_safe_horizon_selection=True,
     )
     top_report = run_mhs_horizon_diagnostic(request_on)
@@ -233,16 +244,16 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
     captured: dict = {}
 
     def _run(captured):
-        monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+        monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
 
         def _spy_post(*args, **kwargs):
             captured["fold_funding_carry"] = args[16] if len(args) > 16 else None
             return (None, None, {}, {}, (), None)
 
-        monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
+        monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
         request_on = MhsDiagnosticRequest(
             start=str(_START), end=str(end), data_root=str(root),
-            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            execution_timeframe="3m", log_run=False,
             execution_universe_size=8, fold_safe_horizon_selection=True,
         )
         top_report = run_mhs_horizon_diagnostic(request_on)
@@ -250,14 +261,13 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
         return captured["fold_funding_carry"]
 
     def _admit_funding_only(*args, **kwargs):
-        if kwargs.get("horizon_candidates") == ev.FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
+        if kwargs.get("horizon_candidates") == FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS:
             return _admitted_selection(72)
         return _admitted_selection(None)
 
-    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _admit_funding_only)
-    monkeypatch.setattr(ev.folds, "fold_train_only_discovery_qualification", _admit_funding_only)
+    monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", _admit_funding_only)
     admitted = _run(captured)
-    n_folds = len(ev.phase_1_anchored_purged_folds())
+    n_folds = len(phase_1_anchored_purged_folds())
     assert set(admitted) == set(range(n_folds))
     for lookback, sign, source, corr in admitted.values():
         assert lookback == 72
@@ -270,8 +280,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
     def _always_none(*args: object, **kwargs: object) -> object:
         return _admitted_selection(None)
 
-    monkeypatch.setattr(ev, "fold_train_only_discovery_qualification", _always_none)
-    monkeypatch.setattr(ev.folds, "fold_train_only_discovery_qualification", _always_none)
+    monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", _always_none)
     fail_closed = _run(captured)
     assert set(fail_closed) == set(range(n_folds))
     for lookback, sign, source, corr in fail_closed.values():

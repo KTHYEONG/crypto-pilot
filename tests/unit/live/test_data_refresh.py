@@ -176,44 +176,58 @@ def test_market_data_staleness_hours_p90_ignores_delisted_outliers(tmp_path, mon
         pd.DataFrame({"timestamp": ts, "close": [1.0] * 10, "volume": [1.0] * 10}).to_parquet(d / f"{sym}.parquet", index=False)
     assert data_refresh.market_data_staleness_hours(tmp_path, now=now) > 150.0
 
-def test_refresh_one_symbol_tail_calls_ensure_metrics_live_tail() -> None:
+def test_refresh_one_symbol_tail_requests_only_live_required_feeds() -> None:
     from src.live.data_refresh import _refresh_one_symbol_tail
 
     calls: list[str] = []
 
     class _Collector:
         def ensure_ohlcv_data(self, symbol, timeframe, start, end):
-            return None
+            calls.append("ohlcv")
 
         def ensure_funding_data(self, symbol, start, end):
-            return None
+            calls.append("funding")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            calls.append("mark")
 
         def ensure_metrics_live_tail(self, symbol):
-            calls.append(symbol)
+            calls.append("metrics")
 
     ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
+    # 3m 백테스트 수집기는 별도 워크플로; 라이브 refresh는 1h OHLCV+펀딩만 요청한다.
     assert ok is True
-    assert calls == ["AAAUSDT"]
+    assert calls == ["ohlcv", "funding"]
 
-def test_refresh_one_symbol_tail_metrics_failure_is_failsoft_returns_true() -> None:
+def test_refresh_one_symbol_tail_mark_api_outage_cannot_affect_refresh() -> None:
     from src.live.data_refresh import _refresh_one_symbol_tail
+
+    calls: list[str] = []
 
     class _Collector:
         def ensure_ohlcv_data(self, symbol, timeframe, start, end):
-            return None
+            calls.append("ohlcv")
 
         def ensure_funding_data(self, symbol, start, end):
-            return None
+            calls.append("funding")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            raise RuntimeError("mark endpoint down")
+
+        def ensure_mark_price_klines(self, symbol, timeframe, start, end):
+            raise RuntimeError("mark endpoint down")
 
         def ensure_metrics_live_tail(self, symbol):
             raise RuntimeError("futures/data endpoint down")
 
     ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
+    # mark API 장애와 무관하게 선언된 피드만으로 결과가 결정된다.
     assert ok is True
+    assert calls == ["ohlcv", "funding"]
 
-def test_refresh_one_symbol_tail_missing_metrics_method_is_noop() -> None:
+def test_refresh_one_symbol_tail_missing_mark_and_metrics_methods_is_noop() -> None:
     from src.live.data_refresh import _refresh_one_symbol_tail
 
     class _Collector:
@@ -228,7 +242,7 @@ def test_refresh_one_symbol_tail_missing_metrics_method_is_noop() -> None:
     assert ok is True
 
 
-def test_refresh_one_symbol_tail_funding_failure_returns_false_but_refreshes_mark_and_metrics() -> None:
+def test_refresh_one_symbol_tail_funding_failure_returns_false_without_mark_or_metrics() -> None:
     from src.live.data_refresh import _refresh_one_symbol_tail
     from src.market_data.binance.futures import BinanceFundingFetchError
 
@@ -249,8 +263,9 @@ def test_refresh_one_symbol_tail_funding_failure_returns_false_but_refreshes_mar
 
     ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
+    # 펀딩 실패는 가시적으로 실패를 반환한다; 성공 플래그나 zero-rate 대체를 내보내지 않는다.
     assert ok is False
-    assert calls == ["ohlcv", "mark", "metrics"]
+    assert calls == ["ohlcv"]
 
 
 def test_refresh_one_symbol_tail_ohlcv_failure_returns_false_and_skips_remaining() -> None:
@@ -307,7 +322,7 @@ def test_refresh_live_market_data_counts_funding_failure_as_failed(tmp_path, mon
     assert report.ok is False
 
 
-def test_refresh_one_symbol_tail_legacy_mark_klines_failure_is_failsoft() -> None:
+def test_refresh_one_symbol_tail_legacy_mark_collectors_are_never_called() -> None:
     from src.live.data_refresh import _refresh_one_symbol_tail
 
     calls: list[str] = []
@@ -329,7 +344,7 @@ def test_refresh_one_symbol_tail_legacy_mark_klines_failure_is_failsoft() -> Non
     ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
     assert ok is True
-    assert calls == ["ohlcv", "mark_legacy", "metrics", "funding"]
+    assert calls == ["ohlcv", "funding"]
 
 
 def test_refresh_one_symbol_tail_propagates_ip_block_from_ohlcv() -> None:
@@ -371,7 +386,7 @@ def test_refresh_one_symbol_tail_propagates_ip_block_from_funding() -> None:
     with pytest.raises(BinanceIpBlockedError):
         _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
-    assert calls == ["ohlcv", "mark", "metrics"]
+    assert calls == ["ohlcv"]
 
 
 def test_refresh_live_market_data_aborts_remaining_symbols_on_ip_block(tmp_path, monkeypatch) -> None:
@@ -835,7 +850,7 @@ def test_refresh_live_market_data_excludes_absent_symbols(tmp_path, monkeypatch,
 
 
 
-def test_refresh_one_symbol_tail_refreshes_mark_and_metrics_before_funding() -> None:
+def test_refresh_one_symbol_tail_refreshes_only_declared_feeds_in_order() -> None:
     from src.live.data_refresh import _refresh_one_symbol_tail
 
     # Given
@@ -857,11 +872,11 @@ def test_refresh_one_symbol_tail_refreshes_mark_and_metrics_before_funding() -> 
     # When
     ok = _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02")
 
-    # Then
+    # Then: 1h OHLCV와 관찰된 펀딩만 요청한다; mark/metrics 캐시는 결과를 결정할 수 없다.
     assert ok is True
-    assert calls == ["ohlcv", "mark", "metrics", "funding"]
+    assert calls == ["ohlcv", "funding"]
 
-def test_refresh_one_symbol_tail_funding_ip_block_raises_funding_error_after_klines_path() -> None:
+def test_refresh_one_symbol_tail_funding_ip_block_raises_funding_error_after_ohlcv_path() -> None:
     import pytest
     from src.live.data_refresh import FundingIpBlockedError, _refresh_one_symbol_tail
     from src.market_data.binance.futures import BinanceIpBlockedError
@@ -891,7 +906,7 @@ def test_refresh_one_symbol_tail_funding_ip_block_raises_funding_error_after_kli
     assert isinstance(exc_info.value, BinanceIpBlockedError)
     assert exc_info.value.http_code == 403
     assert exc_info.value.url == url
-    assert calls == ["ohlcv", "mark", "metrics"]
+    assert calls == ["ohlcv"]
 
 def test_refresh_one_symbol_tail_skip_funding_returns_false_without_funding_call() -> None:
     from src.live.data_refresh import _refresh_one_symbol_tail
@@ -917,7 +932,7 @@ def test_refresh_one_symbol_tail_skip_funding_returns_false_without_funding_call
 
     # Then
     assert ok is False
-    assert calls == ["ohlcv", "mark", "metrics"]
+    assert calls == ["ohlcv"]
 
 def test_refresh_live_market_data_funding_block_keeps_ohlcv_refresh_for_remaining_symbols(tmp_path, monkeypatch) -> None:
     import pandas as pd

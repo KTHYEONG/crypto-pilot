@@ -2,7 +2,7 @@
 
 Extracted verbatim from ``evaluation.py`` lines 3987-4059 (execution-symbol
 resolution, minute-grid construction, ``has_minute_data`` check,
-``_prewarm_mark_frames``, the ``concurrency._run_books_concurrent`` call, and the four
+the ``concurrency._run_books_concurrent`` call, and the four
 ``del`` statements at 4034-4037 released verbatim at the end of this function).
 
 The ``del w_fast, w_fast_execution, phase_fast`` / ``del w_slow,
@@ -21,7 +21,6 @@ import pandas as pd
 import src.mhs.evaluation.committee as committee
 import src.mhs.evaluation.concurrency as concurrency
 import src.mhs.evaluation.guards as guards
-from src.mhs.marks import _prewarm_mark_frames
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -61,12 +60,10 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             ctx._terminal_report = _terminal
             return
         # Each book worker now loads only its own windows' roster slices from
-        # Parquet (window-keyed reads, page-cache backed) and inherits the
-        # execution roster's mark frames warmed here copy-on-write, so no
-        # full-period minute-frame preload is needed before forking -- the three
-        # books run concurrently in fork children (spec Phase 3, P10) with a
-        # fraction of the former resident set.
-        _prewarm_mark_frames(ctx.execution_symbols)
+        # Parquet (window-keyed reads, page-cache backed), so no full-period
+        # preload is needed before forking -- the three books run concurrently
+        # in fork children (spec Phase 3, P10) with a fraction of the former
+        # resident set.
         book_report_fast, book_report_slow, book_report_blend, ctx.blend_traces, member_reports = concurrency._run_books_concurrent(
             ctx.root, ctx.config, len(ctx.funded), ctx.grid_1h, ctx.fast, ctx.slow, ctx.fast_grid, ctx.slow_grid,
             ctx.w_fast, ctx.w_slow, ctx.w_fast_execution, ctx.w_slow_execution, ctx.opens, ctx.bar_funding,

@@ -301,7 +301,7 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
+        execution_timeframe="3m", log_run=False,
     )
     panel = ev.load_base_panel(
         root, "1h", ("close", "open", "quote_vol"), _START, end,
@@ -629,7 +629,7 @@ def _build_books_concurrent_args(
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         **({"execution_universe_size": universe_size} if universe_size is not None else {}),
     )
     panel = ev.load_base_panel(
@@ -1088,7 +1088,7 @@ def _slow_book_panel_inputs(mhs_market):
     funding_by_symbol, _ = ev._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     panel = ev.load_base_panel(

@@ -18,19 +18,45 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.mhs import evaluation as ev
+from src.mhs.contracts import (
+    MhsBookReport,
+    MhsDiagnosticRequest,
+    MhsOutputTier,
+    MhsResearchGoResult,
+)
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.marks as marks
-from src.mhs.types import ExecutionSpec
-from src.mhs.evidence import DeploymentReadinessResult
+from src.mhs.evaluation.books import _book_weights
+from src.mhs.evaluation.diagnostics import _phase_diagnostics
+from src.mhs.evaluation.folds import _run_anchored_fold
+from src.mhs.evaluation.windows import _book_outcome
+from src.mhs.evidence import (
+    AnchoredPurgedFold,
+    DeploymentReadinessResult,
+    PhaseDiagnosticResult,
+    TailSensitivityResult,
+)
 from src.mhs.execution import strategy_aware_execution_replay
+from src.mhs.execution.contracts import (
+    StrategyExecutionReplayResult,
+    bar_funding_panel,
+)
+from src.mhs.execution.specs import _stress_cost_execution_spec
+from src.mhs.marks import _load_funding_series, _pit_execution_mask
+from src.mhs.panel import liquid_half_eligibility, load_base_panel
+from src.mhs.params import GO_PRIMARY_SHARPE_FLOOR, STRESS_COST_MULTIPLIER
+from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
+from src.mhs.report.schema import MhsHorizonDiagnosticReport
+from src.mhs.research_go import GO_REASON_PRIMARY_SHARPE, GO_REASON_STRESS_SHARPE
+from src.mhs.books import renormalize_within_mask
+from src.mhs.types import BOOK_SPECS, ExecutionSpec
 from src.quant.universe.pit_universe import symbol_partition
 
 pytestmark = pytest.mark.slow
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 
-_FOLD = ev.AnchoredPurgedFold(
+_FOLD = AnchoredPurgedFold(
     pd.Timestamp("2021-01-01", tz="UTC"),
     pd.Timestamp("2021-01-31", tz="UTC"),
     pd.Timestamp("2021-02-10", tz="UTC"),
@@ -101,23 +127,21 @@ def mhs_market(tmp_path, monkeypatch):
     end = _write_mhs_market(root)
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; a prior test in the same process/worker using
-    # a different root with an overlapping symbol name would otherwise leak
-    # stale mark data into this fixture's replay.
-    ev._get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless; the shared invalidation entry point
+    # keeps runs isolated when fixtures redirect data roots between tests.
+    marks.clear_mhs_market_data_caches()
     return root, end
 
 
 def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     root, end = mhs_market
     symbols = _DEV_SYMBOLS[:8]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
-    request = ev.MhsDiagnosticRequest(
+    funding_by_symbol, _ = _load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
     )
-    panel = ev.load_base_panel(
+    panel = load_base_panel(
         root, "1h", ("close", "open", "quote_vol"), _START, end,
         partition="dev", min_bars=2000,
     )
@@ -135,21 +159,21 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
         ]
         for s in funded
     }
-    bar_funding = ev.bar_funding_panel(funding_window, grid_1h)
+    bar_funding = bar_funding_panel(funding_window, grid_1h)
     aligned = list(bar_funding.columns)
     close = close[aligned]
     opens = opens[aligned]
     quote_vol = quote_vol[aligned]
     bar_funding = bar_funding[aligned]
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
-    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
-    fast = ev.BOOK_SPECS["fast_reversal"]
+    fast = BOOK_SPECS["fast_reversal"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
-    w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
-    phase = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
-    execution_mask = ev._pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-    w_fast_execution = ev.renormalize_within_mask(
+    w_fast = _book_weights(log_close, eligible, fast, fast_grid)
+    phase = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+    w_fast_execution = renormalize_within_mask(
         w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
     return {
@@ -176,17 +200,17 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
 def test_stress_cost_execution_spec_triples_cost_fields() -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_STRESS_SPEC_TRIPLED_01."""
     base = ExecutionSpec()
-    spec = ev._stress_cost_execution_spec()
-    assert spec.maker_fee_bps == base.maker_fee_bps * ev.STRESS_COST_MULTIPLIER
-    assert spec.taker_fee_bps == base.taker_fee_bps * ev.STRESS_COST_MULTIPLIER
-    assert spec.taker_slippage_bps == base.taker_slippage_bps * ev.STRESS_COST_MULTIPLIER
+    spec = _stress_cost_execution_spec()
+    assert spec.maker_fee_bps == base.maker_fee_bps * STRESS_COST_MULTIPLIER
+    assert spec.taker_fee_bps == base.taker_fee_bps * STRESS_COST_MULTIPLIER
+    assert spec.taker_slippage_bps == base.taker_slippage_bps * STRESS_COST_MULTIPLIER
     assert spec.passive_timeout_minutes == base.passive_timeout_minutes
     assert spec == ExecutionSpec(maker_fee_bps=6.0, taker_fee_bps=15.0, taker_slippage_bps=9.0)
 
 
 def test_toplevel_book_primary_is_immediate_taker(mhs_market) -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_TOPLEVEL_PRIMARY_IS_IMMEDIATE_TAKER_02."""
-    report, _ = ev._book_outcome(**_build_book_outcome_args(mhs_market))
+    report, _ = _book_outcome(**_build_book_outcome_args(mhs_market))
     assert report.primary is not None
     assert report.stress is not None
     assert report.primary.fill_source == "OHLCV_IMMEDIATE_TAKER"
@@ -204,12 +228,12 @@ def test_fold_primary_is_immediate_taker(mhs_market) -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_FOLD_PRIMARY_IS_IMMEDIATE_TAKER_03."""
     root, end = mhs_market
     symbols = _DEV_SYMBOLS[:8]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
-    request = ev.MhsDiagnosticRequest(
+    funding_by_symbol, _ = _load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
     )
-    fold_report = ev._run_anchored_fold(
+    fold_report = _run_anchored_fold(
         str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
     )
     if fold_report.strict is None or fold_report.stress is None:
@@ -219,15 +243,15 @@ def test_fold_primary_is_immediate_taker(mhs_market) -> None:
     assert fold_report.strict.ledger.fill_source == "OHLCV_IMMEDIATE_TAKER"
     assert fold_report.stress.fill_source == "OHLCV_IMMEDIATE_TAKER"
     assert fold_report.stress.ledger.fill_source == "OHLCV_IMMEDIATE_TAKER"
-    assert ev.GO_PRIMARY_SHARPE_FLOOR == 0.6
-    assert ev.GO_REASON_PRIMARY_SHARPE == "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"
-    assert ev.GO_REASON_STRESS_SHARPE == "STRESS_SHARPE_NOT_POSITIVE"
+    assert GO_PRIMARY_SHARPE_FLOOR == 0.6
+    assert GO_REASON_PRIMARY_SHARPE == "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"
+    assert GO_REASON_STRESS_SHARPE == "STRESS_SHARPE_NOT_POSITIVE"
 
 
 def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_FILL_SOURCE_METADATA_04."""
     root, end = mhs_market
-    blend_report, _ = ev._book_outcome(**_build_book_outcome_args(mhs_market))
+    blend_report, _ = _book_outcome(**_build_book_outcome_args(mhs_market))
     assert blend_report.primary is not None
     deployment = DeploymentReadinessResult(
         geometric_cagr=0.0, max_drawdown=0.0, calmar=0.0, expected_shortfall=0.0,
@@ -239,18 +263,12 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
         execution_go_eligible=False, pilot_go_eligible=False, scale_go_eligible=False,
     )
     import src.mhs.evaluation.concurrency as concurrency_mod
+    import src.mhs.evaluation.folds as folds_mod
+    import src.mhs.evidence as evidence_mod
 
-    monkeypatch.setattr(
-        ev, "_run_books_concurrent",
-        lambda *a, **k: (blend_report, blend_report, blend_report, {}, None),
-    )
     monkeypatch.setattr(
         concurrency_mod, "_run_books_concurrent",
         lambda *a, **k: (blend_report, blend_report, blend_report, {}, None),
-    )
-    monkeypatch.setattr(
-        ev, "_run_post_book_concurrently",
-        lambda *a, **k: (None, None, {}, {}, (), deployment),
     )
     monkeypatch.setattr(
         concurrency_mod, "_run_post_book_concurrently",
@@ -258,10 +276,11 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
     )
     # The replay/fold stages consume these via the concurrency leaf; patch
     # there too so injection holds regardless of import order.
-    monkeypatch.setattr(ev, "phase_1_anchored_purged_folds", lambda: ())
-    request = ev.MhsDiagnosticRequest(
+    monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
+    monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
+    request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -270,7 +289,7 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
     assert report.mark_source == blend_report.primary.ledger.mark_source
 
 
-def _small_replay(bound: str) -> ev.StrategyExecutionReplayResult:
+def _small_replay(bound: str) -> StrategyExecutionReplayResult:
     idx = pd.date_range("2021-01-01 12:01", periods=4000, freq="1min", tz="UTC")
     px = pd.DataFrame({"A": [100.0] * len(idx)}, index=idx)
     target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
@@ -287,18 +306,18 @@ def test_compact_payload_strips_patient_reference(tmp_path) -> None:
     scalar patient_reference_naive_sharpe stays in the summary."""
     replay = _small_replay("OHLCV_IMMEDIATE_TAKER")
     patient = _small_replay("OHLCV_STRICT_PROXY")
-    book = ev.MhsBookReport(
+    book = MhsBookReport(
         name="fast_reversal", band="FAST", horizon_hours=24, step_hours=6,
         tranche_count=1, n_symbols=1,
-        phase=ev.PhaseDiagnosticResult(1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False),
-        prescreen={}, tail=ev.TailSensitivityResult(0.0, 0.0, {}, 1, 0, 0.0, 0.0, 0.0, 0.0),
+        phase=PhaseDiagnosticResult(1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False),
+        prescreen={}, tail=TailSensitivityResult(0.0, 0.0, {}, 1, 0, 0.0, 0.0, 0.0, 0.0),
         primary=replay, stress=replay,
         primary_autocorr_sharpe=0.1, primary_naive_sharpe=0.1, primary_net_ann=0.01,
         primary_geometric_cagr=0.01, primary_max_drawdown=-0.01,
         primary_annualized_turnover=1.0, stress_naive_sharpe=0.1,
         patient_reference=patient, patient_reference_naive_sharpe=-0.7,
     )
-    report = ev.MhsHorizonDiagnosticReport(
+    report = MhsHorizonDiagnosticReport(
         feature="multi_horizon_market_state", status="COMPLETE", start="2021-01-01",
         end="2021-01-04", resolved_end="2021-01-04", partition="dev",
         execution_tiers_bps=(2.5, 5.0), books={"fast_reversal": book}, blend=None,
@@ -312,13 +331,13 @@ def test_compact_payload_strips_patient_reference(tmp_path) -> None:
         ),
         synthetic_stress={}, participation_warnings={}, termination_counts={},
         unsupported_assumptions=(), anchored_folds=(), folds=(),
-        research_go=ev.MhsResearchGoResult(False, (), 0, 0),
+        research_go=MhsResearchGoResult(False, (), 0, 0),
         fill_source="OHLCV_IMMEDIATE_TAKER", mark_source="MARK_PRICE",
         execution_timeframe="1m", execution_universe_size=1,
         execution_symbols=("A",), run_elapsed_seconds=0.1,
     )
     out = tmp_path / "mhs_report.json"
-    ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.COMPACT)
+    persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.COMPACT)
     payload = json.loads(out.read_text())
     book_payload = payload["books"]["fast_reversal"]
     assert book_payload["patient_reference_naive_sharpe"] == -0.7

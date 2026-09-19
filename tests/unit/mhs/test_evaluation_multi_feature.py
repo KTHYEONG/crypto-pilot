@@ -4,12 +4,13 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
+import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.statistics as statistics
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-)
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evaluation.diagnostics import _multi_feature_diagnostic
+from src.mhs.evidence import effective_breadth
+from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
@@ -33,12 +34,12 @@ def test_multi_feature_default_off_bit_identical(mhs_market, monkeypatch) -> Non
     # is None and every pre-existing field is bit-identical to the explicit-off
     # baseline -- the multi-feature axis is inert unless explicitly enabled.
     root, end = mhs_market
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
-        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
     default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
@@ -61,12 +62,12 @@ def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, mon
     # excluded by the coverage gate are listed under an explicit excluded key
     # with their failing year, never silently dropped.
     root, end = mhs_market
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, multi_feature_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -97,7 +98,7 @@ def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, mon
     for fields in excluded.values():
         assert "failing_year" in fields
     combined = diag["combined"]
-    assert set(combined["net_sharpe_per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    assert set(combined["net_sharpe_per_tier"]) == set(MEASURED_EXECUTION_COST_TIERS_BPS)
     for value in combined["net_sharpe_per_tier"].values():
         assert value is None or np.isfinite(value)
     breadth = diag["feature_book_effective_breadth"]
@@ -113,12 +114,12 @@ def test_multi_feature_diagnostic_telemetry_stages_recorded(mhs_market_long, mon
     # multi_feature_book=True the resource_measurements carry the diagnostic
     # feature panel load and the multi-feature diagnostic stage.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, multi_feature_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -161,7 +162,7 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
     mask = pd.DataFrame(True, index=grid, columns=symbols)
     decision_grid = pd.date_range(grid[0], grid[-1], freq="24h", tz="UTC")
 
-    diag = ev._multi_feature_diagnostic(
+    diag = _multi_feature_diagnostic(
         "ignored", _START, grid[-1], grid, symbols, mask, close, quote_vol * 0.0,
         panels=panels,
     )
@@ -181,7 +182,7 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
             continue
         base_net, _ = mhs_ledger_pnl(
             books[spec.name], close, quote_vol * 0.0,
-            ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+            MEASURED_EXECUTION_COST_TIERS_BPS["base"],
         )
         ref_admitted[spec.name] = {"_net": base_net}
     net_panel = {name: fields["_net"] for name, fields in ref_admitted.items()}
@@ -197,7 +198,7 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
         combined = equal_risk_combination(
             {name: books[name] for name in combinable}, combinable,
         )
-        for tier, cost_bps in ev.MEASURED_EXECUTION_COST_TIERS_BPS.items():
+        for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
             per_feature = {
                 name: mhs_ledger_pnl(books[name], close, quote_vol * 0.0, cost_bps)[0]
                 for name in combinable
@@ -208,7 +209,7 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
             )
             ref_per_tier[tier] = statistics._annualized_1h_sharpe(combined_net)
     else:
-        ref_per_tier = dict.fromkeys(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+        ref_per_tier = dict.fromkeys(MEASURED_EXECUTION_COST_TIERS_BPS)
 
     ref_gross: float | None = None
     if combined is not None:
@@ -221,13 +222,13 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
         )
     ref_breadth: dict[str, float] | None = None
     if len(net_panel) >= 2:
-        n_eff, mean_corr = ev.effective_breadth(pd.DataFrame(net_panel).fillna(0.0))
+        n_eff, mean_corr = effective_breadth(pd.DataFrame(net_panel).fillna(0.0))
         ref_breadth = {"n_eff": n_eff, "mean_corr": mean_corr}
 
     assert set(diag["admitted"]) == set(ref_admitted)
     assert set(diag["excluded"]) == set(ref_excluded)
     assert diag["combined"]["book_mean_gross"] == ref_gross
-    for tier in ev.MEASURED_EXECUTION_COST_TIERS_BPS:
+    for tier in MEASURED_EXECUTION_COST_TIERS_BPS:
         got = diag["combined"]["net_sharpe_per_tier"][tier]
         want = ref_per_tier[tier]
         assert (got is None and want is None) or got == want

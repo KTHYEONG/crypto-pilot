@@ -13,8 +13,8 @@ from src.mhs import scaling as _scaling
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.marks import (
     _fill_mark_parity_eligibility,
-    _get_symbol_mark_frame,
     _pit_execution_mask,
+    clear_mhs_market_data_caches,
 )
 from src.mhs.evidence import AnchoredPurgedFold
 from src.mhs.execution import bar_funding_panel
@@ -119,12 +119,9 @@ def _build_fold_target_weights(
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     # Unlike run_mhs_horizon_diagnostic (which clears at entry), this function
     # is also called directly outside a diagnostic run (fork worker per fold,
-    # or a unit test calling it standalone), so the process-level
-    # _get_symbol_mark_frame cache is never guaranteed fresh for this root
-    # otherwise -- a stale frame from a prior call against a different
-    # data_root/mark fixture would silently leak in (lru_cache keys on
-    # (symbol, timeframe) only, never on data_root).
-    _get_symbol_mark_frame.cache_clear()
+    # or a unit test calling it standalone), so shared market-data state is
+    # never guaranteed fresh for this root otherwise.
+    clear_mhs_market_data_caches()
     eligible, _ = _fill_mark_parity_eligibility(close, eligible, request.fill_mark_parity_gate)
     log_close = np.log(close)
     if not request.committee_capital:
