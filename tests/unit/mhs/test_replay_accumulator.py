@@ -787,7 +787,7 @@ class TestForcedExitCostModelSharing:
         """SCENARIO_MHS_FORCED_EXIT_COST_MODEL_CORWIN_SCHULTZ_CONSISTENCY:
         corwin_schultz에서 half-spread 추정치는 taker crossing cost에
         반영되고, 데이터 종료 시점의 보유 포지션은 강제 청산 없이
-        UNKNOWN_TERMINATION으로 공시된다
+        unresolved 터미널 증거로 공시된다
         (INV-NO-FABRICATED-TERMINAL-FILL)."""
         wl = self._stale_position_workload()
         cs_spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
@@ -806,9 +806,10 @@ class TestForcedExitCostModelSharing:
         assert abs(est - cs_spec.taker_slippage_bps) > 1e-9
 
         result = acc.finalize()
-        assert result.termination_counts["UNKNOWN_TERMINATION"] == 1
+        assert result.termination_counts["UNKNOWN_TERMINATION"] == 0
         assert result.forced_exit_count == 0
         assert result.forced_exit_notional == 0.0
         assert "forced_exit" not in result.simulated_fills["reason"].tolist()
         assert not result.ledger.primary_valid
-        assert any(g.code == "UNKNOWN_TERMINATION" for g in result.ledger.data_gaps)
+        assert any(g.code == "MISSING_HELD_MARK" for g in result.ledger.data_gaps)
+        assert [p.status for p in result.terminal_positions] == ["unresolved"]

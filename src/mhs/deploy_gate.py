@@ -28,7 +28,10 @@ from scipy.stats import binom
 from src.common.errors import DataIntegrityError
 from src.mhs.deployment_policy import live_parity_blockers
 from src.mhs.params import FORWARD_MIN_FOLDS, GrowthRiskEnvelope
+from src.mhs.resources import MhsMemoryBudget, assert_mhs_stage_allocation
 from src.quant.evaluation.reliability import derive_block_size
+
+CONTINUOUS_BARS_PER_YEAR: float = 365.0
 
 DEPLOY_GATE_ALPHA: float = 0.05
 DEPLOY_GATE_BOOTSTRAP_PATHS: int = 2000
@@ -549,3 +552,172 @@ def deploy_gate_from_report(
         n_draws=n_draws,
         seed=seed,
     )
+
+
+def _binomial_upper_bound(successes: int, trials: int, alpha: float) -> float:
+    from scipy.stats import beta
+
+    if trials < 1:
+        raise DataIntegrityError("trials must be >= 1")
+    if successes <= 0:
+        return float(beta.ppf(1.0 - alpha, 1.0, float(trials)))
+    if successes >= trials:
+        return 1.0
+    return float(beta.ppf(1.0 - alpha, float(successes + 1), float(trials - successes)))
+
+
+def _require_continuous_returns(values: pd.Series, name: str) -> pd.Series:
+    if not isinstance(values.index, pd.DatetimeIndex):
+        raise DataIntegrityError(f"{name} must have a DatetimeIndex")
+    if values.index.hasnans:
+        raise DataIntegrityError(f"{name} must not contain NaT")
+    if values.index.tz is None:
+        raise DataIntegrityError(f"{name} must be timezone-aware")
+    converted = values.index.tz_convert("UTC")
+    if not converted.equals(values.index):
+        raise DataIntegrityError(f"{name} must be UTC")
+    if values.index.has_duplicates or not values.index.is_monotonic_increasing:
+        raise DataIntegrityError(f"{name} must be unique and increasing")
+    arr = values.to_numpy(dtype="float64")
+    if not bool(np.isfinite(arr).all()):
+        raise DataIntegrityError(f"{name} must be finite")
+    if bool((arr <= -1.0).any()):
+        raise DataIntegrityError(f"{name} must exceed -1.0")
+    return values.astype("float64")
+
+
+def evaluate_continuous_growth_survival(
+    base_returns: pd.Series,
+    stress_returns: pd.Series,
+    *,
+    envelope: GrowthRiskEnvelope,
+    alpha: float,
+    n_paths: int,
+    seed: int,
+    batch_paths: int,
+    minimum_block_days: int,
+    memory_budget: MhsMemoryBudget,
+) -> DeployGateResult:
+    """Evaluate one continuous net-return path without assuming quarterly independence.
+
+    Args:
+        base_returns: Unique ordered complete daily inventory returns.
+        stress_returns: Same dated decisions under the registered cost stress.
+        envelope: Frozen net-growth and distributional loss budgets.
+        alpha: Already budgeted per-endpoint significance level.
+        n_paths: Predeclared, sufficiently resolved block-bootstrap path count.
+        seed: Frozen random generator seed.
+        batch_paths: Maximum simultaneous resample paths.
+        memory_budget: Explicit admitted inference working memory.
+        minimum_block_days: Registered lower bound for documented label dependence.
+    Returns:
+        Statistical evidence verdict, to be composed with provenance and forward checks.
+    Raises:
+        DataIntegrityError: Data, tail resolution or financial interval alignment fails.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise DataIntegrityError(f"alpha must be in (0, 1), got {alpha}")
+    if isinstance(n_paths, bool) or not isinstance(n_paths, int) or n_paths < 1:
+        raise DataIntegrityError(f"n_paths must be a positive integer, got {n_paths!r}")
+    if isinstance(batch_paths, bool) or not isinstance(batch_paths, int) or batch_paths < 1:
+        raise DataIntegrityError(f"batch_paths must be a positive integer, got {batch_paths!r}")
+    if isinstance(minimum_block_days, bool) or not isinstance(minimum_block_days, int) or minimum_block_days < 1:
+        raise DataIntegrityError(f"minimum_block_days must be a positive integer, got {minimum_block_days!r}")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise DataIntegrityError(f"seed must be an integer, got {seed!r}")
+    if not isinstance(memory_budget, MhsMemoryBudget):
+        raise DataIntegrityError("memory_budget must be MhsMemoryBudget")
+    if math.ceil(20.0 / alpha) > n_paths:
+        raise DataIntegrityError(f"INFERENCE_TAIL_UNRESOLVED: paths={n_paths} cannot resolve alpha={alpha}")
+    base = _require_continuous_returns(base_returns, "base_returns")
+    stress = _require_continuous_returns(stress_returns, "stress_returns")
+    if not base.index.equals(stress.index):
+        raise DataIntegrityError("base and stress returns must share the exact date set")
+    n = len(base)
+    if n < 2:
+        raise DataIntegrityError("returns must contain at least two rows")
+    base_np = base.to_numpy(dtype="float64")
+    stress_np = stress.to_numpy(dtype="float64")
+    block = max(int(derive_block_size(base_np)), int(derive_block_size(stress_np)), int(minimum_block_days))
+    if n < 2 * block:
+        return DeployGateResult(
+            go=False,
+            reason_codes=("INFERENCE_INSUFFICIENT_BLOCKS",),
+            metrics={"n_days": float(n), "block_days": float(block)},
+        )
+    path_len = n
+    horizon_len = max(1, round(envelope.horizon_years * CONTINUOUS_BARS_PER_YEAR))
+    estimated = int(batch_paths) * int(max(path_len, horizon_len)) * 8 * 2 + 4096
+    assert_mhs_stage_allocation(
+        stage="continuous_inference", estimated_bytes=estimated, budget=memory_budget, replay=True, initial_swap_bytes=None
+    )
+    n_blocks = (path_len + block - 1) // block
+    horizon_blocks = (horizon_len + block - 1) // block
+    rng = np.random.default_rng(seed)
+    growth_base: list[float] = []
+    growth_stress: list[float] = []
+    cursor = 0
+    while cursor < n_paths:
+        _take = min(batch_paths, n_paths - cursor)
+        starts = rng.integers(0, n, size=(_take, n_blocks))
+        idx = (starts[:, :, None] + np.arange(block)[None, None, :]) % n
+        flat = idx.reshape(_take, n_blocks * block)[:, :path_len]
+        batch_base = base_np[flat]
+        batch_stress = stress_np[flat]
+        growth_base.extend((np.log1p(batch_base).mean(axis=1) * CONTINUOUS_BARS_PER_YEAR).tolist())
+        growth_stress.extend((np.log1p(batch_stress).mean(axis=1) * CONTINUOUS_BARS_PER_YEAR).tolist())
+        cursor += _take
+    g_base = np.asarray(growth_base, dtype="float64")
+    g_stress = np.asarray(growth_stress, dtype="float64")
+    base_lcb = float(np.quantile(g_base, alpha))
+    stress_lcb = float(np.quantile(g_stress, alpha))
+    base_point = float(np.log1p(base_np).mean() * CONTINUOUS_BARS_PER_YEAR)
+    stress_point = float(np.log1p(stress_np).mean() * CONTINUOUS_BARS_PER_YEAR)
+    rng_horizon = np.random.default_rng(seed + 1)
+    mdd_hits = 0
+    ruin_hits = 0
+    cursor = 0
+    while cursor < n_paths:
+        _take = min(batch_paths, n_paths - cursor)
+        starts = rng_horizon.integers(0, n, size=(_take, horizon_blocks))
+        idx = (starts[:, :, None] + np.arange(block)[None, None, :]) % n
+        flat = idx.reshape(_take, horizon_blocks * block)[:, :horizon_len]
+        horizon_paths = base_np[flat]
+        cum = np.cumprod(1.0 + horizon_paths, axis=1)
+        augmented = np.concatenate([np.ones((_take, 1), dtype="float64"), cum.astype("float64")], axis=1)
+        mdd = (1.0 - augmented / np.maximum.accumulate(augmented, axis=1)).max(axis=1)
+        mdd_hits += int((mdd > envelope.max_drawdown).sum())
+        ruin_hits += int((cum[:, -1] < envelope.ruin_fraction).sum())
+        cursor += _take
+    p_mdd = float(mdd_hits / n_paths)
+    p_ruin = float(ruin_hits / n_paths)
+    p_mdd_ucb = float(_binomial_upper_bound(mdd_hits, n_paths, alpha))
+    p_ruin_ucb = float(_binomial_upper_bound(ruin_hits, n_paths, alpha))
+    codes: list[str] = []
+    if not base_lcb > 0.0:
+        codes.append("CONTINUOUS_BASE_GROWTH")
+    if not stress_lcb > 0.0:
+        codes.append("CONTINUOUS_STRESS_GROWTH")
+    if not p_mdd_ucb <= envelope.max_drawdown_prob:
+        codes.append("CONTINUOUS_MDD_BUDGET")
+    if not p_ruin_ucb <= envelope.max_ruin_prob:
+        codes.append("CONTINUOUS_RUIN_BUDGET")
+    metrics = {
+        "n_days": float(n),
+        "block_days": float(block),
+        "n_paths": float(n_paths),
+        "alpha": float(alpha),
+        "base_ann_log_growth": float(base_point),
+        "base_ann_log_growth_lcb": float(base_lcb),
+        "stress_ann_log_growth": float(stress_point),
+        "stress_ann_log_growth_lcb": float(stress_lcb),
+        "p_mdd_breach": float(p_mdd),
+        "p_mdd_breach_ucb": float(p_mdd_ucb),
+        "mdd_budget": float(envelope.max_drawdown),
+        "mdd_budget_prob": float(envelope.max_drawdown_prob),
+        "p_ruin": float(p_ruin),
+        "p_ruin_ucb": float(p_ruin_ucb),
+        "ruin_fraction": float(envelope.ruin_fraction),
+        "ruin_max_prob": float(envelope.max_ruin_prob),
+    }
+    return DeployGateResult(go=not codes, reason_codes=tuple(sorted(set(codes))), metrics=metrics)

@@ -190,20 +190,32 @@ def test_candidate_member_books_match_prechange_reference() -> None:
     mask_grid = mask.reindex(decisions).fillna(False)
     for name in PROCESS_FEATURE_CANDIDATES:
         feature = _REGISTRY[name].builder(panels)
+        grid = feature.reindex(decisions)
+        finite = pd.DataFrame(
+            np.isfinite(grid.to_numpy(dtype="float64")),
+            index=grid.index,
+            columns=list(grid.columns),
+        )
+        validated = mask_grid & finite
         legacy = beta_neutralize_weights(
-            rank_weight_book(feature, mask, 1, PROCESS_MIN_SYMBOLS).reindex(decisions).fillna(0.0),
+            rank_weight_book(grid, validated, 1, PROCESS_MIN_SYMBOLS),
             beta_grid,
-            mask_grid,
+            validated,
             PROCESS_MIN_SYMBOLS,
         )
         pd.testing.assert_frame_equal(books[name], legacy, check_exact=True)
     for lookback in PROCESS_FUNDING_CARRY_CANDIDATES_HOURS:
+        signal_grid = funding_carry_signal(funding, lookback).reindex(decisions)
+        finite_signal = pd.DataFrame(
+            np.isfinite(signal_grid.to_numpy(dtype="float64")),
+            index=signal_grid.index,
+            columns=list(signal_grid.columns),
+        )
+        validated_carry = mask_grid & finite_signal
         legacy = beta_neutralize_weights(
-            rank_weight_book(funding_carry_signal(funding, lookback), mask, -1, PROCESS_MIN_SYMBOLS)
-            .reindex(decisions)
-            .fillna(0.0),
+            rank_weight_book(signal_grid, validated_carry, -1, PROCESS_MIN_SYMBOLS),
             beta_grid,
-            mask_grid,
+            validated_carry,
             PROCESS_MIN_SYMBOLS,
         )
         pd.testing.assert_frame_equal(books[f"funding_carry_{lookback}h"], legacy, check_exact=True)
@@ -223,10 +235,16 @@ def test_funding_carry_books_match_full_history_reference() -> None:
     mask_grid = eligible.reindex(decisions).fillna(False)
     for lookback in PROCESS_FUNDING_CARRY_CANDIDATES_HOURS:
         signal_grid = funding_carry_signal(funding, lookback).reindex(decisions)
+        finite_signal = pd.DataFrame(
+            np.isfinite(signal_grid.to_numpy(dtype="float64")),
+            index=signal_grid.index,
+            columns=list(signal_grid.columns),
+        )
+        validated = mask_grid & finite_signal
         expected = beta_neutralize_weights(
-            rank_weight_book(signal_grid, mask_grid, -1, PROCESS_MIN_SYMBOLS),
+            rank_weight_book(signal_grid, validated, -1, PROCESS_MIN_SYMBOLS),
             beta_grid,
-            mask_grid,
+            validated,
             PROCESS_MIN_SYMBOLS,
         )
         pd.testing.assert_frame_equal(books[f"funding_carry_{lookback}h"], expected, check_exact=True)

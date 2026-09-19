@@ -314,8 +314,10 @@ def test_assemble_report_wires_forward_provenance(tmp_path) -> None:
     assert ctx.forward_provenance.valid
     assert report.backtest_reliability is not None
 
-def test_assemble_report_reliability_certifies_terminal_only_blend_ledger() -> None:
-    # Given: a blend ledger invalidated only by positions open at grid end
+def test_assemble_report_reliability_blocks_terminal_only_blend_ledger() -> None:
+    # Given: a blend ledger invalidated only by positions open at grid end.
+    # The terminal-gap certification exception is superseded: terminal-only
+    # state stays visible as evidence but never certifies the ledger.
     import pandas as pd
 
     from src.mhs.execution import ExecutionDataGap
@@ -335,16 +337,16 @@ def test_assemble_report_reliability_certifies_terminal_only_blend_ledger() -> N
                 primary_valid=False, invalid_reasons=("MISSING_DATA",), data_gaps=gaps,
             ),
             simulated_fills=pd.DataFrame(),
+            terminal_positions=(),
         ),
     )
 
     # When
     report = assemble_report(ctx, ctx.telemetry)
 
-    # Then: the certified verdict replaces the raw primary_valid flag
+    # Then: the strict verdict blocks certification on terminal-only state
     assert report.backtest_reliability is not None
-    assert "PRIMARY_EXECUTION_INVALID" not in report.backtest_reliability.reason_codes
-    assert "MISSING_DATA" not in report.backtest_reliability.reason_codes
+    assert "PRIMARY_EXECUTION_INVALID" in report.backtest_reliability.reason_codes
 
 def test_assemble_report_reliability_still_blocks_recovering_blend_gap() -> None:
     # Given: a mid-life funding gap followed by a normal fill for the same symbol

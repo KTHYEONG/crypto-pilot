@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.mhs.execution.contracts import ExecutionDataGap
+from src.mhs.execution.contracts import ExecutionDataGap, StrategyExecutionReplayResult
 
 _RECOVERABLE_HELD_GAP_CODES = frozenset({"MISSING_HELD_FUNDING", "MISSING_HELD_MARK"})
 
@@ -18,13 +18,10 @@ def _funding_gap_terminal_symbols(
 ) -> frozenset[str]:
     """Post-hoc classification of terminal held-position gaps.
 
-    This is a finalize-time classification only and is never fed back into any
-    trading decision (INV-PIT-RESUME-CAUSAL). A later fill for the same symbol
-    proves the position resumed normal trading, so that symbol's gap is NOT
-    terminal-equivalent. A ``delist_settlement`` fill (the causal idle-holdings
-    settlement, ``_settle_idle_holdings``) is excluded from that "later fill"
-    evidence: it is itself the terminal disclosure closing out a position that
-    could never resume normal trading, not proof that trading recovered.
+    Historical classification utility only; it must never certify a ledger.
+    Unknown financing or valuation is not rescued by a terminal-only label, a
+    metadata span, or a later recovery event. This helper is retained for
+    diagnostics and legacy-read parity, never as economic proof.
     """
     missing_last: dict[str, pd.Timestamp] = {}
     for g in data_gaps:
@@ -51,14 +48,11 @@ def ledger_terminal_only(
     data_gaps: Sequence[ExecutionDataGap],
     simulated_fills: pd.DataFrame,
 ) -> bool:
-    """Certify a ledger whose gaps are all disclosed terminal inventory.
+    """Classify whether gaps are all disclosed terminal inventory.
 
-    Generalizes the existing UNKNOWN_TERMINATION-only exception to also accept
-    a MISSING_HELD_FUNDING or MISSING_HELD_MARK episode that never recovers
-    before the replay's own grid end -- symmetric with the pre-existing 'held
-    to backtest end is disclosed evidence, not a crash' precedent; no
-    fabricated settlement, no change to funding/mark accounting
-    (INV-NO-FABRICATED-SETTLEMENT).
+    Historical classification utility only; it must never certify a ledger.
+    A terminal-only label cannot rescue unknown financing or valuation, and no
+    certification path may call this helper as a validity exception.
     """
     if not data_gaps:
         return False
@@ -70,24 +64,37 @@ def ledger_terminal_only(
     )
 
 
-def replay_ledger_certified(replay: Any) -> bool:
-    """Single certification point for a replay's execution ledger.
+def replay_ledger_certified(replay: StrategyExecutionReplayResult | None) -> bool:
+    """Certify execution accounting only when all required observed financial state is valid.
 
-    Returns True when the ledger was already marked ``primary_valid``;
-    otherwise delegates unchanged to :func:`ledger_terminal_only`. Fails
-    closed to False when the replay carries no ledger, no data gaps, or no
-    fills. This is the only place the terminal-inventory exception is
-    expressed; all consumers must call it instead of re-implementing the
-    ``primary_valid or ledger_terminal_only(...)`` pair inline.
+    Args:
+        replay: Engine-native result carrying ledger, gaps and terminal evidence.
+    Returns:
+        False for missing evidence, reconciliation failure, any recorded data gap
+        (held valuation/financing gaps as well as unpriced or unfilled intents),
+        or unresolved settlement; priced open inventory alone is not a failure.
     """
-    ledger = getattr(replay, "ledger", None)
-    if getattr(ledger, "primary_valid", None) is True:
-        return True
-    gaps = getattr(ledger, "data_gaps", None)
-    fills = getattr(replay, "simulated_fills", None)
-    if gaps is None or fills is None:
+    if replay is None:
         return False
-    return bool(ledger_terminal_only(gaps, fills))
+    ledger = getattr(replay, "ledger", None)
+    if ledger is None:
+        return False
+    if getattr(ledger, "primary_valid", None) is not True:
+        return False
+    if tuple(getattr(ledger, "invalid_reasons", ()) or ()) != ():
+        return False
+    gaps: Any = getattr(ledger, "data_gaps", None)
+    if gaps is None or len(list(gaps)) != 0:
+        return False
+    positions: Any = getattr(replay, "terminal_positions", None)
+    if positions is None:
+        return False
+    for position in list(positions):
+        if getattr(position, "status", None) == "unresolved":
+            return False
+        if getattr(position, "funding_complete", True) is not True:
+            return False
+    return True
 
 
 __all__ = ["_funding_gap_terminal_symbols", "ledger_terminal_only", "replay_ledger_certified"]

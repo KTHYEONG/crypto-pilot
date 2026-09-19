@@ -3,22 +3,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.mhs.backtest.availability import ObservationAvailability
 from src.mhs.contracts import MhsResourceMeasurement
 from src.mhs.deploy_gate import DeployGateResult
 from src.mhs.execution.contracts import ExecutionDataGap, FundingCoverageGap, StrategyExecutionReplayResult
 from src.mhs.process import ProcessExecutionPolicy, ProcessRiskSizingSpec, RefitPoint
 from src.mhs.resources import ProcessTreeMemoryStats
 
+if TYPE_CHECKING:
+    from src.mhs.backtest.certification import ProcessValidationResult
+    from src.mhs.backtest.labels import MaturedMemberReturns
+    from src.mhs.backtest.selection import RefitPolicyChoice
+
 PROCESS_CERTIFICATION_LEVEL: str = "process_proxy_1h_ledger"
 
 @dataclass(frozen=True, slots=True)
 class ProcessMarketData:
-    """Causally aligned inputs shared by every cost tier of one process run."""
+    """Causally aligned inputs shared by every cost tier of one process run.
+
+    Carry publication and funding knowledge with prepared books so downstream
+    consumers cannot substitute a whole-file coverage assumption for observations.
+    """
 
     grid_1h: pd.DatetimeIndex
     decision_grid: pd.DatetimeIndex
@@ -28,15 +38,26 @@ class ProcessMarketData:
     funding_step: pd.DataFrame
     member_books: dict[str, pd.DataFrame]
     execution_mask: pd.DataFrame
+    observation_availability: ObservationAvailability | None = None
+    funding_known_1h: pd.DataFrame | None = None
+    input_limitations: tuple[str, ...] = ()
+    member_evidence: MaturedMemberReturns | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RefitRecord:
-    """Audit record of one refit's decisions."""
+    """Audit record of one refit's decisions.
+
+    Bind each allocation to its actual train window and chronological policy
+    comparison so a path cannot hide reused or insufficient selection evidence.
+    """
 
     point: RefitPoint
     member_weights: dict[str, float]
     smoothing_halflife_days: float
+    policy_id: str | None = None
+    train_start: pd.Timestamp | None = None
+    n_train_labels: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +67,11 @@ class ProcessPath:
     Unit targets precede volatility sizing; target weights are the sized
     decision rows actually evaluated. Keeping them prevents a later
     inventory replay from rebuilding a different strategy from summary
-    statistics. Policy and targets are identical across cost tiers.
+    statistics. Policy and targets are identical across cost tiers. Preserve
+    the exact input/publication clock beside targets so downstream
+    execution cannot invent a different availability shift. Bind each allocation
+    to its actual train window and chronological policy comparison so a path
+    cannot hide reused or insufficient selection evidence.
     """
 
     one_way_bps: float
@@ -60,6 +85,9 @@ class ProcessPath:
     target_weights: pd.DataFrame
     turnover_1h: pd.Series
     risk_sizing: ProcessRiskSizingSpec | None = None
+    signal_available_at: pd.DatetimeIndex | None = None
+    clock_mode: Literal["legacy_purge", "matured_labels"] = "legacy_purge"
+    policy_choices: tuple[RefitPolicyChoice, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +105,10 @@ class ProcessBacktestReport:
 
 @dataclass(frozen=True, slots=True)
 class ProcessInventoryReport:
-    """Production 3m inventory evidence for identical process decisions."""
+    """Production 3m inventory evidence for identical process decisions.
+
+    Carry evidence-state approval separately from computation completion and
+    economic summary values. Legacy missing validation means uncertified evidence."""
 
     proxy: ProcessBacktestReport
     base: StrategyExecutionReplayResult
@@ -86,6 +117,7 @@ class ProcessInventoryReport:
     resource_measurements: tuple[MhsResourceMeasurement, ...]
     memory_stats: ProcessTreeMemoryStats
     funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
+    validation: ProcessValidationResult | None = None
 
 
 @dataclass(frozen=True, slots=True)

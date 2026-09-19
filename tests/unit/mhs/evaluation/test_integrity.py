@@ -15,11 +15,10 @@ def test_integrity_module_present() -> None:
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_permanent_funding_gaps() -> None:
-    # mhs_time_scoped_roster_mask: ICPUSDT(조기 시작 공백)는 MISSING_ACTIVE_FUNDING이
-    # KNOWN_ZERO_VOLUME과 동일하게 무조건 미체결 처리되도록 확장되어 제외에서 제거됨.
-    # AIAUSDT/OMNIUSDT는 말기(end-of-life)라 ledger_terminal_only가 finalize 시점에
-    # 인증하므로 whole-history 배제에서 제거됨.
-    assert {"AIAUSDT", "OMNIUSDT", "ICPUSDT"}.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
+    # 2026-09-18 원천 재조회: AIA/ICP의 내부 OHLCV 공백과 BNT/BTCST/BDXN의
+    # 장기 funding 공백은 Vision 월·일별 원천에도 없어 whole-history 배제한다.
+    assert {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert "OMNIUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
     assert isinstance(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS, frozenset)
 
 
@@ -64,8 +63,7 @@ def test_source_gap_excluded_symbols_after_ohlcv_recollection_sweep() -> None:
     }
     assert recovered.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert {"CVXUSDT", "SLPUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    # 2026-09-15 mhs_time_scoped_roster_mask: ICPUSDT도 이후 제거되어 잔여 9개.
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 9
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 14
 
 
 def test_funding_gap_terminal_symbols_accepts_gap_with_no_later_fill() -> None:
@@ -453,13 +451,11 @@ def test_source_gap_excluded_symbols_no_longer_blanket_excludes_resolved_end_of_
     # 2026-09-15 실측(mhs_symbol_lifespan_pit_roster): 이 심볼들은 ledger_terminal_only가
     # finalize 시점에 인증을 통과시키므로 더 이상 whole-history 배제가 필요 없다.
     resolved = {
-        "BAKEUSDT", "HIFIUSDT", "OMNIUSDT", "AIAUSDT", "AGIXUSDT", "ALPACAUSDT", "FTMUSDT",
+        "BAKEUSDT", "HIFIUSDT", "OMNIUSDT", "AGIXUSDT", "ALPACAUSDT", "FTMUSDT",
     }
     assert resolved.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
-    # 2026-09-15 mhs_time_scoped_roster_mask: ICPUSDT도 MISSING_ACTIVE_FUNDING 확장으로
-    # 제외에서 제거됨. 잔여 9개(영구 OHLCV공백/중간공백)만 실측 검증 대상으로 남는다.
-    assert "ICPUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 9
+    assert {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 14
     assert {"LITUSDT", "PUMPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
 
 
@@ -472,15 +468,18 @@ def test_replay_ledger_certified_accepts_valid_ledger() -> None:
     from src.mhs.evaluation.integrity import replay_ledger_certified
 
     replay = SimpleNamespace(
-        ledger=SimpleNamespace(primary_valid=True, data_gaps=()),
+        ledger=SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
         simulated_fills=pd.DataFrame(),
+        terminal_positions=(),
     )
 
-    # When / Then: certified with no gap inspection needed
+    # When / Then: certified with complete engine-native evidence
     assert replay_ledger_certified(replay) is True
 
-def test_replay_ledger_certified_accepts_terminal_only_gaps() -> None:
-    # Given: positions still open at grid end (UNKNOWN_TERMINATION) invalidated the ledger
+def test_replay_ledger_certified_rejects_terminal_only_gaps() -> None:
+    # Given: positions still open at grid end invalidated the ledger.
+    # The terminal-gap certification exception is superseded: unknown terminal
+    # state never certifies, however it is classified.
     from types import SimpleNamespace
 
     import pandas as pd
@@ -493,12 +492,13 @@ def test_replay_ledger_certified_accepts_terminal_only_gaps() -> None:
         ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="BBBUSDT", timestamp=pd.Timestamp("2025-12-31", tz="UTC")),
     )
     replay = SimpleNamespace(
-        ledger=SimpleNamespace(primary_valid=False, data_gaps=gaps),
+        ledger=SimpleNamespace(primary_valid=False, invalid_reasons=("MISSING_DATA",), data_gaps=gaps),
         simulated_fills=pd.DataFrame(),
+        terminal_positions=(),
     )
 
-    # When / Then: disclosed terminal inventory is evidence, not a defect
-    assert replay_ledger_certified(replay) is True
+    # When / Then: disclosed terminal inventory is evidence, never certification
+    assert replay_ledger_certified(replay) is False
 
 def test_replay_ledger_certified_rejects_recovering_gap() -> None:
     # Given: a mid-life funding gap that later recovers (a real data defect)

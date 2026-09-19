@@ -173,12 +173,14 @@ def test_certification_matches_legacy_verdicts() -> None:
     class _Ledger:
         def __init__(self, valid, gaps):
             self.primary_valid = valid
+            self.invalid_reasons = ()
             self.data_gaps = gaps
 
     class _Replay:
         def __init__(self, valid, gaps, fills):
             self.ledger = _Ledger(valid, gaps)
             self.simulated_fills = fills
+            self.terminal_positions = ()
 
     fills = pd.DataFrame({"symbol": [], "timestamp": []})
     gap = ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="AUSDT", timestamp=stamp)
@@ -187,6 +189,7 @@ def test_certification_matches_legacy_verdicts() -> None:
     assert ledger_terminal_only([gap], fills) == legacy.ledger_terminal_only([gap], fills)
     assert replay_ledger_certified(_Replay(False, [gap], fills)) == legacy.replay_ledger_certified(_Replay(False, [gap], fills))
     assert replay_ledger_certified(object()) is False
+    assert replay_ledger_certified(None) is False
     assert replay_ledger_certified(_Replay(False, [], fills)) is False
 
 
@@ -213,7 +216,11 @@ def test_exception_roster_matches_legacy() -> None:
 
     assert SOURCE_GAP_EXCLUDED_SYMBOLS == legacy.SOURCE_GAP_EXCLUDED_SYMBOLS
     assert frozenset(
-        {"AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT", "CVXUSDT", "SLPUSDT", "BNXUSDT"}
+        {
+            "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT",
+            "CVXUSDT", "SLPUSDT", "BNXUSDT", "AIAUSDT", "ICPUSDT", "BNTUSDT",
+            "BTCSTUSDT", "BDXNUSDT",
+        }
     ) == SOURCE_GAP_EXCLUDED_SYMBOLS
 
 
@@ -305,6 +312,141 @@ def test_ops_migrate_wiring_stays_available(tmp_path) -> None:
     import src.mhs.pipeline.stages.assemble as _assemble
 
     assert callable(_assemble.assemble_report)
+
+
+def test_no_recovery_is_not_proof() -> None:
+    """No recovery is not proof: held gaps without later fills never certify."""
+    import src.mhs.evaluation.integrity as legacy
+    from src.mhs.execution.contracts import ExecutionDataGap
+    from src.mhs.execution.integrity import ledger_terminal_only, replay_ledger_certified
+
+    stamp = pd.Timestamp("2022-01-01", tz="UTC")
+
+    class _Ledger:
+        def __init__(self, valid, reasons, gaps):
+            self.primary_valid = valid
+            self.invalid_reasons = reasons
+            self.data_gaps = gaps
+
+    class _Replay:
+        def __init__(self, valid, reasons, gaps, fills, positions=()):
+            self.ledger = _Ledger(valid, reasons, gaps)
+            self.simulated_fills = fills
+            self.terminal_positions = positions
+
+    fills = pd.DataFrame({"symbol": [], "timestamp": []})
+    gaps = [
+        ExecutionDataGap(code="MISSING_HELD_MARK", symbol="AUSDT", timestamp=stamp),
+        ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="BUSDT", timestamp=stamp),
+    ]
+    assert ledger_terminal_only(gaps, fills) is True
+    assert replay_ledger_certified(_Replay(False, ("MISSING_DATA",), gaps, fills)) is False
+    assert replay_ledger_certified(_Replay(False, ("MISSING_DATA",), gaps, fills)) == legacy.replay_ledger_certified(
+        _Replay(False, ("MISSING_DATA",), gaps, fills)
+    )
+
+
+def test_forged_validity_cannot_rescue_gaps() -> None:
+    """Forged validity cannot rescue gaps: flag/reason/position conflicts fail closed."""
+    from src.mhs.execution.contracts import ExecutionDataGap, TerminalPositionEvidence
+    from src.mhs.execution.integrity import replay_ledger_certified
+
+    stamp = pd.Timestamp("2022-01-01", tz="UTC")
+    fills = pd.DataFrame({"symbol": [], "timestamp": []})
+
+    class _Ledger:
+        def __init__(self, valid, reasons, gaps):
+            self.primary_valid = valid
+            self.invalid_reasons = reasons
+            self.data_gaps = gaps
+
+    class _Replay:
+        def __init__(self, valid, reasons, gaps, positions=()):
+            self.ledger = _Ledger(valid, reasons, gaps)
+            self.simulated_fills = fills
+            self.terminal_positions = positions
+
+    gap = ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="AUSDT", timestamp=stamp)
+    assert replay_ledger_certified(_Replay(True, ("MISSING_DATA",), [], ())) is False
+    assert replay_ledger_certified(_Replay(True, (), [gap], ())) is False
+    unresolved = TerminalPositionEvidence(
+        symbol="AUSDT", quantity=1.0, cutoff=stamp, status="unresolved",
+        mark=None, mark_available_at=None, funding_complete=False,
+        reason_codes=("STALE_MARK", "MISSING_HELD_FUNDING"),
+    )
+    assert replay_ledger_certified(_Replay(True, (), [], (unresolved,))) is False
+
+
+def test_canonical_alias_parity() -> None:
+    """Canonical alias parity: core and legacy certification agree on every class."""
+    import src.mhs.evaluation.integrity as legacy
+    from src.mhs.execution.contracts import ExecutionDataGap, TerminalPositionEvidence
+    from src.mhs.execution.integrity import replay_ledger_certified
+
+    stamp = pd.Timestamp("2022-01-01", tz="UTC")
+    fills = pd.DataFrame({"symbol": [], "timestamp": []})
+
+    class _Ledger:
+        def __init__(self, valid, reasons, gaps):
+            self.primary_valid = valid
+            self.invalid_reasons = reasons
+            self.data_gaps = gaps
+
+    class _Replay:
+        def __init__(self, valid, reasons, gaps, positions=()):
+            self.ledger = _Ledger(valid, reasons, gaps)
+            self.simulated_fills = fills
+            self.terminal_positions = positions
+
+    priced_open = TerminalPositionEvidence(
+        symbol="AUSDT", quantity=1.0, cutoff=stamp, status="open_marked",
+        mark=100.0, mark_available_at=stamp, funding_complete=True,
+        reason_codes=("FRESH_MARK", "FUNDING_COMPLETE"),
+    )
+    priced = _Replay(True, (), [], (priced_open,))
+    unresolved = _Replay(
+        False, ("MISSING_DATA",),
+        [ExecutionDataGap(code="MISSING_HELD_MARK", symbol="AUSDT", timestamp=stamp)],
+        (),
+    )
+    settled = _Replay(True, (), [], ())
+    for replay in (priced, unresolved, settled):
+        assert replay_ledger_certified(replay) == legacy.replay_ledger_certified(replay)
+    assert replay_ledger_certified(priced) is True
+    assert replay_ledger_certified(unresolved) is False
+    assert replay_ledger_certified(settled) is True
+
+
+def test_recovery_cannot_erase_unknown_economics() -> None:
+    """Recovery cannot erase unknown economics: later fills never backfill financing."""
+    from src.mhs.execution.contracts import ExecutionDataGap, TerminalPositionEvidence
+    from src.mhs.execution.integrity import replay_ledger_certified
+
+    stamp = pd.Timestamp("2022-01-01", tz="UTC")
+    later = pd.Timestamp("2022-01-02", tz="UTC")
+
+    class _Ledger:
+        def __init__(self, valid, reasons, gaps):
+            self.primary_valid = valid
+            self.invalid_reasons = reasons
+            self.data_gaps = gaps
+
+    class _Replay:
+        def __init__(self, valid, reasons, gaps, fills, positions=()):
+            self.ledger = _Ledger(valid, reasons, gaps)
+            self.simulated_fills = fills
+            self.terminal_positions = positions
+
+    gap = ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="AUSDT", timestamp=stamp)
+    resumed = pd.DataFrame({"symbol": ["AUSDT"], "timestamp": [later], "reason": ["timeout_taker"]})
+    settlement = pd.DataFrame({"symbol": ["AUSDT"], "timestamp": [later], "reason": ["delist_settlement"]})
+    settled = TerminalPositionEvidence(
+        symbol="AUSDT", quantity=0.0, cutoff=later, status="settled",
+        mark=100.0, mark_available_at=later, funding_complete=False,
+        reason_codes=("SETTLEMENT_EVENT",),
+    )
+    assert replay_ledger_certified(_Replay(True, (), [gap], resumed, ())) is False
+    assert replay_ledger_certified(_Replay(True, (), [gap], settlement, (settled,))) is False
 
 
 def test_core_imports_avoid_research_facade() -> None:
