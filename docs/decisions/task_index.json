@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_VALIDATION_NESTED_POLICY_SELECTION",
+      "date": "2026-09-19",
+      "adr_id": "ADR_20260919_MHS_VALIDATION_NESTED_POLICY_SELECTION",
+      "domain": "mhs",
+      "title": "MHS 시간순 중첩 정책 선택 검증",
+      "why": "기존 백테스트 정책 선택이 미래 정보와 선택 편향을 충분히 차단하지 못해 평가 신뢰성이 부족했다.",
+      "resolution": "고정된 후보·대조군·불확실성 규칙과 성숙 라벨 기반의 시간순 내부 증거로 정책을 선택하고 fit 감사와 provenance를 경로에 기록했다.",
+      "impact": "정책 선택이 외부 미래 성과와 분리되고 공통 유효 구간·paired block bootstrap·fail-closed 무결성 검증으로 재현 가능한 검증 근거를 제공한다.",
+      "caveat": "내부 증거는 현재 hourly proxy이며 실행 일치 3분봉 증거와 등록된 전진 결과가 없으면 배포 판정에 사용할 수 없다."
+    },
+    {
       "task_id": "TASK_MHS_FUNDING_COVERAGE_AND_CAUSAL_RISK_SIZING",
       "date": "2026-09-18",
       "adr_id": "ADR_20260918_MHS_FUNDING_COVERAGE_AND_CAUSAL_RISK_SIZING",
@@ -1002,16 +1013,6 @@
       "why": "노출/사이징 계층이 복리성장을 억제하는지 코드 로직 감사 요청. exposure_scale_two_sided 기본 False로 cap=1.0 고정돼 growth_budget 솔버·GrowthRiskEnvelope 전체가 no-op임을 원장 실측(logret 차이 0.005%)으로 확인, 추가로 leverage_ceiling이 상한이 아니라 하한 assert로만 쓰이고 실제 반환값은 부트스트랩 그리드 절단면(선택 risk/ref=3.0=grid max)이었음을 규명.",
       "resolution": "src/application/research/mhs/scaling.py: _envelope_exposure_cap 반환을 frontier_multiple에서 envelope.leverage_ceiling(등록 정책 상수)로 교체(검증 로직·양쪽 ValueError 분기는 보존), _assert_envelope_leverage_ceiling_verified 신설(OOS 이전 슬라이스로 1회 감사, fold-local 윈도우는 no-op), _replay_exposure_scale의 exante_target/growth_budget cap 표현식을 상수 참조로 교체. src/mhs/params.py에 GROWTH_RISK_ENVELOPES 중간 rung growth_moderate(leverage_ceiling=1.5) 등록. src/mhs/pipeline/config.py CLI 실효 기본값 exposure_scale_two_sided True 전환(MhsDiagnosticRequest 자체 기본값은 False 유지), execution_universe_size 신규 CLI 배선. src/cli/commands/research/mhs.py --no-exposure-scale-two-sided 네게이트 플래그 + --execution-universe-size 신규, help 텍스트 정정.",
       "impact": "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_growth_exposure_ceiling_contract.json 전체 PASS(lint/type/target pytest, spec compliance). 실측 사다리(no-exposure-scale-two-sided baseline / growth_moderate / growth)는 사전 등록 판정기준(§5.3)에 따라 코드 변경과 분리된 별도 실행으로 후속 확인 필요 -- 이번 세션은 계약 정합화까지 완료, 3m 원장 재실행은 미실시."
-    },
-    {
-      "task_id": "TASK_MHS_GROWTH_BUDGET_MAIN_LOGIC",
-      "date": "2026-08-22",
-      "adr_id": "ADR_20260822_MHS_GROWTH_BUDGET_MAIN_LOGIC",
-      "domain": "risk",
-      "title": "MHS 성장예산 경계전파 결함 수정 및 메인 로직 기본값 전환",
-      "why": "사용자가 docs/results/mhs_run_history의 실측 결과를 기반으로 복리 자산증식을 극대화할 근거있는 개선안을 요청. 분석 결과 노출 스케일 세 계층(target_gross/regime_cash/pnl_vol_target)이 전부 상한 1.0의 단방향 감쇠라 등록 드로다운 예산에 도달할 수 없었고, growth_budget 모드의 목표변동성이 fold 4개 중 3개에서 leak 또는 전역 fallback(0.20)으로 조용히 대체되어(D1) Research-GO가 배포되지 않을 노출 정책의 fold 증거로 판정하고 있었음. 이후 사용자가 드로다운 크기를 신경쓰지 않는다고 명시적으로 확인하고 growth envelope(파산확률 1% 한도만 남김) + evidence_weighting 조합을 메인 로직 기본값으로 설정해달라고 요청.",
-      "resolution": "src/application/research/mhs/scaling.py에 _growth_budget_target_vol_by_boundary 신설(각 fold의 train_end 이전 데이터로만 leak-free 적합, 실패시 DataIntegrityError). _envelope_exposure_cap을 부트스트랩 파산확률 프론티어에서 유도하도록 수정하고 leverage_ceiling이 프론티어를 넘으면 fail-closed(ValueError). src/mhs/pipeline/stages/fold.py에 경계별 target_vol을 fold pool에 배선. src/application/research/mhs/evaluation.py의 _fold_blend_parity에 배포된(post-scale) gross 비교를 추가하고 top-level blend_traces에도 실제 적용된 exposure_scale_mean을 기록(이전에는 fold쪽만 채워져 있어 발산 감지가 원리적으로 불가능했던 D2 결함 수정). 정책 결정: src/mhs/pipeline/config.py의 MhsRunConfig(CLI 실효 기본값의 단일 소유자) growth_envelope/pnl_vol_target_mode/committee_evidence_weighting 기본값을 conservative/exante_target/False에서 growth/growth_budget/True로 전환, --no-committee-evidence-weighting 네게이트 플래그 신설. MhsDiagnosticRequest(계약 객체) 자체 기본값과 GROWTH_ENVELOPE_DEFAULT 상수, golden fixture 매트릭스는 완전히 보존(committee_capital의 기존 패턴을 그대로 재사용)하여 40여개 기존 bit-exact 회귀 테스트에 영향 없음.",
-      "impact": "무인자 CLI 실행 기준 CAGR 56.0%->112.5%, MDD -17.6%->-26.5%, Sharpe 2.23->2.33, DSR 0.36->0.66, Calmar 3.30->4.25. 예전 기본값은 --growth-envelope conservative --pnl-vol-target-mode exante_target --no-committee-evidence-weighting로 계속 접근 가능하며 회귀 테스트로 정확한 수치(CAGR 56.0204%) 고정. leverage_ceiling=2.0 양방향 옵션(--exposure-scale-two-sided)은 실측 파산확률 프론티어를 넘어 fail-closed로 거부됨을 실행으로 확인, 메인 기본값에는 미포함. 잔여 차단사유는 FOLD_GROWTH_CONCENTRATION(2025년 한 해에 복리성장 59% 쏠림)과 RELEVANT_EXECUTION_DATA_GAP(fold 0 MISSING_DATA)이며 둘 다 이번 작업 범위 밖."
     }
   ]
 }

@@ -528,5 +528,8 @@
     "testing": "tests/unit/application/test_mhs_backtest.py"
   },
   "src/application/mhs_worker.py": {},
-  "src/mhs/backtest/contracts.py": {}
+  "src/mhs/backtest/contracts.py": {},
+  "src/mhs/backtest/paths.py": {
+    "testing": "tests/integration/mhs/test_nested_process_evidence.py"
+  }
 }
