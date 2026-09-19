@@ -154,7 +154,6 @@ class PipelineContext:
     discovery_qualification: Any = None
     full_history_yearly_net_t: Any = None
     funding_carry_worst_year_corr: Any = None
-    _fill_mark_parity_census: Any = None
     _growth_envelope_payload: dict[str, Any] | None = None
     blend_gross: float = 0.0
     blend_cash_fraction: float = 0.0

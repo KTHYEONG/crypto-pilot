@@ -85,7 +85,6 @@ class MhsRunConfig:
 
     # Gates
     execution_coverage_gate: bool = False
-    fill_mark_parity_gate: bool = True
     exposure_scale_two_sided: bool = True  # was False; CLI effective default flips like committee_capital/growth_envelope/pnl_vol_target_mode
     exposure_drawdown_brake: bool = False
     name_drift_trim: bool = False
@@ -165,7 +164,6 @@ class MhsRunConfig:
             committee_target_gross=committee_target_gross,
             committee_evidence_weighting=committee_evidence_weighting,
             execution_coverage_gate=args.execution_coverage_gate,
-            fill_mark_parity_gate=not args.no_fill_mark_parity_gate,
             exposure_scale_two_sided=not args.no_exposure_scale_two_sided,
             exposure_drawdown_brake=args.exposure_drawdown_brake,
             name_drift_trim=args.name_drift_trim,

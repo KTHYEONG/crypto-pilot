@@ -179,35 +179,40 @@ def warmup_reference_gap_days(warmup_returns: pd.Series, reference_start: pd.Tim
     return float((ref - last).total_seconds()) / 86400.0
 
 
-def decision_mark_row(
+def decision_ohlcv_close_row(
     symbols: Iterable[str],
     date: pd.Timestamp,
-    mark_path_fn: Callable[[str], Path],
+    ohlcv_path_fn: Callable[[str], Path],
 ) -> pd.Series:
+    """Read the completed trade close immediately before a UTC decision boundary. Every active target requires a finite positive close at the exact prior-hour timestamp; a missing price must block publication rather than change the sizing source."""
     dt = pd.Timestamp(date)
-    dt = dt.tz_localize("UTC") if dt.tzinfo is None else dt.tz_convert("UTC")
+    if dt.tzinfo is None:
+        raise DataIntegrityError(f"decision_time must be tz-aware UTC, got {date!r}")
+    dt = dt.tz_convert("UTC")
+    if (dt.hour, dt.minute, dt.second) != (0, 0, 0):
+        raise DataIntegrityError(f"decision_time must lie on the 24h grid (00:00 UTC), got {dt}")
     target_ms = int((dt - pd.Timedelta(hours=1)).value // 1_000_000)
     vals: dict[str, float] = {}
     for sym in symbols:
-        path = Path(mark_path_fn(str(sym)))
+        path = Path(ohlcv_path_fn(str(sym)))
         if not path.exists():
-            logger.warning("[DATA] stage=decision_mark symbol=%s reason=%s", sym, "file_missing")
-            continue
+            raise DataIntegrityError(f"decision OHLCV close unavailable: {sym} missing {path}")
         try:
-            df = pd.read_parquet(path, columns=["timestamp", "close"])
+            df = pd.read_parquet(path)
         except (OSError, ValueError) as exc:
-            logger.warning("[DATA] stage=decision_mark symbol=%s reason=%s", sym, f"unreadable:{type(exc).__name__}")
-            continue
+            raise DataIntegrityError(f"decision OHLCV close unreadable: {sym} {path}: {type(exc).__name__}") from exc
+        if "timestamp" not in df.columns or "close" not in df.columns:
+            raise DataIntegrityError(f"decision OHLCV close malformed: {sym} {path}")
         ts = pd.to_numeric(df["timestamp"], errors="coerce")
         cl = pd.to_numeric(df["close"], errors="coerce")
         hit = df.loc[ts == target_ms]
         if hit.empty:
-            logger.warning("[DATA] stage=decision_mark symbol=%s reason=%s", sym, "bar_missing")
-            continue
+            raise DataIntegrityError(f"decision OHLCV close unavailable: {sym} bar_missing at {dt - pd.Timedelta(hours=1)}")
+        if len(hit) > 1:
+            raise DataIntegrityError(f"decision OHLCV close ambiguous: {sym} duplicate timestamp at {dt - pd.Timedelta(hours=1)}")
         close_val = float(cl.loc[hit.index[0]])
         if not np.isfinite(close_val) or close_val <= 0:
-            logger.warning("[DATA] stage=decision_mark symbol=%s reason=%s", sym, "invalid_close")
-            continue
+            raise DataIntegrityError(f"decision OHLCV close invalid: {sym} close={close_val!r}")
         vals[str(sym)] = float(close_val)
     return pd.Series(vals, dtype="float64", name=dt)
 
@@ -382,15 +387,21 @@ def advance_to_date(
     portfolio_state_dir: Path | None = None,
     mode: str = "shadow",
 ) -> tuple[LiveRuntime, int, float]:
-    import src.market_data.services.futures_collection as _futures_collection
     from src.live.deployed_weights import (
         EXPOSURE_SCALE_COLUMN,
         EXPOSURE_SCALE_KEEP_ROWS,
         append_weight_row,
-        decision_marks_path,
+        decision_ohlcv_close_path,
         exposure_scale_path,
         load_weights_frame,
     )
+
+    def _ohlcv_fn(symbol: str) -> Path:
+        if data_root:
+            return Path(data_root) / "1h" / f"{symbol}.parquet"
+        from src.common.paths import ohlcv_path
+
+        return ohlcv_path(symbol, "1h")
 
     target_dt = pd.Timestamp(target).tz_convert("UTC").normalize() if pd.Timestamp(target).tzinfo is not None else pd.Timestamp(target).tz_localize("UTC").normalize()
     last_dt = pd.Timestamp(runtime.last_decision_date).tz_convert("UTC").normalize() if pd.Timestamp(runtime.last_decision_date).tzinfo is not None else pd.Timestamp(runtime.last_decision_date).tz_localize("UTC").normalize()
@@ -411,8 +422,7 @@ def advance_to_date(
         # 스케일/마크를 weights 행보다 먼저 기록: weights 행이 있으면 스케일도 반드시 존재한다.
         append_weight_row(exposure_scale_path(Path(weights_path)), target_dt, pd.Series({EXPOSURE_SCALE_COLUMN: float(_scalar)}, dtype="float64"), artifact_key=artifact_key, keep_rows=EXPOSURE_SCALE_KEEP_ROWS)
         _syms = [str(s) for s in scaled_row.index if pd.notna(scaled_row[s]) and float(scaled_row[s]) != 0.0]
-        _mark_fn = lambda s: _futures_collection._mark_price_path(s, "1h")  # noqa: E731
-        append_weight_row(decision_marks_path(Path(weights_path)), target_dt, decision_mark_row(_syms, target_dt, _mark_fn), artifact_key=artifact_key)
+        append_weight_row(decision_ohlcv_close_path(Path(weights_path)), target_dt, decision_ohlcv_close_row(_syms, target_dt, _ohlcv_fn), artifact_key=artifact_key)
         appended = append_weight_row(Path(weights_path), target_dt, scaled_row, artifact_key=artifact_key)
         updated = LiveRuntime(
             schema_version=runtime.schema_version,
@@ -448,8 +458,7 @@ def advance_to_date(
         # 스케일/마크를 weights 행보다 먼저 기록: weights 행이 있으면 스케일도 반드시 존재한다.
         append_weight_row(exposure_scale_path(Path(weights_path)), cur, pd.Series({EXPOSURE_SCALE_COLUMN: float(_scalar)}, dtype="float64"), artifact_key=artifact_key, keep_rows=EXPOSURE_SCALE_KEEP_ROWS)
         _syms = [str(s) for s in scaled_row.index if pd.notna(scaled_row[s]) and float(scaled_row[s]) != 0.0]
-        _mark_fn = lambda s: _futures_collection._mark_price_path(s, "1h")  # noqa: E731
-        append_weight_row(decision_marks_path(Path(weights_path)), cur, decision_mark_row(_syms, cur, _mark_fn), artifact_key=artifact_key)
+        append_weight_row(decision_ohlcv_close_path(Path(weights_path)), cur, decision_ohlcv_close_row(_syms, cur, _ohlcv_fn), artifact_key=artifact_key)
         appended = append_weight_row(Path(weights_path), cur, scaled_row, artifact_key=artifact_key)
         if appended:
             rows_appended += 1

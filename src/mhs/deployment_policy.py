@@ -48,7 +48,6 @@ class TargetWeightPolicy:
     committee_target_gross: float | None
     funding_carry_sleeve: bool
     funding_carry_weight: float
-    fill_mark_parity_gate: bool
     committee_tranche_count: int = COMMITTEE_TRANCHE_COUNT
 
     def to_request(self) -> MhsDiagnosticRequest:
@@ -77,7 +76,6 @@ class TargetWeightPolicy:
             committee_target_gross=None if not capital else (None if self.committee_target_gross is None else float(self.committee_target_gross)),
             funding_carry_sleeve=bool(self.funding_carry_sleeve) and capital,
             funding_carry_weight=float(self.funding_carry_weight) if (bool(self.funding_carry_sleeve) and capital) else 0.0,
-            fill_mark_parity_gate=bool(self.fill_mark_parity_gate),
         )
         return request
 
@@ -206,7 +204,6 @@ def build_deployment_policy(
         committee_target_gross=_resolved_committee_target_gross(request),
         funding_carry_sleeve=bool(request.funding_carry_sleeve),
         funding_carry_weight=float(request.funding_carry_weight),
-        fill_mark_parity_gate=bool(request.fill_mark_parity_gate),
     )
     mode = str(request.pnl_vol_target_mode)
     kelly_enabled = bool(request.committee_capital and request.committee_kelly_sizing) and mode != "constant_risk"

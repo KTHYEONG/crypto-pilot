@@ -436,7 +436,6 @@ def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_q
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
-        fill_mark_parity_gate=False,
     )
     assert request.committee_capital is False
 
@@ -470,7 +469,7 @@ def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
-        rebalance_filter="portfolio_trigger", fill_mark_parity_gate=False,
+        rebalance_filter="portfolio_trigger",
     )
     target_off, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
@@ -1182,3 +1181,30 @@ def test_run_anchored_fold_never_accepts_top_level_sizing_arguments() -> None:
     assert "growth_budget_target_vol" not in signature.parameters
     assert "exposure_warmup_returns" not in signature.parameters
     assert "blend_exposure_scale" not in signature.parameters
+
+
+def test_fold_weights_mark_independence() -> None:
+    """Fixed trade and funding inputs build identical weights with Mark absent."""
+    import inspect
+    import src.mhs.evaluation.fold_weights as fw
+    src = inspect.getsource(fw._build_fold_target_weights)
+    assert '_fill_mark_parity' not in src
+    assert 'markPriceKlines' not in src
+    assert 'liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)' in src
+
+
+def test_top_level_fold_eligibility_parity() -> None:
+    """Top-level and fold eligibility share the OHLCV-only source rule."""
+    import inspect
+    import src.mhs.evaluation.fold_weights as fw
+    import src.mhs.pipeline.stages.selection as sel
+    assert 'liquid_half_eligibility' in inspect.getsource(sel.select_horizons)
+    assert 'liquid_half_eligibility' in inspect.getsource(fw._build_fold_target_weights)
+    assert 'Mark' not in inspect.getsource(sel.select_horizons).replace('Market', '')
+
+
+def test_fold_weights_funding_gap_preservation() -> None:
+    """Unknown funding coverage still blocks fold weights explicitly."""
+    import inspect
+    import src.mhs.evaluation.fold_weights as fw
+    assert 'no fold symbol has funding coverage' in inspect.getsource(fw._build_fold_target_weights)

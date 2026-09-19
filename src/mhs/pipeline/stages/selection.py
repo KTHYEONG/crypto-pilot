@@ -19,7 +19,6 @@ import numpy as np
 
 import src.mhs.evaluation.books as books
 import src.mhs.evaluation.folds as folds
-from src.mhs.marks import _fill_mark_parity_eligibility
 from src.mhs.panel import liquid_half_eligibility
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
@@ -27,11 +26,8 @@ from src.mhs.types import BOOK_SPECS
 
 
 def select_horizons(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
-    """Compute eligibility, candidate books, and fold-safe horizon selection."""
+    """Build causal liquidity eligibility and horizon candidates from completed trade OHLCV. The same source rule applies to full-period and fold selection; no external valuation feed may change the eligible universe."""
     ctx.eligible = liquid_half_eligibility(ctx.quote_vol, lookback_bars=720, min_history_bars=720)
-    ctx.eligible, ctx._fill_mark_parity_census = _fill_mark_parity_eligibility(
-        ctx.close, ctx.eligible, ctx.config.fill_mark_parity_gate
-    )
     ctx.log_close = np.log(ctx.close)
     # The raw close panel is not used after its log transform.  Releasing it
     # before phase/weight construction avoids retaining two full multi-year

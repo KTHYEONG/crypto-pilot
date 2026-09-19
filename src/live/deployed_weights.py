@@ -31,8 +31,8 @@ def exposure_scale_path(weights_path: Path) -> Path:
     return _sibling_with_token(weights_path, "deployed_exposure_scale")
 
 
-def decision_marks_path(weights_path: Path) -> Path:
-    return _sibling_with_token(weights_path, "deployed_decision_marks")
+def decision_ohlcv_close_path(weights_path: Path) -> Path:
+    return _sibling_with_token(weights_path, "deployed_decision_ohlcv_close")
 
 
 def default_weights_path() -> Path:

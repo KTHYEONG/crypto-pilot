@@ -286,19 +286,6 @@ class TestFrozenLiterals:
 class TestFillMarkParityGateConstants:
     """SCENARIO_MHS_FILL_MARK_PARITY_02: contract constants for parity gate."""
 
-    def test_price_protection_band(self) -> None:
-        from src.mhs.types import FILL_MARK_PRICE_PROTECTION_BAND
-
-        assert FILL_MARK_PRICE_PROTECTION_BAND == 0.05
-
-    def test_max_log_divergence(self) -> None:
-        import math
-
-        from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE, FILL_MARK_PRICE_PROTECTION_BAND
-
-        assert pytest.approx(math.log1p(FILL_MARK_PRICE_PROTECTION_BAND)) == FILL_MARK_MAX_LOG_DIVERGENCE
-        assert 0.048 < FILL_MARK_MAX_LOG_DIVERGENCE < 0.049
-
     def test_vol_target_max_scale(self) -> None:
         from src.mhs.types import (
             COMMITTEE_TARGET_GROSS,

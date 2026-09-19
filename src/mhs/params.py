@@ -9,7 +9,6 @@ only; ``evaluation.py`` imports its tunables from here.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import pandas as pd
@@ -258,8 +257,6 @@ REGISTERED_POLICY_THRESHOLDS: dict[str, float | None] = {
     "max_drawdown_budget_ceiling": 0.60,
 }
 
-FILL_MARK_PRICE_PROTECTION_BAND: float = 0.05
-FILL_MARK_MAX_LOG_DIVERGENCE: float = math.log1p(FILL_MARK_PRICE_PROTECTION_BAND)
 PNL_VOL_TARGET_MAX_SCALE: float = 1.0 / COMMITTEE_TARGET_GROSS
 
 # --- evaluation.py tunables ----------------------------------------------------

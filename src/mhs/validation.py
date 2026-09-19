@@ -169,8 +169,6 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
             raise ValueError("committee_target_gross requires committee_capital=True")
     if not isinstance(request.execution_coverage_gate, bool):
         raise ValueError("execution_coverage_gate must be a bool")
-    if not isinstance(request.fill_mark_parity_gate, bool):
-        raise ValueError("fill_mark_parity_gate must be a bool")
     if not isinstance(request.exposure_scale_two_sided, bool):
         raise ValueError("exposure_scale_two_sided must be a bool")
     if request.exposure_scale_two_sided and request.pnl_vol_target_mode not in (

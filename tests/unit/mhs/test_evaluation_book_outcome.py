@@ -26,8 +26,8 @@ from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _build_books_concurrent_args,
 )
 
-pytestmark = pytest.mark.slow
 
+@pytest.mark.slow
 def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
     # SCENARIO_BOOK_OUTCOME_IS_TWO_PASS: the reported primary is the
     # P&L-vol-target-rescaled Pass-2 replay, with Pass 1 kept as the
@@ -52,6 +52,7 @@ def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
     assert forced.pre_vol_target_reference_naive_sharpe is not None
     assert forced.primary_naive_sharpe != forced.pre_vol_target_reference_naive_sharpe
 
+@pytest.mark.slow
 def test_book_outcome_realized_cost_reaches_report(mhs_market) -> None:
     # SCENARIO_MHS_REALIZED_EXECUTION_COST_REACHES_REPORT_04: _book_outcome
     # projects the already-computed per-fill shortfall aggregates onto
@@ -78,6 +79,7 @@ def test_book_outcome_realized_cost_reaches_report(mhs_market) -> None:
     assert report.stress_realized_shortfall_bps > report.primary_realized_shortfall_bps
     assert report.stress_notional_weighted_shortfall_bps > report.primary_notional_weighted_shortfall_bps
 
+@pytest.mark.slow
 def test_toplevel_blend_replay_matches_renormalized_components(mhs_market) -> None:
     # SCENARIO_MHS_TOPLEVEL_BLEND_REPLAY_MATCHES_RENORMALIZED_COMPONENTS: the
     # blend replay target is the weighted sum of the renormalized execution
@@ -150,6 +152,7 @@ def test_active_blend_grid_no_weight_fails_closed(monkeypatch) -> None:
     with pytest.raises(ValueError, match="allocates no capital"):
         _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
 
+@pytest.mark.slow
 def test_blend_report_adopts_slow_cadence(mhs_market) -> None:
     # SCENARIO_MHS_BLEND_REPORT_ADOPTS_SLOW_CADENCE_04: under the fixture with
     # the current frozen weights, the blend MhsBookReport produced by
@@ -163,6 +166,7 @@ def test_blend_report_adopts_slow_cadence(mhs_market) -> None:
     assert blend_report.step_hours == 24
     assert blend_report.horizon_hours == 168
 
+@pytest.mark.slow
 def test_book_outcome_executed_prescreen_reaches_report(mhs_market) -> None:
     """SCENARIO_MHS_EXECUTED_PRESCREEN_REACHES_REPORT_04: when ``_book_outcome``
     is handed an execution book (``replay_weights_step``) different from the
@@ -185,6 +189,7 @@ def test_book_outcome_executed_prescreen_reaches_report(mhs_market) -> None:
     assert reference_only.executed_tail is None
     assert reference_only.executed_prescreen_net_t is None
 
+@pytest.mark.slow
 def test_book_outcome_existing_primary_metrics_unchanged(mhs_market) -> None:
     """SCENARIO_MHS_EXISTING_PRIMARY_METRICS_UNCHANGED_05: the executed-evidence
     addition is additive-only -- the primary/stress replay metrics stay present
@@ -222,6 +227,7 @@ def test_book_outcome_existing_primary_metrics_unchanged(mhs_market) -> None:
     assert report.tail == expected_tail
 
 
+@pytest.mark.slow
 def test_book_outcome_blend_exposes_exposure_scale_series_constant_risk(mhs_market) -> None:
     # SCENARIO_MHS_BLEND_REPORT_EXPOSES_EXPOSURE_SCALE_SERIES: under
     # constant_risk the two-pass blend book carries the pnl_vol_target_scale it

@@ -32,7 +32,7 @@ def test_advance_to_date_scores_missing_days(monkeypatch, tmp_path) -> None:
         return pd.Series({"BTCUSDT": 0.4}, name=date), pd.Series({"BTCUSDT": 0.2}, name=date), 1.0
 
     monkeypatch.setattr(step, "compute_signal_row", _fake_compute)
-    monkeypatch.setattr(step, "decision_mark_row", lambda symbols, date, mark_path_fn: pd.Series({"BTCUSDT": 101.0}, name=date, dtype="float64"))
+    monkeypatch.setattr(step, "decision_ohlcv_close_row", lambda symbols, date, ohlcv_path_fn: pd.Series({"BTCUSDT": 101.0}, name=date, dtype="float64"))
     path = tmp_path / "deployed_target_weights.parquet"
     new_rt, n, _sc = step.advance_to_date(params, rt, path, "", pd.Timestamp("2026-08-23", tz="UTC"))
     assert n == 3
@@ -400,21 +400,6 @@ def test_descale_realized_returns_starts_at_first_scaled_prior_and_fails_closed(
         descale_realized_returns(equity, pd.Series([2.0, np.nan, 2.0], index=idx[:3], dtype="float64"))
 
 
-def test_decision_mark_row_reads_prior_hour_close_and_omits_missing(tmp_path) -> None:
-    import pandas as pd
-    from src.mhs.live_signal_step import decision_mark_row
-
-    dt = pd.Timestamp("2026-09-05", tz="UTC")
-    prior = dt - pd.Timedelta(hours=1)
-    pd.DataFrame({"timestamp": [prior.value // 1_000_000, dt.value // 1_000_000], "close": [101.5, 999.0]}).to_parquet(tmp_path / "AAAUSDT.parquet", index=False)
-    pd.DataFrame({"timestamp": [dt.value // 1_000_000], "close": [55.0]}).to_parquet(tmp_path / "BBBUSDT.parquet", index=False)
-    pd.DataFrame({"timestamp": [prior.value // 1_000_000], "close": [0.0]}).to_parquet(tmp_path / "DDDUSDT.parquet", index=False)
-    row = decision_mark_row(["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"], dt, lambda symbol: tmp_path / f"{symbol}.parquet")
-    assert row.to_dict() == {"AAAUSDT": 101.5}
-    assert row.name == dt
-    assert row.dtype == "float64"
-
-
 def test_assert_panel_history_available_fails_closed_when_short(tmp_path) -> None:
     import pandas as pd
     import pytest
@@ -541,7 +526,7 @@ def test_advance_to_date_persists_prescale_held_scale_and_decision_marks(tmp_pat
     import dataclasses
     import pandas as pd
     import src.mhs.live_signal_step as module
-    from src.live.deployed_weights import EXPOSURE_SCALE_COLUMN, decision_marks_path, exposure_scale_path, load_weights_frame
+    from src.live.deployed_weights import EXPOSURE_SCALE_COLUMN, decision_ohlcv_close_path, exposure_scale_path, load_weights_frame
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.deployment_policy import build_deployment_policy
     from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime
@@ -561,7 +546,7 @@ def test_advance_to_date_persists_prescale_held_scale_and_decision_marks(tmp_pat
         return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
 
     monkeypatch.setattr(module, "compute_signal_row", fake_compute)
-    monkeypatch.setattr(module, "decision_mark_row", lambda symbols, date, mark_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
+    monkeypatch.setattr(module, "decision_ohlcv_close_row", lambda symbols, date, ohlcv_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
 
     new_rt, appended, scalar = module.advance_to_date(params, runtime, weights_path, "", d1)
@@ -569,7 +554,7 @@ def test_advance_to_date_persists_prescale_held_scale_and_decision_marks(tmp_pat
     assert new_rt.held_target_row == {"AAAUSDT": 0.1}
     scale_frame = load_weights_frame(exposure_scale_path(weights_path))
     assert float(scale_frame.loc[d1, EXPOSURE_SCALE_COLUMN]) == 2.0
-    marks_frame = load_weights_frame(decision_marks_path(weights_path))
+    marks_frame = load_weights_frame(decision_ohlcv_close_path(weights_path))
     assert float(marks_frame.loc[d1, "AAAUSDT"]) == 101.0
     assert seen_scales[0].empty
 
@@ -640,7 +625,7 @@ def test_advance_to_date_gap_branch_persists_prescale(tmp_path, monkeypatch) -> 
         return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
 
     monkeypatch.setattr(module, "compute_signal_row", fake_compute)
-    monkeypatch.setattr(module, "decision_mark_row", lambda symbols, date, mark_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
+    monkeypatch.setattr(module, "decision_ohlcv_close_row", lambda symbols, date, ohlcv_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
 
     new_rt, appended, scalar = module.advance_to_date(params, runtime, weights_path, "", far, max_catchup_days=30)
@@ -871,32 +856,6 @@ def test_realized_equity_unreadable_shard_fails_closed_with_named_error(tmp_path
         realized_equity(d, "paper", bt_end=pd.Timestamp("2025-12-31", tz="UTC"))
 
 
-def test_decision_mark_row_logs_each_omission_reason(tmp_path, caplog) -> None:
-    import logging
-    import pandas as pd
-    from src.mhs.live_signal_step import decision_mark_row
-
-    dt = pd.Timestamp("2026-09-05", tz="UTC")
-    prior_ms = (dt - pd.Timedelta(hours=1)).value // 1_000_000
-    pd.DataFrame({"timestamp": [prior_ms], "close": [101.5]}).to_parquet(tmp_path / "OKUSDT.parquet", index=False)
-    (tmp_path / "BADUSDT.parquet").write_bytes(b"not a parquet")
-    pd.DataFrame({"timestamp": [dt.value // 1_000_000], "close": [55.0]}).to_parquet(tmp_path / "LATEUSDT.parquet", index=False)
-    pd.DataFrame({"timestamp": [prior_ms], "close": [0.0]}).to_parquet(tmp_path / "ZEROUSDT.parquet", index=False)
-
-    with caplog.at_level(logging.WARNING, logger="LiveSignalStep"):
-        row = decision_mark_row(
-            ["OKUSDT", "MISSINGUSDT", "BADUSDT", "LATEUSDT", "ZEROUSDT"], dt,
-            lambda symbol: tmp_path / f"{symbol}.parquet",
-        )
-
-    assert row.to_dict() == {"OKUSDT": 101.5}
-    text = caplog.text
-    assert "symbol=MISSINGUSDT reason=file_missing" in text
-    assert "symbol=BADUSDT reason=unreadable:ArrowInvalid" in text
-    assert "symbol=LATEUSDT reason=bar_missing" in text
-    assert "symbol=ZEROUSDT reason=invalid_close" in text
-
-
 def test_advance_to_date_writes_quarantine_sidecar_with_protected_quarantine(tmp_path, monkeypatch) -> None:
     import dataclasses
     import json
@@ -921,7 +880,7 @@ def test_advance_to_date_writes_quarantine_sidecar_with_protected_quarantine(tmp
         return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
 
     monkeypatch.setattr(module, "compute_signal_row", fake_compute)
-    monkeypatch.setattr(module, "decision_mark_row", lambda symbols, date, mark_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
+    monkeypatch.setattr(module, "decision_ohlcv_close_row", lambda symbols, date, ohlcv_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
 
     module.advance_to_date(params, runtime, weights_path, "", d1)
@@ -959,7 +918,7 @@ def test_advance_to_date_gap_branch_writes_quarantine_sidecar(tmp_path, monkeypa
         return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
 
     monkeypatch.setattr(module, "compute_signal_row", fake_compute)
-    monkeypatch.setattr(module, "decision_mark_row", lambda symbols, date, mark_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
+    monkeypatch.setattr(module, "decision_ohlcv_close_row", lambda symbols, date, ohlcv_path_fn: pd.Series({"AAAUSDT": 101.0}, name=date, dtype="float64"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
 
     far = d1 + pd.Timedelta(days=40)
@@ -1194,3 +1153,276 @@ def test_compute_signal_row_silent_when_warmup_is_contiguous(tmp_path, monkeypat
     # Then: 경고 없음
     assert 0.0 < scalar <= 3.0
     assert not any("warmup_gap_days" in rec.getMessage() for rec in caplog.records)
+
+
+def _write_ohlcv_1h(root, symbol, stamps, closes) -> None:
+    from pathlib import Path
+
+    d = Path(root) / "1h"
+    d.mkdir(parents=True, exist_ok=True)
+    import pandas as pd
+
+    pd.DataFrame(
+        {"timestamp": [int(s.value // 1_000_000) for s in stamps], "close": list(closes)},
+    ).to_parquet(d / f"{symbol}.parquet", index=False)
+
+
+def test_decision_ohlcv_close_uses_prior_completed_close(tmp_path) -> None:
+    """Only the 23:00 close sizes the 00:00 decision."""
+    import pandas as pd
+
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    stamps = [dt - pd.Timedelta(hours=2), dt - pd.Timedelta(hours=1), dt]
+    _write_ohlcv_1h(tmp_path, "AAAUSDT", stamps, [10.0, 11.0, 12.0])
+    row = decision_ohlcv_close_row(["AAAUSDT"], dt, lambda s: tmp_path / "1h" / f"{s}.parquet")
+    assert row.to_dict() == {"AAAUSDT": 11.0}
+    assert row.name == dt
+    assert row.dtype == "float64"
+
+
+def test_decision_ohlcv_close_missing_active_symbol_blocks(tmp_path) -> None:
+    """A missing prior close for a nonzero target blocks publication."""
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    _write_ohlcv_1h(tmp_path, "AAAUSDT", [dt - pd.Timedelta(hours=1)], [11.0])
+    with pytest.raises(DataIntegrityError, match="missing"):
+        decision_ohlcv_close_row(["AAAUSDT", "BBBUSDT"], dt, lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def test_decision_ohlcv_close_rejects_unreadable_file(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    (tmp_path / "1h").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "1h" / "AAAUSDT.parquet").write_bytes(b"not a parquet")
+    with pytest.raises(DataIntegrityError, match="unreadable"):
+        decision_ohlcv_close_row(["AAAUSDT"], dt, lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def test_decision_ohlcv_close_rejects_malformed_columns(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    (tmp_path / "1h").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"timestamp": [1]}).to_parquet(tmp_path / "1h" / "AAAUSDT.parquet", index=False)
+    with pytest.raises(DataIntegrityError, match="malformed"):
+        decision_ohlcv_close_row(["AAAUSDT"], dt, lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def test_decision_ohlcv_close_rejects_missing_bar(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    _write_ohlcv_1h(tmp_path, "AAAUSDT", [dt], [12.0])
+    with pytest.raises(DataIntegrityError, match="bar_missing"):
+        decision_ohlcv_close_row(["AAAUSDT"], dt, lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def test_decision_ohlcv_close_rejects_duplicate_timestamp(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    prior = dt - pd.Timedelta(hours=1)
+    _write_ohlcv_1h(tmp_path, "AAAUSDT", [prior, prior], [11.0, 11.5])
+    with pytest.raises(DataIntegrityError, match="duplicate"):
+        decision_ohlcv_close_row(["AAAUSDT"], dt, lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def test_decision_ohlcv_close_rejects_non_positive_close(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    _write_ohlcv_1h(tmp_path, "AAAUSDT", [dt - pd.Timedelta(hours=1)], [0.0])
+    with pytest.raises(DataIntegrityError, match="invalid"):
+        decision_ohlcv_close_row(["AAAUSDT"], dt, lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def test_decision_ohlcv_close_rejects_non_finite_close(tmp_path) -> None:
+    import math
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    dt = pd.Timestamp("2026-09-05", tz="UTC")
+    _write_ohlcv_1h(tmp_path, "AAAUSDT", [dt - pd.Timedelta(hours=1)], [math.inf])
+    with pytest.raises(DataIntegrityError, match="invalid"):
+        decision_ohlcv_close_row(["AAAUSDT"], dt, lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def test_decision_ohlcv_close_rejects_naive_decision_time(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    with pytest.raises(DataIntegrityError, match="tz-aware"):
+        decision_ohlcv_close_row(["AAAUSDT"], pd.Timestamp("2026-09-05"), lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def test_decision_ohlcv_close_rejects_off_grid_decision_time(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_signal_step import decision_ohlcv_close_row
+
+    with pytest.raises(DataIntegrityError, match="24h grid"):
+        decision_ohlcv_close_row(["AAAUSDT"], pd.Timestamp("2026-09-05 03:00", tz="UTC"), lambda s: tmp_path / "1h" / f"{s}.parquet")
+
+
+def _advance_params_for_date(d1):
+    import dataclasses
+
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_strategy import LiveStrategyParams
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    policy = build_deployment_policy(request, slow_horizon_hours=168, committee_member_weights={"m": 1.0}, admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0)
+    return LiveStrategyParams(schema_version=2, strategy_digest="d", backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")), created_at=pd.Timestamp("2026-09-01", tz="UTC"), policy=policy, bootstrap_sha256="a" * 64, bootstrap_held_row={})
+
+
+def test_advance_publishes_flat_symbol_without_price(tmp_path, monkeypatch) -> None:
+    """A zero target with no price does not block active symbols."""
+    import pandas as pd
+    import src.mhs.live_signal_step as module
+    from src.live.deployed_weights import decision_ohlcv_close_path, load_weights_frame
+    from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime
+
+    d1 = pd.Timestamp("2026-09-05", tz="UTC")
+    params = _advance_params_for_date(d1)
+    runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=d1 - pd.Timedelta(days=1), held_target_row={}, reference_daily_returns=pd.Series(dtype="float64"))
+    _write_ohlcv_1h(tmp_path / "mkt", "AAAUSDT", [d1 - pd.Timedelta(hours=1)], [11.0])
+
+    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
+        return pd.Series({"AAAUSDT": 0.2, "BBBUSDT": 0.0}, name=date), pd.Series({"AAAUSDT": 0.1, "BBBUSDT": 0.0}, name=date), 2.0
+
+    monkeypatch.setattr(module, "compute_signal_row", fake_compute)
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    new_rt, appended, _scalar = module.advance_to_date(params, runtime, weights_path, str(tmp_path / "mkt"), d1)
+    assert appended == 1
+    close_frame = load_weights_frame(decision_ohlcv_close_path(weights_path))
+    assert list(close_frame.columns) == ["AAAUSDT"]
+    assert float(close_frame.loc[d1, "AAAUSDT"]) == 11.0
+
+
+def test_advance_ignores_mark_files(tmp_path, monkeypatch) -> None:
+    """Missing or mutated Mark files leave OHLCV artifacts unchanged."""
+    import pandas as pd
+    import src.market_data.services.futures_collection as fc
+    import src.mhs.live_signal_step as module
+    from src.live.deployed_weights import decision_ohlcv_close_path, load_weights_frame
+    from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime
+
+    d1 = pd.Timestamp("2026-09-05", tz="UTC")
+    params = _advance_params_for_date(d1)
+
+    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
+        return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
+
+    monkeypatch.setattr(module, "compute_signal_row", fake_compute)
+    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: (_ for _ in ()).throw(AssertionError("mark must not be read")))
+    (tmp_path / "markPriceKlines" / "1h").mkdir(parents=True)
+    pd.DataFrame({"timestamp": [0], "close": [999.0]}).to_parquet(tmp_path / "markPriceKlines" / "1h" / "AAAUSDT.parquet", index=False)
+
+    frames = []
+    for run in ("a", "b"):
+        root = tmp_path / run
+        _write_ohlcv_1h(root / "mkt", "AAAUSDT", [d1 - pd.Timedelta(hours=1)], [11.0])
+        runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=d1 - pd.Timedelta(days=1), held_target_row={}, reference_daily_returns=pd.Series(dtype="float64"))
+        weights_path = root / "deployed_target_weights.parquet"
+        new_rt, appended, _scalar = module.advance_to_date(params, runtime, weights_path, str(root / "mkt"), d1)
+        assert appended == 1
+        frames.append((
+            load_weights_frame(weights_path).to_dict(),
+            load_weights_frame(decision_ohlcv_close_path(weights_path)).to_dict(),
+        ))
+    assert frames[0] == frames[1]
+    first_close = load_weights_frame(decision_ohlcv_close_path(tmp_path / "a" / "deployed_target_weights.parquet"))
+    assert float(first_close.loc[d1, "AAAUSDT"]) == 11.0
+
+
+def test_advance_catchup_branch_close_parity(tmp_path, monkeypatch) -> None:
+    """Normal and long-gap catchup branches share decision-close semantics."""
+    import pandas as pd
+    import src.mhs.live_signal_step as module
+    from src.live.deployed_weights import decision_ohlcv_close_path, load_weights_frame
+    from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime
+
+    d1 = pd.Timestamp("2026-09-05", tz="UTC")
+    params = _advance_params_for_date(d1)
+
+    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
+        return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
+
+    monkeypatch.setattr(module, "compute_signal_row", fake_compute)
+    closes = {}
+    for run, last in (("normal", d1 - pd.Timedelta(days=1)), ("gap", d1 - pd.Timedelta(days=40))):
+        root = tmp_path / run
+        _write_ohlcv_1h(root / "mkt", "AAAUSDT", [d1 - pd.Timedelta(hours=1)], [11.0])
+        runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=last, held_target_row={}, reference_daily_returns=pd.Series(dtype="float64"))
+        weights_path = root / "deployed_target_weights.parquet"
+        kwargs = {} if run == "normal" else {"max_catchup_days": 30}
+        _rt, appended, _scalar = module.advance_to_date(params, runtime, weights_path, str(root / "mkt"), d1, **kwargs)
+        assert appended == 1
+        closes[run] = load_weights_frame(decision_ohlcv_close_path(weights_path))
+    pd.testing.assert_frame_equal(closes["normal"], closes["gap"])
+
+
+def test_advance_uses_canonical_ohlcv_root_when_data_root_empty(tmp_path, monkeypatch) -> None:
+    """An empty data_root resolves closes from the canonical OHLCV root."""
+    import pandas as pd
+    import src.common.paths as paths_mod
+    import src.mhs.live_signal_step as module
+    from src.live.deployed_weights import decision_ohlcv_close_path, load_weights_frame
+    from src.mhs.live_runtime import SCHEMA_VERSION, LiveRuntime
+
+    d1 = pd.Timestamp("2026-09-05", tz="UTC")
+    params = _advance_params_for_date(d1)
+    runtime = LiveRuntime(schema_version=SCHEMA_VERSION, params_digest="d", last_decision_date=d1 - pd.Timedelta(days=1), held_target_row={}, reference_daily_returns=pd.Series(dtype="float64"))
+    _write_ohlcv_1h(tmp_path / "canon", "AAAUSDT", [d1 - pd.Timedelta(hours=1)], [13.0])
+    monkeypatch.setattr(paths_mod, "ohlcv_path", lambda symbol, timeframe: tmp_path / "canon" / timeframe / f"{symbol}.parquet")
+
+    def fake_compute(p, rt, root, date, *, portfolio_state_dir=None, mode="shadow", applied_scale=None, quarantine=None):
+        return pd.Series({"AAAUSDT": 0.2}, name=date), pd.Series({"AAAUSDT": 0.1}, name=date), 2.0
+
+    monkeypatch.setattr(module, "compute_signal_row", fake_compute)
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    _rt, appended, _scalar = module.advance_to_date(params, runtime, weights_path, "", d1)
+    assert appended == 1
+    close_frame = load_weights_frame(decision_ohlcv_close_path(weights_path))
+    assert float(close_frame.loc[d1, "AAAUSDT"]) == 13.0
