@@ -87,6 +87,10 @@ def _windowed_weights(
     window: TrainingWindowSpec,
     names: list[str],
 ) -> tuple[pd.Series, pd.Timestamp | None, int, pd.Timestamp | None, pd.Timestamp | None]:
+    """Produce one policy's member allocation from labels mature at the refit cutoff.
+    A rolling estimator is admissible only after its complete registered calendar
+    window and the registered complete-label minimum are both present.
+    """
     if window.kind == "equal_member":
         train = select_matured_training_returns(member_evidence, fit_cutoff=point.train_end)
         weights = pd.Series(1.0 / len(names), index=names)
@@ -95,6 +99,18 @@ def _windowed_weights(
     if window.kind == "rolling" and window.months is not None:
         train_start = pd.Timestamp(point.train_end - pd.DateOffset(months=int(window.months)))
     train = select_matured_training_returns(member_evidence, fit_cutoff=point.train_end, train_start=train_start)
+    if window.kind == "rolling" and window.months is not None:
+        assert train_start is not None
+        common = member_evidence.known.to_numpy(dtype=bool).all(axis=1)
+        common_pos = np.flatnonzero(common)
+        span_ok = bool(
+            len(common_pos)
+            and pd.Timestamp(member_evidence.label_start[common_pos[0]]) <= train_start
+        )
+        if not span_ok or len(train) < PROCESS_MIN_TRAIN_DAYS:
+            return (pd.Series(0.0, index=names), train_start, len(train), None, None)
+    elif len(train) < PROCESS_MIN_TRAIN_DAYS:
+        return (pd.Series(0.0, index=names), train_start, len(train), None, None)
     if len(train) < 2:
         return (pd.Series(0.0, index=names), train_start, len(train), None, None)
     weights = long_only_growth_weights(estimation_adjusted_mean(train), ledoit_wolf_covariance(train))
@@ -130,6 +146,9 @@ def run_process_paths(
     Fit only complete labels available at each refit information cutoff and carry
     the exact signal-publication clock with the resulting path. Legacy omissions
     are explicitly provisional and cannot establish label-maturity certification.
+    Legacy member-return calculations and maturity-aware fitting both use
+    post-smoothing execution availability, so no estimator receives economics for
+    a position that the executable target path would have removed.
 
     Args:
         data: Corrected causal features and registered candidate books.
@@ -203,14 +222,23 @@ def run_process_paths(
         name: smoothed_book_path(data.member_books[name], pd.Series(rate, index=data.member_books[name].index))
         for name in names
     }
-    member_net = pd.DataFrame(
-        {
-            name: step_proxy_net_returns(smoothed_members[name], data.log_close_step, data.funding_step, decision_bps)
-            for name in names
-        }
-    )
+    masked_members = {
+        name: apply_process_execution_availability(book, data.execution_mask)
+        for name, book in smoothed_members.items()
+    }
     del smoothed_members
-    step = member_net.index[1] - member_net.index[0]
+    member_net: pd.DataFrame | None = None
+    step: pd.Timedelta | None = None
+    if member_evidence is None:
+        member_net = pd.DataFrame(
+            {
+                name: step_proxy_net_returns(masked_members[name], data.log_close_step, data.funding_step, decision_bps)
+                for name in names
+            }
+        )
+    del masked_members
+    if member_net is not None:
+        step = member_net.index[1] - member_net.index[0]
     oos_start = schedule[0].effective_from
     oos_end = schedule[-1].effective_to
     oos_days = data.decision_grid[(data.decision_grid >= oos_start) & (data.decision_grid < oos_end)]
@@ -264,6 +292,8 @@ def run_process_paths(
                             estimation_adjusted_mean(train), ledoit_wolf_covariance(train)
                         )
         else:
+            assert member_net is not None
+            assert step is not None
             train_rows = member_net.index[member_net.index + step <= point.train_end]
             train = member_net.loc[train_rows]
             weights = long_only_growth_weights(estimation_adjusted_mean(train), ledoit_wolf_covariance(train))
@@ -373,14 +403,17 @@ def build_inner_policy_evidence(
     risk_sizing: ProcessRiskSizingSpec | None,
     memory_budget: MhsMemoryBudget | None,
 ) -> dict[str, InnerPolicyEvidence]:
-    """Materialize each registered chronological policy trajectory once for later prefix-only nested comparisons.
+    """Materialize each registered policy as one chronological hourly proxy path using
+    the same combination, smoothing, availability, costs and sizing contracts as
+    the selected outer path. The result is comparative proxy evidence only and
+    never execution-native deployment evidence.
 
     Args:
         data: Canonical causal books and publication clocks.
         member_evidence: Complete maturity-tagged member training labels.
         clock: Frozen decision and fitting clock.
         selection_spec: Fixed estimator/control pool and evidence requirements.
-        decision_bps: Registered screening friction used by every trial.
+        decision_bps: Registered decision cost shared by every trial.
         leverage_cap: Existing registered exposure ceiling.
         execution_policy: Same registered adoption policy for every trial.
         risk_sizing: Explicit named sizing mode shared by every trial.
@@ -391,16 +424,16 @@ def build_inner_policy_evidence(
     Raises:
         DataIntegrityError: Chronology, provenance, financial state or resources fail.
     """
-    del decision_bps, leverage_cap, execution_policy, risk_sizing
     budget = _process_memory_budget(memory_budget)
     initial_swap_bytes = _current_tree_swap_bytes()
     names = list(data.member_books.keys())
     if list(member_evidence.returns.columns) != names:
         raise DataIntegrityError("member evidence must cover the declared candidate books exactly")
-    decisions = member_evidence.returns.index
     _admit_process_stage(
         stage="process_inner_evidence",
-        estimated_bytes=_estimate_panel_bytes(len(decisions), len(names), len(selection_spec.policies)),
+        estimated_bytes=_estimate_panel_bytes(
+            len(member_evidence.returns), len(names), len(selection_spec.policies)
+        ),
         budget=budget,
         replay=False,
         initial_swap_bytes=initial_swap_bytes,
@@ -411,46 +444,90 @@ def build_inner_policy_evidence(
         min_train_days=PROCESS_MIN_TRAIN_DAYS,
         fit_latency=clock.fit_latency,
     )
-    first_label = pd.Timestamp(member_evidence.label_start[0])
+    common = member_evidence.known.to_numpy(dtype=bool).all(axis=1)
+    common_pos = np.flatnonzero(common)
+    minimum_ready_at = pd.Timestamp(member_evidence.available_at[common_pos[PROCESS_MIN_TRAIN_DAYS - 1]])
+    label_days = member_evidence.returns.index
+    grid_positions = data.decision_grid.get_indexer(label_days)
+    if bool((grid_positions < 0).any()):
+        raise DataIntegrityError("inner evidence labels must lie on the decision grid")
+    symbols = list(data.member_books[names[0]].columns)
+    if list(data.log_close_step.columns) != symbols or list(data.funding_step.columns) != symbols:
+        raise DataIntegrityError("inner evidence requires symbol-aligned market economics")
+    log_values = data.log_close_step.to_numpy(dtype="float64")
+    fund_values = data.funding_step.to_numpy(dtype="float64")
+    knowledge = data.funding_known_1h
+    if knowledge is None:
+        raise DataIntegrityError("inner evidence requires aligned observed funding knowledge")
+    known_frame = knowledge.reindex(columns=symbols)
+    if bool(known_frame.isna().to_numpy().any()):
+        raise DataIntegrityError("inner evidence requires funding knowledge for every held symbol")
+    known_values = known_frame.to_numpy(dtype=bool)
+    hourly_stamps = knowledge.index.to_numpy()
+    decision_stamps = data.decision_grid.to_numpy()
     out: dict[str, InnerPolicyEvidence] = {}
     for window in selection_spec.policies:
-        if window.kind == "rolling" and window.months is not None:
-            ready = pd.Timestamp(first_label + pd.DateOffset(months=int(window.months)))
-        else:
-            ready = pd.Timestamp(first_label + pd.Timedelta(days=PROCESS_MIN_TRAIN_DAYS))
-        rets: list[float] = []
-        turns: list[float] = []
-        valids: list[bool] = []
-        stamps: list[pd.Timestamp] = []
+        (path,) = run_process_paths(
+            data,
+            schedule,
+            decision_bps=decision_bps,
+            evaluation_bps=(decision_bps,),
+            leverage_cap=leverage_cap,
+            execution_policy=execution_policy,
+            risk_sizing=risk_sizing,
+            memory_budget=memory_budget,
+            clock=clock,
+            member_evidence=member_evidence,
+            training_window=window,
+        )
         audits: list[InnerFitAudit] = []
-        prev_w: pd.Series | None = None
+        first_live: pd.Timestamp | None = None
         for point in schedule:
-            weights, w_start, n_labels, last_end, last_avail = _windowed_weights(member_evidence, point, window, names)
+            weights, w_start, n_labels, last_end, last_avail = _windowed_weights(
+                member_evidence, point, window, names
+            )
             audits.append(InnerFitAudit(point, w_start, n_labels, last_end, last_avail))
-            step_turn = 0.0 if prev_w is None else float((weights - prev_w).abs().sum())
-            prev_w = weights
-            span = decisions[(decisions >= point.effective_from) & (decisions < point.effective_to)]
-            for stamp in span:
-                row = member_evidence.returns.loc[stamp].to_numpy(dtype="float64")
-                known = bool(member_evidence.known.loc[stamp].to_numpy(dtype=bool).all())
-                if known and bool(np.isfinite(row).all()):
-                    rets.append(float(weights.to_numpy(dtype="float64") @ row))
-                    valids.append(True)
+            if first_live is None and bool((weights.to_numpy(dtype="float64") != 0.0).any()):
+                first_live = pd.Timestamp(point.effective_from)
+        if window.kind == "rolling":
+            ready = first_live if first_live is not None else pd.Timestamp.max.tz_localize("UTC")
+        else:
+            ready = minimum_ready_at
+        oos_days = path.daily_returns.index.intersection(label_days).sort_values()
+        holdings = path.unit_target_weights.reindex(oos_days).to_numpy(dtype="float64")
+        ledger = path.daily_returns.reindex(oos_days).to_numpy(dtype="float64")
+        held = holdings != 0.0
+        row_pos = grid_positions[label_days.get_indexer(oos_days)]
+        forward = np.full_like(holdings, np.nan)
+        has_next = row_pos + 1 < len(data.decision_grid)
+        forward[has_next] = (
+            log_values[row_pos[has_next] + 1] - log_values[row_pos[has_next]]
+        )
+        price_move = np.where(np.isfinite(forward), np.exp(forward) - 1.0, np.nan)
+        price_ok = ((~held) | np.isfinite(price_move)).all(axis=1)
+        fund_row = fund_values[row_pos]
+        fund_ok = ((~held) | np.isfinite(fund_row)).all(axis=1)
+        know_ok = np.ones(len(oos_days), dtype=bool)
+        stamps = oos_days.to_numpy()
+        for pos in range(len(oos_days)):
+            held_cols = np.flatnonzero(held[pos])
+            if held_cols.size:
+                left = int(np.searchsorted(hourly_stamps, stamps[pos], side="right"))
+                if row_pos[pos] + 1 < len(decision_stamps):
+                    right = int(np.searchsorted(hourly_stamps, decision_stamps[row_pos[pos] + 1], side="right"))
                 else:
-                    rets.append(float("nan"))
-                    valids.append(False)
-                turns.append(step_turn)
-                stamps.append(pd.Timestamp(stamp))
-                step_turn = 0.0
-        idx = pd.DatetimeIndex(stamps)
-        avail_pos = member_evidence.returns.index.get_indexer(idx)
-        avail = pd.DatetimeIndex(member_evidence.available_at[avail_pos])
+                    right = left
+                know_ok[pos] = bool(known_values[left:right, held_cols].all()) if right > left else False
+        valid = price_ok & fund_ok & know_ok & np.isfinite(ledger) & (ledger > -1.0)
+        rets = np.where(valid, ledger, np.nan)
+        prev = np.vstack([np.zeros((1, holdings.shape[1])), holdings[:-1]])
+        turns = np.abs(holdings - prev).sum(axis=1)
         out[window.policy_id] = InnerPolicyEvidence(
             window.policy_id,
-            pd.Series(rets, index=idx),
-            avail,
-            pd.Series(turns, index=idx),
-            pd.Series(valids, index=idx),
+            pd.Series(rets, index=oos_days),
+            pd.DatetimeIndex(oos_days + clock.decision_period + clock.bar_completion_lag),
+            pd.Series(turns, index=oos_days),
+            pd.Series(valid, index=oos_days),
             member_evidence.procedure_digest,
             member_evidence.input_manifest_digest,
             "hourly_proxy",

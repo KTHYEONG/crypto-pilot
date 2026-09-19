@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ import pandas as pd
 
 from src.mhs.backtest.contracts import ProcessInventoryBacktestError, ProcessInventoryReport
 from src.mhs.backtest.inventory import evaluate_process_inventory_backtest
+from src.mhs.backtest.paths import baseline_process_procedure
 from src.mhs.params import PROCESS_EVALUATION_CEILING
 from src.mhs.process import ProcessExecutionPolicy
 from src.mhs.reporting.inventory import persist_process_inventory_failure, persist_process_inventory_report
@@ -20,10 +22,17 @@ from src.mhs.resources import MhsMemoryBudget, resolve_mhs_memory_budget
 
 _logger = logging.getLogger(__name__)
 
+_PROCEDURE_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+
 
 @dataclass(frozen=True, slots=True)
 class MhsBacktestRequest:
-    """Inputs and one private fresh domain-result destination for a 3-minute evaluation."""
+    """Inputs and one private fresh domain-result destination for a 3-minute evaluation.
+
+    Carry the supervisor-attested MHS source identity required to construct the
+    canonical typed baseline procedure. A canonical run cannot mix legacy fitting
+    with maturity-aware validation.
+    """
 
     start: pd.Timestamp
     end: pd.Timestamp
@@ -35,6 +44,7 @@ class MhsBacktestRequest:
     evidence_root: Path | None = None
     registry_path: Path | None = None
     run_id: str | None = None
+    procedure_code_digest: str | None = None
 
 
 def _validate_managed_run(registry_path: Path, run_id: str) -> None:
@@ -99,6 +109,15 @@ def validate_mhs_backtest_request(request: MhsBacktestRequest) -> None:
         if not isinstance(request.registry_path, Path):
             raise ValueError(f"registry_path must be a Path or None, got {request.registry_path!r}")
         _validate_managed_run(request.registry_path, request.run_id)
+    digest = request.procedure_code_digest
+    managed_complete = all(item is not None for item in managed)
+    managed_empty = all(item is None for item in managed)
+    if digest is not None and (not isinstance(digest, str) or _PROCEDURE_DIGEST_RE.fullmatch(digest) is None):
+        raise ValueError(f"procedure_code_digest must be a lowercase SHA-256 hex identity, got {digest!r}")
+    if managed_complete and digest is None:
+        raise ValueError("managed canonical run requires procedure_code_digest")
+    if managed_empty and digest is not None:
+        raise ValueError("standalone run must not carry procedure_code_digest")
     candidates: list[tuple[str, Path]] = [("result_output", request.result_output)]
     if request.targets_output is not None:
         candidates.append(("targets_output", request.targets_output))
@@ -129,6 +148,10 @@ def execute_mhs_backtest(request: MhsBacktestRequest) -> ProcessInventoryReport:
     start = request.start.tz_convert("UTC")
     end = request.end.tz_convert("UTC")
     policy = ProcessExecutionPolicy(tracking_error_threshold=request.tracking_error_threshold)
+    if request.procedure_code_digest is not None:
+        procedure = baseline_process_procedure(code_digest=request.procedure_code_digest)
+    else:
+        procedure = None
     try:
         report = evaluate_process_inventory_backtest(
             start,
@@ -136,6 +159,7 @@ def execute_mhs_backtest(request: MhsBacktestRequest) -> ProcessInventoryReport:
             data_root=request.data_root,
             execution_policy=policy,
             memory_budget=resolve_mhs_memory_budget(request.memory_budget),
+            procedure=procedure,
         )
     except ProcessInventoryBacktestError as exc:
         try:

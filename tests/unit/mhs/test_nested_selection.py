@@ -92,7 +92,7 @@ def test_choose_refit_policy_rejects_future_fit() -> None:
     dates = _dates()
     rets = {p.policy_id: np.zeros(len(dates)) for p in POLICIES}
     ev = _evidence(dates, rets)
-    bad_audit = InnerFitAudit(RefitPoint(dates[0], dates[-1], dates[5]), None, 4, dates[9], None)
+    bad_audit = InnerFitAudit(RefitPoint(dates[0], dates[-1] + pd.Timedelta(days=1), dates[5]), None, 4, dates[9], None)
     bad = InnerPolicyEvidence(
         "expanding", pd.Series(np.zeros(len(dates)), index=dates), pd.DatetimeIndex(dates),
         pd.Series(0.01, index=dates), pd.Series(True, index=dates), "p", None,
@@ -109,13 +109,12 @@ def test_choose_refit_policy_rejects_unaudited_inner_trajectory() -> None:
     rets = {p.policy_id: np.zeros(len(dates)) for p in POLICIES}
     ev = _evidence(dates, rets)
     first = ev["expanding"]
-    ev["expanding"] = InnerPolicyEvidence(
-        first.policy_id, first.daily_returns, first.available_at, first.turnover,
-        first.valid, first.procedure_digest, first.input_manifest_digest,
-        first.economic_source, first.prerequisites_ready_at, (),
-    )
-    with pytest.raises(DataIntegrityError, match="requires fit audits"):
-        choose_refit_policy(ev, _point(dates), spec=_spec())
+    with pytest.raises(DataIntegrityError, match="fit audits"):
+        ev["expanding"] = InnerPolicyEvidence(
+            first.policy_id, first.daily_returns, first.available_at, first.turnover,
+            first.valid, first.procedure_digest, first.input_manifest_digest,
+            first.economic_source, first.prerequisites_ready_at, (),
+        )
 
 
 def test_choose_refit_policy_common_coverage() -> None:
@@ -144,9 +143,8 @@ def test_choose_refit_policy_candidate_failure_retained() -> None:
     dates = _dates()
     rets = {p.policy_id: np.zeros(len(dates)) for p in POLICIES}
     rets["rolling_12m"] = np.full(len(dates), np.nan)
-    ev = _evidence(dates, rets)
     with pytest.raises(DataIntegrityError):
-        choose_refit_policy(ev, _point(dates), spec=_spec())
+        _evidence(dates, rets)
 
 
 def test_choose_refit_policy_insufficient_shared_sample() -> None:
@@ -199,7 +197,8 @@ def test_choose_refit_policy_pool_identity_mismatch() -> None:
     ev["rolling_12m"] = InnerPolicyEvidence(
         "rolling_12m", pd.Series(np.zeros(len(dates)), index=dates), pd.DatetimeIndex(dates),
         pd.Series(0.01, index=dates), pd.Series(True, index=dates), "other", None,
-        "hourly_proxy", dates[0], (),
+        "hourly_proxy", dates[0],
+        (InnerFitAudit(RefitPoint(dates[0], dates[-1] + pd.Timedelta(days=1), dates[0]), None, len(dates), None, None),),
     )
     with pytest.raises(DataIntegrityError):
         choose_refit_policy(ev, _point(dates), spec=_spec())
@@ -209,7 +208,7 @@ def test_choose_refit_policy_pool_identity_mismatch() -> None:
 
 
 def test_choose_refit_policy_filters_invalid_future_and_unaudited_dates() -> None:
-    """Losing/invalid days, future availability and unaudited dates share one date set."""
+    """Losing/invalid days and future availability share one date set; audit gaps raise."""
     dates = _dates(20)
     rets = {p.policy_id: np.zeros(len(dates)) for p in POLICIES}
     ev = _evidence(dates, rets)
@@ -222,22 +221,23 @@ def test_choose_refit_policy_filters_invalid_future_and_unaudited_dates() -> Non
     )
     roller = ev["rolling_12m"]
     future_avail = list(roller.available_at)
-    future_avail[6] = dates[-1] + pd.Timedelta(days=30)
+    future_avail[-1] = dates[-1] + pd.Timedelta(days=30)
     avail = pd.DatetimeIndex(future_avail)
     ev["rolling_12m"] = InnerPolicyEvidence(
         "rolling_12m", roller.daily_returns, avail, roller.turnover,
         roller.valid, "p", None, "hourly_proxy", dates[0], roller.fit_audits,
     )
+    choice = choose_refit_policy(ev, _point(dates), spec=_spec(minimum_inner_labels=3))
+    assert choice.n_inner_labels == 18
+    assert choice.inner_start == dates[0]
+    assert choice.inner_end == dates[-2]
     narrow_audit = InnerFitAudit(RefitPoint(dates[0], dates[10], dates[0]), None, 10, None, None)
     old_24 = ev["rolling_24m"]
-    ev["rolling_24m"] = InnerPolicyEvidence(
-        "rolling_24m", old_24.daily_returns, old_24.available_at, old_24.turnover,
-        old_24.valid, "p", None, "hourly_proxy", dates[0], (narrow_audit,),
-    )
-    choice = choose_refit_policy(ev, _point(dates), spec=_spec(minimum_inner_labels=3))
-    assert choice.n_inner_labels == 8
-    assert choice.inner_start == dates[0]
-    assert choice.inner_end == dates[9]
+    with pytest.raises(DataIntegrityError, match="exactly once"):
+        ev["rolling_24m"] = InnerPolicyEvidence(
+            "rolling_24m", old_24.daily_returns, old_24.available_at, old_24.turnover,
+            old_24.valid, "p", None, "hourly_proxy", dates[0], (narrow_audit,),
+        )
 
 
 def test_choose_refit_policy_rejects_non_datetime_index() -> None:
@@ -247,12 +247,165 @@ def test_choose_refit_policy_rejects_non_datetime_index() -> None:
     bad_returns = pd.Series(np.zeros(n))
     ev = _evidence(dates, {p.policy_id: np.zeros(n) for p in POLICIES})
     first = ev["expanding"]
-    ev["expanding"] = InnerPolicyEvidence(
-        "expanding", bad_returns, first.available_at, pd.Series(0.01, index=range(n)),
-        pd.Series(True, index=range(n)), "p", None, "hourly_proxy", dates[0], first.fit_audits,
-    )
     with pytest.raises(DataIntegrityError):
-        choose_refit_policy(ev, _point(dates), spec=_spec())
+        ev["expanding"] = InnerPolicyEvidence(
+            "expanding", bad_returns, first.available_at, pd.Series(0.01, index=range(n)),
+            pd.Series(True, index=range(n)), "p", None, "hourly_proxy", dates[0], first.fit_audits,
+        )
+
+
+def _label_evidence(n_days: int, *, sparse_every: int = 1, seed: int = 11):  # type: ignore[no-untyped-def]
+    from src.mhs.backtest.labels import MaturedMemberReturns
+
+    dates = pd.date_range("2020-01-01", periods=n_days, freq="24h", tz="UTC")
+    rng = np.random.default_rng(seed)
+    members = pd.DataFrame(
+        {
+            "a": np.linspace(0.001, 0.004, len(dates)) + rng.normal(0, 1e-4, len(dates)),
+            "b": rng.normal(0.0005, 0.001, len(dates)),
+        },
+        index=dates,
+    )
+    known = pd.DataFrame(True, index=dates, columns=["a", "b"])
+    if sparse_every > 1:
+        known.iloc[::sparse_every] = True
+        mask = np.ones(len(dates), dtype=bool)
+        mask[::sparse_every] = False
+        known.iloc[mask] = False
+    members = members.where(known.all(axis=1), np.nan)
+    return MaturedMemberReturns(
+        members, known, dates, dates + pd.Timedelta(hours=24),
+        dates + pd.Timedelta(hours=24), "daily_step_proxy", "p", None,
+    )
+
+
+def _refit_at(dates: pd.DatetimeIndex) -> RefitPoint:
+    return RefitPoint(dates[-1] + pd.Timedelta(days=1), dates[-1] + pd.Timedelta(days=31), dates[-1])
+
+
+def test_windowed_weights_short_rolling_history_stays_flat() -> None:
+    """A 24-month policy with fewer than 24 calendar months is never estimated."""
+    from src.mhs.backtest.paths import _windowed_weights
+
+    mev = _label_evidence(400)
+    window = next(p for p in POLICIES if p.policy_id == "rolling_24m")
+    weights, train_start, n_labels, last_end, last_avail = _windowed_weights(
+        mev, _refit_at(mev.returns.index), window, ["a", "b"]
+    )
+    assert bool((weights == 0.0).all())
+    assert train_start is not None
+    assert last_end is None
+    assert last_avail is None
+
+
+def test_windowed_weights_sparse_rolling_history_fails_closed() -> None:
+    """A full calendar span with fewer than the registered labels emits no allocation."""
+    from src.mhs.backtest.paths import _windowed_weights
+    from src.mhs.params import PROCESS_MIN_TRAIN_DAYS
+
+    mev = _label_evidence(800, sparse_every=3)
+    window = next(p for p in POLICIES if p.policy_id == "rolling_24m")
+    weights, train_start, n_labels, _, _ = _windowed_weights(
+        mev, _refit_at(mev.returns.index), window, ["a", "b"]
+    )
+    assert bool((weights == 0.0).all())
+    assert n_labels < PROCESS_MIN_TRAIN_DAYS
+
+
+def test_windowed_weights_dense_rolling_history_estimates() -> None:
+    """A complete calendar window with sufficient labels produces an allocation."""
+    from src.mhs.backtest.paths import _windowed_weights
+
+    mev = _label_evidence(520)
+    window = next(p for p in POLICIES if p.policy_id == "rolling_12m")
+    weights, _, n_labels, last_end, last_avail = _windowed_weights(
+        mev, _refit_at(mev.returns.index), window, ["a", "b"]
+    )
+    assert bool((weights != 0.0).any())
+    assert n_labels >= 2
+    assert last_end is not None
+    assert last_avail is not None
+
+
+def test_inner_evidence_rejects_misindexed_series() -> None:
+    """Equal-length series with different dates, order or availability fail."""
+    dates = _dates()
+    rets = {p.policy_id: np.zeros(len(dates)) for p in POLICIES}
+    ev = _evidence(dates, rets)
+    first = ev["expanding"]
+    shifted = dates + pd.Timedelta(days=1)
+    with pytest.raises(DataIntegrityError):
+        InnerPolicyEvidence(
+            "expanding", pd.Series(np.zeros(len(dates)), index=shifted),
+            first.available_at, first.turnover, first.valid,
+            "p", None, "hourly_proxy", dates[0], first.fit_audits,
+        )
+    with pytest.raises(DataIntegrityError):
+        InnerPolicyEvidence(
+            "expanding", first.daily_returns, first.available_at,
+            pd.Series(0.01, index=dates[::-1]), first.valid,
+            "p", None, "hourly_proxy", dates[0], first.fit_audits,
+        )
+    with pytest.raises(DataIntegrityError):
+        InnerPolicyEvidence(
+            "expanding", first.daily_returns, first.available_at[:-1],
+            first.turnover, first.valid,
+            "p", None, "hourly_proxy", dates[0], first.fit_audits,
+        )
+    with pytest.raises(DataIntegrityError):
+        InnerPolicyEvidence(
+            "expanding", first.daily_returns, first.available_at,
+            first.turnover, first.valid,
+            "p", None, "hourly_proxy", pd.Timestamp("2021-01-01"), first.fit_audits,
+        )
+    with pytest.raises(DataIntegrityError):
+        InnerPolicyEvidence(
+            "expanding", first.daily_returns, first.available_at.tz_localize(None),
+            first.turnover, first.valid,
+            "p", None, "hourly_proxy", dates[0], first.fit_audits,
+        )
+    shuffled_avail = pd.DatetimeIndex(list(first.available_at[::-1]))
+    with pytest.raises(DataIntegrityError):
+        InnerPolicyEvidence(
+            "expanding", first.daily_returns, shuffled_avail,
+            first.turnover, first.valid,
+            "p", None, "hourly_proxy", dates[0], first.fit_audits,
+        )
+
+
+def test_inner_evidence_rejects_bad_readiness_and_nonfinite_known() -> None:
+    """Readiness without a UTC timestamp and non-finite known returns fail."""
+    dates = _dates()
+    rets = {p.policy_id: np.zeros(len(dates)) for p in POLICIES}
+    ev = _evidence(dates, rets)
+    first = ev["expanding"]
+    with pytest.raises(DataIntegrityError, match="prerequisites_ready_at"):
+        InnerPolicyEvidence(
+            "expanding", first.daily_returns, first.available_at, first.turnover,
+            first.valid, "p", None, "hourly_proxy", "2021-01-01", first.fit_audits,  # type: ignore[arg-type]
+        )
+    blown = first.daily_returns.copy()
+    blown.iloc[3] = -1.5
+    with pytest.raises(DataIntegrityError):
+        InnerPolicyEvidence(
+            "expanding", blown, first.available_at, first.turnover,
+            first.valid, "p", None, "hourly_proxy", dates[0], first.fit_audits,
+        )
+
+
+def test_inner_evidence_rejects_overlapping_audits() -> None:
+    """Two audits covering one application date cannot disambiguate the fit."""
+    dates = _dates(20)
+    rets = {p.policy_id: np.zeros(len(dates)) for p in POLICIES}
+    ev = _evidence(dates, rets)
+    first = ev["expanding"]
+    first_audit = InnerFitAudit(RefitPoint(dates[0], dates[10], dates[0]), None, 10, None, None)
+    second_audit = InnerFitAudit(RefitPoint(dates[5], dates[-1] + pd.Timedelta(days=1), dates[5]), None, 10, None, None)
+    with pytest.raises(DataIntegrityError, match="exactly once"):
+        InnerPolicyEvidence(
+            "expanding", first.daily_returns, first.available_at, first.turnover,
+            first.valid, "p", None, "hourly_proxy", dates[0], (first_audit, second_audit),
+        )
 
 
 def test_run_process_paths_control_validation_boundaries() -> None:

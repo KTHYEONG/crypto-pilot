@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -15,8 +16,11 @@ from src.mhs.resources import MhsMemoryBudget
 
 _logger = logging.getLogger(__name__)
 
+_PROCEDURE_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Receive the supervisor-attested source identity and forward it unchanged to the application request; the worker never invents a procedure identity."""
     parser = argparse.ArgumentParser(description="Execute one inventory backtest without recursive supervision.")
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
@@ -30,12 +34,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence-root", default=None)
     parser.add_argument("--registry-path", default=None)
     parser.add_argument("--run-id", default=None)
+    parser.add_argument("--procedure-code-digest", default=None)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """Execute one inventory backtest with visible source-owned diagnostics.
 
+    Receive the supervisor-attested source identity and forward it unchanged to
+    the application request; the worker never invents a procedure identity.
     This subprocess configures its own standard logging because parent CLI
     configuration is not inherited across process execution.
 
@@ -62,6 +69,20 @@ def main(argv: list[str] | None = None) -> int:
             replay_tree_pss_bytes=args.replay_tree_pss_bytes,
             min_available_bytes=args.min_available_bytes,
         )
+        digest = args.procedure_code_digest
+        managed = (args.evidence_root, args.registry_path, args.run_id)
+        managed_complete = all(item is not None for item in managed)
+        managed_empty = all(item is None for item in managed)
+        if digest is not None and (
+            not isinstance(digest, str) or _PROCEDURE_DIGEST_RE.fullmatch(digest) is None
+        ):
+            raise ValueError(f"procedure-code-digest must be a lowercase SHA-256 hex identity, got {digest!r}")
+        if managed_complete and digest is None:
+            raise ValueError("managed canonical worker requires --procedure-code-digest")
+        if managed_empty and digest is not None:
+            raise ValueError("standalone worker must not carry --procedure-code-digest")
+        if not managed_complete and not managed_empty:
+            raise ValueError("managed publication context must be fully provided or all None")
         request = MhsBacktestRequest(
             start=start,
             end=end,
@@ -73,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             evidence_root=Path(args.evidence_root) if args.evidence_root else None,
             registry_path=Path(args.registry_path) if args.registry_path else None,
             run_id=args.run_id,
+            procedure_code_digest=digest,
         )
         _logger.info(
             "[WORKER] status=start start=%s end=%s result_output=%s",

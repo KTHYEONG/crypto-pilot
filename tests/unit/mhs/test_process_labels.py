@@ -695,3 +695,131 @@ def test_evaluate_builds_causal_evidence_with_clock(monkeypatch: pytest.MonkeyPa
     assert report.base.signal_available_at[0] == report.base.target_weights.index[0] + pd.Timedelta(hours=1)
     for refit in report.base.refits:
         assert refit.point.train_end == refit.point.effective_from
+
+
+def test_build_proxy_member_returns_zeroes_smoothed_unavailable_holding() -> None:
+    """Smoothed weight on an unavailable symbol contributes no price, funding or turnover."""
+    import dataclasses
+
+    data = _tiny_data(n_days=45, seed=5)
+    day = data.decision_grid[20]
+    masked = data.execution_mask.copy()
+    masked.loc[day, "S0USDT"] = False
+    base = dataclasses.replace(data, execution_mask=masked)
+    shocked_log = data.log_close_step.copy()
+    shocked_log.loc[data.decision_grid[21], "S0USDT"] += 2.0
+    shocked_fund = data.funding_step.copy()
+    shocked_fund.loc[day, "S0USDT"] += 0.5
+    shocked = dataclasses.replace(
+        base, log_close_step=shocked_log, funding_step=shocked_fund
+    )
+    plain = build_proxy_member_returns(
+        base, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    moved = build_proxy_member_returns(
+        shocked, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    assert bool(plain.known.loc[day, "mom"])
+    assert plain.returns.loc[day, "mom"] == pytest.approx(moved.returns.loc[day, "mom"])
+    assert plain.known.loc[day, "mom"] == moved.known.loc[day, "mom"]
+
+
+def test_build_proxy_member_returns_unknown_on_available_funding_gap() -> None:
+    """Executable holding with a funding knowledge gap stays unknown."""
+    day = _decisions(45)[20]
+    evidence = _evidence(
+        n_days=45, seed=5, known_gap=("S0USDT", day, day + pd.Timedelta(hours=24))
+    )
+    assert not bool(evidence.known.loc[day, "mom"])
+    assert bool(np.isnan(evidence.returns.loc[day, "mom"]))
+
+
+def test_build_proxy_member_returns_ignores_unavailable_funding_gap() -> None:
+    """A knowledge gap on a zeroed unavailable symbol does not poison a flat-complete label."""
+    import dataclasses
+
+    data = _tiny_data(n_days=45, seed=5)
+    day = data.decision_grid[20]
+    masked = data.execution_mask.copy()
+    masked.loc[day, "S0USDT"] = False
+    masked.loc[day, "S1USDT"] = False
+    gapped_known = data.funding_known_1h.copy()
+    gapped_known.loc[
+        (gapped_known.index > day) & (gapped_known.index <= day + pd.Timedelta(hours=24)),
+        "S0USDT",
+    ] = False
+    gapped = dataclasses.replace(data, execution_mask=masked, funding_known_1h=gapped_known)
+    evidence = build_proxy_member_returns(
+        gapped, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    assert bool(evidence.known.loc[day, "mom"])
+    assert bool(np.isfinite(evidence.returns.loc[day, "mom"]))
+
+
+def test_build_proxy_member_returns_unknown_on_executable_price_gap() -> None:
+    """Non-finite forward mark on a nonzero executable holding emits no synthetic return."""
+    import dataclasses
+
+    data = _tiny_data(n_days=45, seed=5)
+    day = data.decision_grid[20]
+    broken_log = data.log_close_step.copy()
+    broken_log.loc[data.decision_grid[21], "S0USDT"] = np.nan
+    broken = dataclasses.replace(data, log_close_step=broken_log)
+    evidence = build_proxy_member_returns(
+        broken, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    assert not bool(evidence.known.loc[day, "mom"])
+    assert bool(np.isnan(evidence.returns.loc[day, "mom"]))
+
+
+def test_build_proxy_member_returns_keeps_flat_executable_label() -> None:
+    """Two consecutive fully unavailable decisions form a known zero observation."""
+    import dataclasses
+
+    data = _tiny_data(n_days=45, seed=5)
+    day = data.decision_grid[20]
+    prev_day = data.decision_grid[19]
+    masked = data.execution_mask.copy()
+    masked.loc[[prev_day, day]] = False
+    flat = dataclasses.replace(data, execution_mask=masked)
+    evidence = build_proxy_member_returns(
+        flat, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    for member in ("mom", "carry"):
+        assert bool(evidence.known.loc[day, member])
+        assert evidence.returns.loc[day, member] == pytest.approx(0.0)
+
+
+def test_build_proxy_member_returns_rejects_bad_execution_mask() -> None:
+    """Misaligned, reordered or nullable masks fail closed."""
+    import dataclasses
+
+    data = _tiny_data(n_days=10)
+    shifted = dataclasses.replace(
+        data, execution_mask=data.execution_mask.shift(1, freq="24h")
+    )
+    with pytest.raises(DataIntegrityError, match="execution_mask"):
+        build_proxy_member_returns(
+            shifted, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+        )
+    reordered = dataclasses.replace(
+        data, execution_mask=data.execution_mask[data.execution_mask.columns[::-1]]
+    )
+    with pytest.raises(DataIntegrityError, match="execution_mask"):
+        build_proxy_member_returns(
+            reordered, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+        )
+    nullable_mask = data.execution_mask.astype("boolean")
+    nullable_mask.iloc[0, 0] = pd.NA
+    nullable = dataclasses.replace(data, execution_mask=nullable_mask)
+    with pytest.raises(DataIntegrityError, match="execution_mask"):
+        build_proxy_member_returns(
+            nullable, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+        )
+    nonbool = dataclasses.replace(
+        data, execution_mask=data.execution_mask.astype("int64")
+    )
+    with pytest.raises(DataIntegrityError, match="execution_mask"):
+        build_proxy_member_returns(
+            nonbool, clock=_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+        )

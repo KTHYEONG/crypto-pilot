@@ -220,9 +220,11 @@ def _registration_request(
     *, start: pd.Timestamp, end: pd.Timestamp, data_root: str | None,
     tracking_error_threshold: float | None, timeout_seconds: float | None, poll_seconds: float,
     memory_budget: MhsMemoryBudget | None = None, execution_timeframe: str = "3m",
+    code_digest: str | None = None,
 ) -> dict[str, JsonValue]:
     """Record lifecycle request provenance without fabricating input content hashes."""
     budget = resolve_mhs_memory_budget(memory_budget)
+    resolved_digest = code_digest if code_digest is not None else _code_identity()
     return {
         "start": start.isoformat(),
         "end": end.isoformat(),
@@ -232,7 +234,7 @@ def _registration_request(
         "timeout_seconds": timeout_seconds,
         "poll_seconds": float(poll_seconds),
         "data_root": data_root,
-        "code_identity": _code_identity(),
+        "code_identity": resolved_digest,
         "memory_budget": {
             "total_tree_pss_bytes": budget.total_tree_pss_bytes,
             "replay_tree_pss_bytes": budget.replay_tree_pss_bytes,
@@ -242,6 +244,7 @@ def _registration_request(
             start=start, end=end, data_root=data_root,
             tracking_error_threshold=tracking_error_threshold,
             memory_budget=budget, execution_timeframe=execution_timeframe,
+            code_digest=resolved_digest,
         ),
     }
 
@@ -249,7 +252,7 @@ def _registration_request(
 def request_fingerprint(
     *, start: pd.Timestamp, end: pd.Timestamp, data_root: str | None,
     tracking_error_threshold: float | None, memory_budget: MhsMemoryBudget | None = None,
-    execution_timeframe: str = "3m",
+    execution_timeframe: str = "3m", code_digest: str | None = None,
 ) -> str:
     """Immutable request fingerprint for equivalent-run reuse.
 
@@ -268,7 +271,7 @@ def request_fingerprint(
         "tracking_error_threshold": tracking_error_threshold,
         "data_root": data_root,
         "data_identity": _data_identity(data_root),
-        "code_identity": _code_identity(),
+        "code_identity": code_digest if code_digest is not None else _code_identity(),
         "memory_budget": {
             "total_tree_pss_bytes": budget.total_tree_pss_bytes,
             "replay_tree_pss_bytes": budget.replay_tree_pss_bytes,
@@ -752,6 +755,9 @@ def run_mhs_process_backtest(
 ) -> MhsSupervisedRun:
     """Execute one 3-minute MHS evaluation and atomically publish its complete outcome.
 
+    Bind the supervised worker to the exact MHS source identity used in run
+    registration so its typed baseline procedure and the lifecycle fingerprint
+    describe the same executable strategy.
     The envelope keeps process completion distinct from financial validity so a
     successful subprocess can never be mistaken for deployable evidence.
     """
@@ -796,10 +802,14 @@ def run_mhs_process_backtest(
         if os.path.lexists(candidate):
             raise ValueError(f"{label} must be fresh: {candidate} already exists")
     budget = resolve_mhs_memory_budget(memory_budget)
+    source_digest = _code_identity()
+    if not isinstance(source_digest, str) or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
+        raise ValueError(f"source identity is unavailable, got {source_digest!r}")
     fingerprint = request_fingerprint(
         start=start, end=end, data_root=data_root,
         tracking_error_threshold=tracking_error_threshold,
         memory_budget=budget,
+        code_digest=source_digest,
     )
     initialize_registry(resolved_registry)
     register_run(
@@ -813,6 +823,7 @@ def run_mhs_process_backtest(
                 tracking_error_threshold=tracking_error_threshold,
                 timeout_seconds=timeout_seconds, poll_seconds=poll_seconds,
                 memory_budget=budget,
+                code_digest=source_digest,
             ),
             managed_directory=result_output.parent,
         ),
@@ -828,6 +839,7 @@ def run_mhs_process_backtest(
         "--evidence-root", str(evidence_root),
         "--registry-path", str(resolved_registry),
         "--run-id", resolved_run_id,
+        "--procedure-code-digest", source_digest,
     ]
     if data_root is not None:
         command += ["--data-root", str(data_root)]

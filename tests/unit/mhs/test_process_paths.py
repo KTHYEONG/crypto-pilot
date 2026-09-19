@@ -663,3 +663,112 @@ def test_proxy_frozen_training_sample_disclosure() -> None:
     assert audits[1]["train_start"] is not None
     assert audits[0]["n_train_labels"] != audits[1]["n_train_labels"]
     assert audits[0]["train_end"] != audits[1]["train_end"]
+
+
+def _mature_clock():  # type: ignore[no-untyped-def]
+    from src.mhs.backtest.labels import ProcessClockSpec
+
+    return ProcessClockSpec(
+        decision_period=pd.Timedelta(hours=24),
+        bar_completion_lag=pd.Timedelta(hours=1),
+        fit_latency=pd.Timedelta(0),
+    )
+
+
+def test_mature_evidence_skips_legacy_member_panel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supplied mature evidence fits without materializing an unmasked legacy panel."""
+    import src.mhs.backtest.paths as bt_paths
+    from src.mhs.backtest.labels import build_proxy_member_returns
+
+    data = _synthetic_data(n_days=500)
+    evidence = build_proxy_member_returns(
+        data, clock=_mature_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    schedule = _schedule(data)
+
+    def _forbidden(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        raise AssertionError("legacy member panel must not be required with mature evidence")
+
+    monkeypatch.setattr(bt_paths, "step_proxy_net_returns", _forbidden)
+    (path,) = run_process_paths(
+        data,
+        schedule,
+        decision_bps=8.0,
+        evaluation_bps=(8.0,),
+        leverage_cap=2.0,
+        clock=_mature_clock(),
+        member_evidence=evidence,
+    )
+    assert path.clock_mode == "matured_labels"
+
+
+def test_legacy_and_mature_availability_agree() -> None:
+    """Both routes remove an unavailable holding before economics are evaluated."""
+    import dataclasses
+
+    from src.mhs.backtest.labels import build_proxy_member_returns
+
+    data = _synthetic_data(n_days=500)
+    cutoff = data.decision_grid[60]
+    masked = data.execution_mask.copy()
+    masked.loc[masked.index >= cutoff, "S00USDT"] = False
+    base = dataclasses.replace(data, execution_mask=masked)
+    shock_day = data.decision_grid[data.decision_grid.get_loc(cutoff) + 1]
+    shocked_log = base.log_close_step.copy()
+    shocked_log.loc[shock_day, "S00USDT"] += 1.5
+    shocked_fund = base.funding_step.copy()
+    shocked_fund.loc[cutoff, "S00USDT"] += 0.25
+    shocked = dataclasses.replace(base, log_close_step=shocked_log, funding_step=shocked_fund)
+    schedule = _schedule(base)
+    plain_labels = build_proxy_member_returns(
+        base, clock=_mature_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    moved_labels = build_proxy_member_returns(
+        shocked, clock=_mature_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    pd.testing.assert_frame_equal(plain_labels.returns, moved_labels.returns)
+    pd.testing.assert_frame_equal(
+        plain_labels.known.astype(bool), moved_labels.known.astype(bool)
+    )
+    plain_path = run_process_paths(
+        base, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0
+    )[0]
+    moved_path = run_process_paths(
+        shocked, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0
+    )[0]
+    pd.testing.assert_frame_equal(plain_path.target_weights, moved_path.target_weights)
+
+
+def test_final_target_zero_when_newly_unavailable() -> None:
+    """A newly unavailable symbol is exactly zero after smoothing and adoption."""
+    import dataclasses
+
+    data = _synthetic_data(n_days=500)
+    schedule = _schedule(data)
+    masked = data.execution_mask.copy()
+    masked.loc[masked.index >= schedule[0].effective_from, "S00USDT"] = False
+    gated = dataclasses.replace(data, execution_mask=masked)
+    (path,) = run_process_paths(
+        gated, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0
+    )
+    oos = path.unit_target_weights.index >= schedule[0].effective_from
+    assert bool((path.unit_target_weights.loc[oos, "S00USDT"] == 0.0).all())
+    assert bool((path.target_weights.loc[oos, "S00USDT"] == 0.0).all())
+
+
+def test_common_mature_rows_meet_minimum_without_imputation() -> None:
+    """Well-formed executable labels retain the registered minimum of common mature rows."""
+    from src.mhs.backtest.labels import build_proxy_member_returns, select_matured_training_returns
+    from src.mhs.params import PROCESS_MIN_TRAIN_DAYS
+
+    data = _synthetic_data(n_days=500)
+    evidence = build_proxy_member_returns(
+        data, clock=_mature_clock(), one_way_bps=8.0, procedure_digest="p", input_manifest_digest=None
+    )
+    common = evidence.known.to_numpy(dtype=bool).all(axis=1)
+    assert int(common.sum()) >= int(PROCESS_MIN_TRAIN_DAYS)
+    picked = select_matured_training_returns(evidence, fit_cutoff=evidence.available_at[-1])
+    assert len(picked) >= int(PROCESS_MIN_TRAIN_DAYS)
+    unknown = ~evidence.known.to_numpy(dtype=bool)
+    values = evidence.returns.to_numpy(dtype="float64")
+    assert bool(np.isnan(values[unknown]).all())

@@ -11,6 +11,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.mhs.backtest.contracts import ProcessMarketData
+from src.mhs.backtest.market_data import apply_process_execution_availability
 from src.mhs.params import PROCESS_SMOOTHING_HALFLIFE_DAYS
 from src.mhs.process import RefitPoint, ema_smoothing_rate, smoothed_book_path
 
@@ -92,7 +93,10 @@ def build_proxy_member_returns(
     procedure_digest: str,
     input_manifest_digest: str | None,
 ) -> MaturedMemberReturns:
-    """Construct explicitly provisional member evidence on the decision publication clock.
+    """Construct provisional daily member labels from the same causally executable
+    holdings used by process targets. Smoothing may retain stale weights, so each
+    decision's execution availability is re-applied before turnover, funding,
+    price and maturity evidence are evaluated.
 
     Args:
         data: Canonical published features, candidate books and observed funding knowledge.
@@ -133,6 +137,13 @@ def build_proxy_member_returns(
     knowledge = data.funding_known_1h
     if knowledge is None or list(knowledge.columns) != symbols:
         raise DataIntegrityError("member evidence requires aligned observed funding knowledge")
+    mask = data.execution_mask
+    if not mask.index.equals(decisions) or list(mask.columns) != symbols:
+        raise DataIntegrityError("execution_mask must share decision labels and symbol order")
+    if bool((mask.dtypes.apply(lambda dt: dt.kind != "b")).any()):
+        raise DataIntegrityError("execution_mask must be boolean")
+    if bool(mask.isna().to_numpy().any()):
+        raise DataIntegrityError("execution_mask must not be missing")
     rate = ema_smoothing_rate(PROCESS_SMOOTHING_HALFLIFE_DAYS)
     logv = data.log_close_step.to_numpy(dtype="float64")
     fundv = data.funding_step.to_numpy(dtype="float64")
@@ -150,9 +161,10 @@ def build_proxy_member_returns(
     flags: dict[str, np.ndarray] = {}
     for name, book in books.items():
         smoothed = smoothed_book_path(book, pd.Series(rate, index=book.index))
-        entry = smoothed.to_numpy(dtype="float64")[:-1]
+        executable = apply_process_execution_availability(smoothed, mask)
+        entry = executable.to_numpy(dtype="float64")[:-1]
         held = entry != 0.0
-        usable = (held | np.isfinite(price_move)).all(axis=1) & (held | np.isfinite(fundv[:-1])).all(axis=1)
+        usable = ((~held) | np.isfinite(price_move)).all(axis=1) & ((~held) | np.isfinite(fundv[:-1])).all(axis=1)
         prev = np.vstack([np.zeros((1, entry.shape[1])), entry[:-1]])
         turnover = np.abs(entry - prev).sum(axis=1)
         raw = (entry * safe_price).sum(axis=1) - (entry * safe_fund).sum(axis=1) - cost_rate * turnover
