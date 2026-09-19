@@ -12,6 +12,12 @@ from typing import Any
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.mhs.backtest.journal import (
+    ProcessEvaluationPlan,
+    consulted_process_horizon,
+    persist_process_registration,
+    process_procedure_digest,
+)
 from src.mhs.params import DISCOVERY_START, MHS_FINAL_OOS_CUTOFF_2026H1
 from src.mhs.run_history import (
     _DEFAULT_HISTORY_DIR,
@@ -193,6 +199,46 @@ def register_procedure(
             "frozen_at": now_utc.isoformat(), "data_horizon": horizon.isoformat(),
             "procedure": registration.procedure})
     return registration
+
+
+def register_process_procedure(
+    plan: ProcessEvaluationPlan,
+    *,
+    now: pd.Timestamp,
+    journal_path: Path,
+    legacy_history_dir: Path = _DEFAULT_HISTORY_DIR,
+    legacy_registry_path: Path = PROCEDURE_REGISTRY_PATH,
+) -> ProcessEvaluationPlan:
+    """Register a complete process procedure and permitted looks before judging data exists.
+
+    Args:
+        plan: Strict process definition, fixed family budget and future look schedule.
+        now: Trusted UTC registration time.
+        journal_path: Durable process research journal.
+        legacy_history_dir: Existing consulted research history, when retained.
+        legacy_registry_path: Existing forward registration/evaluation history.
+    Returns:
+        An immutable plan referencing the persisted process registration identity.
+    Raises:
+        ValueError: ``now`` is naive.
+        DataIntegrityError: Procedure/family identity, consultation history or future schedule conflicts.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be tz-aware")
+    if process_procedure_digest(plan.procedure) != plan.procedure_digest:
+        raise DataIntegrityError("procedure digest does not match the frozen definition")
+    now_utc = now.tz_convert("UTC")
+    floor = consulted_data_horizon(legacy_history_dir, legacy_registry_path)
+    journal_floor = consulted_process_horizon(journal_path)
+    if journal_floor > floor:
+        floor = journal_floor
+    if now_utc <= floor:
+        raise DataIntegrityError("registration clock precedes consulted data horizon")
+    if plan.role == "forward" and (
+        plan.judging_start is None or not plan.judging_start.tz_convert("UTC") > now_utc
+    ):
+        raise DataIntegrityError("forward judging schedule must follow registration")
+    return persist_process_registration(journal_path, plan, now=now_utc)
 
 
 def record_forward_evaluation(

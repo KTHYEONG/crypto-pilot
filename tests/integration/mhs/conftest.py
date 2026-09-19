@@ -12,11 +12,16 @@ from src.mhs import scaling
 from src.mhs import statistics
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from tests.integration.mhs.test_mhs_horizon_diagnostic import (
-    DEV_SYMBOLS,
-    START,
-    _write_mhs_market,
-)
+
+
+def _load_horizon_diagnostic_helpers():
+    from tests.integration.mhs.test_mhs_horizon_diagnostic import (
+        DEV_SYMBOLS,
+        START,
+        _write_mhs_market,
+    )
+
+    return DEV_SYMBOLS, START, _write_mhs_market
 
 
 from types import SimpleNamespace
@@ -42,8 +47,9 @@ def _mhs_ample_virtual_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 def synthetic_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
     import src.market_data.services.futures_collection as fc
 
+    dev_symbols, _, write_market = _load_horizon_diagnostic_helpers()
     root = tmp_path_factory.mktemp("mhs_market")
-    end = _write_mhs_market(root, DEV_SYMBOLS)
+    end = write_market(root, dev_symbols)
     originals = {
         "funding_path": marks.funding_path,
         "mark_price_path": fc._mark_price_path,
@@ -69,17 +75,20 @@ def synthetic_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
 
 @pytest.fixture(scope="module")
 def report(synthetic_market):
+    _, start, _ = _load_horizon_diagnostic_helpers()
     root, end = synthetic_market
     return run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(start=str(START), end=str(end), data_root=str(root), execution_timeframe="1m", log_run=False),
+        MhsDiagnosticRequest(start=str(start), end=str(end), data_root=str(root), execution_timeframe="1m", log_run=False),
     )
+
 
 @pytest.fixture(scope="module")
 def touch_report(synthetic_market):
+    _, start, _ = _load_horizon_diagnostic_helpers()
     root, end = synthetic_market
     return run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(
-            start=str(START), end=str(end), data_root=str(root),
+            start=str(start), end=str(end), data_root=str(root),
             execution_timeframe="1m", log_run=False, touch_diagnostic=True,
         ),
     )
@@ -98,6 +107,7 @@ def annualization_report(synthetic_market):
     """
     import src.market_data.services.futures_collection as fc
 
+    _, start, _ = _load_horizon_diagnostic_helpers()
     root, end = synthetic_market
     originals = {
         "funding_path": marks.funding_path,
@@ -110,7 +120,7 @@ def annualization_report(synthetic_market):
     try:
         return run_mhs_horizon_diagnostic(
             MhsDiagnosticRequest(
-                start=str(START), end=str(end), data_root=str(root),
+                start=str(start), end=str(end), data_root=str(root),
                 execution_timeframe="5m", log_run=False,
             ),
         )
@@ -132,6 +142,7 @@ def calibrated_report(synthetic_market):
     from multiprocessing import Manager
     from queue import Empty
 
+    _, start, _ = _load_horizon_diagnostic_helpers()
     root, end = synthetic_market
     # Some constrained CI/sandbox runners deny the socket option used by
     # ``multiprocessing.Manager``.  The diagnostic itself only needs a small
@@ -203,7 +214,7 @@ def calibrated_report(synthetic_market):
     try:
         report = run_mhs_horizon_diagnostic(
             MhsDiagnosticRequest(
-                start=str(START), end=str(end), data_root=str(root),
+                start=str(start), end=str(end), data_root=str(root),
                 execution_timeframe="1m", log_run=False,
             ),
         )

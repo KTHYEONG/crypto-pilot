@@ -145,6 +145,7 @@ def load_base_panel(
     *,
     quarantine: PanelQuarantine | None = None,
     allocation_admission: Callable[[int], None] | None = None,
+    selection_mode: Literal["legacy_window", "causal_history"] = "legacy_window",
 ) -> dict[str, pd.DataFrame]:
     """Read ``<root>/<interval>/<SYMBOL>.parquet`` into wide per-column panels.
 
@@ -154,14 +155,24 @@ def load_base_panel(
     window are kept with NaN outside their life. ``data_policy`` selects the
     input-data contract: ``'legacy'`` keeps every bar, ``'zombie_mask_v1'``
     masks causally-detected zombie (long flat) bars from both the survivor
-    count and every panel column.
+    count and every panel column. Causal-history mode retains source
+    instruments independently of whole-window row counts and endpoint
+    coverage. History qualification occurs at each decision. A physical source
+    roster is not a point-in-time investable universe.
 
     Args:
         allocation_admission: Optional pre-allocation admission of additional dense panel and conversion working memory after source survivor discovery. Rejection preserves source coverage and prevents wide-plane allocation.
+        selection_mode: ``'legacy_window'`` keeps the whole-window survivor
+            filter; ``'causal_history'`` retains instruments with any in-window
+            bar so history qualification stays local to each decision.
 
     Raises:
         DataIntegrityError: Supplied resource admission rejects wide panel construction.
     """
+    if selection_mode not in ("legacy_window", "causal_history"):
+        raise ValueError(f"unknown selection_mode '{selection_mode}'")
+    causal_history = selection_mode == "causal_history"
+    survivor_min_bars = 1 if causal_history else min_bars
     if data_policy not in DATA_POLICIES:
         raise ValueError(f"unknown data_policy '{data_policy}' (shared default {MHS_DATA_POLICY_DEFAULT})")
     data_policy = str(MhsDataPolicy(data_policy))
@@ -211,9 +222,9 @@ def load_base_panel(
         else:
             zombie_tail = False
         idx = idx[keep_rows]
-        if len(idx.drop_duplicates(keep="last")) < min_bars:
+        if len(idx.drop_duplicates(keep="last")) < survivor_min_bars:
             continue
-        if quarantine is not None and not zombie_tail and idx.max() < end and idx.max() >= end - DECISION_BAR_LOOKBACK:
+        if quarantine is not None and not causal_history and not zombie_tail and idx.max() < end and idx.max() >= end - DECISION_BAR_LOOKBACK:
             quarantine.add(sym, "decision_bar_missing")
             scan_quarantined += 1
             continue
