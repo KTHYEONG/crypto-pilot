@@ -114,6 +114,9 @@ class InnerPolicyEvidence:
     fit_audits: tuple[InnerFitAudit, ...]
 
     def __post_init__(self) -> None:
+        """Validate one policy trajectory before chronological comparison so positional
+        alignment, maturity and provenance cannot be substituted by matching lengths.
+        """
         if (
             not isinstance(self.policy_id, str)
             or not self.policy_id
@@ -129,6 +132,44 @@ class InnerPolicyEvidence:
             or len(self.daily_returns) != len(self.valid)
         ):
             raise DataIntegrityError("inner policy evidence is invalid")
+        for series in (self.daily_returns, self.turnover, self.valid):
+            index = series.index
+            if (
+                not isinstance(index, pd.DatetimeIndex)
+                or index.tz is None
+                or str(index.tz) != "UTC"
+                or len(set(index)) != len(index)
+                or not bool(index.is_monotonic_increasing)
+                or not index.equals(self.daily_returns.index)
+            ):
+                raise DataIntegrityError("inner evidence series require unique monotonic UTC labels")
+        if (
+            self.available_at.tz is None
+            or str(self.available_at.tz) != "UTC"
+            or not bool(self.available_at.is_monotonic_increasing)
+        ):
+            raise DataIntegrityError("inner evidence availability must be ordered UTC labels")
+        if not isinstance(self.prerequisites_ready_at, pd.Timestamp):
+            raise DataIntegrityError("inner evidence requires a valid prerequisites_ready_at")
+        ready = self.prerequisites_ready_at
+        if ready.tz is None or str(ready.tz) != "UTC":
+            raise DataIntegrityError("inner evidence requires a valid prerequisites_ready_at")
+        values = self.daily_returns.to_numpy(dtype="float64")
+        flags = self.valid.to_numpy(dtype=bool)
+        if bool(((~np.isfinite(values)) & flags).any()):
+            raise DataIntegrityError("inner evidence retains missing returns only where valid is false")
+        if bool((flags & ~(np.isfinite(values) & (values > -1.0))).any()):
+            raise DataIntegrityError("known inner returns must be finite and exceed minus one")
+        if len(self.daily_returns):
+            if not self.fit_audits:
+                raise DataIntegrityError("inner evidence requires fit audits for every application date")
+            for stamp in self.daily_returns.index:
+                covering = sum(
+                    1 for audit in self.fit_audits
+                    if audit.point.effective_from <= stamp < audit.point.effective_to
+                )
+                if covering != 1:
+                    raise DataIntegrityError("inner evidence audits must cover every date exactly once")
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,11 +269,6 @@ def choose_refit_policy(
                 ok = False
                 break
             if ev.available_at[pos] > cutoff:
-                ok = False
-                break
-            if ev.fit_audits and not any(
-                a.point.effective_from <= stamp < a.point.effective_to for a in ev.fit_audits
-            ):
                 ok = False
                 break
         if ok:
