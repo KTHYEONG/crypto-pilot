@@ -13,21 +13,31 @@ from pathlib import Path
 
 import pytest
 
-from src.mhs import evaluation as ev
+from src.mhs.contracts import (
+    MhsBookReport,
+    MhsDiagnosticRequest,
+    MhsFoldReport,
+    MhsOutputTier,
+    MhsResearchGoResult,
+    MhsResourceMeasurement,
+)
 from src.mhs.discovery import DiscoveryQualificationResult
+from src.mhs.evidence import DeploymentReadinessResult, PhaseDiagnosticResult, TailSensitivityResult
+from src.mhs.report.persist import build_mhs_run_history_record
+from src.mhs.report.schema import MhsHorizonDiagnosticReport
 
 
-def _book(name: str = "slow_momentum") -> ev.MhsBookReport:
-    return ev.MhsBookReport(
+def _book(name: str = "slow_momentum") -> MhsBookReport:
+    return MhsBookReport(
         name=name,
         band="SLOW",
         horizon_hours=168,
         step_hours=6,
         tranche_count=4,
         n_symbols=20,
-        phase=ev.PhaseDiagnosticResult(4, 0.05, 0.5, 0.05, 0.03, 0.07, 0.04, False),
+        phase=PhaseDiagnosticResult(4, 0.05, 0.5, 0.05, 0.03, 0.07, 0.04, False),
         prescreen={},
-        tail=ev.TailSensitivityResult(0.0, 0.0, {}, 1, 0, 0.0, 0.0, 0.0, 0.0),
+        tail=TailSensitivityResult(0.0, 0.0, {}, 1, 0, 0.0, 0.0, 0.0, 0.0),
         primary=None,
         stress=None,
         primary_autocorr_sharpe=0.525674,
@@ -40,10 +50,10 @@ def _book(name: str = "slow_momentum") -> ev.MhsBookReport:
     )
 
 
-def _representative_report() -> ev.MhsHorizonDiagnosticReport:
+def _representative_report() -> MhsHorizonDiagnosticReport:
     slow = _book()
     blend = dataclasses.replace(slow, name="blend")
-    fold = ev.MhsFoldReport(
+    fold = MhsFoldReport(
         fold_index=0,
         validation_start="2021-01-01",
         validation_end="2021-06-30",
@@ -72,7 +82,7 @@ def _representative_report() -> ev.MhsHorizonDiagnosticReport:
             qualification_sign_consistent=None,
         )
     }
-    return ev.MhsHorizonDiagnosticReport(
+    return MhsHorizonDiagnosticReport(
         feature="multi_horizon_market_state",
         status="COMPLETE",
         start="2021-01-01",
@@ -92,7 +102,7 @@ def _representative_report() -> ev.MhsHorizonDiagnosticReport:
         horizon_diagnostics={"realized_vol_48h_mean": 0.091262},
         bootstrap_ci=(-0.0000067, 0.0000277),
         placebo_sharpe_percentile=0.5,
-        deployment_readiness=ev.DeploymentReadinessResult(
+        deployment_readiness=DeploymentReadinessResult(
             0.075649,
             -0.201514,
             0.375412,
@@ -119,7 +129,7 @@ def _representative_report() -> ev.MhsHorizonDiagnosticReport:
         unsupported_assumptions=(),
         anchored_folds=(),
         folds=(fold,),
-        research_go=ev.MhsResearchGoResult(
+        research_go=MhsResearchGoResult(
             eligible=False,
             reason_codes=("PRIMARY_AUTOCORR_SHARPE_BELOW_0_6",),
             evaluated_folds=1,
@@ -132,8 +142,8 @@ def _representative_report() -> ev.MhsHorizonDiagnosticReport:
         execution_symbols=("A",),
         run_elapsed_seconds=394.923,
         resource_measurements=(
-            ev.MhsResourceMeasurement(stage="run", elapsed_ms=100, rss_bytes=9_000_000_000),
-            ev.MhsResourceMeasurement(stage="folds", elapsed_ms=200, rss_bytes=9_483_913_421),
+            MhsResourceMeasurement(stage="run", elapsed_ms=100, rss_bytes=9_000_000_000),
+            MhsResourceMeasurement(stage="folds", elapsed_ms=200, rss_bytes=9_483_913_421),
         ),
         discovery_qualification=discovery,
         realized_execution_roster_size=41.928,
@@ -144,8 +154,8 @@ def _representative_report() -> ev.MhsHorizonDiagnosticReport:
 
 def test_record_round_trips_and_curates_representative_report() -> None:
     report = _representative_report()
-    request = ev.MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
-    record = ev.build_mhs_run_history_record(report, request, ev.MhsOutputTier.FULL, Path("docs/results/x.json"))
+    request = MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    record = build_mhs_run_history_record(report, request, MhsOutputTier.FULL, Path("docs/results/x.json"))
 
     assert json.loads(json.dumps(record)) == record
     assert record["output_tier"] == "full"
@@ -172,9 +182,9 @@ def test_record_includes_data_integrity_reason_codes() -> None:
         data_integrity_reason_codes=("RELEVANT_EXECUTION_DATA_GAP",),
     )
     report = dataclasses.replace(report, research_go=go)
-    request = ev.MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
-    record = ev.build_mhs_run_history_record(
-        report, request, ev.MhsOutputTier.FULL, Path("docs/results/x.json"),
+    request = MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    record = build_mhs_run_history_record(
+        report, request, MhsOutputTier.FULL, Path("docs/results/x.json"),
     )
     assert record["research_go"]["data_integrity_reason_codes"] == [
         "RELEVANT_EXECUTION_DATA_GAP",
@@ -199,7 +209,7 @@ def test_record_omits_optional_fields_without_raising() -> None:
         bootstrap_ci=None,
         resource_measurements=(),
     )
-    record = ev.build_mhs_run_history_record(report, None, ev.MhsOutputTier.COMPACT, None)
+    record = build_mhs_run_history_record(report, None, MhsOutputTier.COMPACT, None)
 
     assert json.loads(json.dumps(record)) == record
     assert record["flags"] is None
@@ -225,12 +235,12 @@ def test_record_includes_committee_diagnostic_when_committee_book() -> None:
     without_committee = dataclasses.replace(
         _representative_report(), committee_diagnostic=None,
     )
-    request = ev.MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
-    record_with = ev.build_mhs_run_history_record(
-        with_committee, request, ev.MhsOutputTier.COMPACT, None,
+    request = MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    record_with = build_mhs_run_history_record(
+        with_committee, request, MhsOutputTier.COMPACT, None,
     )
-    record_without = ev.build_mhs_run_history_record(
-        without_committee, request, ev.MhsOutputTier.COMPACT, None,
+    record_without = build_mhs_run_history_record(
+        without_committee, request, MhsOutputTier.COMPACT, None,
     )
     assert json.loads(json.dumps(record_with)) == record_with
     assert record_with["committee_diagnostic"] == with_committee.committee_diagnostic
@@ -258,12 +268,12 @@ def test_record_includes_holdout_tail_and_parameter_oos_split() -> None:
     without_either = dataclasses.replace(
         _representative_report(), holdout_tail=None, parameter_oos_split=None,
     )
-    request = ev.MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
-    record_with = ev.build_mhs_run_history_record(
-        with_both, request, ev.MhsOutputTier.COMPACT, None,
+    request = MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    record_with = build_mhs_run_history_record(
+        with_both, request, MhsOutputTier.COMPACT, None,
     )
-    record_without = ev.build_mhs_run_history_record(
-        without_either, request, ev.MhsOutputTier.COMPACT, None,
+    record_without = build_mhs_run_history_record(
+        without_either, request, MhsOutputTier.COMPACT, None,
     )
     assert json.loads(json.dumps(record_with)) == record_with
     assert record_with["holdout_tail"] == with_both.holdout_tail
@@ -275,12 +285,13 @@ def test_record_includes_holdout_tail_and_parameter_oos_split() -> None:
 def test_mhs_kelly_z0_history_record_carries_live_policy_snapshot() -> None:
     import json
     from pathlib import Path
-    from src.mhs import evaluation as ev
+    from src.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
     from src.mhs.params import COMMITTEE_KELLY_LCB_Z
+    from src.mhs.report.persist import build_mhs_run_history_record
 
     report = _representative_report()
-    request = ev.MhsDiagnosticRequest(start='2021-01-01', end='2025-12-31')
-    record = ev.build_mhs_run_history_record(report, request, ev.MhsOutputTier.COMPACT, Path('docs/results/x.json'))
+    request = MhsDiagnosticRequest(start='2021-01-01', end='2025-12-31')
+    record = build_mhs_run_history_record(report, request, MhsOutputTier.COMPACT, Path('docs/results/x.json'))
     assert json.loads(json.dumps(record)) == record
     assert record['params_snapshot']['COMMITTEE_KELLY_WINDOW_DAYS'] == 42
     assert record['params_snapshot']['COMMITTEE_KELLY_FRACTION'] == 0.5

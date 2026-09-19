@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 
-from src.mhs.evaluation import MhsDiagnosticRequest
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.cli.commands.research.mhs import add_mhs_commands
 from src.cli.dataclass_args import build_parser_from_dataclass
 
@@ -44,6 +44,8 @@ def _mhs_cli_flags() -> set[str]:
     flags.discard("--deploy-push")
     # 절차 등록 사이드 이펙트 스위치: 플래그 세트를 레지스트리에 동결할 뿐 요청 필드가 아니다.
     flags.discard("--register-procedure")
+    # 실행 식별자는 결과 저장 위치만 결정하며 MHS 요청 경제학을 바꾸지 않는다.
+    flags.discard("--run-id")
     return flags
 
 
@@ -116,7 +118,7 @@ def test_data_policy_choices_match_cli_and_metadata() -> None:
 
     from src.cli.commands.research.mhs import add_mhs_commands
     from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.panel import DATA_POLICIES
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -134,7 +136,7 @@ def test_data_policy_choices_match_cli_and_metadata() -> None:
 def test_request_default_execution_is_3m() -> None:
     import dataclasses
 
-    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     request = MhsDiagnosticRequest()
     assert request.execution_timeframe == "3m"
@@ -146,7 +148,7 @@ def test_request_default_execution_is_3m() -> None:
 def test_request_rejects_legacy_execution_intervals() -> None:
     import pytest
 
-    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     for legacy in ("1m", "5m"):
         with pytest.raises(ValueError, match="execution_timeframe"):
@@ -156,7 +158,7 @@ def test_request_rejects_legacy_execution_intervals() -> None:
 def test_request_timeout_must_align_to_three_minutes() -> None:
     import pytest
 
-    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     MhsDiagnosticRequest(passive_timeout_minutes=30)
     with pytest.raises(ValueError, match="multiple of 3"):
@@ -167,7 +169,7 @@ def test_deployment_policy_converts_3m_and_rejects_legacy() -> None:
     import pytest
 
     from src.mhs.deployment_policy import TargetWeightPolicy
-    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     base = {
         "execution_universe_size": 8,
@@ -200,7 +202,7 @@ def test_deployment_policy_converts_3m_and_rejects_legacy() -> None:
 def test_execution_grids_use_three_minute_steps() -> None:
     import pandas as pd
 
-    from src.mhs.evaluation import MhsDiagnosticRequest
+    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
     from src.mhs.types import ExecutionSpec
 
@@ -212,12 +214,13 @@ def test_execution_grids_use_three_minute_steps() -> None:
     windows = list(
         _iter_mhs_execution_windows(
             empty_weights, empty_signals, "/nonexistent", "3m",
-            start, end, {}, request.mark_mode, ExecutionSpec(),
+            start, end, {}, ExecutionSpec(),
         )
     )
     assert len(windows) == 1
     grid = windows[0].minute_grid
-    assert len(grid) == 21
+    assert len(grid) == 20
+    assert grid[-1] == end - pd.Timedelta(minutes=3)
     assert (grid[1] - grid[0]) == pd.Timedelta(minutes=3)
 
 

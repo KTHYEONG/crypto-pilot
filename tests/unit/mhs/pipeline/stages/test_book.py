@@ -99,8 +99,19 @@ def test_build_books_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         book_stage, "renormalize_within_mask", lambda w, mask, min_symbols: w,
     )
+    monkeypatch.setattr(
+        book_stage,
+        "apply_dynamic_gap_exclusion",
+        lambda mask, *_args, **_kwargs: (mask, ("AAAUSDT",)),
+    )
+    monkeypatch.setattr(
+        book_stage,
+        "assert_relevant_execution_data_coverage",
+        lambda *_args, **_kwargs: None,
+    )
 
     ctx = _bare_context()
+    ctx.config = dataclasses.replace(ctx.config, execution_coverage_gate=True)
     book_stage.build_books(ctx, StageTelemetry(log_run=False))
 
     assert calls == [

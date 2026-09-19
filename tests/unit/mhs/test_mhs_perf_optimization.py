@@ -3,8 +3,6 @@
 Each ``SCENARIO_MHS_PERF_OPT_*`` test pins the bit-identical-equivalence
 invariant of an optimization against the pre-optimization code path:
 
-- ``MARK_PANEL_EQUIVALENCE``: ``_cached_mark_panel`` reproduces
-  ``DataCollector().load_mark_price_panel`` element-for-element.
 - ``WINDOW_SLICE_EQUIVALENCE``: ``_load_window_minute_frames`` reproduces the
   full-period-frame ``.loc`` slice byte-identically.
 - ``WINDOW_REUSE_EQUIVALENCE``: per-pass generator regeneration reproduces the
@@ -21,22 +19,22 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.mhs import evaluation as ev
 from src.mhs import marks as mhs_marks
-from src.mhs.evaluation import (
-    _cached_mark_panel,
+from src.mhs.evaluation.books import (
     _candidate_weight_books,
+)
+from src.mhs.evaluation.folds import (
     _fold_safe_discovery_worker,
-    _iter_mhs_execution_windows,
-    _load_window_minute_frames,
-    _rescaled_windows,
     _run_fold_safe_discovery_parallel,
 )
+from src.mhs.evaluation.windows import _rescaled_windows
+from src.mhs.execution.window_stream import _iter_mhs_execution_windows
+from src.mhs.marks import _load_window_minute_frames
 from src.common.errors import DataIntegrityError
-from src.market_data.services.futures_collection import DataCollector
 from src.mhs.types import BOOK_SPECS, ExecutionSpec
 from src.mhs.evidence import phase_1_anchored_purged_folds
 from src.mhs.execution import replay_execution_windows
@@ -48,11 +46,9 @@ _SYMBOLS = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
 
 @pytest.fixture(autouse=True)
 def _clear_perf_caches() -> None:
-    ev._get_symbol_mark_frame.cache_clear()
-    mhs_marks._compact_mark_series_for_path.cache_clear()
+    mhs_marks.clear_mhs_market_data_caches()
     yield
-    ev._get_symbol_mark_frame.cache_clear()
-    mhs_marks._compact_mark_series_for_path.cache_clear()
+    mhs_marks.clear_mhs_market_data_caches()
 
 
 def _write_mark_market(
@@ -105,7 +101,7 @@ def mark_market(tmp_path, monkeypatch):
         lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet",
     )
     monkeypatch.setattr(
-        ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet",
+        mhs_marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet",
     )
     return root
 
@@ -117,41 +113,6 @@ def _assert_panel_equal(a: pd.DataFrame, b: pd.DataFrame) -> None:
     assert np.array_equal(a.to_numpy(dtype="float64"), b.to_numpy(dtype="float64"), equal_nan=True)
 
 
-def test_mhs_perf_opt_mark_panel_equivalence(mark_market) -> None:
-    """SCENARIO_MHS_PERF_OPT_MARK_PANEL_EQUIVALENCE: ``_cached_mark_panel`` is
-    byte-identical to the DataCollector mark panel on 5m and 1m grids for both
-    strict and stale-carry modes."""
-    collector = DataCollector()
-    grid_5m = pd.date_range(_START, _START + pd.Timedelta(hours=47), freq="5min", tz="UTC")
-    grid_1m = pd.date_range(_START, _START + pd.Timedelta(hours=11), freq="1min", tz="UTC")
-    for stale in (0, 24):
-        for grid in (grid_5m, grid_1m):
-            expected = collector.load_mark_price_panel(_SYMBOLS, "1h", grid, max_stale_hours=stale)
-            actual = _cached_mark_panel(_SYMBOLS, "1h", grid, stale)
-            _assert_panel_equal(actual, expected)
-
-
-def test_mhs_perf_opt_mark_cache_read_once(mark_market) -> None:
-    """The per-process mark caches read each symbol's parquet exactly once:
-    the first window warms the compact series cache without populating the
-    full-frame LRU, and every later window is served from the compact series
-    without touching Parquet again."""
-    ev._get_symbol_mark_frame.cache_clear()
-    mhs_marks._compact_mark_series_for_path.cache_clear()
-    grid = pd.date_range(_START, _START + pd.Timedelta(hours=47), freq="5min", tz="UTC")
-    _cached_mark_panel(_SYMBOLS, "1h", grid, 0)
-    info = ev._get_symbol_mark_frame.cache_info()
-    assert info.misses == 0
-    assert info.currsize == 0
-    _cached_mark_panel(_SYMBOLS, "1h", grid, 0)
-    # The second window is served entirely from the compact-series tier: no
-    # full-frame loads and no parquet re-read.
-    assert ev._get_symbol_mark_frame.cache_info().misses == 0
-    compact_info = mhs_marks._compact_mark_series_for_path.cache_info()
-    assert compact_info.misses == len(_SYMBOLS)
-    assert compact_info.currsize == len(_SYMBOLS)
-
-
 def test_mhs_perf_opt_window_slice_equivalence(mark_market) -> None:
     """SCENARIO_MHS_PERF_OPT_WINDOW_SLICE_EQUIVALENCE: the window-filtered
     loader returns exactly the full-period-frame ``.loc`` slice."""
@@ -161,7 +122,7 @@ def test_mhs_perf_opt_window_slice_equivalence(mark_market) -> None:
     windowed = _load_window_minute_frames(root, _SYMBOLS, ws, we, "3m")
     assert set(windowed) == set(_SYMBOLS)
     for sym in _SYMBOLS:
-        table = ev.pq.read_table(
+        table = pq.read_table(
             f"{root}/3m/{sym}.parquet", columns=["timestamp", "high", "low", "close", "quote_vol"],
         )
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
@@ -204,7 +165,7 @@ def test_mhs_perf_opt_window_reuse_equivalence(mark_market) -> None:
 
     def gen(t: pd.DataFrame):
         return _iter_mhs_execution_windows(
-            t, signals, root, "3m", _START, end, funding, "cache_required", ExecutionSpec(),
+            t, signals, root, "3m", _START, end, funding, ExecutionSpec(),
         )
 
     spec = ExecutionSpec()
@@ -236,13 +197,13 @@ def test_mhs_perf_opt_lazy_frame_scope(mark_market, monkeypatch) -> None:
     we = _START + pd.Timedelta(hours=48)
     calls: list[list[tuple[str, object]]] = []
 
-    real_read_table = ev.pq.read_table
+    real_read_table = pq.read_table
 
     def counting_read_table(*args, **kwargs):
         calls.append(list(kwargs.get("filters", []) or []))
         return real_read_table(*args, **kwargs)
 
-    monkeypatch.setattr(ev.pq, "read_table", counting_read_table)
+    monkeypatch.setattr(pq, "read_table", counting_read_table)
     frames = _load_window_minute_frames(root, _SYMBOLS, ws, we, "3m")
     assert set(frames) == set(_SYMBOLS)
     assert len(calls) == len(_SYMBOLS)
@@ -314,26 +275,11 @@ def test_mhs_perf_opt_rescaled_windows_guards_zero_pattern(mark_market) -> None:
     funding = _build_small_funding(mark_market)
     windows = _iter_mhs_execution_windows(
         target, signals, str(mark_market), "3m", _START, end,
-        funding, "cache_required", ExecutionSpec(),
+        funding, ExecutionSpec(),
     )
     zero_scale = pd.Series(0.0, index=target.index)
     with pytest.raises(DataIntegrityError):
         next(_rescaled_windows(windows, zero_scale))
-
-
-def test_mhs_perf_opt_mark_panel_invalid_grid(mark_market) -> None:
-    """Invalid grid/symbol inputs fail closed exactly like the DataCollector."""
-    grid = pd.date_range(_START, _START + pd.Timedelta(hours=47), freq="5min", tz="UTC")
-    with pytest.raises(ValueError, match="unsupported timeframe"):
-        _cached_mark_panel(_SYMBOLS, "2h", grid, 0)
-    with pytest.raises(DataIntegrityError):
-        _cached_mark_panel([], "1h", grid, 0)
-    with pytest.raises(DataIntegrityError):
-        _cached_mark_panel(["MHSAUSDT", "MHSAUSDT"], "1h", grid, 0)
-    with pytest.raises(DataIntegrityError):
-        _cached_mark_panel(_SYMBOLS, "1h", grid.tz_localize(None), 0)
-    with pytest.raises(DataIntegrityError):
-        _cached_mark_panel(_SYMBOLS, "1h", grid[::-1], 0)
 
 
 def test_scenario_04_candidate_weight_books_covers_union() -> None:
@@ -341,13 +287,13 @@ def test_scenario_04_candidate_weight_books_covers_union() -> None:
     keys covering both the fold-safe BookSpec band horizons and the top-level
     DISCOVERY_* / funding-carry candidate sets, and every panel equals what
     ``build_candidate_weights`` would have produced for that key."""
-    from src.mhs.evaluation import (
+    from src.mhs.discovery import build_candidate_weights as _bcw
+    from src.mhs.funding import build_funding_carry_candidate_weights
+    from src.mhs.params import (
         DISCOVERY_MOMENTUM_CANDIDATES,
         DISCOVERY_REVERSAL_CANDIDATES,
         FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
-        build_funding_carry_candidate_weights,
     )
-    from src.mhs.discovery import build_candidate_weights as _bcw
 
     log_close, eligible, opens, bar_funding, grid = _build_fold_panel()
     specs = BOOK_SPECS
@@ -382,7 +328,7 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
     """SCENARIO_MHS_REFACTOR_06: no ProcessPoolExecutor.submit call in
     evaluation.py passes a pd.DataFrame or pd.Series argument; large read-only
     panels travel through fork_shared_payload tokens."""
-    import src.mhs.evaluation as ev_mod
+    import src.mhs.evaluation.concurrency as concurrency_mod
 
     root = tmp_path / "market"
     _write_mark_market(root, _SYMBOLS, n_hours=2700)
@@ -391,7 +337,7 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
         lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet",
     )
     monkeypatch.setattr(
-        ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet",
+        mhs_marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet",
     )
 
     recorded: list[list[object]] = []
@@ -417,15 +363,12 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
             recorded.append(list(args))
             return _SynchronousFuture(fn, args)
 
-    import src.mhs.evaluation.concurrency as concurrency_mod
     import concurrent.futures as cf_mod
-    monkeypatch.setattr(ev_mod, "ProcessPoolExecutor", _RecordingExecutor)
-    monkeypatch.setattr(concurrency_mod, "ProcessPoolExecutor", _RecordingExecutor)
+    monkeypatch.setattr(concurrency_mod, "ProcessPoolExecutor", _RecordingExecutor, raising=False)
     monkeypatch.setattr(cf_mod, "ProcessPoolExecutor", _RecordingExecutor)
 
-    from src.mhs import evaluation as _ev
     args = _build_books_args_from_market(root, 2700)
-    _ev._run_books_concurrent(**args)
+    concurrency_mod._run_books_concurrent(**args)
 
     assert recorded, "the book pool must submit at least once"
     for submit_args in recorded:
@@ -435,18 +378,27 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
 
 def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]:
     """Minimal ``_run_books_concurrent`` arg set from a written market."""
-    import src.mhs.evaluation as ev_mod
     from src.mhs import scaling as scaling_mod
+    from src.mhs.books import renormalize_within_mask
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.evaluation.books import _book_weights
+    from src.mhs.evaluation.diagnostics import _phase_diagnostics
+    from src.mhs.execution.contracts import bar_funding_panel
+    from src.mhs.horizons import realized_vol
+    from src.mhs.marks import _pit_execution_mask
+    from src.mhs.panel import liquid_half_eligibility, load_base_panel
+    from src.mhs.params import BOOK_BLEND_WEIGHTS
+    from src.mhs.types import BOOK_SPECS
 
     end = _START + pd.Timedelta(hours=n_hours)
     symbols = _SYMBOLS
     funding_by_symbol = _build_small_funding(root)
-    request = ev_mod.MhsDiagnosticRequest(
+    request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="3m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
-    panel = ev_mod.load_base_panel(
+    panel = load_base_panel(
         str(root), "1h", ("close", "open", "quote_vol"), _START, end,
         partition="dev", min_bars=2000,
     )
@@ -461,40 +413,40 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
         for s in symbols
         if s in funding_by_symbol
     }
-    bar_funding = ev_mod.bar_funding_panel(funding_window, grid_1h)
+    bar_funding = bar_funding_panel(funding_window, grid_1h)
     aligned = list(bar_funding.columns)
     close = close[aligned]
     opens = opens[aligned]
     bar_funding = bar_funding[aligned]
     quote_vol = quote_vol[aligned]
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
-    eligible = ev_mod.liquid_half_eligibility(
+    eligible = liquid_half_eligibility(
         quote_vol, lookback_bars=720, min_history_bars=720,
     )
     log_close = np.log(close)
-    fast = ev_mod.BOOK_SPECS["fast_reversal"]
-    slow = ev_mod.BOOK_SPECS["slow_momentum"]
+    fast = BOOK_SPECS["fast_reversal"]
+    slow = BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, end, freq="24h", tz="UTC")
-    w_fast = ev_mod._book_weights(log_close, eligible, fast, fast_grid)
-    w_slow = ev_mod._book_weights(log_close, eligible, slow, slow_grid)
-    phase_fast = ev_mod._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
-    phase_slow = ev_mod._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
-    phase_blend = ev_mod._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
-    execution_mask = ev_mod._pit_execution_mask(quote_vol, eligible, 8)
-    w_fast_execution = ev_mod.renormalize_within_mask(
+    w_fast = _book_weights(log_close, eligible, fast, fast_grid)
+    w_slow = _book_weights(log_close, eligible, slow, slow_grid)
+    phase_fast = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    phase_slow = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
+    phase_blend = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    execution_mask = _pit_execution_mask(quote_vol, eligible, 8)
+    w_fast_execution = renormalize_within_mask(
         w_fast, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
     )
-    w_slow_execution = ev_mod.renormalize_within_mask(
+    w_slow_execution = renormalize_within_mask(
         w_slow, execution_mask.reindex(w_slow.index).fillna(False), slow.min_symbols,
     )
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     blend_1h = (
-        ev_mod.BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
-        + ev_mod.BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
+        BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
+        + BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
     )
-    vol_mean = ev_mod.realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
+    vol_mean = realized_vol(log_close, 48).where(execution_mask).reindex(grid_1h).mean(axis=1)
     regime_scale = scaling_mod._regime_cash_scale(vol_mean)
     blend_1h = blend_1h.mul(regime_scale, axis=0)
     return {
@@ -524,185 +476,3 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
     }
 
 
-# ---------------------------------------------------------------------------
-# SCENARIO_MHS_PERF_P2_01_MARK_PANEL_ELEMENT_EQUALITY (compact mark cache B1)
-# ---------------------------------------------------------------------------
-
-_MARK_ROSTER = [f"MHS{i:02d}USDT" for i in range(45)]
-_MARK_HOURS = 6 * 31 * 24 + 8  # 6 consecutive 31-day windows + shift headroom
-
-
-def _write_mark_roster(root: Path) -> None:
-    """Hourly mark frames for 45 symbols with duplicate/gap/invalid anomalies."""
-    hourly = pd.date_range(_START, periods=_MARK_HOURS, freq="1h", tz="UTC")
-    epoch = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    out_dir = root / "markPriceKlines" / "1h"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(20260807)
-    for i, sym in enumerate(_MARK_ROSTER):
-        prices = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, _MARK_HOURS)))
-        frame = pd.DataFrame(
-            {
-                "timestamp": epoch,
-                "open": prices,
-                "high": prices,
-                "low": prices,
-                "close": prices,
-                "datetime": hourly,
-            }
-        )
-        if i % 7 == 0:
-            # Duplicate stamps with different closes: keep='last' must win.
-            dup = frame.iloc[100:150].copy()
-            dup["close"] = dup["close"] * 1.5
-            frame = pd.concat([frame.iloc[:200], dup, frame.iloc[200:]], ignore_index=True)
-        if i % 11 == 0:
-            # Multi-day holes: the ffill limit boundary must produce NaNs.
-            frame = frame.drop(frame.index[(i * 37) % 400 : (i * 37) % 400 + 300]).reset_index(drop=True)
-        if i == 43:
-            # Empty-but-well-formed frame: empty arrays, column stays all-NaN.
-            frame = frame.iloc[:0]
-        if i == 44:
-            # Invalid rows a strict causal panel must never surface.
-            frame.loc[frame.index[:50], "close"] = -1.0
-            frame.loc[frame.index[50:60], "datetime"] = pd.NaT
-        frame.to_parquet(out_dir / f"{sym}.parquet")
-
-
-@pytest.fixture(scope="module")
-def big_mark_market(tmp_path_factory, monkeypatch_module):
-    root = tmp_path_factory.mktemp("mhs_mark_roster")
-    _write_mark_roster(root)
-    monkeypatch_module.setattr(
-        fc, "_mark_price_path",
-        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet",
-    )
-    return root
-
-
-@pytest.fixture(scope="module")
-def monkeypatch_module():
-    mp = pytest.MonkeyPatch()
-    yield mp
-    mp.undo()
-
-
-def _legacy_mark_panel(
-    roster: list[str],
-    timeframe: str,
-    minute_grid: pd.DatetimeIndex,
-    max_stale_hours: int,
-) -> pd.DataFrame:
-    """Verbatim pre-change per-symbol block (pandas reindex reference)."""
-    panel = pd.DataFrame(index=minute_grid, columns=list(roster), dtype="float64")
-    if len(minute_grid) > 1:
-        step = minute_grid[1] - minute_grid[0]
-        step_minutes = step / pd.Timedelta(minutes=1)
-        if max_stale_hours == 0:
-            ffill_limit = int(60 // step_minutes - 1)
-        else:
-            ffill_limit = int(max_stale_hours * 60 // step_minutes - 1)
-    else:
-        ffill_limit = 0
-    for sym in roster:
-        cache = mhs_marks._get_symbol_mark_frame(sym, timeframe)
-        if cache.empty or "close" not in cache.columns:
-            continue
-        valid = (
-            cache["datetime"].notna()
-            & cache["close"].notna()
-            & (cache["close"] > 0)
-        )
-        closes = (
-            cache.loc[valid, ["datetime", "close"]]
-            .drop_duplicates(subset=["datetime"], keep="last")
-            .sort_values("datetime")
-        )
-        if closes.empty:
-            continue
-        available = pd.Series(
-            closes["close"].to_numpy(dtype="float64"),
-            index=closes["datetime"] + pd.Timedelta(hours=1),
-        )
-        aligned = (
-            available.reindex(minute_grid)
-            if ffill_limit == 0
-            else available.reindex(minute_grid, method="ffill", limit=ffill_limit)
-        )
-        panel[sym] = aligned.to_numpy(dtype="float64")
-    return panel
-
-
-def _assert_element_equal(a: pd.DataFrame, b: pd.DataFrame) -> None:
-    assert list(a.columns) == list(b.columns)
-    assert a.index.equals(b.index)
-    av = a.to_numpy(dtype="float64")
-    bv = b.to_numpy(dtype="float64")
-    assert np.array_equal(np.isnan(av), np.isnan(bv))
-    assert np.array_equal(av[~np.isnan(av)], bv[~np.isnan(bv)])
-
-
-def test_mark_panel_element_equality_45_symbols_6_windows(big_mark_market) -> None:
-    """SCENARIO_MHS_PERF_P2_01: compact-backed output == pre-change output."""
-    for w in range(6):
-        ws = _START + pd.Timedelta(days=31 * w)
-        we = ws + pd.Timedelta(days=31) - pd.Timedelta(minutes=3)
-        grid = pd.date_range(ws, we, freq="3min", tz="UTC")
-        for stale in (0, 24):
-            _assert_element_equal(
-                _cached_mark_panel(_MARK_ROSTER, "1h", grid, stale),
-                _legacy_mark_panel(_MARK_ROSTER, "1h", grid, stale),
-            )
-
-
-def test_mark_panel_validation_raises_fire_on_same_inputs_in_order(big_mark_market) -> None:
-    """All existing validation raises fire on the same inputs, same order."""
-    good_grid = pd.date_range(_START, periods=16, freq="3min", tz="UTC")
-    with pytest.raises(ValueError, match="unsupported timeframe"):
-        _cached_mark_panel(_MARK_ROSTER, "2h", good_grid, 0)
-    with pytest.raises(ValueError, match="non-negative"):
-        _cached_mark_panel(_MARK_ROSTER, "1h", good_grid, -1)
-    with pytest.raises(DataIntegrityError, match="non-empty DatetimeIndex"):
-        _cached_mark_panel(_MARK_ROSTER, "1h", pd.DatetimeIndex([]), 0)
-    with pytest.raises(DataIntegrityError, match="tz-aware UTC"):
-        _cached_mark_panel(_MARK_ROSTER, "1h", good_grid.tz_localize(None), 0)
-    with pytest.raises(DataIntegrityError, match="monotonically increasing"):
-        _cached_mark_panel(_MARK_ROSTER, "1h", good_grid[::-1], 0)
-    with pytest.raises(DataIntegrityError, match="duplicates"):
-        _cached_mark_panel(_MARK_ROSTER, "1h", good_grid.insert(3, good_grid[3]), 0)
-    with pytest.raises(DataIntegrityError, match="non-empty"):
-        _cached_mark_panel([], "1h", good_grid, 0)
-    with pytest.raises(DataIntegrityError, match="unique"):
-        _cached_mark_panel([_MARK_ROSTER[0], _MARK_ROSTER[0]], "1h", good_grid, 0)
-    bad_freq = pd.date_range(_START, periods=16, freq="7min", tz="UTC")
-    with pytest.raises(DataIntegrityError, match="divisor of one hour"):
-        _cached_mark_panel(_MARK_ROSTER[:3], "1h", bad_freq, 0)
-
-
-def test_mark_panel_retained_bytes_at_most_40_percent_of_frame_cache(big_mark_market) -> None:
-    """Compact arrays retain <= 40% of the full-frame cache bytes (measured 30%)."""
-    full_bytes = sum(
-        mhs_marks._get_symbol_mark_frame(sym, "1h").memory_usage(deep=True).sum()
-        for sym in _MARK_ROSTER
-    )
-    compact_bytes = sum(
-        avail.nbytes + close.nbytes
-        for avail, close in (mhs_marks._compact_mark_series(sym, "1h") for sym in _MARK_ROSTER)
-    )
-    assert compact_bytes > 0
-    assert compact_bytes <= 0.40 * float(full_bytes)
-
-
-def test_mark_panel_prewarm_populates_compact_cache(big_mark_market) -> None:
-    """_prewarm_mark_frames warms _compact_mark_series; missing files skipped."""
-    from src.mhs.marks import (
-    _compact_mark_series_for_path,
-    _prewarm_mark_frames,
-)
-
-    _compact_mark_series_for_path.cache_clear()
-    missing = ["MHSZZZUSDT"]
-    _prewarm_mark_frames([*_MARK_ROSTER[:5], *missing])
-    info = _compact_mark_series_for_path.cache_info()
-    assert info.misses == len(_MARK_ROSTER[:5])
-    assert info.currsize == len(_MARK_ROSTER[:5])

@@ -33,7 +33,7 @@ from src.mhs.evidence import (
     selection_overlap_fraction,
 )
 from src.mhs.features import FEATURE_REGISTRY, feature_registry_panel_columns
-from src.mhs.marks import _get_symbol_mark_frame
+from src.mhs.marks import clear_mhs_market_data_caches
 from src.mhs.params import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
@@ -99,8 +99,8 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         base_panel=getattr(ctx, "base_panel", None),
     )
     ctx.folds = tuple(fold_reports)
-    # Free mark frame cache so opt-in diagnostics run with minimal parent memory.
-    _get_symbol_mark_frame.cache_clear()
+    # Invalidate shared market-data state so opt-in diagnostics run with minimal parent memory.
+    clear_mhs_market_data_caches()
     gc.collect()
     _terminal = guards._guard_stage_or_breach(
         "post_folds", ctx.rss_budget_bytes, ctx.rss_reserve_bytes,

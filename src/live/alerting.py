@@ -124,13 +124,13 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "보유 심볼의 펀딩비 데이터가 2회 정산 주기 이상 도착하지 않아 페이퍼 원장 펀딩 정산이 밀려 있습니다. 24시간을 넘기면 사이클이 HALT 됩니다.",
         "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon ls -la /app/data/futures/funding",
     },
-    "paper_delisted_close": {
-        "title": "상장폐지 보유 심볼 페이퍼 정산",
-        "severity_badge": "🔔 알림",
-        "severity_label": "NOTICE",
-        "header_color": "#2563eb",
-        "bg_color": "#eff6ff",
-        "impact": "보유 중이던 심볼이 상장폐지(정산)되어 deliveryDate 시점 mark 가격으로 페이퍼 포지션을 종료했습니다.",
+    "paper_delisted_unresolved": {
+        "title": "상장폐지 보유 심볼 미결 (합성 정산 없음)",
+        "severity_badge": "🚨 긴급",
+        "severity_label": "CRITICAL",
+        "header_color": "#dc2626",
+        "bg_color": "#fef2f2",
+        "impact": "보유 중이던 심볼이 상장폐지 공지됐으나 거래소 실정산 증거가 없어 포지션·현금을 미결로 유지하고 신규 리스크를 중단했습니다.",
         "action": "docker exec mhs-live-daemon cat /app/data/state/live_position_ledger.json",
     },
     "orderbook_backup_impending": {

@@ -553,7 +553,10 @@ def _inventory_result_payload(result: StrategyExecutionReplayResult) -> dict[str
     summary = _inventory_ledger_summary(result)
     fills = result.simulated_fills
     certified = bool(replay_ledger_certified(result))
+    valuation_source = str(result.ledger.mark_source)
     return {
+        "valuation_source": valuation_source,
+        "mark_source": valuation_source,
         "daily_returns": {ts.isoformat(): float(v) for ts, v in daily.items()},
         "cagr": summary["cagr"],
         "max_drawdown": summary["max_drawdown"],
@@ -620,7 +623,7 @@ def persist_process_inventory_report(
     registry_path: Path | None = None,
     run_id: str | None = None,
 ) -> Path:
-    """Persist separately identified 3m execution evidence.
+    """Persist process inventory evidence with its actual price and funding sources, financial validity and unresolved data gaps. An OHLCV execution proxy is research evidence, not liquidation certification.
 
     The summary is compact: large daily-return dictionaries and gap arrays live
     in a content-addressed detail bundle under ``evidence_root`` (defaulting to

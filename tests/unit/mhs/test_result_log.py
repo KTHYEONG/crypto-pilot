@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from src.mhs.run_history import (
@@ -13,23 +14,26 @@ from src.mhs.run_history import (
 )
 
 
+def _history_records(registry: Path) -> list[dict[str, object]]:
+    with sqlite3.connect(registry) as conn:
+        rows = conn.execute(
+            "SELECT record_json FROM history_records ORDER BY ordinal",
+        ).fetchall()
+    return [json.loads(str(row[0])) for row in rows]
+
+
 def test_append_creates_history_dir_active_line_and_latest(tmp_path) -> None:
     record = {"run_id": "abc", "status": "COMPLETE", "perf": {"run_elapsed_seconds": 1.5}}
     history_dir = tmp_path / "history"
     active = append_run_history_record(record, history_dir)
 
-    assert active.name == "active.jsonl"
-    assert active == history_dir / "active.jsonl"
+    assert active.name == "registry.sqlite3"
+    assert active == history_dir / "registry.sqlite3"
     assert history_dir.is_dir()
-    lines = active.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    assert json.loads(lines[0]) == record
-    latest = history_dir / "latest.json"
-    assert latest.exists()
-    assert json.loads(latest.read_text(encoding="utf-8")) == record
+    assert _history_records(active) == [record]
 
 
-def test_append_rotates_active_shard_when_over_budget(tmp_path, monkeypatch) -> None:
+def test_append_keeps_all_records_in_registry(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_SHARD_MAX_BYTES", 1)
     history_dir = tmp_path / "history"
 
@@ -37,17 +41,12 @@ def test_append_rotates_active_shard_when_over_budget(tmp_path, monkeypatch) -> 
     append_run_history_record({"run_id": "second"}, history_dir)
     append_run_history_record({"run_id": "third"}, history_dir)
 
-    archives = sorted(history_dir.glob("mhs_run_history_*.jsonl"))
-    assert len(archives) == 2
-    assert json.loads(archives[0].read_text(encoding="utf-8").splitlines()[0])["run_id"] == "first"
-    assert json.loads(archives[1].read_text(encoding="utf-8").splitlines()[0])["run_id"] == "second"
-
-    active_lines = (history_dir / "active.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(active_lines) == 1
-    assert json.loads(active_lines[0])["run_id"] == "third"
+    assert _history_records(history_dir / "registry.sqlite3") == [
+        {"run_id": "first"}, {"run_id": "second"}, {"run_id": "third"},
+    ]
 
 
-def test_append_prunes_oldest_archive_at_retention_cap(tmp_path, monkeypatch) -> None:
+def test_append_does_not_mutate_legacy_archives(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_SHARD_MAX_BYTES", 1)
     monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_MAX_SHARDS", 3)
     history_dir = tmp_path / "history"
@@ -59,15 +58,10 @@ def test_append_prunes_oldest_archive_at_retention_cap(tmp_path, monkeypatch) ->
 
     append_run_history_record({"run_id": "trigger"}, history_dir)
 
-    archives = sorted(history_dir.glob("mhs_run_history_*.jsonl"))
-    assert len(archives) == 3
-    names = [p.name for p in archives]
-    assert "mhs_run_history_100.jsonl" not in names
-    assert "mhs_run_history_200.jsonl" in names
-    assert "mhs_run_history_300.jsonl" in names
-    active_lines = (history_dir / "active.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(active_lines) == 1
-    assert json.loads(active_lines[0])["run_id"] == "trigger"
+    assert {p.name for p in history_dir.glob("mhs_run_history_*.jsonl")} == {
+        "mhs_run_history_100.jsonl", "mhs_run_history_200.jsonl", "mhs_run_history_300.jsonl",
+    }
+    assert _history_records(history_dir / "registry.sqlite3") == [{"run_id": "trigger"}]
 
 
 def test_append_no_rotation_when_under_budget(tmp_path) -> None:
@@ -75,18 +69,15 @@ def test_append_no_rotation_when_under_budget(tmp_path) -> None:
     append_run_history_record({"run_id": "a"}, history_dir)
     append_run_history_record({"run_id": "b"}, history_dir)
     assert not list(history_dir.glob("mhs_run_history_*.jsonl"))
-    lines = (history_dir / "active.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2
-    assert json.loads(lines[0])["run_id"] == "a"
-    assert json.loads(lines[1])["run_id"] == "b"
+    assert _history_records(history_dir / "registry.sqlite3") == [{"run_id": "a"}, {"run_id": "b"}]
 
 
 def test_latest_snapshot_tracks_most_recent_record(tmp_path) -> None:
     history_dir = tmp_path / "history"
     append_run_history_record({"run_id": "first"}, history_dir)
     append_run_history_record({"run_id": "second"}, history_dir)
-    latest = json.loads((history_dir / "latest.json").read_text(encoding="utf-8"))
-    assert latest["run_id"] == "second"
+    records = _history_records(history_dir / "registry.sqlite3")
+    assert records[-1]["run_id"] == "second"
 
 
 def test_mhs_run_history_dir_derives_from_target_parent() -> None:
@@ -108,13 +99,13 @@ class TestFillMarkParityRunHistoryRecord:
         False at the contract layer, I5)."""
         from src.mhs.evidence import DeploymentReadinessResult
 
-        from src.mhs.evaluation import (
+        from src.mhs.contracts import (
             MhsDiagnosticRequest,
-            MhsHorizonDiagnosticReport,
             MhsOutputTier,
             MhsResearchGoResult,
-            build_mhs_run_history_record,
         )
+        from src.mhs.report.persist import build_mhs_run_history_record
+        from src.mhs.report.schema import MhsHorizonDiagnosticReport
 
         census = {
             "band": 0.0488,

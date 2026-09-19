@@ -61,8 +61,8 @@ def test_iter_mirrors_legacy_window_fields(tmp_path) -> None:
     start, end, decisions, funding, targets, spec = _fixture(tmp_path)
     signals = decisions + pd.Timedelta(hours=1)
     root = str(tmp_path / "ohlcv")
-    left = list(_iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec))
-    right = list(legacy._iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec))
+    left = list(_iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
+    right = list(legacy._iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
     _windows_equal(left, right)
 
 
@@ -76,8 +76,8 @@ def test_iter_preserves_timeout_overlap_resolution(tmp_path) -> None:
     start, end, decisions, funding, targets, spec = _fixture(tmp_path)
     signals = decisions + pd.Timedelta(hours=1)
     root = str(tmp_path / "ohlcv")
-    left = list(_iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec))
-    right = list(legacy._iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec))
+    left = list(_iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
+    right = list(legacy._iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
     assert [w.logical_partition for w in left] == [w.logical_partition for w in right]
     spos = np.array([0, 10, 10**12], dtype="int64")
     grid = np.arange(0, 100, dtype="int64")
@@ -94,13 +94,13 @@ def test_iter_applies_live_requirements_at_same_step(tmp_path) -> None:
     root = str(tmp_path / "ohlcv")
     left = list(
         _iter_mhs_execution_windows(
-            targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            targets, signals, root, "3m", start, end, funding, spec,
             required_symbols=lambda: frozenset({"AUSDT"}),
         )
     )
     right = list(
         legacy._iter_mhs_execution_windows(
-            targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            targets, signals, root, "3m", start, end, funding, spec,
             required_symbols=lambda: frozenset({"AUSDT"}),
         )
     )
@@ -130,7 +130,7 @@ def test_iter_keeps_half_open_fence(tmp_path) -> None:
     signals = decisions + pd.Timedelta(hours=1)
     root = str(tmp_path / "ohlcv")
     for owner in (_iter_mhs_execution_windows, legacy._iter_mhs_execution_windows):
-        windows = list(owner(targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec))
+        windows = list(owner(targets, signals, root, "3m", start, end, funding, spec))
         assert all(end not in w.minute_grid for w in windows)
         assert all((w.bar_available_at <= end).all() for w in windows)
 
@@ -146,13 +146,13 @@ def test_iter_keeps_funding_knowledge_behavior(tmp_path) -> None:
     root = str(tmp_path / "ohlcv")
     left = list(
         _iter_mhs_execution_windows(
-            targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            targets, signals, root, "3m", start, end, funding, spec,
             funding_failures={"BUSDT": "missing"},
         )
     )
     right = list(
         legacy._iter_mhs_execution_windows(
-            targets, signals, root, "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            targets, signals, root, "3m", start, end, funding, spec,
             funding_failures={"BUSDT": "missing"},
         )
     )
@@ -261,9 +261,9 @@ def test_iter_rejects_invalid_coverage(tmp_path) -> None:
 
     start, end, decisions, funding, targets, spec = _fixture(tmp_path)
     with pytest.raises(DataIntegrityError, match="align"):
-        list(_iter_mhs_execution_windows(targets, decisions[:1], str(tmp_path / "ohlcv"), "3m", start, end, funding, "ohlcv_close_fallback", spec))
+        list(_iter_mhs_execution_windows(targets, decisions[:1], str(tmp_path / "ohlcv"), "3m", start, end, funding, spec))
     with pytest.raises(DataIntegrityError, match="precede"):
-        list(_iter_mhs_execution_windows(targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"), "3m", end, start, funding, "ohlcv_close_fallback", spec))
+        list(_iter_mhs_execution_windows(targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"), "3m", end, start, funding, spec))
 
 
 def test_iter_covers_non_last_bound_fallback_and_clamp(tmp_path) -> None:
@@ -286,7 +286,7 @@ def test_iter_covers_non_last_bound_fallback_and_clamp(tmp_path) -> None:
     spec = ExecutionSpec(passive_timeout_minutes=7)
     windows = list(
         _iter_mhs_execution_windows(
-            occupied, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"), "3m", start, end, funding, "ohlcv_close_fallback", spec
+            occupied, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"), "3m", start, end, funding, spec
         )
     )
     assert len(windows) >= 1

@@ -5,11 +5,10 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
 import src.mhs.scaling as scaling
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-)
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evaluation.windows import _book_outcome
+from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS, PNL_VOL_TARGET_SCALE_FLOOR
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _build_book_outcome_args,
@@ -34,7 +33,7 @@ def test_pnl_vol_target_scale_reduces_on_vol_spike() -> None:
     r = _pnl_vol_spike_returns()
     out = scaling._pnl_vol_target_scale(r)
     assert out.iloc[50] == pytest.approx(1.0)
-    assert out.iloc[150] <= ev.PNL_VOL_TARGET_SCALE_FLOOR + 1e-9
+    assert out.iloc[150] <= PNL_VOL_TARGET_SCALE_FLOOR + 1e-9
     assert out.iloc[150] < out.iloc[50]
 
 def test_pnl_vol_target_scale_never_exceeds_one() -> None:
@@ -46,7 +45,7 @@ def test_pnl_vol_target_scale_never_exceeds_one() -> None:
     wild = pd.Series(rng.normal(0.0, 0.5, 150), index=pd.date_range("2024-06-01", periods=150, freq="D", tz="UTC"))
     combo = pd.concat([calm, wild])
     out = scaling._pnl_vol_target_scale(combo)
-    assert (out >= ev.PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (out >= PNL_VOL_TARGET_SCALE_FLOOR).all()
     assert (out <= 1.0).all()
     constant = pd.Series(
         np.concatenate([np.full(100, 0.001), np.full(100, 0.05)]),
@@ -63,7 +62,7 @@ def test_pnl_vol_target_scale_burn_in_is_unscaled() -> None:
     # matter how volatile the input is -- never an under-sampled estimate.
     r = _pnl_vol_spike_returns()
     out = scaling._pnl_vol_target_scale(r)
-    assert (out.iloc[: ev.PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
+    assert (out.iloc[: PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
 
 def test_pnl_vol_target_rolling_median_adapts() -> None:
     # SCENARIO_MHS_PNL_VOL_TARGET_ROLLING_MEDIAN_ADAPTS: a 1500-day series
@@ -89,9 +88,9 @@ def test_pnl_vol_target_rolling_median_adapts() -> None:
     # The stale all-history median keeps suppressing.
     assert last_100_expanding.mean() <= last_100_default.mean() - 0.10
     # Both respect floor <= scale <= 1.0 throughout.
-    assert (default_scale >= ev.PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (default_scale >= PNL_VOL_TARGET_SCALE_FLOOR).all()
     assert (default_scale <= 1.0).all()
-    assert (expanding_scale >= ev.PNL_VOL_TARGET_SCALE_FLOOR).all()
+    assert (expanding_scale >= PNL_VOL_TARGET_SCALE_FLOOR).all()
     assert (expanding_scale <= 1.0).all()
 
 def test_pnl_vol_target_rolling_median_burn_in_identical() -> None:
@@ -101,7 +100,7 @@ def test_pnl_vol_target_rolling_median_burn_in_identical() -> None:
     # element-wise equal to an oversized window (cannot slide within 200 days).
     r = _pnl_vol_spike_returns()
     out = scaling._pnl_vol_target_scale(r)
-    assert (out.iloc[: ev.PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
+    assert (out.iloc[: PNL_VOL_TARGET_BURN_IN_DAYS - 1] == 1.0).all()
 
     expanding_like = scaling._pnl_vol_target_scale(r, median_window_days=99999)
     pd.testing.assert_series_equal(out, expanding_like, check_names=False)
@@ -111,9 +110,9 @@ def test_pnl_vol_target_median_window_validation() -> None:
     # than the burn-in floor raises ValueError; the floor value itself is ok.
     r = _pnl_vol_spike_returns()
     with pytest.raises(ValueError, match="median_window_days"):
-        scaling._pnl_vol_target_scale(r, median_window_days=ev.PNL_VOL_TARGET_BURN_IN_DAYS - 1)
+        scaling._pnl_vol_target_scale(r, median_window_days=PNL_VOL_TARGET_BURN_IN_DAYS - 1)
     # Should not raise.
-    scaling._pnl_vol_target_scale(r, median_window_days=ev.PNL_VOL_TARGET_BURN_IN_DAYS)
+    scaling._pnl_vol_target_scale(r, median_window_days=PNL_VOL_TARGET_BURN_IN_DAYS)
 
 def test_pnl_vol_target_existing_suite_unchanged() -> None:
     # SCENARIO_MHS_PNL_VOL_TARGET_EXISTING_SUITE_UNCHANGED: all pre-existing
@@ -135,8 +134,8 @@ def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, m
         MhsDiagnosticRequest(pnl_vol_target="yes")
 
     args = _build_book_outcome_args(mhs_market)
-    default_report, _ = ev._book_outcome(**args)
-    true_report, _ = ev._book_outcome(
+    default_report, _ = _book_outcome(**args)
+    true_report, _ = _book_outcome(
         **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=True, committee_target_gross=None)}
     )
     # The default reproduces the pre-change primary/stress metrics exactly.
@@ -149,8 +148,8 @@ def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, m
         return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
 
     monkeypatch.setattr(scaling, "_pnl_vol_target_scale", _forced_step_scale)
-    on, _ = ev._book_outcome(**args)
-    off, _ = ev._book_outcome(
+    on, _ = _book_outcome(**args)
+    off, _ = _book_outcome(
         **{**args, "request": dataclasses.replace(args["request"], pnl_vol_target=False, committee_target_gross=None)}
     )
     # Pass-1 reference is identical across the two branches.

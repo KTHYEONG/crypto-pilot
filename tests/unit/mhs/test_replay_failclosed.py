@@ -75,7 +75,7 @@ class TestTerminalFailClosedRejection:
     typed rejection instead of dying on an uncaught process error."""
 
     def test_ledger_capital_breach_is_fail_closed(self) -> None:
-        from src.mhs.evaluation import _classify_execution_failure
+        from src.mhs.evaluation.integrity import _classify_execution_failure
         from src.common.errors import DataIntegrityError
 
         idx = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
@@ -99,7 +99,8 @@ class TestTerminalFailClosedRejection:
     def test_book_failure_serializes_null_metrics(self) -> None:
         import json
 
-        from src.mhs.evaluation import MhsBookFailure, MhsBookReport, _jsonable
+        from src.mhs.contracts import MhsBookFailure, MhsBookReport
+        from src.mhs.report.artifacts import _jsonable
         from src.common.errors import DataIntegrityError
 
         exc = DataIntegrityError("pre-trade equity must be positive and finite")
@@ -198,7 +199,7 @@ class TestCapitalInvariantFailFast:
         """SCENARIO_MHS_CAPITAL_HARDENING_02: the more detailed message keeps
         the 'capital' keyword so ``_classify_execution_failure`` still maps it
         to the stable CAPITAL_INVARIANT_BREACH reason."""
-        from src.mhs.evaluation import _classify_execution_failure
+        from src.mhs.evaluation.integrity import _classify_execution_failure
 
         sym = "AAAUSDT"
         fill_time = pd.Timestamp("2021-01-01 00:10", tz="UTC")

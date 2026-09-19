@@ -6,8 +6,18 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
+import src.mhs.evaluation.books as books_mod
 import src.mhs.scaling as scaling
+from src.mhs.evaluation.books import _active_blend_book_and_grid
+from src.mhs.evaluation.concurrency import _run_books_concurrent
+from src.mhs.evidence import required_cost_tiers
+from src.mhs.evaluation.windows import _book_outcome
+from src.mhs.execution.pnl import mhs_ledger_pnl
+from src.mhs.params import (
+    MEASURED_EXECUTION_COST_TIERS_BPS,
+    PERIODS_PER_YEAR_1H,
+)
+from src.mhs.types import BOOK_BLEND_WEIGHTS, BOOK_SPECS
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
@@ -25,7 +35,7 @@ def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
     # natural fixture, and an engineered non-trivial scale proves Pass 2
     # genuinely re-ran with different weights (the 8th-iteration no-op class).
     args = _build_book_outcome_args(mhs_market)
-    report, _ = ev._book_outcome(**args)
+    report, _ = _book_outcome(**args)
     assert report.pre_vol_target_reference is not None
     assert report.pre_vol_target_reference_naive_sharpe is not None
     assert report.primary is not None
@@ -37,7 +47,7 @@ def test_book_outcome_is_two_pass(mhs_market, monkeypatch) -> None:
         return pd.Series(np.where(idx < mid, 1.0, 0.2), index=idx)
 
     monkeypatch.setattr(scaling, "_pnl_vol_target_scale", _forced_step_scale)
-    forced, _ = ev._book_outcome(**args)
+    forced, _ = _book_outcome(**args)
     assert forced.pre_vol_target_reference is not None
     assert forced.pre_vol_target_reference_naive_sharpe is not None
     assert forced.primary_naive_sharpe != forced.pre_vol_target_reference_naive_sharpe
@@ -49,7 +59,7 @@ def test_book_outcome_realized_cost_reaches_report(mhs_market) -> None:
     # fees, so the realized stress shortfall must be strictly higher than the
     # primary's.
     args = _build_book_outcome_args(mhs_market)
-    report, _ = ev._book_outcome(**args)
+    report, _ = _book_outcome(**args)
     assert report.failure is None
     assert report.primary is not None
     assert report.stress is not None
@@ -76,18 +86,18 @@ def test_toplevel_blend_replay_matches_renormalized_components(mhs_market) -> No
     # blend.
     args = _build_books_concurrent_args(mhs_market, universe_size=8)
     grid_1h = args["grid_1h"]
-    active_spec, active_grid = ev._active_blend_book_and_grid(
+    active_spec, active_grid = _active_blend_book_and_grid(
         args["fast"], args["slow"], args["fast_grid"], args["slow_grid"],
     )
     expected = (
-        ev.BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
-        + ev.BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
+        BOOK_BLEND_WEIGHTS["fast_reversal"] * args["w_fast_execution"].reindex(grid_1h).ffill().fillna(0.0)
+        + BOOK_BLEND_WEIGHTS["slow_momentum"] * args["w_slow_execution"].reindex(grid_1h).ffill().fillna(0.0)
     ).reindex(active_grid)
     collapsed = args["blend_1h"].where(args["execution_mask"], other=0.0).reindex(active_grid)
     assert not expected.equals(collapsed), "renormalized blend must differ from the collapsed pre-mask blend"
     # the concurrent production path replays exactly the renormalized composition
-    _, _, blend_report, _, _ = ev._run_books_concurrent(**args)
-    expected_report, _ = ev._book_outcome(
+    _, _, blend_report, _, _ = _run_books_concurrent(**args)
+    expected_report, _ = _book_outcome(
         "blend", active_spec, args["n_symbols"], active_grid,
         args["blend_1h"].reindex(active_grid), grid_1h,
         args["opens"], args["bar_funding"], args["phase_blend"], args["root"],
@@ -101,11 +111,11 @@ def test_active_blend_grid_slow_only() -> None:
     # BOOK_BLEND_WEIGHTS == {fast_reversal: 0.0, slow_momentum: 1.0},
     # the blend adopts slow's own BookSpec and 24h-native grid by identity (not
     # equality) -- never fast's 6h grid.
-    fast = ev.BOOK_SPECS["fast_reversal"]
-    slow = ev.BOOK_SPECS["slow_momentum"]
+    fast = BOOK_SPECS["fast_reversal"]
+    slow = BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
-    spec, grid = ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+    spec, grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     assert spec is slow
     assert grid is slow_grid
 
@@ -114,14 +124,14 @@ def test_active_blend_grid_fast_weighted(monkeypatch) -> None:
     # weight (historical 50/50), the helper returns fast/fast_grid by identity,
     # reproducing the pre-fix behavior byte-for-byte when fast is re-admitted.
     monkeypatch.setattr(
-        ev, "BOOK_BLEND_WEIGHTS",
+        books_mod, "BOOK_BLEND_WEIGHTS",
         {"fast_reversal": 0.5, "slow_momentum": 0.5},
     )
-    fast = ev.BOOK_SPECS["fast_reversal"]
-    slow = ev.BOOK_SPECS["slow_momentum"]
+    fast = BOOK_SPECS["fast_reversal"]
+    slow = BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
-    spec, grid = ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+    spec, grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     assert spec is fast
     assert grid is fast_grid
 
@@ -130,15 +140,15 @@ def test_active_blend_grid_no_weight_fails_closed(monkeypatch) -> None:
     # books the allocation invariant is violated and the helper must fail
     # closed (ValueError) rather than silently pick a default grid.
     monkeypatch.setattr(
-        ev, "BOOK_BLEND_WEIGHTS",
+        books_mod, "BOOK_BLEND_WEIGHTS",
         {"fast_reversal": 0.0, "slow_momentum": 0.0},
     )
-    fast = ev.BOOK_SPECS["fast_reversal"]
-    slow = ev.BOOK_SPECS["slow_momentum"]
+    fast = BOOK_SPECS["fast_reversal"]
+    slow = BOOK_SPECS["slow_momentum"]
     fast_grid = pd.date_range(_START, periods=4, freq="6h", tz="UTC")
     slow_grid = pd.date_range(_START, periods=1, freq="24h", tz="UTC")
     with pytest.raises(ValueError, match="allocates no capital"):
-        ev._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+        _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
 
 def test_blend_report_adopts_slow_cadence(mhs_market) -> None:
     # SCENARIO_MHS_BLEND_REPORT_ADOPTS_SLOW_CADENCE_04: under the fixture with
@@ -148,7 +158,7 @@ def test_blend_report_adopts_slow_cadence(mhs_market) -> None:
     # (fast_reversal's) -- proving the _run_books_concurrent call site was
     # rewired, not just the helper added in isolation.
     args = _build_books_concurrent_args(mhs_market)
-    _, _, blend_report, _, _ = ev._run_books_concurrent(**args)
+    _, _, blend_report, _, _ = _run_books_concurrent(**args)
     assert blend_report.failure is None
     assert blend_report.step_hours == 24
     assert blend_report.horizon_hours == 168
@@ -162,15 +172,15 @@ def test_book_outcome_executed_prescreen_reaches_report(mhs_market) -> None:
     book the executed fields mirror None. Fails against the pre-change code,
     which could only ever report the reference book."""
     args = _build_book_outcome_args(mhs_market)
-    report, _ = ev._book_outcome(**args)
+    report, _ = _book_outcome(**args)
     assert report.prescreen is not None
     assert report.executed_prescreen is not None
     assert report.executed_tail is not None
-    base_bps = ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"]
+    base_bps = MEASURED_EXECUTION_COST_TIERS_BPS["base"]
     assert report.executed_prescreen_net_t == report.executed_prescreen[base_bps].net_t
     assert report.prescreen[base_bps].net_t != report.executed_prescreen[base_bps].net_t
 
-    reference_only, _ = ev._book_outcome(**{**args, "replay_weights_step": None})
+    reference_only, _ = _book_outcome(**{**args, "replay_weights_step": None})
     assert reference_only.executed_prescreen is None
     assert reference_only.executed_tail is None
     assert reference_only.executed_prescreen_net_t is None
@@ -183,7 +193,7 @@ def test_book_outcome_existing_primary_metrics_unchanged(mhs_market) -> None:
     from src.mhs.evidence import cost_response_curve, tail_sensitivity_curve
 
     args = _build_book_outcome_args(mhs_market)
-    report, _ = ev._book_outcome(**args)
+    report, _ = _book_outcome(**args)
     assert report.primary is not None
     assert report.stress is not None
     assert report.failure is None
@@ -197,16 +207,16 @@ def test_book_outcome_existing_primary_metrics_unchanged(mhs_market) -> None:
         assert np.isfinite(value)
 
     weights_1h = args["weights_step"].reindex(args["grid_1h"]).ffill().fillna(0.0)
-    cost_grid = tuple(dict.fromkeys((0.0, 2.0, 4.0, 8.0, *ev.required_cost_tiers())))
+    cost_grid = tuple(dict.fromkeys((0.0, 2.0, 4.0, 8.0, *required_cost_tiers())))
     expected_prescreen = cost_response_curve(
-        weights_1h, args["opens"], args["bar_funding"], cost_grid, ev._PERIODS_PER_YEAR_1H,
+        weights_1h, args["opens"], args["bar_funding"], cost_grid, PERIODS_PER_YEAR_1H,
     )
-    _net, expected_turnover = ev.mhs_ledger_pnl(
+    _net, expected_turnover = mhs_ledger_pnl(
         weights_1h, args["opens"], args["bar_funding"], 8.0,
     )
     expected_tail = tail_sensitivity_curve(
         weights_1h.shift(2).fillna(0.0), args["opens"].pct_change(),
-        expected_turnover, 8.0, ev._PERIODS_PER_YEAR_1H, args["event_window_bars"],
+        expected_turnover, 8.0, PERIODS_PER_YEAR_1H, args["event_window_bars"],
     )
     assert report.prescreen == expected_prescreen
     assert report.tail == expected_tail
@@ -222,7 +232,7 @@ def test_book_outcome_blend_exposes_exposure_scale_series_constant_risk(mhs_mark
     request = dataclasses.replace(
         args["request"], pnl_vol_target_mode="constant_risk", committee_capital=True,
     )
-    report, _ = ev._book_outcome(**{**args, "name": "blend", "request": request})
+    report, _ = _book_outcome(**{**args, "name": "blend", "request": request})
     assert report.failure is None
     assert report.pre_vol_target_reference is not None
     assert isinstance(report.exposure_scale, pd.Series)
@@ -233,7 +243,7 @@ def test_book_outcome_blend_exposes_exposure_scale_series_constant_risk(mhs_mark
     expected = scaling._replay_exposure_scale(reference_daily_returns, request)
     np.testing.assert_allclose(report.exposure_scale.to_numpy(), expected.to_numpy())
 
-    non_blend, _ = ev._book_outcome(**{**args, "request": request})
+    non_blend, _ = _book_outcome(**{**args, "request": request})
     assert non_blend.failure is None
     assert non_blend.name != "blend"
     assert non_blend.exposure_scale is None

@@ -8,15 +8,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
 import src.mhs.marks as marks
 import src.mhs.marks as mhs_marks
 import src.mhs.statistics as statistics
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-    MhsHorizonDiagnosticReport,
-)
+from src.mhs.evaluation.folds import _run_anchored_fold
+from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+from src.mhs.evaluation.integrity import _truncate_replayable_decisions
+from src.mhs.marks import _load_funding_series, _load_window_minute_frames
+from src.market_data.services.futures_collection import DataCollector as _DataCollector
+from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs.report.schema import MhsHorizonDiagnosticReport
+from src.mhs.resources import _StageRecorder
 
 from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
     DEV_SYMBOLS,
@@ -32,11 +36,9 @@ class TestTypedArtifactRoundtrip:
     NaN-equity concealment."""
 
     def test_ledger_and_times_round_trip_as_utc(self, report, tmp_path) -> None:
-        from src.mhs.evaluation import (
-            MhsOutputTier,
-            load_mhs_replay_artifact,
-            persist_mhs_horizon_diagnostic_report,
-        )
+        from src.mhs.contracts import MhsOutputTier
+        from src.mhs.report.artifacts import load_mhs_replay_artifact
+        from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
         out = tmp_path / "mhs_report.json"
         persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.FULL)
@@ -68,11 +70,9 @@ class TestTypedArtifactRoundtrip:
     def test_json_reference_carries_schema_and_checksum(self, report, tmp_path) -> None:
         import json
 
-        from src.mhs.evaluation import (
-            MhsOutputTier,
-            load_mhs_replay_artifact,
-            persist_mhs_horizon_diagnostic_report,
-        )
+        from src.mhs.contracts import MhsOutputTier
+        from src.mhs.report.artifacts import load_mhs_replay_artifact
+        from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
         out = tmp_path / "mhs_report.json"
         persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.FULL)
@@ -96,10 +96,10 @@ class TestTypedArtifactRoundtrip:
         assert len(roundtrip) == ledger_ref["row_count"]
 
     def test_empty_replay_artifacts_round_trip(self, tmp_path) -> None:
-        from src.mhs.evaluation import (
+        from src.mhs.report.artifacts import load_mhs_replay_artifact
+        from src.mhs.report.persist import (
             _build_replay_category_tables,
             _write_unified_artifact_tables,
-            load_mhs_replay_artifact,
         )
         from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
 
@@ -125,13 +125,10 @@ class TestTypedArtifactRoundtrip:
     def test_completed_fold_artifacts_persisted(self, report, tmp_path) -> None:
         from dataclasses import replace
 
-        from src.mhs.evaluation import (
-            GO_REASON_UNSPECIFIED_POLICY,
-            MhsFoldReport,
-            MhsOutputTier,
-            load_mhs_replay_artifact,
-            persist_mhs_horizon_diagnostic_report,
-        )
+        from src.mhs.contracts import MhsFoldReport, MhsOutputTier
+        from src.mhs.report.artifacts import load_mhs_replay_artifact
+        from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
+        from src.mhs.research_go import GO_REASON_UNSPECIFIED_POLICY
         from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
 
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
@@ -183,10 +180,8 @@ class TestFullModeBackwardCompat:
         # FULL_MODE_BACKWARD_COMPAT
         import pandas as pd
 
-        from src.mhs.evaluation import (
-            MhsOutputTier,
-            persist_mhs_horizon_diagnostic_report,
-        )
+        from src.mhs.contracts import MhsOutputTier
+        from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
         out = tmp_path / "mhs_report.json"
         report_json = persist_mhs_horizon_diagnostic_report(
@@ -272,18 +267,17 @@ class TestFoldWindowTelemetryOracle:
         vs, ve = fold.validation_start, fold.validation_end
         request = MhsDiagnosticRequest(
             start=str(fold.train_start), end=str(fold.validation_end),
-            data_root=str(root), mark_mode="cache_required",
-            execution_timeframe="1m", log_run=False,
+            data_root=str(root), execution_timeframe="3m", log_run=False,
         )
-        target_weights, signal_available_at, roster, _grid_1h = ev._build_fold_target_weights(
+        target_weights, signal_available_at, roster, _grid_1h = _build_fold_target_weights(
             str(root), fold, request, funding_by_symbol,
         )
         target_replay = target_weights[roster]
         minute_grid = pd.date_range(vs, ve, freq="1min", tz="UTC")
-        target_replay, signal_available_at, _censored = ev._truncate_replayable_decisions(
+        target_replay, signal_available_at, _censored = _truncate_replayable_decisions(
             target_replay, signal_available_at, minute_grid, ExecutionSpec(),
         )
-        loaded_frames = ev._load_window_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m")
+        loaded_frames = _load_window_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m")
         minute_frames = mhs_marks._align_minute_frames(
             loaded_frames,
             "1m", vs, ve,
@@ -291,7 +285,7 @@ class TestFoldWindowTelemetryOracle:
         assert minute_frames is not None
         highs, lows, closes = minute_frames
         symbols = list(closes.columns)
-        marks = ev.DataCollector().load_mark_price_panel(
+        marks = _DataCollector().load_mark_price_panel(
             symbols, "1h", minute_grid, max_stale_hours=0,
         )
         mper = minute_grid[1] - minute_grid[0]
@@ -335,13 +329,13 @@ class TestFoldWindowTelemetryOracle:
     def test_fold_window_telemetry_monotonic_and_oracle_equivalent(self, fold_market) -> None:
         root, end = fold_market
         symbols = list(DEV_SYMBOLS)
-        funding_by_symbol, _ = ev._load_funding_series(symbols)
+        funding_by_symbol, _ = _load_funding_series(symbols)
         request = MhsDiagnosticRequest(
             start=str(START), end=str(end), data_root=str(root),
-            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            execution_timeframe="3m", log_run=False,
         )
-        recorder = ev._StageRecorder(log_run=False)
-        fold_report = ev._run_anchored_fold(
+        recorder = _StageRecorder(log_run=False)
+        fold_report = _run_anchored_fold(
             str(root), FOLD_WINDOW_FOLD, request, funding_by_symbol, 1.0, 0, recorder,
         )
         assert fold_report.strict is not None
@@ -417,13 +411,13 @@ class TestMhsExecutionAnnualization:
     def _pre_fix_metrics(ledger):
         net = ledger.net_returns
         equity = ledger.equity
-        pre_naive = float(net.mean() / net.std(ddof=1) * np.sqrt(ev._PERIODS_PER_YEAR_1H))
+        pre_naive = float(net.mean() / net.std(ddof=1) * np.sqrt(_PERIODS_PER_YEAR_1H))
         n = len(equity)
         pre_cagr = float(
-            (equity.iloc[-1] / equity.iloc[0]) ** (ev._PERIODS_PER_YEAR_1H / n) - 1.0,
+            (equity.iloc[-1] / equity.iloc[0]) ** (_PERIODS_PER_YEAR_1H / n) - 1.0,
         )
-        pre_net_ann = float(net.mean() * ev._PERIODS_PER_YEAR_1H)
-        pre_turnover = float(ledger.fill_turnover.mean() * ev._PERIODS_PER_YEAR_1H)
+        pre_net_ann = float(net.mean() * _PERIODS_PER_YEAR_1H)
+        pre_turnover = float(ledger.fill_turnover.mean() * _PERIODS_PER_YEAR_1H)
         return pre_naive, pre_cagr, pre_net_ann, pre_turnover
 
     def test_headline_metrics_larger_in_magnitude_holding_sign(self, annualization_report) -> None:
@@ -497,14 +491,8 @@ class TestTerminalPersistenceSubprocess:
             for b in payload["books"].values()
         )
 
-class TestMhsRefactorBitIdenticalReport:
-    """SCENARIO_MHS_REFACTOR_07: the memory/scheduling refactor
-    (fork-COW shared payloads, RAM-aware worker counts, candidate-weight
-    dedup, byte-budgeted window materialization, dead-cache removal) must
-    never alter a computed field of ``MhsHorizonDiagnosticReport``. The
-    synthetic-market full pipeline is compared bit-identically to the
-    pre-refactor golden payload (tests/fixtures/golden/mhs_refactor_baseline.json,
-    generated from the pre-refactor commit)."""
+class TestMhsSingleSourceReport:
+    """The research report and replay ledger expose one fixed OHLCV source."""
 
     _GOLDEN = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "golden" / "mhs_refactor_baseline.json"
 
@@ -538,7 +526,7 @@ class TestMhsRefactorBitIdenticalReport:
             return run_mhs_horizon_diagnostic(
                 MhsDiagnosticRequest(
                     start=str(START), end=str(end), data_root=str(root),
-                    execution_timeframe="1m", log_run=False, discovery_gate=True,
+                    execution_timeframe="3m", log_run=False, discovery_gate=True,
                 ),
             )
         finally:
@@ -635,22 +623,14 @@ class TestMhsRefactorBitIdenticalReport:
                     }
         return out
 
-    def test_report_fields_bit_identical_to_pre_refactor_golden(
+    def test_report_uses_fixed_ohlcv_valuation_source(
         self, refactor_report,
     ) -> None:
-        golden = json.loads(self._GOLDEN.read_text())
-        projected = self._project(refactor_report)
-
-        def _nan_equal(a, b) -> bool:
-            if isinstance(a, float) and isinstance(b, float):
-                return a == b or (np.isnan(a) and np.isnan(b))
-            return a == b
-
-        def _deep_equal(a, b) -> bool:
-            if isinstance(a, dict) and isinstance(b, dict):
-                return set(a) == set(b) and all(_deep_equal(a[k], b[k]) for k in a)
-            if isinstance(a, list) and isinstance(b, list):
-                return len(a) == len(b) and all(_deep_equal(x, y) for x, y in zip(a, b, strict=True))
-            return _nan_equal(a, b)
-
-        assert _deep_equal(projected, golden)
+        assert refactor_report.status == "COMPLETE"
+        assert refactor_report.mark_source == "OHLCV_CLOSE_FALLBACK"
+        for book in (*refactor_report.books.values(), refactor_report.blend):
+            assert book is not None
+            assert book.primary is not None
+            assert book.stress is not None
+            assert book.primary.mark_source == "OHLCV_CLOSE_FALLBACK"
+            assert book.stress.mark_source == "OHLCV_CLOSE_FALLBACK"

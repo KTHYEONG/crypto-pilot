@@ -5,10 +5,19 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
+import src.mhs.evaluation.committee as committee_mod
+import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evaluation.committee import _committee_evidence_weights_by_boundary, _committee_execution_book
+from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+from src.mhs.features import FEATURE_REGISTRY, build_feature_books
+from src.mhs.marks import _load_funding_series
+from src.mhs.params import (
+    COMMITTEE_MEMBERS,
+    COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+    COMMITTEE_TRANCHE_COUNT,
+    MEASURED_EXECUTION_COST_TIERS_BPS,
 )
 from src.quant.universe.pit_universe import symbol_partition
 
@@ -31,9 +40,9 @@ def test_committee_execution_book_tranche_1_is_identity() -> None:
         "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
         "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
     }
-    default = ev._committee_execution_book(**kwargs)
-    explicit = ev._committee_execution_book(**kwargs, tranche_count=1)
-    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(ev.COMMITTEE_MEMBERS)]
+    default = _committee_execution_book(**kwargs)
+    explicit = _committee_execution_book(**kwargs, tranche_count=1)
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(COMMITTEE_MEMBERS)]
     books = build_feature_books(member_specs, panels, mask, decision_grid, min_symbols=8)
     assert len(books) >= 1
     reference = sum(books.values()) / float(len(books))
@@ -50,8 +59,8 @@ def test_committee_execution_book_tranche_smooths_and_cuts_turnover() -> None:
         "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
         "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
     }
-    base = ev._committee_execution_book(**kwargs)
-    smoothed = ev._committee_execution_book(**kwargs, tranche_count=3)
+    base = _committee_execution_book(**kwargs)
+    smoothed = _committee_execution_book(**kwargs, tranche_count=3)
     raw_change = float(base.loc[decision_grid].diff().abs().sum().sum())
     smooth_change = float(smoothed.loc[decision_grid].diff().abs().sum().sum())
     assert smooth_change < raw_change
@@ -68,8 +77,8 @@ def test_committee_execution_book_tranche_preserves_dollar_neutrality() -> None:
         "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
         "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
     }
-    base = ev._committee_execution_book(**kwargs)
-    smoothed = ev._committee_execution_book(**kwargs, tranche_count=3)
+    base = _committee_execution_book(**kwargs)
+    smoothed = _committee_execution_book(**kwargs, tranche_count=3)
     non_zero = smoothed.abs().sum(axis=1) > 1e-9
     assert float(smoothed.loc[non_zero].sum(axis=1).abs().max()) < 1e-9
     raw_gross = base.abs().sum(axis=1)
@@ -81,7 +90,7 @@ def test_committee_execution_book_invalid_tranche_raises() -> None:
     # SCENARIO_COMMITTEE_EXECUTION_BOOK_INVALID_TRANCHE_RAISES
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
     with pytest.raises(ValueError, match="tranche_count"):
-        ev._committee_execution_book(
+        _committee_execution_book(
             close, quote_vol, taker_buy_quote, mask, decision_grid,
             min_symbols=8, tranche_count=0,
         )
@@ -90,9 +99,9 @@ def test_committee_execution_book_no_member_still_fails_closed(monkeypatch) -> N
     # SCENARIO_COMMITTEE_EXECUTION_BOOK_NO_MEMBER_STILL_FAILS_CLOSED: the
     # fail-closed path fires before any smoothing is applied.
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
-    monkeypatch.setattr(ev, "build_feature_books", lambda *a, **k: {})
+    monkeypatch.setattr(committee_mod, "build_feature_books", lambda *a, **k: {})
     with pytest.raises(RuntimeError, match="no committee member admitted"):
-        ev._committee_execution_book(
+        _committee_execution_book(
             close, quote_vol, taker_buy_quote, mask, decision_grid,
             min_symbols=8, tranche_count=3,
         )
@@ -123,23 +132,23 @@ def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
     )
-    target_default, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_default, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
-    target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_off, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, dataclasses.replace(request, committee_tranche_smoothing=False),
         funding_by_symbol,
     )
     pd.testing.assert_frame_equal(target_default, target_off)
 
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     default_report = run_mhs_horizon_diagnostic(request)
     explicit_off = run_mhs_horizon_diagnostic(
@@ -161,14 +170,14 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True, committee_tranche_smoothing=True,
     )
     seen: dict[str, int] = {}
-    real = ev._committee_execution_book
+    real = _committee_execution_book
 
     def _spy(*args, **kwargs):
         tranche_count = kwargs.get("tranche_count", 1)
@@ -177,17 +186,16 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
         seen["tranche_count"] = tranche_count
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_committee_execution_book", _spy)
-    monkeypatch.setattr(ev.committee, "_committee_execution_book", _spy)
-    ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
-    assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
+    monkeypatch.setattr(committee_mod, "_committee_execution_book", _spy)
+    _build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    assert seen["tranche_count"] == COMMITTEE_TRANCHE_COUNT
 
     seen.clear()
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     run_mhs_horizon_diagnostic(request)
-    assert seen["tranche_count"] == ev.COMMITTEE_TRANCHE_COUNT
+    assert seen["tranche_count"] == COMMITTEE_TRANCHE_COUNT
 
 @pytest.mark.slow
 def test_committee_tranche_count_threads_committee_and_carry_books_at_both_call_sites(
@@ -204,17 +212,17 @@ def test_committee_tranche_count_threads_committee_and_carry_books_at_both_call_
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     count = 5
-    assert count != ev.COMMITTEE_TRANCHE_COUNT
+    assert count != COMMITTEE_TRANCHE_COUNT
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True, committee_tranche_smoothing=True,
         committee_tranche_count=count, funding_carry_sleeve=True, funding_carry_weight=0.3,
     )
     seen: dict[str, list[int]] = {"committee": [], "carry": []}
-    real_book = ev._committee_execution_book
+    real_book = _committee_execution_book
     real_carry = fold_weights_mod.funding_carry_execution_book
 
     def _book_spy(*args, **kwargs):
@@ -225,21 +233,20 @@ def test_committee_tranche_count_threads_committee_and_carry_books_at_both_call_
         seen["carry"].append(args[4] if len(args) > 4 else kwargs["tranche_count"])
         return real_carry(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_committee_execution_book", _book_spy)
-    monkeypatch.setattr(ev.committee, "_committee_execution_book", _book_spy)
+    monkeypatch.setattr(committee_mod, "_committee_execution_book", _book_spy)
     monkeypatch.setattr(fold_weights_mod, "funding_carry_execution_book", _carry_spy)
     monkeypatch.setattr(committee_stage_mod, "funding_carry_execution_book", _carry_spy)
 
     # When the fold target builder runs
-    ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    _build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
     # Then both books received the configured count, never the module default
     assert seen == {"committee": [count], "carry": [count]}
 
     # When the top-level pipeline builds the committee book
     seen["committee"].clear()
     seen["carry"].clear()
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None))
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None))
     run_mhs_horizon_diagnostic(request)
     # Then the top-level call site threads the identical count
     assert seen["committee"]
@@ -258,10 +265,10 @@ def test_committee_execution_book_regime_adaptive_differs_from_fixed_variants() 
         "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
         "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
     }
-    fixed1 = ev._committee_execution_book(**kwargs, tranche_count=1)
-    fixed3 = ev._committee_execution_book(**kwargs, tranche_count=3)
-    adaptive = ev._committee_execution_book(
-        **kwargs, tranche_count=3, regime_adaptive_window=ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+    fixed1 = _committee_execution_book(**kwargs, tranche_count=1)
+    fixed3 = _committee_execution_book(**kwargs, tranche_count=3)
+    adaptive = _committee_execution_book(
+        **kwargs, tranche_count=3, regime_adaptive_window=COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     )
     assert not adaptive.equals(fixed1)
     assert not adaptive.equals(fixed3)
@@ -276,10 +283,10 @@ def test_committee_execution_book_regime_adaptive_preserves_dollar_neutrality() 
         "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
         "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
     }
-    fixed1 = ev._committee_execution_book(**kwargs, tranche_count=1)
-    fixed3 = ev._committee_execution_book(**kwargs, tranche_count=3)
-    adaptive = ev._committee_execution_book(
-        **kwargs, tranche_count=3, regime_adaptive_window=ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+    fixed1 = _committee_execution_book(**kwargs, tranche_count=1)
+    fixed3 = _committee_execution_book(**kwargs, tranche_count=3)
+    adaptive = _committee_execution_book(
+        **kwargs, tranche_count=3, regime_adaptive_window=COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     )
     non_zero = adaptive.abs().sum(axis=1) > 1e-9
     assert float(adaptive.loc[non_zero].sum(axis=1).abs().max()) < 1e-9
@@ -290,7 +297,7 @@ def test_committee_execution_book_regime_adaptive_invalid_window_raises() -> Non
     # SCENARIO_COMMITTEE_EXECUTION_BOOK_REGIME_ADAPTIVE_INVALID_WINDOW_RAISES
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
     with pytest.raises(ValueError, match="regime_adaptive_window"):
-        ev._committee_execution_book(
+        _committee_execution_book(
             close, quote_vol, taker_buy_quote, mask, decision_grid,
             min_symbols=8, tranche_count=3, regime_adaptive_window=2,
         )
@@ -301,9 +308,9 @@ def test_committee_execution_book_regime_adaptive_no_member_still_fails_closed(
     # SCENARIO_COMMITTEE_EXECUTION_BOOK_REGIME_ADAPTIVE_NO_MEMBER_STILL_FAILS_CLOSED:
     # the fail-closed path fires before any regime-adaptive selection.
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
-    monkeypatch.setattr(ev, "build_feature_books", lambda *a, **k: {})
+    monkeypatch.setattr(committee_mod, "build_feature_books", lambda *a, **k: {})
     with pytest.raises(RuntimeError, match="no committee member admitted"):
-        ev._committee_execution_book(
+        _committee_execution_book(
             close, quote_vol, taker_buy_quote, mask, decision_grid,
             min_symbols=8, tranche_count=3, regime_adaptive_window=15,
         )
@@ -350,23 +357,23 @@ def test_committee_regime_adaptive_tranche_default_off_byte_identical(
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
     )
-    target_default, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_default, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
-    target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_off, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, dataclasses.replace(request, committee_regime_adaptive_tranche=False),
         funding_by_symbol,
     )
     pd.testing.assert_frame_equal(target_default, target_off)
 
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     default_report = run_mhs_horizon_diagnostic(request)
     explicit_off = run_mhs_horizon_diagnostic(
@@ -391,31 +398,30 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
         committee_regime_adaptive_tranche=True,
     )
     seen: dict[str, int | None] = {}
-    real = ev._committee_execution_book
+    real = _committee_execution_book
 
     def _spy(*args, **kwargs):
         seen["regime_adaptive_window"] = kwargs.get("regime_adaptive_window")
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_committee_execution_book", _spy)
-    monkeypatch.setattr(ev.committee, "_committee_execution_book", _spy)
-    ev._build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
-    assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
+    monkeypatch.setattr(committee_mod, "_committee_execution_book", _spy)
+    _build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    assert seen["regime_adaptive_window"] == COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
     seen.clear()
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     run_mhs_horizon_diagnostic(request)
-    assert seen["regime_adaptive_window"] == ev.COMMITTEE_REGIME_ADAPTIVE_WINDOW
+    assert seen["regime_adaptive_window"] == COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
 @pytest.mark.slow
 def test_committee_beta_neutralize_threads_both_call_sites(
@@ -433,27 +439,26 @@ def test_committee_beta_neutralize_threads_both_call_sites(
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True, beta_neutralize=True,
     )
     seen: dict[str, pd.DataFrame | None] = {}
-    real = ev._committee_execution_book
+    real = _committee_execution_book
 
     def _spy(*args, **kwargs):
         seen["beta"] = kwargs.get("beta")
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(ev, "_committee_execution_book", _spy)
-    monkeypatch.setattr(ev.committee, "_committee_execution_book", _spy)
-    ev._build_fold_target_weights(str(root), _FOLD, request_on, funding_by_symbol)
+    monkeypatch.setattr(committee_mod, "_committee_execution_book", _spy)
+    _build_fold_target_weights(str(root), _FOLD, request_on, funding_by_symbol)
     assert isinstance(seen["beta"], pd.DataFrame)
 
     seen.clear()
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     run_mhs_horizon_diagnostic(request_on)
     assert isinstance(seen["beta"], pd.DataFrame)
@@ -461,15 +466,15 @@ def test_committee_beta_neutralize_threads_both_call_sites(
     seen.clear()
     request_default = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
     )
-    ev._build_fold_target_weights(str(root), _FOLD, request_default, funding_by_symbol)
+    _build_fold_target_weights(str(root), _FOLD, request_default, funding_by_symbol)
     assert seen["beta"] is None
 
     seen.clear()
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     default_report = run_mhs_horizon_diagnostic(request_default)
     explicit_off = run_mhs_horizon_diagnostic(
@@ -497,19 +502,19 @@ def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monk
     # the committee walk-forward reports sizing_mode='vol_target' -- the pure
     # pre-change vol-target path.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     wf = report.committee_diagnostic["walk_forward"]
     assert wf["sizing_mode"] == "vol_target"
-    assert set(wf["per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    assert set(wf["per_tier"]) == set(MEASURED_EXECUTION_COST_TIERS_BPS)
 
 @pytest.mark.slow
 def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) -> None:
@@ -517,12 +522,12 @@ def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) 
     # committee_kelly_sizing=True the committee walk-forward reports
     # sizing_mode='kelly_blend' -- the opt-in 50/50 quarter-Kelly LCB overlay.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(
@@ -556,7 +561,7 @@ def test_evidence_weights_by_boundary_builds_once(monkeypatch) -> None:
         "fold_1": pd.Timestamp("2023-01-01", tz="UTC"),
         "fold_2": pd.Timestamp("2024-01-01", tz="UTC"),
     }
-    result = ev._committee_evidence_weights_by_boundary(
+    result = _committee_evidence_weights_by_boundary(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, train_ends=train_ends,
     )
@@ -590,7 +595,7 @@ def test_evidence_weights_by_boundary_differentiates(monkeypatch) -> None:
         "early": pd.Timestamp("2021-06-01", tz="UTC"),
         "late": pd.Timestamp("2021-10-01", tz="UTC"),
     }
-    result = ev._committee_evidence_weights_by_boundary(
+    result = _committee_evidence_weights_by_boundary(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, train_ends=train_ends,
     )
@@ -644,12 +649,12 @@ def test_evidence_weights_by_boundary_tail_beyond_every_boundary() -> None:
     cut_close, cut_quote_vol = close.loc[in_cut], quote_vol.loc[in_cut]
     cut_taker, cut_mask = taker_no_gap.loc[in_cut], mask.loc[in_cut]
     train_ends = {"top_level": end_bound}
-    result_tail_gap = ev._committee_evidence_weights_by_boundary(
+    result_tail_gap = _committee_evidence_weights_by_boundary(
         close, quote_vol, taker_gap, mask,
         pd.date_range(close.index[0], close.index[-1], freq="24h", tz="UTC"),
         min_symbols=8, train_ends=train_ends,
     )
-    result_no_tail = ev._committee_evidence_weights_by_boundary(
+    result_no_tail = _committee_evidence_weights_by_boundary(
         cut_close, cut_quote_vol, cut_taker, cut_mask,
         pd.date_range(cut_close.index[0], cut_close.index[-1], freq="24h", tz="UTC"),
         min_symbols=8, train_ends=train_ends,
@@ -663,11 +668,11 @@ def test_evidence_weights_by_boundary_tail_beyond_every_boundary() -> None:
 
 def test_committee_execution_book_member_weights_none_identical() -> None:
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
-    book_no_arg = ev._committee_execution_book(
+    book_no_arg = _committee_execution_book(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, tranche_count=1,
     )
-    book_none = ev._committee_execution_book(
+    book_none = _committee_execution_book(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, tranche_count=1, member_weights=None,
     )
@@ -683,8 +688,8 @@ def test_committee_execution_book_coverage_cutoff_default_none_byte_identical() 
         "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
         "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
     }
-    book_no_arg = ev._committee_execution_book(**kwargs)
-    book_none = ev._committee_execution_book(**kwargs, coverage_cutoff=None)
+    book_no_arg = _committee_execution_book(**kwargs)
+    book_none = _committee_execution_book(**kwargs, coverage_cutoff=None)
     pd.testing.assert_frame_equal(book_no_arg, book_none)
 
 def test_committee_execution_book_beta_default_none_byte_identical() -> None:
@@ -696,8 +701,8 @@ def test_committee_execution_book_beta_default_none_byte_identical() -> None:
         "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
         "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 8,
     }
-    book_no_arg = ev._committee_execution_book(**kwargs)
-    book_none = ev._committee_execution_book(**kwargs, beta=None)
+    book_no_arg = _committee_execution_book(**kwargs)
+    book_none = _committee_execution_book(**kwargs, beta=None)
     pd.testing.assert_frame_equal(book_no_arg, book_none)
 
 def test_committee_execution_book_beta_neutralizes_and_preserves_target_gross() -> None:
@@ -716,8 +721,8 @@ def test_committee_execution_book_beta_neutralizes_and_preserves_target_gross() 
         np.repeat(col_beta[None, :], len(close.index), axis=0),
         index=close.index, columns=close.columns,
     )
-    base = ev._committee_execution_book(**kwargs, target_gross=0.5)
-    with_beta = ev._committee_execution_book(**kwargs, target_gross=0.5, beta=beta)
+    base = _committee_execution_book(**kwargs, target_gross=0.5)
+    with_beta = _committee_execution_book(**kwargs, target_gross=0.5, beta=beta)
     assert not base.equals(with_beta)
     qualifying = (
         mask.reindex(with_beta.index).fillna(False).sum(axis=1) >= kwargs["min_symbols"]
@@ -737,20 +742,20 @@ def test_committee_execution_book_coverage_cutoff_admits_pre_cutoff_member() -> 
     close, quote_vol, taker_gap, _taker_no_gap, mask = _panels_through_2023_with_taker_tail_gap()
     decision_grid = pd.date_range(close.index[0], close.index[-1], freq="24h", tz="UTC")
     cutoff = pd.Timestamp("2023-01-01", tz="UTC")
-    book_without_cutoff = ev._committee_execution_book(
+    book_without_cutoff = _committee_execution_book(
         close, quote_vol, taker_gap, mask, decision_grid,
         min_symbols=8, tranche_count=1,
     )
-    book_with_cutoff = ev._committee_execution_book(
+    book_with_cutoff = _committee_execution_book(
         close, quote_vol, taker_gap, mask, decision_grid,
         min_symbols=8, tranche_count=1, coverage_cutoff=cutoff,
     )
-    member_specs = [s for s in ev.FEATURE_REGISTRY if s.name in set(ev.COMMITTEE_MEMBERS)]
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(COMMITTEE_MEMBERS)]
     flow_members = [
         s.name for s in member_specs if "taker_buy_quote" in s.required_columns
     ]
     assert flow_members
-    books_with_cutoff = ev.build_feature_books(
+    books_with_cutoff = build_feature_books(
         member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_gap},
         mask, decision_grid, min_symbols=8, coverage_cutoff=cutoff,
@@ -763,20 +768,20 @@ def test_committee_execution_book_coverage_cutoff_admits_pre_cutoff_member() -> 
 
 def test_committee_execution_book_applies_member_weights() -> None:
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
-    book_equal = ev._committee_execution_book(
+    book_equal = _committee_execution_book(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, tranche_count=1,
     )
     # Build a weight dict that puts 0.8 on the first admitted member
-    member_specs = [s for s in ev.FEATURE_REGISTRY if s.name in set(ev.COMMITTEE_MEMBERS)]
-    books = ev.build_feature_books(
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(COMMITTEE_MEMBERS)]
+    books = build_feature_books(
         member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
         mask, decision_grid, min_symbols=8,
     )
     first_member = next(iter(books.keys()))
     member_weights = {first_member: 0.8}
-    book_weighted = ev._committee_execution_book(
+    book_weighted = _committee_execution_book(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, tranche_count=1, member_weights=member_weights,
     )
@@ -788,26 +793,26 @@ def test_committee_execution_book_applies_member_weights() -> None:
 
 def test_committee_execution_book_member_weights_fail_closed() -> None:
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
-    book_equal = ev._committee_execution_book(
+    book_equal = _committee_execution_book(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, tranche_count=1,
     )
     # member_weights with only keys not in admitted members
-    book_mismatch = ev._committee_execution_book(
+    book_mismatch = _committee_execution_book(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, tranche_count=1,
         member_weights={"nonexistent_member": 1.0},
     )
     pd.testing.assert_frame_equal(book_equal, book_mismatch)
     # All-zero weights also falls back to equal
-    member_specs = [s for s in ev.FEATURE_REGISTRY if s.name in set(ev.COMMITTEE_MEMBERS)]
-    books = ev.build_feature_books(
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(COMMITTEE_MEMBERS)]
+    books = build_feature_books(
         member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
         mask, decision_grid, min_symbols=8,
     )
     zero_weights = dict.fromkeys(books, 0.0)
-    book_zero = ev._committee_execution_book(
+    book_zero = _committee_execution_book(
         close, quote_vol, taker_buy_quote, mask, decision_grid,
         min_symbols=8, tranche_count=1, member_weights=zero_weights,
     )
@@ -820,10 +825,10 @@ def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_m
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ][:8]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
     )
     spy: dict = {}
@@ -833,10 +838,10 @@ def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_m
         return (None, None, None, {})
 
     import contextlib
-    monkeypatch.setattr(ev, "_committee_execution_book", spy_books)
+    monkeypatch.setattr(committee_mod, "_committee_execution_book", spy_books)
     # Should not raise; the spy captures the call
     with contextlib.suppress(Exception):
-        ev._build_fold_target_weights(
+        _build_fold_target_weights(
             str(root), _FOLD, request, funding_by_symbol, None,
             committee_member_weights={"some_member": 1.0},
         )
@@ -847,7 +852,6 @@ def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_m
 
 def test_top_level_committee_regime_scale_uses_shared_hourly_helper(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
     import pandas as pd
-    import src.mhs.evaluation as ev
     import src.mhs.scaling as scaling
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
@@ -856,7 +860,7 @@ def test_top_level_committee_regime_scale_uses_shared_hourly_helper(mhs_market_w
     root, end = mhs_market_with_taker_buy_quote
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
     )
     calls: list[pd.DatetimeIndex] = []
@@ -867,8 +871,8 @@ def test_top_level_committee_regime_scale_uses_shared_hourly_helper(mhs_market_w
         return real_helper(log_close, execution_mask, grid_1h, fast_horizon_hours, trend_efficiency_overlay)
 
     monkeypatch.setattr(scaling, "regime_cash_scale_1h", spy)
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None))
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None))
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     assert calls

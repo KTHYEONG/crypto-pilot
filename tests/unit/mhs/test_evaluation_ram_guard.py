@@ -213,7 +213,7 @@ def test_pipeline_ram_guard_fails_closed_before_oom(mhs_market_long) -> None:
     root, end = mhs_market_long
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, max_rss_bytes=1,
     )
     report = run_mhs_horizon_diagnostic(request)

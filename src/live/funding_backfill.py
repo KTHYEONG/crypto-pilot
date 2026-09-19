@@ -2,7 +2,8 @@
 
 Restores funding fees the PAPER ledger never accrued by replaying the
 position path reconstructed from the fills sidecar against the on-disk
-funding/mark files. Dry-run by default; persists only with ``--apply``.
+funding files and completed 1h trade closes. Dry-run by default; persists
+only with ``--apply``.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -31,7 +33,7 @@ from src.live.ledger import (
     position_at,
     save_ledger,
 )
-from src.live.runner import _load_paper_funding, _load_paper_marks
+from src.live.runner import _load_paper_funding, _load_paper_trade_closes
 from src.live.scheduler import _resolve_heartbeat_path
 from src.live.settings import LiveSettings
 from src.market_data.services.futures_collection import FUNDING_GAP_THRESHOLD_MS
@@ -66,11 +68,11 @@ class BackfillPlan:
 def compute_funding_backfill(
     history: Sequence[PositionSnapshot],
     funding_by_symbol: Mapping[str, pd.Series],
-    mark_by_symbol: Mapping[str, pd.Series],
+    trade_close_by_symbol: Mapping[str, pd.Series],
     *,
     end: pd.Timestamp,
 ) -> FundingBackfillResult:
-    """Accrue funding over (history[0].effective_from, end] with the engine formula."""
+    """Reconstruct a paper funding estimate from actual settled rates, historical held units and completed trade prices only. Missing held events or prices fail without partial ledger mutation."""
     if not history:
         raise DataIntegrityError("paper funding backfill requires position history")
     start = history[0].effective_from
@@ -104,7 +106,8 @@ def compute_funding_backfill(
                     break
     if bad:
         raise DataIntegrityError(f"paper funding backfill funding coverage gap symbols={','.join(sorted(bad))}")
-    # 엔진과 동일 공식으로 적립: -(rate * qty * mark_open).
+    # 엔진과 동일 공식으로 적립: -(rate * qty * completed trade close).
+    # 이후 바의 종가로 이전 펀딩 이벤트를 평가하지 않는다(정확한 완료-시각 매칭만 사용).
     by_symbol: dict[str, Decimal] = {}
     epochs = 0
     for symbol, series in funding_by_symbol.items():
@@ -116,11 +119,17 @@ def compute_funding_backfill(
             if qty == 0:
                 continue
             bar = epoch.floor("h")
-            marks = mark_by_symbol.get(symbol)
-            if marks is None or bar not in marks.index:
-                raise DataIntegrityError(f"paper funding backfill mark missing symbol={symbol} bar={bar.isoformat()}")
+            trade_closes = trade_close_by_symbol.get(symbol)
+            if trade_closes is None or bar not in trade_closes.index:
+                raise DataIntegrityError(f"paper funding backfill trade-price missing symbol={symbol} bar={bar.isoformat()}")
+            try:
+                px_f = float(trade_closes.loc[bar])
+            except (TypeError, ValueError, KeyError) as exc:
+                raise DataIntegrityError(f"paper funding backfill trade-price missing symbol={symbol} bar={bar.isoformat()}") from exc
+            if not math.isfinite(px_f) or px_f <= 0:
+                raise DataIntegrityError(f"paper funding backfill trade-price missing symbol={symbol} bar={bar.isoformat()}")
             by_symbol[symbol] = by_symbol.get(symbol, Decimal(0)) - (
-                Decimal(str(rate)) * qty * Decimal(str(float(marks.loc[bar])))
+                Decimal(str(rate)) * qty * Decimal(str(px_f))
             )
             epochs += 1
     return FundingBackfillResult(
@@ -241,7 +250,7 @@ def plan_funding_backfill(
     state: LedgerState,
     history: Sequence[PositionSnapshot],
     funding_by_symbol: Mapping[str, pd.Series],
-    mark_by_symbol: Mapping[str, pd.Series],
+    trade_close_by_symbol: Mapping[str, pd.Series],
     *,
     now: pd.Timestamp,
     accrual_start: pd.Timestamp | None = None,
@@ -259,7 +268,7 @@ def plan_funding_backfill(
             raise DataIntegrityError(
                 f"fills do not reconcile with ledger positions symbols={','.join(divergent)}"
             )
-    result = compute_funding_backfill(history, funding_by_symbol, mark_by_symbol, end=end)
+    result = compute_funding_backfill(history, funding_by_symbol, trade_close_by_symbol, end=end)
     return BackfillPlan(
         start=result.start,
         end=result.end,
@@ -310,12 +319,13 @@ def run_paper_funding_backfill(
     now: pd.Timestamp,
     accrual_start: pd.Timestamp | None = None,
     funding_loader: Callable[[Sequence[str]], Mapping[str, pd.Series]] = _load_paper_funding,
-    mark_loader: Callable[[Sequence[str]], Mapping[str, pd.Series]] = _load_paper_marks,
+    trade_close_loader: Callable[[Sequence[str]], Mapping[str, pd.Series]] | None = None,
     shadow_audit_dir: Path | None = None,
     backfill_audit_path: Path | None = None,
     heartbeat_path: Path | None = None,
+    **kwargs: Any,
 ) -> BackfillPlan:
-    """Run the one-shot PAPER funding backfill (dry-run unless ``apply``).
+    """Reconstruct a paper funding estimate from actual settled rates, historical held units and completed trade prices only. Missing held events or prices fail without partial ledger mutation.
 
     Args:
         settings: Live settings (mutation-suppressed mode only).
@@ -323,7 +333,8 @@ def run_paper_funding_backfill(
         now: Backfill window end when the ledger cannot derive one.
         accrual_start: Operator override for the accrual start.
         funding_loader: On-disk funding series loader.
-        mark_loader: On-disk mark series loader.
+        trade_close_loader: Completed 1h trade-close series loader (same source
+            as routine shadow accrual).
         shadow_audit_dir: shadow_cycle audit directory override.
         backfill_audit_path: Backfill audit JSONL override.
         heartbeat_path: Daemon heartbeat override.
@@ -334,6 +345,11 @@ def run_paper_funding_backfill(
     Raises:
         DataIntegrityError: On mode, idempotency, reconciliation, or data gaps.
     """
+    if trade_close_loader is None:
+        legacy = kwargs.pop("mark_loader", None)
+        trade_close_loader = legacy if legacy is not None else _load_paper_trade_closes
+    if kwargs:
+        raise TypeError(f"unexpected keyword arguments: {sorted(kwargs)}")
     if not settings.mode.suppresses_mutations:
         raise DataIntegrityError("paper funding backfill requires a mutation-suppressed mode")
     if apply:
@@ -354,7 +370,7 @@ def run_paper_funding_backfill(
     history = reconstruct_position_history(fills, effective)
     symbols = sorted({symbol for snap in history for symbol in snap.positions})
     plan = plan_funding_backfill(
-        state, history, funding_loader(symbols), mark_loader(symbols), now=now, accrual_start=accrual_start
+        state, history, funding_loader(symbols), trade_close_loader(symbols), now=now, accrual_start=accrual_start
     )
     if apply:
         save_ledger(ledger_path, apply_funding_backfill(state, plan))

@@ -4,12 +4,24 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
+import src.mhs.evaluation.concurrency as concurrency_mod
+from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.evaluation.folds as folds_mod
 import src.mhs.statistics as statistics
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evaluation.diagnostics import _trend_sleeve_diagnostic
+from src.mhs.evaluation.folds import _apply_trend_sleeve, _trend_sleeve_position
+from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+from src.mhs.execution.contracts import bar_funding_panel
+from src.mhs.execution.pnl import mhs_ledger_pnl
+from src.mhs.marks import _load_funding_series, _pit_execution_mask
+from src.mhs.panel import liquid_half_eligibility, load_base_panel
+from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS, TREND_SLEEVE_HORIZONS_HOURS
+from src.mhs.trend_sleeve import (
+    market_basket_log_price,
+    time_series_trend_position,
+    trend_sleeve_weights,
 )
 from src.quant.universe.pit_universe import symbol_partition
 
@@ -47,12 +59,12 @@ def test_trend_sleeve_default_off_bit_identical(mhs_market, monkeypatch) -> None
     # bit-identical to the explicit-off baseline -- the sleeve is inert unless
     # explicitly enabled, so a default run cannot change any existing output.
     root, end = mhs_market
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
-        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
     default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
@@ -74,19 +86,19 @@ def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
     # and the combined metrics; every value is finite or an explicit None,
     # never NaN silently coerced to 0.0.
     root, end = mhs_market
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, trend_sleeve=True, trend_sleeve_gross=0.3,
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     diag = report.trend_sleeve_diagnostic
     assert isinstance(diag, dict)
-    assert set(diag["net_sharpe_per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    assert set(diag["net_sharpe_per_tier"]) == set(MEASURED_EXECUTION_COST_TIERS_BPS)
     for value in diag["net_sharpe_per_tier"].values():
         assert value is None or np.isfinite(value)
     yearly = diag["yearly_net_t"]
@@ -97,7 +109,7 @@ def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
     corr = diag["slow_momentum_pnl_corr"]
     assert corr is None or np.isfinite(corr)
     combined = diag["combined"]
-    assert set(combined["net_sharpe_per_tier"]) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    assert set(combined["net_sharpe_per_tier"]) == set(MEASURED_EXECUTION_COST_TIERS_BPS)
     for value in combined["net_sharpe_per_tier"].values():
         assert value is None or np.isfinite(value)
     worst = combined["worst_year_net_t"]
@@ -115,11 +127,11 @@ def test_trend_sleeve_position_wraps_frozen_math() -> None:
     )
     eligible = pd.DataFrame(True, index=grid, columns=symbols)
     decision_grid = pd.date_range(grid[0], grid[-1], freq="24h", tz="UTC")
-    expected = ev.time_series_trend_position(
-        ev.market_basket_log_price(log_close, eligible),
-        ev.TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
+    expected = time_series_trend_position(
+        market_basket_log_price(log_close, eligible),
+        TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
     )
-    got = ev._trend_sleeve_position(log_close, eligible, decision_grid)
+    got = _trend_sleeve_position(log_close, eligible, decision_grid)
     pd.testing.assert_series_equal(got, expected)
 
 def test_apply_trend_sleeve_is_additive_and_pure() -> None:
@@ -131,10 +143,10 @@ def test_apply_trend_sleeve_is_additive_and_pure() -> None:
     position = pd.Series(0.5, index=grid)
     mask = pd.DataFrame(True, index=grid, columns=symbols)
     expected = blend_1h.add(
-        ev.trend_sleeve_weights(position, mask, 0.3).reindex(blend_1h.index).fillna(0.0),
+        trend_sleeve_weights(position, mask, 0.3).reindex(blend_1h.index).fillna(0.0),
         fill_value=0.0,
     )
-    out = ev._apply_trend_sleeve(blend_1h, position, mask, 0.3)
+    out = _apply_trend_sleeve(blend_1h, position, mask, 0.3)
     pd.testing.assert_frame_equal(out, expected)
     assert out is not blend_1h
     pd.testing.assert_frame_equal(
@@ -152,10 +164,10 @@ def test_trend_sleeve_overlay_off_byte_identical(mhs_market_with_taker_buy_quote
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
-        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8, "committee_capital": True,
     }
     request = MhsDiagnosticRequest(**base)
@@ -163,21 +175,19 @@ def test_trend_sleeve_overlay_off_byte_identical(mhs_market_with_taker_buy_quote
     def _must_not_be_called(*_args, **_kwargs):
         raise AssertionError("sleeve machinery must not run when the overlay is off")
 
-    monkeypatch.setattr(ev, "_trend_sleeve_position", _must_not_be_called)
     monkeypatch.setattr(folds_mod, "_trend_sleeve_position", _must_not_be_called)
-    monkeypatch.setattr(ev, "_apply_trend_sleeve", _must_not_be_called)
     monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _must_not_be_called)
-    target_patched, _sig, _roster, _grid = ev._build_fold_target_weights(
+    target_patched, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
 
     monkeypatch.undo()
-    target_baseline, _sig, _roster, _grid = ev._build_fold_target_weights(
+    target_baseline, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
     pd.testing.assert_frame_equal(target_patched, target_baseline)
 
-    target_gross0, _sig, _roster, _grid = ev._build_fold_target_weights(
+    target_gross0, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD,
         MhsDiagnosticRequest(**base, trend_sleeve=True, trend_sleeve_gross=0.0),
         funding_by_symbol,
@@ -194,20 +204,20 @@ def test_trend_sleeve_overlay_additive_fold(mhs_market_with_taker_buy_quote, mon
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
         trend_sleeve=True, trend_sleeve_gross=0.3,
     )
-    real = ev._apply_trend_sleeve
+    real = _apply_trend_sleeve
     seen = {"called": False}
 
     def _spy(blend_1h, position, execution_mask, gross_budget):
         seen["called"] = True
         seen["position"] = position
-        sleeve = ev.trend_sleeve_weights(position, execution_mask, gross_budget)
+        sleeve = trend_sleeve_weights(position, execution_mask, gross_budget)
         expected = blend_1h.add(sleeve.reindex(blend_1h.index).fillna(0.0), fill_value=0.0)
         out = real(blend_1h, position, execution_mask, gross_budget)
         pd.testing.assert_frame_equal(out, expected)
@@ -216,9 +226,8 @@ def test_trend_sleeve_overlay_additive_fold(mhs_market_with_taker_buy_quote, mon
         assert float(blend_1h.sum(axis=1).abs().max()) < 1e-6
         return out
 
-    monkeypatch.setattr(ev, "_apply_trend_sleeve", _spy)
     monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _spy)
-    target_on, _sig, _roster, _grid = ev._build_fold_target_weights(
+    target_on, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
     assert seen["called"]
@@ -235,15 +244,15 @@ def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote,
     root, end = mhs_market_with_taker_buy_quote
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
         trend_sleeve=True, trend_sleeve_gross=0.3,
     )
-    real = ev._apply_trend_sleeve
+    real = _apply_trend_sleeve
     spy_out = {}
 
     def _spy(blend_1h, position, execution_mask, gross_budget):
-        sleeve = ev.trend_sleeve_weights(position, execution_mask, gross_budget)
+        sleeve = trend_sleeve_weights(position, execution_mask, gross_budget)
         expected = blend_1h.add(sleeve.reindex(blend_1h.index).fillna(0.0), fill_value=0.0)
         out = real(blend_1h, position, execution_mask, gross_budget)
         pd.testing.assert_frame_equal(out, expected)
@@ -251,7 +260,6 @@ def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote,
         spy_out["position"] = position
         return out
 
-    monkeypatch.setattr(ev, "_apply_trend_sleeve", _spy)
     monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _spy)
     captured = {}
 
@@ -260,8 +268,8 @@ def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote,
         captured["committee_execution_book"] = kwargs.get("committee_execution_book")
         return (None, None, None, {}, None)
 
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _fake_books)
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _fake_books)
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
@@ -282,23 +290,22 @@ def test_trend_sleeve_overlay_roster_no_starvation(mhs_market_with_taker_buy_quo
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
         trend_sleeve=True, trend_sleeve_gross=0.3,
     )
-    real = ev._apply_trend_sleeve
+    real = _apply_trend_sleeve
     seen = {}
 
     def _spy(blend_1h, position, execution_mask, gross_budget):
         seen["execution_mask"] = execution_mask
         return real(blend_1h, position, execution_mask, gross_budget)
 
-    monkeypatch.setattr(ev, "_apply_trend_sleeve", _spy)
     monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _spy)
-    target_on, _sig, _roster, _grid = ev._build_fold_target_weights(
+    target_on, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
     assert "execution_mask" in seen
@@ -320,14 +327,14 @@ def test_trend_sleeve_fold_memory_order(mhs_market_with_taker_buy_quote, monkeyp
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
         trend_sleeve=True, trend_sleeve_gross=0.3,
     )
-    real = ev._trend_sleeve_position
+    real = _trend_sleeve_position
     seen = {}
 
     def _spy(log_close, eligible, decision_grid):
@@ -335,9 +342,8 @@ def test_trend_sleeve_fold_memory_order(mhs_market_with_taker_buy_quote, monkeyp
         seen["decision_grid"] = decision_grid
         return real(log_close, eligible, decision_grid)
 
-    monkeypatch.setattr(ev, "_trend_sleeve_position", _spy)
     monkeypatch.setattr(folds_mod, "_trend_sleeve_position", _spy)
-    _target, _sig, _roster, _grid = ev._build_fold_target_weights(
+    _target, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
     assert "eligible_shape" in seen
@@ -358,12 +364,12 @@ def test_trend_sleeve_diagnostic_uses_deployed_book(mhs_market) -> None:
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     funded = [
         s for s in symbols
-        if s in funding_by_symbol and s not in ev.SOURCE_GAP_EXCLUDED_SYMBOLS
+        if s in funding_by_symbol and s not in SOURCE_GAP_EXCLUDED_SYMBOLS
     ]
-    panel = ev.load_base_panel(
+    panel = load_base_panel(
         str(root), "1h", ("close", "open", "quote_vol"), _START, end,
         partition="dev", min_bars=2000,
     )
@@ -377,26 +383,26 @@ def test_trend_sleeve_diagnostic_uses_deployed_book(mhs_market) -> None:
         ]
         for s in funded
     }
-    bar_funding = ev.bar_funding_panel(funding_window, grid_1h)
-    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    bar_funding = bar_funding_panel(funding_window, grid_1h)
+    eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
-    execution_mask = ev._pit_execution_mask(quote_vol, eligible, 8)
+    execution_mask = _pit_execution_mask(quote_vol, eligible, 8)
     request = MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=0.3)
 
     decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
-    basket = ev.market_basket_log_price(log_close, eligible)
-    position = ev.time_series_trend_position(
-        basket, ev.TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
+    basket = market_basket_log_price(log_close, eligible)
+    position = time_series_trend_position(
+        basket, TREND_SLEEVE_HORIZONS_HOURS, decision_grid,
     )
-    sleeve = ev.trend_sleeve_weights(position, execution_mask, request.trend_sleeve_gross)
+    sleeve = trend_sleeve_weights(position, execution_mask, request.trend_sleeve_gross)
 
-    diag = ev._trend_sleeve_diagnostic(
+    diag = _trend_sleeve_diagnostic(
         log_close, eligible, opens, bar_funding, execution_mask, sleeve.copy(), request,
     )
     assert diag["slow_momentum_pnl_corr"] == pytest.approx(1.0)
-    combined_net, _ = ev.mhs_ledger_pnl(
+    combined_net, _ = mhs_ledger_pnl(
         sleeve.add(sleeve), opens, bar_funding,
-        ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+        MEASURED_EXECUTION_COST_TIERS_BPS["base"],
     )
     expected_combined_sharpe = statistics._annualized_1h_sharpe(combined_net)
     assert expected_combined_sharpe is not None

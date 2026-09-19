@@ -238,9 +238,9 @@ def assert_relevant_execution_data_coverage(
 def _mark_availability_index(path: Path) -> pd.DatetimeIndex:
     """Sorted unique mark-availability times for one symbol's mark parquet.
 
-    Mirrors ``_cached_mark_panel``'s causal rules exactly: only rows whose
-    ``close`` is finite AND strictly positive count, and a row at time ``t``
-    becomes available only at ``t + 1h``.
+    Causal availability rules: only rows whose ``close`` is finite AND
+    strictly positive count, and a row at time ``t`` becomes available only
+    at ``t + 1h``.
     """
     if not path.exists():
         return pd.DatetimeIndex([], tz="UTC")
@@ -271,10 +271,9 @@ def _mark_covers_grid(
 ) -> bool:
     """Whether every hour of ``grid`` is causally covered by available marks.
 
-    Exact replica of ``_cached_mark_panel``'s reindex semantics: availability
-    points are reindexed onto the grid with ``method='ffill'`` and the same
-    ``limit`` the replay derives from ``stale_hours``, so a gate that passes
-    cannot die mid-replay from a missing mark.
+    Availability points are reindexed onto the grid with ``method='ffill'``
+    and the same ``limit`` the gate derives from ``stale_hours``, so a gate
+    that passes cannot die mid-replay from a missing mark.
     """
     if avail.empty or grid.empty:
         return False
@@ -297,9 +296,8 @@ def assert_relevant_mark_price_coverage(
     Reuses ``roster_membership_intervals`` and checks each hour of each
     membership interval against the symbol's ``markPriceKlines`` parquet
     (resolved via ``futures_collection._mark_price_path``) using EXACTLY the
-    causal availability rules ``_cached_mark_panel`` applies during replay:
-    rows with finite, strictly-positive ``close`` become available at
-    ``datetime + 1h``, and a stale-carry allowance of ``stale_hours`` is
+    causal availability rules of the mark panel: rows with finite,
+    strictly-positive ``close`` become available at ``datetime + 1h``, and a stale-carry allowance of ``stale_hours`` is
     honored with the same ``ffill`` limit. A gate that is more permissive than
     the replay would let a run pass and then die mid-replay -- this gate is
     deliberately strict.
@@ -758,5 +756,6 @@ def refresh_mhs_execution_manifest(manifest_path: str | Path) -> dict[str, objec
         output_path=attestation_path,
     )
     payload["input_manifest_path"] = str(attestation_path)
+    payload["input_seal"] = "unverified"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return cast(dict[str, object], payload)

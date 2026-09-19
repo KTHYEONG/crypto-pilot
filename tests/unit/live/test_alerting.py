@@ -318,9 +318,9 @@ def test_event_info_paper_ledger_events() -> None:
     from src.live.alerting import EVENT_INFO
 
     lag = EVENT_INFO["paper_funding_lag"]
-    close = EVENT_INFO["paper_delisted_close"]
+    close = EVENT_INFO["paper_delisted_unresolved"]
     assert lag["severity_label"] == "WARNING"
-    assert close["severity_label"] == "NOTICE"
+    assert close["severity_label"] == "CRITICAL"
     for info in (lag, close):
         assert "docker" in info["action"]
         assert set(info) == {"title", "severity_badge", "severity_label", "header_color", "bg_color", "impact", "action"}

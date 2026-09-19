@@ -9,13 +9,14 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.mhs import evaluation as ev
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.evaluation.books as books_mod
+import src.mhs.evaluation.fold_weights as fold_weights
+import src.mhs.evaluation.specs as specs_mod
 import src.mhs.marks as marks
-from src.mhs.evaluation import MhsDiagnosticRequest
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.types import BOOK_BLEND_WEIGHTS
+from src.mhs.types import BOOK_BLEND_WEIGHTS, BOOK_SPECS
 from src.mhs.evidence import AnchoredPurgedFold
 from src.mhs.horizons import horizon_log_return
 from src.quant.universe.pit_universe import symbol_partition
@@ -54,9 +55,10 @@ def _write_market(root: Path, n_hours: int, log_price_fn, include_minute: bool =
     epoch = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
     hdir = root / "1h"
     mdir = root / "1m"
+    threed = root / "3m"
     fdir = root / "funding"
     mkdir = root / "markPriceKlines" / "1h"
-    for d in (hdir, mdir, fdir, mkdir):
+    for d in (hdir, mdir, threed, fdir, mkdir):
         d.mkdir(parents=True, exist_ok=True)
     minute_idx = pd.date_range(_START, end, freq="1min", tz="UTC")
     minute_epoch = (minute_idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
@@ -81,6 +83,14 @@ def _write_market(root: Path, n_hours: int, log_price_fn, include_minute: bool =
                 {"timestamp": minute_epoch, "open": mp, "high": mp * 1.0005,
                  "low": mp * 0.9995, "close": mp, "quote_vol": [1000.0] * len(minute_idx)},
             ).to_parquet(mdir / f"{sym}.parquet")
+            three = pd.DataFrame(
+                {"open": mp, "high": mp * 1.0005, "low": mp * 0.9995,
+                 "close": mp, "quote_vol": 1000.0}, index=minute_idx,
+            ).resample("3min").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "quote_vol": "sum"},
+            ).dropna()
+            three.insert(0, "timestamp", (three.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"))
+            three.to_parquet(threed / f"{sym}.parquet", index=False)
             mark = pd.Series(mp, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
             pd.DataFrame(
                 {"timestamp": epoch, "open": mark, "high": mark, "low": mark,
@@ -123,11 +133,9 @@ def mhs_market(tmp_path, monkeypatch):
     end = _write_market(root, n_hours, _random_walk_log_px(n_hours))
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; a prior test in the same process/worker using
-    # a different root with an overlapping symbol name would otherwise leak
-    # stale mark data into this fixture's replay.
-    ev._get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless; the shared invalidation entry point
+    # keeps runs isolated when fixtures redirect data roots between tests.
+    marks.clear_mhs_market_data_caches()
     return root, end
 
 
@@ -138,18 +146,16 @@ def choppy_market(tmp_path, monkeypatch):
     end = _write_market(root, n_hours, _trend_choppy_log_px(n_hours), include_minute=True)
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; a prior test in the same process/worker using
-    # a different root with an overlapping symbol name would otherwise leak
-    # stale mark data into this fixture's replay.
-    ev._get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless; the shared invalidation entry point
+    # keeps runs isolated when fixtures redirect data roots between tests.
+    marks.clear_mhs_market_data_caches()
     return root, end
 
 
 def _request(root: Path, end: pd.Timestamp, **overrides) -> MhsDiagnosticRequest:
     kwargs = {
         "start": str(_START), "end": str(end), "data_root": str(root),
-        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
     kwargs.update(overrides)
@@ -159,8 +165,8 @@ def _request(root: Path, end: pd.Timestamp, **overrides) -> MhsDiagnosticRequest
 def _fold_targets(mhs_market, request: MhsDiagnosticRequest, fold: AnchoredPurgedFold):
     root, end = mhs_market
     symbols = [s for s in _DEV_SYMBOLS if symbol_partition(s) == "dev"]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
-    return ev._build_fold_target_weights(str(root), fold, request, funding_by_symbol)
+    funding_by_symbol, _ = marks._load_funding_series(symbols)
+    return fold_weights._build_fold_target_weights(str(root), fold, request, funding_by_symbol)
 
 
 class TestSignalEmaSpan:
@@ -168,10 +174,10 @@ class TestSignalEmaSpan:
     SCENARIO_MHS_EMA_SIGN_AWARE_SLOW_UNCHANGED_05"""
 
     def test_signal_ema_span_is_sign_aware(self) -> None:
-        assert ev._signal_ema_span(-1, 48, 6) is None
-        assert ev._signal_ema_span(-1, 168, 24) is None
-        assert ev._signal_ema_span(1, 48, 6) == max(1, round(48 / 6 * ev.SIGNAL_EMA_HORIZON_SPAN))
-        assert ev._signal_ema_span(1, 168, 24) == 7
+        assert specs_mod._signal_ema_span(-1, 48, 6) is None
+        assert specs_mod._signal_ema_span(-1, 168, 24) is None
+        assert specs_mod._signal_ema_span(1, 48, 6) == max(1, round(48 / 6 * specs_mod.SIGNAL_EMA_HORIZON_SPAN))
+        assert specs_mod._signal_ema_span(1, 168, 24) == 7
 
     def test_fast_book_unsmoothed_matches_direct_construction(self) -> None:
         idx = pd.date_range(_START, periods=500, freq="1h", tz="UTC")
@@ -184,10 +190,10 @@ class TestSignalEmaSpan:
             index=idx,
         )
         eligible = pd.DataFrame(True, index=idx, columns=log_close.columns)
-        fast = ev.BOOK_SPECS["fast_reversal"]
+        fast = BOOK_SPECS["fast_reversal"]
         fast_grid = pd.date_range(_START, idx[-1], freq="6h", tz="UTC")
 
-        w_fast = ev._book_weights(log_close, eligible, fast, fast_grid, ema_span=None)
+        w_fast = books_mod._book_weights(log_close, eligible, fast, fast_grid, ema_span=None)
         sig = horizon_log_return(log_close, fast.horizon_hours)
         sig_step = sig.reindex(fast_grid)
         expected = phase_tranche_book(
@@ -197,9 +203,9 @@ class TestSignalEmaSpan:
         pd.testing.assert_frame_equal(w_fast, expected)
 
     def test_slow_ema_span_equals_pre_refactor_inline_formula(self) -> None:
-        slow = ev.BOOK_SPECS["slow_momentum"]
-        inline = max(1, round(slow.horizon_hours / slow.step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
-        assert ev._signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours) == inline
+        slow = BOOK_SPECS["slow_momentum"]
+        inline = max(1, round(slow.horizon_hours / slow.step_hours * specs_mod.SIGNAL_EMA_HORIZON_SPAN))
+        assert specs_mod._signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours) == inline
 
     def test_fold_targets_byte_identical_when_ema_applied_to_both_bands(self, mhs_market) -> None:
         # The pre-refactor behavior applied the whipsaw EMA to BOTH bands; only
@@ -210,11 +216,11 @@ class TestSignalEmaSpan:
         request = _request(root, end)
 
         def old_inline_span(band_sign: int, horizon_hours: int, step_hours: int) -> int | None:
-            return max(1, round(horizon_hours / step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
+            return max(1, round(horizon_hours / step_hours * specs_mod.SIGNAL_EMA_HORIZON_SPAN))
 
         targets_real, *_ = _fold_targets(mhs_market, request, _FOLD)
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(ev, "_signal_ema_span", old_inline_span)
+        monkeypatch.setattr(specs_mod, "_signal_ema_span", old_inline_span)
         try:
             targets_old, *_ = _fold_targets(mhs_market, request, _FOLD)
         finally:
@@ -253,8 +259,6 @@ class TestTrendEfficiencyOverlayDefaultOff:
         import src.mhs.pipeline.stages.fold as fold_stage
         import src.mhs.pipeline.stages.replay as replay_stage
 
-        monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", _spy_books)
-        monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", _spy_post)
         monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
         monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
         monkeypatch.setattr(replay_stage, "_run_books_concurrent", _spy_books, raising=False)
@@ -301,7 +305,7 @@ class TestTrendEfficiencyOverlayScalesSlowOnly:
     def test_overlay_does_not_touch_fast_book(self, choppy_market, monkeypatch) -> None:
         root, end = choppy_market
         recorded: dict[str, int | None] = {}
-        original = ev._book_weights
+        original = books_mod._book_weights
 
         def _spy_book_weights(log_close, eligible, spec, step_grid, ema_span=None):
             if spec.band.sign == -1:
@@ -309,7 +313,6 @@ class TestTrendEfficiencyOverlayScalesSlowOnly:
                 recorded["fast_calls"] = recorded.get("fast_calls", 0) + 1
             return original(log_close, eligible, spec, step_grid, ema_span=ema_span)
 
-        monkeypatch.setattr(ev, "_book_weights", _spy_book_weights)
         monkeypatch.setattr(books_mod, "_book_weights", _spy_book_weights)
         _fold_targets(choppy_market, _request(root, end), _CHOPPY_FOLD)
         n_off = recorded.get("fast_calls", 0)

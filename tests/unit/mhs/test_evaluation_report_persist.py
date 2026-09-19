@@ -8,8 +8,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
 import src.mhs.report.persist as persist_mod
+from src.mhs.contracts import MhsBookReport, MhsFoldReport, MhsOutputTier
+from src.mhs.report.persist import _daily_resample_ledger, persist_mhs_horizon_diagnostic_report
 from src.common.errors import DataIntegrityError
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
@@ -40,10 +41,10 @@ from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
 )
 
 def test_mhs_output_tier_enum_values() -> None:
-    assert ev.MhsOutputTier.COMPACT.value == "compact"
-    assert ev.MhsOutputTier.FULL.value == "full"
-    assert ev.MhsOutputTier("compact") is ev.MhsOutputTier.COMPACT
-    assert ev.MhsOutputTier("full") is ev.MhsOutputTier.FULL
+    assert MhsOutputTier.COMPACT.value == "compact"
+    assert MhsOutputTier.FULL.value == "full"
+    assert MhsOutputTier("compact") is MhsOutputTier.COMPACT
+    assert MhsOutputTier("full") is MhsOutputTier.FULL
 
 def test_regression_existing_report_fields_unchanged() -> None:
     # SCENARIO_REGRESSION_EXISTING_REPORT_FIELDS_UNCHANGED: the two-pass
@@ -51,7 +52,7 @@ def test_regression_existing_report_fields_unchanged() -> None:
     # field (which doubles as the JSON key via to_payload()) -- only
     # pre_vol_target_reference/pre_vol_target_reference_naive_sharpe are new,
     # following the exact patient_reference field-addition precedent.
-    book_fields = {f.name for f in dataclasses.fields(ev.MhsBookReport)}
+    book_fields = {f.name for f in dataclasses.fields(MhsBookReport)}
     for field_name in (
         "name", "band", "horizon_hours", "step_hours", "tranche_count",
         "n_symbols", "phase", "prescreen", "tail", "primary", "stress",
@@ -66,7 +67,7 @@ def test_regression_existing_report_fields_unchanged() -> None:
     assert "pre_vol_target_reference" in book_fields
     assert "pre_vol_target_reference_naive_sharpe" in book_fields
 
-    fold_fields = {f.name for f in dataclasses.fields(ev.MhsFoldReport)}
+    fold_fields = {f.name for f in dataclasses.fields(MhsFoldReport)}
     for field_name in (
         "fold_index", "validation_start", "validation_end", "strict", "stress",
         "primary_valid", "primary_autocorr_sharpe", "primary_naive_sharpe",
@@ -99,7 +100,7 @@ def test_daily_resample_ledger_fidelity() -> None:
     )
     frame.loc[2, "fill_turnover"] = 0.5
     frame.loc[5, "fill_turnover"] = 0.25
-    daily = ev._daily_resample_ledger(frame)
+    daily = _daily_resample_ledger(frame)
     assert len(daily) == 3
     assert list(daily.columns) == [
         "date", "equity_open", "equity_high", "equity_low", "equity_close",
@@ -132,15 +133,15 @@ def test_daily_resample_ledger_fails_closed_on_bad_equity() -> None:
         }
     )
     with pytest.raises(DataIntegrityError, match="equity"):
-        ev._daily_resample_ledger(frame)
+        _daily_resample_ledger(frame)
 
 def test_compact_json_stripped_and_wired(tmp_path) -> None:
     # COMPACT_JSON_STRIPPED: compact persist drops per-replay SHA-256/schema
     # references while retaining only row counts and the scalar report fields.
     report = _build_compact_report()
     out = tmp_path / "mhs_report.json"
-    persisted = ev.persist_mhs_horizon_diagnostic_report(
-        report, out, tier=ev.MhsOutputTier.COMPACT,
+    persisted = persist_mhs_horizon_diagnostic_report(
+        report, out, tier=MhsOutputTier.COMPACT,
     )
     assert persisted == out
     payload = json.loads(out.read_text())
@@ -163,7 +164,7 @@ def test_compact_size_budget(tmp_path) -> None:
     # budgets (daily ledger < 500KB, JSON < 20KB) for a small replay workload.
     report = _build_compact_report()
     out = tmp_path / "mhs_report.json"
-    ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.COMPACT)
+    persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.COMPACT)
     artifact_dir = out.parent / "mhs_report_artifacts"
     daily_path = artifact_dir / "daily_ledger.parquet"
     assert daily_path.exists()
@@ -185,20 +186,17 @@ def test_compact_failure_escalates_past_artifacts(tmp_path, monkeypatch) -> None
 
     monkeypatch.setattr(persist_mod, "_daily_resample_ledger", _boom)
     out = tmp_path / "mhs_report.json"
-    persisted = ev.persist_mhs_horizon_diagnostic_report(
-        report, out, tier=ev.MhsOutputTier.COMPACT,
+    persisted = persist_mhs_horizon_diagnostic_report(
+        report, out, tier=MhsOutputTier.COMPACT,
     )
     assert persisted is None
     assert not out.exists()
 
-def test_gitignore_full_subdir_only() -> None:
-    # GITIGNORE_FULL_SUBDIR: only the _full/ audit subdirectory is gitignored;
-    # the compact daily ledger path and summary JSON stay trackable.
+def test_gitignore_research_outputs_are_untracked() -> None:
+    # Research outputs are local artifacts; authored documentation remains the
+    # only tracked content beneath docs/.
     gitignore = Path(".gitignore").read_text(encoding="utf-8").splitlines()
-    assert "docs/results/mhs_horizon_diagnostic_artifacts/_full/" in gitignore
-    assert "docs/results/mhs_horizon_diagnostic_artifacts/" not in gitignore
-    assert "docs/results/mhs_horizon_diagnostic.json" not in gitignore
-    assert "docs/results/mhs_horizon_diagnostic_artifacts/daily_ledger.parquet" not in gitignore
+    assert "docs/results/" in gitignore
 
 def test_persist_wires_run_history_append_for_compact_and_full(tmp_path, monkeypatch) -> None:
     """SCENARIO_MHS_RESULT_LOG_05: ``persist_mhs_horizon_diagnostic_report``
@@ -208,16 +206,18 @@ def test_persist_wires_run_history_append_for_compact_and_full(tmp_path, monkeyp
 
     def _spy_append(record, history_dir):
         calls.append((record["output_tier"], str(history_dir)))
-        return Path(history_dir) / "active.jsonl"
+        return Path(history_dir) / "registry.sqlite3"
 
     monkeypatch.setattr(persist_mod, "append_run_history_record", _spy_append)
     out = tmp_path / "mhs_report.json"
-    ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.COMPACT)
-    ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.FULL)
+    persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.COMPACT)
+    persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.FULL)
 
     assert len(calls) == 2
     assert [tier for tier, _ in calls] == ["compact", "full"]
-    assert all(history_dir.endswith("mhs_run_history") for _, history_dir in calls)
+    from src.mhs.run_history import canonical_history_registry
+
+    assert all(history_dir == str(canonical_history_registry().parent) for _, history_dir in calls)
 
 def test_persist_still_appends_when_compact_resample_fails(tmp_path, monkeypatch) -> None:
     """SCENARIO_MHS_RESULT_LOG_05 (COMPACT-None branch): the COMPACT path that
@@ -231,13 +231,13 @@ def test_persist_still_appends_when_compact_resample_fails(tmp_path, monkeypatch
 
     def _spy_append(record, history_dir):
         calls.append(record)
-        return Path(history_dir) / "active.jsonl"
+        return Path(history_dir) / "registry.sqlite3"
 
     monkeypatch.setattr(persist_mod, "_daily_resample_ledger", _boom)
     monkeypatch.setattr(persist_mod, "append_run_history_record", _spy_append)
     out = tmp_path / "mhs_report.json"
-    persisted = ev.persist_mhs_horizon_diagnostic_report(
-        report, out, tier=ev.MhsOutputTier.COMPACT,
+    persisted = persist_mhs_horizon_diagnostic_report(
+        report, out, tier=MhsOutputTier.COMPACT,
     )
 
     assert persisted is None
@@ -250,16 +250,16 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
     report = _build_compact_report()
     out = tmp_path / "mhs_report.json"
 
-    baseline = ev.persist_mhs_horizon_diagnostic_report(
-        report, out, tier=ev.MhsOutputTier.COMPACT,
+    baseline = persist_mhs_horizon_diagnostic_report(
+        report, out, tier=MhsOutputTier.COMPACT,
     )
 
     def _boom(record, history_dir):
         raise RuntimeError("history boom")
 
     monkeypatch.setattr(persist_mod, "append_run_history_record", _boom)
-    isolated = ev.persist_mhs_horizon_diagnostic_report(
-        report, out, tier=ev.MhsOutputTier.COMPACT,
+    isolated = persist_mhs_horizon_diagnostic_report(
+        report, out, tier=MhsOutputTier.COMPACT,
     )
 
     assert isolated == baseline
@@ -308,13 +308,13 @@ def test_run_history_record_discloses_live_parity_blockers() -> None:
 
     # When
     trim_record = build_mhs_run_history_record(
-        report, trim_request, ev.MhsOutputTier.COMPACT, None
+        report, trim_request, MhsOutputTier.COMPACT, None
     )
     plain_record = build_mhs_run_history_record(
-        report, plain_request, ev.MhsOutputTier.COMPACT, None
+        report, plain_request, MhsOutputTier.COMPACT, None
     )
     none_record = build_mhs_run_history_record(
-        report, None, ev.MhsOutputTier.COMPACT, None
+        report, None, MhsOutputTier.COMPACT, None
     )
 
     # Then
@@ -366,8 +366,8 @@ def test_run_history_record_carries_deploy_gate_verdict() -> None:
     trim_request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(name_drift_trim=True)))
 
     # When
-    record = build_mhs_run_history_record(report, trim_request, ev.MhsOutputTier.COMPACT, None)
-    none_record = build_mhs_run_history_record(report, None, ev.MhsOutputTier.COMPACT, None)
+    record = build_mhs_run_history_record(report, trim_request, MhsOutputTier.COMPACT, None)
+    none_record = build_mhs_run_history_record(report, None, MhsOutputTier.COMPACT, None)
 
     # Then
     gate = record["deploy_gate"]
@@ -376,4 +376,3 @@ def test_run_history_record_carries_deploy_gate_verdict() -> None:
     assert isinstance(gate["metrics"], dict)
     assert none_record["deploy_gate"] is None
     json.dumps(record["deploy_gate"])
-

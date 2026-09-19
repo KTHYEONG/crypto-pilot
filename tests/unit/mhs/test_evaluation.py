@@ -29,7 +29,7 @@ from src.mhs.execution import simulated_inventory_ledger
 
 def test_mhs_5m_02_pit_roster_uses_only_eligible_trailing_volume() -> None:
     """MHS-5M-02-PIT-ROSTER: ranking is causal and eligibility masked."""
-    from src.mhs.evaluation import _pit_execution_mask
+    from src.mhs.marks import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=720, freq="1h", tz="UTC")
     volume = pd.DataFrame({"A": 10.0, "B": 20.0, "C": 30.0}, index=idx)
@@ -47,7 +47,7 @@ def test_mhs_roster_hysteresis_enter_unchanged_from_baseline() -> None:
     mask is exactly ``{A: True, B: True, C: False}`` as before hysteresis was
     added -- entry via the top ``universe_size`` trailing-volume rank is
     unchanged."""
-    from src.mhs.evaluation import _pit_execution_mask
+    from src.mhs.marks import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=720, freq="1h", tz="UTC")
     volume = pd.DataFrame({"A": 10.0, "B": 20.0, "C": 30.0}, index=idx)
@@ -62,7 +62,7 @@ def test_mhs_roster_hysteresis_member_survives_rank_dip_within_exit_band() -> No
     a member whose rank worsens past ``universe_size`` but stays within the
     ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER`` band is retained,
     unlike the pre-fix hard cutoff which dropped it."""
-    from src.mhs.evaluation import _pit_execution_mask
+    from src.mhs.marks import _pit_execution_mask
     from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
@@ -92,7 +92,7 @@ def test_mhs_roster_hysteresis_member_exits_past_exit_band() -> None:
     """SCENARIO_MHS_HYSTERESIS_03_MEMBER_EXITS_PAST_EXIT_BAND: a member whose
     rank worsens past ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER``
     is dropped on that bar."""
-    from src.mhs.evaluation import _pit_execution_mask
+    from src.mhs.marks import _pit_execution_mask
     from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
@@ -119,7 +119,7 @@ def test_mhs_roster_hysteresis_ineligible_exits_immediately() -> None:
     """SCENARIO_MHS_HYSTERESIS_04_INELIGIBLE_EXITS_IMMEDIATELY_REGARDLESS_OF_HYSTERESIS:
     a held member whose eligible flag becomes False is excluded on that same bar
     even though its raw trailing-volume rank is still inside the exit band."""
-    from src.mhs.evaluation import _pit_execution_mask
+    from src.mhs.marks import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=721, freq="1h", tz="UTC")
     volume = pd.DataFrame(
@@ -888,3 +888,32 @@ def test_SCENARIO_MHS_DSR_07_GATE_STILL_MONOTONE() -> None:
     )
     assert non_binding.eligible is False
     assert GO_REASON_DRAWDOWN_BUDGET_NON_BINDING in non_binding.reason_codes
+
+
+def test_diagnostic_validation_without_mark_mode() -> None:
+    """A request without mark_mode validates with no attribute error or cache-required branch."""
+    import inspect
+
+    import src.mhs.evaluation.windows as windows
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET
+    from src.mhs.validation import validate_request
+
+    request = MhsDiagnosticRequest()
+    assert not hasattr(request, "mark_mode")
+    validate_request(request, COMMITTEE_TARGET_GROSS_UNSET)
+    assert "mark_mode" not in inspect.getsource(validate_request)
+    assert "request.mark_mode" not in inspect.getsource(windows._book_outcome)
+    assert "cache_required" not in inspect.getsource(windows._book_outcome)
+
+
+def test_non_3m_timeframe_fails_before_market_reads() -> None:
+    """A non-3m execution timeframe fails closed at request construction."""
+    import pytest
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        MhsDiagnosticRequest(execution_timeframe="5m", passive_timeout_minutes=10)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        MhsDiagnosticRequest(execution_timeframe="1m", passive_timeout_minutes=30)  # type: ignore[arg-type]

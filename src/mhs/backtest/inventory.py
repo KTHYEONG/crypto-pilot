@@ -76,6 +76,33 @@ _INVENTORY_LEDGER_INVALID: str = "INVENTORY_LEDGER_INVALID"
 _UNPRICED_TERMINAL_CODES: frozenset[str] = frozenset(
     {"MISSING_HELD_MARK", "MISSING_HELD_FUNDING", "MISSING_DECISION_MARK"}
 )
+_CANONICAL_MARK_TO_OHLCV_GAP: dict[str, str] = {
+    "MISSING_DECISION_MARK": "MISSING_ORDER_OHLCV",
+    "MISSING_HELD_MARK": "MISSING_FORCED_EXIT_CLOSE",
+}
+
+
+def _to_canonical_ohlcv_gap(gap: ExecutionDataGap) -> ExecutionDataGap:
+    """Map legacy mark-cache gap codes onto OHLCV source gaps for canonical replay."""
+    mapped = _CANONICAL_MARK_TO_OHLCV_GAP.get(str(gap.code))
+    if mapped is None:
+        return gap
+    return ExecutionDataGap(
+        code=mapped,  # type: ignore[arg-type]
+        symbol=gap.symbol,
+        timestamp=gap.timestamp,
+        decision_time=gap.decision_time,
+        signal_time=gap.signal_time,
+        execution_bound=gap.execution_bound,
+    )
+
+
+def _actual_excluded_symbols(target_columns: list[str] | None) -> tuple[str, ...]:
+    """Report only static-registry symbols actually absent from this target path."""
+    if not target_columns:
+        return ()
+    held = set(target_columns)
+    return tuple(sorted(s for s in SOURCE_GAP_EXCLUDED_SYMBOLS if s not in held))
 
 
 def _execution_fence(target_weights: pd.DataFrame) -> pd.Timestamp:
@@ -158,8 +185,8 @@ def _validate_replay_window(
         omitted_values = expected_targets.loc[decisions, omitted].to_numpy(dtype="float64")
         if not bool((omitted_values == 0.0).all()):
             raise DataIntegrityError("omitted canonical targets must be exactly zero")
-    if window.marks is None or window.quote_volumes is None:
-        raise DataIntegrityError("window requires explicit marks and quote_volumes")
+    if window.quote_volumes is None:
+        raise DataIntegrityError("window requires explicit quote_volumes")
     if window.funding_known is None or window.bar_available_at is None:
         raise DataIntegrityError("window requires explicit funding_known and bar_available_at")
     minute_grid = _require_utc_index(window.minute_grid, "minute_grid")
@@ -172,11 +199,12 @@ def _validate_replay_window(
         "highs": window.highs,
         "lows": window.lows,
         "closes": window.closes,
-        "marks": window.marks,
         "bar_funding": window.bar_funding,
         "quote_volumes": window.quote_volumes,
         "funding_known": window.funding_known,
     }
+    if window.marks is not None:
+        frames["marks"] = window.marks
     for name, frame in frames.items():
         if not frame.index.equals(minute_grid) or list(frame.columns) != symbols:
             raise DataIntegrityError(f"{name} must share minute_grid and ordered symbol columns")
@@ -390,7 +418,6 @@ def _inventory_window_stream(
             start,
             end,
             funding_by_symbol,
-            "cache_required",
             spec,
             funding_failures=funding_failures,
             budget_bytes=budget_bytes,
@@ -570,7 +597,7 @@ def evaluate_process_inventory_backtest(
     evaluation_context: EvaluationContext | None = None,
     member_evidence: MaturedMemberReturns | None = None,
 ) -> ProcessInventoryReport:
-    """Replay original process targets through the primary three-minute engine.
+    """Validate the canonical target against the streamed trade bars, source publication times, funding knowledge and exact replay ledger. OHLCV-only valuation is explicit in the result; absent mark data has no bearing on historical strategy validity.
 
     Preparation, replay-window and finalization diagnostics are emitted before
     completion so a resource termination cannot erase the last observed phase.
@@ -791,17 +818,18 @@ def evaluate_process_inventory_backtest(
                 if acc is None:
                     continue
                 for gap in acc.data_gaps:
+                    canonical = _to_canonical_ohlcv_gap(gap)
                     key = (
-                        gap.code,
-                        gap.symbol,
-                        gap.timestamp,
-                        gap.decision_time,
-                        gap.signal_time,
-                        gap.execution_bound,
+                        canonical.code,
+                        canonical.symbol,
+                        canonical.timestamp,
+                        canonical.decision_time,
+                        canonical.signal_time,
+                        canonical.execution_bound,
                     )
                     if key not in seen_keys:
                         seen_keys.add(key)
-                        observed.append(gap)
+                        observed.append(canonical)
         observed.sort(key=lambda g: (g.timestamp, g.code, g.symbol))
         if proxy is not None:
             effective_policy = proxy.base.execution_policy
@@ -826,7 +854,9 @@ def evaluate_process_inventory_backtest(
             completed_decision_start=progress.completed_decision_start,
             completed_decision_end=progress.completed_decision_end,
             source_gaps=tuple(observed),
-            source_gap_excluded_symbols=tuple(sorted(SOURCE_GAP_EXCLUDED_SYMBOLS)),
+            source_gap_excluded_symbols=_actual_excluded_symbols(
+                list(targets.columns) if targets is not None else None
+            ),
             resource_measurements=recorder.records,
             memory_stats=failure_stats,
             funding_coverage_gaps=_live_funding_coverage(live_sets),
