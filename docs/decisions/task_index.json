@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_MINIMAL_DATA_CONSOLIDATION",
+      "date": "2026-09-19",
+      "adr_id": "ADR_20260919_MHS_MINIMAL_DATA_CONSOLIDATION",
+      "domain": "execution",
+      "title": "MHS OHLCV 데이터 계약과 실행성 기준선",
+      "why": "Mark 가격 의존 제거 과정에서 입력 계약·진단·라이브 수집 범위가 한 계획으로 확장되어 검증 비용과 실행 실패 원인이 섞였다.",
+      "resolution": "현재 01~06 구현과 실제 CLI 결과를 기준선으로 기록하고 OHLCV close fallback 및 실제 보유 상태에 대한 시간순 공백 검증을 기준으로 삼는다.",
+      "impact": "명시적 데이터 기간은 약 84초에 완료되지만 기본 기간은 약 247초 후 재무적으로 무효가 되므로 이후 수정은 데이터 기간과 재무 유효성 신호를 우선 다룬다.",
+      "caveat": "전체 로스터의 funding coverage interval 수는 보유 중 손실과 동일하지 않으며 상장폐지·정산 근거 없이 과거 종목을 제외하면 생존편향이 발생한다."
+    },
+    {
       "task_id": "TASK_MHS_VALIDATION_EXECUTION_PARITY",
       "date": "2026-09-19",
       "adr_id": "ADR_20260919_MHS_VALIDATION_EXECUTION_PARITY",
@@ -1004,16 +1015,6 @@
       "why": "성장 잠재력(CAGR)은 확인됐으니 단점(2025 쏠림 게이트 미통과, MDD -45~54%)을 보완하면서 고점을 유지하는 근본 개선안을 데이터로 탐색해달라는 요청.",
       "resolution": "src/application/research/mhs/scaling.py: resolved_exposure_cap 단일 소유 함수 신설(request만으로 캡 해석, 데이터 비의존). _committee_kelly_scale에 cap 파라미터 추가(기존 clip(upper=1.0) 하드캡이 과거 ADR_20260816 Kelly 기각의 진짜 원인이었음 -- vol-target 항은 leverage_ceiling까지 갈 수 있는데 Kelly 항만 1.0에 묶여 50/50 블렌드가 순수 디레버리저로 작동). _committee_capital_replay_scale/_replay_exposure_scale에 동일 cap 전파. evaluation.py에 exposure_scale_cap_binding_fraction 관측 필드 추가(top-level+fold 양쪽) -- 캡이 92.5% 날짜에 물려 vol-targeting이 사실상 무효화되고 이것이 2025 쏠림의 기계적 원인임을 확인한 진단의 회귀신호. src/mhs/params.py의 growth_extreme(3.0x) rung을 TEMP에서 정식 등록으로 승격(3m 원장 실측 CAGR 5.17/Calmar 9.54/전 fold valid 근거), REGISTERED_POLICY_THRESHOLDS의 cap_30_roster를 cap_60_roster로 개명. src/mhs/pipeline/config.py CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT=60 신설, MhsRunConfig 기본값 30->60 전환(MhsDiagnosticRequest 자체 기본값은 30 유지). src/cli/commands/research/mhs.py --committee-kelly-sizing help의 허위 사실(과거 Kelly가 CAGR/Calmar를 손해봤다는 서술)을 교정하고 --execution-universe-size 기본값/help 갱신. 실측: 평균 레버리지 통제 비교에서 50/50 양측 Kelly 블렌드가 f=1.5/2.0/2.5 전 수준에서 CAGR/MDD/Calmar/max_fold_share 4축 동시 지배(2025 제외해도 지배, 파라미터 15조합 중 14개 지배), breadth 30->60이 CAGR+17.4%/Sharpe+20.2%/stress-Sharpe+14.8%/MDD 사실상 불변으로 Grinold IR∝IC√N 예측(배율1.25)의 96%를 실측 재현. breadth 100은 CAGR/Sharpe/Calmar가 60보다 하락하나 max_fold_share가 처음 0.5 밑(0.465)으로 내려가는 새 트레이드오프 발견(후속 과제로 분리). BTC 베타헤지는 2024 개선되나 MDD 악화로 반증.",
       "impact": "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_kelly_two_sided_sizing_contract.json 전체 PASS(spec/lint/mypy/pytest). 사전등록된 3m 원장 실측(대조군/Kelly+growth/Kelly+growth_extreme)은 코드 반영 직후 이어서 실행해 실제 채택 여부를 판정할 예정 -- 이번 sync 시점에는 아직 미실행."
-    },
-    {
-      "task_id": "TASK_MHS_LEVERAGE_FRONTIER_SCAN",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN",
-      "domain": "risk",
-      "title": "MHS 레버리지 상한 저비용 탐색 도구 신설 + MDD 오버레이 반증",
-      "why": "노출 상한(leverage_ceiling)이 수동 등록 하이퍼파라미터인데 후보마다 4~6분짜리 전체 3m 리플레이가 필요함. 또한 MDD를 낮추면서 CAGR을 유지/향상하는 레버리지 외 근본 대안이 있는지 데이터로 판정 요청.",
-      "resolution": "src/research/risk/growth_sizing.py에 FrontierScanPoint + scan_leverage_frontier 신설(diagnose_growth_headroom과 동일하게 solve_growth_optimal_risk를 호출하지 않고 부트스트랩 루프를 의도적으로 중복구현 -- plateau 규칙이 음의 성장률 후보의 mdd_breach_prob/ruin_prob를 0으로 가려버리는 것을 실측 확인했기 때문). src/application/research/mhs/leverage_scan.py 신규(_load_pre_oos_reference_returns/run_leverage_frontier_scan, 기존 daily_ledger.parquet 아티팩트만 읽고 전체 파이프라인 재실행 없음, fail-closed). src/cli/commands/research/mhs.py에 --leverage-frontier-scan/--leverage-frontier-multiples opt-in 플래그 추가(신규 서브커맨드 트리 아님, 기존 reduced-CLI-surface 불변식 보존; 플래그 True 시 무거운 파이프라인 임포트 전에 단락). tests/contract/test_request_cli_parity.py의 CLI/계약 1:1 대응 불변식에 신규 플래그 2개를 --output-tier와 동일하게 discard 처리. src/mhs/params.py에 LEVERAGE_FRONTIER_SCAN_MULTIPLES(0.25~5.0) 신설, 프로덕션 COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS(0.25~3.0)와 분리 유지. 실측 병행 진단: growth(2.0x) 원장의 실제 MDD(-41.8%, 2024-02-27)가 단일 급락이 아니라 2023-12~2024-04 4개월짜리 완만한 침식(BTC 2년차 강세장)임을 확인, 실현 드로다운 기반 디리스크 오버레이 10개 조합을 인과적으로 시뮬레이션했으나 단 하나도 baseline을 파레토 지배(CAGR유지/향상 AND MDD감소)하지 못함을 반증(전량 트레이드오프, ADR_20260812 crash_regime_tilt·ADR_20260823 mom3_skew 제거와 동일 패턴) -- 코드 미구현, 문서화만.",
-      "impact": "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_leverage_frontier_scan_contract.json --fast PASS(spec/lint/mypy). 타겟 테스트(test_growth_sizing.py/test_leverage_scan.py/test_mhs.py/test_request_cli_parity.py) 82건 전체 PASS. tests/integration/mhs/test_golden_identity.py 1건 FAIL은 이번 변경 스택 이전(prior ADR_20260822/23) golden fixture drift로 stash 비교를 통해 이번 세션 변경과 무관함을 확인, 별도 후속 수정 필요."
     }
   ]
 }
