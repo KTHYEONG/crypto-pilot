@@ -7,12 +7,14 @@ split, so a refit can never see data at or after its own ``train_end``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 from scipy.linalg import solve_triangular
 from scipy.optimize import nnls
 
+from src.common.errors import DataIntegrityError
 from src.mhs.books import portfolio_rebalance_trigger
 from src.mhs.params import (
     PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
@@ -20,6 +22,9 @@ from src.mhs.params import (
     PROCESS_PURGE_HOURS,
     PROCESS_REFIT_FREQUENCY,
 )
+
+if TYPE_CHECKING:
+    from src.mhs.backtest.labels import MaturedMemberReturns
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +83,69 @@ def monthly_refit_schedule(
                 effective_from=start,
                 effective_to=end,
                 train_end=start - pd.Timedelta(hours=purge_hours),
+            )
+        )
+    return tuple(points)
+
+
+def matured_monthly_refit_schedule(
+    labels: MaturedMemberReturns,
+    evaluation_end: pd.Timestamp,
+    *,
+    min_train_days: int,
+    fit_latency: pd.Timedelta,
+) -> tuple[RefitPoint, ...]:
+    """Schedule monthly applications after enough complete historical labels exist.
+
+    Args:
+        labels: Member evidence with explicit maturity and knowledge masks.
+        evaluation_end: Last requested UTC decision date, inclusive.
+        min_train_days: Registered minimum count of complete daily training labels.
+        fit_latency: Registered nonnegative time between fitting and application.
+    Returns:
+        Contiguous monthly application intervals with information cutoffs derived
+        from label maturity, not backward feature lookbacks.
+    Raises:
+        ValueError: Controls are invalid or no refit has sufficient completed evidence.
+        DataIntegrityError: Evidence labels or the resulting intervals are inconsistent.
+    """
+    if evaluation_end.tzinfo is None or str(evaluation_end.tz) != "UTC":
+        raise ValueError("timestamps must be tz-aware UTC")
+    if isinstance(min_train_days, bool) or not isinstance(min_train_days, int) or min_train_days < 1:
+        raise ValueError(f"min_train_days must be a positive integer, got {min_train_days}")
+    if not isinstance(fit_latency, pd.Timedelta) or fit_latency < pd.Timedelta(0):
+        raise ValueError(f"fit_latency must be a nonnegative timedelta, got {fit_latency}")
+    if len(labels.returns) == 0:
+        raise ValueError("no refit has sufficient completed evidence")
+    if not (
+        len(labels.label_start)
+        == len(labels.label_end)
+        == len(labels.available_at)
+        == len(labels.returns)
+    ):
+        raise DataIntegrityError("label intervals must align exactly with return rows")
+    known_all = labels.known.to_numpy(dtype=bool).all(axis=1)
+    first_day = labels.returns.index[0].normalize() + pd.Timedelta(days=1)
+    candidates = pd.date_range(first_day, evaluation_end.normalize(), freq=PROCESS_REFIT_FREQUENCY, tz="UTC")
+    kept: list[pd.Timestamp] = []
+    for candidate in candidates:
+        cutoff = candidate - fit_latency
+        timely = np.asarray(labels.available_at <= cutoff, dtype=bool) & np.asarray(
+            labels.label_end <= cutoff, dtype=bool
+        )
+        if int((known_all & timely).sum()) >= min_train_days:
+            kept.append(candidate)
+    if not kept:
+        raise ValueError("no refit has sufficient completed evidence")
+    last_end = evaluation_end.normalize() + pd.Timedelta(days=1)
+    points: list[RefitPoint] = []
+    for i, start in enumerate(kept):
+        end = kept[i + 1] if i + 1 < len(kept) else last_end
+        points.append(
+            RefitPoint(
+                effective_from=start,
+                effective_to=end,
+                train_end=start - fit_latency,
             )
         )
     return tuple(points)

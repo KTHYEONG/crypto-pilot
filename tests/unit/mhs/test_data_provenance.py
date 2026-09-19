@@ -29,6 +29,20 @@ def test_input_manifest_requires_every_consumed_path(tmp_path) -> None:
     assert 'UNATTESTED_REQUIRED_FILE' in result.reason_codes
 
 
+def test_input_manifest_numeric_timestamp_bounds_use_epoch_milliseconds(tmp_path) -> None:
+    import json
+    import pandas as pd
+    from src.mhs.data_provenance import seal_mhs_input_manifest
+
+    path = tmp_path / "BTCUSDT.parquet"
+    pd.DataFrame({"timestamp": [1735689600000], "close": [1.0]}).to_parquet(path)
+    manifest = tmp_path / "inputs.json"
+    seal_mhs_input_manifest([path], data_root=tmp_path, output_path=manifest)
+    entry = json.loads(manifest.read_text())["files"][0]
+    assert entry["first_timestamp"].startswith("2025-01-01T00:00:00")
+    assert entry["last_timestamp"].startswith("2025-01-01T00:00:00")
+
+
 def test_forward_observation_digest_mismatch_cannot_upgrade() -> None:
     import pandas as pd
     from src.mhs.data_provenance import DataEvidenceTier, validate_forward_execution_observations

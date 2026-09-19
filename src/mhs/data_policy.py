@@ -35,11 +35,10 @@ MHS_DATA_POLICY_DEFAULT: Final[Literal["zombie_mask_v1"]] = "zombie_mask_v1"
 # 2025-06-19~2025-07-23(34일) 펀딩 공백이 재개되는 진짜 불확실성 구간이 드러나
 # Block3(MID_LIFE_GAP)로 재분류.
 #
-# 2026-09-15 mhs_time_scoped_roster_mask: MISSING_ACTIVE_FUNDING(신규 진입 시도
-# 차단, 보유 리스크 없음)을 KNOWN_ZERO_VOLUME과 동일하게 무조건 미체결 처리하고,
-# ledger_terminal_only가 MISSING_HELD_MARK도 MISSING_HELD_FUNDING과 동일 규칙으로
-# 인증하도록 확장한 뒤 실측 리플레이로 재검증 중 -- ICPUSDT(조기시작)는 이 확장만
-# 으로 안전하게 해소되어 제외.
+# 2026-09-18 원천 재조회: AIA/ICP의 3m 내부 공백은 Binance Vision 월·일별
+# klines에도 동일하게 존재해 복구 불가. BNT/BTCST/BDXN은 funding 월별 원천이
+# 통째로 비어 있는 장기 공백으로 확인되어 정적 제외한다. 이 목록은 데이터 원천
+# 부재를 zero-fill로 숨기지 않고, 인증 백테스트에서 fail-closed하기 위한 것이다.
 SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
     # Block2: 펀딩 정상, 단일 영구 OHLCV 공백 8-17h, REST 확인으로 복구 불가.
     # 실측 검증 대상(MISSING_HELD_MARK 확장으로 해소되는지 리플레이로 확인 중).
@@ -48,4 +47,6 @@ SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
     "LITUSDT", "PUMPUSDT", "CVXUSDT", "SLPUSDT",
     # Block4: BNXUSDT는 조기시작 외에도 자체 영구 OHLCV 공백을 보유, 실측 검증 대상
     "BNXUSDT",
+    # 2026-09-18 backfill probe: 원천 아카이브에도 복구 구간이 없는 심볼
+    "AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT",
 })

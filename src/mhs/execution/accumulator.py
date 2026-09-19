@@ -19,8 +19,10 @@ from .contracts import (
     ExecutionDataGap,
     ExecutionReplayWindow,
     FundingCoverageGap,
+    InstrumentSettlementEvent,
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
+    TerminalPositionEvidence,
 )
 
 # 마지막 유동 봉 이후 24h(zombie_mask_v1 K=24 1h와 동일 기간) — 실측 거래소 전체 중단 최장 69분이라 중단을 상폐로 오판하지 않는다.
@@ -105,6 +107,7 @@ class _BoundExecutionReplayAccumulator:
         self._w_qv = np.zeros((0, 0), dtype="float64")
         self._w_fknown = np.zeros((0, 0), dtype=bool)
         self._w_avail_ns: np.ndarray = np.zeros(0, dtype="int64")
+        self._w_avail_explicit = False
         self._w_mark_avail = np.zeros((0, 0), dtype="int64")
         self.last_liquid_ns = np.full(self.n_cols, -1, dtype="int64")
         self._w_last_liquid_idx = np.zeros((0, 0), dtype=np.intp)
@@ -163,6 +166,13 @@ class _BoundExecutionReplayAccumulator:
         self.termination_counts: dict[str, int] = {"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0}
         self.data_gaps: list[ExecutionDataGap] = []
         self.funding_coverage_gaps: dict[tuple[str, pd.Timestamp, pd.Timestamp, str], FundingCoverageGap] = {}
+        self._settlement_seen: set[str] = set()
+        self._pending_settlements: list[InstrumentSettlementEvent] = []
+        self._settled_events: list[InstrumentSettlementEvent] = []
+        self._final_mark = np.full(self.n_cols, np.nan, dtype="float64")
+        self._final_mark_avail_ns = np.full(self.n_cols, -1, dtype="int64")
+        self._ledger_avail_chunks: list[np.ndarray] = []
+        self._ledger_avail_complete = True
         self.units_after_events: list[tuple[pd.Timestamp, np.ndarray]] = []
         self.notional_after_events: list[tuple[pd.Timestamp, np.ndarray]] = []
 
@@ -256,12 +266,14 @@ class _BoundExecutionReplayAccumulator:
         (n_cols, local_cols, n_local, gpos, grid, grid_ns, n_grid, bar_ns, marks_values, highs_values, lows_values, closes_values, close_finite, mark_valid, funding_matrix) = self._consume_validate_window(w)
         for gap in w.funding_coverage_gaps:
             self.funding_coverage_gaps[(gap.symbol, gap.start, gap.end, gap.reason)] = gap
+        self._admit_settlement_events(w)
         self._advance_spread_clock(w.logical_partition)
         (last_close_idx, decision_ns_all, spos_all, dpos_all, on_grid_all, target_values, submit_anchored, fill_start, tw_index, sig_index) = self._consume_prepare_tables(w, grid_ns, n_grid, close_finite, local_cols)
         for i in range(len(tw_index)):
             self._consume_drift_trims(int(decision_ns_all[i]), decision_ns_all, gpos, local_cols, submit_anchored, n_grid, grid_ns, closes_values, grid, marks_values, n_cols, mark_valid, last_close_idx, lows_values, highs_values, funding_matrix)
             self._consume_single_intent(i, decision_ns_all, dpos_all, on_grid_all, gpos, target_values, spos_all, marks_values, grid_ns, funding_matrix, tw_index, sig_index, mark_valid, last_close_idx, local_cols, submit_anchored, n_grid, closes_values, grid, n_cols, lows_values, highs_values)
         self._consume_drift_trims(None, decision_ns_all, gpos, local_cols, submit_anchored, n_grid, grid_ns, closes_values, grid, marks_values, n_cols, mark_valid, last_close_idx, lows_values, highs_values, funding_matrix)
+        self._settle_due_events(grid_ns, n_grid, local_cols, gpos, marks_values, n_cols)
         self._consume_append_ledger(grid_ns, n_grid, local_cols, fill_start, n_local, marks_values, gpos, grid, funding_matrix, bar_ns, closes_values)
         self._advance_liquidity_carry(grid_ns, gpos, decision_ns_all)
         self._observe_spread_partition(highs_values, lows_values, gpos, grid_ns, bar_ns, w.logical_partition)
@@ -335,8 +347,10 @@ class _BoundExecutionReplayAccumulator:
         self._w_fknown = fknown
         if w.bar_available_at is not None and len(w.bar_available_at) == n_grid_int:
             avail_ns = np.asarray(w.bar_available_at, dtype="datetime64[ns]").astype("int64")
+            self._w_avail_explicit = True
         else:
             avail_ns = grid_ns.copy()
+            self._w_avail_explicit = False
         self._w_avail_ns = avail_ns
         # Mark availability trails bar availability by one bar: the mark read
         # at a decision is sourced from the previous bar's close (hourly-carry
@@ -509,45 +523,100 @@ class _BoundExecutionReplayAccumulator:
         return True
 
 
-    def _settle_idle_holdings(self, dns: int, spos: int, gpos: np.ndarray, local_cols: list[str], grid_ns: np.ndarray, marks_values: np.ndarray, n_grid: int, n_cols: int) -> None:
-        """Settle delisted idle holdings at the signal-bar mark (causal)."""
-        row = int(np.searchsorted(self._w_avail_ns, dns, side="right")) - 1
-        for col, gcol in enumerate(gpos.tolist()):
+    def _admit_settlement_events(self, w: ExecutionReplayWindow) -> None:
+        """Admit evidenced settlement events once across physical overlap.
+
+        Each event is validated on admission; an event without price, fee, or
+        source identity is rejected rather than inferred from the last mark.
+        Event IDs are idempotent across physical overlap and window boundaries.
+        Absent actual source events never justify an inferred settlement.
+        """
+        for event in w.settlement_events:
+            if not isinstance(event, InstrumentSettlementEvent):
+                raise DataIntegrityError("settlement_events must be InstrumentSettlementEvent records")
+            if event.symbol not in self.gpos_of:
+                raise DataIntegrityError(f"settlement symbol {event.symbol!r} is not in canonical columns")
+            if event.event_id in self._settlement_seen:
+                continue
+            self._settlement_seen.add(event.event_id)
+            self._pending_settlements.append(event)
+        self._pending_settlements.sort(key=lambda e: (e.available_at.value, e.effective_at.value, e.event_id))
+
+    def _settle_due_events(
+        self,
+        grid_ns: np.ndarray,
+        n_grid: int,
+        local_cols: list[str],
+        gpos: np.ndarray,
+        marks_values: np.ndarray,
+        n_cols: int,
+    ) -> None:
+        """Execute evidenced settlements due within this window at their event price.
+
+        A settlement executes no earlier than both its effective and available
+        time. An observation endpoint or idle threshold cannot create this event.
+        """
+        if not self._pending_settlements:
+            return
+        grid_end_ns = int(grid_ns[-1])
+        local_of = {sym: (col, int(gcol)) for col, (sym, gcol) in enumerate(zip(local_cols, gpos.tolist(), strict=True))}
+        remaining: list[InstrumentSettlementEvent] = []
+        p0_ns = int(self.ledger_start_ns) if self.ledger_start_ns is not None else int(grid_ns[0])
+        for event in self._pending_settlements:
+            due_ns = max(int(event.effective_at.value), int(event.available_at.value))
+            if due_ns > grid_end_ns:
+                remaining.append(event)
+                continue
+            entry = local_of.get(event.symbol)
+            if entry is None:
+                remaining.append(event)
+                continue
+            col, gcol = entry
             units = float(self.units_arr[gcol])
             if abs(units) < QTY_EPS:
+                self._settled_events.append(event)
                 continue
-            if row < 0 or float(self._w_qv[row, col]) != 0.0:
-                continue
-            idx = int(self._w_last_liquid_idx[row, col])
-            last_liquid = max(int(self.last_liquid_ns[gcol]), int(grid_ns[idx]) if idx >= 0 else -1)
-            if last_liquid < 0 or dns - last_liquid < DELIST_SETTLEMENT_IDLE_NS:
-                continue
-            if spos >= n_grid:
-                continue
-            price = float(marks_values[spos, col])
-            if not (np.isfinite(price) and price > 0):
-                continue
-            self._book_delist_settlement(col, gcol, local_cols[col], spos, units, price, grid_ns, marks_values, gpos, n_cols)
+            due_pos = int(np.searchsorted(grid_ns, np.int64(due_ns), side="left"))
+            due_pos = max(due_pos, int(np.searchsorted(grid_ns, np.int64(p0_ns), side="left")))
+            self._book_delist_settlement(
+                col, gcol, event.symbol, due_pos, units, float(event.settlement_price),
+                grid_ns, marks_values, gpos, n_cols,
+                fee_bps=float(event.fee_bps), event_id=event.event_id,
+            )
+            self._settled_events.append(event)
+        self._pending_settlements = remaining
 
-    def _book_delist_settlement(self, col: int, gcol: int, sym: str, spos: int, units: float, price: float, grid_ns: np.ndarray, marks_values: np.ndarray, gpos: np.ndarray, n_cols: int) -> None:
+    def _settle_idle_holdings(self, dns: int, spos: int, gpos: np.ndarray, local_cols: list[str], grid_ns: np.ndarray, marks_values: np.ndarray, n_grid: int, n_cols: int) -> None:
+        """Carry last-liquid provenance without inferring any settlement.
+
+        Prolonged observed zero volume never creates a free settlement or
+        quantity cancellation; only an evidenced exchange settlement event
+        closes inventory.
+        """
+        return
+
+    def _book_delist_settlement(self, col: int, gcol: int, sym: str, spos: int, units: float, price: float, grid_ns: np.ndarray, marks_values: np.ndarray, gpos: np.ndarray, n_cols: int, *, fee_bps: float = 0.0, event_id: str | None = None) -> None:
         """Book a causal delisting settlement.
 
-        Settles like live paper_delisted_close (mark, no fee), booked on fill track, ledger and mirror identically.
+        Books the validated event price, fee, and identity into the fill track,
+        accounting mirror, and ledger identically.
         """
         qty = -units
         self.last_prices_arr[gcol] = price
         self.cash -= qty * price
+        fee = float(fee_bps) / 1e4 * abs(qty) * price
+        self.cash -= fee
         self.units_arr[gcol] = 0.0
         self.fill_bar_ns.append(int(grid_ns[spos]))
         self.fill_gcol.append(int(gcol))
-        self._mirror_pending.append((int(grid_ns[spos]), int(gcol), float(qty), float(price), 0.0))
+        self._mirror_pending.append((int(grid_ns[spos]), int(gcol), float(qty), float(price), float(fee_bps)))
         fill_time = pd.Timestamp(int(self._w_avail_ns[spos]), unit="ns", tz="UTC")
         pre_trade_equity = self._equity_at(gpos)
         self.fill_ts.append(fill_time)
         self.fill_symbol.append(sym)
         self.fill_qty.append(qty)
         self.fill_price.append(price)
-        self.fill_fee_bps.append(0.0)
+        self.fill_fee_bps.append(float(fee_bps))
         self.fill_reason.append("delist_settlement")
         self.fill_pre_trade_equity.append(pre_trade_equity)
         self.fill_times.append(fill_time)
@@ -1334,6 +1403,13 @@ class _BoundExecutionReplayAccumulator:
             self.fee_chunks.append(fee_by_ts[p0:])
             self.turnover_chunks.append(turnover_arr)
             self.ledger_cash = float(cash_after[-1])
+            if self._w_avail_explicit:
+                self._ledger_avail_chunks.append(np.asarray(self._w_avail_ns[p0:], dtype="int64"))
+            else:
+                self._ledger_avail_complete = False
+        if len(gpos):
+            self._final_mark[gpos] = np.asarray(marks_values[-1], dtype="float64")
+            self._final_mark_avail_ns[gpos] = np.asarray(self._w_mark_avail[-1], dtype="int64")
         self._settle_mirror_window(grid_ns, n_grid, p0, marks_values, funding_matrix, self._w_fknown, gpos, grid)
         # Carried last-finite-close provenance advances only over bars this
         # window actually consumed: a decision can never see the window tail
@@ -1508,33 +1584,104 @@ class _BoundExecutionReplayAccumulator:
         self._spread_bar_counts[:] = 0.0
 
 
+    def _terminal_positions(self, grid_end: pd.Timestamp) -> tuple[TerminalPositionEvidence, ...]:
+        """Classify each held position without converting the cutoff into a fictional exit.
+
+        An ordinary cutoff with a valid fresh published mark and complete held
+        financing produces ``open_marked`` and preserves units and cash. A
+        missing or stale held mark produces unresolved valuation and invalid
+        accounting. Missing held funding remains invalid regardless of later
+        fills, their absence, or any inferred end-of-life classification.
+        """
+        cutoff_ns = int(grid_end.value)
+        funded_incomplete = {
+            g.symbol for g in self.data_gaps if g.code == "MISSING_HELD_FUNDING"
+        }
+        if self.first_held_funding is not None:
+            funded_incomplete.add(self.first_held_funding[0])
+        records: list[TerminalPositionEvidence] = []
+        for col in range(self.n_cols):
+            quantity = float(self.units_arr[col])
+            if abs(quantity) < 1e-12:
+                continue
+            sym = self.columns[col]
+            funding_complete = sym not in funded_incomplete
+            final_mark = float(self._final_mark[col])
+            final_avail_ns = int(self._final_mark_avail_ns[col])
+            fresh = (
+                np.isfinite(final_mark)
+                and final_mark > 0.0
+                and final_avail_ns >= 0
+                and final_avail_ns <= cutoff_ns
+            )
+            if fresh and funding_complete:
+                mark: float | None = final_mark
+                mark_available_at = pd.Timestamp(final_avail_ns, unit="ns", tz="UTC")
+                records.append(
+                    TerminalPositionEvidence(
+                        symbol=sym, quantity=quantity, cutoff=grid_end,
+                        status="open_marked", mark=mark,
+                        mark_available_at=mark_available_at,
+                        funding_complete=True, reason_codes=("FRESH_MARK", "FUNDING_COMPLETE"),
+                    )
+                )
+                continue
+            codes = list(("FRESH_MARK",) if fresh else ("STALE_MARK",))
+            if not funding_complete:
+                codes.append("MISSING_HELD_FUNDING")
+            self.ledger_valid = False
+            self.invalid_reasons.add("MISSING_DATA")
+            if not fresh:
+                self.data_gaps.append(
+                    ExecutionDataGap(
+                        code="MISSING_HELD_MARK", symbol=sym, timestamp=grid_end,
+                        execution_bound=self.execution_bound,
+                    )
+                )
+                codes.append("MISSING_HELD_MARK")
+            stale_mark: float | None = final_mark if np.isfinite(final_mark) and final_mark > 0.0 else None
+            stale_avail = (
+                pd.Timestamp(final_avail_ns, unit="ns", tz="UTC")
+                if stale_mark is not None and final_avail_ns >= 0
+                else None
+            )
+            records.append(
+                TerminalPositionEvidence(
+                    symbol=sym, quantity=quantity, cutoff=grid_end,
+                    status="unresolved", mark=stale_mark,
+                    mark_available_at=stale_avail,
+                    funding_complete=funding_complete, reason_codes=tuple(codes),
+                )
+            )
+        for event in self._settled_events:
+            settled_mark = float(event.settlement_price)
+            records.append(
+                TerminalPositionEvidence(
+                    symbol=event.symbol, quantity=0.0, cutoff=grid_end,
+                    status="settled", mark=settled_mark,
+                    mark_available_at=event.available_at,
+                    funding_complete=event.symbol not in funded_incomplete,
+                    reason_codes=("SETTLEMENT_EVENT",),
+                )
+            )
+        records.sort(key=lambda r: r.symbol)
+        return tuple(records)
+
     def finalize(self) -> StrategyExecutionReplayResult:
-        """Finalize the streamed replay into one result. Physical IO boundaries do not reset inventory, liquidity or the logical spread clock. Overlap observations and settlements are applied once."""
+        """Finalize observed equity without converting the cutoff into a fictional exit.
+
+        Returns:
+            Reconciled replay evidence with priced or unresolved terminal positions.
+            Open priced positions remain on the book; held financial gaps remain invalid.
+        Raises:
+            DataIntegrityError: Terminal observations or settlement state are inconsistent.
+        """
         columns = self.columns
-        n_cols = self.n_cols
         self._finalize_spread_partition()
 
-        # Terminal inventory is never fabricated into an exit at a past close
-        # (INV-NO-FABRICATED-TERMINAL-FILL): held units stay open, are
-        # disclosed as UNKNOWN_TERMINATION, and invalidate the primary ledger.
-        # A separately-tagged diagnostic-only stress liquidation is the only
-        # allowed exception, never part of this result.
         forced_exit_count = 0
         forced_exit_notional = 0.0
         grid_end = self.full_grid_end
-        for col in range(n_cols):
-            if abs(float(self.units_arr[col])) < 1e-12:
-                continue
-            sym = columns[col]
-            self.termination_counts["UNKNOWN_TERMINATION"] += 1
-            self.ledger_valid = False
-            self.invalid_reasons.add("MISSING_DATA")
-            self.data_gaps.append(
-                ExecutionDataGap(
-                    code="UNKNOWN_TERMINATION", symbol=sym, timestamp=grid_end,
-                    execution_bound=self.execution_bound,
-                )
-            )
         elapsed_seconds = time.perf_counter() - self._t0
 
         simulated_fills = pd.DataFrame(
@@ -1558,6 +1705,7 @@ class _BoundExecutionReplayAccumulator:
                 {"quantity_delta": "float64", "fill_price": "float64", "fee_bps": "float64"}
             )
 
+        ledger_available_at: pd.DatetimeIndex | None = None
         if self.equity_chunks:
             full_index = self.equity_times[0].append(self.equity_times[1:]) if len(self.equity_times) > 1 else self.equity_times[0]
             equity_values_arr = np.concatenate(self.equity_chunks)
@@ -1565,6 +1713,9 @@ class _BoundExecutionReplayAccumulator:
             funding_arr = np.concatenate(self.funding_chunks)
             fee_arr = np.concatenate(self.fee_chunks)
             turnover_arr = np.concatenate(self.turnover_chunks)
+            if self._ledger_avail_complete and self._ledger_avail_chunks:
+                avail_values = np.concatenate(self._ledger_avail_chunks).astype("datetime64[ns]")
+                ledger_available_at = pd.DatetimeIndex(avail_values, tz="UTC")
             del self.equity_chunks, self.equity_times, self.mtm_chunks, self.funding_chunks, self.fee_chunks, self.turnover_chunks
         else:
             full_index = self.first_grid
@@ -1604,8 +1755,14 @@ class _BoundExecutionReplayAccumulator:
                     timestamp=self.first_held_funding[1], execution_bound=self.execution_bound,
                 )
             )
+        terminal_positions = self._terminal_positions(grid_end)
         self.data_gaps.sort(key=lambda g: (g.timestamp, g.code, g.symbol))
-        ledger = dataclasses.replace(ledger, data_gaps=tuple(self.data_gaps))
+        ledger = dataclasses.replace(
+            ledger,
+            primary_valid=self.ledger_valid,
+            invalid_reasons=tuple(sorted(self.invalid_reasons)),
+            data_gaps=tuple(self.data_gaps),
+        )
 
         if self.units_after_events:
             events_index = pd.DatetimeIndex([t for t, _ in self.units_after_events])
@@ -1676,4 +1833,6 @@ class _BoundExecutionReplayAccumulator:
             notional_weighted_delay_bps=weighted_delay_bps,
             min_notional_dropped_fraction=probe_fraction,
             funding_coverage_gaps=coverage,
+            terminal_positions=terminal_positions,
+            ledger_available_at=ledger_available_at,
         )

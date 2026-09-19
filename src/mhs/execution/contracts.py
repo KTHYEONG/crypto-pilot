@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as _datetime
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -25,6 +27,36 @@ def _utc_epoch_ns(index: pd.Index) -> np.ndarray:
 
 
 @dataclass(frozen=True, slots=True)
+class FundingKnowledgeObservation:
+    """Record observed funding knowledge separately from a file's future coverage.
+
+    An attested no-settlement observation is distinct from absent source data.
+    """
+
+    symbol: str
+    event_time: pd.Timestamp
+    available_at: pd.Timestamp
+    status: Literal["settled", "no_settlement", "unknown"]
+    source_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str) or not self.symbol:
+            raise DataIntegrityError("funding observation symbol must be a nonempty string")
+        if self.status not in ("settled", "no_settlement", "unknown"):
+            raise DataIntegrityError(f"unknown funding observation status {self.status!r}")
+        if not isinstance(self.source_digest, str) or not self.source_digest:
+            raise DataIntegrityError("funding observation source_digest must be a nonempty string")
+        for name in ("event_time", "available_at"):
+            value = getattr(self, name)
+            if not isinstance(value, pd.Timestamp) or pd.isna(value):
+                raise DataIntegrityError(f"funding observation {name} must be a valid timestamp")
+            if value.tzinfo is None or value.utcoffset() != _datetime.timedelta(0):
+                raise DataIntegrityError(f"funding observation {name} must be timezone-aware UTC")
+        if self.available_at < self.event_time:
+            raise DataIntegrityError("funding observation available_at must not precede event_time")
+
+
+@dataclass(frozen=True, slots=True)
 class FundingAlignment:
     """Funding rates split from funding knowledge (INV-FUNDING-KNOWLEDGE).
 
@@ -38,6 +70,22 @@ class FundingAlignment:
     rates: pd.DataFrame
     known: pd.DataFrame
     source_failures: Mapping[str, str]
+    knowledge_source: Literal["recorded", "archive_recency_proxy"] = "archive_recency_proxy"
+    limitations: tuple[str, ...] = ()
+
+
+def _validate_knowledge_observations(
+    knowledge_observations: tuple[FundingKnowledgeObservation, ...],
+) -> dict[str, list[FundingKnowledgeObservation]]:
+    """Group validated funding knowledge observations by symbol (prefix-only)."""
+    grouped: dict[str, list[FundingKnowledgeObservation]] = {}
+    for obs in knowledge_observations:
+        if not isinstance(obs, FundingKnowledgeObservation):
+            raise DataIntegrityError("knowledge_observations must be FundingKnowledgeObservation records")
+        grouped.setdefault(obs.symbol, []).append(obs)
+    for observations in grouped.values():
+        observations.sort(key=lambda o: (o.event_time.value, o.available_at.value))
+    return grouped
 
 
 def align_funding_with_knowledge(
@@ -47,6 +95,7 @@ def align_funding_with_knowledge(
     symbols: Sequence[str],
     source_failures: Mapping[str, str] | None = None,
     max_observation_gap: pd.Timedelta = _DEFAULT_MAX_OBSERVATION_GAP,
+    knowledge_observations: tuple[FundingKnowledgeObservation, ...] = (),
 ) -> FundingAlignment:
     """Align funding onto ``grid`` with an explicit known/unknown mask.
 
@@ -58,8 +107,14 @@ def align_funding_with_knowledge(
     or strictly inside an inter-observation gap longer than
     ``max_observation_gap`` are unknown. Financial results stay float64;
     knowledge stays bool (no downcast, per the performance budget).
+
+    Knowledge consumes only observations published through each row. Archived
+    event recency may be reported as a screening proxy, but future file bounds
+    and future recovery events cannot certify earlier no-settlement intervals.
     """
     failed = dict(source_failures) if source_failures else {}
+    grouped = _validate_knowledge_observations(tuple(knowledge_observations))
+    recorded = bool(grouped)
     gap_ns = int(max_observation_gap.value)
     grid_ns = np.asarray(grid, dtype="datetime64[ns]").astype("int64")
     period = grid[1] - grid[0] if len(grid) > 1 else pd.Timedelta(minutes=1)
@@ -75,18 +130,38 @@ def align_funding_with_knowledge(
         full_ts = np.sort(full_ts)
         windowed = series.loc[(series.index >= grid[0]) & (series.index < grid[-1] + period)]
         aligned = np.asarray(_align_funding_rates(windowed, grid), dtype="float64")
-        in_span = (grid_ns >= full_ts[0]) & (grid_ns <= full_ts[-1])
-        prev = np.searchsorted(full_ts, grid_ns, side="right") - 1
-        after_gap = np.zeros(len(grid), dtype=bool)
-        wide = np.diff(full_ts) > gap_ns
-        for k in np.flatnonzero(wide):
-            after_gap |= (grid_ns > full_ts[k]) & (grid_ns < full_ts[k + 1])
-        known = in_span & (prev >= 0) & ~after_gap
+        observations = grouped.get(sym, [])
+        if observations:
+            event_ns = np.asarray([o.event_time.value for o in observations], dtype="int64")
+            avail_ns = np.asarray([o.available_at.value for o in observations], dtype="int64")
+            attested = np.asarray([o.status in ("settled", "no_settlement") for o in observations], dtype=bool)
+            known = np.zeros(len(grid), dtype=bool)
+            for i in range(len(grid_ns)):
+                eligible = (event_ns <= grid_ns[i]) & (avail_ns <= grid_ns[i])
+                if not bool(eligible.any()):
+                    continue
+                latest = int(np.flatnonzero(eligible)[-1])
+                known[i] = bool(attested[latest])
+        else:
+            prev = np.searchsorted(full_ts, grid_ns, side="right") - 1
+            recency = np.zeros(len(grid), dtype=bool)
+            valid_prev = prev >= 0
+            recency[valid_prev] = (grid_ns[valid_prev] - full_ts[prev[valid_prev]]) <= gap_ns
+            known = (grid_ns >= full_ts[0]) & valid_prev & recency
         rate_cols[sym] = pd.Series(aligned, index=grid, dtype="float64")
         known_cols[sym] = pd.Series(known, index=grid, dtype=bool)
     rates = pd.DataFrame(rate_cols, index=grid).astype("float64")
     known_frame = pd.DataFrame(known_cols, index=grid).astype(bool)
-    return FundingAlignment(rates=rates, known=known_frame, source_failures=failed)
+    if recorded:
+        return FundingAlignment(
+            rates=rates, known=known_frame, source_failures=failed,
+            knowledge_source="recorded", limitations=(),
+        )
+    return FundingAlignment(
+        rates=rates, known=known_frame, source_failures=failed,
+        knowledge_source="archive_recency_proxy",
+        limitations=("ARCHIVE_RECENCY_PROXY_NO_PUBLICATION_PROOF",),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +335,82 @@ class ExecutionReplayWindow:
     # semantics where each window is its own observation range.
     logical_partition: tuple[int, int] | None = None
     funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
+    funding_knowledge_source: Literal["recorded", "archive_recency_proxy", "legacy"] = "legacy"
+    settlement_events: tuple[InstrumentSettlementEvent, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentSettlementEvent:
+    """Describe an evidenced exchange settlement, not a price inferred from inactivity.
+
+    The source binds the contractual settlement time, price and fee. Publication
+    timing prevents a later announcement from generating an earlier fictional fill.
+    """
+
+    event_id: str
+    symbol: str
+    effective_at: pd.Timestamp
+    available_at: pd.Timestamp
+    settlement_price: float
+    fee_bps: float
+    source_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.event_id, str) or not self.event_id:
+            raise DataIntegrityError("settlement event_id must be a nonempty string")
+        if not isinstance(self.symbol, str) or not self.symbol:
+            raise DataIntegrityError("settlement symbol must be a nonempty string")
+        if not isinstance(self.source_digest, str) or not self.source_digest:
+            raise DataIntegrityError("settlement source_digest must be a nonempty string")
+        for name in ("effective_at", "available_at"):
+            value = getattr(self, name)
+            if not isinstance(value, pd.Timestamp) or pd.isna(value):
+                raise DataIntegrityError(f"settlement {name} must be a valid timestamp")
+            if value.tzinfo is None or value.utcoffset() != _datetime.timedelta(0):
+                raise DataIntegrityError(f"settlement {name} must be timezone-aware UTC")
+        price = float(self.settlement_price)
+        if not np.isfinite(price) or price <= 0.0:
+            raise DataIntegrityError("settlement_price must be a finite positive price")
+        fee = float(self.fee_bps)
+        if not np.isfinite(fee) or fee < 0.0:
+            raise DataIntegrityError("fee_bps must be a finite nonnegative fee")
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalPositionEvidence:
+    """Distinguish priced open inventory at an observation cutoff from an instrument
+    settlement and from unobservable financial state. Open valuation does not prove
+    immediate liquidation capacity or future tradability.
+    """
+
+    symbol: str
+    quantity: float
+    cutoff: pd.Timestamp
+    status: Literal["open_marked", "settled", "unresolved"]
+    mark: float | None
+    mark_available_at: pd.Timestamp | None
+    funding_complete: bool
+    reason_codes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str) or not self.symbol:
+            raise DataIntegrityError("terminal symbol must be a nonempty string")
+        if self.status not in ("open_marked", "settled", "unresolved"):
+            raise DataIntegrityError(f"unknown terminal status {self.status!r}")
+        if not isinstance(self.cutoff, pd.Timestamp) or pd.isna(self.cutoff):
+            raise DataIntegrityError("terminal cutoff must be a valid timestamp")
+        if self.cutoff.tzinfo is None or self.cutoff.utcoffset() != _datetime.timedelta(0):
+            raise DataIntegrityError("terminal cutoff must be timezone-aware UTC")
+        if not np.isfinite(float(self.quantity)):
+            raise DataIntegrityError("terminal quantity must be finite")
+        if self.mark is not None and not (np.isfinite(float(self.mark)) and float(self.mark) > 0.0):
+            raise DataIntegrityError("terminal mark must be a finite positive price when present")
+        if self.mark_available_at is not None:
+            value = self.mark_available_at
+            if not isinstance(value, pd.Timestamp) or pd.isna(value):
+                raise DataIntegrityError("terminal mark_available_at must be a valid timestamp")
+            if value.tzinfo is None or value.utcoffset() != _datetime.timedelta(0):
+                raise DataIntegrityError("terminal mark_available_at must be timezone-aware UTC")
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +492,8 @@ class StrategyExecutionReplayResult:
     notional_weighted_delay_bps: float = float("nan")
     min_notional_dropped_fraction: float = float("nan")
     funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
+    terminal_positions: tuple[TerminalPositionEvidence, ...] = ()
+    ledger_available_at: pd.DatetimeIndex | None = None
 
 
 @dataclass(frozen=True, slots=True)

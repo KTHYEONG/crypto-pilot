@@ -770,7 +770,7 @@ def _held_exit_market(tmp_path, n_days=70):
     import pandas as pd
 
     symbols = ["AUSDT", "BUSDT"]
-    exit_block_from = pd.Timestamp("2022-01-01", tz="UTC") + pd.Timedelta(days=6)
+    exit_block_from = pd.Timestamp("2022-01-01", tz="UTC") + pd.Timedelta(days=2)
     grid, decisions, funding = _stream_market(
         tmp_path, symbols, n_days=n_days, funding_through=exit_block_from,
     )

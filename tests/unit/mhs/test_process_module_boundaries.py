@@ -28,17 +28,30 @@ def test_contract_fields_match_declared_shapes() -> None:
     )
 
     expected = {
-        ProcessMarketData: ("grid_1h", "decision_grid", "opens_1h", "bar_funding_1h", "log_close_step", "funding_step", "member_books", "execution_mask"),
-        RefitRecord: ("point", "member_weights", "smoothing_halflife_days"),
-        ProcessPath: ("one_way_bps", "daily_returns", "unit_daily_returns", "exposure", "refits", "leverage_cap", "execution_policy", "unit_target_weights", "target_weights", "turnover_1h"),
+        ProcessMarketData: ("grid_1h", "decision_grid", "opens_1h", "bar_funding_1h", "log_close_step", "funding_step", "member_books", "execution_mask", "observation_availability", "funding_known_1h", "input_limitations", "member_evidence"),
+        RefitRecord: ("point", "member_weights", "smoothing_halflife_days", "policy_id", "train_start", "n_train_labels"),
+        ProcessPath: ("one_way_bps", "daily_returns", "unit_daily_returns", "exposure", "refits", "leverage_cap", "execution_policy", "unit_target_weights", "target_weights", "turnover_1h", "risk_sizing", "signal_available_at", "clock_mode", "policy_choices"),
         ProcessBacktestReport: ("start", "end", "certification_level", "n_candidates", "base", "stress", "gate"),
-        ProcessInventoryReport: ("proxy", "base", "stress", "gate", "resource_measurements", "memory_stats"),
-        ProcessInventoryFailureReport: ("status", "start", "end", "data_root", "execution_policy", "stage", "error_code", "error_type", "error_message", "total_decisions", "validated_decisions", "completed_decisions", "completed_windows", "completed_decision_start", "completed_decision_end", "source_gaps", "source_gap_excluded_symbols", "resource_measurements", "memory_stats"),
+        ProcessInventoryReport: ("proxy", "base", "stress", "gate", "resource_measurements", "memory_stats", "funding_coverage_gaps", "validation"),
+        ProcessInventoryFailureReport: ("status", "start", "end", "data_root", "execution_policy", "stage", "error_code", "error_type", "error_message", "total_decisions", "validated_decisions", "completed_decisions", "completed_windows", "completed_decision_start", "completed_decision_end", "source_gaps", "source_gap_excluded_symbols", "resource_measurements", "memory_stats", "funding_coverage_gaps"),
+    }
+    expected_defaults = {
+        ProcessMarketData: ("observation_availability", "funding_known_1h", "input_limitations", "member_evidence"),
+        RefitRecord: ("policy_id", "train_start", "n_train_labels"),
+        ProcessPath: ("risk_sizing", "signal_available_at", "clock_mode", "policy_choices"),
+        ProcessInventoryReport: ("funding_coverage_gaps", "validation"),
+        ProcessInventoryFailureReport: ("funding_coverage_gaps",),
     }
     for cls, names in expected.items():
         fields = dataclasses.fields(cls)
         assert tuple(f.name for f in fields) == names
-        assert all(f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING for f in fields)
+        defaulted = set(expected_defaults.get(cls, ()))
+        for field in fields:
+            has_default = (
+                field.default is not dataclasses.MISSING
+                or field.default_factory is not dataclasses.MISSING
+            )
+            assert has_default == (field.name in defaulted)
         assert cls.__dataclass_params__.frozen
         assert hasattr(cls, "__slots__")
 

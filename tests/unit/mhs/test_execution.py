@@ -337,8 +337,11 @@ def test_replay_does_not_fabricate_terminal_exit() -> None:
     result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
     assert result.forced_exit_count == 0
     assert 'forced_exit' not in set(result.simulated_fills['reason'])
-    assert not result.ledger.primary_valid
-    assert any(g.code == 'UNKNOWN_TERMINATION' for g in result.ledger.data_gaps)
+    assert 'delist_settlement' not in set(result.simulated_fills['reason'])
+    assert result.ledger.primary_valid
+    assert not any(g.code == 'UNKNOWN_TERMINATION' for g in result.ledger.data_gaps)
+    assert [p.status for p in result.terminal_positions] == ['open_marked']
+    assert float(result.terminal_positions[0].quantity) == pytest.approx(10.0)
 
 
 def test_zero_volume_bar_cannot_fill() -> None:
@@ -530,7 +533,7 @@ def test_unknown_volume_bar_remains_execution_data_gap() -> None:
     assert result.termination_counts.get('NO_VOLUME_UNFILLED', 0) == 0
 
 
-def test_idle_held_position_settles_at_mark_after_24h_without_fee() -> None:
+def test_idle_held_position_never_settles_without_evidenced_event() -> None:
 
     import numpy as np
     import pandas as pd
@@ -556,22 +559,15 @@ def test_idle_held_position_settles_at_mark_after_24h_without_fee() -> None:
     w = _window(grid, qv, marks, [grid[0], grid[30]], [0.5, 0.0])
     # When
     result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
-    # Then: one causal settlement fill at the signal bar's mark, zero fee, position flat
+    # Then: idle never settles without an evidenced event; the exit is unfilled,
+    # inventory stays open and marked, and only the entry fee is charged
     fills = result.simulated_fills
-    settle = fills[fills['reason'] == 'delist_settlement']
-    assert len(settle) == 1
-    entry = fills.iloc[0]
-    assert float(settle['quantity_delta'].iloc[0]) == -float(entry['quantity_delta'])
-    assert float(settle['fill_price'].iloc[0]) == 80.0
-    assert float(settle['fee_bps'].iloc[0]) == 0.0
-    assert pd.Timestamp(settle['timestamp'].iloc[0]) == grid[31] + pd.Timedelta(hours=1)
-    assert result.termination_counts['DELIST_SETTLEMENT'] == 1
-    assert not any(g.code == 'UNKNOWN_TERMINATION' for g in result.ledger.data_gaps)
-    assert result.ledger.primary_valid
-    qty = float(entry['quantity_delta'])
-    entry_cost = qty * float(entry['fill_price']) * (1.0 + float(entry['fee_bps']) / 1e4)
-    expected_final = 1000.0 - entry_cost + qty * 80.0
-    assert float(result.ledger.equity.iloc[-1]) == pytest.approx(expected_final, rel=1e-12)
+    assert 'delist_settlement' not in set(fills['reason'])
+    assert result.termination_counts.get('DELIST_SETTLEMENT', 0) == 0
+    assert [p.status for p in result.terminal_positions] == ['open_marked']
+    assert float(result.terminal_positions[0].quantity) == pytest.approx(5.0)
+    assert float(result.ledger.fee_charge.sum()) == pytest.approx(0.4)
+    assert float(result.ledger.equity.iloc[-1]) == pytest.approx(499.6 + 5.0 * 80.0, rel=1e-12)
 
 
 def test_idle_settlement_not_triggered_before_24h() -> None:
@@ -599,11 +595,12 @@ def test_idle_settlement_not_triggered_before_24h() -> None:
     w = _window(grid, qv, marks, [grid[0], grid[20]], [0.5, 0.0])
     # When
     result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
-    # Then: no settlement; the exit on a zero-volume bar is unfilled and inventory is disclosed at the end
+    # Then: no settlement; the exit on a zero-volume bar is unfilled and inventory stays open and marked
     assert 'delist_settlement' not in set(result.simulated_fills['reason'])
     assert result.termination_counts.get('DELIST_SETTLEMENT', 0) == 0
     assert result.termination_counts['NO_VOLUME_UNFILLED'] >= 1
-    assert any(g.code == 'UNKNOWN_TERMINATION' for g in result.ledger.data_gaps)
+    assert [p.status for p in result.terminal_positions] == ['open_marked']
+    assert result.ledger.primary_valid
 
 
 def test_idle_settlement_not_triggered_by_unknown_volume_hole() -> None:
@@ -638,7 +635,7 @@ def test_idle_settlement_not_triggered_by_unknown_volume_hole() -> None:
     assert not result.ledger.primary_valid
 
 
-def test_idle_settlement_uses_liquidity_carried_from_prior_window() -> None:
+def test_idle_tail_across_windows_never_settles_without_event() -> None:
 
     import numpy as np
     import pandas as pd
@@ -668,11 +665,11 @@ def test_idle_settlement_uses_liquidity_carried_from_prior_window() -> None:
     w2 = _window(g2, np.zeros(len(g2)), np.full(len(g2), 100.0), [full[30]], [0.0])
     # When
     result = replay_execution_windows((w1, w2), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
-    # Then
-    assert result.termination_counts['DELIST_SETTLEMENT'] == 1
-    settle = result.simulated_fills[result.simulated_fills['reason'] == 'delist_settlement']
-    assert pd.Timestamp(settle['timestamp'].iloc[0]) == full[31] + pd.Timedelta(hours=1)
-    assert not any(g.code == 'UNKNOWN_TERMINATION' for g in result.ledger.data_gaps)
+    # Then: an all-zero tail across windows never settles without an evidenced event
+    assert result.termination_counts.get('DELIST_SETTLEMENT', 0) == 0
+    assert 'delist_settlement' not in set(result.simulated_fills['reason'])
+    assert [p.status for p in result.terminal_positions] == ['open_marked']
+    assert float(result.terminal_positions[0].quantity) == pytest.approx(5.0)
 
 
 def test_held_position_outside_window_roster_fails_closed() -> None:
@@ -794,7 +791,7 @@ def test_fills_in_span_matches_bruteforce_and_advances_scan_cursor() -> None:
 
 
 
-def test_idle_settlement_records_event_snapshot_when_retained() -> None:
+def test_idle_tail_event_snapshots_keep_held_inventory() -> None:
 
     import numpy as np
     import pandas as pd
@@ -820,14 +817,14 @@ def test_idle_settlement_records_event_snapshot_when_retained() -> None:
     acc = _BoundExecutionReplayAccumulator(w, 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec(), True)
     # When
     acc.consume(w)
-    # Then: the settlement appends a flat-inventory snapshot at its fill time
-    assert acc.termination_counts['DELIST_SETTLEMENT'] == 1
+    # Then: no inferred settlement exists; snapshots keep the held inventory
+    assert acc.termination_counts.get('DELIST_SETTLEMENT', 0) == 0
+    assert 'delist_settlement' not in acc.fill_reason
     ts, units = acc.units_after_events[-1]
-    assert ts == grid[31] + pd.Timedelta(hours=1)
-    assert float(units[0]) == 0.0
+    assert float(units[0]) == pytest.approx(5.0)
     nts, notional = acc.notional_after_events[-1]
     assert nts == ts
-    assert float(notional[0]) == 0.0
+    assert float(notional[0]) == pytest.approx(5.0 * 100.0)
 
 
 def test_idle_settlement_skipped_when_signal_bar_is_beyond_window() -> None:
