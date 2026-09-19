@@ -166,22 +166,17 @@ def validate_mhs_input_manifest(
 def resolve_required_mhs_input_paths(
     *, data_root: Path, panel_symbols: Sequence[str], execution_symbols: Sequence[str], execution_timeframe: Literal["3m"]
 ) -> tuple[Path, ...]:
-    """Required sealed inputs: 1h panel, execution timeframe, mark, funding."""
+    """Resolve exactly the files consumed by the registered MHS panel and replay: 1h OHLCV for panel symbols, 3m OHLCV for executed symbols, and funding for symbols whose rates affect signals or held cash flow. Missing required files remain missing evidence; mark and daily metrics never enter the input identity."""
     if execution_timeframe != "3m":
         raise ValueError(f"unknown execution_timeframe {execution_timeframe!r}")
     root = Path(data_root)
-    ordered = list(dict.fromkeys([*panel_symbols, *execution_symbols]))
     paths = [
-        candidate
-        for symbol in ordered
-        for candidate in (
-            root / "ohlcv" / "1h" / f"{symbol}.parquet",
-            root / "ohlcv" / execution_timeframe / f"{symbol}.parquet",
-            root / "funding" / f"{symbol}.parquet",
-            root / "markPriceKlines" / "1h" / f"{symbol}.parquet",
-        )
+        *(root / "ohlcv" / "1h" / f"{symbol}.parquet" for symbol in dict.fromkeys(panel_symbols)),
+        *(root / "ohlcv" / execution_timeframe / f"{symbol}.parquet" for symbol in dict.fromkeys(execution_symbols)),
+        *(root / "funding" / f"{symbol}.parquet" for symbol in dict.fromkeys([*panel_symbols, *execution_symbols])),
     ]
-    return tuple(dict.fromkeys(paths))
+    ordered = sorted({p.as_posix() for p in paths})
+    return tuple(Path(p) for p in ordered)
 
 
 def validate_forward_execution_observations(
@@ -214,27 +209,23 @@ def validate_forward_execution_observations(
 
 
 def mhs_sealable_input_paths(*, data_root: Path, execution_timeframe: Literal["3m"]) -> tuple[Path, ...]:
-    """Enumerate sealable inputs: only symbols owning the complete required set.
+    """Enumerate sealable inputs: existing required files for discovered symbols.
 
     Symbols are discovered from ``<data_root>/ohlcv/1h/*.parquet`` sorted by
     stem; the required-path layout comes solely from
-    :func:`resolve_required_mhs_input_paths`. A symbol contributes its paths
-    only when every required file exists -- a symbol missing any required
-    file contributes nothing (never seal a partial symbol).
+    :func:`resolve_required_mhs_input_paths`. Collection-time sealing includes
+    only existing files, while evaluation-time validation reports each missing
+    required file as incomplete evidence.
     """
     if execution_timeframe != "3m":
         raise ValueError(f"unknown execution_timeframe {execution_timeframe!r}")
     root = Path(data_root)
     symbols = sorted({path.stem for path in (root / "ohlcv" / "1h").glob("*.parquet")})
-    sealed: list[Path] = []
-    for symbol in symbols:
-        required = resolve_required_mhs_input_paths(
-            data_root=root,
-            panel_symbols=[symbol],
-            execution_symbols=[symbol],
-            execution_timeframe=execution_timeframe,
-        )
-        # 일부 파일이 빠진 심볼은 통째로 제외한다(부분 봉인 금지).
-        if all(path.exists() for path in required):
-            sealed.extend(required)
+    required = resolve_required_mhs_input_paths(
+        data_root=root,
+        panel_symbols=symbols,
+        execution_symbols=symbols,
+        execution_timeframe=execution_timeframe,
+    )
+    sealed = [path for path in required if path.exists()]
     return tuple(dict.fromkeys(sealed))

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import src.mhs.marks as marks
 import src.market_data.services.futures_collection as fc
-from src.mhs.marks import _get_symbol_mark_frame
+from src.mhs.marks import clear_mhs_market_data_caches
 from tests.unit.mhs.test_evaluation_appresearch import (
     _write_3m_cache,
     _write_mhs_market,
@@ -69,12 +69,10 @@ def mhs_market_long(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["long"]
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
-    # reuses the same symbol names across five distinct roots, so a test that
-    # already populated the cache from a different root would otherwise leak
-    # stale mark data into this one.
-    _get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless and read the lake directly; the shared
+    # invalidation entry point keeps runs isolated when fixtures redirect
+    # funding/mark roots between tests.
+    clear_mhs_market_data_caches()
     return root, end
 
 @pytest.fixture
@@ -82,12 +80,10 @@ def mhs_market(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["default"]
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
-    # reuses the same symbol names across five distinct roots, so a test that
-    # already populated the cache from a different root would otherwise leak
-    # stale mark data into this one.
-    _get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless and read the lake directly; the shared
+    # invalidation entry point keeps runs isolated when fixtures redirect
+    # funding/mark roots between tests.
+    clear_mhs_market_data_caches()
     return root, end
 
 @pytest.fixture
@@ -95,12 +91,10 @@ def mhs_market_with_btc(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["btc"]
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
-    # reuses the same symbol names across five distinct roots, so a test that
-    # already populated the cache from a different root would otherwise leak
-    # stale mark data into this one.
-    _get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless and read the lake directly; the shared
+    # invalidation entry point keeps runs isolated when fixtures redirect
+    # funding/mark roots between tests.
+    clear_mhs_market_data_caches()
     return root, end
 
 @pytest.fixture
@@ -108,12 +102,10 @@ def mhs_market_funding_vary(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["fund"]
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
-    # reuses the same symbol names across five distinct roots, so a test that
-    # already populated the cache from a different root would otherwise leak
-    # stale mark data into this one.
-    _get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless and read the lake directly; the shared
+    # invalidation entry point keeps runs isolated when fixtures redirect
+    # funding/mark roots between tests.
+    clear_mhs_market_data_caches()
     return root, end
 
 @pytest.fixture
@@ -121,10 +113,8 @@ def mhs_market_with_taker_buy_quote(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots["tbq"]
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; the module-scoped _mhs_shared_roots fixture
-    # reuses the same symbol names across five distinct roots, so a test that
-    # already populated the cache from a different root would otherwise leak
-    # stale mark data into this one.
-    _get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless and read the lake directly; the shared
+    # invalidation entry point keeps runs isolated when fixtures redirect
+    # funding/mark roots between tests.
+    clear_mhs_market_data_caches()
     return root, end

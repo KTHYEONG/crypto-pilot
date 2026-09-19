@@ -8,13 +8,13 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
+import src.mhs.evaluation.concurrency as _concurrency_mod
+import src.mhs.evaluation.participation as _participation_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.statistics as statistics
 import src.mhs.research_go as _research_go
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-)
+from src.mhs.contracts import MhsBookReport, MhsDiagnosticRequest
+from src.mhs.params import PERIODS_PER_YEAR_1H
 from src.mhs.types import ExecutionSpec
 from src.mhs.execution import strategy_aware_execution_replay
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
@@ -176,7 +176,7 @@ def test_mhs_perf_opt_002_participation_cumsum_exact(tmp_path) -> None:
     expected = _reference_participation_warnings(
         replay, str(tmp_path), "1m", symbols, grid,
     )
-    actual = ev._participation_warnings(replay, str(tmp_path), "1m", symbols, grid)
+    actual = _participation_mod._participation_warnings(replay, str(tmp_path), "1m", symbols, grid)
     assert set(actual) == set(expected)
     for key in expected:
         assert actual[key] == expected[key]
@@ -212,12 +212,12 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
     # [1.0, nominal_candidate_count]; with discovery_gate=False (the default)
     # the two keys are absent -- opt-in, no default-path cost.
     root, end = mhs_market
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(_concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(_concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, discovery_gate=True,
     )
     report_on = run_mhs_horizon_diagnostic(request_on)
@@ -233,7 +233,7 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
 
     request_off = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     report_off = run_mhs_horizon_diagnostic(request_off)
@@ -250,10 +250,10 @@ def test_naive_sharpe_uses_hourly_annualization() -> None:
     n_bars = round(365.25 * 288 * n_years)
     ledger = _synthetic_ledger("5min", n_bars, mean_ret=0.0004, vol_ret=0.001, seed=7)
     net_1h = ledger.equity.resample("1h").last().dropna().pct_change().dropna()
-    ref = float(net_1h.mean() / net_1h.std(ddof=1) * np.sqrt(ev._PERIODS_PER_YEAR_1H))
+    ref = float(net_1h.mean() / net_1h.std(ddof=1) * np.sqrt(PERIODS_PER_YEAR_1H))
     assert statistics._naive_sharpe(ledger) == pytest.approx(ref)
     net_5m = ledger.net_returns
-    pre_fix = float(net_5m.mean() / net_5m.std(ddof=1) * np.sqrt(ev._PERIODS_PER_YEAR_1H))
+    pre_fix = float(net_5m.mean() / net_5m.std(ddof=1) * np.sqrt(PERIODS_PER_YEAR_1H))
     assert ref / pre_fix == pytest.approx(np.sqrt(12.0), rel=0.05)
 
 def test_hourly_ledger_series_hourly_input_is_identity() -> None:
@@ -317,7 +317,7 @@ def test_geometric_cagr_uses_hourly_annualization() -> None:
     # close, spanning (n_hours - 1) hourly intervals (the code annualizes with
     # n_hours bars, an O(1/n) approximation).
     ratio_h = float(eq_1h.iloc[-1] / eq_1h.iloc[0])
-    span_years = (len(eq_1h) - 1) / ev._PERIODS_PER_YEAR_1H
+    span_years = (len(eq_1h) - 1) / PERIODS_PER_YEAR_1H
     assert statistics._geometric_cagr(eq_1h) == pytest.approx(
         ratio_h ** (1.0 / span_years) - 1.0, rel=1e-3,
     )
@@ -358,7 +358,7 @@ def test_research_go_eligible_is_reachable(mhs_market, monkeypatch) -> None:
     )
     missing = _research_go._mhs_research_go((passing,))
     assert missing.eligible is False
-    assert ev.GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
+    assert _research_go.GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
 
 def test_research_go_data_integrity_reason_split(monkeypatch) -> None:
     """SCENARIO_MHS_RESEARCH_GO_DATA_INTEGRITY_REASON_SPLIT: a fold failing on
@@ -368,7 +368,7 @@ def test_research_go_data_integrity_reason_split(monkeypatch) -> None:
     passing = _passing_fold_report(_gap_mixed_replay())
     mixed = dataclasses.replace(
         passing,
-        failures=(ev.GO_REASON_EXECUTION_GAP, ev.GO_REASON_PRIMARY_SHARPE),
+        failures=(_research_go.GO_REASON_EXECUTION_GAP, _research_go.GO_REASON_PRIMARY_SHARPE),
         termination_counts={"MISSING_DATA": 3, "UNKNOWN_TERMINATION": 0},
         primary_autocorr_sharpe=0.3,
     )
@@ -377,10 +377,10 @@ def test_research_go_data_integrity_reason_split(monkeypatch) -> None:
         {"cap_30_roster": 30.0, "primary_annual_return": 0.05, "deflated_sharpe_ratio": 0.95},
     )
     go = _research_go._mhs_research_go((mixed,), deflated_sharpe_ratio=0.96)
-    assert go.data_integrity_reason_codes == (ev.GO_REASON_EXECUTION_GAP,)
-    assert ev.GO_REASON_PRIMARY_SHARPE not in go.data_integrity_reason_codes
+    assert go.data_integrity_reason_codes == (_research_go.GO_REASON_EXECUTION_GAP,)
+    assert _research_go.GO_REASON_PRIMARY_SHARPE not in go.data_integrity_reason_codes
     assert set(go.reason_codes) == {
-        ev.GO_REASON_EXECUTION_GAP, ev.GO_REASON_PRIMARY_SHARPE,
+        _research_go.GO_REASON_EXECUTION_GAP, _research_go.GO_REASON_PRIMARY_SHARPE,
     }
     assert go.eligible is False
 
@@ -393,7 +393,7 @@ def test_research_go_data_integrity_reason_empty_when_clean(monkeypatch) -> None
     passing = _passing_fold_report(_gap_mixed_replay())
     alpha_only = dataclasses.replace(
         passing,
-        failures=(ev.GO_REASON_PRIMARY_SHARPE,),
+        failures=(_research_go.GO_REASON_PRIMARY_SHARPE,),
         primary_autocorr_sharpe=0.3,
     )
     monkeypatch.setattr(
@@ -403,7 +403,7 @@ def test_research_go_data_integrity_reason_empty_when_clean(monkeypatch) -> None
     go = _research_go._mhs_research_go((alpha_only,), deflated_sharpe_ratio=0.96)
     assert go.eligible is False
     assert go.data_integrity_reason_codes == ()
-    assert go.reason_codes == (ev.GO_REASON_PRIMARY_SHARPE,)
+    assert go.reason_codes == (_research_go.GO_REASON_PRIMARY_SHARPE,)
 
 def test_registered_policy_thresholds_contract() -> None:
     """SCENARIO_MHS_POLICY_THRESHOLDS_REGISTERED_VALUES: the two named policy
@@ -460,7 +460,7 @@ def test_scenario_mhs_kelly_two_sided_08_go_reason_iff_none_registration(
     )
     missing = _research_go._mhs_research_go((passing,))
     assert missing.eligible is False
-    assert ev.GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
+    assert _research_go.GO_REASON_UNSPECIFIED_POLICY in missing.reason_codes
 
 
 def _varying_price_replay() -> object:
@@ -477,8 +477,8 @@ def _varying_price_replay() -> object:
     )
 
 
-def _blend_book_report(replay: object) -> ev.MhsBookReport:
-    return ev.MhsBookReport(
+def _blend_book_report(replay: object) -> MhsBookReport:
+    return MhsBookReport(
         name="blend", band="FAST", horizon_hours=48, step_hours=6, tranche_count=8,
         n_symbols=1, phase=None, prescreen=None, tail=None,
         primary=replay, stress=None,

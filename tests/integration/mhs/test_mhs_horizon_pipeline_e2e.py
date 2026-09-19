@@ -8,14 +8,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
 import src.mhs.marks as marks
 import src.mhs.statistics as statistics
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.evaluation import (
+from src.mhs.contracts import (
     MhsDiagnosticRequest,
     MhsHorizonDiagnosticReport,
 )
+from src.mhs.evidence import phase_1_anchored_purged_folds
+from src.mhs.horizons import horizon_log_return
+from src.mhs.panel import load_base_panel
+from src.mhs.params import SIGNAL_EMA_HORIZON_SPAN
+from src.mhs.types import BOOK_SPECS
 from src.cli.commands.research.mhs import add_mhs_commands
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
@@ -32,12 +36,12 @@ class TestQualityCalibrationWiring:
 
     @staticmethod
     def _book_signal_ema_span(spec) -> int:
-        return max(1, round(spec.horizon_hours / spec.step_hours * ev.SIGNAL_EMA_HORIZON_SPAN))
+        return max(1, round(spec.horizon_hours / spec.step_hours * SIGNAL_EMA_HORIZON_SPAN))
 
     def test_top_level_book_weights_use_ema_span_matching_fold_path(self, calibrated_report) -> None:
         _report, captured = calibrated_report
-        fast = ev.BOOK_SPECS["fast_reversal"]
-        slow = ev.BOOK_SPECS["slow_momentum"]
+        fast = BOOK_SPECS["fast_reversal"]
+        slow = BOOK_SPECS["slow_momentum"]
         assert captured["ema_spans"]["fast_reversal"]
         assert captured["ema_spans"]["slow_momentum"]
         # Every _book_weights call passes the same sign-aware EMA span.
@@ -66,13 +70,13 @@ class TestQualityCalibrationWiring:
 
     def test_run_mhs_horizon_diagnostic_xs_ic_regression_unchanged_after_reorder(self, report, synthetic_market) -> None:
         root, end = synthetic_market
-        panel = ev.load_base_panel(
+        panel = load_base_panel(
             root, "1h", ("close", "open", "quote_vol"), START, end,
             partition="dev", min_bars=2000,
         )
         log_close = np.log(panel["close"])
         opens = panel["open"]
-        signal_48h = ev.horizon_log_return(log_close, 48)
+        signal_48h = horizon_log_return(log_close, 48)
         assert report.xs_rank_ic == statistics._xs_rank_ic(signal_48h, opens, forward_bars=48)
         assert report.date_clustered_regression == statistics._date_clustered_ols(opens, signal_48h, forward_bars=48)
 
@@ -105,7 +109,7 @@ class TestMhsHorizonDiagnostic:
 
     def test_mhs_3m_01_default_execution_timeframe(self) -> None:
         """MHS-3M-01-DEFAULT: production requests default to 3m."""
-        from src.mhs.evaluation import MhsDiagnosticRequest
+        from src.mhs.contracts import MhsDiagnosticRequest
 
         assert MhsDiagnosticRequest().execution_timeframe == "3m"
 
@@ -123,7 +127,7 @@ class TestMhsHorizonDiagnostic:
             run_mhs_horizon_diagnostic(
                 MhsDiagnosticRequest(
                     start=str(START), end=str(end), data_root=str(root),
-                    partition="holdout", execution_timeframe="1m", log_run=False,
+                    partition="holdout", execution_timeframe="3m", log_run=False,
                 ),
             )
 
@@ -136,7 +140,7 @@ class TestMhsHorizonDiagnostic:
                     start=str(START),
                     end=str(HOLDOUT_CUTOFF + pd.Timedelta(days=1)),
                     data_root=str(root),
-                    execution_timeframe="1m", log_run=False,
+                    execution_timeframe="3m", log_run=False,
                 ),
             )
 
@@ -164,7 +168,7 @@ class TestResourceTelemetry:
         assert "blend_participation" in stages
         assert "statistical_diagnostics" in stages
         fold_stages = [s for s in stages if s.startswith("anchored_fold_") and "_window_" not in s]
-        n_folds = len(ev.phase_1_anchored_purged_folds())
+        n_folds = len(phase_1_anchored_purged_folds())
         assert len(fold_stages) == n_folds
         # Anchored folds are recorded in their declared order.
         assert fold_stages == [f"anchored_fold_{i}" for i in range(n_folds)]
@@ -233,7 +237,7 @@ class TestStrictSimulatedPrimary:
         assert 4.18 in blend.prescreen
         assert 6.07 in blend.prescreen
         assert blend.primary.fill_source == "OHLCV_IMMEDIATE_TAKER"
-        assert blend.primary.ledger.mark_source == "MARK_PRICE"
+        assert blend.primary.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
         assert blend.primary_naive_sharpe is not None
         assert blend.primary_max_drawdown <= 0.0 or np.isnan(blend.primary_max_drawdown)
         assert blend.stress.fill_source == "OHLCV_IMMEDIATE_TAKER"
@@ -308,87 +312,16 @@ class TestFreezeBeforeFinalOos:
         assert isinstance(report.execution_symbols, tuple)
         assert report.execution_symbols
 
-class TestMarkPriceCacheRequired:
-    """MHS-MARK-03-CACHE-REQUIRED-INTEGRATION: a complete causal mark cache
-    labels every replay MARK_PRICE and the report agrees across fast/slow/blend."""
+class TestOhlcvValuationSource:
+    """Every replay uses the fixed three-minute OHLCV valuation source."""
 
-    def test_fast_slow_blend_and_report_are_mark_price(self, report) -> None:
-        assert report.mark_source == "MARK_PRICE"
-        for book in (report.books["fast_reversal"], report.books["slow_momentum"], report.blend):
-            assert book.primary.ledger.mark_source == "MARK_PRICE"
-            assert book.primary.mark_source == "MARK_PRICE"
-            assert book.stress.ledger.mark_source == "MARK_PRICE"
-            assert book.stress.mark_source == "MARK_PRICE"
-
-    def test_strict_and_stress_share_the_same_mark_source(self, report) -> None:
-        assert report.mark_source == report.blend.primary.mark_source
-        assert report.blend.primary.mark_source == report.blend.stress.mark_source
-
-@pytest.mark.slow
-class TestNoSilentMarkFallback:
-    """MHS-MARK-04-NO-SILENT-FALLBACK: a cache gap is never silently replaced by
-    OHLCV closes under cache_required; explicit fallback stays labelled."""
-
-    def _gapped_market(self, root: Path, tmp_path: Path, monkeypatch) -> None:
-        import src.market_data.services.futures_collection as fc
-
-        gap_dir = tmp_path / "markPriceKlines" / "1h"
-        gap_dir.mkdir(parents=True, exist_ok=True)
-        gap_start = pd.Timestamp("2021-02-01", tz="UTC")
-        gap_end = pd.Timestamp("2021-02-10", tz="UTC")
-        for sym in DEV_SYMBOLS:
-            frame = pd.read_parquet(root / "markPriceKlines" / "1h" / f"{sym}.parquet")
-            drop = (frame["datetime"] >= gap_start) & (frame["datetime"] < gap_end)
-            frame.loc[drop, "close"] = float("nan")
-            frame.loc[drop, "high"] = float("nan")
-            frame.loc[drop, "low"] = float("nan")
-            frame.loc[drop, "open"] = float("nan")
-            frame.to_parquet(gap_dir / f"{sym}.parquet")
-        monkeypatch.setattr(
-            fc,
-            "_mark_price_path",
-            lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
-        )
-
-    @pytest.mark.slow
-    def test_cache_required_fails_closed_with_typed_rejection(
-        self, synthetic_market, tmp_path, monkeypatch,
-    ) -> None:
-        """MHS-MARK-04-NO-SILENT-FALLBACK: a cache gap is never silently
-        replaced by OHLCV closes under cache_required. The expected strict
-        replay failure becomes a typed book-level rejection in the terminal
-        report instead of escaping the diagnostic process."""
-        root, end = synthetic_market
-        self._gapped_market(root, tmp_path, monkeypatch)
-        report = run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
-                start=str(START), end=str(end), data_root=str(root),
-                mark_mode="cache_required", execution_timeframe="1m", log_run=False,
-            ),
-        )
-        assert report.status == "COMPLETE"
-        failed = [b for b in report.books.values() if b.failure is not None]
-        assert failed, "cache_required mark gap must reject every book"
-        for book in report.books.values():
-            assert book.primary is None
-            assert book.primary_autocorr_sharpe is None
-        assert report.research_go.eligible is False
-
-    @pytest.mark.slow
-    def test_explicit_ohlcv_fallback_completes_as_fallback(
-        self, synthetic_market, tmp_path, monkeypatch,
-    ) -> None:
-        root, end = synthetic_market
-        self._gapped_market(root, tmp_path, monkeypatch)
-        report = run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
-                start=str(START), end=str(end), data_root=str(root),
-                mark_mode="ohlcv_close_fallback", execution_timeframe="1m", log_run=False,
-            ),
-        )
+    def test_fast_slow_blend_and_report_use_ohlcv_closes(self, report) -> None:
         assert report.mark_source == "OHLCV_CLOSE_FALLBACK"
-        assert report.blend is not None
-        assert report.blend.primary.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
+        for book in (report.books["fast_reversal"], report.books["slow_momentum"], report.blend):
+            assert book.primary.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
+            assert book.primary.mark_source == "OHLCV_CLOSE_FALLBACK"
+            assert book.stress.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
+            assert book.stress.mark_source == "OHLCV_CLOSE_FALLBACK"
 
 class TestMarkPriceGoValidityIntegration:
     """MHS-MARK-05-GO-VALIDITY: an invalid primary never yields a Research GO."""
@@ -405,28 +338,28 @@ class TestMarkPriceGoValidityIntegration:
         assert invalid.scale_go_eligible is False
 
 class TestMarkModeCli:
-    """MHS-MARK-06-CLI-MODE: CLI defaults to cache_required, accepts only the
-    two named modes, and exposes neither --collect-mark nor --unseal-holdout."""
+    """Retired mark-mode selector: no --mark-mode choice exists; the old flag
+    fails as an unknown argument rather than switching the valuation source."""
 
-    def test_cli_defaults_to_cache_required(self) -> None:
+    def test_cli_exposes_no_mark_mode_choice(self) -> None:
         import argparse
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="portfolio_command", required=True)
         add_mhs_commands(sub)
         args = parser.parse_args(["mhs-horizon-diagnostic"])
-        assert args.mark_mode == "cache_required"
+        assert not hasattr(args, "mark_mode")
         assert not hasattr(args, "collect_mark")
         assert not hasattr(args, "unseal_holdout")
 
-    def test_cli_accepts_only_two_named_modes(self) -> None:
+    def test_retired_mark_mode_flag_rejected(self) -> None:
         import argparse
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="portfolio_command", required=True)
         add_mhs_commands(sub)
-        fallback = parser.parse_args(["mhs-horizon-diagnostic", "--mark-mode", "ohlcv_close_fallback"])
-        assert fallback.mark_mode == "ohlcv_close_fallback"
+        with pytest.raises(SystemExit):
+            parser.parse_args(["mhs-horizon-diagnostic", "--mark-mode", "ohlcv_close_fallback"])
         with pytest.raises(SystemExit):
             parser.parse_args(["mhs-horizon-diagnostic", "--mark-mode", "bogus"])
 
@@ -468,7 +401,7 @@ class TestPitExecutionGrid:
             yield run_mhs_horizon_diagnostic(
                 MhsDiagnosticRequest(
                     start=str(START), end=str(end), data_root=str(root),
-                    execution_timeframe="1m", log_run=False,
+                    execution_timeframe="3m", log_run=False,
                 ),
             )
         finally:
@@ -510,7 +443,7 @@ class TestAnchoredFoldGoGate:
     relevant termination produces Research GO false and reason codes."""
 
     def test_three_folds_reported_and_go_false(self, report) -> None:
-        expected = ev.phase_1_anchored_purged_folds()
+        expected = phase_1_anchored_purged_folds()
         assert len(report.folds) == len(expected)
         assert len(report.anchored_folds) == len(expected)
         for fold_report, fold in zip(report.folds, expected, strict=True):
@@ -534,7 +467,7 @@ class TestAnchoredFoldGoGate:
         assert fold_report.stress_elapsed_seconds >= 0.0
 
     def test_gate_collects_each_fail_closed_reason(self) -> None:
-        from src.mhs.evaluation import (
+        from src.mhs.contracts import (
             MhsFoldReport,
         )
         from src.mhs.research_go import _mhs_research_go
@@ -571,7 +504,7 @@ class TestAnchoredFoldGoGate:
                 stress_elapsed_seconds=0.01,
             )
 
-        from src.mhs.evaluation import (
+        from src.mhs.research_go import (
             GO_REASON_EXECUTION_GAP,
             GO_REASON_INCOMPLETE_FOLD,
             GO_REASON_PRIMARY_SHARPE,
@@ -629,7 +562,7 @@ class TestFoldSafeHorizonEfficiency:
         return run_mhs_horizon_diagnostic(
             MhsDiagnosticRequest(
                 start=str(START), end=str(end), data_root=str(root),
-                execution_timeframe="1m", log_run=False,
+                execution_timeframe="3m", log_run=False,
                 fold_safe_horizon_selection=True,
             ),
         )
@@ -637,23 +570,25 @@ class TestFoldSafeHorizonEfficiency:
     @pytest.fixture(scope="module")
     def fold_safe_baseline_report(self, synthetic_market) -> MhsHorizonDiagnosticReport:
         root, end = synthetic_market
-        real_fn = ev.fold_train_only_discovery_qualification
+        from src.mhs.evaluation import folds as evaluation_folds
+
+        real_fn = evaluation_folds.fold_train_only_discovery_qualification
 
         def _no_cache(*args, **kwargs):
             kwargs.pop("precomputed_candidate_weights", None)
             return real_fn(*args, **kwargs)
 
-        ev.fold_train_only_discovery_qualification = _no_cache
+        evaluation_folds.fold_train_only_discovery_qualification = _no_cache
         try:
             return run_mhs_horizon_diagnostic(
                 MhsDiagnosticRequest(
                     start=str(START), end=str(end), data_root=str(root),
-                    execution_timeframe="1m", log_run=False,
+                    execution_timeframe="3m", log_run=False,
                     fold_safe_horizon_selection=True,
                 ),
             )
         finally:
-            ev.fold_train_only_discovery_qualification = real_fn
+            evaluation_folds.fold_train_only_discovery_qualification = real_fn
 
     def test_cached_path_report_byte_identical_to_baseline(
         self, fold_safe_report, fold_safe_baseline_report,
@@ -663,7 +598,7 @@ class TestFoldSafeHorizonEfficiency:
         assert (
             len(fold_safe_report.folds)
             == len(fold_safe_baseline_report.folds)
-            == len(ev.phase_1_anchored_purged_folds())
+            == len(phase_1_anchored_purged_folds())
         )
         for cached_fold, baseline_fold in zip(
             fold_safe_report.folds, fold_safe_baseline_report.folds, strict=True,
@@ -697,20 +632,20 @@ class TestMhsPerfOptimizationO3FoldParity:
         fc._mark_price_path = originals["mark_price_path"]
 
     def test_parallel_folds_match_sequential_folds(self, fold_parity_request) -> None:
-        from src.mhs.evaluation import (
+        from src.mhs.evaluation.folds import (
             _run_anchored_fold,
             _run_folds_parallel,
         )
 
         root, end = fold_parity_request
-        funding, _ = ev._load_funding_series(DEV_SYMBOLS)
+        funding, _ = marks._load_funding_series(DEV_SYMBOLS)
         request = MhsDiagnosticRequest(
             start=str(START), end=str(end), data_root=str(root),
-            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            execution_timeframe="3m", log_run=False,
         )
         sequential = tuple(
             _run_anchored_fold(str(root), fold, request, funding, 1.0, idx, None)
-            for idx, fold in enumerate(ev.phase_1_anchored_purged_folds())
+            for idx, fold in enumerate(phase_1_anchored_purged_folds())
         )
         parallel = _run_folds_parallel(str(root), request, funding, 1.0, None)
         assert len(sequential) == len(parallel)
@@ -733,3 +668,176 @@ class TestMhsPerfOptimizationO3FoldParity:
                 assert seq.strict.ledger.equity.equals(par.strict.ledger.equity)
                 assert len(seq.strict.simulated_fills) == len(par.strict.simulated_fills)
                 assert len(seq.stress.simulated_fills) == len(par.stress.simulated_fills)
+
+class TestSingleSourceDiagnosticControls:
+    """Retired mark-mode selector: one fixed 3m OHLCV valuation source across
+    CLI, diagnostic request and pipeline config."""
+
+    def test_default_config_parity(self) -> None:
+        """Default CLI and direct config describe identical OHLCV/funding sources."""
+        import dataclasses
+
+        from src.cli.main import build_root_parser
+        from src.mhs.contracts import MhsDiagnosticRequest
+        from src.mhs.pipeline.config import MhsRunConfig
+
+        args = build_root_parser().parse_args(
+            ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
+        )
+        from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
+        bare = dataclasses.asdict(MhsRunConfig())
+        assert from_cli == bare
+        assert "mark_mode" not in bare
+        assert bare["execution_timeframe"] == "3m"
+        request = MhsDiagnosticRequest(**bare)
+        assert request.execution_timeframe == "3m"
+        assert not hasattr(request, "mark_mode")
+
+    def test_old_mark_flag_does_not_silently_pass(self) -> None:
+        """An old serialized request carrying mark_mode fails explicitly."""
+        from src.mhs.contracts import MhsDiagnosticRequest
+
+        with pytest.raises(TypeError):
+            MhsDiagnosticRequest(mark_mode="cache_required")  # type: ignore[call-arg]
+
+    def test_pipeline_book_stage_reads_no_mark_mode(self) -> None:
+        """build_books consumes the fixed OHLCV contract without mark-gap or mark-coverage branches."""
+        import inspect
+
+        import src.mhs.pipeline.stages.book as book_stage
+
+        source = inspect.getsource(book_stage.build_books)
+        assert "config.mark_mode" not in source
+        assert "apply_dynamic_mark_gap_exclusion" not in source
+        assert "assert_relevant_mark_price_coverage" not in source
+
+    @pytest.mark.slow
+    def test_mark_cache_only_gap_cannot_change_diagnostic_source(
+        self, synthetic_market, tmp_path, monkeypatch,
+    ) -> None:
+        """A mark-cache-only gap cannot change signal membership or ledger source."""
+        import src.market_data.services.futures_collection as fc
+
+        root, end = synthetic_market
+        if not (root / "3m").exists():
+            pytest.skip("3m synthetic execution market not yet available")
+        gap_dir = tmp_path / "markPriceKlines" / "1h"
+        gap_dir.mkdir(parents=True, exist_ok=True)
+        gap_start = pd.Timestamp("2021-02-01", tz="UTC")
+        gap_end = pd.Timestamp("2021-02-10", tz="UTC")
+        for sym in DEV_SYMBOLS:
+            frame = pd.read_parquet(root / "markPriceKlines" / "1h" / f"{sym}.parquet")
+            drop = (frame["datetime"] >= gap_start) & (frame["datetime"] < gap_end)
+            frame.loc[drop, "close"] = float("nan")
+            frame.to_parquet(gap_dir / f"{sym}.parquet")
+        monkeypatch.setattr(
+            fc,
+            "_mark_price_path",
+            lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
+        )
+        report = run_mhs_horizon_diagnostic(
+            MhsDiagnosticRequest(
+                start=str(START), end=str(end), data_root=str(root),
+                execution_timeframe="3m", log_run=False,
+            ),
+        )
+        assert report.status == "COMPLETE"
+        assert report.blend is not None
+        assert report.blend.primary is not None
+        assert report.blend.primary.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
+
+@pytest.mark.slow
+class TestDiagnosticCanonicalOhlcvEconomics:
+    """Research diagnostic and pipeline price the same 3m trade bars."""
+
+    @pytest.fixture
+    def ohlcv_market(self, synthetic_market):
+        root, end = synthetic_market
+        if not (root / "3m").exists():
+            pytest.skip("3m synthetic execution market not yet available")
+        return root, end
+
+    def test_mark_only_gap_leaves_books_invariant(self, ohlcv_market, tmp_path, monkeypatch) -> None:
+        """A missing mark cache changes neither target weights nor ledger source."""
+        import src.market_data.services.futures_collection as fc
+
+        root, end = ohlcv_market
+        gap_dir = tmp_path / "markPriceKlines" / "1h"
+        gap_dir.mkdir(parents=True, exist_ok=True)
+        gap_start = pd.Timestamp("2021-02-01", tz="UTC")
+        gap_end = pd.Timestamp("2021-02-10", tz="UTC")
+        for sym in DEV_SYMBOLS:
+            frame = pd.read_parquet(root / "markPriceKlines" / "1h" / f"{sym}.parquet")
+            drop = (frame["datetime"] >= gap_start) & (frame["datetime"] < gap_end)
+            frame.loc[drop, "close"] = float("nan")
+            frame.to_parquet(gap_dir / f"{sym}.parquet")
+        monkeypatch.setattr(
+            fc,
+            "_mark_price_path",
+            lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
+        )
+        report = run_mhs_horizon_diagnostic(
+            MhsDiagnosticRequest(
+                start=str(START), end=str(end), data_root=str(root),
+                execution_timeframe="3m", log_run=False,
+            ),
+        )
+        assert report.status == "COMPLETE"
+        assert report.blend is not None
+        for book in (report.books["fast_reversal"], report.books["slow_momentum"], report.blend):
+            assert book.primary is not None
+            assert book.primary.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
+
+    def test_stress_remains_same_data_comparison(self, ohlcv_market) -> None:
+        """Base and stress differ in declared costs, never in price source."""
+        root, end = ohlcv_market
+        report = run_mhs_horizon_diagnostic(
+            MhsDiagnosticRequest(
+                start=str(START), end=str(end), data_root=str(root),
+                execution_timeframe="3m", log_run=False,
+            ),
+        )
+        assert report.status == "COMPLETE"
+        assert report.blend is not None
+        primary = report.blend.primary
+        stress = report.blend.stress
+        assert primary is not None
+        assert stress is not None
+        assert primary.fill_source == stress.fill_source == "OHLCV_IMMEDIATE_TAKER"
+        assert primary.ledger.mark_source == stress.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
+        assert primary.mark_source == stress.mark_source == "OHLCV_CLOSE_FALLBACK"
+
+    def test_future_bars_cannot_alter_earlier_fills(self, ohlcv_market, tmp_path) -> None:
+        """Perturbing 3m bars after order resolution leaves prior fills and equity unchanged."""
+        import shutil
+
+        root, end = ohlcv_market
+        request = MhsDiagnosticRequest(
+            start=str(START), end=str(end), data_root=str(root),
+            execution_timeframe="3m", log_run=False,
+        )
+        baseline = run_mhs_horizon_diagnostic(request)
+        assert baseline.status == "COMPLETE"
+        assert baseline.blend is not None
+        assert baseline.blend.primary is not None
+        perturbed_root = tmp_path / "perturbed_market"
+        shutil.copytree(root, perturbed_root)
+        last_symbol = DEV_SYMBOLS[0]
+        frame = pd.read_parquet(perturbed_root / "3m" / f"{last_symbol}.parquet")
+        frame.loc[frame.index[-10:], "close"] = frame.loc[frame.index[-10:], "close"] * 1.5
+        frame.to_parquet(perturbed_root / "3m" / f"{last_symbol}.parquet")
+        perturbed_request = MhsDiagnosticRequest(
+            start=str(START), end=str(end), data_root=str(perturbed_root),
+            execution_timeframe="3m", log_run=False,
+        )
+        rerun = run_mhs_horizon_diagnostic(perturbed_request)
+        assert rerun.status == "COMPLETE"
+        assert rerun.blend is not None
+        assert rerun.blend.primary is not None
+        base_fills = baseline.blend.primary.simulated_fills
+        rerun_fills = rerun.blend.primary.simulated_fills
+        assert base_fills is not None
+        assert rerun_fills is not None
+        assert len(base_fills) > 0
+        prefix = rerun_fills[rerun_fills["timestamp"] <= base_fills["timestamp"].iloc[-1]]
+        assert prefix.equals(base_fills)

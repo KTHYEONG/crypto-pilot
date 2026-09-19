@@ -142,27 +142,15 @@ def test_load_window_minute_frames_threaded_equivalence(tmp_path) -> None:
         assert "close" in frames[s].columns
 
 
-def test_mark_frame_path_keyed_cache(tmp_path) -> None:
-    import pandas as pd
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    from src.mhs.marks import _get_symbol_mark_frame_for_path
+def test_mark_frame_path_keyed_cache_retired(tmp_path) -> None:
+    # The path-keyed mark frame cache is retired: canonical preparation and
+    # replay use completed trade OHLCV; retained minute-frame loaders read the
+    # lake directly with no process cache to isolate.
+    from src.mhs import marks
 
-    root1 = tmp_path / "root1"
-    root2 = tmp_path / "root2"
-    root1.mkdir()
-    root2.mkdir()
-
-    f1 = root1 / "mark_BTC.parquet"
-    f2 = root2 / "mark_BTC.parquet"
-    pq.write_table(pa.Table.from_pandas(pd.DataFrame({"timestamp": [1000], "close": [100.0], "open": [100.0], "high": [100.0], "low": [100.0]})), str(f1))
-    pq.write_table(pa.Table.from_pandas(pd.DataFrame({"timestamp": [1000], "close": [200.0], "open": [200.0], "high": [200.0], "low": [200.0]})), str(f2))
-
-    df1 = _get_symbol_mark_frame_for_path("BTC", "1h", str(f1))
-    df2 = _get_symbol_mark_frame_for_path("BTC", "1h", str(f2))
-    assert not df1.empty
-    assert float(df1["close"].iloc[0]) == 100.0
-    assert float(df2["close"].iloc[0]) == 200.0
+    assert not hasattr(marks, "_get_symbol_mark_frame_for_path")
+    assert not hasattr(marks, "_get_symbol_mark_frame")
+    marks.clear_mhs_market_data_caches()
 
 
 def test_window_ipc_errors(tmp_path) -> None:
@@ -316,7 +304,7 @@ def test_missing_active_execution_file_stays_in_roster(tmp_path) -> None:
     from src.mhs.types import ExecutionSpec
     idx = pd.DatetimeIndex([pd.Timestamp('2025-01-01', tz='UTC')])
     weights = pd.DataFrame({'MISSUSDT': [1.0]}, index=idx)
-    windows = list(_iter_mhs_execution_windows(weights, idx, str(tmp_path), '3m', idx[0], idx[0]+pd.Timedelta(minutes=9), {}, 'ohlcv_close_fallback', ExecutionSpec(), funding_failures={'MISSUSDT': 'missing'}))
+    windows = list(_iter_mhs_execution_windows(weights, idx, str(tmp_path), '3m', idx[0], idx[0]+pd.Timedelta(minutes=9), {}, ExecutionSpec(), funding_failures={'MISSUSDT': 'missing'}))
     assert windows[0].symbols == ('MISSUSDT',)
     assert windows[0].closes['MISSUSDT'].isna().all()
     assert windows[0].quote_volumes['MISSUSDT'].isna().all()
@@ -548,7 +536,7 @@ def test_generator_required_symbols_stay_in_roster(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
-            funding, "ohlcv_close_fallback", ExecutionSpec(),
+            funding, ExecutionSpec(),
             required_symbols=lambda: frozenset({"AUSDT"}),
         )
     )
@@ -574,7 +562,7 @@ def test_generator_unknown_required_symbol_rejected(tmp_path) -> None:
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"), "3m",
-                grid[0], grid[-1], funding, "ohlcv_close_fallback", ExecutionSpec(),
+                grid[0], grid[-1], funding, ExecutionSpec(),
                 required_symbols=lambda: frozenset({"GHOSTUSDT"}),
             )
         )
@@ -634,7 +622,7 @@ def _run_split_parity(tmp_path, cost_model: str):
     windows = list(
         _iter_mhs_execution_windows(
             targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
-            funding, "ohlcv_close_fallback", spec,
+            funding, spec,
         )
     )
     ref = replay_execution_windows(iter(windows), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
@@ -688,7 +676,7 @@ def test_no_future_pricing_across_pieces(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
-            funding, "ohlcv_close_fallback", spec,
+            funding, spec,
         )
     )
     pieces = _split_stream(windows)
@@ -794,7 +782,7 @@ def test_batch_live_roster_holds_unfilled_exit(tmp_path) -> None:
     def _recording():
         gen = _iter_mhs_execution_windows(
             targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
-            funding, "ohlcv_close_fallback", spec,
+            funding, spec,
             required_symbols=lambda: live_required_symbols(cell[0] if cell else []),
         )
         for w in gen:
@@ -827,7 +815,7 @@ def test_batch_without_live_cell_drops_stale_roster_member(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
-            funding, "ohlcv_close_fallback", spec,
+            funding, spec,
         )
     )
     assert len(windows) >= 3
@@ -856,7 +844,7 @@ def test_single_and_coupled_live_cells_populated(tmp_path) -> None:
     spec = ExecutionSpec()
     args = (
         targets, signals, str(tmp_path / "ohlcv"), "3m", grid[0], grid[-1],
-        funding, "ohlcv_close_fallback", spec,
+        funding, spec,
     )
     cell_single: list = []
     replay_execution_windows(
@@ -898,7 +886,7 @@ def test_ipc_round_trip_preserves_logical_partition(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"), "3m",
-            grid[0], grid[-1], funding, "ohlcv_close_fallback", ExecutionSpec(),
+            grid[0], grid[-1], funding, ExecutionSpec(),
         )
     )
     path = str(tmp_path / "tagged.arrow")
@@ -1013,7 +1001,7 @@ def test_generator_final_fence_emits_only_completed_bars(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
         )
     )
     last = windows[-1]
@@ -1037,7 +1025,7 @@ def test_generator_unaligned_fence_trims_incomplete_bar(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
         )
     )
     last = windows[-1]
@@ -1060,7 +1048,7 @@ def test_generator_interior_timeout_endpoint_retained(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
         )
     )
     assert len(windows) >= 2
@@ -1093,7 +1081,7 @@ def test_generator_never_decodes_out_of_fence_row(tmp_path, monkeypatch) -> None
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
         )
     )
     assert seen["grid_end"] < end
@@ -1115,7 +1103,7 @@ def test_generator_minimum_legal_range_succeeds(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
         )
     )
     assert len(windows) == 1
@@ -1142,7 +1130,7 @@ def test_generator_insufficient_range_fails_closed(tmp_path) -> None:
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, "ohlcv_close_fallback", spec,
+                "3m", start, end, funding, spec,
             )
         )
 
@@ -1161,7 +1149,7 @@ def test_generator_empty_targets_emit_completed_grid(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             empty, decisions[:0] + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
         )
     )
     assert len(windows) == 1
@@ -1206,7 +1194,7 @@ def test_adaptive_decode_splits_with_no_missing_decisions(tmp_path, monkeypatch)
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_600_000, reserve_bytes=100, execution_bound_count=2,
         )
     )
@@ -1234,7 +1222,7 @@ def test_adaptive_decode_streams_empty_pieces_before_next_daily_decision(tmp_pat
     windows = list(
         _w._iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_600_000, reserve_bytes=100, execution_bound_count=2,
         )
     )
@@ -1256,7 +1244,7 @@ def test_adaptive_decode_streams_empty_pieces_before_next_daily_decision(tmp_pat
     held_windows = list(
         _w._iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_600_000, reserve_bytes=100, execution_bound_count=2,
             required_symbols=lambda: frozenset({"AUSDT"}),
         )
@@ -1280,7 +1268,7 @@ def test_adaptive_decode_rejects_plan_shorter_than_first_signal_span(tmp_path, m
         list(
             _w._iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, "ohlcv_close_fallback", spec,
+                "3m", start, end, funding, spec,
                 budget_bytes=1_600_000, reserve_bytes=100,
             )
         )
@@ -1309,7 +1297,7 @@ def test_adaptive_empty_piece_rejects_unknown_live_roster(tmp_path, monkeypatch)
         list(
             _w._iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, "ohlcv_close_fallback", spec,
+                "3m", start, end, funding, spec,
                 budget_bytes=1_600_000, reserve_bytes=100,
                 required_symbols=_live_roster,
             )
@@ -1331,7 +1319,7 @@ def test_adaptive_tail_and_nonaligned_fence(tmp_path, monkeypatch) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_550_000, reserve_bytes=100,
             required_symbols=lambda: frozenset({"AUSDT"}),
         )
@@ -1352,7 +1340,7 @@ def test_adaptive_minimum_timeout_retention(tmp_path, monkeypatch) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_550_000, reserve_bytes=100,
         )
     )
@@ -1375,7 +1363,7 @@ def test_adaptive_bound_union_roster(tmp_path, monkeypatch) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_800_000, reserve_bytes=100,
             required_symbols=lambda: frozenset(held),
         )
@@ -1396,7 +1384,7 @@ def test_adaptive_ipc_partition_parity(tmp_path, monkeypatch) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_550_000, reserve_bytes=100,
         )
     )
@@ -1425,7 +1413,7 @@ def test_adaptive_logical_identity_under_splitting(tmp_path, monkeypatch) -> Non
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=2_000_000, reserve_bytes=100,
         )
     )
@@ -1448,7 +1436,7 @@ def test_adaptive_execution_bound_count_validation(tmp_path) -> None:
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, start + pd.Timedelta(hours=2), funding, "ohlcv_close_fallback", spec,
+                "3m", start, start + pd.Timedelta(hours=2), funding, spec,
                 execution_bound_count=0,
             )
         )
@@ -1469,7 +1457,7 @@ def test_estimate_and_minimum_helpers_cover_branches() -> None:
 
 
 def test_materialize_covers_empty_and_missing_branches(tmp_path, monkeypatch) -> None:
-    """Empty aligned frames, missing symbols and mark modes are admitted."""
+    """Empty aligned frames and missing symbols are admitted; no piece carries a mark plane."""
     import pandas as pd
 
     import src.mhs.evaluation.windows as _w
@@ -1484,44 +1472,41 @@ def test_materialize_covers_empty_and_missing_branches(tmp_path, monkeypatch) ->
     win = _w._materialize_execution_piece(
         piece_grid=grid, piece_weights=empty_w, piece_signals=empty_s, roster=[],
         columns=cols, root=str(tmp_path), timeframe="3m", funding_by_symbol={},
-        mark_mode="cache_required", funding_failures=None, allocation=alloc,
+        funding_failures=None, allocation=alloc,
         budget_bytes=None, reserve_bytes=None,
         window_start=grid[0], window_end=grid[-1], logical_partition=(0, 0),
     )
     assert win.symbols == ()
+    assert win.marks is None
     w2 = pd.DataFrame(0.0, index=pd.DatetimeIndex([grid[0]]), columns=list(cols))
     s2 = pd.DatetimeIndex([grid[0] + pd.Timedelta(hours=1)])
     monkeypatch.setattr(_w, "_load_window_minute_frames", lambda *a, **k: {})
     win2 = _w._materialize_execution_piece(
         piece_grid=grid, piece_weights=w2, piece_signals=s2, roster=["AUSDT"],
         columns=cols, root=str(tmp_path), timeframe="3m", funding_by_symbol={},
-        mark_mode="ohlcv_close_fallback", funding_failures=None, allocation=alloc,
+        funding_failures=None, allocation=alloc,
         budget_bytes=None, reserve_bytes=None,
         window_start=grid[0], window_end=grid[-1], logical_partition=(0, 1),
     )
     assert "AUSDT" in win2.symbols
     assert float(win2.highs["AUSDT"].isna().sum()) == len(grid)
-    import pandas as _pd
-
-    marks_panel = _pd.DataFrame(1.0, index=grid, columns=["AUSDT"])
-    monkeypatch.setattr(_w, "_cached_mark_panel", lambda *a, **k: marks_panel)
-    monkeypatch.setattr(_w.integrity, "_assert_cache_required_marks", lambda *a, **k: None)
+    assert win2.marks is None
     win3 = _w._materialize_execution_piece(
         piece_grid=grid, piece_weights=w2, piece_signals=s2, roster=["AUSDT"],
         columns=cols, root=str(tmp_path), timeframe="3m", funding_by_symbol={},
-        mark_mode="cache_required", funding_failures=None, allocation=alloc,
+        funding_failures=None, allocation=alloc,
         budget_bytes=None, reserve_bytes=None,
         window_start=grid[0], window_end=grid[-1], logical_partition=(0, 1),
     )
-    assert win3.marks is not None
+    assert win3.marks is None
     win4 = _w._materialize_execution_piece(
         piece_grid=grid, piece_weights=w2, piece_signals=s2, roster=["AUSDT"],
         columns=cols, root=str(tmp_path), timeframe="3m", funding_by_symbol={},
-        mark_mode="cache_required_stale_carry", funding_failures=None, allocation=alloc,
+        funding_failures=None, allocation=alloc,
         budget_bytes=None, reserve_bytes=None,
         window_start=grid[0], window_end=grid[-1], logical_partition=(0, 1),
     )
-    assert win4.marks is not None
+    assert win4.marks is None
 
 
 def test_adaptive_single_piece_when_budget_allows(tmp_path, monkeypatch) -> None:
@@ -1535,7 +1520,7 @@ def test_adaptive_single_piece_when_budget_allows(tmp_path, monkeypatch) -> None
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=10**12, reserve_bytes=100,
         )
     )
@@ -1556,7 +1541,7 @@ def test_adaptive_single_piece_roster_branches(tmp_path, monkeypatch) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=10**12, reserve_bytes=100,
             required_symbols=lambda: frozenset({"AUSDT"}),
         )
@@ -1567,7 +1552,7 @@ def test_adaptive_single_piece_roster_branches(tmp_path, monkeypatch) -> None:
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, "ohlcv_close_fallback", spec,
+                "3m", start, end, funding, spec,
                 budget_bytes=10**12, reserve_bytes=100,
                 required_symbols=lambda: frozenset({"ZZZ"}),
             )
@@ -1587,7 +1572,7 @@ def test_adaptive_offgrid_timeout_fallback(tmp_path, monkeypatch) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_550_000, reserve_bytes=100,
         )
     )
@@ -1608,7 +1593,7 @@ def test_adaptive_split_unknown_roster_fails_closed(tmp_path, monkeypatch) -> No
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, "ohlcv_close_fallback", spec,
+                "3m", start, end, funding, spec,
                 budget_bytes=1_550_000, reserve_bytes=100,
                 required_symbols=lambda: frozenset({"ZZZ"}),
             )
@@ -1638,7 +1623,7 @@ def test_adaptive_piece_and_tail_unknown_branches(tmp_path, monkeypatch) -> None
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, "ohlcv_close_fallback", spec,
+                "3m", start, end, funding, spec,
                 budget_bytes=10**12, reserve_bytes=100, required_symbols=_flip,
             )
         )
@@ -1653,7 +1638,7 @@ def test_adaptive_piece_and_tail_unknown_branches(tmp_path, monkeypatch) -> None
         list(
             _iter_mhs_execution_windows(
                 targets3, decisions3 + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start3, end3, funding3, "ohlcv_close_fallback", spec3,
+                "3m", start3, end3, funding3, spec3,
                 budget_bytes=1_600_000, reserve_bytes=100, required_symbols=_flip2,
             )
         )
@@ -1685,7 +1670,7 @@ def test_adaptive_tail_unknown_fails_closed(tmp_path, monkeypatch) -> None:
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, "ohlcv_close_fallback", spec,
+                "3m", start, end, funding, spec,
                 budget_bytes=1_550_000, reserve_bytes=100, required_symbols=_flip,
             )
         )
@@ -1706,7 +1691,7 @@ def test_adaptive_long_tail_streams_multiple_pieces(tmp_path, monkeypatch) -> No
     windows = list(
         _iter_mhs_execution_windows(
             targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-            "3m", start, end, funding, "ohlcv_close_fallback", spec,
+            "3m", start, end, funding, spec,
             budget_bytes=1_550_000, reserve_bytes=100,
             required_symbols=lambda: frozenset({"AUSDT"}),
         )
@@ -1729,7 +1714,7 @@ def test_adaptive_unresolvable_budget_fails_closed(tmp_path, monkeypatch) -> Non
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, "ohlcv_close_fallback", spec,
+                "3m", start, end, funding, spec,
                 budget_bytes=1, reserve_bytes=100,
             )
         )
@@ -1751,7 +1736,7 @@ def test_adaptive_insufficient_grid_fails_closed(tmp_path, monkeypatch) -> None:
         list(
             _iter_mhs_execution_windows(
                 targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, start + pd.Timedelta(minutes=6), funding, "ohlcv_close_fallback", spec,
+                "3m", start, start + pd.Timedelta(minutes=6), funding, spec,
                 budget_bytes=10**12, reserve_bytes=100,
             )
         )

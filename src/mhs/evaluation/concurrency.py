@@ -118,6 +118,7 @@ def _run_books_concurrent(
     _books_workers = plan_worker_count(
         n_total_workers, WORKER_PEAK_RSS_BYTES, request.ram_guard,
         observer=_worker_plan_observer(telemetry, "books", WORKER_PEAK_RSS_BYTES),
+        reserve_bytes=_books_reserve,
     )
     assert_fork_admission("books", _books_workers, WORKER_PEAK_RSS_BYTES, _books_reserve)
     with (
@@ -300,11 +301,12 @@ def _run_post_book_concurrently(
         )
 
     reports: dict[int, MhsFoldReport] = {}
+    _post_book_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     max_workers = plan_worker_count(
         min(3, len(fold_list)), WORKER_PEAK_RSS_BYTES, request.ram_guard,
         observer=_worker_plan_observer(telemetry, "post_book_folds", WORKER_PEAK_RSS_BYTES),
+        reserve_bytes=_post_book_reserve,
     )
-    _post_book_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     assert_fork_admission("post_book_folds", max_workers, WORKER_PEAK_RSS_BYTES, _post_book_reserve)
     with fork_shared_payload({"base_panel": base_panel}), ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
         futures = {

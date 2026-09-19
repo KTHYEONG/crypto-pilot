@@ -90,12 +90,15 @@ def plan_worker_count(
     ram_guard: bool,
     *,
     observer: Callable[[str, int, int, int, int], None] | None = None,
+    reserve_bytes: int | None = None,
 ) -> int:
     """Clamp the requested worker count to what the available RAM supports.
 
     ``min(requested, cpu_count)`` is further clamped by
     ``max(1, (available - reserve) // per_worker_bytes)`` when ``ram_guard``
     is True; with ``ram_guard=False`` the CPU bound is returned unchanged.
+    ``reserve_bytes`` lets a caller share the exact same reserve with its
+    subsequent admission check; omitted, the system reserve is used.
     ``per_worker_bytes <= 0`` raises ``ValueError``.  A psutil observational
     failure disables only the RAM clamp, never the CPU bound.
 
@@ -114,7 +117,9 @@ def plan_worker_count(
         available = int(psutil.virtual_memory().available)
     except Exception:  # noqa: BLE001 - observational
         return capped
-    reserve = _system_reserve_bytes()
+    reserve = _system_reserve_bytes() if reserve_bytes is None else reserve_bytes
+    if reserve < 0:
+        raise ValueError("reserve_bytes must be non-negative")
     by_ram = (available - reserve) // per_worker_bytes
     granted = max(1, min(capped, by_ram))
     if observer is not None:

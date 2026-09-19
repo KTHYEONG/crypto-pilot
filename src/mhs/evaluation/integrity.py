@@ -20,6 +20,7 @@ from src.mhs.execution.integrity import (
 )
 from src.mhs.execution.integrity import ledger_terminal_only as ledger_terminal_only
 from src.mhs.execution.integrity import replay_ledger_certified as replay_ledger_certified
+from src.mhs.resources import MhsResourceAdmissionError
 
 
 
@@ -57,6 +58,8 @@ def _classify_execution_failure(exc: BaseException) -> str:
     relabeled as a policy or Sharpe gate. Resource-budget breaches keep their
     own stable code so a fixed-RSS regression can be proven end to end.
     """
+    if isinstance(exc, MhsResourceAdmissionError):
+        return GO_REASON_RESOURCE_BREACH
     message = str(exc).lower()
     if "pre-trade equity" in message or "capital" in message or "equity must be" in message:
         return GO_REASON_CAPITAL_BREACH
@@ -196,5 +199,4 @@ def _assert_cache_required_marks(
                     f"symbol={sym} decision={decision_time} signal={signal_time} "
                     f"for {name}"
                 )
-
 

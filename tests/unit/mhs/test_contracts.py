@@ -364,7 +364,7 @@ class TestFrozenLiteralsCommitteeTiming:
 
         import dataclasses
 
-        from src.mhs.evaluation import (
+        from src.mhs.contracts import (
             MhsDiagnosticRequest,
         )
         from src.mhs.research_go import (
@@ -526,3 +526,65 @@ def test_SCENARIO_MHS_SELECTION_EXEC_REQUEST_FIELD_PARITY_05() -> None:
     request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
     assert request.final_oos_2026h1 is False
     assert MhsDiagnosticRequest().final_oos_2026h1 is False
+
+
+def test_diagnostic_request_has_single_price_source() -> None:
+    """Request exposes one fixed 3m execution/valuation source and no mark-price choice."""
+    import argparse
+
+    from src.cli.commands.research.mhs import add_mhs_commands
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    request = MhsDiagnosticRequest()
+    assert not hasattr(request, "mark_mode")
+    assert "mark_mode" not in MhsDiagnosticRequest.__dataclass_fields__
+    assert request.execution_timeframe == "3m"
+    cli_flags = [
+        field.metadata.get("flag")
+        for field in dataclasses.fields(MhsDiagnosticRequest)
+        if field.metadata.get("flag")
+    ]
+    assert "--mark-mode" not in cli_flags
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    assert "mark_mode" not in {action.dest for action in parser._actions}
+
+
+def test_retired_mark_mode_cli_argument_rejected() -> None:
+    """A retired --mark-mode argument fails as unknown before any data loading."""
+    import argparse
+
+    import pytest
+
+    from src.cli.commands.research.mhs import add_mhs_commands
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--mark-mode", "cache_required"])
+
+
+def test_diagnostic_request_economic_controls_survive() -> None:
+    """Non-default cost and capacity settings are preserved without a mark regime."""
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    request = MhsDiagnosticRequest(
+        trend_sleeve=True,
+        trend_sleeve_gross=0.3,
+        funding_carry_weight=0.3,
+        committee_target_gross=0.92,
+        execution_universe_size=60,
+        max_rss_bytes=8_000_000_000,
+        pnl_vol_target_mode="growth_budget",
+        committee_capital=True,
+        funding_carry_sleeve=True,
+    )
+    assert request.trend_sleeve_gross == 0.3
+    assert request.funding_carry_weight == 0.3
+    assert request.committee_target_gross == 0.92
+    assert request.execution_universe_size == 60
+    assert request.max_rss_bytes == 8_000_000_000
+    assert request.pnl_vol_target_mode == "growth_budget"

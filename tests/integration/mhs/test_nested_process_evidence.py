@@ -497,3 +497,226 @@ def test_late_interval_returns_leave_prior_refit_choice_unchanged() -> None:
     assert second.n_inner_labels == first.n_inner_labels
     assert second.inner_start == first.inner_start
     assert second.inner_end == first.inner_end
+
+
+def _ohlcv_pair_windows(days: int = 2):
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+
+    cols = ["AUSDT", "BUSDT"]
+    index = pd.date_range("2022-01-01", periods=days, freq="24h", tz="UTC")
+    targets = pd.DataFrame(
+        [[0.5, -0.5]] * days, index=index, columns=cols, dtype="float64"
+    )
+    windows = []
+    for i, day in enumerate(index):
+        start = day if i == 0 else index[i - 1]
+        grid = pd.date_range(start, day + pd.Timedelta(hours=23, minutes=57), freq="3min", tz="UTC")
+        frame = pd.DataFrame(100.0, index=grid, columns=cols, dtype="float64")
+        windows.append(
+            ExecutionReplayWindow(
+                window_start=grid[0],
+                window_end=grid[-1],
+                columns=tuple(cols),
+                symbols=tuple(cols),
+                minute_grid=grid,
+                highs=pd.DataFrame(100.5, index=grid, columns=cols, dtype="float64"),
+                lows=pd.DataFrame(99.5, index=grid, columns=cols, dtype="float64"),
+                closes=frame,
+                marks=None,
+                bar_funding=pd.DataFrame(0.0, index=grid, columns=cols, dtype="float64"),
+                target_weights=targets.loc[[day]],
+                signal_available_at=pd.DatetimeIndex([day + pd.Timedelta(hours=1)]),
+                quote_volumes=pd.DataFrame(1e6, index=grid, columns=cols, dtype="float64"),
+                funding_known=pd.DataFrame(True, index=grid, columns=cols),
+                bar_available_at=grid + pd.Timedelta(minutes=3),
+            )
+        )
+    return targets, windows
+
+
+def _ohlcv_pair_path(targets: pd.DataFrame):
+    from src.mhs.backtest.contracts import ProcessMarketData  # noqa: F401
+    from src.mhs.backtest.inventory import replay_process_execution  # noqa: F401
+    from src.mhs.process import ProcessExecutionPolicy
+
+    from src.mhs.backtest.contracts import ProcessPath
+
+    hourly = pd.date_range(targets.index[0], targets.index[-1] + pd.Timedelta(hours=23), freq="1h", tz="UTC")
+    return ProcessPath(
+        one_way_bps=8.0,
+        daily_returns=pd.Series(0.01, index=targets.index),
+        unit_daily_returns=pd.Series(0.01, index=targets.index),
+        exposure=pd.Series(1.0, index=targets.index),
+        refits=(),
+        leverage_cap=2.0,
+        execution_policy=ProcessExecutionPolicy(None),
+        unit_target_weights=targets,
+        target_weights=targets,
+        turnover_1h=pd.Series(0.01, index=hourly),
+    )
+
+
+def test_canonical_envelope_discloses_valuation_source() -> None:
+    import src.mhs.reporting.inventory as rep_inventory
+    from src.mhs.backtest.inventory import replay_process_execution
+    from src.mhs.types import ExecutionSpec
+
+    targets, windows = _ohlcv_pair_windows()
+    path = _ohlcv_pair_path(targets)
+    spec = ExecutionSpec()
+    base = replay_process_execution(
+        path, iter(windows), initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    targets2, windows2 = _ohlcv_pair_windows()
+    path2 = _ohlcv_pair_path(targets2)
+    stress = replay_process_execution(
+        path2, iter(windows2), initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    assert base.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
+    assert stress.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
+    base_payload = rep_inventory._inventory_result_payload(base)
+    stress_payload = rep_inventory._inventory_result_payload(stress)
+    assert base_payload["valuation_source"] == "OHLCV_CLOSE_FALLBACK"
+    assert stress_payload["valuation_source"] == "OHLCV_CLOSE_FALLBACK"
+    assert base_payload["mark_source"] == "OHLCV_CLOSE_FALLBACK"
+    assert "MARK_PRICE" not in (base_payload["valuation_source"], stress_payload["valuation_source"])
+
+
+def test_mark_mutation_cannot_change_ohlcv_output(tmp_path, monkeypatch) -> None:
+    import pathlib
+
+    import src.market_data.services.futures_collection as fc
+    from src.mhs.backtest.inventory import replay_process_execution
+    from src.mhs.execution.window_stream import _iter_mhs_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    symbols = ["AUSDT", "BUSDT"]
+    start = pd.Timestamp("2022-01-01", tz="UTC")
+    end = start + pd.Timedelta(days=3)
+    grid_3m = pd.date_range(start, end, freq="3min", tz="UTC")
+    ms_3m = ((grid_3m - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    root = pathlib.Path(tmp_path) / "ohlcv"
+    (root / "3m").mkdir(parents=True, exist_ok=True)
+    for sym in symbols:
+        pd.DataFrame({
+            "timestamp": ms_3m, "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0,
+            "quote_vol": 1e6, "volume": 10.0,
+        }).to_parquet(root / "3m" / f"{sym}.parquet", index=False)
+    targets = pd.DataFrame(
+        [[0.5, -0.5]] * 3,
+        index=pd.date_range(start, periods=3, freq="24h", tz="UTC"),
+        columns=symbols, dtype="float64",
+    )
+    signals = pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1))
+    funding = {s: pd.Series(0.0, index=grid_3m) for s in symbols}
+    spec = ExecutionSpec()
+    mark_path = tmp_path / "mark.parquet"
+    pd.DataFrame({"timestamp": ms_3m, "datetime": grid_3m, "close": 100.0}).to_parquet(mark_path, index=False)
+    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: mark_path)
+    first_windows = list(
+        _iter_mhs_execution_windows(targets, signals, str(root), "3m", start, end, funding, spec)
+    )
+    pd.DataFrame({"timestamp": ms_3m, "datetime": grid_3m, "close": 500.0}).to_parquet(mark_path, index=False)
+    second_windows = list(
+        _iter_mhs_execution_windows(targets, signals, str(root), "3m", start, end, funding, spec)
+    )
+    assert len(first_windows) == len(second_windows)
+    for left, right in zip(first_windows, second_windows, strict=True):
+        assert left.marks is None
+        assert right.marks is None
+        pd.testing.assert_frame_equal(left.closes, right.closes)
+    path = _ohlcv_pair_path(targets)
+    first = replay_process_execution(
+        path, iter(first_windows), initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    second = replay_process_execution(
+        path, iter(second_windows), initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    pd.testing.assert_frame_equal(first.simulated_fills, second.simulated_fills)
+    pd.testing.assert_series_equal(first.ledger.equity, second.ledger.equity)
+
+
+def test_flat_absent_source_does_not_poison_finance() -> None:
+    from src.mhs.backtest.inventory import replay_process_execution
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.mhs.types import ExecutionSpec
+
+    day = pd.Timestamp("2022-01-01", tz="UTC")
+    targets = pd.DataFrame([[0.5, 0.0]], index=pd.DatetimeIndex([day]), columns=["AUSDT", "BUSDT"], dtype="float64")
+    path = _ohlcv_pair_path(targets)
+    grid = pd.date_range(day, day + pd.Timedelta(hours=23, minutes=57), freq="3min", tz="UTC")
+    cols = ["AUSDT"]
+    window = ExecutionReplayWindow(
+        window_start=grid[0],
+        window_end=grid[-1],
+        columns=("AUSDT", "BUSDT"),
+        symbols=tuple(cols),
+        minute_grid=grid,
+        highs=pd.DataFrame(100.5, index=grid, columns=cols, dtype="float64"),
+        lows=pd.DataFrame(99.5, index=grid, columns=cols, dtype="float64"),
+        closes=pd.DataFrame(100.0, index=grid, columns=cols, dtype="float64"),
+        marks=None,
+        bar_funding=pd.DataFrame(0.0, index=grid, columns=cols, dtype="float64"),
+        target_weights=targets.loc[[day], cols],
+        signal_available_at=pd.DatetimeIndex([day + pd.Timedelta(hours=1)]),
+        quote_volumes=pd.DataFrame(1e6, index=grid, columns=cols, dtype="float64"),
+        funding_known=pd.DataFrame(True, index=grid, columns=cols),
+        bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+    result = replay_process_execution(
+        path, iter([window]), initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
+    )
+    assert bool(result.ledger.primary_valid)
+    assert not any(result.simulated_fills["symbol"] == "BUSDT")
+    assert not any(gap.symbol == "BUSDT" for gap in result.ledger.data_gaps)
+
+
+def test_actual_excluded_set_truthful() -> None:
+    from src.mhs.backtest.inventory import _actual_excluded_symbols, _to_canonical_ohlcv_gap
+    from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
+    from src.mhs.execution.contracts import ExecutionDataGap
+
+    assert len(SOURCE_GAP_EXCLUDED_SYMBOLS) > 0
+    held = sorted(SOURCE_GAP_EXCLUDED_SYMBOLS)[0]
+    assert held not in _actual_excluded_symbols(["AUSDT", held])
+    assert held in _actual_excluded_symbols(["AUSDT"])
+    assert _actual_excluded_symbols([]) == ()
+    assert _actual_excluded_symbols(None) == ()
+    gap = ExecutionDataGap(
+        code="MISSING_HELD_MARK", symbol=held, timestamp=pd.Timestamp("2022-01-02", tz="UTC"),
+        execution_bound="OHLCV_IMMEDIATE_TAKER",
+    )
+    mapped = _to_canonical_ohlcv_gap(gap)
+    assert mapped.code == "MISSING_FORCED_EXIT_CLOSE"
+    assert mapped.symbol == held
+    assert mapped.timestamp == gap.timestamp
+    untouched = _to_canonical_ohlcv_gap(
+        ExecutionDataGap(
+            code="MISSING_HELD_FUNDING", symbol=held, timestamp=pd.Timestamp("2022-01-02", tz="UTC"),
+            execution_bound="OHLCV_IMMEDIATE_TAKER",
+        )
+    )
+    assert untouched.code == "MISSING_HELD_FUNDING"
+
+
+def test_stress_economics_paired() -> None:
+    import dataclasses
+
+    from src.mhs.backtest.inventory import replay_process_execution
+    from src.mhs.types import ExecutionSpec
+
+    targets, windows = _ohlcv_pair_windows()
+    path = _ohlcv_pair_path(targets)
+    base_spec = ExecutionSpec()
+    stress_spec = dataclasses.replace(base_spec, taker_fee_bps=base_spec.taker_fee_bps + 10.0)
+    base = replay_process_execution(
+        path, iter(windows), initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=base_spec,
+    )
+    _, windows2 = _ohlcv_pair_windows()
+    stress = replay_process_execution(
+        path, iter(windows2), initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=stress_spec,
+    )
+    assert list(base.simulated_fills["timestamp"]) == list(stress.simulated_fills["timestamp"])
+    assert list(base.simulated_fills["symbol"]) == list(stress.simulated_fills["symbol"])
+    assert float(stress.ledger.fee_charge.sum()) > float(base.ledger.fee_charge.sum())
+    assert base.ledger.mark_source == stress.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"

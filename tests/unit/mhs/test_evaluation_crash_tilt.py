@@ -5,10 +5,9 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-)
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+from src.mhs.marks import _load_funding_series
 from src.quant.universe.pit_universe import symbol_partition
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
@@ -39,12 +38,12 @@ def test_crash_tilt_disabled_fold_is_byte_identical(mhs_market, monkeypatch) -> 
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
     )
-    target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_off, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
 
@@ -54,13 +53,15 @@ def test_crash_tilt_disabled_fold_is_byte_identical(mhs_market, monkeypatch) -> 
         tilt_calls.append((horizon, alpha))
         return rank_neutral_weights
 
-    monkeypatch.setattr(ev, "crash_regime_tilt_weights", _identity_tilt)
+    import src.mhs.evaluation.fold_weights as fold_weights_mod
+
+    monkeypatch.setattr(fold_weights_mod, "crash_regime_tilt_weights", _identity_tilt)
     request_on = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         crash_regime_tilt_alpha=0.3,
     )
-    target_ident, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_ident, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request_on, funding_by_symbol,
     )
     pd.testing.assert_frame_equal(target_off, target_ident)
@@ -81,17 +82,17 @@ def test_crash_tilt_active_fold_reaches_replay(mhs_market_with_btc) -> None:
                     "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = _load_funding_series(symbols)
     assert "BTCUSDT" in funding_by_symbol
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
     )
-    target_off, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_off, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
     request_on = dataclasses.replace(request, crash_regime_tilt_alpha=0.3, committee_target_gross=None)
-    target_on, _signal, _roster, _grid = ev._build_fold_target_weights(
+    target_on, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request_on, funding_by_symbol,
     )
     assert not target_off.equals(target_on)

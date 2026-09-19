@@ -318,11 +318,12 @@ def _run_fold_safe_discovery_parallel(
     if precomputed is None:
         precomputed = books._candidate_weight_books(log_close, eligible, bar_funding, specs)
     folds = phase_1_anchored_purged_folds()
+    _fold_safe_reserve = _resolve_ram_budget(None, True)[1]
     max_workers = plan_worker_count(
         min(3, len(folds)), WORKER_PEAK_RSS_BYTES, ram_guard=True,
         observer=_worker_plan_observer(telemetry, "fold_safe_discovery", WORKER_PEAK_RSS_BYTES),
+        reserve_bytes=_fold_safe_reserve,
     )
-    _fold_safe_reserve = _resolve_ram_budget(None, True)[1]
     assert_fork_admission(
         "fold_safe_discovery", max_workers, WORKER_PEAK_RSS_BYTES, _fold_safe_reserve,
     )
@@ -386,7 +387,7 @@ def _fold_train_reference_returns(
         base_spec = specs._resolved_base_execution_spec(request)
         execution_grid = pd.date_range(reference_start, reference_end, freq="3min", tz="UTC")
         truncated, truncated_signals, _censored = integrity._truncate_replayable_decisions(target_replay, signal_available_at, execution_grid, base_spec)
-        yield from windows._iter_mhs_execution_windows(truncated, truncated_signals, root, request.execution_timeframe, reference_start, reference_end, funding_by_symbol, request.mark_mode, base_spec)
+        yield from windows._iter_mhs_execution_windows(truncated, truncated_signals, root, request.execution_timeframe, reference_start, reference_end, funding_by_symbol, base_spec)
     _ref_iter = _ref_windows()
     base_spec = specs._resolved_base_execution_spec(request)
     ref_replay = replay_execution_windows(_ref_iter, initial_equity, "OHLCV_IMMEDIATE_TAKER", base_spec, retain_event_snapshots=False)
@@ -415,18 +416,7 @@ def _run_anchored_fold(
     funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
     committee_member_weights: dict[str, float] | None = None,
 ) -> MhsFoldReport:
-    """One independently flat strict/immediate-taker blend replay per fold.
-
-    The 1h panel spans ``[train_start, validation_end]`` so warm-up history
-    feeds features only; the replay decisions and the fresh flat ledger cover
-    only the validation window. The fold uses the same at-most-31-day windowed
-    execution engine as the top-level books (``windows._iter_mhs_execution_windows`` +
-    ``replay_execution_windows``, immediate-taker primary and cost-stressed
-    stress) so dense event snapshots stay disabled
-    and per-window resource telemetry/RSS budgets are applied inside the fold,
-    not only at the top level. A fold that cannot be replayed is reported (not
-    raised) with machine-readable failure codes.
-    """
+    """Keep train, validation and replay slices chronological while forwarding the same 3m OHLCV economics into each fold."""
     try:
         vs = fold.validation_start
         ve = fold.validation_end
@@ -457,7 +447,7 @@ def _run_anchored_fold(
         def _windows() -> Iterator[MhsExecutionWindow]:
             return windows._iter_mhs_execution_windows(
                 target_replay, signal_available_at, root, request.execution_timeframe,
-                vs, ve, funding_by_symbol, request.mark_mode, specs._resolved_base_execution_spec(request),
+                vs, ve, funding_by_symbol, specs._resolved_base_execution_spec(request),
             )
 
         def _window_telemetry(
@@ -658,11 +648,12 @@ def _run_folds_parallel(
     if not folds:
         return ()
     reports: dict[int, MhsFoldReport] = {}
+    _folds_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     max_workers = plan_worker_count(
         min(3, len(folds)), WORKER_PEAK_RSS_BYTES, request.ram_guard,
         observer=_worker_plan_observer(telemetry, "anchored_folds", WORKER_PEAK_RSS_BYTES),
+        reserve_bytes=_folds_reserve,
     )
-    _folds_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     assert_fork_admission("anchored_folds", max_workers, WORKER_PEAK_RSS_BYTES, _folds_reserve)
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
         futures = {

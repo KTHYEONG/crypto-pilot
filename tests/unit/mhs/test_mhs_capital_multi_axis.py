@@ -7,13 +7,12 @@ import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
-from src.mhs import evaluation as ev
 import src.mhs.marks as marks
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-    _committee_execution_book,
-)
-from src.mhs.types import COMMITTEE_MEMBERS
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evaluation import committee as committee_evaluation
+from src.mhs.evaluation import fold_weights
+from src.mhs.evaluation.committee import _committee_execution_book
+from src.mhs.types import BOOK_SPECS, COMMITTEE_MEMBERS
 from src.mhs.evidence import AnchoredPurgedFold
 from src.mhs.features import FEATURE_REGISTRY, FeatureSpec, build_feature_books
 from src.quant.universe.pit_universe import symbol_partition
@@ -40,13 +39,21 @@ def mhs_market_with_taker_buy_quote(tmp_path, monkeypatch):
     """Synthetic market with ``taker_buy_quote`` so the committee fold path loads."""
     root = tmp_path / "market_tbq"
     end = _write_mhs_market(root, include_taker_buy_quote=True)
+    execution_dir = root / "3m"
+    execution_dir.mkdir()
+    for source in (root / "1m").glob("*.parquet"):
+        minute = pd.read_parquet(source)
+        minute.index = pd.to_datetime(minute["timestamp"], unit="ms", utc=True)
+        bars = minute.resample("3min").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "quote_vol": "sum"},
+        ).dropna()
+        bars.insert(0, "timestamp", (bars.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"))
+        bars.to_parquet(execution_dir / source.name, index=False)
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
     monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
-    # _get_symbol_mark_frame is a process-global lru_cache keyed on
-    # (symbol, timeframe) only; a prior test in the same process/worker using
-    # a different root with an overlapping symbol name would otherwise leak
-    # stale mark data into this fixture's replay.
-    ev._get_symbol_mark_frame.cache_clear()
+    # Retained loaders are stateless; the shared invalidation entry point
+    # keeps runs isolated when fixtures redirect data roots between tests.
+    marks.clear_mhs_market_data_caches()
     return root, end
 
 
@@ -93,7 +100,7 @@ def test_committee_execution_book_fails_closed(monkeypatch) -> None:
     close, quote_vol, taker_buy_quote = _synthetic_panels()
     execution_mask = pd.DataFrame(True, index=close.index, columns=close.columns)
     decision_grid = pd.date_range(_START, close.index[-1], freq="24h", tz="UTC")
-    monkeypatch.setattr(ev, "build_feature_books", lambda *a, **k: {})
+    monkeypatch.setattr(committee_evaluation, "build_feature_books", lambda *a, **k: {})
     with pytest.raises(RuntimeError, match="committee_capital: no committee member admitted"):
         _committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, decision_grid, 8,
@@ -113,13 +120,13 @@ def test_fold_path_wires_helper_byte_identical(mhs_market_with_taker_buy_quote, 
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
         if symbol_partition(s) == "dev"
     ]
-    funding_by_symbol, _ = ev._load_funding_series(symbols)
+    funding_by_symbol, _ = marks._load_funding_series(symbols)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         committee_capital=True,
     )
-    orig = ev._committee_execution_book
+    orig = committee_evaluation._committee_execution_book
     captured: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex, int] | None = None
 
     def recording_helper(
@@ -129,13 +136,13 @@ def test_fold_path_wires_helper_byte_identical(mhs_market_with_taker_buy_quote, 
         captured = (close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols)
         return orig(close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols, *args, **kwargs)
 
-    monkeypatch.setattr(ev, "_committee_execution_book", recording_helper)
-    target, _signal, _roster, _grid = ev._build_fold_target_weights(
+    monkeypatch.setattr(committee_evaluation, "_committee_execution_book", recording_helper)
+    target, _signal, _roster, _grid = fold_weights._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
     )
     assert captured is not None
     close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols = captured
-    assert min_symbols == ev.BOOK_SPECS["slow_momentum"].min_symbols
+    assert min_symbols == BOOK_SPECS["slow_momentum"].min_symbols
     books = build_feature_books(
         _committee_member_specs(),
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},

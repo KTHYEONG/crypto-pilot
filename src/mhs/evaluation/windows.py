@@ -22,7 +22,7 @@ from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
 from src.mhs import statistics as _statistics
 from src.mhs.contracts import MhsBookFailure, MhsBookReport, MhsDiagnosticRequest
-from src.mhs.marks import _build_window_frames, _cached_mark_panel, _load_window_minute_frames
+from src.mhs.marks import _build_window_frames, _load_window_minute_frames
 from src.mhs.resources import MhsExecutionAllocation, assert_mhs_allocation_budget, plan_mhs_execution_bars, _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
 from src.common.errors import DataIntegrityError
 from src.mhs.books import portfolio_rebalance_trigger
@@ -270,6 +270,7 @@ def _book_outcome(
     replay_weights_step: pd.DataFrame | None = None,
     telemetry: _StageRecorder | None = None,
 ) -> tuple[MhsBookReport, dict[int, dict[str, float]]]:
+    """Replay each diagnostic bound against the fixed completed 3m trade-bar source and observed funding, with identical targets for every cost assumption."""
     weights_1h = weights_step.reindex(grid_1h).ffill().fillna(0.0)
     cost_grid = tuple(dict.fromkeys((0.0, 2.0, 4.0, 8.0, *required_cost_tiers())))
     reference_evidence = book_evidence(
@@ -341,7 +342,7 @@ def _book_outcome(
     def _windows() -> Iterator[MhsExecutionWindow]:
         return _iter_mhs_execution_windows(
             target_replay, signal_replay, root, request.execution_timeframe,
-            start, end, funding_by_symbol, request.mark_mode, specs._resolved_base_execution_spec(request),
+            start, end, funding_by_symbol, specs._resolved_base_execution_spec(request),
             execution_bound_count=execution_bound_count,
             budget_bytes=_window_budget, reserve_bytes=_window_rss_reserve)
 
@@ -559,8 +560,6 @@ def _book_outcome(
                 n_symbols=len(replay_symbols),
                 fill_count=len(stress.simulated_fills),
             )
-        if request.mark_mode == "cache_required":
-            integrity._assert_cache_required_ledger_valid(name, primary)
     except DataIntegrityError as exc:
         failure = MhsBookFailure(
             stage=f"replay_{name}",

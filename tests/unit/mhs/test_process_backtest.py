@@ -697,9 +697,14 @@ def test_replay_rejects_bad_windows() -> None:
             path, iter([dataclasses.replace(w1, target_weights=w1.target_weights.rename(columns={"AUSDT": "X"})), w2]),
             initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
         )
+    ohlcv_only = replay_process_execution(
+        path, iter([dataclasses.replace(w1, marks=None), dataclasses.replace(w2, marks=None)]),
+        initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    assert ohlcv_only.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
     with pytest.raises(DataIntegrityError, match=r".+"):
         replay_process_execution(
-            path, iter([dataclasses.replace(w1, marks=None), w2]),
+            path, iter([dataclasses.replace(w1, marks=None, quote_volumes=None), w2]),
             initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
         )
     with pytest.raises(DataIntegrityError, match=r".+"):
@@ -1869,7 +1874,7 @@ def test_inventory_production_fence_covers_all_targets(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, signals, str(tmp_path / "ohlcv"), "3m",
-            start, fence, funding, "ohlcv_close_fallback", spec,
+            start, fence, funding, spec,
         )
     )
     assert _execution_fence(targets) == fence
@@ -1904,7 +1909,7 @@ def test_inventory_nonzero_fills_reconcile_across_bounds(tmp_path) -> None:
     windows = list(
         _iter_mhs_execution_windows(
             targets, signals, str(tmp_path / "ohlcv"), "3m",
-            start, fence, funding, "ohlcv_close_fallback", spec,
+            start, fence, funding, spec,
         )
     )
     base, stress = replay_execution_window_batch(
@@ -2434,7 +2439,9 @@ def test_inventory_observed_gaps_preserve_provenance(monkeypatch) -> None:
         bt_inventory.evaluate_process_inventory_backtest(targets.index[0], targets.index[-1] + pd.Timedelta(days=1))
     report = excinfo.value.report
     assert len(report.source_gaps) == 1
-    assert report.source_gaps[0] == gap
+    assert report.source_gaps[0].code == "MISSING_FORCED_EXIT_CLOSE"
+    assert report.source_gaps[0].symbol == gap.symbol
+    assert report.source_gaps[0].timestamp == gap.timestamp
     assert finalized["called"] is False
     assert len(report.source_gap_excluded_symbols) > 0
 
@@ -2664,6 +2671,15 @@ def test_panel_admission_rejection_prevents_decoding(tmp_path, monkeypatch) -> N
     assert len(list((tmp_path / "ohlcv" / "1h").glob("*.parquet"))) == 4
 
 
+def _process_lake_symbols(n: int = 10) -> list[str]:
+    from src.quant.universe.pit_universe import symbol_partition
+
+    candidates = [f"LAKE{i:03d}USDT" for i in range(64)]
+    symbols = [s for s in candidates if symbol_partition(s) == "dev"][:n]
+    assert len(symbols) == n
+    return symbols
+
+
 def test_inventory_typed_window_failure_keeps_consumed_coverage(monkeypatch) -> None:
     """Typed window failure evidence: a later piece rejection keeps typed code, cause and consumed coverage."""
     from src.mhs.resources import MhsResourceAdmissionError
@@ -2693,3 +2709,414 @@ def test_inventory_typed_window_failure_keeps_consumed_coverage(monkeypatch) -> 
     assert report.completed_windows == 2
     assert report.completed_decision_start == targets.index[0]
     assert report.completed_decision_end == targets.index[1]
+
+
+def _write_process_lake(
+    tmp_path,
+    symbols: list[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    seed: int = 11,
+    first_bar: dict | None = None,
+    last_bar: dict | None = None,
+) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    import pathlib
+
+    rng = np.random.default_rng(seed)
+    grid = pd.date_range(start, end, freq="1h", tz="UTC")
+    lake = pathlib.Path(tmp_path) / "ohlcv" / "1h"
+    lake.mkdir(parents=True, exist_ok=True)
+    ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    for j, sym in enumerate(symbols):
+        close = 100.0 + j + np.cumsum(rng.normal(0, 0.5, len(grid)))
+        frame = pd.DataFrame({
+            "timestamp": ms,
+            "close": close,
+            "open": close,
+            "high": close + 0.3,
+            "low": close - 0.3,
+            "quote_vol": rng.uniform(1e6, 2e6, len(grid)),
+            "taker_buy_quote": rng.uniform(4e5, 6e5, len(grid)),
+            "volume": rng.uniform(10.0, 100.0, len(grid)),
+        })
+        if first_bar is not None and sym in first_bar:
+            cutoff_ms = int((first_bar[sym] - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1))
+            frame = frame.loc[frame["timestamp"] >= cutoff_ms]
+        if last_bar is not None and sym in last_bar:
+            cutoff_ms = int((last_bar[sym] - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1))
+            frame = frame.loc[frame["timestamp"] <= cutoff_ms]
+        frame.to_parquet(lake / f"{sym}.parquet", index=False)
+    lake_3m = pathlib.Path(tmp_path) / "ohlcv" / "3m"
+    lake_3m.mkdir(parents=True, exist_ok=True)
+    grid_3m = pd.date_range(start, end, freq="3min", tz="UTC")
+    ms_3m = ((grid_3m - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    for sym in symbols:
+        pd.DataFrame({"timestamp": ms_3m}).to_parquet(lake_3m / f"{sym}.parquet", index=False)
+    return grid, grid_3m
+
+
+def _mock_process_funding(monkeypatch, grid: pd.DatetimeIndex, symbols: list[str], seed: int = 5) -> dict:
+    rng = np.random.default_rng(seed)
+    funding = {sym: pd.Series(rng.normal(0, 1e-5, len(grid)), index=grid) for sym in symbols}
+    monkeypatch.setattr(bt_market, "_load_funding_series", lambda syms: ({s: funding[s] for s in syms if s in funding}, {}))
+    return funding
+
+
+def test_process_decision_ignores_mark_gap(tmp_path, monkeypatch) -> None:
+    symbols = _process_lake_symbols()
+    start = pd.Timestamp("2021-01-01", tz="UTC")
+    end = pd.Timestamp("2021-02-15", tz="UTC")
+    grid, _ = _write_process_lake(tmp_path, symbols, start, end)
+    _mock_process_funding(monkeypatch, grid, symbols)
+    import src.market_data.services.futures_collection as fc
+
+    mark_dir = tmp_path / "markPriceKlines" / "1h"
+    mark_dir.mkdir(parents=True)
+    ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    for sym in symbols:
+        pd.DataFrame({"timestamp": ms, "datetime": grid, "close": 100.0}).to_parquet(mark_dir / f"{sym}.parquet", index=False)
+    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: mark_dir / f"{symbol}.parquet")
+    before = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    for sym in symbols:
+        (mark_dir / f"{sym}.parquet").unlink()
+        pd.DataFrame({"timestamp": ms, "datetime": grid, "close": -5.0}).to_parquet(mark_dir / f"{sym}.parquet", index=False)
+    after = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    assert list(before.member_books) == list(after.member_books)
+    for key in before.member_books:
+        pd.testing.assert_frame_equal(before.member_books[key], after.member_books[key])
+    pd.testing.assert_frame_equal(before.execution_mask, after.execution_mask)
+
+
+def test_late_listed_symbol_remains_locally_eligible(tmp_path, monkeypatch) -> None:
+    symbols = _process_lake_symbols()
+    start = pd.Timestamp("2021-01-01", tz="UTC")
+    end = pd.Timestamp("2021-02-15", tz="UTC")
+    late = symbols[-1]
+    first = pd.Timestamp("2021-02-01", tz="UTC")
+    grid, _ = _write_process_lake(tmp_path, symbols, start, end, first_bar={late: first})
+    _mock_process_funding(monkeypatch, grid, symbols)
+    early_end = pd.Timestamp("2021-01-15", tz="UTC")
+    early = bt_market.load_process_market_data(start, early_end, data_root=str(tmp_path / "ohlcv"))
+    assert late not in list(early.opens_1h.columns)
+    full = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    assert late in list(full.opens_1h.columns)
+    assert late in list(next(iter(full.member_books.values())).columns)
+
+
+def test_delisted_symbol_remains_historical(tmp_path, monkeypatch) -> None:
+    symbols = _process_lake_symbols()
+    start = pd.Timestamp("2021-01-01", tz="UTC")
+    end = pd.Timestamp("2021-02-15", tz="UTC")
+    gone = symbols[-1]
+    last = pd.Timestamp("2021-02-05", tz="UTC")
+    grid, _ = _write_process_lake(tmp_path, symbols, start, end, last_bar={gone: last})
+    _mock_process_funding(monkeypatch, grid, symbols)
+    data = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    assert gone in list(data.opens_1h.columns)
+    assert gone in list(next(iter(data.member_books.values())).columns)
+    assert bool(data.opens_1h[gone].loc[:last].notna().any())
+    assert bool(data.execution_mask[gone].to_numpy().any())
+
+
+def test_unknown_funding_is_not_zero_evidence(tmp_path, monkeypatch) -> None:
+    symbols = _process_lake_symbols()
+    start = pd.Timestamp("2021-01-01", tz="UTC")
+    end = pd.Timestamp("2021-02-15", tz="UTC")
+    grid, _ = _write_process_lake(tmp_path, symbols, start, end)
+    rng = np.random.default_rng(5)
+    funding = {sym: pd.Series(rng.normal(0, 1e-5, len(grid)), index=grid) for sym in symbols}
+    held = symbols[0]
+    gap_start = pd.Timestamp("2021-01-20", tz="UTC")
+    gap_end = pd.Timestamp("2021-01-25", tz="UTC")
+    funding[held] = funding[held].loc[(funding[held].index < gap_start) | (funding[held].index >= gap_end)]
+    monkeypatch.setattr(bt_market, "_load_funding_series", lambda syms: ({s: funding[s] for s in syms if s in funding}, {}))
+    data = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    assert data.funding_known_1h is not None
+    window = data.funding_known_1h.loc[gap_start:gap_end, held]
+    assert not bool(window.all())
+    numerical = data.bar_funding_1h.loc[gap_start:gap_end, held]
+    assert bool((numerical == 0.0).any())
+    assert bool((~data.funding_known_1h.loc[gap_start:gap_end, held] & (data.bar_funding_1h.loc[gap_start:gap_end, held] == 0.0)).any())
+
+
+def test_three_minute_absence_preserves_signal_books(tmp_path, monkeypatch) -> None:
+    symbols = _process_lake_symbols()
+    start = pd.Timestamp("2021-01-01", tz="UTC")
+    end = pd.Timestamp("2021-02-15", tz="UTC")
+    grid, grid_3m = _write_process_lake(tmp_path, symbols, start, end)
+    _mock_process_funding(monkeypatch, grid, symbols)
+    before = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    cutoff = pd.Timestamp("2021-02-01", tz="UTC")
+    ms_3m = ((grid_3m - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    keep = np.asarray(grid_3m <= cutoff)
+    import pathlib
+
+    for sym in symbols:
+        pd.DataFrame({"timestamp": ms_3m[keep]}).to_parquet(pathlib.Path(tmp_path) / "ohlcv" / "3m" / f"{sym}.parquet", index=False)
+    after = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
+    assert list(before.member_books) == list(after.member_books)
+    for key in before.member_books:
+        pd.testing.assert_frame_equal(before.member_books[key], after.member_books[key])
+
+
+def _ohlcv_3m_root(tmp_path, symbols, start, end, *, seed=9, close=100.0):
+    import pathlib
+
+    grid = pd.date_range(start, end, freq="3min", tz="UTC")
+    ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    rng = np.random.default_rng(seed)
+    root = pathlib.Path(tmp_path) / "ohlcv"
+    (root / "3m").mkdir(parents=True, exist_ok=True)
+    for sym in symbols:
+        noise = rng.normal(0, 0.1, len(grid))
+        frame = pd.DataFrame({
+            "timestamp": ms,
+            "open": close + noise,
+            "high": close + np.abs(noise) + 0.2,
+            "low": close - np.abs(noise) - 0.2,
+            "close": close + noise,
+            "quote_vol": 1e6,
+            "volume": 10.0,
+        })
+        frame.to_parquet(root / "3m" / f"{sym}.parquet", index=False)
+    return root, grid
+
+
+def test_streamed_ohlcv_window_leaves_marks_absent(tmp_path) -> None:
+    import inspect
+
+    from src.mhs.execution.window_stream import _iter_mhs_execution_windows
+    import src.mhs.execution.window_stream as ws
+    from src.mhs.types import ExecutionSpec
+
+    symbols = ["LITUSDT", "AUSDT"]
+    start = pd.Timestamp("2026-01-22", tz="UTC")
+    end = start + pd.Timedelta(days=4)
+    root, grid = _ohlcv_3m_root(tmp_path, symbols, start, end)
+    targets = pd.DataFrame(
+        [[0.5, -0.5]] * 3,
+        index=pd.date_range(start, periods=3, freq="24h", tz="UTC"),
+        columns=symbols,
+        dtype="float64",
+    )
+    signals = pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1))
+    funding = {s: pd.Series(0.0, index=grid) for s in symbols}
+
+    assert "_cached_mark_panel" not in inspect.getsource(ws._materialize_execution_piece)
+    assert "_cached_mark_panel" not in inspect.getsource(ws._iter_mhs_execution_windows)
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, signals, str(root), "3m", start, end, funding, ExecutionSpec(),
+        )
+    )
+    assert len(windows) >= 1
+    for window in windows:
+        assert window.marks is None
+        assert window.minute_grid.equals(window.highs.index)
+        assert window.minute_grid.equals(window.closes.index)
+        assert window.minute_grid.equals(window.lows.index)
+        assert list(window.closes.columns) == list(window.symbols)
+        assert bool((window.bar_available_at >= window.minute_grid).all())
+        assert bool((window.signal_available_at >= window.target_weights.index).all())
+
+
+def test_missing_held_close_invalidates_replay() -> None:
+    import dataclasses
+
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _replay_fixtures(2)
+    w1, w2 = windows
+    held = "AUSDT"
+    bad_closes = w1.closes.copy()
+    bad_closes.loc[:, held] = np.nan
+    bad_highs = w1.highs.copy()
+    bad_highs.loc[:, held] = np.nan
+    bad_lows = w1.lows.copy()
+    bad_lows.loc[:, held] = np.nan
+    bad_first = dataclasses.replace(w1, closes=bad_closes, highs=bad_highs, lows=bad_lows, marks=None)
+    result = replay_process_execution(
+        path, iter([bad_first, dataclasses.replace(w2, marks=None)]),
+        initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
+    )
+    assert not bool(result.ledger.primary_valid)
+    assert any(gap.symbol == held for gap in result.ledger.data_gaps)
+    assert bool(np.isfinite(result.ledger.equity.to_numpy()).all())
+
+
+def test_missing_active_execution_bar_not_filled_from_hourly() -> None:
+    import dataclasses
+
+    from src.mhs.types import ExecutionSpec
+
+    path, windows = _replay_fixtures(2)
+    w1, w2 = windows
+    spec = ExecutionSpec()
+    baseline = replay_process_execution(
+        path, iter([dataclasses.replace(w1, marks=None), dataclasses.replace(w2, marks=None)]),
+        initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    gapped_closes = w2.closes.copy()
+    fill_pos = 1
+    gapped_closes.iloc[fill_pos, gapped_closes.columns.get_loc("AUSDT")] = np.nan
+    gapped = dataclasses.replace(w2, closes=gapped_closes, marks=None)
+    result = replay_process_execution(
+        path, iter([dataclasses.replace(w1, marks=None), gapped]),
+        initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    assert any(
+        gap.code == "MISSING_ACTIVE_ORDER_OHLCV" and gap.symbol == "AUSDT"
+        for gap in result.ledger.data_gaps
+    )
+    base_fills = baseline.simulated_fills
+    gap_fills = result.simulated_fills
+    assert len(gap_fills[gap_fills["symbol"] == "AUSDT"]) < len(base_fills[base_fills["symbol"] == "AUSDT"])
+
+
+def _ohlcv_known_window(targets: pd.DataFrame, day: pd.Timestamp, *, known_a: bool, known_b: bool):
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+
+    cols = list(targets.columns)
+    days = list(targets.index)
+    start = day if days.index(day) == 0 else days[days.index(day) - 1]
+    grid = pd.date_range(start, day + pd.Timedelta(hours=23, minutes=57), freq="3min", tz="UTC")
+    known = pd.DataFrame(True, index=grid, columns=cols)
+    known.loc[:, "AUSDT"] = known_a
+    known.loc[:, "BUSDT"] = known_b
+    return ExecutionReplayWindow(
+        window_start=grid[0],
+        window_end=grid[-1],
+        columns=tuple(cols),
+        symbols=tuple(cols),
+        minute_grid=grid,
+        highs=_inventory_frame(100.5, grid, cols),
+        lows=_inventory_frame(99.5, grid, cols),
+        closes=_inventory_frame(100.0, grid, cols),
+        marks=None,
+        bar_funding=_inventory_frame(0.0001, grid, cols),
+        target_weights=targets.loc[[day]],
+        signal_available_at=pd.DatetimeIndex([day + pd.Timedelta(hours=1)]),
+        quote_volumes=_inventory_frame(1e6, grid, cols),
+        funding_known=known,
+        bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+
+
+def test_funding_gap_invalid_only_when_held() -> None:
+    from src.mhs.types import ExecutionSpec
+
+    days = pd.DatetimeIndex([pd.Timestamp("2022-01-01", tz="UTC"), pd.Timestamp("2022-01-02", tz="UTC")])
+    held_targets = pd.DataFrame(
+        [[0.5, 0.0], [0.5, 0.0]], index=days, columns=["AUSDT", "BUSDT"], dtype="float64"
+    )
+    flat_targets = pd.DataFrame(
+        [[0.0, 0.5], [0.0, 0.5]], index=days, columns=["AUSDT", "BUSDT"], dtype="float64"
+    )
+    held_path = _inventory_test_path(held_targets)
+    flat_path = _inventory_test_path(flat_targets)
+    spec = ExecutionSpec()
+    held_windows = [
+        _ohlcv_known_window(held_targets, days[0], known_a=True, known_b=True),
+        _ohlcv_known_window(held_targets, days[1], known_a=False, known_b=True),
+    ]
+    held_result = replay_process_execution(
+        held_path, iter(held_windows),
+        initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    assert not bool(held_result.ledger.primary_valid)
+    assert any(gap.symbol == "AUSDT" for gap in held_result.ledger.data_gaps)
+    flat_windows = [
+        _ohlcv_known_window(flat_targets, days[0], known_a=False, known_b=True),
+        _ohlcv_known_window(flat_targets, days[1], known_a=False, known_b=True),
+    ]
+    flat_result = replay_process_execution(
+        flat_path, iter(flat_windows),
+        initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
+    )
+    assert bool(flat_result.ledger.primary_valid)
+    assert not any(
+        gap.symbol == "AUSDT" and gap.code == "MISSING_HELD_FUNDING" for gap in flat_result.ledger.data_gaps
+    )
+
+
+def test_hour_to_minute_publication_boundary() -> None:
+    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.mhs.types import ExecutionSpec
+
+    day = pd.Timestamp("2022-01-01", tz="UTC")
+    signal = day + pd.Timedelta(hours=1)
+    targets = pd.DataFrame([[0.5, 0.0]], index=pd.DatetimeIndex([day]), columns=["AUSDT", "BUSDT"], dtype="float64")
+    path = _inventory_test_path(targets)
+    grid = pd.date_range(day, day + pd.Timedelta(hours=23, minutes=57), freq="3min", tz="UTC")
+    closes = _inventory_frame(100.0, grid, ["AUSDT", "BUSDT"])
+    closes.loc[grid < signal, "AUSDT"] = 50.0
+    window = ExecutionReplayWindow(
+        window_start=grid[0],
+        window_end=grid[-1],
+        columns=("AUSDT", "BUSDT"),
+        symbols=("AUSDT", "BUSDT"),
+        minute_grid=grid,
+        highs=_inventory_frame(100.5, grid, ["AUSDT", "BUSDT"]),
+        lows=_inventory_frame(99.5, grid, ["AUSDT", "BUSDT"]),
+        closes=closes,
+        marks=None,
+        bar_funding=_inventory_frame(0.0, grid, ["AUSDT", "BUSDT"]),
+        target_weights=targets,
+        signal_available_at=pd.DatetimeIndex([signal]),
+        quote_volumes=_inventory_frame(1e6, grid, ["AUSDT", "BUSDT"]),
+        funding_known=_inventory_frame(1.0, grid, ["AUSDT", "BUSDT"]).astype(bool),
+        bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+    result = replay_process_execution(
+        path, iter([window]),
+        initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
+    )
+    fills = result.simulated_fills
+    side_fills = fills[fills["symbol"] == "AUSDT"]
+    assert len(side_fills) > 0
+    assert bool((pd.DatetimeIndex(side_fills["timestamp"]) >= signal).all())
+    assert bool(((side_fills["fill_price"] - 100.0).abs() < 1e-9).all())
+
+
+def test_replay_positions_carry_across_bounded_pieces(tmp_path, monkeypatch) -> None:
+    from src.mhs.execution import window_stream as ws_stream
+    from src.mhs.execution.window_stream import _iter_mhs_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    symbols = ["AUSDT", "BUSDT"]
+    start = pd.Timestamp("2022-01-01", tz="UTC")
+    end = start + pd.Timedelta(days=6)
+    root, grid = _ohlcv_3m_root(tmp_path, symbols, start, end)
+    targets = pd.DataFrame(
+        [[0.5, -0.5]] * 5,
+        index=pd.date_range(start, periods=5, freq="24h", tz="UTC"),
+        columns=symbols,
+        dtype="float64",
+    )
+    signals = pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1))
+    funding = {s: pd.Series(0.0, index=grid) for s in symbols}
+    spec = ExecutionSpec()
+    real_plan = ws_stream.plan_mhs_execution_bars
+
+    def _capped(*args, **kwargs):
+        return min(int(real_plan(*args, **kwargs)), 800)
+
+    monkeypatch.setattr(ws_stream, "plan_mhs_execution_bars", _capped)
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, signals, str(root), "3m", start, end, funding, spec,
+            budget_bytes=1 << 40, reserve_bytes=1 << 30,
+        )
+    )
+    assert len(windows) > 1
+    assert any(len(window.target_weights) == 0 for window in windows)
+    from src.mhs.execution.batch import replay_execution_window_batch
+
+    base, stress = replay_execution_window_batch(
+        iter(windows), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec), ("OHLCV_IMMEDIATE_TAKER", spec)],
+    )
+    assert bool(base.ledger.primary_valid)
+    assert bool(stress.ledger.primary_valid)
+    assert len(base.simulated_fills) > 0
+    assert len(stress.simulated_fills) > 0

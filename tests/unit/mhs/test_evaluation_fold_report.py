@@ -9,19 +9,29 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs.evaluation import (
-    GO_REASON_FOLD_GROWTH_CONCENTRATION,
-    GO_REASON_PATH_DIVERGENCE,
+from src.mhs.contracts import (
     MhsFoldReport,
-    MhsHorizonDiagnosticReport,
     MhsOutputTier,
     MhsResearchGoResult,
+)
+from src.mhs.evaluation.evidence import (
     _fold_blend_parity,
     _fold_growth_concentration,
     _fold_realized_risk_parity,
-    _incomplete_fold_report,
     _pooled_fold_evidence,
+)
+from src.mhs.evaluation.folds import (
+    _incomplete_fold_report,
+)
+from src.mhs.report.persist import (
     build_mhs_run_history_record,
+)
+from src.mhs.report.schema import (
+    MhsHorizonDiagnosticReport,
+)
+from src.mhs.research_go import (
+    GO_REASON_FOLD_GROWTH_CONCENTRATION,
+    GO_REASON_PATH_DIVERGENCE,
 )
 from src.mhs.research_go import _mhs_research_go
 from src.mhs.evidence import AnchoredPurgedFold, DeploymentReadinessResult

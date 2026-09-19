@@ -5,11 +5,13 @@ import logging
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs import evaluation as ev
+import src.mhs.evaluation.committee as committee_mod
+import src.mhs.evaluation.concurrency as concurrency_mod
+import src.mhs.evaluation.diagnostics as diagnostics_mod
+from src.mhs.committee import purged_walk_forward as _committee_purged_walk_forward
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.evaluation import (
-    MhsDiagnosticRequest,
-)
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.params import COMMITTEE_OOS_START, MEASURED_EXECUTION_COST_TIERS_BPS
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
@@ -32,12 +34,12 @@ def test_committee_default_off_bit_identical(mhs_market, monkeypatch) -> None:
     # pre-existing field is bit-identical to the explicit-off baseline -- the
     # committee axis is inert unless explicitly enabled.
     root, end = mhs_market
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
-        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
     default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
@@ -61,12 +63,12 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
     # every reported value finite or an explicit None. The fixture spans past
     # COMMITTEE_OOS_START so the block grid has real test bars (B1).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -101,12 +103,12 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
                 assert 0.0 <= value <= 1.0
     wf = diag["walk_forward"]
     assert isinstance(wf["block_edges"], list)
-    assert wf["block_edges"][0] == ev.COMMITTEE_OOS_START.isoformat()
+    assert wf["block_edges"][0] == COMMITTEE_OOS_START.isoformat()
     assert wf["purge_hours"] == 720
     assert wf["target_vol"] == pytest.approx(0.15)
     assert isinstance(wf["skipped_blocks"], list)
     per_tier = wf["per_tier"]
-    assert set(per_tier) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    assert set(per_tier) == set(MEASURED_EXECUTION_COST_TIERS_BPS)
     for fields in per_tier.values():
         assert isinstance(fields["bars"], int)
         assert fields["bars"] >= 0
@@ -121,18 +123,18 @@ def test_committee_diagnostic_per_tier_blocks_present(mhs_market_long, monkeypat
     # that partitions the tier's aggregate bar count exactly -- no
     # double-count or calendar gap against the total.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     per_tier = report.committee_diagnostic["walk_forward"]["per_tier"]
-    assert set(per_tier) == set(ev.MEASURED_EXECUTION_COST_TIERS_BPS)
+    assert set(per_tier) == set(MEASURED_EXECUTION_COST_TIERS_BPS)
     for fields in per_tier.values():
         assert isinstance(fields["blocks"], list)
         for block in fields["blocks"]:
@@ -150,12 +152,12 @@ def test_committee_diagnostic_block_logret_share_reported(mhs_market_long, monke
     # tier sum to ~1.0 -- a structural ratio (report-only, never a gate) that
     # surfaces single-block dominance, mirroring top1_event_share.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -184,12 +186,12 @@ def test_committee_diagnostic_block_return_autocorr_lag1_present(
     # [-1.0, 1.0] -- the block-scoped lag-1 autocorrelation of the raw
     # tranche_count=1 committee net returns.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -215,26 +217,26 @@ def test_committee_diagnostic_block_return_autocorr_lag1_matches_manual_computat
     # independently by capturing the purged walk-forward series during the run
     # and slicing it on the reported block edges.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     captured: dict[str, pd.Series] = {}
-    real_wf = ev.purged_walk_forward
+    real_wf = _committee_purged_walk_forward
 
     def _recording_wf(*args, **kwargs):
         result = real_wf(*args, **kwargs)
         captured[args[2]] = result
         return result
 
-    monkeypatch.setattr(ev.committee, "purged_walk_forward", _recording_wf)
+    monkeypatch.setattr(committee_mod, "purged_walk_forward", _recording_wf)
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
-    base_wf = captured.get(ev.MEASURED_EXECUTION_COST_TIERS_BPS["base"])
+    base_wf = captured.get(MEASURED_EXECUTION_COST_TIERS_BPS["base"])
     assert base_wf is not None
     base_fields = report.committee_diagnostic["walk_forward"]["per_tier"]["base"]
     for block in base_fields["blocks"]:
@@ -260,12 +262,12 @@ def test_committee_diagnostic_block_existing_fields_unchanged(
     # same values, same types -- so pre-existing per-block consumers are
     # unaffected.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -290,12 +292,12 @@ def test_committee_diagnostic_off_by_default_unchanged(
     # committee_diagnostic stays exactly None -- the new field only ever appears
     # inside an already-opt-in diagnostic block.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -308,12 +310,12 @@ def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, c
     # MhsHorizonDiagnostic logger emits all four committee checkpoints --
     # source coverage, member PnL, per-block walk-forward, per-tier summary.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     with caplog.at_level(logging.DEBUG, logger="MhsHorizonDiagnostic"):
@@ -335,12 +337,12 @@ def test_committee_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeyp
     # load, the whole committee diagnostic, and one walk-forward checkpoint per
     # measured cost tier -- so a production timeout can be attributed precisely.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -348,7 +350,7 @@ def test_committee_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeyp
     stages = {m.stage for m in report.resource_measurements}
     assert "diagnostic_feature_panels" in stages
     assert "committee_diagnostic" in stages
-    for tier in ev.MEASURED_EXECUTION_COST_TIERS_BPS:
+    for tier in MEASURED_EXECUTION_COST_TIERS_BPS:
         assert f"committee_walk_forward_{tier}" in stages
 
 @pytest.mark.slow
@@ -359,23 +361,22 @@ def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monk
     # diagnostic's own 2021 start; monkeypatching the constant to a different
     # date shifts the first edge, proving the constant is actually read.
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
     first_edge = report.committee_diagnostic["walk_forward"]["block_edges"][0]
-    assert first_edge == ev.COMMITTEE_OOS_START.isoformat()
+    assert first_edge == COMMITTEE_OOS_START.isoformat()
     assert first_edge == "2023-01-01T00:00:00+00:00"
 
     shifted = pd.Timestamp("2023-07-01", tz="UTC")
-    monkeypatch.setattr(ev, "COMMITTEE_OOS_START", shifted)
-    monkeypatch.setattr(ev.committee, "COMMITTEE_OOS_START", shifted)
+    monkeypatch.setattr(committee_mod, "COMMITTEE_OOS_START", shifted)
     report2 = run_mhs_horizon_diagnostic(request)
     assert report2.status == "COMPLETE"
     first_edge2 = report2.committee_diagnostic["walk_forward"]["block_edges"][0]
@@ -409,12 +410,12 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
     # carries the failing source/year. With a full-coverage taker_buy_quote the
     # gate is a no-op and all 6 members are admitted (regression).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -432,14 +433,13 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
     # Regression: with a full-coverage taker_buy_quote the source gate admits
     # every member -- B3 is fail-closed-only and non-disruptive to the shipped
     # committee.
-    real_load = ev._load_feature_panels
+    real_load = diagnostics_mod._load_feature_panels
     def _full_coverage_panels(root_arg, start_arg, end_arg, grid_1h, aligned_symbols, columns=None):
         panels = real_load(root_arg, start_arg, end_arg, grid_1h, aligned_symbols, columns=columns)
         quote_vol = panels["quote_vol"]
         panels["taker_buy_quote"] = quote_vol * 0.5
         return panels
-    monkeypatch.setattr(ev, "_load_feature_panels", _full_coverage_panels)
-    monkeypatch.setattr(ev.diagnostics, "_load_feature_panels", _full_coverage_panels)
+    monkeypatch.setattr(diagnostics_mod, "_load_feature_panels", _full_coverage_panels)
     report_full = run_mhs_horizon_diagnostic(request)
     assert report_full.status == "COMPLETE"
     assert set(report_full.committee_diagnostic["admitted"]) == set(
@@ -453,12 +453,12 @@ def test_committee_diagnostic_reports_trials_and_warning(mhs_market_long, monkey
     # selection_bias_warning naming the configuration count, and tags its
     # evaluation protocol as purged walk-forward OOS (B5).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -479,12 +479,12 @@ def test_evaluation_protocol_field_distinguishes_in_sample_from_oos(mhs_market_l
     from src.mhs.features import FEATURE_REGISTRY
 
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True, multi_feature_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -503,12 +503,12 @@ def test_committee_diagnostic_reports_skipped_blocks(mhs_market_long, monkeypatc
     # block has both sufficient train and at least one test bar, so the list is
     # empty (report-only, never raises).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     request = MhsDiagnosticRequest(
         start=str(_START), end=str(end), data_root=str(root),
-        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -528,12 +528,12 @@ def test_committee_books_regression_unchanged_by_b1_b2(mhs_market_long, monkeypa
     # multi_feature_diagnostic) -- only committee_diagnostic's own walk-forward
     # numbers change by design (B1/B2).
     root, end = mhs_market_long
-    monkeypatch.setattr(ev.concurrency, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    monkeypatch.setattr(ev.concurrency, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
+    monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
-        "mark_mode": "cache_required", "execution_timeframe": "1m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
     off_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))

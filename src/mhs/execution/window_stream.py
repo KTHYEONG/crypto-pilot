@@ -11,7 +11,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.mhs.execution.contracts import ExecutionReplayWindow, align_funding_with_knowledge, funding_coverage_gaps
-from src.mhs.marks import _build_window_frames, _cached_mark_panel, _load_window_minute_frames
+from src.mhs.marks import _build_window_frames, _load_window_minute_frames
 from src.mhs.resources import (
     MhsExecutionAllocation,
     assert_mhs_allocation_budget,
@@ -78,7 +78,6 @@ def _materialize_execution_piece(
     root: str,
     timeframe: Literal["3m"],
     funding_by_symbol: dict[str, pd.Series],
-    mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"],
     funding_failures: Mapping[str, str] | None,
     allocation: MhsExecutionAllocation,
     budget_bytes: int | None,
@@ -88,10 +87,7 @@ def _materialize_execution_piece(
     logical_partition: tuple[int, int],
     initial_swap_bytes: int | None = None,
 ) -> ExecutionReplayWindow:
-    """Decode, align and admit one physical piece without changing decisions.
-
-    Carry the source of funding knowledge onto every physical execution window.
-    Archive recency is not recorded no-settlement or publication evidence.
+    """Materialize completed three-minute trade OHLCV, funding and publication evidence for one replay piece. Emit no external mark plane; the execution engine uses the same trade close series for inventory valuation.
 
     Args:
         initial_swap_bytes: Observed run-entry process-tree swap baseline; existing swapped pages are not classified as growth.
@@ -121,17 +117,6 @@ def _materialize_execution_piece(
     highs = highs.reindex(columns=roster)
     lows = lows.reindex(columns=roster)
     closes = closes.reindex(columns=roster)
-    minute_marks: pd.DataFrame | None = None
-    if mark_mode in ("cache_required", "cache_required_stale_carry"):
-        if roster:
-            stale_hours = 24 if mark_mode == "cache_required_stale_carry" else 0
-            minute_marks = _cached_mark_panel(roster, "1h", piece_grid, stale_hours)
-            if mark_mode == "cache_required":
-                from src.mhs.evaluation.integrity import _assert_cache_required_marks
-
-                _assert_cache_required_marks("window", piece_weights[roster], piece_signals, minute_marks)
-        else:
-            minute_marks = pd.DataFrame(index=piece_grid)
     minute_period = piece_grid[1] - piece_grid[0] if len(piece_grid) > 1 else pd.Timedelta(minutes=1)
     funding_alignment = align_funding_with_knowledge(
         funding_by_symbol, piece_grid, symbols=roster, source_failures=funding_failures
@@ -161,7 +146,7 @@ def _materialize_execution_piece(
         highs=highs,
         lows=lows,
         closes=closes,
-        marks=minute_marks,
+        marks=None,
         bar_funding=minute_funding,
         target_weights=piece_weights[roster] if len(piece_weights) else piece_weights.reindex(columns=roster),
         signal_available_at=piece_signals,
@@ -186,7 +171,6 @@ def _iter_mhs_execution_windows(
     start: pd.Timestamp,
     end: pd.Timestamp,
     funding_by_symbol: dict[str, pd.Series],
-    mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"],
     spec: ExecutionSpec,
     funding_failures: Mapping[str, str] | None = None,
     *,
@@ -196,7 +180,7 @@ def _iter_mhs_execution_windows(
     execution_bound_count: int = 2,
     initial_swap_bytes: int | None = None,
 ) -> Iterator[MhsExecutionWindow]:
-    """Stream the existing completed three-minute execution windows independently of research report assembly. Args: canonical targets and signal release labels, source range and provenance, costs, live required-symbol callback, resource limits, bound count and swap baseline. Returns: chronological half-open-range windows with unchanged decision and market provenance. Raises: DataIntegrityError for invalid coverage or provenance; existing resource admission exceptions for unsafe allocation."""
+    """Stream chronologically completed three-minute trade bars and funding knowledge for an exact target path. The OHLCV mode leaves `ExecutionReplayWindow.marks` absent so the shared accounting engine values positions from 3m closes; bar completion remains the earliest publication time."""
     if len(target_weights) != len(signal_available_at):
         raise DataIntegrityError("signal_available_at must align with target_weights")
     if start >= end:
@@ -222,11 +206,6 @@ def _iter_mhs_execution_windows(
 
     if target_weights.empty:
         completed_grid = pd.date_range(start, end - step, freq=freq, tz="UTC")
-        empty_marks = (
-            pd.DataFrame(index=completed_grid)
-            if mark_mode in ("cache_required", "cache_required_stale_carry")
-            else None
-        )
         yield ExecutionReplayWindow(
             window_start=start,
             window_end=end,
@@ -236,7 +215,7 @@ def _iter_mhs_execution_windows(
             highs=pd.DataFrame(index=completed_grid),
             lows=pd.DataFrame(index=completed_grid),
             closes=pd.DataFrame(index=completed_grid),
-            marks=empty_marks,
+            marks=None,
             bar_funding=pd.DataFrame(index=completed_grid),
             target_weights=target_weights,
             signal_available_at=signal_available_at,
@@ -313,7 +292,6 @@ def _iter_mhs_execution_windows(
                 root=root,
                 timeframe=timeframe,
                 funding_by_symbol=funding_by_symbol,
-                mark_mode=mark_mode,
                 funding_failures=funding_failures,
                 allocation=legacy_alloc,
                 budget_bytes=budget_bytes,
@@ -402,7 +380,6 @@ def _iter_mhs_execution_windows(
                 root=root,
                 timeframe=timeframe,
                 funding_by_symbol=funding_by_symbol,
-                mark_mode=mark_mode,
                 funding_failures=funding_failures,
                 allocation=piece_allocation,
                 budget_bytes=budget_bytes,
@@ -462,7 +439,6 @@ def _iter_mhs_execution_windows(
                     root=root,
                     timeframe=timeframe,
                     funding_by_symbol=funding_by_symbol,
-                    mark_mode=mark_mode,
                     funding_failures=funding_failures,
                     allocation=piece_allocation,
                     budget_bytes=budget_bytes,
@@ -507,7 +483,6 @@ def _iter_mhs_execution_windows(
                 root=root,
                 timeframe=timeframe,
                 funding_by_symbol=funding_by_symbol,
-                mark_mode=mark_mode,
                 funding_failures=funding_failures,
                 allocation=piece_allocation,
                 budget_bytes=budget_bytes,
@@ -556,7 +531,6 @@ def _iter_mhs_execution_windows(
                     root=root,
                     timeframe=timeframe,
                     funding_by_symbol=funding_by_symbol,
-                    mark_mode=mark_mode,
                     funding_failures=funding_failures,
                     allocation=piece_allocation,
                     budget_bytes=budget_bytes,

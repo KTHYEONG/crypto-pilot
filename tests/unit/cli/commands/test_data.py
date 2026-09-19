@@ -6,7 +6,12 @@ import argparse
 
 import pytest
 
-from src.cli.commands.data import _mhs_execution, _refresh_live_universe, add_data_commands
+from src.cli.commands.data import (
+    _mhs_execution,
+    _refresh_live_universe,
+    _refresh_one_symbol_tail,
+    add_data_commands,
+)
 
 
 def _mhs_parser() -> argparse.ArgumentParser:
@@ -60,8 +65,31 @@ def test_data_collect_mhs_execution_threads_timeframe_to_plan(monkeypatch) -> No
     assert captured["timeframe"] == "3m"
 
 
+def test_data_refresh_one_symbol_tail_never_calls_mark_collector() -> None:
+    """MHS collection excludes mark: per-symbol dispatch requests only the
+    declared trade-OHLCV and funding feeds even when the collector exposes
+    mark/metrics methods."""
+    calls: list[str] = []
+
+    class _Collector:
+        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
+            calls.append("ohlcv")
+
+        def ensure_funding_data(self, symbol, start, end):
+            calls.append("funding")
+
+        def ensure_mark_price_data(self, symbol, timeframe, start, end):
+            calls.append("mark")
+
+        def ensure_mark_price_klines(self, symbol, timeframe, start, end):
+            calls.append("mark_legacy")
+
+    assert _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02") is True
+    assert calls == ["ohlcv", "funding"]
+
+
 def test_data_refresh_live_universe_registered_and_dispatches(monkeypatch) -> None:
-    """v2: refresh does 1h/funding + markPriceKlines, no 3m roster."""
+    """v2: refresh does 1h trade OHLCV + settled funding only, no 3m roster, no mark artifacts."""
     monkeypatch.setenv("LIVE_MIN_UNIVERSE_SYMBOLS", "1")
     parser = _mhs_parser()
     args = parser.parse_args(["data", "refresh-live-universe"])
@@ -445,6 +473,7 @@ def test_data_seal_mhs_inputs_seals_complete_symbols(tmp_path) -> None:
         "ohlcv/3m/COMPLETEUSDT.parquet",
         "funding/COMPLETEUSDT.parquet",
         "markPriceKlines/1h/COMPLETEUSDT.parquet",
+        "metrics/1d/COMPLETEUSDT.parquet",
         "ohlcv/1h/PARTIALUSDT.parquet",
     ):
         _write(rel)
@@ -462,15 +491,17 @@ def test_data_seal_mhs_inputs_seals_complete_symbols(tmp_path) -> None:
     ])
     args.handler(args)
 
-    # Then: only the complete symbol is attested
+    # Then: only consumed source paths (1h/3m trade OHLCV + funding) affect the
+    # manifest -- arbitrary mark and metrics files never enter the input identity.
     payload = json.loads(out.read_text(encoding="utf-8"))
     attested = {entry["relative_path"] for entry in payload["files"]}
     assert attested == {
         "ohlcv/1h/COMPLETEUSDT.parquet",
         "ohlcv/3m/COMPLETEUSDT.parquet",
         "funding/COMPLETEUSDT.parquet",
-        "markPriceKlines/1h/COMPLETEUSDT.parquet",
+        "ohlcv/1h/PARTIALUSDT.parquet",
     }
+    assert all("mark" not in rel and "metrics" not in rel for rel in attested)
     assert payload["digest"]
 
     # And: an empty corpus fails closed instead of writing an empty manifest
