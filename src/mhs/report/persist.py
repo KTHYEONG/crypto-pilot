@@ -350,7 +350,6 @@ def build_mhs_run_history_record(
         "fold_growth_concentration": report.fold_growth_concentration,
         "fold_realized_risk_parity": report.fold_realized_risk_parity,
         "evidence_calibration": report.evidence_calibration,
-        "fill_mark_parity": report.fill_mark_parity,
         "growth_envelope": report.growth_envelope,
         "committee_member_attribution": report.committee_member_attribution,
         "holdout_tail": report.holdout_tail,

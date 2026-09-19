@@ -1,28 +1,19 @@
-"""Load observed funding events and derive the point-in-time trade-volume execution roster without an external mark-price history.
-
-MHS historical and paper consumers price completed trade OHLCV and observed
-funding only: no mark-price cache, panel or replay-valuation helper remains in
-this module. The optional fill/mark parity gate (explicitly user-enabled) is
-the sole remaining mark reader; all canonical preparation and replay paths use
-the funding series, the PIT roster mask and the minute-frame loaders below.
-"""
+"""Load observed funding and completed trade OHLCV for MHS execution roster and replay. Historical research has no external Mark price input."""
 
 from __future__ import annotations
 
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Literal
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
 from src.common.paths import funding_path
-from src.market_data.services import futures_collection as _futures_collection
 from src.market_data.storage.loaders import load_funding_rates
 from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
-from src.mhs.types import FILL_MARK_MAX_LOG_DIVERGENCE
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
@@ -87,104 +78,6 @@ def _pit_execution_mask(
         held = enter[i] | (held & keep[i])
         out[i] = held
     return pd.DataFrame(out, index=quote_volume.index, columns=quote_volume.columns)
-
-
-def _contemporaneous_mark_close_panel(
-    symbols: list[str],
-    grid: pd.DatetimeIndex,
-) -> pd.DataFrame:
-    """Contemporaneous mark-price close panel (no +1h shift, no ffill).
-
-    An absent mark stays NaN so the parity mask fails open per I2.  Deliberately
-    does NOT apply any ``+1h`` availability shift — the gate detects a stalled
-    price feed, not the replay's valuation lag. Mark paths resolve dynamically
-    at call time so test monkeypatches keep working.
-    """
-    panel = pd.DataFrame(index=grid, columns=list(symbols), dtype="float64")
-    for sym in symbols:
-        try:
-            path = _futures_collection._mark_price_path(sym, "1h")
-            if not path.exists():
-                continue
-            available = set(pq.ParquetFile(path).schema_arrow.names)
-            if "close" not in available or ("datetime" not in available and "timestamp" not in available):
-                continue
-            columns = (
-                ["datetime", "close"] if "datetime" in available else ["timestamp", "close"]
-            )
-            frame = pq.read_table(path, columns=columns).to_pandas()
-        except (KeyError, ValueError, OSError):
-            # A malformed/incomplete mark cache is a data-integrity condition
-            # owned elsewhere; this parity gate stays fail-open per I2 rather
-            # than pre-empting it with an unrelated crash.
-            continue
-        if frame.empty:
-            continue
-        if "datetime" in frame.columns:
-            frame["datetime"] = pd.to_datetime(frame["datetime"], utc=True, errors="coerce")
-        else:
-            frame["datetime"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True, errors="coerce")
-        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
-        valid = (
-            frame["datetime"].notna()
-            & frame["close"].notna()
-            & (frame["close"] > 0)
-        )
-        closes = (
-            frame.loc[valid, ["datetime", "close"]]
-            .drop_duplicates(subset=["datetime"], keep="last")
-            .sort_values("datetime")
-        )
-        if closes.empty:
-            continue
-        available = pd.Series(
-            closes["close"].to_numpy(dtype="float64"),
-            index=closes["datetime"],
-        )
-        aligned = available.reindex(grid)
-        panel[sym] = aligned.to_numpy(dtype="float64")
-    return panel
-
-
-def _fill_mark_parity_eligibility(
-    close: pd.DataFrame,
-    eligible: pd.DataFrame,
-    enabled: bool,
-    *,
-    mark_close: pd.DataFrame | None = None,
-) -> tuple[pd.DataFrame, dict[str, Any] | None]:
-    """Single shared entry point for BOTH the top-level and the fold path (I4).
-
-    Returns ``(eligible, None)`` unchanged when ``enabled`` is False.
-    Otherwise returns ``(eligible & fill_mark_parity_mask(...), census)``.
-    """
-    if not enabled:
-        return eligible, None
-    if mark_close is None:
-        mark_close = _contemporaneous_mark_close_panel(
-            list(close.columns), close.index,
-        )
-    from src.mhs.panel import fill_mark_parity_mask
-
-    parity = fill_mark_parity_mask(close, mark_close)
-    removed = eligible & ~parity
-    cells_over_band = int(removed.to_numpy().sum())
-    eligible_cells_removed = int((removed & eligible).to_numpy().sum())
-    per_symbol = removed.sum(axis=0)
-    top_symbols = per_symbol[per_symbol > 0].sort_values(ascending=False)
-    truncated = len(top_symbols) > 5
-    symbols_dict: dict[str, int] = {}
-    for sym in top_symbols.index[:5]:
-        symbols_dict[str(sym)] = int(top_symbols[sym])
-    if truncated:
-        symbols_dict["truncated"] = len(top_symbols) - 5
-    census: dict[str, Any] = {
-        "band": FILL_MARK_MAX_LOG_DIVERGENCE,
-        "cells_over_band": cells_over_band,
-        "eligible_cells_removed": eligible_cells_removed,
-        "symbols": symbols_dict,
-    }
-    return eligible & parity, census
 
 
 def clear_mhs_market_data_caches() -> None:

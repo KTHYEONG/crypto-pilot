@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import logging
 import os
@@ -190,30 +189,6 @@ def retired_feed_active_readers() -> tuple[str, ...]:
     operator explicitly accepts the listed readers via ``allow_active_readers``).
     """
     reasons: list[str] = []
-    try:
-        import dataclasses
-
-        from src.mhs import contracts as _contracts
-
-        gate_on = any(
-            field.name == "fill_mark_parity_gate" and field.default is True
-            for field in dataclasses.fields(_contracts.MhsDiagnosticRequest)
-        )
-        if gate_on:
-            reasons.append(
-                "fill_mark_parity_gate default-on (src/mhs/contracts MhsDiagnosticRequest)"
-            )
-    except Exception:  # noqa: BLE001 - inability to prove absence keeps cleanup blocked
-        reasons.append("fill_mark_parity_gate state unverifiable")
-    try:
-        from src.mhs import live_signal_step as _live_signal
-
-        if "_mark_price_path" in inspect.getsource(_live_signal):
-            reasons.append(
-                "live decision-mark recording reads markPriceKlines (src/mhs/live_signal_step)"
-            )
-    except Exception:  # noqa: BLE001
-        reasons.append("live decision-mark readership unverifiable")
     return tuple(reasons)
 
 

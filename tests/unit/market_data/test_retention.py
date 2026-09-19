@@ -221,20 +221,17 @@ def test_quarantine_retired_feeds_dry_run_enumerates_exact_targets(tmp_path) -> 
 
 
 def test_quarantine_retired_feeds_blocked_by_active_readers(tmp_path) -> None:
-    import pytest
-
-    from src.common.errors import DataIntegrityError
     from src.market_data.retention import quarantine_retired_mhs_feeds, retired_feed_active_readers
 
     (tmp_path / "markPriceKlines" / "1h").mkdir(parents=True)
     (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").write_bytes(b"a")
 
-    # The opt-in parity gate and live decision-mark recording still consume
-    # mark files, so physical removal stays blocked without operator override.
-    assert len(retired_feed_active_readers()) > 0
-    with pytest.raises(DataIntegrityError, match="active readers"):
-        quarantine_retired_mhs_feeds(tmp_path, tmp_path / "recovery", dry_run=False)
-    assert (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").exists()
+    # The OHLCV-only contract removed the last mark reader, so physical
+    # removal proceeds without operator override.
+    assert retired_feed_active_readers() == ()
+    report = quarantine_retired_mhs_feeds(tmp_path, tmp_path / "recovery", dry_run=False)
+    assert report["moved"] == 1
+    assert not (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").exists()
 
 
 def test_quarantine_retired_feeds_apply_moves_with_recoverable_manifest(tmp_path) -> None:

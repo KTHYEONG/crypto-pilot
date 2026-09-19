@@ -25,7 +25,7 @@ def test_sizing_and_deployment_policy_reject_invalid_financial_bounds() -> None:
 
     with pytest.raises(ValueError, match="kelly_lcb_z"):
         SizingPolicy(mode="growth_budget", target_annual_vol=0.35, exposure_cap=3.0, scale_floor=0.2, kelly_enabled=True, kelly_window_days=42, kelly_fraction=0.5, kelly_lcb_z=-0.1, kelly_blend_weight=0.5, drawdown_brake=False)
-    target = TargetWeightPolicy(execution_timeframe="3m", execution_universe_size=60, fast_book_mode="single_horizon", slow_book_mode="single_horizon", rebalance_filter="per_symbol_deadband", beta_neutralize=False, ensemble_signal="raw", trend_efficiency_overlay=False, trend_sleeve=False, trend_sleeve_gross=0.0, crash_regime_tilt_alpha=None, committee_capital=True, committee_member_set="flow_momentum", committee_tranche_smoothing=False, committee_regime_adaptive_tranche=True, committee_target_gross=1.0, funding_carry_sleeve=True, funding_carry_weight=0.3, fill_mark_parity_gate=True)
+    target = TargetWeightPolicy(execution_timeframe="3m", execution_universe_size=60, fast_book_mode="single_horizon", slow_book_mode="single_horizon", rebalance_filter="per_symbol_deadband", beta_neutralize=False, ensemble_signal="raw", trend_efficiency_overlay=False, trend_sleeve=False, trend_sleeve_gross=0.0, crash_regime_tilt_alpha=None, committee_capital=True, committee_member_set="flow_momentum", committee_tranche_smoothing=False, committee_regime_adaptive_tranche=True, committee_target_gross=1.0, funding_carry_sleeve=True, funding_carry_weight=0.3)
     sizing = SizingPolicy(mode="growth_budget", target_annual_vol=0.35, exposure_cap=3.0, scale_floor=0.2, kelly_enabled=True, kelly_window_days=42, kelly_fraction=0.5, kelly_lcb_z=0.0, kelly_blend_weight=0.5, drawdown_brake=False)
     window = SignalWindowPolicy(panel_window_days=120, bootstrap_return_tail_days=400, fold_panel_warmup_hours=720, committee_purge_hours=24, committee_oos_start="2023-01-01T00:00:00+00:00")
     with pytest.raises(ValueError, match="admitted"):
@@ -42,7 +42,7 @@ def test_sizing_signal_and_deployment_policies_validate_all_bounds() -> None:
     for key, bad in [("target_annual_vol", 0.0), ("exposure_cap", 0.5), ("scale_floor", 0.0), ("kelly_window_days", 0), ("kelly_fraction", 0.75), ("kelly_blend_weight", 1.5)]:
         with pytest.raises(ValueError, match=key):
             SizingPolicy(**{**good, key: bad})
-    target = TargetWeightPolicy(execution_timeframe="3m", execution_universe_size=60, fast_book_mode="single_horizon", slow_book_mode="single_horizon", rebalance_filter="per_symbol_deadband", beta_neutralize=False, ensemble_signal="raw", trend_efficiency_overlay=False, trend_sleeve=False, trend_sleeve_gross=0.0, crash_regime_tilt_alpha=None, committee_capital=True, committee_member_set="flow_momentum", committee_tranche_smoothing=False, committee_regime_adaptive_tranche=True, committee_target_gross=1.0, funding_carry_sleeve=True, funding_carry_weight=0.3, fill_mark_parity_gate=True)
+    target = TargetWeightPolicy(execution_timeframe="3m", execution_universe_size=60, fast_book_mode="single_horizon", slow_book_mode="single_horizon", rebalance_filter="per_symbol_deadband", beta_neutralize=False, ensemble_signal="raw", trend_efficiency_overlay=False, trend_sleeve=False, trend_sleeve_gross=0.0, crash_regime_tilt_alpha=None, committee_capital=True, committee_member_set="flow_momentum", committee_tranche_smoothing=False, committee_regime_adaptive_tranche=True, committee_target_gross=1.0, funding_carry_sleeve=True, funding_carry_weight=0.3)
     sizing = SizingPolicy(**good)
     base_window = dict(panel_window_days=120, bootstrap_return_tail_days=400, fold_panel_warmup_hours=720, committee_purge_hours=24, committee_oos_start="2023-01-01T00:00:00+00:00")
     for key, bad in [("panel_window_days", 0), ("bootstrap_return_tail_days", 0), ("fold_panel_warmup_hours", 0), ("committee_purge_hours", 0)]:
@@ -86,3 +86,99 @@ def test_live_parity_blockers_is_single_registry_seam() -> None:
     trim_request = MhsDiagnosticRequest(**dataclasses.asdict(trim_config))
     assert live_parity_blockers(trim_config) == ("name_drift_trim",)
     assert live_parity_blockers(trim_request) == ("name_drift_trim",)
+
+
+def test_sealed_policy_with_retired_field_requires_migration() -> None:
+    """A sealed policy carrying the retired parity field fails typed migration."""
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.live_strategy import _deserialize_policy
+
+    raw = {
+        "target_weights": {
+            "execution_timeframe": "3m",
+            "execution_universe_size": 60,
+            "fast_book_mode": "single_horizon",
+            "slow_book_mode": "single_horizon",
+            "rebalance_filter": "per_symbol_deadband",
+            "beta_neutralize": False,
+            "ensemble_signal": "raw",
+            "trend_efficiency_overlay": False,
+            "trend_sleeve": False,
+            "trend_sleeve_gross": 0.0,
+            "crash_regime_tilt_alpha": None,
+            "committee_capital": True,
+            "committee_member_set": "flow_momentum",
+            "committee_tranche_smoothing": False,
+            "committee_regime_adaptive_tranche": True,
+            "committee_target_gross": 1.0,
+            "funding_carry_sleeve": True,
+            "funding_carry_weight": 0.3,
+            "fill_mark_parity_gate": True,
+        },
+        "sizing": {
+            "mode": "growth_budget",
+            "target_annual_vol": 0.35,
+            "exposure_cap": 3.0,
+            "scale_floor": 0.2,
+            "kelly_enabled": True,
+            "kelly_window_days": 42,
+            "kelly_fraction": 0.5,
+            "kelly_lcb_z": 0.0,
+            "kelly_blend_weight": 0.5,
+            "drawdown_brake": False,
+        },
+        "signal_window": {
+            "panel_window_days": 120,
+            "bootstrap_return_tail_days": 400,
+            "fold_panel_warmup_hours": 720,
+            "committee_purge_hours": 24,
+            "committee_oos_start": "2023-01-01T00:00:00+00:00",
+        },
+        "slow_horizon_hours": 168,
+        "committee_member_weights": {"a": 1.0},
+        "admitted_members": ["a"],
+    }
+    with pytest.raises(DataIntegrityError, match="re-seal"):
+        _deserialize_policy(raw)
+
+
+def test_ohlcv_only_policy_source_identity_stable() -> None:
+    """An OHLCV-only policy serializes and reloads with a stable digest."""
+    import dataclasses
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import build_deployment_policy
+    from src.mhs.live_strategy import _compute_strategy_digest, _serialize_policy
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    assert not hasattr(request, "fill_mark_parity_gate")
+    policy = build_deployment_policy(
+        request,
+        slow_horizon_hours=168,
+        committee_member_weights={"a": 1.0},
+        admitted_members=("a",),
+        target_annual_vol=0.35,
+        exposure_cap=3.0,
+    )
+    payload = _serialize_policy(policy)
+    assert "fill_mark_parity_gate" not in payload["target_weights"]
+    first = _compute_strategy_digest(
+        {"backtest_window": ["2021-01-01T00:00:00+00:00", "2022-01-01T00:00:00+00:00"], "policy": payload, "bootstrap_sha256": "0" * 64, "bootstrap_held_row": {}, "schema_version": 2}
+    )
+    second = _compute_strategy_digest(
+        {"backtest_window": ["2021-01-01T00:00:00+00:00", "2022-01-01T00:00:00+00:00"], "policy": payload, "bootstrap_sha256": "0" * 64, "bootstrap_held_row": {}, "schema_version": 2}
+    )
+    assert first == second
+
+
+def test_request_parser_rejects_retired_parity_flags() -> None:
+    """Retired parity flags are rejected rather than ignored."""
+    import pytest
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    with pytest.raises(TypeError):
+        MhsDiagnosticRequest(fill_mark_parity_gate=True)  # type: ignore[call-arg]

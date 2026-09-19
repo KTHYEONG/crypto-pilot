@@ -55,11 +55,6 @@ def test_select_horizons_reaches_fold_safe_discovery_via_seam(
         "liquid_half_eligibility",
         lambda quote_vol, **_k: pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns),
     )
-    monkeypatch.setattr(
-        selection_stage,
-        "_fill_mark_parity_eligibility",
-        lambda close, eligible, _gate: (eligible, None), raising=False
-    )
 
     calls: list[str] = []
 
@@ -99,11 +94,6 @@ def test_select_horizons_skips_fold_safe_discovery_by_default(
         "liquid_half_eligibility",
         lambda quote_vol, **_k: pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns),
     )
-    monkeypatch.setattr(
-        selection_stage,
-        "_fill_mark_parity_eligibility",
-        lambda close, eligible, _gate: (eligible, None), raising=False
-    )
 
     def _boom(*_a: object, **_k: object) -> None:
         raise AssertionError("fold-safe discovery must not run when the flag is off")
@@ -118,3 +108,49 @@ def test_select_horizons_skips_fold_safe_discovery_by_default(
 
     assert ctx.candidate_books is None
     assert ctx.fold_slow_horizons == {}
+
+
+def test_select_horizons_mark_independence(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Divergent Mark files leave trade-derived eligibility unchanged."""
+    import src.market_data.services.futures_collection as fc
+
+    for variant in ("1.0", "999.0"):
+        d = tmp_path / variant
+        (d / "markPriceKlines" / "1h").mkdir(parents=True)
+        pd.DataFrame(
+            {"timestamp": [int(_GRID[0].value // 1_000_000)], "close": [float(variant)]}
+        ).to_parquet(d / "markPriceKlines" / "1h" / f"{_SYMS[0]}.parquet")
+
+    def _boom(symbol: str, timeframe: str):
+        raise AssertionError("selection must not open a Mark path")
+
+    monkeypatch.setattr(fc, "_mark_price_path", _boom)
+    first = _bare_context(fold_safe=False)
+    selection_stage.select_horizons(first, StageTelemetry(log_run=False))
+    second = _bare_context(fold_safe=False)
+    selection_stage.select_horizons(second, StageTelemetry(log_run=False))
+    pd.testing.assert_frame_equal(first.eligible, second.eligible)
+    assert first.slow.horizon_hours == second.slow.horizon_hours
+
+
+def test_select_horizons_missing_mark_independence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No Mark directory still yields trade-derived eligibility."""
+    import src.market_data.services.futures_collection as fc
+
+    def _boom(symbol: str, timeframe: str):
+        raise AssertionError("no Mark path may be opened")
+
+    monkeypatch.setattr(fc, "_mark_price_path", _boom)
+    ctx = _bare_context(fold_safe=False)
+    selection_stage.select_horizons(ctx, StageTelemetry(log_run=False))
+    assert not ctx.eligible.empty
+    assert (ctx.log_close.to_numpy() == 0.0).all()
+
+
+def test_select_horizons_trade_gap_remains_closed() -> None:
+    """A missing trade bar keeps eligibility closed under the integrity gate."""
+    ctx = _bare_context(fold_safe=False)
+    ctx.quote_vol.iloc[0, 0] = float("nan")
+    ctx.close.iloc[0, 0] = float("nan")
+    selection_stage.select_horizons(ctx, StageTelemetry(log_run=False))
+    assert ctx.eligible.iloc[0].to_numpy().sum() == 0

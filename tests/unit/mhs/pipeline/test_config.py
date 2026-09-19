@@ -245,7 +245,7 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
         "committee_tranche_smoothing", "committee_regime_adaptive_tranche",
         "committee_target_gross", "committee_evidence_weighting",
         "funding_carry_sleeve", "funding_carry_weight",
-        "execution_coverage_gate", "fill_mark_parity_gate",
+        "execution_coverage_gate",
         "exposure_scale_two_sided", "exposure_drawdown_brake", "ram_guard",
         "growth_envelope", "committee_member_attribution",
     })

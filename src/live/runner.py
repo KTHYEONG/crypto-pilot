@@ -80,7 +80,7 @@ from src.live.portfolio_state import (
 )
 from src.live.rest import BinanceFuturesRestClient, parse_rate_limits
 from src.live.settings import LiveSettings
-from src.live.signal import assert_signal_available, assert_signal_fresh, latest_decision_marks, latest_target_weights
+from src.live.signal import assert_signal_available, assert_signal_fresh, latest_decision_ohlcv_close, latest_target_weights
 from src.live.sizing import target_quantities
 from src.mhs.params import REFERENCE_PASS_EQUITY_FLOOR
 from src.live.tax_ledger import (
@@ -474,17 +474,22 @@ def run_shadow_cycle(
             with contextlib.suppress(Exception):
                 audit.record("microstructure_write_failed", error=str(exc))
             logger.warning("[SYS] microstructure write failed error=%s", exc)
-        # decision marks for sizing anchor separation (effective time)
-        try:
-            _decision_marks_series = latest_decision_marks(weights_path, effective_dt, artifact_key=settings.artifact_key)
-        except Exception:
-            _decision_marks_series = None
-        if _decision_marks_series is not None:
-            decision_marks: dict[str, Decimal] | None = {str(k): Decimal(str(v)) for k, v in _decision_marks_series.items() if pd.notna(v)}
-            _sizing_anchor = "decision_mark"
-        else:
-            decision_marks = None
-            _sizing_anchor = "book_mid"
+        # decision-close anchor: completed 1h trade OHLCV close at the exact
+        # decision date sizes orders; the current ticker only checks tradability.
+        decision_closes = latest_decision_ohlcv_close(weights_path, effective_dt, artifact_key=settings.artifact_key)
+        active_symbols = {
+            str(symbol)
+            for symbol, weight in weights.items()
+            if pd.notna(weight) and float(weight) != 0.0
+        }
+        missing_decision_closes = sorted(active_symbols - {str(symbol) for symbol in decision_closes.index})
+        if missing_decision_closes:
+            raise DataIntegrityError(
+                "decision OHLCV close missing for active targets: "
+                + ",".join(missing_decision_closes)
+            )
+        decision_marks: dict[str, Decimal] = {str(k): Decimal(str(v)) for k, v in decision_closes.items()}
+        _sizing_anchor = "decision_ohlcv_close"
         # 4) I-EQUITY-MTM / ruin guard (백테스트 패리티).
         if settings.mode.suppresses_mutations:
             absent_held = held_symbols_absent_from_exchange(ledger_state.positions, exchange_info_payload)
