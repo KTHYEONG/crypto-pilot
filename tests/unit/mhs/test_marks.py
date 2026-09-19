@@ -35,38 +35,82 @@ def test_pit_execution_mask_no_eligible_never_holds() -> None:
     assert not mask["A"].any()
 
 
-def test_fill_mark_parity_eligibility_disabled_returns_unchanged() -> None:
-    """With enabled=False the eligibility mask passes through with no census."""
-    idx = pd.date_range("2022-01-01", periods=5, freq="h", tz="UTC")
-    close = pd.DataFrame({"A": 1.0}, index=idx)
-    eligible = pd.DataFrame({"A": True}, index=idx)
+def test_replay_window_reads_no_historical_mark(tmp_path, monkeypatch) -> None:
+    """A replay window load opens no Mark file."""
+    import src.market_data.services.futures_collection as fc
 
-    result_eligible, census = marks._fill_mark_parity_eligibility(
-        close, eligible, enabled=False,
+    def _boom(symbol: str, timeframe: str):
+        raise AssertionError("no Mark file may be read")
+
+    monkeypatch.setattr(fc, "_mark_price_path", _boom)
+    assert not hasattr(marks, "_contemporaneous_mark_close_panel")
+    assert not hasattr(marks, "_fill_mark_parity_eligibility")
+    grid = pd.date_range("2022-01-01", periods=4, freq="3min", tz="UTC")
+    frames = marks._load_window_minute_frames(str(tmp_path), ["A"], grid[0], grid[-1], "3m")
+    assert frames == {}
+
+
+def test_replay_window_ohlcv_valuation_identity(tmp_path) -> None:
+    """A completed 3m close emits marks None under OHLCV close valuation."""
+    from src.mhs.execution.window_stream import _materialize_execution_piece
+    from src.mhs.resources import MhsExecutionAllocation
+
+    grid = pd.date_range("2022-01-01", periods=4, freq="3min", tz="UTC")
+    ts_ms = [int(ts.value // 1_000_000) for ts in grid]
+    frame = pd.DataFrame(
+        {"timestamp": ts_ms, "high": 101.0, "low": 99.0, "close": 100.0, "quote_vol": 10.0},
     )
-
-    assert result_eligible.equals(eligible)
-    assert census is None
-
-
-def test_fill_mark_parity_eligibility_removes_diverged_cells() -> None:
-    """Cells where mark diverges beyond the log-band are excluded, with a census."""
-    idx = pd.date_range("2022-01-01", periods=3, freq="h", tz="UTC")
-    close = pd.DataFrame({"A": [1.0, 1.0, 1.0]}, index=idx)
-    mark_close = pd.DataFrame({"A": [1.0, 10.0, 1.0]}, index=idx)
-    eligible = pd.DataFrame({"A": [True, True, True]}, index=idx)
-
-    result_eligible, census = marks._fill_mark_parity_eligibility(
-        close, eligible, enabled=True, mark_close=mark_close,
+    root = tmp_path / "mkt"
+    (root / "3m").mkdir(parents=True)
+    frame.to_parquet(root / "3m" / "A.parquet")
+    weights = pd.DataFrame(0.0, index=pd.DatetimeIndex([grid[0]]), columns=["A"])
+    window = _materialize_execution_piece(
+        piece_grid=grid,
+        piece_weights=weights,
+        piece_signals=pd.DatetimeIndex([grid[0]]),
+        roster=["A"],
+        columns=("A",),
+        root=str(root),
+        timeframe="3m",
+        funding_by_symbol={},
+        funding_failures=None,
+        allocation=MhsExecutionAllocation(fixed_bytes=1, bytes_per_bar=1, decoder_bytes=1),
+        budget_bytes=None,
+        reserve_bytes=None,
+        window_start=grid[0],
+        window_end=grid[-1] + pd.Timedelta(minutes=3),
+        logical_partition=(0, 1),
     )
+    assert window.marks is None
+    assert float(window.closes["A"].iloc[0]) == 100.0
 
-    assert not result_eligible["A"].iloc[1]
-    assert result_eligible["A"].iloc[0]
-    assert result_eligible["A"].iloc[2]
-    assert census is not None
-    assert census["cells_over_band"] == 1
-    assert census["eligible_cells_removed"] == 1
-    assert "A" in census["symbols"]
+
+def test_replay_window_missing_trade_close_invalid(tmp_path) -> None:
+    """An unavailable 3m bar stays NaN under the existing coverage gate."""
+    from src.mhs.execution.window_stream import _materialize_execution_piece
+    from src.mhs.resources import MhsExecutionAllocation
+
+    grid = pd.date_range("2022-01-01", periods=4, freq="3min", tz="UTC")
+    weights = pd.DataFrame(0.0, index=pd.DatetimeIndex([grid[0]]), columns=["A"])
+    window = _materialize_execution_piece(
+        piece_grid=grid,
+        piece_weights=weights,
+        piece_signals=pd.DatetimeIndex([grid[0]]),
+        roster=["A"],
+        columns=("A",),
+        root=str(tmp_path / "empty"),
+        timeframe="3m",
+        funding_by_symbol={},
+        funding_failures=None,
+        allocation=MhsExecutionAllocation(fixed_bytes=1, bytes_per_bar=1, decoder_bytes=1),
+        budget_bytes=None,
+        reserve_bytes=None,
+        window_start=grid[0],
+        window_end=grid[-1] + pd.Timedelta(minutes=3),
+        logical_partition=(0, 1),
+    )
+    assert window.marks is None
+    assert window.closes["A"].isna().all()
 
 
 def test_align_minute_frames_empty_returns_none() -> None:

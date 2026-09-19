@@ -12,7 +12,6 @@ from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.marks import (
-    _fill_mark_parity_eligibility,
     _pit_execution_mask,
     clear_mhs_market_data_caches,
 )
@@ -54,7 +53,7 @@ def _build_fold_target_weights(
     apply_rebalance_deadband: bool = True,
     panel_quarantine: PanelQuarantine | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
-    """Construct the maintained horizon/committee decision targets with their existing point-in-time calibration. Args: source root, fold, frozen request, funding, existing overrides, explicit decision window, carried deadband state, source roster control, warmup panel and quarantine. Returns: identical targets, signal release timestamps, minute roster and hourly grid. Raises: existing validation and data-integrity errors for conflicting provenance or controls. This builder preserves the deployed strategy and is not the continuous process candidate allocator."""
+    """Fold eligibility uses the same completed trade OHLCV and observed funding sources as top-level selection. Historical Mark availability cannot select fold members."""
     ts = fold.train_start
     effective_start = fold.validation_start if decision_start is None else decision_start
     effective_end = fold.validation_end if decision_end is None else decision_end
@@ -117,12 +116,7 @@ def _build_fold_target_weights(
         taker_buy_quote = taker_buy_quote[aligned_symbols]
 
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
-    # Unlike run_mhs_horizon_diagnostic (which clears at entry), this function
-    # is also called directly outside a diagnostic run (fork worker per fold,
-    # or a unit test calling it standalone), so shared market-data state is
-    # never guaranteed fresh for this root otherwise.
     clear_mhs_market_data_caches()
-    eligible, _ = _fill_mark_parity_eligibility(close, eligible, request.fill_mark_parity_gate)
     log_close = np.log(close)
     if not request.committee_capital:
         del close

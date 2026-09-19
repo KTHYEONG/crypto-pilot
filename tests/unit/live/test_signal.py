@@ -6,8 +6,8 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
-from src.live.errors import CausalityViolation
-from src.live.signal import assert_signal_available, latest_target_weights
+from src.live.errors import CausalityViolation, StaleSignalError
+from src.live.signal import assert_signal_available, assert_signal_fresh, latest_target_weights
 
 
 @pytest.fixture
@@ -59,35 +59,17 @@ def test_naive_index_artifact_fails_closed(tmp_path) -> None:
     with pytest.raises(DataIntegrityError):
         latest_target_weights(path, pd.Timestamp("2026-08-24 00:00Z"))
 
+
+def test_signal_freshness_rejects_stale_decision() -> None:
+    decision_time = pd.Timestamp("2026-08-24 00:00Z")
+    with pytest.raises(StaleSignalError):
+        assert_signal_fresh(
+            decision_time,
+            decision_time + pd.Timedelta(hours=5),
+            pd.Timedelta(hours=4),
+        )
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_07_CAUSALITY_GATE",
 )
-
-def test_SCENARIO_PARITY_08_decision_marks_fail_closed(tmp_path):
-    """SCENARIO_PARITY_08-decision-marks-fail-closed"""
-    import pandas as pd
-    from src.live.signal import latest_decision_marks
-    from src.common.errors import DataIntegrityError
-    # case 1: file missing -> None
-    artifact_path = tmp_path / "deployed_target_weights.parquet"
-    # create a dummy weights file to avoid missing but marks missing
-    weights_df = pd.DataFrame({"AAA": [0.1]}, index=pd.DatetimeIndex([pd.Timestamp("2026-01-01", tz="UTC")]))
-    weights_df.to_parquet(artifact_path)
-    assert latest_decision_marks(artifact_path, pd.Timestamp("2026-01-01", tz="UTC")) is None
-    # case 2: file exists but row missing -> DataIntegrityError
-    marks_path = tmp_path / "deployed_decision_marks.parquet"
-    marks_df = pd.DataFrame({"AAA": [100.0]}, index=pd.DatetimeIndex([pd.Timestamp("2026-01-02", tz="UTC")]))
-    marks_df.to_parquet(marks_path)
-    try:
-        latest_decision_marks(artifact_path, pd.Timestamp("2026-01-01", tz="UTC"))
-        pytest.fail("should have raised")
-    except DataIntegrityError:
-        pass
-    # case 3: row exists -> Series float64
-    marks_df2 = pd.DataFrame({"AAA": [100.0], "BBB": [200.0]}, index=pd.DatetimeIndex([pd.Timestamp("2026-01-01", tz="UTC")]))
-    marks_df2.to_parquet(marks_path)
-    s = latest_decision_marks(artifact_path, pd.Timestamp("2026-01-01", tz="UTC"))
-    assert s is not None
-    assert s.dtype == "float64"
-    assert "AAA" in s.index

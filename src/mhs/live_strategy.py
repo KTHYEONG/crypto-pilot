@@ -77,7 +77,6 @@ BOUND_FLAGS: frozenset[str] = frozenset(
         "growth_envelope",
         "exposure_scale_two_sided",
         "exposure_drawdown_brake",
-        "fill_mark_parity_gate",
     }
 )
 
@@ -148,7 +147,6 @@ def _canonical_policy(policy: MhsDeploymentPolicy) -> dict[str, Any]:
         "execution_timeframe": str(tw.execution_timeframe),
         "execution_universe_size": int(tw.execution_universe_size),
         "fast_book_mode": str(tw.fast_book_mode),
-        "fill_mark_parity_gate": bool(tw.fill_mark_parity_gate),
         "funding_carry_sleeve": bool(tw.funding_carry_sleeve),
         "funding_carry_weight": float(tw.funding_carry_weight),
         "rebalance_filter": str(tw.rebalance_filter),
@@ -271,7 +269,6 @@ def _serialize_policy(policy: MhsDeploymentPolicy) -> dict[str, Any]:
             "committee_target_gross": None if tw.committee_target_gross is None else float(tw.committee_target_gross),
             "funding_carry_sleeve": bool(tw.funding_carry_sleeve),
             "funding_carry_weight": float(tw.funding_carry_weight),
-            "fill_mark_parity_gate": bool(tw.fill_mark_parity_gate),
     }
     # 기본값은 생략해 기존 봉인 digest를 보존한다(_canonical_policy와 동일 규칙).
     if int(tw.committee_tranche_count) != COMMITTEE_TRANCHE_COUNT:
@@ -317,6 +314,8 @@ def _deserialize_policy(raw: Any) -> MhsDeploymentPolicy:
     sw_raw = raw["signal_window"]
     if not isinstance(tw_raw, dict) or not isinstance(sz_raw, dict) or not isinstance(sw_raw, dict):
         raise DataIntegrityError("policy sections must be objects")
+    if "fill_mark_parity_gate" in tw_raw:
+        raise DataIntegrityError("retired field fill_mark_parity_gate requires explicit re-seal under the OHLCV-only contract")
     target = TargetWeightPolicy(**{k: v for k, v in tw_raw.items()})
     sizing = SizingPolicy(**{k: v for k, v in sz_raw.items()})
     sw = dict(sw_raw)
