@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_OHLCV_EXECUTION_ANCHOR",
+      "date": "2026-09-19",
+      "adr_id": "ADR_20260919_MHS_OHLCV_EXECUTION_ANCHOR",
+      "domain": "execution",
+      "title": "MHS Mark 제거와 OHLCV 실행 기준선 확정",
+      "why": "Mark 가격 전환 잔재와 느린 통합 테스트가 연구 유효성과 라이브 주문 기준을 혼합했다.",
+      "resolution": "연구·리플레이·라이브 결정가격을 완료된 OHLCV와 3분봉 종가로 통일하고 Mark reader를 제거했으며 활성 목표의 결정가격 누락은 fail-closed로 차단했다.",
+      "impact": "Mark 데이터 없이도 재현 가능한 OHLCV 실행 경로와 로스터 변경에 안전한 주문 가격 아티팩트를 제공하고 전체 lean check를 통과했다.",
+      "caveat": "3분봉 OHLCV 종가 평가는 실행 연구 기준이며 청산 가격 인증을 대체하지 않고 실제 기간·펀딩 공백 유효성은 별도 확인이 필요하다."
+    },
+    {
       "task_id": "TASK_MHS_MINIMAL_DATA_CONSOLIDATION",
       "date": "2026-09-19",
       "adr_id": "ADR_20260919_MHS_MINIMAL_DATA_CONSOLIDATION",
@@ -1005,16 +1016,6 @@
       "why": "fold0(2022)의 RELEVANT_EXECUTION_DATA_GAP이 '2022년엔 원래 상장 종목이 적었다'는 기존 결론으로 설명되는지, 아니면 백필 가능한 수집 결함인지 직접 판정해달라는 요청.",
       "resolution": "fold0 리플레이를 fork-safe 몽키패치로 직접 캡처해 갭 69건 전부를 심볼/시각 단위로 실측 확인. 18개 심볼(FILUSDT/FTMUSDT/GRTUSDT/KNCUSDT/LRCUSDT/LTCUSDT/OGNUSDT/ONEUSDT/SANDUSDT/SKLUSDT/SOLUSDT/SUSHIUSDT/TRXUSDT/VETUSDT/XLMUSDT/XRPUSDT/ZECUSDT/ZILUSDT)가 정확히 동일한 두 구간(2022-02-26~28, 2022-04-01~02)에서 결측됨을 확인 -- Binance Vision 월간 아카이브 자체가 월 경계에서 이 구간을 누락하고 있었던 것이 원인(로컬 수집기 결함이 아니라 아카이브 소스 결함). 1차 백필 시도에서 no_trades/close_time/ignore 3개 컬럼이 유실되는 결함을 자체 발견해 즉시 백업 원복 후, REST klines 엔드포인트에서 원시 12개 필드 전부를 직접 파싱하는 방식(fetch_full_klines)으로 재작업-- 원본 컬럼/dtype 100% 보존, 기존 행 무변형, 신규 구간 실제 no_trades 값 2402/2402건 채움을 5중 무결성 검사로 직접 검증. 재실행 결과 결측 69건->1건(BNXUSDT만 잔존)으로 실측 확인. BNXUSDT는 REST 실시간 API와 Vision 아카이브 양쪽 모두에서 2022년 4개 구간(04-16~18, 06-08~10, 08-09~13, 2023-01-31~02-22)이 공통 결측임을 교차검증(exchangeInfo onboardDate=2023-02-22, 재상장 계약으로 이전 이력을 거래소가 더 이상 서빙하지 않음, 백필 경로 없음 확정) -- 이미 SLPUSDT 등 7개 심볼에 쓰이던 SOURCE_GAP_EXCLUDED_SYMBOLS 프리즌셋(전체이력 배제, window-scoped 아님)에 편입해 두 실행경로(top-level panel.py, fold path evaluation.py) 양쪽에 일관 적용.",
       "impact": "실행 데이터 결측 게이트(RELEVANT_EXECUTION_DATA_GAP) 완전 해소(data_integrity_reason_codes=[] 사상 최초), 4개 fold 전부 failures=[] 사상 최초 전체 통과. 기본 설정(growth_extreme+Kelly+breadth60) 재실측: CAGR 342%->318%(BNXUSDT 기여분 상실, 정직한 트레이드오프), MDD -38.4%->-38.9%(거의 불변), Calmar 8.89->8.19. 남은 유일한 미통과 게이트는 FOLD_GROWTH_CONCENTRATION(2025 쏠림, max_fold_share=0.551)로 이번 세션 범위 밖 별개 사안(시장구조 기인, 이전 세션들에서 이미 근본원인 규명됨). uv run ruff check 및 관련 테스트(test_evaluation_trend_sleeve.py) PASS. data/ 디렉토리는 gitignore 대상이라 백필된 parquet 자체는 버전관리 밖."
-    },
-    {
-      "task_id": "TASK_MHS_KELLY_TWO_SIDED_SIZING",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING",
-      "domain": "risk",
-      "title": "MHS 양측 Kelly 사이징 복원 + breadth 60 기본값 승격",
-      "why": "성장 잠재력(CAGR)은 확인됐으니 단점(2025 쏠림 게이트 미통과, MDD -45~54%)을 보완하면서 고점을 유지하는 근본 개선안을 데이터로 탐색해달라는 요청.",
-      "resolution": "src/application/research/mhs/scaling.py: resolved_exposure_cap 단일 소유 함수 신설(request만으로 캡 해석, 데이터 비의존). _committee_kelly_scale에 cap 파라미터 추가(기존 clip(upper=1.0) 하드캡이 과거 ADR_20260816 Kelly 기각의 진짜 원인이었음 -- vol-target 항은 leverage_ceiling까지 갈 수 있는데 Kelly 항만 1.0에 묶여 50/50 블렌드가 순수 디레버리저로 작동). _committee_capital_replay_scale/_replay_exposure_scale에 동일 cap 전파. evaluation.py에 exposure_scale_cap_binding_fraction 관측 필드 추가(top-level+fold 양쪽) -- 캡이 92.5% 날짜에 물려 vol-targeting이 사실상 무효화되고 이것이 2025 쏠림의 기계적 원인임을 확인한 진단의 회귀신호. src/mhs/params.py의 growth_extreme(3.0x) rung을 TEMP에서 정식 등록으로 승격(3m 원장 실측 CAGR 5.17/Calmar 9.54/전 fold valid 근거), REGISTERED_POLICY_THRESHOLDS의 cap_30_roster를 cap_60_roster로 개명. src/mhs/pipeline/config.py CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT=60 신설, MhsRunConfig 기본값 30->60 전환(MhsDiagnosticRequest 자체 기본값은 30 유지). src/cli/commands/research/mhs.py --committee-kelly-sizing help의 허위 사실(과거 Kelly가 CAGR/Calmar를 손해봤다는 서술)을 교정하고 --execution-universe-size 기본값/help 갱신. 실측: 평균 레버리지 통제 비교에서 50/50 양측 Kelly 블렌드가 f=1.5/2.0/2.5 전 수준에서 CAGR/MDD/Calmar/max_fold_share 4축 동시 지배(2025 제외해도 지배, 파라미터 15조합 중 14개 지배), breadth 30->60이 CAGR+17.4%/Sharpe+20.2%/stress-Sharpe+14.8%/MDD 사실상 불변으로 Grinold IR∝IC√N 예측(배율1.25)의 96%를 실측 재현. breadth 100은 CAGR/Sharpe/Calmar가 60보다 하락하나 max_fold_share가 처음 0.5 밑(0.465)으로 내려가는 새 트레이드오프 발견(후속 과제로 분리). BTC 베타헤지는 2024 개선되나 MDD 악화로 반증.",
-      "impact": "uv run python tools/agent_skills/lean_check.py --spec docs/specs/mhs_kelly_two_sided_sizing_contract.json 전체 PASS(spec/lint/mypy/pytest). 사전등록된 3m 원장 실측(대조군/Kelly+growth/Kelly+growth_extreme)은 코드 반영 직후 이어서 실행해 실제 채택 여부를 판정할 예정 -- 이번 sync 시점에는 아직 미실행."
     }
   ]
 }

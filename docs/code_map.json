@@ -351,7 +351,8 @@
     "testing": "tests/unit/mhs/test_live_runtime.py"
   },
   "src/mhs/live_signal_step.py": {
-    "testing": "tests/unit/mhs/test_live_signal_step.py"
+    "testing": "tests/unit/mhs/test_live_signal_step.py",
+    "architecture": "docs/architecture/data-flow.md"
   },
   "src/mhs/live_strategy.py": {
     "testing": "tests/unit/mhs/test_live_strategy.py"
