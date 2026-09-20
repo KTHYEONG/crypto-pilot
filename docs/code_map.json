@@ -538,5 +538,8 @@
   },
   "src/mhs/frozen_research_run.py": {
     "testing": "tests/unit/mhs/test_frozen_research_run.py"
+  },
+  "src/cli/commands/backtest.py": {
+    "testing": "tests/unit/cli/commands/test_backtest.py"
   }
 }
