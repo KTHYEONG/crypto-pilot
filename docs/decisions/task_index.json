@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FROZEN_RESEARCH",
+      "date": "2026-09-20",
+      "adr_id": "ADR_20260920_MHS_FROZEN_RESEARCH",
+      "domain": "signal",
+      "title": "MHS 고정 PIT 후보와 3분봉 paired replay",
+      "why": "기존 MHS 검증은 유니버스 시점성·신호 공개시각·3분봉 보유 심볼 계승을 하나의 재현 가능한 계약으로 보장하지 못했다.",
+      "resolution": "PIT 전체 심볼 census에서 breadth를 선택하고 고정 5개 feature 후보를 생성한 뒤 base/stress 3분봉 원장과 실제 live accumulator 요구 심볼을 공유하도록 frozen 연구 경로를 연결했다.",
+      "impact": "Top-20을 기본으로 Top-40 및 임의 breadth control을 동일 실행 엔진에서 비교할 수 있고 평가 시작시각과 bounded-window 보유 보존이 명시적으로 검증된다.",
+      "caveat": "이는 OHLCV 체결 연구용 historical evidence이며 호가 깊이·queue·미래 성과·배포 적격성을 보장하지 않는다."
+    },
+    {
       "task_id": "TASK_MHS_OHLCV_EXECUTION_ANCHOR",
       "date": "2026-09-19",
       "adr_id": "ADR_20260919_MHS_OHLCV_EXECUTION_ANCHOR",
@@ -1006,16 +1017,6 @@
       "why": "FOLD_GROWTH_CONCENTRATION(max_fold_share=0.551>0.5)이 Research-GO를 차단. 실측 근본원인은 노출 스케일이 gross 공간에서만 통제되어 fold3(2025)이 다른 fold 대비 2배 실현위험(0.57 vs 0.28~0.30)을 동일 gross/scale로 배치한 것(D1: fold별 90일 vol-target 데드존, D2: growth_budget target_vol이 leverage_ceiling에 75~98% 포화, D3: Kelly-LCB 항의 경기순응성).",
       "resolution": "src/mhs/params.py에 CONSTANT_RISK_EWMA_HALFLIFE_DAYS/MIN_PERIODS_DAYS/CAP_BINDING_QUANTILE/FOLD_REALIZED_RISK_PARITY_TOLERANCE 신설. scaling.py에 _feasible_constant_risk_target/_constant_risk_scale/_constant_risk_target_vol_by_boundary 추가(Kelly 블렌드 비경유, I-WARM 워밍업 지원, leverage_ceiling*q10(sigma_book) fail-closed 클램프), _replay_exposure_scale에 4번째 opt-in 모드로 배선. evaluation.py에 관측 전용 _fold_realized_risk_parity 진단 추가(report_schema/persist에 fold_realized_risk_parity 필드 배선). contracts/validation/pipeline-config/CLI에 pnl_vol_target_mode='constant_risk' 선택지 확장(기존 3개 모드 및 CLI 실효 기본값은 바이트 동일 보존). 반사실 실측(scratch/test_constant_risk_counterfactual.py): sigma*=0.40 halflife 60d에서 baseline 대비 max_fold_share 0.549->0.373, 4-fold 평균 CAGR 1.13->1.70. /check 과정에서 is_streaming_scale_mode의 committee_kelly_sizing 단독 게이트를 committee_capital AND committee_kelly_sizing으로 교정(committee_kelly_sizing 기본값이 True로 바뀌며 committee_capital=False 요청도 부당하게 non-streaming 경로로 강제되어 골든 테스트에서 잠재해 있던 leverage frontier 버그를 노출시켰던 문제)하고, entry_point 골든 테스트의 MhsRunConfig에 execution_universe_size=30/growth_envelope=conservative를 명시해 CLI 실효 기본값 표류로 인한 골든 불일치를 해소.",
       "impact": "기존 median_relative/exante_target/growth_budget 3개 모드는 바이트 동일. 신규 constant_risk는 opt-in이며 CLI 실효 기본값은 변경하지 않음(별도 ADR에서 승격 검토). is_streaming_scale_mode 수정은 committee_capital=False 요청의 스트리밍 경로를 복원해 실행 성능을 개선하고 부수적으로 골든 테스트의 latent 버그를 노출/수정함."
-    },
-    {
-      "task_id": "TASK_MHS_BNXUSDT_SOURCE_GAP_AND_BACKFILL",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_BNXUSDT_SOURCE_GAP_AND_BACKFILL",
-      "domain": "data",
-      "title": "MHS 2022 fold 실행 데이터 결측 근본원인 규명 + 18개 심볼 백필 + BNXUSDT 진짜 결측 배제",
-      "why": "fold0(2022)의 RELEVANT_EXECUTION_DATA_GAP이 '2022년엔 원래 상장 종목이 적었다'는 기존 결론으로 설명되는지, 아니면 백필 가능한 수집 결함인지 직접 판정해달라는 요청.",
-      "resolution": "fold0 리플레이를 fork-safe 몽키패치로 직접 캡처해 갭 69건 전부를 심볼/시각 단위로 실측 확인. 18개 심볼(FILUSDT/FTMUSDT/GRTUSDT/KNCUSDT/LRCUSDT/LTCUSDT/OGNUSDT/ONEUSDT/SANDUSDT/SKLUSDT/SOLUSDT/SUSHIUSDT/TRXUSDT/VETUSDT/XLMUSDT/XRPUSDT/ZECUSDT/ZILUSDT)가 정확히 동일한 두 구간(2022-02-26~28, 2022-04-01~02)에서 결측됨을 확인 -- Binance Vision 월간 아카이브 자체가 월 경계에서 이 구간을 누락하고 있었던 것이 원인(로컬 수집기 결함이 아니라 아카이브 소스 결함). 1차 백필 시도에서 no_trades/close_time/ignore 3개 컬럼이 유실되는 결함을 자체 발견해 즉시 백업 원복 후, REST klines 엔드포인트에서 원시 12개 필드 전부를 직접 파싱하는 방식(fetch_full_klines)으로 재작업-- 원본 컬럼/dtype 100% 보존, 기존 행 무변형, 신규 구간 실제 no_trades 값 2402/2402건 채움을 5중 무결성 검사로 직접 검증. 재실행 결과 결측 69건->1건(BNXUSDT만 잔존)으로 실측 확인. BNXUSDT는 REST 실시간 API와 Vision 아카이브 양쪽 모두에서 2022년 4개 구간(04-16~18, 06-08~10, 08-09~13, 2023-01-31~02-22)이 공통 결측임을 교차검증(exchangeInfo onboardDate=2023-02-22, 재상장 계약으로 이전 이력을 거래소가 더 이상 서빙하지 않음, 백필 경로 없음 확정) -- 이미 SLPUSDT 등 7개 심볼에 쓰이던 SOURCE_GAP_EXCLUDED_SYMBOLS 프리즌셋(전체이력 배제, window-scoped 아님)에 편입해 두 실행경로(top-level panel.py, fold path evaluation.py) 양쪽에 일관 적용.",
-      "impact": "실행 데이터 결측 게이트(RELEVANT_EXECUTION_DATA_GAP) 완전 해소(data_integrity_reason_codes=[] 사상 최초), 4개 fold 전부 failures=[] 사상 최초 전체 통과. 기본 설정(growth_extreme+Kelly+breadth60) 재실측: CAGR 342%->318%(BNXUSDT 기여분 상실, 정직한 트레이드오프), MDD -38.4%->-38.9%(거의 불변), Calmar 8.89->8.19. 남은 유일한 미통과 게이트는 FOLD_GROWTH_CONCENTRATION(2025 쏠림, max_fold_share=0.551)로 이번 세션 범위 밖 별개 사안(시장구조 기인, 이전 세션들에서 이미 근본원인 규명됨). uv run ruff check 및 관련 테스트(test_evaluation_trend_sleeve.py) PASS. data/ 디렉토리는 gitignore 대상이라 백필된 parquet 자체는 버전관리 밖."
     }
   ]
 }
