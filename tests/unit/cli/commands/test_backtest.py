@@ -226,3 +226,129 @@ def test_backtest_mhs_command_discovery(monkeypatch) -> None:
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["backtest", "mhs", "--help"])
     assert excinfo.value.code == 0
+
+
+def _frozen_argv(tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "backtest", "mhs-frozen",
+        "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
+        "--output", str(tmp_path / "frozen.json"), *extra,
+    ]
+
+
+def _install_frozen(monkeypatch: pytest.MonkeyPatch) -> dict:
+    import src.mhs.frozen_research_run as run_mod
+
+    seen: dict = {}
+
+    def _fake_run(request: object) -> object:
+        seen["request"] = request
+        return types.SimpleNamespace(request=request)
+
+    def _fake_persist(run: object, output: Path) -> Path:
+        seen["output"] = output
+        Path(output).write_text("{}", encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(run_mod, "run_frozen_mhs_backtest", _fake_run)
+    import src.mhs.frozen_research_report as report_mod
+
+    monkeypatch.setattr(report_mod, "persist_frozen_mhs_backtest", _fake_persist)
+    return seen
+
+
+def test_backtest_mhs_frozen_distinct_from_legacy() -> None:
+    """Frozen registration uses its own handler and legacy mhs semantics stay unchanged."""
+    from src.cli.commands.backtest import run_frozen_mhs_backtest_command
+
+    frozen = _parse(_frozen_argv(Path("frozen.json")))
+    assert frozen.handler is run_frozen_mhs_backtest_command
+    assert frozen.handler is not run_mhs_backtest
+    legacy = _parse(["backtest", "mhs"])
+    assert legacy.handler is run_mhs_backtest
+
+
+def test_backtest_mhs_frozen_breadth_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitted breadth selects primary Top-20; breadth 40 names an explicit control variant."""
+    seen = _install_frozen(monkeypatch)
+    backtest_mod.run_frozen_mhs_backtest_command(_parse(_frozen_argv(tmp_path)))
+    assert seen["request"].strategy.strategy_id == "frozen_mhs_top20_v1"
+    assert seen["request"].strategy.breadth == 20
+    assert seen["output"] == tmp_path / "frozen.json"
+    out40 = tmp_path / "frozen40.json"
+    backtest_mod.run_frozen_mhs_backtest_command(_parse([
+        "backtest", "mhs-frozen",
+        "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
+        "--breadth", "40", "--output", str(out40),
+    ]))
+    assert seen["request"].strategy.breadth == 40
+    assert "40" in seen["request"].strategy.strategy_id
+    assert seen["request"].strategy.strategy_id != "frozen_mhs_top20_v1"
+
+
+def test_backtest_mhs_frozen_required_dates_and_fresh_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing source start, invalid order, or an occupied output exits before runner invocation."""
+    seen = _install_frozen(monkeypatch)
+    with pytest.raises(SystemExit, match=r"source-start"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--start", "2025-01-01", "--end", "2025-02-01", "--output", str(tmp_path / "a.json")])
+        )
+    with pytest.raises(SystemExit, match=r"source-start < start"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2025-03-01", "--start", "2025-01-01", "--end", "2025-02-01", "--output", str(tmp_path / "b.json")])
+        )
+    occupied = tmp_path / "occupied.json"
+    occupied.write_text("{}", encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"fresh"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01", "--output", str(occupied)])
+        )
+    assert "request" not in seen
+
+
+def test_backtest_mhs_frozen_variant_breadth_and_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Arbitrary breadth names a control variant; bad controls and replay failures exit nonzero."""
+    seen = _install_frozen(monkeypatch)
+    out12 = tmp_path / "frozen12.json"
+    backtest_mod.run_frozen_mhs_backtest_command(_parse([
+        "backtest", "mhs-frozen",
+        "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
+        "--breadth", "12", "--output", str(out12),
+    ]))
+    assert seen["request"].strategy.breadth == 12
+    assert "12" in seen["request"].strategy.strategy_id
+    with pytest.raises(SystemExit, match=r"breadth"):
+        backtest_mod.run_frozen_mhs_backtest_command(_parse([
+            "backtest", "mhs-frozen",
+            "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
+            "--breadth", "0", "--output", str(tmp_path / "zero.json"),
+        ]))
+    with pytest.raises(SystemExit, match=r"start is required"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--end", "2025-02-01", "--output", str(tmp_path / "c.json")])
+        )
+    with pytest.raises(SystemExit, match=r"end is required"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--output", str(tmp_path / "d.json")])
+        )
+    with pytest.raises(SystemExit, match=r"output is required"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01"])
+        )
+    with pytest.raises(SystemExit, match=r"JSON path"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01", "--output", str(tmp_path / "e.txt")])
+        )
+    with pytest.raises(SystemExit, match=r"invalid frozen backtest request"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01T00:00:00+00:00", "--end", "2025-01-01T12:00:00+00:00", "--output", str(tmp_path / "f.json")])
+        )
+    import src.mhs.frozen_research_run as run_mod
+
+    monkeypatch.setattr(run_mod, "run_frozen_mhs_backtest", lambda request: (_ for _ in ()).throw(ValueError("boom")))
+    failed = tmp_path / "failed.json"
+    with pytest.raises(SystemExit, match=r"frozen backtest failed"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse([*_frozen_argv(tmp_path)[:8], "--output", str(failed)])
+        )
+    assert not failed.exists()

@@ -6,6 +6,7 @@ import argparse
 import logging
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -13,6 +14,10 @@ from src.backtests.contracts import RetentionPolicy
 from src.common.paths import BACKTESTS_DIR
 from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 from src.mhs.resources import MhsMemoryBudget
+
+if TYPE_CHECKING:
+    from src.mhs.frozen_research_candidate import FrozenMhsStrategySpec
+    from src.mhs.types import ExecutionSpec
 
 _logger = logging.getLogger("MhsBacktestCli")
 
@@ -128,6 +133,21 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
         help="Execute an equivalent request again instead of reusing the finalized match.",
     )
     mhs.set_defaults(handler=run_mhs_backtest)
+    frozen = sub.add_parser(
+        "mhs-frozen",
+        help="Research-only frozen MHS Top-20/variant 3m inventory evaluation.",
+        description="Research-only frozen MHS Top-20/variant 3m inventory evaluation.",
+    )
+    frozen.add_argument("--source-start", default=None, help="UTC source history start; date-only values are UTC.")
+    frozen.add_argument("--start", default=None, help="UTC evaluation start; date-only values are UTC.")
+    frozen.add_argument("--end", default=None, help="UTC exclusive evaluation end.")
+    frozen.add_argument("--breadth", type=int, default=20, help="Positive universe breadth; 20 is the primary Top-20.")
+    frozen.add_argument("--output", default=None, help="Fresh complete research result envelope JSON destination.")
+    frozen.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
+    frozen.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
+    frozen.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
+    frozen.add_argument("--min-available-bytes", type=int, default=None, help="Minimum effective physical headroom in bytes.")
+    frozen.set_defaults(handler=run_frozen_mhs_backtest_command)
 
 
 def _resolve_retention_policy(args: argparse.Namespace) -> RetentionPolicy | None:
@@ -210,3 +230,108 @@ def run_mhs_backtest(args: argparse.Namespace) -> None:
         raise SystemExit(f"invalid backtest controls: {exc}") from exc
     if run.status != "completed":
         raise SystemExit(1)
+
+def _frozen_strategy(breadth: int) -> FrozenMhsStrategySpec:
+    """Select the primary Top-20 policy or a breadth-labelled research control."""
+    from src.mhs.frozen_research_candidate import (
+        FROZEN_MHS_TOP20_V1,
+        FROZEN_MHS_TOP40_CONTROL_V1,
+    )
+
+    if breadth == 20:
+        return FROZEN_MHS_TOP20_V1
+    if breadth == 40:
+        return FROZEN_MHS_TOP40_CONTROL_V1
+    import dataclasses
+
+    return dataclasses.replace(
+        FROZEN_MHS_TOP20_V1,
+        strategy_id=f"frozen_mhs_b{breadth}_control_v1",
+        breadth=breadth,
+    )
+
+
+def _frozen_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
+    """Build the registered six/eighteen-basis-point immediate-taker cost pair."""
+    import dataclasses
+
+    from src.mhs.types import ExecutionSpec
+
+    base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0)
+    stress = dataclasses.replace(base, taker_slippage_bps=13.0)
+    return base, stress
+
+
+def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
+    """Run a research-only frozen MHS Top-20/variant 3m inventory evaluation.
+
+    This command is a distinct strategy identity from ``backtest mhs``.  It
+    accepts declared breadth and dates, builds no live artifact, and persists
+    only completed research evidence.
+
+    Args:
+        args: Parsed frozen-MHS source/evaluation dates, breadth, paths, and
+            existing memory-budget controls.
+    Returns:
+        None after a fresh completed research result is persisted.
+    Raises:
+        SystemExit: Arguments are invalid or the research replay fails.
+    """
+    import os
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
+    from src.mhs.frozen_research_report import persist_frozen_mhs_backtest
+    from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, run_frozen_mhs_backtest
+
+    breadth = getattr(args, "breadth", 20)
+    if isinstance(breadth, bool) or not isinstance(breadth, int) or breadth <= 0:
+        raise SystemExit(f"breadth must be a positive integer, got {breadth!r}")
+    if getattr(args, "source_start", None) is None:
+        raise SystemExit("source-start is required")
+    if getattr(args, "start", None) is None:
+        raise SystemExit("start is required")
+    if getattr(args, "end", None) is None:
+        raise SystemExit("end is required")
+    source_start = _utc_timestamp(args.source_start, "source-start", DISCOVERY_START)
+    start = _utc_timestamp(args.start, "start", DISCOVERY_START)
+    end = _utc_timestamp(args.end, "end", PROCESS_EVALUATION_CEILING)
+    if not source_start < start < end:
+        raise SystemExit(f"require source-start < start < end, got {source_start} {start} {end}")
+    raw_output = getattr(args, "output", None)
+    if raw_output is None:
+        raise SystemExit("output is required")
+    output = Path(raw_output)
+    if output.suffix != ".json":
+        raise SystemExit(f"output must be a JSON path, got {raw_output!r}")
+    if os.path.lexists(output):
+        raise SystemExit(f"output must be fresh: {output} already exists")
+    budget = _resolve_budget(args)
+    strategy = _frozen_strategy(breadth)
+    base_spec, stress_spec = _frozen_specs()
+    try:
+        report_periods = (
+            FrozenMhsReportPeriod(
+                label="evaluation",
+                start=start.normalize(),
+                end=(end - pd.Timedelta(days=1)).normalize(),
+            ),
+        )
+        request = FrozenMhsBacktestRequest(
+            source_start=source_start, evaluation_start=start, evaluation_end=end,
+            strategy=strategy, initial_equity=100000.0,
+            base_spec=base_spec, stress_spec=stress_spec,
+            report_periods=report_periods,
+            data_root=Path(args.data_root) if getattr(args, "data_root", None) else None,
+            memory_budget=budget,
+        )
+    except (DataIntegrityError, ValueError) as exc:
+        raise SystemExit(f"invalid frozen backtest request: {exc}") from exc
+    try:
+        run = run_frozen_mhs_backtest(request)
+        persist_frozen_mhs_backtest(run, output)
+    except (DataIntegrityError, ValueError, OSError) as exc:
+        raise SystemExit(f"frozen backtest failed: {exc}") from exc
+    status = "primary" if breadth == 20 else "research control"
+    _logger.info("[EVAL] backtest mhs-frozen strategy=%s status=%s", strategy.strategy_id, status)
+    print(str(output))  # noqa: T201 -- frozen command prints only the finalized result path
