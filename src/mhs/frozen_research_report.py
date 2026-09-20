@@ -99,6 +99,8 @@ def frozen_mhs_backtest_payload(run: FrozenMhsBacktestRun) -> dict[str, JsonValu
         "execution_end": run.execution_end.isoformat(),
         "canonical_symbols": len(run.source_symbols),
         "source_symbols": cast(JsonValue, list(run.source_symbols)),
+        "source_gap_excluded_symbols": cast(JsonValue, sorted(run.source_gap_excluded_symbols)),
+        "source_gap_excluded_count": len(run.source_gap_excluded_symbols),
         "base_one_way_taker_bps": request.base_spec.one_way_taker_bps(),
         "stress_one_way_taker_bps": request.stress_spec.one_way_taker_bps(),
         "base_valid": evidence.base.ledger.primary_valid,

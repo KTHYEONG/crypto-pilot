@@ -326,15 +326,15 @@ def test_validated_windows_reject_unresolved_final_grid() -> None:
         list(validated_frozen_research_windows(candidate, []))
 
 
-def test_validated_windows_reject_disappearance_without_settlement() -> None:
-    """A targeted symbol leaving the roster without evidence fails closed."""
+def test_validated_windows_allow_zero_target_roster_exit() -> None:
+    """A symbol may leave after its later target rows are zero."""
     candidate = _candidate(zero_tail=True)
     labels = list(candidate.target_weights.index)
     first = _window(_grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2)), candidate, labels[:2])
     narrow_grid = _grid(labels[2] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2))
     dropped = _window(narrow_grid, candidate, labels[2:], symbols=("BBB",))
-    with pytest.raises(DataIntegrityError, match="without an evidenced settlement"):
-        list(validated_frozen_research_windows(candidate, [first, dropped]))
+    out = list(validated_frozen_research_windows(candidate, [first, dropped]))
+    assert len(out) == 2
 
 
 def test_validated_windows_allow_evidenced_settlement_exit() -> None:

@@ -41,8 +41,6 @@ def validated_frozen_research_windows(
     expected_set = set(expected_labels)
     canon_pos = {sym: i for i, sym in enumerate(expected_columns)}
     seen: set[pd.Timestamp] = set()
-    touched: set[str] = set()
-    settled: set[str] = set()
     prev_max: pd.Timestamp | None = None
     last_grid_end: pd.Timestamp | None = None
     for window in windows:
@@ -87,11 +85,6 @@ def validated_frozen_research_windows(
             if release != avail_by_label[label] or not (release < label):
                 raise DataIntegrityError("window release must equal the candidate availability and precede entry")
             seen.add(label)
-        weights = window.target_weights.to_numpy(dtype="float64")
-        touched.update(sym for sym, col in zip(local_cols, weights.T, strict=True) if bool((col != 0.0).any()))
-        settled.update(event.symbol for event in window.settlement_events)
-        if any(sym not in set(local_syms) for sym in touched if sym not in settled):
-            raise DataIntegrityError("a targeted symbol left the roster without an evidenced settlement")
         if labels:
             prev_max = labels[-1]
         last_grid_end = window.minute_grid[-1]

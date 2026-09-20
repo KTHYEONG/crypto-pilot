@@ -118,6 +118,7 @@ class _BoundExecutionReplayAccumulator:
         self.ledger_cash = float(initial_equity)
         self.ledger_units = np.zeros(self.n_cols, dtype="float64")
         self.last_valid_mark = np.full(self.n_cols, np.nan, dtype="float64")
+        self._last_valid_mark_avail_ns = np.full(self.n_cols, -1, dtype="int64")
         self.ledger_start_ns: int | None = None
 
         self.last_close_ts: dict[str, pd.Timestamp] = {}
@@ -1243,6 +1244,10 @@ class _BoundExecutionReplayAccumulator:
     def _consume_append_ledger(self, grid_ns: np.ndarray, n_grid: int, local_cols: list[str], fill_start: int, n_local: int, marks_values: np.ndarray, gpos: np.ndarray, grid: pd.DatetimeIndex, funding_matrix: np.ndarray, bar_ns: int, closes_values: np.ndarray) -> None:
         """Append reconciled inventory accounting with bounded scratch storage.
 
+        The first retained bar may use only the immediately preceding consumed,
+        published valuation mark for continuity, because window splitting must
+        not create fictitious missing data.
+
         Args:
             grid_ns: Nanosecond execution labels.
             n_grid: Number of labels.
@@ -1339,16 +1344,45 @@ class _BoundExecutionReplayAccumulator:
                 joint = np.zeros(n_grid, dtype=bool)
                 joint[1:] = finite[1:] & finite[:-1]
                 kept = row_idx >= p0
-                if bool(((held & ~joint) & kept).any()):
+                boundary_continuous = False
+                boundary_carry = float("nan")
+                if chunk_len and p0 == 0 and self.ledger_start_ns is not None:
+                    gcol = int(gpos[j])
+                    prior_mark = float(start_valid[j])
+                    prior_avail = int(self._last_valid_mark_avail_ns[gcol])
+                    prior_bar_ns = int(self.ledger_start_ns) - int(bar_ns)
+                    curr_mark = float(marks_col[0])
+                    curr_avail = int(self._w_mark_avail[0, j])
+                    curr_ok = bool(
+                        np.isfinite(curr_mark)
+                        and curr_mark > 0.0
+                        and curr_avail <= int(grid_ns[0])
+                    )
+                    prior_ok = bool(
+                        np.isfinite(prior_mark)
+                        and prior_mark > 0.0
+                        and prior_avail >= 0
+                        and prior_avail <= prior_bar_ns
+                    )
+                    if bool(abs(float(before[0])) >= QTY_EPS) and curr_ok and prior_ok:
+                        boundary_continuous = True
+                        boundary_carry = prior_mark
+                gap_mask = (held & ~joint) & kept
+                if boundary_continuous:
+                    gap_mask = gap_mask.copy()
+                    gap_mask[0] = False
+                if bool(gap_mask.any()):
                     self.ledger_valid = False
                     self.invalid_reasons.add("MISSING_DATA")
                     if self.first_held_mark is None:
-                        first_pos = int(np.flatnonzero((held & ~joint) & kept)[0])
+                        first_pos = int(np.flatnonzero(gap_mask)[0])
                         self.first_held_mark = (local_cols[j], grid[first_pos])
                 mtm_col = np.zeros(n_grid, dtype="float64")
                 mtm_col[1:] = np.where(
                     joint[1:], before[1:] * (marks_col[1:] - marks_col[:-1]), 0.0,
                 )
+                if boundary_continuous:
+                    mtm_col[0] = float(before[0]) * (float(marks_col[0]) - float(boundary_carry))
                 mtm_arr += mtm_col
                 fknown_col = self._w_fknown[:, j]
                 funding_col = funding_matrix[:, j]
@@ -1368,6 +1402,20 @@ class _BoundExecutionReplayAccumulator:
             if n_local:
                 self.ledger_units[gpos] = end_units
                 self.last_valid_mark[gpos] = end_valid
+                for j in range(n_local):
+                    gcol = int(gpos[j])
+                    marks_col_tail = marks_values[:, j].astype("float64", copy=False)
+                    tail_finite = np.isfinite(marks_col_tail)
+                    if bool(tail_finite[-1]):
+                        self._last_valid_mark_avail_ns[gcol] = int(self._w_mark_avail[-1, j])
+                    else:
+                        hit = np.flatnonzero(tail_finite)
+                        if len(hit):
+                            self._last_valid_mark_avail_ns[gcol] = int(
+                                self._w_mark_avail[int(hit[-1]), j]
+                            )
+                        elif not np.isfinite(float(end_valid[j])):
+                            self._last_valid_mark_avail_ns[gcol] = -1
 
             # The cash cumsum starts at the chunk's first bar (p0): positions
             # [0, p0) belong to the previous chunk's ledger and must not be
