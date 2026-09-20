@@ -360,65 +360,103 @@ def test_strategy_member_validation_branches() -> None:
         build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, strategy=20)  # type: ignore[arg-type]
 
 
-def test_excluded_symbol_never_targetable() -> None:
+def _blocked(idx: pd.DatetimeIndex, symbols: tuple[str, ...]) -> pd.DataFrame:
+    return pd.DataFrame(False, index=idx, columns=list(symbols), dtype=bool)
+
+
+def test_blocked_symbol_never_targetable() -> None:
     daily_close, daily_qv = _daily()
     panels = _hourly()
+    blocked = _blocked(daily_close.index, _SYMBOLS)
+    blocked[_SYMBOLS[0]] = True
     candidate = build_frozen_mhs_candidate(
-        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, excluded_symbols=frozenset({_SYMBOLS[0]})
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, blocked_decisions=blocked
     )
     col = candidate.target_weights[_SYMBOLS[0]].to_numpy()
     assert bool(np.isfinite(col).all())
     assert bool((col == 0.0).all())
     from src.mhs.frozen_research_universe import build_frozen_pit_roster
 
-    roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, excluded_symbols=frozenset({_SYMBOLS[0]}))
+    roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, blocked_decisions=blocked)
     assert not bool(roster[_SYMBOLS[0]].any())
 
 
-def test_exclusion_retains_census_provenance() -> None:
+def test_blocking_retains_census_provenance() -> None:
     daily_close, daily_qv = _daily()
     panels = _hourly()
+    blocked = _blocked(daily_close.index, _SYMBOLS)
+    blocked.iloc[90, 1] = True
     candidate = build_frozen_mhs_candidate(
-        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, excluded_symbols=frozenset({_SYMBOLS[1]})
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, blocked_decisions=blocked
     )
     assert list(candidate.target_weights.columns) == list(_SYMBOLS)
 
 
-def test_unknown_exclusion_fails_closed() -> None:
+def test_blocked_cell_zeroes_only_that_decision() -> None:
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    plain = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS)
+    day = daily_close.index[90]
+    entry = day + pd.Timedelta(days=1)
+    victim = str(plain.target_weights.loc[entry].abs().idxmax())
+    blocked = _blocked(daily_close.index, _SYMBOLS)
+    blocked.loc[day, victim] = True
+    candidate = build_frozen_mhs_candidate(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, blocked_decisions=blocked
+    )
+    assert float(candidate.target_weights.loc[entry, victim]) == 0.0
+    row = candidate.target_weights.loc[entry].to_numpy(dtype="float64")
+    assert abs(float(row.sum())) < 1e-9
+    other = entry + pd.Timedelta(days=1)
+    pd.testing.assert_series_equal(candidate.target_weights.loc[other], plain.target_weights.loc[other])
+
+
+def test_unknown_block_fails_closed() -> None:
     from src.mhs.frozen_research_universe import build_frozen_pit_roster
 
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    with pytest.raises(DataIntegrityError, match="not in census"):
-        build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, excluded_symbols=frozenset({"NOPEUSDT"}))
-    with pytest.raises(DataIntegrityError, match="not in census"):
+    bad_cols = _blocked(daily_close.index, _SYMBOLS).rename(columns={_SYMBOLS[0]: "NOPEUSDT"})
+    with pytest.raises(DataIntegrityError, match="blocked_decisions"):
+        build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, blocked_decisions=bad_cols)
+    with pytest.raises(DataIntegrityError, match="blocked_decisions"):
         build_frozen_mhs_candidate(
-            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, excluded_symbols=frozenset({"NOPEUSDT"})
+            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, blocked_decisions=bad_cols
+        )
+    bad_idx = _blocked(daily_close.index[1:], _SYMBOLS)
+    with pytest.raises(DataIntegrityError, match="blocked_decisions"):
+        build_frozen_mhs_candidate(
+            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, blocked_decisions=bad_idx
         )
 
 
-def test_empty_exclusion_preserves_behavior() -> None:
+def test_no_block_preserves_behavior() -> None:
     from src.mhs.frozen_research_universe import build_frozen_pit_roster
 
     daily_close, daily_qv = _daily()
     panels = _hourly()
     base_roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20)
-    empty_roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, excluded_symbols=frozenset())
+    empty_roster = build_frozen_pit_roster(
+        daily_close, daily_qv, _SYMBOLS, breadth=20, blocked_decisions=_blocked(daily_close.index, _SYMBOLS)
+    )
     pd.testing.assert_frame_equal(empty_roster, base_roster)
     base = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS)
     empty = build_frozen_mhs_candidate(
-        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, excluded_symbols=frozenset()
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+        blocked_decisions=_blocked(daily_close.index, _SYMBOLS),
     )
     pd.testing.assert_frame_equal(empty.target_weights, base.target_weights)
 
 
-def test_breadth_applies_after_exclusion() -> None:
+def test_breadth_applies_after_block() -> None:
     from src.mhs.frozen_research_universe import build_frozen_pit_roster
 
     daily_close, daily_qv = _daily()
     daily_qv = daily_qv.copy()
     daily_qv[_SYMBOLS[0]] = daily_qv[_SYMBOLS[0]] * 10.0
-    roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=3, excluded_symbols=frozenset({_SYMBOLS[0]}))
+    blocked = _blocked(daily_close.index, _SYMBOLS)
+    blocked[_SYMBOLS[0]] = True
+    roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=3, blocked_decisions=blocked)
     assert not bool(roster[_SYMBOLS[0]].any())
     row_sums = roster.sum(axis=1).to_numpy()
     assert bool((row_sums <= 3).all())

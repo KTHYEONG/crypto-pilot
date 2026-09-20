@@ -325,6 +325,41 @@ def _repair_ohlcv(args: argparse.Namespace) -> None:
     )
 
 
+def _verify_source_gaps(args: argparse.Namespace) -> None:
+    from src.market_data.services.source_gap_audit import (
+        audit_source_gap_registry,
+        write_audited_registry,
+    )
+
+    start = pd.Timestamp(args.start, tz="UTC")
+    end = pd.Timestamp(args.end, tz="UTC")
+    symbols = list(args.symbol) if args.symbol else None
+    report = audit_source_gap_registry(
+        plane=args.plane, start=start, end=end, symbols=symbols,
+    )
+    _logger.info(
+        "verify_source_gaps plane=%s start=%s end=%s resolved=%d narrowed=%d unchanged=%d discovered=%d",
+        args.plane, start.isoformat(), end.isoformat(),
+        len(report.resolved), len(report.narrowed), len(report.unchanged), len(report.discovered),
+    )
+    for group_name, group in (
+        ("resolved", report.resolved),
+        ("narrowed", report.narrowed),
+        ("unchanged", report.unchanged),
+        ("discovered", report.discovered),
+    ):
+        for iv in group:
+            iv_end = iv.end.isoformat() if iv.end is not None else "open"
+            _logger.debug(
+                "verify_source_gaps %s symbol=%s interval=[%s, %s) reason=%s",
+                group_name, iv.symbol, iv.start.isoformat(), iv_end, iv.reason,
+            )
+    if args.write:
+        verified_at = pd.Timestamp.now(tz="UTC")
+        count = write_audited_registry(report, verified_at=verified_at)
+        _logger.info("verify_source_gaps status=WRITTEN records=%d", count)
+
+
 def _seal_mhs_inputs(args: argparse.Namespace) -> None:
     """Seal the complete-symbol MHS input corpus into a canonical manifest.
 
@@ -496,3 +531,14 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     seal_inputs.add_argument("--execution-timeframe", choices=["3m"], default="3m")
     seal_inputs.add_argument("--output", default=str(FUTURES_DATA_DIR / "mhs_execution" / "input_manifest.json"))
     seal_inputs.set_defaults(handler=_seal_mhs_inputs)
+
+    verify_gaps = collect.add_parser(
+        "verify-source-gaps",
+        help="Reconcile the committed source-gap registry against the local lake",
+    )
+    verify_gaps.add_argument("--plane", default="ohlcv_3m", choices=("ohlcv_1h", "ohlcv_3m", "funding"))
+    verify_gaps.add_argument("--start", required=True)
+    verify_gaps.add_argument("--end", required=True)
+    verify_gaps.add_argument("--symbol", action="append", default=None)
+    verify_gaps.add_argument("--write", action="store_true", default=False)
+    verify_gaps.set_defaults(handler=_verify_source_gaps)

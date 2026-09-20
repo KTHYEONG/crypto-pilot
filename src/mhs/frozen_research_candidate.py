@@ -139,16 +139,14 @@ def build_frozen_mhs_candidate(
     census_symbols: tuple[str, ...],
     *,
     strategy: FrozenMhsStrategySpec = FROZEN_MHS_TOP20_V1,
-    excluded_symbols: frozenset[str] = frozenset(),
+    blocked_decisions: pd.DataFrame | None = None,
 ) -> FrozenMhsCandidate:
     """Build one immutable, causal target plan from complete hourly sources.
 
-    The builder evaluates only registered features and source bars known by
-    each strategy release timestamp.  It emits dollar-neutral target rows at
-    the declared entry time and emits zero rather than a retrospective proxy
-    whenever required history or population is unavailable. The input
-    suppresses only target eligibility for confirmed unrecoverable execution
-    sources while retaining census columns for provenance.
+    The builder evaluates only registered features and source bars known by each strategy
+    release timestamp. It emits dollar-neutral target rows at the declared entry time and
+    emits zero rather than a retrospective proxy whenever required history, population, or
+    recoverable execution evidence is unavailable for that specific decision.
 
     Args:
         hourly_panels: Aligned close, quote-volume, and taker-buy-quote planes.
@@ -157,19 +155,16 @@ def build_frozen_mhs_candidate(
         daily_quote_volume: Complete historical daily turnover census.
         census_symbols: Canonical source-symbol order, including retired names.
         strategy: Frozen target definition; Top-20 v1 is the primary default.
-        excluded_symbols: Confirmed unrecoverable sources never eligible for targets.
+        blocked_decisions: Boolean decision-day frame withdrawing a symbol from both roster
+            eligibility and target emission for exactly those days.
     Returns:
         Exact entry targets and matching signal-release timestamps.
     Raises:
-        DataIntegrityError: Source, timing, or column provenance is incomplete.
-        ValueError: The strategy references invalid features or clock settings.
+        DataIntegrityError: Source planes, census, or roster evidence is inconsistent.
     """
     if not isinstance(strategy, FrozenMhsStrategySpec):
         raise ValueError("strategy must be a FrozenMhsStrategySpec")
     census = list(census_symbols)
-    unknown = sorted(s for s in set(excluded_symbols) if s not in set(census))
-    if unknown:
-        raise DataIntegrityError(f"excluded symbols not in census: {unknown!r}")
     registry = {spec.name: spec for spec in FEATURE_REGISTRY}
     if any(m.name not in registry for m in strategy.members):
         raise ValueError("strategy references an unregistered feature")
@@ -178,7 +173,7 @@ def build_frozen_mhs_candidate(
         daily_quote_volume,
         census_symbols,
         breadth=strategy.breadth,
-        excluded_symbols=frozenset(excluded_symbols),
+        blocked_decisions=blocked_decisions,
     )
     if any(k not in hourly_panels for k in _REQUIRED_PANELS):
         raise DataIntegrityError("hourly_panels must contain close, quote_vol, and taker_buy_quote")
@@ -237,9 +232,6 @@ def build_frozen_mhs_candidate(
         [d + pd.Timedelta(days=1, hours=int(strategy.entry_hour_utc)) for d in decisions], tz="UTC"
     )
     target = pd.DataFrame(ensemble.to_numpy(dtype="float64"), index=entries, columns=census, dtype="float64")
-    for sym in set(excluded_symbols):
-        if sym in target.columns:
-            target[sym] = 0.0
     available = pd.DatetimeIndex(
         [d + pd.Timedelta(hours=int(strategy.release_hour_utc)) for d in decisions], tz="UTC"
     )

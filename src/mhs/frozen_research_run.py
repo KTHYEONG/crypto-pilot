@@ -33,6 +33,7 @@ from src.mhs.resources import (
     assert_mhs_stage_allocation,
     resolve_mhs_memory_budget,
 )
+from src.mhs.source_gaps import active_intervals
 from src.mhs.types import ExecutionSpec
 
 
@@ -101,6 +102,54 @@ class FrozenMhsBacktestRun:
     execution_end: pd.Timestamp
     source_symbols: tuple[str, ...]
     source_gap_excluded_symbols: tuple[str, ...] = ()
+    source_gap_blocked_decisions: int = 0
+
+
+def frozen_blocked_decisions(
+    decision_index: pd.DatetimeIndex,
+    census_symbols: tuple[str, ...],
+    *,
+    strategy: FrozenMhsStrategySpec,
+    base_spec: ExecutionSpec,
+) -> pd.DataFrame:
+    """Map evidenced 3m source gaps onto the decision days they would have traded through.
+
+    A decision is blocked when the interval it must execute and hold through overlaps an
+    unrecoverable gap, which is the only condition under which the ledger could not have
+    been produced in live trading. Gaps that fall entirely outside a decision's execution
+    and holding window leave the decision untouched.
+
+    Args:
+        decision_index: Daily UTC decision grid shared with the roster inputs.
+        census_symbols: Canonical column order for the returned frame.
+        strategy: Supplies the entry hour that anchors each decision's execution window.
+        base_spec: Supplies the passive timeout that extends each holding window.
+    Returns:
+        Boolean frame indexed by `decision_index` with `census_symbols` as columns.
+    """
+    census = list(census_symbols)
+    entry_hour = int(strategy.entry_hour_utc)
+    holding = pd.Timedelta(days=1) + pd.Timedelta(minutes=int(base_spec.passive_timeout_minutes))
+    frame = pd.DataFrame(False, index=decision_index, columns=census, dtype=bool)
+    if not census:
+        return frame
+    intervals = active_intervals(plane="ohlcv_3m")
+    if not intervals:
+        return frame
+    # 결정일 수가 수천 개라 구간마다 벡터 비교 한 번으로 겹침을 판정한다(일별 루프 금지).
+    column_of = {sym: pos for pos, sym in enumerate(census)}
+    starts = decision_index + pd.Timedelta(days=1, hours=entry_hour)
+    ends = starts + holding
+    values = np.zeros((len(decision_index), len(census)), dtype=bool)
+    for iv in intervals:
+        column = column_of.get(iv.symbol)
+        if column is None:
+            continue
+        overlap = np.asarray(pd.Timestamp(iv.start) < ends, dtype=bool)
+        if iv.end is not None:
+            overlap &= np.asarray(pd.Timestamp(iv.end) > starts, dtype=bool)
+        values[:, column] |= overlap
+    return pd.DataFrame(values, index=decision_index, columns=census, dtype=bool)
 
 
 def _admit_source_stage(budget: MhsMemoryBudget, initial_swap_bytes: int | None) -> None:
@@ -200,11 +249,12 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
     daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root = _load_frozen_source(
         request, budget, initial_swap_bytes
     )
-    from src.mhs.data_policy import frozen_research_source_gap_exclusions
-
-    resolved = frozenset(s for s in frozen_research_source_gap_exclusions() if s in set(census))
+    blocked_decisions = frozen_blocked_decisions(
+        pd.DatetimeIndex(daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
+    )
     roster = build_frozen_pit_roster(
-        daily_close, daily_quote_volume, census, breadth=request.strategy.breadth, excluded_symbols=resolved
+        daily_close, daily_quote_volume, census,
+        breadth=request.strategy.breadth, blocked_decisions=blocked_decisions,
     )
     ever_selected = [sym for sym in census if bool(roster[sym].any())]
     if not ever_selected:
@@ -218,7 +268,7 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
         daily_quote_volume,
         census,
         strategy=request.strategy,
-        excluded_symbols=resolved,
+        blocked_decisions=blocked_decisions,
     )
     labels = full_candidate.target_weights.index
     scored = (labels >= request.evaluation_start) & (labels < request.evaluation_end)
@@ -252,5 +302,6 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
     return FrozenMhsBacktestRun(
         request=request, candidate=candidate, evidence=evidence,
         execution_start=execution_start, execution_end=execution_end, source_symbols=census,
-        source_gap_excluded_symbols=tuple(sorted(resolved)),
+        source_gap_excluded_symbols=tuple(sorted(sym for sym in census if bool(blocked_decisions[sym].any()))),
+        source_gap_blocked_decisions=int(blocked_decisions.to_numpy(dtype=bool).sum()),
     )
