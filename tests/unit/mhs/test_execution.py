@@ -600,7 +600,9 @@ def test_idle_settlement_not_triggered_before_24h() -> None:
     assert result.termination_counts.get('DELIST_SETTLEMENT', 0) == 0
     assert result.termination_counts['NO_VOLUME_UNFILLED'] >= 1
     assert [p.status for p in result.terminal_positions] == ['open_marked']
-    assert result.ledger.primary_valid
+    # A blocked exit keeps exposure on, so the ledger is invalid with the volume cause retained.
+    assert not result.ledger.primary_valid
+    assert any(g.code == 'KNOWN_ZERO_VOLUME' for g in result.ledger.data_gaps)
 
 
 def test_idle_settlement_not_triggered_by_unknown_volume_hole() -> None:

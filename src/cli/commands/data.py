@@ -360,6 +360,49 @@ def _verify_source_gaps(args: argparse.Namespace) -> None:
         _logger.info("verify_source_gaps status=WRITTEN records=%d", count)
 
 
+def _sync_execution_coverage(args: argparse.Namespace) -> None:
+    from src.market_data.services import collection as _collection
+    from src.market_data.services.execution_coverage import (
+        measure_execution_coverage,
+        plan_execution_coverage_backfill,
+    )
+
+    end = pd.Timestamp(args.end, tz="UTC")
+    symbols = list(args.symbol) if args.symbol else None
+    deficits = measure_execution_coverage(horizon_end=end, symbols=symbols)
+    windows = plan_execution_coverage_backfill(
+        deficits, horizon_end=end, lookback_days=args.lookback_days,
+    )
+    total = sum(d.deficit_days for d in deficits)
+    _logger.info(
+        "[DATA] stage=sync_execution_coverage deficits=%d total_deficit_days=%d execute=%s",
+        len(deficits), total, args.execute,
+    )
+    for deficit in deficits:
+        _logger.debug(
+            "sync_execution_coverage symbol=%s deficit_days=%d execution_end=%s horizon=%s",
+            deficit.symbol, deficit.deficit_days, deficit.execution_end, deficit.horizon,
+        )
+    if not args.execute:
+        return
+    failures: list[str] = []
+    for symbol, start, window_end in windows:
+        try:
+            _collection.collect_ohlcv(symbol, "3m", start.isoformat(), window_end.isoformat())
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{symbol}: {exc}")
+            _logger.warning(
+                "[DATA] stage=sync_execution_coverage symbol=%s status=FAILED detail=%s", symbol, exc,
+            )
+    if failures:
+        _logger.error(
+            "[DATA] stage=sync_execution_coverage status=PARTIAL_FAILED failures=%d detail=%s",
+            len(failures), "; ".join(failures),
+        )
+        raise SystemExit(1)
+    _logger.info("[DATA] stage=sync_execution_coverage status=COMPLETED windows=%d", len(windows))
+
+
 def _seal_mhs_inputs(args: argparse.Namespace) -> None:
     """Seal the complete-symbol MHS input corpus into a canonical manifest.
 
@@ -542,3 +585,13 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     verify_gaps.add_argument("--symbol", action="append", default=None)
     verify_gaps.add_argument("--write", action="store_true", default=False)
     verify_gaps.set_defaults(handler=_verify_source_gaps)
+
+    sync_cov = collect.add_parser(
+        "sync-execution-coverage",
+        help="Report or fill where the 3m execution archive trails the 1h signal archive",
+    )
+    sync_cov.add_argument("--end", required=True)
+    sync_cov.add_argument("--symbol", action="append", default=None)
+    sync_cov.add_argument("--lookback-days", type=int, default=3)
+    sync_cov.add_argument("--execute", action="store_true", default=False)
+    sync_cov.set_defaults(handler=_sync_execution_coverage)

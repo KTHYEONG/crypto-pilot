@@ -15,10 +15,24 @@ from src.mhs.frozen_research_candidate import (
     FrozenMhsCandidate,
 )
 from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
+from src.mhs.source_gaps import SourceGapInterval
 from src.mhs.types import ExecutionSpec
 
 import src.mhs.frozen_research_run as run_mod
-from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, frozen_blocked_decisions, run_frozen_mhs_backtest
+from src.mhs.frozen_research_run import (
+    FrozenMhsBacktestRequest,
+    assert_frozen_execution_coverage,
+    frozen_blocked_decisions,
+    run_frozen_mhs_backtest,
+)
+
+_REAL_PRECHECK = run_mod.assert_frozen_execution_coverage
+
+
+@pytest.fixture(autouse=True)
+def _bypass_frozen_coverage_precheck(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Synthetic-census runner tests exercise non-coverage stages; the precheck has its own scenarios below."""
+    monkeypatch.setattr(run_mod, "assert_frozen_execution_coverage", lambda *a, **k: None)
 
 _SYMBOLS = ("AAA", "BBB", "CCC", "DELISTED")
 
@@ -404,6 +418,23 @@ def _gap_source(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
         captured["hourly_columns"] = list(panels["close"].columns)  # type: ignore[index]
         return real_build(panels, available, daily_close, daily_qv, census, **kwargs)  # type: ignore[arg-type]
 
+    # 레지스트리 파일 내용에 결합되면 정책 갱신마다 이 시나리오가 깨진다 — 구간을 주입해 밀봉한다.
+    injected = (
+        SourceGapInterval(
+            symbol="PUMPUSDT", plane="ohlcv_3m",
+            start=pd.Timestamp("2020-01-01", tz="UTC").to_pydatetime(), end=None,
+            reason="SOURCE_ABSENT", evidence="probe fixture: blocks the whole scenario window",
+            verified_at=pd.Timestamp("2026-01-01", tz="UTC").to_pydatetime(), resolved_at=None,
+        ),
+        SourceGapInterval(
+            symbol="LUNAUSDT", plane="ohlcv_3m",
+            start=pd.Timestamp("2023-01-01", tz="UTC").to_pydatetime(),
+            end=pd.Timestamp("2023-02-01", tz="UTC").to_pydatetime(),
+            reason="SOURCE_ABSENT", evidence="probe fixture: bounded interval outside the window",
+            verified_at=pd.Timestamp("2026-01-01", tz="UTC").to_pydatetime(), resolved_at=None,
+        ),
+    )
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: injected)
     monkeypatch.setattr(run_mod, "_load_frozen_source", _fake_source)
     monkeypatch.setattr(run_mod, "build_frozen_pit_roster", _spy_roster)
     monkeypatch.setattr(run_mod, "build_frozen_mhs_candidate", _spy_build)
@@ -479,3 +510,197 @@ def test_held_source_stays_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(run_mod, "_iter_mhs_execution_windows", _boom)
     with pytest.raises(DataIntegrityError, match=r"missing 3m source"):
         run_frozen_mhs_backtest(_request())
+
+
+_SETTLEMENT = pd.Timedelta(minutes=30)
+
+
+def _coverage_roster(
+    days: pd.DatetimeIndex, grants: dict[str, list[pd.Timestamp]],
+) -> pd.DataFrame:
+    frame = pd.DataFrame(False, index=days, columns=sorted(grants), dtype=bool)
+    for symbol, stamps in grants.items():
+        for stamp in stamps:
+            frame.loc[stamp, symbol] = True
+    return frame
+
+
+def _write_3m(root, symbol: str, idx: pd.DatetimeIndex):
+    from pathlib import Path as _Path
+
+    directory = _Path(root) / "ohlcv" / "3m"
+    directory.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame({
+        "timestamp": [int(t.value // 10**6) for t in idx],
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    })
+    path = directory / f"{symbol}.parquet"
+    frame.to_parquet(path, index=False)
+    return path
+
+
+def test_assert_frozen_execution_coverage_blocks_deficient_symbol(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"AAA": [pd.Timestamp("2022-01-08", tz="UTC")], "BBB": []})
+    _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-09", freq="3min", tz="UTC"))
+    with pytest.raises(DataIntegrityError) as exc_info:
+        assert_frozen_execution_coverage(
+            roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        )
+    message = str(exc_info.value)
+    assert "AAA" in message
+    assert "2022-01-10T00:30:00+00:00" in message
+    assert "2022-01-09T00:00:00+00:00" in message
+    assert "BBB" not in message
+
+
+def test_assert_frozen_execution_coverage_honours_entry_hour(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"AAA": [pd.Timestamp("2022-01-08", tz="UTC")]})
+    # entry_hour=0 기준으로는 충족되지만, 6시 진입 변형에서는 6시간이 더 필요하다.
+    _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10 00:30", freq="3min", tz="UTC"))
+    assert_frozen_execution_coverage(
+        roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+    )
+    with pytest.raises(DataIntegrityError) as exc_info:
+        assert_frozen_execution_coverage(
+            roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+            settlement=_SETTLEMENT, entry_hour_utc=6, data_root=tmp_path,
+        )
+    assert "2022-01-10T06:30:00+00:00" in str(exc_info.value)
+
+
+def test_assert_frozen_execution_coverage_separates_unreadable_from_missing(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"AAA": [pd.Timestamp("2022-01-08", tz="UTC")]})
+    corrupt = tmp_path / "ohlcv" / "3m" / "AAA.parquet"
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_bytes(b"not a parquet file")
+    with pytest.raises(DataIntegrityError) as exc_info:
+        assert_frozen_execution_coverage(
+            roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        )
+    message = str(exc_info.value)
+    assert "UNREADABLE" in message
+    assert "MISSING" not in message
+
+
+def test_assert_frozen_execution_coverage_ignores_unselected_symbols(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"AAA": [pd.Timestamp("2022-01-05", tz="UTC")], "GHOST": []})
+    _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-02-01", freq="3min", tz="UTC"))
+    assert_frozen_execution_coverage(
+        roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+    )
+
+
+def test_assert_frozen_execution_coverage_passes_delisted_symbol(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"AAA": [pd.Timestamp("2022-01-08", tz="UTC")]})
+    _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10T00:30", freq="3min", tz="UTC"))
+    assert_frozen_execution_coverage(
+        roster, execution_end=pd.Timestamp("2022-06-01", tz="UTC"),
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+    )
+
+
+def test_assert_frozen_execution_coverage_includes_settlement_slack(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"AAA": [pd.Timestamp("2022-01-08", tz="UTC")]})
+    _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10", freq="3min", tz="UTC"))
+    with pytest.raises(DataIntegrityError, match="AAA"):
+        assert_frozen_execution_coverage(
+            roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        )
+
+
+def test_assert_frozen_execution_coverage_tolerates_one_bar(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"AAA": [pd.Timestamp("2022-01-08", tz="UTC")]})
+    _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10T00:27", freq="3min", tz="UTC"))
+    assert_frozen_execution_coverage(
+        roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+    )
+
+
+def test_assert_frozen_execution_coverage_reports_all_deficient_symbols(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    grant = [pd.Timestamp("2022-01-08", tz="UTC")]
+    roster = _coverage_roster(days, {"AAA": grant, "BBB": grant, "CCC": grant})
+    for symbol in ("AAA", "BBB", "CCC"):
+        _write_3m(tmp_path, symbol, pd.date_range("2022-01-01", "2022-01-05", freq="3min", tz="UTC"))
+    with pytest.raises(DataIntegrityError) as exc_info:
+        assert_frozen_execution_coverage(
+            roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        )
+    message = str(exc_info.value)
+    assert "3 symbol(s)" in message
+    assert all(symbol in message for symbol in ("AAA", "BBB", "CCC"))
+
+
+def test_assert_frozen_execution_coverage_caps_requirement_at_fence(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"AAA": [pd.Timestamp("2022-01-09", tz="UTC")]})
+    _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10", freq="3min", tz="UTC"))
+    assert_frozen_execution_coverage(
+        roster, execution_end=pd.Timestamp("2022-01-10", tz="UTC"),
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+    )
+
+
+def test_assert_frozen_execution_coverage_treats_unreadable_archives_as_missing(tmp_path) -> None:
+    from pathlib import Path as _Path
+
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    grant = [pd.Timestamp("2022-01-05", tz="UTC")]
+    roster = _coverage_roster(days, {"AAA": grant, "BBB": grant, "CCC": grant, "DDD": grant})
+    three_m = _Path(tmp_path) / "ohlcv" / "3m"
+    three_m.mkdir(parents=True)
+    (three_m / "BBB.parquet").write_bytes(b"not a parquet file")
+    pd.DataFrame({"timestamp": pd.Series(dtype="int64")}).to_parquet(
+        three_m / "CCC.parquet", index=False,
+    )
+    pd.DataFrame({"timestamp": [float("nan")] * 3}).to_parquet(three_m / "DDD.parquet", index=False)
+    with pytest.raises(DataIntegrityError) as exc_info:
+        assert_frozen_execution_coverage(
+            roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        )
+    message = str(exc_info.value)
+    assert "4 symbol(s)" in message
+    assert all(symbol in message for symbol in ("AAA", "BBB", "CCC", "DDD"))
+    assert "MISSING" in message
+
+
+def test_run_frozen_mhs_backtest_blocks_before_candidate_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """결손이 있는 요청은 후보 생성과 윈도우 스트림보다 먼저 멈춘다."""
+    monkeypatch.setattr(run_mod, "assert_frozen_execution_coverage", _REAL_PRECHECK)
+    seen: dict = {}
+    _install_source(monkeypatch, seen)
+    days = pd.date_range("2021-04-01", periods=9, freq="D", tz="UTC")
+    roster = _coverage_roster(
+        days, {"AAA": [pd.Timestamp("2021-04-08", tz="UTC")], "BBB": [], "CCC": [], "DELISTED": []},
+    )
+    monkeypatch.setattr(run_mod, "build_frozen_pit_roster", lambda *a, **k: roster)
+    _write_3m(tmp_path, "AAA", pd.date_range("2021-04-01", "2021-04-05", freq="3min", tz="UTC"))
+    called: list[str] = []
+    monkeypatch.setattr(
+        run_mod, "build_frozen_mhs_candidate",
+        lambda *a, **k: (called.append("build"), _candidate(n_days=10))[1],
+    )
+    monkeypatch.setattr(
+        run_mod, "evaluate_frozen_mhs_research",
+        lambda *a, **k: (called.append("evaluate"), _evidence())[1],
+    )
+    with pytest.raises(DataIntegrityError, match="AAA"):
+        run_frozen_mhs_backtest(_request(data_root=tmp_path))
+    assert called == []

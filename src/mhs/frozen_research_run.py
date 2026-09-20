@@ -152,6 +152,81 @@ def frozen_blocked_decisions(
     return pd.DataFrame(values, index=decision_index, columns=census, dtype=bool)
 
 
+def _frozen_execution_available_end(path: Path) -> pd.Timestamp | str:
+    """Last 3m bar open in one archive, or a reason string when no extent can be read.
+
+    An absent archive and a corrupt one both block replay, but they demand different
+    operator action, so the reason is carried instead of collapsing both to one state.
+    """
+    if not path.exists():
+        return "MISSING"
+    try:
+        frame = pd.read_parquet(path, columns=["timestamp"])
+    except Exception as exc:  # noqa: BLE001 - 판독 불가 사유를 진단 메시지로 승격한다.
+        return f"UNREADABLE({type(exc).__name__})"
+    stamps = pd.to_numeric(frame["timestamp"], errors="coerce").dropna() if not frame.empty else frame
+    if not len(stamps):
+        return "EMPTY"
+    return pd.Timestamp(int(stamps.max()), unit="ms", tz="UTC")
+
+
+def assert_frozen_execution_coverage(
+    roster: pd.DataFrame,
+    *,
+    execution_end: pd.Timestamp,
+    settlement: pd.Timedelta,
+    entry_hour_utc: int,
+    data_root: Path | None = None,
+) -> None:
+    """Fail closed before replay when a selected symbol lacks execution evidence.
+
+    Every decision the roster grants must be executable and markable on the 3m plane
+    through the bar that closes it, otherwise the engine enters a position it can never
+    exit and the failure only surfaces much later at an unrelated symbol's bar. Checking
+    the whole roster up front converts a multi-minute replay crash into one actionable list.
+
+    The check consumes only archive extents, never future prices, so it states what the
+    researcher's own lake contains and makes no claim about what was knowable at any
+    decision time.
+
+    Args:
+        roster: Boolean decision-day roster in canonical column order.
+        execution_end: Exclusive UTC fence the replay will stream to.
+        settlement: Extra span past a decision's holding window during which its closing
+            order may still cross; derived from the execution spec, never guessed.
+        entry_hour_utc: Hour a decision's entry lands on, taken from the strategy rather
+            than assumed, so a variant that enters off midnight is checked at its own clock.
+        data_root: OHLCV root override; defaults to the canonical futures lake.
+    Raises:
+        DataIntegrityError: At least one selected symbol's 3m archive ends before the bar
+            that closes its last granted decision. The message names every such symbol with
+            its required and available coverage end.
+    """
+    root = Path(data_root) if data_root is not None else FUTURES_DATA_DIR
+    deficient: list[str] = []
+    for symbol in roster.columns:
+        granted = roster[symbol].to_numpy(dtype=bool)
+        if not bool(granted.any()):
+            continue
+        last_true = pd.Timestamp(roster.index[int(np.flatnonzero(granted)[-1])])
+        # 결정일 D의 진입은 D+1 entry_hour, 청산은 다음 진입(D+2)이며 정산 여유까지 가격이 필요하다.
+        required = last_true + pd.Timedelta(days=2, hours=int(entry_hour_utc)) + settlement
+        if required > execution_end:
+            required = execution_end
+        available = _frozen_execution_available_end(root / "ohlcv" / "3m" / f"{symbol}.parquet")
+        if isinstance(available, str):
+            deficient.append(f"{symbol} (required={required.isoformat()}, available={available})")
+        elif required - available > pd.Timedelta(minutes=3):
+            deficient.append(
+                f"{symbol} (required={required.isoformat()}, available={available.isoformat()})"
+            )
+    if deficient:
+        raise DataIntegrityError(
+            f"frozen execution coverage incomplete for {len(deficient)} symbol(s): "
+            + "; ".join(deficient)
+        )
+
+
 def _admit_source_stage(budget: MhsMemoryBudget, initial_swap_bytes: int | None) -> None:
     """Admit the source panel stage before any wide allocation."""
     assert_mhs_stage_allocation(
@@ -257,6 +332,13 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
         breadth=request.strategy.breadth, blocked_decisions=blocked_decisions,
     )
     ever_selected = [sym for sym in census if bool(roster[sym].any())]
+    assert_frozen_execution_coverage(
+        roster,
+        execution_end=request.evaluation_end,
+        settlement=pd.Timedelta(minutes=int(request.base_spec.passive_timeout_minutes)),
+        entry_hour_utc=int(request.strategy.entry_hour_utc),
+        data_root=request.data_root,
+    )
     if not ever_selected:
         raise DataIntegrityError("request strategy selects no historical symbol")
     selected_panels = {key: frame[ever_selected] for key, frame in hourly_panels.items()}
