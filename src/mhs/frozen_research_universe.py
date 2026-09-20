@@ -16,6 +16,7 @@ def build_frozen_pit_roster(
     census_symbols: tuple[str, ...],
     *,
     breadth: int,
+    excluded_symbols: frozenset[str] = frozenset(),
 ) -> pd.DataFrame:
     """Return a point-in-time daily liquidity roster with no future constituent knowledge.
 
@@ -29,6 +30,7 @@ def build_frozen_pit_roster(
         daily_quote_volume: Matching completed daily USD quote turnover census.
         census_symbols: Complete historical exchange symbol order.
         breadth: Positive maximum number of liquidity-ranked members.
+        excluded_symbols: Confirmed unrecoverable sources never eligible for targets.
     Returns:
         Boolean decision-day roster in the supplied canonical column order.
     Raises:
@@ -38,6 +40,10 @@ def build_frozen_pit_roster(
     if isinstance(breadth, bool) or not isinstance(breadth, int) or breadth <= 0:
         raise ValueError(f"breadth must be a positive integer, got {breadth!r}")
     census = list(census_symbols)
+    excluded = set(excluded_symbols)
+    unknown = sorted(s for s in excluded if s not in set(census))
+    if unknown:
+        raise DataIntegrityError(f"excluded symbols not in census: {unknown!r}")
     if len(census) == 0 or any(not isinstance(s, str) or not s for s in census) or len(set(census)) != len(census):
         raise DataIntegrityError("census_symbols must be a non-empty tuple of unique non-empty symbols")
     if (
@@ -62,17 +68,18 @@ def build_frozen_pit_roster(
     median_src = median_turnover.where(eligible_src)
     med_mat = median_src.to_numpy(dtype="float64", na_value=np.nan)
     elig_mat = eligible_src.to_numpy(dtype=bool)
+    excluded_idx = {census.index(s) for s in excluded if s in census}
     out = np.zeros((len(idx), len(census)), dtype=bool)
     for i in range(1, len(idx)):
-        elig = elig_mat[i - 1]
+        elig = elig_mat[i - 1].copy()
+        for j in excluded_idx:
+            elig[int(j)] = False
         if not bool(elig.any()):
             continue
         meds = med_mat[i - 1]
         order = np.argsort(-np.where(elig, meds, -np.inf), kind="stable")
-        for j in order[: int(breadth)]:
-            if not bool(elig[int(j)]):
-                break
-            out[i, int(j)] = True
+        ranked = [int(j) for j in order if bool(elig[int(j)])][: int(breadth)]
+        out[i, ranked] = True
     return pd.DataFrame(out, index=idx, columns=census, dtype=bool)
 
 

@@ -330,6 +330,10 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     try:
         run = run_frozen_mhs_backtest(request)
         persist_frozen_mhs_backtest(run, output)
+        _logger.info(
+            "[EVAL] backtest mhs-frozen source_gap_excluded=%s",
+            list(getattr(run, "source_gap_excluded_symbols", ())),
+        )
     except (DataIntegrityError, ValueError, OSError) as exc:
         raise SystemExit(f"frozen backtest failed: {exc}") from exc
     status = "primary" if breadth == 20 else "research control"

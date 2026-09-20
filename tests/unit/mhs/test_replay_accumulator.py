@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 from src.common.errors import DataIntegrityError
 from src.mhs.execution import (
+    ExecutionReplayWindow,
     ExecutionSpec,
     _BoundExecutionReplayAccumulator,
     replay_execution_window_batch,
@@ -813,3 +814,213 @@ class TestForcedExitCostModelSharing:
         assert not result.ledger.primary_valid
         assert any(g.code == "MISSING_HELD_MARK" for g in result.ledger.data_gaps)
         assert [p.status for p in result.terminal_positions] == ["unresolved"]
+
+
+class TestFrozenMhsWindowContinuity:
+    """Frozen 3m close-fallback continuity across physical window boundaries."""
+
+    SYM = "AAAUSDT"
+
+    def _frames(self, grid: pd.DatetimeIndex, closes: pd.DataFrame) -> dict[str, object]:
+        px = closes.copy()
+        return {
+            "highs": px.copy(),
+            "lows": px.copy(),
+            "funding": pd.DataFrame(0.0, index=grid, columns=[self.SYM]),
+            "quote_volumes": pd.DataFrame(1000.0, index=grid, columns=[self.SYM]),
+            "funding_known": pd.DataFrame(True, index=grid, columns=[self.SYM]),
+            "bar_available_at": grid + pd.Timedelta(minutes=3),
+        }
+
+    def _window(
+        self,
+        grid: pd.DatetimeIndex,
+        closes: pd.DataFrame,
+        weights: pd.DataFrame,
+        signals: pd.DatetimeIndex,
+        *,
+        funding_known: pd.DataFrame | None = None,
+        funding: pd.DataFrame | None = None,
+    ) -> object:
+        fr = self._frames(grid, closes)
+        return ExecutionReplayWindow(
+            window_start=grid[0],
+            window_end=grid[-1] + pd.Timedelta(minutes=3),
+            columns=(self.SYM,),
+            symbols=(self.SYM,),
+            minute_grid=grid,
+            highs=fr["highs"],  # type: ignore[arg-type]
+            lows=fr["lows"],  # type: ignore[arg-type]
+            closes=closes,
+            marks=None,
+            bar_funding=funding if funding is not None else fr["funding"],  # type: ignore[arg-type]
+            target_weights=weights,
+            signal_available_at=signals,
+            quote_volumes=fr["quote_volumes"],  # type: ignore[arg-type]
+            funding_known=funding_known if funding_known is not None else fr["funding_known"],  # type: ignore[arg-type]
+            bar_available_at=fr["bar_available_at"],  # type: ignore[arg-type]
+        )
+
+    def _split_workload(self) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=12, freq="3min", tz="UTC")
+        vals = 100.0 + 0.5 * np.arange(len(grid))
+        closes = pd.DataFrame({self.SYM: vals}, index=grid)
+        weights = pd.DataFrame({self.SYM: [0.5]}, index=pd.DatetimeIndex([grid[0]]))
+        signals = pd.DatetimeIndex([grid[0]])
+        g1, g2 = grid[:6], grid[6:]
+        w1 = self._window(g1, closes.loc[g1], weights, signals)
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w2 = self._window(g2, closes.loc[g2], empty_w, pd.DatetimeIndex([], tz="UTC"))
+        full = self._window(grid, closes, weights, signals)
+        return {"grid": grid, "closes": closes, "w1": w1, "w2": w2, "full": full, "g2": g2}
+
+    def test_held_close_continuity_matches_unsplit_replay(self) -> None:
+        wl = self._split_workload()
+        spec = ExecutionSpec()
+        split = replay_execution_windows([wl["w1"], wl["w2"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+        single = replay_execution_windows([wl["full"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+        assert split.mark_source == "OHLCV_CLOSE_FALLBACK"
+        assert split.ledger.primary_valid
+        assert single.ledger.primary_valid
+        for field in ("equity", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+            np.testing.assert_allclose(
+                getattr(split.ledger, field).to_numpy(),
+                getattr(single.ledger, field).to_numpy(),
+                rtol=1e-12, atol=1e-12,
+            )
+        assert len(split.simulated_fills) == len(single.simulated_fills)
+        assert [p.status for p in split.terminal_positions] == [p.status for p in single.terminal_positions]
+
+    def test_boundary_mtm_applies_single_carried_transition(self) -> None:
+        wl = self._split_workload()
+        result = replay_execution_windows(
+            [wl["w1"], wl["w2"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+        )
+        units = float(result.simulated_fills["quantity_delta"].sum())
+        assert abs(units) > 0
+        grid = wl["grid"]
+        closes = wl["closes"]
+        expected = units * (float(closes.loc[grid[6], self.SYM]) - float(closes.loc[grid[5], self.SYM]))
+        mtm = result.ledger.mark_to_market_pnl
+        assert float(mtm.loc[grid[6]]) == expected
+        single = replay_execution_windows(
+            [wl["full"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+        )
+        np.testing.assert_allclose(
+            result.ledger.mark_to_market_pnl.to_numpy(),
+            single.ledger.mark_to_market_pnl.to_numpy(),
+            rtol=1e-12, atol=1e-12,
+        )
+
+    def test_boundary_does_not_emit_missing_held_mark(self) -> None:
+        wl = self._split_workload()
+        result = replay_execution_windows(
+            [wl["w1"], wl["w2"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+        )
+        held_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        assert held_gaps == []
+        assert result.ledger.primary_valid
+
+    def test_missing_current_close_fails_closed(self) -> None:
+        wl = self._split_workload()
+        g2 = wl["g2"]
+        bad = wl["closes"].loc[g2].copy()
+        bad.iloc[0, 0] = np.nan
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w2 = self._window(g2, bad, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        result = replay_execution_windows(
+            [wl["w1"], w2], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+        )
+        assert not result.ledger.primary_valid
+        held_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        assert len(held_gaps) == 1
+        assert held_gaps[0].symbol == self.SYM
+        assert held_gaps[0].timestamp == g2[0]
+
+    def test_missing_carried_mark_fails_closed(self) -> None:
+        grid = pd.date_range("2021-01-01", periods=12, freq="3min", tz="UTC")
+        g1, g2 = grid[:6], grid[6:]
+        nan_closes = pd.DataFrame({self.SYM: np.nan}, index=g1)
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w1 = self._window(g1, nan_closes, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        vals = 100.0 + 0.5 * np.arange(len(grid))
+        closes2 = pd.DataFrame({self.SYM: vals[6:]}, index=g2)
+        w2 = self._window(g2, closes2, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        acc = _BoundExecutionReplayAccumulator(w1, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+        acc.consume(w1)
+        acc.units_arr[0] = 0.1
+        acc.ledger_units[0] = 0.1
+        acc.accounting_state.units[0] = 0.1
+        acc.consume(w2)
+        result = acc.finalize()
+        assert not result.ledger.primary_valid
+        held_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        assert len(held_gaps) == 1
+        assert held_gaps[0].timestamp == g2[0]
+
+    def test_flat_symbol_tolerates_unavailable_boundary_mark(self) -> None:
+        grid = pd.date_range("2021-01-01", periods=12, freq="3min", tz="UTC")
+        g1, g2 = grid[:6], grid[6:]
+        vals = 100.0 + 0.5 * np.arange(len(grid))
+        closes = pd.DataFrame({self.SYM: vals}, index=grid)
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w1 = self._window(g1, closes.loc[g1], empty_w, pd.DatetimeIndex([], tz="UTC"))
+        bad = closes.loc[g2].copy()
+        bad.iloc[0, 0] = np.nan
+        bad.iloc[-1, 0] = np.nan
+        w2 = self._window(g2, bad, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        result = replay_execution_windows([w1, w2], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+        assert result.ledger.primary_valid
+        assert [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"] == []
+
+    def test_funding_gap_independent_of_mark_continuity(self) -> None:
+        wl = self._split_workload()
+        g2 = wl["g2"]
+        grid = wl["grid"]
+        funding_full = pd.DataFrame(1.0e-5, index=grid, columns=[self.SYM])
+        known_full = pd.DataFrame(True, index=grid, columns=[self.SYM])
+        known_full.loc[g2[0], self.SYM] = False
+        g1 = grid[:6]
+        w1 = self._window(
+            g1, wl["closes"].loc[g1], pd.DataFrame({self.SYM: [0.5]}, index=pd.DatetimeIndex([grid[0]])),
+            pd.DatetimeIndex([grid[0]]),
+            funding_known=known_full.loc[g1], funding=funding_full.loc[g1],
+        )
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w2 = self._window(
+            g2, wl["closes"].loc[g2], empty_w, pd.DatetimeIndex([], tz="UTC"),
+            funding_known=known_full.loc[g2], funding=funding_full.loc[g2],
+        )
+        result = replay_execution_windows([w1, w2], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+        assert not result.ledger.primary_valid
+        funding_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_FUNDING"]
+        assert funding_gaps
+        assert funding_gaps[0].timestamp == g2[0]
+        assert [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"] == []
+
+    def test_paired_bounds_share_gap_provenance(self) -> None:
+        grid = pd.date_range("2021-01-01", periods=12, freq="3min", tz="UTC")
+        vals = np.array([100.0, 99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0])
+        closes = pd.DataFrame({self.SYM: vals}, index=grid)
+        g1, g2 = grid[:6], grid[6:]
+        weights = pd.DataFrame({self.SYM: [0.5]}, index=pd.DatetimeIndex([grid[0]]))
+        signals = pd.DatetimeIndex([grid[0]])
+        w1 = self._window(g1, closes.loc[g1], weights, signals)
+        bad = closes.loc[g2].copy()
+        bad.iloc[0, 0] = np.nan
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w2 = self._window(g2, bad, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        spec = ExecutionSpec()
+        pair = replay_execution_window_batch(
+            [w1, w2], 1000.0,
+            [("OHLCV_STRICT_PROXY", spec), ("OHLCV_IMMEDIATE_TAKER", spec)],
+        )
+        base, stress = pair
+        assert base is not None
+        assert stress is not None
+        assert not base.ledger.primary_valid
+        assert not stress.ledger.primary_valid
+        base_marks = [(g.timestamp, g.symbol) for g in base.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        stress_marks = [(g.timestamp, g.symbol) for g in stress.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        assert base_marks == stress_marks == [(g2[0], self.SYM)]
+        assert base.fill_source != stress.fill_source

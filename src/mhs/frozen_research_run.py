@@ -100,6 +100,7 @@ class FrozenMhsBacktestRun:
     execution_start: pd.Timestamp
     execution_end: pd.Timestamp
     source_symbols: tuple[str, ...]
+    source_gap_excluded_symbols: tuple[str, ...] = ()
 
 
 def _admit_source_stage(budget: MhsMemoryBudget, initial_swap_bytes: int | None) -> None:
@@ -199,14 +200,25 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
     daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root = _load_frozen_source(
         request, budget, initial_swap_bytes
     )
-    roster = build_frozen_pit_roster(daily_close, daily_quote_volume, census, breadth=request.strategy.breadth)
+    from src.mhs.data_policy import frozen_research_source_gap_exclusions
+
+    resolved = frozenset(s for s in frozen_research_source_gap_exclusions() if s in set(census))
+    roster = build_frozen_pit_roster(
+        daily_close, daily_quote_volume, census, breadth=request.strategy.breadth, excluded_symbols=resolved
+    )
     ever_selected = [sym for sym in census if bool(roster[sym].any())]
     if not ever_selected:
         raise DataIntegrityError("request strategy selects no historical symbol")
     selected_panels = {key: frame[ever_selected] for key, frame in hourly_panels.items()}
     selected_available = hourly_available_at[ever_selected]
     full_candidate = build_frozen_mhs_candidate(
-        selected_panels, selected_available, daily_close, daily_quote_volume, census, strategy=request.strategy
+        selected_panels,
+        selected_available,
+        daily_close,
+        daily_quote_volume,
+        census,
+        strategy=request.strategy,
+        excluded_symbols=resolved,
     )
     labels = full_candidate.target_weights.index
     scored = (labels >= request.evaluation_start) & (labels < request.evaluation_end)
@@ -240,4 +252,5 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
     return FrozenMhsBacktestRun(
         request=request, candidate=candidate, evidence=evidence,
         execution_start=execution_start, execution_end=execution_end, source_symbols=census,
+        source_gap_excluded_symbols=tuple(sorted(resolved)),
     )

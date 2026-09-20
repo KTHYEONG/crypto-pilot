@@ -217,3 +217,38 @@ def test_persist_rejects_unsafe_output(tmp_path: Path) -> None:
         persist_frozen_mhs_backtest(run, "result.json")  # type: ignore[arg-type]
     with pytest.raises(DataIntegrityError, match=r"must be a JSON path"):
         persist_frozen_mhs_backtest(run, tmp_path / "result.parquet")
+
+
+def test_payload_records_integrity_exclusions() -> None:
+    run = _run()
+    tagged = dataclasses.replace(run, source_gap_excluded_symbols=("LUNAUSDT", "PUMPUSDT"))
+    payload = frozen_mhs_backtest_payload(tagged)
+    assert payload["source_gap_excluded_symbols"] == ["LUNAUSDT", "PUMPUSDT"]
+    assert payload["source_gap_excluded_count"] == 2
+    assert payload["canonical_symbols"] == 2
+    assert "approval" not in payload
+    assert "deployment_verdict" not in payload
+    assert "go_live" not in payload
+    assert payload["research_only"] is True
+
+
+def test_registry_remains_frozen_only() -> None:
+    import argparse
+
+    from src.cli.commands.backtest import add_backtest_commands
+    from src.mhs.data_policy import (
+        MHS_DATA_POLICY_DEFAULT,
+        SOURCE_GAP_EXCLUDED_SYMBOLS,
+        frozen_research_source_gap_exclusions,
+    )
+
+    resolved = frozen_research_source_gap_exclusions()
+    assert resolved == frozenset({"PUMPUSDT", "LUNAUSDT"})
+    assert isinstance(resolved, frozenset)
+    assert frozen_research_source_gap_exclusions() is not resolved
+    assert "PUMPUSDT" in SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert "LUNAUSDT" not in SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert MHS_DATA_POLICY_DEFAULT == "zombie_mask_v1"
+    parser = argparse.ArgumentParser()
+    add_backtest_commands(parser)
+    assert "exclud" not in parser.format_help().lower()
