@@ -127,7 +127,11 @@ def evaluate_frozen_mhs_research(
     ) != base_spec:
         raise DataIntegrityError("stress spec must match base mechanics except crossing cost")
     _require_report_periods(report_periods)
-    checked_windows = validated_frozen_research_windows(candidate, windows)
+    checked_windows = validated_frozen_research_windows(
+        candidate,
+        windows,
+        settlement_bars=-(-int(base_spec.passive_timeout_minutes) // 3),
+    )
     paired_bounds: list[tuple[_ExecutionBound, ExecutionSpec]] = [
         ("OHLCV_IMMEDIATE_TAKER", base_spec), ("OHLCV_IMMEDIATE_TAKER", stress_spec)
     ]
