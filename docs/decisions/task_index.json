@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FROZEN_EXECUTION_COVERAGE",
+      "date": "2026-09-21",
+      "adr_id": "ADR_20260921_MHS_FROZEN_EXECUTION_COVERAGE",
+      "domain": "execution",
+      "title": "frozen 백테스트 3m 실행 커버리지 동기화 + 청산 차단 비대칭 교정",
+      "why": "1h 신호 로스터(674개 심볼, 2026-09까지)와 3m 실행 아카이브가 225개 심볼에서 어긋나 있어, 로스터가 선정한 심볼의 실행 데이터가 없으면 청산이 막힌 채 포지션이 물려 리플레이가 임의 시점(LUNA→MANA→AVAX→PEOPLE/BOME)에 MISSING_HELD_*로 중단됐고, 원인 규명 중 펀딩 unknown 차단이 진입·청산을 구분하지 않아 청산 시도까지 막던 비대칭도 함께 드러남",
+      "resolution": "1h/3m 결손을 측정·계획하는 execution_coverage 서비스와 CLI, 로스터 선정 심볼×기간의 3m 존재를 리플레이 시작 전 일괄 검증하는 fail-fast 가드(entry_hour_utc 반영, 판독불가/부재 구분), accumulator의 펀딩 unknown 차단을 진입(재시도)과 청산(BLOCKED_EXIT_UNKNOWN_FUNDING 갭 기록)으로 분리하는 실행 코어 수정을 적용",
+      "impact": "커버리지 결손이 수십 분 리플레이 끝에 한 심볼씩 드러나던 것을 시작 전 일괄 진단으로 전환했고, 청산이 막혀 원치 않는 노출이 유지되는 상태가 더 이상 무음 처리되지 않고 원장 무효+갭으로 드러남(라이브 실행 경로 공유 코드 변경)",
+      "caveat": "블록 조건 변경은 accumulator.py의 라이브 실행 경로와 공유되므로 배포 전 정상 펀딩 구간에서 원장 비트동일성(무회귀) 재확인이 필요하고, 장기 frozen 백테스트 완주 자체는 이번 스펙 범위 밖이라 225개 심볼 3m 백필 실행 후 별도 재실행이 남아있음"
+    },
+    {
       "task_id": "TASK_MHS_SOURCE_GAP_INTERVAL_REGISTRY",
       "date": "2026-09-20",
       "adr_id": "ADR_20260920_MHS_SOURCE_GAP_INTERVAL_REGISTRY",
@@ -1009,16 +1020,6 @@
       "why": "ADR_20260823_MHS_CALIBRATED_EVIDENCE 구현 직후 실제 CLI로 2021-2025/3m 원장 전체 재생해 재보정 게이트가 실전에서 작동하는지, 그리고 I-DEPLOYMENT-INVARIANT(판정만 바뀌고 성과는 불변)가 지켜지는지 검증.",
       "resolution": "실측: max_fold_share=0.526, null-보정 임계값=0.606(alpha=0.05, null 백분위 88.25) -> FOLD_GROWTH_CONCENTRATION 미발화. pooled_sharpe_lcb=1.337(>0.6), pooled_stress_sharpe_lcb=0.572(>0.0) -> PRIMARY_AUTOCORR_SHARPE_BELOW_0_6/STRESS_SHARPE_NOT_POSITIVE 미발화. 4개 fold 전부 failures=[] (데이터 무결성 코드 fold별 fail-closed는 그대로 유지되고 있음을 확인, 단순 무력화가 아님). blend.primary_geometric_cagr=1.777로 직전 constant_risk 런과 완전히 동일(비트동일) -- 배치 로직 미변경이 실측으로 확인됨.",
       "impact": "research_go.reason_codes=['FOLD_BLEND_PATH_DIVERGENCE'] 단 하나만 남아 Research-GO 여전히 미달성. 이 코드는 ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION에서 이미 식별된 별도의 미해결 아키텍처 문제(fold가 자체 EWMA를 재적합하지 않고 blend의 연속 스케일 궤적을 슬라이스해 재사용해야 함)이며 이번 스펙의 범위가 아니다. 다음 단계는 그 구조적 대안의 구현."
-    },
-    {
-      "task_id": "MHS_CALIBRATED_EVIDENCE",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_CALIBRATED_EVIDENCE",
-      "domain": "risk",
-      "title": "MHS 증거 게이트를 고정 임계값에서 null-보정 alpha 가설검정으로 재설계",
-      "why": "직전 constant_risk 튜닝 사이클(7회 실전 실행)에서 FOLD_GROWTH_CONCENTRATION을 넘기지 못함. 게이트 자체를 통계적으로 검증한 결과, 안정적 전략(strict Sharpe 2.17 고정)의 오탈락률이 59.1%(STRESS_SHARPE_NOT_POSITIVE 38.0%/PRIMARY_AUTOCORR_SHARPE_BELOW_0_6 28.8%/PRIMARY_ANNUAL_RETURN_BELOW_FLOOR 19.1%/FOLD_GROWTH_CONCENTRATION 16.4%)임을 실측 확인. 1년 fold Sharpe 추정 SE가 ±1.08로 관측 fold Sharpe 1.21~3.67의 산포를 전부 설명(null 5~95% 구간 [0.32,3.88]이 관측치를 포함). FOLD_GROWTH_CONCENTRATION_MAX_SHARE=0.5는 동일분포 null의 83백분위(유도근거 없음, git 고고학상 문서 부재)로 관측 0.526은 p=0.12(비유의).",
-      "resolution": "src/mhs/calibration.py 신설: stationary_block_bootstrap(자기상관/팻테일 보존 블록 재표집), calibrate_max_share_null(전략 자신의 pooled 수익률로 max_fold_share의 null 분포를 만들어 (1-alpha) 분위수를 임계값으로 반환, fail-closed), sharpe_lower_confidence_bound(Lo(2002) 표준오차 기반 하한, 표본부족/분산0시 -inf로 fail-closed). src/mhs/params.py에 EVIDENCE_GATE_ALPHA=0.05 등록(FOLD_GROWTH_CONCENTRATION_MAX_SHARE 상수 삭제 -- 유도근거 없는 리터럴 제거). _fold_growth_concentration의 임계값을 필수 인자로 승격. research_go.py에 _pooled_level_gate_reasons 신설: level 게이트(Sharpe/stress/연수익)를 fold별 min() 대신 pooled 추정치 하한 vs 등록 절대 경제하한으로 재판정(I-NO-CIRCULAR: 자기 null 보정 금지, level은 절대기준·dispersion만 자기null). evaluation.py에서 fold별 level reason code 3개(min-over-folds 하향편향의 원인) 제거, 데이터 무결성 코드는 fold별 fail-closed 그대로 유지. schema/persist/context/assemble에 evidence_calibration 페이로드 배선.",
-      "impact": "판정 계층만 교체, 배치(노출스케일/북구성/replay) 로직 미변경 -- blend.primary_geometric_cagr 비트동일 확인 완료. 검정력 실측(edge가 1개 fold에만 100% 집중된 인공 취약전략): 탐지율 99.6% 유지. dispersion 게이트 오탈락 16.4%->5.7%. level 게이트: 진짜Sharpe 0.0에서 탈락률 99.2%->99.5%(쓰레기 판별 유지), 2.17에서 28.5%->9.7%(우수전략 오탈락 1/3로 감소). fold 해상도 4->8 확대는 이번 스펙 범위 밖(level min() 제거 후 안전, 후속 과제). fill_mark_parity 5% 밴드/fast_reversal-slow_momentum 유령북/regime_cash_scale 이중계상/SEARCH_TRIALS_ATTEMPTED=70 하드코딩은 별도 진단 필요 항목으로 식별만 하고 미착수."
     }
   ]
 }
