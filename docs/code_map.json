@@ -3,7 +3,8 @@
     "testing": [
       "tests/unit/cli/commands/test_data.py",
       "tests/unit/mhs/test_process.py tests/unit/mhs/test_process_backtest.py tests/unit/market_data/services/test_universe_gaps.py tests/unit/market_data/binance/test_vision.py tests/unit/cli/commands/test_data.py",
-      "tests/unit/mhs/test_source_gaps.py"
+      "tests/unit/mhs/test_source_gaps.py",
+      "tests/unit/mhs/test_replay_accumulator.py"
     ]
   },
   "src/cli/commands/live.py": {
