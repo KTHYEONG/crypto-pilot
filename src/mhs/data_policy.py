@@ -50,3 +50,24 @@ SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
     # 2026-09-18 backfill probe: 원천 아카이브에도 복구 구간이 없는 심볼
     "AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT",
 })
+
+# Frozen-only confirmed unrecoverable execution sources. Binance Vision
+# archive and Futures REST re-query both failed to supply the interval.
+_FROZEN_SOURCE_GAP_EXCLUSIONS: Final[frozenset[str]] = frozenset({
+    # PUMPUSDT: funding gap 2025-06-19 08:00 UTC to 2025-07-10 08:00 UTC,
+    # Vision monthly archive and REST re-query both missing (two boundary settlements only).
+    "PUMPUSDT",
+    # LUNAUSDT: 3-minute archive and REST end at 2022-05-13 06:48 UTC,
+    # Vision daily/monthly klines and REST re-query both end with no settlement evidence.
+    "LUNAUSDT",
+})
+
+
+def frozen_research_source_gap_exclusions() -> frozenset[str]:
+    """Return explicitly evidenced source-unavailable symbols for frozen research only.
+
+    The registry prevents targets in intervals whose required OHLCV or funding
+    evidence cannot be recovered from Binance sources; it preserves the wider
+    historical census and never fabricates a price, funding rate, or settlement.
+    """
+    return frozenset({s.strip().upper() for s in _FROZEN_SOURCE_GAP_EXCLUSIONS if s.strip().upper().endswith("USDT")})
