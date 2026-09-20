@@ -532,5 +532,11 @@
   "src/mhs/backtest/contracts.py": {},
   "src/mhs/backtest/paths.py": {
     "testing": "tests/integration/mhs/test_nested_process_evidence.py"
+  },
+  "src/mhs/frozen_research_evidence.py": {
+    "testing": "tests/unit/mhs/test_frozen_research_evidence.py"
+  },
+  "src/mhs/frozen_research_run.py": {
+    "testing": "tests/unit/mhs/test_frozen_research_run.py"
   }
 }
