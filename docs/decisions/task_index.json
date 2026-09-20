@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_SOURCE_GAP_INTERVAL_REGISTRY",
+      "date": "2026-09-20",
+      "adr_id": "ADR_20260920_MHS_SOURCE_GAP_INTERVAL_REGISTRY",
+      "domain": "data-policy",
+      "title": "원천공백 제외를 심볼 영구 배제에서 구간 단위로 개편",
+      "why": "SOURCE_GAP_EXCLUDED_SYMBOLS/_FROZEN_SOURCE_GAP_EXCLUSIONS 이원화된 영구 심볼 배제가 NEARUSDT처럼 550일 활약한 주요 심볼을 2022년 2일 공백 때문에 전 구간 상실시켰고, frozen 게이트도 piece 전체 span에 finite를 요구해 미보유 구간 공백까지 하드 실패시켰음",
+      "resolution": "src/mhs/policy/source_gaps.jsonl 단일 레지스트리(구간+증거+검증시각)와 src/mhs/source_gaps.py 조회 API를 도입하고, frozen 로스터/타깃 배제를 결정일 단위로, 게이트 유한성 검사를 보유·정산 셀 단위로 정밀화했으며 data collect verify-source-gaps 감사 CLI를 추가",
+      "impact": "probe 실측 기준 유니버스 손실이 941 심볼일에서 4 심볼일로 축소되고 ICPUSDT 같은 과잉 배제 누락이 제거됨",
+      "caveat": "LUNAUSDT는 공백이 아닌 상폐이므로 구간 배제가 아니라 ledger_terminal_only 경로가 처리해야 하며, 구간 제외 자체는 엄밀히는 미래정보이지만 영향이 전체 심볼일의 0.01% 수준으로 측정되어 공시 필드(source_gap_blocked_decisions)로 수용함"
+    },
+    {
       "task_id": "TASK_MHS_FROZEN_SOURCE_GAP_AND_WINDOW_CONTINUITY",
       "date": "2026-09-20",
       "adr_id": "ADR_20260920_MHS_FROZEN_SOURCE_GAP_AND_WINDOW_CONTINUITY",
@@ -1008,16 +1019,6 @@
       "why": "직전 constant_risk 튜닝 사이클(7회 실전 실행)에서 FOLD_GROWTH_CONCENTRATION을 넘기지 못함. 게이트 자체를 통계적으로 검증한 결과, 안정적 전략(strict Sharpe 2.17 고정)의 오탈락률이 59.1%(STRESS_SHARPE_NOT_POSITIVE 38.0%/PRIMARY_AUTOCORR_SHARPE_BELOW_0_6 28.8%/PRIMARY_ANNUAL_RETURN_BELOW_FLOOR 19.1%/FOLD_GROWTH_CONCENTRATION 16.4%)임을 실측 확인. 1년 fold Sharpe 추정 SE가 ±1.08로 관측 fold Sharpe 1.21~3.67의 산포를 전부 설명(null 5~95% 구간 [0.32,3.88]이 관측치를 포함). FOLD_GROWTH_CONCENTRATION_MAX_SHARE=0.5는 동일분포 null의 83백분위(유도근거 없음, git 고고학상 문서 부재)로 관측 0.526은 p=0.12(비유의).",
       "resolution": "src/mhs/calibration.py 신설: stationary_block_bootstrap(자기상관/팻테일 보존 블록 재표집), calibrate_max_share_null(전략 자신의 pooled 수익률로 max_fold_share의 null 분포를 만들어 (1-alpha) 분위수를 임계값으로 반환, fail-closed), sharpe_lower_confidence_bound(Lo(2002) 표준오차 기반 하한, 표본부족/분산0시 -inf로 fail-closed). src/mhs/params.py에 EVIDENCE_GATE_ALPHA=0.05 등록(FOLD_GROWTH_CONCENTRATION_MAX_SHARE 상수 삭제 -- 유도근거 없는 리터럴 제거). _fold_growth_concentration의 임계값을 필수 인자로 승격. research_go.py에 _pooled_level_gate_reasons 신설: level 게이트(Sharpe/stress/연수익)를 fold별 min() 대신 pooled 추정치 하한 vs 등록 절대 경제하한으로 재판정(I-NO-CIRCULAR: 자기 null 보정 금지, level은 절대기준·dispersion만 자기null). evaluation.py에서 fold별 level reason code 3개(min-over-folds 하향편향의 원인) 제거, 데이터 무결성 코드는 fold별 fail-closed 그대로 유지. schema/persist/context/assemble에 evidence_calibration 페이로드 배선.",
       "impact": "판정 계층만 교체, 배치(노출스케일/북구성/replay) 로직 미변경 -- blend.primary_geometric_cagr 비트동일 확인 완료. 검정력 실측(edge가 1개 fold에만 100% 집중된 인공 취약전략): 탐지율 99.6% 유지. dispersion 게이트 오탈락 16.4%->5.7%. level 게이트: 진짜Sharpe 0.0에서 탈락률 99.2%->99.5%(쓰레기 판별 유지), 2.17에서 28.5%->9.7%(우수전략 오탈락 1/3로 감소). fold 해상도 4->8 확대는 이번 스펙 범위 밖(level min() 제거 후 안전, 후속 과제). fill_mark_parity 5% 밴드/fast_reversal-slow_momentum 유령북/regime_cash_scale 이중계상/SEARCH_TRIALS_ATTEMPTED=70 하드코딩은 별도 진단 필요 항목으로 식별만 하고 미착수."
-    },
-    {
-      "task_id": "MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION",
-      "domain": "risk",
-      "title": "MHS constant_risk 실전 실행: 위험 등화는 실측 성공, FOLD_GROWTH_CONCENTRATION/FOLD_BLEND_PATH_DIVERGENCE는 미해결로 확정",
-      "why": "ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT 구현 직후 실제 CLI(--pnl-vol-target-mode constant_risk)로 전체 2021-2025/3m 원장을 7회 반복 실행해 스펙의 반사실(scratch 시뮬레이션) 예측이 실제 파이프라인에서도 성립하는지 검증.",
-      "resolution": "실행 중 2개의 진짜 버그를 발견/수정: (1) top-level(blend) 경로가 target_vol을 전체 5년 미분할 참조로 재해석해 fold 경계별 재적합과 갈라짐(FOLD_BLEND_PATH_DIVERGENCE 최초 노출) -> _constant_risk_target_vol 신설로 top_level 경계를 fold와 동일하게 oos_start 슬라이스. (2) fold별 growth_budget_annual_vol 재해석이 표본 특이적이라 fold마다 다른 target을 만들어 위험 등화가 무력화됨 -> CONSTANT_RISK_TARGET_ANNUAL_VOL 단일 고정 상수로 교체(fold 경계별 재적합 폐지, feasibility 클램프만 경계별 유지). (3) fold_realized_risk_parity 진단이 스케일 적용 전(Phase A reference pass) 수익률을 측정하고 있어 target_vol을 바꿔도 값이 불변이던 버그를 발견, 스케일 적용 후(deployed) 원장으로 측정 지점 이동. target=0.40 고정 후 halflife 60/90/120/150을 실측 스윕: risk-parity(로그비)는 0.63(halflife 미적용시 근사)->0.234(hl=90)로 대폭 개선, fold_growth_concentration.max_fold_share는 baseline 0.551에서 0.526(hl=90, 최선)까지만 하락(0.5 미달). 동시에 hl이 짧을수록 새로 노출된 FOLD_BLEND_PATH_DIVERGENCE가 강해지는 단조 트레이드오프를 확인(hl=90:0.317 FAIL / hl=120:0.264 FAIL / hl=150:0.230 PASS, risk-parity 0.373 규정 위반이나 관측전용이라 게이트엔 무영향)하여 단일 halflife 다이얼로는 두 게이트를 동시통과시킬 수 없음을 실측으로 반증. hl=90(1차 목표에 최근접)을 최종 등록값으로 확정.",
-      "impact": "Research-GO는 여전히 미달성(reason_codes=[FOLD_BLEND_PATH_DIVERGENCE, FOLD_GROWTH_CONCENTRATION], run_id는 docs/results/mhs_run_history/latest.json 참조). 위험 등화 메커니즘 자체는 실측 검증됨(fold 실현변동성 0.31~0.45로 baseline 0.28~0.57 대비 수렴). 후속 과제: fold가 자체 EWMA를 재적합하지 않고 blend의 연속 스케일 궤적을 날짜로 슬라이스해 재사용하는 구조적 대안(파라미터 튜닝이 아닌 아키텍처 변경) 필요."
     }
   ]
 }
