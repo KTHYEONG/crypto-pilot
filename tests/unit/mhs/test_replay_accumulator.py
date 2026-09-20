@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 from src.common.errors import DataIntegrityError
 from src.mhs.execution import (
+    ExecutionDataGap,
     ExecutionReplayWindow,
     ExecutionSpec,
     _BoundExecutionReplayAccumulator,
@@ -1024,3 +1025,143 @@ class TestFrozenMhsWindowContinuity:
         stress_marks = [(g.timestamp, g.symbol) for g in stress.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
         assert base_marks == stress_marks == [(g2[0], self.SYM)]
         assert base.fill_source != stress.fill_source
+
+
+def _blocked_gap(code: str) -> ExecutionDataGap:
+    ts = pd.Timestamp("2025-01-01T00:03:00Z")
+    return ExecutionDataGap(
+        code=code, symbol="BTCUSDT", timestamp=ts,
+        decision_time=ts, signal_time=ts, execution_bound="OHLCV_IMMEDIATE_TAKER",
+    )
+
+
+def _blocked_acc() -> _BoundExecutionReplayAccumulator:
+    grid = pd.date_range("2025-01-01", periods=4, freq="3min", tz="UTC")
+    px = pd.DataFrame({"BTCUSDT": 100.0}, index=grid)
+    w = ExecutionReplayWindow(
+        grid[0], grid[-1], ("BTCUSDT",), ("BTCUSDT",), grid, px, px, px, px, px * 0.0,
+        pd.DataFrame({"BTCUSDT": [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]),
+        quote_volumes=px * 0.0 + 1.0, funding_known=px.notna(),
+        bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+    return _BoundExecutionReplayAccumulator(w, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+
+
+class TestBlockedExitFunding:
+    """펀딩 unknown 차단의 진입/청산 비대칭: 진입은 재시도, 청산은 갭 기록과 원장 무효."""
+
+    def test_block_fill_entry_blocked_by_unknown_funding_stays_valid(self) -> None:
+        acc = _blocked_acc()
+        assert acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=0.0, net_units=10.0) is True
+        assert acc.data_gaps == []
+        assert acc.ledger_valid
+        assert acc.unfilled_count == 1
+        assert acc.termination_counts["NO_FUNDING_UNFILLED"] == 1
+        assert acc.termination_counts.get("BLOCKED_EXIT_UNKNOWN_FUNDING", 0) == 0
+
+    def test_block_fill_exit_blocked_by_unknown_funding_records_gap(self) -> None:
+        acc = _blocked_acc()
+        gap = _blocked_gap("MISSING_ACTIVE_FUNDING")
+        assert acc._block_fill(gap, prior_units=100.0, net_units=-100.0) is True
+        assert len(acc.data_gaps) == 1
+        recorded = acc.data_gaps[0]
+        assert recorded.code == "BLOCKED_EXIT_UNKNOWN_FUNDING"
+        assert recorded.symbol == gap.symbol
+        assert recorded.timestamp == gap.timestamp
+        assert not acc.ledger_valid
+        assert "MISSING_DATA" in acc.invalid_reasons
+        assert acc.unfilled_count == 1
+        assert acc.termination_counts["BLOCKED_EXIT_UNKNOWN_FUNDING"] == 1
+        assert acc.termination_counts.get("NO_FUNDING_UNFILLED", 0) == 0
+
+    def test_block_fill_reduction_counts_as_exit(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=100.0, net_units=-40.0)
+        assert [g.code for g in acc.data_gaps] == ["BLOCKED_EXIT_UNKNOWN_FUNDING"]
+        assert not acc.ledger_valid
+
+    def test_block_fill_expansion_counts_as_entry(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=100.0, net_units=40.0)
+        assert acc.data_gaps == []
+        assert acc.ledger_valid
+        assert acc.termination_counts["NO_FUNDING_UNFILLED"] == 1
+
+    def test_block_fill_sign_flip_reduction_counts_as_exit(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=100.0, net_units=-130.0)
+        assert [g.code for g in acc.data_gaps] == ["BLOCKED_EXIT_UNKNOWN_FUNDING"]
+        assert not acc.ledger_valid
+
+    def test_block_fill_dust_holding_counts_as_entry(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=1e-13, net_units=-50.0)
+        assert acc.data_gaps == []
+        assert acc.ledger_valid
+        assert acc.termination_counts["NO_FUNDING_UNFILLED"] == 1
+
+    def test_block_fill_exit_blocked_by_zero_volume_keeps_volume_code(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("KNOWN_ZERO_VOLUME"), prior_units=50.0, net_units=-50.0)
+        assert [g.code for g in acc.data_gaps] == ["KNOWN_ZERO_VOLUME"]
+        assert not acc.ledger_valid
+        assert acc.unfilled_count == 1
+        assert acc.termination_counts["NO_VOLUME_UNFILLED"] == 1
+
+    def test_block_fill_other_gap_codes_keep_legacy_path(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("ZERO_OR_UNKNOWN_VOLUME"), prior_units=50.0, net_units=-50.0)
+        assert [g.code for g in acc.data_gaps] == ["ZERO_OR_UNKNOWN_VOLUME"]
+        assert not acc.ledger_valid
+        assert acc.unfilled_count == 1
+
+    def test_block_fill_counter_separates_entry_and_exit_blocks(self) -> None:
+        acc = _blocked_acc()
+        for _ in range(2):
+            acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=0.0, net_units=10.0)
+        for _ in range(3):
+            acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=100.0, net_units=-100.0)
+        assert acc.termination_counts["NO_FUNDING_UNFILLED"] == 2
+        assert acc.termination_counts["BLOCKED_EXIT_UNKNOWN_FUNDING"] == 3
+        assert acc.unfilled_count == 5
+
+    def test_blocked_exit_end_to_end_via_consume(self) -> None:
+        grid = pd.date_range("2025-01-01", periods=6, freq="3min", tz="UTC")
+        px = pd.DataFrame({"BTCUSDT": 100.0}, index=grid)
+        known = px.notna()
+        known.iloc[4, 0] = False
+        w = ExecutionReplayWindow(
+            grid[0], grid[-1], ("BTCUSDT",), ("BTCUSDT",), grid, px, px, px, px, px * 0.0,
+            pd.DataFrame({"BTCUSDT": [1.0, 0.0]}, index=[grid[0], grid[3]]),
+            pd.DatetimeIndex([grid[0], grid[3]]),
+            quote_volumes=px * 0.0 + 1.0, funding_known=known,
+            bar_available_at=grid + pd.Timedelta(minutes=3),
+        )
+        result = replay_execution_windows((w,), 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+        assert "BLOCKED_EXIT_UNKNOWN_FUNDING" in [g.code for g in result.ledger.data_gaps]
+        assert not result.ledger.primary_valid
+        assert result.termination_counts["BLOCKED_EXIT_UNKNOWN_FUNDING"] == 1
+        assert result.termination_counts.get("NO_FUNDING_UNFILLED", 0) == 0
+
+    def test_known_funding_replay_has_no_blocked_exit_gaps(self) -> None:
+        grid = pd.date_range("2021-01-01", periods=200, freq="5min", tz="UTC")
+        symbols = ["AAAUSDT", "BBBUSDT"]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        decision_grid = pd.date_range("2021-01-01", periods=8, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        weights.iloc[0, 0] = 0.05
+        weights.iloc[4, 0] = -0.02
+        result = strategy_aware_execution_replay(
+            weights, decision_grid + pd.Timedelta(hours=1),
+            closes * 1.001, closes * 0.999, closes, closes,
+            pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert result.ledger.primary_valid
+        assert tuple(result.ledger.data_gaps) == ()
+        assert not result.simulated_fills.empty
+        assert result.termination_counts.get("BLOCKED_EXIT_UNKNOWN_FUNDING", 0) == 0

@@ -503,24 +503,49 @@ class _BoundExecutionReplayAccumulator:
         return None
 
     def _block_fill(
-        self, gap: ExecutionDataGap,
+        self, gap: ExecutionDataGap, *, prior_units: float, net_units: float,
     ) -> bool:
-        """Record a viability block as gap plus primary-invalid; skip the fill."""
-        if gap.code == "KNOWN_ZERO_VOLUME":
+        """Record a viability block, distinguishing a blocked entry from a blocked exit.
+
+        A blocked entry leaves the book exactly as it was, so retrying at the next decision is
+        both correct and riskless. A blocked exit does not: the position the strategy decided to
+        shed stays on, and its valuation and financing risk continue to accrue while the engine
+        reports nothing. Treating both as the same benign retry understates realized risk and is
+        the reason an unexitable position only surfaces later, at an unrelated bar.
+
+        Args:
+            gap: The viability gap that blocked this fill.
+            prior_units: Signed inventory held immediately before the blocked intent.
+            net_units: Signed quantity the blocked intent would have transacted.
+        Returns:
+            True, so the caller advances to the next symbol exactly as before.
+        """
+        is_exit = abs(prior_units) >= QTY_EPS and abs(prior_units + net_units) < abs(prior_units)
+        if gap.code == "KNOWN_ZERO_VOLUME" and not is_exit:
             # 알려진 0 거래량은 데이터 공백이 아니라 체결 불가(거래소 중단·상폐 꼬리) — 다음 결정에서 재시도(라이브와 동일).
             self.unfilled_count += 1
             self.termination_counts["NO_VOLUME_UNFILLED"] = self.termination_counts.get("NO_VOLUME_UNFILLED", 0) + 1
             return True
-        if gap.code == "MISSING_ACTIVE_FUNDING":
-            # 펀딩 unknown으로 막힌 신규/청산 체결 시도는 보유 리스크가 없다(체결 전이라
+        if gap.code == "MISSING_ACTIVE_FUNDING" and not is_exit:
+            # 펀딩 unknown으로 막힌 신규 체결 시도는 보유 리스크가 없다(체결 전이라
             # 자본 노출이 아직 없음) — KNOWN_ZERO_VOLUME과 동일하게 미체결·재시도.
             self.unfilled_count += 1
             self.termination_counts["NO_FUNDING_UNFILLED"] = self.termination_counts.get("NO_FUNDING_UNFILLED", 0) + 1
+            return True
+        if gap.code == "MISSING_ACTIVE_FUNDING":
+            recorded = dataclasses.replace(gap, code="BLOCKED_EXIT_UNKNOWN_FUNDING")
+            self.data_gaps.append(recorded)
+            self.ledger_valid = False
+            self.invalid_reasons.add("MISSING_DATA")
+            self.unfilled_count += 1
+            self.termination_counts["BLOCKED_EXIT_UNKNOWN_FUNDING"] = self.termination_counts.get("BLOCKED_EXIT_UNKNOWN_FUNDING", 0) + 1
             return True
         self.data_gaps.append(gap)
         self.ledger_valid = False
         self.invalid_reasons.add("MISSING_DATA")
         self.unfilled_count += 1
+        if gap.code == "KNOWN_ZERO_VOLUME":
+            self.termination_counts["NO_VOLUME_UNFILLED"] = self.termination_counts.get("NO_VOLUME_UNFILLED", 0) + 1
         return True
 
 
@@ -830,7 +855,9 @@ class _BoundExecutionReplayAccumulator:
             avail_submit_ns=int(self._w_avail_ns[submit_pos]),
         )
         if block is not None:
-            return self._block_fill(block)
+            return self._block_fill(
+                block, prior_units=float(self.units_arr[gcol]), net_units=float(net_units)
+            )
         if reason == "passive_fill":
             self.fill_count += 1
         if self.execution_bound == "OHLCV_IMMEDIATE_TAKER":
@@ -940,6 +967,7 @@ class _BoundExecutionReplayAccumulator:
                 )
             )
             return True
+        ladder_entry_units = float(self.units_arr[gcol])
         for rel_pos, tranche_price, tranche_fee_bps, qty_fraction in _microstructure.laddered_fill_schedule(
             decision_price, side, adverse,
             closes_window,
@@ -984,7 +1012,11 @@ class _BoundExecutionReplayAccumulator:
                 avail_submit_ns=int(self._w_avail_ns[submit_pos]),
             )
             if block is not None:
-                return self._block_fill(block)
+                current_units = float(self.units_arr[gcol])
+                return self._block_fill(
+                    block, prior_units=current_units,
+                    net_units=float(ladder_entry_units + net_units - current_units),
+                )
             if reason == "passive_fill":
                 self._record_terms(
                     decision_price, fill_price, side, self.spec.maker_fee_bps, 0.0,
@@ -1090,6 +1122,7 @@ class _BoundExecutionReplayAccumulator:
             self.residual_count += 1
             self.residual_notional += abs(net_units) * decision_price
             return True
+        peg_entry_units = float(self.units_arr[gcol])
         for rel_pos, fill_price, fee_bps, qty_fraction, sched_reason in schedule:
             qty = net_units * qty_fraction
             fill_pos = spos + rel_pos
@@ -1101,7 +1134,11 @@ class _BoundExecutionReplayAccumulator:
                 avail_submit_ns=int(self._w_avail_ns[submit_pos]),
             )
             if block is not None:
-                return self._block_fill(block)
+                current_units = float(self.units_arr[gcol])
+                return self._block_fill(
+                    block, prior_units=current_units,
+                    net_units=float(peg_entry_units + net_units - current_units),
+                )
             if reason == "passive_fill":
                 self.fill_count += 1
             else:
