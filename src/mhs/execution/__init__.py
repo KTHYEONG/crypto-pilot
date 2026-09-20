@@ -43,6 +43,7 @@ _ExecutionGapCode = Literal[
     "FUTURE_DATA_REFERENCE",
     "CAUSAL_TIMING_VIOLATION",
     "UNKNOWN_TERMINATION",
+    "BLOCKED_EXIT_UNKNOWN_FUNDING",
 ]
 
 # Facade keeps every existing src.mhs.execution import site working.
