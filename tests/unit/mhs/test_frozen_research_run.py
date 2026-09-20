@@ -369,3 +369,77 @@ def test_empty_evaluation_slice_fails_closed(monkeypatch: pytest.MonkeyPatch) ->
                 evaluation_end=pd.Timestamp("2021-05-10", tz="UTC"),
             )
         )
+
+
+_GAP_SYMBOLS = ("AAA", "PUMPUSDT", "LUNAUSDT", "BBB")
+
+
+def _gap_source(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
+    idx_days = pd.date_range("2021-01-01", periods=100, freq="D", tz="UTC")
+    daily_close = pd.DataFrame(100.0, index=idx_days, columns=list(_GAP_SYMBOLS), dtype="float64")
+    daily_qv = pd.DataFrame(5_000_000.0, index=idx_days, columns=list(_GAP_SYMBOLS), dtype="float64")
+    real_roster = run_mod.build_frozen_pit_roster
+    real_build = run_mod.build_frozen_mhs_candidate
+
+    def _fake_source(request: FrozenMhsBacktestRequest, budget: object, swap: object) -> tuple:
+        idx = pd.date_range("2021-01-01", periods=100 * 24, freq="h", tz="UTC")
+        panels = {
+            key: pd.DataFrame(100.0, index=idx, columns=list(_GAP_SYMBOLS), dtype="float64")
+            for key in ("close", "quote_vol", "taker_buy_quote")
+        }
+        available = pd.DataFrame(
+            np.broadcast_to((idx + pd.Timedelta(hours=1)).to_numpy()[:, None], (len(idx), len(_GAP_SYMBOLS))),
+            index=idx, columns=list(_GAP_SYMBOLS),
+        )
+        return daily_close, daily_qv, panels, available, _GAP_SYMBOLS, {}, {}, "root"
+
+    def _spy_roster(daily_close: object, daily_qv: object, census: object, **kwargs: object) -> object:
+        captured["roster_excluded"] = kwargs.get("excluded_symbols")
+        return real_roster(daily_close, daily_qv, census, **kwargs)  # type: ignore[arg-type]
+
+    def _spy_build(
+        panels: object, available: object, daily_close: object, daily_qv: object, census: object, **kwargs: object
+    ) -> FrozenMhsCandidate:
+        captured["candidate_excluded"] = kwargs.get("excluded_symbols")
+        captured["hourly_columns"] = list(panels["close"].columns)  # type: ignore[index]
+        return real_build(panels, available, daily_close, daily_qv, census, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(run_mod, "_load_frozen_source", _fake_source)
+    monkeypatch.setattr(run_mod, "build_frozen_pit_roster", _spy_roster)
+    monkeypatch.setattr(run_mod, "build_frozen_mhs_candidate", _spy_build)
+    monkeypatch.setattr(run_mod, "evaluate_frozen_mhs_research", lambda *a, **k: _evidence())
+
+
+def test_runner_threads_reviewed_exclusion_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+    _gap_source(monkeypatch, captured)
+    run = run_frozen_mhs_backtest(_request())
+    assert run.source_gap_excluded_symbols == ("LUNAUSDT", "PUMPUSDT")
+    assert captured["roster_excluded"] == captured["candidate_excluded"] == frozenset({"PUMPUSDT", "LUNAUSDT"})
+    assert list(run.candidate.target_weights.columns) == list(_GAP_SYMBOLS)
+    assert bool((run.candidate.target_weights["PUMPUSDT"].to_numpy() == 0.0).all())
+    assert bool((run.candidate.target_weights["LUNAUSDT"].to_numpy() == 0.0).all())
+    assert "PUMPUSDT" in run.source_symbols
+    assert "LUNAUSDT" in run.source_symbols
+
+
+def test_excluded_symbol_absent_from_hourly_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+    _gap_source(monkeypatch, captured)
+    run_frozen_mhs_backtest(_request())
+    assert "PUMPUSDT" not in captured["hourly_columns"]
+    assert "LUNAUSDT" not in captured["hourly_columns"]
+    assert "AAA" in captured["hourly_columns"]
+
+
+def test_held_source_stays_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+    _install_source(monkeypatch, seen)
+    monkeypatch.setattr(run_mod, "build_frozen_mhs_candidate", lambda *a, **k: _candidate(n_days=10))
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise DataIntegrityError("missing 3m source for held AAA")
+
+    monkeypatch.setattr(run_mod, "_iter_mhs_execution_windows", _boom)
+    with pytest.raises(DataIntegrityError, match=r"missing 3m source"):
+        run_frozen_mhs_backtest(_request())

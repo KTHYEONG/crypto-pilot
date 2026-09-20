@@ -358,3 +358,68 @@ def test_strategy_member_validation_branches() -> None:
     panels = _hourly()
     with pytest.raises(ValueError, match="FrozenMhsStrategySpec"):
         build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, strategy=20)  # type: ignore[arg-type]
+
+
+def test_excluded_symbol_never_targetable() -> None:
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    candidate = build_frozen_mhs_candidate(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, excluded_symbols=frozenset({_SYMBOLS[0]})
+    )
+    col = candidate.target_weights[_SYMBOLS[0]].to_numpy()
+    assert bool(np.isfinite(col).all())
+    assert bool((col == 0.0).all())
+    from src.mhs.frozen_research_universe import build_frozen_pit_roster
+
+    roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, excluded_symbols=frozenset({_SYMBOLS[0]}))
+    assert not bool(roster[_SYMBOLS[0]].any())
+
+
+def test_exclusion_retains_census_provenance() -> None:
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    candidate = build_frozen_mhs_candidate(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, excluded_symbols=frozenset({_SYMBOLS[1]})
+    )
+    assert list(candidate.target_weights.columns) == list(_SYMBOLS)
+
+
+def test_unknown_exclusion_fails_closed() -> None:
+    from src.mhs.frozen_research_universe import build_frozen_pit_roster
+
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    with pytest.raises(DataIntegrityError, match="not in census"):
+        build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, excluded_symbols=frozenset({"NOPEUSDT"}))
+    with pytest.raises(DataIntegrityError, match="not in census"):
+        build_frozen_mhs_candidate(
+            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, excluded_symbols=frozenset({"NOPEUSDT"})
+        )
+
+
+def test_empty_exclusion_preserves_behavior() -> None:
+    from src.mhs.frozen_research_universe import build_frozen_pit_roster
+
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    base_roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20)
+    empty_roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, excluded_symbols=frozenset())
+    pd.testing.assert_frame_equal(empty_roster, base_roster)
+    base = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS)
+    empty = build_frozen_mhs_candidate(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, excluded_symbols=frozenset()
+    )
+    pd.testing.assert_frame_equal(empty.target_weights, base.target_weights)
+
+
+def test_breadth_applies_after_exclusion() -> None:
+    from src.mhs.frozen_research_universe import build_frozen_pit_roster
+
+    daily_close, daily_qv = _daily()
+    daily_qv = daily_qv.copy()
+    daily_qv[_SYMBOLS[0]] = daily_qv[_SYMBOLS[0]] * 10.0
+    roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=3, excluded_symbols=frozenset({_SYMBOLS[0]}))
+    assert not bool(roster[_SYMBOLS[0]].any())
+    row_sums = roster.sum(axis=1).to_numpy()
+    assert bool((row_sums <= 3).all())
+    assert bool((row_sums[90:] == 3).all())
