@@ -18,7 +18,7 @@ from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
 from src.mhs.types import ExecutionSpec
 
 import src.mhs.frozen_research_run as run_mod
-from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, run_frozen_mhs_backtest
+from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, frozen_blocked_decisions, run_frozen_mhs_backtest
 
 _SYMBOLS = ("AAA", "BBB", "CCC", "DELISTED")
 
@@ -394,13 +394,13 @@ def _gap_source(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
         return daily_close, daily_qv, panels, available, _GAP_SYMBOLS, {}, {}, "root"
 
     def _spy_roster(daily_close: object, daily_qv: object, census: object, **kwargs: object) -> object:
-        captured["roster_excluded"] = kwargs.get("excluded_symbols")
+        captured["roster_blocked"] = kwargs.get("blocked_decisions")
         return real_roster(daily_close, daily_qv, census, **kwargs)  # type: ignore[arg-type]
 
     def _spy_build(
         panels: object, available: object, daily_close: object, daily_qv: object, census: object, **kwargs: object
     ) -> FrozenMhsCandidate:
-        captured["candidate_excluded"] = kwargs.get("excluded_symbols")
+        captured["candidate_blocked"] = kwargs.get("blocked_decisions")
         captured["hourly_columns"] = list(panels["close"].columns)  # type: ignore[index]
         return real_build(panels, available, daily_close, daily_qv, census, **kwargs)  # type: ignore[arg-type]
 
@@ -414,11 +414,18 @@ def test_runner_threads_reviewed_exclusion_set(monkeypatch: pytest.MonkeyPatch) 
     captured: dict = {}
     _gap_source(monkeypatch, captured)
     run = run_frozen_mhs_backtest(_request())
-    assert run.source_gap_excluded_symbols == ("LUNAUSDT", "PUMPUSDT")
-    assert captured["roster_excluded"] == captured["candidate_excluded"] == frozenset({"PUMPUSDT", "LUNAUSDT"})
+    assert run.source_gap_excluded_symbols == ("PUMPUSDT",)
+    assert run.source_gap_blocked_decisions == 100
+    roster_blocked = captured["roster_blocked"]
+    candidate_blocked = captured["candidate_blocked"]
+    pd.testing.assert_frame_equal(roster_blocked, candidate_blocked)
+    assert bool(roster_blocked["PUMPUSDT"].all())
+    assert not bool(roster_blocked["LUNAUSDT"].any())
+    assert not bool(roster_blocked["AAA"].any())
+    assert not bool(roster_blocked["BBB"].any())
+    assert run.source_gap_blocked_decisions == int(roster_blocked.to_numpy().sum())
     assert list(run.candidate.target_weights.columns) == list(_GAP_SYMBOLS)
     assert bool((run.candidate.target_weights["PUMPUSDT"].to_numpy() == 0.0).all())
-    assert bool((run.candidate.target_weights["LUNAUSDT"].to_numpy() == 0.0).all())
     assert "PUMPUSDT" in run.source_symbols
     assert "LUNAUSDT" in run.source_symbols
 
@@ -428,15 +435,44 @@ def test_excluded_symbol_absent_from_hourly_selection(monkeypatch: pytest.Monkey
     _gap_source(monkeypatch, captured)
     run_frozen_mhs_backtest(_request())
     assert "PUMPUSDT" not in captured["hourly_columns"]
-    assert "LUNAUSDT" not in captured["hourly_columns"]
+    assert "LUNAUSDT" in captured["hourly_columns"]
     assert "AAA" in captured["hourly_columns"]
+
+
+def test_blocked_decisions_uses_half_open_window() -> None:
+    base, _ = _specs()
+    days = pd.DatetimeIndex([pd.Timestamp("2022-02-28", tz="UTC")], tz="UTC")
+    frame = frozen_blocked_decisions(days, ("MANAUSDT",), strategy=FROZEN_MHS_TOP20_V1, base_spec=base)
+    assert not bool(frame.iloc[0, 0])
+
+
+def test_blocked_decisions_blocks_holding_window_overlap() -> None:
+    base, _ = _specs()
+    days = pd.DatetimeIndex([pd.Timestamp("2022-02-27", tz="UTC")], tz="UTC")
+    frame = frozen_blocked_decisions(days, ("MANAUSDT", "AAA"), strategy=FROZEN_MHS_TOP20_V1, base_spec=base)
+    assert bool(frame.loc[days[0], "MANAUSDT"])
+    assert not bool(frame.loc[days[0], "AAA"])
+
+
+def test_blocked_decisions_empty_census_returns_empty_frame() -> None:
+    base, _ = _specs()
+    days = pd.date_range("2021-01-01", periods=3, freq="D", tz="UTC")
+    frame = frozen_blocked_decisions(days, (), strategy=FROZEN_MHS_TOP20_V1, base_spec=base)
+    assert frame.shape == (3, 0)
+
+
+def test_blocked_decisions_empty_registry_blocks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: ())
+    base, _ = _specs()
+    days = pd.date_range("2021-01-01", periods=3, freq="D", tz="UTC")
+    frame = frozen_blocked_decisions(days, ("AAA",), strategy=FROZEN_MHS_TOP20_V1, base_spec=base)
+    assert not bool(frame.to_numpy().any())
 
 
 def test_held_source_stays_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
     _install_source(monkeypatch, seen)
     monkeypatch.setattr(run_mod, "build_frozen_mhs_candidate", lambda *a, **k: _candidate(n_days=10))
-
     def _boom(*args: object, **kwargs: object) -> object:
         raise DataIntegrityError("missing 3m source for held AAA")
 

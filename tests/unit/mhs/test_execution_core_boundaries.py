@@ -210,18 +210,18 @@ def test_later_fill_classification_matches_legacy() -> None:
 
 
 def test_exception_roster_matches_legacy() -> None:
-    """Exception roster preservation: the moved set keeps every member."""
+    """Exception roster preservation: the single registry derives the legacy view."""
     import src.mhs.evaluation.integrity as legacy
     from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
 
-    assert SOURCE_GAP_EXCLUDED_SYMBOLS == legacy.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert frozenset(
+    assert legacy.SOURCE_GAP_EXCLUDED_SYMBOLS is SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert set(SOURCE_GAP_EXCLUDED_SYMBOLS) == frozenset(
         {
             "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT",
             "CVXUSDT", "SLPUSDT", "BNXUSDT", "AIAUSDT", "ICPUSDT", "BNTUSDT",
-            "BTCSTUSDT", "BDXNUSDT",
+            "BTCSTUSDT", "BDXNUSDT", "LUNAUSDT", "MANAUSDT", "NEARUSDT",
         }
-    ) == SOURCE_GAP_EXCLUDED_SYMBOLS
+    )
 
 
 def test_stress_costs_match_legacy_fields() -> None:

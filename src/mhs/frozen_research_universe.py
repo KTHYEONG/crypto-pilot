@@ -16,34 +16,30 @@ def build_frozen_pit_roster(
     census_symbols: tuple[str, ...],
     *,
     breadth: int,
-    excluded_symbols: frozenset[str] = frozenset(),
+    blocked_decisions: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Return a point-in-time daily liquidity roster with no future constituent knowledge.
 
-    The roster is the investable universe for a frozen research strategy.  It
-    admits only symbols whose prior completed observations satisfy the
-    registered liquidity and trading-history requirements, so later listings,
-    delistings, and volume changes cannot alter an earlier decision.
+    A symbol loses its seat only on the decision days whose execution window overlaps an
+    evidenced source gap. Outside those days it competes normally, because the exchange
+    recorded it normally and discarding its whole history would rewrite the investable
+    universe that actually existed.
 
     Args:
-        daily_close: Complete UTC daily close census in canonical symbol order.
+        daily_close: Complete historical daily close census for PIT membership.
         daily_quote_volume: Matching completed daily USD quote turnover census.
         census_symbols: Complete historical exchange symbol order.
         breadth: Positive maximum number of liquidity-ranked members.
-        excluded_symbols: Confirmed unrecoverable sources never eligible for targets.
+        blocked_decisions: Boolean frame sharing the daily index and census columns; True
+            withdraws that symbol's seat for that decision day only.
     Returns:
         Boolean decision-day roster in the supplied canonical column order.
     Raises:
-        DataIntegrityError: Inputs are not a complete aligned UTC PIT census.
-        ValueError: ``breadth`` is not a positive integer.
+        DataIntegrityError: Inputs disagree on index, columns, or observed value domain.
     """
     if isinstance(breadth, bool) or not isinstance(breadth, int) or breadth <= 0:
         raise ValueError(f"breadth must be a positive integer, got {breadth!r}")
     census = list(census_symbols)
-    excluded = set(excluded_symbols)
-    unknown = sorted(s for s in excluded if s not in set(census))
-    if unknown:
-        raise DataIntegrityError(f"excluded symbols not in census: {unknown!r}")
     if len(census) == 0 or any(not isinstance(s, str) or not s for s in census) or len(set(census)) != len(census):
         raise DataIntegrityError("census_symbols must be a non-empty tuple of unique non-empty symbols")
     if (
@@ -68,12 +64,12 @@ def build_frozen_pit_roster(
     median_src = median_turnover.where(eligible_src)
     med_mat = median_src.to_numpy(dtype="float64", na_value=np.nan)
     elig_mat = eligible_src.to_numpy(dtype=bool)
-    excluded_idx = {census.index(s) for s in excluded if s in census}
+    blocked_mat = _blocked_matrix(blocked_decisions, idx, census)
     out = np.zeros((len(idx), len(census)), dtype=bool)
     for i in range(1, len(idx)):
         elig = elig_mat[i - 1].copy()
-        for j in excluded_idx:
-            elig[int(j)] = False
+        if blocked_mat is not None:
+            elig = elig & ~blocked_mat[i]
         if not bool(elig.any()):
             continue
         meds = med_mat[i - 1]
@@ -81,6 +77,21 @@ def build_frozen_pit_roster(
         ranked = [int(j) for j in order if bool(elig[int(j)])][: int(breadth)]
         out[i, ranked] = True
     return pd.DataFrame(out, index=idx, columns=census, dtype=bool)
+
+
+def _blocked_matrix(
+    blocked_decisions: pd.DataFrame | None, idx: pd.DatetimeIndex, census: list[str]
+) -> np.ndarray | None:
+    """Validate the decision-day block frame and return its boolean matrix."""
+    if blocked_decisions is None:
+        return None
+    if not isinstance(blocked_decisions, pd.DataFrame):
+        raise DataIntegrityError("blocked_decisions must be a boolean frame or None")
+    if not blocked_decisions.index.equals(idx) or list(blocked_decisions.columns) != census:
+        raise DataIntegrityError("blocked_decisions must share the daily index and census column order")
+    if not bool((blocked_decisions.dtypes == "bool").all()):
+        raise DataIntegrityError("blocked_decisions must contain only boolean values")
+    return np.asarray(blocked_decisions.to_numpy(dtype=bool), dtype=bool)
 
 
 def _is_utc_midnight_daily(idx: pd.DatetimeIndex) -> bool:

@@ -116,6 +116,7 @@ def test_payload_preserves_strategy_provenance() -> None:
     assert payload["stress_one_way_taker_bps"] == 18.0
     assert payload["base_valid"] is True
     assert payload["research_only"] is True
+    assert payload["source_gap_blocked_decisions"] == run.source_gap_blocked_decisions
     assert "NO_DEPLOYMENT_VERDICT" in payload["limitations"]  # type: ignore[operator]
     assert payload["report_periods"]["P1"]["status"] == "complete"  # type: ignore[index]
     assert payload["report_periods"]["P1"]["base_cagr"] is not None  # type: ignore[index]
@@ -232,22 +233,22 @@ def test_payload_records_integrity_exclusions() -> None:
     assert payload["research_only"] is True
 
 
-def test_registry_remains_frozen_only() -> None:
+def test_registry_is_single_source_gap_view() -> None:
     import argparse
 
     from src.cli.commands.backtest import add_backtest_commands
     from src.mhs.data_policy import (
         MHS_DATA_POLICY_DEFAULT,
         SOURCE_GAP_EXCLUDED_SYMBOLS,
-        frozen_research_source_gap_exclusions,
+        source_gap_excluded_symbols,
     )
 
-    resolved = frozen_research_source_gap_exclusions()
-    assert resolved == frozenset({"PUMPUSDT", "LUNAUSDT"})
+    resolved = source_gap_excluded_symbols()
     assert isinstance(resolved, frozenset)
-    assert frozen_research_source_gap_exclusions() is not resolved
+    assert source_gap_excluded_symbols() is not resolved
+    assert set(resolved) == set(SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert "PUMPUSDT" in SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert "LUNAUSDT" not in SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert "LUNAUSDT" in SOURCE_GAP_EXCLUDED_SYMBOLS
     assert MHS_DATA_POLICY_DEFAULT == "zombie_mask_v1"
     parser = argparse.ArgumentParser()
     add_backtest_commands(parser)

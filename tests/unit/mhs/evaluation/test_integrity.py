@@ -19,7 +19,6 @@ def test_source_gap_excluded_symbols_covers_2026_09_confirmed_permanent_funding_
     # 장기 funding 공백은 Vision 월·일별 원천에도 없어 whole-history 배제한다.
     assert {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
     assert "OMNIUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert isinstance(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS, frozenset)
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_permanent_ohlcv_gap() -> None:
@@ -63,7 +62,11 @@ def test_source_gap_excluded_symbols_after_ohlcv_recollection_sweep() -> None:
     }
     assert recovered.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert {"CVXUSDT", "SLPUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 14
+    assert set(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == {
+        "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT",
+        "CVXUSDT", "SLPUSDT", "BNXUSDT", "AIAUSDT", "ICPUSDT", "BNTUSDT",
+        "BTCSTUSDT", "BDXNUSDT", "LUNAUSDT", "MANAUSDT", "NEARUSDT",
+    }
 
 
 def test_funding_gap_terminal_symbols_accepts_gap_with_no_later_fill() -> None:
@@ -455,7 +458,7 @@ def test_source_gap_excluded_symbols_no_longer_blanket_excludes_resolved_end_of_
     }
     assert resolved.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 14
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 17
     assert {"LITUSDT", "PUMPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
 
 
