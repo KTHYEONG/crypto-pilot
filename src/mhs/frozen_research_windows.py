@@ -16,22 +16,28 @@ from src.mhs.frozen_research_candidate import FrozenMhsCandidate
 def validated_frozen_research_windows(
     candidate: FrozenMhsCandidate,
     windows: Iterable[ExecutionReplayWindow],
+    *,
+    settlement_bars: int,
 ) -> Iterator[ExecutionReplayWindow]:
     """Yield exact 3m execution windows for one frozen entry-target plan.
 
-    Validation proves that every target row is replayed once with market data
-    available after its signal release.  It permits the execution engine's
-    documented OHLCV-close marking fallback while retaining the candidate's
-    wider canonical universe and each window's smaller active/held roster.
+    Validation proves that every target row is replayed once with market data available
+    after its signal release. Source finiteness is asserted only where the plan actually
+    needs a price: a bar at which the symbol carries no inventory and settles no order
+    cannot corrupt the ledger, so demanding evidence there would reject point-in-time
+    reality that the exchange itself recorded normally outside the gap. Structural
+    alignment of every frame remains mandatory for the whole roster.
 
     Args:
         candidate: Complete canonical target plan with entry and release clocks.
         windows: Chronological bounded 3m windows supplied by the execution core.
+        settlement_bars: Bars after a liquidation entry during which the engine may still
+            cross; derived from the execution spec's passive timeout, never guessed.
     Yields:
         The original windows after fail-closed provenance validation.
     Raises:
-        DataIntegrityError: Coverage, timing, roster, funding, price, or
-            terminal-position evidence is incomplete or inconsistent.
+        DataIntegrityError: Coverage, timing, roster, funding, price, or terminal-position
+            evidence is incomplete or inconsistent at a bar the plan depends on.
     """
     expected_columns = tuple(candidate.target_weights.columns)
     expected_labels = list(candidate.target_weights.index)
@@ -43,6 +49,7 @@ def validated_frozen_research_windows(
     seen: set[pd.Timestamp] = set()
     prev_max: pd.Timestamp | None = None
     last_grid_end: pd.Timestamp | None = None
+    carried: frozenset[str] = frozenset()
     for window in windows:
         if not _window_clocks_valid(window):
             raise DataIntegrityError("window clocks, 3-minute grid, or bar availability are invalid")
@@ -60,7 +67,8 @@ def validated_frozen_research_windows(
             raise DataIntegrityError("window local roster must preserve canonical ordering")
         if set(local_cols) != set(local_syms):
             raise DataIntegrityError("window symbols and target columns must cover the same local roster")
-        _check_required_frames(window)
+        required, carried = _required_cells(window, carried, settlement_bars)
+        _check_required_frames(window, required)
         labels = list(window.target_weights.index)
         if len(labels) != len(window.signal_available_at):
             raise DataIntegrityError("window targets and release timestamps must share one length")
@@ -125,7 +133,50 @@ def _window_clocks_valid(window: ExecutionReplayWindow) -> bool:
     return not bool((avail < grid).any())
 
 
-def _check_required_frames(window: ExecutionReplayWindow) -> None:
+def _required_cells(
+    window: ExecutionReplayWindow,
+    carried_held: frozenset[str],
+    settlement_bars: int,
+) -> tuple[np.ndarray, frozenset[str]]:
+    """Mark the (bar, local symbol) cells whose source evidence the ledger consumes.
+
+    A cell is required while the symbol carries inventory or may still cross a resting
+    liquidation. Requirement is derived only from targets inside this window and from the
+    inventory carried in from earlier windows, so a later decision can never retroactively
+    excuse or impose an evidence requirement.
+
+    Args:
+        window: One validated execution piece.
+        carried_held: Symbols still holding inventory when the piece begins.
+        settlement_bars: Bars a liquidation entry may keep crossing for.
+    Returns:
+        Boolean mask shaped `(len(minute_grid), len(window.symbols))` and the symbol set
+        still holding inventory when the piece ends.
+    """
+    grid = window.minute_grid
+    bar_count = len(grid)
+    local = list(window.symbols)
+    required = np.zeros((bar_count, len(local)), dtype=bool)
+    labels = list(window.target_weights.index)
+    carry: set[str] = set()
+    for pos, sym in enumerate(local):
+        held = window.target_weights[sym].to_numpy(dtype="float64") != 0.0
+        open_bar: int | None = 0 if sym in carried_held else None
+        for row, label in enumerate(labels):
+            bar = int(grid.searchsorted(label))
+            if bool(held[row]):
+                if open_bar is None:
+                    open_bar = bar
+            elif open_bar is not None:
+                required[open_bar : min(bar_count, bar + settlement_bars + 1), pos] = True
+                open_bar = None
+        if open_bar is not None:
+            required[open_bar:, pos] = True
+            carry.add(sym)
+    return required, frozenset(carry)
+
+
+def _check_required_frames(window: ExecutionReplayWindow, required: np.ndarray) -> None:
     """Require explicit aligned source frames covering every local symbol."""
     if (
         window.quote_volumes is None
@@ -140,22 +191,25 @@ def _check_required_frames(window: ExecutionReplayWindow) -> None:
     for frame in frames:
         if not frame.index.equals(grid) or any(sym not in frame.columns for sym in local):
             raise DataIntegrityError("window source frames must align to the grid and cover active symbols")
-    prices = np.concatenate(
-        [window.highs[local].to_numpy(dtype="float64"), window.lows[local].to_numpy(dtype="float64"),
-         window.closes[local].to_numpy(dtype="float64"), window.bar_funding[local].to_numpy(dtype="float64")]
+    prices = (
+        window.highs[local].to_numpy(dtype="float64"),
+        window.lows[local].to_numpy(dtype="float64"),
+        window.closes[local].to_numpy(dtype="float64"),
+        window.bar_funding[local].to_numpy(dtype="float64"),
     )
-    if not bool(np.isfinite(prices).all()):
-        raise DataIntegrityError("window trade prices and funding rates must be finite")
+    for values in prices:
+        if not bool(np.isfinite(values[required]).all()):
+            raise DataIntegrityError("window trade prices and funding rates must be finite where held")
     if window.marks is None:
-        effective = window.closes[local].to_numpy(dtype="float64")
+        effective = window.closes[local].to_numpy(dtype="float64")[required]
         if not bool(np.isfinite(effective).all()) or bool((effective <= 0.0).any()):
             raise DataIntegrityError("window effective close fallback marks must be finite positive prices")
     else:
         if not window.marks.index.equals(grid) or any(sym not in window.marks.columns for sym in local):
             raise DataIntegrityError("window source frames must align to the grid and cover active symbols")
-        marks = window.marks[local].to_numpy(dtype="float64")
+        marks = window.marks[local].to_numpy(dtype="float64")[required]
         if bool(np.isinf(marks).any()) or bool(((marks <= 0.0) & np.isfinite(marks)).any()):
             raise DataIntegrityError("window marks must be absent or finite positive prices")
-    volumes = window.quote_volumes[local].to_numpy(dtype="float64")
+    volumes = window.quote_volumes[local].to_numpy(dtype="float64")[required]
     if not bool(np.isfinite(volumes).all()) or bool((volumes < 0.0).any()):
         raise DataIntegrityError("window quote volumes must be finite nonnegative observations")

@@ -186,3 +186,55 @@ def test_roster_rejects_non_utc_midnight_or_gapped_index() -> None:
     with pytest.raises(DataIntegrityError, match="UTC-midnight"):
         build_frozen_pit_roster(gapped, gapped_qv, _SYMBOLS, breadth=20)
     assert np.issubdtype(close.to_numpy().dtype, np.floating)
+
+
+def _blocked(
+    idx: pd.DatetimeIndex, symbols: tuple[str, ...], day: pd.Timestamp | None = None, sym: str | None = None
+) -> pd.DataFrame:
+    frame = pd.DataFrame(False, index=idx, columns=list(symbols), dtype=bool)
+    if day is not None and sym is not None:
+        frame.loc[day, sym] = True
+    return frame
+
+
+def test_blocked_day_returns_seat_to_runner_up() -> None:
+    close, qv = _daily()
+    day = qv.index[95]
+    blocked = _blocked(qv.index, _SYMBOLS, day, "AAA")
+    roster = build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20, blocked_decisions=blocked)
+    assert not bool(roster.loc[day, "AAA"])
+    assert bool(roster.loc[day, "BBB"])
+    assert bool(roster.loc[day, "CCC"])
+    plain = build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20)
+    assert int(roster.loc[day].sum()) == int(plain.loc[day].sum()) - 1
+
+
+def test_unblocked_day_keeps_normal_seat() -> None:
+    close, qv = _daily()
+    day = qv.index[95]
+    other = qv.index[94]
+    blocked = _blocked(qv.index, _SYMBOLS, day, "AAA")
+    roster = build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20, blocked_decisions=blocked)
+    assert bool(roster.loc[other, "AAA"])
+
+
+def test_blocked_decisions_rejects_misaligned_frame() -> None:
+    close, qv = _daily()
+    with pytest.raises(DataIntegrityError, match="blocked_decisions"):
+        build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20, blocked_decisions="nope")  # type: ignore[arg-type]
+    shifted = _blocked(qv.index[1:], _SYMBOLS)
+    with pytest.raises(DataIntegrityError, match="blocked_decisions"):
+        build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20, blocked_decisions=shifted)
+    renamed = _blocked(qv.index, _SYMBOLS).rename(columns={"AAA": "ZZZ"})
+    with pytest.raises(DataIntegrityError, match="blocked_decisions"):
+        build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20, blocked_decisions=renamed)
+    non_bool = _blocked(qv.index, _SYMBOLS).astype(object)
+    with pytest.raises(DataIntegrityError, match="blocked_decisions"):
+        build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20, blocked_decisions=non_bool)
+
+
+def test_no_block_matches_absent_block_frame() -> None:
+    close, qv = _daily()
+    plain = build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20)
+    empty = build_frozen_pit_roster(close, qv, _SYMBOLS, breadth=20, blocked_decisions=_blocked(qv.index, _SYMBOLS))
+    pd.testing.assert_frame_equal(empty, plain)

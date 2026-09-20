@@ -11,6 +11,16 @@ from src.mhs.execution import ExecutionReplayWindow, InstrumentSettlementEvent
 from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V1, FrozenMhsCandidate
 from src.mhs.frozen_research_windows import validated_frozen_research_windows
 
+_SETTLEMENT_BARS = 10
+
+
+def _validated(
+    candidate: FrozenMhsCandidate,
+    windows: object,
+    settlement_bars: int = _SETTLEMENT_BARS,
+) -> object:
+    return validated_frozen_research_windows(candidate, windows, settlement_bars=settlement_bars)  # type: ignore[arg-type]
+
 _SYMBOLS = ("AAA", "BBB")
 _DAY0 = pd.Timestamp("2021-06-01", tz="UTC")
 
@@ -82,7 +92,7 @@ def test_close_fallback_accepted_unchanged() -> None:
     labels = list(candidate.target_weights.index)
     grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
     window = _window(grid, candidate, labels[:2], marks=None)
-    out = list(validated_frozen_research_windows(candidate, [window, _pair(candidate)[1]]))
+    out = list(_validated(candidate, [window, _pair(candidate)[1]]))
     assert out[0] is window
     assert window.marks is None
 
@@ -91,14 +101,15 @@ def test_invalid_effective_fallback_mark_fails() -> None:
     candidate = _candidate()
     labels = list(candidate.target_weights.index)
     grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
+    held_bar = int(grid.searchsorted(labels[0])) + 1
     bad_close = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
-    bad_close.iloc[3, 0] = float("nan")
+    bad_close.iloc[held_bar, 0] = float("nan")
     with pytest.raises(DataIntegrityError, match=r"finite|fallback"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], marks=None, closes=bad_close)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], marks=None, closes=bad_close)]))
     zero_close = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
-    zero_close.iloc[5, 1] = 0.0
+    zero_close.iloc[held_bar + 2, 1] = 0.0
     with pytest.raises(DataIntegrityError, match=r"finite|fallback|positive"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], marks=None, closes=zero_close)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], marks=None, closes=zero_close)]))
 
 
 def test_dynamic_local_roster_projects_canonical_targets() -> None:
@@ -108,7 +119,7 @@ def test_dynamic_local_roster_projects_canonical_targets() -> None:
     local = canon[:29]
     first = _window(_grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2)), candidate, labels[:2], symbols=local)
     second = _window(_grid(labels[2] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2)), candidate, labels[2:], symbols=local)
-    out = list(validated_frozen_research_windows(candidate, [first, second]))
+    out = list(_validated(candidate, [first, second]))
     assert len(out) == 2
     assert out[0] is first
 
@@ -121,7 +132,7 @@ def test_omitted_nonzero_target_rejected() -> None:
     assert "BBB" not in pruned
     narrow = _window(_grid(labels[0] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2)), candidate, labels, symbols=pruned)
     with pytest.raises(DataIntegrityError, match="nonzero"):
-        list(validated_frozen_research_windows(candidate, [narrow]))
+        list(_validated(candidate, [narrow]))
 
 
 def test_reordered_local_roster_rejected() -> None:
@@ -146,7 +157,7 @@ def test_reordered_local_roster_rejected() -> None:
         bar_available_at=grid + pd.Timedelta(minutes=3),
     )
     with pytest.raises(DataIntegrityError, match="canonical ordering"):
-        list(validated_frozen_research_windows(candidate, [window]))
+        list(_validated(candidate, [window]))
 
 
 def test_release_to_entry_causality_exact() -> None:
@@ -155,17 +166,17 @@ def test_release_to_entry_causality_exact() -> None:
     grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
     equal_avail = pd.DatetimeIndex([labels[0], labels[1]], tz="UTC")
     with pytest.raises(DataIntegrityError, match="precede entry"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], signal_available_at=equal_avail)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], signal_available_at=equal_avail)]))
     future_avail = pd.DatetimeIndex([labels[0] + pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=1)], tz="UTC")
     with pytest.raises(DataIntegrityError, match="precede entry"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], signal_available_at=future_avail)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], signal_available_at=future_avail)]))
 
 
 def test_validated_windows_yield_exact_ordered_coverage() -> None:
     """Two disjoint windows stream once in order as the original objects."""
     candidate = _candidate()
     first, second = _pair(candidate)
-    out = list(validated_frozen_research_windows(candidate, [first, second]))
+    out = list(_validated(candidate, [first, second]))
     assert out[0] is first
     assert out[1] is second
     assert [list(w.target_weights.index) for w in out] == [list(candidate.target_weights.index[:2]), list(candidate.target_weights.index[2:])]
@@ -178,7 +189,7 @@ def test_validated_windows_reject_duplicate_decision() -> None:
     labels = list(candidate.target_weights.index)
     duped = _window(_grid(labels[2] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2)), candidate, [labels[2], labels[2]])
     with pytest.raises(DataIntegrityError, match="duplicat"):
-        list(validated_frozen_research_windows(candidate, [first, duped, second]))
+        list(_validated(candidate, [first, duped, second]))
 
 
 def test_validated_windows_reject_omitted_decision() -> None:
@@ -187,7 +198,7 @@ def test_validated_windows_reject_omitted_decision() -> None:
     labels = list(candidate.target_weights.index)
     wide = _window(_grid(labels[0] - pd.Timedelta(hours=1), labels[-1] + pd.Timedelta(hours=2)), candidate, labels[:2])
     with pytest.raises(DataIntegrityError, match="omitted or truncated"):
-        list(validated_frozen_research_windows(candidate, [wide]))
+        list(_validated(candidate, [wide]))
 
 
 def test_validated_windows_enforce_release_clock() -> None:
@@ -198,11 +209,11 @@ def test_validated_windows_enforce_release_clock() -> None:
     shifted_avail = pd.DatetimeIndex([labels[0], labels[1]], tz="UTC")
     bad = _window(grid, candidate, labels[:2], signal_available_at=shifted_avail)
     with pytest.raises(DataIntegrityError, match="precede entry"):
-        list(validated_frozen_research_windows(candidate, [bad]))
+        list(_validated(candidate, [bad]))
     short_avail = pd.DatetimeIndex([candidate.signal_available_at[0]], tz="UTC")
     bad_len = _window(grid, candidate, labels[:2], signal_available_at=short_avail)
     with pytest.raises(DataIntegrityError, match="share one length"):
-        list(validated_frozen_research_windows(candidate, [bad_len]))
+        list(_validated(candidate, [bad_len]))
 
 
 def test_validated_windows_require_knowledge() -> None:
@@ -212,7 +223,7 @@ def test_validated_windows_require_knowledge() -> None:
     grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
     no_knowledge = _window(grid, candidate, labels[:2], funding_known=None)
     with pytest.raises(DataIntegrityError, match="explicit marks"):
-        list(validated_frozen_research_windows(candidate, [no_knowledge]))
+        list(_validated(candidate, [no_knowledge]))
 
 
 def test_validated_windows_reject_nonfinite_or_impossible_source() -> None:
@@ -220,18 +231,19 @@ def test_validated_windows_reject_nonfinite_or_impossible_source() -> None:
     candidate = _candidate()
     labels = list(candidate.target_weights.index)
     grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
+    held_bar = int(grid.searchsorted(labels[0])) + 1
     bad_close = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
-    bad_close.iloc[3, 0] = float("inf")
+    bad_close.iloc[held_bar, 0] = float("inf")
     with pytest.raises(DataIntegrityError, match="finite"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], closes=bad_close)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], closes=bad_close)]))
     bad_mark = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
-    bad_mark.iloc[5, 1] = 0.0
+    bad_mark.iloc[held_bar + 2, 1] = 0.0
     with pytest.raises(DataIntegrityError, match="marks"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], marks=bad_mark)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], marks=bad_mark)]))
     bad_qv = pd.DataFrame(1000.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
-    bad_qv.iloc[7, 0] = -2.0
+    bad_qv.iloc[held_bar + 4, 0] = -2.0
     with pytest.raises(DataIntegrityError, match="volumes"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], quote_volumes=bad_qv)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], quote_volumes=bad_qv)]))
 
 
 def test_validated_windows_reject_misaligned_frames() -> None:
@@ -241,10 +253,10 @@ def test_validated_windows_reject_misaligned_frames() -> None:
     grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
     short = pd.DataFrame(100.0, index=grid[:-5], columns=list(_SYMBOLS), dtype="float64")
     with pytest.raises(DataIntegrityError, match="align to the grid"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], closes=short)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], closes=short)]))
     narrow = pd.DataFrame(100.0, index=grid, columns=["AAA"], dtype="float64")
     with pytest.raises(DataIntegrityError, match="align to the grid"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], closes=narrow)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], closes=narrow)]))
 
 
 def test_validated_windows_reject_bad_clocks() -> None:
@@ -258,43 +270,43 @@ def test_validated_windows_reject_bad_clocks() -> None:
 
     naive_start = grid[0].tz_localize(None)
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(window_start=naive_start)]))
+        list(_validated(candidate, [_bad(window_start=naive_start)]))
     eastern = grid[0].tz_convert(timezone(timedelta(hours=-5)))
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(window_start=eastern)]))
+        list(_validated(candidate, [_bad(window_start=eastern)]))
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(window_start=grid[-1], window_end=grid[0])]))
+        list(_validated(candidate, [_bad(window_start=grid[-1], window_end=grid[0])]))
     single = grid[:1]
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(
+        list(_validated(candidate, [_bad(
             minute_grid=single, window_start=single[0], window_end=single[0] + pd.Timedelta(minutes=3),
             bar_available_at=single + pd.Timedelta(minutes=3),
         )]))
     dup = grid.append(grid[:1])
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(minute_grid=dup)]))
+        list(_validated(candidate, [_bad(minute_grid=dup)]))
     coarse = pd.date_range(grid[0], grid[-1], freq="5min", tz="UTC")
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(minute_grid=coarse)]))
+        list(_validated(candidate, [_bad(minute_grid=coarse)]))
     shifted = grid + pd.Timedelta(hours=9)
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(minute_grid=shifted)]))
+        list(_validated(candidate, [_bad(minute_grid=shifted)]))
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(bar_available_at=None)]))
+        list(_validated(candidate, [_bad(bar_available_at=None)]))
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(bar_available_at=grid[:-1] + pd.Timedelta(minutes=3))]))
+        list(_validated(candidate, [_bad(bar_available_at=grid[:-1] + pd.Timedelta(minutes=3))]))
     early_avail = grid - pd.Timedelta(minutes=3)
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(bar_available_at=early_avail)]))
+        list(_validated(candidate, [_bad(bar_available_at=early_avail)]))
     non_utc_grid = grid.tz_convert(timezone(timedelta(hours=-5)))
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(minute_grid=non_utc_grid)]))
+        list(_validated(candidate, [_bad(minute_grid=non_utc_grid)]))
     naive_grid = grid.tz_localize(None)
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(minute_grid=naive_grid)]))
+        list(_validated(candidate, [_bad(minute_grid=naive_grid)]))
     naive_avail = grid.tz_localize(None) + pd.Timedelta(minutes=3)
     with pytest.raises(DataIntegrityError, match="clocks"):
-        list(validated_frozen_research_windows(candidate, [_bad(bar_available_at=naive_avail)]))
+        list(_validated(candidate, [_bad(bar_available_at=naive_avail)]))
 
 
 def test_validated_windows_reject_unknown_or_altered_targets() -> None:
@@ -306,12 +318,12 @@ def test_validated_windows_reject_unknown_or_altered_targets() -> None:
     alien_weights = pd.DataFrame({"AAA": [0.05], "BBB": [-0.05]}, index=pd.DatetimeIndex([outsider], tz="UTC"))
     alien_avail = pd.DatetimeIndex([outsider - pd.Timedelta(hours=1)], tz="UTC")
     with pytest.raises(DataIntegrityError, match="unknown to or duplicated"):
-        list(validated_frozen_research_windows(candidate, [_window(
+        list(_validated(candidate, [_window(
             grid, candidate, labels[:1], target_weights=alien_weights, signal_available_at=alien_avail)]))
     doped = candidate.target_weights.loc[labels[:2]].copy()
     doped.iloc[0, 0] += 0.5
     with pytest.raises(DataIntegrityError, match="equal the frozen candidate"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], target_weights=doped)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], target_weights=doped)]))
 
 
 def test_validated_windows_reject_unresolved_final_grid() -> None:
@@ -321,9 +333,9 @@ def test_validated_windows_reject_unresolved_final_grid() -> None:
     clipped = _grid(labels[0] - pd.Timedelta(hours=1), labels[-1])
     only = _window(clipped, candidate, labels, window_end=labels[-1])
     with pytest.raises(DataIntegrityError, match="execution horizon"):
-        list(validated_frozen_research_windows(candidate, [only]))
+        list(_validated(candidate, [only]))
     with pytest.raises(DataIntegrityError, match="execution horizon"):
-        list(validated_frozen_research_windows(candidate, []))
+        list(_validated(candidate, []))
 
 
 def test_validated_windows_allow_zero_target_roster_exit() -> None:
@@ -333,7 +345,7 @@ def test_validated_windows_allow_zero_target_roster_exit() -> None:
     first = _window(_grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2)), candidate, labels[:2])
     narrow_grid = _grid(labels[2] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2))
     dropped = _window(narrow_grid, candidate, labels[2:], symbols=("BBB",))
-    out = list(validated_frozen_research_windows(candidate, [first, dropped]))
+    out = list(_validated(candidate, [first, dropped]))
     assert len(out) == 2
 
 
@@ -349,7 +361,7 @@ def test_validated_windows_allow_evidenced_settlement_exit() -> None:
     )
     narrow_grid = _grid(labels[2] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2))
     settled = _window(narrow_grid, candidate, labels[2:], symbols=("BBB",), settlement_events=(event,))
-    out = list(validated_frozen_research_windows(candidate, [first, settled]))
+    out = list(_validated(candidate, [first, settled]))
     assert len(out) == 2
     assert out[1] is settled
 
@@ -362,11 +374,11 @@ def test_validated_windows_reject_column_and_roster_mismatch() -> None:
     grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
     swapped = _window(grid, candidate, labels[:2], columns=("BBB", "AAA"))
     with pytest.raises(DataIntegrityError, match="canonical column order"):
-        list(validated_frozen_research_windows(candidate, [swapped]))
+        list(_validated(candidate, [swapped]))
     assert first.columns == _SYMBOLS
     thin = _window(grid, candidate, labels[:2], symbols=("AAA",))
     with pytest.raises(DataIntegrityError, match="nonzero"):
-        list(validated_frozen_research_windows(candidate, [thin]))
+        list(_validated(candidate, [thin]))
 
 
 def test_validated_windows_reject_out_of_order_stream() -> None:
@@ -374,12 +386,12 @@ def test_validated_windows_reject_out_of_order_stream() -> None:
     candidate = _candidate()
     first, second = _pair(candidate)
     with pytest.raises(DataIntegrityError, match="chronological order"):
-        list(validated_frozen_research_windows(candidate, [second, first]))
+        list(_validated(candidate, [second, first]))
     labels = list(candidate.target_weights.index)
     grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
     shuffled = _window(grid, candidate, [labels[1], labels[0]])
     with pytest.raises(DataIntegrityError, match="chronological order"):
-        list(validated_frozen_research_windows(candidate, [shuffled]))
+        list(_validated(candidate, [shuffled]))
 
 
 def test_validated_windows_stream_without_retaining_source() -> None:
@@ -395,7 +407,7 @@ def test_validated_windows_stream_without_retaining_source() -> None:
             reads.append(pos)
             yield window
 
-    stream = validated_frozen_research_windows(candidate, _source())
+    stream = _validated(candidate, _source())
     head = next(stream)
     assert head is first
     assert reads == [0]
@@ -409,7 +421,7 @@ def test_validated_windows_reject_empty_candidate() -> None:
         signal_available_at=pd.DatetimeIndex([], tz="UTC"), strategy=FROZEN_MHS_TOP20_V1,
     )
     with pytest.raises(DataIntegrityError, match="at least one target row"):
-        list(validated_frozen_research_windows(empty, []))
+        list(_validated(empty, []))
 
 
 def test_local_roster_subset_and_order_branches() -> None:
@@ -419,24 +431,131 @@ def test_local_roster_subset_and_order_branches() -> None:
     empty_weights = candidate.target_weights.loc[labels, []].copy()
     empty_window = _window(grid, candidate, labels, symbols=_SYMBOLS, target_weights=empty_weights)
     with pytest.raises(DataIntegrityError, match="non-empty"):
-        list(validated_frozen_research_windows(candidate, [empty_window]))
+        list(_validated(candidate, [empty_window]))
     alien_weights = candidate.target_weights.loc[labels[:2]].copy()
     alien_weights.columns = ["AAA", "ZZZ"]
     alien = _window(grid, candidate, labels[:2], target_weights=alien_weights)
     with pytest.raises(DataIntegrityError, match="subset"):
-        list(validated_frozen_research_windows(candidate, [alien]))
+        list(_validated(candidate, [alien]))
     ordered_cols = _window(grid, candidate, labels[:2])
     reordered_syms = __import__("dataclasses").replace(ordered_cols, symbols=("BBB", "AAA"))
     with pytest.raises(DataIntegrityError, match="canonical ordering"):
-        list(validated_frozen_research_windows(candidate, [reordered_syms]))
+        list(_validated(candidate, [reordered_syms]))
     mismatched = __import__("dataclasses").replace(ordered_cols, symbols=("AAA", "BBB"),
         target_weights=candidate.target_weights.loc[labels[:2], ["AAA"]].copy())
     with pytest.raises(DataIntegrityError, match="same local roster"):
-        list(validated_frozen_research_windows(candidate, [mismatched]))
+        list(_validated(candidate, [mismatched]))
     thin_target = candidate.target_weights.loc[labels[:2], ["AAA"]].copy()
     thin_both = _window(grid, candidate, labels[:2], symbols=("AAA",), target_weights=thin_target)
     with pytest.raises(DataIntegrityError, match="nonzero"):
-        list(validated_frozen_research_windows(candidate, [thin_both]))
+        list(_validated(candidate, [thin_both]))
     narrow_marks = pd.DataFrame(100.0, index=grid, columns=["AAA"], dtype="float64")
     with pytest.raises(DataIntegrityError, match="align to the grid"):
-        list(validated_frozen_research_windows(candidate, [_window(grid, candidate, labels[:2], marks=narrow_marks)]))
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], marks=narrow_marks)]))
+
+
+def _idle_candidate() -> FrozenMhsCandidate:
+    base = _candidate()
+    weights = base.target_weights.copy()
+    weights.loc[list(weights.index)[:2]] = 0.0
+    return FrozenMhsCandidate(
+        target_weights=weights, signal_available_at=base.signal_available_at, strategy=base.strategy
+    )
+
+
+def test_unheld_gap_passes_through() -> None:
+    candidate = _idle_candidate()
+    labels = list(candidate.target_weights.index)
+    grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
+    gappy = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
+    gappy.iloc[10:20, 0] = float("nan")
+    first = _window(grid, candidate, labels[:2], closes=gappy)
+    second = _window(_grid(labels[2] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2)), candidate, labels[2:])
+    out = list(_validated(candidate, [first, second]))
+    assert out[0] is first
+
+
+def test_held_gap_fails_closed() -> None:
+    candidate = _candidate()
+    labels = list(candidate.target_weights.index)
+    grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
+    bad_close = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
+    bad_close.iloc[int(grid.searchsorted(labels[0])), 0] = float("nan")
+    with pytest.raises(DataIntegrityError, match="finite"):
+        list(_validated(candidate, [_window(grid, candidate, labels[:2], closes=bad_close)]))
+
+
+def test_settlement_window_gap_fails_closed() -> None:
+    candidate = _candidate(zero_tail=True)
+    labels = list(candidate.target_weights.index)
+    grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2))
+    zero_bar = int(grid.searchsorted(labels[2]))
+    bad_close = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
+    bad_close.iloc[zero_bar + 3, 0] = float("nan")
+    with pytest.raises(DataIntegrityError, match="finite"):
+        list(_validated(candidate, [_window(grid, candidate, labels, closes=bad_close)], settlement_bars=_SETTLEMENT_BARS))
+
+
+def test_post_settlement_gap_passes() -> None:
+    candidate = _candidate(zero_tail=True)
+    labels = list(candidate.target_weights.index)
+    grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2))
+    zero_bar = int(grid.searchsorted(labels[2]))
+    gappy = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
+    gappy.iloc[zero_bar + _SETTLEMENT_BARS + 5, 0] = float("nan")
+    out = list(_validated(candidate, [_window(grid, candidate, labels)], settlement_bars=_SETTLEMENT_BARS))
+    assert len(out) == 1
+
+
+def test_carried_hold_across_pieces_fails() -> None:
+    candidate = _candidate()
+    labels = list(candidate.target_weights.index)
+    first = _window(_grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2)), candidate, labels[:2])
+    grid = _grid(labels[2] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2))
+    bad_close = pd.DataFrame(100.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
+    bad_close.iloc[0, 0] = float("nan")
+    second = _window(grid, candidate, labels[2:], closes=bad_close)
+    with pytest.raises(DataIntegrityError, match="finite"):
+        list(_validated(candidate, [first, second]))
+
+
+def test_structure_checked_for_unheld_roster() -> None:
+    base = _candidate()
+    weights = base.target_weights.copy()
+    weights.loc[:, :] = 0.0
+    flat = FrozenMhsCandidate(
+        target_weights=weights, signal_available_at=base.signal_available_at, strategy=base.strategy
+    )
+    labels = list(flat.target_weights.index)
+    grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2))
+    narrow = pd.DataFrame(100.0, index=grid, columns=["AAA"], dtype="float64")
+    with pytest.raises(DataIntegrityError, match="align to the grid"):
+        list(_validated(flat, [_window(grid, flat, labels[:2], closes=narrow)]))
+
+
+def test_negative_volume_only_matters_when_held() -> None:
+    base = _candidate()
+    weights = base.target_weights.copy()
+    weights["BBB"] = 0.0
+    candidate = FrozenMhsCandidate(
+        target_weights=weights, signal_available_at=base.signal_available_at, strategy=base.strategy
+    )
+    labels = list(candidate.target_weights.index)
+    grid = _grid(labels[0] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2))
+    idle_bad = pd.DataFrame(1000.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
+    idle_bad.iloc[40, 1] = -2.0
+    out = list(_validated(candidate, [_window(grid, candidate, labels, quote_volumes=idle_bad)]))
+    assert len(out) == 1
+    held_bad = pd.DataFrame(1000.0, index=grid, columns=list(_SYMBOLS), dtype="float64")
+    held_bad.iloc[40, 0] = -2.0
+    with pytest.raises(DataIntegrityError, match="volumes"):
+        list(_validated(candidate, [_window(grid, candidate, labels, quote_volumes=held_bad)]))
+
+
+def test_healthy_sequence_passes_unchanged() -> None:
+    candidate = _candidate()
+    first, second = _pair(candidate)
+    out = list(_validated(candidate, [first, second], settlement_bars=_SETTLEMENT_BARS))
+    assert len(out) == 2
+    assert out[0] is first
+    assert out[1] is second
