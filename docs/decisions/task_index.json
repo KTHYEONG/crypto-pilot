@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FROZEN_SOURCE_GAP_AND_WINDOW_CONTINUITY",
+      "date": "2026-09-20",
+      "adr_id": "ADR_20260920_MHS_FROZEN_SOURCE_GAP_AND_WINDOW_CONTINUITY",
+      "domain": "execution",
+      "title": "Frozen MHS 원천공백 제외와 3분봉 경계 연속성",
+      "why": "장기 리플레이의 원천 불가 공백과 물리적 윈도우 경계를 데이터 결손으로 오판해 인증 백테스트가 중단됐다.",
+      "resolution": "OHLCV 종가 기반 이전 마크 연속성 검증과 PUMP/LUNA frozen 전용 원천공백 registry를 추가하고 후보·유니버스·실행·보고 경로에 동일하게 연결했다.",
+      "impact": "분할·비분할 3분봉 리플레이가 동일한 원장을 만들고 복구 불가 심볼은 census provenance를 보존한 채 타깃에서 제외되어 장기 검증이 fail-closed로 재현된다.",
+      "caveat": "이는 연구용 무결성 보정이며 원천 공백이 없는 장기 구간의 성과·배포 적격성이나 실제 체결을 보장하지 않는다."
+    },
+    {
       "task_id": "TASK_MHS_FROZEN_RESEARCH",
       "date": "2026-09-20",
       "adr_id": "ADR_20260920_MHS_FROZEN_RESEARCH",
@@ -1007,16 +1018,6 @@
       "why": "ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT 구현 직후 실제 CLI(--pnl-vol-target-mode constant_risk)로 전체 2021-2025/3m 원장을 7회 반복 실행해 스펙의 반사실(scratch 시뮬레이션) 예측이 실제 파이프라인에서도 성립하는지 검증.",
       "resolution": "실행 중 2개의 진짜 버그를 발견/수정: (1) top-level(blend) 경로가 target_vol을 전체 5년 미분할 참조로 재해석해 fold 경계별 재적합과 갈라짐(FOLD_BLEND_PATH_DIVERGENCE 최초 노출) -> _constant_risk_target_vol 신설로 top_level 경계를 fold와 동일하게 oos_start 슬라이스. (2) fold별 growth_budget_annual_vol 재해석이 표본 특이적이라 fold마다 다른 target을 만들어 위험 등화가 무력화됨 -> CONSTANT_RISK_TARGET_ANNUAL_VOL 단일 고정 상수로 교체(fold 경계별 재적합 폐지, feasibility 클램프만 경계별 유지). (3) fold_realized_risk_parity 진단이 스케일 적용 전(Phase A reference pass) 수익률을 측정하고 있어 target_vol을 바꿔도 값이 불변이던 버그를 발견, 스케일 적용 후(deployed) 원장으로 측정 지점 이동. target=0.40 고정 후 halflife 60/90/120/150을 실측 스윕: risk-parity(로그비)는 0.63(halflife 미적용시 근사)->0.234(hl=90)로 대폭 개선, fold_growth_concentration.max_fold_share는 baseline 0.551에서 0.526(hl=90, 최선)까지만 하락(0.5 미달). 동시에 hl이 짧을수록 새로 노출된 FOLD_BLEND_PATH_DIVERGENCE가 강해지는 단조 트레이드오프를 확인(hl=90:0.317 FAIL / hl=120:0.264 FAIL / hl=150:0.230 PASS, risk-parity 0.373 규정 위반이나 관측전용이라 게이트엔 무영향)하여 단일 halflife 다이얼로는 두 게이트를 동시통과시킬 수 없음을 실측으로 반증. hl=90(1차 목표에 최근접)을 최종 등록값으로 확정.",
       "impact": "Research-GO는 여전히 미달성(reason_codes=[FOLD_BLEND_PATH_DIVERGENCE, FOLD_GROWTH_CONCENTRATION], run_id는 docs/results/mhs_run_history/latest.json 참조). 위험 등화 메커니즘 자체는 실측 검증됨(fold 실현변동성 0.31~0.45로 baseline 0.28~0.57 대비 수렴). 후속 과제: fold가 자체 EWMA를 재적합하지 않고 blend의 연속 스케일 궤적을 날짜로 슬라이스해 재사용하는 구조적 대안(파라미터 튜닝이 아닌 아키텍처 변경) 필요."
-    },
-    {
-      "task_id": "MHS_CONSTANT_RISK_DEPLOYMENT",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT",
-      "domain": "risk",
-      "title": "MHS constant_risk 노출 모드 신설로 FOLD_GROWTH_CONCENTRATION 근본 해결",
-      "why": "FOLD_GROWTH_CONCENTRATION(max_fold_share=0.551>0.5)이 Research-GO를 차단. 실측 근본원인은 노출 스케일이 gross 공간에서만 통제되어 fold3(2025)이 다른 fold 대비 2배 실현위험(0.57 vs 0.28~0.30)을 동일 gross/scale로 배치한 것(D1: fold별 90일 vol-target 데드존, D2: growth_budget target_vol이 leverage_ceiling에 75~98% 포화, D3: Kelly-LCB 항의 경기순응성).",
-      "resolution": "src/mhs/params.py에 CONSTANT_RISK_EWMA_HALFLIFE_DAYS/MIN_PERIODS_DAYS/CAP_BINDING_QUANTILE/FOLD_REALIZED_RISK_PARITY_TOLERANCE 신설. scaling.py에 _feasible_constant_risk_target/_constant_risk_scale/_constant_risk_target_vol_by_boundary 추가(Kelly 블렌드 비경유, I-WARM 워밍업 지원, leverage_ceiling*q10(sigma_book) fail-closed 클램프), _replay_exposure_scale에 4번째 opt-in 모드로 배선. evaluation.py에 관측 전용 _fold_realized_risk_parity 진단 추가(report_schema/persist에 fold_realized_risk_parity 필드 배선). contracts/validation/pipeline-config/CLI에 pnl_vol_target_mode='constant_risk' 선택지 확장(기존 3개 모드 및 CLI 실효 기본값은 바이트 동일 보존). 반사실 실측(scratch/test_constant_risk_counterfactual.py): sigma*=0.40 halflife 60d에서 baseline 대비 max_fold_share 0.549->0.373, 4-fold 평균 CAGR 1.13->1.70. /check 과정에서 is_streaming_scale_mode의 committee_kelly_sizing 단독 게이트를 committee_capital AND committee_kelly_sizing으로 교정(committee_kelly_sizing 기본값이 True로 바뀌며 committee_capital=False 요청도 부당하게 non-streaming 경로로 강제되어 골든 테스트에서 잠재해 있던 leverage frontier 버그를 노출시켰던 문제)하고, entry_point 골든 테스트의 MhsRunConfig에 execution_universe_size=30/growth_envelope=conservative를 명시해 CLI 실효 기본값 표류로 인한 골든 불일치를 해소.",
-      "impact": "기존 median_relative/exante_target/growth_budget 3개 모드는 바이트 동일. 신규 constant_risk는 opt-in이며 CLI 실효 기본값은 변경하지 않음(별도 ADR에서 승격 검토). is_streaming_scale_mode 수정은 committee_capital=False 요청의 스트리밍 경로를 복원해 실행 성능을 개선하고 부수적으로 골든 테스트의 latent 버그를 노출/수정함."
     }
   ]
 }
