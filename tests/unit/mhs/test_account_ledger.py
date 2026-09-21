@@ -460,3 +460,313 @@ def test_replay_account_fixed_replay_unchanged_by_unit_equity() -> None:
     )
 
     pd.testing.assert_series_equal(with_equity.daily_equity, plain.daily_equity)
+
+
+def _maker_single_day(
+    closes: list[float],
+    lows: list[float],
+    highs: list[float],
+    weights: list[list[float]] | None = None,
+    window: int = 10,
+    step: float | None = 0.001,
+    ratio: float = 0.01,
+    leverage: int = 10,
+    filters: bool = True,
+) -> AccountLedgerResult:
+    dates = pd.date_range("2026-01-01", periods=1, freq="D", tz="UTC")
+    bars = [dates[0] + pd.Timedelta(minutes=3 * i) for i in range(len(closes))]
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], weights or [[1.0]])
+    index = pd.DatetimeIndex(bars)
+    marks = AccountMarkPanels(
+        close=pd.DataFrame([[c] for c in closes], index=index, columns=["BTCUSDT"], dtype="float64"),
+        high=pd.DataFrame([[h] for h in highs], index=index, columns=["BTCUSDT"], dtype="float64"),
+        low=pd.DataFrame([[lo] for lo in lows], index=index, columns=["BTCUSDT"], dtype="float64"),
+    )
+    return replay_account(
+        unit, marks, funding, adv, sigma, _rules(step=step, minimum=0.0, ratio=ratio, leverage=leverage),
+        _fixed_policy(), capital=1000.0, taker_fee_bps=6.0, apply_order_filters=filters,
+        execution="maker", maker_fee_bps=2.0, passive_window_bars=window,
+    )
+
+
+def test_replay_account_taker_execution_ignores_maker_params() -> None:
+    """Default replay matches explicit taker execution with maker params attached."""
+    dates = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0], [0.5], [0.5]])
+    marks = _panels(list(dates), ["BTCUSDT"], [[100.0], [101.0], [99.0]], spread=0.001)
+
+    plain = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0),
+        _fixed_policy(exposure_max=2.0), capital=1000.0, taker_fee_bps=6.0,
+    )
+    explicit = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0),
+        _fixed_policy(exposure_max=2.0), capital=1000.0, taker_fee_bps=6.0,
+        execution="taker", maker_fee_bps=2.0, passive_window_bars=10,
+    )
+
+    pd.testing.assert_series_equal(explicit.daily_equity, plain.daily_equity)
+    assert explicit.fee_paid == pytest.approx(plain.fee_paid)
+    assert explicit.maker_fill_fraction == 0.0
+    assert plain.maker_fill_fraction == 0.0
+
+
+def test_replay_account_maker_fills_at_anchor_on_trade_through() -> None:
+    """A buy whose window low trades strictly below the anchor fills as maker."""
+    result = _maker_single_day([100.0, 100.0, 100.0], [100.0, 99.5, 100.0], [100.0, 100.0, 100.0])
+
+    assert result.fee_paid == pytest.approx(10.0 * 100.0 * 2e-4)
+    assert result.daily_equity.iloc[0] == pytest.approx(1000.0 - 10.0 * 100.0 * 2e-4)
+    assert result.maker_fill_fraction == pytest.approx(1.0)
+
+
+def test_replay_account_maker_touch_without_trade_through_falls_back() -> None:
+    """A low exactly equal to the anchor is a touch, so the taker fallback applies."""
+    result = _maker_single_day([100.0, 100.0, 100.0], [100.0, 100.0, 100.0], [100.0, 100.0, 100.0])
+
+    assert result.fee_paid == pytest.approx(10.0 * 100.0 * 6e-4)
+    assert result.maker_fill_fraction == pytest.approx(0.0)
+
+
+def test_replay_account_maker_sell_fills_on_high_trade_through() -> None:
+    """A sell whose window high trades strictly above the anchor fills as maker."""
+    result = _maker_single_day(
+        [100.0, 100.0], [100.0, 100.0], [100.0, 100.5], weights=[[-1.0]],
+    )
+
+    assert result.fee_paid == pytest.approx(10.0 * 100.0 * 2e-4)
+    assert result.daily_equity.iloc[0] == pytest.approx(1000.0 - 10.0 * 100.0 * 2e-4)
+    assert result.maker_fill_fraction == pytest.approx(1.0)
+
+
+def test_replay_account_maker_unfilled_crosses_at_window_end_close() -> None:
+    """Without penetration the buy crosses at the last window close with taker fees."""
+    result = _maker_single_day([100.0, 102.0, 105.0], [100.0, 101.0, 103.0], [100.0, 102.0, 105.0])
+
+    fee = 10.0 * 105.0 * 6e-4
+    assert result.fee_paid == pytest.approx(fee)
+    assert result.daily_equity.iloc[0] == pytest.approx(1000.0 - 10.0 * (105.0 - 100.0) - fee)
+    assert result.maker_fill_fraction == pytest.approx(0.0)
+
+
+def test_replay_account_maker_window_stays_within_holding_segment() -> None:
+    """A penetration past the next entry never fills the current segment's order."""
+    dates = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
+    bars = [dates[0], dates[0] + pd.Timedelta(minutes=3), dates[1], dates[1] + pd.Timedelta(minutes=3)]
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0], [1.0]])
+    index = pd.DatetimeIndex(bars)
+    marks = AccountMarkPanels(
+        close=pd.DataFrame([[100.0], [101.0], [200.0], [50.0]], index=index, columns=["BTCUSDT"], dtype="float64"),
+        high=pd.DataFrame([[100.0], [101.0], [200.0], [50.0]], index=index, columns=["BTCUSDT"], dtype="float64"),
+        low=pd.DataFrame([[100.0], [101.0], [200.0], [50.0]], index=index, columns=["BTCUSDT"], dtype="float64"),
+    )
+    result = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0),
+        _fixed_policy(), capital=1000.0, taker_fee_bps=6.0,
+        execution="maker", maker_fee_bps=2.0, passive_window_bars=100,
+    )
+
+    fee = 10.0 * 101.0 * 6e-4
+    assert result.daily_equity.iloc[0] == pytest.approx(1000.0 - 10.0 * (101.0 - 100.0) - fee)
+
+
+def test_replay_account_maker_nan_bars_never_fill() -> None:
+    """All-NaN window lows cannot print a maker fill; the fallback uses finite closes."""
+    finite_fallback = _maker_single_day(
+        [100.0, 102.0, 103.0],
+        [100.0, float("nan"), float("nan")],
+        [100.0, float("nan"), float("nan")],
+        weights=[[0.01]],
+        filters=False,
+    )
+    fee = 0.1 * 103.0 * 6e-4
+    assert finite_fallback.fee_paid == pytest.approx(fee)
+    assert finite_fallback.daily_equity.iloc[0] == pytest.approx(1000.0 - 0.1 * 3.0 - fee)
+    assert finite_fallback.maker_fill_fraction == pytest.approx(0.0)
+
+    anchor_fallback = _maker_single_day(
+        [100.0, float("nan"), float("nan")],
+        [100.0, float("nan"), float("nan")],
+        [100.0, float("nan"), float("nan")],
+        weights=[[0.01]],
+        filters=False,
+    )
+    assert anchor_fallback.fee_paid == pytest.approx(0.1 * 100.0 * 6e-4)
+    assert anchor_fallback.maker_fill_fraction == pytest.approx(0.0)
+
+
+def test_replay_account_maker_nan_anchor_falls_back_to_finite_close() -> None:
+    """A non-finite anchor never fills as maker and crosses at the last finite close."""
+    dates = pd.date_range("2026-01-01", periods=1, freq="D", tz="UTC")
+    bars = [dates[0], dates[0] + pd.Timedelta(minutes=3)]
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0]])
+    index = pd.DatetimeIndex(bars)
+    marks = AccountMarkPanels(
+        close=pd.DataFrame([[float("nan")], [50.0]], index=index, columns=["BTCUSDT"], dtype="float64"),
+        high=pd.DataFrame([[float("nan")], [50.0]], index=index, columns=["BTCUSDT"], dtype="float64"),
+        low=pd.DataFrame([[float("nan")], [49.0]], index=index, columns=["BTCUSDT"], dtype="float64"),
+    )
+    result = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0),
+        _fixed_policy(), capital=1000.0, taker_fee_bps=6.0, apply_order_filters=False,
+        execution="maker", maker_fee_bps=2.0, passive_window_bars=10,
+    )
+
+    assert result.fee_paid == pytest.approx(1000.0 * 50.0 * 6e-4)
+    assert result.maker_fill_fraction == pytest.approx(0.0)
+
+
+def test_replay_account_maker_min_notional_skip_unchanged() -> None:
+    """Below-minimum orders are skipped without any fill judgment under maker."""
+    dates = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[0.0], [0.004]])
+    marks = _panels(list(dates), ["BTCUSDT"], [[1.0], [1.0]])
+    kwargs = {"capital": 1000.0, "taker_fee_bps": 6.0}
+
+    taker = replay_account(
+        unit, marks, funding, adv, sigma, _rules(step=1.0, minimum=5.0),
+        _fixed_policy(), **kwargs,
+    )
+    maker = replay_account(
+        unit, marks, funding, adv, sigma, _rules(step=1.0, minimum=5.0),
+        _fixed_policy(), execution="maker", maker_fee_bps=2.0, passive_window_bars=10, **kwargs,
+    )
+
+    assert maker.skipped_orders == taker.skipped_orders == 1
+    assert maker.daily_equity.iloc[1] == pytest.approx(1000.0)
+
+
+def test_replay_account_maker_future_bars_beyond_window_leave_past_unchanged() -> None:
+    """Bars past the passive window cannot move equity realized before them."""
+    dates = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
+    bars = [
+        dates[0], dates[0] + pd.Timedelta(minutes=3), dates[0] + pd.Timedelta(minutes=6),
+        dates[1], dates[1] + pd.Timedelta(minutes=3),
+    ]
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0], [1.0]])
+    index = pd.DatetimeIndex(bars)
+    base_closes = [[100.0], [100.0], [100.0], [110.0], [112.0]]
+    shocked_closes = [[100.0], [100.0], [100.0], [110.0], [168.0]]
+
+    def _run(closes: list[list[float]]) -> pd.Series:
+        frame = pd.DataFrame(closes, index=index, columns=["BTCUSDT"], dtype="float64")
+        marks = AccountMarkPanels(close=frame, high=frame.copy(), low=frame.copy())
+        return replay_account(
+            unit, marks, funding, adv, sigma, _rules(minimum=0.0),
+            _fixed_policy(), capital=1000.0, taker_fee_bps=6.0,
+            execution="maker", maker_fee_bps=2.0, passive_window_bars=2,
+        ).daily_equity
+
+    assert _run(base_closes).iloc[0] == pytest.approx(_run(shocked_closes).iloc[0])
+
+
+def test_replay_account_maker_fees_below_taker_on_identical_fills() -> None:
+    """When every order rests to a maker fill at the anchor, fees sit below taker."""
+    dates = pd.date_range("2026-01-01", periods=1, freq="D", tz="UTC")
+    bars = [dates[0], dates[0] + pd.Timedelta(minutes=3)]
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0]])
+    index = pd.DatetimeIndex(bars)
+    frame = pd.DataFrame([[100.0], [100.0]], index=index, columns=["BTCUSDT"], dtype="float64")
+    marks = AccountMarkPanels(
+        close=frame, high=frame.copy(),
+        low=pd.DataFrame([[100.0], [99.0]], index=index, columns=["BTCUSDT"], dtype="float64"),
+    )
+    kwargs = {"capital": 1000.0, "taker_fee_bps": 6.0}
+    maker = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0),
+        _fixed_policy(), execution="maker", maker_fee_bps=2.0, passive_window_bars=10, **kwargs,
+    )
+    taker = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0), _fixed_policy(), **kwargs,
+    )
+
+    assert maker.maker_fill_fraction == pytest.approx(1.0)
+    assert maker.fee_paid < taker.fee_paid
+    assert maker.daily_equity.iloc[0] > taker.daily_equity.iloc[0]
+
+
+def test_replay_account_maker_inactive_symbol_keeps_quantity() -> None:
+    """A zero-delta symbol takes no fill judgment and leaves the maker fraction to actives."""
+    dates = pd.date_range("2026-01-01", periods=1, freq="D", tz="UTC")
+    bars = [dates[0] + pd.Timedelta(minutes=3 * i) for i in range(3)]
+    symbols = ["BTCUSDT", "ETHUSDT"]
+    unit, funding, adv, sigma = _frames(dates, symbols, [[1.0, 0.0]])
+    index = pd.DatetimeIndex(bars)
+    marks = AccountMarkPanels(
+        close=pd.DataFrame([[100.0, 10.0]] * 3, index=index, columns=symbols, dtype="float64"),
+        high=pd.DataFrame([[100.0, 10.0]] * 3, index=index, columns=symbols, dtype="float64"),
+        low=pd.DataFrame([[100.0, 10.0], [99.0, 10.0], [100.0, 10.0]], index=index, columns=symbols, dtype="float64"),
+    )
+    result = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0),
+        _fixed_policy(), capital=1000.0, taker_fee_bps=6.0,
+        execution="maker", maker_fee_bps=2.0, passive_window_bars=10,
+    )
+
+    assert result.fee_paid == pytest.approx(10.0 * 100.0 * 2e-4)
+    assert result.maker_fill_fraction == pytest.approx(1.0)
+
+
+def test_replay_account_maker_invalid_configuration_fails_closed() -> None:
+    """Maker without valid fees and window, or with an unknown mode, fails closed."""
+    dates = pd.date_range("2026-01-01", periods=1, freq="D", tz="UTC")
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0]])
+    marks = _panels(list(dates), ["BTCUSDT"], [[100.0]])
+    base = {
+        "unit_weights": unit, "marks": marks, "funding_cum": funding, "adv": adv,
+        "daily_sigma": sigma, "rules": _rules(minimum=0.0), "policy": _fixed_policy(),
+        "capital": 1000.0, "taker_fee_bps": 6.0, "execution": "maker",
+    }
+    cases = [
+        {"maker_fee_bps": None, "passive_window_bars": 10},
+        {"maker_fee_bps": 2.0, "passive_window_bars": None},
+        {"maker_fee_bps": 2.0, "passive_window_bars": 0},
+        {"maker_fee_bps": 7.0, "passive_window_bars": 10},
+        {"maker_fee_bps": float("nan"), "passive_window_bars": 10},
+        {"maker_fee_bps": -1.0, "passive_window_bars": 10},
+        {"maker_fee_bps": 2.0, "passive_window_bars": float("nan")},
+    ]
+    for case in cases:
+        with pytest.raises(DataIntegrityError):
+            replay_account(**{**base, **case})  # type: ignore[arg-type]
+    with pytest.raises(DataIntegrityError):
+        replay_account(**{**base, "execution": "peg"})  # type: ignore[arg-type]
+
+
+def test_replay_account_maker_conserves_cash() -> None:
+    """Maker cash conservation: final equity equals capital plus fill-aware price gains less costs."""
+    dates = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
+    bars = [
+        dates[0], dates[0] + pd.Timedelta(minutes=3), dates[0] + pd.Timedelta(minutes=6),
+        dates[1], dates[1] + pd.Timedelta(minutes=3),
+    ]
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0], [1.0]])
+    index = pd.DatetimeIndex(bars)
+    closes = [[100.0], [100.0], [100.0], [110.0], [112.0]]
+    lows = [[100.0], [99.0], [100.0], [110.0], [110.0]]
+    highs = [[100.0], [100.0], [100.0], [110.0], [112.0]]
+    marks = AccountMarkPanels(
+        close=pd.DataFrame(closes, index=index, columns=["BTCUSDT"], dtype="float64"),
+        high=pd.DataFrame(highs, index=index, columns=["BTCUSDT"], dtype="float64"),
+        low=pd.DataFrame(lows, index=index, columns=["BTCUSDT"], dtype="float64"),
+    )
+    result = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0),
+        _fixed_policy(), capital=1000.0, taker_fee_bps=6.0, apply_order_filters=False,
+        execution="maker", maker_fee_bps=2.0, passive_window_bars=10,
+    )
+
+    first_qty = 1000.0 / 100.0
+    first_fee = first_qty * 100.0 * 2e-4
+    first_equity = 1000.0 - first_fee
+    pre_second_equity = -first_fee + first_qty * 110.0
+    second_qty = pre_second_equity / 110.0
+    second_delta = second_qty - first_qty
+    second_fee = abs(second_delta) * 110.0 * 2e-4
+    expected_final = 1000.0 - first_qty * 100.0 - first_fee - second_delta * 110.0 - second_fee + second_qty * 110.0
+    assert result.daily_equity.iloc[0] == pytest.approx(first_equity)
+    assert result.daily_equity.iloc[-1] == pytest.approx(expected_final)
+    assert result.fee_paid == pytest.approx(first_fee + second_fee)
+    assert result.impact_paid == pytest.approx(0.0)
+    assert result.funding_paid == pytest.approx(0.0)
+    assert result.maker_fill_fraction == pytest.approx(1.0)

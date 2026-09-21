@@ -432,6 +432,11 @@ ACCOUNT_EXPOSURE_MAX: float = 10.0
 ACCOUNT_EXPOSURE_STEP: float = 0.25
 # 테이커 수수료 6bp(프로브 실측 기준).
 ACCOUNT_TAKER_FEE_BPS: float = 6.0
+# Binance USD-M 메이커 수수료로, 공식 원장 ExecutionSpec.maker_fee_bps와 같은 값.
+ACCOUNT_MAKER_FEE_BPS: float = 2.0
+# 공식 원장 passive_timeout_minutes(30분)를 3분봉 개수로 환산한 값. 대기창이 길수록 체결률은
+# 오르지만 역선택도 커진다. 공식 원장과 같은 길이를 써야 두 원장이 비교 가능하다.
+ACCOUNT_PASSIVE_WINDOW_BARS: int = 10
 
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).
