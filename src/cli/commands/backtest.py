@@ -19,9 +19,11 @@ from src.mhs.params import (
     ACCOUNT_EXPOSURE_STEP,
     ACCOUNT_IMPACT_Y,
     ACCOUNT_INITIAL_MARGIN_CAP,
+    ACCOUNT_MAKER_FEE_BPS,
     ACCOUNT_MARGIN_RESERVE,
     ACCOUNT_MEAN_HAIRCUT,
     ACCOUNT_MIN_MOMENT_DAYS,
+    ACCOUNT_PASSIVE_WINDOW_BARS,
     ACCOUNT_PRIOR_DAYS,
     ACCOUNT_SHOCK_PER_UNIT,
     ACCOUNT_TAKER_FEE_BPS,
@@ -201,6 +203,7 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     account.add_argument("--impact-y", type=float, default=None, help="Square-root impact coefficient.")
     account.add_argument("--venue-rules", default=None, help="Venue snapshot path; omitted uses the latest collected snapshot.")
     account.add_argument("--no-order-filters", action="store_true", default=False, help="Trade continuous quantities without step/min-notional filters.")
+    account.add_argument("--execution", choices=("taker", "maker"), default="taker", help="Order execution model: immediate taker or canonical strict passive maker.")
     account.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
     account.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
     account.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
@@ -745,23 +748,25 @@ def _account_headlines(equity: pd.Series, capital: float) -> tuple[float, float,
     return cagr, float((relative - 1.0).min()), final
 
 
-def _latest_primary_reference(index_path: Path) -> dict[str, Any] | None:
-    """Latest mhs_frozen primary row of the run catalog, or None when absent."""
+def _latest_primary_reference(index_path: Path, execution: str = "taker") -> dict[str, Any] | None:
+    """Latest mhs_frozen primary row of the run catalog executed with ``execution`` (rows without an execution field are taker), or None when absent."""
     if not index_path.is_file():
         return None
     reference = None
     for line in index_path.read_text(encoding="utf-8").splitlines():
         record = json.loads(line)
-        if record.get("kind") == "mhs_frozen" and record.get("strategy_id") == "frozen_mhs_top20_v2":
+        if record.get("kind") == "mhs_frozen" and record.get("strategy_id") == "frozen_mhs_top20_v2" and record.get("execution", "taker") == execution:
             reference = record
     return reference
 
 
-def _resolve_account_destination(*, start: pd.Timestamp, end: pd.Timestamp, policy: str, capital: float) -> Path:
+def _resolve_account_destination(*, start: pd.Timestamp, end: pd.Timestamp, policy: str, capital: float, execution: str = "taker") -> Path:
     """Resolve a fresh account run directory named by window, policy, and capital."""
     import os
 
-    name = f"{start:%Y%m%d}_{end:%Y%m%d}_top20_account_{policy}_{capital:.0f}_{pd.Timestamp.now(tz='UTC'):%Y%m%dT%H%M%S}Z"
+    stem = f"{start:%Y%m%d}_{end:%Y%m%d}_top20_account_{policy}_{capital:.0f}"
+    stamp = f"{pd.Timestamp.now(tz='UTC'):%Y%m%dT%H%M%S}Z"
+    name = f"{stem}_{stamp}" if execution == "taker" else f"{stem}_maker_{stamp}"
     run_dir = FROZEN_BACKTESTS_DIR / name
     suffix = 1
     while os.path.lexists(run_dir):
@@ -780,7 +785,9 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
     sizes from and anchors the reconciliation against the canonical 3m ledger. The account
     is then replayed with the requested policy and venue snapshot, and ``account.json`` +
     ``account_daily.parquet`` are written in a fresh run directory
-    ``<start>_<end>_top20_account_<policy>_<capital>_<ts>Z``.
+    ``<start>_<end>_top20_account_<policy>_<capital>_<ts>Z``. Under ``--execution maker``
+    both the unit reference ledger and the account replay use the canonical strict passive
+    rule, and reconciliation only references a canonical run with the same execution.
 
     Raises:
         SystemExit: Invalid arguments, missing venue snapshot, a data-integrity failure,
@@ -811,6 +818,9 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
     policy_name = getattr(args, "policy", "growth")
     if policy_name not in ("growth", "fixed"):
         raise SystemExit(f"policy must be 'growth' or 'fixed', got {policy_name!r}")
+    execution = getattr(args, "execution", "taker")
+    if execution not in ("taker", "maker"):
+        raise SystemExit(f"execution must be 'taker' or 'maker', got {execution!r}")
     raw_fixed = getattr(args, "fixed_exposure", None)
     if policy_name == "fixed" and raw_fixed is None:
         raise SystemExit("--fixed-exposure is required with --policy fixed")
@@ -868,12 +878,20 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         impact_y=impact_y,
     )
     apply_filters = not getattr(args, "no_order_filters", False)
+    if execution == "maker":
+        execution_kwargs: dict[str, Any] = {
+            "execution": "maker",
+            "maker_fee_bps": ACCOUNT_MAKER_FEE_BPS,
+            "passive_window_bars": ACCOUNT_PASSIVE_WINDOW_BARS,
+        }
+    else:
+        execution_kwargs = {"execution": "taker"}
     try:
         unit_policy = dataclasses.replace(policy, kind="fixed", exposure_max=1.0, impact_y=0.0)
         unit = replay_account(
             unit_weights, marks, funding_cum, adv, daily_sigma, rules, unit_policy,
             capital=ACCOUNT_UNIT_REFERENCE_CAPITAL, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS,
-            apply_order_filters=False,
+            apply_order_filters=False, **execution_kwargs,
         )
     except (DataIntegrityError, ValueError) as exc:
         raise SystemExit(f"frozen account failed: unit reference {exc}") from exc
@@ -885,14 +903,14 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         result = replay_account(
             unit_weights, marks, funding_cum, adv, daily_sigma, rules, policy,
             capital=capital, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS, apply_order_filters=apply_filters,
-            unit_equity=unit.daily_equity,
+            unit_equity=unit.daily_equity, **execution_kwargs,
         )
     except (DataIntegrityError, ValueError) as exc:
         raise SystemExit(f"frozen account failed: {exc}") from exc
     index_path = FROZEN_BACKTESTS_DIR.parent.parent / "index.jsonl"
     unit_cagr, unit_mdd, _ = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
     try:
-        reference = _latest_primary_reference(index_path)
+        reference = _latest_primary_reference(index_path, execution)
         reconciliation: dict[str, Any] = {
             "status": "ok",
             "fixed_exposure": 1.0,
@@ -918,10 +936,17 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
     cagr, mdd, final_equity = _account_headlines(result.daily_equity, capital)
     moment_source = "bayesian_causal_unit_ledger" if policy_name == "growth" else "none"
     exposures = result.daily_exposure.to_numpy(dtype="float64")
-    run_dir = _resolve_account_destination(start=start, end=end, policy=policy_name, capital=capital)
+    run_dir = _resolve_account_destination(start=start, end=end, policy=policy_name, capital=capital, execution=execution)
     payload = {
         "strategy_id": strategy.strategy_id,
         "capital": capital,
+        "execution": {
+            "mode": execution,
+            "maker_fee_bps": None if execution == "taker" else ACCOUNT_MAKER_FEE_BPS,
+            "taker_fee_bps": ACCOUNT_TAKER_FEE_BPS,
+            "passive_window_bars": None if execution == "taker" else ACCOUNT_PASSIVE_WINDOW_BARS,
+            "maker_fill_fraction": result.maker_fill_fraction,
+        },
         "policy": {
             "kind": policy.kind,
             "exposure_max": policy.exposure_max,
@@ -958,6 +983,7 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
             "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
             "cagr": unit_cagr,
             "mdd": unit_mdd,
+            "maker_fill_fraction": unit.maker_fill_fraction,
         },
         "venue_rules_applied_retroactively": True,
         "reconciliation": reconciliation,
@@ -975,8 +1001,10 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
             evaluation_start=start, evaluation_end=end,
             strategy_id=strategy.strategy_id,
             base_cagr=cagr, base_max_drawdown=abs(mdd),
+            execution=execution,
         )
     _logger.info(
-        "[EVAL] mhs-frozen-account capital=%.0f policy=%s moment_source=%s cagr=%.4f mdd=%.4f liquidated=%s",
+        "[EVAL] mhs-frozen-account capital=%.0f policy=%s moment_source=%s cagr=%.4f mdd=%.4f liquidated=%s execution=%s maker_fill=%.3f",
         capital, policy_name, moment_source, cagr, mdd, result.liquidated_at,
+        execution, result.maker_fill_fraction,
     )

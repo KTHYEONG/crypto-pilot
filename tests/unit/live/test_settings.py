@@ -204,6 +204,47 @@ def test_live_settings_reject_cross_venue_in_live_modes() -> None:
         )
 
 
+def test_execution_policy_defaults_to_taker_parity() -> None:
+    """Default settings replay the taker parity book with the registered timeout."""
+    from src.mhs.types import ExecutionSpec
+
+    settings = LiveSettings()
+    assert settings.execution_policy == "taker_parity"
+    assert settings.passive_timeout_minutes == ExecutionSpec().passive_timeout_minutes
+
+
+def test_paper_strict_passive_requires_loop_simulator() -> None:
+    """PAPER strict passive with the immediate simulator fails; the loop simulator passes."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="strict_passive"):
+        LiveSettings(
+            mode=ExecutionMode.PAPER, execution_policy="strict_passive",
+            paper_fill_model="immediate_taker",
+        )
+    ok = LiveSettings(
+        mode=ExecutionMode.PAPER, execution_policy="strict_passive",
+        paper_fill_model="peg_chase",
+    )
+    assert ok.execution_policy == "strict_passive"
+
+
+def test_invalid_execution_policy_rejected() -> None:
+    """An execution policy outside the closed set fails closed."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="execution_policy"):
+        LiveSettings(execution_policy="maker")  # type: ignore[arg-type]
+
+
+def test_non_positive_passive_timeout_rejected() -> None:
+    """A non-positive passive timeout fails closed."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="passive_timeout_minutes"):
+        LiveSettings(passive_timeout_minutes=0)
+
+
 def test_live_settings_testnet_requires_dedicated_order_credentials() -> None:
     import pytest
     from pydantic import SecretStr

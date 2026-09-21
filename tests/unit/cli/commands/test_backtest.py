@@ -862,8 +862,8 @@ def _install_account(
         calm = pd.DataFrame({"AAA": [0.02, 0.02, 0.02]}, index=dates, dtype="float64")
         return unit, marks, flat, rich, calm
 
-    def _fake_replay(unit: object, marks: object, funding: object, adv: object, sigma: object, rules: object, policy: object, *, capital: float, taker_fee_bps: float, apply_order_filters: bool = True, unit_equity: pd.Series | None = None) -> AccountLedgerResult:
-        seen.setdefault("replays", []).append({"capital": capital, "policy": policy, "filters": apply_order_filters, "fee": taker_fee_bps, "unit_equity": unit_equity})
+    def _fake_replay(unit: object, marks: object, funding: object, adv: object, sigma: object, rules: object, policy: object, *, capital: float, taker_fee_bps: float, apply_order_filters: bool = True, unit_equity: pd.Series | None = None, execution: str = "taker", **execution_kwargs: object) -> AccountLedgerResult:
+        seen.setdefault("replays", []).append({"capital": capital, "policy": policy, "filters": apply_order_filters, "fee": taker_fee_bps, "unit_equity": unit_equity, "execution": execution, **execution_kwargs})
         if unit_fail and len(seen["replays"]) == 1:
             raise DataIntegrityError("unit boom")
         equity = pd.Series([capital, capital * 1.1, capital * 1.05], index=dates)
@@ -875,6 +875,7 @@ def _install_account(
             skipped_orders=3, untraded_fraction=0.01, initial_margin_breaches=0,
             fee_paid=1.0, impact_paid=2.0, funding_paid=0.5,
             fallback_ladder_symbols=(), missing_filter_symbols=(),
+            maker_fill_fraction=0.9 if execution == "maker" else 0.0,
         )
 
     snapshot = VenueRuleSnapshot(captured_at=pd.Timestamp("2026-01-01", tz="UTC"), symbols={})
@@ -1050,7 +1051,7 @@ def test_account_reference_lookup_failure_is_disclosed(tmp_path: Path, monkeypat
     """A failing catalog lookup is disclosed, never fatal."""
     _install_account(monkeypatch, tmp_path)
 
-    def _boom(path: object) -> object:
+    def _boom(*args: object, **kwargs: object) -> object:
         raise OSError("catalog boom")
 
     monkeypatch.setattr(backtest_mod, "_latest_primary_reference", _boom)
@@ -1072,6 +1073,106 @@ def test_account_fixed_moment_source_is_none(tmp_path: Path, monkeypatch: pytest
     payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
     assert payload["moment_source"] == "none"
     assert "in_sample_moments" not in payload
+
+
+def test_account_default_execution_stays_taker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No --execution flag replays both ledgers as taker without maker controls."""
+    seen = _install_account(monkeypatch, tmp_path)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert len(seen["replays"]) == 2
+    for replay in seen["replays"]:
+        assert replay["execution"] == "taker"
+        assert "maker_fee_bps" not in replay
+        assert "passive_window_bars" not in replay
+    (run_dir,) = _run_dirs(tmp_path)
+    assert "_maker_" not in run_dir.name
+
+
+def test_account_maker_threads_identical_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--execution maker passes identical maker controls to the unit and account ledgers."""
+    from src.mhs.params import ACCOUNT_MAKER_FEE_BPS, ACCOUNT_PASSIVE_WINDOW_BARS
+
+    seen = _install_account(monkeypatch, tmp_path)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
+    assert len(seen["replays"]) == 2
+    for replay in seen["replays"]:
+        assert replay["execution"] == "maker"
+        assert replay["maker_fee_bps"] == ACCOUNT_MAKER_FEE_BPS
+        assert replay["passive_window_bars"] == ACCOUNT_PASSIVE_WINDOW_BARS
+
+
+def test_account_maker_run_directory_suffixed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A maker run directory carries the maker infix after the capital."""
+    _install_account(monkeypatch, tmp_path)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
+    (run_dir,) = _run_dirs(tmp_path)
+    assert "_account_growth_2100_maker_" in run_dir.name
+
+
+def _write_catalog_index(tmp_path: Path, rows: list[dict]) -> Path:
+    index = tmp_path / "index.jsonl"
+    index.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+    return index
+
+
+def test_account_reconciliation_references_same_execution_canonical(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconciliation reads the latest canonical row whose execution matches the run."""
+    _install_account(monkeypatch, tmp_path)
+    _write_catalog_index(tmp_path, [
+        {"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "base_cagr": 1.0},
+        {"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "base_cagr": 1.2, "execution": "maker"},
+    ])
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
+    maker_dir, = [d for d in _run_dirs(tmp_path) if "_maker_" in d.name]
+    maker_payload = json.loads((maker_dir / "account.json").read_text(encoding="utf-8"))
+    assert maker_payload["reconciliation"]["reference_canonical"]["base_cagr"] == 1.2
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    taker_payloads = [
+        json.loads((d / "account.json").read_text(encoding="utf-8"))
+        for d in _run_dirs(tmp_path) if "_maker_" not in d.name
+    ]
+    assert taker_payloads[-1]["reconciliation"]["reference_canonical"]["base_cagr"] == 1.0
+
+
+def test_account_missing_same_execution_canonical_yields_null_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A maker run without a maker canonical discloses a null reference and null gaps."""
+    _install_account(monkeypatch, tmp_path)
+    _write_catalog_index(tmp_path, [
+        {"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "base_cagr": 1.0},
+    ])
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
+    (run_dir,) = _run_dirs(tmp_path)
+    recon = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))["reconciliation"]
+    assert recon["reference_canonical"] is None
+    assert recon["cagr_gap"] is None
+    assert recon["status"] == "ok"
+
+
+def test_account_execution_disclosed_in_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """account.json and the catalog row disclose the execution mode and maker fills."""
+    _install_account(monkeypatch, tmp_path)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
+    (run_dir,) = _run_dirs(tmp_path)
+    payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
+    assert payload["execution"]["mode"] == "maker"
+    assert payload["execution"]["maker_fill_fraction"] == pytest.approx(0.9)
+    assert payload["unit_reference"]["maker_fill_fraction"] == pytest.approx(0.9)
+    rows = (tmp_path / "index.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(rows[-1])["execution"] == "maker"
+
+
+def test_account_invalid_execution_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unknown execution mode exits before loading any input."""
+    import argparse
+
+    seen = _install_account(monkeypatch, tmp_path)
+    args = argparse.Namespace(
+        source_start="2024-01-01", start="2025-01-01", end="2025-02-01",
+        policy="growth", fixed_exposure=None, execution="limit",
+    )
+    with pytest.raises(SystemExit, match=r"execution must be"):
+        backtest_mod.run_frozen_account_command(args)
+    assert "request" not in seen
 
 
 def _write_held_parquet(root: Path, symbol: str, start: pd.Timestamp, bars: int, close: float = 100.0) -> pd.DatetimeIndex:
