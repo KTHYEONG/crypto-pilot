@@ -331,10 +331,16 @@ def test_backtest_mhs_frozen_variant_breadth_and_failures(tmp_path: Path, monkey
         backtest_mod.run_frozen_mhs_backtest_command(
             _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--output", str(tmp_path / "d.json")])
         )
-    with pytest.raises(SystemExit, match=r"output is required"):
-        backtest_mod.run_frozen_mhs_backtest_command(
-            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01"])
-        )
+    auto = tmp_path / "auto"
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", auto)
+    backtest_mod.run_frozen_mhs_backtest_command(
+        _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01"])
+    )
+    resolved = seen["output"]
+    assert resolved.name == "result.json"
+    assert resolved.parent.parent == auto
+    assert resolved.parent.is_dir()
+    assert (resolved.parent / "manifest.json").is_file()
     with pytest.raises(SystemExit, match=r"JSON path"):
         backtest_mod.run_frozen_mhs_backtest_command(
             _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01", "--output", str(tmp_path / "e.txt")])
@@ -352,3 +358,69 @@ def test_backtest_mhs_frozen_variant_breadth_and_failures(tmp_path: Path, monkey
             _parse([*_frozen_argv(tmp_path)[:8], "--output", str(failed)])
         )
     assert not failed.exists()
+
+
+def test_frozen_omitted_output_resolves_to_fresh_run_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitted output resolves into a fresh UUID run directory that already exists."""
+    import re
+
+    frozen_root = tmp_path / "frozen"
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    seen = _install_frozen(monkeypatch)
+    backtest_mod.run_frozen_mhs_backtest_command(
+        _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01"])
+    )
+    resolved = seen["output"]
+    assert resolved.name == "result.json"
+    assert resolved.parent.parent == frozen_root
+    assert re.fullmatch(r"[0-9a-f]{32}", resolved.parent.name) is not None
+    assert resolved.parent.is_dir()
+
+
+def test_frozen_manifest_matches_request_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Manifest beside the result records the request identity in JSON primitives."""
+    frozen_root = tmp_path / "frozen"
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    seen = _install_frozen(monkeypatch)
+    backtest_mod.run_frozen_mhs_backtest_command(
+        _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01"])
+    )
+    request = seen["request"]
+    manifest = json.loads((seen["output"].parent / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_start"] == request.source_start.isoformat()
+    assert manifest["evaluation_start"] == request.evaluation_start.isoformat()
+    assert manifest["evaluation_end"] == request.evaluation_end.isoformat()
+    assert manifest["breadth"] == 20
+    assert manifest["strategy_id"] == request.strategy.strategy_id
+    for key in ("source_start", "evaluation_start", "evaluation_end"):
+        assert manifest[key].endswith("+00:00")
+
+
+def test_frozen_explicit_output_rejects_invalid_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit frozen output keeps the legacy suffix and freshness guards."""
+    _install_frozen(monkeypatch)
+    with pytest.raises(SystemExit, match=r"JSON path"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01", "--output", str(tmp_path / "bad.txt")])
+        )
+    occupied = tmp_path / "occupied.json"
+    occupied.write_text("{}", encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"fresh"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01", "--output", str(occupied)])
+        )
+
+
+def test_retention_default_limits_finalized_runs() -> None:
+    """Unflagged retention policy keeps five finalized bundles with no byte budget."""
+    policy = backtest_mod._resolve_retention_policy(argparse.Namespace(max_detail_bytes=None, max_detail_runs=None))
+    assert policy is not None
+    assert policy.max_detail_runs == 5
+    assert policy.max_detail_bytes is None
+
+
+def test_retention_explicit_flags_override_default() -> None:
+    """Explicit retention flags win over the new five-run default."""
+    policy = backtest_mod._resolve_retention_policy(argparse.Namespace(max_detail_bytes=None, max_detail_runs=2))
+    assert policy is not None
+    assert policy.max_detail_runs == 2
