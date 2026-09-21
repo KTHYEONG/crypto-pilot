@@ -38,8 +38,8 @@ _SYMBOLS = ("AAA", "BBB", "CCC", "DELISTED")
 
 
 def _specs() -> tuple[ExecutionSpec, ExecutionSpec]:
-    base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0)
-    stress = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=13.0)
+    base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0, decision_anchor="submit_bar")
+    stress = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=13.0, decision_anchor="submit_bar")
     return base, stress
 
 
@@ -704,3 +704,54 @@ def test_run_frozen_mhs_backtest_blocks_before_candidate_build(
     with pytest.raises(DataIntegrityError, match="AAA"):
         run_frozen_mhs_backtest(_request(data_root=tmp_path))
     assert called == []
+
+
+def test_request_rejects_decision_bar_anchor() -> None:
+    """Orders sized off a mark published after submission cannot be evidenced."""
+    base, stress = _specs()
+    legacy = dataclasses.replace(base, decision_anchor="decision_bar")
+    legacy_stress = dataclasses.replace(stress, decision_anchor="decision_bar")
+    with pytest.raises(DataIntegrityError, match="submit_bar"):
+        _request(base_spec=legacy, stress_spec=legacy_stress)
+
+
+def test_request_rejects_mismatched_stress_anchor() -> None:
+    """Base and stress must share the causal submit-bar anchor."""
+    base, stress = _specs()
+    drifted = dataclasses.replace(stress, decision_anchor="decision_bar")
+    with pytest.raises(DataIntegrityError, match="submit_bar"):
+        _request(base_spec=base, stress_spec=drifted)
+
+
+def test_request_rejects_unknown_execution_bound() -> None:
+    """Only the registered taker and strict-proxy crossing models are evidenced."""
+    with pytest.raises(DataIntegrityError, match="execution_bound"):
+        _request(execution_bound="OHLCV_PEG_CHASE_PROXY")
+
+
+def test_runner_forwards_execution_bound_to_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A maker request reaches paired evaluation with the selected bound."""
+    seen: dict = {}
+    _install_source(monkeypatch, seen)
+    monkeypatch.setattr(run_mod, "build_frozen_mhs_candidate", lambda *a, **k: _candidate(n_days=10))
+
+    def _spy(candidate: object, windows: object, **kwargs: object) -> object:
+        seen["execution_bound"] = kwargs.get("execution_bound")
+        return _evidence()
+
+    monkeypatch.setattr(run_mod, "evaluate_frozen_mhs_research", _spy)
+    run_frozen_mhs_backtest(_request(execution_bound="OHLCV_STRICT_PROXY"))
+    assert seen["execution_bound"] == "OHLCV_STRICT_PROXY"
+
+
+def test_candidate_builder_matches_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner reuses the standalone candidate builder without replay divergence."""
+    seen: dict = {}
+    _install_source(monkeypatch, seen)
+    monkeypatch.setattr(run_mod, "evaluate_frozen_mhs_research", lambda *a, **k: _evidence())
+    request = _request()
+    direct, context = run_mod.build_frozen_request_candidate(request)
+    run = run_frozen_mhs_backtest(request)
+    pd.testing.assert_frame_equal(direct.target_weights, run.candidate.target_weights)
+    assert bool((direct.signal_available_at == run.candidate.signal_available_at).all())
+    assert context.census == run.source_symbols

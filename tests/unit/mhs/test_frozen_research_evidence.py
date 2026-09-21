@@ -32,8 +32,8 @@ _BASE_LIMITATIONS = (
 
 
 def _specs() -> tuple[ExecutionSpec, ExecutionSpec]:
-    base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0)
-    stress = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=13.0)
+    base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0, decision_anchor="submit_bar")
+    stress = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=13.0, decision_anchor="submit_bar")
     assert base.one_way_taker_bps() == 6.0
     assert stress.one_way_taker_bps() == 18.0
     return base, stress
@@ -371,3 +371,52 @@ def test_evaluate_rejects_mismatched_daily_intervals(monkeypatch: pytest.MonkeyP
     base_spec, stress_spec = _specs()
     with pytest.raises(DataIntegrityError, match="must match"):
         evaluate_frozen_mhs_research(candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_covered_periods())
+
+
+def test_evaluate_applies_selected_bound_to_both_cases() -> None:
+    """The selected crossing model is applied identically to base and stress."""
+    candidate, windows = _engine_case()
+    base_spec, stress_spec = _specs()
+    evidence = evaluate_frozen_mhs_research(
+        candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
+        stress_spec=stress_spec, report_periods=_uncovered_periods(),
+        execution_bound="OHLCV_STRICT_PROXY",
+    )
+    assert evidence.base.fill_source == "OHLCV_STRICT_PROXY"
+    assert evidence.stress.fill_source == "OHLCV_STRICT_PROXY"
+    with pytest.raises(DataIntegrityError, match="execution_bound"):
+        evaluate_frozen_mhs_research(
+            candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
+            stress_spec=stress_spec, report_periods=_uncovered_periods(),
+            execution_bound="OHLCV_PEG_CHASE_PROXY",  # type: ignore[arg-type]
+        )
+
+
+def test_evaluate_maker_costs_less_than_taker() -> None:
+    """Fully trade-through limits cross at the maker fee above taker equity."""
+    candidate, windows = _engine_case()
+    base_spec, stress_spec = _specs()
+    maker = evaluate_frozen_mhs_research(
+        candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
+        stress_spec=stress_spec, report_periods=_uncovered_periods(),
+        execution_bound="OHLCV_STRICT_PROXY",
+    )
+    taker = evaluate_frozen_mhs_research(
+        candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
+        stress_spec=stress_spec, report_periods=_uncovered_periods(),
+        execution_bound="OHLCV_IMMEDIATE_TAKER",
+    )
+    assert set(maker.base.simulated_fills["fee_bps"].unique()) == {base_spec.maker_fee_bps}
+    assert float(maker.base.ledger.equity.iloc[-1]) > float(taker.base.ledger.equity.iloc[-1])
+
+
+def test_evaluate_maker_stress_insensitive_when_fully_passive() -> None:
+    """All-passive fills leave no taker remainder for stress to reprice."""
+    candidate, windows = _engine_case()
+    base_spec, stress_spec = _specs()
+    evidence = evaluate_frozen_mhs_research(
+        candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
+        stress_spec=stress_spec, report_periods=_uncovered_periods(),
+        execution_bound="OHLCV_STRICT_PROXY",
+    )
+    pd.testing.assert_series_equal(evidence.base.ledger.equity, evidence.stress.ledger.equity)
