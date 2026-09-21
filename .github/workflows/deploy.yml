@@ -41,6 +41,7 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:sha-${{ github.sha }}
+          build-args: GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -91,10 +92,11 @@ jobs:
 
           scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/crypto-pilot/"
           # .env는 서버에 이미 배치된 것을 정본으로 쓴다(sops 폐기, CI가 더 이상 덮어쓰지 않음).
-          if [ -f "$PARAMS/strategy_params.json.enc" ]; then
-            scp $SSH_OPTS "$PARAMS/strategy_params.json.enc" "$PARAMS/strategy_bootstrap.parquet.enc" \
-              "$REMOTE_USER@$HOST:~/crypto-pilot/$PARAMS/"
-          fi
+          scp $SSH_OPTS "$PARAMS/frozen_unit_returns_maker.parquet" "$PARAMS/venue_rules_20260921.json" \
+            "$REMOTE_USER@$HOST:~/crypto-pilot/$PARAMS/"
+          # 호스트 공용 백업 타이머가 참조하는 필터. 타이머 스크립트 자체에 필터 인자를 걸어두는
+          # 1회성 설치는 이미 완료됐고(2026-09-21), 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.
+          scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"
 
           # PAT/USER는 로컬에서 확장해 원격 스크립트에 주입(GitHub PAT 문자셋은 셸 안전).
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF

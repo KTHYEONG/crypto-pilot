@@ -119,7 +119,6 @@ def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(tmp_path, 
 
     monkeypatch.setenv("LIVE_MIN_UNIVERSE_SYMBOLS", "1")
     monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     ohlcv_dir = tmp_path / "ohlcv" / "1h"
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
@@ -200,7 +199,6 @@ def test_refresh_live_universe_metrics_tail_is_failsoft(tmp_path, monkeypatch) -
 
     monkeypatch.setenv("LIVE_MIN_UNIVERSE_SYMBOLS", "1")
     monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     ohlcv_dir = tmp_path / "ohlcv" / "1h"
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
@@ -299,35 +297,48 @@ def test_refresh_live_universe_filters_dev_partition_and_no_metrics(tmp_path, mo
     assert captured.get("called") is True
 
 
-def test_seed_cloud_fetches_dev_usdt_universe_idempotent(monkeypatch) -> None:
+def test_seed_cloud_fetches_listed_crypto_perpetuals_universe(monkeypatch) -> None:
+    """seed-cloud must mirror the daemon's actual universe (COIN perpetuals across all
+    partitions), not a Vision dev-partition listing -- otherwise cold-boot leaves out
+    symbols the live frozen step needs on its first cycle."""
     import argparse
     import src.cli.commands.data as data_mod
     from src.live.data_refresh import RefreshReport
-    from src.quant.universe.pit_universe import symbol_partition
 
-    listed = ["BTCUSDT", "ETHUSDT", "AAAUSDT", "BBBUSDT", "CCCUSDT", "SOMECOIN", "XRPUSDT", "BNBBUSD"]
-    expected = [s for s in listed if s.endswith("USDT") and symbol_partition(s) == "dev"]
-
-    class _Vision:
-        def list_all_symbols(self, **k):
-            return listed
-
-    monkeypatch.setattr("src.market_data.binance.vision.BinanceVisionDownloader", lambda *a, **k: _Vision(), raising=False)
+    payload = {
+        "symbols": [
+            {"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "underlyingType": "COIN"},
+            {"symbol": "ETHUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "underlyingType": "COIN"},
+            {"symbol": "AAPLUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "underlyingType": "EQUITY"},
+            {"symbol": "XRPUSDT_260925", "status": "TRADING", "contractType": "CURRENT_QUARTER", "quoteAsset": "USDT", "underlyingType": "COIN"},
+        ],
+    }
+    monkeypatch.setattr("src.market_data.services.universe_gaps.fetch_exchange_info", lambda **k: payload)
+    monkeypatch.setattr("src.live.data_refresh.fetch_listed_symbols", lambda *a, **k: frozenset({"BTCUSDT", "ETHUSDT"}))
     seen: list[str] = []
 
     def _fake_refresh(*a, **k):
         seen.extend(k.get("symbols", []))
-        # also check positional? symbols passed as kw
-        if "symbols" in k:
-            seen[:]  # already captured
         return RefreshReport(total=len(seen), fresh=0, refreshed=len(seen), failed=0, deadline_skipped=0, elapsed_s=1.0, deadline_hit=False, staleness_hours=1.0, ok=True)
 
     monkeypatch.setattr("src.live.data_refresh.refresh_live_market_data", _fake_refresh)
 
     data_mod._seed_cloud(argparse.Namespace(lookback_days=30))
 
-    assert sorted(seen) == sorted(expected)
-    assert expected  # non-empty guard sanity
+    assert sorted(seen) == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_seed_cloud_fails_closed_on_exchange_info_error(monkeypatch) -> None:
+    import argparse
+    import pytest
+    import src.cli.commands.data as data_mod
+
+    def _boom(**k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("src.market_data.services.universe_gaps.fetch_exchange_info", _boom)
+    with pytest.raises(SystemExit):
+        data_mod._seed_cloud(argparse.Namespace(lookback_days=30))
 
 
 def test_prune_live_data_cli_dispatches_both_prunes(monkeypatch) -> None:

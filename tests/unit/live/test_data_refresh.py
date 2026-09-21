@@ -8,7 +8,6 @@ def test_refresh_live_market_data_skips_fresh_symbols(tmp_path, monkeypatch) -> 
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
     funding_dir.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _ms(ts: pd.Timestamp) -> int:
         return int(ts.value // 10**6)
@@ -32,7 +31,7 @@ def test_refresh_live_market_data_skips_fresh_symbols(tmp_path, monkeypatch) -> 
             return _rec
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=2, deadline_s=30.0,
+        tmp_path, symbols=["BTCUSDT"], now=now, lookback_days=40, max_workers=2, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=_Collector(),
     )
 
@@ -54,7 +53,6 @@ def test_refresh_live_market_data_fetches_stale_symbol_with_tail_window(tmp_path
     d.mkdir(parents=True)
     ts = [int((tail - pd.Timedelta(hours=h)).value // 10**6) for h in range(72)]
     pd.DataFrame({"timestamp": ts, "close": [1.0] * 72}).to_parquet(d / "ETHUSDT.parquet", index=False)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     seen: dict[str, str] = {}
 
@@ -66,7 +64,7 @@ def test_refresh_live_market_data_fetches_stale_symbol_with_tail_window(tmp_path
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["ETHUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
     )
 
@@ -86,7 +84,6 @@ def test_refresh_live_market_data_cold_universe_raises_without_network(tmp_path,
     d = tmp_path / "ohlcv" / "1h"
     d.mkdir(parents=True)
     pd.DataFrame({"timestamp": [1, 2, 3], "close": [1.0, 1.0, 1.0]}).to_parquet(d / "BTCUSDT.parquet", index=False)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _boom(*a, **k):
         raise AssertionError("collector must not be constructed on cold universe")
@@ -95,7 +92,7 @@ def test_refresh_live_market_data_cold_universe_raises_without_network(tmp_path,
 
     with pytest.raises(data_refresh.ColdUniverseError):
         data_refresh.refresh_live_market_data(
-            tmp_path, now=pd.Timestamp("2026-09-01T00:00:00Z"), lookback_days=40,
+            tmp_path, symbols=["BTCUSDT"], now=pd.Timestamp("2026-09-01T00:00:00Z"), lookback_days=40,
             max_workers=2, deadline_s=30.0, freshness_floor_hours=1.5,
             min_symbols=100, max_fail_fraction=0.15,
         )
@@ -112,7 +109,6 @@ def test_refresh_live_market_data_deadline_stops_further_fetches(tmp_path, monke
     for sym in ("AUSDT", "BUSDT", "CUSDT"):
         ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
         pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _must_not_fetch(*a, **k):
         raise AssertionError("no fetch past the deadline")
@@ -120,7 +116,7 @@ def test_refresh_live_market_data_deadline_stops_further_fetches(tmp_path, monke
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _must_not_fetch)
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=2, deadline_s=0.0,
+        tmp_path, symbols=["AUSDT", "BUSDT", "CUSDT"], now=now, lookback_days=40, max_workers=2, deadline_s=0.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=1.0, collector=object(),
     )
 
@@ -140,11 +136,10 @@ def test_refresh_live_market_data_ok_false_on_excess_failures(tmp_path, monkeypa
     for sym in ("AUSDT", "BUSDT"):
         ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
         pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", lambda *a, **k: False)
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=2, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT", "BUSDT"], now=now, lookback_days=40, max_workers=2, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=2, max_fail_fraction=0.15, collector=object(),
     )
 
@@ -158,7 +153,6 @@ def test_market_data_staleness_hours_p90_ignores_delisted_outliers(tmp_path, mon
     from src.live import data_refresh
 
     now = pd.Timestamp("2026-09-01T00:00:00Z")
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     assert math.isinf(data_refresh.market_data_staleness_hours(tmp_path, now=now))
 
     d = tmp_path / "ohlcv" / "1h"
@@ -303,7 +297,6 @@ def test_refresh_live_market_data_counts_funding_failure_as_failed(tmp_path, mon
     old = now - pd.Timedelta(days=5)
     ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
     pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / "AUSDT.parquet", index=False)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     class _Collector:
         def ensure_ohlcv_data(self, symbol, timeframe, start, end):
@@ -313,7 +306,7 @@ def test_refresh_live_market_data_counts_funding_failure_as_failed(tmp_path, mon
             raise BinanceFundingFetchError(symbol=symbol, http_code=403, url="https://fapi.binance.com/fapi/v1/fundingRate")
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=_Collector(),
     )
 
@@ -399,7 +392,6 @@ def test_refresh_live_market_data_aborts_remaining_symbols_on_ip_block(tmp_path,
     d.mkdir(parents=True)
     old = now - pd.Timedelta(days=5)
     ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     for sym in ("AUSDT", "BUSDT", "CUSDT"):
         pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
     calls: list[str] = []
@@ -411,7 +403,7 @@ def test_refresh_live_market_data_aborts_remaining_symbols_on_ip_block(tmp_path,
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT", "BUSDT", "CUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
     )
 
@@ -431,7 +423,6 @@ def test_refresh_live_market_data_keeps_fresh_count_during_ip_block(tmp_path, mo
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
     funding_dir.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _ms(ts: pd.Timestamp) -> int:
         return int(ts.value // 10**6)
@@ -455,7 +446,7 @@ def test_refresh_live_market_data_keeps_fresh_count_during_ip_block(tmp_path, mo
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT", "ZUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
     )
 
@@ -474,7 +465,6 @@ def test_refresh_live_market_data_ignores_legacy_temp_artifacts(tmp_path, monkey
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
     funding_dir.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _ms(ts: pd.Timestamp) -> int:
         return int(ts.value // 10**6)
@@ -491,7 +481,7 @@ def test_refresh_live_market_data_ignores_legacy_temp_artifacts(tmp_path, monkey
     (ohlcv_dir / "AUSDT.tmp.parquet").write_bytes((ohlcv_dir / "AUSDT.parquet").read_bytes())
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
     )
 
@@ -507,7 +497,6 @@ def test_market_data_staleness_hours_ignores_legacy_temp_artifacts(tmp_path, mon
     now = pd.Timestamp("2026-09-01T00:00:00Z")
     d = tmp_path / "ohlcv" / "1h"
     d.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     healthy = [int((now - pd.Timedelta(hours=2 + k)).value // 10**6) for k in range(10)]
     stale = [int((now - pd.Timedelta(hours=2000 + k)).value // 10**6) for k in range(10)]
     pd.DataFrame({"timestamp": healthy, "close": [1.0] * 10, "volume": [1.0] * 10}).to_parquet(d / "AUSDT.parquet", index=False)
@@ -526,7 +515,6 @@ def test_refresh_live_market_data_refreshes_fresh_ohlcv_with_stale_funding(tmp_p
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
     funding_dir.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _ms(ts: pd.Timestamp) -> int:
         return int(ts.value // 10**6)
@@ -549,7 +537,7 @@ def test_refresh_live_market_data_refreshes_fresh_ohlcv_with_stale_funding(tmp_p
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", _fake_one)
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
     )
 
@@ -567,7 +555,6 @@ def test_refresh_live_market_data_reports_funding_stale_after_run(tmp_path, monk
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
     funding_dir.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _ms(ts: pd.Timestamp) -> int:
         return int(ts.value // 10**6)
@@ -586,7 +573,7 @@ def test_refresh_live_market_data_reports_funding_stale_after_run(tmp_path, monk
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", lambda collector, symbol, start, end, *, funding_start=None: True)
 
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT", "BUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
     )
 
@@ -604,7 +591,6 @@ def test_funding_fresh_on_disk_treats_missing_or_unreadable_file_as_stale(tmp_pa
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
     funding_dir.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _ms(ts: pd.Timestamp) -> int:
         return int(ts.value // 10**6)
@@ -632,7 +618,6 @@ def test_market_data_staleness_hours_ignores_symbols_without_recent_volume(tmp_p
     now = pd.Timestamp("2026-09-01T00:00:00Z")
     d = tmp_path / "ohlcv" / "1h"
     d.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     healthy = [int((now - pd.Timedelta(hours=2 + k)).value // 10**6) for k in range(10)]
     zombie = [int((now - pd.Timedelta(hours=k)).value // 10**6) for k in range(10)]
     pd.DataFrame({"timestamp": healthy, "close": [1.0] * 10, "volume": [3.0] * 10}).to_parquet(d / "AUSDT.parquet", index=False)
@@ -705,7 +690,6 @@ def test_refresh_live_market_data_refetches_gap_symbol_with_lookback_funding_sta
     ohlcv_dir.mkdir(parents=True)
     funding_dir = tmp_path / "funding"
     funding_dir.mkdir(parents=True)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
 
     def _ms(ts: pd.Timestamp) -> int:
         return int(ts.value // 10**6)
@@ -726,7 +710,7 @@ def test_refresh_live_market_data_refetches_gap_symbol_with_lookback_funding_sta
 
     # When
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["GAPUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
     )
 
@@ -819,7 +803,6 @@ def test_refresh_live_market_data_excludes_absent_symbols(tmp_path, monkeypatch,
     for sym in ("AAAUSDT", "BBBUSDT", "GONEUSDT"):
         stamps = [int((stale - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
         pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{sym}.parquet", index=False)
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     monkeypatch.setattr(data_refresh, "ABSENT_MAX_FRACTION", 0.5)
     refreshed: list[str] = []
     monkeypatch.setattr(data_refresh, "_refresh_one_symbol_tail", lambda collector, symbol, start, end, **k: refreshed.append(symbol) or True)
@@ -827,7 +810,7 @@ def test_refresh_live_market_data_excludes_absent_symbols(tmp_path, monkeypatch,
 
     # When
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=2, deadline_s=30.0, freshness_floor_hours=1.5,
+        tmp_path, symbols=["AAAUSDT", "BBBUSDT", "GONEUSDT"], now=now, lookback_days=40, max_workers=2, deadline_s=30.0, freshness_floor_hours=1.5,
         min_symbols=2, max_fail_fraction=0.15, collector=object(), listed_symbols=frozenset({"AAAUSDT", "BBBUSDT"}),
     )
 
@@ -842,7 +825,7 @@ def test_refresh_live_market_data_excludes_absent_symbols(tmp_path, monkeypatch,
     # Given: 목록 미제공(None)은 기존 동작
     refreshed.clear()
     legacy = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=2, deadline_s=30.0, freshness_floor_hours=1.5,
+        tmp_path, symbols=["AAAUSDT", "BBBUSDT", "GONEUSDT"], now=now, lookback_days=40, max_workers=2, deadline_s=30.0, freshness_floor_hours=1.5,
         min_symbols=2, max_fail_fraction=0.15, collector=object(),
     )
     assert sorted(refreshed) == ["AAAUSDT", "BBBUSDT", "GONEUSDT"]
@@ -945,7 +928,6 @@ def test_refresh_live_market_data_funding_block_keeps_ohlcv_refresh_for_remainin
     d.mkdir(parents=True)
     old = now - pd.Timedelta(days=5)
     ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     for sym in ("AUSDT", "BUSDT", "CUSDT"):
         pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
     ohlcv_calls: list[str] = []
@@ -961,7 +943,7 @@ def test_refresh_live_market_data_funding_block_keeps_ohlcv_refresh_for_remainin
 
     # When
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT", "BUSDT", "CUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=_Collector(),
     )
 
@@ -985,7 +967,6 @@ def test_refresh_live_market_data_klines_block_still_aborts_remaining_symbols(tm
     d.mkdir(parents=True)
     old = now - pd.Timedelta(days=5)
     ts = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
-    monkeypatch.setattr(data_refresh, "symbol_partition", lambda s: "dev")
     for sym in ("AUSDT", "BUSDT", "CUSDT"):
         pd.DataFrame({"timestamp": ts, "close": [1.0] * 48}).to_parquet(d / f"{sym}.parquet", index=False)
     ohlcv_calls: list[str] = []
@@ -1000,7 +981,7 @@ def test_refresh_live_market_data_klines_block_still_aborts_remaining_symbols(tm
 
     # When
     report = data_refresh.refresh_live_market_data(
-        tmp_path, now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+        tmp_path, symbols=["AUSDT", "BUSDT", "CUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
         freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=_Collector(),
     )
 
@@ -1011,3 +992,105 @@ def test_refresh_live_market_data_klines_block_still_aborts_remaining_symbols(tm
     assert report.failed == 3
     assert report.ok is False
 
+
+
+def test_listed_crypto_perpetuals_split_excludes_non_coin() -> None:
+    from src.live.data_refresh import listed_crypto_perpetuals
+
+    payload = {
+        "symbols": [
+            {"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "underlyingType": "COIN"},
+            {"symbol": "AAPLUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "underlyingType": "EQUITY"},
+            {"symbol": "ETHUSDT", "status": "SETTLING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "underlyingType": "COIN"},
+            {"symbol": "BTCUSDT_260925", "status": "TRADING", "contractType": "CURRENT_QUARTER", "quoteAsset": "USDT", "underlyingType": "COIN"},
+            "junk",
+            {"status": "TRADING"},
+        ]
+    }
+
+    crypto, non_crypto = listed_crypto_perpetuals(payload)
+
+    assert crypto == frozenset({"BTCUSDT"})
+    assert non_crypto == frozenset({"AAPLUSDT"})
+
+
+def test_listed_crypto_perpetuals_empty_crypto_fails_closed() -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.data_refresh import listed_crypto_perpetuals
+
+    with pytest.raises(DataIntegrityError):
+        listed_crypto_perpetuals({"symbols": []})
+    with pytest.raises(DataIntegrityError):
+        listed_crypto_perpetuals({})
+    with pytest.raises(DataIntegrityError):
+        listed_crypto_perpetuals(
+            {"symbols": [{"symbol": "AAPLUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "underlyingType": "EQUITY"}]}
+        )
+
+
+def test_refresh_touches_only_given_symbols(tmp_path) -> None:
+    import pandas as pd
+
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    old = now - pd.Timedelta(days=5)
+    for sym in ("BTCUSDT", "AAPLUSDT"):
+        stamps = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{sym}.parquet", index=False)
+    seen: list[str] = []
+
+    def _fake_one(collector, symbol, start, end, **kwargs):
+        seen.append(symbol)
+        return True
+
+    data_refresh._refresh_one_symbol_tail = _fake_one
+    try:
+        report = data_refresh.refresh_live_market_data(
+            tmp_path, symbols=["BTCUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+            freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=0.15, collector=object(),
+        )
+    finally:
+        import importlib
+
+        importlib.reload(data_refresh)
+
+    assert set(seen) == {"BTCUSDT"}
+    assert report.total == 1
+
+
+def test_missing_file_seeds_long_window(tmp_path) -> None:
+    import pandas as pd
+
+    from src.live import data_refresh
+
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    ohlcv_dir = tmp_path / "ohlcv" / "1h"
+    ohlcv_dir.mkdir(parents=True)
+    old = now - pd.Timedelta(days=50)
+    stamps = [int((old - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+    pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / "BTCUSDT.parquet", index=False)
+    seen: dict[str, str] = {}
+
+    def _fake_one(collector, symbol, start, end, **kwargs):
+        seen[symbol] = start
+        return True
+
+    data_refresh._refresh_one_symbol_tail = _fake_one
+    try:
+        data_refresh.refresh_live_market_data(
+            tmp_path, symbols=["BTCUSDT", "SOLUSDT"], now=now, lookback_days=40, max_workers=1, deadline_s=30.0,
+            freshness_floor_hours=1.5, min_symbols=1, max_fail_fraction=1.0, collector=object(),
+            seed_lookback_days=150,
+        )
+    finally:
+        import importlib
+
+        importlib.reload(data_refresh)
+
+    assert pd.Timestamp(seen["SOLUSDT"]) == now - pd.Timedelta(days=150)
+    assert pd.Timestamp(seen["BTCUSDT"]) == now - pd.Timedelta(days=40)

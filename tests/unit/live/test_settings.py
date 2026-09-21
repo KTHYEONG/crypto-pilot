@@ -270,3 +270,66 @@ def test_live_settings_testnet_requires_dedicated_order_credentials() -> None:
     # 메인넷은 주문 키 폴백 허용(같은 베뉴)
     LiveSettings(mode=ExecutionMode.LIVE_MAINNET, mainnet_trading_ack=MAINNET_TRADING_ACK, api_key=SecretStr("k"), api_secret=SecretStr("s"))
 
+
+
+def test_risk_rails_derive_from_account_exposure_max() -> None:
+    from src.live.settings import LiveSettings
+    from src.mhs.params import ACCOUNT_EXPOSURE_MAX
+
+    settings = LiveSettings()
+    assert settings.max_gross_leverage == ACCOUNT_EXPOSURE_MAX
+    assert settings.max_daily_turnover_fraction == 2.0 * ACCOUNT_EXPOSURE_MAX
+    assert settings.max_signal_staleness_hours >= 24
+
+
+def test_record_run_id_derives_strategy_record_paths() -> None:
+    from src.common.paths import DATA_DIR
+    from src.live.settings import LiveSettings
+
+    run_id = "frozen_top20_v2_bayes_maker_20260922"
+    settings = LiveSettings(record_run_id=run_id)
+    root = DATA_DIR / "state" / "runs" / run_id
+    assert settings.run_root() == root
+    assert settings.ledger_path == str(root / "position_ledger.json")
+    assert settings.order_journal_path == str(root / "order_journal.jsonl")
+    assert settings.weights_path == str(root / "target_weights.parquet")
+    assert settings.fills_dir == str(root / "fills")
+    assert settings.execution_quality_dir == str(root / "execution_quality")
+    assert settings.portfolio_state_dir == str(root / "portfolio_state")
+    assert settings.microstructure_dir == str(root / "microstructure")
+    assert settings.tax_ledger_dir == str(root / "tax_ledger")
+
+
+def test_record_run_id_never_overrides_explicit_paths() -> None:
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings(record_run_id="frozen_top20_v2_bayes_maker_20260922", fills_dir="/x")
+    assert settings.fills_dir == "/x"
+    assert settings.ledger_path is not None
+    assert "runs" in settings.ledger_path
+
+
+def test_no_record_run_id_keeps_legacy_defaults() -> None:
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings()
+    assert settings.record_run_id is None
+    assert settings.run_root() is None
+    assert settings.ledger_path is None
+    assert settings.weights_path is None
+    assert settings.fills_dir is None
+    assert settings.execution_quality_dir is None
+    assert settings.portfolio_state_dir is None
+    assert settings.microstructure_dir is None
+    assert settings.tax_ledger_dir is None
+
+
+def test_unsafe_record_run_id_rejected() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.live.settings import LiveSettings
+
+    for bad in ("../evil", "A_UPPER", "short"):
+        with pytest.raises(ValidationError):
+            LiveSettings(record_run_id=bad)

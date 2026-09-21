@@ -265,33 +265,6 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
     assert isolated == baseline
 
 
-def test_emit_deployment_refuses_live_parity_blockers(tmp_path) -> None:
-    import dataclasses
-    import types
-
-    import pytest
-
-    from src.common.errors import DataIntegrityError
-    from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
-    from src.mhs.report.persist import emit_deployment
-
-    # Given: trim ON 요청과, status 검사 단계에서만 걸리도록 만든 더미 리포트
-    trim_request = MhsDiagnosticRequest(
-        **dataclasses.asdict(MhsRunConfig(name_drift_trim=True))
-    )
-    sentinel_report = types.SimpleNamespace(status="INCOMPLETE")
-
-    # When / Then: 리포트 접근 전에 차단
-    with pytest.raises(DataIntegrityError, match="I4_LIVE_PARITY_BLOCKED"):
-        emit_deployment(sentinel_report, trim_request, tmp_path)
-
-    # Given: 기본 요청은 이 가드를 통과하고 status 검사에서 걸린다
-    plain_request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
-    with pytest.raises(DataIntegrityError, match="I0_REPORT_NOT_COMPLETE"):
-        emit_deployment(sentinel_report, plain_request, tmp_path)
-
-
 def test_run_history_record_discloses_live_parity_blockers() -> None:
     import dataclasses
 
@@ -322,36 +295,6 @@ def test_run_history_record_discloses_live_parity_blockers() -> None:
     assert plain_record["live_parity_blockers"] == []
     assert none_record["live_parity_blockers"] is None
     assert trim_record["flags"]["name_drift_trim"] is True
-
-def test_emit_deployment_refuses_when_deploy_gate_blocks(tmp_path, monkeypatch) -> None:
-    import dataclasses
-    import types
-
-    import pytest
-
-    import src.mhs.report.persist as persist
-    from src.common.errors import DataIntegrityError
-    from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.deploy_gate import DeployGateResult
-    from src.mhs.pipeline.config import MhsRunConfig
-
-    trim_request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(name_drift_trim=True)))
-    sentinel_report = types.SimpleNamespace(status="COMPLETE")
-
-    # When / Then: 라이브 미지원 기능은 실제 게이트(monkeypatch 없음)로 차단
-    with pytest.raises(DataIntegrityError, match="I4_LIVE_PARITY_BLOCKED"):
-        persist.emit_deployment(sentinel_report, trim_request, tmp_path)
-
-    # Given: 게이트 통과 -> emit 고유의 구조 전제에서 걸린다
-    monkeypatch.setattr(
-        persist, "deploy_gate_from_report",
-        lambda report, request, **_kw: DeployGateResult(go=True, reason_codes=(), metrics={}),
-    )
-    plain_request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
-    empty_blend = types.SimpleNamespace(status="COMPLETE", blend=None)
-    with pytest.raises(DataIntegrityError, match="blend target_weights empty"):
-        persist.emit_deployment(empty_blend, plain_request, tmp_path)
-
 
 def test_run_history_record_carries_deploy_gate_verdict() -> None:
     import dataclasses

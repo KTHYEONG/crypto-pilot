@@ -209,6 +209,12 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
 
     s = LiveSettings()
     try:
+        from src.market_data.storage.ohlcv import is_temp_artifact
+
+        disk_root = FUTURES_DATA_DIR / "ohlcv" / "1h"
+        disk_syms = sorted(
+            p.stem for p in disk_root.glob("*.parquet") if not is_temp_artifact(p.name)
+        ) if disk_root.exists() else []
         rep = refresh_live_market_data(
             FUTURES_DATA_DIR,
             now=pd.Timestamp.now(tz="UTC"),
@@ -218,6 +224,7 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
             freshness_floor_hours=s.refresh_freshness_floor_hours,
             min_symbols=s.min_universe_symbols,
             max_fail_fraction=s.refresh_max_fail_fraction,
+            symbols=disk_syms,
         )
     except ColdUniverseError as exc:
         _logger.error("[DATA] stage=refresh_live_universe status=COLD_UNIVERSE detail=%s", exc)
@@ -234,20 +241,24 @@ def _seed_cloud(args: argparse.Namespace) -> None:
     import pandas as pd
 
     from src.common.paths import FUTURES_DATA_DIR
-    from src.live.data_refresh import refresh_live_market_data
+    from src.live.data_refresh import fetch_listed_symbols, listed_crypto_perpetuals, refresh_live_market_data
     from src.live.settings import LiveSettings
-    from src.market_data.binance.vision import BinanceVisionDownloader
-    from src.quant.universe.pit_universe import symbol_partition
+    from src.market_data.services.universe_gaps import fetch_exchange_info
 
-    syms = [
-        s
-        for s in BinanceVisionDownloader().list_all_symbols()
-        if s.endswith("USDT") and symbol_partition(s) == "dev"
-    ]
+    # 실제 데몬(frozen live step)이 쓰는 유니버스와 같은 규칙으로 시딩한다: dev 파티션이
+    # 아니라 현재 상장된 COIN USDT 무기한 선물 전체다. dev 파티션 필터로 시딩하면 daemon이
+    # 첫 사이클에 필요로 하는 심볼 일부가 로컬에 없어 콜드스타트가 실패한다.
+    try:
+        crypto, _non_crypto = listed_crypto_perpetuals(fetch_exchange_info())
+    except Exception as exc:  # noqa: BLE001
+        _logger.error("[DATA] stage=seed_cloud status=EXCHANGE_INFO_FAILED detail=%s", exc)
+        raise SystemExit(1) from exc
+    syms = sorted(crypto)
     if not syms:
         _logger.error("[DATA] stage=seed_cloud status=NO_UNIVERSE")
         raise SystemExit(1)
     s = LiveSettings()
+    listed = fetch_listed_symbols()
     lookback = int(getattr(args, "lookback_days", 0)) or s.data_retention_days
     rep = refresh_live_market_data(
         FUTURES_DATA_DIR,
@@ -259,6 +270,7 @@ def _seed_cloud(args: argparse.Namespace) -> None:
         min_symbols=1,
         max_fail_fraction=1.0,
         symbols=syms,
+        listed_symbols=listed,
     )
     _logger.info(
         "[DATA] stage=seed_cloud total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d ok=%s",
@@ -582,7 +594,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     repair.add_argument("--lookback-days", type=int, default=0)
     repair.set_defaults(handler=_repair_ohlcv)
 
-    seed_cloud = collect.add_parser("seed-cloud", help="Cold-boot the box: fetch 1h trade OHLCV + settled funding for the dev universe")
+    seed_cloud = collect.add_parser("seed-cloud", help="Cold-boot the box: fetch 1h trade OHLCV + settled funding for the currently listed COIN perpetual universe")
     seed_cloud.add_argument("--lookback-days", type=int, default=0)
     seed_cloud.set_defaults(handler=_seed_cloud)  # _seed_cloud delegates to refresh_live_market_data(symbols=syms)
 
