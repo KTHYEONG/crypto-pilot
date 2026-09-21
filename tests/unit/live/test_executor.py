@@ -12,11 +12,15 @@ import pytest
 from src.live.audit import AuditLog
 from src.live.errors import VenueError
 from src.live.executor import (
+    EXECUTION_BAR_SECONDS,
+    FeeSchedule,
     PassiveExecutionPolicy,
     _capped_ioc_price,
     _slice_quantities,
+    backtest_parity_execution_policy,
     execute_intent,
     execute_intents,
+    strict_passive_execution_policy,
 )
 from src.live.filters import SymbolFilters
 from src.live.planner import OrderIntent
@@ -2323,4 +2327,170 @@ def test_execute_intents_window_end_unknown_lookup_failure_propagates(tmp_path) 
 
     assert exc_info.value.code == -1022
     assert "abort_cleanup_failed" in _events()
+
+
+def _anchored_policy(**overrides: object) -> PassiveExecutionPolicy:
+    base: dict[str, object] = {
+        "poll_interval_s": 3.0,
+        "passive_deadline_s": 500.0,
+        "window_deadline_s": 600.0,
+        "taker_cap_bps": 8.0,
+        "max_slices": 1,
+        "passive_pricing": "anchored",
+    }
+    base.update(overrides)
+    return PassiveExecutionPolicy(**base)  # type: ignore[arg-type]
+
+
+def _sell_intent() -> OrderIntent:
+    return OrderIntent(
+        symbol="AAAUSDT",
+        side="SELL",
+        quantity=Decimal("1.000"),
+        reduce_only=False,
+        target_qty=Decimal("1.000"),
+        current_qty=Decimal("0"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("100"),
+    )
+
+
+def test_strict_passive_policy_derives_timing_from_timeout() -> None:
+    """Timeout 30 gives a 1800s passive phase, a two-bar window, and the taker cap."""
+    schedule = FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0)
+    policy = strict_passive_execution_policy(schedule, 3.0, 30)
+
+    assert policy.passive_deadline_s == 1800.0
+    assert policy.window_deadline_s == 1800.0 + 2 * EXECUTION_BAR_SECONDS
+    assert policy.taker_cap_bps == 8.0
+    assert policy.passive_pricing == "anchored"
+
+
+def test_strict_passive_policy_rejects_non_positive_timeout() -> None:
+    """A zero or negative passive timeout fails closed."""
+    schedule = FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0)
+    with pytest.raises(ValueError, match="passive_timeout_minutes"):
+        strict_passive_execution_policy(schedule, 3.0, 0)
+    with pytest.raises(ValueError, match="passive_timeout_minutes"):
+        strict_passive_execution_policy(schedule, 3.0, -5)
+
+
+def test_passive_execution_policy_rejects_unknown_pricing() -> None:
+    """A passive_pricing outside the closed set fails closed."""
+    with pytest.raises(ValueError, match="passive_pricing"):
+        PassiveExecutionPolicy(passive_pricing="mid")  # type: ignore[arg-type]
+
+
+def test_anchored_buy_rests_at_decision_price_inside_spread(tmp_path) -> None:
+    """An anchor inside the spread rests at the decision price as GTX."""
+    client = StubClient(touches=[("99.00", "101.00")])
+    execute_intent(
+        client, _intent(), _filters(tick_size="0.10"), _anchored_policy(),
+        AuditLog(tmp_path / "anchored_buy.jsonl"), SteppingClock(15.0),
+    )
+
+    assert Decimal(client.orders[0]["price"]) == Decimal("100.0")
+    assert client.orders[0]["timeInForce"] == "GTX"
+
+
+def test_anchored_buy_clamps_below_ask_when_anchor_would_cross(tmp_path) -> None:
+    """An anchor above the ask rests one tick below the ask, still post-only."""
+    client = StubClient(touches=[("99.00", "99.50")])
+    execute_intent(
+        client, _intent(), _filters(tick_size="0.10"), _anchored_policy(),
+        AuditLog(tmp_path / "anchored_clamp.jsonl"), SteppingClock(15.0),
+    )
+
+    assert Decimal(client.orders[0]["price"]) == Decimal("99.4")
+    assert client.orders[0]["timeInForce"] == "GTX"
+
+
+def test_anchored_sell_mirrors(tmp_path) -> None:
+    """A sell anchor below the bid rests one tick above the bid."""
+    client = StubClient(touches=[("100.50", "101.00")])
+    execute_intent(
+        client, _sell_intent(), _filters(tick_size="0.10"), _anchored_policy(),
+        AuditLog(tmp_path / "anchored_sell.jsonl"), SteppingClock(15.0),
+    )
+
+    assert Decimal(client.orders[0]["price"]) == Decimal("100.6")
+    assert client.orders[0]["timeInForce"] == "GTX"
+
+
+def test_anchored_skips_non_positive_price(tmp_path) -> None:
+    """An anchor derived at or below zero is never posted; only the IOC backstop fires."""
+    client = StubClient(touches=[("0.01", "0.05")])
+    execute_intent(
+        client, _intent(), _filters(tick_size="0.10"), _anchored_policy(),
+        AuditLog(tmp_path / "anchored_zero.jsonl"), SteppingClock(15.0),
+    )
+
+    assert client.orders
+    assert all(o["timeInForce"] == "IOC" for o in client.orders)
+
+
+def test_anchored_never_chases_book_moves(tmp_path) -> None:
+    """Rising quotes before the deadline cause no cancel, no repost, and no chase."""
+    touches = [(f"{100.00 + 0.10 * i:.2f}", f"{101.00 + 0.10 * i:.2f}") for i in range(12)]
+    client = StubClient(touches=touches)
+    outcome = execute_intent(
+        client, _intent(), _filters(tick_size="0.10"), _anchored_policy(),
+        AuditLog(tmp_path / "anchored_nochase.jsonl"), SteppingClock(15.0),
+    )
+
+    gtx_posts = [o for o in client.orders if o["timeInForce"] == "GTX"]
+    assert len(gtx_posts) == 1
+    assert len(client.cancels) == 1
+    assert outcome.chases == 0
+
+
+def test_anchored_escalates_to_capped_ioc_at_deadline(tmp_path) -> None:
+    """Past the passive deadline the remainder crosses once via the capped IOC backstop."""
+    client = StubClient(touches=[("100.00", "100.00")])
+    policy = _anchored_policy(passive_deadline_s=20.0)
+    execute_intent(
+        client, _intent(), _filters(tick_size="0.10"), policy,
+        AuditLog(tmp_path / "anchored_ioc.jsonl"), SteppingClock(15.0),
+    )
+
+    ioc_orders = [o for o in client.orders if o["timeInForce"] == "IOC"]
+    assert len(ioc_orders) >= 1
+    cap = Decimal("100.00") * (Decimal(1) + Decimal(str(policy.taker_cap_bps)) / Decimal(10_000))
+    for order in ioc_orders:
+        assert Decimal(order["price"]) <= cap
+    assert all(o["type"] == "LIMIT" for o in client.orders)
+
+
+def test_anchored_paper_fill_is_maker_on_trade_through(tmp_path) -> None:
+    """A resting anchored GTX fills as maker at its own price when the ask trades through."""
+    client = PaperStubClient(touches=[("99.00", "101.00"), ("99.00", "99.90")])
+    outcome = execute_intent(
+        client, _intent(), _filters(tick_size="0.10"), _anchored_policy(),
+        AuditLog(tmp_path / "anchored_paper.jsonl"), SteppingClock(3.0),
+    )
+
+    assert outcome.status == "FILLED"
+    assert outcome.filled_qty == Decimal("1.000")
+    assert outcome.avg_fill_price == Decimal("100.0")
+    assert outcome.fills[0][4] == "maker"
+    assert outcome.fills[0][1] == Decimal("100.0")
+
+
+def test_touch_chase_behaviour_unchanged(tmp_path) -> None:
+    """The default touch-chase policy keeps its chase-then-IOC shape bit-identically."""
+    client = StubClient()
+    outcome = execute_intent(
+        client, _intent(), _filters(), _policy(), AuditLog(tmp_path / "parity09.jsonl"), SteppingClock(15.0)
+    )
+    gtx_posts = [o for o in client.orders if o["timeInForce"] == "GTX"]
+    assert len(client.cancels) >= 1
+    assert 0 <= len(gtx_posts) - 1 <= _policy().max_chases
+    assert outcome.unfilled_qty > 0
+    assert all(o["type"] == "LIMIT" for o in client.orders)
+
+    schedule = FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0)
+    parity = backtest_parity_execution_policy(schedule, 3.0)
+    assert parity.passive_pricing == "touch_chase"
+    assert parity.passive_deadline_s == EXECUTION_BAR_SECONDS
 

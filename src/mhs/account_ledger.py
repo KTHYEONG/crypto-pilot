@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -29,7 +30,10 @@ class AccountMarkPanels:
 
 @dataclass(frozen=True, slots=True)
 class AccountLedgerResult:
-    """Account-scale replay outcome in USDT; daily series indexed by UTC date."""
+    """Account-scale replay outcome in USDT; daily series indexed by UTC date.
+
+    maker_fill_fraction: share of sent notional filled passively (0.0 under taker execution).
+    """
 
     capital: float
     daily_equity: pd.Series
@@ -43,6 +47,7 @@ class AccountLedgerResult:
     funding_paid: float
     fallback_ladder_symbols: tuple[str, ...]
     missing_filter_symbols: tuple[str, ...]
+    maker_fill_fraction: float = 0.0
 
 
 def replay_account(
@@ -58,6 +63,9 @@ def replay_account(
     taker_fee_bps: float,
     apply_order_filters: bool = True,
     unit_equity: pd.Series | None = None,
+    execution: Literal["taker", "maker"] = "taker",
+    maker_fee_bps: float | None = None,
+    passive_window_bars: int | None = None,
 ) -> AccountLedgerResult:
     """Replay a unit-exposure target book as one real USDT account.
 
@@ -74,13 +82,41 @@ def replay_account(
     same entry index, and the entry at date d uses only its returns realized at entries
     strictly before d (returns 1..d-1), so today's move never informs today's size.
 
+    ``execution="maker"`` replaces the immediate taker fill with the canonical strict passive
+    rule: each order rests at the entry-bar close (the anchor observable at submission) for
+    the next ``passive_window_bars`` 3m bars of the same holding segment; a buy fills at the
+    anchor only if a finite bar low trades strictly below it (a sell: a high strictly above),
+    paying ``maker_fee_bps``; otherwise it crosses at the last finite close of that window
+    paying ``taker_fee_bps``. Order sizing, step rounding, minimum-notional skips and
+    square-root impact are decided at the anchor exactly as under taker execution, so impact
+    stays a capacity charge on every sent notional regardless of liquidity. Margin and
+    liquidation are evaluated on post-trade quantities for the whole segment.
+
     Raises:
         DataIntegrityError: Misaligned indexes/columns, non-positive capital, or no entry row.
         DataIntegrityError: growth policy without unit_equity, or unit_equity misaligned
             with unit_weights, non-finite, or non-positive.
+        DataIntegrityError: maker execution without maker_fee_bps/passive_window_bars, a
+            negative or non-finite maker fee, a maker fee above the taker fee, or passive_window_bars < 1.
     """
     if not np.isfinite(capital) or capital <= 0:
         raise DataIntegrityError(f"capital must be positive, got {capital}")
+    if execution not in ("taker", "maker"):
+        raise DataIntegrityError(f"execution must be 'taker' or 'maker', got {execution}")
+    is_maker = execution == "maker"
+    maker_fee_rate = 0.0
+    window_bars = 0
+    if is_maker:
+        if maker_fee_bps is None:
+            raise DataIntegrityError("maker execution requires maker_fee_bps")
+        if not np.isfinite(maker_fee_bps) or maker_fee_bps < 0 or maker_fee_bps > taker_fee_bps:
+            raise DataIntegrityError(f"invalid maker_fee_bps {maker_fee_bps} for taker_fee_bps {taker_fee_bps}")
+        if isinstance(passive_window_bars, bool) or not isinstance(passive_window_bars, (int, np.integer)):
+            raise DataIntegrityError(f"passive_window_bars must be an int >= 1, got {passive_window_bars}")
+        if int(passive_window_bars) < 1:
+            raise DataIntegrityError(f"passive_window_bars must be >= 1, got {passive_window_bars}")
+        maker_fee_rate = float(maker_fee_bps) / 1e4
+        window_bars = int(passive_window_bars)
     dates = unit_weights.index
     if len(dates) == 0:
         raise DataIntegrityError("unit_weights carries no entry row")
@@ -137,6 +173,9 @@ def replay_account(
     close_values = np.nan_to_num(marks.close[symbols].to_numpy(dtype="float64"), nan=1.0)
     high_values = np.nan_to_num(marks.high[symbols].to_numpy(dtype="float64"), nan=1.0)
     low_values = np.nan_to_num(marks.low[symbols].to_numpy(dtype="float64"), nan=1.0)
+    raw_close = marks.close[symbols].to_numpy(dtype="float64")
+    raw_high = marks.high[symbols].to_numpy(dtype="float64")
+    raw_low = marks.low[symbols].to_numpy(dtype="float64")
     entry_pos = bar_index.searchsorted(dates, side="right") - 1
     if bool((entry_pos < 0).any()):
         raise DataIntegrityError("entry date precedes mark panels")
@@ -160,6 +199,8 @@ def replay_account(
     margin_breaches = 0
     liquidated_at: pd.Timestamp | None = None
     fee_rate = taker_fee_bps / 1e4
+    maker_anchor_sent = 0.0
+    total_anchor_sent = 0.0
     for day in range(days):
         price = entry_close[day]
         held = quantities * price
@@ -207,12 +248,52 @@ def replay_account(
             sent = np.abs(delta) * price
             intended_notional += float(np.abs(target - held).sum())
         fee = fee_rate * float(sent.sum())
+        fill_price = price
+        maker_fill = np.zeros(count, dtype=bool)
+        if is_maker:
+            window_start = int(entry_pos[day]) + 1
+            window_limit = int(entry_pos[day + 1]) if day + 1 < days else close_values.shape[0]
+            window_end = min(window_start + window_bars, window_limit)
+            fill_price = price.copy()
+            if window_end > window_start:
+                window_close = raw_close[window_start:window_end]
+                window_low = raw_low[window_start:window_end]
+                window_high = raw_high[window_start:window_end]
+                anchor_raw = raw_close[int(entry_pos[day])]
+                active = np.abs(delta) > 0.0
+                for position in range(count):
+                    if not bool(active[position]):
+                        continue
+                    anchor = float(anchor_raw[position])
+                    closes = window_close[:, position]
+                    finite_closes = closes[np.isfinite(closes)]
+                    if not np.isfinite(anchor):
+                        if finite_closes.size > 0:
+                            fill_price[position] = float(finite_closes[-1])
+                        continue
+                    if delta[position] > 0.0:
+                        adverse_col = window_low[:, position]
+                        filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col < anchor)))
+                    else:
+                        adverse_col = window_high[:, position]
+                        filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col > anchor)))
+                    if filled:
+                        maker_fill[position] = True
+                        fill_price[position] = price[position]
+                    elif finite_closes.size > 0:
+                        fill_price[position] = float(finite_closes[-1])
+                maker_notional = np.abs(delta) * fill_price * maker_fill
+                taker_notional = np.abs(delta) * fill_price * (~maker_fill)
+                fee = maker_fee_rate * float(maker_notional.sum()) + fee_rate * float(taker_notional.sum())
+            anchor_sent = np.abs(delta) * price
+            total_anchor_sent += float(anchor_sent.sum())
+            maker_anchor_sent += float(anchor_sent[maker_fill].sum())
         # ADV·σ가 없는 종목은 충격을 추정할 근거가 없으므로 0으로 두고, NaN이 현금을 오염시키지 않게 한다.
         valid_impact = np.isfinite(adv_values[day]) & (adv_values[day] > 0) & np.isfinite(sigma_values[day])
         safe_adv = np.where(valid_impact, adv_values[day], np.inf)
         safe_sigma = np.where(valid_impact, sigma_values[day], 0.0)
         impact = float((sent * policy.impact_y * safe_sigma * np.sqrt(sent / safe_adv)).sum())
-        cash -= float((delta * price).sum()) + fee + impact
+        cash -= float((delta * fill_price).sum()) + fee + impact
         fee_paid += fee
         impact_paid += impact
         quantities = quantities + delta
@@ -238,6 +319,7 @@ def replay_account(
             daily_exposure[day:] = 0.0
             break
     untraded = skipped_notional / intended_notional if intended_notional > 0 else 0.0
+    maker_fill_fraction = maker_anchor_sent / total_anchor_sent if total_anchor_sent > 0 else 0.0
     return AccountLedgerResult(
         capital=float(capital),
         daily_equity=pd.Series(daily_equity, index=dates),
@@ -251,4 +333,5 @@ def replay_account(
         funding_paid=funding_paid,
         fallback_ladder_symbols=fallback_symbols,
         missing_filter_symbols=tuple(sorted(missing_filters)),
+        maker_fill_fraction=float(maker_fill_fraction),
     )

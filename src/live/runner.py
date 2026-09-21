@@ -608,10 +608,15 @@ def run_shadow_cycle(
             with contextlib.suppress(Exception):
                 audit.record("position_uncovered", symbol=sym, reason=reason)
 
-        from src.live.executor import FeeSchedule, backtest_parity_execution_policy  # noqa: PLC0415
+        from src.live.executor import FeeSchedule, backtest_parity_execution_policy, strict_passive_execution_policy  # noqa: PLC0415
         from src.live.settings import ExecutionMode  # noqa: PLC0415
 
-        policy = backtest_parity_execution_policy(FeeSchedule(maker_fee_bps=settings.maker_fee_bps, taker_fee_bps=settings.taker_fee_bps), settings.taker_slippage_bps)
+        fee_schedule = FeeSchedule(maker_fee_bps=settings.maker_fee_bps, taker_fee_bps=settings.taker_fee_bps)
+        if settings.execution_policy == "strict_passive":
+            policy = strict_passive_execution_policy(fee_schedule, settings.taker_slippage_bps, settings.passive_timeout_minutes)
+        else:
+            policy = backtest_parity_execution_policy(fee_schedule, settings.taker_slippage_bps)
+        audit.record("execution_policy_selected", policy=settings.execution_policy)
         paper_fill_model = settings.paper_fill_model if settings.mode is ExecutionMode.PAPER else None
         sink: list[ExecutionOutcome] = []
         persisted = False
