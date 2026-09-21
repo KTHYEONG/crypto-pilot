@@ -20,6 +20,7 @@ from src.mhs.frozen_research_candidate import (
     build_frozen_mhs_candidate,
 )
 from src.mhs.frozen_research_evidence import (
+    FrozenExecutionBound,
     FrozenMhsReportPeriod,
     FrozenMhsResearchEvidence,
     evaluate_frozen_mhs_research,
@@ -45,6 +46,11 @@ class FrozenMhsBacktestRequest:
     warm-up are observable rather than manufactured.  The request identifies
     a target policy, exact execution cost bounds, and report periods without
     allowing the runner to select a better strategy from its results.
+
+    ``execution_bound`` selects how both cost cases cross: immediate taker,
+    or a resting maker limit for ``passive_timeout_minutes`` with the unfilled remainder crossing
+    as taker. Both require the ``submit_bar`` decision anchor so no order is sized or priced off a
+    mark published after its own submission.
     """
 
     source_start: pd.Timestamp
@@ -57,6 +63,7 @@ class FrozenMhsBacktestRequest:
     report_periods: tuple[FrozenMhsReportPeriod, ...]
     data_root: Path | None = None
     memory_budget: MhsMemoryBudget | None = None
+    execution_bound: FrozenExecutionBound = "OHLCV_IMMEDIATE_TAKER"
 
     def __post_init__(self) -> None:
         for name in ("source_start", "evaluation_start", "evaluation_end"):
@@ -81,6 +88,10 @@ class FrozenMhsBacktestRequest:
                 raise DataIntegrityError(f"{label} must be an ExecutionSpec")
         if self.base_spec.one_way_taker_bps() != 6.0 or self.stress_spec.one_way_taker_bps() != 18.0:
             raise DataIntegrityError("base cost must be 6 bps and stress cost 18 bps one-way")
+        if self.execution_bound not in ("OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"):
+            raise DataIntegrityError(f"execution_bound must be a registered crossing model, got {self.execution_bound!r}")
+        if self.base_spec.decision_anchor != "submit_bar" or self.stress_spec.decision_anchor != "submit_bar":
+            raise DataIntegrityError("base and stress specs must use decision_anchor='submit_bar'")
         if not isinstance(self.report_periods, tuple) or not self.report_periods:
             raise DataIntegrityError("report_periods must be a non-empty tuple of FrozenMhsReportPeriod")
         if any(not isinstance(p, FrozenMhsReportPeriod) for p in self.report_periods):
@@ -89,6 +100,19 @@ class FrozenMhsBacktestRequest:
             raise DataIntegrityError("data_root must be a Path or None")
         if self.memory_budget is not None and not isinstance(self.memory_budget, MhsMemoryBudget):
             raise DataIntegrityError("memory_budget must be a MhsMemoryBudget or None")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenSourceContext:
+    """One loaded source bundle shared by the inventory replay and alternative ledgers."""
+
+    census: tuple[str, ...]
+    funding_by_symbol: dict[str, pd.Series]
+    funding_failures: dict[str, str]
+    root: str
+    budget: MhsMemoryBudget
+    daily_close: pd.DataFrame
+    daily_quote_volume: pd.DataFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,23 +325,13 @@ def _frozen_window_stream(
     )
 
 
-def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBacktestRun:
-    """Build and replay a frozen PIT strategy using the shared 3m inventory ledger.
+def build_frozen_request_candidate(
+    request: FrozenMhsBacktestRequest,
+) -> tuple[FrozenMhsCandidate, FrozenSourceContext]:
+    """Build the scored candidate exactly as ``run_frozen_mhs_backtest`` does, without replay.
 
-    The runner first reconstructs the full historical universe from Binance
-    archive sources, then materializes only historically selected hourly and
-    active/held 3m symbols.  It produces research evidence for the exact
-    request interval without changing or consulting live strategy state.
-
-    Args:
-        request: Complete historical source, target-policy, cost, and resource request.
-    Returns:
-        Exact candidate provenance and paired base/stress inventory evidence.
-    Raises:
-        DataIntegrityError: Input chronology, source coverage, timing, or
-            execution evidence is incomplete.
-        MhsResourceAdmissionError: A declared memory budget cannot admit work.
-    """
+    Returns the candidate plus the loaded source context (census, funding series, OHLCV root,
+    resolved memory budget) so an alternative ledger can reuse one source load."""
     budget = resolve_mhs_memory_budget(request.memory_budget)
     initial_swap_bytes = _current_tree_swap_bytes()
     _admit_source_stage(budget, initial_swap_bytes)
@@ -362,6 +376,39 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
         signal_available_at=full_candidate.signal_available_at[scored],
         strategy=request.strategy,
     )
+    context = FrozenSourceContext(
+        census=census, funding_by_symbol=funding_by_symbol, funding_failures=funding_failures,
+        root=root, budget=budget, daily_close=daily_close, daily_quote_volume=daily_quote_volume,
+    )
+    return candidate, context
+
+
+def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBacktestRun:
+    """Build and replay a frozen PIT strategy using the shared 3m inventory ledger.
+
+    The runner first reconstructs the full historical universe from Binance
+    archive sources, then materializes only historically selected hourly and
+    active/held 3m symbols.  It produces research evidence for the exact
+    request interval without changing or consulting live strategy state.
+
+    Args:
+        request: Complete historical source, target-policy, cost, and resource request.
+    Returns:
+        Exact candidate provenance and paired base/stress inventory evidence.
+    Raises:
+        DataIntegrityError: Input chronology, source coverage, timing, or
+            execution evidence is incomplete.
+        MhsResourceAdmissionError: A declared memory budget cannot admit work.
+    """
+    candidate, context = build_frozen_request_candidate(request)
+    budget = context.budget
+    root = context.root
+    funding_by_symbol = context.funding_by_symbol
+    funding_failures = context.funding_failures
+    census = context.census
+    blocked_decisions = frozen_blocked_decisions(
+        pd.DatetimeIndex(context.daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
+    )
     execution_start = candidate.signal_available_at[0]
     execution_end = _frozen_execution_fence(candidate)
     live_accumulators: _LiveAccumulatorSets = []
@@ -377,6 +424,7 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
         candidate, window_stream, initial_equity=request.initial_equity,
         base_spec=request.base_spec, stress_spec=request.stress_spec,
         report_periods=request.report_periods, live_accumulators=live_accumulators,
+        execution_bound=request.execution_bound,
     )
     for period in request.report_periods:
         row = evidence.period_metrics.loc[period.label]

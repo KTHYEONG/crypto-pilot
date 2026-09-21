@@ -9,6 +9,7 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -548,3 +549,629 @@ def test_append_backtest_index_falls_back_to_absolute_path_outside_root(tmp_path
     )
     row = json.loads(index_path.read_text(encoding="utf-8").strip())
     assert row["run_dir"] == str(outside_run_dir)
+
+
+def test_frozen_specs_use_submit_anchor() -> None:
+    """Both frozen cost cases cross from the last pre-submission mark at 6 and 18 bps."""
+    base, stress = backtest_mod._frozen_specs()
+    assert base.decision_anchor == "submit_bar"
+    assert stress.decision_anchor == "submit_bar"
+    assert base.one_way_taker_bps() == 6.0
+    assert stress.one_way_taker_bps() == 18.0
+
+
+def test_frozen_execution_flag_maps_to_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--execution maker selects the strict-proxy bound and labels the run directory."""
+    frozen_root = tmp_path / "frozen"
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    seen = _install_frozen(monkeypatch)
+    backtest_mod.run_frozen_mhs_backtest_command(
+        _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01", "--execution", "maker"])
+    )
+    assert seen["request"].execution_bound == "OHLCV_STRICT_PROXY"
+    assert "_maker_" in seen["output"].parent.name
+
+
+def test_frozen_default_execution_is_taker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No flag keeps the immediate-taker bound and today's run directory format."""
+    import re
+
+    frozen_root = tmp_path / "frozen"
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    seen = _install_frozen(monkeypatch)
+    backtest_mod.run_frozen_mhs_backtest_command(
+        _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01"])
+    )
+    assert seen["request"].execution_bound == "OHLCV_IMMEDIATE_TAKER"
+    assert re.fullmatch(r"20250101_20250201_top20_\d{8}T\d{6}Z", seen["output"].parent.name) is not None
+
+
+def test_frozen_execution_rejects_unknown_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An execution value outside taker/maker exits before any workload launch."""
+    seen = _install_frozen(monkeypatch)
+    args = _parse(_frozen_argv(tmp_path))
+    args.execution = "peg"
+    with pytest.raises(SystemExit, match=r"execution"):
+        backtest_mod.run_frozen_mhs_backtest_command(args)
+    assert "request" not in seen
+
+
+def test_frozen_index_records_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A frozen index row carries execution while a canonical mhs row has no such key."""
+    frozen_root = tmp_path / "backtests" / "frozen" / "runs"
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path / "backtests")
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    _install_frozen(monkeypatch)
+    backtest_mod.run_frozen_mhs_backtest_command(
+        _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01"])
+    )
+    frozen_row = json.loads((tmp_path / "backtests" / "index.jsonl").read_text(encoding="utf-8").strip())
+    assert frozen_row["execution"] == "taker"
+
+    def _fake(**kwargs):
+        Path(kwargs["result_output"]).write_text(
+            json.dumps({"financial": {"base": {"cagr": 0.1, "max_drawdown": -0.05}}}), encoding="utf-8",
+        )
+        return types.SimpleNamespace(status="completed")
+
+    import src.application.mhs_supervisor as supmod
+
+    monkeypatch.setattr(supmod, "run_mhs_process_backtest", _fake)
+    run_mhs_backtest(_parse(["backtest", "mhs", "--start", "2022-01-01", "--end", "2022-01-04"]))
+    rows = (tmp_path / "backtests" / "index.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    canonical_row = json.loads(rows[-1])
+    assert canonical_row["kind"] == "mhs"
+    assert "execution" not in canonical_row
+
+
+def _fake_run_dir(tmp_path: Path, multiplier: float = 2.5) -> Path:
+    run_dir = tmp_path / "frozen_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "strategy_id": "frozen_mhs_top20_growth_v2",
+        "breadth": 20,
+        "exposure_multiplier": multiplier,
+        "execution_bound": "OHLCV_IMMEDIATE_TAKER",
+        "source_start": "2024-01-01T00:00:00+00:00",
+        "evaluation_start": "2025-01-01T00:00:00+00:00",
+        "evaluation_end": "2025-02-01T00:00:00+00:00",
+    }
+    (run_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+    idx = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
+    pd.DataFrame(
+        {"base_return": np.full(len(idx), 0.001), "max_name_weight": np.full(len(idx), 0.05)},
+        index=idx,
+    ).to_parquet(run_dir / "daily.parquet")
+    return run_dir
+
+
+def _install_exposure(monkeypatch: pytest.MonkeyPatch) -> dict:
+    import src.mhs.frozen_research_universe as universe_mod
+    import src.mhs.growth_exposure as growth_mod
+    import src.mhs.panel as panel_mod
+    import src.mhs.resources as resources_mod
+
+    seen: dict = {}
+
+    def _fake_panel(root, interval, columns, start, end, partition="all", selection_mode="causal_history", allocation_admission=None):
+        seen["selection_mode"] = selection_mode
+        if allocation_admission is not None:
+            allocation_admission(1024)
+        idx = pd.date_range(start, end, freq="h", tz="UTC")
+        return {name: pd.DataFrame(100.0, index=idx, columns=["AAA", "BBB"], dtype="float64") for name in columns}
+
+    def _fake_roster(daily_close, daily_quote_volume, census, *, breadth, blocked_decisions=None):
+        seen["breadth"] = breadth
+        seen["blocked_decisions"] = blocked_decisions
+        return pd.DataFrame(False, index=daily_close.index, columns=list(census), dtype=bool)
+
+    def _fake_solve(unit_returns, *, max_name_weight, gaps, mean_haircut, grid, plateau_tolerance, n_paths, horizon_years, mean_block_days, seed):
+        seen["unit_returns"] = unit_returns
+        seen["max_name_weight"] = max_name_weight
+        seen["gaps"] = gaps
+        seen["solver_params"] = {
+            "mean_haircut": mean_haircut, "grid": grid, "plateau_tolerance": plateau_tolerance,
+            "n_paths": n_paths, "horizon_years": horizon_years, "mean_block_days": mean_block_days, "seed": seed,
+        }
+        grid_tuple = tuple(grid)
+        return types.SimpleNamespace(
+            grid=grid_tuple, growth=(0.1,) * len(grid_tuple), ruin_probability=(0.0,) * len(grid_tuple),
+            argmax=grid_tuple[-1], chosen=grid_tuple[0], gap_events_per_year=1.5, gap_sample_size=3,
+        )
+
+    monkeypatch.setattr(panel_mod, "load_base_panel", _fake_panel)
+    monkeypatch.setattr(universe_mod, "build_frozen_pit_roster", _fake_roster)
+    monkeypatch.setattr(growth_mod, "solve_log_growth_exposure", _fake_solve)
+    monkeypatch.setattr(growth_mod, "structurally_excluded_symbols", lambda: frozenset())
+    monkeypatch.setattr(resources_mod, "resolve_mhs_memory_budget", lambda budget: budget)
+    monkeypatch.setattr(resources_mod, "assert_mhs_stage_allocation", lambda **kwargs: None)
+    return seen
+
+
+def test_frozen_exposure_unlevers_by_run_multiplier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The solver receives base returns and mean name weight divided by the run multiplier."""
+    from src.mhs.params import (
+        COMMITTEE_GROWTH_HORIZON_YEARS,
+        COMMITTEE_GROWTH_N_PATHS,
+        FROZEN_EXPOSURE_MEAN_HAIRCUT,
+        NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
+    )
+
+    run_dir = _fake_run_dir(tmp_path)
+    seen = _install_exposure(monkeypatch)
+    backtest_mod.run_frozen_exposure_command(_parse(["backtest", "mhs-frozen-exposure", "--run-dir", str(run_dir)]))
+    np.testing.assert_allclose(seen["unit_returns"].to_numpy(), 0.001 / 2.5)
+    assert seen["max_name_weight"] == pytest.approx(0.05 / 2.5)
+    assert seen["solver_params"]["mean_haircut"] == FROZEN_EXPOSURE_MEAN_HAIRCUT
+    assert seen["solver_params"]["n_paths"] == COMMITTEE_GROWTH_N_PATHS
+    assert seen["solver_params"]["horizon_years"] == COMMITTEE_GROWTH_HORIZON_YEARS
+    assert seen["solver_params"]["mean_block_days"] == NULL_BOOTSTRAP_MEAN_BLOCK_DAYS
+    exposure = json.loads((run_dir / "exposure.json").read_text(encoding="utf-8"))
+    assert exposure["chosen"] == exposure["grid"][0]
+    assert exposure["execution_bound"] == "OHLCV_IMMEDIATE_TAKER"
+    assert exposure["exposure_multiplier"] == 2.5
+
+
+def test_frozen_exposure_gap_roster_ignores_trading_exclusions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gap roster is built with no trading-exclusion filter over the evaluation window."""
+    run_dir = _fake_run_dir(tmp_path)
+    seen = _install_exposure(monkeypatch)
+    backtest_mod.run_frozen_exposure_command(_parse(["backtest", "mhs-frozen-exposure", "--run-dir", str(run_dir)]))
+    assert seen["blocked_decisions"] is None
+    assert seen["breadth"] == 20
+    assert seen["selection_mode"] == "causal_history"
+
+
+def test_frozen_exposure_gap_population_restricted_to_delisted_symbols(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only symbols with a registered DELISTED exclusion feed the gap sampler; the rest never do."""
+    import src.mhs.growth_exposure as growth_mod
+
+    run_dir = _fake_run_dir(tmp_path)
+    seen = _install_exposure(monkeypatch)
+    monkeypatch.setattr(growth_mod, "structurally_excluded_symbols", lambda: frozenset({"AAA"}))
+    real_sample = growth_mod.roster_gap_sample
+    captured: dict = {}
+
+    def _spy(daily_close, roster, *, threshold):
+        captured["columns"] = list(daily_close.columns)
+        return real_sample(daily_close, roster, threshold=threshold)
+
+    monkeypatch.setattr(growth_mod, "roster_gap_sample", _spy)
+    backtest_mod.run_frozen_exposure_command(_parse(["backtest", "mhs-frozen-exposure", "--run-dir", str(run_dir)]))
+    assert captured["columns"] == ["AAA"]
+    exposure = json.loads((run_dir / "exposure.json").read_text(encoding="utf-8"))
+    assert exposure["gap_symbols"] == ["AAA"]
+
+
+def test_frozen_exposure_empty_exclusion_registry_skips_sampler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No registered exclusion yields a zero-event gap sample without calling the sampler on zero columns."""
+    import src.mhs.growth_exposure as growth_mod
+
+    run_dir = _fake_run_dir(tmp_path)
+    seen = _install_exposure(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("roster_gap_sample must not be called for an empty exclusion set")
+
+    monkeypatch.setattr(growth_mod, "roster_gap_sample", _boom)
+    backtest_mod.run_frozen_exposure_command(_parse(["backtest", "mhs-frozen-exposure", "--run-dir", str(run_dir)]))
+    assert seen["gaps"].events_per_year == 0.0
+    assert seen["gaps"].magnitudes.size == 0
+    exposure = json.loads((run_dir / "exposure.json").read_text(encoding="utf-8"))
+    assert exposure["gap_symbols"] == []
+
+
+def test_frozen_exposure_artifact_fresh_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An existing exposure.json exits before any panel load."""
+    import src.mhs.panel as panel_mod
+
+    run_dir = _fake_run_dir(tmp_path)
+    (run_dir / "exposure.json").write_text("{}", encoding="utf-8")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("panel must not load")
+
+    monkeypatch.setattr(panel_mod, "load_base_panel", _boom)
+    with pytest.raises(SystemExit, match=r"fresh"):
+        backtest_mod.run_frozen_exposure_command(_parse(["backtest", "mhs-frozen-exposure", "--run-dir", str(run_dir)]))
+
+
+def test_frozen_exposure_rejects_missing_run_dir(tmp_path: Path) -> None:
+    """A missing run-dir flag or a non-directory path exits before any workload."""
+    with pytest.raises(SystemExit, match=r"run-dir is required"):
+        backtest_mod.run_frozen_exposure_command(_parse(["backtest", "mhs-frozen-exposure"]))
+    with pytest.raises(SystemExit, match=r"existing frozen run directory"):
+        backtest_mod.run_frozen_exposure_command(
+            _parse(["backtest", "mhs-frozen-exposure", "--run-dir", str(tmp_path / "missing")])
+        )
+
+
+def test_frozen_exposure_rejects_invalid_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run directory without result.json exits instead of solving garbage."""
+    _install_exposure(monkeypatch)
+    run_dir = tmp_path / "empty_run"
+    run_dir.mkdir()
+    with pytest.raises(SystemExit, match=r"invalid frozen run artifacts"):
+        backtest_mod.run_frozen_exposure_command(_parse(["backtest", "mhs-frozen-exposure", "--run-dir", str(run_dir)]))
+
+
+def test_frozen_exposure_solver_rejection_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A solver rejection exits instead of persisting an exposure artifact."""
+    import src.mhs.growth_exposure as growth_mod
+
+    run_dir = _fake_run_dir(tmp_path)
+    _install_exposure(monkeypatch)
+
+    def _reject(*args, **kwargs):
+        raise ValueError("no admissible rung")
+
+    monkeypatch.setattr(growth_mod, "solve_log_growth_exposure", _reject)
+    with pytest.raises(SystemExit, match=r"frozen exposure failed"):
+        backtest_mod.run_frozen_exposure_command(_parse(["backtest", "mhs-frozen-exposure", "--run-dir", str(run_dir)]))
+    assert not (run_dir / "exposure.json").exists()
+
+
+def _account_argv(*extra: str) -> list[str]:
+    return [
+        "backtest", "mhs-frozen-account",
+        "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
+        *extra,
+    ]
+
+
+def _install_account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, recon_fail: bool = False, stub_venue: bool = True) -> dict:
+    import src.market_data.binance.venue_rules as venue_mod
+    import src.mhs.account_ledger as ledger_mod
+    import src.mhs.account_sources as sources_mod
+    import src.mhs.frozen_research_run as run_mod
+    from src.common.errors import DataIntegrityError
+    from src.mhs.account_ledger import AccountLedgerResult
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
+    from src.mhs.frozen_research_run import FrozenSourceContext
+    from src.market_data.binance.venue_rules import VenueRuleSnapshot
+
+    seen: dict = {}
+    dates = pd.date_range("2025-01-01", periods=3, freq="D", tz="UTC")
+    weights = pd.DataFrame({"AAA": [0.05, -0.05, 0.02]}, index=dates, dtype="float64")
+    candidate = FrozenMhsCandidate(
+        target_weights=weights,
+        signal_available_at=pd.DatetimeIndex(dates - pd.Timedelta(hours=1)),
+        strategy=FROZEN_MHS_TOP20_V2,
+    )
+    frame = pd.DataFrame({"AAA": 100.0}, index=dates, dtype="float64")
+    context = FrozenSourceContext(
+        census=("AAA",), funding_by_symbol={}, funding_failures={}, root="root",
+        budget=MhsMemoryBudget(), daily_close=frame, daily_quote_volume=frame,
+    )
+
+    def _fake_build(request: object) -> tuple:
+        seen["request"] = request
+        return candidate, context
+
+    def _fake_assemble(cand: object, ctx: object) -> tuple:
+        seen["candidate"] = cand
+        bars = pd.date_range("2025-01-01", periods=4, freq="3min", tz="UTC")
+        plane = pd.DataFrame({"AAA": 100.0}, index=bars, dtype="float64")
+        marks = ledger_mod.AccountMarkPanels(close=plane, high=plane, low=plane)
+        unit = pd.DataFrame({"AAA": [0.05, -0.05, 0.02]}, index=dates, dtype="float64")
+        flat = pd.DataFrame({"AAA": [0.0, 0.0, 0.0]}, index=dates, dtype="float64")
+        rich = pd.DataFrame({"AAA": [1e9, 1e9, 1e9]}, index=dates, dtype="float64")
+        calm = pd.DataFrame({"AAA": [0.02, 0.02, 0.02]}, index=dates, dtype="float64")
+        return unit, marks, flat, rich, calm
+
+    def _fake_replay(unit: object, marks: object, funding: object, adv: object, sigma: object, rules: object, policy: object, *, capital: float, taker_fee_bps: float, apply_order_filters: bool = True) -> AccountLedgerResult:
+        seen.setdefault("replays", []).append({"capital": capital, "policy": policy, "filters": apply_order_filters, "fee": taker_fee_bps})
+        if recon_fail and capital == 1e5:
+            raise DataIntegrityError("recon boom")
+        equity = pd.Series([capital, capital * 1.1, capital * 1.05], index=dates)
+        exposure = pd.Series([1.0, 2.0, 1.5], index=dates)
+        return AccountLedgerResult(
+            capital=capital, daily_equity=equity, daily_exposure=exposure, liquidated_at=None,
+            skipped_orders=3, untraded_fraction=0.01, initial_margin_breaches=0,
+            fee_paid=1.0, impact_paid=2.0, funding_paid=0.5,
+            fallback_ladder_symbols=(), missing_filter_symbols=(),
+        )
+
+    snapshot = VenueRuleSnapshot(captured_at=pd.Timestamp("2026-01-01", tz="UTC"), symbols={})
+    monkeypatch.setattr(run_mod, "build_frozen_request_candidate", _fake_build)
+    monkeypatch.setattr(sources_mod, "assemble_account_inputs", _fake_assemble)
+    monkeypatch.setattr(ledger_mod, "replay_account", _fake_replay)
+    if stub_venue:
+        monkeypatch.setattr(venue_mod, "latest_venue_rule_snapshot", lambda root: tmp_path / "venue.json")
+        monkeypatch.setattr(venue_mod, "load_venue_rule_snapshot", lambda path: snapshot)
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", tmp_path / "x" / "runs")
+    return seen
+
+
+def _run_dirs(tmp_path: Path) -> list[Path]:
+    root = tmp_path / "x" / "runs"
+    return sorted(root.iterdir()) if root.is_dir() else []
+
+
+def test_account_command_defaults_to_growth_at_retail_capital(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No policy/capital flags select growth at the declared minimum retail start."""
+    from src.mhs.params import (
+        ACCOUNT_DEFAULT_CAPITAL_USDT,
+        ACCOUNT_EXPOSURE_MAX,
+        ACCOUNT_EXPOSURE_STEP,
+        ACCOUNT_IMPACT_Y,
+        ACCOUNT_INITIAL_MARGIN_CAP,
+        ACCOUNT_MARGIN_RESERVE,
+        ACCOUNT_MEAN_HAIRCUT,
+        ACCOUNT_SHOCK_PER_UNIT,
+        ACCOUNT_TAKER_FEE_BPS,
+        ACCOUNT_UNIT_DAILY_MEAN,
+        ACCOUNT_UNIT_DAILY_SIGMA,
+    )
+
+    seen = _install_account(monkeypatch, tmp_path)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    policy = seen["replays"][0]["policy"]
+    assert policy.kind == "growth"
+    assert seen["replays"][0]["capital"] == ACCOUNT_DEFAULT_CAPITAL_USDT
+    assert policy.mean_haircut == ACCOUNT_MEAN_HAIRCUT
+    assert (policy.exposure_max, policy.exposure_step) == (ACCOUNT_EXPOSURE_MAX, ACCOUNT_EXPOSURE_STEP)
+    assert (policy.unit_daily_mean, policy.unit_daily_sigma) == (ACCOUNT_UNIT_DAILY_MEAN, ACCOUNT_UNIT_DAILY_SIGMA)
+    assert (policy.shock_per_unit, policy.margin_reserve, policy.initial_margin_cap) == (
+        ACCOUNT_SHOCK_PER_UNIT, ACCOUNT_MARGIN_RESERVE, ACCOUNT_INITIAL_MARGIN_CAP,
+    )
+    assert policy.impact_y == ACCOUNT_IMPACT_Y
+    assert seen["replays"][0]["fee"] == ACCOUNT_TAKER_FEE_BPS
+    assert seen["replays"][0]["filters"] is True
+
+
+def test_account_candidate_is_unlevered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The account book is unlevered clip-0.05; exposure is chosen by the policy, never pre-multiplied."""
+    from src.mhs.params import FROZEN_GROWTH_NAME_CLIP
+
+    seen = _install_account(monkeypatch, tmp_path)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert seen["request"].strategy.exposure_multiplier == 1.0
+    assert seen["request"].strategy.name_clip == FROZEN_GROWTH_NAME_CLIP
+
+
+def test_account_fixed_policy_requires_exposure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--policy fixed without --fixed-exposure exits before any load."""
+    seen = _install_account(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit, match=r"fixed-exposure"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv("--policy", "fixed")))
+    assert "request" not in seen
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--policy", "fixed", "--fixed-exposure", "2.5")))
+    assert seen["replays"][0]["policy"].kind == "fixed"
+    assert seen["replays"][0]["policy"].exposure_max == 2.5
+
+
+def test_account_missing_venue_snapshot_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty venue-rules dir exits naming the collection command."""
+    seen = _install_account(monkeypatch, tmp_path, stub_venue=False)
+    empty = tmp_path / "venue_empty"
+    empty.mkdir()
+    monkeypatch.setattr(backtest_mod, "VENUE_RULES_DIR", empty)
+    with pytest.raises(SystemExit, match=r"data collect venue-rules"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert "request" not in seen
+
+
+def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """account.json carries mandated disclosures and the daily parquet exists."""
+    seen = _install_account(monkeypatch, tmp_path)
+    index = tmp_path / "index.jsonl"
+    index.write_text(
+        json.dumps({"kind": "mhs", "strategy_id": "x", "base_cagr": 0.1}) + "\n"
+        + json.dumps({"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "run_dir": "runs/old", "evaluation_start": "2025-01-01", "evaluation_end": "2025-02-01", "base_cagr": 1.365, "base_max_drawdown": 0.29}) + "\n",
+        encoding="utf-8",
+    )
+    with caplog.at_level("INFO", logger="MhsBacktestCli"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert "[EVAL] mhs-frozen-account" in caplog.text
+    (run_dir,) = _run_dirs(tmp_path)
+    assert run_dir.name.startswith("20250101_20250201_top20_account_growth_2100_")
+    payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
+    assert payload["in_sample_moments"] is True
+    assert payload["venue_rules_applied_retroactively"] is True
+    assert payload["capital"] == 2100.0
+    assert payload["policy"]["kind"] == "growth"
+    assert payload["cagr"] == pytest.approx((2205.0 / 2100.0) ** (365.0 / 3.0) - 1.0)
+    assert payload["mdd"] == pytest.approx(2205.0 / 2310.0 - 1.0)
+    assert payload["liquidated_at"] is None
+    assert (payload["mean_exposure"], payload["min_exposure"], payload["last_exposure"]) == (1.5, 1.0, 1.5)
+    recon = payload["reconciliation"]
+    assert recon["reference_canonical"]["base_cagr"] == 1.365
+    assert recon["cagr_gap"] == pytest.approx(recon["cagr"] - 1.365)
+    daily = pd.read_parquet(run_dir / "account_daily.parquet")
+    assert list(daily.columns) == ["equity", "exposure"]
+    assert len(daily) == 3
+    rows = index.read_text(encoding="utf-8").splitlines()
+    assert json.loads(rows[-1])["kind"] == "mhs_frozen_account"
+
+    index.unlink()
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    _, second = _run_dirs(tmp_path)
+    again = json.loads((second / "account.json").read_text(encoding="utf-8"))
+    assert again["reconciliation"]["reference_canonical"] is None
+    assert again["reconciliation"]["cagr_gap"] is None
+
+
+def test_account_reconciliation_failure_still_persists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing reconciliation is disclosed, never fatal."""
+    _install_account(monkeypatch, tmp_path, recon_fail=True)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    (run_dir,) = _run_dirs(tmp_path)
+    payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
+    assert payload["reconciliation"]["status"] == "failed"
+    assert (run_dir / "account_daily.parquet").exists()
+
+
+def _write_held_parquet(root: Path, symbol: str, start: pd.Timestamp, bars: int, close: float = 100.0) -> pd.DatetimeIndex:
+    grid = pd.date_range(start, periods=bars, freq="3min", tz="UTC")
+    frame = pd.DataFrame({
+        "timestamp": (grid.view("int64") // 10**6).astype("int64"),
+        "open": close, "high": close + 1.0, "low": close - 1.0, "close": close,
+    })
+    target = root / "3m"
+    target.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(target / f"{symbol}.parquet")
+    return grid
+
+
+def _assemble_fixture(tmp_path: Path) -> tuple:
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
+    from src.mhs.frozen_research_run import FrozenSourceContext
+    from src.mhs.resources import MhsMemoryBudget
+
+    entries = pd.date_range("2021-04-01", periods=2, freq="D", tz="UTC")
+    weights = pd.DataFrame({"AAA": [0.05, -0.05], "BBB": [0.0, 0.0]}, index=entries, dtype="float64")
+    candidate = FrozenMhsCandidate(
+        target_weights=weights,
+        signal_available_at=pd.DatetimeIndex(entries - pd.Timedelta(hours=1)),
+        strategy=FROZEN_MHS_TOP20_V2,
+    )
+    grid = _write_held_parquet(tmp_path, "AAA", entries[0], 960)
+    days = pd.date_range("2021-01-01", periods=92, freq="D", tz="UTC")
+    qv = pd.DataFrame({"AAA": 5_000_000.0, "BBB": 1_000_000.0}, index=days, dtype="float64")
+    drift = pd.DataFrame(
+        {"AAA": 100.0 + 0.01 * pd.Series(range(92), index=days), "BBB": 50.0},
+        index=days, dtype="float64",
+    )
+    funding_ts = pd.DatetimeIndex([entries[0] + pd.Timedelta(hours=8, minutes=1), entries[1] + pd.Timedelta(hours=8)])
+    funding = pd.Series([0.0001, 0.0002], index=funding_ts, dtype="float64")
+    context = FrozenSourceContext(
+        census=("AAA", "BBB"), funding_by_symbol={"AAA": funding}, funding_failures={},
+        root=str(tmp_path), budget=MhsMemoryBudget(), daily_close=drift, daily_quote_volume=qv,
+    )
+    return candidate, context, entries, grid
+
+
+def test_assemble_account_inputs_held_symbols_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only held symbols are read; funding is cumulated on 3m bars and sampled at each entry."""
+    import src.mhs.account_sources as sources_mod
+
+    candidate, context, entries, grid = _assemble_fixture(tmp_path)
+    seen: dict = {}
+    real_assert = sources_mod.assert_mhs_stage_allocation
+
+    def _spy(*, stage: str, **kwargs: object) -> None:
+        seen["stage"] = stage
+        real_assert(stage=stage, **kwargs)
+
+    monkeypatch.setattr(sources_mod, "assert_mhs_stage_allocation", _spy)
+    unit, marks, funding_cum, adv, daily_sigma = sources_mod.assemble_account_inputs(candidate, context)
+
+    assert list(unit.columns) == ["AAA"]
+    assert seen["stage"] == "account_marks"
+    assert marks.close.dtypes.iloc[0] == np.dtype("float32")
+    assert marks.close.index[0] == entries[0]
+    assert marks.close.index[-1] == entries[-1] + pd.Timedelta(days=1) - pd.Timedelta(minutes=3)
+    # 펀딩 누적은 진입 시각에서 표본화되어 replay_account의 일간 인덱스와 정렬돼야 한다.
+    assert funding_cum.index.equals(unit.index)
+    assert list(funding_cum.columns) == list(unit.columns)
+    assert funding_cum.loc[entries[0], "AAA"] == pytest.approx(0.0)
+    assert funding_cum.loc[entries[1], "AAA"] == pytest.approx(0.0001)
+    assert adv.index.equals(unit.index)
+    assert daily_sigma.index.equals(unit.index)
+    assert adv.loc[entries[1], "AAA"] == pytest.approx(5_000_000.0)
+    assert bool(np.isfinite(daily_sigma.loc[entries[1], "AAA"]))
+
+
+def test_assemble_account_inputs_missing_held_source_fails(tmp_path: Path) -> None:
+    """A held symbol without 3m source fails closed."""
+    import src.mhs.account_sources as sources_mod
+
+    from src.common.errors import DataIntegrityError
+
+    candidate, context, _, _ = _assemble_fixture(tmp_path)
+    (tmp_path / "3m" / "AAA.parquet").unlink()
+    with pytest.raises(DataIntegrityError, match=r"AAA"):
+        sources_mod.assemble_account_inputs(candidate, context)
+
+
+def test_account_rejects_invalid_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid dates, policy, and controls exit before any load."""
+    import argparse
+
+    seen = _install_account(monkeypatch, tmp_path)
+    run = backtest_mod.run_frozen_account_command
+    with pytest.raises(SystemExit, match=r"source-start is required"):
+        run(_parse(["backtest", "mhs-frozen-account", "--start", "2025-01-01", "--end", "2025-02-01"]))
+    with pytest.raises(SystemExit, match=r"start is required"):
+        run(_parse(["backtest", "mhs-frozen-account", "--source-start", "2024-01-01", "--end", "2025-02-01"]))
+    with pytest.raises(SystemExit, match=r"end is required"):
+        run(_parse(["backtest", "mhs-frozen-account", "--source-start", "2024-01-01", "--start", "2025-01-01"]))
+    with pytest.raises(SystemExit, match=r"source-start < start < end"):
+        run(_parse(["backtest", "mhs-frozen-account", "--source-start", "2025-03-01", "--start", "2025-01-01", "--end", "2025-02-01"]))
+    base = {"source_start": "2024-01-01", "start": "2025-01-01", "end": "2025-02-01"}
+    with pytest.raises(SystemExit, match=r"policy must be"):
+        run(argparse.Namespace(**base, policy="turbo", fixed_exposure=None))
+    with pytest.raises(SystemExit, match=r"invalid account controls"):
+        run(argparse.Namespace(**base, policy="fixed", fixed_exposure="abc"))
+    with pytest.raises(SystemExit, match=r"positive finite exposure"):
+        run(_parse(_account_argv("--policy", "fixed", "--fixed-exposure", "0")))
+    with pytest.raises(SystemExit, match=r"positive finite capital"):
+        run(_parse(_account_argv("--capital", "0")))
+    assert "request" not in seen
+
+
+def test_account_run_directory_suffix_on_collision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repeated timestamp resolves to a fresh suffixed run directory."""
+    frozen = pd.Timestamp("2025-03-03 12:00:00", tz="UTC")
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", tmp_path)
+    monkeypatch.setattr(pd.Timestamp, "now", staticmethod(lambda tz=None: frozen))
+    first = backtest_mod._resolve_account_destination(
+        start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2025-02-01", tz="UTC"),
+        policy="growth", capital=2100.0,
+    )
+    second = backtest_mod._resolve_account_destination(
+        start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2025-02-01", tz="UTC"),
+        policy="growth", capital=2100.0,
+    )
+    assert first.name.endswith("Z")
+    assert second.name == f"{first.name}-2"
+
+
+def test_assemble_account_inputs_malformed_source_fails(tmp_path: Path) -> None:
+    """A 3m archive without OHLC columns fails closed."""
+    import src.mhs.account_sources as sources_mod
+
+    from src.common.errors import DataIntegrityError
+
+    candidate, context, _, _ = _assemble_fixture(tmp_path)
+    grid = pd.date_range("2021-04-01", periods=8, freq="3min", tz="UTC")
+    pd.DataFrame({"timestamp": (grid.view("int64") // 10**6).astype("int64"), "open": 1.0}).to_parquet(
+        tmp_path / "3m" / "AAA.parquet"
+    )
+    with pytest.raises(DataIntegrityError, match=r"malformed"):
+        sources_mod.assemble_account_inputs(candidate, context)
+
+
+def test_account_source_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A data-integrity failure during source assembly exits instead of replaying garbage."""
+    import src.mhs.frozen_research_run as run_mod
+
+    from src.common.errors import DataIntegrityError
+
+    seen = _install_account(monkeypatch, tmp_path)
+
+    def _boom(request: object) -> tuple:
+        raise DataIntegrityError("source boom")
+
+    monkeypatch.setattr(run_mod, "build_frozen_request_candidate", _boom)
+    with pytest.raises(SystemExit, match=r"frozen account failed"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert "replays" not in seen
+
+
+def test_account_replay_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A replay failure exits without persisting an account artifact."""
+    import src.mhs.account_ledger as ledger_mod
+
+    from src.common.errors import DataIntegrityError
+
+    _install_account(monkeypatch, tmp_path)
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise DataIntegrityError("replay boom")
+
+    monkeypatch.setattr(ledger_mod, "replay_account", _boom)
+    with pytest.raises(SystemExit, match=r"frozen account failed"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert _run_dirs(tmp_path) == []

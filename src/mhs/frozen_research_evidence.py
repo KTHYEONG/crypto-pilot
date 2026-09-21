@@ -6,6 +6,7 @@ import dataclasses
 import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,7 @@ _METRIC_COLUMNS: tuple[str, ...] = (
     "base_coverage", "stress_coverage",
 )
 _HELD_GAP_CODES = ("MISSING_HELD_MARK", "MISSING_HELD_FUNDING")
+FrozenExecutionBound = Literal["OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"]
 _LIMITATIONS: tuple[str, ...] = (
     "CANDLE_FILLS_NO_ORDER_BOOK_DEPTH",
     "CANDLE_FILLS_NO_QUEUE_POSITION",
@@ -96,6 +98,7 @@ def evaluate_frozen_mhs_research(
     stress_spec: ExecutionSpec,
     report_periods: tuple[FrozenMhsReportPeriod, ...],
     live_accumulators: _LiveAccumulatorSets | None = None,
+    execution_bound: FrozenExecutionBound = "OHLCV_IMMEDIATE_TAKER",
 ) -> FrozenMhsResearchEvidence:
     """Replay a frozen target plan through one shared, paired 3m ledger stream.
 
@@ -112,6 +115,7 @@ def evaluate_frozen_mhs_research(
         report_periods: Non-overlapping UTC intervals to report when complete.
         live_accumulators: Optional accumulator registry shared with the window
             source so carried holdings remain in later local rosters.
+        execution_bound: Crossing model applied identically to the base and stress cases.
     Returns:
         Paired ledger evidence, daily intervals, transparent metrics, and limits.
     Raises:
@@ -126,6 +130,8 @@ def evaluate_frozen_mhs_research(
         stress_spec, taker_fee_bps=base_spec.taker_fee_bps, taker_slippage_bps=base_spec.taker_slippage_bps
     ) != base_spec:
         raise DataIntegrityError("stress spec must match base mechanics except crossing cost")
+    if execution_bound not in ("OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"):
+        raise DataIntegrityError(f"execution_bound must be a registered crossing model, got {execution_bound!r}")
     _require_report_periods(report_periods)
     checked_windows = validated_frozen_research_windows(
         candidate,
@@ -133,7 +139,7 @@ def evaluate_frozen_mhs_research(
         settlement_bars=-(-int(base_spec.passive_timeout_minutes) // 3),
     )
     paired_bounds: list[tuple[_ExecutionBound, ExecutionSpec]] = [
-        ("OHLCV_IMMEDIATE_TAKER", base_spec), ("OHLCV_IMMEDIATE_TAKER", stress_spec)
+        (execution_bound, base_spec), (execution_bound, stress_spec)
     ]
     results = replay_execution_window_batch(
         checked_windows, initial_equity, paired_bounds, live_accumulators=live_accumulators

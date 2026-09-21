@@ -392,6 +392,42 @@ FROZEN_GROWTH_NAME_CLIP: float = 0.05
 # 0.25 단위 rung 중 원장수익률 부트스트랩이 P(3y MDD > 35%) ≤ 10%를 유지하는 최대치(허용 2.51).
 # frozen 북이나 데이터가 바뀌면 동일 부트스트랩으로 반드시 재도출해야 한다.
 FROZEN_GROWTH_EXPOSURE_MULTIPLIER: float = 2.5
+# 이웃 설정 Sharpe 정점 대비 선택 편향으로 깎이는 평균 비율.
+FROZEN_EXPOSURE_MEAN_HAIRCUT: float = 0.25
+# 하루 만에 이름값의 절반 이상이 움직이면 헷지로 막을 수 없는 갭으로 본다.
+FROZEN_EXPOSURE_GAP_THRESHOLD: float = 0.50
+# 로그성장 곡선을 재는 노출 rung 격자. 8.0에서 멈추면 실제 정점(측정상 L≈10)보다 낮은 지점에서
+# argmax가 격자 상한에 그대로 걸려버려(파산확률은 여전히 0) 진짜 위험기반 상한이 아니라 격자
+#길이가 답을 정하는 결과가 나온다. 갭 파산확률이 유의미하게 관측되는 구간(L>=12)까지 반드시 포함한다.
+FROZEN_EXPOSURE_GRID: tuple[float, ...] = tuple(round(1.0 + 0.25 * i, 2) for i in range(61))  # 1.0 ~ 16.0
+# 스트레스 곡선이 평평한 구간에서는 추정 잡음이 argmax를 정하므로 최적 근처를 고원으로 둔다.
+FROZEN_EXPOSURE_PLATEAU_TOLERANCE: float = 0.05
+# 동일 입력에 비트 동일 해를 보장하는 등록 시드.
+FROZEN_EXPOSURE_SEED: int = 20260921
+
+# --- account-scale research ledger -------------------------------------------------
+# 선언 최소 소매 시작금 ₩3,000,000(₩1,430/USD 환산).
+ACCOUNT_DEFAULT_CAPITAL_USDT: float = 2100.0
+# clip-0.05 고정 북의 3m 원장 단위노출 일간 순수익률 평균(표본내 2021-04-01→2026-06-30, 공개용, 인과적이지 않음).
+ACCOUNT_UNIT_DAILY_MEAN: float = 0.0011
+# 동일 북의 단위노출 일간 변동성(표본내 실측, 헤어컷 전).
+ACCOUNT_UNIT_DAILY_SIGMA: float = 0.0094
+# 표본내 평균 과대추정을 반으로 깎는 등록 헤어컷(2배 과대추정에도 full Kelly 이하에 머문다).
+ACCOUNT_MEAN_HAIRCUT: float = 0.50
+# 관측 최악 단위 일간손실(-4.04%)의 2배인 adverse 충격.
+ACCOUNT_SHOCK_PER_UNIT: float = 0.08
+# adverse 후에도 자기자본의 10%는 마진 버퍼로 남긴다.
+ACCOUNT_MARGIN_RESERVE: float = 0.10
+# 개시증거금은 자기자본의 90% 이내로 제한한다.
+ACCOUNT_INITIAL_MARGIN_CAP: float = 0.90
+# 프로브 구간 0.4~1.0의 중앙 제곱근 충격 계수.
+ACCOUNT_IMPACT_Y: float = 0.6
+# 노출 rung 격자 상한(진단용 fixed가 그대로 쓰는 값).
+ACCOUNT_EXPOSURE_MAX: float = 10.0
+# 노출 rung 격자 간격(0.25 단위에서 margin cap이 자기자본 복리에 반응한다).
+ACCOUNT_EXPOSURE_STEP: float = 0.25
+# 테이커 수수료 6bp(프로브 실측 기준).
+ACCOUNT_TAKER_FEE_BPS: float = 6.0
 
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).

@@ -10,6 +10,7 @@ DEPLOY_MHS_DIR: Path = BASE_DIR / "deploy" / "mhs"
 """Repository delivery boundary for sealed MHS runtime artifacts."""
 BACKTESTS_DIR: Path = DATA_DIR / "backtests"
 FROZEN_BACKTESTS_DIR: Path = BACKTESTS_DIR / "frozen" / "runs"
+VENUE_RULES_DIR: Path = FUTURES_DATA_DIR / "venue_rules"
 
 
 def _safe_symbol(symbol: str) -> str:

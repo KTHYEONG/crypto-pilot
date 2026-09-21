@@ -110,6 +110,9 @@ def frozen_mhs_backtest_payload(run: FrozenMhsBacktestRun) -> dict[str, JsonValu
         "source_gap_blocked_decisions": run.source_gap_blocked_decisions,
         "base_one_way_taker_bps": request.base_spec.one_way_taker_bps(),
         "stress_one_way_taker_bps": request.stress_spec.one_way_taker_bps(),
+        "execution_bound": request.execution_bound,
+        "decision_anchor": request.base_spec.decision_anchor,
+        "maker_fee_bps": request.base_spec.maker_fee_bps,
         "base_valid": evidence.base.ledger.primary_valid,
         "stress_valid": evidence.stress.ledger.primary_valid,
         "base_source_gaps": len(evidence.base.data_gaps),
@@ -144,7 +147,9 @@ def frozen_mhs_daily_frame(run: FrozenMhsBacktestRun) -> pd.DataFrame:
         UTC-daily indexed frame with float64 columns ``base_return``, ``stress_return``,
         ``base_equity_close``, ``stress_equity_close``, ``base_equity_low``,
         ``stress_equity_low``, ``base_turnover``, ``stress_turnover``, ``base_funding``,
-        ``stress_funding``, ``target_gross``.
+        ``stress_funding``, ``target_gross``, ``max_name_weight``; the largest single-name
+        weight bounds the loss of an unhedgeable single-name gap, which the exposure
+        solver prices.
     Raises:
         DataIntegrityError: Paired daily indexes disagree or any value is non-finite.
     """
@@ -173,13 +178,15 @@ def frozen_mhs_daily_frame(run: FrozenMhsBacktestRun) -> pd.DataFrame:
         ).sum().reindex(days)
     gross = run.candidate.target_weights.abs().sum(axis=1)
     frame["target_gross"] = gross.reindex(days, fill_value=0.0)
+    max_name = run.candidate.target_weights.abs().max(axis=1)
+    frame["max_name_weight"] = max_name.reindex(days, fill_value=0.0)
     frame = frame[
         [
             "base_return", "stress_return",
             "base_equity_close", "stress_equity_close",
             "base_equity_low", "stress_equity_low",
             "base_turnover", "stress_turnover",
-            "base_funding", "stress_funding", "target_gross",
+            "base_funding", "stress_funding", "target_gross", "max_name_weight",
         ]
     ].astype("float64")
     if not bool(np.isfinite(frame.to_numpy(dtype="float64")).all()):
