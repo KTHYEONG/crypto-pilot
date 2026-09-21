@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FROZEN_GROWTH_POLICY",
+      "date": "2026-09-21",
+      "adr_id": "ADR_20260921_MHS_FROZEN_GROWTH_POLICY",
+      "domain": "execution",
+      "title": "MHS frozen 원장 부동소수 버그 수정 + 인과적 시장대용치 + 종목클립/노출 성장정책",
+      "why": "고레버리지(x2+) 리플레이가 원장측 누적합 부동소수 잔량을 보유 포지션으로 오판해 fail-closed되고, xs_idio_mom 시장 대용치가 사후선정 종목집합으로 계산돼 인과성을 위반했으며, CAGR100%+/MDD35%이하 복리구조 탐색에서 노출 배율만이 유효한 레버로 확인됨",
+      "resolution": "accumulator 원장을 체결후 레벨 스텝함수로 재구성, xs_idio_mom에 인과적 전체census 시장평면 도입(_v1→_v2 식별자 승격), 종목별 5% 클립+gross 복원 변환과 frozen_mhs_top20_growth_v2(클립0.05, 노출x2.5) 정책 등록, CLI --variant growth 및 daily.parquet 증거 저장 추가",
+      "impact": "3분원장 x2.5 리플레이가 valid 완주(base CAGR136.5%/MDD29.2%, stress CAGR87.2%/MDD36.6%), 노출배율은 원장수익률 블록부트스트랩(P(3yMDD>35%)<=10%)으로 재검증되어 L*=2.55로 등록값 2.5 유효 확인",
+      "caveat": "스트레스(18bp) 경로 MDD 36.6%는 35% 목표를 소폭 초과하며 등록 예산은 base-cost 기준이라 의도적 트레이드오프임을 docs/results/mhs_frozen_growth_20260921.md에 명시; 자본용량(~/bin/bash.3-1M)과 상위10종목 PnL집중(64%) 제한은 미해결"
+    },
+    {
       "task_id": "TASK_MHS_FROZEN_STORAGE_LAYOUT",
       "date": "2026-09-21",
       "adr_id": "ADR_20260921_MHS_FROZEN_STORAGE_LAYOUT",
@@ -1011,16 +1022,6 @@
       "why": "ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL 구현 직후 실제 CLI(--pnl-vol-target-mode constant_risk --execution-timeframe 3m)로 2021-2025 원장 재실행해 target_vol 경계별 재해석이 근본원인이라는 가설을 실측 검증.",
       "resolution": "재실행 결과 fold_blend_parity.max_abs_log_deployed_gross_ratio=0.316573로 수정 전과 소수점 6자리까지 완전히 동일(각 fold별 값도 0.241771/0.307097/0.316573/0.268464로 사실상 불변). 원인: CONSTANT_RISK_TARGET_ANNUAL_VOL=0.40 base가 _feasible_constant_risk_target의 leverage_ceiling(3.0)*q10(sigma_book|train) 클램프에 애초에 걸리지 않아(crypto 실현변동성이 0.40/3=0.133보다 항상 높음), 경계별 재해석을 하든 안 하든 모든 boundary가 이미 동일한 0.40으로 수렴하고 있었음 -- target_vol 통일 자체는 무효과. 실측(persisted book_structure)으로 fold_scale/blend_scale 비율을 직접 대조한 결과, 4개 fold 전부에서 fold_scale이 blend_scale보다 일관되게 1.25~1.38배 높음(target_vol가 동일하므로 scale=target/sigma_hat 관계상 fold의 causal EWMA sigma_hat이 blend의 연속 추정치보다 체계적으로 낮게 잡힘). warmup_returns(I-WARM)로 EWMA 상태를 pre-boundary 이력으로 워밍업해도 이 편향이 사라지지 않아, 진짜 근본원인은 target_vol이 아니라 EWMA sigma_hat 자체의 계산 경로(fold-local 2-pass replay로 재계산 vs blend의 단일 연속 replay)에 있음을 실측으로 확정.",
       "impact": "가설 반증: target_vol 단일화 커밋은 되돌리지 않는다(growth_budget 모드 무변경 보존 및 fold_3의 lookahead성 재해석 제거라는 부수 이득은 유효하고 회귀 테스트로 잠겨 있음)이나 FOLD_BLEND_PATH_DIVERGENCE 해소에는 기여하지 않았다. Research-GO는 여전히 미달성(reason_codes=[FOLD_BLEND_PATH_DIVERGENCE], run_id는 docs/results/mhs_run_history/latest.json 참조, run_at=2026-08-23T12:56:18Z). 다음 단계: task_index.json이 원래 지목했던 두 번째 대안(fold가 자체 EWMA를 전혀 재적합하지 않고 blend가 이미 계산한 연속 scale 시계열 자체를 fold의 validation 날짜로 슬라이스해 그대로 재사용)의 구현이 필요 -- 이번 세션에서 배제했던 '파라미터 재해석 자체를 없애는' 방향이 유일하게 남은 구조적 경로."
-    },
-    {
-      "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_FOLD_BLEND_PATH_DIVERGENCE_SINGLE_TARGET_VOL",
-      "domain": "risk",
-      "title": "MHS constant_risk fold/blend target_vol 단일화로 FOLD_BLEND_PATH_DIVERGENCE 구조적 해소",
-      "why": "Research-GO 최후 차단 사유가 FOLD_BLEND_PATH_DIVERGENCE 단 하나로 좁혀진 상태(docs/results/mhs_run_history/latest.json, ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION의 후속 과제). halflife 파라미터 스윕은 fold_blend_parity와 risk_parity의 단조 트레이드오프로 이미 막다른 길임이 실측 확인됨. 코드 추적 결과 근본원인은 blend가 top-level 경계(2021-2022)에서 단 1회 해석한 target_vol을 전체 배치 구간에 고정 적용하는데 반해, fold_1~3은 _constant_risk_target_vol_by_boundary로 자신의 train_end(최대 2년 더 긴 학습창)까지 데이터로 target_vol을 별도 재해석하고 있었기 때문(원시 북 gross_log_ratio는 ±0.04로 일치, deployed_gross_log_ratio만 0.24~0.32로 tolerance 0.25 초과).",
-      "resolution": "src/mhs/pipeline/stages/fold.py::run_folds의 constant_risk 분기를 _constant_risk_target_vol_by_boundary(경계별 재해석) 대신 _constant_risk_target_vol(top-level 경계 단일 해석) 호출로 교체하고 모든 fold index에 동일 값을 브로드캐스트(dict.fromkeys)하도록 수정. growth_budget 분기는 기존 경계별 재해석 로직 완전 보존(바이트 동일). tests/unit/mhs/pipeline/stages/test_fold.py에 SCENARIO_MHS_CONSTANT_RISK_FOLD_BROADCASTS_TOP_LEVEL_VOL 신규 회귀 테스트 추가(constant_risk 모드에서 _constant_risk_target_vol_by_boundary가 호출되면 AssertionError로 실패하도록 가드).",
-      "impact": "docs/specs/mhs_fold_blend_path_divergence.md/_contract.json 기준 spec->implement->check 완료: 유닛 테스트 52건 green, ruff/mypy clean. 실측 CLI 재실행(2021-2025/3m 원장)으로 FOLD_BLEND_PATH_DIVERGENCE 해소 여부 및 blend 성과 불변(primary_geometric_cagr=1.777395 등 비트동일 기대) 확인은 /sync 직후 진행."
     }
   ]
 }
