@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_LIVE_FROZEN_PAPER_AUTOMATION",
+      "date": "2026-09-21",
+      "adr_id": "ADR_20260921_MHS_LIVE_FROZEN_PAPER_AUTOMATION",
+      "domain": "execution",
+      "title": "라이브 봇을 frozen 전략+베이지안 Kelly+메이커 집행으로 전환, or-vps 24시간 자동화 정비",
+      "why": "라이브 데몬이 옛 horizon-diagnostic 봉인 파라미터 스택으로 동작해 검증된 frozen 전략과 달랐고, or-vps는 유니버스가 dev 파티션/TradFi 종목으로 백테스트와 어긋났으며 9월 초 옛 전략 paper 기록과 gdrive 중복 폴더가 쌓여 있었다",
+      "resolution": "1h 120일 창에서 frozen Top-20 비중을 직접 계산하는 src/live/frozen_book.py·frozen_signal.py를 추가해 봉인 params/runtime/signal-step(약 1500줄)을 대체하고, 데몬을 23:03 제출·COIN 전체 유니버스·run_id별 기록 폴더로 재배선했으며, or-vps의 옛 상태 파일을 아카이브로 이전하고 gdrive 중복 폴더 병합+재다운로드 가능 데이터 삭제(7.4GB→53MB)로 정리한 뒤 호스트 공용 백업 스크립트에 crypto-pilot 전용 필터를 실제로 설치...",
+      "impact": "lean_check(ruff/mypy/pytest/diff-coverage 100%) PASS; 실데이터로 frozen-step(16초/1GB) 및 taker_parity·strict_passive 두 paper shadow-cycle을 직접 실행해 사이징→체결→원장까지 검증(18건 체결, strict_passive는 11/20 메이커); or-vps 이전·gdrive 정리·백업필터 설치를 실제 인프라에 적용 완료; deploy/는 컨테이너 파일 2개+호스트 필터 1개로 축소, 일회성 마이그레이션 스크립트는 실행 후 저장소에서 제거",
+      "caveat": "LIVE_DEPLOY_PAUSED=true는 그대로 두어 재개는 사용자가 결정해야 하고, or-vps 1h 데이터가 종목별로 커버리지가 들쭉날쭉해 최초 가동 전 seed-cloud 재수집이 필요하며, 거래소 서명 API 권한 부재로 일일 거래소 규칙 수집은 실패할 가능성이 높아 저장소에 넣은 09-21 스냅샷이 fallback으로 쓰인다; 마이그레이션 스크립트 자체에서 rclone dedupe-mode 오타와 set -e로 인한 조기 중단 버그 2건을 실행 중 발견해 수정했다"
+    },
+    {
       "task_id": "TASK_MHS_ACCOUNT_MAKER_EXECUTION",
       "date": "2026-09-21",
       "adr_id": "ADR_20260921_MHS_ACCOUNT_MAKER_EXECUTION",
@@ -1017,16 +1028,6 @@
       "why": "저렴한 AWS 무료서버에서 섬도우 사이클이 사용자 개입 없이 매일 자동 실행되고, 기록이 무한정 커지지 않으며, main 병합 시 자동 재배포되길 요청. 레거시 Dockerfile/docker-compose.yml은 옛 trader_spot/futures 봇용(Python 3.10+TA-Lib, 이미 비가동 처리)이라 현재 src/live/와 무관했고, AuditLog는 고정 경로에 영구 append만 해 실제로 무한 증가하는 버그가 있었다. MHS 리서치(peak RSS 약 3.1GB, 15GB 데이터, 2021-2022 discovery 구간에 committee/target_vol을 고정 앵커해 피팅)는 무료서버에서 근본적으로 실행 불가능함을 실측 확인.",
       "resolution": "무겁고 가벼운 두 축으로 분리: MHS 리서치는 계속 로컬 수동 실행 + git push, 서버는 git 커밋된 deployed_target_weights.parquet만 소비(data/ 15GB는 git 미추적이라 서버에 전혀 전달되지 않음, 확인됨). src/live/scheduler.py 신설(next_decision_time 순수함수 + run_daemon: 매일 00:00Z 결정, T+1h+5분 버퍼까지 대기, 실행, data/state/live_daemon_last_run.json에 last_processed_decision_time 덮어쓰기 기록, COMPLETE/HALT/예외 모두 처리완료로 취급해 무한 재시도 방지, 재배포로 컨테이너가 죽어도 상태파일로 캐치업). src/live/audit.py의 default_audit_log_path를 logs/live/{name}/{YYYY-MM-DD}.jsonl 날짜 파티션으로 변경(무한증가 버그 수정)하고 prune_old_audit_logs(90일 보존) 신설; runner.py의 3개 호출부(_market_client/_order_client/run_shadow_cycle)를 wall-clock now가 아닌 decision_time으로 파티션 키잉하도록 수정(자정 넘어 캐치업 실행돼도 원래 날짜 파일에 기록). CLI에 live daemon 서브커맨드 추가(--decision-time 불필요, 무한루프). Dockerfile을 uv 기반으로 전면 교체(Python 3.11, TA-Lib/requirements.txt 등 legacy 제거, exec-form CMD로 종료시그널 보장), docker-compose.yml을 mhs-live 단일 서비스로 교체(data/state와 logs만 호스트 바인드마운트로 재배포 생존 보장, mem_limit 512m, json-file 로깅 상한). .dockerignore의 docs/ 전체 제외 버그 수정(연구에서 라이브로 인계하는 아티팩트인 deployed_target_weights.parquet이 빌드 컨텍스트에서 빠지고 있었음) 단계적 negation으로 parquet만 재포함. 기존 GH Actions deploy.yml(ECR+SSH+compose, push:main 트리거)은 그대로 재사용하고 SOPS 복호화 스텝만 추가(.env.enc에서 .env로, 기존 .sops.yaml 재사용, 이미지에 시크릿 미포함 유지).",
       "impact": "라이브 인프라 회귀 없음(tests/unit/live, tests/unit/cli, tests/contract 전체 통과 확인, 유일한 잔여 실패는 이 기능과 무관한 기존 LOG_DIR/DISCOVERY_START 다중선언). Docker 실제 빌드는 이 샌드박스에 docker 미설치라 미실행 -- 정적 계약 테스트(시크릿 미포함, env_file 주입, state/logs 마운트)로 대체 검증했고 실제 docker build는 CI/사용자 로컬에서 최초 검증 필요. 서버는 여전히 SHADOW 모드 기본값과 LIVE_MAINNET 승인문자열 게이트로 실주문 불가 상태 유지."
-    },
-    {
-      "task_id": "TASK_LIVE_BINANCE_SHADOW_EXECUTION",
-      "date": "2026-08-24",
-      "adr_id": "ADR_20260824_LIVE_BINANCE_SHADOW_EXECUTION",
-      "domain": "execution",
-      "title": "Binance 실거래소 섬도우(기록전용) 집행 인프라 구축",
-      "why": "MHS Research-GO 통과(CAGR 318%/MDD -38.9%/DSR 0.79) 이후 실거래소/계좌 연동 요청. 실계좌가 걸린 만큼 3개월간 주문을 전송하지 않고 전 경로(신호->필터->계좌->집행)를 실검증하는 섬도우 우선 설계가 필요했다. 라이브 인프라는 이전까지 전무(주문/계좌/필터/인증 grep 0건, BinanceClient는 시세수집 전용).",
-      "resolution": "src/live/ 신설: settings(ExecutionMode SHADOW/LIVE_TESTNET/LIVE_MAINNET, pydantic-settings, LIVE_MAINNET은 승인문자열 없으면 생성불가), errors(BINANCE_ERROR_POLICY 레지스트리, 미등록코드 fail-closed), filters(Decimal 기반 stepSize/tickSize/minNotional 양자화), rest(BinanceFuturesRestClient, SHADOW 모드에서 GET 외 요청을 전송계층에서 원천 차단), account(거래소 설정 정합 + reconcile_or_halt, 불일치시 자동보정 없이 예외만), signal(latest_target_weights + T+1h 인과성 게이트), sizing/planner(포지션 반전을 reduce_only 2-intent로 분해, 결정론적 client_order_id), executor(GTX post-only 체이스 -> IOC 데드라인, MARKET 주문 전면 금지), audit(비밀정보 절대 미기록 append-only JSONL), runner(일일 사이클 오케스트레이션, 리스크게이트 위반시 부분집행 없이 전체 HALT), ledger(내부 포지션 원장 로드/저장/체결반영, reconcile_or_halt가 소비). CLI에 research/live 서브커맨드(live shadow-cycle) 및 --emit-target-weights 플래그 추가. 연구-라이브 seam: MhsBookReport.target_weights 필드 신설(name=='blend'일 때만 채움, _book_outcome 양쪽 반환경로에 배선), emit_deployed_target_weights가 deployed=target_weights*exposure_scale(ffill) 공식으로 deployed_target_weights.parquet 기록. /check에서 발견된 두 결함(--emit-target-weights가 항상 DataIntegrityError로 무조건 거부되던 스텁, reconcile_or_halt가 하드코딩된 빈 dict를 받아 재조정이 사실상 무력화되던 버그)을 수정: emit 경로를 실제로 배선하고 ledger.py를 신설해 runner가 실제 원장을 재조정하도록 교체. 부수 수정: CLI 파리티 계약에 --emit-target-weights 제외 등록(--output-tier와 동일 패턴), src/live/ 내 _ZERO 상수 3중 선언을 filters.py 단일 소스로 정리.",
-      "impact": "그린필드 신규 기능이라 기존 MHS 연구 파이프라인 회귀 없음(--emit-target-weights 기본 False로 기존 산출물 비트동일 유지 확인). tests/unit/mhs, tests/unit/application/research/mhs, tests/contract, tests/unit/live, tests/unit/cli 전체 통과(코드맵 미등록은 이번 sync로 해소, LOG_DIR/DISCOVERY_START 다중선언은 이 기능과 무관한 기존 이슈로 범위 밖). 실제 주문 전송은 SHADOW 모드 기본값과 LIVE_MAINNET 승인문자열 게이트로 구조적으로 차단된 상태이며, 3개월 섬도우 검증 후 별도 결정 없이는 실주문이 나갈 수 없다."
     }
   ]
 }
