@@ -14,7 +14,7 @@ from src.mhs.execution import (
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
 )
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V1, FrozenMhsCandidate
+from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
 from src.mhs.types import ExecutionSpec
 
 import src.mhs.frozen_research_evidence as evidence_mod
@@ -46,7 +46,7 @@ def _uncovered_periods() -> tuple[FrozenMhsReportPeriod, ...]:
 def _candidate(labels: list[pd.Timestamp], aaa: float = 0.05, bbb: float = -0.05) -> FrozenMhsCandidate:
     weights = pd.DataFrame({"AAA": [aaa] * len(labels), "BBB": [bbb] * len(labels)}, index=pd.DatetimeIndex(labels, tz="UTC"), dtype="float64")
     avail = pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC")
-    return FrozenMhsCandidate(target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V1)
+    return FrozenMhsCandidate(target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V2)
 
 
 def _frames(grid: pd.DatetimeIndex, price: float = 100.0) -> dict[str, pd.DataFrame]:
@@ -309,7 +309,7 @@ def _hand_fixture(trough: bool = False) -> tuple[FrozenMhsCandidate, StrategyExe
     candidate = FrozenMhsCandidate(
         target_weights=weights,
         signal_available_at=pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC"),
-        strategy=FROZEN_MHS_TOP20_V1,
+        strategy=FROZEN_MHS_TOP20_V2,
     )
     base = _hand_result(base_eq, base_funding, base_turnover, 7.0)
     stress = _hand_result(stress_eq, zeros, zeros, 21.0, forced=1)

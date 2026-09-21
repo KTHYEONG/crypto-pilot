@@ -17,6 +17,8 @@ from src.mhs.books import rank_weight_book
 from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
 from src.mhs.types import FEATURE_MIN_COVERAGE
 
+MARKET_CLOSE_PANEL: str = "market_close"
+
 
 @dataclass(frozen=True, slots=True)
 class FeatureSpec:
@@ -339,15 +341,24 @@ def _xs_idio_mom_builder(
 ) -> Callable[[Mapping[str, pd.DataFrame]], pd.DataFrame]:
     """Idiosyncratic momentum: market-beta-removed, vol-normalized horizon return.
 
-    Each symbol's horizon return is regressed on the cross-sectional market
-    return via a causal rolling beta (rolling moments over ``beta_bars``, no
-    forward data), and the residual -- the move the market did not explain -- is
-    scaled by its own rolling volatility.
+    Each symbol's horizon return is regressed on the cross-sectional market return via a causal
+    rolling beta (rolling moments over ``beta_bars``) and the residual is scaled by its own rolling
+    volatility. The market return is the mean horizon return over ``panels[MARKET_CLOSE_PANEL]``
+    when supplied, otherwise over the panel's own ``close`` columns. A caller whose ``close``
+    columns were chosen with hindsight (e.g. "ever selected over the sample") must supply the
+    contemporaneous census plane, because a hindsight-selected cross-section leaks future
+    membership into every historical market estimate.
     """
     def _build(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
         log_close = np.log(panels["close"])
         raw = horizon_log_return(log_close, horizon_bars)
-        market = raw.mean(axis=1)
+        if MARKET_CLOSE_PANEL in panels:
+            market_close = panels[MARKET_CLOSE_PANEL]
+            if not market_close.index.equals(panels["close"].index):
+                raise ValueError("market close panel must share the close panel index exactly")
+            market = horizon_log_return(np.log(market_close), horizon_bars).mean(axis=1)
+        else:
+            market = raw.mean(axis=1)
         mean_r = raw.rolling(beta_bars, min_periods=beta_bars).mean()
         mean_m = market.rolling(beta_bars, min_periods=beta_bars).mean()
         mean_rm = raw.mul(market, axis=0).rolling(beta_bars, min_periods=beta_bars).mean()

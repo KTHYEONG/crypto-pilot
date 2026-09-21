@@ -179,3 +179,44 @@ def scale_book_to_target_gross(
     return pd.DataFrame(
         values * scale[:, None], index=weights.index, columns=weights.columns,
     )
+
+
+def clip_names_preserving_gross(weights: pd.DataFrame, clip: float) -> pd.DataFrame:
+    """Clip per-name weights, re-center on held names, and restore each row's original gross.
+
+    Rank books let a single name carry up to ~9% of unit gross even when its realized volatility
+    is several times the book median, and those names dominate intraday drawdown. Clipping
+    flattens that tail while restoring the pre-clip row gross keeps the ensemble's consensus
+    scaling -- the book's own risk control -- intact. Re-centering over the names held before
+    clipping keeps the row dollar-neutral. The transform is single-pass: after gross
+    restoration a weight may exceed ``clip`` by the restoration factor, so ``clip`` is a
+    shaping parameter, not a hard position limit.
+
+    Args:
+        weights: Dollar-neutral target rows (entry index x symbols); non-finite cells are 0.0.
+        clip: Positive finite per-name absolute weight at which clipping starts.
+    Returns:
+        Frame with identical index and columns.
+    Raises:
+        ValueError: ``clip`` is not positive and finite.
+    """
+    valid = isinstance(clip, (int, float)) and not isinstance(clip, bool)
+    if valid:
+        valid = bool(math.isfinite(float(clip)) and float(clip) > 0.0)
+    if not valid:
+        raise ValueError(f"clip must be positive and finite, got {clip!r}")
+    bound = float(clip)
+    values = np.where(np.isfinite(weights.to_numpy(dtype="float64")), weights.to_numpy(dtype="float64"), 0.0)
+    held = values != 0.0
+    gross_in = np.abs(values).sum(axis=1)
+    clipped = np.sign(values) * np.minimum(np.abs(values), bound)
+    counts = held.sum(axis=1)
+    means = np.where(counts > 0, clipped.sum(axis=1) / np.where(counts > 0, counts, 1), 0.0)
+    centered = np.where(held, clipped - means[:, None], 0.0)
+    gross_centered = np.abs(centered).sum(axis=1)
+    scale = np.divide(
+        gross_in, gross_centered, out=np.zeros_like(gross_in), where=gross_centered > 0.0,
+    )
+    untouched = np.abs(values).max(axis=1) <= bound
+    out = np.where(untouched[:, None], values, centered * scale[:, None])
+    return pd.DataFrame(out, index=weights.index, columns=weights.columns)

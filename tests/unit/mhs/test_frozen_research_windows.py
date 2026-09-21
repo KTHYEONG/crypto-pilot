@@ -8,7 +8,7 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.mhs.execution import ExecutionReplayWindow, InstrumentSettlementEvent
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V1, FrozenMhsCandidate
+from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
 from src.mhs.frozen_research_windows import validated_frozen_research_windows
 
 _SETTLEMENT_BARS = 10
@@ -38,7 +38,7 @@ def _candidate(
         weights.loc[labels[2:], :] = 0.0
     avail = pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC")
     return FrozenMhsCandidate(
-        target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V1
+        target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V2
     )
 
 
@@ -418,7 +418,7 @@ def test_validated_windows_reject_empty_candidate() -> None:
     """A candidate without target rows cannot anchor any window."""
     empty = FrozenMhsCandidate(
         target_weights=pd.DataFrame(columns=list(_SYMBOLS), dtype="float64"),
-        signal_available_at=pd.DatetimeIndex([], tz="UTC"), strategy=FROZEN_MHS_TOP20_V1,
+        signal_available_at=pd.DatetimeIndex([], tz="UTC"), strategy=FROZEN_MHS_TOP20_V2,
     )
     with pytest.raises(DataIntegrityError, match="at least one target row"):
         list(_validated(empty, []))
