@@ -144,6 +144,10 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     frozen.add_argument("--start", default=None, help="UTC evaluation start; date-only values are UTC.")
     frozen.add_argument("--end", default=None, help="UTC exclusive evaluation end.")
     frozen.add_argument("--breadth", type=int, default=20, help="Positive universe breadth; 20 is the primary Top-20.")
+    frozen.add_argument(
+        "--variant", choices=("primary", "growth"), default="primary",
+        help="Target policy: primary = unlevered consensus book; growth = per-name clip + registered exposure multiplier (Top-20 only).",
+    )
     frozen.add_argument("--output", default=None, help="Fresh complete research result envelope JSON destination; omitted creates a unique frozen run directory under data/backtests/frozen/runs.")
     frozen.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
     frozen.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
@@ -286,22 +290,38 @@ def _append_backtest_index(
         fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def _frozen_strategy(breadth: int) -> FrozenMhsStrategySpec:
-    """Select the primary Top-20 policy or a breadth-labelled research control."""
+def _frozen_strategy(breadth: int, variant: str = "primary") -> FrozenMhsStrategySpec:
+    """Select the frozen target policy for one research run.
+
+    ``primary`` keeps the unlevered consensus book at the requested breadth (20 is the primary
+    Top-20, other breadths are labelled controls). ``growth`` is registered only for breadth 20,
+    because its exposure rung was derived from that book's own drawdown distribution and does not
+    transfer to other universes.
+
+    Raises:
+        SystemExit: ``growth`` is requested with a breadth other than 20, or ``variant`` is unknown.
+    """
     from src.mhs.frozen_research_candidate import (
-        FROZEN_MHS_TOP20_V1,
-        FROZEN_MHS_TOP40_CONTROL_V1,
+        FROZEN_MHS_TOP20_GROWTH_V2,
+        FROZEN_MHS_TOP20_V2,
+        FROZEN_MHS_TOP40_CONTROL_V2,
     )
 
+    if variant == "growth":
+        if breadth != 20:
+            raise SystemExit(f"growth variant is registered only for breadth 20, got {breadth!r}")
+        return FROZEN_MHS_TOP20_GROWTH_V2
+    if variant != "primary":
+        raise SystemExit(f"unknown frozen variant {variant!r}")
     if breadth == 20:
-        return FROZEN_MHS_TOP20_V1
+        return FROZEN_MHS_TOP20_V2
     if breadth == 40:
-        return FROZEN_MHS_TOP40_CONTROL_V1
+        return FROZEN_MHS_TOP40_CONTROL_V2
     import dataclasses
 
     return dataclasses.replace(
-        FROZEN_MHS_TOP20_V1,
-        strategy_id=f"frozen_mhs_b{breadth}_control_v1",
+        FROZEN_MHS_TOP20_V2,
+        strategy_id=f"frozen_mhs_b{breadth}_control_v2",
         breadth=breadth,
     )
 
@@ -317,12 +337,15 @@ def _frozen_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
     return base, stress
 
 
-def _frozen_run_name(start: pd.Timestamp, end: pd.Timestamp, breadth: int, created_at: pd.Timestamp) -> str:
+def _frozen_run_name(start: pd.Timestamp, end: pd.Timestamp, breadth: int, created_at: pd.Timestamp, variant: str = "primary") -> str:
     """Human-readable frozen run directory name: dates and breadth are legible without opening any file."""
-    return f"{start:%Y%m%d}_{end:%Y%m%d}_top{breadth}_{created_at:%Y%m%dT%H%M%S}Z"
+    stem = f"{start:%Y%m%d}_{end:%Y%m%d}_top{breadth}"
+    if variant == "growth":
+        stem = f"{stem}_growth"
+    return f"{stem}_{created_at:%Y%m%dT%H%M%S}Z"
 
 
-def _resolve_frozen_destination(args: argparse.Namespace, *, start: pd.Timestamp, end: pd.Timestamp, breadth: int) -> Path:
+def _resolve_frozen_destination(args: argparse.Namespace, *, start: pd.Timestamp, end: pd.Timestamp, breadth: int, variant: str = "primary") -> Path:
     """Resolve the frozen research result destination, defaulting to a fresh, human-readable run directory.
 
     Args:
@@ -339,7 +362,7 @@ def _resolve_frozen_destination(args: argparse.Namespace, *, start: pd.Timestamp
 
     raw_output = getattr(args, "output", None)
     if raw_output is None:
-        name = _frozen_run_name(start, end, breadth, pd.Timestamp.now(tz="UTC"))
+        name = _frozen_run_name(start, end, breadth, pd.Timestamp.now(tz="UTC"), variant)
         run_dir = FROZEN_BACKTESTS_DIR / name
         suffix = 1
         while os.path.lexists(run_dir):
@@ -442,9 +465,10 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     end = _utc_timestamp(args.end, "end", PROCESS_EVALUATION_CEILING)
     if not source_start < start < end:
         raise SystemExit(f"require source-start < start < end, got {source_start} {start} {end}")
-    output = _resolve_frozen_destination(args, start=start, end=end, breadth=breadth)
+    variant = getattr(args, "variant", "primary")
+    strategy = _frozen_strategy(breadth, variant)
+    output = _resolve_frozen_destination(args, start=start, end=end, breadth=breadth, variant=variant)
     budget = _resolve_budget(args)
-    strategy = _frozen_strategy(breadth)
     base_spec, stress_spec = _frozen_specs()
     try:
         report_periods = (
@@ -477,5 +501,8 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     if output.parent.parent == FROZEN_BACKTESTS_DIR and DEFAULT_DETAIL_RETENTION_MAX_RUNS is not None:
         _prune_frozen_runs(keep=DEFAULT_DETAIL_RETENTION_MAX_RUNS)
     status = "primary" if breadth == 20 else "research control"
-    _logger.info("[EVAL] backtest mhs-frozen strategy=%s status=%s", strategy.strategy_id, status)
+    _logger.info(
+        "[EVAL] backtest mhs-frozen strategy=%s status=%s variant=%s exposure=%s name_clip=%s",
+        strategy.strategy_id, status, variant, strategy.exposure_multiplier, strategy.name_clip,
+    )
     print(str(output))  # noqa: T201 -- frozen command prints only the finalized result path

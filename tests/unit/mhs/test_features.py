@@ -471,3 +471,76 @@ def test_boundary_books_rank_each_admitted_feature_once(monkeypatch) -> None:
             pd.testing.assert_frame_equal(books[label][spec.name], expected)
 
 
+def _idio_close_panel(n: int = 200, seed: int = 11) -> pd.DataFrame:
+    import numpy as np
+    import pandas as pd
+
+    idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+    rng = np.random.default_rng(seed)
+    walks = np.cumsum(rng.normal(0.0, 0.005, (n, 6)), axis=0)
+    return pd.DataFrame(
+        np.exp(walks) * 100.0, index=idx, columns=["A", "B", "C", "D", "E", "F"],
+    )
+
+
+def test_idio_mom_market_proxy_ignores_hindsight_selection() -> None:
+    from src.mhs.features import MARKET_CLOSE_PANEL, _xs_idio_mom_builder
+
+    close = _idio_close_panel()
+    builder = _xs_idio_mom_builder(5, beta_bars=10)
+    narrow = builder({"close": close[["A", "B", "C"]], MARKET_CLOSE_PANEL: close})
+    wide = builder({"close": close[["A", "B", "C", "D"]], MARKET_CLOSE_PANEL: close})
+    pd.testing.assert_frame_equal(narrow[["A", "B", "C"]], wide[["A", "B", "C"]])
+
+
+def test_idio_mom_future_perturbation_leaves_past_unchanged() -> None:
+    import numpy as np
+
+    from src.mhs.features import MARKET_CLOSE_PANEL, _xs_idio_mom_builder
+
+    close = _idio_close_panel()
+    builder = _xs_idio_mom_builder(5, beta_bars=10)
+    base = builder({"close": close, MARKET_CLOSE_PANEL: close})
+    shocked = close.copy()
+    rng = np.random.default_rng(3)
+    shocked.iloc[100:] = shocked.iloc[100:] * rng.uniform(0.5, 1.5, shocked.iloc[100:].shape)
+    rebuilt = builder({"close": shocked, MARKET_CLOSE_PANEL: shocked})
+    pd.testing.assert_frame_equal(rebuilt.iloc[:100], base.iloc[:100])
+
+
+def test_idio_mom_delisted_names_drop_out_of_market_mean() -> None:
+    from src.mhs.features import MARKET_CLOSE_PANEL, _xs_idio_mom_builder
+
+    close = _idio_close_panel()
+    builder = _xs_idio_mom_builder(5, beta_bars=10)
+    listed = close.copy()
+    listed.loc[listed.index[100:], "F"] = float("nan")
+    full = builder({"close": close, MARKET_CLOSE_PANEL: listed})
+    dropped = builder({"close": close, MARKET_CLOSE_PANEL: listed.drop(columns=["F"])})
+    shared = ["A", "B", "C", "D", "E"]
+    pd.testing.assert_frame_equal(full[shared].iloc[120:], dropped[shared].iloc[120:])
+
+
+def test_idio_mom_without_market_plane_keeps_legacy_output() -> None:
+    from src.mhs.features import MARKET_CLOSE_PANEL, _xs_idio_mom_builder
+
+    close = _idio_close_panel()
+    builder = _xs_idio_mom_builder(5, beta_bars=10)
+    legacy = builder({"close": close})
+    explicit = builder({"close": close, MARKET_CLOSE_PANEL: close})
+    pd.testing.assert_frame_equal(legacy, explicit)
+
+
+def test_idio_mom_misaligned_market_plane_rejected() -> None:
+    import pandas as pd
+
+    from src.mhs.features import MARKET_CLOSE_PANEL, _xs_idio_mom_builder
+
+    close = _idio_close_panel()
+    builder = _xs_idio_mom_builder(5, beta_bars=10)
+    shifted = close.copy()
+    shifted.index = shifted.index + pd.Timedelta(hours=1)
+    with pytest.raises(ValueError, match="index"):
+        builder({"close": close, MARKET_CLOSE_PANEL: shifted})
+
+

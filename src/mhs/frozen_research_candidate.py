@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
@@ -9,9 +10,10 @@ from typing import Literal
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.books import rank_weight_book
-from src.mhs.features import FEATURE_REGISTRY
+from src.mhs.books import clip_names_preserving_gross, rank_weight_book
+from src.mhs.features import FEATURE_REGISTRY, MARKET_CLOSE_PANEL
 from src.mhs.frozen_research_universe import build_frozen_pit_roster
+from src.mhs.params import FROZEN_GROWTH_EXPOSURE_MULTIPLIER, FROZEN_GROWTH_NAME_CLIP
 
 _REQUIRED_PANELS = ("close", "quote_vol", "taker_buy_quote")
 _HISTORY_BARS = 720
@@ -39,6 +41,9 @@ class FrozenMhsStrategySpec:
     ranking population, and the UTC observation-to-entry clock.  It lets new
     research variants create the same executable target contract without
     changing the inventory accounting engine.
+    ``name_clip`` shapes per-name concentration via
+    ``clip_names_preserving_gross`` before ``exposure_multiplier`` scales every row; ``1.0`` /
+    ``None`` reproduce the unlevered consensus book exactly.
     """
 
     strategy_id: str
@@ -48,6 +53,8 @@ class FrozenMhsStrategySpec:
     snapshot_hour_utc: int
     release_hour_utc: int
     entry_hour_utc: int
+    exposure_multiplier: float = 1.0
+    name_clip: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.strategy_id, str) or not self.strategy_id:
@@ -74,10 +81,26 @@ class FrozenMhsStrategySpec:
                 raise ValueError(f"{label} must be an integer hour in [0, 23], got {hour!r}")
         if not self.snapshot_hour_utc < self.release_hour_utc:
             raise ValueError("snapshot_hour_utc must be strictly earlier than release_hour_utc")
+        if (
+            isinstance(self.exposure_multiplier, bool)
+            or not isinstance(self.exposure_multiplier, (int, float))
+            or not (math.isfinite(float(self.exposure_multiplier)) and float(self.exposure_multiplier) > 0.0)
+        ):
+            raise ValueError(
+                f"exposure_multiplier must be a finite float > 0, got {self.exposure_multiplier!r}"
+            )
+        if self.name_clip is not None and (
+            isinstance(self.name_clip, bool)
+            or not isinstance(self.name_clip, (int, float))
+            or not (math.isfinite(float(self.name_clip)) and 0.0 < float(self.name_clip) <= 1.0)
+        ):
+            raise ValueError(
+                f"name_clip must be None or a finite float in (0, 1], got {self.name_clip!r}"
+            )
 
 
-FROZEN_MHS_TOP20_V1 = FrozenMhsStrategySpec(
-    strategy_id="frozen_mhs_top20_v1",
+FROZEN_MHS_TOP20_V2 = FrozenMhsStrategySpec(
+    strategy_id="frozen_mhs_top20_v2",
     breadth=20,
     members=(
         FrozenFeatureMember(name="flow_imb_168h", sign=1),
@@ -92,8 +115,8 @@ FROZEN_MHS_TOP20_V1 = FrozenMhsStrategySpec(
     entry_hour_utc=0,
 )
 
-FROZEN_MHS_TOP40_CONTROL_V1 = FrozenMhsStrategySpec(
-    strategy_id="frozen_mhs_top40_control_v1",
+FROZEN_MHS_TOP40_CONTROL_V2 = FrozenMhsStrategySpec(
+    strategy_id="frozen_mhs_top40_control_v2",
     breadth=40,
     members=(
         FrozenFeatureMember(name="flow_imb_168h", sign=1),
@@ -106,6 +129,24 @@ FROZEN_MHS_TOP40_CONTROL_V1 = FrozenMhsStrategySpec(
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
+)
+
+FROZEN_MHS_TOP20_GROWTH_V2 = FrozenMhsStrategySpec(
+    strategy_id="frozen_mhs_top20_growth_v2",
+    breadth=20,
+    members=(
+        FrozenFeatureMember(name="flow_imb_168h", sign=1),
+        FrozenFeatureMember(name="flow_imb_720h", sign=1),
+        FrozenFeatureMember(name="xs_mom_336h", sign=1),
+        FrozenFeatureMember(name="xs_idio_mom_336h", sign=1),
+        FrozenFeatureMember(name="mom3_skew_168h", sign=1),
+    ),
+    min_rank_symbols=8,
+    snapshot_hour_utc=22,
+    release_hour_utc=23,
+    entry_hour_utc=0,
+    exposure_multiplier=FROZEN_GROWTH_EXPOSURE_MULTIPLIER,
+    name_clip=FROZEN_GROWTH_NAME_CLIP,
 )
 
 
@@ -138,7 +179,8 @@ def build_frozen_mhs_candidate(
     daily_quote_volume: pd.DataFrame,
     census_symbols: tuple[str, ...],
     *,
-    strategy: FrozenMhsStrategySpec = FROZEN_MHS_TOP20_V1,
+    market_close: pd.DataFrame,
+    strategy: FrozenMhsStrategySpec = FROZEN_MHS_TOP20_V2,
     blocked_decisions: pd.DataFrame | None = None,
 ) -> FrozenMhsCandidate:
     """Build one immutable, causal target plan from complete hourly sources.
@@ -154,11 +196,16 @@ def build_frozen_mhs_candidate(
         daily_close: Complete historical daily close census for PIT membership.
         daily_quote_volume: Complete historical daily turnover census.
         census_symbols: Canonical source-symbol order, including retired names.
-        strategy: Frozen target definition; Top-20 v1 is the primary default.
+        market_close: Full-census hourly close plane (columns in ``census_symbols`` order, same hourly
+            index as ``hourly_panels``) defining the contemporaneous market cross-section for
+            market-relative features; required so no feature can fall back to the hindsight-selected
+            ``hourly_panels`` columns.
+        strategy: Frozen target definition; Top-20 v2 is the primary default.
         blocked_decisions: Boolean decision-day frame withdrawing a symbol from both roster
             eligibility and target emission for exactly those days.
     Returns:
-        Exact entry targets and matching signal-release timestamps.
+        Exact entry targets and matching signal-release timestamps. Target gross may exceed 1.0
+        (levered) under growth specs.
     Raises:
         DataIntegrityError: Source planes, census, or roster evidence is inconsistent.
     """
@@ -201,6 +248,11 @@ def build_frozen_mhs_candidate(
     if bool((available_values < grid_values).any()):
         raise DataIntegrityError("hourly publication cannot precede the bar open")
     available_utc = hourly_available_at.apply(lambda col: pd.to_datetime(col, utc=True))
+    if not market_close.index.equals(first.index):
+        raise DataIntegrityError("market_close must share the hourly close panel index exactly")
+    if list(market_close.columns) != list(census_symbols):
+        raise DataIntegrityError("market_close columns must match census_symbols order")
+    panels[MARKET_CLOSE_PANEL] = market_close
     census = list(census_symbols)
     features = [(m, registry[m.name].builder(panels)) for m in strategy.members]
     daily_idx = roster.index
@@ -228,6 +280,9 @@ def build_frozen_mhs_candidate(
     for book in books[1:]:
         ensemble = ensemble.add(book)
     ensemble = ensemble / float(len(books))
+    if strategy.name_clip is not None:
+        ensemble = clip_names_preserving_gross(ensemble, strategy.name_clip)
+    ensemble = ensemble * strategy.exposure_multiplier
     entries = pd.DatetimeIndex(
         [d + pd.Timedelta(days=1, hours=int(strategy.entry_hour_utc)) for d in decisions], tz="UTC"
     )

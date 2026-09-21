@@ -11,12 +11,16 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.mhs.execution import ExecutionReplayWindow
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V1, FrozenMhsCandidate
+from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
 from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod, evaluate_frozen_mhs_research
 from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, FrozenMhsBacktestRun
 from src.mhs.types import ExecutionSpec
 
-from src.mhs.frozen_research_report import frozen_mhs_backtest_payload, persist_frozen_mhs_backtest
+from src.mhs.frozen_research_report import (
+    frozen_mhs_backtest_payload,
+    frozen_mhs_daily_frame,
+    persist_frozen_mhs_backtest,
+)
 
 _SYMBOLS = ("AAA", "BBB")
 _DAY1 = pd.Timestamp("2021-06-01", tz="UTC")
@@ -34,7 +38,7 @@ def _candidate(labels: list[pd.Timestamp]) -> FrozenMhsCandidate:
         index=pd.DatetimeIndex(labels, tz="UTC"), dtype="float64",
     )
     avail = pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC")
-    return FrozenMhsCandidate(target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V1)
+    return FrozenMhsCandidate(target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V2)
 
 
 def _frames(grid: pd.DatetimeIndex) -> dict[str, pd.DataFrame]:
@@ -92,7 +96,7 @@ def _run() -> FrozenMhsBacktestRun:
     )
     request = FrozenMhsBacktestRequest(
         source_start=_DAY1, evaluation_start=labels[0], evaluation_end=labels[-1] + pd.Timedelta(days=1),
-        strategy=FROZEN_MHS_TOP20_V1, initial_equity=100000.0,
+        strategy=FROZEN_MHS_TOP20_V2, initial_equity=100000.0,
         base_spec=base_spec, stress_spec=stress_spec, report_periods=periods,
     )
     return FrozenMhsBacktestRun(
@@ -106,7 +110,7 @@ def test_payload_preserves_strategy_provenance() -> None:
     """Completed Top-20 evidence serializes strategy, costs, validity, and research-only limits."""
     run = _run()
     payload = frozen_mhs_backtest_payload(run)
-    assert payload["strategy_id"] == "frozen_mhs_top20_v1"
+    assert payload["strategy_id"] == "frozen_mhs_top20_v2"
     assert payload["breadth"] == 20
     assert [member["name"] for member in payload["members"]] == [  # type: ignore[index]
         "flow_imb_168h", "flow_imb_720h", "xs_mom_336h", "xs_idio_mom_336h", "mom3_skew_168h"
@@ -149,15 +153,18 @@ def test_fresh_atomic_output_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     run = _run()
     output = tmp_path / "result.json"
     assert persist_frozen_mhs_backtest(run, output) == output
-    assert json.loads(output.read_text(encoding="utf-8"))["strategy_id"] == "frozen_mhs_top20_v1"
+    assert json.loads(output.read_text(encoding="utf-8"))["strategy_id"] == "frozen_mhs_top20_v2"
     with pytest.raises(DataIntegrityError, match=r"fresh"):
         persist_frozen_mhs_backtest(run, output)
-    second = tmp_path / "second.json"
+    second_dir = tmp_path / "second_run"
+    second_dir.mkdir()
+    second = second_dir / "second.json"
     monkeypatch.setattr(report_mod.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
     with pytest.raises(OSError, match="disk"):
         persist_frozen_mhs_backtest(run, second)
     assert not second.exists()
-    assert not (tmp_path / "second.json.tmp").exists()
+    assert not (second_dir / "second.json.tmp").exists()
+    assert not (second_dir / "daily.parquet").exists()
 
 
 def test_payload_rejects_incomplete_evidence() -> None:
@@ -196,10 +203,10 @@ def test_jsonable_scalars_and_rejection() -> None:
 
 def test_payload_rejects_strategy_mismatch_and_missing_period() -> None:
     """A foreign strategy or a metrics row outside the request cannot be published."""
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP40_CONTROL_V1
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP40_CONTROL_V2
 
     run = _run()
-    foreign = dataclasses.replace(run, request=dataclasses.replace(run.request, strategy=FROZEN_MHS_TOP40_CONTROL_V1))
+    foreign = dataclasses.replace(run, request=dataclasses.replace(run.request, strategy=FROZEN_MHS_TOP40_CONTROL_V2))
     with pytest.raises(DataIntegrityError, match=r"must match the request strategy"):
         frozen_mhs_backtest_payload(foreign)
     ghost_periods = (
@@ -253,3 +260,112 @@ def test_registry_is_single_source_gap_view() -> None:
     parser = argparse.ArgumentParser()
     add_backtest_commands(parser)
     assert "exclud" not in parser.format_help().lower()
+
+
+def _growth_run() -> FrozenMhsBacktestRun:
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_GROWTH_V2
+
+    run = _run()
+    return dataclasses.replace(
+        run,
+        request=dataclasses.replace(run.request, strategy=FROZEN_MHS_TOP20_GROWTH_V2),
+        candidate=dataclasses.replace(run.candidate, strategy=FROZEN_MHS_TOP20_GROWTH_V2),
+    )
+
+
+def test_payload_states_policy() -> None:
+    """Growth and primary payloads state their registered exposure policy explicitly."""
+    from src.mhs.params import FROZEN_GROWTH_EXPOSURE_MULTIPLIER, FROZEN_GROWTH_NAME_CLIP
+
+    growth = frozen_mhs_backtest_payload(_growth_run())
+    assert growth["exposure_multiplier"] == FROZEN_GROWTH_EXPOSURE_MULTIPLIER
+    assert growth["name_clip"] == FROZEN_GROWTH_NAME_CLIP
+    assert growth["daily_artifact"] == "daily.parquet"
+    primary = frozen_mhs_backtest_payload(_run())
+    assert primary["exposure_multiplier"] == 1.0
+    assert primary["name_clip"] is None
+    assert primary["daily_artifact"] == "daily.parquet"
+    json.dumps(growth)
+
+
+def test_daily_frame_matches_ledger_aggregates() -> None:
+    """Daily returns are exact and intraday lows, turnover, and funding reconcile to the 3m ledger."""
+    import numpy as np
+
+    run = _run()
+    frame = frozen_mhs_daily_frame(run)
+    assert list(frame.columns) == [
+        "base_return", "stress_return",
+        "base_equity_close", "stress_equity_close",
+        "base_equity_low", "stress_equity_low",
+        "base_turnover", "stress_turnover",
+        "base_funding", "stress_funding", "target_gross",
+    ]
+    assert all(str(dtype) == "float64" for dtype in frame.dtypes)
+    pd.testing.assert_series_equal(frame["base_return"], run.evidence.base_daily.returns, check_names=False)
+    pd.testing.assert_series_equal(frame["stress_return"], run.evidence.stress_daily.returns, check_names=False)
+    assert bool((frame["base_equity_low"] <= frame["base_equity_close"]).all())
+    assert bool((frame["stress_equity_low"] <= frame["stress_equity_close"]).all())
+    days = frame.index
+    for prefix, replay in (("base", run.evidence.base), ("stress", run.evidence.stress)):
+        turnover = replay.ledger.fill_turnover
+        funding = replay.ledger.funding_charge
+        span = turnover.index.normalize().isin(days)
+        assert frame[f"{prefix}_turnover"].sum() == pytest.approx(float(turnover.loc[span].sum()), rel=1e-12)
+        assert frame[f"{prefix}_funding"].sum() == pytest.approx(float(funding.loc[span].sum()), rel=1e-12)
+    assert bool(np.allclose(frame["target_gross"].to_numpy(), 0.1))
+
+
+def test_daily_frame_rejects_mismatched_and_nonfinite() -> None:
+    """Disagreeing paired daily indexes or non-finite ledger values fail closed."""
+    run = _run()
+    shifted = run.evidence.stress_daily.returns.copy()
+    shifted.index = shifted.index + pd.Timedelta(days=1)
+    bad_daily = dataclasses.replace(run.evidence.stress_daily, returns=shifted)
+    bad_evidence = dataclasses.replace(run.evidence, stress_daily=bad_daily)
+    with pytest.raises(DataIntegrityError, match="indexes disagree"):
+        frozen_mhs_daily_frame(dataclasses.replace(run, evidence=bad_evidence))
+    bad_equity = run.evidence.base.ledger.equity.copy()
+    bad_equity.iloc[-1] = float("inf")
+    bad_ledger = dataclasses.replace(run.evidence.base.ledger, equity=bad_equity)
+    bad_base = dataclasses.replace(run.evidence.base, ledger=bad_ledger)
+    with pytest.raises(DataIntegrityError, match="finite"):
+        frozen_mhs_daily_frame(dataclasses.replace(run, evidence=dataclasses.replace(run.evidence, base=bad_base)))
+
+
+def test_persist_writes_daily_artifact_with_envelope(tmp_path: Path) -> None:
+    """A fresh output persists daily.parquet beside result.json with the payload reference."""
+    run = _run()
+    output = tmp_path / "result.json"
+    assert persist_frozen_mhs_backtest(run, output) == output
+    daily = pd.read_parquet(tmp_path / "daily.parquet")
+    assert list(daily.columns) == [
+        "base_return", "stress_return",
+        "base_equity_close", "stress_equity_close",
+        "base_equity_low", "stress_equity_low",
+        "base_turnover", "stress_turnover",
+        "base_funding", "stress_funding", "target_gross",
+    ]
+    assert json.loads(output.read_text(encoding="utf-8"))["daily_artifact"] == "daily.parquet"
+
+
+def test_persist_failure_leaves_no_partial_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing JSON write removes the already-written daily artifact and every temp file."""
+    import src.mhs.frozen_research_report as report_mod
+
+    run = _run()
+    output = tmp_path / "result.json"
+    monkeypatch.setattr(report_mod.json, "dump", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError, match="disk"):
+        persist_frozen_mhs_backtest(run, output)
+    assert not output.exists()
+    assert not (tmp_path / "daily.parquet").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_persist_rejects_occupied_daily_artifact(tmp_path: Path) -> None:
+    """A pre-existing daily.parquet is refused before any serialization."""
+    run = _run()
+    (tmp_path / "daily.parquet").write_text("occupied", encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="daily artifact"):
+        persist_frozen_mhs_backtest(run, tmp_path / "result.json")

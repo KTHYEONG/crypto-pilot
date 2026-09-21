@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from src.mhs.books import (
+    clip_names_preserving_gross,
     equal_weight_book_ensemble,
     inverse_realized_vol_tilt,
     phase_tranche_book,
@@ -460,3 +461,58 @@ class TestScaleBookToTargetGross:
         out = scale_book_to_target_gross(weights, 1.0)
         assert out.empty
         assert list(out.columns) == ["A", "B", "C"]
+
+
+def _dollar_neutral_book(rows: int = 60, cols: int = 8, seed: int = 21) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    raw = pd.DataFrame(rng.normal(0.0, 1.0, (rows, cols)), columns=[f"S{i}" for i in range(cols)])
+    raw.iloc[::7] *= 6.0
+    centered = raw.sub(raw.mean(axis=1), axis=0)
+    gross = centered.abs().sum(axis=1)
+    return centered.div(gross.where(gross > 0), axis=0).fillna(0.0) * 0.56
+
+
+def test_clip_names_preserving_gross_keeps_dollar_neutrality() -> None:
+    weights = _dollar_neutral_book()
+    out = clip_names_preserving_gross(weights, 0.05)
+    assert out.sum(axis=1).abs().max() <= 1e-12
+
+
+def test_clip_names_preserving_gross_restores_original_gross() -> None:
+    weights = _dollar_neutral_book()
+    out = clip_names_preserving_gross(weights, 0.05)
+    expected = weights.abs().sum(axis=1)
+    got = out.abs().sum(axis=1)
+    assert ((got - expected).abs() / expected.where(expected > 0, 1.0)).max() <= 1e-12
+
+
+def test_clip_names_preserving_gross_never_adds_names() -> None:
+    weights = _dollar_neutral_book()
+    weights.iloc[::3, ::2] = 0.0
+    out = clip_names_preserving_gross(weights, 0.05)
+    assert bool(((out.to_numpy() == 0.0) | (weights.to_numpy() != 0.0)).all())
+    assert list(out.columns) == list(weights.columns)
+    assert out.index.equals(weights.index)
+
+
+def test_clip_names_preserving_gross_unbinding_clip_is_identity() -> None:
+    weights = _dollar_neutral_book() * 0.1
+    assert bool((weights.abs().max(axis=1) < 0.05).all())
+    out = clip_names_preserving_gross(weights, 0.05)
+    assert (out - weights).abs().max().max() <= 1e-15
+
+
+def test_clip_names_preserving_gross_zero_rows_stay_zero() -> None:
+    weights = _dollar_neutral_book()
+    weights.iloc[5] = 0.0
+    weights.iloc[9] = float("nan")
+    out = clip_names_preserving_gross(weights, 0.05)
+    assert bool((out.iloc[5].to_numpy() == 0.0).all())
+    assert bool(np.isfinite(out.to_numpy()).all())
+
+
+def test_clip_names_preserving_gross_invalid_clip_rejected() -> None:
+    weights = _dollar_neutral_book()
+    for bad in (0.0, -0.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="clip"):
+            clip_names_preserving_gross(weights, bad)

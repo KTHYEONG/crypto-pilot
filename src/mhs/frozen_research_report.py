@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 from pathlib import Path
 from typing import cast
@@ -14,6 +15,8 @@ import pandas as pd
 from src.backtests.contracts import JsonValue
 from src.common.errors import DataIntegrityError
 from src.mhs.frozen_research_run import FrozenMhsBacktestRun
+
+_logger = logging.getLogger(__name__)
 
 
 def _jsonable(value: object) -> JsonValue:
@@ -87,6 +90,9 @@ def frozen_mhs_backtest_payload(run: FrozenMhsBacktestRun) -> dict[str, JsonValu
     payload: dict[str, JsonValue] = {
         "strategy_id": candidate.strategy.strategy_id,
         "breadth": candidate.strategy.breadth,
+        "exposure_multiplier": _jsonable(candidate.strategy.exposure_multiplier),
+        "name_clip": _jsonable(candidate.strategy.name_clip),
+        "daily_artifact": "daily.parquet",
         "members": cast(
             JsonValue,
             [{"name": member.name, "sign": member.sign} for member in candidate.strategy.members],
@@ -124,6 +130,63 @@ def frozen_mhs_backtest_payload(run: FrozenMhsBacktestRun) -> dict[str, JsonValu
     return payload
 
 
+def frozen_mhs_daily_frame(run: FrozenMhsBacktestRun) -> pd.DataFrame:
+    """Daily ledger evidence needed to audit and re-derive the exposure policy.
+
+    Summary metrics cannot answer how a drawdown budget binds, how intraday marks deepen
+    drawdown relative to daily marks, or where funding and turnover concentrate; the drawdown
+    budget for the growth rung is solved on exactly these daily series, so they are persisted
+    with the run instead of being reconstructed by ad-hoc probes.
+
+    Args:
+        run: Completed frozen replay with valid paired ledgers.
+    Returns:
+        UTC-daily indexed frame with float64 columns ``base_return``, ``stress_return``,
+        ``base_equity_close``, ``stress_equity_close``, ``base_equity_low``,
+        ``stress_equity_low``, ``base_turnover``, ``stress_turnover``, ``base_funding``,
+        ``stress_funding``, ``target_gross``.
+    Raises:
+        DataIntegrityError: Paired daily indexes disagree or any value is non-finite.
+    """
+    evidence = run.evidence
+    days = evidence.base_daily.returns.index
+    if not days.equals(evidence.stress_daily.returns.index):
+        raise DataIntegrityError("paired daily indexes disagree")
+    frame = pd.DataFrame(
+        {
+            "base_return": evidence.base_daily.returns,
+            "stress_return": evidence.stress_daily.returns,
+        },
+        index=days,
+        dtype="float64",
+    )
+    for prefix, replay in (("base", evidence.base), ("stress", evidence.stress)):
+        ledger = replay.ledger
+        day_labels = ledger.equity.index.normalize()
+        frame[f"{prefix}_equity_close"] = ledger.equity.groupby(day_labels).last().reindex(days)
+        frame[f"{prefix}_equity_low"] = ledger.equity.groupby(day_labels).min().reindex(days)
+        frame[f"{prefix}_turnover"] = ledger.fill_turnover.groupby(
+            ledger.fill_turnover.index.normalize()
+        ).sum().reindex(days)
+        frame[f"{prefix}_funding"] = ledger.funding_charge.groupby(
+            ledger.funding_charge.index.normalize()
+        ).sum().reindex(days)
+    gross = run.candidate.target_weights.abs().sum(axis=1)
+    frame["target_gross"] = gross.reindex(days, fill_value=0.0)
+    frame = frame[
+        [
+            "base_return", "stress_return",
+            "base_equity_close", "stress_equity_close",
+            "base_equity_low", "stress_equity_low",
+            "base_turnover", "stress_turnover",
+            "base_funding", "stress_funding", "target_gross",
+        ]
+    ].astype("float64")
+    if not bool(np.isfinite(frame.to_numpy(dtype="float64")).all()):
+        raise DataIntegrityError("daily frame values must be finite")
+    return frame
+
+
 def persist_frozen_mhs_backtest(run: FrozenMhsBacktestRun, output: Path) -> Path:
     """Atomically persist one fresh frozen-MHS research result envelope.
 
@@ -142,14 +205,32 @@ def persist_frozen_mhs_backtest(run: FrozenMhsBacktestRun, output: Path) -> Path
         raise DataIntegrityError(f"output must be a JSON path, got {str(output)!r}")
     if os.path.lexists(output):
         raise DataIntegrityError(f"output must be fresh: {output} already exists")
+    daily_path = output.parent / "daily.parquet"
+    if os.path.lexists(daily_path):
+        raise DataIntegrityError(f"daily artifact must be fresh: {daily_path} already exists")
     payload = frozen_mhs_backtest_payload(run)
+    daily = frozen_mhs_daily_frame(run)
+    daily_tmp = output.parent / "daily.parquet.tmp"
     tmp = output.parent / f"{output.name}.tmp"
     try:
+        daily.to_parquet(daily_tmp)
+        os.replace(daily_tmp, daily_path)
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, sort_keys=True)
         os.replace(tmp, output)
     except OSError:
         with contextlib.suppress(OSError):
+            os.unlink(daily_tmp)
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
+        with contextlib.suppress(OSError):
+            os.unlink(daily_path)
+        with contextlib.suppress(OSError):
+            os.unlink(output)
         raise
+    _logger.debug(
+        "[EVAL] frozen daily artifact rows=%d start=%s end=%s worst_base_day=%.6f min_base_equity_low=%.2f",
+        len(daily), daily.index[0], daily.index[-1],
+        float(daily["base_return"].min()), float(daily["base_equity_low"].min()),
+    )
     return output

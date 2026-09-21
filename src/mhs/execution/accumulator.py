@@ -128,6 +128,7 @@ class _BoundExecutionReplayAccumulator:
         self.fill_ts: list[pd.Timestamp] = []
         self.fill_symbol: list[str] = []
         self.fill_qty: list[float] = []
+        self.fill_post_units: list[float] = []
         self.fill_price: list[float] = []
         self.fill_fee_bps: list[float] = []
         self.fill_reason: list[str] = []
@@ -641,6 +642,7 @@ class _BoundExecutionReplayAccumulator:
         self.fill_ts.append(fill_time)
         self.fill_symbol.append(sym)
         self.fill_qty.append(qty)
+        self.fill_post_units.append(0.0)
         self.fill_price.append(price)
         self.fill_fee_bps.append(float(fee_bps))
         self.fill_reason.append("delist_settlement")
@@ -913,6 +915,7 @@ class _BoundExecutionReplayAccumulator:
             self.fill_ts.append(fill_time)
             self.fill_symbol.append(sym)
             self.fill_qty.append(net_units)
+            self.fill_post_units.append(float(self.units_arr[gcol]))
             self.fill_price.append(fill_price)
             self.fill_fee_bps.append(fee_bps)
             self.fill_reason.append(reason)
@@ -1055,6 +1058,7 @@ class _BoundExecutionReplayAccumulator:
             self.fill_ts.append(fill_time)
             self.fill_symbol.append(sym)
             self.fill_qty.append(qty)
+            self.fill_post_units.append(float(self.units_arr[gcol]))
             self.fill_price.append(fill_price)
             self.fill_fee_bps.append(fee_bps)
             self.fill_reason.append(reason)
@@ -1193,6 +1197,7 @@ class _BoundExecutionReplayAccumulator:
             self.fill_ts.append(fill_time)
             self.fill_symbol.append(sym)
             self.fill_qty.append(qty)
+            self.fill_post_units.append(float(self.units_arr[gcol]))
             self.fill_price.append(fill_price)
             self.fill_fee_bps.append(fee_bps)
             self.fill_reason.append(reason)
@@ -1284,6 +1289,10 @@ class _BoundExecutionReplayAccumulator:
         The first retained bar may use only the immediately preceding consumed,
         published valuation mark for continuity, because window splitting must
         not create fictitious missing data.
+        Ledger-track inventory is the step function of intent-track post-fill levels anchored at the
+        carried start level, so a position the intent track closed to exactly zero is exactly zero on
+        the ledger track. Re-deriving levels by summing fill quantities changes float association and
+        leaves sub-epsilon dust that the held-inventory checks would otherwise treat as a live position.
 
         Args:
             grid_ns: Nanosecond execution labels.
@@ -1327,6 +1336,7 @@ class _BoundExecutionReplayAccumulator:
                 wf_qty = np.asarray(self.fill_qty[fill_start:], dtype="float64")
                 wf_price = np.asarray(self.fill_price[fill_start:], dtype="float64")
                 wf_fee = np.asarray(self.fill_fee_bps[fill_start:], dtype="float64")
+                wf_post = np.asarray(self.fill_post_units[fill_start:], dtype="float64")
                 wf_fee_amt = wf_fee / 1e4 * np.abs(wf_qty) * wf_price
                 fill_flow = np.zeros(n_grid, dtype="float64")
                 fee_by_ts = np.zeros(n_grid, dtype="float64")
@@ -1339,6 +1349,7 @@ class _BoundExecutionReplayAccumulator:
                 wf_pos = np.empty(0, dtype=np.intp)
                 wf_j = np.empty(0, dtype=np.intp)
                 wf_qty = np.empty(0, dtype="float64")
+                wf_post = np.empty(0, dtype="float64")
                 fill_flow = np.zeros(n_grid, dtype="float64")
                 fee_by_ts = np.zeros(n_grid, dtype="float64")
                 turnover_pos_arr = np.empty(0, dtype=np.intp)
@@ -1358,11 +1369,25 @@ class _BoundExecutionReplayAccumulator:
             end_units = np.empty(n_local, dtype="float64")
             end_valid = np.empty(n_local, dtype="float64")
             for j in range(n_local):
-                d_col = np.zeros(n_grid, dtype="float64")
                 sel = wf_j == j
                 if bool(sel.any()):
-                    np.add.at(d_col, wf_pos[sel], wf_qty[sel])
-                units = np.cumsum(d_col) + float(start_units[j])
+                    pos_j = wf_pos[sel]
+                    post_j = wf_post[sel]
+                    order = np.argsort(pos_j, kind="stable")
+                    pos_s = pos_j[order]
+                    post_s = post_j[order]
+                    _, uniq_idx = np.unique(pos_s[::-1], return_index=True)
+                    keep_rev = np.zeros(len(pos_s), dtype=bool)
+                    keep_rev[uniq_idx] = True
+                    keep = keep_rev[::-1]
+                    pos_u = pos_s[keep]
+                    post_u = post_s[keep]
+                    tmp = np.full(n_grid, np.nan, dtype="float64")
+                    tmp[pos_u] = post_u
+                    last_pos = np.maximum.accumulate(np.where(np.isfinite(tmp), row_idx, -1))
+                    units = np.where(last_pos >= 0, tmp[np.maximum(last_pos, 0)], float(start_units[j]))
+                else:
+                    units = np.full(n_grid, float(start_units[j]), dtype="float64")
                 before = np.empty(n_grid, dtype="float64")
                 before[0] = float(start_units[j])
                 before[1:] = units[:-1]
