@@ -27,8 +27,8 @@ _DAY1 = pd.Timestamp("2021-06-01", tz="UTC")
 
 
 def _specs() -> tuple[ExecutionSpec, ExecutionSpec]:
-    base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0)
-    stress = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=13.0)
+    base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0, decision_anchor="submit_bar")
+    stress = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=13.0, decision_anchor="submit_bar")
     return base, stress
 
 
@@ -299,7 +299,7 @@ def test_daily_frame_matches_ledger_aggregates() -> None:
         "base_equity_close", "stress_equity_close",
         "base_equity_low", "stress_equity_low",
         "base_turnover", "stress_turnover",
-        "base_funding", "stress_funding", "target_gross",
+        "base_funding", "stress_funding", "target_gross", "max_name_weight",
     ]
     assert all(str(dtype) == "float64" for dtype in frame.dtypes)
     pd.testing.assert_series_equal(frame["base_return"], run.evidence.base_daily.returns, check_names=False)
@@ -344,7 +344,7 @@ def test_persist_writes_daily_artifact_with_envelope(tmp_path: Path) -> None:
         "base_equity_close", "stress_equity_close",
         "base_equity_low", "stress_equity_low",
         "base_turnover", "stress_turnover",
-        "base_funding", "stress_funding", "target_gross",
+        "base_funding", "stress_funding", "target_gross", "max_name_weight",
     ]
     assert json.loads(output.read_text(encoding="utf-8"))["daily_artifact"] == "daily.parquet"
 
@@ -369,3 +369,30 @@ def test_persist_rejects_occupied_daily_artifact(tmp_path: Path) -> None:
     (tmp_path / "daily.parquet").write_text("occupied", encoding="utf-8")
     with pytest.raises(DataIntegrityError, match="daily artifact"):
         persist_frozen_mhs_backtest(run, tmp_path / "result.json")
+
+
+def test_payload_states_execution_provenance() -> None:
+    """A maker run serializes the crossing model, anchor, and maker fee."""
+    import dataclasses
+
+    run = _run()
+    maker_run = dataclasses.replace(
+        run, request=dataclasses.replace(run.request, execution_bound="OHLCV_STRICT_PROXY"),
+    )
+    payload = frozen_mhs_backtest_payload(maker_run)
+    assert payload["execution_bound"] == "OHLCV_STRICT_PROXY"
+    assert payload["decision_anchor"] == "submit_bar"
+    assert payload["maker_fee_bps"] == maker_run.request.base_spec.maker_fee_bps
+    json.dumps(payload)
+
+
+def test_daily_frame_reports_max_name_weight() -> None:
+    """The largest single-name weight is reported per entry day and zero otherwise."""
+    import numpy as np
+
+    run = _run()
+    frame = frozen_mhs_daily_frame(run)
+    assert frame["max_name_weight"].max() == pytest.approx(0.05)
+    assert bool((frame["max_name_weight"] <= frame["target_gross"]).all())
+    assert bool(np.allclose(frame["target_gross"].to_numpy(), 0.1))
+    assert bool(np.allclose(frame["max_name_weight"].to_numpy(), 0.05))
