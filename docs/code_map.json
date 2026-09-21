@@ -542,6 +542,7 @@
     "testing": "tests/unit/mhs/test_frozen_research_run.py"
   },
   "src/cli/commands/backtest.py": {
-    "testing": "tests/unit/cli/commands/test_backtest.py"
+    "testing": "tests/unit/cli/commands/test_backtest.py",
+    "architecture": "docs/results/mhs_frozen_growth_20260921.md"
   }
 }
