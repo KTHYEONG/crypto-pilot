@@ -11,6 +11,17 @@ import numpy as np
 
 from src.common.errors import DataIntegrityError
 from src.market_data.binance.venue_rules import VenueRuleSnapshot
+from src.mhs.params import (
+    ACCOUNT_EXPOSURE_MAX,
+    ACCOUNT_EXPOSURE_STEP,
+    ACCOUNT_IMPACT_Y,
+    ACCOUNT_INITIAL_MARGIN_CAP,
+    ACCOUNT_MARGIN_RESERVE,
+    ACCOUNT_MEAN_HAIRCUT,
+    ACCOUNT_MIN_MOMENT_DAYS,
+    ACCOUNT_PRIOR_DAYS,
+    ACCOUNT_SHOCK_PER_UNIT,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +61,22 @@ class UnitMoments:
     mean: float
     sigma: float
     observations: int
+
+
+def account_growth_policy(*, impact_y: float = ACCOUNT_IMPACT_Y) -> ExposurePolicy:
+    """Registered growth exposure policy shared by the account backtest and the live frozen step."""
+    return ExposurePolicy(
+        kind="growth",
+        exposure_max=ACCOUNT_EXPOSURE_MAX,
+        exposure_step=ACCOUNT_EXPOSURE_STEP,
+        mean_haircut=ACCOUNT_MEAN_HAIRCUT,
+        prior_days=ACCOUNT_PRIOR_DAYS,
+        min_moment_days=ACCOUNT_MIN_MOMENT_DAYS,
+        shock_per_unit=ACCOUNT_SHOCK_PER_UNIT,
+        margin_reserve=ACCOUNT_MARGIN_RESERVE,
+        initial_margin_cap=ACCOUNT_INITIAL_MARGIN_CAP,
+        impact_y=impact_y,
+    )
 
 
 def bayesian_unit_moments(

@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 
-import pandas as pd
 import pytest
 
 from src.mhs.params import COMMITTEE_TRANCHE_COUNT, COMMITTEE_TRANCHE_COUNT_MAX
@@ -27,17 +25,6 @@ def _policy(request):
     return build_deployment_policy(
         request, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
         admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0,
-    )
-
-
-def _params(policy):
-    from src.mhs.live_strategy import LiveStrategyParams
-
-    return LiveStrategyParams(
-        schema_version=2, strategy_digest="",
-        backtest_window=(pd.Timestamp("2021-01-01", tz="UTC"), pd.Timestamp("2025-12-31", tz="UTC")),
-        created_at=pd.Timestamp("2026-09-16", tz="UTC"), policy=policy,
-        bootstrap_sha256="a" * 64, bootstrap_held_row={"BTCUSDT": 0.2},
     )
 
 
@@ -131,49 +118,3 @@ def test_deployment_policy_roundtrips_committee_tranche_count() -> None:
     assert policy.target_weights.committee_tranche_count == 7
     assert restored.committee_tranche_count == 7
     assert _resolved_committee_tranche_count(restored) == _resolved_committee_tranche_count(request) == 7
-
-
-def test_strategy_params_default_tranche_count_is_implicit_and_digest_stable(tmp_path) -> None:
-    from src.mhs.live_strategy import _compute_strategy_digest, load_strategy_params, save_strategy_params
-
-    # Given a default-count policy
-    path = save_strategy_params(tmp_path / "default.json", _params(_policy(_request())))
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    # Then the key is omitted, the digest equals the legacy key-less digest, and load restores the default
-    assert "committee_tranche_count" not in raw["policy"]["target_weights"]
-    legacy_raw = {k: v for k, v in raw.items() if k != "strategy_digest"}
-    assert _compute_strategy_digest(legacy_raw) == raw["strategy_digest"]
-    assert load_strategy_params(path).policy.target_weights.committee_tranche_count == COMMITTEE_TRANCHE_COUNT
-
-
-def test_strategy_params_non_default_tranche_count_enters_digest(tmp_path) -> None:
-    from src.mhs.live_strategy import load_strategy_params, save_strategy_params
-
-    default_path = save_strategy_params(tmp_path / "default.json", _params(_policy(_request())))
-    seven_request = _request(
-        committee_tranche_smoothing=True, committee_regime_adaptive_tranche=False, committee_tranche_count=7,
-    )
-    seven_path = save_strategy_params(tmp_path / "seven.json", _params(_policy(seven_request)))
-    default_raw = json.loads(default_path.read_text(encoding="utf-8"))
-    seven_raw = json.loads(seven_path.read_text(encoding="utf-8"))
-
-    assert seven_raw["policy"]["target_weights"]["committee_tranche_count"] == 7
-    assert seven_raw["strategy_digest"] != default_raw["strategy_digest"]
-    assert load_strategy_params(seven_path).policy.target_weights.committee_tranche_count == 7
-
-
-def test_strategy_params_tranche_count_tamper_rejected(tmp_path) -> None:
-    from src.common.errors import DataIntegrityError
-    from src.mhs.live_strategy import load_strategy_params, save_strategy_params
-
-    seven_request = _request(
-        committee_tranche_smoothing=True, committee_regime_adaptive_tranche=False, committee_tranche_count=7,
-    )
-    path = save_strategy_params(tmp_path / "seven.json", _params(_policy(seven_request)))
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    # When the sealed count is edited without re-sealing
-    raw["policy"]["target_weights"]["committee_tranche_count"] = 5
-    path.write_text(json.dumps(raw), encoding="utf-8")
-    # Then the digest check fails closed
-    with pytest.raises(DataIntegrityError):
-        load_strategy_params(path)

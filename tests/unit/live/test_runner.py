@@ -148,3 +148,124 @@ def test_runner_selects_strict_passive_policy_from_settings(tmp_path, monkeypatc
 
     assert captured["policy"].passive_pricing == "touch_chase"
     assert captured["policy"].passive_deadline_s == 180.0
+
+
+def _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id: str):
+    import pandas as pd
+
+    import src.live.settings as settings_mod
+    from src.live.settings import LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    monkeypatch.setattr(settings_mod, "DATA_DIR", tmp_path / "data")
+    settings = LiveSettings(record_run_id=record_run_id)
+    weights_path = tmp_path / "data" / "state" / "runs" / record_run_id / "target_weights.parquet"
+    frame = pd.DataFrame(
+        {"AAAUSDT": [0.02], "BUSDT": [-0.02]},
+        index=pd.DatetimeIndex([DECISION_TIME]),
+    )
+    weights_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(weights_path, index=True)
+    closes = pd.DataFrame(
+        100.0, index=pd.DatetimeIndex(frame.index), columns=list(frame.columns), dtype="float64",
+    )
+    from src.live.deployed_weights import decision_ohlcv_close_path
+
+    closes.to_parquet(decision_ohlcv_close_path(weights_path), index=True)
+    return settings, weights_path, DECISION_TIME, NOW
+
+
+def test_run_manifest_written_once_on_first_cycle(tmp_path, monkeypatch) -> None:
+    import json
+
+    import src.live.runner as runner_mod
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
+
+    record_run_id = "frozen_top20_v2_bayes_maker_20260922"
+    settings, weights_path, decision_time, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+    report = runner_mod.run_shadow_cycle(settings, decision_time, weights_path, now=now)
+    assert report.status == "COMPLETE"
+
+    manifest_path = tmp_path / "data" / "state" / "runs" / record_run_id / "run_manifest.json"
+    assert manifest_path.exists()
+    first = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert first["run_id"] == record_run_id
+    assert first["strategy_id"] == FROZEN_MHS_TOP20_V2.strategy_id
+    assert first["name_clip"] == FROZEN_MHS_TOP20_V2.name_clip
+    assert first["execution_policy"] == settings.execution_policy
+    assert first["paper_fill_model"] == settings.paper_fill_model
+    assert first["mode"] == settings.mode.value
+    assert first["seed_equity_usdt"] == settings.notional_equity_usdt
+    assert first["unit_bootstrap_sha256"]
+    assert "started_at" in first
+
+    second = runner_mod.run_shadow_cycle(settings, decision_time, weights_path, now=now)
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["started_at"] == first["started_at"]
+    assert second.status == "COMPLETE"
+
+
+def test_run_manifest_mismatch_halts(tmp_path, monkeypatch) -> None:
+    import json
+
+    import pytest
+
+    import src.live.runner as runner_mod
+    from src.common.errors import DataIntegrityError
+
+    record_run_id = "frozen_top20_v2_bayes_maker_20260922"
+    settings, weights_path, decision_time, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
+    manifest_path = tmp_path / "data" / "state" / "runs" / record_run_id / "run_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = runner_mod._current_run_manifest(settings, now)
+    payload["execution_policy"] = "taker_parity"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DataIntegrityError):
+        runner_mod._assert_run_manifest_compatible(
+            settings.model_copy(update={"execution_policy": "strict_passive"})
+        )
+
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+    strict_settings = settings.model_copy(update={"execution_policy": "strict_passive"})
+    report = runner_mod.run_shadow_cycle(strict_settings, decision_time, weights_path, now=now)
+    assert report.status == "HALT"
+    assert "mismatch" in (report.reason or "")
+
+
+def test_order_journal_follows_settings_path(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    import src.live.runner as runner_mod
+
+    record_run_id = "frozen_top20_v2_bayes_maker_20260922"
+    settings, weights_path, decision_time, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
+    seen: dict = {}
+    real_journal = runner_mod.OrderJournal
+
+    def _capturing_journal(path):
+        seen["path"] = Path(path)
+        return real_journal(Path(path))
+
+    monkeypatch.setattr(runner_mod, "OrderJournal", _capturing_journal)
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+    runner_mod.run_shadow_cycle(settings, decision_time, weights_path, now=now)
+
+    assert seen["path"] == Path(settings.order_journal_path)
+    journal = real_journal(seen["path"])
+    journal.record_submit("wired-cid", "AAAUSDT", journal.next_submit_seq())
+    assert seen["path"].exists()
+
+
+def test_missing_unit_bootstrap_yields_null_manifest_hash(tmp_path, monkeypatch) -> None:
+    import src.live.runner as runner_mod
+
+    record_run_id = "frozen_top20_v2_bayes_maker_20260922"
+    settings, _, _, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
+    missing = settings.model_copy(update={"unit_bootstrap_path": str(tmp_path / "nope.parquet")})
+    assert runner_mod._unit_bootstrap_sha256(missing) is None
+    payload = runner_mod._current_run_manifest(missing, now)
+    assert payload["unit_bootstrap_sha256"] is None

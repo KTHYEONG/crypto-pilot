@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import functools
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -13,13 +12,10 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.paths import BASE_DIR, DATA_DIR, DEPLOY_MHS_DIR
+from src.common.paths import BASE_DIR, DATA_DIR
 from src.live.deployed_weights import default_weights_path
-from src.mhs.live_signal_step import advance_to_date; from src.live.deployed_weights import default_weights_path  # wiring
 
 logger = logging.getLogger("LiveCli")
-
-from src.live.deployed_weights import default_weights_path as _dw_ref  # wiring anchor
 
 #: 프로덕션 기본값은 봉인된 아티팩트다(I-SEAL). 평문 .parquet 을 쓰려면 --artifact 로 명시한다.
 _DEFAULT_ARTIFACT = str(default_weights_path())
@@ -28,26 +24,6 @@ _DEFAULT_DAEMON_STATE_PATH = str(DATA_DIR / "state" / "live_daemon_last_run.json
 _LIVE_LOG_DIR: Path = BASE_DIR / "logs" / "live"
 LIVE_LOG_MAX_BYTES: int = 10 * 1024 * 1024
 LIVE_LOG_BACKUP_COUNT: int = 5
-
-
-def deployed_strategy_artifact_paths() -> tuple[Path, Path]:
-    """Return the sealed strategy parameters and bootstrap inputs required by live signal generation.
-
-    Returns:
-        Existing deployment-bound parameter and bootstrap paths under `deploy/mhs`.
-    Raises:
-        DataIntegrityError: Either required sealed artifact is absent or ambiguous.
-    """
-    from src.common.errors import DataIntegrityError
-    from src.mhs.live_strategy import STRATEGY_BOOTSTRAP_FILENAME, STRATEGY_PARAMS_FILENAME
-
-    params_path = DEPLOY_MHS_DIR / f"{STRATEGY_PARAMS_FILENAME}.enc"
-    bootstrap_path = DEPLOY_MHS_DIR / f"{STRATEGY_BOOTSTRAP_FILENAME}.enc"
-    params_hits = sorted(DEPLOY_MHS_DIR.glob("strategy_params*.enc"))
-    bootstrap_hits = sorted(DEPLOY_MHS_DIR.glob("strategy_bootstrap*.enc"))
-    if not params_path.is_file() or not bootstrap_path.is_file() or len(params_hits) != 1 or len(bootstrap_hits) != 1:
-        raise DataIntegrityError(f"deployed strategy artifacts absent or ambiguous under {DEPLOY_MHS_DIR}")
-    return params_path, bootstrap_path
 
 
 def _attach_process_log(filename: str) -> Path:
@@ -79,6 +55,15 @@ def _settings_with_mode(args: argparse.Namespace) -> Any:
     return LiveSettings(mode=ExecutionMode(m)) if m else LiveSettings()
 
 
+def _resolve_weights_path(explicit: str | None, settings: Any) -> Path:
+    if explicit:
+        return Path(explicit)
+    weights_path = getattr(settings, "weights_path", None)
+    if weights_path:
+        return Path(weights_path)
+    return default_weights_path()
+
+
 def _run_shadow_cycle(args: argparse.Namespace) -> None:
     from src.live.runner import run_shadow_cycle
     from src.live.settings import LiveSettings
@@ -89,7 +74,7 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
     report = run_shadow_cycle(
         settings,
         args.decision_time,
-        args.artifact,
+        _resolve_weights_path(args.artifact, settings),
     )
     logger.info(
         "[SYS] live shadow-cycle status=%s reason=%s intents=%d",
@@ -101,112 +86,40 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
 
 def _run_daemon(args: argparse.Namespace) -> None:
     from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
-    from src.live.scheduler import _daemon_alert, _default_signal_step, run_daemon
+    from src.live.scheduler import _daemon_alert, run_daemon
     from src.live.settings import LiveSettings
 
     _attach_process_log("daemon.log")
     settings = _settings_with_mode(args)
-    artifact = Path(args.artifact) if getattr(args, "artifact", None) else default_weights_path()
+    artifact = _resolve_weights_path(getattr(args, "artifact", None), settings)
     shutdown = ShutdownFlag()
     install_shutdown_handlers(shutdown)
     try:
-        run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown, signal_step_fn=functools.partial(_default_signal_step, shutdown=shutdown))
+        run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown)
     except Exception as exc:  # 프로세스 경계라 광역 except 허용
         logger.exception("[SYS] daemon crashed error=%s", type(exc).__name__)
         _daemon_alert(settings, set(), event="daemon_crashed", detail=f"error={type(exc).__name__}: {str(exc)[:300]}", decision_time=None, now=pd.Timestamp.now(tz="UTC"))
         raise
 
 
-def _signal_step_sidecar_paths() -> tuple[Path, Path]:
-    weights = default_weights_path()
-    from src.mhs.live_signal_step import quarantine_sidecar_path
-    from src.live.signal_step_result import signal_step_result_path
-    return (signal_step_result_path(weights), quarantine_sidecar_path(weights))
-
-
-def _record_signal_step_failure(path: Path, decision_time: pd.Timestamp, cause: BaseException) -> None:
-    from src.live.signal_step_result import SIGNAL_STEP_STATUS_FAILED, SignalStepResult, write_signal_step_result
-    # 디스크 장애 시 프로세스는 어차피 exit 1이라 쓰기 실패를 잡지 않음
-    write_signal_step_result(path, SignalStepResult(decision_time=decision_time, status=SIGNAL_STEP_STATUS_FAILED, error_type=type(cause).__name__, reason=str(cause)))
-
-
-def _signal_step_body(args: argparse.Namespace, settings: Any) -> None:
-    from src.common.errors import DataIntegrityError
-    from src.live.deployed_weights import default_weights_path as _dwp
-    from src.live.errors import ArtifactSealError
+def _run_frozen_step(args: argparse.Namespace) -> None:
+    from src.live.scheduler import _default_frozen_step
     from src.live.settings import LiveSettings
-    from src.mhs.live_runtime import default_runtime_path, load_or_bootstrap_runtime, save_runtime
 
-    date = args.date
-    from src.mhs import live_strategy as _live_strategy
-
-    explicit_raw = getattr(args, "artifact", None)
-    if explicit_raw is not None:
-        strat_path = Path(explicit_raw)
-        suffix = ".enc" if str(strat_path).endswith(".enc") else ""
-        bootstrap_path = strat_path.parent / f"{_live_strategy.STRATEGY_BOOTSTRAP_FILENAME}{suffix}"
-    else:
-        try:
-            strat_path, bootstrap_path = deployed_strategy_artifact_paths()
-        except Exception as exc:
-            logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
-            raise SystemExit(1) from exc
-    try:
-        params = _live_strategy.load_strategy_params(strat_path, artifact_key=settings.artifact_key)
-        _live_strategy.assert_runtime_data_policy(params)
-    except Exception as exc2:
-        logger.error("[EVAL] signal_step status=FAILED reason=%s", exc2)
-        raise SystemExit(1) from exc2
-    try:
-        bootstrap_ref = _live_strategy.load_strategy_bootstrap(bootstrap_path, expected_sha256=params.bootstrap_sha256, artifact_key=settings.artifact_key)
-    except Exception as exc:
-        logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
-        raise SystemExit(1) from exc
-
-    runtime_path = default_runtime_path()
-    weights_path = default_weights_path()
-    try:
-        runtime = load_or_bootstrap_runtime(runtime_path, params, bootstrap_ref, artifact_key=settings.artifact_key)
-        from src.mhs.live_runtime import reconcile_runtime_params
-
-        runtime, swap_reason = reconcile_runtime_params(runtime, params, bootstrap_ref)
-        if swap_reason:
-            logger.info("[ALGO] params_swap reason=%s new_digest=%s", swap_reason, params.strategy_digest)
-        runtime, n, scalar = advance_to_date(
-            params,
-            runtime,
-            weights_path,
-            "",
-            target=date,
-            artifact_key=settings.artifact_key,
-            portfolio_state_dir=(Path(settings.portfolio_state_dir) if settings.portfolio_state_dir else None),
-            mode=settings.mode.value,
-        )
-        save_runtime(runtime_path, runtime, artifact_key=settings.artifact_key)
-        # compute exposure scale for log: we don't have scalar directly, but we can log n
-        logger.info("[EVAL] signal_step rows_appended=%d last_date=%s exposure_scale=%.4f", n, runtime.last_decision_date.isoformat(), scalar)
-    except (DataIntegrityError, ArtifactSealError) as exc:
-        logger.error("[EVAL] signal_step status=FAILED reason=%s", exc)
-        raise SystemExit(1) from exc
-
-
-def _run_signal_step(args: argparse.Namespace) -> None:
-    from src.live.signal_step_result import SIGNAL_STEP_STATUS_OK, SignalStepResult, load_quarantine_records, write_signal_step_result
-
-    _attach_process_log("signal_step.log")
+    _attach_process_log("frozen_step.log")
     settings = _settings_with_mode(args)
     target = pd.Timestamp(args.date).tz_convert("UTC").normalize()
-    result_path, quarantine_path = _signal_step_sidecar_paths()
+    artifact = _resolve_weights_path(getattr(args, "artifact", None), settings)
     try:
-        _signal_step_body(args, settings)
-    except SystemExit as exc:
-        _record_signal_step_failure(result_path, target, exc.__cause__ if exc.__cause__ is not None else exc)
-        raise
-    except Exception as exc:  # 프로세스 경계라 광역 except 허용
-        logger.exception("[EVAL] signal_step status=CRASHED decision_time=%s", target.isoformat())
-        _record_signal_step_failure(result_path, target, exc)
+        report = _default_frozen_step(target, settings, artifact)
+    except Exception as exc:
+        logger.error("[EVAL] frozen_step status=FAILED decision_time=%s reason=%s", target.isoformat(), exc)
         raise SystemExit(1) from exc
-    write_signal_step_result(result_path, SignalStepResult(decision_time=target, status=SIGNAL_STEP_STATUS_OK, quarantine=load_quarantine_records(quarantine_path, target)))
+    logger.info(
+        "[EVAL] frozen_step decision_day=%s exposure=%.4f equity_usdt=%.2f unit_observations=%d venue=%s written=%s",
+        report.decision_day.isoformat(), report.exposure, report.equity_usdt,
+        report.unit_observations, report.venue_snapshot, report.written,
+    )
 
 
 def _run_status(args: argparse.Namespace) -> None:
@@ -403,13 +316,6 @@ def _run_orderbook_capture(args: argparse.Namespace) -> None:
 
 def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     """``live`` 커맨드 그룹에 shadow-cycle/daemon 서브커맨드를 등록한다."""
-    from src.mhs.live_signal_step import advance_to_date; from src.live.deployed_weights import default_weights_path  # wiring  # noqa: F401
-    from src.live.deployed_weights import default_weights_path  # noqa: F401
-    _ = advance_to_date; _ = default_weights_path
-    # wiring: run_preflight(settings, Path(args.artifact))
-    from src.live.preflight import run_preflight as _preflight_ref  # noqa: F401
-    _ = _run_orderbook_capture  # noqa: F401
-    _ = _preflight_ref
 
     subparsers = live_parser.add_subparsers(dest="live_command", required=True)
 
@@ -423,7 +329,7 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     shadow.add_argument(
         "--artifact",
         type=str,
-        default=_DEFAULT_ARTIFACT,
+        default=None,
         help="Path to the deployed_target_weights.parquet(.enc) artifact to consume (.enc requires LIVE_ARTIFACT_KEY)",
     )
     shadow.add_argument(
@@ -439,7 +345,7 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     daemon.add_argument(
         "--artifact",
         type=str,
-        default=_DEFAULT_ARTIFACT,
+        default=None,
         help="Override the deployed_target_weights path to consume (default: data/state/ forward ledger)",
     )
     daemon.add_argument(
@@ -455,12 +361,11 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     status.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     status.set_defaults(handler=_run_status)
 
-    # wiring: signal-step
-    step = subparsers.add_parser("signal-step", help="Run heavy signal compute (daemon subprocess)")
-    step.add_argument("--date", type=_parse_decision_time, required=True, help="Decision time T as ISO8601 UTC")
-    step.add_argument("--artifact", type=str, default=None, help="Explicit local-development params artifact override (plaintext opt-in; deployment defaults stay sealed)")
-    step.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
-    step.set_defaults(handler=_run_signal_step)
+    frozen = subparsers.add_parser("frozen-step", help="Run one frozen signal step (manual/debug)")
+    frozen.add_argument("--date", type=_parse_decision_time, required=True, help="Decision day as ISO8601 UTC (YYYY-MM-DD)")
+    frozen.add_argument("--artifact", type=str, default=None, help="Override the frozen weights path to append")
+    frozen.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
+    frozen.set_defaults(handler=_run_frozen_step)
 
     eq = subparsers.add_parser("execution-quality-summary", help="Summarize execution quality")
     eq.set_defaults(handler=_run_execution_quality_summary)
@@ -514,6 +419,3 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     ob.add_argument("--interval-s", type=float, default=10.0, help="Interval seconds")
     ob.add_argument("--depth-limit", type=int, default=20, help="Depth limit")
     ob.set_defaults(handler=_run_orderbook_capture)
-    _ = "orderbook-capture"  # noqa: F841
-
-# wiring: step = subparsers.add_parser("signal-step"); step.add_argument("--date", type=_parse_decision_time, required=True); step.set_defaults(handler=_run_signal_step)

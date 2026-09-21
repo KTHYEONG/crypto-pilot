@@ -11,6 +11,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_CACHE_DIR=/root/.cache/uv \
     UV_NO_SYNC=1
+
+ARG GIT_SHA=""
+ENV GIT_SHA=${GIT_SHA}
 # UV_NO_SYNC: 빌드시 --no-dev --frozen 으로 굳힌 venv를 uv run 이 컨테이너 런타임에
 # 다시 동기화(=dev 의존성까지 재설치)하지 않도록 막는다. 실측(VPS): 이 변수 없이
 # 컨테이너 기동 시마다 mypy/ruff 등 17개 dev 패키지를 네트워크로 재설치했다.

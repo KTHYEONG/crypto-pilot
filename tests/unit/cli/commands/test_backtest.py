@@ -1109,6 +1109,65 @@ def test_account_maker_run_directory_suffixed(tmp_path: Path, monkeypatch: pytes
     assert "_account_growth_2100_maker_" in run_dir.name
 
 
+def test_account_unit_returns_export_writes_stamped_parquet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--export-unit-returns writes entry-day pct_change with run-identity metadata."""
+    import pyarrow.parquet as pq
+
+    seen = _install_account(monkeypatch, tmp_path)
+    dest = tmp_path / "nested" / "u.parquet"
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--export-unit-returns", str(dest))))
+    unit_equity = seen["equities"][0]
+    table = pq.read_table(dest)
+    assert table.schema.metadata[b"strategy_id"] == b"frozen_mhs_top20_v2"
+    assert table.schema.metadata[b"execution"] == b"taker"
+    assert b"evaluation_start" in table.schema.metadata
+    assert b"evaluation_end" in table.schema.metadata
+    assert b"run_dir" in table.schema.metadata
+    frame = table.to_pandas()
+    expected = unit_equity.pct_change().iloc[1:]
+    assert frame.index.equals(expected.index)
+    assert list(frame.columns) == ["unit_return"]
+    np.testing.assert_allclose(frame["unit_return"].to_numpy(), expected.to_numpy())
+    (run_dir,) = _run_dirs(tmp_path)
+    assert (run_dir / "account.json").is_file()
+    assert (run_dir / "account_daily.parquet").is_file()
+
+
+def test_account_unit_returns_export_leaves_account_json_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The export option adds a file without changing the account payload."""
+    _install_account(monkeypatch, tmp_path)
+    plain_root = tmp_path / "plain"
+    plain_root.mkdir()
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", plain_root / "runs")
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    (plain_dir,) = sorted((plain_root / "runs").iterdir())
+    plain_payload = json.loads((plain_dir / "account.json").read_text(encoding="utf-8"))
+    stamped_root = tmp_path / "stamped"
+    stamped_root.mkdir()
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", stamped_root / "runs")
+    backtest_mod.run_frozen_account_command(
+        _parse(_account_argv("--export-unit-returns", str(tmp_path / "u.parquet"))),
+    )
+    (stamped_dir,) = sorted((stamped_root / "runs").iterdir())
+    stamped_payload = json.loads((stamped_dir / "account.json").read_text(encoding="utf-8"))
+    plain_payload.pop("created_at")
+    stamped_payload.pop("created_at")
+    assert stamped_payload == plain_payload
+
+
+def test_account_growth_policy_constructed_via_shared_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The growth replay policy equals the shared account growth factory output."""
+    from src.mhs.account_policy import account_growth_policy
+
+    seen = _install_account(monkeypatch, tmp_path)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--impact-y", "0.7")))
+    assert seen["replays"][1]["policy"] == account_growth_policy(impact_y=0.7)
+
+
 def _write_catalog_index(tmp_path: Path, rows: list[dict]) -> Path:
     index = tmp_path / "index.jsonl"
     index.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")

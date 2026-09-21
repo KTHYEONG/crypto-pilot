@@ -22,7 +22,6 @@ from src.mhs.params import (
     GROWTH_RISK_ENVELOPES,
     LEVERAGE_FRONTIER_SCAN_MULTIPLES,
 )
-# wiring import: from src.mhs.report.persist import emit_deployment; from src.mhs.live_strategy import assert_deployment_eligible
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -43,24 +42,6 @@ def _parse_float_csv(raw: str) -> tuple[float, ...]:
     return tuple(values)
 
 
-def _assert_deploy_push_allowed() -> None:
-    """--deploy-push 는 봉인 키가 있어야 한다: 평문 전략을 git 커밋하지 않는다."""
-    from src.live.settings import LiveSettings
-
-    if LiveSettings().artifact_key is None:
-        raise SystemExit(
-            "--deploy-push requires LIVE_ARTIFACT_KEY (refusing to commit a plaintext strategy)"
-        )
-
-
-def _assert_deploy_policy_matches_runtime(data_policy: str) -> None:
-    """--deploy-push 는 라이브 런타임 data_policy 와 같은 정책의 파라미터만 푸시한다."""
-    import src.mhs.live_strategy as live_strategy
-
-    if data_policy != live_strategy.LIVE_RUNTIME_DATA_POLICY:
-        raise SystemExit(f"--deploy-push data_policy {data_policy!r} != LIVE_RUNTIME_DATA_POLICY {live_strategy.LIVE_RUNTIME_DATA_POLICY!r}; switch the runtime constant in the same commit")
-
-
 def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     if getattr(args, "leverage_frontier_scan", False):
         # Diagnostic-only short-circuit: reads an already-persisted ledger and
@@ -72,7 +53,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
 
     import dataclasses
 
-    from src.common.paths import DATA_DIR, DEPLOY_MHS_DIR
+    from src.common.paths import DATA_DIR
     from src.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
     from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
     from src.mhs.pipeline.config import MhsRunConfig
@@ -82,12 +63,6 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     # (committee_capital/regime-adaptive tranche/target-gross/funding-carry-sleeve
     # opt-out semantics); the CLI only parses and adapts to MhsDiagnosticRequest.
     config = MhsRunConfig.from_namespace(args)
-    from src.mhs.deployment_policy import live_parity_blockers
-    _blockers = live_parity_blockers(config)
-    if getattr(args, "emit_deployment", False) and _blockers:
-        raise SystemExit(f"--emit-deployment refuses {','.join(_blockers)}: no live daemon counterpart")
-    if getattr(args, "deploy_push", False):
-        _assert_deploy_policy_matches_runtime(config.data_policy)
     request = MhsDiagnosticRequest(**dataclasses.asdict(config))
     if getattr(args, "register_procedure", False):
         import pandas as pd
@@ -114,37 +89,10 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         "[EVAL] mhs-horizon-diagnostic status=%s books=%s blend=%s path=%s",
         report.status, sorted(report.books), report.blend is not None, path,
     )
-    if getattr(args, "emit_target_weights", False):
-        # legacy wiring anchor for spec
-        from src.mhs.report.persist import emit_deployment as _emit_deployment_ref  # noqa: F401
-        from src.mhs.live_strategy import assert_deployment_eligible as _assert_ref  # noqa: F401
-        pass
-    if getattr(args, "emit_deployment", False):
-        from src.mhs.live_strategy import assert_deployment_eligible
-        from src.mhs.report.persist import emit_deployment
-
-        from src.live.settings import LiveSettings
-        assert_deployment_eligible(report, request, reference_report_path=report_path)
-        res = emit_deployment(report, request, DEPLOY_MHS_DIR, artifact_key=LiveSettings().artifact_key)
-        _logger.info("[EVAL] emit_deployment strategy_digest=%s path=%s", res["strategy_digest"], res["params_path"])
-        if getattr(args, "deploy_push", False):
-            import subprocess
-
-            _assert_deploy_push_allowed()
-            try:
-                subprocess.run(["git", "add", str(DEPLOY_MHS_DIR / "strategy_params.json.enc"), str(DEPLOY_MHS_DIR / "strategy_bootstrap.parquet.enc")], check=True)
-                subprocess.run(["git", "commit", "-m", f'deploy: strategy {res["strategy_digest"]}'], check=True)
-                subprocess.run(["git", "push"], check=True)
-            except Exception as exc:
-                _logger.error("[EVAL] deploy_push status=FAILED reason=%s", exc)
-                _logger.info("manual: git add %s %s && git commit -m 'deploy: strategy %s' && git push", DEPLOY_MHS_DIR / "strategy_params.json.enc", DEPLOY_MHS_DIR / "strategy_bootstrap.parquet.enc", res["strategy_digest"])
 
 
 def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the dev-only ``research run portfolio mhs-horizon-diagnostic`` subcommand."""
-    from src.mhs.report.persist import emit_deployment as _emit_deployment_ref2  # noqa: F401
-    from src.mhs.live_strategy import assert_deployment_eligible as _assert_ref2  # noqa: F401
-    _ = _emit_deployment_ref2; _ = _assert_ref2
     mhs = portfolio_sub.add_parser(
         "mhs-horizon-diagnostic",
         help="Run the dev-only MHS Phase 1 two-band multi-horizon diagnostic",
@@ -645,21 +593,8 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         help=(
             "Opt-in execution-replay trim every NAME_DRIFT_TRIM_INTERVAL_HOURS "
             "after the first decision, cut back to NAME_DRIFT_TRIM_MAX_WEIGHT "
-            "with an ordinary taker fill, research-only, refused with "
-            "--emit-deployment, default False (byte-identical)"
+            "with an ordinary taker fill, research-only, default False (byte-identical)"
         ),
-    )
-    mhs.add_argument(
-        "--emit-deployment",
-        action="store_true",
-        default=False,
-        help="Emit sealed strategy params + bootstrap for cloud deployment",
-    )
-    mhs.add_argument(
-        "--deploy-push",
-        action="store_true",
-        default=False,
-        help="After emit, git add/commit/push the sealed artifacts",
     )
     mhs.add_argument(
         "--leverage-frontier-scan",

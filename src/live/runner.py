@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
+import json
 import logging
+import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -375,6 +378,61 @@ def _execution_quality_metadata(settings: LiveSettings, observed_at: pd.Timestam
     return {"strategy_digest": settings.strategy_digest, "observed_at": observed_at}
 
 
+def _run_manifest_path(settings: LiveSettings) -> Path | None:
+    root = settings.run_root()
+    if root is None:
+        return None
+    return root / "run_manifest.json"
+
+
+def _unit_bootstrap_sha256(settings: LiveSettings) -> str | None:
+    path = Path(settings.unit_bootstrap_path)
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str, Any]:
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2  # noqa: PLC0415
+
+    return {
+        "run_id": settings.record_run_id,
+        "strategy_id": FROZEN_MHS_TOP20_V2.strategy_id,
+        "name_clip": FROZEN_MHS_TOP20_V2.name_clip,
+        "execution_policy": settings.execution_policy,
+        "paper_fill_model": settings.paper_fill_model,
+        "mode": settings.mode.value,
+        "seed_equity_usdt": settings.notional_equity_usdt,
+        "unit_bootstrap_sha256": _unit_bootstrap_sha256(settings),
+        "git_sha": os.environ.get("GIT_SHA"),
+        "started_at": now.isoformat(),
+    }
+
+
+def _assert_run_manifest_compatible(settings: LiveSettings) -> None:
+    path = _run_manifest_path(settings)
+    if path is None or not path.exists():
+        return
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    current = _current_run_manifest(settings, pd.Timestamp.now(tz="UTC"))
+    for key in ("strategy_id", "execution_policy", "mode", "unit_bootstrap_sha256"):
+        if raw.get(key) != current.get(key):
+            raise DataIntegrityError(
+                f"run manifest mismatch key={key} manifest={raw.get(key)!r} current={current.get(key)!r}"
+            )
+
+
+def _ensure_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> None:
+    path = _run_manifest_path(settings)
+    if path is None or path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _current_run_manifest(settings, now)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def run_shadow_cycle(
     settings: LiveSettings,
     decision_time: pd.Timestamp,
@@ -391,6 +449,7 @@ def run_shadow_cycle(
     에쿼티/드로다운 -> 신호 -> 목표수량 -> 계획 -> 리스크 게이트 -> 집행 -> 원장 영속."""
     now_ts = now if now is not None else pd.Timestamp.now(tz="UTC")
     try:
+        _assert_run_manifest_compatible(settings)
         ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
         last_executed = load_ledger(ledger_path).last_executed_decision_time
         if last_executed is not None and decision_time <= last_executed:
@@ -428,7 +487,7 @@ def run_shadow_cycle(
         ledger_positions = ledger_state.positions
 
         # 3) 고아 주문 정리는 재조정 '이전에' 이뤄져야 한다(GTX 잔존 -> 원장 괴리 방지).
-        journal = OrderJournal(default_order_journal_path())
+        journal = OrderJournal(Path(settings.order_journal_path) if settings.order_journal_path else default_order_journal_path())
         settlements = cancel_orphan_orders(order_client, run_id, audit, journal=journal)
         if settlements:
             updated = apply_orphan_settlements(ledger_state.positions, settlements)
@@ -855,6 +914,7 @@ def run_shadow_cycle(
                 outcomes=tuple(outcomes),
                 dropped_notional_fraction=dropped_fraction,
             )
+            _ensure_run_manifest(settings, now_ts)
             audit.record("cycle_complete", intents=len(outcomes))
             return report
         else:

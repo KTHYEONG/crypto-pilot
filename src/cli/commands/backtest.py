@@ -15,17 +15,9 @@ from src.backtests.contracts import RetentionPolicy
 from src.common.paths import BACKTESTS_DIR, FROZEN_BACKTESTS_DIR, VENUE_RULES_DIR
 from src.mhs.params import (
     ACCOUNT_DEFAULT_CAPITAL_USDT,
-    ACCOUNT_EXPOSURE_MAX,
-    ACCOUNT_EXPOSURE_STEP,
     ACCOUNT_IMPACT_Y,
-    ACCOUNT_INITIAL_MARGIN_CAP,
     ACCOUNT_MAKER_FEE_BPS,
-    ACCOUNT_MARGIN_RESERVE,
-    ACCOUNT_MEAN_HAIRCUT,
-    ACCOUNT_MIN_MOMENT_DAYS,
     ACCOUNT_PASSIVE_WINDOW_BARS,
-    ACCOUNT_PRIOR_DAYS,
-    ACCOUNT_SHOCK_PER_UNIT,
     ACCOUNT_TAKER_FEE_BPS,
     ACCOUNT_UNIT_REFERENCE_CAPITAL,
     DEFAULT_DETAIL_RETENTION_MAX_RUNS,
@@ -205,6 +197,7 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     account.add_argument("--no-order-filters", action="store_true", default=False, help="Trade continuous quantities without step/min-notional filters.")
     account.add_argument("--execution", choices=("taker", "maker"), default="taker", help="Order execution model: immediate taker or canonical strict passive maker.")
     account.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
+    account.add_argument("--export-unit-returns", default=None, help="Write the unit reference ledger daily returns (sizing bootstrap for the live frozen step).")
     account.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
     account.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
     account.add_argument("--min-available-bytes", type=int, default=None, help="Minimum effective physical headroom in bytes.")
@@ -776,6 +769,37 @@ def _resolve_account_destination(*, start: pd.Timestamp, end: pd.Timestamp, poli
     return run_dir
 
 
+def _export_unit_returns(
+    *, equity: pd.Series, strategy_id: str, execution: str,
+    start: pd.Timestamp, end: pd.Timestamp, run_dir: Path, dest: Path,
+) -> None:
+    """Write the unit reference ledger daily returns with run-identity metadata."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    returns = equity.pct_change().iloc[1:]
+    returns.index.name = "entry_day"
+    returns.name = "unit_return"
+    table = pa.Table.from_pandas(returns.to_frame(), preserve_index=True)
+    metadata = {
+        "strategy_id": strategy_id,
+        "execution": execution,
+        "evaluation_start": start.isoformat(),
+        "evaluation_end": end.isoformat(),
+        "run_dir": str(run_dir),
+    }
+    merged = dict(table.schema.metadata or {})
+    merged.update({key: str(value) for key, value in metadata.items()})
+    table = table.replace_schema_metadata(merged)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    pq.write_table(table, tmp)
+    import os
+
+    os.replace(tmp, dest)
+
+
 def run_frozen_account_command(args: argparse.Namespace) -> None:
     """Replay the frozen growth book as one real account and persist account-scale evidence.
 
@@ -798,7 +822,7 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
     from src.common.errors import DataIntegrityError
     from src.market_data.binance.venue_rules import latest_venue_rule_snapshot, load_venue_rule_snapshot
     from src.mhs.account_ledger import replay_account
-    from src.mhs.account_policy import ExposurePolicy
+    from src.mhs.account_policy import account_growth_policy
     from src.mhs.account_sources import assemble_account_inputs
     from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
     from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
@@ -865,18 +889,12 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         unit_weights, marks, funding_cum, adv, daily_sigma = assemble_account_inputs(candidate, context)
     except (DataIntegrityError, ValueError, OSError) as exc:
         raise SystemExit(f"frozen account failed: {exc}") from exc
-    policy = ExposurePolicy(
-        kind="growth" if policy_name == "growth" else "fixed",
-        exposure_max=float(fixed_exposure or ACCOUNT_EXPOSURE_MAX),
-        exposure_step=ACCOUNT_EXPOSURE_STEP,
-        mean_haircut=ACCOUNT_MEAN_HAIRCUT,
-        prior_days=ACCOUNT_PRIOR_DAYS,
-        min_moment_days=ACCOUNT_MIN_MOMENT_DAYS,
-        shock_per_unit=ACCOUNT_SHOCK_PER_UNIT,
-        margin_reserve=ACCOUNT_MARGIN_RESERVE,
-        initial_margin_cap=ACCOUNT_INITIAL_MARGIN_CAP,
-        impact_y=impact_y,
-    )
+    growth_base = account_growth_policy(impact_y=impact_y)
+    if policy_name == "growth":
+        policy = growth_base
+    else:
+        assert fixed_exposure is not None
+        policy = dataclasses.replace(growth_base, kind="fixed", exposure_max=fixed_exposure)
     apply_filters = not getattr(args, "no_order_filters", False)
     if execution == "maker":
         execution_kwargs: dict[str, Any] = {
@@ -994,6 +1012,12 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         {"equity": result.daily_equity.to_numpy(dtype="float64"), "exposure": exposures},
         index=result.daily_equity.index,
     ).to_parquet(run_dir / "account_daily.parquet")
+    export_dest = getattr(args, "export_unit_returns", None)
+    if export_dest is not None:
+        _export_unit_returns(
+            equity=unit.daily_equity, strategy_id=strategy.strategy_id, execution=execution,
+            start=start, end=end, run_dir=run_dir, dest=Path(export_dest),
+        )
     if run_dir.parent == FROZEN_BACKTESTS_DIR:
         _append_backtest_index(
             index_path=index_path,

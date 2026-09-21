@@ -63,13 +63,14 @@ def test_SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE(monkeypatch) ->
 
 def test_SCENARIO_SIGNAL_10_CLI_SUBCOMMANDS_AND_EXIT_CODES(monkeypatch) -> None:
     parser = build_root_parser()
-    args = parser.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
+    args = parser.parse_args(["live", "frozen-step", "--date", "2026-08-25T00:00:00Z"])
     assert args.date == __import__("pandas").Timestamp("2026-08-25T00:00:00Z")
-    assert args.handler.__name__ == "_run_signal_step"
+    assert args.handler.__name__ == "_run_frozen_step"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
     # also check daemon still exists
     args2 = parser.parse_args(["live", "daemon"])
     assert args2.handler.__name__ == "_run_daemon"
-
 
 
 def test_live_settings_default_shadow_and_mainnet_ack_gate() -> None:
@@ -137,12 +138,11 @@ def test_live_cli_surface_after_v2() -> None:
     sub = parser.add_subparsers(dest="cmd")
     add_live_commands(sub.add_parser("live"))
 
-    for gone in ("signal-daemon", "signal-refresh", "deploy-check"):
+    for gone in ("signal-daemon", "signal-refresh", "deploy-check", "signal-step"):
         with pytest.raises(SystemExit):
             parser.parse_args(["live", gone])
-    args = parser.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
-    assert args.handler.__name__ == "_run_signal_step"
-
+    args = parser.parse_args(["live", "frozen-step", "--date", "2026-08-25T00:00:00Z"])
+    assert args.handler.__name__ == "_run_frozen_step"
 
 
 def test_run_shadow_cycle_paper_no_credentials() -> None:
@@ -243,107 +243,6 @@ def test_run_status_exit_zero_on_healthy_recent_heartbeat(tmp_path, monkeypatch)
     assert ei.value.code == 0
 
 
-def test_signal_step_reconciles_params_digest_change(tmp_path, monkeypatch) -> None:
-    import argparse
-    import pandas as pd
-    import src.cli.commands.live as live_mod
-
-    seen = {}
-
-    def _fake_reconcile(runtime, params, boot):
-        seen["called"] = True
-        return runtime, "soft_swap"
-
-    def _fake_advance(params, runtime, weights_path, data_root, *, target, artifact_key=None, portfolio_state_dir=None, mode="shadow", **kw):
-        seen["mode"] = mode
-        return runtime, 1, 1.0
-
-    monkeypatch.setattr("src.mhs.live_runtime.reconcile_runtime_params", _fake_reconcile, raising=False)
-    monkeypatch.setattr(live_mod, "advance_to_date", _fake_advance, raising=False)
-    monkeypatch.setattr(live_mod, "_settings_with_mode", lambda a: _mk_settings_stub(), raising=False)
-    monkeypatch.setattr(
-        "src.mhs.live_strategy.load_strategy_params",
-        lambda *a, **k: _mk_params_stub(), raising=False,
-    )
-    monkeypatch.setattr(
-        "src.mhs.live_strategy.load_strategy_bootstrap",
-        lambda *a, **k: __import__("pandas").Series([0.01], index=__import__("pandas").date_range("2026-08-01", periods=1, freq="1D", tz="UTC"), dtype="float64"), raising=False,
-    )
-    monkeypatch.setattr(
-        "src.mhs.live_runtime.load_or_bootstrap_runtime",
-        lambda *a, **k: _mk_runtime_stub(), raising=False,
-    )
-    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", lambda *a, **k: None, raising=False)
-
-    live_mod._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
-
-    assert seen.get("called") is True
-
-
-def _mk_settings_stub():
-    from types import SimpleNamespace
-    from src.live.settings import ExecutionMode
-    return SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=ExecutionMode.PAPER)
-
-
-def _mk_params_stub():
-    from types import SimpleNamespace
-
-    import src.mhs.live_strategy as live_strategy
-    # 이 스텁은 data_policy가 아니라 digest 정합 로직을 검증하므로 항상 런타임 정책과 일치시킨다.
-    return SimpleNamespace(strategy_digest="x", bootstrap_sha256="a" * 64, data_policy=live_strategy.LIVE_RUNTIME_DATA_POLICY)
-
-
-def _mk_runtime_stub():
-    from types import SimpleNamespace
-    import pandas as pd
-    return SimpleNamespace(
-        params_digest="old", last_decision_date=pd.Timestamp("2026-08-30", tz="UTC"),
-    )
-
-
-
-
-
-def test_signal_step_bootstrap_hash_failure_stops_before_runtime_swap(monkeypatch) -> None:
-    import argparse
-    import types
-    import pandas as pd
-    import pytest
-    from src.common.errors import DataIntegrityError
-    import src.cli.commands.live as module
-
-    calls = []
-    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
-    params = types.SimpleNamespace(bootstrap_sha256="a" * 64, strategy_digest="d")
-    monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *_a, **_k: params)
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", lambda *_a, **_k: (_ for _ in ()).throw(DataIntegrityError("bootstrap_sha256 mismatch")))
-    monkeypatch.setattr("src.mhs.live_runtime.load_or_bootstrap_runtime", lambda *_a, **_k: calls.append("runtime"))
-    monkeypatch.setattr("src.mhs.live_runtime.reconcile_runtime_params", lambda *_a, **_k: calls.append("reconcile"))
-    monkeypatch.setattr(module, "advance_to_date", lambda *_a, **_k: calls.append("advance"))
-    with pytest.raises(SystemExit) as exc:
-        module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
-    assert exc.value.code == 1
-    assert calls == []
-
-
-
-def test_signal_step_params_load_failure_exits_one(monkeypatch) -> None:
-    import argparse
-    import types
-    import pandas as pd
-    import pytest
-    import src.cli.commands.live as module
-
-    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
-    monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *_a, **_k: (_ for _ in ()).throw(FileNotFoundError("no params")))
-    with pytest.raises(SystemExit) as exc:
-        module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
-    assert exc.value.code == 1
-
-
 def test_run_daemon_cli_installs_shutdown_handlers_and_process_log(tmp_path, monkeypatch) -> None:
     import argparse
     import logging
@@ -354,7 +253,7 @@ def test_run_daemon_cli_installs_shutdown_handlers_and_process_log(tmp_path, mon
     from src.live.lifecycle import ShutdownFlag
 
     monkeypatch.setattr(module, "_LIVE_LOG_DIR", tmp_path / "live_logs")
-    monkeypatch.setattr(module, "_settings_with_mode", lambda _args: object())
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _args: LiveSettings())
     installed: list[object] = []
     monkeypatch.setattr(lifecycle, "install_shutdown_handlers", lambda flag, **kwargs: installed.append(flag))
     captured: dict[str, object] = {}
@@ -382,36 +281,6 @@ def test_run_daemon_cli_installs_shutdown_handlers_and_process_log(tmp_path, mon
     assert [h.baseFilename for h in rotating] == [str(tmp_path / "live_logs" / "daemon.log")]
     assert rotating[0].maxBytes == 10 * 1024 * 1024
     assert rotating[0].backupCount == 5
-
-
-def test_signal_step_cli_attaches_separate_process_log(tmp_path, monkeypatch) -> None:
-    import argparse
-    import logging
-    import types
-    from logging.handlers import RotatingFileHandler
-    import pandas as pd
-    import pytest
-    import src.cli.commands.live as module
-
-    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
-    monkeypatch.setattr(module, "_LIVE_LOG_DIR", tmp_path / "live_logs")
-    monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
-    monkeypatch.setattr(
-        "src.mhs.live_strategy.load_strategy_params",
-        lambda *_a, **_k: (_ for _ in ()).throw(FileNotFoundError("no params")),
-    )
-    root = logging.getLogger()
-    before = list(root.handlers)
-    try:
-        with pytest.raises(SystemExit):
-            module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
-        added = [h for h in root.handlers if h not in before]
-    finally:
-        for handler in [h for h in root.handlers if h not in before]:
-            root.removeHandler(handler)
-            handler.close()
-
-    assert [h.baseFilename for h in added if isinstance(h, RotatingFileHandler)] == [str(tmp_path / "live_logs" / "signal_step.log")]
 
 
 def test_attach_process_log_is_idempotent_and_writes_records(tmp_path, monkeypatch) -> None:
@@ -466,10 +335,8 @@ def test_run_status_logs_heartbeat_stage(tmp_path, monkeypatch, caplog) -> None:
     assert "stage=execute" in caplog.text
 
 
-
-def test_run_daemon_cli_binds_shutdown_into_default_signal_step(tmp_path, monkeypatch) -> None:
+def test_run_daemon_cli_uses_default_frozen_step(tmp_path, monkeypatch) -> None:
     import argparse
-    import functools
     import logging
     import src.cli.commands.live as module
     import src.live.lifecycle as lifecycle
@@ -489,51 +356,10 @@ def test_run_daemon_cli_binds_shutdown_into_default_signal_step(tmp_path, monkey
             root.removeHandler(handler)
             handler.close()
 
-    step = captured["signal_step_fn"]
-    assert isinstance(step, functools.partial)
-    assert step.func is sched._default_signal_step
-    assert step.keywords == {"shutdown": captured["shutdown"]}
+    # 데몬은 frozen 단계를 기본값(프로세스 내 호출)으로 쓰며 CLI가 대체 함수를 주입하지 않는다.
+    assert "signal_step_fn" not in captured
+    assert captured["shutdown"] is not None
 
-
-def test_signal_step_refuses_params_with_mismatched_data_policy(monkeypatch) -> None:
-    import argparse
-    import types
-    import pandas as pd
-    import pytest
-    import src.cli.commands.live as module
-
-    import src.mhs.live_strategy as live_strategy
-    from src.mhs.panel import DATA_POLICY_LEGACY, DATA_POLICY_ZOMBIE_MASK_V1
-
-    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="paper"))
-    monkeypatch.setattr(module, "_settings_with_mode", lambda _: settings)
-    # 런타임 정책과 다른 값이어야 한다: 상수 자체가 바뀔 수 있으므로 반대 값을 동적으로 고른다.
-    mismatched_policy = (
-        DATA_POLICY_LEGACY
-        if live_strategy.LIVE_RUNTIME_DATA_POLICY != DATA_POLICY_LEGACY
-        else DATA_POLICY_ZOMBIE_MASK_V1
-    )
-    params = types.SimpleNamespace(data_policy=mismatched_policy, bootstrap_sha256="a" * 64)
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *_a, **_k: params)
-
-    bootstrap_calls: list[str] = []
-
-    def _bootstrap(*_a, **_k):
-        bootstrap_calls.append("loaded")
-        raise RuntimeError("stop after bootstrap")
-
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", _bootstrap)
-
-    with pytest.raises(SystemExit) as exc:
-        module._run_signal_step(argparse.Namespace(date=pd.Timestamp("2026-08-31", tz="UTC"), mode=None))
-
-    assert exc.value.code == 1
-    assert bootstrap_calls == []
-
-
-
-
-# --- halt_reason_persistence contract: new scenarios ---
 
 def test_run_status_logs_heartbeat_detail(tmp_path, monkeypatch, caplog) -> None:
     import argparse
@@ -601,79 +427,7 @@ def test_cli_paper_funding_backfill_wires_flags_and_exit_codes(monkeypatch) -> N
     assert excinfo.value.code == 1
 
 
-
-
 # --- auto appended from contract: live_alert_gaps ---
-def test_signal_step_cli_writes_result_sidecar_for_ok_failed_and_crash(tmp_path, monkeypatch, caplog) -> None:
-    import argparse
-    import json
-    import logging
-
-    import pandas as pd
-    import pytest
-
-    import src.cli.commands.live as live_mod
-    from src.common.errors import DataIntegrityError
-
-    # conftest 가 live_mod.default_weights_path 를 tmp_path/state 로 격리한다
-    result_path = tmp_path / "state" / "signal_step_result.json"
-    quarantine_path = tmp_path / "state" / "signal_quarantine.json"
-    quarantine_path.parent.mkdir(parents=True, exist_ok=True)
-    assert live_mod._signal_step_sidecar_paths() == (result_path, quarantine_path)
-    target = pd.Timestamp("2026-08-31", tz="UTC")
-    args = argparse.Namespace(date=target, mode=None)
-    monkeypatch.setattr(live_mod, "_settings_with_mode", lambda a: _mk_settings_stub())
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *a, **k: _mk_params_stub())
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", lambda *a, **k: pd.Series(dtype="float64"))
-    monkeypatch.setattr("src.mhs.live_runtime.load_or_bootstrap_runtime", lambda *a, **k: _mk_runtime_stub())
-    monkeypatch.setattr("src.mhs.live_runtime.reconcile_runtime_params", lambda runtime, params, boot: (runtime, None))
-    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", lambda *a, **k: None)
-
-    # Given/When: 성공 + 이번 결정일 격리 사이드카
-    def _advance_ok(params, runtime, weights_path, data_root, *, target, **kw):
-        quarantine_path.write_text(
-            json.dumps({"decision_time": "2026-08-31T00:00:00+00:00", "records": [{"symbol": "AAAUSDT", "reason": "decision_bar_missing"}]}),
-            encoding="utf-8",
-        )
-        return runtime, 1, 1.0
-
-    monkeypatch.setattr(live_mod, "advance_to_date", _advance_ok)
-    live_mod._run_signal_step(args)
-    assert json.loads(result_path.read_text(encoding="utf-8")) == {
-        "decision_time": "2026-08-31T00:00:00+00:00", "status": "OK", "error_type": "", "reason": "",
-        "quarantine": [{"symbol": "AAAUSDT", "reason": "decision_bar_missing"}],
-    }
-
-    # Given/When: 알려진 실패(DataIntegrityError)
-    monkeypatch.setattr(
-        live_mod, "advance_to_date",
-        lambda *a, **k: (_ for _ in ()).throw(DataIntegrityError("signal quarantine 6 symbols exceeds limit 5 of universe 600")),
-    )
-    with pytest.raises(SystemExit) as failed_exit:
-        live_mod._run_signal_step(args)
-    assert failed_exit.value.code == 1
-    failed = json.loads(result_path.read_text(encoding="utf-8"))
-    assert (failed["status"], failed["error_type"], failed["reason"]) == ("FAILED", "DataIntegrityError", "signal quarantine 6 symbols exceeds limit 5 of universe 600")
-    assert failed["quarantine"] == []
-
-    # Given/When: 예상 밖 크래시 -> traceback 로그 + FAILED + exit 1
-    monkeypatch.setattr(live_mod, "advance_to_date", lambda *a, **k: (_ for _ in ()).throw(KeyError("close")))
-    caplog.set_level(logging.ERROR, logger="LiveCli")
-    with pytest.raises(SystemExit) as crash_exit:
-        live_mod._run_signal_step(args)
-    assert crash_exit.value.code == 1
-    crashed = json.loads(result_path.read_text(encoding="utf-8"))
-    assert (crashed["status"], crashed["error_type"]) == ("FAILED", "KeyError")
-    assert any(record.exc_info and "signal_step status=CRASHED" in record.getMessage() for record in caplog.records)
-
-    # Given/When: 기존 파라미터 로드 실패 경로도 원인 타입을 남긴다
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no params")))
-    with pytest.raises(SystemExit):
-        live_mod._run_signal_step(args)
-    params_failed = json.loads(result_path.read_text(encoding="utf-8"))
-    assert (params_failed["status"], params_failed["error_type"], params_failed["reason"]) == ("FAILED", "FileNotFoundError", "no params")
-
-
 def test_run_daemon_cli_alerts_and_reraises_on_crash(tmp_path, monkeypatch, caplog) -> None:
     import argparse
     import logging
