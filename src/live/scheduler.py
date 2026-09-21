@@ -280,6 +280,7 @@ def _default_frozen_step(target: pd.Timestamp, settings: LiveSettings, weights_p
         ledger_path=Path(settings.ledger_path) if settings.ledger_path else default_ledger_path(),
         seed_equity_usdt=settings.notional_equity_usdt,
         non_crypto=non_crypto,
+        artifact_key=settings.artifact_key,
     )
 
 

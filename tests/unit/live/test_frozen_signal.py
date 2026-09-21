@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.lib
 import pytest
 
 from src.common.errors import DataIntegrityError
@@ -176,6 +178,33 @@ def test_writes_levered_row_equal_to_exposure_times_unit_book(layout: dict[str, 
 def test_plaintext_artifacts_only(layout: dict[str, Path], tmp_path: Path) -> None:
     _run(_DAY, layout)
     assert list(tmp_path.rglob("*.enc")) == []
+
+
+def test_seals_weight_artifacts_when_artifact_key_provided(
+    layout: dict[str, Path], tmp_path: Path,
+) -> None:
+    from pydantic import SecretStr
+
+    from src.live.crypto import derive_key, open_bytes
+    from src.live.errors import ArtifactSealError
+
+    key = SecretStr(base64.b64encode(b"0" * 32).decode("ascii"))
+    first = _run(_DAY, layout, artifact_key=key)
+    assert first.written is True
+    weights_enc = layout["weights"].with_suffix(layout["weights"].suffix + ".enc")
+    closes_enc = (layout["weights"].parent / "deployed_decision_ohlcv_close.parquet.enc")
+    assert weights_enc.exists()
+    assert closes_enc.exists()
+    assert not layout["weights"].exists()
+    # 평문 parquet 매직바이트가 아니라 봉투 형식이어야 한다.
+    with pytest.raises(pyarrow.lib.ArrowInvalid):
+        pd.read_parquet(weights_enc)
+    open_bytes(weights_enc.read_bytes(), derive_key(key))  # 올바른 키로는 복호화된다.
+    with pytest.raises(ArtifactSealError):
+        open_bytes(weights_enc.read_bytes(), derive_key(SecretStr(base64.b64encode(b"1" * 32).decode("ascii"))))
+    # 재실행 시 봉인된 기존 행을 올바로 읽어 append-only 불변식을 유지한다.
+    second = _run(_DAY, layout, artifact_key=key)
+    assert second.written is False
 
 
 def test_seed_equity_on_first_cycle(layout: dict[str, Path]) -> None:

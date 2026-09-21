@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from pydantic import SecretStr
 
 from src.common.errors import DataIntegrityError
 from src.live.deployed_weights import append_weight_row, decision_ohlcv_close_path, load_weights_frame
@@ -107,13 +108,15 @@ def run_frozen_signal_step(
     ledger_path: Path,
     seed_equity_usdt: float,
     non_crypto: frozenset[str],
+    artifact_key: SecretStr | None = None,
 ) -> FrozenStepReport:
     """Compute and persist one decision day's levered frozen target row for the runner.
 
     Rebuilds the frozen book from the trailing 1h window, extends the unit-return history
     with the live proxy (append-only), sizes exposure with the account policy's posterior
     half-Kelly inside venue margin and impact limits, and appends the levered weight row
-    and its snapshot-close sizing row in plaintext. Orders are never placed here.
+    and its snapshot-close sizing row -- sealed (AES-256-GCM) when ``artifact_key`` is set,
+    plaintext otherwise. Orders are never placed here.
 
     Raises:
         CausalityViolation: ``now`` precedes the decision day's release hour.
@@ -198,7 +201,7 @@ def run_frozen_signal_step(
         posterior_sigma=None if moments is None else float(moments.sigma),
         unit_history_end=history.index[-1], venue_snapshot=venue_name, written=True,
     )
-    existing = load_weights_frame(Path(weights_path))
+    existing = load_weights_frame(Path(weights_path), artifact_key=artifact_key)
     if not existing.empty and day in existing.index:
         return replace(report, written=False)
     forward_new = history[history.index > bootstrap.index[-1]]
@@ -210,9 +213,9 @@ def run_frozen_signal_step(
     # 오늘 census 밖 = 보유 목표 0이므로 명시적 0.0으로 채운다.
     prior_columns = [str(c) for c in existing.columns] if not existing.empty else []
     levered = levered.reindex(sorted(set(prior_columns) | set(census_list)), fill_value=0.0)
-    append_weight_row(Path(weights_path), day, levered, artifact_key=None)
+    append_weight_row(Path(weights_path), day, levered, artifact_key=artifact_key)
     sizing = snap_row[[symbol for symbol in census_list if float(unit_row[symbol]) != 0.0 or symbol in positions]]
-    append_weight_row(decision_ohlcv_close_path(Path(weights_path)), day, sizing, artifact_key=None)
+    append_weight_row(decision_ohlcv_close_path(Path(weights_path)), day, sizing, artifact_key=artifact_key)
     report_path = Path(weights_path).parent / FROZEN_SIGNAL_REPORT_NAME
     payload = {
         "decision_day": report.decision_day.isoformat(),
