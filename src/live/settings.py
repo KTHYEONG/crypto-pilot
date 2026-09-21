@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
@@ -95,6 +96,10 @@ class LiveSettings(BaseSettings):
     maker_fee_bps: float = ExecutionSpec().maker_fee_bps
     taker_fee_bps: float = ExecutionSpec().taker_fee_bps
     taker_slippage_bps: float = ExecutionSpec().taker_slippage_bps
+    # 등록 백테스트 집행 방식과 같아야 한다. taker 원장 = taker_parity, maker 원장 =
+    # strict_passive. env는 LIVE_EXECUTION_POLICY.
+    execution_policy: Literal["taker_parity", "strict_passive"] = "taker_parity"
+    passive_timeout_minutes: int = ExecutionSpec().passive_timeout_minutes
     paper_fill_model: str = "immediate_taker"
     orderbook_capture_enabled: bool = True
     orderbook_capture_interval_s: float = 10.0
@@ -197,6 +202,24 @@ class LiveSettings(BaseSettings):
         if value <= 0:
             raise ValueError("max_market_data_staleness_hours must be > 0")
         return value
+
+    @model_validator(mode="after")
+    def _gate_execution_policy(self) -> LiveSettings:
+        """strict passive는 패시브 루프 시뮬레이터와 양의 타임아웃을 요구한다."""
+        if self.passive_timeout_minutes < 1:
+            raise ValueError(
+                f"passive_timeout_minutes must be >= 1, got {self.passive_timeout_minutes}"
+            )
+        if (
+            self.mode is ExecutionMode.PAPER
+            and self.execution_policy == "strict_passive"
+            and self.paper_fill_model == "immediate_taker"
+        ):
+            raise ValueError(
+                "execution_policy='strict_passive' requires a loop fill simulator;"
+                " paper_fill_model='immediate_taker' bypasses the passive loop"
+            )
+        return self
 
     @model_validator(mode="after")
     def _gate_mainnet(self) -> LiveSettings:

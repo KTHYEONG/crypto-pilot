@@ -17,7 +17,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
-from typing import Any
+from typing import Any, Literal
 
 from src.live.audit import AuditLog
 from src.live.errors import LiveTradingError, OrderObsolete, VenueError
@@ -77,6 +77,11 @@ class PassiveExecutionPolicy:
     chase_band_bps(GTX 알파 레일)와 max_cross_bps(IOC 리스크 레일)는 분리된
     한계다: 전자는 GTX peg 가 얼마나 쫓아가는가(수익 기회 한계), 후자는
     백스톱 크로싱이 포기하는 이상 징후 경계(손실 한계)다.
+
+    ``passive_pricing="anchored"`` mirrors the canonical strict passive fill model: the GTX
+    limit rests at the intent's decision price (clamped one tick inside the opposite touch
+    so it stays post-only) for the whole passive phase and never chases the book; only an
+    unfilled remainder at the passive deadline escalates to the capped IOC backstop.
     """
 
     poll_interval_s: float = 3.0
@@ -92,8 +97,11 @@ class PassiveExecutionPolicy:
     max_ioc_attempts: int = 10
     fee_schedule: FeeSchedule = FeeSchedule(maker_fee_bps=ExecutionSpec().maker_fee_bps, taker_fee_bps=ExecutionSpec().taker_fee_bps)
     taker_slippage_bps: float = ExecutionSpec().taker_slippage_bps
+    passive_pricing: Literal["touch_chase", "anchored"] = "touch_chase"
 
     def __post_init__(self) -> None:
+        if self.passive_pricing not in ("touch_chase", "anchored"):
+            raise ValueError(f"passive_pricing must be 'touch_chase' or 'anchored', got {self.passive_pricing!r}")
         if self.passive_deadline_s >= self.window_deadline_s:
             raise ValueError(
                 f"passive_deadline_s ({self.passive_deadline_s}) must be strictly less than "
@@ -125,6 +133,32 @@ def backtest_parity_execution_policy(
         taker_cap_bps=fee_schedule.taker_fee_bps + taker_slippage_bps,
         fee_schedule=fee_schedule,
         taker_slippage_bps=taker_slippage_bps,
+    )
+
+
+def strict_passive_execution_policy(
+    fee_schedule: FeeSchedule, taker_slippage_bps: float, passive_timeout_minutes: int,
+) -> PassiveExecutionPolicy:
+    """Live policy matching the canonical strict passive (maker) backtest.
+
+    The anchored GTX limit rests for ``passive_timeout_minutes`` (the same timeout the
+    OHLCV strict proxy uses), then any remainder crosses through the capped IOC backstop
+    within two replay bars; the IOC cap is taker fee + taker slippage, as in the taker
+    parity policy.
+
+    Raises:
+        ValueError: passive_timeout_minutes < 1.
+    """
+    if passive_timeout_minutes < 1:
+        raise ValueError(f"passive_timeout_minutes must be >= 1, got {passive_timeout_minutes}")
+    passive_deadline_s = float(passive_timeout_minutes) * 60.0
+    return PassiveExecutionPolicy(
+        passive_deadline_s=passive_deadline_s,
+        window_deadline_s=passive_deadline_s + 2 * EXECUTION_BAR_SECONDS,
+        taker_cap_bps=fee_schedule.taker_fee_bps + taker_slippage_bps,
+        fee_schedule=fee_schedule,
+        taker_slippage_bps=taker_slippage_bps,
+        passive_pricing="anchored",
     )
 
 
@@ -306,6 +340,32 @@ def _gtx_candidate(
     else:
         if price < band_low:
             return None
+    return price
+
+
+def _anchored_gtx_price(
+    intent: OrderIntent,
+    touch: tuple[Decimal, Decimal],
+    *,
+    is_buy: bool,
+    filters: SymbolFilters,
+) -> Decimal | None:
+    """Anchored GTX 게시 가격: anchor 고정, opposite 터치 안쪽 한 틱으로만 양보한다.
+
+    매수는 ``min(decision_price, ask - tick)`` 을 tick 아래로, 매도는
+    ``max(decision_price, bid + tick)`` 을 tick 위로 양자화한다. 결과는 항상
+    post-only 이며 anchor 보다 유리한 방향으로만 벗어난다. 0 이하면 None(HOLD).
+    """
+    bid, ask = touch
+    tick = filters.tick_size
+    if is_buy:
+        raw = min(intent.decision_price, ask - tick)
+        price = quantize_to_multiple(raw, tick, ROUND_DOWN)
+    else:
+        raw = max(intent.decision_price, bid + tick)
+        price = quantize_to_multiple(raw, tick, ROUND_UP)
+    if price <= _ZERO:
+        return None
     return price
 
 
@@ -843,6 +903,21 @@ def _poll_or_post(
     if rt.active_id is not None:
         if rt.paper_active:
             executed = rt.reported_executed
+            if (
+                policy.passive_pricing == "anchored"
+                and rt.phase == "passive"
+                and rt.active_price > _ZERO
+            ):
+                resting_qty = rt.intent.quantity - rt.filled_total
+                if resting_qty > _ZERO:
+                    resting_fill = _simulate_paper_fill(rt, touch, "GTX", rt.active_price, resting_qty)
+                    if resting_fill > _ZERO:
+                        fee_bps = policy.fee_schedule.bps_for("maker")
+                        rt.filled_total += resting_fill
+                        rt.fill_notional += resting_fill * rt.active_price
+                        rt.reported_executed = rt.filled_total
+                        rt.fills.append((resting_fill, rt.active_price, fee_bps, "maker_fill", "maker"))
+                        executed = rt.reported_executed
         else:
             payload = client.query_order(rt.intent.symbol, rt.active_id)
             executed = Decimal(str(payload.get("executedQty", "0")))
@@ -876,7 +951,7 @@ def _poll_or_post(
                 _cancel_and_settle(client, rt)
             elif exhausted:
                 return
-            elif moved:
+            elif moved and policy.passive_pricing != "anchored":
                 _cancel_and_settle(client, rt)
                 rt.chases += 1
             else:
@@ -895,9 +970,12 @@ def _poll_or_post(
         # 캡 적용 IOC 백스톱으로 상승시킨다(리포스트 리셋 없음).
         rt.phase = "ioc"
     if rt.phase == "passive":
-        price = _gtx_candidate(
-            own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high
-        )
+        if policy.passive_pricing == "anchored":
+            price = _anchored_gtx_price(rt.intent, touch, is_buy=is_buy, filters=rt.filters)
+        else:
+            price = _gtx_candidate(
+                own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high
+            )
         time_in_force = "GTX"
     else:
         if rt.ioc_attempts >= policy.max_ioc_attempts:
