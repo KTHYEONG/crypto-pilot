@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_FROZEN_STORAGE_LAYOUT",
+      "date": "2026-09-21",
+      "adr_id": "ADR_20260921_MHS_FROZEN_STORAGE_LAYOUT",
+      "domain": "infra",
+      "title": "Frozen 백테스트 저장 구조 개편 + run detail retention 기본값 도입",
+      "why": "mhs-frozen이 --output 강제 지정 방식이라 결과 파일명이 세션마다 즉흥적으로 정해져 data/backtests/ 루트에 무분별하게 쌓였고, mhs의 RetentionPolicy는 구현돼 있으나 기본값이 None(무제한)이라 run detail이 503MB까지 무한 누적됐다",
+      "resolution": "mhs-frozen --output 생략 시 data/backtests/frozen/runs/<uuid>/result.json + manifest.json으로 자동 저장하고, DEFAULT_DETAIL_RETENTION_MAX_RUNS를 5로 변경했다",
+      "impact": "향후 frozen 백테스트 실행 시 파일명을 직접 정할 필요가 없고 manifest로 run 식별이 가능하며, mhs 경로의 run detail은 최근 5개만 보존돼 디스크 누적이 방지된다",
+      "caveat": "기존에 쌓인 data/backtests/ 루트의 4개 loose JSON과 503MB의 runs/evidence 미정리분은 이번 작업 범위 밖이며 별도 수동 정리가 필요하다"
+    },
+    {
       "task_id": "TASK_MHS_FROZEN_EXECUTION_COVERAGE",
       "date": "2026-09-21",
       "adr_id": "ADR_20260921_MHS_FROZEN_EXECUTION_COVERAGE",
@@ -1010,16 +1021,6 @@
       "why": "Research-GO 최후 차단 사유가 FOLD_BLEND_PATH_DIVERGENCE 단 하나로 좁혀진 상태(docs/results/mhs_run_history/latest.json, ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION의 후속 과제). halflife 파라미터 스윕은 fold_blend_parity와 risk_parity의 단조 트레이드오프로 이미 막다른 길임이 실측 확인됨. 코드 추적 결과 근본원인은 blend가 top-level 경계(2021-2022)에서 단 1회 해석한 target_vol을 전체 배치 구간에 고정 적용하는데 반해, fold_1~3은 _constant_risk_target_vol_by_boundary로 자신의 train_end(최대 2년 더 긴 학습창)까지 데이터로 target_vol을 별도 재해석하고 있었기 때문(원시 북 gross_log_ratio는 ±0.04로 일치, deployed_gross_log_ratio만 0.24~0.32로 tolerance 0.25 초과).",
       "resolution": "src/mhs/pipeline/stages/fold.py::run_folds의 constant_risk 분기를 _constant_risk_target_vol_by_boundary(경계별 재해석) 대신 _constant_risk_target_vol(top-level 경계 단일 해석) 호출로 교체하고 모든 fold index에 동일 값을 브로드캐스트(dict.fromkeys)하도록 수정. growth_budget 분기는 기존 경계별 재해석 로직 완전 보존(바이트 동일). tests/unit/mhs/pipeline/stages/test_fold.py에 SCENARIO_MHS_CONSTANT_RISK_FOLD_BROADCASTS_TOP_LEVEL_VOL 신규 회귀 테스트 추가(constant_risk 모드에서 _constant_risk_target_vol_by_boundary가 호출되면 AssertionError로 실패하도록 가드).",
       "impact": "docs/specs/mhs_fold_blend_path_divergence.md/_contract.json 기준 spec->implement->check 완료: 유닛 테스트 52건 green, ruff/mypy clean. 실측 CLI 재실행(2021-2025/3m 원장)으로 FOLD_BLEND_PATH_DIVERGENCE 해소 여부 및 blend 성과 불변(primary_geometric_cagr=1.777395 등 비트동일 기대) 확인은 /sync 직후 진행."
-    },
-    {
-      "task_id": "MHS_CALIBRATED_EVIDENCE_REAL_EXECUTION",
-      "date": "2026-08-23",
-      "adr_id": "ADR_20260823_MHS_CALIBRATED_EVIDENCE_REAL_EXECUTION",
-      "domain": "risk",
-      "title": "MHS calibrated evidence 실전 검증: FOLD_GROWTH_CONCENTRATION/레벨게이트 전부 해소, FOLD_BLEND_PATH_DIVERGENCE만 잔존",
-      "why": "ADR_20260823_MHS_CALIBRATED_EVIDENCE 구현 직후 실제 CLI로 2021-2025/3m 원장 전체 재생해 재보정 게이트가 실전에서 작동하는지, 그리고 I-DEPLOYMENT-INVARIANT(판정만 바뀌고 성과는 불변)가 지켜지는지 검증.",
-      "resolution": "실측: max_fold_share=0.526, null-보정 임계값=0.606(alpha=0.05, null 백분위 88.25) -> FOLD_GROWTH_CONCENTRATION 미발화. pooled_sharpe_lcb=1.337(>0.6), pooled_stress_sharpe_lcb=0.572(>0.0) -> PRIMARY_AUTOCORR_SHARPE_BELOW_0_6/STRESS_SHARPE_NOT_POSITIVE 미발화. 4개 fold 전부 failures=[] (데이터 무결성 코드 fold별 fail-closed는 그대로 유지되고 있음을 확인, 단순 무력화가 아님). blend.primary_geometric_cagr=1.777로 직전 constant_risk 런과 완전히 동일(비트동일) -- 배치 로직 미변경이 실측으로 확인됨.",
-      "impact": "research_go.reason_codes=['FOLD_BLEND_PATH_DIVERGENCE'] 단 하나만 남아 Research-GO 여전히 미달성. 이 코드는 ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT_REAL_EXECUTION에서 이미 식별된 별도의 미해결 아키텍처 문제(fold가 자체 EWMA를 재적합하지 않고 blend의 연속 스케일 궤적을 슬라이스해 재사용해야 함)이며 이번 스펙의 범위가 아니다. 다음 단계는 그 구조적 대안의 구현."
     }
   ]
 }
