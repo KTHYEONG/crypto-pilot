@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_ACCOUNT_MAKER_EXECUTION",
+      "date": "2026-09-21",
+      "adr_id": "ADR_20260921_MHS_ACCOUNT_MAKER_EXECUTION",
+      "domain": "execution",
+      "title": "MHS 계정 원장에 메이커 집행 연결, 라이브 strict passive 집행 정책 추가",
+      "why": "공식 3분 원장에서 메이커 집행이 유일하게 측정된 Sharpe 개선(CAGR 140.7%→151.5%)이었으나 계정 원장은 여전히 즉시 테이커만 지원했고, 라이브의 기존 지정가 정책(touch-chase)은 테이커 백테스트에 맞춘 것이라 메이커 백테스트와 그대로 대응되지 않았다",
+      "resolution": "replay_account에 anchor 고정 지정가 대기창(30분=10봉) 후 미체결 시 테이커 폴백하는 execution=maker 경로를 추가하고 CLI --execution 플래그와 집행별 재조정을 연결했으며, 라이브 executor에 동일 의미의 anchored GTX 정책(strict_passive_execution_policy)을 taker_parity와 나란히 추가했다(기본값은 기존 유지)",
+      "impact": "계정 원장 taker 경로는 비트 동일 유지, 새 maker 경로와 라이브 anchored 정책 모두 lean_check(ruff/mypy/pytest/diff-coverage 100%) PASS; 실제 CLI로 ₩300만/$100k 메이커 원장 재실행 및 실계좌 수치 갱신은 다음 세션 과제로 남음",
+      "caveat": "라이브 전환은 LIVE_EXECUTION_POLICY=strict_passive 설정으로 사용자가 직접 결정해야 하며 PAPER 모드는 paper_fill_model=peg_chase가 함께 필요하고, 메이커 원장은 대기열(큐) 위치나 부분체결을 모델링하지 않는 봉 단위 trade-through 근사다"
+    },
+    {
       "task_id": "TASK_MHS_ACCOUNT_BAYESIAN_KELLY",
       "date": "2026-09-21",
       "adr_id": "ADR_20260921_MHS_ACCOUNT_BAYESIAN_KELLY",
@@ -1016,16 +1027,6 @@
       "why": "MHS Research-GO 통과(CAGR 318%/MDD -38.9%/DSR 0.79) 이후 실거래소/계좌 연동 요청. 실계좌가 걸린 만큼 3개월간 주문을 전송하지 않고 전 경로(신호->필터->계좌->집행)를 실검증하는 섬도우 우선 설계가 필요했다. 라이브 인프라는 이전까지 전무(주문/계좌/필터/인증 grep 0건, BinanceClient는 시세수집 전용).",
       "resolution": "src/live/ 신설: settings(ExecutionMode SHADOW/LIVE_TESTNET/LIVE_MAINNET, pydantic-settings, LIVE_MAINNET은 승인문자열 없으면 생성불가), errors(BINANCE_ERROR_POLICY 레지스트리, 미등록코드 fail-closed), filters(Decimal 기반 stepSize/tickSize/minNotional 양자화), rest(BinanceFuturesRestClient, SHADOW 모드에서 GET 외 요청을 전송계층에서 원천 차단), account(거래소 설정 정합 + reconcile_or_halt, 불일치시 자동보정 없이 예외만), signal(latest_target_weights + T+1h 인과성 게이트), sizing/planner(포지션 반전을 reduce_only 2-intent로 분해, 결정론적 client_order_id), executor(GTX post-only 체이스 -> IOC 데드라인, MARKET 주문 전면 금지), audit(비밀정보 절대 미기록 append-only JSONL), runner(일일 사이클 오케스트레이션, 리스크게이트 위반시 부분집행 없이 전체 HALT), ledger(내부 포지션 원장 로드/저장/체결반영, reconcile_or_halt가 소비). CLI에 research/live 서브커맨드(live shadow-cycle) 및 --emit-target-weights 플래그 추가. 연구-라이브 seam: MhsBookReport.target_weights 필드 신설(name=='blend'일 때만 채움, _book_outcome 양쪽 반환경로에 배선), emit_deployed_target_weights가 deployed=target_weights*exposure_scale(ffill) 공식으로 deployed_target_weights.parquet 기록. /check에서 발견된 두 결함(--emit-target-weights가 항상 DataIntegrityError로 무조건 거부되던 스텁, reconcile_or_halt가 하드코딩된 빈 dict를 받아 재조정이 사실상 무력화되던 버그)을 수정: emit 경로를 실제로 배선하고 ledger.py를 신설해 runner가 실제 원장을 재조정하도록 교체. 부수 수정: CLI 파리티 계약에 --emit-target-weights 제외 등록(--output-tier와 동일 패턴), src/live/ 내 _ZERO 상수 3중 선언을 filters.py 단일 소스로 정리.",
       "impact": "그린필드 신규 기능이라 기존 MHS 연구 파이프라인 회귀 없음(--emit-target-weights 기본 False로 기존 산출물 비트동일 유지 확인). tests/unit/mhs, tests/unit/application/research/mhs, tests/contract, tests/unit/live, tests/unit/cli 전체 통과(코드맵 미등록은 이번 sync로 해소, LOG_DIR/DISCOVERY_START 다중선언은 이 기능과 무관한 기존 이슈로 범위 밖). 실제 주문 전송은 SHADOW 모드 기본값과 LIVE_MAINNET 승인문자열 게이트로 구조적으로 차단된 상태이며, 3개월 섬도우 검증 후 별도 결정 없이는 실주문이 나갈 수 없다."
-    },
-    {
-      "task_id": "TASK_MHS_EQUITY_DRAWDOWN_BRAKE",
-      "date": "2026-08-24",
-      "adr_id": "ADR_20260824_MHS_EQUITY_DRAWDOWN_BRAKE",
-      "domain": "quant",
-      "title": "MHS 자기자본 드로다운 브레이크(opt-in) 도입",
-      "why": "배포 오버레이 constant_risk가 이 북에서 실현변동성과 연간 Sharpe가 양의 상관이라 anti-Kelly로 작동, 최악 에지 해(2024)에 두번째로 높은 레버리지·최고 에지 해(2025)에 최저 레버리지를 배분함을 82개 run_history + daily_ledger.parquet 직접 분해로 실측. 오프라인 선형모델이 실제 3m 리플레이를 일별 corr 0.9994로 재현해 신뢰 검증.",
-      "resolution": "src/application/research/mhs/scaling.py에 _equity_drawdown_brake_scale 신설(인과적 자기참조 재귀, scale_t=clip(base_t*clip(1+k*underwater_{t-1},floor,1),0,cap), 단일 Python 루프 O(n)). _constant_risk_target_vol에 drawdown_brake 키워드 추가(True 시 budget=inf로 _feasible_constant_risk_target의 leverage_ceiling*q10(sigma_book) 클램프만으로 비적합 target_vol 유도, 신규 적합상수 없음). _replay_exposure_scale 단일 디스패처에서 constant_risk 분기에 합성. is_streaming_scale_mode는 브레이크 ON 시 무조건 False. MhsDiagnosticRequest.exposure_drawdown_brake 필드 + validate_request fail-closed(constant_risk 전용, pnl_vol_target=True 필수) + CLI --exposure-drawdown-brake 플래그(기본 False, 비트동일 보존). 상수 EXPOSURE_DRAWDOWN_BRAKE_K=2.0/FLOOR=0.2는 params.py 등록(k는 2.0~6.0 플래토 실측, floor는 실측상 비활성). fold 경로는 blend의 확정 exposure_scale을 슬라이스 재사용하는 기존 배선을 그대로 타므로 코드 변경 없이 브레이크가 자동 전파(I-SCALE-IS-DEPLOYED-OVERLAY 보존, FOLD_BLEND_PATH_DIVERGENCE 재발 없음). 실제 3m 리플레이(constant_risk+growth_extreme+brake) 검증: CAGR 1.761->3.322(+89%), MDD -0.402->-0.400(횡보), Calmar 4.38->8.31이나 fold3(2025) 성장 기여율이 55.4%->65.5%로 상승해 등록임계값(60.1%) 초과, Research-GO 사유가 []에서 FOLD_GROWTH_CONCENTRATION으로 전환(신규 부작용, 미해결). 기본(growth_budget, 브레이크 OFF) 프로덕션 실행은 CAGR 3.184/MDD -0.389/Calmar 8.19/DSR 0.794로 Research-GO 완전 통과 확인, 회귀 없음.",
-      "impact": "기본 실행 경로는 비트동일 보존(회귀 없음, 프로덕션 GO 상태 불변). exposure_drawdown_brake=True는 opt-in 실험 플래그로 남아 프로덕션에 영향 없음. 실측 결과 constant_risk+brake 조합은 fold_growth_concentration 부작용으로 이번 스펙 범위 내 채택 보류, 후속 과제로 k 하향 또는 fold별 상한 재검토 필요."
     }
   ]
 }
