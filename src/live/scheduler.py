@@ -8,6 +8,7 @@ I-DAEMON-NO-CRASH-LOOP: 사이클 예외는 로그로 흡수하고 다음 날짜
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -23,18 +24,19 @@ import pandas as pd
 
 from typing import TYPE_CHECKING
 
-from src.common.paths import DATA_DIR, FUTURES_DATA_DIR
+from src.common.paths import DATA_DIR, FUTURES_DATA_DIR, VENUE_RULES_DIR
 from src.common.errors import DataIntegrityError
+from src.live.errors import CausalityViolation
 
 if TYPE_CHECKING:
     from src.live.data_refresh import RefreshReport
+    from src.live.frozen_signal import FrozenStepReport
 from src.live.audit import AUDIT_LOG_ROOT, prune_old_audit_logs
 from src.live.errors import StaleSignalError
 from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: F401
 from src.live.runner import run_shadow_cycle
 from src.live.settings import LiveSettings
-from src.live.signal import _SIGNAL_LAG
-from src.live.signal_step_result import SIGNAL_STEP_STATUS_FAILED, read_signal_step_result, signal_step_result_path
+from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
 
 try:
     from src.live.alerting import post_alert  # noqa: F401
@@ -77,6 +79,9 @@ DAEMON_POLL_INTERVAL_SECONDS: float = 300.0
 #: T+1h 인과성 게이트 통과 후의 추가 여유(거래소/네트워크 지연).
 DAEMON_CATCHUP_BUFFER: pd.Timedelta = pd.Timedelta(minutes=5)
 
+#: frozen 신호 공개 시각이며, 공식 메이커 원장의 제출봉과 같은 기준이다.
+DECISION_RELEASE_OFFSET: pd.Timedelta = pd.Timedelta(hours=FROZEN_MHS_TOP20_V2.release_hour_utc)
+
 DAEMON_MAX_ATTEMPTS_PER_DAY: int = 5
 DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
 # src/application/ops/daemon_idle_gate.py BUSY_STAGES 와 같은 의미
@@ -84,16 +89,6 @@ INTERRUPTIBLE_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"
 DAEMON_ALERT_SYMBOL_SAMPLE: int = 10
 SIGNAL_REFRESH_OFFSET_MINUTES: float = 0.0
 DAEMON_COLD_UNIVERSE_EXIT_CODE: int = 3
-
-SIGNAL_STEP_TIMEOUT_S: float = 1200.0
-# 컨테이너(cgroup v2) 자신의 메모리 이벤트. oom_kill 증가로만 OOM을 확정해 SIGKILL 일반과 구분한다.
-CGROUP_MEMORY_EVENTS_PATH: Path = Path("/sys/fs/cgroup/memory.events")
-SIGNAL_STEP_POLL_SECONDS: float = 1.0
-SIGNAL_STEP_TERMINATE_GRACE_SECONDS: float = 20.0
-
-
-class SignalStepInterrupted(RuntimeError):
-    """Raised when the signal-step subprocess is terminated on shutdown."""
 
 _STATE_KEY = "last_processed_decision_time"
 
@@ -211,20 +206,25 @@ def _resolve_heartbeat_path(settings: LiveSettings) -> Path:
     return DATA_DIR / "state" / "live_daemon_heartbeat.json"
 
 
-def _strategy_params_present(settings: LiveSettings) -> bool:
-    try:
-        from src.cli.commands.live import deployed_strategy_artifact_paths
-
-        params_path, bootstrap_path = deployed_strategy_artifact_paths()
-    except Exception:
-        return False
-    return params_path.is_file() and bootstrap_path.is_file()
+NON_CRYPTO_SYMBOLS_PATH: Path = DATA_DIR / "state" / "non_crypto_symbols.json"
 
 
 def _default_data_refresh() -> RefreshReport:
-    from src.common.paths import FUTURES_DATA_DIR
-    from src.live.data_refresh import fetch_listed_symbols, refresh_live_market_data
+    import urllib.request
 
+    from src.live.data_refresh import EXCHANGE_INFO_TIMEOUT_S, EXCHANGE_INFO_URL, listed_crypto_perpetuals, refresh_live_market_data
+    from src.mhs.params import LIVE_FROZEN_WARMUP_DAYS
+
+    with urllib.request.urlopen(EXCHANGE_INFO_URL, timeout=EXCHANGE_INFO_TIMEOUT_S) as resp:  # noqa: S310
+        payload = json.loads(resp.read())
+    crypto, non_crypto = listed_crypto_perpetuals(payload)
+    NON_CRYPTO_SYMBOLS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = NON_CRYPTO_SYMBOLS_PATH.with_suffix(NON_CRYPTO_SYMBOLS_PATH.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps({"captured_at": _utc_now().isoformat(), "symbols": sorted(non_crypto)}, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, NON_CRYPTO_SYMBOLS_PATH)
     s = LiveSettings()
     return refresh_live_market_data(
         FUTURES_DATA_DIR,
@@ -235,7 +235,51 @@ def _default_data_refresh() -> RefreshReport:
         freshness_floor_hours=s.refresh_freshness_floor_hours,
         min_symbols=s.min_universe_symbols,
         max_fail_fraction=s.refresh_max_fail_fraction,
-        listed_symbols=fetch_listed_symbols(),
+        symbols=sorted(crypto),
+        seed_lookback_days=LIVE_FROZEN_WARMUP_DAYS + 30,
+    )
+
+
+def _default_venue_capture(settings: LiveSettings) -> None:
+    """Best-effort daily venue rule snapshot (brackets need a signed request); failures never stop the cycle."""
+    try:
+        from src.market_data.binance.venue_rules import fetch_venue_rules, write_venue_rule_snapshot
+
+        key = settings.api_key.get_secret_value() if settings.api_key is not None else None
+        secret = settings.api_secret.get_secret_value() if settings.api_secret is not None else None
+        snapshot = fetch_venue_rules(api_key=key, api_secret=secret)
+        write_venue_rule_snapshot(snapshot, VENUE_RULES_DIR)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DATA] stage=venue_capture status=FAILED error=%s", exc)
+        return None
+
+
+def _default_frozen_step(target: pd.Timestamp, settings: LiveSettings, weights_path: Path) -> FrozenStepReport:
+    from src.live.frozen_signal import run_frozen_signal_step
+    from src.live.ledger import default_ledger_path
+
+    try:
+        raw = json.loads(NON_CRYPTO_SYMBOLS_PATH.read_text(encoding="utf-8"))
+        symbols_raw = raw.get("symbols")
+        if not isinstance(raw, dict) or not isinstance(symbols_raw, list):
+            raise DataIntegrityError(f"non-crypto symbols file malformed: {NON_CRYPTO_SYMBOLS_PATH}")
+        non_crypto = frozenset(str(s) for s in symbols_raw)
+    except FileNotFoundError as exc:
+        raise DataIntegrityError(f"non-crypto symbols file missing: {NON_CRYPTO_SYMBOLS_PATH}") from exc
+    except json.JSONDecodeError as exc:
+        raise DataIntegrityError(f"non-crypto symbols file corrupt: {NON_CRYPTO_SYMBOLS_PATH}") from exc
+    return run_frozen_signal_step(
+        target,
+        now=_utc_now(),
+        data_root=FUTURES_DATA_DIR,
+        weights_path=Path(weights_path),
+        unit_bootstrap_path=Path(settings.unit_bootstrap_path),
+        unit_forward_path=Path(weights_path).parent / "frozen_unit_forward.parquet",
+        venue_rules_dir=VENUE_RULES_DIR,
+        fallback_venue_path=Path(settings.venue_fallback_path),
+        ledger_path=Path(settings.ledger_path) if settings.ledger_path else default_ledger_path(),
+        seed_equity_usdt=settings.notional_equity_usdt,
+        non_crypto=non_crypto,
     )
 
 
@@ -341,63 +385,21 @@ def _refresh_note(report: Any, err: BaseException | None) -> str:
     return f"refresh fresh={getattr(report, 'fresh', 'n/a')} refreshed={getattr(report, 'refreshed', 'n/a')} failed={report.failed}/{getattr(report, 'total', 'n/a')} staleness_h={float(getattr(report, 'staleness_hours', float('nan'))):.1f}"
 
 
-def _terminate_child(proc: subprocess.Popen[bytes], grace_s: float) -> None:
-    proc.terminate()
+def _sizing_note(frozen_report: Any) -> str:
+    if frozen_report is None:
+        return ""
     try:
-        proc.wait(timeout=grace_s)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-
-
-def _run_signal_step_subprocess(
-    cmd: list[str],
-    *,
-    timeout_s: float,
-    shutdown: ShutdownFlag | None,
-    poll_s: float = SIGNAL_STEP_POLL_SECONDS,
-    terminate_grace_s: float = SIGNAL_STEP_TERMINATE_GRACE_SECONDS,
-    popen: Callable[[list[str]], subprocess.Popen[bytes]] = subprocess.Popen,
-) -> None:
-    proc = popen(cmd)
-    deadline = time.monotonic() + timeout_s
-    while True:
-        try:
-            returncode = proc.wait(timeout=poll_s)
-        except subprocess.TimeoutExpired:
-            if shutdown is not None and shutdown.requested:
-                _terminate_child(proc, terminate_grace_s)
-                raise SignalStepInterrupted("signal-step terminated on shutdown")
-            elif time.monotonic() >= deadline:
-                _terminate_child(proc, terminate_grace_s)
-                raise subprocess.TimeoutExpired(cmd, timeout_s)
-            else:
-                continue
-        if returncode != 0:
-            raise subprocess.CalledProcessError(returncode, cmd)
-        return None
-
-
-def _cgroup_oom_kill_count(events_path: Path = CGROUP_MEMORY_EVENTS_PATH) -> int | None:
-    try:
-        text = events_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[0] == "oom_kill" and parts[1].isdigit():
-            return int(parts[1])
-    return None
+        exposure = float(getattr(frozen_report, "exposure"))
+        equity = float(getattr(frozen_report, "equity_usdt"))
+        unit_obs = int(getattr(frozen_report, "unit_observations"))
+    except (TypeError, ValueError, AttributeError):
+        return ""
+    return f" exposure={exposure:.4f} equity_usdt={equity:.2f} unit_observations={unit_obs}"
 
 
 def _log_stage_elapsed(stage: str, target: pd.Timestamp, started: float) -> None:
     elapsed_s = time.monotonic() - started
     logger.info("[SYS] stage=%s decision_time=%s elapsed_s=%.1f", stage, _as_utc(target).isoformat(), elapsed_s)
-
-
-def _default_signal_step(target: pd.Timestamp, *, shutdown: ShutdownFlag | None = None) -> None:
-    """Production signal step: heavy compute isolated in a short-lived subprocess."""
-    _run_signal_step_subprocess([sys.executable, "-m", "src.cli.main", "live", "signal-step", "--date", pd.Timestamp(target).isoformat()], timeout_s=SIGNAL_STEP_TIMEOUT_S, shutdown=shutdown)
 
 
 def run_daemon(
@@ -409,15 +411,20 @@ def run_daemon(
     now_fn: Callable[[], pd.Timestamp] = _utc_now,
     max_iterations: int | None = None,
     shutdown: ShutdownFlag | None = None,
-    refresh_fn: Callable[[], Any] = _default_data_refresh,  # refresh_fn: Callable[[], None] = _default_data_refresh
-    signal_step_fn: Callable[..., None] = _default_signal_step,
+    refresh_fn: Callable[[], Any] = _default_data_refresh,
+    signal_step_fn: Callable[[pd.Timestamp], Any] | None = None,
     prune_fn: Callable[[], None] = _default_data_prune,
+    venue_fn: Callable[[], None] | None = None,
 ) -> None:
-    """Merged autonomous loop: data refresh + signal-step + execution.
+    """Merged autonomous loop: venue snapshot + data refresh + frozen step + execution.
 
-    ``refresh_fn`` / ``signal_step_fn`` default to the real subprocess calls and
+    ``refresh_fn`` / ``signal_step_fn`` / ``venue_fn`` default to the live wiring and
     are injected only by tests -- there is no path-sniffing test detection.
     """
+    if signal_step_fn is None:
+        signal_step_fn = functools.partial(_default_frozen_step, settings=settings, weights_path=weights_path)
+    if venue_fn is None:
+        venue_fn = functools.partial(_default_venue_capture, settings)
     iteration = 0
     wait_fn: Callable[[float], object] = sleep_fn if sleep_fn is not None else (shutdown.wait if shutdown is not None else time.sleep)
     heartbeat_path = _resolve_heartbeat_path(settings)
@@ -473,7 +480,7 @@ def run_daemon(
                     alerts_sent.clear()
                     alerts_decision_time = target
 
-        wait_until = target + _SIGNAL_LAG + buffer_td
+        wait_until = target + DECISION_RELEASE_OFFSET + buffer_td
         remaining_seconds = (wait_until - now_fn()).total_seconds()
         while remaining_seconds > 0:
             if shutdown is not None and shutdown.requested:
@@ -485,14 +492,10 @@ def run_daemon(
         if shutdown is not None and shutdown.requested:
             break
 
-        if not _strategy_params_present(settings):
-            _beat("AWAITING", "idle", detail="strategy_params missing")
-            _daemon_alert(settings, alerts_sent, event="awaiting_params", detail="strategy_params missing", decision_time=target, now=now_fn())
-            try:
-                _wait(DAEMON_POLL_INTERVAL_SECONDS)
-            except Exception:
-                pass
-            continue
+        try:
+            venue_fn()
+        except Exception:  # noqa: BLE001
+            logger.exception("[SYS] venue capture failed decision_time=%s", target)
         if shutdown is not None and shutdown.requested:
             break
         _beat("RUNNING", "refresh")
@@ -543,35 +546,20 @@ def run_daemon(
 
         signal_status = "COMPLETE"
         failure_cause = ""
-        result_path = signal_step_result_path(weights_path)
-        try:
-            result_path.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning("[SYS] signal_step_result unlink failed path=%s error=%s", result_path, exc)
+        frozen_report = None
         quarantined = 0
         _beat("RUNNING", "signal")
-        oom_kills_before = _cgroup_oom_kill_count()
         stage_started = time.monotonic()
         try:
-            signal_step_fn(target)
-        except SignalStepInterrupted:
-            logger.warning("[SYS] signal-step interrupted by shutdown decision_time=%s", target)
-            break
-        except subprocess.CalledProcessError as exc:
-            logger.exception("[SYS] signal-step failed decision_time=%s", target)
+            frozen_report = signal_step_fn(target)
+        except (DataIntegrityError, CausalityViolation) as exc:
+            logger.exception("[SYS] frozen step halted decision_time=%s", target)
             signal_status = "HALT"
-            failure_cause = f"signal_step exit={exc.returncode}"
-            oom_kills_after = _cgroup_oom_kill_count()
-            if oom_kills_before is not None and oom_kills_after is not None and oom_kills_after > oom_kills_before:
-                failure_cause += " oom_killed"
-            # 자식 프로세스가 남긴 typed 원인을 덧붙임
-            sidecar = read_signal_step_result(result_path, target)
-            if sidecar is not None and sidecar.status == SIGNAL_STEP_STATUS_FAILED:
-                failure_cause += f" {sidecar.error_type}: {sidecar.reason}"
-        except Exception as exc:
-            logger.exception("[SYS] signal-step crashed decision_time=%s", target)
+            failure_cause = f"frozen_step {type(exc).__name__}: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[SYS] frozen step crashed decision_time=%s", target)
             signal_status = "HALT"
-            failure_cause = f"signal_step {type(exc).__name__}"
+            failure_cause = f"frozen_step {type(exc).__name__}: {exc}"
         finally:
             _log_stage_elapsed("signal", target, stage_started)
 
@@ -605,14 +593,6 @@ def run_daemon(
                 continue
         if shutdown is not None and shutdown.requested:
             break
-        if signal_status == "COMPLETE":
-            sidecar = read_signal_step_result(result_path, target)
-            records = sidecar.quarantine if sidecar is not None else ()
-            quarantined = len(records)
-            if records:
-                detail = f"count={len(records)} symbols=" + ",".join(f"{s}:{r}" for s, r in records[:DAEMON_ALERT_SYMBOL_SAMPLE])
-                logger.warning("[DATA] stage=signal_quarantine_alert %s", detail)
-                _daemon_alert(settings, alerts_sent, event="data_quarantine", detail=detail, decision_time=target, now=now_fn())
 
         try:
             prune_old_audit_logs(AUDIT_LOG_ROOT / "live", target)
@@ -651,7 +631,7 @@ def run_daemon(
         if status == "COMPLETE":
             alerts_sent.clear()
             if settings.alert_daily_digest:
-                digest_detail = f"intents={getattr(report, 'intent_count', 0)} reason={getattr(report, 'reason', None)} dropped_fraction={float(getattr(report, 'dropped_notional_fraction', 0.0)):.4f} quarantined={quarantined} {refresh_note}"
+                digest_detail = f"intents={getattr(report, 'intent_count', 0)} reason={getattr(report, 'reason', None)} dropped_fraction={float(getattr(report, 'dropped_notional_fraction', 0.0)):.4f} quarantined={quarantined} {refresh_note}{_sizing_note(frozen_report)}"
                 _daemon_alert(settings, alerts_sent, event="cycle_complete", detail=digest_detail, decision_time=target, now=now_fn())
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
             continue

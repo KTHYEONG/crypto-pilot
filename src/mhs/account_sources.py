@@ -44,6 +44,23 @@ def _cumulative_funding_on_grid(series: pd.Series | None, grid: pd.DatetimeIndex
     return np.cumsum(step)
 
 
+def causal_adv_sigma(
+    daily_quote_volume: pd.DataFrame, daily_close: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Causal ADV and daily sigma on the daily grid.
+
+    ADV is the 30-day median daily quote volume shifted one day and sigma is the
+    21-day std of daily log returns shifted one day, so neither includes the day
+    it is labelled on.
+    """
+    adv = daily_quote_volume.rolling(30, min_periods=1).median().shift(1)
+    closes = daily_close
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_returns = np.log(closes / closes.shift(1))
+    daily_sigma = log_returns.rolling(21, min_periods=1).std().shift(1)
+    return adv, daily_sigma
+
+
 def assemble_account_inputs(
     candidate: FrozenMhsCandidate, context: FrozenSourceContext,
 ) -> tuple[pd.DataFrame, AccountMarkPanels, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -72,10 +89,7 @@ def assemble_account_inputs(
     )
     # 원장은 진입일 단위로 펀딩 증분을 정산하므로 누적값을 각 진입 시각에서 표본화한다.
     funding_cum = funding_grid.reindex(entries)
-    quote_volume = context.daily_quote_volume[held]
-    adv = quote_volume.rolling(30, min_periods=1).median().shift(1).reindex(entries)
-    closes = context.daily_close[held]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        log_returns = np.log(closes / closes.shift(1))
-    daily_sigma = log_returns.rolling(21, min_periods=1).std().shift(1).reindex(entries)
+    adv_full, sigma_full = causal_adv_sigma(context.daily_quote_volume[held], context.daily_close[held])
+    adv = adv_full.reindex(entries)
+    daily_sigma = sigma_full.reindex(entries)
     return weights[held], marks, funding_cum, adv, daily_sigma

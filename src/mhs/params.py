@@ -438,6 +438,13 @@ ACCOUNT_MAKER_FEE_BPS: float = 2.0
 # 오르지만 역선택도 커진다. 공식 원장과 같은 길이를 써야 두 원장이 비교 가능하다.
 ACCOUNT_PASSIVE_WINDOW_BARS: int = 10
 
+# --- live frozen paper ---------------------------------------------------------
+# 120일 1h 창에서 frozen 비중이 전체 이력과 비트 동일함을 실측했다(로스터 90일 거래 요건 +
+# 30일 중앙값 + 720h 피처). 이보다 짧으면 로스터가 비거나 달라진다.
+LIVE_FROZEN_WARMUP_DAYS: int = 120
+# 단위 proxy 수익률의 회전 비용. 메이커 체결률 약 98% 실측에 맞춰 메이커 수수료를 쓴다.
+LIVE_UNIT_PROXY_COST_BPS: float = ACCOUNT_MAKER_FEE_BPS
+
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).
 PROCESS_REFIT_FREQUENCY: str = "MS"

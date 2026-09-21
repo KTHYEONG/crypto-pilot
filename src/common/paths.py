@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+APP_ROOT: Path = BASE_DIR
+"""Repository root. Live deployment defaults (frozen unit history, venue fallback) anchor here."""
 DATA_DIR = BASE_DIR / "data"
 FUTURES_DATA_DIR = DATA_DIR / "futures"
 SPOT_DATA_DIR = DATA_DIR / "spot"

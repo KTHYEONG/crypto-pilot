@@ -117,19 +117,6 @@ def test_no_eager_facade_on_package_import() -> None:
     assert proc.stdout.strip() == "[]"
 
 
-def test_maintained_live_targets_direct_owner() -> None:
-    """Live signal step builds targets from the concrete fold owner."""
-    text = _read_text(ROOT / "src/mhs/live_signal_step.py")
-    assert "from src.mhs.evaluation.fold_weights import _build_fold_target_weights" in text
-    assert "missing _build_fold_target_weights" not in text
-    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
-
-    params = list(inspect.signature(_build_fold_target_weights).parameters)
-    assert params[:4] == ["root", "fold", "request", "funding_by_symbol"]
-    for name in ("decision_start", "decision_end", "deadband_seed_row", "panel_quarantine"):
-        assert name in params
-
-
 def test_maintained_research_and_deployment_smoke() -> None:
     """Supported research CLI and deployment wiring stay importable."""
     from src.cli.commands.research.mhs import _run_mhs_horizon_diagnostic, add_mhs_commands

@@ -22,7 +22,6 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
-from pydantic import SecretStr
 
 from src.mhs.contracts import (
     MhsBookReport,
@@ -34,7 +33,6 @@ from src.mhs.deployment_policy import live_parity_blockers
 from src.mhs.deploy_gate import deploy_gate_from_report
 from src.mhs.resources import _peak_rss_bytes
 from src.common.errors import DataIntegrityError
-from src.live.crypto import derive_key
 from src.mhs.execution import StrategyExecutionReplayResult
 from src.mhs.params import ARTIFACT_CATEGORIES
 from src.mhs.report.artifacts import (
@@ -46,123 +44,8 @@ from src.mhs.report.artifacts import (
 )
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.run_history import append_run_history_record, canonical_history_registry
-from src.common.paths import DEPLOY_MHS_DIR
 
 logger = logging.getLogger("MhsHorizonDiagnostic")
-
-
-def _resolved_deployment_member_weights(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest, admitted: tuple[str, ...]) -> dict[str, float]:
-    """배포 봉인용 멤버 가중치를 확정한다(정규화 없이 원본 그대로 봉인)."""
-    if len(admitted) == 0:
-        raise DataIntegrityError("emit_deployment: empty member tuple cannot seal member weights")
-    if not getattr(request, "committee_evidence_weighting", False):
-        return {m: 1.0 / len(admitted) for m in admitted}
-    weights = getattr(report, "committee_member_weights", None)
-    if not weights:
-        raise DataIntegrityError("emit_deployment: committee_evidence_weighting=True but the report carries no committee_member_weights")
-    unknown = set(weights) - set(admitted)
-    if unknown:
-        raise DataIntegrityError(f"emit_deployment: non-admitted members {sorted(unknown)} not in admitted set")
-    for name, value in weights.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0.0:
-            raise DataIntegrityError(f"emit_deployment: member weight for {name!r} must be finite and >= 0")
-    total = sum(float(v) for v in weights.values())
-    if total <= 0.0:
-        raise DataIntegrityError("emit_deployment: committee_member_weights sum must be > 0")
-    logged = {k: round(float(v), 6) for k, v in weights.items()}
-    logger.info("[SYS] deployment_member_weights source=evidence n=%d sum=%.6f weights=%s", len(weights), total, logged)
-    return {k: float(v) for k, v in weights.items()}
-
-
-def emit_deployment(report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest, artifact_root: Path | None = None, *, artifact_key: SecretStr | None = None) -> dict[str, Any]:
-    """Emit v2 strategy params + bound bootstrap (sealed when artifact_key given).
-
-    Deployment output resolves to the sealed delivery boundary
-    (`deploy/mhs`) when the caller supplies no explicit root. Plaintext
-    payloads are local-only and never tracked; only sealed envelopes leave
-    the boundary. Seal-before-read verification applies before return.
-    """
-    from src.common.errors import DataIntegrityError
-    from src.mhs.deployment_policy import build_deployment_policy
-    from src.mhs.live_strategy import LiveStrategyParams, load_strategy_params, save_strategy_bootstrap, save_strategy_params
-    from src.mhs.params import COMMITTEE_MEMBER_SETS, SIGNAL_RETURN_TAIL_DAYS
-
-    gate = deploy_gate_from_report(report, request)
-    if not gate.go:
-        raise DataIntegrityError(f"deployment ineligible: {','.join(gate.reason_codes)}")
-    if report.blend is None or getattr(report.blend, "target_weights", None) is None:
-        raise DataIntegrityError("deployment ineligible: blend target_weights empty")
-    tw = report.blend.target_weights
-    if tw is None or tw.empty:
-        raise DataIntegrityError("deployment ineligible: blend target_weights empty")
-    if artifact_key is None:
-        logger.warning("[SYS] emit_deployment writing PLAINTEXT artifacts (LIVE_ARTIFACT_KEY unset); fine for local, seal before --deploy-push")
-    member_set_key = getattr(request, "committee_member_set", None)
-    if member_set_key not in COMMITTEE_MEMBER_SETS:
-        raise DataIntegrityError(f"emit_deployment: unregistered committee_member_set {member_set_key!r}")
-    admitted = tuple(COMMITTEE_MEMBER_SETS[member_set_key])
-    member_weights = _resolved_deployment_member_weights(report, request, admitted)
-    reference = getattr(report.blend, "pre_vol_target_reference", None)
-    if reference is None or getattr(reference, "ledger", None) is None:
-        raise DataIntegrityError("emit_deployment requires pre_vol_target_reference ledger")
-    equity = reference.ledger.equity
-    ref_returns = equity.resample("1D").last().pct_change().dropna()
-    tail = ref_returns.tail(SIGNAL_RETURN_TAIL_DAYS)
-    if not tail.empty and tail.index.tz is None:
-        tail.index = tail.index.tz_localize("UTC")
-    tail = pd.Series(tail.to_numpy(dtype="float64"), index=tail.index, dtype="float64", name="reference_daily_return")
-    from src.mhs.params import PNL_TARGET_ANNUAL_VOL
-    from src.mhs.research_go import _resolved_growth_envelope
-    import src.mhs.scaling as _scaling_mod
-    from src.mhs.scaling import resolved_exposure_cap
-
-    envelope = _resolved_growth_envelope(request)
-
-    mode = str(request.pnl_vol_target_mode)
-    if mode == "constant_risk":
-        resolved_vol = float(_scaling_mod._constant_risk_target_vol(ref_returns, envelope, drawdown_brake=request.exposure_drawdown_brake))
-    elif mode == "growth_budget" or (mode == "exante_target" and envelope.name != "conservative"):
-        resolved_vol = float(_scaling_mod._growth_budget_target_vol(ref_returns, envelope=envelope))
-    else:
-        resolved_vol = float(PNL_TARGET_ANNUAL_VOL)
-    exp_cap = float(resolved_exposure_cap(request))
-    policy = build_deployment_policy(request, slow_horizon_hours=int(getattr(report.blend, "horizon_hours", 168) or 168), committee_member_weights=dict(member_weights), admitted_members=tuple(admitted), target_annual_vol=resolved_vol, exposure_cap=exp_cap)
-    try:
-        from src.quant.evaluation.policy import resolve_evaluation_end as _resolve_end
-        eval_end = _resolve_end(request.end, unseal_holdout=getattr(request, "final_oos_2026h1", False))
-    except Exception:
-        eval_end = pd.Timestamp(tw.index[-1])
-    try:
-        start_ts = pd.Timestamp(request.start) if getattr(request, "start", None) is not None else pd.Timestamp(tw.index[0])
-    except Exception:
-        start_ts = pd.Timestamp(tw.index[0])
-    start_ts = start_ts.tz_localize("UTC") if start_ts.tzinfo is None else start_ts.tz_convert("UTC")
-    eval_end = eval_end.tz_localize("UTC") if eval_end.tzinfo is None else eval_end.tz_convert("UTC")
-    created_at = pd.Timestamp.now(tz="UTC")
-    held_row = {str(k): float(v) for k, v in tw.iloc[-1].items()}
-    artifact_root = DEPLOY_MHS_DIR if artifact_root is None else Path(artifact_root)
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    bootstrap_path = artifact_root / "strategy_bootstrap.parquet"
-    saved_bootstrap_path, bootstrap_digest = save_strategy_bootstrap(bootstrap_path, tail, artifact_key=artifact_key)
-    params = LiveStrategyParams(
-        schema_version=2,
-        strategy_digest="",
-        backtest_window=(start_ts, eval_end),
-        created_at=created_at,
-        policy=policy,
-        bootstrap_sha256=bootstrap_digest,
-        bootstrap_held_row=held_row,
-        data_policy=str(request.data_policy),
-    )
-    params_path = save_strategy_params(artifact_root / "strategy_params.json", params, artifact_key=artifact_key)
-    loaded = load_strategy_params(params_path, artifact_key=artifact_key)
-    return {
-        "strategy_digest": loaded.strategy_digest,
-        "params_path": str(params_path),
-        "bootstrap_path": str(saved_bootstrap_path),
-        "n_reference_rows": len(tail),
-        "sealed": bool(artifact_key is not None),
-    }
 
 
 def persist_mhs_report(
