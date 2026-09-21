@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_ACCOUNT_BAYESIAN_KELLY",
+      "date": "2026-09-21",
+      "adr_id": "ADR_20260921_MHS_ACCOUNT_BAYESIAN_KELLY",
+      "domain": "risk",
+      "title": "MHS 계정 노출 정책을 인과적 베이지안 수축 Kelly로 교체, 재조정 MDD 부호 수정",
+      "why": "성장 정책의 μ/σ가 평가구간 전체로 잰 표본내 상수라 사실상 고정 레버리지였고, 재조정 mdd_gap의 부호 버그로 25%p 미해소 격차가 잘못 보고되고 있었다",
+      "resolution": "사전 μ=0(730일 가중)에서 매일 전날까지의 단위북 실적으로 사후 μ·σ를 갱신하는 bayesian_unit_moments를 도입하고, 단위(x1) 기준 원장을 한 번만 돌려 사이징 입력과 재조정에 함께 쓰도록 CLI를 재배선했으며, mdd_gap과 카탈로그의 base_max_drawdown을 절대값(크기) 기준으로 통일했다",
+      "impact": "실측: 인과적 정책 하에 ₩300만 CAGR 176.8%/MDD -38.5%(평균 노출 3.64), $100k 104.6%/-32.4%(평균 노출 2.84), 청산 없음; 재조정 mdd_gap은 -0.036으로 정정됐다(기존 -0.254는 부호 버그)",
+      "caveat": "북 설계(멤버·호라이즌·로스터)는 여전히 표본내이고, prior_days=730/mean_haircut=0.5는 probe에서 확인한 선언값이라 결과 반영 없이 사전에 고정한 값이며, 실증은 2026-07+ 보존구간과 paper 운용만 깨끗하다"
+    },
+    {
       "task_id": "TASK_MHS_ACCOUNT_LEDGER",
       "date": "2026-09-21",
       "adr_id": "ADR_20260921_MHS_ACCOUNT_LEDGER",
@@ -1015,16 +1026,6 @@
       "why": "배포 오버레이 constant_risk가 이 북에서 실현변동성과 연간 Sharpe가 양의 상관이라 anti-Kelly로 작동, 최악 에지 해(2024)에 두번째로 높은 레버리지·최고 에지 해(2025)에 최저 레버리지를 배분함을 82개 run_history + daily_ledger.parquet 직접 분해로 실측. 오프라인 선형모델이 실제 3m 리플레이를 일별 corr 0.9994로 재현해 신뢰 검증.",
       "resolution": "src/application/research/mhs/scaling.py에 _equity_drawdown_brake_scale 신설(인과적 자기참조 재귀, scale_t=clip(base_t*clip(1+k*underwater_{t-1},floor,1),0,cap), 단일 Python 루프 O(n)). _constant_risk_target_vol에 drawdown_brake 키워드 추가(True 시 budget=inf로 _feasible_constant_risk_target의 leverage_ceiling*q10(sigma_book) 클램프만으로 비적합 target_vol 유도, 신규 적합상수 없음). _replay_exposure_scale 단일 디스패처에서 constant_risk 분기에 합성. is_streaming_scale_mode는 브레이크 ON 시 무조건 False. MhsDiagnosticRequest.exposure_drawdown_brake 필드 + validate_request fail-closed(constant_risk 전용, pnl_vol_target=True 필수) + CLI --exposure-drawdown-brake 플래그(기본 False, 비트동일 보존). 상수 EXPOSURE_DRAWDOWN_BRAKE_K=2.0/FLOOR=0.2는 params.py 등록(k는 2.0~6.0 플래토 실측, floor는 실측상 비활성). fold 경로는 blend의 확정 exposure_scale을 슬라이스 재사용하는 기존 배선을 그대로 타므로 코드 변경 없이 브레이크가 자동 전파(I-SCALE-IS-DEPLOYED-OVERLAY 보존, FOLD_BLEND_PATH_DIVERGENCE 재발 없음). 실제 3m 리플레이(constant_risk+growth_extreme+brake) 검증: CAGR 1.761->3.322(+89%), MDD -0.402->-0.400(횡보), Calmar 4.38->8.31이나 fold3(2025) 성장 기여율이 55.4%->65.5%로 상승해 등록임계값(60.1%) 초과, Research-GO 사유가 []에서 FOLD_GROWTH_CONCENTRATION으로 전환(신규 부작용, 미해결). 기본(growth_budget, 브레이크 OFF) 프로덕션 실행은 CAGR 3.184/MDD -0.389/Calmar 8.19/DSR 0.794로 Research-GO 완전 통과 확인, 회귀 없음.",
       "impact": "기본 실행 경로는 비트동일 보존(회귀 없음, 프로덕션 GO 상태 불변). exposure_drawdown_brake=True는 opt-in 실험 플래그로 남아 프로덕션에 영향 없음. 실측 결과 constant_risk+brake 조합은 fold_growth_concentration 부작용으로 이번 스펙 범위 내 채택 보류, 후속 과제로 k 하향 또는 fold별 상한 재검토 필요."
-    },
-    {
-      "task_id": "MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE_REAL_EXECUTION",
-      "date": "2026-08-24",
-      "adr_id": "ADR_20260824_MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE_REAL_EXECUTION",
-      "domain": "risk",
-      "title": "MHS Research-GO 최종 달성: exposure_scale blend 슬라이스 재사용으로 FOLD_BLEND_PATH_DIVERGENCE 완전 해소",
-      "why": "ADR_20260824_MHS_FOLD_BLEND_PATH_DIVERGENCE_SCALE_SLICE 구현 직후 실제 CLI(--pnl-vol-target-mode constant_risk --execution-timeframe 3m)로 2021-2025 전체 원장을 재실행해 fold-local EWMA 재적합 제거가 실제로 게이트를 통과시키는지, blend 자체 성과가 비트동일한지 검증.",
-      "resolution": "실측: research_go.eligible=True, reason_codes=[](완전 해소). fold_blend_parity.max_abs_log_deployed_gross_ratio가 0.306545(직전)에서 0.039233으로 붕괴 -- 정확히 max_abs_log_gross_ratio(원시 북 비중 괴리, 0.039233)와 동일값으로 수렴함. 이는 스케일 축 괴리가 완전히 0이 되어 fold/blend deployed_gross 차이가 순수 신호 구성 차이(±0.04, 애초에 tolerance 0.25에 여유있게 통과하던 수준)로만 남았다는 예측이 정확히 실측 확인된 것. blend.primary_geometric_cagr=1.761383, primary_max_drawdown=-0.402129로 직전 실행(committee 가중치 단일화 이후)과 완전 비트동일 -- blend/top-level 경로가 이번 변경으로 전혀 영향받지 않았음을 재확인. deployment_readiness.research_go_eligible=True, calmar=4.38.",
-      "impact": "MHS Phase 1 Research-GO 통과 -- Phase 2(Execution GO, L1/L2 오더북 실시간 체결 검증)로 진행 가능한 상태가 됨. 3차례 시도(target_vol 단일화 무효과 -> committee 가중치 단일화 부분개선 -> exposure_scale 자체를 fold-local 재계산에서 blend 슬라이스 재사용으로 전환해 완전해소)를 통해 얻은 아키텍처 교훈: MHS Phase 1 설계가 의도적으로 배제한 사이징/리스크 오버레이 계층(Kelly, 동적 레버리지 등)과 마찬가지로, constant_risk exposure_scale도 fold별 독립 재적합 대상이 아니라 blend가 배치 확정한 단일 값으로 취급해야 한다는 I-SCALE-IS-DEPLOYED-OVERLAY 원칙이 실측으로 검증됨. fold의 target_weights(raw alpha) 독립 재시뮬레이션은 그대로 유지되어 walk-forward 알파 강건성 검증력은 보존됨."
     }
   ]
 }
