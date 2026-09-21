@@ -50,6 +50,24 @@ def _funding(args: argparse.Namespace) -> None:
     _logger.info("Funding collection complete for %s (through %s)", args.symbol, args.end)
 
 
+def _venue_rules(args: argparse.Namespace) -> None:
+    from src.common.paths import VENUE_RULES_DIR
+    from src.market_data.binance.venue_rules import fetch_venue_rules, write_venue_rule_snapshot
+
+    today = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d")
+    existing = VENUE_RULES_DIR / f"{today}.json"
+    if existing.exists():
+        _logger.info("[DATA] venue-rules already captured path=%s", existing)
+        return
+    snapshot = fetch_venue_rules()
+    path = write_venue_rule_snapshot(snapshot, VENUE_RULES_DIR)
+    print(path)
+    _logger.info(
+        "[DATA] venue-rules symbols=%d captured_at=%s",
+        len(snapshot.symbols), snapshot.captured_at.isoformat(),
+    )
+
+
 def _universe_gaps(args: argparse.Namespace) -> None:
     """List (and with ``--execute`` collect) Vision perpetuals missing from the local lake.
 
@@ -471,6 +489,11 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     funding.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     funding.add_argument("--end", required=True)
     funding.set_defaults(handler=_funding)
+
+    venue_rules = collect_sub.add_parser(
+        "venue-rules", help="Snapshot Binance USD-M leverage brackets and order filters",
+    )
+    venue_rules.set_defaults(handler=_venue_rules)
 
     universe_gaps = collect_sub.add_parser(
         "universe-gaps", help="List or collect Vision perpetuals missing from the local lake",
