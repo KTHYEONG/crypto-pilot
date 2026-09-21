@@ -381,10 +381,10 @@ COMMITTEE_TARGET_GROSS_UNSET: object = object()
 # --- canonical run retention -------------------------------------------------------
 # Default detail-retention quotas for canonical 3-minute runs; None keeps every
 # managed bundle for the byte budget, while the run-count budget defaults to
-# the five most recent unprotected finalized bundles. The CLI references these
-# names instead of hiding literals.
+# only the single most recent unprotected finalized bundle. The CLI references
+# these names instead of hiding literals.
 DEFAULT_DETAIL_RETENTION_MAX_BYTES: int | None = None
-DEFAULT_DETAIL_RETENTION_MAX_RUNS: int | None = 5
+DEFAULT_DETAIL_RETENTION_MAX_RUNS: int | None = 1
 
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).

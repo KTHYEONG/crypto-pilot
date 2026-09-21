@@ -13,7 +13,7 @@ import pandas as pd
 
 from src.backtests.contracts import RetentionPolicy
 from src.common.paths import BACKTESTS_DIR, FROZEN_BACKTESTS_DIR
-from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+from src.mhs.params import DEFAULT_DETAIL_RETENTION_MAX_RUNS, DISCOVERY_START, PROCESS_EVALUATION_CEILING
 from src.mhs.resources import MhsMemoryBudget
 
 if TYPE_CHECKING:
@@ -232,6 +232,59 @@ def run_mhs_backtest(args: argparse.Namespace) -> None:
         raise SystemExit(f"invalid backtest controls: {exc}") from exc
     if run.status != "completed":
         raise SystemExit(1)
+    if result_output.is_file():
+        payload = json.loads(result_output.read_text(encoding="utf-8"))
+        base = payload.get("financial", {}).get("base", {})
+        _append_backtest_index(
+            index_path=BACKTESTS_DIR / "index.jsonl",
+            kind="mhs", run_dir=result_output.parent, created_at=pd.Timestamp.now(tz="UTC"),
+            evaluation_start=start, evaluation_end=end, strategy_id="process_inventory_3m",
+            base_cagr=base.get("cagr"), base_max_drawdown=base.get("max_drawdown"),
+        )
+
+def _append_backtest_index(
+    *, index_path: Path, kind: str, run_dir: Path, created_at: pd.Timestamp,
+    evaluation_start: pd.Timestamp, evaluation_end: pd.Timestamp,
+    strategy_id: str, base_cagr: float | None, base_max_drawdown: float | None,
+) -> None:
+    """Append one headline row to the single cross-pipeline backtest catalog.
+
+    This is the sole file a human or analysis script needs to read to see
+    every backtest ever run (canonical or frozen-research), with headline
+    metrics inline; `registry.sqlite3`/`evidence/` stay internal plumbing for
+    fingerprint reuse and content-addressed detail dedup.
+
+    Args:
+        index_path: Destination `index.jsonl`, derived by the caller from
+            whichever run-root it already owns (never hardcoded here).
+        kind: Producing pipeline identity, `"mhs"` or `"mhs_frozen"`.
+        run_dir: Directory holding that run's own result envelope.
+        created_at: UTC timestamp of index-write time.
+        evaluation_start: Registered evaluation start.
+        evaluation_end: Registered evaluation end.
+        strategy_id: Strategy identity string for the run.
+        base_cagr: Headline base-cost CAGR, or `None` if not cheaply available.
+        base_max_drawdown: Headline base-cost max drawdown, or `None` likewise.
+    Returns:
+        None after appending one JSON line to `index_path`.
+    """
+    try:
+        rel_run_dir = str(run_dir.relative_to(index_path.parent))
+    except ValueError:
+        rel_run_dir = str(run_dir)
+    record = {
+        "kind": kind,
+        "run_dir": rel_run_dir,
+        "created_at": created_at.isoformat(),
+        "evaluation_start": evaluation_start.isoformat(),
+        "evaluation_end": evaluation_end.isoformat(),
+        "strategy_id": strategy_id,
+        "base_cagr": base_cagr,
+        "base_max_drawdown": base_max_drawdown,
+    }
+    with index_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+
 
 def _frozen_strategy(breadth: int) -> FrozenMhsStrategySpec:
     """Select the primary Top-20 policy or a breadth-labelled research control."""
@@ -264,11 +317,19 @@ def _frozen_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
     return base, stress
 
 
-def _resolve_frozen_destination(args: argparse.Namespace) -> Path:
-    """Resolve the frozen research result destination, defaulting to a fresh run directory.
+def _frozen_run_name(start: pd.Timestamp, end: pd.Timestamp, breadth: int, created_at: pd.Timestamp) -> str:
+    """Human-readable frozen run directory name: dates and breadth are legible without opening any file."""
+    return f"{start:%Y%m%d}_{end:%Y%m%d}_top{breadth}_{created_at:%Y%m%dT%H%M%S}Z"
+
+
+def _resolve_frozen_destination(args: argparse.Namespace, *, start: pd.Timestamp, end: pd.Timestamp, breadth: int) -> Path:
+    """Resolve the frozen research result destination, defaulting to a fresh, human-readable run directory.
 
     Args:
         args: Parsed frozen-MHS backtest arguments.
+        start: Registered evaluation start, used to name the default run directory.
+        end: Registered evaluation end, used to name the default run directory.
+        breadth: Declared universe breadth, used to name the default run directory.
     Returns:
         A fresh `result.json` destination under the frozen runs directory.
     Raises:
@@ -278,8 +339,13 @@ def _resolve_frozen_destination(args: argparse.Namespace) -> Path:
 
     raw_output = getattr(args, "output", None)
     if raw_output is None:
-        run_dir = FROZEN_BACKTESTS_DIR / uuid.uuid4().hex
-        run_dir.mkdir(parents=True, exist_ok=True)
+        name = _frozen_run_name(start, end, breadth, pd.Timestamp.now(tz="UTC"))
+        run_dir = FROZEN_BACKTESTS_DIR / name
+        suffix = 1
+        while os.path.lexists(run_dir):
+            suffix += 1
+            run_dir = FROZEN_BACKTESTS_DIR / f"{name}-{suffix}"
+        run_dir.mkdir(parents=True)
         return run_dir / "result.json"
     output = Path(raw_output)
     if output.suffix != ".json":
@@ -290,23 +356,56 @@ def _resolve_frozen_destination(args: argparse.Namespace) -> Path:
 
 
 def _write_frozen_manifest(output: Path, *, request: FrozenMhsBacktestRequest, breadth: int) -> None:
-    """Persist the frozen research identity manifest beside the result envelope.
+    """Persist the frozen research identity manifest beside the result envelope, and append it to the run index.
 
     Args:
         output: Finalized frozen result JSON destination.
         request: Executed frozen backtest request carrying identity timestamps.
         breadth: Declared universe breadth for the research variant.
     Returns:
-        None after `manifest.json` is written beside `output`.
+        None after `manifest.json` is written beside `output` and appended to `index.jsonl`.
     """
     manifest = {
+        "run_dir": output.parent.name,
         "source_start": request.source_start.isoformat(),
         "evaluation_start": request.evaluation_start.isoformat(),
         "evaluation_end": request.evaluation_end.isoformat(),
         "breadth": breadth,
         "strategy_id": request.strategy.strategy_id,
+        "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
     }
     (output.parent / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    if output.parent.parent == FROZEN_BACKTESTS_DIR:
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        evaluation = payload.get("report_periods", {}).get("evaluation", {})
+        _append_backtest_index(
+            index_path=FROZEN_BACKTESTS_DIR.parent.parent / "index.jsonl",
+            kind="mhs_frozen", run_dir=output.parent, created_at=pd.Timestamp.now(tz="UTC"),
+            evaluation_start=request.evaluation_start, evaluation_end=request.evaluation_end,
+            strategy_id=request.strategy.strategy_id,
+            base_cagr=evaluation.get("base_cagr"), base_max_drawdown=evaluation.get("base_max_drawdown"),
+        )
+
+
+def _prune_frozen_runs(keep: int) -> None:
+    """Reclaim result detail for finalized frozen runs beyond the most recent `keep`; the index line is never removed.
+
+    Args:
+        keep: Positive count of most-recently-created run directories to retain in full.
+    Returns:
+        None after removing older run directories' files from disk.
+    """
+    import shutil
+
+    if not FROZEN_BACKTESTS_DIR.is_dir():
+        return
+    run_dirs = sorted(
+        (d for d in FROZEN_BACKTESTS_DIR.iterdir() if d.is_dir()),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in run_dirs[keep:]:
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
@@ -343,7 +442,7 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     end = _utc_timestamp(args.end, "end", PROCESS_EVALUATION_CEILING)
     if not source_start < start < end:
         raise SystemExit(f"require source-start < start < end, got {source_start} {start} {end}")
-    output = _resolve_frozen_destination(args)
+    output = _resolve_frozen_destination(args, start=start, end=end, breadth=breadth)
     budget = _resolve_budget(args)
     strategy = _frozen_strategy(breadth)
     base_spec, stress_spec = _frozen_specs()
@@ -375,6 +474,8 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
         )
     except (DataIntegrityError, ValueError, OSError) as exc:
         raise SystemExit(f"frozen backtest failed: {exc}") from exc
+    if output.parent.parent == FROZEN_BACKTESTS_DIR and DEFAULT_DETAIL_RETENTION_MAX_RUNS is not None:
+        _prune_frozen_runs(keep=DEFAULT_DETAIL_RETENTION_MAX_RUNS)
     status = "primary" if breadth == 20 else "research control"
     _logger.info("[EVAL] backtest mhs-frozen strategy=%s status=%s", strategy.strategy_id, status)
     print(str(output))  # noqa: T201 -- frozen command prints only the finalized result path
