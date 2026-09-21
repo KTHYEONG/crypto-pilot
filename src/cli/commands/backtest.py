@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -11,12 +12,13 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from src.backtests.contracts import RetentionPolicy
-from src.common.paths import BACKTESTS_DIR
+from src.common.paths import BACKTESTS_DIR, FROZEN_BACKTESTS_DIR
 from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 from src.mhs.resources import MhsMemoryBudget
 
 if TYPE_CHECKING:
     from src.mhs.frozen_research_candidate import FrozenMhsStrategySpec
+    from src.mhs.frozen_research_run import FrozenMhsBacktestRequest
     from src.mhs.types import ExecutionSpec
 
 _logger = logging.getLogger("MhsBacktestCli")
@@ -142,7 +144,7 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     frozen.add_argument("--start", default=None, help="UTC evaluation start; date-only values are UTC.")
     frozen.add_argument("--end", default=None, help="UTC exclusive evaluation end.")
     frozen.add_argument("--breadth", type=int, default=20, help="Positive universe breadth; 20 is the primary Top-20.")
-    frozen.add_argument("--output", default=None, help="Fresh complete research result envelope JSON destination.")
+    frozen.add_argument("--output", default=None, help="Fresh complete research result envelope JSON destination; omitted creates a unique frozen run directory under data/backtests/frozen/runs.")
     frozen.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
     frozen.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
     frozen.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
@@ -262,6 +264,51 @@ def _frozen_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
     return base, stress
 
 
+def _resolve_frozen_destination(args: argparse.Namespace) -> Path:
+    """Resolve the frozen research result destination, defaulting to a fresh run directory.
+
+    Args:
+        args: Parsed frozen-MHS backtest arguments.
+    Returns:
+        A fresh `result.json` destination under the frozen runs directory.
+    Raises:
+        SystemExit: An explicit destination is invalid or already occupied.
+    """
+    import os
+
+    raw_output = getattr(args, "output", None)
+    if raw_output is None:
+        run_dir = FROZEN_BACKTESTS_DIR / uuid.uuid4().hex
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir / "result.json"
+    output = Path(raw_output)
+    if output.suffix != ".json":
+        raise SystemExit(f"output must be a JSON path, got {raw_output!r}")
+    if os.path.lexists(output):
+        raise SystemExit(f"output must be fresh: {output} already exists")
+    return output
+
+
+def _write_frozen_manifest(output: Path, *, request: FrozenMhsBacktestRequest, breadth: int) -> None:
+    """Persist the frozen research identity manifest beside the result envelope.
+
+    Args:
+        output: Finalized frozen result JSON destination.
+        request: Executed frozen backtest request carrying identity timestamps.
+        breadth: Declared universe breadth for the research variant.
+    Returns:
+        None after `manifest.json` is written beside `output`.
+    """
+    manifest = {
+        "source_start": request.source_start.isoformat(),
+        "evaluation_start": request.evaluation_start.isoformat(),
+        "evaluation_end": request.evaluation_end.isoformat(),
+        "breadth": breadth,
+        "strategy_id": request.strategy.strategy_id,
+    }
+    (output.parent / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     """Run a research-only frozen MHS Top-20/variant 3m inventory evaluation.
 
@@ -277,8 +324,6 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     Raises:
         SystemExit: Arguments are invalid or the research replay fails.
     """
-    import os
-
     from src.common.errors import DataIntegrityError
     from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
     from src.mhs.frozen_research_report import persist_frozen_mhs_backtest
@@ -298,14 +343,7 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     end = _utc_timestamp(args.end, "end", PROCESS_EVALUATION_CEILING)
     if not source_start < start < end:
         raise SystemExit(f"require source-start < start < end, got {source_start} {start} {end}")
-    raw_output = getattr(args, "output", None)
-    if raw_output is None:
-        raise SystemExit("output is required")
-    output = Path(raw_output)
-    if output.suffix != ".json":
-        raise SystemExit(f"output must be a JSON path, got {raw_output!r}")
-    if os.path.lexists(output):
-        raise SystemExit(f"output must be fresh: {output} already exists")
+    output = _resolve_frozen_destination(args)
     budget = _resolve_budget(args)
     strategy = _frozen_strategy(breadth)
     base_spec, stress_spec = _frozen_specs()
@@ -330,6 +368,7 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     try:
         run = run_frozen_mhs_backtest(request)
         persist_frozen_mhs_backtest(run, output)
+        _write_frozen_manifest(output, request=request, breadth=breadth)
         _logger.info(
             "[EVAL] backtest mhs-frozen source_gap_excluded=%s",
             list(getattr(run, "source_gap_excluded_symbols", ())),
