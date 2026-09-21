@@ -6,9 +6,8 @@ on:
 
 env:
   IMAGE: ghcr.io/kthyeong/crypto-pilot-live
-  # 2026-09-20: 라이브 전달 임시 중단. or-vps 컨테이너도 수동으로 stop 처리됨.
-  # 재개하려면 이 값을 'false'로 되돌린다.
-  LIVE_DEPLOY_PAUSED: 'true'
+  # 2026-09-22: frozen 전략+메이커 집행+or-vps 자동화 정비 완료, PAPER 모드로 재개.
+  LIVE_DEPLOY_PAUSED: 'false'
 
 jobs:
   build-and-push:
