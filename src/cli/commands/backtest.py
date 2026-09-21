@@ -21,10 +21,11 @@ from src.mhs.params import (
     ACCOUNT_INITIAL_MARGIN_CAP,
     ACCOUNT_MARGIN_RESERVE,
     ACCOUNT_MEAN_HAIRCUT,
+    ACCOUNT_MIN_MOMENT_DAYS,
+    ACCOUNT_PRIOR_DAYS,
     ACCOUNT_SHOCK_PER_UNIT,
     ACCOUNT_TAKER_FEE_BPS,
-    ACCOUNT_UNIT_DAILY_MEAN,
-    ACCOUNT_UNIT_DAILY_SIGMA,
+    ACCOUNT_UNIT_REFERENCE_CAPITAL,
     DEFAULT_DETAIL_RETENTION_MAX_RUNS,
     DISCOVERY_START,
     FROZEN_GROWTH_NAME_CLIP,
@@ -773,12 +774,17 @@ def _resolve_account_destination(*, start: pd.Timestamp, end: pd.Timestamp, poli
 def run_frozen_account_command(args: argparse.Namespace) -> None:
     """Replay the frozen growth book as one real account and persist account-scale evidence.
 
-    Builds the unlevered (exposure 1.0) clip-0.05 candidate, assembles account inputs, replays
-    with the requested policy and venue snapshot, and writes ``account.json`` + ``account_daily.parquet``
-    in a fresh run directory ``<start>_<end>_top20_account_<policy>_<capital>_<ts>Z``.
+    Builds the unlevered (exposure 1.0) clip-0.05 candidate and first replays it as the
+    unit-exposure reference ledger (exposure 1, no order filters, no impact, reference
+    capital). That ledger both supplies the causal posterior moments the growth policy
+    sizes from and anchors the reconciliation against the canonical 3m ledger. The account
+    is then replayed with the requested policy and venue snapshot, and ``account.json`` +
+    ``account_daily.parquet`` are written in a fresh run directory
+    ``<start>_<end>_top20_account_<policy>_<capital>_<ts>Z``.
 
     Raises:
-        SystemExit: Invalid arguments, missing venue snapshot, or a data-integrity failure.
+        SystemExit: Invalid arguments, missing venue snapshot, a data-integrity failure,
+            or a failed unit reference replay.
     """
     import dataclasses
 
@@ -853,9 +859,9 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         kind="growth" if policy_name == "growth" else "fixed",
         exposure_max=float(fixed_exposure or ACCOUNT_EXPOSURE_MAX),
         exposure_step=ACCOUNT_EXPOSURE_STEP,
-        unit_daily_mean=ACCOUNT_UNIT_DAILY_MEAN,
-        unit_daily_sigma=ACCOUNT_UNIT_DAILY_SIGMA,
         mean_haircut=ACCOUNT_MEAN_HAIRCUT,
+        prior_days=ACCOUNT_PRIOR_DAYS,
+        min_moment_days=ACCOUNT_MIN_MOMENT_DAYS,
         shock_per_unit=ACCOUNT_SHOCK_PER_UNIT,
         margin_reserve=ACCOUNT_MARGIN_RESERVE,
         initial_margin_cap=ACCOUNT_INITIAL_MARGIN_CAP,
@@ -863,29 +869,39 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
     )
     apply_filters = not getattr(args, "no_order_filters", False)
     try:
+        unit_policy = dataclasses.replace(policy, kind="fixed", exposure_max=1.0, impact_y=0.0)
+        unit = replay_account(
+            unit_weights, marks, funding_cum, adv, daily_sigma, rules, unit_policy,
+            capital=ACCOUNT_UNIT_REFERENCE_CAPITAL, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS,
+            apply_order_filters=False,
+        )
+    except (DataIntegrityError, ValueError) as exc:
+        raise SystemExit(f"frozen account failed: unit reference {exc}") from exc
+    if unit.liquidated_at is not None:
+        raise SystemExit(
+            f"frozen account failed: unit reference liquidated at {unit.liquidated_at}"
+        )
+    try:
         result = replay_account(
             unit_weights, marks, funding_cum, adv, daily_sigma, rules, policy,
             capital=capital, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS, apply_order_filters=apply_filters,
+            unit_equity=unit.daily_equity,
         )
     except (DataIntegrityError, ValueError) as exc:
         raise SystemExit(f"frozen account failed: {exc}") from exc
     index_path = FROZEN_BACKTESTS_DIR.parent.parent / "index.jsonl"
+    unit_cagr, unit_mdd, _ = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
     try:
-        recon_policy = dataclasses.replace(policy, kind="fixed", exposure_max=1.0, impact_y=0.0)
-        recon = replay_account(
-            unit_weights, marks, funding_cum, adv, daily_sigma, rules, recon_policy,
-            capital=1e5, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS, apply_order_filters=False,
-        )
-        recon_cagr, recon_mdd, _ = _account_headlines(recon.daily_equity, 1e5)
         reference = _latest_primary_reference(index_path)
         reconciliation: dict[str, Any] = {
             "status": "ok",
             "fixed_exposure": 1.0,
-            "capital": 1e5,
+            "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
             "order_filters": False,
             "impact_y": 0.0,
-            "cagr": recon_cagr,
-            "mdd": recon_mdd,
+            "cagr": unit_cagr,
+            "mdd": unit_mdd,
+            "mdd_convention": "magnitude",
             "reference_canonical": None if reference is None else {
                 "strategy_id": reference.get("strategy_id"),
                 "run_dir": reference.get("run_dir"),
@@ -894,12 +910,13 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
                 "base_cagr": reference.get("base_cagr"),
                 "base_max_drawdown": reference.get("base_max_drawdown"),
             },
-            "cagr_gap": None if reference is None or reference.get("base_cagr") is None else recon_cagr - float(reference["base_cagr"]),
-            "mdd_gap": None if reference is None or reference.get("base_max_drawdown") is None else recon_mdd - float(reference["base_max_drawdown"]),
+            "cagr_gap": None if reference is None or reference.get("base_cagr") is None else unit_cagr - float(reference["base_cagr"]),
+            "mdd_gap": None if reference is None or reference.get("base_max_drawdown") is None else abs(unit_mdd) - abs(float(reference["base_max_drawdown"])),
         }
     except Exception as exc:  # noqa: BLE001 -- reconciliation is disclosed-only and never fails the run
         reconciliation = {"status": "failed", "error": str(exc)}
     cagr, mdd, final_equity = _account_headlines(result.daily_equity, capital)
+    moment_source = "bayesian_causal_unit_ledger" if policy_name == "growth" else "none"
     exposures = result.daily_exposure.to_numpy(dtype="float64")
     run_dir = _resolve_account_destination(start=start, end=end, policy=policy_name, capital=capital)
     payload = {
@@ -909,9 +926,9 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
             "kind": policy.kind,
             "exposure_max": policy.exposure_max,
             "exposure_step": policy.exposure_step,
-            "unit_daily_mean": policy.unit_daily_mean,
-            "unit_daily_sigma": policy.unit_daily_sigma,
             "mean_haircut": policy.mean_haircut,
+            "prior_days": policy.prior_days,
+            "min_moment_days": policy.min_moment_days,
             "shock_per_unit": policy.shock_per_unit,
             "margin_reserve": policy.margin_reserve,
             "initial_margin_cap": policy.initial_margin_cap,
@@ -936,7 +953,12 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         "funding_paid": result.funding_paid,
         "fallback_ladder_symbols": list(result.fallback_ladder_symbols),
         "missing_filter_symbols": list(result.missing_filter_symbols),
-        "in_sample_moments": True,
+        "moment_source": moment_source,
+        "unit_reference": {
+            "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
+            "cagr": unit_cagr,
+            "mdd": unit_mdd,
+        },
         "venue_rules_applied_retroactively": True,
         "reconciliation": reconciliation,
         "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
@@ -952,9 +974,9 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
             kind="mhs_frozen_account", run_dir=run_dir, created_at=pd.Timestamp.now(tz="UTC"),
             evaluation_start=start, evaluation_end=end,
             strategy_id=strategy.strategy_id,
-            base_cagr=cagr, base_max_drawdown=mdd,
+            base_cagr=cagr, base_max_drawdown=abs(mdd),
         )
     _logger.info(
-        "[EVAL] mhs-frozen-account capital=%.0f policy=%s cagr=%.4f mdd=%.4f liquidated=%s",
-        capital, policy_name, cagr, mdd, result.liquidated_at,
+        "[EVAL] mhs-frozen-account capital=%.0f policy=%s moment_source=%s cagr=%.4f mdd=%.4f liquidated=%s",
+        capital, policy_name, moment_source, cagr, mdd, result.liquidated_at,
     )

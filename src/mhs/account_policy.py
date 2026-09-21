@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -25,18 +26,73 @@ class VenueLadder:
 @dataclass(frozen=True, slots=True)
 class ExposurePolicy:
     """Daily exposure rule. ``fixed`` applies ``exposure_max`` unchanged (diagnostic only);
-    ``growth`` maximizes haircut expected log growth net of impact inside the margin cap."""
+    ``growth`` maximizes fractional-Kelly expected log growth on causally updated posterior
+    unit-book moments, net of impact, inside the margin cap. No field carries a moment
+    estimated on the evaluation window."""
 
     kind: Literal["fixed", "growth"]
     exposure_max: float
     exposure_step: float
-    unit_daily_mean: float
-    unit_daily_sigma: float
     mean_haircut: float
+    prior_days: float
+    min_moment_days: int
     shock_per_unit: float
     margin_reserve: float
     initial_margin_cap: float
     impact_y: float
+
+
+@dataclass(frozen=True, slots=True)
+class UnitMoments:
+    """Posterior daily moments of the unit-exposure book from returns observed strictly
+    before the current entry."""
+
+    mean: float
+    sigma: float
+    observations: int
+
+
+def bayesian_unit_moments(
+    observations: int, total: float, total_sq: float, *, prior_days: float, min_moment_days: int,
+) -> UnitMoments | None:
+    """Posterior unit-book moments under a zero-edge prior, from sufficient statistics.
+
+    The prior mean is 0 with the weight of ``prior_days`` observations, so the posterior
+    mean shrinks the sample mean by n / (n + prior_days); the posterior sigma inflates the
+    sample (population) standard deviation by sqrt(1 + 1 / (n + prior_days)) for mean
+    uncertainty. Sufficient statistics keep the daily update O(1).
+
+    Args:
+        observations: Count n of unit daily returns observed before the entry.
+        total: Sum of those returns.
+        total_sq: Sum of their squares.
+        prior_days: Prior weight in days; must be positive.
+        min_moment_days: Minimum n for a sample variance to be used.
+
+    Returns:
+        Posterior moments, or None when n < min_moment_days or the sample variance is not
+        strictly positive and finite.
+
+    Raises:
+        DataIntegrityError: prior_days not positive/finite, min_moment_days < 2, or
+            non-finite total/total_sq.
+    """
+    if not math.isfinite(prior_days) or not prior_days > 0:
+        raise DataIntegrityError(f"prior_days must be positive finite, got {prior_days}")
+    if min_moment_days < 2:
+        raise DataIntegrityError(f"min_moment_days must be >= 2, got {min_moment_days}")
+    if not math.isfinite(total) or not math.isfinite(total_sq):
+        raise DataIntegrityError(f"total/total_sq must be finite, got {total} {total_sq}")
+    n = observations
+    if n < min_moment_days:
+        return None
+    sample_mean = total / n
+    variance = total_sq / n - sample_mean * sample_mean
+    if not math.isfinite(variance) or not variance > 0:
+        return None
+    mean = total / (n + prior_days)
+    sigma = math.sqrt(variance * (1.0 + 1.0 / (n + prior_days)))
+    return UnitMoments(mean=mean, sigma=sigma, observations=n)
 
 
 def build_venue_ladders(
@@ -126,14 +182,15 @@ def margin_exposure_cap(
 def choose_exposure(
     weights: np.ndarray, equity: float, held_notional: np.ndarray, adv: np.ndarray,
     daily_sigma: np.ndarray, ladders: Sequence[VenueLadder], policy: ExposurePolicy,
+    moments: UnitMoments | None,
 ) -> float:
     """Exposure for today's entry using only information available at the entry.
 
     ``growth``: among grid rungs up to ``margin_exposure_cap``, maximize
-    mu*L - 0.5*(sigma*L)**2 - impact(L)/E, with mu = unit_daily_mean*(1 - mean_haircut),
-    sigma = unit_daily_sigma and impact(L) = sum |dnotional_i| * impact_y * daily_sigma_i *
-    sqrt(|dnotional_i| / adv_i) for the orders this rung would send from ``held_notional``.
-    ``fixed``: ``exposure_max``. Ties resolve to the smaller rung."""
+    mu*L - 0.5*(sigma*L)**2 - impact(L)/E with mu = moments.mean*(1 - mean_haircut) and
+    sigma = moments.sigma (posterior, causal); impact as before. With ``moments`` None
+    (too little evidence) the smallest grid rung within the cap is used, never a larger
+    one. ``fixed``: ``exposure_max``; ``moments`` is ignored. Ties resolve to the smaller rung."""
     if policy.kind == "fixed":
         return float(policy.exposure_max)
     if not equity > 0:
@@ -141,12 +198,16 @@ def choose_exposure(
     cap = margin_exposure_cap(weights, equity, ladders, policy)
     rungs = _policy_grid(policy)
     rungs = rungs[rungs <= cap + 1e-9]
+    if rungs.shape[0] == 0:
+        return 0.0
+    if moments is None:
+        return float(rungs[0])
     unit = np.asarray(weights, dtype=float)
     held = np.asarray(held_notional, dtype=float)
     adv_values = np.asarray(adv, dtype=float)
     sigma_values = np.asarray(daily_sigma, dtype=float)
-    mu = policy.unit_daily_mean * (1.0 - policy.mean_haircut)
-    base = mu * rungs - 0.5 * (policy.unit_daily_sigma * rungs) ** 2
+    mu = moments.mean * (1.0 - policy.mean_haircut)
+    base = mu * rungs - 0.5 * (moments.sigma * rungs) ** 2
     deltas = np.abs(rungs[:, None] * equity * unit[None, :] - held[None, :])
     # unit_weights carries every symbol ever held across the window; a symbol not yet (or no
     # longer) eligible has weight 0 and thus delta 0 here, but its ADV/sigma can be NaN (no
