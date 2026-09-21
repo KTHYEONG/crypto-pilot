@@ -371,6 +371,13 @@ COMMITTEE_TARGET_GROSS_UNSET: object = object()
 DEFAULT_DETAIL_RETENTION_MAX_BYTES: int | None = None
 DEFAULT_DETAIL_RETENTION_MAX_RUNS: int | None = 1
 
+# --- frozen growth policy ------------------------------------------------------
+# (research note moved to the private strategy store)
+FROZEN_GROWTH_NAME_CLIP: float = 0.05
+# (research note moved to the private strategy store)
+# frozen 북이나 데이터가 바뀌면 동일 부트스트랩으로 반드시 재도출해야 한다.
+FROZEN_GROWTH_EXPOSURE_MULTIPLIER: float = None  # private strategy store
+
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).
 PROCESS_REFIT_FREQUENCY: str = "MS"

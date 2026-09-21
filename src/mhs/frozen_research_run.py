@@ -349,6 +349,7 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
         daily_close,
         daily_quote_volume,
         census,
+        market_close=hourly_panels["close"],
         strategy=request.strategy,
         blocked_decisions=blocked_decisions,
     )
