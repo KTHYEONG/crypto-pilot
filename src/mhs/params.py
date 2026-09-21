@@ -386,6 +386,13 @@ COMMITTEE_TARGET_GROSS_UNSET: object = object()
 DEFAULT_DETAIL_RETENTION_MAX_BYTES: int | None = None
 DEFAULT_DETAIL_RETENTION_MAX_RUNS: int | None = 1
 
+# --- frozen growth policy ------------------------------------------------------
+# 종목별 클립: 무레버 Sharpe 2.22→2.34, 3m 마크 드로다운 증폭 1.293→1.148 (단일종목 장중 급락 경로 차단).
+FROZEN_GROWTH_NAME_CLIP: float = 0.05
+# 0.25 단위 rung 중 원장수익률 부트스트랩이 P(3y MDD > 35%) ≤ 10%를 유지하는 최대치(허용 2.51).
+# frozen 북이나 데이터가 바뀌면 동일 부트스트랩으로 반드시 재도출해야 한다.
+FROZEN_GROWTH_EXPOSURE_MULTIPLIER: float = 2.5
+
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).
 PROCESS_REFIT_FREQUENCY: str = "MS"

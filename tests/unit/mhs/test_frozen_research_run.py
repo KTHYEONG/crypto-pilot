@@ -11,7 +11,7 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.mhs.frozen_research_candidate import (
-    FROZEN_MHS_TOP20_V1,
+    FROZEN_MHS_TOP20_V2,
     FrozenMhsCandidate,
 )
 from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
@@ -49,7 +49,7 @@ def _request(**overrides: object) -> FrozenMhsBacktestRequest:
         "source_start": pd.Timestamp("2021-01-01", tz="UTC"),
         "evaluation_start": pd.Timestamp("2021-04-01", tz="UTC"),
         "evaluation_end": pd.Timestamp("2021-04-10", tz="UTC"),
-        "strategy": FROZEN_MHS_TOP20_V1,
+        "strategy": FROZEN_MHS_TOP20_V2,
         "initial_equity": 100000.0,
         "base_spec": base,
         "stress_spec": stress,
@@ -81,7 +81,7 @@ def _candidate(n_days: int = 10) -> FrozenMhsCandidate:
     weights["AAA"] = 0.05
     weights["BBB"] = -0.05
     avail = pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC")
-    return FrozenMhsCandidate(target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V1)
+    return FrozenMhsCandidate(target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V2)
 
 
 def _evidence(coverage: float = 1.0) -> object:
@@ -277,7 +277,7 @@ def test_request_validation_branches() -> None:
         "source_start": pd.Timestamp("2021-01-01", tz="UTC"),
         "evaluation_start": pd.Timestamp("2021-04-01", tz="UTC"),
         "evaluation_end": pd.Timestamp("2021-04-10", tz="UTC"),
-        "strategy": FROZEN_MHS_TOP20_V1,
+        "strategy": FROZEN_MHS_TOP20_V2,
         "initial_equity": 100000.0,
         "base_spec": base,
         "stress_spec": stress,
@@ -299,7 +299,7 @@ def test_request_validation_branches() -> None:
     _bad("source_start", pd.Timestamp("2021-01-01"), "timezone-aware UTC")
     _bad("source_start", "2021-01-01", "valid timestamp")
     _bad("evaluation_end", pd.Timestamp("2021-04-01", tz="UTC"), "source_start < evaluation_start")
-    _bad("strategy", "frozen_mhs_top20_v1", "FrozenMhsStrategySpec")
+    _bad("strategy", "frozen_mhs_top20_v2", "FrozenMhsStrategySpec")
     for bad_equity in (0.0, -10.0, float("nan"), True):
         _bad("initial_equity", bad_equity, "initial_equity")
     _bad("base_spec", ExecutionSpec(), "6 bps")
@@ -473,14 +473,14 @@ def test_excluded_symbol_absent_from_hourly_selection(monkeypatch: pytest.Monkey
 def test_blocked_decisions_uses_half_open_window() -> None:
     base, _ = _specs()
     days = pd.DatetimeIndex([pd.Timestamp("2022-02-28", tz="UTC")], tz="UTC")
-    frame = frozen_blocked_decisions(days, ("MANAUSDT",), strategy=FROZEN_MHS_TOP20_V1, base_spec=base)
+    frame = frozen_blocked_decisions(days, ("MANAUSDT",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base)
     assert not bool(frame.iloc[0, 0])
 
 
 def test_blocked_decisions_blocks_holding_window_overlap() -> None:
     base, _ = _specs()
     days = pd.DatetimeIndex([pd.Timestamp("2022-02-27", tz="UTC")], tz="UTC")
-    frame = frozen_blocked_decisions(days, ("MANAUSDT", "AAA"), strategy=FROZEN_MHS_TOP20_V1, base_spec=base)
+    frame = frozen_blocked_decisions(days, ("MANAUSDT", "AAA"), strategy=FROZEN_MHS_TOP20_V2, base_spec=base)
     assert bool(frame.loc[days[0], "MANAUSDT"])
     assert not bool(frame.loc[days[0], "AAA"])
 
@@ -488,7 +488,7 @@ def test_blocked_decisions_blocks_holding_window_overlap() -> None:
 def test_blocked_decisions_empty_census_returns_empty_frame() -> None:
     base, _ = _specs()
     days = pd.date_range("2021-01-01", periods=3, freq="D", tz="UTC")
-    frame = frozen_blocked_decisions(days, (), strategy=FROZEN_MHS_TOP20_V1, base_spec=base)
+    frame = frozen_blocked_decisions(days, (), strategy=FROZEN_MHS_TOP20_V2, base_spec=base)
     assert frame.shape == (3, 0)
 
 
@@ -496,7 +496,7 @@ def test_blocked_decisions_empty_registry_blocks_nothing(monkeypatch: pytest.Mon
     monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: ())
     base, _ = _specs()
     days = pd.date_range("2021-01-01", periods=3, freq="D", tz="UTC")
-    frame = frozen_blocked_decisions(days, ("AAA",), strategy=FROZEN_MHS_TOP20_V1, base_spec=base)
+    frame = frozen_blocked_decisions(days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base)
     assert not bool(frame.to_numpy().any())
 
 

@@ -272,7 +272,7 @@ def test_backtest_mhs_frozen_breadth_identity(tmp_path: Path, monkeypatch: pytes
     """Omitted breadth selects primary Top-20; breadth 40 names an explicit control variant."""
     seen = _install_frozen(monkeypatch)
     backtest_mod.run_frozen_mhs_backtest_command(_parse(_frozen_argv(tmp_path)))
-    assert seen["request"].strategy.strategy_id == "frozen_mhs_top20_v1"
+    assert seen["request"].strategy.strategy_id == "frozen_mhs_top20_v2"
     assert seen["request"].strategy.breadth == 20
     assert seen["output"] == tmp_path / "frozen.json"
     out40 = tmp_path / "frozen40.json"
@@ -283,7 +283,42 @@ def test_backtest_mhs_frozen_breadth_identity(tmp_path: Path, monkeypatch: pytes
     ]))
     assert seen["request"].strategy.breadth == 40
     assert "40" in seen["request"].strategy.strategy_id
-    assert seen["request"].strategy.strategy_id != "frozen_mhs_top20_v1"
+    assert seen["request"].strategy.strategy_id != "frozen_mhs_top20_v2"
+
+
+def test_backtest_mhs_frozen_growth_variant_selects_registered_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--variant growth selects the registered clip + exposure policy at Top-20 breadth."""
+    from src.mhs.params import FROZEN_GROWTH_EXPOSURE_MULTIPLIER, FROZEN_GROWTH_NAME_CLIP
+
+    seen = _install_frozen(monkeypatch)
+    backtest_mod.run_frozen_mhs_backtest_command(_parse([*_frozen_argv(tmp_path)[:8], "--variant", "growth", "--output", str(tmp_path / "growth.json")]))
+    assert seen["request"].strategy.strategy_id == "frozen_mhs_top20_growth_v2"
+    assert seen["request"].strategy.exposure_multiplier == FROZEN_GROWTH_EXPOSURE_MULTIPLIER
+    assert seen["request"].strategy.name_clip == FROZEN_GROWTH_NAME_CLIP
+    with pytest.raises(SystemExit):
+        backtest_mod._frozen_strategy(20, "turbo")
+
+
+def test_backtest_mhs_frozen_growth_rejects_non20_breadth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Growth with a non-20 breadth exits before any workload launch."""
+    seen = _install_frozen(monkeypatch)
+    with pytest.raises(SystemExit):
+        backtest_mod.run_frozen_mhs_backtest_command(_parse([*_frozen_argv(tmp_path)[:8], "--variant", "growth", "--breadth", "40", "--output", str(tmp_path / "g40.json")]))
+    assert "request" not in seen
+
+
+def test_backtest_mhs_frozen_growth_run_directory_labelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A growth run without --output resolves into a top20_growth_ directory."""
+    import argparse
+
+    frozen_root = tmp_path / "frozen"
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    output = backtest_mod._resolve_frozen_destination(
+        argparse.Namespace(output=None, variant="growth"),
+        start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2025-02-01", tz="UTC"), breadth=20, variant="growth",
+    )
+    assert "top20_growth_" in output.parent.name
+    assert output.name == "result.json"
 
 
 def test_backtest_mhs_frozen_required_dates_and_fresh_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -442,7 +477,7 @@ def test_frozen_index_and_prune_keep_only_recent_runs(tmp_path: Path, monkeypatc
     for line in index_lines:
         row = json.loads(line)
         assert row["kind"] == "mhs_frozen"
-        assert row["strategy_id"] == "frozen_mhs_top20_v1"
+        assert row["strategy_id"] == "frozen_mhs_top20_v2"
     remaining = sorted(d for d in frozen_root.iterdir() if d.is_dir())
     assert len(remaining) == 2
     assert seen["output"].parent.exists()
