@@ -10,8 +10,19 @@ env:
   LIVE_DEPLOY_PAUSED: 'false'
 
 jobs:
+  # 잡 레벨 if: 는 워크플로 env 컨텍스트를 읽지 못한다(GitHub Actions 제약:
+  # "Unrecognized named-value: 'env'"). 셸 스텝에서 값을 읽어 job output으로 넘긴다.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      paused: ${{ steps.check.outputs.paused }}
+    steps:
+      - id: check
+        run: echo "paused=$LIVE_DEPLOY_PAUSED" >> "$GITHUB_OUTPUT"
+
   build-and-push:
-    if: ${{ env.LIVE_DEPLOY_PAUSED != 'true' }}
+    needs: gate
+    if: ${{ needs.gate.outputs.paused != 'true' }}
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -45,8 +56,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    needs: build-and-push
-    if: ${{ env.LIVE_DEPLOY_PAUSED != 'true' }}
+    needs: [gate, build-and-push]
+    if: ${{ needs.gate.outputs.paused != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
