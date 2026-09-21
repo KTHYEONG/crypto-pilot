@@ -373,7 +373,7 @@ def test_frozen_omitted_output_resolves_to_fresh_run_directory(tmp_path: Path, m
     resolved = seen["output"]
     assert resolved.name == "result.json"
     assert resolved.parent.parent == frozen_root
-    assert re.fullmatch(r"[0-9a-f]{32}", resolved.parent.name) is not None
+    assert re.fullmatch(r"20250101_20250201_top20_\d{8}T\d{6}Z", resolved.parent.name) is not None
     assert resolved.parent.is_dir()
 
 
@@ -412,10 +412,10 @@ def test_frozen_explicit_output_rejects_invalid_paths(tmp_path: Path, monkeypatc
 
 
 def test_retention_default_limits_finalized_runs() -> None:
-    """Unflagged retention policy keeps five finalized bundles with no byte budget."""
+    """Unflagged retention policy keeps only the single latest finalized bundle, with no byte budget."""
     policy = backtest_mod._resolve_retention_policy(argparse.Namespace(max_detail_bytes=None, max_detail_runs=None))
     assert policy is not None
-    assert policy.max_detail_runs == 5
+    assert policy.max_detail_runs == 1
     assert policy.max_detail_bytes is None
 
 
@@ -424,3 +424,92 @@ def test_retention_explicit_flags_override_default() -> None:
     policy = backtest_mod._resolve_retention_policy(argparse.Namespace(max_detail_bytes=None, max_detail_runs=2))
     assert policy is not None
     assert policy.max_detail_runs == 2
+
+
+def test_frozen_index_and_prune_keep_only_recent_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each run appends one index line forever; only the newest `keep` run directories survive on disk."""
+    frozen_root = tmp_path / "backtests" / "frozen" / "runs"
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path / "backtests")
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    monkeypatch.setattr(backtest_mod, "DEFAULT_DETAIL_RETENTION_MAX_RUNS", 2)
+    seen = _install_frozen(monkeypatch)
+    for day in ("01", "02", "03"):
+        backtest_mod.run_frozen_mhs_backtest_command(
+            _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", f"2025-01-{day}", "--end", "2025-02-01"])
+        )
+    index_lines = (tmp_path / "backtests" / "index.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(index_lines) == 3
+    for line in index_lines:
+        row = json.loads(line)
+        assert row["kind"] == "mhs_frozen"
+        assert row["strategy_id"] == "frozen_mhs_top20_v1"
+    remaining = sorted(d for d in frozen_root.iterdir() if d.is_dir())
+    assert len(remaining) == 2
+    assert seen["output"].parent.exists()
+
+
+def test_frozen_destination_dedupes_name_collision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run-name collision (same dates/breadth/second) appends a numeric suffix instead of clobbering."""
+    frozen_root = tmp_path / "frozen"
+    frozen_root.mkdir(parents=True)
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    end = pd.Timestamp("2025-02-01", tz="UTC")
+    frozen_now = pd.Timestamp("2026-06-01T00:00:00Z")
+    name = backtest_mod._frozen_run_name(start, end, 20, frozen_now)
+    (frozen_root / name).mkdir()
+    orig_now = pd.Timestamp.now
+    monkeypatch.setattr(pd.Timestamp, "now", classmethod(lambda cls, tz=None: frozen_now))
+    try:
+        output = backtest_mod._resolve_frozen_destination(
+            argparse.Namespace(output=None), start=start, end=end, breadth=20,
+        )
+    finally:
+        pd.Timestamp.now = orig_now
+    assert output.parent.name == f"{name}-2"
+
+
+def test_prune_frozen_runs_noop_when_directory_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pruning before any frozen run has ever been created is a safe no-op."""
+    frozen_root = tmp_path / "never_created"
+    monkeypatch.setattr(backtest_mod, "FROZEN_BACKTESTS_DIR", frozen_root)
+    backtest_mod._prune_frozen_runs(keep=5)
+    assert not frozen_root.exists()
+
+
+def test_backtest_mhs_appends_headline_to_shared_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A completed canonical run appends one headline row to the shared cross-pipeline index."""
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
+
+    def _fake(**kwargs):
+        Path(kwargs["result_output"]).write_text(
+            json.dumps({"financial": {"base": {"cagr": 0.42, "max_drawdown": -0.1}}}), encoding="utf-8",
+        )
+        return types.SimpleNamespace(status="completed")
+
+    import src.application.mhs_supervisor as supmod
+
+    monkeypatch.setattr(supmod, "run_mhs_process_backtest", _fake)
+    run_mhs_backtest(_parse(["backtest", "mhs", "--start", "2022-01-01", "--end", "2022-01-04"]))
+    lines = (tmp_path / "index.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["kind"] == "mhs"
+    assert row["base_cagr"] == 0.42
+    assert row["base_max_drawdown"] == -0.1
+    assert row["run_dir"].startswith("runs" + "/")
+
+
+def test_append_backtest_index_falls_back_to_absolute_path_outside_root(tmp_path: Path) -> None:
+    """A run directory outside the index root records its absolute path instead of raising."""
+    index_path = tmp_path / "inside" / "index.jsonl"
+    index_path.parent.mkdir(parents=True)
+    outside_run_dir = tmp_path / "elsewhere" / "run1"
+    outside_run_dir.mkdir(parents=True)
+    now = pd.Timestamp("2026-01-01", tz="UTC")
+    backtest_mod._append_backtest_index(
+        index_path=index_path, kind="mhs", run_dir=outside_run_dir, created_at=now,
+        evaluation_start=now, evaluation_end=now, strategy_id="s", base_cagr=None, base_max_drawdown=None,
+    )
+    row = json.loads(index_path.read_text(encoding="utf-8").strip())
+    assert row["run_dir"] == str(outside_run_dir)
