@@ -543,6 +543,6 @@
   },
   "src/cli/commands/backtest.py": {
     "testing": "tests/unit/cli/commands/test_backtest.py",
-    "architecture": "docs/results/mhs_frozen_growth_20260921.md"
+    "architecture": "docs/results/mhs_account_ledger_20260921.md"
   }
 }
