@@ -9,17 +9,17 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from src.common.errors import DataIntegrityError
 from src.market_data.binance.futures import BinanceIpBlockedError
 from src.market_data.services.futures_collection import funding_gap_start_ms, funding_tail_is_fresh
 from src.market_data.storage.ohlcv import is_temp_artifact
-from src.quant.universe.pit_universe import symbol_partition
 
 try:
     from src.market_data.services.futures_collection import DataCollector
@@ -64,6 +64,39 @@ EXCHANGE_INFO_TIMEOUT_S: float = 20.0
 # 실측 제거 비율 4/807≈0.5%를 크게 넘으면 잘못된 베뉴/응답으로 보고 목록 불신.
 ABSENT_MAX_FRACTION: float = 0.05
 ABSENT_LOG_SAMPLE: int = 10
+
+
+def listed_crypto_perpetuals(payload: Mapping[str, Any]) -> tuple[frozenset[str], frozenset[str]]:
+    """Split an exchangeInfo payload into (tradable USDT crypto perpetuals, non-crypto symbols).
+
+    Crypto = status TRADING, contractType PERPETUAL, quoteAsset USDT and underlyingType
+    COIN; every symbol whose underlyingType is not COIN is non-crypto (tokenized equities,
+    commodities, indices), matching the research lake exclusion.
+
+    Raises:
+        DataIntegrityError: payload has no symbols list or yields no crypto perpetual.
+    """
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list):
+        raise DataIntegrityError("exchangeInfo payload has no symbols list")
+    crypto: set[str] = set()
+    non_crypto: set[str] = set()
+    for entry in symbols:
+        if not isinstance(entry, Mapping) or "symbol" not in entry:
+            continue
+        name = str(entry["symbol"])
+        if str(entry.get("underlyingType", "COIN")) != "COIN":
+            non_crypto.add(name)
+            continue
+        if (
+            entry.get("status") == "TRADING"
+            and entry.get("contractType") == "PERPETUAL"
+            and entry.get("quoteAsset") == "USDT"
+        ):
+            crypto.add(name)
+    if not crypto:
+        raise DataIntegrityError("exchangeInfo payload yields no crypto perpetual")
+    return frozenset(crypto), frozenset(non_crypto)
 
 
 def parse_listed_symbols(payload: Mapping[str, Any]) -> frozenset[str] | None:
@@ -153,21 +186,19 @@ def _funding_fresh_on_disk(futures_root: Path, symbol: str, now: pd.Timestamp, w
     return funding_gap_start_ms(stamps, int(window_start.value // 1_000_000)) is None
 
 
-def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, partition: str = "dev") -> float:
+def market_data_staleness_hours(futures_root: Path, *, now: pd.Timestamp, symbols: Iterable[str] | None = None) -> float:
     try:
         root = Path(futures_root) / "ohlcv" / "1h"
         if not root.exists():
             return float("inf")
+        wanted = {str(s) for s in symbols} if symbols is not None else None
         parquets = [p for p in root.glob("*.parquet") if not is_temp_artifact(p.name)]
         if not parquets:
             return float("inf")
         gaps: list[float] = []
         for p in parquets:
             sym = p.stem
-            try:
-                if symbol_partition(sym) != partition:
-                    continue
-            except Exception:
+            if wanted is not None and sym not in wanted:
                 continue
             try:
                 df = pd.read_parquet(p, columns=["timestamp", "volume"])
@@ -233,28 +264,13 @@ def refresh_live_market_data(
     freshness_floor_hours: float,
     min_symbols: int,
     max_fail_fraction: float,
-    symbols: list[str] | None = None,
+    symbols: list[str],
     collector: Any | None = None,
-    partition: str = "dev",
     listed_symbols: frozenset[str] | None = None,
+    seed_lookback_days: int = 150,
 ) -> RefreshReport:
     t0 = time.perf_counter()
-    # 1) symbol list
-    if symbols is None:
-        root = Path(futures_root) / "ohlcv" / "1h"
-        parquets = sorted(root.glob("*.parquet")) if root.exists() else []
-        syms = [p.stem for p in parquets if not is_temp_artifact(p.name)]
-        # filter dev
-        filtered: list[str] = []
-        for s in syms:
-            try:
-                if symbol_partition(s) == partition:
-                    filtered.append(s)
-            except Exception:
-                continue
-        symbols_list = filtered
-    else:
-        symbols_list = list(symbols)
+    symbols_list = list(symbols)
 
     symbols_list, absent = split_absent_symbols(symbols_list, listed_symbols)
     if absent:
@@ -262,7 +278,7 @@ def refresh_live_market_data(
 
     total = len(symbols_list)
     if total < min_symbols:
-        raise ColdUniverseError(f"dev universe {total} < min {min_symbols}")
+        raise ColdUniverseError(f"universe {total} < min {min_symbols}")
 
     if collector is None:
         collector = DataCollector()
@@ -285,7 +301,7 @@ def refresh_live_market_data(
         if tail is not None:
             start = max(tail - pd.Timedelta(hours=2), now - pd.Timedelta(days=lookback_days))
         else:
-            start = now - pd.Timedelta(days=lookback_days)
+            start = now - pd.Timedelta(days=seed_lookback_days)
         try:
             if funding_blocked.is_set():
                 ok = _refresh_one_symbol_tail(collector, sym, str(start), str(now), funding_start=str(funding_window_start), skip_funding=True)
@@ -337,7 +353,7 @@ def refresh_live_market_data(
     # However ThreadPool may have already started some before deadline check; for deadline_s=0 we check deadline_ts = t0 +0, so any worker entering after t0 will see perf_counter > deadline_ts true.
     # So all will be deadline.
 
-    staleness = market_data_staleness_hours(Path(futures_root), now=now, partition=partition)
+    staleness = market_data_staleness_hours(Path(futures_root), now=now, symbols=symbols_list)
     funding_stale = sum(1 for sym in symbols_list if not _funding_fresh_on_disk(futures_root, sym, now, window_start=funding_window_start))
     ok = (fresh + refreshed) >= min_symbols and failed <= math.ceil(max_fail_fraction * total) and not ip_blocked.is_set() and not funding_blocked.is_set()
     elapsed_s = time.perf_counter() - t0

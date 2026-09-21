@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from enum import Enum
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.mhs.params import GROWTH_RISK_ENVELOPES, SIGNAL_PANEL_WINDOW_DAYS
+from src.common.paths import APP_ROOT, DATA_DIR
+from src.mhs.params import ACCOUNT_EXPOSURE_MAX, SIGNAL_PANEL_WINDOW_DAYS
 from src.mhs.types import ExecutionSpec
 
 #: LIVE_MAINNET 승인 문자열. 이 값과 정확히 일치해야만 실계좌 모드가 생성된다.
@@ -87,8 +90,9 @@ class LiveSettings(BaseSettings):
     portfolio_state_dir: str | None = None
     # 배포 아티팩트 봉투(AES-256-GCM) 키. base64 인코딩 32바이트. env: LIVE_ARTIFACT_KEY.
     artifact_key: SecretStr | None = None
-    # 신호 스테일 상한(시간). 초과 신호는 주문 0건으로 스킵한다. env: LIVE_MAX_SIGNAL_STALENESS_HOURS.
-    max_signal_staleness_hours: float = 6.0
+    # 신호 스테일 상한(시간). 결정일 00:00 라벨 행을 d 23:03에 소비하므로 23시간 이상이어야
+    # 한다. 다음날 02:00까지만 유효하다. env: LIVE_MAX_SIGNAL_STALENESS_HOURS.
+    max_signal_staleness_hours: float = 26.0
     max_weights_staleness_hours: float = 96.0
     daemon_catchup_buffer_minutes: float = 3.0
     daemon_max_attempts_per_day: int = 5
@@ -131,12 +135,21 @@ class LiveSettings(BaseSettings):
     refresh_max_fail_fraction: float = 0.15
     max_market_data_staleness_hours: float = 30.0
 
-    # 리스크 게이트(등록 상한). 레버리지 천장은 리스크 엔벨로프 레지스트리에서 유도한다.
-    max_gross_leverage: float = GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
+    # 리스크 게이트(등록 상한). frozen 노출은 증거금 상한 안에서 베이지안 Kelly가 정한다.
+    # 리스크 게이트는 그 위의 안전 레일이다.
+    max_gross_leverage: float = ACCOUNT_EXPOSURE_MAX
     leverage_buffer_fraction: float = 0.25
     max_daily_orders: int = 600
-    max_daily_turnover_fraction: float = 2.0 * GROWTH_RISK_ENVELOPES["growth_extreme"].leverage_ceiling
+    max_daily_turnover_fraction: float = 2.0 * ACCOUNT_EXPOSURE_MAX
     min_free_margin_fraction: float = 0.15
+    # Frozen live 입력: 봉인된 단위수익률 부트스트랩과 베뉴 규칙 폴백 스냅샷.
+    unit_bootstrap_path: str = str(APP_ROOT / "deploy" / "mhs" / "frozen_unit_returns_maker.parquet")
+    venue_fallback_path: str = str(APP_ROOT / "deploy" / "mhs" / "venue_rules_20260921.json")
+    # paper/실거래 기록 실행 단위. 설정하면 전략 의존 기록이 `data/state/runs/<run_id>/`에 저장된다.
+    # 전략이나 집행이 바뀌면 새 id를 쓴다. env는 LIVE_RECORD_RUN_ID.
+    record_run_id: str | None = None
+    order_journal_path: str | None = None
+    weights_path: str | None = None
 
     @field_validator("notional_equity_usdt")
     @classmethod
@@ -157,6 +170,15 @@ class LiveSettings(BaseSettings):
     def _validate_paper_fill_model(cls, value: str) -> str:
         if value not in {"immediate_taker", "peg_chase"}:
             raise ValueError(f"paper_fill_model must be one of immediate_taker, peg_chase, got {value!r}")
+        return value
+
+    @field_validator("record_run_id")
+    @classmethod
+    def _validate_record_run_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if re.fullmatch(r"[a-z0-9][a-z0-9_]{7,63}", value) is None:
+            raise ValueError(f"record_run_id must match ^[a-z0-9][a-z0-9_]{{7,63}}$, got {value!r}")
         return value
 
     @field_validator("recv_window_ms")
@@ -260,6 +282,34 @@ class LiveSettings(BaseSettings):
                 " refusing to send mainnet api_key to the testnet venue"
             )
         return self
+
+    @model_validator(mode="after")
+    def _derive_run_paths(self) -> LiveSettings:
+        if self.record_run_id is None:
+            return self
+        run_root = DATA_DIR / "state" / "runs" / self.record_run_id
+        if self.ledger_path is None:
+            self.ledger_path = str(run_root / "position_ledger.json")
+        if self.order_journal_path is None:
+            self.order_journal_path = str(run_root / "order_journal.jsonl")
+        if self.weights_path is None:
+            self.weights_path = str(run_root / "target_weights.parquet")
+        if self.fills_dir is None:
+            self.fills_dir = str(run_root / "fills")
+        if self.execution_quality_dir is None:
+            self.execution_quality_dir = str(run_root / "execution_quality")
+        if self.portfolio_state_dir is None:
+            self.portfolio_state_dir = str(run_root / "portfolio_state")
+        if self.microstructure_dir is None:
+            self.microstructure_dir = str(run_root / "microstructure")
+        if self.tax_ledger_dir is None:
+            self.tax_ledger_dir = str(run_root / "tax_ledger")
+        return self
+
+    def run_root(self) -> Path | None:
+        if self.record_run_id is None:
+            return None
+        return DATA_DIR / "state" / "runs" / self.record_run_id
 
 
 def refresh_settings_fields() -> tuple[str, ...]:

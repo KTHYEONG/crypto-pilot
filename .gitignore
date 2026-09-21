@@ -267,3 +267,5 @@ deploy/mhs/*.json
 deploy/mhs/*.parquet
 deploy/mhs/*.log
 !deploy/mhs/*.enc
+!deploy/mhs/frozen_unit_returns_maker.parquet
+!deploy/mhs/venue_rules_20260921.json

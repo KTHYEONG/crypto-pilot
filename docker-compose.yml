@@ -7,12 +7,19 @@ services:
     env_file: /home/ubuntu/quant-secrets/crypto-pilot.env
     environment:
       - LIVE_MODE=paper
+      - LIVE_EXECUTION_POLICY=strict_passive
+      - LIVE_PAPER_FILL_MODEL=peg_chase
+      - LIVE_NOTIONAL_EQUITY_USDT=2100
+      - LIVE_RECORD_RUN_ID=frozen_top20_v2_bayes_maker_20260921
+      - LIVE_TAX_COLLECTION_ENABLED=false
+      - LIVE_ORDERBOOK_CAPTURE_BASELINE_MAX_SYMBOLS=0
+      - LIVE_ORDERBOOK_CAPTURE_MAX_SYMBOLS=20
     volumes:
       - ./data:/app/data
       - ./data/state:/app/data/state
       - ./logs:/app/logs
       - ./deploy/mhs:/app/deploy/mhs
-    mem_limit: 3g
+    mem_limit: 2g
     command: ["uv", "run", "python", "-m", "src.cli.main", "live", "daemon"]
     logging:
       driver: json-file

@@ -22,9 +22,15 @@ def _sibling_with_token(weights_path: Path, replacement: str) -> Path:
     p = Path(weights_path)
     token = "deployed_target_weights"
     name = p.name
-    if token not in name:
+    sealed = name.endswith(".enc")
+    inner = name[:-4] if sealed else name
+    if token in inner:
+        sibling = inner.replace(token, replacement)
+    elif Path(inner).stem == "target_weights":
+        sibling = replacement.removeprefix("deployed_") + Path(inner).suffix
+    else:
         raise DataIntegrityError(f"weights path missing token 'deployed_target_weights': {p}")
-    return p.parent / name.replace(token, replacement)
+    return p.parent / f"{sibling}{'.enc' if sealed else ''}"
 
 
 def exposure_scale_path(weights_path: Path) -> Path:

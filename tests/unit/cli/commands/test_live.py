@@ -25,7 +25,9 @@ def test_shadow_cycle_parses_utc_decision_time() -> None:
         ["shadow-cycle", "--decision-time", "2026-08-24T00:00:00Z"]
     )
     assert args.decision_time == pd.Timestamp("2026-08-24 00:00Z")
-    assert "deployed_target_weights.parquet" in args.artifact
+    # run-namespaced weights: unset --artifact resolves at handler time from
+    # settings.weights_path, falling back to the rolling state file.
+    assert args.artifact is None
     assert args.dry_run is False
 
 
@@ -44,7 +46,7 @@ def test_SCENARIO_LIVE_DAEMON_09_cli_daemon_subcommand_registered(
     )
     assert shadow_args.decision_time == pd.Timestamp("2026-08-24 00:00Z")
     daemon_args = parser.parse_args(["daemon"])  # --decision-time 없이 파싱 성공
-    assert "deployed_target_weights.parquet" in daemon_args.artifact  # v2 default is rolling state file
+    assert daemon_args.artifact is None  # unset --artifact resolves at handler time
     assert daemon_args.state_path.endswith("live_daemon_last_run.json")
 
     calls: list[tuple[Path, Path]] = []
@@ -160,138 +162,80 @@ COVERED_SCENARIOS: tuple[str, ...] = (
 )
 
 # SCENARIO_RESIL_11-cli-signal-daemon-registered
-def test_SCENARIO_RESIL_11_cli_signal_daemon_registered():  # noqa: D103
-    """SCENARIO_RESIL_11-cli-signal-daemon-registered v2: signal-step replaces signal-daemon/refresh"""
+# SCENARIO_REC_12-cli-tax-subcommands
+
+
+
+
+
+
+
+
+
+
+def test_frozen_step_registered_and_signal_step_removed() -> None:
+    """frozen-step replaces signal-step/signal-daemon/signal-refresh."""
     import argparse
 
     import pytest
 
-    from src.cli.commands.live import _run_signal_step, add_live_commands
+    from src.cli.commands.live import _run_frozen_step, add_live_commands
     from src.cli.main import build_root_parser
 
     parser = argparse.ArgumentParser()
     add_live_commands(parser)
-    args = parser.parse_args(["signal-step", "--date", "2026-08-25T00:00:00Z"])
-    assert args.handler is _run_signal_step
+    args = parser.parse_args(["frozen-step", "--date", "2026-08-25T00:00:00Z"])
+    assert args.handler is _run_frozen_step
     root = build_root_parser()
-    a = root.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
-    assert a.handler is _run_signal_step
+    a = root.parse_args(["live", "frozen-step", "--date", "2026-08-25T00:00:00Z"])
+    assert a.handler is _run_frozen_step
     b = root.parse_args(["live", "daemon"])
     assert b.handler is not None
+    with pytest.raises(SystemExit):
+        parser.parse_args(["signal-step", "--date", "2026-08-25T00:00:00Z"])
     with pytest.raises(SystemExit):
         parser.parse_args(["signal-daemon"])
     with pytest.raises(SystemExit):
         parser.parse_args(["signal-refresh"])
-# SCENARIO_REC_12-cli-tax-subcommands
 
 
-def test_deployed_strategy_artifact_paths_targets_delivery_boundary() -> None:
-    from src.cli.commands.live import deployed_strategy_artifact_paths
-    from src.common.paths import DEPLOY_MHS_DIR
+def test_frozen_delivery_boundary_under_deploy_mhs() -> None:
+    from src.common.paths import DATA_DIR, DEPLOY_MHS_DIR
+    from src.live.settings import LiveSettings
 
-    params_path, bootstrap_path = deployed_strategy_artifact_paths()
-    assert params_path.parent == DEPLOY_MHS_DIR
-    assert bootstrap_path.parent == DEPLOY_MHS_DIR
-    assert params_path.name.endswith(".enc")
-    assert bootstrap_path.name.endswith(".enc")
-    assert "docs" not in params_path.parts
-    assert "docs" not in bootstrap_path.parts
+    settings = LiveSettings()
+    assert DATA_DIR not in DEPLOY_MHS_DIR.parents
+    assert settings.unit_bootstrap_path.startswith(str(DEPLOY_MHS_DIR))
+    assert settings.venue_fallback_path.startswith(str(DEPLOY_MHS_DIR))
 
 
-def test_deployed_strategy_artifact_paths_fails_closed_on_incomplete_pair(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_run_frozen_step_reports_and_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import argparse
-    import types
+    from types import SimpleNamespace
 
     import src.cli.commands.live as live_mod
-    from src.common.errors import DataIntegrityError
 
-    (tmp_path / "strategy_params.json.enc").write_bytes(b"params-only")
-    monkeypatch.setattr(live_mod, "DEPLOY_MHS_DIR", tmp_path)
-    with pytest.raises(DataIntegrityError):
-        live_mod.deployed_strategy_artifact_paths()
+    target = pd.Timestamp("2026-08-25 00:00Z")
+    report = SimpleNamespace(
+        decision_day=target, exposure=2.5, equity_usdt=2100.0, gross_weight=5.0,
+        names=20, unit_observations=300, posterior_mean=0.001, posterior_sigma=0.02,
+        unit_history_end=target, venue_snapshot="20260921.json", written=True,
+    )
+    seen: dict = {}
 
-    def _boom_save(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("must exit before mutating runtime state or weights")
+    def _ok(t, settings, weights):
+        seen.update(target=t, weights=weights)
+        return report
 
-    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", _boom_save)
-    monkeypatch.setattr("src.mhs.live_runtime.load_or_bootstrap_runtime", _boom_save)
-    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="shadow"))
-    args = argparse.Namespace(date=pd.Timestamp("2026-08-25 00:00Z"), artifact=None, mode=None)
+    monkeypatch.setattr("src.live.scheduler._default_frozen_step", _ok)
+    args = argparse.Namespace(date=target, artifact=str(tmp_path / "w.parquet"), mode=None)
+    live_mod._run_frozen_step(args)
+    assert seen["target"] == target
+    assert seen["weights"] == tmp_path / "w.parquet"
+
+    def _boom(t, settings, weights):
+        raise RuntimeError("unit history gap")
+
+    monkeypatch.setattr("src.live.scheduler._default_frozen_step", _boom)
     with pytest.raises(SystemExit):
-        live_mod._signal_step_body(args, settings)
-
-
-def test_signal_step_explicit_plaintext_artifact_is_opt_in(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    import argparse
-    import types
-
-    import src.cli.commands.live as live_mod
-    from src.common.paths import DEPLOY_MHS_DIR
-
-    calls: dict[str, Path] = {}
-    sentinel_params = types.SimpleNamespace(bootstrap_sha256="a" * 64, strategy_digest="digest", bootstrap_held_row={})
-
-    def _fake_load_params(path: Any, *, artifact_key: Any = None) -> Any:
-        calls["params_path"] = Path(path)
-        return sentinel_params
-
-    def _fake_load_bootstrap(path: Any, *, expected_sha256: str, artifact_key: Any = None) -> Any:
-        calls["bootstrap_path"] = Path(path)
-        return pd.Series([0.01], index=pd.DatetimeIndex([pd.Timestamp("2026-08-24", tz="UTC")]), dtype="float64")
-
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", _fake_load_params)
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", _fake_load_bootstrap)
-    monkeypatch.setattr("src.mhs.live_strategy.assert_runtime_data_policy", lambda params: None)
-    sentinel_runtime = types.SimpleNamespace(last_decision_date=pd.Timestamp("2026-08-25 00:00Z"))
-    monkeypatch.setattr("src.mhs.live_runtime.load_or_bootstrap_runtime", lambda *a, **k: sentinel_runtime)
-    monkeypatch.setattr("src.mhs.live_runtime.reconcile_runtime_params", lambda runtime, params, ref: (runtime, ""))
-    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", lambda *a, **k: None)
-    monkeypatch.setattr(live_mod, "advance_to_date", lambda *a, **k: (sentinel_runtime, 1, 1.0))
-
-    before = live_mod.deployed_strategy_artifact_paths()
-    explicit = tmp_path / "dev" / "strategy_params.json"
-    explicit.parent.mkdir(parents=True, exist_ok=True)
-    explicit.write_bytes(b"dev-plaintext")
-    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="shadow"))
-    args = argparse.Namespace(date=pd.Timestamp("2026-08-25 00:00Z"), artifact=str(explicit), mode=None)
-    live_mod._signal_step_body(args, settings)
-
-    assert calls["params_path"] == explicit
-    assert calls["bootstrap_path"] == explicit.parent / "strategy_bootstrap.parquet"
-    assert live_mod.deployed_strategy_artifact_paths() == before
-    assert before[0].parent == DEPLOY_MHS_DIR
-
-
-def test_signal_step_rejects_digest_mismatch_without_live_cycle(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    import argparse
-    import types
-
-    import src.cli.commands.live as live_mod
-    from src.common.errors import DataIntegrityError
-
-    (tmp_path / "strategy_params.json.enc").write_bytes(b"params")
-    (tmp_path / "strategy_bootstrap.parquet.enc").write_bytes(b"bootstrap")
-    monkeypatch.setattr(live_mod, "DEPLOY_MHS_DIR", tmp_path)
-    sentinel_params = types.SimpleNamespace(bootstrap_sha256="b" * 64, strategy_digest="digest", bootstrap_held_row={})
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_params", lambda path, *, artifact_key=None: sentinel_params)
-    monkeypatch.setattr("src.mhs.live_strategy.assert_runtime_data_policy", lambda params: None)
-
-    def _mismatched_bootstrap(path: Any, *, expected_sha256: str, artifact_key: Any = None) -> Any:
-        raise DataIntegrityError("bootstrap_sha256 mismatch")
-
-    monkeypatch.setattr("src.mhs.live_strategy.load_strategy_bootstrap", _mismatched_bootstrap)
-
-    def _boom_save(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("no live cycle executes on digest mismatch")
-
-    monkeypatch.setattr("src.mhs.live_runtime.save_runtime", _boom_save)
-    settings = types.SimpleNamespace(artifact_key=None, portfolio_state_dir=None, mode=types.SimpleNamespace(value="shadow"))
-    args = argparse.Namespace(date=pd.Timestamp("2026-08-25 00:00Z"), artifact=None, mode=None)
-    with pytest.raises(SystemExit):
-        live_mod._signal_step_body(args, settings)
+        live_mod._run_frozen_step(args)

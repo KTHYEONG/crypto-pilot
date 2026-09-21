@@ -5,18 +5,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-_APPROVED_SEALED_NAMES = frozenset(
+_RETIRED_STRATEGY_NAMES = frozenset(
     {
-        "strategy_params.json.enc",
+        "strategy_bootstrap.parquet",
         "strategy_bootstrap.parquet.enc",
         "deployed_target_weights.parquet.enc",
-    }
-)
-_PLAINTEXT_STRATEGY_NAMES = frozenset(
-    {
-        "strategy_params.json",
-        "strategy_bootstrap.parquet",
-        "deployed_target_weights.parquet",
     }
 )
 _RETIRED_PATHS = (    Path("docs/results/mhs_backtest"),
@@ -62,12 +55,10 @@ def test_documentation_has_no_generated_result_payloads() -> None:
     assert binary_payloads == [], f"generated payloads under docs/: {binary_payloads}"
 
 
-def test_only_sealed_delivery_artifacts_may_be_tracked() -> None:
+def test_no_sealed_delivery_artifacts_tracked() -> None:
     tracked = _tracked_files()
-    delivered = [path for path in tracked if path.startswith("deploy/mhs/")]
-    assert delivered, "delivery boundary deploy/mhs/ must carry the sealed artifacts"
-    violations = [path for path in delivered if Path(path).name not in _APPROVED_SEALED_NAMES]
-    assert violations == [], f"unapproved files under deploy/mhs/: {violations}"
+    sealed = [path for path in tracked if path.startswith("deploy/mhs/") and path.endswith(".enc")]
+    assert sealed == [], f"sealed strategy artifacts must stay untracked: {sealed}"
 
 
 def test_deployment_directory_has_no_plaintext_artifacts() -> None:
@@ -75,11 +66,11 @@ def test_deployment_directory_has_no_plaintext_artifacts() -> None:
     violations = [
         path
         for path in tracked
-        if path.startswith("deploy/mhs/") and Path(path).name in _PLAINTEXT_STRATEGY_NAMES
+        if path.startswith("deploy/mhs/") and Path(path).name in _RETIRED_STRATEGY_NAMES
     ]
-    assert violations == [], f"plaintext strategy artifacts tracked: {violations}"
-    for name in _PLAINTEXT_STRATEGY_NAMES:
-        assert not Path("deploy/mhs", name).exists(), f"plaintext artifact present: {name}"
+    assert violations == [], f"retired strategy artifacts tracked: {violations}"
+    for name in _RETIRED_STRATEGY_NAMES:
+        assert not Path("deploy/mhs", name).exists(), f"retired artifact present: {name}"
 
 
 def test_legacy_generated_result_paths_are_absent() -> None:

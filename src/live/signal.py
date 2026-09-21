@@ -82,9 +82,9 @@ def latest_decision_ohlcv_close(
     """Load the source-labelled completed OHLCV decision close for exact-date sizing. Missing, empty, malformed or stale anchors are data-integrity failures, never permission to use a different price source."""
     decision_ts = _as_utc(decision_time)
     base = Path(artifact_path)
-    if "deployed_target_weights" not in base.name:
-        raise DataIntegrityError(f"weights path missing token 'deployed_target_weights': {base}")
-    close_path = base.parent / base.name.replace("deployed_target_weights", "deployed_decision_ohlcv_close")
+    from src.live.deployed_weights import decision_ohlcv_close_path  # noqa: PLC0415
+
+    close_path = decision_ohlcv_close_path(base)
     candidate: Path | None = None
     if close_path.exists():
         candidate = close_path
