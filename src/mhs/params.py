@@ -408,11 +408,15 @@ FROZEN_EXPOSURE_SEED: int = 20260921
 # --- account-scale research ledger -------------------------------------------------
 # 선언 최소 소매 시작금 ₩3,000,000(₩1,430/USD 환산).
 ACCOUNT_DEFAULT_CAPITAL_USDT: float = 2100.0
-# clip-0.05 고정 북의 3m 원장 단위노출 일간 순수익률 평균(표본내 2021-04-01→2026-06-30, 공개용, 인과적이지 않음).
-ACCOUNT_UNIT_DAILY_MEAN: float = 0.0011
-# 동일 북의 단위노출 일간 변동성(표본내 실측, 헤어컷 전).
-ACCOUNT_UNIT_DAILY_SIGMA: float = 0.0094
-# 표본내 평균 과대추정을 반으로 깎는 등록 헤어컷(2배 과대추정에도 full Kelly 이하에 머문다).
+# 사전 "엣지 없음(μ=0)"에 2년 표본만큼의 가중을 둔다. 결과를 보고 고른 값이 아니라
+# 선언값이며, 2년 이상 쌓인 실적이 있어야 사후 μ가 표본평균의 절반을 넘는다.
+ACCOUNT_PRIOR_DAYS: float = 730.0
+# 30일 미만의 관측으로는 표본분산을 신뢰할 수 없으므로, 그동안은 최소 rung만 쓴다.
+ACCOUNT_MIN_MOMENT_DAYS: int = 30
+# 단위북 원장(x1, 주문필터 끔, 충격 0)의 기준 자본. 이 조건에서 수익률은 자본과 무관하다.
+ACCOUNT_UNIT_REFERENCE_CAPITAL: float = 1e5
+# 사후 μ의 Kelly 비율이 `1 - haircut`이다(0.5 = 사후 half-Kelly). 추정오차가 있을 때
+# 과소베팅보다 과대베팅의 손실이 더 크다는 비대칭 때문이다.
 ACCOUNT_MEAN_HAIRCUT: float = 0.50
 # 관측 최악 단위 일간손실(-4.04%)의 2배인 adverse 충격.
 ACCOUNT_SHOCK_PER_UNIT: float = 0.08

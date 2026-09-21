@@ -11,6 +11,7 @@ from src.common.errors import DataIntegrityError
 from src.market_data.binance.venue_rules import VenueRuleSnapshot
 from src.mhs.account_policy import (
     ExposurePolicy,
+    bayesian_unit_moments,
     build_venue_ladders,
     choose_exposure,
     maintenance_and_initial_margin,
@@ -56,6 +57,7 @@ def replay_account(
     capital: float,
     taker_fee_bps: float,
     apply_order_filters: bool = True,
+    unit_equity: pd.Series | None = None,
 ) -> AccountLedgerResult:
     """Replay a unit-exposure target book as one real USDT account.
 
@@ -67,8 +69,15 @@ def replay_account(
     the first bar whose adverse equity falls below total maintenance margin liquidates the account
     (equity 0, replay stops).
 
+    ``growth`` policies size each entry from posterior moments of the unit-exposure book:
+    ``unit_equity`` is that book's daily equity (exposure 1, no filters, no impact) on the
+    same entry index, and the entry at date d uses only its returns realized at entries
+    strictly before d (returns 1..d-1), so today's move never informs today's size.
+
     Raises:
         DataIntegrityError: Misaligned indexes/columns, non-positive capital, or no entry row.
+        DataIntegrityError: growth policy without unit_equity, or unit_equity misaligned
+            with unit_weights, non-finite, or non-positive.
     """
     if not np.isfinite(capital) or capital <= 0:
         raise DataIntegrityError(f"capital must be positive, got {capital}")
@@ -89,6 +98,20 @@ def replay_account(
     absent = [symbol for symbol in symbols if symbol not in marks.close.columns]
     if absent:
         raise DataIntegrityError(f"mark panels miss weight symbols {absent}")
+    unit_values: np.ndarray | None = None
+    unit_cum: np.ndarray | None = None
+    unit_cum_sq: np.ndarray | None = None
+    if policy.kind == "growth":
+        if unit_equity is None:
+            raise DataIntegrityError("growth policy requires unit_equity")
+        if not unit_equity.index.equals(dates):
+            raise DataIntegrityError("unit_equity index misaligned with unit_weights")
+        unit_values = unit_equity.to_numpy(dtype="float64")
+        if not bool(np.isfinite(unit_values).all()) or bool((unit_values <= 0).any()):
+            raise DataIntegrityError("unit_equity must be finite and positive")
+        unit_returns = unit_values[1:] / unit_values[:-1] - 1.0
+        unit_cum = np.cumsum(unit_returns)
+        unit_cum_sq = np.cumsum(unit_returns * unit_returns)
     ladders, fallback_symbols = build_venue_ladders(symbols, rules)
     steps = np.full(len(symbols), np.nan)
     mins = np.full(len(symbols), np.nan)
@@ -145,8 +168,20 @@ def replay_account(
         cash -= charge
         funding_paid += charge
         equity = marked - charge
+        moments = None
+        if policy.kind == "growth":
+            assert unit_cum is not None
+            assert unit_cum_sq is not None
+            n = max(0, day - 1)
+            total = float(unit_cum[n - 1]) if n > 0 else 0.0
+            total_sq = float(unit_cum_sq[n - 1]) if n > 0 else 0.0
+            moments = bayesian_unit_moments(
+                n, total, total_sq,
+                prior_days=policy.prior_days, min_moment_days=policy.min_moment_days,
+            )
         exposure = choose_exposure(
-            weight_values[day], equity, held, adv_values[day], sigma_values[day], ladders, policy
+            weight_values[day], equity, held, adv_values[day], sigma_values[day], ladders, policy,
+            moments,
         )
         target = exposure * equity * weight_values[day]
         _, initial_margin = maintenance_and_initial_margin(np.abs(target), ladders)

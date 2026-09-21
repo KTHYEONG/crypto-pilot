@@ -819,7 +819,10 @@ def _account_argv(*extra: str) -> list[str]:
     ]
 
 
-def _install_account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, recon_fail: bool = False, stub_venue: bool = True) -> dict:
+def _install_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *,
+    unit_fail: bool = False, unit_liquidated: bool = False, stub_venue: bool = True,
+) -> dict:
     import src.market_data.binance.venue_rules as venue_mod
     import src.mhs.account_ledger as ledger_mod
     import src.mhs.account_sources as sources_mod
@@ -859,14 +862,16 @@ def _install_account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, recon_f
         calm = pd.DataFrame({"AAA": [0.02, 0.02, 0.02]}, index=dates, dtype="float64")
         return unit, marks, flat, rich, calm
 
-    def _fake_replay(unit: object, marks: object, funding: object, adv: object, sigma: object, rules: object, policy: object, *, capital: float, taker_fee_bps: float, apply_order_filters: bool = True) -> AccountLedgerResult:
-        seen.setdefault("replays", []).append({"capital": capital, "policy": policy, "filters": apply_order_filters, "fee": taker_fee_bps})
-        if recon_fail and capital == 1e5:
-            raise DataIntegrityError("recon boom")
+    def _fake_replay(unit: object, marks: object, funding: object, adv: object, sigma: object, rules: object, policy: object, *, capital: float, taker_fee_bps: float, apply_order_filters: bool = True, unit_equity: pd.Series | None = None) -> AccountLedgerResult:
+        seen.setdefault("replays", []).append({"capital": capital, "policy": policy, "filters": apply_order_filters, "fee": taker_fee_bps, "unit_equity": unit_equity})
+        if unit_fail and len(seen["replays"]) == 1:
+            raise DataIntegrityError("unit boom")
         equity = pd.Series([capital, capital * 1.1, capital * 1.05], index=dates)
         exposure = pd.Series([1.0, 2.0, 1.5], index=dates)
+        seen.setdefault("equities", []).append(equity)
         return AccountLedgerResult(
-            capital=capital, daily_equity=equity, daily_exposure=exposure, liquidated_at=None,
+            capital=capital, daily_equity=equity, daily_exposure=exposure,
+            liquidated_at=dates[0] if unit_liquidated and len(seen["replays"]) == 1 else None,
             skipped_orders=3, untraded_fraction=0.01, initial_margin_breaches=0,
             fee_paid=1.0, impact_paid=2.0, funding_paid=0.5,
             fallback_ladder_symbols=(), missing_filter_symbols=(),
@@ -898,26 +903,39 @@ def test_account_command_defaults_to_growth_at_retail_capital(tmp_path: Path, mo
         ACCOUNT_INITIAL_MARGIN_CAP,
         ACCOUNT_MARGIN_RESERVE,
         ACCOUNT_MEAN_HAIRCUT,
+        ACCOUNT_MIN_MOMENT_DAYS,
+        ACCOUNT_PRIOR_DAYS,
         ACCOUNT_SHOCK_PER_UNIT,
         ACCOUNT_TAKER_FEE_BPS,
-        ACCOUNT_UNIT_DAILY_MEAN,
-        ACCOUNT_UNIT_DAILY_SIGMA,
+        ACCOUNT_UNIT_REFERENCE_CAPITAL,
     )
 
     seen = _install_account(monkeypatch, tmp_path)
     backtest_mod.run_frozen_account_command(_parse(_account_argv()))
-    policy = seen["replays"][0]["policy"]
+    assert len(seen["replays"]) == 2
+    unit_replay, main = seen["replays"]
+    unit_policy = unit_replay["policy"]
+    assert unit_policy.kind == "fixed"
+    assert unit_policy.exposure_max == 1.0
+    assert unit_policy.impact_y == 0.0
+    assert unit_replay["capital"] == ACCOUNT_UNIT_REFERENCE_CAPITAL
+    assert unit_replay["filters"] is False
+    assert unit_replay["unit_equity"] is None
+    policy = main["policy"]
     assert policy.kind == "growth"
-    assert seen["replays"][0]["capital"] == ACCOUNT_DEFAULT_CAPITAL_USDT
+    assert main["capital"] == ACCOUNT_DEFAULT_CAPITAL_USDT
     assert policy.mean_haircut == ACCOUNT_MEAN_HAIRCUT
     assert (policy.exposure_max, policy.exposure_step) == (ACCOUNT_EXPOSURE_MAX, ACCOUNT_EXPOSURE_STEP)
-    assert (policy.unit_daily_mean, policy.unit_daily_sigma) == (ACCOUNT_UNIT_DAILY_MEAN, ACCOUNT_UNIT_DAILY_SIGMA)
+    assert (policy.prior_days, policy.min_moment_days) == (ACCOUNT_PRIOR_DAYS, ACCOUNT_MIN_MOMENT_DAYS)
+    assert not hasattr(policy, "unit_daily_mean")
     assert (policy.shock_per_unit, policy.margin_reserve, policy.initial_margin_cap) == (
         ACCOUNT_SHOCK_PER_UNIT, ACCOUNT_MARGIN_RESERVE, ACCOUNT_INITIAL_MARGIN_CAP,
     )
     assert policy.impact_y == ACCOUNT_IMPACT_Y
-    assert seen["replays"][0]["fee"] == ACCOUNT_TAKER_FEE_BPS
-    assert seen["replays"][0]["filters"] is True
+    assert main["fee"] == ACCOUNT_TAKER_FEE_BPS
+    assert main["filters"] is True
+    assert main["unit_equity"] is not None
+    pd.testing.assert_series_equal(main["unit_equity"], seen["equities"][0])
 
 
 def test_account_candidate_is_unlevered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -937,8 +955,8 @@ def test_account_fixed_policy_requires_exposure(tmp_path: Path, monkeypatch: pyt
         backtest_mod.run_frozen_account_command(_parse(_account_argv("--policy", "fixed")))
     assert "request" not in seen
     backtest_mod.run_frozen_account_command(_parse(_account_argv("--policy", "fixed", "--fixed-exposure", "2.5")))
-    assert seen["replays"][0]["policy"].kind == "fixed"
-    assert seen["replays"][0]["policy"].exposure_max == 2.5
+    assert seen["replays"][1]["policy"].kind == "fixed"
+    assert seen["replays"][1]["policy"].exposure_max == 2.5
 
 
 def test_account_missing_venue_snapshot_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -954,6 +972,12 @@ def test_account_missing_venue_snapshot_fails_closed(tmp_path: Path, monkeypatch
 
 def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """account.json carries mandated disclosures and the daily parquet exists."""
+    from src.mhs.params import (
+        ACCOUNT_MIN_MOMENT_DAYS,
+        ACCOUNT_PRIOR_DAYS,
+        ACCOUNT_UNIT_REFERENCE_CAPITAL,
+    )
+
     seen = _install_account(monkeypatch, tmp_path)
     index = tmp_path / "index.jsonl"
     index.write_text(
@@ -967,10 +991,19 @@ def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.M
     (run_dir,) = _run_dirs(tmp_path)
     assert run_dir.name.startswith("20250101_20250201_top20_account_growth_2100_")
     payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
-    assert payload["in_sample_moments"] is True
+    assert "in_sample_moments" not in payload
+    assert payload["moment_source"] == "bayesian_causal_unit_ledger"
     assert payload["venue_rules_applied_retroactively"] is True
     assert payload["capital"] == 2100.0
     assert payload["policy"]["kind"] == "growth"
+    assert payload["policy"]["prior_days"] == ACCOUNT_PRIOR_DAYS
+    assert payload["policy"]["min_moment_days"] == ACCOUNT_MIN_MOMENT_DAYS
+    assert "unit_daily_mean" not in payload["policy"]
+    assert payload["unit_reference"]["capital"] == ACCOUNT_UNIT_REFERENCE_CAPITAL
+    assert payload["unit_reference"]["cagr"] == pytest.approx(
+        (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    )
+    assert payload["unit_reference"]["mdd"] == pytest.approx(105000.0 / 110000.0 - 1.0)
     assert payload["cagr"] == pytest.approx((2205.0 / 2100.0) ** (365.0 / 3.0) - 1.0)
     assert payload["mdd"] == pytest.approx(2205.0 / 2310.0 - 1.0)
     assert payload["liquidated_at"] is None
@@ -978,11 +1011,16 @@ def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.M
     recon = payload["reconciliation"]
     assert recon["reference_canonical"]["base_cagr"] == 1.365
     assert recon["cagr_gap"] == pytest.approx(recon["cagr"] - 1.365)
+    assert recon["mdd_convention"] == "magnitude"
+    assert recon["mdd_gap"] == pytest.approx(abs(recon["mdd"]) - 0.29)
     daily = pd.read_parquet(run_dir / "account_daily.parquet")
     assert list(daily.columns) == ["equity", "exposure"]
     assert len(daily) == 3
     rows = index.read_text(encoding="utf-8").splitlines()
-    assert json.loads(rows[-1])["kind"] == "mhs_frozen_account"
+    last = json.loads(rows[-1])
+    assert last["kind"] == "mhs_frozen_account"
+    assert last["base_max_drawdown"] >= 0
+    assert last["base_max_drawdown"] == pytest.approx(abs(payload["mdd"]))
 
     index.unlink()
     backtest_mod.run_frozen_account_command(_parse(_account_argv()))
@@ -992,14 +1030,48 @@ def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.M
     assert again["reconciliation"]["cagr_gap"] is None
 
 
-def test_account_reconciliation_failure_still_persists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failing reconciliation is disclosed, never fatal."""
-    _install_account(monkeypatch, tmp_path, recon_fail=True)
+def test_account_unit_reference_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed unit reference replay exits without persisting an account artifact."""
+    _install_account(monkeypatch, tmp_path, unit_fail=True)
+    with pytest.raises(SystemExit, match=r"unit reference"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert _run_dirs(tmp_path) == []
+
+
+def test_account_unit_reference_liquidation_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A liquidated unit reference is a failed input and exits."""
+    _install_account(monkeypatch, tmp_path, unit_liquidated=True)
+    with pytest.raises(SystemExit, match=r"unit reference"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert _run_dirs(tmp_path) == []
+
+
+def test_account_reference_lookup_failure_is_disclosed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing catalog lookup is disclosed, never fatal."""
+    _install_account(monkeypatch, tmp_path)
+
+    def _boom(path: object) -> object:
+        raise OSError("catalog boom")
+
+    monkeypatch.setattr(backtest_mod, "_latest_primary_reference", _boom)
     backtest_mod.run_frozen_account_command(_parse(_account_argv()))
     (run_dir,) = _run_dirs(tmp_path)
     payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
     assert payload["reconciliation"]["status"] == "failed"
     assert (run_dir / "account_daily.parquet").exists()
+
+
+def test_account_fixed_moment_source_is_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fixed policy discloses no moment source but still replays the unit reference."""
+    seen = _install_account(monkeypatch, tmp_path)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--policy", "fixed", "--fixed-exposure", "2.5")))
+    assert len(seen["replays"]) == 2
+    assert seen["replays"][0]["policy"].exposure_max == 1.0
+    assert seen["replays"][1]["unit_equity"] is not None
+    (run_dir,) = _run_dirs(tmp_path)
+    payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
+    assert payload["moment_source"] == "none"
+    assert "in_sample_moments" not in payload
 
 
 def _write_held_parquet(root: Path, symbol: str, start: pd.Timestamp, bars: int, close: float = 100.0) -> pd.DatetimeIndex:

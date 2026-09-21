@@ -7,7 +7,7 @@ import pytest
 from src.common.errors import DataIntegrityError
 from src.market_data.binance.venue_rules import VenueBracket, VenueRuleSnapshot, VenueSymbolRules
 from src.mhs.account_ledger import AccountLedgerResult, AccountMarkPanels, replay_account
-from src.mhs.account_policy import ExposurePolicy
+from src.mhs.account_policy import ExposurePolicy, UnitMoments
 
 
 def _rules(
@@ -34,9 +34,9 @@ def _growth_policy(**overrides: float | str) -> ExposurePolicy:
         "kind": "growth",
         "exposure_max": 10.0,
         "exposure_step": 0.25,
-        "unit_daily_mean": 0.0011,
-        "unit_daily_sigma": 0.0094,
         "mean_haircut": 0.5,
+        "prior_days": 730.0,
+        "min_moment_days": 30,
         "shock_per_unit": 0.08,
         "margin_reserve": 0.10,
         "initial_margin_cap": 0.90,
@@ -221,7 +221,8 @@ def test_replay_account_filters_off_is_scale_free() -> None:
     )
     marks = _panels(list(dates), ["BTCUSDT"], [[100.0], [101.0], [102.0]], spread=0.001)
     policy = _growth_policy(impact_y=0.0)
-    kwargs = {"taker_fee_bps": 6.0, "apply_order_filters": False}
+    unit_equity = pd.Series([1000.0, 1005.0, 1010.0], index=dates, dtype="float64")
+    kwargs = {"taker_fee_bps": 6.0, "apply_order_filters": False, "unit_equity": unit_equity}
     small = replay_account(unit, marks, funding, adv, sigma, _rules(minimum=0.0, ratio=1e-6, leverage=1000), policy, capital=1e3, **kwargs)
     large = replay_account(unit, marks, funding, adv, sigma, _rules(minimum=0.0, ratio=1e-6, leverage=1000), policy, capital=1e6, **kwargs)
 
@@ -338,6 +339,7 @@ def test_replay_account_never_listed_symbol_does_not_poison_equity() -> None:
     result = replay_account(
         unit, marks, funding, adv, sigma, _rules(minimum=0.0),
         _growth_policy(), capital=1000.0, taker_fee_bps=6.0,
+        unit_equity=pd.Series([1000.0, 1001.0], index=dates, dtype="float64"),
     )
 
     assert bool(np.isfinite(result.daily_equity).all())
@@ -355,5 +357,106 @@ def test_choose_exposure_ignores_unheld_symbol_with_nan_sigma() -> None:
     adv = np.array([1e9, np.nan])
     sigma = np.array([0.02, np.nan])
     held = np.zeros(2)
-    exposure = choose_exposure(weights, 10_000.0, held, adv, sigma, ladders, _growth_policy())
+    exposure = choose_exposure(
+        weights, 10_000.0, held, adv, sigma, ladders, _growth_policy(),
+        UnitMoments(mean=0.0011, sigma=0.0094, observations=1000),
+    )
     assert exposure > 0.25
+
+
+def _growth_frames(
+    dates: pd.DatetimeIndex, weights: list[list[float]], closes: list[list[float]],
+) -> tuple[pd.DataFrame, AccountMarkPanels, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], weights)
+    marks = _panels(list(dates), ["BTCUSDT"], closes)
+    return unit, marks, funding, adv, sigma
+
+
+def _growth_equity(dates: pd.DatetimeIndex, values: list[float]) -> pd.Series:
+    return pd.Series(values, index=dates, dtype="float64")
+
+
+def test_replay_account_growth_requires_unit_equity() -> None:
+    """Growth without unit equity fails closed."""
+    dates = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
+    unit, marks, funding, adv, sigma = _growth_frames(dates, [[1.0], [1.0]], [[100.0], [101.0]])
+
+    with pytest.raises(DataIntegrityError):
+        replay_account(
+            unit, marks, funding, adv, sigma, _rules(), _growth_policy(),
+            capital=1000.0, taker_fee_bps=6.0,
+        )
+
+
+def test_replay_account_unit_equity_alignment_fails_closed() -> None:
+    """Misaligned, non-finite, or non-positive unit equity fails closed."""
+    dates = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+    unit, marks, funding, adv, sigma = _growth_frames(
+        dates, [[1.0], [1.0], [1.0]], [[100.0], [101.0], [102.0]]
+    )
+    kwargs = {"capital": 1000.0, "taker_fee_bps": 6.0, "policy": _growth_policy()}
+    shifted = pd.Series([1000.0, 1001.0, 1002.0],
+                        index=dates + pd.Timedelta(days=1), dtype="float64")
+    with pytest.raises(DataIntegrityError):
+        replay_account(unit, marks, funding, adv, sigma, _rules(), unit_equity=shifted, **kwargs)  # type: ignore[arg-type]
+    nan_equity = _growth_equity(dates, [1000.0, float("nan"), 1002.0])
+    with pytest.raises(DataIntegrityError):
+        replay_account(unit, marks, funding, adv, sigma, _rules(), unit_equity=nan_equity, **kwargs)  # type: ignore[arg-type]
+    zero_equity = _growth_equity(dates, [1000.0, 0.0, 1002.0])
+    with pytest.raises(DataIntegrityError):
+        replay_account(unit, marks, funding, adv, sigma, _rules(), unit_equity=zero_equity, **kwargs)  # type: ignore[arg-type]
+
+
+def test_replay_account_today_unit_return_never_sizes_today() -> None:
+    """Entries up to date d ignore unit returns realized at d and later."""
+    dates = pd.date_range("2026-01-01", periods=5, freq="D", tz="UTC")
+    unit, marks, funding, adv, sigma = _growth_frames(
+        dates, [[1.0]] * 5, [[100.0], [101.0], [102.0], [103.0], [104.0]]
+    )
+    base_values = [1000.0, 1005.0, 1003.0, 1010.0, 1015.0]
+    fork_values = [1000.0, 1005.0, 1003.0, 900.0, 800.0]
+    first = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0), _growth_policy(),
+        capital=1000.0, taker_fee_bps=6.0, unit_equity=_growth_equity(dates, base_values),
+    )
+    second = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0), _growth_policy(),
+        capital=1000.0, taker_fee_bps=6.0, unit_equity=_growth_equity(dates, fork_values),
+    )
+
+    assert (first.daily_exposure.iloc[:4] == second.daily_exposure.iloc[:4]).all()
+
+
+def test_replay_account_early_days_use_smallest_rung() -> None:
+    """Before min_moment_days of evidence every exposure is the smallest rung."""
+    dates = pd.date_range("2026-01-01", periods=4, freq="D", tz="UTC")
+    unit, marks, funding, adv, sigma = _growth_frames(
+        dates, [[1.0]] * 4, [[100.0], [101.0], [102.0], [103.0]]
+    )
+    result = replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0, ratio=1e-6, leverage=1000),
+        _growth_policy(), capital=1000.0, taker_fee_bps=6.0,
+        unit_equity=_growth_equity(dates, [1000.0, 1001.0, 1002.0, 1003.0]),
+    )
+
+    assert (result.daily_exposure == 0.25).all()
+
+
+def test_replay_account_fixed_replay_unchanged_by_unit_equity() -> None:
+    """Fixed replay ignores unit equity bit-for-bit."""
+    dates = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+    unit, marks, funding, adv, sigma = _growth_frames(
+        dates, [[1.0], [1.0], [1.0]], [[100.0], [101.0], [102.0]], 
+    )
+    policy = _fixed_policy()
+    plain = replay_account(
+        unit, marks, funding, adv, sigma, _rules(), policy,
+        capital=1000.0, taker_fee_bps=6.0,
+    )
+    with_equity = replay_account(
+        unit, marks, funding, adv, sigma, _rules(), policy,
+        capital=1000.0, taker_fee_bps=6.0,
+        unit_equity=_growth_equity(dates, [1000.0, 50.0, 2000.0]),
+    )
+
+    pd.testing.assert_series_equal(with_equity.daily_equity, plain.daily_equity)
