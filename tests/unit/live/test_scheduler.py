@@ -476,7 +476,7 @@ def test_run_daemon_has_no_params_gate(monkeypatch, tmp_path) -> None:
                      max_iterations=1, signal_step_fn=lambda target: order.append("signal"),
                      refresh_fn=lambda: order.append("refresh"), prune_fn=lambda: order.append("prune"),
                      venue_fn=lambda: order.append("venue"))
-    assert order == ["venue", "refresh", "prune", "signal", "cycle"]
+    assert order == ["venue", "refresh", "signal", "cycle", "prune"]
     assert json.loads(hb.read_text())["status"] == "COMPLETE"
 
 
@@ -545,7 +545,7 @@ def sched_now() -> "pd.Timestamp":
 
 
 
-def test_daemon_runs_prune_after_refresh_before_signal(tmp_path, monkeypatch) -> None:
+def test_daemon_runs_prune_after_execute(tmp_path, monkeypatch) -> None:
     import pandas as pd
     import src.live.scheduler as sched
     from src.live.settings import LiveSettings
@@ -571,7 +571,7 @@ def test_daemon_runs_prune_after_refresh_before_signal(tmp_path, monkeypatch) ->
         prune_fn=lambda: order.append("prune"),
     )
 
-    assert order == ["refresh", "prune", "signal"]
+    assert order == ["refresh", "signal", "prune"]
 
 
 def test_daemon_prune_failure_is_non_fatal(tmp_path, monkeypatch) -> None:
@@ -736,7 +736,7 @@ def test_run_daemon_proceeds_degraded_when_cached_data_fresh_enough(tmp_path, mo
         prune_fn=lambda: steps.append("prune"),
     )
 
-    assert steps == ["prune", "signal"]
+    assert steps == ["signal", "prune"]
     assert "data_degraded" in alerts
     import json
     hb = json.loads((tmp_path / "hb.json").read_text())
@@ -793,7 +793,7 @@ def test_run_daemon_legacy_none_refresh_still_proceeds(tmp_path, monkeypatch) ->
         prune_fn=lambda: steps.append("prune"),
     )
 
-    assert steps == ["prune", "signal"]
+    assert steps == ["signal", "prune"]
     hb = json.loads((tmp_path / "hb.json").read_text())
     assert hb["status"] == "COMPLETE"
 
@@ -2629,3 +2629,148 @@ def test_daemon_defaults_wire_frozen_step_and_venue(monkeypatch, tmp_path) -> No
 
     assert frozen_calls == [target]
     assert len(venue_calls) == 1
+
+
+def test_prune_runs_after_execution(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.scheduler import DECISION_RELEASE_OFFSET
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    order: list[str] = []
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
+
+    def _fake_cycle(settings, decision_time, artifact_path, *, now=None, **k):
+        order.append("execute")
+        return CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _fake_cycle)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    sched.run_daemon(
+        LiveSettings(),
+        artifact,
+        tmp_path / "state.json",
+        sleep_fn=lambda s: None,
+        now_fn=lambda: ready,
+        max_iterations=1,
+        refresh_fn=lambda: order.append("refresh"),
+        signal_step_fn=lambda t: order.append("signal"),
+        prune_fn=lambda: order.append("prune"),
+        venue_fn=lambda: None,
+    )
+    assert order == ["refresh", "signal", "execute", "prune"]
+
+
+def test_prune_failure_is_isolated(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.scheduler import DECISION_RELEASE_OFFSET
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda *a, **k: CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp("2026-08-24 00:00Z"), intent_count=0),
+    )
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+
+    def _boom() -> None:
+        raise RuntimeError("disk busy")
+
+    sched.run_daemon(
+        LiveSettings(),
+        artifact,
+        state_path,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: ready,
+        max_iterations=1,
+        refresh_fn=lambda: None,
+        signal_step_fn=lambda *a, **k: None,
+        prune_fn=_boom,
+        venue_fn=lambda: None,
+    )
+    hb = json.loads((tmp_path / "hb.json").read_text(encoding="utf-8"))
+    assert hb["status"] == "COMPLETE"
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert pd.Timestamp(saved["last_processed_decision_time"]) == target
+
+
+def test_live_mode_fetches_account_equity(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", tmp_path / "non_crypto.json")
+    (tmp_path / "non_crypto.json").write_text('{"symbols": []}', encoding="utf-8")
+    def _fake_fetch(settings, now):
+        captured["called"] = True
+        return 3000.0
+
+    monkeypatch.setattr("src.live.runner.fetch_live_account_equity", _fake_fetch)
+
+    def _fake_step(target, **kwargs):
+        captured.update(kwargs)
+        return type("R", (), {"status": "COMPLETE"})()
+
+    monkeypatch.setattr("src.live.frozen_signal.run_frozen_signal_step", _fake_step)
+    settings = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key="k", order_api_secret="s", heartbeat_path=str(tmp_path / "hb.json"))
+    sched._default_frozen_step(pd.Timestamp("2026-08-24 00:00Z"), settings, tmp_path / "w.parquet")
+    assert captured.get("account_equity_usdt") == 3000.0
+    assert captured.get("called") is True
+
+
+def test_paper_mode_never_fetches_account_equity(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", tmp_path / "non_crypto.json")
+    (tmp_path / "non_crypto.json").write_text('{"symbols": []}', encoding="utf-8")
+    called: list[bool] = []
+    monkeypatch.setattr("src.live.runner.fetch_live_account_equity", lambda *a, **k: called.append(True) or 3000.0)
+    seen: dict[str, object] = {}
+
+    def _fake_step(target, **kwargs):
+        seen.update(kwargs)
+        return type("R", (), {"status": "COMPLETE"})()
+
+    monkeypatch.setattr("src.live.frozen_signal.run_frozen_signal_step", _fake_step)
+    sched._default_frozen_step(pd.Timestamp("2026-08-24 00:00Z"), LiveSettings(), tmp_path / "w.parquet")
+    assert called == []
+    assert seen.get("account_equity_usdt") is None
+
+
+def test_fetch_failure_halts_step(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+    import src.live.scheduler as sched
+    from src.common.errors import DataIntegrityError
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", tmp_path / "non_crypto.json")
+    (tmp_path / "non_crypto.json").write_text('{"symbols": []}', encoding="utf-8")
+
+    def _boom(settings, now):
+        raise DataIntegrityError("venue down")
+
+    monkeypatch.setattr("src.live.runner.fetch_live_account_equity", _boom)
+    monkeypatch.setattr("src.live.frozen_signal.run_frozen_signal_step", lambda *a, **k: pytest.fail("must not reach signal step"))
+    settings = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key="k", order_api_secret="s", heartbeat_path=str(tmp_path / "hb.json"))
+    with pytest.raises(DataIntegrityError):
+        sched._default_frozen_step(pd.Timestamp("2026-08-24 00:00Z"), settings, tmp_path / "w.parquet")

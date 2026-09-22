@@ -78,20 +78,18 @@ def _research_comparison(tmp_path: Path, symbols: tuple[str, ...]) -> None:
 
 def _mini_book(panel_last_bar: pd.Timestamp | None = None) -> LiveFrozenBook:
     decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
-    entries = pd.DatetimeIndex(["2021-01-02", "2021-01-03", "2021-01-04"], tz="UTC")
     cols = ["AAAUSDT", "BBBUSDT"]
     unit = pd.DataFrame(
         [[0.5, -0.5], [0.5, -0.5], [0.0, 0.0]], index=decisions, columns=cols, dtype="float64",
     )
-    snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
-    entry = pd.DataFrame(
+    snap = pd.DataFrame(
         [[100.0, 100.0], [110.0, 100.0], [110.0, 100.0]],
-        index=entries, columns=cols, dtype="float64",
+        index=decisions, columns=cols, dtype="float64",
     )
     adv = pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64")
     sigma = pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64")
     return LiveFrozenBook(
-        unit_weights=unit, snapshot_closes=snap, entry_closes=entry,
+        unit_weights=unit, snapshot_closes=snap,
         adv=adv, daily_sigma=sigma, valid_from=decisions[0],
         panel_last_bar=panel_last_bar or pd.Timestamp("2021-01-10", tz="UTC"),
     )
@@ -201,15 +199,13 @@ def test_funding_settlement_cadence_is_summed_exactly() -> None:
 
 def test_turnover_cost_uses_weight_change() -> None:
     decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
-    entries = pd.DatetimeIndex(["2021-01-02", "2021-01-03", "2021-01-04"], tz="UTC")
     cols = ["AAAUSDT", "BBBUSDT"]
     unit = pd.DataFrame(
         [[0.0, 0.0], [0.2, -0.2], [0.2, -0.2]], index=decisions, columns=cols, dtype="float64",
     )
-    flat = pd.DataFrame(100.0, index=entries, columns=cols, dtype="float64")
     snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
     book = LiveFrozenBook(
-        unit_weights=unit, snapshot_closes=snap, entry_closes=flat,
+        unit_weights=unit, snapshot_closes=snap,
         adv=snap.copy(), daily_sigma=snap.copy(), valid_from=decisions[0],
         panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
@@ -217,17 +213,16 @@ def test_turnover_cost_uses_weight_change() -> None:
     assert out.iloc[1] == pytest.approx(-0.00008)
 
 
-def test_held_symbol_with_missing_entry_close_fails_closed() -> None:
+def test_held_symbol_with_missing_snapshot_close_fails_closed() -> None:
     book = _mini_book()
-    book.entry_closes.iloc[0, 0] = float("nan")
+    book.snapshot_closes.iloc[1, 0] = float("nan")
     with pytest.raises(DataIntegrityError):
         unit_proxy_returns(book, {}, cost_bps=0.0)
 
 
 def test_forward_bar_past_panel_frontier_is_skipped_not_raised() -> None:
-    # day=2021-01-02 는 nxt_bar(2021-01-03 23:00)가 아직 관측 안 된 미래이므로 조용히
-    # 건너뛴다 -- 매일 자정 직전 실행되는 라이브 사이클이 "어제" 몫을 재채점하려다 아직
-    # 마감 안 된 오늘 자정 봉을 요구하는, 매일 밤 반복되는 정상 상황의 회귀 가드.
+    # day=2021-01-02 는 closing snapshot bar(2021-01-03 22:00)가 아직 관측 안 된 미래이므로
+    # 조용히 건너뛴다 -- 매일 자정 직전 실행되는 라이브 사이클의 정상 상황 회귀 가드.
     book = _mini_book(panel_last_bar=pd.Timestamp("2021-01-03 00:00", tz="UTC"))
     out = unit_proxy_returns(book, {}, cost_bps=0.0)
     assert list(out.index) == [pd.Timestamp("2021-01-03", tz="UTC")]
@@ -237,7 +232,7 @@ def test_genuine_gap_within_observed_history_still_fails_closed() -> None:
     # panel_last_bar 는 넉넉한데도 특정 보유 심볼 값만 NaN이면 -- 미래가 아니라 진짜 결손
     # -- 여전히 fail-closed 해야 한다(수집 실패를 조용히 넘어가지 않는다).
     book = _mini_book()
-    book.entry_closes.iloc[1, 0] = float("nan")
+    book.snapshot_closes.iloc[1, 0] = float("nan")
     with pytest.raises(DataIntegrityError):
         unit_proxy_returns(book, {}, cost_bps=0.0)
 
@@ -328,7 +323,7 @@ def test_build_fails_when_source_malformed(tmp_path: Path) -> None:
 
 def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
     book = _mini_book()
-    book.entry_closes.iloc[:, 1] = float("nan")
+    book.snapshot_closes.iloc[:, 1] = float("nan")
     book.unit_weights.iloc[:, 1] = 0.0
     book.unit_weights.iloc[1, 1] = 0.0
     out = unit_proxy_returns(book, {}, cost_bps=0.0)
@@ -337,7 +332,6 @@ def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
     empty = LiveFrozenBook(
         unit_weights=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
         snapshot_closes=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
-        entry_closes=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
         adv=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
         daily_sigma=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
         valid_from=_START, panel_last_bar=_START,
@@ -384,10 +378,16 @@ def test_assemble_account_inputs_shares_causal_adv_sigma(tmp_path: Path) -> None
         root=str(tmp_path / "marks"), budget=resolve_mhs_memory_budget(None),
         daily_close=daily_close, daily_quote_volume=daily_qv,
     )
-    _, _, _, adv, sigma = assemble_account_inputs(candidate, context)
+    _, _, _, adv, sigma, anchors = assemble_account_inputs(candidate, context)
     expected_adv, expected_sigma = causal_adv_sigma(daily_qv, daily_close)
-    pd.testing.assert_frame_equal(adv, expected_adv.reindex(entries))
-    pd.testing.assert_frame_equal(sigma, expected_sigma.reindex(entries))
+    decisions = entries - pd.Timedelta(days=1)
+    expected_adv = expected_adv.reindex(decisions)
+    expected_adv.index = entries
+    expected_sigma = expected_sigma.reindex(decisions)
+    expected_sigma.index = entries
+    pd.testing.assert_frame_equal(adv, expected_adv)
+    pd.testing.assert_frame_equal(sigma, expected_sigma)
+    pd.testing.assert_index_equal(anchors, pd.DatetimeIndex(entries))
 
 
 def test_history_validation_rejects_bad_inputs() -> None:
@@ -417,3 +417,294 @@ def test_history_validation_rejects_bad_inputs() -> None:
     bad_vals.iloc[0] = float("nan")
     with pytest.raises(DataIntegrityError):
         extend_unit_history(bad_vals, good, good)
+
+
+def _assemble_context(tmp_path: Path, sym: str, entries: pd.DatetimeIndex, releases: pd.DatetimeIndex, grid: pd.DatetimeIndex, funding_by_symbol: dict | None = None):
+    from src.mhs.account_sources import assemble_account_inputs
+    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
+    from src.mhs.frozen_research_run import FrozenSourceContext
+    from src.mhs.resources import resolve_mhs_memory_budget
+    import numpy as np
+
+    weights = pd.DataFrame([[0.5]] * len(entries), index=entries, columns=[sym], dtype="float64")
+    candidate = FrozenMhsCandidate(
+        target_weights=weights, signal_available_at=releases, strategy=FROZEN_MHS_TOP20_V2,
+    )
+    marks_dir = tmp_path / "marks2" / "3m"
+    marks_dir.mkdir(parents=True, exist_ok=True)
+    ms = np.array([int(ts.value // 1_000_000) for ts in grid], dtype="int64")
+    pd.DataFrame(
+        {"timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+    ).to_parquet(marks_dir / f"{sym}.parquet")
+    daily_idx = pd.date_range(pd.Timestamp("2021-01-01", tz="UTC"), entries[-1] + pd.Timedelta(days=1), freq="1D", tz="UTC")
+    daily_close = pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64")
+    daily_qv = pd.DataFrame(2e6, index=daily_idx, columns=[sym], dtype="float64")
+    context = FrozenSourceContext(
+        census=(sym,), funding_by_symbol=dict(funding_by_symbol or {}), funding_failures={},
+        root=str(tmp_path / "marks2"), budget=resolve_mhs_memory_budget(None),
+        daily_close=daily_close, daily_quote_volume=daily_qv,
+    )
+    return assemble_account_inputs(candidate, context)
+
+
+def test_assembled_anchors_follow_release_time(tmp_path: Path) -> None:
+    sym = "AAAUSDT"
+    entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
+    releases = pd.DatetimeIndex(entries - pd.Timedelta(hours=1))
+    grid = pd.date_range(releases[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
+    unit, marks, _, adv, _, anchors = _assemble_context(tmp_path, sym, entries, releases, grid)
+    pd.testing.assert_index_equal(anchors, releases)
+    assert marks.close.index[0] == releases[0]
+    assert len(anchors) == len(unit)
+
+
+def test_assembled_funding_sampled_at_anchors(tmp_path: Path) -> None:
+    sym = "AAAUSDT"
+    entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
+    releases = pd.DatetimeIndex(entries - pd.Timedelta(hours=1))
+    grid = pd.date_range(releases[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
+    funding = pd.Series([0.001], index=pd.DatetimeIndex([entries[0]], tz="UTC"), dtype="float64")
+    _, _, funding_cum, _, _, anchors = _assemble_context(
+        tmp_path, sym, entries, releases, grid, funding_by_symbol={sym: funding},
+    )
+    assert anchors[0] == releases[0]
+    assert funding_cum.loc[entries[0], sym] == 0.0
+    assert funding_cum.loc[entries[1], sym] == 0.001
+
+
+def test_assembled_shared_anchor_fails_closed(tmp_path: Path) -> None:
+    import numpy as np
+
+    from src.mhs.account_sources import assemble_account_inputs
+    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
+    from src.mhs.frozen_research_run import FrozenSourceContext
+    from src.mhs.resources import resolve_mhs_memory_budget
+
+    sym = "AAAUSDT"
+    entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
+    releases = pd.DatetimeIndex([entries[0] - pd.Timedelta(hours=1), entries[0] - pd.Timedelta(minutes=59)])
+    weights = pd.DataFrame([[0.5], [0.5]], index=entries, columns=[sym], dtype="float64")
+    candidate = FrozenMhsCandidate(
+        target_weights=weights, signal_available_at=releases, strategy=FROZEN_MHS_TOP20_V2,
+    )
+    grid = pd.date_range(releases[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
+    marks_dir = tmp_path / "marks3" / "3m"
+    marks_dir.mkdir(parents=True, exist_ok=True)
+    ms = np.array([int(ts.value // 1_000_000) for ts in grid], dtype="int64")
+    pd.DataFrame(
+        {"timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+    ).to_parquet(marks_dir / f"{sym}.parquet")
+    daily_idx = pd.date_range(pd.Timestamp("2021-01-01", tz="UTC"), entries[-1] + pd.Timedelta(days=1), freq="1D", tz="UTC")
+    context = FrozenSourceContext(
+        census=(sym,), funding_by_symbol={}, funding_failures={},
+        root=str(tmp_path / "marks3"), budget=resolve_mhs_memory_budget(None),
+        daily_close=pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64"),
+        daily_quote_volume=pd.DataFrame(2e6, index=daily_idx, columns=[sym], dtype="float64"),
+    )
+    with pytest.raises(DataIntegrityError):
+        assemble_account_inputs(candidate, context)
+
+
+def test_assembled_release_before_first_grid_bar_fails_closed(tmp_path: Path) -> None:
+    import numpy as np
+
+    from src.mhs.account_sources import assemble_account_inputs
+    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
+    from src.mhs.frozen_research_run import FrozenSourceContext
+    from src.mhs.resources import resolve_mhs_memory_budget
+
+    sym = "AAAUSDT"
+    entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
+    releases = pd.DatetimeIndex(
+        [pd.Timestamp("2021-02-01", tz="UTC"), pd.Timestamp("2021-01-15", tz="UTC")]
+    )
+    weights = pd.DataFrame([[0.5], [0.5]], index=entries, columns=[sym], dtype="float64")
+    candidate = FrozenMhsCandidate(
+        target_weights=weights, signal_available_at=releases, strategy=FROZEN_MHS_TOP20_V2,
+    )
+    grid = pd.date_range(releases[0].floor("3min"), entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
+    marks_dir = tmp_path / "marks4" / "3m"
+    marks_dir.mkdir(parents=True, exist_ok=True)
+    ms = np.array([int(ts.value // 1_000_000) for ts in grid], dtype="int64")
+    pd.DataFrame(
+        {"timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+    ).to_parquet(marks_dir / f"{sym}.parquet")
+    daily_idx = pd.date_range(pd.Timestamp("2021-01-01", tz="UTC"), entries[-1] + pd.Timedelta(days=1), freq="1D", tz="UTC")
+    context = FrozenSourceContext(
+        census=(sym,), funding_by_symbol={}, funding_failures={},
+        root=str(tmp_path / "marks4"), budget=resolve_mhs_memory_budget(None),
+        daily_close=pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64"),
+        daily_quote_volume=pd.DataFrame(2e6, index=daily_idx, columns=[sym], dtype="float64"),
+    )
+    with pytest.raises(DataIntegrityError):
+        assemble_account_inputs(candidate, context)
+
+
+def _assemble_with_daily(
+    tmp_path: Path, name: str, daily_close: pd.DataFrame, daily_qv: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    from src.mhs.account_sources import assemble_account_inputs
+    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
+    from src.mhs.frozen_research_run import FrozenSourceContext
+    from src.mhs.resources import resolve_mhs_memory_budget
+
+    sym = str(daily_close.columns[0])
+    entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
+    weights = pd.DataFrame([[0.5], [-0.5]], index=entries, columns=[sym], dtype="float64")
+    candidate = FrozenMhsCandidate(
+        target_weights=weights, signal_available_at=entries, strategy=FROZEN_MHS_TOP20_V2,
+    )
+    grid = pd.date_range(entries[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
+    marks_dir = tmp_path / name / "3m"
+    marks_dir.mkdir(parents=True, exist_ok=True)
+    ms = np.array([int(ts.value // 1_000_000) for ts in grid], dtype="int64")
+    pd.DataFrame(
+        {"timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+    ).to_parquet(marks_dir / f"{sym}.parquet")
+    context = FrozenSourceContext(
+        census=(sym,), funding_by_symbol={}, funding_failures={},
+        root=str(tmp_path / name), budget=resolve_mhs_memory_budget(None),
+        daily_close=daily_close, daily_quote_volume=daily_qv,
+    )
+    _, _, _, adv, sigma, _ = assemble_account_inputs(candidate, context)
+    return adv, sigma
+
+
+def test_replay_adv_uses_decision_day(tmp_path: Path) -> None:
+    sym = "AAAUSDT"
+    entry = pd.Timestamp("2021-02-02", tz="UTC")
+    daily_idx = pd.date_range("2021-01-01", "2021-02-02", freq="1D", tz="UTC")
+    base_qv = pd.DataFrame(2e6, index=daily_idx, columns=[sym], dtype="float64")
+    jumped_qv = base_qv.copy()
+    jumped_qv.loc[entry, sym] = 2e8
+    daily_close = pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64")
+    adv_base, _ = _assemble_with_daily(tmp_path, "adv_base", daily_close, base_qv)
+    adv_jump, _ = _assemble_with_daily(tmp_path, "adv_jump", daily_close, jumped_qv)
+    assert adv_base.loc[entry, sym] == pytest.approx(adv_jump.loc[entry, sym])
+
+
+def test_future_daily_bar_never_moves_replay_adv(tmp_path: Path) -> None:
+    sym = "AAAUSDT"
+    entry = pd.Timestamp("2021-02-02", tz="UTC")
+    daily_idx = pd.date_range("2021-01-01", "2021-02-02", freq="1D", tz="UTC")
+    close_a = pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64")
+    close_b = close_a.copy()
+    close_b.loc[entry, sym] = 150.0
+    daily_qv = pd.DataFrame(2e6, index=daily_idx, columns=[sym], dtype="float64")
+    adv_a, sigma_a = _assemble_with_daily(tmp_path, "fut_a", close_a, daily_qv)
+    adv_b, sigma_b = _assemble_with_daily(tmp_path, "fut_b", close_b, daily_qv)
+    pd.testing.assert_series_equal(adv_a.loc[entry], adv_b.loc[entry], check_names=False)
+    pd.testing.assert_series_equal(sigma_a.loc[entry], sigma_b.loc[entry], check_names=False)
+
+
+def test_proxy_prices_snapshot_to_snapshot() -> None:
+    decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
+    cols = ["AAAUSDT"]
+    unit = pd.DataFrame([[1.0], [1.0], [1.0]], index=decisions, columns=cols, dtype="float64")
+    snap = pd.DataFrame(
+        [[100.0], [110.0], [110.0]], index=decisions, columns=cols, dtype="float64",
+    )
+    book = LiveFrozenBook(
+        unit_weights=unit, snapshot_closes=snap,
+        adv=pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64"),
+        daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
+        valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
+    )
+    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    assert out.loc[pd.Timestamp("2021-01-03", tz="UTC")] == pytest.approx(0.10)
+
+
+def test_proxy_funding_window_is_snapshot_to_snapshot() -> None:
+    decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
+    cols = ["AAAUSDT"]
+    unit = pd.DataFrame([[1.0], [1.0], [1.0]], index=decisions, columns=cols, dtype="float64")
+    snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
+    adv = pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64")
+    sigma = pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64")
+    book = LiveFrozenBook(
+        unit_weights=unit, snapshot_closes=snap, adv=adv, daily_sigma=sigma,
+        valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
+    )
+    day = decisions[0]
+    nxt = decisions[1]
+    funding = {
+        "AAAUSDT": pd.Series(
+            [0.01, 0.02, 0.03, 0.04],
+            index=pd.DatetimeIndex(
+                [day + pd.Timedelta(hours=23), nxt + pd.Timedelta(hours=8),
+                 nxt + pd.Timedelta(hours=23), nxt + pd.Timedelta(days=1)],
+                tz="UTC",
+            ),
+            dtype="float64",
+        ),
+    }
+    out = unit_proxy_returns(book, funding, cost_bps=0.0)
+    assert out.loc[day + pd.Timedelta(days=2)] == pytest.approx(-(0.02 + 0.03))
+
+
+def test_unobserved_closing_snapshot_is_skipped() -> None:
+    decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02"], tz="UTC")
+    cols = ["AAAUSDT"]
+    unit = pd.DataFrame([[1.0], [1.0]], index=decisions, columns=cols, dtype="float64")
+    snap = pd.DataFrame([[100.0], [110.0]], index=decisions, columns=cols, dtype="float64")
+    adv = pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64")
+    sigma = pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64")
+    book = LiveFrozenBook(
+        unit_weights=unit, snapshot_closes=snap, adv=adv, daily_sigma=sigma,
+        valid_from=decisions[0],
+        panel_last_bar=pd.Timestamp("2021-01-02 12:00", tz="UTC"),
+    )
+    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    assert len(out) == 0
+
+
+def test_proxy_matches_replay_anchor_to_anchor() -> None:
+    from src.market_data.binance.venue_rules import VenueBracket, VenueRuleSnapshot, VenueSymbolRules
+
+    from src.mhs.account_ledger import AccountMarkPanels, replay_account
+    from src.mhs.account_policy import ExposurePolicy
+
+    sym = "AAAUSDT"
+    entries = pd.DatetimeIndex(["2021-01-03", "2021-01-04"], tz="UTC")
+    releases = entries - pd.Timedelta(hours=1)
+    grid = pd.date_range(releases[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
+    closes = np.where(grid >= releases[1], 110.0, 100.0)
+    marks = AccountMarkPanels(
+        close=pd.DataFrame({sym: closes}, index=grid, dtype="float64"),
+        high=pd.DataFrame({sym: closes}, index=grid, dtype="float64"),
+        low=pd.DataFrame({sym: closes}, index=grid, dtype="float64"),
+    )
+    unit_weights = pd.DataFrame([[1.0], [1.0]], index=entries, columns=[sym], dtype="float64")
+    funding_cum = pd.DataFrame(0.0, index=entries, columns=[sym], dtype="float64")
+    adv = pd.DataFrame(1e12, index=entries, columns=[sym], dtype="float64")
+    sigma = pd.DataFrame(0.02, index=entries, columns=[sym], dtype="float64")
+    rules = VenueRuleSnapshot(
+        captured_at=pd.Timestamp("2021-01-01", tz="UTC"),
+        symbols={sym: VenueSymbolRules(
+            symbol=sym, brackets=(VenueBracket(0.0, 1e12, 0.0, 0.0, 1000),),
+            step_size=1e-9, min_notional=0.0,
+        )},
+    )
+    policy = ExposurePolicy(
+        kind="fixed", exposure_max=1.0, exposure_step=0.01, mean_haircut=0.0,
+        prior_days=730.0, min_moment_days=30, shock_per_unit=0.0,
+        margin_reserve=0.0, initial_margin_cap=10.0, impact_y=0.0,
+    )
+    result = replay_account(
+        unit_weights, marks, funding_cum, adv, sigma, rules, policy,
+        anchor_times=releases, capital=1e6, taker_fee_bps=0.0,
+        apply_order_filters=False, execution="taker",
+    )
+    replay_ret = float(result.daily_equity.loc[entries[1]] / result.daily_equity.loc[entries[0]] - 1.0)
+    decisions = pd.DatetimeIndex(["2021-01-02", "2021-01-03"], tz="UTC")
+    book = LiveFrozenBook(
+        unit_weights=pd.DataFrame([[1.0], [1.0]], index=decisions, columns=[sym], dtype="float64"),
+        snapshot_closes=pd.DataFrame(
+            [[100.0], [110.0]], index=decisions, columns=[sym], dtype="float64",
+        ),
+        adv=pd.DataFrame(1e6, index=decisions, columns=[sym], dtype="float64"),
+        daily_sigma=pd.DataFrame(0.02, index=decisions, columns=[sym], dtype="float64"),
+        valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
+    )
+    proxy = unit_proxy_returns(book, {}, cost_bps=0.0)
+    assert proxy.loc[entries[1]] == pytest.approx(replay_ret, rel=1e-9)

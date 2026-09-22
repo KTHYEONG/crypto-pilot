@@ -246,7 +246,7 @@ def compute_fill_cash_flow(
         # I-FEE-ACCOUNTED: fills가 있으면 per-fill 수수료 포함, 없으면 보수적 taker fallback
         fills = getattr(outcome, "fills", ())
         if fills:
-            for qty_abs, price, fee_bps, _reason, _liq in fills:
+            for qty_abs, price, fee_bps, _reason, _liq, _filled_at in fills:
                 qty = Decimal(qty_abs)
                 px = Decimal(price)
                 fee = abs(qty * px) * Decimal(str(fee_bps)) / Decimal(10_000)

@@ -43,7 +43,6 @@ class LiveFrozenBook:
 
     unit_weights: pd.DataFrame
     snapshot_closes: pd.DataFrame
-    entry_closes: pd.DataFrame
     adv: pd.DataFrame
     daily_sigma: pd.DataFrame
     valid_from: pd.Timestamp
@@ -138,12 +137,6 @@ def build_live_frozen_book(
         close_c.reindex(snapshot_bars).to_numpy(dtype="float64"),
         index=decisions_kept, columns=census_list, dtype="float64",
     )
-    entries_kept = decisions_kept + pd.Timedelta(days=1)
-    entry_bars = entries_kept - pd.Timedelta(hours=1)
-    entry_closes = pd.DataFrame(
-        close_c.reindex(entry_bars).to_numpy(dtype="float64"),
-        index=entries_kept, columns=census_list, dtype="float64",
-    )
     adv_daily, sigma_daily = causal_adv_sigma(daily_quote_volume, daily_close)
     adv = pd.DataFrame(
         adv_daily.reindex(decisions_kept).to_numpy(dtype="float64"),
@@ -155,7 +148,7 @@ def build_live_frozen_book(
     )
     return LiveFrozenBook(
         unit_weights=unit_weights, snapshot_closes=snapshot_closes,
-        entry_closes=entry_closes, adv=adv, daily_sigma=daily_sigma,
+        adv=adv, daily_sigma=daily_sigma,
         valid_from=valid_from, panel_last_bar=panel_last_bar,
     )
 
@@ -177,63 +170,66 @@ def _funding_sum_in_window(series: pd.Series | None, start: pd.Timestamp, stop: 
 def unit_proxy_returns(
     book: LiveFrozenBook, funding_by_symbol: Mapping[str, pd.Series], *, cost_bps: float,
 ) -> pd.Series:
-    """Daily unit-book return proxy labelled by the settlement day.
+    """Daily unit-book return proxy on the replay ledger's anchor-to-anchor convention.
 
-    The decision-d book is held from entry d+1 to entry d+2 and labelled d+2: price return
-    on entry closes, minus funding settled in (entry, next entry] paid by longs, minus
-    ``cost_bps`` on the absolute weight change against the previous decision. It stands in
-    for the canonical 3m unit ledger after the bootstrap ends; intraday execution path is
-    not modelled.
+    The decision-d book is priced from the d snapshot close (the 23:00 release price, the
+    replay ledger's submit-bar anchor) to the d+1 snapshot close, minus funding settled in
+    (d 23:00, d+1 23:00] paid by longs, minus ``cost_bps`` on the absolute weight change against
+    the previous decision. It is labelled d+2, the entry label whose replay return spans the same
+    two anchors, so the forward history continues the bootstrap export without a timing seam.
+    A day whose closing snapshot bar is not yet observed is skipped and re-scored next cycle.
 
     Raises:
-        DataIntegrityError: non-finite result on a day whose book is non-empty.
+        DataIntegrityError: a held symbol lacks either snapshot close, or the result is non-finite.
     """
     decisions = pd.DatetimeIndex(book.unit_weights.index).tz_convert("UTC").sort_values()
     if len(decisions) == 0:
         return pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
-    entry_index = pd.DatetimeIndex(book.entry_closes.index).tz_convert("UTC")
-    entry_lookup = {stamp: pos for pos, stamp in enumerate(entry_index)}
+    snapshot_hour = int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc)
+    snapshot_index = pd.DatetimeIndex(book.snapshot_closes.index).tz_convert("UTC")
+    snapshot_lookup = {stamp: pos for pos, stamp in enumerate(snapshot_index)}
     symbols = list(book.unit_weights.columns)
     weights = book.unit_weights.reindex(decisions)
-    entries_needed = decisions + pd.Timedelta(days=1)
     out_idx: list[pd.Timestamp] = []
     out_vals: list[float] = []
     prev = np.zeros(len(symbols), dtype="float64")
     for pos, day in enumerate(decisions):
-        entry = entries_needed[pos]
-        nxt = day + pd.Timedelta(days=2)
-        nxt_bar = nxt - pd.Timedelta(hours=1)
-        # nxt_bar 는 nxt 라벨이 참조하는 원본 시간 봉(entry_bars 관례와 동일). 아직 관측된
-        # 패널 범위를 넘는다면 인과적으로 존재할 수 없는 미래 데이터이지 무결성 결함이 아니다
-        # -- 조용히 건너뛰고, 다음 사이클에 그 봉이 관측되면 이 날짜를 다시 채점한다.
-        if entry not in entry_lookup or nxt not in entry_lookup or nxt_bar > book.panel_last_bar:
-            prev = weights.to_numpy(dtype="float64")[pos]
-            continue
+        nxt_decision = day + pd.Timedelta(days=1)
+        label = day + pd.Timedelta(days=2)
         w = weights.to_numpy(dtype="float64")[pos]
+        if day not in snapshot_lookup or nxt_decision not in snapshot_lookup:
+            prev = w
+            continue
+        snapshot_bar_next = nxt_decision + pd.Timedelta(hours=snapshot_hour)
+        if snapshot_bar_next > book.panel_last_bar:
+            prev = w
+            continue
         w = np.where(np.isfinite(w), w, 0.0)
-        row_e = book.entry_closes.loc[entry, symbols].to_numpy(dtype="float64")
-        row_n = book.entry_closes.loc[nxt, symbols].to_numpy(dtype="float64")
+        row_s = book.snapshot_closes.loc[day, symbols].to_numpy(dtype="float64")
+        row_n = book.snapshot_closes.loc[nxt_decision, symbols].to_numpy(dtype="float64")
         held = w != 0.0
         if bool(held.any()) and (
-            bool((~np.isfinite(row_e[held])).any()) or bool((~np.isfinite(row_n[held])).any())
+            bool((~np.isfinite(row_s[held])).any()) or bool((~np.isfinite(row_n[held])).any())
         ):
-            raise DataIntegrityError(f"entry close missing for held symbol at {nxt}")
+            raise DataIntegrityError(f"snapshot close missing for held symbol at {label}")
         price_ret = 0.0
         funding_pay = 0.0
+        start = day + pd.Timedelta(hours=snapshot_hour + 1)
+        stop = nxt_decision + pd.Timedelta(hours=snapshot_hour + 1)
         for col, w_s in enumerate(w):
             if w_s == 0.0:
                 continue
-            c0 = float(row_e[col])
+            c0 = float(row_s[col])
             c1 = float(row_n[col])
             price_ret += float(w_s) * (c1 / c0 - 1.0)
             funding_pay += float(w_s) * _funding_sum_in_window(
-                funding_by_symbol.get(symbols[col]), entry, nxt,
+                funding_by_symbol.get(symbols[col]), start, stop,
             )
         turnover = float(np.abs(w - prev).sum()) * float(cost_bps) / 10000.0
         value = float(price_ret - funding_pay - turnover)
         if not np.isfinite(value):
-            raise DataIntegrityError(f"non-finite unit proxy return at {nxt}")
-        out_idx.append(nxt)
+            raise DataIntegrityError(f"non-finite unit proxy return at {label}")
+        out_idx.append(label)
         out_vals.append(value)
         prev = w
     return pd.Series(out_vals, index=pd.DatetimeIndex(out_idx, tz="UTC"), dtype="float64")

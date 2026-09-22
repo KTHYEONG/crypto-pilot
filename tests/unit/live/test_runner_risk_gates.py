@@ -42,6 +42,11 @@ def artifact(tmp_path):
     )
     path = tmp_path / "deployed_target_weights.parquet"
     frame.to_parquet(path, index=True)
+    closes = pd.DataFrame(
+        100.0, index=pd.DatetimeIndex(frame.index), columns=list(frame.columns), dtype="float64",
+    )
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    closes.to_parquet(decision_ohlcv_close_path(path), index=True)
     return path
 
 @pytest.fixture
@@ -98,8 +103,12 @@ def test_SCENARIO_LIVE_10_risk_gate_blocks_whole_cycle(artifact, live_env, tmp_p
         {"AAAUSDT": [7.0], "BUSDT": [-7.0]},
         index=pd.DatetimeIndex([DECISION_TIME]),
     )
-    leveraged_path = artifact.parent / "leveraged.parquet"
+    leveraged_path = artifact.parent / "deployed_target_weights_leveraged.parquet"
     leveraged_weights.to_parquet(leveraged_path, index=True)
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    pd.DataFrame(
+        100.0, index=pd.DatetimeIndex(leveraged_weights.index), columns=list(leveraged_weights.columns), dtype="float64",
+    ).to_parquet(decision_ohlcv_close_path(leveraged_path), index=True)
 
     leveraged_settings = LiveSettings(
         notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_leverage.json"),
@@ -165,28 +174,12 @@ def test_check_risk_gates_raises_directly() -> None:
 
 
 
-def test_apply_ruin_guard_flattens_at_backtest_equity_floor() -> None:
+def test_deep_drawdown_keeps_book(tmp_path, monkeypatch) -> None:
+    """Deep drawdown at 0.3x seed still sizes non-zero targets with no flatten audit event."""
     from decimal import Decimal
+
     import pandas as pd
-    import pytest
-    from src.live.runner import apply_ruin_guard
-    from src.mhs.params import REFERENCE_PASS_EQUITY_FLOOR
 
-    assert REFERENCE_PASS_EQUITY_FLOOR == 0.5
-    weights = pd.Series({"AAAUSDT": 0.2, "BUSDT": -0.1}, name=pd.Timestamp("2026-09-01", tz="UTC"))
-    flat, breached = apply_ruin_guard(weights, Decimal("1000"), Decimal("2000"))
-    assert breached is True
-    assert (flat == 0.0).all() and list(flat.index) == list(weights.index) and flat.name == weights.name
-    kept, breached_above = apply_ruin_guard(weights, Decimal("1000.01"), Decimal("2000"))
-    assert breached_above is False
-    pd.testing.assert_series_equal(kept, weights)
-    with pytest.raises(ValueError, match="starting_capital"):
-        apply_ruin_guard(weights, Decimal("1000"), Decimal("0"))
-
-
-def test_run_shadow_cycle_ruin_guard_flattens_and_no_symbol_cap(tmp_path, monkeypatch) -> None:
-    from decimal import Decimal
-    import pandas as pd
     import src.live.runner as runner_mod
     from src.live.executor import ExecutionOutcome
     from src.live.ledger import LedgerState, save_ledger
@@ -236,11 +229,11 @@ def test_run_shadow_cycle_ruin_guard_flattens_and_no_symbol_cap(tmp_path, monkey
 
     decision_time = pd.Timestamp("2026-08-24 00:00Z")
     now = decision_time + pd.Timedelta(hours=2)
-    calls: list[object] = []
+    intents: list[object] = []
 
-    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
-        calls.extend(intents)
-        return tuple(ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("101"), chases=0, status="FILLED") for i in intents)
+    def fake_execute(client, intents_in, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        intents.extend(intents_in)
+        return tuple(ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("101"), chases=0, status="FILLED") for i in intents_in)
 
     monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClient())
     monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
@@ -248,21 +241,90 @@ def test_run_shadow_cycle_ruin_guard_flattens_and_no_symbol_cap(tmp_path, monkey
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {s: pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC")) for s in symbols})
     monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
 
-    def settings_for(name):
-        return LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(tmp_path / f"{name}.json"), fills_dir=str(tmp_path / f"{name}_fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / f"{name}_micro"), execution_quality_dir=str(tmp_path / f"{name}_eq"), portfolio_state_dir=str(tmp_path / f"{name}_port"), tax_ledger_dir=str(tmp_path / f"{name}_tax"))
+    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "drawdown.json"), fills_dir=str(tmp_path / "drawdown_fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "drawdown_micro"), execution_quality_dir=str(tmp_path / "drawdown_eq"), portfolio_state_dir=str(tmp_path / "drawdown_port"), tax_ledger_dir=str(tmp_path / "drawdown_tax"))
+    weights_path = tmp_path / "deployed_target_weights_drawdown.parquet"
+    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(weights_path, index=True)
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    pd.DataFrame({"AAAUSDT": [100.0]}, index=pd.DatetimeIndex([decision_time])).to_parquet(decision_ohlcv_close_path(weights_path), index=True)
+    save_ledger(tmp_path / "drawdown.json", LedgerState(positions={}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("600"), funding_accrued_through=now - pd.Timedelta(minutes=1)))
+    report = runner_mod.run_shadow_cycle(settings, decision_time, weights_path, now=now)
+    assert report.status == "COMPLETE"
+    assert len(intents) == 1
+    audit_text = (tmp_path / "shadow_cycle.jsonl").read_text(encoding="utf-8") if (tmp_path / "shadow_cycle.jsonl").exists() else ""
+    assert "ruin_guard_flatten" not in audit_text
 
-    ruin_weights = tmp_path / "ruin.parquet"
-    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(ruin_weights, index=True)
-    save_ledger(tmp_path / "ruin.json", LedgerState(positions={"AAAUSDT": Decimal("1")}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("800"), funding_accrued_through=now - pd.Timedelta(minutes=1)))
-    ruin_report = runner_mod.run_shadow_cycle(settings_for("ruin"), decision_time, ruin_weights, now=now)
-    assert ruin_report.status == "COMPLETE"
-    assert len(calls) == 1
-    assert calls[0].side == "SELL" and calls[0].reduce_only is True and calls[0].quantity == Decimal("1")
 
-    calls.clear()
-    big_weights = tmp_path / "big.parquet"
-    pd.DataFrame({"AAAUSDT": [0.20]}, index=pd.DatetimeIndex([decision_time])).to_parquet(big_weights, index=True)
-    big_report = runner_mod.run_shadow_cycle(settings_for("big"), decision_time, big_weights, now=now)
-    assert big_report.status == "COMPLETE"
-    assert len(calls) == 1
-    assert calls[0].side == "BUY" and calls[0].reduce_only is False and calls[0].quantity > Decimal("3.9")
+def test_runner_exposes_no_ruin_guard() -> None:
+    import src.live.runner as runner_mod
+
+    assert not hasattr(runner_mod, "apply_ruin_guard")
+
+
+def test_fetch_live_account_equity_returns_margin_equity(monkeypatch) -> None:
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    class _Client:
+        def __init__(self) -> None:
+            self.synced = False
+
+        def sync_server_time(self) -> None:
+            self.synced = True
+
+    client = _Client()
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, now: client)
+    from src.live.account import AccountSnapshot
+    monkeypatch.setattr(
+        runner_mod,
+        "fetch_account_snapshot",
+        lambda c, now=None: AccountSnapshot(
+            taken_at=pd.Timestamp("2026-09-22 00:00Z"),
+            wallet_balance=Decimal("5000"),
+            available_balance=Decimal("4900"),
+            total_maint_margin=Decimal("10"),
+            unrealized_pnl=Decimal("250"),
+            positions={},
+            dual_side_position=False,
+            multi_assets_margin=False,
+        ),
+    )
+    settings = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key="k", order_api_secret="s")
+    assert runner_mod.fetch_live_account_equity(settings, pd.Timestamp("2026-09-22 00:00Z")) == 5250.0
+    assert client.synced is True
+
+
+def test_fetch_live_account_equity_fails_closed(monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+    import src.live.runner as runner_mod
+    from src.common.errors import DataIntegrityError
+    from src.live.settings import ExecutionMode, LiveSettings
+
+    paper = LiveSettings(mode=ExecutionMode.PAPER)
+    with pytest.raises(DataIntegrityError):
+        runner_mod.fetch_live_account_equity(paper, pd.Timestamp("2026-09-22 00:00Z"))
+
+    class _Client:
+        def sync_server_time(self) -> None:
+            return None
+
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, now: _Client())
+    from src.live.account import AccountSnapshot
+    monkeypatch.setattr(
+        runner_mod,
+        "fetch_account_snapshot",
+        lambda c, now=None: AccountSnapshot(
+            taken_at=pd.Timestamp("2026-09-22 00:00Z"),
+            wallet_balance=Decimal("0"),
+            available_balance=Decimal("0"),
+            total_maint_margin=Decimal("0"),
+            unrealized_pnl=Decimal("-1"),
+            positions={},
+            dual_side_position=False,
+            multi_assets_margin=False,
+        ),
+    )
+    live = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key="k", order_api_secret="s")
+    with pytest.raises(DataIntegrityError):
+        runner_mod.fetch_live_account_equity(live, pd.Timestamp("2026-09-22 00:00Z"))
