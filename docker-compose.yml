@@ -10,7 +10,7 @@ services:
       - LIVE_EXECUTION_POLICY=strict_passive
       - LIVE_PAPER_FILL_MODEL=peg_chase
       - LIVE_NOTIONAL_EQUITY_USDT=2100
-      - LIVE_RECORD_RUN_ID=frozen_top20_v2_bayes_maker_20260921
+      - LIVE_RECORD_RUN_ID=frozen_top20_v2_bayes_maker_20260922
       - LIVE_TAX_COLLECTION_ENABLED=false
     volumes:
       - ./data:/app/data
