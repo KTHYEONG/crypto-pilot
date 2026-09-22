@@ -2774,3 +2774,289 @@ def test_fetch_failure_halts_step(tmp_path, monkeypatch) -> None:
     settings = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key="k", order_api_secret="s", heartbeat_path=str(tmp_path / "hb.json"))
     with pytest.raises(DataIntegrityError):
         sched._default_frozen_step(pd.Timestamp("2026-08-24 00:00Z"), settings, tmp_path / "w.parquet")
+
+
+def _fast_pulse(monkeypatch, interval_s: float = 0.02) -> None:
+    import src.live.scheduler as sched
+
+    _orig = sched._run_heartbeat_pulse
+
+    def _wrapper(stop, **kwargs):
+        return _orig(stop, interval_s=interval_s, **kwargs)
+
+    monkeypatch.setattr(sched, "_run_heartbeat_pulse", _wrapper)
+
+
+def _daemon_ready(target):
+    import pandas as pd
+
+    import src.live.scheduler as sched
+
+    return target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
+
+
+def test_heartbeat_pulse_writes_fresh_during_slow_execute(tmp_path, monkeypatch) -> None:
+    import json
+    import time
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    _fast_pulse(monkeypatch, interval_s=0.02)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = _daemon_ready(target)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    records: list[dict] = []
+    _orig_write = sched.write_heartbeat
+
+    def _recording(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail=""):
+        records.append({"status": status, "stage": stage, "ts": str(now)})
+        return _orig_write(path, decision_time=decision_time, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now, stage=stage, detail=detail)
+
+    monkeypatch.setattr(sched, "write_heartbeat", _recording)
+
+    def _slow_cycle(settings, decision_time, artifact_path, *, now=None, **k):
+        time.sleep(0.09)
+        return CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _slow_cycle)
+    sched.run_daemon(
+        LiveSettings(), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+    pulses = [r for r in records if r["status"] == "RUNNING" and r["stage"] == "execute"]
+    assert len(pulses) >= 2
+    assert records[-1]["status"] == "COMPLETE"
+    payload = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "COMPLETE"
+
+
+def test_heartbeat_pulse_never_overwrites_final(tmp_path, monkeypatch) -> None:
+    import json
+    import time
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    _fast_pulse(monkeypatch, interval_s=0.02)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = _daemon_ready(target)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+
+    def _slow_cycle(settings, decision_time, artifact_path, *, now=None, **k):
+        time.sleep(0.07)
+        return CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _slow_cycle)
+    sched.run_daemon(
+        LiveSettings(), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+    first = hb_path.read_text(encoding="utf-8")
+    time.sleep(0.08)
+    second = hb_path.read_text(encoding="utf-8")
+    third = hb_path.read_text(encoding="utf-8")
+    assert first == second == third
+    assert json.loads(first)["status"] == "COMPLETE"
+
+
+def test_heartbeat_pulse_survives_crashing_cycle(tmp_path, monkeypatch) -> None:
+    import json
+    import threading
+    import time
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    _fast_pulse(monkeypatch, interval_s=0.02)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = _daemon_ready(target)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    records: list[tuple[str, str]] = []
+    _orig_write = sched.write_heartbeat
+
+    def _recording(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail=""):
+        records.append((status, stage))
+        return _orig_write(path, decision_time=decision_time, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now, stage=stage, detail=detail)
+
+    monkeypatch.setattr(sched, "write_heartbeat", _recording)
+
+    def _crash(settings, decision_time, artifact_path, *, now=None, **k):
+        time.sleep(0.06)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _crash)
+    sched.run_daemon(
+        LiveSettings(daemon_max_attempts_per_day=1), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+    assert ("RUNNING", "execute") in records
+    assert json.loads(hb_path.read_text(encoding="utf-8"))["status"] == "HALT"
+    assert not [t for t in threading.enumerate() if t.name == "live-heartbeat-pulse" and t.is_alive()]
+
+
+def test_heartbeat_pulse_write_failure_does_not_affect_cycle(tmp_path, monkeypatch) -> None:
+    import json
+    import time
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    _fast_pulse(monkeypatch, interval_s=0.02)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = _daemon_ready(target)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    _orig_write = sched.write_heartbeat
+    calls = {"n": 0}
+
+    def _flaky(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail=""):
+        import threading as _th
+        if status == "RUNNING" and stage == "execute" and _th.current_thread().name == "live-heartbeat-pulse" and calls["n"] == 0:
+            calls["n"] += 1
+            raise OSError("disk full")
+        return _orig_write(path, decision_time=decision_time, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now, stage=stage, detail=detail)
+
+    monkeypatch.setattr(sched, "write_heartbeat", _flaky)
+
+    def _slow_cycle(settings, decision_time, artifact_path, *, now=None, **k):
+        time.sleep(0.07)
+        return CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _slow_cycle)
+    sched.run_daemon(
+        LiveSettings(), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+    assert json.loads(hb_path.read_text(encoding="utf-8"))["status"] == "COMPLETE"
+
+
+def test_heartbeat_pulse_no_lingering_thread_after_fast_cycle(tmp_path, monkeypatch) -> None:
+    import threading
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = _daemon_ready(target)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, decision_time, artifact_path, *, now=None, **k: CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0),
+    )
+    sched.run_daemon(
+        LiveSettings(), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+    assert not [t for t in threading.enumerate() if t.name == "live-heartbeat-pulse" and t.is_alive()]
+
+
+def test_heartbeat_pulse_uses_real_wall_clock(tmp_path, monkeypatch) -> None:
+    import threading
+    import time
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    _fast_pulse(monkeypatch, interval_s=0.02)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = _daemon_ready(target)
+    main_thread = threading.get_ident()
+
+    def _main_only_now():
+        assert threading.get_ident() == main_thread, "now_fn called off main thread"
+        return ready
+
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+
+    def _slow_cycle(settings, decision_time, artifact_path, *, now=None, **k):
+        time.sleep(0.07)
+        return CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", _slow_cycle)
+    sched.run_daemon(
+        LiveSettings(), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=_main_only_now, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+
+
+def test_heartbeat_pulse_join_timeout_warns(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+    import time
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    monkeypatch.setattr(sched, "_HEARTBEAT_PULSE_JOIN_TIMEOUT_S", 0.01)
+
+    def _stuck_pulse(stop, **kwargs):
+        time.sleep(0.2)
+
+    monkeypatch.setattr(sched, "_run_heartbeat_pulse", _stuck_pulse)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = _daemon_ready(target)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, decision_time, artifact_path, *, now=None, **k: CycleReport(status="COMPLETE", reason=None, decision_time=decision_time, intent_count=0),
+    )
+    with caplog.at_level(logging.WARNING, logger="LiveScheduler"):
+        sched.run_daemon(
+            LiveSettings(), artifact, tmp_path / "state.json",
+            sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        )
+    assert any("heartbeat pulse thread still alive" in r.getMessage() for r in caplog.records)
