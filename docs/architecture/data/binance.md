@@ -10,22 +10,25 @@ related_paths:
   - src/market_data/binance/spot.py
   - src/market_data/binance/margin.py
   - src/market_data/binance/vision.py
+  - src/market_data/binance/venue_rules.py
   - src/market_data/services/futures_collection.py
   - src/market_data/services/spot_collection.py
   - src/market_data/services/borrow_collection.py
   - src/market_data/services/mhs_execution.py
+  - src/market_data/services/universe_gaps.py
+  - src/market_data/services/execution_coverage.py
   - src/market_data/storage/manifest.py
 change_triggers:
   - src/market_data/binance/*.py
   - src/market_data/services/*.py
   - src/market_data/storage/*.py
-last_verified: 2026-09-03
+last_verified: 2026-09-22
 ---
 
 # 바이낸스 데이터 수집 및 스토리지 아키텍처 (Binance Data Architecture)
 
 ## 1. 개요 (Overview)
-본 문서는 Binance REST API (Futures FAPI, Spot SAPI/V3, Margin SAPI) 및 Binance Vision S3 아카이브(`data.binance.vision`)로부터 Perpetual Futures, Spot, Margin Borrow 및 Microstructure 데이터를 수집, 정규화, 무결성 검증 후 Parquet 데이터셋 및 JSON 매니페스트로 저장하고 관리하는 데이터 파이프라인 아키텍처를 정의합니다.
+본 문서는 Binance REST API (Futures FAPI, Spot SAPI/V3, Margin SAPI) 및 Binance Vision S3 아카이브(`data.binance.vision`)로부터 Perpetual Futures, Spot, Margin Borrow, Microstructure 및 거래소 베뉴 룰 스냅샷 데이터를 수집, 정규화, 무결성 검증 후 Parquet 데이터셋 및 JSON 매니페스트로 저장하고 관리하는 데이터 파이프라인 아키텍처를 정의합니다.
 
 연구(Research) 및 실거래(Live) 환경 모두에서 Point-In-Time (PIT) 인과성을 엄격히 유지하며, 미래 데이터 누출(Look-ahead bias)이 발생하지 않도록 설계되었습니다.
 
@@ -35,15 +38,18 @@ last_verified: 2026-09-03
 
 | 컴포넌트 | 소스 경로 | 주요 책임 및 역할 |
 |---|---|---|
-| `BinanceClient` | `src/market_data/binance/futures.py` | Futures FAPI 원시 Klines (`/fapi/v1/klines`) 및 Funding Rate (`/fapi/v1/fundingRate`) 수집, Rate limit 및 재시도 제어 |
-| `BinanceSpotClient` | `src/market_data/binance/spot.py` | Spot REST API Klines (`/api/v3/klines`) 수집 및 타임프레임 변환 |
-| `BinanceMarginClient` | `src/market_data/binance/margin.py` | SAPI 차입 이자율 및 이력 (`/sapi/v1/margin/interestRateHistory`) 수집 |
-| `BinanceVisionDownloader` | `src/market_data/binance/vision.py` | Vision S3 아카이브(Klines, Funding, Metrics, BookDepth 등 `.zip`) 병렬 다운로드 및 SHA-256 체크섬 검증 |
-| `futures_collection.py` | `src/market_data/services/futures_collection.py` | Futures OHLCV (1m/1h), Funding Rate, Vision Metrics 수집 및 캐시 오케스트레이션 서비스 |
-| `spot_collection.py` | `src/market_data/services/spot_collection.py` | Spot OHLCV (1h) 및 차입 이자율 병합 서비스 |
-| `borrow_collection.py` | `src/market_data/services/borrow_collection.py` | 현물 마진 차입 이자율 수집, 정규화 및 수동 CSV 임포트 서비스 |
-| `mhs_execution.py` | `src/market_data/services/mhs_execution.py` | MHS 체결 시뮬레이션 전용 3m/5m OHLCV 및 1h Mark Price 데이터셋 수집 서비스 |
-| `manifest.py` | `src/market_data/storage/manifest.py` | 데이터 무결성 SHA-256 지문, 레코드 수, 수집 메타데이터 및 품질(NaN 카운트 등) 매니페스트 관리 |
+| [`BinanceClient`](file:///home/kth/crypto-pilot/src/market_data/binance/futures.py) | `src/market_data/binance/futures.py` | Futures FAPI 원시 Klines (`/fapi/v1/klines`) 및 Funding Rate (`/fapi/v1/fundingRate`) 수집, Rate limit 및 재시도 제어 |
+| [`BinanceSpotClient`](file:///home/kth/crypto-pilot/src/market_data/binance/spot.py) | `src/market_data/binance/spot.py` | Spot REST API Klines (`/api/v3/klines`) 수집 및 타임프레임 변환 |
+| [`BinanceMarginClient`](file:///home/kth/crypto-pilot/src/market_data/binance/margin.py) | `src/market_data/binance/margin.py` | SAPI 차입 이자율 및 이력 (`/sapi/v1/margin/interestRateHistory`) 수집 |
+| [`BinanceVisionDownloader`](file:///home/kth/crypto-pilot/src/market_data/binance/vision.py) | `src/market_data/binance/vision.py` | Vision S3 아카이브(Klines, Funding, Metrics, BookDepth 등 `.zip`) 병렬 다운로드 및 SHA-256 체크섬 검증 |
+| [`venue_rules.py`](file:///home/kth/crypto-pilot/src/market_data/binance/venue_rules.py) | `src/market_data/binance/venue_rules.py` | 바이낸스 USDT-M 실거래 브래킷(Tier별 누적유지증거금 MMR/cum) 및 주문필터 스냅샷 수집/로드 |
+| [`futures_collection.py`](file:///home/kth/crypto-pilot/src/market_data/services/futures_collection.py) | `src/market_data/services/futures_collection.py` | Futures OHLCV (1m/1h), Funding Rate, Vision Metrics 수집 및 캐시 오케스트레이션 서비스 |
+| [`spot_collection.py`](file:///home/kth/crypto-pilot/src/market_data/services/spot_collection.py) | `src/market_data/services/spot_collection.py` | Spot OHLCV (1h) 및 차입 이자율 병합 서비스 |
+| [`borrow_collection.py`](file:///home/kth/crypto-pilot/src/market_data/services/borrow_collection.py) | `src/market_data/services/borrow_collection.py` | 현물 마진 차입 이자율 수집, 정규화 및 수동 CSV 임포트 서비스 |
+| [`mhs_execution.py`](file:///home/kth/crypto-pilot/src/market_data/services/mhs_execution.py) | `src/market_data/services/mhs_execution.py` | MHS 체결 시뮬레이션 전용 3m/5m OHLCV 및 1h Mark Price 데이터셋 수집 서비스 |
+| [`universe_gaps.py`](file:///home/kth/crypto-pilot/src/market_data/services/universe_gaps.py) | `src/market_data/services/universe_gaps.py` | 확정된 원천공백 구간(source gaps) 레지스트리 대조 및 무결성 감사 |
+| [`execution_coverage.py`](file:///home/kth/crypto-pilot/src/market_data/services/execution_coverage.py) | `src/market_data/services/execution_coverage.py` | 1h 신호 아카이브 대비 3m 체결 아카이브 결손 측정 및 동기화 |
+| [`manifest.py`](file:///home/kth/crypto-pilot/src/market_data/storage/manifest.py) | `src/market_data/storage/manifest.py` | 데이터 무결성 SHA-256 지문, 레코드 수, 수집 메타데이터 및 품질(NaN 카운트 등) 매니페스트 관리 |
 
 ---
 
@@ -81,6 +87,7 @@ last_verified: 2026-09-03
 | **Indicator Klines** (Mark/Index/Premium) | Binance Vision S3 (`monthly/markPriceKlines`, `indexPriceKlines`, `premiumIndexKlines`) | 2020-01 ~ 현재 (Vision 아카이브) | Parquet (`timestamp`, `open`, `high`, `low`, `close`, `datetime`) | Mark Price(MTM 평가용 기준 가격), Index Price, Premium Index 시계열 데이터 |
 | **Orderbook Depth (5 Level)** | Binance Vision S3 (`daily/bookDepth/`) | 2020-01 ~ 현재 (Vision 아카이브) | Raw / Parquet (`timestamp`, `ask_price_1~5`, `ask_qty_1~5`, `bid_price_1~5`, `bid_qty_1~5` 등) | 호가창 스프레드(Half-spread), 오더북 비대칭도 및 슬리피지/시장 충격(Market Impact) 정밀 모델링용 |
 | **Margin Borrow Rate** (Hourly/Daily) | Margin SAPI `/sapi/v1/margin/interestRateHistory` 및 CSV Import | 최근 31일 (SAPI 제한) / 전체 과거 (CSV 수동 임포트) | Parquet (`timestamp`, `borrow_rate`, `accrual_seconds`) | 현물 마진 차입 이자율 (SAPI 31일 경계 제한 시 과거 CSV 수동 임포트와 무손실 병합) |
+| **Venue Rule Snapshots** | Binance FAPI `/fapi/v1/exchangeInfo` 및 `/fapi/v1/leverageBracket` | 정기 수집 스냅샷 | JSON (`data/venue_rules/binance_rules_YYYYMMDD.json`) | 종목별 브래킷(Tier별 누적유지증거금 MMR/cum), 최소주문금액(min_notional), 주문단위(lot_size, price_filter) 실계좌 원장 검증용 |
 
 ---
 
@@ -90,9 +97,9 @@ last_verified: 2026-09-03
 
 | 스트림명 (Stream) | 저장 경로 (Path) | 파티션 정책 (Partition Scheme) | 이벤트 시간 컬럼 | 주요 스키마 컬럼 (Schema) | 보관 정책 (Retention) |
 |---|---|---|---|---|---|
-| `ohlcv/1h` | `data/futures/ohlcv/1h/*.parquet` | per-symbol parquet | `timestamp` (epoch ms, int64) | `timestamp, open, high, low, close, volume, quote_vol` | `data_retention_days` (기본 220일) |
-| `markPriceKlines/1h` | `data/futures/markPriceKlines/1h/*.parquet` | per-symbol parquet | `timestamp` (epoch ms, int64) | `timestamp, open, high, low, close` | `data_retention_days` (기본 220일) |
-| `funding` | `data/futures/funding/*.parquet` | per-symbol parquet | `timestamp` (epoch ms, int64) | `timestamp, funding_rate` | `data_retention_days` (기본 220일) |
+| `ohlcv/1h` | `data/futures/ohlcv/1h/*.parquet` | per-symbol parquet | `timestamp` (epoch ms, int64) | `timestamp, open, high, low, close, volume, quote_vol` | 슬라이딩 윈도우 보존 |
+| `markPriceKlines/1h` | `data/futures/markPriceKlines/1h/*.parquet` | per-symbol parquet | `timestamp` (epoch ms, int64) | `timestamp, open, high, low, close` | 슬라이딩 윈도우 보존 |
+| `funding` | `data/futures/funding/*.parquet` | per-symbol parquet | `timestamp` (epoch ms, int64) | `timestamp, funding_rate` | 슬라이딩 윈도우 보존 |
 | `live_fills` | `data/state/live_fills/*.parquet` | 월별 샤드 (Monthly) | `decision_time` (UTC), `timestamp` (fill) | `decision_time, timestamp, symbol, side, qty, price` | 영구 보관 (Kept) |
 | `live_execution_quality`| `data/state/live_execution_quality/*.parquet` | 월별 샤드 (Monthly) | `decision_time` (UTC) | `decision_time, symbol, slippage_bps` | 영구 보관 (Kept) |
 | `live_microstructure` | `data/state/live_microstructure/*.parquet` | 월별 샤드 (Monthly) | `decision_time` (UTC) | `decision_time, symbol, spread_bps` | 영구 보관 (Kept) |
@@ -145,6 +152,12 @@ data/
   │   ├── ohlcv/ 1h/ {SYMBOL}.parquet    # 현물 1시간봉 캔들
   │   ├── borrow/ {SYMBOL}.parquet       # 마진 차입 이자율
   │   └── manifest.json
+  ├── venue_rules/                       # 바이낸스 브래킷 및 주문필터 스냅샷
+  │   └── binance_rules_{YYYYMMDD}.json
+  ├── backtests/                         # 백테스트 SQLite3 레지스트리 및 실행 산출물
+  │   ├── registry.sqlite3
+  │   ├── index.jsonl
+  │   └── frozen/runs/{UUID}/
   ├── state/                             # 실거래/섀도우 런타임 영속 상태
   │   ├── live_fills/
   │   ├── live_execution_quality/
@@ -153,6 +166,10 @@ data/
   │   ├── live_orderbook/
   │   └── live_tax_ledger/
   └── manifest.json                      # 전체 데이터셋 SHA-256 무결성 매니페스트
+deploy/
+  └── mhs/                               # 봉인된 배포 전략 아티팩트 (AES-256-GCM)
+      ├── frozen_unit_returns_taker.parquet.enc
+      └── frozen_unit_returns_maker.parquet.enc
 ```
 
 ---
