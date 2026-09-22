@@ -822,6 +822,7 @@ def _account_argv(*extra: str) -> list[str]:
 def _install_account(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *,
     unit_fail: bool = False, unit_liquidated: bool = False, stub_venue: bool = True,
+    unit_intraday: float = 0.05, account_intraday: float = 0.05,
 ) -> dict:
     import src.market_data.binance.venue_rules as venue_mod
     import src.mhs.account_ledger as ledger_mod
@@ -853,28 +854,32 @@ def _install_account(
 
     def _fake_assemble(cand: object, ctx: object) -> tuple:
         seen["candidate"] = cand
-        bars = pd.date_range("2025-01-01", periods=4, freq="3min", tz="UTC")
+        anchors = pd.DatetimeIndex(dates - pd.Timedelta(hours=1))
+        bars = pd.date_range(anchors[0], dates[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
         plane = pd.DataFrame({"AAA": 100.0}, index=bars, dtype="float64")
         marks = ledger_mod.AccountMarkPanels(close=plane, high=plane, low=plane)
         unit = pd.DataFrame({"AAA": [0.05, -0.05, 0.02]}, index=dates, dtype="float64")
         flat = pd.DataFrame({"AAA": [0.0, 0.0, 0.0]}, index=dates, dtype="float64")
         rich = pd.DataFrame({"AAA": [1e9, 1e9, 1e9]}, index=dates, dtype="float64")
         calm = pd.DataFrame({"AAA": [0.02, 0.02, 0.02]}, index=dates, dtype="float64")
-        return unit, marks, flat, rich, calm
+        seen["anchors"] = anchors
+        return unit, marks, flat, rich, calm, anchors
 
-    def _fake_replay(unit: object, marks: object, funding: object, adv: object, sigma: object, rules: object, policy: object, *, capital: float, taker_fee_bps: float, apply_order_filters: bool = True, unit_equity: pd.Series | None = None, execution: str = "taker", **execution_kwargs: object) -> AccountLedgerResult:
-        seen.setdefault("replays", []).append({"capital": capital, "policy": policy, "filters": apply_order_filters, "fee": taker_fee_bps, "unit_equity": unit_equity, "execution": execution, **execution_kwargs})
+    def _fake_replay(unit: object, marks: object, funding: object, adv: object, sigma: object, rules: object, policy: object, *, anchor_times: object = None, capital: float, taker_fee_bps: float, apply_order_filters: bool = True, unit_equity: pd.Series | None = None, execution: str = "taker", **execution_kwargs: object) -> AccountLedgerResult:
+        seen.setdefault("replays", []).append({"capital": capital, "policy": policy, "filters": apply_order_filters, "fee": taker_fee_bps, "unit_equity": unit_equity, "execution": execution, "anchor_times": anchor_times, **execution_kwargs})
         if unit_fail and len(seen["replays"]) == 1:
             raise DataIntegrityError("unit boom")
         equity = pd.Series([capital, capital * 1.1, capital * 1.05], index=dates)
         exposure = pd.Series([1.0, 2.0, 1.5], index=dates)
         seen.setdefault("equities", []).append(equity)
+        intraday = unit_intraday if len(seen["replays"]) == 1 else account_intraday
         return AccountLedgerResult(
             capital=capital, daily_equity=equity, daily_exposure=exposure,
             liquidated_at=dates[0] if unit_liquidated and len(seen["replays"]) == 1 else None,
             skipped_orders=3, untraded_fraction=0.01, initial_margin_breaches=0,
             fee_paid=1.0, impact_paid=2.0, funding_paid=0.5,
             fallback_ladder_symbols=(), missing_filter_symbols=(),
+            intraday_max_drawdown=intraday,
             maker_fill_fraction=0.9 if execution == "maker" else 0.0,
         )
 
@@ -940,13 +945,19 @@ def test_account_command_defaults_to_growth_at_retail_capital(tmp_path: Path, mo
 
 
 def test_account_candidate_is_unlevered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The account book is unlevered clip-0.05; exposure is chosen by the policy, never pre-multiplied."""
+    """The account book is the registered unlevered clip unit book; both replays use its anchors."""
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
     from src.mhs.params import FROZEN_GROWTH_NAME_CLIP
 
     seen = _install_account(monkeypatch, tmp_path)
     backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    assert seen["request"].strategy is FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
+    assert seen["request"].strategy.strategy_id == "frozen_mhs_top20_v2"
     assert seen["request"].strategy.exposure_multiplier == 1.0
     assert seen["request"].strategy.name_clip == FROZEN_GROWTH_NAME_CLIP
+    assert len(seen["replays"]) == 2
+    for replay in seen["replays"]:
+        pd.testing.assert_index_equal(replay["anchor_times"], seen["anchors"])
 
 
 def test_account_fixed_policy_requires_exposure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -971,20 +982,51 @@ def test_account_missing_venue_snapshot_fails_closed(tmp_path: Path, monkeypatch
     assert "request" not in seen
 
 
+def _write_same_book_reference(
+    tmp_path: Path, index: Path, *, run_dir: str = "runs/ref", execution: str | None = None,
+    name_clip: float | None = 0.05, exposure_multiplier: float | None = 1.0,
+    base_cagr: float | None = None, base_mdd: float | None = None,
+    evaluation_start: str = "2025-01-01T00:00:00+00:00",
+    evaluation_end: str = "2025-02-01T00:00:00+00:00",
+) -> dict:
+    """Append one canonical catalog row and its result.json for same-book reconciliation tests."""
+    row: dict = {
+        "kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "run_dir": run_dir,
+        "evaluation_start": evaluation_start, "evaluation_end": evaluation_end,
+        "base_cagr": base_cagr, "base_max_drawdown": base_mdd,
+    }
+    if execution is not None:
+        row["execution"] = execution
+    with index.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    result_dir = tmp_path / run_dir
+    result_dir.mkdir(parents=True, exist_ok=True)
+    (result_dir / "result.json").write_text(
+        json.dumps({"name_clip": name_clip, "exposure_multiplier": exposure_multiplier}),
+        encoding="utf-8",
+    )
+    return row
+
+
 def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """account.json carries mandated disclosures and the daily parquet exists."""
     from src.mhs.params import (
         ACCOUNT_MIN_MOMENT_DAYS,
         ACCOUNT_PRIOR_DAYS,
+        ACCOUNT_RECON_CAGR_TOLERANCE,
+        ACCOUNT_RECON_MDD_TOLERANCE,
         ACCOUNT_UNIT_REFERENCE_CAPITAL,
     )
 
     seen = _install_account(monkeypatch, tmp_path)
     index = tmp_path / "index.jsonl"
     index.write_text(
-        json.dumps({"kind": "mhs", "strategy_id": "x", "base_cagr": 0.1}) + "\n"
-        + json.dumps({"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "run_dir": "runs/old", "evaluation_start": "2025-01-01", "evaluation_end": "2025-02-01", "base_cagr": 1.365, "base_max_drawdown": 0.29}) + "\n",
+        json.dumps({"kind": "mhs", "strategy_id": "x", "base_cagr": 0.1}) + "\n",
         encoding="utf-8",
+    )
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    _write_same_book_reference(
+        tmp_path, index, run_dir="runs/old", base_cagr=unit_cagr, base_mdd=0.05,
     )
     with caplog.at_level("INFO", logger="MhsBacktestCli"):
         backtest_mod.run_frozen_account_command(_parse(_account_argv()))
@@ -995,40 +1037,49 @@ def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.M
     assert "in_sample_moments" not in payload
     assert payload["moment_source"] == "bayesian_causal_unit_ledger"
     assert payload["venue_rules_applied_retroactively"] is True
+    assert payload["entry_anchor"] == "submit_bar"
     assert payload["capital"] == 2100.0
     assert payload["policy"]["kind"] == "growth"
     assert payload["policy"]["prior_days"] == ACCOUNT_PRIOR_DAYS
     assert payload["policy"]["min_moment_days"] == ACCOUNT_MIN_MOMENT_DAYS
     assert "unit_daily_mean" not in payload["policy"]
     assert payload["unit_reference"]["capital"] == ACCOUNT_UNIT_REFERENCE_CAPITAL
-    assert payload["unit_reference"]["cagr"] == pytest.approx(
-        (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
-    )
-    assert payload["unit_reference"]["mdd"] == pytest.approx(105000.0 / 110000.0 - 1.0)
+    assert payload["unit_reference"]["cagr"] == pytest.approx(unit_cagr)
+    assert payload["unit_reference"]["mdd"] == pytest.approx(-0.05)
+    assert payload["unit_reference"]["daily_mdd"] == pytest.approx(105000.0 / 110000.0 - 1.0)
     assert payload["cagr"] == pytest.approx((2205.0 / 2100.0) ** (365.0 / 3.0) - 1.0)
-    assert payload["mdd"] == pytest.approx(2205.0 / 2310.0 - 1.0)
+    assert payload["mdd"] == pytest.approx(-0.05)
+    assert payload["daily_mdd"] == pytest.approx(2205.0 / 2310.0 - 1.0)
     assert payload["liquidated_at"] is None
     assert (payload["mean_exposure"], payload["min_exposure"], payload["last_exposure"]) == (1.5, 1.0, 1.5)
     recon = payload["reconciliation"]
-    assert recon["reference_canonical"]["base_cagr"] == 1.365
-    assert recon["cagr_gap"] == pytest.approx(recon["cagr"] - 1.365)
+    assert recon["status"] == "ok"
+    assert recon["reference_canonical"]["base_cagr"] == pytest.approx(unit_cagr)
+    assert recon["reference_canonical"]["name_clip"] == pytest.approx(0.05)
+    assert recon["reference_canonical"]["exposure_multiplier"] == pytest.approx(1.0)
+    assert recon["cagr_gap"] == pytest.approx(0.0)
+    assert recon["mdd"] == pytest.approx(0.05)
     assert recon["mdd_convention"] == "magnitude"
-    assert recon["mdd_gap"] == pytest.approx(abs(recon["mdd"]) - 0.29)
+    assert recon["mdd_definition"] == "3m_close_path"
+    assert recon["mdd_gap"] == pytest.approx(0.0)
+    assert recon["cagr_tolerance"] == ACCOUNT_RECON_CAGR_TOLERANCE
+    assert recon["mdd_tolerance"] == ACCOUNT_RECON_MDD_TOLERANCE
     daily = pd.read_parquet(run_dir / "account_daily.parquet")
     assert list(daily.columns) == ["equity", "exposure"]
     assert len(daily) == 3
     rows = index.read_text(encoding="utf-8").splitlines()
     last = json.loads(rows[-1])
     assert last["kind"] == "mhs_frozen_account"
-    assert last["base_max_drawdown"] >= 0
-    assert last["base_max_drawdown"] == pytest.approx(abs(payload["mdd"]))
+    assert last["base_max_drawdown"] == pytest.approx(0.05)
 
     index.unlink()
     backtest_mod.run_frozen_account_command(_parse(_account_argv()))
     _, second = _run_dirs(tmp_path)
     again = json.loads((second / "account.json").read_text(encoding="utf-8"))
+    assert again["reconciliation"]["status"] == "missing_reference"
     assert again["reconciliation"]["reference_canonical"] is None
     assert again["reconciliation"]["cagr_gap"] is None
+    assert again["reconciliation"]["mdd_gap"] is None
 
 
 def test_account_unit_reference_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1054,11 +1105,12 @@ def test_account_reference_lookup_failure_is_disclosed(tmp_path: Path, monkeypat
     def _boom(*args: object, **kwargs: object) -> object:
         raise OSError("catalog boom")
 
-    monkeypatch.setattr(backtest_mod, "_latest_primary_reference", _boom)
+    monkeypatch.setattr(backtest_mod, "_latest_same_book_reference", _boom)
     backtest_mod.run_frozen_account_command(_parse(_account_argv()))
     (run_dir,) = _run_dirs(tmp_path)
     payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
     assert payload["reconciliation"]["status"] == "failed"
+    assert payload["reconciliation"]["error"] == "catalog boom"
     assert (run_dir / "account_daily.parquet").exists()
 
 
@@ -1175,36 +1227,44 @@ def _write_catalog_index(tmp_path: Path, rows: list[dict]) -> Path:
 
 
 def test_account_reconciliation_references_same_execution_canonical(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reconciliation reads the latest canonical row whose execution matches the run."""
+    """Reconciliation reads the latest same-book row whose execution matches the run."""
     _install_account(monkeypatch, tmp_path)
-    _write_catalog_index(tmp_path, [
-        {"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "base_cagr": 1.0},
-        {"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "base_cagr": 1.2, "execution": "maker"},
-    ])
+    index = _write_catalog_index(tmp_path, [])
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    _write_same_book_reference(tmp_path, index, run_dir="runs/taker", base_cagr=unit_cagr, base_mdd=0.05)
+    _write_same_book_reference(
+        tmp_path, index, run_dir="runs/maker", execution="maker", base_cagr=unit_cagr, base_mdd=0.05,
+    )
     backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
     maker_dir, = [d for d in _run_dirs(tmp_path) if "_maker_" in d.name]
     maker_payload = json.loads((maker_dir / "account.json").read_text(encoding="utf-8"))
-    assert maker_payload["reconciliation"]["reference_canonical"]["base_cagr"] == 1.2
+    assert maker_payload["reconciliation"]["status"] == "ok"
+    assert maker_payload["reconciliation"]["reference_canonical"]["run_dir"] == "runs/maker"
     backtest_mod.run_frozen_account_command(_parse(_account_argv()))
     taker_payloads = [
         json.loads((d / "account.json").read_text(encoding="utf-8"))
         for d in _run_dirs(tmp_path) if "_maker_" not in d.name
     ]
-    assert taker_payloads[-1]["reconciliation"]["reference_canonical"]["base_cagr"] == 1.0
+    assert taker_payloads[-1]["reconciliation"]["status"] == "ok"
+    assert taker_payloads[-1]["reconciliation"]["reference_canonical"]["run_dir"] == "runs/taker"
 
 
-def test_account_missing_same_execution_canonical_yields_null_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A maker run without a maker canonical discloses a null reference and null gaps."""
+def test_account_missing_same_execution_canonical_yields_null_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A maker run without a same-book maker canonical discloses missing reference with a warning."""
     _install_account(monkeypatch, tmp_path)
-    _write_catalog_index(tmp_path, [
-        {"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "base_cagr": 1.0},
-    ])
-    backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
+    index = _write_catalog_index(tmp_path, [])
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    _write_same_book_reference(tmp_path, index, run_dir="runs/taker", base_cagr=unit_cagr, base_mdd=0.05)
+    with caplog.at_level("WARNING", logger="MhsBacktestCli"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
     (run_dir,) = _run_dirs(tmp_path)
     recon = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))["reconciliation"]
     assert recon["reference_canonical"] is None
     assert recon["cagr_gap"] is None
-    assert recon["status"] == "ok"
+    assert recon["mdd_gap"] is None
+    assert recon["status"] == "missing_reference"
+    assert "status=missing_reference" in caplog.text
+    assert (run_dir / "account_daily.parquet").exists()
 
 
 def test_account_execution_disclosed_in_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1237,7 +1297,7 @@ def test_account_invalid_execution_fails_closed(tmp_path: Path, monkeypatch: pyt
 def _write_held_parquet(root: Path, symbol: str, start: pd.Timestamp, bars: int, close: float = 100.0) -> pd.DatetimeIndex:
     grid = pd.date_range(start, periods=bars, freq="3min", tz="UTC")
     frame = pd.DataFrame({
-        "timestamp": (grid.view("int64") // 10**6).astype("int64"),
+        "timestamp": np.array([int(ts.value // 1_000_000) for ts in grid], dtype="int64"),
         "open": close, "high": close + 1.0, "low": close - 1.0, "close": close,
     })
     target = root / "3m"
@@ -1258,7 +1318,7 @@ def _assemble_fixture(tmp_path: Path) -> tuple:
         signal_available_at=pd.DatetimeIndex(entries - pd.Timedelta(hours=1)),
         strategy=FROZEN_MHS_TOP20_V2,
     )
-    grid = _write_held_parquet(tmp_path, "AAA", entries[0], 960)
+    grid = _write_held_parquet(tmp_path, "AAA", entries[0] - pd.Timedelta(hours=1), 1000)
     days = pd.date_range("2021-01-01", periods=92, freq="D", tz="UTC")
     qv = pd.DataFrame({"AAA": 5_000_000.0, "BBB": 1_000_000.0}, index=days, dtype="float64")
     drift = pd.DataFrame(
@@ -1287,12 +1347,12 @@ def test_assemble_account_inputs_held_symbols_only(tmp_path: Path, monkeypatch: 
         real_assert(stage=stage, **kwargs)
 
     monkeypatch.setattr(sources_mod, "assert_mhs_stage_allocation", _spy)
-    unit, marks, funding_cum, adv, daily_sigma = sources_mod.assemble_account_inputs(candidate, context)
+    unit, marks, funding_cum, adv, daily_sigma, anchors = sources_mod.assemble_account_inputs(candidate, context)
 
     assert list(unit.columns) == ["AAA"]
     assert seen["stage"] == "account_marks"
     assert marks.close.dtypes.iloc[0] == np.dtype("float32")
-    assert marks.close.index[0] == entries[0]
+    assert marks.close.index[0] == entries[0] - pd.Timedelta(hours=1)
     assert marks.close.index[-1] == entries[-1] + pd.Timedelta(days=1) - pd.Timedelta(minutes=3)
     # 펀딩 누적은 진입 시각에서 표본화되어 replay_account의 일간 인덱스와 정렬돼야 한다.
     assert funding_cum.index.equals(unit.index)
@@ -1368,7 +1428,7 @@ def test_assemble_account_inputs_malformed_source_fails(tmp_path: Path) -> None:
 
     candidate, context, _, _ = _assemble_fixture(tmp_path)
     grid = pd.date_range("2021-04-01", periods=8, freq="3min", tz="UTC")
-    pd.DataFrame({"timestamp": (grid.view("int64") // 10**6).astype("int64"), "open": 1.0}).to_parquet(
+    pd.DataFrame({"timestamp": np.array([int(ts.value // 1_000_000) for ts in grid], dtype="int64"), "open": 1.0}).to_parquet(
         tmp_path / "3m" / "AAA.parquet"
     )
     with pytest.raises(DataIntegrityError, match=r"malformed"):
@@ -1407,3 +1467,187 @@ def test_account_replay_failure_fails_closed(tmp_path: Path, monkeypatch: pytest
     with pytest.raises(SystemExit, match=r"frozen account failed"):
         backtest_mod.run_frozen_account_command(_parse(_account_argv()))
     assert _run_dirs(tmp_path) == []
+
+
+def test_assemble_account_inputs_source_outside_window_fails(tmp_path: Path) -> None:
+    """A 3m archive with no bars inside the replay grid fails closed."""
+    import numpy as np
+
+    import src.mhs.account_sources as sources_mod
+
+    from src.common.errors import DataIntegrityError
+
+    candidate, context, entries, _ = _assemble_fixture(tmp_path)
+    stale = pd.date_range("2020-01-01", periods=10, freq="3min", tz="UTC")
+    pd.DataFrame({
+        "timestamp": np.array([int(ts.value // 1_000_000) for ts in stale], dtype="int64"),
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+    }).to_parquet(tmp_path / "3m" / "AAA.parquet")
+    with pytest.raises(DataIntegrityError, match=r"AAA"):
+        sources_mod.assemble_account_inputs(candidate, context)
+
+
+def test_account_unclipped_primary_row_is_never_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unclipped primary row never reconciles the clipped account book."""
+    _install_account(monkeypatch, tmp_path)
+    index = _write_catalog_index(tmp_path, [])
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    _write_same_book_reference(
+        tmp_path, index, run_dir="runs/unclipped", execution="maker",
+        name_clip=None, exposure_multiplier=1.0, base_cagr=unit_cagr, base_mdd=0.05,
+    )
+    with caplog.at_level("WARNING", logger="MhsBacktestCli"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
+    (run_dir,) = _run_dirs(tmp_path)
+    recon = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))["reconciliation"]
+    assert recon["status"] == "missing_reference"
+    assert recon["reference_canonical"] is None
+    assert recon["cagr_gap"] is None
+    assert recon["mdd_gap"] is None
+    assert "status=missing_reference" in caplog.text
+    assert (run_dir / "account.json").is_file()
+    assert (run_dir / "account_daily.parquet").is_file()
+
+
+def test_account_gap_beyond_tolerance_is_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A same-book gap beyond tolerance is a disclosed mismatch, never a failure."""
+    from src.mhs.params import ACCOUNT_RECON_CAGR_TOLERANCE
+
+    _install_account(monkeypatch, tmp_path)
+    index = _write_catalog_index(tmp_path, [])
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    _write_same_book_reference(
+        tmp_path, index, run_dir="runs/ref",
+        base_cagr=unit_cagr + 2.0 * ACCOUNT_RECON_CAGR_TOLERANCE, base_mdd=0.05,
+    )
+    with caplog.at_level("WARNING", logger="MhsBacktestCli"):
+        backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    (run_dir,) = _run_dirs(tmp_path)
+    recon = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))["reconciliation"]
+    assert recon["status"] == "mismatch"
+    assert recon["cagr_gap"] == pytest.approx(-2.0 * ACCOUNT_RECON_CAGR_TOLERANCE)
+    assert "status=mismatch" in caplog.text
+    assert (run_dir / "account_daily.parquet").is_file()
+
+
+def test_account_window_or_execution_mismatch_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clipped rows from another window or execution never reconcile this run."""
+    _install_account(monkeypatch, tmp_path)
+    index = _write_catalog_index(tmp_path, [])
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    _write_same_book_reference(
+        tmp_path, index, run_dir="runs/other-window", execution="maker",
+        base_cagr=unit_cagr, base_mdd=0.05,
+        evaluation_start="2024-01-01T00:00:00+00:00", evaluation_end="2024-02-01T00:00:00+00:00",
+    )
+    _write_same_book_reference(
+        tmp_path, index, run_dir="runs/taker", base_cagr=unit_cagr, base_mdd=0.05,
+    )
+    backtest_mod.run_frozen_account_command(_parse(_account_argv("--execution", "maker")))
+    (run_dir,) = _run_dirs(tmp_path)
+    recon = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))["reconciliation"]
+    assert recon["status"] == "missing_reference"
+    assert recon["reference_canonical"] is None
+
+
+def test_account_latest_matching_row_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two same-book rows reconcile against the later catalog entry."""
+    _install_account(monkeypatch, tmp_path)
+    index = _write_catalog_index(tmp_path, [])
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    _write_same_book_reference(tmp_path, index, run_dir="runs/first", base_cagr=unit_cagr, base_mdd=0.05)
+    _write_same_book_reference(tmp_path, index, run_dir="runs/second", base_cagr=unit_cagr, base_mdd=0.05)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    (run_dir,) = _run_dirs(tmp_path)
+    recon = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))["reconciliation"]
+    assert recon["status"] == "ok"
+    assert recon["reference_canonical"]["run_dir"] == "runs/second"
+
+
+def test_account_headline_drawdown_is_intraday_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headline drawdown is the 3m close path; the daily value stays disclosed separately."""
+    _install_account(monkeypatch, tmp_path, account_intraday=0.2)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    (run_dir,) = _run_dirs(tmp_path)
+    payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
+    assert payload["mdd"] == pytest.approx(-0.2)
+    assert payload["daily_mdd"] == pytest.approx(2205.0 / 2310.0 - 1.0)
+    assert payload["unit_reference"]["mdd"] == pytest.approx(-0.05)
+    assert payload["unit_reference"]["daily_mdd"] == pytest.approx(105000.0 / 110000.0 - 1.0)
+    assert payload["reconciliation"]["mdd"] == pytest.approx(0.05)
+    rows = (tmp_path / "index.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(rows[-1])["base_max_drawdown"] == pytest.approx(0.2)
+
+
+def test_backtest_mhs_frozen_account_unit_variant_only_at_breadth_20(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """account_unit selects the registered clip unit book at Top-20 and names its run directory."""
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
+
+    assert backtest_mod._frozen_strategy(20, "account_unit") is FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
+    with pytest.raises(SystemExit):
+        backtest_mod._frozen_strategy(40, "account_unit")
+    name = backtest_mod._frozen_run_name(
+        pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-02-01", tz="UTC"),
+        20, pd.Timestamp("2025-03-01T00:00:00Z"), variant="account_unit",
+    )
+    assert "_account_unit" in name
+    seen = _install_frozen(monkeypatch)
+    backtest_mod.run_frozen_mhs_backtest_command(_parse([
+        "backtest", "mhs-frozen",
+        "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
+        "--variant", "account_unit", "--output", str(tmp_path / "unit.json"),
+    ]))
+    assert seen["request"].strategy is FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
+
+
+def test_account_same_book_reference_skips_unreadable_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corrupt catalog rows never break same-book reconciliation; the good row still wins."""
+    _install_account(monkeypatch, tmp_path)
+    index = tmp_path / "index.jsonl"
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    lines = [
+        "",
+        json.dumps({"kind": "mhs", "strategy_id": "x"}),
+        json.dumps({"kind": "mhs_frozen", "strategy_id": "other_book"}),
+        json.dumps({"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2"}),
+        json.dumps({
+            "kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "run_dir": 123,
+            "evaluation_start": "2025-01-01T00:00:00+00:00", "evaluation_end": "2025-02-01T00:00:00+00:00",
+        }),
+        json.dumps({
+            "kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "run_dir": "runs/gone",
+            "evaluation_start": "2025-01-01T00:00:00+00:00", "evaluation_end": "2025-02-01T00:00:00+00:00",
+        }),
+    ]
+    index.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    bad_json = tmp_path / "runs" / "broken"
+    bad_json.mkdir(parents=True)
+    (bad_json / "result.json").write_text("not json", encoding="utf-8")
+    index.write_text(
+        index.read_text(encoding="utf-8")
+        + json.dumps({
+            "kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "run_dir": "runs/broken",
+            "evaluation_start": "2025-01-01T00:00:00+00:00", "evaluation_end": "2025-02-01T00:00:00+00:00",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    _write_same_book_reference(
+        tmp_path, index, run_dir="runs/levered",
+        base_cagr=unit_cagr, base_mdd=0.05, exposure_multiplier=2.5,
+    )
+    _write_same_book_reference(tmp_path, index, run_dir="runs/good", base_cagr=unit_cagr, base_mdd=0.05)
+    backtest_mod.run_frozen_account_command(_parse(_account_argv()))
+    (run_dir,) = _run_dirs(tmp_path)
+    recon = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))["reconciliation"]
+    assert recon["status"] == "ok"
+    assert recon["reference_canonical"]["run_dir"] == "runs/good"

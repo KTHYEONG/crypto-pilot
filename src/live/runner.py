@@ -87,7 +87,6 @@ from src.live.rest import BinanceFuturesRestClient, parse_rate_limits
 from src.live.settings import ExecutionMode, LiveSettings
 from src.live.signal import assert_signal_available, assert_signal_fresh, latest_decision_ohlcv_close, latest_target_weights
 from src.live.sizing import target_quantities
-from src.mhs.params import REFERENCE_PASS_EQUITY_FLOOR
 from src.live.tax_ledger import (
     append_tax_records,
     collect_tax_records,
@@ -151,20 +150,27 @@ def check_risk_gates(
             raise RiskGateBreach(f"free margin fraction {free_fraction} below floor")
 
 
-def apply_ruin_guard(
-    weights: pd.Series, equity: Decimal, starting_capital: Decimal
-) -> tuple[pd.Series, bool]:
-    """백테스트 ruin 가드와 동일한 에쿼티 하한 평탄화.
+def fetch_live_account_equity(settings: LiveSettings, now: pd.Timestamp) -> float:
+    """Margin equity (wallet balance + unrealized PnL, USDT) of the LIVE account at ``now``.
 
-    equity <= REFERENCE_PASS_EQUITY_FLOOR * starting_capital 이면 비중을
-    0으로 평탄화하고 True를 반환한다(사이클은 계속되어 포지션을 청산한다).
+    Used by the frozen signal step so exposure is chosen from the same equity the runner sizes
+    orders with; the call syncs server time first, exactly like the execution cycle.
+
+    Raises:
+        DataIntegrityError: ``settings.mode`` suppresses mutations (PAPER/SHADOW have no real
+            account equity to size from) or the snapshot equity is not finite and positive.
     """
-    if starting_capital <= 0:
-        raise ValueError(f"starting_capital must be > 0, got {starting_capital}")
-    floor = Decimal(str(REFERENCE_PASS_EQUITY_FLOOR)) * starting_capital
-    if equity <= floor:
-        return weights * 0.0, True
-    return weights, False
+    import math
+
+    if settings.mode.suppresses_mutations:
+        raise DataIntegrityError("live account equity unavailable in suppressed mode")
+    client = _order_client(settings, now)
+    client.sync_server_time()
+    snapshot = fetch_account_snapshot(client, now=now)
+    equity = float(snapshot.wallet_balance + snapshot.unrealized_pnl)
+    if not math.isfinite(equity) or equity <= 0.0:
+        raise DataIntegrityError(f"live account equity not finite and positive: {equity!r}")
+    return equity
 
 
 PAPER_FUNDING_LAG_HALT: pd.Timedelta = pd.Timedelta(hours=24)
@@ -388,19 +394,30 @@ def _run_manifest_path(settings: LiveSettings) -> Path | None:
 
 
 def _unit_bootstrap_sha256(settings: LiveSettings) -> str | None:
+    """Content digest of the unit bootstrap, independent of the sealing nonce, so resealing identical data never trips the manifest check."""
     path = Path(settings.unit_bootstrap_path)
     if not path.exists():
         return None
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    raw = path.read_bytes()
+    if str(path).endswith(".enc") and settings.artifact_key is not None:
+        from src.live.crypto import derive_key, open_bytes
+
+        try:
+            plaintext = open_bytes(raw, derive_key(settings.artifact_key))
+        except Exception as exc:
+            raise DataIntegrityError(f"unit bootstrap seal open failed: {path}") from exc
+        return hashlib.sha256(plaintext).hexdigest()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str, Any]:
     from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2  # noqa: PLC0415
+    from src.mhs.params import FROZEN_GROWTH_NAME_CLIP  # noqa: PLC0415
 
     return {
         "run_id": settings.record_run_id,
         "strategy_id": FROZEN_MHS_TOP20_V2.strategy_id,
-        "name_clip": FROZEN_MHS_TOP20_V2.name_clip,
+        "name_clip": FROZEN_GROWTH_NAME_CLIP,
         "execution_policy": settings.execution_policy,
         "paper_fill_model": settings.paper_fill_model,
         "mode": settings.mode.value,
@@ -417,11 +434,30 @@ def _assert_run_manifest_compatible(settings: LiveSettings) -> None:
         return
     raw = json.loads(path.read_text(encoding="utf-8"))
     current = _current_run_manifest(settings, pd.Timestamp.now(tz="UTC"))
-    for key in ("strategy_id", "execution_policy", "mode", "unit_bootstrap_sha256"):
-        if raw.get(key) != current.get(key):
-            raise DataIntegrityError(
-                f"run manifest mismatch key={key} manifest={raw.get(key)!r} current={current.get(key)!r}"
-            )
+    compared = ("strategy_id", "name_clip", "execution_policy", "mode", "unit_bootstrap_sha256")
+    mismatched = [key for key in compared if raw.get(key) != current.get(key)]
+    if not mismatched:
+        return
+    allowed = set()
+    if "unit_bootstrap_sha256" in mismatched:
+        bootstrap = Path(settings.unit_bootstrap_path)
+        if bootstrap.exists():
+            legacy_raw = hashlib.sha256(bootstrap.read_bytes()).hexdigest()
+            if raw.get("unit_bootstrap_sha256") == legacy_raw and current.get("unit_bootstrap_sha256") != legacy_raw:
+                allowed.add("unit_bootstrap_sha256")
+    if "name_clip" in mismatched and raw.get("name_clip") is None:
+        allowed.add("name_clip")
+    if set(mismatched) <= allowed and allowed:
+        for key in allowed:
+            raw[key] = current[key]
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+        return
+    key = mismatched[0]
+    raise DataIntegrityError(
+        f"run manifest mismatch key={key} manifest={raw.get(key)!r} current={current.get(key)!r}"
+    )
 
 
 def _ensure_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> None:
@@ -557,7 +593,7 @@ def run_shadow_cycle(
             )
         decision_marks: dict[str, Decimal] = {str(k): Decimal(str(v)) for k, v in decision_closes.items()}
         _sizing_anchor = "decision_ohlcv_close"
-        # 4) I-EQUITY-MTM / ruin guard (백테스트 패리티).
+        # 4) I-EQUITY-MTM (백테스트 패리티).
         if settings.mode.suppresses_mutations:
             absent_held = held_symbols_absent_from_exchange(ledger_state.positions, exchange_info_payload)
             if absent_held:
@@ -575,9 +611,6 @@ def run_shadow_cycle(
             ledger_positions = ledger_state.positions
             current_positions = effective_positions(settings.mode, snapshot, ledger_positions)
         equity = resolve_sizing_equity(snapshot, Decimal(str(settings.notional_equity_usdt)), mode=settings.mode, cash_usdt=ledger_state.cash_usdt, positions=ledger_positions, marks=marks)
-        weights, ruin_flat = apply_ruin_guard(weights, equity, Decimal(str(settings.notional_equity_usdt)))
-        if ruin_flat:
-            audit.record("ruin_guard_flatten", equity=str(equity))
 
         targets, dropped = target_quantities(weights, marks, filters, equity, sizing_marks=decision_marks)
         for item in dropped:
@@ -724,14 +757,14 @@ def run_shadow_cycle(
                 fills_dir = Path(settings.fills_dir) if settings.fills_dir else default_fills_dir()
                 fill_events: list[FillEvent] = []
                 for intent, outcome in zip(kept, outcomes, strict=False):
-                    for qty_abs, price, fee_bps, reason, liquidity in getattr(outcome, "fills", ()):
+                    for qty_abs, price, fee_bps, reason, liquidity, filled_at in getattr(outcome, "fills", ()):
                         qty = Decimal(qty_abs)
                         signed_qty = qty if intent.side == "BUY" else -qty
                         dm = decision_marks.get(intent.symbol) if decision_marks is not None else None
                         fill_events.append(
                             FillEvent(
                                 decision_time=decision_time,
-                                timestamp=decision_time,
+                                timestamp=filled_at,
                                 symbol=intent.symbol,
                                 quantity_delta=signed_qty,
                                 fill_price=Decimal(price),
@@ -791,14 +824,14 @@ def run_shadow_cycle(
                     # SHADOW/PAPER: derive from fills
                     fill_events_for_tax: list[Any] = []
                     for intent, outcome in zip(kept, outcomes, strict=False):
-                        for qty_abs, price, fee_bps, reason, liquidity in getattr(outcome, "fills", ()):
+                        for qty_abs, price, fee_bps, reason, liquidity, filled_at in getattr(outcome, "fills", ()):
                             qty = Decimal(qty_abs)
                             signed_qty = qty if intent.side == "BUY" else -qty
                             dm = decision_marks.get(intent.symbol) if decision_marks is not None else None
                             fill_events_for_tax.append(
                                 FillEvent(
                                     decision_time=decision_time,
-                                    timestamp=decision_time,
+                                    timestamp=filled_at,
                                     symbol=intent.symbol,
                                     quantity_delta=signed_qty,
                                     fill_price=Decimal(price),

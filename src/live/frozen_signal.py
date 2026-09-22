@@ -125,6 +125,7 @@ def run_frozen_signal_step(
     fallback_venue_path: Path,
     ledger_path: Path,
     seed_equity_usdt: float,
+    account_equity_usdt: float | None = None,
     non_crypto: frozenset[str],
     artifact_key: SecretStr | None = None,
 ) -> FrozenStepReport:
@@ -135,6 +136,8 @@ def run_frozen_signal_step(
     half-Kelly inside venue margin and impact limits, and appends the levered weight row
     and its snapshot-close sizing row -- sealed (AES-256-GCM) when ``artifact_key`` is set,
     plaintext otherwise. Orders are never placed here.
+
+    ``account_equity_usdt`` is the LIVE account's margin equity; when given it is the sizing equity for exposure. PAPER/SHADOW pass None and size from the virtual ledger (cash plus positions at snapshot closes), or from ``seed_equity_usdt`` before the first fill.
 
     Raises:
         CausalityViolation: ``now`` precedes the decision day's release hour.
@@ -186,7 +189,11 @@ def run_frozen_signal_step(
     for symbol in needed:
         if symbol not in snap_row.index or not math.isfinite(float(snap_row[symbol])):
             raise DataIntegrityError(f"held symbol without a snapshot close: {symbol}")
-    if state.cash_usdt is None:
+    if account_equity_usdt is not None:
+        if not math.isfinite(float(account_equity_usdt)) or float(account_equity_usdt) <= 0.0:
+            raise DataIntegrityError(f"account equity not finite and positive: {account_equity_usdt!r}")
+        equity = float(account_equity_usdt)
+    elif state.cash_usdt is None:
         equity = float(seed_equity_usdt)
     else:
         equity = float(state.cash_usdt) + sum(

@@ -437,6 +437,10 @@ ACCOUNT_MAKER_FEE_BPS: float = 2.0
 # 공식 원장 passive_timeout_minutes(30분)를 3분봉 개수로 환산한 값. 대기창이 길수록 체결률은
 # 오르지만 역선택도 커진다. 공식 원장과 같은 길이를 써야 두 원장이 비교 가능하다.
 ACCOUNT_PASSIVE_WINDOW_BARS: int = 10
+# 같은 북·같은 창의 공식 3m 원장 대비 CAGR 허용 오차(프로브 실측 잔차 0.3%p의 여유폭).
+ACCOUNT_RECON_CAGR_TOLERANCE: float = 0.005
+# 같은 정의(3m 종가 경로 최고점 대비)의 MDD 허용 오차.
+ACCOUNT_RECON_MDD_TOLERANCE: float = 0.01
 
 # --- live frozen paper ---------------------------------------------------------
 # 120일 1h 창에서 frozen 비중이 전체 이력과 비트 동일함을 실측했다(로스터 90일 거래 요건 +

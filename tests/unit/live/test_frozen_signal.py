@@ -352,9 +352,6 @@ def test_no_book_row_fails_closed(
     fake = LiveFrozenBook(
         unit_weights=pd.DataFrame([[0.1]], index=idx, columns=cols, dtype="float64"),
         snapshot_closes=pd.DataFrame([[1.0]], index=idx, columns=cols, dtype="float64"),
-        entry_closes=pd.DataFrame(
-            [[1.0]], index=pd.DatetimeIndex(["2021-01-03"], tz="UTC"), columns=cols, dtype="float64",
-        ),
         adv=pd.DataFrame([[1.0]], index=idx, columns=cols, dtype="float64"),
         daily_sigma=pd.DataFrame([[0.01]], index=idx, columns=cols, dtype="float64"),
         valid_from=idx[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
@@ -429,3 +426,32 @@ def test_venue_prefers_gzip_snapshot_over_older_json(layout: dict[str, Path], tm
     )
     report = _run(_DAY, {**layout, "venue": venue})
     assert report.venue_snapshot == "20260922.json.gz"
+
+
+def test_live_account_equity_drives_exposure(layout: dict[str, Path], tmp_path: Path) -> None:
+    seed_report = _run(_DAY, layout)
+    assert seed_report.equity_usdt == 2100.0
+    layout2 = {**layout}
+    alt = tmp_path / "live_alt"
+    alt.mkdir()
+    layout2["weights"] = alt / "deployed_target_weights.parquet"
+    layout2["forward"] = alt / "fwd.parquet"
+    live_report = _run(_DAY, layout2, account_equity_usdt=50_000.0)
+    assert live_report.equity_usdt == 50_000.0
+
+
+def test_invalid_account_equity_fails_closed(layout: dict[str, Path]) -> None:
+    import pytest
+    from src.common.errors import DataIntegrityError
+    with pytest.raises(DataIntegrityError):
+        _run(_DAY, layout, account_equity_usdt=0.0)
+    with pytest.raises(DataIntegrityError):
+        _run(_DAY, layout, account_equity_usdt=float("nan"))
+    assert not layout["weights"].exists()
+    assert not layout["forward"].exists()
+
+
+def test_paper_equity_precedence_from_ledger(layout: dict[str, Path]) -> None:
+    _write_ledger(layout["ledger"], {"BTCUSDT": "0.01"}, "1000")
+    report = _run(_DAY, layout, account_equity_usdt=None)
+    assert report.equity_usdt == pytest.approx(1600.0)
