@@ -414,3 +414,18 @@ def test_nonfinite_sizing_fails_closed(layout: dict[str, Path]) -> None:
     _write_ledger(layout["ledger"], {_SYMS[0]: "1e308"}, "1e308")
     with pytest.raises(DataIntegrityError):
         _run(_DAY, layout)
+
+
+def test_venue_prefers_gzip_snapshot_over_older_json(layout: dict[str, Path], tmp_path: Path) -> None:
+    import gzip as _gzip
+
+    venue = tmp_path / "venue_mixed"
+    venue.mkdir()
+    _write_venue(venue / "20260921.json", [_SYMS[0], _SYMS[1]])
+    staged = tmp_path / "staged.json"
+    _write_venue(staged, [_SYMS[0], _SYMS[1]])
+    (venue / "20260922.json.gz").write_bytes(
+        _gzip.compress(staged.read_bytes(), compresslevel=9, mtime=0)
+    )
+    report = _run(_DAY, {**layout, "venue": venue})
+    assert report.venue_snapshot == "20260922.json.gz"

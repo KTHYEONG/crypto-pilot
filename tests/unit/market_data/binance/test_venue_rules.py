@@ -17,6 +17,8 @@ from src.market_data.binance.venue_rules import (
     latest_venue_rule_snapshot,
     load_venue_rule_snapshot,
     parse_venue_rules,
+    venue_rule_snapshot_exists,
+    venue_rule_snapshot_paths,
     write_venue_rule_snapshot,
 )
 
@@ -245,7 +247,7 @@ def test_latest_venue_rule_snapshot_selects_newest(tmp_path: Path) -> None:
     second_path = write_venue_rule_snapshot(second, tmp_path)
 
     assert latest_venue_rule_snapshot(tmp_path) == second_path
-    assert first_path.name == "20260921.json"
+    assert first_path.name == "20260921.json.gz"
 
 
 def test_latest_venue_rule_snapshot_missing(tmp_path: Path) -> None:
@@ -335,28 +337,33 @@ def test_collect_venue_rules_registers_and_collects(
     assert args.handler is data_mod._venue_rules
 
     monkeypatch.setattr("src.common.paths.VENUE_RULES_DIR", tmp_path)
-    snapshot = parse_venue_rules(_bracket_payload(), _exchange_info_payload(), captured_at=CAPTURED_AT)
+    today = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d")
+    snapshot = parse_venue_rules(
+        _bracket_payload(), _exchange_info_payload(), captured_at=pd.Timestamp.now(tz="UTC")
+    )
     monkeypatch.setattr(venue_mod, "fetch_venue_rules", lambda **kwargs: snapshot)
 
     data_mod._venue_rules(argparse.Namespace())
     printed = capsys.readouterr().out
-    assert "20260921.json" in printed
-    assert (tmp_path / "20260921.json").exists()
+    assert f"{today}.json.gz" in printed
+    assert (tmp_path / f"{today}.json.gz").exists()
 
     def _must_not_fetch(**kwargs: Any) -> Any:
         raise AssertionError("fetch must not run when today is already captured")
 
     monkeypatch.setattr(venue_mod, "fetch_venue_rules", _must_not_fetch)
     data_mod._venue_rules(argparse.Namespace())
-    assert (tmp_path / "20260921.json").exists()
+    assert (tmp_path / f"{today}.json.gz").exists()
 
 
 def test_venue_rules_snapshot_json_holds_parsed_fields_only(tmp_path: Path) -> None:
     """JSON on disk stores the parsed fields only, captured_at ISO UTC."""
+    import gzip as _gzip
+
     snapshot = parse_venue_rules(_bracket_payload(), _exchange_info_payload(), captured_at=CAPTURED_AT)
     path = write_venue_rule_snapshot(snapshot, tmp_path)
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = json.loads(_gzip.decompress(path.read_bytes()).decode("utf-8"))
 
     assert raw["captured_at"] == snapshot.captured_at.isoformat()
     assert set(raw) == {"captured_at", "symbols"}
@@ -380,3 +387,61 @@ def test_parse_venue_rules_accepts_maint_amount_alias() -> None:
     snapshot = parse_venue_rules(brackets, _exchange_info_payload(), captured_at=pd.Timestamp("2026-09-21"))
 
     assert snapshot.symbols["BTCUSDT"].brackets[1].maint_amount == 50
+
+
+def test_venue_snapshot_gzip_write_round_trips(tmp_path: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Gzip snapshots round-trip with deterministic bytes."""
+    snapshot = parse_venue_rules(_bracket_payload(), _exchange_info_payload(), captured_at=CAPTURED_AT)
+    path = write_venue_rule_snapshot(snapshot, tmp_path)
+    assert path.suffixes == [".json", ".gz"]
+    loaded = load_venue_rule_snapshot(path)
+    assert loaded.symbols["BTCUSDT"].brackets == snapshot.symbols["BTCUSDT"].brackets
+    assert loaded.symbols["BTCUSDT"].step_size == snapshot.symbols["BTCUSDT"].step_size
+    assert loaded.symbols["BTCUSDT"].min_notional == snapshot.symbols["BTCUSDT"].min_notional
+    other = tmp_path_factory.mktemp("venue2")
+    twin = write_venue_rule_snapshot(snapshot, other)
+    assert path.read_bytes() == twin.read_bytes()
+
+
+def test_venue_snapshot_legacy_json_orders_by_day(tmp_path: Path) -> None:
+    """Legacy json and gzip snapshots order by capture day."""
+    legacy = tmp_path / "20260921.json"
+    legacy.write_text(json.dumps({"captured_at": "2026-09-21T00:00:00+00:00", "symbols": {}}), encoding="utf-8")
+    snapshot = parse_venue_rules(
+        _bracket_payload(), _exchange_info_payload(), captured_at=pd.Timestamp("2026-09-22T00:00:00Z")
+    )
+    gz_path = write_venue_rule_snapshot(snapshot, tmp_path)
+    paths = venue_rule_snapshot_paths(tmp_path)
+    assert [p.name for p in paths] == ["20260921.json", gz_path.name]
+    assert latest_venue_rule_snapshot(tmp_path) == gz_path
+    assert load_venue_rule_snapshot(legacy) is not None
+
+
+def test_venue_snapshot_same_day_duplicate_fails_closed(tmp_path: Path) -> None:
+    """Two files claiming the same day fail closed on listing."""
+    (tmp_path / "20260922.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "20260922.json.gz").write_bytes(b"fake")
+    with pytest.raises(DataIntegrityError):
+        venue_rule_snapshot_paths(tmp_path)
+
+
+def test_venue_snapshot_fresh_only_across_suffixes(tmp_path: Path) -> None:
+    """Fresh-only guard spans both suffixes."""
+    (tmp_path / "20260922.json").write_text("{}", encoding="utf-8")
+    snapshot = parse_venue_rules(
+        _bracket_payload(), _exchange_info_payload(), captured_at=pd.Timestamp("2026-09-22T00:00:00Z")
+    )
+    with pytest.raises(FileExistsError):
+        write_venue_rule_snapshot(snapshot, tmp_path)
+    assert venue_rule_snapshot_exists(tmp_path, "20260922") is True
+    assert venue_rule_snapshot_exists(tmp_path, "20260921") is False
+
+
+def test_venue_snapshot_paths_ignores_non_snapshots(tmp_path: Path) -> None:
+    """Temp files, other suffixes, and directories are ignored; missing root is empty."""
+    assert venue_rule_snapshot_paths(tmp_path / "absent") == []
+    (tmp_path / "subdir").mkdir()
+    (tmp_path / ".20260922.json.gz.tmp").write_text("x", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "2026092.json").write_text("{}", encoding="utf-8")
+    assert venue_rule_snapshot_paths(tmp_path) == []

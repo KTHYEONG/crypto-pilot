@@ -52,12 +52,15 @@ def _funding(args: argparse.Namespace) -> None:
 
 def _venue_rules(args: argparse.Namespace) -> None:
     from src.common.paths import VENUE_RULES_DIR
-    from src.market_data.binance.venue_rules import fetch_venue_rules, write_venue_rule_snapshot
+    from src.market_data.binance.venue_rules import (
+        fetch_venue_rules,
+        venue_rule_snapshot_exists,
+        write_venue_rule_snapshot,
+    )
 
     today = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d")
-    existing = VENUE_RULES_DIR / f"{today}.json"
-    if existing.exists():
-        _logger.info("[DATA] venue-rules already captured path=%s", existing)
+    if venue_rule_snapshot_exists(VENUE_RULES_DIR, today):
+        _logger.info("[DATA] venue-rules already captured path=%s", VENUE_RULES_DIR / today)
         return
     snapshot = fetch_venue_rules()
     path = write_venue_rule_snapshot(snapshot, VENUE_RULES_DIR)
@@ -194,6 +197,32 @@ def _stream_liquidations(args: argparse.Namespace) -> None:
             symbols=symbols,
             directory=directory,
             flush_interval_s=flush_interval_s,
+            shutdown=flag,
+        )
+    )
+
+
+def _record_market(args: argparse.Namespace) -> None:
+    """Run the always-on live-only market recorder until SIGTERM/SIGINT."""
+    import asyncio
+    from pathlib import Path
+
+    from src.common.paths import LIVE_CAPTURE_DIR
+    from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
+    from src.market_data.streams.liquidations import default_liquidations_dir
+    from src.market_data.streams.recorder import MarketRecorderConfig, run_market_recorder
+
+    flag = ShutdownFlag()
+    install_shutdown_handlers(flag)
+    capture_arg = getattr(args, "capture_root", None)
+    liq_arg = getattr(args, "liquidations_dir", None)
+    capture_root = Path(capture_arg) if capture_arg else LIVE_CAPTURE_DIR
+    liquidations_dir = Path(liq_arg) if liq_arg else default_liquidations_dir()
+    asyncio.run(
+        run_market_recorder(
+            MarketRecorderConfig(),
+            capture_root=capture_root,
+            liquidations_dir=liquidations_dir,
             shutdown=flag,
         )
     )
@@ -585,6 +614,11 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     stream_liq.add_argument("--flush-interval-s", type=float, default=60.0)
     stream_liq.add_argument("--dir", type=str, default=None)
     stream_liq.set_defaults(handler=_stream_liquidations)
+
+    record_market = collect_sub.add_parser("record-market", help="Always-on recorder of live-only market sources")
+    record_market.add_argument("--capture-root", type=str, default=None)
+    record_market.add_argument("--liquidations-dir", type=str, default=None)
+    record_market.set_defaults(handler=_record_market)
 
     refresh = collect.add_parser("refresh-live-universe", help="Incremental tail top-up for live signal refresh (1h trade OHLCV + settled funding)")
     refresh.set_defaults(handler=_refresh_live_universe)  # _refresh_live_universe delegates to refresh_live_market_data

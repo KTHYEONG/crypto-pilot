@@ -2494,3 +2494,240 @@ def test_touch_chase_behaviour_unchanged(tmp_path) -> None:
     assert parity.passive_pricing == "touch_chase"
     assert parity.passive_deadline_s == EXECUTION_BAR_SECONDS
 
+
+
+def _fill_events(audit_path):
+    import json as _json
+
+    return [
+        _json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if _json.loads(line)["event"] == "fill"
+    ]
+
+
+def _cancel_events(audit_path):
+    import json as _json
+
+    return [
+        _json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if _json.loads(line)["event"] == "order_cancelled"
+    ]
+
+
+def _posted_events(audit_path):
+    import json as _json
+
+    return [
+        _json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if _json.loads(line)["event"] == "order_posted"
+    ]
+
+
+def _intent_for(symbol: str, qty: str = "1.000") -> OrderIntent:
+    return OrderIntent(
+        symbol=symbol,
+        side="BUY",
+        quantity=Decimal(qty),
+        reduce_only=False,
+        target_qty=Decimal(qty),
+        current_qty=Decimal("0"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("100"),
+    )
+
+
+def _filters_for(symbol: str) -> SymbolFilters:
+    return SymbolFilters(
+        symbol=symbol,
+        tick_size=Decimal("0.10"),
+        step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"),
+        min_notional=Decimal("5"),
+        max_qty=Decimal("1000000"),
+        quantity_precision=3,
+        price_precision=2,
+    )
+
+
+def test_order_fill_events_reconcile_with_outcome(tmp_path) -> None:
+    """Per-intent fill quantities and VWAP reconcile exactly with the outcome."""
+    from src.live.rest import PaperResponse
+    from src.live.settings import ExecutionMode
+
+    audit_path = tmp_path / "fills_audit.jsonl"
+    audit = AuditLog(audit_path)
+    books_by_tick = [
+        {"AAAUSDT": ("100.00", "99.50"), "BBBUSDT": ("100.00", "100.20")},
+        {"AAAUSDT": ("100.00", "99.50"), "BBBUSDT": ("100.30", "100.50")},
+        {"AAAUSDT": ("100.00", "99.50"), "BBBUSDT": ("100.30", "100.10")},
+        {"AAAUSDT": ("100.00", "99.50"), "BBBUSDT": ("100.60", "100.10")},
+    ]
+
+    class _PaperBookClient:
+        mode = ExecutionMode.PAPER
+
+        def __init__(self):
+            self.tick = -1
+
+        def book_tickers(self):
+            self.tick += 1
+            snap = books_by_tick[min(self.tick, len(books_by_tick) - 1)]
+            return {s: {"bidPrice": b, "askPrice": a} for s, (b, a) in snap.items()}
+
+        def new_order(self, params):
+            return PaperResponse.suppressed("POST", "/fapi/v1/order", "0" * 12)
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, *a, **k):
+            raise AssertionError("paper path never queries")
+
+    policy = PassiveExecutionPolicy(
+        poll_interval_s=1.0, chase_ticks=2, max_chases=8,
+        passive_deadline_s=600.0, window_deadline_s=3600.0,
+        taker_cap_bps=15.0, max_slices=1,
+        chase_band_bps=100.0, max_cross_bps=200.0,
+    )
+    intents = [_intent_for("AAAUSDT"), _intent_for("BBBUSDT")]
+    filters = {"AAAUSDT": _filters_for("AAAUSDT"), "BBBUSDT": _filters_for("BBBUSDT")}
+    outcomes = execute_intents(
+        _PaperBookClient(), intents, filters, policy, audit, SteppingClock(5.0), lambda _s: None,
+    )
+    by_symbol = {oc.symbol: oc for oc in outcomes}
+    assert by_symbol["AAAUSDT"].filled_qty == Decimal("1.000")
+    assert by_symbol["BBBUSDT"].filled_qty == Decimal("1.000")
+    fills = _fill_events(audit_path)
+    assert len(fills) == 2
+    for record in fills:
+        assert record["simulated"] is True
+        assert "bid" in record
+        assert "ask" in record
+        outcome = by_symbol[record["symbol"]]
+        sym_fills = [r for r in fills if r["symbol"] == record["symbol"]]
+        assert sum(Decimal(r["qty"]) for r in sym_fills) == outcome.filled_qty
+        vwap = sum(Decimal(r["qty"]) * Decimal(r["price"]) for r in sym_fills) / sum(
+            Decimal(r["qty"]) for r in sym_fills
+        )
+        assert vwap == outcome.avg_fill_price
+    aaa = next(r for r in fills if r["symbol"] == "AAAUSDT")
+    assert (aaa["bid"], aaa["ask"], aaa["liquidity"]) == ("100.00", "99.50", "maker")
+    bbb = next(r for r in fills if r["symbol"] == "BBBUSDT")
+    assert (bbb["bid"], bbb["ask"], bbb["price"]) == ("100.60", "100.10", "100.60")
+
+
+def test_order_cancelled_chase_then_passive_timeout(tmp_path) -> None:
+    """Chase and timeout cancels are recorded in time order."""
+    audit_path = tmp_path / "cancel_audit.jsonl"
+    audit = AuditLog(audit_path)
+    touches = [("100.00", "100.20"), ("100.30", "100.50")]
+
+    class _MovingClient(StubClient):
+        def __init__(self):
+            super().__init__(touches=[touches[0]])
+            self._tick = -1
+
+        def book_tickers(self):
+            self._tick += 1
+            bid, ask = touches[1] if self._tick >= 1 else touches[0]
+            return {"AAAUSDT": {"bidPrice": bid, "askPrice": ask}}
+
+    policy = _policy(
+        poll_interval_s=10.0, passive_deadline_s=15.0, window_deadline_s=60.0,
+        chase_band_bps=50.0, max_cross_bps=100.0,
+    )
+    outcome = execute_intent(
+        _MovingClient(), _intent(), _filters(), policy, audit, SteppingClock(10.0),
+    )
+    reasons = [record["reason"] for record in _cancel_events(audit_path)]
+    assert "chase" in reasons
+    assert "passive_timeout" in reasons
+    assert reasons.index("chase") < reasons.index("passive_timeout")
+    assert reasons[-1] == "window_end"
+    assert outcome.status == "RESIDUAL"
+
+
+def test_order_posted_carries_pricing_touch(tmp_path) -> None:
+    """The posted order records the touch it priced against."""
+    from src.live.rest import PaperResponse
+    from src.live.settings import ExecutionMode
+
+    audit_path = tmp_path / "posted_audit.jsonl"
+    audit = AuditLog(audit_path)
+
+    class _StaticPaperClient:
+        mode = ExecutionMode.PAPER
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            return PaperResponse.suppressed("POST", "/fapi/v1/order", "0" * 12)
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, *a, **k):
+            raise AssertionError("paper path never queries")
+
+    policy = _policy(poll_interval_s=15.0, passive_deadline_s=45.0, window_deadline_s=60.0)
+    outcome = execute_intent(
+        _StaticPaperClient(), _intent(), _filters(), policy, audit, SteppingClock(15.0),
+    )
+    assert outcome.status == "RESIDUAL"
+    posted = _posted_events(audit_path)
+    assert len(posted) == 1
+    assert (posted[0]["bid"], posted[0]["ask"], posted[0]["phase"]) == ("100.00", "100.20", "passive")
+
+
+def test_live_partial_fills_emit_deltas(tmp_path) -> None:
+    """Live executedQty increases emit one fill per delta."""
+    audit_path = tmp_path / "partial_audit.jsonl"
+    audit = AuditLog(audit_path)
+    touches = [("100.00", "100.20")] * 3 + [("100.30", "100.50")] * 100
+
+    class _PartialClient:
+        def __init__(self):
+            self.tick = -1
+            self.orders: list[dict] = []
+            self._executed = ["3", "5", "6"]
+
+        def book_tickers(self):
+            self.tick += 1
+            bid, ask = touches[min(self.tick, len(touches) - 1)]
+            return {"AAAUSDT": {"bidPrice": bid, "askPrice": ask}}
+
+        def book_ticker(self, symbol):
+            bid, ask = touches[min(max(self.tick, 0), len(touches) - 1)]
+            return {"bidPrice": bid, "askPrice": ask}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            return {}
+
+        def query_order(self, symbol, orig_client_order_id):
+            executed = self._executed.pop(0) if self._executed else "0"
+            return {"status": "NEW", "executedQty": executed}
+
+    policy = PassiveExecutionPolicy(
+        poll_interval_s=1.0, chase_ticks=2, max_chases=8,
+        passive_deadline_s=30.0, window_deadline_s=120.0,
+        taker_cap_bps=15.0, max_slices=1, max_ioc_attempts=1000,
+    )
+    outcome = execute_intent(
+        _PartialClient(), _intent_for("AAAUSDT", "10.000"), _filters(), policy, audit, SteppingClock(1.0),
+    )
+    assert outcome.filled_qty == Decimal("6")
+    fills = _fill_events(audit_path)
+    assert [r["qty"] for r in fills] == ["3", "2", "1"]
+    assert all(r["simulated"] is False for r in fills)
+    assert all("bid" in r and "ask" in r for r in fills)
+    assert sum(Decimal(r["qty"]) for r in fills) == outcome.filled_qty
+    cancels = _cancel_events(audit_path)
+    assert cancels[-1]["reason"] == "window_end"
+    assert "bid" not in cancels[-1]
+    assert "ask" not in cancels[-1]

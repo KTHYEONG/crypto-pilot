@@ -333,3 +333,25 @@ def test_unsafe_record_run_id_rejected() -> None:
     for bad in ("../evil", "A_UPPER", "short"):
         with pytest.raises(ValidationError):
             LiveSettings(record_run_id=bad)
+
+
+def test_exec_depth_validator_rejects_bad_variants() -> None:
+    import pytest
+
+    from src.live.settings import LiveSettings
+
+    assert LiveSettings().exec_depth_levels == 5
+    assert LiveSettings().exec_depth_update_ms == 500
+    with pytest.raises(ValueError, match="exec_depth_levels"):
+        LiveSettings(exec_depth_levels=7)
+    with pytest.raises(ValueError, match="exec_depth_update_ms"):
+        LiveSettings(exec_depth_update_ms=700)
+    with pytest.raises(ValueError, match="exec_depth_max_symbols"):
+        LiveSettings(exec_depth_max_symbols=0)
+    with pytest.raises(ValueError, match="exec_depth_flush_interval_s"):
+        LiveSettings(exec_depth_flush_interval_s=0)
+    with pytest.raises(ValueError, match="exec_depth_max_session_s"):
+        LiveSettings(exec_depth_max_session_s=0)
+    with pytest.raises(ValueError, match="exec_depth_post_window_s"):
+        LiveSettings(exec_depth_post_window_s=-1)
+    assert LiveSettings(exec_depth_post_window_s=0).exec_depth_post_window_s == 0

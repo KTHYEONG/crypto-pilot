@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Any, TextIO
 import pandas as pd
 
 from src.common.paths import BASE_DIR
+
+_logger = logging.getLogger(__name__)
 
 #: 감사 로그가 허용되는 유일한 프로젝트 하위 루트(외부 /tmp 금지).
 AUDIT_LOG_ROOT = BASE_DIR / "logs"
@@ -88,20 +91,46 @@ class AuditLog:
     open/close 금지). 각 레코드는 flush 되므로 크래시 시에도 직전 레코드까지 가시적이다.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, mirror_path: Path | None = None) -> None:
+        """Append-only JSONL log; when ``mirror_path`` is set every record is also appended there.
+
+        The mirror lives under the run's state directory, which is backed up and never pruned, so
+        order-level evidence outlives the 90-day log retention.
+        """
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.mirror_path = Path(mirror_path) if mirror_path is not None else None
         self.context: dict[str, Any] = {}
         self._handle: TextIO | None = None
+        self._mirror_handle: TextIO | None = None
+        self._mirror_dead = False
+        self._mirror_warned = False
 
     def _ensure_handle(self) -> TextIO:
         if self._handle is None or self._handle.closed:
             self._handle = self.path.open("a", encoding="utf-8")
         return self._handle
 
+    def _ensure_mirror_handle(self) -> TextIO | None:
+        if self.mirror_path is None or self._mirror_dead:
+            return None
+        if self._mirror_handle is None or self._mirror_handle.closed:
+            try:
+                self.mirror_path.parent.mkdir(parents=True, exist_ok=True)
+                self._mirror_handle = self.mirror_path.open("a", encoding="utf-8")
+            except OSError as exc:
+                self._mirror_dead = True
+                if not self._mirror_warned:
+                    self._mirror_warned = True
+                    _logger.warning("[SYS] audit mirror write failed path=%s error=%s", self.mirror_path, exc)
+                return None
+        return self._mirror_handle
+
     def close(self) -> None:
         if self._handle is not None and not self._handle.closed:
             self._handle.close()
+        if self._mirror_handle is not None and not self._mirror_handle.closed:
+            self._mirror_handle.close()
 
     def record(self, event: str, **fields: Any) -> None:
         record: dict[str, Any] = {
@@ -115,6 +144,16 @@ class AuditLog:
         handle = self._ensure_handle()
         handle.write(line + "\n")
         handle.flush()
+        mirror = self._ensure_mirror_handle()
+        if mirror is not None:
+            try:
+                mirror.write(line + "\n")
+                mirror.flush()
+            except OSError as exc:
+                self._mirror_dead = True
+                if not self._mirror_warned:
+                    self._mirror_warned = True
+                    _logger.warning("[SYS] audit mirror write failed path=%s error=%s", self.mirror_path, exc)
 
     def record_suppressed(self, method: str, path: str, payload: dict[str, Any] | None = None) -> None:
         """SHADOW 모드에서 억제된 변이 요청을 기록한다. 원문 대신 다이제스트만 남긴다."""

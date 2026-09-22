@@ -99,3 +99,62 @@ COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_02_AUDIT_PATH_DATE_PARTITIONED",
     "SCENARIO_LIVE_DAEMON_03_PRUNE_DELETES_ONLY_STALE_DATED_FILES",
 )
+
+
+def test_audit_mirror_is_byte_identical(tmp_path: Path) -> None:
+    """Mirror receives the byte-identical sanitized line in order."""
+    primary = tmp_path / "primary.jsonl"
+    mirror = tmp_path / "mirror" / "run.jsonl"
+    audit = AuditLog(primary, mirror_path=mirror)
+    audit.record("order_posted", symbol="BTCUSDT", price="100.0")
+    audit.record("fill", symbol="BTCUSDT", qty="1", artifact_key="SECRET-VALUE")
+    audit.close()
+    assert primary.read_bytes() == mirror.read_bytes()
+    assert len(primary.read_text(encoding="utf-8").splitlines()) == 2
+    for line in (primary.read_bytes() + mirror.read_bytes()).decode().splitlines():
+        assert "artifact_key" not in line
+        assert "SECRET-VALUE" not in line
+
+
+def test_audit_mirror_failure_is_non_fatal(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A dead mirror warns once; the primary write still lands."""
+    import logging
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    primary = tmp_path / "primary.jsonl"
+    audit = AuditLog(primary, mirror_path=blocker / "m.jsonl")
+    with caplog.at_level(logging.WARNING, logger="src.live.audit"):
+        audit.record("order_posted", symbol="BTCUSDT")
+        audit.record("fill", symbol="BTCUSDT")
+    assert len(primary.read_text(encoding="utf-8").splitlines()) == 2
+    warnings = [r for r in caplog.records if "mirror" in r.message]
+    assert len(warnings) == 1
+
+
+def test_audit_mirror_write_failure_is_non_fatal(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """An opened mirror that fails on write warns once; primary still lands."""
+    import logging
+
+    primary = tmp_path / "primary2.jsonl"
+    audit = AuditLog(primary, mirror_path=tmp_path / "mirror2" / "run.jsonl")
+    audit.record("order_posted", symbol="BTCUSDT")
+
+    class _BoomWriter:
+        closed = False
+
+        def write(self, data: str) -> None:
+            raise OSError("disk full")
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    audit._mirror_handle = _BoomWriter()  # type: ignore[assignment]
+    with caplog.at_level(logging.WARNING, logger="src.live.audit"):
+        audit.record("fill", symbol="BTCUSDT")
+        audit.record("fill", symbol="ETHUSDT")
+    assert len(primary.read_text(encoding="utf-8").splitlines()) == 3
+    assert len([r for r in caplog.records if "mirror" in r.message]) == 1
