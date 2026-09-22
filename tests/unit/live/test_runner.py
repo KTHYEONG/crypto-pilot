@@ -193,7 +193,9 @@ def test_run_manifest_written_once_on_first_cycle(tmp_path, monkeypatch) -> None
     first = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert first["run_id"] == record_run_id
     assert first["strategy_id"] == FROZEN_MHS_TOP20_V2.strategy_id
-    assert first["name_clip"] == FROZEN_MHS_TOP20_V2.name_clip
+    from src.mhs.params import FROZEN_GROWTH_NAME_CLIP
+
+    assert first["name_clip"] == FROZEN_GROWTH_NAME_CLIP
     assert first["execution_policy"] == settings.execution_policy
     assert first["paper_fill_model"] == settings.paper_fill_model
     assert first["mode"] == settings.mode.value
@@ -269,3 +271,138 @@ def test_missing_unit_bootstrap_yields_null_manifest_hash(tmp_path, monkeypatch)
     assert runner_mod._unit_bootstrap_sha256(missing) is None
     payload = runner_mod._current_run_manifest(missing, now)
     assert payload["unit_bootstrap_sha256"] is None
+
+
+def test_resealed_bootstrap_keeps_manifest_digest(tmp_path) -> None:
+    import base64
+    import hashlib
+    import io
+    import pandas as pd
+    from pydantic import SecretStr
+    import src.live.runner as runner_mod
+    from src.live.crypto import derive_key, open_bytes, seal_bytes
+    from src.live.settings import LiveSettings
+
+    key_b64 = base64.b64encode(b"0" * 32).decode()
+    key = derive_key(SecretStr(key_b64))
+    frame = pd.DataFrame({"ret": [0.01, -0.02]}, index=pd.date_range("2026-01-01", periods=2, tz="UTC"))
+    buf = io.BytesIO()
+    frame.to_parquet(buf, index=True)
+    plaintext = buf.getvalue()
+    blob = seal_bytes(plaintext, key)
+    assert open_bytes(blob, key) == plaintext
+    p1 = tmp_path / "b1.parquet.enc"
+    p2 = tmp_path / "b2.parquet.enc"
+    p1.write_bytes(blob)
+    p2.write_bytes(blob)
+    s1 = LiveSettings(unit_bootstrap_path=str(p1), artifact_key=key_b64)
+    s2 = LiveSettings(unit_bootstrap_path=str(p2), artifact_key=key_b64)
+    assert runner_mod._unit_bootstrap_sha256(s1) == runner_mod._unit_bootstrap_sha256(s2) == hashlib.sha256(plaintext).hexdigest()
+
+
+def test_manifest_records_applied_clip(tmp_path) -> None:
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.settings import LiveSettings
+    from src.mhs.params import FROZEN_GROWTH_NAME_CLIP
+
+    now = pd.Timestamp("2026-09-22 00:00Z")
+    settings = LiveSettings(unit_bootstrap_path=str(tmp_path / "nope.parquet"))
+    payload = runner_mod._current_run_manifest(settings, now)
+    assert payload["name_clip"] == FROZEN_GROWTH_NAME_CLIP
+
+
+def test_legacy_ciphertext_digest_migrates_once(tmp_path, monkeypatch) -> None:
+    import base64
+    import hashlib
+    import io
+    import json
+    import pandas as pd
+    import pytest
+    from pydantic import SecretStr
+    import src.live.runner as runner_mod
+    import src.live.settings as settings_mod
+    from src.live.crypto import derive_key, seal_bytes
+    from src.live.settings import LiveSettings
+    from src.common.errors import DataIntegrityError
+
+    monkeypatch.setattr(settings_mod, "DATA_DIR", tmp_path / "data")
+    key_b64 = base64.b64encode(b"1" * 32).decode()
+    key = derive_key(SecretStr(key_b64))
+    frame = pd.DataFrame({"ret": [0.03]}, index=pd.date_range("2026-01-01", periods=1, tz="UTC"))
+    buf = io.BytesIO()
+    frame.to_parquet(buf, index=True)
+    blob = seal_bytes(buf.getvalue(), key)
+    boot = tmp_path / "boot.parquet.enc"
+    boot.write_bytes(blob)
+    record_run_id = "legacy_digest_run_20260922"
+    settings = LiveSettings(record_run_id=record_run_id, unit_bootstrap_path=str(boot), artifact_key=key_b64)
+    now = pd.Timestamp("2026-09-22 00:00Z")
+    manifest_path = tmp_path / "data" / "state" / "runs" / record_run_id / "run_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    current = runner_mod._current_run_manifest(settings, now)
+    legacy = dict(current)
+    legacy["unit_bootstrap_sha256"] = hashlib.sha256(blob).hexdigest()
+    assert legacy["unit_bootstrap_sha256"] != current["unit_bootstrap_sha256"]
+    manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+    runner_mod._assert_run_manifest_compatible(settings)
+    migrated = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert migrated["unit_bootstrap_sha256"] == current["unit_bootstrap_sha256"]
+    other = dict(current)
+    other["unit_bootstrap_sha256"] = hashlib.sha256(b"different").hexdigest()
+    manifest_path.write_text(json.dumps(other), encoding="utf-8")
+    with pytest.raises(DataIntegrityError):
+        runner_mod._assert_run_manifest_compatible(settings)
+
+
+def test_legacy_null_clip_manifest_migrates_once(tmp_path, monkeypatch) -> None:
+    import json
+    import pandas as pd
+    import pytest
+    import src.live.runner as runner_mod
+    import src.live.settings as settings_mod
+    from src.live.settings import LiveSettings
+    from src.common.errors import DataIntegrityError
+
+    monkeypatch.setattr(settings_mod, "DATA_DIR", tmp_path / "data")
+    record_run_id = "legacy_clip_run_20260922"
+    settings = LiveSettings(record_run_id=record_run_id, unit_bootstrap_path=str(tmp_path / "nope.parquet"))
+    now = pd.Timestamp("2026-09-22 00:00Z")
+    manifest_path = tmp_path / "data" / "state" / "runs" / record_run_id / "run_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    current = runner_mod._current_run_manifest(settings, now)
+    legacy = dict(current)
+    legacy["name_clip"] = None
+    manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+    runner_mod._assert_run_manifest_compatible(settings)
+    migrated = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert migrated["name_clip"] == 0.05
+    bad = dict(current)
+    bad["name_clip"] = 0.1
+    manifest_path.write_text(json.dumps(bad), encoding="utf-8")
+    with pytest.raises(DataIntegrityError):
+        runner_mod._assert_run_manifest_compatible(settings)
+
+
+def test_sealed_bootstrap_wrong_key_raises(tmp_path) -> None:
+    import base64
+    import io
+    import pandas as pd
+    import pytest
+    from pydantic import SecretStr
+    import src.live.runner as runner_mod
+    from src.live.crypto import derive_key, seal_bytes
+    from src.live.settings import LiveSettings
+    from src.common.errors import DataIntegrityError
+
+    key_b64 = base64.b64encode(b"2" * 32).decode()
+    wrong_b64 = base64.b64encode(b"3" * 32).decode()
+    frame = pd.DataFrame({"ret": [0.01]}, index=pd.date_range("2026-01-01", periods=1, tz="UTC"))
+    buf = io.BytesIO()
+    frame.to_parquet(buf, index=True)
+    blob = seal_bytes(buf.getvalue(), derive_key(SecretStr(key_b64)))
+    boot = tmp_path / "boot.parquet.enc"
+    boot.write_bytes(blob)
+    settings = LiveSettings(unit_bootstrap_path=str(boot), artifact_key=wrong_b64)
+    with pytest.raises(DataIntegrityError):
+        runner_mod._unit_bootstrap_sha256(settings)

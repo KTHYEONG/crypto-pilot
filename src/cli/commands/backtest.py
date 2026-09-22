@@ -22,7 +22,6 @@ from src.mhs.params import (
     ACCOUNT_UNIT_REFERENCE_CAPITAL,
     DEFAULT_DETAIL_RETENTION_MAX_RUNS,
     DISCOVERY_START,
-    FROZEN_GROWTH_NAME_CLIP,
     PROCESS_EVALUATION_CEILING,
 )
 from src.mhs.resources import MhsMemoryBudget
@@ -157,8 +156,8 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     frozen.add_argument("--end", default=None, help="UTC exclusive evaluation end.")
     frozen.add_argument("--breadth", type=int, default=20, help="Positive universe breadth; 20 is the primary Top-20.")
     frozen.add_argument(
-        "--variant", choices=("primary", "growth"), default="primary",
-        help="Target policy: primary = unlevered consensus book; growth = per-name clip + registered exposure multiplier (Top-20 only).",
+        "--variant", choices=("primary", "growth", "account_unit"), default="primary",
+        help="Target policy: primary = unlevered consensus book; growth = per-name clip + registered exposure multiplier (Top-20 only); account_unit = unlevered clip book the account ledger replays (Top-20 only; reconciliation reference).",
     )
     frozen.add_argument("--output", default=None, help="Fresh complete research result envelope JSON destination; omitted creates a unique frozen run directory under data/backtests/frozen/runs.")
     frozen.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
@@ -347,12 +346,15 @@ def _frozen_strategy(breadth: int, variant: str = "primary") -> FrozenMhsStrateg
     ``primary`` keeps the unlevered consensus book at the requested breadth (20 is the primary
     Top-20, other breadths are labelled controls). ``growth`` is registered only for breadth 20,
     because its exposure rung was derived from that book's own drawdown distribution and does not
-    transfer to other universes.
+    transfer to other universes. ``account_unit`` is the unlevered clip book the account ledger
+    replays (Top-20 only; reconciliation reference).
 
     Raises:
-        SystemExit: ``growth`` is requested with a breadth other than 20, or ``variant`` is unknown.
+        SystemExit: ``growth`` or ``account_unit`` is requested with a breadth other than 20,
+            or ``variant`` is unknown.
     """
     from src.mhs.frozen_research_candidate import (
+        FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2,
         FROZEN_MHS_TOP20_GROWTH_V2,
         FROZEN_MHS_TOP20_V2,
         FROZEN_MHS_TOP40_CONTROL_V2,
@@ -362,6 +364,10 @@ def _frozen_strategy(breadth: int, variant: str = "primary") -> FrozenMhsStrateg
         if breadth != 20:
             raise SystemExit(f"growth variant is registered only for breadth 20, got {breadth!r}")
         return FROZEN_MHS_TOP20_GROWTH_V2
+    if variant == "account_unit":
+        if breadth != 20:
+            raise SystemExit(f"account_unit variant is registered only for breadth 20, got {breadth!r}")
+        return FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
     if variant != "primary":
         raise SystemExit(f"unknown frozen variant {variant!r}")
     if breadth == 20:
@@ -393,6 +399,8 @@ def _frozen_run_name(start: pd.Timestamp, end: pd.Timestamp, breadth: int, creat
     stem = f"{start:%Y%m%d}_{end:%Y%m%d}_top{breadth}"
     if variant == "growth":
         stem = f"{stem}_growth"
+    if variant == "account_unit":
+        stem = f"{stem}_account_unit"
     if execution == "maker":
         stem = f"{stem}_maker"
     return f"{stem}_{created_at:%Y%m%dT%H%M%S}Z"
@@ -741,15 +749,53 @@ def _account_headlines(equity: pd.Series, capital: float) -> tuple[float, float,
     return cagr, float((relative - 1.0).min()), final
 
 
-def _latest_primary_reference(index_path: Path, execution: str = "taker") -> dict[str, Any] | None:
-    """Latest mhs_frozen primary row of the run catalog executed with ``execution`` (rows without an execution field are taker), or None when absent."""
+def _latest_same_book_reference(
+    index_path: Path,
+    *,
+    execution: str,
+    strategy: FrozenMhsStrategySpec,
+    evaluation_start: pd.Timestamp,
+    evaluation_end: pd.Timestamp,
+) -> dict[str, Any] | None:
+    """Latest canonical ``mhs_frozen`` run of the exact book the account ledger replays.
+
+    A reference must share the strategy id, execution mode, evaluation window, name clip and
+    exposure multiplier; the last two live only in the run's ``result.json`` (resolved against
+    the catalog directory), so rows whose result is missing or unreadable are skipped. Returns
+    the catalog row, or None when no run of the same book exists.
+    """
     if not index_path.is_file():
         return None
-    reference = None
+    reference: dict[str, Any] | None = None
     for line in index_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
         record = json.loads(line)
-        if record.get("kind") == "mhs_frozen" and record.get("strategy_id") == "frozen_mhs_top20_v2" and record.get("execution", "taker") == execution:
-            reference = record
+        if record.get("kind") != "mhs_frozen":
+            continue
+        if record.get("strategy_id") != strategy.strategy_id:
+            continue
+        if record.get("execution", "taker") != execution:
+            continue
+        try:
+            row_start = pd.Timestamp(record["evaluation_start"]).tz_convert("UTC")
+            row_end = pd.Timestamp(record["evaluation_end"]).tz_convert("UTC")
+        except (KeyError, ValueError, TypeError):
+            continue
+        if row_start != evaluation_start or row_end != evaluation_end:
+            continue
+        run_dir = record.get("run_dir")
+        if not isinstance(run_dir, str):
+            continue
+        try:
+            payload = json.loads((index_path.parent / run_dir / "result.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if payload.get("name_clip") != strategy.name_clip:
+            continue
+        if payload.get("exposure_multiplier") != strategy.exposure_multiplier:
+            continue
+        reference = {**record, "name_clip": payload.get("name_clip"), "exposure_multiplier": payload.get("exposure_multiplier")}
     return reference
 
 
@@ -824,9 +870,10 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
     from src.mhs.account_ledger import replay_account
     from src.mhs.account_policy import account_growth_policy
     from src.mhs.account_sources import assemble_account_inputs
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
+    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
     from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
     from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, build_frozen_request_candidate
+    from src.mhs.params import ACCOUNT_RECON_CAGR_TOLERANCE, ACCOUNT_RECON_MDD_TOLERANCE
 
     if getattr(args, "source_start", None) is None:
         raise SystemExit("source-start is required")
@@ -864,9 +911,7 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         rules = load_venue_rule_snapshot(venue_path)
     except (DataIntegrityError, FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise SystemExit(f"missing venue snapshot ({exc}); run data collect venue-rules first") from exc
-    strategy = dataclasses.replace(
-        FROZEN_MHS_TOP20_V2, exposure_multiplier=1.0, name_clip=FROZEN_GROWTH_NAME_CLIP,
-    )
+    strategy = FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
     budget = _resolve_budget(args)
     base_spec, stress_spec = _frozen_specs()
     request = FrozenMhsBacktestRequest(
@@ -886,7 +931,7 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
     )
     try:
         candidate, context = build_frozen_request_candidate(request)
-        unit_weights, marks, funding_cum, adv, daily_sigma = assemble_account_inputs(candidate, context)
+        unit_weights, marks, funding_cum, adv, daily_sigma, anchor_times = assemble_account_inputs(candidate, context)
     except (DataIntegrityError, ValueError, OSError) as exc:
         raise SystemExit(f"frozen account failed: {exc}") from exc
     growth_base = account_growth_policy(impact_y=impact_y)
@@ -908,6 +953,7 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         unit_policy = dataclasses.replace(policy, kind="fixed", exposure_max=1.0, impact_y=0.0)
         unit = replay_account(
             unit_weights, marks, funding_cum, adv, daily_sigma, rules, unit_policy,
+            anchor_times=anchor_times,
             capital=ACCOUNT_UNIT_REFERENCE_CAPITAL, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS,
             apply_order_filters=False, **execution_kwargs,
         )
@@ -920,38 +966,88 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
     try:
         result = replay_account(
             unit_weights, marks, funding_cum, adv, daily_sigma, rules, policy,
+            anchor_times=anchor_times,
             capital=capital, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS, apply_order_filters=apply_filters,
             unit_equity=unit.daily_equity, **execution_kwargs,
         )
     except (DataIntegrityError, ValueError) as exc:
         raise SystemExit(f"frozen account failed: {exc}") from exc
     index_path = FROZEN_BACKTESTS_DIR.parent.parent / "index.jsonl"
-    unit_cagr, unit_mdd, _ = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
+    unit_cagr, unit_daily_mdd, _ = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
+    unit_mdd = unit.intraday_max_drawdown
     try:
-        reference = _latest_primary_reference(index_path, execution)
-        reconciliation: dict[str, Any] = {
-            "status": "ok",
-            "fixed_exposure": 1.0,
-            "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
-            "order_filters": False,
-            "impact_y": 0.0,
-            "cagr": unit_cagr,
-            "mdd": unit_mdd,
-            "mdd_convention": "magnitude",
-            "reference_canonical": None if reference is None else {
-                "strategy_id": reference.get("strategy_id"),
-                "run_dir": reference.get("run_dir"),
-                "evaluation_start": reference.get("evaluation_start"),
-                "evaluation_end": reference.get("evaluation_end"),
-                "base_cagr": reference.get("base_cagr"),
-                "base_max_drawdown": reference.get("base_max_drawdown"),
-            },
-            "cagr_gap": None if reference is None or reference.get("base_cagr") is None else unit_cagr - float(reference["base_cagr"]),
-            "mdd_gap": None if reference is None or reference.get("base_max_drawdown") is None else abs(unit_mdd) - abs(float(reference["base_max_drawdown"])),
-        }
+        reference = _latest_same_book_reference(
+            index_path, execution=execution, strategy=strategy,
+            evaluation_start=start, evaluation_end=end,
+        )
+        if reference is None:
+            reconciliation: dict[str, Any] = {
+                "status": "missing_reference",
+                "fixed_exposure": 1.0,
+                "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
+                "order_filters": False,
+                "impact_y": 0.0,
+                "cagr": unit_cagr,
+                "mdd": unit_mdd,
+                "mdd_convention": "magnitude",
+                "mdd_definition": "3m_close_path",
+                "cagr_tolerance": ACCOUNT_RECON_CAGR_TOLERANCE,
+                "mdd_tolerance": ACCOUNT_RECON_MDD_TOLERANCE,
+                "reference_canonical": None,
+                "cagr_gap": None,
+                "mdd_gap": None,
+            }
+            _logger.warning(
+                "[EVAL] mhs-frozen-account reconciliation status=%s cagr_gap=%s mdd_gap=%s",
+                "missing_reference", None, None,
+            )
+        else:
+            base_cagr = reference.get("base_cagr")
+            base_mdd = reference.get("base_max_drawdown")
+            cagr_gap = None if base_cagr is None else unit_cagr - float(base_cagr)
+            mdd_gap = None if base_mdd is None else unit_mdd - abs(float(base_mdd))
+            status = "ok"
+            if (
+                cagr_gap is None or abs(cagr_gap) > ACCOUNT_RECON_CAGR_TOLERANCE
+                or mdd_gap is None or abs(mdd_gap) > ACCOUNT_RECON_MDD_TOLERANCE
+            ):
+                status = "mismatch"
+            reconciliation = {
+                "status": status,
+                "fixed_exposure": 1.0,
+                "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
+                "order_filters": False,
+                "impact_y": 0.0,
+                "cagr": unit_cagr,
+                "mdd": unit_mdd,
+                "mdd_convention": "magnitude",
+                "mdd_definition": "3m_close_path",
+                "cagr_tolerance": ACCOUNT_RECON_CAGR_TOLERANCE,
+                "mdd_tolerance": ACCOUNT_RECON_MDD_TOLERANCE,
+                "reference_canonical": {
+                    "strategy_id": reference.get("strategy_id"),
+                    "run_dir": reference.get("run_dir"),
+                    "evaluation_start": reference.get("evaluation_start"),
+                    "evaluation_end": reference.get("evaluation_end"),
+                    "base_cagr": reference.get("base_cagr"),
+                    "base_max_drawdown": reference.get("base_max_drawdown"),
+                    "name_clip": reference.get("name_clip"),
+                    "exposure_multiplier": reference.get("exposure_multiplier"),
+                },
+                "cagr_gap": cagr_gap,
+                "mdd_gap": mdd_gap,
+            }
+            if status == "mismatch":
+                _logger.warning(
+                    "[EVAL] mhs-frozen-account reconciliation status=%s cagr_gap=%.4f mdd_gap=%.4f",
+                    status,
+                    float(cagr_gap) if cagr_gap is not None else float("nan"),
+                    float(mdd_gap) if mdd_gap is not None else float("nan"),
+                )
     except Exception as exc:  # noqa: BLE001 -- reconciliation is disclosed-only and never fails the run
         reconciliation = {"status": "failed", "error": str(exc)}
-    cagr, mdd, final_equity = _account_headlines(result.daily_equity, capital)
+    cagr, daily_mdd, final_equity = _account_headlines(result.daily_equity, capital)
+    mdd = -result.intraday_max_drawdown
     moment_source = "bayesian_causal_unit_ledger" if policy_name == "growth" else "none"
     exposures = result.daily_exposure.to_numpy(dtype="float64")
     run_dir = _resolve_account_destination(start=start, end=end, policy=policy_name, capital=capital, execution=execution)
@@ -983,6 +1079,7 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         "evaluation_end": end.isoformat(),
         "cagr": cagr,
         "mdd": mdd,
+        "daily_mdd": daily_mdd,
         "final_equity": final_equity,
         "liquidated_at": None if result.liquidated_at is None else result.liquidated_at.isoformat(),
         "mean_exposure": float(exposures.mean()),
@@ -997,10 +1094,12 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         "fallback_ladder_symbols": list(result.fallback_ladder_symbols),
         "missing_filter_symbols": list(result.missing_filter_symbols),
         "moment_source": moment_source,
+        "entry_anchor": "submit_bar",
         "unit_reference": {
             "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
             "cagr": unit_cagr,
-            "mdd": unit_mdd,
+            "mdd": -unit_mdd,
+            "daily_mdd": unit_daily_mdd,
             "maker_fill_fraction": unit.maker_fill_fraction,
         },
         "venue_rules_applied_retroactively": True,
@@ -1024,7 +1123,7 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
             kind="mhs_frozen_account", run_dir=run_dir, created_at=pd.Timestamp.now(tz="UTC"),
             evaluation_start=start, evaluation_end=end,
             strategy_id=strategy.strategy_id,
-            base_cagr=cagr, base_max_drawdown=abs(mdd),
+            base_cagr=cagr, base_max_drawdown=result.intraday_max_drawdown,
             execution=execution,
         )
     _logger.info(

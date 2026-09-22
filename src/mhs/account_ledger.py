@@ -32,6 +32,8 @@ class AccountMarkPanels:
 class AccountLedgerResult:
     """Account-scale replay outcome in USDT; daily series indexed by UTC date.
 
+    intraday_max_drawdown: running-peak drawdown magnitude (>= 0) of the 3m close-marked equity
+        path, the same definition as the canonical ledger's base_max_drawdown; 1.0 after liquidation.
     maker_fill_fraction: share of sent notional filled passively (0.0 under taker execution).
     """
 
@@ -47,6 +49,7 @@ class AccountLedgerResult:
     funding_paid: float
     fallback_ladder_symbols: tuple[str, ...]
     missing_filter_symbols: tuple[str, ...]
+    intraday_max_drawdown: float
     maker_fill_fraction: float = 0.0
 
 
@@ -59,6 +62,7 @@ def replay_account(
     rules: VenueRuleSnapshot,
     policy: ExposurePolicy,
     *,
+    anchor_times: pd.DatetimeIndex,
     capital: float,
     taker_fee_bps: float,
     apply_order_filters: bool = True,
@@ -69,10 +73,10 @@ def replay_account(
 ) -> AccountLedgerResult:
     """Replay a unit-exposure target book as one real USDT account.
 
-    At each daily entry the policy picks exposure from current equity; target quantities are
-    rounded to the symbol's step size, orders below the symbol's minimum notional are not sent
-    (full closes are reduce-only and always sent), fees and square-root impact are charged on
-    sent notional, and funding accrues on held notional. Between entries quantities are fixed
+    At each entry the policy picks exposure from equity marked at the entry's
+    anchor bar close (``anchor_times``: the last close observable at submission, the canonical
+    ``submit_bar`` anchor); orders are sized and priced there, and quantities are held until the
+    next entry's anchor. Between entries quantities are fixed
     and marked on 3m closes; maintenance margin is evaluated on each bar's adverse low/high, and
     the first bar whose adverse equity falls below total maintenance margin liquidates the account
     (equity 0, replay stops).
@@ -83,8 +87,8 @@ def replay_account(
     strictly before d (returns 1..d-1), so today's move never informs today's size.
 
     ``execution="maker"`` replaces the immediate taker fill with the canonical strict passive
-    rule: each order rests at the entry-bar close (the anchor observable at submission) for
-    the next ``passive_window_bars`` 3m bars of the same holding segment; a buy fills at the
+    rule: each order rests at the anchor close for the next ``passive_window_bars``
+    3m bars after the anchor of the same holding segment; a buy fills at the
     anchor only if a finite bar low trades strictly below it (a sell: a high strictly above),
     paying ``maker_fee_bps``; otherwise it crosses at the last finite close of that window
     paying ``taker_fee_bps``. Order sizing, step rounding, minimum-notional skips and
@@ -92,12 +96,18 @@ def replay_account(
     stays a capacity charge on every sent notional regardless of liquidity. Margin and
     liquidation are evaluated on post-trade quantities for the whole segment.
 
+    ``intraday_max_drawdown`` is measured on the 3m close-marked equity path across all
+    segments (running peak from ``capital``), so it is directly comparable with the canonical
+    ledger's drawdown; ``daily_equity`` keeps the post-trade anchor equity per entry label.
+
     Raises:
         DataIntegrityError: Misaligned indexes/columns, non-positive capital, or no entry row.
         DataIntegrityError: growth policy without unit_equity, or unit_equity misaligned
             with unit_weights, non-finite, or non-positive.
         DataIntegrityError: maker execution without maker_fee_bps/passive_window_bars, a
             negative or non-finite maker fee, a maker fee above the taker fee, or passive_window_bars < 1.
+        DataIntegrityError: ``anchor_times`` not aligned 1:1 with ``unit_weights``, not
+            strictly increasing, or containing a bar absent from the mark panels.
     """
     if not np.isfinite(capital) or capital <= 0:
         raise DataIntegrityError(f"capital must be positive, got {capital}")
@@ -163,23 +173,25 @@ def replay_account(
         if step is None or minimum is None:
             missing_filters.append(symbol)
     bar_index = marks.close.index
+    if len(anchor_times) != len(dates):
+        raise DataIntegrityError("anchor_times not aligned 1:1 with unit_weights")
+    anchor_pos = bar_index.get_indexer(anchor_times)
+    if bool((anchor_pos < 0).any()):
+        raise DataIntegrityError("anchor bar absent from the mark panels")
+    if len(anchor_pos) > 1 and bool((anchor_pos[1:] <= anchor_pos[:-1]).any()):
+        raise DataIntegrityError("anchor_times must be strictly increasing")
+    n_bars = len(bar_index)
     # unit_weights carries every symbol EVER held across the full window, but a symbol not yet
     # listed (or already delisted) has no price for the bars outside its life -- forward-fill in
     # _read_held_marks only covers gaps AFTER a symbol's first bar, so leading/trailing NaN marks
     # remain. Weight there is always exactly 0.0 (the PIT roster gates it), but IEEE754 makes
     # 0.0 * NaN = NaN, which would otherwise poison quantities and equity from day 0 onward.
-    # Replacing non-finite marks with a neutral finite placeholder keeps every such symbol's
-    # contribution exactly zero without ever being economically load-bearing.
-    close_values = np.nan_to_num(marks.close[symbols].to_numpy(dtype="float64"), nan=1.0)
-    high_values = np.nan_to_num(marks.high[symbols].to_numpy(dtype="float64"), nan=1.0)
-    low_values = np.nan_to_num(marks.low[symbols].to_numpy(dtype="float64"), nan=1.0)
-    raw_close = marks.close[symbols].to_numpy(dtype="float64")
-    raw_high = marks.high[symbols].to_numpy(dtype="float64")
-    raw_low = marks.low[symbols].to_numpy(dtype="float64")
-    entry_pos = bar_index.searchsorted(dates, side="right") - 1
-    if bool((entry_pos < 0).any()):
-        raise DataIntegrityError("entry date precedes mark panels")
-    entry_close = close_values[entry_pos]
+    # Panels stay float32 (one copy of the three planes); only the current segment or maker
+    # window is converted to float64 with a neutral finite placeholder, so peak additional
+    # memory stays at or below one float32 copy of the three panels.
+    close_f32 = marks.close[symbols].to_numpy(dtype="float32")
+    high_f32 = marks.high[symbols].to_numpy(dtype="float32")
+    low_f32 = marks.low[symbols].to_numpy(dtype="float32")
     weight_values = unit_weights.to_numpy(dtype="float64")
     adv_values = adv.to_numpy(dtype="float64")
     sigma_values = daily_sigma.to_numpy(dtype="float64")
@@ -201,8 +213,11 @@ def replay_account(
     fee_rate = taker_fee_bps / 1e4
     maker_anchor_sent = 0.0
     total_anchor_sent = 0.0
+    running_peak = float(capital)
+    max_drawdown = 0.0
     for day in range(days):
-        price = entry_close[day]
+        anchor = int(anchor_pos[day])
+        price = np.nan_to_num(close_f32[anchor].astype(np.float64), nan=1.0)
         held = quantities * price
         marked = cash + float(held.sum())
         charge = float((held * funding_step[day]).sum())
@@ -251,32 +266,32 @@ def replay_account(
         fill_price = price
         maker_fill = np.zeros(count, dtype=bool)
         if is_maker:
-            window_start = int(entry_pos[day]) + 1
-            window_limit = int(entry_pos[day + 1]) if day + 1 < days else close_values.shape[0]
+            window_start = anchor + 1
+            window_limit = int(anchor_pos[day + 1]) if day + 1 < days else n_bars
             window_end = min(window_start + window_bars, window_limit)
             fill_price = price.copy()
             if window_end > window_start:
-                window_close = raw_close[window_start:window_end]
-                window_low = raw_low[window_start:window_end]
-                window_high = raw_high[window_start:window_end]
-                anchor_raw = raw_close[int(entry_pos[day])]
+                window_close = close_f32[window_start:window_end].astype(np.float64)
+                window_low = low_f32[window_start:window_end].astype(np.float64)
+                window_high = high_f32[window_start:window_end].astype(np.float64)
+                anchor_raw = close_f32[anchor].astype(np.float64)
                 active = np.abs(delta) > 0.0
                 for position in range(count):
                     if not bool(active[position]):
                         continue
-                    anchor = float(anchor_raw[position])
+                    anchor_level = float(anchor_raw[position])
                     closes = window_close[:, position]
                     finite_closes = closes[np.isfinite(closes)]
-                    if not np.isfinite(anchor):
+                    if not np.isfinite(anchor_level):
                         if finite_closes.size > 0:
                             fill_price[position] = float(finite_closes[-1])
                         continue
                     if delta[position] > 0.0:
                         adverse_col = window_low[:, position]
-                        filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col < anchor)))
+                        filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col < anchor_level)))
                     else:
                         adverse_col = window_high[:, position]
-                        filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col > anchor)))
+                        filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col > anchor_level)))
                     if filled:
                         maker_fill[position] = True
                         fill_price[position] = price[position]
@@ -299,10 +314,12 @@ def replay_account(
         quantities = quantities + delta
         daily_equity[day] = cash + float((quantities * price).sum())
         daily_exposure[day] = exposure
-        stop = int(entry_pos[day + 1]) if day + 1 < days else close_values.shape[0]
-        segment = slice(int(entry_pos[day]), stop)
-        adverse = np.where(quantities > 0, low_values[segment], high_values[segment])
-        adverse = np.where(np.isfinite(adverse), adverse, close_values[segment])
+        stop = int(anchor_pos[day + 1]) if day + 1 < days else n_bars
+        seg_close = np.nan_to_num(close_f32[anchor:stop].astype(np.float64), nan=1.0)
+        seg_high = np.nan_to_num(high_f32[anchor:stop].astype(np.float64), nan=1.0)
+        seg_low = np.nan_to_num(low_f32[anchor:stop].astype(np.float64), nan=1.0)
+        adverse = np.where(quantities > 0, seg_low, seg_high)
+        adverse = np.where(np.isfinite(adverse), adverse, seg_close)
         adverse_equity = cash + (quantities[None, :] * adverse).sum(axis=1)
         adverse_notional = np.abs(quantities[None, :] * adverse)
         required = np.zeros(adverse_equity.shape[0])
@@ -312,12 +329,21 @@ def replay_account(
             required += np.maximum(adverse_notional[:, position] * ladder.ratios[tier] - ladder.amounts[tier], 0.0)
         hits = np.flatnonzero(adverse_equity < required)
         if hits.shape[0] > 0:
-            liquidated_at = pd.Timestamp(bar_index[int(entry_pos[day]) + int(hits[0])])
+            liquidated_at = pd.Timestamp(bar_index[anchor + int(hits[0])])
             cash = 0.0
             quantities = np.zeros(count)
             daily_equity[day:] = 0.0
             daily_exposure[day:] = 0.0
+            max_drawdown = 1.0
             break
+        seg_equity = cash + (quantities[None, :] * seg_close).sum(axis=1)
+        peaks = np.maximum(running_peak, np.maximum.accumulate(seg_equity))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            seg_dd = np.where(peaks > 0, 1.0 - seg_equity / peaks, 0.0)
+        seg_dd = np.maximum(seg_dd, 0.0)
+        if seg_dd.size:
+            max_drawdown = max(max_drawdown, float(seg_dd.max()))
+            running_peak = float(peaks[-1])
     untraded = skipped_notional / intended_notional if intended_notional > 0 else 0.0
     maker_fill_fraction = maker_anchor_sent / total_anchor_sent if total_anchor_sent > 0 else 0.0
     return AccountLedgerResult(
@@ -333,5 +359,6 @@ def replay_account(
         funding_paid=funding_paid,
         fallback_ladder_symbols=fallback_symbols,
         missing_filter_symbols=tuple(sorted(missing_filters)),
+        intraday_max_drawdown=float(max_drawdown),
         maker_fill_fraction=float(maker_fill_fraction),
     )

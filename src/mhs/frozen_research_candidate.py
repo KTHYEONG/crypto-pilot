@@ -149,6 +149,25 @@ FROZEN_MHS_TOP20_GROWTH_V2 = FrozenMhsStrategySpec(
     name_clip=FROZEN_GROWTH_NAME_CLIP,
 )
 
+# 계좌 원장이 노출을 정책으로 고르는 무레버리지 클립 북이며, 신호 북은 v2와 같아 라이브 부트스트랩 식별자를 유지한다.
+FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2 = FrozenMhsStrategySpec(
+    strategy_id="frozen_mhs_top20_v2",
+    breadth=20,
+    members=(
+        FrozenFeatureMember(name="flow_imb_168h", sign=1),
+        FrozenFeatureMember(name="flow_imb_720h", sign=1),
+        FrozenFeatureMember(name="xs_mom_336h", sign=1),
+        FrozenFeatureMember(name="xs_idio_mom_336h", sign=1),
+        FrozenFeatureMember(name="mom3_skew_168h", sign=1),
+    ),
+    min_rank_symbols=8,
+    snapshot_hour_utc=22,
+    release_hour_utc=23,
+    entry_hour_utc=0,
+    exposure_multiplier=1.0,
+    name_clip=FROZEN_GROWTH_NAME_CLIP,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class FrozenMhsCandidate:

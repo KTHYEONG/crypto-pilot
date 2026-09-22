@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any, Literal
 
+import pandas as pd
+
 from src.live.audit import AuditLog
 from src.live.errors import LiveTradingError, OrderObsolete, VenueError
 from src.live.filters import _ZERO, SymbolFilters, quantize_to_multiple
@@ -168,6 +170,8 @@ class ExecutionOutcome:
 
     status 는 'FILLED' | 'RESIDUAL' | 'SHADOW' | 'OBSOLETE' 폐쇄집합이다.
     SHADOW 는 억제된 주문, OBSOLETE 는 -2022 로 무의미해진 reduceOnly intent 다.
+    ``fills`` 는 ``(qty, price, fee_bps, reason, liquidity, filled_at)`` 튜플들이며,
+    ``filled_at`` 은 체결이 확인된 폴/응답 시점의 UTC wall-clock 이지 결정일 라벨이 아니다.
     """
 
     symbol: str
@@ -177,7 +181,7 @@ class ExecutionOutcome:
     chases: int
     status: str
     latency_seconds: float | None = None
-    fills: tuple[tuple[Decimal, Decimal, float, str, str], ...] = ()
+    fills: tuple[tuple[Decimal, Decimal, float, str, str, pd.Timestamp], ...] = ()
     maker_qty: Decimal = _ZERO
     taker_qty: Decimal = _ZERO
 
@@ -312,10 +316,17 @@ def _band(intent: OrderIntent, policy: PassiveExecutionPolicy) -> tuple[Decimal,
     return intent.decision_price - half_band, intent.decision_price + half_band
 
 
-def _risk_rail(intent: OrderIntent, policy: PassiveExecutionPolicy) -> tuple[Decimal, Decimal]:
-    """IOC 리스크 레일: decision_price ± max_cross_bps."""
-    half_rail = intent.decision_price * Decimal(str(policy.max_cross_bps)) / _BPS_DENOMINATOR
-    return intent.decision_price - half_rail, intent.decision_price + half_rail
+def _risk_rail(bid: Decimal, ask: Decimal, policy: PassiveExecutionPolicy) -> tuple[Decimal, Decimal]:
+    """IOC anomaly rail: the current book mid ± ``max_cross_bps``.
+
+    Centred on the book observed at IOC time, not on the submit-time decision price, so a
+    genuine trend during the passive window is still crossed (the replay ledger crosses at the
+    window's last close); only a far touch implausibly far from its own mid -- a spread
+    blow-out or broken quote -- is refused.
+    """
+    mid = (bid + ask) / Decimal(2)
+    half_rail = mid * Decimal(str(policy.max_cross_bps)) / _BPS_DENOMINATOR
+    return mid - half_rail, mid + half_rail
 
 
 def _gtx_candidate(
@@ -398,6 +409,8 @@ def _cancel_and_settle(
     audit: AuditLog,
     reason: str,
     touch: tuple[Decimal, Decimal] | None = None,
+    *,
+    now: float,
 ) -> None:
     """취소 직후 동일 주문을 재조회해 취소 시점 부분체결을 정산한다(-2011 benign).
 
@@ -434,7 +447,7 @@ def _cancel_and_settle(
         except Exception:
             avg_price = None
     # fee schedule from active runtime? use default if not tracked
-    _record_fill(rt, executed, avg_price=avg_price, audit=audit, touch=touch)
+    _record_fill(rt, executed, now=now, avg_price=avg_price, audit=audit, touch=touch)
     rt.active_id = None
     rt.active_post_qty = _ZERO
 
@@ -464,10 +477,16 @@ def _emit_fill_event(
     audit.record("fill", **fields)
 
 
+def _fill_time(now: float) -> pd.Timestamp:
+    """UTC wall-clock confirmation stamp for one fill tuple entry."""
+    return pd.Timestamp(now, unit="s", tz="UTC")
+
+
 def _record_fill(
     rt: _IntentRuntime,
     executed: Decimal,
     *,
+    now: float,
     avg_price: Decimal | None = None,
     fee_schedule: FeeSchedule | None = None,
     audit: AuditLog | None = None,
@@ -491,7 +510,7 @@ def _record_fill(
     liquidity = "maker" if rt.phase == "passive" else "taker"
     fee_bps = fee_schedule.bps_for(liquidity) if fee_schedule is not None else (2.0 if liquidity == "maker" else 5.0)  # noqa: SIM108
     reason = "maker_fill" if liquidity == "maker" else "timeout_taker"
-    rt.fills.append((delta_fill, price, fee_bps, reason, liquidity))
+    rt.fills.append((delta_fill, price, fee_bps, reason, liquidity, _fill_time(now)))
     if audit is not None:
         # Live venue query path only (paper fills are simulated by the caller).
         _emit_fill_event(audit, rt, delta_fill, price, liquidity, False, touch)
@@ -544,7 +563,7 @@ class _IntentRuntime:
     # 시뮬레이터가 이미 반영한 체결로 정산한다.
     paper_active: bool = False
     active_post_qty: Decimal = _ZERO
-    fills: list[tuple[Decimal, Decimal, float, str, str]] = field(default_factory=list)
+    fills: list[tuple[Decimal, Decimal, float, str, str, pd.Timestamp]] = field(default_factory=list)
     # 패시브 단계 진입 시각(phase-level 타임아웃 기준). 첫 _poll_or_post 호출에 기록되며
     # 재게시 때마다 갱신되는 posted_at 과 달리 리포스트로 리셋되지 않는다.
     passive_started_at: float = 0.0
@@ -576,8 +595,8 @@ class _IntentRuntime:
         # Guard against spurious negative due to clock skew (contract I-LATENCY-NONNEGATIVE).
         if latency is not None and latency < 0.0:
             latency = 0.0
-        maker_qty = sum((qty for qty, _, _, _, liq in self.fills if liq == "maker"), _ZERO)
-        taker_qty = sum((qty for qty, _, _, _, liq in self.fills if liq == "taker"), _ZERO)
+        maker_qty = sum((qty for qty, _, _, _, liq, _ in self.fills if liq == "maker"), _ZERO)
+        taker_qty = sum((qty for qty, _, _, _, liq, _ in self.fills if liq == "taker"), _ZERO)
         # If no fills recorded but filled_total>0 (fallback via paper path), assume maker for residual compatibility
         # but maker_qty/taker_qty already zero; downstream cashflow will fallback.
         return ExecutionOutcome(
@@ -692,6 +711,8 @@ def simulate_immediate_taker_fills(
     intents: Sequence[OrderIntent],
     books: Mapping[str, tuple[Decimal, Decimal]],
     policy: PassiveExecutionPolicy,
+    *,
+    now: float = 0.0,
 ) -> tuple[ExecutionOutcome, ...]:
     fee_bps = policy.fee_schedule.taker_fee_bps + policy.taker_slippage_bps
     outcomes: list[ExecutionOutcome] = []
@@ -715,7 +736,7 @@ def simulate_immediate_taker_fills(
             continue
         bid, ask = touch
         mid = (bid + ask) / Decimal(2)
-        fills = ((intent.quantity, mid, fee_bps, "immediate_taker", "taker"),)
+        fills = ((intent.quantity, mid, fee_bps, "immediate_taker", "taker", _fill_time(now)),)
         outcomes.append(
             ExecutionOutcome(
                 symbol=intent.symbol,
@@ -759,7 +780,7 @@ def execute_intents(
                 outcome_sink[:] = []
             return ()
         books = _fetch_books(client, sorted({i.symbol for i in intents}))
-        outcomes = simulate_immediate_taker_fills(intents, books, policy)
+        outcomes = simulate_immediate_taker_fills(intents, books, policy, now=clock())
         if outcome_sink is not None:
             outcome_sink[:] = list(outcomes)
         for it, oc in zip(intents, outcomes, strict=False):
@@ -945,7 +966,7 @@ def _poll_or_post(
     own_touch = bid if is_buy else ask
     opposite_touch = ask if is_buy else bid
     band_low, band_high = _band(rt.intent, policy)
-    rail_low, rail_high = _risk_rail(rt.intent, policy)
+    rail_low, rail_high = _risk_rail(bid, ask, policy)
 
     # 0) 미확인 제출: 조회로 해소될 때까지 재게시 금지.
     if rt.unresolved_id is not None and not _resolve_unknown_submission(client, rt, now, audit):
@@ -968,7 +989,7 @@ def _poll_or_post(
                         rt.filled_total += resting_fill
                         rt.fill_notional += resting_fill * rt.active_price
                         rt.reported_executed = rt.filled_total
-                        rt.fills.append((resting_fill, rt.active_price, fee_bps, "maker_fill", "maker"))
+                        rt.fills.append((resting_fill, rt.active_price, fee_bps, "maker_fill", "maker", _fill_time(now)))
                         _emit_fill_event(audit, rt, resting_fill, rt.active_price, "maker", True, touch)
                         executed = rt.reported_executed
         else:
@@ -983,7 +1004,7 @@ def _poll_or_post(
                         avg_price = None
                 except Exception:
                     avg_price = None
-            _record_fill(rt, executed, avg_price=avg_price, fee_schedule=policy.fee_schedule, audit=audit, touch=touch)
+            _record_fill(rt, executed, now=now, avg_price=avg_price, fee_schedule=policy.fee_schedule, audit=audit, touch=touch)
             if avg_raw is None or str(avg_raw) in ("", "0", "0.0", "0.00"):
                 # ensure fill recorded with fallback price even if avgPrice missing
                 pass
@@ -998,19 +1019,19 @@ def _poll_or_post(
             moved = abs(own_touch - rt.active_price) >= rt.filters.tick_size * policy.chase_ticks
             slice_done = rt.active_post_qty > _ZERO and rt.reported_executed >= rt.active_post_qty and (rt.intent.quantity - rt.filled_total) > _ZERO
             if timed_out:
-                _cancel_and_settle(client, rt, audit, "passive_timeout", touch)
+                _cancel_and_settle(client, rt, audit, "passive_timeout", touch, now=now)
                 rt.phase = "ioc"
             elif slice_done:
-                _cancel_and_settle(client, rt, audit, "slice_done", touch)
+                _cancel_and_settle(client, rt, audit, "slice_done", touch, now=now)
             elif exhausted:
                 return
             elif moved and policy.passive_pricing != "anchored":
-                _cancel_and_settle(client, rt, audit, "chase", touch)
+                _cancel_and_settle(client, rt, audit, "chase", touch, now=now)
                 rt.chases += 1
             else:
                 return
         else:
-            _cancel_and_settle(client, rt, audit, "ioc_expired", touch)
+            _cancel_and_settle(client, rt, audit, "ioc_expired", touch, now=now)
 
     # 2) 게시: 패시브(GTX, 밴드 내) 또는 백스톱(IOC, 캡+밴드 클램프).
     remaining = rt.intent.quantity - rt.filled_total
@@ -1124,7 +1145,7 @@ def _poll_or_post(
             rt.filled_total += executed_qty
             rt.fill_notional += executed_qty * price
             rt.reported_executed = rt.filled_total
-            rt.fills.append((executed_qty, price, fee_bps, reason, liquidity))
+            rt.fills.append((executed_qty, price, fee_bps, reason, liquidity, _fill_time(now)))
             _emit_fill_event(audit, rt, executed_qty, price, liquidity, True, touch, order_id)
             rt.active_price = prev_active_price
             if rt.intent.quantity - rt.filled_total <= _ZERO:
@@ -1207,7 +1228,7 @@ def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog, 
                             avg_price = None
                     except Exception:
                         avg_price = None
-                _record_fill(rt, executed, avg_price=avg_price, audit=audit)
+                _record_fill(rt, executed, now=now, avg_price=avg_price, audit=audit)
             rt.active_id = None
             rt.active_post_qty = _ZERO
             rt.paper_active = False

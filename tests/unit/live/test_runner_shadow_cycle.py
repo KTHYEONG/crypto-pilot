@@ -450,7 +450,7 @@ def test_SCENARIO_PARITY_09_runner_wiring_and_failsoft(tmp_path, monkeypatch):
     def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         outcomes=[]
         for intent in intents:
-            outcomes.append(ExecutionOutcome(symbol=intent.symbol, filled_qty=Decimal("0.5"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((Decimal("0.5"), Decimal("100"), 2.0, "maker_fill", "maker"),), maker_qty=Decimal("0.5"), taker_qty=Decimal("0")))  # noqa: PERF401
+            outcomes.append(ExecutionOutcome(symbol=intent.symbol, filled_qty=Decimal("0.5"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((Decimal("0.5"), Decimal("100"), 2.0, "maker_fill", "maker", pd.Timestamp("2026-01-01 00:00Z")),), maker_qty=Decimal("0.5"), taker_qty=Decimal("0")))  # noqa: PERF401
         return tuple(outcomes)
     monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
 
@@ -532,7 +532,7 @@ def test_SCENARIO_REC_10_runner_failsoft_collect(tmp_path, monkeypatch):
     def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         from src.live.executor import ExecutionOutcome
 
-        return tuple(ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((Decimal("0.5"), Decimal("100"), 2.0, "maker_fill", "maker"),)) for i in intents)
+        return tuple(ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((Decimal("0.5"), Decimal("100"), 2.0, "maker_fill", "maker", pd.Timestamp("2026-01-01 00:00Z")),)) for i in intents)
 
     monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
     # monkeypatch microstructure and tax to fail
@@ -1745,3 +1745,77 @@ def test_run_shadow_cycle_unexpected_error_stops_recorder(tmp_path, monkeypatch)
     with pytest.raises(RuntimeError, match="unexpected"):
         run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
     assert _StubDepthRecorder.instances[0].stops == [0.0]
+
+
+def test_fill_events_record_real_time(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    from decimal import Decimal
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import LiveSettings
+    import src.live.runner as runner_mod
+    from src.live.executor import ExecutionOutcome
+
+    decision_time = pd.Timestamp("2026-01-01 00:00Z")
+    filled_at = pd.Timestamp("2026-01-01 23:07:12", tz="UTC")
+    frame = pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time]))
+    artifact = tmp_path / "deployed_target_weights.parquet"
+    frame.to_parquet(artifact, index=True)
+    _seed_close_artifact(artifact)
+
+    class MarketClient:
+        def exchange_info(self):
+            return {
+                "symbols": [{
+                    "symbol": "AAAUSDT",
+                    "contractType": "PERPETUAL",
+                    "quoteAsset": "USDT",
+                    "status": "TRADING",
+                    "quantityPrecision": 3,
+                    "pricePrecision": 2,
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100000"},
+                        {"filterType": "MIN_NOTIONAL", "minNotional": "1"},
+                    ],
+                }],
+                "rateLimits": [
+                    {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
+                    {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
+                    {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300},
+                ],
+            }
+        def book_ticker(self, s):
+            return {"bidPrice": "100.00", "askPrice": "101.00"}
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "101.00"}}
+    class OrderClient:
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v2/account":
+                return {"totalWalletBalance": "2000", "availableBalance": "1900", "totalInitialMargin": "10", "totalUnrealizedProfit": "0", "dualSidePosition": "false", "multiAssetsMargin": "false"}
+            if path == "/fapi/v2/positionRisk":
+                return []
+            raise AssertionError(path)
+        def sync_server_time(self):
+            return None
+        def open_orders(self):
+            return []
+    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClient())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        return tuple(
+            ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((i.quantity, Decimal("100"), 2.0, "maker_fill", "maker", filled_at),))
+            for i in intents
+        )
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+
+    fills_dir = tmp_path / "fills"
+    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"), fills_dir=str(fills_dir))
+    report = run_shadow_cycle(settings, decision_time, artifact, now=decision_time + pd.Timedelta(hours=2))
+    assert report.status == "COMPLETE"
+    from src.live.fills import load_fills
+    df = load_fills(fills_dir)
+    assert len(df) == 1
+    assert pd.Timestamp(df["timestamp"].iloc[0]).tz_convert("UTC") == filled_at
+    assert pd.Timestamp(df["decision_time"].iloc[0]).tz_convert("UTC") == decision_time
