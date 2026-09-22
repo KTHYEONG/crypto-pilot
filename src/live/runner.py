@@ -38,6 +38,7 @@ from src.live.account import (
     settled_delisting_symbols,
     synthetic_flat_snapshot,
 )
+from src.common.paths import LIVE_CAPTURE_DIR
 from src.live.audit import AuditLog, default_audit_log_path
 from src.live.alerting import post_alert, send_email_alert
 from src.live.errors import CausalityViolation, LiveTradingError, RiskGateBreach, StaleSignalError
@@ -46,6 +47,7 @@ from src.live.execution_quality import (
     build_execution_quality_records,
     default_execution_quality_dir,
 )
+from src.live.depth_capture import DepthCaptureSummary, ExecutionDepthRecorder
 from src.live.executor import (
     ExecutionOutcome,
     PassiveExecutionPolicy,
@@ -82,7 +84,7 @@ from src.live.portfolio_state import (
     resolve_effective_equity,
 )
 from src.live.rest import BinanceFuturesRestClient, parse_rate_limits
-from src.live.settings import LiveSettings
+from src.live.settings import ExecutionMode, LiveSettings
 from src.live.signal import assert_signal_available, assert_signal_fresh, latest_decision_ohlcv_close, latest_target_weights
 from src.live.sizing import target_quantities
 from src.mhs.params import REFERENCE_PASS_EQUITY_FLOOR
@@ -448,6 +450,8 @@ def run_shadow_cycle(
     """게이트 순서: 인과성/스테일 -> 거래소 메타 -> 계좌 -> 고아 정리 -> 재조정 ->
     에쿼티/드로다운 -> 신호 -> 목표수량 -> 계획 -> 리스크 게이트 -> 집행 -> 원장 영속."""
     now_ts = now if now is not None else pd.Timestamp.now(tz="UTC")
+    # 사이클이 어느 지점에서 끝나든 호가 캡처 스레드를 즉시 멈춰 저장한다(세션 상한까지 방치 금지).
+    depth_recorders: list[ExecutionDepthRecorder] = []
     try:
         _assert_run_manifest_compatible(settings)
         ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
@@ -464,7 +468,11 @@ def run_shadow_cycle(
         )
         # wiring: weights = latest_target_weights(weights_path, decision_time, artifact_key=settings.artifact_key, max_staleness=pd.Timedelta(hours=settings.max_weights_staleness_hours)); effective_dt = pd.Timestamp(weights.name); assert_signal_available(effective_dt, now_ts)
 
-        audit = AuditLog(default_audit_log_path("shadow_cycle", for_date=decision_time))
+        run_root = settings.run_root()
+        audit = AuditLog(
+            default_audit_log_path("shadow_cycle", for_date=decision_time),
+            mirror_path=(run_root / "audit" / f"{decision_time:%Y-%m-%d}.jsonl") if run_root is not None else None,
+        )
         run_id = decision_time.strftime("%Y%m%d")
         audit.context.update(run_id=run_id, mode=settings.mode.value)
 
@@ -612,63 +620,43 @@ def run_shadow_cycle(
                 audit=audit,
             )
             kept = reject_intents_over_notional_cap(kept, brackets, leverages, audit)
-        try:
-            from src.live.orderbook import append_order_book_snapshots, capture_order_books, default_orderbook_dir  # noqa: PLC0415
+        def _stop_depth(post_window_s: float) -> DepthCaptureSummary | None:
+            """Stop the execution-depth recorder exactly once; None when never started."""
+            if not depth_recorders:
+                return None
+            return depth_recorders.pop().stop(post_window_s=post_window_s, shutdown=shutdown)
 
-            if settings.orderbook_capture_enabled:
-                orderbook_dir = Path(settings.orderbook_capture_dir) if settings.orderbook_capture_dir else default_orderbook_dir()
-                pretrade_syms = [
-                    i.symbol
-                    for i in sorted(kept, key=lambda x: abs(x.quantity * marks.get(x.symbol, Decimal(0))), reverse=True)
-                ][: settings.orderbook_capture_pretrade_max_symbols]
-                if pretrade_syms:
-                    pre_snaps = capture_order_books(
-                        market_client,
-                        pretrade_syms,
-                        decision_time,
-                        mode=settings.mode.value,
-                        duration_s=0.0,
-                        interval_s=settings.orderbook_capture_interval_s,
-                        depth_limit=settings.orderbook_capture_depth_limit,
-                        max_symbols=settings.orderbook_capture_pretrade_max_symbols,
-                        clock=_clock,
-                        sleep_fn=time.sleep,
-                        now_fn=lambda: pd.Timestamp.now(tz="UTC"),
-                        shutdown=shutdown,
-                        phase="pre_trade",
-                    )
-                    append_order_book_snapshots(pre_snaps, orderbook_dir)
-                untraded_syms = sorted(set(wanted_symbols) - {i.symbol for i in kept})[
-                    : settings.orderbook_capture_baseline_max_symbols
-                ]
-                if untraded_syms:
-                    baseline_snaps = capture_order_books(
-                        market_client,
-                        untraded_syms,
-                        decision_time,
-                        mode=settings.mode.value,
-                        duration_s=0.0,
-                        interval_s=settings.orderbook_capture_interval_s,
-                        depth_limit=settings.orderbook_capture_depth_limit,
-                        max_symbols=settings.orderbook_capture_baseline_max_symbols,
-                        clock=_clock,
-                        sleep_fn=time.sleep,
-                        now_fn=lambda: pd.Timestamp.now(tz="UTC"),
-                        shutdown=shutdown,
-                        phase="baseline_untraded",
-                    )
-                    append_order_book_snapshots(baseline_snaps, orderbook_dir)
-        except Exception as exc:  # noqa: BLE001
-            with contextlib.suppress(Exception):
-                audit.record("pretrade_orderbook_capture_failed", error=str(exc))
-            logger.warning("[SYS] pretrade/baseline orderbook capture failed error=%s", exc)
+        if settings.mode is ExecutionMode.LIVE_TESTNET:
+            audit.record("exec_depth_skipped", reason="testnet")
+        elif not settings.exec_depth_capture_enabled:
+            audit.record("exec_depth_skipped", reason="disabled")
+        elif not kept:
+            audit.record("exec_depth_skipped", reason="empty")
+        else:
+            capture_syms = [
+                i.symbol
+                for i in sorted(kept, key=lambda x: abs(x.quantity * marks.get(x.symbol, Decimal(0))), reverse=True)
+            ][: settings.exec_depth_max_symbols]
+            depth_recorder = ExecutionDepthRecorder(
+                capture_syms,
+                decision_time=decision_time,
+                run_id=run_id,
+                mode=settings.mode.value,
+                root=LIVE_CAPTURE_DIR,
+                stream_url=settings.exec_depth_stream_url,
+                levels=settings.exec_depth_levels,
+                update_ms=settings.exec_depth_update_ms,
+                flush_interval_s=settings.exec_depth_flush_interval_s,
+                max_session_s=settings.exec_depth_max_session_s,
+            )
+            depth_recorders.append(depth_recorder)
+            depth_recorder.start()
 
         for sym, reason in _uncovered_positions(current_positions, targets, filters, marks, kept):
             with contextlib.suppress(Exception):
                 audit.record("position_uncovered", symbol=sym, reason=reason)
 
         from src.live.executor import FeeSchedule, backtest_parity_execution_policy, strict_passive_execution_policy  # noqa: PLC0415
-        from src.live.settings import ExecutionMode  # noqa: PLC0415
 
         fee_schedule = FeeSchedule(maker_fee_bps=settings.maker_fee_bps, taker_fee_bps=settings.taker_fee_bps)
         if settings.execution_policy == "strict_passive":
@@ -787,36 +775,13 @@ def run_shadow_cycle(
                 )
                 portfolio_dir = Path(settings.portfolio_state_dir) if settings.portfolio_state_dir else default_portfolio_state_dir()
                 append_portfolio_state(portfolio_record, portfolio_dir)
-                # orderbook capture (fail-soft)
-                try:
-                    from src.live.orderbook import append_order_book_snapshots, capture_order_books, default_orderbook_dir  # noqa: PLC0415
-
-                    if settings.orderbook_capture_enabled and kept:
-                        orderbook_dir = Path(settings.orderbook_capture_dir) if settings.orderbook_capture_dir else default_orderbook_dir()
-                        capture_syms = [i.symbol for i in sorted(kept, key=lambda x: abs(x.quantity * marks.get(x.symbol, Decimal(0))), reverse=True)]
-                        snaps = capture_order_books(
-                            market_client,
-                            capture_syms,
-                            decision_time,
-                            mode=settings.mode.value,
-                            duration_s=settings.orderbook_capture_duration_s,
-                            interval_s=settings.orderbook_capture_interval_s,
-                            depth_limit=settings.orderbook_capture_depth_limit,
-                            max_symbols=settings.orderbook_capture_max_symbols,
-                            clock=_clock,
-                            sleep_fn=time.sleep,
-                            now_fn=lambda: pd.Timestamp.now(tz="UTC"),
-                            shutdown=shutdown,
-                        )
-                        append_order_book_snapshots(snaps, orderbook_dir)
-                except Exception as exc:  # noqa: BLE001
-                    with contextlib.suppress(Exception):
-                        audit.record("orderbook_capture_failed", error=str(exc))
-                    logger.warning("[SYS] orderbook capture failed error=%s", exc)
             except Exception as exc:  # noqa: BLE001 - observability-only, never halts cycle
                 with contextlib.suppress(Exception):
                     audit.record("portfolio_state_write_failed", error=str(exc))
                 logger.warning("[SYS] portfolio_state write failed error=%s", exc)
+            depth_summary = _stop_depth(settings.exec_depth_post_window_s)
+            if depth_summary is not None:
+                audit.record("exec_depth_capture", **dataclasses.asdict(depth_summary))
             # tax ledger — fail-soft, never halts cycle (uses append_tax_records(tax_records, tax_dir))
             try:
                 tax_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
@@ -948,6 +913,9 @@ def run_shadow_cycle(
             decision_time=decision_time,
             intent_count=0,
         )
+    finally:
+        while depth_recorders:
+            depth_recorders.pop().stop(post_window_s=0.0)
 
 
 def _uncovered_positions(

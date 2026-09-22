@@ -392,14 +392,30 @@ def _cancel_tolerating_benign(client: Any, symbol: str, client_order_id: str) ->
             raise
 
 
-def _cancel_and_settle(client: Any, rt: _IntentRuntime) -> None:
+def _cancel_and_settle(
+    client: Any,
+    rt: _IntentRuntime,
+    audit: AuditLog,
+    reason: str,
+    touch: tuple[Decimal, Decimal] | None = None,
+) -> None:
     """취소 직후 동일 주문을 재조회해 취소 시점 부분체결을 정산한다(-2011 benign).
 
     cancel 응답의 체결량을 폐기하면 그 사이 체결이 filled_total 에 누락되고
     다음 사이클 정합성 검증에서 HALT 로 이어진다. PAPER 의 가상 주문은 조회할
     실체가 없고 시뮬레이터가 체결을 이미 반영했으므로 로컬로만 해소한다.
+    취소 결정은 감사 추적에 ``order_cancelled`` 로 남는다.
     """
     assert rt.active_id is not None
+    fields: dict[str, Any] = {
+        "symbol": rt.intent.symbol,
+        "client_order_id": rt.active_id,
+        "reason": reason,
+    }
+    if touch is not None:
+        fields["bid"] = str(touch[0])
+        fields["ask"] = str(touch[1])
+    audit.record("order_cancelled", **fields)
     if rt.paper_active:
         rt.paper_active = False
         rt.active_id = None
@@ -418,12 +434,45 @@ def _cancel_and_settle(client: Any, rt: _IntentRuntime) -> None:
         except Exception:
             avg_price = None
     # fee schedule from active runtime? use default if not tracked
-    _record_fill(rt, executed, avg_price=avg_price)
+    _record_fill(rt, executed, avg_price=avg_price, audit=audit, touch=touch)
     rt.active_id = None
     rt.active_post_qty = _ZERO
 
 
-def _record_fill(rt: _IntentRuntime, executed: Decimal, *, avg_price: Decimal | None = None, fee_schedule: FeeSchedule | None = None) -> None:
+def _emit_fill_event(
+    audit: AuditLog,
+    rt: _IntentRuntime,
+    qty: Decimal,
+    price: Decimal,
+    liquidity: str,
+    simulated: bool,
+    touch: tuple[Decimal, Decimal] | None,
+    client_order_id: str | None = None,
+) -> None:
+    """Per-fill audit evidence; sums reconcile exactly with the outcome ledger."""
+    fields: dict[str, Any] = {
+        "symbol": rt.intent.symbol,
+        "client_order_id": client_order_id if client_order_id is not None else rt.active_id,
+        "qty": str(qty),
+        "price": str(price),
+        "liquidity": liquidity,
+        "simulated": simulated,
+    }
+    if touch is not None:
+        fields["bid"] = str(touch[0])
+        fields["ask"] = str(touch[1])
+    audit.record("fill", **fields)
+
+
+def _record_fill(
+    rt: _IntentRuntime,
+    executed: Decimal,
+    *,
+    avg_price: Decimal | None = None,
+    fee_schedule: FeeSchedule | None = None,
+    audit: AuditLog | None = None,
+    touch: tuple[Decimal, Decimal] | None = None,
+) -> None:
     delta_fill = executed - rt.reported_executed
     if delta_fill <= _ZERO:
         # even if no delta, update reported to executed for tracking
@@ -443,6 +492,9 @@ def _record_fill(rt: _IntentRuntime, executed: Decimal, *, avg_price: Decimal | 
     fee_bps = fee_schedule.bps_for(liquidity) if fee_schedule is not None else (2.0 if liquidity == "maker" else 5.0)  # noqa: SIM108
     reason = "maker_fill" if liquidity == "maker" else "timeout_taker"
     rt.fills.append((delta_fill, price, fee_bps, reason, liquidity))
+    if audit is not None:
+        # Live venue query path only (paper fills are simulated by the caller).
+        _emit_fill_event(audit, rt, delta_fill, price, liquidity, False, touch)
     if rt.journal is not None and rt.active_id is not None:
         rt.journal.record_observed(rt.active_id, executed)
 
@@ -917,6 +969,7 @@ def _poll_or_post(
                         rt.fill_notional += resting_fill * rt.active_price
                         rt.reported_executed = rt.filled_total
                         rt.fills.append((resting_fill, rt.active_price, fee_bps, "maker_fill", "maker"))
+                        _emit_fill_event(audit, rt, resting_fill, rt.active_price, "maker", True, touch)
                         executed = rt.reported_executed
         else:
             payload = client.query_order(rt.intent.symbol, rt.active_id)
@@ -930,7 +983,7 @@ def _poll_or_post(
                         avg_price = None
                 except Exception:
                     avg_price = None
-            _record_fill(rt, executed, avg_price=avg_price, fee_schedule=policy.fee_schedule)
+            _record_fill(rt, executed, avg_price=avg_price, fee_schedule=policy.fee_schedule, audit=audit, touch=touch)
             if avg_raw is None or str(avg_raw) in ("", "0", "0.0", "0.00"):
                 # ensure fill recorded with fallback price even if avgPrice missing
                 pass
@@ -945,19 +998,19 @@ def _poll_or_post(
             moved = abs(own_touch - rt.active_price) >= rt.filters.tick_size * policy.chase_ticks
             slice_done = rt.active_post_qty > _ZERO and rt.reported_executed >= rt.active_post_qty and (rt.intent.quantity - rt.filled_total) > _ZERO
             if timed_out:
-                _cancel_and_settle(client, rt)
+                _cancel_and_settle(client, rt, audit, "passive_timeout", touch)
                 rt.phase = "ioc"
             elif slice_done:
-                _cancel_and_settle(client, rt)
+                _cancel_and_settle(client, rt, audit, "slice_done", touch)
             elif exhausted:
                 return
             elif moved and policy.passive_pricing != "anchored":
-                _cancel_and_settle(client, rt)
+                _cancel_and_settle(client, rt, audit, "chase", touch)
                 rt.chases += 1
             else:
                 return
         else:
-            _cancel_and_settle(client, rt)
+            _cancel_and_settle(client, rt, audit, "ioc_expired", touch)
 
     # 2) 게시: 패시브(GTX, 밴드 내) 또는 백스톱(IOC, 캡+밴드 클램프).
     remaining = rt.intent.quantity - rt.filled_total
@@ -1072,6 +1125,7 @@ def _poll_or_post(
             rt.fill_notional += executed_qty * price
             rt.reported_executed = rt.filled_total
             rt.fills.append((executed_qty, price, fee_bps, reason, liquidity))
+            _emit_fill_event(audit, rt, executed_qty, price, liquidity, True, touch, order_id)
             rt.active_price = prev_active_price
             if rt.intent.quantity - rt.filled_total <= _ZERO:
                 rt.terminal_status = "FILLED"
@@ -1096,7 +1150,7 @@ def _poll_or_post(
         # For paper, reported_executed should reflect per-order executed already counted
         # Keep it as filled_total for slice tracking; active_post_qty tracks slice
         rt.posted_at = now
-        audit.record("order_posted", symbol=rt.intent.symbol, client_order_id=order_id, time_in_force=time_in_force, price=str(price), quantity=str(post_qty), simulated=True)
+        audit.record("order_posted", symbol=rt.intent.symbol, client_order_id=order_id, time_in_force=time_in_force, price=str(price), quantity=str(post_qty), simulated=True, bid=str(bid), ask=str(ask), phase="passive" if time_in_force == "GTX" else "ioc")
         return
     rt.active_id = order_id
     rt.active_price = price
@@ -1112,6 +1166,9 @@ def _poll_or_post(
         time_in_force=time_in_force,
         price=str(price),
         quantity=str(post_qty),
+        bid=str(bid),
+        ask=str(ask),
+        phase="passive" if time_in_force == "GTX" else "ioc",
     )
 
 
@@ -1133,6 +1190,12 @@ def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog, 
         if rt.active_id is not None:
             if not rt.paper_active:
                 _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
+                audit.record(
+                    "order_cancelled",
+                    symbol=rt.intent.symbol,
+                    client_order_id=rt.active_id,
+                    reason="window_end",
+                )
                 payload = client.query_order(rt.intent.symbol, rt.active_id)
                 executed = Decimal(str(payload.get("executedQty", "0")))
                 avg_raw = payload.get("avgPrice") if "avgPrice" in payload else payload.get("avg_price")
@@ -1144,7 +1207,7 @@ def _finalize(client: Any, runtimes: Sequence[_IntentRuntime], audit: AuditLog, 
                             avg_price = None
                     except Exception:
                         avg_price = None
-                _record_fill(rt, executed, avg_price=avg_price)
+                _record_fill(rt, executed, avg_price=avg_price, audit=audit)
             rt.active_id = None
             rt.active_post_qty = _ZERO
             rt.paper_active = False

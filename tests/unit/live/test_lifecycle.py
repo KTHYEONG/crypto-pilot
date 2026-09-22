@@ -50,8 +50,8 @@ def test_docker_compose_mhs_live_stop_grace_period_covers_stage_boundary() -> No
     from pathlib import Path
 
     text = Path("docker-compose.yml").read_text(encoding="utf-8")
-    mhs_block = text.split("  mhs-live:", 1)[1].split("  liquidation-collector:", 1)[0]
-    liq_block = text.split("  liquidation-collector:", 1)[1]
+    mhs_block = text.split("  mhs-live:", 1)[1].split("  market-recorder:", 1)[0]
+    liq_block = text.split("  market-recorder:", 1)[1]
 
     assert "stop_grace_period: 120s" in mhs_block
     assert "stop_grace_period: 30s" in liq_block

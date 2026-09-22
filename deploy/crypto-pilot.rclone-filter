@@ -9,6 +9,8 @@
 + /futures/liquidations/**
 # Keep venue rule snapshots which pin historical execution constraints.
 + /futures/venue_rules/**
+# Keep live-only captured market sources (top-of-book, premium index, raw reference, coverage).
++ /live_capture/**
 # Exclude re-downloadable market data (ohlcv, markPriceKlines, funding, metrics).
 - /futures/**
 # Exclude transient partial writes.

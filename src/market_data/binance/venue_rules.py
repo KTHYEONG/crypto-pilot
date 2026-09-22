@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import hmac
 import json
@@ -21,6 +22,8 @@ from src.common.errors import DataIntegrityError
 
 BRACKET_URL = "https://fapi.binance.com/fapi/v1/leverageBracket"
 EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+
+VENUE_SNAPSHOT_SUFFIXES: tuple[str, ...] = (".json.gz", ".json")
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,12 +181,22 @@ def fetch_venue_rules(
 
 
 def write_venue_rule_snapshot(snapshot: VenueRuleSnapshot, root: Path) -> Path:
-    """Persist ``<root>/<YYYYMMDD>.json`` atomically (temp + os.replace); fresh-only per day."""
+    """Persist ``<root>/<YYYYMMDD>.json.gz`` atomically (temp + os.replace); fresh-only per day.
+
+    Gzip (deterministic, mtime=0) cuts the daily snapshot ~33x; content is the same JSON document as the
+    legacy ``.json`` files.
+
+    Raises:
+        FileExistsError: a snapshot (either suffix) already exists for that UTC day.
+    """
     directory = Path(root)
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / f"{snapshot.captured_at.tz_convert('UTC').strftime('%Y%m%d')}.json"
-    if target.exists():
-        raise FileExistsError(f"venue-rules snapshot already captured: {target}")
+    day = snapshot.captured_at.tz_convert("UTC").strftime("%Y%m%d")
+    target = directory / f"{day}.json.gz"
+    legacy = directory / f"{day}.json"
+    if target.exists() or legacy.exists():
+        existing = target if target.exists() else legacy
+        raise FileExistsError(f"venue-rules snapshot already captured: {existing}")
     payload = {
         "captured_at": snapshot.captured_at.isoformat(),
         "symbols": {
@@ -205,14 +218,54 @@ def write_venue_rule_snapshot(snapshot: VenueRuleSnapshot, root: Path) -> Path:
         },
     }
     tmp = target.with_name(f".{target.name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    blob = gzip.compress(json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"), compresslevel=9, mtime=0)
+    tmp.write_bytes(blob)
     os.replace(tmp, target)
     return target
 
 
+def _snapshot_day(name: str) -> str | None:
+    for suffix in VENUE_SNAPSHOT_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return None
+
+
+def venue_rule_snapshot_paths(root: Path) -> list[Path]:
+    """All snapshot files under ``root`` (both suffixes) sorted by capture day ascending.
+
+    Raises:
+        DataIntegrityError: two files claim the same day (``.json`` and ``.json.gz``).
+    """
+    directory = Path(root)
+    if not directory.exists():
+        return []
+    by_day: dict[str, Path] = {}
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        day = _snapshot_day(path.name)
+        if day is None or len(day) != 8 or not day.isdigit():
+            continue
+        if day in by_day:
+            raise DataIntegrityError(f"duplicate venue-rules snapshot for day {day}")
+        by_day[day] = path
+    return [by_day[day] for day in sorted(by_day)]
+
+
+def venue_rule_snapshot_exists(root: Path, day: str) -> bool:
+    """Whether a snapshot for ``day`` (``YYYYMMDD``) exists under either suffix."""
+    directory = Path(root)
+    return (directory / f"{day}.json.gz").exists() or (directory / f"{day}.json").exists()
+
+
 def load_venue_rule_snapshot(path: Path) -> VenueRuleSnapshot:
-    """Load one persisted snapshot with the same validation as ``parse_venue_rules``."""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    """Load one persisted snapshot (``.json`` or ``.json.gz``) with ``parse_venue_rules`` validation."""
+    src = Path(path)
+    if src.name.endswith(".json.gz"):
+        raw = json.loads(gzip.decompress(src.read_bytes()).decode("utf-8"))
+    else:
+        raw = json.loads(src.read_text(encoding="utf-8"))
     bracket_payload: list[Any] = []
     exchange_symbols: list[Any] = []
     for symbol, entry in raw["symbols"].items():
@@ -245,12 +298,12 @@ def load_venue_rule_snapshot(path: Path) -> VenueRuleSnapshot:
 
 
 def latest_venue_rule_snapshot(root: Path) -> Path:
-    """Most recent snapshot file under ``root``.
+    """Most recent snapshot file under ``root`` (either suffix).
 
     Raises:
         FileNotFoundError: No snapshot exists.
     """
-    files = sorted(Path(root).glob("*.json"))
+    files = venue_rule_snapshot_paths(root)
     if not files:
         raise FileNotFoundError(f"no venue-rules snapshot under {root}")
     return files[-1]

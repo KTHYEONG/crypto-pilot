@@ -55,3 +55,27 @@ def _isolate_live_process_logs(monkeypatch: pytest.MonkeyPatch, tmp_path):
         logging.getLogger().removeHandler(handler)
         with contextlib.suppress(Exception):
             handler.close()
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_execution_depth_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """실행 윈도우 깊이 캡처는 단위 테스트에서 실제 스레드/소켓을 열지 않는다.
+
+    ``run_shadow_cycle`` 은 기본적으로 WS 레코더를 기동하므로, 스텁하지 않으면
+    실제 aiohttp 세션과 30분 post-window 대기로 테스트가 멈춘다. 깊이 캡처 자체를
+    검증하는 테스트는 자체 스텁으로 덮어쓴다.
+    """
+    import src.live.runner as runner_mod
+    from src.live.depth_capture import DepthCaptureSummary
+
+    class _NullDepthRecorder:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self, *, post_window_s: float, shutdown: object = None) -> DepthCaptureSummary:
+            return DepthCaptureSummary(rows=0, symbols_requested=0, symbols_seen=0, reconnects=0, parts=0)
+
+    monkeypatch.setattr(runner_mod, "ExecutionDepthRecorder", _NullDepthRecorder)

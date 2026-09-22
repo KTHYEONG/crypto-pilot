@@ -110,9 +110,15 @@ class LiveSettings(BaseSettings):
     orderbook_capture_duration_s: float = 1800.0
     orderbook_capture_depth_limit: int = 20
     orderbook_capture_max_symbols: int = 40
-    orderbook_capture_pretrade_max_symbols: int = 15
-    orderbook_capture_baseline_max_symbols: int = 80
     orderbook_capture_dir: str | None = None
+    exec_depth_capture_enabled: bool = True
+    exec_depth_stream_url: str = "wss://fstream.binance.com/stream"
+    exec_depth_levels: int = 5
+    exec_depth_update_ms: int = 500
+    exec_depth_post_window_s: float = 1800.0
+    exec_depth_max_symbols: int = 60
+    exec_depth_flush_interval_s: float = 300.0
+    exec_depth_max_session_s: float = 7200.0
     fills_dir: str | None = None
     microstructure_dir: str | None = None
     tax_ledger_dir: str | None = None
@@ -170,6 +176,41 @@ class LiveSettings(BaseSettings):
     def _validate_paper_fill_model(cls, value: str) -> str:
         if value not in {"immediate_taker", "peg_chase"}:
             raise ValueError(f"paper_fill_model must be one of immediate_taker, peg_chase, got {value!r}")
+        return value
+
+    @field_validator("exec_depth_levels")
+    @classmethod
+    def _validate_exec_depth_levels(cls, value: int) -> int:
+        if value not in {5, 10, 20}:
+            raise ValueError(f"exec_depth_levels must be one of 5, 10, 20, got {value!r}")
+        return value
+
+    @field_validator("exec_depth_update_ms")
+    @classmethod
+    def _validate_exec_depth_update_ms(cls, value: int) -> int:
+        if value not in {100, 250, 500}:
+            raise ValueError(f"exec_depth_update_ms must be one of 100, 250, 500, got {value!r}")
+        return value
+
+    @field_validator("exec_depth_max_symbols")
+    @classmethod
+    def _validate_exec_depth_max_symbols(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"exec_depth_max_symbols must be >= 1, got {value!r}")
+        return value
+
+    @field_validator("exec_depth_flush_interval_s", "exec_depth_max_session_s")
+    @classmethod
+    def _validate_exec_depth_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError(f"exec depth interval must be > 0, got {value!r}")
+        return value
+
+    @field_validator("exec_depth_post_window_s")
+    @classmethod
+    def _validate_exec_depth_post_window(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError(f"exec_depth_post_window_s must be >= 0, got {value!r}")
         return value
 
     @field_validator("record_run_id")

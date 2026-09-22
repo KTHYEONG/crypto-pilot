@@ -12,8 +12,6 @@ services:
       - LIVE_NOTIONAL_EQUITY_USDT=2100
       - LIVE_RECORD_RUN_ID=frozen_top20_v2_bayes_maker_20260921
       - LIVE_TAX_COLLECTION_ENABLED=false
-      - LIVE_ORDERBOOK_CAPTURE_BASELINE_MAX_SYMBOLS=0
-      - LIVE_ORDERBOOK_CAPTURE_MAX_SYMBOLS=20
     volumes:
       - ./data:/app/data
       - ./data/state:/app/data/state
@@ -26,17 +24,18 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
-  liquidation-collector:
+  market-recorder:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
-    container_name: liquidation-collector
+    container_name: market-recorder
     restart: unless-stopped
     stop_grace_period: 30s
     mem_limit: 768m
     env_file: /home/ubuntu/quant-secrets/crypto-pilot.env
     volumes:
       - ./data/futures/liquidations:/app/data/futures/liquidations
+      - ./data/live_capture:/app/data/live_capture
       - ./data/state:/app/data/state
-    command: ["uv", "run", "python", "-m", "src.cli.main", "data", "collect", "stream-liquidations"]
+    command: ["uv", "run", "python", "-m", "src.cli.main", "data", "collect", "record-market"]
     logging:
       driver: json-file
       options:

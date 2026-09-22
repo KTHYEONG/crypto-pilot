@@ -29,14 +29,19 @@ def test_SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS() -> None:
     assert "./logs:/app/logs" in compose
 
 
-def test_docker_compose_has_independent_liquidation_collector_service() -> None:
+def test_docker_compose_has_independent_market_recorder_service() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    # 청산 스트림은 live 데몬과 독립된 서비스로 24/7 가동된다.
-    assert "stream-liquidations" in compose
+    # 라이브 전용 소스(bookTicker/premiumIndex/reference) + 청산 스트림은 live 데몬과 독립된 서비스로 24/7 가동된다.
+    assert "record-market" in compose
+    assert "container_name: market-recorder" in compose
     assert '"data"' in compose  # command runs the data CLI group
     assert "unless-stopped" in compose
     assert "./data/futures/liquidations:/app/data/futures/liquidations" in compose
+    assert "./data/live_capture:/app/data/live_capture" in compose
+    assert "mem_limit: 768m" in compose
+    assert "stop_grace_period: 30s" in compose
     assert "env_file: /home/ubuntu/quant-secrets/crypto-pilot.env" in compose
+    assert "liquidation-collector" not in compose
     # 기존 live 데몬 서비스 계약이 깨지지 않는다.
     assert "./data/state:/app/data/state" in compose
 
@@ -44,7 +49,7 @@ def test_docker_compose_has_independent_liquidation_collector_service() -> None:
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS",
-    "test_docker_compose_has_independent_liquidation_collector_service",
+    "test_docker_compose_has_independent_market_recorder_service",
     "test_dockerfile_keeps_uv_cache_out_of_image",
     "test_dockerignore_excludes_workspace_caches",
     "test_compose_uses_absolute_secret_path_and_declares_live_mode",
@@ -72,14 +77,14 @@ def test_docker_compose_memory_budget_fits_oci_a1_host() -> None:
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
 
     # When
-    live_block, liquidation_block = compose.split("  liquidation-collector:\n", 1)
+    live_block, recorder_block = compose.split("  market-recorder:\n", 1)
 
     # Then
     assert "container_name: mhs-live-daemon" in live_block
-    assert "mem_limit: 3g" in live_block
+    assert "mem_limit: 2g" in live_block
     assert "mem_limit: 1200m" not in compose
-    assert "container_name: liquidation-collector" in liquidation_block
-    assert "mem_limit: 768m" in liquidation_block
+    assert "container_name: market-recorder" in recorder_block
+    assert "mem_limit: 768m" in recorder_block
     assert "HARDWARE_MAX_WORKERS" not in compose
 
 
@@ -136,6 +141,17 @@ def test_deploy_workflow_builds_native_arm64_and_tags_commit_sha() -> None:
     assert "sha-${{ github.sha }}" in workflow
     assert "${{ env.IMAGE }}:latest" in workflow
     assert "python3 -m src.application.ops.daemon_idle_gate" in workflow
+
+
+def test_rclone_filter_keeps_live_capture() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "deploy" / "crypto-pilot.rclone-filter").read_text(encoding="utf-8")
+
+    assert "+ /live_capture/**" in text
+    assert text.index("+ /live_capture/**") < text.index("- /futures/**")
+    assert text.index("+ /live_capture/**") < text.index("- **")
 
 
 def test_gate_waits_on_fresh_busy_heartbeat() -> None:
