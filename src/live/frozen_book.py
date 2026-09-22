@@ -47,6 +47,10 @@ class LiveFrozenBook:
     adv: pd.DataFrame
     daily_sigma: pd.DataFrame
     valid_from: pd.Timestamp
+    #: Last hourly bar actually observed on disk across the census (distinct from the
+    #: requested ``panel_end``, which reaches past real collection at every nightly cycle
+    #: since the decision releases before the next midnight bar closes).
+    panel_last_bar: pd.Timestamp
 
 
 def _require_utc(day: pd.Timestamp, label: str) -> pd.Timestamp:
@@ -98,6 +102,10 @@ def build_live_frozen_book(
     if not census_list:
         raise DataIntegrityError("no census symbol has 1h bars inside the panel window")
     close_c = panel["close"][census_list].astype("float64")
+    observed = close_c.dropna(how="all").index
+    if len(observed) == 0:
+        raise DataIntegrityError("no observed 1h bar for any census symbol inside the panel window")
+    panel_last_bar = pd.Timestamp(observed.max())
     quote_c = panel["quote_vol"][census_list].astype("float64")
     taker_c = panel["taker_buy_quote"][census_list].astype("float64")
     daily_close = close_c.resample("1D").last().astype("float64")
@@ -148,7 +156,7 @@ def build_live_frozen_book(
     return LiveFrozenBook(
         unit_weights=unit_weights, snapshot_closes=snapshot_closes,
         entry_closes=entry_closes, adv=adv, daily_sigma=daily_sigma,
-        valid_from=valid_from,
+        valid_from=valid_from, panel_last_bar=panel_last_bar,
     )
 
 
@@ -194,7 +202,11 @@ def unit_proxy_returns(
     for pos, day in enumerate(decisions):
         entry = entries_needed[pos]
         nxt = day + pd.Timedelta(days=2)
-        if entry not in entry_lookup or nxt not in entry_lookup:
+        nxt_bar = nxt - pd.Timedelta(hours=1)
+        # nxt_bar 는 nxt 라벨이 참조하는 원본 시간 봉(entry_bars 관례와 동일). 아직 관측된
+        # 패널 범위를 넘는다면 인과적으로 존재할 수 없는 미래 데이터이지 무결성 결함이 아니다
+        # -- 조용히 건너뛰고, 다음 사이클에 그 봉이 관측되면 이 날짜를 다시 채점한다.
+        if entry not in entry_lookup or nxt not in entry_lookup or nxt_bar > book.panel_last_bar:
             prev = weights.to_numpy(dtype="float64")[pos]
             continue
         w = weights.to_numpy(dtype="float64")[pos]

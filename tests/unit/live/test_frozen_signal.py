@@ -357,7 +357,7 @@ def test_no_book_row_fails_closed(
         ),
         adv=pd.DataFrame([[1.0]], index=idx, columns=cols, dtype="float64"),
         daily_sigma=pd.DataFrame([[0.01]], index=idx, columns=cols, dtype="float64"),
-        valid_from=idx[0],
+        valid_from=idx[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
     monkeypatch.setattr(signal_mod, "build_live_frozen_book", lambda *args, **kwargs: fake)
     bare = tmp_path / "bare"
