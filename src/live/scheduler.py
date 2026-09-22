@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -76,6 +77,9 @@ logger = logging.getLogger("LiveScheduler")
 
 #: 대기 중 sleep_fn 호출 간격 상한(초). 종료 시그널 처리 지연과 테스트 대기 횟수를 bound한다.
 DAEMON_POLL_INTERVAL_SECONDS: float = 300.0
+# stale_after_s(2700초/45분)보다 한참 짧게 잡아, 스케줄러 지연이 겹쳐도 여유가 크다.
+DAEMON_HEARTBEAT_PULSE_INTERVAL_SECONDS: float = 120.0
+_HEARTBEAT_PULSE_JOIN_TIMEOUT_S: float = 10.0
 #: T+1h 인과성 게이트 통과 후의 추가 여유(거래소/네트워크 지연).
 DAEMON_CATCHUP_BUFFER: pd.Timedelta = pd.Timedelta(minutes=5)
 
@@ -400,6 +404,41 @@ def _sizing_note(frozen_report: Any) -> str:
     return f" exposure={exposure:.4f} equity_usdt={equity:.2f} unit_observations={unit_obs}"
 
 
+def _run_heartbeat_pulse(
+    stop: threading.Event,
+    *,
+    heartbeat_path: Path,
+    decision_time: pd.Timestamp,
+    attempts: int,
+    consecutive_halts: int,
+    interval_s: float = DAEMON_HEARTBEAT_PULSE_INTERVAL_SECONDS,
+) -> None:
+    """Keep the heartbeat fresh while a long blocking stage (execute) runs.
+
+    Runs in a background thread started just before the blocking call and stopped in its
+    ``finally``. Writes ``status="RUNNING", stage="execute"`` at ``interval_s`` using the real
+    UTC wall clock (never an injected/test clock -- the deploy gate reads this file from a
+    separate process, so freshness must reflect actual elapsed time, and a fake clock shared
+    across threads would race). One write failure is logged and never stops the loop; the pulse
+    is a liveness signal only and must never affect the trading cycle's outcome.
+    """
+    while True:
+        if stop.wait(timeout=interval_s):
+            return
+        try:
+            write_heartbeat(
+                heartbeat_path,
+                decision_time=decision_time,
+                status="RUNNING",
+                attempts=attempts,
+                consecutive_halts=consecutive_halts,
+                now=pd.Timestamp.now(tz="UTC"),
+                stage="execute",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("[SYS] heartbeat pulse write failed")
+
+
 def _log_stage_elapsed(stage: str, target: pd.Timestamp, started: float) -> None:
     elapsed_s = time.monotonic() - started
     logger.info("[SYS] stage=%s decision_time=%s elapsed_s=%.1f", stage, _as_utc(target).isoformat(), elapsed_s)
@@ -601,6 +640,20 @@ def run_daemon(
         status = "HALT"
         _beat("RUNNING", "execute")
         stage_started = time.monotonic()
+        pulse_stop = threading.Event()
+        pulse_thread = threading.Thread(
+            target=_run_heartbeat_pulse,
+            kwargs={
+                "stop": pulse_stop,
+                "heartbeat_path": heartbeat_path,
+                "decision_time": target,
+                "attempts": attempts,
+                "consecutive_halts": consecutive_halts,
+            },
+            name="live-heartbeat-pulse",
+            daemon=True,
+        )
+        pulse_thread.start()
         try:
             report = run_shadow_cycle(settings, target, weights_path, now=now_fn()) if shutdown is None else run_shadow_cycle(settings, target, weights_path, now=now_fn(), shutdown=shutdown)
             logger.info("[EVAL] daemon cycle decision_time=%s status=%s reason=%s", target, report.status, report.reason)
@@ -611,6 +664,10 @@ def run_daemon(
             status = "HALT"
             failure_cause = f"cycle crashed {type(exc).__name__}"
         finally:
+            pulse_stop.set()
+            pulse_thread.join(timeout=_HEARTBEAT_PULSE_JOIN_TIMEOUT_S)
+            if pulse_thread.is_alive():
+                logger.warning("[SYS] heartbeat pulse thread still alive decision_time=%s", target)
             _log_stage_elapsed("execute", target, stage_started)
 
         if status == "COMPLETE":
