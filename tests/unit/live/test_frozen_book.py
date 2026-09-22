@@ -76,7 +76,7 @@ def _research_comparison(tmp_path: Path, symbols: tuple[str, ...]) -> None:
         )
 
 
-def _mini_book() -> LiveFrozenBook:
+def _mini_book(panel_last_bar: pd.Timestamp | None = None) -> LiveFrozenBook:
     decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
     entries = pd.DatetimeIndex(["2021-01-02", "2021-01-03", "2021-01-04"], tz="UTC")
     cols = ["AAAUSDT", "BBBUSDT"]
@@ -93,6 +93,7 @@ def _mini_book() -> LiveFrozenBook:
     return LiveFrozenBook(
         unit_weights=unit, snapshot_closes=snap, entry_closes=entry,
         adv=adv, daily_sigma=sigma, valid_from=decisions[0],
+        panel_last_bar=panel_last_bar or pd.Timestamp("2021-01-10", tz="UTC"),
     )
 
 
@@ -136,6 +137,20 @@ def test_future_bars_after_snapshot_never_change_decision_row(tmp_path: Path) ->
     pd.testing.assert_series_equal(
         book_a.unit_weights.loc[day], book_b.unit_weights.loc[day], check_names=False,
     )
+
+
+def test_panel_last_bar_stops_at_real_data_not_requested_end(tmp_path: Path) -> None:
+    # 매일 결정 실행 시각(자정 전)에는 요청한 panel_end 가 항상 실제 수집분보다 앞서 있다
+    # -- panel_last_bar 는 요청 경계가 아니라 실제 관측된 마지막 봉이어야 한다.
+    start, real_end = _write_panel(tmp_path, _SYMBOLS)
+    requested_end = real_end + pd.Timedelta(hours=2)
+    book = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=requested_end)
+    assert book.panel_last_bar == real_end - pd.Timedelta(hours=1)
+    # 실제 수집분을 넘어서는 최신 결정일들은 예외 없이 조용히 건너뛴다.
+    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    assert np.isfinite(out.to_numpy()).all()
+    assert len(out) > 0
+    assert out.index.max() <= book.panel_last_bar + pd.Timedelta(hours=1)
 
 
 def test_census_column_restriction(tmp_path: Path) -> None:
@@ -196,6 +211,7 @@ def test_turnover_cost_uses_weight_change() -> None:
     book = LiveFrozenBook(
         unit_weights=unit, snapshot_closes=snap, entry_closes=flat,
         adv=snap.copy(), daily_sigma=snap.copy(), valid_from=decisions[0],
+        panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
     out = unit_proxy_returns(book, {}, cost_bps=2.0)
     assert out.iloc[1] == pytest.approx(-0.00008)
@@ -204,6 +220,24 @@ def test_turnover_cost_uses_weight_change() -> None:
 def test_held_symbol_with_missing_entry_close_fails_closed() -> None:
     book = _mini_book()
     book.entry_closes.iloc[0, 0] = float("nan")
+    with pytest.raises(DataIntegrityError):
+        unit_proxy_returns(book, {}, cost_bps=0.0)
+
+
+def test_forward_bar_past_panel_frontier_is_skipped_not_raised() -> None:
+    # day=2021-01-02 는 nxt_bar(2021-01-03 23:00)가 아직 관측 안 된 미래이므로 조용히
+    # 건너뛴다 -- 매일 자정 직전 실행되는 라이브 사이클이 "어제" 몫을 재채점하려다 아직
+    # 마감 안 된 오늘 자정 봉을 요구하는, 매일 밤 반복되는 정상 상황의 회귀 가드.
+    book = _mini_book(panel_last_bar=pd.Timestamp("2021-01-03 00:00", tz="UTC"))
+    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    assert list(out.index) == [pd.Timestamp("2021-01-03", tz="UTC")]
+
+
+def test_genuine_gap_within_observed_history_still_fails_closed() -> None:
+    # panel_last_bar 는 넉넉한데도 특정 보유 심볼 값만 NaN이면 -- 미래가 아니라 진짜 결손
+    # -- 여전히 fail-closed 해야 한다(수집 실패를 조용히 넘어가지 않는다).
+    book = _mini_book()
+    book.entry_closes.iloc[1, 0] = float("nan")
     with pytest.raises(DataIntegrityError):
         unit_proxy_returns(book, {}, cost_bps=0.0)
 
@@ -306,7 +340,7 @@ def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
         entry_closes=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
         adv=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
         daily_sigma=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
-        valid_from=_START,
+        valid_from=_START, panel_last_bar=_START,
     )
     assert len(unit_proxy_returns(empty, {}, cost_bps=0.0)) == 0
     outside = {
