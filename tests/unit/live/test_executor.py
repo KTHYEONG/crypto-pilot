@@ -358,18 +358,23 @@ def test_SCENARIO_LIVE_20_PASSIVE_DEADLINE_STRICTLY_BELOW_WINDOW(tmp_path) -> No
     assert post_times[1] == post_times[0] + policy.passive_deadline_s
     assert post_times[1] >= 1080.0
     ioc_price = Decimal(client.orders[1]["price"])
-    # S7: IOC 캡은 리스크 레일(max_cross_bps)이다 -- chase_band_bps 가 아니다.
-    assert ioc_price <= Decimal("100") * (
-        Decimal(1) + Decimal(str(policy.max_cross_bps)) / Decimal(10_000)
+    # Fresh-book rail: the IOC crosses a genuine trend -- capped at the current
+    # far touch plus taker cap, never at the stale decision price.
+    ask = Decimal("100.05")
+    assert ioc_price <= ask * (
+        Decimal(1) + Decimal(str(policy.taker_cap_bps)) / Decimal(10_000)
     )
-    assert ioc_price >= Decimal("100.05")  # ask 이상: 마케터블
+    assert ioc_price >= ask  # 마케터블
     assert outcome.status == "RESIDUAL"
 
 
 def test_SCENARIO_LIVE_21_CHASE_EXHAUSTION_HOLDS_INSTEAD_OF_CROSSING(tmp_path) -> None:
     """호가가 매 폴 움직여도 chases 소진은 재페그 중단일 뿐이다: GTX 게시는
     정확히 max_chases+1 회, IOC 전이 없음(t=1080s 이전 무조건)."""
-    touches = [(f"{100 + 0.3 * i:.2f}", f"{100.20 + 0.3 * i:.2f}") for i in range(16)]
+    touches = [(f"{100 + 0.3 * i:.2f}", f"{100.20 + 0.3 * i:.2f}") for i in range(15)]
+    # IOC 시점의 호가는 스프레드 붕괴(own mid 대비 far touch +800bp 초과)라
+    # fresh-book 레일이 거부한다: 점진적 추세는 크로싱되고, 깨진 호가만 대기한다.
+    touches.append(("104.50", "114.00"))
     client = StubClient(touches=touches)
     # 리스크 레일은 알파 레일(chase_band)을 초과해야 한다. 최종 호가
     # (104.50/104.70)는 400bps 레일 상한 104.00 밖이라 IOC 거부가 유지된다.
@@ -477,9 +482,9 @@ class CancelFillStubClient(StubClient):
 def test_SCENARIO_LIVE_24_CANCEL_SETTLES_PARTIAL_FILL(tmp_path) -> None:
     """취소 시점 부분체결은 cancel 직후 재조회로 정산된다. 수정 전 경로
     (취소 응답 폐기)라면 filled_qty 는 0 으로 수렴해 이 테스트는 실패한다.
-    ask(101.00)가 리스크 레일 밖이라 IOC 백스톱은 게시되지 않고, 잔량 0.5 는
-    순수하게 취소 정산만으로 확정된다."""
-    client = CancelFillStubClient(touches=[("100.00", "101.00")])
+    far touch(102.00)가 own-mid 레일 밖 스프레드 붕괴라 IOC 백스톱은 게시되지
+    않고, 잔량 0.5 는 순수하게 취소 정산만으로 확정된다."""
+    client = CancelFillStubClient(touches=[("100.00", "102.00")])
     policy = _policy(passive_deadline_s=20.0, window_deadline_s=600.0)
     outcome = execute_intent(
         client, _intent(), _filters(), policy, AuditLog(tmp_path / "24.jsonl"), SteppingClock(3.0)
@@ -520,14 +525,14 @@ def test_SCENARIO_LIVE_25_IOC_ALWAYS_MARKETABLE_INSIDE_RISK_RAIL(tmp_path) -> No
 
 
 def test_SCENARIO_LIVE_26_RISK_RAIL_STILL_REFUSES_ANOMALY(tmp_path) -> None:
-    """S7: ask 가 max_cross_bps 레일 밖(100bps)이면 None 이고, execute_intents
-    는 해당 intent 에 IOC 0건으로 RESIDUAL 로 종결한다."""
+    """S7: far touch 가 own-mid ± max_cross_bps 레일 밖(스프레드 붕괴)이면
+    None 이고, execute_intents 는 해당 intent 에 IOC 0건으로 RESIDUAL 로 종결한다."""
     assert _capped_ioc_price(
         Decimal("101.00"), is_buy=True, taker_cap_bps=8.0,
         tick_size=Decimal("0.10"), band_low=Decimal("99.50"), band_high=Decimal("100.50"),
     ) is None
 
-    client = StubClient(touches=[("100.00", "101.00")])
+    client = StubClient(touches=[("100.00", "102.00")])
     policy = _policy(passive_deadline_s=20.0, window_deadline_s=600.0)
     outcome = execute_intent(
         client, _intent(), _filters(tick_size="0.10"), policy,
@@ -1017,18 +1022,20 @@ def test_SCENARIO_PARITY_02_avg_price_preferred(tmp_path):
     rt.active_id="oid1"
     rt.active_price=Decimal("100.00")
     rt.phase="ioc"
-    _record_fill(rt, Decimal("1"), avg_price=Decimal("99.50"))
+    _record_fill(rt, Decimal("1"), now=3.0, avg_price=Decimal("99.50"))
     assert rt.fill_notional==Decimal("99.50")
     # fallback without avgPrice
     rt2=_IntentRuntime(intent=intent, filters=filters["AAAUSDT"])
     rt2.active_id="oid2"
     rt2.active_price=Decimal("100.00")
     rt2.phase="passive"
-    _record_fill(rt2, Decimal("1"), avg_price=None)
+    _record_fill(rt2, Decimal("1"), now=3.0, avg_price=None)
     assert rt2.fill_notional==Decimal("100.00")
 
 
 def test_simulate_immediate_taker_fills_fills_full_quantity_at_mid() -> None:
+    import pandas as pd
+
     from src.live.executor import FeeSchedule, PassiveExecutionPolicy, simulate_immediate_taker_fills
     from src.live.filters import _ZERO
     from src.live.planner import OrderIntent
@@ -1049,7 +1056,7 @@ def test_simulate_immediate_taker_fills_fills_full_quantity_at_mid() -> None:
         fee_schedule=FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0),
         taker_slippage_bps=3.0,
     )
-    outcomes = simulate_immediate_taker_fills([intent], books, policy)
+    outcomes = simulate_immediate_taker_fills([intent], books, policy, now=12.0)
     assert len(outcomes) == 1
     oc = outcomes[0]
     assert oc.status == "FILLED"
@@ -1059,7 +1066,7 @@ def test_simulate_immediate_taker_fills_fills_full_quantity_at_mid() -> None:
     assert oc.chases == 0
     assert oc.latency_seconds == 0.0
     assert len(oc.fills) == 1
-    assert oc.fills[0] == (Decimal("2"), Decimal("101"), 8.0, "immediate_taker", "taker")
+    assert oc.fills[0] == (Decimal("2"), Decimal("101"), 8.0, "immediate_taker", "taker", pd.Timestamp(12.0, unit="s", tz="UTC"))
     assert oc.taker_qty == Decimal("2")
     assert oc.maker_qty == _ZERO
 
@@ -1250,7 +1257,7 @@ def test_execute_intents_default_model_preserves_peg_chase_path(tmp_path) -> Non
     )
     assert outcomes[0].status == "FILLED"
     # reasons should be maker_fill or backstop_taker/timeout_taker
-    reasons = {r for _, _, _, r, _ in outcomes[0].fills}
+    reasons = {r for _, _, _, r, _, _ in outcomes[0].fills}
     assert reasons.issubset({"maker_fill", "timeout_taker", "backstop_taker"})
     assert len(client.orders) >= 1
 
@@ -2419,20 +2426,21 @@ def test_anchored_sell_mirrors(tmp_path) -> None:
 
 
 def test_anchored_skips_non_positive_price(tmp_path) -> None:
-    """An anchor derived at or below zero is never posted; only the IOC backstop fires."""
+    """An anchor derived at or below zero is never posted; a dust book that far
+    from its own mid is a broken quote, so the IOC backstop refuses too."""
     client = StubClient(touches=[("0.01", "0.05")])
-    execute_intent(
+    outcome = execute_intent(
         client, _intent(), _filters(tick_size="0.10"), _anchored_policy(),
         AuditLog(tmp_path / "anchored_zero.jsonl"), SteppingClock(15.0),
     )
 
-    assert client.orders
-    assert all(o["timeInForce"] == "IOC" for o in client.orders)
+    assert client.orders == []
+    assert outcome.status == "RESIDUAL"
 
 
 def test_anchored_never_chases_book_moves(tmp_path) -> None:
     """Rising quotes before the deadline cause no cancel, no repost, and no chase."""
-    touches = [(f"{100.00 + 0.10 * i:.2f}", f"{101.00 + 0.10 * i:.2f}") for i in range(12)]
+    touches = [(f"{100.00 + 0.10 * i:.2f}", f"{101.20 + 0.10 * i:.2f}") for i in range(12)]
     client = StubClient(touches=touches)
     outcome = execute_intent(
         client, _intent(), _filters(tick_size="0.10"), _anchored_policy(),
@@ -2731,3 +2739,140 @@ def test_live_partial_fills_emit_deltas(tmp_path) -> None:
     assert cancels[-1]["reason"] == "window_end"
     assert "bid" not in cancels[-1]
     assert "ask" not in cancels[-1]
+
+
+def test_trend_during_passive_window_is_still_crossed(tmp_path) -> None:
+    """Fresh-book rail: decision 100에서 +80bp 추세도 IOC로 크로싱된다."""
+    from src.live.executor import PassiveExecutionPolicy
+
+    client = PaperStubClient(
+        touches=[("100.00", "100.05")] * 3 + [("100.80", "100.82")] * 50
+    )
+    policy = _policy(passive_deadline_s=9.0, window_deadline_s=600.0)
+    outcome = execute_intent(
+        client, _intent(), _filters(), policy,
+        AuditLog(tmp_path / "trend.jsonl"), SteppingClock(3.0),
+    )
+    ioc_posts = [o for o in client.suppressed_attempts if o["timeInForce"] == "IOC"]
+    assert ioc_posts
+    ask = Decimal("100.82")
+    cap = ask * (Decimal(1) + Decimal(str(policy.taker_cap_bps)) / Decimal(10_000))
+    for order in ioc_posts:
+        assert Decimal(order["price"]) >= ask
+        assert Decimal(order["price"]) <= cap
+    assert outcome.status == "FILLED"
+    assert isinstance(policy, PassiveExecutionPolicy)
+
+
+def test_broken_book_is_refused(tmp_path) -> None:
+    """Own-mid 대비 far touch +125bp 스프레드 붕괴는 IOC 없이 RESIDUAL이다."""
+    client = PaperStubClient(touches=[("99.00", "101.50")])
+    policy = _policy(passive_deadline_s=9.0, window_deadline_s=120.0)
+    outcome = execute_intent(
+        client, _intent(), _filters(), policy,
+        AuditLog(tmp_path / "broken.jsonl"), SteppingClock(3.0),
+    )
+    assert [o for o in client.suppressed_attempts if o["timeInForce"] == "IOC"] == []
+    assert outcome.status == "RESIDUAL"
+    assert outcome.unfilled_qty > 0
+
+
+def test_sell_side_mirrors_trend_crossing(tmp_path) -> None:
+    """매도: 결정가 대비 -60bp 타이트 북도 IOC로 크로싱된다."""
+    from src.live.planner import OrderIntent
+
+    sell_intent = OrderIntent(
+        symbol="AAAUSDT",
+        side="SELL",
+        quantity=Decimal("1.000"),
+        reduce_only=False,
+        target_qty=Decimal("0"),
+        current_qty=Decimal("1.000"),
+        client_order_prefix="run1",
+        leg_index=0,
+        decision_price=Decimal("100"),
+    )
+    client = PaperStubClient(touches=[("99.38", "99.40")] * 50)
+    policy = _policy(passive_deadline_s=9.0, window_deadline_s=600.0)
+    outcome = execute_intent(
+        client, sell_intent, _filters(), policy,
+        AuditLog(tmp_path / "sell_trend.jsonl"), SteppingClock(3.0),
+    )
+    assert [o for o in client.suppressed_attempts if o["timeInForce"] == "IOC"]
+    assert outcome.status == "FILLED"
+
+
+def test_fills_carry_confirmation_time(tmp_path) -> None:
+    """3초 폴 시계에서 5번째 폴의 메이커 체결 filled_at은 start+15s다."""
+    import pandas as pd
+
+    from src.live.executor import PassiveExecutionPolicy
+
+    client = PaperStubClient(
+        touches=[("100.00", "100.05")] * 4 + [("100.00", "99.50")] * 50
+    )
+    policy = PassiveExecutionPolicy(
+        poll_interval_s=3.0, passive_deadline_s=50.0, window_deadline_s=600.0,
+        taker_cap_bps=15.0, max_slices=1, passive_pricing="anchored",
+    )
+    outcome = execute_intent(
+        client, _intent(), _filters(tick_size="0.01"), policy,
+        AuditLog(tmp_path / "fill_time.jsonl"), SteppingClock(3.0),
+    )
+    assert outcome.status == "FILLED"
+    assert len(outcome.fills) == 1
+    filled_at = outcome.fills[0][5]
+    assert filled_at == pd.Timestamp(15.0, unit="s", tz="UTC")
+    assert filled_at != pd.Timestamp("2026-08-24 00:00", tz="UTC")
+    assert filled_at.tzinfo is not None
+
+
+def test_every_fill_path_stamps_time(tmp_path) -> None:
+    """resting-maker, partial-on-cancel, IOC, immediate-taker 모두 6필드 UTC 스탬프다."""
+    import pandas as pd
+
+    from src.live.executor import (
+        FeeSchedule,
+        PassiveExecutionPolicy,
+        simulate_immediate_taker_fills,
+    )
+
+    anchored = PassiveExecutionPolicy(
+        poll_interval_s=3.0, passive_deadline_s=50.0, window_deadline_s=600.0,
+        taker_cap_bps=15.0, max_slices=1, passive_pricing="anchored",
+    )
+    maker_client = PaperStubClient(
+        touches=[("100.00", "100.05")] * 4 + [("100.00", "99.50")] * 50
+    )
+    maker_outcome = execute_intent(
+        maker_client, _intent(), _filters(tick_size="0.01"), anchored,
+        AuditLog(tmp_path / "stamp_maker.jsonl"), SteppingClock(3.0),
+    )
+    cancel_client = CancelFillStubClient(touches=[("100.00", "102.00")])
+    cancel_outcome = execute_intent(
+        cancel_client, _intent(), _filters(), _policy(passive_deadline_s=20.0, window_deadline_s=600.0),
+        AuditLog(tmp_path / "stamp_cancel.jsonl"), SteppingClock(3.0),
+    )
+    trend_client = PaperStubClient(
+        touches=[("100.00", "100.05")] * 3 + [("100.80", "100.82")] * 50
+    )
+    trend_outcome = execute_intent(
+        trend_client, _intent(), _filters(), _policy(passive_deadline_s=9.0, window_deadline_s=600.0),
+        AuditLog(tmp_path / "stamp_ioc.jsonl"), SteppingClock(3.0),
+    )
+    immediate = simulate_immediate_taker_fills(
+        [_intent()], {"AAAUSDT": (Decimal("100"), Decimal("102"))},
+        PassiveExecutionPolicy(
+            fee_schedule=FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0),
+            taker_slippage_bps=3.0,
+        ),
+        now=12.0,
+    )[0]
+    for outcome in (maker_outcome, cancel_outcome, trend_outcome, immediate):
+        assert outcome.fills
+        for fill in outcome.fills:
+            assert len(fill) == 6
+            stamped = fill[5]
+            assert isinstance(stamped, pd.Timestamp)
+            assert stamped.tzinfo is not None
+            assert str(stamped.tzinfo) == "UTC"

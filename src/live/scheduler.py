@@ -257,6 +257,7 @@ def _default_venue_capture(settings: LiveSettings) -> None:
 def _default_frozen_step(target: pd.Timestamp, settings: LiveSettings, weights_path: Path) -> FrozenStepReport:
     from src.live.frozen_signal import run_frozen_signal_step
     from src.live.ledger import default_ledger_path
+    from src.live.runner import fetch_live_account_equity
 
     try:
         raw = json.loads(NON_CRYPTO_SYMBOLS_PATH.read_text(encoding="utf-8"))
@@ -279,6 +280,7 @@ def _default_frozen_step(target: pd.Timestamp, settings: LiveSettings, weights_p
         fallback_venue_path=Path(settings.venue_fallback_path),
         ledger_path=Path(settings.ledger_path) if settings.ledger_path else default_ledger_path(),
         seed_equity_usdt=settings.notional_equity_usdt,
+        account_equity_usdt=None if settings.mode.suppresses_mutations else fetch_live_account_equity(settings, _utc_now()),
         non_crypto=non_crypto,
         artifact_key=settings.artifact_key,
     )
@@ -540,11 +542,6 @@ def run_daemon(
         if shutdown is not None and shutdown.requested:
             break
 
-        try:
-            prune_fn()
-        except Exception:  # noqa: BLE001
-            logger.exception("[SYS] data prune failed decision_time=%s", target)
-
         signal_status = "COMPLETE"
         failure_cause = ""
         frozen_report = None
@@ -628,6 +625,11 @@ def run_daemon(
             write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn(), detail=failure_cause)
         except Exception:
             logger.exception("[SYS] heartbeat write failed")
+
+        try:
+            prune_fn()
+        except Exception:  # noqa: BLE001
+            logger.exception("[SYS] data prune failed decision_time=%s", target)
 
         if status == "COMPLETE":
             alerts_sent.clear()

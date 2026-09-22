@@ -159,7 +159,7 @@ def test_resolve_sizing_equity_paper_uncapped() -> None:
         total_maint_margin=Decimal(0), unrealized_pnl=Decimal(0), positions={}, dual_side_position=False, multi_assets_margin=False,
     )
     live_eq = resolve_sizing_equity(live_snap, Decimal("2000"), mode=ExecutionMode.LIVE_MAINNET)
-    assert live_eq == Decimal("2000")
+    assert live_eq == Decimal("5000")
 
 def test_synthetic_flat_snapshot_passes_guards() -> None:
     import pandas as pd
@@ -626,3 +626,34 @@ def test_reconcile_or_halt_accepts_settled_symbols_only_when_venue_flat() -> Non
     with pytest.raises(ReconciliationBreach, match="OTHERUSDT"):
         reconcile_or_halt(_snap({}), {"OTHERUSDT": Decimal("1")}, qty_tolerance_fraction=0.0, settled_symbols=("SETUSDT",))
 
+
+
+def test_live_equity_is_uncapped() -> None:
+    from src.live.account import resolve_sizing_equity
+    from src.live.settings import ExecutionMode
+
+    snap = _snapshot({}, wallet_balance=Decimal("5000"), unrealized_pnl=Decimal("250"))
+    assert resolve_sizing_equity(snap, Decimal("2100"), mode=ExecutionMode.LIVE_MAINNET) == Decimal("5250")
+
+
+def test_live_non_positive_equity_fails_closed() -> None:
+    import pytest
+    from src.live.account import resolve_sizing_equity
+    from src.live.errors import RiskGateBreach
+    from src.live.settings import ExecutionMode
+
+    snap = _snapshot({}, wallet_balance=Decimal("0"), unrealized_pnl=Decimal("-1"))
+    with pytest.raises(RiskGateBreach):
+        resolve_sizing_equity(snap, Decimal("2100"), mode=ExecutionMode.LIVE_MAINNET)
+
+
+def test_paper_equity_uses_virtual_mtm() -> None:
+    from src.live.account import resolve_sizing_equity
+    from src.live.settings import ExecutionMode
+
+    snap = _snapshot({})
+    eq = resolve_sizing_equity(
+        snap, Decimal("2000"), mode=ExecutionMode.PAPER,
+        cash_usdt=Decimal("2739.16"), positions={}, marks={},
+    )
+    assert eq == Decimal("2739.16")

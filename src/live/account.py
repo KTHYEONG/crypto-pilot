@@ -325,7 +325,7 @@ def resolve_sizing_equity(
     positions: Mapping[str, Decimal] | None = None,
     marks: Mapping[str, Decimal] | None = None,
 ) -> Decimal:
-    """I-EQUITY-MODE / I-EQUITY-MTM: 모드에 따라 가상 MTM 분기."""
+    """LIVE modes size from the venue's own margin equity (wallet balance plus unrealized PnL) with no ceiling, so the account compounds exactly as the growth policy was evaluated; ``cap_usdt`` only seeds the first PAPER/SHADOW cycle's virtual cash."""
     if mode is not None and mode.suppresses_mutations:
         # virtual MTM: cash + Σ qty*mark, 첫 사이클 cash None이면 cap으로 시드
         cash = cash_usdt if cash_usdt is not None else cap_usdt
@@ -344,7 +344,7 @@ def resolve_sizing_equity(
                 f"(virtual_mtm={total} seed={cap_usdt})"
             )
         return equity
-    equity = min(snapshot.wallet_balance + snapshot.unrealized_pnl, cap_usdt)
+    equity = snapshot.wallet_balance + snapshot.unrealized_pnl
     if equity <= Decimal(0):
         raise RiskGateBreach(
             f"sizing equity {equity} must be positive "

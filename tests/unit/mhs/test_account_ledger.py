@@ -6,8 +6,17 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.market_data.binance.venue_rules import VenueBracket, VenueRuleSnapshot, VenueSymbolRules
-from src.mhs.account_ledger import AccountLedgerResult, AccountMarkPanels, replay_account
+from src.mhs.account_ledger import AccountLedgerResult, AccountMarkPanels, replay_account as _orig_replay_account
 from src.mhs.account_policy import ExposurePolicy, UnitMoments
+
+
+def replay_account(*args: object, **kwargs: object) -> AccountLedgerResult:
+    """Regression shim: legacy calls without an explicit anchor replay at the entry labels."""
+    if "anchor_times" not in kwargs:
+        first = args[0] if args else kwargs.get("unit_weights")
+        assert isinstance(first, pd.DataFrame)
+        kwargs["anchor_times"] = pd.DatetimeIndex(first.index)
+    return _orig_replay_account(*args, **kwargs)  # type: ignore[arg-type]
 
 
 def _rules(
@@ -237,6 +246,7 @@ def _valid_kwargs() -> dict[str, object]:
     return {
         "unit_weights": unit, "marks": marks, "funding_cum": funding, "adv": adv,
         "daily_sigma": sigma, "rules": _rules(), "policy": _fixed_policy(),
+        "anchor_times": pd.DatetimeIndex(dates),
         "capital": 1000.0, "taker_fee_bps": 6.0,
     }
 
@@ -288,7 +298,7 @@ def test_replay_account_rejects_misaligned_inputs() -> None:
     early = pd.date_range("2025-12-31", periods=2, freq="D", tz="UTC")
     early_unit, early_funding, early_adv, early_sigma = _frames(early, ["BTCUSDT"], [[1.0], [1.0]])
     with pytest.raises(DataIntegrityError):
-        replay_account(**dict(base, unit_weights=early_unit, funding_cum=early_funding, adv=early_adv, daily_sigma=early_sigma))  # type: ignore[arg-type]
+        replay_account(**dict(base, unit_weights=early_unit, funding_cum=early_funding, adv=early_adv, daily_sigma=early_sigma, anchor_times=pd.DatetimeIndex(early)))  # type: ignore[arg-type]
 
     empty_rules = VenueRuleSnapshot(captured_at=pd.Timestamp("2026-01-01", tz="UTC"), symbols={})
     with pytest.raises(DataIntegrityError):
@@ -770,3 +780,204 @@ def test_replay_account_maker_conserves_cash() -> None:
     assert result.impact_paid == pytest.approx(0.0)
     assert result.funding_paid == pytest.approx(0.0)
     assert result.maker_fill_fraction == pytest.approx(1.0)
+
+
+def _anchor_replay(
+    unit: pd.DataFrame, marks: AccountMarkPanels, funding: pd.DataFrame,
+    adv: pd.DataFrame, sigma: pd.DataFrame, anchors: pd.DatetimeIndex, **kwargs: object,
+) -> AccountLedgerResult:
+    base: dict[str, object] = {"capital": 1000.0, "taker_fee_bps": 6.0}
+    base.update(kwargs)
+    return _orig_replay_account(
+        unit, marks, funding, adv, sigma, base.pop("rules", _rules(minimum=0.0)),  # type: ignore[arg-type]
+        base.pop("policy", _fixed_policy()),  # type: ignore[arg-type]
+        anchor_times=anchors, **base,  # type: ignore[arg-type]
+    )
+
+
+def test_replay_account_anchor_equal_to_entry_label_is_bit_identical() -> None:
+    """Anchors on the entry labels reproduce the hand-computed pre-change ledger."""
+    dates = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0], [0.5]])
+    marks = _panels(list(dates), ["BTCUSDT"], [[100.0], [101.0]], spread=0.001)
+    anchors = pd.DatetimeIndex(dates)
+    # 1000 USDT 전액 매수(10.000개, 수수료 0.6) 후 101에서 절반으로 축소(4.997개, step 0.001 절사).
+    expected_equity = [999.4, 1009.0968182]
+    expected_fee = 0.9031818
+    taker = _orig_replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0), _fixed_policy(),
+        anchor_times=anchors, capital=1000.0, taker_fee_bps=6.0,
+    )
+    assert taker.daily_equity.to_list() == pytest.approx(expected_equity)
+    assert taker.fee_paid == pytest.approx(expected_fee)
+    assert taker.funding_paid == 0.0
+    assert taker.liquidated_at is None
+    # 앵커 뒤 대기 봉이 없으면 메이커 주문은 앵커 가격에서 테이커로 체결되어 같은 원장이 된다.
+    maker = _orig_replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0), _fixed_policy(),
+        anchor_times=anchors, capital=1000.0, taker_fee_bps=6.0,
+        execution="maker", maker_fee_bps=2.0, passive_window_bars=10,
+    )
+    assert maker.daily_equity.to_list() == pytest.approx(expected_equity)
+    assert maker.maker_fill_fraction == 0.0
+
+
+def test_replay_account_earlier_anchor_prices_rebalance_at_anchor_close() -> None:
+    entries = pd.DatetimeIndex([pd.Timestamp("2026-01-02", tz="UTC")])
+    anchors = pd.DatetimeIndex([pd.Timestamp("2026-01-01 23:00", tz="UTC")])
+    grid = pd.date_range(anchors[0], entries[0] + pd.Timedelta(days=1), freq="3min", tz="UTC")
+    closes = [100.0 if ts < entries[0] else 110.0 for ts in grid]
+    frame = pd.DataFrame([[c] for c in closes], index=grid, columns=["BTCUSDT"], dtype="float64")
+    marks = AccountMarkPanels(close=frame, high=frame.copy(), low=frame.copy())
+    unit, funding, adv, sigma = _frames(entries, ["BTCUSDT"], [[1.0]])
+    result = _orig_replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0), _fixed_policy(),
+        anchor_times=anchors, capital=1000.0, taker_fee_bps=0.0, apply_order_filters=False,
+    )
+    assert result.daily_equity.iloc[0] == pytest.approx(1000.0)
+
+
+def test_replay_account_maker_window_starts_after_anchor() -> None:
+    entries = pd.DatetimeIndex([pd.Timestamp("2026-01-02", tz="UTC")])
+    anchor = pd.Timestamp("2026-01-01 23:00", tz="UTC")
+    bars = [anchor, anchor + pd.Timedelta(minutes=3), anchor + pd.Timedelta(minutes=6)]
+    unit, funding, adv, sigma = _frames(entries, ["BTCUSDT"], [[1.0]])
+    anchors = pd.DatetimeIndex([anchor])
+
+    def _marks(dip_bar: int) -> AccountMarkPanels:
+        closes = [100.0, 100.0, 100.0]
+        lows = [100.0, 100.0, 100.0]
+        lows[dip_bar] = 99.0
+        index = pd.DatetimeIndex(bars)
+        return AccountMarkPanels(
+            close=pd.DataFrame([[c] for c in closes], index=index, columns=["BTCUSDT"], dtype="float64"),
+            high=pd.DataFrame([[100.0]] * 3, index=index, columns=["BTCUSDT"], dtype="float64"),
+            low=pd.DataFrame([[v] for v in lows], index=index, columns=["BTCUSDT"], dtype="float64"),
+        )
+
+    filled = _orig_replay_account(
+        unit, _marks(1), funding, adv, sigma, _rules(minimum=0.0), _fixed_policy(),
+        anchor_times=anchors, capital=1000.0, taker_fee_bps=6.0,
+        execution="maker", maker_fee_bps=2.0, passive_window_bars=1,
+    )
+    assert filled.maker_fill_fraction == pytest.approx(1.0)
+    assert filled.fee_paid == pytest.approx(10.0 * 100.0 * 2e-4)
+    crossed = _orig_replay_account(
+        unit, _marks(2), funding, adv, sigma, _rules(minimum=0.0), _fixed_policy(),
+        anchor_times=anchors, capital=1000.0, taker_fee_bps=6.0,
+        execution="maker", maker_fee_bps=2.0, passive_window_bars=1,
+    )
+    assert crossed.maker_fill_fraction == pytest.approx(0.0)
+
+
+def test_replay_account_funding_step_spans_anchor_to_anchor() -> None:
+    anchors = pd.DatetimeIndex(
+        [pd.Timestamp("2026-01-01 23:00", tz="UTC"), pd.Timestamp("2026-01-02 23:00", tz="UTC")]
+    )
+    entries = pd.DatetimeIndex([pd.Timestamp("2026-01-02", tz="UTC"), pd.Timestamp("2026-01-03", tz="UTC")])
+    grid = pd.date_range(anchors[0], entries[-1] + pd.Timedelta(days=1), freq="3min", tz="UTC")
+    frame = pd.DataFrame(100.0, index=grid, columns=["BTCUSDT"], dtype="float64")
+    marks = AccountMarkPanels(close=frame, high=frame.copy(), low=frame.copy())
+    unit, _, adv, sigma = _frames(entries, ["BTCUSDT"], [[1.0], [1.0]])
+    funding = pd.DataFrame([[0.0], [0.001]], index=entries, columns=["BTCUSDT"], dtype="float64")
+    result = _orig_replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0), _fixed_policy(),
+        anchor_times=anchors, capital=1000.0, taker_fee_bps=0.0, apply_order_filters=False,
+    )
+    assert result.funding_paid == pytest.approx(10.0 * 100.0 * 0.001)
+
+
+def test_replay_account_intraday_drawdown_sees_recovered_dip() -> None:
+    anchors = pd.DatetimeIndex(
+        [pd.Timestamp("2026-01-01 23:00", tz="UTC"), pd.Timestamp("2026-01-02 23:00", tz="UTC")]
+    )
+    entries = pd.DatetimeIndex([pd.Timestamp("2026-01-02", tz="UTC"), pd.Timestamp("2026-01-03", tz="UTC")])
+    grid = pd.date_range(anchors[0], entries[-1] + pd.Timedelta(days=1), freq="3min", tz="UTC")
+    closes = [100.0] * len(grid)
+    mid = len(grid) // 4
+    closes[mid] = 80.0
+    frame = pd.DataFrame([[c] for c in closes], index=grid, columns=["BTCUSDT"], dtype="float64")
+    low = frame.copy()
+    low.iloc[mid, 0] = 80.0
+    marks = AccountMarkPanels(close=frame, high=frame.copy(), low=low)
+    unit, funding, adv, sigma = _frames(entries, ["BTCUSDT"], [[1.0], [1.0]])
+    result = _orig_replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0, ratio=0.0, leverage=100),
+        _fixed_policy(exposure_max=1.0), anchor_times=anchors,
+        capital=1000.0, taker_fee_bps=0.0, apply_order_filters=False,
+    )
+    assert result.daily_equity.iloc[0] == pytest.approx(1000.0)
+    assert result.daily_equity.iloc[1] == pytest.approx(1000.0)
+    assert result.intraday_max_drawdown == pytest.approx(0.20)
+
+
+def test_replay_account_intraday_drawdown_peak_carries_across_segments() -> None:
+    anchors = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2026-01-01 23:00", tz="UTC"),
+            pd.Timestamp("2026-01-02 23:00", tz="UTC"),
+            pd.Timestamp("2026-01-03 23:00", tz="UTC"),
+        ]
+    )
+    entries = pd.DatetimeIndex(
+        [pd.Timestamp("2026-01-02", tz="UTC"), pd.Timestamp("2026-01-03", tz="UTC"), pd.Timestamp("2026-01-04", tz="UTC")]
+    )
+    grid = pd.date_range(anchors[0], entries[-1] + pd.Timedelta(days=1), freq="3min", tz="UTC")
+    a1 = grid.get_loc(anchors[1])
+    closes = [100.0] * len(grid)
+    closes[a1 // 2] = 120.0
+    closes[a1 + (len(grid) - a1) // 2] = 110.0
+    frame = pd.DataFrame([[c] for c in closes], index=grid, columns=["BTCUSDT"], dtype="float64")
+    marks = AccountMarkPanels(close=frame, high=frame.copy(), low=frame.copy())
+    unit, funding, adv, sigma = _frames(entries, ["BTCUSDT"], [[1.0], [1.0], [1.0]])
+    result = _orig_replay_account(
+        unit, marks, funding, adv, sigma, _rules(minimum=0.0, ratio=0.0, leverage=100),
+        _fixed_policy(exposure_max=1.0), anchor_times=anchors,
+        capital=1000.0, taker_fee_bps=0.0, apply_order_filters=False,
+    )
+    assert result.intraday_max_drawdown == pytest.approx(1.0 - 1000.0 / 1200.0)
+
+
+def test_replay_account_liquidation_sets_full_drawdown() -> None:
+    result = _wick_replay(50.0)
+    assert result.liquidated_at is not None
+    assert result.intraday_max_drawdown == 1.0
+
+
+def test_replay_account_misaligned_anchors_fail_closed() -> None:
+    base = _valid_kwargs()
+    dates = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
+    short = pd.DatetimeIndex(dates[:1])
+    with pytest.raises(DataIntegrityError):
+        _orig_replay_account(**{**base, "anchor_times": short})  # type: ignore[arg-type]
+    dup = pd.DatetimeIndex([dates[0], dates[0]])
+    with pytest.raises(DataIntegrityError):
+        _orig_replay_account(**{**base, "anchor_times": dup})  # type: ignore[arg-type]
+    off = pd.DatetimeIndex([dates[0], dates[1] + pd.Timedelta(minutes=1)])
+    with pytest.raises(DataIntegrityError):
+        _orig_replay_account(**{**base, "anchor_times": off})  # type: ignore[arg-type]
+
+
+def test_replay_account_future_bars_never_change_past_entries() -> None:
+    dates = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+    anchors = pd.DatetimeIndex(dates)
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[1.0], [1.0], [1.0]])
+    grid = pd.DatetimeIndex([*list(dates), dates[-1] + pd.Timedelta(hours=6)])
+    closes = [[100.0], [101.0], [102.0], [103.0]]
+    frame = pd.DataFrame(closes, index=grid, columns=["BTCUSDT"], dtype="float64")
+    base_marks = AccountMarkPanels(close=frame, high=frame.copy(), low=frame.copy())
+    shocked_frame = frame.copy()
+    shocked_frame.iloc[2:, 0] = shocked_frame.iloc[2:, 0] * 2.5
+    shocked_marks = AccountMarkPanels(
+        close=shocked_frame, high=shocked_frame.copy(), low=shocked_frame.copy()
+    )
+    kwargs: dict[str, object] = {"capital": 1000.0, "taker_fee_bps": 6.0}
+    first = _orig_replay_account(
+        unit, base_marks, funding, adv, sigma, _rules(minimum=1.0), _fixed_policy(),
+        anchor_times=anchors, **kwargs,  # type: ignore[arg-type]
+    )
+    second = _orig_replay_account(
+        unit, shocked_marks, funding, adv, sigma, _rules(minimum=1.0), _fixed_policy(),
+        anchor_times=anchors, **kwargs,  # type: ignore[arg-type]
+    )
+    assert first.daily_equity.iloc[:2].equals(second.daily_equity.iloc[:2])
