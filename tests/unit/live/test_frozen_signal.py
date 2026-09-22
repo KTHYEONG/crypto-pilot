@@ -382,6 +382,24 @@ def test_malformed_bootstrap_fails_closed(layout: dict[str, Path], tmp_path: Pat
         _run(_DAY, {**layout, "boot": bad})
 
 
+def test_sealed_bootstrap_readable_with_key_and_blocked_without(
+    layout: dict[str, Path], tmp_path: Path,
+) -> None:
+    from pydantic import SecretStr
+
+    from src.live.crypto import derive_key, seal_bytes
+    from src.live.errors import ArtifactSealError
+
+    key = SecretStr(base64.b64encode(b"2" * 32).decode("ascii"))
+    sealed = tmp_path / "boot.parquet.enc"
+    sealed.write_bytes(seal_bytes(layout["boot"].read_bytes(), derive_key(key)))
+    # 공개 리포에 커밋되는 건 이 바이트뿐이다 -- 키 없이는 무의미한 암호문이어야 한다.
+    with pytest.raises(ArtifactSealError):
+        _run(_DAY, {**layout, "boot": sealed})
+    report = _run(_DAY, {**layout, "boot": sealed}, artifact_key=key)
+    assert report.written is True
+
+
 def test_empty_forward_file_uses_bootstrap_anchor(layout: dict[str, Path]) -> None:
     pd.DataFrame(
         {"unit_return": pd.Series([], dtype="float64")},
