@@ -26,9 +26,7 @@ from src.live.settings import LiveSettings
 from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
 
 @pytest.fixture(autouse=True)
-def _maybe_disable_orderbook_capture(monkeypatch, request):  # noqa: ARG001
-    if "captures_orderbook" in request.node.name:
-        return
+def _maybe_disable_orderbook_capture(monkeypatch):
     import src.live.orderbook as ob_mod
 
     monkeypatch.setattr(ob_mod, "capture_order_books", lambda *a, **k: [])
@@ -665,142 +663,6 @@ def test_run_shadow_cycle_paper_mode_records_immediate_taker_fills(tmp_path, mon
 
 
 
-def test_run_shadow_cycle_captures_orderbook_and_never_halts_on_failure(tmp_path, monkeypatch) -> None:
-    import src.live.runner as runner_mod
-    from src.live.runner import run_shadow_cycle
-    from src.live.settings import LiveSettings
-    import json
-
-    decision_time = pd.Timestamp("2026-08-24 00:00Z")
-    now = decision_time + pd.Timedelta(hours=2)
-    artifact = tmp_path / "deployed_target_weights.parquet"
-    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(artifact, index=True)
-    _seed_close_artifact(artifact)
-
-    class MarketClientOK:
-        def exchange_info(self):
-            return {
-                "symbols": [{
-                    "symbol": "AAAUSDT",
-                    "contractType": "PERPETUAL",
-                    "quoteAsset": "USDT",
-                    "status": "TRADING",
-                    "quantityPrecision": 3,
-                    "pricePrecision": 2,
-                    "filters": [
-                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
-                        {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100000"},
-                        {"filterType": "MIN_NOTIONAL", "minNotional": "1"},
-                    ],
-                }],
-                "rateLimits": [
-                    {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
-                    {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
-                    {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300},
-                ],
-            }
-
-        def book_ticker(self, symbol):
-            return {"bidPrice": "100.00", "askPrice": "101.00"}
-
-        def book_tickers(self):
-            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "101.00", "symbol": "AAAUSDT"}}
-
-        def premium_index(self):
-            return {}
-
-        def depth(self, symbol, *, limit=20):
-            return {"lastUpdateId": 1, "bids": [["100", "1"]], "asks": [["101", "1"]]}
-
-    class OrderClient:
-        def request(self, method, path, params=None, *, signed=False):
-            if path == "/fapi/v2/account":
-                return {"totalWalletBalance": "2000", "availableBalance": "1900", "totalInitialMargin": "10", "totalUnrealizedProfit": "0", "dualSidePosition": "false", "multiAssetsMargin": "false"}
-            if path == "/fapi/v2/positionRisk":
-                return []
-            raise AssertionError(path)
-
-        def sync_server_time(self):
-            return None
-
-        def open_orders(self):
-            return []
-
-        def book_ticker(self, s):
-            return {"bidPrice": "100.00", "askPrice": "101.00"}
-
-        def book_tickers(self):
-            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "101.00"}}
-
-    # first run success
-    orderbook_dir = tmp_path / "ob"
-
-    def fake_exec(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
-        from src.live.executor import ExecutionOutcome as EO
-
-        return tuple(EO(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((i.quantity, Decimal("100"), 2.0, "maker_fill", "maker"),)) for i in intents)
-
-    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClientOK())
-    monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
-    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_exec)
-
-    ledger_path = tmp_path / "ledger.json"
-    settings = LiveSettings(
-        notional_equity_usdt=2000.0,
-        ledger_path=str(ledger_path),
-        orderbook_capture_enabled=True,
-        orderbook_capture_dir=str(orderbook_dir),
-        orderbook_capture_duration_s=0,
-        orderbook_capture_interval_s=10,
-        microstructure_dir=str(tmp_path / "micro"),
-        execution_quality_dir=str(tmp_path / "eq"),
-        portfolio_state_dir=str(tmp_path / "port"),
-        fills_dir=str(tmp_path / "fills"),
-        tax_ledger_dir=str(tmp_path / "tax"),
-    )
-    report = run_shadow_cycle(settings, decision_time, artifact, now=now)
-    assert report.status == "COMPLETE"
-    files = list(orderbook_dir.glob("live_orderbook_*.parquet"))
-    assert len(files) >= 1
-
-    # second run where depth raises
-    class MarketClientFail(MarketClientOK):
-        def depth(self, symbol, *, limit=20):
-            raise RuntimeError("depth fail")
-
-    # second run where depth raises -> simulate whole capture failure via patching orderbook capture to raise
-    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClientFail())
-    import src.live.orderbook as ob_mod
-
-    monkeypatch.setattr(ob_mod, "capture_order_books", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("depth fail")))
-    # need fresh ledger for second decision time to avoid duplicate? use same ledger but different decision_time
-    decision_time2 = pd.Timestamp("2026-08-25 00:00Z")
-    artifact2 = tmp_path / "deployed_target_weights2.parquet"
-    pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time2])).to_parquet(artifact2, index=True)
-    _seed_close_artifact(artifact2)
-    ledger_path2 = tmp_path / "ledger2.json"
-    settings2 = LiveSettings(
-        notional_equity_usdt=2000.0,
-        ledger_path=str(ledger_path2),
-        orderbook_capture_enabled=True,
-        orderbook_capture_dir=str(tmp_path / "ob2"),
-        orderbook_capture_duration_s=0,
-        orderbook_capture_interval_s=10,
-        microstructure_dir=str(tmp_path / "micro2"),
-        execution_quality_dir=str(tmp_path / "eq2"),
-        portfolio_state_dir=str(tmp_path / "port2"),
-        fills_dir=str(tmp_path / "fills2"),
-        tax_ledger_dir=str(tmp_path / "tax2"),
-    )
-    report2 = run_shadow_cycle(settings2, decision_time2, artifact2, now=decision_time2 + pd.Timedelta(hours=2))
-    assert report2.status == "COMPLETE"
-    audit_path = tmp_path / "shadow_cycle.jsonl"
-    txt = audit_path.read_text(encoding="utf-8")
-    assert "orderbook_capture_failed" in txt
-
-
-
 def test_run_shadow_cycle_shadow_mode_does_not_use_immediate_taker(tmp_path, monkeypatch) -> None:
     import src.live.runner as runner_mod
     from src.live.runner import run_shadow_cycle
@@ -1025,128 +887,195 @@ def test_load_paper_funding_skips_missing_symbols(tmp_path, monkeypatch) -> None
     assert list(out) == ["AAAUSDT"]
     assert float(out["AAAUSDT"].iloc[0]) == 0.001
 
-def test_run_shadow_cycle_captures_pretrade_and_baseline_before_post_trade_orderbook(tmp_path, monkeypatch) -> None:
-    import pandas as pd
-    import src.live.runner as runner_mod
-    import src.live.orderbook as ob_mod
-    from src.live.runner import run_shadow_cycle
-    from src.live.settings import LiveSettings
+"""Replacement + new depth-recorder cycle tests (spliced into test_runner_shadow_cycle.py)."""
+import json
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
 
-    decision_time = pd.Timestamp("2026-08-24 00:00Z")
-    now = decision_time + pd.Timedelta(hours=2)
-    artifact = tmp_path / "deployed_target_weights.parquet"
+import pandas as pd
+
+import src.live.runner as runner_mod
+from src.live.depth_capture import DepthCaptureSummary
+from src.live.executor import ExecutionOutcome
+from src.live.runner import run_shadow_cycle
+from src.live.settings import LiveSettings
+
+from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+
+class _StubDepthRecorder:
+    instances: list[_StubDepthRecorder] = []
+
+    def __init__(self, symbols: Any, **kwargs: Any) -> None:
+        self.symbols = list(symbols)
+        self.kwargs = kwargs
+        self.starts = 0
+        self.stops: list[float] = []
+        _StubDepthRecorder.instances.append(self)
+
+    def start(self) -> None:
+        self.starts += 1
+
+    def stop(self, *, post_window_s: float, shutdown: Any = None) -> DepthCaptureSummary:
+        self.stops.append(float(post_window_s))
+        return DepthCaptureSummary(
+            rows=len(self.symbols),
+            symbols_requested=len(self.symbols),
+            symbols_seen=len(self.symbols),
+            reconnects=0,
+            parts=1,
+        )
+
+
+def _three_symbol_market():
+    class _Market(StubMarketClient):
+        def exchange_info(self) -> dict[str, Any]:
+            payload = super().exchange_info()
+            template = payload["symbols"][0]
+            extra = dict(template)
+            extra["symbol"] = "CCCUSDT"
+            payload["symbols"].append(extra)
+            return payload
+
+        def book_ticker(self, symbol: str) -> dict[str, str]:
+            return {"bidPrice": "100.00", "askPrice": "101.00"}
+
+    return _Market()
+
+
+def _three_symbol_weights(tmp_path: Path) -> Path:
+    path = tmp_path / "deployed_target_weights_depth.parquet"
     pd.DataFrame(
-        {"AAAUSDT": [0.02], "BBBUSDT": [0.0]}, index=pd.DatetimeIndex([decision_time])
-    ).to_parquet(artifact, index=True)
-    _seed_close_artifact(artifact)
+        {"AAAUSDT": [0.03], "BUSDT": [0.02], "CCCUSDT": [0.01]},
+        index=pd.DatetimeIndex([DECISION_TIME]),
+    ).to_parquet(path, index=True)
+    closes = pd.DataFrame(
+        100.0, index=pd.DatetimeIndex([DECISION_TIME]),
+        columns=["AAAUSDT", "BUSDT", "CCCUSDT"], dtype="float64",
+    )
+    from src.live.deployed_weights import decision_ohlcv_close_path
 
-    class MarketClientOK:
-        def exchange_info(self):
-            return {
-                "symbols": [{
-                    "symbol": "AAAUSDT",
-                    "contractType": "PERPETUAL",
-                    "quoteAsset": "USDT",
-                    "status": "TRADING",
-                    "quantityPrecision": 3,
-                    "pricePrecision": 2,
-                    "filters": [
-                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
-                        {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100000"},
-                        {"filterType": "MIN_NOTIONAL", "minNotional": "1"},
-                    ],
-                }],
-                "rateLimits": [
-                    {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
-                    {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
-                    {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300},
-                ],
-            }
+    closes.to_parquet(decision_ohlcv_close_path(path), index=True)
+    return path
 
-        def book_ticker(self, symbol):
-            return {"bidPrice": "100.00", "askPrice": "101.00"}
 
-        def book_tickers(self):
-            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "101.00", "symbol": "AAAUSDT"}}
+def _depth_cycle_settings(tmp_path: Path, monkeypatch: Any, **overrides: Any) -> tuple[Any, list[Any]]:
+    import src.common.paths as paths_mod
+    import src.live.settings as settings_mod
 
-        def premium_index(self):
-            return {}
+    monkeypatch.setattr(paths_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(settings_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: _three_symbol_market())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: StubOrderClient())
+    monkeypatch.setattr(
+        runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl"
+    )
+    monkeypatch.setattr(runner_mod, "ExecutionDepthRecorder", _StubDepthRecorder)
+    _StubDepthRecorder.instances.clear()
+    calls: list[Any] = []
 
-        def depth(self, symbol, *, limit=20):
-            return {"lastUpdateId": 1, "bids": [["100", "1"]], "asks": [["101", "1"]]}
-
-    class OrderClient:
-        def request(self, method, path, params=None, *, signed=False):
-            if path == "/fapi/v2/account":
-                return {"totalWalletBalance": "2000", "availableBalance": "1900", "totalInitialMargin": "10", "totalUnrealizedProfit": "0", "dualSidePosition": "false", "multiAssetsMargin": "false"}
-            if path == "/fapi/v2/positionRisk":
-                return []
-            raise AssertionError(path)
-
-        def sync_server_time(self):
-            return None
-
-        def open_orders(self):
-            return []
-
-        def book_ticker(self, s):
-            return {"bidPrice": "100.00", "askPrice": "101.00"}
-
-        def book_tickers(self):
-            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "101.00"}}
-
-    calls: list[tuple[tuple, str]] = []
-
-    def fake_capture(client, symbols, decision_time, **kwargs):
-        calls.append((tuple(symbols), kwargs.get("phase", "post_trade")))
-        return []
-
-    def fake_exec(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
-        from src.live.executor import ExecutionOutcome as EO
-
+    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        calls.extend(intents)
         return tuple(
-            EO(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((i.quantity, Decimal("100"), 2.0, "maker_fill", "maker"),))
+            ExecutionOutcome(
+                symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+            )
             for i in intents
         )
 
-    from decimal import Decimal
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    params: dict[str, Any] = {
+        "mode": "paper",
+        "notional_equity_usdt": 2000.0,
+        "ledger_path": str(tmp_path / "ledger.json"),
+        "order_journal_path": str(tmp_path / "order_journal.jsonl"),
+        "fills_dir": str(tmp_path / "fills"),
+        "execution_quality_dir": str(tmp_path / "eq"),
+        "portfolio_state_dir": str(tmp_path / "port"),
+        "microstructure_dir": str(tmp_path / "micro"),
+        "tax_ledger_dir": str(tmp_path / "tax"),
+        "record_run_id": "depthtest01",
+        "exec_depth_post_window_s": 0.0,
+    }
+    params.update(overrides)
+    return LiveSettings(**params), calls
 
-    monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClientOK())
-    monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
-    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_exec)
-    monkeypatch.setattr(ob_mod, "capture_order_books", fake_capture)
 
-    ledger_path = tmp_path / "ledger.json"
-    settings = LiveSettings(
-        notional_equity_usdt=2000.0,
-        ledger_path=str(ledger_path),
-        orderbook_capture_enabled=True,
-        orderbook_capture_dir=str(tmp_path / "ob"),
-        orderbook_capture_duration_s=0,
-        orderbook_capture_interval_s=10,
-        orderbook_capture_pretrade_max_symbols=15,
-        orderbook_capture_baseline_max_symbols=80,
-        microstructure_dir=str(tmp_path / "micro"),
-        execution_quality_dir=str(tmp_path / "eq"),
-        portfolio_state_dir=str(tmp_path / "port"),
-        fills_dir=str(tmp_path / "fills"),
-        tax_ledger_dir=str(tmp_path / "tax"),
-    )
-
-    report = run_shadow_cycle(settings, decision_time, artifact, now=now)
-
+def test_run_shadow_cycle_depth_recorder_brackets_execution(tmp_path, monkeypatch) -> None:
+    settings, calls = _depth_cycle_settings(tmp_path, monkeypatch)
+    weights_path = _three_symbol_weights(tmp_path)
+    report = run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
     assert report.status == "COMPLETE"
-    phases = [c[1] for c in calls]
-    assert "pre_trade" in phases and "baseline_untraded" in phases and "post_trade" in phases
-    assert phases.index("pre_trade") < phases.index("post_trade")
-    assert phases.index("baseline_untraded") < phases.index("post_trade")
-    pretrade_call = next(c for c in calls if c[1] == "pre_trade")
-    assert pretrade_call[0] == ("AAAUSDT",)
-    baseline_call = next(c for c in calls if c[1] == "baseline_untraded")
-    assert baseline_call[0] == ("BBBUSDT",)
+    assert len(_StubDepthRecorder.instances) == 1
+    recorder = _StubDepthRecorder.instances[0]
+    assert recorder.starts == 1
+    expected = sorted(calls, key=lambda i: abs(i.quantity * Decimal("100.50")), reverse=True)
+    assert recorder.symbols == [i.symbol for i in expected]
+    assert len(recorder.symbols) == 3
+    assert recorder.stops == [settings.exec_depth_post_window_s]
+    assert recorder.kwargs["run_id"] == DECISION_TIME.strftime("%Y%m%d")
+    lines = (tmp_path / "shadow_cycle.jsonl").read_text(encoding="utf-8").splitlines()
+    events = [json.loads(line)["event"] for line in lines]
+    assert "exec_depth_capture" in events
 
 
+def test_run_shadow_cycle_execution_failure_stops_recorder_immediately(tmp_path, monkeypatch) -> None:
+    from src.live.errors import LiveTradingError
+
+    settings, _ = _depth_cycle_settings(tmp_path, monkeypatch)
+
+    def _boom(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        raise LiveTradingError("venue down")
+
+    monkeypatch.setattr(runner_mod, "execute_intents", _boom)
+    weights_path = _three_symbol_weights(tmp_path)
+    report = run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "HALT"
+    assert len(_StubDepthRecorder.instances) == 1
+    assert _StubDepthRecorder.instances[0].stops == [0.0]
+
+
+def test_run_shadow_cycle_pre_execution_failure_stops_recorder_immediately(tmp_path, monkeypatch) -> None:
+    settings, calls = _depth_cycle_settings(tmp_path, monkeypatch)
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("policy build failed")
+
+    # 캡처 시작 뒤, 주문 집행 전 단계의 실패
+    monkeypatch.setattr(runner_mod, "_uncovered_positions", _boom)
+    weights_path = _three_symbol_weights(tmp_path)
+    report = run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "HALT"
+    assert calls == []
+    assert len(_StubDepthRecorder.instances) == 1
+    assert _StubDepthRecorder.instances[0].stops == [0.0]
+
+
+def test_run_shadow_cycle_never_calls_rest_depth_capture(tmp_path, monkeypatch) -> None:
+    import src.live.orderbook as ob_mod
+
+    settings, _ = _depth_cycle_settings(tmp_path, monkeypatch)
+
+    def _forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("REST depth capture must not run in the cycle")
+
+    monkeypatch.setattr(ob_mod, "capture_order_books", _forbidden)
+    weights_path = _three_symbol_weights(tmp_path)
+    report = run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "COMPLETE"
+    assert list((tmp_path / "ob").glob("*.parquet")) == [] if (tmp_path / "ob").exists() else True
+
+
+def test_run_shadow_cycle_audit_mirrored_into_run_directory(tmp_path, monkeypatch) -> None:
+    settings, _ = _depth_cycle_settings(tmp_path, monkeypatch)
+    weights_path = _three_symbol_weights(tmp_path)
+    report = run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "COMPLETE"
+    mirror = tmp_path / "state" / "runs" / "depthtest01" / "audit" / "2026-08-24.jsonl"
+    assert mirror.exists()
+    assert mirror.read_bytes() == (tmp_path / "shadow_cycle.jsonl").read_bytes()
 def test_run_shadow_cycle_complete_stamps_ledger_and_rerun_does_not_trade(artifact, live_env, tmp_path) -> None:
     from src.live.ledger import load_ledger
     from src.live.runner import run_shadow_cycle
@@ -1789,3 +1718,30 @@ def test_runner_sealed_anchor_roundtrip(tmp_path) -> None:
         latest_decision_ohlcv_close(weights_path, DECISION_TIME, artifact_key=SecretStr(base64.b64encode(b"1" * 32).decode()))
     with pytest.raises(ArtifactSealError):
         latest_decision_ohlcv_close(weights_path, DECISION_TIME)
+
+
+def test_run_shadow_cycle_skips_depth_when_disabled(tmp_path, monkeypatch) -> None:
+    settings, _ = _depth_cycle_settings(tmp_path, monkeypatch, exec_depth_capture_enabled=False)
+    weights_path = _three_symbol_weights(tmp_path)
+    report = run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "COMPLETE"
+    assert _StubDepthRecorder.instances == []
+    lines = (tmp_path / "shadow_cycle.jsonl").read_text(encoding="utf-8").splitlines()
+    assert any(
+        json.loads(line).get("event") == "exec_depth_skipped"
+        and json.loads(line).get("reason") == "disabled"
+        for line in lines
+    )
+
+
+def test_run_shadow_cycle_unexpected_error_stops_recorder(tmp_path, monkeypatch) -> None:
+    settings, _ = _depth_cycle_settings(tmp_path, monkeypatch)
+
+    def _boom(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(runner_mod, "execute_intents", _boom)
+    weights_path = _three_symbol_weights(tmp_path)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert _StubDepthRecorder.instances[0].stops == [0.0]

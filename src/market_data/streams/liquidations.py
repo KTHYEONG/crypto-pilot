@@ -6,11 +6,14 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from src.common.paths import DATA_DIR
+
+if TYPE_CHECKING:
+    from src.market_data.streams.coverage import CoverageTracker
 
 _logger = logging.getLogger(__name__)
 
@@ -348,6 +351,10 @@ def default_liquidations_dir() -> Path:
     return DATA_DIR / "futures" / "liquidations"
 
 
+def _utc_now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")
+
+
 async def run_liquidation_stream(
     *,
     symbols: list[str] | None,
@@ -357,7 +364,15 @@ async def run_liquidation_stream(
     shutdown: Any | None = None,
     exchange_factory: Callable[[], Any] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    coverage: CoverageTracker | None = None,
+    now_fn: Callable[[], pd.Timestamp] | None = None,
 ) -> None:
+    """Stream Binance forceOrder liquidations into daily parquet partitions until shutdown.
+
+    Binance pushes at most one liquidation snapshot per symbol per second, so stored events are a lower
+    bound of liquidation flow. When ``coverage`` is given, every successful watch return is attested and
+    every transport error closes the attested segment, making outages distinguishable from quiet markets.
+    """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     if exchange_factory is not None:
@@ -378,8 +393,10 @@ async def run_liquidation_stream(
 
     buffer: list[LiquidationEvent] = []
     last_flush = clock()
+    last_coverage_flush = last_flush
     backoff = 1.0
     max_backoff = 60.0
+    _now = now_fn if now_fn is not None else _utc_now
 
     # helpers to check shutdown
     def _is_shutdown() -> bool:
@@ -418,13 +435,23 @@ async def run_liquidation_stream(
                 ev = parse_liquidation(msg, ingested_at=now_ingested)
                 if ev is not None:
                     buffer.append(ev)
+            if coverage is not None:
+                coverage.mark_ok(_now())
             # reset backoff on success
             backoff = 1.0
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if coverage is not None:
+                coverage.mark_error(_now())
             # log and backoff
             _logger.warning("liquidation stream error: %s backoff=%.1fs", exc, backoff)
+            if coverage is not None:
+                try:
+                    coverage.flush()
+                except Exception as exc_cov:
+                    _logger.warning("liquidation coverage flush failed: %s", exc_cov)
+                last_coverage_flush = clock()
             try:
                 await asyncio.sleep(backoff)
             except asyncio.CancelledError:
@@ -459,6 +486,12 @@ async def run_liquidation_stream(
                 _logger.warning("liquidation flush failed: %s", exc)
                 # keep buffer for retry; update last_flush to avoid tight retry loop?
                 last_flush = clock()
+        if coverage is not None and (clock() - last_coverage_flush) >= flush_interval_s:
+            try:
+                coverage.flush()
+            except Exception as exc:
+                _logger.warning("liquidation coverage flush failed: %s", exc)
+            last_coverage_flush = clock()
         # cooperative yield to avoid busy loop if watch returns immediately with empty
         # and shutdown not requested
         if not should_flush and not buffer:
@@ -474,6 +507,11 @@ async def run_liquidation_stream(
             append_liquidation_events(buffer, directory)
         except Exception as exc:
             _logger.warning("liquidation final flush failed: %s", exc)
+    if coverage is not None:
+        try:
+            coverage.flush()
+        except Exception as exc:
+            _logger.warning("liquidation coverage flush failed: %s", exc)
     try:
         close = getattr(ex, "close", None)
         if close is not None:
