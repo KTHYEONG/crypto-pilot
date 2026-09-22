@@ -102,7 +102,7 @@ jobs:
 
           scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/crypto-pilot/"
           # .env는 서버에 이미 배치된 것을 정본으로 쓴다(sops 폐기, CI가 더 이상 덮어쓰지 않음).
-          scp $SSH_OPTS "$PARAMS/frozen_unit_returns_maker.parquet" "$PARAMS/venue_rules_20260921.json" \
+          scp $SSH_OPTS "$PARAMS/frozen_unit_returns_maker.parquet.enc" "$PARAMS/venue_rules_20260921.json" \
             "$REMOTE_USER@$HOST:~/crypto-pilot/$PARAMS/"
           # 호스트 공용 백업 타이머가 참조하는 필터. 타이머 스크립트 자체에 필터 인자를 걸어두는
           # 1회성 설치는 이미 완료됐고(2026-09-21), 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.

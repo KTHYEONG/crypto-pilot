@@ -14,7 +14,7 @@ from pydantic import SecretStr
 
 from src.common.errors import DataIntegrityError
 from src.live.deployed_weights import append_weight_row, decision_ohlcv_close_path, load_weights_frame
-from src.live.errors import CausalityViolation
+from src.live.errors import ArtifactSealError, CausalityViolation
 from src.live.frozen_book import (
     build_live_frozen_book,
     crypto_census,
@@ -59,11 +59,25 @@ class FrozenStepReport:
     written: bool
 
 
-def _read_unit_series(path: Path, label: str) -> pd.Series:
-    """Read a ``unit_return`` parquet column as a UTC daily return series."""
+def _read_unit_series(path: Path, label: str, *, artifact_key: SecretStr | None = None) -> pd.Series:
+    """Read a ``unit_return`` parquet column as a UTC daily return series.
+
+    ``path`` ending in ``.enc`` is opened as an AES-256-GCM envelope (``artifact_key``
+    required); this is how the calibrated bootstrap ships publicly without handing the
+    historical performance series to anyone who clones the repository.
+    """
     try:
-        frame = pd.read_parquet(path)
+        if str(path).endswith(".enc"):
+            if artifact_key is None:
+                raise ArtifactSealError(f"sealed artifact requires a key: {path}")
+            from src.live.crypto import derive_key, read_sealed_parquet
+
+            frame = read_sealed_parquet(path, derive_key(artifact_key))
+        else:
+            frame = pd.read_parquet(path)
         values = frame["unit_return"]
+    except ArtifactSealError:
+        raise
     except Exception as exc:
         raise DataIntegrityError(f"{label} unit returns unreadable: {path}: {exc}") from exc
     index = pd.DatetimeIndex(pd.to_datetime(values.index, utc=True))
@@ -136,7 +150,7 @@ def run_frozen_signal_step(
         [path.stem for path in hourly_dir.glob("*.parquet") if not is_temp_artifact(path.name)],
         non_crypto,
     )
-    bootstrap = _read_unit_series(Path(unit_bootstrap_path), "bootstrap")
+    bootstrap = _read_unit_series(Path(unit_bootstrap_path), "bootstrap", artifact_key=artifact_key)
     forward_path = Path(unit_forward_path)
     forward = _read_unit_series(forward_path, "forward") if forward_path.exists() else pd.Series(
         dtype="float64", index=pd.DatetimeIndex([], tz="UTC"), name="unit_return",
