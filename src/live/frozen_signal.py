@@ -22,7 +22,11 @@ from src.live.frozen_book import (
     unit_proxy_returns,
 )
 from src.live.ledger import load_ledger
-from src.market_data.binance.venue_rules import VenueRuleSnapshot, load_venue_rule_snapshot
+from src.market_data.binance.venue_rules import (
+    VenueRuleSnapshot,
+    load_venue_rule_snapshot,
+    venue_rule_snapshot_paths,
+)
 from src.market_data.storage.loaders import load_funding_rates
 from src.market_data.storage.ohlcv import is_temp_artifact
 from src.mhs.account_policy import (
@@ -99,7 +103,7 @@ def _load_live_funding(data_root: Path, census: tuple[str, ...]) -> dict[str, pd
 
 def _resolve_venue(venue_dir: Path, fallback: Path) -> tuple[str, VenueRuleSnapshot]:
     """Newest snapshot under ``venue_dir``, or the fallback file when the directory is empty."""
-    candidates = sorted(Path(venue_dir).glob("*.json"))
+    candidates = venue_rule_snapshot_paths(Path(venue_dir))
     if candidates:
         chosen = candidates[-1]
     else:

@@ -236,3 +236,196 @@ def test_run_liquidation_stream_reconnects_on_error_without_dying(tmp_path, monk
     assert all(s <= 60.0 for s in backoffs)
     files = list(tmp_path.glob("liquidations_*.parquet"))
     assert sum(len(pd.read_parquet(f)) for f in files) == 1
+
+
+def _ticking_now(start: pd.Timestamp, step_s: float = 60.0):
+    state = {"n": 0}
+
+    def _now() -> pd.Timestamp:
+        out = start + pd.Timedelta(seconds=state["n"] * step_s)
+        state["n"] += 1
+        return out
+
+    return _now
+
+
+class _ScriptedExchange:
+    """Watch stub playing a scripted ok/error sequence, then shutting down."""
+
+    def __init__(self, script: list, shutdown) -> None:
+        self._script = list(script)
+        self._shutdown = shutdown
+        self.closed = 0
+
+    async def watch_liquidations_for_symbols(self, symbols, *a, **k):
+        if not self._script:
+            self._shutdown.requested = True
+            return []
+        action = self._script.pop(0)
+        if isinstance(action, Exception):
+            raise action
+        if not self._script:
+            self._shutdown.requested = True
+        return action
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+def test_run_liquidation_stream_quiet_stretch_still_attested(tmp_path) -> None:
+    """Quiet connected stretches attest coverage without writing event files."""
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    start = pd.Timestamp("2026-09-22T10:00:00Z")
+    tracker = CoverageTracker("liquidations", tmp_path)
+    stub = _ScriptedExchange([[], [], []], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            exchange_factory=lambda: stub,
+            coverage=tracker,
+            now_fn=_ticking_now(start),
+        )
+    )
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    assert len(out) == 1
+    assert out.iloc[0]["start"] == start
+    assert list(tmp_path.glob("liquidations_*.parquet")) == []
+
+
+def test_run_liquidation_stream_error_opens_coverage_gap(tmp_path) -> None:
+    """A transport error splits attested coverage while the stream survives."""
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    start = pd.Timestamp("2026-09-22T10:00:00Z")
+    tracker = CoverageTracker("liquidations", tmp_path)
+    stub = _ScriptedExchange([[_RAW_MSG], [_RAW_MSG], ConnectionError("ws dropped"), [_RAW_MSG], [_RAW_MSG]], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            exchange_factory=lambda: stub,
+            coverage=tracker,
+            now_fn=_ticking_now(start),
+        )
+    )
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    assert len(out) == 2
+    assert out.iloc[0]["end"] < out.iloc[1]["start"]
+
+
+def test_run_liquidation_stream_without_coverage_writes_no_attestation(tmp_path) -> None:
+    """Legacy behavior is unchanged when no coverage tracker is given."""
+    flag = _Flag()
+    stub = _ScriptedExchange([[_RAW_MSG]], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            exchange_factory=lambda: stub,
+            coverage=None,
+        )
+    )
+    assert not (tmp_path / "coverage").exists()
+
+
+def test_run_liquidation_stream_coverage_flush_failure_never_stops_stream(tmp_path) -> None:
+    """Coverage flush failures are logged and the stream continues."""
+    flag = _Flag()
+    start = pd.Timestamp("2026-09-22T10:00:00Z")
+
+    class _FailingFlush:
+        def mark_ok(self, ts) -> None:
+            return None
+
+        def mark_error(self, ts) -> None:
+            return None
+
+        def flush(self):
+            raise OSError("disk full")
+
+    stub = _ScriptedExchange([[], []], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            exchange_factory=lambda: stub,
+            coverage=_FailingFlush(),
+            now_fn=_ticking_now(start),
+        )
+    )
+    assert stub.closed == 1
+
+
+def test_run_liquidation_stream_error_with_flush_failure_still_recovers(tmp_path) -> None:
+    """An error-path coverage flush failure does not break reconnect."""
+    flag = _Flag()
+    start = pd.Timestamp("2026-09-22T10:00:00Z")
+
+    class _FailingFlush:
+        def mark_ok(self, ts) -> None:
+            return None
+
+        def mark_error(self, ts) -> None:
+            return None
+
+        def flush(self):
+            raise OSError("disk full")
+
+    stub = _ScriptedExchange(
+        [[_RAW_MSG], [_RAW_MSG], ConnectionError("ws dropped"), [_RAW_MSG], [_RAW_MSG]], flag
+    )
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            exchange_factory=lambda: stub,
+            coverage=_FailingFlush(),
+            now_fn=_ticking_now(start),
+        )
+    )
+    assert stub.closed == 1
+    assert list(tmp_path.glob("liquidations_*.parquet")) != []
+
+
+def test_run_liquidation_stream_default_clock_attests(tmp_path) -> None:
+    """The default UTC wall clock attests coverage when no clock is injected."""
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    before = pd.Timestamp.now(tz="UTC")
+    tracker = CoverageTracker("liquidations", tmp_path)
+    stub = _ScriptedExchange([[], [], []], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            exchange_factory=lambda: stub,
+            coverage=tracker,
+        )
+    )
+    out = load_coverage(
+        tmp_path, "liquidations", start=before, end=pd.Timestamp.now(tz="UTC"),
+    )
+    assert len(out) == 1

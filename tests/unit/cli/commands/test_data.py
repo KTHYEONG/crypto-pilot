@@ -697,3 +697,32 @@ def test_universe_gaps_excludes_tokenized_equity(monkeypatch) -> None:
     )
     data_mod._universe_gaps(args)
     assert calls == ["BTCUSDT"]
+
+
+def test_record_market_subcommand_wires_recorder(monkeypatch) -> None:
+    """`data collect record-market` runs the recorder with the given roots."""
+    from pathlib import Path
+
+    import src.cli.commands.data as data_mod
+
+    parser = _mhs_parser()
+    args = parser.parse_args(["data", "collect", "record-market", "--capture-root", "X"])
+    assert args.handler is data_mod._record_market
+    assert args.capture_root == "X"
+
+    captured: dict = {}
+
+    async def _fake_recorder(config, **kwargs):
+        captured["config"] = config
+        captured.update(kwargs)
+
+    monkeypatch.setattr("src.market_data.streams.recorder.run_market_recorder", _fake_recorder)
+    monkeypatch.setattr("src.live.lifecycle.install_shutdown_handlers", lambda *a, **k: None)
+
+    data_mod._record_market(args)
+
+    from src.market_data.streams.recorder import MarketRecorderConfig
+
+    assert captured["capture_root"] == Path("X")
+    assert isinstance(captured["config"], MarketRecorderConfig)
+    assert hasattr(captured["shutdown"], "requested")
