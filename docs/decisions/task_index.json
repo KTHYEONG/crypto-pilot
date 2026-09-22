@@ -1,6 +1,28 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_LIVE_COMPOUNDING_EXECUTION_REDESIGN",
+      "date": "2026-09-22",
+      "adr_id": "ADR_20260922_LIVE_COMPOUNDING_EXECUTION_REDESIGN",
+      "domain": "live",
+      "title": "라이브 봇 실행 구조를 복리 극대화 기준으로 개편(배포 가드·실계좌 사이징·체결·유닛 수익률)",
+      "why": "라이브가 백테스트와 다른 규칙으로 돌아 페이퍼 증거를 신뢰할 수 없었다: 배포가 결정 사이클 도중에도 데몬을 재시작시켜 제출이 최대 85분 지연됐고(60분 지연=CAGR -18%p), IOC가 결정시점 가격 기준 50bp를 넘으면 잔량을 포기했으며(모멘텀 북 특성상 하필 유리한 체결을 놓침), LIVE 모드는 시드 금액에 사이징이 고정돼 복리가 막혀 있었고, 50% 파산방지 청산이 백테스트에 없는 규칙으로 따로 있었으며, ADV/sigma가 결정일 23~24시 데이터를 미리 보는 룩어헤드가 있었고, 라이브 유닛수익률 기록의 가격/비...",
+      "resolution": "daemon_idle_gate에 결정 창(22:45~익일 02:00 UTC) 가드를 추가해 사이클 COMPLETE 전 재시작을 막고 prune을 실행 단계 뒤로 이동시켰으며, run manifest에 실제 적용 클립(0.05)과 평문 기준 부트스트랩 해시를 기록하고 레거시 값을 1회 자동 이관한다. resolve_sizing_equity의 LIVE 분기에서 시드 상한을 제거하고 fetch_live_account_equity로 실계좌 자산을 사이징에 연결했으며 apply_ruin_guard를 삭제했다. executor의 IOC 리스크...",
+      "impact": "라이브 제출 지연이 사실상 0분으로 강제되어 지연발 CAGR 손실(최대 -48%p)이 제거되고, 실계좌 자산 기준 자유복리가 적용되며(사용자 결정: 파산방지 청산 제거, 마진 기반 노출정책만 유지), IOC 잔량 포기가 사라져 unit x1 기준 +0.34%p, 미래참조 제거로 -0.5%p 반영된 더 보수적이고 정확한 배포수치(CAGR/MDD)가 나온다. 다음 배포 시 부트스트랩 enc 재생성과 새 LIVE_RECORD_RUN_ID(페이퍼 리셋)를 반드시 함께 수행해야 하며 결정 창 시간대(22:45~02:00 UTC)에는 배포가...",
+      "caveat": "실행 단계(약 66분) 동안 heartbeat ts가 갱신되지 않아 stale_after_s(45분) 이후에는 결정 창 안이어도 배포 가드가 통과시킬 수 있다(체결 자체엔 영향 없음, 후속 heartbeat 주기 갱신 작업 필요). LIVE 실거래 전환 전 부트스트랩 재생성/페이퍼 리셋 런북을 반드시 실행해야 한다."
+    },
+    {
+      "task_id": "TASK_MHS_ACCOUNT_SUBMIT_ANCHOR",
+      "date": "2026-09-22",
+      "adr_id": "ADR_20260922_MHS_ACCOUNT_SUBMIT_ANCHOR",
+      "domain": "execution",
+      "title": "MHS 계좌 원장 진입 기준을 정본 제출봉으로 통일하고 같은 북 대조로 교정",
+      "why": "계좌 원장이 00:00 진입 라벨로 사이징/체결하는데 정본·라이브는 23:00 신호 후 23:03 제출 기준이라 3.2%p CAGR 격차가 있었고, 대조는 클립 없는 다른 북(v2)과 비교해 −7.1%p로 과장됐으며 status가 항상 ok로 찍혀 실효가 없었다.",
+      "resolution": "assemble_account_inputs가 signal_available_at을 3분 그리드로 floor한 anchor_times를 함께 반환하도록 바꾸고 replay_account가 진입일 대신 anchor로 사이징/체결/청산을 계산하며 3분 종가 경로 최고점 대비 intraday_max_drawdown을 새로 계측한다. run_frozen_account_command는 클립 5%·노출 1배의 FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2로 자기 자신을 대조하고 허용오차(CAGR 0.5%p, MDD 1%p) 기반 o...",
+      "impact": "같은 북 기준 계좌-정본 CAGR 격차가 −3.2%p에서 −0.3%p로, 일별 표본 대신 3분 경로로 잰 MDD 과소평가(약 2%p)가 해소되어 대표 수치를 정본과 같은 기준으로 신뢰할 수 있다. 기존 replay_account 호출부는 anchor_times가 필수 키워드가 되어 하위호환 깨짐(테스트 shim으로만 legacy 경로 유지).",
+      "caveat": "라이브 배포된 유닛 수익률 부트스트랩(deploy/mhs/frozen_unit_returns_maker.parquet.enc)은 이번 변경으로 재생성되지 않았으므로 재배포 여부는 별도 판단이 필요하고, --variant account_unit 정본 대조 실행을 한 번 돌리기 전까지 계좌 실행은 missing_reference로 표시된다."
+    },
+    {
       "task_id": "TASK_LIVE_CAPTURE_REDESIGN",
       "date": "2026-09-22",
       "adr_id": "ADR_20260922_LIVE_CAPTURE_REDESIGN",
@@ -1009,26 +1031,6 @@
       "why": "실측 결과 체결엔진이 유동성을 전혀 참조하지 않고 전 심볼에 taker_slippage_bps=3.0 고정을 부과했으며(Corwin-Schultz 추정 실측 BTC 1.4~2.3bps ~ PEPE 4.5~6.3bps로 심볼별 최대 4배 차이), 백테스트에 계좌 규모 개념이 없어(initial_equity=1.0 스케일프리) 라이브 실제 $2,000 설정에서 평균 주문금액($19.12)이 Binance minNotional 경계에 걸치는데도 손실이 0으로 가정됐다. 또한 '30분 대기가 지정가를 불리하게 만든다'는 가설을 449개 결정일로 반증(0~120분 드리프트가 0과 통계적으로 구분 불가, t<1.0)했고, 대신 peg_chase_fill_schedule의 backstop_eligible 밴드 게이트가 미체결(residual) 11%를 강제해 건당 알파가 19배 높은(+0.57bps vs -0.03bps) 미체결군을 구조적으로 버리고 있음을 확인했다. taker와 peg_chase 두 바운드가 서로 다른 완결성·비용 계약 위에서 경쟁해 비교 자체가 불공정했다.",
       "resolution": "src/mhs/execution.py: peg_chase_fill_schedule의 backstop_eligible 밴드 거부 게이트를 제거해 완결성을 보장(밴드는 maker peg 클램프 전용, 유한 종가가 있는 창은 반드시 체결). corwin_schultz_half_spread_bps 순수함수를 신설해 창 high/low에서 심볼별 반스프레드를 벡터화 추정(음수 2-bar 추정치 0 플로어, [0, CEILING] 클립). _BoundExecutionReplayAccumulator에 half_spread_bps EWMA를 추가해 consume() 종료 시점(체결 확정 이후)에만 갱신하는 인과적 순서를 강제하고, IMMEDIATE_TAKER/PEG_CHASE_PROXY 양쪽에 동일 심볼별 비용을 대칭 부과. min_notional_probe_usdt로 계좌규모 손실을 원장 불변 진단 지표로 계측. ExecutionSpec에 liquidity_cost_model/spread_ewma_alpha/min_notional_probe_usdt/reference_equity_usdt 필드를 기본값과 함께 추가(flat 기본값은 기존 동작과 bit-identical). CLI --liquidity-cost-model 플래그와 MhsBookReport 비용분해 필드(fee/spread/delay)를 배선. src/live/executor.py는 chase_band_bps(알파 레일)와 max_cross_bps(리스크 레일, 신설, 50bps)를 분리해 _capped_ioc_price가 리스크 레일 안에서는 반드시 마케터블 가격을 반환하도록 수정.",
       "impact": "peg_chase 바운드 실측(전체 2021-2025 재실행): fill_rate 87.7~89.0%에서 100%로 개선(잔여 미체결 완전 제거), maker_share는 100%에서 86.0~87.7%로 하락(밴드 밖 강제체결이 taker 비용을 물기 때문, 정상 트레이드오프), peg_chase naive Sharpe가 blend 기준 2.174→2.275로 개선(미체결이 버리던 고알파 종목을 이제 붙잡음). --liquidity-cost-model corwin_schultz 활성화 시 primary(즉시체결)도 실측 스프레드를 반영해 blend CAGR 318.4%→301.3%, MDD -38.90%→-40.23%, Sharpe 2.886→2.760로 악화(기존 3bps 고정이 소형 알트코인 비중이 큰 breadth-60 로스터의 실제 비용을 과소평가하고 있었다는 뜻이며, 성과 저하가 아니라 더 정직한 측정치). MhsRunConfig() 기본 실행(liquidity_cost_model='flat')은 bit-identical 유지(test_golden_digest.py 통과). 알려진 잔여 비일관성: OHLCV_STRICT_PROXY(patient_reference)의 타임아웃 강제체결 수수료(execution.py:2085)가 half_spread_bps를 참조하지 않는 레거시 경로로 남아있어, liquidity_cost_model을 바꿔도 patient_reference 값이 불변이다 — 완전한 바운드 간 공정 비교를 위해서는 후속 스펙에서 이 경로도 정리해야 한다."
-    },
-    {
-      "task_id": "TASK_MHS_EXECUTION_FIDELITY",
-      "date": "2026-08-24",
-      "adr_id": "ADR_20260824_MHS_EXECUTION_FIDELITY",
-      "domain": "execution",
-      "title": "MHS 지정가 체결 정확도 및 live executor 결함 수정",
-      "why": "지정가 레퍼런스(OHLCV_STRICT_PROXY)가 결정 시각(T) mark를 앵커로 써서 실제 제출 시점보다 63~66분 stale했고, 이로 인해 patient_reference naive Sharpe가 2.886→0.138로 붕괴해 '지정가 대기의 경제적 근거 없음'이라는 잘못된 결론을 뒷받침하고 있었다. blend 연회전율 271.18x에서 taker-maker 편도 6bps 차이는 연 16.27%p에 해당해 현재 비용구조상 최대 단일 레버였다. 또한 src/live/executor.py에서 passive_deadline_s==window_deadline_s로 타임아웃 분기가 도달 불가능했고, chase 8회 소진으로 패시브 대기가 실질 ~24초에 그쳤으며, 밴드 클램프가 유리 방향까지 차단하고, 비마케터블 IOC가 3초마다 무한 재게시되고, cancel 응답의 executedQty가 유실되는 5건의 체결 결함이 있었다.",
-      "resolution": "src/mhs/types.py ExecutionSpec에 decision_anchor/peg_passive_fraction/peg_chase_band_bps 필드 추가(기본값은 기존 동작과 bit-identical). src/mhs/execution.py에 peg_chase_fill_schedule 순수함수와 OHLCV_PEG_CHASE_PROXY 바운드를 신설해 live의 peg→chase→capped IOC 정책을 리플레이에서 재현하고 residual_count/residual_notional로 미체결을 계측한다. --peg-chase-diagnostic opt-in으로 배선하며 옵션 바운드 인덱스를 명시적으로 추적해 기존 'ladder = batch.results[-1]' 오배정 위험을 제거했다. src/live/executor.py는 passive_deadline_s를 window_deadline_s의 60%(1080s)로 분리해 fail-closed 검증을 추가하고, chase 소진 시 주문을 유지하도록 바꾸고, _gtx_candidate/_capped_ioc_price의 대칭 밴드 클램프를 불리 방향 전용으로 교정하고, max_ioc_attempts로 비마케터블 IOC 재게시를 상한하고, cancel 직후 재조회로 executedQty 유실을 막았다.",
-      "impact": "MhsRunConfig() 기본 실행(primary/stress)은 bit-identical 유지(test_golden_digest.py 통과 확인). --peg-chase-diagnostic 옵트인 시에만 새 바운드가 실행되어 지정가 활용의 실제 fill_rate/maker_share를 처음으로 계측 가능. live executor 5건 결함 수정으로 GTX 패시브 대기가 설계대로 1080초까지 유지되고, 유리 방향 체결 기회 손실과 비마케터블 IOC 스팸(최대 10회로 상한)과 cancel 시점 체결 유실에 의한 reconcile_or_halt 오탐 리스크가 해소됨. execution_timeframe 1m 채택 여부는 peg-chase 바운드로 A/B 실측 전까지 보류(사전등록 채택 기준 명시)."
-    },
-    {
-      "task_id": "ADR_20260824_LIVE_EXECUTION_HARDENING",
-      "date": "2026-08-24",
-      "adr_id": "ADR_20260824_ADR_20260824_LIVE_EXECUTION_HARDENING",
-      "domain": "live",
-      "title": "Live 매매봇 정확성/정합성/효율/기밀성 강화",
-      "why": "SHADOW 모드 구조적 HALT, 원장 유실 시 영구 HALT, 아티팩트 부재 시 조용한 소각, tick 양자화/슬라이스 손실, 백테스트-라이브 집행 파라미터 불일치, 폴링 busy-wait, 전략 레시피 평문 노출을 실증 후 해소",
-      "resolution": "executor 협조 루프 재구성(sleep 예산화), Decimal 배수 양자화 통일, 반전 2-leg client_order_id 충돌 해소, SHADOW ShadowResponse 단락, 원장 finally 영속화, I-EQUITY-MTM/I-DD-HALT 도입, AES-256-GCM 결정적 봉투(src/live/crypto.py)로 deployed_target_weights.parquet 봉인, LiveSettings 기본 아티팩트 경로를 .enc로 전환, LiveSettings의 공유 .env(BINANCE_API_KEY 등) 크래시 버그 수정(env_file 제거, OS 환경변수만 신뢰)",
-      "impact": "live 24/7 데몬이 SHADOW 검증 기간과 실제 운영 .env 구성 양쪽에서 정상 기동 가능. deployed_target_weights.parquet의 git 노출 경로 차단(암호문만 커밋)"
     }
   ]
 }
