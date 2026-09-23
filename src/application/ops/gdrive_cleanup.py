@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -407,7 +408,9 @@ def vision_symbol_probe(*, opener: Callable[[str], bytes] = _default_opener) -> 
         if key in cache:
             return cache[key]
         for scope in ("monthly", "daily"):
-            url = f"{VISION_BUCKET_LISTING_URL}?list-type=2&prefix=data/futures/um/{scope}/{dataset}/{symbol}/"
+            # 심볼명에 비ASCII 문자(예: CJK 표기 페어)가 섞여 있어 URL은 반드시 퍼센트 인코딩해야 한다.
+            encoded_prefix = urllib.parse.quote(f"data/futures/um/{scope}/{dataset}/{symbol}/", safe="/")
+            url = f"{VISION_BUCKET_LISTING_URL}?list-type=2&prefix={encoded_prefix}"
             try:
                 payload = opener(url)
             except Exception as exc:

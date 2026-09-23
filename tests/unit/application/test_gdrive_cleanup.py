@@ -275,6 +275,19 @@ def test_vision_symbol_probe_checks_scopes_memoizes_and_fails_closed() -> None:
         vision_symbol_probe(opener=broken_opener)("klines", "BTCUSDT")
 
 
+def test_vision_symbol_probe_percent_encodes_non_ascii_symbol() -> None:
+    seen: list[str] = []
+
+    def opener(url: str) -> bytes:
+        seen.append(url)
+        assert url.isascii()
+        return b"<ListBucketResult></ListBucketResult>"
+
+    probe = vision_symbol_probe(opener=opener)
+    assert probe("fundingRate", "牛来USDT") is False
+    assert any("%E7%89%9B%E6%9D%A5USDT" in url for url in seen)
+
+
 def test_empty_trash_reports_transport_failure() -> None:
     ok_calls: list[list[str]] = []
 
