@@ -1,0 +1,12 @@
+[Unit]
+Description=crypto-pilot Drive backup timer (00:15 and 12:30 UTC)
+
+[Timer]
+OnCalendar=*-*-* 00:15:00 UTC
+OnCalendar=*-*-* 12:30:00 UTC
+Persistent=true
+AccuracySec=5min
+Unit=crypto-pilot-backup.service
+
+[Install]
+WantedBy=timers.target

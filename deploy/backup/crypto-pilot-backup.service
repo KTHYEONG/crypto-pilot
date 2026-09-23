@@ -1,0 +1,8 @@
+[Unit]
+Description=crypto-pilot Drive backup (single writer, lock-serialized, versioned)
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
+TimeoutStartSec=3h
