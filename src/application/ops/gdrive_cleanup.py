@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -425,30 +426,44 @@ def vision_symbol_probe(*, opener: Callable[[str], bytes] = _default_opener) -> 
 
 
 def apply_plan(plan: CleanupPlan, rclone: str, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> dict[str, int]:
-    """Delete every candidate with ``rclone deletefile`` (Drive trash), then ``rclone rmdirs --leave-root`` on each touched rule root.
+    """Delete every candidate in one batch (Drive trash), then ``rclone rmdirs --leave-root`` on each touched rule root.
+
+    One ``rclone delete --files-from`` call replaces a per-file ``deletefile`` subprocess: thousands of
+    individual rclone invocations each pay Drive API round-trip latency and can blow past any reasonable
+    wall-clock budget (measured: 2617 candidates did not finish a per-file sweep in 30 minutes). Outcome
+    is verified by re-listing the touched roots afterward rather than trusted from the batch's exit code,
+    since ``rclone delete`` continues past individual failures.
 
     Returns:
         Counts ``{"deleted": n, "failed": m, "bytes": b}``.
 
     Raises:
-        RuntimeError: after attempting all candidates, when ``failed > 0``.
+        RuntimeError: after the batch attempt, when re-listing shows any candidate still present.
     """
     active = _active_runner(runner)
-    deleted = 0
-    failed = 0
-    freed = 0
-    for candidate in plan.candidates:
-        completed = active(
-            [rclone, "deletefile", f"{DRIVE_REMOTE}/{candidate.obj.path}"],
+    if not plan.candidates:
+        return {"deleted": 0, "failed": 0, "bytes": 0}
+    with tempfile.TemporaryDirectory(prefix="gdrive-cleanup-delete-") as listdir:
+        files_from = Path(listdir) / "candidates.txt"
+        files_from.write_text("".join(f"{c.obj.path}\n" for c in plan.candidates), encoding="utf-8")
+        active(
+            [rclone, "delete", DRIVE_REMOTE, "--files-from", str(files_from), "--fast-list", "--checkers", "8"],
             capture_output=True,
             text=True,
             check=False,
         )
-        if completed.returncode == 0:
+    still_present: set[str] = set()
+    for root in sorted({_RULE_RMDIR_ROOTS[candidate.rule] for candidate in plan.candidates}):
+        still_present.update(obj.path for obj in list_remote(rclone, root, runner=runner))
+    deleted = 0
+    failed = 0
+    freed = 0
+    for candidate in plan.candidates:
+        if candidate.obj.path in still_present:
+            failed += 1
+        else:
             deleted += 1
             freed += candidate.obj.size
-        else:
-            failed += 1
     for root in sorted({_RULE_RMDIR_ROOTS[candidate.rule] for candidate in plan.candidates}):
         active(
             [rclone, "rmdirs", "--leave-root", f"{DRIVE_REMOTE}/{root}"],
