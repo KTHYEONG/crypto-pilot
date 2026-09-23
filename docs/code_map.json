@@ -547,5 +547,8 @@
   },
   "src/mhs/account_ledger.py": {
     "testing": "tests/unit/mhs/test_account_ledger.py"
+  },
+  "src/application/ops/gdrive_cleanup.py": {
+    "testing": "tests/unit/application/test_gdrive_cleanup.py"
   }
 }

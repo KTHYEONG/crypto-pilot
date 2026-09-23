@@ -104,14 +104,20 @@ jobs:
           # .env는 서버에 이미 배치된 것을 정본으로 쓴다(sops 폐기, CI가 더 이상 덮어쓰지 않음).
           scp $SSH_OPTS "$PARAMS/frozen_unit_returns_maker.parquet.enc" "$PARAMS/venue_rules_20260921.json" \
             "$REMOTE_USER@$HOST:~/crypto-pilot/$PARAMS/"
-          # 호스트 공용 백업 타이머가 참조하는 필터. 타이머 스크립트 자체에 필터 인자를 걸어두는
-          # 1회성 설치는 이미 완료됐고(2026-09-21), 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.
+          # repo-owned 백업 유닛이 소비하는 필터. 공용 타이머가 아닌 crypto-pilot-backup.service가
+          # --filter-from으로 참조하므로, 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.
           scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/backup ~/.config/systemd/user"
+          scp $SSH_OPTS deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/"
+          scp $SSH_OPTS deploy/backup/crypto-pilot-backup.service deploy/backup/crypto-pilot-backup.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
 
           # PAT/USER는 로컬에서 확장해 원격 스크립트에 주입(GitHub PAT 문자셋은 셸 안전).
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF
           set -e
           cd ~/crypto-pilot
+          chmod +x ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
+          systemctl --user daemon-reload
+          systemctl --user enable --now crypto-pilot-backup.timer
           echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
           if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
           \$C pull

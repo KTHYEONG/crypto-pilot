@@ -77,6 +77,21 @@ def _run_daemon_idle_gate(args: argparse.Namespace) -> None:
         raise SystemExit(rc)
 
 
+def _run_gdrive_cleanup(args: argparse.Namespace) -> None:
+    from src.application.ops.gdrive_cleanup import main as cleanup_main
+
+    argv: list[str] = []
+    if args.apply:
+        argv.append("--apply")
+    if args.empty_trash:
+        argv.append("--empty-trash")
+    if args.i_understand_irreversible:
+        argv.append("--i-understand-irreversible")
+    rc = cleanup_main(argv)
+    if rc != 0:
+        raise SystemExit(rc)
+
+
 def _run_artifact_seal(args: argparse.Namespace) -> None:
     from src.application.ops.artifact_seal import main as seal_main
 
@@ -121,6 +136,11 @@ def add_ops_commands(parser: argparse.ArgumentParser) -> None:
     gate.add_argument("--stale-after-s", type=float, default=2700.0)
     gate.add_argument("--now", type=str, default=None)
     gate.set_defaults(handler=_run_daemon_idle_gate)
+    cleanup = subparsers.add_parser("gdrive-cleanup", help="One-time evidence-gated Drive cleanup (dry-run by default)")
+    cleanup.add_argument("--apply", action="store_true", default=False)
+    cleanup.add_argument("--empty-trash", action="store_true", default=False)
+    cleanup.add_argument("--i-understand-irreversible", action="store_true", default=False)
+    cleanup.set_defaults(handler=_run_gdrive_cleanup)
     seal = subparsers.add_parser("artifact-seal", help="Seal deployed artifacts")
     seal_sub = seal.add_subparsers(dest="artifact_command", required=True)
     seal_sub.add_parser("keygen", help="emit a fresh base64 32-byte artifact key")
