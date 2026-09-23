@@ -309,21 +309,33 @@ def _responder(
     by_root: dict[str, list[RemoteObject]],
     calls: list[list[str]],
     *,
-    delete_rc: dict[str, int] | None = None,
+    keep_on_delete: frozenset[str] = frozenset(),
 ) -> object:
+    """Fake rclone transport backed by one flat, mutable object registry (paths are absolute,
+    relative to DRIVE_REMOTE). ``lsjson <remote>/<root>`` filters by path prefix -- so it answers
+    both the canonical listing roots (LIVE_DATA, ...) and the narrower ``_RULE_RMDIR_ROOTS``
+    sub-paths apply_plan re-lists for post-delete verification. A batch ``delete --files-from``
+    actually removes listed paths from the registry, except paths in ``keep_on_delete``
+    (simulates a per-file failure surviving the batch)."""
+    registry: dict[str, RemoteObject] = {o.path: o for objs in by_root.values() for o in objs}
+
     def fake(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(argv))
         if "lsjson" in argv:
             root = argv[-1].split("gdrive:quant-lake/")[1]
-            entries = []
-            for o in by_root.get(root, []):
-                rel = o.path.split(root + "/", 1)[1] if root + "/" in o.path else o.path
-                entries.append({"Path": rel, "Size": o.size, "IsDir": False})
-            body = json.dumps(entries)
-            return _lsjson_completed(list(argv), body)
-        if "deletefile" in argv:
-            rc = (delete_rc or {}).get(argv[-1], 0)
-            return _lsjson_completed(list(argv), "", returncode=rc)
+            prefix = root + "/"
+            entries = [
+                {"Path": path[len(prefix):], "Size": obj.size, "IsDir": False}
+                for path, obj in registry.items()
+                if path.startswith(prefix)
+            ]
+            return _lsjson_completed(list(argv), json.dumps(entries))
+        if "delete" in argv and "--files-from" in argv:
+            listed = Path(argv[argv.index("--files-from") + 1]).read_text(encoding="utf-8").splitlines()
+            for path in listed:
+                if path not in keep_on_delete:
+                    registry.pop(path, None)
+            return _lsjson_completed(list(argv), "")
         return _lsjson_completed(list(argv), "")
 
     return fake
@@ -372,7 +384,7 @@ def test_main_dry_run_is_non_mutating_and_writes_report(
     assert main([]) == 0
     assert calls
     assert all("lsjson" in call for call in calls)
-    assert not any(cmd in call for call in calls for cmd in ("deletefile", "rmdirs", "cleanup"))
+    assert not any(cmd in call for call in calls for cmd in ("delete", "rmdirs", "cleanup"))
     out = capsys.readouterr().out
     assert "[SYS] stage=gdrive_cleanup rule=futures_legacy candidates=1 bytes=500 kept=1" in out
     assert "[SYS] stage=gdrive_cleanup rule=legacy_state candidates=0 bytes=0 kept=1" in out
@@ -427,7 +439,7 @@ def test_main_apply_deletes_fresh_plan_and_reports(
     monkeypatch.setattr(cleanup_module, "vision_symbol_probe", lambda: _no_vision)
     monkeypatch.setattr(cleanup_module, "REPORT_DIR", tmp_path)
     assert main(["--apply"]) == 0
-    assert any("deletefile" in call for call in calls)
+    assert any(call[:2] == ["rclone", "delete"] for call in calls)
     assert any("rmdirs" in call for call in calls)
     assert "status=ok mode=apply" in capsys.readouterr().out
     payload = json.loads(next(tmp_path.glob("gdrive_cleanup_*.json")).read_text(encoding="utf-8"))
@@ -449,24 +461,38 @@ def test_main_apply_reports_partial_failure_after_trying_all(
     monkeypatch.setattr(
         subprocess,
         "run",
-        _responder(by_root, calls, delete_rc={"gdrive:quant-lake/" + first.path: 1}),
+        _responder(by_root, calls, keep_on_delete=frozenset({first.path})),
     )
     monkeypatch.setattr(cleanup_module, "vision_symbol_probe", lambda: _no_vision)
     monkeypatch.setattr(cleanup_module, "REPORT_DIR", tmp_path)
     assert main(["--apply"]) == 1
-    deletes = [call for call in calls if "deletefile" in call]
-    assert len(deletes) == 2
+    deletes = [call for call in calls if call[:2] == ["rclone", "delete"]]
+    assert len(deletes) == 1
     payload = json.loads(next(tmp_path.glob("gdrive_cleanup_*.json")).read_text(encoding="utf-8"))
     assert payload["status"] == "failed"
 
 
+def test_apply_plan_returns_zero_counts_for_empty_plan() -> None:
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"no rclone call expected for an empty plan: {argv}")
+
+    assert apply_plan(CleanupPlan(candidates=(), kept=()), "rclone", runner=runner) == {
+        "deleted": 0,
+        "failed": 0,
+        "bytes": 0,
+    }
+
+
 def test_apply_plan_reports_partial_failure_after_trying_all() -> None:
-    first = CleanupCandidate("futures_legacy", _obj("live/a.parquet", 10), "research:x size=10")
-    second = CleanupCandidate("futures_legacy", _obj("live/b.parquet", 20), "research:y size=20")
+    first = CleanupCandidate("futures_legacy", _obj(f"{LIVE_DATA}/futures/a.parquet", 10), "research:x size=10")
+    second = CleanupCandidate("futures_legacy", _obj(f"{LIVE_DATA}/futures/b.parquet", 20), "research:y size=20")
 
     def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if "deletefile" in argv and argv[-1].endswith("a.parquet"):
-            return _lsjson_completed(list(argv), "", returncode=1)
+        # The batch delete "succeeds" (rc=0) but a is left behind; the post-delete
+        # re-listing (scoped to _RULE_RMDIR_ROOTS["futures_legacy"] = LIVE_DATA + "/futures")
+        # is what must surface the partial failure.
+        if "lsjson" in argv:
+            return _lsjson_completed(list(argv), json.dumps([{"Path": "a.parquet", "Size": 10, "IsDir": False}]))
         return _lsjson_completed(list(argv), "")
 
     with pytest.raises(RuntimeError, match="partial failure"):
