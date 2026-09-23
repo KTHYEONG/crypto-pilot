@@ -288,3 +288,37 @@ def test_ops_cli_delegates_daemon_idle_gate(tmp_path, capsys) -> None:
     idle_args = parser.parse_args(["ops", "daemon-idle-gate", "--heartbeat-file", str(idle), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"])
     assert idle_args.handler(idle_args) is None
 
+
+def test_backup_timer_covers_both_slots() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    timer = (root / "deploy" / "backup" / "crypto-pilot-backup.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 00:15:00 UTC" in timer
+    assert "OnCalendar=*-*-* 12:30:00 UTC" in timer
+    assert "Persistent=true" in timer
+
+
+def test_backup_service_alerts_on_failure_and_outlives_lock_wait() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    service = (root / "deploy" / "backup" / "crypto-pilot-backup.service").read_text(encoding="utf-8")
+    assert "OnFailure=kca-alert@%n.service" in service
+    assert "Type=oneshot" in service
+    assert "ExecStart=%h/crypto-pilot/deploy/backup/crypto-pilot-backup.sh" in service
+    assert "TimeoutStartSec=3h" in service
+
+
+def test_deploy_workflow_installs_and_enables_backup_unit() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert 'scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"' in workflow
+    assert 'scp $SSH_OPTS deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/"' in workflow
+    assert "deploy/backup/crypto-pilot-backup.service" in workflow
+    assert "deploy/backup/crypto-pilot-backup.timer" in workflow
+    assert "systemctl --user daemon-reload" in workflow
+    assert "systemctl --user enable --now crypto-pilot-backup.timer" in workflow
+
