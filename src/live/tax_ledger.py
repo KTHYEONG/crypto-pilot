@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,7 +14,6 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
-from src.live.records import append_jsonl_partition
 
 TAX_RECORD_KINDS: frozenset[str] = frozenset({"TRADE", "REALIZED_PNL", "FUNDING_FEE", "COMMISSION", "TRANSFER"})
 
@@ -44,6 +45,13 @@ class TaxWatermark:
     last_collected_at: pd.Timestamp | None
 
 
+@dataclass(frozen=True, slots=True)
+class TaxCollectionIssue:
+    stream: str  # "trades:<SYMBOL>" | "income"
+    stage: str  # "fetch" | "parse"
+    detail: str  # exception type and message, or offending record id
+
+
 def _income_kind(income_type: str) -> str:
     mapping = {
         "REALIZED_PNL": "REALIZED_PNL",
@@ -54,6 +62,17 @@ def _income_kind(income_type: str) -> str:
     return mapping.get(income_type.upper(), income_type.upper())
 
 
+def _report_issue(
+    issues: list[TaxCollectionIssue] | None, stream: str, stage: str, detail: str
+) -> None:
+    if issues is not None:
+        issues.append(TaxCollectionIssue(stream=stream, stage=stage, detail=detail))
+
+
+def _issue_detail(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
 def collect_tax_records(
     client: Any,
     symbols: Sequence[str],
@@ -61,13 +80,19 @@ def collect_tax_records(
     mode: str,
     *,
     now: pd.Timestamp,
+    issues: list[TaxCollectionIssue] | None = None,
 ) -> tuple[tuple[TaxRecord, ...], TaxWatermark]:
+    """Pull venue trades and income newer than the watermark into tax records.
+
+    The watermark for a stream never moves past a record that failed to convert, so a later
+    cycle re-fetches it. Fetch and parse failures are appended to ``issues`` instead of being
+    silently dropped; callers decide how to surface them.
+    """
     now_ts = pd.Timestamp(now)
     now_ts = now_ts.tz_localize("UTC") if now_ts.tzinfo is None else now_ts.tz_convert("UTC")
     records: list[TaxRecord] = []
     new_last_trade: dict[str, int] = dict(watermark.last_trade_id)
     max_income_id = watermark.last_income_id
-    max_trade_seen: dict[str, int] = {}
     # userTrades per symbol
     for sym in symbols:
         last_id = watermark.last_trade_id.get(sym)
@@ -78,25 +103,25 @@ def collect_tax_records(
             # fallback if client signature doesn't accept from_id keyword
             try:
                 trades = client.user_trades(sym, from_id)
-            except Exception:
-                trades = []
-        except Exception:
-            trades = []
+            except Exception as exc:  # noqa: BLE001 - fetch failure keeps the stream watermark, reported via issues
+                _report_issue(issues, f"trades:{sym}", "fetch", _issue_detail(exc))
+                continue
+        except Exception as exc:  # noqa: BLE001 - fetch failure keeps the stream watermark, reported via issues
+            _report_issue(issues, f"trades:{sym}", "fetch", _issue_detail(exc))
+            continue
         if not isinstance(trades, list):
             continue
+        parsed_ids: list[int] = []
+        failed_ids: list[int] = []
         for entry in trades:
             try:
                 venue_id = int(entry.get("id", entry.get("tranId", 0)))
-            except Exception:  # noqa: S112 - 개별 레코드 파싱 실패는 건너뛰고 수집 지속
+            except Exception as exc:  # noqa: S112 - id가 없으면 워터마크 하한을 둘 수 없어 건너뛰고 보고만 한다
+                _report_issue(issues, f"trades:{sym}", "parse", f"unparseable id: {_issue_detail(exc)}")
                 continue
             # skip duplicates already seen (id <= last_id)
             if last_id is not None and venue_id <= last_id:
                 continue
-            if sym not in max_trade_seen or venue_id > max_trade_seen[sym]:
-                max_trade_seen[sym] = venue_id
-            if venue_id > max_income_id:
-                # we track income separately, don't mix
-                pass
             # parse fields
             try:
                 price = float(entry.get("price", 0) or 0)
@@ -131,7 +156,9 @@ def collect_tax_records(
                 is_maker = bool(entry.get("maker", False))
                 # income asset for TRADE is commissionAsset
                 income_asset = fee_asset or "USDT"
-            except Exception:  # noqa: S112 - 개별 레코드 파싱 실패는 건너뛰고 수집 지속
+            except Exception as exc:  # noqa: S112 - 파싱 실패 레코드는 건너뛰고 워터마크는 그 아래에 둔다
+                failed_ids.append(venue_id)
+                _report_issue(issues, f"trades:{sym}", "parse", f"id {venue_id}: {_issue_detail(exc)}")
                 continue
             record_id = f"venue:TRADE:{venue_id}"
             # source is always venue for collected
@@ -154,10 +181,15 @@ def collect_tax_records(
                 mode=str(mode),
             )
             # dedup by venue_id check (should not duplicate)
+            parsed_ids.append(venue_id)
             records.append(rec)
-        if max_trade_seen.get(sym) is not None:
-            new_last_trade[sym] = max(new_last_trade.get(sym, -1), max_trade_seen[sym])
+        if failed_ids:
+            floor = min(failed_ids) - 1
+            new_last_trade[sym] = max(new_last_trade.get(sym, -1), floor)
+        elif parsed_ids:
+            new_last_trade[sym] = max(new_last_trade.get(sym, -1), max(parsed_ids))
     # income
+    income_issues: list[TaxCollectionIssue] = []
     start_ms: int | None = None
     if watermark.last_collected_at is not None:
         try:
@@ -171,21 +203,24 @@ def collect_tax_records(
     except TypeError:
         try:
             incomes = client.income(start_time_ms=start_ms) if start_ms is not None else client.income()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - fetch failure keeps the stream watermark, reported via issues
+            _report_issue(income_issues, "income", "fetch", _issue_detail(exc))
             incomes = []
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - fetch failure keeps the stream watermark, reported via issues
+        _report_issue(income_issues, "income", "fetch", _issue_detail(exc))
         incomes = []
     if isinstance(incomes, list):
+        parsed_income_ids: list[int] = []
+        failed_income_ids: list[int] = []
         for entry in incomes:
             try:
                 tran_id_raw = entry.get("tranId", entry.get("id", entry.get("tran_id", 0)))
                 venue_id = int(tran_id_raw) if tran_id_raw is not None else 0
-            except Exception:  # noqa: S112 - 개별 레코드 파싱 실패는 건너뛰고 수집 지속
+            except Exception as exc:  # noqa: S112 - id가 없으면 워터마크 하한을 둘 수 없어 건너뛰고 보고만 한다
+                _report_issue(income_issues, "income", "parse", f"unparseable id: {_issue_detail(exc)}")
                 continue
             if venue_id <= watermark.last_income_id:
                 continue
-            if venue_id > max_income_id:
-                max_income_id = venue_id
             try:
                 income_type = str(entry.get("incomeType", entry.get("income_type", "TRANSFER")) or "TRANSFER")
                 kind = _income_kind(income_type)
@@ -208,7 +243,9 @@ def collect_tax_records(
                     event_time = now_ts
                 # For income records: price/qty etc zero, realized_pnl = income
                 realized_pnl = inc
-            except Exception:  # noqa: S112 - 개별 레코드 파싱 실패는 건너뛰고 수집 지속
+            except Exception as exc:  # noqa: S112 - 파싱 실패 레코드는 건너뛰고 워터마크는 그 아래에 둔다
+                failed_income_ids.append(venue_id)
+                _report_issue(income_issues, "income", "parse", f"id {venue_id}: {_issue_detail(exc)}")
                 continue
             record_id = f"venue:{kind}:{venue_id}"
             rec = TaxRecord(
@@ -229,11 +266,21 @@ def collect_tax_records(
                 source="venue",
                 mode=str(mode),
             )
+            parsed_income_ids.append(venue_id)
             records.append(rec)
+        if failed_income_ids:
+            max_income_id = max(max_income_id, min(failed_income_ids) - 1)
+        elif parsed_income_ids:
+            max_income_id = max(max_income_id, max(parsed_income_ids))
+    # 수입은 시간 창(startTime)으로 조회되므로, 조회·파싱 실패가 있으면 시간 워터마크를 전진시키지
+    # 않아야 다음 사이클이 실패 구간을 다시 가져온다(재조회분은 record_id 멱등 추가로 걸러진다).
+    income_failed = bool(income_issues)
+    if issues is not None:
+        issues.extend(income_issues)
     new_watermark = TaxWatermark(
         last_trade_id=new_last_trade,
         last_income_id=max_income_id,
-        last_collected_at=now_ts,
+        last_collected_at=watermark.last_collected_at if income_failed else now_ts,
     )
     # deduplicate by venue_id already, but also sort by event_time
     records_sorted = sorted(records, key=lambda r: r.event_time)
@@ -304,33 +351,274 @@ def simulated_tax_records(
     return tuple(records)
 
 
+def funding_tax_records(
+    events: Sequence[Any], *, run_id: str, mode: str
+) -> tuple[TaxRecord, ...]:
+    """Map paper funding events to simulated FUNDING_FEE tax records with deterministic ids.
+
+    The id is "simulated:FUNDING_FEE:<run_id>:<symbol>:<epoch_ms>". A settlement accrues at most once
+    per symbol and epoch within a run, so replaying the same accrual after a crash yields the same ids.
+    """
+    records: list[TaxRecord] = []
+    for ev in events:
+        epoch = pd.Timestamp(ev.epoch)
+        epoch = epoch.tz_localize("UTC") if epoch.tzinfo is None else epoch.tz_convert("UTC")
+        epoch_ms = int(epoch.timestamp() * 1000)
+        quantity = float(ev.quantity)
+        price = float(ev.price)
+        records.append(
+            TaxRecord(
+                record_id=f"simulated:FUNDING_FEE:{run_id}:{ev.symbol}:{epoch_ms}",
+                kind="FUNDING_FEE",
+                event_time=epoch,
+                symbol=str(ev.symbol),
+                side="",
+                quantity=quantity,
+                price=price,
+                quote_qty=float(ev.quantity * ev.price),
+                fee=0.0,
+                fee_asset="USDT",
+                realized_pnl=float(ev.amount),
+                income_asset="USDT",
+                is_maker=False,
+                venue_id=0,
+                source="simulated",
+                mode=str(mode),
+            )
+        )
+    return tuple(records)
+
+
+def _tax_shard_path(ledger_dir: Path, event_time: pd.Timestamp) -> Path:
+    ts = pd.Timestamp(event_time)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    return Path(ledger_dir) / f"tax_ledger_{ts.strftime('%Y%m')}.jsonl"
+
+
+def _partition_fresh_tax_records(
+    records: Sequence[TaxRecord], directory: Path
+) -> dict[Path, list[TaxRecord]]:
+    """Bucket records by destination shard and drop ids already present (verified first).
+
+    Raises:
+        DataIntegrityError: an existing shard line is not valid JSON or lacks record_id.
+    """
+    buckets: dict[Path, list[TaxRecord]] = {}
+    for r in records:
+        buckets.setdefault(_tax_shard_path(directory, r.event_time), []).append(r)
+    # Verify first: load existing ids for every touched shard before deciding anything.
+    existing_by_shard: dict[Path, set[str]] = {}
+    for shard in sorted(buckets):
+        seen: set[str] = set()
+        if shard.exists():
+            with shard.open("r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        obj = json.loads(stripped)
+                    except json.JSONDecodeError as exc:
+                        raise DataIntegrityError(f"tax shard corrupt line: {shard}") from exc
+                    if not isinstance(obj, dict) or not obj.get("record_id"):
+                        raise DataIntegrityError(f"tax shard line lacks record_id: {shard}")
+                    seen.add(str(obj["record_id"]))
+        existing_by_shard[shard] = seen
+    fresh: dict[Path, list[TaxRecord]] = {}
+    for shard in sorted(buckets):
+        seen = existing_by_shard[shard]
+        batch_seen: set[str] = set()
+        fresh_rows: list[TaxRecord] = []
+        for r in buckets[shard]:
+            if r.record_id in seen or r.record_id in batch_seen:
+                continue
+            batch_seen.add(r.record_id)
+            fresh_rows.append(r)
+        if fresh_rows:
+            fresh[shard] = fresh_rows
+    return fresh
+
+
 def append_tax_records(
     records: Sequence[TaxRecord], ledger_dir: Path
 ) -> list[Path]:
+    """Append tax records to monthly JSONL shards, skipping record_ids already present.
+
+    Idempotent: ids already in the destination shard or repeated within the batch are dropped,
+    so retries and crash replays never duplicate ledger rows.
+
+    Returns:
+        Shard paths that received at least one new row.
+
+    Raises:
+        DataIntegrityError: an existing shard line is not valid JSON or lacks record_id (fail-closed;
+            never append to a shard whose contents cannot be verified).
+    """
     if not records:
         return []
-    rows: list[dict[str, Any]] = [
-        {
-            "record_id": r.record_id,
-            "kind": r.kind,
-            "event_time": r.event_time,
-            "symbol": r.symbol,
-            "side": r.side,
-            "quantity": r.quantity,
-            "price": r.price,
-            "quote_qty": r.quote_qty,
-            "fee": r.fee,
-            "fee_asset": r.fee_asset,
-            "realized_pnl": r.realized_pnl,
-            "income_asset": r.income_asset,
-            "is_maker": r.is_maker,
-            "venue_id": r.venue_id,
-            "source": r.source,
-            "mode": r.mode,
-        }
-        for r in records
-    ]
-    return append_jsonl_partition(rows, Path(ledger_dir), "tax_ledger", time_key="event_time")
+    directory = Path(ledger_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    fresh = _partition_fresh_tax_records(records, directory)
+    # Append only: never rewrite or reorder existing lines.
+    written: list[Path] = []
+    for shard in sorted(fresh):
+        with shard.open("a", encoding="utf-8") as f:
+            for r in fresh[shard]:
+                event_time = r.event_time.isoformat() if isinstance(r.event_time, pd.Timestamp) else str(r.event_time)
+                row = {
+                    "record_id": r.record_id,
+                    "kind": r.kind,
+                    "event_time": event_time,
+                    "symbol": r.symbol,
+                    "side": r.side,
+                    "quantity": r.quantity,
+                    "price": r.price,
+                    "quote_qty": r.quote_qty,
+                    "fee": r.fee,
+                    "fee_asset": r.fee_asset,
+                    "realized_pnl": r.realized_pnl,
+                    "income_asset": r.income_asset,
+                    "is_maker": r.is_maker,
+                    "venue_id": r.venue_id,
+                    "source": r.source,
+                    "mode": r.mode,
+                }
+                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        written.append(shard)
+    return sorted(written)
+
+
+def load_tax_watermark(path: Path) -> TaxWatermark:
+    """Read watermark.json; an absent file means an empty watermark.
+
+    Raises:
+        DataIntegrityError: file exists but is not valid JSON or has malformed fields (fail-closed).
+    """
+    watermark_path = Path(path)
+    if not watermark_path.exists():
+        return TaxWatermark(last_trade_id={}, last_income_id=0, last_collected_at=None)
+    try:
+        raw = json.loads(watermark_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DataIntegrityError(f"tax watermark unreadable: {watermark_path}") from exc
+    if not isinstance(raw, dict):
+        raise DataIntegrityError(f"tax watermark must be a JSON object: {watermark_path}")
+    try:
+        last_trade_id = {str(k): int(v) for k, v in dict(raw.get("last_trade_id", {})).items()}
+        last_income_id = int(raw.get("last_income_id", 0))
+        collected_raw = raw.get("last_collected_at")
+        if collected_raw is None:
+            last_collected_at = None
+        else:
+            last_collected_at = pd.Timestamp(collected_raw)
+            if last_collected_at.tzinfo is None:
+                last_collected_at = last_collected_at.tz_localize("UTC")
+            else:
+                last_collected_at = last_collected_at.tz_convert("UTC")
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise DataIntegrityError(f"tax watermark malformed: {watermark_path}") from exc
+    return TaxWatermark(
+        last_trade_id=last_trade_id,
+        last_income_id=last_income_id,
+        last_collected_at=last_collected_at,
+    )
+
+
+def save_tax_watermark(path: Path, watermark: TaxWatermark) -> None:
+    """Persist watermark.json atomically (temp file + os.replace) with the existing JSON schema."""
+    watermark_path = Path(path)
+    watermark_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "last_trade_id": dict(watermark.last_trade_id),
+        "last_income_id": int(watermark.last_income_id),
+        "last_collected_at": watermark.last_collected_at.isoformat()
+        if watermark.last_collected_at is not None
+        else None,
+    }
+    tmp_path = watermark_path.with_suffix(watermark_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(tmp_path, watermark_path)
+
+
+def collect_and_persist_live_tax(
+    client: Any,
+    symbols: Sequence[str],
+    tax_dir: Path,
+    mode: str,
+    *,
+    now: pd.Timestamp,
+) -> tuple[int, tuple[TaxCollectionIssue, ...]]:
+    """One live tax collection step: load watermark, collect, append records, then save watermark.
+
+    Records are appended before the watermark is saved, and appends are idempotent by record_id,
+    so no crash point can lose or duplicate a venue record.
+
+    Returns:
+        (number of newly written rows, issues encountered).
+
+    Raises:
+        DataIntegrityError: watermark file unreadable; nothing is collected or written.
+    """
+    directory = Path(tax_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    watermark = load_tax_watermark(directory / "watermark.json")
+    found: list[TaxCollectionIssue] = []
+    records, new_watermark = collect_tax_records(
+        client, symbols, watermark, mode, now=now, issues=found
+    )
+    new_rows = sum(len(rows) for rows in _partition_fresh_tax_records(records, directory).values())
+    append_tax_records(records, directory)
+    save_tax_watermark(directory / "watermark.json", new_watermark)
+    return new_rows, tuple(found)
+
+
+@dataclass(frozen=True, slots=True)
+class CashReconciliation:
+    expected_delta: Decimal
+    actual_delta: Decimal
+    difference: Decimal
+    within_tolerance: bool
+
+
+def reconcile_cycle_cash(
+    cash_before: Decimal,
+    cash_after: Decimal,
+    trade_records: Sequence[TaxRecord],
+    funding_records: Sequence[TaxRecord],
+    *,
+    tolerance_usdt: Decimal,
+) -> CashReconciliation:
+    """Check that one paper cycle's cash change equals the cash implied by its own records.
+
+    expected = sum(funding.realized_pnl) - sum(signed trade quote flow) - sum(trade.fee), where a BUY consumes
+    quote_qty and a SELL returns it. A mismatch means the ledger moved cash that no record explains.
+    """
+    expected = Decimal(0)
+    for r in funding_records:
+        if r.kind != "FUNDING_FEE":
+            raise ValueError(f"funding_records must all be FUNDING_FEE, got {r.kind!r}")
+        expected += Decimal(str(float(r.realized_pnl)))
+    for r in trade_records:
+        if r.kind != "TRADE":
+            raise ValueError(f"trade_records must all be TRADE, got {r.kind!r}")
+        quote = Decimal(str(float(r.quote_qty)))
+        fee = Decimal(str(float(r.fee)))
+        if r.side == "BUY":
+            expected += -quote - fee
+        elif r.side == "SELL":
+            expected += quote - fee
+        elif r.side == "" and quote == 0:
+            expected += -fee
+        else:
+            raise ValueError(f"trade record side must be BUY or SELL, got {r.side!r}")
+    actual = Decimal(cash_after) - Decimal(cash_before)
+    difference = actual - expected
+    return CashReconciliation(
+        expected_delta=expected,
+        actual_delta=actual,
+        difference=difference,
+        within_tolerance=abs(difference) <= tolerance_usdt,
+    )
 
 
 def load_tax_records(

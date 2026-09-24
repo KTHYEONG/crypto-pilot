@@ -123,6 +123,8 @@ class LiveSettings(BaseSettings):
     microstructure_dir: str | None = None
     tax_ledger_dir: str | None = None
     tax_collection_enabled: bool = True
+    # 시뮬레이션 기록의 float 수수료 반올림을 흡수하는 허용 오차.
+    cash_reconcile_tolerance_usdt: float = 0.01
     alert_webhook_url: str | None = None
     alert_gmail_user: str | None = None
     alert_gmail_app_password: SecretStr | None = None
@@ -227,6 +229,13 @@ class LiveSettings(BaseSettings):
     def _bounded_recv_window(cls, value: int) -> int:
         if not 0 < value <= _MAX_RECV_WINDOW_MS:
             raise ValueError(f"recv_window_ms must be in (0, {_MAX_RECV_WINDOW_MS}]")
+        return value
+
+    @field_validator("cash_reconcile_tolerance_usdt")
+    @classmethod
+    def _positive_reconcile_tolerance(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("cash_reconcile_tolerance_usdt must be > 0")
         return value
 
     @field_validator("data_retention_days")
