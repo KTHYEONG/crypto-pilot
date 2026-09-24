@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_20260924_RECORDER_DEPLOY_CONTINUITY",
+      "date": "2026-09-24",
+      "adr_id": "ADR_20260924_20260924_RECORDER_DEPLOY_CONTINUITY",
+      "domain": "ops",
+      "title": "수집기 배포 연속성: 청산 웹소켓 직접 연결과 지문 기반 선택적 재생성",
+      "why": "매 푸시마다 market-recorder가 재생성되어 청산·호가 수집에 10~60초 공백이 생겼고, ccxt 기동 3.8초와 이벤트 도착 전까지 종료를 관찰하지 못하는 루프가 공백을 키웠다.",
+      "resolution": "청산 수집을 aiohttp forceOrder 웹소켓(1초 종료 관찰, 연결 유지 프레임 기반 커버리지, 저장 이후에만 커버리지 기록)으로 교체하고, 수집기 전용 진입점과 AST 클로저 sha256 지문을 이미지에 기록해 지문·compose 해시가 같으면 데몬만 재생성한다.",
+      "impact": "수집기 재시작이 수집기 코드 변경 푸시(과거 49건 중 약 20%)로 한정되고 재시작 1회 공백도 10~20초에서 3~4초로 줄어든다.",
+      "caveat": "지문 판단이 불가하면 항상 재생성으로 떨어지며, 겹쳐 띄우는 무중단 교체는 동일 일자 파일 쓰기 경합 때문에 채택하지 않았다."
+    },
+    {
       "task_id": "TASK_20260924_CRYPTO_RECORDS_INTEGRITY",
       "date": "2026-09-24",
       "adr_id": "ADR_20260924_20260924_CRYPTO_RECORDS_INTEGRITY",
@@ -1024,16 +1035,6 @@
       "why": "DSR 통과 스펙 이후 남은 SELECTION_WINDOW_OVERLAP은 코드 버그가 아니라 CLI 기본값(breadth=60/growth_extreme/Kelly)이 2021~2025년 '전체' 리포트 구간으로 튜닝됐다는 사실 자체에서 발생. 이를 줄이는 방법은 프로젝트에 의도적으로 봉인된 시간축(HOLDOUT_CUTOFF)/심볼축(holdout partition) 두 가지뿐이라 자율 판단 대신 사용자에게 확인, 사용자가 '2026년 상반기까지 데이터 확보 후 시간축 봉인을 좁게 풀자'고 승인. 동시에 사용자가 제안한 '지정가 먼저 시도 후 미체결분만 시장가' 체결 알고리즘을 실측 검증해달라고 요청 - 직전 스펙(mhs_dsr_passage)에서 30분 창 1개 데이터포인트로만 확인했던 것을 3~30분 6구간 전체 스윕으로 결정적으로 재검증.",
       "resolution": "src/mhs/params.py에 MHS_FINAL_OOS_CUTOFF_2026H1(2026-06-30) 상수를 신설(공유 HOLDOUT_CUTOFF는 미수정, MHS 전용의 더 좁은 상한). MhsRunConfig/MhsDiagnosticRequest에 final_oos_2026h1(기본 False) 필드를 추가하고 --final-oos-2026h1 CLI 플래그로 노출. src/mhs/pipeline/orchestrator.py의 end 해석 로직을 '_evaluation_ceiling = MHS_FINAL_OOS_CUTOFF_2026H1 if final_oos_2026h1 else HOLDOUT_CUTOFF'로 교체해 플래그 미설정시 기존과 바이트 동일 동작 보존(I1, ledger+daily_ledger.parquet 완전 동일 확인), 플래그 설정시에도 2026-06-30을 초과할 수 없도록 이중 봉인. 3m OHLCV(424심볼)와 mark-price 캐시(1h, 424심볼)를 실제로 2026-06-30까지 수집완료(Binance REST+Vision, 429 레이트리밋은 Vision 백업으로 자동 해결됨을 확인). window_trial_sharpes의 (start,resolved_end) 정확매칭 설계 덕분에 final-OOS 실행이 기본 창의 DSR 시행원장을 오염시키지 않음을 검증(I-NO-TUNING-FEEDBACK). 체결 알고리즘: --peg-chase-diagnostic --passive-timeout-minutes를 3/6/9/15/21/30분 6구간 전체 스윕 실측 - 사용자가 제안한 '한 번 시도 후 시장가'(3분=1봉)조차 시장가 대비 격차가 -0.574~-0.594 Sharpe로 사실상 평평함을 확인, 코드 위치까지 특정한 근본원인(decision_anchor='submit_bar'가 1봉 늦은 기준가를 쓰는 무룩백 설계상 고정비용)과 함께 문서화 - 어떤 체결창 길이도 채택하지 않음(코드 변경 없음). /check에서 실제 --final-oos-2026h1 라이브 실행이 _assert_envelope_leverage_ceiling_verified(미수정 기존 코드)에서 ValueError로 3회 재현성 있게 실패하는 것을 발견 - 원인을 심층 규명: end를 2026-06-30까지 늘리면 1h 베이스 패널의 min_bars=2000 자격 기준을 통과하는 종목 집합이 바뀌어(508개로 증가) 2021~2022년 과거 데이터의 교차단면 신호 순위 계산까지 영향을 주고, 이게 growth_extreme/growth_extreme_budgeted 두 envelope 모두 동일하게(0.75x) 리스크 상한 검증 실패로 이어짐(3회 재현, 두 envelope 동일 실패로 envelope 파라미터 자체는 원인에서 배제됨). 이 근본 결함은 모든 실행이 의존하는 안전장치(I3 리스크상한 검증)를 건드리는 사안이라 이번 스펙에서 임의 수정하지 않고 §6 Deferred에 근거와 함께 기록, 스펙 문서의 Acceptance/Expected outcome을 실제 달성 범위(배선 검증)로 정직하게 수정.",
       "impact": "SELECTION_WINDOW_OVERLAP 완전 해소는 아니나(5.5년 리포트 중 5년이 여전히 튜닝 구간) 사상 최초로 2026년 실제 미확인 데이터가 파이프라인에 도달 가능해짐(플래그 배선 검증 완료, 실제 성과 수치 산출은 후속 스펙 필요). 체결 알고리즘은 사용자 제안을 포함해 전 구간 기각 확정 - 시장가(OHLCV_IMMEDIATE_TAKER) 유지, 코드 변경 없음. 기본 실행 경로는 CAGR 3.184/MDD -0.389/Sharpe 2.886/회전율 271.2로 완전 불변 확인(I1). 신규 발견: 종목 유니버스 구성이 리포트 end 날짜에 따라 과거 신호까지 소급 변경되는 구조적 민감성 - 향후 유니버스를 end-불변 스냅샷으로 고정하거나 envelope 검증을 end-불변 슬라이스로 계산하는 별도 스펙이 필요."
-    },
-    {
-      "task_id": "TASK_MHS_DSR_PASSAGE",
-      "date": "2026-08-25",
-      "adr_id": "ADR_20260825_MHS_DSR_PASSAGE",
-      "domain": "evidence",
-      "title": "MHS DSR 통과: 시행기반 분산 추정, 구속력 있는 드로다운 예산, 인과적 BTC 레짐 증거",
-      "why": "DSR 게이트가 4개 1년 fold의 Sharpe 분산으로 SR* 벤치마크를 산출했는데, 블록부트스트랩(p=0.417)·해석적 chi2(p=0.357) 검정 결과 이 분산의 91.6%가 순수 추정노이즈였고, 진짜 fold간 분산이 0이어도 36.9% 확률로 우연히 통과하는 동전던지기 게이트였음. 드로다운 예산은 growth_extreme envelope이 무제한(1.0/1.0)이라 등록된 0.60 상한을 넘어 항상 DRAWDOWN_BUDGET_NON_BINDING으로 차단됨. 이전 스펙에서 사전등록한 4개 개선 후보(multi-feature-book/beta-neutralize/vol_normalized/trend-sleeve)를 실측 실행한 결과 committee 경로가 이들이 쓰는 값을 버려 blend 출력이 비트동일했음(죽은 플래그). 지정가(peg-chase) 승격도 실측 재검증: fill_rate 1.0/maker 0.877인데도 Sharpe 2.29 vs 시장가 2.89로 전 연도 열위(역선택 17.3bp > 수수료절감 6bp) - 기존 immediate-taker가 실제로 더 나은 체결모델임을 재확인. regime_conditional_sharpe 최초 구현이 전략 자신의 지분곡선 낙폭으로 레짐을 라벨링해 근사 순환논리였음을 /check에서 발견.",
-      "resolution": "src/mhs/evidence.py에 distinct_trial_sr_variance(trial_sharpes, observed_sr, dedup_decimals=6, min_outcomes=8)를 신설해 DSR의 trial 분산을 fold 분산 대신 '현재 보고 구간과 정확히 동일한 run_history 시행 원장의 구별되는 결과' 풀(관측 Sharpe 항상 포함)의 ddof=1 분산으로 교체. src/mhs/run_history.py에 window_trial_sharpes(window, history_dir)를 신설해 동일 창의 annualized blend Sharpe들을 flags 페이로드 기준 중복제거 후 반환(중복 재실행이 V를 줄이지 못함: +50 중복 재실행 시 0.956->0.943로 오히려 하락, 반면 flag별pool 방식은 0.803->0.989로 조작 가능함을 실측 검증). src/application/research/mhs/statistics.py의 _deflated_sharpe_evidence가 이제 (deflated_sharpe_ratio, DsrDecomposition, fold_proxy) 3-튜플을 반환하고, distinct_trial_sr_variance가 ValueError를 던지면(구별되는 결과 8개 미만) 게이트에 쓰이는 DSR은 반드시 None으로 fail-closed되며 fold 기반 값은 관측용 fold_proxy로만 노출되고 어떤 경로로도 게이트에 재유입되지 않음(SCENARIO_03로 검증). src/mhs/params.py에 GROWTH_RISK_ENVELOPES['growth_extreme_budgeted'](max_drawdown=0.60, max_drawdown_prob=0.10, leverage_ceiling=3.0 동일)를 신설하고 CLI_GROWTH_ENVELOPE_DEFAULT를 이걸로 교체 - growth_solver 직접 probe로 top_level 경계에서 동일한 3.00x/연변동성 0.8622가 선택됨을 확인해 노출 정체성 보존, growth_extreme 원본은 미수정. src/application/research/mhs/validation.py에 passive_timeout_minutes가 execution_timeframe(1m/3m/5m)의 배수가 아니면 요청 검증 단계에서 즉시 ValueError로 막는 가드를 추가(이전에는 3m 그리드에 5분처럼 나누어떨어지지 않는 값을 넣으면 전 결정이 검열되어 무관한 envelope 에러로 파이프라인이 죽었음). fold_committee_weight_leak(fold별 위원회 가중치 학습표본 겹침 비율, 관측용)과 regime_conditional_sharpe(인과적 레짐별 Sharpe, 관측용)를 신규 노출. /check에서 regime_conditional_sharpe 최초 구현이 causal_regime_labels에 전략 자신의 원장 수익률을 넣어 'btc_drawdown_state'라 이름붙이고도 실제로는 BTC가 아닌 자기 자신의 낙폭으로 레짐을 라벨링하는 결함을 발견(실측: btc_drawdown_bear 키가 리포트에 전혀 없었는데 실제 BTC는 5년간 7505시간 -50% 이상 낙폭을 겪었음) - src/application/research/mhs/evaluation.py에 _load_reference_close(root, start, end, reference_symbol='BTCUSDT') I/O 헬퍼를 신설하고 causal_regime_labels(returns, btc_close)로 시그니처를 변경해 독립적인 BTC 1h 종가를 별도 인자로 주입하도록 수정, 재검증 결과 btc_drawdown_bear가 정확히 7505시간으로 나타남을 확인.",
-      "impact": "실측: DSR 0.6191->0.9466 (원장 CAGR 3.184/MDD -0.389/Sharpe 2.886/회전율 271.2는 비트동일 보존, I-EXPOSURE-IDENTITY 확인). DRAWDOWN_BUDGET_NON_BINDING 사유코드 해소. DEFLATED_SHARPE_BELOW_THRESHOLD와 SELECTION_WINDOW_OVERLAP은 잔존 - DSR 마진(0.9466<0.95)이 실측대로 여전히 얇아 이번 대화 중 자체 실험 7건이 시행원장에 쌓이며 분모(N)가 127->137로 늘어 벤치마크가 살짝 상승한 결과이며, 이는 스펙이 사전에 경고한 정확한 동작(중복탐색이 벤치마크를 조작하지 못하고 오히려 정직하게 반영됨). SELECTION_WINDOW_OVERLAP은 3m 데이터가 2025-12-31까지만 존재해 이번 스펙 범위 밖(2026년 데이터 수집이 다음 단계로 스펙 §6에 사전등록됨). 4개 후보 execution/committee 플래그는 실측 결과 아무 효과 없음(비트동일 blend)이 확인되어 기본값 변경 없음 - 스펙의 사전등록 채택규칙(전체Sharpe개선 AND 최소fold Sharpe개선 AND 분산 비증가)이 전부 실패."
     }
   ]
 }

@@ -1,18 +1,21 @@
 """Contract coverage for the liquidation WebSocket stream collector.
 
 Covers: parse_liquidation (raw forceOrder + ccxt unified), compact daily
-partition persistence + dedup, research loader, and the resilient async
-stream loop (flush/shutdown + reconnect-without-dying).
+partition persistence + dedup, research loader, and the resilient native
+forceOrder stream loop (flush/shutdown + reconnect + attested liveness).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+from typing import Any
 
 import pandas as pd
 import pytest
 
 from src.market_data.streams.liquidations import (
+    FeedFrame,
     LiquidationEvent,
     append_liquidation_events,
     load_liquidation_events,
@@ -37,6 +40,26 @@ _RAW_MSG = {
         }
     }
 }
+
+
+def _raw(symbol: str, ms: int) -> dict[str, Any]:
+    return {
+        "e": "forceOrder",
+        "E": ms,
+        "o": {
+            "s": symbol,
+            "S": "SELL",
+            "o": "LIMIT",
+            "f": "IOC",
+            "q": "0.5",
+            "p": "60000",
+            "ap": "60000",
+            "X": "FILLED",
+            "l": "0.5",
+            "z": "0.5",
+            "T": ms,
+        },
+    }
 
 
 def test_parse_liquidation_from_raw_force_order_payload() -> None:
@@ -160,135 +183,136 @@ def test_load_liquidation_events_roundtrip_and_missing_dir(tmp_path) -> None:
     assert load_liquidation_events(tmp_path, since=after).empty
 
 
-class _StubExchange:
-    """Minimal ccxt.pro-shaped stub driving one watch cycle."""
-
-    def __init__(self, batches: list, shutdown, *, error_first: bool = False) -> None:
-        self._batches = list(batches)
-        self._shutdown = shutdown
-        self._error_first = error_first
-        self.calls = 0
-        self.closed = 0
-
-    async def watch_liquidations_for_symbols(self, symbols, *a, **k):  # noqa: D401 - stub
-        self.last_symbols = symbols
-        self.calls += 1
-        if self._error_first and self.calls == 1:
-            raise ConnectionError("ws dropped")
-        batch = self._batches.pop(0) if self._batches else []
-        if not self._batches:
-            self._shutdown.requested = True
-        return batch
-
-    async def close(self) -> None:
-        self.closed += 1
-
-
 class _Flag:
     requested = False
 
 
-def test_run_liquidation_stream_flushes_and_stops_on_shutdown(tmp_path) -> None:
-    flag = _Flag()
-    stub = _StubExchange([[_RAW_MSG, _CCXT_FLAT_INFO_MSG]], flag)
-    asyncio.run(
-        run_liquidation_stream(
-            symbols=None,
-            directory=tmp_path,
-            flush_interval_s=0.0,
-            shutdown=flag,
-            exchange_factory=lambda: stub,
-        )
-    )
-    files = list(tmp_path.glob("liquidations_*.parquet"))
-    total = sum(len(pd.read_parquet(f)) for f in files)
-    assert total == 2
-    assert stub.closed == 1
-    # 전체 마켓 구독은 빈 심볼 리스트로 호출된다(ccxt watch_liquidations 는 symbol 필수).
-    assert stub.last_symbols == []
+class _ManualClock:
+    """Deterministic monotonic clock advanced explicitly by the feed fake."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
 
 
-def test_run_liquidation_stream_reconnects_on_error_without_dying(tmp_path, monkeypatch) -> None:
-    flag = _Flag()
-    sleeps: list[float] = []
-    real_sleep = asyncio.sleep
-
-    async def _fake_sleep(seconds, *a, **k):
-        sleeps.append(float(seconds))
-        await real_sleep(0)
-
-    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
-
-    stub = _StubExchange([[_RAW_MSG]], flag, error_first=True)
-    # must not propagate the ConnectionError
-    asyncio.run(
-        run_liquidation_stream(
-            symbols=None,
-            directory=tmp_path,
-            flush_interval_s=0.0,
-            shutdown=flag,
-            exchange_factory=lambda: stub,
-        )
-    )
-    backoffs = [s for s in sleeps if s > 0]
-    assert backoffs
-    assert backoffs[0] == 1.0
-    assert all(s <= 60.0 for s in backoffs)
-    files = list(tmp_path.glob("liquidations_*.parquet"))
-    assert sum(len(pd.read_parquet(f)) for f in files) == 1
+def _events_frame(*msgs: Any, at: pd.Timestamp) -> FeedFrame:
+    return FeedFrame(kind="events", received_at=at, payloads=tuple(msgs))
 
 
-def _ticking_now(start: pd.Timestamp, step_s: float = 60.0):
-    state = {"n": 0}
-
-    def _now() -> pd.Timestamp:
-        out = start + pd.Timedelta(seconds=state["n"] * step_s)
-        state["n"] += 1
-        return out
-
-    return _now
+def _alive_frame(at: pd.Timestamp) -> FeedFrame:
+    return FeedFrame(kind="alive", received_at=at)
 
 
-class _ScriptedExchange:
-    """Watch stub playing a scripted ok/error sequence, then shutting down."""
+_TIMEOUT = FeedFrame(kind="timeout", received_at=None)
+_CLOSED = FeedFrame(kind="closed", received_at=None, detail="server close")
 
-    def __init__(self, script: list, shutdown) -> None:
-        self._script = list(script)
+
+class _ScriptedFeed:
+    """Scripted ``LiquidationFeed`` fake; sets shutdown when frames are exhausted."""
+
+    def __init__(
+        self,
+        frames: list[FeedFrame],
+        shutdown: _Flag,
+        *,
+        clock: _ManualClock | None = None,
+        step_s: float = 0.0,
+        shutdown_on_exhaust: bool = True,
+    ) -> None:
+        self._frames = list(frames)
         self._shutdown = shutdown
+        self._clock = clock
+        self._step_s = step_s
+        self._shutdown_on_exhaust = shutdown_on_exhaust
+        self.receive_timeouts: list[float] = []
         self.closed = 0
 
-    async def watch_liquidations_for_symbols(self, symbols, *a, **k):
-        if not self._script:
+    async def receive(self, timeout_s: float) -> FeedFrame:
+        self.receive_timeouts.append(float(timeout_s))
+        if self._clock is not None and self._step_s:
+            self._clock.advance(self._step_s)
+        if not self._frames:
+            if self._shutdown_on_exhaust:
+                self._shutdown.requested = True
+                return FeedFrame(kind="timeout", received_at=None)
+            return FeedFrame(kind="closed", received_at=None, detail="exhausted")
+        frame = self._frames.pop(0)
+        if not self._frames and self._shutdown_on_exhaust:
             self._shutdown.requested = True
-            return []
-        action = self._script.pop(0)
-        if isinstance(action, Exception):
-            raise action
-        if not self._script:
-            self._shutdown.requested = True
-        return action
+        return frame
 
     async def close(self) -> None:
         self.closed += 1
 
 
-def test_run_liquidation_stream_quiet_stretch_still_attested(tmp_path) -> None:
-    """Quiet connected stretches attest coverage without writing event files."""
-    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+def _once(feed: _ScriptedFeed) -> Any:
+    async def _factory() -> _ScriptedFeed:
+        return feed
 
+    return _factory
+
+
+def test_run_liquidation_stream_persists_events_and_stops_on_shutdown(tmp_path) -> None:
     flag = _Flag()
-    start = pd.Timestamp("2026-09-22T10:00:00Z")
-    tracker = CoverageTracker("liquidations", tmp_path)
-    stub = _ScriptedExchange([[], [], []], flag)
+    feed = _ScriptedFeed(
+        [_events_frame(_RAW_MSG, _CCXT_FLAT_INFO_MSG, "junk", {}, at=pd.Timestamp("2026-09-22T10:00:00Z"))],
+        flag,
+    )
     asyncio.run(
         run_liquidation_stream(
             symbols=None,
             directory=tmp_path,
-            flush_interval_s=0.0,
+            flush_interval_s=3600.0,
             shutdown=flag,
-            exchange_factory=lambda: stub,
+            feed_factory=_once(feed),
+        )
+    )
+    files = list(tmp_path.glob("liquidations_*.parquet"))
+    assert sum(len(pd.read_parquet(f)) for f in files) == 2
+    assert feed.closed == 1
+
+
+def test_run_liquidation_stream_observes_shutdown_without_events(tmp_path) -> None:
+    flag = _Flag()
+    feed = _ScriptedFeed([_CLOSED], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            receive_timeout_s=0.5,
+        )
+    )
+    assert 1 <= len(feed.receive_timeouts) <= 2
+    assert all(t == 0.5 for t in feed.receive_timeouts)
+
+
+def test_run_liquidation_stream_attests_quiet_stretch_with_alive_frames(tmp_path) -> None:
+    """Quiet-but-connected stretches stay attested without writing event files."""
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    tracker = CoverageTracker("liquidations", tmp_path)
+    feed = _ScriptedFeed(
+        [_alive_frame(t0), _alive_frame(t0 + pd.Timedelta(seconds=5)), _alive_frame(t0 + pd.Timedelta(seconds=10))],
+        flag,
+    )
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
             coverage=tracker,
-            now_fn=_ticking_now(start),
         )
     )
     out = load_coverage(
@@ -296,136 +320,603 @@ def test_run_liquidation_stream_quiet_stretch_still_attested(tmp_path) -> None:
         start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
     )
     assert len(out) == 1
-    assert out.iloc[0]["start"] == start
+    assert out.iloc[0]["start"] == t0
+    assert out.iloc[0]["end"] == t0 + pd.Timedelta(seconds=10)
     assert list(tmp_path.glob("liquidations_*.parquet")) == []
 
 
-def test_run_liquidation_stream_error_opens_coverage_gap(tmp_path) -> None:
-    """A transport error splits attested coverage while the stream survives."""
+def test_run_liquidation_stream_timeout_frames_never_attest(tmp_path) -> None:
     from src.market_data.streams.coverage import CoverageTracker, load_coverage
 
     flag = _Flag()
-    start = pd.Timestamp("2026-09-22T10:00:00Z")
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
     tracker = CoverageTracker("liquidations", tmp_path)
-    stub = _ScriptedExchange([[_RAW_MSG], [_RAW_MSG], ConnectionError("ws dropped"), [_RAW_MSG], [_RAW_MSG]], flag)
+    feed = _ScriptedFeed([_alive_frame(t0), _TIMEOUT, _TIMEOUT], flag)
     asyncio.run(
         run_liquidation_stream(
             symbols=None,
             directory=tmp_path,
-            flush_interval_s=0.0,
+            flush_interval_s=3600.0,
             shutdown=flag,
-            exchange_factory=lambda: stub,
+            feed_factory=_once(feed),
             coverage=tracker,
-            now_fn=_ticking_now(start),
+            liveness_timeout_s=3600.0,
         )
     )
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    assert out.empty or out["end"].max() <= t0
+
+
+def test_run_liquidation_stream_liveness_timeout_forces_reconnect(tmp_path) -> None:
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    t1 = t0 + pd.Timedelta(seconds=5)
+    t2 = t0 + pd.Timedelta(seconds=60)
+    t3 = t0 + pd.Timedelta(seconds=65)
+    first = _ScriptedFeed(
+        [_alive_frame(t0), _alive_frame(t1), _TIMEOUT, _TIMEOUT, _TIMEOUT, _TIMEOUT, _TIMEOUT],
+        flag,
+        clock=clock,
+        step_s=5.0,
+        shutdown_on_exhaust=False,
+    )
+    second = _ScriptedFeed([_alive_frame(t2), _alive_frame(t3)], flag, clock=clock, step_s=5.0)
+    feeds = [first, second]
+    calls = {"n": 0}
+
+    async def _factory() -> _ScriptedFeed:
+        calls["n"] += 1
+        return feeds.pop(0)
+
+    tracker = CoverageTracker("liquidations", tmp_path)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            clock=clock,
+            coverage=tracker,
+            liveness_timeout_s=12.0,
+        )
+    )
+    assert calls["n"] == 2
     out = load_coverage(
         tmp_path, "liquidations",
         start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
     )
     assert len(out) == 2
+    assert out.iloc[0]["end"] == t1
     assert out.iloc[0]["end"] < out.iloc[1]["start"]
 
 
-def test_run_liquidation_stream_without_coverage_writes_no_attestation(tmp_path) -> None:
-    """Legacy behavior is unchanged when no coverage tracker is given."""
+def test_run_liquidation_stream_healthy_connection_reconnects_immediately(tmp_path, monkeypatch) -> None:
     flag = _Flag()
-    stub = _ScriptedExchange([[_RAW_MSG]], flag)
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    t1 = t0 + pd.Timedelta(seconds=5)
+    first = _ScriptedFeed(
+        [_events_frame(_raw("BTCUSDT", 1758531600000), at=t0), _CLOSED], flag, shutdown_on_exhaust=False
+    )
+    second = _ScriptedFeed([_events_frame(_raw("ETHUSDT", 1758531660000), at=t1)], flag)
+    feeds = [first, second]
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _fake_sleep(seconds: float, *a: Any, **k: Any) -> None:
+        sleeps.append(float(seconds))
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    async def _factory() -> _ScriptedFeed:
+        return feeds.pop(0)
+
     asyncio.run(
         run_liquidation_stream(
             symbols=None,
             directory=tmp_path,
-            flush_interval_s=0.0,
+            flush_interval_s=3600.0,
             shutdown=flag,
-            exchange_factory=lambda: stub,
-            coverage=None,
+            feed_factory=_factory,  # type: ignore[arg-type]
         )
     )
-    assert not (tmp_path / "coverage").exists()
+    assert sleeps == []
+    files = list(tmp_path.glob("liquidations_*.parquet"))
+    assert sum(len(pd.read_parquet(f)) for f in files) == 2
 
 
-def test_run_liquidation_stream_coverage_flush_failure_never_stops_stream(tmp_path) -> None:
-    """Coverage flush failures are logged and the stream continues."""
+def test_run_liquidation_stream_consecutive_failures_back_off_exponentially(tmp_path, monkeypatch) -> None:
     flag = _Flag()
-    start = pd.Timestamp("2026-09-22T10:00:00Z")
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
 
-    class _FailingFlush:
-        def mark_ok(self, ts) -> None:
-            return None
+    async def _fake_sleep(seconds: float, *a: Any, **k: Any) -> None:
+        sleeps.append(float(seconds))
+        await real_sleep(0)
 
-        def mark_error(self, ts) -> None:
-            return None
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    factory_marks: list[int] = []
 
-        def flush(self):
-            raise OSError("disk full")
+    async def _factory() -> _ScriptedFeed:
+        factory_marks.append(len(sleeps))
+        if len(factory_marks) <= 8:
+            raise ConnectionError("ws dropped")
+        return _ScriptedFeed([], flag)
 
-    stub = _ScriptedExchange([[], []], flag)
     asyncio.run(
         run_liquidation_stream(
             symbols=None,
             directory=tmp_path,
-            flush_interval_s=0.0,
+            flush_interval_s=3600.0,
             shutdown=flag,
-            exchange_factory=lambda: stub,
-            coverage=_FailingFlush(),
-            now_fn=_ticking_now(start),
+            feed_factory=_factory,  # type: ignore[arg-type]
+            max_backoff_s=60.0,
         )
     )
-    assert stub.closed == 1
+    assert len(factory_marks) == 9
+    totals = [
+        sum(sleeps[factory_marks[i]:factory_marks[i + 1]]) for i in range(8)
+    ]
+    assert totals == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+    assert all(s <= 60.0 for s in sleeps)
 
 
-def test_run_liquidation_stream_error_with_flush_failure_still_recovers(tmp_path) -> None:
-    """An error-path coverage flush failure does not break reconnect."""
-    flag = _Flag()
-    start = pd.Timestamp("2026-09-22T10:00:00Z")
-
-    class _FailingFlush:
-        def mark_ok(self, ts) -> None:
-            return None
-
-        def mark_error(self, ts) -> None:
-            return None
-
-        def flush(self):
-            raise OSError("disk full")
-
-    stub = _ScriptedExchange(
-        [[_RAW_MSG], [_RAW_MSG], ConnectionError("ws dropped"), [_RAW_MSG], [_RAW_MSG]], flag
-    )
-    asyncio.run(
-        run_liquidation_stream(
-            symbols=None,
-            directory=tmp_path,
-            flush_interval_s=0.0,
-            shutdown=flag,
-            exchange_factory=lambda: stub,
-            coverage=_FailingFlush(),
-            now_fn=_ticking_now(start),
-        )
-    )
-    assert stub.closed == 1
-    assert list(tmp_path.glob("liquidations_*.parquet")) != []
-
-
-def test_run_liquidation_stream_default_clock_attests(tmp_path) -> None:
-    """The default UTC wall clock attests coverage when no clock is injected."""
+def test_run_liquidation_stream_coverage_never_outruns_persisted_events(tmp_path, monkeypatch) -> None:
+    """A failed event flush keeps the buffer and leaves coverage pending."""
+    import src.market_data.streams.liquidations as liq_mod
     from src.market_data.streams.coverage import CoverageTracker, load_coverage
 
     flag = _Flag()
-    before = pd.Timestamp.now(tz="UTC")
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    t1 = t0 + pd.Timedelta(seconds=5)
+    real_append = liq_mod.append_liquidation_events
+    calls = {"n": 0}
+
+    def _fail_once(events: Any, directory: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert list(tmp_path.rglob("*.jsonl")) == []
+            raise OSError("disk full")
+        return real_append(events, directory)
+
+    monkeypatch.setattr(liq_mod, "append_liquidation_events", _fail_once)
     tracker = CoverageTracker("liquidations", tmp_path)
-    stub = _ScriptedExchange([[], [], []], flag)
+    feed = _ScriptedFeed(
+        [
+            _events_frame(_raw("BTCUSDT", 1758531600000), at=t0),
+            _events_frame(_raw("BTCUSDT", 1758531660000), at=t1),
+        ],
+        flag,
+    )
     asyncio.run(
         run_liquidation_stream(
             symbols=None,
             directory=tmp_path,
             flush_interval_s=0.0,
             shutdown=flag,
-            exchange_factory=lambda: stub,
+            feed_factory=_once(feed),
+            clock=clock,
             coverage=tracker,
         )
     )
+    assert calls["n"] >= 2
+    files = list(tmp_path.glob("liquidations_*.parquet"))
+    assert sum(len(pd.read_parquet(f)) for f in files) == 2
     out = load_coverage(
-        tmp_path, "liquidations", start=before, end=pd.Timestamp.now(tz="UTC"),
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
     )
     assert len(out) == 1
+    assert out.iloc[0]["start"] == t0
+    assert out.iloc[0]["end"] == t1
+
+
+def test_run_liquidation_stream_symbol_filter_keeps_liveness(tmp_path) -> None:
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    t1 = t0 + pd.Timedelta(seconds=5)
+    tracker = CoverageTracker("liquidations", tmp_path)
+    feed = _ScriptedFeed(
+        [
+            _events_frame(_raw("ETHUSDT", 1758531600000), at=t0),
+            _events_frame(_raw("ETHUSDT", 1758531660000), at=t1),
+        ],
+        flag,
+    )
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=["BTCUSDT"],
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            coverage=tracker,
+        )
+    )
+    assert list(tmp_path.glob("liquidations_*.parquet")) == []
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    assert len(out) == 1
+    assert out.iloc[0]["start"] == t0
+    assert out.iloc[0]["end"] == t1
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"receive_timeout_s": 0.0},
+        {"ping_interval_s": 0.0},
+        {"liveness_timeout_s": 5.0, "ping_interval_s": 5.0},
+        {"liveness_timeout_s": 1.0, "ping_interval_s": 5.0},
+    ],
+)
+def test_run_liquidation_stream_rejects_invalid_timing(tmp_path, kwargs: dict[str, float]) -> None:
+    flag = _Flag()
+    opened = {"n": 0}
+
+    async def _factory() -> _ScriptedFeed:
+        opened["n"] += 1
+        return _ScriptedFeed([], flag)
+
+    with pytest.raises(ValueError, match="must be"):
+        asyncio.run(
+            run_liquidation_stream(
+                symbols=None,
+                directory=tmp_path,
+                shutdown=flag,
+                feed_factory=_factory,  # type: ignore[arg-type]
+                **kwargs,  # type: ignore[arg-type]
+            )
+        )
+    assert opened["n"] == 0
+
+
+def test_run_liquidation_stream_receive_error_reconnects(tmp_path) -> None:
+    """A ``receive`` transport error is treated as a closed connection."""
+    flag = _Flag()
+    calls = {"n": 0}
+
+    class _Flaky:
+        closed = 0
+
+        async def receive(self, timeout_s: float) -> FeedFrame:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transport lost")
+            flag.requested = True
+            return FeedFrame(kind="timeout", received_at=None)
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    feed = _Flaky()
+
+    async def _factory() -> _Flaky:
+        return feed
+
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+        )
+    )
+    assert calls["n"] == 2
+    assert feed.closed == 2
+
+
+def test_run_liquidation_stream_receive_cancel_propagates(tmp_path) -> None:
+    flag = _Flag()
+
+    class _Cancelling:
+        async def receive(self, timeout_s: float) -> FeedFrame:
+            raise asyncio.CancelledError
+
+        async def close(self) -> None:
+            return None
+
+    async def _factory() -> _Cancelling:
+        return _Cancelling()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            run_liquidation_stream(
+                symbols=None,
+                directory=tmp_path,
+                shutdown=flag,
+                feed_factory=_factory,  # type: ignore[arg-type]
+            )
+        )
+
+
+def test_run_liquidation_stream_silent_disconnect_backs_off(tmp_path) -> None:
+    """A liveness death with no evidence backs off; shutdown mid-backoff stops the stream."""
+    flag = _Flag()
+    clock = _ManualClock()
+    feed = _ScriptedFeed([_TIMEOUT, _TIMEOUT, _TIMEOUT], flag, clock=clock, step_s=5.0, shutdown_on_exhaust=False)
+    calls = {"n": 0}
+
+    async def _factory() -> _ScriptedFeed:
+        calls["n"] += 1
+        return feed
+
+    async def _scenario() -> None:
+        async def _stop() -> None:
+            await asyncio.sleep(0.2)
+            flag.requested = True
+
+        task = asyncio.create_task(_stop())
+        await run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            clock=clock,
+            liveness_timeout_s=12.0,
+        )
+        await task
+
+    asyncio.run(_scenario())
+    assert calls["n"] == 1
+
+
+def test_run_liquidation_stream_shutdown_during_backoff(tmp_path) -> None:
+    """Shutdown observed mid-backoff stops the stream without opening a feed."""
+    flag = _Flag()
+    opened = {"n": 0}
+
+    async def _factory() -> _ScriptedFeed:
+        opened["n"] += 1
+        raise ConnectionError("down")
+
+    async def _scenario() -> None:
+        async def _stop() -> None:
+            await asyncio.sleep(1.5)
+            flag.requested = True
+
+        task = asyncio.create_task(_stop())
+        await run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+        )
+        await task
+
+    asyncio.run(_scenario())
+    assert opened["n"] == 2
+
+
+def test_run_liquidation_stream_cancelled_sleep_propagates(tmp_path, monkeypatch) -> None:
+    flag = _Flag()
+
+    async def _factory() -> _ScriptedFeed:
+        raise ConnectionError("down")
+
+    async def _boom(seconds: float, *a: Any, **k: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _boom)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            run_liquidation_stream(
+                symbols=None,
+                directory=tmp_path,
+                shutdown=flag,
+                feed_factory=_factory,  # type: ignore[arg-type]
+            )
+        )
+
+
+def test_run_liquidation_stream_coverage_mark_failures_logged(tmp_path) -> None:
+    """Coverage callback failures never stop the stream."""
+
+    class _Rejecting:
+        def mark_ok(self, ts: Any) -> None:
+            raise RuntimeError("no")
+
+        def mark_error(self, ts: Any) -> None:
+            raise RuntimeError("no")
+
+        def flush(self) -> Any:
+            raise RuntimeError("no")
+
+    flag = _Flag()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    feed = _ScriptedFeed([_alive_frame(t0), _CLOSED], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            coverage=_Rejecting(),  # type: ignore[arg-type]
+        )
+    )
+    assert feed.closed == 1
+
+
+def test_run_liquidation_stream_feed_close_failure_logged(tmp_path) -> None:
+    flag = _Flag()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+
+    class _BadClose(_ScriptedFeed):
+        async def close(self) -> None:
+            raise RuntimeError("close boom")
+
+    feed = _BadClose([_events_frame(_raw("BTCUSDT", 1758531600000), at=t0)], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+        )
+    )
+    assert sum(len(pd.read_parquet(f)) for f in tmp_path.glob("liquidations_*.parquet")) == 1
+
+
+def test_run_liquidation_stream_broken_shutdown_flag_treated_as_not_requested(tmp_path) -> None:
+    """A shutdown flag that raises on access never reads as requested."""
+
+    class _Raising:
+        @property
+        def requested(self) -> bool:
+            raise RuntimeError("boom")
+
+    class _Yielding:
+        async def receive(self, timeout_s: float) -> FeedFrame:
+            await asyncio.sleep(0)
+            return FeedFrame(kind="timeout", received_at=None)
+
+        async def close(self) -> None:
+            return None
+
+    async def _factory() -> _Yielding:
+        return _Yielding()
+
+    async def _scenario() -> None:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                run_liquidation_stream(
+                    symbols=None,
+                    directory=tmp_path,
+                    shutdown=_Raising(),
+                    feed_factory=_factory,  # type: ignore[arg-type]
+                    liveness_timeout_s=3600.0,
+                ),
+                0.5,
+            )
+
+    asyncio.run(_scenario())
+
+
+def test_run_liquidation_stream_clock_failure_logged_and_stops(tmp_path) -> None:
+    flag = _Flag()
+    calls = {"n": 0}
+
+    def _clock() -> float:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise RuntimeError("clock boom")
+        return 0.0
+
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    feed = _ScriptedFeed([_events_frame(_raw("BTCUSDT", 1758531600000), at=t0)], flag)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            clock=_clock,
+        )
+    )
+    assert calls["n"] >= 3
+
+
+async def _run_default_factory_once(
+    tmp_path: Any, monkeypatch: Any, flag: _Flag, close_exc: BaseException | None
+) -> dict[str, int]:
+    """Run the stream with the default factory against a local forceOrder endpoint."""
+    import aiohttp
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    import src.market_data.streams.liquidations as liq_mod
+
+    payload = _raw("BTCUSDT", 1758531600000)
+    closed = {"n": 0}
+
+    async def _handler(request: Any) -> Any:
+        ws = web.WebSocketResponse(autoping=False)
+        await ws.prepare(request)
+        await ws.send_str(json.dumps(payload))
+        await asyncio.sleep(5.0)
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/ws", _handler)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        local_url = str(server.make_url("/ws")).replace("http://", "ws://")
+        real_connect = liq_mod.BinanceForceOrderFeed.connect
+
+        @classmethod
+        async def _local_connect(cls: Any, session: Any, **kwargs: Any) -> Any:
+            return await real_connect(session, url=local_url, **kwargs)
+
+        monkeypatch.setattr(liq_mod.BinanceForceOrderFeed, "connect", _local_connect)
+        real_close = aiohttp.ClientSession.close
+
+        async def _counting_close(self: Any) -> None:
+            closed["n"] += 1
+            if close_exc is not None:
+                raise close_exc
+            await real_close(self)
+
+        monkeypatch.setattr(aiohttp.ClientSession, "close", _counting_close)
+
+        async def _stop() -> None:
+            await asyncio.sleep(1.0)
+            flag.requested = True
+
+        task = asyncio.create_task(_stop())
+        await run_liquidation_stream(symbols=None, directory=tmp_path, flush_interval_s=0.0, shutdown=flag)
+        await task
+        return closed
+    finally:
+        await server.close()
+
+
+def test_run_liquidation_stream_default_factory_uses_owned_session(tmp_path, monkeypatch) -> None:
+    """Without ``feed_factory`` the stream connects, persists, and closes its session."""
+    flag = _Flag()
+
+    async def _scenario() -> dict[str, int]:
+        return await _run_default_factory_once(tmp_path, monkeypatch, flag, None)
+
+    closed = asyncio.run(_scenario())
+    assert closed["n"] == 1
+    assert sum(len(pd.read_parquet(f)) for f in tmp_path.glob("liquidations_*.parquet")) >= 1
+
+
+def test_run_liquidation_stream_default_factory_session_close_failure_logged(tmp_path, monkeypatch) -> None:
+    """An owned-session close failure is logged and never raises."""
+    flag = _Flag()
+
+    async def _scenario() -> dict[str, int]:
+        return await _run_default_factory_once(tmp_path, monkeypatch, flag, RuntimeError("close boom"))
+
+    closed = asyncio.run(_scenario())
+    assert closed["n"] == 1
+    assert sum(len(pd.read_parquet(f)) for f in tmp_path.glob("liquidations_*.parquet")) >= 1
+
+
+def test_run_liquidation_stream_default_factory_session_cancel_propagates(tmp_path, monkeypatch) -> None:
+    """Cancellation during the owned-session close propagates."""
+    flag = _Flag()
+
+    async def _scenario() -> None:
+        await _run_default_factory_once(tmp_path, monkeypatch, flag, asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(_scenario())

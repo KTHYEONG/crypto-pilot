@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 from src.market_data.streams.coverage import CoverageTracker
 from src.market_data.streams.liquidations import run_liquidation_stream
@@ -48,6 +48,9 @@ class MarketRecorderConfig(BaseModel):
     http_timeout_s: float = 10.0
     restart_backoff_max_s: float = 60.0
     liquidation_flush_interval_s: float = 60.0
+    liquidation_receive_timeout_s: float = 1.0
+    liquidation_liveness_timeout_s: float = 15.0
+    liquidation_ping_interval_s: float = 5.0
 
     @field_validator("book_ticker_interval_s", "premium_index_interval_s")
     @classmethod
@@ -75,6 +78,21 @@ class MarketRecorderConfig(BaseModel):
     def _check_backoff(cls, value: float) -> float:
         if value < 1:
             raise ValueError("restart_backoff_max_s must be >= 1")
+        return value
+
+    @field_validator("liquidation_receive_timeout_s", "liquidation_ping_interval_s")
+    @classmethod
+    def _check_liquidation_timing(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be positive")
+        return value
+
+    @field_validator("liquidation_liveness_timeout_s")
+    @classmethod
+    def _check_liquidation_liveness(cls, value: float, info: ValidationInfo) -> float:
+        ping = info.data.get("liquidation_ping_interval_s", 5.0)
+        if value <= ping:
+            raise ValueError("liquidation_liveness_timeout_s must be greater than liquidation_ping_interval_s")
         return value
 
 
@@ -349,6 +367,9 @@ async def run_market_recorder(
             symbols=None, directory=Path(liquidations_dir),
             flush_interval_s=config.liquidation_flush_interval_s,
             shutdown=shutdown, coverage=tracker,
+            receive_timeout_s=config.liquidation_receive_timeout_s,
+            liveness_timeout_s=config.liquidation_liveness_timeout_s,
+            ping_interval_s=config.liquidation_ping_interval_s,
         )
         try:
             tracker.flush()

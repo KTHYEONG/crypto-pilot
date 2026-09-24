@@ -32,9 +32,9 @@ def test_SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS() -> None:
 def test_docker_compose_has_independent_market_recorder_service() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     # 라이브 전용 소스(bookTicker/premiumIndex/reference) + 청산 스트림은 live 데몬과 독립된 서비스로 24/7 가동된다.
-    assert "record-market" in compose
+    assert "src.market_data.streams.recorder_main" in compose
+    assert "/app/.venv/bin/python" in compose
     assert "container_name: market-recorder" in compose
-    assert '"data"' in compose  # command runs the data CLI group
     assert "unless-stopped" in compose
     assert "./data/futures/liquidations:/app/data/futures/liquidations" in compose
     assert "./data/live_capture:/app/data/live_capture" in compose
@@ -61,12 +61,16 @@ def test_deploy_workflow_waits_for_daemon_idle_gate_before_recreate() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
 
     gate = workflow.index("python3 -m src.application.ops.daemon_idle_gate")
-    recreate = workflow.index("up -d --force-recreate")
+    recreate = workflow.index("compose_recreate.sh")
     assert gate < recreate
     assert "cat ~/crypto-pilot/data/state/live_daemon_heartbeat.json" in workflow
     assert '--waited-s "$waited"' in workflow
     assert '"$rc" -ne 10' in workflow
     assert "sleep 60" in workflow
+    assert 'scp $SSH_OPTS deploy/compose_recreate.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"' in workflow
+    # recorder는 fingerprint 스크립트가 판단한다. 베어 recreate로 recorder까지 재시작하면 안 된다.
+    assert "up -d --force-recreate --remove-orphans\n" not in workflow
+    assert "$C up -d --force-recreate" not in workflow
 
 
 def test_docker_compose_memory_budget_fits_oci_a1_host() -> None:
@@ -160,8 +164,8 @@ def test_gate_waits_on_fresh_busy_heartbeat() -> None:
     from src.application.ops.daemon_idle_gate import BUSY_STAGES, decide_deploy
 
     assert frozenset({"refresh", "signal", "execute"}) == BUSY_STAGES
-    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
-    heartbeat = {"stage": "signal", "status": "RUNNING", "ts": "2026-09-15T01:29:00+00:00"}
+    now = datetime.fromisoformat("2026-09-15T10:30:00+00:00")
+    heartbeat = {"stage": "signal", "status": "RUNNING", "ts": "2026-09-15T10:29:00+00:00"}
     decision = decide_deploy(heartbeat, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
     assert decision.action == "wait"
     assert decision.reason == "busy:signal"
@@ -172,9 +176,9 @@ def test_gate_proceeds_on_idle_heartbeat() -> None:
 
     from src.application.ops.daemon_idle_gate import decide_deploy, main
 
-    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
+    now = datetime.fromisoformat("2026-09-15T10:30:00+00:00")
     decision = decide_deploy(
-        {"stage": "idle", "ts": "2026-09-15T01:29:00+00:00"},
+        {"stage": "idle", "ts": "2026-09-15T10:29:00+00:00"},
         now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0,
     )
     assert (decision.action, decision.reason) == ("proceed", "idle")
@@ -184,8 +188,8 @@ def test_gate_proceeds_on_idle_heartbeat() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         hb = _Path(tmp) / "hb.json"
-        hb.write_text(json.dumps({"stage": "idle", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
-        assert main(["--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"]) == 0
+        hb.write_text(json.dumps({"stage": "idle", "ts": "2026-09-15T10:29:00+00:00"}), encoding="utf-8")
+        assert main(["--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T10:30:00+00:00"]) == 0
 
 
 def test_gate_preserves_strict_stale_boundary() -> None:
@@ -193,9 +197,9 @@ def test_gate_preserves_strict_stale_boundary() -> None:
 
     from src.application.ops.daemon_idle_gate import decide_deploy
 
-    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
-    at_threshold = {"stage": "execute", "ts": "2026-09-15T00:45:00+00:00"}
-    over_threshold = {"stage": "execute", "ts": "2026-09-15T00:44:59+00:00"}
+    now = datetime.fromisoformat("2026-09-15T10:30:00+00:00")
+    at_threshold = {"stage": "execute", "ts": "2026-09-15T09:45:00+00:00"}
+    over_threshold = {"stage": "execute", "ts": "2026-09-15T09:44:59+00:00"}
     at_decision = decide_deploy(at_threshold, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
     assert at_decision.action == "wait"
     over_decision = decide_deploy(over_threshold, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
@@ -208,8 +212,8 @@ def test_gate_proceeds_on_wait_timeout() -> None:
 
     from src.application.ops.daemon_idle_gate import decide_deploy, main
 
-    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
-    heartbeat = {"stage": "signal", "status": "RUNNING", "ts": "2026-09-15T01:29:30+00:00"}
+    now = datetime.fromisoformat("2026-09-15T10:30:00+00:00")
+    heartbeat = {"stage": "signal", "status": "RUNNING", "ts": "2026-09-15T10:29:30+00:00"}
     decision = decide_deploy(heartbeat, now=now, waited_s=3600.0, max_wait_s=3600.0, stale_after_s=2700.0)
     assert decision.action == "proceed_timeout"
     assert decision.reason == "max_wait:signal waited_s=3600"
@@ -220,7 +224,7 @@ def test_gate_proceeds_on_wait_timeout() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         hb = _Path(tmp) / "hb.json"
         hb.write_text(json.dumps(heartbeat), encoding="utf-8")
-        assert main(["--heartbeat-file", str(hb), "--waited-s", "3600", "--now", "2026-09-15T01:30:00+00:00"]) == 0
+        assert main(["--heartbeat-file", str(hb), "--waited-s", "3600", "--max-wait-s", "3600", "--now", "2026-09-15T10:30:00+00:00"]) == 0
 
 
 def test_gate_keeps_malformed_heartbeat_behavior(tmp_path, capsys) -> None:
@@ -230,22 +234,22 @@ def test_gate_keeps_malformed_heartbeat_behavior(tmp_path, capsys) -> None:
 
     from datetime import datetime
 
-    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
+    now = datetime.fromisoformat("2026-09-15T10:30:00+00:00")
     for heartbeat in (None, {}, {"stage": "signal"}, {"stage": "signal", "ts": "not-a-time"}):
         decision = decide_deploy(heartbeat, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
         assert (decision.action, decision.reason) == ("proceed", "no_heartbeat")
     import pytest
 
     with pytest.raises(ValueError, match="tz-aware"):
-        decide_deploy({"stage": "idle", "ts": "2026-09-15T01:29:00+00:00"}, now=datetime(2026, 9, 15, 1, 30), waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
+        decide_deploy({"stage": "idle", "ts": "2026-09-15T10:29:00+00:00"}, now=datetime(2026, 9, 15, 1, 30), waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
     busy = tmp_path / "busy.json"
-    busy.write_text(json.dumps({"stage": "signal", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
-    assert main(["--heartbeat-file", str(busy), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"]) == 10
+    busy.write_text(json.dumps({"stage": "signal", "ts": "2026-09-15T10:29:00+00:00"}), encoding="utf-8")
+    assert main(["--heartbeat-file", str(busy), "--waited-s", "0", "--now", "2026-09-15T10:30:00+00:00"]) == 10
     assert capsys.readouterr().out.strip() == "action=wait reason=busy:signal"
     for raw in ("", "<html>", "[1, 2]"):
         target = tmp_path / "case.json"
         target.write_text(raw, encoding="utf-8")
-        assert main(["--heartbeat-file", str(target), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"]) == 0
+        assert main(["--heartbeat-file", str(target), "--waited-s", "0", "--now", "2026-09-15T10:30:00+00:00"]) == 0
         assert capsys.readouterr().out.strip() == "action=proceed reason=no_heartbeat"
 
 
@@ -259,9 +263,9 @@ def test_gate_runs_under_bare_python_and_matches_workflow(tmp_path) -> None:
     workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
     assert "python3 -m src.application.ops.daemon_idle_gate" in workflow
     hb = tmp_path / "hb.json"
-    hb.write_text(json.dumps({"stage": "refresh", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
+    hb.write_text(json.dumps({"stage": "refresh", "ts": "2026-09-15T10:29:00+00:00"}), encoding="utf-8")
     result = subprocess.run(  # noqa: S603 - fixed argv: this interpreter + the repo gate module
-        [sys.executable, "-I", "-m", "src.application.ops.daemon_idle_gate", "--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"],
+        [sys.executable, "-I", "-m", "src.application.ops.daemon_idle_gate", "--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T10:30:00+00:00"],
         capture_output=True, text=True, check=False, cwd=root,
     )
     assert result.returncode == 10
@@ -276,16 +280,16 @@ def test_ops_cli_delegates_daemon_idle_gate(tmp_path, capsys) -> None:
     from src.cli.main import build_root_parser
 
     hb = tmp_path / "hb.json"
-    hb.write_text(json.dumps({"stage": "signal", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
+    hb.write_text(json.dumps({"stage": "signal", "ts": "2026-09-15T10:29:00+00:00"}), encoding="utf-8")
     parser = build_root_parser()
-    args = parser.parse_args(["ops", "daemon-idle-gate", "--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"])
+    args = parser.parse_args(["ops", "daemon-idle-gate", "--heartbeat-file", str(hb), "--waited-s", "0", "--now", "2026-09-15T10:30:00+00:00"])
     with pytest.raises(SystemExit) as exc:
         args.handler(args)
     assert exc.value.code == 10
     assert capsys.readouterr().out.strip() == "action=wait reason=busy:signal"
     idle = tmp_path / "idle.json"
-    idle.write_text(json.dumps({"stage": "idle", "ts": "2026-09-15T01:29:00+00:00"}), encoding="utf-8")
-    idle_args = parser.parse_args(["ops", "daemon-idle-gate", "--heartbeat-file", str(idle), "--waited-s", "0", "--now", "2026-09-15T01:30:00+00:00"])
+    idle.write_text(json.dumps({"stage": "idle", "ts": "2026-09-15T10:29:00+00:00"}), encoding="utf-8")
+    idle_args = parser.parse_args(["ops", "daemon-idle-gate", "--heartbeat-file", str(idle), "--waited-s", "0", "--now", "2026-09-15T10:30:00+00:00"])
     assert idle_args.handler(idle_args) is None
 
 
@@ -322,3 +326,180 @@ def test_deploy_workflow_installs_and_enables_backup_unit() -> None:
     assert "systemctl --user daemon-reload" in workflow
     assert "systemctl --user enable --now crypto-pilot-backup.timer" in workflow
 
+
+_FAKE_DOCKER_SCRIPT = """#!/usr/bin/env bash
+echo "docker $*" >> "$FAKE_LOG"
+op="$1"; shift || true
+case "$op" in
+  compose)
+    sub="$1"; shift || true
+    case "$sub" in
+      version) exit 0 ;;
+      pull) exit 0 ;;
+      config) printf '%s\\n' "$FAKE_CONFIG_HASH"; exit 0 ;;
+      up)
+        if [ -n "${FAKE_FAIL_UP:-}" ]; then
+          case "$*" in
+            *"$FAKE_FAIL_UP"*) exit 1 ;;
+          esac
+        fi
+        exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  exec)
+    if [ "${FAKE_INSPECT_RUNNING:-}" != "true" ]; then exit 1; fi
+    if [ "${FAKE_EXEC_FAIL:-0}" = "1" ]; then exit 1; fi
+    printf '%s\\n' "$FAKE_RUNNING_FP"
+    exit 0
+    ;;
+  run)
+    if [ "${FAKE_RUN_FAIL:-0}" = "1" ]; then exit 1; fi
+    printf '%s\\n' "$FAKE_IMAGE_FP"
+    exit 0
+    ;;
+  inspect)
+    if [ "${FAKE_INSPECT_RUNNING:-}" = "fail" ]; then exit 1; fi
+    case "$*" in
+      *State.Running*)
+        if [ "${FAKE_INSPECT_RUNNING:-}" = "true" ]; then echo "true"; else echo "false"; fi
+        exit 0 ;;
+      *config-hash*) printf '%s\\n' "$FAKE_LABEL"; exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  image) exit 0 ;;
+  *) exit 0 ;;
+esac
+"""
+
+
+def _run_compose_recreate(tmp_path, env: dict[str, str]):
+    """Replay `deploy/compose_recreate.sh` against a fake `docker` on PATH."""
+    import os
+    import shutil
+    import stat
+    import subprocess
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(_FAKE_DOCKER_SCRIPT, encoding="utf-8")
+    fake_docker.chmod(fake_docker.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    log = tmp_path / "argv.log"
+    log.write_text("", encoding="utf-8")
+    full_env = dict(os.environ)
+    full_env.update(env)
+    full_env["FAKE_LOG"] = str(log)
+    full_env["PATH"] = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+    result = subprocess.run(  # noqa: S603 - fixed argv: the repo script under test + a fake image ref
+        [str(shutil.which("bash") or "/bin/bash"), str(ROOT / "deploy" / "compose_recreate.sh"), "fake-image:latest"],
+        capture_output=True, text=True, check=False, cwd=tmp_path, env=full_env,
+    )
+    return result, [line for line in log.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _base_recreate_env() -> dict[str, str]:
+    return {
+        "FAKE_INSPECT_RUNNING": "true",
+        "FAKE_RUNNING_FP": "sha256:abc",
+        "FAKE_IMAGE_FP": "sha256:abc",
+        "FAKE_CONFIG_HASH": "hash-1",
+        "FAKE_LABEL": "hash-1",
+        "FAKE_EXEC_FAIL": "0",
+        "FAKE_RUN_FAIL": "0",
+    }
+
+
+def _up_lines(argv_log: list[str]) -> list[str]:
+    return [line for line in argv_log if " compose up " in line or "compose up " in line]
+
+
+def test_compose_recreate_keeps_unchanged_recorder(tmp_path) -> None:
+    result, argv_log = _run_compose_recreate(tmp_path, _base_recreate_env())
+    assert result.returncode == 0
+    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=keep reason=unchanged"
+    ups = _up_lines(argv_log)
+    assert any("mhs-live" in line and "--force-recreate" in line for line in ups)
+    assert not any("market-recorder" in line for line in ups)
+
+
+def test_compose_recreate_recreates_recorder_before_daemon_on_fingerprint_change(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_IMAGE_FP"] = "sha256:changed"
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=fingerprint_changed"
+    ups = _up_lines(argv_log)
+    recorder_idx = next(i for i, line in enumerate(ups) if "market-recorder" in line)
+    daemon_idx = next(i for i, line in enumerate(ups) if "mhs-live" in line)
+    assert recorder_idx < daemon_idx
+
+
+def test_compose_recreate_recreates_recorder_on_compose_config_change(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_LABEL"] = "hash-2"
+    result, _ = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=compose_config_changed"
+
+
+def test_compose_recreate_recreates_missing_recorder(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_INSPECT_RUNNING"] = "fail"
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=not_running"
+    assert any("market-recorder" in line for line in _up_lines(argv_log))
+
+
+def test_compose_recreate_recreates_when_running_fingerprint_unreadable(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_EXEC_FAIL"] = "1"
+    result, _ = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=running_fp_unreadable"
+
+
+def test_compose_recreate_recreates_when_image_fingerprint_unreadable(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_RUN_FAIL"] = "1"
+    result, _ = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=image_fp_unreadable"
+
+
+def test_compose_recreate_propagates_compose_failure(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_FAIL_UP"] = "mhs-live"
+    result, _ = _run_compose_recreate(tmp_path, env)
+    assert result.returncode != 0
+
+
+def test_dockerfile_writes_recorder_fingerprint_after_dependency_sync() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    fingerprint_idx = dockerfile.index("recorder_fingerprint")
+    assert fingerprint_idx > dockerfile.rindex("uv sync")
+    assert "/app/.recorder_fingerprint" in dockerfile
+
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert ".recorder_fingerprint" in dockerignore
+
+
+
+def test_gate_holds_inside_decision_window_until_cycle_complete() -> None:
+    from datetime import datetime
+
+    from src.application.ops.daemon_idle_gate import decide_deploy
+
+    # 결정 윈도우(23:00 공개 15분 전 ~ 익일 02:00 UTC) 안에서는 idle 이어도 사이클 완료 전에는 막는다.
+    now = datetime.fromisoformat("2026-09-15T01:30:00+00:00")
+    idle = {"stage": "idle", "status": "AWAITING_DATA", "ts": "2026-09-15T01:29:00+00:00"}
+    held = decide_deploy(idle, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
+    assert (held.action, held.reason) == ("wait", "decision_window:AWAITING_DATA")
+    done = {
+        "stage": "idle", "status": "COMPLETE",
+        "decision_time": "2026-09-14T23:00:00+00:00", "ts": "2026-09-15T01:29:00+00:00",
+    }
+    released = decide_deploy(done, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
+    assert (released.action, released.reason) == ("proceed", "cycle_complete")

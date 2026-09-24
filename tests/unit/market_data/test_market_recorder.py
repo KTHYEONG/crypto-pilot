@@ -497,3 +497,46 @@ def test_utc_now_returns_utc_wall_clock() -> None:
     ts = recorder_mod._utc_now()
     assert ts.tzinfo is not None
     assert (pd.Timestamp.now(tz="UTC") - ts).total_seconds() < 60.0
+
+
+def test_liquidation_runner_receives_timing_config(tmp_path: Path) -> None:
+    """The recorder forwards its liquidation timing config to the stream runner."""
+    flag = _Flag()
+    clock = _Clock(pd.Timestamp("2026-09-22T10:00:20Z"))
+    book_calls: list[int] = []
+    fetch = _fetch_router(flag, clock, book_calls=book_calls, stop_after_book=1)
+    seen: dict[str, Any] = {}
+
+    async def _capturing(**kwargs: Any) -> None:
+        seen.update(kwargs)
+        await _quiet_liquidations(flag, **kwargs)
+
+    _run(
+        run_market_recorder(
+            _default_config(
+                liquidation_receive_timeout_s=0.5,
+                liquidation_liveness_timeout_s=20.0,
+                liquidation_ping_interval_s=2.0,
+            ),
+            capture_root=tmp_path / "cap", liquidations_dir=tmp_path / "liq",
+            shutdown=flag, fetch=fetch, liquidation_runner=_capturing,
+            now_fn=clock.now, sleep=clock.sleep,
+        )
+    )
+    assert seen["receive_timeout_s"] == 0.5
+    assert seen["liveness_timeout_s"] == 20.0
+    assert seen["ping_interval_s"] == 2.0
+
+
+def test_liquidation_timing_config_rejected() -> None:
+    """Non-positive receive/ping intervals and liveness <= ping interval fail closed."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        MarketRecorderConfig(liquidation_receive_timeout_s=0.0)
+    with pytest.raises(ValidationError):
+        MarketRecorderConfig(liquidation_ping_interval_s=-1.0)
+    with pytest.raises(ValidationError):
+        MarketRecorderConfig(liquidation_liveness_timeout_s=5.0, liquidation_ping_interval_s=5.0)
+    with pytest.raises(ValidationError):
+        MarketRecorderConfig(liquidation_liveness_timeout_s=1.0)

@@ -35,7 +35,7 @@ services:
       - ./data/futures/liquidations:/app/data/futures/liquidations
       - ./data/live_capture:/app/data/live_capture
       - ./data/state:/app/data/state
-    command: ["uv", "run", "python", "-m", "src.cli.main", "data", "collect", "record-market"]
+    command: ["/app/.venv/bin/python", "-m", "src.market_data.streams.recorder_main"]
     logging:
       driver: json-file
       options:
