@@ -517,6 +517,7 @@ def test_liquidation_runner_receives_timing_config(tmp_path: Path) -> None:
                 liquidation_receive_timeout_s=0.5,
                 liquidation_liveness_timeout_s=20.0,
                 liquidation_ping_interval_s=2.0,
+                liquidation_event_stall_timeout_s=300.0,
             ),
             capture_root=tmp_path / "cap", liquidations_dir=tmp_path / "liq",
             shutdown=flag, fetch=fetch, liquidation_runner=_capturing,
@@ -526,6 +527,7 @@ def test_liquidation_runner_receives_timing_config(tmp_path: Path) -> None:
     assert seen["receive_timeout_s"] == 0.5
     assert seen["liveness_timeout_s"] == 20.0
     assert seen["ping_interval_s"] == 2.0
+    assert seen["event_stall_timeout_s"] == 300.0
 
 
 def test_liquidation_timing_config_rejected() -> None:
@@ -540,3 +542,5 @@ def test_liquidation_timing_config_rejected() -> None:
         MarketRecorderConfig(liquidation_liveness_timeout_s=5.0, liquidation_ping_interval_s=5.0)
     with pytest.raises(ValidationError):
         MarketRecorderConfig(liquidation_liveness_timeout_s=1.0)
+    with pytest.raises(ValidationError):
+        MarketRecorderConfig(liquidation_event_stall_timeout_s=15.0)
