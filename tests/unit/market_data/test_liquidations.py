@@ -920,3 +920,36 @@ def test_run_liquidation_stream_default_factory_session_cancel_propagates(tmp_pa
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(_scenario())
+
+
+def test_run_liquidation_stream_quiet_coverage_flushes_at_interval_not_per_frame(tmp_path, monkeypatch) -> None:
+    """Quiet stretch: ~5 s ping frames must not write one coverage record each."""
+    from src.market_data.streams import coverage as coverage_mod
+    from src.market_data.streams.coverage import CoverageTracker
+
+    flag = _Flag()
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    frames = [_alive_frame(t0 + pd.Timedelta(seconds=5 * i)) for i in range(24)]  # 120 s of pings
+    feed = _ScriptedFeed(frames, flag, clock=clock, step_s=5.0)
+    writes: list[int] = []
+    original = coverage_mod._append_intervals
+
+    def _spy(*args, **kwargs):
+        writes.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(coverage_mod, "_append_intervals", _spy)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=60.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            coverage=CoverageTracker("liquidations", tmp_path),
+            clock=clock,
+        )
+    )
+    # 120 s / 60 s 주기 → 몇 번(최종 flush 포함)이지 24번이 아니다.
+    assert 1 <= len(writes) <= 4
