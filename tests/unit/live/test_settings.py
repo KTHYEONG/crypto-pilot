@@ -32,6 +32,12 @@ def test_recv_window_and_equity_validators() -> None:
         LiveSettings(notional_equity_usdt=0)
 
 
+def test_cash_reconcile_tolerance_must_be_positive() -> None:
+    assert LiveSettings().cash_reconcile_tolerance_usdt == 0.01
+    with pytest.raises(ValueError, match="cash_reconcile_tolerance_usdt"):
+        LiveSettings(cash_reconcile_tolerance_usdt=0)
+
+
 def test_shared_env_with_non_live_keys_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
     """docker-compose 의 env_file: .env 는 BINANCE_API_KEY 등 비-LIVE_ 키도 함께 주입한다.
 

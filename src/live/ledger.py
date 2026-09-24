@@ -48,11 +48,25 @@ class PositionSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class FundingEvent:
+    """One accrued paper funding settlement: amount = -(rate * quantity * price), cash sign convention."""
+
+    symbol: str
+    epoch: pd.Timestamp  # tz-aware UTC funding time
+    rate: Decimal
+    quantity: Decimal  # signed position held at epoch
+    price: Decimal
+    amount: Decimal
+    price_source: str = "trade_close_1h"
+
+
+@dataclass(frozen=True, slots=True)
 class FundingAccrual:
     cash_delta: Decimal
     watermarks: dict[str, pd.Timestamp]
     lag_by_symbol: dict[str, pd.Timedelta]
     interval_by_symbol: dict[str, pd.Timedelta]
+    events: tuple[FundingEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +384,7 @@ def accrue_funding_by_watermark(
     now: pd.Timestamp,
     closed_at: Mapping[str, pd.Timestamp] | None = None,
 ) -> FundingAccrual:
-    """Accrue observed funding rates against held paper units using completed trade-price notional estimates. The result is a paper cash estimate, with explicit unresolved status when price or funding evidence is missing."""
+    """Accrue observed funding rates against held paper units using completed trade-price notional estimates. The result is a paper cash estimate, with explicit unresolved status when price or funding evidence is missing. Each accrued settlement is also returned as a FundingEvent so the cash change is reconstructable from records."""
     now_ts = _require_tz_aware(now, "now").tz_convert("UTC")
     closed = dict(closed_at or {})
     current = history[-1].positions if history else {}
@@ -378,6 +392,7 @@ def accrue_funding_by_watermark(
     updated: dict[str, pd.Timestamp] = {}
     lags: dict[str, pd.Timedelta] = {}
     intervals: dict[str, pd.Timedelta] = {}
+    events: list[FundingEvent] = []
     for symbol in sorted(set(watermarks) | set(current)):
         watermark = watermarks.get(symbol) or _held_since(history, symbol)
         if watermark is None:
@@ -405,7 +420,19 @@ def accrue_funding_by_watermark(
                         break
                     if not math.isfinite(px_f) or px_f <= 0:
                         break
-                    total += -(Decimal(str(rate)) * qty * Decimal(str(px_f)))
+                    amount = -(Decimal(str(rate)) * qty * Decimal(str(px_f)))
+                    total += amount
+                    events.append(
+                        FundingEvent(
+                            symbol=symbol,
+                            epoch=pd.Timestamp(epoch).tz_convert("UTC"),
+                            rate=Decimal(str(rate)),
+                            quantity=qty,
+                            price=Decimal(str(px_f)),
+                            amount=amount,
+                            price_source="trade_close_1h",
+                        )
+                    )
                 watermark = epoch
         intervals[symbol] = _funding_interval(series)
         if symbol in current and symbol not in closed:
@@ -417,4 +444,4 @@ def accrue_funding_by_watermark(
                 updated[symbol] = watermark
                 if symbol not in closed and released is not None and watermark < released:
                     lags[symbol] = now_ts - watermark
-    return FundingAccrual(total, updated, lags, intervals)
+    return FundingAccrual(total, updated, lags, intervals, tuple(events))

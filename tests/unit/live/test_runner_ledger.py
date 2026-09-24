@@ -42,6 +42,11 @@ def artifact(tmp_path):
     )
     path = tmp_path / "deployed_target_weights.parquet"
     frame.to_parquet(path, index=True)
+    closes = pd.DataFrame(
+        {"AAAUSDT": [100.0], "BUSDT": [100.0]},
+        index=pd.DatetimeIndex([DECISION_TIME]),
+    )
+    closes.to_parquet(tmp_path / "deployed_decision_ohlcv_close.parquet", index=True)
     return path
 
 @pytest.fixture
@@ -220,8 +225,11 @@ def test_SCENARIO_LIVE_48_CASH_TRACKING_SURVIVES_PARTIAL_FILL_HALT(tmp_path, mon
     weights = pd.DataFrame(
         {"AAAUSDT": [0.02], "BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])
     )
-    weights_path = tmp_path / "weights.parquet"
+    weights_path = tmp_path / "deployed_target_weights.parquet"
     weights.to_parquet(weights_path, index=True)
+    pd.DataFrame(
+        {"AAAUSDT": [100.0], "BUSDT": [100.0]}, index=pd.DatetimeIndex([DECISION_TIME])
+    ).to_parquet(tmp_path / "deployed_decision_ohlcv_close.parquet", index=True)
 
     ledger_path = tmp_path / "ledger_cash_halt.json"
     settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
@@ -327,12 +335,12 @@ def test_accrue_ledger_funding_preserves_last_executed(tmp_path, monkeypatch) ->
     executed = pd.Timestamp("2026-08-23 00:00Z")
     now = pd.Timestamp("2026-08-24 12:00Z")
     epoch = pd.Timestamp("2026-08-24 08:00Z")
-    seed, _ = runner_mod._accrue_ledger_funding(
+    seed, _, _ = runner_mod._accrue_ledger_funding(
         LedgerState(positions={}, last_executed_decision_time=executed), now, tmp_path / "seed.json",
     )
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([epoch]))})
     monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {"AAAUSDT": pd.Series([100.0], index=pd.DatetimeIndex([epoch]))})
-    held, accrual = runner_mod._accrue_ledger_funding(
+    held, accrual, _ = runner_mod._accrue_ledger_funding(
         LedgerState(
             positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"),
             funding_accrued_through=pd.Timestamp("2026-08-24 00:00Z"), last_executed_decision_time=executed,
@@ -437,25 +445,218 @@ def test_accrue_ledger_funding_stamps_accrual_start_on_bootstrap(tmp_path, monke
     legacy = LedgerState(positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"))
 
     # When
-    first, _ = runner_mod._accrue_ledger_funding(legacy, now, tmp_path / "ledger.json")
+    first, _, _ = runner_mod._accrue_ledger_funding(legacy, now, tmp_path / "ledger.json")
 
     # Then: 부트스트랩 시각이 accrual 시작 마커로 영속
     assert first.funding_accrual_started_at == now
     assert load_ledger(tmp_path / "ledger.json").funding_accrual_started_at == now
 
     # When: 이력이 생긴 뒤 재호출해도 마커 불변
-    second, _ = runner_mod._accrue_ledger_funding(first, later, tmp_path / "ledger.json")
+    second, _, _ = runner_mod._accrue_ledger_funding(first, later, tmp_path / "ledger.json")
     assert second.funding_accrual_started_at == now
 
     # Given: funding_accrued_through 가 있는 원장은 그 시각으로 부트스트랩
     through = pd.Timestamp("2026-09-14 02:00Z")
-    seeded, _ = runner_mod._accrue_ledger_funding(
+    seeded, _, _ = runner_mod._accrue_ledger_funding(
         LedgerState(positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"), funding_accrued_through=through), now, tmp_path / "seeded.json"
     )
     assert seeded.funding_accrual_started_at == through
 
     # Given: 보유 없음 -> 부트스트랩 없음 -> 마커 없음
-    flat, _ = runner_mod._accrue_ledger_funding(LedgerState(positions={}, cash_usdt=Decimal("1000")), now, tmp_path / "flat.json")
+    flat, _, _ = runner_mod._accrue_ledger_funding(LedgerState(positions={}, cash_usdt=Decimal("1000")), now, tmp_path / "flat.json")
     assert flat.funding_accrual_started_at is None
+
+
+def _paper_cycle_harness(tmp_path, monkeypatch):
+    """Paper cycle with seeded cash and two taker fills; returns (settings, paths)."""
+    import pandas as pd
+
+    import src.live.runner as runner_mod
+    from decimal import Decimal
+    from src.live.executor import ExecutionOutcome
+    from src.live.ledger import LedgerState, save_ledger
+    from src.live.settings import LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+    monkeypatch.setattr(
+        runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl"
+    )
+
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        outcomes = []
+        for intent in intents:
+            outcomes.append(
+                ExecutionOutcome(
+                    symbol=intent.symbol,
+                    filled_qty=intent.quantity,
+                    unfilled_qty=Decimal("0"),
+                    avg_fill_price=Decimal("100"),
+                    chases=0,
+                    status="FILLED",
+                    fills=((intent.quantity, Decimal("100"), 5.0, "immediate_taker", "taker", NOW),),
+                )
+            )
+        audit.record("intents_executed", count=len(outcomes))
+        return outcomes
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    weights = pd.DataFrame(
+        {"AAAUSDT": [0.02], "BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])
+    )
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    weights.to_parquet(weights_path, index=True)
+    closes = pd.DataFrame(
+        {"AAAUSDT": [100.0], "BUSDT": [100.0]}, index=pd.DatetimeIndex([DECISION_TIME])
+    )
+    closes.to_parquet(tmp_path / "deployed_decision_ohlcv_close.parquet", index=True)
+    ledger_path = tmp_path / "ledger.json"
+    save_ledger(
+        ledger_path,
+        LedgerState(positions={}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("2000")),
+    )
+    settings = LiveSettings(
+        mode="paper",
+        notional_equity_usdt=2000.0,
+        ledger_path=str(ledger_path),
+        tax_ledger_dir=str(tmp_path / "tax"),
+        fills_dir=str(tmp_path / "fills"),
+        execution_quality_dir=str(tmp_path / "eq"),
+        portfolio_state_dir=str(tmp_path / "portfolio"),
+        microstructure_dir=str(tmp_path / "micro"),
+    )
+    return runner_mod, settings, weights_path
+
+
+def _audit_events(tmp_path, event: str) -> list[dict]:
+    import json
+
+    path = tmp_path / "shadow_cycle.jsonl"
+    if not path.exists():
+        return []
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("event") == event
+    ]
+
+
+def test_funding_records_persist_before_ledger_save(tmp_path, monkeypatch) -> None:
+    """save_ledger crashes after the tax append; a retry writes each FUNDING_FEE id exactly once."""
+    from decimal import Decimal
+
+    import pandas as pd
+
+    import src.live.runner as runner_mod
+    from src.live.ledger import LedgerState
+
+    epoch = pd.Timestamp("2026-08-24 08:00Z")
+    monkeypatch.setattr(
+        runner_mod, "_load_paper_funding",
+        lambda symbols: {"AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([epoch]))},
+    )
+    monkeypatch.setattr(
+        runner_mod, "_load_paper_trade_closes",
+        lambda symbols: {"AAAUSDT": pd.Series([100.0], index=pd.DatetimeIndex([epoch]))},
+    )
+    tax_dir = tmp_path / "tax"
+    state = LedgerState(
+        positions={"AAAUSDT": Decimal("1")},
+        equity_high_water_mark=Decimal("2000"),
+        cash_usdt=Decimal("1000"),
+        funding_accrued_through=pd.Timestamp("2026-08-24 00:00Z"),
+    )
+    now = pd.Timestamp("2026-08-24 12:00Z")
+    real_save = runner_mod.save_ledger
+
+    def _raise_once(path, next_state):
+        raise RuntimeError("crash after tax append")
+
+    monkeypatch.setattr(runner_mod, "save_ledger", _raise_once)
+    import pytest
+
+    with pytest.raises(RuntimeError, match="crash after tax append"):
+        runner_mod._accrue_ledger_funding(
+            state, now, tmp_path / "ledger.json", tax_dir=tax_dir, run_id="run1", mode="paper"
+        )
+    monkeypatch.setattr(runner_mod, "save_ledger", real_save)
+    _, _, funding_records = runner_mod._accrue_ledger_funding(
+        state, now, tmp_path / "ledger.json", tax_dir=tax_dir, run_id="run1", mode="paper"
+    )
+    assert len(funding_records) == 1
+    shard = tax_dir / "tax_ledger_202608.jsonl"
+    lines = [line for line in shard.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    import json
+
+    assert json.loads(lines[0])["record_id"] == funding_records[0].record_id
+
+
+def test_paper_cycle_trade_tax_rows_equal_fills_rows(tmp_path, monkeypatch) -> None:
+    """Paper TRADE tax records correspond one-to-one to the written fills; no globals fallback."""
+    import inspect
+
+    import src.live.runner as runner_mod
+    from src.live.fills import load_fills
+    from src.live.tax_ledger import load_tax_records
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    runner_mod, settings, weights_path = _paper_cycle_harness(tmp_path, monkeypatch)
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "COMPLETE"
+    fills = load_fills(tmp_path / "fills")
+    assert len(fills) == 2
+    tax = load_tax_records(tmp_path / "tax", year=2026)
+    trades = tax[tax["kind"] == "TRADE"]
+    assert len(trades) == len(fills)
+    for _, fill in fills.iterrows():
+        match = trades[trades["symbol"] == fill["symbol"]]
+        assert len(match) == 1
+        assert abs(match.iloc[0]["quantity"]) == abs(fill["quantity_delta"])
+        assert match.iloc[0]["price"] == fill["fill_price"]
+    source = inspect.getsource(runner_mod.run_shadow_cycle)
+    assert 'globals().get("fill_events")' not in source
+    assert "simulated_tax_records(fill_events" in source
+
+
+def test_paper_cycle_emits_reconcile_audit(tmp_path, monkeypatch) -> None:
+    """Every paper cycle records exactly one ledger_reconcile audit event with ok=True."""
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    runner_mod, settings, weights_path = _paper_cycle_harness(tmp_path, monkeypatch)
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "COMPLETE"
+    events = _audit_events(tmp_path, "ledger_reconcile")
+    assert len(events) == 1
+    assert events[0]["ok"] is True
+
+
+def test_paper_cycle_mismatch_alerts_once_without_halting(tmp_path, monkeypatch) -> None:
+    """Cash perturbed by 1 USDT: COMPLETE, ok=False audited, one mismatch email."""
+    from decimal import Decimal
+
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    runner_mod, settings, weights_path = _paper_cycle_harness(tmp_path, monkeypatch)
+    real_flow = runner_mod.compute_fill_cash_flow
+    monkeypatch.setattr(
+        runner_mod, "compute_fill_cash_flow",
+        lambda intents, outcomes: real_flow(intents, outcomes) + Decimal("1"),
+    )
+    calls: list[dict] = []
+
+    def _fake_email(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(runner_mod, "send_email_alert", _fake_email)
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "COMPLETE"
+    events = _audit_events(tmp_path, "ledger_reconcile")
+    assert len(events) == 1
+    assert events[0]["ok"] is False
+    assert len(calls) == 1
+    assert calls[0]["event"] == "ledger_reconcile_mismatch"
+
 
 

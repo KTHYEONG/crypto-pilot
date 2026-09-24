@@ -88,9 +88,12 @@ from src.live.settings import ExecutionMode, LiveSettings
 from src.live.signal import assert_signal_available, assert_signal_fresh, latest_decision_ohlcv_close, latest_target_weights
 from src.live.sizing import target_quantities
 from src.live.tax_ledger import (
+    TaxRecord,
     append_tax_records,
-    collect_tax_records,
+    collect_and_persist_live_tax,
     default_tax_ledger_dir,
+    funding_tax_records,
+    reconcile_cycle_cash,
     simulated_tax_records,
 )
 
@@ -256,7 +259,10 @@ def _accrue_ledger_funding(
     ledger_path: Path,
     *,
     closed_at: Mapping[str, pd.Timestamp] | None = None,
-) -> tuple[LedgerState, FundingAccrual]:
+    tax_dir: Path | None = None,
+    run_id: str = "",
+    mode: str = "",
+) -> tuple[LedgerState, FundingAccrual, tuple[TaxRecord, ...]]:
     """원장에 페이퍼 펀딩비를 워터마크 기준으로 발생시키고 원자적으로 영속한다."""
     held = {symbol: qty for symbol, qty in state.positions.items() if qty != 0}
     history = state.position_history
@@ -277,6 +283,10 @@ def _accrue_ledger_funding(
     )
     if accrual.cash_delta != 0 and state.cash_usdt is None:
         raise DataIntegrityError("paper funding accrual requires cash_usdt")
+    funding_records: tuple[TaxRecord, ...] = ()
+    if tax_dir is not None and accrual.events:
+        funding_records = funding_tax_records(accrual.events, run_id=run_id, mode=mode)
+        append_tax_records(funding_records, Path(tax_dir))
     updated = dataclasses.replace(
         state,
         cash_usdt=None if state.cash_usdt is None else state.cash_usdt + accrual.cash_delta,
@@ -286,7 +296,7 @@ def _accrue_ledger_funding(
         position_history=history,
     )
     save_ledger(ledger_path, updated)
-    return updated, accrual
+    return updated, accrual, funding_records
 
 
 def _delisted_held_symbols(
@@ -594,14 +604,24 @@ def run_shadow_cycle(
         decision_marks: dict[str, Decimal] = {str(k): Decimal(str(v)) for k, v in decision_closes.items()}
         _sizing_anchor = "decision_ohlcv_close"
         # 4) I-EQUITY-MTM (백테스트 패리티).
+        cash_before: Decimal | None = None
+        funding_records: tuple[TaxRecord, ...] = ()
         if settings.mode.suppresses_mutations:
             absent_held = held_symbols_absent_from_exchange(ledger_state.positions, exchange_info_payload)
             if absent_held:
                 audit.record("held_symbol_absent", symbols=absent_held)
                 raise DataIntegrityError(f"held symbols absent from exchangeInfo symbols={','.join(absent_held)}; resolve via actual venue settlement or live account reconciliation")
             delisted = _delisted_held_symbols(ledger_state.positions, exchange_info_payload, now_ts)
-            ledger_state, accrual = _accrue_ledger_funding(
-                ledger_state, now_ts, ledger_path, closed_at=delisted
+            cash_before = ledger_state.cash_usdt
+            funding_tax_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
+            ledger_state, accrual, funding_records = _accrue_ledger_funding(
+                ledger_state,
+                now_ts,
+                ledger_path,
+                closed_at=delisted,
+                tax_dir=funding_tax_dir,
+                run_id=settings.record_run_id or run_id,
+                mode=settings.mode.value,
             )
             if delisted:
                 ledger_state = _settle_delisted_paper_positions(
@@ -702,6 +722,7 @@ def run_shadow_cycle(
         persisted = False
         outcomes: list[ExecutionOutcome] = []
         final_state: LedgerState | None = None
+        fill_events: list[FillEvent] = []
         try:
             try:
                 outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal))
@@ -755,7 +776,7 @@ def run_shadow_cycle(
                 logger.warning("[SYS] execution_quality write failed error=%s", exc)
             try:
                 fills_dir = Path(settings.fills_dir) if settings.fills_dir else default_fills_dir()
-                fill_events: list[FillEvent] = []
+                fill_events = []
                 for intent, outcome in zip(kept, outcomes, strict=False):
                     for qty_abs, price, fee_bps, reason, liquidity, filled_at in getattr(outcome, "fills", ()):
                         qty = Decimal(qty_abs)
@@ -819,86 +840,68 @@ def run_shadow_cycle(
             try:
                 tax_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
                 tax_dir.mkdir(parents=True, exist_ok=True)
-                tax_records: tuple[Any, ...] = ()
                 if settings.mode.suppresses_mutations:
-                    # SHADOW/PAPER: derive from fills
-                    fill_events_for_tax: list[Any] = []
-                    for intent, outcome in zip(kept, outcomes, strict=False):
-                        for qty_abs, price, fee_bps, reason, liquidity, filled_at in getattr(outcome, "fills", ()):
-                            qty = Decimal(qty_abs)
-                            signed_qty = qty if intent.side == "BUY" else -qty
-                            dm = decision_marks.get(intent.symbol) if decision_marks is not None else None
-                            fill_events_for_tax.append(
-                                FillEvent(
-                                    decision_time=decision_time,
-                                    timestamp=filled_at,
-                                    symbol=intent.symbol,
-                                    quantity_delta=signed_qty,
-                                    fill_price=Decimal(price),
-                                    fee_bps=float(fee_bps),
-                                    reason=str(reason),
-                                    pre_trade_equity=equity,
-                                    liquidity=str(liquidity),
-                                    mode=settings.mode.value,
-                                    run_id=run_id,
-                                    leg_index=int(intent.leg_index),
-                                    client_order_id=str(intent.client_order_prefix),
-                                    decision_mark=dm,
-                                    sizing_anchor=_sizing_anchor,
-                                )
+                    trade_records = simulated_tax_records(fill_events, settings.mode.value)
+                    if trade_records:
+                        append_tax_records(trade_records, tax_dir)
+                    if cash_before is not None and final_state is not None and final_state.cash_usdt is not None:
+                        reconciliation = reconcile_cycle_cash(
+                            cash_before,
+                            final_state.cash_usdt,
+                            trade_records,
+                            funding_records,
+                            tolerance_usdt=Decimal(str(settings.cash_reconcile_tolerance_usdt)),
+                        )
+                        audit.record(
+                            "ledger_reconcile",
+                            expected=float(reconciliation.expected_delta),
+                            actual=float(reconciliation.actual_delta),
+                            difference=float(reconciliation.difference),
+                            ok=reconciliation.within_tolerance,
+                        )
+                        if not reconciliation.within_tolerance:
+                            logger.warning(
+                                "[PORTFOLIO] ledger_reconcile status=MISMATCH difference=%s",
+                                reconciliation.difference,
                             )
-                    # also capture any fallback fills from non-fills outcomes
-                    if not fill_events_for_tax:
-                        # try to use previously built fill_events if available via outer scope
-                        try:
-                            _maybe = globals().get("fill_events", [])
-                            if isinstance(_maybe, list):
-                                fill_events_for_tax = _maybe
-                        except Exception:
-                            pass
-                    tax_records = simulated_tax_records(fill_events_for_tax, settings.mode.value)
+                            send_email_alert(
+                                gmail_user=settings.alert_gmail_user,
+                                gmail_app_password=(
+                                    settings.alert_gmail_app_password.get_secret_value()
+                                    if settings.alert_gmail_app_password is not None
+                                    else None
+                                ),
+                                event="ledger_reconcile_mismatch",
+                                detail=f"difference={reconciliation.difference} expected={reconciliation.expected_delta} actual={reconciliation.actual_delta}",
+                                decision_time=decision_time,
+                                now=now_ts,
+                            )
                 else:
                     if settings.tax_collection_enabled:
                         try:
-                            wm_path = tax_dir / "watermark.json"
-                            if wm_path.exists():
-                                import json as _json
-
-                                raw = _json.loads(wm_path.read_text(encoding="utf-8"))
-                                from src.live.tax_ledger import TaxWatermark as _TW
-
-                                watermark = _TW(
-                                    last_trade_id={k: int(v) for k, v in raw.get("last_trade_id", {}).items()},
-                                    last_income_id=int(raw.get("last_income_id", 0)),
-                                    last_collected_at=pd.Timestamp(raw["last_collected_at"]) if raw.get("last_collected_at") else None,
+                            _, live_tax_issues = collect_and_persist_live_tax(
+                                order_client,
+                                wanted_symbols,
+                                tax_dir,
+                                settings.mode.value,
+                                now=decision_time,
+                            )
+                        except DataIntegrityError as exc:
+                            audit.record("tax_watermark_invalid", error=str(exc))
+                            logger.warning("[SYS] tax_watermark_invalid error=%s", exc)
+                        else:
+                            for live_issue in live_tax_issues:
+                                audit.record(
+                                    "tax_collect_issue",
+                                    stream=live_issue.stream,
+                                    stage=live_issue.stage,
+                                    detail=live_issue.detail,
                                 )
-                            else:
-                                from src.live.tax_ledger import TaxWatermark as _TW
-
-                                watermark = _TW(last_trade_id={}, last_income_id=0, last_collected_at=None)
-                            collected, new_wm = collect_tax_records(order_client, wanted_symbols, watermark, settings.mode.value, now=decision_time)
-                            tax_records = collected
-                            try:
-                                import json as _json2
-
-                                wm_path.write_text(
-                                    _json2.dumps(
-                                        {
-                                            "last_trade_id": new_wm.last_trade_id,
-                                            "last_income_id": new_wm.last_income_id,
-                                            "last_collected_at": new_wm.last_collected_at.isoformat() if new_wm.last_collected_at is not None else None,
-                                        }
-                                    ),
-                                    encoding="utf-8",
+                                logger.warning(
+                                    "[EXEC] tax_collect_issue stream=%s stage=%s",
+                                    live_issue.stream,
+                                    live_issue.stage,
                                 )
-                            except Exception:
-                                pass
-                        except Exception:
-                            tax_records = ()
-                    else:
-                        tax_records = ()
-                if tax_records:
-                    append_tax_records(tax_records, tax_dir)
             except Exception as exc:  # noqa: BLE001
                 with contextlib.suppress(Exception):
                     audit.record("tax_ledger_write_failed", error=str(exc))
