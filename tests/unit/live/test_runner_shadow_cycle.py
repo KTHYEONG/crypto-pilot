@@ -864,7 +864,7 @@ def test_accrue_ledger_funding_requires_cash(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {"AAAUSDT": pd.Series([100.0], index=pd.DatetimeIndex([epoch]))})
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))})
-    quiet, accrual = runner_mod._accrue_ledger_funding(state, pd.Timestamp("2026-09-02 01:03", tz="UTC"), tmp_path / "quiet.json")
+    quiet, accrual, _ = runner_mod._accrue_ledger_funding(state, pd.Timestamp("2026-09-02 01:03", tz="UTC"), tmp_path / "quiet.json")
     assert quiet.cash_usdt is None
     assert accrual.cash_delta == Decimal(0)
 
