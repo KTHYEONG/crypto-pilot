@@ -22,6 +22,7 @@ data/*.csv
 data/*.db
 results/*.json
 !results/best_params_*.json
+.recorder_fingerprint
 
 # Workspace caches (local-first: never enter the build context)
 scratch/
