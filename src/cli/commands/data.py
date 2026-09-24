@@ -204,28 +204,17 @@ def _stream_liquidations(args: argparse.Namespace) -> None:
 
 def _record_market(args: argparse.Namespace) -> None:
     """Run the always-on live-only market recorder until SIGTERM/SIGINT."""
-    import asyncio
     from pathlib import Path
 
     from src.common.paths import LIVE_CAPTURE_DIR
-    from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
     from src.market_data.streams.liquidations import default_liquidations_dir
-    from src.market_data.streams.recorder import MarketRecorderConfig, run_market_recorder
+    from src.market_data.streams.recorder_main import run_recorder
 
-    flag = ShutdownFlag()
-    install_shutdown_handlers(flag)
     capture_arg = getattr(args, "capture_root", None)
     liq_arg = getattr(args, "liquidations_dir", None)
     capture_root = Path(capture_arg) if capture_arg else LIVE_CAPTURE_DIR
     liquidations_dir = Path(liq_arg) if liq_arg else default_liquidations_dir()
-    asyncio.run(
-        run_market_recorder(
-            MarketRecorderConfig(),
-            capture_root=capture_root,
-            liquidations_dir=liquidations_dir,
-            shutdown=flag,
-        )
-    )
+    run_recorder(capture_root=capture_root, liquidations_dir=liquidations_dir)
 
 
 def _refresh_live_universe(args: argparse.Namespace) -> None:

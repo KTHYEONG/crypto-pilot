@@ -243,7 +243,10 @@
     "testing": "tests/unit/market_data/services/test_metrics_live_tail.py"
   },
   "src/market_data/streams/liquidations.py": {
-    "testing": "tests/unit/market_data/test_liquidations.py"
+    "testing": [
+      "tests/unit/market_data/test_liquidations.py",
+      "tests/unit/market_data/test_liquidation_feed.py"
+    ]
   },
   "src/mhs/books.py": {
     "testing": "tests/unit/mhs/test_books.py"

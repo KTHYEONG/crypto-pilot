@@ -107,6 +107,7 @@ jobs:
           # repo-owned 백업 유닛이 소비하는 필터. 공용 타이머가 아닌 crypto-pilot-backup.service가
           # --filter-from으로 참조하므로, 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.
           scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"
+          scp $SSH_OPTS deploy/compose_recreate.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/backup ~/.config/systemd/user"
           scp $SSH_OPTS deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/"
           scp $SSH_OPTS deploy/backup/crypto-pilot-backup.service deploy/backup/crypto-pilot-backup.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
@@ -120,7 +121,5 @@ jobs:
           systemctl --user enable --now crypto-pilot-backup.timer
           echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
           if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
-          \$C pull
-          \$C up -d --force-recreate --remove-orphans
-          docker image prune -f
+          bash ~/crypto-pilot/deploy/compose_recreate.sh '$IMAGE:latest'
           EOF

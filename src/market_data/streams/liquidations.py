@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+import aiohttp
 import pandas as pd
 
 from src.common.paths import DATA_DIR
@@ -16,6 +19,153 @@ if TYPE_CHECKING:
     from src.market_data.streams.coverage import CoverageTracker
 
 _logger = logging.getLogger(__name__)
+
+FORCE_ORDER_STREAM_URL: str = "wss://fstream.binance.com/ws/!forceOrder@arr"
+
+
+@dataclass(frozen=True, slots=True)
+class FeedFrame:
+    """One observation from a liquidation feed.
+
+    ``kind`` semantics:
+      * ``"events"``  — one or more raw forceOrder payloads arrived at ``received_at``.
+      * ``"alive"``   — a control frame (pong, or server ping that was answered) arrived at
+        ``received_at``; proves the connection was live at that instant without carrying events.
+      * ``"timeout"`` — nothing arrived within the requested timeout; carries no liveness evidence.
+      * ``"closed"``  — the connection ended (server close, transport error, heartbeat loss).
+    """
+
+    kind: Literal["events", "alive", "timeout", "closed"]
+    received_at: pd.Timestamp | None
+    payloads: tuple[Mapping[str, Any], ...] = ()
+    detail: str = ""
+
+
+class LiquidationFeed(Protocol):
+    """Minimal surface a liquidation transport must provide."""
+
+    async def receive(self, timeout_s: float) -> FeedFrame: ...
+    async def close(self) -> None: ...
+
+
+class BinanceForceOrderFeed:
+    """Binance USD-M all-market liquidation stream over a raw WebSocket.
+
+    Binance pushes at most one forceOrder snapshot per symbol per second on ``!forceOrder@arr``; the
+    payload shape is ``{"e": "forceOrder", "E": ..., "o": {...}}`` which ``parse_liquidation``
+    already accepts. Automatic ping handling is disabled so control frames surface as liveness
+    evidence: the feed sends a client ping every ``ping_interval_s`` and answers server pings itself.
+    """
+
+    def __init__(
+        self,
+        ws: aiohttp.ClientWebSocketResponse,
+        *,
+        ping_interval_s: float,
+        now_fn: Callable[[], pd.Timestamp],
+    ) -> None:
+        self._ws = ws
+        self._ping_interval_s = ping_interval_s
+        self._now_fn = now_fn
+        self._last_ping = time.monotonic()
+        self._closed = False
+
+    @classmethod
+    async def connect(
+        cls,
+        session: aiohttp.ClientSession,
+        *,
+        url: str = FORCE_ORDER_STREAM_URL,
+        ping_interval_s: float,
+        now_fn: Callable[[], pd.Timestamp],
+    ) -> BinanceForceOrderFeed:
+        """Open the all-market forceOrder stream; raises on handshake failure."""
+        ws = await session.ws_connect(url, autoping=False, heartbeat=None)
+        return cls(ws, ping_interval_s=ping_interval_s, now_fn=now_fn)
+
+    def _handle_text(self, text: str) -> FeedFrame:
+        try:
+            decoded = json.loads(text)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("[DATA] stage=liquidation_stream status=BAD_FRAME detail=%s", exc)
+            return FeedFrame(kind="alive", received_at=self._now_fn())
+        if isinstance(decoded, Mapping):
+            return FeedFrame(kind="events", received_at=self._now_fn(), payloads=(decoded,))
+        if isinstance(decoded, list):
+            usable = tuple(item for item in decoded if isinstance(item, Mapping))
+            if usable:
+                if len(usable) != len(decoded):
+                    _logger.warning(
+                        "[DATA] stage=liquidation_stream status=BAD_FRAME detail=%d of %d items dropped",
+                        len(decoded) - len(usable),
+                        len(decoded),
+                    )
+                return FeedFrame(kind="events", received_at=self._now_fn(), payloads=usable)
+            _logger.warning("[DATA] stage=liquidation_stream status=BAD_FRAME detail=no usable payloads")
+            return FeedFrame(kind="alive", received_at=self._now_fn())
+        _logger.warning("[DATA] stage=liquidation_stream status=BAD_FRAME detail=non-mapping payload")
+        return FeedFrame(kind="alive", received_at=self._now_fn())
+
+    async def receive(self, timeout_s: float) -> FeedFrame:
+        """Wait at most ``timeout_s`` for the next frame, sending a client ping when due."""
+        if self._closed:
+            return FeedFrame(kind="closed", received_at=None, detail="already closed")
+        if time.monotonic() - self._last_ping >= self._ping_interval_s:
+            try:
+                await self._ws.ping()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                return FeedFrame(kind="closed", received_at=None, detail=f"ping failed: {exc}")
+            self._last_ping = time.monotonic()
+        try:
+            msg = await self._ws.receive(timeout=timeout_s)
+        except TimeoutError:
+            return FeedFrame(kind="timeout", received_at=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return FeedFrame(kind="closed", received_at=None, detail=f"receive failed: {exc}")
+        try:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                return self._handle_text(str(msg.data))
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                try:
+                    text = bytes(msg.data).decode("utf-8")
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("[DATA] stage=liquidation_stream status=BAD_FRAME detail=%s", exc)
+                    return FeedFrame(kind="alive", received_at=self._now_fn())
+                return self._handle_text(text)
+            if msg.type == aiohttp.WSMsgType.PONG:
+                return FeedFrame(kind="alive", received_at=self._now_fn())
+            if msg.type == aiohttp.WSMsgType.PING:
+                try:
+                    await self._ws.pong(msg.data)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    return FeedFrame(kind="closed", received_at=None, detail=f"pong failed: {exc}")
+                return FeedFrame(kind="alive", received_at=self._now_fn())
+            if msg.type in (
+                aiohttp.WSMsgType.CLOSE,
+                aiohttp.WSMsgType.CLOSED,
+                aiohttp.WSMsgType.CLOSING,
+                aiohttp.WSMsgType.ERROR,
+            ):
+                return FeedFrame(kind="closed", received_at=None, detail=f"ws {msg.type.name}: {msg.data}")
+            return FeedFrame(kind="closed", received_at=None, detail=f"unexpected ws type: {msg.type}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return FeedFrame(kind="closed", received_at=None, detail=f"dispatch failed: {exc}")
+
+    async def close(self) -> None:
+        """Close the socket; idempotent and never raises."""
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(Exception):
+            await self._ws.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,161 +512,225 @@ async def run_liquidation_stream(
     flush_interval_s: float = 60.0,
     max_buffer: int = 5000,
     shutdown: Any | None = None,
-    exchange_factory: Callable[[], Any] | None = None,
+    feed_factory: Callable[[], Awaitable[LiquidationFeed]] | None = None,
     clock: Callable[[], float] = time.monotonic,
     coverage: CoverageTracker | None = None,
     now_fn: Callable[[], pd.Timestamp] | None = None,
+    receive_timeout_s: float = 1.0,
+    liveness_timeout_s: float = 15.0,
+    ping_interval_s: float = 5.0,
+    max_backoff_s: float = 60.0,
 ) -> None:
     """Stream Binance forceOrder liquidations into daily parquet partitions until shutdown.
 
     Binance pushes at most one liquidation snapshot per symbol per second, so stored events are a lower
-    bound of liquidation flow. When ``coverage`` is given, every successful watch return is attested and
-    every transport error closes the attested segment, making outages distinguishable from quiet markets.
+    bound of liquidation flow. Coverage is attested only at instants with direct evidence of a live
+    connection (an event or a control frame), so quiet-but-connected stretches stay attested while a
+    silent dead socket never is. Shutdown is observed at least every ``receive_timeout_s`` so SIGTERM
+    completes the final flush well inside the container stop grace period.
+
+    Args:
+        symbols: optional client-side filter on the all-market stream (normalized symbol names);
+            ``None`` keeps every symbol.
+        feed_factory: opens a connected feed; defaults to ``BinanceForceOrderFeed.connect`` on a
+            session owned (and closed) by this function.
+        receive_timeout_s: upper bound on shutdown observation latency.
+        liveness_timeout_s: a connection with no event/control frame for this long is treated as dead.
+        ping_interval_s: client ping cadence passed to the default feed.
+        max_backoff_s: cap of the exponential reconnect backoff.
+
+    Raises:
+        ValueError: when ``receive_timeout_s``/``ping_interval_s`` are not positive or
+            ``liveness_timeout_s`` is not greater than ``ping_interval_s``.
     """
+    if receive_timeout_s <= 0:
+        raise ValueError("receive_timeout_s must be positive")
+    if ping_interval_s <= 0:
+        raise ValueError("ping_interval_s must be positive")
+    if liveness_timeout_s <= ping_interval_s:
+        raise ValueError("liveness_timeout_s must be greater than ping_interval_s")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    if exchange_factory is not None:
-        ex = exchange_factory()
+    wanted = {_normalize_symbol(s) for s in symbols} if symbols else None
+    _now = now_fn if now_fn is not None else _utc_now
+
+    owned_session: aiohttp.ClientSession | None = None
+    factory: Callable[[], Awaitable[LiquidationFeed]]
+    if feed_factory is not None:
+        factory = feed_factory
     else:
-        try:
-            import ccxt.pro as ccxtpro
+        owned_session = aiohttp.ClientSession()
 
-            ex = ccxtpro.binanceusdm({"newUpdates": True})
-        except Exception:  # noqa: BLE001
-            # fallback: try ccxt.pro via ccxt
-            try:
-                import ccxt.pro as ccxtpro
+        async def _default_factory() -> LiquidationFeed:
+            assert owned_session is not None
+            return await BinanceForceOrderFeed.connect(
+                owned_session, ping_interval_s=ping_interval_s, now_fn=_now
+            )
 
-                ex = ccxtpro.binanceusdm({"newUpdates": True})
-            except Exception as exc2:
-                raise RuntimeError("ccxt.pro not available for liquidation stream") from exc2
+        factory = _default_factory
 
     buffer: list[LiquidationEvent] = []
     last_flush = clock()
-    last_coverage_flush = last_flush
     backoff = 1.0
-    max_backoff = 60.0
-    _now = now_fn if now_fn is not None else _utc_now
 
-    # helpers to check shutdown
     def _is_shutdown() -> bool:
         try:
             return bool(getattr(shutdown, "requested", False))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
-    while True:
-        if _is_shutdown():
-            break
-        try:
-            # ccxt watch_liquidations(symbol) 는 symbol 필수. 전체 마켓은 빈 리스트로 조회한다.
-            if hasattr(ex, "watch_liquidations_for_symbols"):
-                raw = await ex.watch_liquidations_for_symbols(list(symbols) if symbols else [])
-            elif symbols and len(symbols) == 1 and hasattr(ex, "watch_liquidations"):
-                raw = await ex.watch_liquidations(symbols[0])
-            else:
-                raise AttributeError("exchange has no usable liquidation watch method")
-            # raw may be list or single dict
-            if raw is None:
-                items: list[Any] = []
-            elif isinstance(raw, list):
-                items = raw
-            elif isinstance(raw, Mapping):
-                items = [raw]
-            else:
-                try:
-                    items = list(raw)
-                except Exception:
-                    items = [raw]
-            now_ingested = pd.Timestamp.now(tz="UTC")
-            for msg in items:
-                if not isinstance(msg, Mapping):
-                    continue
-                ev = parse_liquidation(msg, ingested_at=now_ingested)
-                if ev is not None:
-                    buffer.append(ev)
-            if coverage is not None:
-                coverage.mark_ok(_now())
-            # reset backoff on success
-            backoff = 1.0
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if coverage is not None:
-                coverage.mark_error(_now())
-            # log and backoff
-            _logger.warning("liquidation stream error: %s backoff=%.1fs", exc, backoff)
-            if coverage is not None:
-                try:
-                    coverage.flush()
-                except Exception as exc_cov:
-                    _logger.warning("liquidation coverage flush failed: %s", exc_cov)
-                last_coverage_flush = clock()
+    async def _sleep_shutdown_aware(delay: float) -> bool:
+        """Sleep in ≤1 s chunks; return True when shutdown was observed."""
+        remaining = delay
+        while remaining > 0:
+            if _is_shutdown():
+                return True
             try:
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(min(1.0, remaining))
             except asyncio.CancelledError:
                 raise
-            backoff = min(max_backoff, backoff * 2.0)
-            # check shutdown before continue
-            if _is_shutdown():
-                break
-            continue
+            remaining -= 1.0
+        return _is_shutdown()
 
-        # flush condition
-        now_clock = clock()
-        should_flush = False
-        if len(buffer) >= max_buffer:
-            should_flush = True
-        elif (now_clock - last_flush) >= flush_interval_s:
-            if buffer:
-                should_flush = True
-            else:
-                # still update last_flush to avoid tight loop spinning on time?
-                # only update if we would have flushed; otherwise keep interval?
-                # For flush_interval_s==0, we want frequent checks; update.
-                if flush_interval_s == 0:
-                    last_flush = now_clock
-        if should_flush and buffer:
-            to_write = list(buffer)
-            try:
-                append_liquidation_events(to_write, directory)
-                buffer.clear()
-                last_flush = clock()
-            except Exception as exc:
-                _logger.warning("liquidation flush failed: %s", exc)
-                # keep buffer for retry; update last_flush to avoid tight retry loop?
-                last_flush = clock()
-        if coverage is not None and (clock() - last_coverage_flush) >= flush_interval_s:
-            try:
-                coverage.flush()
-            except Exception as exc:
-                _logger.warning("liquidation coverage flush failed: %s", exc)
-            last_coverage_flush = clock()
-        # cooperative yield to avoid busy loop if watch returns immediately with empty
-        # and shutdown not requested
-        if not should_flush and not buffer:
-            # small yield
-            await asyncio.sleep(0)
-
-        if _is_shutdown():
-            break
-
-    # final flush and close
-    if buffer:
+    def _mark_ok(ts: pd.Timestamp) -> None:
+        if coverage is None:
+            return
         try:
-            append_liquidation_events(buffer, directory)
-        except Exception as exc:
-            _logger.warning("liquidation final flush failed: %s", exc)
-    if coverage is not None:
+            coverage.mark_ok(ts)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("[DATA] stage=liquidation_stream status=COVERAGE_MARK_FAILED detail=%s", exc)
+
+    def _mark_error() -> None:
+        if coverage is None:
+            return
+        try:
+            coverage.mark_error(_now())
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("[DATA] stage=liquidation_stream status=COVERAGE_MARK_FAILED detail=%s", exc)
+
+    def _flush_coverage() -> None:
+        if coverage is None:
+            return
         try:
             coverage.flush()
-        except Exception as exc:
-            _logger.warning("liquidation coverage flush failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("[DATA] stage=liquidation_stream status=COVERAGE_FLUSH_FAILED detail=%s", exc)
+
+    def _flush_events() -> bool:
+        """Persist buffered events; return True when the buffer is empty afterwards."""
+        nonlocal last_flush
+        if not buffer:
+            return True
+        try:
+            append_liquidation_events(buffer, directory)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("[DATA] stage=liquidation_stream status=FLUSH_FAILED detail=%s", exc)
+            return False
+        buffer.clear()
+        last_flush = clock()
+        return True
+
+    async def _close_feed(feed: LiquidationFeed | None) -> None:
+        if feed is None:
+            return
+        try:
+            await feed.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("[DATA] stage=liquidation_stream status=CLOSE_FAILED detail=%s", exc)
+
+    feed: LiquidationFeed | None = None
     try:
-        close = getattr(ex, "close", None)
-        if close is not None:
-            res = close()
-            if asyncio.iscoroutine(res):
-                await res
-    except Exception as exc:
-        _logger.debug("exchange close failed: %s", exc)
+        while not _is_shutdown():
+            try:
+                feed = await factory()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "[DATA] stage=liquidation_stream status=CONNECT_FAILED detail=%s backoff=%.1f",
+                    exc,
+                    backoff,
+                )
+                _mark_error()
+                if not buffer:
+                    _flush_coverage()
+                if await _sleep_shutdown_aware(backoff):
+                    break
+                backoff = min(max_backoff_s, backoff * 2.0)
+                continue
+            has_evidence = False
+            last_evidence = clock()
+            while not _is_shutdown():
+                try:
+                    frame = await feed.receive(receive_timeout_s)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    frame = FeedFrame(kind="closed", received_at=None, detail=f"receive raised: {exc}")
+                if frame.kind == "events" or frame.kind == "alive":
+                    assert frame.received_at is not None
+                    has_evidence = True
+                    last_evidence = clock()
+                    _mark_ok(frame.received_at)
+                    if frame.kind == "events":
+                        for msg in frame.payloads:
+                            if not isinstance(msg, Mapping):
+                                continue
+                            ev = parse_liquidation(msg, ingested_at=frame.received_at)
+                            if ev is None:
+                                continue
+                            if wanted is not None and ev.symbol not in wanted:
+                                continue
+                            buffer.append(ev)
+                elif frame.kind == "timeout":
+                    if clock() - last_evidence >= liveness_timeout_s:
+                        _logger.warning(
+                            "[DATA] stage=liquidation_stream status=LIVENESS_TIMEOUT detail=no evidence for "
+                            "%.1fs",
+                            clock() - last_evidence,
+                        )
+                        _mark_error()
+                        if not buffer:
+                            _flush_coverage()
+                        break
+                else:  # "closed"
+                    _logger.warning(
+                        "[DATA] stage=liquidation_stream status=DISCONNECTED detail=%s", frame.detail
+                    )
+                    _mark_error()
+                    if not buffer:
+                        _flush_coverage()
+                    break
+                if buffer and (len(buffer) >= max_buffer or clock() - last_flush >= flush_interval_s):
+                    if _flush_events():
+                        _flush_coverage()
+                elif not buffer:
+                    _flush_coverage()
+            await _close_feed(feed)
+            feed = None
+            if _is_shutdown():
+                break
+            if has_evidence:
+                backoff = 1.0
+                continue
+            if await _sleep_shutdown_aware(backoff):
+                break
+            backoff = min(max_backoff_s, backoff * 2.0)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("[DATA] stage=liquidation_stream status=FATAL detail=%s", exc)
+    finally:
+        _flush_events()
+        if not buffer:
+            _flush_coverage()
+        await _close_feed(feed)
+        if owned_session is not None:
+            try:
+                await owned_session.close()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("[DATA] stage=liquidation_stream status=SESSION_CLOSE_FAILED detail=%s", exc)
