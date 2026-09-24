@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -31,7 +32,10 @@ def target_quantities(
     dropped: list[DroppedSymbol] = []
     for symbol, weight in weights.items():
         sym = str(symbol)
-        target_notional = equity_usdt * Decimal(str(float(weight)))
+        weight_f = float(weight)
+        if weight_f == 0.0 or not math.isfinite(weight_f):
+            continue
+        target_notional = equity_usdt * Decimal(str(weight_f))
         symbol_filters = filters.get(sym)
         mark = marks.get(sym)
         if symbol_filters is None or mark is None or mark <= 0:

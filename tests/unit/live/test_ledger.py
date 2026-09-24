@@ -636,6 +636,115 @@ def test_accrue_funding_by_watermark_skips_zero_holding_without_watermark() -> N
     assert result.lag_by_symbol == {}
 
 
+def test_accrue_funding_events_sum_exactly_to_cash_delta() -> None:
+    """Two held symbols across three funding epochs: event amounts sum to cash_delta exactly."""
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from src.live.ledger import accrue_funding_by_watermark, append_position_snapshot
+
+    t0 = pd.Timestamp("2026-09-01 01:30", tz="UTC")
+    now = pd.Timestamp("2026-09-02 01:30", tz="UTC")
+    epochs = pd.DatetimeIndex(
+        ["2026-09-01 08:00", "2026-09-01 16:00", "2026-09-02 00:00"], tz="UTC"
+    )
+    funding = {
+        "AUSDT": pd.Series([0.0001, 0.0002, 0.0003], index=epochs),
+        "BUSDT": pd.Series([-0.0002, -0.0002, -0.0002], index=epochs),
+    }
+    closes = {
+        "AUSDT": pd.Series([100.0, 101.0, 102.0], index=epochs),
+        "BUSDT": pd.Series([50.0, 50.0, 50.0], index=epochs),
+    }
+    history = append_position_snapshot((), t0, {"AUSDT": Decimal("2"), "BUSDT": Decimal("-1")})
+
+    result = accrue_funding_by_watermark(history, {}, funding, closes, now)
+
+    assert len(result.events) == 6
+    assert {(e.symbol, e.epoch) for e in result.events} == {
+        (s, e) for s in ("AUSDT", "BUSDT") for e in epochs
+    }
+    assert [(e.symbol, e.epoch) for e in result.events] == sorted(
+        [(e.symbol, e.epoch) for e in result.events]
+    )
+    assert sum((e.amount for e in result.events), Decimal(0)) == result.cash_delta
+    assert all(e.price_source == "trade_close_1h" for e in result.events)
+
+
+def test_accrue_funding_events_stop_where_watermark_stops_on_missing_price() -> None:
+    """Second epoch hourly close missing: only the first epoch produces an event."""
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from src.live.ledger import accrue_funding_by_watermark, append_position_snapshot
+
+    t0 = pd.Timestamp("2026-09-01 01:30", tz="UTC")
+    now = pd.Timestamp("2026-09-01 17:00", tz="UTC")
+    e1 = pd.Timestamp("2026-09-01 08:00", tz="UTC")
+    e2 = pd.Timestamp("2026-09-01 16:00", tz="UTC")
+    history = append_position_snapshot((), t0, {"AUSDT": Decimal("1")})
+    funding = {"AUSDT": pd.Series([0.001, 0.002], index=pd.DatetimeIndex([e1, e2]))}
+    closes = {"AUSDT": pd.Series([200.0], index=pd.DatetimeIndex([e1]))}
+
+    result = accrue_funding_by_watermark(history, {}, funding, closes, now)
+
+    assert [(e.symbol, e.epoch) for e in result.events] == [("AUSDT", e1)]
+    assert result.cash_delta == Decimal("-0.2")
+    assert result.watermarks == {"AUSDT": e1}
+
+
+def test_accrue_funding_zero_quantity_epoch_yields_no_event_but_advances() -> None:
+    """Zero position at an epoch adds no event, yet the watermark advances past it."""
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from src.live.ledger import accrue_funding_by_watermark, append_position_snapshot
+
+    t0 = pd.Timestamp("2026-09-01 01:30", tz="UTC")
+    t1 = pd.Timestamp("2026-09-02 01:30", tz="UTC")
+    now = pd.Timestamp("2026-09-03 01:30", tz="UTC")
+    e1 = pd.Timestamp("2026-09-01 08:00", tz="UTC")
+    e2 = pd.Timestamp("2026-09-02 08:00", tz="UTC")
+    history = append_position_snapshot(
+        append_position_snapshot((), t0, {}), t1, {"AUSDT": Decimal("1")}
+    )
+    funding = {"AUSDT": pd.Series([0.001, 0.002], index=pd.DatetimeIndex([e1, e2]))}
+    closes = {"AUSDT": pd.Series([100.0, 100.0], index=pd.DatetimeIndex([e1, e2]))}
+
+    result = accrue_funding_by_watermark(history, {"AUSDT": t0}, funding, closes, now)
+
+    assert [(e.symbol, e.epoch) for e in result.events] == [("AUSDT", e2)]
+    assert result.cash_delta == Decimal("-0.2")
+    assert result.watermarks == {"AUSDT": e2}
+
+
+def test_accrue_funding_legacy_outputs_unchanged_for_fixed_inputs() -> None:
+    """Pre-change outputs (cash, watermarks, lag, interval) are pinned as literals."""
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from src.live.ledger import accrue_funding_by_watermark, append_position_snapshot
+
+    t0 = pd.Timestamp("2026-09-01 01:30", tz="UTC")
+    now = pd.Timestamp("2026-09-01 17:00", tz="UTC")
+    e1 = pd.Timestamp("2026-09-01 08:00:00.004", tz="UTC")
+    e2 = pd.Timestamp("2026-09-01 16:00:00.002", tz="UTC")
+    history = append_position_snapshot((), t0, {"AUSDT": Decimal("1")})
+    funding = {"AUSDT": pd.Series([0.001, 0.002], index=pd.DatetimeIndex([e1, e2]))}
+    marks = {"AUSDT": pd.Series([200.0], index=pd.DatetimeIndex([pd.Timestamp("2026-09-01 08:00", tz="UTC")]))}
+
+    result = accrue_funding_by_watermark(history, {}, funding, marks, now)
+
+    assert result.cash_delta == Decimal("-0.2")
+    assert result.watermarks == {"AUSDT": e1}
+    assert result.lag_by_symbol == {"AUSDT": now - e1}
+    assert result.interval_by_symbol == {"AUSDT": pd.Timedelta(hours=8)}
+
+
 def test_ledger_roundtrips_funding_backfill_markers(tmp_path) -> None:
     import json
     from decimal import Decimal

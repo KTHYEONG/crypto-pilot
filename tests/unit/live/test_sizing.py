@@ -57,6 +57,36 @@ def test_missing_filter_or_mark_dropped_as_not_tradable() -> None:
     assert targets == {} or list(targets) == ["XXXUSDT"]
     assert all(d.reason == "NOT_TRADABLE" for d in dropped)
 
+def test_zero_weights_are_neither_targets_nor_drops() -> None:
+    """Weights {A: 0.1, B: 0.0, C: NaN} with no mark or filters for B and C."""
+    import math
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from src.live.sizing import target_quantities
+
+    weights = pd.Series([0.1, 0.0, math.nan], index=["AUSDT", "BBBUSDT", "CCCUSDT"], dtype="float64")
+    targets, dropped = target_quantities(
+        weights, {"AUSDT": Decimal("100")}, {"AUSDT": _filters("AUSDT")}, Decimal("1000")
+    )
+    assert sorted(targets) == ["AUSDT"]
+    assert dropped == []
+
+
+def test_nonzero_untradable_weight_still_reported() -> None:
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from src.live.sizing import target_quantities
+
+    weights = pd.Series([0.05], index=["DUSDT"], dtype="float64")
+    targets, dropped = target_quantities(weights, {}, {}, Decimal("1000"))
+    assert targets == {}
+    assert [(d.symbol, d.reason) for d in dropped] == [("DUSDT", "NOT_TRADABLE")]
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_04_MIN_NOTIONAL_DROP_NO_REDISTRIBUTION",

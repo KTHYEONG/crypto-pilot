@@ -406,3 +406,74 @@ def test_sealed_bootstrap_wrong_key_raises(tmp_path) -> None:
     settings = LiveSettings(unit_bootstrap_path=str(boot), artifact_key=wrong_b64)
     with pytest.raises(DataIntegrityError):
         runner_mod._unit_bootstrap_sha256(settings)
+
+
+def _audit_events_by_name(tmp_path, event: str) -> list:
+    import json
+
+    path = tmp_path / "shadow_cycle.jsonl"
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)
+        if record.get("event") == event:
+            events.append(record)
+    return events
+
+
+def _seed_live_tax_cycle(tmp_path, monkeypatch):
+    import src.live.runner as runner_mod
+    from src.live.settings import LiveSettings
+
+    path, decision_time, now = _seed_policy_cycle_artifact(tmp_path)
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+    settings = LiveSettings(
+        mode="live_testnet",
+        order_api_key="testnet-key",
+        order_api_secret="testnet-secret",
+        ledger_path=str(tmp_path / "ledger_live_tax.json"),
+        tax_ledger_dir=str(tmp_path / "tax"),
+    )
+    return runner_mod, settings, path, decision_time, now
+
+
+def test_live_tax_issues_audited_without_halting(tmp_path, monkeypatch) -> None:
+    """Live collection issue: cycle COMPLETE with one tax_collect_issue audit event."""
+    from src.live.tax_ledger import TaxCollectionIssue
+
+    runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
+    calls: list = []
+
+    def _fake_collect(client, symbols, tax_dir, mode, *, now):
+        calls.append((symbols, str(tax_dir), mode))
+        return 2, (TaxCollectionIssue(stream="trades:AAAUSDT", stage="fetch", detail="boom"),)
+
+    monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
+    report = runner_mod.run_shadow_cycle(settings, decision_time, path, now=now)
+    assert report.status == "COMPLETE"
+    assert len(calls) == 1
+    events = _audit_events_by_name(tmp_path, "tax_collect_issue")
+    assert len(events) == 1
+    assert events[0]["stream"] == "trades:AAAUSDT"
+    assert events[0]["stage"] == "fetch"
+
+
+def test_live_tax_invalid_watermark_audited_once(tmp_path, monkeypatch) -> None:
+    """Corrupt watermark: one tax_watermark_invalid audit event and the cycle is COMPLETE."""
+    from src.common.errors import DataIntegrityError
+
+    runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
+
+    def _fake_collect(client, symbols, tax_dir, mode, *, now):
+        raise DataIntegrityError("tax watermark unreadable")
+
+    monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
+    report = runner_mod.run_shadow_cycle(settings, decision_time, path, now=now)
+    assert report.status == "COMPLETE"
+    events = _audit_events_by_name(tmp_path, "tax_watermark_invalid")
+    assert len(events) == 1
