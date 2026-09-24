@@ -571,6 +571,7 @@ async def run_liquidation_stream(
 
     buffer: list[LiquidationEvent] = []
     last_flush = clock()
+    last_coverage_flush = last_flush
     backoff = 1.0
 
     def _is_shutdown() -> bool:
@@ -703,11 +704,15 @@ async def run_liquidation_stream(
                     if not buffer:
                         _flush_coverage()
                     break
-                if buffer and (len(buffer) >= max_buffer or clock() - last_flush >= flush_interval_s):
+                now_c = clock()
+                if buffer and (len(buffer) >= max_buffer or now_c - last_flush >= flush_interval_s):
                     if _flush_events():
                         _flush_coverage()
-                elif not buffer:
+                        last_coverage_flush = now_c
+                elif not buffer and now_c - last_coverage_flush >= flush_interval_s:
+                    # 조용한 구간은 프레임(핑 5초)마다가 아니라 flush 주기마다만 기록한다(레코드 폭증 방지).
                     _flush_coverage()
+                    last_coverage_flush = now_c
             await _close_feed(feed)
             feed = None
             if _is_shutdown():
