@@ -51,6 +51,7 @@ class MarketRecorderConfig(BaseModel):
     liquidation_receive_timeout_s: float = 1.0
     liquidation_liveness_timeout_s: float = 15.0
     liquidation_ping_interval_s: float = 5.0
+    liquidation_event_stall_timeout_s: float = 600.0
 
     @field_validator("book_ticker_interval_s", "premium_index_interval_s")
     @classmethod
@@ -85,6 +86,14 @@ class MarketRecorderConfig(BaseModel):
     def _check_liquidation_timing(cls, value: float, info: ValidationInfo) -> float:
         if value <= 0:
             raise ValueError(f"{info.field_name} must be positive")
+        return value
+
+    @field_validator("liquidation_event_stall_timeout_s")
+    @classmethod
+    def _check_liquidation_event_stall(cls, value: float, info: ValidationInfo) -> float:
+        liveness = info.data.get("liquidation_liveness_timeout_s", 15.0)
+        if value <= liveness:
+            raise ValueError("liquidation_event_stall_timeout_s must be greater than liquidation_liveness_timeout_s")
         return value
 
     @field_validator("liquidation_liveness_timeout_s")
@@ -370,6 +379,7 @@ async def run_market_recorder(
             receive_timeout_s=config.liquidation_receive_timeout_s,
             liveness_timeout_s=config.liquidation_liveness_timeout_s,
             ping_interval_s=config.liquidation_ping_interval_s,
+            event_stall_timeout_s=config.liquidation_event_stall_timeout_s,
         )
         try:
             tracker.flush()

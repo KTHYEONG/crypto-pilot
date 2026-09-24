@@ -20,7 +20,9 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-FORCE_ORDER_STREAM_URL: str = "wss://fstream.binance.com/ws/!forceOrder@arr"
+# Binance USD-M 웹소켓은 카테고리 경로로 분리되었다. 청산 스트림은 `market` 경로에서만 이벤트가 온다.
+# 레거시 `/ws/` 경로는 연결·핑퐁은 정상이면서 이벤트가 0건이라 겉보기로는 "조용한 시장"과 구분되지 않는다.
+FORCE_ORDER_STREAM_URL: str = "wss://fstream.binance.com/market/ws/!forceOrder@arr"
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,6 +522,7 @@ async def run_liquidation_stream(
     liveness_timeout_s: float = 15.0,
     ping_interval_s: float = 5.0,
     max_backoff_s: float = 60.0,
+    event_stall_timeout_s: float = 600.0,
 ) -> None:
     """Stream Binance forceOrder liquidations into daily parquet partitions until shutdown.
 
@@ -538,10 +541,15 @@ async def run_liquidation_stream(
         liveness_timeout_s: a connection with no event/control frame for this long is treated as dead.
         ping_interval_s: client ping cadence passed to the default feed.
         max_backoff_s: cap of the exponential reconnect backoff.
+        event_stall_timeout_s: a connection that answers pings but delivers no event for this long is
+            treated as a silently broken subscription (wrong endpoint, dropped subscription): the
+            attested segment is closed and the stream reconnects. Market-wide liquidations arrive
+            ~0.3/s, the largest observed quiet gap is ~107 s, so 600 s never fires on a healthy feed.
 
     Raises:
         ValueError: when ``receive_timeout_s``/``ping_interval_s`` are not positive or
-            ``liveness_timeout_s`` is not greater than ``ping_interval_s``.
+            ``liveness_timeout_s`` is not greater than ``ping_interval_s`` or ``event_stall_timeout_s``
+            is not greater than ``liveness_timeout_s``.
     """
     if receive_timeout_s <= 0:
         raise ValueError("receive_timeout_s must be positive")
@@ -549,6 +557,8 @@ async def run_liquidation_stream(
         raise ValueError("ping_interval_s must be positive")
     if liveness_timeout_s <= ping_interval_s:
         raise ValueError("liveness_timeout_s must be greater than ping_interval_s")
+    if event_stall_timeout_s <= liveness_timeout_s:
+        raise ValueError("event_stall_timeout_s must be greater than liveness_timeout_s")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     wanted = {_normalize_symbol(s) for s in symbols} if symbols else None
@@ -663,6 +673,7 @@ async def run_liquidation_stream(
                 continue
             has_evidence = False
             last_evidence = clock()
+            last_event_at = last_evidence
             while not _is_shutdown():
                 try:
                     frame = await feed.receive(receive_timeout_s)
@@ -670,6 +681,18 @@ async def run_liquidation_stream(
                     raise
                 except Exception as exc:  # noqa: BLE001
                     frame = FeedFrame(kind="closed", received_at=None, detail=f"receive raised: {exc}")
+                if frame.kind == "events":
+                    last_event_at = clock()
+                elif frame.kind in ("alive", "timeout") and clock() - last_event_at >= event_stall_timeout_s:
+                    _logger.warning(
+                        "[DATA] stage=liquidation_stream status=EVENT_STALL detail=no event for %.0fs "
+                        "while connection answers",
+                        clock() - last_event_at,
+                    )
+                    _mark_error()
+                    if not buffer:
+                        _flush_coverage()
+                    break
                 if frame.kind == "events" or frame.kind == "alive":
                     assert frame.received_at is not None
                     has_evidence = True

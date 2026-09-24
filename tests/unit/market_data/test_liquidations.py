@@ -341,6 +341,7 @@ def test_run_liquidation_stream_timeout_frames_never_attest(tmp_path) -> None:
             feed_factory=_once(feed),
             coverage=tracker,
             liveness_timeout_s=3600.0,
+            event_stall_timeout_s=7200.0,
         )
     )
     out = load_coverage(
@@ -801,6 +802,7 @@ def test_run_liquidation_stream_broken_shutdown_flag_treated_as_not_requested(tm
                     shutdown=_Raising(),
                     feed_factory=_factory,  # type: ignore[arg-type]
                     liveness_timeout_s=3600.0,
+            event_stall_timeout_s=7200.0,
                 ),
                 0.5,
             )
@@ -953,3 +955,89 @@ def test_run_liquidation_stream_quiet_coverage_flushes_at_interval_not_per_frame
     )
     # 120 s / 60 s 주기 → 몇 번(최종 flush 포함)이지 24번이 아니다.
     assert 1 <= len(writes) <= 4
+
+
+def test_force_order_stream_url_uses_market_category_path() -> None:
+    """Binance splits USD-M streams by category; forceOrder events only flow on the `market` path."""
+    from src.market_data.streams.liquidations import FORCE_ORDER_STREAM_URL
+
+    assert FORCE_ORDER_STREAM_URL == "wss://fstream.binance.com/market/ws/!forceOrder@arr"
+
+
+def test_run_liquidation_stream_event_stall_closes_coverage_and_reconnects(tmp_path) -> None:
+    """Pings alone (no events) for > event_stall_timeout_s must stop attesting and force a reconnect."""
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    pings = [_alive_frame(t0 + pd.Timedelta(seconds=5 * i)) for i in range(40)]  # 200 s of pings only
+    first = _ScriptedFeed(pings, flag, clock=clock, step_s=5.0, shutdown_on_exhaust=False)
+    second = _ScriptedFeed(
+        [
+            _events_frame(_raw("BTCUSDT", 1758535200000), at=t0 + pd.Timedelta(seconds=210)),
+            _alive_frame(t0 + pd.Timedelta(seconds=215)),
+        ],
+        flag, clock=clock, step_s=5.0,
+    )
+    feeds = [first, second]
+
+    async def _factory() -> _ScriptedFeed:
+        return feeds.pop(0)
+
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            coverage=CoverageTracker("liquidations", tmp_path),
+            clock=clock,
+            event_stall_timeout_s=100.0,
+        )
+    )
+    assert feeds == []  # 정지 판정으로 두 번째 연결이 열렸다
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    # 첫 연결의 정지 구간은 정지 판정 시점(100 s) 이후로 이어 붙지 않는다.
+    assert out.iloc[0]["end"] <= t0 + pd.Timedelta(seconds=105)
+    assert len(out) >= 2
+
+
+def test_run_liquidation_stream_healthy_event_flow_never_stalls(tmp_path) -> None:
+    flag = _Flag()
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    frames = []
+    for i in range(30):
+        at = t0 + pd.Timedelta(seconds=30 * i)
+        frames.append(_events_frame(_raw("BTCUSDT", 1758535200000 + i * 1000), at=at))
+        frames.append(_alive_frame(at + pd.Timedelta(seconds=15)))
+    feed = _ScriptedFeed(frames, flag, clock=clock, step_s=15.0)
+    opened = {"n": 0}
+
+    async def _factory() -> _ScriptedFeed:
+        opened["n"] += 1
+        return feed
+
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None, directory=tmp_path, flush_interval_s=0.0, shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            clock=clock, event_stall_timeout_s=100.0,
+        )
+    )
+    assert opened["n"] == 1
+
+
+def test_run_liquidation_stream_rejects_stall_not_above_liveness(tmp_path) -> None:
+    with pytest.raises(ValueError, match="event_stall_timeout_s"):
+        asyncio.run(
+            run_liquidation_stream(
+                symbols=None, directory=tmp_path, shutdown=_Flag(),
+                liveness_timeout_s=15.0, event_stall_timeout_s=15.0,
+            )
+        )
