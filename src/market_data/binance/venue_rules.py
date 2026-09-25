@@ -180,18 +180,40 @@ def fetch_venue_rules(
     )
 
 
-def write_venue_rule_snapshot(snapshot: VenueRuleSnapshot, root: Path) -> Path:
-    """Persist ``<root>/<YYYYMMDD>.json.gz`` atomically (temp + os.replace); fresh-only per day.
+def write_venue_rule_snapshot(
+    snapshot: VenueRuleSnapshot, root: Path, *, slot_day: pd.Timestamp | None = None
+) -> Path:
+    """Persist ``<root>/<YYYYMMDD>.json.gz`` atomically (temp + os.replace); fresh-only per slot.
+
+    The slot defaults to the UTC capture day. The live daemon passes the decision day instead so that
+    a catch-up capture after midnight is filed under the decision it served and never occupies the
+    next decision day's slot; the true capture instant stays in the payload's ``captured_at``. An
+    existing slot is never replaced, because decisions reference snapshots by file name.
 
     Gzip (deterministic, mtime=0) cuts the daily snapshot ~33x; content is the same JSON document as the
     legacy ``.json`` files.
 
+    Args:
+        snapshot: Parsed venue rules.
+        root: Snapshot directory (created if missing).
+        slot_day: tz-aware timestamp whose UTC date names the file; ``None`` uses ``snapshot.captured_at``.
+
+    Returns:
+        The written path.
+
     Raises:
-        FileExistsError: a snapshot (either suffix) already exists for that UTC day.
+        FileExistsError: a snapshot (either suffix) already exists for that slot.
+        ValueError: ``slot_day`` is tz-naive.
     """
     directory = Path(root)
     directory.mkdir(parents=True, exist_ok=True)
-    day = snapshot.captured_at.tz_convert("UTC").strftime("%Y%m%d")
+    if slot_day is None:
+        day = snapshot.captured_at.tz_convert("UTC").strftime("%Y%m%d")
+    else:
+        slot = pd.Timestamp(slot_day)
+        if slot.tzinfo is None:
+            raise ValueError("slot_day must be tz-aware")
+        day = slot.tz_convert("UTC").strftime("%Y%m%d")
     target = directory / f"{day}.json.gz"
     legacy = directory / f"{day}.json"
     if target.exists() or legacy.exists():

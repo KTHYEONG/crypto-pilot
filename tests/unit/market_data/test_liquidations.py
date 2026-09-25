@@ -17,6 +17,7 @@ import pytest
 from src.market_data.streams.liquidations import (
     FeedFrame,
     LiquidationEvent,
+    LiquidationHealth,
     append_liquidation_events,
     load_liquidation_events,
     parse_liquidation,
@@ -145,20 +146,20 @@ def _event(symbol: str, ms: int, price: float, qty: float, accum: float) -> Liqu
     )
 
 
-def test_append_liquidation_events_daily_zstd_partition_and_dedup(tmp_path) -> None:
+def test_append_liquidation_events_hourly_zstd_partition_and_dedup(tmp_path) -> None:
     d1 = pd.Timestamp("2026-09-01T12:00:00Z").value // 1_000_000
     d2 = pd.Timestamp("2026-09-02T09:00:00Z").value // 1_000_000
     events = [
         _event("BTCUSDT", d1, 100.0, 1.0, 1.0),
         _event("BTCUSDT", d1, 100.0, 1.0, 1.0),  # exact dup -> collapsed
         _event("BTCUSDT", d1, 101.0, 2.0, 2.0),  # distinct
-        _event("ETHUSDT", d2, 50.0, 3.0, 3.0),   # distinct day
+        _event("ETHUSDT", d2, 50.0, 3.0, 3.0),   # distinct hour
     ]
     append_liquidation_events(events, tmp_path)
     append_liquidation_events(events, tmp_path)  # re-run must not duplicate
 
-    f1 = tmp_path / "liquidations_20260901.parquet"
-    f2 = tmp_path / "liquidations_20260902.parquet"
+    f1 = tmp_path / "liquidations_20260901_12.parquet"
+    f2 = tmp_path / "liquidations_20260902_09.parquet"
     assert f1.exists()
     assert f2.exists()
 
@@ -168,6 +169,59 @@ def test_append_liquidation_events_daily_zstd_partition_and_dedup(tmp_path) -> N
     assert df1["orig_qty"].dtype == "float32"
     assert isinstance(df1["side"].dtype, pd.CategoricalDtype)
     assert len(pd.read_parquet(f2)) == 1
+
+
+def test_append_liquidation_events_routes_by_utc_hour_boundary(tmp_path) -> None:
+    before_ms = pd.Timestamp("2026-09-24T05:59:59.999Z").value // 1_000_000
+    on_ms = pd.Timestamp("2026-09-24T06:00:00.000Z").value // 1_000_000
+    written = append_liquidation_events(
+        [_event("BTCUSDT", before_ms, 100.0, 1.0, 1.0), _event("BTCUSDT", on_ms, 100.0, 1.0, 1.0)],
+        tmp_path,
+    )
+    assert written == [tmp_path / "liquidations_20260924_05.parquet", tmp_path / "liquidations_20260924_06.parquet"]
+    assert len(pd.read_parquet(written[0])) == 1
+    assert len(pd.read_parquet(written[1])) == 1
+
+
+def test_append_liquidation_events_leaves_legacy_daily_file_untouched(tmp_path) -> None:
+    legacy = tmp_path / "liquidations_20260924.parquet"
+    ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
+    append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
+    hourly = tmp_path / "liquidations_20260924_05.parquet"
+    # reshape the hourly file into a legacy daily layout
+    legacy.write_bytes(hourly.read_bytes())
+    before = legacy.read_bytes()
+    mtime_before = legacy.stat().st_mtime_ns
+    ms2 = pd.Timestamp("2026-09-24T06:30:00Z").value // 1_000_000
+    append_liquidation_events([_event("ETHUSDT", ms2, 50.0, 2.0, 2.0)], tmp_path)
+    assert legacy.read_bytes() == before
+    assert legacy.stat().st_mtime_ns == mtime_before
+    assert len(pd.read_parquet(tmp_path / "liquidations_20260924_06.parquet")) == 1
+
+
+def test_load_liquidation_events_deduplicates_across_layouts(tmp_path) -> None:
+    ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
+    append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
+    hourly = tmp_path / "liquidations_20260924_05.parquet"
+    legacy = tmp_path / "liquidations_20260924.parquet"
+    legacy.write_bytes(hourly.read_bytes())
+    loaded = load_liquidation_events(tmp_path)
+    assert len(loaded) == 1
+
+
+def test_append_liquidation_events_quarantines_corrupt_hour(tmp_path) -> None:
+    ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
+    append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
+    target = tmp_path / "liquidations_20260924_05.parquet"
+    raw = target.read_bytes()
+    target.write_bytes(raw[: len(raw) // 2])
+    ms2 = pd.Timestamp("2026-09-24T05:30:00Z").value // 1_000_000
+    written = append_liquidation_events([_event("ETHUSDT", ms2, 50.0, 2.0, 2.0)], tmp_path)
+    assert written == [target]
+    assert len(pd.read_parquet(target)) == 1
+    quarantined = list((tmp_path / "_quarantine").glob("liquidations_20260924_05.parquet.*.corrupt"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == raw[: len(raw) // 2]
 
 
 def test_load_liquidation_events_roundtrip_and_missing_dir(tmp_path) -> None:
@@ -294,8 +348,8 @@ def test_run_liquidation_stream_observes_shutdown_without_events(tmp_path) -> No
     assert all(t == 0.5 for t in feed.receive_timeouts)
 
 
-def test_run_liquidation_stream_attests_quiet_stretch_with_alive_frames(tmp_path) -> None:
-    """Quiet-but-connected stretches stay attested without writing event files."""
+def test_run_liquidation_stream_pong_only_connection_attests_nothing(tmp_path) -> None:
+    """A pong-answering socket with no parseable events leaves no coverage behind."""
     from src.market_data.streams.coverage import CoverageTracker, load_coverage
 
     flag = _Flag()
@@ -319,10 +373,44 @@ def test_run_liquidation_stream_attests_quiet_stretch_with_alive_frames(tmp_path
         tmp_path, "liquidations",
         start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
     )
+    assert out.empty
+    assert list(tmp_path.glob("liquidations_*.parquet")) == []
+
+
+def test_run_liquidation_stream_quiet_stretch_between_events_stays_attested(tmp_path) -> None:
+    """Within one connection the attested segment spans first to latest event."""
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    t1 = t0 + pd.Timedelta(seconds=100)
+    tracker = CoverageTracker("liquidations", tmp_path)
+    feed = _ScriptedFeed(
+        [
+            _events_frame(_raw("BTCUSDT", 1758531600000), at=t0),
+            _alive_frame(t0 + pd.Timedelta(seconds=30)),
+            _alive_frame(t0 + pd.Timedelta(seconds=60)),
+            _events_frame(_raw("BTCUSDT", 1758531700000), at=t1),
+        ],
+        flag,
+    )
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            coverage=tracker,
+        )
+    )
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
     assert len(out) == 1
     assert out.iloc[0]["start"] == t0
-    assert out.iloc[0]["end"] == t0 + pd.Timedelta(seconds=10)
-    assert list(tmp_path.glob("liquidations_*.parquet")) == []
+    assert out.iloc[0]["end"] == t1
 
 
 def test_run_liquidation_stream_timeout_frames_never_attest(tmp_path) -> None:
@@ -393,9 +481,8 @@ def test_run_liquidation_stream_liveness_timeout_forces_reconnect(tmp_path) -> N
         tmp_path, "liquidations",
         start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
     )
-    assert len(out) == 2
-    assert out.iloc[0]["end"] == t1
-    assert out.iloc[0]["end"] < out.iloc[1]["start"]
+    # pong-only connections carry no event evidence, so nothing is attested.
+    assert out.empty
 
 
 def test_run_liquidation_stream_healthy_connection_reconnects_immediately(tmp_path, monkeypatch) -> None:
@@ -810,28 +897,245 @@ def test_run_liquidation_stream_broken_shutdown_flag_treated_as_not_requested(tm
     asyncio.run(_scenario())
 
 
-def test_run_liquidation_stream_clock_failure_logged_and_stops(tmp_path) -> None:
+def test_run_liquidation_stream_unexpected_error_reraised_after_cleanup(tmp_path) -> None:
+    """An unexpected error persists buffered events, closes the feed, then propagates."""
+    import pytest
+
     flag = _Flag()
     calls = {"n": 0}
 
     def _clock() -> float:
         calls["n"] += 1
-        if calls["n"] >= 3:
+        if calls["n"] == 6:
             raise RuntimeError("clock boom")
         return 0.0
 
     t0 = pd.Timestamp("2026-09-22T10:00:00Z")
-    feed = _ScriptedFeed([_events_frame(_raw("BTCUSDT", 1758531600000), at=t0)], flag)
+    feed = _ScriptedFeed(
+        [_events_frame(_raw("BTCUSDT", 1758531600000), at=t0), _alive_frame(t0)],
+        flag,
+        shutdown_on_exhaust=False,
+    )
+    with pytest.raises(RuntimeError, match="clock boom"):
+        asyncio.run(
+            run_liquidation_stream(
+                symbols=None,
+                directory=tmp_path,
+                shutdown=flag,
+                feed_factory=_once(feed),
+                clock=_clock,
+            )
+        )
+    assert calls["n"] >= 6
+    assert sum(len(pd.read_parquet(f)) for f in tmp_path.glob("liquidations_*.parquet")) == 1
+    assert feed.closed == 1
+
+
+def test_liquidation_health_tracks_events_and_failed_connections(tmp_path) -> None:
+    """Two connect failures then one event: counters rise, then reset with the event time."""
+    flag = _Flag()
+    t1 = pd.Timestamp("2026-09-22T10:05:00Z")
+    health = LiquidationHealth()
+    attempts = {"n": 0}
+
+    async def _factory() -> _ScriptedFeed:
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise ConnectionError("ws dropped")
+        return _ScriptedFeed([_events_frame(_raw("BTCUSDT", 1758531600000), at=t1)], flag)
+
     asyncio.run(
         run_liquidation_stream(
             symbols=None,
             directory=tmp_path,
+            flush_interval_s=3600.0,
             shutdown=flag,
-            feed_factory=_once(feed),
-            clock=_clock,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            health=health,
         )
     )
-    assert calls["n"] >= 3
+    assert health.last_event_at == t1
+    assert health.consecutive_failed_connections == 0
+    assert health.last_connected_at is not None
+    assert health.last_disconnect_reason is not None
+    assert health.last_disconnect_reason.startswith("CONNECT_FAILED")
+
+
+def test_liquidation_health_counts_failed_connect_attempts_before_events(tmp_path) -> None:
+    """Before any event arrives, consecutive failures stay visible on the health record."""
+    flag = _Flag()
+    health = LiquidationHealth()
+    attempts = {"n": 0}
+
+    async def _factory() -> _ScriptedFeed:
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise ConnectionError("ws dropped")
+        feed = _ScriptedFeed([_CLOSED], flag)
+        return feed
+
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            health=health,
+        )
+    )
+    # 2 connect failures, then an eventless disconnect recorded without a counter bump at shutdown.
+    assert health.consecutive_failed_connections == 2
+    assert health.last_event_at is None
+    assert health.last_connected_at is not None
+    assert health.last_disconnect_reason is not None
+    assert health.last_disconnect_reason.startswith("DISCONNECTED")
+
+
+def test_liquidation_health_pong_only_connections_count_as_failed(tmp_path) -> None:
+    """Two pong-only connections ending by EVENT_STALL count as two failed connections."""
+    flag = _Flag()
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    health = LiquidationHealth()
+
+    def _pongs(n: int) -> list[FeedFrame]:
+        return [_alive_frame(t0 + pd.Timedelta(seconds=5 * i)) for i in range(n)]
+
+    first = _ScriptedFeed(_pongs(30), flag, clock=clock, step_s=5.0, shutdown_on_exhaust=False)
+    second = _ScriptedFeed(_pongs(30), flag, clock=clock, step_s=5.0, shutdown_on_exhaust=False)
+    third = _ScriptedFeed([], flag, clock=clock)
+    feeds = [first, second, third]
+
+    async def _factory() -> _ScriptedFeed:
+        return feeds.pop(0)
+
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            clock=clock,
+            event_stall_timeout_s=100.0,
+            health=health,
+        )
+    )
+    assert feeds == []
+    assert health.consecutive_failed_connections == 2
+    assert health.last_event_at is None
+    assert health.last_disconnect_reason is not None
+    assert health.last_disconnect_reason.startswith("EVENT_STALL")
+
+
+def test_liquidation_health_heartbeat_entry_is_json_ready() -> None:
+    """The heartbeat snapshot serializes with ISO-8601 UTC timestamps."""
+    import json
+
+    health = LiquidationHealth(
+        last_event_at=pd.Timestamp("2026-09-22T10:00:00Z"),
+        last_connected_at=pd.Timestamp("2026-09-22T09:59:00Z"),
+        consecutive_failed_connections=2,
+        last_disconnect_reason="EVENT_STALL: no parseable event for 100s",
+    )
+    entry = health.as_heartbeat_entry()
+    assert json.dumps(entry)
+    assert entry["last_event_at"] == "2026-09-22T10:00:00+00:00"
+    assert entry["last_connected_at"] == "2026-09-22T09:59:00+00:00"
+    assert entry["consecutive_failed_connections"] == 2
+    assert isinstance(entry["consecutive_failed_connections"], int)
+    empty = LiquidationHealth().as_heartbeat_entry()
+    assert empty["last_event_at"] is None
+    assert empty["last_connected_at"] is None
+    assert json.dumps(empty)
+
+
+def test_append_liquidation_events_backfills_legacy_hour_missing_event_time_ms(tmp_path) -> None:
+    """An hour file without the dedup key column still merges instead of failing."""
+    ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
+    append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
+    target = tmp_path / "liquidations_20260924_05.parquet"
+    legacy = pd.read_parquet(target).drop(columns=["event_time_ms"])
+    assert "event_time_ms" not in legacy.columns
+    legacy.to_parquet(target, index=False, compression="zstd")
+    ms2 = pd.Timestamp("2026-09-24T05:30:00Z").value // 1_000_000
+    append_liquidation_events([_event("ETHUSDT", ms2, 50.0, 2.0, 2.0)], tmp_path)
+    merged = pd.read_parquet(target)
+    assert len(merged) == 2
+    assert set(merged["symbol"]) == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_run_liquidation_stream_stall_fires_on_quiet_timeouts_after_pings(tmp_path) -> None:
+    """Alive frames keep liveness fresh but never reset the event-stall timer."""
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    pings = [_alive_frame(t0 + pd.Timedelta(seconds=5 * i)) for i in range(18)]
+    pings += [_TIMEOUT, _TIMEOUT, _TIMEOUT]
+    first = _ScriptedFeed(pings, flag, clock=clock, step_s=5.0, shutdown_on_exhaust=False)
+    second = _ScriptedFeed([], flag, clock=clock)
+    feeds = [first, second]
+
+    async def _factory() -> _ScriptedFeed:
+        return feeds.pop(0)
+
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            coverage=CoverageTracker("liquidations", tmp_path),
+            clock=clock,
+            event_stall_timeout_s=100.0,
+        )
+    )
+    assert feeds == []  # EVENT_STALL (not liveness) opened the second connection
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    assert out.empty
+
+
+def test_run_liquidation_stream_unparseable_frames_neither_attest_nor_reset_stall(tmp_path) -> None:
+    """Frames with zero parseable payloads cannot mask a broken subscription."""
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    flag = _Flag()
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    junk = [_events_frame({"not": "forceOrder"}, "junk", at=t0 + pd.Timedelta(seconds=5 * i)) for i in range(30)]
+    first = _ScriptedFeed(junk, flag, clock=clock, step_s=5.0, shutdown_on_exhaust=False)
+    second = _ScriptedFeed([], flag, clock=clock)
+    feeds = [first, second]
+
+    async def _factory() -> _ScriptedFeed:
+        return feeds.pop(0)
+
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_factory,  # type: ignore[arg-type]
+            coverage=CoverageTracker("liquidations", tmp_path),
+            clock=clock,
+            event_stall_timeout_s=100.0,
+        )
+    )
+    assert feeds == []  # EVENT_STALL opened the second connection
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    assert out.empty
+    assert list(tmp_path.glob("liquidations_*.parquet")) == []
 
 
 async def _run_default_factory_once(
@@ -925,14 +1229,17 @@ def test_run_liquidation_stream_default_factory_session_cancel_propagates(tmp_pa
 
 
 def test_run_liquidation_stream_quiet_coverage_flushes_at_interval_not_per_frame(tmp_path, monkeypatch) -> None:
-    """Quiet stretch: ~5 s ping frames must not write one coverage record each."""
+    """Event-driven coverage still flushes per interval, not once per frame."""
     from src.market_data.streams import coverage as coverage_mod
     from src.market_data.streams.coverage import CoverageTracker
 
     flag = _Flag()
     clock = _ManualClock()
     t0 = pd.Timestamp("2026-09-22T10:00:00Z")
-    frames = [_alive_frame(t0 + pd.Timedelta(seconds=5 * i)) for i in range(24)]  # 120 s of pings
+    frames = [
+        _events_frame(_raw("BTCUSDT", 1758531600000 + 5000 * i), at=t0 + pd.Timedelta(seconds=5 * i))
+        for i in range(24)
+    ]  # 120 s of events
     feed = _ScriptedFeed(frames, flag, clock=clock, step_s=5.0)
     writes: list[int] = []
     original = coverage_mod._append_intervals
@@ -965,18 +1272,25 @@ def test_force_order_stream_url_uses_market_category_path() -> None:
 
 
 def test_run_liquidation_stream_event_stall_closes_coverage_and_reconnects(tmp_path) -> None:
-    """Pings alone (no events) for > event_stall_timeout_s must stop attesting and force a reconnect."""
+    """An eventless tail attests nothing: the first connection's segment ends at its last event."""
     from src.market_data.streams.coverage import CoverageTracker, load_coverage
 
     flag = _Flag()
     clock = _ManualClock()
     t0 = pd.Timestamp("2026-09-22T10:00:00Z")
-    pings = [_alive_frame(t0 + pd.Timedelta(seconds=5 * i)) for i in range(40)]  # 200 s of pings only
-    first = _ScriptedFeed(pings, flag, clock=clock, step_s=5.0, shutdown_on_exhaust=False)
+    t0b = t0 + pd.Timedelta(seconds=5)
+    headed = [
+        _events_frame(_raw("BTCUSDT", 1758531600000), at=t0),
+        _events_frame(_raw("BTCUSDT", 1758531605000), at=t0b),
+    ]
+    headed += [_alive_frame(t0 + pd.Timedelta(seconds=5 * i)) for i in range(2, 40)]  # ~200 s tail of pings
+    first = _ScriptedFeed(headed, flag, clock=clock, step_s=5.0, shutdown_on_exhaust=False)
+    t2 = t0 + pd.Timedelta(seconds=210)
+    t2b = t2 + pd.Timedelta(seconds=5)
     second = _ScriptedFeed(
         [
-            _events_frame(_raw("BTCUSDT", 1758535200000), at=t0 + pd.Timedelta(seconds=210)),
-            _alive_frame(t0 + pd.Timedelta(seconds=215)),
+            _events_frame(_raw("BTCUSDT", 1758535200000), at=t2),
+            _events_frame(_raw("BTCUSDT", 1758535205000), at=t2b),
         ],
         flag, clock=clock, step_s=5.0,
     )
@@ -1002,9 +1316,12 @@ def test_run_liquidation_stream_event_stall_closes_coverage_and_reconnects(tmp_p
         tmp_path, "liquidations",
         start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
     )
-    # 첫 연결의 정지 구간은 정지 판정 시점(100 s) 이후로 이어 붙지 않는다.
-    assert out.iloc[0]["end"] <= t0 + pd.Timedelta(seconds=105)
-    assert len(out) >= 2
+    # 첫 연결의 정지 구간은 마지막 이벤트(t0b) 이후로 이어 붙지 않는다.
+    assert len(out) == 2
+    assert out.iloc[0]["start"] == t0
+    assert out.iloc[0]["end"] == t0b
+    assert out.iloc[1]["start"] == t2
+    assert out.iloc[1]["end"] == t2b
 
 
 def test_run_liquidation_stream_healthy_event_flow_never_stalls(tmp_path) -> None:

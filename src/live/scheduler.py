@@ -244,15 +244,28 @@ def _default_data_refresh() -> RefreshReport:
     )
 
 
-def _default_venue_capture(settings: LiveSettings) -> None:
-    """Best-effort daily venue rule snapshot (brackets need a signed request); failures never stop the cycle."""
-    try:
-        from src.market_data.binance.venue_rules import fetch_venue_rules, write_venue_rule_snapshot
+def _default_venue_capture(settings: LiveSettings, decision_time: pd.Timestamp) -> None:
+    """Best-effort venue rule snapshot for ``decision_time``'s slot; failures never stop the cycle.
 
+    The slot is keyed by the decision day so a catch-up cycle after midnight does not consume the next
+    decision day's slot. An existing slot (an earlier attempt for the same decision) is reused without
+    a signed API call.
+    """
+    try:
+        from src.market_data.binance.venue_rules import (
+            fetch_venue_rules,
+            venue_rule_snapshot_exists,
+            write_venue_rule_snapshot,
+        )
+
+        slot = _as_utc(decision_time).strftime("%Y%m%d")
+        if venue_rule_snapshot_exists(VENUE_RULES_DIR, slot):
+            logger.info("[DATA] stage=venue_capture status=ALREADY_CAPTURED slot=%s", slot)
+            return None
         key = settings.api_key.get_secret_value() if settings.api_key is not None else None
         secret = settings.api_secret.get_secret_value() if settings.api_secret is not None else None
         snapshot = fetch_venue_rules(api_key=key, api_secret=secret)
-        write_venue_rule_snapshot(snapshot, VENUE_RULES_DIR)
+        write_venue_rule_snapshot(snapshot, VENUE_RULES_DIR, slot_day=decision_time)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[DATA] stage=venue_capture status=FAILED error=%s", exc)
         return None
@@ -456,7 +469,7 @@ def run_daemon(
     refresh_fn: Callable[[], Any] = _default_data_refresh,
     signal_step_fn: Callable[[pd.Timestamp], Any] | None = None,
     prune_fn: Callable[[], None] = _default_data_prune,
-    venue_fn: Callable[[], None] | None = None,
+    venue_fn: Callable[[pd.Timestamp], None] | None = None,
 ) -> None:
     """Merged autonomous loop: venue snapshot + data refresh + frozen step + execution.
 
@@ -535,7 +548,7 @@ def run_daemon(
             break
 
         try:
-            venue_fn()
+            venue_fn(target)
         except Exception:  # noqa: BLE001
             logger.exception("[SYS] venue capture failed decision_time=%s", target)
         if shutdown is not None and shutdown.requested:

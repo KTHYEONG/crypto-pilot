@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.common.paths import APP_ROOT, DATA_DIR
@@ -131,6 +131,14 @@ class LiveSettings(BaseSettings):
     min_universe_symbols: int = 100
     alert_halt_streak: int = 2
     alert_daily_digest: bool = True
+    recorder_watch_enabled: bool = True
+    recorder_watch_interval_s: float = 60.0
+    recorder_heartbeat_stale_s: float = 600.0
+    # 청산 무음 알림은 스트림의 EVENT_STALL 재연결 타임아웃(600 s)보다 길게 잡는다:
+    # 스트림이 한 번 스스로 재연결을 시도해 보고, 그래도 이벤트가 없으면 알림한다.
+    recorder_liquidation_silence_s: float = 900.0
+    recorder_liquidation_max_failed_connections: int = 5
+    recorder_sampler_stale_s: float = 1800.0
     # Frozen strategy digest stamped onto execution-quality observations so
     # forward evidence can be attributed to an immutable strategy version.
     strategy_digest: str | None = None
@@ -158,6 +166,25 @@ class LiveSettings(BaseSettings):
     record_run_id: str | None = None
     order_journal_path: str | None = None
     weights_path: str | None = None
+
+    @field_validator(
+        "recorder_watch_interval_s",
+        "recorder_heartbeat_stale_s",
+        "recorder_liquidation_silence_s",
+        "recorder_sampler_stale_s",
+    )
+    @classmethod
+    def _positive_recorder_seconds(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be positive")
+        return value
+
+    @field_validator("recorder_liquidation_max_failed_connections")
+    @classmethod
+    def _positive_recorder_max_failed(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("recorder_liquidation_max_failed_connections must be >= 1")
+        return value
 
     @field_validator("notional_equity_usdt")
     @classmethod

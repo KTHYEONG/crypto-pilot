@@ -9,6 +9,8 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
+
 
 def monthly_partition_path(
     directory: Path, prefix: str, when: pd.Timestamp, *, suffix: str = ".parquet"
@@ -47,6 +49,29 @@ def append_typed_frame(
     dtypes: Mapping[str, str],
     compression: str = "zstd",
 ) -> list[Path]:
+    """Merge ``frame`` into monthly ``<prefix>_<YYYYMM>.parquet`` partitions keyed by ``time_column`` (UTC).
+
+    Evidence partitions are append-only: existing rows are never dropped. Each touched month is
+    read, concatenated with the new rows, dtype-normalized and atomically replaced, so a crash or a
+    backup snapshot can only observe the previous or the new complete partition. An undecodable
+    existing partition is quarantined (see ``read_parquet_or_quarantine``) and the month restarts
+    from the new rows. Assumes a single writer process per ``directory``.
+
+    Args:
+        frame: New rows; ``time_column`` must be parseable as UTC timestamps.
+        directory: Partition directory (created if missing).
+        prefix: Partition file prefix.
+        time_column: Column whose UTC month selects the partition.
+        dtypes: Column dtype contract enforced on new and merged rows.
+        compression: Parquet codec.
+
+    Returns:
+        Sorted partition paths written; empty when ``frame`` is empty.
+
+    Raises:
+        Exception: Merge or dtype-enforcement failures and OS-level read/write failures propagate;
+            the existing partition is left unchanged.
+    """
     if frame.empty:
         return []
     directory = Path(directory)
@@ -62,19 +87,16 @@ def append_typed_frame(
     for yyyymm, group in frame.groupby("_yyyymm"):
         grp = group.drop(columns=["_yyyymm"])
         path = directory / f"{prefix}_{yyyymm}.parquet"
-        if path.exists():
-            try:
-                existing = pd.read_parquet(path)
-                combined = pd.concat([existing, grp], ignore_index=True)
-                combined = _enforce_dtypes(combined, dtypes)
-                # ensure time column remains datetime
-                if time_column in combined.columns:
-                    combined[time_column] = pd.to_datetime(combined[time_column], utc=True).astype("datetime64[ns, UTC]")
-                combined.to_parquet(path, index=False, compression=compression)
-            except Exception:  # noqa: BLE001 - 손상된 기존 파티션은 신규 그룹으로 덮어써 append 지속
-                grp.to_parquet(path, index=False, compression=compression)
+        existing = read_parquet_or_quarantine(path, stage=f"records_{prefix}")
+        if existing is not None:
+            combined = pd.concat([existing, grp], ignore_index=True)
+            combined = _enforce_dtypes(combined, dtypes)
+            # ensure time column remains datetime
+            if time_column in combined.columns:
+                combined[time_column] = pd.to_datetime(combined[time_column], utc=True).astype("datetime64[ns, UTC]")
+            write_parquet_atomic(combined, path, compression=compression)
         else:
-            grp.to_parquet(path, index=False, compression=compression)
+            write_parquet_atomic(grp, path, compression=compression)
         written.append(path)
     return sorted(written)
 

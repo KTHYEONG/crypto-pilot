@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 import aiohttp
 import pandas as pd
 
+from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 from src.common.paths import DATA_DIR
 
 if TYPE_CHECKING:
@@ -408,6 +409,27 @@ def append_liquidation_events(
     events: Sequence[LiquidationEvent],
     directory: Path,
 ) -> list[Path]:
+    """Merge liquidation events into hourly ``liquidations_<YYYYMMDD>_<HH>.parquet`` partitions.
+
+    Partitions are keyed by the UTC hour of ``event_time`` so each flush rewrites at most one hour of
+    rows and every closed hour becomes an immutable file that the nightly backup copies once. Each
+    touched hour is read, merged, deduplicated on (symbol, event_time_ms, price, orig_qty,
+    filled_accum_qty) keeping the last copy, and atomically replaced; an undecodable hour file is
+    quarantined and the hour restarts from the new events. Legacy daily files
+    (``liquidations_<YYYYMMDD>.parquet``) are never modified; ``load_liquidation_events`` reads both
+    layouts. Assumes a single writer process per ``directory``.
+
+    Args:
+        events: Parsed events; an empty batch writes nothing.
+        directory: Partition directory (created if missing).
+
+    Returns:
+        Sorted hourly partition paths written.
+
+    Raises:
+        Exception: Merge failures and OS-level read/write failures propagate with every existing
+            partition unchanged; the caller keeps its buffer and retries on the next flush.
+    """
     if not events:
         return []
     directory = Path(directory)
@@ -415,34 +437,30 @@ def append_liquidation_events(
     frame = _events_to_frame(events)
     if frame.empty:
         return []
-    # group by date UTC of event_time
-    frame["event_date"] = frame["event_time"].dt.tz_convert("UTC").dt.date
+    # group by UTC hour of event_time
+    frame["event_hour"] = frame["event_time"].dt.tz_convert("UTC").dt.strftime("%Y%m%d_%H")
     written: list[Path] = []
-    for date_val, group in frame.groupby("event_date"):
-        date_str = pd.Timestamp(date_val).strftime("%Y%m%d")
-        path = directory / f"liquidations_{date_str}.parquet"
-        # prepare group without helper date
-        grp = group.drop(columns=["event_date"])
-        dedup_subset = ["symbol", "event_time_ms", "price", "orig_qty", "filled_accum_qty"]
+    dedup_subset = ["symbol", "event_time_ms", "price", "orig_qty", "filled_accum_qty"]
+    for hour_str, group in frame.groupby("event_hour"):
+        path = directory / f"liquidations_{hour_str}.parquet"
+        # prepare group without helper key
+        grp = group.drop(columns=["event_hour"])
         grp = _apply_compact_dtypes(grp)
         grp["event_time"] = pd.to_datetime(grp["event_time"], utc=True)
         grp["ingested_at"] = pd.to_datetime(grp["ingested_at"], utc=True)
         grp = grp.drop_duplicates(subset=dedup_subset, keep="last")
-        if path.exists():
-            try:
-                existing = pd.read_parquet(path)
-                if "event_time_ms" not in existing.columns and "event_time" in existing.columns:
-                    existing["event_time_ms"] = pd.to_datetime(existing["event_time"], utc=True).astype("int64") // 1_000_000
-                combined = pd.concat([existing, grp], ignore_index=True)
-                combined = _apply_compact_dtypes(combined)
-                combined["event_time"] = pd.to_datetime(combined["event_time"], utc=True)
-                combined["ingested_at"] = pd.to_datetime(combined["ingested_at"], utc=True)
-                combined = combined.drop_duplicates(subset=dedup_subset, keep="last")
-                combined.to_parquet(path, index=False, compression="zstd")
-            except Exception:
-                grp.to_parquet(path, index=False, compression="zstd")
+        existing = read_parquet_or_quarantine(path, stage="liquidations")
+        if existing is not None:
+            if "event_time_ms" not in existing.columns and "event_time" in existing.columns:
+                existing["event_time_ms"] = pd.to_datetime(existing["event_time"], utc=True).astype("int64") // 1_000_000
+            combined = pd.concat([existing, grp], ignore_index=True)
+            combined = _apply_compact_dtypes(combined)
+            combined["event_time"] = pd.to_datetime(combined["event_time"], utc=True)
+            combined["ingested_at"] = pd.to_datetime(combined["ingested_at"], utc=True)
+            combined = combined.drop_duplicates(subset=dedup_subset, keep="last")
+            write_parquet_atomic(combined, path, compression="zstd")
         else:
-            grp.to_parquet(path, index=False, compression="zstd")
+            write_parquet_atomic(grp, path, compression="zstd")
         written.append(path)
     # sort and dedup written
     written = sorted(set(written))
@@ -507,6 +525,46 @@ def _utc_now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
 
+@dataclass(slots=True)
+class LiquidationHealth:
+    """Mutable liveness facts of the liquidation stream, published through the recorder heartbeat.
+
+    Updated in place by ``run_liquidation_stream`` on the event loop thread and snapshotted by the
+    recorder's heartbeat task; a pong-answering socket that delivers no events is invisible to
+    coverage, so an external watchdog needs the time of the last *parseable* event and the count of
+    connections that ended without delivering one.
+
+    Attributes:
+        last_event_at: Wall-clock receipt time of the latest parseable forceOrder event (UTC).
+        last_connected_at: Wall-clock time the latest connection was established (UTC).
+        consecutive_failed_connections: Connection attempts in a row that failed to open or closed
+            without delivering a parseable event; reset to 0 by the next parseable event.
+        last_disconnect_reason: Status token and detail of the latest connection end or connect failure.
+    """
+
+    last_event_at: pd.Timestamp | None = None
+    last_connected_at: pd.Timestamp | None = None
+    consecutive_failed_connections: int = 0
+    last_disconnect_reason: str | None = None
+
+    def as_heartbeat_entry(self) -> dict[str, Any]:
+        """JSON-ready snapshot: timestamps as ISO-8601 UTC strings (or ``None``), counters as ``int``."""
+
+        def _iso(ts: pd.Timestamp | None) -> str | None:
+            if ts is None:
+                return None
+            out = pd.Timestamp(ts)
+            out = out.tz_localize("UTC") if out.tzinfo is None else out.tz_convert("UTC")  # noqa: SIM108
+            return str(out.isoformat())
+
+        return {
+            "last_event_at": _iso(self.last_event_at),
+            "last_connected_at": _iso(self.last_connected_at),
+            "consecutive_failed_connections": int(self.consecutive_failed_connections),
+            "last_disconnect_reason": self.last_disconnect_reason,
+        }
+
+
 async def run_liquidation_stream(
     *,
     symbols: list[str] | None,
@@ -523,33 +581,40 @@ async def run_liquidation_stream(
     ping_interval_s: float = 5.0,
     max_backoff_s: float = 60.0,
     event_stall_timeout_s: float = 600.0,
+    health: LiquidationHealth | None = None,
 ) -> None:
-    """Stream Binance forceOrder liquidations into daily parquet partitions until shutdown.
+    """Stream Binance forceOrder liquidations into hourly parquet partitions until shutdown.
 
     Binance pushes at most one liquidation snapshot per symbol per second, so stored events are a lower
-    bound of liquidation flow. Coverage is attested only at instants with direct evidence of a live
-    connection (an event or a control frame), so quiet-but-connected stretches stay attested while a
-    silent dead socket never is. Shutdown is observed at least every ``receive_timeout_s`` so SIGTERM
-    completes the final flush well inside the container stop grace period.
+    bound of liquidation flow. Coverage is attested only by parseable forceOrder events: within one
+    connection the attested segment spans its first to its latest event, so quiet stretches between
+    events stay attested while a connection that only answers pings (wrong endpoint, dropped
+    subscription) attests nothing. Control frames are liveness evidence for reconnect decisions only.
+    Shutdown is observed at least every ``receive_timeout_s`` so SIGTERM completes the final flush
+    well inside the container stop grace period.
 
     Args:
         symbols: optional client-side filter on the all-market stream (normalized symbol names);
-            ``None`` keeps every symbol.
+            ``None`` keeps every symbol. Filtered-out events still count as evidence that the
+            subscription delivers.
         feed_factory: opens a connected feed; defaults to ``BinanceForceOrderFeed.connect`` on a
             session owned (and closed) by this function.
         receive_timeout_s: upper bound on shutdown observation latency.
         liveness_timeout_s: a connection with no event/control frame for this long is treated as dead.
         ping_interval_s: client ping cadence passed to the default feed.
         max_backoff_s: cap of the exponential reconnect backoff.
-        event_stall_timeout_s: a connection that answers pings but delivers no event for this long is
-            treated as a silently broken subscription (wrong endpoint, dropped subscription): the
-            attested segment is closed and the stream reconnects. Market-wide liquidations arrive
-            ~0.3/s, the largest observed quiet gap is ~107 s, so 600 s never fires on a healthy feed.
+        event_stall_timeout_s: a connection that answers pings but delivers no parseable event for
+            this long is treated as a silently broken subscription and reconnected. Market-wide
+            liquidations arrive ~0.3/s and the largest observed quiet gap is ~107 s, so 600 s never
+            fires on a healthy feed.
+        health: optional liveness record updated in place for the recorder heartbeat.
 
     Raises:
         ValueError: when ``receive_timeout_s``/``ping_interval_s`` are not positive or
             ``liveness_timeout_s`` is not greater than ``ping_interval_s`` or ``event_stall_timeout_s``
             is not greater than ``liveness_timeout_s``.
+        Exception: any unexpected error, re-raised after buffered events and coverage are flushed and
+            the feed/session are closed, so the caller's supervisor restarts the stream.
     """
     if receive_timeout_s <= 0:
         raise ValueError("receive_timeout_s must be positive")
@@ -664,6 +729,9 @@ async def run_liquidation_stream(
                     exc,
                     backoff,
                 )
+                if health is not None:
+                    health.consecutive_failed_connections += 1
+                    health.last_disconnect_reason = f"CONNECT_FAILED: {exc}"
                 _mark_error()
                 if not buffer:
                     _flush_coverage()
@@ -671,9 +739,26 @@ async def run_liquidation_stream(
                     break
                 backoff = min(max_backoff_s, backoff * 2.0)
                 continue
+            if health is not None:
+                health.last_connected_at = _now()
             has_evidence = False
+            connection_event_evidence = False
+            disconnect_reason: str | None = None
             last_evidence = clock()
             last_event_at = last_evidence
+
+            def _note_stall(elapsed: float) -> None:
+                nonlocal disconnect_reason
+                _logger.warning(
+                    "[DATA] stage=liquidation_stream status=EVENT_STALL detail=no event for %.0fs "
+                    "while connection answers",
+                    elapsed,
+                )
+                disconnect_reason = f"EVENT_STALL: no parseable event for {elapsed:.0f}s"
+                _mark_error()
+                if not buffer:
+                    _flush_coverage()
+
             while not _is_shutdown():
                 try:
                     frame = await feed.receive(receive_timeout_s)
@@ -682,39 +767,54 @@ async def run_liquidation_stream(
                 except Exception as exc:  # noqa: BLE001
                     frame = FeedFrame(kind="closed", received_at=None, detail=f"receive raised: {exc}")
                 if frame.kind == "events":
-                    last_event_at = clock()
-                elif frame.kind in ("alive", "timeout") and clock() - last_event_at >= event_stall_timeout_s:
-                    _logger.warning(
-                        "[DATA] stage=liquidation_stream status=EVENT_STALL detail=no event for %.0fs "
-                        "while connection answers",
-                        clock() - last_event_at,
-                    )
-                    _mark_error()
-                    if not buffer:
-                        _flush_coverage()
-                    break
-                if frame.kind == "events" or frame.kind == "alive":
-                    assert frame.received_at is not None
+                    # Event evidence is evaluated before the symbol filter: a parseable
+                    # forceOrder payload proves the subscription delivers, even when the
+                    # event itself is filtered out of storage.
+                    evidence: list[LiquidationEvent] = []
+                    for msg in frame.payloads:
+                        if not isinstance(msg, Mapping):
+                            continue
+                        received_at = frame.received_at
+                        assert received_at is not None
+                        ev = parse_liquidation(msg, ingested_at=received_at)
+                        if ev is not None:
+                            evidence.append(ev)
                     has_evidence = True
                     last_evidence = clock()
-                    _mark_ok(frame.received_at)
-                    if frame.kind == "events":
-                        for msg in frame.payloads:
-                            if not isinstance(msg, Mapping):
-                                continue
-                            ev = parse_liquidation(msg, ingested_at=frame.received_at)
-                            if ev is None:
-                                continue
+                    if evidence:
+                        last_event_at = clock()
+                        connection_event_evidence = True
+                        received_at = frame.received_at
+                        assert received_at is not None
+                        _mark_ok(received_at)
+                        if health is not None:
+                            health.last_event_at = received_at
+                            health.consecutive_failed_connections = 0
+                        for ev in evidence:
                             if wanted is not None and ev.symbol not in wanted:
                                 continue
                             buffer.append(ev)
+                    elif clock() - last_event_at >= event_stall_timeout_s:
+                        _note_stall(clock() - last_event_at)
+                        break
+                elif frame.kind == "alive":
+                    has_evidence = True
+                    last_evidence = clock()
+                    if clock() - last_event_at >= event_stall_timeout_s:
+                        _note_stall(clock() - last_event_at)
+                        break
                 elif frame.kind == "timeout":
+                    if clock() - last_event_at >= event_stall_timeout_s:
+                        _note_stall(clock() - last_event_at)
+                        break
                     if clock() - last_evidence >= liveness_timeout_s:
+                        elapsed = clock() - last_evidence
                         _logger.warning(
                             "[DATA] stage=liquidation_stream status=LIVENESS_TIMEOUT detail=no evidence for "
                             "%.1fs",
-                            clock() - last_evidence,
+                            elapsed,
                         )
+                        disconnect_reason = f"LIVENESS_TIMEOUT: no evidence for {elapsed:.1f}s"
                         _mark_error()
                         if not buffer:
                             _flush_coverage()
@@ -723,6 +823,7 @@ async def run_liquidation_stream(
                     _logger.warning(
                         "[DATA] stage=liquidation_stream status=DISCONNECTED detail=%s", frame.detail
                     )
+                    disconnect_reason = f"DISCONNECTED: {frame.detail}"
                     _mark_error()
                     if not buffer:
                         _flush_coverage()
@@ -738,6 +839,10 @@ async def run_liquidation_stream(
                     last_coverage_flush = now_c
             await _close_feed(feed)
             feed = None
+            if disconnect_reason is not None and health is not None:
+                health.last_disconnect_reason = disconnect_reason
+                if not _is_shutdown() and not connection_event_evidence:
+                    health.consecutive_failed_connections += 1
             if _is_shutdown():
                 break
             if has_evidence:
@@ -749,7 +854,8 @@ async def run_liquidation_stream(
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001
-        _logger.warning("[DATA] stage=liquidation_stream status=FATAL detail=%s", exc)
+        _logger.error("[DATA] stage=liquidation_stream status=FATAL detail=%s", exc, exc_info=True)
+        raise
     finally:
         _flush_events()
         if not buffer:

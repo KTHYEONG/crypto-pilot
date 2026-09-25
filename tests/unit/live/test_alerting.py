@@ -341,3 +341,13 @@ def test_alert_gap_events_registered_and_digest_default_on() -> None:
     assert LiveSettings(alert_daily_digest=False).alert_daily_digest is False
 
 
+
+
+def test_recorder_events_registered_with_correct_severity() -> None:
+    from src.live.alerting import EVENT_INFO
+
+    unhealthy = EVENT_INFO["recorder_unhealthy"]
+    assert unhealthy["severity_label"] == "CRITICAL"
+    assert "docker logs --tail 200 market-recorder" in unhealthy["action"]
+    recovered = EVENT_INFO["recorder_recovered"]
+    assert recovered["severity_label"] == "NOTICE"
