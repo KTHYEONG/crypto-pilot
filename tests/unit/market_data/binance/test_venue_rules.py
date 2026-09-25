@@ -445,3 +445,54 @@ def test_venue_snapshot_paths_ignores_non_snapshots(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
     (tmp_path / "2026092.json").write_text("{}", encoding="utf-8")
     assert venue_rule_snapshot_paths(tmp_path) == []
+
+
+def test_write_venue_snapshot_slot_follows_decision_day(tmp_path: Path) -> None:
+    """Catch-up capture after midnight is filed under the decision day it served."""
+    import gzip as _gzip
+
+    snapshot = parse_venue_rules(
+        _bracket_payload(),
+        _exchange_info_payload(),
+        captured_at=pd.Timestamp("2026-09-23T00:10:00Z"),
+    )
+    path = write_venue_rule_snapshot(
+        snapshot, tmp_path, slot_day=pd.Timestamp("2026-09-22T00:00:00Z")
+    )
+
+    assert path.name == "20260922.json.gz"
+    raw = json.loads(_gzip.decompress(path.read_bytes()).decode("utf-8"))
+    assert raw["captured_at"] == "2026-09-23T00:10:00+00:00"
+
+
+def test_write_venue_snapshot_default_slot_is_capture_day(tmp_path: Path) -> None:
+    """No slot_day keeps the legacy capture-day naming."""
+    snapshot = parse_venue_rules(
+        _bracket_payload(),
+        _exchange_info_payload(),
+        captured_at=pd.Timestamp("2026-09-23T00:10:00Z"),
+    )
+    path = write_venue_rule_snapshot(snapshot, tmp_path)
+
+    assert path.name == "20260923.json.gz"
+
+
+def test_write_venue_snapshot_existing_slot_never_replaced(tmp_path: Path) -> None:
+    """An existing slot (either suffix) is never replaced."""
+    legacy = tmp_path / "20260922.json"
+    legacy.write_text('{"sentinel": true}', encoding="utf-8")
+    snapshot = parse_venue_rules(
+        _bracket_payload(),
+        _exchange_info_payload(),
+        captured_at=pd.Timestamp("2026-09-23T00:10:00Z"),
+    )
+    with pytest.raises(FileExistsError):
+        write_venue_rule_snapshot(snapshot, tmp_path, slot_day=pd.Timestamp("2026-09-22T00:00:00Z"))
+    assert legacy.read_text(encoding="utf-8") == '{"sentinel": true}'
+
+
+def test_write_venue_snapshot_rejects_naive_slot(tmp_path: Path) -> None:
+    """tz-naive slot_day is rejected."""
+    snapshot = parse_venue_rules(_bracket_payload(), _exchange_info_payload(), captured_at=CAPTURED_AT)
+    with pytest.raises(ValueError, match="tz-aware"):
+        write_venue_rule_snapshot(snapshot, tmp_path, slot_day=pd.Timestamp("2026-09-22T00:00:00"))

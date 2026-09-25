@@ -38,6 +38,40 @@ def test_cash_reconcile_tolerance_must_be_positive() -> None:
         LiveSettings(cash_reconcile_tolerance_usdt=0)
 
 
+def test_recorder_watch_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recorder watchdog thresholds default to the spec'd cadences."""
+    for key in (
+        "LIVE_RECORDER_WATCH_ENABLED",
+        "LIVE_RECORDER_WATCH_INTERVAL_S",
+        "LIVE_RECORDER_HEARTBEAT_STALE_S",
+        "LIVE_RECORDER_LIQUIDATION_SILENCE_S",
+        "LIVE_RECORDER_LIQUIDATION_MAX_FAILED_CONNECTIONS",
+        "LIVE_RECORDER_SAMPLER_STALE_S",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    settings = LiveSettings()
+    assert settings.recorder_watch_enabled is True
+    assert settings.recorder_watch_interval_s == 60.0
+    assert settings.recorder_heartbeat_stale_s == 600.0
+    assert settings.recorder_liquidation_silence_s == 900.0
+    assert settings.recorder_liquidation_max_failed_connections == 5
+    assert settings.recorder_sampler_stale_s == 1800.0
+
+
+def test_recorder_watch_env_override_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Env overrides apply; non-positive cadences fail naming the field."""
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("LIVE_RECORDER_LIQUIDATION_SILENCE_S", "1200")
+    assert LiveSettings().recorder_liquidation_silence_s == 1200.0
+    monkeypatch.setenv("LIVE_RECORDER_WATCH_INTERVAL_S", "0")
+    with pytest.raises(ValidationError, match="recorder_watch_interval_s"):
+        LiveSettings()
+    monkeypatch.delenv("LIVE_RECORDER_WATCH_INTERVAL_S")
+    with pytest.raises(ValidationError, match="recorder_liquidation_max_failed_connections"):
+        LiveSettings(recorder_liquidation_max_failed_connections=0)
+
+
 def test_shared_env_with_non_live_keys_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
     """docker-compose 의 env_file: .env 는 BINANCE_API_KEY 등 비-LIVE_ 키도 함께 주입한다.
 

@@ -14,6 +14,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 from src.common.paths import DATA_DIR
 from src.live.settings import ExecutionMode
 from src.mhs.run_history import RUN_HISTORY_MAX_SHARDS, RUN_HISTORY_SHARD_MAX_BYTES
@@ -125,6 +126,24 @@ def _record_to_dataframe(record: PortfolioStateRecord) -> pd.DataFrame:
 
 
 def append_portfolio_state(record: PortfolioStateRecord, history_dir: Path) -> Path | None:
+    """Append one cycle's portfolio state to ``active.parquet``, rotating it into a timestamped archive by size.
+
+    Rotation (``active.parquet`` renamed to ``portfolio_state_<utc ms>.parquet`` once the next
+    append would exceed ``RUN_HISTORY_SHARD_MAX_BYTES``) is an atomic rename. The active shard is
+    extended by atomic replacement; an undecodable active shard is quarantined and restarted from
+    this record. Assumes a single writer process per ``history_dir``.
+
+    Args:
+        record: Cycle observation.
+        history_dir: Shard directory (created if missing).
+
+    Returns:
+        Path of the active shard.
+
+    Raises:
+        Exception: Merge failures and OS-level read/write failures propagate with the existing
+            shard unchanged.
+    """
     history_dir = Path(history_dir)
     history_dir.mkdir(parents=True, exist_ok=True)
     active = history_dir / _PORTFOLIO_ACTIVE_FILE_NAME
@@ -137,8 +156,8 @@ def append_portfolio_state(record: PortfolioStateRecord, history_dir: Path) -> P
         active.rename(archive)
         _prune_archives(history_dir)
     if active.exists():
-        try:
-            df_existing = pd.read_parquet(active)
+        df_existing = read_parquet_or_quarantine(active, stage="live_portfolio_state")
+        if df_existing is not None:
             df_combined = pd.concat([df_existing, df_new], ignore_index=True)
             # Ensure dtypes remain typed after concat
             df_combined["decision_time"] = pd.to_datetime(df_combined["decision_time"], utc=True).astype("datetime64[ns, UTC]")
@@ -148,11 +167,11 @@ def append_portfolio_state(record: PortfolioStateRecord, history_dir: Path) -> P
             for col in ("n_holdings", "intent_count"):
                 if col in df_combined.columns:
                     df_combined[col] = pd.to_numeric(df_combined[col], errors="coerce").astype("int64")
-            df_combined.to_parquet(active, index=False, compression="snappy")
-        except Exception:
-            df_new.to_parquet(active, index=False, compression="snappy")
+            write_parquet_atomic(df_combined, active, compression="snappy")
+        else:
+            write_parquet_atomic(df_new, active, compression="snappy")
     else:
-        df_new.to_parquet(active, index=False, compression="snappy")
+        write_parquet_atomic(df_new, active, compression="snappy")
     return active
 
 

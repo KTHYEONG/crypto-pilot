@@ -59,6 +59,40 @@ def test_SCENARIO_PARITY_03_fill_schema_parity(tmp_path):
         pass
 
 
+def _fill(ts: pd.Timestamp, run_id: str, client_order_id: str) -> FillEvent:
+    return FillEvent(
+        decision_time=ts,
+        timestamp=ts,
+        symbol="BTCUSDT",
+        quantity_delta=Decimal("1.0"),
+        fill_price=Decimal("100.0"),
+        fee_bps=2.0,
+        reason="maker_fill",
+        pre_trade_equity=Decimal("2000"),
+        liquidity="maker",
+        mode="paper",
+        run_id=run_id,
+        leg_index=0,
+        client_order_id=client_order_id,
+    )
+
+
+def test_append_fills_preserves_every_earlier_row(tmp_path):
+    """Appending to an existing month extends it instead of replacing it."""
+    fills_dir = tmp_path / "fills3"
+    fills_dir.mkdir()
+    ts = pd.Timestamp("2026-03-15 00:00:00", tz="UTC")
+    append_fills([_fill(ts, "20260315", "id-1")], fills_dir)
+    path = fills_dir / "fills_202603.parquet"
+    before = path.read_bytes()
+    ts2 = pd.Timestamp("2026-03-20 00:00:00", tz="UTC")
+    append_fills([_fill(ts2, "20260320", "id-2")], fills_dir)
+    assert path.read_bytes() != before
+    df = load_fills(fills_dir)
+    assert len(df) == 2
+    assert set(df["client_order_id"]) == {"id-1", "id-2"}
+
+
 def test_SCENARIO_PARITY_04_monthly_partition_no_prune(tmp_path):
     """SCENARIO_PARITY_04-monthly-partition-no-prune"""
     fills_dir = tmp_path / "fills2"

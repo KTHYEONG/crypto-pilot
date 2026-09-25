@@ -1,6 +1,10 @@
 # crypto-pilot rclone filter: keep only irreplaceable streams.
-# rclone applies the first matching rule from the top.
+# rclone applies the first matching rule from the top, so transient-file
+# exclusions precede every include; an exclusion after a broader include never fires.
 
+# Exclude transient partial writes (must stay before every include: first match wins).
+- *.tmp
+- *.tmp-*
 # Keep strategy run records (ledgers, fills, manifests) which cannot be re-downloaded.
 + /state/**
 # Keep sealed research archives which cannot be regenerated deterministically.
@@ -13,7 +17,5 @@
 + /live_capture/**
 # Exclude re-downloadable market data (ohlcv, markPriceKlines, funding, metrics).
 - /futures/**
-# Exclude transient partial writes.
-- *.tmp
 # Exclude everything else by default.
 - **

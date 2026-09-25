@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 from src.common.paths import DATA_DIR
 
 _ORDERBOOK_TOP_K: int = 20
@@ -199,6 +200,24 @@ def _flatten_snapshot(snap: OrderBookSnapshot) -> dict[str, Any]:
 def append_order_book_snapshots(
     snapshots: Sequence[OrderBookSnapshot], directory: Path
 ) -> list[Path]:
+    """Merge snapshots into daily ``live_orderbook_<YYYYMMDD>.parquet`` files keyed by ``captured_at`` (UTC).
+
+    Rows are deduplicated on (symbol, captured_at, last_update_id); legacy rows without ``phase``
+    are labelled ``post_trade``. Each touched day is atomically replaced; an undecodable day file is
+    quarantined and restarted from the new snapshots. Assumes a single writer process per
+    ``directory``.
+
+    Args:
+        snapshots: Captured order books.
+        directory: Partition directory (created if missing).
+
+    Returns:
+        Sorted day files written; empty for an empty batch.
+
+    Raises:
+        Exception: Merge failures and OS-level read/write failures propagate with the existing
+            day file unchanged.
+    """
     if not snapshots:
         return []
     directory = Path(directory)
@@ -223,29 +242,26 @@ def append_order_book_snapshots(
             if col in df_new.columns:
                 df_new[col] = pd.to_datetime(df_new[col], utc=True).astype("datetime64[ns, UTC]")
         path = directory / f"live_orderbook_{yyyymmdd}.parquet"
-        if path.exists():
-            try:
-                df_existing = pd.read_parquet(path)
-                combined = pd.concat([df_existing, df_new], ignore_index=True)
-                combined["phase"] = combined["phase"].fillna("post_trade")
-                # dedup
-                combined = combined.drop_duplicates(subset=["symbol", "captured_at", "last_update_id"])
-                # re-enforce dtypes for qty/px
-                for col in combined.columns:
-                    if col.startswith("bid_qty_") or col.startswith("ask_qty_"):
-                        combined[col] = pd.to_numeric(combined[col], errors="coerce").astype("float32")
-                    elif col.startswith("bid_px_") or col.startswith("ask_px_") or col in ("best_bid", "best_ask", "mid", "spread_bps"):
-                        combined[col] = pd.to_numeric(combined[col], errors="coerce").astype("float64")
-                for col in ("captured_at", "decision_time"):
-                    if col in combined.columns:
-                        combined[col] = pd.to_datetime(combined[col], utc=True).astype("datetime64[ns, UTC]")
-                combined.to_parquet(path, index=False, compression="zstd")
-            except Exception:
-                df_new.to_parquet(path, index=False, compression="zstd")
+        df_existing = read_parquet_or_quarantine(path, stage="live_orderbook")
+        if df_existing is not None:
+            combined = pd.concat([df_existing, df_new], ignore_index=True)
+            combined["phase"] = combined["phase"].fillna("post_trade")
+            # dedup
+            combined = combined.drop_duplicates(subset=["symbol", "captured_at", "last_update_id"])
+            # re-enforce dtypes for qty/px
+            for col in combined.columns:
+                if col.startswith("bid_qty_") or col.startswith("ask_qty_"):
+                    combined[col] = pd.to_numeric(combined[col], errors="coerce").astype("float32")
+                elif col.startswith("bid_px_") or col.startswith("ask_px_") or col in ("best_bid", "best_ask", "mid", "spread_bps"):
+                    combined[col] = pd.to_numeric(combined[col], errors="coerce").astype("float64")
+            for col in ("captured_at", "decision_time"):
+                if col in combined.columns:
+                    combined[col] = pd.to_datetime(combined[col], utc=True).astype("datetime64[ns, UTC]")
+            write_parquet_atomic(combined, path, compression="zstd")
         else:
             # dedup within new (in case duplicates in input)
             df_new = df_new.drop_duplicates(subset=["symbol", "captured_at", "last_update_id"])
-            df_new.to_parquet(path, index=False, compression="zstd")
+            write_parquet_atomic(df_new, path, compression="zstd")
         written.append(path)
     return sorted(written)
 
