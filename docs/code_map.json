@@ -357,7 +357,7 @@
   },
   "src/mhs/live_signal_step.py": {
     "testing": "tests/unit/mhs/test_live_signal_step.py",
-    "architecture": "docs/architecture/data-flow.md"
+    "architecture": "docs/architecture/system-design.md"
   },
   "src/mhs/live_strategy.py": {
     "testing": "tests/unit/mhs/test_live_strategy.py"
@@ -527,7 +527,7 @@
     "testing": "tests/unit/quant/universe/test_pit_universe.py"
   },
   "src/mhs/process_backtest.py": {
-    "architecture": "docs/architecture/data-flow.md",
+    "architecture": "docs/architecture/system-design.md",
     "testing": "tests/unit/mhs/test_process_backtest.py"
   },
   "src/application/mhs_backtest.py": {
