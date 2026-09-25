@@ -475,7 +475,7 @@ def test_run_daemon_has_no_params_gate(monkeypatch, tmp_path) -> None:
                      sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-25 23:20:00", tz="UTC"),
                      max_iterations=1, signal_step_fn=lambda target: order.append("signal"),
                      refresh_fn=lambda: order.append("refresh"), prune_fn=lambda: order.append("prune"),
-                     venue_fn=lambda: order.append("venue"))
+                     venue_fn=lambda target: order.append("venue"))
     assert order == ["venue", "refresh", "signal", "cycle", "prune"]
     assert json.loads(hb.read_text())["status"] == "COMPLETE"
 
@@ -1371,7 +1371,7 @@ def test_run_daemon_honors_shutdown_at_stage_boundaries(tmp_path, monkeypatch) -
     before_venue = ShutdownFlag()
     _run(
         before_venue,
-        venue_hook=lambda: (before_venue.request("SIGTERM"), calls.append("venue-1")),
+        venue_hook=lambda target: (before_venue.request("SIGTERM"), calls.append("venue-1")),
         refresh_hook=lambda: calls.append("refresh-1"),
         signal_hook=lambda t: calls.append("signal-1"),
         state_file="s1.json",
@@ -1379,7 +1379,7 @@ def test_run_daemon_honors_shutdown_at_stage_boundaries(tmp_path, monkeypatch) -
     before_refresh = ShutdownFlag()
     _run(
         before_refresh,
-        venue_hook=lambda: None,
+        venue_hook=lambda target: None,
         refresh_hook=lambda: (before_refresh.request("SIGTERM"), calls.append("refresh-2")),
         signal_hook=lambda t: calls.append("signal-2"),
         state_file="s2.json",
@@ -1387,7 +1387,7 @@ def test_run_daemon_honors_shutdown_at_stage_boundaries(tmp_path, monkeypatch) -
     before_signal = ShutdownFlag()
     _run(
         before_signal,
-        venue_hook=lambda: None,
+        venue_hook=lambda target: None,
         refresh_hook=lambda: None,
         signal_hook=lambda t: (before_signal.request("SIGTERM"), calls.append("signal-3")),
         state_file="s3.json",
@@ -2391,7 +2391,7 @@ def test_daemon_waits_until_release_plus_buffer(tmp_path, monkeypatch) -> None:
     cur = [pd.Timestamp("2026-08-24 22:00Z")]
     first_stage_at: list[pd.Timestamp] = []
 
-    def _venue() -> None:
+    def _venue(target) -> None:
         first_stage_at.append(cur[0])
 
     sched.run_daemon(
@@ -2425,7 +2425,7 @@ def test_daemon_frozen_step_integrity_error_halts_with_cause(tmp_path, monkeypat
     sched.run_daemon(
         LiveSettings(daemon_max_attempts_per_day=5), tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=_gap, prune_fn=lambda: None, venue_fn=lambda: None,
+        refresh_fn=lambda: None, signal_step_fn=_gap, prune_fn=lambda: None, venue_fn=lambda target: None,
     )
 
     hb = json.loads((tmp_path / "hb.json").read_text(encoding="utf-8"))
@@ -2449,7 +2449,7 @@ def test_daemon_venue_capture_failure_never_stops_cycle(tmp_path, monkeypatch) -
     target = pd.Timestamp("2026-08-24 00:00Z")
     ready = target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
 
-    def _boom() -> None:
+    def _boom(target) -> None:
         raise RuntimeError("bracket endpoint down")
 
     sched.run_daemon(
@@ -2482,7 +2482,7 @@ def test_same_day_row_stays_fresh_at_submission(tmp_path, monkeypatch) -> None:
     sched.run_daemon(
         settings, tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: day + pd.Timedelta(hours=23, minutes=20), max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None, venue_fn=lambda: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None, venue_fn=lambda target: None,
     )
 
     assert ran == [day]
@@ -2507,7 +2507,7 @@ def test_digest_carries_sizing_fields(tmp_path, monkeypatch) -> None:
     sched.run_daemon(
         LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: frozen, prune_fn=lambda: None, venue_fn=lambda: None,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: frozen, prune_fn=lambda: None, venue_fn=lambda target: None,
     )
 
     assert len(details) == 1
@@ -2516,10 +2516,14 @@ def test_digest_carries_sizing_fields(tmp_path, monkeypatch) -> None:
 
 
 def test_default_venue_capture_stores_snapshot_and_tolerates_failure(monkeypatch, tmp_path) -> None:
+    import pandas as pd
+
     import src.live.scheduler as sched
     from src.live.settings import LiveSettings
 
     seen: dict = {}
+    target = pd.Timestamp("2026-09-21T00:00:00Z")
+    monkeypatch.setattr(sched, "VENUE_RULES_DIR", tmp_path)
 
     def _fake_fetch(*, api_key=None, api_secret=None):
         seen.update(api_key=api_key, api_secret=api_secret)
@@ -2527,22 +2531,119 @@ def test_default_venue_capture_stores_snapshot_and_tolerates_failure(monkeypatch
 
     written: dict = {}
 
-    def _fake_write(snapshot, root):
-        written.update(snapshot=snapshot, root=root)
-        return tmp_path / "20260921.json"
+    def _fake_write(snapshot, root, *, slot_day=None):
+        written.update(snapshot=snapshot, root=root, slot_day=slot_day)
+        return tmp_path / "20260921.json.gz"
 
     monkeypatch.setattr("src.market_data.binance.venue_rules.fetch_venue_rules", _fake_fetch)
     monkeypatch.setattr("src.market_data.binance.venue_rules.write_venue_rule_snapshot", _fake_write)
-    assert sched._default_venue_capture(LiveSettings()) is None
+    assert sched._default_venue_capture(LiveSettings(), target) is None
     assert seen == {"api_key": None, "api_secret": None}
     assert written["snapshot"] == "snapshot"
-    assert str(written["root"]).endswith("venue_rules")
+    assert written["root"] == tmp_path
+    assert pd.Timestamp(written["slot_day"]) == target
 
     def _boom(*, api_key=None, api_secret=None):
         raise RuntimeError("bracket endpoint down")
 
     monkeypatch.setattr("src.market_data.binance.venue_rules.fetch_venue_rules", _boom)
-    assert sched._default_venue_capture(LiveSettings()) is None
+    assert sched._default_venue_capture(LiveSettings(), target) is None
+
+
+def test_default_venue_capture_fills_decision_day_slot(monkeypatch, tmp_path) -> None:
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.market_data.binance.venue_rules import parse_venue_rules
+
+    brackets = [
+        {
+            "symbol": "BTCUSDT",
+            "brackets": [
+                {
+                    "bracket": 1,
+                    "initialLeverage": 125,
+                    "notionalCap": 50000,
+                    "notionalFloor": 0,
+                    "maintMarginRatio": 0.004,
+                    "cum": 0,
+                },
+            ],
+        }
+    ]
+    info = {"symbols": [{"symbol": "BTCUSDT", "filters": []}]}
+    snapshot = parse_venue_rules(
+        brackets, info, captured_at=pd.Timestamp("2026-09-23T00:10:00Z")
+    )
+    monkeypatch.setattr(
+        "src.market_data.binance.venue_rules.fetch_venue_rules", lambda **kwargs: snapshot
+    )
+    monkeypatch.setattr(sched, "VENUE_RULES_DIR", tmp_path)
+
+    assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-22T00:00:00Z")) is None
+    assert (tmp_path / "20260922.json.gz").exists()
+    assert not (tmp_path / "20260923.json.gz").exists()
+
+
+def test_default_venue_capture_skips_signed_fetch_when_slot_exists(monkeypatch, tmp_path, caplog) -> None:
+    import logging
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    (tmp_path / "20260922.json.gz").write_bytes(b"sentinel")
+    monkeypatch.setattr(sched, "VENUE_RULES_DIR", tmp_path)
+
+    def _must_not_fetch(**kwargs):
+        raise AssertionError("fetch must not run when the slot already exists")
+
+    monkeypatch.setattr("src.market_data.binance.venue_rules.fetch_venue_rules", _must_not_fetch)
+    with caplog.at_level(logging.INFO, logger="LiveScheduler"):
+        assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-22T00:00:00Z")) is None
+    assert any("ALREADY_CAPTURED" in rec.message and "slot=20260922" in rec.message for rec in caplog.records)
+
+
+def test_daemon_passes_cycle_target_to_venue_fn(monkeypatch, tmp_path) -> None:
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda s, t, w, now=None, **k: CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp(t), intent_count=0))
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
+    received: list = []
+    sched.run_daemon(
+        LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), tmp_path / "w.parquet", tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
+        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        venue_fn=lambda decision_time: received.append(pd.Timestamp(decision_time)),
+    )
+    assert received == [target]
+
+
+def test_default_venue_capture_failure_stays_non_fatal(monkeypatch, tmp_path, caplog) -> None:
+    import logging
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "VENUE_RULES_DIR", tmp_path)
+
+    def _boom(**kwargs):
+        raise RuntimeError("bracket endpoint down")
+
+    monkeypatch.setattr("src.market_data.binance.venue_rules.fetch_venue_rules", _boom)
+    with caplog.at_level(logging.WARNING, logger="LiveScheduler"):
+        assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-21T00:00:00Z")) is None
+    assert any("status=FAILED" in rec.message for rec in caplog.records)
 
 
 def test_default_frozen_step_wires_run_args_and_fails_without_non_crypto_list(monkeypatch, tmp_path) -> None:
@@ -2618,7 +2719,7 @@ def test_daemon_defaults_wire_frozen_step_and_venue(monkeypatch, tmp_path) -> No
     frozen_calls: list = []
     venue_calls: list = []
     monkeypatch.setattr(sched, "_default_frozen_step", lambda t, settings=None, weights_path=None: frozen_calls.append(t) or None)
-    monkeypatch.setattr(sched, "_default_venue_capture", lambda settings=None: venue_calls.append(settings) or None)
+    monkeypatch.setattr(sched, "_default_venue_capture", lambda settings=None, decision_time=None: venue_calls.append((settings, decision_time)) or None)
     target = pd.Timestamp("2026-08-24 00:00Z")
     ready = target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
 
@@ -2629,6 +2730,7 @@ def test_daemon_defaults_wire_frozen_step_and_venue(monkeypatch, tmp_path) -> No
 
     assert frozen_calls == [target]
     assert len(venue_calls) == 1
+    assert venue_calls[0][1] == target
 
 
 def test_prune_runs_after_execution(tmp_path, monkeypatch) -> None:
@@ -2661,7 +2763,7 @@ def test_prune_runs_after_execution(tmp_path, monkeypatch) -> None:
         refresh_fn=lambda: order.append("refresh"),
         signal_step_fn=lambda t: order.append("signal"),
         prune_fn=lambda: order.append("prune"),
-        venue_fn=lambda: None,
+        venue_fn=lambda target: None,
     )
     assert order == ["refresh", "signal", "execute", "prune"]
 
@@ -2699,7 +2801,7 @@ def test_prune_failure_is_isolated(tmp_path, monkeypatch) -> None:
         refresh_fn=lambda: None,
         signal_step_fn=lambda *a, **k: None,
         prune_fn=_boom,
-        venue_fn=lambda: None,
+        venue_fn=lambda target: None,
     )
     hb = json.loads((tmp_path / "hb.json").read_text(encoding="utf-8"))
     assert hb["status"] == "COMPLETE"

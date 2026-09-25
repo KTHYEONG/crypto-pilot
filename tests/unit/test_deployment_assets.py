@@ -40,10 +40,16 @@ def test_docker_compose_has_independent_market_recorder_service() -> None:
     assert "./data/live_capture:/app/data/live_capture" in compose
     assert "mem_limit: 768m" in compose
     assert "stop_grace_period: 30s" in compose
-    assert "env_file: /home/ubuntu/quant-secrets/crypto-pilot.env" in compose
     assert "liquidation-collector" not in compose
     # 기존 live 데몬 서비스 계약이 깨지지 않는다.
     assert "./data/state:/app/data/state" in compose
+    # recorder 블록은 시크릿과 state 마운트 없이 최소 권한으로 동작한다.
+    live_block, recorder_block = compose.split("  market-recorder:\n", 1)
+    assert "env_file" not in recorder_block
+    assert "./data/state" not in recorder_block
+    assert "./logs:/app/logs" in recorder_block
+    assert "env_file: /home/ubuntu/quant-secrets/crypto-pilot.env" in live_block
+    assert "./data/state:/app/data/state" in live_block
 
 
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
@@ -124,7 +130,7 @@ def test_compose_uses_absolute_secret_path_and_declares_live_mode() -> None:
     root = Path(__file__).resolve().parents[2]
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
 
-    assert compose.count("env_file: /home/ubuntu/quant-secrets/crypto-pilot.env") == 2
+    assert compose.count("env_file: /home/ubuntu/quant-secrets/crypto-pilot.env") == 1
     assert "env_file: .env" not in compose
     assert "LIVE_MODE=paper" in compose
     assert "live_mainnet" not in compose
@@ -156,6 +162,26 @@ def test_rclone_filter_keeps_live_capture() -> None:
     assert "+ /live_capture/**" in text
     assert text.index("+ /live_capture/**") < text.index("- /futures/**")
     assert text.index("+ /live_capture/**") < text.index("- **")
+    rules = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    first_include = next(i for i, line in enumerate(rules) if line.startswith("+ "))
+    assert "- *.tmp" in rules
+    assert "- *.tmp-*" in rules
+    assert rules.index("- *.tmp") < first_include
+    assert rules.index("- *.tmp-*") < first_include
+
+
+def test_rclone_filter_excludes_coverage_temp_names() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "deploy" / "crypto-pilot.rclone-filter").read_text(encoding="utf-8")
+    rules = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    first_include = next(i for i, line in enumerate(rules) if line.startswith("+ "))
+    # String-level check is sufficient: the two transient patterns must precede any include,
+    # so `.20260924.jsonl.tmp-123` (-> `- *.tmp-*`) and `.10.parquet.tmp` (-> `- *.tmp`)
+    # are matched by an exclusion before any include.
+    assert rules.index("- *.tmp") < first_include
+    assert rules.index("- *.tmp-*") < first_include
 
 
 def test_gate_waits_on_fresh_busy_heartbeat() -> None:
@@ -319,8 +345,14 @@ def test_deploy_workflow_installs_and_enables_backup_unit() -> None:
 
     root = Path(__file__).resolve().parents[2]
     workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
-    assert 'scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"' in workflow
-    assert 'scp $SSH_OPTS deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/"' in workflow
+    assert 'deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new"' in workflow
+    assert 'deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new"' in workflow
+    assert "mv -f ~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new ~/crypto-pilot/deploy/crypto-pilot.rclone-filter" in workflow
+    assert "mv -f ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh" in workflow
+    assert workflow.index("mv -f ~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new") < workflow.index("chmod +x ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh")
+    assert workflow.index("mv -f ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new") < workflow.index("chmod +x ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh")
+    assert workflow.index("mv -f ~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new") < workflow.index("systemctl --user daemon-reload")
+    assert workflow.index("mv -f ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new") < workflow.index("systemctl --user daemon-reload")
     assert "deploy/backup/crypto-pilot-backup.service" in workflow
     assert "deploy/backup/crypto-pilot-backup.timer" in workflow
     assert "systemctl --user daemon-reload" in workflow

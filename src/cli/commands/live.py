@@ -86,6 +86,7 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
 
 def _run_daemon(args: argparse.Namespace) -> None:
     from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
+    from src.live.recorder_watch import build_recorder_watchdog
     from src.live.scheduler import _daemon_alert, run_daemon
     from src.live.settings import LiveSettings
 
@@ -94,12 +95,24 @@ def _run_daemon(args: argparse.Namespace) -> None:
     artifact = _resolve_weights_path(getattr(args, "artifact", None), settings)
     shutdown = ShutdownFlag()
     install_shutdown_handlers(shutdown)
+    watchdog = build_recorder_watchdog(
+        settings,
+        alert=lambda event, detail: _daemon_alert(
+            settings, set(), event=event, detail=detail, decision_time=None, now=pd.Timestamp.now(tz="UTC")
+        ),
+    )
+    if watchdog is not None:
+        watchdog.start()
     try:
-        run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown)
-    except Exception as exc:  # 프로세스 경계라 광역 except 허용
-        logger.exception("[SYS] daemon crashed error=%s", type(exc).__name__)
-        _daemon_alert(settings, set(), event="daemon_crashed", detail=f"error={type(exc).__name__}: {str(exc)[:300]}", decision_time=None, now=pd.Timestamp.now(tz="UTC"))
-        raise
+        try:
+            run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown)
+        except Exception as exc:  # 프로세스 경계라 광역 except 허용
+            logger.exception("[SYS] daemon crashed error=%s", type(exc).__name__)
+            _daemon_alert(settings, set(), event="daemon_crashed", detail=f"error={type(exc).__name__}: {str(exc)[:300]}", decision_time=None, now=pd.Timestamp.now(tz="UTC"))
+            raise
+    finally:
+        if watchdog is not None:
+            watchdog.stop()
 
 
 def _run_frozen_step(args: argparse.Namespace) -> None:

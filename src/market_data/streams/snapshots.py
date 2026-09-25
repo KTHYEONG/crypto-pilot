@@ -14,6 +14,7 @@ from typing import Any
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 
 _logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ BOOK_TICKER_COLUMNS: tuple[str, ...] = (
     "captured_at",
     "symbol",
     "exchange_time_ms",
+    "fetched_at_ms",
     "bid_px",
     "bid_qty",
     "ask_px",
@@ -42,6 +44,7 @@ PREMIUM_INDEX_COLUMNS: tuple[str, ...] = (
     "captured_at",
     "symbol",
     "exchange_time_ms",
+    "fetched_at_ms",
     "mark_price",
     "index_price",
     "estimated_settle_price",
@@ -49,6 +52,7 @@ PREMIUM_INDEX_COLUMNS: tuple[str, ...] = (
     "interest_rate",
     "next_funding_time_ms",
 )
+NULLABLE_MS_COLUMNS: frozenset[str] = frozenset({"fetched_at_ms"})
 
 _EPOCH = pd.Timestamp("1970-01-01", tz="UTC")
 
@@ -83,6 +87,18 @@ def _utc_captured(captured_at: pd.Timestamp) -> pd.Timestamp:
     return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
 
 
+def _utc_fetched(fetched_at: pd.Timestamp, captured_at: pd.Timestamp) -> pd.Timestamp:
+    """Validate the response-receipt instant against the grid label it is filed under."""
+    cap = _utc_captured(captured_at)
+    ts = pd.Timestamp(fetched_at)
+    if ts.tzinfo is None:
+        raise DataIntegrityError("snapshot fetched_at is naive or missing")
+    out = ts.tz_convert("UTC")
+    if out < cap:
+        raise DataIntegrityError("snapshot fetched_at precedes captured_at")
+    return out
+
+
 def _parse_float(value: Any, label: str) -> float:
     try:
         out = float(value)
@@ -113,23 +129,31 @@ def _parse_opt_float(value: Any) -> float:
     return out
 
 
-def parse_book_ticker_payload(payload: Any, *, captured_at: pd.Timestamp) -> pd.DataFrame:
+def parse_book_ticker_payload(
+    payload: Any, *, captured_at: pd.Timestamp, fetched_at: pd.Timestamp
+) -> pd.DataFrame:
     """Normalize an all-symbol ``/fapi/v1/ticker/bookTicker`` response into ``BOOK_TICKER_COLUMNS``.
 
-    ``captured_at`` is the local grid instant the request was issued for; ``exchange_time_ms`` is the
-    venue's own quote timestamp, kept so clock skew and quote staleness remain measurable.
+    ``captured_at`` is the wall-clock grid instant the sample is filed under (a join key shared by all
+    datasets); ``fetched_at`` is when the response was fully received and is the earliest instant the
+    data was observable, so point-in-time consumers must gate on ``fetched_at_ms``, never on
+    ``captured_at``. ``exchange_time_ms`` is the venue's own quote timestamp, kept so clock skew and
+    quote staleness remain measurable.
 
     Returns:
         One row per symbol; prices float64, quantities float32, ``exchange_time_ms`` int64,
-        ``captured_at`` datetime64[ns, UTC], ``symbol`` string.
+        ``fetched_at_ms`` Int64, ``captured_at`` datetime64[ns, UTC], ``symbol`` string.
 
     Raises:
-        DataIntegrityError: payload is not a non-empty list, or a row lacks a required key or has a
-            non-numeric / non-positive price.
+        DataIntegrityError: payload is not a non-empty list, a row lacks a required key or has a
+            non-numeric / non-positive price, ``fetched_at`` is naive, or ``fetched_at`` precedes
+            ``captured_at``.
     """
     if not isinstance(payload, list) or not payload:
         raise DataIntegrityError("book ticker payload must be a non-empty list")
     cap = _utc_captured(captured_at)
+    fetched = _utc_fetched(fetched_at, captured_at)
+    fetched_ms = int(fetched.value // 1_000_000)
     rows: list[dict[str, Any]] = []
     for row in payload:
         if not isinstance(row, Mapping):
@@ -150,6 +174,7 @@ def parse_book_ticker_payload(payload: Any, *, captured_at: pd.Timestamp) -> pd.
                 "captured_at": cap,
                 "symbol": symbol,
                 "exchange_time_ms": exchange_ms,
+                "fetched_at_ms": fetched_ms,
                 "bid_px": bid_px,
                 "bid_qty": bid_qty,
                 "ask_px": ask_px,
@@ -160,6 +185,7 @@ def parse_book_ticker_payload(payload: Any, *, captured_at: pd.Timestamp) -> pd.
     frame["captured_at"] = pd.to_datetime(frame["captured_at"], utc=True)
     frame["symbol"] = frame["symbol"].astype("string")
     frame["exchange_time_ms"] = frame["exchange_time_ms"].astype("int64")
+    frame["fetched_at_ms"] = frame["fetched_at_ms"].astype("Int64")
     frame["bid_px"] = frame["bid_px"].astype("float64")
     frame["ask_px"] = frame["ask_px"].astype("float64")
     frame["bid_qty"] = frame["bid_qty"].astype("float32")
@@ -167,23 +193,30 @@ def parse_book_ticker_payload(payload: Any, *, captured_at: pd.Timestamp) -> pd.
     return frame
 
 
-def parse_premium_index_payload(payload: Any, *, captured_at: pd.Timestamp) -> pd.DataFrame:
+def parse_premium_index_payload(
+    payload: Any, *, captured_at: pd.Timestamp, fetched_at: pd.Timestamp
+) -> pd.DataFrame:
     """Normalize an all-symbol ``/fapi/v1/premiumIndex`` response into ``PREMIUM_INDEX_COLUMNS``.
 
     ``last_funding_rate`` is the venue's running estimate for the next settlement (the realized rate is
     archived separately by the funding history endpoint); keeping the estimate path lets research test
-    predicted-funding signals without reconstructing the premium-index clamp.
+    predicted-funding signals without reconstructing the premium-index clamp. ``captured_at`` is the
+    grid label and ``fetched_at_ms`` the availability time (see ``parse_book_ticker_payload``).
 
     Returns:
-        One row per symbol; rates/prices float64, ``*_ms`` int64, ``captured_at`` datetime64[ns, UTC].
-        Empty-string numeric fields (delisting symbols) become NaN, never 0.
+        One row per symbol; rates/prices float64, venue ``*_ms`` int64, ``fetched_at_ms`` Int64,
+        ``captured_at`` datetime64[ns, UTC]. Empty-string numeric fields (delisting symbols) become
+        NaN, never 0.
 
     Raises:
-        DataIntegrityError: payload is not a non-empty list or a row lacks ``symbol``/``markPrice``.
+        DataIntegrityError: payload is not a non-empty list, a row lacks ``symbol``/``markPrice``,
+            ``fetched_at`` is naive, or ``fetched_at`` precedes ``captured_at``.
     """
     if not isinstance(payload, list) or not payload:
         raise DataIntegrityError("premium index payload must be a non-empty list")
     cap = _utc_captured(captured_at)
+    fetched = _utc_fetched(fetched_at, captured_at)
+    fetched_ms = int(fetched.value // 1_000_000)
     rows: list[dict[str, Any]] = []
     for row in payload:
         if not isinstance(row, Mapping):
@@ -204,6 +237,7 @@ def parse_premium_index_payload(payload: Any, *, captured_at: pd.Timestamp) -> p
                 "captured_at": cap,
                 "symbol": symbol,
                 "exchange_time_ms": _parse_ms(row["time"], "time"),
+                "fetched_at_ms": fetched_ms,
                 "mark_price": mark_price,
                 "index_price": _parse_opt_float(row.get("indexPrice")),
                 "estimated_settle_price": _parse_opt_float(row.get("estimatedSettlePrice")),
@@ -216,6 +250,7 @@ def parse_premium_index_payload(payload: Any, *, captured_at: pd.Timestamp) -> p
     frame["captured_at"] = pd.to_datetime(frame["captured_at"], utc=True)
     frame["symbol"] = frame["symbol"].astype("string")
     frame["exchange_time_ms"] = frame["exchange_time_ms"].astype("int64")
+    frame["fetched_at_ms"] = frame["fetched_at_ms"].astype("Int64")
     frame["next_funding_time_ms"] = frame["next_funding_time_ms"].astype("int64")
     for col in ("mark_price", "index_price", "estimated_settle_price", "last_funding_rate", "interest_rate"):
         frame[col] = pd.to_numeric(frame[col], errors="coerce").astype("float64")
@@ -231,7 +266,9 @@ def _enforce_snapshot_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     for col in out.columns:
         if col in ("captured_at", "symbol"):
             continue
-        if col.endswith("_ms"):
+        if col in NULLABLE_MS_COLUMNS:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+        elif col.endswith("_ms"):
             out[col] = pd.to_numeric(out[col], errors="raise").astype("int64")
         elif col.endswith("_qty"):
             out[col] = pd.to_numeric(out[col], errors="coerce").astype("float32")
@@ -245,13 +282,17 @@ def write_hourly_partition(frame: pd.DataFrame, root: Path, dataset: str) -> lis
     """Merge snapshot rows into ``<root>/<dataset>/<YYYYMMDD>/<HH>.parquet`` keyed by ``captured_at`` hour.
 
     Hour partitions bound every rewrite to at most one hour of rows and make every closed hour an
-    immutable file, so the nightly ``rclone copy`` transfers each finished file exactly once.
+    immutable file, so the nightly ``rclone copy`` transfers each finished file exactly once. Each hour
+    is atomically replaced; an undecodable existing hour file is quarantined instead of blocking every
+    later flush of that hour. Assumes a single writer process per dataset.
 
     Returns:
         Sorted list of partition files written.
 
     Raises:
         DataIntegrityError: ``frame`` lacks ``captured_at``/``symbol`` or ``captured_at`` is naive.
+        Exception: Merge failures and OS-level read/write failures propagate with the existing hour
+            file unchanged.
     """
     if "captured_at" not in frame.columns or "symbol" not in frame.columns:
         raise DataIntegrityError("snapshot frame lacks captured_at/symbol")
@@ -275,8 +316,8 @@ def write_hourly_partition(frame: pd.DataFrame, root: Path, dataset: str) -> lis
         target.parent.mkdir(parents=True, exist_ok=True)
         chunk = group.drop(columns=[c for c in group.columns if c not in frame.columns])
         chunk = _enforce_snapshot_dtypes(chunk)
-        if target.exists():
-            existing = pd.read_parquet(target)
+        existing = read_parquet_or_quarantine(target, stage=f"snapshot_{dataset}")
+        if existing is not None:
             existing["captured_at"] = pd.to_datetime(existing["captured_at"], utc=True)
             combined = pd.concat([existing, chunk], ignore_index=True)
             combined = _enforce_snapshot_dtypes(combined)
@@ -285,9 +326,7 @@ def write_hourly_partition(frame: pd.DataFrame, root: Path, dataset: str) -> lis
         combined = combined.drop_duplicates(subset=["symbol", "captured_at"], keep="last")
         combined = combined.sort_values(["symbol", "captured_at"]).reset_index(drop=True)
         combined = _enforce_snapshot_dtypes(combined)
-        tmp = target.with_name(f".{target.name}.tmp")
-        combined.to_parquet(tmp, index=False, compression="zstd")
-        os.replace(tmp, target)
+        write_parquet_atomic(combined, target, compression="zstd")
         written.append(target)
     return sorted(written)
 

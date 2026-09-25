@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 from src.common.paths import DATA_DIR
 
 FILL_REASONS: frozenset[str] = frozenset({"maker_fill", "backstop_taker", "timeout_taker", "residual", "obsolete", "immediate_taker"})
@@ -105,6 +106,26 @@ def _enforce_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def append_fills(events: Sequence[FillEvent], fills_dir: Path) -> Path | None:
+    """Append fills to monthly ``fills_<YYYYMM>.parquet`` ledgers keyed by fill ``timestamp`` (UTC).
+
+    The per-fill ledger is economic evidence (backtest ``fills.parquet`` parity), so a month is only
+    ever extended: each touched month is read, concatenated and atomically replaced; an undecodable
+    month is quarantined and restarted from the new fills rather than overwritten. Reasons are
+    validated for the whole batch before anything is written. Assumes a single writer process per
+    ``fills_dir``.
+
+    Args:
+        events: Fills to persist.
+        fills_dir: Ledger directory (created if missing).
+
+    Returns:
+        The last partition written (months in ascending order), or ``None`` for an empty batch.
+
+    Raises:
+        ValueError: A fill carries a reason outside ``FILL_REASONS`` or an invalid liquidity tag.
+        Exception: Merge failures and OS-level read/write failures propagate with the existing
+            ledger unchanged.
+    """
     if not events:
         return None
     # validate all reasons first (fail fast)
@@ -126,17 +147,13 @@ def append_fills(events: Sequence[FillEvent], fills_dir: Path) -> Path | None:
         df_new = pd.DataFrame(rows)
         df_new = _enforce_dtypes(df_new)
         path = fills_dir / f"fills_{yyyymm}.parquet"
-        if path.exists():
-            try:
-                df_existing = pd.read_parquet(path)
-                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-                df_combined = _enforce_dtypes(df_combined)
-                df_combined.to_parquet(path, index=False, compression="snappy")
-            except Exception:
-                # fallback overwrite
-                df_new.to_parquet(path, index=False, compression="snappy")
+        df_existing = read_parquet_or_quarantine(path, stage="live_fills")
+        if df_existing is not None:
+            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+            df_combined = _enforce_dtypes(df_combined)
+            write_parquet_atomic(df_combined, path, compression="snappy")
         else:
-            df_new.to_parquet(path, index=False, compression="snappy")
+            write_parquet_atomic(df_new, path, compression="snappy")
         last_written = path
     return last_written
 

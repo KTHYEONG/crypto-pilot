@@ -87,6 +87,31 @@ def test_SCENARIO_LIVE_46_PORTFOLIO_STATE_APPENDS_TYPED_PARQUET_AND_ROTATES(tmp_
     assert summary["n_cycles"] >= 1
 
 
+def test_append_portfolio_state_extends_active_shard_without_rotation(tmp_path: Path) -> None:
+    """Appends below the size cap merge into the active shard instead of replacing it."""
+    history_dir = tmp_path / "portfolio_state2"
+    append_portfolio_state(_record(), history_dir)
+    append_portfolio_state(_record(decision_time=DECISION_TIME + pd.Timedelta(hours=1)), history_dir)
+    assert list(history_dir.glob("portfolio_state_*.parquet")) == []
+    df = pd.read_parquet(history_dir / "active.parquet")
+    assert len(df) == 2
+
+
+def test_corrupt_active_shard_is_quarantined_and_restarted(tmp_path: Path) -> None:
+    """An undecodable active shard is moved aside and restarted from the new record."""
+    history_dir = tmp_path / "portfolio_state3"
+    append_portfolio_state(_record(), history_dir)
+    active = history_dir / "active.parquet"
+    raw = active.read_bytes()
+    active.write_bytes(raw[: len(raw) // 2])
+    append_portfolio_state(_record(decision_time=DECISION_TIME + pd.Timedelta(hours=2)), history_dir)
+    df = pd.read_parquet(active)
+    assert len(df) == 1
+    quarantined = list((history_dir / "_quarantine").glob("active.parquet.*.corrupt"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == raw[: len(raw) // 2]
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_45_VIRTUAL_EQUITY_ONLY_FOR_SUPPRESSED_MODES",

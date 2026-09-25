@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_CAPTURE_INTEGRITY",
+      "date": "2026-09-25",
+      "adr_id": "ADR_20260925_CAPTURE_INTEGRITY",
+      "domain": "data",
+      "title": "수집·원장 무결성 강화 (원자적 parquet, 청산 스트림, 수집기 감시)",
+      "why": "VPS 감사에서 원장 parquet가 예외 시 배치 1행으로 덮어써지고 수집기 정지가 감지되지 않는 문제가 확인됨.",
+      "resolution": "원자적 쓰기·격리 헬퍼, 청산 스트림 경로 교정, 수집기 supervisor·grid sampler·daemon 워치독, 운영 위생, venue-rule 결정일 슬롯을 구현함.",
+      "impact": "원장·수집 파티션 손실 경로가 제거되고 수집기 정지가 daemon 알림으로 감지됨.",
+      "caveat": "recorder 시크릿 제거는 daemon 워치독 알림 배포와 함께 반영해야 하며, 상위 디렉터리 fsync는 미적용."
+    },
+    {
       "task_id": "TASK_20260924_RECORDER_DEPLOY_CONTINUITY",
       "date": "2026-09-24",
       "adr_id": "ADR_20260924_20260924_RECORDER_DEPLOY_CONTINUITY",
@@ -1025,16 +1036,6 @@
       "why": "--final-oos-2026h1(end=2026-06-30) 실행이 growth_extreme/growth_extreme_budgeted 모두 동일하게 leverage_ceiling=3.0 vs bootstrap frontier 0.75x ValueError로 3회 재현성 있게 실패. 직전 세션의 가설(min_bars=2000 유니버스 확장이 2021-2022 신호 순위 계산에 소급 영향)은 이번 세션에서 실측으로 반증(패널 값/liquid_half_eligibility 마스크가 2023년 이전 구간에서 byte-identical, 신규 61종목 전부 첫 봉이 2023-01-01 이후). 4단계 파이프라인(load_panel->select_horizons->build_books->build_committee)만 실행해 committee_weights_by_boundary['top_level']을 직접 비교한 결과 flow_imb_168h/flow_imb_720h(둘 다 taker_buy_quote 필요)가 end=2026-06-30에서만 완전히 탈락함을 확인. src/mhs/features.py의 build_feature_books가 feature 채택 여부를 연도별 coverage로 감사하는데 그 감사 범위가 요청 구간 전체(end까지)라서, 2026년(taker_buy_quote coverage 0.8425 < FEATURE_MIN_COVERAGE 0.90)의 부분연도 결함이 2021-2025 구간(coverage 99.999-100%)까지 포함해 feature 전체를 탈락시켰음을 정밀 특정.",
       "resolution": "src/mhs/features.py build_feature_books에 coverage_cutoff: pd.Timestamp | None = None 옵션 추가 -- coverage_cutoff가 주어지면 feature_coverage_audit을 feature.index < coverage_cutoff로 제한(admission 감사 범위만 축소, rank_weight_book이 소비하는 book의 값 계산 범위는 전체 decision_grid로 불변). _committee_evidence_weights_by_boundary(evaluation.py:3032)는 coverage_cutoff=max(train_ends.values())를 전달(신규 하드코딩 상수 없이 이미 받는 train_ends에서 파생). _committee_execution_book(evaluation.py:3056)에 coverage_cutoff 파라미터를 추가해 내부 build_feature_books 호출에 전달하고 top-level 배포 지점(committee.py:110, ctx.blend_1h)과 fold 경로(_build_fold_target_weights) 두 호출부 모두 coverage_cutoff=COMMITTEE_OOS_START를 전달(committee_member_weights를 적합한 것과 동일 경계, I-SINGLE-CONFIGURATION과 대칭 유지). 기본값 None은 기존 동작과 byte-identical 보존. tests/unit/mhs/test_features.py, tests/unit/application/research/mhs/test_evaluation_committee_execution.py, tests/unit/mhs/pipeline/stages/test_committee.py에 4개 시나리오 신규 테스트 추가(coverage_cutoff가 post-cutoff gap을 무시함, 경계 너머 tail이 어떤 boundary의 적합도 바꾸지 않음, 배포된 book이 cutoff 이전 멤버를 다시 채택함, committee stage가 COMMITTEE_OOS_START를 올바르게 배선함). _committee_diagnostic/multi_feature_book의 동일 패턴은 opt-in 진단 전용(기본 False)이라 이번 스펙 범위 밖으로 명시적으로 제외.",
       "impact": "실측: uv run ruff check/mypy/pytest 전부 PASS(회귀 없음, coverage_cutoff=None 기본 경로 byte-identical 유지). 실제 --final-oos-2026h1 라이브 재실행(506심볼, 2021-01-01~2026-06-30 전체 분당 리플레이) 결과 ValueError 없이 status=COMPLETE로 최초 완주. growth_extreme_budgeted 기준 leverage_ruin_probabilities 3.0x=0.0(검증 통과), 전체구간 geometric_cagr=2.749/max_drawdown=-0.389/Calmar=7.07. daily_ledger.parquet에서 2026년만 분리한 진짜 hold-out 성과: 6개월 CAGR 0.559/MDD -0.156/naive_sharpe 1.106(2021-2025의 sharpe 2.66 대비 하락하나 표본 181일로 노이즈 큼). research_go_eligible=False로 남음 -- deflated_sharpe_ratio가 이번 실행에서 null로 계산 스킵됐고 probability_mdd_over_30pct=0.879로 드로다운 확률 게이트 미통과, 둘 다 이번 스펙 범위 밖의 별개 후속 과제로 식별."
-    },
-    {
-      "task_id": "TASK_MHS_SELECTION_AND_EXECUTION_ALGORITHMS",
-      "date": "2026-08-25",
-      "adr_id": "ADR_20260825_MHS_SELECTION_AND_EXECUTION_ALGORITHMS",
-      "domain": "evidence",
-      "title": "MHS 선택창 겹침 축소(2026H1 final-OOS 봉인 해제) 및 체결 알고리즘 비교 확정",
-      "why": "DSR 통과 스펙 이후 남은 SELECTION_WINDOW_OVERLAP은 코드 버그가 아니라 CLI 기본값(breadth=60/growth_extreme/Kelly)이 2021~2025년 '전체' 리포트 구간으로 튜닝됐다는 사실 자체에서 발생. 이를 줄이는 방법은 프로젝트에 의도적으로 봉인된 시간축(HOLDOUT_CUTOFF)/심볼축(holdout partition) 두 가지뿐이라 자율 판단 대신 사용자에게 확인, 사용자가 '2026년 상반기까지 데이터 확보 후 시간축 봉인을 좁게 풀자'고 승인. 동시에 사용자가 제안한 '지정가 먼저 시도 후 미체결분만 시장가' 체결 알고리즘을 실측 검증해달라고 요청 - 직전 스펙(mhs_dsr_passage)에서 30분 창 1개 데이터포인트로만 확인했던 것을 3~30분 6구간 전체 스윕으로 결정적으로 재검증.",
-      "resolution": "src/mhs/params.py에 MHS_FINAL_OOS_CUTOFF_2026H1(2026-06-30) 상수를 신설(공유 HOLDOUT_CUTOFF는 미수정, MHS 전용의 더 좁은 상한). MhsRunConfig/MhsDiagnosticRequest에 final_oos_2026h1(기본 False) 필드를 추가하고 --final-oos-2026h1 CLI 플래그로 노출. src/mhs/pipeline/orchestrator.py의 end 해석 로직을 '_evaluation_ceiling = MHS_FINAL_OOS_CUTOFF_2026H1 if final_oos_2026h1 else HOLDOUT_CUTOFF'로 교체해 플래그 미설정시 기존과 바이트 동일 동작 보존(I1, ledger+daily_ledger.parquet 완전 동일 확인), 플래그 설정시에도 2026-06-30을 초과할 수 없도록 이중 봉인. 3m OHLCV(424심볼)와 mark-price 캐시(1h, 424심볼)를 실제로 2026-06-30까지 수집완료(Binance REST+Vision, 429 레이트리밋은 Vision 백업으로 자동 해결됨을 확인). window_trial_sharpes의 (start,resolved_end) 정확매칭 설계 덕분에 final-OOS 실행이 기본 창의 DSR 시행원장을 오염시키지 않음을 검증(I-NO-TUNING-FEEDBACK). 체결 알고리즘: --peg-chase-diagnostic --passive-timeout-minutes를 3/6/9/15/21/30분 6구간 전체 스윕 실측 - 사용자가 제안한 '한 번 시도 후 시장가'(3분=1봉)조차 시장가 대비 격차가 -0.574~-0.594 Sharpe로 사실상 평평함을 확인, 코드 위치까지 특정한 근본원인(decision_anchor='submit_bar'가 1봉 늦은 기준가를 쓰는 무룩백 설계상 고정비용)과 함께 문서화 - 어떤 체결창 길이도 채택하지 않음(코드 변경 없음). /check에서 실제 --final-oos-2026h1 라이브 실행이 _assert_envelope_leverage_ceiling_verified(미수정 기존 코드)에서 ValueError로 3회 재현성 있게 실패하는 것을 발견 - 원인을 심층 규명: end를 2026-06-30까지 늘리면 1h 베이스 패널의 min_bars=2000 자격 기준을 통과하는 종목 집합이 바뀌어(508개로 증가) 2021~2022년 과거 데이터의 교차단면 신호 순위 계산까지 영향을 주고, 이게 growth_extreme/growth_extreme_budgeted 두 envelope 모두 동일하게(0.75x) 리스크 상한 검증 실패로 이어짐(3회 재현, 두 envelope 동일 실패로 envelope 파라미터 자체는 원인에서 배제됨). 이 근본 결함은 모든 실행이 의존하는 안전장치(I3 리스크상한 검증)를 건드리는 사안이라 이번 스펙에서 임의 수정하지 않고 §6 Deferred에 근거와 함께 기록, 스펙 문서의 Acceptance/Expected outcome을 실제 달성 범위(배선 검증)로 정직하게 수정.",
-      "impact": "SELECTION_WINDOW_OVERLAP 완전 해소는 아니나(5.5년 리포트 중 5년이 여전히 튜닝 구간) 사상 최초로 2026년 실제 미확인 데이터가 파이프라인에 도달 가능해짐(플래그 배선 검증 완료, 실제 성과 수치 산출은 후속 스펙 필요). 체결 알고리즘은 사용자 제안을 포함해 전 구간 기각 확정 - 시장가(OHLCV_IMMEDIATE_TAKER) 유지, 코드 변경 없음. 기본 실행 경로는 CAGR 3.184/MDD -0.389/Sharpe 2.886/회전율 271.2로 완전 불변 확인(I1). 신규 발견: 종목 유니버스 구성이 리포트 end 날짜에 따라 과거 신호까지 소급 변경되는 구조적 민감성 - 향후 유니버스를 end-불변 스냅샷으로 고정하거나 envelope 검증을 end-불변 슬라이스로 계산하는 별도 스펙이 필요."
     }
   ]
 }

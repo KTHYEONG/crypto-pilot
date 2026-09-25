@@ -106,16 +106,18 @@ jobs:
             "$REMOTE_USER@$HOST:~/crypto-pilot/$PARAMS/"
           # repo-owned 백업 유닛이 소비하는 필터. 공용 타이머가 아닌 crypto-pilot-backup.service가
           # --filter-from으로 참조하므로, 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.
-          scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"
+          scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new"
           scp $SSH_OPTS deploy/compose_recreate.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/backup ~/.config/systemd/user"
-          scp $SSH_OPTS deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/"
+          scp $SSH_OPTS deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new"
           scp $SSH_OPTS deploy/backup/crypto-pilot-backup.service deploy/backup/crypto-pilot-backup.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
 
           # PAT/USER는 로컬에서 확장해 원격 스크립트에 주입(GitHub PAT 문자셋은 셸 안전).
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF
           set -e
           cd ~/crypto-pilot
+          mv -f ~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new ~/crypto-pilot/deploy/crypto-pilot.rclone-filter
+          mv -f ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
           chmod +x ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
           systemctl --user daemon-reload
           systemctl --user enable --now crypto-pilot-backup.timer

@@ -178,6 +178,24 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "결정 사이클이 정상 완료되었습니다. 이 메일이 오지 않는 날은 데몬·VPS·알림 채널 이상을 의심하세요.",
         "action": "docker exec mhs-live-daemon uv run python -m src.cli.main live status",
     },
+    "recorder_unhealthy": {
+        "title": "레코더 수집 이상 (실시간 마켓 데이터 중단)",
+        "severity_badge": "🚨 긴급",
+        "severity_label": "CRITICAL",
+        "header_color": "#dc2626",
+        "bg_color": "#fef2f2",
+        "impact": "라이브 전용 마켓 데이터(청산/호가/프리미엄 인덱스) 수집이 중단되거나 정체되었습니다. 해당 데이터는 아카이브에 없어 나중에 다시 내려받을 수 없습니다.",
+        "action": "docker logs --tail 200 market-recorder\ndocker exec mhs-live-daemon cat /app/data/live_capture/recorder_heartbeat.json\ntail -200 ~/crypto-pilot/logs/recorder/recorder.log",
+    },
+    "recorder_recovered": {
+        "title": "레코더 수집 복구",
+        "severity_badge": "🔔 알림",
+        "severity_label": "NOTICE",
+        "header_color": "#2563eb",
+        "bg_color": "#eff6ff",
+        "impact": "레코더 상태 검사가 전부 다시 통과했습니다. 중단 구간은 커버리지/갭 기록에서 확인할 수 있습니다.",
+        "action": "docker exec mhs-live-daemon cat /app/data/live_capture/recorder_heartbeat.json",
+    },
 }
 
 

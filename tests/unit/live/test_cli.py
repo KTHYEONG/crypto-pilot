@@ -345,6 +345,7 @@ def test_run_daemon_cli_uses_default_frozen_step(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(module, "_LIVE_LOG_DIR", tmp_path / "live_logs")
     monkeypatch.setattr(module, "_settings_with_mode", lambda _args: object())
     monkeypatch.setattr(lifecycle, "install_shutdown_handlers", lambda flag, **kwargs: None)
+    monkeypatch.setattr("src.live.recorder_watch.build_recorder_watchdog", lambda *a, **k: None)
     captured: dict[str, object] = {}
     monkeypatch.setattr(sched, "run_daemon", lambda settings, weights_path, state_path, **kwargs: captured.update(kwargs))
     root = logging.getLogger()
@@ -441,6 +442,7 @@ def test_run_daemon_cli_alerts_and_reraises_on_crash(tmp_path, monkeypatch, capl
     settings = object()
     monkeypatch.setattr(module, "_settings_with_mode", lambda _args: settings)
     monkeypatch.setattr(lifecycle, "install_shutdown_handlers", lambda flag, **kwargs: None)
+    monkeypatch.setattr("src.live.recorder_watch.build_recorder_watchdog", lambda *a, **k: None)
 
     def _crash(*a, **k):
         raise OSError("disk full")
@@ -462,3 +464,51 @@ def test_run_daemon_cli_alerts_and_reraises_on_crash(tmp_path, monkeypatch, capl
     assert any(record.exc_info and "daemon crashed" in record.getMessage() for record in caplog.records)
 
 
+
+
+def test_run_daemon_cli_brackets_run_daemon_with_watchdog(tmp_path, monkeypatch, caplog) -> None:
+    import argparse
+    import logging
+
+    import pytest
+
+    import src.cli.commands.live as module
+    import src.live.lifecycle as lifecycle
+    import src.live.scheduler as sched
+
+    settings = object()
+    monkeypatch.setattr(module, "_settings_with_mode", lambda _args: settings)
+    monkeypatch.setattr(lifecycle, "install_shutdown_handlers", lambda flag, **kwargs: None)
+
+    events: list[str] = []
+
+    class _FakeWatchdog:
+        def start(self) -> None:
+            events.append("start")
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    def _fake_build(*args, **kwargs):
+        events.append("build")
+        return _FakeWatchdog()
+
+    monkeypatch.setattr("src.live.recorder_watch.build_recorder_watchdog", _fake_build)
+
+    def _crash(*a, **k):
+        events.append("run")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sched, "run_daemon", _crash)
+    alerts: list[tuple[object, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda s, sent, *, event, detail, decision_time, now: alerts.append((s, event)) or True,
+    )
+    caplog.set_level(logging.ERROR, logger="LiveCli")
+
+    with pytest.raises(OSError, match="disk full"):
+        module._run_daemon(argparse.Namespace(artifact=str(tmp_path / "w.parquet"), state_path=str(tmp_path / "state.json"), mode=None))
+
+    assert events == ["build", "start", "run", "stop"]
+    assert alerts == [(settings, "daemon_crashed")]
