@@ -140,13 +140,17 @@ def parse_book_ticker_payload(
     ``captured_at``. ``exchange_time_ms`` is the venue's own quote timestamp, kept so clock skew and
     quote staleness remain measurable.
 
+    A zero price is the venue's encoding of an empty book side (e.g. a settled delivery contract),
+    so it is stored as NaN rather than rejecting the whole all-symbol snapshot.
+
     Returns:
-        One row per symbol; prices float64, quantities float32, ``exchange_time_ms`` int64,
-        ``fetched_at_ms`` Int64, ``captured_at`` datetime64[ns, UTC], ``symbol`` string.
+        One row per symbol; prices float64 (NaN for an empty side), quantities float32,
+        ``exchange_time_ms`` int64, ``fetched_at_ms`` Int64, ``captured_at`` datetime64[ns, UTC],
+        ``symbol`` string.
 
     Raises:
         DataIntegrityError: payload is not a non-empty list, a row lacks a required key or has a
-            non-numeric / non-positive price, ``fetched_at`` is naive, or ``fetched_at`` precedes
+            non-numeric / negative price, ``fetched_at`` is naive, or ``fetched_at`` precedes
             ``captured_at``.
     """
     if not isinstance(payload, list) or not payload:
@@ -164,8 +168,12 @@ def parse_book_ticker_payload(
         symbol = str(row["symbol"])
         bid_px = _parse_float(row["bidPrice"], "bidPrice")
         ask_px = _parse_float(row["askPrice"], "askPrice")
-        if not bid_px > 0 or not ask_px > 0:
-            raise DataIntegrityError("book ticker row has non-positive price")
+        if bid_px < 0 or ask_px < 0:
+            raise DataIntegrityError("book ticker row has negative price")
+        # 가격 0 = 해당 쪽 호가 없음(만기 정산된 분기물·빈 호가창). 한 심볼 때문에 전 종목 스냅샷을
+        # 버리지 않도록 행은 유지하고 그 쪽 가격만 NaN 으로 둔다.
+        bid_px = bid_px if bid_px > 0 else float("nan")
+        ask_px = ask_px if ask_px > 0 else float("nan")
         bid_qty = _parse_float(row["bidQty"], "bidQty")
         ask_qty = _parse_float(row["askQty"], "askQty")
         exchange_ms = _parse_ms(row["time"], "time")
