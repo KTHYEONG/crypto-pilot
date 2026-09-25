@@ -20,6 +20,9 @@ from src.market_data.streams.snapshots import (
     write_reference_snapshot,
 )
 
+_CAP = pd.Timestamp("2026-09-22T10:00:00Z")
+_FETCH = pd.Timestamp("2026-09-22T10:00:00.250Z")
+
 
 def test_next_grid_time_strictly_future() -> None:
     """Grid points advance strictly forward on epoch alignment."""
@@ -40,34 +43,66 @@ def _book_payload() -> list[dict[str, object]]:
 
 def test_parse_book_ticker_keeps_every_symbol() -> None:
     """All symbols kept without filtering, with compact dtypes."""
-    frame = parse_book_ticker_payload(_book_payload(), captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+    frame = parse_book_ticker_payload(_book_payload(), captured_at=_CAP, fetched_at=_FETCH)
     assert set(frame["symbol"]) == {"BTCUSDT", "AAPLUSDT"}
     assert tuple(frame.columns) == BOOK_TICKER_COLUMNS
     assert str(frame["bid_qty"].dtype) == "float32"
     assert str(frame["exchange_time_ms"].dtype) == "int64"
 
 
+def test_parse_book_ticker_stamps_fetched_at() -> None:
+    """Every row carries the receipt instant as nullable Int64 milliseconds."""
+    frame = parse_book_ticker_payload(_book_payload(), captured_at=_CAP, fetched_at=_FETCH)
+    assert tuple(frame.columns) == BOOK_TICKER_COLUMNS
+    assert str(frame["fetched_at_ms"].dtype) == "Int64"
+    assert (frame["fetched_at_ms"] == int(_CAP.value // 1_000_000) + 250).all()
+
+
+def test_parse_book_ticker_rejects_bad_fetched_at() -> None:
+    """A receipt before the grid label, or a naive receipt, fails closed."""
+    with pytest.raises(DataIntegrityError):
+        parse_book_ticker_payload(
+            _book_payload(), captured_at=_CAP, fetched_at=_CAP - pd.Timedelta(seconds=1)
+        )
+    with pytest.raises(DataIntegrityError):
+        parse_book_ticker_payload(
+            _book_payload(), captured_at=_CAP, fetched_at=pd.Timestamp("2026-09-22 10:00:00")
+        )
+
+
+def test_parse_premium_index_rejects_bad_fetched_at() -> None:
+    """A receipt before the grid label, or a naive receipt, fails closed."""
+    with pytest.raises(DataIntegrityError):
+        parse_premium_index_payload(
+            _premium_payload(), captured_at=_CAP, fetched_at=_CAP - pd.Timedelta(seconds=1)
+        )
+    with pytest.raises(DataIntegrityError):
+        parse_premium_index_payload(
+            _premium_payload(), captured_at=_CAP, fetched_at=pd.Timestamp("2026-09-22 10:00:00")
+        )
+
+
 def test_parse_book_ticker_rejects_malformed_rows() -> None:
     """Missing keys and non-positive prices are rejected."""
     bad_missing = [{"symbol": "BTCUSDT", "bidPrice": "1", "bidQty": "1", "askQty": "1", "time": 1}]
     with pytest.raises(DataIntegrityError):
-        parse_book_ticker_payload(bad_missing, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+        parse_book_ticker_payload(bad_missing, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
     bad_price = [{"symbol": "BTCUSDT", "bidPrice": "0", "bidQty": "1", "askPrice": "1", "askQty": "1", "time": 1}]
     with pytest.raises(DataIntegrityError):
-        parse_book_ticker_payload(bad_price, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+        parse_book_ticker_payload(bad_price, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
     with pytest.raises(DataIntegrityError):
-        parse_book_ticker_payload([], captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+        parse_book_ticker_payload([], captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
     with pytest.raises(DataIntegrityError):
-        parse_book_ticker_payload([42], captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+        parse_book_ticker_payload([42], captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
     bad_numeric = [{"symbol": "BTCUSDT", "bidPrice": "abc", "bidQty": "1", "askPrice": "1", "askQty": "1", "time": 1}]
     with pytest.raises(DataIntegrityError):
-        parse_book_ticker_payload(bad_numeric, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+        parse_book_ticker_payload(bad_numeric, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
     bad_nan = [{"symbol": "BTCUSDT", "bidPrice": "nan", "bidQty": "1", "askPrice": "1", "askQty": "1", "time": 1}]
     with pytest.raises(DataIntegrityError):
-        parse_book_ticker_payload(bad_nan, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+        parse_book_ticker_payload(bad_nan, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
     bad_time = [{"symbol": "BTCUSDT", "bidPrice": "1", "bidQty": "1", "askPrice": "1", "askQty": "1", "time": "abc"}]
     with pytest.raises(DataIntegrityError):
-        parse_book_ticker_payload(bad_time, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+        parse_book_ticker_payload(bad_time, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
 
 
 def _premium_payload() -> list[dict[str, object]]:
@@ -87,7 +122,7 @@ def _premium_payload() -> list[dict[str, object]]:
 
 def test_parse_premium_index_blanks_become_nan() -> None:
     """Empty-string funding fields become NaN, never zero."""
-    frame = parse_premium_index_payload(_premium_payload(), captured_at=pd.Timestamp("2026-09-22T10:00:00Z"))
+    frame = parse_premium_index_payload(_premium_payload(), captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
     assert tuple(frame.columns) == PREMIUM_INDEX_COLUMNS
     gone = frame[frame["symbol"] == "GONEUSDT"].iloc[0]
     assert pd.isna(gone["last_funding_rate"])
@@ -100,36 +135,36 @@ def test_parse_premium_index_rejects_malformed() -> None:
     """Malformed premium payloads fail closed; None becomes NaN."""
     cap = pd.Timestamp("2026-09-22T10:00:00Z")
     with pytest.raises(DataIntegrityError):
-        parse_premium_index_payload([], captured_at=cap)
+        parse_premium_index_payload([], captured_at=cap, fetched_at=_FETCH)
     with pytest.raises(DataIntegrityError):
-        parse_premium_index_payload([42], captured_at=cap)
+        parse_premium_index_payload([42], captured_at=cap, fetched_at=_FETCH)
     with pytest.raises(DataIntegrityError):
-        parse_premium_index_payload([{"symbol": "BTCUSDT"}], captured_at=cap)
+        parse_premium_index_payload([{"symbol": "BTCUSDT"}], captured_at=cap, fetched_at=_FETCH)
     with pytest.raises(DataIntegrityError):
         parse_premium_index_payload(
             [{"symbol": "BTCUSDT", "markPrice": None, "time": 1, "nextFundingTime": 2}],
-            captured_at=cap,
+            captured_at=cap, fetched_at=_FETCH,
         )
     with pytest.raises(DataIntegrityError):
         parse_premium_index_payload(
             [{"symbol": "BTCUSDT", "markPrice": "", "time": 1, "nextFundingTime": 2}],
-            captured_at=cap,
+            captured_at=cap, fetched_at=_FETCH,
         )
     with pytest.raises(DataIntegrityError):
         parse_premium_index_payload(
             [{"symbol": "BTCUSDT", "markPrice": "abc", "time": 1, "nextFundingTime": 2}],
-            captured_at=cap,
+            captured_at=cap, fetched_at=_FETCH,
         )
     with pytest.raises(DataIntegrityError):
         parse_premium_index_payload(
             [{"symbol": "BTCUSDT", "markPrice": "1.0"}],
-            captured_at=cap,
+            captured_at=cap, fetched_at=_FETCH,
         )
     none_row = [
         {"symbol": "BTCUSDT", "markPrice": "1", "indexPrice": None, "estimatedSettlePrice": None,
          "lastFundingRate": None, "interestRate": None, "nextFundingTime": 2, "time": 1}
     ]
-    out = parse_premium_index_payload(none_row, captured_at=cap)
+    out = parse_premium_index_payload(none_row, captured_at=cap, fetched_at=_FETCH)
     assert pd.isna(out.iloc[0]["index_price"])
 
 
@@ -175,6 +210,46 @@ def test_write_hourly_partition_empty_frame_noop(tmp_path: Path) -> None:
     empty = pd.DataFrame({"captured_at": pd.Series(dtype="datetime64[ns, UTC]"), "symbol": pd.Series(dtype="string")})
     assert write_hourly_partition(empty, tmp_path, "book_ticker") == []
     assert list(tmp_path.rglob("*.parquet")) == []
+
+
+def test_write_hourly_partition_quarantines_corrupt_hour(tmp_path: Path) -> None:
+    """An undecodable hour file is quarantined instead of wedging every later flush."""
+    write_hourly_partition(_snapshot_frame().iloc[[0]], tmp_path, "book_ticker")
+    target = tmp_path / "book_ticker" / "20260922" / "10.parquet"
+    raw = target.read_bytes()
+    target.write_bytes(raw[: len(raw) // 2])
+    write_hourly_partition(_snapshot_frame().iloc[[0]], tmp_path, "book_ticker")
+    merged = pd.read_parquet(target)
+    assert len(merged) == 1
+    quarantined = list((tmp_path / "book_ticker" / "20260922" / "_quarantine").glob("10.parquet.*.corrupt"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == raw[: len(raw) // 2]
+
+
+def test_write_hourly_partition_merges_legacy_hour_without_fetched_at(tmp_path: Path) -> None:
+    """An hour file without the new column merges with new rows, keeping dtypes."""
+    write_hourly_partition(_snapshot_frame().iloc[[0]], tmp_path, "book_ticker")
+    target = tmp_path / "book_ticker" / "20260922" / "10.parquet"
+    assert "fetched_at_ms" not in pd.read_parquet(target).columns
+    new_row = parse_book_ticker_payload(
+        [
+            {
+                "symbol": "ETHUSDT", "bidPrice": "3000", "bidQty": "2",
+                "askPrice": "3001", "askQty": "2", "time": 1758531600000,
+            }
+        ],
+        captured_at=pd.Timestamp("2026-09-22T10:59:30Z"),
+        fetched_at=pd.Timestamp("2026-09-22T10:59:30.100Z"),
+    )
+    write_hourly_partition(new_row, tmp_path, "book_ticker")
+    merged = pd.read_parquet(target)
+    assert len(merged) == 2
+    assert str(merged["fetched_at_ms"].dtype) == "Int64"
+    assert str(merged["exchange_time_ms"].dtype) == "int64"
+    legacy = merged[merged["symbol"] == "BTCUSDT"].iloc[0]
+    assert pd.isna(legacy["fetched_at_ms"])
+    fresh = merged[merged["symbol"] == "ETHUSDT"].iloc[0]
+    assert fresh["fetched_at_ms"] == int(pd.Timestamp("2026-09-22T10:59:30.100Z").value // 1_000_000)
 
 
 def test_load_snapshot_dataset_bounds_by_window(tmp_path: Path) -> None:

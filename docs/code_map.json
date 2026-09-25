@@ -553,5 +553,8 @@
   },
   "src/application/ops/gdrive_cleanup.py": {
     "testing": "tests/unit/application/test_gdrive_cleanup.py"
+  },
+  "src/common/parquet_io.py": {
+    "testing": "tests/unit/common/test_parquet_io.py"
   }
 }
