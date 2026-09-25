@@ -82,12 +82,27 @@ def test_parse_premium_index_rejects_bad_fetched_at() -> None:
         )
 
 
+def test_parse_book_ticker_keeps_snapshot_when_a_side_is_empty() -> None:
+    """A settled delivery contract quotes 0 on empty sides; the snapshot survives with NaN prices."""
+    payload = [
+        *_book_payload(),
+        {"symbol": "BTCUSDT_260925", "bidPrice": "0.0", "bidQty": "0.000", "askPrice": "89550.0", "askQty": "0.006", "time": 1790323298753},
+        {"symbol": "ETHUSDT_260925", "bidPrice": "0.00", "bidQty": "0.000", "askPrice": "0.00", "askQty": "0.000", "time": 1790323308750},
+    ]
+    frame = parse_book_ticker_payload(payload, captured_at=_CAP, fetched_at=_FETCH).set_index("symbol")
+    assert len(frame) == 4
+    assert pd.isna(frame.loc["BTCUSDT_260925", "bid_px"])
+    assert frame.loc["BTCUSDT_260925", "ask_px"] == 89550.0
+    assert frame.loc["ETHUSDT_260925", ["bid_px", "ask_px"]].isna().all()
+    assert frame.loc["BTCUSDT", "bid_px"] == 60000.5
+
+
 def test_parse_book_ticker_rejects_malformed_rows() -> None:
-    """Missing keys and non-positive prices are rejected."""
+    """Missing keys and negative prices are rejected."""
     bad_missing = [{"symbol": "BTCUSDT", "bidPrice": "1", "bidQty": "1", "askQty": "1", "time": 1}]
     with pytest.raises(DataIntegrityError):
         parse_book_ticker_payload(bad_missing, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
-    bad_price = [{"symbol": "BTCUSDT", "bidPrice": "0", "bidQty": "1", "askPrice": "1", "askQty": "1", "time": 1}]
+    bad_price = [{"symbol": "BTCUSDT", "bidPrice": "-1", "bidQty": "1", "askPrice": "1", "askQty": "1", "time": 1}]
     with pytest.raises(DataIntegrityError):
         parse_book_ticker_payload(bad_price, captured_at=pd.Timestamp("2026-09-22T10:00:00Z"), fetched_at=_FETCH)
     with pytest.raises(DataIntegrityError):
