@@ -171,6 +171,9 @@ def build_recorder_watchdog(
         normalizer_max_lag_s=settings.recorder_normalizer_max_lag_s,
         normalizer_max_consecutive_failures=settings.recorder_normalizer_max_consecutive_failures,
         compaction_max_delay_s=settings.recorder_compaction_max_delay_s,
+        startup_grace_s=settings.recorder_startup_grace_s,
+        prune_blocked_alert_after_s=settings.recorder_prune_blocked_alert_after_s,
+        local_disk_budget_bytes=settings.recorder_local_disk_budget_bytes,
     )
     return RecorderWatchdog(
         heartbeat_path=LIVE_CAPTURE_DIR / HEARTBEAT_NAME,

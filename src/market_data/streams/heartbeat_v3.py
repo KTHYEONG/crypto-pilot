@@ -70,6 +70,7 @@ def new_stream_states() -> dict[str, dict[str, Any]]:
     """Fresh per-dataset heartbeat accumulators for the normalizer loop."""
     return {
         "book_ticker": {
+            "interval_s": None,
             "last_grid": None, "last_persisted_at": None, "rows_last_write": 0,
             "rejected_rows_last_sample": 0, "rejected_fraction_last_sample": 0.0,
             "rejected_rows_total": 0, "consecutive_rejecting_points": 0,
@@ -77,6 +78,7 @@ def new_stream_states() -> dict[str, dict[str, Any]]:
             "duplicates_dropped_total": 0,
         },
         "premium_index": {
+            "interval_s": None,
             "last_grid": None, "last_persisted_at": None, "rows_last_write": 0,
             "rejected_rows_last_sample": 0, "rejected_fraction_last_sample": 0.0,
             "rejected_rows_total": 0, "consecutive_rejecting_points": 0,
@@ -127,23 +129,41 @@ def refresh_window_states(
     health_window_s: float,
     now_ns: int,
     *,
+    derive_lag_s: float,
     observed_since_ns: int | None = None,
 ) -> None:
     """Recompute window capture ratios, last samples and rejecting streaks from outcome history.
 
-    Outcomes live only in memory, so right after a normalizer restart the history covers just the
-    time since ``observed_since_ns``. Expected points are therefore counted over
-    ``min(health_window_s, now - observed_since)``; counting the full window would report a degraded
-    capture ratio for most of an hour after every deploy although nothing was lost.
+    Capture health compares grid points that *should already be derived* with those that were: the
+    window covers grid points ``g`` with ``lo <= g <= now - derive_lag_s``, where ``lo`` is
+    ``now - health_window_s`` but never earlier than ``observed_since_ns``. Outcomes live only in
+    memory, so right after a normalizer restart the history covers just the time since
+    ``observed_since_ns``; counting the full window would report a degraded ratio for most of an hour
+    after every deploy although nothing was lost. Points newer than ``derive_lag_s`` are excluded from
+    both counts, because the capture may have written them while the normalizer has not derived them
+    yet; without this a healthy point could be counted as captured but not expected. Both counts use
+    the same grid-aligned range, so ``captured <= expected`` always holds.
+
+    Args:
+        derive_lag_s: Worst-case delay between a grid point being sampled and being derived
+            (normalizer cadence plus sampling slack).
+        observed_since_ns: Normalizer start; grid points before it were never observed by this
+            process.
     """
     window_ns = int(health_window_s * 1_000_000_000)
+    lo_ns = now_ns - window_ns
     if observed_since_ns is not None:
-        window_ns = max(0, min(window_ns, now_ns - observed_since_ns))
-    cutoff = now_ns - window_ns
+        lo_ns = max(lo_ns, observed_since_ns)
+    hi_ns = now_ns - int(derive_lag_s * 1_000_000_000)
+    cutoff = lo_ns
     for stream in ("book_ticker", "premium_index"):
         state = states[stream]
         interval_s = intervals[stream]
-        state["window_expected_points"] = max(1, int((window_ns // 1_000_000_000) // interval_s))
+        interval_ns = interval_s * 1_000_000_000
+        state["interval_s"] = interval_s
+        first_grid = -(-lo_ns // interval_ns)
+        last_grid = hi_ns // interval_ns
+        state["window_expected_points"] = max(0, last_grid - first_grid + 1)
         captured: set[int] = set()
         last: tuple[int, str, bool, int, int, float] | None = None
         for outcome in outcomes:
@@ -151,7 +171,8 @@ def refresh_window_states(
             if outcome_stream != stream or grid_ns < cutoff:
                 continue
             if ok:
-                captured.add(grid_ns)
+                if grid_ns <= hi_ns:
+                    captured.add(grid_ns)
                 if last is None or grid_ns >= last[0]:
                     last = outcome
         state["window_captured_points"] = len(captured)
@@ -223,6 +244,31 @@ def disk_usage_bytes(capture_root: Path) -> tuple[int, int]:
         else:
             archive = total
     return hot, archive
+
+
+def local_footprint_bytes(capture_root: Path, liquidations_dir: Path) -> int:
+    """Total bytes of raw journals plus derived parquet trees, skipping ``.partial`` and temp files.
+
+    Used against the local disk budget while the backup-gated prune is blocked, so a long block that
+    would exhaust the disk alerts even before the duration threshold.
+    """
+    total = 0
+    trees = (
+        Path(capture_root) / "raw",
+        Path(capture_root) / "book_ticker",
+        Path(capture_root) / "premium_index",
+        Path(liquidations_dir),
+    )
+    for base in trees:
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            try:
+                if path.is_file() and not path.name.endswith((".partial", ".tmp")):
+                    total += path.stat().st_size
+            except OSError:
+                continue
+    return total
 
 
 def build_heartbeat_payload(

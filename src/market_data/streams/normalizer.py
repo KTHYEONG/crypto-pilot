@@ -17,7 +17,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ from src.market_data.streams.heartbeat_v3 import (
     build_heartbeat_payload,
     disk_usage_bytes,
     fold_cycle_report,
+    local_footprint_bytes,
     new_stream_states,
     refresh_window_states,
     write_heartbeat_atomic,
@@ -81,6 +82,7 @@ class NormalizerConfig(BaseModel):
     partial_sweep_age_s: float = 3600.0
     retention_interval_s: float = 3600.0
     heartbeat_interval_s: float = 30.0
+    derive_lag_allowance_s: float = 60.0
 
     @field_validator("normalize_interval_s")
     @classmethod
@@ -159,7 +161,13 @@ class NormalizerConfig(BaseModel):
             raise ValueError("raw_archive_local_retention_days must be >= 2")
         return value
 
-    @field_validator("backup_status_max_age_h", "partial_sweep_age_s", "retention_interval_s", "heartbeat_interval_s")
+    @field_validator(
+        "backup_status_max_age_h",
+        "partial_sweep_age_s",
+        "retention_interval_s",
+        "heartbeat_interval_s",
+        "derive_lag_allowance_s",
+    )
     @classmethod
     def _positive_float(cls, value: float, info: Any) -> float:
         if value <= 0:
@@ -185,6 +193,8 @@ class NormalizerConfig(BaseModel):
             raise ValueError("grid_health_window_s must be >= max grid interval x 2")
         if self.partial_sweep_age_s < 600:
             raise ValueError("partial_sweep_age_s must be >= 600")
+        if self.derive_lag_allowance_s < self.normalize_interval_s:
+            raise ValueError("derive_lag_allowance_s must be >= normalize_interval_s")
         return self
 
 
@@ -208,10 +218,14 @@ class NormalizerCheckpoint:
     Attributes:
         files: Cursor per hot segment path relative to ``<capture_root>/raw/hot``.
         coverage: Per-slot restorable force_order coverage state.
+        retention_blocked_since: ISO UTC instant the backup-gated prune first became blocked, or
+            ``None`` while it is not blocked. Persisted so a restart (every deploy) does not reset the
+            timer that decides when a persistent block alerts.
     """
 
     files: Mapping[str, FileCursor]
     coverage: Mapping[str, CoverageTrackerState]
+    retention_blocked_since: str | None = None
 
 
 def _parse_ts(value: Any) -> pd.Timestamp | None:
@@ -270,7 +284,10 @@ def load_checkpoint(path: Path) -> NormalizerCheckpoint:
         raise DataIntegrityError("checkpoint coverage must be an object")
     for slot, state in states.items():
         coverage[str(slot)] = _state_from_json(state)
-    return NormalizerCheckpoint(files=files, coverage=coverage)
+    blocked_since = raw.get("retention_blocked_since")
+    if blocked_since is not None and (not isinstance(blocked_since, str) or _parse_ts(blocked_since) is None):
+        raise DataIntegrityError("checkpoint retention_blocked_since is not ISO UTC")
+    return NormalizerCheckpoint(files=files, coverage=coverage, retention_blocked_since=blocked_since)
 
 
 def save_checkpoint(path: Path, checkpoint: NormalizerCheckpoint) -> None:
@@ -287,6 +304,8 @@ def save_checkpoint(path: Path, checkpoint: NormalizerCheckpoint) -> None:
             for slot, state in checkpoint.coverage.items()
         },
     }
+    if checkpoint.retention_blocked_since is not None:
+        payload["retention_blocked_since"] = checkpoint.retention_blocked_since
     data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     partial = dest.with_name(dest.name + ".partial")
     try:
@@ -723,7 +742,11 @@ def normalize_once(
         previous = merged_files.get(rel, FileCursor(offset=0, final=False))
         merged_files[rel] = FileCursor(offset=end, final=previous.final)
     merged_files = _file_final_flags(hot_root, merged_files, now_ns, config.segment_final_grace_s)
-    new_checkpoint = NormalizerCheckpoint(files=merged_files, coverage=coverage_states)
+    new_checkpoint = NormalizerCheckpoint(
+        files=merged_files,
+        coverage=coverage_states,
+        retention_blocked_since=checkpoint.retention_blocked_since,
+    )
     duplicates = {**rest.duplicates, "force_order": ws.duplicates}
     parse_failures = rest.parse_failures + ws.parse_failures
     lag_s = float((now_ns - oldest_pending) / 1_000_000_000) if more_pending and oldest_pending is not None else 0.0
@@ -792,8 +815,8 @@ def run_normalizer(
     last_report: CycleReport | None = None
     compaction_state: dict[str, Any] = {"last_day": None, "last_result": None, "last_error": None, "last_run_at": None}
     retention_state: dict[str, Any] = {
-        "prune_blocked": False, "blocked_reason": None, "backup_started_at": None,
-        "last_run_at": None, "pruned_files_total": 0,
+        "prune_blocked": False, "blocked_reason": None, "blocked_since": None, "backup_started_at": None,
+        "footprint_bytes": 0, "last_run_at": None, "pruned_files_total": 0,
     }
     last_retention_run: pd.Timestamp | None = None
     last_heartbeat_run: pd.Timestamp | None = None
@@ -815,6 +838,8 @@ def run_normalizer(
                 _sleep_interval(sleep_fn, shutdown, config.normalize_interval_s, now_fn)
                 continue
         assert checkpoint is not None
+        if retention_state["blocked_since"] is None:
+            retention_state["blocked_since"] = checkpoint.retention_blocked_since
         try:
             while True:
                 checkpoint, last_report = normalize_once(
@@ -847,7 +872,7 @@ def run_normalizer(
         if shutdown.requested:
             break
         now = now_fn()
-        if last_retention_run is None or (now - last_retention_run).total_seconds() >= config.retention_interval_s:
+        if _retention_due(last_retention_run, retention_state, config, backup_status_path, now):
             checkpoint, compaction_state, retention_state = _run_retention_pass(
                 capture_root, liquidations_dir, config, checkpoint,
                 backup_status_path, compaction_state, retention_state, now, checkpoint_path,
@@ -875,6 +900,29 @@ def _sleep_interval(
         if remaining <= 0:
             return
         sleep_fn(min(1.0, remaining))
+
+
+def _retention_due(
+    last_run: pd.Timestamp | None,
+    retention_state: Mapping[str, Any],
+    config: NormalizerConfig,
+    backup_status_path: Path,
+    now: pd.Timestamp,
+) -> bool:
+    """Whether the sweep/compaction/prune pass should run now.
+
+    It runs on its cadence, and additionally every cycle while the prune is blocked and a fresh
+    successful backup status has appeared, so a block clears within one cycle instead of waiting for
+    the next cadence tick (an hour). Checking only needs one small status file read.
+    """
+    if last_run is None or (now - last_run).total_seconds() >= config.retention_interval_s:
+        return True
+    if retention_state["prune_blocked"] is not True:
+        return False
+    status = read_backup_status(backup_status_path)
+    if status is None:
+        return False
+    return bool((now - status.finished_at).total_seconds() <= config.backup_status_max_age_h * 3600.0)
 
 
 def _run_retention_pass(
@@ -923,9 +971,9 @@ def _run_retention_pass(
                 "last_day": day, "last_result": "ok", "last_error": None, "last_run_at": now.isoformat()
             }
             hot_prefix = f"{stream}/{day}/"
-            checkpoint = NormalizerCheckpoint(
+            checkpoint = replace(
+                checkpoint,
                 files={rel: cursor for rel, cursor in checkpoint.files.items() if not rel.startswith(hot_prefix)},
-                coverage=checkpoint.coverage,
             )
             save_checkpoint(checkpoint_path, checkpoint)
     except Exception as exc:
@@ -940,6 +988,12 @@ def _run_retention_pass(
         )
         retention_state["prune_blocked"] = report.prune_blocked
         retention_state["blocked_reason"] = report.blocked_reason
+        blocked_since = (checkpoint.retention_blocked_since or now.isoformat()) if report.prune_blocked else None
+        if blocked_since != checkpoint.retention_blocked_since:
+            checkpoint = replace(checkpoint, retention_blocked_since=blocked_since)
+            save_checkpoint(checkpoint_path, checkpoint)
+        retention_state["blocked_since"] = blocked_since
+        retention_state["footprint_bytes"] = local_footprint_bytes(capture_root, liquidations_dir)
         retention_state["last_run_at"] = now.isoformat()
         retention_state["pruned_files_total"] = int(retention_state["pruned_files_total"]) + report.pruned_files
         _logger.info(
@@ -974,6 +1028,7 @@ def _maybe_publish_heartbeat(
     now_ns = int(now.value)
     refresh_window_states(
         states, dedupe.rest_outcomes, intervals, config.grid_health_window_s, now_ns,
+        derive_lag_s=config.derive_lag_allowance_s,
         observed_since_ns=int(started_at.value),
     )
     lag_s: float | None = last_report.lag_s if last_report is not None else None
