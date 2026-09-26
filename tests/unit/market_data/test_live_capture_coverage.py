@@ -117,3 +117,47 @@ def test_load_coverage_skips_malformed_lines(tmp_path: Path) -> None:
     (tmp_path / "coverage" / "liquidations" / "20260923.jsonl").mkdir()
     out2 = load_coverage(tmp_path, "liquidations", start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-24T00:00:00Z"))
     assert len(out2) == 1
+
+
+def test_coverage_discard_unflushed_withdraws_pending_only(tmp_path: Path) -> None:
+    """Discarding drops the open span; flushed history and later segments survive."""
+    import pandas as pd
+
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    tracker = CoverageTracker("liquidations", tmp_path)
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    t1 = t0 + pd.Timedelta(seconds=10)
+    t2 = t1 + pd.Timedelta(seconds=10)
+    tracker.mark_ok(t0)
+    tracker.mark_ok(t1)
+    tracker.flush()
+    tracker.mark_ok(t2)
+    tracker.discard_unflushed(t2)
+    assert tracker.flush() == []
+    t3 = t2 + pd.Timedelta(seconds=10)
+    t4 = t3 + pd.Timedelta(seconds=10)
+    tracker.mark_ok(t3)
+    tracker.mark_ok(t4)
+    tracker.flush()
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    assert len(out) == 2
+    assert out.iloc[0]["start"] == t0
+    assert out.iloc[0]["end"] == t1
+    assert out.iloc[1]["start"] == t3
+    assert out.iloc[1]["end"] == t4
+
+
+def test_coverage_discard_unflushed_rejects_naive_timestamp(tmp_path: Path) -> None:
+    """Naive discard instants fail closed."""
+    import pandas as pd
+    import pytest
+
+    from src.market_data.streams.coverage import CoverageTracker
+
+    tracker = CoverageTracker("liquidations", tmp_path)
+    with pytest.raises(ValueError, match="tz-aware"):
+        tracker.discard_unflushed(pd.Timestamp("2026-09-22 10:00:00"))

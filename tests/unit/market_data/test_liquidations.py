@@ -648,6 +648,7 @@ def test_run_liquidation_stream_symbol_filter_keeps_liveness(tmp_path) -> None:
         {"ping_interval_s": 0.0},
         {"liveness_timeout_s": 5.0, "ping_interval_s": 5.0},
         {"liveness_timeout_s": 1.0, "ping_interval_s": 5.0},
+        {"max_pending_events": 0},
     ],
 )
 def test_run_liquidation_stream_rejects_invalid_timing(tmp_path, kwargs: dict[str, float]) -> None:
@@ -1358,3 +1359,282 @@ def test_run_liquidation_stream_rejects_stall_not_above_liveness(tmp_path) -> No
                 liveness_timeout_s=15.0, event_stall_timeout_s=15.0,
             )
         )
+
+
+def test_parse_liquidation_preserves_raw_order_with_unknown_fields() -> None:
+    """The venue order object is kept verbatim, including future fields."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    payload = _json.loads(
+        (_Path("scratch/edge_audit/recorder/forceorder_sample.json")).read_text(encoding="utf-8")
+    )
+    first = payload[0]
+    ev = parse_liquidation(first, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z"))
+    assert ev is not None
+    assert ev.raw_order_json is not None
+    assert _json.loads(ev.raw_order_json) == first["o"]
+    assert _json.loads(ev.raw_order_json)["ps"] == "QNTUSDT"
+    assert _json.loads(ev.raw_order_json)["st"] == 1
+
+
+def test_parse_liquidation_unified_fallback_has_no_raw_payload() -> None:
+    """Events without a raw order object carry no raw payload."""
+    unified = {
+        "symbol": "ETH/USDT:USDT",
+        "timestamp": 1568014460893,
+        "price": 1600.0,
+        "amount": 3.2,
+    }
+    ev = parse_liquidation(unified, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z"))
+    assert ev is not None
+    assert ev.raw_order_json is None
+
+
+def test_append_liquidation_events_merges_legacy_hour_without_raw_column(tmp_path) -> None:
+    """Hour files written before the column gain nulls for old rows."""
+    ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
+    append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
+    target = tmp_path / "liquidations_20260924_05.parquet"
+    legacy = pd.read_parquet(target).drop(columns=["raw_order_json"])
+    assert "raw_order_json" not in legacy.columns
+    legacy.to_parquet(target, index=False, compression="zstd")
+    ms2 = pd.Timestamp("2026-09-24T05:30:00Z").value // 1_000_000
+    raw = _raw("ETHUSDT", ms2)
+    ev2 = parse_liquidation(raw, ingested_at=pd.Timestamp("2026-09-24T05:31:00Z"))
+    assert ev2 is not None
+    assert ev2.raw_order_json is not None
+    append_liquidation_events([ev2], tmp_path)
+    merged = pd.read_parquet(target)
+    assert "raw_order_json" in merged.columns
+    assert len(merged) == 2
+    old = merged[merged["symbol"] == "BTCUSDT"].iloc[0]
+    assert pd.isna(old["raw_order_json"])
+    fresh = merged[merged["symbol"] == "ETHUSDT"].iloc[0]
+    assert isinstance(fresh["raw_order_json"], str)
+    assert fresh["raw_order_json"]
+
+
+def test_load_liquidation_events_reads_mixed_layouts(tmp_path) -> None:
+    """Legacy files without the column still load alongside new files."""
+    ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
+    append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
+    hourly = tmp_path / "liquidations_20260924_05.parquet"
+    legacy = tmp_path / "liquidations_20260924.parquet"
+    legacy_frame = pd.read_parquet(hourly).drop(columns=["raw_order_json"])
+    legacy_frame.to_parquet(legacy, index=False, compression="zstd")
+    hourly.unlink()
+    ms2 = pd.Timestamp("2026-09-24T06:00:00Z").value // 1_000_000
+    ev2 = parse_liquidation(
+        _raw("ETHUSDT", ms2), ingested_at=pd.Timestamp("2026-09-24T06:01:00Z")
+    )
+    assert ev2 is not None
+    append_liquidation_events([ev2], tmp_path)
+    loaded = load_liquidation_events(tmp_path)
+    assert len(loaded) == 2
+    assert "raw_order_json" in loaded.columns
+    assert loaded[loaded["symbol"] == "BTCUSDT"]["raw_order_json"].isna().all()
+    assert loaded[loaded["symbol"] == "ETHUSDT"]["raw_order_json"].notna().all()
+
+
+def test_parse_liquidation_raw_serialization_failure_keeps_event() -> None:
+    """A non-serializable order value yields no raw payload without dropping the event."""
+    msg = dict(_raw("BTCUSDT", 1758531600000))
+    msg["o"] = dict(msg["o"], extra={"bad"})
+    ev = parse_liquidation(msg, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z"))
+    assert ev is not None
+    assert ev.raw_order_json is None
+    assert ev.symbol == "BTCUSDT"
+
+
+def test_liquidation_buffer_bounded_under_persistent_flush_failure(tmp_path, monkeypatch) -> None:
+    """Unpersisted events stay bounded; drops and flush failures are counted."""
+    import src.market_data.streams.liquidations as liq_mod
+    from src.market_data.streams.liquidations import LiquidationHealth
+
+    def _boom(events: Any, directory: Any) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(liq_mod, "append_liquidation_events", _boom)
+    flag = _Flag()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    msgs = [_raw("BTCUSDT", 1758531600000 + 1000 * i) for i in range(25)]
+    feed = _ScriptedFeed([_events_frame(*msgs, at=t0)], flag)
+    health = LiquidationHealth()
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=3600.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            health=health,
+            max_pending_events=10,
+        )
+    )
+    assert health.dropped_events_total == 15
+    assert health.consecutive_flush_failures >= 1
+    assert health.pending_events == 10
+    assert list(tmp_path.glob("liquidations_*.parquet")) == []
+
+
+def test_liquidation_dropped_span_never_attested(tmp_path, monkeypatch) -> None:
+    """Coverage never certifies receipt times whose events were dropped."""
+    import src.market_data.streams.liquidations as liq_mod
+    from src.market_data.streams.coverage import CoverageTracker, load_coverage
+
+    real_append = liq_mod.append_liquidation_events
+    calls = {"n": 0}
+
+    def _fail_once(events: Any, directory: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real_append(events, directory)
+
+    monkeypatch.setattr(liq_mod, "append_liquidation_events", _fail_once)
+    flag = _Flag()
+    clock = _ManualClock()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    first = [_raw("BTCUSDT", 1758531600000 + 1000 * i) for i in range(25)]
+    second = [_raw("BTCUSDT", 1758531700000 + 1000 * i) for i in range(5)]
+    feed = _ScriptedFeed(
+        [
+            _events_frame(*first, at=t0),
+            _events_frame(*second, at=t0 + pd.Timedelta(seconds=30)),
+        ],
+        flag,
+        clock=clock,
+        step_s=5.0,
+    )
+    tracker = CoverageTracker("liquidations", tmp_path)
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            clock=clock,
+            coverage=tracker,
+            max_pending_events=10,
+        )
+    )
+    out = load_coverage(
+        tmp_path, "liquidations",
+        start=pd.Timestamp("2026-09-22T09:00:00Z"), end=pd.Timestamp("2026-09-22T12:00:00Z"),
+    )
+    dropped_end = t0 + pd.Timedelta(seconds=14)
+    if not out.empty:
+        assert not ((out["start"] <= t0) & (out["end"] > t0)).any()
+        assert not ((out["start"] <= dropped_end) & (out["end"] > dropped_end)).any()
+
+
+def test_liquidation_successful_flush_resets_persistence_health(tmp_path, monkeypatch) -> None:
+    """One success clears the failure streak, the backlog count, and stamps the write."""
+    import src.market_data.streams.liquidations as liq_mod
+    from src.market_data.streams.liquidations import LiquidationHealth
+
+    real_append = liq_mod.append_liquidation_events
+    calls = {"n": 0}
+
+    def _fail_once(events: Any, directory: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real_append(events, directory)
+
+    monkeypatch.setattr(liq_mod, "append_liquidation_events", _fail_once)
+    flag = _Flag()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    t1 = t0 + pd.Timedelta(seconds=5)
+    feed = _ScriptedFeed(
+        [
+            _events_frame(_raw("BTCUSDT", 1758531600000), at=t0),
+            _events_frame(_raw("BTCUSDT", 1758531605000), at=t1),
+        ],
+        flag,
+    )
+    health = LiquidationHealth()
+    asyncio.run(
+        run_liquidation_stream(
+            symbols=None,
+            directory=tmp_path,
+            flush_interval_s=0.0,
+            shutdown=flag,
+            feed_factory=_once(feed),
+            health=health,
+            max_pending_events=10,
+        )
+    )
+    assert calls["n"] >= 2
+    assert health.consecutive_flush_failures == 0
+    assert health.pending_events == 0
+    assert health.last_persisted_at is not None
+
+
+def test_liquidation_coverage_discard_failure_logged(tmp_path, monkeypatch) -> None:
+    """A discard failure is logged and never drops the stream."""
+    import src.market_data.streams.liquidations as liq_mod
+    from src.market_data.streams.liquidations import LiquidationHealth
+
+    def _boom(events: Any, directory: Any) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(liq_mod, "append_liquidation_events", _boom)
+
+    class _RejectingCoverage:
+        def mark_ok(self, ts: Any) -> None:
+            return None
+
+        def mark_error(self, ts: Any) -> None:
+            return None
+
+        def flush(self) -> Any:
+            return []
+
+        def discard_unflushed(self, ts: Any) -> None:
+            raise OSError("coverage down")
+
+    import logging as _logging
+
+    flag = _Flag()
+    t0 = pd.Timestamp("2026-09-22T10:00:00Z")
+    msgs = [_raw("BTCUSDT", 1758531600000 + 1000 * i) for i in range(25)]
+    feed = _ScriptedFeed([_events_frame(*msgs, at=t0)], flag)
+    health = LiquidationHealth()
+    with _TestCapLog(_logging.getLogger("src.market_data.streams.liquidations")) as records:
+        asyncio.run(
+            run_liquidation_stream(
+                symbols=None,
+                directory=tmp_path,
+                flush_interval_s=3600.0,
+                shutdown=flag,
+                feed_factory=_once(feed),
+                health=health,
+                coverage=_RejectingCoverage(),  # type: ignore[arg-type]
+                max_pending_events=10,
+            )
+        )
+    assert health.dropped_events_total == 15
+    assert any("COVERAGE_MARK_FAILED" in message for message in records)
+
+
+class _TestCapLog:
+    """Minimal log capture without the pytest caplog fixture (usable in any context)."""
+
+    def __init__(self, logger: Any) -> None:
+        import logging as _logging
+
+        self._logger = logger
+        self._records: list[str] = []
+        self._handler = _logging.Handler()
+        self._handler.emit = lambda record: self._records.append(record.getMessage())  # type: ignore[method-assign]
+
+    def __enter__(self) -> list[str]:
+        self._logger.addHandler(self._handler)
+        return self._records
+
+    def __exit__(self, *args: Any) -> bool:
+        self._logger.removeHandler(self._handler)
+        return False

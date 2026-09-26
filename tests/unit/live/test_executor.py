@@ -134,6 +134,23 @@ def _policy(**overrides) -> PassiveExecutionPolicy:
     return PassiveExecutionPolicy(**base)
 
 
+def _test_attempt(journal):
+    """Create one v2 attempt on ``journal`` for tests (Spec 03 both-or-none contract)."""
+    import pandas as pd
+    from decimal import Decimal
+
+    now = pd.Timestamp("2026-09-14T00:00:00Z")
+    return journal.begin_attempt(
+        decision_time=now,
+        run_id="test",
+        mode="LIVE",
+        pre_trade_equity=Decimal("1000"),
+        sizing_anchor="equity",
+        decision_marks={},
+        started_at=now,
+    )
+
+
 def test_SCENARIO_LIVE_09_passive_chase_then_ioc_never_market(tmp_path) -> None:
     # (a') 고정 호가 + 미체결: passive_deadline 경과 후 IOC 백스톱으로 전이한다.
     # I-CHASE-BAND 하에서 정적 호가는 재호가를 유발하지 않는다(밴드 안 유지).
@@ -166,7 +183,7 @@ def test_SCENARIO_LIVE_09_passive_chase_then_ioc_never_market(tmp_path) -> None:
 
     # (d) passive_deadline 경과 후 잔여는 IOC 백스톱으로 전이하며, 게시 가격은
     # ask*(1+15bps) 상한을 준수하고 재게시는 max_ioc_attempts 로 상한 종결된다.
-    deadline_client = StubClient(touches=[("100.00", "100.00")])
+    deadline_client = StubClient(touches=[("99.90", "100.00")])
     execute_intent(
         deadline_client,
         _intent(),
@@ -451,7 +468,7 @@ def test_SCENARIO_LIVE_23_NON_MARKETABLE_IOC_IS_BOUNDED(tmp_path) -> None:
     )
     assert marketable_sell is not None
 
-    client = StubClient(touches=[("100.00", "100.00")])
+    client = StubClient(touches=[("99.90", "100.00")])
     policy = _policy(passive_deadline_s=20.0, window_deadline_s=600.0)
     outcome = execute_intent(
         client, _intent(), _filters(), policy, AuditLog(tmp_path / "23.jsonl"), SteppingClock(3.0)
@@ -596,11 +613,11 @@ class PaperStubClient:
 
 def test_SCENARIO_LIVE_27_PAPER_FILLS_WITHOUT_SENDING_ORDERS(tmp_path) -> None:
     """SCENARIO_LIVE_27_PAPER_FILLS_WITHOUT_SENDING_ORDERS: a PAPER run whose
-    observed touch trades through the posted GTX price fills locally (non-zero
-    filled_qty, status FILLED) while zero mutating requests reach the network;
-    the equivalent SHADOW run stays at filled_qty == 0 / status SHADOW."""
-    # ask(99.50) < 게시 GTX 가격(bid 100.00 양자화): 엄밀 trade-through.
-    paper_client = PaperStubClient(touches=[("100.00", "99.50")])
+    IOC backstop fills locally (non-zero filled_qty, status FILLED) while zero
+    mutating requests reach the network; the equivalent SHADOW run stays at
+    filled_qty == 0 / status SHADOW."""
+    # 유효한 정적 호가: GTX는 미체결로 휴지하다 passive 마감 후 IOC 백스톱으로 체결된다.
+    paper_client = PaperStubClient(touches=[("100.00", "100.20")])
     outcome = execute_intent(
         paper_client,
         _intent(),
@@ -638,8 +655,8 @@ def test_SCENARIO_LIVE_28_PAPER_EXERCISES_IOC_BACKSTOP(tmp_path) -> None:
     trades through the GTX price, the run still transitions to the IOC phase
     after passive_deadline_s and terminates FILLED via the capped IOC -- chase
     and backstop paths that SHADOW never reaches."""
-    # 정적 균형 호가: ask(100.00) < 게시가(100.00) 거짓 -> GTX 미체결 유지.
-    client = PaperStubClient(touches=[("100.00", "100.00")])
+    # 정적 유효 호가: ask(100.00) > 게시가(100.00 전후) -> GTX 미체결 유지.
+    client = PaperStubClient(touches=[("99.90", "100.00")])
     policy = _policy(passive_deadline_s=20.0)
     outcome = execute_intent(
         client,
@@ -681,7 +698,7 @@ class OffsetSteppingClock:
 
 def test_SCENARIO_EXECUTOR_LATENCY_NONNEGATIVE_ON_FILL(tmp_path) -> None:
     """PAPER 체결 시 latency_seconds 가 채워지고 항상 0 이상이다."""
-    paper_client = PaperStubClient(touches=[("100.00", "99.50")])
+    paper_client = PaperStubClient(touches=[("100.00", "100.20")])
     outcome = execute_intent(
         paper_client,
         _intent(),
@@ -795,6 +812,7 @@ def test_SCENARIO_RESIL_01_sink_survives_non_live_error(tmp_path):  # noqa: D103
         window_deadline_s=600.0,
         taker_cap_bps=15.0,
         max_slices=1,
+        passive_pricing="anchored",
     )
 
     class FillThenThrowClient:
@@ -804,15 +822,22 @@ def test_SCENARIO_RESIL_01_sink_survives_non_live_error(tmp_path):  # noqa: D103
 
         def book_tickers(self):
             self.tick += 1
-            if self.tick == 2:
+            if self.tick == 3:
                 raise self.exc_type("boom")
+            if self.tick == 2:
+                return {
+                    "AAAUSDT": {"bidPrice": "99.40", "askPrice": "99.50"},
+                    "BBBUSDT": {"bidPrice": "99.40", "askPrice": "99.50"},
+                    "CCCUSDT": {"bidPrice": "100.00", "askPrice": "100.20"},
+                }
             return {
-                "AAAUSDT": {"bidPrice": "100.00", "askPrice": "99.50"},
+                "AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"},
                 "BBBUSDT": {"bidPrice": "100.00", "askPrice": "100.20"},
+                "CCCUSDT": {"bidPrice": "100.00", "askPrice": "100.20"},
             }
 
         def book_ticker(self, symbol):  # noqa: ARG002
-            return {"bidPrice": "100.00", "askPrice": "99.50"}
+            return {"bidPrice": "100.00", "askPrice": "100.20"}
 
         def new_order(self, params):  # noqa: ARG002
             return PaperResponse.suppressed("POST", "/fapi/v1/order", "0" * 12)
@@ -823,8 +848,8 @@ def test_SCENARIO_RESIL_01_sink_survives_non_live_error(tmp_path):  # noqa: D103
         def query_order(self, *a, **k):  # noqa: ARG002
             return {"executedQty": "0"}
 
-    intents = [make_intent("AAAUSDT"), make_intent("BBBUSDT")]
-    filters = {"AAAUSDT": filt_a, "BBBUSDT": filt_b}
+    intents = [make_intent("AAAUSDT"), make_intent("BBBUSDT"), make_intent("CCCUSDT")]
+    filters = {"AAAUSDT": filt_a, "BBBUSDT": filt_b, "CCCUSDT": filt_a}
     for exc in (http.client.HTTPException, OSError, KeyboardInterrupt):
         client = FillThenThrowClient(exc)
         sink: list = []
@@ -929,9 +954,9 @@ def test_SCENARIO_PARITY_01_slice_progress_no_stall(tmp_path):
             self.orders=[]
             self._tick=0
         def book_tickers(self):
-            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "99.00"}}
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"}}
         def book_ticker(self, s):
-            return {"bidPrice": "100.00", "askPrice": "99.00"}
+            return {"bidPrice": "100.00", "askPrice": "100.20"}
         def new_order(self, params):
             self.orders.append(params)
             return {"orderId": len(self.orders)}
@@ -1218,10 +1243,10 @@ def test_execute_intents_default_model_preserves_peg_chase_path(tmp_path) -> Non
             self.orders: list[dict] = []
 
         def book_tickers(self):
-            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "99.00"}}
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"}}
 
         def book_ticker(self, symbol):
-            return {"bidPrice": "100.00", "askPrice": "99.00"}
+            return {"bidPrice": "100.00", "askPrice": "100.20"}
 
         def new_order(self, params):
             self.orders.append(params)
@@ -1315,6 +1340,7 @@ def test_execute_intents_unknown_submission_is_adopted_not_resent(tmp_path) -> N
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -1346,7 +1372,7 @@ def test_execute_intents_unknown_submission_is_adopted_not_resent(tmp_path) -> N
     client = _Client()
 
     outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, policy, audit,
-                               clock, sleep_fn, journal=journal)
+                               clock, sleep_fn, journal=journal, attempt=attempt)
 
     order_id = client.posted[0]["newClientOrderId"]
     assert len(client.posted) == 1
@@ -1365,7 +1391,7 @@ def test_execute_intents_unknown_submission_confirmed_absent_posts_new_seq(tmp_p
     from decimal import Decimal
     from src.live.audit import AuditLog
     from src.live.errors import VenueError
-    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.executor import PassiveExecutionPolicy, UNKNOWN_SUBMISSION_MISS_LIMIT, execute_intents
     from src.live.filters import SymbolFilters
     from src.live.order_journal import OrderJournal
     from src.live.planner import OrderIntent
@@ -1381,10 +1407,11 @@ def test_execute_intents_unknown_submission_confirmed_absent_posts_new_seq(tmp_p
                            target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
                            leg_index=0, decision_price=Decimal("100.10"))
 
-    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0)
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=50.0, window_deadline_s=200.0)
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -1396,17 +1423,19 @@ def test_execute_intents_unknown_submission_confirmed_absent_posts_new_seq(tmp_p
     def _events():
         return [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
 
-    from src.live.executor import UNKNOWN_SUBMISSION_MISS_LIMIT
-
     class _Client:
+        unknown_outcome_horizon_s = 35.0
+
         def __init__(self):
             self.posted: list[dict] = []
             self.lookups: list[str] = []
+            self.post_times: list[float] = []
 
         def book_tickers(self):
             return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
 
         def new_order(self, params):
+            self.post_times.append(clock_state[0])
             self.posted.append(params)
             if len(self.posted) == 1:
                 raise OrderStatusUnknown("503", path="/fapi/v1/order", http_status=503, code=None)
@@ -1424,7 +1453,7 @@ def test_execute_intents_unknown_submission_confirmed_absent_posts_new_seq(tmp_p
     client = _Client()
 
     outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, policy, audit,
-                               clock, sleep_fn, journal=journal)
+                               clock, sleep_fn, journal=journal, attempt=attempt)
 
     first_id = client.posted[0]["newClientOrderId"]
     second_id = client.posted[1]["newClientOrderId"]
@@ -1432,7 +1461,9 @@ def test_execute_intents_unknown_submission_confirmed_absent_posts_new_seq(tmp_p
     assert len(client.posted) == 2
     assert first_id.endswith("-0-0")
     assert second_id.endswith("-0-1")
-    assert client.lookups.count(first_id) == 2
+    # Not placed only after the horizon: second post at least 35 s after the first.
+    assert client.post_times[1] - client.post_times[0] >= 35.0
+    assert client.lookups.count(first_id) >= 2
     assert outcomes[0].status == "FILLED"
     assert "order_unknown_not_placed" in _events()
 
@@ -1460,6 +1491,7 @@ def test_execute_intents_rate_limited_submission_retries_next_tick_with_new_seq(
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -1493,7 +1525,7 @@ def test_execute_intents_rate_limited_submission_retries_next_tick_with_new_seq(
     client = _Client()
 
     outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, policy, audit,
-                               clock, sleep_fn, journal=journal)
+                               clock, sleep_fn, journal=journal, attempt=attempt)
 
     assert [p["newClientOrderId"][-4:] for p in client.posted] == ["-0-0", "-0-1"]
     assert outcomes[0].status == "FILLED"
@@ -1523,6 +1555,7 @@ def test_execute_intents_abort_cancels_and_settles_active_orders(tmp_path) -> No
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -1547,7 +1580,7 @@ def test_execute_intents_abort_cancels_and_settles_active_orders(tmp_path) -> No
         def new_order(self, params):
             self.posted.append(params)
             if params["symbol"] == "BBBUSDT":
-                raise VenueError("insufficient margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+                raise VenueError("unknown rejection", code=-9999, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
             return {"orderId": 1}
 
         def cancel_order(self, symbol, orig_client_order_id):
@@ -1562,7 +1595,7 @@ def test_execute_intents_abort_cancels_and_settles_active_orders(tmp_path) -> No
 
     with pytest.raises(VenueError) as exc_info:
         execute_intents(client, [_intent("AAAUSDT"), _intent("BBBUSDT")], filters, policy, audit,
-                        clock, sleep_fn, journal=journal)
+                        clock, sleep_fn, journal=journal, attempt=attempt)
 
     aaa_id = client.posted[0]["newClientOrderId"]
     assert client.cancels == [aaa_id]
@@ -1595,6 +1628,7 @@ def test_execute_intents_abort_cleanup_failure_does_not_mask_original_error(tmp_
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -1614,7 +1648,7 @@ def test_execute_intents_abort_cleanup_failure_does_not_mask_original_error(tmp_
 
         def new_order(self, params):
             if params["symbol"] == "BBBUSDT":
-                raise VenueError("insufficient margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+                raise VenueError("unknown rejection", code=-9999, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
             return {"orderId": 1}
 
         def cancel_order(self, symbol, orig_client_order_id):
@@ -1627,9 +1661,9 @@ def test_execute_intents_abort_cleanup_failure_does_not_mask_original_error(tmp_
 
     with pytest.raises(VenueError) as exc_info:
         execute_intents(_Client(), [_intent("AAAUSDT"), _intent("BBBUSDT")], filters, policy, audit,
-                        clock, sleep_fn, journal=journal)
+                        clock, sleep_fn, journal=journal, attempt=attempt)
 
-    assert exc_info.value.code == -2019
+    assert exc_info.value.code == -9999
     assert "abort_cleanup_failed" in _events()
 
 def test_execute_intents_abort_resolves_unknown_submission_at_exit(tmp_path) -> None:
@@ -1657,6 +1691,7 @@ def test_execute_intents_abort_resolves_unknown_submission_at_exit(tmp_path) -> 
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -1682,7 +1717,7 @@ def test_execute_intents_abort_resolves_unknown_submission_at_exit(tmp_path) -> 
             self.posted.append(params)
             if params["symbol"] == "AAAUSDT":
                 raise OrderStatusUnknown("timeout", path="/fapi/v1/order", http_status=0, code=None)
-            raise VenueError("insufficient margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            raise VenueError("unknown rejection", code=-9999, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
 
         def cancel_order(self, symbol, orig_client_order_id):
             self.cancels.append(orig_client_order_id)
@@ -1696,7 +1731,7 @@ def test_execute_intents_abort_resolves_unknown_submission_at_exit(tmp_path) -> 
 
     with pytest.raises(VenueError) as exc_info:
         execute_intents(client, [_intent("AAAUSDT"), _intent("BBBUSDT")], filters, policy, audit,
-                        clock, sleep_fn, journal=journal)
+                        clock, sleep_fn, journal=journal, attempt=attempt)
 
     aaa_id = client.posted[0]["newClientOrderId"]
     assert client.cancels == [aaa_id]
@@ -1728,6 +1763,7 @@ def test_execute_intents_window_end_drops_unknown_submission_confirmed_absent(tm
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -1763,13 +1799,15 @@ def test_execute_intents_window_end_drops_unknown_submission_confirmed_absent(tm
     client = _Client()
 
     outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, short_policy, audit,
-                               clock, sleep_fn, journal=journal)
+                               clock, sleep_fn, journal=journal, attempt=attempt)
 
     assert len(client.posted) == 1
     assert client.cancels == []
     assert outcomes[0].status == "RESIDUAL"
 
-def test_execute_intents_suppressed_client_never_writes_journal(tmp_path) -> None:
+def test_execute_intents_suppressed_paper_client_journals_submits(tmp_path) -> None:
+    """Spec 03 INV-FILL-WAL: a mutation-suppressed PAPER client still journals its submissions (and fills),
+    because the runner rebuilds the PAPER ledger from the journal alone; ids come from the journal sequence."""
     import json
     from decimal import Decimal
     from src.live.audit import AuditLog
@@ -1792,6 +1830,7 @@ def test_execute_intents_suppressed_client_never_writes_journal(tmp_path) -> Non
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -1824,10 +1863,12 @@ def test_execute_intents_suppressed_client_never_writes_journal(tmp_path) -> Non
     client = _Client()
 
     execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, short_policy, audit,
-                    clock, sleep_fn, journal=journal)
+                    clock, sleep_fn, journal=journal, attempt=attempt)
 
     assert client.posted[0]["newClientOrderId"].endswith("-0-0")
-    assert not (tmp_path / "journal.jsonl").exists()
+    assert journal.next_submit_seq() == len(client.posted) >= 1
+    journal_text = (tmp_path / "journal.jsonl").read_text(encoding="utf-8")
+    assert all(p["newClientOrderId"] in journal_text for p in client.posted)
 
 def test_cancel_orphan_orders_settles_prior_day_and_legacy_orders_by_journal_delta(tmp_path) -> None:
     from decimal import Decimal
@@ -1838,6 +1879,7 @@ def test_cancel_orphan_orders_settles_prior_day_and_legacy_orders_by_journal_del
 
     audit = AuditLog(tmp_path / "orphan_audit.jsonl")
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
 
     class _Client:
         def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
@@ -1865,28 +1907,55 @@ def test_cancel_orphan_orders_settles_prior_day_and_legacy_orders_by_journal_del
     prior = "mh20260913-ABCDEFGHIJ-0-0-7"
     booked = "mh20260914-KLMNOPQRST-1-0-8"
     legacy = "20260912-BBBUSDT-0-0-1"
-    journal.record_observed(prior, Decimal("3"))
-    journal.record_observed(booked, Decimal("4"))
+    import pandas as pd
+
+    now = pd.Timestamp("2026-09-14T00:00:00Z")
+    journal.record_submit(
+        prior, "AAAUSDT", journal.next_submit_seq(), attempt_seq=attempt.attempt_seq,
+        side="BUY", quantity=Decimal("4"), reduce_only=False, leg_index=0,
+    )
+    journal.record_fill(
+        kind="execution", attempt_seq=attempt.attempt_seq, symbol="AAAUSDT", side="BUY",
+        quantity=Decimal("3"), price=Decimal("100"), fee_bps=2.0, liquidity="maker",
+        reason="maker_fill", filled_at=now, client_order_id=prior, leg_index=0,
+        cumulative_executed_qty=Decimal("3"), simulated=False,
+    )
+    journal.record_submit(
+        booked, "CCCUSDT", journal.next_submit_seq(), attempt_seq=attempt.attempt_seq,
+        side="BUY", quantity=Decimal("4"), reduce_only=False, leg_index=1,
+    )
+    journal.record_fill(
+        kind="execution", attempt_seq=attempt.attempt_seq, symbol="CCCUSDT", side="BUY",
+        quantity=Decimal("4"), price=Decimal("100"), fee_bps=2.0, liquidity="maker",
+        reason="maker_fill", filled_at=now, client_order_id=booked, leg_index=1,
+        cumulative_executed_qty=Decimal("4"), simulated=False,
+    )
     client = _Client(
         [{"symbol": "AAAUSDT", "clientOrderId": prior}, {"symbol": "CCCUSDT", "clientOrderId": booked},
          {"symbol": "BBBUSDT", "clientOrderId": legacy}],
         {prior: "4", booked: "4", legacy: "2"},
     )
 
-    settlements = cancel_orphan_orders(client, "20260914", audit, journal=journal)
+    settlements = cancel_orphan_orders(client, "20260914", audit, journal=journal, now=now, taker_fee_bps=4.5)
 
     assert client.cancels == [prior, booked, legacy]
-    assert [(s.symbol, s.executed_qty) for s in settlements] == [("AAAUSDT", Decimal("1")), ("BBBUSDT", Decimal("2"))]
+    assert [(s.symbol, s.quantity) for s in settlements] == [("AAAUSDT", Decimal("1")), ("BBBUSDT", Decimal("2"))]
+    assert all(s.kind == "orphan_settlement" and s.simulated is False for s in settlements)
+    assert (settlements[0].side, settlements[0].price) == ("BUY", Decimal("100"))
+    assert settlements[0].cumulative_executed_qty == Decimal("4")
+    # Both submitted ids are terminal now, so restart recovery has nothing to query.
+    assert journal.unresolved_submits(since=now - pd.Timedelta(hours=72)) == ()
 
-def test_cancel_orphan_orders_fails_closed_on_foreign_order_before_any_cancel(tmp_path) -> None:
+def test_cancel_orphan_orders_reports_foreign_symbols_without_cancelling_them(tmp_path) -> None:
     from src.live.audit import AuditLog
-    from src.live.executor import ForeignOpenOrderError, cancel_orphan_orders
+    from src.live.executor import cancel_orphan_orders
     from src.live.order_journal import OrderJournal
     from src.live.rest import OrderStatusUnknown
     from src.live.settings import ExecutionMode
 
     audit = AuditLog(tmp_path / "orphan_audit.jsonl")
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
 
     class _Client:
         def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
@@ -1911,8 +1980,9 @@ def test_cancel_orphan_orders_fails_closed_on_foreign_order_before_any_cancel(tm
             return {"status": status, "side": "BUY", "avgPrice": "100",
                     "executedQty": self._executed.get(orig_client_order_id, "0")}
 
-    import pytest
+    import pandas as pd
 
+    now = pd.Timestamp("2026-09-14T00:00:00Z")
     client = _Client(
         [{"symbol": "AAAUSDT", "clientOrderId": "mh20260914-ABCDEFGHIJ-0-0-1"},
          {"symbol": "BBBUSDT", "clientOrderId": "web_manual_123"}],
@@ -1920,10 +1990,10 @@ def test_cancel_orphan_orders_fails_closed_on_foreign_order_before_any_cancel(tm
         mode=ExecutionMode.LIVE_TESTNET,
     )
 
-    with pytest.raises(ForeignOpenOrderError):
-        cancel_orphan_orders(client, "20260914", audit, journal=journal)
+    sweep = cancel_orphan_orders(client, "20260914", audit, journal=journal, now=now, taker_fee_bps=4.5)
 
-    assert client.cancels == []
+    assert sweep.foreign_symbols == ("BBBUSDT",)
+    assert client.cancels == ["mh20260914-ABCDEFGHIJ-0-0-1"]
 
 def test_cancel_orphan_orders_ignores_foreign_orders_in_suppressed_mode(tmp_path) -> None:
     from src.live.audit import AuditLog
@@ -1934,6 +2004,7 @@ def test_cancel_orphan_orders_ignores_foreign_orders_in_suppressed_mode(tmp_path
 
     audit = AuditLog(tmp_path / "orphan_audit.jsonl")
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
 
     class _Client:
         def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
@@ -1960,13 +2031,17 @@ def test_cancel_orphan_orders_ignores_foreign_orders_in_suppressed_mode(tmp_path
 
     client = _Client([{"symbol": "BBBUSDT", "clientOrderId": "web_manual_123"}], {}, mode=ExecutionMode.PAPER)
 
-    settlements = cancel_orphan_orders(client, "20260914", audit, journal=journal)
+    import pandas as pd
 
-    assert settlements == []
+    sweep = cancel_orphan_orders(client, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
+
+    assert sweep == []
+    assert sweep.foreign_symbols == ("BBBUSDT",)
     assert client.cancels == []
     assert "foreign_open_order" in (tmp_path / "orphan_audit.jsonl").read_text(encoding="utf-8")
 
 def test_cancel_orphan_orders_cancel_status_unknown_resolved_by_lookup(tmp_path) -> None:
+    import pandas as pd
     from decimal import Decimal
     from src.live.audit import AuditLog
     from src.live.executor import cancel_orphan_orders
@@ -1975,6 +2050,7 @@ def test_cancel_orphan_orders_cancel_status_unknown_resolved_by_lookup(tmp_path)
 
     audit = AuditLog(tmp_path / "orphan_audit.jsonl")
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
 
     class _Client:
         def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
@@ -2004,17 +2080,18 @@ def test_cancel_orphan_orders_cancel_status_unknown_resolved_by_lookup(tmp_path)
     order = "mh20260914-ABCDEFGHIJ-0-0-3"
     closed = _Client([{"symbol": "AAAUSDT", "clientOrderId": order}], {order: "1"}, cancel_unknown_status="CANCELED")
 
-    settlements = cancel_orphan_orders(closed, "20260914", audit, journal=journal)
+    settlements = cancel_orphan_orders(closed, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
 
     assert closed.cancels == [order]
-    assert [s.executed_qty for s in settlements] == [Decimal("1")]
+    assert [s.quantity for s in settlements] == [Decimal("1")]
 
     still_open = _Client([{"symbol": "AAAUSDT", "clientOrderId": order}], {order: "0"}, cancel_unknown_status="NEW")
     with pytest.raises(OrderStatusUnknown):
-        cancel_orphan_orders(still_open, "20260914", audit, journal=journal)
+        cancel_orphan_orders(still_open, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
     assert still_open.cancels == [order]
 
 def test_cancel_orphan_orders_tolerates_order_gone_on_lookup(tmp_path) -> None:
+    import pandas as pd
     from src.live.audit import AuditLog
     from src.live.errors import VenueError
     from src.live.executor import cancel_orphan_orders
@@ -2023,6 +2100,7 @@ def test_cancel_orphan_orders_tolerates_order_gone_on_lookup(tmp_path) -> None:
 
     audit = AuditLog(tmp_path / "orphan_audit.jsonl")
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
 
     class _Client:
         def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
@@ -2059,10 +2137,11 @@ def test_cancel_orphan_orders_tolerates_order_gone_on_lookup(tmp_path) -> None:
 
     client = _GoneClient([{"symbol": "AAAUSDT", "clientOrderId": order}], {})
 
-    assert cancel_orphan_orders(client, "20260914", audit, journal=journal) == []
+    assert cancel_orphan_orders(client, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5) == []
     assert client.cancels == [order]
 
 def test_cancel_orphan_orders_propagates_non_benign_cancel_rejection(tmp_path) -> None:
+    import pandas as pd
     from src.live.audit import AuditLog
     from src.live.errors import VenueError
     from src.live.executor import cancel_orphan_orders
@@ -2071,6 +2150,7 @@ def test_cancel_orphan_orders_propagates_non_benign_cancel_rejection(tmp_path) -
 
     audit = AuditLog(tmp_path / "orphan_audit.jsonl")
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
 
     class _Client:
         def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
@@ -2107,11 +2187,12 @@ def test_cancel_orphan_orders_propagates_non_benign_cancel_rejection(tmp_path) -
     client = _RejectingClient([{"symbol": "AAAUSDT", "clientOrderId": order}], {order: "1"})
 
     with pytest.raises(VenueError) as exc_info:
-        cancel_orphan_orders(client, "20260914", audit, journal=journal)
+        cancel_orphan_orders(client, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
 
     assert exc_info.value.code == -1022
 
 def test_cancel_orphan_orders_falls_back_to_open_order_avg_price(tmp_path) -> None:
+    import pandas as pd
     from decimal import Decimal
     from src.live.audit import AuditLog
     from src.live.executor import cancel_orphan_orders
@@ -2120,6 +2201,7 @@ def test_cancel_orphan_orders_falls_back_to_open_order_avg_price(tmp_path) -> No
 
     audit = AuditLog(tmp_path / "orphan_audit.jsonl")
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
 
     class _Client:
         def __init__(self, open_orders, executed, *, mode=None, cancel_unknown_status=None):
@@ -2152,9 +2234,9 @@ def test_cancel_orphan_orders_falls_back_to_open_order_avg_price(tmp_path) -> No
 
     client = _NoAvgClient([{"symbol": "AAAUSDT", "clientOrderId": order, "avgPrice": "99.5"}], {})
 
-    settlements = cancel_orphan_orders(client, "20260914", audit, journal=journal)
+    settlements = cancel_orphan_orders(client, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
 
-    assert [(s.side, s.executed_qty, s.avg_price) for s in settlements] == [("SELL", Decimal("2"), Decimal("99.5"))]
+    assert [(s.side, s.quantity, s.price) for s in settlements] == [("SELL", Decimal("2"), Decimal("99.5"))]
 
 def test_execute_intents_unknown_ioc_submission_adopted_without_second_send(tmp_path) -> None:
     import json
@@ -2180,6 +2262,7 @@ def test_execute_intents_unknown_ioc_submission_adopted_without_second_send(tmp_
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -2213,7 +2296,7 @@ def test_execute_intents_unknown_ioc_submission_adopted_without_second_send(tmp_
     client = _Client()
 
     outcomes = execute_intents(client, [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, ioc_policy, audit,
-                               clock, sleep_fn, journal=journal)
+                               clock, sleep_fn, journal=journal, attempt=attempt)
 
     assert [p["timeInForce"] for p in client.posted] == ["IOC"]
     assert outcomes[0].status == "FILLED"
@@ -2243,6 +2326,7 @@ def test_execute_intents_unknown_lookup_failure_propagates(tmp_path) -> None:
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -2271,7 +2355,7 @@ def test_execute_intents_unknown_lookup_failure_propagates(tmp_path) -> None:
 
     with pytest.raises(VenueError) as exc_info:
         execute_intents(_Client(), [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, policy, audit,
-                        clock, sleep_fn, journal=journal)
+                        clock, sleep_fn, journal=journal, attempt=attempt)
 
     assert exc_info.value.code == -1022
 
@@ -2300,6 +2384,7 @@ def test_execute_intents_window_end_unknown_lookup_failure_propagates(tmp_path) 
     audit_path = tmp_path / "exec_audit.jsonl"
     audit = AuditLog(audit_path)
     journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
     clock_state = [0.0]
 
     def clock():
@@ -2330,7 +2415,7 @@ def test_execute_intents_window_end_unknown_lookup_failure_propagates(tmp_path) 
 
     with pytest.raises(VenueError) as exc_info:
         execute_intents(_Client(), [_intent("AAAUSDT")], {"AAAUSDT": _filters("AAAUSDT")}, short_policy, audit,
-                        clock, sleep_fn, journal=journal)
+                        clock, sleep_fn, journal=journal, attempt=attempt)
 
     assert exc_info.value.code == -1022
     assert "abort_cleanup_failed" in _events()
@@ -2455,7 +2540,7 @@ def test_anchored_never_chases_book_moves(tmp_path) -> None:
 
 def test_anchored_escalates_to_capped_ioc_at_deadline(tmp_path) -> None:
     """Past the passive deadline the remainder crosses once via the capped IOC backstop."""
-    client = StubClient(touches=[("100.00", "100.00")])
+    client = StubClient(touches=[("99.90", "100.00")])
     policy = _anchored_policy(passive_deadline_s=20.0)
     execute_intent(
         client, _intent(), _filters(tick_size="0.10"), policy,
@@ -2566,10 +2651,9 @@ def test_order_fill_events_reconcile_with_outcome(tmp_path) -> None:
     audit_path = tmp_path / "fills_audit.jsonl"
     audit = AuditLog(audit_path)
     books_by_tick = [
-        {"AAAUSDT": ("100.00", "99.50"), "BBBUSDT": ("100.00", "100.20")},
-        {"AAAUSDT": ("100.00", "99.50"), "BBBUSDT": ("100.30", "100.50")},
-        {"AAAUSDT": ("100.00", "99.50"), "BBBUSDT": ("100.30", "100.10")},
-        {"AAAUSDT": ("100.00", "99.50"), "BBBUSDT": ("100.60", "100.10")},
+        {"AAAUSDT": ("100.00", "100.20"), "BBBUSDT": ("100.00", "100.20")},
+        {"AAAUSDT": ("99.40", "99.50"), "BBBUSDT": ("100.30", "100.50")},
+        {"AAAUSDT": ("99.40", "99.50"), "BBBUSDT": ("99.40", "99.50")},
     ]
 
     class _PaperBookClient:
@@ -2597,6 +2681,7 @@ def test_order_fill_events_reconcile_with_outcome(tmp_path) -> None:
         passive_deadline_s=600.0, window_deadline_s=3600.0,
         taker_cap_bps=15.0, max_slices=1,
         chase_band_bps=100.0, max_cross_bps=200.0,
+        passive_pricing="anchored",
     )
     intents = [_intent_for("AAAUSDT"), _intent_for("BBBUSDT")]
     filters = {"AAAUSDT": _filters_for("AAAUSDT"), "BBBUSDT": _filters_for("BBBUSDT")}
@@ -2620,9 +2705,9 @@ def test_order_fill_events_reconcile_with_outcome(tmp_path) -> None:
         )
         assert vwap == outcome.avg_fill_price
     aaa = next(r for r in fills if r["symbol"] == "AAAUSDT")
-    assert (aaa["bid"], aaa["ask"], aaa["liquidity"]) == ("100.00", "99.50", "maker")
+    assert (aaa["bid"], aaa["ask"], aaa["liquidity"]) == ("99.40", "99.50", "maker")
     bbb = next(r for r in fills if r["symbol"] == "BBBUSDT")
-    assert (bbb["bid"], bbb["ask"], bbb["price"]) == ("100.60", "100.10", "100.60")
+    assert (bbb["bid"], bbb["ask"], bbb["price"]) == ("99.40", "99.50", "100")
 
 
 def test_order_cancelled_chase_then_passive_timeout(tmp_path) -> None:
@@ -2809,7 +2894,7 @@ def test_fills_carry_confirmation_time(tmp_path) -> None:
     from src.live.executor import PassiveExecutionPolicy
 
     client = PaperStubClient(
-        touches=[("100.00", "100.05")] * 4 + [("100.00", "99.50")] * 50
+        touches=[("100.00", "100.05")] * 4 + [("99.40", "99.50")] * 50
     )
     policy = PassiveExecutionPolicy(
         poll_interval_s=3.0, passive_deadline_s=50.0, window_deadline_s=600.0,
@@ -2842,7 +2927,7 @@ def test_every_fill_path_stamps_time(tmp_path) -> None:
         taker_cap_bps=15.0, max_slices=1, passive_pricing="anchored",
     )
     maker_client = PaperStubClient(
-        touches=[("100.00", "100.05")] * 4 + [("100.00", "99.50")] * 50
+        touches=[("100.00", "100.05")] * 4 + [("99.40", "99.50")] * 50
     )
     maker_outcome = execute_intent(
         maker_client, _intent(), _filters(tick_size="0.01"), anchored,
@@ -2876,3 +2961,1877 @@ def test_every_fill_path_stamps_time(tmp_path) -> None:
             assert isinstance(stamped, pd.Timestamp)
             assert stamped.tzinfo is not None
             assert str(stamped.tzinfo) == "UTC"
+
+
+def _exec_filters(symbol):
+    from decimal import Decimal
+    from src.live.filters import SymbolFilters
+
+    return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                         min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                         quantity_precision=3, price_precision=2)
+
+
+def _exec_intent(symbol):
+    from decimal import Decimal
+    from src.live.planner import OrderIntent
+
+    return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                       target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                       leg_index=0, decision_price=Decimal("100.10"))
+
+
+def _exec_events(audit_path):
+    import json
+    return [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_book_fetch_transient_skips_single_tick(tmp_path) -> None:
+    """A single book-fetch transient failure skips one tick only."""
+    from src.live.audit import AuditLog
+    from src.live.errors import TransientReadError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=50.0, window_deadline_s=200.0)
+    audit_path = tmp_path / "tick.jsonl"
+    audit = AuditLog(audit_path)
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(s):
+        clock_state[0] += s
+
+    class _Client:
+        def __init__(self):
+            self.n = 0
+            self.orders: list = []
+
+        def book_tickers(self):
+            self.n += 1
+            if self.n == 2:
+                raise TransientReadError("blip", path="/fapi/v1/ticker/bookTicker", http_status=503, code=None, attempts=4)
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, symbol, oid):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    outcomes = execute_intents(_Client(), [_exec_intent("AAAUSDT")], {"AAAUSDT": _exec_filters("AAAUSDT")},
+                               policy, audit, clock, sleep_fn)
+    assert outcomes[0].status == "FILLED"
+    skips = [e for e in _exec_events(audit_path) if e["event"] == "tick_skipped_read_failure" and e.get("scope") == "books"]
+    assert len(skips) == 1
+
+
+def test_consecutive_book_failures_abort_fail_closed(tmp_path) -> None:
+    """Consecutive book failures beyond the cap abort fail-closed."""
+    import pytest
+    from src.live.audit import AuditLog
+    from src.live.errors import TransientReadError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=50.0, window_deadline_s=200.0,
+                                    max_consecutive_read_failures=2)
+    audit_path = tmp_path / "abort.jsonl"
+    audit = AuditLog(audit_path)
+    clock_state = [0.0]
+
+    class _Client:
+        def __init__(self):
+            self.cancels: list = []
+            self.posted = 0
+
+        def book_tickers(self):
+            self.posted += 1
+            if self.posted == 1:
+                return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+            raise TransientReadError("down", path="/fapi/v1/ticker/bookTicker", http_status=503, code=None, attempts=4)
+
+        def new_order(self, params):
+            return {"orderId": 1}
+
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
+            return {}
+
+        def query_order(self, symbol, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+    client = _Client()
+    with pytest.raises(TransientReadError) as exc_info:
+        execute_intents(client, [_exec_intent("AAAUSDT")], {"AAAUSDT": _exec_filters("AAAUSDT")},
+                        policy, audit, lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s))
+    assert exc_info.value.partial_outcomes is not None
+    assert client.cancels != []
+
+
+def test_order_query_transient_isolates_intent(tmp_path) -> None:
+    """An order-query transient failure isolates to its intent."""
+    from src.live.audit import AuditLog
+    from src.live.errors import TransientReadError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=30.0)
+    audit_path = tmp_path / "iso.jsonl"
+    audit = AuditLog(audit_path)
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(s):
+        clock_state[0] += s
+
+    class _Client:
+        def __init__(self):
+            self.orders: list = []
+            self.post_times: list = []
+            self.calls = 0
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            self.post_times.append((params["symbol"], clock_state[0]))
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, symbol, oid):
+            if symbol == "AAAUSDT":
+                self.calls += 1
+                if self.calls == 1:
+                    raise TransientReadError("blip", path="/fapi/v1/order", http_status=503, code=None, attempts=4)
+            if symbol == "AAAUSDT":
+                return {"status": "NEW", "executedQty": "0"}
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+    outcomes = execute_intents(client, [_exec_intent("AAAUSDT"), _exec_intent("BBBUSDT")],
+                               {"AAAUSDT": _exec_filters("AAAUSDT"), "BBBUSDT": _exec_filters("BBBUSDT")},
+                               policy, audit, clock, sleep_fn)
+    by = {o.symbol: o for o in outcomes}
+    assert by["BBBUSDT"].status == "FILLED"
+    passive_posts = [(sym, t) for sym, t in client.post_times if t < policy.passive_deadline_s]
+    # 조회 실패 틱은 AAA 의 활성 주문을 유지할 뿐 재게시하지 않고, BBB 는 같은 틱에 정상 게시된다.
+    assert [t for sym, t in passive_posts if sym == "AAAUSDT"] == [0.0]
+    assert [t for sym, t in passive_posts if sym == "BBBUSDT"] == [0.0]
+    skips = [e for e in _exec_events(audit_path) if e["event"] == "tick_skipped_read_failure" and e.get("scope") == "order"]
+    assert skips
+
+
+def test_repro_b_single_503_no_abort(tmp_path, monkeypatch) -> None:
+    """One 503 on an order-status GET skips a tick: no abort, both orders keep resting until the window ends."""
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse
+    from src.live.settings import ExecutionMode
+
+    monkeypatch.setattr("src.live.rest.time.sleep", lambda s: None)
+    clock_state = [0.0]
+    calls: list[tuple[str, str, float]] = []
+    served_503: list[tuple[str, str]] = []
+
+    def _responder(method, url):
+        from urllib.parse import urlparse
+        path = urlparse(url).path
+        calls.append((method, path, clock_state[0]))
+        if path == "/fapi/v1/ticker/bookTicker":
+            return HttpResponse(status_code=200, headers={}, body=b'[{"symbol":"AAAUSDT","bidPrice":"100.00","askPrice":"100.20"},{"symbol":"BBBUSDT","bidPrice":"100.00","askPrice":"100.20"}]')
+        if method == "GET" and path == "/fapi/v1/order" and not served_503:
+            # 모든 재시도를 소진시키도록 한 틱 동안 5xx 를 유지한다.
+            if sum(1 for m, p, t in calls if m == "GET" and p == "/fapi/v1/order" and t == clock_state[0]) >= 4:
+                served_503.append((method, path))
+            return HttpResponse(status_code=503, headers={}, body=b"")
+        return HttpResponse(status_code=200, headers={}, body=b'{"status":"NEW","executedQty":"0"}')
+
+    class _Transport:
+        def call(self, method, url, headers):
+            return _responder(method, url)
+
+    audit = AuditLog(tmp_path / "repro.jsonl")
+    client = BinanceFuturesRestClient("https://fapi.binance.com", SecretStr("k"), SecretStr("s"),
+                                      ExecutionMode.LIVE_TESTNET, audit, session=_Transport())
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=5.0, window_deadline_s=10.0)
+    outcomes = execute_intents(client, [_exec_intent("AAAUSDT"), _exec_intent("BBBUSDT")],
+                               {"AAAUSDT": _exec_filters("AAAUSDT"), "BBBUSDT": _exec_filters("BBBUSDT")},
+                               policy, audit, lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s))
+
+    assert served_503 == [("GET", "/fapi/v1/order")]
+    assert sorted(o.symbol for o in outcomes) == ["AAAUSDT", "BBBUSDT"]
+    first_503_at = next(t for m, p, t in calls if m == "GET" and p == "/fapi/v1/order")
+    cancels = [t for m, p, t in calls if m == "DELETE"]
+    # 중단(abort) 정리가 아니라 창 종료 시점에만 취소가 일어난다.
+    assert cancels
+    assert min(cancels) > first_503_at
+    assert all(t >= policy.passive_deadline_s for t in cancels)
+    assert [p for m, p, t in calls if m == "POST" and t <= first_503_at].count("/fapi/v1/order") == 2
+
+
+def test_unknown_submission_not_placed_before_horizon(tmp_path) -> None:
+    """Unknown submission is not declared not placed before the horizon."""
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=50.0, window_deadline_s=200.0)
+    audit_path = tmp_path / "h.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "j.jsonl")
+    attempt = _test_attempt(journal)
+    clock_state = [0.0]
+
+    class _Client:
+        unknown_outcome_horizon_s = 35.0
+
+        def __init__(self):
+            self.posted: list = []
+            self.post_times: list = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.post_times.append(clock_state[0])
+            self.posted.append(params)
+            if len(self.posted) == 1:
+                raise OrderStatusUnknown("x", path="/fapi/v1/order", http_status=0, code=None)
+            return {"orderId": 2}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            if oid == self.posted[0]["newClientOrderId"]:
+                raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+    execute_intents(client, [_exec_intent("AAAUSDT")], {"AAAUSDT": _exec_filters("AAAUSDT")}, policy, audit,
+                    lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s), journal=journal, attempt=attempt)
+    assert len(client.posted) == 2
+    assert client.post_times[1] - client.post_times[0] >= 35.0
+
+
+def test_unknown_submission_found_late_adopted(tmp_path) -> None:
+    """An unknown submission found late is adopted, not duplicated."""
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import OrderStatusUnknown
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=50.0, window_deadline_s=200.0)
+    audit_path = tmp_path / "adopt.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "j.jsonl")
+    attempt = _test_attempt(journal)
+    clock_state = [0.0]
+
+    class _Client:
+        unknown_outcome_horizon_s = 35.0
+
+        def __init__(self):
+            self.posted: list = []
+            self.post_times: list = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.post_times.append(clock_state[0])
+            self.posted.append(params)
+            if len(self.posted) == 1:
+                raise OrderStatusUnknown("x", path="/fapi/v1/order", http_status=0, code=None)
+            return {"orderId": len(self.posted)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            if clock_state[0] < 10.0:
+                raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"status": "NEW", "executedQty": "0", "avgPrice": "0"}
+
+    client = _Client()
+    import json
+    execute_intents(client, [_exec_intent("AAAUSDT")], {"AAAUSDT": _exec_filters("AAAUSDT")}, policy, audit,
+                    lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s), journal=journal, attempt=attempt)
+    assert len(client.posted) >= 1
+    events = [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert "order_unknown_adopted" in events
+    # No duplicate post for the same submission: any repost happens only via the IOC backstop.
+    if len(client.post_times) > 1:
+        assert client.post_times[1] >= 50.0
+
+
+def test_window_end_finalize_waits_for_horizon(tmp_path) -> None:
+    """Window-end finalize sleeps until the horizon before the final lookup."""
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, _finalize, _IntentRuntime
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=5.0, window_deadline_s=600.0)
+    audit = AuditLog(tmp_path / "f.jsonl")
+
+    class _Client:
+        unknown_outcome_horizon_s = 35.0
+
+        def __init__(self):
+            self.lookups = 0
+
+        def query_order(self, s, oid):
+            self.lookups += 1
+            raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+    rt = _IntentRuntime(intent=_exec_intent("AAAUSDT"), filters=_exec_filters("AAAUSDT"))
+    rt.unresolved_id = "oid-1"
+    rt.unresolved_at = 0.0
+    clock_state = [5.0]
+    sleeps: list = []
+
+    def sleep_fn(s):
+        sleeps.append(s)
+        clock_state[0] += s
+
+    _finalize(_Client(), [rt], audit, lambda: clock_state[0], sleep_fn)
+    assert sleeps == [30.0]
+    assert rt.unresolved_id is None
+
+
+def test_throttle_recovers_below_recovery_floor(tmp_path) -> None:
+    """Throttle doubles above budget then halves back once below the recovery floor."""
+    from src.live.executor import PassiveExecutionPolicy, _throttled_interval
+    from src.live.rest import RateLimits
+
+    policy = PassiveExecutionPolicy(poll_interval_s=3.0, passive_deadline_s=50.0, window_deadline_s=600.0)
+    limits = RateLimits(request_weight_1m=2400, orders_1m=1200, orders_10s=300)
+
+    class _C:
+        def __init__(self, w):
+            self.rate_state = type("S", (), {"used_weight_1m": w, "order_count_10s": 0, "order_count_1m": 0})()
+
+    interval = 3.0
+    high = _C(1500)
+    for _ in range(3):
+        interval = _throttled_interval(high, interval, policy, limits)
+    assert interval > 3.0
+    low = _C(500)
+    for _ in range(10):
+        interval = _throttled_interval(low, interval, policy, limits)
+    assert interval == policy.poll_interval_s
+    assert interval >= policy.poll_interval_s
+
+
+def test_throttle_holds_inside_hysteresis_band() -> None:
+    """Inside the hysteresis band the interval is unchanged."""
+    from src.live.executor import PassiveExecutionPolicy, _throttled_interval
+    from src.live.rest import RateLimits
+
+    policy = PassiveExecutionPolicy(poll_interval_s=3.0, passive_deadline_s=50.0, window_deadline_s=600.0)
+    limits = RateLimits(request_weight_1m=2400, orders_1m=1200, orders_10s=300)
+
+    class _C:
+        rate_state = type("S", (), {"used_weight_1m": 1000, "order_count_10s": 0, "order_count_1m": 0})()
+
+    assert _throttled_interval(_C(), 6.0, policy, limits) == 6.0
+
+
+def test_policy_validates_new_fields() -> None:
+    """Policy validates the new read/throttle fields."""
+    import pytest
+    from src.live.executor import PassiveExecutionPolicy
+
+    with pytest.raises(ValueError, match="max_consecutive_read_failures"):
+        PassiveExecutionPolicy(max_consecutive_read_failures=0)
+    with pytest.raises(ValueError, match="rate_weight_recover_fraction"):
+        PassiveExecutionPolicy(rate_weight_recover_fraction=0.5)
+    with pytest.raises(ValueError, match="rate_weight_recover_fraction"):
+        PassiveExecutionPolicy(rate_weight_recover_fraction=0.0)
+
+
+def test_throttled_interval_without_rate_state_returns_floor() -> None:
+    """No rate state (or all-None counters) cannot retain a stale enlarged interval."""
+    from src.live.executor import PassiveExecutionPolicy, _throttled_interval
+    from src.live.rest import RateLimits
+
+    policy = PassiveExecutionPolicy(poll_interval_s=3.0, passive_deadline_s=5.0, window_deadline_s=600.0)
+    limits = RateLimits(request_weight_1m=2400, orders_1m=1200, orders_10s=300)
+
+    class _NoState:
+        pass
+
+    assert _throttled_interval(_NoState(), 9.0, policy, limits) == 3.0
+    assert _throttled_interval(_NoState(), 9.0, policy, None) == 3.0
+
+    class _Empty:
+        rate_state = type("S", (), {"used_weight_1m": None, "order_count_10s": None, "order_count_1m": None})()
+
+    assert _throttled_interval(_Empty(), 9.0, policy, limits) == 3.0
+
+
+def test_throttled_interval_order_counts_drive_hysteresis() -> None:
+    """Order-count counters double above budget and recover below the floor."""
+    from src.live.executor import PassiveExecutionPolicy, _throttled_interval
+    from src.live.rest import RateLimits
+
+    policy = PassiveExecutionPolicy(poll_interval_s=3.0, passive_deadline_s=5.0, window_deadline_s=600.0)
+    limits = RateLimits(request_weight_1m=2400, orders_1m=1200, orders_10s=300)
+
+    class _C:
+        def __init__(self, w, c10, c1m):
+            self.rate_state = type("S", (), {"used_weight_1m": w, "order_count_10s": c10, "order_count_1m": c1m})()
+
+    assert _throttled_interval(_C(0, 250, 0), 3.0, policy, limits) == 6.0
+    assert _throttled_interval(_C(0, 0, 900), 3.0, policy, limits) == 6.0
+    # Above the recover floor but below budget: hold.
+    assert _throttled_interval(_C(0, 120, 0), 6.0, policy, limits) == 6.0
+    assert _throttled_interval(_C(900, 0, 0), 6.0, policy, limits) == 6.0
+    assert _throttled_interval(_C(0, 0, 500), 6.0, policy, limits) == 6.0
+
+
+def test_unknown_lookup_transient_is_undecidable(tmp_path) -> None:
+    """A TransientReadError during unknown lookup neither adopts nor counts a miss."""
+    from src.live.audit import AuditLog
+    from src.live.errors import TransientReadError
+    from src.live.executor import _resolve_unknown_submission, _IntentRuntime
+
+    rt = _IntentRuntime(intent=_exec_intent("AAAUSDT"), filters=_exec_filters("AAAUSDT"))
+    rt.unresolved_id = "oid-1"
+    rt.unresolved_at = 100.0
+
+    class _C:
+        def query_order(self, s, oid):
+            raise TransientReadError("blip", path="/fapi/v1/order", http_status=503, code=None, attempts=4)
+
+    assert _resolve_unknown_submission(_C(), rt, 101.0, AuditLog(tmp_path / "u.jsonl")) is False
+    assert rt.unresolved_id == "oid-1"
+    assert rt.unknown_misses == 0
+
+
+def test_per_rt_consecutive_read_failures_abort(tmp_path) -> None:
+    """Per-rt transient reads beyond the cap re-raise fail-closed."""
+    import pytest
+    from src.live.audit import AuditLog
+    from src.live.errors import TransientReadError
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=5.0, window_deadline_s=50.0,
+                                    max_consecutive_read_failures=1)
+    audit = AuditLog(tmp_path / "r.jsonl")
+    clock_state = [0.0]
+
+    class _C:
+        def __init__(self):
+            self.orders = 0
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.orders += 1
+            return {"orderId": self.orders}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            raise TransientReadError("down", path="/fapi/v1/order", http_status=503, code=None, attempts=4)
+
+    with pytest.raises(TransientReadError):
+        execute_intents(_C(), [_exec_intent("AAAUSDT")], {"AAAUSDT": _exec_filters("AAAUSDT")}, policy, audit,
+                        lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s))
+
+
+def test_poll_active_avg_price_branches(tmp_path) -> None:
+    """Active poll tolerates zero and malformed avgPrice without recording fills."""
+    from decimal import Decimal
+    from src.live.audit import AuditLog
+    from src.live.executor import PassiveExecutionPolicy, _IntentRuntime, _poll_active
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=50.0, window_deadline_s=600.0)
+    audit = AuditLog(tmp_path / "avg.jsonl")
+
+    class _ZeroAvg:
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0", "avgPrice": "0.000"}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+    rt = _IntentRuntime(intent=_exec_intent("AAAUSDT"), filters=_exec_filters("AAAUSDT"))
+    rt.active_id = "oid-1"
+    rt.active_price = Decimal("100")
+    _poll_active(_ZeroAvg(), rt, (Decimal("100"), Decimal("100.20")), 1.0, policy, audit)
+    assert rt.filled_total == Decimal("0")
+
+    class _BadAvg:
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0", "avgPrice": "nan-x"}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+    rt2 = _IntentRuntime(intent=_exec_intent("AAAUSDT"), filters=_exec_filters("AAAUSDT"))
+    rt2.active_id = "oid-2"
+    rt2.active_price = Decimal("100")
+    _poll_active(_BadAvg(), rt2, (Decimal("100"), Decimal("100.20")), 1.0, policy, audit)
+    assert rt2.filled_total == Decimal("0")
+
+
+def test_finalize_horizon_branches(tmp_path) -> None:
+    """Finalize covers adopted-now, adopted-after-sleep and already-elapsed paths."""
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import PassiveExecutionPolicy, _finalize, _IntentRuntime
+
+    policy = PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=5.0, window_deadline_s=600.0)
+    assert policy.poll_interval_s == 1.0
+
+    def _rt(oid, at):
+        rt = _IntentRuntime(intent=_exec_intent("AAAUSDT"), filters=_exec_filters("AAAUSDT"))
+        rt.unresolved_id = oid
+        rt.unresolved_at = at
+        return rt
+
+    # First lookup success: adopted immediately, no sleep.
+    class _Found:
+        unknown_outcome_horizon_s = 35.0
+
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+    rt = _rt("a", 0.0)
+    sleeps: list = []
+    _finalize(_Found(), [rt], AuditLog(tmp_path / "f1.jsonl"), lambda: 5.0, sleeps.append)
+    assert sleeps == []
+    assert rt.unresolved_id is None
+
+    # First miss then found after the horizon sleep: adopted.
+    class _Late:
+        unknown_outcome_horizon_s = 35.0
+
+        def __init__(self):
+            self.n = 0
+
+        def query_order(self, s, oid):
+            self.n += 1
+            if self.n == 1:
+                raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"status": "NEW", "executedQty": "0"}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+    rt2 = _rt("b", 0.0)
+    clock_state = [5.0]
+    sleeps2: list = []
+
+    def _sleep(s):
+        sleeps2.append(s)
+        clock_state[0] += s
+
+    _finalize(_Late(), [rt2], AuditLog(tmp_path / "f2.jsonl"), lambda: clock_state[0], _sleep)
+    assert sleeps2 == [30.0]
+    assert rt2.unresolved_id is None
+
+    # Already past the horizon: no sleep, declared not placed.
+    class _Gone:
+        unknown_outcome_horizon_s = 35.0
+
+        def query_order(self, s, oid):
+            raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+    rt3 = _rt("c", 0.0)
+    sleeps3: list = []
+    _finalize(_Gone(), [rt3], AuditLog(tmp_path / "f3.jsonl"), lambda: 100.0, sleeps3.append)
+    assert sleeps3 == []
+    assert rt3.unresolved_id is None
+
+    # Second lookup with a non-2013 error propagates.
+    import pytest
+
+    class _BadSecond:
+        unknown_outcome_horizon_s = 35.0
+
+        def __init__(self):
+            self.n = 0
+
+        def query_order(self, s, oid):
+            self.n += 1
+            if self.n == 1:
+                raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            raise VenueError("bad", code=-1022, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+    with pytest.raises(VenueError, match="bad"):
+        _finalize(_BadSecond(), [_rt("d", 0.0)], AuditLog(tmp_path / "f4.jsonl"), lambda: 5.0, lambda s: None)
+
+
+def _iso_filters(symbol, min_qty="0.001", min_notional="1"):
+    from decimal import Decimal
+    from src.live.filters import SymbolFilters
+
+    return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                         min_qty=Decimal(min_qty), min_notional=Decimal(min_notional), max_qty=Decimal("100000"),
+                         quantity_precision=3, price_precision=2)
+
+
+def _iso_intent(symbol, qty="1", reduce_only=False):
+    from decimal import Decimal
+    from src.live.planner import OrderIntent
+
+    return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal(qty), reduce_only=reduce_only,
+                       target_qty=Decimal(qty), current_qty=Decimal("0"), client_order_prefix="20260914",
+                       leg_index=0, decision_price=Decimal("100.10"))
+
+
+def _iso_policy(**overrides):
+    from src.live.executor import PassiveExecutionPolicy
+
+    base = {"poll_interval_s": 1.0, "passive_deadline_s": 50.0, "window_deadline_s": 200.0}
+    base.update(overrides)
+    return PassiveExecutionPolicy(**base)
+
+
+def _iso_run(client, intents, filters, policy, tmp_path, name="iso.jsonl"):
+    from src.live.audit import AuditLog
+
+    audit_path = tmp_path / name
+    audit = AuditLog(audit_path)
+    clock_state = [0.0]
+
+    def clock():
+        return clock_state[0]
+
+    def sleep_fn(s):
+        clock_state[0] += s
+
+    from src.live.executor import execute_intents
+
+    outcomes = execute_intents(client, intents, filters, policy, audit, clock, sleep_fn)
+    import json
+
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    return outcomes, events, client
+
+
+def test_sub_minimum_residual_after_partial_fill(tmp_path) -> None:
+    """Spec 02 Repro A: a 0.04 remainder below minNotional is never posted."""
+    from decimal import Decimal
+
+    class _Client:
+        def __init__(self):
+            self.orders: list = []
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, symbol, oid):
+            if symbol == "AAAUSDT":
+                return {"status": "NEW", "executedQty": "0.96", "avgPrice": "100.00"}
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+    policy = _iso_policy(passive_deadline_s=20.0, window_deadline_s=600.0)
+    filters = {"AAAUSDT": _iso_filters("AAAUSDT", min_notional="5"), "BBBUSDT": _iso_filters("BBBUSDT")}
+    outcomes, events, _ = _iso_run(client, [_iso_intent("AAAUSDT"), _iso_intent("BBBUSDT")], filters, policy, tmp_path)
+    by = {o.symbol: o for o in outcomes}
+    assert by["AAAUSDT"].status == "RESIDUAL_SUB_MINIMUM"
+    assert by["AAAUSDT"].filled_qty == Decimal("0.96")
+    assert by["BBBUSDT"].status == "FILLED"
+    assert all(Decimal(o["quantity"]) != Decimal("0.04") for o in client.orders)
+    assert any(e["event"] == "intent_sub_minimum" for e in events)
+
+
+def test_sub_minimum_reduce_only_residual_is_posted(tmp_path) -> None:
+    """Spec 02: a reduce-only remainder below minNotional is posted reduce-only."""
+    class _Client:
+        def __init__(self):
+            self.orders: list = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+    client = _Client()
+    policy = _iso_policy(window_deadline_s=6.0, passive_deadline_s=5.0)
+    outcomes, _, _ = _iso_run(client, [_iso_intent("AAAUSDT", qty="0.04", reduce_only=True)],
+                               {"AAAUSDT": _iso_filters("AAAUSDT", min_notional="5")}, policy, tmp_path)
+    assert client.orders
+    assert all(o.get("reduceOnly") == "true" and o["quantity"] == "0.04" for o in client.orders)
+
+
+def test_remainder_below_min_qty_never_posted(tmp_path) -> None:
+    """Spec 02: a remainder below minQty ends quietly with zero posts."""
+    class _Client:
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            raise AssertionError("must never post")
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+    policy = _iso_policy(window_deadline_s=6.0, passive_deadline_s=5.0)
+    outcomes, events, _ = _iso_run(_Client(), [_iso_intent("AAAUSDT", qty="0.0005")],
+                                   {"AAAUSDT": _iso_filters("AAAUSDT")}, policy, tmp_path)
+    assert outcomes[0].status == "RESIDUAL_SUB_MINIMUM"
+    assert any(e["event"] == "intent_sub_minimum" for e in events)
+
+
+def test_undersized_head_slice_posts_whole_remainder(tmp_path) -> None:
+    """Spec 02: slicing must never create an unpostable head order."""
+    from decimal import Decimal
+
+    class _Client:
+        def __init__(self):
+            self.orders: list = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+    client = _Client()
+    policy = _iso_policy(window_deadline_s=6.0, passive_deadline_s=5.0)
+    _iso_run(client, [_iso_intent("AAAUSDT", qty="10")],
+             {"AAAUSDT": _iso_filters("AAAUSDT", min_notional="600")}, policy, tmp_path)
+    assert client.orders
+    assert all(Decimal(o["quantity"]) == Decimal("10") for o in client.orders)
+
+
+def test_symbol_scoped_rejection_ends_only_that_intent(tmp_path) -> None:
+    """Spec 02: BBB -4140 ends REJECTED while AAA fills normally."""
+    from src.live.errors import VenueError
+
+    class _Client:
+        def __init__(self):
+            self.cancels: list = []
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            if params["symbol"] == "BBBUSDT":
+                raise VenueError("invalid status", code=-4140, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"orderId": 1}
+
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+    filters = {"AAAUSDT": _iso_filters("AAAUSDT"), "BBBUSDT": _iso_filters("BBBUSDT")}
+    outcomes, events, _ = _iso_run(client, [_iso_intent("AAAUSDT"), _iso_intent("BBBUSDT")], filters, _iso_policy(), tmp_path)
+    by = {o.symbol: o for o in outcomes}
+    assert by["BBBUSDT"].status == "REJECTED"
+    assert by["BBBUSDT"].reject_code == -4140
+    assert by["AAAUSDT"].status == "FILLED"
+    assert client.cancels == []
+    rejected = [e for e in events if e["event"] == "intent_rejected"]
+    assert len(rejected) == 1
+    assert rejected[0]["code"] == -4140
+    assert any(e["event"] == "intent_outcome" and e.get("reject_code") == -4140 for e in events)
+
+
+def test_margin_rejection_waits_then_retries(tmp_path) -> None:
+    """Spec 02: one -2019 waits margin_retry_s before reposting, then fills."""
+    from src.live.errors import VenueError
+
+    clock_state = [0.0]
+
+    class _Client:
+        def __init__(self):
+            self.post_times: list = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.post_times.append(clock_state[0])
+            if len(self.post_times) == 1:
+                raise VenueError("margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"orderId": 2}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    from src.live.audit import AuditLog
+    from src.live.executor import execute_intents
+    import json
+
+    audit_path = tmp_path / "margin.jsonl"
+    audit = AuditLog(audit_path)
+    client = _Client()
+    policy = _iso_policy(passive_deadline_s=500.0, window_deadline_s=600.0)
+    outcomes = execute_intents(client, [_iso_intent("AAAUSDT")], {"AAAUSDT": _iso_filters("AAAUSDT")},
+                               policy, audit, lambda: clock_state[0],
+                               lambda s: clock_state.__setitem__(0, clock_state[0] + s))
+    assert outcomes[0].status == "FILLED"
+    assert len(client.post_times) == 2
+    assert client.post_times[1] - client.post_times[0] >= 60.0
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert sum(1 for e in events if e["event"] == "intent_margin_wait") == 1
+
+
+def test_margin_rejections_bounded(tmp_path) -> None:
+    """Spec 02: perpetual -2019 ends REJECTED after max_margin_rejects+1 attempts."""
+    from src.live.errors import VenueError
+
+    class _Client:
+        def __init__(self):
+            self.posts = 0
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            if params["symbol"] == "AAAUSDT":
+                self.posts += 1
+                raise VenueError("margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"orderId": 99}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+    policy = _iso_policy(passive_deadline_s=500.0, window_deadline_s=600.0, max_margin_rejects=2)
+    filters = {"AAAUSDT": _iso_filters("AAAUSDT"), "BBBUSDT": _iso_filters("BBBUSDT")}
+    outcomes, _, _ = _iso_run(client, [_iso_intent("AAAUSDT"), _iso_intent("BBBUSDT")], filters, policy, tmp_path)
+    by = {o.symbol: o for o in outcomes}
+    assert by["AAAUSDT"].status == "REJECTED"
+    assert by["AAAUSDT"].reject_code == -2019
+    assert client.posts == 3
+    assert by["BBBUSDT"].status == "FILLED"
+
+
+def test_margin_rejection_on_reduce_only_rejects_immediately(tmp_path) -> None:
+    """Spec 02: reduce-only needs no margin, so its -2019 is anomalous REJECTED."""
+    from src.live.errors import VenueError
+
+    class _Client:
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            raise VenueError("margin", code=-2019, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+    policy = _iso_policy(window_deadline_s=6.0, passive_deadline_s=5.0)
+    outcomes, _, _ = _iso_run(_Client(), [_iso_intent("AAAUSDT", reduce_only=True)],
+                               {"AAAUSDT": _iso_filters("AAAUSDT")}, policy, tmp_path)
+    assert outcomes[0].status == "REJECTED"
+    assert outcomes[0].reject_code == -2019
+
+
+def test_risk_increase_freeze_stops_only_increases(tmp_path) -> None:
+    """Spec 02: -4400 freezes increases while reduce-only fills."""
+    from src.live.errors import VenueError
+
+    class _Client:
+        def __init__(self):
+            self.posted: list = []
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT", "CCCUSDT")}
+
+        def new_order(self, params):
+            if params["symbol"] == "AAAUSDT":
+                raise VenueError("frozen", code=-4400, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            self.posted.append(params)
+            return {"orderId": len(self.posted)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    client = _Client()
+    filters = {s: _iso_filters(s) for s in ("AAAUSDT", "BBBUSDT", "CCCUSDT")}
+    intents = [_iso_intent("AAAUSDT"), _iso_intent("BBBUSDT"), _iso_intent("CCCUSDT", reduce_only=True)]
+    outcomes, events, _ = _iso_run(client, intents, filters, _iso_policy(), tmp_path)
+    by = {o.symbol: o for o in outcomes}
+    assert by["AAAUSDT"].status == "REJECTED"
+    assert by["AAAUSDT"].reject_code == -4400
+    assert by["BBBUSDT"].status == "REJECTED"
+    assert by["CCCUSDT"].status == "FILLED"
+    assert all(p["symbol"] != "BBBUSDT" for p in client.posted)
+    assert any(e["event"] == "risk_increase_frozen" and e["code"] == -4400 for e in events)
+
+
+def test_reductions_posted_before_increases(tmp_path) -> None:
+    """Spec 02: within a tick reduce-only intents post first."""
+    class _Client:
+        def __init__(self):
+            self.posted: list = []
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            return {"orderId": len(self.posted)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+    client = _Client()
+    policy = _iso_policy(window_deadline_s=4.0, passive_deadline_s=3.0)
+    filters = {"AAAUSDT": _iso_filters("AAAUSDT"), "BBBUSDT": _iso_filters("BBBUSDT")}
+    _iso_run(client, [_iso_intent("AAAUSDT"), _iso_intent("BBBUSDT", reduce_only=True)], filters, policy, tmp_path)
+    assert client.posted
+    assert client.posted[0]["symbol"] == "BBBUSDT"
+
+
+def test_unregistered_rejection_still_aborts(tmp_path) -> None:
+    """Spec 02: an unregistered code fails closed with cleanup and partials."""
+    from src.live.errors import VenueError
+    from src.live.order_journal import OrderJournal
+
+    class _Client:
+        def __init__(self):
+            self.posted: list = []
+            self.cancels: list = []
+
+        def book_tickers(self):
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            self.posted.append(params)
+            if params["symbol"] == "BBBUSDT":
+                raise VenueError("unknown", code=-9999, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+            return {"orderId": 1}
+
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "CANCELED", "executedQty": "0.4", "avgPrice": "100.00"}
+
+    import pytest
+
+    from src.live.audit import AuditLog
+    from src.live.executor import execute_intents
+
+    audit = AuditLog(tmp_path / "a.jsonl")
+    journal = OrderJournal(tmp_path / "j.jsonl")
+    attempt = _test_attempt(journal)
+    clock_state = [0.0]
+    client = _Client()
+    filters = {"AAAUSDT": _iso_filters("AAAUSDT"), "BBBUSDT": _iso_filters("BBBUSDT")}
+    with pytest.raises(VenueError):
+        execute_intents(client, [_iso_intent("AAAUSDT"), _iso_intent("BBBUSDT")], filters, _iso_policy(),
+                        audit, lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s),
+                        journal=journal, attempt=attempt)
+    assert client.cancels == [client.posted[0]["newClientOrderId"]]
+
+
+def test_outcome_statuses_closed_set() -> None:
+    """Spec 02: OUTCOME_STATUSES pins the six terminal states."""
+    from src.live.executor import OUTCOME_STATUSES
+
+    assert frozenset({"FILLED", "RESIDUAL", "RESIDUAL_SUB_MINIMUM", "REJECTED", "SHADOW", "OBSOLETE"}) == OUTCOME_STATUSES
+
+
+def test_policy_validates_margin_fields() -> None:
+    """Spec 02: margin wait knobs fail closed on nonsense values."""
+    import pytest
+
+    from src.live.executor import PassiveExecutionPolicy
+
+    with pytest.raises(ValueError, match="margin_retry_s"):
+        PassiveExecutionPolicy(margin_retry_s=0.0)
+    with pytest.raises(ValueError, match="max_margin_rejects"):
+        PassiveExecutionPolicy(max_margin_rejects=0)
+
+
+def test_paper_invalid_quote_never_fills(tmp_path) -> None:
+    """Spec 02: an ask of 0 cannot trade through a resting PAPER BUY."""
+    from src.live.rest import PaperResponse
+
+    class _Client:
+        def __init__(self):
+            self.orders: list = []
+            self.cancels: list = []
+            self.tick = 0
+
+        def book_tickers(self):
+            self.tick += 1
+            if self.tick >= 2:
+                return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "0"}}
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return PaperResponse.suppressed("POST", "/fapi/v1/order", "0" * 12)
+
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
+            return {}
+
+        def query_order(self, s, oid):
+            raise AssertionError("PAPER must never poll a venue order")
+
+    client = _Client()
+    policy = _iso_policy(window_deadline_s=3.0, passive_deadline_s=1.5)
+    outcomes, events, _ = _iso_run(client, [_iso_intent("AAAUSDT")], {"AAAUSDT": _iso_filters("AAAUSDT")},
+                                   policy, tmp_path, name="paper.jsonl")
+    assert len(client.orders) == 1
+    assert client.cancels == []
+    assert outcomes[0].fills == ()
+    assert outcomes[0].status == "RESIDUAL"
+    invalid = [e for e in events if e["event"] == "quote_invalid"]
+    assert len(invalid) == 1
+
+
+def test_immediate_taker_skips_invalid_quotes(tmp_path) -> None:
+    """Spec 02: immediate-taker simulation leaves invalid-quote symbols RESIDUAL."""
+    from decimal import Decimal
+
+    from src.live.audit import AuditLog
+    from src.live.executor import execute_intents
+
+    class _Client:
+        def book_tickers(self):
+            return {
+                "AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "0", "askPrice": "100.20"},
+                "BBBUSDT": {"symbol": "BBBUSDT", "bidPrice": "100.00", "askPrice": "100.20"},
+            }
+
+    audit = AuditLog(tmp_path / "imm.jsonl")
+    filters = {"AAAUSDT": _iso_filters("AAAUSDT"), "BBBUSDT": _iso_filters("BBBUSDT")}
+    outcomes = execute_intents(_Client(), [_iso_intent("AAAUSDT"), _iso_intent("BBBUSDT")], filters,
+                               _iso_policy(), audit, lambda: 0.0, lambda s: None,
+                               paper_fill_model="immediate_taker")
+    by = {o.symbol: o for o in outcomes}
+    assert by["AAAUSDT"].status == "RESIDUAL"
+    assert by["AAAUSDT"].filled_qty == Decimal("0")
+    assert by["BBBUSDT"].status == "FILLED"
+
+
+def test_fetch_books_reports_invalid_quotes() -> None:
+    """Spec 02: _fetch_books omits invalid quotes with audit, and tolerates gaps."""
+    from src.live.executor import _fetch_books
+
+    class _BatchMissing:
+        def book_tickers(self):
+            return {"OTHERUSDT": {"bidPrice": "1", "askPrice": "2"}}
+
+    assert _fetch_books(_BatchMissing(), ["AAAUSDT"]) == {}
+
+    class _LegacyInvalid:
+        def book_ticker(self, symbol):
+            return {"bidPrice": "100.00", "askPrice": "0"}
+
+    assert _fetch_books(_LegacyInvalid(), ["AAAUSDT"]) == {}
+
+
+def test_fetch_books_legacy_invalid_audited(tmp_path) -> None:
+    """Spec 02: legacy per-symbol fallback validates through the same gate."""
+    import json
+
+    from src.live.audit import AuditLog
+    from src.live.executor import _fetch_books
+
+    class _LegacyInvalid:
+        def book_ticker(self, symbol):
+            return {"bidPrice": "100.00", "askPrice": "0"}
+
+    audit_path = tmp_path / "books.jsonl"
+    books = _fetch_books(_LegacyInvalid(), ["AAAUSDT"], audit=AuditLog(audit_path))
+    assert books == {}
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert [(e["event"], e["symbol"]) for e in events] == [("quote_invalid", "AAAUSDT")]
+
+
+def test_order_budget_exceeded_posts_nothing(tmp_path) -> None:
+    """Spec 02: an exhausted order budget skips posting without ending the intent."""
+    from src.live.audit import AuditLog
+    from src.live.executor import execute_intents
+    from src.live.rest import RateLimits
+
+    class _Client:
+        def __init__(self):
+            self.orders: list = []
+            self.rate_state = type("S", (), {"used_weight_1m": 0, "order_count_10s": 290, "order_count_1m": 0})()
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, *a, **k):
+            return {}
+
+        def query_order(self, s, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+    client = _Client()
+    limits = RateLimits(request_weight_1m=2400, orders_1m=1200, orders_10s=300)
+    audit = AuditLog(tmp_path / "budget.jsonl")
+    clock_state = [0.0]
+    outcomes = execute_intents(client, [_iso_intent("AAAUSDT")], {"AAAUSDT": _iso_filters("AAAUSDT")},
+                               _iso_policy(window_deadline_s=4.0, passive_deadline_s=3.0), audit,
+                               lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s),
+                               rate_limits=limits)
+    assert client.orders == []
+    assert outcomes[0].status == "RESIDUAL"
+
+
+# ---- Spec 03: execution interruption & journal-backed fill durability ----
+
+def _shutdown_policy(**overrides):
+    base = {"poll_interval_s": 1.0, "passive_deadline_s": 50.0, "window_deadline_s": 200.0,
+            "taker_cap_bps": 15.0, "max_slices": 1}
+    base.update(overrides)
+    from src.live.executor import PassiveExecutionPolicy
+
+    return PassiveExecutionPolicy(**base)
+
+
+def _shutdown_intent(symbol):
+    from decimal import Decimal
+
+    from src.live.planner import OrderIntent
+
+    return OrderIntent(symbol=symbol, side="BUY", quantity=Decimal("1"), reduce_only=False,
+                       target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+                       leg_index=0, decision_price=Decimal("100.10"))
+
+
+def _shutdown_filters(symbol):
+    from decimal import Decimal
+
+    from src.live.filters import SymbolFilters
+
+    return SymbolFilters(symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                         min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+                         quantity_precision=3, price_precision=2)
+
+
+class _ShutdownLiveClient:
+    """Two resting GTX orders; AAA partially fills; shutdown flag trips on the Nth book fetch."""
+
+    def __init__(self, flag, trip_at=2):
+        self.orders: list = []
+        self.cancels: list = []
+        self.flag = flag
+        self.trip_at = trip_at
+        self.books = 0
+
+    def book_tickers(self):
+        self.books += 1
+        if self.books >= self.trip_at:
+            self.flag.requested = True
+        return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"}
+                for s in ("AAAUSDT", "BBBUSDT")}
+
+    def new_order(self, params):
+        self.orders.append(params)
+        return {"orderId": len(self.orders)}
+
+    def cancel_order(self, symbol, orig_client_order_id):
+        self.cancels.append(orig_client_order_id)
+        return {}
+
+    def query_order(self, symbol, orig_client_order_id):
+        for order in self.orders:
+            if order["newClientOrderId"] == orig_client_order_id:
+                if orig_client_order_id in self.cancels:
+                    return {"status": "CANCELED", "executedQty": "0.4" if symbol == "AAAUSDT" else "0",
+                            "avgPrice": "100.00"}
+                return {"status": "NEW", "executedQty": "0.4" if symbol == "AAAUSDT" else "0",
+                        "avgPrice": "100.00"}
+        return {"status": "NEW", "executedQty": "0"}
+
+
+def test_shutdown_during_window_settles_and_raises_interrupted(tmp_path) -> None:
+    """Shutdown mid-window cancels, settles, journals, then raises ExecutionInterrupted."""
+    import json
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.live.audit import AuditLog
+    from src.live.executor import ExecutionInterrupted, execute_intents
+    from src.live.order_journal import OrderJournal
+
+    audit_path = tmp_path / "shutdown.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    flag = SimpleNamespace(requested=False)
+    client = _ShutdownLiveClient(flag)
+    clock_state = [0.0]
+    intents = [_shutdown_intent("AAAUSDT"), _shutdown_intent("BBBUSDT")]
+    filters = {"AAAUSDT": _shutdown_filters("AAAUSDT"), "BBBUSDT": _shutdown_filters("BBBUSDT")}
+
+    with pytest.raises(ExecutionInterrupted) as exc_info:
+        execute_intents(client, intents, filters, _shutdown_policy(), audit,
+                        lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s),
+                        shutdown=flag, journal=journal, attempt=attempt)
+
+    posted_ids = [o["newClientOrderId"] for o in client.orders]
+    assert sorted(client.cancels) == sorted(posted_ids)
+    partial = {o.symbol: o for o in exc_info.value.partial_outcomes}
+    assert partial["AAAUSDT"].filled_qty == Decimal("0.4")
+    assert partial["BBBUSDT"].filled_qty == Decimal("0")
+    fills = journal.fills_after(-1)
+    assert len(fills) == 1
+    assert fills[0].kind == "execution"
+    assert fills[0].quantity == Decimal("0.4")
+    assert fills[0].cumulative_executed_qty == Decimal("0.4")
+    assert fills[0].simulated is False
+    import pandas as pd
+
+    assert journal.unresolved_submits(since=pd.Timestamp("2026-09-14T00:00:00Z") - pd.Timedelta(hours=72)) == ()
+    events = [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert "execution_interrupted" in events
+
+
+def test_shutdown_before_first_tick_posts_nothing(tmp_path) -> None:
+    """A pre-set shutdown flag raises with empty fills and no order posted."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.live.audit import AuditLog
+    from src.live.executor import ExecutionInterrupted, execute_intents
+    from src.live.order_journal import OrderJournal
+
+    audit = AuditLog(tmp_path / "pre.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    flag = SimpleNamespace(requested=True)
+    client = _ShutdownLiveClient(flag, trip_at=10**9)
+    clock_state = [0.0]
+    intents = [_shutdown_intent("AAAUSDT"), _shutdown_intent("BBBUSDT")]
+    filters = {"AAAUSDT": _shutdown_filters("AAAUSDT"), "BBBUSDT": _shutdown_filters("BBBUSDT")}
+
+    with pytest.raises(ExecutionInterrupted) as exc_info:
+        execute_intents(client, intents, filters, _shutdown_policy(), audit,
+                        lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s),
+                        shutdown=flag, journal=journal, attempt=attempt)
+
+    assert client.orders == []
+    assert all(o.fills == () and o.filled_qty == 0 for o in exc_info.value.partial_outcomes)
+    assert journal.fills_after(-1) == ()
+
+
+def test_shutdown_cleanup_budget_bounds_venue_calls(tmp_path) -> None:
+    """With a 20 s budget and 15 s per cancel, at most two of three orders are settled."""
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    from src.live.audit import AuditLog
+    from src.live.executor import ExecutionInterrupted, execute_intents
+    from src.live.order_journal import OrderJournal
+
+    audit = AuditLog(tmp_path / "budget.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    flag = SimpleNamespace(requested=False)
+    clock_state = [0.0]
+
+    class _SlowCancelClient(_ShutdownLiveClient):
+        def cancel_order(self, symbol, orig_client_order_id):
+            clock_state[0] += 15.0
+            return super().cancel_order(symbol, orig_client_order_id)
+
+    symbols = ("AAAUSDT", "BBBUSDT", "CCCUSDT")
+
+    class _ThreeClient(_SlowCancelClient):
+        def book_tickers(self):
+            self.books += 1
+            if self.books >= self.trip_at:
+                self.flag.requested = True
+            return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in symbols}
+
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "CANCELED" if orig_client_order_id in self.cancels else "NEW",
+                    "executedQty": "0", "avgPrice": "100.00"}
+
+    client = _ThreeClient(flag)
+    intents = [_shutdown_intent(s) for s in symbols]
+    filters = {s: _shutdown_filters(s) for s in symbols}
+
+    with pytest.raises(ExecutionInterrupted):
+        execute_intents(client, intents, filters, _shutdown_policy(), audit,
+                        lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s),
+                        shutdown=flag, journal=journal, attempt=attempt,
+                        shutdown_cleanup_budget_s=20.0)
+
+    assert len(client.cancels) == 2
+    posted_ids = [o["newClientOrderId"] for o in client.orders]
+    leftover = [i for i in posted_ids if i not in client.cancels]
+    assert len(leftover) == 1
+    pending = journal.unresolved_submits(
+        since=pd.Timestamp("2026-09-14T00:00:00Z") - pd.Timedelta(hours=72))
+    assert [s.client_order_id for s in pending] == leftover
+
+
+def test_every_fill_is_journaled_before_visible(tmp_path) -> None:
+    """PAPER trade-through and live partial fills each have exactly one journal fill; a failing journal aborts with no in-memory fill."""
+    from decimal import Decimal
+
+    import pytest
+
+    from src.live.audit import AuditLog
+    from src.live.executor import execute_intents
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import PaperResponse
+
+    # PAPER GTX trade-through.
+    class _PaperThrough:
+        def __init__(self, touches):
+            self._touches = list(touches)
+            self._cursor = 0
+
+        def book_tickers(self):
+            idx = min(self._cursor, len(self._touches) - 1)
+            self._cursor += 1
+            bid, ask = self._touches[idx]
+            return {"AAAUSDT": {"bidPrice": bid, "askPrice": ask}}
+
+        def new_order(self, params):
+            return PaperResponse.suppressed("POST", "/fapi/v1/order", "0" * 12)
+
+    from src.live.executor import PassiveExecutionPolicy
+
+    anchored = PassiveExecutionPolicy(poll_interval_s=3.0, passive_deadline_s=50.0, window_deadline_s=600.0,
+                                      taker_cap_bps=15.0, max_slices=1, passive_pricing="anchored")
+    paper_client = _PaperThrough([("100.00", "100.05")] * 4 + [("99.40", "99.50")] * 50)
+    paper_journal = OrderJournal(tmp_path / "paper_journal.jsonl")
+    paper_attempt = _test_attempt(paper_journal)
+    clock_state = [0.0]
+
+    def _clock():
+        value = clock_state[0]
+        clock_state[0] += 3.0
+        return value
+
+    outcomes = execute_intents(paper_client, [_shutdown_intent("AAAUSDT")],
+                               {"AAAUSDT": _shutdown_filters("AAAUSDT")}, anchored,
+                               AuditLog(tmp_path / "paper.jsonl"), _clock, lambda s: None,
+                               journal=paper_journal, attempt=paper_attempt)
+    assert outcomes[0].status == "FILLED"
+    paper_fills = paper_journal.fills_after(-1)
+    assert len(paper_fills) == 1
+    assert paper_fills[0].simulated is True
+    assert paper_fills[0].cumulative_executed_qty is None
+    assert paper_fills[0].quantity == outcomes[0].filled_qty == Decimal("1")
+    assert paper_fills[0].price == outcomes[0].avg_fill_price
+    assert paper_fills[0].attempt_seq == paper_attempt.attempt_seq
+
+    # Live partial fill: one journal execution fill mirrors the outcome delta.
+    live_journal = OrderJournal(tmp_path / "live_journal.jsonl")
+    live_attempt = _test_attempt(live_journal)
+    live_client = _ShutdownLiveClient(__import__("types").SimpleNamespace(requested=False), trip_at=10**9)
+    first_id: dict = {}
+
+    def _once_partial(symbol, oid):
+        # A constant venue answer would re-fill on every repost; only the first order may fill.
+        first_id.setdefault("id", oid)
+        executed = "0.4" if oid == first_id["id"] else "0"
+        return {"status": "NEW", "executedQty": executed, "avgPrice": "100.00"}
+
+    live_client.query_order = _once_partial
+    short = _shutdown_policy(passive_deadline_s=20.0, window_deadline_s=600.0)
+    live_outcomes = execute_intents(live_client, [_shutdown_intent("AAAUSDT")],
+                                    {"AAAUSDT": _shutdown_filters("AAAUSDT")}, short,
+                                    AuditLog(tmp_path / "live.jsonl"), SteppingClock(3.0), lambda s: None,
+                                    journal=live_journal, attempt=live_attempt)
+    assert live_outcomes[0].filled_qty == Decimal("0.4")
+    journaled = live_journal.fills_after(-1)
+    assert [(f.quantity, f.price) for f in journaled] == [(Decimal("0.4"), live_outcomes[0].avg_fill_price)]
+
+    # A journal that raises on write aborts the attempt with no in-memory fill.
+    boom_journal = OrderJournal(tmp_path / "boom_journal.jsonl")
+    boom_attempt = _test_attempt(boom_journal)
+    boom_client = _ShutdownLiveClient(__import__("types").SimpleNamespace(requested=False), trip_at=10**9)
+    boom_client.query_order = lambda s, oid: {"status": "NEW", "executedQty": "1", "avgPrice": "100.00"}
+
+    def _boom(**kwargs):
+        raise RuntimeError("journal down")
+
+    boom_journal.record_fill = _boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="journal down"):
+        execute_intents(boom_client, [_shutdown_intent("AAAUSDT")],
+                        {"AAAUSDT": _shutdown_filters("AAAUSDT")}, short,
+                        AuditLog(tmp_path / "boom.jsonl"), SteppingClock(3.0), lambda s: None,
+                        journal=boom_journal, attempt=boom_attempt)
+
+
+def test_orphan_settlement_journaled_not_applied(tmp_path) -> None:
+    """Venue executedQty 1.5 over observed 1.0 yields one orphan_settlement fill plus terminal."""
+    import pandas as pd
+    from decimal import Decimal
+
+    from src.live.audit import AuditLog
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+
+    audit_path = tmp_path / "orphan2.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    now = pd.Timestamp("2026-09-14T00:00:00Z")
+    order_id = "mh20260914-ABCDEFGHIJ-0-0-3"
+    journal.record_submit(order_id, "AAAUSDT", journal.next_submit_seq(), attempt_seq=attempt.attempt_seq,
+                          side="BUY", quantity=Decimal("2"), reduce_only=False, leg_index=0)
+    journal.record_fill(kind="execution", attempt_seq=attempt.attempt_seq, symbol="AAAUSDT", side="BUY",
+                        quantity=Decimal("1"), price=Decimal("99"), fee_bps=2.0, liquidity="maker",
+                        reason="maker_fill", filled_at=now, client_order_id=order_id, leg_index=0,
+                        cumulative_executed_qty=Decimal("1"), simulated=False)
+
+    class _Client:
+        def open_orders(self):
+            return [{"symbol": "AAAUSDT", "clientOrderId": order_id}]
+
+        def cancel_order(self, symbol, oid):
+            return {}
+
+        def query_order(self, symbol, oid):
+            return {"status": "CANCELED", "side": "SELL", "avgPrice": "101", "executedQty": "1.5"}
+
+    fills = cancel_orphan_orders(_Client(), "20260914", audit, journal=journal, now=now, taker_fee_bps=4.5)
+
+    assert len(fills) == 1
+    assert fills[0].kind == "orphan_settlement"
+    assert fills[0].quantity == Decimal("0.5")
+    assert (fills[0].side, fills[0].price) == ("SELL", Decimal("101"))
+    assert fills[0].cumulative_executed_qty == Decimal("1.5")
+    assert fills[0].fee_bps == 4.5
+    assert journal.unresolved_submits(since=now - pd.Timedelta(hours=72)) == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"status": "CANCELED", "side": "BUY", "avgPrice": "0", "executedQty": "1.5"},
+        {"status": "CANCELED", "side": "BUY", "avgPrice": "abc", "executedQty": "1.5"},
+        {"status": "CANCELED", "avgPrice": "101", "executedQty": "1.5"},
+        {"status": "CANCELED", "side": "BUY", "avgPrice": "101"},
+        {"status": "CANCELED", "side": "BUY", "avgPrice": "101", "executedQty": "x"},
+        {"status": "CANCELED", "side": "BUY", "avgPrice": "101", "executedQty": "NaN"},
+    ],
+    ids=["zero_price", "unparseable_price", "no_side", "no_executed", "bad_executed", "nan_executed"],
+)
+def test_orphan_settlement_without_price_fails_closed(tmp_path, answer) -> None:
+    """A settled orphan with a missing venue side, executedQty or positive price raises and journals nothing."""
+    import pandas as pd
+    from decimal import Decimal
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.audit import AuditLog
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+
+    audit = AuditLog(tmp_path / "orphan3.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    now = pd.Timestamp("2026-09-14T00:00:00Z")
+    order_id = "mh20260914-ABCDEFGHIJ-0-0-3"
+    journal.record_submit(order_id, "AAAUSDT", journal.next_submit_seq(), attempt_seq=attempt.attempt_seq,
+                          side="BUY", quantity=Decimal("2"), reduce_only=False, leg_index=0)
+
+    class _Client:
+        def open_orders(self):
+            return [{"symbol": "AAAUSDT", "clientOrderId": order_id}]
+
+        def cancel_order(self, symbol, oid):
+            return {}
+
+        def query_order(self, symbol, oid):
+            return dict(answer)
+
+    with pytest.raises(DataIntegrityError):
+        cancel_orphan_orders(_Client(), "20260914", audit, journal=journal, now=now, taker_fee_bps=4.5)
+
+    assert journal.fills_after(-1) == ()
+    assert [s.client_order_id for s in journal.unresolved_submits(since=now - pd.Timedelta(hours=72))] == [order_id]
+
+
+def test_orphan_sweep_equality_branches(tmp_path) -> None:
+    """OrphanSweep compares by fills against lists and by value against sweeps."""
+    import pandas as pd
+    from src.live.audit import AuditLog
+    from src.live.executor import OrphanSweep, cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+
+    audit = AuditLog(tmp_path / "sweep_eq.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    now = pd.Timestamp("2026-09-14T00:00:00Z")
+
+    class _Client:
+        def open_orders(self):
+            return []
+
+    empty = cancel_orphan_orders(_Client(), "20260914", audit, journal=journal, now=now, taker_fee_bps=4.5)
+    assert empty == []
+    assert empty == ()
+    assert empty == OrphanSweep(fills=(), foreign_symbols=())
+    assert (empty == object()) is False
+
+
+@pytest.mark.parametrize("paper_fill_model", ["immediate_taker", None], ids=["immediate_taker", "peg_chase"])
+def test_mutation_suppressed_paper_client_still_journals_fills(tmp_path, paper_fill_model) -> None:
+    """Production PAPER clients report mode=PAPER (mutations suppressed); their simulated fills must still be
+    journaled, because the runner commits the ledger from journal fills only (INV-FILL-WAL)."""
+    from src.live.audit import AuditLog
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.order_journal import OrderJournal
+    from src.live.rest import PaperResponse
+    from src.live.settings import ExecutionMode
+
+    class _SuppressedPaperClient:
+        mode = ExecutionMode.PAPER
+
+        def __init__(self) -> None:
+            self._ticks = 0
+
+        def book_tickers(self):
+            self._ticks += 1
+            bid, ask = ("100.00", "100.05") if self._ticks <= 4 else ("99.40", "99.50")
+            return {"AAAUSDT": {"bidPrice": bid, "askPrice": ask}}
+
+        def new_order(self, params):
+            return PaperResponse.suppressed("POST", "/fapi/v1/order", "0" * 12)
+
+    policy = PassiveExecutionPolicy(poll_interval_s=3.0, passive_deadline_s=50.0, window_deadline_s=600.0,
+                                    taker_cap_bps=15.0, max_slices=1, passive_pricing="anchored")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+
+    outcomes = execute_intents(_SuppressedPaperClient(), [_shutdown_intent("AAAUSDT")],
+                               {"AAAUSDT": _shutdown_filters("AAAUSDT")}, policy,
+                               AuditLog(tmp_path / "audit.jsonl"), SteppingClock(3.0), lambda s: None,
+                               paper_fill_model=paper_fill_model, journal=journal, attempt=attempt)
+
+    assert outcomes[0].status == "FILLED"
+    fills = journal.fills_after(-1)
+    assert [(f.quantity, f.simulated) for f in fills] == [(outcomes[0].filled_qty, True)]
+
+
+def test_paper_ioc_backstop_fill_is_journaled_and_terminal(tmp_path) -> None:
+    """A PAPER IOC backstop that fills at posting journals one simulated fill and marks the order FILLED."""
+    import pandas as pd
+
+    from src.live.order_journal import OrderJournal
+    from src.live.settings import ExecutionMode
+
+    class _StaticPaper(PaperStubClient):
+        mode = ExecutionMode.PAPER
+
+        def book_tickers(self):
+            return {"AAAUSDT": self.book_ticker("AAAUSDT")}
+
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    client = _StaticPaper(touches=[("100.00", "100.20")])
+
+    outcomes = execute_intents(client, [_intent()], {"AAAUSDT": _filters(tick_size="0.01")}, _policy(),
+                               AuditLog(tmp_path / "audit.jsonl"), SteppingClock(3.0), lambda _s: None,
+                               journal=journal, attempt=attempt)
+
+    assert outcomes[0].status == "FILLED"
+    fills = journal.fills_after(-1)
+    assert sum(f.quantity for f in fills) == outcomes[0].filled_qty
+    assert all(f.simulated and f.reason == "timeout_taker" for f in fills)
+    assert journal.unresolved_submits(since=pd.Timestamp("2020-01-01", tz="UTC")) == ()
+
+
+def test_shutdown_cleanup_failure_is_audited_and_left_for_recovery(tmp_path) -> None:
+    """A venue error while settling on shutdown is audited; the order stays unresolved (restart recovery) and
+    ExecutionInterrupted is still raised with the fills observed so far."""
+    import json
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.live.errors import VenueError
+    from src.live.executor import ExecutionInterrupted
+    from src.live.order_journal import OrderJournal
+
+    class _CancelFails(_ShutdownLiveClient):
+        def cancel_order(self, symbol, orig_client_order_id):
+            raise VenueError("venue", code=-1022, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+    audit_path = tmp_path / "audit.jsonl"
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    flag = SimpleNamespace(requested=False)
+    clock_state = [0.0]
+
+    with pytest.raises(ExecutionInterrupted) as exc_info:
+        execute_intents(_CancelFails(flag), [_shutdown_intent("AAAUSDT")], {"AAAUSDT": _shutdown_filters("AAAUSDT")},
+                        _shutdown_policy(), AuditLog(audit_path),
+                        lambda: clock_state[0], lambda s: clock_state.__setitem__(0, clock_state[0] + s),
+                        shutdown=flag, journal=journal, attempt=attempt)
+
+    assert exc_info.value.partial_outcomes[0].filled_qty == Decimal("0.4")
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert any(e["event"] == "abort_cleanup_failed" for e in events)
+    unresolved = journal.unresolved_submits(since=pd.Timestamp("2026-01-01", tz="UTC"))
+    assert len(unresolved) == 1
+
+
+def test_execute_intents_requires_journal_and_attempt_together(tmp_path) -> None:
+    from src.live.order_journal import OrderJournal
+
+    with pytest.raises(ValueError, match="together"):
+        execute_intents(object(), [], {}, _shutdown_policy(), AuditLog(tmp_path / "a.jsonl"), lambda: 0.0,
+                        lambda s: None, journal=OrderJournal(tmp_path / "j.jsonl"))
+
+
+def test_immediate_taker_shutdown_before_first_tick_raises_interrupted(tmp_path) -> None:
+    """immediate_taker honours a shutdown requested before any fill: nothing is fetched, simulated or journaled."""
+    from types import SimpleNamespace
+
+    from src.live.executor import ExecutionInterrupted
+    from src.live.order_journal import OrderJournal
+
+    class _NoCalls:
+        def book_tickers(self):
+            raise AssertionError("no book fetch after shutdown")
+
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+
+    with pytest.raises(ExecutionInterrupted) as exc_info:
+        execute_intents(_NoCalls(), [_shutdown_intent("AAAUSDT")], {"AAAUSDT": _shutdown_filters("AAAUSDT")},
+                        _shutdown_policy(), AuditLog(tmp_path / "a.jsonl"), lambda: 0.0, lambda s: None,
+                        shutdown=SimpleNamespace(requested=True), paper_fill_model="immediate_taker",
+                        journal=journal, attempt=attempt)
+
+    assert exc_info.value.partial_outcomes == ()
+    assert journal.fills_after(-1) == ()
+
+
+def test_immediate_taker_journal_failure_clears_sink(tmp_path) -> None:
+    """If the WAL write fails, no simulated fill is exposed through the outcome sink (the journal is the only truth)."""
+    from src.live.order_journal import OrderJournal
+    from src.live.settings import ExecutionMode
+
+    class _DiskFull(OrderJournal):
+        def record_fill(self, **kwargs):
+            raise OSError(28, "No space left on device")
+
+    class _Paper:
+        mode = ExecutionMode.PAPER
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"}}
+
+    journal = _DiskFull(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    sink: list = ["stale"]
+
+    with pytest.raises(OSError, match="No space left"):
+        execute_intents(_Paper(), [_shutdown_intent("AAAUSDT")], {"AAAUSDT": _shutdown_filters("AAAUSDT")},
+                        _shutdown_policy(), AuditLog(tmp_path / "a.jsonl"), lambda: 0.0, lambda s: None,
+                        outcome_sink=sink, paper_fill_model="immediate_taker", journal=journal, attempt=attempt)
+
+    assert sink == []
+
+
+def test_cancel_fill_race_at_passive_timeout_completes_intent(tmp_path) -> None:
+    """The passive-timeout cancel settles a full fill that raced the cancel: the intent ends FILLED (journaled terminal)
+    and no IOC backstop is posted."""
+    import pandas as pd
+
+    from src.live.order_journal import OrderJournal
+
+    class _RaceClient:
+        def __init__(self) -> None:
+            self.orders: list = []
+            self.cancelled: set = set()
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, symbol, oid):
+            self.cancelled.add(oid)
+            return {}
+
+        def query_order(self, symbol, oid):
+            if oid in self.cancelled:
+                return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"status": "NEW", "executedQty": "0", "avgPrice": "0"}
+
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    client = _RaceClient()
+
+    outcomes = execute_intents(client, [_shutdown_intent("AAAUSDT")], {"AAAUSDT": _shutdown_filters("AAAUSDT")},
+                               _shutdown_policy(passive_deadline_s=5.0), AuditLog(tmp_path / "a.jsonl"),
+                               SteppingClock(1.0), lambda s: None, journal=journal, attempt=attempt)
+
+    assert outcomes[0].status == "FILLED"
+    assert outcomes[0].filled_qty == Decimal("1")
+    assert len(client.orders) == 1
+    assert journal.unresolved_submits(since=pd.Timestamp("2026-01-01", tz="UTC")) == ()
+
+
+def test_reduce_only_obsolete_ends_only_that_intent_and_journals_terminal(tmp_path) -> None:
+    """-2022 (position already closed) on a reduce-only post ends that intent OBSOLETE, journals the id terminal,
+    and the other symbol keeps executing."""
+    import pandas as pd
+
+    from src.live.errors import OrderObsolete
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+
+    class _Client:
+        def __init__(self) -> None:
+            self.orders: list = []
+
+        def book_tickers(self):
+            return {s: {"bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            if params["symbol"] == "AAAUSDT":
+                raise OrderObsolete("reduce only rejected")
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, symbol, oid):
+            return {}
+
+        def query_order(self, symbol, oid):
+            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+
+    reduce = OrderIntent(symbol="AAAUSDT", side="SELL", quantity=Decimal("1"), reduce_only=True,
+                         target_qty=Decimal("0"), current_qty=Decimal("1"), client_order_prefix="20260914",
+                         leg_index=0, decision_price=Decimal("100.10"))
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+
+    outcomes = execute_intents(_Client(), [reduce, _shutdown_intent("BBBUSDT")],
+                               {"AAAUSDT": _shutdown_filters("AAAUSDT"), "BBBUSDT": _shutdown_filters("BBBUSDT")},
+                               _shutdown_policy(), AuditLog(tmp_path / "a.jsonl"), SteppingClock(1.0), lambda s: None,
+                               journal=journal, attempt=attempt)
+
+    by_symbol = {o.symbol: o for o in outcomes}
+    assert by_symbol["AAAUSDT"].status == "OBSOLETE"
+    assert by_symbol["BBBUSDT"].status == "FILLED"
+    assert journal.unresolved_submits(since=pd.Timestamp("2026-01-01", tz="UTC")) == ()
+
+
+def test_finalize_no_wait_path_leaves_unknown_order_unresolved(tmp_path) -> None:
+    """A no-op sleeper (shutdown/abort cleanup) never declares an unknown order NOT_PLACED early."""
+    from src.live.audit import AuditLog
+    from src.live.errors import VenueError
+    from src.live.executor import _finalize, _IntentRuntime
+
+    class _Missing:
+        unknown_outcome_horizon_s = 30.0
+
+        def __init__(self) -> None:
+            self.queries = 0
+
+        def query_order(self, s, oid):
+            self.queries += 1
+            raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+    rt = _IntentRuntime(intent=_exec_intent("AAAUSDT"), filters=_exec_filters("AAAUSDT"))
+    rt.unresolved_id = "u1"
+    rt.unresolved_at = 0.0
+    client = _Missing()
+    _finalize(client, [rt], AuditLog(tmp_path / "a.jsonl"), lambda: 1.0, lambda _s: None)
+    assert rt.unresolved_id == "u1"
+    assert client.queries == 2
+    assert rt.terminal_status is None
+
+
+def test_default_unknown_outcome_horizon_ignores_environment(monkeypatch) -> None:
+    """The module-level default derives from field defaults, never from LIVE_* env at import time."""
+    from src.live.executor import _default_unknown_outcome_horizon_s
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setenv("LIVE_RECV_WINDOW_MS", "not-a-number")
+    expected = LiveSettings.model_fields["recv_window_ms"].default / 1000
+    assert _default_unknown_outcome_horizon_s() > expected

@@ -76,3 +76,97 @@ def test_SCENARIO_REC_05_microstructure_record_shape(tmp_path: Path):
     assert set(df.columns) == fields
 # SCENARIO_REC_04-quotes-single-batch-call
 # SCENARIO_REC_05-microstructure-record-shape
+
+
+def test_parse_book_quote_rejects_zero_bid() -> None:
+    """Spec 02: a zero bid (empty book side) is unusable."""
+    from src.live.microstructure import parse_book_quote
+
+    assert parse_book_quote("X", {"bidPrice": "0.0", "askPrice": "89550.0"}) is None
+
+
+def test_parse_book_quote_rejects_zero_both_sides() -> None:
+    """Spec 02: zero on both sides is rejected."""
+    from src.live.microstructure import parse_book_quote
+
+    assert parse_book_quote("X", {"bidPrice": "0.00", "askPrice": "0.00"}) is None
+
+
+def test_parse_book_quote_rejects_crossed_and_locked() -> None:
+    """Spec 02: crossed and locked books are rejected."""
+    from src.live.microstructure import parse_book_quote
+
+    assert parse_book_quote("X", {"bidPrice": "101", "askPrice": "100"}) is None
+    assert parse_book_quote("X", {"bidPrice": "100", "askPrice": "100"}) is None
+
+
+def test_parse_book_quote_rejects_missing_price() -> None:
+    """Spec 02: a missing price is rejected, never defaulted to 0."""
+    from src.live.microstructure import parse_book_quote
+
+    assert parse_book_quote("X", {"askPrice": "100.1"}) is None
+    assert parse_book_quote("X", {}) is None
+    assert parse_book_quote("X", None) is None
+
+
+def test_parse_book_quote_rejects_non_finite() -> None:
+    """Spec 02: NaN and Infinity prices are rejected."""
+    from src.live.microstructure import parse_book_quote
+
+    assert parse_book_quote("X", {"bidPrice": "NaN", "askPrice": "100.1"}) is None
+    assert parse_book_quote("X", {"bidPrice": "100", "askPrice": "Infinity"}) is None
+    assert parse_book_quote("X", {"bidPrice": "100", "askPrice": "100.1", "bidQty": "oops"}) is None
+
+
+def test_parse_book_quote_accepts_valid_with_default_qty() -> None:
+    """Spec 02: a valid quote passes with zero quantities and a positive mid."""
+    from decimal import Decimal
+
+    from src.live.microstructure import parse_book_quote
+
+    quote = parse_book_quote("X", {"bidPrice": "100", "askPrice": "100.1"})
+    assert quote is not None
+    assert quote.bid_qty == Decimal(0)
+    assert quote.ask_qty == Decimal(0)
+    assert quote.mid == Decimal("100.05")
+    assert quote.spread_bps > 0
+    legacy = parse_book_quote("X", {"bid": "100", "ask": "100.1", "bidQty": "2", "askQty": "3"})
+    assert legacy is not None
+    assert legacy.bid_qty == Decimal(2)
+
+
+def test_fetch_book_quotes_drops_only_invalid_symbols() -> None:
+    """Spec 02: batch fetch keeps the valid symbol and drops the zero-bid one."""
+    from src.live.microstructure import fetch_book_quotes
+
+    class _Client:
+        def book_tickers(self):
+            return {
+                "BTCUSDT": {"bidPrice": "100", "askPrice": "100.1"},
+                "BTCUSDT_260925": {"bidPrice": "0.0", "askPrice": "100.1"},
+            }
+
+    result = fetch_book_quotes(_Client(), ["BTCUSDT", "BTCUSDT_260925"])
+    assert set(result) == {"BTCUSDT"}
+
+
+def test_parse_book_quote_rejects_non_finite_qty() -> None:
+    """Spec 02: a present non-finite quantity makes the quote invalid."""
+    from src.live.microstructure import parse_book_quote
+
+    assert parse_book_quote("X", {"bidPrice": "100", "askPrice": "100.1", "bidQty": "NaN"}) is None
+
+
+def test_fetch_book_quotes_list_payload_drops_invalid() -> None:
+    """Spec 02: list batch payloads validate every entry the same way."""
+    from src.live.microstructure import fetch_book_quotes
+
+    class _Client:
+        def book_tickers(self):
+            return [
+                {"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.1"},
+                {"symbol": "BTCUSDT_260925", "bidPrice": "0.0", "askPrice": "100.1"},
+            ]
+
+    result = fetch_book_quotes(_Client(), ["BTCUSDT", "BTCUSDT_260925"])
+    assert set(result) == {"BTCUSDT"}

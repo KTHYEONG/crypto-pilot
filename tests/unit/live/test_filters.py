@@ -83,6 +83,8 @@ def test_parse_exchange_filters_keeps_only_tradable_perpetuals() -> None:
     parsed = parse_exchange_filters(exchange_info)
     assert set(parsed) == {"AAAUSDT"}
     assert parsed["AAAUSDT"].min_notional == Decimal("5")
+    assert parsed["AAAUSDT"].position_control_side == "NONE"
+    assert parsed["AAAUSDT"].blocks_risk_increase is False
 
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
@@ -132,3 +134,58 @@ def test_held_symbols_absent_from_exchange_lists_nonzero_unlisted_positions() ->
     assert held_symbols_absent_from_exchange({}, info) == []
     with pytest.raises(DataIntegrityError):
         held_symbols_absent_from_exchange(positions, {})
+
+
+def _filter_entry(symbol, extra_filters=()):
+    return {
+        "symbol": symbol,
+        "contractType": "PERPETUAL",
+        "quoteAsset": "USDT",
+        "status": "TRADING",
+        "quantityPrecision": 3,
+        "pricePrecision": 2,
+        "filters": [
+            {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+            {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "1000"},
+            {"filterType": "MIN_NOTIONAL", "minNotional": "5"},
+            *extra_filters,
+        ],
+    }
+
+
+def test_position_risk_control_is_parsed() -> None:
+    """Spec 02: POSITION_RISK_CONTROL NONE parses with no restriction."""
+    from src.live.filters import parse_exchange_filters
+
+    info = {"symbols": [_filter_entry("AAAUSDT", [{"filterType": "POSITION_RISK_CONTROL", "positionControlSide": "NONE"}])]}
+    parsed = parse_exchange_filters(info)
+    assert parsed["AAAUSDT"].position_control_side == "NONE"
+    assert parsed["AAAUSDT"].blocks_risk_increase is False
+
+
+def test_unknown_control_side_blocks_risk_increases() -> None:
+    """Spec 02: any non-NONE control side (including unknown values) blocks increases."""
+    from decimal import Decimal
+
+    from src.live.filters import POSITION_CONTROL_NONE, SymbolFilters, parse_exchange_filters
+
+    assert POSITION_CONTROL_NONE == "NONE"
+    for side in ("LONG", "SHORT", "BOTH", "FUTURE_VALUE"):
+        info = {"symbols": [_filter_entry("AAAUSDT", [{"filterType": "POSITION_RISK_CONTROL", "positionControlSide": side}])]}
+        parsed = parse_exchange_filters(info)
+        assert parsed["AAAUSDT"].position_control_side == side
+        assert parsed["AAAUSDT"].blocks_risk_increase is True
+    assert SymbolFilters(
+        symbol="X", tick_size=Decimal("0.1"), step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"), min_notional=Decimal("5"),
+        max_qty=Decimal("1000"), quantity_precision=3, price_precision=2,
+    ).blocks_risk_increase is False
+
+
+def test_missing_control_filter_defaults_to_none() -> None:
+    """Spec 02: entries without the filter parse and impose no restriction."""
+    from src.live.filters import parse_exchange_filters
+
+    parsed = parse_exchange_filters({"symbols": [_filter_entry("AAAUSDT")]})
+    assert parsed["AAAUSDT"].position_control_side == "NONE"
+    assert parsed["AAAUSDT"].blocks_risk_increase is False

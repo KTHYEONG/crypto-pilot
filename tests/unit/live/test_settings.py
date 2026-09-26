@@ -163,7 +163,6 @@ def test_live_settings_refresh_field_defaults_and_bounds(monkeypatch) -> None:
     assert s.refresh_max_workers == 12
     assert s.refresh_lookback_days == 40
     assert s.refresh_deadline_s == 900.0
-    assert s.refresh_freshness_floor_hours == 1.5
     assert s.refresh_max_fail_fraction == 0.15
     assert s.max_market_data_staleness_hours == 30.0
 
@@ -395,3 +394,162 @@ def test_exec_depth_validator_rejects_bad_variants() -> None:
     with pytest.raises(ValueError, match="exec_depth_post_window_s"):
         LiveSettings(exec_depth_post_window_s=-1)
     assert LiveSettings(exec_depth_post_window_s=0).exec_depth_post_window_s == 0
+
+
+def test_reject_cluster_alert_min_symbols_default_and_bounds() -> None:
+    """Spec 02: cluster alert threshold defaults to 3 and requires >= 2."""
+    import pytest
+
+    from src.live.settings import LiveSettings
+
+    assert LiveSettings().reject_cluster_alert_min_symbols == 3
+    with pytest.raises(ValueError, match="reject_cluster_alert_min_symbols"):
+        LiveSettings(reject_cluster_alert_min_symbols=1)
+
+
+def test_deadman_ping_validators_require_positive_seconds() -> None:
+    """deadman 핑 간격·타임아웃은 양수이며 타임아웃은 간격보다 짧다."""
+    import pytest
+
+    from src.live.settings import LiveSettings
+
+    with pytest.raises(ValueError, match="deadman_ping_interval_s"):
+        LiveSettings(deadman_ping_interval_s=0)
+    with pytest.raises(ValueError, match="deadman_ping_timeout_s"):
+        LiveSettings(deadman_ping_interval_s=300.0, deadman_ping_timeout_s=300.0)
+
+
+def test_alert_outbox_max_records_requires_positive() -> None:
+    """아웃박스 용량 상한은 1 이상이다."""
+    import pytest
+
+    from src.live.settings import LiveSettings
+
+    with pytest.raises(ValueError, match="alert_outbox_max_records"):
+        LiveSettings(alert_outbox_max_records=0)
+
+
+def test_venue_force_close_lookback_hours_bounded() -> None:
+    """Force-close lookback is bounded by venue retention."""
+    import pytest
+
+    from src.live.settings import LiveSettings
+
+    assert LiveSettings(venue_force_close_lookback_hours=168.0).venue_force_close_lookback_hours == 168.0
+    with pytest.raises(ValueError, match="venue_force_close_lookback_hours"):
+        LiveSettings(venue_force_close_lookback_hours=0)
+    with pytest.raises(ValueError, match="venue_force_close_lookback_hours"):
+        LiveSettings(venue_force_close_lookback_hours=169)
+
+
+def test_bounded_validators_reject_non_positive() -> None:
+    """Shared positive/bounded validators fail closed."""
+    import pytest
+
+    from src.live.settings import LiveSettings
+
+    with pytest.raises(ValueError, match="journal_recovery_lookback_hours"):
+        LiveSettings(journal_recovery_lookback_hours=0)
+    with pytest.raises(ValueError, match="tax_income_page_limit"):
+        LiveSettings(tax_income_page_limit=0)
+    with pytest.raises(ValueError, match="tax_max_pages_per_cycle"):
+        LiveSettings(tax_max_pages_per_cycle=0)
+    with pytest.raises(ValueError, match="tax_income_overlap_s"):
+        LiveSettings(tax_income_overlap_s=0)
+
+
+def test_delisting_settings_validators_and_retention_default() -> None:
+    """Delisting lifecycle knobs fail closed on nonsense; listing retention tracks data retention."""
+    import pytest
+
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings()
+    assert settings.delisting_announcement_horizon_days == 365
+    assert settings.delisting_block_lead_hours == 48.0
+    assert settings.delisting_settlement_min_flat_bars == 3
+    assert settings.delisting_settlement_price_rtol == 1e-9
+    assert settings.venue_listing_snapshot_max_age_hours == 30.0
+    assert settings.venue_listing_retention_days == settings.data_retention_days
+    assert LiveSettings(venue_listing_retention_days=7).venue_listing_retention_days == 7
+
+    with pytest.raises(ValueError, match="delisting_announcement_horizon_days"):
+        LiveSettings(delisting_announcement_horizon_days=0)
+    with pytest.raises(ValueError, match="delisting_block_lead_hours"):
+        LiveSettings(delisting_block_lead_hours=0)
+    with pytest.raises(ValueError, match="venue_listing_snapshot_max_age_hours"):
+        LiveSettings(venue_listing_snapshot_max_age_hours=0)
+    with pytest.raises(ValueError, match="delisting_settlement_min_flat_bars"):
+        LiveSettings(delisting_settlement_min_flat_bars=0)
+    with pytest.raises(ValueError, match="delisting_settlement_price_rtol"):
+        LiveSettings(delisting_settlement_price_rtol=0)
+    with pytest.raises(ValueError, match="delisting_settlement_fee_bps"):
+        LiveSettings(delisting_settlement_fee_bps=-1)
+    with pytest.raises(ValueError, match="venue_listing_retention_days"):
+        LiveSettings(venue_listing_retention_days=0)
+
+
+def test_venue_age_validators_reject_negative_and_inverted() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.live.settings import LiveSettings
+
+    with pytest.raises(ValidationError, match="venue_rules_warn_age_days"):
+        LiveSettings(venue_rules_warn_age_days=-1.0)
+    with pytest.raises(ValidationError, match="venue_rules_warn_age_days"):
+        LiveSettings(venue_rules_warn_age_days=7.0, venue_rules_max_age_days=7.0)
+
+
+def test_funding_prefetch_offset_validator_bounds() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.live.settings import LiveSettings
+
+    with pytest.raises(ValidationError):
+        LiveSettings(funding_prefetch_offset_hours=0.0)
+    with pytest.raises(ValidationError):
+        LiveSettings(funding_prefetch_offset_hours=22.5)
+    assert LiveSettings(funding_prefetch_offset_hours=20.25).funding_prefetch_offset_hours == 20.25
+
+
+def test_recorder_health_field_defaults() -> None:
+    """Watchdog persistence thresholds default to the spec'd values."""
+    from src.live.settings import LiveSettings as _Settings
+
+    settings = _Settings()
+    assert settings.recorder_sampler_max_consecutive_failures == 5
+    assert settings.recorder_min_capture_ratio == 0.9
+    assert settings.recorder_capture_ratio_min_points == 10
+    assert settings.recorder_persist_stale_s == 1200.0
+    assert settings.recorder_max_consecutive_flush_failures == 3
+    assert settings.recorder_reference_grace_s == 3600.0
+    assert settings.recorder_rejected_fraction_alert == 0.01
+    assert settings.recorder_rejected_max_consecutive_points == 60
+
+
+def test_recorder_health_field_validation() -> None:
+    """Non-positive counts and out-of-range ratios fail naming the field."""
+    from pydantic import ValidationError
+
+    from src.live.settings import LiveSettings as _Settings
+
+    with pytest.raises(ValidationError, match="recorder_sampler_max_consecutive_failures"):
+        _Settings(recorder_sampler_max_consecutive_failures=0)
+    with pytest.raises(ValidationError, match="recorder_capture_ratio_min_points"):
+        _Settings(recorder_capture_ratio_min_points=0)
+    with pytest.raises(ValidationError, match="recorder_max_consecutive_flush_failures"):
+        _Settings(recorder_max_consecutive_flush_failures=0)
+    with pytest.raises(ValidationError, match="recorder_rejected_max_consecutive_points"):
+        _Settings(recorder_rejected_max_consecutive_points=0)
+    with pytest.raises(ValidationError, match="recorder_min_capture_ratio"):
+        _Settings(recorder_min_capture_ratio=0.0)
+    with pytest.raises(ValidationError, match="recorder_min_capture_ratio"):
+        _Settings(recorder_min_capture_ratio=1.5)
+    with pytest.raises(ValidationError, match="recorder_rejected_fraction_alert"):
+        _Settings(recorder_rejected_fraction_alert=0.0)
+    with pytest.raises(ValidationError, match="recorder_persist_stale_s"):
+        _Settings(recorder_persist_stale_s=0.0)
+    with pytest.raises(ValidationError, match="recorder_reference_grace_s"):
+        _Settings(recorder_reference_grace_s=-1.0)

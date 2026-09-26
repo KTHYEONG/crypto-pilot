@@ -158,6 +158,14 @@ def build_recorder_watchdog(
         liquidation_silence_s=settings.recorder_liquidation_silence_s,
         liquidation_max_failed_connections=settings.recorder_liquidation_max_failed_connections,
         sampler_stale_s=settings.recorder_sampler_stale_s,
+        sampler_max_consecutive_failures=settings.recorder_sampler_max_consecutive_failures,
+        min_capture_ratio=settings.recorder_min_capture_ratio,
+        capture_ratio_min_points=settings.recorder_capture_ratio_min_points,
+        persist_stale_s=settings.recorder_persist_stale_s,
+        max_consecutive_flush_failures=settings.recorder_max_consecutive_flush_failures,
+        reference_grace_s=settings.recorder_reference_grace_s,
+        rejected_fraction_alert=settings.recorder_rejected_fraction_alert,
+        rejected_max_consecutive_points=settings.recorder_rejected_max_consecutive_points,
     )
     return RecorderWatchdog(
         heartbeat_path=LIVE_CAPTURE_DIR / HEARTBEAT_NAME,

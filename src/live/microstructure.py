@@ -50,6 +50,51 @@ class BookQuote:
         return float((self.ask - self.bid) / mid * Decimal(10_000))
 
 
+def parse_book_quote(symbol: str, entry: Mapping[str, Any]) -> BookQuote | None:
+    """Validate one bookTicker entry into a two-sided top of book, or None when it is unusable.
+
+    Binance encodes an empty book side as price 0 (e.g. a settled delivery contract returned
+    ``bidPrice "0.0"`` on 2026-09-25); a crossed or locked book, a non-finite value or a missing
+    price is equally unusable for marking or pricing. Returning None makes the symbol *absent*,
+    which every caller already handles (no mark, no post), instead of producing a mark of 0 or a
+    half-price mid.
+
+    Returns:
+        ``BookQuote`` with bid > 0, ask > 0, bid < ask, all finite; quantities default to 0 when
+        missing but a present non-numeric quantity makes the quote invalid.
+    """
+    try:
+        if not isinstance(entry, Mapping):
+            return None
+        bid_raw = entry.get("bidPrice", None)
+        if bid_raw is None:
+            bid_raw = entry.get("bid", None)
+        ask_raw = entry.get("askPrice", None)
+        if ask_raw is None:
+            ask_raw = entry.get("ask", None)
+        if bid_raw is None or ask_raw is None:
+            return None
+        bid = Decimal(str(bid_raw))
+        ask = Decimal(str(ask_raw))
+        if not bid.is_finite() or not ask.is_finite():
+            return None
+        if bid <= 0 or ask <= 0 or not bid < ask:
+            return None
+        bid_qty_raw = entry.get("bidQty", None)
+        if bid_qty_raw is None:
+            bid_qty_raw = entry.get("bid_qty", None)
+        ask_qty_raw = entry.get("askQty", None)
+        if ask_qty_raw is None:
+            ask_qty_raw = entry.get("ask_qty", None)
+        bid_qty = Decimal(0) if bid_qty_raw is None else Decimal(str(bid_qty_raw))
+        ask_qty = Decimal(0) if ask_qty_raw is None else Decimal(str(ask_qty_raw))
+        if not bid_qty.is_finite() or not ask_qty.is_finite():
+            return None
+        return BookQuote(symbol=symbol, bid=bid, ask=ask, bid_qty=bid_qty, ask_qty=ask_qty)
+    except Exception:  # noqa: BLE001, S112 - any parse failure makes the quote unusable
+        return None
+
+
 def fetch_book_quotes(client: Any, symbols: Sequence[str]) -> dict[str, BookQuote]:
     wanted = list(symbols)
     result: dict[str, BookQuote] = {}
@@ -63,24 +108,10 @@ def fetch_book_quotes(client: Any, symbols: Sequence[str]) -> dict[str, BookQuot
                 entry = payload.get(sym)
                 if entry is None:
                     continue
-                try:
-                    bid = Decimal(str(entry.get("bidPrice", entry.get("bid", "0"))))
-                    ask = Decimal(str(entry.get("askPrice", entry.get("ask", "0"))))
-                    bq_raw = entry.get("bidQty", entry.get("bid_qty", entry.get("bidQty", None)))
-                    aq_raw = entry.get("askQty", entry.get("ask_qty", entry.get("askQty", None)))
-                    # Handle missing keys: entry may not have bidQty/askQty
-                    if bq_raw is None:
-                        # try alternative keys
-                        bq_raw = entry.get("bidQty", 0)
-                        if "bidQty" not in entry and "bid_qty" not in entry:
-                            bq_raw = Decimal(0)
-                    if aq_raw is None:
-                        aq_raw = Decimal(0)
-                    bid_qty = Decimal(str(bq_raw)) if bq_raw is not None else Decimal(0)
-                    ask_qty = Decimal(str(aq_raw)) if aq_raw is not None else Decimal(0)
-                except Exception:  # noqa: S112 - 개별 심볼 파싱 실패는 건너뛰고 나머지 수집
+                quote = parse_book_quote(sym, entry)
+                if quote is None:
                     continue
-                result[sym] = BookQuote(symbol=sym, bid=bid, ask=ask, bid_qty=bid_qty, ask_qty=ask_qty)
+                result[sym] = quote
             return result
         # if list, handle
         if isinstance(payload, list):
@@ -92,16 +123,10 @@ def fetch_book_quotes(client: Any, symbols: Sequence[str]) -> dict[str, BookQuot
                 entry = indexed.get(sym)
                 if entry is None:
                     continue
-                try:
-                    bid = Decimal(str(entry.get("bidPrice", entry.get("bid", "0"))))
-                    ask = Decimal(str(entry.get("askPrice", entry.get("ask", "0"))))
-                    bq_raw = entry.get("bidQty", Decimal(0))
-                    aq_raw = entry.get("askQty", Decimal(0))
-                    bid_qty = Decimal(str(bq_raw)) if bq_raw is not None else Decimal(0)
-                    ask_qty = Decimal(str(aq_raw)) if aq_raw is not None else Decimal(0)
-                except Exception:  # noqa: S112 - 개별 심볼 파싱 실패는 건너뛰고 나머지 수집
+                quote = parse_book_quote(sym, entry)
+                if quote is None:
                     continue
-                result[sym] = BookQuote(symbol=sym, bid=bid, ask=ask, bid_qty=bid_qty, ask_qty=ask_qty)
+                result[sym] = quote
             return result
     # fallback per-symbol
     for sym in wanted:
@@ -112,16 +137,10 @@ def fetch_book_quotes(client: Any, symbols: Sequence[str]) -> dict[str, BookQuot
             entry = getter(sym)
         except Exception:  # noqa: S112 - 심볼별 조회 실패는 건너뛰고 나머지 수집
             continue
-        try:
-            bid = Decimal(str(entry.get("bidPrice", entry.get("bid", "0"))))
-            ask = Decimal(str(entry.get("askPrice", entry.get("ask", "0"))))
-            bq_raw = entry.get("bidQty", entry.get("bid_qty", None))
-            aq_raw = entry.get("askQty", entry.get("ask_qty", None))
-            bid_qty = Decimal(str(bq_raw)) if bq_raw is not None else Decimal(0)
-            ask_qty = Decimal(str(aq_raw)) if aq_raw is not None else Decimal(0)
-        except Exception:  # noqa: S112 - 심볼별 파싱 실패는 건너뛰고 나머지 수집
+        quote = parse_book_quote(sym, entry)
+        if quote is None:
             continue
-        result[sym] = BookQuote(symbol=sym, bid=bid, ask=ask, bid_qty=bid_qty, ask_qty=ask_qty)
+        result[sym] = quote
     return result
 
 

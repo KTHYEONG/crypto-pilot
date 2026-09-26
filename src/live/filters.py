@@ -17,6 +17,9 @@ from src.common.errors import DataIntegrityError
 _ZERO = Decimal(0)
 _ONE = Decimal(1)
 
+#: The venue POSITION_RISK_CONTROL value meaning "no restriction".
+POSITION_CONTROL_NONE: str = "NONE"
+
 
 @dataclass(frozen=True, slots=True)
 class QuantizedOrder:
@@ -39,6 +42,12 @@ class SymbolFilters:
     max_qty: Decimal
     quantity_precision: int
     price_precision: int
+    position_control_side: str = POSITION_CONTROL_NONE
+
+    @property
+    def blocks_risk_increase(self) -> bool:
+        """True when the venue's POSITION_RISK_CONTROL restricts the symbol (any value but NONE)."""
+        return self.position_control_side != POSITION_CONTROL_NONE
 
 
 def _required(mapping: Mapping[str, Any], key: str, context: str) -> Any:
@@ -80,6 +89,11 @@ def parse_exchange_filters(exchange_info: Mapping[str, Any]) -> dict[str, Symbol
         lot_size = _filter_of(entry, "LOT_SIZE")
         notional = _notional_filter(entry)
         min_notional_key = "minNotional" if "minNotional" in notional else "notional"
+        position_control_side = POSITION_CONTROL_NONE
+        for item in entry.get("filters", ()):
+            if isinstance(item, Mapping) and item.get("filterType") == "POSITION_RISK_CONTROL":
+                position_control_side = str(item.get("positionControlSide", POSITION_CONTROL_NONE)).upper()
+                break
         parsed[symbol] = SymbolFilters(
             symbol=symbol,
             tick_size=Decimal(str(_required(price_filter, "tickSize", f"{symbol} PRICE_FILTER"))),
@@ -89,6 +103,7 @@ def parse_exchange_filters(exchange_info: Mapping[str, Any]) -> dict[str, Symbol
             max_qty=Decimal(str(_required(lot_size, "maxQty", f"{symbol} LOT_SIZE"))),
             quantity_precision=int(_required(entry, "quantityPrecision", symbol)),
             price_precision=int(_required(entry, "pricePrecision", symbol)),
+            position_control_side=position_control_side,
         )
     return parsed
 

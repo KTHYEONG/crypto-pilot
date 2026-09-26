@@ -239,7 +239,6 @@ def _refresh_live_universe(args: argparse.Namespace) -> None:
             lookback_days=s.refresh_lookback_days,
             max_workers=s.refresh_max_workers,
             deadline_s=s.refresh_deadline_s,
-            freshness_floor_hours=s.refresh_freshness_floor_hours,
             min_symbols=s.min_universe_symbols,
             max_fail_fraction=s.refresh_max_fail_fraction,
             symbols=disk_syms,
@@ -284,7 +283,6 @@ def _seed_cloud(args: argparse.Namespace) -> None:
         lookback_days=lookback,
         max_workers=s.refresh_max_workers,
         deadline_s=s.refresh_deadline_s * 6,
-        freshness_floor_hours=0.0,
         min_symbols=1,
         max_fail_fraction=1.0,
         symbols=syms,
@@ -302,7 +300,6 @@ def _prune_live_data(args: argparse.Namespace) -> None:
     import pandas as pd
 
     from src.common.paths import FUTURES_DATA_DIR
-    from src.live.alerting import send_email_alert
     from src.live.orderbook import default_orderbook_dir
     from src.live.settings import LiveSettings
     from src.market_data.retention import (
@@ -321,27 +318,48 @@ def _prune_live_data(args: argparse.Namespace) -> None:
             ob_dir, s.orderbook_retention_days, now=now, warning_days=7
         )
         if is_impending and earliest_date is not None:
+            from src.live.alerting import dispatch_alert
+
             marker = ob_dir / f".backup_alert_{earliest_date.replace('-', '')}"
             if not marker.exists():
-                sent = send_email_alert(
-                    gmail_user=s.alert_gmail_user,
-                    gmail_app_password=(
-                        s.alert_gmail_app_password.get_secret_value()
-                        if s.alert_gmail_app_password is not None
-                        else None
-                    ),
+                dispatch_alert(
+                    s,
                     event="orderbook_backup_impending",
                     detail=f"earliest_date={earliest_date} days_left={days_left}",
                     decision_time=None,
+                    dedupe_key=f"orderbook_backup_impending:{earliest_date}",
                     now=now,
                 )
-                if sent:
-                    marker.write_text(f"alerted_at={now.isoformat()}\n", encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[DATA] orderbook backup alert check failed: %s", exc)
 
     ob = prune_orderbook_history(ob_dir, s.orderbook_retention_days, now=now)
-    _logger.info("[DATA] stage=prune_live_data market=%s orderbook_files_removed=%d", md, ob)
+    from src.common.paths import DATA_DIR
+
+    listing_root = DATA_DIR / "state" / "venue_listing"
+    retention_days = int(
+        s.venue_listing_retention_days
+        if s.venue_listing_retention_days is not None
+        else s.data_retention_days
+    )
+    listing_removed = 0
+    if listing_root.exists():
+        cutoff = now.normalize() - pd.Timedelta(days=retention_days)
+        for child in sorted(listing_root.glob("*.json.gz")):
+            stem = child.name.removesuffix(".json.gz")
+            if len(stem) != 8 or not stem.isdigit():
+                continue
+            try:
+                slot = pd.Timestamp(stem, tz="UTC")
+            except (ValueError, TypeError):
+                continue
+            if slot < cutoff:
+                try:
+                    child.unlink()
+                    listing_removed += 1
+                except OSError as exc:  # noqa: BLE001
+                    _logger.warning("[DATA] listing prune failed path=%s error=%s", child, exc)
+    _logger.info("[DATA] stage=prune_live_data market=%s orderbook_files_removed=%d listing_removed=%d", md, ob, listing_removed)
 
 
 def _repair_spot_gap(args: argparse.Namespace) -> None:

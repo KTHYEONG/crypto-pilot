@@ -25,6 +25,74 @@ from src.live.settings import LiveSettings
 
 from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
 
+
+def _journal_fake_fills(intents, outcomes, *, journal, attempt) -> None:
+    """Journal one execution fill per outcome with filled_qty>0 (test fake helper)."""
+    from decimal import Decimal as _D
+
+    from tests.unit.live._runner_stubs import NOW as _NOW
+
+    if journal is None or attempt is None:
+        return
+    seq = attempt.attempt_seq
+    for intent, outcome in zip(intents, outcomes):
+        fq = outcome.filled_qty
+        if fq is None or fq <= 0:
+            continue
+        fee_bps = 5.0
+        liquidity = "taker"
+        reason = "timeout_taker"
+        filled_at = _NOW
+        fills = getattr(outcome, "fills", ())
+        if fills:
+            try:
+                _q, _pr, _fee, _reason, _liq, _ts = fills[0]
+                fee_bps = float(_fee)
+                liquidity = str(_liq)
+                reason = str(_reason)
+                if _ts is not None:
+                    filled_at = _ts
+            except Exception:
+                pass
+        price = outcome.avg_fill_price if outcome.avg_fill_price is not None else _D("100")
+        journal.record_fill(
+            kind="execution",
+            attempt_seq=seq,
+            symbol=intent.symbol,
+            side=intent.side,
+            quantity=_D(str(fq)),
+            price=_D(str(price)),
+            fee_bps=fee_bps,
+            liquidity=liquidity,
+            reason=reason,
+            filled_at=filled_at,
+            client_order_id=f"test-{intent.symbol}-{intent.leg_index}",
+            leg_index=int(intent.leg_index),
+            cumulative_executed_qty=None,
+            simulated=True,
+        )
+
+
+def _wrap_with_journal(fn):
+    """Wrap a fake execute_intents so returned outcomes are journaled before return."""
+    import functools
+
+    @functools.wraps(fn)
+    def _inner(*args, **kwargs):
+        # intents is 2nd positional (client, intents, ...) or kwarg
+        intents = args[1] if len(args) > 1 else kwargs.get("intents", ())
+        outcomes = fn(*args, **kwargs)
+        try:
+            _journal_fake_fills(
+                list(intents), list(outcomes or ()),
+                journal=kwargs.get("journal"), attempt=kwargs.get("attempt"),
+            )
+        except Exception:
+            pass
+        return outcomes
+
+    return _inner
+
 @pytest.fixture(autouse=True)
 def _maybe_disable_orderbook_capture(monkeypatch):
     import src.live.orderbook as ob_mod
@@ -82,7 +150,7 @@ def live_env(monkeypatch, tmp_path):
         audit.record("intents_executed", count=len(outcomes))
         return outcomes
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute_intents))
     monkeypatch.setattr(
         runner_mod,
         "default_audit_log_path",
@@ -130,8 +198,7 @@ def test_SCENARIO_LIVE_29_CYCLE_REPORTS_MIN_NOTIONAL_DROP(artifact, live_env, tm
         _seed_close_artifact(drop_path)
 
         settings = LiveSettings(
-            notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_drop.json"),
-        )
+            notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_drop.json"), order_journal_path=str(tmp_path / "journal_1.jsonl"), fills_dir=str(tmp_path / "fills_1"), tax_ledger_dir=str(tmp_path / "tax_1"), execution_quality_dir=str(tmp_path / "eq_1"), portfolio_state_dir=str(tmp_path / "port_1"), microstructure_dir=str(tmp_path / "micro_1"))
         report = run_shadow_cycle(settings, DECISION_TIME, drop_path, now=NOW)
     finally:
         runner_mod._market_client = original_market
@@ -147,7 +214,7 @@ def test_SCENARIO_LIVE_29_CYCLE_REPORTS_MIN_NOTIONAL_DROP(artifact, live_env, tm
     assert report.dropped_notional_fraction == pytest.approx(expected, rel=1e-9)
 
     no_drop_report = run_shadow_cycle(
-        LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_clean.json")),
+        LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_clean.json"), order_journal_path=str(tmp_path / "journal_2.jsonl"), fills_dir=str(tmp_path / "fills_2"), tax_ledger_dir=str(tmp_path / "tax_2"), execution_quality_dir=str(tmp_path / "eq_2"), portfolio_state_dir=str(tmp_path / "port_2"), microstructure_dir=str(tmp_path / "micro_2")),
         DECISION_TIME,
         artifact,
         now=NOW,
@@ -188,7 +255,7 @@ def test_SCENARIO_LIVE_RUNNER_WRITES_EXECUTION_QUALITY_AND_NEVER_HALTS_ON_ITS_FA
             for intent in intents
         )
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute_intents))
 
     eq_dir = tmp_path / "eq_quality"
     ledger_path = tmp_path / "ledger_runner_eq.json"
@@ -196,8 +263,7 @@ def test_SCENARIO_LIVE_RUNNER_WRITES_EXECUTION_QUALITY_AND_NEVER_HALTS_ON_ITS_FA
         mode="paper",
         notional_equity_usdt=2000.0,
         ledger_path=str(ledger_path),
-        execution_quality_dir=str(eq_dir),
-    )
+        execution_quality_dir=str(eq_dir), order_journal_path=str(tmp_path / "journal_3.jsonl"), fills_dir=str(tmp_path / "fills_3"), tax_ledger_dir=str(tmp_path / "tax_3"), portfolio_state_dir=str(tmp_path / "port_3"), microstructure_dir=str(tmp_path / "micro_3"))
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "COMPLETE"
     # At least one record persisted with mark
@@ -218,8 +284,7 @@ def test_SCENARIO_LIVE_RUNNER_WRITES_EXECUTION_QUALITY_AND_NEVER_HALTS_ON_ITS_FA
         mode="paper",
         notional_equity_usdt=2000.0,
         ledger_path=str(ledger_path2),
-        execution_quality_dir=str(tmp_path / "eq_quality2"),
-    )
+        execution_quality_dir=str(tmp_path / "eq_quality2"), order_journal_path=str(tmp_path / "journal_4.jsonl"), fills_dir=str(tmp_path / "fills_4"), tax_ledger_dir=str(tmp_path / "tax_4"), portfolio_state_dir=str(tmp_path / "port_4"), microstructure_dir=str(tmp_path / "micro_4"))
     report2 = run_shadow_cycle(settings2, DECISION_TIME, artifact, now=NOW)
     assert report2.status == "COMPLETE"
     assert ledger_path2.exists()
@@ -257,7 +322,7 @@ def test_SCENARIO_LIVE_35_PAPER_MULTI_DAY_CYCLES_DO_NOT_HALT(tmp_path, monkeypat
             for i in intents
         )
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute_intents))
     # PAPER funding accrual under the parity contract: stub per-symbol funding
     # I/O (empty series -> zero delta) so the multi-day continuity assertions
     # exercise sizing/ledger logic, not the on-disk funding store.
@@ -275,7 +340,7 @@ def test_SCENARIO_LIVE_35_PAPER_MULTI_DAY_CYCLES_DO_NOT_HALT(tmp_path, monkeypat
     _seed_close_artifact(weights_path, close=100.5)
 
     ledger_path = tmp_path / "ledger_paper_multi.json"
-    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
+    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path), order_journal_path=str(tmp_path / "journal_5.jsonl"), fills_dir=str(tmp_path / "fills_5"), tax_ledger_dir=str(tmp_path / "tax_5"), execution_quality_dir=str(tmp_path / "eq_5"), portfolio_state_dir=str(tmp_path / "port_5"), microstructure_dir=str(tmp_path / "micro_5"))
 
     reports = []
     ledger_snapshots = []
@@ -311,7 +376,7 @@ def test_SCENARIO_LIVE_47_RUNNER_PERSISTS_PORTFOLIO_STATE_PAPER_VS_LIVE(
             for i in intents
         )
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute_intents))
 
     weights = pd.DataFrame(
         {"AAAUSDT": [0.02], "BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])
@@ -325,8 +390,7 @@ def test_SCENARIO_LIVE_47_RUNNER_PERSISTS_PORTFOLIO_STATE_PAPER_VS_LIVE(
     paper_settings = LiveSettings(
         mode="paper", notional_equity_usdt=2000.0,
         ledger_path=str(tmp_path / "ledger_paper.json"),
-        portfolio_state_dir=str(paper_dir),
-    )
+        portfolio_state_dir=str(paper_dir), order_journal_path=str(tmp_path / "journal_6.jsonl"), fills_dir=str(tmp_path / "fills_6"), tax_ledger_dir=str(tmp_path / "tax_6"), execution_quality_dir=str(tmp_path / "eq_6"), microstructure_dir=str(tmp_path / "micro_6"))
     paper_report = run_shadow_cycle(paper_settings, DECISION_TIME, weights_path, now=NOW)
     assert paper_report.status == "COMPLETE"
     paper_df = pd.read_parquet(paper_dir / "active.parquet")
@@ -348,8 +412,7 @@ def test_SCENARIO_LIVE_47_RUNNER_PERSISTS_PORTFOLIO_STATE_PAPER_VS_LIVE(
     live_settings = LiveSettings(
         mode="live_testnet", notional_equity_usdt=2000.0,
         ledger_path=str(tmp_path / "ledger_live.json"),
-        portfolio_state_dir=str(live_dir),
-    )
+        portfolio_state_dir=str(live_dir), order_journal_path=str(tmp_path / "journal_7.jsonl"), fills_dir=str(tmp_path / "fills_7"), tax_ledger_dir=str(tmp_path / "tax_7"), execution_quality_dir=str(tmp_path / "eq_7"), microstructure_dir=str(tmp_path / "micro_7"))
     live_report = run_shadow_cycle(live_settings, DECISION_TIME, weights_path, now=NOW)
     assert live_report.status == "COMPLETE"
     live_df = pd.read_parquet(live_dir / "active.parquet")
@@ -365,8 +428,7 @@ def test_SCENARIO_LIVE_47_RUNNER_PERSISTS_PORTFOLIO_STATE_PAPER_VS_LIVE(
     fail_settings = LiveSettings(
         mode="paper", notional_equity_usdt=2000.0,
         ledger_path=str(tmp_path / "ledger_paper2.json"),
-        portfolio_state_dir=str(tmp_path / "portfolio_fail"),
-    )
+        portfolio_state_dir=str(tmp_path / "portfolio_fail"), order_journal_path=str(tmp_path / "journal_8.jsonl"), fills_dir=str(tmp_path / "fills_8"), tax_ledger_dir=str(tmp_path / "tax_8"), execution_quality_dir=str(tmp_path / "eq_8"), microstructure_dir=str(tmp_path / "micro_8"))
     fail_report = run_shadow_cycle(fail_settings, DECISION_TIME, weights_path, now=NOW)
     assert fail_report.status == "COMPLETE"
 
@@ -452,12 +514,12 @@ def test_SCENARIO_PARITY_09_runner_wiring_and_failsoft(tmp_path, monkeypatch):
         for intent in intents:
             outcomes.append(ExecutionOutcome(symbol=intent.symbol, filled_qty=Decimal("0.5"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((Decimal("0.5"), Decimal("100"), 2.0, "maker_fill", "maker", pd.Timestamp("2026-01-01 00:00Z")),), maker_qty=Decimal("0.5"), taker_qty=Decimal("0")))  # noqa: PERF401
         return tuple(outcomes)
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
 
     fills_dir = tmp_path / "fills"
     eq_dir = tmp_path / "eq"
     ledger_path = tmp_path / "ledger.json"
-    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(fills_dir), execution_quality_dir=str(eq_dir))
+    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(fills_dir), execution_quality_dir=str(eq_dir), order_journal_path=str(tmp_path / "journal_9.jsonl"), tax_ledger_dir=str(tmp_path / "tax_9"), portfolio_state_dir=str(tmp_path / "port_9"), microstructure_dir=str(tmp_path / "micro_9"))
     report = run_shadow_cycle(settings, decision_time, artifact, now=decision_time+pd.Timedelta(hours=2))
     assert report.status == "COMPLETE"
     # check fills written
@@ -471,7 +533,7 @@ def test_SCENARIO_PARITY_09_runner_wiring_and_failsoft(tmp_path, monkeypatch):
         raise OSError("disk full")
     monkeypatch.setattr(runner_mod, "append_fills", raise_oserror)
     ledger_path2 = tmp_path / "ledger2.json"
-    settings2 = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path2), fills_dir=str(tmp_path / "fills2"))
+    settings2 = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(ledger_path2), fills_dir=str(tmp_path / "fills2"), order_journal_path=str(tmp_path / "journal_10.jsonl"), tax_ledger_dir=str(tmp_path / "tax_10"), execution_quality_dir=str(tmp_path / "eq_10"), portfolio_state_dir=str(tmp_path / "port_10"), microstructure_dir=str(tmp_path / "micro_10"))
     report2 = run_shadow_cycle(settings2, decision_time, artifact, now=decision_time+pd.Timedelta(hours=2))
     assert report2.status == "COMPLETE"
     # audit log should contain fills_write_failed
@@ -534,12 +596,12 @@ def test_SCENARIO_REC_10_runner_failsoft_collect(tmp_path, monkeypatch):
 
         return tuple(ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((Decimal("0.5"), Decimal("100"), 2.0, "maker_fill", "maker", pd.Timestamp("2026-01-01 00:00Z")),)) for i in intents)
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
     # monkeypatch microstructure and tax to fail
     monkeypatch.setattr(runner_mod, "append_microstructure", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     monkeypatch.setattr(runner_mod, "append_tax_records", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
 
-    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"), fills_dir=str(tmp_path / "fills"), execution_quality_dir=str(tmp_path / "eq"))
+    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"), fills_dir=str(tmp_path / "fills"), execution_quality_dir=str(tmp_path / "eq"), order_journal_path=str(tmp_path / "journal_11.jsonl"), tax_ledger_dir=str(tmp_path / "tax_11"), portfolio_state_dir=str(tmp_path / "port_11"), microstructure_dir=str(tmp_path / "micro_11"))
     report = run_shadow_cycle(settings, decision_time, artifact, now=decision_time + pd.Timedelta(hours=2))
     assert report.status == "COMPLETE"
     audit_path = tmp_path / "shadow_cycle.jsonl"
@@ -637,7 +699,7 @@ def test_run_shadow_cycle_paper_mode_records_immediate_taker_fills(tmp_path, mon
 
     ledger_path = tmp_path / "ledger.json"
     fills_dir = tmp_path / "fills"
-    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(fills_dir), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"), execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"))
+    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(fills_dir), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"), execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_12.jsonl"))
     # fees: default maker 2 taker 5 slippage 3 => 8
     report = run_shadow_cycle(settings, decision_time, artifact, now=now)
     assert report.status == "COMPLETE"
@@ -738,7 +800,7 @@ def test_run_shadow_cycle_shadow_mode_does_not_use_immediate_taker(tmp_path, mon
             for i in intents
         )
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
     settings = LiveSettings(
         mode=ExecutionMode.SHADOW,
         notional_equity_usdt=2000.0,
@@ -748,8 +810,7 @@ def test_run_shadow_cycle_shadow_mode_does_not_use_immediate_taker(tmp_path, mon
         execution_quality_dir=str(tmp_path / "eq"),
         portfolio_state_dir=str(tmp_path / "port"),
         tax_ledger_dir=str(tmp_path / "tax"),
-        orderbook_capture_enabled=False,
-    )
+        orderbook_capture_enabled=False, order_journal_path=str(tmp_path / "journal_13.jsonl"))
     report = run_shadow_cycle(settings, decision_time, artifact, now=now)
     assert report.status == "COMPLETE"
     # outcomes should be SHADOW
@@ -839,9 +900,9 @@ def test_run_shadow_cycle_paper_accrues_funding_and_uses_parity_policy(tmp_path,
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": funding})
     monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {"AAAUSDT": pd.Series([101.0], index=pd.DatetimeIndex([decision_time]))})
     monkeypatch.setattr(runner_mod, "resolve_sizing_equity", equity_spy)
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
 
-    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"), execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"))
+    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"), execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_14.jsonl"))
     report = runner_mod.run_shadow_cycle(settings, decision_time, artifact, now=now)
     assert report.status == "COMPLETE"
     assert captured["cash_usdt"] == Decimal("1899.899")
@@ -920,11 +981,14 @@ class _StubDepthRecorder:
     def stop(self, *, post_window_s: float, shutdown: Any = None) -> DepthCaptureSummary:
         self.stops.append(float(post_window_s))
         return DepthCaptureSummary(
-            rows=len(self.symbols),
+            rows_received=len(self.symbols),
+            rows_persisted=len(self.symbols),
             symbols_requested=len(self.symbols),
             symbols_seen=len(self.symbols),
+            symbols_missing=(),
             reconnects=0,
             parts=1,
+            flush_failures=0,
         )
 
 
@@ -985,7 +1049,7 @@ def _depth_cycle_settings(tmp_path: Path, monkeypatch: Any, **overrides: Any) ->
             for i in intents
         )
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
     params: dict[str, Any] = {
         "mode": "paper",
         "notional_equity_usdt": 2000.0,
@@ -1029,7 +1093,7 @@ def test_run_shadow_cycle_execution_failure_stops_recorder_immediately(tmp_path,
     def _boom(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         raise LiveTradingError("venue down")
 
-    monkeypatch.setattr(runner_mod, "execute_intents", _boom)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(_boom))
     weights_path = _three_symbol_weights(tmp_path)
     report = run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
     assert report.status == "HALT"
@@ -1083,7 +1147,7 @@ def test_run_shadow_cycle_complete_stamps_ledger_and_rerun_does_not_trade(artifa
     from tests.unit.live._runner_stubs import DECISION_TIME, NOW
 
     ledger_path = tmp_path / "ledger_once.json"
-    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(ledger_path))
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(ledger_path), order_journal_path=str(tmp_path / "journal_15.jsonl"), fills_dir=str(tmp_path / "fills_15"), tax_ledger_dir=str(tmp_path / "tax_15"), execution_quality_dir=str(tmp_path / "eq_15"), portfolio_state_dir=str(tmp_path / "port_15"), microstructure_dir=str(tmp_path / "micro_15"))
 
     first = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     executed_after_first = len(live_env)
@@ -1129,8 +1193,7 @@ def test_enforce_funding_lag_alerts_then_halts(monkeypatch) -> None:
     from src.live.settings import LiveSettings
 
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(runner_mod, "post_alert", lambda url, *, event, detail, decision_time, now: sent.append((event, detail)) or False)
-    monkeypatch.setattr(runner_mod, "send_email_alert", lambda **kwargs: False)
+    monkeypatch.setattr(runner_mod, "dispatch_alert", lambda settings, *, event, detail, decision_time, dedupe_key, now: sent.append((event, detail)) or False)
     now = pd.Timestamp("2026-09-14 01:26Z")
     decision = pd.Timestamp("2026-09-14 00:00Z")
     fresh = FundingAccrual(Decimal(0), {}, {"AUSDT": pd.Timedelta(hours=9)}, {"AUSDT": pd.Timedelta(hours=4)})
@@ -1161,7 +1224,7 @@ def test_settle_delisted_paper_positions_keeps_unresolved_without_synthetic_sett
     path = tmp_path / "ledger.json"
     before = LedgerState(positions={"AUSDT": Decimal("1")}, cash_usdt=Decimal("100"))
 
-    with pytest.raises(DataIntegrityError, match="paper delisted holding unresolved symbols=AUSDT"):
+    with pytest.raises(DataIntegrityError, match="delisted holding without settlement evidence: symbols=AUSDT"):
         runner_mod._settle_delisted_paper_positions(
             before, delivery, now, path, audit, LiveSettings(), now.normalize(),
         )
@@ -1187,8 +1250,7 @@ def test_run_shadow_cycle_paper_halts_on_delisted_holding_without_synthetic_sett
     from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
 
     alerts: list[tuple[str, str]] = []
-    monkeypatch.setattr(runner_mod, "post_alert", lambda url, *, event, detail, decision_time, now: alerts.append((event, detail)) or False)
-    monkeypatch.setattr(runner_mod, "send_email_alert", lambda **kwargs: False)
+    monkeypatch.setattr(runner_mod, "dispatch_alert", lambda settings, *, event, detail, decision_time, dedupe_key, now: alerts.append((event, detail)) or False)
     monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
     monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
 
@@ -1198,13 +1260,12 @@ def test_run_shadow_cycle_paper_halts_on_delisted_holding_without_synthetic_sett
             for i in intents
         )
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
     ledger_path = tmp_path / "ledger.json"
     settings = LiveSettings(
         mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
         fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
-        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
-    )
+        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_16.jsonl"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
     _seed_close_artifact(weights_path)
@@ -1236,7 +1297,7 @@ def test_run_shadow_cycle_paper_halts_on_delisted_holding_without_synthetic_sett
         executed.extend(intents)
         return real_execute(client, intents, filters, policy, audit, clock, sleep_fn, rate_limits=rate_limits, **kwargs)
 
-    monkeypatch.setattr(runner_mod, "execute_intents", guarded_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(guarded_execute))
     captured: dict[str, object] = {}
     real_equity = runner_mod.resolve_sizing_equity
 
@@ -1256,7 +1317,7 @@ def test_run_shadow_cycle_paper_halts_on_delisted_holding_without_synthetic_sett
     # Delisting announcement alone supplies no settlement price: position and
     # cash stay unresolved, new risk is stopped (HALT, no orders executed).
     assert report.status == "HALT"
-    assert "paper delisted holding unresolved" in report.reason
+    assert "without settlement evidence" in report.reason
     assert executed == []
     assert load_ledger(ledger_path).positions == {"AAAUSDT": Decimal("1")}
     assert load_ledger(ledger_path).cash_usdt == Decimal("1900")
@@ -1274,8 +1335,7 @@ def test_run_shadow_cycle_paper_halts_when_held_funding_lag_exceeds_24h(tmp_path
     from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
 
     alerts: list[tuple[str, str]] = []
-    monkeypatch.setattr(runner_mod, "post_alert", lambda url, *, event, detail, decision_time, now: alerts.append((event, detail)) or False)
-    monkeypatch.setattr(runner_mod, "send_email_alert", lambda **kwargs: False)
+    monkeypatch.setattr(runner_mod, "dispatch_alert", lambda settings, *, event, detail, decision_time, dedupe_key, now: alerts.append((event, detail)) or False)
     monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
     monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
 
@@ -1285,19 +1345,18 @@ def test_run_shadow_cycle_paper_halts_when_held_funding_lag_exceeds_24h(tmp_path
             for i in intents
         )
 
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
     ledger_path = tmp_path / "ledger.json"
     settings = LiveSettings(
         mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
         fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
-        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
-    )
+        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_17.jsonl"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
     _seed_close_artifact(weights_path)
 
     calls: list[object] = []
-    monkeypatch.setattr(runner_mod, "execute_intents", lambda *a, **k: calls.append(a) or ())
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(lambda *a, **k: calls.append(a) or ()))
     monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
     stale_epoch = NOW - pd.Timedelta(hours=30)
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([stale_epoch]))})
@@ -1319,7 +1378,6 @@ def test_run_shadow_cycle_applies_orphan_settlements_before_reconcile(tmp_path, 
     from decimal import Decimal
     import pandas as pd
     import src.live.runner as runner_mod
-    from src.live.executor import OrphanSettlement
     from src.live.ledger import load_ledger
     from src.live.settings import ExecutionMode, LiveSettings
     from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
@@ -1327,27 +1385,38 @@ def test_run_shadow_cycle_applies_orphan_settlements_before_reconcile(tmp_path, 
     monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
     monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
     monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
-    monkeypatch.setattr(
-        runner_mod,
-        "cancel_orphan_orders",
-        lambda client, run_id, audit, **kwargs: [
-            OrphanSettlement(
+    def _fake_cancel_orphans(client, run_id, audit, *, journal=None, now=None, **kwargs):
+        from tests.unit.live._runner_stubs import NOW as _NOW
+
+        from src.live.executor import OrphanSweep
+
+        if journal is not None:
+            journal.record_fill(
+                kind="orphan_settlement",
+                attempt_seq=None,
                 symbol="AAAUSDT",
-                client_order_id=f"{run_id}-0",
                 side="BUY",
-                executed_qty=Decimal("0.5"),
-                avg_price=Decimal("100"),
+                quantity=Decimal("0.5"),
+                price=Decimal("100"),
+                fee_bps=5.0,
+                liquidity="taker",
+                reason="orphan_settlement",
+                filled_at=_NOW,
+                client_order_id=f"{run_id}-0",
+                leg_index=0,
+                cumulative_executed_qty=None,
+                simulated=True,
             )
-        ],
-    )
-    monkeypatch.setattr(runner_mod, "execute_intents", lambda *args, **kwargs: ())
+        return OrphanSweep(fills=(), foreign_symbols=())
+
+    monkeypatch.setattr(runner_mod, "cancel_orphan_orders", _fake_cancel_orphans)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(lambda *args, **kwargs: ()))
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {})
     monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {})
 
     ledger_path = tmp_path / "ledger.json"
     settings = LiveSettings(
-        mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
-    )
+        mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), order_journal_path=str(tmp_path / "journal_18.jsonl"), fills_dir=str(tmp_path / "fills_18"), tax_ledger_dir=str(tmp_path / "tax_18"), execution_quality_dir=str(tmp_path / "eq_18"), portfolio_state_dir=str(tmp_path / "port_18"), microstructure_dir=str(tmp_path / "micro_18"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
     _seed_close_artifact(weights_path)
@@ -1426,10 +1495,12 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
     monkeypatch.setattr(runner_mod, "default_order_journal_path", lambda: journal_path)
     captured: dict[str, object] = {}
 
-    def fake_orphans(client, client_order_prefix, audit, *, journal=None):
+    def fake_orphans(client, client_order_prefix, audit, *, journal=None, now=None, taker_fee_bps=None):
+        from src.live.executor import OrphanSweep
+
         captured["orphan_journal"] = journal
         captured["prefix"] = client_order_prefix
-        return []
+        return OrphanSweep(fills=(), foreign_symbols=())
 
     def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         captured["execute_journal"] = kwargs.get("journal")
@@ -1439,13 +1510,12 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
         )
 
     monkeypatch.setattr(runner_mod, "cancel_orphan_orders", fake_orphans)
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
     settings = LiveSettings(
         mode=ExecutionMode.SHADOW, notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"),
         fills_dir=str(tmp_path / "fills"), microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"),
-        tax_ledger_dir=str(tmp_path / "tax"), orderbook_capture_enabled=False,
-    )
+        tax_ledger_dir=str(tmp_path / "tax"), orderbook_capture_enabled=False)
 
     report = run_shadow_cycle(settings, decision_time, artifact, now=now)
 
@@ -1454,7 +1524,8 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
     assert captured["orphan_journal"] is captured["execute_journal"]
     assert captured["orphan_journal"].path == journal_path
     assert captured["prefix"] == "20260824"
-    assert not journal_path.exists()
+    assert journal_path.exists()
+    assert captured["orphan_journal"].fills_after(-1) == ()
 
 
 def test_run_shadow_cycle_paper_halts_when_held_symbol_absent_from_exchange(tmp_path, monkeypatch) -> None:
@@ -1468,13 +1539,12 @@ def test_run_shadow_cycle_paper_halts_when_held_symbol_absent_from_exchange(tmp_
     from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
 
     alerts: list[tuple[str, str]] = []
-    monkeypatch.setattr(runner_mod, "post_alert", lambda url, *, event, detail, decision_time, now: alerts.append((event, detail)) or False)
-    monkeypatch.setattr(runner_mod, "send_email_alert", lambda **kwargs: False)
+    monkeypatch.setattr(runner_mod, "dispatch_alert", lambda settings, *, event, detail, decision_time, dedupe_key, now: alerts.append((event, detail)) or False)
     monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
     monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
     monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
     executed: list[object] = []
-    monkeypatch.setattr(runner_mod, "execute_intents", lambda *a, **k: executed.append(a) or ())
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(lambda *a, **k: executed.append(a) or ()))
     accrued: list[object] = []
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: accrued.append(symbols) or {})
     monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {})
@@ -1482,8 +1552,7 @@ def test_run_shadow_cycle_paper_halts_when_held_symbol_absent_from_exchange(tmp_
     settings = LiveSettings(
         mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
         fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
-        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"),
-    )
+        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_20.jsonl"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
     _seed_close_artifact(weights_path)
@@ -1508,7 +1577,7 @@ def test_runner_missing_anchor_blocks_orders(artifact, live_env, tmp_path) -> No
     from src.live.deployed_weights import decision_ohlcv_close_path
 
     decision_ohlcv_close_path(artifact).unlink()
-    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_missing.json"))
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_missing.json"), order_journal_path=str(tmp_path / "journal_21.jsonl"), fills_dir=str(tmp_path / "fills_21"), tax_ledger_dir=str(tmp_path / "tax_21"), execution_quality_dir=str(tmp_path / "eq_21"), portfolio_state_dir=str(tmp_path / "port_21"), microstructure_dir=str(tmp_path / "micro_21"))
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "HALT"
     assert "missing" in (report.reason or "")
@@ -1523,7 +1592,7 @@ def test_runner_sparse_anchor_blocks_active_target(artifact, live_env, tmp_path)
     pd.DataFrame(
         {"AAAUSDT": [100.0]}, index=pd.DatetimeIndex([DECISION_TIME]),
     ).to_parquet(decision_ohlcv_close_path(artifact), index=True)
-    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_sparse.json"))
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_sparse.json"), order_journal_path=str(tmp_path / "journal_22.jsonl"), fills_dir=str(tmp_path / "fills_22"), tax_ledger_dir=str(tmp_path / "tax_22"), execution_quality_dir=str(tmp_path / "eq_22"), portfolio_state_dir=str(tmp_path / "port_22"), microstructure_dir=str(tmp_path / "micro_22"))
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "HALT"
     assert "missing for active targets: BUSDT" in (report.reason or "")
@@ -1541,7 +1610,7 @@ def test_runner_old_mark_artifact_ignored(artifact, live_env, tmp_path) -> None:
     pd.DataFrame(
         {"AAAUSDT": [999.0], "BUSDT": [999.0]}, index=pd.DatetimeIndex([DECISION_TIME]),
     ).to_parquet(artifact.parent / "deployed_decision_marks.parquet", index=True)
-    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_legacymark.json"))
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_legacymark.json"), order_journal_path=str(tmp_path / "journal_23.jsonl"), fills_dir=str(tmp_path / "fills_23"), tax_ledger_dir=str(tmp_path / "tax_23"), execution_quality_dir=str(tmp_path / "eq_23"), portfolio_state_dir=str(tmp_path / "port_23"), microstructure_dir=str(tmp_path / "micro_23"))
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "HALT"
     assert report.intent_count == 0
@@ -1558,7 +1627,7 @@ def test_runner_stale_anchor_row_fails(artifact, live_env, tmp_path) -> None:
         {"AAAUSDT": [100.0], "BUSDT": [100.0]},
         index=pd.DatetimeIndex([DECISION_TIME - pd.Timedelta(days=1)]),
     ).to_parquet(decision_ohlcv_close_path(artifact), index=True)
-    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_stale.json"))
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_stale.json"), order_journal_path=str(tmp_path / "journal_24.jsonl"), fills_dir=str(tmp_path / "fills_24"), tax_ledger_dir=str(tmp_path / "tax_24"), execution_quality_dir=str(tmp_path / "eq_24"), portfolio_state_dir=str(tmp_path / "port_24"), microstructure_dir=str(tmp_path / "micro_24"))
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "HALT"
     assert "not present" in (report.reason or "")
@@ -1568,7 +1637,7 @@ def test_runner_stale_anchor_row_fails(artifact, live_env, tmp_path) -> None:
 
 def test_runner_current_ticker_remains_execution_check(artifact, live_env, tmp_path, monkeypatch) -> None:
     """A valid decision close with no current ticker stays NOT_TRADABLE."""
-    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_notradable.json"))
+    settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_notradable.json"), order_journal_path=str(tmp_path / "journal_25.jsonl"), fills_dir=str(tmp_path / "fills_25"), tax_ledger_dir=str(tmp_path / "tax_25"), execution_quality_dir=str(tmp_path / "eq_25"), portfolio_state_dir=str(tmp_path / "port_25"), microstructure_dir=str(tmp_path / "micro_25"))
     monkeypatch.setattr(runner_mod, "_marks_from_tickers", lambda client, symbols: {})
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "COMPLETE"
@@ -1740,7 +1809,7 @@ def test_run_shadow_cycle_unexpected_error_stops_recorder(tmp_path, monkeypatch)
     def _boom(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr(runner_mod, "execute_intents", _boom)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(_boom))
     weights_path = _three_symbol_weights(tmp_path)
     with pytest.raises(RuntimeError, match="unexpected"):
         run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
@@ -1808,10 +1877,10 @@ def test_fill_events_record_real_time(tmp_path, monkeypatch) -> None:
             ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED", fills=((i.quantity, Decimal("100"), 2.0, "maker_fill", "maker", filled_at),))
             for i in intents
         )
-    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
 
     fills_dir = tmp_path / "fills"
-    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"), fills_dir=str(fills_dir))
+    settings = LiveSettings(mode="paper", notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"), fills_dir=str(fills_dir), order_journal_path=str(tmp_path / "journal_26.jsonl"), tax_ledger_dir=str(tmp_path / "tax_26"), execution_quality_dir=str(tmp_path / "eq_26"), portfolio_state_dir=str(tmp_path / "port_26"), microstructure_dir=str(tmp_path / "micro_26"))
     report = run_shadow_cycle(settings, decision_time, artifact, now=decision_time + pd.Timedelta(hours=2))
     assert report.status == "COMPLETE"
     from src.live.fills import load_fills
@@ -1819,3 +1888,94 @@ def test_fill_events_record_real_time(tmp_path, monkeypatch) -> None:
     assert len(df) == 1
     assert pd.Timestamp(df["timestamp"].iloc[0]).tz_convert("UTC") == filled_at
     assert pd.Timestamp(df["decision_time"].iloc[0]).tz_convert("UTC") == decision_time
+
+
+def test_run_shadow_cycle_paper_books_evidenced_delisting_settlement(tmp_path, monkeypatch) -> None:
+    from decimal import Decimal
+    import pandas as pd
+    import src.live.runner as runner_mod
+    from src.live.executor import ExecutionOutcome
+    from src.live.ledger import LedgerState, PositionSnapshot, load_ledger, save_ledger
+    from src.live.settings import ExecutionMode, LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    delivery = DECISION_TIME - pd.Timedelta(days=2)
+    delivery_ms = int(delivery.value // 1_000_000)
+    bars = tmp_path / "ohlcv" / "1h"
+    bars.mkdir(parents=True)
+    stamps = [delivery_ms + h * 3_600_000 for h in range(5)]
+    pd.DataFrame(
+        {
+            "timestamp": stamps,
+            "open": [90.0] * 5,
+            "high": [90.0] * 5,
+            "low": [90.0] * 5,
+            "close": [90.0] * 5,
+            "volume": [0.0] * 5,
+        }
+    ).to_parquet(bars / "AAAUSDT.parquet", index=False)
+    monkeypatch.setattr(runner_mod, "FUTURES_DATA_DIR", tmp_path)
+
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(runner_mod, "dispatch_alert", lambda settings, *, event, detail, decision_time, dedupe_key, now: alerts.append((event, detail)) or False)
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+    monkeypatch.setattr(runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl")
+
+    def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        return tuple(
+            ExecutionOutcome(symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED")
+            for i in intents
+        )
+
+    monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
+    ledger_path = tmp_path / "ledger.json"
+    settings = LiveSettings(
+        mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
+        fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
+        execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_17.jsonl"))
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
+    _seed_close_artifact(weights_path)
+
+    class DelistingMarketClient(StubMarketClient):
+        def exchange_info(self):
+            info = super().exchange_info()
+            for entry in info["symbols"]:
+                if entry["symbol"] == "AAAUSDT":
+                    entry["status"] = "SETTLING"
+                    entry["deliveryDate"] = delivery_ms
+            return info
+
+        def book_tickers(self):
+            return {"BUSDT": {"symbol": "BUSDT", "bidPrice": "100.00", "askPrice": "101.00"}}
+
+        def premium_index(self):
+            return {}
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: DelistingMarketClient())
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {})
+    monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {})
+    save_ledger(ledger_path, LedgerState(
+        positions={"AAAUSDT": Decimal("1")}, equity_high_water_mark=Decimal("2000"), cash_usdt=Decimal("1900"),
+        funding_accrued_through=NOW - pd.Timedelta(hours=1),
+    ))
+
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+
+    assert report.status == "COMPLETE"
+    state = load_ledger(ledger_path)
+    assert state.positions.get("AAAUSDT", Decimal(0)) == Decimal(0)
+    fee_bps = Decimal(str(settings.delisting_settlement_fee_bps))
+    settlement_delta = Decimal("90") - Decimal("90") * fee_bps / Decimal(10_000)
+    assert state.cash_usdt is not None and state.cash_usdt > Decimal("1900") + settlement_delta - Decimal("1")
+    tax_text = "".join(p.read_text(encoding="utf-8") for p in (tmp_path / "tax").glob("*.jsonl"))
+    assert "delisting_settlement" in tax_text
+    audit_lines = [
+        json.loads(line)
+        for line in (tmp_path / "shadow_cycle.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(line.get("event") == "delisting_settlement_booked" for line in audit_lines)
+    reconciles = [line for line in audit_lines if line.get("event") == "ledger_reconcile"]
+    assert reconciles and all(line.get("ok") is True for line in reconciles)
+    assert [event for event, _ in alerts].count("delisting_settled") == 1

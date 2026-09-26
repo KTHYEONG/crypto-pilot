@@ -397,7 +397,7 @@ def test_get_requests_keep_retry_backoff(tmp_path, monkeypatch) -> None:
 
     assert payload["status"] == "NEW"
     assert [method for method, _ in calls] == ["GET", "GET"]
-    assert sleeps == [1.0]
+    assert sleeps == [0.5]
 
 def test_mutation_clock_resync_is_the_only_resend(tmp_path, monkeypatch) -> None:
     from pydantic import SecretStr
@@ -470,11 +470,11 @@ def test_keepalive_transport_sends_mutations_once_on_fresh_connection(monkeypatc
         transport.call("GET", "https://fapi.binance.com/fapi/v1/order?x=1", {})
     assert requests == ["POST", "GET", "GET"]
 
-def test_get_transport_failure_propagates_unchanged(tmp_path, monkeypatch) -> None:
+def test_get_transport_failure_retries_then_raises_transient_read_error(tmp_path, monkeypatch) -> None:
     from pydantic import SecretStr
     from src.live.audit import AuditLog
-    from src.live.errors import VenueError
-    from src.live.rest import BinanceFuturesRestClient, HttpResponse, OrderStatusUnknown
+    from src.live.errors import TransientReadError, VenueError
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse, OrderStatusUnknown, _GET_RETRY_BACKOFF_SECONDS
     from src.live.settings import ExecutionMode
 
     calls: list[tuple[str, str]] = []
@@ -492,9 +492,6 @@ def test_get_transport_failure_propagates_unchanged(tmp_path, monkeypatch) -> No
             AuditLog(tmp_path / "rest_audit.jsonl"), session=_Transport(),
         )
 
-    order_params = {"symbol": "AAAUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
-                    "quantity": "1", "price": "100", "newClientOrderId": "mh20260914-ABCDEFGHIJ-0-0-0"}
-
     import pytest
 
     def _reset(method, url):
@@ -502,10 +499,13 @@ def test_get_transport_failure_propagates_unchanged(tmp_path, monkeypatch) -> No
 
     client = _client(_reset)
 
-    with pytest.raises(ConnectionResetError):
+    with pytest.raises(TransientReadError) as exc_info:
         client.query_order("AAAUSDT", "mh20260914-ABCDEFGHIJ-0-0-0")
 
-    assert calls == [("GET", "https://fapi.binance.com/fapi/v1/order")]
+    assert len(calls) == len(_GET_RETRY_BACKOFF_SECONDS) + 1
+    assert exc_info.value.attempts == len(_GET_RETRY_BACKOFF_SECONDS) + 1
+    assert not isinstance(exc_info.value, VenueError)
+    assert sleeps == list(_GET_RETRY_BACKOFF_SECONDS)
 
 
 
@@ -531,3 +531,417 @@ def test_signed_query_round_trips_non_ascii_symbol(tmp_path: Path) -> None:
     assert len(sig_part) == 64
     parsed = dict(urllib.parse.parse_qsl(query_part))
     assert parsed["symbol"] == "\u9f99\u867eUSDT"
+
+
+def _rest_client(tmp_path, monkeypatch, responder, audit_name="rest_audit.jsonl"):
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.rest import BinanceFuturesRestClient
+    from src.live.settings import ExecutionMode
+
+    calls: list[str] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr("src.live.rest.time.sleep", sleeps.append)
+
+    class _Transport:
+        def call(self, method, url, headers):
+            calls.append(url)
+            return responder(method, url)
+
+    client = BinanceFuturesRestClient(
+        "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+        AuditLog(tmp_path / audit_name), session=_Transport(),
+    )
+    return client, calls, sleeps
+
+
+def test_get_503_then_success_returns_body(tmp_path, monkeypatch) -> None:
+    """GET 503 then success returns the body with one retry audit row."""
+    import json
+    from src.live.rest import HttpResponse
+
+    responses = [
+        HttpResponse(status_code=503, headers={}, body=b""),
+        HttpResponse(status_code=200, headers={}, body=b'{"status":"NEW"}'),
+    ]
+    client, calls, sleeps = _rest_client(tmp_path, monkeypatch, lambda m, u: responses.pop(0))
+    payload = client.request("GET", "/fapi/v1/order", {"symbol": "AAAUSDT"}, signed=True)
+    assert payload == {"status": "NEW"}
+    assert len(calls) == 2
+    events = [json.loads(line) for line in (tmp_path / "rest_audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    retries = [e for e in events if e["event"] == "venue_read_retry"]
+    assert len(retries) == 1
+    assert retries[0]["path"] == "/fapi/v1/order"
+
+
+def test_get_socket_timeout_then_success(tmp_path, monkeypatch) -> None:
+    """GET socket timeout then success returns the indexed mapping."""
+    from src.live.rest import HttpResponse
+
+    state = {"n": 0}
+
+    def _responder(method, url):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise TimeoutError("read timed out")
+        return HttpResponse(status_code=200, headers={}, body=b'[{"symbol":"AAAUSDT","bidPrice":"1","askPrice":"2"}]')
+
+    client, calls, _ = _rest_client(tmp_path, monkeypatch, _responder)
+    result = client.book_tickers()
+    assert result["AAAUSDT"]["symbol"] == "AAAUSDT"
+    assert len(calls) == 2
+
+
+def test_get_html_200_is_transient_never_none(tmp_path, monkeypatch) -> None:
+    """GET HTML 200 body raises TransientReadError after the full budget, never None."""
+    import pytest
+    from src.live.errors import TransientReadError, VenueError
+    from src.live.rest import HttpResponse, _GET_RETRY_BACKOFF_SECONDS
+
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(status_code=200, headers={}, body=b"<html>blocked</html>")
+    )
+    with pytest.raises(TransientReadError) as exc_info:
+        client.request("GET", "/fapi/v1/ticker/bookTicker")
+    assert exc_info.value.attempts == len(_GET_RETRY_BACKOFF_SECONDS) + 1
+    assert len(calls) == len(_GET_RETRY_BACKOFF_SECONDS) + 1
+    assert not isinstance(exc_info.value, VenueError)
+
+
+def test_get_transient_code_retried(tmp_path, monkeypatch) -> None:
+    """GET -1001 is retried and succeeds on the second send."""
+    from src.live.rest import HttpResponse
+
+    responses = [
+        HttpResponse(status_code=400, headers={}, body=b'{"code":-1001,"msg":"disconnected"}'),
+        HttpResponse(status_code=200, headers={}, body=b'{"status":"NEW"}'),
+    ]
+    client, calls, _ = _rest_client(tmp_path, monkeypatch, lambda m, u: responses.pop(0))
+    payload = client.request("GET", "/fapi/v1/order")
+    assert payload == {"status": "NEW"}
+    assert len(calls) == 2
+
+
+def test_get_transient_budget_exhaustion(tmp_path, monkeypatch) -> None:
+    """GET 5xx forever raises TransientReadError with a full attempt count."""
+    import pytest
+    from src.live.errors import TransientReadError, VenueError
+    from src.live.rest import HttpResponse, _GET_RETRY_BACKOFF_SECONDS
+
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(status_code=500, headers={}, body=b"{}")
+    )
+    with pytest.raises(TransientReadError) as exc_info:
+        client.request("GET", "/fapi/v1/order")
+    assert exc_info.value.attempts == len(_GET_RETRY_BACKOFF_SECONDS) + 1
+    assert not isinstance(exc_info.value, VenueError)
+
+
+def test_waf_403_is_not_retried(tmp_path, monkeypatch) -> None:
+    """WAF 403 HTML body raises VenueError with exactly one send."""
+    import pytest
+    from src.live.errors import VenueError
+    from src.live.rest import HttpResponse
+
+    client, calls, sleeps = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(status_code=403, headers={}, body=b"<html>blocked</html>")
+    )
+    with pytest.raises(VenueError) as exc_info:
+        client.request("GET", "/fapi/v1/order")
+    assert len(calls) == 1
+    assert exc_info.value.http_status == 403
+
+
+def test_mutation_5xx_raises_unknown_with_one_send(tmp_path, monkeypatch) -> None:
+    """Mutation 5xx still raises OrderStatusUnknown with one send and no sleep."""
+    import pytest
+    from src.live.rest import HttpResponse, OrderStatusUnknown
+
+    client, calls, sleeps = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(status_code=503, headers={}, body=b"")
+    )
+    with pytest.raises(OrderStatusUnknown):
+        client.new_order({"symbol": "AAAUSDT"})
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_get_retries_resign_with_fresh_timestamp(tmp_path, monkeypatch) -> None:
+    """Signed GET retries rebuild the query so timestamps differ."""
+    from urllib.parse import parse_qs, urlparse
+    from src.live.rest import HttpResponse
+
+    responses = [
+        HttpResponse(status_code=503, headers={}, body=b""),
+        HttpResponse(status_code=200, headers={}, body=b"{}"),
+    ]
+    client, calls, _ = _rest_client(tmp_path, monkeypatch, lambda m, u: responses.pop(0))
+    # Force distinct timestamps by advancing time between sends.
+    import time as _time
+    real_time = _time.time
+    ticks = [1_000.0, 1_001.0]
+    monkeypatch.setattr("src.live.rest.time.time", lambda: ticks.pop(0) if ticks else real_time())
+    client.request("GET", "/fapi/v1/order", {"symbol": "AAAUSDT"}, signed=True)
+    assert len(calls) == 2
+    q0 = parse_qs(urlparse(calls[0]).query)
+    q1 = parse_qs(urlparse(calls[1]).query)
+    assert q0.get("timestamp") != q1.get("timestamp")
+
+
+def test_unknown_outcome_horizon_is_recv_window_plus_timeout(tmp_path) -> None:
+    """Unknown-outcome horizon equals recvWindow plus transport timeout."""
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.rest import BinanceFuturesRestClient, _HTTP_TIMEOUT_SECONDS
+    from src.live.settings import ExecutionMode
+
+    client = BinanceFuturesRestClient(
+        "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+        AuditLog(tmp_path / "h.jsonl"), recv_window_ms=5000, session=None,
+    )
+    # Avoid opening a real connection; only the property is exercised.
+    assert client.unknown_outcome_horizon_s == 5.0 + _HTTP_TIMEOUT_SECONDS
+    assert client.unknown_outcome_horizon_s > 0
+
+
+def test_transient_read_error_str_includes_context() -> None:
+    """TransientReadError str carries path, status, code and attempts without payload."""
+    from src.live.errors import TransientReadError
+
+    err = TransientReadError("boom", path="/fapi/v1/order", http_status=503, code=-1001, attempts=4)
+    text = str(err)
+    assert "/fapi/v1/order" in text
+    assert "503" in text
+    assert "-1001" in text
+    assert "4" in text
+
+
+def test_get_429_then_success(tmp_path, monkeypatch) -> None:
+    """GET 429 sleeps Retry-After, consumes budget, then succeeds."""
+    from src.live.rest import HttpResponse
+
+    responses = [
+        HttpResponse(status_code=429, headers={"Retry-After": "0"}, body=b""),
+        HttpResponse(status_code=200, headers={}, body=b'{"ok":true}'),
+    ]
+    client, calls, sleeps = _rest_client(tmp_path, monkeypatch, lambda m, u: responses.pop(0))
+    payload = client.request("GET", "/fapi/v1/order")
+    assert payload == {"ok": True}
+    assert len(calls) == 2
+    assert sleeps == [0.0]
+
+
+def test_get_429_budget_exhaustion(tmp_path, monkeypatch) -> None:
+    """GET 429 forever exhausts the budget as TransientReadError."""
+    import pytest
+    from src.live.errors import TransientReadError
+    from src.live.rest import HttpResponse, _GET_RETRY_BACKOFF_SECONDS
+
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(status_code=429, headers={}, body=b"")
+    )
+    with pytest.raises(TransientReadError) as exc_info:
+        client.request("GET", "/fapi/v1/order")
+    assert exc_info.value.attempts == len(_GET_RETRY_BACKOFF_SECONDS) + 1
+
+
+def test_get_retry_backoff_long_code_retried(tmp_path, monkeypatch) -> None:
+    """GET -1003 keeps the long rate-limit backoff and succeeds on retry."""
+    from src.live.rest import HttpResponse
+
+    responses = [
+        HttpResponse(status_code=400, headers={}, body=b'{"code":-1003,"msg":"rate limited"}'),
+        HttpResponse(status_code=200, headers={}, body=b'{"ok":true}'),
+    ]
+    client, calls, sleeps = _rest_client(tmp_path, monkeypatch, lambda m, u: responses.pop(0))
+    assert client.request("GET", "/fapi/v1/order") == {"ok": True}
+    assert len(calls) == 2
+    assert sleeps == [10.0]
+
+
+def test_get_418_never_retried(tmp_path, monkeypatch) -> None:
+    """GET 418 raises immediately with a single send."""
+    import pytest
+    from src.live.errors import LiveTradingError
+    from src.live.rest import HttpResponse
+
+    client, calls, sleeps = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(status_code=418, headers={}, body=b"{}")
+    )
+    with pytest.raises(LiveTradingError):
+        client.request("GET", "/fapi/v1/order")
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_get_registry_branches(tmp_path, monkeypatch) -> None:
+    """GET non-transient registry codes keep today's behaviour."""
+    import pytest
+    from src.live.errors import OrderObsolete, VenueError
+    from src.live.rest import HttpResponse, OrderStatusUnknown
+
+    # BENIGN (-2011) returns the body.
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=b'{"code":-2011,"msg":"gone"}'),
+        audit_name="b1.jsonl",
+    )
+    assert client.request("GET", "/fapi/v1/order") == {"code": -2011, "msg": "gone"}
+    # BENIGN_ABORT (-2022) raises OrderObsolete.
+    client2, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=b'{"code":-2022,"msg":"obsolete"}'),
+        audit_name="b2.jsonl",
+    )
+    with pytest.raises(OrderObsolete):
+        client2.request("GET", "/fapi/v1/order")
+    # BENIGN_REPRICE (-5022) raises VenueError.
+    client3, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=b'{"code":-5022,"msg":"reprice"}'),
+        audit_name="b3.jsonl",
+    )
+    with pytest.raises(VenueError):
+        client3.request("GET", "/fapi/v1/order")
+    # FAIL_CLOSED (-1022) raises VenueError with one send.
+    client4, calls4, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=b'{"code":-1022,"msg":"bad"}'),
+        audit_name="b4.jsonl",
+    )
+    with pytest.raises(VenueError):
+        client4.request("GET", "/fapi/v1/order")
+    assert len(calls4) == 1
+
+
+def test_get_clock_resync_once(tmp_path, monkeypatch) -> None:
+    """GET -1021 resyncs the clock once then succeeds."""
+    from src.live.rest import HttpResponse
+
+    responses = [
+        HttpResponse(status_code=400, headers={}, body=b'{"code":-1021,"msg":"timestamp"}'),
+        HttpResponse(status_code=200, headers={}, body=b'{"serverTime": 5}'),
+        HttpResponse(status_code=200, headers={}, body=b'{"ok":true}'),
+    ]
+    client, calls, _ = _rest_client(tmp_path, monkeypatch, lambda m, u: responses.pop(0))
+    assert client.request("GET", "/fapi/v1/order") == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_get_retry_backoff_exhaustion(tmp_path, monkeypatch) -> None:
+    """GET -1003 forever exhausts the budget as TransientReadError."""
+    import pytest
+    from src.live.errors import TransientReadError
+    from src.live.rest import HttpResponse, _GET_RETRY_BACKOFF_SECONDS
+
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=b'{"code":-1003,"msg":"throttled"}'),
+    )
+    with pytest.raises(TransientReadError) as exc_info:
+        client.request("GET", "/fapi/v1/order")
+    assert exc_info.value.attempts == len(_GET_RETRY_BACKOFF_SECONDS) + 1
+    assert len(calls) == len(_GET_RETRY_BACKOFF_SECONDS) + 1
+
+
+def test_get_double_resync_exhausts(tmp_path, monkeypatch) -> None:
+    """GET -1021 twice breaks the resync loop and raises the exhausted error."""
+    import pytest
+    from src.live.errors import VenueError
+    from src.live.rest import HttpResponse
+
+    def _responder(method, url):
+        from urllib.parse import urlparse
+        if urlparse(url).path == "/fapi/v1/time":
+            return HttpResponse(status_code=200, headers={}, body=b'{"serverTime": 5}')
+        return HttpResponse(status_code=400, headers={}, body=b'{"code":-1021,"msg":"timestamp"}')
+
+    client, calls, _ = _rest_client(tmp_path, monkeypatch, _responder)
+    with pytest.raises(VenueError):
+        client.request("GET", "/fapi/v1/order")
+
+
+def test_scoped_rejection_raises_without_retry(tmp_path, monkeypatch) -> None:
+    """Spec 02: a scoped rejection raises VenueError with one send and no sleep."""
+    import pytest
+    from src.live.errors import VenueError
+    from src.live.rest import HttpResponse
+
+    client, calls, sleeps = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=b'{"code":-4164,"msg":"notional"}'),
+    )
+    with pytest.raises(VenueError) as exc_info:
+        client.new_order({"symbol": "AAAUSDT"})
+    assert exc_info.value.code == -4164
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_scoped_get_rejection_raises_without_retry(tmp_path, monkeypatch) -> None:
+    """Spec 02: scoped actions on GETs raise immediately instead of retrying."""
+    import pytest
+    from src.live.errors import VenueError
+    from src.live.rest import HttpResponse
+
+    for code in (-2019, -4400, -4140):
+        client, calls, sleeps = _rest_client(
+            tmp_path, monkeypatch,
+            lambda m, u, c=code: HttpResponse(status_code=400, headers={}, body=f'{{"code":{c},"msg":"x"}}'.encode()),
+            audit_name=f"scoped_{code}.jsonl",
+        )
+        with pytest.raises(VenueError) as exc_info:
+            client.request("GET", "/fapi/v1/order")
+        assert exc_info.value.code == code
+        assert len(calls) == 1
+        assert sleeps == []
+
+
+def test_force_orders_returns_raw_list(tmp_path, monkeypatch) -> None:
+    """Signed forceOrders returns the raw list over the requested window."""
+    import json
+    import urllib.parse
+    from src.live.rest import HttpResponse
+
+    seen: list[str] = []
+
+    def _responder(method, url):
+        seen.append(url)
+        return HttpResponse(status_code=200, headers={}, body=json.dumps([{"symbol": "AAAUSDT"}]).encode())
+
+    client, calls, _ = _rest_client(tmp_path, monkeypatch, _responder)
+    out = client.force_orders(start_time_ms=1, end_time_ms=2, limit=100)
+    assert out == [{"symbol": "AAAUSDT"}]
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(calls[0]).query))
+    assert (query["startTime"], query["endTime"], query["limit"]) == ("1", "2", "100")
+
+
+def test_force_orders_rejects_non_list_payload(tmp_path, monkeypatch) -> None:
+    """A non-list forceOrders payload fails closed."""
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.live.rest import HttpResponse
+
+    client, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=200, headers={}, body=b'{"x": 1}'),
+        audit_name="force_bad.jsonl",
+    )
+    with pytest.raises(DataIntegrityError):
+        client.force_orders(start_time_ms=1, end_time_ms=2)
+
+
+def test_income_sends_end_time(tmp_path, monkeypatch) -> None:
+    """Income window end is forwarded as endTime."""
+    import json
+    import urllib.parse
+    from src.live.rest import HttpResponse
+
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=200, headers={}, body=json.dumps([]).encode()),
+        audit_name="income_end.jsonl",
+    )
+    assert client.income(start_time_ms=1, end_time_ms=2) == []
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(calls[0]).query))
+    assert query["endTime"] == "2"

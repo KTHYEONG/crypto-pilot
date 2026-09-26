@@ -403,6 +403,17 @@ class BinanceClient:
         start_date: str | datetime,
         end_date: str | datetime | None = None,
     ) -> pd.DataFrame:
+        """Settled funding rates for ``symbol`` in ``[start_date, end_date]`` via ``/fapi/v1/fundingRate``.
+
+        Pages of ``FUNDING_RATE_REQUEST_LIMIT`` rows (kept below the AWS WAF threshold) are requested
+        oldest-first. A page shorter than the limit proves the range is exhausted, so no further
+        request is issued. Every request consumes one token of the shared ``FUNDING_RATE_LIMITER``,
+        so each avoided request buys back 0.75 s of the nightly refresh budget.
+
+        Raises:
+            BinanceIpBlockedError: HTTP 403/418/429.
+            BinanceFundingFetchError: other HTTP or transport failure.
+        """
         base_url = "https://fapi.binance.com/fapi/v1/fundingRate"
         timeout_sec = 30
         limit = FUNDING_RATE_REQUEST_LIMIT
@@ -494,6 +505,8 @@ class BinanceClient:
             last_ts = int(data[-1]["fundingTime"])
             since = last_ts + 1
             if last_ts >= end_ts:
+                break
+            if len(data) < limit:
                 break
 
         if not all_rows:

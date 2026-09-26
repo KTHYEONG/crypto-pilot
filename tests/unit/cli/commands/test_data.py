@@ -143,9 +143,14 @@ def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(tmp_path, 
             seen.append(symbol)
             if symbol == "AAAUSDT":
                 raise OSError("network unreachable")
+            tail = now.floor("1h")
+            stamps = [int((tail - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
+            pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{symbol}.parquet", index=False)
 
         def ensure_funding_data(self, symbol, start, end):
-            pass
+            last = last_settled_funding_epoch_ms(now, FUNDING_DEFAULT_INTERVAL_MS)
+            funding = [last - k * FUNDING_DEFAULT_INTERVAL_MS for k in (2, 1, 0)]
+            pd.DataFrame({"timestamp": funding, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
 
         def ensure_mark_price_data(self, symbol, timeframe, start, end):
             pass
@@ -354,11 +359,12 @@ def test_prune_live_data_cli_dispatches_both_prunes(monkeypatch) -> None:
     assert calls == ["market", "orderbook"]
 
 
-def test_prune_live_data_sends_backup_alert_and_creates_marker(tmp_path, monkeypatch) -> None:
+def test_prune_live_data_sends_backup_alert_through_outbox(tmp_path, monkeypatch) -> None:
     import argparse
     import src.cli.commands.data as data_mod
 
     alerts: list[dict] = []
+    monkeypatch.setenv("LIVE_ALERT_OUTBOX_PATH", str(tmp_path / "outbox.json"))
     monkeypatch.setattr("src.live.orderbook.default_orderbook_dir", lambda: tmp_path)
     monkeypatch.setattr("src.market_data.retention.prune_market_data", lambda *a, **k: {})
     monkeypatch.setattr("src.market_data.retention.prune_orderbook_history", lambda *a, **k: 0)
@@ -367,20 +373,17 @@ def test_prune_live_data_sends_backup_alert_and_creates_marker(tmp_path, monkeyp
         lambda *a, **k: (True, 5, "2025-09-05"),
     )
     monkeypatch.setattr(
-        "src.live.alerting.send_email_alert",
-        lambda **k: alerts.append(k) or True,
+        "src.live.alerting.dispatch_alert",
+        lambda settings, **k: alerts.append(k) or True,
     )
 
     data_mod._prune_live_data(argparse.Namespace())
 
     assert len(alerts) == 1
     assert alerts[0]["event"] == "orderbook_backup_impending"
+    assert alerts[0]["dedupe_key"] == "orderbook_backup_impending:2025-09-05"
     assert "earliest_date=2025-09-05" in alerts[0]["detail"]
-    assert (tmp_path / ".backup_alert_20250905").exists()
-
-    # Second call should deduplicate via marker
-    data_mod._prune_live_data(argparse.Namespace())
-    assert len(alerts) == 1
+    assert not (tmp_path / ".backup_alert_20250905").exists()
 
 
 def test_seed_cloud_and_prune_live_data_subcommands_registered() -> None:
@@ -721,3 +724,61 @@ def test_record_market_subcommand_wires_recorder(monkeypatch) -> None:
 
     assert captured["capture_root"] == Path("X")
     assert "liquidations_dir" in captured
+
+
+def test_prune_live_data_prunes_old_listing_slots(tmp_path, monkeypatch) -> None:
+    import argparse
+    import src.cli.commands.data as data_mod
+
+    listing = tmp_path / "data" / "state" / "venue_listing"
+    listing.mkdir(parents=True)
+    (listing / "20200101.json.gz").write_bytes(b"old")
+    (listing / "20990101.json.gz").write_bytes(b"new")
+    (listing / "notes.txt").write_bytes(b"junk")
+    (listing / "notes.json.gz").write_bytes(b"junk")
+    (listing / "20261345.json.gz").write_bytes(b"junk")
+    monkeypatch.setattr("src.common.paths.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("src.live.orderbook.default_orderbook_dir", lambda: tmp_path / "ob")
+    monkeypatch.setattr("src.market_data.retention.prune_market_data", lambda *a, **k: {})
+    monkeypatch.setattr("src.market_data.retention.prune_orderbook_history", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        "src.market_data.retention.check_orderbook_prune_impending", lambda *a, **k: (False, 0, None)
+    )
+
+    data_mod._prune_live_data(argparse.Namespace())
+
+    assert not (listing / "20200101.json.gz").exists()
+    assert (listing / "20990101.json.gz").exists()
+    assert (listing / "notes.txt").exists()
+    assert (listing / "notes.json.gz").exists()
+    assert (listing / "20261345.json.gz").exists()
+
+
+def test_prune_live_data_tolerates_listing_unlink_failure(tmp_path, monkeypatch) -> None:
+    import argparse
+    import pathlib
+    import src.cli.commands.data as data_mod
+
+    listing = tmp_path / "data" / "state" / "venue_listing"
+    listing.mkdir(parents=True)
+    victim = listing / "20200101.json.gz"
+    victim.write_bytes(b"old")
+    monkeypatch.setattr("src.common.paths.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("src.live.orderbook.default_orderbook_dir", lambda: tmp_path / "ob")
+    monkeypatch.setattr("src.market_data.retention.prune_market_data", lambda *a, **k: {})
+    monkeypatch.setattr("src.market_data.retention.prune_orderbook_history", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        "src.market_data.retention.check_orderbook_prune_impending", lambda *a, **k: (False, 0, None)
+    )
+    real_unlink = pathlib.Path.unlink
+
+    def _flaky_unlink(self, *args, **kwargs):
+        if self == victim:
+            raise OSError("disk read-only")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", _flaky_unlink)
+
+    data_mod._prune_live_data(argparse.Namespace())
+
+    assert victim.exists()

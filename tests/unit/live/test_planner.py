@@ -207,3 +207,59 @@ def test_build_client_order_id_submit_seq_makes_ids_distinct() -> None:
     with pytest.raises(ValueError, match="client order id"):
         build_client_order_id("20260914", "AAAUSDT", 0, 0, 10 ** 12)
 
+
+
+def _risk_filters(*symbols, controlled=()):
+    from decimal import Decimal
+
+    from src.live.filters import SymbolFilters
+
+    out = {}
+    for symbol in symbols:
+        out[symbol] = SymbolFilters(
+            symbol=symbol, tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+            min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+            quantity_precision=3, price_precision=2,
+            position_control_side="LONG" if symbol in controlled else "NONE",
+        )
+    return out
+
+
+def test_partition_risk_controlled_blocks_increases_keeps_reductions() -> None:
+    """Spec 02: a controlled symbol keeps its close leg but blocks the new leg."""
+    from decimal import Decimal
+
+    from src.live.planner import OrderIntent, partition_risk_controlled
+
+    close_leg = OrderIntent(symbol="AAAUSDT", side="SELL", quantity=Decimal("1"), reduce_only=True,
+                            target_qty=Decimal("-1"), current_qty=Decimal("1"),
+                            client_order_prefix="run1", leg_index=0, decision_price=Decimal("100"))
+    new_leg = OrderIntent(symbol="AAAUSDT", side="SELL", quantity=Decimal("1"), reduce_only=False,
+                          target_qty=Decimal("-1"), current_qty=Decimal("1"),
+                          client_order_prefix="run1", leg_index=1, decision_price=Decimal("100"))
+    increase = OrderIntent(symbol="BBBUSDT", side="BUY", quantity=Decimal("1"), reduce_only=False,
+                           target_qty=Decimal("1"), current_qty=Decimal("0"),
+                           client_order_prefix="run1", leg_index=0, decision_price=Decimal("100"))
+    filters = _risk_filters("AAAUSDT", "BBBUSDT", controlled={"AAAUSDT"})
+    allowed, blocked = partition_risk_controlled([close_leg, new_leg, increase], filters)
+    assert allowed == [close_leg, increase]
+    assert blocked == [new_leg]
+
+
+def test_partition_without_control_is_identity() -> None:
+    """Spec 02: with all filters at NONE every intent stays allowed."""
+    from decimal import Decimal
+
+    from src.live.planner import OrderIntent, partition_risk_controlled
+
+    intents = [
+        OrderIntent(symbol="AAAUSDT", side="BUY", quantity=Decimal("1"), reduce_only=False,
+                    target_qty=Decimal("1"), current_qty=Decimal("0"),
+                    client_order_prefix="run1", leg_index=0, decision_price=Decimal("100")),
+        OrderIntent(symbol="BBBUSDT", side="SELL", quantity=Decimal("2"), reduce_only=True,
+                    target_qty=Decimal("0"), current_qty=Decimal("2"),
+                    client_order_prefix="run1", leg_index=0, decision_price=Decimal("100")),
+    ]
+    allowed, blocked = partition_risk_controlled(intents, _risk_filters("AAAUSDT", "BBBUSDT"))
+    assert allowed == intents
+    assert blocked == []
