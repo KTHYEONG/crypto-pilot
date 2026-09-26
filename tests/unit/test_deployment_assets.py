@@ -43,9 +43,11 @@ def test_docker_compose_has_independent_market_recorder_service() -> None:
     assert "liquidation-collector" not in compose
     # 기존 live 데몬 서비스 계약이 깨지지 않는다.
     assert "./data/state:/app/data/state" in compose
-    # recorder 블록은 시크릿과 state 마운트 없이 최소 권한으로 동작한다.
+    # recorder 블록은 최소 권한으로 동작한다: 데몬 시크릿이 아닌 레코더 전용 env만 선택적으로 받는다.
     live_block, recorder_block = compose.split("  market-recorder:\n", 1)
-    assert "env_file" not in recorder_block
+    assert "crypto-pilot-recorder.env" in recorder_block
+    assert "required: false" in recorder_block
+    assert "crypto-pilot.env" not in recorder_block.replace("crypto-pilot-recorder.env", "")
     assert "./data/state" not in recorder_block
     assert "./logs:/app/logs" in recorder_block
     assert "env_file: /home/ubuntu/quant-secrets/crypto-pilot.env" in live_block
@@ -535,3 +537,28 @@ def test_gate_holds_inside_decision_window_until_cycle_complete() -> None:
     }
     released = decide_deploy(done, now=now, waited_s=0.0, max_wait_s=3600.0, stale_after_s=2700.0)
     assert (released.action, released.reason) == ("proceed", "cycle_complete")
+
+
+def test_liveness_units_are_well_formed() -> None:
+    from pathlib import Path
+    import subprocess
+
+    root = Path(__file__).resolve().parents[2]
+    timer = (root / "deploy" / "liveness" / "crypto-pilot-liveness.timer").read_text(encoding="utf-8")
+    service = (root / "deploy" / "liveness" / "crypto-pilot-liveness.service").read_text(encoding="utf-8")
+    script = (root / "deploy" / "liveness" / "crypto-pilot-liveness.sh").read_text(encoding="utf-8")
+
+    assert "OnCalendar=*:0/5" in timer
+    assert "Persistent=true" in timer
+    assert "Type=oneshot" in service
+    assert "OnFailure=kca-alert@%n.service" in service
+    # user unit(%h)은 system unit docker.service에 의존할 수 없다: 의존 시 트랜잭션 단계에서
+    # 실행 자체가 거부되어 OnFailure도 발동하지 않는다.
+    assert "docker.service" not in service
+    assert "--pull never" in script
+    assert "data/state" in script
+    assert "LIVE_DEADMAN_PING_URL=" not in script
+    assert "LIVE_RECORDER_DEADMAN_PING_URL=" not in script
+    assert "set -uo pipefail" in script
+    assert "stage=liveness" in script
+    assert subprocess.run(["/bin/bash", "-n", str(root / "deploy" / "liveness" / "crypto-pilot-liveness.sh")], capture_output=True, timeout=30).returncode == 0  # noqa: S603

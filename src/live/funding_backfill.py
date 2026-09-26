@@ -23,6 +23,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.live.audit import AUDIT_LOG_ROOT, AuditLog, default_audit_log_path
+from src.live.daemon_idle import assert_daemon_idle
 from src.live.fills import default_fills_dir, load_fills
 from src.live.ledger import (
     POSITION_HISTORY_MAX,
@@ -41,9 +42,6 @@ from src.market_data.services.futures_collection import FUNDING_GAP_THRESHOLD_MS
 logger = logging.getLogger("LiveFundingBackfill")
 
 BACKFILL_AUDIT_NAME: str = "paper_funding_backfill"
-# 운영 의미는 src/application/ops/daemon_idle_gate.py 의 BUSY_STAGES/DEFAULT_STALE_AFTER_S 와 동일(도구 스크립트 import 금지라 값 복제).
-BACKFILL_BUSY_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"})
-BACKFILL_BUSY_STALE_S: float = 2700.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,20 +294,7 @@ def apply_funding_backfill(state: LedgerState, plan: BackfillPlan) -> LedgerStat
 
 def _assert_daemon_idle(heartbeat_path: Path, now: pd.Timestamp) -> None:
     """Reject --apply while a cycle holds the ledger; stale busy is a crash remnant."""
-    if not heartbeat_path.exists():
-        return
-    try:
-        raw = json.loads(heartbeat_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise DataIntegrityError(f"heartbeat unreadable path={heartbeat_path}") from exc
-    if not isinstance(raw, dict):
-        raise DataIntegrityError(f"heartbeat unreadable path={heartbeat_path}")
-    stage = raw.get("stage")
-    ts_raw = raw.get("ts")
-    if stage in BACKFILL_BUSY_STAGES and ts_raw is not None:
-        age_s = (now - pd.Timestamp(ts_raw)).total_seconds()
-        if age_s <= BACKFILL_BUSY_STALE_S:
-            raise DataIntegrityError(f"daemon busy stage={stage}; retry when idle")
+    assert_daemon_idle(heartbeat_path, now)
 
 
 def run_paper_funding_backfill(

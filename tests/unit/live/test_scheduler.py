@@ -87,7 +87,7 @@ def test_SCENARIO_LIVE_DAEMON_04_one_cycle_per_iteration(
         sleep_fn=lambda seconds: pytest.fail("window already passed; must not sleep"),
         now_fn=lambda: READY_NOW,
         max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     assert cycle_calls == [DECISION_TIME]
@@ -132,7 +132,7 @@ def test_SCENARIO_LIVE_DAEMON_05_idempotent_skip_on_restart(
             sleep_fn=limited_sleep,
             now_fn=lambda: DECISION_TIME,  # 오늘자는 이미 처리됨 -> 내일자 윈도우 대기 상태
             max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     assert len(sleeps) >= 1
@@ -159,7 +159,7 @@ def test_SCENARIO_LIVE_DAEMON_06_crash_does_not_kill_loop(
         sleep_fn=lambda seconds: None,
         now_fn=lambda: READY_NOW,
         max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -199,7 +199,7 @@ def test_SCENARIO_LIVE_DAEMON_07_catchup_no_extra_wait(
         sleep_fn=lambda seconds: pytest.fail("catch-up must run without extra wait"),
         now_fn=lambda: DECISION_TIME + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20),
         max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     assert cycle_calls == [DECISION_TIME]
@@ -257,7 +257,7 @@ def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noq
         sleep_fn=sleep_fn,
         now_fn=now_fn,
         max_iterations=6,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     assert len([c for c in calls if c == dt]) == 5
     saved = json.loads(state_path.read_text())
@@ -288,7 +288,7 @@ def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noq
         sleep_fn=sleep_fn2,
         now_fn=now_fn2,
         max_iterations=2,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     assert len(calls2) == 2
 
@@ -334,7 +334,7 @@ def test_SCENARIO_RESIL_06_graceful_shutdown(tmp_path, monkeypatch):  # noqa: D1
         now_fn=lambda: ready,
         max_iterations=10,
         shutdown=flag,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     assert len(calls) == 1
 
@@ -405,7 +405,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur,
         now_fn=now_fn_cur,
         max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     size1 = hb_path.stat().st_size
     # Second run with advancing clock for 30 iterations
@@ -424,12 +424,12 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur2,
         now_fn=now_fn_cur2,
         max_iterations=30,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
     size2 = hb_path.stat().st_size
     assert size2 <= size1 * 1.5
     data = json.loads(hb_path.read_text())
-    assert set(data.keys()) == {"ts", "decision_time", "status", "attempts", "consecutive_halts", "stage", "detail"}
+    assert set(data.keys()) == {"ts", "decision_time", "status", "attempts", "consecutive_halts", "stage", "detail", "expected_by"}
     orig_write = sched.write_heartbeat
 
     def failing_write(*a, **k):  # noqa: ARG001
@@ -451,7 +451,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         sleep_fn=sleep_fn_cur3,
         now_fn=now_fn_cur3,
         max_iterations=10,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
 def test_run_daemon_has_no_params_gate(monkeypatch, tmp_path) -> None:
@@ -474,7 +474,7 @@ def test_run_daemon_has_no_params_gate(monkeypatch, tmp_path) -> None:
     sched.run_daemon(settings, tmp_path / "w.parquet", tmp_path / "state.json",
                      sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-25 23:20:00", tz="UTC"),
                      max_iterations=1, signal_step_fn=lambda target: order.append("signal"),
-                     refresh_fn=lambda: order.append("refresh"), prune_fn=lambda: order.append("prune"),
+                     refresh_fn=lambda *a, **k: order.append("refresh"), prune_fn=lambda: order.append("prune"),
                      venue_fn=lambda target: order.append("venue"))
     assert order == ["venue", "refresh", "signal", "cycle", "prune"]
     assert json.loads(hb.read_text())["status"] == "COMPLETE"
@@ -495,7 +495,7 @@ def test_run_daemon_runs_signal_then_cycle(monkeypatch, tmp_path) -> None:
     settings = sched.LiveSettings(heartbeat_path=str(tmp_path / "hb.json"))
     sched.run_daemon(settings, tmp_path / "w.parquet", tmp_path / "state.json",
                      sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-25 23:20:00", tz="UTC"),
-                     max_iterations=1, signal_step_fn=_sig, refresh_fn=lambda: None, prune_fn=lambda: None)
+                     max_iterations=1, signal_step_fn=_sig, refresh_fn=lambda *a, **k: None, prune_fn=lambda: None)
     assert [k for k, _ in order] == ["signal", "cycle"]
     assert order[0][1] == order[1][1]
 
@@ -516,7 +516,7 @@ def test_run_daemon_awaiting_data_when_refresh_fails(tmp_path, monkeypatch) -> N
     artifact.touch()
     step_calls: list[object] = []
 
-    def _bad_refresh() -> None:
+    def _bad_refresh(*a: object, **k: object) -> None:
         raise RuntimeError("cold")
 
     sched.run_daemon(
@@ -566,7 +566,7 @@ def test_daemon_runs_prune_after_execute(tmp_path, monkeypatch) -> None:
         sleep_fn=lambda _s: None,
         now_fn=lambda: pd.Timestamp("2026-08-24 00:00Z") + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20),
         max_iterations=1,
-        refresh_fn=lambda: order.append("refresh"),
+        refresh_fn=lambda *a, **k: order.append("refresh"),
         signal_step_fn=lambda *a, **k: order.append("signal"),
         prune_fn=lambda: order.append("prune"),
     )
@@ -598,7 +598,7 @@ def test_daemon_prune_failure_is_non_fatal(tmp_path, monkeypatch) -> None:
         sleep_fn=lambda _s: None,
         now_fn=lambda: pd.Timestamp("2026-08-24 00:00Z") + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20),
         max_iterations=1,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=lambda *a, **k: ran.append("signal"),
         prune_fn=_boom,
     )
@@ -632,6 +632,7 @@ def test_default_data_refresh_splits_crypto_and_seeds_long_window(monkeypatch, t
 
     monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
     monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", tmp_path / "non_crypto_symbols.json")
+    monkeypatch.setattr(sched, "DATA_DIR", tmp_path / "data")
 
     captured: dict = {}
 
@@ -640,12 +641,22 @@ def test_default_data_refresh_splits_crypto_and_seeds_long_window(monkeypatch, t
         return RefreshReport(total=1, fresh=0, refreshed=1, failed=0, deadline_skipped=0, elapsed_s=0.1, deadline_hit=False, staleness_hours=1.0, ok=True)
 
     monkeypatch.setattr("src.live.data_refresh.refresh_live_market_data", _fake_refresh)
-    rep = sched._default_data_refresh()
+    import pandas as pd
+
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings(ledger_path=str(tmp_path / "ledger.json"))
+    (tmp_path / "ledger.json").write_text(
+        json.dumps({"positions": {"GHOSTUSDT": "1"}, "cash_usdt": "1000"}), encoding="utf-8"
+    )
+    decision_time = pd.Timestamp("2026-09-01 00:00Z")
+    rep = sched._default_data_refresh(settings, tmp_path / "w.parquet", decision_time)
     assert rep.ok is True
     assert captured["symbols"] == ["BTCUSDT"]
     assert captured["seed_lookback_days"] == LIVE_FROZEN_WARMUP_DAYS + 30
     saved = json.loads((tmp_path / "non_crypto_symbols.json").read_text(encoding="utf-8"))
     assert saved["symbols"] == ["AAPLUSDT"]
+    assert (tmp_path / "data" / "state" / "venue_listing" / "20260901.json.gz").exists()
 
 
 
@@ -659,7 +670,7 @@ def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
     monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
     monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
-    monkeypatch.setattr(sched, "post_alert", lambda *a, **k: True, raising=False)
+    monkeypatch.setattr("src.live.alerting.post_alert", lambda *a, **k: True)
 
     emails: list[str] = []
 
@@ -667,7 +678,7 @@ def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
         emails.append(event)
         return True
 
-    monkeypatch.setattr(sched, "send_email_alert", _fake_email, raising=False)
+    monkeypatch.setattr("src.live.alerting.send_email_alert", _fake_email)
 
     def _halt_cycle(settings, decision_time, artifact, *, now):
         from src.live.runner import CycleReport
@@ -692,13 +703,14 @@ def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
             daemon_max_attempts_per_day=1,
             alert_gmail_user="bot@gmail.com",
             alert_gmail_app_password="pw",
+            alert_outbox_path=str(tmp_path / "outbox.json"),
         ),
         artifact,
         tmp_path / "state.json",
         sleep_fn=sleep_fn,
         now_fn=now_fn,
         max_iterations=3,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=lambda *a, **k: None,
         prune_fn=lambda: None,
     )
@@ -715,7 +727,7 @@ def test_run_daemon_proceeds_degraded_when_cached_data_fresh_enough(tmp_path, mo
 
     monkeypatch.setattr(sched, "_strategy_params_present", lambda s: True, raising=False)
     alerts: list[str] = []
-    monkeypatch.setattr(sched, "_daemon_alert", lambda s, sent, *, event, detail, decision_time, now: alerts.append(event))
+    monkeypatch.setattr(sched, "_daemon_alert", lambda s, *, event, detail, decision_time, now, **_k: alerts.append(event))
 
     class _Report:
         pass
@@ -731,7 +743,7 @@ def test_run_daemon_proceeds_degraded_when_cached_data_fresh_enough(tmp_path, mo
         settings, tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T23:20:00Z"),
         max_iterations=1,
-        refresh_fn=lambda: rep,
+        refresh_fn=lambda *a, **k: rep,
         signal_step_fn=lambda target: steps.append("signal"),
         prune_fn=lambda: steps.append("prune"),
     )
@@ -762,7 +774,7 @@ def test_run_daemon_awaiting_data_when_staleness_beyond_limit(tmp_path, monkeypa
         settings, tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T23:20:00Z"),
         max_iterations=1,
-        refresh_fn=lambda: rep,
+        refresh_fn=lambda *a, **k: rep,
         signal_step_fn=lambda target: called.append("signal"),
         prune_fn=lambda: called.append("prune"),
     )
@@ -788,7 +800,7 @@ def test_run_daemon_legacy_none_refresh_still_proceeds(tmp_path, monkeypatch) ->
         settings, tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T23:20:00Z"),
         max_iterations=1,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=lambda target: steps.append("signal"),
         prune_fn=lambda: steps.append("prune"),
     )
@@ -813,7 +825,7 @@ def test_run_daemon_alerts_day_skipped_when_cycle_halts_on_last_attempt(tmp_path
     monkeypatch.setattr(
         sched,
         "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -835,7 +847,7 @@ def test_run_daemon_alerts_day_skipped_when_cycle_halts_on_last_attempt(tmp_path
         sleep_fn=lambda s: None,
         now_fn=lambda: ready,
         max_iterations=1,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=lambda *a, **k: None,
         prune_fn=lambda: None,
     )
@@ -861,7 +873,7 @@ def test_run_daemon_alerts_day_skipped_when_signal_step_fails_on_last_attempt(tm
     monkeypatch.setattr(
         sched,
         "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -885,7 +897,7 @@ def test_run_daemon_alerts_day_skipped_when_signal_step_fails_on_last_attempt(tm
         sleep_fn=lambda s: None,
         now_fn=lambda: ready,
         max_iterations=1,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=_failing_signal_step,
         prune_fn=lambda: None,
     )
@@ -910,7 +922,7 @@ def test_run_daemon_halt_streak_detail_names_crashed_cycle_exception(tmp_path, m
     monkeypatch.setattr(
         sched,
         "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -930,12 +942,12 @@ def test_run_daemon_halt_streak_detail_names_crashed_cycle_exception(tmp_path, m
         sleep_fn=lambda s: None,
         now_fn=lambda: ready,
         max_iterations=1,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=lambda *a, **k: None,
         prune_fn=lambda: None,
     )
 
-    assert alerts == [("halt_streak", "consecutive_halts=1 cause=cycle crashed RuntimeError")]
+    assert [a for a in alerts if a[0] != "venue_capture_failed"] == [("halt_streak", "consecutive_halts=1 cause=cycle crashed RuntimeError")]
 
 
 def test_run_daemon_alerts_halt_streak_once_per_decision_day(tmp_path, monkeypatch) -> None:
@@ -950,9 +962,8 @@ def test_run_daemon_alerts_halt_streak_once_per_decision_day(tmp_path, monkeypat
     monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
     events: list[tuple[str, pd.Timestamp]] = []
     monkeypatch.setattr(
-        sched, "post_alert",
-        lambda url, *, event, detail, decision_time, now: events.append((event, decision_time)) or True,
-        raising=False,
+        "src.live.alerting.post_alert",
+        lambda url, *, event, detail, decision_time, now, **_k: events.append((event, decision_time)) or True,
     )
 
     def _halt_cycle(settings, decision_time, artifact, *, now):
@@ -973,13 +984,13 @@ def test_run_daemon_alerts_halt_streak_once_per_decision_day(tmp_path, monkeypat
         cur[0] += pd.Timedelta(seconds=s)
 
     sched.run_daemon(
-        LiveSettings(alert_webhook_url="https://h.example", alert_halt_streak=2, daemon_max_attempts_per_day=1),
+        LiveSettings(alert_webhook_url="https://h.example", alert_halt_streak=2, daemon_max_attempts_per_day=1, alert_outbox_path=str(tmp_path / "outbox.json")),
         artifact,
         tmp_path / "state.json",
         sleep_fn=sleep_fn,
         now_fn=now_fn,
         max_iterations=3,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=lambda *a, **k: None,
         prune_fn=lambda: None,
     )
@@ -1000,7 +1011,7 @@ def test_run_daemon_degraded_alert_detail_includes_refresh_failure_count(tmp_pat
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda s, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda s, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     rep = RefreshReport(total=500, fresh=0, refreshed=21, failed=479, deadline_skipped=0,
                         elapsed_s=12.0, deadline_hit=False, staleness_hours=0.1, ok=False)
@@ -1014,12 +1025,12 @@ def test_run_daemon_degraded_alert_detail_includes_refresh_failure_count(tmp_pat
         settings, tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T23:20:00Z"),
         max_iterations=1,
-        refresh_fn=lambda: rep,
+        refresh_fn=lambda *a, **k: rep,
         signal_step_fn=lambda target: None,
         prune_fn=lambda: None,
     )
 
-    assert ("data_degraded", "staleness_h=0.1 failed=479/500 err=None") in alerts
+    assert any(ev == "data_degraded" and detail.startswith("staleness_h=0.1 failed=479/500 err=None") for ev, detail in alerts)
 
 
 def test_run_daemon_refresh_failed_alert_detail_includes_refresh_failure_count(tmp_path, monkeypatch) -> None:
@@ -1032,7 +1043,7 @@ def test_run_daemon_refresh_failed_alert_detail_includes_refresh_failure_count(t
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda s, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda s, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     rep = RefreshReport(total=500, fresh=0, refreshed=0, failed=500, deadline_skipped=0,
                         elapsed_s=5.0, deadline_hit=False, staleness_hours=200.0, ok=False)
@@ -1042,12 +1053,12 @@ def test_run_daemon_refresh_failed_alert_detail_includes_refresh_failure_count(t
         settings, tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T23:20:00Z"),
         max_iterations=1,
-        refresh_fn=lambda: rep,
+        refresh_fn=lambda *a, **k: rep,
         signal_step_fn=lambda target: None,
         prune_fn=lambda: None,
     )
 
-    assert ("data_refresh_failed", "staleness_h=200.0 failed=500/500 err=None") in alerts
+    assert any(ev == "data_refresh_failed" and detail.startswith("staleness_h=200.0 failed=500/500 err=None") for ev, detail in alerts)
 
 
 def test_run_daemon_halt_streak_detail_names_generic_signal_step_exception(tmp_path, monkeypatch) -> None:
@@ -1065,7 +1076,7 @@ def test_run_daemon_halt_streak_detail_names_generic_signal_step_exception(tmp_p
     monkeypatch.setattr(
         sched,
         "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1089,7 +1100,7 @@ def test_run_daemon_halt_streak_detail_names_generic_signal_step_exception(tmp_p
         sleep_fn=lambda s: None,
         now_fn=lambda: ready,
         max_iterations=1,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=_crashing_signal_step,
         prune_fn=lambda: None,
     )
@@ -1146,7 +1157,7 @@ def test_write_heartbeat_is_atomic_and_carries_stage(tmp_path, monkeypatch) -> N
         sched.write_heartbeat(hb, decision_time=decision, status="HALT", attempts=2, consecutive_halts=1, now=decision)
 
     assert running["stage"] == "signal"
-    assert set(running) == {"ts", "decision_time", "status", "attempts", "consecutive_halts", "stage", "detail"}
+    assert set(running) == {"ts", "decision_time", "status", "attempts", "consecutive_halts", "stage", "detail", "expected_by"}
     assert json.loads(complete_text)["stage"] == "idle"
     assert hb.read_text(encoding="utf-8") == complete_text
 
@@ -1167,7 +1178,7 @@ def test_run_daemon_writes_full_state_once_and_legacy_writer_removed(tmp_path, m
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1189,7 +1200,7 @@ def test_run_daemon_writes_full_state_once_and_legacy_writer_removed(tmp_path, m
     )
     sched.run_daemon(
         LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready,
-        max_iterations=1, refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
     complete_keys = set(json.loads(state_path.read_text(encoding="utf-8")))
     complete_writes = len(writes)
@@ -1202,7 +1213,7 @@ def test_run_daemon_writes_full_state_once_and_legacy_writer_removed(tmp_path, m
     sched.run_daemon(
         LiveSettings(daemon_max_attempts_per_day=1, alert_halt_streak=5), artifact, halted_state,
         sleep_fn=lambda s: None, now_fn=lambda: ready,
-        max_iterations=1, refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
 
     assert not hasattr(sched, "_save_last_processed")
@@ -1229,7 +1240,7 @@ def test_run_daemon_corrupt_state_alerts_and_idles_without_reset(tmp_path, monke
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1244,7 +1255,7 @@ def test_run_daemon_corrupt_state_alerts_and_idles_without_reset(tmp_path, monke
 
     sched.run_daemon(
         LiveSettings(), artifact, state_path, sleep_fn=sleeps.append, now_fn=lambda: ready,
-        max_iterations=1, refresh_fn=lambda: None, signal_step_fn=lambda t: cycles.append(t), prune_fn=lambda: None,
+        max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: cycles.append(t), prune_fn=lambda: None,
     )
 
     heartbeat = json.loads(hb_path.read_text(encoding="utf-8"))
@@ -1273,7 +1284,7 @@ def test_run_daemon_heartbeat_stage_transitions_for_complete_cycle(tmp_path, mon
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1283,7 +1294,7 @@ def test_run_daemon_heartbeat_stage_transitions_for_complete_cycle(tmp_path, mon
 
     beats: list[tuple[str, str]] = []
 
-    def _record(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail=""):
+    def _record(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail="", expected_by=None, **_k):
         beats.append((status, stage))
 
     monkeypatch.setattr(sched, "write_heartbeat", _record)
@@ -1294,7 +1305,7 @@ def test_run_daemon_heartbeat_stage_transitions_for_complete_cycle(tmp_path, mon
 
     sched.run_daemon(
         LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready,
-        max_iterations=1, refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
 
     assert beats == [("RUNNING", "refresh"), ("RUNNING", "signal"), ("RUNNING", "execute"), ("COMPLETE", "idle")]
@@ -1325,7 +1336,7 @@ def test_run_daemon_default_wait_is_interrupted_by_shutdown(tmp_path, monkeypatc
     sched.run_daemon(
         LiveSettings(), tmp_path / "w.parquet", state_path,
         now_fn=lambda: pd.Timestamp("2026-08-23 12:00Z"), max_iterations=3, shutdown=flag,
-        refresh_fn=lambda: cycles.append("refresh"), signal_step_fn=lambda t: cycles.append(t), prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: cycles.append("refresh"), signal_step_fn=lambda t: cycles.append(t), prune_fn=lambda: None,
     )
 
     assert time.monotonic() - started < 5.0
@@ -1348,7 +1359,7 @@ def test_run_daemon_honors_shutdown_at_stage_boundaries(tmp_path, monkeypatch) -
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1372,7 +1383,7 @@ def test_run_daemon_honors_shutdown_at_stage_boundaries(tmp_path, monkeypatch) -
     _run(
         before_venue,
         venue_hook=lambda target: (before_venue.request("SIGTERM"), calls.append("venue-1")),
-        refresh_hook=lambda: calls.append("refresh-1"),
+        refresh_hook=lambda *a, **k: calls.append("refresh-1"),
         signal_hook=lambda t: calls.append("signal-1"),
         state_file="s1.json",
     )
@@ -1380,7 +1391,7 @@ def test_run_daemon_honors_shutdown_at_stage_boundaries(tmp_path, monkeypatch) -
     _run(
         before_refresh,
         venue_hook=lambda target: None,
-        refresh_hook=lambda: (before_refresh.request("SIGTERM"), calls.append("refresh-2")),
+        refresh_hook=lambda *a, **k: (before_refresh.request("SIGTERM"), calls.append("refresh-2")),
         signal_hook=lambda t: calls.append("signal-2"),
         state_file="s2.json",
     )
@@ -1388,7 +1399,7 @@ def test_run_daemon_honors_shutdown_at_stage_boundaries(tmp_path, monkeypatch) -
     _run(
         before_signal,
         venue_hook=lambda target: None,
-        refresh_hook=lambda: None,
+        refresh_hook=lambda *a, **k: None,
         signal_hook=lambda t: (before_signal.request("SIGTERM"), calls.append("signal-3")),
         state_file="s3.json",
     )
@@ -1415,7 +1426,7 @@ def test_run_daemon_passes_shutdown_to_cycle(tmp_path, monkeypatch) -> None:
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1436,7 +1447,7 @@ def test_run_daemon_passes_shutdown_to_cycle(tmp_path, monkeypatch) -> None:
 
     sched.run_daemon(
         LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready,
-        max_iterations=1, shutdown=flag, refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        max_iterations=1, shutdown=flag, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
 
     assert seen == [flag]
@@ -1458,7 +1469,7 @@ def test_run_daemon_catchup_skips_stale_days_to_earliest_fresh_decision(tmp_path
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1480,7 +1491,7 @@ def test_run_daemon_catchup_skips_stale_days_to_earliest_fresh_decision(tmp_path
         sched.run_daemon(
             LiveSettings(max_signal_staleness_hours=6.0), artifact, state_path, sleep_fn=_stop_on_wait,
             now_fn=lambda: pd.Timestamp("2026-08-24 10:00Z"), max_iterations=1,
-            refresh_fn=lambda: cycles.append("refresh"), signal_step_fn=lambda t: cycles.append(t), prune_fn=lambda: None,
+            refresh_fn=lambda *a, **k: cycles.append("refresh"), signal_step_fn=lambda t: cycles.append(t), prune_fn=lambda: None,
         )
 
     saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1505,7 +1516,7 @@ def test_run_daemon_catchup_skips_stale_pending_retry(tmp_path, monkeypatch) -> 
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1529,7 +1540,7 @@ def test_run_daemon_catchup_skips_stale_pending_retry(tmp_path, monkeypatch) -> 
         sched.run_daemon(
             LiveSettings(max_signal_staleness_hours=6.0), artifact, state_path, sleep_fn=_stop_on_wait,
             now_fn=lambda: pd.Timestamp("2026-08-24 10:00Z"), max_iterations=1,
-            refresh_fn=lambda: None, signal_step_fn=lambda t: pytest.fail("stale pending must not run"), prune_fn=lambda: None,
+            refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: pytest.fail("stale pending must not run"), prune_fn=lambda: None,
         )
 
     saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1555,7 +1566,7 @@ def test_run_daemon_no_catchup_within_freshness_window(tmp_path, monkeypatch) ->
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1575,7 +1586,7 @@ def test_run_daemon_no_catchup_within_freshness_window(tmp_path, monkeypatch) ->
     sched.run_daemon(
         LiveSettings(), artifact, state_path, sleep_fn=lambda s: None,
         now_fn=lambda: pd.Timestamp("2026-08-24 23:20Z"), max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
 
     assert ran == [target]
@@ -1598,7 +1609,7 @@ def test_run_daemon_restores_consecutive_halts_from_halted_heartbeat(tmp_path, m
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1618,7 +1629,7 @@ def test_run_daemon_restores_consecutive_halts_from_halted_heartbeat(tmp_path, m
     sched.run_daemon(
         LiveSettings(alert_halt_streak=4, daemon_max_attempts_per_day=5), artifact, state_path,
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
 
     assert ("halt_streak", "consecutive_halts=4 cause=cycle status=HALT reason=x") in alerts
@@ -1640,7 +1651,7 @@ def test_run_daemon_does_not_restore_halts_from_complete_or_unreadable_heartbeat
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1662,7 +1673,7 @@ def test_run_daemon_does_not_restore_halts_from_complete_or_unreadable_heartbeat
         sched.run_daemon(
             LiveSettings(alert_halt_streak=2, daemon_max_attempts_per_day=5), artifact, tmp_path / f"state{index}.json",
             sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+            refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         )
 
     assert [event for event, _ in alerts if event == "halt_streak"] == []
@@ -1684,7 +1695,7 @@ def test_run_daemon_corrupt_state_survives_heartbeat_write_failure(tmp_path, mon
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1704,7 +1715,7 @@ def test_run_daemon_corrupt_state_survives_heartbeat_write_failure(tmp_path, mon
 
     sched.run_daemon(
         LiveSettings(), artifact, state_path, sleep_fn=waits.append, now_fn=lambda: ready,
-        max_iterations=1, refresh_fn=lambda: None, signal_step_fn=lambda t: cycles.append(t), prune_fn=lambda: None,
+        max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: cycles.append(t), prune_fn=lambda: None,
     )
 
     assert alerts == [("state_corrupt", "path=state.json error=DataIntegrityError")]
@@ -1730,7 +1741,7 @@ def test_run_daemon_signal_step_halt_waits_backoff_and_keeps_pending(tmp_path, m
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -1750,7 +1761,8 @@ def test_run_daemon_signal_step_halt_waits_backoff_and_keeps_pending(tmp_path, m
     sched.run_daemon(
         LiveSettings(daemon_max_attempts_per_day=5, alert_halt_streak=5), artifact, state_path,
         sleep_fn=waits.append, now_fn=lambda: ready,
-        max_iterations=1, refresh_fn=lambda: None, signal_step_fn=_failing_signal_step, prune_fn=lambda: None,
+        max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=_failing_signal_step, prune_fn=lambda: None,
+        venue_fn=lambda t: "captured",
     )
 
     saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1789,7 +1801,7 @@ def test_run_daemon_logs_elapsed_per_stage(tmp_path, monkeypatch, caplog) -> Non
     with caplog.at_level(logging.INFO, logger="LiveScheduler"):
         sched.run_daemon(
             LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready,
-            max_iterations=1, refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+            max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         )
 
     pattern = re.compile(r"^\[SYS\] stage=(refresh|signal|execute) decision_time=2026-08-24T00:00:00\+00:00 elapsed_s=\d+\.\d$")
@@ -1820,7 +1832,7 @@ def test_run_daemon_logs_stage_elapsed_even_when_stage_fails(tmp_path, monkeypat
     monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: cycles.append(a))
     monkeypatch.setattr(data_refresh, "market_data_staleness_hours", lambda root, *, now, partition="dev": 0.0)
 
-    def _refresh_boom():
+    def _refresh_boom(*a: object, **k: object):
         raise RuntimeError("refresh down")
 
     def _signal_boom(t):
@@ -1922,7 +1934,7 @@ def test_run_daemon_persists_signal_halt_cause_to_heartbeat(tmp_path, monkeypatc
         LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
         artifact, state_path,
         sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=boom_signal_step, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=boom_signal_step, prune_fn=lambda: None,
     )
 
     # Then: heartbeat detail carries the same redacted cause the alert would have used
@@ -1964,7 +1976,7 @@ def test_run_daemon_persists_execute_halt_cause_to_heartbeat(tmp_path, monkeypat
         LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
         artifact, state_path,
         sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     # Then
@@ -1984,7 +1996,7 @@ def test_run_daemon_persists_awaiting_data_detail_to_heartbeat(tmp_path, monkeyp
     import src.live.data_refresh as data_refresh_mod
     monkeypatch.setattr(data_refresh_mod, "market_data_staleness_hours", lambda *a, **k: 999.0)
 
-    def boom_refresh():
+    def boom_refresh(*a: object, **k: object):
         raise RuntimeError("network down")
 
     artifact = tmp_path / "a.parquet"
@@ -2036,7 +2048,7 @@ def test_run_daemon_persists_state_corrupt_detail_to_heartbeat(tmp_path, monkeyp
         LiveSettings(heartbeat_path=str(hb_path)),
         artifact, state_path,
         sleep_fn=lambda s: None, now_fn=lambda: now, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     # Then: heartbeat detail carries the same path/error-type summary the state_corrupt alert used
@@ -2072,7 +2084,7 @@ def test_run_daemon_alerts_interrupted_stage_once_and_logs_banner(tmp_path, monk
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -2104,7 +2116,7 @@ def test_run_daemon_alerts_interrupted_stage_once_and_logs_banner(tmp_path, monk
     with pytest.raises(_Stop):
         sched.run_daemon(
             LiveSettings(), artifact, state_path, sleep_fn=_stop, now_fn=lambda: early, max_iterations=1,
-            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+            refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         )
 
     # Then
@@ -2122,7 +2134,7 @@ def test_run_daemon_alerts_interrupted_stage_once_and_logs_banner(tmp_path, monk
     with pytest.raises(_Stop):
         sched.run_daemon(
             LiveSettings(), artifact, state_path, sleep_fn=_stop, now_fn=lambda: early, max_iterations=1,
-            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+            refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         )
     assert alerts == []
 
@@ -2149,7 +2161,7 @@ def test_run_daemon_touches_heartbeat_ts_while_waiting_without_creating_it(tmp_p
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     artifact = tmp_path / "w.parquet"
     artifact.touch()
@@ -2180,13 +2192,15 @@ def test_run_daemon_touches_heartbeat_ts_while_waiting_without_creating_it(tmp_p
     with pytest.raises(_Stop):
         sched.run_daemon(
             LiveSettings(), artifact, state_path, sleep_fn=_sleep, now_fn=lambda: cur[0], max_iterations=1,
-            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+            refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         )
 
-    # Then: ts 만 갱신, 나머지 필드 보존
+    # Then: ts 와 expected_by(다음 행동 시각 + grace)만 갱신, 상태 필드 보존
     heartbeat = json.loads(hb_path.read_text(encoding="utf-8"))
-    assert heartbeat["ts"] == (start + pd.Timedelta(seconds=calls[0])).isoformat()
-    assert {k: v for k, v in heartbeat.items() if k != "ts"} == base_payload
+    tick = start + pd.Timedelta(seconds=calls[0])
+    assert heartbeat["ts"] == tick.isoformat()
+    assert pd.Timestamp(heartbeat["expected_by"]) > tick
+    assert {k: v for k, v in heartbeat.items() if k not in ("ts", "expected_by")} == base_payload
 
     # Given: heartbeat 부재 -> 생존 틱이 파일을 만들지 않는다
     hb_path.unlink()
@@ -2195,56 +2209,31 @@ def test_run_daemon_touches_heartbeat_ts_while_waiting_without_creating_it(tmp_p
     with pytest.raises(_Stop):
         sched.run_daemon(
             LiveSettings(), artifact, state_path, sleep_fn=_sleep, now_fn=lambda: cur[0], max_iterations=1,
-            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+            refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         )
     assert not hb_path.exists()
 
 
-def test_daemon_alert_marks_sent_only_after_delivery(monkeypatch) -> None:
+def test_daemon_alert_dispatches_through_outbox(tmp_path, monkeypatch) -> None:
     import pandas as pd
 
     import src.live.scheduler as sched
     from src.live.settings import LiveSettings
 
-    posts: list[str] = []
-    emails: list[str] = []
-    outcome = {"email": False}
-    monkeypatch.setattr(sched, "post_alert", lambda url, *, event, detail, decision_time, now: posts.append(event) or False)
-
-    def _email(**kwargs):
-        emails.append(kwargs["event"])
-        return outcome["email"]
-
-    monkeypatch.setattr(sched, "send_email_alert", _email)
-    settings = LiveSettings(alert_gmail_user="bot@gmail.com", alert_gmail_app_password="pw")
-    sent: set[str] = set()
+    settings = LiveSettings(
+        alert_outbox_path=str(tmp_path / "outbox.json"),
+        alert_gmail_user="bot@gmail.com",
+        alert_gmail_app_password="pw",
+    )
     now = pd.Timestamp("2026-08-24 01:10Z")
 
-    # When: 모든 채널 실패 -> 미발송으로 남아 다음 호출에서 재시도
-    assert sched._daemon_alert(settings, sent, event="halt_streak", detail="d", decision_time=None, now=now) is False
-    assert sent == set()
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(sched, "dispatch_alert", lambda s, *, event, detail, decision_time, dedupe_key, now: calls.append((event, dedupe_key)) or True)
 
-    # When: 이메일 성공
-    outcome["email"] = True
-    assert sched._daemon_alert(settings, sent, event="halt_streak", detail="d", decision_time=None, now=now) is True
-    assert sent == {"halt_streak"}
-
-    # When: 이미 발송된 이벤트
-    assert sched._daemon_alert(settings, sent, event="halt_streak", detail="d", decision_time=None, now=now) is False
-    assert emails == ["halt_streak", "halt_streak"]
-    assert posts == ["halt_streak", "halt_streak"]
-
-    # When: 채널 호출 자체가 예외 -> 로그 후 False, 미기록
-    def _boom(**kwargs):
-        raise RuntimeError("smtp down")
-
-    monkeypatch.setattr(sched, "send_email_alert", _boom)
-    assert sched._daemon_alert(settings, sent, event="day_skipped", detail="d", decision_time=None, now=now) is False
-    assert "day_skipped" not in sent
-
-    # When: 채널 미설정 -> 경고 없이 False
-    monkeypatch.setattr(sched, "send_email_alert", lambda **kwargs: False)
-    assert sched._daemon_alert(LiveSettings(), set(), event="data_degraded", detail="d", decision_time=None, now=now) is False
+    assert sched._daemon_alert(settings, event="halt_streak", detail="d", decision_time=None, now=now) is True
+    assert calls == [("halt_streak", "halt_streak:none")]
+    assert sched._daemon_alert(settings, event="halt_streak", detail="d", decision_time=None, now=now, dedupe_key="custom") is True
+    assert calls[-1] == ("halt_streak", "custom")
 
 
 def test_scheduler_alert_gap_helpers_tolerate_bad_inputs(tmp_path, monkeypatch) -> None:
@@ -2287,9 +2276,9 @@ def test_scheduler_alert_gap_helpers_tolerate_bad_inputs(tmp_path, monkeypatch) 
 
     # _handle_interrupted_stage: naive decision_time/비정수 카운터는 안전한 기본값으로 기록
     alerts: list[tuple[str, str]] = []
-    monkeypatch.setattr(sched, "_daemon_alert", lambda settings, sent, *, event, detail, decision_time, now: alerts.append((event, detail)))
+    monkeypatch.setattr(sched, "_daemon_alert", lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)))
     hb.write_text(json.dumps({"stage": "execute", "decision_time": "2026-08-24T00:00:00", "attempts": "many", "ts": "t0"}), encoding="utf-8")
-    sched._handle_interrupted_stage(LiveSettings(), hb, set(), now)
+    sched._handle_interrupted_stage(LiveSettings(), hb, now)
     rewritten = json.loads(hb.read_text(encoding="utf-8"))
     assert alerts == [("cycle_interrupted", "stage=execute decision_time=2026-08-24T00:00:00 heartbeat_ts=t0")]
     assert (rewritten["decision_time"], rewritten["attempts"], rewritten["consecutive_halts"]) == ("2026-08-24T00:00:00+00:00", 0, 0)
@@ -2302,7 +2291,7 @@ def test_scheduler_alert_gap_helpers_tolerate_bad_inputs(tmp_path, monkeypatch) 
         raise OSError("disk full")
 
     monkeypatch.setattr(sched, "write_heartbeat", _broken_heartbeat)
-    sched._handle_interrupted_stage(LiveSettings(), hb, set(), now)
+    sched._handle_interrupted_stage(LiveSettings(), hb, now)
     assert alerts[-1] == ("cycle_interrupted", "stage=refresh decision_time=2026-08-24T00:00:00+00:00 heartbeat_ts=t1")
 
 
@@ -2319,8 +2308,17 @@ def test_default_data_refresh_propagates_exchange_info_failure(monkeypatch) -> N
         raise urllib.error.URLError("venue down")
 
     monkeypatch.setattr("urllib.request.urlopen", _blocked)
+    from pathlib import Path
+
+    import pandas as pd
+
+    from src.live.settings import LiveSettings
+
     with pytest.raises(urllib.error.URLError):
-        sched._default_data_refresh()
+        sched._default_data_refresh(
+            LiveSettings(), Path("/tmp/w.parquet"),
+            pd.Timestamp("2026-09-01 00:00Z"),
+        )
 
 
 
@@ -2339,7 +2337,7 @@ def test_run_daemon_degraded_alert_detail_flags_funding_block(tmp_path, monkeypa
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         sched, "_daemon_alert",
-        lambda s, sent, *, event, detail, decision_time, now: alerts.append((event, detail)),
+        lambda s, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
     )
     rep = RefreshReport(total=500, fresh=0, refreshed=21, failed=479, deadline_skipped=0,
                         elapsed_s=12.0, deadline_hit=False, staleness_hours=0.1, ok=False, funding_blocked=True)
@@ -2354,13 +2352,13 @@ def test_run_daemon_degraded_alert_detail_flags_funding_block(tmp_path, monkeypa
         settings, tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-09-01T23:20:00Z"),
         max_iterations=1,
-        refresh_fn=lambda: rep,
+        refresh_fn=lambda *a, **k: rep,
         signal_step_fn=lambda target: None,
         prune_fn=lambda: None,
     )
 
     # Then
-    assert ("data_degraded", "staleness_h=0.1 failed=479/500 err=None funding_blocked=True") in alerts
+    assert any(ev == "data_degraded" and detail.startswith("staleness_h=0.1 failed=479/500 err=None") and "funding_blocked=True" in detail for ev, detail in alerts)
 
 
 
@@ -2398,7 +2396,7 @@ def test_daemon_waits_until_release_plus_buffer(tmp_path, monkeypatch) -> None:
         LiveSettings(), tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: cur.__setitem__(0, cur[0] + pd.Timedelta(seconds=s)),
         now_fn=lambda: cur[0], max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         venue_fn=_venue,
     )
 
@@ -2425,7 +2423,7 @@ def test_daemon_frozen_step_integrity_error_halts_with_cause(tmp_path, monkeypat
     sched.run_daemon(
         LiveSettings(daemon_max_attempts_per_day=5), tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=_gap, prune_fn=lambda: None, venue_fn=lambda target: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=_gap, prune_fn=lambda: None, venue_fn=lambda target: None,
     )
 
     hb = json.loads((tmp_path / "hb.json").read_text(encoding="utf-8"))
@@ -2455,7 +2453,7 @@ def test_daemon_venue_capture_failure_never_stops_cycle(tmp_path, monkeypatch) -
     sched.run_daemon(
         LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None, venue_fn=_boom,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None, venue_fn=_boom,
     )
 
     assert json.loads((tmp_path / "hb.json").read_text(encoding="utf-8"))["status"] == "COMPLETE"
@@ -2482,7 +2480,7 @@ def test_same_day_row_stays_fresh_at_submission(tmp_path, monkeypatch) -> None:
     sched.run_daemon(
         settings, tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: day + pd.Timedelta(hours=23, minutes=20), max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None, venue_fn=lambda target: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None, venue_fn=lambda target: None,
     )
 
     assert ran == [day]
@@ -2499,7 +2497,7 @@ def test_digest_carries_sizing_fields(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sched, "run_shadow_cycle", lambda s, t, w, now=None, **k: CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp(t), intent_count=3))
     monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
     details: list[str] = []
-    monkeypatch.setattr(sched, "_daemon_alert", lambda s, sent, *, event, detail, decision_time, now: details.append(detail) if event == "cycle_complete" else None)
+    monkeypatch.setattr(sched, "_daemon_alert", lambda s, *, event, detail, decision_time, now, **_k: details.append(detail) if event == "cycle_complete" else None)
     target = pd.Timestamp("2026-08-24 00:00Z")
     ready = target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
 
@@ -2507,7 +2505,7 @@ def test_digest_carries_sizing_fields(tmp_path, monkeypatch) -> None:
     sched.run_daemon(
         LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: frozen, prune_fn=lambda: None, venue_fn=lambda target: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: frozen, prune_fn=lambda: None, venue_fn=lambda target: None,
     )
 
     assert len(details) == 1
@@ -2525,7 +2523,7 @@ def test_default_venue_capture_stores_snapshot_and_tolerates_failure(monkeypatch
     target = pd.Timestamp("2026-09-21T00:00:00Z")
     monkeypatch.setattr(sched, "VENUE_RULES_DIR", tmp_path)
 
-    def _fake_fetch(*, api_key=None, api_secret=None):
+    def _fake_fetch(*, api_key=None, api_secret=None, max_rejected_fraction=0.0):
         seen.update(api_key=api_key, api_secret=api_secret)
         return "snapshot"
 
@@ -2537,17 +2535,17 @@ def test_default_venue_capture_stores_snapshot_and_tolerates_failure(monkeypatch
 
     monkeypatch.setattr("src.market_data.binance.venue_rules.fetch_venue_rules", _fake_fetch)
     monkeypatch.setattr("src.market_data.binance.venue_rules.write_venue_rule_snapshot", _fake_write)
-    assert sched._default_venue_capture(LiveSettings(), target) is None
+    assert sched._default_venue_capture(LiveSettings(), target) == "captured"
     assert seen == {"api_key": None, "api_secret": None}
     assert written["snapshot"] == "snapshot"
     assert written["root"] == tmp_path
     assert pd.Timestamp(written["slot_day"]) == target
 
-    def _boom(*, api_key=None, api_secret=None):
+    def _boom(*, api_key=None, api_secret=None, max_rejected_fraction=0.0):
         raise RuntimeError("bracket endpoint down")
 
     monkeypatch.setattr("src.market_data.binance.venue_rules.fetch_venue_rules", _boom)
-    assert sched._default_venue_capture(LiveSettings(), target) is None
+    assert sched._default_venue_capture(LiveSettings(), target) == "failed"
 
 
 def test_default_venue_capture_fills_decision_day_slot(monkeypatch, tmp_path) -> None:
@@ -2581,7 +2579,7 @@ def test_default_venue_capture_fills_decision_day_slot(monkeypatch, tmp_path) ->
     )
     monkeypatch.setattr(sched, "VENUE_RULES_DIR", tmp_path)
 
-    assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-22T00:00:00Z")) is None
+    assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-22T00:00:00Z")) == "captured"
     assert (tmp_path / "20260922.json.gz").exists()
     assert not (tmp_path / "20260923.json.gz").exists()
 
@@ -2602,7 +2600,7 @@ def test_default_venue_capture_skips_signed_fetch_when_slot_exists(monkeypatch, 
 
     monkeypatch.setattr("src.market_data.binance.venue_rules.fetch_venue_rules", _must_not_fetch)
     with caplog.at_level(logging.INFO, logger="LiveScheduler"):
-        assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-22T00:00:00Z")) is None
+        assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-22T00:00:00Z")) == "already_captured"
     assert any("ALREADY_CAPTURED" in rec.message and "slot=20260922" in rec.message for rec in caplog.records)
 
 
@@ -2621,7 +2619,7 @@ def test_daemon_passes_cycle_target_to_venue_fn(monkeypatch, tmp_path) -> None:
     sched.run_daemon(
         LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), tmp_path / "w.parquet", tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         venue_fn=lambda decision_time: received.append(pd.Timestamp(decision_time)),
     )
     assert received == [target]
@@ -2642,7 +2640,7 @@ def test_default_venue_capture_failure_stays_non_fatal(monkeypatch, tmp_path, ca
 
     monkeypatch.setattr("src.market_data.binance.venue_rules.fetch_venue_rules", _boom)
     with caplog.at_level(logging.WARNING, logger="LiveScheduler"):
-        assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-21T00:00:00Z")) is None
+        assert sched._default_venue_capture(LiveSettings(), pd.Timestamp("2026-09-21T00:00:00Z")) == "failed"
     assert any("status=FAILED" in rec.message for rec in caplog.records)
 
 
@@ -2725,7 +2723,7 @@ def test_daemon_defaults_wire_frozen_step_and_venue(monkeypatch, tmp_path) -> No
 
     sched.run_daemon(
         LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), tmp_path / "w.parquet", tmp_path / "state.json",
-        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1, refresh_fn=lambda: None, prune_fn=lambda: None,
+        sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1, refresh_fn=lambda *a, **k: None, prune_fn=lambda: None,
     )
 
     assert frozen_calls == [target]
@@ -2760,7 +2758,7 @@ def test_prune_runs_after_execution(tmp_path, monkeypatch) -> None:
         sleep_fn=lambda s: None,
         now_fn=lambda: ready,
         max_iterations=1,
-        refresh_fn=lambda: order.append("refresh"),
+        refresh_fn=lambda *a, **k: order.append("refresh"),
         signal_step_fn=lambda t: order.append("signal"),
         prune_fn=lambda: order.append("prune"),
         venue_fn=lambda target: None,
@@ -2798,7 +2796,7 @@ def test_prune_failure_is_isolated(tmp_path, monkeypatch) -> None:
         sleep_fn=lambda s: None,
         now_fn=lambda: ready,
         max_iterations=1,
-        refresh_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None,
         signal_step_fn=lambda *a, **k: None,
         prune_fn=_boom,
         venue_fn=lambda target: None,
@@ -2918,7 +2916,7 @@ def test_heartbeat_pulse_writes_fresh_during_slow_execute(tmp_path, monkeypatch)
     records: list[dict] = []
     _orig_write = sched.write_heartbeat
 
-    def _recording(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail=""):
+    def _recording(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail="", expected_by=None, **_k):
         records.append({"status": status, "stage": stage, "ts": str(now)})
         return _orig_write(path, decision_time=decision_time, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now, stage=stage, detail=detail)
 
@@ -2932,7 +2930,7 @@ def test_heartbeat_pulse_writes_fresh_during_slow_execute(tmp_path, monkeypatch)
     sched.run_daemon(
         LiveSettings(), artifact, tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
     pulses = [r for r in records if r["status"] == "RUNNING" and r["stage"] == "execute"]
     assert len(pulses) >= 2
@@ -2968,7 +2966,7 @@ def test_heartbeat_pulse_never_overwrites_final(tmp_path, monkeypatch) -> None:
     sched.run_daemon(
         LiveSettings(), artifact, tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
     first = hb_path.read_text(encoding="utf-8")
     time.sleep(0.08)
@@ -2999,7 +2997,7 @@ def test_heartbeat_pulse_survives_crashing_cycle(tmp_path, monkeypatch) -> None:
     records: list[tuple[str, str]] = []
     _orig_write = sched.write_heartbeat
 
-    def _recording(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail=""):
+    def _recording(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail="", expected_by=None, **_k):
         records.append((status, stage))
         return _orig_write(path, decision_time=decision_time, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=now, stage=stage, detail=detail)
 
@@ -3013,7 +3011,7 @@ def test_heartbeat_pulse_survives_crashing_cycle(tmp_path, monkeypatch) -> None:
     sched.run_daemon(
         LiveSettings(daemon_max_attempts_per_day=1), artifact, tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
     assert ("RUNNING", "execute") in records
     assert json.loads(hb_path.read_text(encoding="utf-8"))["status"] == "HALT"
@@ -3041,7 +3039,7 @@ def test_heartbeat_pulse_write_failure_does_not_affect_cycle(tmp_path, monkeypat
     _orig_write = sched.write_heartbeat
     calls = {"n": 0}
 
-    def _flaky(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail=""):
+    def _flaky(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail="", expected_by=None, **_k):
         import threading as _th
         if status == "RUNNING" and stage == "execute" and _th.current_thread().name == "live-heartbeat-pulse" and calls["n"] == 0:
             calls["n"] += 1
@@ -3058,7 +3056,7 @@ def test_heartbeat_pulse_write_failure_does_not_affect_cycle(tmp_path, monkeypat
     sched.run_daemon(
         LiveSettings(), artifact, tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
     assert json.loads(hb_path.read_text(encoding="utf-8"))["status"] == "COMPLETE"
 
@@ -3086,7 +3084,7 @@ def test_heartbeat_pulse_no_lingering_thread_after_fast_cycle(tmp_path, monkeypa
     sched.run_daemon(
         LiveSettings(), artifact, tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
     assert not [t for t in threading.enumerate() if t.name == "live-heartbeat-pulse" and t.is_alive()]
 
@@ -3124,7 +3122,7 @@ def test_heartbeat_pulse_uses_real_wall_clock(tmp_path, monkeypatch) -> None:
     sched.run_daemon(
         LiveSettings(), artifact, tmp_path / "state.json",
         sleep_fn=lambda s: None, now_fn=_main_only_now, max_iterations=1,
-        refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
     )
 
 
@@ -3159,6 +3157,864 @@ def test_heartbeat_pulse_join_timeout_warns(tmp_path, monkeypatch, caplog) -> No
         sched.run_daemon(
             LiveSettings(), artifact, tmp_path / "state.json",
             sleep_fn=lambda s: None, now_fn=lambda: ready, max_iterations=1,
-            refresh_fn=lambda: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+            refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
         )
     assert any("heartbeat pulse thread still alive" in r.getMessage() for r in caplog.records)
+
+
+def test_day_skipped_survives_delivery_outage(tmp_path, monkeypatch) -> None:
+    """전송 장애 시 day_skipped는 유실되지 않고 채널 복구 후 1회 배달된다."""
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.scheduler import DECISION_RELEASE_OFFSET
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    delivered: list[str] = []
+    state = {"up": False}
+    monkeypatch.setattr(
+        "src.live.alerting.post_alert",
+        lambda url, *, event, detail, decision_time, now, **_k: delivered.append(event) or state["up"],
+    )
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, target, wp, now=None, **k: CycleReport(status="HALT", reason="x", decision_time=target, intent_count=0))
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    base = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [base + pd.Timedelta(days=5) + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)]
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    settings = LiveSettings(alert_webhook_url="https://h.example", daemon_max_attempts_per_day=1, alert_outbox_path=str(tmp_path / "outbox.json"))
+    sched.run_daemon(settings, artifact, tmp_path / "state.json", sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None)
+    assert "day_skipped" in delivered
+    state["up"] = True
+    from src.live.alerting import drain_alerts
+
+    report = drain_alerts(settings, now=cur[0] + pd.Timedelta(seconds=3600), blocking=True)
+    assert report.pending == 0
+    assert delivered.count("day_skipped") == 2
+
+
+def test_halt_streak_alerts_once_per_streak_length_across_restart(tmp_path, monkeypatch) -> None:
+    """연속 HALT 3회는 streak 2·3 알림만 남기고 재시작 후에도 중복하지 않는다."""
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.scheduler import DECISION_RELEASE_OFFSET
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        "src.live.alerting.post_alert",
+        lambda url, *, event, detail, decision_time, now, **_k: delivered.append(detail) or True,
+    )
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, target, wp, now=None, **k: CycleReport(status="HALT", reason="x", decision_time=target, intent_count=0))
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    base = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [base + pd.Timedelta(days=5) + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)]
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    settings = LiveSettings(alert_webhook_url="https://h.example", alert_halt_streak=2, daemon_max_attempts_per_day=5, alert_outbox_path=str(tmp_path / "outbox.json"))
+
+    def _run_once(max_iterations):
+        sched.run_daemon(settings, artifact, tmp_path / "state.json", sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=max_iterations, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None)
+
+    _run_once(2)
+    _run_once(1)
+    streaks = sorted({d.split("consecutive_halts=")[1].split()[0].rstrip(",") for d in delivered if d.startswith("consecutive_halts=")})
+    assert streaks == ["2", "3"]
+
+
+def test_heartbeat_carries_expected_by_for_every_stage(tmp_path, monkeypatch) -> None:
+    """refresh·signal·execute·idle 하트비트는 모두 ts보다 늦은 expected_by를 가진다."""
+    import json
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.scheduler import DECISION_RELEASE_OFFSET
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_daemon_alert", lambda *a, **k: True)
+    writes: list[dict] = []
+    original_write = sched.write_heartbeat
+
+    def _capture(path, **kwargs):
+        original_write(path, **kwargs)
+        writes.append({"stage": kwargs.get("stage"), "ts": kwargs.get("now"), "expected_by": kwargs.get("expected_by")})
+
+    monkeypatch.setattr(sched, "write_heartbeat", _capture)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    base = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [base + pd.Timedelta(days=5) + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)]
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, target, wp, now=None, **k: CycleReport(status="COMPLETE", reason=None, decision_time=target, intent_count=0))
+    sched.run_daemon(
+        LiveSettings(alert_outbox_path=str(tmp_path / "outbox.json")), artifact, tmp_path / "state.json",
+        sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+    )
+    stages = {w["stage"] for w in writes}
+    assert {"refresh", "signal", "execute", "idle"} <= stages
+    for w in writes:
+        assert w["expected_by"] is not None
+        assert pd.Timestamp(w["expected_by"]) > pd.Timestamp(w["ts"])
+
+
+def test_pulse_covers_long_refresh(tmp_path, monkeypatch) -> None:
+    """차단형 refresh 동안 펄스가 ts를 갱신하고 stage를 refresh로 유지한다."""
+    import json
+    import threading
+    import time
+    import pandas as pd
+    import src.live.scheduler as sched
+
+    hb_path = tmp_path / "hb.json"
+    decision = pd.Timestamp("2026-08-24 00:00Z")
+    sched.write_heartbeat(hb_path, decision_time=decision, status="RUNNING", attempts=0, consecutive_halts=0, now=decision, stage="refresh")
+    before = json.loads(hb_path.read_text(encoding="utf-8"))["ts"]
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=sched._run_heartbeat_pulse,
+        kwargs={"stop": stop, "heartbeat_path": hb_path, "decision_time": decision, "attempts": 0, "consecutive_halts": 0, "interval_s": 0.02, "stage": "refresh"},
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.08)
+    stop.set()
+    thread.join(timeout=5)
+    after = json.loads(hb_path.read_text(encoding="utf-8"))
+    assert after["stage"] == "refresh"
+    assert pd.Timestamp(after["ts"]) > pd.Timestamp(before)
+
+
+def test_daemon_ping_and_drain_failures_never_stop_cycle(tmp_path, monkeypatch) -> None:
+    """deadman 핑·아웃박스 drain 예외는 사이클을 멈추지 않는다."""
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+    from src.live.scheduler import DECISION_RELEASE_OFFSET
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_daemon_alert", lambda *a, **k: True)
+
+    def _boom_ping(self, *, now, failing):
+        raise RuntimeError("deadman down")
+
+    monkeypatch.setattr(sched.DeadmanPinger, "maybe_ping", _boom_ping)
+
+    def _boom_drain(*a, **k):
+        raise RuntimeError("outbox lock down")
+
+    monkeypatch.setattr(sched, "drain_alerts", _boom_drain)
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, target, wp, now=None, **k: CycleReport(status="COMPLETE", reason=None, decision_time=target, intent_count=0))
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    base = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [base + pd.Timedelta(days=5) + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)]
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    sched.run_daemon(
+        LiveSettings(alert_outbox_path=str(tmp_path / "outbox.json"), deadman_ping_url="https://hc.example.com/ping"),
+        artifact, tmp_path / "state.json", sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+    )
+    assert (tmp_path / "hb.json").exists()
+
+
+def test_state_corrupt_dedupe_key_uses_mtime_or_date_fallback(tmp_path) -> None:
+    """state_corrupt 키는 mtime 기반이며 stat 실패 시 날짜 폴백을 사용한다."""
+    import pandas as pd
+    import src.live.scheduler as sched
+
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{bad", encoding="utf-8")
+    now = pd.Timestamp("2026-08-24 05:00Z")
+    assert sched._state_corrupt_dedupe_key(state_path, now) == f"state_corrupt:state.json:{state_path.stat().st_mtime_ns}"
+    assert sched._state_corrupt_dedupe_key(tmp_path / "missing.json", now) == "state_corrupt:missing.json:2026-08-24"
+
+
+def test_wait_drain_failure_never_blocks_release_wait(tmp_path, monkeypatch) -> None:
+    """대기 중 drain 예외는 릴리스 대기를 막지 않는다."""
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+    from src.live.scheduler import DECISION_RELEASE_OFFSET
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(sched, "_daemon_alert", lambda *a, **k: True)
+
+    def _boom_drain(*a, **k):
+        raise RuntimeError("drain down")
+
+    monkeypatch.setattr(sched, "drain_alerts", _boom_drain)
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: None)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    base = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [base + pd.Timedelta(minutes=10)]
+
+    waited: list[float] = []
+
+    class _StopLoop(Exception):
+        pass
+
+    def sleep_fn(s):
+        waited.append(s)
+        cur[0] += pd.Timedelta(seconds=s)
+        if len(waited) >= 2:
+            raise _StopLoop
+
+    try:
+        sched.run_daemon(
+            LiveSettings(alert_outbox_path=str(tmp_path / "outbox.json")), artifact, tmp_path / "state.json",
+            sleep_fn=sleep_fn, now_fn=lambda: cur[0], max_iterations=1,
+            refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        )
+    except _StopLoop:
+        pass
+    assert len(waited) >= 2
+
+
+def test_interrupted_report_keeps_day_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """INTERRUPTED report keeps the day pending: daemon state has pending == target with unchanged attempts, heartbeat stage execute/INTERRUPTED, no cycle_complete alert, consecutive halts unchanged."""
+    from src.live.scheduler import DaemonState, _load_daemon_state, _read_heartbeat
+
+    heartbeat_path = tmp_path / "heartbeat.json"
+    state_path = tmp_path / "state.json"
+    artifact_path = tmp_path / "w.parquet"
+    artifact_path.touch()
+    settings = LiveSettings(heartbeat_path=str(heartbeat_path))
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        scheduler_mod, "_daemon_alert",
+        lambda s, *, event, detail, decision_time, now, dedupe_key=None: alerts.append((event, detail)) or False,
+    )
+    monkeypatch.setattr(
+        scheduler_mod, "run_shadow_cycle",
+        lambda *a, **k: CycleReport(status="INTERRUPTED", reason="shutdown_requested", decision_time=DECISION_TIME, intent_count=1),
+    )
+    monkeypatch.setattr(scheduler_mod, "prune_old_audit_logs", lambda *_a: 0)
+
+    run_daemon(
+        settings, artifact_path, state_path,
+        sleep_fn=lambda s: pytest.fail("must not sleep"),
+        now_fn=lambda: READY_NOW, max_iterations=1,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None,
+        prune_fn=lambda: None, venue_fn=lambda t: None,
+    )
+
+    saved = _load_daemon_state(state_path)
+    assert saved.pending_decision_time == DECISION_TIME
+    assert saved.attempts == 0
+    assert saved.last_processed_decision_time is None
+    beat = _read_heartbeat(heartbeat_path)
+    assert beat is not None
+    assert beat["stage"] == "execute"
+    assert beat["status"] == "INTERRUPTED"
+    assert beat["attempts"] == 0
+    assert beat["consecutive_halts"] == 0
+    assert all(event != "cycle_complete" for event, _ in alerts)
+
+
+def test_restart_after_interruption_alerts_and_resumes_same_day(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Restart after interruption alerts cycle_interrupted once and the next cycle targets the pending decision time."""
+    from src.live.scheduler import _read_heartbeat, _save_daemon_state, DaemonState, write_heartbeat
+
+    heartbeat_path = tmp_path / "heartbeat.json"
+    state_path = tmp_path / "state.json"
+    artifact_path = tmp_path / "w.parquet"
+    artifact_path.touch()
+    settings = LiveSettings(heartbeat_path=str(heartbeat_path))
+    _save_daemon_state(state_path, DaemonState(last_processed_decision_time=None, pending_decision_time=DECISION_TIME, attempts=0))
+    write_heartbeat(
+        heartbeat_path, decision_time=DECISION_TIME, status="RUNNING", attempts=0,
+        consecutive_halts=0, now=READY_NOW - pd.Timedelta(minutes=5), stage="execute",
+    )
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        scheduler_mod, "_daemon_alert",
+        lambda s, *, event, detail, decision_time, now, dedupe_key=None: alerts.append((event, detail)) or False,
+    )
+    cycles: list[pd.Timestamp] = []
+    monkeypatch.setattr(
+        scheduler_mod, "run_shadow_cycle",
+        lambda *a, **k: cycles.append(k.get("now", None) and a[1] or a[1]) or CycleReport(status="COMPLETE", reason=None, decision_time=a[1], intent_count=0),
+    )
+    monkeypatch.setattr(scheduler_mod, "prune_old_audit_logs", lambda *_a: 0)
+
+    run_daemon(
+        settings, artifact_path, state_path,
+        sleep_fn=lambda s: pytest.fail("must not sleep"),
+        now_fn=lambda: READY_NOW, max_iterations=1,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None,
+        prune_fn=lambda: None, venue_fn=lambda t: None,
+    )
+
+    interrupted = [a for a in alerts if a[0] == "cycle_interrupted"]
+    assert len(interrupted) == 1
+    assert cycles and cycles[0] == DECISION_TIME
+
+
+def test_run_daemon_degraded_processes_day_and_alerts_once(tmp_path, monkeypatch) -> None:
+    """DEGRADED processes the day and alerts."""
+    import json
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
+    beats: list[tuple[str, str]] = []
+
+    def _record(path, *, decision_time, status, attempts, consecutive_halts, now, stage="idle", detail="", expected_by=None, **_k):
+        beats.append((status, stage))
+
+    monkeypatch.setattr(sched, "write_heartbeat", _record)
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda *a, **k: CycleReport(status="DEGRADED", reason="reconciliation_breach", decision_time=target, intent_count=1),
+    )
+
+    sched.run_daemon(
+        LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready,
+        max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=lambda: None,
+    )
+
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert pd.Timestamp(saved["last_processed_decision_time"]) == target
+    assert saved["pending_decision_time"] is None
+    assert saved["attempts"] == 0
+    assert ("DEGRADED", "idle") in beats
+    degraded = [detail for event, detail in alerts if event == "cycle_degraded"]
+    assert len(degraded) == 1
+    assert not [event for event, _ in alerts if event == "cycle_complete"]
+
+
+def test_run_daemon_degraded_survives_heartbeat_and_prune_failures(tmp_path, monkeypatch) -> None:
+    """DEGRADED still processes the day when heartbeat and prune writes fail."""
+    import json
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    hb_path = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb_path)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched, "_daemon_alert",
+        lambda settings, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)),
+    )
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    state_path = tmp_path / "state.json"
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    ready = target + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
+
+    def _boom_write(*a, **k):
+        raise OSError("disk full")
+
+    def _boom_prune():
+        raise RuntimeError("prune down")
+
+    monkeypatch.setattr(sched, "write_heartbeat", _boom_write)
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda *a, **k: CycleReport(status="DEGRADED", reason="free_margin_floor", decision_time=target, intent_count=1),
+    )
+
+    sched.run_daemon(
+        LiveSettings(), artifact, state_path, sleep_fn=lambda s: None, now_fn=lambda: ready,
+        max_iterations=1, refresh_fn=lambda *a, **k: None, signal_step_fn=lambda t: None, prune_fn=_boom_prune,
+        venue_fn=lambda t: "captured",
+    )
+
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert pd.Timestamp(saved["last_processed_decision_time"]) == target
+    assert [event for event, _ in alerts] == ["cycle_degraded"]
+
+
+def test_required_symbols_unions_ledger_and_weights(tmp_path) -> None:
+    import json
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    ledger_path = tmp_path / "ledger.json"
+    ledger_path.write_text(
+        json.dumps({"positions": {"HELDUSDT": "1.5", "FLATUSDT": "0"}, "cash_usdt": "1000"}),
+        encoding="utf-8",
+    )
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    idx = pd.DatetimeIndex([pd.Timestamp("2026-08-24 00:00Z"), pd.Timestamp("2026-08-25 00:00Z")])
+    pd.DataFrame({"BOOKUSDT": [0.0, 0.02], "ZEROUSDT": [0.0, 0.0]}, index=idx).to_parquet(weights_path, index=True)
+    settings = LiveSettings(ledger_path=str(ledger_path))
+
+    assert sched._required_symbols(settings, weights_path) == {"HELDUSDT", "BOOKUSDT"}
+
+
+def test_required_symbols_missing_files_contribute_nothing(tmp_path) -> None:
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings(ledger_path=str(tmp_path / "no-ledger.json"))
+
+    assert sched._required_symbols(settings, tmp_path / "no-weights.parquet") == set()
+
+
+def test_required_symbols_corrupt_ledger_fails_closed(tmp_path) -> None:
+    import pytest
+
+    import src.live.scheduler as sched
+    from src.common.errors import DataIntegrityError
+    from src.live.settings import LiveSettings
+
+    ledger_path = tmp_path / "ledger.json"
+    ledger_path.write_text("{not json", encoding="utf-8")
+    settings = LiveSettings(ledger_path=str(ledger_path))
+
+    with pytest.raises(DataIntegrityError):
+        sched._required_symbols(settings, tmp_path / "no-weights.parquet")
+
+
+def test_required_symbols_skips_non_numeric_weight_columns(tmp_path) -> None:
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    weights_path = tmp_path / "deployed_target_weights.parquet"
+    idx = pd.DatetimeIndex([pd.Timestamp("2026-08-25 00:00Z")])
+    frame = pd.DataFrame({"BOOKUSDT": [0.02], "NOTE": ["held"]}, index=idx)
+    frame.to_parquet(weights_path, index=True)
+    settings = LiveSettings(ledger_path=str(tmp_path / "no-ledger.json"))
+
+    assert sched._required_symbols(settings, weights_path) == {"BOOKUSDT"}
+
+
+def test_run_daemon_binds_default_wiring_without_network(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.lifecycle import ShutdownFlag
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    flag = ShutdownFlag()
+    flag.request("SIGTERM")
+    sched.run_daemon(
+        LiveSettings(),
+        tmp_path / "w.parquet",
+        tmp_path / "state.json",
+        sleep_fn=lambda s: None,
+        now_fn=lambda: pd.Timestamp("2026-08-24 01:00Z"),
+        max_iterations=1,
+        shutdown=flag,
+        refresh_fn=None,
+        signal_step_fn=None,
+        prune_fn=lambda: None,
+    )
+
+
+def test_prefetch_runs_once_per_target_before_refresh(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    prefetch_at = target + pd.Timedelta(hours=20.25)
+    release = target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=3)
+    assert prefetch_at < release
+    cur = [prefetch_at - pd.Timedelta(minutes=10)]
+    order: list[str] = []
+
+    def now_fn():
+        return cur[0]
+
+    def sleep_fn(s):
+        cur[0] += pd.Timedelta(seconds=s)
+
+    def prefetch_fn(t):
+        order.append(f"prefetch:{pd.Timestamp(t).isoformat()}")
+        return None
+
+    def refresh_fn(t):
+        order.append("refresh")
+        return None
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: CycleReport(status="COMPLETE", reason=None, decision_time=target, intent_count=0))
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    sched.run_daemon(
+        LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), artifact, tmp_path / "state.json",
+        sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
+        refresh_fn=refresh_fn, signal_step_fn=lambda t: order.append("signal"),
+        prune_fn=lambda: None, venue_fn=lambda t: "captured", prefetch_fn=prefetch_fn,
+    )
+    assert order.count(f"prefetch:{target.isoformat()}") == 1
+    assert order.index(f"prefetch:{target.isoformat()}") < order.index("refresh")
+
+
+def test_prefetch_failure_never_blocks_cycle(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)]
+    ran: list[str] = []
+
+    def boom(t):
+        raise RuntimeError("prefetch down")
+
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: CycleReport(status="COMPLETE", reason=None, decision_time=target, intent_count=0))
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    sched.run_daemon(
+        LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: cur[0], max_iterations=1,
+        refresh_fn=lambda t: ran.append("refresh"),
+        signal_step_fn=lambda t: ran.append("signal"),
+        prune_fn=lambda: None, venue_fn=lambda t: "captured", prefetch_fn=boom,
+    )
+    assert ran == ["refresh", "signal"]
+
+
+def test_required_incomplete_alerts_with_symbols(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.data_refresh import RefreshReport
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(sched, "_daemon_alert", lambda s, *, event, detail, decision_time, now, **_k: alerts.append((event, detail)))
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp("2026-08-24 00:00Z"), intent_count=0))
+    rep = RefreshReport(total=200, fresh=199, refreshed=0, failed=0, deadline_skipped=0, incomplete=1, required_incomplete=("XUSDT",), not_current_sample=("XUSDT",), elapsed_s=1.0, deadline_hit=False, staleness_hours=1.0, ok=False)
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    sched.run_daemon(
+        LiveSettings(heartbeat_path=str(tmp_path / "hb.json")), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-24 00:00Z") + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20),
+        max_iterations=1, refresh_fn=lambda t: rep,
+        signal_step_fn=lambda t: None, prune_fn=lambda: None, venue_fn=lambda t: "captured",
+        prefetch_fn=lambda t: None,
+    )
+    assert any(ev == "refresh_incomplete" and "XUSDT" in detail for ev, detail in alerts)
+
+
+def test_venue_capture_failure_alerts_once(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    alerts: list[str] = []
+    monkeypatch.setattr(sched, "_daemon_alert", lambda s, *, event, detail, decision_time, now, **_k: alerts.append(event))
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp("2026-08-24 00:00Z"), intent_count=0))
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    cur = [target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)]
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    sched.run_daemon(
+        LiveSettings(heartbeat_path=str(tmp_path / "hb.json"), daemon_max_attempts_per_day=1), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: cur[0], max_iterations=1,
+        refresh_fn=lambda t: None, signal_step_fn=lambda t: (_ for _ in ()).throw(RuntimeError("halt")),
+        prune_fn=lambda: None, venue_fn=lambda t: "failed", prefetch_fn=lambda t: None,
+    )
+    assert alerts.count("venue_capture_failed") == 1
+
+
+def test_stale_ladder_warns_before_halting(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    alerts: list[str] = []
+    monkeypatch.setattr(sched, "_daemon_alert", lambda s, *, event, detail, decision_time, now, **_k: alerts.append(event))
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp("2026-08-24 00:00Z"), intent_count=0))
+    frozen = type("R", (), {"venue_snapshot_age_days": 3.0, "venue_snapshot": "20260921.json.gz", "decision_bar_missing": 0, "venue_gap_excluded": (), "exposure": 0.0, "equity_usdt": 1.0, "unit_observations": 1})()
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    sched.run_daemon(
+        LiveSettings(heartbeat_path=str(tmp_path / "hb.json"), venue_rules_warn_age_days=2.0), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-24 00:00Z") + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20),
+        max_iterations=1, refresh_fn=lambda t: None,
+        signal_step_fn=lambda t: frozen, prune_fn=lambda: None, venue_fn=lambda t: "captured",
+        prefetch_fn=lambda t: None,
+    )
+    assert "venue_rules_stale" in alerts
+
+
+def test_default_funding_prefetch_returns_none_without_listing(monkeypatch, tmp_path) -> None:
+    import src.live.scheduler as sched
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "DATA_DIR", tmp_path / "data")
+    settings = LiveSettings(ledger_path=str(tmp_path / "ledger.json"))
+    assert sched._default_funding_prefetch(settings, tmp_path / "w.parquet", sched.DECISION_RELEASE_OFFSET) is None
+
+
+def test_default_funding_prefetch_uses_universe_and_reports(monkeypatch, tmp_path) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.data_refresh import FundingPrefetchReport
+    from src.live.settings import LiveSettings
+    from src.live.venue_listing import VenueListingEntry, VenueListingSnapshot
+
+    listing_root = tmp_path / "data" / "state" / "venue_listing"
+    listing_root.mkdir(parents=True)
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    entries = {
+        "BTCUSDT": VenueListingEntry(symbol="BTCUSDT", status="TRADING", contract_type="PERPETUAL", underlying_type="COIN", quote_asset="USDT", delivery_time=None, announced_delisting=False, delisting_first_seen_at=None),
+    }
+    from src.live.venue_listing import write_venue_listing_snapshot
+
+    write_venue_listing_snapshot(VenueListingSnapshot(captured_at=now, entries=entries), listing_root, slot_day=now)
+    monkeypatch.setattr(sched, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", tmp_path / "non_crypto.json")
+    (tmp_path / "non_crypto.json").write_text('{"captured_at": "2026-09-01T00:00:00+00:00", "symbols": []}', encoding="utf-8")
+    (tmp_path / "ledger.json").write_text('{"positions": {}, "cash_usdt": "1000"}', encoding="utf-8")
+    seen: dict = {}
+
+    def _fake_prefetch(*a, **k):
+        seen.update(k)
+        return FundingPrefetchReport(total=1, fetched=1, fresh=0, failed=0, deadline_skipped=0, funding_blocked=False, elapsed_s=0.5)
+
+    monkeypatch.setattr("src.live.data_refresh.refresh_funding_tails", _fake_prefetch)
+    settings = LiveSettings(ledger_path=str(tmp_path / "ledger.json"))
+    report = sched._default_funding_prefetch(settings, tmp_path / "w.parquet", pd.Timestamp("2026-09-01T00:00:00Z"))
+    assert report.fetched == 1
+    assert seen["symbols"] == ["BTCUSDT"]
+
+
+def test_default_funding_prefetch_tolerates_corrupt_non_crypto_file(monkeypatch, tmp_path) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.data_refresh import FundingPrefetchReport
+    from src.live.settings import LiveSettings
+    from src.live.venue_listing import VenueListingEntry, VenueListingSnapshot, write_venue_listing_snapshot
+
+    listing_root = tmp_path / "data" / "state" / "venue_listing"
+    listing_root.mkdir(parents=True)
+    now = pd.Timestamp("2026-09-01T00:00:00Z")
+    write_venue_listing_snapshot(
+        VenueListingSnapshot(
+            captured_at=now,
+            entries={"BTCUSDT": VenueListingEntry(symbol="BTCUSDT", status="TRADING", contract_type="PERPETUAL", underlying_type="COIN", quote_asset="USDT", delivery_time=None, announced_delisting=False, delisting_first_seen_at=None)},
+        ),
+        listing_root, slot_day=now,
+    )
+    monkeypatch.setattr(sched, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", tmp_path / "non_crypto.json")
+    (tmp_path / "non_crypto.json").write_bytes(b"{corrupt")
+    (tmp_path / "ledger.json").write_text('{"positions": {}, "cash_usdt": "1000"}', encoding="utf-8")
+    monkeypatch.setattr(
+        "src.live.data_refresh.refresh_funding_tails",
+        lambda *a, **k: FundingPrefetchReport(total=1, fetched=0, fresh=1, failed=0, deadline_skipped=0, funding_blocked=False, elapsed_s=0.1),
+    )
+    report = sched._default_funding_prefetch(LiveSettings(ledger_path=str(tmp_path / "ledger.json")), tmp_path / "w.parquet", now)
+    assert report.fresh == 1
+
+
+def _daemon_clock(start: pd.Timestamp):
+    cur = [start]
+
+    def now_fn() -> pd.Timestamp:
+        return cur[0]
+
+    return cur, now_fn
+
+
+def _expected_by(hb_path: Path) -> pd.Timestamp:
+    return pd.Timestamp(json.loads(hb_path.read_text(encoding="utf-8"))["expected_by"])
+
+
+def test_idle_wait_keeps_expected_by_in_future(tmp_path, monkeypatch) -> None:
+    """사이클 완료 후 하루 대기 동안 heartbeat expected_by는 항상 현재 시각보다 뒤여야 한다."""
+    import src.live.scheduler as sched
+
+    hb = tmp_path / "hb.json"
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb)
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, decision_time, artifact, now=None, **k: _report(decision_time))
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    cur, now_fn = _daemon_clock(READY_NOW)
+    lags: list[float] = []
+
+    def sleep_fn(seconds: float) -> None:
+        if hb.exists():
+            lags.append((_expected_by(hb) - cur[0]).total_seconds())
+        cur[0] += pd.Timedelta(seconds=seconds)
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0),
+        tmp_path / "w.parquet",
+        tmp_path / "state.json",
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        max_iterations=2,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+    )
+    assert len(lags) > 200  # 약 하루 대기
+    assert min(lags) > 0
+
+
+def test_halt_backoff_keeps_expected_by_and_pings_fail(tmp_path, monkeypatch) -> None:
+    """HALT 재시도 backoff 동안 expected_by가 만료되지 않고, 대기 중 핑은 /fail(failing=True)이다."""
+    import src.live.scheduler as sched
+
+    hb = tmp_path / "hb.json"
+    pings: list[bool] = []
+    in_wait = [False]
+
+    class _Pinger:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def maybe_ping(self, *, now: pd.Timestamp, failing: bool) -> bool:
+            # 대기(_wait) 직후의 핑만 수집: 단계 진입 RUNNING 핑은 정상 상태이므로 제외
+            if in_wait[0]:
+                pings.append(failing)
+                in_wait[0] = False
+            return True
+
+    monkeypatch.setattr(sched, "DeadmanPinger", _Pinger)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: hb)
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda settings, decision_time, artifact, now=None, **k: CycleReport(status="HALT", reason="halt", decision_time=decision_time, intent_count=0),
+    )
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    cur, now_fn = _daemon_clock(READY_NOW)
+    lags: list[float] = []
+
+    def sleep_fn(seconds: float) -> None:
+        if hb.exists():
+            lags.append((_expected_by(hb) - cur[0]).total_seconds())
+        cur[0] += pd.Timedelta(seconds=seconds)
+        in_wait[0] = True
+
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0, daemon_max_attempts_per_day=5),
+        tmp_path / "w.parquet",
+        tmp_path / "state.json",
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        max_iterations=4,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        venue_fn=lambda t: None,
+    )
+    assert lags and min(lags) > 0
+    assert pings and all(pings)
+
+
+def test_stage_pulse_receives_deadman_pinger(tmp_path, monkeypatch) -> None:
+    """장시간 단계의 heartbeat pulse에는 dead-man pinger가 전달되어야 한다."""
+    import src.live.scheduler as sched
+
+    seen: list[Any] = []
+
+    class _Pinger:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def maybe_ping(self, *, now: pd.Timestamp, failing: bool) -> bool:
+            return True
+
+    def _spy_pulse(stop, **kwargs: Any) -> None:
+        seen.append((kwargs["stage"], kwargs["pinger"]))
+        stop.wait()
+
+    monkeypatch.setattr(sched, "DeadmanPinger", _Pinger)
+    monkeypatch.setattr(sched, "_run_heartbeat_pulse", _spy_pulse)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, decision_time, artifact, now=None, **k: _report(decision_time))
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    run_daemon(
+        LiveSettings(daemon_catchup_buffer_minutes=20.0),
+        tmp_path / "w.parquet",
+        tmp_path / "state.json",
+        sleep_fn=lambda s: None,
+        now_fn=lambda: READY_NOW,
+        max_iterations=1,
+        refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
+    )
+    stages = {stage for stage, _ in seen}
+    assert "execute" in stages
+    assert all(isinstance(p, _Pinger) for _, p in seen)

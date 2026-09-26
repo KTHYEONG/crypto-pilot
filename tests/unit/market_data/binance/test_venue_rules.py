@@ -366,7 +366,8 @@ def test_venue_rules_snapshot_json_holds_parsed_fields_only(tmp_path: Path) -> N
     raw = json.loads(_gzip.decompress(path.read_bytes()).decode("utf-8"))
 
     assert raw["captured_at"] == snapshot.captured_at.isoformat()
-    assert set(raw) == {"captured_at", "symbols"}
+    assert set(raw) == {"captured_at", "symbols", "rejected_symbols"}
+    assert raw["rejected_symbols"] == []
     assert set(raw["symbols"]["BTCUSDT"]) == {"brackets", "step_size", "min_notional"}
     assert set(raw["symbols"]["BTCUSDT"]["brackets"][0]) == {
         "notional_floor",
@@ -496,3 +497,114 @@ def test_write_venue_snapshot_rejects_naive_slot(tmp_path: Path) -> None:
     snapshot = parse_venue_rules(_bracket_payload(), _exchange_info_payload(), captured_at=CAPTURED_AT)
     with pytest.raises(ValueError, match="tz-aware"):
         write_venue_rule_snapshot(snapshot, tmp_path, slot_day=pd.Timestamp("2026-09-22T00:00:00"))
+
+
+def _many_bracket_payload(count: int, bad_indices: frozenset[int] = frozenset()) -> Any:
+    rows: list[Any] = []
+    for index in range(count):
+        symbol = f"SYM{index:03d}USDT"
+        if index in bad_indices:
+            brackets = [
+                {
+                    "bracket": 1,
+                    "initialLeverage": 50,
+                    "notionalCap": 10000,
+                    "notionalFloor": 0,
+                    "maintMarginRatio": 0.01,
+                    "cum": 0,
+                },
+                {
+                    "bracket": 2,
+                    "initialLeverage": 25,
+                    "notionalCap": 50000,
+                    "notionalFloor": 20000,
+                    "maintMarginRatio": 0.02,
+                    "cum": 100,
+                },
+            ]
+        else:
+            brackets = [
+                {
+                    "bracket": 1,
+                    "initialLeverage": 50,
+                    "notionalCap": 10000,
+                    "notionalFloor": 0,
+                    "maintMarginRatio": 0.01,
+                    "cum": 0,
+                }
+            ]
+        rows.append({"symbol": symbol, "brackets": brackets})
+    return rows
+
+
+def test_parse_venue_rules_isolates_single_malformed_row() -> None:
+    """One non-contiguous ladder of 100 is isolated with fraction 0.05."""
+    brackets = _many_bracket_payload(100, frozenset({42}))
+
+    snapshot = parse_venue_rules(
+        brackets,
+        {"symbols": []},
+        captured_at=CAPTURED_AT,
+        max_rejected_fraction=0.05,
+    )
+
+    assert len(snapshot.symbols) == 99
+    assert snapshot.rejected_symbols == ("SYM042USDT",)
+    assert "SYM042USDT" not in snapshot.symbols
+
+
+def test_parse_venue_rules_rejects_snapshot_above_rejected_fraction() -> None:
+    """10 malformed rows of 100 exceed fraction 0.05."""
+    brackets = _many_bracket_payload(100, frozenset(range(10)))
+
+    with pytest.raises(DataIntegrityError):
+        parse_venue_rules(
+            brackets,
+            {"symbols": []},
+            captured_at=CAPTURED_AT,
+            max_rejected_fraction=0.05,
+        )
+
+
+def test_parse_venue_rules_default_stays_strict() -> None:
+    """Default fraction keeps the all-or-nothing contract."""
+    brackets = _many_bracket_payload(100, frozenset({42}))
+
+    with pytest.raises(DataIntegrityError):
+        parse_venue_rules(brackets, {"symbols": []}, captured_at=CAPTURED_AT)
+
+
+def test_venue_snapshot_rejected_symbols_round_trip_and_legacy_default(tmp_path: Path) -> None:
+    """Rejected symbols persist; a legacy file without the key loads with ()."""
+    import gzip as _gzip
+
+    brackets = _many_bracket_payload(100, frozenset({42}))
+    snapshot = parse_venue_rules(
+        brackets,
+        {"symbols": []},
+        captured_at=CAPTURED_AT,
+        max_rejected_fraction=0.05,
+    )
+    loaded = load_venue_rule_snapshot(write_venue_rule_snapshot(snapshot, tmp_path))
+
+    assert loaded.rejected_symbols == ("SYM042USDT",)
+    assert loaded.symbols.keys() == snapshot.symbols.keys()
+
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    raw = json.loads(_gzip.decompress((tmp_path / "20260921.json.gz").read_bytes()).decode("utf-8"))
+    del raw["rejected_symbols"]
+    legacy = legacy_dir / "20260921.json"
+    legacy.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert load_venue_rule_snapshot(legacy).rejected_symbols == ()
+
+
+def test_malformed_exchange_info_filters_isolated() -> None:
+    brackets = _bracket_payload()
+    info = _exchange_info_payload()
+    info["symbols"].append({"symbol": "ETHUSDT", "filters": ["junk"]})
+    snapshot = parse_venue_rules(brackets, info, captured_at=CAPTURED_AT, max_rejected_fraction=0.5)
+    assert "ETHUSDT" not in snapshot.symbols
+    assert snapshot.rejected_symbols == ("ETHUSDT",)
+    assert "BTCUSDT" in snapshot.symbols

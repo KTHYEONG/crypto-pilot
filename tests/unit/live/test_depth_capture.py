@@ -143,7 +143,7 @@ def test_messages_become_wide_rows(tmp_path: Path) -> None:
     rec.start()
     _wait_for(lambda: rec._rows >= 3)
     summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 3
+    assert summary.rows_received == 3
     assert summary.symbols_seen == 2
     assert isinstance(summary, DepthCaptureSummary)
     frame = _read_parts(tmp_path)
@@ -189,7 +189,7 @@ def test_reconnect_counted_and_gap_attested(tmp_path: Path) -> None:
     _wait_for(lambda: rec._rows >= 4)
     summary = rec.stop(post_window_s=0.0)
     assert summary.reconnects == 1
-    assert summary.rows == 4
+    assert summary.rows_received == 4
     out = load_coverage(
         tmp_path, "exec_depth",
         start=pd.Timestamp("2026-09-22T00:00:00Z"), end=pd.Timestamp("2026-09-22T02:00:00Z"),
@@ -223,7 +223,7 @@ def test_shutdown_shortens_post_window(tmp_path: Path) -> None:
     started = time.monotonic()
     summary = rec.stop(post_window_s=3600.0, shutdown=_Shutdown())
     assert time.monotonic() - started < 10.0
-    assert summary.rows == 1
+    assert summary.rows_received == 1
     assert len(_read_parts(tmp_path)) == 1
 
 
@@ -241,7 +241,7 @@ def test_connect_failure_never_raises(tmp_path: Path) -> None:
     rec.start()
     time.sleep(0.5)
     summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 0
+    assert summary.rows_received == 0
     assert summary.parts == 0
 
 
@@ -270,7 +270,7 @@ def test_empty_symbols_is_noop(tmp_path: Path) -> None:
     )
     rec.start()
     summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 0
+    assert summary.rows_received == 0
     assert summary.symbols_requested == 0
 
 
@@ -282,7 +282,7 @@ def test_stop_without_start_is_safe(tmp_path: Path) -> None:
         flush_interval_s=1.0, max_session_s=1.0,
     )
     summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 0
+    assert summary.rows_received == 0
 
 
 def test_coverage_flush_failure_keeps_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -295,7 +295,7 @@ def test_coverage_flush_failure_keeps_rows(tmp_path: Path, monkeypatch: pytest.M
     rec.start()
     _wait_for(lambda: rec._rows >= 1)
     summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 1
+    assert summary.rows_received == 1
     assert len(_read_parts(tmp_path)) == 1
 
 
@@ -311,7 +311,7 @@ def test_start_failure_is_safe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     rec = _make_recorder(tmp_path, ["BTCUSDT"], [[_full_book("BTCUSDT")]], [])
     rec.start()
     summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 0
+    assert summary.rows_received == 0
 
 
 def test_stuck_thread_abandoned_with_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,7 +325,7 @@ def test_stuck_thread_abandoned_with_summary(tmp_path: Path, monkeypatch: pytest
     rec.start()
     _wait_for(lambda: rec._rows >= 1)
     summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 1
+    assert summary.rows_received == 1
     real_join(rec._thread, timeout=5.0)
 
 
@@ -417,7 +417,7 @@ def test_periodic_flush_and_malformed_message(tmp_path: Path) -> None:
     _wait_for(lambda: rec._rows >= 2)
     _wait_for(lambda: list((tmp_path / EXEC_DEPTH_DATASET / "20260922").glob("part_*.parquet")) != [])
     summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 2
+    assert summary.rows_received == 2
 
 
 def test_stop_waits_post_window_and_is_idempotent(tmp_path: Path) -> None:
@@ -445,7 +445,7 @@ def test_stuck_thread_abandoned_and_logged(tmp_path: Path, monkeypatch: pytest.M
     _wait_for(lambda: rec._rows >= 1)
     with caplog.at_level(logging.ERROR, logger="src.live.depth_capture"):
         summary = rec.stop(post_window_s=0.0)
-    assert summary.rows == 1
+    assert summary.rows_received == 1
     assert any("THREAD_STUCK" in record.message for record in caplog.records)
     assert rec._thread is not None
     real_join(rec._thread, timeout=5.0)
@@ -467,4 +467,118 @@ def test_session_failure_logged_not_raised(tmp_path: Path, monkeypatch: pytest.M
         assert rec._thread is not None
         rec._thread.join(timeout=5.0)
     assert any("SESSION_FAILED" in record.message for record in caplog.records)
-    assert rec.stop(post_window_s=0.0).rows == 0
+    assert rec.stop(post_window_s=0.0).rows_received == 0
+
+
+def test_silent_symbol_listed_as_missing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A requested symbol with no message is named, warned, and manifested with nulls."""
+    import json as _json
+    import logging
+
+    calls: list[str] = []
+    rec = _make_recorder(
+        tmp_path,
+        ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        [[_full_book("BTCUSDT"), _full_book("ETHUSDT")]],
+        calls,
+    )
+    with caplog.at_level(logging.WARNING, logger="src.live.depth_capture"):
+        rec.start()
+        _wait_for(lambda: rec._rows >= 2)
+        summary = rec.stop(post_window_s=0.0)
+    assert summary.symbols_missing == ("SOLUSDT",)
+    assert any("SYMBOLS_MISSING" in record.message for record in caplog.records)
+    manifests = list((tmp_path / EXEC_DEPTH_DATASET / "20260922").glob("manifest_*.json"))
+    assert len(manifests) == 1
+    manifest = _json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["symbols_missing"] == ["SOLUSDT"]
+    missing = manifest["symbols"]["SOLUSDT"]
+    assert missing["first_received_at"] is None
+    assert missing["last_received_at"] is None
+    assert missing["rows_persisted"] == 0
+    assert manifest["symbols"]["BTCUSDT"]["rows_persisted"] == 1
+
+
+def test_persisted_rows_exclude_failed_final_flush(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed final flush keeps rows out of the persisted count without raising."""
+    import logging
+
+    calls: list[str] = []
+    rec = _make_recorder(
+        tmp_path, ["BTCUSDT"], [[_full_book("BTCUSDT"), _full_book("BTCUSDT")]], calls
+    )
+
+    def _boom(target: Any, source: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("src.live.depth_capture.os.replace", _boom)
+    with caplog.at_level(logging.ERROR, logger="src.live.depth_capture"):
+        rec.start()
+        _wait_for(lambda: rec._rows >= 2)
+        summary = rec.stop(post_window_s=0.0)
+    assert summary.rows_received == 2
+    assert summary.rows_persisted == 0
+    assert summary.rows_persisted < summary.rows_received
+    assert any("ROWS_LOST" in record.message for record in caplog.records)
+
+
+def test_manifest_rows_reconcile_with_part_files(tmp_path: Path) -> None:
+    """Per-symbol manifest counts sum to the rows in part files and the summary."""
+    import json as _json
+
+    calls: list[str] = []
+    rec = _make_recorder(
+        tmp_path,
+        ["BTCUSDT", "ETHUSDT"],
+        [[_full_book("BTCUSDT"), _full_book("ETHUSDT")]],
+        calls,
+        flush_interval_s=0.0,
+    )
+    rec.start()
+    _wait_for(lambda: rec._parts >= 1)
+    time.sleep(0.3)
+    summary = rec.stop(post_window_s=0.0)
+    manifests = list((tmp_path / EXEC_DEPTH_DATASET / "20260922").glob("manifest_*.json"))
+    assert len(manifests) == 1
+    manifest = _json.loads(manifests[0].read_text(encoding="utf-8"))
+    parts = _read_parts(tmp_path)
+    assert sum(item["rows_persisted"] for item in manifest["symbols"].values()) == len(parts)
+    assert summary.rows_persisted == len(parts)
+    assert summary.rows_received == len(parts)
+
+
+def test_manifest_failure_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A manifest write failure is a warning; the summary still returns."""
+    import logging
+
+    calls: list[str] = []
+    rec = _make_recorder(
+        tmp_path, ["BTCUSDT"], [[_full_book("BTCUSDT")]], calls
+    )
+
+    def _boom(self: Any, stamp: str) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ExecutionDepthRecorder, "_manifest_path", _boom)
+    with caplog.at_level(logging.WARNING, logger="src.live.depth_capture"):
+        rec.start()
+        _wait_for(lambda: rec._rows >= 1)
+        summary = rec.stop(post_window_s=0.0)
+    assert summary.rows_received == 1
+    assert any("MANIFEST_FAILED" in record.message for record in caplog.records)
+
+
+def test_flush_empty_rows_is_noop(tmp_path: Path) -> None:
+    """Flushing nothing persists nothing and reports success."""
+    from src.market_data.streams.coverage import CoverageTracker
+
+    calls: list[str] = []
+    rec = _make_recorder(tmp_path, ["BTCUSDT"], [[]], calls)
+    assert rec._flush_rows([], CoverageTracker("exec_depth", tmp_path)) is True
+    assert rec._parts == 0

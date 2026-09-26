@@ -185,6 +185,8 @@ class LiquidationEvent:
     status: str
     last_filled_qty: float
     filled_accum_qty: float
+    raw_order_json: str | None = None
+    """`raw_order_json`: the venue order object (`o`) serialized as compact, key-sorted JSON (`separators=(",", ":")`, `ensure_ascii=False`). The forceOrder stream has no archive, so fields unknown today (e.g. `ps`, `st`) are preserved verbatim for later research. `None` when the event came through the unified fallback without a raw order object."""
 
 
 def _normalize_symbol(symbol: Any) -> str:
@@ -193,6 +195,13 @@ def _normalize_symbol(symbol: Any) -> str:
         raw = raw.replace("/", "")
         raw = raw.split(":")[0]
     return raw
+
+
+def _serialize_raw_order(o: Mapping[str, Any]) -> str | None:
+    try:
+        return json.dumps(dict(o), separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_liquidation(
@@ -262,6 +271,7 @@ def parse_liquidation(
                 status=status,
                 last_filled_qty=float(last_filled),
                 filled_accum_qty=float(filled_accum),
+                raw_order_json=_serialize_raw_order(o),
             )
 
         # Unified fallback
@@ -379,12 +389,14 @@ def _events_to_frame(events: Sequence[LiquidationEvent]) -> pd.DataFrame:
                 "last_filled_qty": float(ev.last_filled_qty),
                 "filled_accum_qty": float(ev.filled_accum_qty),
                 "event_time_ms": etm,
+                "raw_order_json": ev.raw_order_json,
             }
         )
     df = pd.DataFrame(rows)
     # ensure tz-aware
     df["event_time"] = pd.to_datetime(df["event_time"], utc=True)
     df["ingested_at"] = pd.to_datetime(df["ingested_at"], utc=True)
+    df["raw_order_json"] = df["raw_order_json"].astype("string")
     return df
 
 
@@ -402,6 +414,8 @@ def _apply_compact_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("side", "status", "order_type", "time_in_force"):
         if col in df.columns:
             df[col] = df[col].astype("category")
+    if "raw_order_json" in df.columns:
+        df["raw_order_json"] = df["raw_order_json"].astype("string")
     return df
 
 
@@ -500,6 +514,8 @@ def load_liquidation_events(
         combined["event_time"] = pd.to_datetime(combined["event_time"], utc=True)
     if "ingested_at" in combined.columns:
         combined["ingested_at"] = pd.to_datetime(combined["ingested_at"], utc=True)
+    if "raw_order_json" in combined.columns:
+        combined["raw_order_json"] = combined["raw_order_json"].astype("string")
     # dedup globally (cross-file same key unlikely but keep)
     dedup_subset = [c for c in ["symbol", "event_time_ms", "price", "orig_qty", "filled_accum_qty"] if c in combined.columns]
     if dedup_subset:
@@ -540,12 +556,20 @@ class LiquidationHealth:
         consecutive_failed_connections: Connection attempts in a row that failed to open or closed
             without delivering a parseable event; reset to 0 by the next parseable event.
         last_disconnect_reason: Status token and detail of the latest connection end or connect failure.
+        last_persisted_at: Wall-clock instant of the latest successful event flush (UTC).
+        consecutive_flush_failures: Flushes in a row that raised.
+        pending_events: Events buffered in memory and not yet persisted.
+        dropped_events_total: Events discarded by the pending bound since process start.
     """
 
     last_event_at: pd.Timestamp | None = None
     last_connected_at: pd.Timestamp | None = None
     consecutive_failed_connections: int = 0
     last_disconnect_reason: str | None = None
+    last_persisted_at: pd.Timestamp | None = None
+    consecutive_flush_failures: int = 0
+    pending_events: int = 0
+    dropped_events_total: int = 0
 
     def as_heartbeat_entry(self) -> dict[str, Any]:
         """JSON-ready snapshot: timestamps as ISO-8601 UTC strings (or ``None``), counters as ``int``."""
@@ -562,6 +586,10 @@ class LiquidationHealth:
             "last_connected_at": _iso(self.last_connected_at),
             "consecutive_failed_connections": int(self.consecutive_failed_connections),
             "last_disconnect_reason": self.last_disconnect_reason,
+            "last_persisted_at": _iso(self.last_persisted_at),
+            "consecutive_flush_failures": int(self.consecutive_flush_failures),
+            "pending_events": int(self.pending_events),
+            "dropped_events_total": int(self.dropped_events_total),
         }
 
 
@@ -582,6 +610,7 @@ async def run_liquidation_stream(
     max_backoff_s: float = 60.0,
     event_stall_timeout_s: float = 600.0,
     health: LiquidationHealth | None = None,
+    max_pending_events: int = 100_000,
 ) -> None:
     """Stream Binance forceOrder liquidations into hourly parquet partitions until shutdown.
 
@@ -608,6 +637,8 @@ async def run_liquidation_stream(
             liquidations arrive ~0.3/s and the largest observed quiet gap is ~107 s, so 600 s never
             fires on a healthy feed.
         health: optional liveness record updated in place for the recorder heartbeat.
+        max_pending_events: memory bound on unpersisted events; oldest events are dropped
+            beyond it after a failed flush.
 
     Raises:
         ValueError: when ``receive_timeout_s``/``ping_interval_s`` are not positive or
@@ -624,6 +655,8 @@ async def run_liquidation_stream(
         raise ValueError("liveness_timeout_s must be greater than ping_interval_s")
     if event_stall_timeout_s <= liveness_timeout_s:
         raise ValueError("event_stall_timeout_s must be greater than liveness_timeout_s")
+    if max_pending_events < 1:
+        raise ValueError("max_pending_events must be >= 1")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     wanted = {_normalize_symbol(s) for s in symbols} if symbols else None
@@ -701,9 +734,33 @@ async def run_liquidation_stream(
             append_liquidation_events(buffer, directory)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("[DATA] stage=liquidation_stream status=FLUSH_FAILED detail=%s", exc)
+            if health is not None:
+                health.consecutive_flush_failures += 1
+                health.pending_events = len(buffer)
+            if len(buffer) > max_pending_events:
+                dropped = len(buffer) - max_pending_events
+                del buffer[:dropped]
+                if health is not None:
+                    health.dropped_events_total += dropped
+                    health.pending_events = len(buffer)
+                _logger.error(
+                    "[DATA] stage=liquidation_stream status=BUFFER_OVERFLOW dropped=%d pending=%d",
+                    dropped, len(buffer),
+                )
+                if coverage is not None:
+                    try:
+                        coverage.discard_unflushed(_now())
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.warning(
+                            "[DATA] stage=liquidation_stream status=COVERAGE_MARK_FAILED detail=%s", exc
+                        )
             return False
         buffer.clear()
         last_flush = clock()
+        if health is not None:
+            health.last_persisted_at = _now()
+            health.consecutive_flush_failures = 0
+            health.pending_events = 0
         return True
 
     async def _close_feed(feed: LiquidationFeed | None) -> None:

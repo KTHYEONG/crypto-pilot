@@ -26,6 +26,9 @@ class ErrorAction(str, Enum):  # noqa: UP042 - contract pins the (str, Enum) bas
     BENIGN_REPRICE = "benign_reprice"
     # '이 intent 는 무의미해졌다'(-2022 reduceOnly 거절). 사이클 전체가 아니라 해당 intent 만 종료한다.
     BENIGN_ABORT = "benign_abort"
+    INTENT_REJECT = "intent_reject"
+    MARGIN_WAIT = "margin_wait"
+    RISK_INCREASE_FREEZE = "risk_increase_freeze"
     FAIL_CLOSED = "fail_closed"
 
 
@@ -38,16 +41,24 @@ BINANCE_ERROR_POLICY: Mapping[int, ErrorAction] = {
     -1007: ErrorAction.RESYNC_THEN_DECIDE,
     -1021: ErrorAction.RESYNC_CLOCK,
     -1022: ErrorAction.FAIL_CLOSED,
-    -1013: ErrorAction.FAIL_CLOSED,
+    -1013: ErrorAction.INTENT_REJECT,  # "Filter failure: {filter}."
     -2010: ErrorAction.FAIL_CLOSED,
     -2011: ErrorAction.BENIGN,
-    -2019: ErrorAction.FAIL_CLOSED,
+    -2019: ErrorAction.MARGIN_WAIT,  # "Margin is insufficient."
     -4046: ErrorAction.BENIGN,
     -5022: ErrorAction.BENIGN_REPRICE,
     # ReduceOnly Order is rejected: 포지션이 이미 청산됨 -> 해당 intent 만 무의미.
     -2022: ErrorAction.BENIGN_ABORT,
     # PERCENT_PRICE 한계 초과: 밴드 내 재호가 신호.
     -4131: ErrorAction.BENIGN_REPRICE,
+    -4164: ErrorAction.INTENT_REJECT,  # "Order's notional must be no smaller than {0} (unless you choose reduce only)."
+    -4140: ErrorAction.INTENT_REJECT,  # "Invalid symbol status for opening position."
+    -2027: ErrorAction.INTENT_REJECT,  # "Exceeded the maximum allowable position at current leverage."
+    -1111: ErrorAction.INTENT_REJECT,  # "Precision is over the maximum defined for this asset."
+    -4014: ErrorAction.INTENT_REJECT,  # "Price not increased by tick size."
+    -4023: ErrorAction.INTENT_REJECT,  # "Quantity not increased by step size."
+    -4003: ErrorAction.INTENT_REJECT,  # "Quantity less than zero."
+    -4400: ErrorAction.RISK_INCREASE_FREEZE,  # "Quantitative rules violation; only reduceOnly orders are allowed."
 }
 
 
@@ -124,4 +135,29 @@ class VenueError(LiveTradingError):
         return (
             f"{super().__str__()} (code={self.code} http={self.http_status} "
             f"path={self.path} payload_sha256_12={self.payload_digest})"
+        )
+
+
+class TransientReadError(LiveTradingError):
+    """An idempotent venue read failed transiently and its bounded retry budget is exhausted.
+
+    Raised only for GET requests whose failure class is transport-level (socket error, timeout),
+    HTTP 5xx, a non-JSON body on a success status, or a registered transient code (-1000/-1001/
+    -1007). It never carries mutation semantics: callers may skip the tick that needed the read
+    and retry on the next one, because re-reading cannot change venue state.
+    """
+
+    def __init__(
+        self, message: str, *, path: str, http_status: int, code: int | None, attempts: int
+    ) -> None:
+        super().__init__(message)
+        self.path = path
+        self.http_status = http_status
+        self.code = code
+        self.attempts = attempts
+
+    def __str__(self) -> str:
+        return (
+            f"{super().__str__()} (path={self.path} http={self.http_status} "
+            f"code={self.code} attempts={self.attempts})"
         )

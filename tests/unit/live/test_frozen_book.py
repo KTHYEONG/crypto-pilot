@@ -25,6 +25,18 @@ _START = pd.Timestamp("2021-01-01", tz="UTC")
 _SYMBOLS = tuple(f"SYM{i:02d}USDT" for i in range(10))
 
 
+def _zero_funding(book) -> dict[str, pd.Series]:
+    """모든 종목에 대해 관측된 0.0 펀딩(8h 격자)을 패널 전 구간에 걸쳐 만든다.
+
+    proxy는 보유 종목의 펀딩이 관측되지 않은 창을 보류하므로, 가격 경로만 검증하는 테스트는
+    '펀딩 없음'이 아니라 '관측된 0 펀딩'을 명시적으로 공급한다.
+    """
+    first = pd.Timestamp(book.snapshot_closes.index.min()).tz_convert("UTC").normalize() - pd.Timedelta(days=1)
+    last = pd.Timestamp(book.panel_last_bar).tz_convert("UTC") + pd.Timedelta(days=3)
+    idx = pd.date_range(first, last, freq="8h")
+    return {str(sym): pd.Series(0.0, index=idx) for sym in book.unit_weights.columns}
+
+
 def _write_panel(
     root: Path, symbols: tuple[str, ...], *, days: int = 130, seed: int = 7,
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -145,7 +157,7 @@ def test_panel_last_bar_stops_at_real_data_not_requested_end(tmp_path: Path) -> 
     book = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=requested_end)
     assert book.panel_last_bar == real_end - pd.Timedelta(hours=1)
     # 실제 수집분을 넘어서는 최신 결정일들은 예외 없이 조용히 건너뛴다.
-    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     assert np.isfinite(out.to_numpy()).all()
     assert len(out) > 0
     assert out.index.max() <= book.panel_last_bar + pd.Timedelta(hours=1)
@@ -159,7 +171,7 @@ def test_census_column_restriction(tmp_path: Path) -> None:
 
 def test_unit_proxy_prices_entry_to_entry_with_lag_label() -> None:
     book = _mini_book()
-    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     assert out.index[0] == pd.Timestamp("2021-01-03", tz="UTC")
     assert out.iloc[0] == pytest.approx(0.05)
 
@@ -168,11 +180,15 @@ def test_longs_pay_positive_funding() -> None:
     book = _mini_book()
     entry = pd.Timestamp("2021-01-02", tz="UTC")
     nxt = pd.Timestamp("2021-01-03", tz="UTC")
+    # 0.0 정산행은 합계를 바꾸지 않으면서 윈도우 끝까지 관측됐음을 증거한다.
+    cover_idx = pd.DatetimeIndex(
+        [entry + pd.Timedelta(hours=h) for h in (1, 8, 16)], tz="UTC",
+    )
     funding = {
-        "AAAUSDT": pd.Series([0.001], index=pd.DatetimeIndex([entry + pd.Timedelta(hours=1)], tz="UTC")),
-        "BBBUSDT": pd.Series([0.0], index=pd.DatetimeIndex([entry + pd.Timedelta(hours=1)], tz="UTC")),
+        "AAAUSDT": pd.Series([0.001, 0.0, 0.0], index=cover_idx),
+        "BBBUSDT": pd.Series([0.0, 0.0, 0.0], index=cover_idx),
     }
-    base = unit_proxy_returns(book, {}, cost_bps=0.0)
+    base = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     paid = unit_proxy_returns(book, funding, cost_bps=0.0)
     assert (base.iloc[0] - paid.iloc[0]) == pytest.approx(0.0005)
     assert nxt in paid.index
@@ -181,16 +197,19 @@ def test_longs_pay_positive_funding() -> None:
 def test_funding_settlement_cadence_is_summed_exactly() -> None:
     book = _mini_book()
     entry = pd.Timestamp("2021-01-02", tz="UTC")
-    nxt = pd.Timestamp("2021-01-03", tz="UTC")
     hourly_idx = pd.DatetimeIndex([entry + pd.Timedelta(hours=h) for h in range(1, 9)], tz="UTC")
-    one = pd.DatetimeIndex([entry + pd.Timedelta(hours=8)], tz="UTC")
+    # 윈도우 끝(다음날 23:00)까지 관측됐음을 0.0 정산행으로 증거한다 -- 합계는 그대로다.
+    eight_idx = hourly_idx.append(
+        pd.DatetimeIndex([entry + pd.Timedelta(hours=h) for h in range(9, 23)], tz="UTC"),
+    )
+    one = pd.DatetimeIndex([entry + pd.Timedelta(hours=h) for h in (8, 16, 22)], tz="UTC")
     eight = {
-        "AAAUSDT": pd.Series([0.0001] * 8, index=hourly_idx),
-        "BBBUSDT": pd.Series([0.0] * 8, index=hourly_idx),
+        "AAAUSDT": pd.Series([0.0001] * 8 + [0.0] * 14, index=eight_idx),
+        "BBBUSDT": pd.Series([0.0] * 22, index=eight_idx),
     }
     single = {
-        "AAAUSDT": pd.Series([0.0008], index=one),
-        "BBBUSDT": pd.Series([0.0], index=one),
+        "AAAUSDT": pd.Series([0.0008, 0.0, 0.0], index=one),
+        "BBBUSDT": pd.Series([0.0, 0.0, 0.0], index=one),
     }
     assert unit_proxy_returns(book, eight, cost_bps=0.0).iloc[0] == pytest.approx(
         unit_proxy_returns(book, single, cost_bps=0.0).iloc[0],
@@ -209,7 +228,7 @@ def test_turnover_cost_uses_weight_change() -> None:
         adv=snap.copy(), daily_sigma=snap.copy(), valid_from=decisions[0],
         panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
-    out = unit_proxy_returns(book, {}, cost_bps=2.0)
+    out = unit_proxy_returns(book, _zero_funding(book), cost_bps=2.0)
     assert out.iloc[1] == pytest.approx(-0.00008)
 
 
@@ -217,14 +236,14 @@ def test_held_symbol_with_missing_snapshot_close_fails_closed() -> None:
     book = _mini_book()
     book.snapshot_closes.iloc[1, 0] = float("nan")
     with pytest.raises(DataIntegrityError):
-        unit_proxy_returns(book, {}, cost_bps=0.0)
+        unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
 
 
 def test_forward_bar_past_panel_frontier_is_skipped_not_raised() -> None:
     # day=2021-01-02 는 closing snapshot bar(2021-01-03 22:00)가 아직 관측 안 된 미래이므로
     # 조용히 건너뛴다 -- 매일 자정 직전 실행되는 라이브 사이클의 정상 상황 회귀 가드.
     book = _mini_book(panel_last_bar=pd.Timestamp("2021-01-03 00:00", tz="UTC"))
-    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     assert list(out.index) == [pd.Timestamp("2021-01-03", tz="UTC")]
 
 
@@ -234,7 +253,7 @@ def test_genuine_gap_within_observed_history_still_fails_closed() -> None:
     book = _mini_book()
     book.snapshot_closes.iloc[1, 0] = float("nan")
     with pytest.raises(DataIntegrityError):
-        unit_proxy_returns(book, {}, cost_bps=0.0)
+        unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
 
 
 def test_history_extension_is_contiguous_and_append_only() -> None:
@@ -326,7 +345,7 @@ def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
     book.snapshot_closes.iloc[:, 1] = float("nan")
     book.unit_weights.iloc[:, 1] = 0.0
     book.unit_weights.iloc[1, 1] = 0.0
-    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     assert np.isfinite(out.to_numpy()).all()
     empty_idx = pd.DatetimeIndex([], tz="UTC")
     empty = LiveFrozenBook(
@@ -610,7 +629,7 @@ def test_proxy_prices_snapshot_to_snapshot() -> None:
         daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
         valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
-    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     assert out.loc[pd.Timestamp("2021-01-03", tz="UTC")] == pytest.approx(0.10)
 
 
@@ -654,7 +673,7 @@ def test_unobserved_closing_snapshot_is_skipped() -> None:
         valid_from=decisions[0],
         panel_last_bar=pd.Timestamp("2021-01-02 12:00", tz="UTC"),
     )
-    out = unit_proxy_returns(book, {}, cost_bps=0.0)
+    out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     assert len(out) == 0
 
 
@@ -706,5 +725,249 @@ def test_proxy_matches_replay_anchor_to_anchor() -> None:
         daily_sigma=pd.DataFrame(0.02, index=decisions, columns=[sym], dtype="float64"),
         valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
-    proxy = unit_proxy_returns(book, {}, cost_bps=0.0)
+    proxy = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     assert proxy.loc[entries[1]] == pytest.approx(replay_ret, rel=1e-9)
+
+
+def _write_block_panel(root: Path) -> tuple[pd.Timestamp, pd.Timestamp]:
+    return _write_panel(root, tuple(f"BK{i:02d}USDT" for i in range(22)), days=126, seed=21)
+
+
+def test_blocked_build_withdraws_seat_and_reranks(tmp_path: Path) -> None:
+    start, end = _write_block_panel(tmp_path)
+    census = tuple(f"BK{i:02d}USDT" for i in range(22))
+    plain = build_live_frozen_book(tmp_path, census, panel_start=start, panel_end=end)
+    day = plain.unit_weights.index[2]
+    weights_d = plain.unit_weights.loc[day]
+    symbol_a = str(weights_d.abs().idxmax())
+    assert float(weights_d[symbol_a]) != 0.0
+
+    def _blocked(index: pd.DatetimeIndex, order: tuple[str, ...]) -> pd.DataFrame:
+        frame = pd.DataFrame(False, index=index, columns=list(order), dtype="bool")
+        frame.loc[day, symbol_a] = True
+        return frame
+
+    blocked = build_live_frozen_book(
+        tmp_path, census, panel_start=start, panel_end=end, blocked_decisions=_blocked,
+    )
+    assert float(blocked.unit_weights.loc[day, symbol_a]) == 0.0
+    plain_seats = {str(s) for s in weights_d.index if float(weights_d[s]) != 0.0}
+    blocked_seats = {
+        str(s) for s in blocked.unit_weights.columns if float(blocked.unit_weights.loc[day, s]) != 0.0
+    }
+    assert len(blocked_seats) == len(plain_seats)
+    assert blocked_seats - plain_seats, "the next-ranked symbol must gain the withdrawn seat"
+    earlier = plain.unit_weights.index[plain.unit_weights.index < day]
+    pd.testing.assert_frame_equal(blocked.unit_weights.loc[earlier], plain.unit_weights.loc[earlier])
+    later = plain.unit_weights.index[plain.unit_weights.index > day]
+    pd.testing.assert_frame_equal(blocked.unit_weights.loc[later], plain.unit_weights.loc[later])
+
+
+def test_all_false_blocked_build_matches_unblocked(tmp_path: Path) -> None:
+    start, end = _write_block_panel(tmp_path)
+    census = tuple(f"BK{i:02d}USDT" for i in range(22))
+    plain = build_live_frozen_book(tmp_path, census, panel_start=start, panel_end=end)
+
+    def _none_blocked(index: pd.DatetimeIndex, order: tuple[str, ...]) -> pd.DataFrame:
+        return pd.DataFrame(False, index=index, columns=list(order), dtype="bool")
+
+    same = build_live_frozen_book(
+        tmp_path, census, panel_start=start, panel_end=end, blocked_decisions=_none_blocked,
+    )
+    pd.testing.assert_frame_equal(same.unit_weights, plain.unit_weights)
+    pd.testing.assert_frame_equal(same.snapshot_closes, plain.snapshot_closes)
+
+
+def _settlement_proxy_book() -> LiveFrozenBook:
+    decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
+    cols = ["SSUSDT"]
+    unit = pd.DataFrame([[1.0], [1.0], [0.0]], index=decisions, columns=cols, dtype="float64")
+    snap = pd.DataFrame(
+        [[100.0], [float("nan")], [float("nan")]], index=decisions, columns=cols, dtype="float64",
+    )
+    adv = pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64")
+    sigma = pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64")
+    return LiveFrozenBook(
+        unit_weights=unit, snapshot_closes=snap, adv=adv, daily_sigma=sigma,
+        valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
+    )
+
+
+def test_proxy_prices_settlement_only_after_delivery() -> None:
+    from decimal import Decimal
+
+    from src.live.venue_listing import SettlementEvidence
+
+    book = _settlement_proxy_book()
+    delivery = pd.Timestamp("2021-01-02 12:00", tz="UTC")
+    evidence = {
+        "SSUSDT": SettlementEvidence(
+            symbol="SSUSDT", delivery_time=delivery, price=Decimal("110"),
+            flat_bars=5, source="flat_1h_klines",
+        ),
+    }
+    funding = {
+        "SSUSDT": pd.Series(
+            [0.001, 0.05],
+            index=pd.DatetimeIndex(
+                [pd.Timestamp("2021-01-02 08:00", tz="UTC"), pd.Timestamp("2021-01-02 16:00", tz="UTC")],
+                tz="UTC",
+            ),
+            dtype="float64",
+        ),
+    }
+    out = unit_proxy_returns(book, funding, cost_bps=0.0, settlements=evidence)
+    # settle/close_d - 1, minus only the pre-delivery funding leg.
+    assert out.loc[pd.Timestamp("2021-01-03", tz="UTC")] == pytest.approx(0.10 - 0.001)
+    with pytest.raises(DataIntegrityError):
+        unit_proxy_returns(book, funding, cost_bps=0.0)
+
+
+def test_proxy_finite_close_wins_over_settlement() -> None:
+    from decimal import Decimal
+
+    from src.live.venue_listing import SettlementEvidence
+
+    book = _settlement_proxy_book()
+    book.snapshot_closes.iloc[1, 0] = 105.0
+    evidence = {
+        "SSUSDT": SettlementEvidence(
+            symbol="SSUSDT", delivery_time=pd.Timestamp("2021-01-02 12:00", tz="UTC"),
+            price=Decimal("110"), flat_bars=5, source="flat_1h_klines",
+        ),
+    }
+    out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0, settlements=evidence)
+    assert out.loc[pd.Timestamp("2021-01-03", tz="UTC")] == pytest.approx(0.05)
+
+
+def test_venue_gap_snapshot_close_is_never_substituted(tmp_path: Path) -> None:
+    from src.live.frozen_book import classify_snapshot_gaps, snapshot_gap_blocked_decisions
+
+    start, end = _write_panel(tmp_path, _SYMBOLS)
+    victim = _SYMBOLS[0]
+    path = tmp_path / "ohlcv" / "1h" / f"{victim}.parquet"
+    frame = pd.read_parquet(path)
+    stamps = pd.to_datetime(pd.to_numeric(frame["timestamp"], errors="coerce"), unit="ms", utc=True)
+    gap_bar = pd.Timestamp("2021-05-05 22:00", tz="UTC")
+    assert (stamps == gap_bar).sum() == 1
+    frame = frame[stamps != gap_bar]
+    frame.to_parquet(path)
+    book = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
+    gap_day = pd.Timestamp("2021-05-05", tz="UTC")
+    assert gap_day in book.unit_weights.index
+    # venue gap(뒤 봉이 있으니 영구 결손)이지 refresh 문제가 아니어야 한다.
+    report = classify_snapshot_gaps(tmp_path, _SYMBOLS, snapshot_bar=gap_bar)
+    assert report.refresh_incomplete == ()
+    assert report.venue_gap == (victim,)
+    blocked = snapshot_gap_blocked_decisions(
+        tmp_path, book.unit_weights.index, tuple(book.unit_weights.columns), snapshot_hour=22,
+    )
+    assert bool(blocked.loc[gap_day, victim]) is True
+    # 결손 봉의 스냅샷 종가는 NaN 그대로 -- LOCF/보간/다음 봉 대입이 전혀 없다.
+    assert not np.isfinite(float(book.snapshot_closes.loc[gap_day, victim]))
+    raw = pd.read_parquet(path)
+    raw_stamps = pd.to_datetime(pd.to_numeric(raw["timestamp"], errors="coerce"), unit="ms", utc=True)
+    assert (raw_stamps == gap_bar).sum() == 0
+    for symbol in _SYMBOLS[1:]:
+        assert np.isfinite(float(book.snapshot_closes.loc[gap_day, symbol]))
+
+
+def test_unobserved_funding_defers_scoring() -> None:
+    decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
+    cols = ["FUSDT"]
+    unit = pd.DataFrame([[1.0], [1.0], [1.0]], index=decisions, columns=cols, dtype="float64")
+    snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
+    book = LiveFrozenBook(
+        unit_weights=unit, snapshot_closes=snap,
+        adv=pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64"),
+        daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
+        valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
+    )
+    # d+1 윈도우 끝(2021-01-02 23:00)보다 먼저 끝나는 낡은 펀딩 꼬리 -- 스냅샷은 전부 관측됐다.
+    stale = {
+        "FUSDT": pd.Series(
+            [0.001, 0.001, 0.001],
+            index=pd.DatetimeIndex(
+                [pd.Timestamp("2021-01-01", tz="UTC") + pd.Timedelta(hours=h) for h in (0, 8, 16)],
+                tz="UTC",
+            ),
+            dtype="float64",
+        ),
+    }
+    out = unit_proxy_returns(book, stale, cost_bps=0.0)
+    assert pd.Timestamp("2021-01-03", tz="UTC") not in out.index
+    assert len(out) == 0
+
+
+def test_held_symbol_without_any_funding_defers_scoring() -> None:
+    """보유 종목의 펀딩 행이 전혀 없으면 펀딩 0으로 채점하지 않고 proxy를 보류한다."""
+    decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
+    cols = ["AAAUSDT", "BBBUSDT"]
+    unit = pd.DataFrame([[0.5, -0.5]] * 3, index=decisions, columns=cols, dtype="float64")
+    snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
+    book = LiveFrozenBook(
+        unit_weights=unit, snapshot_closes=snap,
+        adv=pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64"),
+        daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
+        valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
+    )
+    only_a = {"AAAUSDT": _zero_funding(book)["AAAUSDT"]}
+    assert len(unit_proxy_returns(book, only_a, cost_bps=0.0)) == 0
+    assert len(unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)) > 0
+
+
+def test_observed_funding_scores_identically_to_legacy() -> None:
+    decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
+    cols = ["AAAUSDT", "BBBUSDT"]
+    unit = pd.DataFrame(
+        [[0.5, -0.5], [0.5, -0.5], [0.5, -0.5]], index=decisions, columns=cols, dtype="float64",
+    )
+    snap = pd.DataFrame(
+        [[100.0, 100.0], [110.0, 100.0], [110.0, 100.0]],
+        index=decisions, columns=cols, dtype="float64",
+    )
+    book = LiveFrozenBook(
+        unit_weights=unit, snapshot_closes=snap,
+        adv=pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64"),
+        daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
+        valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
+    )
+    day0 = decisions[0]
+    day1 = decisions[1]
+    legs = pd.DatetimeIndex(
+        [day0 + pd.Timedelta(days=1, hours=h) for h in (0, 8, 16)]
+        + [day1 + pd.Timedelta(days=1, hours=h) for h in (0, 8, 16)],
+        tz="UTC",
+    )
+    funding = {
+        "AAAUSDT": pd.Series([0.001, 0.002, 0.0, 0.0, 0.0, 0.0], index=legs, dtype="float64"),
+        "BBBUSDT": pd.Series([0.0] * 6, index=legs, dtype="float64"),
+    }
+    out = unit_proxy_returns(book, funding, cost_bps=0.0)
+    # 레거시 의미 그대로 손계산한 핀값: 가격수익 - 펀딩지급 - turnover(0).
+    assert out.loc[pd.Timestamp("2021-01-03", tz="UTC")] == pytest.approx(0.05 - 0.5 * 0.003)
+    assert out.loc[pd.Timestamp("2021-01-04", tz="UTC")] == pytest.approx(0.0)
+
+
+def test_classify_snapshot_gaps_unreadable_file_fails_closed(tmp_path: Path) -> None:
+    import pandas as pd
+
+    from src.live.frozen_book import classify_snapshot_gaps
+
+    (tmp_path / "ohlcv" / "1h").mkdir(parents=True)
+    (tmp_path / "ohlcv" / "1h" / "BROKENUSDT.parquet").write_bytes(b"not a parquet")
+    with pytest.raises(DataIntegrityError):
+        classify_snapshot_gaps(tmp_path, ["BROKENUSDT"], snapshot_bar=pd.Timestamp("2021-05-25 22:00", tz="UTC"))
+    with pytest.raises(DataIntegrityError):
+        classify_snapshot_gaps(tmp_path, ["MISSINGUSDT"], snapshot_bar=pd.Timestamp("2021-05-25 22:00", tz="UTC"))
+
+
+def test_funding_coverage_empty_series_has_no_last_settlement() -> None:
+    import pandas as pd
+
+    from src.live.frozen_book import _funding_coverage_ms
+
+    assert _funding_coverage_ms(None) == (None, 28800000)
+    assert _funding_coverage_ms(pd.Series([], dtype="float64")) == (None, 28800000)
+    bad = pd.Series([0.0001], index=["not-a-date"])
+    assert _funding_coverage_ms(bad) == (None, 28800000)

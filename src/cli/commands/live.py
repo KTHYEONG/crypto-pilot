@@ -85,9 +85,11 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
 
 
 def _run_daemon(args: argparse.Namespace) -> None:
+    import os
+
+    from src.live.alerting import dispatch_alert, drain_alerts
     from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
     from src.live.recorder_watch import build_recorder_watchdog
-    from src.live.scheduler import _daemon_alert, run_daemon
     from src.live.settings import LiveSettings
 
     _attach_process_log("daemon.log")
@@ -97,22 +99,43 @@ def _run_daemon(args: argparse.Namespace) -> None:
     install_shutdown_handlers(shutdown)
     watchdog = build_recorder_watchdog(
         settings,
-        alert=lambda event, detail: _daemon_alert(
-            settings, set(), event=event, detail=detail, decision_time=None, now=pd.Timestamp.now(tz="UTC")
-        ),
+        alert=lambda event, detail: dispatch_alert(settings, event=event, detail=detail, decision_time=None, dedupe_key=f"{event}:{pd.Timestamp.now(tz='UTC').isoformat()}", now=pd.Timestamp.now(tz="UTC")),
     )
     if watchdog is not None:
         watchdog.start()
     try:
         try:
+            from src.live.scheduler import run_daemon
+
             run_daemon(settings, artifact, Path(args.state_path), shutdown=shutdown)
         except Exception as exc:  # 프로세스 경계라 광역 except 허용
             logger.exception("[SYS] daemon crashed error=%s", type(exc).__name__)
-            _daemon_alert(settings, set(), event="daemon_crashed", detail=f"error={type(exc).__name__}: {str(exc)[:300]}", decision_time=None, now=pd.Timestamp.now(tz="UTC"))
+            tick = pd.Timestamp.now(tz="UTC")
+            dispatch_alert(settings, event="daemon_crashed", detail=f"error={type(exc).__name__}: {str(exc)[:300]}", decision_time=None, dedupe_key=f"daemon_crashed:{os.getpid()}:{tick.isoformat()}", now=tick)
+            drain_alerts(settings, now=tick, blocking=True)
             raise
     finally:
         if watchdog is not None:
             watchdog.stop()
+
+
+def _run_liveness_check(args: argparse.Namespace) -> None:
+    import sys
+
+    from src.live.liveness import ContainerObservation, _default_state_path, run_liveness_check
+
+    settings = _settings_with_mode(args)
+    started_at = pd.Timestamp(args.container_started_at) if args.container_started_at else None
+    container = ContainerObservation(
+        running=bool(args.container_running),
+        restarting=bool(args.container_restarting),
+        oom_killed=bool(args.container_oom),
+        restart_count=int(args.restart_count),
+        started_at=started_at,
+    )
+    state_path = Path(args.state_path) if args.state_path else _default_state_path()
+    code = run_liveness_check(settings, container, now=pd.Timestamp.now(tz="UTC"), state_path=state_path)
+    sys.exit(code)
 
 
 def _run_frozen_step(args: argparse.Namespace) -> None:
@@ -183,6 +206,35 @@ def _run_portfolio_state_summary(args: argparse.Namespace) -> None:  # noqa: ARG
     logger.info("[EVAL] portfolio_state %s", summary)
 
 
+def _run_ledger_resync(args: argparse.Namespace) -> None:
+    from src.common.errors import DataIntegrityError
+    from src.live.errors import LiveTradingError
+
+    import src.live.ledger_resync as _resync
+
+    settings = _settings_with_mode(args)
+    try:
+        plan = _resync.run_ledger_resync(
+            settings, apply=bool(args.apply), now=pd.Timestamp.now(tz="UTC")
+        )
+    except (LiveTradingError, DataIntegrityError) as exc:
+        logger.error("[PORTFOLIO] ledger_resync status=FAILED reason=%s", exc)
+        raise SystemExit(1) from exc
+    logger.info(
+        "[PORTFOLIO] ledger_resync status=%s adjustments=%d",
+        "APPLIED" if args.apply else "DRY_RUN",
+        len(plan.adjustments),
+    )
+    for breach in plan.adjustments:
+        logger.info(
+            "[PORTFOLIO] ledger_resync adjustment symbol=%s venue=%s ledger=%s gap=%s",
+            breach.symbol,
+            breach.venue_qty,
+            breach.ledger_qty,
+            breach.gap,
+        )
+
+
 def _run_paper_funding_backfill(args: argparse.Namespace) -> None:
     from src.common.errors import DataIntegrityError
 
@@ -222,7 +274,7 @@ def _run_tax_collect(args: argparse.Namespace) -> None:
     from src.live.audit import AuditLog, default_audit_log_path
     from src.live.rest import BinanceFuturesRestClient
     from src.live.settings import LiveSettings
-    from src.live.tax_ledger import TaxWatermark, collect_tax_records, default_tax_ledger_dir
+    from src.live.tax_ledger import default_tax_ledger_dir
 
     settings = LiveSettings()
     audit = AuditLog(default_audit_log_path("tax_collect", for_date=pd.Timestamp.now(tz="UTC")))
@@ -235,39 +287,14 @@ def _run_tax_collect(args: argparse.Namespace) -> None:
         recv_window_ms=settings.recv_window_ms,
     )
     ledger_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
-    wm_path = ledger_dir / "watermark.json"
-    if wm_path.exists():
-        import json
+    from src.live.tax_ledger import collect_and_persist_live_tax
 
-        raw = json.loads(wm_path.read_text(encoding="utf-8"))
-        watermark = TaxWatermark(
-            last_trade_id={k: int(v) for k, v in raw.get("last_trade_id", {}).items()},
-            last_income_id=int(raw.get("last_income_id", 0)),
-            last_collected_at=pd.Timestamp(raw["last_collected_at"]) if raw.get("last_collected_at") else None,
-        )
-    else:
-        watermark = TaxWatermark(last_trade_id={}, last_income_id=0, last_collected_at=None)
     symbols: list[str] = []
     now = pd.Timestamp.now(tz="UTC")
-    records, new_wm = collect_tax_records(client, symbols, watermark, settings.mode.value, now=now)
-    if records:
-        from src.live.tax_ledger import append_tax_records
-
-        append_tax_records(records, ledger_dir)
-    wm_path.parent.mkdir(parents=True, exist_ok=True)
-    import json as _json
-
-    wm_path.write_text(
-        _json.dumps(
-            {
-                "last_trade_id": new_wm.last_trade_id,
-                "last_income_id": new_wm.last_income_id,
-                "last_collected_at": new_wm.last_collected_at.isoformat() if new_wm.last_collected_at is not None else None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    logger.info("[EVAL] tax_collect records=%d", len(records))
+    written, issues = collect_and_persist_live_tax(client, symbols, ledger_dir, settings.mode.value, now=now, settings=settings)
+    for issue in issues:
+        audit.record("tax_collect_issue", stream=issue.stream, stage=issue.stage, detail=issue.detail)
+    logger.info("[EVAL] tax_collect records=%d", written)
 
 
 def _run_tax_summary(args: argparse.Namespace) -> None:
@@ -414,6 +441,11 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     )
     backfill.set_defaults(handler=_run_paper_funding_backfill)
 
+    resync = subparsers.add_parser("ledger-resync", help="Adopt the venue position snapshot into the ledger and clear de-risk-only mode (dry-run unless --apply)")
+    resync.add_argument("--apply", action="store_true", default=False, help="Persist the adjustments (backs up the ledger first)")
+    resync.add_argument("--mode", choices=["live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
+    resync.set_defaults(handler=_run_ledger_resync)
+
     from src.live.tax_ledger import summarize_tax_year as _summarize_tax_year_ref  # noqa: F401
 
     tax_collect = subparsers.add_parser("tax-collect", help="Collect tax ledger from venue")
@@ -432,3 +464,12 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     ob.add_argument("--interval-s", type=float, default=10.0, help="Interval seconds")
     ob.add_argument("--depth-limit", type=int, default=20, help="Depth limit")
     ob.set_defaults(handler=_run_orderbook_capture)
+
+    liveness = subparsers.add_parser("liveness-check", help="Evaluate daemon liveness from host container state")
+    liveness.add_argument("--container-running", type=int, choices=[0, 1], default=1)
+    liveness.add_argument("--container-restarting", type=int, choices=[0, 1], default=0)
+    liveness.add_argument("--container-oom", type=int, choices=[0, 1], default=0)
+    liveness.add_argument("--restart-count", type=int, default=0)
+    liveness.add_argument("--container-started-at", type=str, default=None)
+    liveness.add_argument("--state-path", type=str, default=None)
+    liveness.set_defaults(handler=_run_liveness_check)

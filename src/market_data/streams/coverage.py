@@ -71,6 +71,22 @@ class CoverageTracker:
             return None
         return (self._cursor, self._open_last)
 
+    def discard_unflushed(self, ts: pd.Timestamp) -> None:
+        """Withdraw every attested interval not yet flushed and close the open segment.
+
+        Called when buffered events covering those intervals are discarded without being persisted:
+        attesting a period whose events were dropped would certify a gap as complete data. The next
+        ``mark_ok`` opens a fresh segment, so the discarded span becomes an explicit coverage gap.
+
+        Raises:
+            ValueError: ``ts`` is tz-naive.
+        """
+        _require_aware(ts, "discard_unflushed")
+        self._closed = []
+        self._open_start = None
+        self._open_last = None
+        self._cursor = None
+
     def flush(self) -> list[Path]:
         """Persist the attested interval accumulated since the previous flush; the open segment continues."""
         intervals: list[tuple[pd.Timestamp, pd.Timestamp]] = list(self._closed)
