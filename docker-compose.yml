@@ -24,20 +24,56 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
-  market-recorder:
+  capture-blue:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
-    container_name: market-recorder
+    container_name: market-capture-blue
+    profiles: ["capture-blue"]
     restart: unless-stopped
-    stop_grace_period: 30s
-    mem_limit: 768m
+    stop_grace_period: 20s
+    mem_limit: 256m
     env_file:
       - path: /home/ubuntu/quant-secrets/crypto-pilot-recorder.env
         required: false
     volumes:
-      - ./data/futures/liquidations:/app/data/futures/liquidations
       - ./data/live_capture:/app/data/live_capture
       - ./logs:/app/logs
-    command: ["/app/.venv/bin/python", "-m", "src.market_data.streams.recorder_main"]
+    command: ["/app/.venv/bin/python", "-m", "src.capture.main", "--slot", "blue"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+  capture-green:
+    image: ghcr.io/kthyeong/crypto-pilot-live:latest
+    container_name: market-capture-green
+    profiles: ["capture-green"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 256m
+    env_file:
+      - path: /home/ubuntu/quant-secrets/crypto-pilot-recorder.env
+        required: false
+    volumes:
+      - ./data/live_capture:/app/data/live_capture
+      - ./logs:/app/logs
+    command: ["/app/.venv/bin/python", "-m", "src.capture.main", "--slot", "green"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+  market-normalizer:
+    image: ghcr.io/kthyeong/crypto-pilot-live:latest
+    container_name: market-normalizer
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 768m
+    volumes:
+      - ./data/live_capture:/app/data/live_capture
+      - ./data/futures/liquidations:/app/data/futures/liquidations
+      - ./logs:/app/logs
+      - ./deploy/backup/status:/app/backup_status:ro
+    command: ["/app/.venv/bin/python", "-m", "src.market_data.streams.normalizer_main"]
     logging:
       driver: json-file
       options:

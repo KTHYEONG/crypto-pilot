@@ -1,3 +1,18 @@
+import json
+import os
+from pathlib import Path
+
+import pandas as pd
+
+from src.market_data.streams.normalizer import NormalizerConfig
+from src.market_data.streams.retention import (
+    BackupStatus,
+    prune_backed_up,
+    read_backup_status,
+    sweep_partials,
+)
+
+
 def test_prune_market_data_shrinks_only_old_rows(tmp_path) -> None:
     import pandas as pd
     from src.market_data.retention import prune_market_data
@@ -306,3 +321,378 @@ def test_prune_market_data_uses_hidden_temp_and_skips_legacy_tmp_files(tmp_path,
     assert (d / "BTCUSDT.tmp.parquet").read_bytes() == leftover_before
     assert result["ohlcv/1h"]["files_pruned"] == 1
 
+
+
+def _norm_now() -> pd.Timestamp:
+    return pd.Timestamp("2026-09-26T12:00:00Z")
+
+
+def _norm_status(started_days_ago: float = 1.0, finished_days_ago: float = 0.5) -> BackupStatus:
+    now = _norm_now()
+    return BackupStatus(
+        started_at=now - pd.Timedelta(days=started_days_ago),
+        finished_at=now - pd.Timedelta(days=finished_days_ago),
+    )
+
+
+def _touch_old(path: Path, days_ago: float = 40.0) -> None:
+    old = _norm_now().value // 1_000_000_000 - int(days_ago * 86400)
+    os.utime(path, (old, old))
+
+
+def _touch_now(path: Path) -> None:
+    fresh = _norm_now().value // 1_000_000_000
+    os.utime(path, (fresh, fresh))
+
+
+def _archive_pair(root: Path, stream: str, day: str, days_ago: float = 40.0) -> None:
+    stream_dir = root / "raw" / "archive" / stream
+    stream_dir.mkdir(parents=True, exist_ok=True)
+    for name in (f"{day}.jsonl.xz", f"{day}.manifest.json"):
+        (stream_dir / name).write_bytes(b"x")
+        _touch_old(stream_dir / name, days_ago)
+
+
+def test_backup_gated_prune_removes_old_pair_keeps_recent(tmp_path, monkeypatch) -> None:
+    """A 31-day archive pair with a covering status is removed manifest-last; 29-day kept."""
+    _archive_pair(tmp_path, "book_ticker", "20260826")
+    _archive_pair(tmp_path, "book_ticker", "20260828")
+    removed: list[str] = []
+    real_unlink = Path.unlink
+
+    def recording_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        removed.append(str(self))
+        real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", recording_unlink)
+    report = prune_backed_up(
+        tmp_path, tmp_path / "liq", status=_norm_status(), config=NormalizerConfig(), now=_norm_now()
+    )
+    assert report.prune_blocked is False
+    assert not (tmp_path / "raw" / "archive" / "book_ticker" / "20260826.jsonl.xz").exists()
+    assert not (tmp_path / "raw" / "archive" / "book_ticker" / "20260826.manifest.json").exists()
+    assert (tmp_path / "raw" / "archive" / "book_ticker" / "20260828.jsonl.xz").exists()
+    archive_pos = next(i for i, p in enumerate(removed) if p.endswith("20260826.jsonl.xz"))
+    manifest_pos = next(i for i, p in enumerate(removed) if p.endswith("20260826.manifest.json"))
+    assert archive_pos < manifest_pos
+
+
+def test_prune_keeps_unit_modified_after_backup_start(tmp_path) -> None:
+    """An eligible day touched after the backup started is kept without blocking."""
+
+    _archive_pair(tmp_path, "book_ticker", "20260826")
+    fresh = tmp_path / "raw" / "archive" / "book_ticker" / "20260826.jsonl.xz"
+    now = _norm_now()
+    os.utime(fresh, (now.value // 1_000_000_000, now.value // 1_000_000_000))
+
+    report = prune_backed_up(
+        tmp_path, tmp_path / "liq", status=_norm_status(), config=NormalizerConfig(), now=_norm_now()
+    )
+    assert report.prune_blocked is False
+    assert fresh.exists()
+
+
+def test_prune_blocked_without_fresh_successful_status(tmp_path) -> None:
+    """Missing, stale or failed backup evidence blocks every deletion with its reason."""
+
+
+    _archive_pair(tmp_path, "book_ticker", "20260826")
+    config = NormalizerConfig()
+    missing = prune_backed_up(tmp_path, tmp_path / "liq", status=None, config=config, now=_norm_now())
+    assert (missing.prune_blocked, missing.blocked_reason) == (True, "status_missing")
+    stale = prune_backed_up(
+        tmp_path, tmp_path / "liq", status=_norm_status(started_days_ago=5.0, finished_days_ago=4.0),
+        config=config, now=_norm_now(),
+    )
+    assert (stale.prune_blocked, stale.blocked_reason) == (True, "status_stale")
+    bad = tmp_path / "last_success.json"
+    bad.write_text(json.dumps({"started_at": "2026-09-26T00:00:00+00:00",
+                               "finished_at": "2026-09-26T01:00:00+00:00", "rc": 1}))
+    assert read_backup_status(bad) is None
+    invalid = prune_backed_up(tmp_path, tmp_path / "liq", status=None, config=config, now=_norm_now(),
+                              backup_status_path=bad)
+    assert (invalid.prune_blocked, invalid.blocked_reason) == (True, "status_invalid")
+    assert (tmp_path / "raw" / "archive" / "book_ticker" / "20260826.jsonl.xz").exists()
+
+
+def test_parquet_partitions_follow_own_window(tmp_path) -> None:
+    """181-day snapshot and liquidation partitions prune; 179-day stays."""
+
+    old_day, keep_day = "20260328", "20260330"
+    old_dir = tmp_path / "book_ticker" / old_day
+    old_dir.mkdir(parents=True)
+    (old_dir / "10.parquet").write_bytes(b"p")
+    _touch_old(old_dir / "10.parquet")
+    keep_dir = tmp_path / "book_ticker" / keep_day
+    keep_dir.mkdir(parents=True)
+    (keep_dir / "10.parquet").write_bytes(b"p")
+    _touch_old(keep_dir / "10.parquet")
+    liq = tmp_path / "liq"
+    liq.mkdir()
+    (liq / f"liquidations_{old_day}_10.parquet").write_bytes(b"p")
+    _touch_old(liq / f"liquidations_{old_day}_10.parquet")
+    young_liq = liq / "liquidations_20260330_10.parquet"
+    young_liq.write_bytes(b"p")
+    _touch_old(young_liq)
+    fresh_liq = liq / "liquidations_20260327_10.parquet"
+    fresh_liq.write_bytes(b"p")
+    report = prune_backed_up(
+        tmp_path, liq, status=_norm_status(), config=NormalizerConfig(), now=_norm_now()
+    )
+    assert report.prune_blocked is False
+    assert not (old_dir / "10.parquet").exists()
+    assert (keep_dir / "10.parquet").exists()
+    assert not (liq / f"liquidations_{old_day}_10.parquet").exists()
+    assert young_liq.exists()
+    assert fresh_liq.exists()
+
+
+def test_protected_trees_never_touched(tmp_path) -> None:
+    """Coverage, reference, quarantine, exec_depth and heartbeat files survive pruning."""
+
+    keep = [
+        tmp_path / "coverage" / "liquidations" / "20200101.jsonl",
+        tmp_path / "reference" / "exchange_info" / "20200101.json.gz",
+        tmp_path / "quarantine" / "x.parquet",
+        tmp_path / "exec_depth" / "y.parquet",
+        tmp_path / "recorder_heartbeat.json",
+        tmp_path / "raw" / "capture_blue.json",
+        tmp_path / "raw" / "normalizer_checkpoint.json",
+    ]
+    for path in keep:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"keep")
+        _touch_old(path, days_ago=400.0)
+    _archive_pair(tmp_path, "book_ticker", "20260826")
+    report = prune_backed_up(
+        tmp_path, tmp_path / "liq", status=_norm_status(), config=NormalizerConfig(), now=_norm_now()
+    )
+    assert report.prune_blocked is False
+    assert all(p.exists() for p in keep)
+
+
+def test_sweep_removes_only_old_temps(tmp_path) -> None:
+    """Old partials and parquet tmps are swept; fresh ones survive."""
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    old_partial = raw / "x.partial"
+    old_partial.write_bytes(b"o")
+    _touch_old(old_partial, days_ago=2.0)
+    fresh_partial = raw / "y.partial"
+    fresh_partial.write_bytes(b"f")
+    _touch_now(fresh_partial)
+    book = tmp_path / "book_ticker" / "20260926"
+    book.mkdir(parents=True)
+    old_tmp = book / ".10.parquet.1.2.tmp"
+    old_tmp.write_bytes(b"o")
+    _touch_old(old_tmp, days_ago=2.0)
+    fresh_tmp = book / ".11.parquet.1.2.tmp"
+    fresh_tmp.write_bytes(b"f")
+    _touch_now(fresh_tmp)
+    swept = sweep_partials(tmp_path, tmp_path / "liq", now=_norm_now(), max_age_s=3600.0)
+    assert swept == 2
+    assert not old_partial.exists()
+    assert fresh_partial.exists()
+    assert not old_tmp.exists()
+    assert fresh_tmp.exists()
+
+
+def test_empty_dirs_removed_roots_kept(tmp_path) -> None:
+    """Empty day dirs vanish; the dataset roots themselves remain."""
+
+    day_dir = tmp_path / "raw" / "hot" / "book_ticker" / "20260901"
+    day_dir.mkdir(parents=True)
+    book_root = tmp_path / "book_ticker"
+    book_root.mkdir(parents=True)
+    report = prune_backed_up(
+        tmp_path, tmp_path / "liq", status=_norm_status(), config=NormalizerConfig(), now=_norm_now()
+    )
+    assert report.prune_blocked is False
+    assert not day_dir.exists()
+    assert book_root.exists()
+
+
+def test_read_backup_status_variants(tmp_path) -> None:
+    """Absent, corrupt, failed-rc and naive timestamps all read as None."""
+    assert read_backup_status(tmp_path / "missing.json") is None
+    bad = tmp_path / "bad.json"
+    bad.write_text("{oops")
+    assert read_backup_status(bad) is None
+    scalar = tmp_path / "scalar.json"
+    scalar.write_text("[1]")
+    assert read_backup_status(scalar) is None
+    failed = tmp_path / "failed.json"
+    failed.write_text(json.dumps({"started_at": "2026-09-26T00:00:00+00:00",
+                                  "finished_at": "2026-09-26T01:00:00+00:00", "rc": 2}))
+    assert read_backup_status(failed) is None
+    naive = tmp_path / "naive.json"
+    naive.write_text(json.dumps({"started_at": "2026-09-26T00:00:00",
+                                 "finished_at": "2026-09-26T01:00:00", "rc": 0}))
+    assert read_backup_status(naive) is None
+    ok = tmp_path / "ok.json"
+    ok.write_text(json.dumps({"started_at": "2026-09-26T00:00:00+00:00",
+                              "finished_at": "2026-09-26T01:00:00+00:00", "rc": 0}))
+    status = read_backup_status(ok)
+    assert status is not None
+    assert status.finished_at > status.started_at
+
+
+def test_sweep_skips_missing_trees_and_failures(tmp_path, monkeypatch) -> None:
+    """Absent trees sweep zero; unlink races are skipped silently."""
+    assert sweep_partials(tmp_path, tmp_path / "liq", now=_norm_now(), max_age_s=3600.0) == 0
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    doomed = raw / "z.partial"
+    doomed.write_bytes(b"x")
+    _touch_old(doomed, days_ago=2.0)
+
+    def _fail_unlink(self, *args, **kwargs) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(Path, "unlink", _fail_unlink)
+    assert sweep_partials(tmp_path, tmp_path / "liq", now=_norm_now(), max_age_s=3600.0) == 0
+    assert doomed.exists()
+
+
+def test_prune_skips_foreign_names_and_missing_files(tmp_path) -> None:
+    """Non-day archive names and vanished files never break the pass."""
+    stream_dir = tmp_path / "raw" / "archive" / "book_ticker"
+    stream_dir.mkdir(parents=True)
+    (stream_dir / "notes.txt").write_bytes(b"x")
+    (stream_dir / "2026-09-20.jsonl.xz").write_bytes(b"x")
+    liq = tmp_path / "liq"
+    liq.mkdir()
+    (liq / "scratch.parquet").write_bytes(b"x")
+    (liq / "liquidations_20200101_10.parquet").write_bytes(b"p")
+    _touch_old(liq / "liquidations_20200101_10.parquet", days_ago=400.0)
+    report = prune_backed_up(tmp_path, liq, status=_norm_status(), config=NormalizerConfig(), now=_norm_now())
+    assert report.prune_blocked is False
+    assert (stream_dir / "notes.txt").exists()
+    assert (stream_dir / "2026-09-20.jsonl.xz").exists()
+    assert (liq / "scratch.parquet").exists()
+    assert not (liq / "liquidations_20200101_10.parquet").exists()
+
+
+def test_prune_unlink_failures_are_counted_not_raised(tmp_path, monkeypatch) -> None:
+    """A locked file keeps the unit alive without failing the pass."""
+    _archive_pair(tmp_path, "book_ticker", "20260826")
+    real_unlink = Path.unlink
+    calls = {"n": 0}
+
+    def _flaky_unlink(self, *args, **kwargs) -> None:
+        if self.name.endswith(".jsonl.xz") and calls["n"] == 0:
+            calls["n"] += 1
+            raise OSError("locked")
+        real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _flaky_unlink)
+    report = prune_backed_up(tmp_path, tmp_path / "liq", status=_norm_status(),
+                             config=NormalizerConfig(), now=_norm_now())
+    assert report.prune_blocked is False
+    assert (tmp_path / "raw" / "archive" / "book_ticker" / "20260826.manifest.json").exists()
+
+
+def test_status_key_and_type_errors_read_none(tmp_path) -> None:
+    """Timestamp-less or mistyped status files read as None."""
+    bad = tmp_path / "keys.json"
+    bad.write_text(json.dumps({"rc": 0}))
+    assert read_backup_status(bad) is None
+    mistyped = tmp_path / "types.json"
+    mistyped.write_text(json.dumps({"started_at": 123, "finished_at": [], "rc": 0}))
+    assert read_backup_status(mistyped) is None
+
+
+def test_older_than_false_on_vanished_paths(tmp_path) -> None:
+    """Vanished paths are never older than anything."""
+    from src.market_data.streams.retention import _older_than
+
+    assert _older_than(tmp_path / "missing", 10**20) is False
+
+
+def test_sweep_unlink_failures_skipped(tmp_path, monkeypatch) -> None:
+    """A locked temp file is skipped without failing the sweep."""
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    doomed = raw / "z.partial"
+    doomed.write_bytes(b"x")
+    _touch_old(doomed, days_ago=2.0)
+    book = tmp_path / "book_ticker" / "20260926"
+    book.mkdir(parents=True)
+    doomed_tmp = book / ".10.parquet.1.2.tmp"
+    doomed_tmp.write_bytes(b"x")
+    _touch_old(doomed_tmp, days_ago=2.0)
+
+    def _flaky_unlink(self, *args, **kwargs) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(Path, "unlink", _flaky_unlink)
+    assert sweep_partials(tmp_path, tmp_path / "liq", now=_norm_now(), max_age_s=3600.0) == 0
+    assert doomed.exists()
+    assert doomed_tmp.exists()
+    monkeypatch.undo()
+    assert sweep_partials(tmp_path, tmp_path / "liq", now=_norm_now(), max_age_s=3600.0) == 2
+
+
+def test_prune_skips_foreign_day_names(tmp_path) -> None:
+    """Non-day archive and snapshot names are never parsed as days."""
+    stream_dir = tmp_path / "raw" / "archive" / "book_ticker"
+    stream_dir.mkdir(parents=True)
+    (stream_dir / "latest.jsonl.xz").write_bytes(b"x")
+    snap_base = tmp_path / "book_ticker"
+    (snap_base / "latest").mkdir(parents=True)
+    (snap_base / "latest" / "10.parquet").write_bytes(b"x")
+    liq = tmp_path / "liq"
+    liq.mkdir()
+    (liq / "notes.txt").write_bytes(b"x")
+    (liq / "liquidations_latest.parquet").write_bytes(b"x")
+    report = prune_backed_up(tmp_path, liq, status=_norm_status(), config=NormalizerConfig(), now=_norm_now())
+    assert report.prune_blocked is False
+    assert (stream_dir / "latest.jsonl.xz").exists()
+    assert (snap_base / "latest").exists()
+
+
+def test_backed_up_check_false_on_vanished_files(tmp_path) -> None:
+    """A unit whose files vanish mid-check is kept, never pruned."""
+    from src.market_data.streams.retention import _unit_backed_up
+
+    assert _unit_backed_up([tmp_path / "missing"], 0) is False
+
+
+def test_snapshot_and_liquidation_unlink_failures_kept(tmp_path, monkeypatch) -> None:
+    """Locked derived files keep their day units without failing the pass."""
+    old_day = "20260328"
+    old_dir = tmp_path / "book_ticker" / old_day
+    old_dir.mkdir(parents=True)
+    (old_dir / "10.parquet").write_bytes(b"p")
+    _touch_old(old_dir / "10.parquet")
+    liq = tmp_path / "liq"
+    liq.mkdir()
+    liq_file = liq / f"liquidations_{old_day}_10.parquet"
+    liq_file.write_bytes(b"p")
+    _touch_old(liq_file)
+    real_unlink = Path.unlink
+
+    def _flaky_unlink(self, *args, **kwargs) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(Path, "unlink", _flaky_unlink)
+    report = prune_backed_up(tmp_path, liq, status=_norm_status(), config=NormalizerConfig(), now=_norm_now())
+    assert report.prune_blocked is False
+    assert (old_dir / "10.parquet").exists()
+    assert liq_file.exists()
+
+
+def test_rmdir_failures_skipped(tmp_path, monkeypatch) -> None:
+    """A locked empty directory is skipped without failing the pass."""
+    from src.market_data.streams.retention import _remove_empty_dirs
+
+    day_dir = tmp_path / "raw" / "hot" / "book_ticker" / "20260901"
+    day_dir.mkdir(parents=True)
+
+    def _flaky_rmdir(self, *args, **kwargs) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(Path, "rmdir", _flaky_rmdir)
+    assert _remove_empty_dirs([tmp_path / "raw" / "hot"]) == 0
+    assert day_dir.exists()

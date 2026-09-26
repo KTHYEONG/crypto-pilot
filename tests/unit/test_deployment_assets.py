@@ -29,27 +29,41 @@ def test_SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS() -> None:
     assert "./logs:/app/logs" in compose
 
 
-def test_docker_compose_has_independent_market_recorder_service() -> None:
+def test_docker_compose_has_blue_green_capture_slots() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    # 라이브 전용 소스(bookTicker/premiumIndex/reference) + 청산 스트림은 live 데몬과 독립된 서비스로 24/7 가동된다.
-    assert "src.market_data.streams.recorder_main" in compose
-    assert "/app/.venv/bin/python" in compose
-    assert "container_name: market-recorder" in compose
+    # Raw-first 캡처는 blue/green 슬롯으로 24/7 가동되며, 정규화기는 파생 parquet만 쓴다.
+    assert "src.capture.main" in compose
+    assert '"--slot"' in compose or "--slot" in compose
+    assert "container_name: market-capture-blue" in compose
+    assert "container_name: market-capture-green" in compose
+    assert "container_name: market-normalizer" in compose
+    assert "market-recorder" not in compose
+    assert "src.market_data.streams.recorder_main" not in compose
+    assert "liquidation-collector" not in compose
     assert "unless-stopped" in compose
     assert "./data/futures/liquidations:/app/data/futures/liquidations" in compose
     assert "./data/live_capture:/app/data/live_capture" in compose
     assert "mem_limit: 768m" in compose
-    assert "stop_grace_period: 30s" in compose
-    assert "liquidation-collector" not in compose
-    # 기존 live 데몬 서비스 계약이 깨지지 않는다.
+    assert "mem_limit: 256m" in compose
     assert "./data/state:/app/data/state" in compose
-    # recorder 블록은 최소 권한으로 동작한다: 데몬 시크릿이 아닌 레코더 전용 env만 선택적으로 받는다.
-    live_block, recorder_block = compose.split("  market-recorder:\n", 1)
-    assert "crypto-pilot-recorder.env" in recorder_block
-    assert "required: false" in recorder_block
-    assert "crypto-pilot.env" not in recorder_block.replace("crypto-pilot-recorder.env", "")
-    assert "./data/state" not in recorder_block
-    assert "./logs:/app/logs" in recorder_block
+    _, blue_block = compose.split("  capture-blue:\n", 1)
+    blue_block = blue_block.split("\n  capture-green:\n", 1)[0]
+    green_block = compose.split("\n  capture-green:\n", 1)[1].split("\n  market-normalizer:\n", 1)[0]
+    normalizer_block = compose.split("\n  market-normalizer:\n", 1)[1]
+    live_block = compose.split("  capture-blue:\n", 1)[0]
+    for block in (blue_block, green_block):
+        assert "profiles:" in block
+        assert "mem_limit: 256m" in block
+        assert "--slot" in block
+        assert "crypto-pilot-recorder.env" in block
+        assert "required: false" in block
+        assert "crypto-pilot.env" not in block.replace("crypto-pilot-recorder.env", "")
+        assert "./data/state" not in block
+        assert "./logs:/app/logs" in block
+    assert "normalizer_main" in normalizer_block
+    assert "./deploy/backup/status:/app/backup_status:ro" in normalizer_block
+    assert "mem_limit: 768m" in normalizer_block
+    assert "env_file" not in normalizer_block
     assert "env_file: /home/ubuntu/quant-secrets/crypto-pilot.env" in live_block
     assert "./data/state:/app/data/state" in live_block
 
@@ -57,7 +71,7 @@ def test_docker_compose_has_independent_market_recorder_service() -> None:
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_11_DOCKERFILE_BUILDS",
-    "test_docker_compose_has_independent_market_recorder_service",
+    "test_docker_compose_has_blue_green_capture_slots",
     "test_dockerfile_keeps_uv_cache_out_of_image",
     "test_dockerignore_excludes_workspace_caches",
     "test_compose_uses_absolute_secret_path_and_declares_live_mode",
@@ -89,14 +103,17 @@ def test_docker_compose_memory_budget_fits_oci_a1_host() -> None:
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
 
     # When
-    live_block, recorder_block = compose.split("  market-recorder:\n", 1)
+    live_block = compose.split("  capture-blue:\n", 1)[0]
 
     # Then
     assert "container_name: mhs-live-daemon" in live_block
     assert "mem_limit: 2g" in live_block
     assert "mem_limit: 1200m" not in compose
-    assert "container_name: market-recorder" in recorder_block
-    assert "mem_limit: 768m" in recorder_block
+    assert "container_name: market-capture-blue" in compose
+    assert "container_name: market-capture-green" in compose
+    assert compose.count("mem_limit: 256m") >= 2
+    assert "container_name: market-normalizer" in compose
+    assert "mem_limit: 768m" in compose
     assert "HARDWARE_MAX_WORKERS" not in compose
 
 
@@ -377,15 +394,35 @@ case "$op" in
             *"$FAKE_FAIL_UP"*) exit 1 ;;
           esac
         fi
-        exit 0 ;;
+        case "$*" in
+          *capture-green*)
+            if [ "${FAKE_GREEN_CRASH:-0}" = "1" ]; then printf 'false\\n' > "$FAKE_STATE/green_running";
+            else printf 'true\\n' > "$FAKE_STATE/green_running"; fi
+            exit 0 ;;
+          *capture-blue*)
+            printf 'true\\n' > "$FAKE_STATE/blue_running"; exit 0 ;;
+          *) exit 0 ;;
+        esac
+        ;;
+      stop|rm) exit 0 ;;
       *) exit 0 ;;
     esac
     ;;
   exec)
-    if [ "${FAKE_INSPECT_RUNNING:-}" != "true" ]; then exit 1; fi
-    if [ "${FAKE_EXEC_FAIL:-0}" = "1" ]; then exit 1; fi
-    printf '%s\\n' "$FAKE_RUNNING_FP"
-    exit 0
+    container="$1"; shift || true
+    case "$container" in
+      market-capture-blue)
+        if [ "${FAKE_BLUE_RUNNING:-false}" != "true" ]; then exit 1; fi
+        if [ "${FAKE_EXEC_FAIL:-0}" = "1" ]; then exit 1; fi
+        printf '%s\\n' "$FAKE_BLUE_FP"; exit 0 ;;
+      market-capture-green)
+        state="false"
+        if [ -f "$FAKE_STATE/green_running" ]; then state="$(cat "$FAKE_STATE/green_running")";
+        else state="${FAKE_GREEN_RUNNING:-false}"; fi
+        if [ "$state" != "true" ]; then exit 1; fi
+        printf '%s\\n' "$FAKE_IMAGE_FP"; exit 0 ;;
+      *) exit 1 ;;
+    esac
     ;;
   run)
     if [ "${FAKE_RUN_FAIL:-0}" = "1" ]; then exit 1; fi
@@ -393,19 +430,63 @@ case "$op" in
     exit 0
     ;;
   inspect)
-    if [ "${FAKE_INSPECT_RUNNING:-}" = "fail" ]; then exit 1; fi
     case "$*" in
-      *State.Running*)
-        if [ "${FAKE_INSPECT_RUNNING:-}" = "true" ]; then echo "true"; else echo "false"; fi
+      *State.Running*market-capture-blue*)
+        if [ -f "$FAKE_STATE/blue_running" ]; then cat "$FAKE_STATE/blue_running";
+        else printf '%s\\n' "${FAKE_BLUE_RUNNING:-false}"; fi
         exit 0 ;;
-      *config-hash*) printf '%s\\n' "$FAKE_LABEL"; exit 0 ;;
+      *State.Running*market-capture-green*)
+        if [ -f "$FAKE_STATE/green_running" ]; then cat "$FAKE_STATE/green_running";
+        else printf '%s\\n' "${FAKE_GREEN_RUNNING:-false}"; fi
+        exit 0 ;;
+      *State.Running*market-recorder*)
+        if [ -f "$FAKE_STATE/legacy_removed" ]; then printf 'false\\n'; else printf '%s\\n' "${FAKE_LEGACY_RUNNING:-false}"; fi
+        exit 0 ;;
+      market-recorder)
+        if [ "${FAKE_LEGACY_RUNNING:-false}" = "true" ] && [ ! -f "$FAKE_STATE/legacy_removed" ]; then exit 0; fi
+        exit 1 ;;
+      *State.StartedAt*) printf '%s\\n' "$FAKE_STARTED_AT"; exit 0 ;;
+      *config-hash*market-capture-blue*) printf '%s\\n' "$FAKE_LABEL_BLUE"; exit 0 ;;
+      *config-hash*market-capture-green*) printf '%s\\n' "$FAKE_LABEL_GREEN"; exit 0 ;;
       *) exit 1 ;;
     esac
     ;;
+  stop|rm)
+    case "$*" in
+      *market-recorder*)
+        if [ "${FAKE_LEGACY_STUCK:-0}" != "1" ] && [ "$op" = "rm" ]; then touch "$FAKE_STATE/legacy_removed"; fi ;;
+    esac
+    exit 0 ;;
   image) exit 0 ;;
   *) exit 0 ;;
 esac
 """
+
+
+def _write_ready_heartbeat(tmp_path, slot: str, started_at_iso: str) -> None:
+    """Write a fully READY heartbeat for ``slot`` with a fresh ``ts``."""
+    import json
+    from datetime import UTC, datetime
+
+    now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    payload = {
+        "started_at": started_at_iso,
+        "stopped_at": None,
+        "ts": now_iso,
+        "rest": {"book_ticker": {"first_ok_at": started_at_iso}},
+        "ws": {"first_frame_at": started_at_iso},
+        "flush_failures": 0,
+    }
+    raw_dir = tmp_path / "data" / "live_capture" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / f"capture_{slot}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _shift_iso(iso_text: str, seconds: int) -> str:
+    from datetime import datetime, timedelta
+
+    parsed = datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
+    return (parsed + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
 def _run_compose_recreate(tmp_path, env: dict[str, str]):
@@ -420,11 +501,17 @@ def _run_compose_recreate(tmp_path, env: dict[str, str]):
     fake_docker = fake_bin / "docker"
     fake_docker.write_text(_FAKE_DOCKER_SCRIPT, encoding="utf-8")
     fake_docker.chmod(fake_docker.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(ROOT / "src" / "application" / "ops" / "capture_handover.py", deploy_dir / "capture_handover.py")
     log = tmp_path / "argv.log"
     log.write_text("", encoding="utf-8")
     full_env = dict(os.environ)
     full_env.update(env)
     full_env["FAKE_LOG"] = str(log)
+    full_env["FAKE_STATE"] = str(state_dir)
     full_env["PATH"] = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
     result = subprocess.run(  # noqa: S603 - fixed argv: the repo script under test + a fake image ref
         [str(shutil.which("bash") or "/bin/bash"), str(ROOT / "deploy" / "compose_recreate.sh"), "fake-image:latest"],
@@ -433,15 +520,23 @@ def _run_compose_recreate(tmp_path, env: dict[str, str]):
     return result, [line for line in log.read_text(encoding="utf-8").splitlines() if line]
 
 
-def _base_recreate_env() -> dict[str, str]:
+def _base_recreate_env(started_at_iso: str = "2026-09-26T11:50:00+00:00") -> dict[str, str]:
     return {
-        "FAKE_INSPECT_RUNNING": "true",
-        "FAKE_RUNNING_FP": "sha256:abc",
+        "FAKE_BLUE_RUNNING": "false",
+        "FAKE_GREEN_RUNNING": "false",
+        "FAKE_LEGACY_RUNNING": "false",
+        "FAKE_BLUE_FP": "sha256:abc",
         "FAKE_IMAGE_FP": "sha256:abc",
         "FAKE_CONFIG_HASH": "hash-1",
-        "FAKE_LABEL": "hash-1",
+        "FAKE_LABEL_BLUE": "hash-1",
+        "FAKE_LABEL_GREEN": "hash-1",
+        "FAKE_STARTED_AT": started_at_iso,
         "FAKE_EXEC_FAIL": "0",
         "FAKE_RUN_FAIL": "0",
+        "FAKE_GREEN_CRASH": "0",
+        "CAPTURE_HANDOVER_TIMEOUT_S": "5",
+        "CAPTURE_HANDOVER_POLL_S": "1",
+        "CAPTURE_HEARTBEAT_STALE_S": "30",
     }
 
 
@@ -449,75 +544,233 @@ def _up_lines(argv_log: list[str]) -> list[str]:
     return [line for line in argv_log if " compose up " in line or "compose up " in line]
 
 
-def test_compose_recreate_keeps_unchanged_recorder(tmp_path) -> None:
-    result, argv_log = _run_compose_recreate(tmp_path, _base_recreate_env())
+def test_compose_recreate_keeps_unchanged_capture(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
     assert result.returncode == 0
-    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=keep reason=unchanged"
+    assert "capture_action=keep" in result.stdout
     ups = _up_lines(argv_log)
     assert any("mhs-live" in line and "--force-recreate" in line for line in ups)
-    assert not any("market-recorder" in line for line in ups)
+    assert not any("capture-" in line for line in ups)
 
 
-def test_compose_recreate_recreates_recorder_before_daemon_on_fingerprint_change(tmp_path) -> None:
+def test_compose_handover_starts_idle_slot_before_retiring_old(tmp_path) -> None:
     env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
     env["FAKE_IMAGE_FP"] = "sha256:changed"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    _write_ready_heartbeat(tmp_path, "green", _shift_iso(env["FAKE_STARTED_AT"], 10))
     result, argv_log = _run_compose_recreate(tmp_path, env)
     assert result.returncode == 0
-    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=fingerprint_changed"
+    assert "capture_action=handover" in result.stdout
     ups = _up_lines(argv_log)
-    recorder_idx = next(i for i, line in enumerate(ups) if "market-recorder" in line)
+    capture_idx = next(i for i, line in enumerate(ups) if "capture-green" in line)
+    normalizer_idx = next(i for i, line in enumerate(ups) if "market-normalizer" in line)
     daemon_idx = next(i for i, line in enumerate(ups) if "mhs-live" in line)
-    assert recorder_idx < daemon_idx
+    assert capture_idx < normalizer_idx < daemon_idx
+    joined = "\n".join(argv_log)
+    up_green = joined.index("up -d --no-deps --force-recreate capture-green")
+    stop_blue = joined.index("capture-blue", up_green)
+    assert up_green < stop_blue
 
 
-def test_compose_recreate_recreates_recorder_on_compose_config_change(tmp_path) -> None:
+def test_compose_handover_timeout_keeps_old_slot_and_fails_deploy(tmp_path) -> None:
     env = _base_recreate_env()
-    env["FAKE_LABEL"] = "hash-2"
+    env["FAKE_BLUE_RUNNING"] = "true"
+    env["FAKE_IMAGE_FP"] = "sha256:changed"
+    env["CAPTURE_HANDOVER_TIMEOUT_S"] = "1"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 3
+    joined = "\n".join(argv_log)
+    assert "capture-green" in joined
+    assert not any("capture-blue" in line and ("stop" in line or " rm" in line) for line in argv_log)
+    assert any("capture-green" in line and ("stop" in line or " rm" in line) for line in argv_log)
+    ups = _up_lines(argv_log)
+    assert any("market-normalizer" in line for line in ups)
+    assert any("mhs-live" in line for line in ups)
+
+
+def test_compose_crashed_new_slot_fails_fast(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    env["FAKE_IMAGE_FP"] = "sha256:changed"
+    env["FAKE_GREEN_CRASH"] = "1"
+    env["CAPTURE_HANDOVER_TIMEOUT_S"] = "5"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
     result, _ = _run_compose_recreate(tmp_path, env)
-    assert result.returncode == 0
-    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=compose_config_changed"
+    assert result.returncode == 3
+    assert "capture_handover=failed" in result.stdout
 
 
-def test_compose_recreate_recreates_missing_recorder(tmp_path) -> None:
+def test_compose_first_deploy_retires_legacy_recorder_only_after_ready(tmp_path) -> None:
     env = _base_recreate_env()
-    env["FAKE_INSPECT_RUNNING"] = "fail"
+    env["FAKE_LEGACY_RUNNING"] = "true"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
     result, argv_log = _run_compose_recreate(tmp_path, env)
     assert result.returncode == 0
-    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=not_running"
-    assert any("market-recorder" in line for line in _up_lines(argv_log))
+    assert "reason=legacy_migration" in result.stdout
+    joined = "\n".join(argv_log)
+    assert joined.index("capture-blue") < joined.index("market-recorder")
 
 
-def test_compose_recreate_recreates_when_running_fingerprint_unreadable(tmp_path) -> None:
+def test_compose_failed_migration_keeps_legacy_and_skips_normalizer(tmp_path) -> None:
     env = _base_recreate_env()
-    env["FAKE_EXEC_FAIL"] = "1"
-    result, _ = _run_compose_recreate(tmp_path, env)
-    assert result.returncode == 0
-    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=running_fp_unreadable"
+    env["FAKE_LEGACY_RUNNING"] = "true"
+    env["CAPTURE_HANDOVER_TIMEOUT_S"] = "1"
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 3
+    joined = "\n".join(argv_log)
+    assert "market-recorder" not in [line for line in joined.splitlines() if "docker stop" in line and "market-recorder" in line]
+    assert "normalizer_action=skipped reason=legacy_active" in result.stdout
+    assert any("mhs-live" in line for line in _up_lines(argv_log))
 
 
-def test_compose_recreate_recreates_when_image_fingerprint_unreadable(tmp_path) -> None:
+def test_compose_both_running_host_reconciles(tmp_path) -> None:
     env = _base_recreate_env()
-    env["FAKE_RUN_FAIL"] = "1"
-    result, _ = _run_compose_recreate(tmp_path, env)
+    env["FAKE_BLUE_RUNNING"] = "true"
+    env["FAKE_GREEN_RUNNING"] = "true"
+    env["FAKE_BLUE_FP"] = "sha256:old"
+    env["FAKE_IMAGE_FP"] = "sha256:abc"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    _write_ready_heartbeat(tmp_path, "green", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
     assert result.returncode == 0
-    assert result.stdout.strip() == "[SYS] stage=deploy_recreate recorder_action=recreate reason=image_fp_unreadable"
+    assert "capture_action=reconcile" in result.stdout
+    assert not any("capture-" in line for line in _up_lines(argv_log))
+    stops = [line for line in argv_log if "stop" in line and "capture-" in line]
+    assert len(stops) >= 1
+
+
+def test_compose_script_has_no_remove_orphans() -> None:
+    script = (ROOT / "deploy" / "compose_recreate.sh").read_text(encoding="utf-8")
+    assert "--remove-orphans" not in script
 
 
 def test_compose_recreate_propagates_compose_failure(tmp_path) -> None:
     env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
     env["FAKE_FAIL_UP"] = "mhs-live"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
     result, _ = _run_compose_recreate(tmp_path, env)
     assert result.returncode != 0
 
 
-def test_dockerfile_writes_recorder_fingerprint_after_dependency_sync() -> None:
+def test_compose_declares_profile_gated_slots_and_least_privilege_normalizer() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    for slot in ("blue", "green"):
+        assert '"--slot"' in compose or "--slot" in compose
+        assert slot in compose
+    assert "profiles:" in compose
+    assert "mem_limit: 256m" in compose
+    assert "src.capture.main" in compose
+    assert "./data/state" not in compose.split("capture-blue:", 1)[1].split("market-normalizer:", 1)[0]
+    assert "crypto-pilot.env" not in compose.split("capture-blue:", 1)[1].split("market-normalizer:", 1)[0].replace("crypto-pilot-recorder.env", "")
+    assert "normalizer_main" in compose
+    assert "./deploy/backup/status:/app/backup_status:ro" in compose
+    assert "mem_limit: 768m" in compose
+    normalizer_block = compose.split("market-normalizer:", 1)[1]
+    assert "env_file" not in normalizer_block.split("mhs-live:", 1)[0] if "mhs-live:" in normalizer_block else "env_file" not in normalizer_block
+    assert "market-recorder" not in compose
+
+
+def test_deploy_workflow_ships_handover_helper_and_status_dir_before_recreate() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert "capture_handover.py" in workflow
+    assert workflow.index("capture_handover.py.new") < workflow.index("compose_recreate.sh '$IMAGE:latest'")
+    assert "deploy/backup/status" in workflow
+    assert workflow.index("deploy/backup/status") < workflow.index("compose_recreate.sh '$IMAGE:latest'")
+    assert "python3 -m src.application.ops.daemon_idle_gate" in workflow
+
+
+def test_filter_excludes_hot_json_and_partial_before_capture_include() -> None:
+    text = (ROOT / "deploy" / "crypto-pilot.rclone-filter").read_text(encoding="utf-8")
+    capture_idx = text.index("+ /live_capture/**")
+    for rule in ("- *.partial", "- /live_capture/raw/hot/**", "- /live_capture/raw/*.json", "+ /live_capture/raw/archive/**"):
+        assert rule in text
+        assert text.index(rule) < capture_idx
+    rules = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    assert rules[-1] == "- **"
+
+
+def test_backup_status_written_atomically_only_on_full_success(tmp_path) -> None:
+    import json
+    import os
+    import shutil
+    import stat
+    import subprocess
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    fake_rclone = fake_bin / "rclone"
+    fake_rclone.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_rclone.chmod(fake_rclone.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    lock = tmp_path / "test.lock"
+    lock.write_text("", encoding="utf-8")
+    script = ROOT / "deploy" / "backup" / "crypto-pilot-backup.sh"
+    full_env = dict(os.environ)
+    full_env["PATH"] = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+    full_env["CRYPTO_PILOT_ROOT"] = str(tmp_path)
+    full_env["RCLONE_BIN"] = str(fake_rclone)
+    full_env["QUANT_GDRIVE_LOCK"] = str(lock)
+    full_env["LOG_DIR"] = str(tmp_path / "logs")
+    result = subprocess.run(  # noqa: S603 - fixed argv: the repo backup script under test
+        [str(shutil.which("bash") or "/bin/bash"), str(script)],
+        capture_output=True, text=True, check=False, cwd=tmp_path, env=full_env,
+    )
+    assert result.returncode == 0
+    status = tmp_path / "deploy" / "backup" / "status" / "last_success.json"
+    assert status.is_file()
+    payload = json.loads(status.read_text(encoding="utf-8"))
+    assert payload["rc"] == 0
+    assert payload["started_at"] <= payload["finished_at"]
+    assert list((tmp_path / "deploy" / "backup" / "status").glob("*.partial")) == []
+
+
+def test_backup_failed_step_never_advances_status(tmp_path) -> None:
+    import os
+    import shutil
+    import stat
+    import subprocess
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    fake_rclone = fake_bin / "rclone"
+    fake_rclone.write_text("#!/usr/bin/env bash\ncase \"$*\" in *copy*) exit 1;; *) exit 0;; esac\n", encoding="utf-8")
+    fake_rclone.chmod(fake_rclone.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    status_dir = tmp_path / "deploy" / "backup" / "status"
+    status_dir.mkdir(parents=True, exist_ok=True)
+    before = '{"started_at": "2026-09-25T00:00:00Z", "finished_at": "2026-09-25T00:01:00Z", "rc": 0}'
+    (status_dir / "last_success.json").write_text(before, encoding="utf-8")
+    lock = tmp_path / "test.lock"
+    lock.write_text("", encoding="utf-8")
+    full_env = dict(os.environ)
+    full_env["PATH"] = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+    full_env["CRYPTO_PILOT_ROOT"] = str(tmp_path)
+    full_env["RCLONE_BIN"] = str(fake_rclone)
+    full_env["QUANT_GDRIVE_LOCK"] = str(lock)
+    full_env["LOG_DIR"] = str(tmp_path / "logs")
+    result = subprocess.run(  # noqa: S603 - fixed argv: the repo backup script under test
+        [str(shutil.which("bash") or "/bin/bash"), str(ROOT / "deploy" / "backup" / "crypto-pilot-backup.sh")],
+        capture_output=True, text=True, check=False, cwd=tmp_path, env=full_env,
+    )
+    assert result.returncode == 1
+    assert (status_dir / "last_success.json").read_text(encoding="utf-8") == before
+
+
+def test_dockerfile_writes_capture_fingerprint_after_dependency_sync() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    fingerprint_idx = dockerfile.index("recorder_fingerprint")
+    fingerprint_idx = dockerfile.index("capture_fingerprint")
     assert fingerprint_idx > dockerfile.rindex("uv sync")
-    assert "/app/.recorder_fingerprint" in dockerfile
+    assert "/app/.capture_fingerprint" in dockerfile
+    assert "recorder_fingerprint" not in dockerfile
+    assert ".recorder_fingerprint" not in dockerfile
 
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
-    assert ".recorder_fingerprint" in dockerignore
+    assert ".capture_fingerprint" in dockerignore
+    assert ".recorder_fingerprint" not in dockerignore
 
 
 
@@ -581,3 +834,44 @@ def test_deploy_workflow_never_ships_sealed_artifacts() -> None:
     workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
     assert ".enc" not in "".join(line for line in workflow.splitlines() if line.lstrip().startswith("scp "))
 
+
+
+def test_compose_up_failure_of_new_slot_continues_and_fails_deploy(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    env["FAKE_IMAGE_FP"] = "sha256:changed"
+    env["FAKE_FAIL_UP"] = "capture-green"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 3
+    assert "capture_handover=failed reason=up_failed" in result.stdout
+    ups = _up_lines(argv_log)
+    assert any("market-normalizer" in line for line in ups)
+    assert any("mhs-live" in line for line in ups)
+    assert not any("capture-blue" in line and ("stop" in line or " rm" in line) for line in argv_log)
+
+
+def test_compose_keep_still_retires_lingering_legacy_recorder(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    env["FAKE_LEGACY_RUNNING"] = "true"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0
+    assert "legacy_recorder=retired" in result.stdout
+    assert any("rm" in line and "market-recorder" in line for line in argv_log)
+    assert any("market-normalizer" in line for line in _up_lines(argv_log))
+
+
+def test_compose_stuck_legacy_recorder_blocks_normalizer_and_fails_deploy(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    env["FAKE_LEGACY_RUNNING"] = "true"
+    env["FAKE_LEGACY_STUCK"] = "1"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 3
+    assert "legacy_recorder=retire_failed" in result.stdout
+    assert "normalizer_action=skipped reason=legacy_active" in result.stdout
+    assert not any("market-normalizer" in line for line in _up_lines(argv_log))
+    assert any("mhs-live" in line for line in _up_lines(argv_log))

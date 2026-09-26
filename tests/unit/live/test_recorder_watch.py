@@ -22,7 +22,6 @@ def _thresholds() -> RecorderWatchThresholds:
     return RecorderWatchThresholds(
         heartbeat_stale_s=600.0,
         liquidation_silence_s=900.0,
-        liquidation_max_failed_connections=5,
         sampler_stale_s=1800.0,
         sampler_max_consecutive_failures=5,
         min_capture_ratio=0.9,
@@ -32,6 +31,12 @@ def _thresholds() -> RecorderWatchThresholds:
         reference_grace_s=3600.0,
         rejected_fraction_alert=0.01,
         rejected_max_consecutive_points=60,
+        capture_stale_s=120.0,
+        capture_ready_grace_s=900.0,
+        capture_dual_active_max_s=1200.0,
+        normalizer_max_lag_s=600.0,
+        normalizer_max_consecutive_failures=5,
+        compaction_max_delay_s=10800.0,
     )
 
 
@@ -43,25 +48,72 @@ class _ManualNow:
         return pd.Timestamp(self.t)
 
 
+def _fresh_slot(ts: str) -> dict[str, Any]:
+    started = "2026-09-24T05:00:00Z"
+    return {
+        "slot": "blue",
+        "pid": 7,
+        "fingerprint": "fp",
+        "started_at": started,
+        "stopped_at": None,
+        "rest": {
+            "book_ticker": {"first_ok_at": started, "last_ok_at": ts, "consecutive_failures": 0},
+            "premium_index": {"first_ok_at": started, "last_ok_at": ts, "consecutive_failures": 0},
+        },
+        "ws": {"connected_at": started, "first_frame_at": started, "last_frame_at": ts,
+               "reconnects": 0, "pending_dropped": 0},
+        "last_flush_at": ts,
+        "flush_failures": 0,
+        "ts": ts,
+        "ready": True,
+    }
+
+
 def _heartbeat(
     *,
     ts: str = _NOW,
-    last_event_at: str = _NOW,
-    failed: int = 0,
-    book_at: str = _NOW,
-    premium_at: str = _NOW,
+    dead_capture: bool = False,
+    premium_at: str | None = None,
+    schema_version: int = 3,
+    consecutive_failures: int = 0,
 ) -> dict[str, Any]:
+    day_ts = pd.Timestamp(ts).tz_convert("UTC")
+    day = day_ts.strftime("%Y%m%d")
+    previous = (day_ts - pd.Timedelta(days=1)).strftime("%Y%m%d")
+    premium_persisted = premium_at if premium_at is not None else ts
     return {
+        "schema_version": schema_version,
         "ts": ts,
         "started_at": "2026-09-24T05:00:00Z",
-        "book_ticker": {"last_success_at": book_at},
-        "premium_index": {"last_success_at": premium_at},
-        "liquidations": {
-            "last_event_at": last_event_at,
-            "last_connected_at": last_event_at,
-            "consecutive_failed_connections": failed,
-            "last_disconnect_reason": None,
+        "normalizer": {"last_run_at": ts, "last_success_at": ts,
+                       "consecutive_failures": consecutive_failures, "lag_s": 0.0,
+                       "pending_complete_bytes": 0, "last_error": None},
+        "streams": {
+            "book_ticker": {"last_grid": "2026-09-24T06:30:00+00:00", "last_persisted_at": ts,
+                            "rows_last_write": 10, "rejected_rows_last_sample": 0,
+                            "rejected_fraction_last_sample": 0.0, "rejected_rows_total": 0,
+                            "consecutive_rejecting_points": 0, "window_expected_points": 60,
+                            "window_captured_points": 60, "duplicates_dropped_total": 0},
+            "premium_index": {"last_grid": "2026-09-24T06:30:00+00:00",
+                              "last_persisted_at": premium_persisted, "rows_last_write": 5,
+                              "rejected_rows_last_sample": 0, "rejected_fraction_last_sample": 0.0,
+                              "rejected_rows_total": 0, "consecutive_rejecting_points": 0,
+                              "window_expected_points": 12, "window_captured_points": 12,
+                              "duplicates_dropped_total": 0},
+            "force_order": {"last_frame_recv_at": ts, "last_persisted_at": ts, "frames_total": 10,
+                            "duplicates_dropped_total": 0, "parse_failures_total": 0},
         },
+        "reference": {"day": day, "cutoff_utc": "00:05",
+                      "endpoints": {"exchange_info": {"captured": True},
+                                    "funding_info": {"captured": True},
+                                    "asset_index": {"captured": True}},
+                      "previous_day": previous, "previous_day_complete": True},
+        "compaction": {"last_day": previous, "last_result": "ok", "last_error": None,
+                       "last_run_at": ts, "archived_days_pending": []},
+        "retention": {"prune_blocked": False, "blocked_reason": None, "backup_started_at": None,
+                      "last_run_at": ts, "pruned_files_total": 0,
+                      "raw_hot_bytes": 1, "raw_archive_bytes": 2},
+        "capture": {"blue": None if dead_capture else _fresh_slot(ts), "green": None},
     }
 
 
@@ -90,39 +142,37 @@ def _watch(
 def test_one_alert_per_episode(tmp_path: Path) -> None:
     """Repeated unhealthy checks alert only once until the finding set changes."""
     path = tmp_path / "recorder_heartbeat.json"
-    _write(path, _heartbeat(last_event_at="2026-09-24T06:19:00Z"))
+    _write(path, _heartbeat(dead_capture=True))
     calls: list[tuple[str, str]] = []
     watch = _watch(path, calls)
     for _ in range(3):
         findings = watch.check_once()
     assert len(findings) == 1
     assert [event for event, _ in calls] == ["recorder_unhealthy"]
-    assert "liquidation_silent:liquidations" in calls[0][1]
+    assert "capture_missing:capture" in calls[0][1]
 
 
 def test_new_failure_during_episode_realerts(tmp_path: Path) -> None:
     """A second finding joins the episode with one alert listing both keys."""
     path = tmp_path / "recorder_heartbeat.json"
-    _write(path, _heartbeat(last_event_at="2026-09-24T06:19:00Z"))
+    _write(path, _heartbeat(dead_capture=True))
     calls: list[tuple[str, str]] = []
     watch = _watch(path, calls)
     watch.check_once()
     _write(
         path,
-        _heartbeat(
-            last_event_at="2026-09-24T06:19:00Z", premium_at="2026-09-24T06:04:00Z"
-        ),
+        _heartbeat(dead_capture=True, premium_at="2026-09-24T06:04:00Z"),
     )
     watch.check_once()
     assert [event for event, _ in calls] == ["recorder_unhealthy", "recorder_unhealthy"]
-    assert "liquidation_silent:liquidations" in calls[1][1]
+    assert "capture_missing:capture" in calls[1][1]
     assert "sampler_stale:premium_index" in calls[1][1]
 
 
 def test_recovery_announced_once_and_relapse_realerts(tmp_path: Path) -> None:
     """A cleared episode announces recovery once; a later relapse opens a new episode."""
     path = tmp_path / "recorder_heartbeat.json"
-    _write(path, _heartbeat(last_event_at="2026-09-24T06:19:00Z"))
+    _write(path, _heartbeat(dead_capture=True))
     calls: list[tuple[str, str]] = []
     watch = _watch(path, calls)
     watch.check_once()
@@ -130,7 +180,7 @@ def test_recovery_announced_once_and_relapse_realerts(tmp_path: Path) -> None:
     watch.check_once()
     watch.check_once()
     assert [event for event, _ in calls] == ["recorder_unhealthy", "recorder_recovered"]
-    _write(path, _heartbeat(last_event_at="2026-09-24T06:19:00Z"))
+    _write(path, _heartbeat(dead_capture=True))
     watch.check_once()
     assert [event for event, _ in calls] == [
         "recorder_unhealthy",
@@ -142,7 +192,7 @@ def test_recovery_announced_once_and_relapse_realerts(tmp_path: Path) -> None:
 def test_undelivered_alert_retried(tmp_path: Path) -> None:
     """A failed delivery is retried on the next check without duplicating after success."""
     path = tmp_path / "recorder_heartbeat.json"
-    _write(path, _heartbeat(last_event_at="2026-09-24T06:19:00Z"))
+    _write(path, _heartbeat(dead_capture=True))
     calls: list[tuple[str, str]] = []
     watch = _watch(path, calls, results=[False, True])
     watch.check_once()
@@ -225,7 +275,6 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
         recorder_watch_interval_s=30.0,
         recorder_heartbeat_stale_s=60.0,
         recorder_liquidation_silence_s=120.0,
-        recorder_liquidation_max_failed_connections=2,
         recorder_sampler_stale_s=180.0,
         recorder_sampler_max_consecutive_failures=4,
         recorder_min_capture_ratio=0.8,
@@ -235,6 +284,12 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
         recorder_reference_grace_s=1800.0,
         recorder_rejected_fraction_alert=0.02,
         recorder_rejected_max_consecutive_points=30,
+        recorder_capture_stale_s=45.0,
+        recorder_capture_ready_grace_s=400.0,
+        recorder_capture_dual_active_max_s=800.0,
+        recorder_normalizer_max_lag_s=300.0,
+        recorder_normalizer_max_consecutive_failures=4,
+        recorder_compaction_max_delay_s=7200.0,
     )
     watch = build_recorder_watchdog(settings, alert=lambda event, detail: True)
     assert watch is not None
@@ -243,7 +298,6 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
     assert watch._thresholds == RecorderWatchThresholds(
         heartbeat_stale_s=60.0,
         liquidation_silence_s=120.0,
-        liquidation_max_failed_connections=2,
         sampler_stale_s=180.0,
         sampler_max_consecutive_failures=4,
         min_capture_ratio=0.8,
@@ -253,6 +307,12 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
         reference_grace_s=1800.0,
         rejected_fraction_alert=0.02,
         rejected_max_consecutive_points=30,
+        capture_stale_s=45.0,
+        capture_ready_grace_s=400.0,
+        capture_dual_active_max_s=800.0,
+        normalizer_max_lag_s=300.0,
+        normalizer_max_consecutive_failures=4,
+        compaction_max_delay_s=7200.0,
     )
 
 
@@ -263,7 +323,7 @@ def test_raising_alert_never_escapes_unhealthy_path(
     import logging
 
     path = tmp_path / "recorder_heartbeat.json"
-    _write(path, _heartbeat(last_event_at="2026-09-24T06:19:00Z"))
+    _write(path, _heartbeat(dead_capture=True))
 
     def _boom(event: str, detail: str) -> bool:
         raise RuntimeError("webhook down")
@@ -277,7 +337,7 @@ def test_raising_alert_never_escapes_unhealthy_path(
     )
     with caplog.at_level(logging.ERROR, logger="src.live.recorder_watch"):
         findings = watch.check_once()
-    assert [f.key for f in findings] == ["liquidation_silent:liquidations"]
+    assert [f.key for f in findings] == ["capture_missing:capture"]
     assert any("ALERT_FAILED" in record.message for record in caplog.records)
 
 
@@ -288,7 +348,7 @@ def test_raising_alert_never_escapes_recovery_path(
     import logging
 
     path = tmp_path / "recorder_heartbeat.json"
-    _write(path, _heartbeat(last_event_at="2026-09-24T06:19:00Z"))
+    _write(path, _heartbeat(dead_capture=True))
     calls: list[tuple[str, str]] = []
     watch = _watch(path, calls)
     watch.check_once()
@@ -310,7 +370,7 @@ def test_start_is_idempotent_and_loop_checks(tmp_path: Path) -> None:
     import time
 
     path = tmp_path / "recorder_heartbeat.json"
-    _write(path, _heartbeat(last_event_at="2026-09-24T06:19:00Z"))
+    _write(path, _heartbeat(dead_capture=True))
     calls: list[tuple[str, str]] = []
     watch = RecorderWatchdog(
         heartbeat_path=path,
@@ -331,66 +391,8 @@ def test_start_is_idempotent_and_loop_checks(tmp_path: Path) -> None:
     assert calls[0][0] == "recorder_unhealthy"
 
 
-def _v2_sampler(success_at: str, **overrides: Any) -> dict[str, Any]:
-    base: dict[str, Any] = {
-        "last_success_at": success_at,
-        "consecutive_failures": 0,
-        "skipped_grid_points": 0,
-        "rows_last_flush": 100,
-        "last_persisted_at": success_at,
-        "consecutive_flush_failures": 0,
-        "pending_rows": 0,
-        "dropped_rows_total": 0,
-        "rejected_rows_last_sample": 0,
-        "rejected_rows_total": 0,
-        "rejected_fraction_last_sample": 0.0,
-        "consecutive_rejecting_points": 0,
-        "window_expected_points": 60,
-        "window_captured_points": 60,
-    }
-    base.update(overrides)
-    return base
 
 
-def _v2_heartbeat(ts: str, *, book_failures: int, book_at: str) -> dict[str, Any]:
-    return {
-        "schema_version": 2,
-        "ts": ts,
-        "started_at": "2026-09-25T07:00:00Z",
-        "book_ticker": _v2_sampler(book_at, consecutive_failures=book_failures),
-        "premium_index": _v2_sampler(book_at),
-        "reference": {
-            "day": "20260925",
-            "cutoff_utc": "00:05",
-            "endpoints": {
-                "exchange_info": {
-                    "captured": True, "consecutive_failures": 0,
-                    "last_attempt_at": None, "last_error": None,
-                },
-                "funding_info": {
-                    "captured": True, "consecutive_failures": 0,
-                    "last_attempt_at": None, "last_error": None,
-                },
-                "asset_index": {
-                    "captured": True, "consecutive_failures": 0,
-                    "last_attempt_at": None, "last_error": None,
-                },
-            },
-            "last_success_at": "2026-09-25T00:06:00Z",
-            "previous_day": "20260924",
-            "previous_day_complete": True,
-        },
-        "liquidations": {
-            "last_event_at": ts,
-            "last_connected_at": ts,
-            "consecutive_failed_connections": 0,
-            "last_disconnect_reason": None,
-            "last_persisted_at": ts,
-            "consecutive_flush_failures": 0,
-            "pending_events": 0,
-            "dropped_events_total": 0,
-        },
-    }
 
 
 def test_production_thresholds_wired_from_settings() -> None:
@@ -406,6 +408,12 @@ def test_production_thresholds_wired_from_settings() -> None:
         recorder_reference_grace_s=1800.0,
         recorder_rejected_fraction_alert=0.02,
         recorder_rejected_max_consecutive_points=30,
+        recorder_capture_stale_s=90.0,
+        recorder_capture_ready_grace_s=800.0,
+        recorder_capture_dual_active_max_s=1000.0,
+        recorder_normalizer_max_lag_s=500.0,
+        recorder_normalizer_max_consecutive_failures=4,
+        recorder_compaction_max_delay_s=9000.0,
     )
     watch = _build(settings, alert=lambda event, detail: True)
     assert watch is not None
@@ -417,10 +425,17 @@ def test_production_thresholds_wired_from_settings() -> None:
     assert watch._thresholds.reference_grace_s == 1800.0
     assert watch._thresholds.rejected_fraction_alert == 0.02
     assert watch._thresholds.rejected_max_consecutive_points == 30
+    assert watch._thresholds.capture_stale_s == 90.0
+    assert watch._thresholds.capture_ready_grace_s == 800.0
+    assert watch._thresholds.capture_dual_active_max_s == 1000.0
+    assert watch._thresholds.normalizer_max_lag_s == 500.0
+    assert watch._thresholds.normalizer_max_consecutive_failures == 4
+    assert watch._thresholds.compaction_max_delay_s == 9000.0
+    assert not hasattr(watch._thresholds, "liquidation_max_failed_connections")
 
 
 def test_outage_replay_alerts_in_minutes(tmp_path: Path) -> None:
-    """A 1-minute grid outage pages once, within minutes of the fifth failure."""
+    """A normalizer outage pages once, within minutes of the fifth failed cycle."""
     from src.live.recorder_watch import RecorderWatchdog as _Watchdog
 
     start = pd.Timestamp("2026-09-25T08:02:00Z")
@@ -441,10 +456,20 @@ def test_outage_replay_alerts_in_minutes(tmp_path: Path) -> None:
     for minute in range(7):
         stamp = (start + pd.Timedelta(minutes=minute)).isoformat()
         now.t = stamp
-        _write(
-            watch._heartbeat_path,
-            _v2_heartbeat(stamp, book_failures=minute, book_at=stamp),
-        )
+        payload = _heartbeat(ts=stamp, consecutive_failures=minute)
+        _write(watch._heartbeat_path, payload)
         watch.check_once()
     assert [event for event, _ in calls] == ["recorder_unhealthy"]
-    assert "sampler_failing:book_ticker" in calls[0][1]
+    assert "normalizer_failing:normalizer" in calls[0][1]
+
+
+def test_settings_reject_inconsistent_capture_window() -> None:
+    """A capture staleness at or beyond heartbeat staleness fails validation."""
+    import pytest
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="recorder_capture_stale_s"):
+        LiveSettings(recorder_capture_stale_s=600.0, recorder_heartbeat_stale_s=600.0)
+    with pytest.raises(ValidationError, match="recorder_capture_dual_active_max_s"):
+        LiveSettings(recorder_capture_dual_active_max_s=100.0, recorder_capture_ready_grace_s=900.0)

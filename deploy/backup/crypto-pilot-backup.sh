@@ -31,6 +31,8 @@ if ! flock -w "$LOCK_WAIT_SEC" "$LOCK_FD"; then
   exit 75
 fi
 
+BACKUP_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 FAILED=0
 
 # Step: data (copy-only, filtered, versioned).
@@ -104,6 +106,17 @@ else
 fi
 
 if [ "$FAILED" -eq 0 ]; then
+  STATUS_DIR="$CRYPTO_PILOT_ROOT/deploy/backup/status"
+  mkdir -p "$STATUS_DIR"
+  FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  STATUS_PARTIAL="$STATUS_DIR/last_success.json.partial"
+  printf '{"started_at": "%s", "finished_at": "%s", "rc": 0}' "$BACKUP_STARTED_AT" "$FINISHED_AT" > "$STATUS_PARTIAL"
+  sync
+  if ! mv -f "$STATUS_PARTIAL" "$STATUS_DIR/last_success.json"; then
+    log_line "[SYS] stage=gdrive_backup step=status status=failed"
+    exit 1
+  fi
+  log_line "[SYS] stage=gdrive_backup step=status status=ok"
   log_line "[SYS] stage=gdrive_backup status=ok"
   exit 0
 else

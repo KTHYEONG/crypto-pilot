@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +20,24 @@ def _require_aware(ts: pd.Timestamp, label: str) -> pd.Timestamp:
     if out.tzinfo is None:
         raise ValueError(f"{label} requires tz-aware timestamp")
     return out.tz_convert("UTC")
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageTrackerState:
+    """Restorable attestation state of one per-slot connection segment.
+
+    Persisted in the normalizer checkpoint so that a normalizer restart in the middle of a capture
+    connection continues the same attested segment instead of dropping the span between the last
+    persisted frame and the next one.
+
+    Attributes:
+        open_last: Receipt instant of the latest frame of the open segment, or ``None`` when no
+            segment is open.
+        cursor: Instant up to which the open segment is already persisted, or ``None``.
+    """
+
+    open_last: pd.Timestamp | None
+    cursor: pd.Timestamp | None
 
 
 class CoverageTracker:
@@ -105,6 +124,25 @@ class CoverageTracker:
         if self._open_start is None:
             self._cursor = None
         return sorted(touched)
+
+    def snapshot_state(self) -> CoverageTrackerState:
+        """Return the state needed to resume attestation after a restart (closed segments must be flushed first)."""
+        if self._closed:
+            raise ValueError("unflushed closed segments exist; flush before checkpointing")
+        if self._open_start is None:
+            return CoverageTrackerState(open_last=None, cursor=None)
+        return CoverageTrackerState(open_last=self._open_last, cursor=self._cursor)
+
+    @classmethod
+    def restore(cls, stream: str, root: Path, state: CoverageTrackerState) -> CoverageTracker:
+        """Rebuild a tracker whose open segment continues from ``state``."""
+        tracker = cls(stream, root)
+        if state.open_last is not None:
+            anchor = state.cursor if state.cursor is not None else state.open_last
+            tracker._open_start = _require_aware(anchor, "restore")
+            tracker._open_last = _require_aware(state.open_last, "restore")
+            tracker._cursor = _require_aware(anchor, "restore")
+        return tracker
 
 
 def _split_at_midnight(start: pd.Timestamp, end: pd.Timestamp) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
