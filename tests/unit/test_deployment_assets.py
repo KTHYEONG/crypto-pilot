@@ -388,7 +388,7 @@ case "$op" in
     case "$sub" in
       version) exit 0 ;;
       pull) exit 0 ;;
-      config) printf '%s\\n' "$FAKE_CONFIG_HASH"; exit 0 ;;
+      config) printf '%s %s\\n' "${1:-unknown}" "$FAKE_CONFIG_HASH"; exit 0 ;;
       up)
         if [ -n "${FAKE_FAIL_UP:-}" ]; then
           case "$*" in
@@ -885,6 +885,7 @@ def test_recreate_script_hashes_profile_gated_slot_services_with_their_profile()
     script = (root / "deploy" / "compose_recreate.sh").read_text(encoding="utf-8")
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     assert '$C --profile "$service" config --hash "$service"' in script
+    assert "print $NF" in script
     for slot in ("blue", "green"):
         assert f'profiles: ["capture-{slot}"]' in compose
 
