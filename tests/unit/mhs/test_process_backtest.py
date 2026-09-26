@@ -1103,7 +1103,7 @@ def test_zeroed_target_with_unfillable_exit_holds_inventory_as_open_marked() -> 
     result = replay_execution_windows((window,), 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert abs(float(result.ledger.equity.iloc[-1] - result.ledger.equity.iloc[0])) >= 0.0
     assert "delist_settlement" not in set(result.simulated_fills["reason"])
-    assert result.ledger.primary_valid
+    assert not result.ledger.primary_valid
     assert [p.status for p in result.terminal_positions] == ["open_marked"]
     assert abs(float(result.terminal_positions[0].quantity)) > 0.0
 
@@ -2929,15 +2929,15 @@ def test_missing_held_close_invalidates_replay() -> None:
     path, windows = _replay_fixtures(2)
     w1, w2 = windows
     held = "AUSDT"
-    bad_closes = w1.closes.copy()
+    bad_closes = w2.closes.copy()
     bad_closes.loc[:, held] = np.nan
-    bad_highs = w1.highs.copy()
+    bad_highs = w2.highs.copy()
     bad_highs.loc[:, held] = np.nan
-    bad_lows = w1.lows.copy()
+    bad_lows = w2.lows.copy()
     bad_lows.loc[:, held] = np.nan
-    bad_first = dataclasses.replace(w1, closes=bad_closes, highs=bad_highs, lows=bad_lows, marks=None)
+    bad_second = dataclasses.replace(w2, closes=bad_closes, highs=bad_highs, lows=bad_lows, marks=None)
     result = replay_process_execution(
-        path, iter([bad_first, dataclasses.replace(w2, marks=None)]),
+        path, iter([dataclasses.replace(w1, marks=None), bad_second]),
         initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=ExecutionSpec(),
     )
     assert not bool(result.ledger.primary_valid)

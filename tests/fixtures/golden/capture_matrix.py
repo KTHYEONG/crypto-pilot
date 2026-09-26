@@ -38,6 +38,7 @@ from tests.fixtures.golden.compare import GOLDEN_MATRIX_NAMES, assert_report_dig
 from tests.fixtures.golden.digest import build_report_digest, build_report_summary
 from tests.unit.mhs.test_evaluation_appresearch import (
     _START,
+    _write_3m_cache,
     _write_mhs_market,
 )
 
@@ -81,6 +82,7 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
             # Non-baseline goldens require the taker_buy_quote column so the
             # committee / fold-safe code paths can load the panel.
             end = _write_mhs_market(root, n_hours=2700, include_taker_buy_quote=(name != "baseline"))
+            _write_3m_cache(root)
             # Redirect the funding/mark-price resolvers to the synthetic root;
             # without this, _load_funding_series reads the real production data
             # directory and "no dev symbol has funding coverage" is raised.
@@ -105,7 +107,7 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
                     start=str(_START),
                     end=str(end),
                     data_root=str(root),
-                    execution_timeframe="1m",
+                    execution_timeframe="3m",
                     log_run=False,
                     **overrides,  # type: ignore[arg-type]
                 )

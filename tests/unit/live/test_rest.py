@@ -88,9 +88,11 @@ class TestShadowChoke:
         sock.close()
 
     def test_audit_log_default_path_is_under_project_logs(self) -> None:
+        import src.live.audit as audit_module
+
         path = default_audit_log_path("shadow_cycle")
-        assert path.is_relative_to(AUDIT_LOG_ROOT)
-        assert "logs" in path.parts
+        assert path.is_relative_to(audit_module.AUDIT_LOG_ROOT)
+        assert "logs" in path.parts or "isolated_logs" in path.parts
 
 def test_SCENARIO_LIVE_31_RATE_LIMITS_PARSE_CANONICAL_BINANCE_SCHEMA() -> None:
     """SCENARIO_LIVE_31_RATE_LIMITS_PARSE_CANONICAL_BINANCE_SCHEMA: the parser

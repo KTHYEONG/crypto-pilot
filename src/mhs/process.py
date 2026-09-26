@@ -316,7 +316,8 @@ def step_proxy_net_returns(
     if len(weights.index) < 2:
         return pd.Series(dtype="float64")
     w = weights.to_numpy(dtype="float64")
-    forward = log_close.shift(-1).to_numpy(dtype="float64") - log_close.to_numpy(dtype="float64")
+    fwd_ret = log_close.shift(-1) - log_close
+    forward = fwd_ret.to_numpy(dtype="float64")
     price_move = np.where(np.isfinite(forward), np.exp(forward) - 1.0, 0.0)
     fund = np.where(np.isfinite(funding.to_numpy(dtype="float64")), funding.to_numpy(dtype="float64"), 0.0)
     prev = np.vstack([np.zeros((1, w.shape[1])), w[:-1]])

@@ -294,9 +294,7 @@ def test_loader_releases_expired_buffers() -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(bt_market, "load_base_panel", lambda *a, _p=fake_panel, **k: _p)
     monkeypatch.setattr(bt_market, "_load_funding_series", lambda syms: ({s: funding[s] for s in syms}, {}))
-    monkeypatch.setattr(bt_market, "apply_dynamic_gap_exclusion", lambda mask, *a, **k: (mask, {})
-    )
-    monkeypatch.setattr(bt_market, "apply_dynamic_mark_gap_exclusion", lambda mask: (mask, {}))
+    monkeypatch.setattr(bt_market, "apply_dynamic_gap_exclusion", lambda mask, *a, **k: (mask, {}))
     try:
         start = grid[0]
         end = grid[0] + pd.Timedelta(days=30)

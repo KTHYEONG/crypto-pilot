@@ -54,6 +54,44 @@ def _isolate_alert_outbox(monkeypatch: pytest.MonkeyPatch, tmp_path, _isolate_ex
 
 
 @pytest.fixture(autouse=True)
+def _isolate_live_state_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Route every default ``data/state`` artifact of the live runner to per-test paths.
+
+    The runner, scheduler and CLI fall back to ``DATA_DIR/state/...`` for the order journal, tax
+    ledger, execution-quality, microstructure and portfolio-state histories and the daemon
+    heartbeat when ``LiveSettings`` leaves them unset. Tests that do not set them explicitly would
+    write synthetic rows (AAAUSDT, fixed 2026-08 dates) into the developer's real state directory.
+    Audit logs (``logs/live/shadow_cycle``) are routed to a per-test root as well. The default-path helpers are replaced instead of the ``LIVE_*`` settings so tests that assert
+    ``LiveSettings`` defaults keep observing the real defaults.
+    """
+    import src.live.execution_quality as execution_quality
+    import src.live.ledger_resync as ledger_resync
+    import src.live.microstructure as microstructure
+    import src.live.portfolio_state as portfolio_state
+    import src.live.runner as runner
+    import src.live.scheduler as scheduler
+    import src.live.tax_ledger as tax_ledger
+
+    state = tmp_path / "isolated_state"
+    replacements = {
+        "default_order_journal_path": state / "order_journal.jsonl",
+        "default_tax_ledger_dir": state / "tax_ledger",
+        "default_execution_quality_dir": state / "execution_quality",
+        "default_microstructure_dir": state / "microstructure",
+        "default_portfolio_state_dir": state / "portfolio_state",
+    }
+    # order_journal keeps its real helper: nothing inside that module calls it, and its default is asserted directly.
+    for module in (tax_ledger, execution_quality, microstructure, portfolio_state, runner, ledger_resync):
+        for name, target in replacements.items():
+            if hasattr(module, name):
+                monkeypatch.setattr(module, name, lambda target=target: target)
+    monkeypatch.setattr(scheduler, "DATA_DIR", tmp_path / "isolated_data")
+    import src.live.audit as audit
+
+    monkeypatch.setattr(audit, "AUDIT_LOG_ROOT", tmp_path / "isolated_logs")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_live_process_logs(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """src.cli.commands.live 로그 디렉터리를 테스트 격리 경로로 돌린다."""
     import logging

@@ -31,6 +31,7 @@ import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import psutil
 
+from src.common.logging import LOG_DIR
 from src.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
 from src.mhs.execution import ExecutionSpec
 from src.mhs.execution.contracts import ExecutionReplayWindow
@@ -38,7 +39,7 @@ from src.mhs.resources import _TreeMemorySampler
 
 SAMPLE_DIR = Path(__file__).parent
 ROOT = Path(__file__).resolve().parents[3]
-SCRATCH_DIR = ROOT / "logs" / "scratch"
+SCRATCH_DIR = LOG_DIR / "scratch"
 
 sys.path.insert(0, str(SAMPLE_DIR))
 

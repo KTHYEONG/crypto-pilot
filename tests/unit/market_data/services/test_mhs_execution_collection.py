@@ -12,7 +12,7 @@ from src.market_data.services import mhs_execution as mhs_execution_collection
 from src.common.errors import DataIntegrityError
 
 _START = "2023-01-01T00:00:00Z"
-_END = "2023-01-01T23:55:00Z"
+_END = "2023-01-01T23:57:00Z"
 
 
 def _epoch_ms(idx: pd.DatetimeIndex) -> pd.Series:
@@ -23,7 +23,7 @@ _FREQ_BY_INTERVAL = {"1m": "1min", "3m": "3min", "5m": "5min"}
 
 
 def _write_cache(
-    root: Path, symbol: str, interval: str = "5m", start: str = _START,
+    root: Path, symbol: str, interval: str = "3m", start: str = _START,
     end: str = _END, drop_slice: slice | None = None,
 ) -> None:
     """Write one symbol's ``interval`` Parquet covering [start, end];
@@ -71,7 +71,7 @@ def test_mhs_execution_data_coverage_gate_missing_symbol_raises(tmp_path) -> Non
     _write_cache(root, "BTCUSDT")
     with pytest.raises(DataIntegrityError) as exc_info:
         mhs_execution_collection.assert_execution_data_coverage(
-            ["BTCUSDT", "MISSINGUSDT"], "5m", _START, _END, root=str(root),
+            ["BTCUSDT", "MISSINGUSDT"], "3m", _START, _END, root=str(root),
         )
     message = str(exc_info.value)
     assert "MISSINGUSDT" in message
@@ -85,7 +85,7 @@ def test_mhs_execution_data_coverage_gate_all_present_noop(tmp_path) -> None:
     for symbol in ("BTCUSDT", "ETHUSDT"):
         _write_cache(root, symbol)
     assert mhs_execution_collection.assert_execution_data_coverage(
-        ["BTCUSDT", "ETHUSDT"], "5m", _START, _END, root=str(root),
+        ["BTCUSDT", "ETHUSDT"], "3m", _START, _END, root=str(root),
     ) is None
 
 
@@ -98,7 +98,7 @@ def test_mhs_execution_data_coverage_gate_gapped_symbol_raises(tmp_path) -> None
     _write_cache(root, "GAPPEDUSDT", drop_slice=slice(120, 132))
     with pytest.raises(DataIntegrityError) as exc_info:
         mhs_execution_collection.assert_execution_data_coverage(
-            ["BTCUSDT", "GAPPEDUSDT"], "5m", _START, _END, root=str(root),
+            ["BTCUSDT", "GAPPEDUSDT"], "3m", _START, _END, root=str(root),
         )
     message = str(exc_info.value)
     assert "GAPPEDUSDT" in message
@@ -111,13 +111,13 @@ def test_mhs_coverage_root_override_backward_compatible(tmp_path, monkeypatch) -
     # ``_coverage`` without ``root`` (the existing two call sites' calling
     # convention) still resolves under ``FUTURES_DATA_DIR / 'ohlcv'``.
     root = tmp_path / "canonical"
-    (root / "ohlcv" / "5m").mkdir(parents=True)
-    idx = pd.date_range(_START, _END, freq="5min", tz="UTC")
-    pd.DataFrame({"timestamp": _epoch_ms(idx)}).to_parquet(root / "ohlcv" / "5m" / "BTCUSDT.parquet")
+    (root / "ohlcv" / "3m").mkdir(parents=True)
+    idx = pd.date_range(_START, _END, freq="3min", tz="UTC")
+    pd.DataFrame({"timestamp": _epoch_ms(idx)}).to_parquet(root / "ohlcv" / "3m" / "BTCUSDT.parquet")
     monkeypatch.setattr(mhs_execution_collection, "FUTURES_DATA_DIR", root)
-    result = mhs_execution_collection._coverage("BTCUSDT", "5m", _START, _END)
+    result = mhs_execution_collection._coverage("BTCUSDT", "3m", _START, _END)
     assert result["status"] == "PRESENT"
-    assert result["rows"] == 288
+    assert result["rows"] == 480
 
 
 def test_mhs_coverage_step_mapping_3m_present(tmp_path) -> None:

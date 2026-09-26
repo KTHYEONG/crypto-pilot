@@ -568,7 +568,7 @@ def _run_retention(registry_path: Path, run_id: str, evidence_root: Path, policy
             registry_path, run_id,
             {"cleanup_error": str(exc), "budget_satisfied": None, "removed_evidence_ids": [], "reclaimed_bytes": 0},
         )
-        _logger.warning("[RETENTION] status=plan_failed run_id=%s error=%s", run_id, exc)
+        _logger.warning("[SYS] status=plan_failed run_id=%s error=%s", run_id, exc)
         return
     try:
         result = apply_retention(registry_path, evidence_root, plan)
@@ -582,7 +582,7 @@ def _run_retention(registry_path: Path, run_id: str, evidence_root: Path, policy
                 "reclaimed_bytes": 0,
             },
         )
-        _logger.warning("[RETENTION] status=apply_failed run_id=%s error=%s", run_id, exc)
+        _logger.warning("[SYS] status=apply_failed run_id=%s error=%s", run_id, exc)
         return
     _record_operational_metadata(
         registry_path, run_id,
@@ -595,7 +595,7 @@ def _run_retention(registry_path: Path, run_id: str, evidence_root: Path, policy
     )
     if not (plan.budget_satisfied and result.budget_satisfied):
         _logger.warning(
-            "[RETENTION] status=budget_unsatisfied run_id=%s reclaimed_bytes=%d",
+            "[SYS] status=budget_unsatisfied run_id=%s reclaimed_bytes=%d",
             run_id, result.reclaimed_bytes,
         )
 
@@ -918,7 +918,7 @@ def run_mhs_process_backtest(
             wall = time.monotonic() - wall_start
             if wall - (last_heartbeat - wall_start) >= HEARTBEAT_SECONDS:
                 _logger.info(
-                    "[SUPERVISOR] heartbeat wall_s=%.1f pid=%d", wall, pid,
+                    "[SYS] heartbeat wall_s=%.1f pid=%d", wall, pid,
                 )
                 last_heartbeat = time.monotonic()
             if timeout_seconds is not None and wall >= float(timeout_seconds):

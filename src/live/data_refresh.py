@@ -20,6 +20,7 @@ import pyarrow.parquet as pq
 from src.common.errors import DataIntegrityError
 from src.live.venue_listing import VenueListingSnapshot
 from src.market_data.binance.futures import BinanceIpBlockedError
+from src.market_data.binance.venue_rules import EXCHANGE_INFO_URL
 from src.market_data.services.futures_collection import funding_gap_start_ms, funding_tail_is_fresh
 from src.market_data.storage.ohlcv import is_temp_artifact
 
@@ -73,7 +74,6 @@ class ColdUniverseError(RuntimeError):
 STALENESS_ACTIVE_WINDOW_HOURS: int = 72
 
 # DataCollector는 메인넷 fapi 고정이라 목록도 같은 베뉴를 쓴다.
-EXCHANGE_INFO_URL: str = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 EXCHANGE_INFO_TIMEOUT_S: float = 20.0
 # 실측 제거 비율 4/807≈0.5%를 크게 넘으면 잘못된 베뉴/응답으로 보고 목록 불신.
 ABSENT_MAX_FRACTION: float = 0.05

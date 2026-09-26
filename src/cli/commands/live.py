@@ -12,7 +12,8 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.paths import BASE_DIR, DATA_DIR
+from src.common.logging import LOG_DIR
+from src.common.paths import DATA_DIR
 from src.live.deployed_weights import default_weights_path
 
 logger = logging.getLogger("LiveCli")
@@ -21,7 +22,7 @@ logger = logging.getLogger("LiveCli")
 _DEFAULT_ARTIFACT = str(default_weights_path())
 _DEFAULT_DAEMON_STATE_PATH = str(DATA_DIR / "state" / "live_daemon_last_run.json")
 
-_LIVE_LOG_DIR: Path = BASE_DIR / "logs" / "live"
+_LIVE_LOG_DIR: Path = LOG_DIR / "live"
 LIVE_LOG_MAX_BYTES: int = 10 * 1024 * 1024
 LIVE_LOG_BACKUP_COUNT: int = 5
 

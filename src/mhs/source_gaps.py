@@ -14,9 +14,13 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 
 SourceGapPlane = Literal["ohlcv_1h", "ohlcv_3m", "funding"]
+SourceGapExtent = Literal["LISTING_EDGE", "OPEN_EDGE", "INTERIOR", "UNSCOPED"]
 
 _VALID_PLANES: Final[tuple[str, ...]] = ("ohlcv_1h", "ohlcv_3m", "funding")
 _VALID_REASONS: Final[tuple[str, ...]] = ("SOURCE_ABSENT", "DELISTED", "SETTLING")
+_VALID_EXTENTS: Final[tuple[str, ...]] = ("LISTING_EDGE", "OPEN_EDGE", "INTERIOR", "UNSCOPED")
+# 과거 레지스트리 행에는 extent 가 없다. 측정되지 않은 범위이므로 가장 보수적인 UNSCOPED 로 읽는다.
+_LEGACY_EXTENT: Final[SourceGapExtent] = "UNSCOPED"
 _REQUIRED_FIELDS: Final[tuple[str, ...]] = (
     "symbol",
     "plane",
@@ -47,6 +51,11 @@ class SourceGapInterval:
         evidence: Human-readable record of which sources were queried and found empty.
         verified_at: UTC time the absence was last empirically confirmed.
         resolved_at: UTC time the source was observed recovered; non-None deactivates it.
+        extent: Measured position of the gap relative to the symbol's observed bars.
+            ``LISTING_EDGE`` is the span before the first listed bar, ``OPEN_EDGE`` the
+            span after the last observed bar of a symbol not known to be DELISTED,
+            ``INTERIOR`` a bounded gap between observed bars, and ``UNSCOPED`` a legacy or
+            manually curated record whose scope was never measured.
     """
 
     symbol: str
@@ -57,6 +66,7 @@ class SourceGapInterval:
     evidence: str
     verified_at: datetime
     resolved_at: datetime | None
+    extent: SourceGapExtent = _LEGACY_EXTENT
 
 
 def _default_registry_path() -> Path:
@@ -108,6 +118,9 @@ def _parse_record(record: object, line_no: int) -> SourceGapInterval:
     evidence = record["evidence"]
     if not isinstance(evidence, str) or not evidence.strip():
         raise DataIntegrityError(f"source-gap registry line {line_no}: evidence must not be blank")
+    extent = record.get("extent", _LEGACY_EXTENT)
+    if not isinstance(extent, str) or extent not in _VALID_EXTENTS:
+        raise DataIntegrityError(f"source-gap registry line {line_no}: unknown extent {extent!r}")
     start = _parse_utc_moment(record["start"], "start", line_no)
     end_raw = record["end"]
     end: datetime | None = None
@@ -135,6 +148,7 @@ def _parse_record(record: object, line_no: int) -> SourceGapInterval:
         evidence=evidence,
         verified_at=verified_at,
         resolved_at=resolved_at,
+        extent=cast(SourceGapExtent, extent),
     )
 
 

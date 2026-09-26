@@ -512,10 +512,11 @@ def test_cli_verify_source_gaps_defaults_to_read_only(monkeypatch: pytest.Monkey
     )
     calls: dict[str, Any] = {}
     monkeypatch.setattr(audit_mod, "audit_source_gap_registry", lambda **kwargs: noisy)
-    monkeypatch.setattr(
-        audit_mod, "write_audited_registry",
-        lambda report, **kwargs: calls.setdefault("write", (report, kwargs)) or 0,
-    )
+    def _record_write(report: SourceGapAuditReport, **kwargs: Any) -> int:
+        calls["write"] = (report, kwargs)
+        return 1
+
+    monkeypatch.setattr(audit_mod, "write_audited_registry", _record_write)
     args.handler(args)
     assert "write" not in calls, "--write 없이 실행하면 파일을 변경하지 않는다"
 
@@ -789,3 +790,49 @@ def test_clip_and_merge_helpers_handle_open_spans() -> None:
     # 맞닿은 구간은 병합된다.
     assert _merge_clipped([(t0, t1), (t1, t2)]) == [(t0, t2)]
     assert _merge_clipped([(t2, None), (t0, t1)]) == [(t0, t1), (t2, None)]
+
+
+def test_measure_assigns_explicit_extent_per_site(tmp_path: Path) -> None:
+    """Every measured interval carries its scope as data, so policy never parses evidence text."""
+    root = tmp_path / "lake"
+    start = pd.Timestamp("2022-01-01T00:00:00Z")
+    end = pd.Timestamp("2022-01-06T00:00:00Z")
+    grid = _grid("2022-01-02T00:00:00Z", "2022-01-04T00:00:00Z")
+    kept = grid[(grid < pd.Timestamp("2022-01-03T00:00:00Z")) | (grid >= pd.Timestamp("2022-01-03T01:00:00Z"))]
+    _write_ohlcv(root, "MIDUSDT", "3m", kept)
+    _write_ohlcv(root, "FUTUREUSDT", "3m", _grid("2022-02-01T00:00:00Z", "2022-02-02T00:00:00Z"))
+    (root / "ohlcv" / "3m").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"timestamp": pd.Series([], dtype="int64")}).to_parquet(root / "ohlcv" / "3m" / "EMPTYUSDT.parquet")
+    gaps = measure_source_gaps(
+        ["MIDUSDT", "FUTUREUSDT", "EMPTYUSDT", "NOFILEUSDT"],
+        plane="ohlcv_3m", start=start, end=end, data_root=root,
+    )
+    mid = {(g.start, g.end): g.extent for g in gaps if g.symbol == "MIDUSDT"}
+    assert mid[(start.to_pydatetime(), pd.Timestamp("2022-01-02T00:00:00Z").to_pydatetime())] == "LISTING_EDGE"
+    assert mid[(pd.Timestamp("2022-01-03T00:00:00Z").to_pydatetime(), pd.Timestamp("2022-01-03T01:00:00Z").to_pydatetime())] == "INTERIOR"
+    assert [e for (s, e_), e in mid.items() if e_ is None] == ["OPEN_EDGE"]
+    by_symbol = {g.symbol: g.extent for g in gaps if g.symbol in {"FUTUREUSDT", "EMPTYUSDT", "NOFILEUSDT"}}
+    assert by_symbol == {"FUTUREUSDT": "LISTING_EDGE", "EMPTYUSDT": "OPEN_EDGE", "NOFILEUSDT": "OPEN_EDGE"}
+
+
+def test_audit_narrowed_legacy_record_is_unscoped_and_written(tmp_path: Path) -> None:
+    """A residual narrowed from an unmeasured legacy record stays UNSCOPED and the writer persists extent."""
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [_row(symbol="CCCUUSDT", start="2020-01-01T00:00:00Z", end=None, evidence="legacy open")],
+    )
+    root = tmp_path / "lake"
+    grid = _grid("2022-06-01T00:00:00Z", "2022-07-01T00:00:00Z")
+    kept = grid[(grid < pd.Timestamp("2022-06-10T00:00:00Z")) | (grid >= pd.Timestamp("2022-06-11T00:00:00Z"))]
+    _write_ohlcv(root, "CCCUUSDT", "3m", kept)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["CCCUUSDT"], registry_path=registry, data_root=root,
+    )
+    assert [iv.extent for iv in report.narrowed] == ["UNSCOPED"]
+    write_audited_registry(report, registry_path=registry, verified_at=pd.Timestamp("2022-07-01T00:00:00Z"))
+    rows = [json.loads(line) for line in registry.read_text(encoding="utf-8").splitlines()]
+    assert rows
+    assert all(row["extent"] in {"LISTING_EDGE", "OPEN_EDGE", "INTERIOR", "UNSCOPED"} for row in rows)
+    assert {iv.extent for iv in load_source_gap_registry(registry) if iv.resolved_at is None} == {"UNSCOPED"}

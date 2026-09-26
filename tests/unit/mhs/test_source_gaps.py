@@ -179,8 +179,7 @@ def test_blocked_symbols_between_excludes_touching_window(tmp_path: Path) -> Non
 
 
 def test_source_gap_excluded_symbols_matches_active_view(monkeypatch: pytest.MonkeyPatch) -> None:
-    expected = frozenset(iv.symbol for iv in active_intervals())
-    assert source_gap_excluded_symbols() == expected
+    expected = source_gap_excluded_symbols()
     assert set(SOURCE_GAP_EXCLUDED_SYMBOLS) == expected
     assert len(SOURCE_GAP_EXCLUDED_SYMBOLS) == len(expected)
     assert "LUNAUSDT" in SOURCE_GAP_EXCLUDED_SYMBOLS
@@ -198,7 +197,11 @@ def test_packaged_registry_loads_probe_confirmed_intervals() -> None:
     assert len(luna) == 1
     assert luna[0].end is None
     assert luna[0].reason == "DELISTED"
-    mana = [(iv.start.isoformat(), iv.end.isoformat() if iv.end else None) for iv in intervals if iv.symbol == "MANAUSDT"]
+    mana = [
+        (iv.start.isoformat(), iv.end.isoformat() if iv.end else None)
+        for iv in intervals
+        if iv.symbol == "MANAUSDT" and "Binance Vision" in iv.evidence
+    ]
     assert mana == [
         ("2022-02-26T00:00:00+00:00", "2022-03-01T00:00:00+00:00"),
         ("2022-04-01T00:00:00+00:00", "2022-04-03T00:00:00+00:00"),
@@ -349,3 +352,37 @@ def test_blocked_symbols_between_rejects_non_timestamp_window(tmp_path: Path) ->
     path = _write_registry(tmp_path, [_row()])
     with pytest.raises(DataIntegrityError):
         blocked_symbols_between("2022-01-01", pd.Timestamp(_END, tz="UTC"), plane="ohlcv_3m", path=path)  # type: ignore[arg-type]
+
+
+def test_loader_defaults_missing_extent_to_unscoped(tmp_path: Path) -> None:
+    path = _write_registry(tmp_path, [_row()])
+    (iv,) = load_source_gap_registry(path)
+    assert iv.extent == "UNSCOPED"
+
+
+def test_loader_rejects_unknown_extent(tmp_path: Path) -> None:
+    path = _write_registry(tmp_path, [{**_row(), "extent": "EDGE"}])
+    with pytest.raises(DataIntegrityError, match="unknown extent"):
+        load_source_gap_registry(path)
+
+
+@pytest.mark.parametrize(
+    ("reason", "extent", "excluded"),
+    [
+        ("SOURCE_ABSENT", "LISTING_EDGE", False),
+        ("SOURCE_ABSENT", "OPEN_EDGE", False),
+        ("SOURCE_ABSENT", "INTERIOR", False),
+        ("SOURCE_ABSENT", "UNSCOPED", True),
+        ("DELISTED", "OPEN_EDGE", True),
+    ],
+)
+def test_excluded_symbols_follow_reason_and_extent_not_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str, extent: str, excluded: bool
+) -> None:
+    """Evidence text that mentions an edge must not change the rule; only reason/extent fields do."""
+    path = _write_registry(
+        tmp_path, [{**_row(reason=reason, evidence="listing edge interior gap open-ended edge"), "extent": extent}]
+    )
+    intervals = load_source_gap_registry(path)
+    monkeypatch.setattr(data_policy_mod, "active_intervals", lambda **kwargs: intervals)
+    assert (source_gap_excluded_symbols() == frozenset({"AAAUSDT"})) is excluded

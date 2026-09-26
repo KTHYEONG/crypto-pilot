@@ -1,23 +1,73 @@
 {
-  "src/cli/commands/data.py": {
+  "src/application/mhs_backtest.py": {
+    "testing": "tests/unit/application/test_mhs_backtest.py"
+  },
+  "src/application/mhs_supervisor.py": {
+    "testing": "tests/unit/application/test_mhs_supervisor.py"
+  },
+  "src/application/mhs_worker.py": {
     "testing": [
-      "tests/unit/cli/commands/test_data.py",
-      "tests/unit/mhs/test_process.py tests/unit/mhs/test_process_backtest.py tests/unit/market_data/services/test_universe_gaps.py tests/unit/market_data/binance/test_vision.py tests/unit/cli/commands/test_data.py",
-      "tests/unit/mhs/test_source_gaps.py",
-      "tests/unit/mhs/test_replay_accumulator.py"
+      "tests/unit/application/test_mhs_backtest.py",
+      "tests/unit/cli/commands/test_backtest.py",
+      "tests/unit/mhs/test_process_module_boundaries.py"
     ]
+  },
+  "src/application/ops/artifact_seal.py": {
+    "testing": "tests/unit/application/test_artifact_seal.py"
+  },
+  "src/application/ops/daemon_idle_gate.py": {
+    "testing": [
+      "tests/unit/application/ops/test_daemon_idle_gate.py",
+      "tests/unit/application/test_daemon_idle_gate.py"
+    ]
+  },
+  "src/application/ops/gdrive_cleanup.py": {
+    "testing": "tests/unit/application/test_gdrive_cleanup.py"
+  },
+  "src/application/ops/recorder_fingerprint.py": {
+    "testing": "tests/unit/application/test_recorder_fingerprint.py"
+  },
+  "src/backtests/contracts.py": {
+    "testing": [
+      "tests/unit/mhs/execution/test_contracts.py",
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/quant/technical_experts/test_contracts.py"
+    ]
+  },
+  "src/backtests/migration.py": {
+    "testing": "tests/unit/backtests/test_migration.py"
+  },
+  "src/backtests/registry.py": {
+    "testing": "tests/unit/backtests/test_registry.py"
+  },
+  "src/backtests/retention.py": {
+    "testing": [
+      "tests/unit/backtests/test_retention.py",
+      "tests/unit/market_data/test_retention.py"
+    ]
+  },
+  "src/cli/commands/backtest.py": {
+    "testing": [
+      "tests/unit/cli/commands/test_backtest.py",
+      "tests/unit/quant/baseline/test_backtest.py"
+    ]
+  },
+  "src/cli/commands/data.py": {
+    "testing": "tests/unit/cli/commands/test_data.py"
   },
   "src/cli/commands/live.py": {
     "testing": "tests/unit/cli/commands/test_live.py"
   },
   "src/cli/commands/ops.py": {
-    "testing": "tests/unit/cli/test_ops_commands.py"
+    "testing": [
+      "tests/unit/backtests/test_migration.py",
+      "tests/unit/cli/test_backtest_lifecycle.py",
+      "tests/unit/cli/test_ops_commands.py",
+      "tests/unit/mhs/test_execution_core_boundaries.py"
+    ]
   },
   "src/cli/commands/research/mhs.py": {
-    "testing": [
-      "tests/unit/cli/commands/research/test_mhs.py",
-      "tests/unit/mhs/test_forward_preregistration.py"
-    ]
+    "testing": "tests/unit/cli/commands/research/test_mhs.py"
   },
   "src/cli/dataclass_args.py": {
     "testing": "tests/unit/cli/test_dataclass_args.py"
@@ -25,84 +75,50 @@
   "src/cli/main.py": {
     "testing": "tests/unit/cli/test_main.py"
   },
+  "src/common/daemon_stages.py": {
+    "testing": "tests/unit/application/ops/test_daemon_idle_gate.py"
+  },
   "src/common/env_provisioning.py": {
     "testing": "tests/unit/common/test_env_provisioning.py"
   },
   "src/common/errors.py": {
-    "testing": [
-      "tests/integration/workflows/test_taker_flow_candidate.py",
-      "tests/unit/cli/commands/research/test_mhs.py",
-      "tests/unit/common/test_env_provisioning.py",
-      "tests/unit/live/test_account.py",
-      "tests/unit/live/test_cli.py",
-      "tests/unit/live/test_data_repair.py",
-      "tests/unit/live/test_deployed_weights.py",
-      "tests/unit/live/test_filters.py",
-      "tests/unit/live/test_funding_backfill.py",
-      "tests/unit/live/test_ledger.py",
-      "tests/unit/live/test_order_journal.py",
-      "tests/unit/live/test_rest.py",
-      "tests/unit/live/test_runner_shadow_cycle.py",
-      "tests/unit/live/test_scheduler.py",
-      "tests/unit/live/test_signal.py",
-      "tests/unit/live/test_tax_ledger.py",
-      "tests/unit/market_data/services/test_futures_collection.py",
-      "tests/unit/market_data/services/test_mhs_execution_collection.py",
-      "tests/unit/market_data/services/test_spot_collection.py",
-      "tests/unit/market_data/storage/test_loaders.py",
-      "tests/unit/market_data/test_futures_mark_price.py",
-      "tests/unit/mhs/evaluation/test_integrity.py",
-      "tests/unit/mhs/evaluation/test_windows.py",
-      "tests/unit/mhs/execution/test_accounting.py",
-      "tests/unit/mhs/report/test_persist.py",
-      "tests/unit/mhs/test_calibration.py",
-      "tests/unit/mhs/test_committee_tranche_count.py",
-      "tests/unit/mhs/test_deploy_gate.py",
-      "tests/unit/mhs/test_evaluation_appresearch.py",
-      "tests/unit/mhs/test_evaluation_diagnostic_gates.py",
-      "tests/unit/mhs/test_evaluation_folds.py",
-      "tests/unit/mhs/test_evaluation_pipeline.py",
-      "tests/unit/mhs/test_evaluation_ram_guard.py",
-      "tests/unit/mhs/test_evaluation_report_persist.py",
-      "tests/unit/mhs/test_execution.py",
-      "tests/unit/mhs/test_forward_preregistration.py",
-      "tests/unit/mhs/test_live_runtime.py",
-      "tests/unit/mhs/test_live_signal_step.py",
-      "tests/unit/mhs/test_live_strategy.py",
-      "tests/unit/mhs/test_mhs_perf_optimization.py",
-      "tests/unit/mhs/test_panel.py",
-      "tests/unit/mhs/test_parallel.py",
-      "tests/unit/mhs/test_replay_accumulator.py",
-      "tests/unit/mhs/test_replay_batch.py",
-      "tests/unit/mhs/test_replay_failclosed.py",
-      "tests/unit/mhs/test_replay_ledger.py",
-      "tests/unit/mhs/test_resources.py",
-      "tests/unit/mhs/test_scaling.py",
-      "tests/unit/quant/baseline/test_backtest.py",
-      "tests/unit/quant/baseline/test_directional_funding_signal.py",
-      "tests/unit/quant/technical_experts/test_xs_ledger.py",
-      "tests/unit/quant/technical_experts/test_xs_weights.py",
-      "tests/unit/tools/test_repartition_ohlcv_parquet.py"
-    ]
+    "testing": "tests/unit/live/test_errors.py"
   },
   "src/common/logging.py": {
     "testing": "tests/unit/common/test_logging.py"
   },
+  "src/common/parquet_io.py": {
+    "testing": "tests/unit/common/test_parquet_io.py"
+  },
   "src/common/paths.py": {
     "testing": [
+      "tests/unit/cli/commands/research/test_mhs.py",
       "tests/unit/cli/commands/test_data.py",
+      "tests/unit/cli/commands/test_live.py",
       "tests/unit/common/test_config.py",
+      "tests/unit/live/test_alert_outbox.py",
+      "tests/unit/live/test_ledger_resync.py",
       "tests/unit/live/test_order_journal.py",
       "tests/unit/live/test_runner_shadow_cycle.py",
+      "tests/unit/live/test_scheduler.py",
+      "tests/unit/live/test_settings.py",
+      "tests/unit/market_data/binance/test_venue_rules.py",
       "tests/unit/mhs/evaluation/test_windows.py",
-      "tests/unit/mhs/test_live_signal_step.py"
+      "tests/unit/mhs/test_frozen_research_run.py",
+      "tests/unit/mhs/test_run_history.py"
     ]
   },
   "src/common/settings.py": {
-    "testing": "tests/unit/common/test_settings.py"
+    "testing": [
+      "tests/unit/common/test_settings.py",
+      "tests/unit/live/test_settings.py"
+    ]
   },
   "src/live/account.py": {
     "testing": "tests/unit/live/test_account.py"
+  },
+  "src/live/alert_outbox.py": {
+    "testing": "tests/unit/live/test_alert_outbox.py"
   },
   "src/live/alerting.py": {
     "testing": "tests/unit/live/test_alerting.py"
@@ -113,14 +129,26 @@
   "src/live/crypto.py": {
     "testing": "tests/unit/live/test_crypto.py"
   },
+  "src/live/daemon_idle.py": {
+    "testing": "tests/unit/application/ops/test_daemon_idle_gate.py"
+  },
   "src/live/data_refresh.py": {
     "testing": "tests/unit/live/test_data_refresh.py"
   },
   "src/live/data_repair.py": {
     "testing": "tests/unit/live/test_data_repair.py"
   },
+  "src/live/deadman.py": {
+    "testing": "tests/unit/live/test_deadman.py"
+  },
   "src/live/deployed_weights.py": {
     "testing": "tests/unit/live/test_deployed_weights.py"
+  },
+  "src/live/depth_capture.py": {
+    "testing": "tests/unit/live/test_depth_capture.py"
+  },
+  "src/live/derisk.py": {
+    "testing": "tests/unit/live/test_derisk.py"
   },
   "src/live/errors.py": {
     "testing": "tests/unit/live/test_errors.py"
@@ -137,14 +165,26 @@
   "src/live/filters.py": {
     "testing": "tests/unit/live/test_filters.py"
   },
+  "src/live/frozen_book.py": {
+    "testing": "tests/unit/live/test_frozen_book.py"
+  },
+  "src/live/frozen_signal.py": {
+    "testing": "tests/unit/live/test_frozen_signal.py"
+  },
   "src/live/funding_backfill.py": {
     "testing": "tests/unit/live/test_funding_backfill.py"
   },
   "src/live/ledger.py": {
     "testing": "tests/unit/live/test_ledger.py"
   },
+  "src/live/ledger_resync.py": {
+    "testing": "tests/unit/live/test_ledger_resync.py"
+  },
   "src/live/lifecycle.py": {
     "testing": "tests/unit/live/test_lifecycle.py"
+  },
+  "src/live/liveness.py": {
+    "testing": "tests/unit/live/test_liveness.py"
   },
   "src/live/microstructure.py": {
     "testing": "tests/unit/live/test_microstructure.py"
@@ -164,8 +204,14 @@
   "src/live/preflight.py": {
     "testing": "tests/unit/live/test_preflight.py"
   },
+  "src/live/recorder_watch.py": {
+    "testing": "tests/unit/live/test_recorder_watch.py"
+  },
   "src/live/records.py": {
     "testing": "tests/unit/live/test_records.py"
+  },
+  "src/live/recovery.py": {
+    "testing": "tests/unit/live/test_recovery.py"
   },
   "src/live/rest.py": {
     "testing": "tests/unit/live/test_rest.py"
@@ -177,19 +223,31 @@
     "testing": "tests/unit/live/test_scheduler.py"
   },
   "src/live/settings.py": {
-    "testing": "tests/unit/live/test_settings.py"
+    "testing": [
+      "tests/unit/common/test_settings.py",
+      "tests/unit/live/test_settings.py"
+    ]
   },
   "src/live/signal.py": {
-    "testing": "tests/unit/live/test_signal.py"
+    "testing": [
+      "tests/unit/live/test_signal.py",
+      "tests/unit/quant/baseline/test_signal.py"
+    ]
   },
   "src/live/signal_step_result.py": {
     "testing": "tests/unit/live/test_signal_step_result.py"
   },
   "src/live/sizing.py": {
-    "testing": "tests/unit/live/test_sizing.py"
+    "testing": [
+      "tests/unit/live/test_sizing.py",
+      "tests/unit/quant/baseline/test_sizing.py"
+    ]
   },
   "src/live/tax_ledger.py": {
     "testing": "tests/unit/live/test_tax_ledger.py"
+  },
+  "src/live/venue_listing.py": {
+    "testing": "tests/unit/live/test_venue_listing.py"
   },
   "src/market_data/binance/futures.py": {
     "testing": [
@@ -205,17 +263,29 @@
   "src/market_data/binance/spot.py": {
     "testing": "tests/unit/market_data/binance/test_binance.py"
   },
+  "src/market_data/binance/venue_rules.py": {
+    "testing": "tests/unit/market_data/binance/test_venue_rules.py"
+  },
   "src/market_data/binance/vision.py": {
     "testing": "tests/unit/market_data/binance/test_vision.py"
   },
   "src/market_data/retention.py": {
-    "testing": "tests/unit/market_data/test_retention.py"
+    "testing": [
+      "tests/unit/backtests/test_retention.py",
+      "tests/unit/market_data/test_retention.py"
+    ]
   },
   "src/market_data/services/borrow_collection.py": {
     "testing": "tests/unit/market_data/services/test_borrow_collection.py"
   },
   "src/market_data/services/collection.py": {
-    "testing": "tests/unit/market_data/services/test_collection.py"
+    "testing": [
+      "tests/unit/market_data/services/test_collection.py",
+      "tests/unit/mhs/test_collection.py"
+    ]
+  },
+  "src/market_data/services/execution_coverage.py": {
+    "testing": "tests/unit/market_data/test_execution_coverage.py"
   },
   "src/market_data/services/futures_collection.py": {
     "testing": "tests/unit/market_data/services/test_futures_collection.py"
@@ -224,8 +294,14 @@
     "testing": "tests/unit/market_data/services/test_mhs_execution.py"
   },
   "src/market_data/services/rate_common.py": {},
+  "src/market_data/services/source_gap_audit.py": {
+    "testing": "tests/unit/market_data/test_source_gap_audit.py"
+  },
   "src/market_data/services/spot_collection.py": {
     "testing": "tests/unit/market_data/services/test_spot_collection.py"
+  },
+  "src/market_data/services/universe_gaps.py": {
+    "testing": "tests/unit/market_data/services/test_universe_gaps.py"
   },
   "src/market_data/storage/gap_report.py": {
     "testing": "tests/unit/market_data/storage/test_gap_report.py"
@@ -242,26 +318,167 @@
   "src/market_data/storage/schemas.py": {
     "testing": "tests/unit/market_data/services/test_metrics_live_tail.py"
   },
-  "src/market_data/streams/liquidations.py": {
+  "src/market_data/streams/coverage.py": {
     "testing": [
+      "tests/unit/live/test_depth_capture.py",
       "tests/unit/market_data/test_liquidations.py",
-      "tests/unit/market_data/test_liquidation_feed.py"
+      "tests/unit/market_data/test_live_capture_coverage.py",
+      "tests/unit/market_data/test_market_recorder.py"
     ]
   },
+  "src/market_data/streams/liquidations.py": {
+    "testing": "tests/unit/market_data/test_liquidations.py"
+  },
+  "src/market_data/streams/recorder.py": {
+    "testing": [
+      "tests/unit/application/test_recorder_fingerprint.py",
+      "tests/unit/cli/commands/test_data.py",
+      "tests/unit/live/test_deadman.py",
+      "tests/unit/live/test_recorder_watch.py",
+      "tests/unit/market_data/test_market_recorder.py",
+      "tests/unit/market_data/test_recorder_health.py",
+      "tests/unit/market_data/test_recorder_main.py",
+      "tests/unit/test_deployment_assets.py"
+    ]
+  },
+  "src/market_data/streams/recorder_health.py": {
+    "testing": "tests/unit/market_data/test_recorder_health.py"
+  },
+  "src/market_data/streams/recorder_main.py": {
+    "testing": "tests/unit/market_data/test_recorder_main.py"
+  },
+  "src/market_data/streams/snapshots.py": {
+    "testing": [
+      "tests/unit/market_data/test_live_capture_snapshots.py",
+      "tests/unit/market_data/test_market_recorder.py"
+    ]
+  },
+  "src/mhs/account_ledger.py": {
+    "testing": "tests/unit/mhs/test_account_ledger.py"
+  },
+  "src/mhs/account_policy.py": {
+    "testing": "tests/unit/mhs/test_account_policy.py"
+  },
+  "src/mhs/account_sources.py": {
+    "testing": [
+      "tests/unit/cli/commands/test_backtest.py",
+      "tests/unit/live/test_frozen_book.py"
+    ]
+  },
+  "src/mhs/backtest/availability.py": {
+    "testing": "tests/unit/mhs/test_process_availability.py"
+  },
+  "src/mhs/backtest/certification.py": {
+    "testing": [
+      "tests/integration/mhs/test_process_validation_pipeline.py",
+      "tests/unit/mhs/test_continuous_inference.py",
+      "tests/unit/mhs/test_frozen_research_evidence.py",
+      "tests/unit/mhs/test_process_certification.py",
+      "tests/unit/mhs/test_process_paths.py",
+      "tests/unit/mhs/test_process_validation_reporting.py",
+      "tests/unit/mhs/test_research_journal.py"
+    ]
+  },
+  "src/mhs/backtest/contracts.py": {
+    "testing": [
+      "tests/unit/mhs/execution/test_contracts.py",
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/quant/technical_experts/test_contracts.py"
+    ]
+  },
+  "src/mhs/backtest/inventory.py": {
+    "testing": [
+      "tests/integration/mhs/test_nested_process_evidence.py",
+      "tests/integration/mhs/test_process_prefix_invariance.py",
+      "tests/integration/mhs/test_process_validation_pipeline.py",
+      "tests/unit/application/test_mhs_backtest.py",
+      "tests/unit/mhs/evaluation/test_windows.py",
+      "tests/unit/mhs/test_frozen_research_evidence.py",
+      "tests/unit/mhs/test_inventory_persistence.py",
+      "tests/unit/mhs/test_process_backtest.py",
+      "tests/unit/mhs/test_process_certification.py",
+      "tests/unit/mhs/test_process_inventory_report.py",
+      "tests/unit/mhs/test_process_module_boundaries.py",
+      "tests/unit/mhs/test_process_paths.py"
+    ]
+  },
+  "src/mhs/backtest/journal.py": {
+    "testing": [
+      "tests/integration/mhs/test_process_validation_pipeline.py",
+      "tests/unit/application/test_mhs_backtest.py",
+      "tests/unit/mhs/test_process_paths.py",
+      "tests/unit/mhs/test_process_preregistration.py",
+      "tests/unit/mhs/test_research_journal.py"
+    ]
+  },
+  "src/mhs/backtest/labels.py": {
+    "testing": [
+      "tests/integration/mhs/test_nested_process_evidence.py",
+      "tests/integration/mhs/test_process_prefix_invariance.py",
+      "tests/integration/mhs/test_process_validation_pipeline.py",
+      "tests/unit/mhs/test_nested_selection.py",
+      "tests/unit/mhs/test_process_labels.py",
+      "tests/unit/mhs/test_process_paths.py",
+      "tests/unit/mhs/test_research_journal.py"
+    ]
+  },
+  "src/mhs/backtest/market_data.py": {
+    "testing": [
+      "tests/integration/mhs/test_process_prefix_invariance.py",
+      "tests/unit/mhs/test_process_backtest.py",
+      "tests/unit/mhs/test_process_features.py"
+    ]
+  },
+  "src/mhs/backtest/paths.py": {
+    "testing": [
+      "tests/integration/mhs/test_nested_process_evidence.py",
+      "tests/integration/mhs/test_process_prefix_invariance.py",
+      "tests/integration/mhs/test_process_validation_pipeline.py",
+      "tests/unit/cli/commands/test_data.py",
+      "tests/unit/mhs/test_nested_selection.py",
+      "tests/unit/mhs/test_process_backtest.py",
+      "tests/unit/mhs/test_process_certification.py",
+      "tests/unit/mhs/test_process_labels.py",
+      "tests/unit/mhs/test_process_paths.py"
+    ]
+  },
+  "src/mhs/backtest/selection.py": {
+    "testing": "tests/unit/mhs/pipeline/stages/test_selection.py"
+  },
   "src/mhs/books.py": {
-    "testing": "tests/unit/mhs/test_books.py"
+    "testing": [
+      "tests/unit/mhs/evaluation/test_books.py",
+      "tests/unit/mhs/test_books.py"
+    ]
   },
   "src/mhs/calibration.py": {
     "testing": "tests/unit/mhs/test_calibration.py"
   },
   "src/mhs/committee.py": {
-    "testing": "tests/unit/mhs/test_committee.py"
+    "testing": [
+      "tests/unit/mhs/pipeline/stages/test_committee.py",
+      "tests/unit/mhs/test_committee.py"
+    ]
   },
   "src/mhs/contracts.py": {
-    "testing": "tests/unit/mhs/test_contracts.py"
+    "testing": [
+      "tests/unit/mhs/execution/test_contracts.py",
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/quant/technical_experts/test_contracts.py"
+    ]
   },
   "src/mhs/data_policy.py": {
-    "testing": "tests/unit/mhs/test_data_policy.py"
+    "testing": [
+      "tests/contract/test_request_cli_parity.py",
+      "tests/integration/mhs/test_nested_process_evidence.py",
+      "tests/integration/mhs/test_process_prefix_invariance.py",
+      "tests/integration/mhs/test_process_validation_pipeline.py",
+      "tests/unit/mhs/test_evaluation_trend_sleeve.py",
+      "tests/unit/mhs/test_execution_core_boundaries.py",
+      "tests/unit/mhs/test_frozen_research_report.py",
+      "tests/unit/mhs/test_process_paths.py",
+      "tests/unit/mhs/test_source_gaps.py"
+    ]
   },
   "src/mhs/data_provenance.py": {
     "testing": "tests/unit/mhs/test_data_provenance.py"
@@ -279,13 +496,15 @@
     "testing": "tests/unit/mhs/test_discovery.py"
   },
   "src/mhs/evaluation/books.py": {
-    "testing": "tests/unit/mhs/evaluation/test_books.py"
+    "testing": [
+      "tests/unit/mhs/evaluation/test_books.py",
+      "tests/unit/mhs/test_books.py"
+    ]
   },
   "src/mhs/evaluation/committee.py": {
     "testing": [
       "tests/unit/mhs/pipeline/stages/test_committee.py",
-      "tests/unit/mhs/pipeline/stages/test_fold.py",
-      "tests/unit/mhs/test_evaluation_folds.py"
+      "tests/unit/mhs/test_committee.py"
     ]
   },
   "src/mhs/evaluation/concurrency.py": {
@@ -295,7 +514,7 @@
     "testing": "tests/unit/mhs/evaluation/test_diagnostics.py"
   },
   "src/mhs/evaluation/evidence.py": {
-    "testing": "tests/unit/mhs/pipeline/stages/test_fold.py"
+    "testing": "tests/unit/mhs/test_evidence.py"
   },
   "src/mhs/evaluation/fold_weights.py": {
     "testing": "tests/unit/mhs/evaluation/test_fold_weights.py"
@@ -313,7 +532,10 @@
     "testing": "tests/unit/mhs/evaluation/test_participation.py"
   },
   "src/mhs/evaluation/regime.py": {
-    "testing": "tests/unit/mhs/evaluation/test_regime.py"
+    "testing": [
+      "tests/unit/mhs/evaluation/test_regime.py",
+      "tests/unit/mhs/test_regime.py"
+    ]
   },
   "src/mhs/evaluation/specs.py": {
     "testing": "tests/unit/mhs/evaluation/test_specs.py"
@@ -330,21 +552,83 @@
   "src/mhs/execution/accumulator.py": {
     "testing": "tests/unit/mhs/execution/test_accumulator.py"
   },
-  "src/mhs/execution/batch.py": {},
-  "src/mhs/execution/contracts.py": {
-    "testing": "tests/unit/mhs/execution/test_contracts.py"
+  "src/mhs/execution/batch.py": {
+    "testing": [
+      "tests/benchmark/mhs/test_mhs_process_completion_resources.py",
+      "tests/unit/mhs/evaluation/test_windows.py",
+      "tests/unit/mhs/test_evaluation_pipeline.py",
+      "tests/unit/mhs/test_process_backtest.py",
+      "tests/unit/mhs/test_process_inventory_report.py"
+    ]
   },
-  "src/mhs/execution/ledger.py": {},
-  "src/mhs/execution/microstructure.py": {},
-  "src/mhs/execution/pnl.py": {},
+  "src/mhs/execution/contracts.py": {
+    "testing": [
+      "tests/unit/mhs/execution/test_contracts.py",
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/quant/technical_experts/test_contracts.py"
+    ]
+  },
+  "src/mhs/execution/integrity.py": {
+    "testing": "tests/unit/mhs/evaluation/test_integrity.py"
+  },
+  "src/mhs/execution/ledger.py": {
+    "testing": "tests/unit/live/test_ledger.py"
+  },
+  "src/mhs/execution/microstructure.py": {
+    "testing": "tests/unit/live/test_microstructure.py"
+  },
+  "src/mhs/execution/pnl.py": {
+    "testing": [
+      "tests/unit/mhs/test_evaluation_book_outcome.py",
+      "tests/unit/mhs/test_evaluation_trend_sleeve.py"
+    ]
+  },
+  "src/mhs/execution/specs.py": {
+    "testing": "tests/unit/mhs/evaluation/test_specs.py"
+  },
   "src/mhs/execution/strategy_replay.py": {
     "testing": "tests/unit/mhs/test_execution.py"
+  },
+  "src/mhs/execution/window_stream.py": {
+    "testing": [
+      "tests/integration/mhs/test_nested_process_evidence.py",
+      "tests/integration/mhs/test_process_validation_pipeline.py",
+      "tests/unit/mhs/evaluation/test_windows.py",
+      "tests/unit/mhs/test_evaluation_diagnostic_gates.py",
+      "tests/unit/mhs/test_evaluation_pipeline.py",
+      "tests/unit/mhs/test_execution_core_boundaries.py",
+      "tests/unit/mhs/test_marks.py",
+      "tests/unit/mhs/test_mhs_perf_optimization.py",
+      "tests/unit/mhs/test_process_backtest.py",
+      "tests/unit/test_maintained_dependency_boundaries.py"
+    ]
   },
   "src/mhs/features.py": {
     "testing": "tests/unit/mhs/test_features.py"
   },
+  "src/mhs/frozen_research_candidate.py": {
+    "testing": "tests/unit/mhs/test_frozen_research_candidate.py"
+  },
+  "src/mhs/frozen_research_evidence.py": {
+    "testing": "tests/unit/mhs/test_frozen_research_evidence.py"
+  },
+  "src/mhs/frozen_research_report.py": {
+    "testing": "tests/unit/mhs/test_frozen_research_report.py"
+  },
+  "src/mhs/frozen_research_run.py": {
+    "testing": "tests/unit/mhs/test_frozen_research_run.py"
+  },
+  "src/mhs/frozen_research_universe.py": {
+    "testing": "tests/unit/mhs/test_frozen_research_universe.py"
+  },
+  "src/mhs/frozen_research_windows.py": {
+    "testing": "tests/unit/mhs/test_frozen_research_windows.py"
+  },
   "src/mhs/funding.py": {
     "testing": "tests/unit/mhs/test_funding.py"
+  },
+  "src/mhs/growth_exposure.py": {
+    "testing": "tests/unit/mhs/test_growth_exposure.py"
   },
   "src/mhs/horizons.py": {
     "testing": "tests/unit/mhs/test_horizons.py"
@@ -352,69 +636,61 @@
   "src/mhs/leverage_scan.py": {
     "testing": "tests/unit/mhs/test_leverage_scan.py"
   },
-  "src/mhs/live_runtime.py": {
-    "testing": "tests/unit/mhs/test_live_runtime.py"
-  },
-  "src/mhs/live_signal_step.py": {
-    "testing": "tests/unit/mhs/test_live_signal_step.py",
-    "architecture": "docs/architecture/system-design.md"
-  },
-  "src/mhs/live_strategy.py": {
-    "testing": "tests/unit/mhs/test_live_strategy.py"
-  },
+  "src/mhs/live_strategy.py": {},
   "src/mhs/marks.py": {
     "testing": "tests/unit/mhs/test_marks.py"
   },
   "src/mhs/panel.py": {
-    "testing": "tests/unit/mhs/test_panel.py"
+    "testing": [
+      "tests/unit/mhs/pipeline/stages/test_panel.py",
+      "tests/unit/mhs/test_panel.py"
+    ]
   },
   "src/mhs/parallel.py": {
     "testing": "tests/unit/mhs/test_parallel.py"
   },
   "src/mhs/params.py": {
-    "testing": [
-      "tests/unit/mhs/test_params.py",
-      "tests/unit/mhs/test_process.py tests/unit/mhs/test_process_backtest.py"
-    ]
+    "testing": "tests/unit/mhs/test_params.py"
   },
   "src/mhs/pipeline/config.py": {
-    "testing": "tests/unit/mhs/pipeline/test_config.py"
+    "testing": [
+      "tests/unit/common/test_config.py",
+      "tests/unit/mhs/pipeline/test_config.py"
+    ]
   },
   "src/mhs/pipeline/context.py": {
-    "testing": [
-      "tests/unit/mhs/pipeline/stages/test_book.py",
-      "tests/unit/mhs/pipeline/stages/test_committee.py",
-      "tests/unit/mhs/pipeline/stages/test_context.py",
-      "tests/unit/mhs/pipeline/stages/test_fold.py",
-      "tests/unit/mhs/pipeline/stages/test_panel.py",
-      "tests/unit/mhs/pipeline/stages/test_replay.py",
-      "tests/unit/mhs/pipeline/stages/test_selection.py",
-      "tests/unit/mhs/pipeline/test_assemble.py",
-      "tests/unit/mhs/pipeline/test_orchestrator.py",
-      "tests/unit/mhs/report/test_persist.py"
-    ]
+    "testing": "tests/unit/mhs/pipeline/stages/test_context.py"
   },
   "src/mhs/pipeline/orchestrator.py": {
     "testing": "tests/unit/mhs/pipeline/test_orchestrator.py"
   },
   "src/mhs/pipeline/runner.py": {
-    "testing": "tests/integration/mhs/test_mhs_horizon_pipeline_e2e.py"
+    "testing": "tests/unit/live/test_runner.py"
   },
   "src/mhs/pipeline/stages/assemble.py": {
-    "testing": "tests/unit/mhs/pipeline/stages/test_assemble.py"
+    "testing": [
+      "tests/unit/mhs/pipeline/stages/test_assemble.py",
+      "tests/unit/mhs/pipeline/test_assemble.py"
+    ]
   },
   "src/mhs/pipeline/stages/book.py": {
     "testing": "tests/unit/mhs/pipeline/stages/test_book.py"
   },
   "src/mhs/pipeline/stages/committee.py": {
-    "testing": "tests/unit/mhs/pipeline/stages/test_committee.py"
+    "testing": [
+      "tests/unit/mhs/pipeline/stages/test_committee.py",
+      "tests/unit/mhs/test_committee.py"
+    ]
   },
   "src/mhs/pipeline/stages/diagnostic.py": {},
   "src/mhs/pipeline/stages/fold.py": {
     "testing": "tests/unit/mhs/pipeline/stages/test_fold.py"
   },
   "src/mhs/pipeline/stages/panel.py": {
-    "testing": "tests/unit/mhs/pipeline/stages/test_panel.py"
+    "testing": [
+      "tests/unit/mhs/pipeline/stages/test_panel.py",
+      "tests/unit/mhs/test_panel.py"
+    ]
   },
   "src/mhs/pipeline/stages/replay.py": {
     "testing": "tests/unit/mhs/pipeline/stages/test_replay.py"
@@ -423,10 +699,23 @@
     "testing": "tests/unit/mhs/pipeline/stages/test_selection.py"
   },
   "src/mhs/preregistration.py": {
-    "testing": "tests/unit/mhs/test_forward_preregistration.py"
+    "testing": [
+      "tests/unit/mhs/test_forward_preregistration.py",
+      "tests/unit/mhs/test_process_preregistration.py",
+      "tests/unit/mhs/test_research_journal.py"
+    ]
+  },
+  "src/mhs/process.py": {
+    "testing": "tests/unit/mhs/test_process.py"
+  },
+  "src/mhs/process_features.py": {
+    "testing": "tests/unit/mhs/test_process_features.py"
   },
   "src/mhs/regime.py": {
-    "testing": "tests/unit/mhs/test_regime.py"
+    "testing": [
+      "tests/unit/mhs/evaluation/test_regime.py",
+      "tests/unit/mhs/test_regime.py"
+    ]
   },
   "src/mhs/reliability.py": {
     "testing": "tests/unit/mhs/test_reliability.py"
@@ -440,6 +729,21 @@
   "src/mhs/report/schema.py": {
     "testing": "tests/unit/mhs/report/test_schema.py"
   },
+  "src/mhs/reporting/inventory.py": {
+    "testing": [
+      "tests/integration/mhs/test_nested_process_evidence.py",
+      "tests/unit/cli/commands/research/test_mhs.py",
+      "tests/unit/mhs/test_frozen_research_evidence.py",
+      "tests/unit/mhs/test_inventory_persistence.py",
+      "tests/unit/mhs/test_process_backtest.py",
+      "tests/unit/mhs/test_process_inventory_report.py",
+      "tests/unit/mhs/test_process_module_boundaries.py",
+      "tests/unit/mhs/test_process_validation_reporting.py"
+    ]
+  },
+  "src/mhs/reporting/process.py": {
+    "testing": "tests/unit/mhs/test_process.py"
+  },
   "src/mhs/research_go.py": {
     "testing": "tests/unit/mhs/test_research_go.py"
   },
@@ -451,6 +755,9 @@
   },
   "src/mhs/scaling.py": {
     "testing": "tests/unit/mhs/test_scaling.py"
+  },
+  "src/mhs/source_gaps.py": {
+    "testing": "tests/unit/mhs/test_source_gaps.py"
   },
   "src/mhs/stability.py": {
     "testing": "tests/unit/mhs/test_stability.py"
@@ -471,19 +778,22 @@
     "testing": "tests/unit/mhs/test_validation.py"
   },
   "src/quant/baseline/backtest.py": {
-    "testing": "tests/unit/quant/baseline/test_backtest.py"
+    "testing": [
+      "tests/unit/cli/commands/test_backtest.py",
+      "tests/unit/quant/baseline/test_backtest.py"
+    ]
   },
   "src/quant/baseline/signal.py": {
-    "testing": "tests/unit/quant/baseline/test_signal.py"
+    "testing": [
+      "tests/unit/live/test_signal.py",
+      "tests/unit/quant/baseline/test_signal.py"
+    ]
   },
   "src/quant/contracts.py": {
     "testing": [
-      "tests/integration/workflows/test_baseline.py",
-      "tests/integration/workflows/test_taker_flow_candidate.py",
-      "tests/unit/quant/baseline/test_backtest.py",
-      "tests/unit/quant/baseline/test_directional_funding_signal.py",
-      "tests/unit/quant/baseline/test_no_lookahead.py",
-      "tests/unit/quant/baseline/test_signal.py"
+      "tests/unit/mhs/execution/test_contracts.py",
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/quant/technical_experts/test_contracts.py"
     ]
   },
   "src/quant/evaluation/gate_feasibility.py": {
@@ -499,14 +809,7 @@
     "testing": "tests/unit/quant/evaluation/test_promotion.py"
   },
   "src/quant/evaluation/reliability.py": {
-    "testing": [
-      "tests/integration/workflows/test_baseline.py",
-      "tests/integration/workflows/test_taker_flow_candidate.py",
-      "tests/unit/quant/evaluation/test_fold_concentration.py",
-      "tests/unit/quant/evaluation/test_portfolio_reliability.py",
-      "tests/unit/quant/evaluation/test_promotion.py",
-      "tests/unit/quant/technical_experts/test_xs_admission.py"
-    ]
+    "testing": "tests/unit/mhs/test_reliability.py"
   },
   "src/quant/risk/growth_sizing.py": {
     "testing": "tests/unit/quant/risk/test_growth_sizing.py"
@@ -515,7 +818,11 @@
     "testing": "tests/unit/quant/technical_experts/test_catalog.py"
   },
   "src/quant/technical_experts/contracts.py": {
-    "testing": "tests/unit/quant/technical_experts/test_contracts.py"
+    "testing": [
+      "tests/unit/mhs/execution/test_contracts.py",
+      "tests/unit/mhs/test_contracts.py",
+      "tests/unit/quant/technical_experts/test_contracts.py"
+    ]
   },
   "src/quant/technical_experts/cross_sectional.py": {
     "testing": "tests/unit/quant/technical_experts/test_cross_sectional.py"
@@ -525,36 +832,5 @@
   },
   "src/quant/universe/pit_universe.py": {
     "testing": "tests/unit/quant/universe/test_pit_universe.py"
-  },
-  "src/mhs/process_backtest.py": {
-    "architecture": "docs/architecture/system-design.md",
-    "testing": "tests/unit/mhs/test_process_backtest.py"
-  },
-  "src/application/mhs_backtest.py": {
-    "testing": "tests/unit/application/test_mhs_backtest.py"
-  },
-  "src/application/mhs_worker.py": {},
-  "src/mhs/backtest/contracts.py": {},
-  "src/mhs/backtest/paths.py": {
-    "testing": "tests/integration/mhs/test_nested_process_evidence.py"
-  },
-  "src/mhs/frozen_research_evidence.py": {
-    "testing": "tests/unit/mhs/test_frozen_research_evidence.py"
-  },
-  "src/mhs/frozen_research_run.py": {
-    "testing": "tests/unit/mhs/test_frozen_research_run.py"
-  },
-  "src/cli/commands/backtest.py": {
-    "testing": "tests/unit/cli/commands/test_backtest.py",
-    "architecture": "docs/results/mhs_account_ledger_20260921.md"
-  },
-  "src/mhs/account_ledger.py": {
-    "testing": "tests/unit/mhs/test_account_ledger.py"
-  },
-  "src/application/ops/gdrive_cleanup.py": {
-    "testing": "tests/unit/application/test_gdrive_cleanup.py"
-  },
-  "src/common/parquet_io.py": {
-    "testing": "tests/unit/common/test_parquet_io.py"
   }
 }

@@ -64,7 +64,7 @@ def build_mhs_execution_plan(
 ) -> MhsExecutionCollectionPlan:
     """Derive the exact PIT replay symbol union without network access."""
     if timeframe != "3m":
-        raise ValueError(f"unknown execution_timeframe '{timeframe}'")
+        raise ValueError(f"unknown execution_timeframe '{timeframe}': timeframe must be '3m' ('1m', '3m' or '5m' are recognized but only 3m is supported)")
     if execution_universe_size < 8:
         raise ValueError("execution_universe_size must be >= 8")
     start_ts = pd.Timestamp(start, tz="UTC")
