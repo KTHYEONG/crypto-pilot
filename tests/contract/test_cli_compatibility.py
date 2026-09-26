@@ -67,7 +67,7 @@ def test_mhs_horizon_diagnostic_parses_into_mhs_handler(monkeypatch) -> None:
         lambda config: captured.append(config) or _Report(),
     )
     monkeypatch.setattr(
-        "src.mhs.evaluation.persist_mhs_horizon_diagnostic_report",
+        "src.mhs.report.persist.persist_mhs_horizon_diagnostic_report",
         lambda report, path, tier, **kwargs: path,
     )
     _run_mhs_horizon_diagnostic(args)
@@ -82,4 +82,4 @@ def test_cli_contract_is_unchanged() -> None:
 
     parser = build_root_parser()
     groups = parser._subparsers._group_actions[0].choices  # type: ignore[union-attr]
-    assert set(groups) == {"data", "research", "live", "ops"}
+    assert set(groups) == {"backtest", "data", "live", "ops", "research"}

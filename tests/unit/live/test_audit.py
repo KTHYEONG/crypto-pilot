@@ -10,7 +10,6 @@ import pytest
 from pydantic import SecretStr
 
 from src.live.audit import (
-    AUDIT_LOG_ROOT,
     AuditLog,
     default_audit_log_path,
     prune_old_audit_logs,
@@ -57,8 +56,10 @@ def test_SCENARIO_LIVE_11_no_secrets_in_logs(tmp_path: Path) -> None:
     assert SECRET not in rendered_error
     assert len(error.payload_digest) == 12
 
+    import src.live.audit as audit_module
+
     live_path = default_audit_log_path("shadow_cycle")
-    assert live_path.is_relative_to(AUDIT_LOG_ROOT)
+    assert live_path.is_relative_to(audit_module.AUDIT_LOG_ROOT)
 
 
 def test_SCENARIO_LIVE_DAEMON_02_audit_path_date_partitioned() -> None:

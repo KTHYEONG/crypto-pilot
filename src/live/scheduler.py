@@ -63,7 +63,7 @@ DECISION_RELEASE_OFFSET: pd.Timedelta = pd.Timedelta(hours=FROZEN_MHS_TOP20_V2.r
 
 DAEMON_MAX_ATTEMPTS_PER_DAY: int = 5
 DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
-# src/application/ops/daemon_idle_gate.py BUSY_STAGES 와 같은 의미
+# src/common/daemon_stages.py BUSY_STAGES 와 같은 의미
 INTERRUPTIBLE_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"})
 DAEMON_ALERT_SYMBOL_SAMPLE: int = 10
 SIGNAL_REFRESH_OFFSET_MINUTES: float = 0.0
@@ -236,9 +236,9 @@ def _default_data_refresh(
 ) -> RefreshReport:
     import urllib.request
 
+    from src.market_data.binance.venue_rules import EXCHANGE_INFO_URL
     from src.live.data_refresh import (
         EXCHANGE_INFO_TIMEOUT_S,
-        EXCHANGE_INFO_URL,
         build_refresh_universe,
         listed_crypto_perpetuals,
         refresh_live_market_data,

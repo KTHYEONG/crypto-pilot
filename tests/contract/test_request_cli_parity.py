@@ -189,7 +189,6 @@ def test_deployment_policy_converts_3m_and_rejects_legacy() -> None:
         "committee_target_gross": None,
         "funding_carry_sleeve": False,
         "funding_carry_weight": 0.0,
-        "fill_mark_parity_gate": True,
     }
     request = TargetWeightPolicy(execution_timeframe="3m", **base).to_request()  # type: ignore[arg-type]
     assert isinstance(request, MhsDiagnosticRequest)

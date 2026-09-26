@@ -170,9 +170,8 @@ def run_preflight(
     try:
         if snapshot is None:
             raise DataIntegrityError("missing snapshot: cannot reconcile")
-        from src.live.account import assert_suppressed_venue_flat, reconcile_or_halt
+        from src.live.account import RECONCILE_QTY_TOLERANCE_FRACTION, assert_suppressed_venue_flat, reconcile_or_halt
         from src.live.ledger import default_ledger_path, load_ledger
-        from src.live.runner import _RECONCILE_TOLERANCE_FRACTION
 
         ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
         ledger_state = load_ledger(ledger_path)
@@ -180,7 +179,7 @@ def run_preflight(
         if settings.mode.suppresses_mutations:
             assert_suppressed_venue_flat(snapshot)
         else:
-            reconcile_or_halt(snapshot, ledger_positions, qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION)
+            reconcile_or_halt(snapshot, ledger_positions, qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION)
         checks.append(PreflightCheck(name="position_reconciliation", passed=True, detail="ok"))
     except Exception as exc:
         checks.append(PreflightCheck(name="position_reconciliation", passed=False, detail=str(exc)))

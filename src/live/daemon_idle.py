@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.common.daemon_stages import BUSY_STAGES
 from src.common.errors import DataIntegrityError
 
-BUSY_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"})
 BUSY_STALE_S: float = 2700.0
 
 

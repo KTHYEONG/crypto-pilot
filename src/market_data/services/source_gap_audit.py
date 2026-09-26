@@ -156,6 +156,7 @@ def _measure_one_symbol(
                 ),
                 verified_at=verified,
                 resolved_at=None,
+                extent="OPEN_EDGE",
             ),
         )
     observed = _read_bar_times(path, plane)
@@ -173,6 +174,7 @@ def _measure_one_symbol(
                 ),
                 verified_at=verified,
                 resolved_at=None,
+                extent="OPEN_EDGE",
             ),
         )
     intervals: list[SourceGapInterval] = []
@@ -201,6 +203,7 @@ def _measure_one_symbol(
                         ),
                         verified_at=verified,
                         resolved_at=None,
+                        extent="INTERIOR",
                     )
                 )
     first = observed[0]
@@ -222,6 +225,7 @@ def _measure_one_symbol(
                 ),
                 verified_at=verified,
                 resolved_at=None,
+                extent="LISTING_EDGE",
             )
         )
     elif first >= end:
@@ -238,6 +242,7 @@ def _measure_one_symbol(
                 ),
                 verified_at=verified,
                 resolved_at=None,
+                extent="LISTING_EDGE",
             )
         )
     if last + step < end:
@@ -257,6 +262,7 @@ def _measure_one_symbol(
                 ),
                 verified_at=verified,
                 resolved_at=None,
+                extent="OPEN_EDGE",
             )
         )
     intervals.sort(key=lambda iv: (iv.start, iv.end or datetime.max.replace(tzinfo=UTC)))
@@ -456,6 +462,7 @@ def audit_source_gap_registry(
                         ),
                         verified_at=end.to_pydatetime(),
                         resolved_at=None,
+                        extent="UNSCOPED",
                     )
                 )
     # Measured gaps come from the reconciled scope itself, so every gap here
@@ -486,6 +493,7 @@ def _record_to_row(iv: SourceGapInterval) -> dict[str, object]:
         "evidence": iv.evidence,
         "verified_at": _iso_z(iv.verified_at),
         "resolved_at": _iso_z(iv.resolved_at) if iv.resolved_at is not None else None,
+        "extent": iv.extent,
     }
 
 
@@ -550,6 +558,7 @@ def write_audited_registry(
                     evidence=iv.evidence,
                     verified_at=verified_dt,
                     resolved_at=verified_dt,
+                    extent=iv.extent,
                 )
             )
         elif key in unchanged_keys:
@@ -563,6 +572,7 @@ def write_audited_registry(
                     evidence=iv.evidence,
                     verified_at=verified_dt,
                     resolved_at=None,
+                    extent=iv.extent,
                 )
             )
         elif any(
@@ -579,6 +589,7 @@ def write_audited_registry(
                     evidence=iv.evidence,
                     verified_at=verified_dt,
                     resolved_at=verified_dt,
+                    extent=iv.extent,
                 )
             )
         else:
@@ -593,6 +604,7 @@ def write_audited_registry(
             evidence=iv.evidence,
             verified_at=verified_dt,
             resolved_at=None,
+            extent=iv.extent,
         )
 
     rebuilt.extend(_stamped(iv) for iv in (*narrowed_new, *discovered_new))

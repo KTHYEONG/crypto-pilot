@@ -11,13 +11,13 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 from src.live.audit import AuditLog
 from src.live.errors import VenueError
+from src.live.executor import _OPEN_ORDER_STATUSES
 from src.live.order_journal import OrderJournal
 
 if TYPE_CHECKING:
     from src.live.order_journal import JournalFill
 
 #: Venue statuses that mean the order may still fill; left for the open-order sweep.
-_OPEN_ORDER_STATUSES: frozenset[str] = frozenset({"NEW", "PARTIALLY_FILLED"})
 
 @dataclass(frozen=True, slots=True)
 class RecoveryReport:

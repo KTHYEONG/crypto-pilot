@@ -17,7 +17,6 @@ from src.mhs.evaluation.folds import _run_anchored_fold
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
 from src.mhs.evaluation.integrity import _truncate_replayable_decisions
 from src.mhs.marks import _load_funding_series, _load_window_minute_frames
-from src.market_data.services.futures_collection import DataCollector as _DataCollector
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.resources import _StageRecorder
@@ -29,6 +28,7 @@ from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
     _SUBPROCESS_SCRIPT,
     _write_mhs_market,
 )
+from tests.unit.mhs.test_evaluation_appresearch import _write_3m_cache
 
 class TestTypedArtifactRoundtrip:
     """MHS-29-TYPED-ARTIFACT-ROUNDTRIP: persisted ledger and times artifacts
@@ -236,6 +236,7 @@ class TestFoldWindowTelemetryOracle:
 
         root = tmp_path_factory.mktemp("mhs_fold_market")
         end = _write_mhs_market(root, DEV_SYMBOLS, n_hours=3000)
+        _write_3m_cache(root)
         originals = {
             "funding_path": marks.funding_path,
             "mark_price_path": fc._mark_price_path,
@@ -265,6 +266,7 @@ class TestFoldWindowTelemetryOracle:
 
         fold = FOLD_WINDOW_FOLD
         vs, ve = fold.validation_start, fold.validation_end
+        ve_eff = ve - pd.Timedelta(minutes=3)
         request = MhsDiagnosticRequest(
             start=str(fold.train_start), end=str(fold.validation_end),
             data_root=str(root), execution_timeframe="3m", log_run=False,
@@ -273,21 +275,18 @@ class TestFoldWindowTelemetryOracle:
             str(root), fold, request, funding_by_symbol,
         )
         target_replay = target_weights[roster]
-        minute_grid = pd.date_range(vs, ve, freq="1min", tz="UTC")
+        minute_grid = pd.date_range(vs, ve_eff, freq="3min", tz="UTC")
         target_replay, signal_available_at, _censored = _truncate_replayable_decisions(
             target_replay, signal_available_at, minute_grid, ExecutionSpec(),
         )
-        loaded_frames = _load_window_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m")
+        loaded_frames = _load_window_minute_frames(str(root), list(target_replay.columns), vs, ve_eff, "3m")
         minute_frames = mhs_marks._align_minute_frames(
             loaded_frames,
-            "1m", vs, ve,
+            "3m", vs, ve_eff,
         )
         assert minute_frames is not None
         highs, lows, closes = minute_frames
         symbols = list(closes.columns)
-        marks = _DataCollector().load_mark_price_panel(
-            symbols, "1h", minute_grid, max_stale_hours=0,
-        )
         mper = minute_grid[1] - minute_grid[0]
         funding_alignment = align_funding_with_knowledge(funding_by_symbol, minute_grid, symbols=symbols)
         quote_volumes = pd.DataFrame(
@@ -313,7 +312,7 @@ class TestFoldWindowTelemetryOracle:
                     highs=highs,
                     lows=lows,
                     closes=closes,
-                    marks=marks,
+                    marks=None,
                     bar_funding=funding_alignment.rates,
                     target_weights=target_replay,
                     signal_available_at=signal_available_at,
@@ -326,7 +325,12 @@ class TestFoldWindowTelemetryOracle:
         )
         return oracle
 
-    def test_fold_window_telemetry_monotonic_and_oracle_equivalent(self, fold_market) -> None:
+    def test_fold_window_telemetry_monotonic_and_oracle_equivalent(self, fold_market, monkeypatch: pytest.MonkeyPatch) -> None:
+        idx = pd.date_range("2021-01-01", "2021-01-30", freq="1D", tz="UTC")
+        monkeypatch.setattr(
+            "src.mhs.evaluation.folds._fold_train_reference_returns",
+            lambda *a, **k: pd.Series(0.001, index=idx),
+        )
         root, end = fold_market
         symbols = list(DEV_SYMBOLS)
         funding_by_symbol, _ = _load_funding_series(symbols)

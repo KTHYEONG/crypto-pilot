@@ -257,14 +257,14 @@ def test_migrate_preserves_unresolved_primary_evidence(tmp_path: Path) -> None:
 
 def test_migrate_rejects_unsafe_source_selection(tmp_path: Path) -> None:
     registry = tmp_path / "registry.sqlite3"
-    with pytest.raises(ValueError, match=".+"):
+    with pytest.raises(ValueError, match=r".+"):
         migrate_legacy_backtests(
             registry_path=cast(Path, "not-a-path"),
             history_directories=(),
             run_directories=(),
             dry_run=True,
         )
-    with pytest.raises(ValueError, match=".+"):
+    with pytest.raises(ValueError, match=r".+"):
         migrate_legacy_backtests(
             registry_path=registry, history_directories=(tmp_path / "missing",), run_directories=(), dry_run=True
         )
@@ -457,10 +457,10 @@ def test_verify_ignores_run_bundles_and_cli_wiring(tmp_path: Path) -> None:
         ["backtests-verify-history-migration", "--registry-path", str(registry), "--history-directory", str(source)]
     )
     args.handler(args)
+    bad = parser.parse_args(
+        ["backtests-verify-history-migration", "--registry-path", str(registry), "--history-directory", str(tmp_path / "missing")]
+    )
     with pytest.raises(SystemExit):
-        bad = parser.parse_args(
-            ["backtests-verify-history-migration", "--registry-path", str(registry), "--history-directory", str(tmp_path / "missing")]
-        )
         bad.handler(bad)
     assert _counts(registry)["runs"] == 0
 
@@ -526,7 +526,7 @@ def test_verify_detects_registry_drift(tmp_path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
-    with pytest.raises(DataIntegrityError, match="identity|provenance"):
+    with pytest.raises(DataIntegrityError, match=r"identity|provenance"):
         verify_legacy_history_migration(registry_path=registry, source=source)
     empty_db = tmp_path / "empty.sqlite3"
     empty_conn = sqlite3.connect(str(empty_db))

@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.live.account import (
+    RECONCILE_QTY_TOLERANCE_FRACTION,
     AccountSnapshot,
     PositionBreach,
     fetch_account_snapshot,
@@ -46,10 +47,9 @@ def _breaches(
     # 정산 대기 중인 상폐 심볼은 재동기화로 지우면 정산 기록이 사라지므로 불일치에서 제외한다.
     settled = settled_delisting_symbols(exchange_info, snapshot.positions, positions, now=now)
     return find_position_breaches(
-        snapshot, positions, qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION, settled_symbols=settled
+        snapshot, positions, qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION, settled_symbols=settled
     )
 
-_RECONCILE_TOLERANCE_FRACTION = 0.001
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +232,7 @@ def run_ledger_resync(
             reconcile_or_halt(
                 snapshot,
                 ledger_state.positions,
-                qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION,
+                qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION,
                 settled_symbols=settled_delisting_symbols(
                     exchange_info, snapshot.positions, ledger_state.positions, now=now_ts
                 ),

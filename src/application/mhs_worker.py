@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import argparse
 import logging
-import re
 import sys
 from pathlib import Path
 
 import pandas as pd
 
-from src.application.mhs_backtest import MhsBacktestRequest, execute_mhs_backtest
+from src.application.mhs_backtest import _PROCEDURE_DIGEST_RE, MhsBacktestRequest, execute_mhs_backtest
 from src.mhs.backtest.contracts import ProcessInventoryBacktestError
 from src.mhs.resources import MhsMemoryBudget
 
 _logger = logging.getLogger(__name__)
-
-_PROCEDURE_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -97,14 +94,14 @@ def main(argv: list[str] | None = None) -> int:
             procedure_code_digest=digest,
         )
         _logger.info(
-            "[WORKER] status=start start=%s end=%s result_output=%s",
+            "[SYS] status=start start=%s end=%s result_output=%s",
             start.isoformat(),
             end.isoformat(),
             request.result_output,
         )
         execute_mhs_backtest(request)
         _logger.info(
-            "[WORKER] status=persistence_complete result_output=%s",
+            "[SYS] status=persistence_complete result_output=%s",
             request.result_output,
         )
     except ProcessInventoryBacktestError:
