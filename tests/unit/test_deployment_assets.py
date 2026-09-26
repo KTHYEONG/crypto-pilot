@@ -383,6 +383,7 @@ echo "docker $*" >> "$FAKE_LOG"
 op="$1"; shift || true
 case "$op" in
   compose)
+    if [ "${1:-}" = "--profile" ]; then echo "PROFILE_USED $2" >> "$FAKE_LOG"; shift 2; fi
     sub="$1"; shift || true
     case "$sub" in
       version) exit 0 ;;
@@ -551,6 +552,7 @@ def test_compose_recreate_keeps_unchanged_capture(tmp_path) -> None:
     result, argv_log = _run_compose_recreate(tmp_path, env)
     assert result.returncode == 0
     assert "capture_action=keep" in result.stdout
+    assert "PROFILE_USED capture-blue" in argv_log
     ups = _up_lines(argv_log)
     assert any("mhs-live" in line and "--force-recreate" in line for line in ups)
     assert not any("capture-" in line for line in ups)
@@ -875,3 +877,14 @@ def test_compose_stuck_legacy_recorder_blocks_normalizer_and_fails_deploy(tmp_pa
     assert "normalizer_action=skipped reason=legacy_active" in result.stdout
     assert not any("market-normalizer" in line for line in _up_lines(argv_log))
     assert any("mhs-live" in line for line in _up_lines(argv_log))
+
+
+def test_recreate_script_hashes_profile_gated_slot_services_with_their_profile() -> None:
+    """Without --profile, compose reports "no such service", so every deploy would look like a config change."""
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "deploy" / "compose_recreate.sh").read_text(encoding="utf-8")
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    assert '$C --profile "$service" config --hash "$service"' in script
+    for slot in ("blue", "green"):
+        assert f'profiles: ["capture-{slot}"]' in compose
+
