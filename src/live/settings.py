@@ -12,6 +12,7 @@ from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_valid
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.common.paths import APP_ROOT, DATA_DIR
+from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
 from src.mhs.params import ACCOUNT_EXPOSURE_MAX, SIGNAL_PANEL_WINDOW_DAYS
 from src.mhs.types import ExecutionSpec
 
@@ -125,9 +126,27 @@ class LiveSettings(BaseSettings):
     tax_collection_enabled: bool = True
     # 시뮬레이션 기록의 float 수수료 반올림을 흡수하는 허용 오차.
     cash_reconcile_tolerance_usdt: float = 0.01
+    tax_income_page_limit: int = 1000
+    tax_trades_page_limit: int = 1000
+    tax_income_window_days: int = 7
+    tax_income_overlap_s: float = 21600.0
+    tax_income_retention_days: int = 90
+    tax_max_pages_per_cycle: int = 200
     alert_webhook_url: str | None = None
     alert_gmail_user: str | None = None
     alert_gmail_app_password: SecretStr | None = None
+    alert_outbox_path: str | None = None
+    alert_retry_backoff_s: float = 60.0
+    alert_retry_backoff_max_s: float = 1800.0
+    alert_outbox_max_age_s: float = 259200.0
+    alert_outbox_retention_s: float = 604800.0
+    alert_outbox_max_records: int = 1000
+    liveness_stage_grace_s: float = 900.0
+    liveness_execute_budget_s: float = 3960.0
+    liveness_heartbeat_stale_s: float = 900.0
+    deadman_ping_url: SecretStr | None = None
+    deadman_ping_interval_s: float = 300.0
+    deadman_ping_timeout_s: float = 10.0
     min_universe_symbols: int = 100
     alert_halt_streak: int = 2
     alert_daily_digest: bool = True
@@ -139,6 +158,14 @@ class LiveSettings(BaseSettings):
     recorder_liquidation_silence_s: float = 900.0
     recorder_liquidation_max_failed_connections: int = 5
     recorder_sampler_stale_s: float = 1800.0
+    recorder_sampler_max_consecutive_failures: int = 5
+    recorder_min_capture_ratio: float = 0.9
+    recorder_capture_ratio_min_points: int = 10
+    recorder_persist_stale_s: float = 1200.0
+    recorder_max_consecutive_flush_failures: int = 3
+    recorder_reference_grace_s: float = 3600.0
+    recorder_rejected_fraction_alert: float = 0.01
+    recorder_rejected_max_consecutive_points: int = 60
     # Frozen strategy digest stamped onto execution-quality observations so
     # forward evidence can be attributed to an immutable strategy version.
     strategy_digest: str | None = None
@@ -147,9 +174,21 @@ class LiveSettings(BaseSettings):
     refresh_max_workers: int = 12
     refresh_lookback_days: int = 40
     refresh_deadline_s: float = 900.0
-    refresh_freshness_floor_hours: float = 1.5
     refresh_max_fail_fraction: float = 0.15
+    funding_prefetch_enabled: bool = True
+    funding_prefetch_offset_hours: float = 20.25
+    refresh_decision_bar_max_missing_fraction: float = 0.05
+    venue_rules_warn_age_days: float = 2.0
+    venue_rules_max_age_days: float = 7.0
+    venue_rules_max_rejected_fraction: float = 0.05
     max_market_data_staleness_hours: float = 30.0
+    delisting_announcement_horizon_days: int = 365
+    delisting_block_lead_hours: float = 48.0
+    delisting_settlement_min_flat_bars: int = 3
+    delisting_settlement_price_rtol: float = 1e-9
+    delisting_settlement_fee_bps: float = ExecutionSpec().taker_fee_bps
+    venue_listing_snapshot_max_age_hours: float = 30.0
+    venue_listing_retention_days: int | None = None
 
     # 리스크 게이트(등록 상한). frozen 노출은 증거금 상한 안에서 베이지안 Kelly가 정한다.
     # 리스크 게이트는 그 위의 안전 레일이다.
@@ -158,6 +197,11 @@ class LiveSettings(BaseSettings):
     max_daily_orders: int = 600
     max_daily_turnover_fraction: float = 2.0 * ACCOUNT_EXPOSURE_MAX
     min_free_margin_fraction: float = 0.15
+    derisk_mode_enabled: bool = True
+    venue_force_close_auto_adopt: bool = False
+    venue_force_close_lookback_hours: float = 168.0
+    ledger_resync_backup_dir: str | None = None
+    reject_cluster_alert_min_symbols: int = 3
     # Frozen live 입력: 봉인된 단위수익률 부트스트랩과 베뉴 규칙 폴백 스냅샷.
     unit_bootstrap_path: str = str(APP_ROOT / "deploy" / "mhs" / "frozen_unit_returns_maker.parquet.enc")
     venue_fallback_path: str = str(APP_ROOT / "deploy" / "mhs" / "venue_rules_20260921.json")
@@ -166,12 +210,44 @@ class LiveSettings(BaseSettings):
     record_run_id: str | None = None
     order_journal_path: str | None = None
     weights_path: str | None = None
+    journal_recovery_lookback_hours: float = 72.0
+    execution_shutdown_cleanup_budget_s: float = 20.0
+
+    @field_validator("venue_force_close_lookback_hours")
+    @classmethod
+    def _bounded_force_close_lookback(cls, value: float) -> float:
+        if not 0 < value <= 168:
+            raise ValueError("venue_force_close_lookback_hours must be in (0, 168]")
+        return value
+
+    @field_validator("journal_recovery_lookback_hours", "execution_shutdown_cleanup_budget_s")
+    @classmethod
+    def _positive_recovery_seconds(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be positive")
+        return value
+
+    @field_validator("deadman_ping_interval_s", "deadman_ping_timeout_s")
+    @classmethod
+    def _positive_deadman_seconds(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be positive")
+        return value
+
+    @field_validator("alert_outbox_max_records")
+    @classmethod
+    def _bounded_outbox_records(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("alert_outbox_max_records must be >= 1")
+        return value
 
     @field_validator(
         "recorder_watch_interval_s",
         "recorder_heartbeat_stale_s",
         "recorder_liquidation_silence_s",
         "recorder_sampler_stale_s",
+        "recorder_persist_stale_s",
+        "recorder_reference_grace_s",
     )
     @classmethod
     def _positive_recorder_seconds(cls, value: float, info: ValidationInfo) -> float:
@@ -186,6 +262,25 @@ class LiveSettings(BaseSettings):
             raise ValueError("recorder_liquidation_max_failed_connections must be >= 1")
         return value
 
+    @field_validator(
+        "recorder_sampler_max_consecutive_failures",
+        "recorder_capture_ratio_min_points",
+        "recorder_max_consecutive_flush_failures",
+        "recorder_rejected_max_consecutive_points",
+    )
+    @classmethod
+    def _positive_recorder_counts(cls, value: int, info: ValidationInfo) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1")
+        return value
+
+    @field_validator("recorder_min_capture_ratio", "recorder_rejected_fraction_alert")
+    @classmethod
+    def _bounded_recorder_ratio(cls, value: float, info: ValidationInfo) -> float:
+        if not 0 < value <= 1:
+            raise ValueError(f"{info.field_name} must be in (0, 1]")
+        return value
+
     @field_validator("notional_equity_usdt")
     @classmethod
     def _positive_equity(cls, value: float) -> float:
@@ -198,6 +293,13 @@ class LiveSettings(BaseSettings):
     def _bounded_buffer_fraction(cls, value: float) -> float:
         if not 0.0 <= value < 1.0:
             raise ValueError("leverage_buffer_fraction must be in [0.0, 1.0)")
+        return value
+
+    @field_validator("reject_cluster_alert_min_symbols")
+    @classmethod
+    def _bounded_reject_cluster_min_symbols(cls, value: int) -> int:
+        if value < 2:
+            raise ValueError("reject_cluster_alert_min_symbols must be >= 2")
         return value
 
     @field_validator("paper_fill_model")
@@ -265,6 +367,27 @@ class LiveSettings(BaseSettings):
             raise ValueError("cash_reconcile_tolerance_usdt must be > 0")
         return value
 
+    @field_validator("tax_income_page_limit", "tax_trades_page_limit")
+    @classmethod
+    def _bounded_tax_page_limit(cls, value: int, info: ValidationInfo) -> int:
+        if not 1 <= value <= 1000:
+            raise ValueError(f"{info.field_name} must be in [1, 1000]")
+        return value
+
+    @field_validator("tax_income_window_days", "tax_income_retention_days", "tax_max_pages_per_cycle")
+    @classmethod
+    def _positive_tax_int(cls, value: int, info: ValidationInfo) -> int:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be > 0")
+        return value
+
+    @field_validator("tax_income_overlap_s")
+    @classmethod
+    def _positive_tax_overlap(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("tax_income_overlap_s must be > 0")
+        return value
+
     @field_validator("data_retention_days")
     @classmethod
     def _bounded_data_retention(cls, value: int) -> int:
@@ -279,6 +402,28 @@ class LiveSettings(BaseSettings):
     def _bounded_refresh_workers(cls, value: int) -> int:
         if not 1 <= value <= 64:
             raise ValueError("refresh_max_workers must be in [1, 64]")
+        return value
+
+    @field_validator("funding_prefetch_offset_hours")
+    @classmethod
+    def _bounded_prefetch_offset(cls, value: float) -> float:
+        bound = float(FROZEN_MHS_TOP20_V2.release_hour_utc) - 0.5
+        if not 0 < value < bound:
+            raise ValueError(f"funding_prefetch_offset_hours must be in (0, {bound})")
+        return value
+
+    @field_validator("refresh_decision_bar_max_missing_fraction", "venue_rules_max_rejected_fraction")
+    @classmethod
+    def _bounded_unit_fraction(cls, value: float, info: ValidationInfo) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{info.field_name} must be in [0.0, 1.0]")
+        return value
+
+    @field_validator("venue_rules_warn_age_days", "venue_rules_max_age_days")
+    @classmethod
+    def _non_negative_venue_age(cls, value: float, info: ValidationInfo) -> float:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be >= 0")
         return value
 
     @field_validator("refresh_max_fail_fraction")
@@ -301,6 +446,69 @@ class LiveSettings(BaseSettings):
         if value <= 0:
             raise ValueError("max_market_data_staleness_hours must be > 0")
         return value
+
+    @field_validator("delisting_announcement_horizon_days")
+    @classmethod
+    def _bounded_delisting_horizon(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("delisting_announcement_horizon_days must be >= 1")
+        return value
+
+    @field_validator("delisting_block_lead_hours", "venue_listing_snapshot_max_age_hours")
+    @classmethod
+    def _positive_delisting_hours(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be > 0")
+        return value
+
+    @field_validator("delisting_settlement_min_flat_bars")
+    @classmethod
+    def _bounded_settlement_flat_bars(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("delisting_settlement_min_flat_bars must be >= 1")
+        return value
+
+    @field_validator("delisting_settlement_price_rtol")
+    @classmethod
+    def _positive_settlement_rtol(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("delisting_settlement_price_rtol must be > 0")
+        return value
+
+    @field_validator("delisting_settlement_fee_bps")
+    @classmethod
+    def _bounded_settlement_fee(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("delisting_settlement_fee_bps must be >= 0")
+        return value
+
+    @field_validator("venue_listing_retention_days")
+    @classmethod
+    def _bounded_listing_retention(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("venue_listing_retention_days must be >= 1")
+        return value
+
+    @model_validator(mode="after")
+    def _default_listing_retention(self) -> LiveSettings:
+        """Listing snapshots cover the frozen panel window unless overridden."""
+        if self.venue_listing_retention_days is None:
+            self.venue_listing_retention_days = self.data_retention_days
+        return self
+
+    @model_validator(mode="after")
+    def _gate_venue_rule_ages(self) -> LiveSettings:
+        """The stale-ladder warning must fire strictly before the sizing halt."""
+        if not self.venue_rules_warn_age_days < self.venue_rules_max_age_days:
+            raise ValueError("venue_rules_warn_age_days must be < venue_rules_max_age_days")
+        return self
+
+    @model_validator(mode="after")
+    def _gate_deadman(self) -> LiveSettings:
+        """Dead-man ping timeout must stay below the ping interval."""
+        if not self.deadman_ping_timeout_s < self.deadman_ping_interval_s:
+            raise ValueError("deadman_ping_timeout_s must be < deadman_ping_interval_s")
+        return self
 
     @model_validator(mode="after")
     def _gate_execution_policy(self) -> LiveSettings:
@@ -394,8 +602,10 @@ def refresh_settings_fields() -> tuple[str, ...]:
         "refresh_max_workers",
         "refresh_lookback_days",
         "refresh_deadline_s",
-        "refresh_freshness_floor_hours",
         "refresh_max_fail_fraction",
+        "funding_prefetch_enabled",
+        "funding_prefetch_offset_hours",
+        "refresh_decision_bar_max_missing_fraction",
         "max_market_data_staleness_hours",
     )
 

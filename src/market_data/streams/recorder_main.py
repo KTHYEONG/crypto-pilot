@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+from pydantic import SecretStr
 
 from src.common.paths import BASE_DIR, LIVE_CAPTURE_DIR
 from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
@@ -99,9 +102,11 @@ def run_recorder(
     install_shutdown_handlers(flag)
     root = capture_root if capture_root is not None else LIVE_CAPTURE_DIR
     liquidations = liquidations_dir if liquidations_dir is not None else default_liquidations_dir()
+    recorder_ping_raw = os.environ.get("LIVE_RECORDER_DEADMAN_PING_URL")
+    recorder_ping = SecretStr(recorder_ping_raw) if recorder_ping_raw else None
     asyncio.run(
         run_market_recorder(
-            MarketRecorderConfig(),
+            MarketRecorderConfig(deadman_ping_url=recorder_ping),
             capture_root=root,
             liquidations_dir=liquidations,
             shutdown=flag,

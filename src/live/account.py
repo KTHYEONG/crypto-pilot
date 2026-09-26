@@ -43,6 +43,29 @@ class AccountSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class PositionBreach:
+    symbol: str
+    venue_qty: Decimal
+    ledger_qty: Decimal
+
+    @property
+    def gap(self) -> Decimal:
+        """venue_qty - ledger_qty (the quantity the ledger is missing)."""
+        return self.venue_qty - self.ledger_qty
+
+
+@dataclass(frozen=True, slots=True)
+class VenueForceClose:
+    symbol: str
+    side: str  # 'BUY' | 'SELL'
+    executed_qty: Decimal  # > 0
+    avg_price: Decimal  # > 0
+    auto_close_type: str  # 'LIQUIDATION' | 'ADL'
+    order_id: str
+    updated_at: pd.Timestamp  # tz-aware UTC
+
+
+@dataclass(frozen=True, slots=True)
 class LeverageBracket:
     """레버리지 브래킷: 초기 레버리지와 노셔널 상/하한."""
 
@@ -324,17 +347,44 @@ def resolve_sizing_equity(
     cash_usdt: Decimal | None = None,
     positions: Mapping[str, Decimal] | None = None,
     marks: Mapping[str, Decimal] | None = None,
+    fallback_marks: Mapping[str, Decimal] | None = None,
 ) -> Decimal:
-    """LIVE modes size from the venue's own margin equity (wallet balance plus unrealized PnL) with no ceiling, so the account compounds exactly as the growth policy was evaluated; ``cap_usdt`` only seeds the first PAPER/SHADOW cycle's virtual cash."""
+    """Sizing equity for the cycle.
+
+    LIVE modes use the venue's margin equity (wallet balance + unrealized PnL) with no ceiling.
+    PAPER/SHADOW value the virtual book as cash + Σ qty·mark; a held symbol without a valid live
+    mark is valued at its causal decision snapshot close from ``fallback_marks``, and if neither
+    exists the cycle fails closed instead of silently valuing the position at zero (which
+    over-sized every target by the missing notional).
+
+    Raises:
+        RiskGateBreach: non-positive equity, or a nonzero PAPER/SHADOW position with neither a
+            live mark nor a fallback mark.
+    """
     if mode is not None and mode.suppresses_mutations:
         # virtual MTM: cash + Σ qty*mark, 첫 사이클 cash None이면 cap으로 시드
         cash = cash_usdt if cash_usdt is not None else cap_usdt
         total = Decimal(cash)
         if positions is not None and marks is not None:
             for sym, qty in positions.items():
+                if qty == 0:
+                    continue
                 mk = marks.get(sym)
-                if mk is not None:
-                    total += qty * mk
+                if mk is None and fallback_marks is not None:
+                    candidate = fallback_marks.get(sym)
+                    if candidate is not None:
+                        try:
+                            finite = math.isfinite(float(candidate))
+                        except (OverflowError, ValueError):
+                            finite = False
+                        if finite and candidate > 0:
+                            mk = candidate
+                if mk is None:
+                    raise RiskGateBreach(
+                        f"sizing equity missing mark for held {sym}; "
+                        "neither a live mark nor a fallback mark exists"
+                    )
+                total += qty * mk
         # 합성 원장은 캡을 적용하지 않는다: 백테스트의 자유 복리 vol-target 북과의
         # 정합성을 위해 cap_usdt 는 첫 사이클 현금 시드로만 쓰인다(I-PAPER-IS-BACKTEST-CONTINUATION).
         equity = total
@@ -361,20 +411,21 @@ def assert_venue_configuration(snapshot: AccountSnapshot) -> None:
         raise RiskGateBreach("dual-side position mode is active; one-way assumption broken")
 
 
-def reconcile_or_halt(
+def find_position_breaches(
     snapshot: AccountSnapshot,
     ledger_positions: Mapping[str, Decimal],
     *,
     qty_tolerance_fraction: float,
     settled_symbols: Collection[str] = (),
-) -> None:
-    """거래소 스냅샷과 내부 원장을 대조한다. 불일치 시 절대 보정하지 않고 breach만 발생시킨다."""
+) -> tuple[PositionBreach, ...]:
+    """Compare the venue snapshot with the ledger and return every symbol whose relative deviation exceeds `qty_tolerance_fraction`, sorted by symbol. Pure; never corrects anything. Settled delisted symbols that are flat on the venue are exempt (delisting settlement is booked separately)."""
     if qty_tolerance_fraction < 0:
         raise ValueError("qty_tolerance_fraction must be >= 0")
     epsilon = Decimal("1e-12")
     symbols = set(ledger_positions) | {
         sym for sym, qty in snapshot.positions.items() if qty != 0
     }
+    breaches: list[PositionBreach] = []
     for symbol in sorted(symbols):
         ledger_qty = ledger_positions.get(symbol, Decimal(0))
         venue_qty = snapshot.positions.get(symbol, Decimal(0))
@@ -383,10 +434,142 @@ def reconcile_or_halt(
         denominator = max(abs(ledger_qty), epsilon)
         deviation = abs(venue_qty - ledger_qty) / denominator
         if deviation > Decimal(str(qty_tolerance_fraction)):
-            raise ReconciliationBreach(
-                f"position divergence for {symbol}: venue={venue_qty} "
-                f"ledger={ledger_qty} tolerance={qty_tolerance_fraction}"
+            breaches.append(
+                PositionBreach(symbol=symbol, venue_qty=venue_qty, ledger_qty=ledger_qty)
             )
+    return tuple(breaches)
+
+
+def reconcile_or_halt(
+    snapshot: AccountSnapshot,
+    ledger_positions: Mapping[str, Decimal],
+    *,
+    qty_tolerance_fraction: float,
+    settled_symbols: Collection[str] = (),
+) -> None:
+    """Raise `ReconciliationBreach` naming the first breach returned by `find_position_breaches`. Kept for callers that must fail closed (resync verification, `derisk_mode_enabled=False`)."""
+    breaches = find_position_breaches(
+        snapshot,
+        ledger_positions,
+        qty_tolerance_fraction=qty_tolerance_fraction,
+        settled_symbols=settled_symbols,
+    )
+    if breaches:
+        first = breaches[0]
+        raise ReconciliationBreach(
+            f"position divergence for {first.symbol}: venue={first.venue_qty} "
+            f"ledger={first.ledger_qty} tolerance={qty_tolerance_fraction}"
+        )
+
+
+def fetch_venue_force_closes(
+    client: Any, *, since: pd.Timestamp, until: pd.Timestamp
+) -> tuple[VenueForceClose, ...]:
+    """Fetch the account's venue-initiated liquidation and ADL orders (`GET /fapi/v1/forceOrders`, both auto-close types) filled in `[since, until]`, paginating by time until the range is exhausted.
+
+    Raises: DataIntegrityError: the response is not a list, or an entry lacks symbol/side/executedQty/avgPrice/updateTime or has non-positive quantity or price. Only filled quantity is returned; entries with zero executed quantity are skipped.
+    """
+    since_ms = int(pd.Timestamp(since).tz_convert("UTC").value // 1_000_000)
+    until_ms = int(pd.Timestamp(until).tz_convert("UTC").value // 1_000_000)
+    out: list[VenueForceClose] = []
+    cursor = since_ms
+    seen: set[str] = set()
+    while True:
+        payload = client.force_orders(start_time_ms=cursor, end_time_ms=until_ms, limit=100)
+        if not isinstance(payload, list):
+            raise DataIntegrityError("forceOrders endpoint returned an unexpected schema")
+        if not payload:
+            break
+        max_ts: int | None = None
+        for entry in payload:
+            if not isinstance(entry, dict):
+                raise DataIntegrityError("forceOrders row malformed")
+            try:
+                symbol = str(entry["symbol"])
+                side = str(entry["side"])
+                qty = Decimal(str(entry["executedQty"]))
+                price = Decimal(str(entry["avgPrice"]))
+                ts_ms = int(entry["updateTime"])
+                order_id = str(entry.get("orderId", entry.get("id", "")))
+                auto_close = str(entry.get("autoCloseType", ""))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DataIntegrityError("forceOrders row missing required keys") from exc
+            if side not in ("BUY", "SELL"):
+                raise DataIntegrityError("forceOrders row has unknown side")
+            if qty < 0:
+                raise DataIntegrityError("forceOrders row has negative executedQty")
+            if qty == 0:
+                continue
+            if price <= 0:
+                raise DataIntegrityError("forceOrders row has non-positive avgPrice")
+            if auto_close not in ("LIQUIDATION", "ADL"):
+                raise DataIntegrityError("forceOrders row has unknown autoCloseType")
+            updated_at = pd.Timestamp(ts_ms, unit="ms", tz="UTC")
+            if max_ts is None or ts_ms > max_ts:
+                max_ts = ts_ms
+            key = f"{symbol}|{order_id}|{ts_ms}|{qty}|{price}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                VenueForceClose(
+                    symbol=symbol,
+                    side=side,
+                    executed_qty=qty,
+                    avg_price=price,
+                    auto_close_type=auto_close,
+                    order_id=order_id,
+                    updated_at=updated_at,
+                )
+            )
+        if max_ts is None or max_ts >= until_ms or len(payload) < 100:
+            break
+        cursor = max_ts + 1
+    out.sort(key=lambda item: (item.symbol, item.order_id, int(item.updated_at.value // 1_000_000)))
+    return tuple(out)
+
+
+def explain_breaches(
+    breaches: Sequence[PositionBreach],
+    force_closes: Sequence[VenueForceClose],
+    *,
+    qty_tolerance_fraction: float,
+) -> tuple[tuple[VenueForceClose, ...], tuple[PositionBreach, ...]]:
+    """Split breaches into those fully explained by venue force closes and those that remain unexplained.
+
+    A breach is explained only when the signed sum of force-close quantities for its symbol equals its `gap` within `qty_tolerance_fraction` of the larger absolute quantity. Partial explanations count as unexplained — adopting part of a gap would hide the rest. Returns (force closes to adopt, unexplained breaches).
+    """
+    by_symbol: dict[str, list[VenueForceClose]] = {}
+    for item in force_closes:
+        by_symbol.setdefault(item.symbol, []).append(item)
+    to_adopt: list[VenueForceClose] = []
+    unexplained: list[PositionBreach] = []
+    epsilon = Decimal("1e-12")
+    for breach in breaches:
+        closes = by_symbol.get(breach.symbol, [])
+        signed = sum(
+            (item.executed_qty if item.side == "BUY" else -item.executed_qty for item in closes),
+            Decimal(0),
+        )
+        gap = breach.gap
+        denominator = max(abs(gap), abs(signed), epsilon)
+        deviation = abs(signed - gap) / denominator
+        if closes and deviation <= Decimal(str(qty_tolerance_fraction)):
+            to_adopt.extend(closes)
+        else:
+            unexplained.append(breach)
+    to_adopt.sort(key=lambda item: (item.symbol, item.order_id))
+    return tuple(to_adopt), tuple(unexplained)
+
+
+def free_margin_breached(snapshot: AccountSnapshot, *, min_free_margin_fraction: float) -> bool:
+    """True when the wallet balance is positive and `available_balance / wallet_balance` is below the floor. A zero wallet (credential-less synthetic snapshot) is never a breach."""
+    if snapshot.wallet_balance <= 0:
+        return False
+    return (
+        snapshot.available_balance / snapshot.wallet_balance
+        < Decimal(str(min_free_margin_fraction))
+    )
 
 
 def synthetic_flat_snapshot(now: pd.Timestamp) -> AccountSnapshot:

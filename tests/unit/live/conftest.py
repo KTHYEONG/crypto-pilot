@@ -42,6 +42,18 @@ def _isolate_signal_step_sidecars(monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
 
 
 @pytest.fixture(autouse=True)
+def _isolate_alert_outbox(monkeypatch: pytest.MonkeyPatch, tmp_path, _isolate_exchange_credentials: None) -> None:
+    """Route the durable alert outbox to a per-test file.
+
+    ``LiveSettings`` defaults to ``DATA_DIR/state/alert_outbox.json``; without
+    isolation every daemon/runner test would share one real outbox and dedupe
+    against each other. The explicit dependency on the credential scrub keeps
+    the env var alive regardless of fixture ordering.
+    """
+    monkeypatch.setenv("LIVE_ALERT_OUTBOX_PATH", str(tmp_path / "alert_outbox.json"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_live_process_logs(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """src.cli.commands.live 로그 디렉터리를 테스트 격리 경로로 돌린다."""
     import logging
@@ -76,6 +88,9 @@ def _neutralize_execution_depth_capture(monkeypatch: pytest.MonkeyPatch) -> None
             return None
 
         def stop(self, *, post_window_s: float, shutdown: object = None) -> DepthCaptureSummary:
-            return DepthCaptureSummary(rows=0, symbols_requested=0, symbols_seen=0, reconnects=0, parts=0)
+            return DepthCaptureSummary(
+                rows_received=0, rows_persisted=0, symbols_requested=0, symbols_seen=0,
+                symbols_missing=(), reconnects=0, parts=0, flush_failures=0,
+            )
 
     monkeypatch.setattr(runner_mod, "ExecutionDepthRecorder", _NullDepthRecorder)

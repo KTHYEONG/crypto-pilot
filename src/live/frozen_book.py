@@ -8,7 +8,7 @@ Kelly sizing.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +16,12 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.live.venue_listing import SettlementEvidence
+from src.market_data.services.futures_collection import (
+    FUNDING_DEFAULT_INTERVAL_MS,
+    FUNDING_TIME_TOLERANCE_MS,
+    infer_funding_interval_ms,
+)
 from src.mhs.account_sources import causal_adv_sigma
 from src.mhs.books import clip_names_preserving_gross
 from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, build_frozen_mhs_candidate
@@ -52,6 +58,88 @@ class LiveFrozenBook:
     panel_last_bar: pd.Timestamp
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotGapReport:
+    """Classification of census symbols lacking the decision-day snapshot bar in the raw source."""
+
+    refresh_incomplete: tuple[str, ...]  # raw tail ends before the snapshot bar (not yet refreshed)
+    venue_gap: tuple[str, ...]  # snapshot bar absent while a later bar exists (permanent hole)
+
+
+def _raw_1h_timestamps_ms(data_root: Path, symbol: str) -> set[int]:
+    """Open-time millis present in the raw 1h file, reading only the timestamp column.
+
+    Zombie masking is deliberately not applied, so a post-delivery flat bar counts as
+    present and settled symbols are never reported as gaps here.
+    """
+    path = Path(data_root) / "ohlcv" / "1h" / f"{symbol}.parquet"
+    try:
+        frame = pd.read_parquet(path, columns=["timestamp"])
+    except Exception as exc:
+        raise DataIntegrityError(f"snapshot gap bars unreadable: {symbol}: {exc}") from exc
+    stamps = pd.to_numeric(frame["timestamp"], errors="coerce").dropna()
+    return {int(value) for value in stamps.tolist()}
+
+
+def classify_snapshot_gaps(
+    data_root: Path, symbols: Sequence[str], *, snapshot_bar: pd.Timestamp,
+) -> SnapshotGapReport:
+    """Classify why each symbol lacks the raw 1h bar opening at ``snapshot_bar``.
+
+    Reads only the ``timestamp`` column of raw files (zombie masking is not applied), so a
+    post-delivery flat bar counts as present. Settled symbols are therefore never reported here;
+    they are priced by the delisting settlement path instead.
+
+    Raises:
+        DataIntegrityError: a file is unreadable.
+    """
+    bar = pd.Timestamp(snapshot_bar)
+    bar = bar.tz_localize("UTC") if bar.tzinfo is None else bar.tz_convert("UTC")
+    bar_ms = int(bar.value // 1_000_000)
+    refresh: list[str] = []
+    venue: list[str] = []
+    for symbol in symbols:
+        name = str(symbol)
+        stamps = _raw_1h_timestamps_ms(Path(data_root), name)
+        if bar_ms in stamps:
+            continue
+        if stamps and max(stamps) > bar_ms:
+            venue.append(name)
+        else:
+            refresh.append(name)
+    return SnapshotGapReport(
+        refresh_incomplete=tuple(sorted(refresh)), venue_gap=tuple(sorted(venue)),
+    )
+
+
+def snapshot_gap_blocked_decisions(
+    data_root: Path, decision_index: pd.DatetimeIndex, census: Sequence[str], *, snapshot_hour: int,
+) -> pd.DataFrame:
+    """Withdraw a symbol's seat on each decision day whose snapshot bar is an evidenced venue gap.
+
+    Mirrors the research source-gap contract: a decision that cannot be anchored on a published
+    bar is not traded. Only venue gaps block (a later bar evidences the hole as permanent);
+    refresh-incomplete days stay unblocked and are handled by the frozen step's decision-bar
+    gate. Snapshot closes are never filled; the gap-blocked seat gives the symbol target
+    weight 0 for that decision day. It is composed with the announced-delisting blocks by
+    logical OR before being passed to ``build_frozen_mhs_candidate``.
+    """
+    names = [str(symbol) for symbol in census]
+    stamps_by_symbol = {name: _raw_1h_timestamps_ms(Path(data_root), name) for name in names}
+    top_by_symbol = {name: (max(stamps) if stamps else None) for name, stamps in stamps_by_symbol.items()}
+    days = pd.DatetimeIndex(decision_index)
+    values = np.zeros((len(days), len(names)), dtype=bool)
+    for row, raw_day in enumerate(days):
+        day = pd.Timestamp(raw_day)
+        day = day.tz_localize("UTC") if day.tzinfo is None else day.tz_convert("UTC")
+        bar_ms = int((day + pd.Timedelta(hours=int(snapshot_hour))).value // 1_000_000)
+        for col, name in enumerate(names):
+            top = top_by_symbol[name]
+            if bar_ms not in stamps_by_symbol[name] and top is not None and top > bar_ms:
+                values[row, col] = True
+    return pd.DataFrame(values, index=days, columns=names).astype(bool)
+
+
 def _require_utc(day: pd.Timestamp, label: str) -> pd.Timestamp:
     stamp = pd.Timestamp(day)
     if stamp.tzinfo is None:
@@ -61,6 +149,7 @@ def _require_utc(day: pd.Timestamp, label: str) -> pd.Timestamp:
 
 def build_live_frozen_book(
     data_root: Path, census: tuple[str, ...], *, panel_start: pd.Timestamp, panel_end: pd.Timestamp,
+    blocked_decisions: Callable[[pd.DatetimeIndex, tuple[str, ...]], pd.DataFrame] | None = None,
 ) -> LiveFrozenBook:
     """Rebuild the frozen book from ``data_root/ohlcv/1h`` over ``[panel_start, panel_end)``.
 
@@ -70,6 +159,12 @@ def build_live_frozen_book(
     the research source loader applies. Decision rows earlier than
     ``panel_start + LIVE_FROZEN_WARMUP_DAYS`` are dropped because their roster and features
     are not yet equal to the full-history result.
+
+    ``blocked_decisions`` builds the research-contract withdrawal frame for the builder's own
+    daily decision index and final census order (announced delistings). It is a callable because
+    the index and census are only known after the panel is read. Blocking withdraws the roster seat
+    and the target for exactly those decision days. This deliberately deviates from the unblocked
+    research book, and only for names the venue will stop trading.
 
     Raises:
         DataIntegrityError: census empty, panel_end - panel_start shorter than the warmup,
@@ -117,10 +212,15 @@ def build_live_frozen_book(
     ).apply(lambda col: pd.to_datetime(col).dt.tz_localize("UTC"))
     strategy = FROZEN_MHS_TOP20_V2
     hourly_panels = {"close": close_c, "quote_vol": quote_c, "taker_buy_quote": taker_c}
+    blocked_frame: pd.DataFrame | None = None
+    if blocked_decisions is not None:
+        # The research builder validates the frame against its own daily index
+        # (``daily_close.index``) and census order, so the callable receives exactly those.
+        blocked_frame = blocked_decisions(pd.DatetimeIndex(daily_close.index), tuple(census_list))
     candidate = build_frozen_mhs_candidate(
         hourly_panels, hourly_available_at, daily_close, daily_quote_volume,
         tuple(census_list), market_close=close_c,
-        strategy=strategy, blocked_decisions=None,
+        strategy=strategy, blocked_decisions=blocked_frame,
     )
     clipped = clip_names_preserving_gross(candidate.target_weights, FROZEN_GROWTH_NAME_CLIP)
     entries = pd.DatetimeIndex(clipped.index).tz_convert("UTC")
@@ -167,8 +267,26 @@ def _funding_sum_in_window(series: pd.Series | None, start: pd.Timestamp, stop: 
     return float(window.sum())
 
 
+def _funding_coverage_ms(series: pd.Series | None) -> tuple[int | None, int]:
+    """Last settlement millis and inferred interval millis for one funding series.
+
+    A missing or empty series returns ``(None, default)``. A held symbol with no observed funding
+    at all makes its window unobserved: scoring it with a 0.0 funding leg would write an
+    unobserved value into the append-only proxy history, so the caller defers that day instead.
+    """
+    if series is None or len(series) == 0:
+        return None, FUNDING_DEFAULT_INTERVAL_MS
+    idx = pd.DatetimeIndex(pd.to_datetime(series.index, utc=True, errors="coerce"))
+    idx = idx[~idx.isna()]
+    if len(idx) == 0:
+        return None, FUNDING_DEFAULT_INTERVAL_MS
+    millis = [int(stamp.value // 1_000_000) for stamp in idx]
+    return max(millis), infer_funding_interval_ms(millis)
+
+
 def unit_proxy_returns(
     book: LiveFrozenBook, funding_by_symbol: Mapping[str, pd.Series], *, cost_bps: float,
+    settlements: Mapping[str, SettlementEvidence] | None = None,
 ) -> pd.Series:
     """Daily unit-book return proxy on the replay ledger's anchor-to-anchor convention.
 
@@ -179,9 +297,24 @@ def unit_proxy_returns(
     two anchors, so the forward history continues the bootstrap export without a timing seam.
     A day whose closing snapshot bar is not yet observed is skipped and re-scored next cycle.
 
+    A held symbol whose snapshot close is missing at an anchor strictly after its evidenced
+    ``delivery_time`` is priced at the settlement price for that anchor. Funding after delivery
+    is zero because settlement ends the position. A held symbol missing a close without
+    settlement evidence still raises.
+
+    A decision day is scored only when every held symbol's funding series is observed through
+    the day's funding window end: the last settlement must reach ``stop - inferred interval -
+    FUNDING_TIME_TOLERANCE_MS`` (the interval is inferred from the series itself), unless the
+    symbol settled at delivery inside the window. A series with no rows at all keeps the
+    legacy 0.0 funding leg. The first unscorable day stops scoring for this call and later
+    days are left for a later cycle, so the append-only history never contains a hole or a
+    zero-filled funding leg. With complete funding every output is bit-identical to the
+    legacy computation.
+
     Raises:
         DataIntegrityError: a held symbol lacks either snapshot close, or the result is non-finite.
     """
+    settled: Mapping[str, SettlementEvidence] = settlements or {}
     decisions = pd.DatetimeIndex(book.unit_weights.index).tz_convert("UTC").sort_values()
     if len(decisions) == 0:
         return pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
@@ -190,6 +323,7 @@ def unit_proxy_returns(
     snapshot_lookup = {stamp: pos for pos, stamp in enumerate(snapshot_index)}
     symbols = list(book.unit_weights.columns)
     weights = book.unit_weights.reindex(decisions)
+    coverage = {name: _funding_coverage_ms(funding_by_symbol.get(name)) for name in symbols}
     out_idx: list[pd.Timestamp] = []
     out_vals: list[float] = []
     prev = np.zeros(len(symbols), dtype="float64")
@@ -205,8 +339,19 @@ def unit_proxy_returns(
             prev = w
             continue
         w = np.where(np.isfinite(w), w, 0.0)
-        row_s = book.snapshot_closes.loc[day, symbols].to_numpy(dtype="float64")
-        row_n = book.snapshot_closes.loc[nxt_decision, symbols].to_numpy(dtype="float64")
+        row_s = book.snapshot_closes.loc[day, symbols].to_numpy(dtype="float64").copy()
+        row_n = book.snapshot_closes.loc[nxt_decision, symbols].to_numpy(dtype="float64").copy()
+        anchor_s = day + pd.Timedelta(hours=snapshot_hour)
+        anchor_n = nxt_decision + pd.Timedelta(hours=snapshot_hour)
+        for col, name in enumerate(symbols):
+            evidence = settled.get(name)
+            if evidence is None:
+                continue
+            settle_price = float(evidence.price)
+            if not np.isfinite(row_s[col]) and anchor_s > evidence.delivery_time:
+                row_s[col] = settle_price
+            if not np.isfinite(row_n[col]) and anchor_n > evidence.delivery_time:
+                row_n[col] = settle_price
         held = w != 0.0
         if bool(held.any()) and (
             bool((~np.isfinite(row_s[held])).any()) or bool((~np.isfinite(row_n[held])).any())
@@ -222,13 +367,39 @@ def unit_proxy_returns(
             c0 = float(row_s[col])
             c1 = float(row_n[col])
             price_ret += float(w_s) * (c1 / c0 - 1.0)
+            stop_eff = stop
+            evidence = settled.get(symbols[col])
+            if evidence is not None and evidence.delivery_time < stop_eff:
+                stop_eff = evidence.delivery_time
+                if stop_eff <= start:
+                    continue
             funding_pay += float(w_s) * _funding_sum_in_window(
-                funding_by_symbol.get(symbols[col]), start, stop,
+                funding_by_symbol.get(symbols[col]), start, stop_eff,
             )
         turnover = float(np.abs(w - prev).sum()) * float(cost_bps) / 10000.0
         value = float(price_ret - funding_pay - turnover)
         if not np.isfinite(value):
             raise DataIntegrityError(f"non-finite unit proxy return at {label}")
+        observed = True
+        for col, w_s in enumerate(w):
+            if w_s == 0.0:
+                continue
+            last_ms, interval_ms = coverage[symbols[col]]
+            if last_ms is None:
+                # 보유 종목에 관측된 펀딩이 전혀 없으면 펀딩 0으로 채점하지 않고 이 창의 proxy를 보류한다.
+                observed = False
+                break
+            window_end = stop
+            evidence = settled.get(symbols[col])
+            if evidence is not None and evidence.delivery_time < window_end:
+                window_end = evidence.delivery_time
+                if window_end <= start:
+                    continue
+            if last_ms < int(window_end.value // 1_000_000) - interval_ms - FUNDING_TIME_TOLERANCE_MS:
+                observed = False
+                break
+        if not observed:
+            break
         out_idx.append(label)
         out_vals.append(value)
         prev = w

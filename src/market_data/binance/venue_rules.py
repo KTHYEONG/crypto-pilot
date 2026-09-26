@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -24,6 +25,8 @@ BRACKET_URL = "https://fapi.binance.com/fapi/v1/leverageBracket"
 EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 
 VENUE_SNAPSHOT_SUFFIXES: tuple[str, ...] = (".json.gz", ".json")
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,7 @@ class VenueRuleSnapshot:
 
     captured_at: pd.Timestamp
     symbols: Mapping[str, VenueSymbolRules]
+    rejected_symbols: tuple[str, ...] = ()
 
 
 def _parse_bracket_tiers(symbol: str, raw: Any) -> tuple[VenueBracket, ...]:
@@ -106,17 +110,24 @@ def _extract_filters(entry: Mapping[str, Any]) -> tuple[float | None, float | No
 
 
 def parse_venue_rules(
-    bracket_payload: Any, exchange_info_payload: Any, *, captured_at: pd.Timestamp,
+    bracket_payload: Any,
+    exchange_info_payload: Any,
+    *,
+    captured_at: pd.Timestamp,
+    max_rejected_fraction: float = 0.0,
 ) -> VenueRuleSnapshot:
-    """Join the leverageBracket and exchangeInfo responses into one snapshot.
+    """Join the leverageBracket and exchangeInfo responses into one snapshot, isolating malformed rows.
 
-    A symbol present only in the bracket payload keeps ``step_size``/``min_notional`` as None;
-    a symbol present only in exchangeInfo is dropped (no margin ladder means it cannot be priced
-    for margin). Brackets are sorted by notional floor and must tile [0, last cap) without gaps.
+    A malformed bracket row (missing keys, non-positive ratio or leverage, non-contiguous ladder) or
+    a malformed exchangeInfo entry is skipped and its symbol recorded in ``rejected_symbols``, so one
+    retired delivery or TradFi row cannot void the ladders of every tradable symbol. The snapshot as
+    a whole is rejected only when the payload shapes are wrong or the rejected share exceeds
+    ``max_rejected_fraction``. The default 0.0 preserves the historical all-or-nothing contract
+    for existing callers.
 
     Raises:
-        DataIntegrityError: Malformed payloads, missing required bracket keys, non-positive
-            ratios/leverage, or a non-contiguous ladder.
+        DataIntegrityError: a payload is not the expected container, no row parses, or rejected rows
+            exceed ``max_rejected_fraction`` of the bracket rows.
     """
     if not isinstance(bracket_payload, list):
         raise DataIntegrityError("leverageBracket payload must be a list")
@@ -124,32 +135,68 @@ def parse_venue_rules(
     if not isinstance(raw_symbols, list):
         raise DataIntegrityError("exchangeInfo payload missing symbols list")
     filter_map: dict[str, tuple[float | None, float | None]] = {}
+    malformed_info_symbols: set[str] = set()
     for info_entry in raw_symbols:
         if not isinstance(info_entry, Mapping) or "symbol" not in info_entry:
             raise DataIntegrityError("exchangeInfo symbol entry malformed")
-        filter_map[str(info_entry["symbol"])] = _extract_filters(info_entry)
+        name = str(info_entry["symbol"])
+        try:
+            filter_map[name] = _extract_filters(info_entry)
+        except (TypeError, ValueError, AttributeError):
+            malformed_info_symbols.add(name)
     captured = pd.Timestamp(captured_at)
     captured = captured.tz_localize("UTC") if captured.tzinfo is None else captured.tz_convert("UTC")
     symbols: dict[str, VenueSymbolRules] = {}
+    rejected: list[str] = []
     for row in bracket_payload:
         if not isinstance(row, Mapping) or "symbol" not in row:
             raise DataIntegrityError("leverageBracket row malformed")
         raw_tiers = row.get("brackets")
         if not isinstance(raw_tiers, list) or not raw_tiers:
-            raise DataIntegrityError("leverageBracket row malformed")
+            rejected.append(str(row["symbol"]))
+            continue
         symbol = str(row["symbol"])
+        if symbol in malformed_info_symbols:
+            rejected.append(symbol)
+            continue
+        try:
+            tiers = _parse_bracket_tiers(symbol, raw_tiers)
+        except DataIntegrityError:
+            rejected.append(symbol)
+            continue
         step_size, min_notional = filter_map.get(symbol, (None, None))
         symbols[symbol] = VenueSymbolRules(
             symbol=symbol,
-            brackets=_parse_bracket_tiers(symbol, raw_tiers),
+            brackets=tiers,
             step_size=step_size,
             min_notional=min_notional,
         )
-    return VenueRuleSnapshot(captured_at=captured, symbols=symbols)
+    total_rows = len(bracket_payload)
+    if total_rows and not symbols:
+        raise DataIntegrityError("venue-rules snapshot has no parsable rows")
+    if total_rows and len(rejected) / total_rows > max_rejected_fraction:
+        raise DataIntegrityError(
+            f"venue-rules rejected {len(rejected)}/{total_rows} rows above fraction {max_rejected_fraction}"
+        )
+    if rejected and symbols:
+        _logger.warning(
+            "[DATA] stage=venue_rules status=ROWS_ISOLATED rejected=%d sample=%s",
+            len(rejected),
+            ",".join(sorted(rejected)[:5]),
+        )
+    return VenueRuleSnapshot(
+        captured_at=captured,
+        symbols=symbols,
+        rejected_symbols=tuple(sorted(rejected)),
+    )
 
 
 def fetch_venue_rules(
-    *, api_key: str | None = None, api_secret: str | None = None, timeout_seconds: float = 30.0
+    *,
+    api_key: str | None = None,
+    api_secret: str | None = None,
+    timeout_seconds: float = 30.0,
+    max_rejected_fraction: float = 0.0,
 ) -> VenueRuleSnapshot:
     """Fetch both endpoints (bracket endpoint is signed; exchangeInfo is public) and parse them.
 
@@ -176,7 +223,10 @@ def fetch_venue_rules(
     except (urllib.error.HTTPError, urllib.error.URLError) as exc:
         raise RuntimeError(f"Binance venue-rules exchangeInfo request failed: {exc}") from exc
     return parse_venue_rules(
-        bracket_payload, exchange_info_payload, captured_at=pd.Timestamp.now(tz="UTC")
+        bracket_payload,
+        exchange_info_payload,
+        captured_at=pd.Timestamp.now(tz="UTC"),
+        max_rejected_fraction=max_rejected_fraction,
     )
 
 
@@ -221,6 +271,7 @@ def write_venue_rule_snapshot(
         raise FileExistsError(f"venue-rules snapshot already captured: {existing}")
     payload = {
         "captured_at": snapshot.captured_at.isoformat(),
+        "rejected_symbols": sorted(snapshot.rejected_symbols),
         "symbols": {
             symbol: {
                 "brackets": [
@@ -314,8 +365,17 @@ def load_venue_rule_snapshot(path: Path) -> VenueRuleSnapshot:
             filters.append({"filterType": "MIN_NOTIONAL", "notional": entry["min_notional"]})
         if filters:
             exchange_symbols.append({"symbol": symbol, "filters": filters})
-    return parse_venue_rules(
-        bracket_payload, {"symbols": exchange_symbols}, captured_at=pd.Timestamp(raw["captured_at"])
+    parsed = parse_venue_rules(
+        bracket_payload,
+        {"symbols": exchange_symbols},
+        captured_at=pd.Timestamp(raw["captured_at"]),
+        max_rejected_fraction=1.0,
+    )
+    rejected = tuple(str(s) for s in raw.get("rejected_symbols", ()))
+    return VenueRuleSnapshot(
+        captured_at=parsed.captured_at,
+        symbols=parsed.symbols,
+        rejected_symbols=rejected,
     )
 
 

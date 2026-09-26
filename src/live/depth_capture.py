@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -29,13 +30,22 @@ _STOP_JOIN_TIMEOUT_S: float = 10.0
 
 @dataclass(frozen=True, slots=True)
 class DepthCaptureSummary:
-    """Outcome of one execution-window capture session (for audit/alerting)."""
+    """Outcome of one execution-window capture session (for audit/alerting).
 
-    rows: int
+    ``rows_received`` counts parsed messages and ``rows_persisted`` counts rows in written part
+    files; they differ when a flush fails. Stream-level coverage attests only that the combined
+    connection delivered, so ``symbols_missing`` names requested symbols that produced no message
+    at all, since coverage alone would certify them.
+    """
+
+    rows_received: int
+    rows_persisted: int
     symbols_requested: int
     symbols_seen: int
+    symbols_missing: tuple[str, ...]
     reconnects: int
     parts: int
+    flush_failures: int
 
 
 def _utc_now() -> pd.Timestamp:
@@ -209,9 +219,16 @@ class ExecutionDepthRecorder:
         self._start_failed = False
         self._summary: DepthCaptureSummary | None = None
         self._rows = 0
+        self._rows_persisted = 0
+        self._flush_failures = 0
         self._symbols_seen: set[str] = set()
+        self._symbol_first: dict[str, pd.Timestamp] = {}
+        self._symbol_last: dict[str, pd.Timestamp] = {}
+        self._symbol_persisted: dict[str, int] = {}
         self._reconnects = 0
         self._parts = 0
+        self._session_start: pd.Timestamp | None = None
+        self._first_part_stamp: str | None = None
 
     def start(self) -> None:
         """Start the capture thread; returns immediately (never blocks order submission)."""
@@ -226,13 +243,35 @@ class ExecutionDepthRecorder:
             _logger.warning("[EXEC] stage=exec_depth_capture status=START_FAILED error=%s", exc)
             self._start_failed = True
 
+    def _build_summary(self) -> DepthCaptureSummary:
+        missing = tuple(symbol for symbol in self._symbols if symbol not in self._symbols_seen)
+        return DepthCaptureSummary(
+            rows_received=self._rows,
+            rows_persisted=self._rows_persisted,
+            symbols_requested=len(self._symbols),
+            symbols_seen=len(self._symbols_seen),
+            symbols_missing=missing,
+            reconnects=self._reconnects,
+            parts=self._parts,
+            flush_failures=self._flush_failures,
+        )
+
     def stop(self, *, post_window_s: float, shutdown: Any | None = None) -> DepthCaptureSummary:
         """Keep capturing for ``post_window_s`` seconds (0 = stop now), then stop, flush and join.
 
         Returns early when ``shutdown.requested`` becomes true. Idempotent; safe if ``start`` failed.
         """
-        if self._empty or self._start_failed or not self._started:
-            return DepthCaptureSummary(rows=0, symbols_requested=len(self._symbols), symbols_seen=0, reconnects=0, parts=0)
+        if self._empty:
+            return DepthCaptureSummary(
+                rows_received=0, rows_persisted=0, symbols_requested=0, symbols_seen=0,
+                symbols_missing=(), reconnects=0, parts=0, flush_failures=0,
+            )
+        if self._start_failed or not self._started:
+            return DepthCaptureSummary(
+                rows_received=0, rows_persisted=0, symbols_requested=len(self._symbols),
+                symbols_seen=0, symbols_missing=tuple(self._symbols),
+                reconnects=0, parts=0, flush_failures=0,
+            )
         if self._summary is not None:
             return self._summary
         try:
@@ -249,23 +288,25 @@ class ExecutionDepthRecorder:
                 thread.join(timeout=_STOP_JOIN_TIMEOUT_S)
                 if thread.is_alive():
                     _logger.error("[EXEC] stage=exec_depth_capture status=THREAD_STUCK")
-            summary = DepthCaptureSummary(
-                rows=self._rows,
-                symbols_requested=len(self._symbols),
-                symbols_seen=len(self._symbols_seen),
-                reconnects=self._reconnects,
-                parts=self._parts,
-            )
+            summary = self._build_summary()
             self._summary = summary
+            self._write_manifest(summary)
+            if summary.symbols_missing:
+                _logger.warning(
+                    "[EXEC] stage=exec_depth_capture status=SYMBOLS_MISSING decision_time=%s missing=%s",
+                    self._decision_time.isoformat(), ",".join(summary.symbols_missing),
+                )
             _logger.info(
                 "[EXEC] stage=exec_depth_capture decision_time=%s rows=%d symbols_seen=%d/%d reconnects=%d parts=%d",
-                self._decision_time.isoformat(), summary.rows, summary.symbols_seen,
+                self._decision_time.isoformat(), summary.rows_received, summary.symbols_seen,
                 summary.symbols_requested, summary.reconnects, summary.parts,
             )
             return summary
         except Exception as exc:
             _logger.error("[EXEC] stage=exec_depth_capture status=STOP_FAILED error=%s", exc)
-            return DepthCaptureSummary(rows=self._rows, symbols_requested=len(self._symbols), symbols_seen=len(self._symbols_seen), reconnects=self._reconnects, parts=self._parts)
+            summary = self._build_summary()
+            self._summary = summary
+            return summary
 
     def _thread_main(self) -> None:
         try:
@@ -284,20 +325,78 @@ class ExecutionDepthRecorder:
             target = directory / f"part_{stamp}_{seq}.parquet"
         return target
 
-    def _flush_rows(self, rows: list[dict[str, Any]], coverage: CoverageTracker) -> None:
+    def _manifest_path(self, stamp: str) -> Path:
+        day: str = self._decision_time.strftime("%Y%m%d")
+        directory = self._root / EXEC_DEPTH_DATASET / day
+        directory.mkdir(parents=True, exist_ok=True)
+        seq = len(list(directory.glob(f"manifest_{stamp}_*.json")))
+        return directory / f"manifest_{stamp}_{seq}.json"
+
+    def _write_manifest(self, summary: DepthCaptureSummary) -> None:
+        try:
+            if self._first_part_stamp is not None:
+                stamp = self._first_part_stamp
+            elif self._session_start is not None:
+                stamp = pd.Timestamp(self._session_start).tz_convert("UTC").strftime("%H%M%S")
+            else:
+                stamp = self._decision_time.strftime("%H%M%S")
+            target = self._manifest_path(stamp)
+            symbols: dict[str, dict[str, Any]] = {}
+            for symbol in self._symbols:
+                first = self._symbol_first.get(symbol)
+                last = self._symbol_last.get(symbol)
+                symbols[symbol] = {
+                    "first_received_at": first.isoformat() if first is not None else None,
+                    "last_received_at": last.isoformat() if last is not None else None,
+                    "rows_persisted": int(self._symbol_persisted.get(symbol, 0)),
+                }
+            manifest = {
+                "decision_time": self._decision_time.isoformat(),
+                "run_id": self._run_id,
+                "mode": self._mode,
+                "symbols_requested": list(self._symbols),
+                "symbols": symbols,
+                "symbols_missing": list(summary.symbols_missing),
+            }
+            tmp = target.with_name(f".{target.name}.tmp")
+            tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, target)
+        except Exception as exc:
+            _logger.warning("[EXEC] stage=exec_depth_capture status=MANIFEST_FAILED error=%s", exc)
+
+    def _flush_rows(self, rows: list[dict[str, Any]], coverage: CoverageTracker, *, final: bool = False) -> bool:
         if not rows:
-            return
-        frame = _rows_to_frame(rows, self._levels)
-        first = pd.Timestamp(frame["received_at"].iloc[0]).tz_convert("UTC")
-        target = self._part_path(first, self._parts)
-        tmp = target.with_name(f".{target.name}.tmp")
-        frame.to_parquet(tmp, index=False, compression="zstd")
-        os.replace(tmp, target)
+            return True
+        try:
+            frame = _rows_to_frame(rows, self._levels)
+            first = pd.Timestamp(frame["received_at"].iloc[0]).tz_convert("UTC")
+            target = self._part_path(first, self._parts)
+            tmp = target.with_name(f".{target.name}.tmp")
+            frame.to_parquet(tmp, index=False, compression="zstd")
+            os.replace(tmp, target)
+        except Exception as exc:
+            self._flush_failures += 1
+            _logger.warning(
+                "[EXEC] stage=exec_depth_capture status=FLUSH_FAILED rows=%d error=%s",
+                len(rows), exc,
+            )
+            if final:
+                _logger.error(
+                    "[EXEC] stage=exec_depth_capture status=ROWS_LOST rows=%d", len(rows),
+                )
+            return False
         self._parts += 1
+        if self._first_part_stamp is None:
+            self._first_part_stamp = pd.Timestamp(frame["received_at"].iloc[0]).tz_convert("UTC").strftime("%H%M%S")
+        self._rows_persisted += len(rows)
+        for row in rows:
+            symbol = str(row.get("symbol", ""))
+            self._symbol_persisted[symbol] = self._symbol_persisted.get(symbol, 0) + 1
         try:
             coverage.flush()
         except Exception as exc:
             _logger.warning("[EXEC] stage=exec_depth_capture status=COVERAGE_FLUSH_FAILED error=%s", exc)
+        return True
 
     async def _run_session(self) -> None:
         url = _depth_stream_url(self._stream_url, self._symbols, self._levels, self._update_ms)
@@ -306,6 +405,7 @@ class ExecutionDepthRecorder:
         backoff = 1.0
         connected_once = False
         started_at = time.monotonic()
+        self._session_start = self._now()
         last_flush = time.monotonic()
         while not self._stop_requested and time.monotonic() - started_at < self._max_session_s:
             try:
@@ -328,11 +428,16 @@ class ExecutionDepthRecorder:
                                 continue
                             buffer.append(row)
                             self._rows += 1
-                            self._symbols_seen.add(str(row["symbol"]))
-                            coverage.mark_ok(_as_utc(pd.Timestamp(row["received_at"])))
+                            symbol = str(row["symbol"])
+                            self._symbols_seen.add(symbol)
+                            received = _as_utc(pd.Timestamp(row["received_at"]))
+                            if symbol not in self._symbol_first:
+                                self._symbol_first[symbol] = received
+                            self._symbol_last[symbol] = received
+                            coverage.mark_ok(received)
                         if buffer and time.monotonic() - last_flush >= self._flush_interval_s:
-                            self._flush_rows(buffer, coverage)
-                            buffer = []
+                            if self._flush_rows(buffer, coverage):
+                                buffer = []
                             last_flush = time.monotonic()
             except Exception as exc:
                 _logger.warning("[EXEC] stage=exec_depth_capture status=DISCONNECTED error=%s", exc)
@@ -343,4 +448,5 @@ class ExecutionDepthRecorder:
                     await asyncio.sleep(0.1)
                     elapsed += 0.1
                 backoff = min(_RECONNECT_BACKOFF_MAX_S, backoff * 2.0)
-        self._flush_rows(buffer, coverage)
+        if buffer:
+            self._flush_rows(buffer, coverage, final=True)

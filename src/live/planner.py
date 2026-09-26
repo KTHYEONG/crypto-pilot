@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -105,3 +105,23 @@ def plan_orders(
                 )
             )
     return intents
+
+
+def partition_risk_controlled(
+    intents: Sequence[OrderIntent], filters: Mapping[str, SymbolFilters]
+) -> tuple[list[OrderIntent], list[OrderIntent]]:
+    """Split intents into (allowed, blocked) under venue position-risk control.
+
+    A symbol whose filters report ``blocks_risk_increase`` accepts only reductions: reduce-only
+    intents (including the closing leg of a flip) stay allowed, every risk-increasing intent is
+    blocked so it is never posted (Binance would reject it with -4140/-2027-class codes).
+    """
+    allowed: list[OrderIntent] = []
+    blocked: list[OrderIntent] = []
+    for intent in intents:
+        symbol_filters = filters.get(intent.symbol)
+        if symbol_filters is not None and symbol_filters.blocks_risk_increase and not intent.reduce_only:
+            blocked.append(intent)
+        else:
+            allowed.append(intent)
+    return allowed, blocked

@@ -351,3 +351,172 @@ def test_recorder_events_registered_with_correct_severity() -> None:
     assert "docker logs --tail 200 market-recorder" in unhealthy["action"]
     recovered = EVENT_INFO["recorder_recovered"]
     assert recovered["severity_label"] == "NOTICE"
+
+
+def test_reconcile_mismatch_is_critical_on_both_channels(monkeypatch) -> None:
+    """ledger_reconcile_mismatch는 웹훅 CRITICAL·이메일 CRITICAL 배지로 전송된다."""
+    import json
+    import pandas as pd
+    import src.live.alerting as a
+
+    payloads: dict = {}
+
+    class _Resp:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *_a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        payloads.update(json.loads(req.data.decode("utf-8")))
+        return _Resp()
+
+    monkeypatch.setattr(a.urllib.request, "urlopen", _fake_urlopen)
+    captured: dict = {}
+
+    class _SMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *_a):
+            return False
+        def starttls(self):
+            pass
+        def login(self, user, password):
+            captured["user"] = user
+        def send_message(self, msg):
+            captured["subject"] = str(msg["Subject"])
+
+    monkeypatch.setattr(a.smtplib, "SMTP", _SMTP)
+    now = pd.Timestamp("2026-08-24T01:00:00", tz="UTC")
+    assert a.post_alert("https://hook.example/abc", event="ledger_reconcile_mismatch", detail="difference=1", decision_time=None, now=now) is True
+    assert payloads["severity"] == "CRITICAL"
+    assert a.send_email_alert(gmail_user="bot@gmail.com", gmail_app_password="pw", event="ledger_reconcile_mismatch", detail="difference=1", decision_time=None, now=now) is True
+    assert "🚨 긴급" in captured["subject"]
+
+
+def test_unregistered_event_renders_critical_not_info(monkeypatch) -> None:
+    """미등록 이벤트는 INFO가 아닌 CRITICAL으로 렌더링된다."""
+    import pandas as pd
+    import src.live.alerting as a
+
+    assert a.event_severity("made_up_event") == "CRITICAL"
+    captured: dict = {}
+
+    class _SMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *_a):
+            return False
+        def starttls(self):
+            pass
+        def login(self, user, password):
+            pass
+        def send_message(self, msg):
+            captured["subject"] = str(msg["Subject"])
+
+    monkeypatch.setattr(a.smtplib, "SMTP", _SMTP)
+    assert a.send_email_alert(gmail_user="bot@gmail.com", gmail_app_password="pw", event="made_up_event", detail="x", decision_time=None, now=pd.Timestamp("2026-08-24T01:00:00", tz="UTC")) is True
+    assert "🚨 긴급" in captured["subject"]
+    assert "🔔 알림" not in captured["subject"]
+
+
+def test_event_registry_covers_all_dispatched_events() -> None:
+    """src/에서 dispatch/_daemon_alert/_notify_event로 전송되는 모든 이벤트는 EVENT_INFO에 등록된다."""
+    import re
+    from pathlib import Path
+
+    import src.live.alerting as a
+
+    root = Path("src")
+    pattern = re.compile(r"""(?:dispatch_alert|_daemon_alert|_notify_event)\s*\([^)]*?event\s*=\s*["']([^"']+)["']""", re.DOTALL)
+    found: set[str] = set()
+    for path in root.rglob("*.py"):
+        found |= set(pattern.findall(path.read_text(encoding="utf-8")))
+    literal_pattern = re.compile(r"""event\s*=\s*["']([a-z_]+)["']""")
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "dispatch_alert" in text or "_notify_event" in text:
+            found |= set(literal_pattern.findall(text))
+    missing = {event for event in found if event not in a.EVENT_INFO and event != "event"}
+    assert missing == set(), f"unregistered alert events: {sorted(missing)}"
+
+
+def test_dispatch_returns_false_when_outbox_rejects_notice(tmp_path, monkeypatch) -> None:
+    """용량 초과로 NOTICE가 거부되면 dispatch는 False를 반환한다."""
+    import pandas as pd
+    from src.live.alert_outbox import AlertOutbox, resolve_outbox_path
+    from src.live.settings import LiveSettings
+    import src.live.alerting as a
+
+    settings = LiveSettings(alert_outbox_path=str(tmp_path / "outbox.json"), alert_outbox_max_records=1, alert_webhook_url="https://h.example")
+    box = AlertOutbox.from_settings(resolve_outbox_path(settings), settings)
+    now = pd.Timestamp("2026-08-24 01:10Z")
+    assert box.enqueue(event="day_skipped", detail="d", decision_time=None, dedupe_key="k0", channels=frozenset({"webhook"}), now=now) is True
+    monkeypatch.setattr(a, "event_severity", lambda event: "NOTICE")
+    assert a.dispatch_alert(settings, event="cycle_complete", detail="n", decision_time=None, dedupe_key="notice1", now=now) is False
+
+
+def test_dispatch_survives_immediate_drain_failure(tmp_path, monkeypatch) -> None:
+    """즉시 전송 시 drain 예외는 삼키고 durable hand-off(True)를 반환한다."""
+    import pandas as pd
+    from src.live.settings import LiveSettings
+    import src.live.alerting as a
+
+    settings = LiveSettings(alert_outbox_path=str(tmp_path / "outbox.json"), alert_webhook_url="https://h.example")
+    monkeypatch.setattr("src.live.alert_outbox.AlertOutbox.drain", lambda self, deliver, *, now, blocking: (_ for _ in ()).throw(RuntimeError("drain down")))
+    assert a.dispatch_alert(settings, event="day_skipped", detail="d", decision_time=None, dedupe_key="k1", now=pd.Timestamp("2026-08-24 01:10Z")) is True
+
+
+def test_dispatch_never_raises_on_enqueue_failure(monkeypatch) -> None:
+    """enqueue 경로 예외도 False로 흡수된다."""
+    import pandas as pd
+    from src.live.settings import LiveSettings
+    import src.live.alerting as a
+
+    settings = LiveSettings(alert_webhook_url="https://h.example")
+    monkeypatch.setattr("src.live.alert_outbox.AlertOutbox.enqueue", lambda self, **k: (_ for _ in ()).throw(OSError("disk full")))
+    assert a.dispatch_alert(settings, event="day_skipped", detail="d", decision_time=None, dedupe_key="k1", now=pd.Timestamp("2026-08-24 01:10Z")) is False
+
+
+def test_drain_alerts_never_raises_on_outbox_failure(monkeypatch) -> None:
+    """drain 경로 예외는 빈 리포트로 흡수된다."""
+    import pandas as pd
+    from src.live.settings import LiveSettings
+    import src.live.alerting as a
+
+    settings = LiveSettings(alert_webhook_url="https://h.example")
+
+    def _boom(*a, **k):
+        raise OSError("lock down")
+
+    monkeypatch.setattr("src.live.alert_outbox.resolve_outbox_path", _boom)
+    report = a.drain_alerts(settings, now=pd.Timestamp("2026-08-24 01:10Z"), blocking=True)
+    assert (report.attempted, report.completed, report.expired, report.pending) == (0, 0, 0, 0)
+
+
+def test_deliver_record_failure_isolated_per_channel(tmp_path, monkeypatch) -> None:
+    """채널 전송 예외는 False로 격리되고 로그 후 계속된다."""
+    import pandas as pd
+    from src.live.alert_outbox import AlertRecord
+    from src.live.settings import LiveSettings
+    import src.live.alerting as a
+
+    settings = LiveSettings(alert_outbox_path=str(tmp_path / "outbox.json"), alert_webhook_url="https://h.example")
+    record = AlertRecord(
+        dedupe_key="k", event="day_skipped", severity="CRITICAL", detail="d", decision_time=None,
+        created_at=pd.Timestamp("2026-08-24 01:10Z"), pending_channels=frozenset({"webhook"}),
+        delivered_channels=frozenset(), attempts=0, next_attempt_at=pd.Timestamp("2026-08-24 01:10Z"),
+        completed_at=None, expired=False,
+    )
+
+    def _boom(*a, **k):
+        raise RuntimeError("transport down")
+
+    monkeypatch.setattr(a, "post_alert", _boom)
+    assert a._deliver_record(settings, record, "webhook", pd.Timestamp("2026-08-24 01:10Z")) is False
+    assert a._deliver_record(settings, record, "bogus", pd.Timestamp("2026-08-24 01:10Z")) is False

@@ -1214,3 +1214,460 @@ def test_heartbeat_interval_rejected() -> None:
         MarketRecorderConfig(heartbeat_interval_s=0)
     with pytest.raises(ValidationError, match="heartbeat_interval_s"):
         MarketRecorderConfig(heartbeat_interval_s=-5.0)
+
+
+def test_sampler_stores_remaining_rows_when_one_row_malformed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One bad row per sample is isolated; the grid still succeeds."""
+    import json as _json
+
+    flag = _Flag()
+    clock = _ManualClock(pd.Timestamp("2026-09-22T10:00:20Z"))
+    calls = {"n": 0}
+    cap = tmp_path / "cap"
+
+    async def _fetch(url: str) -> bytes:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            flag.requested = True
+        payload = [
+            dict(_BOOK_ROW, symbol="BTCUSDT"),
+            dict(_BOOK_ROW, symbol="ETHUSDT"),
+            dict(_BOOK_ROW, symbol="BADUSDT", bidQty=""),
+        ]
+        return _json.dumps(payload).encode()
+
+    async def _scenario() -> None:
+        await _drive_sampler(
+            root=cap, fetch=_fetch, clock=clock, flag=flag,
+            config=_default_config(snapshot_max_rejected_fraction=0.5),
+        ).run()
+
+    with caplog.at_level(logging.WARNING, logger="src.market_data.streams.recorder"):
+        _run(_scenario())
+    out = load_snapshot_dataset(
+        cap, "book_ticker",
+        start=pd.Timestamp("2026-09-22T10:00:00Z"), end=pd.Timestamp("2026-09-22T10:04:00Z"),
+    )
+    assert len(out["captured_at"].unique()) == 2
+    assert set(out["symbol"]) == {"BTCUSDT", "ETHUSDT"}
+    assert len(out) == 4
+    rejected = [r for r in caplog.records if "ROWS_REJECTED" in r.message]
+    assert len(rejected) == 2
+    assert all("non_numeric_bid_qty:1" in r.message for r in rejected)
+
+
+def test_sampler_treats_structural_drift_as_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every row failing the contract fails the slot without buffering."""
+    import json as _json
+
+    flag = _Flag()
+    clock = _ManualClock(pd.Timestamp("2026-09-22T10:00:20Z"))
+    cap = tmp_path / "cap"
+    state = {"n": 0}
+
+    async def _fetch(url: str) -> bytes:
+        state["n"] += 1
+        if state["n"] >= 7:
+            flag.requested = True
+        bad = {k: v for k, v in dict(_BOOK_ROW).items() if k != "time"}
+        return _json.dumps([dict(bad, symbol="AUSDT"), dict(bad, symbol="BUSDT")]).encode()
+
+    sampler = None
+
+    async def _scenario() -> None:
+        nonlocal sampler
+        sampler = _drive_sampler(root=cap, fetch=_fetch, clock=clock, flag=flag)
+        await sampler.run()
+
+    with caplog.at_level(logging.WARNING, logger="src.market_data.streams.recorder"):
+        _run(_scenario())
+    assert sampler is not None
+    assert sampler._buffer == []
+    assert sampler._failures >= 1
+    assert any("status=FAILED" in r.message for r in caplog.records)
+
+
+def test_sampler_rejected_fraction_config_validated() -> None:
+    """The tolerated rejected fraction must lie strictly inside (0, 1)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="snapshot_max_rejected_fraction"):
+        MarketRecorderConfig(snapshot_max_rejected_fraction=0)
+    with pytest.raises(ValidationError, match="snapshot_max_rejected_fraction"):
+        MarketRecorderConfig(snapshot_max_rejected_fraction=1.0)
+
+
+def test_flush_failure_published_while_fetches_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writes can fail while fetching stays healthy; the heartbeat shows it."""
+    import src.market_data.streams.recorder as recorder_mod
+
+    flag = _Flag()
+    clock = _ManualClock(pd.Timestamp("2026-09-22T10:00:20Z"))
+    calls = {"n": 0}
+    cap = tmp_path / "cap"
+
+    async def _fetch(url: str) -> bytes:
+        calls["n"] += 1
+        if calls["n"] >= 9:
+            flag.requested = True
+        return json.dumps([dict(_BOOK_ROW)]).encode()
+
+    def _boom(frame: Any, root: Any, dataset: str) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(recorder_mod, "write_hourly_partition", _boom)
+
+    async def _scenario() -> None:
+        await _drive_sampler(
+            root=cap, fetch=_fetch, clock=clock, flag=flag,
+            config=_default_config(flush_interval_s=120.0),
+        ).run()
+
+    _run(_scenario())
+    heartbeat = json.loads((cap / "recorder_heartbeat.json").read_text(encoding="utf-8"))
+    assert heartbeat["schema_version"] == 2
+    book = heartbeat["book_ticker"]
+    assert book["consecutive_flush_failures"] >= 3
+    assert book["pending_rows"] > 0
+    assert book["last_persisted_at"] is None
+    assert book["consecutive_failures"] == 0
+
+
+def test_buffer_overflow_counted_in_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rows discarded by the buffer bound are counted, not just logged."""
+    import src.market_data.streams.recorder as recorder_mod
+
+    flag = _Flag()
+    clock = _ManualClock(pd.Timestamp("2026-09-22T10:00:20Z"))
+    calls = {"n": 0}
+    cap = tmp_path / "cap"
+
+    async def _fetch(url: str) -> bytes:
+        calls["n"] += 1
+        if calls["n"] >= 12:
+            flag.requested = True
+        return json.dumps([dict(_BOOK_ROW)]).encode()
+
+    def _boom(frame: Any, root: Any, dataset: str) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(recorder_mod, "write_hourly_partition", _boom)
+    with caplog.at_level(logging.ERROR, logger="src.market_data.streams.recorder"):
+        async def _scenario() -> None:
+            await _drive_sampler(
+                root=cap, fetch=_fetch, clock=clock, flag=flag,
+                config=_default_config(flush_interval_s=120.0),
+            ).run()
+
+        _run(_scenario())
+    assert any("BUFFER_OVERFLOW" in record.message for record in caplog.records)
+    heartbeat = json.loads((cap / "recorder_heartbeat.json").read_text(encoding="utf-8"))
+    assert heartbeat["book_ticker"]["dropped_rows_total"] > 0
+
+
+def test_heartbeat_republished_per_grid_point(tmp_path: Path) -> None:
+    """Failed grid points reach the heartbeat file without waiting for a flush."""
+    flag = _Flag()
+    clock = _ManualClock(pd.Timestamp("2026-09-22T10:00:20Z"))
+    calls = {"n": 0}
+    cap = tmp_path / "cap"
+
+    async def _fetch(url: str) -> bytes:
+        calls["n"] += 1
+        if calls["n"] >= 19:
+            flag.requested = True
+        raise RuntimeError("fetch down")
+
+    async def _scenario() -> None:
+        await _drive_sampler(
+            root=cap, fetch=_fetch, clock=clock, flag=flag,
+            config=_default_config(flush_interval_s=3600.0),
+        ).run()
+
+    _run(_scenario())
+    heartbeat = json.loads((cap / "recorder_heartbeat.json").read_text(encoding="utf-8"))
+    assert heartbeat["book_ticker"]["consecutive_failures"] == 3
+    assert list((cap / "book_ticker").rglob("*.parquet")) == []
+
+
+def test_capture_ratio_counts_skipped_points(tmp_path: Path) -> None:
+    """Skipped and failed points are expected but not captured in the window."""
+    import json as _json
+
+    flag = _Flag()
+    clock = _ManualClock(pd.Timestamp("2026-09-22T10:00:20Z"))
+    cap = tmp_path / "cap"
+    calls = {"n": 0}
+
+    async def _fetch(url: str) -> bytes:
+        calls["n"] += 1
+        if calls["n"] > 7:
+            raise RuntimeError("fetch down")
+        return _json.dumps([dict(_BOOK_ROW)]).encode()
+
+    async def _scenario() -> None:
+        sampler = _drive_sampler(root=cap, fetch=_fetch, clock=clock, flag=flag)
+        base = pd.Timestamp("2026-09-22T09:50:00Z")
+        sampler._first_target = base
+        for i in range(7):
+            assert await sampler._sample_slot(base + pd.Timedelta(minutes=i))
+        assert not await sampler._sample_slot(base + pd.Timedelta(minutes=7))
+        sampler._register_skips(
+            [(base + pd.Timedelta(minutes=8), "lag"), (base + pd.Timedelta(minutes=9), "lag")]
+        )
+        entry = sampler._heartbeat_entry(clock.now())
+        assert entry.window_expected_points == 10
+        assert entry.window_captured_points == 7
+
+    _run(_scenario())
+
+
+def test_clean_sample_resets_consecutive_rejecting_points(tmp_path: Path) -> None:
+    """A sample with no rejected row clears the rejecting streak."""
+    import json as _json
+
+    flag = _Flag()
+    clock = _ManualClock(pd.Timestamp("2026-09-22T10:00:20Z"))
+    cap = tmp_path / "cap"
+    calls = {"n": 0}
+
+    async def _fetch(url: str) -> bytes:
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            payload = [dict(_BOOK_ROW, symbol="BTCUSDT"), dict(_BOOK_ROW, symbol="BADUSDT", bidQty="")]
+        else:
+            payload = [dict(_BOOK_ROW, symbol="BTCUSDT"), dict(_BOOK_ROW, symbol="ETHUSDT")]
+        return _json.dumps(payload).encode()
+
+    async def _scenario() -> None:
+        sampler = _drive_sampler(
+            root=cap, fetch=_fetch, clock=clock, flag=flag,
+            config=_default_config(snapshot_max_rejected_fraction=0.6),
+        )
+        grid = pd.Timestamp("2026-09-22T10:00:00Z")
+        for _ in range(3):
+            assert await sampler._sample_slot(grid)
+        assert sampler._consecutive_rejecting == 3
+        assert await sampler._sample_slot(grid)
+        assert sampler._consecutive_rejecting == 0
+        assert sampler._rejected_rows_last_sample == 0
+
+    _run(_scenario())
+
+
+def test_reference_endpoint_failure_does_not_block_others(tmp_path: Path) -> None:
+    """One failing endpoint leaves the others captured and the day incomplete."""
+    flag = _Flag()
+    t006 = pd.Timestamp("2026-09-22T00:06:00Z")
+    t1300 = pd.Timestamp("2026-09-22T13:00:00Z")
+    state = {"n": 0}
+
+    def _now() -> pd.Timestamp:
+        state["n"] += 1
+        return t006 if state["n"] < 3000 else t1300
+
+    async def _sleep(delay: float) -> None:
+        await asyncio.sleep(0)
+        if state["n"] > 4000:
+            flag.requested = True
+
+    async def _fetch(url: str) -> bytes:
+        if "bookTicker" in url:
+            return json.dumps([dict(_BOOK_ROW)]).encode()
+        if "premiumIndex" in url:
+            return json.dumps([dict(_PREMIUM_ROW)]).encode()
+        if "fundingInfo" in url:
+            raise RuntimeError("403 forbidden")
+        return _REF_BYTES
+
+    cap = tmp_path / "cap"
+    _run(
+        run_market_recorder(
+            _default_config(), capture_root=cap,
+            liquidations_dir=tmp_path / "liq", shutdown=flag, fetch=_fetch,
+            liquidation_runner=lambda **k: _quiet_liquidations(flag, **k),
+            now_fn=_now, sleep=_sleep,
+        )
+    )
+    assert (cap / "reference" / "exchange_info" / "20260922.json.gz").exists()
+    assert (cap / "reference" / "asset_index" / "20260922.json.gz").exists()
+    assert not (cap / "reference" / "funding_info" / "20260922.json.gz").exists()
+    heartbeat = json.loads((cap / "recorder_heartbeat.json").read_text(encoding="utf-8"))
+    ref = heartbeat["reference"]
+    assert ref["endpoints"]["funding_info"]["captured"] is False
+    assert ref["endpoints"]["funding_info"]["consecutive_failures"] >= 1
+    assert ref["endpoints"]["exchange_info"]["captured"] is True
+    assert ref["last_success_at"] is None
+
+
+def test_reference_failed_endpoint_retried_after_interval(tmp_path: Path) -> None:
+    """A failed endpoint waits out the retry interval; captured ones are never re-fetched."""
+    flag = _Flag()
+    start = pd.Timestamp("2026-09-22T00:06:00Z")
+    clock = _ManualClock(start)
+    fetched: list[tuple[str, pd.Timestamp]] = []
+
+    async def _fetch(url: str) -> bytes:
+        if "bookTicker" in url:
+            return json.dumps([dict(_BOOK_ROW)]).encode()
+        if "premiumIndex" in url:
+            return json.dumps([dict(_PREMIUM_ROW)]).encode()
+        fetched.append((url, clock.now()))
+        if "fundingInfo" in url:
+            raise RuntimeError("403 forbidden")
+        return _REF_BYTES
+
+    cap = tmp_path / "cap"
+    _run(
+        run_market_recorder(
+            _default_config(reference_retry_interval_s=600.0), capture_root=cap,
+            liquidations_dir=tmp_path / "liq", shutdown=flag, fetch=_fetch,
+            liquidation_runner=lambda **k: _quiet_liquidations(flag, **k),
+            now_fn=clock.now, sleep=_stop_after_elapsed(flag, clock, start, 2000.0),
+        )
+    )
+    funding_times = [ts for url, ts in fetched if "fundingInfo" in url]
+    assert len(funding_times) >= 2
+    for first, second in itertools.pairwise(funding_times):
+        assert (second - first).total_seconds() >= 600.0
+    assert len([url for url, _ in fetched if "exchangeInfo" in url]) == 1
+
+
+def test_reference_restart_recognizes_captured_files(tmp_path: Path) -> None:
+    """Files already on disk are published as captured without re-fetching."""
+    from src.market_data.streams.snapshots import write_reference_snapshot
+
+    cap = tmp_path / "cap"
+    now = pd.Timestamp("2026-09-22T00:06:00Z")
+    write_reference_snapshot(_REF_BYTES, cap, "exchange_info", captured_at=now)
+    flag = _Flag()
+    start = now
+    clock = _ManualClock(start)
+    fetched: list[str] = []
+
+    async def _fetch(url: str) -> bytes:
+        if "bookTicker" in url:
+            return json.dumps([dict(_BOOK_ROW)]).encode()
+        if "premiumIndex" in url:
+            return json.dumps([dict(_PREMIUM_ROW)]).encode()
+        fetched.append(url)
+        return _REF_BYTES
+
+    _run(
+        run_market_recorder(
+            _default_config(), capture_root=cap,
+            liquidations_dir=tmp_path / "liq", shutdown=flag, fetch=_fetch,
+            liquidation_runner=lambda **k: _quiet_liquidations(flag, **k),
+            now_fn=clock.now, sleep=_stop_after_elapsed(flag, clock, start, 300.0),
+        )
+    )
+    assert not any("exchangeInfo" in url for url in fetched)
+    heartbeat = json.loads((cap / "recorder_heartbeat.json").read_text(encoding="utf-8"))
+    assert heartbeat["reference"]["endpoints"]["exchange_info"]["captured"] is True
+
+
+def test_reference_day_rollover_records_previous_completeness(tmp_path: Path) -> None:
+    """Midnight snapshots the finished day before resetting for the new one."""
+    flag = _Flag()
+    day_one = pd.Timestamp("2026-09-22T00:06:00Z")
+    day_two = pd.Timestamp("2026-09-23T00:06:00Z")
+    state = {"n": 0}
+
+    def _now() -> pd.Timestamp:
+        state["n"] += 1
+        return day_one if state["n"] < 2000 else day_two
+
+    async def _sleep(delay: float) -> None:
+        await asyncio.sleep(0)
+        if state["n"] > 3000:
+            flag.requested = True
+
+    async def _fetch(url: str) -> bytes:
+        if "bookTicker" in url:
+            return json.dumps([dict(_BOOK_ROW)]).encode()
+        if "premiumIndex" in url:
+            return json.dumps([dict(_PREMIUM_ROW)]).encode()
+        if "fundingInfo" in url:
+            raise RuntimeError("403 forbidden")
+        return _REF_BYTES
+
+    cap = tmp_path / "cap"
+    _run(
+        run_market_recorder(
+            _default_config(reference_retry_interval_s=600.0), capture_root=cap,
+            liquidations_dir=tmp_path / "liq", shutdown=flag, fetch=_fetch,
+            liquidation_runner=lambda **k: _quiet_liquidations(flag, **k),
+            now_fn=_now, sleep=_sleep,
+        )
+    )
+    heartbeat = json.loads((cap / "recorder_heartbeat.json").read_text(encoding="utf-8"))
+    ref = heartbeat["reference"]
+    assert ref["previous_day"] == "20260922"
+    assert ref["previous_day_complete"] is False
+    assert ref["day"] == "20260923"
+
+
+def test_recorder_config_new_fields_validated() -> None:
+    """Pending bound, retry cadence, and health window reject bad values."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="liquidation_max_pending_events"):
+        MarketRecorderConfig(liquidation_max_pending_events=0)
+    with pytest.raises(ValidationError, match="reference_retry_interval_s"):
+        MarketRecorderConfig(reference_retry_interval_s=0)
+    with pytest.raises(ValidationError, match="grid_health_window_s"):
+        MarketRecorderConfig(grid_health_window_s=60.0)
+    config = MarketRecorderConfig(
+        liquidation_max_pending_events=10,
+        reference_retry_interval_s=60.0,
+        grid_health_window_s=3600.0,
+    )
+    assert config.liquidation_max_pending_events == 10
+    assert config.reference_retry_interval_s == 60.0
+    assert config.grid_health_window_s == 3600.0
+
+
+def test_reference_marks_externally_captured_file(tmp_path: Path) -> None:
+    """A file appearing mid-run is adopted without another fetch."""
+    import gzip as _gzip
+
+    flag = _Flag()
+    start = pd.Timestamp("2026-09-22T00:06:00Z")
+    clock = _ManualClock(start)
+    calls = {"funding": 0}
+    cap = tmp_path / "cap"
+
+    async def _fetch(url: str) -> bytes:
+        if "bookTicker" in url:
+            return json.dumps([dict(_BOOK_ROW)]).encode()
+        if "premiumIndex" in url:
+            return json.dumps([dict(_PREMIUM_ROW)]).encode()
+        if "fundingInfo" in url:
+            calls["funding"] += 1
+            if calls["funding"] == 2:
+                target = cap / "reference" / "funding_info" / "20260922.json.gz"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(_gzip.compress(_REF_BYTES, compresslevel=9, mtime=0))
+            raise RuntimeError("403 forbidden")
+        return _REF_BYTES
+
+    _run(
+        run_market_recorder(
+            _default_config(reference_retry_interval_s=600.0), capture_root=cap,
+            liquidations_dir=tmp_path / "liq", shutdown=flag, fetch=_fetch,
+            liquidation_runner=lambda **k: _quiet_liquidations(flag, **k),
+            now_fn=clock.now, sleep=_stop_after_elapsed(flag, clock, start, 2000.0),
+        )
+    )
+    heartbeat = json.loads((cap / "recorder_heartbeat.json").read_text(encoding="utf-8"))
+    ref = heartbeat["reference"]
+    assert ref["endpoints"]["funding_info"]["captured"] is True
+    assert ref["last_success_at"] is not None

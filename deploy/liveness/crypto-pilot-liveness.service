@@ -1,0 +1,8 @@
+[Unit]
+Description=crypto-pilot daemon liveness check (one-shot)
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh
+TimeoutStartSec=240
