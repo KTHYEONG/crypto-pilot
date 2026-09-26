@@ -573,3 +573,11 @@ def test_deploy_workflow_installs_and_enables_liveness_unit() -> None:
     assert "deploy/liveness/crypto-pilot-liveness.timer" in workflow
     assert workflow.index("mv -f ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh.new") < workflow.index("systemctl --user daemon-reload")
     assert workflow.index("systemctl --user daemon-reload") < workflow.index("systemctl --user enable --now crypto-pilot-liveness.timer")
+
+
+def test_deploy_workflow_never_ships_sealed_artifacts() -> None:
+    """Sealed .enc artifacts are untracked; a CI scp of them fails the whole deploy on a clean checkout."""
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert ".enc" not in "".join(line for line in workflow.splitlines() if line.lstrip().startswith("scp "))
+

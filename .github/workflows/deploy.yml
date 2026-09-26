@@ -102,7 +102,9 @@ jobs:
 
           scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/crypto-pilot/"
           # .env는 서버에 이미 배치된 것을 정본으로 쓴다(sops 폐기, CI가 더 이상 덮어쓰지 않음).
-          scp $SSH_OPTS "$PARAMS/frozen_unit_returns_maker.parquet.enc" "$PARAMS/venue_rules_20260921.json" \
+          # 봉인된 부트스트랩 아티팩트(deploy/mhs/*.enc)는 공개 리포에 추적하지 않으므로 CI가 배포하지 않는다.
+          # 서버의 ~/crypto-pilot/deploy/mhs/ 사본을 정본으로 쓴다(.env와 동일한 취급).
+          scp $SSH_OPTS "$PARAMS/venue_rules_20260921.json" \
             "$REMOTE_USER@$HOST:~/crypto-pilot/$PARAMS/"
           # repo-owned 백업 유닛이 소비하는 필터. 공용 타이머가 아닌 crypto-pilot-backup.service가
           # --filter-from으로 참조하므로, 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.
