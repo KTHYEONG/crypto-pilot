@@ -37,6 +37,9 @@ def _thresholds() -> RecorderWatchThresholds:
         normalizer_max_lag_s=600.0,
         normalizer_max_consecutive_failures=5,
         compaction_max_delay_s=10800.0,
+        startup_grace_s=120.0,
+        prune_blocked_alert_after_s=21600.0,
+        local_disk_budget_bytes=8 * 1024**3,
     )
 
 
@@ -313,6 +316,9 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
         normalizer_max_lag_s=300.0,
         normalizer_max_consecutive_failures=4,
         compaction_max_delay_s=7200.0,
+        startup_grace_s=120.0,
+        prune_blocked_alert_after_s=21600.0,
+        local_disk_budget_bytes=8 * 1024**3,
     )
 
 
@@ -414,6 +420,9 @@ def test_production_thresholds_wired_from_settings() -> None:
         recorder_normalizer_max_lag_s=500.0,
         recorder_normalizer_max_consecutive_failures=4,
         recorder_compaction_max_delay_s=9000.0,
+        recorder_startup_grace_s=90.0,
+        recorder_prune_blocked_alert_after_s=7200.0,
+        recorder_local_disk_budget_bytes=4 * 1024**3,
     )
     watch = _build(settings, alert=lambda event, detail: True)
     assert watch is not None
@@ -431,6 +440,9 @@ def test_production_thresholds_wired_from_settings() -> None:
     assert watch._thresholds.normalizer_max_lag_s == 500.0
     assert watch._thresholds.normalizer_max_consecutive_failures == 4
     assert watch._thresholds.compaction_max_delay_s == 9000.0
+    assert watch._thresholds.startup_grace_s == 90.0
+    assert watch._thresholds.prune_blocked_alert_after_s == 7200.0
+    assert watch._thresholds.local_disk_budget_bytes == 4 * 1024**3
     assert not hasattr(watch._thresholds, "liquidation_max_failed_connections")
 
 
