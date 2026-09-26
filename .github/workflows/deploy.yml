@@ -111,6 +111,10 @@ jobs:
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/backup ~/.config/systemd/user"
           scp $SSH_OPTS deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new"
           scp $SSH_OPTS deploy/backup/crypto-pilot-backup.service deploy/backup/crypto-pilot-backup.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
+          # 데몬 생존 감시(호스트 타이머): 죽은 데몬은 스스로 알릴 수 없으므로 데몬과 별개 프로세스로 감시한다.
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/liveness"
+          scp $SSH_OPTS deploy/liveness/crypto-pilot-liveness.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh.new"
+          scp $SSH_OPTS deploy/liveness/crypto-pilot-liveness.service deploy/liveness/crypto-pilot-liveness.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
 
           # PAT/USER는 로컬에서 확장해 원격 스크립트에 주입(GitHub PAT 문자셋은 셸 안전).
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF
@@ -119,8 +123,11 @@ jobs:
           mv -f ~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new ~/crypto-pilot/deploy/crypto-pilot.rclone-filter
           mv -f ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
           chmod +x ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
+          mv -f ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh.new ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh
+          chmod +x ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh
           systemctl --user daemon-reload
           systemctl --user enable --now crypto-pilot-backup.timer
+          systemctl --user enable --now crypto-pilot-liveness.timer
           echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
           if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
           bash ~/crypto-pilot/deploy/compose_recreate.sh '$IMAGE:latest'
