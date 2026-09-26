@@ -20,7 +20,7 @@ def test_no_nonschema_log_tags_in_src() -> None:
     assert offenders == [], f"non-schema log tags: {sorted(set(offenders))}"
 
 def test_compose_mounts_state_dir_on_every_service() -> None:
-    """I-STATE-SURVIVES-REDEPLOY: every long-running service persists data/state."""
+    """I-STATE-SURVIVES-REDEPLOY: only mhs-live persists data/state."""
     from pathlib import Path
 
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
@@ -32,7 +32,9 @@ def test_compose_mounts_state_dir_on_every_service() -> None:
         f"{compose.count(mount)}"
     )
     assert "mhs-live:" in compose
-    assert ("liquidation-collector:" in compose or "market-recorder:" in compose)
+    assert "market-normalizer:" in compose
+    assert "capture-blue:" in compose
+    assert "capture-green:" in compose
     assert service_blocks  # compose parsed into indented blocks
 
 def test_discovery_start_names_are_unambiguous() -> None:

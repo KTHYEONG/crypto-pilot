@@ -15,6 +15,12 @@
   "src/application/ops/artifact_seal.py": {
     "testing": "tests/unit/application/test_artifact_seal.py"
   },
+  "src/application/ops/capture_fingerprint.py": {
+    "testing": "tests/unit/application/test_capture_fingerprint.py"
+  },
+  "src/application/ops/capture_handover.py": {
+    "testing": "tests/unit/application/ops/test_capture_handover.py"
+  },
   "src/application/ops/daemon_idle_gate.py": {
     "testing": [
       "tests/unit/application/ops/test_daemon_idle_gate.py",
@@ -23,9 +29,6 @@
   },
   "src/application/ops/gdrive_cleanup.py": {
     "testing": "tests/unit/application/test_gdrive_cleanup.py"
-  },
-  "src/application/ops/recorder_fingerprint.py": {
-    "testing": "tests/unit/application/test_recorder_fingerprint.py"
   },
   "src/backtests/contracts.py": {
     "testing": [
@@ -318,40 +321,39 @@
   "src/market_data/storage/schemas.py": {
     "testing": "tests/unit/market_data/services/test_metrics_live_tail.py"
   },
+  "src/market_data/streams/compaction.py": {
+    "testing": "tests/unit/market_data/test_compaction.py"
+  },
   "src/market_data/streams/coverage.py": {
     "testing": [
       "tests/unit/live/test_depth_capture.py",
       "tests/unit/market_data/test_liquidations.py",
-      "tests/unit/market_data/test_live_capture_coverage.py",
-      "tests/unit/market_data/test_market_recorder.py"
+      "tests/unit/market_data/test_live_capture_coverage.py"
     ]
+  },
+  "src/market_data/streams/dedupe_window.py": {
+    "testing": "tests/unit/market_data/test_normalizer.py"
+  },
+  "src/market_data/streams/heartbeat_v3.py": {
+    "testing": "tests/unit/market_data/test_heartbeat_v3.py"
   },
   "src/market_data/streams/liquidations.py": {
     "testing": "tests/unit/market_data/test_liquidations.py"
   },
-  "src/market_data/streams/recorder.py": {
-    "testing": [
-      "tests/unit/application/test_recorder_fingerprint.py",
-      "tests/unit/cli/commands/test_data.py",
-      "tests/unit/live/test_deadman.py",
-      "tests/unit/live/test_recorder_watch.py",
-      "tests/unit/market_data/test_market_recorder.py",
-      "tests/unit/market_data/test_recorder_health.py",
-      "tests/unit/market_data/test_recorder_main.py",
-      "tests/unit/test_deployment_assets.py"
-    ]
+  "src/market_data/streams/normalizer.py": {
+    "testing": "tests/unit/market_data/test_normalizer.py"
+  },
+  "src/market_data/streams/normalizer_main.py": {
+    "testing": "tests/unit/market_data/test_normalizer_main.py"
   },
   "src/market_data/streams/recorder_health.py": {
     "testing": "tests/unit/market_data/test_recorder_health.py"
   },
-  "src/market_data/streams/recorder_main.py": {
-    "testing": "tests/unit/market_data/test_recorder_main.py"
+  "src/market_data/streams/retention.py": {
+    "testing": "tests/unit/market_data/test_retention.py"
   },
   "src/market_data/streams/snapshots.py": {
-    "testing": [
-      "tests/unit/market_data/test_live_capture_snapshots.py",
-      "tests/unit/market_data/test_market_recorder.py"
-    ]
+    "testing": "tests/unit/market_data/test_live_capture_snapshots.py"
   },
   "src/mhs/account_ledger.py": {
     "testing": "tests/unit/mhs/test_account_ledger.py"
@@ -832,5 +834,8 @@
   },
   "src/quant/universe/pit_universe.py": {
     "testing": "tests/unit/quant/universe/test_pit_universe.py"
+  },
+  "src/capture/journal.py": {
+    "testing": "tests/unit/capture/test_journal.py"
   }
 }

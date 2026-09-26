@@ -17,7 +17,7 @@ import pandas as pd
 
 from src.common.paths import LIVE_CAPTURE_DIR
 from src.live.settings import LiveSettings
-from src.market_data.streams.recorder import HEARTBEAT_NAME
+from src.market_data.streams.heartbeat_v3 import HEARTBEAT_NAME
 from src.market_data.streams.recorder_health import (
     RecorderFinding,
     RecorderWatchThresholds,
@@ -156,7 +156,6 @@ def build_recorder_watchdog(
     thresholds = RecorderWatchThresholds(
         heartbeat_stale_s=settings.recorder_heartbeat_stale_s,
         liquidation_silence_s=settings.recorder_liquidation_silence_s,
-        liquidation_max_failed_connections=settings.recorder_liquidation_max_failed_connections,
         sampler_stale_s=settings.recorder_sampler_stale_s,
         sampler_max_consecutive_failures=settings.recorder_sampler_max_consecutive_failures,
         min_capture_ratio=settings.recorder_min_capture_ratio,
@@ -166,6 +165,12 @@ def build_recorder_watchdog(
         reference_grace_s=settings.recorder_reference_grace_s,
         rejected_fraction_alert=settings.recorder_rejected_fraction_alert,
         rejected_max_consecutive_points=settings.recorder_rejected_max_consecutive_points,
+        capture_stale_s=settings.recorder_capture_stale_s,
+        capture_ready_grace_s=settings.recorder_capture_ready_grace_s,
+        capture_dual_active_max_s=settings.recorder_capture_dual_active_max_s,
+        normalizer_max_lag_s=settings.recorder_normalizer_max_lag_s,
+        normalizer_max_consecutive_failures=settings.recorder_normalizer_max_consecutive_failures,
+        compaction_max_delay_s=settings.recorder_compaction_max_delay_s,
     )
     return RecorderWatchdog(
         heartbeat_path=LIVE_CAPTURE_DIR / HEARTBEAT_NAME,

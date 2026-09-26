@@ -110,7 +110,8 @@ jobs:
           # --filter-from으로 참조하므로, 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.
           scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new"
           scp $SSH_OPTS deploy/compose_recreate.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"
-          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/backup ~/.config/systemd/user"
+          scp $SSH_OPTS src/application/ops/capture_handover.py "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/capture_handover.py.new"
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/backup ~/crypto-pilot/deploy/backup/status ~/.config/systemd/user"
           scp $SSH_OPTS deploy/backup/crypto-pilot-backup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new"
           scp $SSH_OPTS deploy/backup/crypto-pilot-backup.service deploy/backup/crypto-pilot-backup.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
           # 데몬 생존 감시(호스트 타이머): 죽은 데몬은 스스로 알릴 수 없으므로 데몬과 별개 프로세스로 감시한다.
@@ -123,6 +124,7 @@ jobs:
           set -e
           cd ~/crypto-pilot
           mv -f ~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new ~/crypto-pilot/deploy/crypto-pilot.rclone-filter
+          mv -f ~/crypto-pilot/deploy/capture_handover.py.new ~/crypto-pilot/deploy/capture_handover.py
           mv -f ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
           chmod +x ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
           mv -f ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh.new ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh

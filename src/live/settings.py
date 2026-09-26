@@ -156,7 +156,6 @@ class LiveSettings(BaseSettings):
     # 청산 무음 알림은 스트림의 EVENT_STALL 재연결 타임아웃(600 s)보다 길게 잡는다:
     # 스트림이 한 번 스스로 재연결을 시도해 보고, 그래도 이벤트가 없으면 알림한다.
     recorder_liquidation_silence_s: float = 900.0
-    recorder_liquidation_max_failed_connections: int = 5
     recorder_sampler_stale_s: float = 1800.0
     recorder_sampler_max_consecutive_failures: int = 5
     recorder_min_capture_ratio: float = 0.9
@@ -166,6 +165,12 @@ class LiveSettings(BaseSettings):
     recorder_reference_grace_s: float = 3600.0
     recorder_rejected_fraction_alert: float = 0.01
     recorder_rejected_max_consecutive_points: int = 60
+    recorder_capture_stale_s: float = 120.0
+    recorder_capture_ready_grace_s: float = 900.0
+    recorder_capture_dual_active_max_s: float = 1200.0
+    recorder_normalizer_max_lag_s: float = 600.0
+    recorder_normalizer_max_consecutive_failures: int = 5
+    recorder_compaction_max_delay_s: float = 10800.0
     # Frozen strategy digest stamped onto execution-quality observations so
     # forward evidence can be attributed to an immutable strategy version.
     strategy_digest: str | None = None
@@ -248,6 +253,11 @@ class LiveSettings(BaseSettings):
         "recorder_sampler_stale_s",
         "recorder_persist_stale_s",
         "recorder_reference_grace_s",
+        "recorder_capture_stale_s",
+        "recorder_capture_ready_grace_s",
+        "recorder_capture_dual_active_max_s",
+        "recorder_normalizer_max_lag_s",
+        "recorder_compaction_max_delay_s",
     )
     @classmethod
     def _positive_recorder_seconds(cls, value: float, info: ValidationInfo) -> float:
@@ -255,18 +265,12 @@ class LiveSettings(BaseSettings):
             raise ValueError(f"{info.field_name} must be positive")
         return value
 
-    @field_validator("recorder_liquidation_max_failed_connections")
-    @classmethod
-    def _positive_recorder_max_failed(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("recorder_liquidation_max_failed_connections must be >= 1")
-        return value
-
     @field_validator(
         "recorder_sampler_max_consecutive_failures",
         "recorder_capture_ratio_min_points",
         "recorder_max_consecutive_flush_failures",
         "recorder_rejected_max_consecutive_points",
+        "recorder_normalizer_max_consecutive_failures",
     )
     @classmethod
     def _positive_recorder_counts(cls, value: int, info: ValidationInfo) -> int:
@@ -508,6 +512,17 @@ class LiveSettings(BaseSettings):
         """Dead-man ping timeout must stay below the ping interval."""
         if not self.deadman_ping_timeout_s < self.deadman_ping_interval_s:
             raise ValueError("deadman_ping_timeout_s must be < deadman_ping_interval_s")
+        return self
+
+    @model_validator(mode="after")
+    def _gate_capture_window(self) -> LiveSettings:
+        """Capture freshness must resolve well inside heartbeat staleness; handover residue needs room."""
+        if not self.recorder_capture_stale_s < self.recorder_heartbeat_stale_s:
+            raise ValueError("recorder_capture_stale_s must be < recorder_heartbeat_stale_s")
+        if not self.recorder_capture_dual_active_max_s >= self.recorder_capture_ready_grace_s:
+            raise ValueError(
+                "recorder_capture_dual_active_max_s must be >= recorder_capture_ready_grace_s"
+            )
         return self
 
     @model_validator(mode="after")

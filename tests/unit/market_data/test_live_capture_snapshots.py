@@ -187,17 +187,27 @@ def _snapshot_frame() -> pd.DataFrame:
 
 
 def test_write_hourly_partition_split_and_merge_dedup(tmp_path: Path) -> None:
-    """Rows split by hour; rewrites dedup on symbol and time keeping the last."""
+    """Rows split by hour; rewrites keep the earliest receipt per symbol and time."""
     first = _snapshot_frame()
+    first["fetched_at_ms"] = [200, 200]
     written = write_hourly_partition(first, tmp_path, "book_ticker")
     assert [p.name for p in written] == ["10.parquet", "11.parquet"]
     second = first.copy()
     second.loc[0, "bid_px"] = 9.0
+    second.loc[0, "fetched_at_ms"] = 300
     write_hourly_partition(second.iloc[[0]], tmp_path, "book_ticker")
     merged = pd.read_parquet(tmp_path / "book_ticker" / "20260922" / "10.parquet")
     assert len(merged) == 1
-    assert merged.iloc[0]["bid_px"] == pytest.approx(9.0)
+    assert merged.iloc[0]["bid_px"] == pytest.approx(1.0)
+    assert merged.iloc[0]["fetched_at_ms"] == 200
     assert str(merged["bid_qty"].dtype) == "float32"
+    third = first.copy()
+    third.loc[0, "bid_px"] = 9.0
+    third.loc[0, "fetched_at_ms"] = 100
+    write_hourly_partition(third.iloc[[0]], tmp_path, "book_ticker")
+    merged = pd.read_parquet(tmp_path / "book_ticker" / "20260922" / "10.parquet")
+    assert merged.iloc[0]["bid_px"] == pytest.approx(9.0)
+    assert merged.iloc[0]["fetched_at_ms"] == 100
 
 
 def test_write_hourly_partition_leaves_other_hours_untouched(tmp_path: Path) -> None:

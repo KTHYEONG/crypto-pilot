@@ -5,6 +5,7 @@
 # Exclude transient partial writes (must stay before every include: first match wins).
 - *.tmp
 - *.tmp-*
+- *.partial
 # Keep strategy run records (ledgers, fills, manifests) which cannot be re-downloaded.
 + /state/**
 # Keep sealed research archives which cannot be regenerated deterministically.
@@ -14,6 +15,9 @@
 # Keep venue rule snapshots which pin historical execution constraints.
 + /futures/venue_rules/**
 # Keep live-only captured market sources (top-of-book, premium index, raw reference, coverage).
+- /live_capture/raw/hot/**
+- /live_capture/raw/*.json
++ /live_capture/raw/archive/**
 + /live_capture/**
 # Exclude re-downloadable market data (ohlcv, markPriceKlines, funding, metrics).
 - /futures/**

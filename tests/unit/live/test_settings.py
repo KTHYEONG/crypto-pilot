@@ -45,8 +45,10 @@ def test_recorder_watch_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         "LIVE_RECORDER_WATCH_INTERVAL_S",
         "LIVE_RECORDER_HEARTBEAT_STALE_S",
         "LIVE_RECORDER_LIQUIDATION_SILENCE_S",
-        "LIVE_RECORDER_LIQUIDATION_MAX_FAILED_CONNECTIONS",
         "LIVE_RECORDER_SAMPLER_STALE_S",
+        "LIVE_RECORDER_CAPTURE_STALE_S",
+        "LIVE_RECORDER_NORMALIZER_MAX_LAG_S",
+        "LIVE_RECORDER_COMPACTION_MAX_DELAY_S",
     ):
         monkeypatch.delenv(key, raising=False)
     settings = LiveSettings()
@@ -54,8 +56,13 @@ def test_recorder_watch_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.recorder_watch_interval_s == 60.0
     assert settings.recorder_heartbeat_stale_s == 600.0
     assert settings.recorder_liquidation_silence_s == 900.0
-    assert settings.recorder_liquidation_max_failed_connections == 5
     assert settings.recorder_sampler_stale_s == 1800.0
+    assert settings.recorder_capture_stale_s == 120.0
+    assert settings.recorder_capture_ready_grace_s == 900.0
+    assert settings.recorder_capture_dual_active_max_s == 1200.0
+    assert settings.recorder_normalizer_max_lag_s == 600.0
+    assert settings.recorder_normalizer_max_consecutive_failures == 5
+    assert settings.recorder_compaction_max_delay_s == 10800.0
 
 
 def test_recorder_watch_env_override_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,8 +75,8 @@ def test_recorder_watch_env_override_and_validation(monkeypatch: pytest.MonkeyPa
     with pytest.raises(ValidationError, match="recorder_watch_interval_s"):
         LiveSettings()
     monkeypatch.delenv("LIVE_RECORDER_WATCH_INTERVAL_S")
-    with pytest.raises(ValidationError, match="recorder_liquidation_max_failed_connections"):
-        LiveSettings(recorder_liquidation_max_failed_connections=0)
+    with pytest.raises(ValidationError, match="recorder_normalizer_max_consecutive_failures"):
+        LiveSettings(recorder_normalizer_max_consecutive_failures=0)
 
 
 def test_shared_env_with_non_live_keys_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:

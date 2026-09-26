@@ -234,7 +234,7 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "header_color": "#dc2626",
         "bg_color": "#fef2f2",
         "impact": "라이브 전용 마켓 데이터(청산/호가/프리미엄 인덱스) 수집이 중단되거나 정체되었습니다. 해당 데이터는 아카이브에 없어 나중에 다시 내려받을 수 없습니다.",
-        "action": "docker logs --tail 200 market-recorder\ndocker exec mhs-live-daemon cat /app/data/live_capture/recorder_heartbeat.json\ntail -200 ~/crypto-pilot/logs/recorder/recorder.log",
+        "action": "docker ps --filter name=market-capture --filter name=market-normalizer\ndocker logs --tail 200 market-capture-blue  # 또는 market-capture-green (활성 슬롯)\ndocker logs --tail 200 market-normalizer\ncat ~/crypto-pilot/data/live_capture/raw/capture_*.json\ncat ~/crypto-pilot/data/live_capture/recorder_heartbeat.json\ntail -200 ~/crypto-pilot/logs/capture/capture_*.log ~/crypto-pilot/logs/normalizer/*.log",
     },
     "recorder_recovered": {
         "title": "레코더 수집 복구",

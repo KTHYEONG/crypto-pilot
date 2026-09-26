@@ -529,9 +529,12 @@ def write_hourly_partition(frame: pd.DataFrame, root: Path, dataset: str) -> lis
     """Merge snapshot rows into ``<root>/<dataset>/<YYYYMMDD>/<HH>.parquet`` keyed by ``captured_at`` hour.
 
     Hour partitions bound every rewrite to at most one hour of rows and make every closed hour an
-    immutable file, so the nightly ``rclone copy`` transfers each finished file exactly once. Each hour
-    is atomically replaced; an undecodable existing hour file is quarantined instead of blocking every
-    later flush of that hour. Assumes a single writer process per dataset.
+    immutable file, so the backup transfers each finished file once. Duplicate ``(symbol,
+    captured_at)`` rows arise when two capture slots overlap during a handover, or when a checkpoint
+    is replayed after a crash. The row with the smallest ``fetched_at_ms`` wins (earliest observation
+    of that grid instant; nulls sort last), so a replay or a second slot never replaces data already
+    persisted with a later receipt. Each hour is atomically replaced; an undecodable existing hour
+    file is quarantined instead of blocking later writes. Assumes a single writer process per dataset.
 
     Returns:
         Sorted list of partition files written.
@@ -566,16 +569,34 @@ def write_hourly_partition(frame: pd.DataFrame, root: Path, dataset: str) -> lis
         existing = read_parquet_or_quarantine(target, stage=f"snapshot_{dataset}")
         if existing is not None:
             existing["captured_at"] = pd.to_datetime(existing["captured_at"], utc=True)
-            combined = pd.concat([existing, chunk], ignore_index=True)
-            combined = _enforce_snapshot_dtypes(combined)
+            combined = _earliest_receipt_merge(existing, chunk)
         else:
-            combined = chunk
-        combined = combined.drop_duplicates(subset=["symbol", "captured_at"], keep="last")
+            combined = _earliest_receipt_merge(chunk.iloc[0:0], chunk)
+        combined = combined.drop_duplicates(subset=["symbol", "captured_at"], keep="first")
         combined = combined.sort_values(["symbol", "captured_at"]).reset_index(drop=True)
         combined = _enforce_snapshot_dtypes(combined)
         write_parquet_atomic(combined, target, compression="zstd")
         written.append(target)
     return sorted(written)
+
+
+def _earliest_receipt_merge(existing: pd.DataFrame, chunk: pd.DataFrame) -> pd.DataFrame:
+    """Combine on-disk rows with new rows so the earliest receipt per key sorts first.
+
+    Ties go to the row already on disk, and null ``fetched_at_ms`` (legacy rows) ranks after
+    any real receipt. The caller keeps the first row per ``(symbol, captured_at)``.
+    """
+    prior = pd.DataFrame({"_on_disk": [0] * len(existing) + [1] * len(chunk)})
+    combined = pd.concat([existing, chunk], ignore_index=True)
+    combined = _enforce_snapshot_dtypes(combined)
+    combined["_on_disk"] = prior["_on_disk"].to_numpy()
+    if "fetched_at_ms" in combined.columns:
+        combined = combined.sort_values(
+            ["fetched_at_ms", "_on_disk"], ascending=[True, True], na_position="last"
+        )
+    else:
+        combined = combined.sort_values(["_on_disk"], ascending=True)
+    return combined.drop(columns=["_on_disk"])
 
 
 def load_snapshot_dataset(

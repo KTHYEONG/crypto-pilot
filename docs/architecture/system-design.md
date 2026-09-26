@@ -45,8 +45,11 @@ flowchart TD
 
     subgraph DataTier ["⚡ 2. 시세 수집 및 스토리지 계층"]
         FAPI & VISION --> Refresh["Tail 증분 갱신 (max: tail - 2h)"]:::stage1
-        WS --> Stream["aiohttp 청산 수집기 (1초 종료 관찰)"]:::stage1
-        Refresh & Stream --> ParquetStore[("data/futures/<br/>(zstd 압축 Parquet)")]:::stage1
+        FAPI & WS --> Capture["캡처 슬롯 blue/green (원본 우선 저널)"]:::stage1
+        Capture --> RawJournal[("live_capture/raw (hot gz → 일별 xz 아카이브)")]:::stage1
+        RawJournal --> Normalizer["정규화기 (재생 가능 파생)"]:::stage1
+        Refresh --> ParquetStore[("data/futures/<br/>(zstd 압축 Parquet)")]:::stage1
+        Normalizer --> ParquetStore
         ParquetStore --> Prune["원자적 프루닝 (임시파일 치환)"]:::stage1
     end
 
@@ -76,7 +79,7 @@ flowchart TD
 ### 외부 연동 인터페이스 (External Interfaces)
 1. **Binance Futures FAPI REST**: Klines(`1m/1h`), Funding Rate(`8h`), Leverage Bracket 스냅샷 수집.
 2. **Binance Vision S3 Archive**: 과거 대용량 Klines, 5분 메트릭스(OI, LSR) `.zip` 다운로드 및 SHA-256 체크섬 무결성 검증.
-3. **Binance WebSocket (`forceOrder`)**: 비동기 `aiohttp` 스트리밍 직결, 실시간 강제청산 틱 수신 및 이벤트 정지 감시.
+3. **Binance WebSocket (`forceOrder`)**: forceOrder frames are journaled raw before interpretation.
 4. **Google Drive Storage**: 호스트 레벨 `flock` 파일 잠금 기반 rclone 원격 백업.
 
 ---
@@ -154,3 +157,12 @@ Layer 0: 코어 공통 계약, 불변식 스키마 및 설정 (src/common)
 # 아키텍처 계층 계약 및 문서 예산 검증
 uv run pytest tests/contract/test_module_boundaries.py -k "test_architecture_docs_within_line_limit"
 ```
+
+## 6. Capture Operations
+
+- **Which slot is live:** `docker ps --filter name=market-capture --format '{{.Names}} {{.Status}}'`.
+- **Verify health:** `python3 deploy/capture_handover.py ready --heartbeat data/live_capture/raw/capture_<slot>.json --container-started-at "$(docker inspect -f '{{.State.StartedAt}}' market-capture-<slot>)" --stale-s 30` returns 0; also check `recorder_heartbeat.json` for normalizer lag and `prune_blocked`.
+- **Manual slot switch:** `docker compose up -d --no-deps capture-<idle>`, wait for `ready` 0, then `docker compose stop -t 20 capture-<old> && docker compose rm -f capture-<old>`.
+- **Rollback:** re-run the previous commit deploy; the handover gate keeps the current slot when the new image is not READY.
+- **Backup gate:** `cat deploy/backup/status/last_success.json`; older than 72 h blocks pruning with `prune_blocked`.
+

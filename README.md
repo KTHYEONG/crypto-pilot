@@ -64,8 +64,11 @@ flowchart TD
 
     subgraph DataTier ["⚡ 2. 시세 수집 및 캐시 (Tail 20초)"]
         FAPI & VISION --> Refresh["Tail 증분 갱신 (max: tail - 2h)"]:::stage1
-        WS --> Stream["aiohttp 청산 수집기 (1초 종료 관찰)"]:::stage1
-        Refresh & Stream --> ParquetStore[("data/futures/<br/>(zstd 압축 Parquet)")]:::stage1
+        FAPI & WS --> Capture["캡처 슬롯 blue/green (원본 우선 저널)"]:::stage1
+        Capture --> RawJournal[("live_capture/raw (hot gz → 일별 xz 아카이브)")]:::stage1
+        RawJournal --> Normalizer["정규화기 (재생 가능 파생)"]:::stage1
+        Refresh --> ParquetStore[("data/futures/<br/>(zstd 압축 Parquet)")]:::stage1
+        Normalizer --> ParquetStore
         ParquetStore --> Prune["원자적 임시파일 치환 프루닝"]:::stage1
     end
 
