@@ -9,7 +9,7 @@ from pathlib import Path
 
 from src.backtests.contracts import ArtifactReference, RunFinalization, RunRegistration
 
-_SCHEMA_VERSION = 1
+_REGISTRY_SCHEMA_VERSION = 1
 
 _DDL_STATEMENTS: tuple[str, ...] = (
     "CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER PRIMARY KEY)",
@@ -73,7 +73,7 @@ _INDEX_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_runs_registered_at ON runs(registered_at)",
 )
 
-_REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
+_REGISTRY_REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "runs": frozenset({"run_id", "strategy_id", "registered_at", "request_json", "managed_directory", "pinned", "resolved", "deployment_referenced"}),
     "finalizations": frozenset({"run_id", "finalized_at", "status", "primary_valid", "terminal_certified", "outcome_json"}),
     "artifacts": frozenset({"run_id", "role", "path", "sha256", "byte_count", "managed", "evidence_id", "retained"}),
@@ -115,10 +115,10 @@ def initialize_registry(path: Path) -> None:
                 conn.execute(statement)
             row = conn.execute("SELECT version FROM schema_meta").fetchone()
             if row is None:
-                conn.execute("INSERT INTO schema_meta (version) VALUES (?)", (_SCHEMA_VERSION,))
-            elif int(row[0]) != _SCHEMA_VERSION:
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?)", (_REGISTRY_SCHEMA_VERSION,))
+            elif int(row[0]) != _REGISTRY_SCHEMA_VERSION:
                 raise ValueError(f"unsupported registry schema version: {row[0]!r}")
-        for table, required in _REQUIRED_COLUMNS.items():
+        for table, required in _REGISTRY_REQUIRED_COLUMNS.items():
             actual = frozenset(r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall())  # noqa: S608
             if not required.issubset(actual):
                 raise ValueError(f"unsupported registry schema for table {table}: {sorted(actual)}")

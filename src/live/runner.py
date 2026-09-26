@@ -25,6 +25,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.live.account import (
+    RECONCILE_QTY_TOLERANCE_FRACTION,
     AccountSnapshot,
     assert_suppressed_venue_flat,
     assert_venue_configuration,
@@ -108,8 +109,6 @@ from src.live.tax_ledger import (
 from src.live.venue_listing import SettlementEvidence, settlement_evidence_from_bars
 
 logger = logging.getLogger("LiveRunner")
-
-_RECONCILE_TOLERANCE_FRACTION = 0.001
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +310,7 @@ def _adopt_force_closes(
     }
     fresh = tuple(item for item in force_closes if item.order_id not in already)
     to_adopt, _unexplained = explain_breaches(
-        breaches, fresh, qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION
+        breaches, fresh, qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION
     )
     for item in to_adopt:
         side = item.side
@@ -1161,7 +1160,7 @@ def run_shadow_cycle(
             breaches = find_position_breaches(
                 snapshot,
                 ledger_positions,
-                qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION,
+                qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION,
                 settled_symbols=settled,
             )
             if breaches and settings.venue_force_close_auto_adopt:
@@ -1173,7 +1172,7 @@ def run_shadow_cycle(
                 breaches = find_position_breaches(
                     snapshot,
                     ledger_positions,
-                    qty_tolerance_fraction=_RECONCILE_TOLERANCE_FRACTION,
+                    qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION,
                     settled_symbols=settled,
                 )
             reasons = (("reconciliation_breach",) if breaches else ()) + (

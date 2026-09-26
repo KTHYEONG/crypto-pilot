@@ -532,7 +532,7 @@ def test_run_folds_parallel_resolves_folds_from_the_request(monkeypatch) -> None
 
 def test_integrity_skips_reliability_eligibility_only_under_forward_protocol(monkeypatch) -> None:
     import src.mhs.deploy_gate as dg
-    import src.mhs.evaluation.integrity as integrity_mod
+    import src.mhs.execution.integrity as integrity_mod
 
     monkeypatch.setattr(integrity_mod, "replay_ledger_certified", lambda primary: True)
     fold = SimpleNamespace(strict=object(), failures=())

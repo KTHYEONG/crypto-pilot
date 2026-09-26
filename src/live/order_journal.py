@@ -43,7 +43,7 @@ _FILL_KINDS: frozenset[str] = frozenset(
 _SIDES: frozenset[str] = frozenset({"BUY", "SELL"})
 _LIQUIDITY: frozenset[str] = frozenset({"maker", "taker"})
 
-JOURNAL_SCHEMA_VERSION: int = 2
+ORDER_JOURNAL_SCHEMA_VERSION: int = 2
 
 
 def _utc_now() -> pd.Timestamp:
@@ -597,7 +597,7 @@ class OrderJournal:
     def _ensure_v2_schema(self) -> None:
         if self._has_schema:
             return
-        self._append({"event": "schema", "version": JOURNAL_SCHEMA_VERSION})
+        self._append({"event": "schema", "version": ORDER_JOURNAL_SCHEMA_VERSION})
         self._has_schema = True
 
     def _append(self, record: dict[str, Any]) -> None:

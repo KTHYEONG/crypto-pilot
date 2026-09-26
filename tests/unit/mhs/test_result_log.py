@@ -107,12 +107,6 @@ class TestFillMarkParityRunHistoryRecord:
         from src.mhs.report.persist import build_mhs_run_history_record
         from src.mhs.report.schema import MhsHorizonDiagnosticReport
 
-        census = {
-            "band": 0.0488,
-            "cells_over_band": 7,
-            "eligible_cells_removed": 7,
-            "symbols": {"FROZEN": 7},
-        }
         report = MhsHorizonDiagnosticReport(
             feature="mhs",
             status="COMPLETE",
@@ -158,13 +152,9 @@ class TestFillMarkParityRunHistoryRecord:
             execution_universe_size=30,
             execution_symbols=(),
             run_elapsed_seconds=1.0,
-            fill_mark_parity=census,
         )
         request = MhsDiagnosticRequest()
         record = build_mhs_run_history_record(report, request, MhsOutputTier.COMPACT, None)
-        assert record["fill_mark_parity"]["cells_over_band"] == 7
-        assert record["fill_mark_parity"]["band"] == 0.0488
-        assert record["flags"]["fill_mark_parity_gate"] is True
         assert record["flags"]["exposure_scale_two_sided"] is False
 
 

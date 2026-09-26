@@ -51,7 +51,7 @@ def _hash_run_dir(source: Path) -> str:
 
 
 def _source_identity(source: Path, content_sha: str) -> str:
-    return _sha256_hex(f"{source.resolve()}|{content_sha}".encode("utf-8"))
+    return _sha256_hex(f"{source.resolve()}|{content_sha}".encode())
 
 
 def _is_hex32(value: str) -> bool:
@@ -447,12 +447,12 @@ def verify_legacy_history_migration(*, registry_path: Path, source: Path) -> dic
         sparse = _sparse_identity_key(identity)
         first = record.get("run_at")
         if isinstance(first, str):
-            expected[sparse] = min(expected[sparse], first) if sparse in expected and expected[sparse] else first
+            expected[sparse] = min(expected[sparse], first) if expected.get(sparse) else first
         else:
             expected.setdefault(sparse, "")
     for original, first_seen in ledger_raw.items():
         sparse = _sparse_identity_key(original)
-        if sparse in expected and expected[sparse]:
+        if expected.get(sparse):
             expected[sparse] = min(expected[sparse], str(first_seen))
         elif sparse not in expected:
             expected[sparse] = str(first_seen)

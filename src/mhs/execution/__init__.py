@@ -47,6 +47,7 @@ _ExecutionGapCode = Literal[
 ]
 
 # Facade keeps every existing src.mhs.execution import site working.
+from . import window_stream as window_stream  # noqa: E402
 from .accounting import CausalPortfolioState, reconcile_causal_state  # noqa: E402
 from .accumulator import _BoundExecutionReplayAccumulator  # noqa: E402
 from .batch import (  # noqa: E402  # noqa: E402  # noqa: E402

@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from src.live.planner import OrderIntent
 
 VENUE_MARGIN_TYPE: str = "CROSSED"
+# 원장-거래소 수량 대사 허용 오차(포지션 대비 비율): 체결 수량 반올림 잡음은 통과시키고 실제 괴리만 위반으로 본다.
+RECONCILE_QTY_TOLERANCE_FRACTION: float = 0.001
 DELISTED_SYMBOL_STATUSES: frozenset[str] = frozenset({"SETTLING", "CLOSE"})
 _CROSS_MARGIN_ALIASES: frozenset[str] = frozenset({"cross", "crossed"})
 BLOCKED_MARGIN_TYPE_CHANGE_CODES: frozenset[int] = frozenset({-4047, -4048})

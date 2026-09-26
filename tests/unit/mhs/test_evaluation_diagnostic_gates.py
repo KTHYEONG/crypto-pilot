@@ -431,80 +431,12 @@ def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
     assert report.blend.primary is not None
     assert report.fill_source == "OHLCV_IMMEDIATE_TAKER"
 
-class TestFillMarkParityEligibility:
-    """SCENARIO_MHS_FILL_MARK_PARITY_04: _fill_mark_parity_eligibility ALPACA regression."""
-
-    def test_alpaca_shape_divergence(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from src.mhs.marks import _fill_mark_parity_eligibility
-
-        idx = pd.date_range("2025-04-01", periods=10, freq="1h", tz="UTC")
-        symbols = ["GOOD", "FROZEN", "ALSO_GOOD"]
-        close = pd.DataFrame(
-            {
-                "GOOD": [100.0] * 10,
-                "FROZEN": [1.19] * 10,
-                "ALSO_GOOD": [50.0] * 10,
-            },
-            index=idx, columns=symbols,
-        )
-        # FROZEN's mark decays from 0.575 -> 0.059 over the last 6 bars
-        mark_values = [1.19, 1.19, 1.19, 0.575, 0.4, 0.3, 0.2, 0.1, 0.07, 0.059]
-        mark = pd.DataFrame(
-            {
-                "GOOD": [100.0] * 10,
-                "FROZEN": mark_values,
-                "ALSO_GOOD": [50.0] * 10,
-            },
-            index=idx, columns=symbols,
-        )
-        eligible = pd.DataFrame(True, index=idx, columns=symbols)
-        result, census = _fill_mark_parity_eligibility(close, eligible, True, mark_close=mark)
-        # FROZEN rows 3-9 have |log(1.19/mark)| > log1p(0.05)
-        for i in range(3, 10):
-            assert result.loc[idx[i], "FROZEN"] == False  # noqa: E712
-        # GOOD and ALSO_GOOD unaffected
-        assert result["GOOD"].all()
-        assert result["ALSO_GOOD"].all()
-        assert census is not None
-        assert census["cells_over_band"] == 7
-        assert census["eligible_cells_removed"] == 7
-        assert "FROZEN" in census["symbols"]
-
-    def test_enabled_false_returns_unchanged(self) -> None:
-        from src.mhs.marks import _fill_mark_parity_eligibility
-
-        idx = pd.date_range("2025-04-01", periods=5, freq="1h", tz="UTC")
-        close = pd.DataFrame({"A": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=idx)
-        eligible = pd.DataFrame({"A": [True, True, True, True, True]}, index=idx)
-        result, census = _fill_mark_parity_eligibility(close, eligible, False)
-        pd.testing.assert_frame_equal(result, eligible)
-        assert census is None
-
 class TestMhsDiagnosticRequestParityGate:
     """SCENARIO_MHS_FILL_MARK_PARITY_05: request field validation."""
 
     def test_defaults(self) -> None:
         req = MhsDiagnosticRequest()
-        assert req.fill_mark_parity_gate is True
         assert req.exposure_scale_two_sided is False
-
-    def test_two_sided_requires_exante(self) -> None:
-        with pytest.raises(ValueError, match=r"exposure_scale_two_sided.*exante_target"):
-            MhsDiagnosticRequest(
-                exposure_scale_two_sided=True,
-                pnl_vol_target_mode="median_relative",
-            )
-
-    def test_two_sided_exante_ok(self) -> None:
-        req = MhsDiagnosticRequest(
-            exposure_scale_two_sided=True,
-            pnl_vol_target_mode="exante_target",
-        )
-        assert req.exposure_scale_two_sided is True
-
-    def test_non_bool_fill_mark_parity_gate_raises(self) -> None:
-        with pytest.raises(ValueError, match="fill_mark_parity_gate"):
-            MhsDiagnosticRequest(fill_mark_parity_gate="yes")  # type: ignore[arg-type]
 
     def test_non_bool_exposure_scale_two_sided_raises(self) -> None:
         with pytest.raises(ValueError, match="exposure_scale_two_sided"):

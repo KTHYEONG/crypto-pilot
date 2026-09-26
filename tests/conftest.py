@@ -15,16 +15,14 @@ for _key, _val in (
     os.environ.setdefault(_key, _val)
 
 
-import os
+import contextlib
 import shutil
+import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
-
-import uuid
-
-from src.quant.contracts import CostModel, StrategySpec
 
 # Project-only temp policy (AGENTS.md §4): pytest's ``tmp_path``/``tmpdir``
 # fixtures, the ``tempfile`` module, and ``TMPDIR``-honoring subprocesses all
@@ -38,6 +36,37 @@ from src.quant.contracts import CostModel, StrategySpec
 _PROJECT_TEMP_ROOT = Path(__file__).resolve().parents[1] / "tmp" / "pytest"
 _PROC_RUN_ID = f"proc_{os.getpid()}_{uuid.uuid4().hex[:8]}"
 _PROC_TEMP_ROOT = _PROJECT_TEMP_ROOT / _PROC_RUN_ID
+
+# Route process logs and the backtest registry to this run's temp root *before* any ``src`` import:
+# ``setup_logger`` opens its log files and registry defaults resolve at import time, so an
+# unconditional override here keeps tests from writing into the developer's real ``logs/`` and
+# ``data/backtests/registry.sqlite3`` regardless of the host shell.
+os.environ["CRYPTO_PILOT_LOG_DIR"] = str(_PROC_TEMP_ROOT / "logs")
+os.environ["CRYPTO_PILOT_BACKTESTS_DIR"] = str(_PROC_TEMP_ROOT / "backtests")
+
+from src.quant.contracts import CostModel, StrategySpec  # noqa: E402
+
+# Developer-tree paths that must be byte-identical before and after a test session. A test that
+# writes here pollutes real state, logs or the backtest registry, so the session fails loudly.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_GUARDED_TREES: tuple[str, ...] = ("data/state", "data/live_capture", "data/backtests", "logs")
+
+
+def _snapshot_guarded_trees() -> dict[str, tuple[int, int]]:
+    """Return ``{relative_path: (size, mtime_ns)}`` for every file under the guarded trees."""
+    snapshot: dict[str, tuple[int, int]] = {}
+    for tree in _GUARDED_TREES:
+        root = _REPO_ROOT / tree
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file():
+                stat = path.stat()
+                snapshot[str(path.relative_to(_REPO_ROOT))] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+_GUARDED_BEFORE = _snapshot_guarded_trees()
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -61,11 +90,18 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
         # pytest-xdist worker process: sessionfinish fires independently per
         # worker; only the controller process cleans up.
         return
+    after = _snapshot_guarded_trees()
+    leaked = sorted(path for path in after.keys() | _GUARDED_BEFORE.keys() if after.get(path) != _GUARDED_BEFORE.get(path))
+    if leaked:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        shown = "\n  ".join(leaked[:20])
+        sys.stderr.write(
+            f"\nHERMETIC GUARD: tests changed {len(leaked)} file(s) under {', '.join(_GUARDED_TREES)}:\n  {shown}\n"
+            "Route the writer to tmp_path (see tests/conftest.py and tests/unit/live/conftest.py).\n"
+        )
     if _PROC_TEMP_ROOT.exists():
-        try:
+        with contextlib.suppress(OSError):
             shutil.rmtree(_PROC_TEMP_ROOT, ignore_errors=True)
-        except OSError:
-            pass
 
 
 @pytest.fixture(autouse=True, scope="session")
