@@ -91,6 +91,7 @@ def matrix_market(request, tmp_path_factory):
     import src.mhs.statistics as statistics
     from tests.unit.mhs.test_evaluation_appresearch import (
         _START as _TE_START,
+        _write_3m_cache,
         _write_mhs_market as _write_taker_market,
     )
 
@@ -100,6 +101,7 @@ def matrix_market(request, tmp_path_factory):
     # exact writer/param set here is required for the goldens to be reproducible.
     root = tmp_path_factory.mktemp(f"mhs_golden_market_{name}")
     end = _write_taker_market(root, n_hours=2700, include_taker_buy_quote=(name != "baseline"))
+    _write_3m_cache(root)
     start = _TE_START
 
     originals = {
@@ -161,7 +163,7 @@ def test_golden_identity_matrix(name, matrix_market, matrix_golden):
     root, end, start = matrix_market
     request = MhsDiagnosticRequest(
         start=str(start), end=str(end), data_root=str(root),
-        execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         **MATRIX_OVERRIDES[name],
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -184,7 +186,7 @@ def test_golden_identity(name, matrix_market, matrix_golden):
     root, end, start = matrix_market
     request = MhsDiagnosticRequest(
         start=str(start), end=str(end), data_root=str(root),
-        execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         **MATRIX_OVERRIDES[name],
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -219,7 +221,7 @@ def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matr
     root, end, start = matrix_market
     config = MhsRunConfig(
         start=str(start), end=str(end), data_root=str(root),
-        execution_timeframe="1m", log_run=False,
+        execution_timeframe="3m", log_run=False,
         committee_capital=False, committee_regime_adaptive_tranche=False,
         funding_carry_sleeve=False, committee_target_gross=None,
         pnl_vol_target_mode="median_relative",

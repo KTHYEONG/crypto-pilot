@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+from pathlib import Path
 
 from src.common.paths import BASE_DIR
 
-LOG_DIR = BASE_DIR / "logs"
+LOG_DIR = Path(os.environ["CRYPTO_PILOT_LOG_DIR"]) if os.environ.get("CRYPTO_PILOT_LOG_DIR") else BASE_DIR / "logs"
+"""Process log root. ``CRYPTO_PILOT_LOG_DIR`` lets the test harness keep log files off the real logs directory."""
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 _FORMAT = "%(asctime)s [%(levelname)s] [%(tag)s] %(message)s"

@@ -370,7 +370,6 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "the raw (tranche_count=1) committee book."
         ),
     )
-    mhs.add_argument("--no-fill-mark-parity-gate", action="store_true")
     mhs.add_argument(
         "--no-exposure-scale-two-sided",
         action="store_true",

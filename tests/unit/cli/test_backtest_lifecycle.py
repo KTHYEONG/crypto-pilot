@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import src.cli.commands.backtest as backtest_mod
+from src.backtests.contracts import RetentionPolicy
 from src.cli.commands.backtest import _resolve_destinations, _resolve_fingerprint, _resolve_retention_policy, run_mhs_backtest
 from src.cli.main import build_root_parser
 from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
@@ -165,8 +166,8 @@ def test_explicit_registry_and_retention_defaults(tmp_path, monkeypatch) -> None
     seen = _install_supervisor(monkeypatch)
     run_mhs_backtest(_parse(["backtest", "mhs", "--registry-path", str(custom)]))
     assert seen["registry_path"] == custom
-    assert seen["retention_policy"] is None
-    assert _resolve_retention_policy(_parse(["backtest", "mhs"])) is None
+    assert seen["retention_policy"] == RetentionPolicy(max_detail_bytes=None, max_detail_runs=1)
+    assert _resolve_retention_policy(_parse(["backtest", "mhs"])) == RetentionPolicy(max_detail_bytes=None, max_detail_runs=1)
     budgeted = _parse(["backtest", "mhs", "--max-detail-bytes", "100", "--max-detail-runs", "2"])
     policy = _resolve_retention_policy(budgeted)
     assert policy is not None

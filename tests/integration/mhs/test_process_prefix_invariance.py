@@ -85,7 +85,6 @@ def test_process_membership_ignores_static_source_gap_exclusions(monkeypatch) ->
         bt_market, "_load_funding_series", lambda syms: ({s: funding[s] for s in syms}, {})
     )
     monkeypatch.setattr(bt_market, "apply_dynamic_gap_exclusion", lambda mask, *a, **k: (mask, {}))
-    monkeypatch.setattr(bt_market, "apply_dynamic_mark_gap_exclusion", lambda mask: (mask, {}))
     start, end = grid[0], grid[0] + pd.Timedelta(days=30)
     baseline = bt_market.load_process_market_data(start, end)
     monkeypatch.setattr(

@@ -1364,12 +1364,16 @@ def test_run_liquidation_stream_rejects_stall_not_above_liveness(tmp_path) -> No
 def test_parse_liquidation_preserves_raw_order_with_unknown_fields() -> None:
     """The venue order object is kept verbatim, including future fields."""
     import json as _json
-    from pathlib import Path as _Path
 
-    payload = _json.loads(
-        (_Path("scratch/edge_audit/recorder/forceorder_sample.json")).read_text(encoding="utf-8")
-    )
-    first = payload[0]
+    first = {
+        "e": "forceOrder",
+        "E": 1758531600123,
+        "o": {
+            "s": "QNTUSDT", "ps": "QNTUSDT", "S": "SELL", "o": "LIMIT", "f": "IOC", "q": "1.2",
+            "p": "88.5", "ap": "88.4", "X": "FILLED", "l": "1.2", "z": "1.2", "T": 1758531600100,
+            "st": 1,
+        },
+    }
     ev = parse_liquidation(first, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z"))
     assert ev is not None
     assert ev.raw_order_json is not None

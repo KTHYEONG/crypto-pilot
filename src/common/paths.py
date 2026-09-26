@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -10,7 +11,10 @@ FUTURES_DATA_DIR = DATA_DIR / "futures"
 SPOT_DATA_DIR = DATA_DIR / "spot"
 DEPLOY_MHS_DIR: Path = BASE_DIR / "deploy" / "mhs"
 """Repository delivery boundary for sealed MHS runtime artifacts."""
-BACKTESTS_DIR: Path = DATA_DIR / "backtests"
+BACKTESTS_DIR: Path = (
+    Path(os.environ["CRYPTO_PILOT_BACKTESTS_DIR"]) if os.environ.get("CRYPTO_PILOT_BACKTESTS_DIR") else DATA_DIR / "backtests"
+)
+"""Backtest registry/evidence root. ``CRYPTO_PILOT_BACKTESTS_DIR`` lets the test harness keep runs off the real registry."""
 FROZEN_BACKTESTS_DIR: Path = BACKTESTS_DIR / "frozen" / "runs"
 VENUE_RULES_DIR: Path = FUTURES_DATA_DIR / "venue_rules"
 LIVE_CAPTURE_DIR: Path = DATA_DIR / "live_capture"

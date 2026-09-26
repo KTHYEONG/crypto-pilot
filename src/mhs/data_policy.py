@@ -12,7 +12,7 @@ from collections.abc import Iterator, Set
 from enum import StrEnum
 from typing import Final, Literal
 
-from src.mhs.source_gaps import active_intervals
+from src.mhs.source_gaps import SourceGapExtent, active_intervals
 
 
 class MhsDataPolicy(StrEnum):
@@ -32,19 +32,32 @@ MHS_DATA_POLICY_DEFAULT: Final[Literal["zombie_mask_v1"]] = "zombie_mask_v1"
 # `src.mhs.source_gaps.blocked_mask` instead.
 
 
-def source_gap_excluded_symbols() -> frozenset[str]:
-    """Return every symbol carrying at least one unresolved source-gap interval.
+# 심볼 전체 이력을 버리는 근거: 상폐 확정이거나 범위가 측정되지 않은 레거시 기록일 때만.
+_SYMBOL_EXCLUDING_REASONS: Final[frozenset[str]] = frozenset({"DELISTED"})
+_SYMBOL_EXCLUDING_EXTENTS: Final[frozenset[SourceGapExtent]] = frozenset({"UNSCOPED"})
 
-    This symbol-level view exists only for legacy consumers that filter a universe
-    before they know their evaluation grid. Interval-aware callers must consult
-    `src.mhs.source_gaps.blocked_mask` instead, because collapsing an interval to a
-    symbol discards the point-in-time reality that the symbol traded normally outside
-    the gap.
+
+def source_gap_excluded_symbols() -> frozenset[str]:
+    """Return symbols the legacy symbol-level view must drop for their whole history.
+
+    A symbol is excluded when at least one active interval is ``DELISTED`` or has
+    ``UNSCOPED`` extent (a legacy or manual record whose scope was never measured).
+    Measured ``LISTING_EDGE``, ``OPEN_EDGE`` and ``INTERIOR`` spans do not exclude the
+    symbol: an absence before listing, after the last observed bar or between observed
+    bars is not evidence that the symbol was untradeable while it traded, so dropping
+    its entire history would be survivorship-style selection. This view exists only for
+    legacy consumers that filter a universe before they know their evaluation grid;
+    interval-aware callers must consult `src.mhs.source_gaps.blocked_mask`, which
+    blocks exactly the measured bars.
 
     Returns:
-        Symbols with at least one active interval across all planes.
+        Symbols with at least one active DELISTED or UNSCOPED interval across all planes.
     """
-    return frozenset(iv.symbol for iv in active_intervals())
+    return frozenset(
+        iv.symbol
+        for iv in active_intervals()
+        if iv.reason in _SYMBOL_EXCLUDING_REASONS or iv.extent in _SYMBOL_EXCLUDING_EXTENTS
+    )
 
 
 class _SourceGapExcludedSymbolsView(Set[str]):

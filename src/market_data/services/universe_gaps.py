@@ -8,10 +8,9 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+from src.market_data.binance.venue_rules import EXCHANGE_INFO_URL
 from src.market_data.storage.ohlcv import is_temp_artifact
 from src.quant.universe.pit_universe import symbol_partition
-
-EXCHANGE_INFO_URL: str = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 
 
 def local_futures_symbols(root: Path, timeframe: str) -> frozenset[str]:

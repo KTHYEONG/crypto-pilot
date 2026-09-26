@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-BUSY_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"})
+from src.common.daemon_stages import BUSY_STAGES
 
 EXIT_PROCEED: int = 0
 EXIT_WAIT: int = 10

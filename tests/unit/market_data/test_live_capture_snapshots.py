@@ -348,16 +348,11 @@ def _premium_row(symbol: str, **overrides: object) -> dict[str, object]:
 
 def test_parse_book_ticker_isolates_single_malformed_row() -> None:
     """One blank qty excludes only that row with a counted reason."""
-    import json as _json
-
-    payload = _json.loads(
-        (Path("scratch/edge_audit/recorder/book_ticker.json")).read_text(encoding="utf-8")
-    )
-    victim = next(r["symbol"] for r in payload if r["symbol"] == "BTCUSDT")
+    payload = [_book_row(f"S{i:02d}USDT") for i in range(40)]
+    victim = "S07USDT"
     for row in payload:
         if row["symbol"] == victim:
             row["bidQty"] = ""
-            break
     parsed = parse_book_ticker_payload(
         payload, captured_at=_CAP, fetched_at=_FETCH, max_rejected_fraction=0.05
     )
@@ -433,11 +428,7 @@ def test_parse_book_ticker_counters_conserve_rows() -> None:
 
 def test_parse_premium_index_isolates_blank_mark_price() -> None:
     """One blank markPrice excludes only that row."""
-    import json as _json
-
-    payload = _json.loads(
-        (Path("scratch/edge_audit/recorder/premium_index.json")).read_text(encoding="utf-8")
-    )
+    payload = [_premium_row(f"S{i:02d}USDT") for i in range(40)]
     victim = str(payload[0]["symbol"])
     payload[0]["markPrice"] = ""
     parsed = parse_premium_index_payload(
@@ -450,12 +441,10 @@ def test_parse_premium_index_isolates_blank_mark_price() -> None:
 
 def test_parse_premium_index_placeholder_funding_becomes_null() -> None:
     """Venue placeholder zeros for unscheduled funding become nulls."""
-    import json as _json
-
-    payload = _json.loads(
-        (Path("scratch/edge_audit/recorder/premium_index.json")).read_text(encoding="utf-8")
+    row = _premium_row(
+        "WAVESUSDT", markPrice="0.75728182", lastFundingRate="0.00000000", interestRate="0.00000000",
+        estimatedSettlePrice="0.00000000", nextFundingTime=0,
     )
-    row = next(r for r in payload if r["symbol"] == "WAVESUSDT")
     parsed = parse_premium_index_payload(
         [row], captured_at=_CAP, fetched_at=_FETCH, max_rejected_fraction=0.05
     )
