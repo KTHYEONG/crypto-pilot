@@ -36,7 +36,13 @@ _SAMPLER_DATASETS: tuple[str, str] = ("book_ticker", "premium_index")
 
 @dataclass(frozen=True, slots=True)
 class RecorderWatchThresholds:
-    """Alert thresholds for one evaluation of the heartbeat (all durations in seconds)."""
+    """Alert thresholds for one evaluation of the heartbeat (all durations in seconds).
+
+    ``startup_grace_s`` is slack added to one grid interval before a dataset that has never persisted
+    since the normalizer started may raise sampler findings. ``prune_blocked_alert_after_s`` is how long
+    the backup-gated prune may stay blocked before it alerts, and ``local_disk_budget_bytes`` is the
+    raw + derived footprint that alerts a blocked prune regardless of duration.
+    """
 
     heartbeat_stale_s: float
     liquidation_silence_s: float
@@ -55,6 +61,9 @@ class RecorderWatchThresholds:
     normalizer_max_lag_s: float
     normalizer_max_consecutive_failures: int
     compaction_max_delay_s: float
+    startup_grace_s: float
+    prune_blocked_alert_after_s: float
+    local_disk_budget_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,8 +267,34 @@ def _capture_findings(
     return findings
 
 
+def _in_startup_grace(
+    entry: Mapping[str, Any],
+    *,
+    started_at: pd.Timestamp | None,
+    now_utc: pd.Timestamp,
+    thresholds: RecorderWatchThresholds,
+) -> bool:
+    """True while a dataset that has not persisted since the normalizer started may still be warming up.
+
+    The grid produces its first point at most one interval after start, and the normalizer derives it
+    within one cycle, so before ``interval_s + startup_grace_s`` an unpersisted dataset is not evidence
+    of a fault. A dataset that has persisted at least once is never in grace, and a missing or malformed
+    ``interval_s`` or ``started_at`` disables the grace (fail closed).
+    """
+    interval_s = _parse_count(entry.get("interval_s"))
+    if started_at is None or interval_s is None or interval_s < 1:
+        return False
+    if _parse_ts(entry.get("last_persisted_at")) is not None:
+        return False
+    return bool((now_utc - started_at).total_seconds() <= interval_s + thresholds.startup_grace_s)
+
+
 def _stream_findings(
-    streams: Any, *, now_utc: pd.Timestamp, thresholds: RecorderWatchThresholds
+    streams: Any,
+    *,
+    now_utc: pd.Timestamp,
+    started_at: pd.Timestamp | None,
+    thresholds: RecorderWatchThresholds,
 ) -> list[RecorderFinding]:
     findings: list[RecorderFinding] = []
     for dataset in _SAMPLER_DATASETS:
@@ -269,9 +304,11 @@ def _stream_findings(
             findings.append(RecorderFinding("sampler_degraded", dataset, "entry=missing"))
             findings.append(RecorderFinding("sampler_rejecting", dataset, "entry=missing"))
             continue
+        warming_up = _in_startup_grace(entry, started_at=started_at, now_utc=now_utc, thresholds=thresholds)
         persisted_at = _parse_ts(entry.get("last_persisted_at"))
         if persisted_at is None:
-            findings.append(RecorderFinding("sampler_stale", dataset, "entry=malformed"))
+            if not warming_up:
+                findings.append(RecorderFinding("sampler_stale", dataset, "entry=malformed"))
         elif (now_utc - persisted_at).total_seconds() > thresholds.sampler_stale_s:
             findings.append(
                 RecorderFinding(
@@ -283,7 +320,8 @@ def _stream_findings(
         expected = _parse_count(entry.get("window_expected_points"))
         captured = _parse_count(entry.get("window_captured_points"))
         if expected is None or captured is None or captured < 0 or captured > expected:
-            findings.append(RecorderFinding("sampler_degraded", dataset, "entry=malformed"))
+            if not warming_up:
+                findings.append(RecorderFinding("sampler_degraded", dataset, "entry=malformed"))
         elif expected >= thresholds.capture_ratio_min_points:
             ratio = captured / expected
             if ratio < thresholds.min_capture_ratio:
@@ -382,18 +420,47 @@ def _compaction_findings(
     return findings
 
 
-def _retention_findings(entry: Any) -> list[RecorderFinding]:
+def _retention_findings(
+    entry: Any, *, now_utc: pd.Timestamp, thresholds: RecorderWatchThresholds
+) -> list[RecorderFinding]:
+    """Alert a blocked prune only when it has stayed blocked long enough or the disk budget is breached.
+
+    A block right after the first deploy (no backup status yet) or after a missed backup is expected and
+    harmless while nothing needs deleting, so it is reported only once it persists for
+    ``prune_blocked_alert_after_s`` (measured from ``blocked_since``, which survives restarts) or the
+    local footprint exceeds ``local_disk_budget_bytes``.
+    """
     if not isinstance(entry, Mapping):
         return [RecorderFinding("prune_blocked", "retention", "entry=missing")]
     blocked = entry.get("prune_blocked")
-    if blocked is True:
-        return [
-            RecorderFinding(
-                "prune_blocked", "retention", f"blocked_reason={entry.get('blocked_reason') or 'none'}"
-            )
-        ]
     if blocked is not True and blocked is not False:
         return [RecorderFinding("prune_blocked", "retention", "entry=malformed")]
+    if blocked is False:
+        return []
+    reason = entry.get("blocked_reason") or "none"
+    since = _parse_ts(entry.get("blocked_since"))
+    footprint = entry.get("footprint_bytes")
+    if since is None or isinstance(footprint, bool) or not isinstance(footprint, int) or footprint < 0:
+        return [RecorderFinding("prune_blocked", "retention", f"blocked_reason={reason} entry=malformed")]
+    blocked_s = (now_utc - since).total_seconds()
+    if blocked_s > thresholds.prune_blocked_alert_after_s:
+        return [
+            RecorderFinding(
+                "prune_blocked",
+                "retention",
+                f"blocked_reason={reason} blocked_s={int(blocked_s)} "
+                f"threshold_s={_fmt_threshold(thresholds.prune_blocked_alert_after_s)}",
+            )
+        ]
+    if footprint > thresholds.local_disk_budget_bytes:
+        return [
+            RecorderFinding(
+                "prune_blocked",
+                "retention",
+                f"blocked_reason={reason} footprint_bytes={footprint} "
+                f"budget_bytes={thresholds.local_disk_budget_bytes}",
+            )
+        ]
     return []
 
 
@@ -527,10 +594,12 @@ def evaluate_recorder_heartbeat(
     started_at = _parse_ts(payload.get("started_at"))
     findings: list[RecorderFinding] = []
     findings.extend(_capture_findings(payload.get("capture"), now_utc=now_utc, thresholds=thresholds))
-    findings.extend(_stream_findings(payload.get("streams"), now_utc=now_utc, thresholds=thresholds))
+    findings.extend(
+        _stream_findings(payload.get("streams"), now_utc=now_utc, started_at=started_at, thresholds=thresholds)
+    )
     findings.extend(_normalizer_findings(payload.get("normalizer"), thresholds=thresholds))
     findings.extend(_compaction_findings(payload.get("compaction"), now_utc=now_utc, thresholds=thresholds))
-    findings.extend(_retention_findings(payload.get("retention")))
+    findings.extend(_retention_findings(payload.get("retention"), now_utc=now_utc, thresholds=thresholds))
     findings.extend(
         _reference_findings(payload, now_utc=now_utc, started_at=started_at, thresholds=thresholds)
     )
