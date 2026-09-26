@@ -30,6 +30,9 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     mem_limit: 768m
+    env_file:
+      - path: /home/ubuntu/quant-secrets/crypto-pilot-recorder.env
+        required: false
     volumes:
       - ./data/futures/liquidations:/app/data/futures/liquidations
       - ./data/live_capture:/app/data/live_capture

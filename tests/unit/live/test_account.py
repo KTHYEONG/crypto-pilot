@@ -657,3 +657,337 @@ def test_paper_equity_uses_virtual_mtm() -> None:
         cash_usdt=Decimal("2739.16"), positions={}, marks={},
     )
     assert eq == Decimal("2739.16")
+
+
+def test_sizing_equity_missing_live_mark_uses_fallback() -> None:
+    """Spec 02: a held symbol without a live mark is valued at the decision close."""
+    from src.live.account import resolve_sizing_equity
+    from src.live.settings import ExecutionMode
+
+    equity = resolve_sizing_equity(
+        _snapshot({}),
+        Decimal("2000"),
+        mode=ExecutionMode.PAPER,
+        cash_usdt=Decimal("2000"),
+        positions={"AAAUSDT": Decimal("-5")},
+        marks={},
+        fallback_marks={"AAAUSDT": Decimal("100")},
+    )
+    assert equity == Decimal("1500")
+
+
+def test_sizing_equity_missing_both_marks_fails_closed() -> None:
+    """Spec 02: a held symbol absent from both mark sets halts the cycle."""
+    import pytest
+
+    from src.live.account import resolve_sizing_equity
+    from src.live.errors import RiskGateBreach
+    from src.live.settings import ExecutionMode
+
+    with pytest.raises(RiskGateBreach, match="AAAUSDT"):
+        resolve_sizing_equity(
+            _snapshot({}),
+            Decimal("2000"),
+            mode=ExecutionMode.PAPER,
+            cash_usdt=Decimal("2000"),
+            positions={"AAAUSDT": Decimal("-5")},
+            marks={},
+            fallback_marks={},
+        )
+    with pytest.raises(RiskGateBreach, match="AAAUSDT"):
+        resolve_sizing_equity(
+            _snapshot({}),
+            Decimal("2000"),
+            mode=ExecutionMode.PAPER,
+            cash_usdt=Decimal("2000"),
+            positions={"AAAUSDT": Decimal("-5")},
+            marks={},
+            fallback_marks={"AAAUSDT": Decimal("0")},
+        )
+
+
+def test_sizing_equity_live_mark_takes_precedence() -> None:
+    """Spec 02: a live mark wins over the fallback mark."""
+    from src.live.account import resolve_sizing_equity
+    from src.live.settings import ExecutionMode
+
+    equity = resolve_sizing_equity(
+        _snapshot({}),
+        Decimal("2000"),
+        mode=ExecutionMode.PAPER,
+        cash_usdt=Decimal("2000"),
+        positions={"AAAUSDT": Decimal("5")},
+        marks={"AAAUSDT": Decimal("100")},
+        fallback_marks={"AAAUSDT": Decimal("1")},
+    )
+    assert equity == Decimal("2500")
+
+
+def test_sizing_equity_live_branch_ignores_fallback() -> None:
+    """Spec 02: LIVE equity is wallet plus uPnL regardless of the fallback."""
+    from src.live.account import resolve_sizing_equity
+    from src.live.settings import ExecutionMode
+
+    snapshot = _snapshot({}, wallet_balance=Decimal("3000"), unrealized_pnl=Decimal("50"))
+    assert resolve_sizing_equity(
+        snapshot,
+        Decimal("2000"),
+        mode=ExecutionMode.LIVE_MAINNET,
+        fallback_marks={"AAAUSDT": Decimal("1")},
+    ) == Decimal("3050")
+
+
+def test_sizing_equity_skips_zero_positions() -> None:
+    """Spec 02: zero positions are not considered and need no marks."""
+    from src.live.account import resolve_sizing_equity
+    from src.live.settings import ExecutionMode
+
+    equity = resolve_sizing_equity(
+        _snapshot({}),
+        Decimal("2000"),
+        mode=ExecutionMode.PAPER,
+        cash_usdt=Decimal("2000"),
+        positions={"AAAUSDT": Decimal("0")},
+        marks={},
+        fallback_marks={},
+    )
+    assert equity == Decimal("2000")
+
+
+def test_sizing_equity_non_numeric_fallback_fails_closed() -> None:
+    """Spec 02: an unusable fallback mark counts as absent and halts."""
+    import pytest
+
+    from src.live.account import resolve_sizing_equity
+    from src.live.errors import RiskGateBreach
+    from src.live.settings import ExecutionMode
+
+    with pytest.raises(RiskGateBreach, match="AAAUSDT"):
+        resolve_sizing_equity(
+            _snapshot({}),
+            Decimal("2000"),
+            mode=ExecutionMode.PAPER,
+            cash_usdt=Decimal("2000"),
+            positions={"AAAUSDT": Decimal("-5")},
+            marks={},
+            fallback_marks={"AAAUSDT": "bogus"},  # type: ignore[dict-item]
+        )
+
+
+def test_find_position_breaches_keeps_tolerance_boundary() -> None:
+    """Breach detection keeps today's tolerance boundary."""
+    from src.live.account import find_position_breaches
+
+    base = _snapshot({"AAAUSDT": Decimal("1.0009")})
+    assert find_position_breaches(base, {"AAAUSDT": Decimal("1.0")}, qty_tolerance_fraction=0.001) == ()
+    over = _snapshot({"AAAUSDT": Decimal("1.0011")})
+    breaches = find_position_breaches(over, {"AAAUSDT": Decimal("1.0")}, qty_tolerance_fraction=0.001)
+    assert [b.symbol for b in breaches] == ["AAAUSDT"]
+    assert breaches[0].gap == Decimal("1.0011") - Decimal("1.0")
+
+
+def test_find_position_breaches_exempts_settled_flat_symbol() -> None:
+    """Settled delisted symbol is exempt."""
+    from src.live.account import find_position_breaches
+
+    snap = _snapshot({})
+    breaches = find_position_breaches(
+        snap, {"SETUSDT": Decimal("2.0")}, qty_tolerance_fraction=0.001, settled_symbols=("SETUSDT",)
+    )
+    assert breaches == ()
+
+
+def test_explain_breaches_adopts_full_adl_gap() -> None:
+    """ADL fully explains the gap."""
+    import pandas as pd
+
+    from src.live.account import PositionBreach, VenueForceClose, explain_breaches
+
+    breach = PositionBreach(symbol="AAAUSDT", venue_qty=Decimal("-1.0"), ledger_qty=Decimal("-3.0"))
+    close = VenueForceClose(
+        symbol="AAAUSDT", side="BUY", executed_qty=Decimal("2.0"), avg_price=Decimal("100"),
+        auto_close_type="ADL", order_id="111", updated_at=pd.Timestamp("2026-09-14T00:00:00Z"),
+    )
+    adopted, unexplained = explain_breaches((breach,), (close,), qty_tolerance_fraction=0.001)
+    assert adopted == (close,)
+    assert unexplained == ()
+
+
+def test_explain_breaches_partial_gap_stays_unexplained() -> None:
+    """Partial explanation is unexplained."""
+    import pandas as pd
+
+    from src.live.account import PositionBreach, VenueForceClose, explain_breaches
+
+    breach = PositionBreach(symbol="AAAUSDT", venue_qty=Decimal("-1.0"), ledger_qty=Decimal("-3.0"))
+    close = VenueForceClose(
+        symbol="AAAUSDT", side="BUY", executed_qty=Decimal("1.5"), avg_price=Decimal("100"),
+        auto_close_type="ADL", order_id="111", updated_at=pd.Timestamp("2026-09-14T00:00:00Z"),
+    )
+    adopted, unexplained = explain_breaches((breach,), (close,), qty_tolerance_fraction=0.001)
+    assert adopted == ()
+    assert unexplained == (breach,)
+
+
+def test_fetch_venue_force_closes_rejects_malformed_payload() -> None:
+    """Malformed force-order payload fails closed."""
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.account import fetch_venue_force_closes
+
+    class _Client:
+        def force_orders(self, *, start_time_ms, end_time_ms, limit=100):
+            return [{"symbol": "AAAUSDT", "side": "BUY", "executedQty": "1.0", "updateTime": 1}]
+
+    with pytest.raises(DataIntegrityError):
+        fetch_venue_force_closes(
+            _Client(),
+            since=pd.Timestamp("2026-09-07T00:00:00Z"),
+            until=pd.Timestamp("2026-09-14T00:00:00Z"),
+        )
+
+
+def test_free_margin_breached_ignores_zero_wallet() -> None:
+    """Zero wallet is never a margin breach."""
+    from src.live.account import free_margin_breached, synthetic_flat_snapshot
+
+    import pandas as pd
+
+    flat = synthetic_flat_snapshot(pd.Timestamp("2026-09-14T00:00:00Z"))
+    assert free_margin_breached(flat, min_free_margin_fraction=0.15) is False
+    thin = _snapshot({}, wallet_balance=Decimal("2000"), available_balance=Decimal("100"))
+    assert free_margin_breached(thin, min_free_margin_fraction=0.15) is True
+    healthy = _snapshot({}, wallet_balance=Decimal("2000"), available_balance=Decimal("1900"))
+    assert free_margin_breached(healthy, min_free_margin_fraction=0.15) is False
+
+
+def _force_entry(order_id, ts_ms, qty="1.0", **overrides):
+    entry = {
+        "symbol": "AAAUSDT", "side": "BUY", "executedQty": qty, "avgPrice": "100",
+        "autoCloseType": "ADL", "orderId": order_id, "updateTime": ts_ms,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_fetch_venue_force_closes_paginates_by_time() -> None:
+    """Full pages advance the cursor until the range is exhausted."""
+    import pandas as pd
+
+    from src.live.account import fetch_venue_force_closes
+
+    base_ms = 1_786_000_000_000
+    page_one = [_force_entry(f"id-{i}", base_ms, qty="0.01") for i in range(100)]
+    page_two = [_force_entry("id-last", base_ms + 1000, qty="0.02")]
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        def force_orders(self, *, start_time_ms, end_time_ms, limit=100):
+            self.calls.append(start_time_ms)
+            assert limit == 100
+            if len(self.calls) == 1:
+                return page_one
+            return page_two
+
+    client = _Client()
+    out = fetch_venue_force_closes(
+        client,
+        since=pd.Timestamp(base_ms, unit="ms", tz="UTC"),
+        until=pd.Timestamp(base_ms + 3_600_000, unit="ms", tz="UTC"),
+    )
+    assert len(out) == 101
+    assert len(client.calls) == 2
+    assert client.calls[1] == base_ms + 1
+
+
+def test_fetch_venue_force_closes_skips_zero_qty() -> None:
+    """Entries with zero executed quantity are skipped."""
+    import pandas as pd
+
+    from src.live.account import fetch_venue_force_closes
+
+    class _Client:
+        def force_orders(self, *, start_time_ms, end_time_ms, limit=100):
+            return [_force_entry("zero", 1_786_000_000_000, qty="0")]
+
+    out = fetch_venue_force_closes(
+        _Client(),
+        since=pd.Timestamp("2026-09-07T00:00:00Z"),
+        until=pd.Timestamp("2026-09-14T00:00:00Z"),
+    )
+    assert out == ()
+
+
+def test_fetch_venue_force_closes_empty_page_ends_pagination() -> None:
+    """An empty page ends pagination with no closes."""
+    import pandas as pd
+
+    from src.live.account import fetch_venue_force_closes
+
+    class _Client:
+        def force_orders(self, *, start_time_ms, end_time_ms, limit=100):
+            return []
+
+    out = fetch_venue_force_closes(
+        _Client(),
+        since=pd.Timestamp("2026-09-07T00:00:00Z"),
+        until=pd.Timestamp("2026-09-14T00:00:00Z"),
+    )
+    assert out == ()
+
+
+def test_fetch_venue_force_closes_dedupes_repeated_rows() -> None:
+    """The same force close returned twice is adopted once."""
+    import pandas as pd
+
+    from src.live.account import fetch_venue_force_closes
+
+    entry = _force_entry("dup", 1_786_000_000_000, qty="0.5")
+
+    class _Client:
+        def force_orders(self, *, start_time_ms, end_time_ms, limit=100):
+            return [entry, dict(entry)]
+
+    out = fetch_venue_force_closes(
+        _Client(),
+        since=pd.Timestamp("2026-09-07T00:00:00Z"),
+        until=pd.Timestamp("2026-09-14T00:00:00Z"),
+    )
+    assert [f.order_id for f in out] == ["dup"]
+
+
+def test_fetch_venue_force_closes_rejects_bad_rows() -> None:
+    """Non-list payloads and unknown sides/quantities/prices fail closed."""
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.account import fetch_venue_force_closes
+
+    since = pd.Timestamp("2026-09-07T00:00:00Z")
+    until = pd.Timestamp("2026-09-14T00:00:00Z")
+
+    class _Client:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def force_orders(self, *, start_time_ms, end_time_ms, limit=100):
+            return self.payload
+
+    with pytest.raises(DataIntegrityError):
+        fetch_venue_force_closes(_Client(object()), since=since, until=until)
+    with pytest.raises(DataIntegrityError):
+        fetch_venue_force_closes(_Client(["nope"]), since=since, until=until)
+    bad_variants = [
+        _force_entry("x", 1_786_000_000_000, side="HOLD"),
+        _force_entry("x", 1_786_000_000_000, qty="-1"),
+        _force_entry("x", 1_786_000_000_000, avgPrice="0"),
+        _force_entry("x", 1_786_000_000_000, autoCloseType="MARGIN_CALL"),
+    ]
+    for bad in bad_variants:
+        with pytest.raises(DataIntegrityError):
+            fetch_venue_force_closes(_Client([bad]), since=since, until=until)

@@ -15,14 +15,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
-from src.live.executor import ExecutionOutcome, OrphanSettlement
-from src.live.planner import OrderIntent
+
+if TYPE_CHECKING:
+    from src.live.order_journal import JournalFill
 
 _HWM_KEY = "equity_high_water_mark"
 _POSITIONS_KEY = "positions"
@@ -31,6 +32,10 @@ _FUNDING_THROUGH_KEY = "funding_accrued_through"
 _LAST_EXECUTED_KEY = "last_executed_decision_time"
 _WATERMARKS_KEY = "funding_watermarks"
 _HISTORY_KEY = "position_history"
+_JOURNAL_APPLIED_KEY = "journal_applied_fill_seq"
+_JOURNAL_RECORDED_KEY = "journal_recorded_fill_seq"
+_DERISK_SINCE_KEY = "derisk_since"
+_DERISK_REASONS_KEY = "derisk_reasons"
 _ACCRUAL_STARTED_KEY = "funding_accrual_started_at"
 _BACKFILLED_KEY = "funding_backfilled_through"
 
@@ -82,6 +87,10 @@ class LedgerState:
     position_history: tuple[PositionSnapshot, ...] = ()
     funding_accrual_started_at: pd.Timestamp | None = None
     funding_backfilled_through: pd.Timestamp | None = None
+    journal_applied_fill_seq: int = -1
+    journal_recorded_fill_seq: int = -1
+    derisk_since: pd.Timestamp | None = None
+    derisk_reasons: tuple[str, ...] = ()
 
 
 def _parse_utc(value: Any, name: str, path: Path) -> pd.Timestamp:
@@ -101,6 +110,18 @@ def _parse_positions(raw: Any, name: str, path: Path) -> dict[str, Decimal]:
         return {str(symbol): Decimal(str(qty)) for symbol, qty in raw.items()}
     except (InvalidOperation, ValueError, TypeError, AttributeError) as exc:
         raise DataIntegrityError(f"ledger {name} quantity is not numeric: {path}") from exc
+
+
+def _parse_watermark(raw: Any, name: str, path: Path) -> int:
+    if isinstance(raw, bool):
+        raise DataIntegrityError(f"ledger {name} must be an integer: {path}")
+    try:
+        value = int(raw)
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"ledger {name} must be an integer: {path}") from exc
+    if value < -1:
+        raise DataIntegrityError(f"ledger {name} must be >= -1: {path}")
+    return value
 
 
 def load_ledger(path: Path) -> LedgerState:
@@ -173,6 +194,10 @@ def load_ledger(path: Path) -> LedgerState:
     if _POSITIONS_KEY not in raw:
         watermarks: dict[str, pd.Timestamp] = {}
         history: tuple[PositionSnapshot, ...] = ()
+        journal_applied = -1
+        journal_recorded = -1
+        derisk_since: pd.Timestamp | None = None
+        derisk_reasons: tuple[str, ...] = ()
     else:
         watermarks_raw = raw.get(_WATERMARKS_KEY, {})
         if not isinstance(watermarks_raw, dict):
@@ -200,6 +225,29 @@ def load_ledger(path: Path) -> LedgerState:
             )
         parsed_history.sort(key=lambda snap: snap.effective_from)
         history = tuple(parsed_history)
+        journal_applied = (
+            _parse_watermark(raw[_JOURNAL_APPLIED_KEY], "journal_applied_fill_seq", path)
+            if _JOURNAL_APPLIED_KEY in raw
+            else -1
+        )
+        journal_recorded = (
+            _parse_watermark(raw[_JOURNAL_RECORDED_KEY], "journal_recorded_fill_seq", path)
+            if _JOURNAL_RECORDED_KEY in raw
+            else -1
+        )
+        if journal_recorded > journal_applied:
+            raise DataIntegrityError(
+                f"ledger journal_recorded_fill_seq ({journal_recorded}) exceeds "
+                f"journal_applied_fill_seq ({journal_applied}): {path}"
+            )
+        derisk_since_raw = raw.get(_DERISK_SINCE_KEY)
+        derisk_since = _parse_utc(derisk_since_raw, "derisk_since", path) if derisk_since_raw is not None else None
+        derisk_reasons_raw = raw.get(_DERISK_REASONS_KEY, [])
+        if not isinstance(derisk_reasons_raw, list):
+            raise DataIntegrityError(f"ledger derisk_reasons must be a list: {path}")
+        derisk_reasons = tuple(sorted({str(item) for item in derisk_reasons_raw}))
+        if derisk_since is None and derisk_reasons:
+            raise DataIntegrityError(f"ledger derisk_reasons without derisk_since: {path}")
     return LedgerState(
         positions=positions,
         equity_high_water_mark=hwm,
@@ -210,15 +258,21 @@ def load_ledger(path: Path) -> LedgerState:
         position_history=history,
         funding_accrual_started_at=funding_accrual_started_at,
         funding_backfilled_through=funding_backfilled_through,
+        journal_applied_fill_seq=journal_applied,
+        journal_recorded_fill_seq=journal_recorded,
+        derisk_since=derisk_since,
+        derisk_reasons=derisk_reasons,
     )
 
 
 def save_ledger(path: Path, state: LedgerState) -> None:
-    """임시파일 + os.replace 로 원자적 기록한다(부분 기록 JSON 은 영구 HALT 로 이어진다)."""
+    """Write via a temporary file that is fsync'd before `os.replace`, then fsync the parent directory, so a power loss can never leave an empty or partially written ledger."""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         _POSITIONS_KEY: {symbol: str(qty) for symbol, qty in state.positions.items() if qty != 0},
         _HWM_KEY: str(state.equity_high_water_mark),
+        _JOURNAL_APPLIED_KEY: int(state.journal_applied_fill_seq),
+        _JOURNAL_RECORDED_KEY: int(state.journal_recorded_fill_seq),
     }
     if state.cash_usdt is not None:
         payload[_CASH_KEY] = str(state.cash_usdt)
@@ -245,69 +299,202 @@ def save_ledger(path: Path, state: LedgerState) -> None:
         payload[_ACCRUAL_STARTED_KEY] = pd.Timestamp(state.funding_accrual_started_at).tz_convert("UTC").isoformat()
     if state.funding_backfilled_through is not None:
         payload[_BACKFILLED_KEY] = pd.Timestamp(state.funding_backfilled_through).tz_convert("UTC").isoformat()
+    if state.derisk_since is not None:
+        payload[_DERISK_SINCE_KEY] = pd.Timestamp(state.derisk_since).tz_convert("UTC").isoformat()
+        payload[_DERISK_REASONS_KEY] = sorted(state.derisk_reasons)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    with tmp_path.open("rb") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp_path, path)
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
-def compute_fill_cash_flow(
-    intents: Sequence[OrderIntent],
-    outcomes: Sequence[ExecutionOutcome],
-) -> Decimal:
-    """체결 현금흐름을 계산한다. BUY는 음수, SELL은 양수."""
-    total = Decimal(0)
-    for intent, outcome in zip(intents, outcomes, strict=True):
-        # I-FEE-ACCOUNTED: fills가 있으면 per-fill 수수료 포함, 없으면 보수적 taker fallback
-        fills = getattr(outcome, "fills", ())
-        if fills:
-            for qty_abs, price, fee_bps, _reason, _liq, _filled_at in fills:
-                qty = Decimal(qty_abs)
-                px = Decimal(price)
-                fee = abs(qty * px) * Decimal(str(fee_bps)) / Decimal(10_000)
-                signed = qty if intent.side == "BUY" else -qty
-                total += -signed * px - fee
-            continue
-        if outcome.filled_qty <= 0 or outcome.avg_fill_price is None:
-            continue
-        signed = outcome.filled_qty if intent.side == "BUY" else -outcome.filled_qty
-        # 구 스키마 fallback: 수수료는 taker로 보수적 부과
-        fee_bps = 5.0
-        try:
-            from src.mhs.types import ExecutionSpec  # noqa: PLC0415
-
-            fee_bps = ExecutionSpec().taker_fee_bps
-        except Exception:  # noqa: BLE001, S110
-            pass
-        fee = abs(outcome.filled_qty * outcome.avg_fill_price) * Decimal(str(fee_bps)) / Decimal(10_000)
-        total += -signed * outcome.avg_fill_price - fee
-    return total
+def _fill_cash_delta(side: str, quantity: Decimal, price: Decimal, fee_bps: float) -> Decimal:
+    signed = Decimal(quantity) if side == "BUY" else -Decimal(quantity)
+    notional = abs(Decimal(quantity) * Decimal(price))
+    fee = notional * Decimal(str(fee_bps)) / Decimal(10_000)
+    return -signed * Decimal(price) - fee
 
 
-def apply_outcomes(
-    positions: Mapping[str, Decimal],
-    intents: Sequence[OrderIntent],
-    outcomes: Sequence[ExecutionOutcome],
-) -> dict[str, Decimal]:
-    """체결된 수량만큼 원장을 갱신한다. 방향은 intent.side에서, 크기는 outcome.filled_qty에서 온다."""
-    if len(intents) != len(outcomes):
-        raise ValueError("intents and outcomes must be the same length and order")
-    updated = dict(positions)
-    for intent, outcome in zip(intents, outcomes, strict=True):
-        if outcome.symbol != intent.symbol:
-            raise ValueError(f"outcome/intent symbol mismatch: {outcome.symbol} != {intent.symbol}")
-        signed_fill = outcome.filled_qty if intent.side == "BUY" else -outcome.filled_qty
-        updated[intent.symbol] = updated.get(intent.symbol, Decimal(0)) + signed_fill
-    return updated
+def commit_journal_fills(
+    path: Path,
+    base_state: LedgerState,
+    fills: Sequence[JournalFill],
+    *,
+    equity: Decimal | None,
+    track_cash: bool,
+    starting_capital: Decimal,
+    executed_decision_time: pd.Timestamp | None = None,
+) -> LedgerState:
+    """Fold journal fills with `fill_seq` above the applied watermark into positions (and PAPER cash) and persist the result atomically together with the new watermark.
+
+    This is the only function that moves ledger positions or simulated cash for executions. Fills at or below `base_state.journal_applied_fill_seq` are skipped, so replaying the same journal range any number of times yields the same ledger. Cash moves by `-signed_qty * price - |qty * price| * fee_bps / 1e4` per fill (BUY negative) and only when `track_cash`. `operator_resync` fills move positions only, never cash. The position-history snapshot is stamped at the latest `filled_at` of the applied batch because funding accrual must see a position from the moment it was actually held. `executed_decision_time` is set only by a COMPLETE attempt; it is never inferred.
+
+    Args: path: ledger file. base_state: state the fills are applied on. fills: candidate fills (any order; filtered and sorted by `fill_seq`). equity: sizing equity to ratchet the high-water mark, or None to leave it unchanged. track_cash: True for mutation-suppressed (PAPER/SHADOW) modes. starting_capital: cash seed when the ledger has none. executed_decision_time: stamp for a COMPLETE attempt, else None.
+    Returns: the persisted state.
+    Raises: DataIntegrityError: the applied fills contain a gap in `fill_seq` relative to the watermark (a journal line was lost), or a fill references an unknown side.
+    """
+    watermark = base_state.journal_applied_fill_seq
+    pending = sorted(
+        (fill for fill in fills if int(fill.fill_seq) > watermark),
+        key=lambda fill: int(fill.fill_seq),
+    )
+    if not pending:
+        return base_state
+    seqs = [int(fill.fill_seq) for fill in pending]
+    expected = list(range(watermark + 1, seqs[-1] + 1))
+    if seqs != expected:
+        raise DataIntegrityError(
+            f"journal fill gap: watermark {watermark}, got fill_seq {seqs}"
+        )
+    positions = dict(base_state.positions)
+    cash: Decimal | None = base_state.cash_usdt
+    if track_cash and cash is None:
+        cash = Decimal(starting_capital)
+    for fill in pending:
+        side = str(fill.side)
+        if side not in ("BUY", "SELL"):
+            raise DataIntegrityError(
+                f"journal fill {fill.fill_seq} has unknown side {fill.side!r}"
+            )
+        qty = Decimal(str(fill.quantity))
+        if side == "BUY":
+            positions[fill.symbol] = positions.get(fill.symbol, Decimal(0)) + qty
+        else:
+            positions[fill.symbol] = positions.get(fill.symbol, Decimal(0)) - qty
+        if track_cash and str(getattr(fill, "kind", "execution")) != "operator_resync":
+            assert cash is not None
+            cash = cash + _fill_cash_delta(
+                side, qty, Decimal(str(fill.price)), float(fill.fee_bps)
+            )
+    latest_filled_at = max(pd.Timestamp(fill.filled_at) for fill in pending)
+    history = append_position_snapshot(
+        base_state.position_history,
+        latest_filled_at,
+        positions,
+        watermarks=base_state.funding_watermarks,
+    )
+    hwm = base_state.equity_high_water_mark
+    if equity is not None and Decimal(equity) > hwm:
+        hwm = Decimal(equity)
+    new_state = LedgerState(
+        positions=positions,
+        equity_high_water_mark=hwm,
+        cash_usdt=cash,
+        funding_accrued_through=base_state.funding_accrued_through,
+        last_executed_decision_time=(
+            executed_decision_time
+            if executed_decision_time is not None
+            else base_state.last_executed_decision_time
+        ),
+        funding_watermarks=dict(base_state.funding_watermarks),
+        position_history=history,
+        funding_accrual_started_at=base_state.funding_accrual_started_at,
+        funding_backfilled_through=base_state.funding_backfilled_through,
+        journal_applied_fill_seq=seqs[-1],
+        journal_recorded_fill_seq=base_state.journal_recorded_fill_seq,
+        derisk_since=base_state.derisk_since,
+        derisk_reasons=base_state.derisk_reasons,
+    )
+    save_ledger(path, new_state)
+    return new_state
 
 
-def apply_orphan_settlements(
-    positions: Mapping[str, Decimal], settlements: Sequence[OrphanSettlement]
-) -> dict[str, Decimal]:
-    updated = dict(positions)
-    for s in settlements:
-        signed = s.executed_qty if s.side == "BUY" else -s.executed_qty
-        updated[s.symbol] = updated.get(s.symbol, Decimal(0)) + signed
-    return updated
+def mark_fills_recorded(
+    path: Path, base_state: LedgerState, through_fill_seq: int
+) -> LedgerState:
+    """Advance `journal_recorded_fill_seq` after downstream evidence (fills parquet, simulated tax rows) for all fills up to `through_fill_seq` was written. Never moves the watermark backwards or above `journal_applied_fill_seq`."""
+    through = int(through_fill_seq)
+    if through < base_state.journal_recorded_fill_seq:
+        raise ValueError(
+            f"journal_recorded_fill_seq would move backwards: "
+            f"{base_state.journal_recorded_fill_seq} -> {through}"
+        )
+    if through > base_state.journal_applied_fill_seq:
+        raise ValueError(
+            f"journal_recorded_fill_seq ({through}) above "
+            f"journal_applied_fill_seq ({base_state.journal_applied_fill_seq})"
+        )
+    if through == base_state.journal_recorded_fill_seq:
+        return base_state
+    new_state = LedgerState(
+        positions=dict(base_state.positions),
+        equity_high_water_mark=base_state.equity_high_water_mark,
+        cash_usdt=base_state.cash_usdt,
+        funding_accrued_through=base_state.funding_accrued_through,
+        last_executed_decision_time=base_state.last_executed_decision_time,
+        funding_watermarks=dict(base_state.funding_watermarks),
+        position_history=tuple(base_state.position_history),
+        funding_accrual_started_at=base_state.funding_accrual_started_at,
+        funding_backfilled_through=base_state.funding_backfilled_through,
+        journal_applied_fill_seq=base_state.journal_applied_fill_seq,
+        journal_recorded_fill_seq=through,
+        derisk_since=base_state.derisk_since,
+        derisk_reasons=base_state.derisk_reasons,
+    )
+    save_ledger(path, new_state)
+    return new_state
+
+
+def enter_derisk(
+    path: Path, base_state: LedgerState, *, reasons: Sequence[str], now: pd.Timestamp
+) -> LedgerState:
+    """Persist the de-risk-only flag (first entry time is kept; reasons are unioned and sorted) so the mode survives restarts. Only `live ledger-resync --apply` clears it — a later clean reconciliation is not proof that the unexplained cause is gone."""
+    now_ts = pd.Timestamp(now)
+    if now_ts.tzinfo is None:
+        raise ValueError("now must be tz-aware")
+    now_ts = now_ts.tz_convert("UTC")
+    merged = tuple(sorted(set(base_state.derisk_reasons) | {str(item) for item in reasons}))
+    new_state = LedgerState(
+        positions=dict(base_state.positions),
+        equity_high_water_mark=base_state.equity_high_water_mark,
+        cash_usdt=base_state.cash_usdt,
+        funding_accrued_through=base_state.funding_accrued_through,
+        last_executed_decision_time=base_state.last_executed_decision_time,
+        funding_watermarks=dict(base_state.funding_watermarks),
+        position_history=tuple(base_state.position_history),
+        funding_accrual_started_at=base_state.funding_accrual_started_at,
+        funding_backfilled_through=base_state.funding_backfilled_through,
+        journal_applied_fill_seq=base_state.journal_applied_fill_seq,
+        journal_recorded_fill_seq=base_state.journal_recorded_fill_seq,
+        derisk_since=base_state.derisk_since if base_state.derisk_since is not None else now_ts,
+        derisk_reasons=merged,
+    )
+    if new_state is not base_state:
+        save_ledger(path, new_state)
+    return new_state
+
+
+def clear_derisk(path: Path, base_state: LedgerState) -> LedgerState:
+    """Remove the flag; called only by the operator resync after the ledger was adopted from the venue snapshot and verified."""
+    if base_state.derisk_since is None and not base_state.derisk_reasons:
+        return base_state
+    new_state = LedgerState(
+        positions=dict(base_state.positions),
+        equity_high_water_mark=base_state.equity_high_water_mark,
+        cash_usdt=base_state.cash_usdt,
+        funding_accrued_through=base_state.funding_accrued_through,
+        last_executed_decision_time=base_state.last_executed_decision_time,
+        funding_watermarks=dict(base_state.funding_watermarks),
+        position_history=tuple(base_state.position_history),
+        funding_accrual_started_at=base_state.funding_accrual_started_at,
+        funding_backfilled_through=base_state.funding_backfilled_through,
+        journal_applied_fill_seq=base_state.journal_applied_fill_seq,
+        journal_recorded_fill_seq=base_state.journal_recorded_fill_seq,
+        derisk_since=None,
+        derisk_reasons=(),
+    )
+    save_ledger(path, new_state)
+    return new_state
 
 
 def _require_tz_aware(value: pd.Timestamp, name: str) -> pd.Timestamp:
@@ -321,14 +508,34 @@ def append_position_snapshot(
     history: Sequence[PositionSnapshot],
     effective_from: pd.Timestamp,
     positions: Mapping[str, Decimal],
+    *,
+    watermarks: Mapping[str, pd.Timestamp] | None = None,
 ) -> tuple[PositionSnapshot, ...]:
+    """Append a snapshot, keeping at least POSITION_HISTORY_MAX plus any snapshot still needed by funding accrual.
+
+    POSITION_HISTORY_MAX is a floor: when `watermarks` (funding_watermarks) is given,
+    the snapshot active at the oldest watermark is retained even if it is older than
+    the most recent POSITION_HISTORY_MAX snapshots, because funding accrual reads
+    positions at past epochs.
+    """
     ts = _require_tz_aware(effective_from, "effective_from").tz_convert("UTC")
     nonzero = {symbol: qty for symbol, qty in positions.items() if qty != 0}
-    if history and history[-1].positions == nonzero:
-        return tuple(history)
-    return (*history, PositionSnapshot(effective_from=ts, positions=nonzero))[
-        -POSITION_HISTORY_MAX:
-    ]
+    snaps = list(history)
+    if not (snaps and snaps[-1].positions == nonzero):
+        snaps.append(PositionSnapshot(effective_from=ts, positions=nonzero))
+    if len(snaps) <= POSITION_HISTORY_MAX:
+        return tuple(snaps)
+    start = len(snaps) - POSITION_HISTORY_MAX
+    if watermarks:
+        oldest = min(pd.Timestamp(v) for v in watermarks.values())
+        active_idx = 0
+        for idx, snap in enumerate(snaps):
+            if snap.effective_from <= oldest:
+                active_idx = idx
+            else:
+                break
+        start = min(start, active_idx)
+    return tuple(snaps[start:])
 
 
 def position_at(

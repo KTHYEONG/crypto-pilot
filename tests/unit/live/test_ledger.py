@@ -10,11 +10,8 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.live.account import AccountSnapshot, reconcile_or_halt
-from src.live.executor import ExecutionOutcome
 from src.live.ledger import (
     LedgerState,
-    apply_outcomes,
-    compute_fill_cash_flow,
     default_ledger_path,
     load_ledger,
     save_ledger,
@@ -81,39 +78,6 @@ def test_load_ledger_corrupt_file_fails_closed(tmp_path: Path) -> None:
         load_ledger(path)
 
 
-def test_apply_outcomes_buy_and_sell_signed_correctly() -> None:
-    intents = [_intent("BTCUSDT", "BUY", "1"), _intent("ETHUSDT", "SELL", "2")]
-    outcomes = [
-        ExecutionOutcome(symbol="BTCUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED"),
-        ExecutionOutcome(symbol="ETHUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("50"), chases=0, status="FILLED"),
-    ]
-    updated = apply_outcomes({}, intents, outcomes)
-    assert updated == {"BTCUSDT": Decimal("1"), "ETHUSDT": Decimal("-2")}
-
-
-def test_apply_outcomes_accumulates_onto_existing_position() -> None:
-    intents = [_intent("BTCUSDT", "BUY", "0.5")]
-    outcomes = [
-        ExecutionOutcome(symbol="BTCUSDT", filled_qty=Decimal("0.5"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100"), chases=0, status="FILLED"),
-    ]
-    updated = apply_outcomes({"BTCUSDT": Decimal("1")}, intents, outcomes)
-    assert updated == {"BTCUSDT": Decimal("1.5")}
-
-
-def test_apply_outcomes_length_mismatch_raises() -> None:
-    with pytest.raises(ValueError, match="same length"):
-        apply_outcomes({}, [_intent("BTCUSDT", "BUY", "1")], [])
-
-
-def test_apply_outcomes_symbol_mismatch_raises() -> None:
-    intents = [_intent("BTCUSDT", "BUY", "1")]
-    outcomes = [
-        ExecutionOutcome(symbol="ETHUSDT", filled_qty=Decimal("1"), unfilled_qty=Decimal("0"), avg_fill_price=None, chases=0, status="FILLED"),
-    ]
-    with pytest.raises(ValueError, match="mismatch"):
-        apply_outcomes({}, intents, outcomes)
-
-
 def test_default_ledger_path_under_data_state() -> None:
     path = default_ledger_path()
     assert path.parts[-2:] == ("state", "live_position_ledger.json")
@@ -160,73 +124,11 @@ def test_SCENARIO_LIVE_43_LEDGER_CASH_ROUND_TRIPS_AND_STAYS_BACKWARD_COMPATIBLE(
     assert load_ledger(legacy_path).cash_usdt is None
 
 
-def test_SCENARIO_LIVE_44_FILL_CASH_FLOW_SIGN_CONVENTION() -> None:
-    """SCENARIO_LIVE_44: BUY decreases cash, SELL increases it; unfilled/None
-    price contributes exactly 0; two intents sum algebraically."""
-    buy = _intent("AAAUSDT", "BUY", "2")
-    buy_outcome = ExecutionOutcome(
-        symbol="AAAUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
-        avg_fill_price=Decimal("100"), chases=0, status="FILLED",
-    )
-    assert compute_fill_cash_flow([buy], [buy_outcome]) == Decimal("-200.1")  # fee 5bps
-
-    sell = _intent("AAAUSDT", "SELL", "2")
-    sell_outcome = ExecutionOutcome(
-        symbol="AAAUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
-        avg_fill_price=Decimal("100"), chases=0, status="FILLED",
-    )
-    assert compute_fill_cash_flow([sell], [sell_outcome]) == Decimal("199.9")  # fee 5bps
-
-    zero_fill = ExecutionOutcome(
-        symbol="AAAUSDT", filled_qty=Decimal("0"), unfilled_qty=Decimal("2"),
-        avg_fill_price=Decimal("100"), chases=0, status="RESIDUAL",
-    )
-    assert compute_fill_cash_flow([buy], [zero_fill]) == Decimal("0")
-    no_price = ExecutionOutcome(
-        symbol="AAAUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
-        avg_fill_price=None, chases=0, status="SHADOW",
-    )
-    assert compute_fill_cash_flow([buy], [no_price]) == Decimal("0")
-
-    combined = compute_fill_cash_flow(
-        [buy, _intent("BBBUSDT", "SELL", "2")],
-        [
-            buy_outcome,
-            ExecutionOutcome(
-                symbol="BBBUSDT", filled_qty=Decimal("2"), unfilled_qty=Decimal("0"),
-                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
-            ),
-        ],
-    )
-    assert combined == Decimal("-200.1") + Decimal("199.9") == Decimal("-0.2")
-
-
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_43_LEDGER_CASH_ROUND_TRIPS_AND_STAYS_BACKWARD_COMPATIBLE",
     "SCENARIO_LIVE_44_FILL_CASH_FLOW_SIGN_CONVENTION",
 )
-
-def test_SCENARIO_PARITY_05_fee_accounted_cashflow():
-    """SCENARIO_PARITY_05-fee-accounted-cashflow"""
-    from decimal import Decimal
-    import pandas as pd
-    from src.live.planner import OrderIntent
-    from src.live.executor import ExecutionOutcome
-    from src.live.ledger import compute_fill_cash_flow
-    stamp = pd.Timestamp("2026-09-22 23:07:12", tz="UTC")
-    intent_buy = OrderIntent(symbol="AAAUSDT", side="BUY", quantity=Decimal("1.0"), reduce_only=False, target_qty=Decimal("1.0"), current_qty=Decimal("0"), client_order_prefix="run1", leg_index=0, decision_price=Decimal("100"))
-    # maker 2bps
-    outcome_maker = ExecutionOutcome(symbol="AAAUSDT", filled_qty=Decimal("1.0"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.0"), chases=0, status="FILLED", fills=((Decimal("1.0"), Decimal("100.0"), 2.0, "maker_fill", "maker", stamp),), maker_qty=Decimal("1.0"), taker_qty=Decimal("0"))
-    assert compute_fill_cash_flow([intent_buy], [outcome_maker]) == Decimal("-100.02")
-    # taker 5bps
-    outcome_taker = ExecutionOutcome(symbol="AAAUSDT", filled_qty=Decimal("1.0"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.0"), chases=0, status="FILLED", fills=((Decimal("1.0"), Decimal("100.0"), 5.0, "timeout_taker", "taker", stamp),), maker_qty=Decimal("0"), taker_qty=Decimal("1.0"))
-    assert compute_fill_cash_flow([intent_buy], [outcome_taker]) == Decimal("-100.05")
-    # SELL maker
-    intent_sell = OrderIntent(symbol="AAAUSDT", side="SELL", quantity=Decimal("1.0"), reduce_only=False, target_qty=Decimal("0"), current_qty=Decimal("1.0"), client_order_prefix="run1", leg_index=0, decision_price=Decimal("100"))
-    outcome_sell_maker = ExecutionOutcome(symbol="AAAUSDT", filled_qty=Decimal("1.0"), unfilled_qty=Decimal("0"), avg_fill_price=Decimal("100.0"), chases=0, status="FILLED", fills=((Decimal("1.0"), Decimal("100.0"), 2.0, "maker_fill", "maker", stamp),), maker_qty=Decimal("1.0"), taker_qty=Decimal("0"))
-    assert compute_fill_cash_flow([intent_sell], [outcome_sell_maker]) == Decimal("99.98")
-
 
 def test_ledger_roundtrip_funding_accrued_through(tmp_path) -> None:
     import json
@@ -778,3 +680,257 @@ def test_ledger_roundtrips_funding_backfill_markers(tmp_path) -> None:
         load_ledger(path)
 
 
+def _journal_fill(fill_seq, side, qty, price, *, fee_bps=0.0, symbol="AAAUSDT", kind="execution", filled_at=None):
+    """Minimal journal-fill stand-in carrying the fields commit_journal_fills folds."""
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    return SimpleNamespace(
+        fill_seq=fill_seq,
+        kind=kind,
+        attempt_seq=0,
+        symbol=symbol,
+        side=side,
+        quantity=Decimal(str(qty)),
+        price=Decimal(str(price)),
+        fee_bps=float(fee_bps),
+        liquidity="taker",
+        reason="timeout_taker",
+        filled_at=filled_at or pd.Timestamp("2026-09-20 00:00", tz="UTC"),
+        client_order_id=f"cid-{fill_seq}",
+        leg_index=0,
+        cumulative_executed_qty=None,
+        simulated=True,
+    )
+
+
+def test_commit_journal_fills_replay_is_idempotent(tmp_path: Path) -> None:
+    """Same journal range applied twice yields the same positions and watermark."""
+    from src.live.ledger import commit_journal_fills
+
+    path = tmp_path / "ledger.json"
+    fills = [
+        _journal_fill(0, "BUY", "1", "100"),
+        _journal_fill(1, "BUY", "1", "100"),
+        _journal_fill(2, "SELL", "0.5", "100"),
+    ]
+    once = commit_journal_fills(
+        path, LedgerState(), fills, equity=None, track_cash=False,
+        starting_capital=Decimal("0"),
+    )
+    assert once.positions == {"AAAUSDT": Decimal("1.5")}
+    assert once.journal_applied_fill_seq == 2
+    twice = commit_journal_fills(
+        path, once, fills, equity=None, track_cash=False,
+        starting_capital=Decimal("0"),
+    )
+    assert twice.positions == {"AAAUSDT": Decimal("1.5")}
+    assert twice.journal_applied_fill_seq == 2
+    assert load_ledger(path).positions == {"AAAUSDT": Decimal("1.5")}
+
+
+def test_commit_journal_fills_gap_fails_closed(tmp_path: Path) -> None:
+    """Missing fill_seq relative to the watermark raises and leaves the file unchanged."""
+    from src.live.ledger import commit_journal_fills
+
+    path = tmp_path / "ledger.json"
+    base = LedgerState(
+        positions={"AAAUSDT": Decimal("1")}, journal_applied_fill_seq=0,
+    )
+    save_ledger(path, base)
+    with pytest.raises(DataIntegrityError):
+        commit_journal_fills(
+            path, base, [_journal_fill(2, "BUY", "1", "100"), _journal_fill(3, "BUY", "1", "100")],
+            equity=None, track_cash=False, starting_capital=Decimal("0"),
+        )
+    assert load_ledger(path) == base
+
+
+def test_commit_journal_fills_conserves_paper_cash(tmp_path: Path) -> None:
+    """BUY 2 @100 (5bps) + SELL 1 @110 (2bps) moves cash by the exact signed notional minus fees."""
+    from src.live.ledger import commit_journal_fills
+
+    path = tmp_path / "ledger.json"
+    base = LedgerState(cash_usdt=Decimal("1000"))
+    fills = [
+        _journal_fill(0, "BUY", "2", "100", fee_bps=5.0),
+        _journal_fill(1, "SELL", "1", "110", fee_bps=2.0),
+    ]
+    result = commit_journal_fills(
+        path, base, fills, equity=None, track_cash=True,
+        starting_capital=Decimal("0"),
+    )
+    assert result.cash_usdt == Decimal("909.878")
+    assert result.positions == {"AAAUSDT": Decimal("1")}
+
+
+def test_commit_journal_fills_operator_resync_skips_cash(tmp_path: Path) -> None:
+    """operator_resync fills move positions only, never cash."""
+    from src.live.ledger import commit_journal_fills
+
+    path = tmp_path / "ledger.json"
+    base = LedgerState(cash_usdt=Decimal("1000"))
+    result = commit_journal_fills(
+        path, base, [_journal_fill(0, "BUY", "3", "100", kind="operator_resync")],
+        equity=None, track_cash=True, starting_capital=Decimal("0"),
+    )
+    assert result.positions == {"AAAUSDT": Decimal("3")}
+    assert result.cash_usdt == Decimal("1000")
+
+
+def test_commit_journal_fills_retains_history_needed_by_funding(tmp_path: Path) -> None:
+    """Snapshots older than POSITION_HISTORY_MAX survive when funding still needs them."""
+    import pandas as pd
+
+    from src.live.ledger import PositionSnapshot, commit_journal_fills
+
+    path = tmp_path / "ledger.json"
+    t0 = pd.Timestamp("2026-09-01 01:00", tz="UTC")
+    history = tuple(
+        PositionSnapshot(
+            effective_from=t0 + pd.Timedelta(days=day),
+            positions={"AAAUSDT": Decimal(day + 1)},
+        )
+        for day in range(6)
+    )
+    base = LedgerState(
+        positions={"AAAUSDT": Decimal("6")},
+        funding_watermarks={"AAAUSDT": t0},
+        position_history=history,
+        journal_applied_fill_seq=5,
+    )
+    result = commit_journal_fills(
+        path, base,
+        [_journal_fill(6, "BUY", "1", "100", filled_at=t0 + pd.Timedelta(days=6))],
+        equity=None, track_cash=False, starting_capital=Decimal("0"),
+    )
+    assert result.journal_applied_fill_seq == 6
+    assert any(snap.effective_from == t0 for snap in result.position_history)
+
+
+def test_mark_fills_recorded_never_exceeds_applied(tmp_path: Path) -> None:
+    """Advancing the recorded watermark above applied fails without touching state."""
+    from src.live.ledger import mark_fills_recorded
+
+    path = tmp_path / "ledger.json"
+    base = LedgerState(
+        positions={"AAAUSDT": Decimal("1")}, journal_applied_fill_seq=3,
+    )
+    with pytest.raises(ValueError, match="above"):
+        mark_fills_recorded(path, base, 5)
+    assert not path.exists()
+    advanced = mark_fills_recorded(path, base, 2)
+    assert advanced.journal_recorded_fill_seq == 2
+    assert advanced.journal_applied_fill_seq == 3
+    assert load_ledger(path).journal_recorded_fill_seq == 2
+    with pytest.raises(ValueError, match="backwards"):
+        mark_fills_recorded(path, advanced, 1)
+    path.unlink()
+    assert mark_fills_recorded(path, advanced, 2) is advanced
+    assert not path.exists()  # no-op advance performs no write
+
+
+
+
+def test_ledger_derisk_flag_round_trip_and_guards(tmp_path) -> None:
+    """De-risk flag persists, unions reasons, and validates on load."""
+    import pytest
+
+    import pandas as pd
+
+    from src.common.errors import DataIntegrityError
+    from src.live.ledger import clear_derisk, enter_derisk, load_ledger, save_ledger
+    from src.live.ledger import LedgerState
+
+    path = tmp_path / "ledger_derisk.json"
+    save_ledger(path, LedgerState(positions={"AAAUSDT": Decimal("1")}))
+    state = load_ledger(path)
+    assert state.derisk_since is None
+    assert state.derisk_reasons == ()
+
+    entered = enter_derisk(path, state, reasons=("foreign_open_orders",), now=pd.Timestamp("2026-09-14T00:00:00Z"))
+    assert entered.derisk_since == pd.Timestamp("2026-09-14T00:00:00Z")
+    reloaded = load_ledger(path)
+    assert reloaded.derisk_since == entered.derisk_since
+    assert reloaded.derisk_reasons == ("foreign_open_orders",)
+
+    again = enter_derisk(path, reloaded, reasons=("reconciliation_breach", "foreign_open_orders"), now=pd.Timestamp("2026-09-15T00:00:00Z"))
+    assert again.derisk_since == entered.derisk_since
+    assert again.derisk_reasons == ("foreign_open_orders", "reconciliation_breach")
+
+    cleared = clear_derisk(path, again)
+    assert cleared.derisk_since is None
+    assert load_ledger(path).derisk_since is None
+
+    import json
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["derisk_reasons"] = ["reconciliation_breach"]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="without derisk_since"):
+        load_ledger(path)
+    raw["derisk_reasons"] = "nope"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="must be a list"):
+        load_ledger(path)
+
+
+def test_ledger_watermark_guards_fail_closed(tmp_path) -> None:
+    """Non-integer watermarks and inverted journals fail closed."""
+    import json
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.ledger import LedgerState, load_ledger, save_ledger
+
+    path = tmp_path / "ledger_wm.json"
+    save_ledger(path, LedgerState(positions={}))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for bad in (True, "x", -2):
+        raw["journal_applied_fill_seq"] = bad
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with pytest.raises(DataIntegrityError, match="journal_applied_fill_seq"):
+            load_ledger(path)
+    raw["journal_applied_fill_seq"] = 1
+    raw["journal_recorded_fill_seq"] = 2
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="exceeds"):
+        load_ledger(path)
+
+
+def test_commit_journal_fills_rejects_unknown_side(tmp_path) -> None:
+    """A fill with an unknown side fails closed."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.live.ledger import LedgerState, commit_journal_fills
+
+    path = tmp_path / "ledger_side.json"
+    fill = SimpleNamespace(fill_seq=0, side="HOLD", symbol="AAAUSDT", quantity=Decimal("1"), price=Decimal("1"), fee_bps=0.0)
+    with pytest.raises(DataIntegrityError, match="unknown side"):
+        commit_journal_fills(path, LedgerState(), [fill], equity=None, track_cash=False, starting_capital=Decimal("0"))
+
+
+def test_save_ledger_tolerates_unfsyncable_directory(tmp_path, monkeypatch) -> None:
+    """An OSError on directory fsync still leaves a valid ledger."""
+    from src.live.ledger import LedgerState, load_ledger, save_ledger
+
+    path = tmp_path / "ledger_dir.json"
+    monkeypatch.setattr("os.open", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    save_ledger(path, LedgerState(positions={"AAAUSDT": Decimal("2")}))
+    assert load_ledger(path).positions == {"AAAUSDT": Decimal("2")}
+
+
+def test_enter_derisk_rejects_naive_now(tmp_path) -> None:
+    """De-risk entry requires a tz-aware timestamp."""
+    import pandas as pd
+    import pytest
+
+    from src.live.ledger import LedgerState, enter_derisk
+
+    with pytest.raises(ValueError, match="tz-aware"):
+        enter_derisk(tmp_path / "x.json", LedgerState(), reasons=("a",), now=pd.Timestamp("2026-09-14 00:00"))

@@ -449,10 +449,13 @@ def test_run_daemon_cli_alerts_and_reraises_on_crash(tmp_path, monkeypatch, capl
 
     monkeypatch.setattr(sched, "run_daemon", _crash)
     alerts: list[tuple[object, str, str, object, str]] = []
-    monkeypatch.setattr(
-        sched, "_daemon_alert",
-        lambda s, sent, *, event, detail, decision_time, now: alerts.append((s, event, detail, decision_time, str(now.tz))) or True,
-    )
+
+    def _fake_dispatch(settings_arg, *, event, detail, decision_time, dedupe_key, now):
+        alerts.append((settings_arg, event, detail, decision_time, str(now.tz)))
+        return True
+
+    monkeypatch.setattr("src.live.alerting.dispatch_alert", _fake_dispatch)
+    monkeypatch.setattr("src.live.alerting.drain_alerts", lambda *a, **k: None)
     caplog.set_level(logging.ERROR, logger="LiveCli")
 
     # When
@@ -501,10 +504,13 @@ def test_run_daemon_cli_brackets_run_daemon_with_watchdog(tmp_path, monkeypatch,
 
     monkeypatch.setattr(sched, "run_daemon", _crash)
     alerts: list[tuple[object, str]] = []
-    monkeypatch.setattr(
-        sched, "_daemon_alert",
-        lambda s, sent, *, event, detail, decision_time, now: alerts.append((s, event)) or True,
-    )
+
+    def _fake_dispatch(settings_arg, *, event, detail, decision_time, dedupe_key, now):
+        alerts.append((settings_arg, event))
+        return True
+
+    monkeypatch.setattr("src.live.alerting.dispatch_alert", _fake_dispatch)
+    monkeypatch.setattr("src.live.alerting.drain_alerts", lambda *a, **k: None)
     caplog.set_level(logging.ERROR, logger="LiveCli")
 
     with pytest.raises(OSError, match="disk full"):
@@ -512,3 +518,74 @@ def test_run_daemon_cli_brackets_run_daemon_with_watchdog(tmp_path, monkeypatch,
 
     assert events == ["build", "start", "run", "stop"]
     assert alerts == [(settings, "daemon_crashed")]
+
+
+def test_cli_ledger_resync_wires_flags_and_exit_codes(monkeypatch) -> None:
+    from decimal import Decimal
+
+    import pytest
+
+    import src.live.ledger_resync as resync_mod
+    from src.cli.main import build_root_parser
+    from src.live.account import PositionBreach
+    from src.live.errors import LiveTradingError
+    from src.live.ledger_resync import ResyncPlan
+
+    parser = build_root_parser()
+    args = parser.parse_args(["live", "ledger-resync", "--apply", "--mode", "live_testnet"])
+    assert args.apply is True
+    defaults = parser.parse_args(["live", "ledger-resync"])
+    assert defaults.apply is False
+
+    calls: list[dict] = []
+    plan = ResyncPlan(
+        adjustments=(PositionBreach(symbol="AAAUSDT", venue_qty=Decimal("0.5"), ledger_qty=Decimal("0")),),
+        backup_path=None,
+        applied=True,
+    )
+
+    def _ok(settings, *, apply, now):
+        calls.append({"mode": settings.mode.value, "apply": apply})
+        return plan
+
+    monkeypatch.setattr(resync_mod, "run_ledger_resync", _ok)
+    args.handler(args)
+    assert calls == [{"mode": "live_testnet", "apply": True}]
+
+    def _fail(*_a, **_k):
+        raise LiveTradingError("daemon busy stage=execute; retry when idle")
+
+    monkeypatch.setattr(resync_mod, "run_ledger_resync", _fail)
+    with pytest.raises(SystemExit) as excinfo:
+        args.handler(args)
+    assert excinfo.value.code == 1
+
+
+def test_tax_collect_cli_uses_durable_collect_path_and_audits_issues(monkeypatch, tmp_path) -> None:
+    """`live tax-collect` routes through collect_and_persist_live_tax (same path as the daemon) and audits every issue."""
+    import json
+
+    import src.live.audit as audit_mod
+    import src.live.rest as rest_mod
+    import src.live.tax_ledger as tax_mod
+
+    monkeypatch.setenv("LIVE_TAX_LEDGER_DIR", str(tmp_path / "tax"))
+    audit_path = tmp_path / "tax_collect_audit.jsonl"
+    monkeypatch.setattr(audit_mod, "default_audit_log_path", lambda name, for_date=None: audit_path)
+    monkeypatch.setattr(rest_mod, "BinanceFuturesRestClient", lambda *a, **k: object())
+    seen: dict = {}
+
+    def _collect(client, symbols, tax_dir, mode, *, now, settings):
+        seen.update(tax_dir=tax_dir, symbols=list(symbols), now=now)
+        return 3, (tax_mod.TaxCollectionIssue(stream="income", stage="page_cap", detail="budget"),)
+
+    monkeypatch.setattr(tax_mod, "collect_and_persist_live_tax", _collect)
+    args = build_root_parser().parse_args(["live", "tax-collect"])
+
+    args.handler(args)
+
+    assert seen["tax_dir"] == tmp_path / "tax"
+    assert seen["now"].tzinfo is not None
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    issue = next(e for e in events if e["event"] == "tax_collect_issue")
+    assert (issue["stream"], issue["stage"]) == ("income", "page_cap")

@@ -7,12 +7,14 @@ import json
 import logging
 import os
 import re
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, ValidationInfo, field_validator, model_validator
 
 from src.market_data.streams.coverage import CoverageTracker
 from src.market_data.streams.liquidations import LiquidationHealth, run_liquidation_stream
@@ -22,9 +24,11 @@ from src.market_data.streams.snapshots import (
     PREMIUM_INDEX_DATASET,
     PREMIUM_INDEX_URL,
     REFERENCE_URLS,
+    SnapshotParse,
     next_grid_time,
     parse_book_ticker_payload,
     parse_premium_index_payload,
+    reference_snapshot_path,
     write_hourly_partition,
     write_reference_snapshot,
 )
@@ -32,6 +36,7 @@ from src.market_data.streams.snapshots import (
 _logger = logging.getLogger(__name__)
 
 HEARTBEAT_NAME: str = "recorder_heartbeat.json"
+HEARTBEAT_SCHEMA_VERSION: int = 2
 
 _CUTOFF_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
@@ -56,6 +61,13 @@ class MarketRecorderConfig(BaseModel):
     grid_max_start_lag_s: float = 5.0
     grid_retry_delay_s: float = 1.0
     rate_limit_cooldown_s: float = 60.0
+    snapshot_max_rejected_fraction: float = 0.05
+    liquidation_max_pending_events: int = 100_000
+    reference_retry_interval_s: float = 600.0
+    grid_health_window_s: float = 3600.0
+    deadman_ping_url: SecretStr | None = None
+    deadman_ping_interval_s: float = 300.0
+    deadman_ping_timeout_s: float = 10.0
 
     @field_validator("book_ticker_interval_s", "premium_index_interval_s")
     @classmethod
@@ -115,6 +127,34 @@ class MarketRecorderConfig(BaseModel):
             raise ValueError("heartbeat_interval_s must be positive")
         return value
 
+    @field_validator("snapshot_max_rejected_fraction")
+    @classmethod
+    def _check_rejected_fraction(cls, value: float) -> float:
+        if not 0 < value < 1:
+            raise ValueError("snapshot_max_rejected_fraction must be in (0, 1)")
+        return value
+
+    @field_validator("liquidation_max_pending_events")
+    @classmethod
+    def _check_liquidation_pending(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("liquidation_max_pending_events must be >= 1")
+        return value
+
+    @field_validator("reference_retry_interval_s", "grid_health_window_s")
+    @classmethod
+    def _check_reference_retry(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be positive")
+        return value
+
+    @field_validator("deadman_ping_interval_s", "deadman_ping_timeout_s")
+    @classmethod
+    def _check_deadman_seconds(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be positive")
+        return value
+
     @model_validator(mode="after")
     def _check_grid_cadences(self) -> MarketRecorderConfig:
         if not self.grid_retry_delay_s > 0:
@@ -125,6 +165,10 @@ class MarketRecorderConfig(BaseModel):
             raise ValueError("grid_max_start_lag_s must be less than the sampler grid intervals")
         if not self.rate_limit_cooldown_s >= 1:
             raise ValueError("rate_limit_cooldown_s must be >= 1")
+        if not self.deadman_ping_timeout_s < self.deadman_ping_interval_s:
+            raise ValueError("deadman_ping_timeout_s must be < deadman_ping_interval_s")
+        if not self.grid_health_window_s >= max(self.book_ticker_interval_s, self.premium_index_interval_s):
+            raise ValueError("grid_health_window_s must be >= the sampler grid intervals")
         return self
 
 
@@ -221,13 +265,154 @@ def _write_heartbeat_file(root: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, target)
 
 
+@dataclass(frozen=True, slots=True)
+class SamplerHeartbeatEntry:
+    """Point-in-time health of one grid sampler as published in the recorder heartbeat.
+
+    Fetch success and persistence are reported separately because a sampler can keep fetching while
+    every write fails (full disk, merge failure); the watchdog must see the data that reached disk,
+    not the loop that produced it.
+
+    Attributes:
+        last_success_at: Grid instant of the latest accepted sample (fetch + parse), or None.
+        consecutive_failures: Grid points in a row whose fetch/parse failed or was rate limited.
+        skipped_grid_points: Grid points skipped (late, lag, embargo) since process start.
+        rows_last_flush: Rows written by the latest successful flush.
+        last_persisted_at: Wall-clock instant of the latest successful partition write, or None.
+        consecutive_flush_failures: Flushes in a row that raised.
+        pending_rows: Rows buffered in memory and not yet persisted.
+        dropped_rows_total: Rows discarded by the buffer bound since process start.
+        rejected_rows_last_sample: Rows excluded by the row contract in the latest accepted sample.
+        rejected_rows_total: Rows excluded since process start.
+        rejected_fraction_last_sample: Rejected rows / (accepted + rejected rows) of the latest accepted sample; 0.0 when none.
+        consecutive_rejecting_points: Accepted grid points in a row whose sample rejected at least one row; reset to 0 by a sample with no rejected row.
+        window_expected_points: Grid points inside the trailing health window since sampler start.
+        window_captured_points: Of those, points whose sample was accepted.
+    """
+
+    last_success_at: pd.Timestamp | None
+    consecutive_failures: int
+    skipped_grid_points: int
+    rows_last_flush: int
+    last_persisted_at: pd.Timestamp | None
+    consecutive_flush_failures: int
+    pending_rows: int
+    dropped_rows_total: int
+    rejected_rows_last_sample: int
+    rejected_rows_total: int
+    rejected_fraction_last_sample: float
+    consecutive_rejecting_points: int
+    window_expected_points: int
+    window_captured_points: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceEndpointStatus:
+    """Capture state of one daily reference endpoint for the current UTC day."""
+
+    captured: bool
+    consecutive_failures: int
+    last_attempt_at: pd.Timestamp | None
+    last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceHeartbeatEntry:
+    """Daily reference capture state as published in the recorder heartbeat.
+
+    Attributes:
+        day: UTC day (``YYYYMMDD``) the endpoint statuses refer to.
+        cutoff_utc: ``reference_capture_after_utc``, published so the watchdog can compute the
+            deadline without sharing the recorder configuration.
+        endpoints: Endpoint name (every key of ``REFERENCE_URLS``) to its status.
+        last_success_at: Instant the day's set became complete, or None.
+        previous_day: The preceding UTC day this process observed, or None after a restart.
+        previous_day_complete: Whether ``previous_day`` ended with every endpoint captured.
+    """
+
+    day: str
+    cutoff_utc: str
+    endpoints: Mapping[str, ReferenceEndpointStatus]
+    last_success_at: pd.Timestamp | None
+    previous_day: str | None
+    previous_day_complete: bool | None
+
+
+def _sampler_entry_to_dict(entry: SamplerHeartbeatEntry) -> dict[str, Any]:
+    return {
+        "last_success_at": entry.last_success_at.isoformat() if entry.last_success_at is not None else None,
+        "consecutive_failures": int(entry.consecutive_failures),
+        "skipped_grid_points": int(entry.skipped_grid_points),
+        "rows_last_flush": int(entry.rows_last_flush),
+        "last_persisted_at": entry.last_persisted_at.isoformat() if entry.last_persisted_at is not None else None,
+        "consecutive_flush_failures": int(entry.consecutive_flush_failures),
+        "pending_rows": int(entry.pending_rows),
+        "dropped_rows_total": int(entry.dropped_rows_total),
+        "rejected_rows_last_sample": int(entry.rejected_rows_last_sample),
+        "rejected_rows_total": int(entry.rejected_rows_total),
+        "rejected_fraction_last_sample": float(entry.rejected_fraction_last_sample),
+        "consecutive_rejecting_points": int(entry.consecutive_rejecting_points),
+        "window_expected_points": int(entry.window_expected_points),
+        "window_captured_points": int(entry.window_captured_points),
+    }
+
+
+def _reference_entry_to_dict(entry: ReferenceHeartbeatEntry) -> dict[str, Any]:
+    return {
+        "day": entry.day,
+        "cutoff_utc": entry.cutoff_utc,
+        "endpoints": {
+            name: {
+                "captured": bool(status.captured),
+                "consecutive_failures": int(status.consecutive_failures),
+                "last_attempt_at": status.last_attempt_at.isoformat() if status.last_attempt_at is not None else None,
+                "last_error": status.last_error,
+            }
+            for name, status in entry.endpoints.items()
+        },
+        "last_success_at": entry.last_success_at.isoformat() if entry.last_success_at is not None else None,
+        "previous_day": entry.previous_day,
+        "previous_day_complete": entry.previous_day_complete,
+    }
+
+
+def _fresh_sampler_entry() -> dict[str, Any]:
+    return _sampler_entry_to_dict(
+        SamplerHeartbeatEntry(
+            last_success_at=None,
+            consecutive_failures=0,
+            skipped_grid_points=0,
+            rows_last_flush=0,
+            last_persisted_at=None,
+            consecutive_flush_failures=0,
+            pending_rows=0,
+            dropped_rows_total=0,
+            rejected_rows_last_sample=0,
+            rejected_rows_total=0,
+            rejected_fraction_last_sample=0.0,
+            consecutive_rejecting_points=0,
+            window_expected_points=0,
+            window_captured_points=0,
+        )
+    )
+
+
 class _Heartbeat:
     def __init__(self, *, started_at: pd.Timestamp) -> None:
         self._started_at = pd.Timestamp(started_at)
         self._entries: dict[str, dict[str, Any]] = {
-            BOOK_TICKER_DATASET: {"last_success_at": None, "rows_last_flush": 0, "consecutive_failures": 0, "skipped_grid_points": 0},
-            PREMIUM_INDEX_DATASET: {"last_success_at": None, "rows_last_flush": 0, "consecutive_failures": 0, "skipped_grid_points": 0},
-            "reference": {"last_success_at": None, "rows_last_flush": 0, "consecutive_failures": 0},
+            BOOK_TICKER_DATASET: _fresh_sampler_entry(),
+            PREMIUM_INDEX_DATASET: _fresh_sampler_entry(),
+            "reference": _reference_entry_to_dict(
+                ReferenceHeartbeatEntry(
+                    day="",
+                    cutoff_utc="",
+                    endpoints={},
+                    last_success_at=None,
+                    previous_day=None,
+                    previous_day_complete=None,
+                )
+            ),
             "liquidations": {
                 "last_event_at": None,
                 "last_connected_at": None,
@@ -238,28 +423,27 @@ class _Heartbeat:
         self._lock = asyncio.Lock()
 
     def _payload(self, ts: pd.Timestamp) -> dict[str, Any]:
-        return {"ts": pd.Timestamp(ts).isoformat(), "started_at": self._started_at.isoformat(), **self._entries}
+        return {
+            "schema_version": HEARTBEAT_SCHEMA_VERSION,
+            "ts": pd.Timestamp(ts).isoformat(),
+            "started_at": self._started_at.isoformat(),
+            **self._entries,
+        }
 
-    async def update(
-        self,
-        root: Path,
-        dataset: str,
-        *,
-        ts: pd.Timestamp,
-        last_success_at: pd.Timestamp | None,
-        rows_last_flush: int,
-        consecutive_failures: int,
-        skipped_grid_points: int | None = None,
+    async def update_sampler(
+        self, root: Path, dataset: str, *, ts: pd.Timestamp, entry: SamplerHeartbeatEntry
     ) -> None:
+        """Publish one sampler's persistence-aware entry, rewriting the whole file."""
         async with self._lock:
-            entry = self._entries.setdefault(
-                dataset, {"last_success_at": None, "rows_last_flush": 0, "consecutive_failures": 0}
-            )
-            entry["last_success_at"] = last_success_at.isoformat() if last_success_at is not None else None
-            entry["rows_last_flush"] = rows_last_flush
-            entry["consecutive_failures"] = consecutive_failures
-            if skipped_grid_points is not None:
-                entry["skipped_grid_points"] = skipped_grid_points
+            self._entries[dataset] = _sampler_entry_to_dict(entry)
+            _write_heartbeat_file(root, self._payload(ts))
+
+    async def update_reference(
+        self, root: Path, *, ts: pd.Timestamp, entry: ReferenceHeartbeatEntry
+    ) -> None:
+        """Publish the daily reference capture state, rewriting the whole file."""
+        async with self._lock:
+            self._entries["reference"] = _reference_entry_to_dict(entry)
             _write_heartbeat_file(root, self._payload(ts))
 
     async def update_liquidations(
@@ -270,6 +454,24 @@ class _Heartbeat:
             self._entries["liquidations"] = dict(entry)
             _write_heartbeat_file(root, self._payload(ts))
 
+    def is_failing(self) -> bool:
+        """Return True when any dataset shows consecutive fetch or flush failures.
+
+        A flush failure means fetched rows are not reaching disk, which is data loss even while
+        fetching looks healthy, so it maps to the dead-man ``/fail`` endpoint as well.
+        """
+        for dataset, entry in self._entries.items():
+            keys = ("consecutive_flush_failures",) if dataset == "liquidations" else (
+                "consecutive_failures", "consecutive_flush_failures",
+            )
+            for key in keys:
+                try:
+                    if int(entry.get(key, 0)) >= 1:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
 
 class _GridSampler:
     def __init__(
@@ -278,7 +480,7 @@ class _GridSampler:
         dataset: str,
         url: str,
         interval_s: int,
-        parse_fn: Callable[..., pd.DataFrame],
+        parse_fn: Callable[..., SnapshotParse],
         config: MarketRecorderConfig,
         capture_root: Path,
         heartbeat: _Heartbeat,
@@ -307,22 +509,68 @@ class _GridSampler:
         self._rows_last_flush = 0
         self._prev_grid: pd.Timestamp | None = None
         self._skipped = 0
+        self._rejected_rows_last_sample: int = 0
+        self._rejected_rows_total: int = 0
+        self._last_persisted: pd.Timestamp | None = None
+        self._flush_failures = 0
+        self._dropped_total = 0
+        self._rejected_fraction_last = 0.0
+        self._consecutive_rejecting = 0
+        self._first_target: pd.Timestamp | None = None
+        bound = max(8, int(config.grid_health_window_s // interval_s) + 8)
+        self._outcomes: deque[tuple[pd.Timestamp, bool]] = deque(maxlen=bound)
 
     def _is_shutdown(self) -> bool:
         return bool(getattr(self._shutdown, "requested", False))
 
+    def _prune_outcomes(self, now: pd.Timestamp) -> None:
+        cutoff = pd.Timestamp(now) - pd.Timedelta(seconds=self._config.grid_health_window_s)
+        outcomes = self._outcomes
+        while outcomes and outcomes[0][0] <= cutoff:
+            outcomes.popleft()
+
+    def _heartbeat_entry(self, now: pd.Timestamp) -> SamplerHeartbeatEntry:
+        moment = pd.Timestamp(now)
+        self._prune_outcomes(moment)
+        first = self._first_target
+        if first is None:
+            expected = 0
+            captured = 0
+        else:
+            expected = sum(1 for ts, _ in self._outcomes if ts >= first)
+            captured = sum(1 for ts, ok in self._outcomes if ts >= first and ok)
+        return SamplerHeartbeatEntry(
+            last_success_at=self._last_success,
+            consecutive_failures=self._failures,
+            skipped_grid_points=self._skipped,
+            rows_last_flush=self._rows_last_flush,
+            last_persisted_at=self._last_persisted,
+            consecutive_flush_failures=self._flush_failures,
+            pending_rows=sum(len(item) for item in self._buffer),
+            dropped_rows_total=self._dropped_total,
+            rejected_rows_last_sample=self._rejected_rows_last_sample,
+            rejected_rows_total=self._rejected_rows_total,
+            rejected_fraction_last_sample=self._rejected_fraction_last,
+            consecutive_rejecting_points=self._consecutive_rejecting,
+            window_expected_points=expected,
+            window_captured_points=captured,
+        )
+
+    async def _publish(self) -> None:
+        now = self._now()
+        await self._heartbeat.update_sampler(
+            self._root, self._dataset, ts=now, entry=self._heartbeat_entry(now)
+        )
+
     async def _flush(self) -> None:
         if not self._buffer:
-            await self._heartbeat.update(
-                self._root, self._dataset, ts=self._now(),
-                last_success_at=self._last_success, rows_last_flush=0,
-                consecutive_failures=self._failures, skipped_grid_points=self._skipped,
-            )
+            await self._publish()
             return
         frame = pd.concat(self._buffer, ignore_index=True)
         try:
             files = write_hourly_partition(frame, self._root, self._dataset)
         except Exception as exc:
+            self._flush_failures += 1
             _logger.warning(
                 "[DATA] stage=market_recorder dataset=%s status=FLUSH_FAILED error=%s",
                 self._dataset, exc, exc_info=True,
@@ -332,31 +580,28 @@ class _GridSampler:
             total = sum(len(item) for item in self._buffer)
             if total > limit:
                 self._buffer, dropped = _bound_frames(self._buffer, limit)
+                self._dropped_total += dropped
                 _logger.error(
                     "[DATA] stage=market_recorder dataset=%s status=BUFFER_OVERFLOW dropped=%d",
                     self._dataset, dropped,
                 )
-            await self._heartbeat.update(
-                self._root, self._dataset, ts=self._now(),
-                last_success_at=self._last_success, rows_last_flush=0,
-                consecutive_failures=self._failures, skipped_grid_points=self._skipped,
-            )
+            await self._publish()
             return
         rows = len(frame)
         self._buffer = []
         self._rows_last_flush = rows
+        self._last_persisted = self._now()
+        self._flush_failures = 0
         _logger.info(
             "[DATA] stage=market_recorder dataset=%s rows=%d files=%d",
             self._dataset, rows, len(files),
         )
-        await self._heartbeat.update(
-            self._root, self._dataset, ts=self._now(),
-            last_success_at=self._last_success, rows_last_flush=rows,
-            consecutive_failures=self._failures, skipped_grid_points=self._skipped,
-        )
+        await self._publish()
 
     def _register_skips(self, skipped: list[tuple[pd.Timestamp, str]]) -> None:
         self._skipped += len(skipped)
+        for ts, _reason in skipped:
+            self._outcomes.append((ts, False))
         first = skipped[0][0]
         last = skipped[-1][0]
         reason = skipped[-1][1]
@@ -374,31 +619,62 @@ class _GridSampler:
                 raw = await self._fetch(self._url)
                 fetched_at = self._now()
                 payload = json.loads(raw.decode("utf-8"))
-                frame = self._parse_fn(payload, captured_at=g, fetched_at=fetched_at)
+                parsed = self._parse_fn(
+                    payload, captured_at=g, fetched_at=fetched_at,
+                    max_rejected_fraction=self._config.snapshot_max_rejected_fraction,
+                )
+                frame = parsed.frame
             except RateLimitedError as exc:
                 until = self._rate_gate.block(self._now(), exc.retry_after_s)
                 self._failures += 1
+                self._outcomes.append((g, False))
                 _logger.warning(
                     "[DATA] stage=market_recorder dataset=%s status=RATE_LIMITED http_status=%s blocked_until=%s",
                     self._dataset, exc.status, until.isoformat(),
                 )
+                await self._publish()
                 return False
             except Exception as exc:
                 await _sleep_capped(self._sleep, retry_delay_s, self._shutdown)
                 if self._is_shutdown():
+                    self._outcomes.append((g, False))
+                    await self._publish()
                     return False
                 if (self._now() - g).total_seconds() > lag_s:
                     self._failures += 1
+                    self._outcomes.append((g, False))
                     _logger.warning(
                         "[DATA] stage=market_recorder dataset=%s status=FAILED grid=%s error=%s",
                         self._dataset, g.isoformat(), exc, exc_info=exc,
                     )
+                    await self._publish()
                     return False
                 continue
             self._buffer.append(frame)
             self._last_sample_rows = len(frame)
             self._last_success = g
             self._failures = 0
+            self._rejected_rows_last_sample = parsed.rejected_rows
+            self._rejected_rows_total += parsed.rejected_rows
+            total_rows = len(frame) + parsed.rejected_rows
+            self._rejected_fraction_last = (
+                parsed.rejected_rows / total_rows if total_rows > 0 else 0.0
+            )
+            if parsed.rejected_rows > 0:
+                self._consecutive_rejecting += 1
+                reasons = ",".join(
+                    f"{key}:{parsed.rejected_reasons[key]}" for key in sorted(parsed.rejected_reasons)
+                )
+                symbols = ",".join(parsed.rejected_symbols)
+                _logger.warning(
+                    "[DATA] stage=market_recorder dataset=%s status=ROWS_REJECTED grid=%s rejected=%d total=%d reasons=%s symbols=%s",
+                    self._dataset, g.isoformat(), parsed.rejected_rows, parsed.total_rows,
+                    reasons, symbols,
+                )
+            else:
+                self._consecutive_rejecting = 0
+            self._outcomes.append((g, True))
+            await self._publish()
             return True
 
     async def run(self) -> None:
@@ -414,6 +690,7 @@ class _GridSampler:
         interval = pd.Timedelta(seconds=self._interval_s)
         lag = pd.Timedelta(seconds=self._config.grid_max_start_lag_s)
         target = next_grid_time(self._now(), self._interval_s)
+        self._first_target = target
         last_flush_wall = self._now()
         while not self._is_shutdown():
             now = self._now()
@@ -430,14 +707,17 @@ class _GridSampler:
             if self._rate_gate.blocked_until(now) is not None:
                 skipped.append((g, "rate_limited"))
                 self._register_skips(skipped)
+                await self._publish()
                 target = next_grid_time(g, self._interval_s)
             elif now - g > lag:
                 skipped.append((g, "lag"))
                 self._register_skips(skipped)
+                await self._publish()
                 target = next_grid_time(g, self._interval_s)
             else:
                 if skipped:
                     self._register_skips(skipped)
+                    await self._publish()
                 if await self._sample_slot(g):
                     if self._prev_grid is not None and g.floor("h") != self._prev_grid.floor("h"):
                         await self._flush()
@@ -533,6 +813,13 @@ async def run_market_recorder(
             backoff = min(config.restart_backoff_max_s, backoff * 2.0)
 
     rate_gate = _RateLimitGate(cooldown_s=config.rate_limit_cooldown_s)
+    from src.live.deadman import DeadmanPinger
+
+    pinger = DeadmanPinger(
+        url=config.deadman_ping_url,
+        interval_s=float(config.deadman_ping_interval_s),
+        timeout_s=float(config.deadman_ping_timeout_s),
+    )
     book = _GridSampler(
         dataset=BOOK_TICKER_DATASET, url=BOOK_TICKER_URL,
         interval_s=config.book_ticker_interval_s, parse_fn=parse_book_ticker_payload,
@@ -558,6 +845,7 @@ async def run_market_recorder(
             liveness_timeout_s=config.liquidation_liveness_timeout_s,
             ping_interval_s=config.liquidation_ping_interval_s,
             event_stall_timeout_s=config.liquidation_event_stall_timeout_s,
+            max_pending_events=config.liquidation_max_pending_events,
         )
         try:
             tracker.flush()
@@ -567,43 +855,107 @@ async def run_market_recorder(
     async def _heartbeat_loop() -> None:
         while not _is_shutdown():
             await heartbeat.update_liquidations(root, ts=_now(), entry=health.as_heartbeat_entry())
+            if pinger.enabled:
+                await asyncio.to_thread(pinger.maybe_ping, now=_now(), failing=heartbeat.is_failing())
             await _sleep_capped(sleep, config.heartbeat_interval_s, shutdown)
         await heartbeat.update_liquidations(root, ts=_now(), entry=health.as_heartbeat_entry())
+        if pinger.enabled:
+            await asyncio.to_thread(pinger.maybe_ping, now=_now(), failing=heartbeat.is_failing())
 
     async def _reference() -> None:
-        done: set[str] = set()
-        failures = 0
+        current_day: str | None = None
+        endpoints: dict[str, ReferenceEndpointStatus] = {}
+        last_success_at: pd.Timestamp | None = None
+        previous_day: str | None = None
+        previous_day_complete: bool | None = None
+
+        def _entry() -> ReferenceHeartbeatEntry:
+            return ReferenceHeartbeatEntry(
+                day=current_day or "",
+                cutoff_utc=config.reference_capture_after_utc,
+                endpoints=dict(endpoints),
+                last_success_at=last_success_at,
+                previous_day=previous_day,
+                previous_day_complete=previous_day_complete,
+            )
+
+        async def _publish(now: pd.Timestamp) -> None:
+            await heartbeat.update_reference(root, ts=now, entry=_entry())
+
         while not _is_shutdown():
             now = _now()
-            day = now.tz_convert("UTC").strftime("%Y%m%d")
+            today = now.tz_convert("UTC").strftime("%Y%m%d")
+            if today != current_day:
+                if current_day is not None:
+                    previous_day = current_day
+                    previous_day_complete = all(status.captured for status in endpoints.values())
+                current_day = today
+                last_success_at = None
+                endpoints = {}
+                for name in REFERENCE_URLS:
+                    if reference_snapshot_path(root, name, today).exists():
+                        endpoints[name] = ReferenceEndpointStatus(
+                            captured=True, consecutive_failures=0,
+                            last_attempt_at=None, last_error=None,
+                        )
+                    else:
+                        endpoints[name] = ReferenceEndpointStatus(
+                            captured=False, consecutive_failures=0,
+                            last_attempt_at=None, last_error=None,
+                        )
+                await _publish(now)
             cutoff = _cutoff_for_day(now, config.reference_capture_after_utc)
-            if now >= cutoff and day not in done:
-                try:
-                    for name, url in REFERENCE_URLS.items():
+            if now >= cutoff and current_day is not None:
+                changed = False
+                for name, url in REFERENCE_URLS.items():
+                    status = endpoints[name]
+                    if status.captured:
+                        continue
+                    if reference_snapshot_path(root, name, current_day).exists():
+                        endpoints[name] = ReferenceEndpointStatus(
+                            captured=True, consecutive_failures=0,
+                            last_attempt_at=status.last_attempt_at, last_error=None,
+                        )
+                        changed = True
+                        continue
+                    if (
+                        status.last_attempt_at is not None
+                        and (now - status.last_attempt_at).total_seconds()
+                        < config.reference_retry_interval_s
+                    ):
+                        continue
+                    attempt_at = now
+                    try:
                         raw = await fetch_fn(url)
                         write_reference_snapshot(raw, root, name, captured_at=now)
-                    done.add(day)
-                    failures = 0
-                    await heartbeat.update(
-                        root, "reference", ts=now, last_success_at=now,
-                        rows_last_flush=len(REFERENCE_URLS), consecutive_failures=0,
+                    except Exception as exc:
+                        err = f"{type(exc).__name__}: {exc}"[:200]
+                        endpoints[name] = ReferenceEndpointStatus(
+                            captured=False,
+                            consecutive_failures=status.consecutive_failures + 1,
+                            last_attempt_at=attempt_at,
+                            last_error=err,
+                        )
+                        _logger.warning(
+                            "[DATA] stage=market_recorder dataset=reference endpoint=%s status=FAILED error=%s",
+                            name, exc, exc_info=True,
+                        )
+                        changed = True
+                        continue
+                    endpoints[name] = ReferenceEndpointStatus(
+                        captured=True, consecutive_failures=0,
+                        last_attempt_at=attempt_at, last_error=None,
                     )
+                    changed = True
+                if all(status.captured for status in endpoints.values()) and last_success_at is None:
+                    last_success_at = now
                     _logger.info(
                         "[DATA] stage=market_recorder dataset=reference rows=%d files=%d",
                         len(REFERENCE_URLS), len(REFERENCE_URLS),
                     )
-                except Exception as exc:
-                    failures += 1
-                    _logger.warning(
-                        "[DATA] stage=market_recorder dataset=reference status=FAILED error=%s",
-                        exc, exc_info=True,
-                    )
-                    await heartbeat.update(
-                        root, "reference", ts=_now(), last_success_at=None,
-                        rows_last_flush=0, consecutive_failures=failures,
-                    )
-                    await _sleep_capped(sleep, 3600.0, shutdown)
-                    continue
+                    changed = True
+                if changed:
+                    await _publish(now)
             await _sleep_capped(sleep, 60.0, shutdown)
 
     try:

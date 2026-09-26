@@ -93,6 +93,9 @@ def test_SCENARIO_LIVE_10_risk_gate_blocks_whole_cycle(artifact, live_env, tmp_p
     # 깨뜨린다(이 테스트는 사이클 간 연속성이 아니라 각 게이트를 독립 검증한다).
     settings = LiveSettings(
         notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_ok.json"),
+        order_journal_path=str(tmp_path / "journal_ok.jsonl"),
+        fills_dir=str(tmp_path / "fills_ok"), tax_ledger_dir=str(tmp_path / "tax_ok"),
+        execution_quality_dir=str(tmp_path / "eq_ok"), portfolio_state_dir=str(tmp_path / "port_ok"),
     )
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "COMPLETE"
@@ -112,6 +115,9 @@ def test_SCENARIO_LIVE_10_risk_gate_blocks_whole_cycle(artifact, live_env, tmp_p
 
     leveraged_settings = LiveSettings(
         notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_leverage.json"),
+        order_journal_path=str(tmp_path / "journal_leverage.jsonl"),
+        fills_dir=str(tmp_path / "fills_leverage"), tax_ledger_dir=str(tmp_path / "tax_leverage"),
+        execution_quality_dir=str(tmp_path / "eq_leverage"), portfolio_state_dir=str(tmp_path / "port_leverage"),
     )
     execute_calls_before = len(live_env)
     halted = run_shadow_cycle(leveraged_settings, DECISION_TIME, leveraged_path, now=NOW)
@@ -124,6 +130,9 @@ def test_SCENARIO_LIVE_10_risk_gate_blocks_whole_cycle(artifact, live_env, tmp_p
     tight = LiveSettings(
         notional_equity_usdt=2000.0, max_daily_orders=1,
         ledger_path=str(tmp_path / "ledger_tight.json"),
+        order_journal_path=str(tmp_path / "journal_tight.jsonl"),
+        fills_dir=str(tmp_path / "fills_tight"), tax_ledger_dir=str(tmp_path / "tax_tight"),
+        execution_quality_dir=str(tmp_path / "eq_tight"), portfolio_state_dir=str(tmp_path / "port_tight"),
     )
     assert run_shadow_cycle(tight, DECISION_TIME, artifact, now=NOW).status == "HALT"
 
@@ -143,6 +152,10 @@ def test_SCENARIO_LIVE_10_risk_gate_blocks_whole_cycle(artifact, live_env, tmp_p
 
     margin_settings = LiveSettings(
         notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_margin.json"),
+        order_journal_path=str(tmp_path / "journal_margin.jsonl"),
+        fills_dir=str(tmp_path / "fills_margin"), tax_ledger_dir=str(tmp_path / "tax_margin"),
+        execution_quality_dir=str(tmp_path / "eq_margin"), portfolio_state_dir=str(tmp_path / "port_margin"),
+        mode="live_testnet", derisk_mode_enabled=False,
     )
     original_order_client = runner_mod._order_client
     runner_mod._order_client = lambda settings, decision_time: ThinMarginClient()  # type: ignore[assignment, misc]
@@ -170,7 +183,7 @@ def test_check_risk_gates_raises_directly() -> None:
     intents = []
     settings = LiveSettings(notional_equity_usdt=2000.0, max_gross_leverage=3.0)
     with pytest.raises(RiskGateBreach):
-        check_risk_gates(intents, targets, marks, snapshot, settings, Decimal("2000"))
+        check_risk_gates(intents, targets, marks, settings, Decimal("2000"))
 
 
 
@@ -328,3 +341,126 @@ def test_fetch_live_account_equity_fails_closed(monkeypatch) -> None:
     live = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key="k", order_api_secret="s")
     with pytest.raises(DataIntegrityError):
         runner_mod.fetch_live_account_equity(live, pd.Timestamp("2026-09-22 00:00Z"))
+
+
+def _live_risk_env(monkeypatch, tmp_path, order_client):
+    """LIVE harness with journaling executor fake."""
+    import src.live.orderbook as ob_mod
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: order_client)
+    monkeypatch.setattr(
+        runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl"
+    )
+    monkeypatch.setattr(ob_mod, "capture_order_books", lambda *a, **k: [])
+    monkeypatch.setattr(ob_mod, "append_order_book_snapshots", lambda *a, **k: [])
+    posted: list[Any] = []
+
+    def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
+        from tests.unit.live.test_runner_reconcile import _journal_fake_fills as _fills
+
+        posted.extend(intents)
+        outcomes = tuple(
+            ExecutionOutcome(
+                symbol=i.symbol, filled_qty=i.quantity, unfilled_qty=Decimal("0"),
+                avg_fill_price=Decimal("100"), chases=0, status="FILLED",
+            )
+            for i in intents
+        )
+        _fills(kwargs.get("journal"), kwargs.get("attempt"), intents, outcomes)
+        return outcomes
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
+    return posted
+
+
+def _risk_artifact(tmp_path):
+    frame = pd.DataFrame(
+        {"AAAUSDT": [0.02], "BUSDT": [-0.02]},
+        index=pd.DatetimeIndex([DECISION_TIME]),
+    )
+    path = tmp_path / "deployed_target_weights.parquet"
+    frame.to_parquet(path, index=True)
+    closes = pd.DataFrame(
+        100.0, index=pd.DatetimeIndex(frame.index), columns=list(frame.columns), dtype="float64",
+    )
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    closes.to_parquet(decision_ohlcv_close_path(path), index=True)
+    return path
+
+
+def test_target_integrity_breach_halts_even_in_derisk_mode(tmp_path, monkeypatch) -> None:
+    """Target-integrity breach HALTs even in de-risk mode."""
+    from src.live.ledger import enter_derisk
+
+    artifact = _risk_artifact(tmp_path)
+    posted = _live_risk_env(monkeypatch, tmp_path, StubOrderClient())
+    ledger_path = tmp_path / "ledger_derisk_gates.json"
+    save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
+    ledger_state = load_ledger(ledger_path)
+    enter_derisk(ledger_path, ledger_state, reasons=("reconciliation_breach",), now=NOW)
+    leveraged = pd.DataFrame(
+        {"AAAUSDT": [7.0], "BUSDT": [-7.0]},
+        index=pd.DatetimeIndex([DECISION_TIME]),
+    )
+    leveraged_path = tmp_path / "deployed_target_weights_leveraged.parquet"
+    leveraged.to_parquet(leveraged_path, index=True)
+    from src.live.deployed_weights import decision_ohlcv_close_path
+    pd.DataFrame(
+        100.0, index=pd.DatetimeIndex(leveraged.index), columns=list(leveraged.columns), dtype="float64",
+    ).to_parquet(decision_ohlcv_close_path(leveraged_path), index=True)
+    settings = LiveSettings(
+        mode="live_testnet", notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
+        order_journal_path=str(tmp_path / "journal_gates.jsonl"),
+        fills_dir=str(tmp_path / "fills_gates"), tax_ledger_dir=str(tmp_path / "tax_gates"),
+        execution_quality_dir=str(tmp_path / "eq_gates"), portfolio_state_dir=str(tmp_path / "port_gates"),
+    )
+
+    report = run_shadow_cycle(settings, DECISION_TIME, leveraged_path, now=NOW)
+
+    assert report.status == "HALT"
+    assert report.reason is not None
+    assert "leverage" in report.reason.lower()
+    assert posted == []
+
+
+def test_free_margin_floor_executes_only_reducing_intents(tmp_path, monkeypatch) -> None:
+    """Free-margin floor executes only reducing intents."""
+    artifact = _risk_artifact(tmp_path)
+
+    class ThinMarginClient(StubOrderClient):
+        def request(self, method, path, params=None, *, signed=False):
+            if path == "/fapi/v2/account":
+                return {
+                    "totalWalletBalance": "2000",
+                    "availableBalance": "100",
+                    "totalInitialMargin": "10",
+                    "totalUnrealizedProfit": "0",
+                    "dualSidePosition": "false",
+                    "multiAssetsMargin": "false",
+                }
+            if path == "/fapi/v2/positionRisk":
+                return [{"symbol": "AAAUSDT", "positionAmt": "1.0"}]
+            return super().request(method, path, params, signed=signed)
+
+    posted = _live_risk_env(monkeypatch, tmp_path, ThinMarginClient())
+    ledger_path = tmp_path / "ledger_margin_floor.json"
+    save_ledger(
+        ledger_path,
+        LedgerState(positions={"AAAUSDT": Decimal("1.0")}, equity_high_water_mark=Decimal(0)),
+    )
+    settings = LiveSettings(
+        mode="live_testnet", notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
+        order_journal_path=str(tmp_path / "journal_floor.jsonl"),
+        fills_dir=str(tmp_path / "fills_floor"), tax_ledger_dir=str(tmp_path / "tax_floor"),
+        execution_quality_dir=str(tmp_path / "eq_floor"), portfolio_state_dir=str(tmp_path / "port_floor"),
+    )
+
+    report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
+
+    assert report.status == "DEGRADED"
+    assert report.reason is not None
+    assert "free_margin_floor" in report.reason
+    assert [i.symbol for i in posted] == ["AAAUSDT"]
+    assert all(i.reduce_only for i in posted)
+    assert load_ledger(ledger_path).derisk_since is None

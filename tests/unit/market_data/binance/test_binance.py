@@ -843,7 +843,7 @@ def test_fetch_funding_rate_history_acquires_limiter_per_page_without_fixed_slee
     rates = client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
 
     assert rates.to_dict("records") == [{"timestamp": 1000, "funding_rate": 0.0001}]
-    assert events == ["acquire", "request", "acquire", "request"]
+    assert events == ["acquire", "request"]
     assert sleeps == []
 
 
@@ -894,6 +894,112 @@ def test_fetch_funding_rate_history_uses_waf_safe_request_limit(monkeypatch) -> 
     query = urllib.parse.parse_qs(urllib.parse.urlparse(urls[0]).query)
     assert query["limit"] == [str(FUNDING_RATE_REQUEST_LIMIT)]
 
+
+def _funding_stub_client(monkeypatch, pages: list[bytes]):
+    """Stub BinanceClient with queued fundingRate payloads; returns (client, calls)."""
+    import src.market_data.binance.futures as futures_module
+    from src.market_data.binance.futures import BinanceClient
+
+    client = BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
+    monkeypatch.setattr(
+        client.exchange,
+        "parse8601",
+        lambda value: 0 if value.startswith("2024-01-01") else 10_000_000,
+    )
+
+    class _Spy:
+        def acquire(self) -> float:
+            return 0.0
+
+    monkeypatch.setattr(futures_module, "FUNDING_RATE_LIMITER", _Spy())
+
+    class Response:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return self.payload
+
+    queue = iter([Response(p) for p in pages])
+    calls: list[str] = []
+
+    def _urlopen(req, *args, **kwargs):
+        calls.append(req.full_url)
+        return next(queue)
+
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+    return client, calls
+
+
+def test_fetch_funding_rate_history_short_page_issues_one_request(monkeypatch) -> None:
+    import json
+
+    rows = [{"fundingTime": t, "fundingRate": "0.0001"} for t in (100, 200, 300, 400, 500, 600)]
+    client, calls = _funding_stub_client(monkeypatch, [json.dumps(rows).encode()])
+
+    rates = client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")
+
+    assert len(calls) == 1
+    assert len(rates) == 6
+
+
+def test_fetch_funding_rate_history_full_page_continues(monkeypatch) -> None:
+    import json
+
+    first = [{"fundingTime": t, "fundingRate": "0.0001"} for t in range(1, 101)]
+    second = [{"fundingTime": t, "fundingRate": "0.0002"} for t in range(101, 201)]
+    third = [{"fundingTime": t, "fundingRate": "0.0003"} for t in range(201, 208)]
+    client, calls = _funding_stub_client(
+        monkeypatch,
+        [json.dumps(first).encode(), json.dumps(second).encode(), json.dumps(third).encode()],
+    )
+
+    rates = client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")
+
+    assert len(calls) == 3
+    assert len(rates) == 207
+    assert rates["timestamp"].is_unique
+    assert rates["timestamp"].is_monotonic_increasing
+
+
+def test_fetch_funding_rate_history_empty_range_still_one_request(monkeypatch) -> None:
+    client, calls = _funding_stub_client(monkeypatch, [b"[]"])
+
+    rates = client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")
+
+    assert len(calls) == 1
+    assert list(rates.columns) == ["timestamp", "funding_rate"]
+    assert rates.empty
+
+
+def test_fetch_funding_rate_history_rows_unchanged_from_legacy(monkeypatch) -> None:
+    import pandas as pd
+
+    payload = (
+        b'[{"fundingTime":300,"fundingRate":"0.0003"},'
+        b'{"fundingTime":100,"fundingRate":"0.0001"},'
+        b'{"fundingTime":200,"fundingRate":"0.0002"},'
+        b'{"fundingTime":100,"fundingRate":"0.0001"}]'
+    )
+    client, calls = _funding_stub_client(monkeypatch, [payload])
+
+    rates = client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")
+
+    expected = pd.DataFrame(
+        [(100, 0.0001), (200, 0.0002), (300, 0.0003)],
+        columns=["timestamp", "funding_rate"],
+    )
+    pd.testing.assert_frame_equal(rates, expected)
+    assert len(calls) == 1
+
+
 def test_fetch_funding_rate_history_paginates_beyond_request_limit(monkeypatch) -> None:
     import json
     import urllib.parse
@@ -927,7 +1033,7 @@ def test_fetch_funding_rate_history_paginates_beyond_request_limit(monkeypatch) 
 
     first = [{"fundingTime": t, "fundingRate": "0.0001"} for t in range(1, FUNDING_RATE_REQUEST_LIMIT + 1)]
     second = [{"fundingTime": 200, "fundingRate": "0.0002"}]
-    pages = iter([json.dumps(first).encode(), json.dumps(second).encode(), b"[]"])
+    pages = iter([json.dumps(first).encode(), json.dumps(second).encode()])
     starts: list[int] = []
 
     def _urlopen(req, *args, **kwargs):
@@ -941,7 +1047,6 @@ def test_fetch_funding_rate_history_paginates_beyond_request_limit(monkeypatch) 
     rates = client.fetch_funding_rate_history("BTC/USDT", "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")
 
     # Then
-    assert starts == [0, 101, 201]
+    assert starts == [0, 101]
     assert len(rates) == FUNDING_RATE_REQUEST_LIMIT + 1
     assert rates["timestamp"].tolist()[-1] == 200
-

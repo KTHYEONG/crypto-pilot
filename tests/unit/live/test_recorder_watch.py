@@ -24,6 +24,14 @@ def _thresholds() -> RecorderWatchThresholds:
         liquidation_silence_s=900.0,
         liquidation_max_failed_connections=5,
         sampler_stale_s=1800.0,
+        sampler_max_consecutive_failures=5,
+        min_capture_ratio=0.9,
+        capture_ratio_min_points=10,
+        persist_stale_s=1200.0,
+        max_consecutive_flush_failures=3,
+        reference_grace_s=3600.0,
+        rejected_fraction_alert=0.01,
+        rejected_max_consecutive_points=60,
     )
 
 
@@ -219,6 +227,14 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
         recorder_liquidation_silence_s=120.0,
         recorder_liquidation_max_failed_connections=2,
         recorder_sampler_stale_s=180.0,
+        recorder_sampler_max_consecutive_failures=4,
+        recorder_min_capture_ratio=0.8,
+        recorder_capture_ratio_min_points=5,
+        recorder_persist_stale_s=900.0,
+        recorder_max_consecutive_flush_failures=2,
+        recorder_reference_grace_s=1800.0,
+        recorder_rejected_fraction_alert=0.02,
+        recorder_rejected_max_consecutive_points=30,
     )
     watch = build_recorder_watchdog(settings, alert=lambda event, detail: True)
     assert watch is not None
@@ -229,6 +245,14 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
         liquidation_silence_s=120.0,
         liquidation_max_failed_connections=2,
         sampler_stale_s=180.0,
+        sampler_max_consecutive_failures=4,
+        min_capture_ratio=0.8,
+        capture_ratio_min_points=5,
+        persist_stale_s=900.0,
+        max_consecutive_flush_failures=2,
+        reference_grace_s=1800.0,
+        rejected_fraction_alert=0.02,
+        rejected_max_consecutive_points=30,
     )
 
 
@@ -305,3 +329,122 @@ def test_start_is_idempotent_and_loop_checks(tmp_path: Path) -> None:
     watch.stop(timeout_s=1.0)
     assert calls
     assert calls[0][0] == "recorder_unhealthy"
+
+
+def _v2_sampler(success_at: str, **overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "last_success_at": success_at,
+        "consecutive_failures": 0,
+        "skipped_grid_points": 0,
+        "rows_last_flush": 100,
+        "last_persisted_at": success_at,
+        "consecutive_flush_failures": 0,
+        "pending_rows": 0,
+        "dropped_rows_total": 0,
+        "rejected_rows_last_sample": 0,
+        "rejected_rows_total": 0,
+        "rejected_fraction_last_sample": 0.0,
+        "consecutive_rejecting_points": 0,
+        "window_expected_points": 60,
+        "window_captured_points": 60,
+    }
+    base.update(overrides)
+    return base
+
+
+def _v2_heartbeat(ts: str, *, book_failures: int, book_at: str) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "ts": ts,
+        "started_at": "2026-09-25T07:00:00Z",
+        "book_ticker": _v2_sampler(book_at, consecutive_failures=book_failures),
+        "premium_index": _v2_sampler(book_at),
+        "reference": {
+            "day": "20260925",
+            "cutoff_utc": "00:05",
+            "endpoints": {
+                "exchange_info": {
+                    "captured": True, "consecutive_failures": 0,
+                    "last_attempt_at": None, "last_error": None,
+                },
+                "funding_info": {
+                    "captured": True, "consecutive_failures": 0,
+                    "last_attempt_at": None, "last_error": None,
+                },
+                "asset_index": {
+                    "captured": True, "consecutive_failures": 0,
+                    "last_attempt_at": None, "last_error": None,
+                },
+            },
+            "last_success_at": "2026-09-25T00:06:00Z",
+            "previous_day": "20260924",
+            "previous_day_complete": True,
+        },
+        "liquidations": {
+            "last_event_at": ts,
+            "last_connected_at": ts,
+            "consecutive_failed_connections": 0,
+            "last_disconnect_reason": None,
+            "last_persisted_at": ts,
+            "consecutive_flush_failures": 0,
+            "pending_events": 0,
+            "dropped_events_total": 0,
+        },
+    }
+
+
+def test_production_thresholds_wired_from_settings() -> None:
+    """Non-default watchdog settings reach the thresholds verbatim."""
+    from src.live.recorder_watch import build_recorder_watchdog as _build
+
+    settings = LiveSettings(
+        recorder_sampler_max_consecutive_failures=4,
+        recorder_min_capture_ratio=0.8,
+        recorder_capture_ratio_min_points=5,
+        recorder_persist_stale_s=900.0,
+        recorder_max_consecutive_flush_failures=2,
+        recorder_reference_grace_s=1800.0,
+        recorder_rejected_fraction_alert=0.02,
+        recorder_rejected_max_consecutive_points=30,
+    )
+    watch = _build(settings, alert=lambda event, detail: True)
+    assert watch is not None
+    assert watch._thresholds.sampler_max_consecutive_failures == 4
+    assert watch._thresholds.min_capture_ratio == 0.8
+    assert watch._thresholds.capture_ratio_min_points == 5
+    assert watch._thresholds.persist_stale_s == 900.0
+    assert watch._thresholds.max_consecutive_flush_failures == 2
+    assert watch._thresholds.reference_grace_s == 1800.0
+    assert watch._thresholds.rejected_fraction_alert == 0.02
+    assert watch._thresholds.rejected_max_consecutive_points == 30
+
+
+def test_outage_replay_alerts_in_minutes(tmp_path: Path) -> None:
+    """A 1-minute grid outage pages once, within minutes of the fifth failure."""
+    from src.live.recorder_watch import RecorderWatchdog as _Watchdog
+
+    start = pd.Timestamp("2026-09-25T08:02:00Z")
+    now = _ManualNow(start.isoformat())
+    calls: list[tuple[str, str]] = []
+
+    def _alert(event: str, detail: str) -> bool:
+        calls.append((event, detail))
+        return True
+
+    watch = _Watchdog(
+        heartbeat_path=tmp_path / "recorder_heartbeat.json",
+        thresholds=_thresholds(),
+        interval_s=60.0,
+        alert=_alert,
+        now_fn=now,
+    )
+    for minute in range(7):
+        stamp = (start + pd.Timedelta(minutes=minute)).isoformat()
+        now.t = stamp
+        _write(
+            watch._heartbeat_path,
+            _v2_heartbeat(stamp, book_failures=minute, book_at=stamp),
+        )
+        watch.check_once()
+    assert [event for event, _ in calls] == ["recorder_unhealthy"]
+    assert "sampler_failing:book_ticker" in calls[0][1]

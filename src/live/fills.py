@@ -12,7 +12,7 @@ import pandas as pd
 from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 from src.common.paths import DATA_DIR
 
-FILL_REASONS: frozenset[str] = frozenset({"maker_fill", "backstop_taker", "timeout_taker", "residual", "obsolete", "immediate_taker"})
+FILL_REASONS: frozenset[str] = frozenset({"maker_fill", "backstop_taker", "timeout_taker", "residual", "obsolete", "immediate_taker", "orphan_settlement", "recovered_fill", "venue_force_close"})
 
 __all__ = ["FILL_REASONS", "_FILL_COLUMNS", "FillEvent", "append_fills", "default_fills_dir", "load_fills"]
 
@@ -32,6 +32,7 @@ _FILL_COLUMNS = [
     "client_order_id",
     "decision_mark",
     "sizing_anchor",
+    "fill_id",
 ]
 
 
@@ -52,6 +53,8 @@ class FillEvent:
     client_order_id: str
     decision_mark: Decimal | None = None
     sizing_anchor: str = "book_mid"
+    fill_id: str | None = None
+    """Deterministic identity `journal:<fill_seq>` of the journal fill this row was built from; None only for legacy rows."""
 
 
 def default_fills_dir() -> Path:
@@ -80,6 +83,7 @@ def _event_to_row(ev: FillEvent) -> dict[str, object]:
         "client_order_id": str(ev.client_order_id),
         "decision_mark": float(ev.decision_mark) if ev.decision_mark is not None else float("nan"),
         "sizing_anchor": str(ev.sizing_anchor),
+        "fill_id": str(ev.fill_id) if ev.fill_id is not None else None,
     }
 
 
@@ -96,13 +100,33 @@ def _enforce_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("leg_index",):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("int64")
-    for col in ("symbol", "reason", "liquidity", "mode", "run_id", "client_order_id", "sizing_anchor"):
+    for col in ("symbol", "reason", "liquidity", "mode", "run_id", "client_order_id", "sizing_anchor", "fill_id"):
         if col in df.columns:
             df[col] = df[col].astype("object")
     # ensure column order
     ordered = [c for c in _FILL_COLUMNS if c in df.columns]
     extras = [c for c in df.columns if c not in ordered]
     return df[ordered + extras]
+
+
+def _fill_id_of(value: object) -> str | None:
+    """Stored fill_id as str, or None for legacy rows (None/NaN after a parquet round trip)."""
+    return None if value is None or pd.isna(value) else str(value)
+
+
+def _dedupe_batch(evs: list[FillEvent]) -> list[FillEvent]:
+    """Collapse duplicates inside one batch on non-null fill_id (first wins)."""
+    seen: set[str] = set()
+    kept: list[FillEvent] = []
+    for ev in evs:
+        if ev.fill_id is None:
+            kept.append(ev)
+        elif str(ev.fill_id) in seen:
+            continue
+        else:
+            seen.add(str(ev.fill_id))
+            kept.append(ev)
+    return kept
 
 
 def append_fills(events: Sequence[FillEvent], fills_dir: Path) -> Path | None:
@@ -125,6 +149,8 @@ def append_fills(events: Sequence[FillEvent], fills_dir: Path) -> Path | None:
         ValueError: A fill carries a reason outside ``FILL_REASONS`` or an invalid liquidity tag.
         Exception: Merge failures and OS-level read/write failures propagate with the existing
             ledger unchanged.
+
+    Rows whose `fill_id` already exists in the target month are skipped, so re-emitting a journal range after a crash is idempotent. Rows without `fill_id` are never deduplicated (legacy).
     """
     if not events:
         return None
@@ -143,12 +169,20 @@ def append_fills(events: Sequence[FillEvent], fills_dir: Path) -> Path | None:
         buckets.setdefault(key, []).append(ev)
     last_written: Path | None = None
     for yyyymm, evs in sorted(buckets.items()):
+        evs = _dedupe_batch(evs)
         rows = [_event_to_row(ev) for ev in evs]
         df_new = pd.DataFrame(rows)
         df_new = _enforce_dtypes(df_new)
         path = fills_dir / f"fills_{yyyymm}.parquet"
         df_existing = read_parquet_or_quarantine(path, stage="live_fills")
         if df_existing is not None:
+            df_existing = _enforce_dtypes(df_existing)
+            # 스펙 03 이전 파티션에는 fill_id 컬럼이 없다(전부 레거시 행).
+            stored = df_existing["fill_id"].tolist() if "fill_id" in df_existing.columns else []
+            known = {fid for fid in map(_fill_id_of, stored) if fid is not None}
+            df_new = df_new[[(fid := _fill_id_of(v)) is None or fid not in known for v in df_new["fill_id"].tolist()]]
+            if df_new.empty:
+                continue
             df_combined = pd.concat([df_existing, df_new], ignore_index=True)
             df_combined = _enforce_dtypes(df_combined)
             write_parquet_atomic(df_combined, path, compression="snappy")
@@ -158,33 +192,25 @@ def append_fills(events: Sequence[FillEvent], fills_dir: Path) -> Path | None:
     return last_written
 
 
+def _empty_fills_frame() -> pd.DataFrame:
+    empty = pd.DataFrame({c: [] for c in _FILL_COLUMNS})
+    empty["decision_time"] = pd.to_datetime(empty["decision_time"], utc=True).astype("datetime64[ns, UTC]")
+    empty["timestamp"] = pd.to_datetime(empty["timestamp"], utc=True).astype("datetime64[ns, UTC]")
+    for col in ("quantity_delta", "fill_price", "fee_bps", "pre_trade_equity", "decision_mark"):
+        empty[col] = empty[col].astype("float64")
+    empty["leg_index"] = empty["leg_index"].astype("int64")
+    for col in ("symbol", "reason", "liquidity", "mode", "run_id", "client_order_id", "sizing_anchor", "fill_id"):
+        empty[col] = empty[col].astype("object")
+    return empty
+
+
 def load_fills(fills_dir: Path | str | None = None, *, since: pd.Timestamp | None = None) -> pd.DataFrame:
     dir_path = Path(fills_dir) if fills_dir is not None else default_fills_dir()
     if not dir_path.exists():
-        # return empty with schema
-        empty = pd.DataFrame({c: [] for c in _FILL_COLUMNS})
-        # set dtypes
-        empty["decision_time"] = pd.to_datetime(empty["decision_time"], utc=True).astype("datetime64[ns, UTC]")
-        empty["timestamp"] = pd.to_datetime(empty["timestamp"], utc=True).astype("datetime64[ns, UTC]")
-        for col in ("quantity_delta", "fill_price", "fee_bps", "pre_trade_equity", "decision_mark"):
-            empty[col] = empty[col].astype("float64")
-        empty["leg_index"] = empty["leg_index"].astype("int64")
-        for col in ("symbol", "reason", "liquidity", "mode", "run_id", "client_order_id", "sizing_anchor"):
-            empty[col] = empty[col].astype("object")
-        if since is not None:
-            return empty
-        return empty
+        return _empty_fills_frame()
     shards = sorted(dir_path.glob("fills_*.parquet"))
     if not shards:
-        empty = pd.DataFrame({c: [] for c in _FILL_COLUMNS})
-        empty["decision_time"] = pd.to_datetime(empty["decision_time"], utc=True).astype("datetime64[ns, UTC]")
-        empty["timestamp"] = pd.to_datetime(empty["timestamp"], utc=True).astype("datetime64[ns, UTC]")
-        for col in ("quantity_delta", "fill_price", "fee_bps", "pre_trade_equity", "decision_mark"):
-            empty[col] = empty[col].astype("float64")
-        empty["leg_index"] = empty["leg_index"].astype("int64")
-        for col in ("symbol", "reason", "liquidity", "mode", "run_id", "client_order_id", "sizing_anchor"):
-            empty[col] = empty[col].astype("object")
-        return empty
+        return _empty_fills_frame()
     frames: list[pd.DataFrame] = []
     for shard in shards:
         try:
@@ -194,16 +220,10 @@ def load_fills(fills_dir: Path | str | None = None, *, since: pd.Timestamp | Non
         except Exception:  # noqa: S112, BLE001
             continue
     if not frames:
-        empty = pd.DataFrame({c: [] for c in _FILL_COLUMNS})
-        empty["decision_time"] = pd.to_datetime(empty["decision_time"], utc=True).astype("datetime64[ns, UTC]")
-        empty["timestamp"] = pd.to_datetime(empty["timestamp"], utc=True).astype("datetime64[ns, UTC]")
-        for col in ("quantity_delta", "fill_price", "fee_bps", "pre_trade_equity", "decision_mark"):
-            empty[col] = empty[col].astype("float64")
-        empty["leg_index"] = empty["leg_index"].astype("int64")
-        for col in ("symbol", "reason", "liquidity", "mode", "run_id", "client_order_id", "sizing_anchor"):
-            empty[col] = empty[col].astype("object")
-        return empty
+        return _empty_fills_frame()
     combined = pd.concat(frames, ignore_index=True)
+    if "fill_id" not in combined.columns:
+        combined["fill_id"] = pd.Series([None] * len(combined), dtype="object")
     combined = _enforce_dtypes(combined)
     # reorder to canonical order
     ordered = [c for c in _FILL_COLUMNS if c in combined.columns]

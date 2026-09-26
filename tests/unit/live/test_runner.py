@@ -88,7 +88,7 @@ def _seed_policy_cycle_artifact(tmp_path) -> tuple:
     return path, DECISION_TIME, NOW
 
 
-def _install_policy_cycle_stubs(tmp_path, monkeypatch, captured: dict) -> None:
+def _install_policy_cycle_stubs(tmp_path, monkeypatch, captured: dict, *, journal_fills: bool = False) -> None:
     import src.live.orderbook as ob_mod
     import src.live.runner as runner_mod
     from src.live.executor import ExecutionOutcome
@@ -104,8 +104,12 @@ def _install_policy_cycle_stubs(tmp_path, monkeypatch, captured: dict) -> None:
     def fake_execute_intents(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
         from decimal import Decimal
 
+        import pandas as pd
+
+        from tests.unit.live._runner_stubs import NOW
+
         captured["policy"] = policy
-        return tuple(
+        outcomes = [
             ExecutionOutcome(
                 symbol=intent.symbol,
                 filled_qty=intent.quantity,
@@ -115,7 +119,32 @@ def _install_policy_cycle_stubs(tmp_path, monkeypatch, captured: dict) -> None:
                 status="FILLED",
             )
             for intent in intents
-        )
+        ]
+        if journal_fills:
+            journal = kwargs.get("journal")
+            attempt = kwargs.get("attempt")
+            if journal is not None and attempt is not None:
+                for outcome in outcomes:
+                    if outcome.filled_qty <= 0:
+                        continue
+                    side = next((i.side for i in intents if i.symbol == outcome.symbol), "BUY")
+                    journal.record_fill(
+                        kind="execution",
+                        attempt_seq=attempt.attempt_seq,
+                        symbol=outcome.symbol,
+                        side=side,
+                        quantity=outcome.filled_qty,
+                        price=Decimal("100"),
+                        fee_bps=5.0,
+                        liquidity="taker",
+                        reason="timeout_taker",
+                        filled_at=pd.Timestamp(NOW),
+                        client_order_id=None,
+                        leg_index=0,
+                        cumulative_executed_qty=None,
+                        simulated=True,
+                    )
+        return tuple(outcomes)
 
     monkeypatch.setattr(runner_mod, "execute_intents", fake_execute_intents)
     monkeypatch.setattr(
@@ -258,7 +287,18 @@ def test_order_journal_follows_settings_path(tmp_path, monkeypatch) -> None:
 
     assert seen["path"] == Path(settings.order_journal_path)
     journal = real_journal(seen["path"])
-    journal.record_submit("wired-cid", "AAAUSDT", journal.next_submit_seq())
+    from decimal import Decimal
+
+    journal.record_submit(
+        "wired-cid",
+        "AAAUSDT",
+        journal.next_submit_seq(),
+        attempt_seq=0,
+        side="BUY",
+        quantity=Decimal("1"),
+        reduce_only=False,
+        leg_index=0,
+    )
     assert seen["path"].exists()
 
 
@@ -431,13 +471,17 @@ def _seed_live_tax_cycle(tmp_path, monkeypatch):
 
     path, decision_time, now = _seed_policy_cycle_artifact(tmp_path)
     captured: dict = {}
-    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured, journal_fills=True)
     settings = LiveSettings(
         mode="live_testnet",
         order_api_key="testnet-key",
         order_api_secret="testnet-secret",
         ledger_path=str(tmp_path / "ledger_live_tax.json"),
+        order_journal_path=str(tmp_path / "order_journal.jsonl"),
+        fills_dir=str(tmp_path / "fills"),
         tax_ledger_dir=str(tmp_path / "tax"),
+        execution_quality_dir=str(tmp_path / "eq"),
+        portfolio_state_dir=str(tmp_path / "portfolio"),
     )
     return runner_mod, settings, path, decision_time, now
 
@@ -449,7 +493,7 @@ def test_live_tax_issues_audited_without_halting(tmp_path, monkeypatch) -> None:
     runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
     calls: list = []
 
-    def _fake_collect(client, symbols, tax_dir, mode, *, now):
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None):
         calls.append((symbols, str(tax_dir), mode))
         return 2, (TaxCollectionIssue(stream="trades:AAAUSDT", stage="fetch", detail="boom"),)
 
@@ -469,7 +513,7 @@ def test_live_tax_invalid_watermark_audited_once(tmp_path, monkeypatch) -> None:
 
     runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
 
-    def _fake_collect(client, symbols, tax_dir, mode, *, now):
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None):
         raise DataIntegrityError("tax watermark unreadable")
 
     monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
@@ -477,3 +521,290 @@ def test_live_tax_invalid_watermark_audited_once(tmp_path, monkeypatch) -> None:
     assert report.status == "COMPLETE"
     events = _audit_events_by_name(tmp_path, "tax_watermark_invalid")
     assert len(events) == 1
+
+
+def test_reject_cluster_alerts_once(tmp_path) -> None:
+    """Spec 02: one intent_reject_cluster alert for a code shared by >= threshold symbols."""
+    import json
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from src.live.audit import AuditLog
+    from src.live.executor import ExecutionOutcome
+    from src.live.runner import _alert_reject_cluster
+    from src.live.settings import LiveSettings
+
+    def _rejected(symbol, code):
+        return ExecutionOutcome(symbol=symbol, filled_qty=Decimal(0), unfilled_qty=Decimal(1),
+                                avg_fill_price=None, chases=0, status="REJECTED", reject_code=code)
+
+    audit_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(audit_path)
+    settings = LiveSettings()
+    assert settings.reject_cluster_alert_min_symbols == 3
+    outcomes = [_rejected("AAAUSDT", -1013), _rejected("BBBUSDT", -1013), _rejected("CCCUSDT", -1013)]
+    _alert_reject_cluster(settings, outcomes, audit,
+                          decision_time=pd.Timestamp("2026-09-14", tz="UTC"),
+                          now=pd.Timestamp("2026-09-14 01:00", tz="UTC"))
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    clusters = [e for e in events if e["event"] == "intent_reject_cluster"]
+    assert len(clusters) == 1
+    assert clusters[0]["code"] == -1013
+    assert clusters[0]["symbols"] == 3
+
+
+def test_scattered_rejections_do_not_alert(tmp_path) -> None:
+    """Spec 02: rejections spread across codes below threshold stay silent."""
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from src.live.audit import AuditLog
+    from src.live.executor import ExecutionOutcome
+    from src.live.runner import _alert_reject_cluster
+    from src.live.settings import LiveSettings
+
+    def _rejected(symbol, code):
+        return ExecutionOutcome(symbol=symbol, filled_qty=Decimal(0), unfilled_qty=Decimal(1),
+                                avg_fill_price=None, chases=0, status="REJECTED", reject_code=code)
+
+    audit_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(audit_path)
+    outcomes = [_rejected("AAAUSDT", -1013), _rejected("BBBUSDT", -4164), _rejected("CCCUSDT", -4164)]
+    _alert_reject_cluster(LiveSettings(), outcomes, audit,
+                          decision_time=pd.Timestamp("2026-09-14", tz="UTC"),
+                          now=pd.Timestamp("2026-09-14 01:00", tz="UTC"))
+    import json
+
+    lines = audit_path.read_text(encoding="utf-8").splitlines() if audit_path.exists() else []
+    events = [json.loads(line) for line in lines]
+    assert [e for e in events if e["event"] == "intent_reject_cluster"] == []
+
+
+def test_sizing_mark_fallbacks_audited(tmp_path) -> None:
+    """Spec 02: nonzero held symbols absent from live marks are audited once each."""
+    import json
+    from decimal import Decimal
+
+    from src.live.audit import AuditLog
+    from src.live.runner import _audit_sizing_mark_fallbacks
+
+    audit_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(audit_path)
+    _audit_sizing_mark_fallbacks(
+        audit,
+        {"AAAUSDT": Decimal("5"), "BBBUSDT": Decimal("0"), "CCCUSDT": Decimal("-2")},
+        {"AAAUSDT": Decimal("100")},
+        {"CCCUSDT": Decimal("99")},
+    )
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    fallbacks = [e for e in events if e["event"] == "sizing_mark_fallback"]
+    assert [(e["symbol"], e["has_fallback"]) for e in fallbacks] == [("CCCUSDT", True)]
+
+
+def test_risk_blocked_intents_audited(tmp_path) -> None:
+    """Spec 02: withheld risk-increasing intents leave one audit row each."""
+    import json
+    from decimal import Decimal
+
+    from src.live.audit import AuditLog
+    from src.live.planner import OrderIntent
+    from src.live.runner import _audit_risk_blocked
+
+    audit_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(audit_path)
+    _audit_risk_blocked(audit, [])
+    assert not audit_path.exists()
+    blocked = [
+        OrderIntent(symbol="AAAUSDT", side="BUY", quantity=Decimal("1"), reduce_only=False,
+                    target_qty=Decimal("1"), current_qty=Decimal("0"),
+                    client_order_prefix="run1", leg_index=1, decision_price=Decimal("100")),
+    ]
+    _audit_risk_blocked(audit, blocked)
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert [(e["event"], e["symbol"]) for e in events] == [("intent_risk_control_blocked", "AAAUSDT")]
+
+
+def test_reject_cluster_alerts_on_abort_path(tmp_path, monkeypatch) -> None:
+    """Spec 02: the abort path still emits the cluster alert once outcomes persist."""
+    import json
+
+    import pandas as pd
+
+    import src.live.runner as runner_mod
+    from src.live.audit import AuditLog  # noqa: F401
+    from src.live.errors import LiveTradingError
+    from src.live.executor import ExecutionOutcome
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    frame = pd.DataFrame(
+        {"AAAUSDT": [0.02], "BUSDT": [-0.02]},
+        index=pd.DatetimeIndex([DECISION_TIME]),
+    )
+    weights_path = tmp_path / "deployed_target_weights_abort.parquet"
+    frame.to_parquet(weights_path, index=True)
+    from src.live.deployed_weights import decision_ohlcv_close_path
+
+    closes = pd.DataFrame(
+        100.0, index=pd.DatetimeIndex(frame.index), columns=list(frame.columns), dtype="float64",
+    )
+    closes.to_parquet(decision_ohlcv_close_path(weights_path), index=True)
+
+    monkeypatch.setattr(
+        runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient()
+    )
+    monkeypatch.setattr(
+        runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient()
+    )
+    monkeypatch.setattr(
+        runner_mod, "default_audit_log_path", lambda name, for_date=None: tmp_path / f"{name}.jsonl"
+    )
+    import src.live.orderbook as ob_mod
+
+    monkeypatch.setattr(ob_mod, "capture_order_books", lambda *a, **k: [])
+    monkeypatch.setattr(ob_mod, "append_order_book_snapshots", lambda *a, **k: [])
+
+    from decimal import Decimal
+
+    def fake_raise(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, outcome_sink=None, **kwargs):
+        outcomes = [
+            ExecutionOutcome(symbol=i.symbol, filled_qty=Decimal(0), unfilled_qty=i.quantity,
+                             avg_fill_price=None, chases=0, status="REJECTED", reject_code=-1013)
+            for i in intents
+        ]
+        if outcome_sink is not None:
+            outcome_sink[:] = outcomes
+        exc = LiveTradingError("boom")
+        exc.partial_outcomes = tuple(outcomes)
+        raise exc
+
+    monkeypatch.setattr(runner_mod, "execute_intents", fake_raise)
+    settings = LiveSettings(
+        notional_equity_usdt=2000.0,
+        ledger_path=str(tmp_path / "ledger_abort.json"),
+        order_journal_path=str(tmp_path / "order_journal.jsonl"),
+        fills_dir=str(tmp_path / "fills"),
+        tax_ledger_dir=str(tmp_path / "tax"),
+        execution_quality_dir=str(tmp_path / "eq"),
+        portfolio_state_dir=str(tmp_path / "portfolio"),
+        reject_cluster_alert_min_symbols=2,
+    )
+    report = run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
+    assert report.status == "HALT"
+    audit_path = tmp_path / "shadow_cycle.jsonl"
+    assert audit_path.exists()
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    clusters = [e for e in events if e["event"] == "intent_reject_cluster"]
+    assert len(clusters) == 1
+    assert clusters[0]["code"] == -1013
+
+
+def test_corrupt_funding_shard_alerts_and_halts(tmp_path, monkeypatch) -> None:
+    """PAPER funding shard with mid-file corruption: HALT + one tax_ledger_corrupt dispatch."""
+    import json
+    from decimal import Decimal
+
+    import pandas as pd
+
+    import src.live.runner as runner_mod
+    from src.live.ledger import LedgerState, PositionSnapshot, save_ledger
+    from src.live.settings import LiveSettings
+    from src.live.tax_ledger import _tax_shard_path
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    path, _, _ = _seed_policy_cycle_artifact(tmp_path)
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+
+    t0 = NOW - pd.Timedelta(days=2)
+    t1 = t0 + pd.Timedelta(hours=8)
+    funding = pd.Series([0.0001], index=pd.DatetimeIndex([t1]))
+    closes = pd.Series([100.0], index=pd.DatetimeIndex([t1.floor("h")]))
+    monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {"AAAUSDT": funding})
+    monkeypatch.setattr(runner_mod, "_load_paper_trade_closes", lambda symbols: {"AAAUSDT": closes})
+
+    tax_dir = tmp_path / "tax"
+    tax_dir.mkdir(parents=True, exist_ok=True)
+    shard = _tax_shard_path(tax_dir, t1)
+    row = {"record_id": "seed:1", "kind": "FUNDING_FEE", "event_time": t0.isoformat(),
+           "symbol": "AAAUSDT", "side": "", "quantity": 1.0, "price": 100.0, "quote_qty": 100.0,
+           "fee": 0.0, "fee_asset": "USDT", "realized_pnl": 0.1, "income_asset": "USDT",
+           "is_maker": False, "venue_id": 0, "source": "simulated", "mode": "paper", "income_type": ""}
+    shard.write_text(json.dumps(row) + "\n" + "{bad}\n" + json.dumps(row) + "\n", encoding="utf-8")
+
+    ledger_path = tmp_path / "ledger_corrupt.json"
+    save_ledger(
+        ledger_path,
+        LedgerState(
+            positions={"AAAUSDT": Decimal("1")},
+            equity_high_water_mark=Decimal("2000"),
+            cash_usdt=Decimal("2000"),
+            funding_watermarks={"AAAUSDT": t0},
+            position_history=(PositionSnapshot(effective_from=t0, positions={"AAAUSDT": Decimal("1")}),),
+        ),
+    )
+    settings = LiveSettings(
+        mode="paper",
+        ledger_path=str(ledger_path),
+        order_journal_path=str(tmp_path / "journal.jsonl"),
+        fills_dir=str(tmp_path / "fills"),
+        tax_ledger_dir=str(tax_dir),
+        execution_quality_dir=str(tmp_path / "eq"),
+        portfolio_state_dir=str(tmp_path / "port"),
+    )
+    calls: list = []
+
+    def _fake_dispatch(settings, *, event, detail, decision_time, dedupe_key, now):
+        calls.append({"event": event, "detail": detail, "dedupe_key": dedupe_key})
+        return True
+
+    monkeypatch.setattr(runner_mod, "dispatch_alert", _fake_dispatch)
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, path, now=NOW)
+    assert report.status == "HALT"
+    assert len(calls) == 1
+    assert calls[0]["event"] == "tax_ledger_corrupt"
+    assert "line=2" in calls[0]["detail"]
+
+
+def test_live_collection_receives_wall_clock_now(tmp_path, monkeypatch) -> None:
+    """LIVE collection gets now=now_ts, not decision_time."""
+    import src.live.runner as runner_mod
+
+    runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
+    seen: dict = {}
+
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None):
+        seen["now"] = now
+        return 0, ()
+
+    monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
+    report = runner_mod.run_shadow_cycle(settings, decision_time, path, now=now)
+    assert report.status == "COMPLETE"
+    assert seen["now"] == now
+    assert seen["now"] != decision_time
+
+
+def test_live_tax_retention_gap_alerts(tmp_path, monkeypatch) -> None:
+    """A retention_gap collection issue (venue history already expired) is alerted, not only audited."""
+    from src.live.tax_ledger import TaxCollectionIssue
+
+    runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
+    alerts: list = []
+
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None):
+        return 0, (TaxCollectionIssue(stream="income", stage="retention_gap", detail="uncovered [a..b]"),)
+
+    monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
+    monkeypatch.setattr(runner_mod, "dispatch_alert", lambda settings, **kw: alerts.append(kw))
+
+    report = runner_mod.run_shadow_cycle(settings, decision_time, path, now=now)
+
+    assert report.status == "COMPLETE"
+    gap = [a for a in alerts if a["event"] == "tax_income_gap"]
+    assert len(gap) == 1
+    assert gap[0]["detail"] == "uncovered [a..b]"
