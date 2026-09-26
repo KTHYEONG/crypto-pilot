@@ -1,918 +1,512 @@
-"""Invariant guards for pure recorder-heartbeat evaluation."""
+"""Invariant guards for heartbeat v3 evaluation."""
 
 from __future__ import annotations
 
+import datetime
+from typing import Any
+
+import pandas as pd
 import pytest
 
 from src.market_data.streams.recorder_health import (
+    RecorderFinding,
     RecorderWatchThresholds,
     evaluate_recorder_heartbeat,
-    read_recorder_heartbeat,
 )
 
-_DEFAULTS = RecorderWatchThresholds(
-    heartbeat_stale_s=600.0,
-    liquidation_silence_s=900.0,
-    liquidation_max_failed_connections=5,
-    sampler_stale_s=1800.0,
-    sampler_max_consecutive_failures=5,
-    min_capture_ratio=0.9,
-    capture_ratio_min_points=10,
-    persist_stale_s=1200.0,
-    max_consecutive_flush_failures=3,
-    reference_grace_s=3600.0,
-    rejected_fraction_alert=0.01,
-    rejected_max_consecutive_points=60,
-)
 
-_NOW = "2026-09-24T06:35:00Z"
+def _now() -> pd.Timestamp:
+    return pd.Timestamp("2026-09-26T12:00:00Z")
 
 
-def _payload(**overrides):
-    now = _NOW
-    base = {
-        "ts": now,
-        "started_at": "2026-09-24T05:00:00Z",
-        "book_ticker": {"last_success_at": now, "rows_last_flush": 1, "consecutive_failures": 0},
-        "premium_index": {"last_success_at": now, "rows_last_flush": 1, "consecutive_failures": 0},
-        "reference": {"last_success_at": now, "rows_last_flush": 3, "consecutive_failures": 0},
-        "liquidations": {
-            "last_event_at": now,
-            "last_connected_at": now,
-            "consecutive_failed_connections": 0,
-            "last_disconnect_reason": None,
-        },
+def _thresholds(**overrides: Any) -> RecorderWatchThresholds:
+    values: dict[str, Any] = {
+        "heartbeat_stale_s": 600.0,
+        "liquidation_silence_s": 900.0,
+        "sampler_stale_s": 1800.0,
+        "sampler_max_consecutive_failures": 5,
+        "min_capture_ratio": 0.9,
+        "capture_ratio_min_points": 10,
+        "persist_stale_s": 1200.0,
+        "max_consecutive_flush_failures": 3,
+        "reference_grace_s": 3600.0,
+        "rejected_fraction_alert": 0.01,
+        "rejected_max_consecutive_points": 60,
+        "capture_stale_s": 120.0,
+        "capture_ready_grace_s": 900.0,
+        "capture_dual_active_max_s": 1200.0,
+        "normalizer_max_lag_s": 600.0,
+        "normalizer_max_consecutive_failures": 5,
+        "compaction_max_delay_s": 10800.0,
     }
-    base.update(overrides)
-    return base
+    values.update(overrides)
+    return RecorderWatchThresholds(**values)
 
 
-def test_healthy_heartbeat_yields_no_findings() -> None:
-    """A fresh heartbeat with recent events and no failures is quiet."""
-    now = _NOW
+def _slot(started_ago_s: float = 100.0, ready: bool = True, **overrides: Any) -> dict[str, Any]:
+    now = _now()
+    started = (now - pd.Timedelta(seconds=started_ago_s)).isoformat()
+    first_ok = started if ready else None
+    first_frame = started if ready else None
+    payload: dict[str, Any] = {
+        "slot": "blue",
+        "pid": 7,
+        "fingerprint": "fp",
+        "started_at": started,
+        "stopped_at": None,
+        "rest": {
+            "book_ticker": {"first_ok_at": first_ok, "last_ok_at": first_ok, "consecutive_failures": 0},
+            "premium_index": {"first_ok_at": first_ok, "last_ok_at": first_ok, "consecutive_failures": 0},
+        },
+        "ws": {"connected_at": started, "first_frame_at": first_frame,
+               "last_frame_at": now.isoformat(), "reconnects": 0, "pending_dropped": 0},
+        "last_flush_at": now.isoformat(),
+        "flush_failures": 0,
+        "ts": now.isoformat(),
+        "ready": ready,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _payload(**overrides: Any) -> dict[str, Any]:
+    now = _now()
+    payload: dict[str, Any] = {
+        "schema_version": 3,
+        "ts": now.isoformat(),
+        "started_at": (now - pd.Timedelta(hours=2)).isoformat(),
+        "normalizer": {"last_run_at": now.isoformat(), "last_success_at": now.isoformat(),
+                       "consecutive_failures": 0, "lag_s": 0.0,
+                       "pending_complete_bytes": 0, "last_error": None},
+        "streams": {
+            "book_ticker": {"last_grid": "2026-09-26T11:55:00+00:00",
+                            "last_persisted_at": now.isoformat(), "rows_last_write": 10,
+                            "rejected_rows_last_sample": 0, "rejected_fraction_last_sample": 0.0,
+                            "rejected_rows_total": 0, "consecutive_rejecting_points": 0,
+                            "window_expected_points": 60, "window_captured_points": 60,
+                            "duplicates_dropped_total": 0},
+            "premium_index": {"last_grid": "2026-09-26T11:55:00+00:00",
+                              "last_persisted_at": now.isoformat(), "rows_last_write": 5,
+                              "rejected_rows_last_sample": 0, "rejected_fraction_last_sample": 0.0,
+                              "rejected_rows_total": 0, "consecutive_rejecting_points": 0,
+                              "window_expected_points": 12, "window_captured_points": 12,
+                              "duplicates_dropped_total": 0},
+            "force_order": {"last_frame_recv_at": now.isoformat(),
+                            "last_persisted_at": now.isoformat(), "frames_total": 100,
+                            "duplicates_dropped_total": 0, "parse_failures_total": 0},
+        },
+        "reference": {"day": "20260926", "cutoff_utc": "00:05",
+                      "endpoints": {"exchange_info": {"captured": True},
+                                    "funding_info": {"captured": True},
+                                    "asset_index": {"captured": True}},
+                      "previous_day": "20260925", "previous_day_complete": True},
+        "compaction": {"last_day": "20260925", "last_result": "ok", "last_error": None,
+                       "last_run_at": now.isoformat(), "archived_days_pending": []},
+        "retention": {"prune_blocked": False, "blocked_reason": None, "backup_started_at": None,
+                      "last_run_at": now.isoformat(), "pruned_files_total": 0,
+                      "raw_hot_bytes": 10, "raw_archive_bytes": 20},
+        "capture": {"blue": _slot(), "green": None},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _keys(findings: tuple[RecorderFinding, ...]) -> set[str]:
+    return {finding.key for finding in findings}
+
+
+def test_healthy_snapshot_yields_no_findings() -> None:
+    """One fresh READY slot, lagless normalizer, ok compaction and open retention prune clean."""
+    assert evaluate_recorder_heartbeat(_payload(), now=_now(),
+                                       watch_started_at=_now() - pd.Timedelta(hours=3),
+                                       thresholds=_thresholds()) == ()
+
+
+def test_schema_other_than_3_yields_only_schema() -> None:
+    """A v2 payload fails only the schema check."""
+    payload = _payload(schema_version=2)
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert _keys(findings) == {"heartbeat_schema:recorder"}
+
+
+def test_dead_capture_live_normalizer_is_missing() -> None:
+    """No fresh slot heartbeat surfaces as capture_missing."""
+    payload = _payload(capture={"blue": None, "green": None})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert "capture_missing:capture" in _keys(findings)
+
+
+def test_unfinished_handover_is_dual_active() -> None:
+    """Two fresh slots older than the dual-active window raise; a young pair does not."""
+    now = _now()
+    payload = _payload(capture={"blue": _slot(started_ago_s=1300), "green": _slot(started_ago_s=1300)})
+    findings = evaluate_recorder_heartbeat(payload, now=now,
+                                           watch_started_at=now - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert "capture_dual_active:capture" in _keys(findings)
+    young = _payload(capture={"blue": _slot(started_ago_s=600), "green": _slot(started_ago_s=600)})
+    young_findings = evaluate_recorder_heartbeat(young, now=now,
+                                                 watch_started_at=now - pd.Timedelta(hours=3),
+                                                 thresholds=_thresholds())
+    assert "capture_dual_active:capture" not in _keys(young_findings)
+
+
+def test_slot_never_ready() -> None:
+    """A fresh slot past the ready grace without a first frame raises not_ready."""
+    payload = _payload(capture={"blue": _slot(started_ago_s=1000, ready=False), "green": None})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert "capture_not_ready:blue" in _keys(findings)
+
+
+def test_healthy_slot_masks_overlap_rest_failures() -> None:
+    """Green failing book_ticker 6 times is masked while blue stays healthy."""
+    failing = _slot()
+    failing["rest"]["book_ticker"]["consecutive_failures"] = 6
+    payload = _payload(capture={"blue": _slot(), "green": failing})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert "capture_rest_failing:book_ticker" not in _keys(findings)
+
+
+def test_normalizer_lag_and_failures() -> None:
+    """Lag and consecutive failures each raise their own finding."""
+    payload = _payload(normalizer={"last_run_at": _now().isoformat(), "last_success_at": None,
+                                   "consecutive_failures": 5, "lag_s": 700.0,
+                                   "pending_complete_bytes": 9, "last_error": "boom"})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert {"normalizer_lagging:normalizer", "normalizer_failing:normalizer"} <= _keys(findings)
+
+
+def test_compaction_and_retention_problems() -> None:
+    """Error result, overdue pending day and blocked prune all surface."""
     payload = _payload(
-        ts="2026-09-24T06:34:30Z",
-        liquidations={
-            "last_event_at": "2026-09-24T06:34:40Z",
-            "last_connected_at": now,
-            "consecutive_failed_connections": 0,
-            "last_disconnect_reason": None,
-        },
-        book_ticker={"last_success_at": "2026-09-24T06:34:00Z"},
-        premium_index={"last_success_at": "2026-09-24T06:34:00Z"},
+        compaction={"last_day": "20260920", "last_result": "error", "last_error": "x",
+                    "last_run_at": _now().isoformat(),
+                    "archived_days_pending": [{"stream": "book_ticker", "day": "20260920"}]},
+        retention={"prune_blocked": True, "blocked_reason": "status_missing",
+                   "backup_started_at": None, "last_run_at": _now().isoformat(),
+                   "pruned_files_total": 0, "raw_hot_bytes": 1, "raw_archive_bytes": 2},
     )
-    assert (
-        evaluate_recorder_heartbeat(
-            payload,
-            now=now,
-            watch_started_at="2026-09-24T06:30:00Z",
-            thresholds=_DEFAULTS,
-        )
-        == ()
-    )
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert {"compaction_failed:compaction", "compaction_overdue:compaction",
+            "prune_blocked:retention"} <= _keys(findings)
 
 
-def test_sixty_eight_minute_outage_is_caught() -> None:
-    """The 2026-09-24 zero-event outage fires a single silence finding with its age."""
-    (finding,) = evaluate_recorder_heartbeat(
-        _payload(liquidations={
-            "last_event_at": "2026-09-24T06:19:00Z",
-            "last_connected_at": "2026-09-24T06:19:00Z",
-            "consecutive_failed_connections": 1,
-            "last_disconnect_reason": "EVENT_STALL: silent",
-        }),
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert finding.key == "liquidation_silent:liquidations"
-    assert "age_s=960" in finding.detail
+def test_stale_heartbeat_masks_everything() -> None:
+    """A stale ts yields only heartbeat_stale."""
+    payload = _payload(ts=(_now() - pd.Timedelta(seconds=3600)).isoformat(), capture={"blue": None})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert _keys(findings) == {"heartbeat_stale:recorder"}
 
 
-def test_silence_boundary_is_strict() -> None:
-    """Exactly at the silence threshold nothing fires; one second later it does."""
-    thresholds = _DEFAULTS
-    at_threshold = evaluate_recorder_heartbeat(
-        _payload(liquidations={
-            "last_event_at": "2026-09-24T06:20:00Z",
-            "last_connected_at": "2026-09-24T06:20:00Z",
-            "consecutive_failed_connections": 0,
-            "last_disconnect_reason": None,
-        }),
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=thresholds,
-    )
-    assert all(f.check != "liquidation_silent" for f in at_threshold)
-    (finding,) = [
-        f
-        for f in evaluate_recorder_heartbeat(
-            _payload(liquidations={
-                "last_event_at": "2026-09-24T06:19:59Z",
-                "last_connected_at": "2026-09-24T06:19:59Z",
-                "consecutive_failed_connections": 0,
-                "last_disconnect_reason": None,
-            }),
-            now=_NOW,
-            watch_started_at="2026-09-24T06:30:00Z",
-            thresholds=thresholds,
-        )
-        if f.check == "liquidation_silent"
-    ]
-    assert finding.key == "liquidation_silent:liquidations"
+def test_missing_heartbeat_grace_and_alert() -> None:
+    """A missing heartbeat is tolerated while the watch is young, then reported."""
+    young = evaluate_recorder_heartbeat(None, now=_now(), watch_started_at=_now(),
+                                        thresholds=_thresholds())
+    assert young == ()
+    old = evaluate_recorder_heartbeat(None, now=_now(),
+                                      watch_started_at=_now() - pd.Timedelta(hours=3),
+                                      thresholds=_thresholds())
+    assert _keys(old) == {"heartbeat_missing:recorder"}
 
 
-def test_never_seen_event_ages_from_process_start() -> None:
-    """A null last event falls back to the recorder start instant."""
-    (finding,) = [
-        f
-        for f in evaluate_recorder_heartbeat(
-            _payload(
-                started_at="2026-09-24T06:15:00Z",
-                liquidations={
-                    "last_event_at": None,
-                    "last_connected_at": "2026-09-24T06:15:00Z",
-                    "consecutive_failed_connections": 0,
-                    "last_disconnect_reason": None,
-                },
-            ),
-            now=_NOW,
-            watch_started_at="2026-09-24T06:30:00Z",
-            thresholds=_DEFAULTS,
-        )
-        if f.check == "liquidation_silent"
-    ]
-    assert finding.subject == "liquidations"
+def test_heartbeat_io_variants(tmp_path) -> None:
+    """Missing, corrupt and non-object heartbeat files read as None; naive clocks rejected."""
+    import pytest
 
+    from src.market_data.streams.recorder_health import read_recorder_heartbeat
 
-def test_failed_connections_threshold() -> None:
-    """The failing check fires at the count threshold, not one below."""
-    healthy_liq = {
-        "last_event_at": _NOW,
-        "last_connected_at": _NOW,
-        "consecutive_failed_connections": 5,
-        "last_disconnect_reason": "DISCONNECTED: close",
-    }
-    (finding,) = evaluate_recorder_heartbeat(
-        _payload(liquidations=healthy_liq),
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert finding.key == "liquidation_failing:liquidations"
-    below = dict(healthy_liq, consecutive_failed_connections=4)
-    assert (
-        evaluate_recorder_heartbeat(
-            _payload(liquidations=below),
-            now=_NOW,
-            watch_started_at="2026-09-24T06:30:00Z",
-            thresholds=_DEFAULTS,
-        )
-        == ()
-    )
-
-
-def test_stale_heartbeat_suppresses_derived_checks() -> None:
-    """Only the staleness itself is reported when the heartbeat describes the past."""
-    (finding,) = evaluate_recorder_heartbeat(
-        _payload(
-            ts="2026-09-24T06:24:00Z",
-            liquidations={
-                "last_event_at": "2026-09-24T05:24:00Z",
-                "last_connected_at": "2026-09-24T05:24:00Z",
-                "consecutive_failed_connections": 9,
-                "last_disconnect_reason": "DISCONNECTED: close",
-            },
-        ),
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert finding.key == "heartbeat_stale:recorder"
-
-
-def test_missing_heartbeat_tolerated_during_startup() -> None:
-    """An absent heartbeat is tolerated inside the grace window, then reported."""
-    assert (
-        evaluate_recorder_heartbeat(
-            None,
-            now=_NOW,
-            watch_started_at="2026-09-24T06:30:00Z",
-            thresholds=_DEFAULTS,
-        )
-        == ()
-    )
-    (finding,) = evaluate_recorder_heartbeat(
-        None,
-        now=_NOW,
-        watch_started_at="2026-09-24T06:24:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert finding.key == "heartbeat_missing:recorder"
-
-
-def test_legacy_heartbeat_without_liquidation_entry_fails_closed() -> None:
-    """A payload predating the liquidation entry counts as silent."""
-    payload = {
-        "ts": _NOW,
-        "started_at": "2026-09-24T05:00:00Z",
-        "book_ticker": {"last_success_at": _NOW},
-        "premium_index": {"last_success_at": _NOW},
-    }
-    (finding,) = evaluate_recorder_heartbeat(
-        payload,
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert finding.key == "liquidation_silent:liquidations"
-    assert "entry=missing" in finding.detail
-
-
-def test_stale_sampler_detected_per_dataset() -> None:
-    """Only the stale dataset is reported when its sibling is fresh."""
-    (finding,) = evaluate_recorder_heartbeat(
-        _payload(premium_index={"last_success_at": "2026-09-24T06:04:00Z"}),
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert finding.key == "sampler_stale:premium_index"
-
-
-def test_unreadable_file_reads_as_none(tmp_path) -> None:
-    """Invalid JSON and non-object JSON both read as unavailable."""
+    assert read_recorder_heartbeat(tmp_path / "missing.json") is None
     bad = tmp_path / "bad.json"
-    bad.write_text("{not json", encoding="utf-8")
+    bad.write_text("{nope", encoding="utf-8")
     assert read_recorder_heartbeat(bad) is None
-    listed = tmp_path / "list.json"
-    listed.write_text("[1, 2]", encoding="utf-8")
-    assert read_recorder_heartbeat(listed) is None
-    assert read_recorder_heartbeat(tmp_path / "absent.json") is None
+    scalar = tmp_path / "scalar.json"
+    scalar.write_text("[1,2]", encoding="utf-8")
+    assert read_recorder_heartbeat(scalar) is None
+    with pytest.raises(ValueError, match="tz-aware"):
+        evaluate_recorder_heartbeat(_payload(), now=pd.Timestamp("2026-09-26T12:00:00"),
+                                    watch_started_at=_now() - pd.Timedelta(hours=3),
+                                    thresholds=_thresholds())
+    stale_ts = evaluate_recorder_heartbeat(_payload(ts=True), now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert {finding.key for finding in stale_ts} == {"heartbeat_stale:recorder"}
 
 
-def test_naive_clock_rejected() -> None:
-    """Tz-naive evaluation instants fail closed with ValueError."""
-    with pytest.raises(ValueError, match="now"):
-        evaluate_recorder_heartbeat(
-            _payload(),
-            now="2026-09-24 06:35:00",
-            watch_started_at="2026-09-24T06:30:00Z",
-            thresholds=_DEFAULTS,
-        )
-    with pytest.raises(ValueError, match="watch_started_at"):
-        evaluate_recorder_heartbeat(
-            _payload(),
-            now=_NOW,
-            watch_started_at="2026-09-24 05:00:00",
-            thresholds=_DEFAULTS,
-        )
-
-
-def test_timestamp_shapes_and_garbage() -> None:
-    """Datetime objects parse like strings; bools, numbers, and garbage do not."""
-    import datetime
-
-    import pandas as pd
-
-    object_payload = _payload(
-        ts=pd.Timestamp(_NOW),
-        started_at=datetime.datetime(2026, 9, 24, 5, 0, tzinfo=datetime.UTC),
-        liquidations={
-            "last_event_at": datetime.datetime(2026, 9, 24, 6, 34, 40, tzinfo=datetime.UTC),
-            "last_connected_at": pd.Timestamp(_NOW),
-            "consecutive_failed_connections": 0,
-            "last_disconnect_reason": None,
-        },
-        book_ticker={"last_success_at": pd.Timestamp(_NOW)},
-        premium_index={"last_success_at": pd.Timestamp(_NOW)},
-    )
-    assert (
-        evaluate_recorder_heartbeat(
-            object_payload,
-            now=pd.Timestamp(_NOW),
-            watch_started_at=pd.Timestamp("2026-09-24T06:30:00Z"),
-            thresholds=_DEFAULTS,
-        )
-        == ()
-    )
-    for bad_ts in (True, 12345, "not-a-time"):
-        (finding,) = evaluate_recorder_heartbeat(
-            _payload(ts=bad_ts),
-            now=_NOW,
-            watch_started_at="2026-09-24T06:30:00Z",
-            thresholds=_DEFAULTS,
-        )
-        assert finding.key == "heartbeat_stale:recorder"
-        assert "ts=missing" in finding.detail
-
-
-def test_malformed_liquidation_entry_fires_both_checks() -> None:
-    """An entry with unparseable event time and counter fails both of its checks."""
-    payload = _payload()
-    del payload["started_at"]
-    payload["liquidations"] = {
-        "last_event_at": "tomorrow",
-        "last_connected_at": _NOW,
-        "consecutive_failed_connections": "lots",
-        "last_disconnect_reason": None,
-    }
-    findings = evaluate_recorder_heartbeat(
-        payload,
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert [f.key for f in findings] == [
-        "liquidation_failing:liquidations",
-        "liquidation_silent:liquidations",
-    ]
-    assert "entry=malformed" in findings[0].detail
-    assert "entry=malformed" in findings[1].detail
-
-
-def test_malformed_sampler_entry_and_bool_counter() -> None:
-    """Naive sampler timestamps and boolean counters count as malformed."""
+def test_malformed_sections_fail_closed() -> None:
+    """Missing sections fail their own checks without masking the rest."""
     payload = _payload(
-        book_ticker={"last_success_at": "2026-09-22 10:00:00"},
-        liquidations={
-            "last_event_at": _NOW,
-            "last_connected_at": _NOW,
-            "consecutive_failed_connections": True,
-            "last_disconnect_reason": None,
-        },
+        streams={},
+        normalizer=None,
+        compaction=None,
+        retention={},
+        capture={"blue": {**_slot(), "flush_failures": "bad"}},
     )
-    del payload["started_at"]
-    findings = evaluate_recorder_heartbeat(
-        payload,
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert [f.key for f in findings] == [
-        "liquidation_failing:liquidations",
-        "sampler_stale:book_ticker",
-    ]
-    assert "entry=malformed" in findings[1].detail
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    keys = {finding.key for finding in findings}
+    assert "sampler_stale:book_ticker" in keys
+    assert "normalizer_lagging:normalizer" in keys
+    assert "normalizer_failing:normalizer" in keys
+    assert "compaction_failed:compaction" in keys
+    assert "prune_blocked:retention" in keys
+    assert "capture_flush_failing:blue" in keys
+    assert "liquidation_unpersisted:force_order" in keys
 
 
-def test_missing_sampler_entry_and_started_at_fallback() -> None:
-    """An absent dataset entry fails closed; a null success ages from process start."""
-    payload = _payload(started_at="2026-09-24T06:00:00Z")
-    del payload["premium_index"]
-    payload["book_ticker"] = {"last_success_at": None}
-    findings = evaluate_recorder_heartbeat(
-        payload,
-        now=_NOW,
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    by_key = {f.key: f for f in findings}
-    assert by_key["sampler_stale:premium_index"].detail == "entry=missing"
-    assert "age_s=2100" in by_key["sampler_stale:book_ticker"].detail
-    assert "last_success_at=none" in by_key["sampler_stale:book_ticker"].detail
+def test_all_slots_rest_failing_and_silent() -> None:
+    """Every fresh slot failing a stream, and silent WS, raise their findings."""
+    bad = _slot()
+    bad["rest"]["book_ticker"]["consecutive_failures"] = 9
+    bad["rest"]["premium_index"]["consecutive_failures"] = 9
+    bad["ws"]["last_frame_at"] = "2026-09-26T10:00:00+00:00"
+    payload = _payload(capture={"blue": bad, "green": None})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    keys = {finding.key for finding in findings}
+    assert "capture_rest_failing:book_ticker" in keys
+    assert "capture_ws_silent:force_order" in keys
 
 
-def _v2_sampler(success_at: str, **overrides):
-    base = {
-        "last_success_at": success_at,
-        "consecutive_failures": 0,
-        "skipped_grid_points": 0,
-        "rows_last_flush": 100,
-        "last_persisted_at": success_at,
-        "consecutive_flush_failures": 0,
-        "pending_rows": 0,
-        "dropped_rows_total": 0,
-        "rejected_rows_last_sample": 0,
-        "rejected_rows_total": 0,
-        "rejected_fraction_last_sample": 0.0,
-        "consecutive_rejecting_points": 0,
-        "window_expected_points": 60,
-        "window_captured_points": 60,
-    }
-    base.update(overrides)
-    return base
+def test_sampler_degraded_rejecting_and_unpersisted_fire() -> None:
+    """Thin ratios, hot rejects and a stale liquidation persist raise findings."""
+    payload = _payload()
+    payload["streams"]["book_ticker"]["window_captured_points"] = 5
+    payload["streams"]["premium_index"]["rejected_fraction_last_sample"] = 0.5
+    payload["streams"]["force_order"]["last_persisted_at"] = "2026-09-26T10:00:00+00:00"
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    keys = {finding.key for finding in findings}
+    assert "sampler_degraded:book_ticker" in keys
+    assert "sampler_rejecting:premium_index" in keys
+    assert "liquidation_unpersisted:force_order" in keys
 
 
-def _v2_reference(
-    day: str,
-    captured: bool = True,
-    cutoff: str = "00:05",
-    last_error: str | None = None,
-    previous_day: str | None = "20260923",
-    previous_complete: bool | None = True,
-):
-    def _endpoint(name: str, ok: bool):
-        return {
-            "captured": ok,
-            "consecutive_failures": 0 if ok else 2,
-            "last_attempt_at": None if ok else "2026-09-24T01:06:00Z",
-            "last_error": None if ok else last_error,
-        }
+def test_reference_variants() -> None:
+    """Cutoff, staleness and completeness corners of the reference rule."""
+    base = _payload()
 
-    return {
-        "day": day,
-        "cutoff_utc": cutoff,
-        "endpoints": {
-            "exchange_info": _endpoint("exchange_info", True),
-            "funding_info": _endpoint("funding_info", captured),
-            "asset_index": _endpoint("asset_index", True),
-        },
-        "last_success_at": "2026-09-24T01:06:00Z" if captured else None,
-        "previous_day": previous_day,
-        "previous_day_complete": previous_complete,
-    }
+    def _evaluate(reference: object) -> set[str]:
+        payload = _payload(reference=reference)
+        return {finding.key for finding in evaluate_recorder_heartbeat(
+            payload, now=_now(), watch_started_at=_now() - pd.Timedelta(hours=3),
+            thresholds=_thresholds())}
+
+    assert "reference_missing:reference" in _evaluate({"cutoff_utc": None})
+    recent_start = (_now() - pd.Timedelta(seconds=10)).isoformat()
+    young_payload = _payload(reference={"cutoff_utc": None}, started_at=recent_start)
+    young_keys = {finding.key for finding in evaluate_recorder_heartbeat(
+        young_payload, now=_now(), watch_started_at=_now() - pd.Timedelta(seconds=10),
+        thresholds=_thresholds())}
+    assert "reference_missing:reference" not in young_keys
+    incomplete_today = dict(base["reference"])
+    incomplete_today["endpoints"] = {"exchange_info": {"captured": False},
+                                     "funding_info": {"captured": True},
+                                     "asset_index": {"captured": True}}
+    assert "reference_missing:reference" in _evaluate(incomplete_today)
+    assert "reference_missing:reference" in _evaluate("yesterday-stale")
 
 
-def _v2_liquidations(event_at: str, **overrides):
-    base = {
-        "last_event_at": event_at,
-        "last_connected_at": event_at,
-        "consecutive_failed_connections": 0,
-        "last_disconnect_reason": None,
-        "last_persisted_at": event_at,
-        "consecutive_flush_failures": 0,
-        "pending_events": 0,
-        "dropped_events_total": 0,
-    }
-    base.update(overrides)
-    return base
+def test_compaction_overdue_variants() -> None:
+    """Pending lists fail closed on shape errors and fire past the deadline."""
+    base_pending = [{"stream": "book_ticker", "day": "20990101"}]
+
+    def _evaluate(compaction: object) -> set[str]:
+        payload = _payload(compaction=compaction)
+        return {finding.key for finding in evaluate_recorder_heartbeat(
+            payload, now=_now(), watch_started_at=_now() - pd.Timedelta(hours=3),
+            thresholds=_thresholds())}
+
+    assert _evaluate({"last_day": None, "last_result": None, "last_error": None,
+                       "last_run_at": None, "archived_days_pending": base_pending}) == set()
+    assert "compaction_overdue:compaction" in _evaluate(
+        {"last_day": None, "last_result": None, "last_error": None,
+         "last_run_at": None, "archived_days_pending": "oops"})
+    assert "compaction_overdue:compaction" in _evaluate(
+        {"last_day": None, "last_result": None, "last_error": None,
+         "last_run_at": None, "archived_days_pending": [{"stream": "book_ticker"}]})
+    assert "compaction_overdue:compaction" in _evaluate(
+        {"last_day": None, "last_result": None, "last_error": None,
+         "last_run_at": None, "archived_days_pending": [{"stream": "book_ticker", "day": "20260920"}]})
 
 
-def _v2_payload(now: str, **overrides):
-    base = {
-        "schema_version": 2,
-        "ts": now,
-        "started_at": "2026-09-24T00:00:00Z",
-        "book_ticker": _v2_sampler(now),
-        "premium_index": _v2_sampler(now),
-        "reference": _v2_reference("20260924"),
-        "liquidations": _v2_liquidations(now),
-    }
-    base.update(overrides)
-    return base
+def test_dual_active_and_not_ready_missing_started() -> None:
+    """Missing started_at fails the handover checks closed."""
+    no_start = _slot()
+    del no_start["started_at"]
+    payload = _payload(capture={"blue": no_start, "green": _slot()})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    keys = {finding.key for finding in findings}
+    assert "capture_dual_active:capture" in keys
+    assert "capture_not_ready:blue" in keys
 
 
-def _evaluate(payload, now: str):
-    return evaluate_recorder_heartbeat(
-        payload,
-        now=now,
-        watch_started_at="2026-09-24T00:00:00Z",
-        thresholds=_DEFAULTS,
+def test_parse_helpers_cover_input_shapes() -> None:
+    """Scalar parsers accept, coerce and reject each documented shape."""
+    from datetime import datetime as _datetime
+
+    from src.market_data.streams.recorder_health import (
+        _parse_count,
+        _parse_cutoff,
+        _parse_ratio,
+        _parse_ts,
     )
 
+    assert _parse_ts(True) is None
+    assert _parse_ts(pd.Timestamp("2026-09-26T12:00:00Z")) is not None
+    assert _parse_ts("2026-09-26T12:00:00Z") is not None
+    assert _parse_ts("yesterday") is None
+    assert _parse_ts(_datetime(2026, 9, 26, 12, 0)) is None
+    assert _parse_ts(_datetime(2026, 9, 26, 12, 0, tzinfo=datetime.UTC)) is not None
+    assert _parse_ts(None) is None
+    assert _parse_ts(123) is None
+    assert _parse_count(True) is None
+    assert _parse_count(3) == 3
+    assert _parse_count(3.5) is None
+    assert _parse_ratio(True) is None
+    assert _parse_ratio(2) == 2.0
+    assert _parse_ratio("x") is None
+    assert _parse_cutoff(True) is None
+    assert _parse_cutoff("25:00") is None
+    assert _parse_cutoff("00:05") == (0, 5)
 
-def test_sampler_failing_alerts_within_minutes() -> None:
-    """Five consecutive failures alert while freshness stays quiet."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T06:34:00Z", consecutive_failures=5),
+
+def test_malformed_mappings_fail_each_check() -> None:
+    """Mapping-shaped but key-missing entries fail their own checks."""
+    payload = _payload(
+        streams={"book_ticker": {}, "premium_index": {}, "force_order": {}},
+        normalizer={"lag_s": None, "consecutive_failures": None},
     )
-    keys = {finding.key for finding in _evaluate(payload, now)}
-    assert "sampler_failing:book_ticker" in keys
-    assert "sampler_stale:book_ticker" not in keys
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    keys = {finding.key for finding in findings}
+    assert "sampler_stale:book_ticker" in keys
+    assert "sampler_degraded:book_ticker" in keys
+    assert "sampler_rejecting:book_ticker" in keys
+    assert "liquidation_unpersisted:force_order" in keys
+    assert "normalizer_lagging:normalizer" in keys
+    assert "normalizer_failing:normalizer" in keys
 
 
-def test_sampler_four_consecutive_failures_stay_quiet() -> None:
-    """Below-threshold failures do not page."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T06:34:00Z", consecutive_failures=4),
-    )
-    assert "sampler_failing:book_ticker" not in {finding.key for finding in _evaluate(payload, now)}
+def test_ws_null_frame_within_grace_is_quiet() -> None:
+    """A fresh slot with no frame yet inside the ready grace is not silent."""
+    slot = _slot()
+    slot["ws"]["last_frame_at"] = None
+    slot["ws"]["first_frame_at"] = None
+    slot["started_at"] = (_now() - pd.Timedelta(seconds=100)).isoformat()
+    slot["rest"]["book_ticker"]["first_ok_at"] = slot["started_at"]
+    payload = _payload(capture={"blue": slot, "green": None})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert "capture_ws_silent:force_order" not in {finding.key for finding in findings}
 
 
-def test_sampler_degraded_by_capture_ratio() -> None:
-    """Intermittent misses are caught by the trailing capture ratio."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler(
-            "2026-09-24T06:34:00Z", window_expected_points=60, window_captured_points=50
-        ),
-    )
-    (finding,) = [
-        finding for finding in _evaluate(payload, now) if finding.key == "sampler_degraded:book_ticker"
-    ]
-    assert "ratio=0.833" in finding.detail
+def test_capture_non_mapping_is_missing() -> None:
+    """A non-object capture section reads as no fresh slot."""
+    payload = _payload(capture="oops")
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert {finding.key for finding in findings} == {"capture_missing:capture"}
 
 
-def test_sampler_capture_ratio_ignored_at_startup() -> None:
-    """Too few expected points means no ratio verdict yet."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler(
-            "2026-09-24T06:34:00Z", window_expected_points=5, window_captured_points=0
-        ),
-    )
-    assert "sampler_degraded:book_ticker" not in {finding.key for finding in _evaluate(payload, now)}
+def test_slot_without_book_ticker_never_ready() -> None:
+    """A slot heartbeat missing book_ticker cannot be READY."""
+    slot = _slot(started_ago_s=1000.0)
+    slot["rest"] = {"premium_index": slot["rest"]["premium_index"]}
+    payload = _payload(capture={"blue": slot, "green": None})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert "capture_not_ready:blue" in {finding.key for finding in findings}
 
 
-def test_sampler_flush_failures_detected_while_fetches_succeed() -> None:
-    """Fresh fetches with failing writes page persistence, not freshness."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T06:34:00Z", consecutive_flush_failures=3),
-    )
-    assert "sampler_unpersisted:book_ticker" in {finding.key for finding in _evaluate(payload, now)}
+def test_slot_flush_failures_counted() -> None:
+    """A non-zero flush failure count on a fresh slot raises its finding."""
+    slot = _slot()
+    slot["flush_failures"] = 2
+    payload = _payload(capture={"blue": slot, "green": None})
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert "capture_flush_failing:blue" in {finding.key for finding in findings}
 
 
-def test_sampler_stale_persistence_with_pending_rows_detected() -> None:
-    """Buffered rows with no recent write page persistence."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler(
-            "2026-09-24T06:34:00Z", pending_rows=4000, last_persisted_at="2026-09-24T06:13:20Z"
-        ),
-    )
-    assert "sampler_unpersisted:book_ticker" in {finding.key for finding in _evaluate(payload, now)}
+@pytest.mark.parametrize("pending", [None, "absent"])
+def test_compaction_pending_missing_is_malformed(pending: object) -> None:
+    """A missing or null pending list cannot prove nothing is overdue, so it fails closed."""
+    compaction: dict[str, object] = {"last_day": None, "last_result": None, "last_error": None, "last_run_at": None}
+    if pending is None:
+        compaction["archived_days_pending"] = None
+    payload = _payload(compaction=compaction)
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    overdue = [finding for finding in findings if finding.key == "compaction_overdue:compaction"]
+    assert overdue
+    assert overdue[0].detail == "entry=malformed"
 
 
-def test_sampler_idle_buffer_is_not_unpersisted() -> None:
-    """Nothing pending means nothing unpersisted, however old the last write."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler(
-            "2026-09-24T06:34:00Z", pending_rows=0, last_persisted_at="2026-09-24T05:11:40Z"
-        ),
-    )
-    assert "sampler_unpersisted:book_ticker" not in {finding.key for finding in _evaluate(payload, now)}
+def test_retention_null_is_missing() -> None:
+    """A null retention section reads as a missing prune report."""
+    payload = _payload(retention=None)
+    findings = evaluate_recorder_heartbeat(payload, now=_now(),
+                                           watch_started_at=_now() - pd.Timedelta(hours=3),
+                                           thresholds=_thresholds())
+    assert "prune_blocked:retention" in {finding.key for finding in findings}
 
 
-def test_sampler_single_row_rejection_stays_quiet() -> None:
-    """Expected venue noise stays in logs and counters, not in alerts."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler(
-            "2026-09-24T06:34:00Z",
-            rejected_rows_last_sample=2,
-            rejected_fraction_last_sample=0.0026,
-            consecutive_rejecting_points=3,
-            rejected_rows_total=6,
-        ),
-    )
-    assert "sampler_rows_rejected:book_ticker" not in {
-        finding.key for finding in _evaluate(payload, now)
-    }
+def test_reference_stale_and_incomplete_days() -> None:
+    """Post-deadline shape errors, stale days and incomplete history all raise."""
+    def _keys(reference: object) -> set[str]:
+        payload = _payload(reference=reference)
+        return {finding.key for finding in evaluate_recorder_heartbeat(
+            payload, now=_now(), watch_started_at=_now() - pd.Timedelta(hours=3),
+            thresholds=_thresholds())}
 
-
-def test_sampler_high_rejected_fraction_alerts() -> None:
-    """A schema-scale rejection fraction pages immediately."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler(
-            "2026-09-24T06:34:00Z",
-            rejected_rows_last_sample=15,
-            rejected_fraction_last_sample=0.02,
-            consecutive_rejecting_points=1,
-            rejected_rows_total=15,
-        ),
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "sampler_rows_rejected:book_ticker"
-    ]
-    assert "fraction=0.0200" in finding.detail
-
-
-def test_sampler_persistent_rejection_alerts() -> None:
-    """A long-lived malformed row surfaces once it persists long enough."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler(
-            "2026-09-24T06:34:00Z",
-            rejected_rows_last_sample=1,
-            rejected_fraction_last_sample=0.0013,
-            consecutive_rejecting_points=60,
-            rejected_rows_total=60,
-        ),
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "sampler_rows_rejected:book_ticker"
-    ]
-    assert "consecutive_points=60" in finding.detail
-
-
-def test_liquidation_flush_failure_detected() -> None:
-    """Failing liquidation writes page even with a fresh event stream."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(now, liquidations=_v2_liquidations(now, consecutive_flush_failures=3))
-    keys = {finding.key for finding in _evaluate(payload, now)}
-    assert "liquidation_unpersisted:liquidations" in keys
-    assert "liquidation_silent:liquidations" not in keys
-
-
-def test_reference_incomplete_after_deadline_flagged() -> None:
-    """A missing endpoint past the deadline names the endpoint and error."""
-    now = "2026-09-24T01:10:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T01:09:00Z"),
-        premium_index=_v2_sampler("2026-09-24T01:09:00Z"),
-        liquidations=_v2_liquidations("2026-09-24T01:09:00Z"),
-        reference=_v2_reference("20260924", captured=False, last_error="ClientResponseError: 403"),
-    )
-    (finding,) = [
-        finding for finding in _evaluate(payload, now) if finding.key == "reference_missing:reference"
-    ]
-    assert "funding_info" in finding.detail
-    assert "403" in finding.detail
-
-
-def test_reference_quiet_before_deadline() -> None:
-    """Today's endpoints may still arrive before the deadline."""
-    now = "2026-09-24T00:30:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T00:29:00Z"),
-        premium_index=_v2_sampler("2026-09-24T00:29:00Z"),
-        liquidations=_v2_liquidations("2026-09-24T00:29:00Z"),
-        reference=_v2_reference("20260924", captured=False),
-    )
-    assert "reference_missing:reference" not in {finding.key for finding in _evaluate(payload, now)}
-
-
-def test_reference_previous_incomplete_day_stays_flagged() -> None:
-    """An incomplete yesterday does not falsely recover at midnight."""
-    now = "2026-09-24T00:30:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T00:29:00Z"),
-        premium_index=_v2_sampler("2026-09-24T00:29:00Z"),
-        liquidations=_v2_liquidations("2026-09-24T00:29:00Z"),
-        reference=_v2_reference(
-            "20260924", captured=False, previous_day="20260923", previous_complete=False
-        ),
-    )
-    assert "reference_missing:reference" in {finding.key for finding in _evaluate(payload, now)}
-
-
-def test_v1_heartbeat_uses_legacy_checks_only() -> None:
-    """A young v1 payload evaluates exactly like before, without a schema finding."""
-    payload = _payload(ts="2026-09-24T06:34:30Z")
-    findings = evaluate_recorder_heartbeat(
-        payload,
-        now="2026-09-24T06:35:00Z",
-        watch_started_at="2026-09-24T06:30:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert findings == ()
-    assert not any(finding.check == "heartbeat_schema" for finding in findings)
-
-
-def test_v1_outdated_recorder_image_flagged() -> None:
-    """A v1 file outliving one stale window means an outdated image."""
-    payload = _payload(ts="2026-09-24T06:34:30Z")
-    findings = evaluate_recorder_heartbeat(
-        payload,
-        now="2026-09-24T06:35:00Z",
-        watch_started_at="2026-09-24T05:00:00Z",
-        thresholds=_DEFAULTS,
-    )
-    assert "heartbeat_schema:recorder" in {finding.key for finding in findings}
-
-
-def test_malformed_v2_counter_fails_closed() -> None:
-    """A boolean where a counter belongs fails that check closed."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T06:34:00Z", consecutive_flush_failures=True),
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "sampler_unpersisted:book_ticker"
-    ]
-    assert finding.detail == "entry=malformed"
-
-
-def test_sampler_bool_failure_counter_fails_closed() -> None:
-    """A boolean failure count fails that check closed."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now, book_ticker=_v2_sampler("2026-09-24T06:34:00Z", consecutive_failures=True)
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "sampler_failing:book_ticker"
-    ]
-    assert finding.detail == "entry=malformed"
-
-
-def test_sampler_bool_window_fails_closed() -> None:
-    """A boolean window count fails the ratio check closed."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now, book_ticker=_v2_sampler("2026-09-24T06:34:00Z", window_expected_points=True)
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "sampler_degraded:book_ticker"
-    ]
-    assert finding.detail == "entry=malformed"
-
-
-def test_sampler_bad_rejected_fraction_fails_closed() -> None:
-    """Non-numeric rejection fractions fail that check closed."""
-    now = "2026-09-24T06:35:00Z"
-    for bad in (True, "high"):
-        payload = _v2_payload(
-            now,
-            book_ticker=_v2_sampler(
-                "2026-09-24T06:34:00Z", rejected_fraction_last_sample=bad
-            ),
-        )
-        (finding,) = [
-            finding
-            for finding in _evaluate(payload, now)
-            if finding.key == "sampler_rows_rejected:book_ticker"
-        ]
-        assert finding.detail == "entry=malformed"
-
-
-def test_sampler_garbage_persisted_timestamp_fails_closed() -> None:
-    """An unparseable persistence timestamp fails that check closed."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler(
-            "2026-09-24T06:34:00Z", pending_rows=10, last_persisted_at="not-a-time"
-        ),
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "sampler_unpersisted:book_ticker"
-    ]
-    assert finding.detail == "entry=malformed"
-
-
-def test_sampler_pending_without_time_reference_fails_closed() -> None:
-    """Pending rows with no time anchor fail that check closed."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(now)
-    del payload["started_at"]
-    payload["book_ticker"] = _v2_sampler(
-        "2026-09-24T06:34:00Z", pending_rows=10, last_persisted_at=None
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "sampler_unpersisted:book_ticker"
-    ]
-    assert finding.detail == "entry=malformed"
-
-
-def test_sampler_missing_entry_skips_v2_checks() -> None:
-    """A missing sampler entry keeps its stale finding and gains no v2 ones."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(now, premium_index=None)
-    keys = {finding.key for finding in _evaluate(payload, now)}
-    assert "sampler_stale:premium_index" in keys
-    assert "sampler_failing:premium_index" not in keys
-    assert "sampler_degraded:premium_index" not in keys
-
-
-def test_reference_malformed_cutoff_flagged() -> None:
-    """An unreadable cutoff cannot compute a deadline and fails closed."""
-    now = "2026-09-24T06:35:00Z"
-    for bad_cutoff in (True, "25:99"):
-        payload = _v2_payload(
-            now, reference=_v2_reference("20260924", cutoff=bad_cutoff)  # type: ignore[arg-type]
-        )
-        (finding,) = [
-            finding
-            for finding in _evaluate(payload, now)
-            if finding.key == "reference_missing:reference"
-        ]
-        assert finding.detail == "entry=malformed"
-
-
-def test_reference_non_mapping_entry_fails_closed() -> None:
-    """A non-mapping reference entry fails closed."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(now, reference="bad")
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "reference_missing:reference"
-    ]
-    assert finding.detail == "entry=malformed"
-
-
-def test_reference_malformed_day_endpoints_after_deadline() -> None:
-    """Unreadable day fields fail closed once the deadline passes."""
-    now = "2026-09-24T01:10:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T01:09:00Z"),
-        premium_index=_v2_sampler("2026-09-24T01:09:00Z"),
-        liquidations=_v2_liquidations("2026-09-24T01:09:00Z"),
-        reference={
-            "day": "20260924",
-            "cutoff_utc": "00:05",
-            "endpoints": "bad",
-            "last_success_at": None,
-            "previous_day": "20260923",
-            "previous_day_complete": True,
-        },
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "reference_missing:reference"
-    ]
-    assert finding.detail == "entry=malformed"
-
-
-def test_reference_malformed_day_endpoints_quiet_before_deadline() -> None:
-    """Unreadable day fields stay quiet while endpoints may still arrive."""
-    now = "2026-09-24T00:30:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T00:29:00Z"),
-        premium_index=_v2_sampler("2026-09-24T00:29:00Z"),
-        liquidations=_v2_liquidations("2026-09-24T00:29:00Z"),
-        reference={
-            "day": "20260924",
-            "cutoff_utc": "00:05",
-            "endpoints": "bad",
-            "last_success_at": None,
-            "previous_day": "20260923",
-            "previous_day_complete": True,
-        },
-    )
-    assert "reference_missing:reference" not in {finding.key for finding in _evaluate(payload, now)}
-
-
-def test_reference_stale_day_after_deadline() -> None:
-    """An entry still pointing at yesterday past the deadline is stale."""
-    now = "2026-09-24T01:10:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T01:09:00Z"),
-        premium_index=_v2_sampler("2026-09-24T01:09:00Z"),
-        liquidations=_v2_liquidations("2026-09-24T01:09:00Z"),
-        reference=_v2_reference("20260923"),
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "reference_missing:reference"
-    ]
-    assert "entry=stale" in finding.detail
-
-
-def test_reference_yesterday_incomplete_before_deadline() -> None:
-    """Yesterday's incomplete endpoints stay flagged until today completes."""
-    now = "2026-09-24T00:30:00Z"
-    payload = _v2_payload(
-        now,
-        book_ticker=_v2_sampler("2026-09-24T00:29:00Z"),
-        premium_index=_v2_sampler("2026-09-24T00:29:00Z"),
-        liquidations=_v2_liquidations("2026-09-24T00:29:00Z"),
-        reference=_v2_reference(
-            "20260923", captured=False, previous_day=None, previous_complete=None
-        ),
-    )
-    (finding,) = [
-        finding
-        for finding in _evaluate(payload, now)
-        if finding.key == "reference_missing:reference"
-    ]
-    assert "funding_info" in finding.detail
-
-
-def test_reference_unpublished_cutoff_quiet_right_after_start() -> None:
-    """기동 직후 첫 publish 전(cutoff 빈 값)에는 기한을 알 수 없으므로 reference_missing을 내지 않는다."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(
-        now,
-        started_at="2026-09-24T06:34:00Z",
-        reference=_v2_reference("20260924", cutoff=""),
-    )
-    keys = {finding.key for finding in _evaluate(payload, now)}
-    assert "reference_missing:reference" not in keys
-
-
-def test_reference_unpublished_cutoff_flagged_after_grace() -> None:
-    """grace가 지나도 cutoff가 비어 있으면 malformed로 fail-closed 한다."""
-    now = "2026-09-24T06:35:00Z"
-    payload = _v2_payload(now, reference=_v2_reference("20260924", cutoff=""))
-    (finding,) = [f for f in _evaluate(payload, now) if f.key == "reference_missing:reference"]
-    assert finding.detail == "entry=malformed"
+    assert "reference_missing:reference" in _keys({"day": "20260926", "cutoff_utc": "00:05"})
+    assert "reference_missing:reference" in _keys({
+        "day": "20260920", "cutoff_utc": "00:05",
+        "endpoints": {"exchange_info": {"captured": True}, "funding_info": {"captured": True},
+                      "asset_index": {"captured": True}},
+        "previous_day": "20260925", "previous_day_complete": True})
+    assert "reference_missing:reference" in _keys({
+        "day": "20260926", "cutoff_utc": "00:05",
+        "endpoints": {"exchange_info": {"captured": True}, "funding_info": {"captured": True},
+                      "asset_index": {"captured": True}},
+        "previous_day": "20260925", "previous_day_complete": False})
+    assert "reference_missing:reference" in _keys({
+        "day": "20260925", "cutoff_utc": "00:05",
+        "endpoints": {"exchange_info": {"captured": False}, "funding_info": {"captured": True},
+                      "asset_index": {"captured": True}},
+        "previous_day": "20260924", "previous_day_complete": True})
+    early = pd.Timestamp("2026-09-26T00:30:00Z")
+    payload = _payload(reference={
+        "day": "20260925", "cutoff_utc": "00:05",
+        "endpoints": {"exchange_info": {"captured": False}, "funding_info": {"captured": True},
+                      "asset_index": {"captured": True}},
+        "previous_day": "20260924", "previous_day_complete": True})
+    early_findings = evaluate_recorder_heartbeat(
+        payload, now=early, watch_started_at=early - pd.Timedelta(hours=3),
+        thresholds=_thresholds())
+    assert "reference_missing:reference" in {finding.key for finding in early_findings}

@@ -167,33 +167,6 @@ def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(tmp_path, 
     assert sorted(seen) == ["AAAUSDT", "BUSDT"]
 
 
-def test_stream_liquidations_subcommand_wires_asyncio_run(monkeypatch) -> None:
-    """``data collect stream-liquidations`` parses --symbols/--flush-interval-s
-    and drives run_liquidation_stream via asyncio.run with a shutdown flag."""
-    from src.cli.commands.data import _stream_liquidations
-
-    parser = _mhs_parser()
-    args = parser.parse_args(
-        ["data", "collect", "stream-liquidations", "--symbols", "BTCUSDT,ETHUSDT", "--flush-interval-s", "30"]
-    )
-    assert args.handler is _stream_liquidations
-    assert args.flush_interval_s == 30.0
-
-    captured: dict = {}
-
-    async def _fake_stream(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr(
-        "src.market_data.streams.liquidations.run_liquidation_stream", _fake_stream
-    )
-    monkeypatch.setattr("src.live.lifecycle.install_shutdown_handlers", lambda *a, **k: None)
-
-    _stream_liquidations(args)
-
-    assert captured["symbols"] == ["BTCUSDT", "ETHUSDT"]
-    assert captured["flush_interval_s"] == 30.0
-    assert hasattr(captured["shutdown"], "requested")
 
 
 def test_refresh_live_universe_metrics_tail_is_failsoft(tmp_path, monkeypatch) -> None:
@@ -702,28 +675,29 @@ def test_universe_gaps_excludes_tokenized_equity(monkeypatch) -> None:
     assert calls == ["BTCUSDT"]
 
 
-def test_record_market_subcommand_wires_recorder(monkeypatch) -> None:
-    """`data collect record-market` delegates to the dedicated recorder entrypoint."""
+def test_normalize_market_subcommand_wires_normalizer(monkeypatch) -> None:
+    """`data collect normalize-market` delegates to the dedicated normalizer entrypoint."""
     from pathlib import Path
 
     import src.cli.commands.data as data_mod
 
     parser = _mhs_parser()
-    args = parser.parse_args(["data", "collect", "record-market", "--capture-root", "X"])
-    assert args.handler is data_mod._record_market
+    args = parser.parse_args(["data", "collect", "normalize-market", "--capture-root", "X"])
+    assert args.handler is data_mod._normalize_market
     assert args.capture_root == "X"
 
     captured: dict = {}
 
-    def _fake_run_recorder(**kwargs):
+    def _fake_run_normalizer(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("src.market_data.streams.recorder_main.run_recorder", _fake_run_recorder)
+    monkeypatch.setattr("src.market_data.streams.normalizer_main.run_normalizer_process", _fake_run_normalizer)
 
-    data_mod._record_market(args)
+    data_mod._normalize_market(args)
 
     assert captured["capture_root"] == Path("X")
     assert "liquidations_dir" in captured
+    assert "backup_status_path" in captured
 
 
 def test_prune_live_data_prunes_old_listing_slots(tmp_path, monkeypatch) -> None:

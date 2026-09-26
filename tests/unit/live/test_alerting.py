@@ -348,7 +348,10 @@ def test_recorder_events_registered_with_correct_severity() -> None:
 
     unhealthy = EVENT_INFO["recorder_unhealthy"]
     assert unhealthy["severity_label"] == "CRITICAL"
-    assert "docker logs --tail 200 market-recorder" in unhealthy["action"]
+    assert "market-recorder" not in unhealthy["action"]
+    assert "market-normalizer" in unhealthy["action"]
+    assert "market-capture-blue" in unhealthy["action"]
+    assert "logs/capture" in unhealthy["action"]
     recovered = EVENT_INFO["recorder_recovered"]
     assert recovered["severity_label"] == "NOTICE"
 

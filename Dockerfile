@@ -25,8 +25,8 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked uv sync --frozen --
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked uv sync --frozen --no-dev
 
-# 배포는 이 파일과 실행 중인 컨테이너의 값을 비교해 recorder 재시작을 건너뛴다.
-RUN /app/.venv/bin/python -m src.application.ops.recorder_fingerprint --root /app > /app/.recorder_fingerprint
+# 배포는 이 값과 실행 중인 캡처 슬롯의 값을 비교해 핸드오버 여부를 판단한다.
+RUN /app/.venv/bin/python -m src.application.ops.capture_fingerprint --root /app > /app/.capture_fingerprint
 
 # 24/7 무인 데몬(live daemon)을 PID 1로 구동한다(exec form: 종료 시그널 전달 보장).
 CMD ["uv", "run", "python", "-m", "src.cli.main", "live", "daemon"]
